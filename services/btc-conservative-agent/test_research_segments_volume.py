@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -744,6 +745,27 @@ def test_env_enables_backlog_mode_with_bounded_defaults(tmp_path):
     assert shipper.backlog_boost_bytes == shipper_mod.DEFAULT_BACKLOG_BOOST_BYTES == 8 * 1024 * 1024
     assert shipper.boost_segment_bytes == shipper_mod.DEFAULT_BOOST_SEGMENT_BYTES == 64 * 1024 * 1024
     assert shipper.boost_segment_bytes <= shipper.max_member_bytes
+    assert shipper.sqlite_backup_deadline == shipper_mod.SQLITE_BACKUP_DEADLINE_SECONDS
+
+
+def test_env_sets_sqlite_backup_deadline_and_cap(tmp_path):
+    shipper = shipper_mod.shipper_from_env({
+        "BOT_DATA_DIR": str(tmp_path), "RESEARCH_SEGMENTS_SINK": "volume",
+        "RESEARCH_SEGMENTS_STATE_DIR": str(tmp_path / "state"),
+        "RESEARCH_SEGMENTS_SQLITE_BACKUP_DEADLINE_SECONDS": "600",
+        "RESEARCH_SEGMENTS_MAX_SQLITE_BYTES": str(1536 * 1024 ** 2),
+    })
+    assert shipper.sqlite_backup_deadline == 600.0
+    assert shipper.max_sqlite_bytes == 1536 * 1024 ** 2
+
+
+def test_fly_toml_sqlite_cap_and_deadline_are_bounded():
+    text = (Path(__file__).with_name("fly.toml")).read_text(encoding="utf-8")
+    values = dict(re.findall(r'^\s*(RESEARCH_SEGMENTS_[A-Z_]+)\s*=\s*"([^"]*)"', text, re.M))
+    cap = int(values["RESEARCH_SEGMENTS_MAX_SQLITE_BYTES"])
+    deadline = float(values["RESEARCH_SEGMENTS_SQLITE_BACKUP_DEADLINE_SECONDS"])
+    assert 512 * 1024 ** 2 < cap <= shipper_mod.VOLUME_DEFAULT_MAX_STORE_BYTES // 4
+    assert shipper_mod.SQLITE_BACKUP_DEADLINE_SECONDS < deadline <= 900
 
 
 def test_priority_switches_between_idle_class_and_bounded_nice(monkeypatch):

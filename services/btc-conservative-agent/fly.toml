@@ -25,6 +25,12 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES = "8388608"
   RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES = "67108864"
   RESEARCH_SEGMENTS_BOOST_NICE = "10"
+  # research.db grows ~90 MB/day (424.6 MB on 2026-10-02) and would cross the
+  # 512 MiB default, turning into a permanent FLY_OVERSIZED_PATHS promotion deny.
+  # The online backup restarts on every bot write, so its copy window must also
+  # grow with the file; each step still holds the shared lock for one step only.
+  RESEARCH_SEGMENTS_MAX_SQLITE_BYTES = "1610612736"
+  RESEARCH_SEGMENTS_SQLITE_BACKUP_DEADLINE_SECONDS = "600"
   # Fresh-start epoch (2026-09-30): v2 begins at a genesis BASELINE segment,
   # so only data written after the cutover ships. v1 is superseded.
   RESEARCH_SEGMENTS_PREFIX = "v2"
