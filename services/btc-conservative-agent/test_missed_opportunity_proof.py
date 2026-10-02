@@ -154,6 +154,7 @@ def _write_complete_canonical_tape(root):
 def _identity_ledgers(root):
     ledgers = root / "v3" / "ledgers"
     _write_jsonl(ledgers / "opportunity.jsonl", [{
+        "record_id": "opportunity:episode-1",
         "opportunity_id": "opportunity:episode-1",
         "episode_id": "episode-1",
         "shared_ai_call_id": "scan-1",
@@ -163,6 +164,7 @@ def _identity_ledgers(root):
         "feature_snapshot_at_signal": {"regime": "TREND", "adx": 31.5},
     }])
     _write_jsonl(ledgers / "decision.jsonl", [{
+        "record_id": "decision:episode-1",
         "episode_id": "episode-1",
         "shared_ai_call_id": "scan-1",
         "scores": {"long": 8, "short": 2, "confidence": 60},
@@ -360,6 +362,8 @@ def test_one_second_path_detects_touch_between_checkpoints_and_partial_fill():
     engine = _load_engine()
     first, expiry, stages, tape = _compressed_join_inputs(available_qty=0.75)
     tape[1001]["ask"] = 99.0
+    # REALISTIC_V1: the resting limit needs a same-bucket print at/through it.
+    tape[1001].update(sell_qty=0.75, sell_vwap=99.0, buy_qty=0.0, trade_count=1)
     joined = engine._joined_compressed_chase_tape_evidence(
         first, expiry, stages, "LONG", tape,
     )
@@ -457,6 +461,7 @@ def test_short_path_uses_bid_touch_and_declared_limit():
     first, expiry, stages, tape = _compressed_join_inputs()
     stages[0]["virtual_limit_price"] = 102.0
     tape[1001]["bid"] = 103.0
+    tape[1001].update(buy_qty=5.0, buy_vwap=103.0, sell_qty=0.0, trade_count=1)
     joined = engine._joined_compressed_chase_tape_evidence(
         first, expiry, stages, "SHORT", tape,
     )

@@ -194,8 +194,10 @@ def test_distinct_reprice_intervals_do_not_double_count_displayed_liquidity():
         + schedule(limit=101, start=103, end=106, bucket="chase_4")
     )
     rows = [
-        row(100), row(101), row(102, ask=100, ask_qty=.4),
-        row(103, ask=102), row(104, ask=102), row(105, ask=101, ask_qty=.6),
+        # REALISTIC_V1: a resting limit fills only against a same-bucket print.
+        row(100), row(101), row(102, ask=100, ask_qty=.4, sell_qty=.4, sell_vwap=100),
+        row(103, ask=102), row(104, ask=102),
+        row(105, ask=101, ask_qty=.6, sell_qty=.6, sell_vwap=101),
     ]
     got = evaluate(
         rows, direction="LONG", requested_qty=1, chase_schedule=sched,
