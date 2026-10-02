@@ -38827,11 +38827,13 @@ def api_data_size():
     volume_total_mb = None
     filesystem_used_mb = None
     filesystem_free_mb = None
+    filesystem_free_bytes = None
     try:
         usage = shutil.disk_usage(runtime_root)
         volume_total_mb = round(float(usage.total) / (1024.0 * 1024.0), 2)
         filesystem_used_mb = round(float(usage.used) / (1024.0 * 1024.0), 2)
         filesystem_free_mb = round(float(usage.free) / (1024.0 * 1024.0), 2)
+        filesystem_free_bytes = max(0, int(usage.free))
     except OSError:
         env_mb = os.getenv("FLY_VOLUME_MB", "").strip()
         try:
@@ -38895,6 +38897,9 @@ def api_data_size():
         "used_fraction": used_fraction,
         "observation_only": True,
     }
+    inventory_capacity = _data_sync_inventory_capacity_projection(
+        filesystem_free_bytes
+    )
     key_files = ["trades_3factor.csv", "ai_reason_research.jsonl", "signal_replay.jsonl"]
     if current:
         size_status = "CURRENT"
@@ -38940,6 +38945,7 @@ def api_data_size():
         "legacy_collector_version": COLLECTOR_V22_VERSION,
         "storage_state": storage_payload,
         "capacity_projection": capacity_payload,
+        "inventory_capacity": inventory_capacity,
     })
 
 def _arm_live_control() -> tuple:
@@ -39428,6 +39434,31 @@ def _data_sync_inventory_volume_free_bytes() -> int | None:
         return max(0, int(shutil.disk_usage(_data_sync_volume_root()).free))
     except OSError:
         return None
+
+
+def _data_sync_inventory_capacity_projection(
+    observed_free_bytes: int | None,
+) -> dict:
+    """Project the inventory admission reserve from one O(1) usage fact."""
+    minimum_free_bytes = max(0, int(_DATA_SYNC_INVENTORY_MIN_FREE_BYTES))
+    try:
+        observed = (
+            None
+            if observed_free_bytes is None or isinstance(observed_free_bytes, bool)
+            else max(0, int(observed_free_bytes))
+        )
+    except (TypeError, ValueError, OverflowError):
+        observed = None
+    sufficient = None if observed is None else observed >= minimum_free_bytes
+    return {
+        "minimum_free_bytes": minimum_free_bytes,
+        "observed_free_bytes": observed,
+        "sufficient": sufficient,
+        "additional_required_bytes": (
+            None if observed is None
+            else max(0, minimum_free_bytes - observed)
+        ),
+    }
 
 
 def _data_sync_inventory_failure_fingerprint(
@@ -43465,11 +43496,14 @@ def api_data_sync_manifest():
     # disk_usage is an O(1) filesystem statistic. Expose it on identity-only
     # polls so the desktop can detect meaningful growth without forcing a
     # recursive manifest walk every three minutes.
-    usage = (
-        shutil.disk_usage(_data_sync_volume_root())
-        if not targeted_path and (identity_only or inventory_status == "CURRENT")
-        else None
-    )
+    usage = None
+    if not targeted_path and (identity_only or inventory_status == "CURRENT"):
+        try:
+            usage = shutil.disk_usage(_data_sync_volume_root())
+        except OSError:
+            # Identity-only polling must remain available when the O(1)
+            # capacity fact cannot be observed. Unknown stays explicit below.
+            usage = None
     ack = (
         _read_data_sync_ack()
         if inventory_status == "CURRENT" and not targeted_path else {}
@@ -43505,6 +43539,9 @@ def api_data_sync_manifest():
     )
     inventory_failure_free_bytes = _data_sync_async_inventory.get(
         "last_worker_failure_volume_free_bytes"
+    )
+    inventory_capacity = _data_sync_inventory_capacity_projection(
+        None if usage is None else usage.free
     )
     payload = {
         "schema": "fly_runtime_incremental_sync_v1",
@@ -43586,6 +43623,7 @@ def api_data_sync_manifest():
         "inventory_worker": {
             "owner": "data-sync-inventory-refresh",
             "single_flight": True,
+            "capacity": inventory_capacity,
             "refreshing": bool(inventory_state.get("refreshing")),
             "phase": inventory_state.get("worker_phase"),
             "files_seen": inventory_state.get("worker_files_seen"),
@@ -44129,6 +44167,7 @@ def _data_sync_ack_v3(body: dict):
         "inventory_file_count": int(generation["file_count"]),
         "manifest_page_count": int(generation["page_count"]),
         "manifest_pages_complete": True,
+        "ack_session_id": session_id,
         "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
     })
 

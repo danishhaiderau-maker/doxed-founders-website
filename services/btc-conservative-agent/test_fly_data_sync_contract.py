@@ -336,6 +336,7 @@ def test_paged_ack_stages_every_bounded_page_before_one_complete_generation_comm
     assert 'operation != "FINALIZE"' in ack_v3
     assert 'for page_index in range(int(generation["page_count"]))' in ack_v3
     assert '"missing_page_index": page_index' in ack_v3
+    assert '"ack_session_id": session_id' in ack_v3
     assert ack_v3.index('operation == "STAGE_PAGE"') < ack_v3.index(
         'for page_index in range(int(generation["page_count"]))'
     ) < ack_v3.index("_write_data_sync_ack(compact_ack)")

@@ -173,7 +173,104 @@ def _run_parent_exception() -> tuple[dict, list[str]]:
         return state, logged
 
 
+def _run_capacity_projection(observed_free_bytes: int | None) -> dict:
+    namespace = {
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
+        # The extracted projection must use only the supplied O(1) fact.
+        "shutil": SimpleNamespace(
+            disk_usage=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("capacity projection must not inspect the filesystem")
+            )
+        ),
+        "_data_sync_request_async_inventory": lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("capacity projection must not start an inventory scan")
+            )
+        ),
+    }
+    functions = _functions("_data_sync_inventory_capacity_projection")
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace["_data_sync_inventory_capacity_projection"](
+        observed_free_bytes
+    )
+
+
+def _assert_o1_capacity_projection_wiring() -> None:
+    tree = ast.parse(SOURCE, filename="bot.py")
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    def disk_usage_calls(node: ast.AST) -> list[ast.Call]:
+        return [
+            child for child in ast.walk(node)
+            if isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and isinstance(child.func.value, ast.Name)
+            and child.func.value.id == "shutil"
+            and child.func.attr == "disk_usage"
+        ]
+
+    def has_guarded_disk_usage(node: ast.AST) -> bool:
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Try):
+                continue
+            if not disk_usage_calls(ast.Module(body=child.body, type_ignores=[])):
+                continue
+            if any(
+                isinstance(handler.type, ast.Name)
+                and handler.type.id == "OSError"
+                for handler in child.handlers
+            ):
+                return True
+        return False
+
+    data_size = functions["api_data_size"]
+    manifest = functions["api_data_sync_manifest"]
+    assert len(disk_usage_calls(data_size)) == 1
+    assert len(disk_usage_calls(manifest)) == 1
+    assert has_guarded_disk_usage(data_size)
+    assert has_guarded_disk_usage(manifest)
+    assert not any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and isinstance(child.func.value, ast.Name)
+        and child.func.value.id == "os"
+        and child.func.attr == "walk"
+        for function in (data_size, manifest)
+        for child in ast.walk(function)
+    )
+
+
 def main() -> None:
+    minimum = 512 * 1024 * 1024
+    assert _run_capacity_projection(200 * 1024 * 1024) == {
+        "minimum_free_bytes": minimum,
+        "observed_free_bytes": 200 * 1024 * 1024,
+        "sufficient": False,
+        "additional_required_bytes": 312 * 1024 * 1024,
+    }
+    assert _run_capacity_projection(700 * 1024 * 1024) == {
+        "minimum_free_bytes": minimum,
+        "observed_free_bytes": 700 * 1024 * 1024,
+        "sufficient": True,
+        "additional_required_bytes": 0,
+    }
+    assert _run_capacity_projection(None) == {
+        "minimum_free_bytes": minimum,
+        "observed_free_bytes": None,
+        "sufficient": None,
+        "additional_required_bytes": None,
+    }
+    assert _run_capacity_projection(True) == {
+        "minimum_free_bytes": minimum,
+        "observed_free_bytes": None,
+        "sufficient": None,
+        "additional_required_bytes": None,
+    }
+    _assert_o1_capacity_projection_wiring()
     result, state = _run_low_space_gate()
     assert result["status"] == "EMPTY"
     assert result["error"] == "INVENTORY_CAPACITY_DEFERRED"
@@ -187,6 +284,8 @@ def main() -> None:
     assert "logger.error(f\"data-sync inventory background refresh failed: {exc}\")" not in SOURCE
     assert '"error": type(exc).__name__' not in SOURCE
     assert "_data_sync_inventory_public_failure_code" in SOURCE
+    assert '"inventory_capacity": inventory_capacity' in SOURCE
+    assert '"capacity": inventory_capacity' in SOURCE
     parent_state, logged = _run_parent_exception()
     assert parent_state["error"] == "INVENTORY_WORKER_FAILED"
     assert parent_state["last_worker_failure_stage"] == "PARENT_REFRESH"

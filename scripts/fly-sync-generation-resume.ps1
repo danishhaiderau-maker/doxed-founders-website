@@ -4,6 +4,77 @@ function Test-FlyResumeRevision {
   return ($Expected -cmatch '^[0-9a-f]{40}$' -and $Observed -cmatch '^[0-9a-f]{12,40}$' -and
     $Expected.StartsWith($Observed, [StringComparison]::Ordinal))
 }
+
+# A successful transport invocation is not terminal authority on its own.  The
+# result must bind this exact manifest to the remote FINALIZE receipt and the
+# immutable local membership receipt before the caller may treat it as ACKed.
+function Test-FlyResumeIntegral {
+  param([object]$Value)
+  return ($null -ne $Value -and (
+      $Value -is [byte] -or $Value -is [sbyte] -or
+      $Value -is [int16] -or $Value -is [uint16] -or
+      $Value -is [int] -or $Value -is [uint32] -or
+      $Value -is [long] -or $Value -is [uint64]
+    ))
+}
+
+function Test-FlyResumeCount {
+  param([object]$Value, [long]$Expected)
+  if (-not (Test-FlyResumeIntegral -Value $Value)) { return $false }
+  try { return ([long]$Value -eq $Expected) }
+  catch { return $false }
+}
+
+function Test-FlyResumeTerminalAck {
+  param(
+    [Parameter(Mandatory)][object]$Identity,
+    [Parameter(Mandatory)][object]$Result,
+    [Parameter(Mandatory)][object]$Manifest
+  )
+  if (
+    -not (Test-FlyResumeIntegral -Value $Manifest.file_count) -or
+    -not (Test-FlyResumeIntegral -Value $Manifest.total_bytes) -or
+    [long]$Manifest.file_count -le 0 -or
+    [long]$Manifest.total_bytes -lt 0
+  ) { return $false }
+  $expectedCount = [long]$Manifest.file_count
+  $expectedBytes = [long]$Manifest.total_bytes
+  if (
+    $Result.AckAccepted -isnot [bool] -or $Result.AckAccepted -ne $true -or
+    $Result.AckFinalized -isnot [bool] -or $Result.AckFinalized -ne $true -or
+    $Result.AckCoverageComplete -isnot [bool] -or $Result.AckCoverageComplete -ne $true -or
+    $Result.AckManifestPagesComplete -isnot [bool] -or $Result.AckManifestPagesComplete -ne $true -or
+    [string]$Result.AckOperation -cne 'FINALIZE' -or
+    [string]$Result.AckInventoryStatus -cne 'VALIDATED' -or
+    [string]$Result.AckSessionId -cnotmatch '^[0-9a-f]{32}$'
+  ) { return $false }
+  if (
+    -not (Test-FlyResumeCount -Value $Result.AckExpectedCount -Expected $expectedCount) -or
+    -not (Test-FlyResumeCount -Value $Result.AckAcceptedCount -Expected $expectedCount) -or
+    -not (Test-FlyResumeCount -Value $Result.AckInventoryFileCount -Expected $expectedCount) -or
+    -not (Test-FlyResumeCount -Value $Result.AckRejectedCount -Expected 0) -or
+    -not (Test-FlyResumeCount -Value $Result.AckManifestFileCount -Expected $expectedCount) -or
+    -not (Test-FlyResumeCount -Value $Result.AckManifestTotalBytes -Expected $expectedBytes) -or
+    -not (Test-FlyResumeCount -Value $Result.AckLocalContentFileCount -Expected $expectedCount) -or
+    -not (Test-FlyResumeCount -Value $Result.AckLocalContentTotalBytes -Expected $expectedBytes) -or
+    [string]$Result.AckLocalContentDigestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$Result.AckMembershipReceiptSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$Result.AckMembershipReceiptSchema -cne 'fly_terminal_transfer_membership_receipt_v1' -or
+    [string]$Result.AckMembershipContentHashStatus -cne 'LOCAL_COMPLETE_FRESH_RECOMPUTED' -or
+    [string]$Result.AckMembershipReceiptName -cne (
+      "terminal-transfer-membership-$([string]$Identity.inventory_generation_id)-$([string]$Result.AckSessionId).json"
+    )
+  ) { return $false }
+  if (
+    [string]$Result.InventoryGenerationId -cne [string]$Identity.inventory_generation_id -or
+    [string]$Result.InventorySha256 -cne [string]$Identity.inventory_sha256 -or
+    [string]$Result.CollectionEpochId -cne [string]$Identity.collection_epoch_id -or
+    [string]$Result.TileRegistrySignature -cne [string]$Identity.tile_registry_signature -or
+    [string]$Result.CanonicalSourceRevision -cne [string]$Identity.source_git_rev -or
+    -not (Test-FlyResumeRevision $Identity.source_git_rev $Result.SourceRevision)
+  ) { return $false }
+  return $true
+}
 function Invoke-FlyGenerationResume {
   param(
     [Parameter(Mandatory)][object]$Identity,
@@ -33,17 +104,21 @@ function Invoke-FlyGenerationResume {
     }
     $outcome = & $RunAttempt $manifest $attempt
     if ($outcome.Success -is [bool] -and $outcome.Success -eq $true) {
-      if ($outcome.Result.AckAccepted -isnot [bool] -or $outcome.Result.AckAccepted -ne $true -or
-          -not (Test-FlyResumeRevision $Identity.source_git_rev $outcome.Result.SourceRevision)) { throw 'RESUME_TERMINAL_ACK_INVALID' }
+      if (-not (Test-FlyResumeTerminalAck -Identity $Identity -Result $outcome.Result -Manifest $manifest)) {
+        throw 'RESUME_TERMINAL_ACK_INVALID'
+      }
       return $outcome.Result
     }
     $receipt = $outcome.Receipt
     if ($receipt.failureCode -cnotin @('BUNDLE_TRANSFER_DEADLINE','BUNDLE_INDEX_PREPARATION_DEADLINE')) {
       throw 'RESUME_NON_DEADLINE_FAILURE'
     }
-    if ($receipt.ok -ne $false -or $receipt.inProgress -ne $false -or $receipt.ackPending -ne $true -or
+    if ($receipt.ok -isnot [bool] -or $receipt.ok -ne $false -or
+        $receipt.inProgress -isnot [bool] -or $receipt.inProgress -ne $false -or
+        $receipt.ackPending -isnot [bool] -or $receipt.ackPending -ne $true -or
         $receipt.completionAuthority -cne 'NONE_TRANSFER_PROGRESS_ONLY' -or
         [string]$receipt.inventoryGenerationId -cne [string]$Identity.inventory_generation_id -or
+        [string]$receipt.inventorySha256 -cne [string]$Identity.inventory_sha256 -or
         [string]$receipt.collectionEpochId -cne [string]$Identity.collection_epoch_id -or
         [string]$receipt.sourceRevision -cne [string]$Identity.source_git_rev -or
         -not (Test-FlyResumeRevision $Identity.source_git_rev $receipt.deployedRevision) -or
