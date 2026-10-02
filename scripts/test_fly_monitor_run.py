@@ -138,3 +138,15 @@ def test_informational_keys_follow_segments_live_flag(monkeypatch):
     assert runner.informational_keys() == frozenset({"transfer_lag"})
     monkeypatch.setenv("FLY_MONITOR_SEGMENTS_LIVE", "1")
     assert runner.informational_keys() == frozenset()
+
+
+def test_last_finished_deploy_skips_dispatches_that_did_not_deploy():
+    runs = [
+        {"id": 3, "status": "in_progress", "event": "push"},
+        {"id": 2, "status": "completed", "event": "workflow_dispatch", "conclusion": "success"},
+        {"id": 1, "status": "completed", "event": "push", "conclusion": "failure", "head_sha": "b" * 40,
+         "updated_at": "2026-10-02T09:00:00Z"},
+    ]
+    jobs = {2: [{"name": runner.DEPLOY_JOB_NAME, "conclusion": "skipped"}]}
+    last = runner.last_finished_deploy(runs, lambda rid: jobs.get(rid, []))
+    assert last["id"] == 1 and last["conclusion"] == "failure"

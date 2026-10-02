@@ -30,6 +30,7 @@ READY = {
 }
 STATUS = {
     "uptime": {"boot_at": "2026-10-02T09:56:10Z"},
+    "book_refresh": {"book_age_sec": 0.49, "consecutive_failures": 0, "inflight": False, "last_error": None},
     "lifecycle_pipeline": {
         "available": True, "running": True, "last_outcome": "SUCCESS", "last_success_age_sec": 20.8,
         "emergency": False, "failure_count": 0, "last_error_code": None,
@@ -41,6 +42,8 @@ STATUS = {
             "binance": {"reconnects": 0}, "bybit": {"reconnects": 0}, "okx": {"reconnects": 0},
         }},
         "market_context_tape": {"status": "OK", "stale_feeds": []},
+        "execution_markouts": {"write_failures": 0, "dropped": 0, "taker_capture_failures": 0},
+        "xvl_evaluator": {"write_failures": 0},
     },
 }
 RELAY = {"state_integrity": {"live_armed": False, "relay_push": {"delivery_scheduler": {
@@ -293,3 +296,52 @@ def test_contract_field_missing_needs_two_runs_and_is_a_warning():
     assert alerts.evaluate(state, finding, now=NOW, maintenance=False)[0][0]["action"] == "pending"
     decision = alerts.evaluate(state, finding, now=NOW + 15 * MIN, maintenance=False)[0][0]
     assert decision["action"] == "alert" and not alerts.is_failing(decision)
+
+
+def test_order_book_stale_only_while_unpaused():
+    status = {"book_refresh": {"book_age_sec": 0.5, "consecutive_failures": 0, "last_error": None}}
+    assert sub.order_book_findings(status, paused=False) == {}
+    stale = {"book_refresh": {"book_age_sec": 400.0, "consecutive_failures": 12, "last_error": "timeout"}}
+    found = sub.order_book_findings(stale, paused=False)["order_book_stale"]
+    assert "book_age_sec=400" in found and "12 consecutive failures" in found
+    assert sub.order_book_findings(stale, paused=True) == {}
+    assert sub.order_book_findings(None, paused=False) == {}
+
+
+def test_relay_cache_stale_from_cache_age_or_execution_state_503():
+    assert sub.relay_cache_findings({"relay_cache": {"age_sec": 1.9}}, []) == {}
+    assert "age_sec=900" in sub.relay_cache_findings({"relay_cache": {"age_sec": 900.0}}, [])["relay_cache_stale"]
+    note = "skipped rules for https://doxed-btc-bot.fly.dev/api/relay-execution-state: HTTP 503"
+    assert "HTTP 503" in sub.relay_cache_findings(None, [note])["relay_cache_stale"]
+
+
+def test_collection_write_failures_alert_only_when_a_counter_grows():
+    state = alerts.empty_state()
+    status = {"collection": {"xvl_evaluator": {"write_failures": 0},
+                             "execution_markouts": {"write_failures": 0, "dropped": 0}}}
+    assert sub.collection_write_failure_findings(state, status, None) == {}
+    assert sub.collection_write_failure_findings(state, status, None) == {}
+    grown = copy.deepcopy(status)
+    grown["collection"]["execution_markouts"]["dropped"] = 3
+    found = sub.collection_write_failure_findings(state, grown, None)["collection_write_failures"]
+    assert "execution_markouts.dropped +3" in found
+    # a restart resets counters to 0: new baseline, no alert
+    assert sub.collection_write_failure_findings(state, status, None) == {}
+
+
+def test_restart_loop_needs_three_distinct_boots_within_an_hour():
+    state = alerts.empty_state()
+    for i, boot in enumerate(["2026-10-02T09:00:00Z", "2026-10-02T09:00:00Z", "2026-10-02T09:20:00Z"]):
+        assert sub.restart_loop_findings(state, {"uptime": {"boot_at": boot}}, NOW + i * 10 * MIN) == {}
+    found = sub.restart_loop_findings(state, {"uptime": {"boot_at": "2026-10-02T09:40:00Z"}}, NOW + 30 * MIN)
+    assert "3 times" in found["restart_loop"]
+    assert sub.restart_loop_findings(state, {"uptime": {"boot_at": "2026-10-02T09:40:00Z"}}, NOW + 150 * MIN) == {}
+
+
+def test_deploy_failed_until_a_later_deploy_succeeds():
+    failed = {"last_finished_deploy": {"id": 7, "event": "push", "head_sha": "a" * 40,
+                                       "conclusion": "failure", "updated_at": "2026-10-02T10:00:00Z"}}
+    assert "concluded failure" in sub.deploy_failure_findings(failed)["deploy_failed"]
+    ok = {"last_finished_deploy": {**failed["last_finished_deploy"], "conclusion": "success"}}
+    assert sub.deploy_failure_findings(ok) == {}
+    assert sub.deploy_failure_findings(None) == {}

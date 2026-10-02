@@ -85,6 +85,14 @@ POLICIES: Mapping[str, Policy] = {
     # Emitted only after the duration gate; escalated to critical while live_armed.
     "relay_stale_owner_pending": Policy(1, 0.0, 6 * HOUR, False, WARNING),
     "entries_blocked": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    "order_book_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "relay_cache_stale": Policy(2, 15 * 60.0, 6 * HOUR, True, WARNING),
+    # Counters only grow on a real write failure; a restart resets the baseline.
+    "collection_write_failures": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    # A deploy restarts once; three starts in an hour is a crash loop, never suppressed.
+    "restart_loop": Policy(1, 0.0, 3 * HOUR, False),
+    # Persists until a later image deploy succeeds.
+    "deploy_failed": Policy(1, 0.0, 12 * HOUR, False, WARNING),
     # A field the deployed revision is known to emit disappeared.
     "contract_field_missing": Policy(2, 15 * 60.0, 12 * HOUR, True, WARNING),
     # Operator-requested end-to-end proof of the notification channel.

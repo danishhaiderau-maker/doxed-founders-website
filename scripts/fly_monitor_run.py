@@ -44,6 +44,7 @@ HEALTH_URL = "https://doxed-btc-bot.fly.dev/health"
 READY_URL = "https://doxed-btc-bot.fly.dev/ready"
 STATUS_URL = "https://doxed-btc-bot.fly.dev/api/status"
 RELAY_URL = "https://doxed-btc-bot.fly.dev/api/relay-execution-state"
+RELAY_STATE_URL = "https://doxed-btc-bot.fly.dev/api/relay-state"
 SYSTEM_HEALTH_URL = "https://doxed-btc-bot.fly.dev/api/system-health"
 DEPLOY_RUNS_PATH = "/actions/workflows/fly-bot-deploy.yml/runs?per_page=50"
 # Only an image deploy in progress suppresses transitional findings, and only
@@ -104,6 +105,21 @@ def optional_probe(url: str, notes: list[str]) -> dict[str, Any] | None:
         notes.append(f"skipped rules for {url}: HTTP {status}")
         return None
     return payload
+
+
+def last_finished_deploy(
+    runs: list[dict[str, Any]], jobs_for_run: Callable[[Any], list[dict[str, Any]]]
+) -> dict[str, Any] | None:
+    """Newest completed image deploy (push, or dispatch whose deploy job ran); runs are newest first."""
+    for run in runs:
+        if run.get("status") != "completed":
+            continue
+        if run.get("event") != "push":
+            jobs = [j for j in jobs_for_run(run.get("id")) if j.get("name") == DEPLOY_JOB_NAME]
+            if not jobs or jobs[0].get("conclusion") == "skipped":
+                continue
+        return {k: run.get(k) for k in ("id", "event", "head_sha", "conclusion", "updated_at")}
+    return None
 
 
 def deploy_suppression(
@@ -185,7 +201,8 @@ class GitHub:
 
         deployed, in_flight = resolve_deployed_revision(runs, jobs)
         active, why = deploy_suppression(runs, jobs, time.time() if now is None else now)
-        return {"deployed": deployed, "in_flight": in_flight, "deploy_active": active, "deploy_note": why}
+        return {"deployed": deployed, "in_flight": in_flight, "deploy_active": active, "deploy_note": why,
+                "last_finished_deploy": last_finished_deploy(runs, jobs)}
 
     def previous_monitor_run_ts(self, now: float) -> float | None:
         runs = self.call(heartbeat.MONITOR_RUNS_PATH)["workflow_runs"]
@@ -368,6 +385,7 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     status_payload = optional_probe(STATUS_URL, notes) if health is not None else None
     relay = optional_probe(RELAY_URL, notes) if health is not None else None
     system_health = optional_probe(SYSTEM_HEALTH_URL, notes) if health is not None else None
+    relay_state = optional_probe(RELAY_STATE_URL, notes) if health is not None else None
     findings.update(subsystems.ready_block_findings(ready, paused=paused))
     findings.update(subsystems.cross_venue_degraded_findings(state, ready, now))
     findings.update(subsystems.cross_venue_reconnect_findings(state, status_payload))
@@ -376,6 +394,11 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     findings.update(subsystems.relay_findings(state, relay, now))
     findings.update(subsystems.entries_blocked_findings(state, ready, paused=paused, now=now))
     findings.update(subsystems.laptop_health_findings(system_health))
+    findings.update(subsystems.order_book_findings(status_payload, paused=paused))
+    findings.update(subsystems.relay_cache_findings(relay_state, notes))
+    findings.update(subsystems.collection_write_failure_findings(state, status_payload, ready))
+    findings.update(subsystems.restart_loop_findings(state, status_payload, now))
+    findings.update(subsystems.deploy_failure_findings(deploy))
     findings.update(subsystems.contract_findings({
         "health": health, "ready": ready, "status": status_payload, "relay": relay, "system_health": system_health,
     }))

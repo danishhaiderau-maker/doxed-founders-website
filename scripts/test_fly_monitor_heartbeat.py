@@ -259,6 +259,7 @@ def test_collect_wires_subsystem_rules_with_live_shapes(monkeypatch):
     payloads = {
         runner.HEALTH_URL: health, runner.READY_URL: ready, runner.STATUS_URL: fx.STATUS,
         runner.RELAY_URL: relay, runner.SYSTEM_HEALTH_URL: {**fx.SYSTEM_HEALTH, "stale": True},
+        runner.RELAY_STATE_URL: {"relay_cache": {"age_sec": 1.9}},
     }
 
     class _GH:
