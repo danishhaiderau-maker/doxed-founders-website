@@ -12,7 +12,7 @@ for _name in ("BTC_AGENT_DATA_DIR", "BTC_AGENT_REPORT_DIR"):
 _SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 # cwd-relative runtime state that cwd-fallback readers (bot, accumulator,
 # analyzer) would pick up from the source folder on the next run.
-_RUNTIME_STATE_IN_SOURCE = ("research_session.json",)
+_RUNTIME_STATE_IN_SOURCE = ("research_session.json", "v3")
 
 
 @pytest.fixture(autouse=True)

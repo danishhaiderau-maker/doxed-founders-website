@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import tempfile
@@ -16,6 +17,20 @@ from replay_eligibility import validate_replay_eligibility
 
 
 SIGNAL_TS = 1_700_000_000.0
+
+
+def _in_temp_cwd(test):
+    """bot resolves the V3 store and runtime files from os.getcwd(); keep them out of the source folder."""
+    @functools.wraps(test)
+    def wrapper(self, *args, **kwargs):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+            os.chdir(root)
+            try:
+                return test(self, *args, **kwargs)
+            finally:
+                os.chdir(previous)
+    return wrapper
 
 
 def _bar(minute):
@@ -103,6 +118,7 @@ class CollectorIntegrityTests(unittest.TestCase):
         self.assertNotIn("INVERT_SIGNAL_DEFAULT", vars(bot))
         self.assertNotIn("_ensure_invert_live_default", vars(bot))
 
+    @_in_temp_cwd
     def test_startup_and_poll_self_heal_missing_same_epoch_provisionals(self):
         saved_pending = dict(bot._order_multiverse_pending_src)
         saved_state = dict(bot._order_multiverse_state)
@@ -150,6 +166,7 @@ class CollectorIntegrityTests(unittest.TestCase):
             bot._order_multiverse_last_poll = saved_poll
             bot._collector_v22_last_merge = saved_merge
 
+    @_in_temp_cwd
     def test_maturation_poll_rotates_a_bounded_batch_without_rescanning_journal(self):
         saved_pending = dict(bot._order_multiverse_pending_src)
         saved_poll = bot._order_multiverse_last_poll
@@ -205,6 +222,7 @@ class CollectorIntegrityTests(unittest.TestCase):
             bot._collector_v22_last_merge = saved_merge
             bot._order_multiverse_maturation_cursor = saved_cursor
 
+    @_in_temp_cwd
     def test_terminal_ready_backlog_is_prioritized_and_adaptive_with_telemetry(self):
         saved_pending = dict(bot._order_multiverse_pending_src)
         saved_poll = bot._order_multiverse_last_poll
@@ -269,6 +287,7 @@ class CollectorIntegrityTests(unittest.TestCase):
             with bot.state_lock:
                 bot.state["collector_maturation"] = saved_status
 
+    @_in_temp_cwd
     def test_periodic_background_remerge_is_cooldown_limited(self):
         saved_pending = dict(bot._order_multiverse_pending_src)
         saved_poll = bot._order_multiverse_last_poll
@@ -325,6 +344,7 @@ class CollectorIntegrityTests(unittest.TestCase):
             self.assertEqual(bot._merge_collector_v22_provisionals(reason="EPOCH_RACE_TEST"), 0)
         remove.assert_not_called()
 
+    @_in_temp_cwd
     def test_maturation_reports_when_target_is_unachievable_at_hard_cap(self):
         saved_pending = dict(bot._order_multiverse_pending_src)
         saved_poll = bot._order_multiverse_last_poll
