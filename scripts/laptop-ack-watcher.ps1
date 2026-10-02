@@ -18,6 +18,8 @@ param(
   [int]$SyncTimeoutMin = 240,
   [int]$StaleInProgressMin = 15,
   [int]$MaxIterations = 0,
+  [int]$InventoryRefreshMinIntervalSec = 600,
+  [int]$RevalidatingPollSec = 20,
   [switch]$SkipAnalyzerRefresh
 )
 
@@ -65,7 +67,10 @@ $status = [ordered]@{
   expected = $null
   inventory = $null
   syncChildPid = $null
+  lastInventoryRefreshRequestAt = $null
+  lastInventoryRefreshResult = $null
 }
+$script:lastInventoryRefreshRequest = [datetime]::MinValue
 $script:child = $null
 
 function Save-WatcherStatus { Write-JsonAtomic -Path $cfg.WatcherStatus -Value $status }
@@ -75,6 +80,25 @@ function Get-ManifestPage($Token, [string]$Cursor = '', [int]$PageSize = 250) {
   $uri = "$($cfg.SourceUrl)/api/data-sync/manifest"
   if ($Cursor) { $uri += "?page_size=$PageSize&cursor=$([uri]::EscapeDataString($Cursor))" }
   return Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 180 -UseBasicParsing
+}
+
+# Plain manifest GETs are read-only on Fly and never rebuild inventory. Once
+# the CURRENT cache TTL lapses the generation reports STALE until someone asks
+# for a rebuild, so the watcher must request one explicitly (single-flight on
+# Fly; rate-limited here).
+function Request-InventoryRefresh($Token) {
+  $headers = @{ 'X-Bot-Admin-Token' = $Token; Accept = 'application/json' }
+  $body = @{ nonce = [guid]::NewGuid().ToString('N') } | ConvertTo-Json -Compress
+  return Invoke-RestMethod -Method Post -Uri "$($cfg.SourceUrl)/api/data-sync/manifest/refresh" `
+    -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60 -UseBasicParsing
+}
+
+function Test-InventoryRefreshNeeded($Manifest, [string]$InventoryStatus) {
+  if ($InventoryStatus -notin @('STALE', 'EMPTY')) { return $false }
+  if ([string]$Manifest.inventory_build_status -eq 'BUILDING') { return $false }
+  $worker = $Manifest.inventory_worker
+  if ($worker -and $worker.refreshing -eq $true) { return $false }
+  return ([datetime]::UtcNow - $script:lastInventoryRefreshRequest).TotalSeconds -ge $InventoryRefreshMinIntervalSec
 }
 
 # Bytes the local mirror still lacks; the soft cap bounds transfer, not the
