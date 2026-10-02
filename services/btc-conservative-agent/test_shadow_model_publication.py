@@ -107,7 +107,8 @@ def test_normal_shadow_helper_writes_verifiable_full_stream(tmp_path, monkeypatc
     again, _ = analyzer._write_conservative_shadow_report(
         evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
     assert again["result_stream"]["relative_path"] == "conservative_shadow_results.jsonl.gz"
-    assert len(list(output.glob("*.jsonl.gz"))) == 1
+    assert sorted(p.name for p in output.glob("*.jsonl.gz")) == [
+        "conditional_shadow_results.jsonl.gz", "conservative_shadow_results.jsonl.gz"]
     assert not list(output.glob(".shadow-results-*.tmp"))
     def fail(*a, **k):
         k["result_sink"]({"temporary": "unpublished"})
@@ -180,6 +181,7 @@ def test_variant_full_streams_bound_and_mirrored(tmp_path, monkeypatch):
     output.mkdir()
     archive = tmp_path / "archive"
     monkeypatch.chdir(output)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(analyzer, "REPORTS_DIR", str(archive))
     monkeypatch.setattr(schema, "generation_identity", lambda *a, **k: GEN)
     monkeypatch.setattr(shadow, "load_current_policy_candidates", lambda *a, **k: (candidates, artifact))
@@ -190,7 +192,9 @@ def test_variant_full_streams_bound_and_mirrored(tmp_path, monkeypatch):
         for root in (output, archive):
             with verify_result_stream(root, report, GEN) as index:
                 assert index.verified_summary["complete_replay_count"] == 1
-    assert len(list(archive.glob("*.jsonl.gz"))) == 3
+    assert len(list(archive.glob("conservative_shadow_results.jsonl.gz"))) == 1
+    assert len(list(archive.glob("shadow_variant_*.jsonl.gz"))) == 2
+    assert len(list(archive.glob("conditional_shadow*.jsonl.gz"))) == 3
     original = shadow.build_conservative_shadow_report
     calls = []
     def fail_variant(*args, **kwargs):

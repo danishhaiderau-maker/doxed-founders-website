@@ -11,15 +11,29 @@ import json
 import math
 import os
 from bisect import bisect_left
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
-from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
+from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash, validate_policy_spec
+import concurrent.futures
+import time
+import numpy as np
+
+from research_v3_policy_replay import PreparedReplayArrays, ReplayPlan, prepare_replay_price_path, replay_cell
+from research_v3_side_marks import (
+    BASIS_1M_ADVERSE_FIRST,
+    BASIS_NONE,
+    BASIS_SEGMENT_LAST_PRICE,
+    PATH_HORIZON_SEC,
+    event_side_marks,
+    load_side_mark_tape,
+    mark_source_summary,
+)
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
+from research.fill_model import fill_model_declaration
 from execution_cost_receipt_adapter import build_measured_execution_cost_receipt
 
 
@@ -852,25 +866,23 @@ def _conservative_child_receipt(
 
 
 PROTECTION_REPLAY_WINDOW_SCHEMA = "protection_replay_event_window_v1"
-DEFAULT_PROTECTION_REPLAY_MAX_EVENTS = 150
+DEFAULT_PROTECTION_REPLAY_MAX_EVENTS: int | None = None
 
 
 def protection_replay_max_events() -> int | None:
-    """Most-recent-event bound for the protection replay; 0 means unbounded.
+    """Optional most-recent-event bound for the protection replay; 0 or unset means unbounded.
 
-    The replay materialises every entry child x protection variant per event
-    and its cost grows with the epoch (1,764 events took >25 min and ~30 GB;
-    ~1.7 s per replayed event plus ~2 min fixed for the 21k-policy screen).
-    Per replayed event the cost is ~1.9 s of replay, ~1.6 s of 21k-policy
-    assessment and ~34 MB of materialised episodes, so caching replays alone
-    cannot make the full epoch fit; only the replay share is cacheable.
+    Inputs stream one event at a time and outcomes are kept as columnar
+    cells, so every eligible event is replayed by default.  The override
+    remains for emergencies and any bound it applies is reported as
+    truncation.
     """
     raw = os.getenv("ANALYZER_PROTECTION_REPLAY_MAX_EVENTS", "").strip()
     try:
         value = int(raw) if raw else DEFAULT_PROTECTION_REPLAY_MAX_EVENTS
     except ValueError:
         value = DEFAULT_PROTECTION_REPLAY_MAX_EVENTS
-    return value if value > 0 else None
+    return value if value is not None and value > 0 else None
 
 
 
@@ -940,6 +952,12 @@ def protection_replay_window_summary(receipt: Mapping[str, Any] | None) -> dict[
         alert_level, reason = "AMBER", "PROTECTION_REPLAY_TRUNCATED"
     else:
         alert_level, reason = "GREEN", None
+    mark = receipt.get("mark_source") if isinstance(receipt.get("mark_source"), Mapping) else {}
+    mark_level = str(mark.get("alert_level") or "GREEN")
+    severity = {"GREEN": 0, "AMBER": 1, "RED": 2}
+    if mark and selected and severity.get(mark_level, 1) > severity[alert_level]:
+        alert_level, reason = mark_level, mark.get("reason")
+    streaming = receipt.get("streaming") if isinstance(receipt.get("streaming"), Mapping) else {}
     return {
         "schema": PROTECTION_REPLAY_WINDOW_SUMMARY_SCHEMA,
         "window_schema": PROTECTION_REPLAY_WINDOW_SCHEMA,
@@ -957,84 +975,153 @@ def protection_replay_window_summary(receipt: Mapping[str, Any] | None) -> dict[
         "first_signal_ts": receipt.get("first_signal_ts"),
         "last_signal_ts": receipt.get("last_signal_ts"),
         "override_env": "ANALYZER_PROTECTION_REPLAY_MAX_EVENTS",
+        "mark_source_alert_level": mark.get("alert_level"),
+        "mark_events_by_basis": mark.get("events_by_basis"),
+        "mark_episodes_by_basis": mark.get("episodes_by_basis"),
+        "mark_fallback_events": mark.get("fallback_events"),
+        "mark_side_correct_ratio": mark.get("side_correct_ratio"),
+        "mark_side_convention": mark.get("side_convention"),
+        "replay_cells": streaming.get("cells"),
+        "replay_cell_store_bytes": streaming.get("cell_store_bytes"),
     }
 
 
-def load_candidate_inputs(
-    data_dir: str | Path,
-    *,
-    epoch_id: str | None = None,
-    minimum_signal_ts: float | None = None,
-    max_events: int | None = None,
-    window: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Return one normalized event input per event, never per duplicate row.
+def _regime_label(value: Any) -> str | None:
+    """Regime label text; observed captures wrap it as ``{observed_ts, value}``."""
+    if isinstance(value, Mapping):
+        value = value.get("value")
+    text = str(value or "").strip()
+    return text or None
 
-    ``max_events`` keeps only the most recent events by signal time, chosen
-    before any market segment is read; ``window`` receives the selection
-    receipt.
+
+def _read_jsonl_offsets(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
+    try:
+        with path.open("rb") as handle:
+            offset = 0
+            for line in handle:
+                start, offset = offset, offset + len(line)
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    yield start, row
+    except FileNotFoundError:
+        return
+
+
+_OPPORTUNITY_FIELDS = ("epoch_id", "signal_ts", "record_id", "feature_snapshot_at_signal")
+
+
+class CandidateInputStream:
+    """Candidate inputs materialised one event at a time.
+
+    Only the small ledgers and each order intent's byte offset stay resident;
+    an intent body and its market segments are read when its event is yielded,
+    so a pass over every eligible event holds one event in memory at a time.
+    Iterating again re-reads the same events in the same order.
     """
-    root = Path(data_dir)
-    ledgers = root / "v3" / "ledgers"
-    def in_scope(row: Mapping[str, Any]) -> bool:
-        if epoch_id is not None and str(row.get("epoch_id") or "") != str(epoch_id):
-            return False
-        return True
 
-    opportunities = {}
-    for row in _read_jsonl(ledgers / "opportunity.jsonl"):
-        if not in_scope(row):
-            continue
-        try:
-            signal_ts = float(row.get("signal_ts"))
-        except (TypeError, ValueError):
-            signal_ts = None
-        if minimum_signal_ts is not None and (signal_ts is None or signal_ts < minimum_signal_ts):
-            continue
-        opportunities[str(row.get("episode_id"))] = row
-    allowed_episodes = set(opportunities)
-    intents = {
-        str(row.get("event_id")): row
-        for row in _read_jsonl(ledgers / "order_intent.jsonl")
-        if in_scope(row) and str(row.get("episode_id") or "") in allowed_episodes
-    }
-    terminal = {
-        str(row.get("event_id")): row for row in _read_jsonl(ledgers / "lifecycle.jsonl")
-        if row.get("terminal") is True
-        and in_scope(row)
-        and str(row.get("episode_id") or "") in allowed_episodes
-    }
-    executions_by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in _read_jsonl(ledgers / "execution.jsonl"):
-        if not in_scope(row) or str(row.get("episode_id") or "") not in allowed_episodes:
-            continue
-        executions_by_event[str(row.get("event_id") or "")].append(row)
-    cycle_atr = _cycle_atr_by_event(root)
-    eligible = sorted(set(intents) & set(terminal))
-    selected = select_recent_events(
-        eligible,
-        lambda event_id: (opportunities.get(str(terminal[event_id].get("episode_id") or "")) or {}).get("signal_ts"),
-        max_events=max_events,
-    )
-    if window is not None:
-        window.update(selected["receipt"])
-    result = []
-    for event_id in selected["event_ids"]:
-        intent, lifecycle = intents[event_id], terminal[event_id]
+    def __init__(
+        self,
+        data_dir: str | Path,
+        *,
+        epoch_id: str | None = None,
+        minimum_signal_ts: float | None = None,
+        max_events: int | None = None,
+        window: dict[str, Any] | None = None,
+        exclude_episode_ids: Iterable[str] = (),
+    ) -> None:
+        self.root = Path(data_dir)
+        ledgers = self.root / "v3" / "ledgers"
+        self._intent_path = ledgers / "order_intent.jsonl"
+
+        def in_scope(row: Mapping[str, Any]) -> bool:
+            return epoch_id is None or str(row.get("epoch_id") or "") == str(epoch_id)
+
+        opportunities: dict[str, dict[str, Any]] = {}
+        for row in _read_jsonl(ledgers / "opportunity.jsonl"):
+            if not in_scope(row):
+                continue
+            try:
+                signal_ts = float(row.get("signal_ts"))
+            except (TypeError, ValueError):
+                signal_ts = None
+            if minimum_signal_ts is not None and (signal_ts is None or signal_ts < minimum_signal_ts):
+                continue
+            opportunities[str(row.get("episode_id"))] = {key: row.get(key) for key in _OPPORTUNITY_FIELDS if key in row}
+        allowed_episodes = set(opportunities)
+        intent_offsets: dict[str, int] = {}
+        for offset, row in _read_jsonl_offsets(self._intent_path):
+            if in_scope(row) and str(row.get("episode_id") or "") in allowed_episodes:
+                intent_offsets[str(row.get("event_id"))] = offset
+        terminal = {
+            str(row.get("event_id")): row for row in _read_jsonl(ledgers / "lifecycle.jsonl")
+            if row.get("terminal") is True
+            and in_scope(row)
+            and str(row.get("episode_id") or "") in allowed_episodes
+        }
+        executions_by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in _read_jsonl(ledgers / "execution.jsonl"):
+            if not in_scope(row) or str(row.get("episode_id") or "") not in allowed_episodes:
+                continue
+            executions_by_event[str(row.get("event_id") or "")].append(row)
+        eligible = sorted(set(intent_offsets) & set(terminal))
+        selected = select_recent_events(
+            eligible,
+            lambda event_id: (opportunities.get(str(terminal[event_id].get("episode_id") or "")) or {}).get("signal_ts"),
+            max_events=max_events,
+        )
+        if window is not None:
+            window.update(selected["receipt"])
+        excluded = {str(value) for value in exclude_episode_ids}
+        self.event_ids = [
+            event_id for event_id in selected["event_ids"]
+            if str(terminal[event_id].get("episode_id") or "") not in excluded
+        ]
+        keep = set(self.event_ids)
+        self._opportunities = opportunities
+        self._intent_offsets = {event_id: intent_offsets[event_id] for event_id in self.event_ids}
+        self._terminal = {event_id: terminal[event_id] for event_id in self.event_ids}
+        self._executions = {event_id: executions_by_event.get(event_id, []) for event_id in keep}
+        self._cycle_atr = _cycle_atr_by_event(self.root)
+        self._mark_tape: Any = None
+        self.events_yielded = 0
+
+    def __len__(self) -> int:
+        return len(self.event_ids)
+
+    def _signal_ts(self, event_id: str) -> float | None:
+        episode_id = str(self._terminal[event_id].get("episode_id") or "")
+        return _number((self._opportunities.get(episode_id) or {}).get("signal_ts"))
+
+    @property
+    def mark_tape(self) -> Any:
+        """The 1 s side-mark tape covering every selected event's replay horizon."""
+        if self._mark_tape is None and self.event_ids:
+            times = [ts for ts in (self._signal_ts(event_id) for event_id in self.event_ids) if ts is not None]
+            if times:
+                self._mark_tape = load_side_mark_tape(
+                    self.root, start_ts=min(times) - 5,
+                    end_ts=max(times) + _MAX_ENTRY_WINDOW_SEC + PATH_HORIZON_SEC + 5,
+                )
+        return self._mark_tape
+
+    def _build(self, event_id: str, handle: Any) -> dict[str, Any] | None:
+        handle.seek(self._intent_offsets[event_id])
+        intent = json.loads(handle.readline())
+        lifecycle = self._terminal[event_id]
         episode_id = str(lifecycle.get("episode_id") or intent.get("episode_id") or "")
         if str(intent.get("episode_id") or "") != episode_id:
-            continue
-        executions = executions_by_event.get(event_id, [])
+            return None
+        executions = self._executions.get(event_id, [])
         if any(str(row.get("episode_id") or "") != episode_id for row in executions):
-            continue
-        opportunity = opportunities.get(episode_id) or {}
+            return None
+        opportunity = self._opportunities.get(episode_id) or {}
         epoch_values = {
             _identity_text(row.get("epoch_id"))
             for row in (opportunity, intent, lifecycle, *executions)
             if row
         }
         if None in epoch_values or len(epoch_values) != 1:
-            continue
+            return None
         source_policy_signatures = {
             value for value in (
                 _identity_text(row.get("policy_signature"))
@@ -1043,14 +1130,14 @@ def load_candidate_inputs(
             ) if value is not None
         }
         if len(source_policy_signatures) > 1:
-            continue
+            return None
         one_second_rows = []
         one_minute_rows = []
         for ref in lifecycle.get("market_segment_refs") or []:
             if str(ref.get("timeframe")) == "1s":
-                one_second_rows.extend(_load_segment(root, ref))
+                one_second_rows.extend(_load_segment(self.root, ref))
             elif str(ref.get("timeframe")) == "1m":
-                one_minute_rows.extend(_load_segment(root, ref))
+                one_minute_rows.extend(_load_segment(self.root, ref))
         feature = opportunity.get("feature_snapshot_at_signal") or {}
         market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
         fill_execution = next((
@@ -1059,8 +1146,8 @@ def load_candidate_inputs(
         ), {})
         terminal_executions = [row for row in executions if row.get("close_ts") is not None]
         terminal_execution = terminal_executions[0] if len(terminal_executions) == 1 else {}
-        atr_projection = _candidate_atr_projection(fill_execution, intent, feature, cycle_atr.get(event_id))
-        result.append({
+        atr_projection = _candidate_atr_projection(fill_execution, intent, feature, self._cycle_atr.get(event_id))
+        return {
             "epoch_id": next(iter(epoch_values)),
             "event_id": event_id,
             "episode_id": episode_id,
@@ -1089,9 +1176,10 @@ def load_candidate_inputs(
             ],
             "signal_ts": opportunity.get("signal_ts"),
             "regime": (
-                feature.get("regime")
-                or feature.get("market_regime")
-                or market_context.get("regime_label")
+                _regime_label(feature.get("regime"))
+                or _regime_label(feature.get("regime_label"))
+                or _regime_label(feature.get("market_regime"))
+                or _regime_label(market_context.get("regime_label"))
                 or "UNKNOWN"
             ),
             "direction": intent.get("executed_direction"),
@@ -1110,20 +1198,53 @@ def load_candidate_inputs(
             "ordered_1s_prices": one_second_rows,
             "canonical_1m_ohlc": one_minute_rows,
             "terminal_outcome_state": lifecycle.get("outcome_state"),
-        })
-    return result
+        }
+
+    def _iter_events(self, event_ids: Iterable[tuple[int, str]]) -> Iterable[tuple[int, dict[str, Any]]]:
+        self.events_yielded = 0
+        if not self.event_ids:
+            return
+        with self._intent_path.open("rb") as handle:
+            for position, event_id in event_ids:
+                row = self._build(event_id, handle)
+                if row is not None:
+                    self.events_yielded += 1
+                    yield position, row
+
+    def __iter__(self) -> Iterable[dict[str, Any]]:
+        for _position, row in self._iter_events(enumerate(self.event_ids)):
+            yield row
+
+    def iter_by_episode(self) -> Iterable[tuple[int, dict[str, Any]]]:
+        """(selection position, input) grouped by episode, lowest event id first."""
+        def episode(event_id: str) -> str:
+            return str(self._terminal[event_id].get("episode_id") or "")
+
+        order = sorted(enumerate(self.event_ids), key=lambda item: (episode(item[1]), item[1], item[0]))
+        yield from self._iter_events(order)
 
 
-def _ordered_prices(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, float]]:
-    result = []
-    for row in rows:
-        ts = row.get("ts", row.get("t"))
-        price = row.get("price", row.get("mark", row.get("close")))
-        try:
-            result.append({"ts": float(ts), "price": float(price)})
-        except (TypeError, ValueError):
-            continue
-    return sorted(result, key=lambda row: row["ts"])
+_MAX_ENTRY_WINDOW_SEC = 7200
+
+
+def load_candidate_inputs(
+    data_dir: str | Path,
+    *,
+    epoch_id: str | None = None,
+    minimum_signal_ts: float | None = None,
+    max_events: int | None = None,
+    window: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return one normalized event input per event, never per duplicate row.
+
+    ``max_events`` keeps only the most recent events by signal time, chosen
+    before any market segment is read; ``window`` receives the selection
+    receipt.  ``CandidateInputStream`` is the bounded-memory equivalent.
+    """
+    return list(CandidateInputStream(
+        data_dir, epoch_id=epoch_id, minimum_signal_ts=minimum_signal_ts,
+        max_events=max_events, window=window,
+    ))
 
 
 def _conservative_ohlc_prices(rows: Iterable[Mapping[str, Any]], *, direction: str) -> list[dict[str, float]]:
@@ -1231,30 +1352,586 @@ def _comparison_cohort_receipt(
     }
 
 
-def evaluate_protection_screen(
-    inputs: list[dict[str, Any]],
+_UNSUPPORTED_REASON_BY_KIND = {
+    1: "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
+    2: "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
+    3: "ORDERED_1S_PATH_OR_ATR_MISSING",
+}
+_KIND_NO_FILL, _KIND_REPLAYED = 0, 4
+_NAN = float("nan")
+
+
+def _maybe(value: float) -> float | None:
+    return None if value != value else value
+
+
+def _code(table: dict[Any, int], names: list[Any], value: Any) -> int:
+    code = table.get(value)
+    if code is None:
+        code = table[value] = len(names)
+        names.append(value)
+    return code
+
+
+class _ProtectionCellStore:
+    """Columnar (policy, episode) outcomes: one compact cell per kept sample.
+
+    A cell holds the codes and numbers needed to rebuild the exact episode
+    row ``validate_policy`` consumes, so memory grows by ~60 bytes per cell
+    instead of one nested dict tree per policy and episode.
+    """
+
+    def __init__(self) -> None:
+        from array import array
+        self.policy = array("i")
+        self.event = array("i")
+        self.first_position = array("i")
+        self.identity = array("i")
+        self.c_kind = array("b")
+        self.c_state = array("h")
+        self.c_exit = array("h")
+        self.c_values = array("d")
+        self.d_kind = array("b")
+        self.d_state = array("h")
+        self.d_exit = array("h")
+        self.d_pnl = array("d")
+        self.names: list[Any] = []
+        self._codes: dict[Any, int] = {}
+        self.identities: list[tuple[bool, tuple[str, ...]]] = []
+        self._identity_codes: dict[tuple[bool, tuple[str, ...]], int] = {}
+
+    def code(self, value: Any) -> int:
+        return _code(self._codes, self.names, value)
+
+    def identity_code(self, receipt: Mapping[str, Any]) -> int:
+        projected = _validation_receipt_identity(dict(receipt))
+        key = (projected["complete"], tuple(projected["missing_required_identities"]))
+        return _code(self._identity_codes, self.identities, key)
+
+    def encode_conservative(self, cell: tuple) -> tuple:
+        kind, state, exit_reason, *values = cell
+        if kind != _KIND_REPLAYED:
+            return (kind, 0, 0, *values)
+        return (kind, self.code(state), self.code(exit_reason), *values)
+
+    def encode_diagnostic(self, cell: tuple) -> tuple:
+        kind, state, exit_reason, pnl = cell
+        if kind != _KIND_REPLAYED:
+            return (kind, 0, 0, pnl)
+        return (kind, self.code(state), self.code(exit_reason), pnl)
+
+    def append(self, policy: int, event: int, first_position: int, identity: int,
+               conservative: tuple, diagnostic: tuple) -> None:
+        self.policy.append(policy)
+        self.event.append(event)
+        self.first_position.append(first_position)
+        self.identity.append(identity)
+        kind, state, exit_code, pnl, retention, giveback, underwater = conservative
+        self.c_kind.append(kind)
+        self.c_state.append(state)
+        self.c_exit.append(exit_code)
+        self.c_values.extend((pnl, retention, giveback, underwater))
+        kind, state, exit_code, pnl = diagnostic
+        self.d_kind.append(kind)
+        self.d_state.append(state)
+        self.d_exit.append(exit_code)
+        self.d_pnl.append(pnl)
+
+    def __len__(self) -> int:
+        return len(self.policy)
+
+    def nbytes(self) -> int:
+        return sum(column.itemsize * len(column) for column in (
+            self.policy, self.event, self.first_position, self.identity, self.c_kind, self.c_state,
+            self.c_exit, self.c_values, self.d_kind, self.d_state, self.d_exit, self.d_pnl))
+
+    def subset(self, cells: np.ndarray) -> "_ProtectionCellStore":
+        """A store holding only ``cells`` (renumbered 0..n-1 in that order)."""
+        from array import array
+        out = _ProtectionCellStore()
+        cells = np.asarray(cells, dtype=np.int64)
+        for name in ("policy", "event", "first_position", "identity", "c_kind", "c_state", "c_exit",
+                     "d_kind", "d_state", "d_exit", "d_pnl"):
+            column = getattr(self, name)
+            values = np.frombuffer(column, dtype=np.dtype(column.typecode)) if len(column) else np.empty(0)
+            setattr(out, name, array(column.typecode, values[cells].astype(column.typecode).tobytes()
+                                     if len(cells) else b""))
+        quad = np.frombuffer(self.c_values, dtype=np.float64).reshape(-1, 4) if len(self.c_values) else np.empty((0, 4))
+        out.c_values = array("d", quad[cells].tobytes() if len(cells) else b"")
+        out.names, out.identities = self.names, self.identities
+        return out
+
+    def cells_by_policy(self) -> dict[int, Any]:
+        policies = np.frombuffer(self.policy, dtype=np.int32) if len(self.policy) else np.empty(0, np.int32)
+        order = np.argsort(policies, kind="stable")
+        sorted_policies = policies[order]
+        starts = np.flatnonzero(np.r_[True, sorted_policies[1:] != sorted_policies[:-1]]) if len(order) else []
+        ends = list(starts[1:]) + [len(order)] if len(order) else []
+        return {int(sorted_policies[start]): order[start:end] for start, end in zip(starts, ends)}
+
+    def conservative_outcome(self, cell: int, basis: str, base: Mapping[str, Any]) -> dict[str, Any]:
+        kind = self.c_kind[cell]
+        if kind == _KIND_NO_FILL:
+            return {"outcome_state": "NO_FILL", "net_pnl_usd": None}
+        if kind != _KIND_REPLAYED:
+            return {"outcome_state": "UNSUPPORTED", "reason": _UNSUPPORTED_REASON_BY_KIND[kind]}
+        pnl, retention, giveback, underwater = (_maybe(v) for v in self.c_values[4 * cell: 4 * cell + 4])
+        outcome = {
+            "outcome_state": self.names[self.c_state[cell]],
+            "net_pnl_usd": pnl,
+            "exit_reason": self.names[self.c_exit[cell]],
+            "profit_retention_ratio": retention,
+            "profit_giveback_pct": giveback,
+            "underwater_observation_ratio": underwater,
+            "replay_path_basis": basis,
+        }
+        outcome["cost_evidence"] = build_measured_execution_cost_receipt(
+            base.get("authoritative_cost_source") or {},
+            source_receipt_ids=base.get("authoritative_cost_source_ids") or [],
+            expected_net_pnl_usd=pnl,
+        )
+        return outcome
+
+    def diagnostic_outcome(self, cell: int) -> dict[str, Any]:
+        kind = self.d_kind[cell]
+        if kind == _KIND_NO_FILL:
+            return {"outcome_state": "NO_FILL", "net_pnl_usd": None}
+        if kind != _KIND_REPLAYED:
+            return {"outcome_state": "UNSUPPORTED", "reason": _UNSUPPORTED_REASON_BY_KIND[kind]}
+        return {
+            "outcome_state": self.names[self.d_state[cell]],
+            "net_pnl_usd": _maybe(self.d_pnl[cell]),
+            "exit_reason": self.names[self.d_exit[cell]],
+            "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "qualification_eligible": False,
+        }
+
+
+def _policy_rows(store: "_ProtectionCellStore", events: Mapping[int, Mapping[str, Any]] | list,
+                 cells: Iterable[int], policy_id: str) -> list[dict[str, Any]]:
+    """Episode rows of one policy in (signal_ts, first selection position) order."""
+    rows = []
+    for cell in cells:
+        cell = int(cell)
+        base = events[store.event[cell]]
+        complete, missing = store.identities[store.identity[cell]]
+        rows.append((store.first_position[cell], {
+            "epoch_id": base["epoch_id"],
+            "dataset_epoch": base["dataset_epoch"],
+            "source_revision": base["source_revision"],
+            "deployed_revision": base["deployed_revision"],
+            "tile_config_signature": base["tile_config_signature"],
+            "cohort_signature": base["cohort_signature"],
+            "episode_id": base["episode_id"],
+            "opportunity_id": base["opportunity_id"],
+            "tape_ids": list(base["tape_ids"]),
+            "source_event_id": base["source_event_id"],
+            "signal_ts": base["signal_ts"],
+            "evidence_collected_at": base["evidence_collected_at"],
+            "required_end_ts": base["required_end_ts"],
+            "regime": base["regime"],
+            "replay_path_basis": base["replay_path_basis"],
+            "receipt_identity": {"complete": complete, "missing_required_identities": list(missing)},
+            "policy_outcomes": {policy_id: store.conservative_outcome(cell, base["replay_path_basis"], base)},
+            "ideal_touch_policy_outcomes": {policy_id: store.diagnostic_outcome(cell)},
+        }))
+    rows.sort(key=lambda item: (float(item[1].get("signal_ts") or 0), item[0]))
+    return [row for _position, row in rows]
+
+
+_NO_CELLS = np.empty(0, dtype=np.int64)
+ASSESS_WORKERS_ENV = "ANALYZER_PROTECTION_ASSESS_WORKERS"
+ASSESS_PARALLEL_MIN_CELLS = 200_000
+_ASSESS_CHUNKS_PER_WORKER = 6
+
+
+def protection_assess_workers() -> int:
+    """Worker processes for per-policy assessment; 1 runs in-process."""
+    raw = os.environ.get(ASSESS_WORKERS_ENV)
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+    return max(1, min(4, (os.cpu_count() or 1) // 3))
+
+
+def _assess_chunk(payload: tuple) -> list[dict[str, Any]]:
+    store, events, items, policies_tested, sealed_holdout = payload
+    return [
+        _assess_policy(
+            policy_id, _policy_rows(store, events, cells, policy_id),
+            policy_signature=signature, policy_spec=spec, policy_family=family,
+            policies_tested=policies_tested, sealed_holdout=sealed_holdout,
+        )
+        for policy_id, cells, signature, spec, family in items
+    ]
+
+
+def _chunk_payload(store: "_ProtectionCellStore", events: list, items: list, policies_tested: int,
+                   sealed_holdout: Any) -> tuple:
+    """Self-contained slice: only this chunk's cells and the events they cite."""
+    cells = np.concatenate([np.asarray(item[1], dtype=np.int64) for item in items]) if items else _NO_CELLS
+    subset = store.subset(cells)
+    offsets = np.cumsum([0] + [len(item[1]) for item in items])
+    local_items = [
+        (policy_id, np.arange(offsets[i], offsets[i + 1]), signature, spec, family)
+        for i, (policy_id, _cells, signature, spec, family) in enumerate(items)
+    ]
+    cited = {int(event): events[int(event)] for event in np.unique(np.frombuffer(subset.event, dtype=np.int32))} \
+        if len(subset) else {}
+    if isinstance(sealed_holdout, Mapping) and sealed_holdout.get("schema") != "sealed_holdout_evaluation_v1":
+        sealed_holdout = {item[0]: sealed_holdout[item[0]] for item in items if item[0] in sealed_holdout}
+    return subset, cited, local_items, policies_tested, sealed_holdout
+
+
+def _assess_policies(store: "_ProtectionCellStore", events: list, items: list, *, policies_tested: int,
+                     sealed_holdout: Any) -> tuple[list[dict[str, Any]], int]:
+    """Assess every policy in order; large screens fan out over worker processes.
+
+    Each policy's assessment is a pure function of its own rows (bootstraps
+    are seeded per call), so the parallel result equals the in-process one.
+    """
+    workers = protection_assess_workers()
+    if workers > 1 and len(store) >= ASSESS_PARALLEL_MIN_CELLS and len(items) > 1:
+        try:
+            return _assess_parallel(store, events, items, workers, policies_tested, sealed_holdout), workers
+        except (OSError, RuntimeError, concurrent.futures.BrokenExecutor) as exc:
+            print(f"[protection-screen] parallel assessment unavailable ({exc!r}); assessing in-process",
+                  flush=True)
+    return _assess_chunk((store, events, items, policies_tested, sealed_holdout)), 1
+
+
+def _assess_parallel(store: "_ProtectionCellStore", events: list, items: list, workers: int,
+                     policies_tested: int, sealed_holdout: Any) -> list[dict[str, Any]]:
+    size = max(1, math.ceil(len(items) / (workers * _ASSESS_CHUNKS_PER_WORKER)))
+    chunks = [items[i:i + size] for i in range(0, len(items), size)]
+    results: list[list[dict[str, Any]] | None] = [None] * len(chunks)
+    # At most two chunks per worker are pickled and in flight at once, so the
+    # parent never holds more than a bounded slice of copied cells.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+        pending: dict[concurrent.futures.Future, int] = {}
+        next_chunk = 0
+        while next_chunk < len(chunks) or pending:
+            while next_chunk < len(chunks) and len(pending) < 2 * workers:
+                payload = _chunk_payload(store, events, chunks[next_chunk], policies_tested, sealed_holdout)
+                pending[pool.submit(_assess_chunk, payload)] = next_chunk
+                next_chunk += 1
+            done, _ = concurrent.futures.wait(pending, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                results[pending.pop(future)] = future.result()
+    return [row for chunk in results for row in chunk]
+
+
+def _assess_policy(
+    policy_id: str,
+    rows: list[dict[str, Any]],
     *,
-    sealed_holdout: Mapping[str, Any] | bool | None = None,
-    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    policy_signature: str,
+    policy_spec: Mapping[str, Any],
+    policy_family: str,
+    policies_tested: int,
+    sealed_holdout: Mapping[str, Any] | bool | None,
 ) -> dict[str, Any]:
-    """Evaluate exact policies; return descriptive rows and gated candidates."""
-    episodes_by_policy: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    policy_specs: dict[str, dict[str, Any]] = {}
-    policy_signatures: dict[str, str] = {}
-    protections = protection_screen()
-    input_total = len(inputs)
-    for source_index, source in enumerate(inputs, start=1):
-        episode_id = str(source.get("episode_id") or "")
-        if not episode_id:
+    """Validation receipt and descriptive metrics of one screened policy."""
+    holdout_start = int(len(rows) * 0.7)
+    oos = rows[holdout_start:]
+    # The candidate screen accepts only a content-addressed evaluation
+    # receipt.  A per-policy map is required when several policies are
+    # screened because each receipt is bound to that exact policy
+    # signature and evaluated cohort.  Legacy booleans remain accepted by
+    # the function signature solely to fail closed rather than crash.
+    holdout_receipt = (
+        sealed_holdout
+        if isinstance(sealed_holdout, Mapping)
+        and sealed_holdout.get("schema") == "sealed_holdout_evaluation_v1"
+        else (
+            sealed_holdout.get(policy_id)
+            if isinstance(sealed_holdout, Mapping)
+            else None
+        )
+    )
+    holdout_verified = verify_evaluation_receipt(
+        holdout_receipt,
+        policy_id=policy_id,
+        policy_signature=policy_signature,
+        holdout_episodes=oos,
+    )
+    comparison_cohort = _comparison_cohort_receipt(
+        rows,
+        holdout_start=holdout_start,
+        sealed_holdout=holdout_verified,
+    )
+    diagnostic_comparison_cohort = _comparison_cohort_receipt(
+        rows,
+        holdout_start=holdout_start,
+        sealed_holdout=False,
+        evidence_world="IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+    )
+    prevalidation_outcomes = [
+        (row.get("policy_outcomes") or {}).get(policy_id) or {}
+        for row in oos
+    ]
+    prevalidation_states = {
+        str(outcome.get("outcome_state") or "UNSUPPORTED")
+        for outcome in prevalidation_outcomes
+    }
+    conservative_execution_ready = bool(oos) and bool(
+        prevalidation_states & {"FULL_FILL", "PARTIAL_FILL"}
+    ) and prevalidation_states <= {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}
+    walk_forward = validate_purged_walk_forward(rows, policy_id=policy_id)
+    validation = validate_policy(
+        oos,
+        policy_id=policy_id,
+        policy_signature=policy_signature,
+        starting_equity_usd=1000,
+        max_drawdown_usd=50,
+        max_drawdown_pct=5,
+        min_cvar95_usd=-10,
+        policies_tested=policies_tested,
+        conservative_execution=conservative_execution_ready,
+        neighborhood_stable=False,
+        sealed_holdout=holdout_receipt,
+        liquidation_buffer_verified=False,
+        purged_walk_forward=walk_forward,
+    )
+    risk = validation["risk"]
+    diagnostic_rows = [
+        {
+            **row,
+            "policy_outcomes": row.get("ideal_touch_policy_outcomes") or {},
+        }
+        for row in oos
+    ]
+    diagnostic_validation = validate_policy(
+        diagnostic_rows,
+        policy_id=policy_id,
+        policy_signature=policy_signature,
+        starting_equity_usd=1000,
+        max_drawdown_usd=50,
+        max_drawdown_pct=5,
+        min_cvar95_usd=-10,
+        policies_tested=policies_tested,
+        conservative_execution=False,
+        neighborhood_stable=False,
+        sealed_holdout=False,
+        liquidation_buffer_verified=False,
+    )
+    replay_outcomes = [
+        (row.get("policy_outcomes") or {}).get(policy_id) or {}
+        for row in oos
+    ]
+    retentions = [float(row["profit_retention_ratio"]) for row in replay_outcomes if row.get("profit_retention_ratio") is not None]
+    givebacks = [float(row["profit_giveback_pct"]) for row in replay_outcomes if row.get("profit_giveback_pct") is not None]
+    underwater = [float(row["underwater_observation_ratio"]) for row in replay_outcomes if row.get("underwater_observation_ratio") is not None]
+    outcome_states = validation.get("outcome_states") or {}
+    full_fills = int(outcome_states.get("FULL_FILL", 0))
+    partial_fills = int(outcome_states.get("PARTIAL_FILL", 0))
+    no_fills = int(outcome_states.get("NO_FILL", 0))
+    has_conservative_execution = full_fills + partial_fills > 0
+    unsupported = sum(
+        int(count) for state, count in outcome_states.items()
+        if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
+    )
+    regime_breakdown = {}
+    oos_by_regime: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in oos:
+        oos_by_regime[_regime_label(row.get("regime")) or "UNKNOWN"].append(row)
+    for regime in sorted(oos_by_regime):
+        regime_rows = oos_by_regime[regime]
+        regime_pnls = [
+            float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
+            for row in regime_rows
+            if ((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd") is not None
+        ]
+        regime_breakdown[regime] = {
+            "independent_episodes": len(regime_rows),
+            "scored_episodes": len(regime_pnls),
+            "net_pnl_usd": round(sum(regime_pnls), 8),
+            "expectancy_usd": round(sum(regime_pnls) / len(regime_pnls), 8) if regime_pnls else None,
+        }
+    return {
+        "policy_id": policy_id,
+        "policy_signature": policy_signature,
+        "policy_spec": policy_spec,
+        "policy_family": policy_family,
+        "episodes_total": len(rows),
+        "oos_episodes": len(oos),
+        "comparison_cohort": comparison_cohort,
+        "comparison_cohort_key": comparison_cohort["comparison_cohort_key"],
+        "cross_family_rank_eligible": comparison_cohort["complete"],
+        "diagnostic_comparison_cohort": diagnostic_comparison_cohort,
+        "diagnostic_comparison_cohort_key": diagnostic_comparison_cohort["comparison_cohort_key"],
+        "supported_conservative_episodes": full_fills + partial_fills + no_fills,
+        "full_fills": full_fills,
+        "partial_fills": partial_fills,
+        "no_fills": no_fills,
+        "unsupported_episodes": unsupported,
+        "receipt_identity": {
+            "schema": "candidate_episode_receipt_identity_summary_v1",
+            "complete_episodes": sum(
+                1 for row in rows
+                if ((row.get("receipt_identity") or {}).get("complete") is True)
+            ),
+            "incomplete_episodes": sum(
+                1 for row in rows
+                if ((row.get("receipt_identity") or {}).get("complete") is not True)
+            ),
+            "missing_required_identities": sorted({
+                missing
+                for row in rows
+                for missing in (
+                    (row.get("receipt_identity") or {}).get("missing_required_identities") or []
+                )
+            }),
+        },
+        "conservative_fill_rate": (
+            round((full_fills + partial_fills) / (full_fills + partial_fills + no_fills), 8)
+            if full_fills + partial_fills + no_fills else None
+        ),
+        "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
+        "ideal_touch_diagnostic": {
+            "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "qualification_eligible": False,
+            "oos_net_usd": diagnostic_validation["risk"].get("net_pnl_usd"),
+            "max_drawdown_usd": diagnostic_validation["risk"].get("max_drawdown_usd"),
+            "expectancy_lcb_usd": diagnostic_validation["bootstrap"].get("mean_lcb95"),
+            "outcome_states": diagnostic_validation.get("outcome_states"),
+            "touches": int((diagnostic_validation.get("outcome_states") or {}).get("FULL_FILL", 0))
+            + int((diagnostic_validation.get("outcome_states") or {}).get("PARTIAL_FILL", 0)),
+            "no_touches": int((diagnostic_validation.get("outcome_states") or {}).get("NO_FILL", 0)),
+            "wins": int(diagnostic_validation["risk"].get("wins") or 0),
+            "losses": int(diagnostic_validation["risk"].get("losses") or 0),
+        },
+        # No supported terminal execution means these metrics are
+        # unavailable, not $0.  The validation receipt retains the raw
+        # opportunity accounting for audit, while ranking stays fail
+        # closed against invented profitability or risk.
+        "sealed_oos_net_usd": risk.get("net_pnl_usd") if has_conservative_execution else None,
+        "max_drawdown_usd": risk.get("max_drawdown_usd") if has_conservative_execution else None,
+        "cvar95_usd": risk.get("cvar95_usd") if has_conservative_execution else None,
+        "expectancy_lcb_usd": validation["bootstrap"].get("mean_lcb95") if has_conservative_execution else None,
+        "longest_losing_sequence": risk.get("longest_loss_streak") if has_conservative_execution else None,
+        "mean_profit_retention_ratio": round(sum(retentions) / len(retentions), 8) if retentions else None,
+        "mean_profit_giveback_pct": round(sum(givebacks) / len(givebacks), 8) if givebacks else None,
+        "mean_underwater_observation_ratio": round(sum(underwater) / len(underwater), 8) if underwater else None,
+        "max_underwater_episodes": risk.get("max_underwater_episodes"),
+        "regime_breakdown": regime_breakdown,
+        "replay_path_bases": sorted({str(row.get("replay_path_basis") or "UNKNOWN") for row in rows}),
+        "gates": validation["gates"],
+        "validation": validation,
+    }
+
+
+def _source_order(inputs: Any) -> Iterable[tuple[int, Mapping[str, Any]]]:
+    """Inputs grouped by episode, lowest event id first (ties keep input order)."""
+    if hasattr(inputs, "iter_by_episode"):
+        yield from inputs.iter_by_episode()
+        return
+    rows = list(inputs)
+    order = sorted(range(len(rows)), key=lambda index: (
+        str(rows[index].get("episode_id") or ""), str(rows[index].get("event_id")), index,
+    ))
+    for index in order:
+        yield index, rows[index]
+
+
+def _event_price_path(source: Mapping[str, Any], mark_tape: Any) -> dict[str, Any]:
+    """Side-correct 1 s marks; flagged last-price or 1m adverse-first fallbacks."""
+    direction = str(source.get("direction") or "UNKNOWN")
+    signal_ts = _number(source.get("signal_ts"))
+    times = [signal_ts] if signal_ts is not None else []
+    for child in source.get("entry_children") or []:
+        times.append(_number(child.get("fill_ts")))
+        times.extend(_number(row.get("active_until_ts")) for row in (child.get("chase_schedule") or [])
+                     if isinstance(row, Mapping))
+    times = [value for value in times if value is not None]
+    segment_rows = source.get("ordered_1s_prices") or []
+    if times:
+        marks = event_side_marks(
+            direction=direction, segment_rows=segment_rows, tape=mark_tape,
+            start_ts=min(times) - 2, end_ts=max(times) + PATH_HORIZON_SEC,
+        )
+        if len(marks["ts"]):
+            return {"basis": marks["basis"], "ts": marks["ts"], "price": marks["price"], "rows": None}
+    rows: list[dict[str, float]] = []
+    for row in segment_rows:
+        try:
+            rows.append({
+                "ts": float(row.get("ts", row.get("t"))),
+                "price": float(row.get("price", row.get("mark", row.get("close")))),
+            })
+        except (TypeError, ValueError):
             continue
-        prices = _ordered_prices(source.get("ordered_1s_prices") or [])
-        replay_path_basis = "CANONICAL_1S_ORDERED"
-        if not prices:
-            prices = _conservative_ohlc_prices(
-                source.get("canonical_1m_ohlc") or [],
-                direction=str(source.get("direction") or "UNKNOWN"),
-            )
-            replay_path_basis = "CANONICAL_1M_ADVERSE_FIRST_OHLC"
+    if rows:
+        return {"basis": BASIS_SEGMENT_LAST_PRICE, "ts": None, "price": None,
+                "rows": sorted(rows, key=lambda row: row["ts"])}
+    rows = _conservative_ohlc_prices(source.get("canonical_1m_ohlc") or [], direction=direction)
+    if rows:
+        return {"basis": BASIS_1M_ADVERSE_FIRST, "ts": None, "price": None, "rows": rows}
+    return {"basis": BASIS_NONE, "ts": None, "price": None, "rows": None}
+
+
+STREAM_PARALLEL_MIN_EVENTS = 200
+
+
+def _protection_specs(entry_id: str, offset_pct: Any, chase_id: str,
+                      protections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "entry": {
+                "entry_policy_id": entry_id,
+                "offset_pct": offset_pct,
+                "chase_id": chase_id,
+            },
+            "fill": {
+                "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
+                # Evaluator identity belongs to the declared policy,
+                # including when an individual episode is unsupported
+                # before the evaluator can emit a full receipt.
+                "source_fill_model": EVALUATOR_VERSION,
+            },
+            "loss_protection": protection["loss_protection"],
+            "profit_protection": protection["profit_protection"],
+            "portfolio": {"concurrency_cap": 1, "size_scale": 1.0, "daily_loss_kill_pct": 3},
+        }
+        for protection in protections
+    ]
+
+
+class _EpisodeReplayer:
+    """Replays one episode's events; identical in-process or in a worker.
+
+    Returns, per event, one record per entry child:
+    ``(child_index, entry_id, offset_pct, chase_id, identity_key, cells, signature)``
+    where ``cells`` is None when an earlier event of the episode already
+    supplied that entry's sample, else one (conservative, diagnostic) pair
+    per protection with state and exit reason as plain strings; ``signature``
+    is the first protection's policy signature the receipt was bound to.
+    """
+
+    def __init__(self, protections: list[dict[str, Any]] | None = None) -> None:
+        self.protections = protections if protections is not None else protection_screen()
+        self.world_defects: dict[tuple[int, str], list[str]] = {}
+        self.replay_plans: dict[int, ReplayPlan] = {}
+        self.signatures: dict[tuple[str, Any, str], str] = {}
+
+    def defects_for(self, protection_index: int, world: str, spec: Mapping[str, Any]) -> list[str]:
+        key = (protection_index, world)
+        if key not in self.world_defects:
+            self.world_defects[key] = validate_policy_spec(spec)
+        return self.world_defects[key]
+
+    def replay_episode(self, jobs: list[tuple[int, Mapping[str, Any], dict[str, Any]]]) -> list[list[tuple]]:
+        kept: set[str] = set()
+        return [self.replay_event(source, path, kept) for _position, source, path in jobs]
+
+    def replay_event(self, source: Mapping[str, Any], path: dict[str, Any], kept: set[str]) -> list[tuple]:
+        protections = self.protections
+        direction = str(source.get("direction") or "UNKNOWN")
+        leverage = float(source.get("leverage") or 100)
+        atr = source.get("atr14_pct")
+        has_prices = path["ts"] is not None or bool(path["rows"])
         microstructure_by_ts = {}
         for row in source.get("ordered_1s_prices") or []:
             try:
@@ -1264,17 +1941,47 @@ def evaluate_protection_screen(
             microstructure_by_ts[bucket_ts] = row
         # Children of one event share its price path, so a replay is fully
         # determined by these per-event keys; equal keys replay identically.
-        prepared_paths: dict[float, dict[str, Any]] = {}
-        replays: dict[tuple[Any, ...], dict[str, Any]] = {}
+        prepared_paths: dict[tuple[float, float], Any] = {}
+        replays: dict[tuple[Any, ...], tuple] = {}
 
-        def prepared_path_at(fill_ts: float) -> dict[str, Any]:
-            prepared = prepared_paths.get(fill_ts)
+        def prepared_at(fill_ts: float, entry_price: float) -> Any:
+            key = (fill_ts, entry_price)
+            prepared = prepared_paths.get(key)
             if prepared is None:
-                prepared = prepare_replay_price_path(prices, fill_ts=fill_ts)
-                prepared_paths[fill_ts] = prepared
+                end_ts = fill_ts + PATH_HORIZON_SEC
+                if path["ts"] is not None:
+                    lo, hi = np.searchsorted(path["ts"], [fill_ts, end_ts], side="left")
+                    ordered = np.column_stack((path["ts"][lo:hi], path["price"][lo:hi]))
+                    error = None
+                else:
+                    canonical = prepare_replay_price_path(
+                        (row for row in path["rows"] if row["ts"] < end_ts), fill_ts=fill_ts,
+                    )
+                    ordered, error = canonical.get("ordered") or (), canonical.get("error")
+                prepared = error or PreparedReplayArrays(
+                    ordered, direction=direction, entry_price=entry_price,
+                    leverage=leverage, fill_ts=fill_ts,
+                )
+                prepared_paths[key] = prepared
             return prepared
 
-        for child in source.get("entry_children") or []:
+        def replay(world: str, protection_index: int, spec: Mapping[str, Any], fill_ts: float,
+                   entry_price: float, margin_usd: float) -> dict[str, Any]:
+            defects = self.defects_for(protection_index, world, spec)
+            if defects:
+                return {"status": "UNSUPPORTED", "reasons": defects}
+            prepared = prepared_at(fill_ts, entry_price)
+            if isinstance(prepared, str):
+                return {"status": "DATA_ERROR", "reasons": [prepared]}
+            # Worlds differ only in ``fill``; the plan reads loss/profit only.
+            plan = self.replay_plans.get(protection_index)
+            if plan is None:
+                plan = self.replay_plans[protection_index] = ReplayPlan(spec)
+            return replay_cell(prepared, plan, atr_pct_at_fill=float(atr), leverage=leverage,
+                               margin_usd=margin_usd)
+
+        records = []
+        for child_index, child in enumerate(source.get("entry_children") or []):
             source_policy_id = str(child.get("entry_policy_id") or "").strip()
             if not source_policy_id:
                 continue
@@ -1294,392 +2001,322 @@ def evaluate_protection_screen(
                 if "_CHASE_" in entry_id
                 else str(child.get("chase_id") or entry_id).split("|", 1)[0]
             )
+            offset_pct = child.get("offset_pct")
+            if entry_id in kept:
+                records.append((child_index, entry_id, offset_pct, canonical_chase_id, None, None, None))
+                continue
+            kept.add(entry_id)
+            specs = _protection_specs(entry_id, offset_pct, canonical_chase_id, protections)
+            signature_key = (entry_id, offset_pct, canonical_chase_id)
+            signature = self.signatures.get(signature_key)
+            if signature is None:
+                signature = self.signatures[signature_key] = canonical_hash("v3-policy", specs[0])
             conservative_receipt = _conservative_child_receipt(
                 source, child, microstructure_by_ts=microstructure_by_ts,
             )
-            conservative_outcome = str(conservative_receipt.get("outcome") or "UNSUPPORTED")
-            conservative_fill_ts = conservative_receipt.get("trigger_bucket_ts")
-            conservative_fill_price = conservative_receipt.get("fill_price")
-            requested_qty = _number(conservative_receipt.get("requested_qty"))
-            filled_qty = _number(conservative_receipt.get("filled_qty"))
+            identity_for, bind_receipt = _candidate_receipt_binder(conservative_receipt, source)
+            policy_receipt = bind_receipt(signature)
+            projected = _validation_receipt_identity(dict(policy_receipt))
+            identity_key = (projected["complete"], tuple(projected["missing_required_identities"]))
+            conservative_outcome = str(policy_receipt.get("outcome") or "UNSUPPORTED")
+            conservative_fill_ts = policy_receipt.get("trigger_bucket_ts")
+            conservative_fill_price = policy_receipt.get("fill_price")
+            requested_qty = _number(policy_receipt.get("requested_qty"))
+            filled_qty = _number(policy_receipt.get("filled_qty"))
             fill_fraction = (
                 min(1.0, filled_qty / requested_qty)
                 if requested_qty and filled_qty is not None else 0.0
             )
-            prepared_price_path = None
-            if conservative_fill_ts is not None and prices and source.get("atr14_pct") is not None:
-                prepared_price_path = prepared_path_at(float(conservative_fill_ts))
-            ideal_prepared_price_path = None
-            if child.get("fill_ts") is not None and prices and source.get("atr14_pct") is not None:
-                ideal_prepared_price_path = prepared_path_at(float(child["fill_ts"]))
-            bind_receipt = _candidate_receipt_binder(conservative_receipt, source)[1]
-            for protection_index, protection in enumerate(protections):
-                policy_id = f"{entry_id}|{protection['protection_id']}"
-                spec = {
-                    "entry": {
-                        "entry_policy_id": entry_id,
-                        "offset_pct": child.get("offset_pct"),
-                        "chase_id": canonical_chase_id,
-                    },
-                    "fill": {
-                        "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
-                        # Evaluator identity belongs to the declared policy,
-                        # including when an individual episode is unsupported
-                        # before the evaluator can emit a full receipt.
-                        "source_fill_model": EVALUATOR_VERSION,
-                    },
-                    "loss_protection": protection["loss_protection"],
-                    "profit_protection": protection["profit_protection"],
-                    "portfolio": {"concurrency_cap": 1, "size_scale": 1.0, "daily_loss_kill_pct": 3},
-                }
-                prior_spec = policy_specs.get(policy_id)
-                if prior_spec is not None and prior_spec != spec:
-                    raise ValueError(f"POLICY_ID_SPEC_COLLISION:{policy_id}")
-                if prior_spec is None:
-                    policy_specs[policy_id] = spec
-                    policy_signatures[policy_id] = canonical_hash("v3-policy", spec)
-                candidate_policy_signature = policy_signatures[policy_id]
-                policy_receipt = bind_receipt(candidate_policy_signature)
-                conservative_outcome = str(policy_receipt.get("outcome") or "UNSUPPORTED")
-                conservative_fill_ts = policy_receipt.get("trigger_bucket_ts")
-                conservative_fill_price = policy_receipt.get("fill_price")
-                requested_qty = _number(policy_receipt.get("requested_qty"))
-                filled_qty = _number(policy_receipt.get("filled_qty"))
-                fill_fraction = (
-                    min(1.0, filled_qty / requested_qty)
-                    if requested_qty and filled_qty is not None else 0.0
-                )
-                outcome: dict[str, Any]
+            cells = []
+            for protection_index, spec in enumerate(specs):
                 if conservative_outcome == "NO_FILL":
-                    outcome = {
-                        "outcome_state": "NO_FILL", "net_pnl_usd": None,
-                    }
+                    conservative = (_KIND_NO_FILL, None, None, _NAN, _NAN, _NAN, _NAN)
                 elif conservative_outcome == "UNSUPPORTED":
-                    outcome = {
-                        "outcome_state": "UNSUPPORTED",
-                        "reason": "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
-                    }
+                    conservative = (1, None, None, _NAN, _NAN, _NAN, _NAN)
                 elif conservative_outcome not in {"FILL", "PARTIAL_FILL"}:
-                    outcome = {
-                        "outcome_state": "UNSUPPORTED",
-                        "reason": "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
-                    }
-                elif not prices or source.get("atr14_pct") is None:
-                    outcome = {
-                        "outcome_state": "UNSUPPORTED",
-                        "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
-                    }
+                    conservative = (2, None, None, _NAN, _NAN, _NAN, _NAN)
+                elif not has_prices or atr is None:
+                    conservative = (3, None, None, _NAN, _NAN, _NAN, _NAN)
                 else:
                     replay_key = (
                         "CONSERVATIVE", protection_index, float(conservative_fill_ts),
                         float(conservative_fill_price or 0), fill_fraction,
                     )
-                    replay = replays.get(replay_key)
-                    if replay is None:
-                        replay = replay_protected_policy(
-                            prices,
-                            direction=str(source.get("direction") or "UNKNOWN"),
-                            entry_price=float(conservative_fill_price or 0),
-                            fill_ts=float(conservative_fill_ts),
-                            atr_pct_at_fill=float(source["atr14_pct"]),
-                            leverage=float(source.get("leverage") or 100),
-                            margin_usd=float(source.get("margin_usd") or 0.25) * fill_fraction,
-                            policy_spec=spec,
-                            prepared_price_path=prepared_price_path,
-                            collect_trace=False,
+                    conservative = replays.get(replay_key)
+                    if conservative is None:
+                        result = replay(
+                            "CONSERVATIVE", protection_index, spec, float(conservative_fill_ts),
+                            float(conservative_fill_price or 0),
+                            float(source.get("margin_usd") or 0.25) * fill_fraction,
                         )
-                        replays[replay_key] = replay
-                    outcome = {
-                        "outcome_state": (
-                            "PARTIAL_FILL" if replay.get("status") == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
-                            else "FULL_FILL" if replay.get("status") == "COMPLETE"
-                            else str(replay.get("status") or "UNSUPPORTED")
-                        ),
-                        "net_pnl_usd": replay.get("net_pnl_usd"),
-                        "exit_reason": replay.get("exit_reason"),
-                        "profit_retention_ratio": replay.get("profit_retention_ratio"),
-                        "profit_giveback_pct": replay.get("profit_giveback_pct"),
-                        "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
-                        "replay_path_basis": replay_path_basis,
-                    }
-                    outcome["cost_evidence"] = build_measured_execution_cost_receipt(
-                        source.get("authoritative_cost_source") or {},
-                        source_receipt_ids=source.get("authoritative_cost_source_ids") or [],
-                        expected_net_pnl_usd=outcome.get("net_pnl_usd"),
-                    )
-                diagnostic_outcome: dict[str, Any]
+                        status = result.get("status")
+                        state = (
+                            "PARTIAL_FILL" if status == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
+                            else "FULL_FILL" if status == "COMPLETE"
+                            else str(status or "UNSUPPORTED")
+                        )
+                        conservative = replays[replay_key] = (
+                            _KIND_REPLAYED, state, result.get("exit_reason"),
+                            *(_NAN if result.get(name) is None else float(result[name]) for name in (
+                                "net_pnl_usd", "profit_retention_ratio", "profit_giveback_pct",
+                                "underwater_observation_ratio",
+                            )),
+                        )
                 if child.get("fill_ts") is None:
-                    diagnostic_outcome = {"outcome_state": "NO_FILL", "net_pnl_usd": None}
-                elif not prices or source.get("atr14_pct") is None:
-                    diagnostic_outcome = {
-                        "outcome_state": "UNSUPPORTED",
-                        "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
-                    }
+                    diagnostic = (_KIND_NO_FILL, None, None, _NAN)
+                elif not has_prices or atr is None:
+                    diagnostic = (3, None, None, _NAN)
                 else:
-                    diagnostic_spec = {
-                        **spec,
-                        "fill": {
-                            "execution_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
-                            "source_fill_model": child.get("fill_model"),
-                            "qualification_eligible": False,
-                        },
-                    }
                     diagnostic_key = (
                         "IDEAL_TOUCH", protection_index, float(child["fill_ts"]),
                         float(child.get("fill_price") or 0),
                     )
-                    diagnostic_replay = replays.get(diagnostic_key)
-                    if diagnostic_replay is None:
-                        diagnostic_replay = replay_protected_policy(
-                            prices,
-                            direction=str(source.get("direction") or "UNKNOWN"),
-                            entry_price=float(child.get("fill_price") or 0),
-                            fill_ts=float(child["fill_ts"]),
-                            atr_pct_at_fill=float(source["atr14_pct"]),
-                            leverage=float(source.get("leverage") or 100),
-                            margin_usd=float(source.get("margin_usd") or 0.25),
-                            policy_spec=diagnostic_spec,
-                            prepared_price_path=ideal_prepared_price_path,
-                            collect_trace=False,
+                    diagnostic = replays.get(diagnostic_key)
+                    if diagnostic is None:
+                        diagnostic_spec = {
+                            **spec,
+                            "fill": {
+                                "execution_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+                                "source_fill_model": child.get("fill_model"),
+                                "qualification_eligible": False,
+                            },
+                        }
+                        result = replay(
+                            "IDEAL_TOUCH", protection_index, diagnostic_spec, float(child["fill_ts"]),
+                            float(child.get("fill_price") or 0), float(source.get("margin_usd") or 0.25),
                         )
-                        replays[diagnostic_key] = diagnostic_replay
-                    diagnostic_outcome = {
-                        "outcome_state": (
-                            "FULL_FILL" if diagnostic_replay.get("status") == "COMPLETE"
-                            else str(diagnostic_replay.get("status") or "UNSUPPORTED")
-                        ),
-                        "net_pnl_usd": diagnostic_replay.get("net_pnl_usd"),
-                        "exit_reason": diagnostic_replay.get("exit_reason"),
-                        "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
-                        "qualification_eligible": False,
-                    }
+                        status = result.get("status")
+                        diagnostic = replays[diagnostic_key] = (
+                            _KIND_REPLAYED,
+                            "FULL_FILL" if status == "COMPLETE" else str(status or "UNSUPPORTED"),
+                            result.get("exit_reason"),
+                            _NAN if result.get("net_pnl_usd") is None else float(result["net_pnl_usd"]),
+                        )
+                cells.append((conservative, diagnostic))
+            records.append((child_index, entry_id, offset_pct, canonical_chase_id, identity_key, cells, signature))
+        return records
+
+
+_WORKER_REPLAYER: _EpisodeReplayer | None = None
+
+
+def _replay_episode_job(jobs: list[tuple[int, Mapping[str, Any], dict[str, Any]]]) -> list[list[tuple]]:
+    global _WORKER_REPLAYER
+    if _WORKER_REPLAYER is None:
+        _WORKER_REPLAYER = _EpisodeReplayer()
+    return _WORKER_REPLAYER.replay_episode(jobs)
+
+
+def evaluate_protection_screen(
+    inputs: Iterable[Mapping[str, Any]],
+    *,
+    sealed_holdout: Mapping[str, Any] | bool | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    mark_tape: Any = None,
+    input_observer: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Evaluate exact policies; return descriptive rows and gated candidates.
+
+    Inputs are consumed one event at a time, grouped by episode.  The first
+    event (lowest event id) carrying an entry policy supplies that policy's
+    sample for the episode, so later events of the episode are not replayed
+    for it.  Exits are replayed on side-correct 1 s marks over a fixed
+    post-fill horizon.
+    """
+    if mark_tape is None:
+        mark_tape = getattr(inputs, "mark_tape", None)
+    protections = protection_screen()
+    protection_count = len(protections)
+    entry_ids: list[str] = []
+    entry_index: dict[str, int] = {}
+    entry_spec_keys: list[tuple[Any, str]] = []
+    entry_first_key: list[tuple[int, int]] = []
+    policy_specs: dict[str, dict[str, Any]] = {}
+    policy_signatures: dict[str, str] = {}
+    store = _ProtectionCellStore()
+    events: list[dict[str, Any]] = []
+    events_by_basis: dict[str, int] = defaultdict(int)
+    episodes_by_basis: dict[str, int] = defaultdict(int)
+    input_total = len(inputs) if hasattr(inputs, "__len__") else 0
+    processed = 0
+    current_episode: str | None = None
+    episode_jobs: list[tuple[int, Mapping[str, Any], dict[str, Any]]] = []
+    episode_event_indexes: list[int] = []
+    replayer = _EpisodeReplayer(protections)
+    workers = protection_assess_workers()
+    pool = None
+    if workers > 1 and input_total >= STREAM_PARALLEL_MIN_EVENTS:
+        try:
+            pool = concurrent.futures.ProcessPoolExecutor(max_workers=workers)
+        except (OSError, RuntimeError) as exc:
+            print(f"[protection-screen] parallel replay unavailable ({exc!r}); replaying in-process", flush=True)
+    stream_workers = workers if pool is not None else 1
+    in_flight: deque[tuple[Any, list, list[int]]] = deque()
+
+    def register_entry(entry_id: str, offset_pct: Any, chase_id: str, key: tuple[int, int],
+                       first_signature: str | None) -> int:
+        index = entry_index[entry_id] = len(entry_ids)
+        entry_ids.append(entry_id)
+        entry_spec_keys.append((offset_pct, chase_id))
+        entry_first_key.append(key)
+        specs = _protection_specs(entry_id, offset_pct, chase_id, protections)
+        for protection_index, (protection, spec) in enumerate(zip(protections, specs)):
+            policy_id = f"{entry_id}|{protection['protection_id']}"
+            policy_specs[policy_id] = spec
+            policy_signatures[policy_id] = (
+                first_signature if protection_index == 0 and first_signature is not None
+                else canonical_hash("v3-policy", spec)
+            )
+        return index
+
+    def apply_episode(records: list[list[tuple]], positions: list[int], event_indexes: list[int]) -> None:
+        kept: dict[int, list[Any]] = {}
+        for position, event_index, children in zip(positions, event_indexes, records):
+            for child_index, entry_id, offset_pct, chase_id, identity_key, cells, signature in children:
+                entry = entry_index.get(entry_id)
+                if entry is None:
+                    entry = register_entry(entry_id, offset_pct, chase_id, (position, child_index), signature)
+                else:
+                    if entry_spec_keys[entry] != (offset_pct, chase_id):
+                        raise ValueError(f"POLICY_ID_SPEC_COLLISION:{entry_id}|{protections[0]['protection_id']}")
+                    entry_first_key[entry] = min(entry_first_key[entry], (position, child_index))
+                if cells is None:
+                    kept[entry][0] = min(kept[entry][0], position)
+                    continue
+                identity = _code(store._identity_codes, store.identities, identity_key)
                 # Multiple lane events from one AI call are correlated. A
                 # deterministic event-id tie-break keeps one sample per episode.
-                prior = episodes_by_policy[policy_id].get(episode_id)
-                if prior is None or str(source.get("event_id")) < str(prior.get("source_event_id")):
-                    episodes_by_policy[policy_id][episode_id] = {
-                        "epoch_id": source.get("epoch_id"),
-                        "dataset_epoch": source.get("dataset_epoch") or source.get("epoch_id"),
-                        "source_revision": source.get("source_revision"),
-                        "deployed_revision": source.get("deployed_revision"),
-                        "tile_config_signature": source.get("tile_config_signature"),
-                        "cohort_signature": source.get("cohort_signature"),
-                        "episode_id": episode_id,
-                        "opportunity_id": source.get("opportunity_id"),
-                        "tape_ids": list(source.get("tape_ids") or []),
-                        "source_event_id": source.get("event_id"),
-                        "signal_ts": source.get("signal_ts"),
-                        "evidence_collected_at": source.get("evidence_collected_at"),
-                        "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
-                        "regime": source.get("regime"),
-                        "replay_path_basis": replay_path_basis,
-                        "receipt_identity": _validation_receipt_identity(policy_receipt),
-                        "policy_outcomes": {policy_id: outcome},
-                        "ideal_touch_policy_outcomes": {policy_id: diagnostic_outcome},
-                    }
+                kept[entry] = [position, event_index, identity, [
+                    (store.encode_conservative(conservative), store.encode_diagnostic(diagnostic))
+                    for conservative, diagnostic in cells
+                ]]
+        for entry, (first_position, event, identity, cells) in kept.items():
+            for protection_index, (conservative, diagnostic) in enumerate(cells):
+                store.append(entry * protection_count + protection_index, event, first_position,
+                             identity, conservative, diagnostic)
 
-        if progress_callback is not None and (
-            source_index == 1 or source_index == input_total or source_index % 5 == 0
-        ):
-            progress_callback({
-                "phase": "PROTECTION_REPLAY",
-                "input_events_completed": source_index,
-                "input_events_total": input_total,
-                "protection_variants": len(protections),
-                "policies_materialized": len(episodes_by_policy),
-            })
+    def drain(limit: int) -> None:
+        nonlocal pool
+        while len(in_flight) > limit:
+            future, jobs, event_indexes = in_flight.popleft()
+            try:
+                records = future.result()
+            except concurrent.futures.BrokenExecutor as exc:
+                print(f"[protection-screen] replay worker lost ({exc!r}); continuing in-process", flush=True)
+                pool = None
+                records = replayer.replay_episode(jobs)
+            apply_episode(records, [job[0] for job in jobs], event_indexes)
 
+    def dispatch_episode() -> None:
+        nonlocal pool
+        if not episode_jobs:
+            return
+        jobs, event_indexes = list(episode_jobs), list(episode_event_indexes)
+        episode_jobs.clear()
+        episode_event_indexes.clear()
+        if pool is not None:
+            try:
+                in_flight.append((pool.submit(_replay_episode_job, jobs), jobs, event_indexes))
+                drain(2 * stream_workers)
+                return
+            except concurrent.futures.BrokenExecutor as exc:
+                print(f"[protection-screen] replay pool lost ({exc!r}); continuing in-process", flush=True)
+                pool = None
+        drain(0)
+        apply_episode(replayer.replay_episode(jobs), [job[0] for job in jobs], event_indexes)
+
+    stream_started = time.perf_counter()
+    try:
+        for position, source in _source_order(inputs):
+            processed += 1
+            if input_observer is not None:
+                input_observer(source)
+            episode_id = str(source.get("episode_id") or "")
+            if episode_id:
+                if episode_id != current_episode:
+                    dispatch_episode()
+                    current_episode = episode_id
+                    first_event_of_episode = True
+                else:
+                    first_event_of_episode = False
+                path = _event_price_path(source, mark_tape)
+                replay_path_basis = path["basis"]
+                events_by_basis[replay_path_basis] += 1
+                if first_event_of_episode:
+                    episodes_by_basis[replay_path_basis] += 1
+                episode_event_indexes.append(len(events))
+                events.append({
+                    "epoch_id": source.get("epoch_id"),
+                    "dataset_epoch": source.get("dataset_epoch") or source.get("epoch_id"),
+                    "source_revision": source.get("source_revision"),
+                    "deployed_revision": source.get("deployed_revision"),
+                    "tile_config_signature": source.get("tile_config_signature"),
+                    "cohort_signature": source.get("cohort_signature"),
+                    "episode_id": episode_id,
+                    "opportunity_id": source.get("opportunity_id"),
+                    "tape_ids": list(source.get("tape_ids") or []),
+                    "source_event_id": source.get("event_id"),
+                    "signal_ts": source.get("signal_ts"),
+                    "evidence_collected_at": source.get("evidence_collected_at"),
+                    "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
+                    "regime": _regime_label(source.get("regime")),
+                    "replay_path_basis": replay_path_basis,
+                    "authoritative_cost_source": source.get("authoritative_cost_source") or {},
+                    "authoritative_cost_source_ids": list(source.get("authoritative_cost_source_ids") or []),
+                })
+                episode_jobs.append((position, source, path))
+
+            if progress_callback is not None and (
+                processed == 1 or processed == input_total or processed % 5 == 0
+            ):
+                progress_callback({
+                    "phase": "PROTECTION_REPLAY",
+                    "input_events_completed": processed,
+                    "input_events_total": input_total,
+                    "protection_variants": protection_count,
+                    "policies_materialized": len(entry_ids) * protection_count,
+                    "cells_materialized": len(store),
+                })
+        dispatch_episode()
+        drain(0)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+    stream_seconds = round(time.perf_counter() - stream_started, 3)
+
+    policy_order = sorted(
+        range(len(entry_ids) * protection_count),
+        key=lambda index: (entry_first_key[index // protection_count], index % protection_count),
+    )
+    cells_by_policy = store.cells_by_policy()
+
+    mark_source = mark_source_summary(
+        events_by_basis, episodes_by_basis, getattr(mark_tape, "receipt", None),
+    )
+    streaming_receipt = {
+        "schema": "protection_replay_streaming_v1",
+        "input_events_processed": processed,
+        "events_with_episode": len(events),
+        "cells": len(store),
+        "cell_store_bytes": store.nbytes(),
+        "policies": len(policy_order),
+        "stream_workers": stream_workers,
+        "stream_seconds": stream_seconds,
+    }
     assessed = []
-    policies_tested = max(1, len(episodes_by_policy))
-    for policy_id, by_episode in episodes_by_policy.items():
-        rows = sorted(by_episode.values(), key=lambda row: float(row.get("signal_ts") or 0))
-        holdout_start = int(len(rows) * 0.7)
-        oos = rows[holdout_start:]
-        # The candidate screen accepts only a content-addressed evaluation
-        # receipt.  A per-policy map is required when several policies are
-        # screened because each receipt is bound to that exact policy
-        # signature and evaluated cohort.  Legacy booleans remain accepted by
-        # the function signature solely to fail closed rather than crash.
-        holdout_receipt = (
-            sealed_holdout
-            if isinstance(sealed_holdout, Mapping)
-            and sealed_holdout.get("schema") == "sealed_holdout_evaluation_v1"
-            else (
-                sealed_holdout.get(policy_id)
-                if isinstance(sealed_holdout, Mapping)
-                else None
-            )
-        )
-        holdout_verified = verify_evaluation_receipt(
-            holdout_receipt,
-            policy_id=policy_id,
-            policy_signature=policy_signatures[policy_id],
-            holdout_episodes=oos,
-        )
-        comparison_cohort = _comparison_cohort_receipt(
-            rows,
-            holdout_start=holdout_start,
-            sealed_holdout=holdout_verified,
-        )
-        diagnostic_comparison_cohort = _comparison_cohort_receipt(
-            rows,
-            holdout_start=holdout_start,
-            sealed_holdout=False,
-            evidence_world="IDEAL_TOUCH_DIAGNOSTIC_ONLY",
-        )
-        prevalidation_outcomes = [
-            (row.get("policy_outcomes") or {}).get(policy_id) or {}
-            for row in oos
-        ]
-        prevalidation_states = {
-            str(outcome.get("outcome_state") or "UNSUPPORTED")
-            for outcome in prevalidation_outcomes
-        }
-        conservative_execution_ready = bool(oos) and bool(
-            prevalidation_states & {"FULL_FILL", "PARTIAL_FILL"}
-        ) and prevalidation_states <= {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}
-        walk_forward = validate_purged_walk_forward(rows, policy_id=policy_id)
-        validation = validate_policy(
-            oos,
-            policy_id=policy_id,
-            policy_signature=policy_signatures[policy_id],
-            starting_equity_usd=1000,
-            max_drawdown_usd=50,
-            max_drawdown_pct=5,
-            min_cvar95_usd=-10,
-            policies_tested=policies_tested,
-            conservative_execution=conservative_execution_ready,
-            neighborhood_stable=False,
-            sealed_holdout=holdout_receipt,
-            liquidation_buffer_verified=False,
-            purged_walk_forward=walk_forward,
-        )
-        risk = validation["risk"]
-        diagnostic_rows = [
-            {
-                **row,
-                "policy_outcomes": row.get("ideal_touch_policy_outcomes") or {},
-            }
-            for row in oos
-        ]
-        diagnostic_validation = validate_policy(
-            diagnostic_rows,
-            policy_id=policy_id,
-            policy_signature=policy_signatures[policy_id],
-            starting_equity_usd=1000,
-            max_drawdown_usd=50,
-            max_drawdown_pct=5,
-            min_cvar95_usd=-10,
-            policies_tested=policies_tested,
-            conservative_execution=False,
-            neighborhood_stable=False,
-            sealed_holdout=False,
-            liquidation_buffer_verified=False,
-        )
-        replay_outcomes = [
-            (row.get("policy_outcomes") or {}).get(policy_id) or {}
-            for row in oos
-        ]
-        retentions = [float(row["profit_retention_ratio"]) for row in replay_outcomes if row.get("profit_retention_ratio") is not None]
-        givebacks = [float(row["profit_giveback_pct"]) for row in replay_outcomes if row.get("profit_giveback_pct") is not None]
-        underwater = [float(row["underwater_observation_ratio"]) for row in replay_outcomes if row.get("underwater_observation_ratio") is not None]
-        outcome_states = validation.get("outcome_states") or {}
-        full_fills = int(outcome_states.get("FULL_FILL", 0))
-        partial_fills = int(outcome_states.get("PARTIAL_FILL", 0))
-        no_fills = int(outcome_states.get("NO_FILL", 0))
-        has_conservative_execution = full_fills + partial_fills > 0
-        unsupported = sum(
-            int(count) for state, count in outcome_states.items()
-            if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
-        )
-        regime_breakdown = {}
-        oos_by_regime: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in oos:
-            oos_by_regime[str(row.get("regime") or "UNKNOWN")].append(row)
-        for regime in sorted(oos_by_regime):
-            regime_rows = oos_by_regime[regime]
-            regime_pnls = [
-                float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
-                for row in regime_rows
-                if ((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd") is not None
-            ]
-            regime_breakdown[regime] = {
-                "independent_episodes": len(regime_rows),
-                "scored_episodes": len(regime_pnls),
-                "net_pnl_usd": round(sum(regime_pnls), 8),
-                "expectancy_usd": round(sum(regime_pnls) / len(regime_pnls), 8) if regime_pnls else None,
-            }
-        assessed.append({
-            "policy_id": policy_id,
-            "policy_signature": policy_signatures[policy_id],
-            "policy_spec": policy_specs[policy_id],
-            "policy_family": next((p["policy_family"] for p in protections if policy_id.endswith("|" + p["protection_id"])), "UNKNOWN"),
-            "episodes_total": len(rows),
-            "oos_episodes": len(oos),
-            "comparison_cohort": comparison_cohort,
-            "comparison_cohort_key": comparison_cohort["comparison_cohort_key"],
-            "cross_family_rank_eligible": comparison_cohort["complete"],
-            "diagnostic_comparison_cohort": diagnostic_comparison_cohort,
-            "diagnostic_comparison_cohort_key": diagnostic_comparison_cohort["comparison_cohort_key"],
-            "supported_conservative_episodes": full_fills + partial_fills + no_fills,
-            "full_fills": full_fills,
-            "partial_fills": partial_fills,
-            "no_fills": no_fills,
-            "unsupported_episodes": unsupported,
-            "receipt_identity": {
-                "schema": "candidate_episode_receipt_identity_summary_v1",
-                "complete_episodes": sum(
-                    1 for row in rows
-                    if ((row.get("receipt_identity") or {}).get("complete") is True)
-                ),
-                "incomplete_episodes": sum(
-                    1 for row in rows
-                    if ((row.get("receipt_identity") or {}).get("complete") is not True)
-                ),
-                "missing_required_identities": sorted({
-                    missing
-                    for row in rows
-                    for missing in (
-                        (row.get("receipt_identity") or {}).get("missing_required_identities") or []
-                    )
-                }),
-            },
-            "conservative_fill_rate": (
-                round((full_fills + partial_fills) / (full_fills + partial_fills + no_fills), 8)
-                if full_fills + partial_fills + no_fills else None
-            ),
-            "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
-            "ideal_touch_diagnostic": {
-                "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
-                "qualification_eligible": False,
-                "oos_net_usd": diagnostic_validation["risk"].get("net_pnl_usd"),
-                "max_drawdown_usd": diagnostic_validation["risk"].get("max_drawdown_usd"),
-                "expectancy_lcb_usd": diagnostic_validation["bootstrap"].get("mean_lcb95"),
-                "outcome_states": diagnostic_validation.get("outcome_states"),
-                "touches": int((diagnostic_validation.get("outcome_states") or {}).get("FULL_FILL", 0))
-                + int((diagnostic_validation.get("outcome_states") or {}).get("PARTIAL_FILL", 0)),
-                "no_touches": int((diagnostic_validation.get("outcome_states") or {}).get("NO_FILL", 0)),
-                "wins": int(diagnostic_validation["risk"].get("wins") or 0),
-                "losses": int(diagnostic_validation["risk"].get("losses") or 0),
-            },
-            # No supported terminal execution means these metrics are
-            # unavailable, not $0.  The validation receipt retains the raw
-            # opportunity accounting for audit, while ranking stays fail
-            # closed against invented profitability or risk.
-            "sealed_oos_net_usd": risk.get("net_pnl_usd") if has_conservative_execution else None,
-            "max_drawdown_usd": risk.get("max_drawdown_usd") if has_conservative_execution else None,
-            "cvar95_usd": risk.get("cvar95_usd") if has_conservative_execution else None,
-            "expectancy_lcb_usd": validation["bootstrap"].get("mean_lcb95") if has_conservative_execution else None,
-            "longest_losing_sequence": risk.get("longest_loss_streak") if has_conservative_execution else None,
-            "mean_profit_retention_ratio": round(sum(retentions) / len(retentions), 8) if retentions else None,
-            "mean_profit_giveback_pct": round(sum(givebacks) / len(givebacks), 8) if givebacks else None,
-            "mean_underwater_observation_ratio": round(sum(underwater) / len(underwater), 8) if underwater else None,
-            "max_underwater_episodes": risk.get("max_underwater_episodes"),
-            "regime_breakdown": regime_breakdown,
-            "replay_path_bases": sorted({str(row.get("replay_path_basis") or "UNKNOWN") for row in rows}),
-            "gates": validation["gates"],
-            "validation": validation,
-        })
+    policies_tested = max(1, len(policy_order))
+    families = [protection["policy_family"] for protection in protections]
+    items = []
+    for index in policy_order:
+        policy_id = f"{entry_ids[index // protection_count]}|{protections[index % protection_count]['protection_id']}"
+        items.append((policy_id, cells_by_policy.get(index, _NO_CELLS), policy_signatures[policy_id],
+                      policy_specs[policy_id], families[index % protection_count]))
+    assess_started = time.perf_counter()
+    assessed, assess_workers = _assess_policies(
+        store, events, items, policies_tested=policies_tested, sealed_holdout=sealed_holdout,
+    )
+    streaming_receipt["assess_workers"] = assess_workers
+    streaming_receipt["assess_seconds"] = round(time.perf_counter() - assess_started, 3)
     # Public conservative policy ordering is multi-factor.  Raw profit remains
     # visible, but can no longer dominate missing execution, tail-risk,
     # uncertainty, regime, or neighboring-parameter evidence.
@@ -1879,7 +2516,18 @@ def evaluate_protection_screen(
     return {
         "schema": "safe_policy_candidate_screen_v3",
         "stage": "STAGE_1_PROTECTION_SCREEN",
-        "input_events": len(inputs),
+        "input_events": processed,
+        "mark_source": mark_source,
+        "streaming": streaming_receipt,
+        "fill_model": fill_model_declaration(
+            headline_world="CONSERVATIVE_BBO_DEPTH_V1",
+            headline_entry_evaluator=EVALUATOR_VERSION,
+            shadow_world="IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            exit_fill_model="EXECUTABLE_SIDE_1S_MARK_V1",
+            # Targets/partials still book at the first executable-side mark
+            # crossing; REALISTIC_V1 maker trade-through exits are not applied.
+            realistic_exit_model_applied=False,
+        ),
         "unique_policies_evaluated": len(assessed),
         "protection_variants": len(protections),
         "candidates": assessed,

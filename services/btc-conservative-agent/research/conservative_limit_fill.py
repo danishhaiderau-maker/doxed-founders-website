@@ -24,8 +24,13 @@ except ImportError:  # direct script/test execution
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
 RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v2"
-EVALUATOR_VERSION = "public-tape-conservative-v3-quantity-aware"
+EVALUATOR_VERSION = "public-tape-conservative-v4-realistic-v1"
 MAX_AGGRESSOR_WINDOW_SEC = 5
+FILL_MODEL = "REALISTIC_V1"
+SHADOW_FILL_MODEL = "OPTIMISTIC_TOUCH_V1"
+HEADLINE_ROLE = "HEADLINE"
+SHADOW_ROLE = "COMPARISON_SHADOW_NOT_HEADLINE"
+FILL_MODELS = (FILL_MODEL, SHADOW_FILL_MODEL)
 
 
 def _quote_available_at(row, ts):
@@ -83,6 +88,10 @@ def _base_receipt(direction: str, qty: Any, window: Any) -> dict[str, Any]:
         "missed_entry_cost_usd": None,
         "missed_entry_cost_basis": "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON",
         "queue_position_model": "NONE",
+        "fill_model": FILL_MODEL,
+        "fill_model_role": HEADLINE_ROLE,
+        "fill_basis": None,
+        "optimistic_shadow": None,
         "scope": "PUBLIC_TAPE_COUNTERFACTUAL_NOT_EXCHANGE_CONFIRMATION",
         "negative_reasons": [],
         "diagnostics": {},
@@ -126,25 +135,46 @@ def _normalise_schedule(schedule: Sequence[Mapping[str, Any]]) -> tuple[list[dic
 
 
 def evaluate_limit_fill(rows, *, direction, requested_qty, chase_schedule,
-                        aggressor_window_sec=3, symbol=None, quantity_constraints=None):
+                        aggressor_window_sec=3, symbol=None, quantity_constraints=None, fill_model=FILL_MODEL):
     return _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
         chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
-        symbol=symbol, quantity_constraints=quantity_constraints)
+        symbol=symbol, quantity_constraints=quantity_constraints, fill_model=fill_model)
 
 
 def evaluate_conditional_limit_fill(rows, *, direction, requested_qty, chase_schedule,
-                                    aggressor_window_sec=3, symbol=None, venue_quantity_observation=None):
+                                    aggressor_window_sec=3, symbol=None, venue_quantity_observation=None,
+                                    fill_model=FILL_MODEL):
     from research.conditional_quantity_execution import LABELS
     result = _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
         chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
-        symbol=symbol, quantity_constraints=venue_quantity_observation, _conditional=True)
+        symbol=symbol, quantity_constraints=venue_quantity_observation, _conditional=True,
+        fill_model=fill_model)
     result.update(LABELS)
     result['schema'] = 'conditional_limit_fill_receipt_v1'
     result['model_kind'] = 'CONDITIONAL_VENUE_QUANTITY'
     return result
 
 
-def _evaluate_limit_fill(
+def _evaluate_limit_fill(rows, *, fill_model: str = FILL_MODEL, **kwargs) -> dict[str, Any]:
+    """REALISTIC_V1 headline receipt with the optimistic BBO-touch receipt attached as a labelled shadow."""
+    if fill_model not in FILL_MODELS:
+        receipt = _base_receipt(kwargs.get("direction"), kwargs.get("requested_qty"), kwargs.get("aggressor_window_sec", 3))
+        receipt.update(fill_model=str(fill_model), fill_model_role=None)
+        return _unsupported(receipt, "UNKNOWN_FILL_MODEL")
+    rows = list(rows)
+    receipt = _evaluate_core(rows, realistic=fill_model == FILL_MODEL, **kwargs)
+    if fill_model != FILL_MODEL:
+        return receipt
+    shadow = _evaluate_core(rows, realistic=False, **kwargs)
+    receipt["optimistic_shadow"] = {
+        key: shadow.get(key) for key in (
+            "fill_model", "fill_model_role", "outcome", "final_classification", "filled_qty",
+            "fill_price", "trigger_bucket_ts", "fill_latency_sec", "chase_bucket_id", "negative_reasons")
+    }
+    return receipt
+
+
+def _evaluate_core(
     rows: Iterable[Mapping[str, Any]],
     *,
     direction: str,
@@ -154,18 +184,24 @@ def _evaluate_limit_fill(
     symbol: str | None = None,
     quantity_constraints: Mapping[str, Any] | None = None,
     _conditional: bool = False,
+    realistic: bool = True,
 ) -> dict[str, Any]:
     """Return a deterministic fill/no-fill/partial/unsupported receipt.
 
-    LONG represents a buy limit: a fresh ask at/below the limit is immediately
-    executable against visible ask depth. SHORT is the exact mirror using bid
-    depth. Same-bucket aggressor prints are retained as corroboration, but are
-    not required once the opposite BBO itself is marketable. A candle/last-price
-    touch is never sufficient. A partial receipt never promotes to a full
-    simulated fill.
+    LONG represents a buy limit, SHORT the exact mirror.  REALISTIC_V1: a
+    fresh opposite BBO at/through the limit fills only in the interval's first
+    evaluable bucket (the order was marketable on arrival, bounded by visible depth);
+    afterwards the resting limit fills only on an exact same-bucket aggressor
+    print at/through the limit, bounded by that print's quantity.  A BBO that
+    crosses the limit without a print is not a fill (no L2 queue evidence).
+    The optimistic shadow keeps the legacy rule (any crossed BBO fills against
+    visible depth).  A candle/last-price touch is never sufficient.  A partial
+    receipt never promotes to a full simulated fill.
     """
 
     receipt = _base_receipt(direction, requested_qty, aggressor_window_sec)
+    if not realistic:
+        receipt.update(fill_model=SHADOW_FILL_MODEL, fill_model_role=SHADOW_ROLE)
     side = str(direction).upper()
     qty = _finite_positive(requested_qty)
     if side not in {"LONG", "SHORT"}:
@@ -236,7 +272,8 @@ def _evaluate_limit_fill(
             expected_ts.append(ts)
 
     incomplete: set[str] = set()
-    counters = {"bbo_not_crossed": 0, "insufficient_visible_qty": 0, "no_matching_aggressor": 0}
+    counters = {"bbo_not_crossed": 0, "insufficient_visible_qty": 0, "no_matching_aggressor": 0,
+                "bbo_cross_without_print": 0}
     best_by_interval: dict[str, dict[str, Any]] = {}
     for ts in expected_ts:
         row = by_ts.get(ts)
@@ -327,7 +364,20 @@ def _evaluate_limit_fill(
         # opposite top-of-book depth. We intentionally do not accumulate the
         # same displayed quantity across seconds or claim queue priority.
         filled = min(qty, visible)
+        basis = "OPTIMISTIC_BBO_CROSS"
+        if realistic:
+            # Earlier buckets of the interval never reach here (their aggressor
+            # window straddles placement), so this is the first evaluable bucket.
+            if ts <= interval["start_ts"] + aggressor_window_sec - 1:
+                basis = "MARKETABLE_AT_PLACEMENT"
+            elif aggressor_qty > 0:
+                basis = "TRADE_THROUGH_PRINT"
+                filled = min(qty, aggressor_qty)
+            else:
+                counters["bbo_cross_without_print"] += 1
+                continue
         evidence = {
+            "basis": basis,
             "interval": interval,
             "ts": ts,
             "available_at": available_at,
@@ -432,7 +482,10 @@ def _evaluate_limit_fill(
                     or float(best_partial["ts"] + 1))
                 if best_partial["aggressor"] > 0 else None
             ),
-            "aggressor_time_semantics": "POST_BUCKET_CORROBORATION_NOT_FILL_TRIGGER",
+            "aggressor_time_semantics": (
+                "PRINT_IS_FILL_TRIGGER" if best_partial["basis"] == "TRADE_THROUGH_PRINT"
+                else "POST_BUCKET_CORROBORATION_NOT_FILL_TRIGGER"),
+            "fill_basis": best_partial["basis"],
             "fill_price": interval["limit_price"],
             # A conservative replay books at the declared limit, never at the
             # potentially better displayed quote.  Preserve that deliberate
@@ -465,5 +518,7 @@ def _evaluate_limit_fill(
         reasons.append("INSUFFICIENT_VISIBLE_TOP_OF_BOOK_QTY")
     if counters["no_matching_aggressor"]:
         reasons.append("NO_MATCHING_AGGRESSOR_AT_OR_THROUGH_LIMIT")
+    if counters["bbo_cross_without_print"]:
+        reasons.append("BBO_CROSS_WITHOUT_PRINT_NOT_A_FILL")
     receipt["negative_reasons"] = reasons or ["NO_PROVABLE_FILL"]
     return receipt

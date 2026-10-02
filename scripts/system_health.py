@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fly_platform_status as fly_platform_mod  # noqa: E402
 import system_health_meta as meta_mod  # noqa: E402
 
 SCHEMA = "system_health_v1"
@@ -56,7 +57,7 @@ WATCHER_FEATURES = (
     "parity_checker", "puller_lock", "chain_monitor_alerts", "incident_relay", "interim_status",
     "delivery_check", "fly_copy_lag", "wall_integrity", "adhoc_visibility", "check_dedupe", "amber_acks",
     "flapping", "pull_ack_run_telemetry", "epoch_parity_fields", "lifecycle_recent_red", "revision_master_ahead",
-    "parity_timeout",
+    "parity_timeout", "fly_platform_status",
 )
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
@@ -104,6 +105,9 @@ THRESHOLDS: dict[str, float] = {
     "shipper_stall_red_sec": 9 * MIN,
     "shipper_stall_backlog_red_sec": 20 * MIN,
     "shipper_status_red_sec": 10 * MIN,
+    # Backoff 60 s doubling: 6 races is ~1 h of continuous backup misses.
+    "shipper_backup_retry_red_sec": 60 * MIN,
+    "shipper_backup_retry_max_races": 6,
     "unshipped_amber_bytes": 256 * 1024 * 1024,
     "pull_finished_red_sec": 15 * MIN,
     "pull_lag_seq_red": 30,
@@ -165,7 +169,7 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 # Checks that need N consecutive bad evaluations before an alarm opens (flap
 # guard for single network blips). Default is 1.
-SUSTAIN = {"fly.process": 2, "analyzer.api": 2, "railway.api": 2, "trading.orphans": 2}
+SUSTAIN = {"fly.process": 2, "analyzer.api": 2, "railway.api": 2, "trading.orphans": 2, "fly.platform_status": 2}
 
 
 # ---------------------------------------------------------------- utilities
@@ -624,6 +628,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["laptop_disk"] = None
     inputs["neon"] = collect_neon(cache, opts.state_dir, now)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
+    inputs["fly_platform"] = fly_platform_mod.cached_snapshot(cache.setdefault("fly_platform", {}), now)
     return inputs
 
 
@@ -1247,8 +1252,25 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         seg_age = (now - last_seg) if last_seg else None
         status_age = transfer.get("segment_status_age_sec")
         backlog = unshipped > 0 or bool(err)
+        # A hot SQLite snapshot whose online backup hit its deadline backs off
+        # and retries while other streams keep shipping (research.db 10-02
+        # 17:22-17:40Z: two 180 s misses, shipped on the 3rd). That is AMBER
+        # until segments stop for the backlog window or retries run too long.
+        backup_retry = str(err or "").startswith("PLAN_RACE") and "online backup" in str(err)
+        if backup_retry:
+            since = mem.setdefault("shipper_backup_retry_since", now)
+        else:
+            mem.pop("shipper_backup_retry_since", None)
+            since = None
+        retry_for = (now - float(since)) if since is not None else None
+        races = max([int(row.get("races") or 0) for row in transfer.get("racing_paths") or []
+                     if isinstance(row, Mapping)] or [0])
+        retries_exhausted = backup_retry and (retry_for > t["shipper_backup_retry_red_sec"]
+                                              or races >= t["shipper_backup_retry_max_races"])
         st = GREEN
-        if seg_age is not None and err and seg_age > t["shipper_stall_red_sec"]:
+        if retries_exhausted:
+            st = RED
+        elif seg_age is not None and err and not backup_retry and seg_age > t["shipper_stall_red_sec"]:
             st = RED
         elif seg_age is not None and backlog and seg_age > t["shipper_stall_backlog_red_sec"]:
             st = RED
@@ -1259,14 +1281,26 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             st = AMBER
         if not transfer.get("segments_enabled", True):
             st = RED
-        add(check("shipper.progress", "shipper", st,
-                  f"shipped_seq={shipped} last segment {fmt_age(seg_age)} ago, unshipped={unshipped / 1e6:.1f}MB, "
-                  f"last_error={err or 'none'}, status age={fmt_age(status_age)}",
-                  f"new segment within {fmt_age(t['shipper_stall_red_sec'])} while last_error, within "
-                  f"{fmt_age(t['shipper_stall_backlog_red_sec'])} while backlog (RED)",
-                  "" if st == GREEN else
-                  ("PLAN_RACE/hot stream aborting every cycle or shipper thread dead; ACK will freeze"
-                   if st == RED else "backlog building or transient PLAN_RACE")))
+        obs = (f"shipped_seq={shipped} last segment {fmt_age(seg_age)} ago, unshipped={unshipped / 1e6:.1f}MB, "
+               f"last_error={err or 'none'}, status age={fmt_age(status_age)}")
+        if backup_retry:
+            obs += f"; SQLite backup deadline retry for {fmt_age(retry_for)} (max races {races})"
+        if st == GREEN:
+            hint = ""
+        elif backup_retry and st == RED:
+            hint = ("SQLite online-backup retries exhausted or no segment within the backlog window; "
+                    "hot DB too large/hot for the backup deadline")
+        elif backup_retry:
+            hint = "hot SQLite snapshot backup missed its deadline and is retrying; other streams still ship"
+        else:
+            hint = ("PLAN_RACE/hot stream aborting every cycle or shipper thread dead; ACK will freeze"
+                    if st == RED else "backlog building or transient PLAN_RACE")
+        add(check("shipper.progress", "shipper", st, obs,
+                  f"new segment within {fmt_age(t['shipper_stall_red_sec'])} while last_error (backup-deadline "
+                  f"retry: within {fmt_age(t['shipper_stall_backlog_red_sec'])}, retrying <= "
+                  f"{fmt_age(t['shipper_backup_retry_red_sec'])} and < {t['shipper_backup_retry_max_races']} races), "
+                  f"within {fmt_age(t['shipper_stall_backlog_red_sec'])} while backlog (RED)",
+                  hint))
 
     # ---------------- Laptop pull / ACK
     pull = inputs.get("pull_status") or {}
@@ -1539,6 +1573,12 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         code = cyc.get("exitCode")
         st = AMBER if code not in (None, 0) else GREEN
         obs = f"last cycle {fmt_age(dur)} exit={code}"
+        if code not in (None, 0) and cyc.get("stopReason"):
+            obs += f" ({cyc.get('stopReason')})"
+    promotion_warnings = [str(w) for w in cyc.get("promotionWarnings") or [] if w]
+    if promotion_warnings:
+        st = max(st, AMBER, key=RANK.get)
+        obs += f"; promoted with disclosed warnings: {', '.join(promotion_warnings[:3])}"
     head = str(inputs.get("analyzer_head") or "")
     if fly_rev and head and not head.startswith(fly_rev):
         if inputs.get("analyzer_contains_fly"):
@@ -2066,8 +2106,25 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   fields={"generated_age_sec": gen_age, "diagnose_age_sec": diag_age, "late_jobs": amber,
                           "verdict": sa.get("verdict")}))
 
+    if "fly_platform" in inputs:
+        add(fly_platform_check(inputs.get("fly_platform"), checks, now))
     add(_fail_open_guard(checks, errors, source_down, now, t))
     return checks
+
+
+def fly_platform_check(snapshot: Any, checks: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """Fly.io status page vs our own Fly checks; annotates failing ones with the platform correlation."""
+    res = fly_platform_mod.assess(snapshot if isinstance(snapshot, Mapping) else None, checks, now,
+                                  fly_platform_mod.app_region())
+    fly_platform_mod.annotate_checks(checks, res)
+    hint = {RED: "Fly platform incident on our region/components while our Fly checks fail; likely not our bug - "
+                 "follow the status page before repairing",
+            AMBER: "Fly incident/maintenance on our region or components; app still healthy - watch, do not deploy",
+            SKIP: "status.flyio.net unreachable; platform attribution unavailable"}.get(res["status"], "")
+    return check("fly.platform_status", "fly", res["status"], res["summary"],
+                 "INFO: notices outside our region/components; AMBER: incident on our region or Machines/Volumes/"
+                 "proxy/deploys; RED only if our Fly checks also fail", hint,
+                 fields={**fly_platform_mod.compact(res), "classification": res["classification"]})
 
 
 def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float,
@@ -2362,6 +2419,7 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
     report = summarize(checks, state, now, acks=meta.get("acks"))
     report["source_errors"] = inputs.get("errors")
     report["proof"] = proof_summary(inputs.get("proof_active"), now)
+    report["fly_platform"] = next((c.get("observed_fields") for c in checks if c["id"] == "fly.platform_status"), None)
     if alarms:
         events = alarm_transitions(report, state, now)
         for e in events:

@@ -58,6 +58,15 @@ DEFAULT_COPY_WORKERS = 8
 # Per-append integrity caches keyed to the Fly inode/mtime of their source;
 # meaningless off-host and never read by the analyzer.
 FLY_LOCAL_ONLY_SUFFIXES = (".jsonl.validation.json",)
+# A SQLite snapshot over the Fly shipper cap (research.db outgrows the 512 MiB
+# default during the 2026-10 deploy freeze) stops re-shipping while every other
+# stream keeps flowing. Promotion proceeds on the last shipped copy, disclosed
+# as AMBER. Fly reports only the path, not its live size, so its bytes are
+# counted in unshipped_bytes; that excess is tolerated up to a bound and only
+# while Fly is still publishing segments for the other streams.
+OVERSIZE_TOLERATED_SNAPSHOTS = frozenset({"research.db"})
+OVERSIZED_SNAPSHOT_ALLOWANCE_BYTES = 1024 * 1024 * 1024
+OVERSIZED_SNAPSHOT_MAX_SEGMENT_AGE_SEC = 20 * 60
 
 
 class PromotionRefused(RuntimeError):
@@ -150,9 +159,29 @@ def _clear_view(view_root: Path) -> None:
             child.unlink()
 
 
+def _tolerated_oversized(head: dict, tree: Path, now: float) -> tuple[list[str], list[str]]:
+    """(tolerated snapshot paths, refusal reasons) for ``head['oversized_paths']``."""
+    oversized = [str(path) for path in head.get("oversized_paths") or []]
+    if not oversized:
+        return [], []
+    if any(path not in OVERSIZE_TOLERATED_SNAPSHOTS for path in oversized):
+        return [], [f"FLY_OVERSIZED_PATHS:{len(oversized)}"]
+    never = [path for path in oversized if not (tree / path).is_file()]
+    if never:
+        return [], [f"FLY_OVERSIZED_PATH_NEVER_SHIPPED:{path}" for path in never]
+    last_segment = head.get("shipper_last_segment_at")
+    age = now - float(last_segment) if isinstance(last_segment, (int, float)) else None
+    if age is None or age > OVERSIZED_SNAPSHOT_MAX_SEGMENT_AGE_SEC:
+        shown = "unknown" if age is None else f"{age:.0f}s"
+        return [], [f"FLY_OVERSIZED_PATHS:{len(oversized)}:no segment shipped for {shown}"]
+    return oversized, []
+
+
 def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
-                 max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES) -> list[str]:
+                 max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES,
+                 warnings: list[str] | None = None, now: float | None = None) -> list[str]:
     reasons = []
+    warnings = [] if warnings is None else warnings
     if state.get("schema") != STATE_SCHEMA:
         reasons.append("PULLER_STATE_MISSING")
         return reasons
@@ -162,12 +191,17 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
         reasons.append(f"SHADOW_BEHIND_PUBLISHED:{applied}<{published}")
     if head.get("last_manifest_sha256") != state.get("last_manifest_sha256"):
         reasons.append("HEAD_MANIFEST_MISMATCH")
+    tolerated, oversized_reasons = _tolerated_oversized(head, tree, time.time() if now is None else now)
+    reasons.extend(oversized_reasons)
+    for path in tolerated:
+        warnings.append(f"FLY_OVERSIZED_SQLITE_SNAPSHOT:{path}")
     # A live epoch always has an in-flight tail; only a real backlog refuses.
     unshipped = int(head.get("unshipped_bytes") or 0)
-    if unshipped > max_unshipped_bytes:
-        reasons.append(f"FLY_UNSHIPPED_BYTES:{unshipped}>{max_unshipped_bytes}")
-    if head.get("oversized_paths"):
-        reasons.append(f"FLY_OVERSIZED_PATHS:{len(head['oversized_paths'])}")
+    allowance = OVERSIZED_SNAPSHOT_ALLOWANCE_BYTES if tolerated else 0
+    if unshipped > max_unshipped_bytes + allowance:
+        reasons.append(f"FLY_UNSHIPPED_BYTES:{unshipped}>{max_unshipped_bytes + allowance}")
+    elif unshipped > max_unshipped_bytes:
+        warnings.append(f"FLY_UNSHIPPED_BYTES_INCLUDE_OVERSIZED_SNAPSHOT:{unshipped}")
     # A racing hot snapshot is only acceptable if an earlier version shipped.
     for row in head.get("racing_paths") or []:
         path = str(row.get("path") if isinstance(row, dict) else row)
@@ -217,9 +251,13 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     try:
         state_path = shadow_root / ".puller" / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
-        reasons = deny_reasons(state, head, health, tree, max_unshipped_bytes)
+        warnings: list[str] = []
+        reasons = deny_reasons(state, head, health, tree, max_unshipped_bytes, warnings=warnings, now=now)
         if reasons:
             raise PromotionRefused(reasons)
+        # The shadow equals the just-fetched Fly published head now; a quiet or
+        # lock-blocked puller leaves last_applied_at old without any lag.
+        head_verified_at = _utc_now()
         view_root.mkdir(parents=True, exist_ok=True)
         # The view is not consumable while it is being updated.
         for name in (SYNC_STATE_NAME, HEARTBEAT_NAME):
@@ -297,7 +335,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     revision = str(state["last_source_git_rev"]).lower()
     heartbeat = {
         "ok": True, "inProgress": False, "phase": "complete",
-        "source": "research_segments_volume_sink", "syncedAt": state.get("last_applied_at"),
+        "source": "research_segments_volume_sink", "syncedAt": head_verified_at,
+        "segmentLastAppliedAt": state.get("last_applied_at"),
         "sourceRevision": revision, "observedSourceRevision": revision,
         "mirroredSourceRevision": revision,
         "deployedRevision": str(health["source_git_rev"]).lower(), "revisionParity": "MATCH",
@@ -311,6 +350,9 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         "unshippedBytesAtPromotion": int(head.get("unshipped_bytes") or 0),
         "racingPaths": [str(row.get("path") if isinstance(row, dict) else row)
                         for row in head.get("racing_paths") or []],
+        "oversizedPaths": [str(path) for path in head.get("oversized_paths") or []],
+        "promotionLevel": "AMBER" if warnings else "GREEN",
+        "promotionWarnings": warnings,
         "fileCount": len(sync_state),
     }
     (view_root / SYNC_STATE_NAME).write_text(json.dumps(sync_state, sort_keys=True, indent=1), encoding="utf-8")
@@ -321,7 +363,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             "files_reused": counts["reused"], "files_rehashed_unchanged": counts["rehashed_unchanged"],
             "files_appended": counts["appended"],
             "files_copied": counts["copied"], "files_removed": counts["removed"], "bytes_written": written_bytes,
-            "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision}
+            "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision,
+            "promotion_level": heartbeat["promotionLevel"], "promotion_warnings": warnings}
 
 
 def _health(base_url: str) -> dict:

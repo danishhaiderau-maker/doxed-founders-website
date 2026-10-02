@@ -18,7 +18,11 @@ param(
   [string]$Python = 'python',
   [int]$Port = 9001,
   [int]$PromotionAttempts = 6,
-  [int]$LockWaitMaxSec = 600,
+  # Must exceed research_segment_fly_parity.DEFAULT_MAX_LOCK_SEC (600 s): a
+  # parity scan that starts just before the cycle may hold the lock that long.
+  [int]$LockWaitMaxSec = 900,
+  [int]$FlyBacklogWaitMaxSec = 900,
+  [int]$FlyBacklogPollSec = 60,
   [int]$SyncMaxAgeSec = 1800,
   [int]$InlineFfMaxWaitSec = 900,
   [int]$InlineFfPollSec = 30,
@@ -43,7 +47,10 @@ function Set-CycleStatus([string]$Phase, $ExitCode = $null) {
   Write-JsonAtomic -Path $cfg.CycleStatus -Value $script:cycleStatus
 }
 
-function Stop-Cycle([int]$Code) {
+function Stop-Cycle([int]$Code, [string]$StopReason = '', [string]$Detail = '') {
+  $script:cycleStatus.stopReason = $StopReason
+  $script:cycleStatus.detail = $Detail
+  Write-ChainLog -Config $cfg -Name $logName -Message ("CYCLE_STOPPED exit={0} reason={1} {2}" -f $Code, $StopReason, $Detail)
   Set-CycleStatus 'STOPPED' $Code
   $up = $false
   try { $up = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
@@ -61,7 +68,8 @@ if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP
 # and the pull loop defers a parity pass while the phase is PROMOTION.
 $cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $PID; reason = $Reason
                            startedAt = (Get-UtcNowIso); phase = 'PROMOTION'; updatedAt = $null
-                           finishedAt = $null; exitCode = $null }
+                           finishedAt = $null; exitCode = $null; stopReason = $null; detail = $null
+                           promotionLevel = $null; promotionWarnings = @() }
 Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -75,6 +83,7 @@ $pullArgs = @((Join-Path $service 'research_segment_puller.py'), '--shadow-root'
               '--prefix', $Prefix, '--source', 'http', '--base-url', $cfg.SourceUrl)
 $promotion = $null
 $lockWaitStart = $null
+$backlogWaitStart = $null
 $previous = $ErrorActionPreference
 for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   Set-CycleStatus 'PROMOTION'
@@ -102,12 +111,37 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
       $attempt--
       continue
     }
-    Stop-Cycle 3
+    Stop-Cycle 3 'SHADOW_LOCK_WAIT_TIMEOUT' ("lock held > {0}s" -f $LockWaitMaxSec)
+  }
+  $denied = @([regex]::Matches([string]$promotion, '"([A-Z_]+)(:[^"]*)?"') | ForEach-Object { $_.Groups[1].Value } |
+              Where-Object { $_ -match '^(SHADOW_|HEAD_|FLY_|REVISION_|TILE_|RESEARCH_|PULLER_|VIEW_)' } | Select-Object -Unique)
+  $denyDetail = ([string]$promotion -replace '\s+', ' ').Trim()
+  if ($denyDetail.Length -gt 400) { $denyDetail = $denyDetail.Substring(0, 400) }
+  # A Fly shipper backlog after a restart drains on its own (48 -> 36 MB -> OK in
+  # ~10 min on 10-02); it is the only guard worth waiting out inside the cycle.
+  $onlyBacklog = ($denied.Count -gt 0) -and -not ($denied | Where-Object { $_ -notin @('FLY_UNSHIPPED_BYTES', 'SHADOW_BEHIND_PUBLISHED', 'HEAD_MANIFEST_MISMATCH') }) -and ($denied -contains 'FLY_UNSHIPPED_BYTES')
+  if ($onlyBacklog) {
+    if ($null -eq $backlogWaitStart) { $backlogWaitStart = [datetime]::UtcNow }
+    if (([datetime]::UtcNow - $backlogWaitStart).TotalSeconds -lt $FlyBacklogWaitMaxSec) {
+      Set-CycleStatus 'PROMOTION_WAIT_FLY_BACKLOG'
+      Start-Sleep -Seconds $FlyBacklogPollSec
+      $attempt--
+      continue
+    }
+    Stop-Cycle 3 'FLY_BACKLOG_NOT_DRAINED' $denyDetail
   }
   # Only a moving head is worth retrying; any other refusal is final.
-  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 }
+  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 ('PROMOTION_DENIED:' + ($denied -join ',')) $denyDetail }
 }
-if ($promotionExit -ne 0) { Stop-Cycle 3 }
+if ($promotionExit -ne 0) { Stop-Cycle 3 'PROMOTION_HEAD_KEPT_MOVING' $denyDetail }
+# A disclosed promotion warning (e.g. research.db over the Fly SQLite cap ships
+# its last copy) degrades the cycle to AMBER but never blocks it.
+$promotionHeartbeat = Read-JsonFile (Join-Path $ViewRoot '.segment-promotion.heartbeat.json')
+$cycleStatus.promotionLevel = if ($promotionHeartbeat -and $promotionHeartbeat.promotionLevel) { [string]$promotionHeartbeat.promotionLevel } else { 'GREEN' }
+$cycleStatus.promotionWarnings = @(if ($promotionHeartbeat) { @($promotionHeartbeat.promotionWarnings) | Where-Object { $_ } | ForEach-Object { [string]$_ } })
+if ($cycleStatus.promotionWarnings.Count -gt 0) {
+  Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION_DEGRADED level={0} warnings={1}" -f $cycleStatus.promotionLevel, ($cycleStatus.promotionWarnings -join ','))
+}
 Set-CycleStatus 'MIGRATION'
 
 $ErrorActionPreference = 'Continue'
@@ -117,7 +151,7 @@ try {
 } finally { $ErrorActionPreference = $previous }
 $migrationExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message ("MIGRATION exit={0} {1}" -f $migrationExit, $migration)
-if ($migrationExit -ne 0) { Stop-Cycle 4 }
+if ($migrationExit -ne 0) { Stop-Cycle 4 'MIGRATION_FAILED' }
 
 # The analyzer must run code that contains the revision Fly was running when
 # this data was promoted; an older checkout ran the 02:40Z flyMatch=False pass
@@ -136,7 +170,7 @@ function Test-CheckoutContainsDeployed {
 if (-not (Test-CheckoutContainsDeployed)) {
   Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_REVISION_MISMATCH checkout={0} deployed={1}" -f $checkoutHead, $deployedRev)
   $autoFfDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled')
-  if ($autoFfDisabled -or -not $deployedRev) { Stop-Cycle 5 }
+  if ($autoFfDisabled -or -not $deployedRev) { Stop-Cycle 5 'ANALYZER_REVISION_MISMATCH' ("checkout={0} deployed={1}" -f $checkoutHead, $deployedRev) }
   $ffStart = [datetime]::UtcNow
   $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
   $contains = $false
@@ -155,7 +189,7 @@ if (-not (Test-CheckoutContainsDeployed)) {
     # deploy run has not concluded success yet and is worth waiting for.
     if ($ffExit -eq 3 -or $waited -ge $InlineFfMaxWaitSec) {
       Write-ChainLog -Config $cfg -Name $logName -Message ("AUTO_FF_INLINE gave_up exit={0} waited={1}s checkout={2} deployed={3}" -f $ffExit, $waited, $checkoutHead, $deployedRev)
-      Stop-Cycle 5
+      Stop-Cycle 5 'AUTO_FF_INLINE_GAVE_UP' ("exit={0} waited={1}s" -f $ffExit, $waited)
     }
     Start-Sleep -Seconds $InlineFfPollSec
   }
@@ -169,6 +203,14 @@ $env:ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = "$SyncMaxAgeSec"
   -RepoRoot $cfg.RepoRoot -CanonicalRoot $cfg.CanonicalRoot -StateDir $cfg.StateDir -Port $Port -Reason $Reason
 $analyzerExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message "ANALYZER exit=$analyzerExit"
+if ($analyzerExit -ne 0) {
+  $runStatus = Read-JsonFile $cfg.AnalyzerStatus
+  $runDetail = if ($runStatus) { [string]$runStatus.detail } else { '' }
+  $knownCause = [regex]::Match($runDetail, 'Error\("([A-Z][A-Z_]+)').Groups[1].Value
+  if (-not $knownCause) { $knownCause = [regex]::Match($runDetail, '[A-Z][A-Z_]{6,}(?=\W|$)').Value }
+  $cycleStatus.stopReason = if ($knownCause) { "ANALYZER_EXIT_${analyzerExit}:$knownCause" } else { "ANALYZER_EXIT_$analyzerExit" }
+  $cycleStatus.detail = if ($runDetail.Length -gt 400) { $runDetail.Substring(0, 400) } else { $runDetail }
+}
 
 # Custody-gated retention (50 GB cap) runs only after a successful generation,
 # still inside this cycle's mutex so promotion/migration cannot race it. It

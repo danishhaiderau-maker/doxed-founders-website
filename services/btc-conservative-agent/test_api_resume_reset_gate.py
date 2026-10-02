@@ -117,7 +117,8 @@ def test_normal_resume_contract_is_unchanged(resume_runtime, completed_pointer):
     with bot.app.test_client() as client:
         response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
     assert response.status_code == 200
-    assert response.get_json() == {"status": "resumed", "execution_paused": False}
+    assert response.get_json() == {"status": "resumed", "execution_paused": False,
+                                   "pause_owner": None, "active_pause_reason": None}
     assert calls == {"readiness": 1, "save": 1, "resume": 1, "cache": 1}
     with bot.state_lock:
         assert bot.state["execution_paused"] is False

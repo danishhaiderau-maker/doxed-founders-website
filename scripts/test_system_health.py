@@ -266,6 +266,64 @@ def test_replay_shipper_plan_race_stall_20261001_alarms_within_threshold():
     assert any(t > stall_end for t in recovered)
 
 
+BACKUP_RETRY_ERROR = ("PLAN_RACE: research.db online backup not completed: "
+                      "research.db online backup exceeded 180s")
+
+
+def _backup_retry(now: float, seg_at: float, races: int = 2) -> dict:
+    inputs = healthy(now)
+    inputs["fly_health"]["volume"]["transfer"].update(
+        last_segment_at=seg_at, unshipped_bytes=434_520_070, last_error=BACKUP_RETRY_ERROR,
+        racing_paths=[{"path": "research.db", "races": races, "retry_at": now + 60}])
+    return inputs
+
+
+def test_research_db_backup_deadline_retry_20261002_is_amber_not_red():
+    # 10-02: last segment 17:24:11Z, research.db backup missed 180 s twice, shipped
+    # seq 2400 at 17:39:55Z. The watcher paged RED at 17:36Z (11 min > 9 min).
+    seg_at = ts("2026-10-02T17:24:11Z")
+    now = ts("2026-10-02T17:36:00Z")
+    check = by_id(sh.evaluate(_backup_retry(now, seg_at), {}))["shipper.progress"]
+    assert check["status"] == sh.AMBER
+    assert "SQLite backup deadline retry" in check["observed"]
+    assert "other streams still ship" in check["hint"]
+
+
+def test_research_db_backup_retry_red_when_no_segment_for_backlog_window():
+    seg_at = ts("2026-10-02T17:24:11Z")
+    now = seg_at + sh.THRESHOLDS["shipper_stall_backlog_red_sec"] + 60
+    assert by_id(sh.evaluate(_backup_retry(now, seg_at), {}))["shipper.progress"]["status"] == sh.RED
+
+
+def test_research_db_backup_retry_red_when_retries_exhaust():
+    now = ts("2026-10-02T18:30:00Z")
+    races = sh.THRESHOLDS["shipper_backup_retry_max_races"]
+    inputs = _backup_retry(now, now - 120, races=races)
+    assert by_id(sh.evaluate(inputs, {}))["shipper.progress"]["status"] == sh.RED
+    state = {"memory": {"shipper_backup_retry_since": now - sh.THRESHOLDS["shipper_backup_retry_red_sec"] - 60}}
+    assert by_id(sh.evaluate(_backup_retry(now, now - 120), state))["shipper.progress"]["status"] == sh.RED
+    assert by_id(sh.evaluate(_backup_retry(now, now - 120), {}))["shipper.progress"]["status"] == sh.AMBER
+
+
+def test_other_plan_race_keeps_the_nine_minute_red():
+    now = ts("2026-10-02T17:36:00Z")
+    inputs = healthy(now)
+    inputs["fly_health"]["volume"]["transfer"].update(
+        last_segment_at=now - sh.THRESHOLDS["shipper_stall_red_sec"] - 60, unshipped_bytes=4_000_000,
+        last_error="PLAN_RACE: v3/receipts/x/complete.json changed identity")
+    assert by_id(sh.evaluate(inputs, {}))["shipper.progress"]["status"] == sh.RED
+
+
+def test_cycle_promoted_with_disclosed_warnings_is_amber():
+    now = ts("2026-10-03T23:50:00Z")
+    inputs = healthy(now)
+    inputs["cycle_status"].update(promotionLevel="AMBER",
+                                  promotionWarnings=["FLY_OVERSIZED_SQLITE_SNAPSHOT:research.db"])
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.cycle"]
+    assert check["status"] == sh.AMBER
+    assert "FLY_OVERSIZED_SQLITE_SNAPSHOT:research.db" in check["observed"]
+
+
 def test_post_fix_idle_gap_does_not_page():
     # Real post-#257 gap: seq 2040 at 21:11:42Z, next at 21:25:30Z with a few MB backlog, no error.
     now = ts("2026-10-01T21:25:00Z")

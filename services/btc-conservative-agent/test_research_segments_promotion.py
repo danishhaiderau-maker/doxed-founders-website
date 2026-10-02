@@ -96,6 +96,73 @@ def test_live_tail_and_racing_shipped_snapshot_are_promoted_and_recorded(tmp_pat
     assert heartbeat["racingPaths"] == ["research.db", "never.jsonl.validation.json"]
 
 
+def _oversized_research_db(head, now, **change):
+    return {**head, "oversized_paths": ["research.db"], "shipper_last_segment_at": now - 120,
+            "unshipped_bytes": 560 * 1024 * 1024, **change}
+
+
+def test_oversized_research_db_alone_promotes_as_disclosed_amber(tmp_path, monkeypatch):
+    env, head, health = _synced(tmp_path)
+    now = 1_790_990_000.0
+    view = tmp_path / "view"
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=_oversized_research_db(head, now),
+                                   health=health, now=now)
+    expected = ["FLY_OVERSIZED_SQLITE_SNAPSHOT:research.db",
+                f"FLY_UNSHIPPED_BYTES_INCLUDE_OVERSIZED_SNAPSHOT:{560 * 1024 * 1024}"]
+    assert receipt["promotion_level"] == "AMBER" and receipt["promotion_warnings"] == expected
+    heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text())
+    assert heartbeat["promotionLevel"] == "AMBER" and heartbeat["promotionWarnings"] == expected
+    assert heartbeat["oversizedPaths"] == ["research.db"]
+    assert (view / "research.db").read_bytes() == (env.shadow / "tree" / "research.db").read_bytes()
+
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    migrated = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME)
+    assert migrated["promotion_level"] == "AMBER" and migrated["promotion_warnings"] == expected
+
+    from research.input_blockers import segment_promotion_item
+    item = segment_promotion_item(store)
+    assert item["status"] == "DEGRADED" and item["reason_code"] == "FLY_OVERSIZED_SQLITE_SNAPSHOT"
+    assert "research.db" in item["reason"] and item["side"] == "COLLECTION"
+
+
+def test_clean_promotion_is_green_without_warnings(tmp_path):
+    env, head, health = _synced(tmp_path)
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=tmp_path / "view", head=head, health=health)
+    assert receipt["promotion_level"] == "GREEN" and receipt["promotion_warnings"] == []
+    from research.input_blockers import segment_promotion_item
+    assert segment_promotion_item(tmp_path / "no-store") is None
+
+
+@pytest.mark.parametrize("change, reason", [
+    ({"oversized_paths": ["research.db", "v3/other.sqlite3"]}, "FLY_OVERSIZED_PATHS:2"),
+    ({"shipper_last_segment_at": None}, "FLY_OVERSIZED_PATHS:1:no segment shipped for unknown"),
+    ({"shipper_last_segment_at": 1_790_990_000.0 - promotion.OVERSIZED_SNAPSHOT_MAX_SEGMENT_AGE_SEC - 1},
+     "FLY_OVERSIZED_PATHS:1:no segment shipped"),
+    ({"unshipped_bytes": promotion.DEFAULT_MAX_UNSHIPPED_BYTES + promotion.OVERSIZED_SNAPSHOT_ALLOWANCE_BYTES + 1},
+     "FLY_UNSHIPPED_BYTES"),
+])
+def test_oversized_research_db_tolerance_is_bounded(tmp_path, change, reason):
+    env, head, health = _synced(tmp_path)
+    now = 1_790_990_000.0
+    with pytest.raises(promotion.PromotionRefused) as refused:
+        promotion.stage_view(shadow_root=env.shadow, view_root=tmp_path / "view",
+                             head=_oversized_research_db(head, now, **change), health=health, now=now)
+    assert any(item.startswith(reason) for item in refused.value.reasons), refused.value.reasons
+
+
+def test_oversized_research_db_never_shipped_is_refused(tmp_path):
+    env, head, health = _synced(tmp_path)
+    (env.shadow / "tree" / "research.db").unlink()
+    now = 1_790_990_000.0
+    with pytest.raises(promotion.PromotionRefused) as refused:
+        promotion.stage_view(shadow_root=env.shadow, view_root=tmp_path / "view",
+                             head=_oversized_research_db(head, now), health=health, now=now)
+    assert "FLY_OVERSIZED_PATH_NEVER_SHIPPED:research.db" in refused.value.reasons
+
+
 def test_revision_drift_and_missing_session_are_refused(tmp_path):
     env, head, health = _synced(tmp_path)
     (env.shadow / "tree" / "research_session.json").unlink()
@@ -118,6 +185,23 @@ def test_view_must_be_empty_and_outside_the_shadow_tree(tmp_path):
     with pytest.raises(promotion.PromotionRefused, match="VIEW_NOT_EMPTY"):
         promotion.stage_view(shadow_root=env.shadow, view_root=occupied, head=head, health=health)
     assert (occupied / "keep.txt").read_text() == "evidence"
+
+def test_synced_at_is_the_head_verification_not_the_last_applied_segment(tmp_path, monkeypatch):
+    # 10-02 14:10Z: no segment applied for 31 min (parity held the lock, then the
+    # head was idle), promotion verified shadow == published head, yet the
+    # analyzer refused MIRROR_SYNC_RECEIPT_STALE off last_applied_at.
+    env, head, health = _synced(tmp_path)
+    state_path = env.shadow / ".puller" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["last_applied_at"] = "2026-10-02T13:39:06Z"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(promotion, "_utc_now", lambda: "2026-10-02T13:55:21Z")
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text(encoding="utf-8"))
+    assert heartbeat["syncedAt"] == "2026-10-02T13:55:21Z"
+    assert heartbeat["segmentLastAppliedAt"] == "2026-10-02T13:39:06Z"
+
 
 def test_promotion_heartbeat_carries_v2_genesis(tmp_path):
     env, head, health = _synced(tmp_path)

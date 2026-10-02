@@ -2,7 +2,7 @@
   "schema": "self_aware_edges_registry_v1",
   "registered_at": "2026-10-02T09:00:00Z",
   "note": "Pre-registered screens. Specs are frozen by hash: editing a spec creates a new spec id/hash and restarts its evidence clock. Polarity is fixed here, never chosen in-sample. Inspired by INDICATOR-SEARCH-MODEL-A/C and AI-DIRECTION audits of 2026-10-02.",
-  "clock": {"kind": "grid", "step_sec": 300, "venue": "bitfinex_1s_mid", "entry": "decision second + 1 s", "cost": "half-spread in + half-spread out, 0 fees (paper maker/taker fees are applied by tiles, not here)"},
+  "clock": {"kind": "grid", "step_sec": 300, "venue": "bitfinex_1s_mid", "entry": "decision second + 1 s", "cost": "REALISTIC_V1: taker both legs at the opposite BBO (half-spread in + half-spread out of the 1 s quotes), 0 fees (bitfinex_cost_profile BITFINEX_ZERO); hit = positive return after that cost; gross mid-to-mid only as shadow_optimistic_mid_* columns", "fill_model": "REALISTIC_V1", "exit_latency": "horizon quote, no extra exit delay (stored grid events pin the horizon)"},
   "guards": {
     "holdout_fraction": 0.22,
     "embargo_sec": 3600,

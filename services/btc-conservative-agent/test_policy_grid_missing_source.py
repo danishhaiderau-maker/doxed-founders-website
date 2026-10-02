@@ -21,7 +21,11 @@ def test_missing_grid_endpoint_and_renderer(monkeypatch, report):
     node=shutil.which('node')
     if not node: pytest.skip('Node unavailable')
     fn='async function loadCombos('+dashboard.DASHBOARD_HTML.split('async function loadCombos(',1)[1].split('async function loadSpreadPerf',1)[0]
-    script="const assert=require('assert');const elements={};global.document={getElementById:id=>elements[id]||(elements[id]={})};function missingResearchSource(){return 'SOURCE UNAVAILABLE';}global.fetch=async()=>({json:async()=>("+json.dumps(payload)+")});"+fn+"""
+    page=dashboard.DASHBOARD_HTML
+    helpers=(page[page.index('const EVIDENCE_SCOPES ='):page.index('const navEl =')]
+             +page[page.index('function setEvidenceScope('):page.index('const showAllEl =')]
+             +'function policyGridEvidenceScope('+page.split('function policyGridEvidenceScope(',1)[1].split('\n}\n',1)[0]+'\n}\n')
+    script="const assert=require('assert');const elements={};global.document={getElementById:id=>elements[id]||(elements[id]={querySelector:()=>null})};function missingResearchSource(){return 'SOURCE UNAVAILABLE';}global.fetch=async()=>({json:async()=>("+json.dumps(payload)+")});"+helpers+fn+"""
 loadCombos().then(()=>{
  assert.equal(elements['policy-grid-kpis'].innerHTML,'');
  assert.equal(elements['policy-grid-note'].textContent,'SOURCE UNAVAILABLE');

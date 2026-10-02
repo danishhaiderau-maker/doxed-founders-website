@@ -25,6 +25,13 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/data/capacity
   /api/selfaware/data/sufficiency
   /api/selfaware/sections           :9001 section health (populated, fresh, dimensions, consistency)
+  /api/selfaware/fly-platform       Fly.io status page events classified vs our region/components + correlation
+  /contracts                        HTML section-contract view
+  /api/selfaware/contracts          ?surface=analyzer|fly|exports|selfaware|watcher&status=RED,AMBER
+  /api/selfaware/contracts/registry declarative specs (section_contracts.json) + violation legend
+  /api/selfaware/contracts/<id>     ?rows=N&history=N   spec, last result, history, raw rows fetched now
+  /api/selfaware/data/compatibility ?stream=&severity=   data versions / clean epoch per stream, schema drift,
+                                    dead-in-version fields, segregated partitions + manual delete command
 """
 from __future__ import annotations
 
@@ -35,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import contracts
 from .ai_scorecard import headline as ai_headline, json_safe
 from .config import SERVER_PORT
 from .facts import parse_ts, tail_jsonl
@@ -105,6 +113,8 @@ class Handler(BaseHTTPRequestHandler):
                 return route(self, q)
             if path.startswith("/api/selfaware/ai/calls/"):
                 return self.ai_call(unquote(path.rsplit("/", 1)[1]))
+            if path.startswith("/api/selfaware/contracts/"):
+                return self.contract_detail(unquote(path.rsplit("/", 1)[1]), q)
             self._send(404, {"error": "not found", "endpoints": sorted(ROUTES)})
         except QueryRejected as exc:
             self._send(400, {"error": str(exc)})
@@ -340,8 +350,65 @@ class Handler(BaseHTTPRequestHandler):
         doc = self.eng.docs.get("sections") or self.eng.state.get("analyzer_sections_doc")
         self._send(200 if doc else 503, doc or {"error": "section check not run yet (every 2 h)"})
 
+    def fly_platform(self, q):
+        doc = (self.eng.docs.get("health") or {}).get("fly_platform")
+        self._send(200 if doc else 503, doc or {"error": "fly platform status not evaluated yet (every diagnose pass)"})
+
+    def data_compat(self, q):
+        doc = self.eng.docs.get("compat")
+        if not doc:
+            return self._send(503, {"error": "compatibility scan not computed yet (job runs every 30 min)"})
+        if q.get("stream"):
+            rows = [s for s in doc["streams"] if s["stream"] == q["stream"]]
+            return self._send(200 if rows else 404, {"schema": doc["schema"], "generated_at": doc["generated_at"],
+                                                     "epoch": doc["epoch"], "streams": rows})
+        streams = doc["streams"]
+        if q.get("severity"):
+            want = {s.strip().upper() for s in q["severity"].split(",")}
+            streams = [s for s in streams if s["severity"] in want]
+        self._send(200, {**{k: v for k, v in doc.items() if k != "streams"}, "streams": streams})
+
     def data_view(self, q):
         self._send(200, render_data(self.eng), "text/html")
+
+    # ------------------------------------------------------------ section contracts
+    def contracts_summary(self, q):
+        doc = self.eng.docs.get("contracts")
+        if not doc:
+            return self._send(503, {"error": "section contracts not evaluated yet (light pass at start, heavy every 2 h)"})
+        rows = doc["contracts"]
+        if q.get("surface"):
+            rows = [r for r in rows if r["surface"] == q["surface"]]
+        if q.get("status"):
+            want = {s.strip().upper() for s in q["status"].split(",") if s.strip()}
+            rows = [r for r in rows if r["status"] in want]
+        self._send(200, {**{k: v for k, v in doc.items() if k != "contracts"}, "returned": len(rows), "contracts": rows,
+                         "detail": "/api/selfaware/contracts/<id>?rows=N&history=N drills to the raw rows behind a section",
+                         "registry": "/api/selfaware/contracts/registry", "provenance": self._prov(contracts.HISTORY_TABLE)})
+
+    def contracts_registry(self, q):
+        reg = contracts.load_registry()
+        self._send(200, {"schema": "self_aware_contract_registry_v1", "registry_hash": reg["registry_hash"],
+                         "file": str(contracts.REGISTRY_FILE.name), "contracts": reg["contracts"],
+                         "violation_kinds": contracts.VIOLATION_HELP})
+
+    def contract_detail(self, cid: str, q):
+        reg = contracts.load_registry()
+        spec = next((s for s in reg["contracts"] if s["id"] == cid), None)
+        if spec is None:
+            return self._send(404, {"error": "unknown contract", "ids": [s["id"] for s in reg["contracts"]]})
+        last = next((r for r in (self.eng.docs.get("contracts") or {}).get("contracts") or [] if r["id"] == cid), None)
+        body: dict[str, Any] = {"schema": "self_aware_contract_detail_v1", "spec": spec, "last": last}
+        n = min(int(q.get("history", 24) or 0), 500)
+        if n:
+            body["history"] = self.eng.store.history(contracts.HISTORY_TABLE, limit=n, kind="CONTRACT", id=cid)
+        rows = min(int(q.get("rows", 50) or 0), 1000)
+        if rows:
+            body["raw"] = contracts.drill(spec, contracts.Fetcher(self.eng.paths, self.eng.docs), rows)
+        self._send(200, body)
+
+    def contracts_view(self, q):
+        self._send(200, render_contracts(self.eng), "text/html")
 
 
 ROUTES = {
@@ -356,6 +423,10 @@ ROUTES = {
     "/api/selfaware/data/catalog": Handler.data_catalog, "/api/selfaware/data/completeness": Handler.data_completeness,
     "/api/selfaware/data/fields": Handler.data_fields, "/api/selfaware/data/capacity": Handler.data_capacity,
     "/api/selfaware/data/sufficiency": Handler.data_sufficiency, "/api/selfaware/sections": Handler.sections,
+    "/api/selfaware/fly-platform": Handler.fly_platform,
+    "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
+    "/api/selfaware/contracts/registry": Handler.contracts_registry,
+    "/api/selfaware/data/compatibility": Handler.data_compat,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
@@ -403,7 +474,8 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <div class=m>generated {_e(h.get('generated_at'))} · Fly {_e((h.get('fly') or {}).get('git_rev', '')[:9])}
  · paused={_e((h.get('fly') or {}).get('paused'))} · watcher {_e(h.get('watcher_verdict'))}
  · engine rev {_e(eng.store.revision[:9])} · <a href='/api/selfaware/health'>health JSON</a> · <a href='/api/selfaware/tables'>tables</a>
- · <a href='/data'>data health</a></div>
+ · <a href='/data'>data health</a> · <a href='/contracts'>section contracts</a></div>
+{render_fly_platform(h.get('fly_platform'))}
 <h2>Hourly digest</h2><p><b>{_e(d.get('headline'))}</b><br><span class=m>{_e(d.get('summary_line'))}</span></p>
 <h2>Self-diagnosis ({len(rows)} open, {greens} green)</h2>
 <table><tr><th>sev</th><th>check</th><th>observed · probable cause</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>all green</td></tr>'}</table>
@@ -414,12 +486,99 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {time.strftime('%H:%M:%S')}.</p>
 </body></html>"""
 
+_PLATFORM_COLOR = {"INFO": "#7cb7ff", "NONE": "#30a46c", "UNREACHABLE": "#8b8d98"}
+
+
+def render_fly_platform(fp: Any) -> str:
+    if not fp:
+        return "<p class=m>Fly platform: not evaluated yet</p>"
+    cls = fp.get("classification")
+    events = "".join(
+        f"<li><b style='color:{_COLOR.get(e.get('level')) if e.get('level') != 'INFO' else _PLATFORM_COLOR['INFO']}'>"
+        f"{_e(e.get('level'))}</b> {_e(e.get('kind'))}: <a href='{_e(e.get('url'))}'>{_e(e.get('title'))}</a>"
+        f" <span class=m>{_e(', '.join(e.get('matched') or []) or 'not our region/components')}"
+        f"{' · starts ' + _e(e.get('starts_at')) if e.get('kind') == 'scheduled' else ''}</span></li>"
+        for e in fp.get("events") or [])
+    return (f"<h2>Fly platform <span class=pill style='background:{_PLATFORM_COLOR.get(cls) or _COLOR.get(cls, '#8b8d98')}'>"
+            f"{_e(cls)}</span></h2><p>{_e(fp.get('summary'))}<br><span class=m>{_e(fp.get('app'))} region "
+            f"{_e(str(fp.get('region') or '').upper())} · feed {_e(fp.get('source'))} fetched {_e(fp.get('fetched_at'))}"
+            f" · <a href='{_e(fp.get('status_page'))}'>status page</a> · <a href='/api/selfaware/fly-platform'>JSON</a></span></p>"
+            f"{'<ul>' + events + '</ul>' if events else ''}")
+
+
+def render_contracts(eng) -> str:
+    doc = eng.docs.get("contracts")
+    if not doc:
+        return "<!doctype html><meta http-equiv=refresh content=20><body style='font:14px system-ui'>section contracts warming up…"
+    rows = []
+    for r in doc["contracts"]:
+        bad = [v for v in r["violations"] if v["severity"] in ("RED", "AMBER")]
+        info = [v for v in r["violations"] if v["severity"] not in ("RED", "AMBER")]
+        rows.append(
+            f"<tr><td><b style='color:{_COLOR.get(r['status'], '#8b8d98')}'>{_e(r['status'])}</b></td>"
+            f"<td><a href='/api/selfaware/contracts/{_e(r['id'])}?rows=50'>{_e(r['id'])}</a><div class=m>{_e(r['title'])}</div></td>"
+            f"<td>{_e(r['surface'])}</td>"
+            f"<td>{'<br>'.join(_e(v['kind'] + ': ' + v['detail']) for v in bad) or '—'}"
+            f"{('<div class=m>' + _e('; '.join(v['kind'] for v in info)) + '</div>') if info else ''}</td>"
+            f"<td class=m>{_e(', '.join(f'{k}={v}' for k, v in list((r.get('metrics') or {}).items())[:6]))}</td></tr>")
+    ad = doc.get("archive_drift") or {}
+    adrows = "".join(f"<tr><td><b style='color:{_COLOR.get(f['severity'])}'>{_e(f['severity'])}</b></td><td>{_e(f['series'])}</td>"
+                     f"<td>{_e(f['report'])}</td><td>{_e(f['kind'])}: {_e(f['detail'])}</td></tr>" for f in ad.get("findings") or [])
+    cov = doc.get("coverage") or {}
+    counts = " · ".join(f"<b style='color:{_COLOR[s]}'>{s} {n}</b>" for s, n in doc["counts"].items())
+    surf = " · ".join(f"{_e(k)} <b style='color:{_COLOR.get(v)}'>{_e(v)}</b>" for k, v in doc["surfaces"].items())
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta http-equiv=refresh content=120>
+<title>Section contracts</title><style>
+body{{font:14px system-ui;background:#111113;color:#edeef0;margin:24px;max-width:1400px}}
+table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bottom:1px solid #2e3035;padding:6px;text-align:left;vertical-align:top}}
+.m{{color:#a0a1a7;font-size:12px}}a{{color:#7cb7ff}}h2{{margin-top:28px}}
+</style></head><body>
+<h1>Section contracts</h1><div class=m>{doc['contracts_total']} contracts · last {_e(doc['tier'])} pass {_e(doc['generated_at'])}
+ · heavy {_e(doc.get('heavy_at'))} · registry {_e(doc['registry_hash'][:12])} · <a href='/'>overview</a>
+ · <a href='/api/selfaware/contracts'>JSON</a> · <a href='/api/selfaware/contracts/registry'>registry</a></div>
+<p>{counts}</p><p class=m>{surf}</p>
+<p class=m>/details coverage: {_e(cov.get('covered'))}/{_e(cov.get('sections'))} sections ·
+uncovered: {_e(', '.join(s['section'] for s in cov.get('uncovered') or []) or 'none')}</p>
+<h2>Contracts</h2><table><tr><th>status</th><th>section</th><th>surface</th><th>violations</th><th>metrics</th></tr>{''.join(rows)}</table>
+<h2>Archive drift (last {len((ad.get('snapshots') or {}).get('generations') or [])} generations)</h2>
+<table>{adrows or '<tr><td>no report vanished, shrank or lost columns</td></tr>'}</table>
+</body></html>"""
+
+
 _STATUS_COLOR = {"FRESH": "#30a46c", "READY": "#30a46c", "OK": "#30a46c", "IDLE": "#8b8d98", "ACCUMULATING": "#f5a524",
                  "STALE": "#e5484d", "MISSING": "#e5484d", "BLOCKED": "#e5484d", "NO_TIMESTAMP": "#8b8d98"}
 
 
 def _mb(b: Any) -> str:
     return "" if b is None else f"{float(b) / 1e6:,.1f} MB"
+
+
+def render_compat(eng) -> str:
+    doc = eng.docs.get("compat")
+    if not doc:
+        return "<h2>Data compatibility</h2><p class=m>compatibility scan warming up (every 30 min)</p>"
+    ep, seg, cov = doc["epoch"], doc["segregated"], doc["coverage"]
+    rows = []
+    for s in sorted(doc["streams"], key=lambda x: ({"RED": 0, "AMBER": 1, "GREEN": 2}[x["severity"]], -x["segregated_bytes"])):
+        if s["severity"] == "GREEN" and not s["segregated_bytes"]:
+            continue
+        vers = "; ".join(f"{k.split('=', 1)[-1]} {v:,}" for k, v in list(s["versions"].items())[:4])
+        rows.append(f"<tr><td><b style='color:{_COLOR.get(s['severity'])}'>{_e(s['severity'])}</b></td>"
+                    f"<td><a href='/api/selfaware/data/compatibility?stream={_e(s['stream'])}'>{_e(s['stream'])}</a></td>"
+                    f"<td>{s['rows']:,}<div class=m>{_e(vers)}</div></td><td>{_mb(s['segregated_bytes'])}</td>"
+                    f"<td class=m>{_e('; '.join(s['problems']))}</td></tr>")
+    parts = "".join(f"<li>{_e(k)}: {v['rows']:,} rows · {_mb(v['bytes'])} · {v['streams']} streams</li>"
+                    for k, v in seg["partitions"].items())
+    cmd = seg["delete_command"]
+    return f"""<h2>Data compatibility</h2>
+<p>epoch <b>{_e(ep['epoch_id'] or 'none declared')}</b> {_e(ep.get('started_at_utc') or '')} · release {_e(ep.get('release'))}
+· index {_e(cov['scanned_pct'])}% of {_mb(cov['bytes_total'])} · {_e(doc['counts'])} · <a href='/api/selfaware/data/compatibility'>JSON</a></p>
+<p class=m>{_e(ep.get('note') or '')}</p>
+<p><b>Segregated (never merged into current-cohort analysis): {_mb(seg['bytes'])}</b></p><ul>{parts or '<li>nothing segregated</li>'}</ul>
+<p class=m>{_e(seg['note'])}. Deletion is manual:</p>
+<pre id=wipecmd style='white-space:pre-wrap;background:#1c1d21;padding:8px'>{_e(cmd)}</pre>
+<button onclick="navigator.clipboard.writeText(document.getElementById('wipecmd').innerText)">copy delete command</button>
+<table><tr><th>sev</th><th>stream</th><th>rows · versions</th><th>segregated</th><th>problems</th></tr>{''.join(rows) or '<tr><td colspan=5>all streams compatible</td></tr>'}</table>"""
 
 
 def render_data(eng) -> str:
@@ -466,6 +625,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 ({_e(s['catalogued'])} catalogued, {_e(s['uncatalogued'])} auto-discovered) · pass {_e(s['ms'])} ms · <a href='/'>overview</a>
 · <a href='/api/selfaware/data'>JSON</a></div>
 <h2>Checks</h2><table>{frows or '<tr><td>no data findings yet</td></tr>'}</table>
+{render_compat(eng)}
 <h2>Capacity</h2>
 <div class=k>laptop<br><b>{_e(lap.get('bot_data_gb'))}/{_e(lap.get('cap_gb'))} GB</b><div class=m>{_e(lap.get('usage_pct'))}% · +{_e(lap.get('growth_gb_per_day'))} GB/day · {_e(lap.get('days_to_90pct_cap'))} days to 90%</div></div>
 <div class=k>Fly volume<br><b>{_e(fly.get('volume_free_gb'))} GB free</b><div class=m>{_e(fly.get('hours_to_full'))} h to full · segment store {_e(fly.get('segment_store_pct_of_cap'))}% of cap</div></div>

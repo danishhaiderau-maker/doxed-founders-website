@@ -62,6 +62,7 @@ def _inputs():
     }
     rows = [
         {"schema": "market_microstructure_1s_v1", "bucket_ts": ts,
+         "source_ts": ts, "observed_at_ts": ts,
          "fresh": True, "valid_bbo": True, "bid": price, "ask": price + 0.1,
          "bid_qty": 1, "ask_qty": 1, "trade_count": 1, "buy_qty": .1, "sell_qty": .1}
         for ts, price in ((11, 100), (12, 101), (13, 103), (14, 102))
@@ -344,7 +345,8 @@ def test_actual_conservative_limit_fill_receipt_round_trips_to_terminal_replay()
     constraints = values["entry_receipt"]["quantity_constraints"]
     entry = evaluate_limit_fill(
         [{"schema": "market_microstructure_1s_v1", "symbol": "BTCUSD",
-          "bucket_ts": 10, "fresh": True, "valid_bbo": True,
+          "bucket_ts": 10, "source_ts": 10, "observed_at_ts": 10,
+          "fresh": True, "valid_bbo": True,
           "bid": 99.9, "ask": 100, "bid_qty": 1, "ask_qty": .4,
           "trade_count": 0, "buy_qty": 0, "sell_qty": 0}],
         direction="LONG", requested_qty=.4,

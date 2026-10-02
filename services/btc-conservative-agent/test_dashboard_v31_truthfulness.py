@@ -59,7 +59,7 @@ def test_api_exposes_collector_and_legacy_writer_as_separate_identities() -> Non
     for body in (snapshot, overlay):
         assert '"collector_version"' in body
         assert '"legacy_collector_version"' in body
-    assert 'safeText(\'collectorVersionBanner\', d.collector_version || \'UNKNOWN\')' in BOT_SOURCE
+    assert "safeText('collectorVersionBanner', d.collector_version || truthText('collector_version'))" in BOT_SOURCE
     assert 'safeText(\'legacyCollectorVersionBanner\', d.legacy_collector_version || \'none\')' in BOT_SOURCE
 
 

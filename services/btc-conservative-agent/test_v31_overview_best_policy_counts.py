@@ -27,6 +27,15 @@ def test_empty_overview_shows_deployed_epoch_and_registry_collecting_identities(
     assert deployed["qualification_allowed"] is False
     assert all(row["collection_status"] == "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE" for row in deployed["policies"])
     assert all(row["policy_id"] and row["policy_signature"] for row in deployed["policies"])
+    assert [row["research_lane"] for row in deployed["policies"]] == list(combo_pathway_config.ACTIVE_TILE_ORDER)
+
+
+def test_report_supplied_deployed_collection_is_keyed_by_research_lane(monkeypatch):
+    report = {"deployed_policy_collection": {"policies": [{"lane": "FAMILY_A"}], "policy_count": 1}}
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+    monkeypatch.setattr(dashboard, "_read_report", lambda _name, default=None: default or {})
+    policies = dashboard._best_policy_research_v31_payload()["deployed_policy_collection"]["policies"]
+    assert policies == [{"lane": "FAMILY_A", "research_lane": "FAMILY_A"}]
 
 
 def test_executive_summary_pre_wraps_inside_narrow_viewport():

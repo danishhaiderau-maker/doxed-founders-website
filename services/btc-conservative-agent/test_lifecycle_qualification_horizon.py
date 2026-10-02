@@ -114,6 +114,7 @@ class QualificationHorizonBridgeTests(unittest.TestCase):
                 "source_revision": "a" * 40,
                 "deployed_revision": "a" * 40,
                 "tile_config_signature": "b" * 64,
+                "config_signature": "c" * 64,
             }
             self.addCleanup(
                 setattr, research_v3_store, "_provenance_cache", previous_provenance,

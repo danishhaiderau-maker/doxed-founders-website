@@ -31,7 +31,7 @@ def _row(key, record_id, *, completion=True):
         **key.as_dict(), "ledger": "lifecycle", "record_id": record_id,
         "event_id": "trade-1", "observed_ts": 10_000.0,
         "source_revision": "src", "deployed_revision": "dep",
-        "tile_config_signature": "tile",
+        "tile_config_signature": "tile", "config_signature": "cfg",
         "bundle_completion": _completion() if completion else None,
     }
     if completion:
@@ -44,7 +44,7 @@ def _row(key, record_id, *, completion=True):
             "identity": key.as_dict(), "event_id": "trade-1",
             "provenance": {
                 "source_revision": "src", "deployed_revision": "dep",
-                "tile_config_signature": "tile",
+                "tile_config_signature": "tile", "config_signature": "cfg",
             },
             "completion_receipt_sha256": completion_receipt["completion_receipt_sha256"],
             "qualification_eligible_at": 18_000.0,

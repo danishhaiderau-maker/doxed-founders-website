@@ -26,6 +26,7 @@ PROTECTION_REPLAY_WINDOW_FILE = "protection_replay_window.json"
 TRADES_CSV = "trades_3factor.csv"
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 OPPORTUNITY_LEDGER = Path("v3") / "ledgers" / "opportunity.jsonl"
+MIGRATION_RECEIPT = Path("migration") / "migration_receipt.json"
 COUNTERFACTUAL_JOIN_KEYS = ("signal_ts", "shared_ai_call_id", "epoch_id", "opportunity_id")
 
 
@@ -418,6 +419,21 @@ def protection_replay_item(report_dir: Path) -> dict:
     )
 
 
+def segment_promotion_item(data_dir: Path) -> dict[str, Any] | None:
+    """DEGRADED when this dataset was promoted with disclosed Fly-side warnings."""
+    receipt = _load_json(data_dir / MIGRATION_RECEIPT) or {}
+    warnings = [str(item) for item in receipt.get("promotion_warnings") or []]
+    if not warnings:
+        return None
+    stale = [item.split(":", 1)[1] for item in warnings if item.startswith("FLY_OVERSIZED_SQLITE_SNAPSHOT:")]
+    reason = (f"Promoted on the last shipped copy of {', '.join(stale)} (over the Fly SQLite snapshot cap)."
+              if stale else "Promoted with disclosed Fly shipper warnings.")
+    return _item("fly_segment_promotion", "DEGRADED", warnings[0].split(":", 1)[0], reason,
+                 side="COLLECTION", evidence={"promotion_warnings": warnings,
+                                              "promotion_level": receipt.get("promotion_level"),
+                                              "migrated_at": receipt.get("completed_at")})
+
+
 def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict[str, Any]:
     """Return the analyzer_input_blockers_v1 document for one analyzer cycle."""
     from research.exit_ladder_paper_cohort import load_replay_index
@@ -437,6 +453,9 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
         signal_replay_item(report_dir, cohort=exit_ladder["evidence"].get("paper_cohort")),
         counterfactual_item(report_dir, data_dir, epoch_id),
     ]
+    promotion = segment_promotion_item(data_dir)
+    if promotion is not None:
+        items.append(promotion)
     statuses = {item["status"] for item in items}
     replay_red = any(
         item["input"] == "protection_replay_window" and item["evidence"].get("alert_level") == "RED"

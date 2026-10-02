@@ -22,13 +22,16 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from . import ai_scorecard, alarms, analyzer_sections, data_awareness, diagnose, digest, edges, repair, tiles, uptime
+from . import (ai_scorecard, alarms, analyzer_sections, contracts, data_awareness, diagnose, digest, edges, repair, tiles,
+               uptime)
+from . import data_compat
 from .ai_scorecard import json_safe
-from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, Paths
+from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, THRESHOLDS, Paths
 from .facts import collect, iso, parse_ts
 from .store import Store
 
-HISTORY_KEEP_DAYS = {"findings_events": 30, "digests": 30, "uptime_history": 14, "runtime_history": 7}
+HISTORY_KEEP_DAYS = {"findings_events": 30, "digests": 30, "uptime_history": 14, "runtime_history": 7,
+                     contracts.HISTORY_TABLE: 30}
 
 
 def _below_normal() -> None:
@@ -62,7 +65,8 @@ class Engine:
         self.jobs: dict[str, Callable[[], Any]] = {
             "views": self.job_views, "diagnose": self.job_diagnose, "uptime": self.job_uptime,
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
-            "data": self.job_data, "sections": self.job_sections,
+            "data": self.job_data, "sections": self.job_sections, "contracts": self.job_contracts,
+            "contracts_light": self.job_contracts_light, "compat": self.job_compat,
         }
 
     # ------------------------------------------------------------ state
@@ -95,6 +99,8 @@ class Engine:
         self.facts = collect(self.paths, self.store, now, probe_local=self.probe_local)
         self.facts["data_awareness"] = (self.docs.get("data") or {}).get("summary")
         self.facts["analyzer_sections"] = self.docs.get("sections") or self.state.get("analyzer_sections_doc")
+        self.facts["contracts"] = contracts.summary(self.docs.get("contracts"))
+        self.facts["data_compat"] = self.docs.get("compat")
         found = diagnose.run(self.paths, self.store, self.facts, self.state)
         changes = diagnose.transitions(found, self.state, now)
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
@@ -122,6 +128,8 @@ class Engine:
             "fly": {"git_rev": rt.get("git_rev"), "paused": rt.get("execution_paused"), "pause_owner": rt.get("pause_owner"),
                     "active_tile_lanes": rt.get("active_tile_lanes"), "live_armed": rt.get("live_armed"),
                     "snapshot_at": rt.get("observedAt")},
+            "contracts": self.facts.get("contracts"),
+            "fly_platform": self.facts.get("fly_platform"),
             "engine": self.engine_status(),
         }
         self.docs["health"] = json_safe(doc)
@@ -177,6 +185,36 @@ class Engine:
         d = doc["dashboard"]
         return {"verdict": d.get("verdict"), "counts": d.get("counts"), "error": d.get("error"),
                 "genome_grid_age_sec": doc["genome_grid"].get("age_sec"), "shrank": len(doc["shrank"])}
+    def _contracts(self, tier: str) -> dict:
+        self._need_facts()
+        doc = json_safe(contracts.run(self.store, self.paths, self.facts, self.state, self.docs, tier=tier))
+        self.docs["contracts"] = doc
+        return {"tier": tier, "counts": doc["counts"], "surfaces": doc["surfaces"], "fly_calls": doc["fly_calls"],
+                "ms": doc["ms"]}
+
+    def job_contracts(self) -> dict:
+        # The heavy pass reads ~100 MB of analyzer JSON; wait for the analyzer cycle to finish, but not forever.
+        waited = self.state.get("contracts_deferred_since")
+        if contracts.analyzer_busy(self.paths):
+            now = time.time()
+            if not waited:
+                self.state["contracts_deferred_since"] = waited = now
+            if now - waited < THRESHOLDS["contracts_heavy_defer_max_sec"]:
+                self.state["contracts_retry_at"] = now + 120
+                return {"deferred": "analyzer cycle running", "since": iso(waited)}
+        self.state["contracts_deferred_since"] = self.state["contracts_retry_at"] = None
+        return self._contracts("heavy")
+
+    def job_contracts_light(self) -> dict:
+        return self._contracts("light")
+
+    def job_compat(self) -> dict:
+        doc = json_safe(data_compat.run(self.paths, self.state))
+        doc["epoch_purity"] = data_compat.epoch_purity(self.paths, doc)
+        self.docs["compat"] = doc
+        return {"counts": doc["counts"], "coverage_pct": doc["coverage"]["scanned_pct"],
+                "epoch": doc["epoch"]["epoch_id"], "segregated_bytes": doc["segregated"]["bytes"],
+                "deferred": doc["scan_deferred_for_analyzer_cycle"], "ms": doc["ms"]}
 
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
@@ -248,16 +286,19 @@ class Engine:
         return result
 
     def due(self, name: str, now: float) -> bool:
+        if name == "contracts" and self.state.get("contracts_retry_at"):
+            return now >= self.state["contracts_retry_at"]
         last = ((self.state.get("jobs") or {}).get(name) or {}).get("last_run_epoch") or 0
         return now - last >= CADENCE_SEC[name]
 
     def run_once(self) -> dict:
-        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "ai",
-                                                      "edges", "diagnose", "digest")}
+        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "compat",
+                                                      "ai",
+                                                      "edges", "contracts", "diagnose", "digest")}
 
     def loop(self) -> None:
         # Views and the cheap in-memory documents are rebuilt at start so no endpoint answers 503 after a restart.
-        for name in ("views", "diagnose", "uptime", "tiles", "data", "diagnose"):
+        for name in ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "diagnose"):
             self.run_job(name)
         while not self._stop.is_set():
             now = time.time()

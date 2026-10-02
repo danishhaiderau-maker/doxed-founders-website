@@ -27,7 +27,7 @@ def test_api_to_actual_loader_preserves_unknown_and_zero(monkeypatch, present):
     node=shutil.which('node')
     if not node: pytest.skip('Node unavailable')
     fn='async function loadResearchDesign('+dashboard.DASHBOARD_HTML.split('async function loadResearchDesign(',1)[1].split('async function loadEvidenceCoverage',1)[0]
-    js="const assert=require('assert'),nodes={};global.document={getElementById:id=>nodes[id]||(nodes[id]={style:{}})};global.fetch=async()=>({ok:true,json:async()=>("+json.dumps(payload)+")});"+fn+"""
+    js="const assert=require('assert'),nodes={};const mkEl=()=>({style:{},children:[],closest(){return mkEl();},replaceChildren(){this.children=[];},appendChild(c){this.children.push(c);}});global.document={getElementById:id=>nodes[id]||(nodes[id]=mkEl()),createElement:()=>mkEl()};global.fetch=async()=>({ok:true,json:async()=>("+json.dumps(payload)+")});"+fn+"""
 loadResearchDesign().then(()=>{
 const k=nodes['research-design-kpis'].innerHTML,rows=nodes['research-baseline-body'].innerHTML;
 assert.equal((rows.match(/<tr>/g)||[]).length,11);
@@ -38,3 +38,21 @@ assert(!nodes['research-design-banner'].textContent.includes('LOAD_FAILED'));
 """
     result=subprocess.run([node,'-e',js],capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_episode_receipts_are_summarized_not_shipped(monkeypatch):
+    monkeypatch.setattr(dashboard,'_API_RESPONSE_CACHE',{})
+    receipts=[{'receipt_id':f'r{i}','results':[{'pad':'x'*1000}]} for i in range(50)]
+    def report(name):
+        value=dict(same_opportunity_count=50,summaries={},episode_receipts=receipts) if name=='entry_baseline_replay_report.json' else {}
+        return value, {'manifest':{'generation_id':'test','generated_at':'2026-10-03T00:00:00+00:00'}}
+    monkeypatch.setattr(dashboard,'_declared_atomic_generation_report',report)
+    monkeypatch.setattr(dashboard,'_generation_freshness_meta',lambda *_:{'current':True})
+    response=dashboard.app.test_client().get('/api/research-design')
+    replay=response.get_json()['entry_baseline_replay']
+    assert 'episode_receipts' not in replay
+    assert replay['episode_receipt_count']==50 and replay['episode_receipts_omitted'] is True
+    assert replay['episode_receipts_url']=='/api/report/entry_baseline_replay_report.json'
+    assert response.get_json()['generated_at']=='2026-10-03T00:00:00+00:00'
+    assert len(response.data)<20000
+    assert len(receipts)==50
