@@ -51,6 +51,7 @@ Owner: SECTION-CONTRACTS. Scope: every section, page, table and card of Analyzer
 4. Runtime snapshot: `bot_instance_id`, `started_at` and `source_revision` for runtime incidents (gap 12).
 5. Integrity TTL signature split (ANALYZER-FIDELITY, gap 7).
 6. `collection.xvl_evaluator` absent (XVL-FEED, already tracked).
+7. Fly chase panels (CHASE-BUCKETS request): export `chase_analytics` into the runtime snapshot (#317). Contract `fly.chase_buckets` (follow-up PR) reports INFO while the field is absent and goes RED unless the status is `VERIFIED_RECENT_SNAPSHOT` or `NOT_APPLICABLE`.
 
 ## Requests to other owners
 
