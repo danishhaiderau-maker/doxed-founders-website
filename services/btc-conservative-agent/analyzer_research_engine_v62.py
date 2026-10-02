@@ -11956,6 +11956,17 @@ def apply_exact_terminal_net_pnl(trades):
 FORCED_EXIT_REASONS = frozenset({"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL"})
 
 
+def _forced_exit_origin_counts(forced_trades) -> dict:
+    """Deploy-boundary vs operator split of excluded forced exits (close_origin)."""
+    from research.close_origin import forced_exit_origin_counts
+
+    if forced_trades is None or forced_trades.empty:
+        return {}
+    cols = [c for c in ("trade_id", "exit_reason", "outcome_exit_reason", "close_origin") if c in forced_trades.columns]
+    records = forced_trades[cols].astype(object).where(forced_trades[cols].notna(), None).to_dict("records")
+    return {k: v for k, v in forced_exit_origin_counts(records).items() if v}
+
+
 def _lane_closed_trade_stats(lane_trades):
     """Per-tile closed-trade spread and MAE/MFE consumed by the dashboard Decision page.
 
@@ -11963,7 +11974,7 @@ def _lane_closed_trade_stats(lane_trades):
     are forced exits, not tile outcomes. MAE/MFE still describe every close.
     """
     if lane_trades is None or lane_trades.empty:
-        return {"n": 0, "n_all_closes": 0, "forced_exits_excluded": 0, "mean_net_pnl_usd": None,
+        return {"n": 0, "n_all_closes": 0, "forced_exits_excluded": 0, "forced_exits_by_origin": {}, "mean_net_pnl_usd": None,
                 "stdev_net_pnl_usd": None, "mae_mfe_rows": 0, "median_mae_margin_pct": None,
                 "median_mfe_margin_pct": None}
     pnl_col = next((c for c in ("outcome_net_pnl_usd", "net_pnl_usd") if c in lane_trades.columns), None)
@@ -11992,6 +12003,7 @@ def _lane_closed_trade_stats(lane_trades):
         "n": n,
         "n_all_closes": int(len(all_pnl)),
         "forced_exits_excluded": int(len(all_pnl) - n),
+        "forced_exits_by_origin": _forced_exit_origin_counts(lane_trades.loc[forced]),
         "mean_net_pnl_usd": round(float(pnl.mean()), 6) if n else None,
         "stdev_net_pnl_usd": round(float(pnl.std(ddof=1)), 6) if n >= 2 else None,
         "mae_mfe_rows": int(len(extremes)),

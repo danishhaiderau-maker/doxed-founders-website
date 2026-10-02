@@ -28648,6 +28648,16 @@ def _paper_terminal_cost_evidence(
     }
 
 
+def _forced_close_origin(exit_reason) -> str | None:
+    """Who issued a forced close: the guarded deploy boundary, an operator, or safety."""
+    from research.close_origin import FORCED_EXIT_REASONS, close_origin_for_pause_owner
+
+    if str(exit_reason or "").strip().upper() not in FORCED_EXIT_REASONS:
+        return None
+    # Lock-free read: close callers may already hold position/trade locks.
+    return close_origin_for_pause_owner(_pause_owner_locked())
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -28866,6 +28876,7 @@ def close_position(pos: dict, exit_reason: str):
             "total_cost_usd": round(trading_fees + funding_total, 2),
             **terminal_cost_evidence,
             "exit_reason": exit_reason,
+            "close_origin": _forced_close_origin(exit_reason),
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
             "ai_win_prob": pos.get("ai_win_prob") or master.get("ai_win_prob"),
@@ -34528,9 +34539,10 @@ __ADMIN_ACCESS_CONTROLS__
 </table></div>
 
 <h2>Trades</h2>
-<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
+<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades. Export full session via /api/export_csv.</p>
+<p id="tradesTableLegend" style="color:#8b949e;font-size:0.8em;margin:0 0 8px;">Every row here is a paper position that <strong>filled</strong> and later closed; orders that never filled are listed under Expired Orders, not here. <strong>Bitfinex copy</strong> says whether the relay copied the trade to Bitfinex (relay disarmed = paper only). <strong>Analyzer stats</strong> marks closes that were not decided by the strategy (deploy-boundary force-flats, operator closes) and are excluded from strategy statistics.</p>
 <div class="activity-table-scroll" role="region" aria-label="Trades table" tabindex="0"><table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th title="Simulated paper fill. Filled, then closed = the paper position opened and has exited.">Paper fill</th><th title="Whether the Bitfinex relay copied this trade. Paper only = not sent to Bitfinex (relay disarmed or not eligible).">Bitfinex copy</th><th title="Whether this close counts in analyzer strategy statistics. Deploy-boundary and operator closes are excluded.">Analyzer stats</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table></div>
 
@@ -34573,7 +34585,7 @@ DASHBOARD_JS = """(function () {
         STOP_LOSS: 'Stop loss',
         HARD_STOP: 'Safety stop',
         TIME_EXIT: 'Maximum-hold exit',
-        ADMIN_MANUAL_CLOSE: 'Manual close',
+        ADMIN_MANUAL_CLOSE: 'Manual or deploy close',
         CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
       };
       return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
@@ -36335,11 +36347,26 @@ DASHBOARD_JS = """(function () {
           const show = truth.showcase_simulated || {};
           const bf = truth.bitfinex_authenticated || {};
           const rel = truth.relationship || {};
-          const showcaseLabel = show.status || (show.executed ? 'FILLED' : 'UNFILLED');
-          const bitfinexLabel = bf.authenticated
+          const disp = t.trade_display || {};
+          const dispFill = disp.paper_fill || {};
+          const dispCopy = disp.bitfinex_copy || {};
+          const dispClose = disp.close || {};
+          const dispStats = disp.analyzer || {};
+          const showcaseLabel = dispFill.label || show.status || (show.executed ? 'FILLED' : 'UNFILLED');
+          const bitfinexLabel = dispCopy.label || (bf.authenticated
             ? (bf.classification || 'AUTHENTICATED')
+            : 'Paper only, not copied to Bitfinex');
+          const relCode = dispCopy.relationship || rel.shadow_label || rel.divergence_classification || '';
+          const exitCauseLabel = dispClose.label
+            || (t.exit_reason ? displayExitCause(t.exit_reason) : (dispClose.code === 'STRATEGY_EXIT' ? 'Strategy exit' : displayExitCause(t.exit_reason)));
+          const forcedCloseNote = dispClose.code && dispClose.code !== 'STRATEGY_EXIT'
+            ? '<br><span style="color:#8b949e;font-size:0.76em;">not a strategy exit' + (dispClose.evidence_url ? ' · <a href="' + dispClose.evidence_url + '" target="_blank" rel="noopener" style="color:#8b949e;">deploy run</a>' : '') + '</span>'
+            : '';
+          const statsCell = dispStats.label
+            ? (dispStats.included
+              ? '<span style="color:#3fb950;">' + dispStats.label + '</span>'
+              : '<span title="Not counted in analyzer strategy statistics (EV, win rate, rankings)" style="display:inline-block;padding:1px 6px;border:1px solid #f0883e;border-radius:4px;color:#ffa657;">' + dispStats.label + '</span>')
             : '-';
-          const relLabel = rel.shadow_label || rel.divergence_classification || '-';
           const stopEvidence = tradeStopEvidence(t);
           const margin = stopEvidence.explicitMargin;
           const leverage = Number(t.leverage ?? 0);
@@ -36353,7 +36380,7 @@ DASHBOARD_JS = """(function () {
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
-            <td>${displayExitCause(t.exit_reason)}${stopEvidence.accountingContaminated ? '<br><span style="color:#f85149;font-size:0.76em;">PRE-FIX PNL ACCOUNTING CONTAMINATED · raw family PnL may be double-counted · excluded from qualification</span>' : (stopEvidence.overshoot ? '<br><span style="color:#f0c14b;font-size:0.76em;">STOP OVERSHOOT · observed loss crossed ' + stopEvidence.hardStopPct.toFixed(0) + '% trigger' + (stopEvidence.capReferenceNet == null ? '' : ' · trigger-level reference $' + stopEvidence.capReferenceNet.toFixed(2)) + ' · not reconstructed execution</span>' : '')}</td>
+            <td>${exitCauseLabel}${forcedCloseNote}${stopEvidence.accountingContaminated ? '<br><span style="color:#f85149;font-size:0.76em;">PRE-FIX PNL ACCOUNTING CONTAMINATED · raw family PnL may be double-counted · excluded from qualification</span>' : (stopEvidence.overshoot ? '<br><span style="color:#f0c14b;font-size:0.76em;">STOP OVERSHOOT · observed loss crossed ' + stopEvidence.hardStopPct.toFixed(0) + '% trigger' + (stopEvidence.capReferenceNet == null ? '' : ' · trigger-level reference $' + stopEvidence.capReferenceNet.toFixed(2)) + ' · not reconstructed execution</span>' : '')}</td>
             <td title="Percentage return on the displayed margin, not on account equity">${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
             <td>${margin > 0 ? '$' + margin.toFixed(2) : (stopEvidence.inferredMargin > 0 ? '~$' + stopEvidence.inferredMargin.toFixed(2) + ' inferred' : '-')}</td>
             <td>${notional > 0 ? '$' + notional.toFixed(2) : '-'}</td>
@@ -36362,8 +36389,8 @@ DASHBOARD_JS = """(function () {
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
             <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
             <td>${showcaseLabel}</td>
-            <td>${bitfinexLabel}</td>
-            <td>${relLabel}</td>
+            <td${relCode ? ' title="Relay relationship: ' + relCode + '"' : ''}>${bitfinexLabel}</td>
+            <td>${statsCell}</td>
           </tr>`;
         }).join('');
         safeHTML(
@@ -40146,6 +40173,8 @@ def _enrich_dashboard_trade_rows(
     evidence_index=None,
 ):
     """Join immutable relay evidence after the money-state lock is released."""
+    from research.close_origin import trade_display
+
     index = evidence_index or {}
     enriched = []
     for trade in raw_rows:
@@ -40158,6 +40187,8 @@ def _enrich_dashboard_trade_rows(
                 row["dual_execution_truth"] = split_execution_truth(row)
             except Exception:
                 pass
+        if isinstance(row, dict):
+            row["trade_display"] = trade_display(row, row.get("dual_execution_truth"))
         enriched.append(row)
     return enriched
 
@@ -41087,7 +41118,7 @@ _PUBLIC_TRADE_SAFE_KEYS = {
     "ts", "ts_melbourne", "trade_id", "final_direction", "dir",
     "entry", "exit", "dur_min", "pnl", "net_pnl_usd",
     "gross_pnl_usd", "trading_fees_usd", "fees_usd",
-    "funding_fees_usd", "close_ts_melbourne",
+    "funding_fees_usd", "close_ts_melbourne", "trade_display",
 }
 
 
@@ -42232,6 +42263,7 @@ def api_close_showcase_position():
             len(matches),
         )
         return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
+    close_origin = _forced_close_origin("ADMIN_MANUAL_CLOSE")
     close_position(matches[0], "ADMIN_MANUAL_CLOSE")
     with state_lock:
         still_open = any(
@@ -42251,11 +42283,12 @@ def api_close_showcase_position():
         trades=paper_trades,
     )
     cache_generation = _invalidate_relay_execution_snapshot()
-    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
+    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s origin=%s", trade_id, close_origin)
     return jsonify({
         "status": "closed",
         "trade_id": trade_id,
         "scope": "showcase_paper_only",
+        "close_origin": close_origin,
         "money_state_generation": cache_generation,
     })
 
