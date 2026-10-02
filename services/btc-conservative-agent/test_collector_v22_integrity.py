@@ -153,7 +153,9 @@ class CollectorIntegrityTests(unittest.TestCase):
                 bot._collector_v22_last_merge = 0.0
                 self.assertEqual(bot._merge_collector_v22_provisionals(reason="TEST_RUNTIME_MAP_LOSS"), 1)
                 processed = []
-                with mock.patch.object(bot, "persist_rejected_opportunity", side_effect=lambda src, **kw: processed.append(dict(src))):
+                # The poll's background merge daemon would outlive the temp cwd.
+                with mock.patch.object(bot, "persist_rejected_opportunity", side_effect=lambda src, **kw: processed.append(dict(src))), \
+                     mock.patch.object(bot, "_schedule_collector_v22_provisional_merge", return_value=False):
                     bot._maybe_complete_pending_order_multiverse()
                 self.assertEqual(processed[0]["trade_id"], "journal-overdue")
         finally:
