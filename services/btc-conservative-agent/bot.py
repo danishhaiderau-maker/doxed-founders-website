@@ -74,9 +74,12 @@ import pytz
 import bitfinex_cost_profile
 
 from combo_pathway_config import (
+    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
     ANALYZER_SYNC_ID as COMBO_ANALYZER_SYNC_ID,
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
+    AI_PROMPT_INPUT_REVISION,
+    COMMITTED_FADE_MIN_SCORE_GAP,
     TILE_ARCHITECTURE_VERSION,
     TILE_REGISTRY_SCHEMA,
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
@@ -4331,19 +4334,25 @@ def log_ai_input_full(
             "liquidity_sweep_low": upgrade.get("liquidity_sweep_low"),
             "regime_change_count_60m": upgrade.get("regime_change_count_60m"),
             "context": copy.deepcopy(ctx),
+            "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
+            "prompt_input_revision": ai_result.get("prompt_input_revision") or AI_PROMPT_INPUT_REVISION,
             "ai": {
                 "decision": ai_result.get("decision"),
                 "win_prob": evidence_win_prob(ai_result),
                 "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai_result.get("direction"),
+                "raw_direction": ai_result.get("raw_direction"),
                 "bull_score": ai_result.get("bull_score"),
                 "bear_score": ai_result.get("bear_score"),
+                "long_score": ai_result.get("long_score"),
+                "short_score": ai_result.get("short_score"),
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
                 "deepseek_model": ai_result.get("deepseek_model"),
                 "deepseek_served_model": ai_result.get("deepseek_served_model"),
                 "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
+                **ai_commit_flags(ai_result),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -5674,8 +5683,6 @@ _execution_markout_counters = {
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "last": None}
 _adaptive_entry_stats_lock = threading.Lock()
-ret_1m_buffer = deque(maxlen=20)
-ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
 delta_buffer = deque(maxlen=200)
 delta_change_buffer = deque(maxlen=200)
@@ -6919,6 +6926,34 @@ def label_swing_sequence(swings, max_labels=6):
     score = sum(score_map.get(l, 0) for l in labels)
     return labels, score
 
+
+def last_swing_pair_labels(swings) -> dict:
+    """Latest swing-high label and latest swing-low label, judged separately.
+
+    ``label_swing_sequence`` lists every high label before every low label, so
+    its last two entries are both low labels whenever two lows exist; a pattern
+    check on that tail can never see LH or HH. Two-sided flags come from here.
+    """
+    out = {}
+    for kind, up, down, eq in (("high", "HH", "LH", "EH"), ("low", "HL", "LL", "EL")):
+        seq = [s["price"] for s in swings if s["type"] == kind][-2:]
+        if len(seq) < 2:
+            out[kind] = None
+        else:
+            out[kind] = up if seq[1] > seq[0] else (down if seq[1] < seq[0] else eq)
+    last_high, last_low = out["high"], out["low"]
+    return {
+        "last_high_label": last_high,
+        "last_low_label": last_low,
+        "higher_high": last_high == "HH",
+        "lower_high": last_high == "LH",
+        "higher_low": last_low == "HL",
+        "lower_low": last_low == "LL",
+        "hh_hl_sequence_active": last_high == "HH" and last_low == "HL",
+        "lh_ll_sequence_active": last_high == "LH" and last_low == "LL",
+    }
+
+
 def compute_market_structure(candles):
     swings = extract_pivot_swings(candles[-96:] if len(candles) > 96 else candles)
     labels, score = label_swing_sequence(swings, max_labels=6)
@@ -6934,14 +6969,11 @@ def compute_market_structure(candles):
         bias = "MIXED"
     last_highs = [s["price"] for s in swings if s["type"] == "high"][-2:]
     last_lows = [s["price"] for s in swings if s["type"] == "low"][-2:]
-    hh_hl_active = len(labels) >= 2 and all(x in ("HH", "HL") for x in labels[-2:])
-    lh_ll_active = len(labels) >= 2 and all(x in ("LH", "LL") for x in labels[-2:])
     return {
         "swing_labels_last": labels,
         "structure_score": score,
         "structure_bias": bias,
-        "hh_hl_sequence_active": hh_hl_active,
-        "lh_ll_sequence_active": lh_ll_active,
+        **last_swing_pair_labels(swings),
         "last_swing_high": last_highs[-1] if last_highs else None,
         "last_swing_low": last_lows[-1] if last_lows else None,
         "pivot_count": len(swings),
@@ -7009,8 +7041,7 @@ def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
         bias = "MIXED"
     micro_support = float(lows[-1]["price"]) if lows else None
     micro_resistance = float(highs[-1]["price"]) if highs else None
-    higher_low = bool(labels) and "HL" in labels[-2:]
-    lower_high = bool(labels) and "LH" in labels[-2:]
+    pair = last_swing_pair_labels(swings)
     return {
         "micro_support": micro_support,
         "micro_resistance": micro_resistance,
@@ -7020,10 +7051,7 @@ def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
         "swing_labels_last": labels,
         "structure_score": score,
         "structure_bias": bias,
-        "higher_low": higher_low,
-        "lower_high": lower_high,
-        "hh_hl_sequence_active": higher_low and bool(labels) and all(x in ("HH", "HL") for x in labels[-2:]),
-        "lh_ll_sequence_active": lower_high and bool(labels) and all(x in ("LH", "LL") for x in labels[-2:]),
+        **pair,
         "last_swing_low": micro_support,
         "last_swing_high": micro_resistance,
     }
@@ -11254,14 +11282,24 @@ def populate_candle_buffers_from_candles(candles, *, force=False):
     logger.info(f"[CANDLE BUFFER PRELOAD] populated {populated} candles into buffers [PIPELINE ENFORCEMENT]")
     return populated
 
-def compute_volume_ratio():
-    if len(volume_buffer) < 1:
+VOLUME_RATIO_LOOKBACK_BARS = 20
+
+
+def compute_volume_ratio(candles=None):
+    """Last closed 15m bar volume over the mean of the 20 closed bars before it.
+
+    ``latest_candles[-1]`` is the forming bar and ``volume_buffer`` holds single
+    trade sizes, so neither is a bar-volume ratio; 1.0 means typical volume.
+    """
+    rows = latest_candles if candles is None else candles
+    closed = [float(c[5]) for c in list(rows)[-(VOLUME_RATIO_LOOKBACK_BARS + 2):-1]
+              if len(c) > 5 and c[5] is not None]
+    if len(closed) < VOLUME_RATIO_LOOKBACK_BARS + 1:
         return 0.0
-    vol_mean = np.mean(list(volume_buffer)[-50:]) if len(volume_buffer) > 50 else np.mean(list(volume_buffer))
+    vol_mean = float(np.mean(closed[:-1]))
     if vol_mean <= 0:
         return 0.0
-    current = volume_buffer[-1]
-    return float(current / vol_mean)
+    return float(closed[-1] / vol_mean)
 
 def update_candle_features():
     global last_processed_candle_ts
@@ -13270,6 +13308,7 @@ def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
         logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
         return None
     sr = raw_sr
+    tape = _ai_shadow_tape_features()
     ctx = {
         "price": nz(state_snapshot.get("price")),
         "recent_high": nz(sr.get("swing_high")),
@@ -13280,8 +13319,10 @@ def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
         "ema21": nz(state_snapshot.get("ema_status", {}).get("ema21")),
         "ema200": nz(state_snapshot.get("ema_status", {}).get("ema200")),
         "ema_slope": (nz(state_snapshot.get("ema_status", {}).get("ema9")) - nz(state_snapshot.get("ema_status", {}).get("ema21"))) / nz(state_snapshot.get("ema_status", {}).get("ema21")) if nz(state_snapshot.get("ema_status", {}).get("ema21")) != 0 else 0.0,
-        "ret_1m": nz(buffers.get("ret_1m", [0])[-1] if len(buffers.get("ret_1m", [])) > 0 else 0),
-        "ret_5m": nz(buffers.get("ret_5m", [0])[-1] if len(buffers.get("ret_5m", [])) > 0 else 0),
+        # Fractional returns from the Bitfinex 1 s tape (same source as the
+        # prompt's ret_*_bp); 0 only when the tape has no such window yet.
+        "ret_1m": nz(tape.get("ret_1m"), 0.0),
+        "ret_5m": nz(tape.get("ret_5m"), 0.0),
         "velocity": get_aggregated(velocity_buffer),
         "volume": get_aggregated(volume_buffer),
         "avg_volume": get_aggregated(volume_buffer),
@@ -16221,6 +16262,35 @@ def parse_ai_response_fields(text: str) -> dict:
         "explicit_abstain": explicit_abstain,
         "score_direction_mismatch": score_direction_mismatch,
         "score_tie": score_tie,
+    }
+
+
+def ai_commit_flags(ai_result: dict) -> dict:
+    """Commit/abstain facts of one shared call (the Tile 2 commit rule, logged on every call).
+
+    Committed = explicit LONG/SHORT, scores agree with that side, and the score
+    gap is at least ``COMMITTED_FADE_MIN_SCORE_GAP``.
+    """
+    ai_result = ai_result or {}
+    raw = str(ai_result.get("raw_direction") or "").upper()
+    try:
+        long_s = float(ai_result.get("long_score"))
+        short_s = float(ai_result.get("short_score"))
+    except (TypeError, ValueError):
+        long_s = short_s = None
+    gap = abs(long_s - short_s) if long_s is not None else None
+    score_side = None if gap is None or gap == 0 else ("LONG" if long_s > short_s else "SHORT")
+    abstain = raw not in ("LONG", "SHORT")
+    mismatch = (not abstain) and score_side is not None and raw != score_side
+    committed = (not abstain and not mismatch and not ai_result.get("ai_error")
+                 and gap is not None and gap >= COMMITTED_FADE_MIN_SCORE_GAP)
+    return {
+        "explicit_abstain": abstain,
+        "score_direction_mismatch": mismatch,
+        "score_tie": gap == 0,
+        "score_gap": gap,
+        "ai_committed": bool(committed),
+        "commit_rule": f"EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED_AND_GAP_GE_{COMMITTED_FADE_MIN_SCORE_GAP:g}",
     }
 
 
@@ -19974,11 +20044,13 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
+            "prompt_input_revision": AI_PROMPT_INPUT_REVISION,
             "deepseek_model": call_meta.get("requested_model") or _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
             "deepseek_served_model": call_meta.get("served_model"),
             "deepseek_system_fingerprint": call_meta.get("system_fingerprint"),
         }
+        ai_result.update(ai_commit_flags(ai_result))
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
         ai_result["research_baseline_context_status"] = research_context_capture
@@ -25167,8 +25239,6 @@ def process_signal(event: dict):
                     return {"entry_resolution": "NO_ORDER", "exact_reason": "AI_COOLDOWN_ACTIVE"}
 
                 buffers = {
-                    "ret_1m": ret_1m_buffer,
-                    "ret_5m": ret_5m_buffer,
                     "velocity": velocity_buffer,
                     "volume": volume_buffer,
                     "avg_volume": get_aggregated(volume_buffer),
@@ -29216,6 +29286,14 @@ _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
     daily_cap=int(os.getenv("AI_SHADOW_COMPACT_DAILY_CAP", "600")),
 )
 _AI_INPUT_DEAD_DETECTOR = _ai_shadow.DeadInputDetector(AI_INPUT_DEAD_FIELD_CALLS)
+import ai_regime_shadow as _ai_regime
+import decision_feature_snapshots as _dfs
+
+AI_SHADOW_REGIME_PROMPT_FILE = _ai_regime.REGIME_PROMPT_FILE
+AI_SHADOW_REGIME_PROMPT_ENABLED = os.getenv("AI_SHADOW_REGIME_PROMPT_ENABLED", "1").strip() == "1"
+DECISION_FEATURE_SNAPSHOT_FILE = _dfs.SNAPSHOT_FILE
+_AI_REGIME_BUDGET = _ai_regime.RegimeBudget()
+_DFS_BOOK = _dfs.LabelBook()
 _AI_SHADOW_PROMPT_PAYLOADS = {}
 _AI_SHADOW_LOCK = threading.Lock()
 _ai_shadow_status = {
@@ -29228,6 +29306,12 @@ _ai_shadow_status = {
     "recent": deque(maxlen=480),
     "boot_recovered_calls": 0,
     "boot_hydrated_seconds": 0,
+    "regime_ok": 0,
+    "regime_errors": 0,
+    "regime_skipped": 0,
+    "last_regime_error": None,
+    "snapshots_logged": 0,
+    "labels_logged": 0,
 }
 
 SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_1_20261001"
@@ -29322,6 +29406,7 @@ def cross_venue_health_snapshot() -> dict:
 
 
 import cross_venue_lead as _xvl
+from taker_time_exit_binding import evidence_badge as _taker_time_evidence_badge
 
 # Per-second cross-venue lead evaluator for registry tiles on the
 # CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
@@ -29368,8 +29453,8 @@ def _xvl_lower_thread_priority() -> None:
         _xvl_status["thread_niced"] = False
 
 
-def _xvl_append(row: dict) -> None:
-    ok = _safe_append_jsonl(XVL_SHADOW_FILE, row, label="XVL_SHADOW", fallback_on_error=False)
+def _xvl_append(row: dict, path: str = XVL_SHADOW_FILE) -> None:
+    ok = _safe_append_jsonl(path, row, label="XVL_SHADOW", fallback_on_error=False)
     with _XVL_LOCK:
         _xvl_status["rows_written" if ok else "write_failures"] += 1
 
@@ -29416,9 +29501,11 @@ def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
         with _XVL_LOCK:
             lane_state = _xvl_lane_state(lane)
             lane_state["busy"] = False
+            evaluator = _XVL_EVALUATORS.get(lane)
+            signal_key = getattr(evaluator, "SIGNAL_KEY", "lead_bp")
             lane_state["last_attempt"] = {
                 "trigger_id": trigger.get("trigger_id"), "side": trigger.get("side"),
-                "lead_bp": trigger.get("lead_bp"), "outcome": outcome, "ts": time.time(),
+                signal_key: trigger.get(signal_key), "outcome": outcome, "ts": time.time(),
             }
             if outcome == "ORDER_ELIGIBLE":
                 lane_state["orders_eligible"] += 1
@@ -29445,35 +29532,33 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
         last = _buf_float(state.get("price"), 0.0)
     reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+    evaluator = _XVL_EVALUATORS.get(lane) or _xvl.LeadEvaluator
+    tag = f"{evaluator.ID_PREFIX.upper()}_TRIGGER"
     signal_features = {
-        "xvl_trigger": {
-            key: copy.deepcopy(trigger.get(key)) for key in (
-                "trigger_id", "anchor_bucket_ts", "evaluated_ts", "side", "lead_bp",
-                "venue_ret_bp", "bfx_ret_bp", "venue_bbo_age_s", "collector_age_s",
-                "bfx_bbo_age_s", "bfx_bid", "bfx_ask", "spread_bps", "episode_id",
-                "episode_first", "rule",
-            )
+        evaluator.TRIGGER_FEATURE_KEY: {
+            key: copy.deepcopy(trigger.get(key)) for key in evaluator.TRIGGER_FEATURE_FIELDS
         },
         "signal_clock": _xvl.SIGNAL_CLOCK,
     }
     decision = policy.decide_entry(
         direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
         reference_price=reference,
-        ai_feature={"xvl_trigger_id": call_id, "lead_bp": trigger.get("lead_bp")},
+        ai_feature={f"{evaluator.ID_PREFIX}_trigger_id": call_id,
+                    evaluator.SIGNAL_KEY: trigger.get(evaluator.SIGNAL_KEY)},
     )
     decision["shared_ai_call_id"] = call_id
-    decision["xvl_trigger_id"] = call_id
+    decision[f"{evaluator.ID_PREFIX}_trigger_id"] = call_id
     _record_adaptive_entry_decision(lane, decision)
     accepted = decision.get("action") != "STAND_ASIDE"
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
         "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
-        "raw_direction": side, "raw_decision": "XVL_TRIGGER",
+        "raw_direction": side, "raw_decision": tag,
         "direction_source": _xvl_direction_source(lane),
         "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts, "trade_id": call_id,
         "effective_research_direction": side,
         "effective_research_admission_policy_id": (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment"),
-        "effective_research_admission": {"applied": True, "accepted": True, "reason": "XVL_TRIGGER",
+        "effective_research_admission": {"applied": True, "accepted": True, "reason": tag,
                                          "effective_direction": side},
     }
     ctx = {
@@ -29481,7 +29566,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         "price": reference, "symbol": SYMBOL,
     }
     disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
-    reason = "XVL_TRIGGER_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
+    reason = f"{tag}_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
     evidence_ready = _write_v3_shared_lane_decision(
         lane, ai, ctx, signal_features,
         policy_decision="ACCEPT" if accepted else "REJECT",
@@ -29496,7 +29581,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         _xvl_lane_state(lane)["submissions"].append(time.time())
     _spawn_combo_lane(
         ctx, ai, 0.0, {**signal_features, "adaptive_entry_decision": decision}, lane,
-        f"XVL_TRIGGER_{COMBO_LANE_SPECS[lane]['combo_key']}",
+        f"{tag}_{COMBO_LANE_SPECS[lane]['combo_key']}",
     )
     return "ORDER_ELIGIBLE"
 
@@ -29516,7 +29601,7 @@ def _xvl_tick(now: float) -> None:
         )
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
-            _xvl_append(row)
+            _xvl_append(row, evaluator.SHADOW_FILE)
         if trigger:
             _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
 
@@ -29527,10 +29612,7 @@ def xvl_evaluator_loop():
         return
     _xvl_lower_thread_priority()
     for lane in lanes:
-        policy = _patient_chase_policy(lane)
-        _XVL_EVALUATORS[lane] = _xvl.LeadEvaluator(
-            policy.RULE, policy_id=policy.POLICY_ID, policy_signature=policy.POLICY_SIGNATURE,
-        )
+        _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
     _xvl_status["started_ts"] = time.time()
     next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
     while not shutdown_event.is_set():
@@ -29607,6 +29689,7 @@ def xvl_evaluator_snapshot() -> dict:
         "tick_age_s": tick_age,
         "lanes": {
             lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
+                   "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
                    "paper": runtime.get(lane, {})}
             for lane in lanes
         },
@@ -29760,6 +29843,109 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
     return row
 
 
+def _ai_shadow_premium_facts() -> dict:
+    evaluator = _XVL_EVALUATORS.get(RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S)
+    if evaluator is None or not hasattr(evaluator, "latest_features"):
+        return {"status": "UNAVAILABLE"}
+    try:
+        return evaluator.latest_features()
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+AI_SHADOW_HOOK_BUDGET_SEC = POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC - 6.0
+AI_SHADOW_REGIME_MIN_TIMEOUT_SEC = 5.0
+
+
+def _ai_shadow_run_regime(compact_facts: dict, premium: dict, call_id: str, now_ts: float,
+                          timeout_sec: float = AI_SHADOW_COMPACT_TIMEOUT_SEC) -> dict:
+    facts = _ai_regime.build_regime_facts(compact_facts or {}, premium)
+    row = {
+        "schema": _ai_regime.REGIME_PROMPT_SCHEMA,
+        "row_kind": "REGIME_PROMPT",
+        "shared_ai_call_id": call_id,
+        "prompt_id": _ai_regime.REGIME_PROMPT_ID,
+        "hypothesis_id": _ai_regime.HYPOTHESIS_ID,
+        "observed_at_utc": utc_iso(),
+        "decision_ts": now_ts,
+        "epoch_id": _collector_v22_epoch_id(),
+        "git_rev": _runtime_git_rev(),
+        "temperature": 0.0,
+        "max_tokens": _ai_regime.MAX_TOKENS,
+        "facts": facts,
+        "stat_rule": _ai_regime.stat_rule(facts),
+        "gates_orders": False,
+        "call_state": None,
+        "parsed": None,
+    }
+    if not AI_SHADOW_REGIME_PROMPT_ENABLED:
+        row["call_state"] = "DISABLED"
+        return row
+    if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
+        row["call_state"] = "SKIPPED_DEMO_MODE"
+        return row
+    if timeout_sec < AI_SHADOW_REGIME_MIN_TIMEOUT_SEC:
+        row["call_state"] = "SKIPPED_HOOK_DEADLINE"
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_skipped"] += 1
+        return row
+    allowed, reason = _AI_REGIME_BUDGET.acquire(now_ts)
+    if not allowed:
+        row["call_state"] = f"SKIPPED_{reason}"
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_skipped"] += 1
+        return row
+    try:
+        text, latency_ms, call_meta = call_deepseek_api_with_meta(
+            _ai_regime.render_regime_messages(facts),
+            temperature=0.0,
+            purpose="trading_direction_shadow",
+            max_tokens=_ai_regime.MAX_TOKENS,
+            response_format={"type": "json_object"},
+            timeout=min(AI_SHADOW_COMPACT_TIMEOUT_SEC, timeout_sec),
+        )
+        parsed = _ai_regime.parse_regime_response(text)
+        row.update({
+            "call_state": "CALLED",
+            "model": call_meta.get("requested_model") or _deepseek_model(),
+            "served_model": call_meta.get("served_model"),
+            "system_fingerprint": call_meta.get("system_fingerprint"),
+            "latency_ms": latency_ms,
+            "raw_response": str(text)[:400],
+            "parsed": parsed,
+        })
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_ok"] += int(parsed.get("parse_status") == "OK")
+            _ai_shadow_status["regime_errors"] += int(parsed.get("parse_status") != "OK")
+    except Exception as exc:
+        row.update({"call_state": "ERROR", "error": str(exc)[:300]})
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_errors"] += 1
+            _ai_shadow_status["last_regime_error"] = str(exc)[:160]
+    return row
+
+
+def _log_decision_feature_snapshot(*, call_id, decision_ts, ctx, ai_result, tape, leader,
+                                   premium, compact_row, regime_row) -> None:
+    try:
+        snapshot = _dfs.build_snapshot(
+            call_id=call_id, decision_ts=decision_ts, decision_price=ctx.get("price"),
+            ai_result=ai_result, tape=tape, leader=leader, premium=premium,
+            compact_facts=compact_row.get("facts"),
+            regime={"call_state": regime_row.get("call_state"), "parsed": regime_row.get("parsed")},
+            tile_toggles=research_lane_enabled_map(),
+            meta={"epoch_id": _collector_v22_epoch_id(), "git_rev": _runtime_git_rev(),
+                  "decision_utc": ai_result.get("shared_ai_call_ts")},
+        )
+    except Exception as exc:
+        logger.warning(f"[DECISION SNAPSHOT] build failed: {exc} [PIPELINE ENFORCEMENT]")
+        return
+    if _safe_append_jsonl(DECISION_FEATURE_SNAPSHOT_FILE, snapshot, label="DECISION_FEATURE_SNAPSHOT"):
+        _DFS_BOOK.register(snapshot)
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["snapshots_logged"] += 1
+
+
 def _ai_shadow_win_prob(ai_result: dict, challengers: dict) -> dict:
     """Evidence win probability: the compact model's success probability for the score-led side.
 
@@ -29797,12 +29983,18 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     call_id = str(ai_result.get("shared_ai_call_id") or ai_result.get("trade_id") or ctx.get("trade_id") or "")
     if not call_id:
         return
+    hook_started = time.time()
     decision_ts = _ai_shadow_decision_ts(ai_result)
     tape = ctx.get("tape_features")
     if not isinstance(tape, dict) or tape.get("source") == "UNAVAILABLE":
         tape = _ai_shadow_tape_features(decision_ts)
     leader = _ai_shadow_leader_features(decision_ts)
     compact_row = _ai_shadow_run_compact(ctx, tape, call_id, time.time())
+    premium = _ai_shadow_premium_facts()
+    regime_row = _ai_shadow_run_regime(
+        compact_row.get("facts"), premium, call_id, decision_ts,
+        timeout_sec=AI_SHADOW_HOOK_BUDGET_SEC - (time.time() - hook_started),
+    )
     challengers = _ai_shadow.compute_challenger_sides(
         ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"), leader=leader,
     )
@@ -29825,6 +30017,7 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "git_rev": _runtime_git_rev(),
         "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
+        "prompt_input_revision": ai_result.get("prompt_input_revision") or AI_PROMPT_INPUT_REVISION,
         "deepseek_model": ai_result.get("deepseek_model"),
         "deepseek_served_model": ai_result.get("deepseek_served_model"),
         "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
@@ -29859,6 +30052,11 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     }
     _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, call_row, label="AI_SHADOW_CHALLENGER")
     _safe_append_jsonl(AI_SHADOW_COMPACT_PROMPT_FILE, compact_row, label="AI_SHADOW_COMPACT_PROMPT")
+    _safe_append_jsonl(AI_SHADOW_REGIME_PROMPT_FILE, regime_row, label="AI_SHADOW_REGIME_PROMPT")
+    _log_decision_feature_snapshot(
+        call_id=call_id, decision_ts=decision_ts, ctx=ctx, ai_result=ai_result, tape=tape,
+        leader=leader, premium=premium, compact_row=compact_row, regime_row=regime_row,
+    )
     _AI_SHADOW_BOOK.register(call_row)
     with _AI_SHADOW_LOCK:
         _ai_shadow_status["calls_logged"] += 1
@@ -29913,6 +30111,10 @@ def _ai_shadow_boot_recover() -> None:
         _read_jsonl_tail(AI_SHADOW_CHALLENGER_FILE, 8 * 1024 * 1024), time.time(),
     )
     recovered = sum(1 for row in pending if _AI_SHADOW_BOOK.register(row))
+    snapshots = _dfs.pending_from_rows(
+        _read_jsonl_tail(DECISION_FEATURE_SNAPSHOT_FILE, 4 * 1024 * 1024), time.time(),
+    )
+    recovered += sum(1 for snap, done in snapshots if _DFS_BOOK.register(snap, done))
     with _AI_SHADOW_LOCK:
         _ai_shadow_status["boot_hydrated_seconds"] = hydrated
         _ai_shadow_status["boot_recovered_calls"] = recovered
@@ -29935,6 +30137,12 @@ def ai_shadow_maturation_loop():
             for row in _AI_SHADOW_BOOK.mature(_AI_SHADOW_TAPE, time.time()):
                 _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, row, label="AI_SHADOW_CHALLENGER")
                 _ai_shadow_note_matured(row)
+            labels = _DFS_BOOK.mature(_AI_SHADOW_TAPE, time.time())
+            for row in labels:
+                _safe_append_jsonl(DECISION_FEATURE_SNAPSHOT_FILE, row, label="DECISION_FEATURE_SNAPSHOT")
+            if labels:
+                with _AI_SHADOW_LOCK:
+                    _ai_shadow_status["labels_logged"] += len(labels)
         except Exception as exc:
             logger.warning(f"[AI SHADOW] maturation failed: {exc} [PIPELINE ENFORCEMENT]")
 
@@ -29977,6 +30185,10 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "compact_prompt_id": _ai_shadow.COMPACT_PROMPT_ID,
         "compact_enabled": AI_SHADOW_COMPACT_PROMPT_ENABLED,
         "compact_budget": _AI_SHADOW_BUDGET.snapshot(),
+        "regime_prompt_id": _ai_regime.REGIME_PROMPT_ID,
+        "regime_enabled": AI_SHADOW_REGIME_PROMPT_ENABLED,
+        "decision_snapshot_version": _dfs.FEATURE_SET_VERSION,
+        "decision_label_pending": _DFS_BOOK.pending_count(),
         "pending_calls": _AI_SHADOW_BOOK.pending_count(),
         "book": dict(_AI_SHADOW_BOOK.stats),
         "tape_ring_seconds": len(_AI_SHADOW_TAPE),
@@ -30927,6 +31139,7 @@ def research_wipe_file_paths():
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
         AI_SHADOW_CHALLENGER_FILE, AI_SHADOW_COMPACT_PROMPT_FILE,
+        AI_SHADOW_REGIME_PROMPT_FILE, DECISION_FEATURE_SNAPSHOT_FILE,
         EDGE_CENSUS_FILE,
         "pathway_scorecard.json", FILL_QUALITY_FILE, "fill_quality_report.json",
         "shadow_fill_outcome_report.json", "benchmark_vs_lanes_report.json", "pathway_lane_specs.json",
@@ -32162,11 +32375,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "filters": lane_spec,
             },
             "signal_clock": lane_spec.get("signal_clock") or "SHARED_AI_CALL",
-            "evidence_badge": (
-                "HINT — 12h evidence"
-                if str((lane_spec.get("presentation", {}).get("hypothesis_result") or {}).get("status")) == "HINT_12H_EVIDENCE"
-                else None
-            ),
+            "evidence_badge": _taker_time_evidence_badge(lane_spec),
             "exit": policy_view["exit"],
             "exit_path": policy_view["exit"]["profile"],
             "promotion_criteria": lane_spec["promotion_criteria"],
@@ -50024,6 +50233,8 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "AI_INPUT_LOG_FILE",
     "AI_SHADOW_CHALLENGER_FILE",
     "AI_SHADOW_COMPACT_PROMPT_FILE",
+    "AI_SHADOW_REGIME_PROMPT_FILE",
+    "DECISION_FEATURE_SNAPSHOT_FILE",
     "CSV_FALLBACK_JSONL",
     "CHASE_OFFSET_TOUCH_GRID_FILE",
     "ORDER_MULTIVERSE_FILE",

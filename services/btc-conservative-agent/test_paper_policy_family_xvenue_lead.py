@@ -80,7 +80,7 @@ def test_registry_owns_a_paper_only_relay_ineligible_cross_venue_tile():
     assert policy.POLICY_SIGNATURE == spec["policy_signature"]
     assert spec["signal_clock"] == CROSS_VENUE_SIGNAL_CLOCK == xvl.SIGNAL_CLOCK
     assert spec["uses_shared_ai_direction"] is False
-    assert is_cross_venue_clock_lane(policy.LANE) and cross_venue_clock_lanes() == (policy.LANE,)
+    assert is_cross_venue_clock_lane(policy.LANE) and cross_venue_clock_lanes()[0] == policy.LANE
     assert policy.LANE not in RETIRED_TILE_LANES
     assert "HINT" in spec["subtitle"] and "12h evidence" in spec["subtitle"]
     assert "RELAY INELIGIBLE" in spec["subtitle"]

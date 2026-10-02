@@ -589,6 +589,7 @@ MAIN_RANKINGS_REPORT_FILE = "main_rankings_report.json"
 STREAM_STUDIES_REPORT_FILE = "stream_studies_report.json"
 DATA_HEALTH_REPORT_FILE = "data_health_report.json"
 EVENT_STUDY_REPORT_FILE = "event_study_report.json"
+DECISION_MODEL_REPORT_FILE = "decision_model_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -697,6 +698,7 @@ ANALYZER_JSON_REPORT_FILES = (
     STREAM_STUDIES_REPORT_FILE,
     DATA_HEALTH_REPORT_FILE,
     EVENT_STUDY_REPORT_FILE,
+    DECISION_MODEL_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -781,6 +783,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Stream Studies", STREAM_STUDIES_REPORT_FILE, "Exit-timing regret from post_exit_replay, taker counterfactual EV per AI decision and tile, post-fill markout curves per tile x liquidity, research_events_v22 outcome/observation mix; per-stream health"),
     ("Data Health", DATA_HEALTH_REPORT_FILE, "Coverage %, staleness and row counts per stream: market-context spot/premium/derivatives/liquidations/session flags, cross-venue taker flow up-mask, Bitfinex 1s tape; distinct-trade replay completeness and repaired-stream quality"),
     ("Pre-registered Event Studies", EVENT_STUDY_REPORT_FILE, "Frozen hypotheses H1-H5 (XVL lead, liquidation burst, funding-window drift, US cash open, Coinbase premium lead): matched controls (hour x trailing-vol tercile), CAR curves, hour-cluster t, lockbox counted until it closes, BH q on scored lockboxes"),
+    ("Decision Model Research", DECISION_MODEL_REPORT_FILE, "Versioned decision feature snapshots with 1-120m forward labels; regime shadow prompt H8 vs climatology and a fixed rule (kill after 14 days); laptop logistic challenger H9 walk-forward (10-14 day gates, never trades)"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -9322,6 +9325,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             strategy_lab_report(session=session, trades=trades)
             data_health_report(session=session)
             event_study_report(session=session)
+            decision_model_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9441,6 +9445,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         strategy_lab_report(session=session, trades=trades)
         data_health_report(session=session)
         event_study_report(session=session)
+        decision_model_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12311,9 +12316,13 @@ def tile_paired_comparison_report(trades) -> dict:
     print(f"\n=== TILE PAIRED COMPARISON {PIPELINE_ENFORCEMENT_TAG} ===")
     try:
         import tile_paired_comparison
+        from ai_shadow_challengers import CHALLENGER_FILE
         rows = trades.to_dict("records") if trades is not None and not getattr(trades, "empty", True) else []
+        revisions = tile_paired_comparison.call_input_revisions(
+            _load_jsonl_rows_all_generations(CHALLENGER_FILE, contains='"CALL"'))
         report = tile_paired_comparison.build_report(
             trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=CURRENT_RESEARCH_LANES,
+            call_revisions=revisions,
         )
         report["cohort"] = EXPECTED_BOT_VERSION
     except Exception as exc:
@@ -12779,6 +12788,22 @@ def event_study_report(session=None):
     except Exception as exc:  # the event study must never stop the analyzer
         payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
     return _write_aux_report(EVENT_STUDY_REPORT_FILE, payload, session)
+
+
+def decision_model_report(session=None):
+    """Publish snapshot health, the regime shadow prompt (H8) and the logistic challenger (H9)."""
+    from decision_feature_snapshots import SNAPSHOT_FILE
+    from research.decision_model_report import SCHEMA, build_from_data_dir
+
+    session = session or load_research_session()
+    try:
+        payload = build_from_data_dir(
+            os.path.dirname(os.path.abspath(_agent_data_path(SNAPSHOT_FILE))),
+            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
+        )
+    except Exception as exc:  # the decision-model view must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(DECISION_MODEL_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):

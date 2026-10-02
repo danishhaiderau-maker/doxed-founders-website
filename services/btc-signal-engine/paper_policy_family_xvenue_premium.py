@@ -1,12 +1,12 @@
-"""Tile 3: cross-venue lead — follow a Binance/Bybit lead over Bitfinex, taker, 60-s hold, 40 bp catastrophic stop (paper only)."""
+"""Tile 4: cross-venue premium — follow Binance/Bybit when their premium over Bitfinex is extreme vs its 60-min mean, taker, 60-s hold, 40 bp catastrophic stop (paper only)."""
 from __future__ import annotations
 
 from adaptive_regime_entry import ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA
-from cross_venue_lead import LeadEvaluator, LeadRule
+from cross_venue_premium import PremiumEvaluator, PremiumRule
 from taker_time_exit_binding import TakerTimeExitBinding
 
-LANE = "FAMILY_XVENUE_LEAD_60S"
-_BINDING = TakerTimeExitBinding(LANE, "Cross-venue lead · Binance/Bybit ≥8 bp lead over 10 s, 60-s hold, 40 bp stop")
+LANE = "FAMILY_XVENUE_PREMIUM_60S"
+_BINDING = TakerTimeExitBinding(LANE, "Cross-venue premium · Binance/Bybit premium ≥+1.75 / ≤−1.88 bp vs 60-min mean, 60-s hold, 40 bp stop")
 POLICY_ID = _BINDING.policy_id
 POLICY_SIGNATURE = _BINDING.policy_signature
 ENTRY = _BINDING.entry
@@ -16,13 +16,13 @@ ADAPTIVE_ENTRY = True
 CHASE_STEP = SPEC.chase_step
 MIN_CLOSED_CANDLES = _BINDING.MIN_CLOSED_CANDLES
 SIGNAL_CLOCK = ENTRY["signal_clock"]
-RULE = LeadRule.from_policy(ENTRY, EXIT)
+RULE = PremiumRule.from_policy(ENTRY, EXIT)
 
 __all__ = ("ACTION_STAND_ASIDE", "ACTION_TAKER", "DECISION_SCHEMA")
 
 
-def make_evaluator() -> LeadEvaluator:
-    return LeadEvaluator(RULE, policy_id=POLICY_ID, policy_signature=POLICY_SIGNATURE)
+def make_evaluator() -> PremiumEvaluator:
+    return PremiumEvaluator(RULE, policy_id=POLICY_ID, policy_signature=POLICY_SIGNATURE)
 
 
 lane_admission = _BINDING.lane_admission

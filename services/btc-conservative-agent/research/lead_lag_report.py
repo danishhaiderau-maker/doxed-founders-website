@@ -20,9 +20,10 @@ Sections, per leader venue:
 * ``basis`` - leader-minus-Bitfinex basis distribution and whether a basis
   deviation from its 15-minute mean predicts Bitfinex's next 60 s / 300 s.
 * ``derivatives`` - funding and open-interest change vs the next 15 minutes.
-* ``xvl`` - the registered cross-venue lead tile: capacity-one replay of its
-  rule on these tapes, the live shadow trigger/outcome stream
-  (``xvl_shadow_signals.jsonl``) and their anchor-matched parity.
+* ``xvl`` - every registered cross-venue tile (lead XVL and premium XVP):
+  capacity-one replay of its rule on these tapes, the live shadow
+  trigger/outcome streams (``xvl_shadow_signals.jsonl``,
+  ``xvp_shadow_signals.jsonl``) and their anchor-matched parity.
 
 The pre-registered rule is the shadow challenger's: 10 s window, 2 bp. Every
 other window/threshold is exploratory and carries the multiple-testing
@@ -430,15 +431,85 @@ def derivatives_section(al: Aligned) -> dict:
 # Cross-venue lead tile (XVL): tape replay, live shadow stream and parity
 # ---------------------------------------------------------------------------
 def _xvl_rules() -> dict:
-    """{lane: (LeadRule, policy_signature)} for registry tiles on the cross-venue clock."""
+    """{lane: (rule, policy_signature)} for registry tiles on the cross-venue clock.
+
+    The rule is a ``LeadRule`` (XVL) or a ``PremiumRule`` (XVP) by the tile's
+    direction source; ``_replay_for`` picks the matching tape replay.
+    """
     from combo_pathway_config import ACTIVE_TILE_REGISTRY, cross_venue_clock_lanes
     from cross_venue_lead import LeadRule
-    return {
-        lane: (LeadRule.from_policy(ACTIVE_TILE_REGISTRY[lane]["entry_policy"],
-                                    ACTIVE_TILE_REGISTRY[lane]["exit_policy"]),
-               str(ACTIVE_TILE_REGISTRY[lane].get("policy_signature") or ""))
-        for lane in cross_venue_clock_lanes()
-    }
+    from cross_venue_premium import PremiumRule
+    out = {}
+    for lane in cross_venue_clock_lanes():
+        spec = ACTIVE_TILE_REGISTRY[lane]
+        premium = spec["entry_policy"].get("direction_source") == "CROSS_VENUE_PREMIUM"
+        rule_cls = PremiumRule if premium else LeadRule
+        out[lane] = (rule_cls.from_policy(spec["entry_policy"], spec["exit_policy"]),
+                     str(spec.get("policy_signature") or ""))
+    return out
+
+
+def _ffill_limited(series: np.ndarray, limit: int) -> np.ndarray:
+    """Forward-fill NaNs for at most ``limit`` consecutive seconds (the research dataset rule)."""
+    out = series.copy()
+    last_val, last_i = np.nan, -10 ** 9
+    for i in range(len(out)):
+        if np.isfinite(out[i]):
+            last_val, last_i = out[i], i
+        elif i - last_i <= limit:
+            out[i] = last_val
+    return out
+
+
+def xvp_replay_trades(al: Aligned, rule) -> list:
+    """Capacity-one replay of the registered XVP premium-deviation rule (same markout as the shadow)."""
+    prem = []
+    bfx = _ffill_limited(al.bfx_mid, int(rule.max_fill_forward_sec))
+    for venue in rule.venues:
+        if venue not in al.mid:
+            return []
+        mid = _ffill_limited(al.mid[venue], int(rule.max_fill_forward_sec))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            prem.append((mid / bfx - 1.0) * 1e4)
+    with np.errstate(invalid="ignore"):
+        stack = np.vstack(prem)
+        valid = np.isfinite(stack)
+        count_v = valid.sum(axis=0)
+        premium = np.where(count_v > 0, np.where(valid, stack, 0.0).sum(axis=0) / np.maximum(count_v, 1), np.nan)
+    finite = np.isfinite(premium)
+    csum = np.concatenate([[0.0], np.cumsum(np.where(finite, premium, 0.0))])
+    ccnt = np.concatenate([[0], np.cumsum(finite.astype(int))])
+    idx = np.arange(al.n)
+    lo = np.maximum(0, idx + 1 - int(rule.mean_window_sec))
+    cnt = ccnt[idx + 1] - ccnt[lo]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.where(cnt >= int(rule.min_mean_samples), (csum[idx + 1] - csum[lo]) / np.maximum(cnt, 1), np.nan)
+        dev = premium - mean
+        spread = (al.ask - al.bid) / ((al.ask + al.bid) / 2.0) * 1e4
+        side = np.where(dev >= rule.long_threshold_bps, 1.0, np.where(dev <= rule.short_threshold_bps, -1.0, 0.0))
+        ok = np.isfinite(dev) & (side != 0) & np.isfinite(spread) & (spread <= rule.max_spread_bps)
+    trades, busy_until = [], -1
+    for i in np.flatnonzero(ok):
+        if i <= busy_until:
+            continue
+        entry_i, exit_i = i + rule.entry_delay_sec, i + rule.entry_delay_sec + rule.hold_sec
+        if exit_i >= al.n:
+            break
+        quotes = (al.bid[entry_i], al.ask[entry_i], al.bid[exit_i], al.ask[exit_i])
+        if not all(np.isfinite(q) for q in quotes):
+            continue
+        s = float(side[i])
+        bid0, ask0, bid1, ask1 = quotes
+        entry, exit_ = (ask0, bid1) if s > 0 else (bid0, ask1)
+        trades.append({"anchor": int(al.start + i), "side": "LONG" if s > 0 else "SHORT",
+                       "premium_dev_bp": float(dev[i]), "net_bp": float(s * (exit_ - entry) / entry * 1e4),
+                       "hour": int(al.hour[i])})
+        busy_until = exit_i
+    return trades
+
+
+def _replay_for(rule):
+    return xvp_replay_trades if hasattr(rule, "mean_window_sec") else xvl_replay_trades
 
 
 def xvl_replay_trades(al: Aligned, rule) -> list:
@@ -476,9 +547,15 @@ def xvl_replay_trades(al: Aligned, rule) -> list:
 
 
 def load_xvl_shadow_rows(data_dir: str) -> tuple:
-    from cross_venue_lead import OUTCOME_SCHEMA, SHADOW_FILE, TRIGGER_SCHEMA
+    """Trigger and outcome rows from every cross-venue shadow stream (XVL and XVP)."""
+    import cross_venue_lead as lead
+    import cross_venue_premium as premium
+    trigger_schemas = {lead.TRIGGER_SCHEMA, premium.TRIGGER_SCHEMA}
+    outcome_schemas = {lead.OUTCOME_SCHEMA, premium.OUTCOME_SCHEMA}
     triggers, outcomes = [], []
-    for path in _generations(os.path.join(data_dir, SHADOW_FILE)):
+    paths = [path for name in (lead.SHADOW_FILE, premium.SHADOW_FILE)
+             for path in _generations(os.path.join(data_dir, name))]
+    for path in paths:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
@@ -488,9 +565,9 @@ def load_xvl_shadow_rows(data_dir: str) -> tuple:
                         continue
                     if not isinstance(row, dict):
                         continue
-                    if row.get("schema") == TRIGGER_SCHEMA:
+                    if row.get("schema") in trigger_schemas:
                         triggers.append(row)
-                    elif row.get("schema") == OUTCOME_SCHEMA:
+                    elif row.get("schema") in outcome_schemas:
                         outcomes.append(row)
         except OSError:
             continue
@@ -516,8 +593,12 @@ def xvl_section(al: Optional[Aligned], triggers, outcomes) -> dict:
         return {**out, "status": "NO_CROSS_VENUE_TILES"}
     lanes = {}
     for lane, (rule, signature) in rules.items():
-        lane_trig = [r for r in triggers if r.get("policy_signature") in ("", None, signature)]
-        lane_out = [r for r in outcomes if r.get("policy_signature") in ("", None, signature)]
+        def _mine(r):
+            if r.get("research_lane") not in (None, lane):
+                return False
+            return r.get("policy_signature") in ("", None, signature)
+        lane_trig = [r for r in triggers if _mine(r)]
+        lane_out = [r for r in outcomes if _mine(r)]
         gates = {}
         for row in lane_trig:
             gates[str(row.get("gate"))] = gates.get(str(row.get("gate")), 0) + 1
@@ -544,7 +625,7 @@ def xvl_section(al: Optional[Aligned], triggers, outcomes) -> dict:
             },
         }
         if al is not None and al.bfx_source == "MICROSTRUCTURE_TAPE":
-            replay = xvl_replay_trades(al, rule)
+            replay = _replay_for(rule)(al, rule)
             cell["replay"] = {"span": [al.start, al.end],
                               **_xvl_summary([t["net_bp"] for t in replay], [t["hour"] for t in replay])}
             shadow_by_anchor = {int(r["anchor_bucket_ts"]): r for r in cap1}

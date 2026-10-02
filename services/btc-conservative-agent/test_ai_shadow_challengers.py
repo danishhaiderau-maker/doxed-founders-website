@@ -423,10 +423,13 @@ def test_shadow_purpose_is_allowed_and_request_is_bounded():
 
 def test_challenger_hook_logs_rows_and_never_touches_orders():
     tmp = tempfile.mkdtemp()
-    names = ("AI_SHADOW_CHALLENGER_FILE", "AI_SHADOW_COMPACT_PROMPT_FILE")
+    names = ("AI_SHADOW_CHALLENGER_FILE", "AI_SHADOW_COMPACT_PROMPT_FILE",
+             "AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE")
     originals = {n: getattr(bot, n) for n in names}
     original_call = bot.call_deepseek_api
     original_budget = bot._AI_SHADOW_BUDGET
+    original_regime_budget = bot._AI_REGIME_BUDGET
+    original_dfs_book = bot._DFS_BOOK
     original_book = bot._AI_SHADOW_BOOK
     original_live = bot._cross_venue_live
     calls = []
@@ -457,6 +460,8 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         bot.call_deepseek_api_with_meta = fake_call_with_meta
         bot._AI_SHADOW_BUDGET = shadow.CompactPromptBudget(0, 10)
         bot._AI_SHADOW_BOOK = shadow.ChallengerBook()
+        bot._AI_REGIME_BUDGET = bot._ai_regime.RegimeBudget()
+        bot._DFS_BOOK = bot._dfs.LabelBook()
         bot._cross_venue_live = lambda *a, **k: live
         ctx = _ctx(tape_features=shadow.tape_features(_ring(0, 400, lambda t: 1e5 + t), 400.0))
         ai = {"shared_ai_call_id": "hook-1", "long_score": 70, "short_score": 40,
@@ -492,7 +497,17 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
             "max_tokens": bot.AI_SHADOW_COMPACT_MAX_TOKENS,
             "response_format": {"type": "json_object"},
             "timeout": bot.AI_SHADOW_COMPACT_TIMEOUT_SEC,
+        }), ("trading_direction_shadow", 0.0, {
+            "max_tokens": bot._ai_regime.MAX_TOKENS,
+            "response_format": {"type": "json_object"},
+            "timeout": bot.AI_SHADOW_COMPACT_TIMEOUT_SEC,
         })]
+        with open(bot.AI_SHADOW_REGIME_PROMPT_FILE, encoding="utf-8") as fh:
+            regime_rows = [json.loads(line) for line in fh if line.strip()]
+        assert regime_rows[0]["call_state"] == "CALLED" and regime_rows[0]["gates_orders"] is False
+        assert regime_rows[0]["parsed"]["parse_status"] == "OUT_OF_RANGE_OR_MISSING"
+        assert row["prompt_input_revision"] == bot.AI_PROMPT_INPUT_REVISION
+        assert bot._DFS_BOOK.pending_count() == 1
         assert bot._AI_SHADOW_BOOK.pending_count() == 1
         with bot.trade_lock:
             assert len(bot.pending_orders) == orders_before
@@ -506,6 +521,8 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         bot.call_deepseek_api_with_meta = original_call_with_meta
         bot._AI_SHADOW_BUDGET = original_budget
         bot._AI_SHADOW_BOOK = original_book
+        bot._AI_REGIME_BUDGET = original_regime_budget
+        bot._DFS_BOOK = original_dfs_book
         bot._cross_venue_live = original_live
 
 
@@ -515,7 +532,33 @@ def test_hook_registered_and_files_are_wipe_and_serialization_scoped():
     assert "ai_shadow_challengers" in inspect.getsource(bot._run_post_ai_evidence_hook)
     wipe = bot.research_wipe_file_paths()
     assert bot.AI_SHADOW_CHALLENGER_FILE in wipe and bot.AI_SHADOW_COMPACT_PROMPT_FILE in wipe
+    assert bot.AI_SHADOW_REGIME_PROMPT_FILE in wipe and bot.DECISION_FEATURE_SNAPSHOT_FILE in wipe
     assert "AI_SHADOW_CHALLENGER_FILE" in bot._JSONL_SERIALIZED_APPEND_CONSTANTS
+    assert {"AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE"} <= set(
+        bot._JSONL_SERIALIZED_APPEND_CONSTANTS)
     health = bot.ai_input_health_snapshot()
     assert health["schema"] == shadow.INPUT_HEALTH_SCHEMA
     assert health["prompt_id"] == bot.SHARED_DIRECTION_PROMPT_ID
+
+
+@pytest.mark.parametrize("p_long,p_short,side", [
+    # Most frequent live pairs (mirror, 425 compact calls to 2026-10-02): p_long is
+    # pinned at 0.42, so only p_short moves; the relative rule must still fire.
+    (0.42, 0.38, "LONG"),
+    (0.42, 0.44, "NONE"),
+    (0.42, 0.40, "NONE"),
+    (0.42, 0.48, "SHORT"),
+    (0.52, 0.48, "LONG"),
+    (0.42, 0.55, "SHORT"),
+])
+def test_compact_side_rule_on_observed_live_probability_pairs(p_long, p_short, side):
+    parsed = {"parse_status": "OK", "abstain": False, "p_long_success": p_long, "p_short_success": p_short}
+    assert shadow.compact_side(parsed) == side
+    assert shadow.compact_summary(parsed)["side_rule"] == "relative_gap_0.04_v2"
+
+
+def test_compact_side_rule_never_trades_abstain_or_invalid():
+    base = {"parse_status": "OK", "abstain": False, "p_long_success": 0.30, "p_short_success": 0.60}
+    assert shadow.compact_side({**base, "abstain": True}) == "NONE"
+    assert shadow.compact_side({**base, "parse_status": "OUT_OF_RANGE_OR_MISSING"}) == "NONE"
+    assert shadow.compact_side(None) == "NONE"

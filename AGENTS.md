@@ -37,76 +37,69 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Two tiles are registered, both owner-approved paper experiments with no
-  proven edge. Each consumes the shared AI call with its own lock, orders,
-  positions, ledger and analyzer cohort, and they pair on identical signals.
-  Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`): its own lane admission trades
-  the opposite of the shared call's score-led side (raw AI NO_TRADE and small
-  gaps still trade; ties, invalid scores and AI errors refuse), enters taker at
-  the signal with a 5 bp price cap and 15 s TTL, stands aside when the spread
-  exceeds 1.68 bp or the BBO is stale, and exits only at 60 minutes or a 40 bp
-  catastrophic stop booked at the crossing quote (no ladder, break-even, trail
-  or target; one position). Its label discloses "in-sample +$1.30 / 47 trades;
-  expected heavy decay". It defaults OFF in source (the deploy turns it ON).
-  Its policy epoch and signature are pinned so its cohort continues across
-  registry-version bumps; it has no paired control since the Dynamic Adaptive
-  tiles were retired on 2026-10-02. Tile 2, Trend Fade 60 + Profit Lock
-  (`FAMILY_TREND_FADE_60_LADDER`, prefix `ftl`): identical entry and lane
-  admission; exits on the Scenario-C profit-lock ladder (8>5, 12>10, 19>17,
-  40>28, 60>45, 80>60, 100>75, 150>120 margin % at 100x, booked at the crossing
-  quote), the 40 bp catastrophic stop or the 60-minute backstop (no break-even,
-  trail or target beyond the ladder); holds up to five concurrent positions in
-  its own capacity; default ON at the owner's request (the registry refuses
-  default ON for any tile that is not paper-only and relay-blocked); Trend Fade
-  60 is its paired control. Both are paper-only and relay-ineligible and carry
-  the same frozen trade-count pre-registration: promotion (owner review, never
-  relay) needs >=150 trades, a per-trade EV lower 95% CI > 0, both halves
-  positive and no 2 h window above 30% of profit; kill when down $0.40 after 40
-  trades, not positive after 80, any trade worse than -60 bp, drawdown above
-  $1.00, or day 14 without promotion. The three Dynamic Adaptive tiles
-- Tile 3 is Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), a paper
-  experiment labelled "HINT - 12h evidence" that uses no AI: a bounded
-  per-second evaluator (`cross_venue_lead.py`, its own thread, separate from the
-  180 s AI cadence) takes a Bitfinex taker entry (5 bp cap, 3 s TTL) in the
-  direction of the mean Binance/Bybit 10 s mid return when it leads Bitfinex by
-  >=8 bp, refuses when any feed is >2 s old or the spread exceeds 3 bp, and
-  exits at 60 s or a 40 bp catastrophic stop; one position, >=5 s between
-  submissions, <=60 per hour. Every qualifying second is logged to
-  `xvl_shadow_signals.jsonl` with its hypothetical 60 s after-spread outcome
-  whether or not the toggle is ON. Venue prices are data only; fees are
-  Bitfinex-only. It defaults OFF in source (the deploy turns it ON), is
-  paper-only, and is relay-ineligible. Pre-registration: promotion (owner
-  review, never relay) needs >=1000 fills over >=5 UTC days incl. 3 Asia
-  sessions of >=50 trades, 1 h-cluster lower 95% CI > 0, 4 of the first 5 days
-  and both halves positive, no hour above 15% of profit, and shadow/paper
-  parity within 1 bp; kill when the mean is not positive after 150 trades, the
-  upper CI is below 0.5 bp after 400, on a -45 bp trade or >1% stale-feed
-  share, drawdown above $0.50, or day 10 without promotion. It is excluded from
-  shared-AI pairing and scored alone.
+- Four tiles are registered, all owner-approved paper experiments with no
+  proven edge, each with its own lock, orders, positions, ledger and analyzer
+  cohort. All default OFF in source (the deploy turns them ON), are paper-only
+  and relay-ineligible.
+- Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`, prefix `ftf`): its own lane
+  admission trades the opposite of the shared call's score-led side (raw AI
+  NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
+  refuse), enters taker at the signal with a 5 bp price cap and 15 s TTL, stands
+  aside when the spread exceeds 1.68 bp or the BBO is stale, and exits only at
+  60 minutes or a 40 bp catastrophic stop booked at the crossing quote (one
+  position). Label: "in-sample +$1.30 / 47 trades; expected heavy decay". Its
+  policy epoch and signature are pinned so its cohort continues across
+  registry-version bumps. The shared AI input revision
+  (`AI_PROMPT_INPUT_REVISION`) is logged per call; the analyzer splits Tile 1
+  at each revision boundary instead of re-signing the tile.
+- Tile 2, Trend Fade 60 - committed calls only
+  (`FAMILY_TREND_FADE_60_COMMITTED`, prefix `ftc`): identical to Tile 1 except
+  it only fades calls where the AI committed to an explicit LONG/SHORT that
+  equals the score-led side with a score gap >= 30; it never fades NO_TRADE or
+  a score/side mismatch. Tile 1 is its paired control. Pre-registration:
+  promotion (owner review, never relay) needs >=150 fills over >=40 h and >=3
+  regime-days, 2 h-cluster lower 95% CI > 0, beating Tile 1 by 10 bp on paired
+  signals and both halves positive; kill when hit rate < 52% after 150 fills,
+  trend-day mean < -15 bp, any trade < -60 bp, drawdown > $1, or day 21. It
+  replaced the retired Trend Fade 60 + Profit Lock ladder tile
+  (`FAMILY_TREND_FADE_60_LADDER`, prefix `ftl`), whose history is opaque archive.
+- Tile 3, Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), "HINT -
+  12h evidence", uses no AI: a bounded per-second evaluator
+  (`cross_venue_lead.py`, its own thread, separate from the 180 s AI cadence)
+  takes a Bitfinex taker entry (5 bp cap, 3 s TTL) in the direction of the mean
+  Binance/Bybit 10 s mid return when it leads Bitfinex by >=8 bp, refuses when
+  any feed is >2 s old or the spread exceeds 3 bp, and exits at 60 s or a 40 bp
+  catastrophic stop; one position, >=5 s between submissions, <=60 per hour.
+  Every qualifying second is logged to `xvl_shadow_signals.jsonl` with its
+  hypothetical 60 s after-spread outcome whether or not the toggle is ON. Its
+  policy epoch is pinned to v5. Pre-registration: promotion needs >=1000 fills
+  over >=5 UTC days incl. 3 Asia sessions of >=50 trades, 1 h-cluster lower 95%
+  CI > 0, 4 of the first 5 days and both halves positive, no hour above 15% of
+  profit, and shadow/paper parity within 1 bp; kill when the mean is not
+  positive after 150 trades, the upper CI is below 0.5 bp after 400, on a -45 bp
+  trade or >1% stale-feed share, drawdown above $0.50, or day 10.
+- Tile 4, Cross-venue premium (`FAMILY_XVENUE_PREMIUM_60S`, prefix `xvp`), "HINT
+  - 8h holdout evidence", uses no AI and shares the per-second evaluator thread
+  (`cross_venue_premium.py`): the premium is the mean Binance/Bybit mid over the
+  Bitfinex mid in bp; a deviation from its own trailing 60-minute mean (>=1200
+  samples, so ~20 minutes of warm-up after every boot) of >=+1.75 bp goes long
+  and <=-1.88 bp goes short (Bitfinex follows the leaders); taker entry with a
+  5 bp cap and 3 s TTL, 60 s time exit (chosen over 300 s, which was not
+  materially better on non-overlapping holdout trades), 40 bp catastrophic
+  stop, spread <=3 bp, feeds <=2 s old, one position. Shadow rows go to
+  `xvp_shadow_signals.jsonl`. Pre-registration: promotion needs >=500 fills over
+  >=7 days with >=3 each of ASIA/EU/US sessions, cluster CI > 0, the 5 s-delay
+  shadow positive, no day > 30% of profit, both sides >= 0, shadow/paper parity
+  <=1 bp and median signal-to-fill <=2 s; kill when the mean is <=0 after 300,
+  the 5 s-delay shadow < -0.5 bp after 300, a trade < -45 bp or >1% stale,
+  drawdown > $0.50, day 14, or pause on any execution defect. Cross-venue tiles
+  are excluded from shared-AI pairing and scored alone.
+- The Trend Fade 60 ladder, the three Dynamic Adaptive tiles
   (`FAMILY_ADAPTIVE_REGIME`, `FAMILY_ADAPTIVE_REGIME_LADDER`,
   `FAMILY_ADAPTIVE_REGIME_LADDER_BE`), the five former family tiles and the
   Continuous comparison label are retired (`RETIRED_TILE_LANES`); their history
   is opaque archive data. A future tile is promoted only if it passes the OOS
   promotion gate.
-- Tile 2 is Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), a paper
-  experiment labelled "HINT - 12h evidence" that uses no AI: a bounded
-  per-second evaluator (`cross_venue_lead.py`, its own thread, separate from the
-  180 s AI cadence) takes a Bitfinex taker entry (5 bp cap, 3 s TTL) in the
-  direction of the mean Binance/Bybit 10 s mid return when it leads Bitfinex by
-  >=8 bp, refuses when any feed is >2 s old or the spread exceeds 3 bp, and
-  exits at 60 s or a 40 bp catastrophic stop; one position, >=5 s between
-  submissions, <=60 per hour. Every qualifying second is logged to
-  `xvl_shadow_signals.jsonl` with its hypothetical 60 s after-spread outcome
-  whether or not the toggle is ON. Venue prices are data only; fees are
-  Bitfinex-only. It defaults OFF in source (the deploy turns it ON), is
-  paper-only, and is relay-ineligible. Pre-registration: promotion (owner
-  review, never relay) needs >=1000 fills over >=5 UTC days incl. 3 Asia
-  sessions of >=50 trades, 1 h-cluster lower 95% CI > 0, 4 of the first 5 days
-  and both halves positive, no hour above 15% of profit, and shadow/paper
-  parity within 1 bp; kill when the mean is not positive after 150 trades, the
-  upper CI is below 0.5 bp after 400, on a -45 bp trade or >1% stale-feed
-  share, drawdown above $0.50, or day 10 without promotion. It is excluded from
-  shared-AI pairing and scored alone.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy

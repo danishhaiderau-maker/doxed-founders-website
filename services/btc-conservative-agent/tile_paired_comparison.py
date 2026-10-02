@@ -78,7 +78,7 @@ def _fill_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     return {
         "lane": lane, "call": call, "close_ts": close_ts, "pnl_usd": pnl,
         "bp": pnl / notional * 1e4 if notional > 0 else None,
-        "reason": reason, "overshoot_bp": overshoot,
+        "reason": reason, "overshoot_bp": overshoot, "side": sign, "entry": entry,
     }
 
 
@@ -332,15 +332,188 @@ def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any
     }
 
 
+def _committed_fade_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """2 h-cluster CI, distinct hours, hit rate and regime-day facts for the committed fade.
+
+    The regime of a UTC day uses the tile's own entry prices that day
+    (``ENTRY_PRICE_PROXY``): a first-to-last move of at least 1.5% is a trend
+    day, otherwise range. Days with one fill are range days.
+    """
+    fills = sorted(fills, key=lambda r: r["close_ts"])
+    bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
+    lo, hi = _cluster_ci(bps, cluster_sec=WINDOW_2H_SEC)
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    for r in fills:
+        by_day.setdefault(datetime.fromtimestamp(r["close_ts"], timezone.utc).date().isoformat(), []).append(r)
+    regimes: dict[str, str] = {}
+    trend_day_means: dict[str, float] = {}
+    for day, rows in by_day.items():
+        prices = [r["entry"] for r in rows if r.get("entry")]
+        move = (prices[-1] / prices[0] - 1.0) if len(prices) >= 2 else 0.0
+        regimes[day] = "UP" if move >= 0.015 else ("DOWN" if move <= -0.015 else "RANGE")
+        day_bps = [r["bp"] for r in rows if r["bp"] is not None]
+        if regimes[day] != "RANGE" and day_bps:
+            trend_day_means[day] = round(sum(day_bps) / len(day_bps), 4)
+    return {
+        "per_fill_ev_ci95_bp_2h": [lo, hi],
+        "distinct_hours": len({int(r["close_ts"] // 3600) for r in fills}),
+        "hit_rate": round(sum(1 for _, v in bps if v > 0) / len(bps), 4) if bps else None,
+        "regime_days": regimes,
+        "regime_kinds_observed": sorted(set(regimes.values())),
+        "regime_method": "ENTRY_PRICE_PROXY",
+        "worst_trend_day_mean_bp": min(trend_day_means.values()) if trend_day_means else None,
+    }
+
+
+def _committed_fade_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                            dsr: float | None, now_ts: float) -> dict[str, Any]:
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, _ = stats.get("per_fill_ev_ci95_bp_2h") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    kills = []
+    hit = stats.get("hit_rate")
+    if fills >= kill["k1_after_fills"] and hit is not None and hit < kill["k1_hit_rate_below"]:
+        kills.append("K1_HIT_RATE_BELOW_52_AFTER_150")
+    worst_day = stats.get("worst_trend_day_mean_bp")
+    if worst_day is not None and worst_day < kill["k2_trend_day_mean_bp_below"]:
+        kills.append("K2_TREND_DAY_MEAN_BELOW_MINUS_15")
+    worst = stats.get("worst_fill_bp")
+    if worst is not None and worst < kill["k3_worst_trade_bp_below"]:
+        kills.append("K3_STOP_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    diff = paired.get("mean_difference_bp")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "min_distinct_hours": (stats.get("distinct_hours") or 0) >= promote["min_distinct_hours"],
+        "min_regime_days": len(stats.get("regime_kinds_observed") or ()) >= promote["min_regime_days"],
+        "per_fill_ev_lower_ci95_2h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "beats_control": diff is not None and diff >= promote["beats_control_by_bp"],
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
+XVP_SESSIONS_UTC = {"ASIA": (0, 8), "EU": (8, 13), "US": (13, 21)}
+
+
+def _xvp_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """1 h-cluster CI, UTC days, per-session days, day concentration and per-side means."""
+    fills = sorted(fills, key=lambda r: r["close_ts"])
+    bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
+    lo, hi = _cluster_ci(bps, cluster_sec=3600)
+    days: dict[str, float] = {}
+    sessions: dict[str, set] = {name: set() for name in XVP_SESSIONS_UTC}
+    for r in fills:
+        moment = datetime.fromtimestamp(r["close_ts"], timezone.utc)
+        day = moment.date().isoformat()
+        days[day] = days.get(day, 0.0) + r["pnl_usd"]
+        for name, (start_h, end_h) in XVP_SESSIONS_UTC.items():
+            if start_h <= moment.hour < end_h:
+                sessions[name].add(day)
+    total = sum(r["pnl_usd"] for r in fills)
+    side_bp = {
+        label: [r["bp"] for r in fills if r.get("side") == sign and r["bp"] is not None]
+        for label, sign in (("LONG", 1), ("SHORT", -1))
+    }
+    return {
+        "mean_bp": round(sum(v for _, v in bps) / len(bps), 4) if bps else None,
+        "per_fill_ev_ci95_bp_1h": [lo, hi],
+        "utc_days": len(days),
+        "session_days": {name: len(v) for name, v in sessions.items()},
+        "session_hours_utc": {k: list(v) for k, v in XVP_SESSIONS_UTC.items()},
+        "max_single_day_profit_share": round(max(days.values()) / total, 4) if fills and total > 0 else None,
+        "side_mean_bp": {k: (round(sum(v) / len(v), 4) if v else None) for k, v in side_bp.items()},
+    }
+
+
+def _xvp_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                 dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """Shadow 5 s-delay, replay parity and signal-to-fill facts come from the analyzer's
+    cross-venue report when present; until then those checks stay False (no promotion)."""
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, _ = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    mean = stats.get("mean_bp")
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    delay5 = stats.get("shadow_5s_delay_mean_bp")
+    kills = []
+    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
+        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_300")
+    if fills >= kill["k2_after_fills"] and delay5 is not None and delay5 < kill["k2_shadow_5s_delay_mean_below_bp"]:
+        kills.append("K2_5S_DELAY_SHADOW_NEGATIVE_AFTER_300")
+    worst = stats.get("worst_fill_bp")
+    stale_share = stats.get("stale_feed_fill_share")
+    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
+        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
+    ):
+        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    sessions = stats.get("session_days") or {}
+    sides = stats.get("side_mean_bp") or {}
+    share = stats.get("max_single_day_profit_share")
+    parity = stats.get("replay_parity_gap_bp")
+    latency = stats.get("median_signal_to_fill_sec")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
+        "sessions": all((sessions.get(s) or 0) >= promote["min_sessions_each"] for s in promote["sessions"]),
+        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "shadow_5s_delay_positive": delay5 is not None and delay5 > promote["shadow_5s_delay_mean_gt_bp"],
+        "no_day_dominates": share is not None and share <= promote["max_single_day_profit_share"],
+        "both_sides_non_negative": all(
+            sides.get(s) is not None and sides[s] >= promote["both_sides_mean_ge_bp"] for s in ("LONG", "SHORT")
+        ),
+        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
+        "signal_to_fill_latency": latency is not None and latency <= promote["max_median_signal_to_fill_sec"],
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
 VERDICT_RULES = {
     "tile_pre_registration_trade_count_v1": _trade_count_verdict,
     "tile_pre_registration_xvl_v1": _xvl_verdict,
+    "tile_pre_registration_committed_fade_v1": _committed_fade_verdict,
+    "tile_pre_registration_xvp_v1": _xvp_verdict,
 }
-EXTRA_STATS = {"tile_pre_registration_xvl_v1": _xvl_extra_stats}
+EXTRA_STATS = {
+    "tile_pre_registration_xvl_v1": _xvl_extra_stats,
+    "tile_pre_registration_committed_fade_v1": _committed_fade_extra_stats,
+    "tile_pre_registration_xvp_v1": _xvp_extra_stats,
+}
+
+
+UNJOINED_INPUT_REVISION = "UNJOINED"
+PRE_REVISION_INPUTS = "shared_direction_inputs_r1"
+
+
+def call_input_revisions(challenger_rows: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """shared_ai_call_id -> prompt input revision; calls logged before the field existed are r1."""
+    out: dict[str, str] = {}
+    for row in challenger_rows:
+        if row.get("row_kind") != "CALL" or not row.get("shared_ai_call_id"):
+            continue
+        out[str(row["shared_ai_call_id"])] = str(row.get("prompt_input_revision") or PRE_REVISION_INPUTS)
+    return out
+
+
+def _input_revision_cohorts(by_lane, lanes, revisions: Mapping[str, str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for lane in lanes:
+        cells: dict[str, list[float]] = {}
+        for r in by_lane[lane]:
+            if r["bp"] is None:
+                continue
+            cells.setdefault(revisions.get(r["call"], UNJOINED_INPUT_REVISION), []).append(r["bp"])
+        out[lane] = {rev: {"n": len(v), "mean_bp": round(sum(v) / len(v), 4)} for rev, v in sorted(cells.items())}
+    return out
 
 
 def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, Mapping[str, Any]],
-                 tile_order: Sequence[str], now_ts: float | None = None) -> dict[str, Any]:
+                 tile_order: Sequence[str], now_ts: float | None = None,
+                 call_revisions: Mapping[str, str] | None = None) -> dict[str, Any]:
     now_ts = float(now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp())
     lanes = [str(lane).upper() for lane in tile_order]
     by_lane: dict[str, list[dict[str, Any]]] = {lane: [] for lane in lanes}
@@ -420,5 +593,10 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
         "paired": pairs,
         "all_tiles_paired": all_paired,
         "pre_registered": pre_registered,
+        "input_revision_cohorts": {
+            "meaning": ("AI-fed tiles split by the shared call's prompt input revision; a revision "
+                        "changes what the AI saw, so evidence must not pool across it"),
+            "lanes": _input_revision_cohorts(by_lane, paired_lanes, call_revisions or {}),
+        },
         "qualification_eligible": False,
     }
