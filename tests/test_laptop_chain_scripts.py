@@ -727,6 +727,59 @@ def test_runner_refreshes_dashboard_code_once_per_checkout_revision(tmp_path, ch
     assert f"DASHBOARD_CODE_REFRESH from=unknown to={head} exit=0" in log
 
 
+_FAKE_STATUS_SERVER = (
+    "import http.server\n"
+    "class H(http.server.BaseHTTPRequestHandler):\n"
+    "    def do_GET(self):\n"
+    "        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()\n"
+    "        self.wfile.write(b'{\"analysis_run\": null}')\n"
+    "    def log_message(self, *a): pass\n"
+    "http.server.HTTPServer(('127.0.0.1', 59431), H).serve_forever()\n"
+)
+
+
+@windows_only
+def test_failed_code_refresh_restores_the_dashboard_on_current_code(tmp_path, chain):
+    marker = tmp_path / "dashboard-calls.txt"
+    pid_file = tmp_path / "server.pid"
+    launcher = (
+        "param([switch]$Once,[switch]$NoWait,[switch]$DashboardOnly,[int]$Port=0)\n"
+        "if (-not $DashboardOnly) { exit 0 }\n"
+        f"$calls = @(Get-Content -LiteralPath '{marker}' -ErrorAction SilentlyContinue).Count\n"
+        "if ($calls -eq 0) {\n"
+        f"  Add-Content -LiteralPath '{marker}' -Value 'refresh-failed'\n"
+        f"  Stop-Process -Id ([int](Get-Content -LiteralPath '{pid_file}')) -Force\n"
+        "  [Console]::Error.WriteLine('DASHBOARD_PORT_NOT_RELEASED'); exit 1\n"
+        "}\n"
+        f"Add-Content -LiteralPath '{marker}' -Value 'start'; exit 0\n"
+    )
+    repo = _fake_repo(tmp_path, launcher)
+    for args in (("init", "-q"), ("add", "-A"),
+                 ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init")):
+        _git(repo, *args)
+    server = subprocess.Popen([sys.executable, "-c", _FAKE_STATUS_SERVER])
+    pid_file.write_text(str(server.pid))
+    try:
+        time.sleep(1.5)
+        result = _run_runner(repo, chain)
+    finally:
+        server.kill()
+        server.wait()
+    assert result.returncode == 6, result.stdout + result.stderr
+    assert marker.read_text().split() == ["refresh-failed", "start"]
+    # The restored dashboard was started from the current checkout.
+    head = _git(repo, "rev-parse", "HEAD")
+    assert (chain["state"] / "analyzer-dashboard-revision.txt").read_text() == head
+    log = "".join(p.read_text(encoding="utf-8-sig") for p in (chain["state"] / "logs").glob("analyzer-run-*.log"))
+    assert f"DASHBOARD_CODE_REFRESH from=unknown to={head} exit=1" in log and "DASHBOARD_START exit=0" in log
+    runner = _source("run-analyzer-once.ps1")
+    refresh = runner.split("function Update-AnalyzerDashboardCode {", 1)[1].split("\n}\n", 1)[0]
+    assert refresh.index("if ($dash.ExitCode -eq 0) {") < refresh.index("$readyBy = ")
+    launcher_src = _source("start-home-analyzer.ps1")
+    owned = launcher_src.split("function Restart-OwnedAnalyzerDashboard {", 1)[1].split("\n}\n", 1)[0]
+    assert owned.index("$releaseBy = ") < owned.index("throw 'DASHBOARD_PORT_NOT_RELEASED'")
+
+
 def test_supervisor_restores_the_dashboard_during_a_running_cycle():
     supervisor = _source("laptop-chain-supervisor.ps1")
     probe = supervisor.index('"http://127.0.0.1:$Port/api/health"')
