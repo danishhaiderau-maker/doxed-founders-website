@@ -9616,7 +9616,8 @@ def _section_index() -> list[dict]:
                 pages[path] = ""
         _SECTION_PAGE_HTML.update(at=now, html=pages)
     return _dashboard_sections.section_index(DASHBOARD_HTML, REPORT_NAV_GROUPS, DECISION_NAV_LINKS,
-                                             _SECTION_PAGE_HTML["html"])
+                                             _SECTION_PAGE_HTML["html"],
+                                             routes=[rule.rule for rule in app.url_map.iter_rules()])
 
 
 def _section_fetch(apis) -> dict:

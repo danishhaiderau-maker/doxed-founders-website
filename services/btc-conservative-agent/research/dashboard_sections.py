@@ -31,7 +31,9 @@ CORE_SECTIONS = ("summary", "combos", "genome", "lanes", "evidence-coverage")
 CORE_PAGES = ("/data-health", "/safe-policy-genome-v3.1", "/decision")
 EXTRA_SECTION_APIS = {"combos": ("/api/genome-grid",), "genome": ("/api/safe-policy-genome-v3.1",)}
 
-_FETCH_RE = re.compile(r"fetch\(\s*[`'\"](/api/[A-Za-z0-9_\-./]+)")
+_API_LITERAL_RE = re.compile(r"[`'\"](/api/[A-Za-z0-9_\-./]+)")
+# Shared by every page (status strip, system-health banner); not a section's own data.
+COMMON_APIS = ("/api/status", "/api/system-health")
 _TS_KEYS = ("generated_at", "generatedAt", "report_generated_at", "updated_at")
 
 
@@ -57,11 +59,16 @@ def loader_apis(html: str, loader: str) -> list[str]:
 
 
 def page_apis(html: str) -> list[str]:
-    return list(dict.fromkeys(_FETCH_RE.findall(html or "")))
+    """Quoted ``/api/...`` literals (fetch arguments or URL variables); dynamic prefixes ending in / are skipped."""
+    return [api for api in dict.fromkeys(_API_LITERAL_RE.findall(html or ""))
+            if not api.endswith("/") and api not in COMMON_APIS]
 
 
 def section_index(html: str, nav_groups: Iterable[tuple[str, str, Iterable[tuple[str, str, Any]]]],
-                  pages: Iterable[tuple[str, str]], page_html: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+                  pages: Iterable[tuple[str, str]], page_html: Mapping[str, str] | None = None,
+                  routes: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """Every /details section and decision page; server-rendered pages gain their registered JSON twin."""
+    routes = set(routes)
     loaders = section_loaders(html)
     out = []
     for gid, glabel, items in nav_groups:
@@ -70,7 +77,7 @@ def section_index(html: str, nav_groups: Iterable[tuple[str, str, Iterable[tuple
             for loader in loaders.get(sid, []):
                 apis += loader_apis(html, loader)
             apis += list(EXTRA_SECTION_APIS.get(sid, ()))
-            apis = [a for a in dict.fromkeys(apis) if a != "/api/status"]
+            apis = [a for a in dict.fromkeys(apis) if a not in COMMON_APIS]
             out.append({"id": sid, "label": label, "group": glabel, "kind": "details_section",
                         "report_file": report_file, "loaders": loaders.get(sid, []), "apis": apis,
                         "json": f"/api/sections/{sid}", "core": sid in CORE_SECTIONS})
@@ -78,6 +85,7 @@ def section_index(html: str, nav_groups: Iterable[tuple[str, str, Iterable[tuple
         if path.startswith("/api/") or path == "/details":
             continue
         apis = page_apis((page_html or {}).get(path, ""))
+        apis += [twin for twin in (f"/api{path}", f"/api/streams{path}") if twin in routes]
         apis += list(EXTRA_SECTION_APIS.get(path, ()))
         sid = "page" + path.replace("/", "-").rstrip("-")
         out.append({"id": sid, "label": label, "group": "Decision pages", "kind": "page", "path": path,
