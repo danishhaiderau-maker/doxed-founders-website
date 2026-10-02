@@ -7206,10 +7206,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="genome-grid-kpis"></div>
     <h3>Genome axes - best train-selected policy per value, with its chronological holdout</h3>
     <table><thead><tr><th>Axis</th><th>Values</th><th>Best value</th><th>Train EV / fill</th><th>Holdout EV / fill</th><th>Holdout WR%</th><th>Holdout fills</th><th>Verdict</th><th>Confirmed policies</th><th>Weakest ranked value</th></tr></thead><tbody id="genome-grid-axes"></tbody></table>
-    <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="BBO_MARKETABLE">BBO marketable fills</option><option value="IDEAL_TOUCH">Ideal touch (diagnostic)</option></select> <select id="genome-grid-filter"><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
+    <div class="stale-banner" id="genome-grid-fill-model" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;">Fill model: loading...</div>
+    <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="REALISTIC_V1">REALISTIC_V1 (headline)</option><option value="OPTIMISTIC_TOUCH_SHADOW">Optimistic touch (comparison shadow - not headline)</option></select> <select id="genome-grid-filter"><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
     <table><thead><tr><th>#</th><th>Side</th><th>Entry offset</th><th>Chase / reprice</th><th>TTL</th><th>Exit</th><th>Loss protection</th><th>Signals</th><th>Fills</th><th>WR% all</th><th>EV / fill all</th><th>Avg R</th><th>Train EV / fill (rank key)</th><th>OOS fills</th><th>OOS WR% [95% CI]</th><th>OOS EV / fill</th><th>OOS net</th><th>Holdout</th><th>Max DD</th></tr></thead><tbody id="genome-grid-body"></tbody></table>
     <h3>Live paper outcomes per lane (LIVE_PAPER - separate cohort)</h3>
-    <table><thead><tr><th>Lane</th><th>Registry status</th><th>Terminal closes</th><th>WR%</th><th>Net PnL</th><th>EV / close</th></tr></thead><tbody id="genome-grid-live"></tbody></table>
+    <table><thead><tr><th>Lane</th><th>Registry status</th><th>Fill model</th><th>Terminal closes</th><th>WR%</th><th>Net PnL</th><th>EV / close</th></tr></thead><tbody id="genome-grid-live"></tbody></table>
     <h2>Top Profitable Conservative Policy Combos</h2>
     <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. Execution fills are split into full and partial receipts. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
@@ -8122,7 +8123,18 @@ let GENOME_GRID_CACHE = null;
 function renderGenomeGridRows() {
   const d = GENOME_GRID_CACHE || {};
   const sel = document.getElementById('genome-grid-world');
-  const world = sel ? sel.value : 'BBO_MARKETABLE';
+  const world = sel ? sel.value : (d.headline_fill_world || 'REALISTIC_V1');
+  const banner = document.getElementById('genome-grid-fill-model');
+  if (banner) {
+    const fmDecl = d.fill_model || {}, lat = fmDecl.decision_latency || {};
+    const shadow = world !== d.headline_fill_world;
+    banner.style.background = shadow || !d.headline_fill_world ? '#3d2a1f' : '#1f2d3d';
+    banner.textContent = !d.headline_fill_world
+      ? 'UNDECLARED FILL MODEL (legacy report) - these numbers are not a REALISTIC_V1 headline.'
+      : shadow
+        ? `${world}: COMPARISON SHADOW - NOT HEADLINE. Optimistic touch fills, no latency; never quote these as results. Headline = ${d.headline_fill_world}.`
+        : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? 0}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
+  }
   const filter = document.getElementById('genome-grid-filter');
   const rows = ((d[filter ? filter.value : 'top_100_by_world'] || {})[world]) || [];
   document.getElementById('genome-grid-body').innerHTML = rows.map((x, i) => {
@@ -8143,13 +8155,20 @@ async function loadGenomeGrid() {
     return;
   }
   const cov = d.coverage || {}, g = d.grid || {}, h = d.holdout || {}, par = d.canonical_parity || {};
+  const head = ((d.headline_vs_shadow || {})[d.headline_fill_world] || {});
+  const headVerdicts = head.holdout_verdicts || h.verdicts || {};
+  const worldSel = document.getElementById('genome-grid-world');
+  if (worldSel && d.top_100_by_world) {
+    const worlds = Object.keys(d.top_100_by_world);
+    worldSel.innerHTML = worlds.map(w => `<option value="${escapeHtml(w)}"${w === d.headline_fill_world ? ' selected' : ''}>${escapeHtml(w)} ${w === d.headline_fill_world ? '(headline)' : '(comparison shadow - not headline)'}</option>`).join('');
+  }
   if (note) note.textContent = `${d.note || ''} Generated ${d.generated_at} (${Math.round((d.age_sec||0)/60)} min ago) at ${String(d.code_revision||'').slice(0,9)}. Holdout ${h.rule} cut ${h.cut_utc}; ${h.selection || ''}. ${h.independence_note || ''}. ${d.cost_model}. ${d.path_model}.`;
   document.getElementById('genome-grid-kpis').innerHTML = [
     ['Episodes evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
     ['Signals span', `${String(cov.first_signal_utc||'').slice(5,16)} to ${String(cov.last_signal_utc||'').slice(5,16)}`],
     ['Policies evaluated', Number(g.policies_evaluated||0).toLocaleString()],
     ['Ranked (train >= ' + (h.min_train_fills_for_rank??30) + ', OOS >= ' + (h.min_oos_fills_for_rank??10) + ' fills)', Number(g.policies_ranked||0).toLocaleString()],
-    ['Holdout confirmed / failed', `${(h.verdicts||{}).CONFIRMED ?? 0} / ${(h.verdicts||{}).FAILED_HOLDOUT ?? 0}`],
+    ['Holdout confirmed / failed (' + (d.headline_fill_world || 'all worlds') + ')', `${headVerdicts.CONFIRMED ?? 0} / ${headVerdicts.FAILED_HOLDOUT ?? 0}`],
     ['Entries x exits', `${g.entries} x ${g.protections}`],
     ['Engine replay parity', `${par.status} (${par.checked ?? 0})`],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
@@ -8161,7 +8180,7 @@ async function loadGenomeGrid() {
     return `<tr><td>${escapeHtml(axis)}</td><td>${s.distinct_values}</td><td>${escapeHtml(String(best.value ?? '-'))}</td><td>${genomeUsd(best.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(best.best_oos_ev_per_fill_usd)}</td><td>${best.best_oos_win_rate_pct ?? '-'}</td><td>${best.best_oos_fills ?? '-'}</td><td>${escapeHtml(best.best_holdout_verdict || '-')}</td><td>${best.confirmed_policies ?? 0}</td><td>${escapeHtml(String(worst.value ?? '-'))} (train ${genomeUsd(worst.best_train_ev_per_fill_usd)})</td></tr>`;
   }).join('');
   document.getElementById('genome-grid-live').innerHTML = (d.live_paper_by_lane || []).map(x =>
-    `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No terminal paper lifecycles.</td></tr>';
+    `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${escapeHtml(x.fill_model || 'UNDECLARED')}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="7">No terminal paper lifecycles.</td></tr>';
   ['genome-grid-world', 'genome-grid-filter'].forEach(id => {
     const el = document.getElementById(id);
     if (el && !el.dataset.bound) { el.dataset.bound = '1'; el.addEventListener('change', renderGenomeGridRows); }
@@ -9701,6 +9720,7 @@ GENOME_GRID_REPORT_PATH = Path(
 _GENOME_GRID_PASSTHROUGH = (
     "generated_at", "code_revision", "evidence_label", "note", "fill_worlds", "cost_model", "path_model",
     "holdout", "coverage", "grid", "canonical_parity", "dimension_summary", "live_paper_by_lane", "rows_artifact",
+    "fill_model", "headline_fill_world", "shadow_fill_worlds", "headline_vs_shadow",
 )
 
 
@@ -9712,8 +9732,11 @@ def _genome_grid_payload(limit: int = 100) -> dict:
                 "reason": f"{type(exc).__name__}: {exc}"[:300], "report_path": str(GENOME_GRID_REPORT_PATH)}
     generated = _dashboard_sections._parse_ts(report.get("generated_at"))
     limit = max(1, min(int(limit), 100))
+    declared = (report.get("fill_model") or {}).get("fill_model")
     return {
         "schema": "genome_grid_dashboard_v1", "status": "OK", "report_path": str(GENOME_GRID_REPORT_PATH),
+        "fill_model_status": "DECLARED" if declared == "REALISTIC_V1" and report.get("headline_fill_world") == declared
+        else "UNDECLARED_LEGACY_REPORT",
         "source_schema": report.get("schema"), "age_sec": round(time.time() - generated, 1) if generated else None,
         **{key: report.get(key) for key in _GENOME_GRID_PASSTHROUGH},
         "top_100_by_world": {world: list(rows or [])[:limit]

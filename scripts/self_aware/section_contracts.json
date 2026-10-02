@@ -104,6 +104,24 @@
                  "why": "the canonical grid report is missing; Top-100 falls back to the legacy executed table"}],
      "counters": [{"path": "#top_100_by_world", "min": 1, "kind": "GRID_EMPTY", "why": "no fill world ranked"}]},
 
+    {"id": "analyzer.genome_grid_fill_model", "surface": "analyzer", "title": "Genome grid headline declares fill_model=REALISTIC_V1", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#combos", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/genome-grid"},
+     "depends_on": ["research/fill_model.py", "genome_grid_study.py", "analyzer-exports/genome-grid/genome_grid_report.json"],
+     "allow_http": {"404": "AMBER"},
+     "reconcile": "fill_model_headline"},
+
+    {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",
+     "page": "http://127.0.0.1:9021/edges", "source": {"kind": "self", "doc": "health"},
+     "depends_on": ["scripts/self_aware/edges.py", "res_edges"],
+     "reconcile": "edges_fill_model"},
+
+    {"id": "fly.fill_model", "surface": "fly", "title": "Fly paper ledger / tile cards declare fill_model=REALISTIC_V1", "tier": "heavy",
+     "page": "https://doxed-btc-bot.fly.dev/", "source": {"kind": "fly", "path": "/api/state"},
+     "depends_on": ["Fly runtime", "research/fill_model.py", "clean-epoch deploy"],
+     "fill_model_undeclared_severity": "AMBER",
+     "fill_model_pending": "Fly REALISTIC_V1 ships in the post-freeze clean-epoch deploy; RED once declared optimistic",
+     "reconcile": "fill_model_headline"},
+
     {"id": "analyzer.sections_health", "surface": "analyzer", "title": ":9001 section index health (ANALYZER-GENOME)", "tier": "heavy",
      "page": "http://127.0.0.1:9001/api/sections/health",
      "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/sections/health"},
