@@ -47,6 +47,7 @@ RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.p
 RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
 # This import executes before every AI API call, not just analyzer startup.
 RUN python -c "import research.runtime_baseline_declaration"
+RUN python -c "import research.close_origin"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
 RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
 # Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.

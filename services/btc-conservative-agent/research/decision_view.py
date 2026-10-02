@@ -137,8 +137,16 @@ def after_cost_ev(funnel_lane: dict | None, *, stale_since: str | None = None) -
     stats = lane.get("closed_trade_stats") if isinstance(lane.get("closed_trade_stats"), dict) else {}
     n = _count(stats.get("n")) if stats else None
     forced = _count(stats.get("forced_exits_excluded")) if stats else None
-    n_source = (f"strategy exits ({forced} deploy/operator forced exits excluded from EV)"
-                if forced else "trade log rows")
+    by_origin = stats.get("forced_exits_by_origin") if stats and isinstance(stats.get("forced_exits_by_origin"), dict) else {}
+    origin_words = {"DEPLOY_MAINTENANCE": "deploy-boundary force-flat", "OPERATOR": "operator close",
+                    "SAFETY": "safety close", "UNRECORDED": "origin-unrecorded forced exit"}
+    split = ", ".join(
+        f"{_count(by_origin[key])} {origin_words[key]}{'' if _count(by_origin[key]) == 1 else 's'}"
+        for key in origin_words if _count(by_origin.get(key))
+    )
+    n_source = (f"strategy exits ({forced} forced exits excluded from EV: {split})" if forced and split
+                else f"strategy exits ({forced} deploy/operator forced exits excluded from EV)" if forced
+                else "trade log rows")
     if n is None:
         n = _count(lane.get("closed"))
         n_source = "CLOSED lifecycle events"
