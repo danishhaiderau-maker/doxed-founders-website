@@ -1057,7 +1057,8 @@ class V3EvidenceStore:
         current = self._active_ledger_generation(ledger)
         legacy_migration = None
         legacy_ref = None
-        if current["generation"] > 0:
+        # Ledgers opted in while empty never had a generation 0 to migrate.
+        if current["generation"] > 0 and self._legacy_migration_path(ledger).exists():
             legacy_migration = self._load_legacy_migration(ledger)
             legacy_ref = {
                 "schema": "v3_ledger_generation_ref_v1", "state": "ACTIVE",

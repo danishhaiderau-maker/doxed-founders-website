@@ -423,8 +423,10 @@ def test_shadow_purpose_is_allowed_and_request_is_bounded():
 
 def test_challenger_hook_logs_rows_and_never_touches_orders():
     tmp = tempfile.mkdtemp()
+    # RESEARCH_SESSION_FILE is cwd-relative: the hook binds a collector epoch.
     names = ("AI_SHADOW_CHALLENGER_FILE", "AI_SHADOW_COMPACT_PROMPT_FILE",
-             "AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE")
+             "AI_SHADOW_REGIME_PROMPT_FILE", "DECISION_FEATURE_SNAPSHOT_FILE",
+             "RESEARCH_SESSION_FILE")
     originals = {n: getattr(bot, n) for n in names}
     original_call = bot.call_deepseek_api
     original_budget = bot._AI_SHADOW_BUDGET
