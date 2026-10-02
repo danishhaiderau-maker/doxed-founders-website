@@ -31,6 +31,7 @@ from adaptive_regime_entry import (
 )
 from combo_pathway_config import COMBO_LANE_SPECS
 from family_policy_common import (
+    SHARED_AI_SIGNAL_DETAIL,
     PolicySpec,
     account_risk_quantity as _size,
     chase_due as _chase,
@@ -45,6 +46,20 @@ from family_policy_common import (
 CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
 DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", CROSS_VENUE_LEAD})
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
+
+
+def signal_source_detail(tile: Mapping[str, Any]) -> str:
+    """Strategy-box signal line derived from the tile's registry signal metadata."""
+    if tile.get("uses_shared_ai_direction", True) and not tile.get("signal_clock"):
+        return SHARED_AI_SIGNAL_DETAIL
+    entry = tile.get("entry_policy") or {}
+    clock = str(tile.get("signal_clock") or "own signal clock").replace("_", " ").capitalize()
+    venues = "/".join(str(v).capitalize() for v in entry.get("leader_venues") or ())
+    window = f" over {entry['lookback_sec']}s" if entry.get("lookback_sec") else ""
+    source = f" ({venues} lead vs Bitfinex{window})" if venues else ""
+    role = str(entry.get("ai_decision_role") or "NONE").upper()
+    ai = "no AI call" if role == "NONE" else f"AI role {role}, not the shared AI call"
+    return f"{clock}{source}; {ai}; independent identity, order, position and ledger"
 
 
 class TakerTimeExitBinding:
@@ -214,7 +229,7 @@ class TakerTimeExitBinding:
     def dashboard_policy(self):
         tile = COMBO_LANE_SPECS[self.lane]
         entry, exit_policy = self.entry, self.exit
-        payload = _dashboard(self.spec)
+        payload = _dashboard(self.spec, signal_detail=signal_source_detail(tile))
         source = entry["direction_source"]
         if source == CROSS_VENUE_LEAD:
             return self._cross_venue_dashboard_policy(payload, tile)

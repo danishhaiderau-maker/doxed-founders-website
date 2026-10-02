@@ -334,7 +334,10 @@ def _exit_config_base(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]
     }
 
 
-def dashboard_policy(spec: PolicySpec) -> dict[str, Any]:
+SHARED_AI_SIGNAL_DETAIL = "One shared AI call; independent identity, order, position and ledger"
+
+
+def dashboard_policy(spec: PolicySpec, signal_detail: str = SHARED_AI_SIGNAL_DETAIL) -> dict[str, Any]:
     chips = [
         "PAPER ONLY", f"Offset {spec.entry_offset_pct:g}%",
         f"Reprice template {','.join(map(str, spec.chase_windows))}",
@@ -374,7 +377,7 @@ def dashboard_policy(spec: PolicySpec) -> dict[str, Any]:
         },
         "strategy_detail": [
             f"Raw policy: {spec.policy_id}",
-            "One shared AI call; independent identity, order, position and ledger",
+            signal_detail,
             "Side-correct BBO/depth fill required; last-price touch is insufficient",
             "Tile ON is paper eligibility only; relay remains fail-closed",
         ],
