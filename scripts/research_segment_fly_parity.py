@@ -13,6 +13,11 @@ laptop must hold byte-identical shipped content:
 
 GREEN means 0 sealed mismatches and 0 missing shipped files.
 
+Snapshot digests are cached by (size, mtime_ns) in ``.puller/parity-hash-cache.json``
+because the scan holds the puller lock: re-hashing the whole tree every run made
+the hold grow with the tree and starved the pull loop. Every cached digest is
+still re-verified from disk once per 24-48 h (spread per path).
+
     set BOT_ADMIN_TOKEN=...   (never printed)
     python scripts/research_segment_fly_parity.py --prefix v2 --report C:\\DoxxedCrypto\\fly-mirror-segments\\parity-latest.json
 """
@@ -25,6 +30,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +42,8 @@ SCHEMA = "research_segment_checkpoint_parity_v1"
 ANCHOR_BYTES = 4096
 RED_CLASSES = ("missing", "sealed_mismatch", "sqlite_corrupt")
 SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+HASH_CACHE_SCHEMA = "research_segment_parity_hash_cache_v1"
+HASH_REVERIFY_SEC = 24 * 3600.0
 
 
 def _get(base_url: str, prefix: str, route: str, token: str) -> dict:
@@ -54,6 +62,50 @@ def _sha256(path: Path, start: int = 0) -> str:
     return digest.hexdigest()
 
 
+class HashCache:
+    """Full-file sha256 keyed by relpath and validated by (size, mtime_ns)."""
+
+    def __init__(self, path: Path | None, now: float | None = None, reverify_sec: float = HASH_REVERIFY_SEC):
+        self.path = path
+        self.now = time.time() if now is None else now
+        self.reverify_sec = reverify_sec
+        self.entries: dict[str, list] = {}
+        self.used: dict[str, list] = {}
+        self.hits = self.hashed = 0
+        if path is not None and path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if raw.get("schema") == HASH_CACHE_SCHEMA and isinstance(raw.get("entries"), dict):
+                    self.entries = raw["entries"]
+            except (OSError, ValueError, AttributeError):
+                self.entries = {}
+
+    def _window(self, relpath: str) -> float:
+        spread = int(hashlib.sha256(relpath.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+        return self.reverify_sec * (1.0 + spread)
+
+    def sha256(self, relpath: str, path: Path) -> str:
+        st = path.stat()
+        entry = self.entries.get(relpath)
+        if (isinstance(entry, list) and len(entry) == 4 and entry[0] == st.st_size and entry[1] == st.st_mtime_ns
+                and self.now - float(entry[3]) < self._window(relpath)):
+            self.hits += 1
+            self.used[relpath] = entry
+            return entry[2]
+        digest = _sha256(path)
+        self.hashed += 1
+        self.used[relpath] = [st.st_size, st.st_mtime_ns, digest, self.now]
+        return digest
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"schema": HASH_CACHE_SCHEMA, "entries": self.used}, sort_keys=True),
+                       encoding="utf-8")
+        os.replace(tmp, self.path)
+
+
 def _sqlite_ok(path: Path) -> bool:
     try:
         with sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True) as connection:
@@ -63,9 +115,10 @@ def _sqlite_ok(path: Path) -> bool:
 
 
 def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baselines: dict,
-             pruned: dict[str, str] | None = None) -> dict:
+             pruned: dict[str, str] | None = None, hashes: HashCache | None = None) -> dict:
     local = {path.relative_to(tree).as_posix(): path for path in tree.rglob("*") if path.is_file()}
     pruned = pruned or {}
+    hashes = hashes or HashCache(None)
     buckets: dict[str, list] = {name: [] for name in (
         "append_match", "snapshot_match", "sqlite_ok", "baseline_only", "pruned_verified",
         "missing", "sealed_mismatch", "sqlite_corrupt", "local_only")}
@@ -93,7 +146,7 @@ def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baseline
             buckets["pruned_verified"].append(relpath)
         elif path is None:
             buckets["missing"].append(relpath)
-        elif _sha256(path) != entry.get("sha256"):
+        elif hashes.sha256(relpath, path) != entry.get("sha256"):
             buckets["sealed_mismatch"].append({"path": relpath, "reason": "sha256"})
         elif relpath.lower().endswith(SQLITE_SUFFIXES):
             buckets["sqlite_ok" if _sqlite_ok(path) else "sqlite_corrupt"].append(relpath)
@@ -119,12 +172,15 @@ def main(argv=None) -> int:
         print(json.dumps({"error": "BOT_ADMIN_TOKEN is not set"}))
         return 2
     shadow_root = Path(args.shadow_root)
+    started = time.monotonic()
     # The tree must not advance between the seq check and the scan.
     try:
         lock = _RunLock(shadow_root / ".puller" / "run.lock")
     except PullerError:
         print(json.dumps({"verdict": "RETRY", "reason": "a puller run holds the shadow-root lock"}))
         return 3
+    locked_at = time.monotonic()
+    hashes = HashCache(shadow_root / ".puller" / "parity-hash-cache.json")
     try:
         state = json.loads((shadow_root / ".puller" / "state.json").read_text(encoding="utf-8"))
         checkpoint = _get(args.base_url, args.prefix, "files", token)
@@ -137,10 +193,15 @@ def main(argv=None) -> int:
 
         report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
                           shadow_root / "tree", state.get("baselines") or {},
-                          pruned_index(args.retention_dir))
+                          pruned_index(args.retention_dir), hashes)
+        hashes.save()
     finally:
         lock.release()
+    released_at = time.monotonic()
     report.update({
+        "timing": {"lock_held_sec": round(released_at - locked_at, 1),
+                   "elapsed_sec": round(released_at - started, 1),
+                   "hashed": hashes.hashed, "hash_cache_hits": hashes.hits},
         "schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(),
         "prefix": args.prefix, "seq": state["applied_seq"],
         "manifest_sha256": state["last_manifest_sha256"], "baseline": checkpoint.get("baseline"),

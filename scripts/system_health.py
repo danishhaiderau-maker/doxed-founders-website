@@ -42,6 +42,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import system_health_meta as meta_mod  # noqa: E402
+
 SCHEMA = "system_health_v1"
 ALARM_SCHEMA = "system_health_alarm_v1"
 # Behaviour contracts this watcher build implements; the blindspot closure
@@ -50,6 +53,9 @@ WATCHER_FEATURES = (
     "analyzer_reports", "analyzer_parity_strict", "pull_ack_no_none_green", "supervisor_process_check",
     "streams_analysed_freshness", "missing_data_not_green", "selfaware_engine", "cached_live_refresh",
     "fetch_failure_not_skip", "incident_stale_report",
+    "parity_checker", "puller_lock", "chain_monitor_alerts", "incident_relay", "interim_status",
+    "delivery_check", "fly_copy_lag", "wall_integrity", "adhoc_visibility", "check_dedupe", "amber_acks",
+    "flapping", "pull_ack_run_telemetry", "epoch_parity_fields", "lifecycle_recent_red", "revision_master_ahead",
 )
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
@@ -1343,7 +1349,9 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
               "; ".join(reasons + ambers) or ("" if st == GREEN else "pull catching up"),
               str(pull.get("error") or "")[:200],
               fields={"published": published, "applied": applied, "applied_source": applied_src,
-                      "fly_acked": fly_acked, "pull_exit": exit_code}))
+                      "fly_acked": fly_acked, "pull_exit": exit_code,
+                      **{k: puller.get(k) for k in ("last_attempt_result", "consecutive_failures", "run_seconds",
+                                                    "max_run_seconds", "deadline_reached")}}))
 
     sup = inputs.get("supervisor_tick_at")
     sup_age = (now - sup) if sup else None
@@ -1763,7 +1771,10 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     add(check("dashboards.parity", "dashboards", st,
               "; ".join(contradictions) or f"{len(fly_lanes)} tiles agree across Fly API, toggles and registry",
               "Fly dashboard API == registry roster == toggles; truth labels match evidence",
-              "" if not contradictions else "stale deploy/registry drift or a truth label built from attempts, not results"))
+              "" if not contradictions else "stale deploy/registry drift or a truth label built from attempts, not results",
+              fields={"epoch_parity": None if epoch is None else str(epoch)[:160],
+                      "epoch_parity_ok": parity_state(epoch), "fly_lanes": list(fly_lanes),
+                      "registry_lanes": list(reg_lanes or [])}))
 
     # ---------------- Railway relay / API
     relay = inputs.get("relay_snapshot") or {}
@@ -2058,15 +2069,19 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     return checks
 
 
-def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float) -> dict[str, Any]:
+def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float,
+              acks: Any = None) -> dict[str, Any]:
+    checks = meta_mod.dedupe(checks)
+    checks.append(meta_mod.flapping(checks, state, check))
+    acked = meta_mod.apply_acks(checks, acks, now, parse_ts)
     last_good = state.setdefault("last_good", {})
     for c in checks:
         if c["status"] == GREEN:
             last_good[c["id"]] = now
         c["last_good_at"] = iso(last_good.get(c["id"]))
-    rated = [c for c in checks if c["status"] != SKIP]
+    rated = [c for c in checks if c["status"] != SKIP and not c.get("acked")]
     verdict = max((c["status"] for c in rated), key=RANK.get, default=AMBER)
-    failing = [c for c in checks if c["status"] in (RED, AMBER)]
+    failing = [c for c in checks if c["status"] in (RED, AMBER) and not c.get("acked")]
     failing.sort(key=lambda c: -RANK[c["status"]])
     subsystems: dict[str, str] = {}
     for c in checks:
@@ -2083,6 +2098,7 @@ def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float) -
         "subsystems": subsystems,
         "failing": [{k: c[k] for k in ("id", "status", "observed", "threshold", "hint", "runbook", "last_good_at")}
                     for c in failing],
+        "acked": acked,
         "checks": checks,
         "runbook": RUNBOOK,
     }
@@ -2335,7 +2351,14 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
     now = utcnow()
     inputs = collect(opts, state, now)
     checks = evaluate(inputs, state)
-    report = summarize(checks, state, now)
+    previous = read_json(hdir / "system-health-latest.json") or {}
+    published, _ = http_json(f"{opts.fly_url}/api/system-health", timeout=15)
+    meta = meta_mod.collect_meta(state_dir=Path(opts.state_dir), shadow_root=Path(opts.shadow_root),
+                                 wall=Path(opts.proof_dir) / "WALL-STATUS-FLY.md", parse_ts=parse_ts,
+                                 fly_published=published)
+    checks += meta_mod.meta_checks(meta, state, now, check, fmt_age,
+                                   local_generated_ts=parse_ts(previous.get("generated_ts")))
+    report = summarize(checks, state, now, acks=meta.get("acks"))
     report["source_errors"] = inputs.get("errors")
     report["proof"] = proof_summary(inputs.get("proof_active"), now)
     if alarms:
@@ -2345,6 +2368,7 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
         delivery = notify(events, Path(opts.state_dir)) if not opts.no_notify else {"pushed": 0, "muted": True}
         report["last_delivery"] = delivery
         report["fly_banner"] = push_fly_banner(report, opts, state, now) if not opts.no_fly_banner else "disabled"
+        meta_mod.record_delivery(state, report["fly_banner"], delivery)
         write_json_atomic(hdir / "system-health-latest.json", report)
         append_jsonl(hdir / f"verdicts-{datetime.now(timezone.utc):%Y%m}.jsonl",
                      {"at": report["generated_at"], "verdict": report["verdict"], "open_alarms": report["open_alarms"],

@@ -46,6 +46,19 @@ function Get-VerdictAgeMinutes {
   return $null
 }
 
+function Write-InterimStatus([string]$Decision, $CarriesWatcher, [string]$RunAge, [string]$VerdictAge) {
+  # Read by the watcher's watcher.interim check: a stale file means this task stopped running.
+  $path = Join-Path $StateDir 'health\interim-tick.status.json'
+  try {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    $json = [ordered]@{ schema = 'system_health_interim_tick_v1'; at = [datetime]::UtcNow.ToString('o'); decision = $Decision
+                        carries_watcher = [bool]$CarriesWatcher; supervisor_run = $RunAge; verdict_age = $VerdictAge } | ConvertTo-Json -Compress
+    $tmp = "$path.tmp"
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+  } catch { Write-TickLog ("INTERIM_STATUS_ERROR {0}" -f $_.Exception.Message) }
+}
+
 if ($Interim) {
   $supervisor = Join-Path $SupervisorRepo 'scripts\laptop-chain-supervisor.ps1'
   $carriesWatcher = (Test-Path -LiteralPath $supervisor) -and (Select-String -LiteralPath $supervisor -Pattern 'system_health.py' -Quiet)
@@ -54,9 +67,11 @@ if ($Interim) {
   $fmt = { param($v) if ($null -eq $v) { 'unknown' } else { '{0:N1}m' -f $v } }
   if ($carriesWatcher -and $null -ne $runAge -and $runAge -lt $FreshMinutes -and $null -ne $verdictAge -and $verdictAge -lt $FreshMinutes) {
     Write-TickLog ('DEFERRED supervisor ran {0} ago and published a verdict {1} ago' -f (& $fmt $runAge), (& $fmt $verdictAge))
+    Write-InterimStatus 'DEFERRED' $carriesWatcher (& $fmt $runAge) (& $fmt $verdictAge)
     exit 0
   }
   Write-TickLog ('TAKEOVER carriesWatcher={0} supervisorRun={1} verdictAge={2}' -f $carriesWatcher, (& $fmt $runAge), (& $fmt $verdictAge))
+  Write-InterimStatus 'TAKEOVER' $carriesWatcher (& $fmt $runAge) (& $fmt $verdictAge)
 }
 
 try {
