@@ -113,6 +113,13 @@ def _async_inventory_function(state, monotonic_value):
         def start(self):
             starts[-1]["started"] = True
 
+    def retained_generation(generation_id):
+        generation = state.get("generation")
+        if (isinstance(generation, dict) and generation_id
+                and generation_id == generation.get("generation_id")):
+            return {**generation, "retained_at": monotonic_value}
+        return None
+
     namespace = {
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
@@ -123,6 +130,11 @@ def _async_inventory_function(state, monotonic_value):
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
+        "_data_sync_inventory_generation": retained_generation,
+        "_data_sync_memory_identity_payload": lambda: {
+            "source_git_rev": "rev", "collection_epoch_id": "epoch",
+            "tile_registry_signature": "tile",
+        },
         "hmac": hmac,
         "uuid": uuid,
         "utc_iso": lambda: "2026-09-01T00:00:00Z",

@@ -42046,7 +42046,27 @@ def _data_sync_request_async_inventory(
                 str(refresh_nonce),
             )
         )
-        if (
+        # An async disk cache does not itself retain authority: immutable
+        # pages can expire independently, or belong to an earlier identity.
+        # Both checks are memory-only under this condition's reentrant lock.
+        cached_generation = _data_sync_async_inventory.get("generation")
+        disk_authority_current = True
+        if isinstance(cached_generation, dict):
+            cached_identity = cached_generation.get("bundle_identity")
+            current_identity = _data_sync_memory_identity_payload()
+            disk_authority_current = bool(
+                isinstance(cached_identity, dict)
+                and all(
+                    isinstance(cached_identity.get(key), str)
+                    and bool(cached_identity[key])
+                    and cached_identity[key] == current_identity.get(key)
+                    for key in ("source_git_rev", "collection_epoch_id", "tile_registry_signature")
+                )
+                and _data_sync_inventory_generation(
+                    str(_data_sync_async_inventory.get("generation_id") or "")
+                ) is not None
+            )
+        if disk_authority_current and (
             deliver_completed_generation
             or (not force_refresh and current)
             or matching_completed_refresh
