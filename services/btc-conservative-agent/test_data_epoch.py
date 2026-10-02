@@ -81,3 +81,13 @@ def test_fingerprint_dead_fields_and_drift():
     assert de.schema_drift(None, fp)["status"] == "UNANNOUNCED"
     assert de.record_kind({"kind": "fill"}) == "kind=fill" and de.record_kind({}) == "*"
     assert json.dumps(fp)
+
+
+def test_manifest_records_fill_model_declaration(tmp_path):
+    from research import fill_model as fm
+    doc = de.ensure_runtime_manifest(tmp_path, "ce-20261004-realistic", now=time.time(),
+                                     fill_model=fm.fill_model_declaration())
+    assert doc["fill_model"]["fill_model"] == "REALISTIC_V1"
+    assert doc["fill_model"]["fill_model_fingerprint"] == fm.fill_model_fingerprint()
+    assert de.new_manifest("ce-20261004-legacy", started_at_ts=time.time())["fill_model"] is None
+    assert not de.validate_manifest(doc)

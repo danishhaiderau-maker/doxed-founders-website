@@ -196,6 +196,43 @@ def test_fly_chase_buckets_dead_vs_not_applicable():
     assert _eval(spec, {"chase_analytics": {"status": "NOT_APPLICABLE"}})["status"] == "GREEN"
 
 
+def test_fill_model_headline_requires_realistic_v1():
+    spec = _spec(id="analyzer.genome_grid_fill_model", reconcile="fill_model_headline")
+    good = {"fill_model": {"fill_model": "REALISTIC_V1", "shadow_fill_model": "OPTIMISTIC_TOUCH_V1"},
+            "headline_fill_world": "REALISTIC_V1",
+            "rows": [{"fill_world": "REALISTIC_V1", "fill_model": "REALISTIC_V1", "fill_model_role": "HEADLINE"},
+                     {"fill_world": "OPTIMISTIC_TOUCH_SHADOW", "fill_model": "OPTIMISTIC_TOUCH_V1",
+                      "fill_model_role": "COMPARISON_SHADOW_NOT_HEADLINE"}]}
+    assert _eval(spec, good)["status"] == "GREEN"
+    legacy = _eval(spec, {"rows": [{"fill_world": "IDEAL_TOUCH"}]})
+    assert legacy["status"] == "RED" and "FILL_MODEL_UNDECLARED" in _kinds(legacy)
+    swapped = _eval(spec, {**good, "headline_fill_world": "OPTIMISTIC_TOUCH_SHADOW"})
+    assert swapped["status"] == "RED" and "FILL_MODEL_OPTIMISTIC_HEADLINE" in _kinds(swapped)
+    mislabelled = dict(good, rows=[{"fill_world": "IDEAL_TOUCH", "fill_model": "OPTIMISTIC_TOUCH_V1", "fill_model_role": "HEADLINE"}])
+    assert "FILL_MODEL_OPTIMISTIC_HEADLINE" in _kinds(_eval(spec, mislabelled))
+
+
+def test_fill_model_undeclared_severity_is_per_contract_but_optimistic_is_always_red():
+    spec = _spec(id="fly.fill_model", surface="fly", reconcile="fill_model_headline",
+                 fill_model_undeclared_severity="AMBER", fill_model_pending="ships post-freeze")
+    pending = _eval(spec, {"trades": []})
+    assert pending["status"] == "AMBER" and "ships post-freeze" in pending["violations"][0]["detail"]
+    assert _eval(spec, {"fill_model": "OPTIMISTIC_TOUCH_V1"})["status"] == "RED"
+    assert _eval(spec, {"fill_model": {"fill_model": "REALISTIC_V1"}})["status"] == "GREEN"
+
+
+def test_edges_fill_model_reads_published_rows(store):
+    import pandas as pd
+    spec = _spec(id="selfaware.edges_fill_model", surface="selfaware", reconcile="edges_fill_model")
+    assert _eval(spec, {"ok": 1}, store=store)["status"] == "GREEN"
+    store.publish("edges", pd.DataFrame({"edge": ["A"], "holdout_hit": [0.55]}), sources=["t"])
+    legacy = _eval(spec, {"ok": 1}, store=store)
+    assert legacy["status"] == "RED" and "FILL_MODEL_UNDECLARED" in _kinds(legacy)
+    store.publish("edges", pd.DataFrame({"edge": ["A", "B"], "fill_model": ["REALISTIC_V1", "REALISTIC_V1"]}), sources=["t"])
+    res = _eval(spec, {"ok": 1}, store=store)
+    assert res["status"] == "GREEN" and res["metrics"]["edges:REALISTIC_V1"] == 2
+
+
 # ------------------------------------------------------------------ drift
 
 def test_drift_collapse_and_dims_dropped():

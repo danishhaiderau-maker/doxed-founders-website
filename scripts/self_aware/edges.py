@@ -11,6 +11,12 @@ and a decay check. Status:
   shown in the digest, never alerted, never promoted;
 * WATCH / REJECTED / INSUFFICIENT otherwise.
 
+Fill model REALISTIC_V1 (research/fill_model.py): both legs are taker fills at
+the opposite BBO (mid +/- half spread) of the quote 1 s after the grid decision
+and of the horizon quote; a hit is a positive return AFTER that spread cost.
+The gross mid-to-mid hit and return are kept only as labelled
+``shadow_optimistic_mid_*`` comparison columns, never as the headline.
+
 Grid events are upserted (features + forward outcomes) so evidence keeps
 accumulating after the mirror rotates its tape. The regime playbook is
 descriptive only (not corrected for multiple testing).
@@ -29,6 +35,8 @@ from . import tape as tp
 from .facts import iso
 
 REGISTRY_PATH = Path(__file__).with_name("edges_registry.json")
+FILL_MODEL = "REALISTIC_V1"
+SHADOW_FILL_MODEL = "OPTIMISTIC_MID_TO_MID"
 HSEC = {v: k for k, v in tp.HLABEL.items()}
 FEATURES = ("r5m", "r15m", "r60m", "ofi1m", "ofi5m", "l1imb", "tz60")
 
@@ -119,8 +127,9 @@ def evaluate(events: pd.DataFrame, reg: dict, released: set[str] | None = None) 
             net = side * ret - ev[f"cost_{lab}_bp"].to_numpy(float)
             take = (side != 0) & np.isfinite(net)
             tr, ho = take & (ts < train_end), take & (ts >= hold_start)
-            hit = lambda m: float(((side[m] * ret[m]) > 0).mean()) if m.any() else np.nan  # noqa: E731
+            hit = lambda m: float((net[m] > 0).mean()) if m.any() else np.nan  # noqa: E731
             mean = lambda m: float(net[m].mean()) if m.any() else np.nan  # noqa: E731
+            mid_hit = lambda m: float(((side[m] * ret[m]) > 0).mean()) if m.any() else np.nan  # noqa: E731
             ho_idx = np.where(ho)[0]
             half = ho_idx[: len(ho_idx) // 2], ho_idx[len(ho_idx) // 2:]
             lo, hi = tp.cluster_bootstrap(net[ho], hour[ho]) if ho.sum() >= 10 else (np.nan, np.nan)
@@ -136,6 +145,10 @@ def evaluate(events: pd.DataFrame, reg: dict, released: set[str] | None = None) 
                 "holdout_first_half_bp": float(net[half[0]].mean()) if len(half[0]) else np.nan,
                 "holdout_second_half_bp": float(net[half[1]].mean()) if len(half[1]) else np.nan,
                 "holdout_start": iso(hold_start), "train_end": iso(train_end),
+                "fill_model": FILL_MODEL,
+                "shadow_fill_model": SHADOW_FILL_MODEL,
+                "shadow_optimistic_mid_hit": mid_hit(ho),
+                "shadow_optimistic_mid_net_bp": float((side[ho] * ret[ho]).mean()) if ho.any() else np.nan,
             })
     if not rows:
         return pd.DataFrame(queued), playbook(ev, reg, hold_start)
@@ -199,8 +212,7 @@ def playbook(ev: pd.DataFrame, reg: dict, hold_start: float) -> pd.DataFrame:
                 m = (side != 0) & np.isfinite(net)
                 if m.sum() < 30:
                     continue
-                cand = (float(net[m].mean()), spec["id"], lab, int(m.sum()),
-                        float(((side[m] * cell[f"fwd_{lab}_bp"].to_numpy(float)[m]) > 0).mean()))
+                cand = (float(net[m].mean()), spec["id"], lab, int(m.sum()), float((net[m] > 0).mean()))
                 if best is None or cand[0] > best[0]:
                     best = cand
         rows.append({"session": sess, "vol": vol, "trend": trend, "events": int(len(cell)),
@@ -208,6 +220,7 @@ def playbook(ev: pd.DataFrame, reg: dict, hold_start: float) -> pd.DataFrame:
                      "best_net_bp": best[0] if best else None, "best_n": best[3] if best else None,
                      "best_hit": best[4] if best else None,
                      "action": ("STAND_ASIDE" if not best or best[0] <= 0 else "CONSIDER_" + best[1]),
+                     "fill_model": FILL_MODEL,
                      "note": "descriptive holdout only; not multiple-testing corrected"})
     return pd.DataFrame(rows)
 
