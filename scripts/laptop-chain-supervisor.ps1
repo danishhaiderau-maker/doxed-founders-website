@@ -49,8 +49,19 @@ try {
     } catch { $autoFf = 'autoFf=error' }
   }
 
-  if (-not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAnalyzerRun')) -and
-      -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle'))) {
+  $dashboardUp = $false
+  try { $dashboardUp = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
+  $analyzerBusy = (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAnalyzerRun')) -or
+                  (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle'))
+  if ($analyzerBusy -and -not $dashboardUp) {
+    # The dashboard serves the last completed generation throughout a cycle;
+    # restoring it takes only the dashboard mutex, never the cycle's.
+    $ensure = Start-Process -FilePath $powershell -WorkingDirectory $cfg.RepoRoot -WindowStyle Hidden -PassThru `
+      -ArgumentList ($common + @((Join-Path $PSScriptRoot 'run-analyzer-once.ps1')) + $roots +
+                     @('-Port', "$Port", '-Reason', 'dashboard-down-midcycle', '-EnsureDashboardOnly'))
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_ENSURE_STARTED pid={0} midCycle=True" -f $ensure.Id)
+  }
+  if (-not $analyzerBusy) {
     # Cadence runs from the last cycle start: the analyzer itself starts 8-17 min
     # into a cycle, and timing from it spaced generations 44-52 min apart. A
     # cycle that stopped without a generation is retried on the next tick.
@@ -59,8 +70,6 @@ try {
     $lastStart = if ($cycle) { ConvertTo-UtcDate $cycle.startedAt } elseif ($analyzer) { ConvertTo-UtcDate $analyzer.startedAt } else { $null }
     $cycleFailed = $cycle -and $null -ne $cycle.exitCode -and [int]$cycle.exitCode -ne 0
     $due = ($null -eq $lastStart) -or $cycleFailed -or (([datetime]::UtcNow - $lastStart).TotalMinutes -ge $AnalyzerIntervalMin)
-    $dashboardUp = $false
-    try { $dashboardUp = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
     if ($due -or -not $dashboardUp) {
       $runner = if ($due) { 'run-segment-analyzer-cycle.ps1' } else { 'run-analyzer-once.ps1' }
       $runnerArgs = @('-Port', "$Port", '-Reason', $(if ($due) { 'schedule' } else { 'dashboard-down' }))

@@ -641,6 +641,76 @@ def test_runner_refuses_overlap(tmp_path, chain):
     assert result.returncode == 3, result.stdout + result.stderr
 
 
+def _counting_launcher(marker: Path, once_sleep_sec: int = 0) -> str:
+    return (
+        "param([switch]$Once,[switch]$NoWait,[switch]$DashboardOnly,[int]$Port=0)\n"
+        f"if ($DashboardOnly) {{ Add-Content -LiteralPath '{marker}' -Value 'dashboard'; exit 0 }}\n"
+        f"Start-Sleep -Seconds {once_sleep_sec}\nexit 0\n"
+    )
+
+
+def test_once_pass_never_touches_the_dashboard_listener():
+    launcher = _source("start-home-analyzer.ps1")
+    assert "if (-not $Once -and (Test-PortOpen $AnalyzerPort)) {" in launcher
+    reconcile = launcher.split("if (-not $Once -and (Test-PortOpen $AnalyzerPort)) {", 1)[1].split("\n}\n", 1)[0]
+    assert "Stop-ListenPortFast" in reconcile
+    assert launcher.count("Stop-ListenPortFast") == 1
+    # The dashboard lock is separate from the start lock a -Once pass holds.
+    assert "if ($DashboardOnly.IsPresent) { $lockStem = 'home-analyzer-dashboard' }" in launcher
+    assert launcher.index('$lockFile = Join-Path $machineLockDir "$lockStem-$AnalyzerPort.lock"') < launcher.index("$lockHandle = $null")
+
+
+@windows_only
+def test_dashboard_ensure_runs_while_a_pass_holds_the_run_mutex(tmp_path, chain):
+    marker = tmp_path / "dashboard-starts.txt"
+    repo = _fake_repo(tmp_path, _counting_launcher(marker))
+    status_path = chain["state"] / "analyzer-run.status.json"
+    holder = subprocess.Popen(
+        [POWERSHELL, "-NoProfile", "-Command",
+         _common_prelude(chain) + "$h = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun'); 'held'; Start-Sleep -Seconds 60"],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]},
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        result = _run_runner(repo, chain, "-EnsureDashboardOnly")
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.read_text().split() == ["dashboard"]
+    # The running pass owns analyzer-run.status.json; an ensure never rewrites it.
+    assert not status_path.exists()
+
+
+@windows_only
+def test_runner_restores_a_dashboard_that_dies_mid_pass(tmp_path, chain):
+    marker = tmp_path / "dashboard-starts.txt"
+    repo = _fake_repo(tmp_path, _counting_launcher(marker, once_sleep_sec=8))
+    result = _run_runner(repo, chain, "-DashboardWatchSec 1")
+    assert result.returncode == 6, result.stdout + result.stderr
+    starts = marker.read_text().split()
+    # Ensured before, restored at least once during, and ensured after the pass.
+    assert len(starts) >= 3, starts
+    log = "".join(p.read_text(encoding="utf-8-sig") for p in (chain["state"] / "logs").glob("analyzer-run-*.log"))
+    assert "DASHBOARD_DOWN_MIDPASS" in log
+
+
+def test_supervisor_restores_the_dashboard_during_a_running_cycle():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    probe = supervisor.index('"http://127.0.0.1:$Port/api/health"')
+    busy = supervisor.index("$analyzerBusy = ")
+    midcycle = supervisor.index("if ($analyzerBusy -and -not $dashboardUp) {")
+    assert probe < busy < midcycle < supervisor.index("if (-not $analyzerBusy) {")
+    block = supervisor[midcycle:supervisor.index("if (-not $analyzerBusy) {")]
+    assert "run-analyzer-once.ps1" in block and "'-EnsureDashboardOnly'" in block
+    assert "run-segment-analyzer-cycle.ps1" not in block
+    runner = _source("run-analyzer-once.ps1")
+    ensure = runner.split("if ($EnsureDashboardOnly) {", 1)[1].split("\n}\n", 1)[0]
+    assert "LaptopAnalyzerRun" not in ensure and "AnalyzerStatus" not in ensure
+    assert runner.index("if ($EnsureDashboardOnly) {") < runner.index("Get-ChainMutexName 'LaptopAnalyzerRun'")
+    assert "Get-ChainMutexName 'LaptopAnalyzerDashboard'" in runner
+
+
 def _git(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
 
