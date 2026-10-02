@@ -8,8 +8,14 @@ comment only on new alerts or re-alerts, and closes after recovery.
 
 It also refreshes the ``LAPTOP_CHAIN_HEARTBEAT`` repository variable so the
 scheduled Fly monitor can alert when the supervisor itself stops ticking
-(a dead supervisor cannot report its own death). This script never fails the
-supervisor tick: GitHub errors are logged and retried next tick.
+(a dead supervisor cannot report its own death). GitHub errors are retried
+next tick and make the script exit 1 so the failure is visible in the
+supervisor log (the supervisor never fails its own tick on it).
+
+A missing or stale ``system-health-latest.json`` is itself an incident
+(``system_health_stale``): a dead watcher must not read as "no RED alarms".
+Deploy maintenance (Fly ``pause_owner == DEPLOY_MAINTENANCE`` in the runtime
+snapshot) suppresses only maintenance-suppressible findings, for at most 90 min.
 """
 
 from __future__ import annotations
@@ -49,10 +55,18 @@ POLICIES: Mapping[str, Policy] = {
     # The supervisor ticks but the local monitor is not refreshing alerts.
     "monitor_stale": Policy(2, 20 * 60.0, 12 * HOUR, False),
     # scripts/system_health.py has an open RED alarm (already sustain-gated).
-    "system_health_red": Policy(1, 0.0, 12 * HOUR, False),
+    # Deploy pauses legitimately trip Fly checks, so this one waits out the
+    # (90 min capped) deploy-maintenance grace.
+    "system_health_red": Policy(1, 0.0, 12 * HOUR, True),
+    # Real-money safety checks are never suppressed, not even during a deploy.
+    "system_health_safety_red": Policy(1, 0.0, 12 * HOUR, False),
+    # The watcher's own verdict is missing or older than SYSTEM_HEALTH_MAX_AGE_SEC.
+    "system_health_stale": Policy(1, 0.0, 12 * HOUR, False),
     "test_alert": Policy(1, 0.0, 0.0, False),
 }
-SYSTEM_HEALTH_MAX_AGE_SEC = 20 * 60.0
+SYSTEM_HEALTH_MAX_AGE_SEC = 15 * 60.0
+SAFETY_CHECK_PREFIXES = ("bitfinex.", "railway.relay", "trading.orphans")
+RUNTIME_SNAPSHOT_MAX_AGE_SEC = 15 * 60.0
 
 
 def parse_utc(value: Any) -> float | None:
@@ -105,19 +119,48 @@ def findings(
 
 
 def system_health_findings(report: Any, now: float) -> dict[str, str]:
-    """One finding while the system-health watcher has open RED alarms."""
+    """``system_health_stale`` for a missing/stale verdict, else one finding while RED alarms are open."""
     if not isinstance(report, dict):
-        return {}
+        return {"system_health_stale": "system health verdict missing (system-health-latest.json absent or "
+                                       "unreadable): the watcher is not running"}
     generated = report.get("generated_ts")
     if not isinstance(generated, (int, float)) or now - generated > SYSTEM_HEALTH_MAX_AGE_SEC:
-        return {}
+        age = f"{(now - generated) / 60:.0f} min old" if isinstance(generated, (int, float)) else "undated"
+        return {"system_health_stale": f"system health verdict is {age} (limit "
+                                       f"{SYSTEM_HEALTH_MAX_AGE_SEC / 60:.0f} min): the watcher stopped ticking; "
+                                       f"last verdict {report.get('verdict')} open={report.get('open_alarms')}"}
     open_ids = [str(x) for x in report.get("open_alarms") or []]
     if not open_ids:
         return {}
     by_id = {f.get("id"): f for f in report.get("failing") or [] if isinstance(f, dict)}
-    lines = [f"{cid}: {str(by_id.get(cid, {}).get('observed') or '')[:160]} -> {by_id.get(cid, {}).get('runbook', '')}"
-             for cid in open_ids[:8]]
-    return {"system_health_red": "system health RED: " + " | ".join(lines)}
+
+    def describe(ids: list[str]) -> str:
+        return " | ".join(f"{cid}: {str(by_id.get(cid, {}).get('observed') or '')[:160]} -> "
+                          f"{by_id.get(cid, {}).get('runbook', '')}" for cid in ids[:8])
+
+    safety = [cid for cid in open_ids if cid.startswith(SAFETY_CHECK_PREFIXES)]
+    other = [cid for cid in open_ids if cid not in safety]
+    found = {}
+    if safety:
+        found["system_health_safety_red"] = "system health SAFETY RED: " + describe(safety)
+    if other:
+        found["system_health_red"] = "system health RED: " + describe(other)
+    return found
+
+
+def deploy_maintenance(runtime_snapshot: Any, now: float) -> bool:
+    """True while a fresh Fly runtime snapshot shows the guarded-deploy pause.
+
+    The 90-minute cap is enforced by ``fly_monitor_alerts.evaluate`` via
+    ``maintenance_since`` / ``MAINTENANCE_GRACE_SEC``.
+    """
+    if not isinstance(runtime_snapshot, dict) or not runtime_snapshot.get("ok"):
+        return False
+    observed = parse_utc(runtime_snapshot.get("observedAt"))
+    if observed is None or now - observed > RUNTIME_SNAPSHOT_MAX_AGE_SEC:
+        return False
+    return bool(runtime_snapshot.get("execution_paused")) and \
+        str(runtime_snapshot.get("pause_owner") or "").upper() == "DEPLOY_MAINTENANCE"
 
 
 RELAY_WORKFLOW = "laptop-incident-relay.yml"
@@ -200,9 +243,11 @@ def run(args: argparse.Namespace, *, client: Any = None, now: float | None = Non
     found.update(system_health_findings(read_json(state_dir / "health" / "system-health-latest.json"), now))
     if args.test_alert:
         found["test_alert"] = "synthetic laptop test alert (not a real incident)"
-    decisions, resolved = alerts.evaluate(state, found, now=now, maintenance=False, policies=POLICIES)
+    maintenance = deploy_maintenance(read_json(state_dir / "fly_runtime_snapshot_v1.json"), now)
+    decisions, resolved = alerts.evaluate(state, found, now=now, maintenance=maintenance, policies=POLICIES)
 
-    result: dict[str, Any] = {"decisions": decisions, "resolved": [r["key"] for r in resolved], "synced": False}
+    result: dict[str, Any] = {"decisions": decisions, "resolved": [r["key"] for r in resolved], "synced": False,
+                              "maintenance": maintenance}
     heartbeat_at = saved.get("heartbeat_at") if isinstance(saved.get("heartbeat_at"), (int, float)) else None
     if not args.dry_run:
         client = client or GhCli(args.repo)
@@ -258,9 +303,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"LAPTOP_INCIDENT decisions={summary} resolved={','.join(result['resolved']) or 'none'} "
         f"synced={result['synced']} heartbeat={result.get('heartbeat', False)} "
+        f"maintenance={result.get('maintenance', False)} "
         f"error={result.get('error') or result.get('heartbeat_error') or ''}"
     )
-    return 0
+    return 1 if result.get("error") or result.get("heartbeat_error") else 0
 
 
 if __name__ == "__main__":

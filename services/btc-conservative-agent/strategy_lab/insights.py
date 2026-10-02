@@ -11,7 +11,9 @@
 Also served uncached at ``http://127.0.0.1:9001/api/insights``. Every
 component carries ``status`` OK / STALE / UNAVAILABLE, ``as_of``, ``age_sec``
 and ``max_age_sec``. A STALE or UNAVAILABLE component has ``data = None``:
-old data is refused, never returned as if it were current. Read-only: no
+old data is refused, never returned as if it were current. ``transfer`` can
+also be DEGRADED (fresh data kept, but pulls are failing or the applied seq
+came from the puller's state.json) or UNKNOWN (no applied seq anywhere). Read-only: no
 file is written, nothing on Fly or Bitfinex is touched.
 """
 from __future__ import annotations
@@ -41,6 +43,9 @@ RETENTION_DIR = os.environ.get("DOXXED_BOT_DATA_RETENTION_DIR") or r"C:\DoxxedCr
 WALL_TAIL_LINES = 400
 
 OK, STALE, UNAVAILABLE = "OK", "STALE", "UNAVAILABLE"
+DEGRADED, UNKNOWN = "DEGRADED", "UNKNOWN"   # fresh but failing (data kept) / fresh but unverifiable (data None)
+PULLER_STATE_PATH = os.environ.get("DOXXED_PULLER_STATE") or r"C:\DoxxedCrypto\fly-mirror-segments\.puller\state.json"
+TRANSFER_LOCK_BUSY_TOLERANCE = 3     # consecutive LOCK_BUSY pulls (promotion/parity hold the lock) before DEGRADED
 
 
 def _now() -> float:
@@ -93,7 +98,7 @@ def _component(status: str, *, data=None, as_of: Optional[float] = None, max_age
         "as_of": _iso(as_of),
         "age_sec": round(now - as_of, 1) if as_of else None,
         "max_age_sec": max_age,
-        "data": data if status == OK else None,
+        "data": data if status in (OK, DEGRADED) else None,
     }
 
 
@@ -232,6 +237,14 @@ def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0)
 
 
 # --------------------------------------------------------------------------- transfer / ACK
+def _puller_state() -> dict:
+    try:
+        state = _read_json(PULLER_STATE_PATH)
+    except Exception:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
 def transfer_component(now: float, health: Optional[dict]) -> dict:
     try:
         pull = _read_json(os.path.join(STATE_DIR, "segment-pull.status.json"))
@@ -244,9 +257,19 @@ def transfer_component(now: float, health: Optional[dict]) -> dict:
         head = {}
     checks = ((health or {}).get("data") or {}).get("checks") or {}
     published = pull.get("remotePublishedSeq")
-    applied = pull.get("appliedSeq")
+    applied, acked, seq_source = pull.get("appliedSeq"), pull.get("ackedSeq"), "segment-pull.status.json"
+    if not isinstance(applied, int):
+        state = _puller_state()
+        if isinstance(state.get("applied_seq"), int):
+            applied, seq_source = state["applied_seq"], f"{PULLER_STATE_PATH} (pull status had no appliedSeq)"
+            if not isinstance(acked, int) and isinstance(state.get("acked_seq"), int):
+                acked = state["acked_seq"]
     data = {
-        "published_seq": published, "applied_seq": applied, "laptop_acked_seq": pull.get("ackedSeq"),
+        "published_seq": published, "applied_seq": applied, "laptop_acked_seq": acked,
+        "applied_seq_source": seq_source if isinstance(applied, int) else None,
+        "last_attempt_result": pull.get("lastAttemptResult"),
+        "consecutive_failures": pull.get("consecutiveFailures"),
+        "last_success_at": pull.get("lastSuccessAt"),
         "fly_shipped_seq": head.get("shipped_seq"), "fly_laptop_acked_seq": head.get("laptop_acked_seq"),
         "fly_unshipped_bytes": head.get("unshipped_bytes"), "fly_last_error": head.get("last_error"),
         "applied_behind_published": (published - applied) if isinstance(published, int) and isinstance(applied, int)
@@ -257,8 +280,28 @@ def transfer_component(now: float, health: Optional[dict]) -> dict:
         "health_checks": {k: checks.get(k) for k in ("shipper.progress", "laptop.pull_ack") if k in checks},
     }
     as_of = _ts(pull.get("finishedAt"))
-    return _fresh(data, as_of=as_of, max_age=TRANSFER_MAX_AGE_SEC, source=STATE_DIR, now=now,
+    comp = _fresh(data, as_of=as_of, max_age=TRANSFER_MAX_AGE_SEC, source=STATE_DIR, now=now,
                   what="segment pull status")
+    if comp["status"] != OK:
+        return comp
+    if not isinstance(applied, int):
+        return _component(UNKNOWN, as_of=as_of, max_age=TRANSFER_MAX_AGE_SEC, source=STATE_DIR, now=now,
+                          reason="applied_seq unknown: segment-pull status has no appliedSeq and puller "
+                                 f"state.json has none either (last pull exit={pull.get('exitCode')}, "
+                                 f"error={pull.get('error')})")
+    problems = []
+    if seq_source != "segment-pull.status.json":
+        problems.append("pull status had no appliedSeq; using puller state.json")
+    failures = pull.get("consecutiveFailures")
+    brief_lock_wait = (pull.get("lastAttemptResult") == "LOCK_BUSY" and isinstance(failures, int)
+                       and failures < TRANSFER_LOCK_BUSY_TOLERANCE)
+    if pull.get("exitCode") not in (0, None) and not brief_lock_wait:
+        problems.append(f"last pull exit={pull.get('exitCode')} result={pull.get('lastAttemptResult')} "
+                        f"consecutive_failures={failures} error={pull.get('error')}")
+    if problems:
+        comp = _component(DEGRADED, data=data, as_of=as_of, max_age=TRANSFER_MAX_AGE_SEC, source=STATE_DIR,
+                          now=now, reason="; ".join(problems))
+    return comp
 
 
 # --------------------------------------------------------------------------- deploy queue (WALL)

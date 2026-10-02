@@ -77,8 +77,19 @@ try {
       appliedNow = $(if ($pull) { $pull.applied_now } else { $null })
       remotePublishedSeq = $(if ($pull -and $pull.remote_head) { $pull.remote_head.published_seq } else { $null })
       error = $(if ($pull -and -not $pull.ok) { $pull.error } elseif (-not $pull) { ($output -split "`r?`n" | Select-Object -Last 1) } else { $null })
+      lastAttemptResult = $(if ($pull -and $pull.last_attempt_result) { $pull.last_attempt_result } elseif ($pull -and $pull.ok) { 'OK' } else { 'ERROR' })
+      consecutiveFailures = $(if ($pull) { $pull.consecutive_failures } else { $null })
+      lockHolder = $(if ($pull) { $pull.lock_holder } else { $null })
+      lastSuccessAt = $(if ($pull -and $pull.ok) { Get-UtcNowIso } elseif ($pull) { $pull.last_success_at } else { $null })
+    }
+    # A failed attempt with no puller receipt must not erase the last known progress.
+    if ($previous) {
+      foreach ($field in 'appliedSeq', 'ackedSeq', 'lastSuccessAt') {
+        if ($null -eq $status[$field] -and $previous.PSObject.Properties[$field]) { $status[$field] = $previous.$field }
+      }
     }
     Write-JsonAtomic -Path $statusPath -Value $status
+    $previous = [pscustomobject]$status
     Write-ChainLog -Config $cfg -Name $logName -Message ("PULL exit={0} applied={1} acked={2} now={3} remote={4} parity={5}" -f $code, $status.appliedSeq, $status.ackedSeq, $status.appliedNow, $status.remotePublishedSeq, $parityDue)
     if ($MaxIterations -gt 0 -and $iteration -ge $MaxIterations) { break }
     # Drain a large first backlog in consecutive bounded batches.

@@ -314,6 +314,48 @@ def test_snapshot_refuses_stale_components(tmp_path, monkeypatch):
     assert snap["system_verdict"] == "UNKNOWN"
 
 
+def _transfer(tmp_path, monkeypatch, pull: dict, state: dict | None = None) -> dict:
+    now = time.time()
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "segment-pull.status.json").write_text(json.dumps({"finishedAt": I._iso(now - 30), **pull}))
+    puller_state = tmp_path / "puller-state.json"
+    if state is not None:
+        puller_state.write_text(json.dumps(state))
+    monkeypatch.setattr(I, "STATE_DIR", str(state_dir))
+    monkeypatch.setattr(I, "PULLER_STATE_PATH", str(puller_state))
+    return I.transfer_component(now, None)
+
+
+LOCK_REFUSED = {"exitCode": 2, "appliedSeq": None, "ackedSeq": None, "remotePublishedSeq": None,
+                "error": "PullerError: another puller run holds the shadow-root lock"}
+
+
+def test_transfer_is_never_ok_with_a_null_applied_seq(tmp_path, monkeypatch):
+    comp = _transfer(tmp_path, monkeypatch, LOCK_REFUSED)
+    assert comp["status"] == "UNKNOWN" and comp["data"] is None
+    assert "applied_seq unknown" in comp["reason"]
+
+
+def test_transfer_falls_back_to_puller_state_seq_as_degraded(tmp_path, monkeypatch):
+    comp = _transfer(tmp_path, monkeypatch, LOCK_REFUSED,
+                     state={"schema": "research_segment_puller_state_v1", "applied_seq": 2288, "acked_seq": 2288})
+    assert comp["status"] == "DEGRADED"
+    assert comp["data"]["applied_seq"] == 2288 and comp["data"]["laptop_acked_seq"] == 2288
+    assert "state.json" in comp["data"]["applied_seq_source"] and "state.json" in comp["reason"]
+
+
+def test_transfer_tolerates_a_brief_lock_wait_but_not_a_streak(tmp_path, monkeypatch):
+    busy = {"exitCode": 2, "appliedSeq": 2296, "ackedSeq": 2296, "remotePublishedSeq": 2296,
+            "error": "PullerError: another puller run holds the shadow-root lock", "lastAttemptResult": "LOCK_BUSY"}
+    brief = _transfer(tmp_path, monkeypatch, {**busy, "consecutiveFailures": 1})
+    assert brief["status"] == "OK" and brief["data"]["applied_seq"] == 2296
+    streak = _transfer(tmp_path, monkeypatch, {**busy, "consecutiveFailures": I.TRANSFER_LOCK_BUSY_TOLERANCE})
+    assert streak["status"] == "DEGRADED" and "consecutive_failures=3" in streak["reason"]
+    error = _transfer(tmp_path, monkeypatch, {**busy, "lastAttemptResult": "ERROR", "consecutiveFailures": 1})
+    assert error["status"] == "DEGRADED" and error["data"]["applied_seq"] == 2296
+
+
 def test_fly_data_joins_win_rate_from_export():
     status = {"git_rev": "abc", "execution_paused": False, "last_ai_success_at": I._iso(time.time() - 30),
               "active_tiles": [{"lane": "FAMILY_A", "label": "A"}],

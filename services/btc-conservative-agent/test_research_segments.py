@@ -419,6 +419,109 @@ def test_existing_ack_disagreement_fails_closed(tmp_path):
         env.puller().pull_once()
 
 
+# ------------------------------------------------- status survives failed runs
+def _main(env, monkeypatch, capsys, *extra) -> tuple[int, dict]:
+    monkeypatch.setattr(puller_mod, "store_from_env", lambda: env.store)
+    code = puller_mod.main(["--shadow-root", str(env.shadow), "--archive-root", str(env.archive),
+                            "--prefix", "v1", "--source", "store", *extra])
+    return code, json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def _puller_status(env) -> dict:
+    return json.loads((env.shadow / ".puller" / "status.json").read_text())
+
+
+def test_lock_refusal_keeps_sequences_and_counts_failures(tmp_path, monkeypatch, capsys):
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    code, out = _main(env, monkeypatch, capsys)
+    assert code == 0 and out["applied_seq"] == 1
+    ok = _puller_status(env)
+    assert ok["last_attempt_result"] == "OK" and ok["consecutive_failures"] == 0
+    assert ok["applied_seq"] == ok["acked_seq"] == 1 and ok["last_success_at"]
+
+    holder = puller_mod._RunLock(env.shadow / ".puller" / "run.lock", holder="research_segment_promotion")
+    try:
+        for expected_failures in (1, 2):
+            code, out = _main(env, monkeypatch, capsys)
+            assert code == 2 and "holds the shadow-root lock" in out["error"]
+            status = _puller_status(env)
+            assert status["last_attempt_result"] == "LOCK_BUSY"
+            assert status["consecutive_failures"] == expected_failures
+            assert status["applied_seq"] == 1 and status["acked_seq"] == 1
+            assert status["last_success_at"] == ok["last_success_at"]
+            assert status["lock_holder"]["holder"] == "research_segment_promotion"
+            assert status["lock_holder"]["pid"] == os.getpid()
+            assert "holds the shadow-root lock" in status["last_error"]
+            # The stdout receipt feeds segment-pull.status.json: it must carry the seqs too.
+            assert out["applied_seq"] == 1 and out["acked_seq"] == 1
+            assert out["last_attempt_result"] == "LOCK_BUSY" and out["consecutive_failures"] == expected_failures
+    finally:
+        holder.release()
+    assert not (env.shadow / ".puller" / "run.lock.holder.json").exists()
+
+    code, _out = _main(env, monkeypatch, capsys)
+    status = _puller_status(env)
+    assert code == 0 and status["last_attempt_result"] == "OK" and status["consecutive_failures"] == 0
+    assert status["lock_holder"] is None and status["last_error"] is None
+
+
+def test_errors_fall_back_to_state_json_and_never_null_sequences(tmp_path, monkeypatch, capsys):
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    env.puller().pull_once()
+    # A status written by an older puller that already erased the seqs.
+    (env.shadow / ".puller" / "status.json").write_text(json.dumps(
+        {"schema": "research_segment_puller_status_v1", "last_error": "PullerError: lock"}))
+
+    def boom(self, **_kwargs):
+        raise puller_mod.PullerError("manifest 2 is published but its segment is missing")
+
+    monkeypatch.setattr(puller_mod.SegmentPuller, "pull_once", boom)
+    code, out = _main(env, monkeypatch, capsys)
+    status = _puller_status(env)
+    assert code == 2 and status["last_attempt_result"] == "ERROR" and status["consecutive_failures"] == 1
+    assert status["applied_seq"] == 1 and status["acked_seq"] == 1 and out["applied_seq"] == 1
+
+    def crash(self, **_kwargs):
+        raise KeyError("unexpected")
+
+    monkeypatch.setattr(puller_mod.SegmentPuller, "pull_once", crash)
+    with pytest.raises(KeyError):
+        _main(env, monkeypatch, capsys)
+    status = _puller_status(env)
+    assert status["last_attempt_result"] == "ERROR" and status["consecutive_failures"] == 2
+    assert status["applied_seq"] == 1 and status["acked_seq"] == 1
+
+
+def test_run_deadline_stops_between_segments_and_resumes(tmp_path, monkeypatch):
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    env.write("a.jsonl", _rows(3, 3), append=True)
+    env.ship_all()
+    clock = iter(range(0, 10_000, 100))
+    monkeypatch.setattr(puller_mod.time, "monotonic", lambda: float(next(clock)))
+    stopped = env.puller().pull_once(max_run_seconds=50)
+    assert stopped["applied_now"] == 1 and stopped["applied_seq"] == 1 and stopped["deadline_reached"] is True
+    assert env.puller().pull_once() == {"applied_now": 1, "applied_seq": 2, "acked_seq": 2}
+    env.assert_tree_matches_source()
+
+
+def test_http_source_retries_stop_at_the_request_deadline():
+    import time as _time
+
+    from research_segment_store import HttpSegmentSource, StoreError
+    source = HttpSegmentSource(base_url="http://127.0.0.1:9", admin_token="t", attempts=5,
+                               timeout=5, request_deadline=0.5)
+    started = _time.monotonic()
+    with pytest.raises(StoreError, match="failed after retries"):
+        source.get(fmt.manifest_key("v1", 1))
+    assert _time.monotonic() - started < 3.0
+
+
 def test_shipper_reads_laptop_ack_without_pruning(tmp_path):
     env = Env(tmp_path)
     source = env.write("a.jsonl", _rows(0, 2))

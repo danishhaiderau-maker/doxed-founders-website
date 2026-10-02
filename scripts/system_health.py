@@ -44,6 +44,13 @@ from typing import Any, Callable, Iterable, Mapping
 
 SCHEMA = "system_health_v1"
 ALARM_SCHEMA = "system_health_alarm_v1"
+# Behaviour contracts this watcher build implements; the blindspot closure
+# ledger only marks an item CLOSED-VERIFIED-LIVE when the live report lists it.
+WATCHER_FEATURES = (
+    "analyzer_reports", "analyzer_parity_strict", "pull_ack_no_none_green", "supervisor_process_check",
+    "streams_analysed_freshness", "missing_data_not_green", "selfaware_engine", "cached_live_refresh",
+    "fetch_failure_not_skip", "incident_stale_report",
+)
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
 RUNBOOK = "docs/SYSTEM_HEALTH_RUNBOOK.md"
@@ -59,6 +66,8 @@ DEFAULT_RETENTION_DIR = r"C:\DoxxedCrypto\bot-data-retention"
 DEFAULT_ARCHIVE_DIR = r"C:\DoxxedCrypto\analysis-archive"
 FLY_URL = "https://doxed-btc-bot.fly.dev"
 ANALYZER_URL = "http://127.0.0.1:9001"
+SELFAWARE_URL = "http://127.0.0.1:9021"
+SUPERVISOR_TASK = "DoxxedLaptopChainSupervisor"
 SERVER_PORT = 9011
 REPO = "danishhaiderau-maker/doxed-founders-website"
 
@@ -126,6 +135,19 @@ THRESHOLDS: dict[str, float] = {
     "neon_usage_cache_sec": 15 * MIN,
     "neon_usage_error_cache_sec": 5 * MIN,
     "deepseek_balance_fly_max_age_sec": 30 * MIN,
+    "analyzer_reports_red_sec": 45 * MIN,
+    "analyzer_receipt_amber_sec": 30 * MIN,
+    "analyzer_receipt_wall_amber_sec": 60 * MIN,
+    "pull_applied_none_red_sec": 30 * MIN,
+    "pull_exit_red_sec": 10 * MIN,
+    "pull_loop_missing_red_sec": 10 * MIN,
+    "source_down_amber_sec": 15 * MIN,
+    "streams_content_lag_amber_sec": 60 * MIN,
+    "selfaware_down_red_sec": 15 * MIN,
+    "selfaware_stale_red_sec": 20 * MIN,
+    "selfaware_job_late_factor": 3,
+    "supervisor_probe_cache_sec": 60.0,
+    "legacy_ack_stale_sec": HOUR,
 }
 
 # DeepSeek retired "deepseek-v4-flash" on 2026-10-01 and serves those requests
@@ -240,8 +262,9 @@ def check(
     threshold: Any,
     hint: str = "",
     detail: str = "",
+    fields: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    out = {
         "id": cid,
         "subsystem": subsystem,
         "status": status,
@@ -251,6 +274,38 @@ def check(
         "detail": detail,
         "runbook": f"{RUNBOOK}#{cid.replace('.', '-')}",
     }
+    if fields:
+        out["observed_fields"] = dict(fields)
+    return out
+
+
+_PARITY_OK = {"MATCH", "MATCHED", "OK", "TRUE", "GREEN", "PASS", "YES"}
+_PARITY_UNKNOWN = {"", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "PENDING"}
+
+
+def parity_state(value: Any) -> bool | None:
+    """True/False/None (unknown) for parity fields that may be bool, string ("MATCH") or a mapping."""
+    if isinstance(value, Mapping):
+        inner = value.get("match", value.get("ok", value.get("status")))
+        return None if inner is None else parity_state(inner)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in _PARITY_OK:
+        return True
+    if text in _PARITY_UNKNOWN:
+        return None
+    return False
+
+
+def same_rev(a: Any, b: Any) -> bool | None:
+    """Prefix compare of two git revisions (Fly reports 12 chars); None when either is unknown."""
+    a, b = str(a or "").strip().lower(), str(b or "").strip().lower()
+    if len(a) < 7 or len(b) < 7:
+        return None
+    return a.startswith(b) or b.startswith(a)
 
 
 # ------------------------------------------------------------------ inputs
@@ -413,6 +468,52 @@ def last_supervisor_tick(log_dir: Path) -> float | None:
     return newest
 
 
+_PROBE_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$t = Get-ScheduledTask -TaskName '__TASK__'
+$i = if ($t) { $t | Get-ScheduledTaskInfo } else { $null }
+$procs = @(Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%research-segment-pull-loop%' OR CommandLine LIKE '%laptop-chain-supervisor%' OR CommandLine LIKE '%laptop-ack-watcher%'")
+function Pids([string]$pat) { ,@($procs | Where-Object { $_.CommandLine -like $pat } | ForEach-Object { [int]$_.ProcessId }) }
+[pscustomobject]@{
+  task_found = [bool]$t
+  task_state = if ($t) { [string]$t.State } else { $null }
+  last_run = if ($i -and $i.LastRunTime) { $i.LastRunTime.ToUniversalTime().ToString('o') } else { $null }
+  last_result = if ($i) { [int64]$i.LastTaskResult } else { $null }
+  pull_loop_pids = (Pids '*research-segment-pull-loop*')
+  supervisor_pids = (Pids '*laptop-chain-supervisor*')
+  ack_watcher_pids = (Pids '*laptop-ack-watcher*')
+} | ConvertTo-Json -Compress
+"""
+
+
+def probe_supervisor(cache: dict[str, Any], now: float, *, ttl: float | None = None,
+                     runner: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """Scheduled-task state + live pull-loop/supervisor processes (cached; one PowerShell call)."""
+    ttl = THRESHOLDS["supervisor_probe_cache_sec"] if ttl is None else ttl
+    cached = cache.get("supervisor_probe")
+    if isinstance(cached, Mapping) and now - float(cached.get("checked_at") or 0) < ttl:
+        return dict(cached)
+    out: dict[str, Any] = {"checked_at": now, "ok": False}
+    if os.name != "nt" and runner is subprocess.run:
+        out["error"] = "NOT_WINDOWS"
+    else:
+        # -EncodedCommand keeps the probe's own command line free of the patterns it searches for.
+        encoded = base64.b64encode(_PROBE_SCRIPT.replace("__TASK__", SUPERVISOR_TASK).encode("utf-16-le")).decode()
+        try:
+            result = runner(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                            capture_output=True, text=True, timeout=45, check=False,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            payload = json.loads((result.stdout or "").strip().splitlines()[-1])
+            for key in ("pull_loop_pids", "supervisor_pids", "ack_watcher_pids"):
+                value = payload.get(key)
+                payload[key] = [int(v) for v in (value if isinstance(value, list) else [value] if value else [])]
+            out.update(payload, ok=True)
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError, TypeError, AttributeError):
+            out["error"] = "PROBE_FAILED"
+    cache["supervisor_probe"] = out
+    return dict(out)
+
+
 def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None = None) -> dict[str, Any]:
     """Gather every input. Each source fails independently into ``errors``."""
     now = utcnow() if now is None else now
@@ -435,6 +536,9 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     else:
         inputs["fly_state"], errors["fly_state"] = None, "ADMIN_TOKEN_MISSING"
     fetch("analyzer_api", f"{opts.analyzer_url}/api/health", timeout=10)
+    fetch("analyzer_status_api", f"{opts.analyzer_url}/api/status", timeout=15)
+    fetch("analyzer_streams", f"{opts.analyzer_url}/api/streams/health", timeout=15)
+    fetch("selfaware", f"{getattr(opts, 'selfaware_url', None) or SELFAWARE_URL}/api/selfaware/health", timeout=15)
     base = os.environ.get("PLATFORM_API_BASE_URL") or vault.get("PLATFORM_API_BASE_URL")
     if base:
         fetch("railway_health", f"{base.rstrip('/')}/health", timeout=20)
@@ -452,9 +556,13 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         "cycle_status": state_dir / "segment-analyzer-cycle.status.json",
         "proof_active": state_dir / "unattended-proof" / "active.json",
         "puller_status": shadow / ".puller" / "status.json",
+        # The puller rewrites status.json without seqs on a lock refusal; state.json keeps them.
+        "puller_state": shadow / ".puller" / "state.json",
+        "legacy_ack_watcher": state_dir / "laptop-ack-watcher.status.json",
     }
     for key, path in files.items():
         inputs[key] = read_json(path)
+    inputs["legacy_ack_retired"] = (state_dir / "laptop-ack-watcher.RETIRED").exists()
     receipts = shadow / ".puller" / "ack-receipts.jsonl"
     try:
         with open(receipts, "rb") as handle:
@@ -482,6 +590,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     inputs["mirror_trades"] = read_ledger_rows(Path(opts.mirror_tree) / "trades_3factor.csv")
     inputs["exports"] = collect_exports(Path(opts.exports), now)
     cache = state.setdefault("cache", {})
+    inputs["supervisor_probe"] = probe_supervisor(cache, now)
     inputs["registry"] = collect_registry(opts.analyzer_repo, cache.setdefault("registry", {}))
     inputs["analyzer_head"] = _git(opts.analyzer_repo, "rev-parse", "HEAD")
     fly_rev = str(dig(inputs.get("fly_status"), "git_rev") or dig(inputs.get("fly_health"), "git_rev") or "")
@@ -762,6 +871,46 @@ def _ai_provider_health(status: Any, state: Any) -> dict[str, Any] | None:
     return None
 
 
+TRACKED_SOURCES = ("fly_status", "fly_health", "fly_state", "analyzer_api", "analyzer_status_api",
+                   "analyzer_streams", "selfaware", "railway_health")
+# A SKIP caused by a fetch failure (429, timeout, missing token) may hide a real failure;
+# once its source has failed for ``source_down_amber_sec`` the check is AMBER instead.
+SKIP_SOURCES: Mapping[str, tuple[str, ...]] = {
+    "fly.revision": ("fly_status", "fly_health"),
+    "ai.success": ("fly_status", "fly_health"),
+    "ai.served_model": ("fly_status", "fly_health"),
+    "trading.orders": ("fly_state", "fly_status", "fly_health"),
+    "trading.orphans": ("fly_state",),
+    "ws.ticks": ("fly_status", "fly_health"),
+    "shipper.progress": ("fly_status", "fly_health"),
+    "streams.coverage": ("fly_status",),
+    "dashboards.parity": ("fly_status",),
+}
+
+
+def _fail_open_guard(checks: list[dict[str, Any]], errors: Mapping[str, Any], down: Mapping[str, float],
+                     now: float, t: Mapping[str, float]) -> dict[str, Any]:
+    """Turn fetch-caused SKIPs AMBER after a sustained outage and summarize every failing source."""
+    limit = t["source_down_amber_sec"]
+    long_down = {k: now - float(v) for k, v in down.items() if now - float(v) > limit}
+    for c in checks:
+        if c["status"] != SKIP:
+            continue
+        hit = [k for k in SKIP_SOURCES.get(c["id"], ()) if k in long_down]
+        if hit:
+            c["status"] = AMBER
+            c["observed"] = (f"cannot fetch {', '.join(f'{k} ({errors.get(k)})' for k in hit)} for "
+                             f"{fmt_age(max(long_down[k] for k in hit))}; {c['observed']}")
+            c["hint"] = c["hint"] or "input unavailable too long to trust a SKIP (rate limit, token, outage)"
+    parts = [f"{k}={errors.get(k)} for {fmt_age(now - float(v))}" for k, v in sorted(down.items())]
+    st = AMBER if long_down else GREEN
+    return check("watcher.sources", "watcher", st,
+                 "; ".join(parts) or f"all {len(TRACKED_SOURCES)} sources answered",
+                 f"no source failing for more than {fmt_age(limit)}",
+                 "" if st == GREEN else "rate limited (HTTP_429), token missing, or endpoint down; dependent checks "
+                                        "are blind", fields={"failing_sources": sorted(long_down)})
+
+
 def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mapping[str, float] | None = None
              ) -> list[dict[str, Any]]:
     """Pure evaluation of every check. ``state`` carries progress memory."""
@@ -777,6 +926,13 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     pause_owner = dig(status, "pause_owner", default=dig(health, "pause_owner")) or ""
     checks: list[dict[str, Any]] = []
     add = checks.append
+    source_down = mem.setdefault("source_down", {})
+    for key in TRACKED_SOURCES:
+        err = errors.get(key)
+        if err and not (key == "railway_health" and err == "CONFIG_MISSING"):
+            source_down.setdefault(key, now)
+        else:
+            source_down.pop(key, None)
 
     # ---------------- Fly
     reachable = status is not None and health is not None
@@ -884,8 +1040,9 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     window = [e for e in events if e["ok"] and now - e["ts"] <= t["ai_neutral_window_sec"] and e.get("direction")]
     neutral = [e for e in window if str(e["direction"]).upper() in {"NO_TRADE", "NEUTRAL", "HOLD", "NONE"}]
     if len(window) < t["ai_neutral_min_samples"]:
-        add(check("ai.decision_mix", "ai", SKIP if not window else GREEN,
-                  f"{len(neutral)}/{len(window)} neutral in {fmt_age(t['ai_neutral_window_sec'])}",
+        add(check("ai.decision_mix", "ai", SKIP,
+                  f"{len(neutral)}/{len(window)} neutral in {fmt_age(t['ai_neutral_window_sec'])} "
+                  f"(below {int(t['ai_neutral_min_samples'])} samples; not rated)",
                   f"not 100% neutral over >= {int(t['ai_neutral_min_samples'])} responses"))
     else:
         all_neutral = len(neutral) == len(window)
@@ -945,8 +1102,11 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   "" if st == GREEN else "top up DeepSeek; at $0 every AI call fails with HTTP 402"))
 
     # ---------------- Trading
-    toggles = dig(fstate, "research_lane_enabled", default=None) or dig(inputs.get("runtime_snapshot"),
-                                                                          "research_lane_enabled", default={}) or {}
+    toggle_sources = [dig(fstate, "research_lane_enabled"),
+                      dig(inputs.get("runtime_snapshot"), "research_lane_enabled")]
+    toggle_maps = [m for m in toggle_sources if isinstance(m, Mapping)]
+    toggles_known = bool(toggle_maps)
+    toggles = next((m for m in toggle_maps if m), toggle_maps[0] if toggle_maps else {})
     on_lanes = sorted(k for k, v in toggles.items() if v is True)
     route_counts = dig(fstate, "tile_route_counts", default={}) or {}
     instance = str(dig(status, "bot_instance_id") or "")
@@ -976,6 +1136,11 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if not reachable or fstate is None:
         add(check("trading.orders", "trading", SKIP, f"no /api/state ({errors.get('fly_state')})",
                   f"an order within {fmt_age(t['orders_red_sec'])} while tiles ON"))
+    elif not toggles_known:
+        add(check("trading.orders", "trading", AMBER,
+                  "toggle state unavailable (no research_lane_enabled in /api/state or the runtime snapshot)",
+                  f"an order within {fmt_age(t['orders_red_sec'])} while tiles ON",
+                  "cannot tell which tiles are ON; /api/state shape changed or the runtime snapshot is missing"))
     elif not on_lanes:
         add(check("trading.orders", "trading", GREEN, "all tiles OFF (no orders expected)",
                   f"an order within {fmt_age(t['orders_red_sec'])} while tiles ON"))
@@ -1032,15 +1197,21 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     else:
         ws_age = dig(status, "ws_age")
         ws_age = float(ws_age) if isinstance(ws_age, (int, float)) else None
-        progressing = dig(progress, "ws_progressing", default=True)
+        progressing = dig(progress, "ws_progressing")
+        if progressing is None:
+            progressing = dig(inputs.get("runtime_snapshot"), "strategy_progress", "ws_progressing")
         st = GREEN
         if ws_age is None or ws_age > t["ws_red_sec"] or progressing is False:
             st = RED
-        elif ws_age > t["ws_amber_sec"]:
+        elif ws_age > t["ws_amber_sec"] or progressing is None:
             st = AMBER
-        add(check("ws.ticks", "ws", st, f"trade tick {fmt_age(ws_age)} old, ws_progressing={progressing}",
-                  f"<= {t['ws_amber_sec']:.0f}s AMBER / {t['ws_red_sec']:.0f}s RED",
-                  "" if st == GREEN else "Bitfinex WS disconnected/stalled; REST fallback only"))
+        add(check("ws.ticks", "ws", st,
+                  f"trade tick {fmt_age(ws_age)} old, ws_progressing="
+                  f"{progressing if progressing is not None else 'not reported'}",
+                  f"<= {t['ws_amber_sec']:.0f}s AMBER / {t['ws_red_sec']:.0f}s RED, ws_progressing reported true",
+                  "" if st == GREEN else
+                  ("Fly no longer reports strategy_progress.ws_progressing" if progressing is None and st == AMBER
+                   and (ws_age or 0) <= t["ws_amber_sec"] else "Bitfinex WS disconnected/stalled; REST fallback only")))
 
     # ---------------- Shipper
     transfer = dig(health, "volume", "transfer", default=None) or (inputs.get("head_snapshot") if
@@ -1084,7 +1255,13 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     puller = inputs.get("puller_status") or {}
     receipt = inputs.get("ack_receipt") or {}
     published = dig(transfer, "shipped_seq") if transfer else None
-    applied = puller.get("applied_seq") if puller.get("applied_seq") is not None else pull.get("appliedSeq")
+    pstate = inputs.get("puller_state") if isinstance(inputs.get("puller_state"), Mapping) else {}
+    applied, applied_src = None, "none"
+    for src, value in (("puller status", puller.get("applied_seq")), ("pull status", pull.get("appliedSeq")),
+                       ("puller state.json", pstate.get("applied_seq"))):
+        if value is not None:
+            applied, applied_src = value, src
+            break
     fly_acked = dig(transfer, "laptop_acked_seq") if transfer else None
     finished = parse_ts(pull.get("finishedAt"))
     if applied is not None and published is not None and int(applied) >= int(published):
@@ -1112,23 +1289,110 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         reasons.append(f"Fly laptop_acked behind applied by {ack_lag} segments")
     elif ack_lag and ack_lag > 0 and ack_behind_for > t["ack_lag_red_sec"]:
         reasons.append(f"Fly laptop_acked behind applied and not advancing for {fmt_age(ack_behind_for)}")
-    st = RED if reasons else GREEN
+    ambers = []
+    if applied is None:
+        none_for = now - float(mem.setdefault("applied_none_since", now))
+        (reasons if none_for > t["pull_applied_none_red_sec"] else ambers).append(
+            f"applied seq unknown for {fmt_age(none_for)} (puller status, pull status and state.json all lack it)")
+    else:
+        mem.pop("applied_none_since", None)
+    exit_code = pull.get("exitCode")
+    iteration = pull.get("iteration")
+    pull_fail = mem.get("pull_fail") or {}
+    if isinstance(exit_code, int) and exit_code != 0:
+        if not pull_fail:
+            pull_fail = {"since": now, "first_iteration": iteration, "first_finished": pull.get("finishedAt")}
+        pull_fail["iteration"], pull_fail["exit"] = iteration, exit_code
+        mem["pull_fail"] = pull_fail
+        failing_for = now - float(pull_fail["since"])
+        try:
+            consecutive = int(iteration) - int(pull_fail.get("first_iteration")) + 1
+        except (TypeError, ValueError):
+            consecutive = 1 if pull.get("finishedAt") == pull_fail.get("first_finished") else 2
+        msg = f"segment pull exit={exit_code} for {consecutive} consecutive pulls / {fmt_age(failing_for)}"
+        if consecutive > 1 and failing_for > t["pull_exit_red_sec"]:
+            # A lock refusal while another puller (the analyzer cycle) keeps applying is degraded, not dead.
+            lock_held = "lock" in str(pull.get("error") or "").lower()
+            applying = mem.get("applied_changed_ts") and now - float(mem["applied_changed_ts"]) <= t["pull_lag_red_sec"]
+            (ambers if lock_held and applying else reasons).append(
+                msg + ("; another puller holds the lock and applied keeps advancing" if lock_held and applying else ""))
+        else:
+            ambers.append(msg)
+    elif exit_code == 0:
+        mem.pop("pull_fail", None)
+    st = RED if reasons else AMBER if ambers else GREEN
     if st == GREEN and pull_lag:
         st = AMBER if behind_for > 5 * MIN else GREEN
     add(check("laptop.pull_ack", "laptop", st,
-              f"published={published} applied={applied} fly_acked={fly_acked} last pull {fmt_age(finished_age)} ago"
-              f" (last receipt through {receipt.get('through_seq')})",
-              f"applied advancing or ==published within {fmt_age(t['pull_lag_red_sec'])}, Fly ACK advancing within "
+              f"published={published} applied={applied} ({applied_src}) fly_acked={fly_acked} last pull "
+              f"{fmt_age(finished_age)} ago exit={exit_code} (last receipt through {receipt.get('through_seq')})",
+              f"applied known and advancing or ==published within {fmt_age(t['pull_lag_red_sec'])}, pull exit 0 "
+              f"(RED after >1 failing pull and {fmt_age(t['pull_exit_red_sec'])}), Fly ACK advancing within "
               f"{fmt_age(t['ack_lag_red_sec'])} and <= {t['ack_lag_seq_red']} behind applied",
-              "; ".join(reasons) or ("" if st == GREEN else "pull catching up"),
-              str(pull.get("error") or "")[:200]))
+              "; ".join(reasons + ambers) or ("" if st == GREEN else "pull catching up"),
+              str(pull.get("error") or "")[:200],
+              fields={"published": published, "applied": applied, "applied_source": applied_src,
+                      "fly_acked": fly_acked, "pull_exit": exit_code}))
+
     sup = inputs.get("supervisor_tick_at")
     sup_age = (now - sup) if sup else None
-    add(check("laptop.supervisor", "laptop", RED if sup_age is None or sup_age > t["supervisor_tick_red_sec"] else GREEN,
-              f"last DoxxedLaptopChainSupervisor tick {fmt_age(sup_age)} ago",
-              f"<= {fmt_age(t['supervisor_tick_red_sec'])}",
-              "" if sup_age is not None and sup_age <= t["supervisor_tick_red_sec"]
-              else "scheduled task disabled, laptop asleep, or tick erroring"))
+    probe = inputs.get("supervisor_probe") if isinstance(inputs.get("supervisor_probe"), Mapping) else None
+    sup_threshold = (f"task enabled, last run <= {fmt_age(t['supervisor_tick_red_sec'])}, pull-loop process alive "
+                     f"(RED after {fmt_age(t['pull_loop_missing_red_sec'])} missing)")
+    if not probe or not probe.get("ok"):
+        st = RED if sup_age is None or sup_age > t["supervisor_tick_red_sec"] else AMBER
+        add(check("laptop.supervisor", "laptop", st,
+                  f"process probe unavailable ({(probe or {}).get('error')}); last log TICK {fmt_age(sup_age)} ago",
+                  sup_threshold, "cannot verify the scheduled task / pull loop; only the supervisor log is visible"
+                  if st == AMBER else "scheduled task disabled, laptop asleep, or tick erroring"))
+    else:
+        last_run = parse_ts(probe.get("last_run"))
+        run_age = (now - last_run) if last_run else None
+        pull_pids = list(probe.get("pull_loop_pids") or [])
+        red, amber = [], []
+        if not probe.get("task_found"):
+            red.append(f"scheduled task {SUPERVISOR_TASK} not found")
+        elif str(probe.get("task_state")).lower() == "disabled":
+            red.append("scheduled task disabled")
+        if run_age is None or run_age > t["supervisor_tick_red_sec"]:
+            red.append(f"task last ran {fmt_age(run_age)} ago")
+        if pull_pids:
+            mem.pop("pull_loop_missing_since", None)
+        else:
+            missing = now - float(mem.setdefault("pull_loop_missing_since", now))
+            (red if missing > t["pull_loop_missing_red_sec"] else amber).append(
+                f"no research-segment-pull-loop process for {fmt_age(missing)}")
+        if probe.get("last_result") not in (None, 0, 267009, 267011):  # 0x41301 running, 0x41303 not yet run
+            amber.append(f"task last result 0x{int(probe['last_result']):X}")
+        st = RED if red else AMBER if amber else GREEN
+        add(check("laptop.supervisor", "laptop", st,
+                  f"task state={probe.get('task_state')} last run {fmt_age(run_age)} ago result={probe.get('last_result')}; "
+                  f"pull loop pid(s) {pull_pids or 'none'}; log TICK {fmt_age(sup_age)} ago",
+                  sup_threshold,
+                  "; ".join(red + amber) or "",
+                  fields={"task_state": probe.get("task_state"), "last_run_age_sec": run_age,
+                          "pull_loop_pids": pull_pids, "supervisor_pids": probe.get("supervisor_pids"),
+                          "probe_checked_at": iso(probe.get("checked_at"))}))
+
+    legacy = inputs.get("legacy_ack_watcher") if isinstance(inputs.get("legacy_ack_watcher"), Mapping) else None
+    ack_pids = list((probe or {}).get("ack_watcher_pids") or [])
+    if inputs.get("legacy_ack_retired"):
+        add(check("laptop.legacy_ack_watcher", "laptop", GREEN, "legacy ACK watcher explicitly retired (marker file)",
+                  "retired, or running with a fresh poll"))
+    elif legacy is None:
+        add(check("laptop.legacy_ack_watcher", "laptop", GREEN, "no legacy ACK watcher state on disk",
+                  "retired, or running with a fresh poll"))
+    else:
+        poll = parse_ts(legacy.get("lastPollAt"))
+        poll_age = (now - poll) if poll else None
+        frozen = poll_age is None or poll_age > t["legacy_ack_stale_sec"]
+        st = AMBER if frozen else GREEN
+        add(check("laptop.legacy_ack_watcher", "laptop", st,
+                  f"laptop-ack-watcher.status.json state={legacy.get('state')} last poll {fmt_age(poll_age)} ago; "
+                  f"process {ack_pids or 'not running'}",
+                  "retired, or running with a fresh poll",
+                  "" if st == GREEN else "orphan state from the retired data-sync ACK watcher (segments replaced it); "
+                                         "archive the status file or create laptop-ack-watcher.RETIRED"))
 
     # ---------------- Analyzer
     an = inputs.get("analyzer_status") or {}
@@ -1152,13 +1416,98 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   "dashboard replaced during the ANALYZER phase" if st == AMBER else "analyzer dashboard crashed"))
     else:
         mem.pop("analyzer_api_down_since", None)
-        parity = api.get("source_revision_parity")
-        parity_ok = parity.get("match", parity.get("ok", True)) if isinstance(parity, Mapping) else True
-        ok = bool(api.get("ok")) and bool(api.get("runtime_sync_match", True)) and parity_ok is not False
-        add(check("analyzer.api", "analyzer", GREEN if ok else AMBER,
-                  f"ok={api.get('ok')} sync_match={api.get('runtime_sync_match')} revision_parity={parity_ok}",
-                  "ready, sync match, revision parity",
-                  "" if ok else "analyzer generation not current or revision/epoch parity mismatch"))
+        sapi = inputs.get("analyzer_status_api") if isinstance(inputs.get("analyzer_status_api"), Mapping) else None
+        gf = api.get("generation_freshness") if isinstance(api.get("generation_freshness"), Mapping) else \
+            dig(sapi, "generation_freshness", default={})
+        src_parity = parity_state(api.get("source_revision_parity"))
+        rev_parity = parity_state(gf.get("revision_parity"))
+        gen_rev = gf.get("generation_revision")
+        fly_src = dig(health, "source_git_rev") or fly_rev
+        rev_match = same_rev(gen_rev, fly_src)
+        fly_sync = dig(health, "analyzer_sync_id") or dig(status, "analyzer_sync_id")
+        local_syncs = {k: v for k, v in (("upstream_sync_id", dig(sapi, "upstream_sync_id")),
+                                          ("analyzer_sync_id", dig(sapi, "analyzer_sync_id")
+                                           or api.get("runtime_analyzer_sync_id"))) if v}
+        sync_id_match = None if not fly_sync or not local_syncs else all(v == fly_sync for v in local_syncs.values())
+        receipt_age = gf.get("mirror_sync_receipt_age_seconds")
+        receipt_age = float(receipt_age) if isinstance(receipt_age, (int, float)) else None
+        receipt_ts = parse_ts(gf.get("mirror_sync_receipt_timestamp"))
+        run_start = parse_ts(dig(sapi, "analysis_run", "started_at"))
+        receipt_at_start = (run_start - receipt_ts) if (run_start and receipt_ts) else None
+        problems = []
+        if not api.get("ok"):
+            problems.append("/api/health ok=false")
+        if sapi is None:
+            problems.append(f"/api/status unreadable ({errors.get('analyzer_status_api')})")
+        elif sapi.get("ok") is not True:
+            problems.append(f"/api/status ok={sapi.get('ok')} while /api/health ok={api.get('ok')}")
+        if api.get("runtime_sync_match") is False:
+            problems.append("runtime_sync_match=false")
+        for label, value in (("source_revision_parity", src_parity), ("revision_parity", rev_parity)):
+            if value is False:
+                problems.append(f"{label}={api.get(label) if label == 'source_revision_parity' else gf.get(label)}")
+            elif value is None:
+                problems.append(f"{label} not reported")
+        if rev_match is False:
+            problems.append(f"generation rev {str(gen_rev)[:12]} != Fly {str(fly_src)[:12]}")
+        elif rev_match is None:
+            problems.append("generation/Fly revision unknown")
+        if sync_id_match is False:
+            problems.append(f"sync id {local_syncs} != Fly {fly_sync}")
+        if receipt_at_start is not None and receipt_at_start > t["analyzer_receipt_amber_sec"]:
+            problems.append(f"analysis started on a mirror receipt {fmt_age(receipt_at_start)} old")
+        if receipt_age is not None and receipt_age > t["analyzer_receipt_wall_amber_sec"]:
+            problems.append(f"mirror sync receipt {fmt_age(receipt_age)} old")
+        add(check("analyzer.api", "analyzer", AMBER if problems else GREEN,
+                  "; ".join(problems) or f"ok on /api/health and /api/status; generation rev {str(gen_rev)[:12]} == "
+                                         f"Fly {str(fly_src)[:12]}; sync id {fly_sync}",
+                  "/api/health and /api/status ok, parity MATCH, generation rev == Fly source_git_rev, sync ids == "
+                  f"Fly, mirror receipt <= {fmt_age(t['analyzer_receipt_amber_sec'])} old at analysis start and <= "
+                  f"{fmt_age(t['analyzer_receipt_wall_amber_sec'])} on the wall clock",
+                  "" if not problems else "analyzer generation not current, stale upstream identity, or "
+                                          "revision/epoch parity mismatch",
+                  fields={"generation_rev": gen_rev, "fly_rev": fly_src, "sync_id_match": sync_id_match,
+                          "fly_sync_id": fly_sync, "local_sync_ids": local_syncs, "receipt_age_sec": receipt_age,
+                          "receipt_age_at_run_start_sec": receipt_at_start, "health_ok": api.get("ok"),
+                          "status_ok": dig(sapi, "ok")}))
+
+    sapi = inputs.get("analyzer_status_api") if isinstance(inputs.get("analyzer_status_api"), Mapping) else None
+    reports_threshold = (f"required_reports_ok=true and ok=true (AMBER on first sight, RED after "
+                         f"{fmt_age(t['analyzer_reports_red_sec'])} or a second generation)")
+    if sapi is None:
+        add(check("analyzer.reports", "analyzer", AMBER,
+                  f":9001 /api/status unreadable ({errors.get('analyzer_status_api')}; cycle phase={cyc.get('phase')})",
+                  reports_threshold, "required-report state unknown"))
+    elif not isinstance(sapi.get("required_reports_ok"), bool):
+        mem.pop("analyzer_reports_bad", None)
+        add(check("analyzer.reports", "analyzer", AMBER, "/api/status has no required_reports_ok field",
+                  reports_threshold, "analyzer dashboard predates required-report reporting or changed shape"))
+    else:
+        req = sapi.get("required_report_status") if isinstance(sapi.get("required_report_status"), Mapping) else {}
+        failures = [str(x) for x in sapi.get("required_report_failures") or []] or \
+            [name for name, v in req.items() if isinstance(v, Mapping) and v.get("available_in_generation") is False]
+        bad = sapi["required_reports_ok"] is False or sapi.get("ok") is False
+        generation = str(sapi.get("generated_at") or "")
+        if bad:
+            track = mem.setdefault("analyzer_reports_bad", {"since": now, "generations": []})
+            if generation and generation not in track["generations"]:
+                track["generations"] = (track["generations"] + [generation])[-5:]
+            bad_for = now - float(track["since"])
+            st = RED if bad_for > t["analyzer_reports_red_sec"] or len(track["generations"]) >= 2 else AMBER
+            detail = ", ".join(
+                f"{name} ({str(dig(req, name, 'generation_error') or 'unavailable')[:90]})" for name in failures[:4])
+            other = [str(x) for x in (sapi.get("stale_reasons") or []) + (sapi.get("analyzer_sync_blockers") or [])]
+            obs = (f"required_reports_ok={sapi['required_reports_ok']} ok={sapi.get('ok')} for {fmt_age(bad_for)} "
+                   f"across {len(track['generations'])} generation(s); failing: {detail or 'none listed'}"
+                   + (f"; other reasons: {', '.join(other[:4])}" if other else ""))
+        else:
+            mem.pop("analyzer_reports_bad", None)
+            st, obs = GREEN, f"all {len(req)} required reports available in generation {generation or '?'}"
+        add(check("analyzer.reports", "analyzer", st, obs, reports_threshold,
+                  "" if st == GREEN else "required analyzer reports failing in the current generation; see "
+                                         "required_report_status on :9001 /api/status and the analyzer-once log",
+                  fields={"required_reports_ok": sapi["required_reports_ok"], "ok": sapi.get("ok"),
+                          "failing_reports": failures, "generated_at": generation or None}))
     started = parse_ts(cyc.get("startedAt"))
     if in_cycle and started:
         dur = now - started
@@ -1317,11 +1666,56 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                 issues.append(f"stream {name} stale/unhealthy")
     if status is None:
         add(check("streams.coverage", "streams", SKIP, "Fly unreachable", "all streams fresh"))
+    elif not issues and not per_stream:
+        add(check("streams.coverage", "streams", AMBER,
+                  "no stream health reported by Fly (no market_context/microstructure/cross-venue/XVL/data_streams "
+                  "blocks); coverage unknown",
+                  f"collection OK, every stream fresher than {fmt_age(t['streams_stale_amber_sec'])}",
+                  "Fly /api/status collection blocks missing (shape change or collector disabled)"))
     else:
         add(check("streams.coverage", "streams", AMBER if issues else GREEN,
-                  "; ".join(issues) or f"collection OK; streams {', '.join(per_stream) or 'none reported by Fly'}",
+                  "; ".join(issues) or f"collection OK; streams {', '.join(per_stream)}",
                   f"collection OK, every stream fresher than {fmt_age(t['streams_stale_amber_sec'])}",
                   "" if not issues else "collector worker stalled, tape source missing, or venue feed stale"))
+
+    sh_streams = inputs.get("analyzer_streams") if isinstance(inputs.get("analyzer_streams"), Mapping) else None
+    af_threshold = (f"no analysed stream whose content lags its export by > {fmt_age(t['streams_content_lag_amber_sec'])} "
+                    "or is STALE while continuous; not_fully_analysed empty")
+    if sh_streams is None or not isinstance(sh_streams.get("streams"), list):
+        add(check("streams.analysed_freshness", "streams", AMBER,
+                  f":9001 /api/streams/health unavailable ({errors.get('analyzer_streams') or 'no streams list'})",
+                  af_threshold, "analysed-stream freshness unknown"))
+    else:
+        partial = [str(x) for x in sh_streams.get("not_fully_analysed") or []]
+        stale, lags = [], []
+        for s in sh_streams["streams"]:
+            if not isinstance(s, Mapping):
+                continue
+            name = str(s.get("stream"))
+            usage = str(s.get("analyzer_usage") or "").upper()
+            if usage in ("", "HEALTH_ONLY", "NONE") or name in partial:
+                continue
+            lag = s.get("content_lag_sec")
+            lag = float(lag) if isinstance(lag, (int, float)) else None
+            if lag is None and parse_ts(s.get("content_last_at")):
+                lag = now - float(parse_ts(s.get("content_last_at")))
+            if lag is not None:
+                lags.append(lag)
+            if lag is not None and lag > t["streams_content_lag_amber_sec"]:
+                stale.append(f"{name} content {fmt_age(lag)} behind")
+            elif str(s.get("status")).upper() == "STALE" and s.get("continuous"):
+                stale.append(f"{name} STALE (content end {s.get('content_last_at') or 'unknown'})")
+        st = AMBER if stale or partial else GREEN
+        fresh = sh_streams.get("freshness") if isinstance(sh_streams.get("freshness"), Mapping) else {}
+        add(check("streams.analysed_freshness", "streams", st,
+                  ("; ".join(stale + ([f"not fully analysed: {', '.join(partial[:4])}"] if partial else [])) or
+                   f"{len(sh_streams['streams'])} streams; analysed content lag max {fmt_age(max(lags) if lags else None)}")
+                  + f" (export {fresh.get('age_min')}m old, status {sh_streams.get('status')})",
+                  af_threshold,
+                  "" if st == GREEN else "stream content stopped advancing on Fly/mirror but the analyzer still marks "
+                                         "it analysed, or a stream is only partly analysed",
+                  fields={"stale_analysed": stale, "not_fully_analysed": partial,
+                          "export_age_min": fresh.get("age_min"), "status": sh_streams.get("status")}))
 
     # ---------------- Dashboards / roster parity
     registry = inputs.get("registry") or {}
@@ -1334,8 +1728,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if fly_lanes and toggle_lanes and sorted(fly_lanes) != toggle_lanes:
         contradictions.append(f"Fly toggles {toggle_lanes} != active tiles")
     api_health = inputs.get("analyzer_api") if isinstance(inputs.get("analyzer_api"), Mapping) else {}
-    epoch = api_health.get("epoch_parity")
-    if isinstance(epoch, Mapping) and epoch.get("match", epoch.get("ok", True)) is False:
+    epoch = api_health.get("epoch_parity", dig(api_health, "generation_freshness", "epoch_parity"))
+    if api_health and parity_state(epoch) is False:
         contradictions.append(f"analyzer epoch parity mismatch {str(epoch)[:120]}")
     ds = dig(fstate, "dashboard_truth", "deepseek", default=None)
     ai_age_now = (now - last_success) if last_success else None
@@ -1354,7 +1748,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         st = RED if severe else AMBER
     else:
         mem.pop("dashboard_contradiction_since", None)
-        st = GREEN if (fly_lanes or reg_lanes) else SKIP
+        st = GREEN if (fly_lanes or reg_lanes) and status is not None else SKIP
     add(check("dashboards.parity", "dashboards", st,
               "; ".join(contradictions) or f"{len(fly_lanes)} tiles agree across Fly API, toggles and registry",
               "Fly dashboard API == registry roster == toggles; truth labels match evidence",
@@ -1367,8 +1761,10 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     snap_age = (now - observed_at) if observed_at else None
     armed = bool(relay.get("relayArmedAt")) or str(relay.get("relayExecutionMode") or relay.get("status") or "").upper() \
         not in ("PAUSED", "DISARMED", "")
-    recon = relay.get("reconciliation") or {}
+    recon_raw = relay.get("reconciliation")
+    recon = recon_raw if isinstance(recon_raw, Mapping) else {}
     executor = relay.get("relayExecutor") or {}
+    relay_hint = "relay executor heartbeat/snapshot stale"
     if not relay.get("ok"):
         st, obs = AMBER, f"relay status unreadable ({relay.get('error')})"
     else:
@@ -1376,12 +1772,15 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         if st == GREEN and (snap_age is None or snap_age > t["relay_snapshot_amber_sec"] or not executor.get("healthy")
                             or float(executor.get("heartbeatAgeMs") or 0) > t["relay_heartbeat_amber_ms"]):
             st = AMBER
+        if st == GREEN and recon_raw is None:
+            st, relay_hint = AMBER, "Railway relay status reports reconciliation=null: exchange reconciliation unverified"
         obs = (f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
-               f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old")
+               f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old "
+               f"reconciliation={'null' if recon_raw is None else ('alert' if recon.get('alert') else 'ok')}")
     add(check("railway.relay", "railway", st, obs,
-              "relay PAUSED/disarmed, executor healthy, no reconciliation alert",
+              "relay PAUSED/disarmed, executor healthy, reconciliation reported without alert",
               "" if st == GREEN else ("relay ARMED or reconciliation mismatch - verify on Railway immediately"
-                                      if st == RED else "relay executor heartbeat/snapshot stale")))
+                                      if st == RED else relay_hint)))
     if rail is None:
         add(check("railway.api", "railway", AMBER if inputs.get("errors", {}).get("railway_health") != "CONFIG_MISSING" else SKIP,
                   f"/health {errors.get('railway_health')}", "api ok, database ok",
@@ -1451,15 +1850,30 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         problems.append(f"exchange position qty={exch_qty}")
     if active_orders:
         problems.append(f"{active_orders} active exchange orders")
+    relay_disarmed = relay.get("ok") and not armed and str(relay.get("relayExecutionMode") or relay.get("status")
+                                                          or "").upper() in ("PAUSED", "DISARMED")
+    explicit_disarm = live_armed is False and bfx_enabled is False and force_paper is True and relay_disarmed
     if not reachable and not relay.get("ok"):
         add(check("bitfinex.exposure", "bitfinex", AMBER, "cannot observe (Fly and relay unreadable)",
                   "disarmed, 0 exchange position, 0 exchange orders"))
-    else:
-        add(check("bitfinex.exposure", "bitfinex", RED if problems else GREEN,
-                  "; ".join(problems) or f"disarmed (live_armed={live_armed}, force_paper={force_paper}), exchange qty={exch_qty}, "
-                                         f"orders={active_orders}",
+    elif problems:
+        add(check("bitfinex.exposure", "bitfinex", RED, "; ".join(problems),
                   "disarmed, 0 exchange position, 0 exchange orders",
-                  "" if not problems else "UNEXPECTED REAL EXPOSURE/ARMING - never force-close; escalate to Danish"))
+                  "UNEXPECTED REAL EXPOSURE/ARMING - never force-close; escalate to Danish"))
+    elif exch_qty is None and not explicit_disarm:
+        add(check("bitfinex.exposure", "bitfinex", AMBER,
+                  f"exchange position unknown (qty not reported) while not explicitly disarmed: live_armed={live_armed} "
+                  f"bitfinex_live_enabled={bfx_enabled} force_paper={force_paper} relay="
+                  f"{relay.get('relayExecutionMode') or relay.get('status')}",
+                  "disarmed, 0 exchange position, 0 exchange orders",
+                  "real exposure cannot be ruled out; verify the relay reconciliation / Bitfinex position"))
+    else:
+        qty_text = (f"exchange qty={exch_qty}" if exch_qty is not None else
+                    "exchange qty not probed (disarmed: Fly live_armed=false, bitfinex_live_enabled=false, "
+                    f"relay {relay.get('relayExecutionMode') or relay.get('status')})")
+        add(check("bitfinex.exposure", "bitfinex", GREEN,
+                  f"disarmed (live_armed={live_armed}, force_paper={force_paper}), {qty_text}, orders={active_orders}",
+                  "disarmed, 0 exchange position, 0 exchange orders"))
 
     # ---------------- Proof checker
     active = inputs.get("proof_active")
@@ -1578,6 +1992,58 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
               "a verified snapshot per analyzer generation (< 3h)",
               "" if st == GREEN else "no snapshot means retention deletes nothing; check the analyzer log "
                                      "for 'Analysis archive failed'"))
+
+    # ---------------- Self-aware keeper (:9021) - its real engine progress, not a ping
+    sa = inputs.get("selfaware") if isinstance(inputs.get("selfaware"), Mapping) else None
+    factor = t["selfaware_job_late_factor"]
+    sa_threshold = (f"answers (RED after {fmt_age(t['selfaware_down_red_sec'])} down), generated_at and diagnose "
+                    f"last_ok <= {fmt_age(t['selfaware_stale_red_sec'])} (RED), every job last_ok within "
+                    f"{factor:g}x its cadence (AMBER)")
+    if sa is None:
+        down = now - float(mem.setdefault("selfaware_down_since", now))
+        st = RED if down > t["selfaware_down_red_sec"] else AMBER
+        add(check("selfaware.engine", "selfaware", st,
+                  f":9021 unreachable for {fmt_age(down)} ({errors.get('selfaware')})", sa_threshold,
+                  "DoxxedSelfAware keeper not running or its engine crashed"))
+    else:
+        mem.pop("selfaware_down_since", None)
+        engine = sa.get("engine") if isinstance(sa.get("engine"), Mapping) else {}
+        jobs = engine.get("jobs") if isinstance(engine.get("jobs"), Mapping) else {}
+        cadence = engine.get("cadence_sec") if isinstance(engine.get("cadence_sec"), Mapping) else {}
+        started = parse_ts(engine.get("started_at"))
+        uptime = (now - started) if started else None
+        gen_at = parse_ts(sa.get("generated_at"))
+        gen_age = (now - gen_at) if gen_at else None
+        diag = parse_ts(dig(jobs, "diagnose", "last_ok"))
+        diag_age = (now - diag) if diag else None
+        red, amber = [], []
+        if gen_age is None or gen_age > t["selfaware_stale_red_sec"]:
+            red.append(f"health generated {fmt_age(gen_age)} ago")
+        if diag_age is None or diag_age > t["selfaware_stale_red_sec"]:
+            red.append(f"diagnose last_ok {fmt_age(diag_age)} ago")
+        if not jobs:
+            amber.append("engine jobs not reported")
+        for job, info in sorted(jobs.items()):
+            interval = cadence.get(job)
+            if not isinstance(interval, (int, float)) or interval <= 0:
+                amber.append(f"{job} cadence unknown")
+                continue
+            last_ok = parse_ts(dig(info, "last_ok"))
+            late = (now - last_ok) if last_ok else None
+            if late is None and (uptime is None or uptime > factor * interval):
+                amber.append(f"{job} never succeeded")
+            elif late is not None and late > factor * interval:
+                amber.append(f"{job} last_ok {fmt_age(late)} ago (cadence {fmt_age(interval)})")
+        st = RED if red else AMBER if amber else GREEN
+        add(check("selfaware.engine", "selfaware", st,
+                  "; ".join(red + amber) or f"{len(jobs)} jobs on time; diagnose {fmt_age(diag_age)} ago, health "
+                                            f"generated {fmt_age(gen_age)} ago (self-aware verdict {sa.get('verdict')})",
+                  sa_threshold,
+                  "" if st == GREEN else "self-aware engine stalled or a job keeps failing; see :9021 engine.jobs",
+                  fields={"generated_age_sec": gen_age, "diagnose_age_sec": diag_age, "late_jobs": amber,
+                          "verdict": sa.get("verdict")}))
+
+    add(_fail_open_guard(checks, errors, source_down, now, t))
     return checks
 
 
@@ -1600,6 +2066,7 @@ def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float) -
         "generated_at": iso(now),
         "generated_ts": now,
         "host": socket.gethostname(),
+        "features": list(WATCHER_FEATURES),
         "verdict": verdict,
         "counts": {s: sum(1 for c in checks if c["status"] == s) for s in (RED, AMBER, GREEN, SKIP)},
         "subsystems": subsystems,
@@ -1942,6 +2409,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--archive-dir", default=DEFAULT_ARCHIVE_DIR)
     p.add_argument("--fly-url", default=FLY_URL)
     p.add_argument("--analyzer-url", default=ANALYZER_URL)
+    p.add_argument("--selfaware-url", default=SELFAWARE_URL)
     p.add_argument("--port", type=int, default=SERVER_PORT)
     p.add_argument("--json", action="store_true")
     p.add_argument("--tick", action="store_true", help="watcher tick: evaluate, alarm, publish")

@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import research_segment_format as fmt
@@ -41,8 +42,23 @@ _WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$", 
 _WINDOWS_BAD_CHARS = set('<>:"|?*')
 
 
+STATUS_SCHEMA = "research_segment_puller_status_v1"
+ATTEMPT_OK, ATTEMPT_LOCK_BUSY, ATTEMPT_ERROR = "OK", "LOCK_BUSY", "ERROR"
+# Carried over from the previous status/state on every non-OK attempt; a failed
+# attempt must never erase what the shadow mirror has already applied and ACKed.
+_PRESERVED_STATUS_FIELDS = ("applied_seq", "acked_seq", "fly_acked", "last_success_at")
+
+
 class PullerError(RuntimeError):
     """Fail-closed verification or application error; nothing past it is applied."""
+
+
+class LockBusyError(PullerError):
+    """Another process (puller, promotion, parity, retention) holds the shadow-root lock."""
+
+    def __init__(self, message: str, holder: dict | None = None):
+        super().__init__(message)
+        self.holder = holder
 
 
 def _utc_now() -> str:
@@ -83,10 +99,27 @@ def refuse_unsafe_root(path: Path, label: str) -> Path:
     return resolved
 
 
-class _RunLock:
-    """Exclusive per-shadow-root lock released automatically if the process dies."""
+def _holder_path(lock_path: Path) -> Path:
+    return lock_path.with_name(lock_path.name + ".holder.json")
 
-    def __init__(self, path: Path):
+
+def read_lock_holder(lock_path: Path) -> dict | None:
+    """Best-effort identity of the current lock holder (stale if the holder crashed)."""
+    try:
+        holder = json.loads(_holder_path(lock_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return holder if isinstance(holder, dict) else None
+
+
+class _RunLock:
+    """Exclusive per-shadow-root lock released automatically if the process dies.
+
+    The holder identity lives in a sidecar file: the locked byte of the lock
+    file itself is unreadable by other processes on Windows.
+    """
+
+    def __init__(self, path: Path, holder: str | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("a+b")
         try:
@@ -99,9 +132,23 @@ class _RunLock:
                 fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             self._handle.close()
-            raise PullerError("another puller run holds the shadow-root lock") from exc
+            raise LockBusyError("another puller run holds the shadow-root lock",
+                                holder=read_lock_holder(path)) from exc
+        self._path = path
+        label = holder or Path(sys.argv[0] or "python").stem or "python"
+        try:
+            _fsync_write(_holder_path(path), json.dumps(
+                {"pid": os.getpid(), "holder": label, "acquired_at": _utc_now()}, sort_keys=True).encode())
+        except OSError:
+            pass
 
     def release(self) -> None:
+        holder = read_lock_holder(self._path)
+        if holder and holder.get("pid") == os.getpid():
+            try:
+                _holder_path(self._path).unlink()
+            except OSError:
+                pass
         try:
             if os.name == "nt":
                 import msvcrt
@@ -110,6 +157,67 @@ class _RunLock:
         except OSError:
             pass
         self._handle.close()
+
+
+def _read_json_dict(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _last_fly_ack(meta: Path) -> int | None:
+    """``through_seq`` of the newest ACK receipt Fly accepted, from the receipt log tail."""
+    try:
+        with (meta / "ack-receipts.jsonl").open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 8192))
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            receipt = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(receipt, dict) and receipt.get("ok") and isinstance(receipt.get("through_seq"), int):
+            return receipt["through_seq"]
+    return None
+
+
+def last_known_progress(meta: Path) -> dict:
+    """Last durable applied/ACK progress: state.json wins, the previous status fills gaps."""
+    previous = _read_json_dict(meta / "status.json")
+    state = _read_json_dict(meta / "state.json")
+    known = {field: previous.get(field) for field in _PRESERVED_STATUS_FIELDS}
+    for field in ("applied_seq", "acked_seq"):
+        if isinstance(state.get(field), int):
+            known[field] = state[field]
+    fly_acked = _last_fly_ack(meta)
+    if fly_acked is not None:
+        known["fly_acked"] = fly_acked
+    failures = previous.get("consecutive_failures")
+    known["consecutive_failures"] = failures if isinstance(failures, int) and failures >= 0 else 0
+    return known
+
+
+def record_attempt(meta: Path, prefix: str, outcome: str, *, result: dict | None = None,
+                   error: str | None = None, lock_holder: dict | None = None) -> dict:
+    """Write status.json for one attempt without ever nulling known sequence numbers."""
+    known = last_known_progress(meta)
+    now = _utc_now()
+    fields = {key: known[key] for key in _PRESERVED_STATUS_FIELDS}
+    if outcome == ATTEMPT_OK:
+        fields.update(result or {})
+        fields.update(last_success_at=now, consecutive_failures=0, lock_holder=None)
+    else:
+        fields.update(consecutive_failures=known["consecutive_failures"] + 1, lock_holder=lock_holder)
+    payload = {"schema": STATUS_SCHEMA, "updated_at": now, "puller_version": PULLER_VERSION,
+               "prefix": prefix, "last_error": error, "last_attempt_at": now,
+               "last_attempt_result": outcome, **fields}
+    _fsync_write(meta / "status.json", json.dumps(payload, sort_keys=True, indent=2).encode())
+    return payload
 
 
 class SegmentPuller:
@@ -144,10 +252,8 @@ class SegmentPuller:
     def save_state(self, state: dict) -> None:
         _fsync_write(self.state_path, json.dumps(state, sort_keys=True, indent=2).encode())
 
-    def write_status(self, **fields) -> None:
-        payload = {"schema": "research_segment_puller_status_v1", "updated_at": _utc_now(),
-                   "puller_version": PULLER_VERSION, "prefix": self.prefix, **fields}
-        _fsync_write(self.status_path, json.dumps(payload, sort_keys=True, indent=2).encode())
+    def write_status(self, outcome: str, **kwargs) -> dict:
+        return record_attempt(self.meta, self.prefix, outcome, **kwargs)
 
     # ---------------------------------------------------------------- fetching
     def _archived(self, kind: str, key: str) -> Path:
@@ -294,11 +400,18 @@ class SegmentPuller:
             raise PullerError(f"{label}: unknown kind")
 
     # ------------------------------------------------------------------- run
-    def pull_once(self, max_segments: int | None = None) -> dict:
+    def pull_once(self, max_segments: int | None = None, max_run_seconds: float | None = None) -> dict:
         state = self.load_state()
         self.baselines = {path: dict(entry) for path, entry in (state.get("baselines") or {}).items()}
         applied = 0
+        # Checked only between segments (each applied seq is already durable in
+        # state.json), and never before the first one so every run makes progress.
+        deadline = time.monotonic() + max_run_seconds if max_run_seconds else None
+        deadline_reached = False
         while max_segments is None or applied < max_segments:
+            if deadline is not None and applied and time.monotonic() >= deadline:
+                deadline_reached = True
+                break
             seq = int(state["applied_seq"]) + 1
             manifest_key = fmt.manifest_key(self.prefix, seq)
             manifest_raw = self._fetch("man", manifest_key)
@@ -326,10 +439,12 @@ class SegmentPuller:
             self.store.last_ack_response = None
         acked = self.ack(state)
         result = {"applied_now": applied, "applied_seq": state["applied_seq"], "acked_seq": acked}
+        if deadline_reached:
+            result["deadline_reached"] = True
         receipt = getattr(self.store, "last_ack_response", None)
         if receipt:
             result["ack_receipt"] = receipt
-        self.write_status(last_error=None, **result)
+        self.write_status(ATTEMPT_OK, result=result)
         return result
 
     def ack(self, state: dict) -> int:
@@ -386,6 +501,24 @@ def _remote_head_summary(store) -> dict:
         "unshipped_bytes", "shipper_last_error", "pruning_enabled")}
 
 
+def _record_failure(args, puller: SegmentPuller | None, exc: BaseException) -> dict:
+    """Persist a non-OK attempt; returns the preserved progress for the stdout receipt."""
+    outcome = ATTEMPT_LOCK_BUSY if isinstance(exc, LockBusyError) else ATTEMPT_ERROR
+    try:
+        if puller is not None:
+            meta, prefix = puller.meta, puller.prefix
+        else:
+            meta, prefix = refuse_unsafe_root(Path(args.shadow_root), "shadow root") / ".puller", args.prefix
+            if not meta.is_dir():
+                return {"last_attempt_result": outcome}
+        status = record_attempt(meta, prefix, outcome, error=f"{type(exc).__name__}: {exc}",
+                                lock_holder=getattr(exc, "holder", None))
+    except (OSError, PullerError):
+        return {"last_attempt_result": outcome}
+    return {key: status.get(key) for key in (*_PRESERVED_STATUS_FIELDS, "last_attempt_at",
+                                             "last_attempt_result", "consecutive_failures", "lock_holder")}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shadow-root", default=r"C:\DoxxedCrypto\fly-mirror-segments")
@@ -398,6 +531,10 @@ def main(argv=None) -> int:
                         help="store: bucket/local store from env; http: Fly volume-sink endpoint")
     parser.add_argument("--base-url", default=os.getenv("RESEARCH_SEGMENTS_BASE_URL")
                         or "https://doxed-btc-bot.fly.dev")
+    parser.add_argument("--max-run-seconds", type=float,
+                        default=float(os.getenv("RESEARCH_SEGMENTS_MAX_RUN_SEC") or 900),
+                        help="stop fetching new segments after this long (0 = unbounded); "
+                             "applied segments stay durable and the next run resumes")
     args = parser.parse_args(argv)
     lock = None
     puller = None
@@ -411,20 +548,19 @@ def main(argv=None) -> int:
         puller = SegmentPuller(store=store, shadow_root=Path(args.shadow_root),
                                archive_root=Path(args.archive_root), prefix=args.prefix,
                                write_ack=not args.no_ack)
-        lock = _RunLock(puller.meta / "run.lock")
-        result = puller.pull_once(max_segments=args.max_segments)
+        lock = _RunLock(puller.meta / "run.lock", holder="research_segment_puller")
+        result = puller.pull_once(max_segments=args.max_segments, max_run_seconds=args.max_run_seconds)
         if args.source == "http":
             result["remote_head"] = _remote_head_summary(store)
         print(json.dumps({"ok": True, **result}, sort_keys=True))
         return 0
     except (PullerError, fmt.SegmentFormatError, StoreError) as exc:
-        if puller is not None:
-            try:
-                puller.write_status(last_error=f"{type(exc).__name__}: {exc}")
-            except OSError:
-                pass
-        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, sort_keys=True))
+        status = _record_failure(args, puller, exc)
+        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}", **status}, sort_keys=True))
         return 2
+    except Exception as exc:
+        _record_failure(args, puller, exc)
+        raise
     finally:
         if lock is not None:
             lock.release()

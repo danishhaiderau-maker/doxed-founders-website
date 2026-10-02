@@ -149,7 +149,8 @@ Consecutive failed AI calls (`ai_history` trailing errors, or provider
 ### ai.decision_mix
 Over the last 6 hours, with at least 20 successful responses, the decisions must not be
 100% NO_TRADE or neutral. AMBER only. A quiet market can do this, but it is also the
-signature of a prompt or parse regression or of dead inputs.
+signature of a prompt or parse regression or of dead inputs. Below 20 responses the
+check is SKIP (not rated), never GREEN.
 Fix: check the `ai_input_health` dead fields and the raw `comment` in `ai_history`.
 
 <a id="ai-served_model"></a>
@@ -177,6 +178,8 @@ Orders per ON tile from `tile_route_counts` deltas, live positions, orders and t
 plus the mirror's `trades_3factor.csv` and `expired_orders_3factor.csv`.
 - RED: no ON tile has placed an order for 3 hours while paper runs.
 - AMBER: an individual ON tile has been quiet for 6 hours or more.
+- AMBER "toggle state unavailable" when neither `/api/state` nor the runtime snapshot
+  carries `research_lane_enabled` (missing toggles are not "all OFF").
 
 The observed value lists each tile's last order and its 48-hour count.
 Fix: compare the `shared_ai_lane_counters[lane].reasons` admission rejections and check
@@ -199,7 +202,8 @@ Do not rewrite the evidence.
 <a id="ws-ticks"></a>
 ### ws.ticks
 Bitfinex trade-tick age (`ws_age`) and `ws_progressing`. AMBER at 60 seconds, RED at
-120 seconds or when not progressing.
+120 seconds or when not progressing. `ws_progressing` missing from both Fly
+`strategy_progress` and the runtime snapshot is AMBER (never assumed true).
 Fix: check `ws_last_disconnect_reason` and `ws_reconnect_count` in `/api/state`. A
 persistent stall needs a guarded restart.
 
@@ -234,14 +238,56 @@ a fault as long as it keeps advancing (false RED of 2026-10-02, replayed in
 from a failing laptop POST, compare `/api/research-segments/v2/head`
 `laptop_acked.through_seq` with `/health` `volume.transfer.laptop_acked_seq`.
 
+Applied comes from `.puller\status.json`, then `segment-pull.status.json`, then
+`.puller\state.json` (a lock refusal rewrites the first two without seqs). Applied
+unknown in all three is AMBER, RED after 30 minutes; it is never GREEN.
+`segment-pull.status.json` `exitCode != 0` is AMBER, and RED once it has failed for
+more than one consecutive pull (by `iteration`) and 10 minutes. A lock refusal
+("another puller run holds the shadow-root lock") while applied keeps advancing (the
+analyzer cycle's own puller) stays AMBER.
+
 Fix: check `segment-pull.status.json`, `fly-mirror-segments\.puller\status.json` and
 `logs\segment-pull-loop-*.log`. The supervisor restarts a dead loop.
 
 <a id="laptop-supervisor"></a>
 ### laptop.supervisor
-The last `DoxxedLaptopChainSupervisor` TICK must be within 15 minutes.
+Verified from the process table, not the log: one cached (60 s) PowerShell probe reads
+`Get-ScheduledTask`/`Get-ScheduledTaskInfo DoxxedLaptopChainSupervisor` and the
+`Win32_Process` command lines.
+- RED: task missing or disabled, last run older than 15 minutes, or no
+  `research-segment-pull-loop.ps1` process for 10 minutes (AMBER before that).
+- AMBER: a last task result other than 0 / running, or the probe itself failed (then the
+  log TICK is shown; a stale TICK is still RED).
+
 Fix: `Get-ScheduledTask DoxxedLaptopChainSupervisor`, then
 `Start-ScheduledTask DoxxedLaptopChainSupervisor`. Check that the laptop is not asleep.
+
+<a id="laptop-legacy_ack_watcher"></a>
+### laptop.legacy_ack_watcher
+The data-sync ACK watcher was retired (segments replaced it), but
+`laptop-chain\laptop-ack-watcher.status.json` stayed behind, frozen since 2026-09-30.
+A status file whose `lastPollAt` is older than 1 h is AMBER orphan state. Fix: archive the
+file, or create `laptop-chain\laptop-ack-watcher.RETIRED` to record the retirement (GREEN).
+
+<a id="selfaware-engine"></a>
+### selfaware.engine
+The self-aware keeper's real progress from `:9021/api/selfaware/health`, not a ping.
+- RED: unreachable for 15 minutes (AMBER before), `generated_at` or the `diagnose` job's
+  `last_ok` older than 20 minutes.
+- AMBER: any `engine.jobs.<job>.last_ok` older than 3x its `engine.cadence_sec`, a job
+  that never succeeded after 3 cadences of uptime, or no jobs reported.
+
+Fix: `Get-ScheduledTask DoxxedSelfAware`, the keeper log, then `docs/SELF_AWARE_RUNBOOK.md`.
+
+<a id="watcher-sources"></a>
+### watcher.sources
+Every input the watcher fetches (Fly `/api/status`, `/health`, `/api/state`, :9001
+`/api/health`, `/api/status`, `/api/streams/health`, :9021, Railway). A source failing
+(HTTP_429, timeout, token missing) for more than 15 minutes is AMBER, and any check that
+SKIPped because of it (for example `trading.orders` on `/api/state` HTTP_429) is turned
+AMBER with the fetch error. A SKIP is never a silent pass for longer than that.
+Fix: the Fly API is rate-limited at 60/min per IP shared by all laptop jobs; check for a
+polling loop, the admin token in the vault, or the endpoint itself.
 
 <a id="analyzer-generation"></a>
 ### analyzer.generation
@@ -252,10 +298,30 @@ Fix: read `logs\analyzer-once-*.err.log` and `segment-analyzer-cycle.status.json
 
 <a id="analyzer-api"></a>
 ### analyzer.api
-The :9001 `/api/health` must answer with `ok`, sync match and revision parity. Down is
-AMBER for up to 20 minutes while a cycle replaces the dashboard. Otherwise it is RED
-after 2 ticks.
+The :9001 `/api/health` and `/api/status` must both answer `ok` (health ok with status
+not ok is AMBER). Down is AMBER for up to 20 minutes while a cycle replaces the
+dashboard. Otherwise it is RED after 2 ticks. Also AMBER (values in `observed_fields`):
+- `source_revision_parity` / `generation_freshness.revision_parity` not `MATCH`
+  (strings are parsed; missing is not a match);
+- `generation_freshness.generation_revision` (`generation_rev`) not a prefix match of Fly
+  `/health.source_git_rev` (`fly_rev`): the generation predates the deploy;
+- `upstream_sync_id` or `analyzer_sync_id` different from Fly `analyzer_sync_id`
+  (`sync_id_match=false`): stale upstream identity;
+- the mirror sync receipt was more than 30 minutes old when the analysis run started, or
+  is more than 60 minutes old on the wall clock (`receipt_age_sec`). The dashboard's own
+  `mirror_sync_receipt_freshness` turns STALE after 10 minutes, so it is not used.
+
 Fix: the supervisor restarts a down dashboard (`run-analyzer-once.ps1 -EnsureDashboardOnly`).
+
+<a id="analyzer-reports"></a>
+### analyzer.reports
+:9001 `/api/status.required_reports_ok` and `ok`. False is AMBER on first sight and RED
+once it lasts 45 minutes or is seen on a second generation (`generated_at`). The observed
+text lists `required_report_failures` with each `generation_error` (2026-10-02:
+`best_policy_research_report.json`, `safe_policy_genome_v3_report.json` on
+`POLICY_ID_SPEC_COLLISION`). A missing field or unreachable `/api/status` is AMBER.
+Fix: read the analyzer-once log for the failing study; the analyzer pass exiting 0 does
+not mean its reports were produced.
 
 <a id="analyzer-cycle"></a>
 ### analyzer.cycle
@@ -323,7 +389,17 @@ cross-venue tape status, the XVL per-second evaluator (`collection.xvl_evaluator
 `STALE` = ticks stopped, `DEGRADED` = shadow rows failing to write), AI dead
 inputs, and per-stream age and coverage from
 `data_streams` once worker d9f889db exposes it. AMBER only, because research
-collection does not block trading.
+collection does not block trading. Nothing reported at all is AMBER ("coverage
+unknown"), never GREEN.
+
+<a id="streams-analysed_freshness"></a>
+### streams.analysed_freshness
+:9001 `/api/streams/health`. AMBER when a stream the analyzer uses (`analyzer_usage` not
+`HEALTH_ONLY`) has `content_lag_sec` (content end vs its export) over 60 minutes, or is
+`STALE` while `continuous` (2026-10-02: `research_events_v22.jsonl`), or when
+`not_fully_analysed` is non-empty. An unreachable endpoint is AMBER.
+Fix: check the Fly collector for that stream and the laptop mirror; stale content must
+not be reported as analysed evidence.
 
 <a id="dashboards-parity"></a>
 ### dashboards.parity
@@ -342,7 +418,8 @@ after 30 minutes.
 ### railway.relay
 The relay must be PAUSED or disarmed (`relayArmedAt` null), with a healthy executor
 heartbeat and no reconciliation or position-mismatch alert. Armed or mismatched is RED:
-verify on Railway immediately. Arming is the user's decision only.
+verify on Railway immediately. Arming is the user's decision only. A relay status with
+`reconciliation: null` is AMBER (reconciliation unverified).
 
 <a id="railway-api"></a>
 ### railway.api
@@ -375,7 +452,9 @@ extra branches not priced).
 ### bitfinex.exposure
 These must hold: `live_armed=false`, `bitfinex_live_enabled=false`,
 `force_paper_mode=true`, exchange position quantity 0 and 0 exchange orders. Any
-violation is RED.
+violation is RED. An unreported exchange quantity is GREEN only while everything is
+explicitly disarmed (Fly flags above and the relay PAUSED/DISARMED), and the observed
+text then says "not probed (disarmed ...)"; otherwise it is AMBER.
 **Never force-close.** Escalate to Danish. Do not arm.
 
 <a id="proof-latest"></a>
@@ -416,5 +495,14 @@ retention deletes nothing and Fly pruning stops advancing (fail closed).
 <a id="watcher-stale"></a>
 ### watcher.stale
 Synthesized by the endpoint and `health_client` when the published verdict is older
-than 15 minutes. The watcher itself is not ticking: check the supervisor or interim
-task and `logs\system-health-*.log`.
+than 15 minutes; it is RED and makes the served verdict RED. `laptop_chain_incident.py`
+raises the matching `system_health_stale` incident (also for a missing report). The
+watcher itself is not ticking: check the supervisor or interim task and
+`logs\system-health-*.log`. The interim `DoxxedSystemHealthWatcher` task defers only
+while the supervisor task ran and a verdict was published within 15 minutes; otherwise
+it ticks itself (`TAKEOVER` in its log).
+
+`GET :9011/api/system-health?live=1` returns the newest cached verdict at once with
+`age_sec`, `generated_at` and `refresh: started|running`, and starts at most one
+background re-evaluation. Only when the cache is older than 120 s does it wait (up to
+10 s) for that refresh (`refresh: completed`).
