@@ -150,6 +150,29 @@ def test_proof_progress_label_and_sanitizer(tmp_path):
     assert ru.sanitize_proof({"elapsed_hours": "nope"}) is None
 
 
+def test_fly_fetch_is_cached_and_keeps_last_good_value_on_429(monkeypatch):
+    import io
+    import urllib.error
+
+    monkeypatch.setattr(ru, "_FLY_CACHE", {"at": 0.0, "value": None, "error": None, "good_at": 0.0, "good": None})
+    calls = []
+
+    def ok(url, timeout):
+        calls.append(url)
+        return io.BytesIO(json.dumps({"uptime": {"state": "RUNNING"}}).encode())
+
+    def limited(url, timeout):
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 429, "rate limit", {}, None)
+
+    assert ru.fetch_fly_uptime("u", opener=ok)["uptime"]["state"] == "RUNNING"
+    assert ru.fetch_fly_uptime("u", opener=ok)["uptime"]["state"] == "RUNNING" and len(calls) == 1
+    out = ru.fetch_fly_uptime("u", opener=limited, max_age=0)
+    assert out["uptime"]["state"] == "RUNNING" and "429" in out["error"] and "ago" in out["error"]
+    ru._FLY_CACHE["good_at"] -= ru.FLY_LAST_GOOD_MAX_AGE_SEC + 1
+    assert ru.fetch_fly_uptime("u", opener=limited, max_age=0)["uptime"] is None
+
+
 def test_banner_script_always_renders_uptime_strip():
     js = shb.banner_script()
     assert "runtime-uptime-strip" in js and "uninterrupted_label" in js

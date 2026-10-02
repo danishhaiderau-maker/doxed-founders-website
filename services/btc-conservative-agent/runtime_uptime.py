@@ -92,9 +92,11 @@ def problem_from(*, paused: bool, pause_owner=None, pause_reason=None, tiles_on:
     """The first reason the runtime is not running unattended right now, or None."""
     if paused:
         owner = str(pause_owner or "unattributed")
-        detail = f"paused by {owner}" + (f" ({pause_reason})" if pause_reason and pause_reason != owner else "")
-        return {"kind": "deploy_pause" if owner == DEPLOY_PAUSE_OWNER else "pause", "owner": owner,
-                "text": detail[:200]}
+        if owner == DEPLOY_PAUSE_OWNER:
+            return {"kind": "deploy_pause", "owner": owner, "text": f"paused for guarded deploy ({owner})"}
+        detail = f"paused by {owner}" + (
+            f" ({pause_reason})" if pause_reason and pause_reason not in (owner, "ADMIN_MANUAL") else "")
+        return {"kind": "pause", "owner": owner, "text": detail[:200]}
     if tiles_total is not None and tiles_total > 0 and (tiles_on or 0) == 0:
         return {"kind": "paper_off", "owner": None, "text": f"paper off (0/{tiles_total} tiles ON)"}
     failures = int(ai_consecutive_failures or 0)
@@ -187,7 +189,7 @@ class UptimeTracker:
             if (open_prev and last_seen is not None and down is not None
                     and down <= CONTINUE_OPEN_INTERRUPTION_SEC):
                 started = clock(open_prev.get("at"), now)["aest"]
-                text = (f"{label} at {clock(now, now)['aest']} after {open_prev.get('text')} from {started}"
+                text = (f"{label} at {clock(now, now)['aest']} (guarded-deploy pause from {started})"
                         if deploy and open_prev.get("kind") == "deploy_pause"
                         else f"{open_prev.get('text')}, then {label} at {clock(now, now)['aest']}")
                 for entry in reversed(self.state.get("interruptions") or []):
@@ -339,25 +341,36 @@ def sanitize_proof(value) -> dict | None:
         return None
 
 
-_FLY_CACHE = {"at": 0.0, "value": None, "error": None}
+_FLY_CACHE = {"at": 0.0, "value": None, "error": None, "good_at": 0.0, "good": None}
 _FLY_CACHE_LOCK = threading.Lock()
+# Fly allows 60 public /api/* requests per minute per IP and the laptop shares
+# that bucket, so poll at most once a minute and keep a recent good value.
+FLY_FETCH_EVERY_SEC = 60.0
+FLY_LAST_GOOD_MAX_AGE_SEC = 10 * 60.0
 
 
-def fetch_fly_uptime(url: str, *, timeout: float = 5.0, max_age: float = 30.0) -> dict:
+def fetch_fly_uptime(url: str, *, timeout: float = 5.0, max_age: float = FLY_FETCH_EVERY_SEC,
+                     opener=None) -> dict:
     """Fly's uptime block from ``/api/status`` for the analyzer (cached; never raises)."""
     now = time.time()
     with _FLY_CACHE_LOCK:
         if now - _FLY_CACHE["at"] < max_age:
             return {"uptime": _FLY_CACHE["value"], "error": _FLY_CACHE["error"]}
+        _FLY_CACHE["at"] = now  # one fetch per window even when concurrent requests arrive
     value, error = None, None
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - fixed https URL
+        with (opener or urllib.request.urlopen)(url, timeout=timeout) as resp:  # noqa: S310 - fixed https URL
             payload = json.loads(resp.read(4 * 1024 * 1024).decode("utf-8"))
         value = payload.get("uptime") if isinstance(payload, dict) else None
         if not isinstance(value, dict):
             value, error = None, "Fly /api/status has no uptime block yet (ships with the next guarded deploy)"
     except Exception as exc:
-        error = f"Fly /api/status unreachable: {type(exc).__name__}"
+        error = f"Fly /api/status refresh failed: {getattr(exc, 'code', None) or type(exc).__name__}"
     with _FLY_CACHE_LOCK:
-        _FLY_CACHE.update(at=now, value=value, error=error)
+        if value is not None:
+            _FLY_CACHE.update(good=value, good_at=now)
+        elif _FLY_CACHE["good"] is not None and now - _FLY_CACHE["good_at"] <= FLY_LAST_GOOD_MAX_AGE_SEC:
+            value = _FLY_CACHE["good"]
+            error = f"{error}; showing the value from {int(now - _FLY_CACHE['good_at'])}s ago"
+        _FLY_CACHE.update(value=value, error=error)
     return {"uptime": value, "error": error}
