@@ -28,6 +28,10 @@ def _exec_canonical_as_module() -> None:
 
 
 if __name__ == "__main__":
+    # Must precede the first pyarrow import. The threaded server runs each request
+    # on a short-lived thread, and pyarrow's default mimalloc pool crashes there
+    # with 0xC0000005 in arrow.dll on Windows; the system allocator does not.
+    os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
     if not os.path.isfile(_CANONICAL):
         raise SystemExit(f"Missing canonical dashboard: {_CANONICAL}")
     os.chdir(_RESEARCH_DIR)
