@@ -421,14 +421,30 @@ def check_ai_cadence(f, sig, store) -> Finding:
     rows = _q(store, """
         WITH d AS (SELECT try_cast(ts AS TIMESTAMPTZ) AS t FROM raw_ai_tranche WHERE event = 'AI_DECISION'),
              m AS (SELECT max(t) AS mx FROM d)
-        SELECT count(*) FILTER (WHERE t > (SELECT mx FROM m) - INTERVAL 2 HOUR) / 2.0 AS per_hour FROM d""")
+        SELECT count(*) FILTER (WHERE t > (SELECT mx FROM m) - INTERVAL 2 HOUR) / 2.0 AS per_hour,
+               epoch((SELECT mx FROM m)) AS newest FROM d""")
     per_hour = float(rows[0]["per_hour"]) if rows and rows[0].get("per_hour") is not None else None
+    newest = rows[0].get("newest") if rows else None
+    mirror_age = f["now"] - float(newest) if newest is not None else None
+    age_basis = "Fly"
+    if not isinstance(ai_age, (int, float)) and mirror_age is not None:
+        ai_age, age_basis = mirror_age, "newest mirror AI row"
     paused = sig["paper_paused"]["on"]
+    owner = str(rt.get("pause_owner") or "").upper()
+    up = sp.get("process_startup_age_sec")
     sev = GREEN
     problems = []
+    if not paused and not isinstance(ai_age, (int, float)) and per_hour is None:
+        return Finding("prog.ai_cadence", "AI calls keep advancing", "progress", SKIP,
+                       "neither Fly nor the mirror reports an AI success time", "AI success time is observable")
+    if (paused and owner == "DEPLOY_MAINTENANCE" and isinstance(up, (int, float))
+            and up > THRESHOLDS["deploy_pause_amber_sec"]):
+        sev = AMBER
+        problems.append(f"paper still paused by DEPLOY_MAINTENANCE {fmt_age(up)} after boot "
+                        "(resume is an operator/deployer action; flag only)")
     if isinstance(ai_age, (int, float)) and ai_age > THRESHOLDS["fly_ai_stale_sec"] and not paused:
         sev = RED if ai_age > 3 * THRESHOLDS["fly_ai_stale_sec"] else AMBER
-        problems.append(f"Fly's last AI success {fmt_age(ai_age)} ago")
+        problems.append(f"last AI success {fmt_age(ai_age)} ago ({age_basis})")
     if per_hour is not None and per_hour < THRESHOLDS["ai_calls_per_hour_min"]:
         sev = max(sev, AMBER, key=_RANK.get)
         problems.append(f"mirror shows {per_hour:.1f} AI decisions/h in its last 2 h")
@@ -438,12 +454,15 @@ def check_ai_cadence(f, sig, store) -> Finding:
     if paused and sev == GREEN and isinstance(ai_age, (int, float)) and ai_age > THRESHOLDS["fly_ai_stale_sec"]:
         problems.append("AI idle because paper is paused (expected, not counted)")
     return Finding("prog.ai_cadence", "AI calls keep advancing", "progress", sev,
-                   "; ".join(problems) or f"Fly last AI success {fmt_age(ai_age)} ago; mirror {per_hour} decisions/h",
+                   "; ".join(problems) or f"last AI success {fmt_age(ai_age)} ago ({age_basis}); "
+                                          f"mirror {per_hour} decisions/h",
                    f"Fly AI success <= {fmt_age(THRESHOLDS['fly_ai_stale_sec'])} ago while paper runs; >= "
                    f"{THRESHOLDS['ai_calls_per_hour_min']} decisions/h",
                    causes=[] if sev == GREEN else attribute(["deepseek_credit", "cpu_saturation", "deploy_maintenance",
                                                               "paper_paused"], sig),
-                   evidence={"ai_age_sec": ai_age, "per_hour": per_hour, "consecutive_failures": fails})
+                   evidence={"ai_age_sec": ai_age, "age_basis": age_basis, "per_hour": per_hour,
+                             "consecutive_failures": fails, "pause_owner": owner or None,
+                             "process_startup_age_sec": up})
 
 
 def check_orders_on_tiles(f, sig, store) -> Finding:

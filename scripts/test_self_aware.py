@@ -157,6 +157,25 @@ def test_expired_and_traded_in_legacy_ledgers(paths, store):
     assert diagnose.check_expired_filled(f, diagnose.signals(f), store).severity == "RED"
 
 
+def test_ai_cadence_sees_a_stall_when_fly_reports_no_age(paths, store):
+    from datetime import datetime, timezone
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat()
+    rows = "".join(f"{iso(NOW - 7200 - i * 180)},AI_DECISION\n" for i in range(40))
+    paths.mirror.mkdir(parents=True, exist_ok=True)
+    (paths.mirror / "ai_tranche_log.csv").write_text("ts,event\n" + rows)
+    store.refresh_views()
+    f = _facts()
+    fd = diagnose.check_ai_cadence(f, diagnose.signals(f), store)
+    assert fd.severity == "RED" and "newest mirror AI row" in fd.observed
+    rt = {"observedAt": NOW - 30, "git_rev": "abc", "execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE",
+          "strategy_progress": {"ai_age_sec": None, "process_startup_age_sec": 600}}
+    f = _facts(runtime=rt)
+    assert diagnose.check_ai_cadence(f, diagnose.signals(f), store).severity == "GREEN"
+    rt["strategy_progress"]["process_startup_age_sec"] = 3 * 3600
+    fd = diagnose.check_ai_cadence(f, diagnose.signals(f), store)
+    assert fd.severity == "AMBER" and "DEPLOY_MAINTENANCE" in fd.observed
+
+
 def test_custody_ack_without_copy_is_red(store):
     f = _facts(segment_head={"shipped_seq": 100}, pull={"ackedSeq": 100, "appliedSeq": 98, "finishedAt": NOW - 30})
     assert diagnose.check_custody(f, diagnose.signals(f), store).severity == "RED"

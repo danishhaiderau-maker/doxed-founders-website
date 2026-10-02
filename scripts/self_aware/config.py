@@ -34,6 +34,7 @@ THRESHOLDS = {
     "ai_call_unanswered_grace_sec": 15 * 60,
     "ai_calls_per_hour_min": 8,
     "fly_ai_stale_sec": 15 * 60,
+    "deploy_pause_amber_sec": 45 * 60,
     "orders_quiet_amber_sec": 6 * 3600,
     "fill_close_max_open_sec": 8 * 3600,
     "analyzer_success_amber_sec": 45 * 60,

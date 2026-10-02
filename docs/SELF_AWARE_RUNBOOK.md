@@ -135,8 +135,9 @@ Every finding has an id, a severity (`GREEN`, `AMBER`, `RED` or `SKIP`), observe
 <a id="prog-ai-cadence"></a>
 ### prog.ai_cadence: AI decisions keep coming
 
-- **What it means.** Fly's last AI success is more than 15 minutes old while paper is running, or the mirror shows fewer than 8 decisions an hour.
+- **What it means.** The last AI success is more than 15 minutes old while paper is running, or the mirror shows fewer than 8 decisions an hour. When Fly reports no success time (for example right after a boot), the age of the newest mirror AI row is used instead. AMBER also fires when a `DEPLOY_MAINTENANCE` pause outlives 45 minutes after boot.
 - **Causes.** A deploy pause, DeepSeek credit, rate limiting or CPU saturation.
+- **Repair.** Flag only. Resuming paper after a deploy belongs to the deployer or operator.
 
 <a id="prog-tile-orders"></a>
 ### prog.tile_orders: ON tiles keep producing order-eligible decisions
