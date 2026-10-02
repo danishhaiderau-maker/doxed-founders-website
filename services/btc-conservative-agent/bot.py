@@ -41631,7 +41631,7 @@ def _data_sync_bundle_generation(generation_id: str) -> dict | None:
             "inventory_sha256": generation_id}
 
 
-def _start_data_sync_bundle_generation(generation_id: str) -> bool:
+def _start_data_sync_bundle_generation(generation_id: str, *, checkpoint_retry_sha256=None) -> bool:
     """Optional acceleration, isolated from HTTP and from trading's interpreter."""
     if os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1":
         return False
@@ -41641,6 +41641,14 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
         return False  # Optional acceleration must not invalidate inventory.
     if not generation or not _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False):
         return False
+    if checkpoint_retry_sha256 is not None:
+        try:
+            from data_sync_bundle_retry import claim_checkpoint_retry
+            claim_checkpoint_retry(generation, _data_sync_runtime_root(),
+                _data_sync_inventory_work_root() / "transport-bundles", checkpoint_retry_sha256)
+        except Exception:
+            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+            raise
 
     def owner():
         global _DATA_SYNC_BUNDLE_LAST_STATUS
@@ -41663,7 +41671,11 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
             if maintenance.get("status") != "ADMITTED":
                 publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
                 return
-            publish(run_resumable_generation(
+            runner = run_resumable_generation
+            if checkpoint_retry_sha256 is not None:
+                from data_sync_bundle_retry import run_checkpoint_recovery
+                runner = run_checkpoint_recovery
+            publish(runner(
                 generation, _data_sync_runtime_root(), work / "transport-bundles",
                 pressure_probe=pressure, generation_available=retained, publish=publish))
         except Exception:
@@ -51659,6 +51671,9 @@ def _require_fly_runtime_for_direct_start() -> None:
 
 
 from data_sync_bundle_api import register_bundle_routes as _register_data_sync_bundle_routes
+from data_sync_bundle_retry import register_checkpoint_retry_route
+register_checkpoint_retry_route(app, authenticated=_data_sync_bundle_authenticated,
+                                start=_start_data_sync_bundle_generation)
 _register_data_sync_bundle_routes(
     app, authenticated=_data_sync_bundle_authenticated,
     generation_lookup=_data_sync_bundle_generation,
