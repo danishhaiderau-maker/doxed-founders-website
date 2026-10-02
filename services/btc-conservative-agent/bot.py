@@ -12705,13 +12705,114 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     return ctx
 
 
-def build_pure_ai_context(state_snapshot, buffers):
+def _finite_positive_sr_value(value) -> bool:
+    """Return whether one S/R swing is a finite positive numeric scalar."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return bool(math.isfinite(numeric) and numeric > 0)
+
+
+def _sr_swing_pair_ready(support_resistance) -> bool:
+    """Non-mutating structural predicate shared by readiness and AI context."""
+    if not isinstance(support_resistance, dict):
+        return False
+    swing_high = support_resistance.get("swing_high")
+    swing_low = support_resistance.get("swing_low")
+    return bool(
+        _finite_positive_sr_value(swing_high)
+        and _finite_positive_sr_value(swing_low)
+        and float(swing_high) > float(swing_low)
+    )
+
+
+def _sr_swing_prerequisite_failures(support_resistance) -> list:
+    """Classify missing and invalid S/R inputs without changing source state."""
+    if support_resistance is None:
+        support_resistance = {}
+    if not isinstance(support_resistance, dict):
+        return ["SR_STRUCTURE_INVALID"]
+    swing_high = support_resistance.get("swing_high")
+    swing_low = support_resistance.get("swing_low")
+    failures = []
+    high_missing = swing_high is None or (
+        not isinstance(swing_high, bool)
+        and isinstance(swing_high, (int, float)) and swing_high == 0
+    )
+    low_missing = swing_low is None or (
+        not isinstance(swing_low, bool)
+        and isinstance(swing_low, (int, float)) and swing_low == 0
+    )
+    high_valid = _finite_positive_sr_value(swing_high)
+    low_valid = _finite_positive_sr_value(swing_low)
+    if high_missing:
+        failures.append("SR_SWING_HIGH_MISSING")
+    elif not high_valid:
+        failures.append("SR_SWING_HIGH_INVALID")
+    if low_missing:
+        failures.append("SR_SWING_LOW_MISSING")
+    elif not low_valid:
+        failures.append("SR_SWING_LOW_INVALID")
+    if high_valid and low_valid and float(swing_high) <= float(swing_low):
+        failures.append("SR_SWING_RANGE_INVALID")
+    return failures
+
+
+def _bounded_ctx_failure_scalar(value, *, max_text: int = 64, numeric_only: bool = False):
+    """Project one JSON-safe bounded scalar for diagnostic evidence only."""
+    if value is None:
+        return None
+    if numeric_only and (isinstance(value, bool) or not isinstance(value, (int, float))):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if not math.isfinite(float(value)) or len(str(value)) > 64:
+                return None
+        except (OverflowError, TypeError, ValueError):
+            return None
+        return value
+    if isinstance(value, str):
+        return value[:max(0, min(int(max_text), 256))]
+    return None
+
+
+def _ctx_fail_prerequisite_detail(state_snapshot: dict) -> dict:
+    """Return only observed S/R prerequisites that made pure context unavailable."""
+    raw_sr = state_snapshot.get("support_resistance")
+    sr = raw_sr if isinstance(raw_sr, dict) else {}
+    return {
+        "prerequisite_failures": _sr_swing_prerequisite_failures(raw_sr),
+        "sr_swing_high": _bounded_ctx_failure_scalar(
+            sr.get("swing_high"), numeric_only=True,
+        ),
+        "sr_swing_low": _bounded_ctx_failure_scalar(
+            sr.get("swing_low"), numeric_only=True,
+        ),
+        "sr_state": _bounded_ctx_failure_scalar(sr.get("sr_state"), max_text=64),
+        "sr_timestamp": _bounded_ctx_failure_scalar(sr.get("ts"), max_text=64),
+    }
+
+
+def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
+    raw_sr = state_snapshot.get("support_resistance")
+    if not _sr_swing_pair_ready(raw_sr):
+        if isinstance(failure_detail, dict):
+            failure_detail.clear()
+            failure_detail.update(_ctx_fail_prerequisite_detail(state_snapshot))
+        logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
+        return None
+    sr = raw_sr
     ctx = {
         "price": nz(state_snapshot.get("price")),
-        "recent_high": nz(state_snapshot.get("support_resistance", {}).get("swing_high")),
-        "recent_low": nz(state_snapshot.get("support_resistance", {}).get("swing_low")),
-        "dist_to_resistance": nz(state_snapshot.get("support_resistance", {}).get("dist_to_resistance")),
-        "dist_to_support": nz(state_snapshot.get("support_resistance", {}).get("dist_to_support")),
+        "recent_high": nz(sr.get("swing_high")),
+        "recent_low": nz(sr.get("swing_low")),
+        "dist_to_resistance": nz(sr.get("dist_to_resistance")),
+        "dist_to_support": nz(sr.get("dist_to_support")),
         "ema9": nz(state_snapshot.get("ema_status", {}).get("ema9")),
         "ema21": nz(state_snapshot.get("ema_status", {}).get("ema21")),
         "ema200": nz(state_snapshot.get("ema_status", {}).get("ema200")),
@@ -12731,19 +12832,93 @@ def build_pure_ai_context(state_snapshot, buffers):
         "edge_score": state.get("last_edge", 0.0),
         "edge_threshold": get_edge_threshold(),
         "regime": state_snapshot.get("regime", "UNKNOWN"),
-        "sr_state": state_snapshot.get("support_resistance", {}).get("sr_state", "UNKNOWN"),
-        "sr_bias": state_snapshot.get("support_resistance", {}).get("sr_bias", "UNKNOWN"),
+        "sr_state": sr.get("sr_state", "UNKNOWN"),
+        "sr_bias": sr.get("sr_bias", "UNKNOWN"),
         "data_quality": state_snapshot.get("data_quality", 0.0),
         "funding": get_funding_snapshot_for_ai(),
         "market_context": get_market_context_for_ai(),
     }
     ctx = sanitize_features(ctx)
-    if ctx["recent_high"] == 0 or ctx["recent_low"] == 0:
-        logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
-        return None
     ctx = enrich_ai_context_upgrade(ctx)
     ctx = _stamp_3m_exhaustion_for_ai(ctx)
     return sanitize_ai_inputs(ctx)
+
+
+def _record_ctx_fail_unavailable_coverage(raw_context: dict, failure_detail: dict) -> dict:
+    """Persist a bounded no-call receipt; never create a research opportunity."""
+    from research.scan_counterfactual_unavailable import build_scan_counterfactual_unavailable
+
+    observed_at = time.time()
+    receipt = build_scan_counterfactual_unavailable(
+        context=raw_context,
+        reason_code="CONTEXT_UNAVAILABLE",
+        observed_at_ts=observed_at,
+        source_revision=_runtime_git_rev_exact(),
+        epoch_id=_collector_v22_epoch_id(),
+    )
+    try:
+        readiness = _runtime_readiness_components(observed_at)
+    except Exception:
+        readiness = {}
+    receipt.update({
+        "context_failure_schema": "pure_ai_context_prerequisite_failure_v1",
+        "prerequisite_failures": list(
+            (failure_detail or {}).get("prerequisite_failures") or []
+        )[:2],
+        "sr_swing_high": (failure_detail or {}).get("sr_swing_high"),
+        "sr_swing_low": (failure_detail or {}).get("sr_swing_low"),
+        "sr_state": (failure_detail or {}).get("sr_state"),
+        "sr_timestamp": (failure_detail or {}).get("sr_timestamp"),
+        "candle_count": len(latest_candles),
+        "buffer_counts": {
+            "price": len(price_buffer),
+            "volume": len(volume_buffer),
+            "delta": len(delta_buffer),
+            "imbalance": len(imbalance_buffer),
+            "candle_range": len(candle_range_buffer),
+            "wick_ratio": len(wick_ratio_buffer),
+            "body_ratio": len(body_ratio_buffer),
+        },
+        "readiness": {
+            "system_ready": bool(readiness.get("system_ready")),
+            "structural_prerequisites_ready": bool(
+                readiness.get("structural_prerequisites_ready")
+            ),
+            "sr_ready": bool(readiness.get("sr_ready")),
+            "buffers_ready": bool(readiness.get("buffers_ready")),
+            "candle_ready": bool(readiness.get("candle_ready")),
+            "ema_ready": bool(readiness.get("ema_ready")),
+            "ohlcv_ready": bool(readiness.get("ohlcv_ready")),
+            "readiness_reasons": [
+                str(reason)[:64]
+                for reason in (readiness.get("readiness_reasons") or [])[:16]
+            ],
+        },
+    })
+    try:
+        accepted = _safe_append_jsonl(
+            AI_INPUT_LOG_FILE, receipt, label="AI_INPUT",
+        ) is True
+    except Exception:
+        accepted = False
+    if not accepted:
+        logger.warning("[RESEARCH] CTX_FAIL_COVERAGE_WRITE_FAILED")
+    return {
+        "receipt": receipt,
+        "write_status": "ACCEPTED" if accepted else "FAILED",
+    }
+
+
+def _build_pure_ai_context_with_evidence(state_snapshot, buffers, raw_context):
+    failure_detail = {}
+    ctx = build_pure_ai_context(
+        state_snapshot, buffers, failure_detail=failure_detail,
+    )
+    if ctx is not None:
+        return ctx, None
+    return None, _record_ctx_fail_unavailable_coverage(
+        raw_context, failure_detail,
+    )
 
 
 def build_shared_direction_prompt_context(ctx: dict) -> dict:
@@ -23128,9 +23303,27 @@ def process_signal(event: dict):
                 update_support_resistance()
                 with state_lock:
                     ai_state_snapshot = copy.deepcopy(state)
-                ctx = build_pure_ai_context(ai_state_snapshot, buffers)
+                ctx_fail_id = str(
+                    event.get("research_scan_id")
+                    or event.get("trade_id")
+                    or uuid.uuid4()
+                )
+                ctx, ctx_fail_coverage = _build_pure_ai_context_with_evidence(
+                    ai_state_snapshot,
+                    buffers,
+                    {
+                        "trade_id": ctx_fail_id,
+                        "shared_ai_call_id": event.get("research_scan_id"),
+                    },
+                )
                 if not ctx:
-                    enforce_log({"trade_id": str(uuid.uuid4())}, "BLOCKED", "CTX_FAIL")
+                    enforce_log({
+                        "trade_id": ctx_fail_id,
+                        "ai_evaluated": False,
+                        "ctx_fail_coverage_write_status": (
+                            (ctx_fail_coverage or {}).get("write_status") or "FAILED"
+                        ),
+                    }, "BLOCKED", "CTX_FAIL")
                     full_pipeline_trace("BLOCKED", "CTX_FAIL", None)
                     with state_lock:
                         state["debug_state"]["last_block_reason"] = "CTX_FAIL"
