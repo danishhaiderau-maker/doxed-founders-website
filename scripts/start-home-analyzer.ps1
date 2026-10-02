@@ -35,7 +35,11 @@ $machineStateBase = if ($env:LOCALAPPDATA) {
 }
 $machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
 New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
-$lockFile = Join-Path $machineLockDir "home-analyzer-start-$AnalyzerPort.lock"
+# A -Once pass holds the start lock for its whole run; the dashboard has its
+# own lock so it can be restored while a pass is analysing.
+$lockStem = 'home-analyzer-start'
+if ($DashboardOnly.IsPresent) { $lockStem = 'home-analyzer-dashboard' }
+$lockFile = Join-Path $machineLockDir "$lockStem-$AnalyzerPort.lock"
 $starterPidFile = Join-Path $repoRoot ".home-analyzer-starter.pid"
 
 function Test-PortOpen([int]$P) {
@@ -339,7 +343,10 @@ if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
 }
 
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
-if (Test-PortOpen $AnalyzerPort) {
+# A -Once pass never touches the listener: the dashboard is an independent
+# process serving the last completed generation, and a one-shot engine has no
+# .home-analyzer.pid, so the liveness probe below always reads it as stale.
+if (-not $Once -and (Test-PortOpen $AnalyzerPort)) {
   $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
   $dashboardAlive = (Test-AnalyzerAlive)
   $dashboardReady = (Test-AnalyzerHealthy)

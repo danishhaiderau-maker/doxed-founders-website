@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from bisect import bisect_left
 from collections import defaultdict
 from pathlib import Path
@@ -850,13 +851,77 @@ def _conservative_child_receipt(
     return receipt
 
 
+PROTECTION_REPLAY_WINDOW_SCHEMA = "protection_replay_event_window_v1"
+DEFAULT_PROTECTION_REPLAY_MAX_EVENTS = 150
+
+
+def protection_replay_max_events() -> int | None:
+    """Most-recent-event bound for the protection replay; 0 means unbounded.
+
+    The replay materialises every entry child x protection variant per event
+    and its cost grows with the epoch (1,764 events took >25 min and ~30 GB;
+    ~1.7 s per replayed event plus ~2 min fixed for the 21k-policy screen).
+    """
+    raw = os.getenv("ANALYZER_PROTECTION_REPLAY_MAX_EVENTS", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_PROTECTION_REPLAY_MAX_EVENTS
+    except ValueError:
+        value = DEFAULT_PROTECTION_REPLAY_MAX_EVENTS
+    return value if value > 0 else None
+
+
+
+def select_recent_events(
+    event_ids: Iterable[str],
+    signal_ts_of: Callable[[str], Any],
+    *,
+    max_events: int | None,
+) -> dict[str, Any]:
+    """Keep the ``max_events`` most recent events; ties break on event id.
+
+    The selection is returned in event-id order so a bounded replay walks the
+    same order as an unbounded one.
+    """
+    ordered = sorted(event_ids)
+    def sort_key(event_id: str) -> tuple[float, str]:
+        ts = _number(signal_ts_of(event_id))
+        return (ts if ts is not None else float("-inf"), event_id)
+
+    if max_events is not None and len(ordered) > max_events:
+        kept = set(sorted(ordered, key=sort_key)[-max_events:])
+        chosen = [event_id for event_id in ordered if event_id in kept]
+    else:
+        chosen = ordered
+    chosen_ts = [ts for ts in (_number(signal_ts_of(event_id)) for event_id in chosen) if ts is not None]
+    return {
+        "event_ids": chosen,
+        "receipt": {
+            "schema": PROTECTION_REPLAY_WINDOW_SCHEMA,
+            "policy": "MOST_RECENT_EVENTS_BY_SIGNAL_TS",
+            "max_events": max_events,
+            "events_eligible": len(ordered),
+            "events_selected": len(chosen),
+            "truncated": len(chosen) < len(ordered),
+            "first_signal_ts": min(chosen_ts) if chosen_ts else None,
+            "last_signal_ts": max(chosen_ts) if chosen_ts else None,
+        },
+    }
+
+
 def load_candidate_inputs(
     data_dir: str | Path,
     *,
     epoch_id: str | None = None,
     minimum_signal_ts: float | None = None,
+    max_events: int | None = None,
+    window: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one normalized event input per event, never per duplicate row."""
+    """Return one normalized event input per event, never per duplicate row.
+
+    ``max_events`` keeps only the most recent events by signal time, chosen
+    before any market segment is read; ``window`` receives the selection
+    receipt.
+    """
     root = Path(data_dir)
     ledgers = root / "v3" / "ledgers"
     def in_scope(row: Mapping[str, Any]) -> bool:
@@ -893,8 +958,16 @@ def load_candidate_inputs(
             continue
         executions_by_event[str(row.get("event_id") or "")].append(row)
     cycle_atr = _cycle_atr_by_event(root)
+    eligible = sorted(set(intents) & set(terminal))
+    selected = select_recent_events(
+        eligible,
+        lambda event_id: (opportunities.get(str(terminal[event_id].get("episode_id") or "")) or {}).get("signal_ts"),
+        max_events=max_events,
+    )
+    if window is not None:
+        window.update(selected["receipt"])
     result = []
-    for event_id in sorted(set(intents) & set(terminal)):
+    for event_id in selected["event_ids"]:
         intent, lifecycle = intents[event_id], terminal[event_id]
         episode_id = str(lifecycle.get("episode_id") or intent.get("episode_id") or "")
         if str(intent.get("episode_id") or "") != episode_id:

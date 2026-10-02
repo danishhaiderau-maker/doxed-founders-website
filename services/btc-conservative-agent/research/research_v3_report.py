@@ -14,7 +14,11 @@ from typing import Any
 
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
-from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
+from research_v3_candidates import (
+    evaluate_protection_screen,
+    load_candidate_inputs,
+    protection_replay_max_events,
+)
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
@@ -1150,9 +1154,11 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
                 flush=True,
             )
 
+        replay_window: dict[str, Any] = {}
         candidate_inputs = [
             row for row in load_candidate_inputs(
                 data_dir, epoch_id=selected_epoch, minimum_signal_ts=cutoff,
+                max_events=protection_replay_max_events(), window=replay_window,
             )
             if str(row.get("episode_id") or "") not in quarantined_episode_ids
         ]
@@ -1161,6 +1167,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             candidate_inputs,
             progress_callback=emit_candidate_progress,
         )
+        candidate_screen["input_window"] = replay_window
         candidates = candidate_screen["candidates"]
     incident_episodes = sorted({str(row.get("episode_id") or "") for row in opportunities
                                 if incident_index.reasons(row)})

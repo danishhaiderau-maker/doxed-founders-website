@@ -14,6 +14,7 @@ param(
   [int]$Port = 9001,
   [int]$TimeoutMin = 240,
   [int]$DashboardReadySec = 90,
+  [int]$DashboardWatchSec = 30,
   [string]$Reason = 'manual',
   [switch]$EnsureDashboardOnly
 )
@@ -45,7 +46,7 @@ function Assert-CanonicalDataLink {
   New-Item -ItemType Junction -Path $link -Target $cfg.DataRoot | Out-Null
 }
 
-function Invoke-Launcher([string[]]$LauncherArgs, [string]$Tag, [int]$TimeoutMs) {
+function Invoke-Launcher([string[]]$LauncherArgs, [string]$Tag, [int]$TimeoutMs, [scriptblock]$WhileRunning = $null) {
   $stamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
   $stdoutPath = Join-Path $cfg.LogDir "analyzer-$Tag-$stamp.out.log"
   $stderrPath = Join-Path $cfg.LogDir "analyzer-$Tag-$stamp.err.log"
@@ -64,7 +65,12 @@ function Invoke-Launcher([string[]]$LauncherArgs, [string]$Tag, [int]$TimeoutMs)
   # Drain both pipes concurrently so a chatty child can never deadlock.
   $stdoutTask = $process.StandardOutput.ReadToEndAsync()
   $stderrTask = $process.StandardError.ReadToEndAsync()
-  $timedOut = -not $process.WaitForExit($TimeoutMs)
+  $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+  $timedOut = $false
+  while (-not $process.WaitForExit([int][Math]::Min($DashboardWatchSec * 1000, [Math]::Max(0, ($deadline - (Get-Date)).TotalMilliseconds)))) {
+    if ((Get-Date) -ge $deadline) { $timedOut = $true; break }
+    if ($WhileRunning) { try { & $WhileRunning } catch { } }
+  }
   if ($timedOut) {
     Invoke-NativeQuiet { & taskkill.exe /PID $process.Id /T /F } | Out-Null
   }
@@ -77,6 +83,61 @@ function Invoke-Launcher([string[]]$LauncherArgs, [string]$Tag, [int]$TimeoutMs)
     $tail = (($stdoutTask.Result.Trim() -split "`r?`n") | Where-Object { $_ -match 'REFUSED|error|Error|FAILED' } | Select-Object -Last 3) -join ' | '
   }
   return [pscustomobject]@{ ExitCode = $code; TimedOut = $timedOut; Stdout = $stdoutPath; Stderr = $stderrPath; Tail = $tail }
+}
+
+function Initialize-AnalyzerEnvironment {
+  $env:DOXXED_NONINTERACTIVE = '1'
+  # A native crash (0xC0000005) otherwise leaves no Python stack behind.
+  $env:PYTHONFAULTHANDLER = '1'
+  # A stale user-level value would point the analyzer at a retired store.
+  Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
+  $health = $null
+  if ($env:DOXXED_LAPTOP_CHAIN_OFFLINE -ne '1') {
+    try { $health = Get-FlyHealth $cfg.SourceUrl; [void](Publish-UpstreamIdentity -Config $cfg -Health $health) } catch { }
+  }
+  $mode = Resolve-AnalyzerResearchMode -RepoRoot $cfg.RepoRoot -Health $health
+  $env:SCORE_LED_PAPER_RESEARCH_ENABLED = $mode.Flag
+  Assert-CanonicalDataLink
+  return $mode
+}
+
+# The dashboard is an independent process that keeps serving the last
+# completed generation while a pass analyses. Its own mutex (never the run
+# mutex) lets it be restored mid-pass without touching the pass's status.
+function Confirm-AnalyzerDashboard {
+  if (Get-AnalyzerStatus) { return }
+  $guard = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerDashboard')
+  if (-not $guard) {
+    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
+    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
+    return
+  }
+  try {
+    if (Get-AnalyzerStatus) { return }
+    $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_START exit={0} {1}" -f $dash.ExitCode, $dash.Tail)
+    if ($dash.ExitCode -ne 0) { throw "DASHBOARD_START_FAILED exit=$($dash.ExitCode) $($dash.Tail)" }
+    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
+    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
+    if (-not (Get-AnalyzerStatus)) {
+      Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_NOT_READY after ${DashboardReadySec}s"
+    }
+  } finally {
+    Exit-SingleInstance $guard
+  }
+}
+
+if ($EnsureDashboardOnly) {
+  $ensureExit = 0
+  try {
+    [void](Initialize-AnalyzerEnvironment)
+    Confirm-AnalyzerDashboard
+  } catch {
+    $ensureExit = 1
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_ENSURE_FAILED reason={0} {1}" -f $Reason, $_.Exception.Message)
+  }
+  Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_ENSURED reason={0} exit={1}" -f $Reason, $ensureExit)
+  exit $ensureExit
 }
 
 $instance = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun')
@@ -107,65 +168,45 @@ $status = [ordered]@{
 $exitCode = 1
 try {
   Write-JsonAtomic -Path $cfg.AnalyzerStatus -Value $status
-  $env:DOXXED_NONINTERACTIVE = '1'
-  # A native crash (0xC0000005) otherwise leaves no Python stack behind.
-  $env:PYTHONFAULTHANDLER = '1'
-  # A stale user-level value would point the analyzer at a retired store.
-  Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
-  $health = $null
-  if ($env:DOXXED_LAPTOP_CHAIN_OFFLINE -ne '1') {
-    try { $health = Get-FlyHealth $cfg.SourceUrl; [void](Publish-UpstreamIdentity -Config $cfg -Health $health) } catch { }
-  }
-  $mode = Resolve-AnalyzerResearchMode -RepoRoot $cfg.RepoRoot -Health $health
-  $env:SCORE_LED_PAPER_RESEARCH_ENABLED = $mode.Flag
+  $mode = Initialize-AnalyzerEnvironment
   $status.researchModeFlag = $mode.Flag
   $status.researchModeMatchesFly = $mode.Matched
-  Assert-CanonicalDataLink
 
-  # The launcher's single pass replaces any dashboard that has no persistent
-  # engine behind it, so the dashboard is ensured before and again after it.
-  function Confirm-AnalyzerDashboard {
-    if (Get-AnalyzerStatus) { return }
-    $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
-    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_START exit={0} {1}" -f $dash.ExitCode, $dash.Tail)
-    if ($dash.ExitCode -ne 0) { throw "DASHBOARD_START_FAILED exit=$($dash.ExitCode) $($dash.Tail)" }
-    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
-    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
-    if (-not (Get-AnalyzerStatus)) {
-      Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_NOT_READY after ${DashboardReadySec}s"
-    }
-  }
-
+  # Ensured before, watched during, and ensured again after the single pass.
   Confirm-AnalyzerDashboard
-  if ($EnsureDashboardOnly) {
-    $status.state = 'DASHBOARD_ENSURED'
-    $exitCode = 0
-  } else {
-    $before = Get-AnalyzerStatus
-    $beforeCompleted = if ($before -and $before.analysis_run) { ConvertTo-UtcDate $before.analysis_run.last_completed_at } else { $null }
-    Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_START reason={0} rev={1} scoreLed={2} flyMatch={3}" -f $Reason, $status.revision, $mode.Flag, $mode.Matched)
-    $run = Invoke-Launcher -LauncherArgs @('-Once', "-Port $Port") -Tag 'once' -TimeoutMs ($TimeoutMin * 60 * 1000)
-    $status.stdoutLog = $run.Stdout
-    $status.stderrLog = $run.Stderr
-    $exitCode = $run.ExitCode
-    $status.detail = $run.Tail
-    try { Confirm-AnalyzerDashboard } catch {
-      Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_RESTORE_FAILED {0}" -f $_.Exception.Message)
-    }
-    if ($exitCode -eq 0) {
-      $after = Get-AnalyzerStatus
-      $afterCompleted = if ($after -and $after.analysis_run) { ConvertTo-UtcDate $after.analysis_run.last_completed_at } else { $null }
-      $phase = if ($after -and $after.analysis_run) { [string]$after.analysis_run.phase } else { 'UNAVAILABLE' }
-      if ($afterCompleted -and $phase -ne 'FAILED' -and (-not $beforeCompleted -or $afterCompleted -gt $beforeCompleted)) {
-        $status.lastSuccessAt = Get-UtcNowIso
-        $status.lastCompletedGenerationAt = $afterCompleted.ToString('o')
-      } else {
-        $exitCode = 6
-        $status.detail = "NO_NEW_COMPLETED_GENERATION phase=$phase $($run.Tail)"
-      }
-    }
-    $status.state = $(if ($exitCode -eq 0) { 'COMPLETED' } elseif ($exitCode -eq 124) { 'TIMEOUT' } else { 'FAILED' })
+  $before = Get-AnalyzerStatus
+  $beforeCompleted = if ($before -and $before.analysis_run) { ConvertTo-UtcDate $before.analysis_run.last_completed_at } else { $null }
+  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_START reason={0} rev={1} scoreLed={2} flyMatch={3}" -f $Reason, $status.revision, $mode.Flag, $mode.Matched)
+  $script:dashboardMisses = 0
+  $watchDashboard = {
+    if (Get-AnalyzerStatus) { $script:dashboardMisses = 0; return }
+    $script:dashboardMisses++
+    if ($script:dashboardMisses -lt 2) { return }
+    Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_DOWN_MIDPASS misses=$($script:dashboardMisses)"
+    Confirm-AnalyzerDashboard
+    $script:dashboardMisses = 0
   }
+  $run = Invoke-Launcher -LauncherArgs @('-Once', "-Port $Port") -Tag 'once' -TimeoutMs ($TimeoutMin * 60 * 1000) -WhileRunning $watchDashboard
+  $status.stdoutLog = $run.Stdout
+  $status.stderrLog = $run.Stderr
+  $exitCode = $run.ExitCode
+  $status.detail = $run.Tail
+  try { Confirm-AnalyzerDashboard } catch {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_RESTORE_FAILED {0}" -f $_.Exception.Message)
+  }
+  if ($exitCode -eq 0) {
+    $after = Get-AnalyzerStatus
+    $afterCompleted = if ($after -and $after.analysis_run) { ConvertTo-UtcDate $after.analysis_run.last_completed_at } else { $null }
+    $phase = if ($after -and $after.analysis_run) { [string]$after.analysis_run.phase } else { 'UNAVAILABLE' }
+    if ($afterCompleted -and $phase -ne 'FAILED' -and (-not $beforeCompleted -or $afterCompleted -gt $beforeCompleted)) {
+      $status.lastSuccessAt = Get-UtcNowIso
+      $status.lastCompletedGenerationAt = $afterCompleted.ToString('o')
+    } else {
+      $exitCode = 6
+      $status.detail = "NO_NEW_COMPLETED_GENERATION phase=$phase $($run.Tail)"
+    }
+  }
+  $status.state = $(if ($exitCode -eq 0) { 'COMPLETED' } elseif ($exitCode -eq 124) { 'TIMEOUT' } else { 'FAILED' })
 } catch {
   $exitCode = 1
   $status.state = 'FAILED'
