@@ -416,6 +416,7 @@ def test_saver_and_transition_lock_order_cannot_deadlock_or_publish_state_only()
 
     namespace = {
         "paper_lifecycle_transition_lock": transition,
+        "COMBO_LANE_SPECS": {},  # This fixture exercises the eligible relay branch.
         "paper_lifecycle_file_lock": lifecycle_lock,
         "trade_lock": trade,
         "PAPER_LIFECYCLE_FILE": "present",
