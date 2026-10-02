@@ -216,8 +216,23 @@ def test_segment_lag_stuck_ack_and_pruning_fail():
     stuck = {"observedAt": up.iso(now), "ok": True, "shipped_seq": 110, "laptop_acked_seq": 98, "pruning_enabled": False}
     previous = {"observed": {"shipped_seq": 100, "laptop_acked_seq": 98, "ai_cycle_completed_ts": 1.0}}
     assert "segments_acked" in up.evaluate_row(**_inputs(now, head=stuck, previous=previous))["failed_checks"]
-    pruning = {"observedAt": up.iso(now), "ok": True, "shipped_seq": 100, "laptop_acked_seq": 100, "pruning_enabled": True}
-    assert up.evaluate_row(**_inputs(now, head=pruning))["failed_checks"] == ["segments_acked"]
+    ahead = {"observedAt": up.iso(now), "ok": True, "shipped_seq": 100, "laptop_acked_seq": 100,
+             "pruning_enabled": True, "pruned_through_seq": 90, "custody_through_seq": 80}
+    assert up.evaluate_row(**_inputs(now, head=ahead))["failed_checks"] == ["segments_acked"]
+    no_custody = {**ahead, "custody_through_seq": None}
+    assert up.evaluate_row(**_inputs(now, head=no_custody))["failed_checks"] == ["segments_acked"]
+
+
+def test_guarded_pruning_passes():
+    now = T0 + 60
+    guarded = {"observedAt": up.iso(now - 20), "ok": True, "shipped_seq": 100, "laptop_acked_seq": 100,
+               "pruning_enabled": True, "prune_mode": "enforce", "pruned_through_seq": 80,
+               "custody_through_seq": 90, "last_segment_at": now - 140}
+    row = up.evaluate_row(**_inputs(now, head=guarded))
+    assert "segments_acked" not in row["failed_checks"]
+    assert row["observed"]["pruned_through_seq"] == 80
+    dry = {**guarded, "prune_mode": "dry_run", "pruned_through_seq": None}
+    assert "segments_acked" not in up.evaluate_row(**_inputs(now, head=dry))["failed_checks"]
 
 
 def _head(now, shipped, acked, newest_age_sec):

@@ -243,6 +243,21 @@ def _laptop_acked_seq(pull: Mapping[str, Any] | None, now: float) -> tuple[int |
     return int(pull["ackedSeq"]), f"laptop acked {int(pull['ackedSeq'])} at {pull.get('finishedAt')}"
 
 
+def _prune_unguarded(head: dict, acked) -> str | None:
+    """Return why enabled pruning is unsafe, or None when it trails custody and the ACK."""
+    pruned = (head or {}).get("pruned_through_seq")
+    custody = (head or {}).get("custody_through_seq")
+    if pruned in (None, 0):
+        return None
+    if custody is None:
+        return f"segments pruned through {pruned} without a laptop custody receipt"
+    if int(pruned) > int(custody):
+        return f"segments pruned through {pruned} beyond custody {custody}"
+    if acked is not None and int(pruned) > int(acked):
+        return f"segments pruned through {pruned} beyond laptop ACK {acked}"
+    return None
+
+
 def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] | None,
                  relay: Mapping[str, Any] | None, analyzer: Mapping[str, Any] | None,
                  alerts: Mapping[str, Any] | None, baseline: Mapping[str, Any],
@@ -374,7 +389,8 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
     else:
         checks["ws_fresh"] = _check(True, f"ws tick {float(ws_age):.1f}s old")
 
-    # Segments published == acked within tolerance and bounded lag age; pruning must stay off.
+    # Segments published == acked within tolerance and bounded lag age. Pruning is allowed
+    # only while guarded: pruned_through <= custody_through <= laptop ACK.
     head_ok, head_err = _fresh_snapshot(head, now, "Fly segment head")
     shipped, acked = (head or {}).get("shipped_seq"), (head or {}).get("laptop_acked_seq")
     head_at = parse_utc((head or {}).get("observedAt")) or now
@@ -383,14 +399,17 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
     laptop_acked, laptop_detail = _laptop_acked_seq(laptop_pull, now)
     observed.update({"shipped_seq": shipped, "laptop_acked_seq": acked,
                      "pruning_enabled": (head or {}).get("pruning_enabled"),
+                     "prune_mode": (head or {}).get("prune_mode"),
+                     "pruned_through_seq": (head or {}).get("pruned_through_seq"),
+                     "custody_through_seq": (head or {}).get("custody_through_seq"),
                      "newest_segment_age_sec": newest_age, "laptop_pull_acked_seq": laptop_acked})
     prev_acked, prev_shipped = prev_obs.get("laptop_acked_seq"), prev_obs.get("shipped_seq")
     if not head_ok:
         checks["segments_acked"] = _check(None, head_err)
     elif shipped is None or acked is None:
         checks["segments_acked"] = _check(None, "shipped/acked seq not observed")
-    elif (head or {}).get("pruning_enabled") is True:
-        checks["segments_acked"] = _check(False, "segment pruning is enabled")
+    elif (head or {}).get("pruning_enabled") is True and _prune_unguarded(head, acked):
+        checks["segments_acked"] = _check(False, _prune_unguarded(head, acked))
     elif int(shipped) - int(acked) > SEGMENT_ACK_TOLERANCE_SEQ:
         checks["segments_acked"] = _check(False, f"published {shipped} vs acked {acked} (lag > {SEGMENT_ACK_TOLERANCE_SEQ})")
     elif int(acked) >= int(shipped):

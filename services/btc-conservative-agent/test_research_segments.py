@@ -492,8 +492,9 @@ def test_shipper_has_no_bot_http_lock_or_prune_surface():
     assert not imported & {"bot", "flask", "http", "socketserver", "btc_conservative_agent",
                            "shutil", "requests", "ccxt"}
     assert "trade_lock" not in source
-    assert shipper_mod.PRUNING_ENABLED is False
-    assert "def prune" not in source and "rmtree" not in source
+    assert "rmtree" not in source
+    # Deletion lives only in research_segment_prune.execute, reached solely in enforce mode.
+    assert source.count("prune.execute(") == 1
 
 
 def test_shipper_disabled_by_default(monkeypatch, capsys):
