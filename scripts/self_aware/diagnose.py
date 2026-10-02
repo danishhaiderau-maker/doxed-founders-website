@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyzer_sections, fly_platform
+from . import analyzer_sections, data_compat, fly_platform
 from .config import RUNBOOK, RUNBOOK_BASE, THRESHOLDS, Paths
 from .facts import iso, parse_ts, snapshot_age, watcher_check
 
@@ -725,6 +725,23 @@ def check_analyzer_sections(f, sig, store) -> list[Finding]:
                     drill_sql=None) for r in rows]
 
 
+_COMPAT_TITLES = {
+    "data.compat_mixed": "One data version / clean epoch per analysis input",
+    "data.compat_schema": "Every stream schema announced (no silent drift)",
+    "data.compat_declared": "Every row declares its data version / epoch",
+    "data.compat_epoch_purity": "Analyzer results contain no pre-epoch rows",
+}
+
+
+def check_data_compat(f, sig, store) -> list[Finding]:
+    """Data compatibility (30-min job): versions, epoch classes, schema drift, analyzer epoch purity."""
+    doc = f.get("data_compat")
+    rows = data_compat.findings(doc, f["now"], THRESHOLDS["compat_doc_max_age_sec"], (doc or {}).get("epoch_purity"))
+    return [Finding(r["id"], _COMPAT_TITLES[r["id"]], "data", r["severity"], r["observed"], r["expected"],
+                    evidence=r.get("evidence") or {}, emit_alarm=r.get("emit_alarm", True), drill_sql=None)
+            for r in rows]
+
+
 # ------------------------------------------------------------- run
 
 CONTRACT_SURFACES = {"analyzer": "Analyzer :9001 sections", "fly": "Fly dashboard panels and snapshots",
@@ -800,6 +817,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_data(facts, sig, store),
         lambda: check_analyzer_sections(facts, sig, store),
         lambda: check_contracts(facts, sig, store),
+        lambda: check_data_compat(facts, sig, store),
     ]
     findings: list[Finding] = []
     for fn in checks:

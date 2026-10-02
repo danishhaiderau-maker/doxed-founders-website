@@ -24,6 +24,7 @@ CADENCE_SEC = {
     "sections": 7200,
     "contracts": 7200,
     "contracts_light": 300,
+    "compat": 1800,
 }
 
 THRESHOLDS = {
@@ -59,6 +60,7 @@ THRESHOLDS = {
     "sections_doc_max_age_sec": 3 * 3600,
     "contracts_heavy_max_age_sec": 5 * 3600,
     "contracts_heavy_defer_max_sec": 45 * 60,
+    "compat_doc_max_age_sec": 2 * 3600,
 }
 
 
