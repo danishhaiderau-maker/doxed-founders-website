@@ -41022,7 +41022,7 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
             _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
                                            "updated_at": utc_iso()}
         try:
-            from data_sync_bundle_runtime import run_managed_generation
+            from data_sync_bundle_resumption import run_resumable_generation
             work = _data_sync_inventory_work_root()
             def pressure():
                 return {**_lifecycle_pipeline_pressure_probe(),
@@ -41036,7 +41036,7 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
             if maintenance.get("status") != "ADMITTED":
                 publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
                 return
-            publish(run_managed_generation(
+            publish(run_resumable_generation(
                 generation, _data_sync_runtime_root(), work / "transport-bundles",
                 pressure_probe=pressure, generation_available=retained, publish=publish))
         except Exception:
