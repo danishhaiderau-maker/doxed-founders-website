@@ -73,8 +73,16 @@ def test_verified_evaluator_rows_reach_publication_and_adapter_before_filtering(
     assert [row["raw_ai_decision"] for row in consumed] == ["APPROVE", "REJECT", "AI_ERROR", "UNKNOWN"]
     assert consumed[0]["family_policy_decision"] == "REJECT"
     coverage = report["ai_verdict_coverage"]
-    assert coverage["raw_verdict_row_counts"] == {"APPROVE": 1, "REJECT": 1, "ERROR": 1, "UNKNOWN": 1}
-    assert coverage["comparison_status"] == "NOT_EVALUATED"
+    assert coverage["raw_verdict_row_counts"] == {
+        "APPROVE": 1,
+        "REJECT": 1,
+        "NO_TRADE": 0,
+        "AI_NOT_CALLED": 0,
+        "ERROR": 1,
+        "UNKNOWN": 1,
+    }
+    assert coverage["comparison_status"] == "UNKNOWN"
+    assert coverage["blockers"] == ["NO_ELIGIBLE_MATCHED_AI_OUTCOMES"]
     assert coverage["profitability_supported"] is False
 
 
