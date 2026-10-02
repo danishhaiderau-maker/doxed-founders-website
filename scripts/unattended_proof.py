@@ -34,6 +34,8 @@ MAX_ROW_GAP_SEC = 45 * 60.0
 SNAPSHOT_MAX_AGE_SEC = 15 * 60.0
 ANALYZER_MAX_AGE_SEC = 45 * 60.0
 WS_MAX_AGE_SEC = 60.0
+# Successful DeepSeek responses arrive every ~3 min while entry is eligible.
+AI_SUCCESS_MAX_AGE_SEC = 15 * 60.0
 SEGMENT_ACK_TOLERANCE_SEQ = 30
 # Fly reads the laptop ACK between shipper cycles, so its acked seq trails the
 # laptop by up to a cycle plus the poll interval. A lag younger than this, or
@@ -273,12 +275,19 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
         checks["tiles_all_on"] = (_check(True, f"{len(lanes)}/{len(lanes)} tiles ON") if not off
                                   else _check(False, f"tiles OFF: {', '.join(off)}"))
 
-    # AI advancing: runtime says progressing, cadence rules clean, and a new cycle since the last row.
+    # AI advancing: runtime says progressing, cadence rules clean, and a new
+    # SUCCESSFUL model response since the last row. A completed cycle whose
+    # DeepSeek call failed or timed out is an attempt, not progress.
     progress = rt.get("strategy_progress") if isinstance(rt.get("strategy_progress"), Mapping) else {}
     cycle = progress.get("scheduled_ai_cycle") if isinstance(progress.get("scheduled_ai_cycle"), Mapping) else {}
     completed_ts = cycle.get("completed_ts")
     observed["ai_cycle_completed_ts"] = completed_ts
     observed["ai_age_sec"] = progress.get("ai_age_sec")
+    success_at = parse_utc(progress.get("last_ai_success_at"))
+    observed["ai_last_success_at"] = progress.get("last_ai_success_at")
+    observed["ai_consecutive_failures"] = progress.get("ai_consecutive_failures")
+    provider = progress.get("ai_provider") if isinstance(progress.get("ai_provider"), Mapping) else {}
+    observed["ai_served_model"] = provider.get("last_model_echo")
     if not runtime_ok:
         checks["ai_advancing"] = _check(None, runtime_err)
     elif boundary:
@@ -288,17 +297,31 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
     else:
         observed_at = parse_utc(rt.get("observedAt")) or now
         findings = cadence_findings({"strategy_progress": dict(progress)}, paused=False, now=observed_at)
+        entry_eligible = cycle.get("last_poll_entry_eligible") is not False
         stalled = (prev_obs.get("ai_cycle_completed_ts") is not None and completed_ts is not None
-                   and completed_ts == prev_obs.get("ai_cycle_completed_ts")
-                   and cycle.get("last_poll_entry_eligible") is not False)
+                   and completed_ts == prev_obs.get("ai_cycle_completed_ts") and entry_eligible)
+        prev_success = parse_utc(prev_obs.get("ai_last_success_at"))
+        success_age = observed_at - success_at if success_at is not None else None
+        stale_after = max(float(progress.get("ai_stale_after_sec") or 0.0), AI_SUCCESS_MAX_AGE_SEC)
         if progress.get("ai_progressing") is not True:
             checks["ai_advancing"] = _check(False, f"ai_progressing={progress.get('ai_progressing')!r}")
         elif findings:
             checks["ai_advancing"] = _check(False, "; ".join(findings.values()))
         elif stalled:
             checks["ai_advancing"] = _check(False, "no AI cycle completed since the previous proof row")
+        elif "last_ai_success_at" not in progress:
+            checks["ai_advancing"] = _check(None, "last_ai_success_at not observed (successful-response truth missing)")
+        elif success_at is None:
+            checks["ai_advancing"] = _check(False, "no successful model response in this process")
+        elif entry_eligible and prev_success is not None and success_at <= prev_success:
+            checks["ai_advancing"] = _check(False, f"no SUCCESSFUL model response since the previous proof row "
+                                                   f"(last success {progress.get('last_ai_success_at')})")
+        elif entry_eligible and success_age is not None and success_age > stale_after:
+            checks["ai_advancing"] = _check(False, f"last successful model response {success_age:.0f}s ago "
+                                                   f"(> {stale_after:.0f}s)")
         else:
-            checks["ai_advancing"] = _check(True, f"AI progressing; last call {float(progress.get('ai_age_sec') or 0):.0f}s ago")
+            checks["ai_advancing"] = _check(True, f"AI progressing; last SUCCESSFUL response "
+                                                  f"{max(0.0, success_age or 0.0):.0f}s ago")
 
     # WebSocket ticks fresh.
     ws_age = progress.get("ws_age_sec", rt.get("ws_age"))
