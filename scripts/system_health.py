@@ -1541,6 +1541,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         code = cyc.get("exitCode")
         st = AMBER if code not in (None, 0) else GREEN
         obs = f"last cycle {fmt_age(dur)} exit={code}"
+        if code not in (None, 0) and cyc.get("stopReason"):
+            obs += f" ({cyc.get('stopReason')})"
     head = str(inputs.get("analyzer_head") or "")
     if fly_rev and head and not head.startswith(fly_rev):
         if inputs.get("analyzer_contains_fly"):
