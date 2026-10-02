@@ -7,6 +7,19 @@ LAPTOP_TESTS = ROOT / ".github" / "workflows" / "laptop-tests.yml"
 RUNNER = ROOT / "scripts" / "fly_monitor_run.py"
 
 
+def test_laptop_tests_workflow_is_read_only_and_runs_on_every_pr():
+    text = LAPTOP_TESTS.read_text(encoding="utf-8")
+    on_block = text[text.index("\non:"):text.index("\npermissions:")]
+    pr_paths = on_block[on_block.index("pull_request:"):on_block.index("  push:")].split("paths:")[1]
+    push_paths = on_block[on_block.index("  push:"):].split("paths:")[1]
+
+    assert "branches" not in on_block[:on_block.index("  push:")]
+    assert pr_paths.split() == push_paths.split()
+    assert "permissions:\n  contents: read\n" in text
+    assert "secrets." not in text and "fly-bot-deploy" not in text and "flyctl" not in text
+    assert "cancel-in-progress: true" in text
+
+
 def test_monitor_uses_health_only_for_liveness():
     text = RUNNER.read_text(encoding="utf-8")
 
@@ -57,6 +70,8 @@ def test_monitor_heartbeat_and_deploy_workflow_boundary():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     text = RUNNER.read_text(encoding="utf-8")
 
+    assert "FLY_MONITOR_HEARTBEAT: ${{ vars.FLY_MONITOR_HEARTBEAT }}" in workflow
+    assert "FLY_MONITOR_VARIABLES_TOKEN: ${{ secrets.FLY_MONITOR_VARIABLES_TOKEN }}" in workflow
     # The monitor only reads fly-bot-deploy runs; it never dispatches or edits them.
     assert "gh workflow run" not in workflow and "/dispatches" not in text
     assert '"POST"' not in text[text.index("def deploy_state"):text.index("def previous_monitor_run_ts")]

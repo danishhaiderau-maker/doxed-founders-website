@@ -5,8 +5,10 @@ on:
     # Fly probes /health every 15s and Railway owns the sustained-drop guard.
     # This job is revision-drift and safety observability, not the money-path
     # watchdog. Failures are deduplicated by scripts/fly_monitor_run.py: a run
-    # fails only when an incident alerts or re-alerts, and one issue labelled
-    # fly-monitor-incident tracks it until recovery.
+    # fails only when a critical incident alerts or re-alerts (warnings are
+    # listed in the issue but stay green), and one issue labelled
+    # fly-monitor-incident tracks it until recovery. A crashed run or a cache
+    # miss never closes the issue.
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
@@ -57,6 +59,14 @@ jobs:
           # Epoch seconds refreshed every 15 min by scripts/laptop_chain_incident.py
           # from the laptop supervisor; stale > 2h raises laptop_silent.
           LAPTOP_CHAIN_HEARTBEAT: ${{ vars.LAPTOP_CHAIN_HEARTBEAT }}
+          # Previous run's dead-man heartbeat (JSON {at, run_id, ...}); a gap
+          # > 45 min raises monitor_schedule_gap. Gap detection also uses the
+          # cached state and this workflow's runs list (actions: read).
+          FLY_MONITOR_HEARTBEAT: ${{ vars.FLY_MONITOR_HEARTBEAT }}
+          # GITHUB_TOKEN cannot write Actions variables. Optional fine-grained
+          # PAT scoped to this repo with "Variables: read and write" only;
+          # when unset the heartbeat write is skipped with a notice.
+          FLY_MONITOR_VARIABLES_TOKEN: ${{ secrets.FLY_MONITOR_VARIABLES_TOKEN }}
         run: python scripts/fly_monitor_run.py
       - name: Save incident state
         if: always()

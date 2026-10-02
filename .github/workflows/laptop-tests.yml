@@ -1,0 +1,87 @@
+name: Laptop tests
+
+# Laptop-side watcher, incident, supervisor and segment-puller tests. Read-only:
+# no secrets, no deploy steps, nothing that dispatches another workflow.
+#
+# GitHub skips pull_request workflows when the PR head commit message contains
+# [skip ci]. Never put [skip ci] in PR commits; put it only in the squash-merge
+# subject (see docs/SYSTEM_HEALTH_RUNBOOK.md, "CI and [skip ci]").
+
+on:
+  pull_request:
+    paths:
+      - "scripts/system_health*.py"
+      - "scripts/test_system_health.py"
+      - "scripts/laptop_chain_incident.py"
+      - "scripts/self_aware/**"
+      - "scripts/test_self_aware.py"
+      - "scripts/*.ps1"
+      - "tests/test_laptop_chain_scripts.py"
+      - "services/btc-conservative-agent/research_segment_puller.py"
+      - "services/btc-conservative-agent/research_segment_store.py"
+      - "services/btc-conservative-agent/strategy_lab/**"
+      - "services/btc-conservative-agent/research/**"
+      - "services/btc-conservative-agent/test_research_segment*.py"
+      - "scripts/fly_monitor_*.py"
+      - ".github/workflows/laptop-tests.yml"
+  push:
+    branches: [master]
+    paths:
+      - "scripts/system_health*.py"
+      - "scripts/test_system_health.py"
+      - "scripts/laptop_chain_incident.py"
+      - "scripts/self_aware/**"
+      - "scripts/test_self_aware.py"
+      - "scripts/*.ps1"
+      - "tests/test_laptop_chain_scripts.py"
+      - "services/btc-conservative-agent/research_segment_puller.py"
+      - "services/btc-conservative-agent/research_segment_store.py"
+      - "services/btc-conservative-agent/strategy_lab/**"
+      - "services/btc-conservative-agent/research/**"
+      - "services/btc-conservative-agent/test_research_segment*.py"
+      - "scripts/fly_monitor_*.py"
+      - ".github/workflows/laptop-tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: laptop-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install minimal dependencies
+        run: python -m pip install -r services/btc-conservative-agent/requirements.txt pytest
+      - name: System health, laptop incident and self-aware watcher
+        working-directory: scripts
+        run: |
+          tests="test_system_health.py test_laptop_chain_incident.py"
+          if [ -f test_self_aware.py ]; then tests="$tests test_self_aware.py"; fi
+          python -m pytest $tests -q -p no:cacheprovider
+      - name: Laptop chain scripts (PowerShell cases skip on Linux)
+        run: python -m pytest tests/test_laptop_chain_scripts.py -q -p no:cacheprovider
+      - name: Segment puller and store
+        working-directory: services/btc-conservative-agent
+        run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py -q -p no:cacheprovider
+
+  windows-powershell:
+    # tests/test_laptop_chain_scripts.py runs the supervisor/monitor .ps1
+    # scripts through Windows PowerShell; those cases are skipped on Linux.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest
+      - name: Laptop chain PowerShell scripts
+        run: python -m pytest tests/test_laptop_chain_scripts.py -q -p no:cacheprovider
