@@ -199,7 +199,8 @@ def test_relay_workflow_is_restricted_to_issue_posts():
 # --- supervisor-dead detection on the Fly monitor side --------------------
 
 def test_fly_monitor_flags_silent_laptop_supervisor_after_two_hours():
-    assert rules.laptop_heartbeat_findings("", NOW) == {}
+    assert "unset" in rules.laptop_heartbeat_findings("", NOW)["laptop_silent"]
+    assert "unset" in rules.laptop_heartbeat_findings(None, NOW)["laptop_silent"]
     assert rules.laptop_heartbeat_findings(str(int(NOW - 3600)), NOW) == {}
     found = rules.laptop_heartbeat_findings(str(int(NOW - 3 * 3600)), NOW)
     assert "laptop_silent" in found and "3.0h" in found["laptop_silent"]

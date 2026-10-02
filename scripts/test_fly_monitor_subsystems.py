@@ -1,0 +1,295 @@
+"""Subsystem rules: shadow collectors, lifecycle, V3 reconcile, relay outbox, laptop push, contract."""
+
+import copy
+
+import fly_monitor_alerts as alerts
+import fly_monitor_subsystems as sub
+
+NOW = 1_790_938_800.0
+MIN = 60.0
+
+# Shapes captured from the deployed revision (/ready, /api/status,
+# /api/relay-execution-state, /api/system-health, /health) on 2026-10-02.
+READY = {
+    "active_tiles": [],
+    "strategy_progress": {
+        "process_startup_age_sec": 3566.0,
+        "scheduled_ai_cycle": {
+            "last_poll_ts": NOW - 30, "last_poll_entry_eligible": True,
+            "last_poll_reason": "READY", "stage": "IDLE",
+        },
+    },
+    "bbo_refresh": {
+        "inflight": False, "inflight_age_sec": 0.0, "last_success_age_sec": 1.3,
+        "consecutive_failures": 0, "last_error": None,
+    },
+    "ai_input_health": {"status": "WARMING", "prompt_id": "p", "dead_fields": []},
+    "cross_venue_health": {"status": "OK", "reason": None, "collector_age_s": 1.1, "stale_venues": []},
+    "xvl_evaluator_health": {"status": "OK", "reason": None, "tick_age_s": 0.8},
+    "market_context_health": {"status": "OK", "stale_feeds": [], "age_sec": 1.6},
+}
+STATUS = {
+    "uptime": {"boot_at": "2026-10-02T09:56:10Z"},
+    "lifecycle_pipeline": {
+        "available": True, "running": True, "last_outcome": "SUCCESS", "last_success_age_sec": 20.8,
+        "emergency": False, "failure_count": 0, "last_error_code": None,
+        "blocker_counts": {"POST_OBSERVATION_MISSING": 1, "TERMINAL_REASON_MISSING": 1},
+        "emergency_wal": {"status": "CURRENT", "reserve_ready": True, "observed_age_sec": 21.4, "alarms": []},
+    },
+    "collection": {
+        "cross_venue_tape": {"venues": {
+            "binance": {"reconnects": 0}, "bybit": {"reconnects": 0}, "okx": {"reconnects": 0},
+        }},
+        "market_context_tape": {"status": "OK", "stale_feeds": []},
+    },
+}
+RELAY = {"state_integrity": {"live_armed": False, "relay_push": {"delivery_scheduler": {
+    "schema": "relay_delivery_plan_v1",
+    "counts": {"pending_total": 0, "stale_owner_pending": 0, "ready_trade_heads": 0},
+}}}}
+SYSTEM_HEALTH = {"age_sec": 236, "stale": False, "verdict": "AMBER", "received_at": "2026-10-02T10:56:20Z"}
+HEALTH = {
+    "probe_contract": "PROCESS_LIVENESS_ONLY", "process_alive": True, "force_paper_mode": True,
+    "live_armed": False, "bitfinex_live_enabled": False, "source_git_rev": "abc", "execution_paused": False,
+    "pause_owner": None, "volume": {"used_pct": 10.0, "transfer": {}},
+    "research_collection": {"alarms": [], "multiverse": {"v3_reconcile_worker": {
+        "alive": True, "phase": "IDLE", "phase_started_ts": NOW - 40, "runs": 3,
+        "started_ts": NOW - 3800, "last_error": None, "exit_error": None,
+    }}},
+}
+
+
+def _with(base, path, value):
+    payload = copy.deepcopy(base)
+    node = payload
+    *parents, leaf = path.split(".")
+    for part in parents:
+        node = node[part]
+    node[leaf] = value
+    return payload
+
+
+def test_live_snapshot_shapes_are_all_healthy():
+    state = alerts.empty_state()
+    assert sub.ready_block_findings(READY, paused=False) == {}
+    assert sub.cross_venue_degraded_findings(state, READY, NOW) == {}
+    assert sub.cross_venue_reconnect_findings(state, STATUS) == {}
+    assert sub.lifecycle_findings(STATUS) == {}
+    assert sub.v3_reconcile_findings(HEALTH, NOW) == {}
+    assert sub.relay_findings(state, RELAY, NOW) == {}
+    assert sub.entries_blocked_findings(state, READY, paused=False, now=NOW) == {}
+    assert sub.laptop_health_findings(SYSTEM_HEALTH) == {}
+    assert sub.contract_findings({
+        "health": HEALTH, "ready": READY, "status": STATUS, "relay": RELAY, "system_health": SYSTEM_HEALTH,
+    }) == {}
+
+
+# --- /ready blocks --------------------------------------------------------
+
+def test_xvl_evaluator_stale_on_status_or_tick_age():
+    assert "xvl_evaluator_stale" in sub.ready_block_findings(
+        _with(READY, "xvl_evaluator_health", {"status": "STALE", "reason": "TICK_AGE_90S", "tick_age_s": 90.0}),
+        paused=False,
+    )
+    assert "xvl_evaluator_stale" in sub.ready_block_findings(
+        _with(READY, "xvl_evaluator_health.tick_age_s", 61.0), paused=False
+    )
+    for status in ("DISABLED", "STARTING"):
+        found = sub.ready_block_findings(
+            _with(READY, "xvl_evaluator_health", {"status": status, "tick_age_s": None}), paused=False
+        )
+        assert "xvl_evaluator_stale" not in found
+
+
+def test_cross_venue_down_or_collector_age_but_not_disabled():
+    down = _with(READY, "cross_venue_health", {"status": "DOWN", "reason": "COLLECTOR_HEARTBEAT_STALE",
+                                               "collector_age_s": 400.0, "stale_venues": []})
+    assert "cross_venue_stale" in sub.ready_block_findings(down, paused=True)
+    aged = _with(READY, "cross_venue_health.collector_age_s", 121.0)
+    assert "cross_venue_stale" in sub.ready_block_findings(aged, paused=False)
+    off = _with(READY, "cross_venue_health", {"status": "DISABLED", "collector_age_s": None})
+    assert "cross_venue_stale" not in sub.ready_block_findings(off, paused=False)
+
+
+def test_cross_venue_degraded_needs_thirty_continuous_minutes():
+    state = alerts.empty_state()
+    degraded = _with(READY, "cross_venue_health", {"status": "DEGRADED", "reason": "VENUE_STALE",
+                                                   "collector_age_s": 1.0, "stale_venues": ["okx"]})
+    assert sub.cross_venue_degraded_findings(state, degraded, NOW) == {}
+    assert sub.cross_venue_degraded_findings(state, degraded, NOW + 29 * MIN) == {}
+    assert "okx" in sub.cross_venue_degraded_findings(state, degraded, NOW + 30 * MIN)["cross_venue_stale"]
+    assert sub.cross_venue_degraded_findings(state, READY, NOW + 31 * MIN) == {}
+    assert sub.cross_venue_degraded_findings(state, degraded, NOW + 32 * MIN) == {}
+
+
+def test_cross_venue_reconnect_storm_uses_per_run_delta():
+    state = alerts.empty_state()
+    assert sub.cross_venue_reconnect_findings(state, STATUS) == {}
+    storm = _with(STATUS, "collection.cross_venue_tape.venues.okx.reconnects", 30)
+    assert "okx=30" in sub.cross_venue_reconnect_findings(state, storm)["cross_venue_reconnects"]
+    assert sub.cross_venue_reconnect_findings(state, storm) == {}
+    # A restart resets the counters; that is not a storm.
+    assert sub.cross_venue_reconnect_findings(state, STATUS) == {}
+
+
+def test_market_context_degraded_or_down_but_not_disabled():
+    for status in ("COLLECTOR_DOWN", "DEGRADED"):
+        payload = _with(READY, "market_context_health", {"status": status, "stale_feeds": ["deriv_okx"]})
+        assert "deriv_okx" in sub.ready_block_findings(payload, paused=True)["market_context_stale"]
+    off = _with(READY, "market_context_health", {"status": "DISABLED", "stale_feeds": []})
+    assert "market_context_stale" not in sub.ready_block_findings(off, paused=False)
+
+
+def test_ai_input_dead_only_while_unpaused():
+    dead = _with(READY, "ai_input_health", {"status": "DEAD_INPUT", "prompt_id": "p",
+                                            "dead_fields": [{"path": "funding.rate", "kind": "constant"}]})
+    assert "funding.rate" in sub.ready_block_findings(dead, paused=False)["ai_input_dead"]
+    assert "ai_input_dead" not in sub.ready_block_findings(dead, paused=True)
+    assert "ai_input_dead" not in sub.ready_block_findings(dead, paused=None)
+
+
+def test_bbo_refresh_stale_thresholds():
+    assert "bbo_refresh_stale" in sub.ready_block_findings(
+        _with(READY, "bbo_refresh.last_success_age_sec", 301.0), paused=False)
+    assert "bbo_refresh_stale" in sub.ready_block_findings(
+        _with(_with(READY, "bbo_refresh.inflight", True), "bbo_refresh.inflight_age_sec", 121.0), paused=False)
+    assert "bbo_refresh_stale" in sub.ready_block_findings(
+        _with(READY, "bbo_refresh.consecutive_failures", 10), paused=False)
+    assert "bbo_refresh_stale" not in sub.ready_block_findings(
+        _with(READY, "bbo_refresh.consecutive_failures", 9), paused=False)
+    assert "bbo_refresh_stale" not in sub.ready_block_findings(
+        _with(READY, "bbo_refresh.last_success_age_sec", 900.0), paused=True)
+
+
+def test_ready_rules_skip_the_startup_window():
+    warming = _with(READY, "strategy_progress.process_startup_age_sec", 600.0)
+    warming = _with(warming, "xvl_evaluator_health.tick_age_s", 500.0)
+    assert sub.ready_block_findings(warming, paused=False) == {}
+    assert sub.ready_block_findings(None, paused=False) == {}
+
+
+# --- /api/status lifecycle -------------------------------------------------
+
+def test_lifecycle_stalled_on_success_age_not_running_or_emergency():
+    stale = _with(STATUS, "lifecycle_pipeline.last_success_age_sec", 3660.0)
+    assert "61 min" in sub.lifecycle_findings(stale)["lifecycle_stalled"]
+    assert sub.lifecycle_findings(_with(STATUS, "lifecycle_pipeline.last_success_age_sec", 3600.0)) == {}
+    assert "not running" in sub.lifecycle_findings(
+        _with(STATUS, "lifecycle_pipeline.running", False))["lifecycle_stalled"]
+    assert "emergency" in sub.lifecycle_findings(
+        _with(STATUS, "lifecycle_pipeline.emergency", True))["lifecycle_stalled"]
+    assert sub.lifecycle_findings(_with(STATUS, "lifecycle_pipeline.available", False)) == {}
+    assert sub.lifecycle_findings(None) == {}
+
+
+def test_lifecycle_wal_alarm_invalid_or_stale():
+    for status in ("ALARM", "INVALID", "STALE"):
+        payload = _with(STATUS, "lifecycle_pipeline.emergency_wal.status", status)
+        assert status in sub.lifecycle_findings(payload)["lifecycle_wal"]
+    assert "lifecycle_wal" not in sub.lifecycle_findings(_with(STATUS, "lifecycle_pipeline.emergency_wal", None))
+
+
+def test_lifecycle_blocked_needs_ten_lifecycles_on_one_code():
+    assert "lifecycle_blocked" not in sub.lifecycle_findings(STATUS)
+    blocked = _with(STATUS, "lifecycle_pipeline.blocker_counts", {"POST_OBSERVATION_MISSING": 10, "X": 2})
+    assert "POST_OBSERVATION_MISSING=10" in sub.lifecycle_findings(blocked)["lifecycle_blocked"]
+
+
+# --- collector V3 reconcile ---------------------------------------------------
+
+def test_v3_reconcile_stalled_phase_runs_or_dead():
+    worker = "research_collection.multiverse.v3_reconcile_worker"
+    stuck = _with(HEALTH, worker + ".phase", "RECONCILING")
+    stuck = _with(stuck, worker + ".phase_started_ts", NOW - 601)
+    assert "RECONCILING" in sub.v3_reconcile_findings(stuck, NOW)["collector_v3_reconcile_stalled"]
+    fresh = _with(stuck, worker + ".phase_started_ts", NOW - 300)
+    assert sub.v3_reconcile_findings(fresh, NOW) == {}
+
+    never = _with(HEALTH, worker + ".runs", 0)
+    assert sub.v3_reconcile_findings(_with(never, worker + ".started_ts", NOW - 14 * MIN), NOW) == {}
+    found = sub.v3_reconcile_findings(_with(never, worker + ".started_ts", NOW - 16 * MIN), NOW)
+    assert found["collector_v3_reconcile_stalled"].startswith("COLLECTOR_V3_RECONCILE_STALLED")
+
+    dead = _with(HEALTH, worker + ".alive", False)
+    assert "not alive" in sub.v3_reconcile_findings(dead, NOW)["collector_v3_reconcile_stalled"]
+    assert sub.v3_reconcile_findings(None, NOW) == {}
+
+
+# --- relay outbox ------------------------------------------------------------
+
+def test_relay_stale_owner_pending_after_thirty_minutes():
+    state = alerts.empty_state()
+    stuck = _with(RELAY, "state_integrity.relay_push.delivery_scheduler.counts.stale_owner_pending", 22)
+    assert sub.relay_findings(state, stuck, NOW) == {}
+    # An unreadable endpoint keeps the clock instead of resetting it.
+    assert sub.relay_findings(state, None, NOW + 15 * MIN) == {}
+    found = sub.relay_findings(state, stuck, NOW + 30 * MIN)
+    assert "22 events" in found["relay_stale_owner_pending"]
+    assert sub.relay_findings(state, RELAY, NOW + 45 * MIN) == {}
+    assert sub.relay_findings(state, stuck, NOW + 60 * MIN) == {}
+
+
+def test_relay_finding_is_warning_unless_live_armed():
+    state = alerts.empty_state()
+    finding = {"relay_stale_owner_pending": "22 events"}
+    decision = alerts.evaluate(state, finding, now=NOW, maintenance=True)[0][0]
+    assert (decision["action"], decision["severity"]) == ("alert", "warning")
+    assert not alerts.is_failing(decision)
+    armed = alerts.evaluate(
+        alerts.empty_state(), finding, now=NOW, maintenance=True, escalate=frozenset(finding)
+    )[0][0]
+    assert armed["severity"] == "critical" and alerts.is_failing(armed)
+
+
+def test_relay_scheduler_absent_when_owner_filter_off_is_not_stale():
+    state = alerts.empty_state()
+    off = _with(RELAY, "state_integrity.relay_push.delivery_scheduler", None)
+    assert sub.relay_findings(state, off, NOW) == {}
+    assert "relay_stale_owner_pending" not in state["since"]
+
+
+# --- entries blocked --------------------------------------------------------
+
+def test_entries_blocked_after_two_hours_unpaused_only():
+    state = alerts.empty_state()
+    blocked = _with(READY, "strategy_progress.scheduled_ai_cycle.last_poll_entry_eligible", False)
+    blocked = _with(blocked, "strategy_progress.scheduled_ai_cycle.last_poll_reason", "CAPACITY_FULL")
+    assert sub.entries_blocked_findings(state, blocked, paused=False, now=NOW) == {}
+    assert sub.entries_blocked_findings(state, blocked, paused=False, now=NOW + 119 * MIN) == {}
+    found = sub.entries_blocked_findings(state, blocked, paused=False, now=NOW + 120 * MIN)
+    assert "CAPACITY_FULL" in found["entries_blocked"]
+    # A pause resets the clock: a paused bot legitimately takes no entries.
+    assert sub.entries_blocked_findings(state, blocked, paused=True, now=NOW + 121 * MIN) == {}
+    assert sub.entries_blocked_findings(state, blocked, paused=False, now=NOW + 122 * MIN) == {}
+
+
+# --- laptop health push -------------------------------------------------------
+
+def test_laptop_health_silent_on_age_or_stale_flag():
+    assert sub.laptop_health_findings({**SYSTEM_HEALTH, "age_sec": 1801}) != {}
+    assert sub.laptop_health_findings({**SYSTEM_HEALTH, "stale": True}) != {}
+    assert sub.laptop_health_findings({**SYSTEM_HEALTH, "age_sec": 1800}) == {}
+    assert sub.laptop_health_findings(None) == {}
+
+
+# --- contract ------------------------------------------------------------------
+
+def test_missing_required_field_is_a_finding_but_null_value_is_not():
+    status = copy.deepcopy(STATUS)
+    del status["lifecycle_pipeline"]["emergency_wal"]
+    found = sub.contract_findings({"status": status, "ready": _with(READY, "bbo_refresh.last_success_age_sec", None)})
+    assert found["contract_field_missing"] == (
+        "1 required field(s) missing from Fly responses: status:lifecycle_pipeline.emergency_wal"
+    )
+
+
+def test_contract_skips_endpoints_that_did_not_answer():
+    assert sub.contract_findings({"health": None, "ready": None, "status": None}) == {}
+
+
+def test_contract_field_missing_needs_two_runs_and_is_a_warning():
+    state = alerts.empty_state()
+    finding = {"contract_field_missing": "ready:xvl_evaluator_health.status"}
+    assert alerts.evaluate(state, finding, now=NOW, maintenance=False)[0][0]["action"] == "pending"
+    decision = alerts.evaluate(state, finding, now=NOW + 15 * MIN, maintenance=False)[0][0]
+    assert decision["action"] == "alert" and not alerts.is_failing(decision)

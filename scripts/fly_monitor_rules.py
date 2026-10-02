@@ -3,7 +3,9 @@
 Each function maps already-probed /health and /ready payloads to findings
 (condition key -> message). Deduplication and timing live in
 ``fly_monitor_alerts``; these rules only decide whether a condition holds now.
-Missing fields (an older deployed revision) never produce a finding.
+A missing optional field skips its rule here; fields the deployed revision is
+known to emit are enforced by ``fly_monitor_subsystems.contract_findings``
+(``contract_field_missing``), so a disappearing block is not silent.
 """
 
 from __future__ import annotations
@@ -138,11 +140,18 @@ def cadence_findings(ready: Mapping[str, Any] | None, *, paused: bool | None, no
 def laptop_heartbeat_findings(raw: str | None, now: float) -> dict[str, str]:
     """Dead-man check for the laptop supervisor via the LAPTOP_CHAIN_HEARTBEAT variable.
 
-    Unset means the laptop watchdog has never reported, so nothing is expected yet.
+    Unset is a finding too: the variable has existed since the watchdog was
+    installed, so an empty value means it was deleted or the workflow lost
+    access to ``vars``, and the dead-man check would otherwise be blind.
     """
     text = (raw or "").strip()
     if not text:
-        return {}
+        return {
+            "laptop_silent": (
+                "LAPTOP_CHAIN_HEARTBEAT repository variable is unset or empty: the laptop dead-man check "
+                "cannot run (variable deleted, or the laptop watchdog never reported)"
+            )
+        }
     try:
         age = now - float(text)
     except ValueError:

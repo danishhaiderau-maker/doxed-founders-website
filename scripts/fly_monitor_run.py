@@ -27,8 +27,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "services" / "btc-conservative-agent"))
 
 import fly_monitor_alerts as alerts  # noqa: E402
+import fly_monitor_heartbeat as heartbeat  # noqa: E402
 import fly_monitor_rules as rules  # noqa: E402
+import fly_monitor_subsystems as subsystems  # noqa: E402
 from fly_monitor_contract import (  # noqa: E402
+    DEPLOY_JOB_NAME,
     MonitorContractError,
     require_deployed_revision,
     require_strategy_progress,
@@ -39,7 +42,14 @@ from fly_monitor_contract import (  # noqa: E402
 FLY_BASE = "https://doxed-btc-bot.fly.dev"
 HEALTH_URL = "https://doxed-btc-bot.fly.dev/health"
 READY_URL = "https://doxed-btc-bot.fly.dev/ready"
+STATUS_URL = "https://doxed-btc-bot.fly.dev/api/status"
+RELAY_URL = "https://doxed-btc-bot.fly.dev/api/relay-execution-state"
+SYSTEM_HEALTH_URL = "https://doxed-btc-bot.fly.dev/api/system-health"
 DEPLOY_RUNS_PATH = "/actions/workflows/fly-bot-deploy.yml/runs?per_page=50"
+# Only an image deploy in progress suppresses transitional findings, and only
+# this long after the run started; inspect/snapshot/repair dispatches never do.
+DEPLOY_SUPPRESS_MAX_SEC = 45 * 60.0
+OPTIONAL_PROBE_ATTEMPTS = 2
 INCIDENT_LABEL = "fly-monitor-incident"
 INCIDENT_TITLE = "Fly BTC bot monitor incident"
 PROBE_ATTEMPTS = 3
@@ -52,7 +62,7 @@ class ProbeUnavailable(RuntimeError):
     pass
 
 
-def probe(url: str, *, accept: Callable[[int, Any], bool]) -> tuple[int, Any]:
+def probe(url: str, *, accept: Callable[[int, Any], bool], attempts: int = PROBE_ATTEMPTS) -> tuple[int, Any]:
     """GET JSON with bounded retries; return the last (status, payload).
 
     Non-2xx responses with a JSON body (e.g. /ready 503) are real answers and
@@ -60,7 +70,7 @@ def probe(url: str, *, accept: Callable[[int, Any], bool]) -> tuple[int, Any]:
     """
     last: tuple[int, Any] | None = None
     last_error = ""
-    for attempt in range(PROBE_ATTEMPTS):
+    for attempt in range(attempts):
         if attempt:
             time.sleep(PROBE_BACKOFF_SEC[min(attempt - 1, len(PROBE_BACKOFF_SEC) - 1)])
         try:
@@ -77,15 +87,63 @@ def probe(url: str, *, accept: Callable[[int, Any], bool]) -> tuple[int, Any]:
         if accept(*last):
             return last
     if last is None:
-        raise ProbeUnavailable(f"{url} unavailable after {PROBE_ATTEMPTS} attempts ({last_error})")
+        raise ProbeUnavailable(f"{url} unavailable after {attempts} attempts ({last_error})")
     return last
 
 
+def optional_probe(url: str, notes: list[str]) -> dict[str, Any] | None:
+    """A 200 JSON object from a public read-only endpoint, else ``None`` with a note."""
+    try:
+        status, payload = probe(
+            url, accept=lambda s, p: s == 200 and isinstance(p, dict), attempts=OPTIONAL_PROBE_ATTEMPTS
+        )
+    except ProbeUnavailable as exc:
+        notes.append(f"skipped rules for {url}: {exc}")
+        return None
+    if status != 200 or not isinstance(payload, dict):
+        notes.append(f"skipped rules for {url}: HTTP {status}")
+        return None
+    return payload
+
+
+def deploy_suppression(
+    runs: list[dict[str, Any]], jobs_for_run: Callable[[Any], list[dict[str, Any]]], now: float
+) -> tuple[bool, str]:
+    """(suppress, note): an image deploy started < DEPLOY_SUPPRESS_MAX_SEC ago is in progress.
+
+    A push run is always an image deploy. A dispatch run counts only once its
+    ``test-and-deploy`` job exists and is not skipped (mode deploy /
+    recover-unready / recover-stalled-runtime); inspect, snapshot, repair and
+    restart modes skip that job and must not hide findings.
+    """
+    notes = []
+    suppress = False
+    for run in runs:
+        if run.get("status") == "completed":
+            continue
+        started = heartbeat.parse_iso(run.get("run_started_at") or run.get("created_at"))
+        age = now - started if started is not None else None
+        if run.get("event") == "push":
+            deploying = True
+        else:
+            jobs = [j for j in jobs_for_run(run.get("id")) if j.get("name") == DEPLOY_JOB_NAME]
+            deploying = bool(jobs) and jobs[0].get("conclusion") != "skipped"
+        if not deploying:
+            notes.append(f"run {run.get('id')} ({run.get('event')}) is not an image deploy")
+            continue
+        if age is None or age >= DEPLOY_SUPPRESS_MAX_SEC:
+            notes.append(f"deploy run {run.get('id')} older than {DEPLOY_SUPPRESS_MAX_SEC / 60:.0f} min")
+            continue
+        suppress = True
+        notes.append(f"deploy run {run.get('id')} in progress for {age / 60:.0f} min")
+    return suppress, "; ".join(notes) or "no deploy run in progress"
+
+
 class GitHub:
-    def __init__(self) -> None:
+    def __init__(self, token: str | None = None) -> None:
         self.api = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
         self.headers = {
-            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "Authorization": f"Bearer {token or os.environ['GITHUB_TOKEN']}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
@@ -110,7 +168,7 @@ class GitHub:
             time.sleep(3 * (attempt + 1))
         raise AssertionError("unreachable")
 
-    def deploy_state(self) -> dict[str, Any]:
+    def deploy_state(self, now: float | None = None) -> dict[str, Any]:
         # The branch-filtered listing is search-backed and intermittently
         # returned months-old runs; filter the plain newest-first list instead.
         runs = [
@@ -118,11 +176,28 @@ class GitHub:
             for run in self.call(DEPLOY_RUNS_PATH)["workflow_runs"]
             if run.get("head_branch") == "master"
         ]
-        deployed, in_flight = resolve_deployed_revision(
-            runs, lambda run_id: self.call(f"/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
-        )
-        active = [run for run in runs if run.get("status") != "completed"]
-        return {"deployed": deployed, "in_flight": in_flight, "deploy_active": bool(active)}
+        cache: dict[Any, list[dict[str, Any]]] = {}
+
+        def jobs(run_id: Any) -> list[dict[str, Any]]:
+            if run_id not in cache:
+                cache[run_id] = self.call(f"/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
+            return cache[run_id]
+
+        deployed, in_flight = resolve_deployed_revision(runs, jobs)
+        active, why = deploy_suppression(runs, jobs, time.time() if now is None else now)
+        return {"deployed": deployed, "in_flight": in_flight, "deploy_active": active, "deploy_note": why}
+
+    def previous_monitor_run_ts(self, now: float) -> float | None:
+        runs = self.call(heartbeat.MONITOR_RUNS_PATH)["workflow_runs"]
+        return heartbeat.previous_run_ts(runs, os.environ.get("GITHUB_RUN_ID", ""), now)
+
+    def set_variable(self, name: str, value: str) -> None:
+        try:
+            self.call(f"/actions/variables/{name}", "PATCH", {"name": name, "value": value})
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            self.call("/actions/variables", "POST", {"name": name, "value": value})
 
 
 def git_resolve(reported: str) -> str:
@@ -142,8 +217,8 @@ def on_master(actual: str) -> bool:
     return subprocess.run(["git", "merge-base", "--is-ancestor", actual, "HEAD"], check=False).returncode == 0
 
 
-def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, list[str]]:
-    """Probe everything; return (findings, maintenance, informational notes)."""
+def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, list[str], frozenset[str]]:
+    """Probe everything; return (findings, maintenance, informational notes, escalated keys)."""
     findings: dict[str, str] = {}
     notes: list[str] = []
     maintenance = False
@@ -151,11 +226,12 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     github = GitHub()
     deploy: dict[str, Any] | None = None
     try:
-        deploy = github.deploy_state()
+        deploy = github.deploy_state(now)
         maintenance = deploy["deploy_active"]
         notes.append(
             f"latest successful deploy {deploy['deployed'][:12]}; "
-            f"in-flight {deploy['in_flight'][:12] or 'none'}; deploy run active={deploy['deploy_active']}"
+            f"in-flight {deploy['in_flight'][:12] or 'none'}; deploy suppression={deploy['deploy_active']} "
+            f"({deploy['deploy_note']})"
         )
     except (MonitorContractError, KeyError, ValueError, *TRANSPORT_ERRORS) as exc:
         findings["monitor_error"] = f"cannot read Fly deploy runs: {type(exc).__name__}: {exc}"
@@ -289,7 +365,26 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
         except MonitorContractError as exc:
             findings["registry_drift"] = str(exc)
 
-    return findings, maintenance, notes
+    status_payload = optional_probe(STATUS_URL, notes) if health is not None else None
+    relay = optional_probe(RELAY_URL, notes) if health is not None else None
+    system_health = optional_probe(SYSTEM_HEALTH_URL, notes) if health is not None else None
+    findings.update(subsystems.ready_block_findings(ready, paused=paused))
+    findings.update(subsystems.cross_venue_degraded_findings(state, ready, now))
+    findings.update(subsystems.cross_venue_reconnect_findings(state, status_payload))
+    findings.update(subsystems.lifecycle_findings(status_payload))
+    findings.update(subsystems.v3_reconcile_findings(health, now))
+    findings.update(subsystems.relay_findings(state, relay, now))
+    findings.update(subsystems.entries_blocked_findings(state, ready, paused=paused, now=now))
+    findings.update(subsystems.laptop_health_findings(system_health))
+    findings.update(subsystems.contract_findings({
+        "health": health, "ready": ready, "status": status_payload, "relay": relay, "system_health": system_health,
+    }))
+    live_armed = bool(
+        (health or {}).get("live_armed") is True
+        or ((relay or {}).get("state_integrity") or {}).get("live_armed") is True
+    )
+    escalate = frozenset({"relay_stale_owner_pending"}) if live_armed else frozenset()
+    return findings, maintenance, notes, escalate
 
 
 def issue_body(
@@ -299,20 +394,23 @@ def issue_body(
     label: str = INCIDENT_LABEL,
     source: str = "the scheduled **Monitor Fly BTC bot** workflow",
     link: str | None = None,
+    awaiting_close: str = "",
 ) -> str:
     lines = [
         f"<!-- {label} -->",
         f"Opened by {source}. This issue is edited in place;",
         "comments are only added when a condition first alerts, re-alerts, or recovers.",
         "",
-        "| Condition | Since (UTC) | Last alert (UTC) | Latest detail |",
-        "|---|---|---|---|",
+        "| Condition | Severity | Since (UTC) | Last alert (UTC) | Latest detail |",
+        "|---|---|---|---|---|",
     ]
     for key, entry in sorted(alerts.active_alerted(state).items()):
         lines.append(
-            f"| `{key}` | {_ts(entry.get('first_seen'))} | {_ts(entry.get('last_alert'))} | "
-            f"{str(entry.get('last_message', '')).replace('|', '/')[:400]} |"
+            f"| `{key}` | {entry.get('severity', alerts.CRITICAL)} | {_ts(entry.get('first_seen'))} | "
+            f"{_ts(entry.get('last_alert'))} | {str(entry.get('last_message', '')).replace('|', '/')[:400]} |"
         )
+    if awaiting_close:
+        lines += ["", awaiting_close]
     lines += ["", f"Last checked {_ts(now)} by {link or 'run ' + _run_url()}"]
     return "\n".join(lines)
 
@@ -328,11 +426,22 @@ def sync_issue(
     title: str = INCIDENT_TITLE,
     source: str = "the scheduled **Monitor Fly BTC bot** workflow",
     link: str | None = None,
+    can_close: bool = True,
 ) -> None:
-    """Keep exactly one open issue per ``label`` in step with the dedup state."""
+    """Keep exactly one open issue per ``label`` in step with the dedup state.
+
+    ``can_close`` False (crashed run, or state reset by a cache miss) keeps an
+    open issue open even when no condition is active in this run's state.
+    """
     github = client if client is not None else GitHub()
     where = link or _run_url()
-    body = lambda: issue_body(state, now, label=label, source=source, link=link)  # noqa: E731
+    awaiting = "" if can_close else (
+        "Not closed yet: this run crashed or started from a reset state; closing needs "
+        f"{alerts.CLEAR_RUNS_TO_RESOLVE} consecutive clean runs on restored state."
+    )
+    body = lambda: issue_body(  # noqa: E731
+        state, now, label=label, source=source, link=link, awaiting_close=awaiting
+    )
     open_issues = github.call(f"/issues?state=open&labels={label}&per_page=5")
     issue = open_issues[0] if open_issues else None
     fired = [d for d in decisions if d["action"] == "alert"]
@@ -349,9 +458,12 @@ def sync_issue(
     if issue is None:
         return
     if fired:
-        text = "\n".join(f"- **{d['key']}**: {d['message']}" for d in fired)
+        text = "\n".join(
+            f"- **{d['key']}**{' (warning)' if d.get('severity') == alerts.WARNING else ''}: {d['message']}"
+            for d in fired
+        )
         github.call(f"/issues/{issue['number']}/comments", "POST", {"body": f"Alert ({where}):\n{text}"})
-    if active:
+    if active or not can_close:
         github.call(f"/issues/{issue['number']}", "PATCH", {"body": body()})
         return
     recovered = ", ".join(f"`{r['key']}`" for r in resolved) or "all conditions"
@@ -381,43 +493,119 @@ def informational_keys() -> frozenset[str]:
     return frozenset({"transfer_lag"})
 
 
+def load_state(state_path: Path) -> tuple[dict[str, Any], bool]:
+    """(state, restored); ``restored`` False means a cache miss or unreadable/foreign state."""
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return alerts.empty_state(), False
+    if not alerts.is_restorable(raw):
+        return alerts.empty_state(), False
+    return alerts.normalize_state(raw), True
+
+
+def schedule_gap(state: dict[str, Any], now: float, notes: list[str]) -> dict[str, str]:
+    last_run = state.get("last_run") if isinstance(state.get("last_run"), dict) else {}
+    candidates: dict[str, float | None] = {
+        f"{heartbeat.HEARTBEAT_VARIABLE} variable": heartbeat.parse_heartbeat(
+            os.environ.get(heartbeat.HEARTBEAT_VARIABLE)
+        ),
+        "cached state": last_run.get("ts") if isinstance(last_run.get("ts"), (int, float)) else None,
+    }
+    try:
+        candidates["Actions runs API"] = GitHub().previous_monitor_run_ts(now)
+    except Exception as exc:  # gap detection must never break the run
+        notes.append(f"cannot list previous monitor runs: {type(exc).__name__}")
+    found, note = heartbeat.schedule_gap_findings(candidates, now)
+    notes.append(note)
+    return found
+
+
+def write_heartbeat(now: float, *, crashed: bool, restored: bool) -> str:
+    """Refresh FLY_MONITOR_HEARTBEAT; GITHUB_TOKEN cannot write Actions variables."""
+    token = os.environ.get("FLY_MONITOR_VARIABLES_TOKEN", "").strip()
+    if not token:
+        return "heartbeat variable not written (FLY_MONITOR_VARIABLES_TOKEN secret not configured)"
+    value = heartbeat.format_heartbeat(
+        now,
+        run_id=os.environ.get("GITHUB_RUN_ID", ""),
+        attempt=os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        crashed=crashed,
+        restored=restored,
+    )
+    try:
+        GitHub(token).set_variable(heartbeat.HEARTBEAT_VARIABLE, value)
+    except urllib.error.HTTPError as exc:
+        return f"heartbeat variable write failed: HTTP {exc.code}"
+    except (KeyError, ValueError, *TRANSPORT_ERRORS) as exc:
+        return f"heartbeat variable write failed: {type(exc).__name__}"
+    return f"heartbeat variable written: {value}"
+
+
 def main() -> int:
     state_path = Path(os.environ.get("FLY_MONITOR_STATE", ".fly-monitor-state/state.json"))
-    try:
-        state = alerts.normalize_state(json.loads(state_path.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        state = alerts.empty_state()
+    state, restored = load_state(state_path)
     now = time.time()
+    crashed = False
+    notes: list[str] = []
+    decisions: list[dict[str, Any]] = []
+    resolved: list[dict[str, Any]] = []
+    maintenance = False
     try:
         try:
-            findings, maintenance, notes = collect(state, now)
+            findings, maintenance, notes, escalate = collect(state, now)
         except Exception as exc:  # a broken monitor alerts through the same dedup policy
             traceback.print_exc()
-            findings, maintenance, notes = {"monitor_error": f"monitor crashed: {type(exc).__name__}: {exc}"}, False, []
+            crashed = True
+            findings, maintenance, notes, escalate = (
+                {"monitor_error": f"monitor crashed: {type(exc).__name__}: {exc}"}, False, [], frozenset()
+            )
+        findings.update(schedule_gap(state, now, notes))
         if os.environ.get("FLY_MONITOR_TEST_ALERT", "").strip() == "1":
             findings["test_alert"] = "synthetic test alert requested via workflow_dispatch (not a real incident)"
         decisions, resolved = alerts.evaluate(
-            state, findings, now=now, maintenance=maintenance, informational=informational_keys()
+            state, findings, now=now, maintenance=maintenance, informational=informational_keys(),
+            crashed=crashed, restored=restored, escalate=escalate,
         )
     finally:
+        state["last_run"] = {
+            "ts": now,
+            "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+            "restored": restored,
+            "crashed": crashed,
+        }
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        notes.append(write_heartbeat(now, crashed=crashed, restored=restored))
 
+    can_close = alerts.can_close_incident(state, crashed=crashed, restored=restored)
+    notes.append(
+        f"state restored={restored} crashed={crashed} clean_streak={state.get('clean_streak')} "
+        f"incident_close_allowed={can_close}"
+    )
     for note in notes:
         print(note)
     if maintenance:
-        print("Guarded deploy / DEPLOY_MAINTENANCE active: transitional conditions are suppressed "
-              f"for up to {alerts.MAINTENANCE_GRACE_SEC / 60:.0f} minutes.")
+        print("Guarded image deploy / DEPLOY_MAINTENANCE active: transitional conditions are suppressed "
+              f"for up to {alerts.MAINTENANCE_GRACE_SEC / 60:.0f} minutes; safety findings never are.")
     for decision in decisions:
-        level = {"alert": "error", "info": "notice"}.get(decision["action"], "warning")
-        print(f"::{level} title=fly-monitor {decision['key']} ({decision['action']})::{_escape(decision['message'])}")
+        if decision["action"] == "info":
+            level = "notice"
+        elif alerts.is_failing(decision):
+            level = "error"
+        else:
+            level = "warning"
+        print(
+            f"::{level} title=fly-monitor {decision['key']} ({decision['action']}, "
+            f"{decision.get('severity', 'info')})::{_escape(decision['message'])}"
+        )
     for item in resolved:
         print(f"Recovered: {item['key']}")
     if not [d for d in decisions if d["action"] != "info"]:
         print("Fly bot healthy, paper-only, disarmed, on the latest deployed revision, and strategy progressing.")
 
     try:
-        sync_issue(state, decisions, resolved, now)
+        sync_issue(state, decisions, resolved, now, can_close=can_close)
     except (KeyError, ValueError, *TRANSPORT_ERRORS) as exc:
         print(f"::warning title=fly-monitor issue sync::{type(exc).__name__}: {exc}")
 
@@ -425,13 +613,17 @@ def main() -> int:
     if summary:
         with open(summary, "a", encoding="utf-8") as out:
             out.write("### Fly monitor\n\n")
+            out.write(f"- restored: **{restored}**, crashed: **{crashed}**\n")
             out.write("\n".join(f"- {n}" for n in notes) + "\n\n")
             for decision in decisions:
-                out.write(f"- **{decision['key']}** ({decision['action']}): {decision['message']}\n")
+                out.write(
+                    f"- **{decision['key']}** ({decision['action']}, {decision.get('severity', 'info')}): "
+                    f"{decision['message']}\n"
+                )
             if not decisions:
                 out.write("All checks passed.\n")
 
-    return 1 if any(d["action"] == "alert" for d in decisions) else 0
+    return 1 if any(alerts.is_failing(d) for d in decisions) else 0
 
 
 if __name__ == "__main__":

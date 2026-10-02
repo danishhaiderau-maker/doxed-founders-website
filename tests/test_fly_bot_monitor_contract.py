@@ -3,7 +3,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "fly-bot-monitor.yml"
+LAPTOP_TESTS = ROOT / ".github" / "workflows" / "laptop-tests.yml"
 RUNNER = ROOT / "scripts" / "fly_monitor_run.py"
+
+
+def test_laptop_tests_workflow_is_read_only_and_runs_on_every_pr():
+    text = LAPTOP_TESTS.read_text(encoding="utf-8")
+    on_block = text[text.index("\non:"):text.index("\npermissions:")]
+    pr_paths = on_block[on_block.index("pull_request:"):on_block.index("  push:")].split("paths:")[1]
+    push_paths = on_block[on_block.index("  push:"):].split("paths:")[1]
+
+    assert "branches" not in on_block[:on_block.index("  push:")]
+    assert pr_paths.split() == push_paths.split()
+    assert "permissions:\n  contents: read\n" in text
+    assert "secrets." not in text and "fly-bot-deploy" not in text and "flyctl" not in text
+    assert "cancel-in-progress: true" in text
 
 
 def test_monitor_uses_health_only_for_liveness():
@@ -42,4 +56,22 @@ def test_monitor_failures_are_deduplicated_through_one_incident_issue():
     assert "actions/cache/restore@v4" in workflow and "actions/cache/save@v4" in workflow
     assert "if: always()" in workflow
     assert 'INCIDENT_LABEL = "fly-monitor-incident"' in text
-    assert 'return 1 if any(d["action"] == "alert" for d in decisions) else 0' in text
+    assert "return 1 if any(alerts.is_failing(d) for d in decisions) else 0" in text
+
+
+def test_monitor_never_closes_incidents_on_crash_or_reset_state():
+    text = RUNNER.read_text(encoding="utf-8")
+
+    assert "alerts.can_close_incident(state, crashed=crashed, restored=restored)" in text
+    assert "sync_issue(state, decisions, resolved, now, can_close=can_close)" in text
+
+
+def test_monitor_heartbeat_and_deploy_workflow_boundary():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    text = RUNNER.read_text(encoding="utf-8")
+
+    assert "FLY_MONITOR_HEARTBEAT: ${{ vars.FLY_MONITOR_HEARTBEAT }}" in workflow
+    assert "FLY_MONITOR_VARIABLES_TOKEN: ${{ secrets.FLY_MONITOR_VARIABLES_TOKEN }}" in workflow
+    # The monitor only reads fly-bot-deploy runs; it never dispatches or edits them.
+    assert "gh workflow run" not in workflow and "/dispatches" not in text
+    assert '"POST"' not in text[text.index("def deploy_state"):text.index("def previous_monitor_run_ts")]

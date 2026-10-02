@@ -86,7 +86,7 @@ def test_deploy_pause_clock_resets_on_other_owner_and_survives_unknown():
 def test_deploy_stuck_is_not_suppressed_by_maintenance():
     state = alerts.empty_state()
     decisions, _ = alerts.evaluate(state, {"deploy_stuck": "x"}, now=0, maintenance=True)
-    assert decisions == [{"key": "deploy_stuck", "message": "x", "action": "alert"}]
+    assert decisions == [{"key": "deploy_stuck", "message": "x", "action": "alert", "severity": "critical"}]
 
 
 # --- cadence --------------------------------------------------------------

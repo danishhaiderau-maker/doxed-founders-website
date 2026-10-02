@@ -4,6 +4,11 @@ A condition alerts once when it has persisted long enough, then re-alerts at
 most every ``realert_sec`` while it stays active. Transitional conditions are
 suppressed while a guarded deploy or deploy-maintenance pause is active, but
 only for a bounded grace window so a stuck deploy still alerts.
+
+A crashed run is not evidence that anything recovered, and a freshly reset
+state (cache miss) has forgotten what was alerted: neither may count toward
+closing the incident. ``clean_streak`` only advances on restored, non-crashed
+runs with no alerted condition present.
 """
 
 from __future__ import annotations
@@ -13,6 +18,8 @@ from typing import Any, Mapping
 
 STATE_VERSION = 1
 HOUR = 3600.0
+CRITICAL = "critical"
+WARNING = "warning"
 
 
 @dataclass(frozen=True)
@@ -21,6 +28,8 @@ class Policy:
     min_age_sec: float
     realert_sec: float
     suppress_in_maintenance: bool
+    # Warnings enter the incident issue but never fail the run.
+    severity: str = CRITICAL
 
 
 POLICIES: Mapping[str, Policy] = {
@@ -58,10 +67,30 @@ POLICIES: Mapping[str, Policy] = {
     "touch_grid_coverage": Policy(2, 30 * 60.0, 6 * HOUR, True),
     # Laptop supervisor dead-man heartbeat (it cannot report its own death).
     "laptop_silent": Policy(1, 0.0, 12 * HOUR, False),
+    # Fly /api/system-health has not received a laptop watcher push.
+    "laptop_health_silent": Policy(2, 30 * 60.0, 12 * HOUR, False),
+    # GitHub skipped scheduled monitor runs; detected one run late by design.
+    "monitor_schedule_gap": Policy(1, 0.0, 12 * HOUR, False, WARNING),
+    # Shadow/research subsystems (never inputs to ready_ok, so not covered by not_ready).
+    "xvl_evaluator_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "cross_venue_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    "cross_venue_reconnects": Policy(2, 30 * 60.0, 6 * HOUR, True, WARNING),
+    "market_context_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    "ai_input_dead": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    "bbo_refresh_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "lifecycle_stalled": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    "lifecycle_wal": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "lifecycle_blocked": Policy(2, 60 * 60.0, 12 * HOUR, True, WARNING),
+    "collector_v3_reconcile_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    # Emitted only after the duration gate; escalated to critical while live_armed.
+    "relay_stale_owner_pending": Policy(1, 0.0, 6 * HOUR, False, WARNING),
+    "entries_blocked": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    # A field the deployed revision is known to emit disappeared.
+    "contract_field_missing": Policy(2, 15 * 60.0, 12 * HOUR, True, WARNING),
     # Operator-requested end-to-end proof of the notification channel.
     "test_alert": Policy(1, 0.0, 0.0, False),
 }
-MAINTENANCE_GRACE_SEC = 90 * 60.0
+MAINTENANCE_GRACE_SEC = 45 * 60.0
 PAUSED_ALERT_SEC = 2 * HOUR
 CLEAR_RUNS_TO_RESOLVE = 2
 
@@ -73,6 +102,10 @@ def empty_state() -> dict[str, Any]:
         "maintenance_since": None,
         "paused_since": None,
         "deploy_pause_since": None,
+        "clean_streak": 0,
+        "since": {},
+        "counters": {},
+        "last_run": None,
     }
 
 
@@ -88,7 +121,35 @@ def normalize_state(raw: Any, policies: Mapping[str, Policy] = POLICIES) -> dict
     for key in ("maintenance_since", "paused_since", "deploy_pause_since"):
         value = raw.get(key)
         state[key] = float(value) if isinstance(value, (int, float)) else None
+    streak = raw.get("clean_streak")
+    state["clean_streak"] = streak if isinstance(streak, int) and not isinstance(streak, bool) and streak > 0 else 0
+    for key in ("since", "counters"):
+        value = raw.get(key)
+        if isinstance(value, dict):
+            state[key] = {
+                str(k): float(v) for k, v in value.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            }
+    if isinstance(raw.get("last_run"), dict):
+        state["last_run"] = dict(raw["last_run"])
     return state
+
+
+def is_restorable(raw: Any) -> bool:
+    """True when ``raw`` is a saved state this version restores (not a reset)."""
+    return isinstance(raw, dict) and raw.get("version") == STATE_VERSION
+
+
+def track_since(state: dict[str, Any], key: str, active: bool | None, now: float) -> float:
+    """Continuous duration of a rule condition; ``None`` (unknown) keeps the clock."""
+    since = state.setdefault("since", {})
+    if active is None:
+        return now - since[key] if key in since else 0.0
+    if not active:
+        since.pop(key, None)
+        return 0.0
+    since.setdefault(key, now)
+    return now - since[key]
 
 
 def track_pause(state: dict[str, Any], paused: bool | None, now: float) -> float:
@@ -112,14 +173,23 @@ def evaluate(
     maintenance: bool,
     informational: frozenset[str] = frozenset(),
     policies: Mapping[str, Policy] = POLICIES,
+    crashed: bool = False,
+    restored: bool = True,
+    escalate: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Update ``state`` in place; return (decisions, resolved).
 
-    Each decision has ``key``, ``message`` and ``action`` in
-    {"alert", "known", "pending", "suppressed", "info"}. Only "alert" should
-    fail the run; resolved entries are previously alerted conditions that
-    cleared. Keys in ``informational`` are reported as "info" and never enter
-    incident state, so they cannot open, re-alert, or hold open the issue.
+    Each decision has ``key``, ``message``, ``severity`` and ``action`` in
+    {"alert", "known", "pending", "suppressed", "info"}. Only a critical
+    "alert" should fail the run; resolved entries are previously alerted
+    conditions that cleared. Keys in ``informational`` are reported as "info"
+    and never enter incident state, so they cannot open, re-alert, or hold
+    open the issue. Keys in ``escalate`` are critical for this run whatever
+    their policy severity.
+
+    A ``crashed`` run observed nothing, so absent conditions neither clear nor
+    reset. ``clean_streak`` counts consecutive restored, non-crashed runs in
+    which no alerted condition was present; see ``can_close_incident``.
     """
     findings = dict(findings)
     info = [
@@ -152,19 +222,44 @@ def evaluate(
             action = "pending"
         if action == "alert":
             entry["last_alert"] = now
-        decisions.append({"key": key, "message": message, "action": action})
+        severity = CRITICAL if key in escalate else policy.severity
+        entry["severity"] = severity
+        decisions.append({"key": key, "message": message, "action": action, "severity": severity})
 
     resolved: list[dict[str, Any]] = []
-    for key in [k for k in conditions if k not in findings]:
-        entry = conditions[key]
-        if entry.get("last_alert") is None:
-            del conditions[key]
-            continue
-        entry["clear_runs"] = int(entry.get("clear_runs") or 0) + 1
-        if entry["clear_runs"] >= CLEAR_RUNS_TO_RESOLVE:
-            resolved.append({"key": key, "message": entry.get("last_message", "")})
-            del conditions[key]
+    if not crashed:
+        for key in [k for k in conditions if k not in findings]:
+            entry = conditions[key]
+            if entry.get("last_alert") is None:
+                del conditions[key]
+                continue
+            entry["clear_runs"] = int(entry.get("clear_runs") or 0) + 1
+            if entry["clear_runs"] >= CLEAR_RUNS_TO_RESOLVE:
+                resolved.append({"key": key, "message": entry.get("last_message", "")})
+                del conditions[key]
+
+    alerted_present = any(
+        conditions.get(key, {}).get("last_alert") is not None for key in findings
+    )
+    if crashed or not restored or alerted_present:
+        state["clean_streak"] = 0
+    else:
+        state["clean_streak"] = int(state.get("clean_streak") or 0) + 1
     return decisions + info, resolved
+
+
+def can_close_incident(state: Mapping[str, Any], *, crashed: bool, restored: bool) -> bool:
+    """Closing needs restored state and CLEAR_RUNS_TO_RESOLVE clean evaluated runs."""
+    return (
+        not crashed
+        and restored
+        and not active_alerted(state)
+        and int(state.get("clean_streak") or 0) >= CLEAR_RUNS_TO_RESOLVE
+    )
+
+
+def is_failing(decision: Mapping[str, Any]) -> bool:
+    return decision.get("action") == "alert" and decision.get("severity", CRITICAL) == CRITICAL
 
 
 def active_alerted(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
