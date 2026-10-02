@@ -288,7 +288,8 @@ from research.counterfactual_normalization import (
     policy_comparability_key as _pure_policy_comparability_key,
     horizons as _pure_counterfactual_horizons,
 )
-from research.venue_quantity_constraints import capture_quantity_constraints
+from research.venue_quantity_constraints import capture_public_pair_constraints
+from research import fill_model as research_fill_model
 from scenario_c_config import (
     SCENARIO_C_LADDER_LABEL,
     SCENARIO_C_PROFILE_ID,
@@ -3932,7 +3933,7 @@ def lane_register_pending_order(order: dict):
         order.update(copy.deepcopy(frozen_identity))
         capture_helper = globals().get("_capture_runtime_quantity_constraints")
         constraint_capture = (
-            capture_helper() if callable(capture_helper) else {
+            capture_helper(requested_qty=order.get("qty")) if callable(capture_helper) else {
                 "supported": False, "receipt": None,
                 "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
             }
@@ -5890,6 +5891,9 @@ COORD_STATE_UNCONFIRMED_SINCE_BOOT = "UNCONFIRMED_SINCE_BOOT"
 LIVE_RELAY_COORDINATION_UNCONFIRMED_REASON = "LIVE_RELAY_COORDINATION_NOT_CONFIRMED_BY_RAILWAY_SINCE_BOOT"
 VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
+# Paper fills follow the shared research fill model; the legacy BBO-cross verdict
+# is kept on every gate receipt as the labelled optimistic shadow.
+PAPER_FILL_MODEL = os.getenv("PAPER_FILL_MODEL", "REALISTIC_V1").strip().upper()
 FUNDING_RATE_CAP_PER_8H = bitfinex_cost_profile.FUNDING_RATE_BAND_PER_8H
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
@@ -17637,7 +17641,7 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     epoch_id = _collector_v22_epoch_id()
     capture_helper = globals().get("_capture_runtime_quantity_constraints")
     quantity_constraints_status = (
-        capture_helper() if callable(capture_helper) else {
+        capture_helper(requested_qty=requested_qty) if callable(capture_helper) else {
             "supported": False, "receipt": None,
             "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
         }
@@ -22657,7 +22661,7 @@ def _prepare_initial_pending_order_evidence(order: dict, signal_snapshot: dict) 
     order.update(copy.deepcopy(paper_policy_identity_for_sources(
         _collector_v22_epoch_id(), order, signal_snapshot,
     )))
-    captured = _capture_runtime_quantity_constraints()
+    captured = _capture_runtime_quantity_constraints(requested_qty=order.get("qty"))
     order["signed_quantity_constraints"] = copy.deepcopy(captured.get("receipt"))
     order["quantity_constraints_status"] = copy.deepcopy(captured)
     receipt = captured.get("receipt")
@@ -23603,13 +23607,17 @@ def _venue_executable_showcase_fill(
         if available + 1e-12 >= qty:
             break
     evidence["visible_executable_qty"] = round(available, 8)
-    if not quote_executable or available + 1e-12 < qty:
-        evidence["reason"] = "INSUFFICIENT_EXECUTABLE_DEPTH"
-        return False, evidence
+    optimistic = bool(quote_executable and available + 1e-12 >= qty)
+    realistic_on = PAPER_FILL_MODEL == research_fill_model.FILL_MODEL_VERSION
+    state = _realistic_fill_state(order, direction=direction, limit=limit, generation=live_generation,
+                                  book=book, bid=bid, ask=ask, now=now)
     # A resting BUY fills when a sell aggressor hits its bid; a resting SELL
     # fills when a buy aggressor lifts its ask.
     expected_aggressor = "Sell" if direction == "LONG" else "Buy"
+    sign = 1.0 if direction == "LONG" else -1.0
     printed_qty = 0.0
+    last_seen = float(state.get("last_trade_ts") or 0.0)
+    newest = last_seen
     for trade in recent_market_trades or []:
         try:
             trade_ts = float(trade.get("received_ts") or 0)
@@ -23617,15 +23625,81 @@ def _venue_executable_showcase_fill(
             trade_qty = max(0.0, float(trade.get("v") or 0))
         except (AttributeError, TypeError, ValueError):
             continue
-        if float(now) - trade_ts > VENUE_EXECUTABLE_TRADE_WINDOW_SEC:
+        if str(trade.get("S") or "") != expected_aggressor:
             continue
-        at_limit = trade_px <= limit if direction == "LONG" else trade_px >= limit
-        if str(trade.get("S") or "") == expected_aggressor and at_limit:
+        at_or_through = sign * (limit - trade_px) >= -1e-9
+        if float(now) - trade_ts <= VENUE_EXECUTABLE_TRADE_WINDOW_SEC and at_or_through:
             printed_qty += trade_qty
+        # REALISTIC_V1 counts each post-placement print once (no carry across generations).
+        if trade_ts > last_seen and trade_ts >= float(state["generation_start_ts"]):
+            newest = max(newest, trade_ts)
+            if sign * (limit - trade_px) > 1e-9:
+                state["through"] = True
+            elif abs(trade_px - limit) <= 1e-9:
+                state["at_limit_volume"] = float(state.get("at_limit_volume") or 0.0) + trade_qty
+    state["last_trade_ts"] = newest
     evidence["recent_executable_trade_qty"] = round(printed_qty, 8)
     evidence["recent_execution_corroborated"] = printed_qty + 1e-12 >= qty
+    queue = state.get("queue_ahead")
+    consumed = queue is not None and float(state.get("at_limit_volume") or 0.0) - float(queue) + 1e-12 >= qty
+    if state.get("placement_check") and optimistic:
+        basis = "MARKETABLE_AT_PLACEMENT"
+    elif state.get("through"):
+        basis = "TRADE_THROUGH"
+    elif consumed:
+        basis = "QUEUE_CONSUMED_AT_LIMIT"
+    else:
+        basis = None
+    evidence.update({
+        "fill_model": PAPER_FILL_MODEL,
+        "fill_model_role": research_fill_model.HEADLINE_ROLE,
+        "fill_basis": basis,
+        "queue_estimate": {"queue_ahead": queue, "basis": state.get("queue_basis"),
+                           "at_limit_volume_since_placement": round(float(state.get("at_limit_volume") or 0.0), 8),
+                           "generation_start_ts": state.get("generation_start_ts")},
+        "optimistic_shadow": {"fill_model": research_fill_model.SHADOW_FILL_MODEL,
+                              "role": research_fill_model.SHADOW_ROLE, "executable": optimistic},
+    })
+    executable = bool(basis) if realistic_on else optimistic
+    if not executable:
+        evidence["reason"] = ("BBO_CROSS_WITHOUT_PRINT_NOT_A_FILL" if optimistic
+                              else "INSUFFICIENT_EXECUTABLE_DEPTH")
+        return False, evidence
     evidence["reason"] = "EXECUTABLE"
+    evidence["fill_id"] = "fill:" + hashlib.sha256(
+        f"{trade_id}|{live_generation}|{round(float(now), 3)}|{basis}".encode()).hexdigest()[:20]
+    evidence["tape_id"] = f"{BITFINEX_WS_SYMBOL}:{int(book_ts)}" if book_ts else None
     return True, evidence
+
+
+def _realistic_fill_state(order: dict, *, direction: str, limit: float, generation: int, book: dict,
+                          bid: float, ask: float, now: float) -> dict:
+    """Per-generation REALISTIC_V1 queue state persisted on the paper order (reset by every reprice)."""
+    state = order.get("realistic_fill_state")
+    if isinstance(state, dict) and state.get("generation") == generation and state.get("limit_price") == limit:
+        state["placement_check"] = False
+        return state
+    start = float(order.get("last_chase_ts") or order.get("created_ts") or now)
+    touch = float(bid or 0) if direction == "LONG" else float(ask or 0)
+    levels = list(book.get("bids") or []) if direction == "LONG" else list(book.get("asks") or [])
+    queue, basis = None, "UNKNOWN_LEVEL_NOT_IN_VISIBLE_BOOK"
+    if touch > 0 and ((direction == "LONG" and limit > touch) or (direction == "SHORT" and limit < touch)):
+        queue, basis = 0.0, "LIMIT_IMPROVES_TOUCH"
+    else:
+        for level in levels:
+            try:
+                level_price, level_size = float(level[0]), max(0.0, float(level[2]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if abs(level_price - limit) <= 1e-9:
+                queue, basis = level_size, "VISIBLE_SIZE_AT_LIMIT_AT_PLACEMENT"
+                break
+    state = {"generation": generation, "limit_price": limit, "generation_start_ts": start,
+             "placement_check": float(now) - start <= research_fill_model.TAKER_MAX_WAIT_SEC,
+             "queue_ahead": queue, "queue_basis": basis, "at_limit_volume": 0.0, "through": False,
+             "last_trade_ts": start}
+    order["realistic_fill_state"] = state
+    return state
 
 
 def _is_static_no_chase_order(order: dict) -> bool:
@@ -41373,6 +41447,12 @@ def _build_api_state_snapshot():
             key: round(value, 3) for key, value in phase_timings.items()
         }
         snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
+        snapshot["fill_model"] = {
+            **research_fill_model.fill_model_declaration(scope="FLY_PAPER_LEDGER_AND_TILE_CARDS"),
+            "fill_model": PAPER_FILL_MODEL,
+            "headline_role": (research_fill_model.HEADLINE_ROLE
+                              if PAPER_FILL_MODEL == research_fill_model.FILL_MODEL_VERSION else None),
+        }
         logger.info(
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
             f"elapsed_ms={int(phase_timings['total'])} "
@@ -41729,6 +41809,8 @@ def _relay_execution_cache_refresher_loop():
 # (strategy, regime, edge_threshold*, ai_*, chase_*, spread_gate, lane specs,
 # golden_stack_config, research_config, signal_info internals, etc.) is omitted.
 _PUBLIC_STATE_SAFE_TOP_KEYS = {
+    # fill model declaration (self-aware fill_model headline contract)
+    "fill_model",
     # bot identity / status
     "bot_status", "bot_pid", "bot_instance_id", "dashboard_owner",
     "dashboard_pid", "dashboard_port", "source_git_rev",
@@ -46752,15 +46834,16 @@ def export_csv():
         logger.error("[EXPORT ERROR] failed to build bounded research archive", exc_info=True)
         return _research_export_error(503)
 
-def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revision=None) -> dict:
-    """Capture exact venue metadata for evidence; never invent constraints."""
+def _capture_runtime_quantity_constraints(
+    *, evidence_symbol=None, source_revision=None, requested_qty=None,
+) -> dict:
+    """Bitfinex public pair bounds (cached, unauthenticated); never invent or round up."""
     try:
-        return capture_quantity_constraints(
-            bitfinex_public,
-            ccxt_symbol=SYMBOL_CCXT,
+        return capture_public_pair_constraints(
             evidence_symbol=evidence_symbol or BITFINEX_WS_SYMBOL,
             captured_at=utc_iso(),
             source_revision=source_revision or _runtime_git_rev(),
+            requested_qty=requested_qty,
         )
     except Exception as exc:
         logger.warning(

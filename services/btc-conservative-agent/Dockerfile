@@ -44,7 +44,7 @@ RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.p
     && python -c "import lifecycle_tail_repair, lifecycle_tail_repair_verify, lifecycle_cursor_rebind, lifecycle_cursor_rebind_verify, execution_tail_repair, execution_tail_repair_verify"
 # Quantity-aware conservative paper evidence is part of both the runtime
 # collector and analyzer path. Fail the image build if the whitelist omits it.
-RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
+RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints, research.venue_quantity_observation, research.bitfinex_pair_constraints, research.fill_model"
 # This import executes before every AI API call, not just analyzer startup.
 RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import research.close_origin"

@@ -8133,7 +8133,7 @@ function renderGenomeGridRows() {
       ? 'UNDECLARED FILL MODEL (legacy report) - these numbers are not a REALISTIC_V1 headline.'
       : shadow
         ? `${world}: COMPARISON SHADOW - NOT HEADLINE. Optimistic touch fills, no latency; never quote these as results. Headline = ${d.headline_fill_world}.`
-        : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? 0}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
+        : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? '-'}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
   }
   const filter = document.getElementById('genome-grid-filter');
   const rows = ((d[filter ? filter.value : 'top_100_by_world'] || {})[world]) || [];
@@ -8164,20 +8164,20 @@ async function loadGenomeGrid() {
   }
   if (note) note.textContent = `${d.note || ''} Generated ${d.generated_at} (${Math.round((d.age_sec||0)/60)} min ago) at ${String(d.code_revision||'').slice(0,9)}. Holdout ${h.rule} cut ${h.cut_utc}; ${h.selection || ''}. ${h.independence_note || ''}. ${d.cost_model}. ${d.path_model}.`;
   document.getElementById('genome-grid-kpis').innerHTML = [
-    ['Episodes evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
+    ['Episodes evaluated', `${cov.episodes_evaluated ?? '-'} / ${cov.episodes_collected ?? '-'}`],
     ['Signals span', `${String(cov.first_signal_utc||'').slice(5,16)} to ${String(cov.last_signal_utc||'').slice(5,16)}`],
     ['Policies evaluated', Number(g.policies_evaluated||0).toLocaleString()],
     ['Ranked (train >= ' + (h.min_train_fills_for_rank??30) + ', OOS >= ' + (h.min_oos_fills_for_rank??10) + ' fills)', Number(g.policies_ranked||0).toLocaleString()],
-    ['Holdout confirmed / failed (' + (d.headline_fill_world || 'all worlds') + ')', `${headVerdicts.CONFIRMED ?? 0} / ${headVerdicts.FAILED_HOLDOUT ?? 0}`],
+    ['Holdout confirmed / failed (' + (d.headline_fill_world || 'all worlds') + ')', `${headVerdicts.CONFIRMED ?? '-'} / ${headVerdicts.FAILED_HOLDOUT ?? '-'}`],
     ['Entries x exits', `${g.entries} x ${g.protections}`],
-    ['Engine replay parity', `${par.status} (${par.checked ?? 0})`],
+    ['Engine replay parity', `${par.status} (${par.checked ?? '-'})`],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
   const axes = d.dimension_summary || {};
   document.getElementById('genome-grid-axes').innerHTML = Object.entries(axes).map(([axis, s]) => {
     const vals = (s.values || []);
     const ranked = vals.filter(v => v.best_train_ev_per_fill_usd !== null && v.best_train_ev_per_fill_usd !== undefined);
     const best = ranked[0] || {}, worst = ranked[ranked.length - 1] || {};
-    return `<tr><td>${escapeHtml(axis)}</td><td>${s.distinct_values}</td><td>${escapeHtml(String(best.value ?? '-'))}</td><td>${genomeUsd(best.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(best.best_oos_ev_per_fill_usd)}</td><td>${best.best_oos_win_rate_pct ?? '-'}</td><td>${best.best_oos_fills ?? '-'}</td><td>${escapeHtml(best.best_holdout_verdict || '-')}</td><td>${best.confirmed_policies ?? 0}</td><td>${escapeHtml(String(worst.value ?? '-'))} (train ${genomeUsd(worst.best_train_ev_per_fill_usd)})</td></tr>`;
+    return `<tr><td>${escapeHtml(axis)}</td><td>${s.distinct_values}</td><td>${escapeHtml(String(best.value ?? '-'))}</td><td>${genomeUsd(best.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(best.best_oos_ev_per_fill_usd)}</td><td>${best.best_oos_win_rate_pct ?? '-'}</td><td>${best.best_oos_fills ?? '-'}</td><td>${escapeHtml(best.best_holdout_verdict || '-')}</td><td>${best.confirmed_policies ?? '-'}</td><td>${escapeHtml(String(worst.value ?? '-'))} (train ${genomeUsd(worst.best_train_ev_per_fill_usd)})</td></tr>`;
   }).join('');
   document.getElementById('genome-grid-live').innerHTML = (d.live_paper_by_lane || []).map(x =>
     `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${escapeHtml(x.fill_model || 'UNDECLARED')}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="7">No terminal paper lifecycles.</td></tr>';

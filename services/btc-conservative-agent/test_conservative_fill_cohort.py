@@ -242,7 +242,8 @@ def test_v31_terminal_fractional_second_is_included_without_generation_overlap()
         tape_row(99, bid=99, symbol="tBTCF0:USTF0"),
         tape_row(100, bid=99, symbol="tBTCF0:USTF0"),
         tape_row(101, bid=99, symbol="tBTCF0:USTF0"),
-        tape_row(102, bid=101, bid_qty=2, symbol="tBTCF0:USTF0"),
+        # REALISTIC_V1: the resting SHORT limit needs a buy print at/through it.
+        tape_row(102, bid=101, bid_qty=2, buy_qty=2, buy_vwap=101, symbol="tBTCF0:USTF0"),
     ]
     receipt = build_v3_conservative_fill_cohort([row], tape)["receipts"][0]
     assert receipt["outcome"] == "FILL"

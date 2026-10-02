@@ -432,7 +432,7 @@ def test_venue_fill_gate_refuses_old_generation_and_keeps_unknown_on_stale_book(
             "cont-57bb": {"limit_generation": 1, "current_limit_price": 63504.89},
         },
     }
-    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    gate = _compile_gate(namespace)
     executable, evidence = gate(
         {"trade_id": "cont-57bb", "side": "buy", "limit_price": 63486.52, "limit_chase_count": 0, "qty": 0.03},
         bid=63490, ask=63495,
@@ -465,7 +465,7 @@ def test_venue_fill_gate_accepts_fresh_crossed_bbo_and_full_visible_depth_withou
         "VENUE_EXECUTABLE_TRADE_WINDOW_SEC": 3.0,
         "_canonical_source_order_market_evidence": {},
     }
-    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    gate = _compile_gate(namespace)
     executable, evidence = gate(
         {"trade_id": "offset-crossed", "side": "buy", "limit_price": 74414.57, "qty": 0.0268},
         bid=74390.0,
@@ -495,7 +495,7 @@ def test_venue_fill_gate_keeps_thin_crossed_depth_unfilled():
         "VENUE_EXECUTABLE_TRADE_WINDOW_SEC": 3.0,
         "_canonical_source_order_market_evidence": {},
     }
-    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    gate = _compile_gate(namespace)
     executable, evidence = gate(
         {"trade_id": "offset-thin", "side": "buy", "limit_price": 74414.57, "qty": 0.0268},
         bid=74390.0,
@@ -642,6 +642,76 @@ def _compile_function(name, namespace):
     )
     exec(compile(ast.Module(body=[fn], type_ignores=[]), f"<{name}-test>", "exec"), namespace)
     return namespace[name]
+
+
+def _compile_gate(namespace, fill_model="REALISTIC_V1"):
+    import hashlib
+    sys.path.insert(0, str(Path(__file__).parent))
+    from research import fill_model as research_fill_model
+    namespace.setdefault("hashlib", hashlib)
+    namespace.setdefault("research_fill_model", research_fill_model)
+    namespace.setdefault("PAPER_FILL_MODEL", fill_model)
+    namespace.setdefault("BITFINEX_WS_SYMBOL", "tBTCF0:USTF0")
+    namespace.setdefault("VENUE_EXECUTABLE_TRADE_WINDOW_SEC", 3.0)
+    _compile_function("_realistic_fill_state", namespace)
+    return _compile_function("_venue_executable_showcase_fill", namespace)
+
+
+def _gate_ns():
+    return {
+        "_normalize_order_side_to_dir": lambda value: (
+            "LONG" if str(value or "").upper() in {"BUY", "LONG"} else
+            "SHORT" if str(value or "").upper() in {"SELL", "SHORT"} else ""
+        ),
+        "VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC": 2.0,
+        "_canonical_source_order_market_evidence": {},
+    }
+
+
+def test_realistic_v1_cross_without_print_after_placement_is_not_a_fill_but_is_the_shadow():
+    gate = _compile_gate(_gate_ns())
+    order = {"trade_id": "rv1-cross", "side": "buy", "limit_price": 74400.0, "qty": 0.0003, "created_ts": 100.0}
+    book = {"bids": [[74400.0, 2, 0.5]], "asks": [[74401.0, 1, 0.4]]}
+    ok, ev = gate(order, bid=74400.0, ask=74401.0, venue_snapshot={"book_ts": 100.5, "order_book": book},
+                  recent_market_trades=[], now=100.6)
+    assert ok is False and ev["queue_estimate"]["queue_ahead"] == 0.5
+    crossed = {"bids": [[74398.0, 1, 0.5]], "asks": [[74399.0, 1, 0.4]]}
+    ok, ev = gate(order, bid=74398.0, ask=74399.0, venue_snapshot={"book_ts": 160.0, "order_book": crossed},
+                  recent_market_trades=[], now=160.1)
+    assert ok is False and ev["reason"] == "BBO_CROSS_WITHOUT_PRINT_NOT_A_FILL"
+    assert ev["fill_model"] == "REALISTIC_V1"
+    assert ev["optimistic_shadow"] == {"fill_model": "OPTIMISTIC_TOUCH_V1", "role": "COMPARISON_SHADOW_NOT_HEADLINE",
+                                       "executable": True}
+
+
+def test_realistic_v1_fills_on_trade_through_or_queue_consumption():
+    gate = _compile_gate(_gate_ns())
+    book = {"bids": [[74400.0, 2, 0.5]], "asks": [[74401.0, 1, 0.4]]}
+    snap = lambda ts: {"book_ts": ts, "order_book": book}  # noqa: E731
+    through = {"trade_id": "rv1-through", "side": "buy", "limit_price": 74400.0, "qty": 0.0003, "created_ts": 100.0}
+    gate(through, bid=74400.0, ask=74401.0, venue_snapshot=snap(100.5), recent_market_trades=[], now=100.6)
+    ok, ev = gate(through, bid=74400.0, ask=74401.0, venue_snapshot=snap(120.0), now=120.1,
+                  recent_market_trades=[{"received_ts": 119.0, "p": 74399.0, "v": 0.01, "S": "Sell"}])
+    assert ok is True and ev["fill_basis"] == "TRADE_THROUGH" and ev["fill_id"].startswith("fill:")
+    assert ev["tape_id"] == "tBTCF0:USTF0:120"
+    queue = {"trade_id": "rv1-queue", "side": "buy", "limit_price": 74400.0, "qty": 0.0003, "created_ts": 100.0}
+    gate(queue, bid=74400.0, ask=74401.0, venue_snapshot=snap(100.5), recent_market_trades=[], now=100.6)
+    at_limit = [{"received_ts": 110.0, "p": 74400.0, "v": 0.3, "S": "Sell"}]
+    ok, _ = gate(queue, bid=74400.0, ask=74401.0, venue_snapshot=snap(110.5), recent_market_trades=at_limit, now=110.6)
+    assert ok is False  # 0.3 printed at the limit < 0.5 queue ahead
+    # The same print seen again is not double counted; a further 0.2003 clears the queue plus our size.
+    more = at_limit + [{"received_ts": 111.0, "p": 74400.0, "v": 0.2003, "S": "Sell"}]
+    ok, ev = gate(queue, bid=74400.0, ask=74401.0, venue_snapshot=snap(111.5), recent_market_trades=more, now=111.6)
+    assert ok is True and ev["fill_basis"] == "QUEUE_CONSUMED_AT_LIMIT"
+
+
+def test_legacy_fill_model_env_keeps_bbo_cross_verdict():
+    gate = _compile_gate(_gate_ns(), fill_model="OPTIMISTIC_TOUCH_V1")
+    order = {"trade_id": "legacy", "side": "buy", "limit_price": 74400.0, "qty": 0.0003, "created_ts": 100.0}
+    crossed = {"bids": [[74398.0, 1, 0.5]], "asks": [[74399.0, 1, 0.4]]}
+    ok, ev = gate(order, bid=74398.0, ask=74399.0, venue_snapshot={"book_ts": 160.0, "order_book": crossed},
+                  recent_market_trades=[], now=160.1)
+    assert ok is True and ev["optimistic_shadow"]["executable"] is True
 
 
 def test_marketable_limit_fill_never_violates_hard_limit_price():

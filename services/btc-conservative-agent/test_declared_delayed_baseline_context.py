@@ -18,11 +18,19 @@ def test_zero_delay_pinned_context_and_replay_tamper(tmp_path,monkeypatch,delay)
     import test_declared_directional_context_integration as fixture_module
     original_row=fixture_module._row
     def changing_row(ts,**kwargs):
+        if ts==101:
+            kwargs.update(bid=100.2,ask=100.3)
         if ts>=102:
             kwargs.update(bid=106,ask=106.1)
         if ts>=103:
             kwargs.update(bid=107,ask=107.1)
-        return original_row(ts,**kwargs)
+        row=original_row(ts,**kwargs)
+        if ts==101:
+            # REALISTIC_V1: the undelayed resting SHORT limit fills at 101 only
+            # because a buy print trades through it; the delayed submission
+            # arrives later and is marketable on arrival.
+            row.update(buy_qty=2,buy_vwap=row['ask'],trade_count=1)
+        return row
     monkeypatch.setattr(fixture_module,'_row',changing_row)
     producer=fixture_module.materialize_signal_time_baseline_schedules
     def capture_timing(opportunity):
