@@ -127,6 +127,7 @@ class Engine:
                     "active_tile_lanes": rt.get("active_tile_lanes"), "live_armed": rt.get("live_armed"),
                     "snapshot_at": rt.get("observedAt")},
             "contracts": self.facts.get("contracts"),
+            "fly_platform": self.facts.get("fly_platform"),
             "engine": self.engine_status(),
         }
         self.docs["health"] = json_safe(doc)

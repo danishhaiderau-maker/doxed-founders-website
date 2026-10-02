@@ -25,6 +25,7 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/data/capacity
   /api/selfaware/data/sufficiency
   /api/selfaware/sections           :9001 section health (populated, fresh, dimensions, consistency)
+  /api/selfaware/fly-platform       Fly.io status page events classified vs our region/components + correlation
   /contracts                        HTML section-contract view
   /api/selfaware/contracts          ?surface=analyzer|fly|exports|selfaware|watcher&status=RED,AMBER
   /api/selfaware/contracts/registry declarative specs (section_contracts.json) + violation legend
@@ -347,6 +348,10 @@ class Handler(BaseHTTPRequestHandler):
         doc = self.eng.docs.get("sections") or self.eng.state.get("analyzer_sections_doc")
         self._send(200 if doc else 503, doc or {"error": "section check not run yet (every 2 h)"})
 
+    def fly_platform(self, q):
+        doc = (self.eng.docs.get("health") or {}).get("fly_platform")
+        self._send(200 if doc else 503, doc or {"error": "fly platform status not evaluated yet (every diagnose pass)"})
+
     def data_view(self, q):
         self._send(200, render_data(self.eng), "text/html")
 
@@ -402,6 +407,7 @@ ROUTES = {
     "/api/selfaware/data/catalog": Handler.data_catalog, "/api/selfaware/data/completeness": Handler.data_completeness,
     "/api/selfaware/data/fields": Handler.data_fields, "/api/selfaware/data/capacity": Handler.data_capacity,
     "/api/selfaware/data/sufficiency": Handler.data_sufficiency, "/api/selfaware/sections": Handler.sections,
+    "/api/selfaware/fly-platform": Handler.fly_platform,
     "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
     "/api/selfaware/contracts/registry": Handler.contracts_registry,
 }
@@ -452,6 +458,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
  · paused={_e((h.get('fly') or {}).get('paused'))} · watcher {_e(h.get('watcher_verdict'))}
  · engine rev {_e(eng.store.revision[:9])} · <a href='/api/selfaware/health'>health JSON</a> · <a href='/api/selfaware/tables'>tables</a>
  · <a href='/data'>data health</a> · <a href='/contracts'>section contracts</a></div>
+{render_fly_platform(h.get('fly_platform'))}
 <h2>Hourly digest</h2><p><b>{_e(d.get('headline'))}</b><br><span class=m>{_e(d.get('summary_line'))}</span></p>
 <h2>Self-diagnosis ({len(rows)} open, {greens} green)</h2>
 <table><tr><th>sev</th><th>check</th><th>observed · probable cause</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>all green</td></tr>'}</table>
@@ -461,6 +468,26 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <h2>Edges (pre-registered, walk-forward holdout)</h2><table><tr><th>status</th><th>screen</th><th>n</th><th>hit</th><th>net bp</th><th>BH q</th><th>why</th></tr>{''.join(edge_rows) or '<tr><td colspan=7>no candidate, hint or watch</td></tr>'}</table>
 <p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {time.strftime('%H:%M:%S')}.</p>
 </body></html>"""
+
+_PLATFORM_COLOR = {"INFO": "#7cb7ff", "NONE": "#30a46c", "UNREACHABLE": "#8b8d98"}
+
+
+def render_fly_platform(fp: Any) -> str:
+    if not fp:
+        return "<p class=m>Fly platform: not evaluated yet</p>"
+    cls = fp.get("classification")
+    events = "".join(
+        f"<li><b style='color:{_COLOR.get(e.get('level')) if e.get('level') != 'INFO' else _PLATFORM_COLOR['INFO']}'>"
+        f"{_e(e.get('level'))}</b> {_e(e.get('kind'))}: <a href='{_e(e.get('url'))}'>{_e(e.get('title'))}</a>"
+        f" <span class=m>{_e(', '.join(e.get('matched') or []) or 'not our region/components')}"
+        f"{' · starts ' + _e(e.get('starts_at')) if e.get('kind') == 'scheduled' else ''}</span></li>"
+        for e in fp.get("events") or [])
+    return (f"<h2>Fly platform <span class=pill style='background:{_PLATFORM_COLOR.get(cls) or _COLOR.get(cls, '#8b8d98')}'>"
+            f"{_e(cls)}</span></h2><p>{_e(fp.get('summary'))}<br><span class=m>{_e(fp.get('app'))} region "
+            f"{_e(str(fp.get('region') or '').upper())} · feed {_e(fp.get('source'))} fetched {_e(fp.get('fetched_at'))}"
+            f" · <a href='{_e(fp.get('status_page'))}'>status page</a> · <a href='/api/selfaware/fly-platform'>JSON</a></span></p>"
+            f"{'<ul>' + events + '</ul>' if events else ''}")
+
 
 def render_contracts(eng) -> str:
     doc = eng.docs.get("contracts")

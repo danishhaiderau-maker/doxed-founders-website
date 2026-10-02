@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fly_platform_status as fly_platform_mod  # noqa: E402
 import system_health_meta as meta_mod  # noqa: E402
 
 SCHEMA = "system_health_v1"
@@ -56,7 +57,7 @@ WATCHER_FEATURES = (
     "parity_checker", "puller_lock", "chain_monitor_alerts", "incident_relay", "interim_status",
     "delivery_check", "fly_copy_lag", "wall_integrity", "adhoc_visibility", "check_dedupe", "amber_acks",
     "flapping", "pull_ack_run_telemetry", "epoch_parity_fields", "lifecycle_recent_red", "revision_master_ahead",
-    "parity_timeout",
+    "parity_timeout", "fly_platform_status",
 )
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
@@ -165,7 +166,7 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 # Checks that need N consecutive bad evaluations before an alarm opens (flap
 # guard for single network blips). Default is 1.
-SUSTAIN = {"fly.process": 2, "analyzer.api": 2, "railway.api": 2, "trading.orphans": 2}
+SUSTAIN = {"fly.process": 2, "analyzer.api": 2, "railway.api": 2, "trading.orphans": 2, "fly.platform_status": 2}
 
 
 # ---------------------------------------------------------------- utilities
@@ -624,6 +625,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["laptop_disk"] = None
     inputs["neon"] = collect_neon(cache, opts.state_dir, now)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
+    inputs["fly_platform"] = fly_platform_mod.cached_snapshot(cache.setdefault("fly_platform", {}), now)
     return inputs
 
 
@@ -2066,8 +2068,25 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   fields={"generated_age_sec": gen_age, "diagnose_age_sec": diag_age, "late_jobs": amber,
                           "verdict": sa.get("verdict")}))
 
+    if "fly_platform" in inputs:
+        add(fly_platform_check(inputs.get("fly_platform"), checks, now))
     add(_fail_open_guard(checks, errors, source_down, now, t))
     return checks
+
+
+def fly_platform_check(snapshot: Any, checks: list[dict[str, Any]], now: float) -> dict[str, Any]:
+    """Fly.io status page vs our own Fly checks; annotates failing ones with the platform correlation."""
+    res = fly_platform_mod.assess(snapshot if isinstance(snapshot, Mapping) else None, checks, now,
+                                  fly_platform_mod.app_region())
+    fly_platform_mod.annotate_checks(checks, res)
+    hint = {RED: "Fly platform incident on our region/components while our Fly checks fail; likely not our bug - "
+                 "follow the status page before repairing",
+            AMBER: "Fly incident/maintenance on our region or components; app still healthy - watch, do not deploy",
+            SKIP: "status.flyio.net unreachable; platform attribution unavailable"}.get(res["status"], "")
+    return check("fly.platform_status", "fly", res["status"], res["summary"],
+                 "INFO: notices outside our region/components; AMBER: incident on our region or Machines/Volumes/"
+                 "proxy/deploys; RED only if our Fly checks also fail", hint,
+                 fields={**fly_platform_mod.compact(res), "classification": res["classification"]})
 
 
 def summarize(checks: list[dict[str, Any]], state: dict[str, Any], now: float,
@@ -2362,6 +2381,7 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
     report = summarize(checks, state, now, acks=meta.get("acks"))
     report["source_errors"] = inputs.get("errors")
     report["proof"] = proof_summary(inputs.get("proof_active"), now)
+    report["fly_platform"] = next((c.get("observed_fields") for c in checks if c["id"] == "fly.platform_status"), None)
     if alarms:
         events = alarm_transitions(report, state, now)
         for e in events:

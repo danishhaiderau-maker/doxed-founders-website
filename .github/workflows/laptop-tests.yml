@@ -11,6 +11,9 @@ on:
   pull_request:
     paths:
       - "scripts/system_health*.py"
+      - "scripts/fly_platform_status.py"
+      - "scripts/test_fly_platform_status.py"
+      - "scripts/fixtures/fly_status/**"
       - "scripts/test_system_health*.py"
       - "scripts/research_segment_fly_parity.py"
       - "scripts/test_research_segment_fly_parity.py"
@@ -33,6 +36,9 @@ on:
     branches: [master]
     paths:
       - "scripts/system_health*.py"
+      - "scripts/fly_platform_status.py"
+      - "scripts/test_fly_platform_status.py"
+      - "scripts/fixtures/fly_status/**"
       - "scripts/test_system_health*.py"
       - "scripts/research_segment_fly_parity.py"
       - "scripts/test_research_segment_fly_parity.py"
@@ -73,7 +79,7 @@ jobs:
       - name: System health, laptop incident and self-aware watcher
         working-directory: scripts
         run: |
-          tests="test_system_health.py test_system_health_meta.py test_research_segment_fly_parity.py test_laptop_chain_incident.py"
+          tests="test_system_health.py test_system_health_meta.py test_fly_platform_status.py test_research_segment_fly_parity.py test_laptop_chain_incident.py"
           if [ -f test_self_aware.py ]; then tests="$tests test_self_aware.py"; fi
           if [ -f test_self_aware_contracts.py ]; then tests="$tests test_self_aware_contracts.py"; fi
           python -m pytest $tests -q -p no:cacheprovider
