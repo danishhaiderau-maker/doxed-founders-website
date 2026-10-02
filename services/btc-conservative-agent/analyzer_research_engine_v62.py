@@ -23460,7 +23460,10 @@ def finalize_analyzer_outputs(
         try:
             from research.report_history import snapshot_report_set
 
-            history = snapshot_report_set(REPORTS_DIR)
+            history = snapshot_report_set(
+                os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
+                generation_id=(_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id"),
+            )
             print(f"  Report history: {history.get('status')} {history.get('path') or history.get('error') or ''} "
                   f"{PIPELINE_ENFORCEMENT_TAG}")
         except Exception as exc:
