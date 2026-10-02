@@ -37,6 +37,8 @@ on:
           - fresh-start-wipe-execute
           - clean-epoch-wipe-plan
           - clean-epoch-wipe-execute
+          - clean-epoch-reset-plan
+          - clean-epoch-reset-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -46,7 +48,7 @@ on:
         default: false
         type: boolean
       clean_epoch_confirm:
-        description: clean-epoch-wipe-execute only - DELETE-PRE-EPOCH:<epoch>:<cert8> printed by scripts/clean_epoch_certify.py
+        description: clean-epoch-wipe-execute - DELETE-PRE-EPOCH:<epoch>:<cert8> from scripts/clean_epoch_certify.py; clean-epoch-reset-execute - RESET-AT-BOUNDARY:<epoch>:<deployed rev12>
         required: false
         type: string
       lifecycle_reset_proof:
@@ -888,6 +890,143 @@ jobs:
 
       - name: Prove paper active with every registry tile ON
         if: ${{ success() && inputs.mode == 'clean-epoch-wipe-execute' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ steps.boundary.outputs.revision }}
+        run: python scripts/fly_postdeploy_active_gate.py
+
+  clean-epoch-boundary-reset:
+    # Guarded Fresh Collection reset (POST /api/wipe_fly_only, no laptop signal)
+    # at the clean-epoch paper boundary, right after the epoch deploy: removes
+    # every pre-epoch V3 ledger row and retired research payload. The bot itself
+    # refuses unless paused, disarmed, force-paper, flat, WAL empty and recovery
+    # audit clear; it keeps paper/relay lifecycle (relay outbox), restart state,
+    # generation authority, data-epoch receipts and the 1 s tape, and leaves no
+    # V3 generation pointer, so appends stay valid across later deploys.
+    # Execute requires RESET-AT-BOUNDARY:<epoch>:<deployed rev12>, the epoch
+    # opened <= 60 min ago and a volume snapshot <= 6 h old. Never arms relay.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-reset-plan' || inputs.mode == 'clean-epoch-reset-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Plan (read-only)
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          epoch="$(python -c 'import re; print(re.search(r"^\s*DATA_EPOCH_ID\s*=\s*\"([^\"]+)\"", open("services/btc-conservative-agent/fly.toml", encoding="utf-8").read(), re.M).group(1))')"
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          plan="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$machine_id" "python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime" || true)"
+          printf '%s\n' "$plan"
+          printf '%s' "$plan" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("mode")=="plan" and d.get("ok") is True and not d.get("protected_candidates"), "reset plan is not clean: protected candidates or incomplete inventory"'
+          {
+            echo "machine_id=$machine_id"
+            echo "epoch=$epoch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require confirm token and a fresh volume snapshot
+        if: ${{ inputs.mode == 'clean-epoch-reset-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          EPOCH: ${{ steps.plan.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          python -c 'import os,re,sys; t=os.environ["CONFIRM"]; e=os.environ["EPOCH"]; sys.exit(0 if re.fullmatch("RESET-AT-BOUNDARY:"+re.escape(e)+":[0-9a-f]{12}", t) else "clean_epoch_confirm must be RESET-AT-BOUNDARY:"+e+":<deployed rev12>")'
+          flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys,datetime as d
+          rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("status") or "").lower()=="created"]
+          now=d.datetime.now(d.timezone.utc)
+          fresh=[s for s in rows if (now-d.datetime.fromisoformat(str(s["created_at"]).replace("Z","+00:00"))).total_seconds()<6*3600]
+          if not fresh: sys.exit("no volume snapshot created within 6 h: run mode=snapshot-volume first")
+          print(json.dumps({"snapshot_id":fresh[0].get("id"),"created_at":fresh[0].get("created_at")}))'
+
+      - name: Enter flat paper maintenance boundary
+        id: boundary
+        if: ${{ inputs.mode == 'clean-epoch-reset-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          EPOCH: ${{ steps.plan.outputs.epoch }}
+        run: |
+          python - <<'PY'
+          import datetime, json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          expected_rev = os.environ["CONFIRM"].rsplit(":", 1)[1]
+          def call(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(base + path, data=data, method="POST" if data else "GET",
+                                               headers={**headers, **({"Content-Type": "application/json"} if data else {})})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          status = call("/api/status")
+          epoch = status.get("data_epoch") or {}
+          if str(status.get("source_git_rev") or "")[:12].lower() != expected_rev:
+              raise SystemExit("deployed revision does not match the confirm token")
+          if epoch.get("epoch_id") != os.environ["EPOCH"]:
+              raise SystemExit("running data epoch does not match fly.toml DATA_EPOCH_ID")
+          opened = datetime.datetime.fromisoformat(str(epoch.get("started_at_utc")).replace("Z", "+00:00"))
+          if (datetime.datetime.now(datetime.timezone.utc) - opened).total_seconds() > 3600:
+              raise SystemExit("epoch opened > 60 min ago: boundary reset would delete current-epoch evidence")
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(60):
+              status = call("/api/status"); progress = status.get("strategy_progress") or {}
+              if (status.get("execution_paused") is True and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True
+                      and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
+                  print("flat paper maintenance boundary established rev=" + expected_rev)
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                      handle.write("revision=" + expected_rev + "\n")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("flat, disarmed paper boundary not proven: no deletion performed")
+          PY
+
+      - name: Reset at the boundary and verify
+        if: ${{ inputs.mode == 'clean-epoch-reset-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+          EPOCH: ${{ steps.plan.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          before="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$MACHINE_ID" "python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime" || true)"
+          printf '%s\n' "$before" > reset-plan-before.json
+          read -r present relay_sha < <(printf '%s' "$before" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("ok") is True and not d.get("protected_candidates"), "boundary plan is not clean"; r=d["relay_evidence"]; assert r.get("readable") is True, "relay evidence unreadable"; print(",".join(d["protected_present"]) or "-", r["pending_ids_sha256"])')
+          python - <<'PY'
+          import json, os, urllib.request
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=b"{}", method="POST",
+                                           headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
+          with urllib.request.urlopen(request, timeout=900) as response:
+              body = json.load(response)
+          reset = body.get("reset") or {}
+          print(json.dumps({"status": body.get("status"), "reset_ok": reset.get("ok"), "reset_id": reset.get("reset_id"),
+                            "epoch": reset.get("epoch_id") or reset.get("new_epoch_id")}, sort_keys=True))
+          if body.get("status") != "ok":
+              raise SystemExit("guarded reset refused or failed")
+          PY
+          [ "$present" = "-" ] && present=""
+          flyctl machine exec --app doxed-btc-bot --timeout 300 "$MACHINE_ID" \
+            "python /app/clean_epoch_reset_plan.py verify --runtime-root /app/data/runtime --epoch $EPOCH --expect-present=$present --expect-relay-sha256=$relay_sha" | tee reset-verify.json
+          python -c 'import json; lines=[x for x in open("reset-verify.json") if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("ok") is True, d.get("failures")'
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$MACHINE_ID" "sh -lc 'df -h /app/data'"
+
+      - name: Resume paper
+        if: ${{ always() && steps.boundary.outcome != 'skipped' && steps.boundary.outcome != '' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_failure_paper_resume.py
+
+      - name: Prove paper active with every registry tile ON
+        if: ${{ success() && inputs.mode == 'clean-epoch-reset-execute' }}
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}

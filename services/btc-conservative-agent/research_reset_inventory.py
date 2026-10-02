@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 
+from data_epoch import EPOCH_INDEPENDENT_BASES
 from research_v3_contract import LEDGER_NAMES
 from research_reset_paths import io_path, logical_path, resolved_path
 
@@ -110,6 +111,9 @@ ESSENTIAL_NAMES = frozenset({
     "csv_write_fallback.jsonl", "csv_write_fallback_replay.json", "relay_lifecycle_evidence_v1.json",
     "trades_3factor.csv.malformed_rows.jsonl", "expired_orders_3factor.csv.malformed_rows.jsonl",
 })
+# A research reset keeps epoch-independent market data, including numbered rotations, so the clean-epoch 1 s tape
+# survives the boundary.
+EPOCH_INDEPENDENT_MARKET_NAMES = EPOCH_INDEPENDENT_BASES
 
 
 def _digest(value):
@@ -162,6 +166,8 @@ def _essential(relative):
     name = re.sub(r"^\d{6}_", "", name)
     if name in ESSENTIAL_NAMES:
         return "ESSENTIAL_ORDER_PAPER_OR_ACCOUNTING_STATE"
+    if re.sub(r"\.\d+(?:\.gz)?$", "", name) in EPOCH_INDEPENDENT_MARKET_NAMES:
+        return "RETAINED_EPOCH_INDEPENDENT_MARKET_DATA"
     if (name.startswith(".env") or any(any(x in p for x in ("credential", "secret", "token", "config")) for p in parts)
             or name.endswith((".pem", ".key", ".pfx", ".p12"))):
         return "ESSENTIAL_CONFIG_OR_CREDENTIAL"

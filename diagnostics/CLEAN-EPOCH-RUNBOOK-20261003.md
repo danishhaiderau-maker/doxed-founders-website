@@ -49,14 +49,43 @@ Execute re-checks the guard per file and refuses if size/mtime changed since the
 2. Verify on Fly (read-only): `/api/status` → `data_epoch.declared=true`, `epoch_id=ce-20261004-v31-clean`,
    `started_at_utc` ≈ boot; `/api/research-segments/v3/files` lists `data_epoch.json` and the v3
    genesis BASELINE; v2 still answers (archived prefix).
-3. Laptop cutover, between analyzer cycles (status file `phase` DONE):
+
+### 1b. Boundary reset — wipe pre-epoch V3 rows (within 60 min of `started_at_utc`)
+Relay/Bitfinex stay DISARMED throughout; the job never arms anything.
+1. `mode=snapshot-volume` (execute refuses without a snapshot created within 6 h).
+2. Dry run: `mode=clean-epoch-reset-plan` — runs, read-only,
+   `python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime` and fails on any
+   protected candidate or incomplete inventory. Review `would_delete` (expect `RETIRED_EPOCH_V3_LEDGER`,
+   research payloads/rotations, derived indexes, genome/accumulator), `protected_present` (must list
+   `paper_lifecycle_v1.json` and `market_microstructure_1s.jsonl`), `relay_evidence.pending` (22 today)
+   and `v3_generation_pointers` (expect `[]`).
+3. Execute: `mode=clean-epoch-reset-execute`,
+   `clean_epoch_confirm=RESET-AT-BOUNDARY:ce-20261004-v31-clean:<deployed rev12>`. In order:
+   1. token + snapshot ≤ 6 h;
+   2. deployed revision == token rev, running epoch == `fly.toml` `DATA_EPOCH_ID`, epoch age ≤ 60 min;
+   3. `/api/pause` (`DEPLOY_MAINTENANCE`) and wait ≤ 180 s for paused + `live_armed=false` +
+      `bitfinex_live_enabled=false` + force-paper + `pending_orders=0` + `open_positions=0`; otherwise
+      it fails with **no deletion** and resumes paper;
+   4. re-plan on the paused book and pin `protected_present` + `relay_evidence.pending_ids_sha256`;
+   5. `POST /api/wipe_fly_only` (the bot re-checks its own admission);
+   6. verify: `clean_epoch_reset_plan.py verify --epoch <epoch> --expect-present=… --expect-relay-sha256=…`
+      — every V3 head absent/empty/current-epoch, no sealed V3 generation, no `ACTIVE.json` pointer,
+      every protected file still present, relay pending event ids unchanged; then `df -h /app/data`;
+   7. resume paper (`fly_failure_paper_resume.py`, always) and `fly_postdeploy_active_gate.py`.
+4. Afterwards (read-only): `/api/status` `data_epoch.epoch_id` unchanged, `/api/relay-state` stale-owner
+   pending count unchanged, two advancing paper cycles. Receipts:
+   `/app/data/runtime/research_reset_receipts/<reset_id>/{binding,operation,deletion}.json`.
+5. Then do the laptop cutover (1c), so the fresh mirror tree never pulls pre-epoch V3 rows.
+
+### 1c. Laptop cutover
+1. Laptop cutover, between analyzer cycles (status file `phase` DONE):
    - stop the puller/cycle scheduled tasks;
    - `git pull` the merged master into `C:\DoxxedCrypto\btc-v31-current` (do not reset/clean);
    - instant rename (no copy, no disk): move `C:\DoxxedCrypto\fly-mirror-segments` (tree, `.puller`,
      quarantine, tombstones), `segment-promotion-view`, `segment-analyzer-view` and
      `analyzer-exports\latest` into `C:\DoxxedCrypto\pre-clean-epoch\`;
    - start the tasks; the cycle now pulls prefix `v3` into a fresh tree.
-4. Confirm `:9021/api/selfaware/data/compatibility`: `epoch.declared=true`, streams show `CURRENT`
+2. Confirm `:9021/api/selfaware/data/compatibility`: `epoch.declared=true`, streams show `CURRENT`
    rows, `data.compat_mixed` GREEN (the fresh tree holds no pre-epoch rows).
 
 ### 2. Certify (≥ 2 h after `started_at_utc`)
@@ -119,7 +148,32 @@ versions mixed in one input: v3 ledgers mix 6-8 versions, trades_3factor.csv 13)
     next numbered generation (`rotate_research_events`, under the writer lock, no deletion). Its
     pre-epoch mtime makes it a `PRE_EPOCH_SEALED_ROTATION` wipe candidate; seals, indexes and the
     provisional store stay.
-  - V3 ledgers: assessed only. Generation pointers are bound to the deployed revision, so adopting the
-    legacy generation 0 on boot would invalidate appends after the next deploy; the V3 store is also
-    restart-recovery state. Pre-epoch V3 rows stay in place and are excluded by the analyzer epoch
-    guard; removing them needs the guarded Fresh Collection reset at a paper boundary.
+  - V3 ledgers: assessed only at boot. Generation pointers are bound to the deployed revision, so
+    adopting the legacy generation 0 on boot would invalidate appends after the next deploy. Pre-epoch
+    V3 rows are removed by step 1b (boundary reset); until then the analyzer epoch guard excludes them.
+    The `v3` boundary receipt keeps saying `PRE_EPOCH_HEAD / NOT_ROTATED` (it records the boot state);
+    `clean_epoch_reset_plan.py verify` is the post-reset truth.
+
+## Boundary reset — evaluation (CLEAN-EPOCH, 2026-10-03)
+The existing guarded Fresh Collection reset (`POST /api/wipe_fly_only` →
+`perform_fresh_collection_reset(send_local_signal=False)`) is the step that wipes pre-epoch V3 rows:
+- **Admission (bot-enforced):** `execution_paused`, `live_armed=false`, force-paper, zero pending
+  orders and open positions (`fresh_collection_requires_paused_disarmed_flat_boundary`), empty WAL,
+  clear recovery audit, orphan/auxiliary audits. Never force-closes; refuses otherwise. Leaves
+  `execution_paused=true` (the workflow resumes paper explicitly).
+- **Relay/Bitfinex evidence:** not in V3. A scan of the mirrored V3 `execution` / `order_intent` /
+  `lifecycle` ledgers found no exchange/Bitfinex order id, relay receipt, relay event id or live fill;
+  only `relay_eligible` research metadata. The relay outbox (incl. the 22 stale-owner pending events)
+  lives in `paper_lifecycle_v1.json` (+ `relay_lifecycle_evidence_v1.json`), both inventory-ESSENTIAL,
+  so no move is needed. The workflow pins the pending event-id digest before and verifies it after.
+- **Restart-recovery state kept:** positions/orders/state/session/ledgers, recovery/owner/emergency
+  paths, locks, `ledger_generations_v1`, `append_heads`, `data_epoch.json`, `data_epoch_boundary/`.
+- **V3 generation pointers:** production has none; the reset deletes the V3 ledgers then
+  `retire_empty_epoch_authority`, leaving no `ACTIVE.json`. Absent pointer = generation 0 for any
+  revision, so appends stay valid after later deploys (verified by `verify`).
+- **Fix shipped in #336:** the reset inventory now keeps epoch-independent market data
+  (`market_microstructure_1s.jsonl*`, cross-venue/context 1m, liquidations) with reason
+  `RETAINED_EPOCH_INDEPENDENT_MARKET_DATA`; before, it would have deleted the 1 s tape.
+- **Caveat:** the reset is whole-file (it also removes current-epoch research heads, genome and
+  accumulator rows). It therefore runs only at the epoch-opening boundary; the workflow refuses when the
+  epoch opened > 60 min ago.

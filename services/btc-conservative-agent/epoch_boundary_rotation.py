@@ -11,7 +11,9 @@ Runs once per epoch, right after the bot opens a *new* ``data_epoch.json``.
   to the deployed revision, so adopting a legacy generation 0 here would
   invalidate every later append after the next deploy. They are assessed
   only (stat + first row); new rows carry ``data_epoch_id`` inside the hashed
-  material and the analyzer epoch guard excludes the pre-epoch ones.
+  material and the analyzer epoch guard excludes the pre-epoch ones until the
+  guarded Fresh Collection reset removes them at the epoch-opening paper
+  boundary (``clean_epoch_reset_plan.py``, workflow ``clean-epoch-reset-*``).
 
 Each stream writes one receipt under ``data_epoch_boundary/`` (kept by the
 wipe's chain-state guard). A head is rotated only when its first row predates
