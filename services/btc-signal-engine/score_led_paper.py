@@ -10,6 +10,9 @@ def project_score_led_paper(ai, *, spec, force_paper, live_armed, inverted=False
 
     This is not an AI approval, confidence estimate, fill, or live permission.
     A valid higher directional score is the sole *admission* experiment.
+    Exact score ties (including 50/50) refuse projection; any inequality
+    (e.g. SHORT 51 vs LONG 49, or SHORT 40 vs LONG 35) selects the higher
+    side even when the original verdict is REJECT/NO_TRADE.
     Existing downstream market/order/protection gates remain authoritative.
     """
     if spec.get("admission_treatment") != TREATMENT_ID:
