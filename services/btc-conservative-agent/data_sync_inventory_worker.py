@@ -1138,7 +1138,27 @@ def _publish_generation(
         index_temporary.unlink(missing_ok=True)
 
 
+class _InvocationTimings:
+    """Fixed labels only; no paths, payloads or identities in diagnostics."""
+    def __init__(self, clock=None):
+        self.clock = clock or time.monotonic
+        self.seconds = {key: 0.0 for key in ("row_processing", "sql_batch", "counts", "checkpoint_publication")}
+
+    def call(self, phase, function, *args):
+        if phase not in self.seconds:
+            raise ValueError("UNKNOWN_INVENTORY_TIMING_PHASE")
+        started = self.clock()
+        try:
+            return function(*args)
+        finally:
+            self.seconds[phase] += max(0.0, self.clock() - started)
+
+    def snapshot(self):
+        return {key: round(value, 6) for key, value in self.seconds.items()}
+
+
 def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]:
+    setup_started = time.monotonic()
     fingerprint = _request_fingerprint(request)
     checkpoint_path, progress_path, database_path, staging = _state_paths(work_root, fingerprint)
     generation_directory_limit, generation_entry_limit, generation_spool_bytes = (
@@ -1178,6 +1198,8 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
     )))
     started = time.monotonic()
     cpu_started = time.process_time()
+    setup_seconds = max(0.0, time.monotonic() - setup_started)
+    timings = _InvocationTimings()
     invocation_files = 0
     invocation_dirs = 0
     invocation_pages = 0
@@ -1199,7 +1221,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                         continue
                     if budget_exhausted():
                         break
-                    row = _row(request["_volume"] / name, request)
+                    row = timings.call("row_processing", _row, request["_volume"] / name, request)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     checkpoint["top_level_after"] = name
@@ -1277,7 +1299,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 for (name,) in files[:remaining_file_budget]:
                     if budget_exhausted():
                         break
-                    row = _row(directory / str(name), request)
+                    row = timings.call("row_processing", _row, directory / str(name), request)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     current["after_file"] = str(name)
@@ -1286,7 +1308,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 if not budget_exhausted() and len(files) <= remaining_file_budget:
                     checkpoint["current_dir"] = None
 
-            checkpoint["rows_written"] = _store_rows(connection, batch_rows)
+            checkpoint["rows_written"] = timings.call("sql_batch", _store_rows, connection, batch_rows)
             scan_complete = bool(
                 checkpoint["top_level_complete"]
                 and checkpoint.get("current_dir") is None
@@ -1335,6 +1357,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 after_path = descriptor["last_path"]
 
         elapsed = time.monotonic() - started
+        counts_started = time.monotonic()
         pages_written = int(connection.execute(
             "SELECT COUNT(*) FROM pages"
         ).fetchone()[0])
@@ -1362,6 +1385,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                     str(current.get("after_file") or ""),
                 ),
             ).fetchone()[0])
+        timings.seconds["counts"] += max(0.0, time.monotonic() - counts_started)
         checkpoint["elapsed_seconds"] = float(checkpoint.get("elapsed_seconds") or 0.0) + elapsed
         checkpoint["invocations"] += 1
         receipt = {
@@ -1401,10 +1425,13 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             "checkpoint_path": str(checkpoint_path.resolve()),
             "database_path": str(database_path.resolve()),
         }
-        _atomic_json(progress_path, receipt)
         if generation is None:
             checkpoint["checkpoint_sha256"] = _checkpoint_digest(checkpoint)
-            _atomic_json(checkpoint_path, checkpoint)
+            timings.call("checkpoint_publication", _atomic_json, checkpoint_path, checkpoint)
+        receipt["invocation_phase_seconds"] = timings.snapshot()
+        receipt["invocation_setup_seconds"] = round(setup_seconds, 6)
+        receipt["invocation_phase_scope"] = "SINCE_SCAN_START_EXCLUDES_PROGRESS_RECEIPT_PUBLICATION"
+        _atomic_json(progress_path, receipt)
         return generation, receipt
     except (CheckpointError, InventoryWorkerError, sqlite3.DatabaseError):
         connection.close()

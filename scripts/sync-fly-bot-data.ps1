@@ -409,10 +409,11 @@ function Write-SyncProgressHeartbeat {
     [int64]$FileBytes = 0,
     [int64]$RemoteBytes = 0,
     [switch]$Completed,
+    [string]$ReceiptTarget = "",
     [object]$BundleProgress = $null
   )
   if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
-  $target = [System.IO.Path]::GetFullPath($ProgressHeartbeatFile)
+  $target = [System.IO.Path]::GetFullPath($(if ($ReceiptTarget) { $ReceiptTarget } else { $ProgressHeartbeatFile }))
   $relayEvidence = $null
   if (-not [string]::IsNullOrWhiteSpace($ProgressRelayEvidenceJson)) {
     try { $relayEvidence = $ProgressRelayEvidenceJson | ConvertFrom-Json }
@@ -1691,22 +1692,32 @@ if ($PublishAnalyzerReport) {
 # the progress receipt. Without this final marker a successful standalone sync
 # leaves the analyzer permanently fail-closed behind `inProgress: true`.
 $MirroredSourceRevision = [string]$manifest.source_git_rev
+$canonicalCandidate = if ($ProgressHeartbeatFile) { [IO.Path]::GetFullPath($ProgressHeartbeatFile) + '.canonical-' + [guid]::NewGuid().ToString('N') } else { '' }
+try {
 Write-SyncProgressHeartbeat `
   -Phase "complete" `
   -FileIndex $selectedFiles.Count `
   -FileCount $selectedFiles.Count `
   -FileBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
   -RemoteBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
-  -Completed
+  -Completed -ReceiptTarget $canonicalCandidate
 
 # Commit an append-first, hash-chained dataset identity only after the complete
 # authenticated generation and its heartbeat are durable. Analyzer admission
 # can therefore fail closed on epoch/revision/tile parity.
 if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   $migrationScript = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
-  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $ProgressHeartbeatFile
+  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $canonicalCandidate
   if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }
   if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
+  # The public completion receipt is the last publication, never an input
+  # falsely visible as complete while canonical identity is still pending.
+  Move-Item -LiteralPath $canonicalCandidate -Destination $ProgressHeartbeatFile -Force
+}
+} finally {
+  if ($canonicalCandidate -and (Test-Path -LiteralPath $canonicalCandidate -PathType Leaf)) {
+    Remove-Item -LiteralPath $canonicalCandidate -Force
+  }
 }
 
 [pscustomobject]@{
