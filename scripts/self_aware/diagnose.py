@@ -742,6 +742,38 @@ def check_data_compat(f, sig, store) -> list[Finding]:
             for r in rows]
 
 
+def check_fees(f, sig, store) -> Finding:
+    """Fee truth (30-min job): Bitfinex account fees == bitfinex_cost_profile == every other fee surface."""
+    title, expected = "Fees match the Bitfinex account everywhere", (
+        "auth/r/summary derivatives maker/taker == bitfinex_cost_profile, and every fee surface (TS relay/sim, Fly "
+        "deployed revision, analyzer checkout, code literals) == the profile; account answer <= 9h old")
+    doc = f.get("fees")
+    gen = parse_ts((doc or {}).get("generated_at"))
+    if not doc or not gen or f["now"] - gen > THRESHOLDS["fees_doc_max_age_sec"]:
+        return Finding("fees.truth", title, "parity", SKIP, "fee truth has not run recently", "fees job every 30 min",
+                       emit_alarm=False)
+    mm = doc.get("mismatches") or []
+    rates = (f"account {doc.get('source')} derivatives maker {doc.get('derivatives_maker_bps')}bp / taker "
+             f"{doc.get('derivatives_taker_bps')}bp (fetched {doc.get('fetched_at')}); profile "
+             f"{(doc.get('cost_profile') or {}).get('fee_profile_id')}")
+    if mm:
+        named = "; ".join(f"{m['file']} {m['field']}={m['value']} (expected {m['expected']})" for m in mm[:4])
+        obs = f"{len(mm)} fee mismatch(es): {named}. {rates}"
+    elif doc.get("source") == "ACCOUNT_SUMMARY" and doc.get("stale"):
+        obs = f"last verified account fees are stale ({fmt_age(doc.get('age_sec'))} old). {rates}"
+    elif doc.get("source") != "ACCOUNT_SUMMARY":
+        err = (doc.get("last_attempt") or {}).get("account_error") or (doc.get("last_attempt") or {}).get("credentials")
+        obs = f"account fees unverified (source {doc.get('source')}; account: {err}). {rates}"
+    else:
+        obs = f"{rates}; {len(doc.get('surfaces') or [])} fee surfaces agree"
+    causes = [{"cause": "fee_drift", "text": f"{m['file']} {m['field']} disagrees with the account/profile",
+               "confidence": "certain", "evidence": m} for m in mm[:3]]
+    return Finding("fees.truth", title, "parity", doc.get("status") or AMBER, obs, expected, causes=causes,
+                   evidence={k: doc.get(k) for k in ("source", "fetched_at", "stale", "maker_bps", "taker_bps",
+                                                     "derivatives_maker_bps", "derivatives_taker_bps",
+                                                     "matches_cost_profile", "fly_rev")})
+
+
 # ------------------------------------------------------------- run
 
 CONTRACT_SURFACES = {"analyzer": "Analyzer :9001 sections", "fly": "Fly dashboard panels and snapshots",
@@ -818,6 +850,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_analyzer_sections(facts, sig, store),
         lambda: check_contracts(facts, sig, store),
         lambda: check_data_compat(facts, sig, store),
+        lambda: check_fees(facts, sig, store),
     ]
     findings: list[Finding] = []
     for fn in checks:

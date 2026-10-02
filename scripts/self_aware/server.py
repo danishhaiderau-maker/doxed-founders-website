@@ -32,6 +32,8 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/contracts/<id>     ?rows=N&history=N   spec, last result, history, raw rows fetched now
   /api/selfaware/data/compatibility ?stream=&severity=   data versions / clean epoch per stream, schema drift,
                                     dead-in-version fields, segregated partitions + manual delete command
+  /api/selfaware/fees               ?detail=1  Bitfinex account fee truth (auth/r/summary, 6 h cache) vs
+                                    bitfinex_cost_profile and every fee surface; selfaware.fees.truth
 """
 from __future__ import annotations
 
@@ -354,6 +356,14 @@ class Handler(BaseHTTPRequestHandler):
         doc = (self.eng.docs.get("health") or {}).get("fly_platform")
         self._send(200 if doc else 503, doc or {"error": "fly platform status not evaluated yet (every diagnose pass)"})
 
+    def fees(self, q):
+        doc = self.eng.docs.get("fees") or (getattr(self.eng, "state", None) or {}).get("fees_doc")
+        if not doc:
+            return self._send(503, {"error": "fee truth not computed yet (job runs every 30 min)"})
+        if q.get("detail") != "1":
+            doc = {k: v for k, v in doc.items() if k not in ("surfaces", "fee_literals", "raw_fee_block")}
+        self._send(200, doc)
+
     def data_compat(self, q):
         doc = self.eng.docs.get("compat")
         if not doc:
@@ -426,7 +436,7 @@ ROUTES = {
     "/api/selfaware/fly-platform": Handler.fly_platform,
     "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
     "/api/selfaware/contracts/registry": Handler.contracts_registry,
-    "/api/selfaware/data/compatibility": Handler.data_compat,
+    "/api/selfaware/data/compatibility": Handler.data_compat, "/api/selfaware/fees": Handler.fees,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
