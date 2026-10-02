@@ -1174,6 +1174,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         replay_window["events_replayed"] = candidate_inputs.events_yielded
         replay_window["mark_source"] = candidate_screen.get("mark_source")
         replay_window["streaming"] = candidate_screen.get("streaming")
+        replay_window["fill_model"] = candidate_screen.get("fill_model")
         candidate_screen["input_window"] = {
             **replay_window,
             "alert_level": protection_replay_window_summary(replay_window)["alert_level"],

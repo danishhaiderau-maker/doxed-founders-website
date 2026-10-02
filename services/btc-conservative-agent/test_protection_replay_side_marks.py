@@ -128,6 +128,20 @@ def test_fallbacks_are_labelled_and_alerted():
     assert protection_replay_window_summary(window)["alert_level"] == "GREEN"
 
 
+def test_screen_declares_realistic_headline_and_labelled_touch_shadow():
+    screen = evaluate_protection_screen([
+        _source(rows=_walk(3, 1000, 120), event_id="a", episode_id="ep-a", fill_price=50000.0)])
+    declared = screen["fill_model"]
+    assert declared["fill_model"] == "REALISTIC_V1"
+    assert declared["headline_role"] == "HEADLINE"
+    assert (declared["shadow_world"], declared["shadow_role"]) == (
+        "IDEAL_TOUCH_DIAGNOSTIC_ONLY", "COMPARISON_SHADOW_NOT_HEADLINE")
+    assert declared["headline_entry_evaluator"] == rc.EVALUATOR_VERSION
+    assert declared["realistic_exit_model_applied"] is False
+    assert all(row["policy_spec"]["fill"]["source_fill_model"] == rc.EVALUATOR_VERSION
+               for row in screen["candidates"])
+
+
 def test_regime_breakdown_uses_the_observed_regime_value():
     sources = [
         _source(rows=_walk(i, 1000, 300), event_id=f"e{i}", episode_id=f"ep{i}", fill_price=50000.0,
@@ -177,3 +191,28 @@ def test_engine_genome_grid_and_canonical_replay_agree_on_tape_marks(monkeypatch
             assert (engine["net_pnl_usd"], engine["exit_reason"]) == (canonical["net_pnl_usd"], canonical["exit_reason"])
             assert genome["exit_reason"] == canonical["exit_reason"], protection["protection_id"]
             assert abs(genome["net_pnl_usd"] - canonical["net_pnl_usd"]) <= 1e-6, protection["protection_id"]
+
+
+def test_parallel_assessment_equals_in_process(monkeypatch):
+    import json
+
+    sources = [
+        _source(direction="LONG" if i % 2 else "SHORT", rows=_walk(20 + i, 1000, 900), event_id=f"e{i}",
+                episode_id=f"ep{i}", fill_price=50000.0, regime="BULL" if i % 3 else "CHOP")
+        for i in range(6)
+    ]
+
+    def screen(workers):
+        monkeypatch.setenv(rc.ASSESS_WORKERS_ENV, str(workers))
+        monkeypatch.setattr(rc, "ASSESS_PARALLEL_MIN_CELLS", 0)
+        monkeypatch.setattr(rc, "STREAM_PARALLEL_MIN_EVENTS", 0)
+        result = evaluate_protection_screen(sources)
+        streaming = result.pop("streaming")
+        return result, streaming
+
+    serial, serial_streaming = screen(1)
+    parallel, parallel_streaming = screen(2)
+    assert (serial_streaming["assess_workers"], parallel_streaming["assess_workers"]) == (1, 2)
+    assert (serial_streaming["stream_workers"], parallel_streaming["stream_workers"]) == (1, 2)
+    assert json.dumps(parallel, sort_keys=True, default=str) == json.dumps(serial, sort_keys=True, default=str)
+    assert len(serial["candidates"]) == len(protection_screen())
