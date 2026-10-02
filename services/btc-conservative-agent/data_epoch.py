@@ -92,7 +92,7 @@ def utc_iso(ts: float) -> str:
 
 
 def new_manifest(epoch_id: str, *, started_at_ts: float, source_git_rev: str = "", bot_version: str = "",
-                 segment_prefix: str = "", previous: dict | None = None) -> dict:
+                 segment_prefix: str = "", previous: dict | None = None, fill_model: dict | None = None) -> dict:
     if not valid_epoch_id(epoch_id):
         raise ValueError(f"invalid epoch id {epoch_id!r}: expected ce-YYYYMMDD[THHMMSSZ]-<label>")
     return {
@@ -100,6 +100,8 @@ def new_manifest(epoch_id: str, *, started_at_ts: float, source_git_rev: str = "
         "started_at_utc": utc_iso(started_at_ts), "source_git_rev": source_git_rev, "bot_version": bot_version,
         "segment_prefix": segment_prefix, "stamp_field": STAMP_FIELD,
         "previous": previous or None, "status": "OPEN",
+        # research/fill_model.py declaration: rows from different fill models are not comparable.
+        "fill_model": dict(fill_model) if fill_model else None,
     }
 
 
@@ -141,7 +143,8 @@ def write_json_atomic(path: str | os.PathLike, doc: dict) -> None:
 
 
 def ensure_runtime_manifest(runtime_root: str | os.PathLike, epoch_id: str | None, *, now: float | None = None,
-                            source_git_rev: str = "", bot_version: str = "", segment_prefix: str = "") -> dict | None:
+                            source_git_rev: str = "", bot_version: str = "", segment_prefix: str = "",
+                            fill_model: dict | None = None) -> dict | None:
     """Bot boot hook: keep the manifest for ``epoch_id`` or open a new one.
 
     A restart with the same id keeps the original start time; a new id opens a
@@ -156,7 +159,8 @@ def ensure_runtime_manifest(runtime_root: str | os.PathLike, epoch_id: str | Non
         return current
     doc = new_manifest(epoch_id, started_at_ts=time.time() if now is None else now, source_git_rev=source_git_rev,
                        bot_version=bot_version, segment_prefix=segment_prefix,
-                       previous={k: current.get(k) for k in ("epoch_id", "started_at_utc", "status")} if current else None)
+                       previous={k: current.get(k) for k in ("epoch_id", "started_at_utc", "status")} if current else None,
+                       fill_model=fill_model)
     write_json_atomic(path, doc)
     return doc
 
