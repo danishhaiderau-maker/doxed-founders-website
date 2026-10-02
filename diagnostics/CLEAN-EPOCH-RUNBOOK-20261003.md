@@ -92,8 +92,18 @@ create a 10 GB volume in `sin`, restore/copy the kept tree during a paper mainte
 swap the machine mount, prove two advancing cycles, keep the old 52.8 GB volume 7 days, then
 destroy it. (Separate dispatch; not automated here.)
 
-## Dry-run numbers (2026-10-02/03, nothing deleted)
-See the PR description for the final measured totals (laptop dry-run walk and Fly checkpoint preview).
+## Dry-run numbers (measured 2026-10-02 ~15:30Z, `--simulate-now`, nothing deleted)
+
+| Scope | Delete | Keep | Notes |
+|---|---|---|---|
+| Laptop | **85.19 GB** (655,454 files) | **1.12 GB** | perf caches 59.31, canonical-research-data 9.35, promotion view 5.56, mirror tree 5.55, archive 2.82, fly-segments 2.24, Tier A 0.19, analyzer view/exports/analysis archive 0.17. Kept: 1s tape 0.92, chain state 0.16, epoch-independent market data 0.04, relay/Bitfinex evidence 0.002, code/config |
+| Fly runtime | **3.50 GB** (166 sealed pre-epoch rotations + quarantine) | **5.54 GB** | signal_replay 1.62, post_exit_replay 0.71, order_multiverse 0.66, entry grid 0.32, source_order_market_evidence 0.10, other 0.09. Kept: V3 store 2.79, live heads 2.12 (research_events_v22 1.77), SQLite 0.51, tape 0.11 |
+| Fly outside runtime | up to **3.18 GB** | — | archived v2/v1 segment store + shipper state; candidate only after the laptop ACKs the final v2 seq |
+
+Fly volume 52.8 GB, 12.22 GB used → ≈ 5.6 GB after the wipe (fits a 10 GB volume with the
+15-day tape growth). Compatibility now (no epoch declared): 66 streams, 0 RED / 30 AMBER (data
+versions mixed in one input: v3 ledgers mix 6-8 versions, trades_3factor.csv 13) / 36 GREEN;
+1.70 GB in 32 streams segregated as `LEGACY_VERSION`; 9 streams declare no version at all.
 
 ## Follow-ups (not in this change)
 - V3 ledger generation rotation and `research_events_v22.jsonl` (1.77 GB live head) are kept: live
