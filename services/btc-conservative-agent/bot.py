@@ -50869,6 +50869,25 @@ DATA_EPOCH_ID = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
 _DATA_EPOCH_MANIFEST: dict | None = None
 
 
+def _data_epoch_fill_model() -> str:
+    configured = (os.getenv("FILL_MODEL_VERSION") or "").strip()
+    if configured:
+        return configured
+    try:
+        from research.fill_model import FILL_MODEL_VERSION as shared_fill_model
+        return str(shared_fill_model)
+    except Exception:
+        return "unspecified"
+
+
+def _data_epoch_fingerprint() -> dict:
+    return _data_epoch.epoch_fingerprint(
+        bot_version=EXECUTION_FIX_VERSION, research_stack_version=COMBO_EXECUTION_FIX_VERSION,
+        fill_model=_data_epoch_fill_model(), collector_fill_model=FILL_MODEL_IDEAL_TOUCH,
+        collector_version=COLLECTOR_VERSION, feature_schema_version=FEATURE_SCHEMA_VERSION,
+    )
+
+
 def _open_data_epoch() -> dict | None:
     """Boot hook: open (or keep, across restarts) the clean data epoch named by DATA_EPOCH_ID."""
     global _DATA_EPOCH_MANIFEST
@@ -50879,11 +50898,19 @@ def _open_data_epoch() -> dict | None:
             str(_data_sync_runtime_root()), DATA_EPOCH_ID, source_git_rev=_runtime_git_rev(),
             bot_version=EXECUTION_FIX_VERSION,
             segment_prefix=(os.getenv("RESEARCH_SEGMENTS_PREFIX") or "").strip(),
+            fingerprint=_data_epoch_fingerprint(),
         )
     except (OSError, ValueError) as exc:
         _DATA_EPOCH_MANIFEST = None
         logger.error(f"[DATA EPOCH] cannot open {DATA_EPOCH_ID}: {exc}; rows stay unstamped [PIPELINE ENFORCEMENT]")
         return None
+    _data_epoch.activate(_DATA_EPOCH_MANIFEST)
+    try:
+        import epoch_boundary_rotation
+        epoch_boundary_rotation.start_boundary_thread(_data_sync_runtime_root(), _DATA_EPOCH_MANIFEST,
+                                                      log=logger.info)
+    except Exception as exc:
+        logger.error(f"[DATA EPOCH] boundary cutover not started: {exc} [PIPELINE ENFORCEMENT]")
     logger.info(
         f"[DATA EPOCH] {_DATA_EPOCH_MANIFEST['epoch_id']} since {_DATA_EPOCH_MANIFEST['started_at_utc']} "
         "[PIPELINE ENFORCEMENT]"
@@ -50893,16 +50920,30 @@ def _open_data_epoch() -> dict | None:
 
 def _data_epoch_row(path: str, row):
     manifest = globals().get("_DATA_EPOCH_MANIFEST")
-    if not manifest or not isinstance(row, dict) or _data_epoch.epoch_independent(os.path.basename(path)):
+    if not manifest or not isinstance(row, dict):
         return row
     return _data_epoch.stamp(row, manifest["epoch_id"])
+
+
+def _data_epoch_boundary_status(manifest: dict) -> dict | None:
+    if not manifest:
+        return None
+    try:
+        import epoch_boundary_rotation
+        root = _data_sync_runtime_root()
+        return {stream: (epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}).get("status")
+                for stream in ("research_events_v22", "v3")}
+    except Exception:
+        return None
 
 
 def _data_epoch_public() -> dict:
     manifest = _DATA_EPOCH_MANIFEST or {}
     return {"declared": bool(manifest), "configured": DATA_EPOCH_ID, "epoch_id": manifest.get("epoch_id"),
             "started_at_utc": manifest.get("started_at_utc"), "stamp_field": _data_epoch.STAMP_FIELD,
-            "segment_prefix": manifest.get("segment_prefix")}
+            "segment_prefix": manifest.get("segment_prefix"), "fingerprint": manifest.get("fingerprint"),
+            "boundary": _data_epoch_boundary_status(manifest),
+            "fingerprint_changes": len(manifest.get("fingerprint_changes") or [])}
 
 
 def _validate_research_ledgers_on_startup():

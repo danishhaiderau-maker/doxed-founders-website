@@ -355,6 +355,10 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
                 dead_by_version[version] = sorted(set(dead))[:40]
         real_versions = [v for v in versions if v != "UNVERSIONED"]
         independent = de.epoch_independent(base)
+        # Fixed-header CSVs cannot carry data_epoch_id; under a declared epoch their post-epoch rows are dated by
+        # the epoch itself, so the stream is declared once no post-epoch row is merely timestamp-inferred.
+        epoch_declared = bool(manifest and de.unstampable(base) and classes.get(de.CURRENT_UNSTAMPED)
+                              and not classes.get(de.UNSTAMPED_POST_EPOCH))
         problems = []
         sev = "GREEN"
         if manifest:
@@ -381,7 +385,7 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
             "stream": base, "files": len(rels), "bytes": total_bytes,
             "scanned_pct": round(100.0 * scanned / total_bytes, 1) if total_bytes else 100.0,
             "rows": sum(versions.values()), "versions": dict(sorted(versions.items(), key=lambda kv: -kv[1])),
-            "version_declared": bool(real_versions), "epoch_independent": independent,
+            "version_declared": bool(real_versions) or epoch_declared, "epoch_independent": independent,
             "current_version": current, "classes": classes, "segregated": segregated,
             "segregated_bytes": sum(s["bytes"] for s in segregated.values()),
             "whole_files_incompatible": whole_files,

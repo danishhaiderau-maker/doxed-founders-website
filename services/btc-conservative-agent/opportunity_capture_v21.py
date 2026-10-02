@@ -467,7 +467,8 @@ def _compact_path_1m(candles_1m, start_ts: float, end_ts: float) -> list:
 
 
 def write_opportunity_capture(path: str, record: Mapping[str, Any]) -> str:
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
+    from data_epoch import stamp_active
+    line = json.dumps(stamp_active(dict(record)), separators=(",", ":"), ensure_ascii=True)
     if line.count("\n"):
         raise ValueError("opportunity_capture row must be one JSON line")
     with open(path, "a", encoding="utf-8") as handle:

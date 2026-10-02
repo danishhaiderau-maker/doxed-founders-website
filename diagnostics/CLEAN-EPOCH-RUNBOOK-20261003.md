@@ -105,8 +105,21 @@ Fly volume 52.8 GB, 12.22 GB used → ≈ 5.6 GB after the wipe (fits a 10 GB vo
 versions mixed in one input: v3 ledgers mix 6-8 versions, trades_3factor.csv 13) / 36 GREEN;
 1.70 GB in 32 streams segregated as `LEGACY_VERSION`; 9 streams declare no version at all.
 
-## Follow-ups (not in this change)
-- V3 ledger generation rotation and `research_events_v22.jsonl` (1.77 GB live head) are kept: live
-  heads are never deleted. They need writer-side rotation to drop pre-epoch rows.
-- Writers outside `_safe_append_jsonl` (execution_funnel, order_multiverse, opportunity_capture,
-  ai_call_logger, genome store, collectors) are classified by timestamp; stamp them next.
+## Epoch boundary (Fly, #336)
+- Every writer stamps `data_epoch_id`: `_safe_append_jsonl`, execution_funnel, order_multiverse,
+  opportunity_capture, ai_call_logger, genome store, the 1 s tape, and the cross-venue / market-context
+  collectors (separate processes; they adopt the bot's manifest via `DATA_EPOCH_ID`). V3 rows carry it
+  inside the hashed material (also from the lifecycle worker). CSVs cannot take a column; the
+  compatibility monitor treats them as declared once every post-epoch row is epoch-dated.
+- `data_epoch.json` carries a `fingerprint` (bot / research-stack / fill model / collector / feature
+  schema). A restart under the same id with a different fingerprint is appended to
+  `fingerprint_changes`; certification must reject a mixed epoch.
+- On boot of a new epoch a background thread writes `data_epoch_boundary/<epoch>.<stream>.json`:
+  - `research_events_v22`: when the head's first row predates the epoch start it is sealed into the
+    next numbered generation (`rotate_research_events`, under the writer lock, no deletion). Its
+    pre-epoch mtime makes it a `PRE_EPOCH_SEALED_ROTATION` wipe candidate; seals, indexes and the
+    provisional store stay.
+  - V3 ledgers: assessed only. Generation pointers are bound to the deployed revision, so adopting the
+    legacy generation 0 on boot would invalidate appends after the next deploy; the V3 store is also
+    restart-recovery state. Pre-epoch V3 rows stay in place and are excluded by the analyzer epoch
+    guard; removing them needs the guarded Fresh Collection reset at a paper boundary.

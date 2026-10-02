@@ -33,6 +33,7 @@ from typing import Callable, Optional
 
 import cross_venue_collector as cvc
 import cross_venue_tape as cvt
+from data_epoch import activate_from_env, stamp_active
 import market_context_tape as mct
 import market_session_calendar as msc
 import trailing_regime as tr
@@ -336,7 +337,8 @@ class Collector:
         os.rename(path, f"{path}.{max(suffixes, default=0) + 1}")
 
     def _append(self, path: str, rows: list, liq: bool = False) -> bool:
-        data = "".join(json.dumps(r, separators=(",", ":"), allow_nan=False) + "\n" for r in rows).encode("utf-8")
+        data = "".join(json.dumps(stamp_active(r), separators=(",", ":"), allow_nan=False) + "\n"
+                       for r in rows).encode("utf-8")
         try:
             self._rotate_if_needed(path)
             with open(path, "ab") as handle:
@@ -414,6 +416,7 @@ class Collector:
 
 def main() -> int:
     cvc.LOG_TAG = "market-context"
+    activate_from_env(os.getcwd())
     collector = Collector(os.getcwd())
 
     def _stop(*_):
