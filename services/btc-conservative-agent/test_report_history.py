@@ -121,3 +121,15 @@ def test_refuses_onedrive_and_missing_dirs_never_raises(tmp_path):
     out = RH.snapshot_report_set(str(tmp_path / "OneDrive" / "reports"), str(tmp_path / "h"))
     assert out["status"] == "REFUSED"
     assert RH.snapshot_report_set(str(tmp_path / "nope"), str(tmp_path / "h"))["status"] == "NO_REPORT_DIR"
+
+
+def test_engine_snapshots_the_manifest_report_dir_with_its_generation():
+    # The published reports/ copy lacks report_manifest.json and part of the set,
+    # which produced nogen-* snapshots missing reports.
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "analyzer_research_engine_v62.py"),
+               encoding="utf-8").read()
+    start = src.index("snapshot_report_set(", src.index("from research.report_history import snapshot_report_set"))
+    call = src[start:src.index(")\n", src.index("generation_id=", start)) + 1]
+    assert "os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE))" in call
+    assert '_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id")' in call
+    assert "REPORTS_DIR" not in call
