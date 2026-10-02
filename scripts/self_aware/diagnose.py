@@ -606,6 +606,86 @@ def check_engine(f, sig, store, state: dict[str, Any]) -> Finding:
                                                     "evidence": problems[:5]}])
 
 
+def check_data(f, sig, store) -> list[Finding]:
+    """Data awareness: critical streams fresh, every slot filled, watched fields alive, room to grow."""
+    d = f.get("data_awareness")
+    t = THRESHOLDS
+    ids = ("data.freshness", "data.completeness", "data.dead_fields", "data.capacity", "data.sufficiency")
+    gen = parse_ts((d or {}).get("generated_at"))
+    if not d or not gen or f["now"] - gen > t["data_doc_max_age_sec"]:
+        return [Finding(i, "Data awareness", "data", SKIP, "data awareness has not run recently", "data job every 30 min",
+                        emit_alarm=False) for i in ids]
+    out = []
+    stale = d.get("stale_critical") or []
+    out.append(Finding("data.freshness", "Critical streams are fresh against the mirror head", "data",
+                       AMBER if stale else GREEN,
+                       f"stale or missing critical streams: {stale}" if stale else
+                       f"all critical streams within their cadence of the mirror head {d.get('mirror_head')}",
+                       "tape/cross-venue/market-context/AI streams within 3 min / 10 min / 6 h of the mirror head",
+                       causes=attribute(["stale_venue_feed", "deploy_maintenance", "shipper_stalled"], sig) if stale else [],
+                       drill_sql="SELECT stream, status, last_ts, lag_vs_mirror_head_sec FROM res_data_catalog "
+                                 "WHERE critical ORDER BY lag_vs_mirror_head_sec DESC"))
+    tape = d.get("tape") or {}
+    probs = []
+    fill = tape.get("fill_pct_24h_excl_interruptions")
+    if fill is not None and fill < t["tape_fill_amber_pct"]:
+        probs.append(f"Bitfinex 1 s tape {fill:.2f}% filled over 24 h outside Fly interruptions "
+                     f"({tape.get('gaps_24h')} gaps, {tape.get('gap_sec_24h')} s)")
+    big = [g for g in tape.get("unexplained_gaps_24h") or [] if g["sec"] >= t["tape_gap_amber_sec"]]
+    if big:
+        probs.append(f"unexplained tape gaps >= {t['tape_gap_amber_sec']}s: " +
+                     ", ".join(f"{g['start'][11:19]}Z {g['sec']}s" for g in big[:3]))
+    for name, m in (d.get("minute_streams") or {}).items():
+        if m.get("fill_pct_24h") is not None and m["hours"] >= 3 and m["fill_pct_24h"] < t["minute_fill_amber_pct"]:
+            probs.append(f"{name} {m['fill_pct_24h']:.1f}% of minutes present over {m['hours']} h")
+    out.append(Finding("data.completeness", "Every time slot is filled", "data", AMBER if probs else GREEN,
+                       "; ".join(probs) if probs else
+                       f"tape {tape.get('fill_pct_24h_excl_interruptions')}% filled (24 h, outside interruptions; "
+                       f"{tape.get('gaps_24h')} gaps >5 s, largest {((tape.get('largest_gaps') or [{}])[0]).get('sec')} s); "
+                       + ", ".join(f"{k} {v.get('fill_pct_24h')}%" for k, v in (d.get("minute_streams") or {}).items()),
+                       f"tape >= {t['tape_fill_amber_pct']}% and no unexplained gap >= {t['tape_gap_amber_sec']}s; "
+                       f"minute streams >= {t['minute_fill_amber_pct']}%",
+                       causes=attribute(["stale_venue_feed", "cpu_saturation", "deploy_maintenance"], sig) if probs else [],
+                       evidence={"largest_gaps": tape.get("largest_gaps"), "minute_streams": d.get("minute_streams")},
+                       drill_sql=None))
+    wa = d.get("watch_alarms") or {}
+    flat = [f"{s}.{x}" for s, xs in wa.items() for x in xs]
+    out.append(Finding("data.dead_fields", "Watched fields are alive (not null, all-zero or constant)", "data",
+                       AMBER if flat else GREEN,
+                       (f"{len(flat)} watched field(s) dead or constant: " + "; ".join(flat[:8])) if flat else
+                       f"all watched fields alive ({d.get('dead_field_count')} unwatched fields dead across "
+                       f"{d.get('streams')} streams; see /api/selfaware/data/fields)",
+                       "every watched field varies and is populated in the latest sample",
+                       causes=[{"cause": "dead_input", "confidence": "likely",
+                                "text": "The producer writes a placeholder (0/null/constant) instead of the real value; "
+                                        "the field is useless for research and, for AI inputs, misleads the model.",
+                                "evidence": flat[:8]}] if flat else [],
+                       drill_sql="SELECT stream, field, n, null_pct, zero_pct, constant_value, status FROM res_data_fields "
+                                 "WHERE watched AND status <> 'OK' ORDER BY stream, field"))
+    cap = d.get("capacity") or {}
+    lap, fly = cap.get("laptop") or {}, cap.get("fly") or {}
+    days, hours = lap.get("days_to_90pct_cap"), fly.get("hours_to_full")
+    sev = GREEN
+    if (days is not None and days < t["laptop_days_to_cap_red"]) or (hours is not None and hours < t["fly_hours_to_full_red"]):
+        sev = RED
+    elif (days is not None and days < t["laptop_days_to_cap_amber"]) or (hours is not None and hours < t["fly_hours_to_full_amber"]):
+        sev = AMBER
+    out.append(Finding("data.capacity", "Room to keep collecting (laptop 50 GB cap, Fly volume)", "data", sev,
+                       f"laptop {lap.get('bot_data_gb')}/{lap.get('cap_gb')} GB ({lap.get('usage_pct')}%), growing "
+                       f"{lap.get('growth_gb_per_day')} GB/day -> {days} days to 90% of cap; Fly volume "
+                       f"{fly.get('volume_free_gb')} GB free, {hours} h to full, ingest {fly.get('ingest_gb_per_day')} GB/day",
+                       f"laptop >= {t['laptop_days_to_cap_amber']:.0f} days and Fly >= {t['fly_hours_to_full_amber']:.0f} h of headroom",
+                       evidence={"laptop": lap, "fly": fly}))
+    suff = d.get("sufficiency") or []
+    out.append(Finding("data.sufficiency", "Research questions: data present and enough samples", "data", GREEN,
+                       "; ".join(f"{q['id']} {q['status']}" + (f" (ETA {q['eta_ready'][:10]})" if q.get("eta_ready") else "")
+                                 for q in suff) or "no questions registered",
+                       "informational: READY questions release their gated edge screens", emit_alarm=False,
+                       drill_sql="SELECT id, status, full_question_status, blockers, missing_for_full_answer, short_samples, "
+                                 "eta_ready FROM res_data_sufficiency"))
+    return out
+
+
 # ------------------------------------------------------------- run
 
 def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> list[Finding]:
@@ -625,6 +705,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_analyzer(facts, sig, store),
         lambda: check_fly_reachability(facts, sig, store, state),
         lambda: check_engine(facts, sig, store, state),
+        lambda: check_data(facts, sig, store),
     ]
     findings: list[Finding] = []
     for fn in checks:

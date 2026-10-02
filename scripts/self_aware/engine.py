@@ -22,10 +22,10 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from . import ai_scorecard, alarms, diagnose, digest, edges, repair, tiles, uptime
+from . import ai_scorecard, alarms, data_awareness, diagnose, digest, edges, repair, tiles, uptime
 from .ai_scorecard import json_safe
 from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, Paths
-from .facts import collect, iso
+from .facts import collect, iso, parse_ts
 from .store import Store
 
 HISTORY_KEEP_DAYS = {"findings_events": 30, "digests": 30, "uptime_history": 14, "runtime_history": 7}
@@ -62,6 +62,7 @@ class Engine:
         self.jobs: dict[str, Callable[[], Any]] = {
             "views": self.job_views, "diagnose": self.job_diagnose, "uptime": self.job_uptime,
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
+            "data": self.job_data,
         }
 
     # ------------------------------------------------------------ state
@@ -90,6 +91,7 @@ class Engine:
     def job_diagnose(self) -> dict:
         now = time.time()
         self.facts = collect(self.paths, self.store, now, probe_local=self.probe_local)
+        self.facts["data_awareness"] = (self.docs.get("data") or {}).get("summary")
         found = diagnose.run(self.paths, self.store, self.facts, self.state)
         changes = diagnose.transitions(found, self.state, now)
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
@@ -150,6 +152,19 @@ class Engine:
         doc = tiles.receipts(self.store, self.facts)
         self.docs["receipts"] = json_safe(doc)
         return {"tile_rows": int(len(frame)), "deploys": len(doc["deploys"])}
+
+    def job_data(self) -> dict:
+        self._need_facts()
+        up = self.docs.get("uptime") or {}
+        intervals = [(parse_ts(i["start"]), parse_ts(i["end"]), i["cause"]) for i in up.get("interruptions_7d") or []]
+        # A Fly restart or deploy pause can drop a few seconds either side of the watcher's tick boundaries.
+        intervals = [(s - 120, e + 120, c) for s, e, c in intervals if s and e]
+        res = data_awareness.run(self.store, self.paths, self.facts, self.state, intervals)
+        self.docs["data"] = json_safe(res)
+        s = res["summary"]
+        return {"streams": s["streams"], "uncatalogued": s["uncatalogued"], "watch_alarms": sum(len(v) for v in
+                s["watch_alarms"].values()), "ms": s["ms"],
+                "sufficiency": {q["id"]: q["status"] for q in s["sufficiency"]}}
 
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
@@ -225,11 +240,12 @@ class Engine:
         return now - last >= CADENCE_SEC[name]
 
     def run_once(self) -> dict:
-        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "ai", "edges", "digest")}
+        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "ai", "edges",
+                                                      "diagnose", "digest")}
 
     def loop(self) -> None:
         # Views and the cheap in-memory documents are rebuilt at start so no endpoint answers 503 after a restart.
-        for name in ("views", "diagnose", "uptime", "tiles"):
+        for name in ("views", "diagnose", "uptime", "tiles", "data", "diagnose"):
             self.run_job(name)
         while not self._stop.is_set():
             now = time.time()

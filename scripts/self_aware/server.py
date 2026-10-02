@@ -17,6 +17,13 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/repairs            ?limit=
   /api/selfaware/tables             raw views + result tables + provenance
   /api/selfaware/query?sql=SELECT…  guarded single SELECT (also POST {"sql": …})
+  /data                             HTML data-health view
+  /api/selfaware/data               data-awareness summary (freshness, completeness, dead fields, capacity, sufficiency)
+  /api/selfaware/data/catalog       ?stream=&catalogued=1   every collected stream
+  /api/selfaware/data/completeness  ?stream=                hourly expected vs actual + gaps
+  /api/selfaware/data/fields        ?stream=&status=DEAD_ZERO,DEAD_NULL,CONSTANT&watched=1
+  /api/selfaware/data/capacity
+  /api/selfaware/data/sufficiency
 """
 from __future__ import annotations
 
@@ -192,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"schema": "self_aware_edges_v1", "registry_hash": reg["registry_hash"],
                          "registered_at": reg.get("registered_at"), "guards": reg.get("guards"),
                          "counts": {s: sum(1 for r in rows if r["status"] == s) for s in
-                                    ("CANDIDATE", "HINT", "WATCH", "REJECTED", "INSUFFICIENT")},
+                                    ("CANDIDATE", "HINT", "WATCH", "REJECTED", "INSUFFICIENT", "QUEUED_DATA")},
                          "edges": rows, "provenance": self._prov("edges", "edge_events")})
 
     def playbook(self, q):
@@ -244,6 +251,91 @@ class Handler(BaseHTTPRequestHandler):
     def index(self, q):
         self._send(200, render_overview(self.eng), "text/html")
 
+    # ------------------------------------------------------------ data awareness
+    def _data(self):
+        doc = self.eng.docs.get("data")
+        if not doc:
+            self._send(503, {"error": "data awareness not computed yet (job runs at start and every 30 min)"})
+        return doc
+
+    def data_summary(self, q):
+        doc = self._data()
+        if doc:
+            self._send(200, {**doc["summary"], "provenance": self._prov("data_catalog", "data_fields", "data_sufficiency")})
+
+    def data_catalog(self, q):
+        doc = self._data()
+        if not doc:
+            return
+        streams = doc["streams"]
+        if q.get("stream"):
+            streams = [s for s in streams if s["stream"] == q["stream"] or s.get("path") == q["stream"]]
+        elif q.get("catalogued") in ("1", "true"):
+            streams = [s for s in streams if s.get("catalogued")]
+        slim = [{k: v for k, v in s.items() if k not in ("hourly", "gaps", "exact")} for s in streams]
+        if q.get("stream") and streams:
+            slim = streams
+        self._send(200, {"schema": "self_aware_data_catalog_v1", "generated_at": doc["summary"]["generated_at"],
+                         "mirror_head": doc["summary"]["mirror_head"], "streams": slim,
+                         "provenance": self._prov("data_catalog")})
+
+    def data_completeness(self, q):
+        doc = self._data()
+        if not doc:
+            return
+        out = []
+        for s in doc["streams"]:
+            if q.get("stream") and s["stream"] != q["stream"]:
+                continue
+            if not q.get("stream") and not s.get("critical"):
+                continue
+            out.append({"stream": s["stream"], "cadence": s.get("cadence"), "status": s.get("status"),
+                        "expected_per_hour": s.get("expected_per_hour"), "observed_per_hour": s.get("observed_per_hour"),
+                        "sample_span_h": s.get("sample_span_h"), "lag_vs_mirror_head_sec": s.get("lag_vs_mirror_head_sec"),
+                        "exact": s.get("exact"), "hourly": s.get("hourly"), "gaps": s.get("gaps")})
+        self._send(200, {"schema": "self_aware_data_completeness_v1", "generated_at": doc["summary"]["generated_at"],
+                         "streams": out, "note": "critical streams by default; ?stream=<name> for any stream"})
+
+    def data_fields(self, q):
+        st = self.eng.store
+        if not st.table_exists("res_data_fields"):
+            return self._send(503, {"error": "field liveness not computed yet"})
+        where, params = [], []
+        if q.get("stream"):
+            where.append("stream = ?")
+            params.append(q["stream"])
+        if q.get("status"):
+            sts = [s.strip().upper() for s in q["status"].split(",") if s.strip()]
+            where.append(f"status IN ({','.join('?' * len(sts))})")
+            params.extend(sts)
+        if q.get("watched") in ("1", "true"):
+            where.append("watched")
+        sql = ('SELECT stream, field, n, null_pct, "distinct", zero_pct, constant_value, status, watched, alarm '
+               'FROM res_data_fields ' + (("WHERE " + " AND ".join(where)) if where else "") +
+               " ORDER BY alarm DESC, stream, field LIMIT ?")
+        rows = _rows(st, sql, params + [min(int(q.get("limit", 2000)), 20000)])
+        self._send(200, {"schema": "self_aware_data_fields_v1", "fields": rows,
+                         "status_legend": {"DEAD_NULL": "always null/empty", "DEAD_ZERO": "numeric measure always 0",
+                                           "CONSTANT": "one value across >= 50 rows", "MISSING": "watched field absent"},
+                         "provenance": self._prov("data_fields")})
+
+    def data_capacity(self, q):
+        doc = self._data()
+        if doc:
+            self._send(200, {"schema": "self_aware_data_capacity_v1", **doc["capacity"]})
+
+    def data_sufficiency(self, q):
+        doc = self._data()
+        if doc:
+            self._send(200, {"schema": "self_aware_data_sufficiency_v1", "questions": doc["sufficiency"],
+                             "status_legend": {"READY": "fields alive and enough independent samples; gated screens released",
+                                               "ACCUMULATING": "fields alive, samples short; see eta_ready",
+                                               "BLOCKED": "a required field is missing, dead or constant"},
+                             "provenance": self._prov("data_sufficiency")})
+
+    def data_view(self, q):
+        self._send(200, render_data(self.eng), "text/html")
+
 
 ROUTES = {
     "/": Handler.index, "/api/ping": Handler.ping, "/api/selfaware/health": Handler.health,
@@ -253,6 +345,10 @@ ROUTES = {
     "/api/selfaware/tiles": Handler.tiles, "/api/selfaware/receipts": Handler.receipts,
     "/api/selfaware/digest": Handler.digest, "/api/selfaware/repairs": Handler.repairs,
     "/api/selfaware/tables": Handler.tables, "/api/selfaware/query": Handler.query,
+    "/data": Handler.data_view, "/api/selfaware/data": Handler.data_summary,
+    "/api/selfaware/data/catalog": Handler.data_catalog, "/api/selfaware/data/completeness": Handler.data_completeness,
+    "/api/selfaware/data/fields": Handler.data_fields, "/api/selfaware/data/capacity": Handler.data_capacity,
+    "/api/selfaware/data/sufficiency": Handler.data_sufficiency,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
@@ -299,7 +395,8 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <h1>Self-aware <span class=pill style='background:{_COLOR.get(v, "#8b8d98")}'>{_e(v or "warming up")}</span></h1>
 <div class=m>generated {_e(h.get('generated_at'))} · Fly {_e((h.get('fly') or {}).get('git_rev', '')[:9])}
  · paused={_e((h.get('fly') or {}).get('paused'))} · watcher {_e(h.get('watcher_verdict'))}
- · engine rev {_e(eng.store.revision[:9])} · <a href='/api/selfaware/health'>health JSON</a> · <a href='/api/selfaware/tables'>tables</a></div>
+ · engine rev {_e(eng.store.revision[:9])} · <a href='/api/selfaware/health'>health JSON</a> · <a href='/api/selfaware/tables'>tables</a>
+ · <a href='/data'>data health</a></div>
 <h2>Hourly digest</h2><p><b>{_e(d.get('headline'))}</b><br><span class=m>{_e(d.get('summary_line'))}</span></p>
 <h2>Self-diagnosis ({len(rows)} open, {greens} green)</h2>
 <table><tr><th>sev</th><th>check</th><th>observed · probable cause</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>all green</td></tr>'}</table>
@@ -308,4 +405,71 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <h2>AI scorecard (all-time, after cost)</h2><table><tr><th>horizon</th><th>strategy</th><th>n</th><th>hit</th><th>net bp</th><th>95% CI</th></tr>{''.join(ai_rows)}</table>
 <h2>Edges (pre-registered, walk-forward holdout)</h2><table><tr><th>status</th><th>screen</th><th>n</th><th>hit</th><th>net bp</th><th>BH q</th><th>why</th></tr>{''.join(edge_rows) or '<tr><td colspan=7>no candidate, hint or watch</td></tr>'}</table>
 <p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {time.strftime('%H:%M:%S')}.</p>
+</body></html>"""
+
+_STATUS_COLOR = {"FRESH": "#30a46c", "READY": "#30a46c", "OK": "#30a46c", "IDLE": "#8b8d98", "ACCUMULATING": "#f5a524",
+                 "STALE": "#e5484d", "MISSING": "#e5484d", "BLOCKED": "#e5484d", "NO_TIMESTAMP": "#8b8d98"}
+
+
+def _mb(b: Any) -> str:
+    return "" if b is None else f"{float(b) / 1e6:,.1f} MB"
+
+
+def render_data(eng) -> str:
+    doc = eng.docs.get("data")
+    if not doc:
+        return "<!doctype html><meta http-equiv=refresh content=20><body style='font:14px system-ui'>data awareness warming up…"
+    s, cap = doc["summary"], doc["capacity"]
+    lap, fly = cap.get("laptop") or {}, cap.get("fly") or {}
+    tape = s.get("tape") or {}
+    fnd = {f["id"]: f for f in ((eng.docs.get("health") or {}).get("findings") or []) if f["id"].startswith("data.")}
+    frows = "".join(f"<tr><td><b style='color:{_COLOR.get(f['severity'])}'>{_e(f['severity'])}</b></td><td>{_e(f['id'])}</td>"
+                    f"<td>{_e(f['observed'])}</td></tr>" for f in fnd.values())
+    qrows = "".join(
+        f"<tr><td><b style='color:{_STATUS_COLOR.get(q['status'], '#8b8d98')}'>{_e(q['status'])}</b></td><td>{_e(q['question'])}"
+        f"<div class=m>{_e(q['id'])} · screens: {_e(', '.join(q['screens']) or 'none')}"
+        f"{' (released)' if q['screens_released'] else ''}</div></td>"
+        f"<td>{_e('; '.join(q['blockers'] + q['short_samples']) or '—')}<div class=m>ETA {_e(q.get('eta_ready') or '—')}</div></td>"
+        f"<td><b style='color:{_STATUS_COLOR.get(q['full_question_status'], '#8b8d98')}'>{_e(q['full_question_status'])}</b>"
+        f"<div class=m>{_e('; '.join(q['missing_for_full_answer']) or 'nothing missing')}</div></td></tr>"
+        for q in doc["sufficiency"])
+    wa = "".join(f"<tr><td>{_e(k)}</td><td>{_e('; '.join(v))}</td></tr>" for k, v in (s.get("watch_alarms") or {}).items())
+    srows = []
+    for st in sorted(doc["streams"], key=lambda x: (not x.get("critical"), not x.get("catalogued"), -(x.get("bytes") or 0))):
+        srows.append(
+            f"<tr><td>{'★ ' if st.get('critical') else ''}<a href='/api/selfaware/data/catalog?stream={_e(st['stream'])}'>{_e(st['stream'])}</a>"
+            f"<div class=m>{_e(st.get('what'))}</div></td>"
+            f"<td><b style='color:{_STATUS_COLOR.get(st.get('status'), '#8b8d98')}'>{_e(st.get('status'))}</b></td>"
+            f"<td>{_e(st.get('cadence'))}<div class=m>exp {_e(st.get('expected_per_hour'))}/h · obs {_e(st.get('observed_per_hour'))}/h</div></td>"
+            f"<td>{_e(st.get('last_ts'))}<div class=m>lag {_e(st.get('lag_vs_mirror_head_sec'))} s</div></td>"
+            f"<td>{_mb(st.get('bytes'))}<div class=m>{_e(st.get('files'))} file(s) · ~{_e(st.get('rows_estimated'))} rows · "
+            f"{_mb(st.get('bytes_per_day'))}/day</div></td>"
+            f"<td>{_e(st.get('retention_tier'))}</td><td class=m>{_e(', '.join(st.get('schema') or []))}<br>{_e(st.get('fields'))} fields</td></tr>")
+    hours = "".join(f"<span title='{_e(h['hour'])} {h['fill_pct']}%' style='display:inline-block;width:9px;height:22px;margin-right:1px;"
+                    f"background:{'#30a46c' if h['fill_pct'] >= 99 else '#f5a524' if h['fill_pct'] >= 95 else '#e5484d'}'></span>"
+                    for h in ((next((x for x in doc["streams"] if x["stream"] == "bitfinex_tape_1s"), {}).get("exact") or {})
+                              .get("hourly") or []))
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta http-equiv=refresh content=120>
+<title>Data health</title><style>
+body{{font:14px system-ui;background:#111113;color:#edeef0;margin:24px;max-width:1300px}}
+table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bottom:1px solid #2e3035;padding:6px;text-align:left;vertical-align:top}}
+.m{{color:#a0a1a7;font-size:12px}}a{{color:#7cb7ff}}h2{{margin-top:28px}}.k{{display:inline-block;margin-right:28px}}.k b{{font-size:20px}}
+</style></head><body>
+<h1>Data health</h1><div class=m>generated {_e(s['generated_at'])} · mirror head {_e(s.get('mirror_head'))} · {_e(s['streams'])} streams
+({_e(s['catalogued'])} catalogued, {_e(s['uncatalogued'])} auto-discovered) · pass {_e(s['ms'])} ms · <a href='/'>overview</a>
+· <a href='/api/selfaware/data'>JSON</a></div>
+<h2>Checks</h2><table>{frows or '<tr><td>no data findings yet</td></tr>'}</table>
+<h2>Capacity</h2>
+<div class=k>laptop<br><b>{_e(lap.get('bot_data_gb'))}/{_e(lap.get('cap_gb'))} GB</b><div class=m>{_e(lap.get('usage_pct'))}% · +{_e(lap.get('growth_gb_per_day'))} GB/day · {_e(lap.get('days_to_90pct_cap'))} days to 90%</div></div>
+<div class=k>Fly volume<br><b>{_e(fly.get('volume_free_gb'))} GB free</b><div class=m>{_e(fly.get('hours_to_full'))} h to full · segment store {_e(fly.get('segment_store_pct_of_cap'))}% of cap</div></div>
+<div class=k>ingest<br><b>{_e(fly.get('ingest_gb_per_day'))} GB/day</b><div class=m>sum of per-stream rates</div></div>
+<div class=m>{_e(lap.get('growth_basis'))}</div>
+<h2>Bitfinex 1 s tape completeness</h2>
+<p>{_e(tape.get('fill_pct_24h_excl_interruptions'))}% of seconds present over 24 h outside Fly interruptions ({_e(tape.get('fill_pct_24h'))}% raw;
+{_e(tape.get('gaps_24h'))} gaps &gt;5 s totalling {_e(tape.get('gap_sec_24h'))} s) · window {_e(tape.get('window_start'))} → {_e(tape.get('window_end'))}</p>
+<div>{hours}</div><div class=m>one bar per hour, last 48 h (green ≥99%, amber ≥95%)</div>
+<h2>Research sufficiency</h2><table><tr><th>screen status</th><th>question</th><th>short / blocked</th><th>full answer</th></tr>{qrows}</table>
+<h2>Dead or constant watched fields</h2><table>{wa or '<tr><td>none</td></tr>'}</table>
+<p class=m>All fields: <a href='/api/selfaware/data/fields?status=DEAD_ZERO,DEAD_NULL,CONSTANT'>/api/selfaware/data/fields?status=DEAD_ZERO,DEAD_NULL,CONSTANT</a></p>
+<h2>Catalog</h2><table><tr><th>stream</th><th>status</th><th>cadence</th><th>last row</th><th>size</th><th>tier</th><th>schema</th></tr>{''.join(srows)}</table>
 </body></html>"""

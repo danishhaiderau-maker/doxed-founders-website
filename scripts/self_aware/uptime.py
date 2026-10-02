@@ -78,6 +78,8 @@ def compute(store, facts: dict, state: dict, now: float | None = None) -> dict:
         "last_interruption": ({"start": iso(merged[-1][0]), "end": iso(merged[-1][1]), "cause": merged[-1][2]}
                               if merged else None),
         "interruptions_24h": sum(1 for s, e, _ in merged if e >= now - 86400),
+        "interruptions_7d": [{"start": iso(s), "end": iso(e), "cause": c} for s, e, c in merged
+                             if e >= now - 7 * 86400][-50:],
         "longest_run_7d_sec": round(max(runs(now - 7 * 86400), default=0.0)),
         "unobserved_gaps_7d": [{"start": iso(a), "end": iso(b)} for a, b in unobserved if b >= now - 7 * 86400][-10:],
         "process_starts": [iso(s) for s in starts[-10:]],

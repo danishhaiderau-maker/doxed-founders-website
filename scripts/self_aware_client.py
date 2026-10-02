@@ -7,6 +7,8 @@
     sa.ai_scorecard(window="7d", horizon="60m")["rows"]
     sa.ai_calls(limit=20, model="deepseek-flash")["calls"]
     sa.edges(status="CANDIDATE,HINT")["edges"]
+    sa.data_sufficiency()["questions"]  # can the collected data answer each research question yet?
+    sa.data_fields(status="DEAD_ZERO,DEAD_NULL", watched=True)["fields"]
     sa.query("SELECT strategy, n, net_bp FROM res_ai_scorecard WHERE \\"window\\"='all' AND horizon='5m' AND slice_dim='overall'")
 
 ``python scripts/self_aware_client.py`` prints a one-screen summary; ``--json`` prints health.
@@ -90,6 +92,30 @@ def tables() -> dict[str, Any]:
 
 def query(sql: str, max_rows: int = 1000) -> dict[str, Any]:
     return get("/api/selfaware/query", timeout=60.0, sql=sql, max_rows=max_rows)
+
+
+def data() -> dict[str, Any]:
+    return get("/api/selfaware/data")
+
+
+def data_catalog(stream: str | None = None, catalogued: bool = False) -> dict[str, Any]:
+    return get("/api/selfaware/data/catalog", stream=stream, catalogued=1 if catalogued else None)
+
+
+def data_completeness(stream: str | None = None) -> dict[str, Any]:
+    return get("/api/selfaware/data/completeness", stream=stream)
+
+
+def data_fields(stream: str | None = None, status: str | None = None, watched: bool = False) -> dict[str, Any]:
+    return get("/api/selfaware/data/fields", stream=stream, status=status, watched=1 if watched else None)
+
+
+def data_capacity() -> dict[str, Any]:
+    return get("/api/selfaware/data/capacity")
+
+
+def data_sufficiency() -> dict[str, Any]:
+    return get("/api/selfaware/data/sufficiency")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -70,8 +70,29 @@ def grid_events(tape: tp.Tape, step: int, t_from: float | None = None) -> pd.Dat
     return ev
 
 
-def evaluate(events: pd.DataFrame, reg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def gate_mask(ev: pd.DataFrame, gate: dict | None, train: np.ndarray) -> np.ndarray:
+    """Regime gate for a spec. Tercile cut points come from the training window only (no holdout leakage)."""
+    if not gate:
+        return np.ones(len(ev), dtype=bool)
+    x = ev[gate["feature"]].to_numpy(float)
+    if "tercile" in gate:
+        ref = x[train & np.isfinite(x)]
+        if len(ref) < 30:
+            return np.zeros(len(ev), dtype=bool)
+        q1, q2 = np.percentile(ref, [100 / 3, 200 / 3])
+        return {"LOW": x <= q1, "MID": (x > q1) & (x <= q2), "HIGH": x > q2}[gate["tercile"]] & np.isfinite(x)
+    if "abs_min" in gate:
+        return np.abs(x) >= gate["abs_min"]
+    if "abs_max" in gate:
+        return np.abs(x) < gate["abs_max"]
+    raise ValueError(f"unknown gate {gate}")
+
+
+def evaluate(events: pd.DataFrame, reg: dict, released: set[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``released``: research questions whose data is sufficient; gated specs of other questions stay QUEUED_DATA
+    and are kept out of the multiple-testing family until then."""
     g = reg["guards"]
+    released = released or set()
     ev = events.sort_values("ts").reset_index(drop=True)
     if ev.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -81,10 +102,18 @@ def evaluate(events: pd.DataFrame, reg: dict) -> tuple[pd.DataFrame, pd.DataFram
     hour = (ev["ts"] // 3600).astype(np.int64).to_numpy()
     day = (ev["ts"] // 86400).astype(np.int64).to_numpy()
     ts = ev["ts"].to_numpy()
-    rows = []
+    rows, queued = [], []
     for spec in reg["specs"]:
+        if spec.get("requires") and spec["requires"] not in released:
+            queued.extend({"spec_id": spec["id"], "spec_hash": spec["spec_hash"], "feature": spec["feature"],
+                           "polarity": spec["polarity"], "threshold": spec["threshold"], "horizon": lab,
+                           "gate": json.dumps(spec.get("gate")), "requires": spec["requires"], "status": "QUEUED_DATA",
+                           "reasons": f"waiting for {spec['requires']} data sufficiency (see /api/selfaware/data/sufficiency)"}
+                          for lab in spec["horizons"])
+            continue
         x = ev[spec["feature"]].to_numpy(float)
         side = np.where(np.abs(x) > spec["threshold"], spec["polarity"] * np.sign(x), 0).astype(int)
+        side = np.where(gate_mask(ev, spec.get("gate"), ts < train_end), side, 0)
         for lab in spec["horizons"]:
             ret = ev[f"fwd_{lab}_bp"].to_numpy(float)
             net = side * ret - ev[f"cost_{lab}_bp"].to_numpy(float)
@@ -98,6 +127,7 @@ def evaluate(events: pd.DataFrame, reg: dict) -> tuple[pd.DataFrame, pd.DataFram
             rows.append({
                 "spec_id": spec["id"], "spec_hash": spec["spec_hash"], "feature": spec["feature"],
                 "polarity": spec["polarity"], "threshold": spec["threshold"], "horizon": lab,
+                "gate": json.dumps(spec.get("gate")) if spec.get("gate") else None, "requires": spec.get("requires"),
                 "train_n": int(tr.sum()), "train_hit": hit(tr), "train_net_bp": mean(tr),
                 "holdout_n": int(ho.sum()), "holdout_hit": hit(ho), "holdout_net_bp": mean(ho),
                 "holdout_net_lo": lo, "holdout_net_hi": hi,
@@ -107,10 +137,14 @@ def evaluate(events: pd.DataFrame, reg: dict) -> tuple[pd.DataFrame, pd.DataFram
                 "holdout_second_half_bp": float(net[half[1]].mean()) if len(half[1]) else np.nan,
                 "holdout_start": iso(hold_start), "train_end": iso(train_end),
             })
+    if not rows:
+        return pd.DataFrame(queued), playbook(ev, reg, hold_start)
     res = pd.DataFrame(rows)
     res["bh_q"] = tp.bh_q(res["holdout_p"].to_numpy())
     res["holm_p"] = tp.holm(res["holdout_p"].to_numpy())
     res["status"], res["reasons"] = zip(*[_status(r, g) for r in res.to_dict("records")])
+    if queued:
+        res = pd.concat([res, pd.DataFrame(queued)], ignore_index=True)
     return res, playbook(ev, reg, hold_start)
 
 
@@ -156,6 +190,8 @@ def playbook(ev: pd.DataFrame, reg: dict, hold_start: float) -> pd.DataFrame:
     for (sess, vol, trend), cell in ho.groupby(["session", "vol", "trend"]):
         best = None
         for spec in reg["specs"]:
+            if spec.get("gate"):
+                continue  # the playbook cells are the regime split; gated specs would double-gate
             x = cell[spec["feature"]].to_numpy(float)
             side = np.where(np.abs(x) > spec["threshold"], spec["polarity"] * np.sign(x), 0)
             for lab in spec["horizons"]:
@@ -195,7 +231,10 @@ def run(store, now: float | None = None) -> dict:
     if not store.table_exists("res_edge_events"):
         return {"status": "NO_DATA"}
     events = store.frame("SELECT * FROM res_edge_events")
-    res, book = evaluate(events, reg)
+    released: set[str] = set()
+    if store.table_exists("res_data_sufficiency"):
+        released = {r["id"] for r in store.read("SELECT id FROM res_data_sufficiency WHERE screens_released")}
+    res, book = evaluate(events, reg, released)
     res["registry_hash"] = reg["registry_hash"]
     window = (iso(float(events["ts"].min())), iso(float(events["ts"].max())))
     store.publish("edges", res, sources=["res_edge_events", "edges_registry.json"], window=window,
@@ -204,5 +243,6 @@ def run(store, now: float | None = None) -> dict:
     store.publish("regime_playbook", book if len(book) else pd.DataFrame({"note": ["no holdout events yet"]}),
                   sources=["res_edge_events"], window=window, note="descriptive only")
     counts = res["status"].value_counts().to_dict() if len(res) else {}
-    return {"status": "OK", "events": int(len(events)), "new_events": int(len(new)), "tests": int(len(res)),
+    return {"status": "OK", "events": int(len(events)), "new_events": int(len(new)),
+            "tests": int((res["status"] != "QUEUED_DATA").sum()) if len(res) else 0, "released": sorted(released),
             "by_status": counts, "registry_hash": reg["registry_hash"], "ms": int((time.time() - started) * 1000)}

@@ -55,7 +55,7 @@ Invoke-RestMethod http://127.0.0.1:9021/api/selfaware/health
 - **One pass by hand.** Run `cd C:\DoxxedCrypto\self-aware-live\scripts; ..\..\self-aware\venv\Scripts\python.exe -m self_aware.engine --once --no-alarms --no-repair`. Use `--no-alarms` for any run that is not the daemon.
 - **Update.** Run `git -C C:\DoxxedCrypto\self-aware-live checkout --detach <merged sha>`, then restart. This checkout is not v2c, so moving it is not a manual intervention for the unattended proof.
 - **Footprint.** The process runs at BELOW_NORMAL priority. DuckDB is limited to 2 threads and 768 MB, and jobs run sequentially. The store is about 10 MB and grows with AI calls and edge events. Evidence keeps the newest 500 bundles; history tables keep 7–30 days.
-- **Cadence.** Views every 5 minutes, diagnosis every 2, uptime every 5, tiles every 10, AI every 15, edges every 30 and the digest every 60.
+- **Cadence.** Views every 5 minutes, diagnosis every 2, uptime every 5, tiles every 10, AI every 15, edges and data awareness every 30, and the digest every 60.
 
 ## Auto-repair policy
 
@@ -197,3 +197,63 @@ It is AMBER while something broke, a RED is open or an edge candidate appeared. 
 A candidate raises `selfaware.edge_candidate` (AMBER). **It never toggles a tile or creates a relay-capable tile.** Promotion needs Danish's approval plus the tile-lifecycle procedure in `TILE_LIFECYCLE.md`.
 
 To change the screens, add a new registry version with a new `registered_at`. Never edit a spec in place after seeing results.
+
+**Gated screens.** A spec with `requires: <question id>` is pre-registered but stays `QUEUED_DATA`, outside the BH/Holm family, until that research question is READY in `/api/selfaware/data/sufficiency`. Its `gate` restricts the screen to a regime:
+- `tercile` gates on the 15-minute realized-vol tercile. The cut points are fixed on the training window only.
+- `abs_min` and `abs_max` gate on the 60-minute trend z.
+
+<a id="data-awareness"></a>
+## Data awareness
+
+The `data` job runs at start and every 30 minutes, taking about 15 s and 12 CPU-seconds. It walks the mirror tree (`fly-mirror-segments\tree`) and reads a bounded tail of each stream: 1 MB, or 8 MB for minute streams, capped at 3,000 rows. The Bitfinex tape is measured exactly by DuckDB over `raw_tape_1s`. It makes no Fly calls. View: `http://127.0.0.1:9021/data`.
+
+| Endpoint | What it returns |
+|---|---|
+| `/api/selfaware/data` | Summary: mirror head, stale critical streams, watched-field alarms, tape and minute-stream fill, capacity and question status. |
+| `/api/selfaware/data/catalog?stream=&catalogued=1` | Every collected stream (curated plus auto-discovered): what it is, venue, cadence, expected and observed rows per hour, Fly path (`/app/data/...`), laptop path, size, estimated rows, bytes per day, retention tier, schema, first and last timestamp, lag vs the mirror head, and status (FRESH, IDLE, STALE or MISSING). Pass `?stream=` to add the hourly buckets and gaps. |
+| `/api/selfaware/data/completeness?stream=` | Expected vs actual rows per hour (last 48 hours), plus gaps. Each gap is attributed to a Fly interruption when they overlap. |
+| `/api/selfaware/data/fields?stream=&status=&watched=1` | Field liveness: n, null %, distinct, zero %, constant value and status (OK, DEAD_NULL, DEAD_ZERO, CONSTANT or MISSING). |
+| `/api/selfaware/data/capacity` | Laptop bot data vs the 50 GB cap (from the retention status), growth in GB/day and days to 90% of cap. Fly volume free and hours to full (parsed from the watcher's `disk.space`), ingest in GB/day, and Tier A datasets. |
+| `/api/selfaware/data/sufficiency` | For each research question: screen status, full-answer status, blockers, short samples, ETA, and whether its gated screens are released. |
+
+**Adding a stream or question.** Add a `StreamSpec` (with `watch` fields that must vary) or a `Question` in `scripts/self_aware/data_awareness.py`. Gated screens go in `edges_registry.json` with `requires`. Uncatalogued files still appear as auto-discovered streams, and their fields are profiled without raising alarms.
+
+<a id="data-freshness"></a>
+### data.freshness: critical streams are fresh
+
+- **What it checks.** The critical streams are the tape, cross-venue, market context and AI calls. Each must be within 3 min, 10 min, 10 min and 6 h respectively of the mirror head. The head is the newest critical row, so the mirror's own lag (`inv.mirror_*_lag`) is not double-counted.
+- **If it fires.** A collector on Fly stopped writing, or the stream was renamed. Check `/api/status.collection` in the next owner read, and the catalog row's `last_ts`.
+
+<a id="data-completeness"></a>
+### data.completeness: every time slot is filled
+
+- **What it checks.** The tape must be at least 98% filled over 24 hours, excluding Fly interruptions. No single unexplained gap may reach 300 s. Minute streams must be at least 95% present over 24 hours.
+- **If it fires.** Look at `largest_gaps` in the evidence. A gap with `explained_by` null that is not a deploy or restart points to a WS stall or Fly CPU saturation.
+
+<a id="data-dead-fields"></a>
+### data.dead_fields: watched fields are alive
+
+- **What it checks.** Every watched field must vary and be populated. A watched field that is always null, always 0 (for a numeric measure) or constant across 50 or more rows raises AMBER.
+- **First run (2026-10-02).** The first pass caught:
+  - `ai_input_log.context.ret_1m/ret_5m/delta_change` = 0: the live prompt sends dead returns;
+  - `adaptive_entry_decisions.ai_feature.win_prob` = 0;
+  - counterfactual `epoch_id` and `opportunity_id` null, so the rows cannot be joined;
+  - `market_context.regime.label` = WARMUP;
+  - `pre_entry_features.captured_at_ts` null.
+- **Fixing.** These are producer fixes on Fly, so they are post-freeze. The finding clears by itself when the field comes alive.
+
+<a id="data-capacity"></a>
+### data.capacity: room to keep collecting
+
+- **Thresholds.** Laptop: AMBER under 7 days to 90% of the 50 GB cap, RED under 2. Fly volume: AMBER under 72 hours to full, RED under 24.
+- **Growth basis.** Until 6 hours of history exist, laptop growth is the sum of the per-stream ingest rates excluding Tier B (reconstructible, pruned by retention). After that it is the measured net slope of retained bytes.
+
+<a id="data-sufficiency"></a>
+### data.sufficiency: research questions (informational)
+
+Each question can be in one of three states:
+- **READY.** Its fields are alive and there are enough independent samples (days, hour clusters, N). Its gated screens are released.
+- **ACCUMULATING.** Fields are alive but samples are short; see `eta_ready`.
+- **BLOCKED.** A required field is missing, dead or constant.
+
+`full_question_status` tracks the inputs needed for a real-outcome answer, such as skipped-signal outcomes, ADX and maker fills. It never raises an alarm.

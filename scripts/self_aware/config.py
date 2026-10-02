@@ -20,6 +20,7 @@ CADENCE_SEC = {
     "ai": 900,
     "edges": 1800,
     "digest": 3600,
+    "data": 1800,
 }
 
 THRESHOLDS = {
@@ -43,6 +44,14 @@ THRESHOLDS = {
     "rate_limit_persistent_sec": 15 * 60,
     "evaluation_age_cpu_sec": 90,
     "evidence_keep_files": 500,
+    "tape_fill_amber_pct": 98.0,
+    "tape_gap_amber_sec": 300,
+    "minute_fill_amber_pct": 95.0,
+    "laptop_days_to_cap_amber": 7.0,
+    "laptop_days_to_cap_red": 2.0,
+    "fly_hours_to_full_amber": 72.0,
+    "fly_hours_to_full_red": 24.0,
+    "data_doc_max_age_sec": 2 * 3600,
 }
 
 
@@ -68,6 +77,7 @@ class Paths:
     diagnostics: Path = field(default_factory=lambda: _env_path(
         "SELF_AWARE_DIAGNOSTICS", r"C:\DoxxedCrypto\btc-v31-current\diagnostics"))
     analyzer_repo: Path = field(default_factory=lambda: _env_path("SELF_AWARE_ANALYZER_REPO", r"C:\DoxxedCrypto\v2c"))
+    retention: Path = field(default_factory=lambda: _env_path("SELF_AWARE_RETENTION", r"C:\DoxxedCrypto\bot-data-retention"))
 
     @property
     def store(self) -> Path:

@@ -15,7 +15,7 @@ np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from self_aware import alarms, diagnose, edges, repair  # noqa: E402
+from self_aware import alarms, data_awareness, diagnose, edges, repair  # noqa: E402
 from self_aware import tape as tp  # noqa: E402
 from self_aware.ai_scorecard import json_safe, scorecard  # noqa: E402
 from self_aware.config import Paths  # noqa: E402
@@ -33,7 +33,8 @@ def _jsonl(path: Path, rows: list[dict]) -> None:
 def paths(tmp_path: Path) -> Paths:
     p = Paths(home=tmp_path / "home", chain=tmp_path / "chain", mirror=tmp_path / "mirror",
               mirror_archive=tmp_path / "archive-mirror", puller=tmp_path / "puller", exports=tmp_path / "exports",
-              archive=tmp_path / "analysis-archive", diagnostics=tmp_path / "diag", analyzer_repo=tmp_path / "v2c")
+              archive=tmp_path / "analysis-archive", diagnostics=tmp_path / "diag", analyzer_repo=tmp_path / "v2c",
+              retention=tmp_path / "retention")
     (p.chain / "health").mkdir(parents=True)
     return p
 
@@ -364,6 +365,133 @@ def test_server_endpoints_and_query_guard(paths, store):
             urllib.request.urlopen(f"http://127.0.0.1:{port}/api/selfaware/query?sql=SELECT%20getenv('X')", timeout=10)
         assert err.value.code == 400
         assert srv.server_address[0] == "127.0.0.1"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ------------------------------------------------------------ data awareness
+
+def test_field_liveness_classifies_dead_constant_and_missing():
+    spec = data_awareness.StreamSpec("s", "s.jsonl", "", "", "event", ("ts",),
+                                     watch=("context.ret_1m", "price", "label", "absent", "epoch_id"))
+    rows = [{"ts": NOW + i, "context": {"ret_1m": 0.0, "price": 100 + i}, "price": 100 + i, "label": "WARMUP",
+             "epoch_id": None, "free_text": "x"} for i in range(60)]
+    f = {r["field"]: r for r in data_awareness.profile_fields(rows, spec)}
+    assert f["context.ret_1m"]["status"] == "DEAD_ZERO" and f["context.ret_1m"]["alarm"]
+    assert f["price"]["status"] == "OK" and not f["price"]["alarm"]
+    assert f["label"]["status"] == "CONSTANT" and f["label"]["alarm"]
+    assert f["epoch_id"]["status"] == "DEAD_NULL" and f["absent"]["status"] == "MISSING"
+    assert f["free_text"]["status"] == "CONSTANT" and not f["free_text"]["alarm"]  # unwatched constants never alarm
+
+
+def _data_mirror(paths) -> float:
+    now = float(int(NOW) // 3600 * 3600 + 1800)
+    t0 = int(now - 3 * 3600)
+    secs = [t for t in range(t0, int(now) - 5) if not (t0 + 1000 <= t < t0 + 1600) and not (t0 + 5000 <= t < t0 + 5120)]
+    _jsonl(paths.mirror / "market_microstructure_1s.jsonl",
+           [{"bucket_ts": t, "bid": 100.0 + (t % 7), "ask": 100.5 + (t % 7), "bid_qty": 1.0 + t % 3, "ask_qty": 1.0 + t % 2,
+             "buy_qty": float(t % 5), "sell_qty": float(t % 4), "valid_bbo": True, "fresh": True} for t in secs])
+    _jsonl(paths.mirror / "cross_venue_tape_1m.jsonl",
+           [{"minute_ts": m, "n": 60, "basis_bp_mean": {"binance": (m // 60 % 17) / 3, "bybit": 1 + m // 60 % 5,
+                                                        "okx": 2.0 + m // 60 % 3}, "bfx": {"m0": 1000 + m // 60 % 11}}
+            for m in range(t0 - t0 % 60, int(now) - 60, 60)])
+    _jsonl(paths.mirror / "ai_input_log.jsonl",
+           [{"ts_epoch": now - 3600 + i * 60, "context": {"price": 100 + i, "ret_1m": 0.0, "ret_5m": 0.0,
+                                                          "delta_change": 0.0, "ema_slope": i / 100}} for i in range(55)])
+    _jsonl(paths.mirror / "brand_new_stream.jsonl", [{"ts": now - i, "v": i} for i in range(30)])
+    paths.retention.mkdir(parents=True, exist_ok=True)
+    (paths.retention / "status.json").write_text(json.dumps({
+        "bytes_after": 26e9, "cap_bytes": 50e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
+        "sizes_after": {"mirror_tree": 5.3e9}, "tier_a_schema": [{"dataset": "ai_calls", "bytes": 1, "partitions": 1,
+                                                                  "status": "COMPATIBLE"}]}), encoding="utf-8")
+    return now
+
+
+def test_data_awareness_catalog_completeness_capacity_and_sufficiency(paths, store):
+    now = _data_mirror(paths)
+    store.refresh_views()
+    t0 = int(now - 3 * 3600)
+    facts = _facts(watcher={"checks": [{"id": "disk.space", "status": "GREEN", "observed":
+                                        "laptop free 306.6GB; Fly volume free 36.4GB (493.0h to full); segment store 17.5% of cap"}]})
+    res = data_awareness.run(store, paths, facts, {}, [(t0 + 4990, t0 + 5130, "fly.paused")], now=now)
+    by = {s["stream"]: s for s in res["streams"]}
+    assert not by["brand_new_stream.jsonl"]["catalogued"] and by["bitfinex_tape_1s"]["catalogued"]
+    assert by["v3_execution"]["status"] == "MISSING"
+    assert by["bitfinex_tape_1s"]["fly_location"] == "/app/data/market_microstructure_1s.jsonl"
+    assert "context.ret_1m=DEAD_ZERO (0.0)" in res["summary"]["watch_alarms"]["ai_calls"]
+    assert "cross_venue_tape_1m" not in res["summary"]["watch_alarms"]
+    tape = by["bitfinex_tape_1s"]["exact"]
+    gaps = {g["sec"]: g for g in tape["gaps"]}
+    assert gaps[601]["explained_by"] is None and gaps[121]["explained_by"] == "fly.paused"
+    assert [g["sec"] for g in tape["unexplained_gaps_24h"]] == [601]
+    assert tape["fill_pct_24h"] < tape["fill_pct_24h_excl_interruptions"] < 100
+    cap = res["capacity"]
+    assert cap["laptop"]["bot_data_gb"] == 26.0 and cap["fly"]["hours_to_full"] == 493.0
+    assert cap["laptop"]["days_to_90pct_cap"] and cap["laptop"]["days_to_90pct_cap"] > 0
+    q = {x["id"]: x for x in res["sufficiency"]}
+    assert q["Q_VOL_GATE"]["status"] == "ACCUMULATING" and not q["Q_VOL_GATE"]["blockers"]
+    assert q["Q_VOL_GATE"]["eta_ready"] and not q["Q_VOL_GATE"]["screens_released"]
+    assert q["Q_XVENUE"]["status"] == "BLOCKED" and any("xvl_shadow_signals" in b for b in q["Q_XVENUE"]["missing_for_full_answer"])
+    assert store.read("SELECT count(*) AS n FROM res_data_sufficiency WHERE screens_released")[0]["n"] == 0
+
+    found = {f.id: f for f in diagnose.check_data({**facts, "now": now, "data_awareness": res["summary"]}, diagnose.signals(
+        {**facts, "now": now}), store)}
+    assert found["data.dead_fields"].severity == "AMBER" and "context.ret_1m" in found["data.dead_fields"].observed
+    assert found["data.completeness"].severity == "AMBER" and "601s" in found["data.completeness"].observed
+    assert found["data.capacity"].severity == "GREEN"
+    assert found["data.freshness"].severity == "AMBER" and "market_context_1m" in found["data.freshness"].observed
+    assert not found["data.sufficiency"].emit_alarm
+    stale = diagnose.check_data({**facts, "now": now + 3 * 3600, "data_awareness": res["summary"]}, {}, store)
+    assert {f.severity for f in stale} == {"SKIP"}
+
+
+def test_gated_screens_stay_queued_until_their_question_is_ready():
+    reg = edges.load_registry()
+    events = edges.grid_events(_synthetic_tape(), int(reg["clock"]["step_sec"]))
+    queued, _ = edges.evaluate(events, reg)
+    gated = queued[queued.spec_id.str.startswith(("VOLHI", "VOLLO", "TREND_MOM", "CHOP_"))]
+    assert len(gated) and set(gated.status) == {"QUEUED_DATA"} and gated.bh_q.isna().all()
+    released, _ = edges.evaluate(events, reg, {"Q_VOL_GATE"})
+    vol = released[released.spec_id.str.startswith(("VOLHI", "VOLLO"))]
+    assert "QUEUED_DATA" not in set(vol.status) and vol.holdout_n.max() > 0
+    assert set(released[released.spec_id.str.startswith("CHOP_")].status) == {"QUEUED_DATA"}
+    hi = released[(released.spec_id == "VOLHI_MOM_R15M") & (released.horizon == "15m")].iloc[0]
+    base = released[(released.spec_id == "MOM_R15M") & (released.horizon == "15m")].iloc[0]
+    assert 0 < hi.holdout_n < base.holdout_n  # the gate keeps roughly the top tercile only
+    assert "CANDIDATE" not in set(released.status)
+
+
+def test_data_endpoints_and_view(paths, store):
+    from self_aware.server import make_server
+    now = _data_mirror(paths)
+    store.refresh_views()
+    res = json_safe(data_awareness.run(store, paths, _facts(), {}, [], now=now))
+
+    class FakeEngine:
+        def __init__(self):
+            self.store, self.paths = store, paths
+            self.docs = {"health": {"verdict": "AMBER", "findings": []}, "data": res}
+
+        def engine_status(self):
+            return {"ok": True}
+
+    srv = make_server(FakeEngine(), 0)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        raw = lambda p: urllib.request.urlopen(f"http://127.0.0.1:{port}{p}", timeout=10).read()  # noqa: E731
+        get = lambda p: json.loads(raw(p))  # noqa: E731
+        assert get("/api/selfaware/data")["schema"] == "self_aware_data_v1"
+        assert {q["id"] for q in get("/api/selfaware/data/sufficiency")["questions"]} >= {"Q_VOL_GATE", "Q_LIMIT_VS_TAKER"}
+        cat = get("/api/selfaware/data/catalog")["streams"]
+        assert any(s["stream"] == "brand_new_stream.jsonl" for s in cat) and all("hourly" not in s for s in cat)
+        assert get("/api/selfaware/data/catalog?stream=bitfinex_tape_1s")["streams"][0]["exact"]["gaps"]
+        dead = get("/api/selfaware/data/fields?status=DEAD_ZERO&watched=1")["fields"]
+        assert {f["field"] for f in dead} == {"context.ret_1m", "context.ret_5m", "context.delta_change"}
+        assert get("/api/selfaware/data/completeness")["streams"]
+        assert get("/api/selfaware/data/capacity")["laptop"]["cap_gb"] == 50.0
+        assert b"Research sufficiency" in raw("/data")
     finally:
         srv.shutdown()
         srv.server_close()
