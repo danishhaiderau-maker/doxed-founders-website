@@ -272,10 +272,17 @@ def simulate(tape: Tape, signals: pd.DataFrame, entry: EntrySpec, exit_: ExitSpe
     return df
 
 
+# Exits decided by a later AI re-call; a tape replay cannot reproduce them.
+_AI_DEPENDENT_EXITS = frozenset({"THESIS_FAST_CUT", "THESIS_INVALIDATED"})
+
+
 def exit_spec_from_registry(spec: dict, leverage: float = 100.0) -> tuple:
     """Map a registry ``exit_policy`` to an ``ExitSpec`` (or ``(None, reason)``)."""
     ep = dict((spec or {}).get("exit_policy") or {})
     family = str(ep.get("family") or "").upper()
+    ai_exits = sorted(_AI_DEPENDENT_EXITS.intersection(str(x).upper() for x in ep.get("exit_order") or ()))
+    if ai_exits:
+        return None, f"EXIT_NOT_TAPE_REPLAYABLE:{family or 'MISSING'}:{'+'.join(ai_exits)}"
     lev = float(leverage or 100.0)
     hard_bp = ep.get("hard_stop_bps")
     if hard_bp is None and ep.get("hard_stop_margin_pct") is not None:
