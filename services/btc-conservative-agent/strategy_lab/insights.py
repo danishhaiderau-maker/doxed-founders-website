@@ -1,0 +1,408 @@
+"""One-call agent insights feed: system health, live Fly bot, transfer/ACK, deploy queue, analyzer export.
+
+    import insights_client                       # C:\\DoxxedCrypto\\analyzer-exports\\insights_client.py
+    snap = insights_client.snapshot()
+    snap["status"]        # COMPLETE (every component fresh) or PARTIAL
+    snap["refused"]       # [{"component", "status", "reason"}] for every stale/unavailable component
+    snap["components"]["fly_bot"]["data"]["tiles"]
+
+Also served uncached at ``http://127.0.0.1:9001/api/insights``. Every
+component carries ``status`` OK / STALE / UNAVAILABLE, ``as_of``, ``age_sec``
+and ``max_age_sec``. A STALE or UNAVAILABLE component has ``data = None``:
+old data is refused, never returned as if it were current. Read-only: no
+file is written, nothing on Fly or Bitfinex is touched.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from typing import Callable, Optional
+
+SCHEMA = "agent_insights_v1"
+STATE_DIR = os.environ.get("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain"
+HEALTH_ENDPOINT = os.environ.get("DOXXED_HEALTH_URL") or "http://127.0.0.1:9011/api/system-health"
+FLY_STATUS_URL = os.environ.get("DOXXED_FLY_STATUS_URL") or "https://doxed-btc-bot.fly.dev/api/status"
+WALL_PATH = os.environ.get("DOXXED_WALL_PATH") or r"C:\DoxxedCrypto\btc-v31-current\diagnostics\WALL-STATUS-FLY.md"
+
+HEALTH_MAX_AGE_SEC = 15 * 60          # system_health THRESHOLDS["watcher_stale_sec"]
+FLY_SNAPSHOT_MAX_AGE_SEC = 5 * 60     # laptop fly_runtime snapshot fallback when the live call fails
+TRANSFER_MAX_AGE_SEC = 15 * 60
+AI_SUCCESS_MAX_AGE_SEC = 15 * 60
+EXPORT_MAX_AGE_SEC = 45 * 60          # analyzer export freshness policy
+WALL_TAIL_LINES = 400
+
+OK, STALE, UNAVAILABLE = "OK", "STALE", "UNAVAILABLE"
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _iso(ts: Optional[float]) -> Optional[str]:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ts(value) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v / 1000.0 if v > 1e11 else v
+    text = str(value).strip().replace("Z", "+00:00")
+    m = re.match(r"^(.*\.\d{6})\d+(.*)$", text)   # PowerShell 7-digit fractions
+    if m:
+        text = m.group(1) + m.group(2)
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _get_json(url: str, timeout: float) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "doxxed-insights/1"})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _read_json(path: str) -> dict:
+    with open(path, encoding="utf-8-sig") as handle:
+        return json.load(handle)
+
+
+def _component(status: str, *, data=None, as_of: Optional[float] = None, max_age: Optional[float] = None,
+               reason: Optional[str] = None, source: Optional[str] = None, now: Optional[float] = None) -> dict:
+    now = now if now is not None else _now()
+    return {
+        "status": status,
+        "reason": reason,
+        "source": source,
+        "as_of": _iso(as_of),
+        "age_sec": round(now - as_of, 1) if as_of else None,
+        "max_age_sec": max_age,
+        "data": data if status == OK else None,
+    }
+
+
+def _fresh(data, *, as_of: Optional[float], max_age: float, source: str, now: float, what: str) -> dict:
+    if as_of is None:
+        return _component(STALE, as_of=None, max_age=max_age, source=source, now=now,
+                          reason=f"{what} has no timestamp; refusing undated data")
+    if now - as_of > max_age:
+        return _component(STALE, as_of=as_of, max_age=max_age, source=source, now=now,
+                          reason=f"{what} is {int(now - as_of)}s old (limit {int(max_age)}s)")
+    return _component(OK, data=data, as_of=as_of, max_age=max_age, source=source, now=now)
+
+
+# --------------------------------------------------------------------------- health
+def health_component(now: float, timeout: float = 10.0) -> dict:
+    report, source, errors = None, None, []
+    try:
+        report, source = _get_json(HEALTH_ENDPOINT, timeout), "endpoint"
+    except Exception as exc:  # endpoint down: fall back to the published file
+        errors.append(f"endpoint: {type(exc).__name__}: {exc}")
+    if report is None:
+        path = os.path.join(STATE_DIR, "health", "system-health-latest.json")
+        try:
+            report, source = _read_json(path), "file"
+        except Exception as exc:
+            errors.append(f"file: {type(exc).__name__}: {exc}")
+    if report is None:
+        return _component(UNAVAILABLE, reason="; ".join(errors), max_age=HEALTH_MAX_AGE_SEC, now=now)
+    as_of = _ts(report.get("generated_ts")) or _ts(report.get("generated_at"))
+    failing = [{k: f.get(k) for k in ("id", "status", "observed", "hint", "runbook")}
+               for f in report.get("failing") or []]
+    data = {"verdict": report.get("verdict"), "counts": report.get("counts"), "failing": failing,
+            "open_alarms": report.get("open_alarms"), "source_errors": report.get("source_errors"),
+            "checks": {c.get("id"): {"status": c.get("status"), "observed": c.get("observed")}
+                       for c in report.get("checks") or []}}
+    return _fresh(data, as_of=as_of, max_age=HEALTH_MAX_AGE_SEC, source=source, now=now, what="system health")
+
+
+# --------------------------------------------------------------------------- fly bot
+def _fly_data(status: dict, tile_stats: Optional[list], now: float) -> dict:
+    sp = status.get("strategy_progress") or {}
+    lanes_exec = sp.get("combo_lane_execution") or {}
+    stats = {str(r.get("research_lane")): r for r in tile_stats or []}
+    tiles = []
+    for spec in status.get("active_tiles") or []:
+        lane = spec.get("lane")
+        ex = lanes_exec.get(lane) or {}
+        st = stats.get(str(lane)) or {}
+        win = st.get("win_rate")
+        tiles.append({
+            "lane": lane, "label": spec.get("label"), "id_prefix": spec.get("id_prefix"),
+            "lifecycle_state": spec.get("lifecycle_state"), "paper_only": spec.get("paper_only"),
+            "relay_eligible": spec.get("relay_eligible"), "accepting": ex.get("accepting"),
+            "active": ex.get("active"), "completed": ex.get("completed"), "queued": ex.get("queued"),
+            "win_pct": round(100.0 * float(win), 1) if isinstance(win, (int, float)) else None,
+            "closed_trades": st.get("n"), "net_pnl_usd": st.get("net_pnl_usd"),
+            "corrected_verdict": st.get("corrected_verdict"),
+            "win_pct_source": "analyzer export tile_stats" if st else "not in analyzer export",
+        })
+    ai_ts = _ts(status.get("last_ai_success_at"))
+    ai_age = round(now - ai_ts, 1) if ai_ts else None
+    return {
+        "rev": status.get("git_rev"), "process": status.get("status"),
+        "paused": status.get("execution_paused"),
+        "open_positions": sp.get("open_positions"), "pending_orders": sp.get("pending_orders"),
+        "last_ai_success_at": status.get("last_ai_success_at"), "ai_success_age_sec": ai_age,
+        "ai_success_stale": ai_age is None or ai_age > AI_SUCCESS_MAX_AGE_SEC,
+        "bitfinex_live_enabled": status.get("bitfinex_live_enabled"),
+        "tiles": tiles,
+    }
+
+
+def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0) -> dict:
+    try:
+        status = _get_json(FLY_STATUS_URL, timeout)
+        return _component(OK, data=_fly_data(status, tile_stats, now), as_of=now, max_age=0,
+                          source=FLY_STATUS_URL, now=now)
+    except Exception as exc:
+        live_error = f"{type(exc).__name__}: {exc}"
+    path = os.path.join(STATE_DIR, "fly_runtime_snapshot_v1.json")
+    try:
+        snap = _read_json(path)
+    except Exception as exc:
+        return _component(UNAVAILABLE, reason=f"live /api/status failed ({live_error}); snapshot unreadable "
+                                              f"({type(exc).__name__})", max_age=FLY_SNAPSHOT_MAX_AGE_SEC, now=now)
+    status = snap.get("status") if isinstance(snap.get("status"), dict) else snap
+    as_of = _ts(snap.get("observedAt") or snap.get("observed_at")) or os.path.getmtime(path)
+    comp = _fresh(_fly_data(status, tile_stats, now), as_of=as_of, max_age=FLY_SNAPSHOT_MAX_AGE_SEC,
+                  source=path, now=now, what="laptop Fly runtime snapshot")
+    comp["reason"] = f"live /api/status failed ({live_error})" + (f"; {comp['reason']}" if comp["reason"] else "")
+    return comp
+
+
+# --------------------------------------------------------------------------- transfer / ACK
+def transfer_component(now: float, health: Optional[dict]) -> dict:
+    try:
+        pull = _read_json(os.path.join(STATE_DIR, "segment-pull.status.json"))
+    except Exception as exc:
+        return _component(UNAVAILABLE, reason=f"segment-pull.status.json: {type(exc).__name__}: {exc}",
+                          max_age=TRANSFER_MAX_AGE_SEC, now=now)
+    try:
+        head = _read_json(os.path.join(STATE_DIR, "fly_segment_head_snapshot_v1.json"))
+    except Exception:
+        head = {}
+    checks = ((health or {}).get("data") or {}).get("checks") or {}
+    published = pull.get("remotePublishedSeq")
+    applied = pull.get("appliedSeq")
+    data = {
+        "published_seq": published, "applied_seq": applied, "laptop_acked_seq": pull.get("ackedSeq"),
+        "fly_shipped_seq": head.get("shipped_seq"), "fly_laptop_acked_seq": head.get("laptop_acked_seq"),
+        "fly_unshipped_bytes": head.get("unshipped_bytes"), "fly_last_error": head.get("last_error"),
+        "applied_behind_published": (published - applied) if isinstance(published, int) and isinstance(applied, int)
+        else None,
+        "last_pull_finished_at": pull.get("finishedAt"), "last_pull_exit": pull.get("exitCode"),
+        "last_pull_error": pull.get("error"), "last_parity_at": pull.get("lastParityAt"),
+        "fly_head_observed_at": head.get("observedAt"),
+        "health_checks": {k: checks.get(k) for k in ("shipper.progress", "laptop.pull_ack") if k in checks},
+    }
+    as_of = _ts(pull.get("finishedAt"))
+    return _fresh(data, as_of=as_of, max_age=TRANSFER_MAX_AGE_SEC, source=STATE_DIR, now=now,
+                  what="segment pull status")
+
+
+# --------------------------------------------------------------------------- deploy queue (WALL)
+_WALL_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \| ([^(|]+?) \(([^)]*)\) (.*)$")
+
+
+def _wall_key(tag: str, worker: str) -> str:
+    # The task tag is the stable identity; the worker label in parentheses varies between posts.
+    return tag.strip()
+
+
+def parse_wall(lines, now: float) -> dict:
+    """Fly slot holder and queue from WALL-STATUS-FLY.md lines (oldest first)."""
+    holder, holder_since, entries, last = None, None, [], {}
+    queued_at: dict = {}
+    for raw in lines:
+        m = _WALL_LINE.match(raw.strip())
+        if not m:
+            continue
+        ts, tag, worker, text = m.groups()
+        key = _wall_key(tag, worker)
+        up = text.upper()
+        # "PRIORITY CLAIM of the next Fly slot" queues at the head; it does not take a held slot.
+        claims = ("CLAIMS FLY SLOT" in up or "HOLDS FLY SLOT" in up or up.startswith("CLAIMS ")) \
+            and "NOT CLAIMING" not in up
+        if up.startswith("PRIORITY CLAIM"):
+            queued_at.setdefault(key, "0000-" + ts)
+        released = "SLOT RELEASED" in up or ("DONE" in up[:12] and holder == key and "NEVER" not in up[:60])
+        if claims:
+            holder, holder_since = key, ts
+        if released and holder == key:
+            holder, holder_since = None, None
+        if up.startswith("QUEUED") or " QUEUED" in up[:40]:
+            queued_at.setdefault(key, ts)
+        if up.startswith("DONE") or "SLOT RELEASED" in up or claims:
+            queued_at.pop(key, None)
+        state = re.split(r"[,:;(]", text, maxsplit=1)[0].strip()[:60]
+        last[key] = {"task": key, "worker": re.sub(r"^worker\s+", "", worker.strip()), "at": ts, "state": state,
+                     "text": text[:400]}
+        entries.append((ts, key))
+    queue = [{**last[k], "queued_since": t} for k, t in sorted(queued_at.items(), key=lambda kv: kv[1])
+             if k != holder]
+    holder_entry = last.get(holder) if holder else None
+    recent_done = [last[k] for k in last if last[k]["state"].upper().startswith("DONE")]
+    recent_done.sort(key=lambda r: r["at"], reverse=True)
+    last_ts = _ts(entries[-1][0]) if entries else None
+    return {
+        "slot_holder": holder, "slot_held_since": holder_since,
+        "slot_holder_latest": holder_entry,
+        "slot_state": "FREE" if not holder else (
+            "DEPLOYING" if holder_entry and "IN PROGRESS" in holder_entry["text"].upper() else "HELD"),
+        "queue": queue, "recent_done": recent_done[:5],
+        "latest_entry_at": entries[-1][0] if entries else None,
+        "latest_entry_age_sec": round(now - last_ts, 1) if last_ts else None,
+        "entries_parsed": len(entries),
+    }
+
+
+def deploy_queue_component(now: float) -> dict:
+    try:
+        with open(WALL_PATH, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()[-WALL_TAIL_LINES:]
+        mtime = os.path.getmtime(WALL_PATH)
+    except Exception as exc:
+        return _component(UNAVAILABLE, reason=f"WALL unreadable: {type(exc).__name__}: {exc}", now=now)
+    data = parse_wall(lines, now)
+    if not data["entries_parsed"]:
+        return _component(UNAVAILABLE, reason="WALL has no parseable entries", source=WALL_PATH, now=now)
+    # The WALL is read live from disk, so it is current by construction; a quiet WALL is not stale data.
+    data["file_modified_at"] = _iso(mtime)
+    return _component(OK, data=data, as_of=now, max_age=0, source=WALL_PATH, now=now)
+
+
+# --------------------------------------------------------------------------- analyzer export
+def _load_client():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (here, os.path.dirname(here)):
+        if path not in sys.path:
+            sys.path.append(path)
+    try:
+        import analyzer_client as client  # export-root copy next to insights_client.py
+    except ImportError:
+        from strategy_lab import client  # repo / analyzer process
+    return client
+
+
+def _records(df, columns, limit=None) -> list:
+    if df is None or len(df) == 0:
+        return []
+    cols = [c for c in columns if c in df.columns]
+    out = df[cols].head(limit) if limit else df[cols]
+    return json.loads(out.to_json(orient="records"))
+
+
+def export_component(now: float, check_live: bool = True) -> tuple:
+    try:
+        client = _load_client()
+        exp = client.load_latest(check_live=check_live, retries=1, retry_wait_sec=3)
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        status = STALE if type(exc).__name__ == "StaleExportError" else UNAVAILABLE
+        return _component(status, reason=reason, max_age=EXPORT_MAX_AGE_SEC, now=now), None
+    s = exp.summary
+    tiles = _records(exp.get("tile_stats"), ["research_lane", "label", "n", "win_rate", "mean_usd", "net_pnl_usd",
+                                             "ci_lo_usd", "ci_hi_usd", "n_tested", "p_holm", "q_bh",
+                                             "corrected_verdict", "last_close"])
+    regret = exp.get("exit_regret")
+    taker = exp.get("taker_counterfactual")
+    marks = exp.get("fill_markouts")
+    data = {
+        "export_id": s.get("export_id"), "generated_at": s.get("generated_at"), "checks": exp.checks,
+        "analyzer_revision": (s.get("generation") or {}).get("analyzer_revision"),
+        "generation_id": (s.get("generation") or {}).get("generation_id"),
+        "dataset_epoch": (s.get("generation") or {}).get("dataset_epoch"),
+        "tile_stats": tiles,
+        "hypotheses": _records(exp.get("hypotheses"), ["id", "title", "verdict", "n_test", "mean_bp", "p_holm",
+                                                       "status"]),
+        "main_rankings": (s.get("main_rankings") or {}).get("family_summaries"),
+        "stream_health": _records(exp.get("stream_health"), ["stream", "status", "age_sec", "content_last_at",
+                                                             "content_lag_sec", "analyzer_usage"]),
+        "stream_study_health": _records(exp.get("stream_study_health"), ["stream", "status", "rows_used",
+                                                                         "content_last_at", "error"]),
+        "exit_regret_1h": _records(regret[regret["horizon_sec"] == 3600] if regret is not None and len(regret)
+                                   and "horizon_sec" in regret.columns else None,
+                                   ["research_lane", "n", "hold_longer_mean_usd", "ci_lo_usd", "ci_hi_usd",
+                                    "verdict"]),
+        "taker_ev_1s": _records(taker[(taker["horizon"] == "1s") & (taker["group"].isin(["ALL", "TILE"]))]
+                                if taker is not None and len(taker) and "horizon" in taker.columns else None,
+                                ["group", "value", "latency_sec", "n", "ev_exit_touch_bps", "ci_lo_bps",
+                                 "ci_hi_bps"]),
+        "fill_markouts": _records(marks[marks["liquidity"] == "ALL"] if marks is not None and len(marks)
+                                  and "liquidity" in marks.columns else None,
+                                  ["research_lane", "horizon", "n", "markout_mid_bps", "ci_lo_bps", "ci_hi_bps"]),
+        "quarantine": _records(exp.get("quarantine"), ["trade_id", "research_lane", "reason"]),
+    }
+    comp = _component(OK, data=data, as_of=s.get("generated_at_ts"), max_age=EXPORT_MAX_AGE_SEC,
+                      source=exp.path, now=now)
+    return comp, tiles
+
+
+# --------------------------------------------------------------------------- snapshot
+def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
+    """Every component in one dict; stale or unavailable components are refused (``data`` None)."""
+    t0 = now = _now()
+    components: dict = {}
+
+    def guard(name: str, fn: Callable[[], dict]) -> dict:
+        try:
+            components[name] = fn()
+        except Exception as exc:  # one broken source must not hide the others
+            components[name] = _component(UNAVAILABLE, reason=f"{type(exc).__name__}: {exc}", now=now)
+        return components[name]
+
+    health = guard("system_health", lambda: health_component(now, timeout=min(timeout, 10.0)))
+    exp_holder: dict = {}
+
+    def _export():
+        comp, tiles = export_component(now, check_live=check_live)
+        exp_holder["tiles"] = tiles
+        return comp
+
+    guard("analyzer_export", _export)
+    guard("fly_bot", lambda: fly_component(now, exp_holder.get("tiles"), timeout=timeout))
+    guard("transfer", lambda: transfer_component(now, health))
+    guard("deploy_queue", lambda: deploy_queue_component(now))
+    refused = [{"component": k, "status": v["status"], "reason": v["reason"]}
+               for k, v in components.items() if v["status"] != OK]
+    hd = health.get("data") or {}
+    return {
+        "schema": SCHEMA,
+        "generated_at": _iso(now),
+        "status": "COMPLETE" if not refused else "PARTIAL",
+        "refused": refused,
+        "system_verdict": hd.get("verdict") if health.get("status") == OK else "UNKNOWN",
+        "failing_checks": [f.get("id") for f in hd.get("failing") or []],
+        "components": components,
+        "elapsed_sec": round(_now() - t0, 2),
+        "freshness_policy": {
+            "system_health_max_age_sec": HEALTH_MAX_AGE_SEC, "fly_snapshot_fallback_max_age_sec":
+            FLY_SNAPSHOT_MAX_AGE_SEC, "transfer_max_age_sec": TRANSFER_MAX_AGE_SEC,
+            "analyzer_export_max_age_sec": EXPORT_MAX_AGE_SEC,
+            "rule": "a component older than its limit (or unreachable) is STALE/UNAVAILABLE with data=None",
+        },
+    }
+
+
+if __name__ == "__main__":  # python insights_client.py [--json]
+    snap = snapshot()
+    if "--json" in sys.argv:
+        print(json.dumps(snap, indent=1, default=str))
+    else:
+        print(f"{snap['status']} system={snap['system_verdict']} failing={snap['failing_checks']} "
+              f"({snap['elapsed_sec']}s)")
+        for name, comp in snap["components"].items():
+            print(f"  {name:16s} {comp['status']:11s} age={comp['age_sec']}s {comp['reason'] or ''}")

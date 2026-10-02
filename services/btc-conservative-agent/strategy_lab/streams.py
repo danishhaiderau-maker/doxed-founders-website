@@ -42,7 +42,8 @@ ANALYZER_USAGE = {
     "decisions_3factor.csv": {"usage": FULL, "continuous": True, "consumers": ["load_data decisions (session filter)"]},
     "cycle_3m_universe.jsonl": {"usage": FULL, "continuous": True, "consumers": ["research modules"]},
     "research_events_v22.jsonl": {
-        "usage": DASHBOARD_ONLY, "continuous": True, "consumers": ["research_dashboard event views"],
+        "usage": STRATEGY_LAB, "continuous": True,
+        "consumers": ["research_dashboard event views", "stream_studies outcome x observation mix (incremental index)"],
         "note": "fill-time ATR receipts are not copied into the trade ledger, limiting ATR-exit parity"},
     "trades_3factor.csv": {
         "usage": FULL, "continuous": False,
@@ -64,15 +65,16 @@ ANALYZER_USAGE = {
         "usage": FULL, "continuous": False, "consumers": ["compressed shadow schedule rows", "multiverse health"],
         "note": "compressed shadow rows read the active file only; now include the closed rotation"},
     "post_exit_replay.jsonl": {
-        "usage": IGNORED, "continuous": False, "consumers": [],
-        "note": "post-exit paths are reproducible from the 1 s tape (strategy_lab simulator)"},
+        "usage": STRATEGY_LAB, "continuous": False, "consumers": ["stream_studies exit-timing regret (all rotations)"]},
     "opportunity_capture.jsonl": {"usage": FULL, "continuous": False, "consumers": ["opportunity capture reports"]},
     "lane_opportunity_capture.jsonl": {"usage": FULL, "continuous": False,
                                        "consumers": ["lane_opportunity_capture_report"]},
     "signal_snapshot.jsonl": {"usage": FULL, "continuous": False, "consumers": ["entry gate sweeps"]},
     "execution_funnel.jsonl": {"usage": FULL, "continuous": False, "consumers": ["chase attribution"]},
-    "taker_signal_counterfactuals.jsonl": {"usage": IGNORED, "continuous": False, "consumers": []},
-    "fill_markouts.jsonl": {"usage": IGNORED, "continuous": False, "consumers": []},
+    "taker_signal_counterfactuals.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
+                                           "consumers": ["stream_studies taker counterfactual EV"]},
+    "fill_markouts.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
+                            "consumers": ["stream_studies post-fill markout curves"]},
 }
 
 

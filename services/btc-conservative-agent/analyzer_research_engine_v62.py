@@ -585,6 +585,8 @@ FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
 AI_CHALLENGER_REPORT_FILE = "ai_challenger_report.json"
 LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
 STRATEGY_LAB_REPORT_FILE = "strategy_lab_report.json"
+MAIN_RANKINGS_REPORT_FILE = "main_rankings_report.json"
+STREAM_STUDIES_REPORT_FILE = "stream_studies_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -689,6 +691,8 @@ ANALYZER_JSON_REPORT_FILES = (
     AI_CHALLENGER_REPORT_FILE,
     LEAD_LAG_REPORT_FILE,
     STRATEGY_LAB_REPORT_FILE,
+    MAIN_RANKINGS_REPORT_FILE,
+    STREAM_STUDIES_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -769,6 +773,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
     ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI"),
     ("Strategy Lab", STRATEGY_LAB_REPORT_FILE, "Pre-registered hypotheses judged on unseen post-registration trades (Holm), bounded exploratory families with family-wise nulls, BH q, deflated Sharpe and walk-forward, live-fill simulator parity and correlation to live tiles; CONSERVATIVE_BBO 1s tape, Bitfinex costs"),
+    ("Main Rankings (corrected)", MAIN_RANKINGS_REPORT_FILE, "Every main ranking (tiles, top combinations, regime x lane cells, feature correlations, expanding-quintile feature buckets) with hour-cluster p, Holm FWER and BH q; corrected verdict per row"),
+    ("Stream Studies", STREAM_STUDIES_REPORT_FILE, "Exit-timing regret from post_exit_replay, taker counterfactual EV per AI decision and tile, post-fill markout curves per tile x liquidity, research_events_v22 outcome/observation mix; per-stream health"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -8634,7 +8640,10 @@ def feature_impact_analysis(df):
             continue
         df_copy = df.copy()
         numeric_col = pd.to_numeric(df_copy[f], errors='coerce')
-        df_copy[f + "_bucket"] = pd.qcut(numeric_col, q=5, duplicates="drop")
+        labels = _expanding_quintile_labels(df_copy, numeric_col)
+        if labels is None:
+            continue
+        df_copy[f + "_bucket"] = labels
         stats = df_copy.groupby(f + "_bucket")["net_pnl_usd"].agg(["mean", "count", "sum"])
         stats["win_rate"] = df_copy.groupby(f + "_bucket")["net_pnl_usd"].apply(lambda x: (pd.to_numeric(x, errors='coerce')>0).mean()*100 if len(x)>0 else 0)
         print(f"\n{f} impact: {PIPELINE_ENFORCEMENT_TAG}")
@@ -12525,6 +12534,100 @@ def _strategy_lab_cache_dir():
         return None
     state = os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain"
     return os.path.join(state, "strategy-lab-cache")
+
+
+def _expanding_quintile_labels(frame, values):
+    """Q1..Q5 from strictly earlier trades (no look-ahead); None when strategy_lab is unavailable."""
+    try:
+        from strategy_lab.rankings import expanding_bucket_labels, trade_time
+    except Exception:
+        return None
+    ts = trade_time(frame)
+    return expanding_bucket_labels(
+        pd.to_numeric(values, errors="coerce").to_numpy(float), np.where(np.isfinite(ts), ts, np.inf),
+    )
+
+
+def _ranking_samples(sub):
+    try:
+        from strategy_lab.rankings import samples_of
+    except Exception:
+        return None
+    return samples_of(sub)
+
+
+def _ranking_multiple_testing(rows, samples, family):
+    """Holm / BH annotate ranking rows in place; strategy_lab is laptop-only, so degrade explicitly."""
+    try:
+        from strategy_lab.rankings import annotate
+        if any(sample is None for sample in samples):
+            raise ImportError("strategy_lab.rankings unavailable")
+        return annotate(rows, samples, family=family)
+    except Exception as exc:
+        return {"family": family, "status": "UNAVAILABLE", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _ranking_correlation_tests(rows):
+    try:
+        from strategy_lab.rankings import annotate_correlations
+        return annotate_correlations(rows)
+    except Exception as exc:
+        return {"family": "feature_importance", "status": "UNAVAILABLE", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def main_rankings_report(session=None, trades=None):
+    """Corrected verdicts (hour-cluster p, Holm, BH q) for every main ranking family."""
+    session = session or load_research_session()
+    tables, stage = {}, None
+    try:
+        from strategy_lab.export import stage_group as stage
+        from strategy_lab.rankings import build_main_rankings
+
+        labels = {lane: (spec or {}).get("label") for lane, spec in (ACTIVE_TILE_REGISTRY or {}).items()}
+        reports = {
+            "top_combinations": _load_json_report(TOP_COMBINATIONS_REPORT_FILE) or {},
+            "regime_leaderboard": _load_json_report(REGIME_LEADERBOARD_REPORT_FILE) or {},
+            "feature_importance": _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE) or {},
+        }
+        payload, tables = build_main_rankings(
+            trades, CURRENT_RESEARCH_LANES, labels=labels, reports=reports,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:  # corrected rankings must never stop the analyzer
+        payload = {"schema": "main_rankings_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    if stage is not None:
+        stage("main_rankings", payload, tables)
+    verdicts = {k: v.get("corrected_verdict") for k, v in (payload.get("tile_verdicts") or {}).items()}
+    print(f"  Main rankings: status={payload.get('status')} tiles={verdicts} {PIPELINE_ENFORCEMENT_TAG}")
+    return _write_aux_report(MAIN_RANKINGS_REPORT_FILE, payload, session)
+
+
+def stream_studies_report(session=None, trades=None):
+    """post_exit_replay, taker counterfactuals, fill markouts and research_events_v22 summaries."""
+    session = session or load_research_session()
+    tables, stage = {}, None
+    try:
+        from strategy_lab.export import stage_group as stage
+        from strategy_lab.stream_studies import run_stream_studies
+
+        epoch_ts = pd.to_numeric(pd.Series([session.get("collector_v22_epoch_ts")]), errors="coerce").iloc[0]
+        payload, tables = run_stream_studies(
+            os.path.dirname(os.path.abspath(_agent_data_path("trades_3factor.csv"))),
+            trades=trades, registry=ACTIVE_TILE_REGISTRY, lanes=CURRENT_RESEARCH_LANES,
+            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
+            epoch_start=float(epoch_ts) if pd.notna(epoch_ts) else 0.0,
+            cache_dir=_strategy_lab_cache_dir(),
+        )
+    except Exception as exc:  # stream studies must never stop the analyzer
+        payload = {"schema": "stream_studies_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    if stage is not None:
+        stage("stream_studies", payload, tables)
+    print(
+        f"  Stream studies: status={payload.get('status')} "
+        f"total={((payload.get('timing') or {}).get('total_sec'))}s errors={payload.get('errors')} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return _write_aux_report(STREAM_STUDIES_REPORT_FILE, payload, session)
 
 
 def strategy_lab_report(session=None, trades=None):
@@ -17222,6 +17325,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
         return payload
 
     combos = []
+    combo_samples = []
     dims = ["adx_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane"]
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
         adx_b, spread_b, entry_b, lane = keys
@@ -17243,6 +17347,8 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
             "lane": str(lane).upper(),
             **stats,
         })
+        combo_samples.append(_ranking_samples(sub))
+    multiple_testing = _ranking_multiple_testing(combos, combo_samples, "top_combinations")
     combos.sort(key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
     top = combos[:top_n]
     bottom = list(reversed(combos[-top_n:])) if len(combos) > top_n else list(reversed(combos))
@@ -17261,6 +17367,7 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
         "dimensions": dims,
         "filter_note": "Explicit direction-only cohort only: ADX x normalized score gap x entry path x lane. Probability-era trades are excluded; AI confidence is not fabricated.",
         "total_combos": len(combos),
+        "multiple_testing": multiple_testing,
         "top": top,
         "bottom": bottom,
     }
@@ -18988,6 +19095,7 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
         work[dim] = tag_rows.apply(lambda t, d=dim: t.get(d))
 
     cells = []
+    cell_samples = []
     by_regime_lane = {}
     for (regime, lane), sub in work.groupby(["regime_key", work["research_lane"].astype(str).str.upper()]):
         stats = _combo_stats_from_df(sub)
@@ -18995,8 +19103,10 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
             continue
         cell = {"regime": regime, "lane": lane, **stats}
         cells.append(cell)
+        cell_samples.append(_ranking_samples(sub))
         by_regime_lane.setdefault(regime, []).append(cell)
 
+    multiple_testing = _ranking_multiple_testing(cells, cell_samples, "regime_lane_cells")
     regimes = []
     for regime, lane_rows in sorted(by_regime_lane.items()):
         eligible = [r for r in lane_rows if r["trades"] >= min_trades]
@@ -19032,6 +19142,7 @@ def regime_leaderboard_report(trades=None, session=None, min_trades=3):
         "total_trades": len(work),
         "regime_dimensions": ["day_type", "session", "adx", "volatility", "funding", "liquidity"],
         "cells": cells,
+        "multiple_testing": multiple_testing,
         "regimes": regimes,
         "usage_note": "Recommend-only — do not auto-switch lanes until ≥20 trades per regime cell (~200 total tagged)",
     }
@@ -19189,6 +19300,7 @@ def feature_importance_report(trades=None, session=None):
             "n": int(len(aligned)),
         })
     ranked.sort(key=lambda x: -x["abs_correlation"])
+    multiple_testing = _ranking_correlation_tests(ranked)
     if ranked:
         top = ranked[0]
         weak = [r["feature"] for r in ranked if r["abs_correlation"] < 0.05]
@@ -19205,6 +19317,7 @@ def feature_importance_report(trades=None, session=None):
         "method": "Pearson correlation with net_pnl_usd — validation only, not for auto-tuning",
         "trades": int(pnl.notna().sum()),
         "features": ranked,
+        "multiple_testing": multiple_testing,
         "weak_signals": [r["feature"] for r in ranked if r["abs_correlation"] < 0.05],
     }
     try:
@@ -22877,6 +22990,8 @@ def finalize_analyzer_outputs(
     data_scope="all",
 ):
     """Write hierarchical text reports + dashboard; print all layers to console."""
+    main_rankings_report(session=session, trades=trades)
+    stream_studies_report(session=session, trades=trades)
     payload = build_executive_summary_payload(
         session,
         trades,

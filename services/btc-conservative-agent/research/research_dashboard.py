@@ -396,7 +396,7 @@ def _read_api_cache_key() -> str:
 # from the report-generation cache (the export is written after the manifest).
 _UNCACHED_API_PATHS = (
     "/api/health", "/api/status", "/api/integrity",
-    "/api/export/latest", "/api/hypotheses", "/api/streams/health",
+    "/api/export/latest", "/api/hypotheses", "/api/streams/health", "/api/insights",
 )
 
 
@@ -3264,6 +3264,14 @@ def api_streams_health():
     from strategy_lab import api as _lab_api
 
     return jsonify(_lab_api.streams_health(report_root=str(ROOT)))
+
+
+@app.route("/api/insights")
+def api_insights():
+    """One-call agent feed: health, live Fly bot, transfer/ACK, deploy queue, analyzer export (stale = refused)."""
+    from strategy_lab import insights as _insights
+
+    return jsonify(_insights.snapshot(check_live=request.args.get("live_parity", "1") != "0"))
 
 
 @app.route("/api/runtime-incidents")
@@ -9160,6 +9168,7 @@ def _decision_payload() -> dict:
     selector, selector_evidence = _current_lane_artifact("fixed_vs_dynamic_selector_report.json")
     trial, trial_evidence = _current_lane_artifact("forward_trial_report.json")
     ai_challengers, _ai_challenger_evidence = _current_lane_artifact(_ai_challenger_view.REPORT_FILE)
+    rankings, rankings_evidence = _current_lane_artifact("main_rankings_report.json")
     generated_at = manifest.get("generated_at")
     fmt = format_melbourne_dt
     generation = {
@@ -9214,6 +9223,7 @@ def _decision_payload() -> dict:
         ),
         selector=_decision_view.selector_view(selector or None, selector_evidence),
         forward_trial=_decision_view.forward_trial_view(trial or None, trial_evidence),
+        rankings=_decision_view.rankings_view(rankings or None, rankings_evidence),
     )
 
 

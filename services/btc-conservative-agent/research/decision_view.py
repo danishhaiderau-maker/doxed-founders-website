@@ -603,11 +603,39 @@ def forward_trial_view(report: dict | None, evidence: dict | None) -> dict:
     }
 
 
+_DISCOVERY_VERDICTS = ("POSITIVE_FWER", "NEGATIVE_FWER", "POSITIVE_FDR", "NEGATIVE_FDR")
+
+
+def rankings_view(report: dict | None, evidence: dict | None) -> dict:
+    """Family-wise corrected verdicts (main_rankings_report) for the tiles and every main ranking."""
+    empty = {"tiles": {}, "families": [], "discoveries": []}
+    if not isinstance(report, dict) or not report or (evidence or {}).get("status") != "CURRENT_GENERATION":
+        return {"state": NO_DATA, "text": _not_current(evidence), **empty}
+    if report.get("status") != "OK":
+        return {"state": NO_DATA, "text": report.get("error") or str(report.get("status")), **empty}
+    families, discoveries = [], []
+    for name, block in (report.get("families") or {}).items():
+        summary = block.get("summary") or {}
+        families.append({"family": name, "rows": summary.get("rows"), "tested": summary.get("tested"),
+                         "raw": summary.get("raw_p_below_alpha"),
+                         "expected_false": summary.get("expected_false_raw_hits"),
+                         "holm": summary.get("holm_significant"), "bh": summary.get("bh_discoveries")})
+        for row in block.get("rows") or []:
+            if row.get("corrected_verdict") in _DISCOVERY_VERDICTS:
+                key = row.get("key") or row.get("combo") or row.get("feature") or f"{row.get('regime')}|{row.get('lane')}"
+                discoveries.append({"family": name, "key": key, "verdict": row.get("corrected_verdict"),
+                                    "n": row.get("n_tested"), "p_holm": row.get("p_holm"), "q_bh": row.get("q_bh")})
+    discoveries.sort(key=lambda d: (d["p_holm"] is None, d["p_holm"] if d["p_holm"] is not None else 1.0))
+    return {"state": VALUE, "text": "", "tiles": dict(report.get("tile_verdicts") or {}), "families": families,
+            "discoveries": discoveries[:20]}
+
+
 def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | None,
                            ai_coverage: dict | None, generation: dict, alarms: list,
                            freshness_rows: list, summary_trades=None,
                            relay_state: dict | None = None, selector: dict | None = None,
-                           forward_trial: dict | None = None) -> dict:
+                           forward_trial: dict | None = None, rankings: dict | None = None) -> dict:
+    rankings = rankings or rankings_view(None, None)
     has_generation = bool(generation.get("generated_at")) and isinstance(funnel_report, dict)
     stale_since = None if generation.get("current") else generation.get("generated_at_display") or generation.get("generated_at")
     funnel_lanes = (funnel_report or {}).get("lanes") if isinstance(funnel_report, dict) else None
@@ -630,6 +658,7 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
             "mae_mfe": extremes,
             "ai_vs_rules": ai,
             "verdict": tile_verdict(has_generation=has_generation, ev=ev, stale_since=stale_since),
+            "corrected": (rankings.get("tiles") or {}).get(lane),
         })
     tile_counts = [t["ev"]["n"] for t in tiles if t["ev"]["n"] is not None]
     return {
@@ -644,6 +673,7 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
         "relay_state": relay_state,
         "selector": selector or selector_view(None, None),
         "forward_trial": forward_trial or forward_trial_view(None, None),
+        "rankings": rankings,
     }
 
 
@@ -707,6 +737,43 @@ def _trial_html(view: dict) -> str:
                   "behaviour, tile toggles or relay eligibility.</p>")
 
 
+def _p_text(value) -> str:
+    return "n/a" if value is None else (f"{value:.3f}" if value >= 0.001 else "<0.001")
+
+
+def _na(value) -> str:
+    return "n/a" if value is None else str(value)
+
+
+def _corrected_text(corr: dict | None) -> str:
+    if not corr:
+        return "Corrected verdict: no data yet"
+    return (f"Corrected verdict: {corr.get('verdict_text') or corr.get('corrected_verdict')} "
+            f"(n={_na(corr.get('n_tested'))}, Holm p={_p_text(corr.get('p_holm'))}, BH q={_p_text(corr.get('q_bh'))})")
+
+
+def _rankings_html(view: dict) -> str:
+    if view.get("state") != VALUE:
+        return f"<p id='decisionRankings' style='color:#8b949e'>{_esc(view.get('text') or NO_DATA_TEXT)}</p>"
+    fam = "".join(
+        f"<tr><td>{_esc(f['family'])}</td><td>{_esc(_na(f['tested']))} of {_esc(_na(f['rows']))}</td>"
+        f"<td>{_esc(_na(f['raw']))} (~{_esc(_na(f['expected_false']))} expected by chance)</td>"
+        f"<td>{_esc(_na(f['holm']))}</td><td>{_esc(_na(f['bh']))}</td></tr>"
+        for f in view.get("families") or [])
+    disc = "".join(
+        f"<tr><td>{_esc(d['family'])}</td><td>{_esc(d['key'])}</td><td>{_esc(d['verdict'])}</td><td>{_esc(_na(d['n']))}</td>"
+        f"<td>{_esc(_p_text(d['p_holm']))}</td><td>{_esc(_p_text(d['q_bh']))}</td></tr>"
+        for d in view.get("discoveries") or []) or "<tr><td colspan='6'>No row survives Holm or BH correction.</td></tr>"
+    return ("<div class='wrap'><table id='decisionRankings'><thead><tr><th>Ranking family</th><th>Rows tested</th>"
+            "<th>Raw p&lt;0.05</th><th>Holm significant</th><th>BH discoveries (q&le;0.10)</th></tr></thead>"
+            f"<tbody>{fam}</tbody></table></div>"
+            "<div class='wrap'><table id='decisionRankingDiscoveries'><thead><tr><th>Family</th><th>Row</th>"
+            "<th>Corrected verdict</th><th>n</th><th>Holm p</th><th>BH q</th></tr></thead>"
+            f"<tbody>{disc}</tbody></table></div><p class='sub'>Each ranking is one family: hour-cluster t-test on mean "
+            "after-cost PnL, Holm across the family (family-wise 5%) and Benjamini-Hochberg q. Feature buckets use "
+            "expanding quintiles built only from earlier trades. Rows with fewer than 10 trades are not tested.</p>")
+
+
 def render_decision_html(payload: dict, *, nav_links, details_href: str = "/details") -> str:
     gen = payload.get("generation") or {}
     stale = not gen.get("current")
@@ -749,7 +816,8 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
             f"<td>{extremes}</td>"
             f"<td>{cell(ai['cell'], _usd)}{ai_note}</td>"
             "</tr>"
-            f"<tr class='verdict'><td colspan='7' style='color:{colour}'>Verdict: {_esc(verdict['text'])}</td></tr>"
+            f"<tr class='verdict'><td colspan='7' style='color:{colour}'>Verdict: {_esc(verdict['text'])}"
+            f"<div class='sub'>{_esc(_corrected_text(tile.get('corrected')))}</div></td></tr>"
         )
     alarm_html = "".join(
         f"<li style='color:{_SEVERITY_COLOURS.get(a['severity'], '#8b949e')}'>"
@@ -777,6 +845,7 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
         for row in payload.get("freshness") or []
     )
     selector_html, trial_html = _selector_html(payload.get("selector") or {}), _trial_html(payload.get("forward_trial") or {})
+    rankings_html = _rankings_html(payload.get("rankings") or {})
     nav = " · ".join(f"<a href=\"{_esc(href)}\">{_esc(label)}</a>" for label, href in nav_links)
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -805,6 +874,7 @@ ul{{padding-left:18px;}} li{{margin:6px 0;}} .wrap{{overflow-x:auto;}}
 <p class="sub">A tile needs at least {payload.get('min_sample', MIN_DECISION_SAMPLE)} closed trades before any EV
 verdict or ranking. "no data yet" means the value was not collected or not published; it is never a zero.</p>
 <h2>Trade counts</h2><p id="decisionTradeScope">{_esc((payload.get('trade_counts') or {}).get('text') or NO_DATA_TEXT)}</p>
+<h2>Main rankings after multiple-testing correction</h2>{rankings_html}
 <h2>Fixed tile vs dynamic selector (walk-forward OOS, after costs)</h2>{selector_html}
 <h2>Forward trial (freeze protocol, 15 days)</h2>{trial_html}
 <h2>Bitfinex relay state (read-only)</h2><div class="wrap"><table id="decisionRelayState">{relay_html}</table></div>
