@@ -240,3 +240,84 @@ def test_collector_rotates_without_deleting(tmp_path, monkeypatch):
         if n.startswith(mct.FILE_NAME):
             total += sum(1 for _ in open(tmp_path / n, encoding="utf-8"))
     assert total == 3
+
+
+# --------------------------------------------------------------------------
+# Restart-safe trailing regime (rehydrated from durable files on boot)
+# --------------------------------------------------------------------------
+def _tape_row(sec, mid, fresh=True):
+    return json.dumps({"schema": "market_microstructure_1s_v1", "bucket_ts": sec, "fresh": fresh,
+                       "valid_bbo": True, "bid": mid - 0.5, "ask": mid + 0.5, "bid_qty": 1.0})
+
+
+def _closes(n, start=100000.0):
+    out, px = [], start
+    for i in range(n):
+        px *= 1.0 + (0.0004 if (i * 7919) % 13 < 6 else -0.00035) * (1 + (i % 5) / 4)
+        out.append(round(px, 2))
+    return out
+
+
+def _write_tape(tmp_path, first_minute, closes, split=None):
+    lines = []
+    for i, px in enumerate(closes):
+        minute = first_minute + i * 60
+        lines.append(_tape_row(minute + 10, px * 0.999))
+        lines.append(_tape_row(minute + 59, px))
+        lines.append(_tape_row(minute + 59, px * 2, fresh=False))
+    split = len(lines) // 2 if split is None else split
+    base = tmp_path / "market_microstructure_1s.jsonl"
+    (tmp_path / "market_microstructure_1s.jsonl.1").write_text("\n".join(lines[:split]) + "\n", encoding="utf-8")
+    base.write_text("\n".join(lines[split:]) + "\n", encoding="utf-8")
+
+
+def test_regime_seed_from_tape_survives_restart_and_matches_live(tmp_path):
+    n = tr.DEFAULT_MIN_HISTORY + 60
+    first = T0 - n * 60
+    closes = _closes(n)
+    _write_tape(tmp_path, first, closes)
+    c = mcc.Collector(str(tmp_path), clock=_Clock(T0 + 5), fetch=_fake_fetch, start_workers=False)
+    seed = c.regime_seed
+    assert seed["tape_minutes"] == n and seed["labels_ready"] is True
+    assert seed["last_minute_ts"] == T0 - 60
+    # An uninterrupted collector would have produced exactly these values live.
+    os.makedirs(tmp_path / "empty")
+    live = mcc.Collector(str(tmp_path / "empty"), clock=_Clock(T0), fetch=_fake_fetch, start_workers=False)
+    assert len(live._regime) == 0
+    for px in closes:
+        live._regime_for([None] * 59 + [px])
+    assert c._regime._sorted == live._regime._sorted
+    assert list(c._bfx_closes) == list(live._bfx_closes)
+    nxt = c._regime_for([None] * 59 + [closes[-1] * 1.0003])
+    ref = live._regime_for([None] * 59 + [closes[-1] * 1.0003])
+    assert nxt["label"] != tr.WARMUP and nxt == ref
+    health = mct.health_from_live(c.live_payload(T0 + 5), T0 + 5)
+    assert health["regime"]["seed"]["labels_ready"] is True
+    assert health["regime"]["last"]["label"] == nxt["label"]
+
+
+def test_regime_seed_never_reads_at_or_after_the_first_live_minute(tmp_path):
+    n = 40
+    closes = _closes(n)
+    _write_tape(tmp_path, T0 - 30 * 60, closes)
+    c = mcc.Collector(str(tmp_path), clock=_Clock(T0 + 5), fetch=_fake_fetch, start_workers=False)
+    assert c.regime_seed["tape_minutes"] == 30
+    assert c.regime_seed["labels_ready"] is False
+
+
+def test_regime_seed_uses_stamped_context_rv_only_before_tape_coverage(tmp_path):
+    tape_first = T0 - 100 * 60
+    _write_tape(tmp_path, tape_first, _closes(100))
+    ctx = []
+    for i in range(50):
+        minute = tape_first - (50 - i) * 60
+        ctx.append(json.dumps({"schema": mct.SCHEMA, "minute_ts": minute,
+                               "regime": {"rv15_bps": 1.0 + i / 100}}))
+    ctx.append(json.dumps({"schema": mct.SCHEMA, "minute_ts": tape_first + 60,
+                           "regime": {"rv15_bps": 99.0}}))
+    (tmp_path / mct.FILE_NAME).write_text("\n".join(ctx) + "\n", encoding="utf-8")
+    c = mcc.Collector(str(tmp_path), clock=_Clock(T0 + 5), fetch=_fake_fetch, start_workers=False)
+    assert c.regime_seed["context_rv_n"] == 50
+    assert 99.0 not in c._regime._sorted
+    assert c.regime_seed["first_minute_ts"] == tape_first - 50 * 60
+    assert len(c._regime) == 50 + c.regime_seed["tape_rv_n"]

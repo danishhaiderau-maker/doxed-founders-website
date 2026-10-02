@@ -549,6 +549,8 @@ def health_from_live(live: Optional[Mapping[str, Any]], now: float, *, enabled: 
         return out
     age = now - float(live.get("written_ts") or 0.0)
     out["age_sec"] = round(age, 1)
+    if isinstance(live.get("regime"), Mapping):
+        out["regime"] = dict(live["regime"])
     if age > COLLECTOR_DOWN_SEC:
         out["status"] = "COLLECTOR_DOWN"
         return out

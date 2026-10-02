@@ -45,10 +45,97 @@ REST_OFFSET_SEC = 20
 REST_TIMEOUT_SEC = 5.0
 REST_MAX_BYTES = 256 * 1024
 RV_WINDOW_MIN = 15
-REGIME_BACKFILL_BYTES = 8 * 1024 * 1024
 STATUS_LOG_EVERY_SEC = 900
 USER_AGENT = "doxed-market-context/1 (watch-only research)"
 _RV_RE = re.compile(rb'"rv15_bps":\s*([0-9.]+)')
+_MINUTE_RE = re.compile(rb'"minute_ts":\s*(\d+)')
+_FRESH_RE = re.compile(rb'"fresh":\s*true')
+_VALID_BBO_RE = re.compile(rb'"valid_bbo":\s*true')
+_BID_RE = re.compile(rb'"bid":\s*([0-9][0-9.eE+-]*)')
+_ASK_RE = re.compile(rb'"ask":\s*([0-9][0-9.eE+-]*)')
+
+
+def _rotation_paths(path: str) -> list:
+    """Active file plus numbered rotations, oldest first (higher suffix = newer)."""
+    rotated = sorted(
+        (int(p.rsplit(".", 1)[-1]), p) for p in glob.glob(path + ".*")
+        if p.rsplit(".", 1)[-1].isdigit()
+    )
+    paths = [p for _, p in rotated]
+    if os.path.exists(path):
+        paths.append(path)
+    return paths
+
+
+def rv15_from_closes(closes: list) -> Optional[float]:
+    """rv15 of consecutive 1-minute closes; shared by live labelling and seeding."""
+    rets = [math.log(b / a) if a and b else None for a, b in zip(closes, closes[1:])]
+    if sum(1 for r in rets if r is not None) < RV_WINDOW_MIN - 2:
+        return None
+    return tr.rv_bps(rets)
+
+
+def tape_minute_closes(paths: list, start_ts: int, end_ts: int) -> dict:
+    """{minute_ts: last fresh valid Bitfinex mid} from the 1 s tape, ``start_ts <= s < end_ts``.
+
+    Same selection as ``cross_venue_collector.read_bfx_mids`` + ``_regime_for``:
+    fresh rows with a valid BBO, the close being the latest such second.
+    """
+    best: dict = {}
+    for path in paths:
+        try:
+            handle = open(path, "rb")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                match = cvc._BUCKET_RE.search(line)
+                if not match:
+                    continue
+                sec = int(match.group(1))
+                if sec < start_ts or sec >= end_ts:
+                    continue
+                if not (_FRESH_RE.search(line) and _VALID_BBO_RE.search(line)):
+                    continue
+                bid_m, ask_m = _BID_RE.search(line), _ASK_RE.search(line)
+                if not bid_m or not ask_m:
+                    continue
+                try:
+                    bid, ask = float(bid_m.group(1)), float(ask_m.group(1))
+                except ValueError:
+                    continue
+                if not (math.isfinite(bid) and math.isfinite(ask) and bid > 0 and ask > 0):
+                    continue
+                minute = sec - sec % 60
+                offset = sec - minute
+                prev = best.get(minute)
+                if prev is None or offset >= prev[0]:
+                    best[minute] = (offset, (bid + ask) / 2.0)
+    return {minute: mid for minute, (_, mid) in best.items()}
+
+
+def context_rv_values(paths: list, start_ts: int, end_ts: int) -> list:
+    """[(minute_ts, rv15_bps)] already stamped in market_context rows, chronological."""
+    out = []
+    for path in paths:
+        try:
+            handle = open(path, "rb")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                minute_m = _MINUTE_RE.search(line)
+                rv_m = _RV_RE.search(line)
+                if not minute_m or not rv_m:
+                    continue
+                minute = int(minute_m.group(1))
+                if start_ts <= minute < end_ts:
+                    try:
+                        out.append((minute, float(rv_m.group(1))))
+                    except ValueError:
+                        continue
+    out.sort(key=lambda item: item[0])
+    return out
 
 
 def _http_json(url: str, timeout: float = REST_TIMEOUT_SEC):
@@ -169,6 +256,8 @@ class Collector:
                       "day": None, "write_failures": 0, "live_write_failures": 0, "cpu_pct_1m": None,
                       "rss_mb": None, "seconds_closed": 0, "seconds_skipped": 0,
                       "regime_backfill_n": 0}
+        self.regime_seed: dict = {}
+        self._last_regime: dict = {}
         self._backfill_regime()
 
     def _feed_connected(self, feed: str) -> bool:
@@ -176,21 +265,47 @@ class Collector:
         return bool(worker and worker.connected)
 
     def _backfill_regime(self) -> None:
-        """Seed the trailing regime from our own tail so a restart is not a fresh WARMUP."""
-        try:
-            with open(self.path, "rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - REGIME_BACKFILL_BYTES))
-                chunk = handle.read()
-        except OSError:
-            return
-        for m in _RV_RE.finditer(chunk):
-            try:
-                self._regime.push(float(m.group(1)))
-            except ValueError:
-                continue
+        """Rehydrate the trailing regime from durable files so a restart is not a fresh WARMUP.
+
+        The Bitfinex 1 s tape (active file + rotations, ~55 h on the volume) is
+        the primary source: rv15 is recomputed from its 1-minute closes with
+        the exact live formula, so a restarted collector labels the next minute
+        as an uninterrupted one would. rv15 values already stamped in older
+        market_context rows fill the part of the trailing window the tape no
+        longer covers. Values are pushed oldest first so window eviction stays
+        chronological; everything is strictly before the first live minute.
+        """
+        started = time.monotonic()
+        start_minute = int(self.started_ts) - int(self.started_ts) % 60
+        window_start = start_minute - (self._regime.window + RV_WINDOW_MIN) * 60
+        closes = tape_minute_closes(_rotation_paths(self.bfx_path), window_start, start_minute)
+        tape_first = min(closes) if closes else start_minute
+        context = context_rv_values(_rotation_paths(self.path), window_start, tape_first)
+        for _, rv in context:
+            self._regime.push(rv)
+        tape_rv_n = 0
+        if closes:
+            window: deque = deque(maxlen=RV_WINDOW_MIN + 1)
+            for minute in range(tape_first, start_minute, 60):
+                window.append(closes.get(minute))
+                rv = rv15_from_closes(list(window))
+                if rv is not None:
+                    self._regime.push(rv)
+                    tape_rv_n += 1
+            self._bfx_closes.extend(window)
         self.stats["regime_backfill_n"] = len(self._regime)
+        self.regime_seed = {
+            "source": "bitfinex_1s_tape+market_context_rv15",
+            "tape_minutes": len(closes),
+            "tape_rv_n": tape_rv_n,
+            "context_rv_n": len(context),
+            "first_minute_ts": context[0][0] if context else (tape_first if closes else None),
+            "last_minute_ts": (start_minute - 60) if closes else (context[-1][0] if context else None),
+            "history_n": len(self._regime),
+            "min_history": self._regime.min_history,
+            "labels_ready": len(self._regime) >= self._regime.min_history,
+            "elapsed_ms": round((time.monotonic() - started) * 1000.0, 1),
+        }
 
     def start(self) -> None:
         if self._start_workers:
@@ -257,10 +372,10 @@ class Collector:
     def _regime_for(self, bfx_mids: list) -> dict:
         close = next((m for m in reversed(bfx_mids) if m), None)
         self._bfx_closes.append(close)
-        closes = list(self._bfx_closes)
-        rets = [math.log(b / a) if a and b else None for a, b in zip(closes, closes[1:])]
-        rv = tr.rv_bps(rets) if sum(1 for r in rets if r is not None) >= RV_WINDOW_MIN - 2 else None
+        rv = rv15_from_closes(list(self._bfx_closes))
         obs = self._regime.observe(rv)
+        self._last_regime = {"label": obs["label"], "rank_pct": obs["rank_pct"],
+                             "history_n": obs["history_n"]}
         return {"schema": tr.SCHEMA, "source": "bitfinex_1m_close", "rv15_bps": rv,
                 "trailing_window_min": self._regime.window, **obs}
 
@@ -374,6 +489,8 @@ class Collector:
                             for v, d in latest.items()},
             "liquidation_events": {v: b.events for v, b in self.liq.items()},
             "stats": {**self.stats, "file": mct.FILE_NAME, "liq_file": mct.LIQ_FILE_NAME},
+            "regime": {"history_n": len(self._regime), "min_history": self._regime.min_history,
+                       "last": self._last_regime or None, "seed": self.regime_seed or None},
         }
 
     def write_live(self, now: float) -> None:

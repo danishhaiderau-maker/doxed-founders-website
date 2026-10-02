@@ -1253,6 +1253,8 @@ jobs:
           python -m pytest test_phantom_cancel_lane_gate.py test_relay_event_outbox.py -q
           python -m pytest test_post_exit_replay_boot_memory.py -q
           python -m pytest test_market_context.py test_data_quality_fixes_20261002.py test_event_study_and_data_health.py test_ai_shadow_challengers.py test_ai_input_revision_r2.py test_ai_regime_and_decision_snapshots.py test_decision_model_report.py test_cross_venue_tape.py -q
+
+          python -m pytest test_runtime_telemetry.py test_trade_lock_telemetry.py test_trade_lock_contention.py -q
           python test_phantom_cancel_endpoint.py
 
       - name: Verify guarded deploy maintenance boundary failure modes
