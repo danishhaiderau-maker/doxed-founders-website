@@ -50,11 +50,11 @@ def test_restore_last_ai_payload_from_log(tmp_path, monkeypatch):
     assert bot_mod.LAST_AI_TIMESTAMP == "2026-08-19T11:50:00Z"
 
 
-def test_dashboard_names_canonical_non_onedrive_mirror():
+def test_dashboard_names_segment_store_not_onedrive_or_legacy_mirror():
     html = bot_mod.HTML
-    assert "C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data" in html
-    assert "C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror" not in html
-    assert "services/btc-conservative-agent/fly-data-mirror" not in html
+    assert "Laptop segment pull" in html
+    assert "onedrive" not in html.casefold()
+    assert "fly-data-mirror" not in html
 
 
 def test_json_for_js_keeps_quotes_newlines_backticks_inside_json():
