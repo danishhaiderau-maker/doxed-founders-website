@@ -188,8 +188,17 @@ Fly published `shipped_seq`, compared with the laptop's applied seq and with Fly
 `laptop_acked_seq`. RED when any of these holds:
 - no finished pull for 15 minutes;
 - applied is more than 30 seqs behind published;
-- applied has been behind published for 15 minutes;
-- Fly's ACK has trailed the applied seq for 15 minutes.
+- applied has been behind published, without advancing, for 15 minutes;
+- Fly's ACK is more than 10 seqs behind applied;
+- Fly's ACK has trailed applied without advancing for 15 minutes.
+
+Fly polls ACKs at most every `RESEARCH_SEGMENTS_ACK_POLL_SECONDS` (300s), between
+idle-priority shipper cycles. While it ships every few minutes, `laptop_acked_seq`
+normally trails applied by one or two seqs for up to roughly 10 minutes. That is not
+a fault as long as it keeps advancing (false RED of 2026-10-02, replayed in
+`test_replay_fly_ack_chasing_applied_20261002_is_not_red`). To tell a stuck Fly poll
+from a failing laptop POST, compare `/api/research-segments/v2/head`
+`laptop_acked.through_seq` with `/health` `volume.transfer.laptop_acked_seq`.
 
 Fix: check `segment-pull.status.json`, `fly-mirror-segments\.puller\status.json` and
 `logs\segment-pull-loop-*.log`. The supervisor restarts a dead loop.
@@ -218,7 +227,11 @@ Fix: the supervisor restarts a down dashboard (`run-analyzer-once.ps1 -EnsureDas
 ### analyzer.cycle
 - Running cycle duration: AMBER at 45 minutes, RED at 90 minutes.
 - The last cycle's exit code.
-- `v2c` HEAD must equal the Fly revision; `v2c-auto-ff` follows successful deploys.
+- `v2c` HEAD must contain the Fly revision, which is the same ancestry rule as the cycle's
+  `ANALYZER_REVISION_MISMATCH` guard. Laptop-only merges on top of the deployed revision
+  are GREEN. `v2c-auto-ff` follows successful deploys.
+- Exit 3 means promotion was refused. `FLY_UNSHIPPED_BYTES` > 32 MB right after a deploy
+  restart is transient; the next scheduled cycle retries.
 
 Fix: check `v2c-auto-ff.receipts.jsonl` (refusals) and the cycle phase log.
 

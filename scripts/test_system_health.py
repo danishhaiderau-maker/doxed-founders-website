@@ -359,6 +359,93 @@ def test_pull_and_ack_lag():
     assert by_id(sh.evaluate(inputs, {}))["laptop.pull_ack"]["status"] == sh.RED
 
 
+# Laptop applied/ACKed transitions from segment-pull-loop-2026100{1,2}.log after the #271 deploy.
+APPLIED_20261002 = [("2026-10-01T23:41:45Z", 2066), ("2026-10-01T23:43:34Z", 2067), ("2026-10-01T23:45:24Z", 2068),
+                    ("2026-10-01T23:49:18Z", 2069), ("2026-10-01T23:50:14Z", 2070), ("2026-10-01T23:52:51Z", 2071),
+                    ("2026-10-01T23:57:30Z", 2072), ("2026-10-02T00:02:07Z", 2073), ("2026-10-02T00:06:13Z", 2074),
+                    ("2026-10-02T00:09:32Z", 2075), ("2026-10-02T00:13:40Z", 2076), ("2026-10-02T00:16:50Z", 2077)]
+
+
+def _seq_at(points: list, when: float) -> int:
+    return [seq for at, seq in points if ts(at) <= when][-1]
+
+
+def ack_chase_inputs(now: float, fly_acked: int) -> dict:
+    inputs = healthy(now)
+    applied = _seq_at(APPLIED_20261002, now)
+    inputs["fly_health"]["volume"]["transfer"].update(shipped_seq=applied, laptop_acked_seq=fly_acked,
+                                                      last_segment_at=now - 60)
+    inputs["puller_status"]["applied_seq"] = inputs["pull_status"]["appliedSeq"] = applied
+    inputs["ack_receipt"]["through_seq"] = applied
+    return inputs
+
+
+# (watcher sample, Fly laptop_acked_seq). Fly polls ACKs at most every 300s at the top of a
+# ~300s loop, so laptop_acked trails applied by a segment or two yet keeps advancing.
+FLY_ACKED_20261002 = [("2026-10-01T23:50:38Z", 2070), ("2026-10-01T23:55:38Z", 2070), ("2026-10-02T00:00:38Z", 2071),
+                      ("2026-10-02T00:05:38Z", 2072), ("2026-10-02T00:09:10Z", 2073), ("2026-10-02T00:09:34Z", 2073),
+                      ("2026-10-02T00:12:38Z", 2073)]
+
+
+def test_replay_fly_ack_chasing_applied_20261002_is_not_red():
+    # The legacy check paged "Fly laptop_acked behind applied for 28m" at 00:09Z although
+    # the laptop's ACK reached the segment server and Fly's ACK advanced throughout.
+    state: dict = {}
+    legacy_red = []
+    for at, fly_acked in FLY_ACKED_20261002:
+        now = ts(at)
+        inputs = ack_chase_inputs(now, fly_acked)
+        check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+        assert check["status"] == sh.GREEN, (at, check["observed"], check["hint"])
+        if now - ts(FLY_ACKED_20261002[0][0]) > sh.THRESHOLDS["ack_lag_red_sec"]:
+            legacy_red.append(at)
+    assert legacy_red[0] == "2026-10-02T00:09:10Z"
+
+
+def test_analyzer_on_laptop_only_descendant_of_fly_rev_is_green():
+    # 2026-10-02: v2c fast-forwarded past Fly ad30ecaed to 3376338f5 (#269/#273, scripts/analyzer only);
+    # the cycle's ancestry guard ran exit 0, so the watcher must not hold analyzer.cycle AMBER.
+    now = ts("2026-10-02T00:35:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_head"] = "3376338f588e0000"
+    inputs["analyzer_contains_fly"] = True
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.cycle"]["status"] == sh.GREEN
+    inputs["analyzer_contains_fly"] = False
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.cycle"]
+    assert check["status"] == sh.AMBER and "does not contain Fly" in check["observed"]
+
+
+def test_fly_ack_frozen_while_laptop_applies_is_red_within_threshold():
+    state: dict = {}
+    start = ts("2026-10-01T23:50:38Z")
+    now, first_red = start, None
+    while now <= ts("2026-10-02T00:20:38Z"):
+        check = by_id(sh.evaluate(ack_chase_inputs(now, 2070), state))["laptop.pull_ack"]
+        if check["status"] == sh.RED and first_red is None:
+            first_red = now
+            assert "not advancing" in check["hint"]
+        now += TICK
+    assert first_red is not None and first_red - start <= sh.THRESHOLDS["ack_lag_red_sec"] + TICK
+
+
+def test_fly_ack_far_behind_applied_is_red_even_if_advancing():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["fly_health"]["volume"]["transfer"]["laptop_acked_seq"] = 100 - sh.THRESHOLDS["ack_lag_seq_red"] - 1
+    check = by_id(sh.evaluate(inputs, {}))["laptop.pull_ack"]
+    assert check["status"] == sh.RED and "segments" in check["hint"]
+
+
+def test_ack_lag_from_first_observation_is_not_masked_by_empty_memory():
+    now = ts("2026-10-02T03:00:00Z")
+    state: dict = {}
+    for i in range(5):
+        inputs = healthy(now + i * TICK)
+        inputs["fly_health"]["volume"]["transfer"]["laptop_acked_seq"] = 98
+        status = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"]
+    assert status == sh.RED
+
+
 def test_bitfinex_and_relay_safety():
     now = ts("2026-10-02T03:00:00Z")
     inputs = healthy(now)

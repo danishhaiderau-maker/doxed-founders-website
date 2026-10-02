@@ -90,6 +90,7 @@ THRESHOLDS: dict[str, float] = {
     "pull_lag_seq_red": 30,
     "pull_lag_red_sec": 15 * MIN,
     "ack_lag_red_sec": 15 * MIN,
+    "ack_lag_seq_red": 10,
     "analyzer_gen_amber_sec": 45 * MIN,
     "analyzer_gen_red_sec": 90 * MIN,
     "analyzer_api_down_red_sec": 20 * MIN,
@@ -461,6 +462,12 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     cache = state.setdefault("cache", {})
     inputs["registry"] = collect_registry(opts.analyzer_repo, cache.setdefault("registry", {}))
     inputs["analyzer_head"] = _git(opts.analyzer_repo, "rev-parse", "HEAD")
+    fly_rev = str(dig(inputs.get("fly_status"), "git_rev") or dig(inputs.get("fly_health"), "git_rev") or "")
+    if fly_rev and inputs["analyzer_head"]:
+        # Same rule as run-segment-analyzer-cycle.ps1: laptop-only merges on top of
+        # the deployed revision are fine.
+        inputs["analyzer_contains_fly"] = _git(opts.analyzer_repo, "merge-base", "--is-ancestor",
+                                               fly_rev, "HEAD") is not None
     master = cache.get("master") or {}
     if now - float(master.get("at") or 0) > 10 * MIN:
         line = _git(opts.analyzer_repo, "ls-remote", "origin", "refs/heads/master", timeout=30)
@@ -886,24 +893,35 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         mem["pull_caught_up_ts"] = now
     if fly_acked is not None and applied is not None and int(fly_acked) >= int(applied):
         mem["ack_caught_up_ts"] = now
+    # While Fly ships every few minutes and polls ACKs every ~5m, the trailing
+    # counter can chase the leading one indefinitely without ever matching at a
+    # tick. Lag is only a custody risk when the trailing counter stops advancing.
+    if applied is not None and applied != mem.get("applied_seq"):
+        mem["applied_seq"], mem["applied_changed_ts"] = applied, now
+    if fly_acked is not None and fly_acked != mem.get("fly_acked_seq"):
+        mem["fly_acked_seq"], mem["fly_acked_changed_ts"] = fly_acked, now
     pull_lag = (int(published) - int(applied)) if (published is not None and applied is not None) else None
-    behind_for = now - float(mem.get("pull_caught_up_ts") or now)
-    ack_behind_for = now - float(mem.get("ack_caught_up_ts") or now)
+    ack_lag = (int(applied) - int(fly_acked)) if (applied is not None and fly_acked is not None) else None
+    behind_for = now - float(max(mem.setdefault("pull_caught_up_ts", now), mem.get("applied_changed_ts") or 0))
+    ack_behind_for = now - float(max(mem.setdefault("ack_caught_up_ts", now), mem.get("fly_acked_changed_ts") or 0))
     finished_age = (now - finished) if finished else None
     reasons = []
     if finished_age is None or finished_age > t["pull_finished_red_sec"]:
         reasons.append(f"no finished pull for {fmt_age(finished_age)}")
     if pull_lag is not None and (pull_lag > t["pull_lag_seq_red"] or (pull_lag > 0 and behind_for > t["pull_lag_red_sec"])):
         reasons.append(f"applied behind published by {pull_lag} for {fmt_age(behind_for)}")
-    if ack_behind_for > t["ack_lag_red_sec"]:
-        reasons.append(f"Fly laptop_acked behind applied for {fmt_age(ack_behind_for)}")
+    if ack_lag is not None and ack_lag > t["ack_lag_seq_red"]:
+        reasons.append(f"Fly laptop_acked behind applied by {ack_lag} segments")
+    elif ack_lag and ack_lag > 0 and ack_behind_for > t["ack_lag_red_sec"]:
+        reasons.append(f"Fly laptop_acked behind applied and not advancing for {fmt_age(ack_behind_for)}")
     st = RED if reasons else GREEN
     if st == GREEN and pull_lag:
         st = AMBER if behind_for > 5 * MIN else GREEN
     add(check("laptop.pull_ack", "laptop", st,
               f"published={published} applied={applied} fly_acked={fly_acked} last pull {fmt_age(finished_age)} ago"
               f" (last receipt through {receipt.get('through_seq')})",
-              f"applied==published within {fmt_age(t['pull_lag_red_sec'])}, ACK within {fmt_age(t['ack_lag_red_sec'])}",
+              f"applied advancing or ==published within {fmt_age(t['pull_lag_red_sec'])}, Fly ACK advancing within "
+              f"{fmt_age(t['ack_lag_red_sec'])} and <= {t['ack_lag_seq_red']} behind applied",
               "; ".join(reasons) or ("" if st == GREEN else "pull catching up"),
               str(pull.get("error") or "")[:200]))
     sup = inputs.get("supervisor_tick_at")
@@ -956,10 +974,13 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         obs = f"last cycle {fmt_age(dur)} exit={code}"
     head = str(inputs.get("analyzer_head") or "")
     if fly_rev and head and not head.startswith(fly_rev):
-        st = max(st, AMBER, key=RANK.get)
-        obs += f"; analyzer rev {head[:12]} != Fly {fly_rev[:12]}"
+        if inputs.get("analyzer_contains_fly"):
+            obs += f"; analyzer rev {head[:12]} contains Fly {fly_rev[:12]}"
+        else:
+            st = max(st, AMBER, key=RANK.get)
+            obs += f"; analyzer rev {head[:12]} does not contain Fly {fly_rev[:12]}"
     add(check("analyzer.cycle", "analyzer", st, obs,
-              f"cycle <= {fmt_age(t['cycle_amber_sec'])}, exit 0, analyzer rev == Fly rev",
+              f"cycle <= {fmt_age(t['cycle_amber_sec'])}, exit 0, analyzer rev contains Fly rev",
               "" if st == GREEN else "slow promotion/migration, failed cycle, or v2c auto-ff not yet followed Fly"))
 
     # ---------------- Exports (worker eed92197)
