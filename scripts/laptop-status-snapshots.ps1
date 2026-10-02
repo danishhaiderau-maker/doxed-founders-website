@@ -108,6 +108,14 @@ if ($offline) {
         stale_venues = @($crossVenue.stale_venues | ForEach-Object { [string]$_ })
       }
     }
+    $xvl = $ready.xvl_evaluator_health
+    if ($xvl) {
+      $runtime.xvl_evaluator_health = [ordered]@{
+        status = [string]$xvl.status; reason = $xvl.reason
+        tick_age_s = $xvl.tick_age_s; write_failures = $xvl.write_failures
+        tick_errors = $xvl.tick_errors; rows_written = $xvl.rows_written
+      }
+    }
     $provider = $progress.ai_provider
     $runtime.strategy_progress = [ordered]@{
       ai_progressing = $progress.ai_progressing; ai_age_sec = $progress.ai_age_sec

@@ -587,6 +587,8 @@ LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
 STRATEGY_LAB_REPORT_FILE = "strategy_lab_report.json"
 MAIN_RANKINGS_REPORT_FILE = "main_rankings_report.json"
 STREAM_STUDIES_REPORT_FILE = "stream_studies_report.json"
+DATA_HEALTH_REPORT_FILE = "data_health_report.json"
+EVENT_STUDY_REPORT_FILE = "event_study_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -693,6 +695,8 @@ ANALYZER_JSON_REPORT_FILES = (
     STRATEGY_LAB_REPORT_FILE,
     MAIN_RANKINGS_REPORT_FILE,
     STREAM_STUDIES_REPORT_FILE,
+    DATA_HEALTH_REPORT_FILE,
+    EVENT_STUDY_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -771,10 +775,12 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
     ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
-    ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI"),
+    ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI; XVL tile shadow triggers, tape replay and shadow-vs-replay parity"),
     ("Strategy Lab", STRATEGY_LAB_REPORT_FILE, "Pre-registered hypotheses judged on unseen post-registration trades (Holm), bounded exploratory families with family-wise nulls, BH q, deflated Sharpe and walk-forward, live-fill simulator parity and correlation to live tiles; CONSERVATIVE_BBO 1s tape, Bitfinex costs"),
     ("Main Rankings (corrected)", MAIN_RANKINGS_REPORT_FILE, "Every main ranking (tiles, top combinations, regime x lane cells, feature correlations, expanding-quintile feature buckets) with hour-cluster p, Holm FWER and BH q; corrected verdict per row"),
     ("Stream Studies", STREAM_STUDIES_REPORT_FILE, "Exit-timing regret from post_exit_replay, taker counterfactual EV per AI decision and tile, post-fill markout curves per tile x liquidity, research_events_v22 outcome/observation mix; per-stream health"),
+    ("Data Health", DATA_HEALTH_REPORT_FILE, "Coverage %, staleness and row counts per stream: market-context spot/premium/derivatives/liquidations/session flags, cross-venue taker flow up-mask, Bitfinex 1s tape; distinct-trade replay completeness and repaired-stream quality"),
+    ("Pre-registered Event Studies", EVENT_STUDY_REPORT_FILE, "Frozen hypotheses H1-H5 (XVL lead, liquidation burst, funding-window drift, US cash open, Coinbase premium lead): matched controls (hour x trailing-vol tercile), CAR curves, hour-cluster t, lockbox counted until it closes, BH q on scored lockboxes"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -9244,6 +9250,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         signal_persist, pipeline_events = per_call["signal_persist"], per_call["pipeline_events"]
         ai_errors = per_call["ai_errors"]
         cohort_quarantine["ai_provider_outage"] = ai_outage_receipt
+        cohort_quarantine["ai_served_model"] = ai_served_model_split(trades)
         if ai_outage_receipt["rows"]:
             print(
                 f"   AI provider outage quarantine: {ai_outage_receipt['rows']} per-call rows "
@@ -9298,6 +9305,8 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             ai_challenger_report(session=session)
             lead_lag_report(session=session)
             strategy_lab_report(session=session, trades=trades)
+            data_health_report(session=session)
+            event_study_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9415,6 +9424,8 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         ai_challenger_report(session=session)
         lead_lag_report(session=session)
         strategy_lab_report(session=session, trades=trades)
+        data_health_report(session=session)
+        event_study_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -11991,6 +12002,75 @@ AI_PROVIDER_OUTAGE_INTERVALS = (
     },
 )
 RELAY_INTERFERENCE_REASON = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
+# Immutable served-model cohort annotation.  A provider-side model swap keeps
+# the epoch and every tile policy signature (the cohort continues); analysis
+# splits results by the model that actually answered.  Rows recorded before
+# the bot logged the response ``model`` field are attributed by timestamp.
+AI_SERVED_MODEL_SWITCHOVER = {
+    "from_model": "deepseek-v4-flash",
+    "to_model": "deepseek-flash",
+    "to_model_name": "DeepSeek-V4.1-Flash",
+    "window_start": "2026-10-01T18:56:01Z",
+    "window_end": "2026-10-01T21:30:47Z",
+    "approx_switch_at": "2026-10-01T21:30:47Z",
+    "basis": "DeepSeek retired deepseek-v4-flash from /models and answers it as deepseek-flash; "
+             "the swap happened inside the 18:56-21:30Z provider outage (no successful response "
+             "in between). Pre-fix rows carried only the configured id; first echo-confirmed "
+             "deepseek-flash response 2026-10-01T21:34Z (in-machine probe run 36929501389).",
+}
+SERVED_MODEL_COLUMNS = ("deepseek_served_model", "ai_served_model", "served_model")
+SERVED_MODEL_SWITCHOVER_UNKNOWN = "UNKNOWN_SWITCHOVER_WINDOW"
+
+
+def ai_served_model_cohort(df, ts_cols=("entry_ts", "open_ts", "ts", "timestamp")) -> "pd.Series":
+    """Served model per row: the recorded response ``model`` field, else the annotation."""
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=object)
+    served = pd.Series("", index=df.index, dtype=object)
+    for col in SERVED_MODEL_COLUMNS:
+        if col in df.columns:
+            values = df[col].fillna("").astype(str).str.strip()
+            served[(served == "") & (values != "")] = values[(served == "") & (values != "")]
+    col = next((c for c in ts_cols if c in df.columns), None)
+    if col is None:
+        return served
+    raw = df[col]
+    numeric = pd.to_numeric(raw, errors="coerce")
+    text = raw.where(numeric.isna(), None)
+    try:
+        ser = pd.to_datetime(text, utc=True, errors="coerce", format="ISO8601")
+    except (TypeError, ValueError):
+        ser = pd.to_datetime(text, utc=True, errors="coerce")
+    epoch = pd.to_datetime(numeric, unit="s", utc=True, errors="coerce")
+    ser = ser.where(numeric.isna(), epoch)
+    start = pd.Timestamp(AI_SERVED_MODEL_SWITCHOVER["window_start"])
+    end = pd.Timestamp(AI_SERVED_MODEL_SWITCHOVER["window_end"])
+    missing = served == ""
+    served[missing & (ser <= start)] = AI_SERVED_MODEL_SWITCHOVER["from_model"]
+    served[missing & (ser >= end)] = AI_SERVED_MODEL_SWITCHOVER["to_model"]
+    served[missing & (ser > start) & (ser < end)] = SERVED_MODEL_SWITCHOVER_UNKNOWN
+    return served
+
+
+def ai_served_model_split(trades) -> dict:
+    """Per-lane closed-trade stats split by served model (annotation receipt)."""
+    receipt = {"switchover": dict(AI_SERVED_MODEL_SWITCHOVER), "by_lane": {}, "rows_by_model": {},
+               "basis": "recorded response model field, else timestamp annotation; epoch and "
+                        "policy signatures unchanged"}
+    if trades is None or getattr(trades, "empty", True):
+        return receipt
+    served = ai_served_model_cohort(trades)
+    pnl = pd.to_numeric(trades.get("net_pnl_usd"), errors="coerce") if "net_pnl_usd" in trades.columns else None
+    lanes = trades["research_lane"].fillna("").astype(str) if "research_lane" in trades.columns else pd.Series("", index=trades.index)
+    receipt["rows_by_model"] = {str(k or "UNATTRIBUTED"): int(v) for k, v in served.value_counts().items()}
+    for (lane, model), idx in trades.groupby([lanes, served]).groups.items():
+        row = {"trades": int(len(idx))}
+        if pnl is not None:
+            values = pnl.loc[idx].dropna()
+            row.update({"net_pnl_usd": round(float(values.sum()), 6),
+                        "win_rate": round(float((values > 0).mean()), 4) if len(values) else None})
+        receipt["by_lane"].setdefault(str(lane or "UNKNOWN"), {})[str(model or "UNATTRIBUTED")] = row
+    return receipt
 
 
 def ai_provider_outage_reason(df, ts_cols=("ts", "timestamp")) -> "pd.Series":
@@ -12656,6 +12736,34 @@ def strategy_lab_report(session=None, trades=None):
         f"verdicts={verdicts} parity={((payload.get('sim_parity') or {}).get('verdict'))} {PIPELINE_ENFORCEMENT_TAG}"
     )
     return _write_aux_report(STRATEGY_LAB_REPORT_FILE, payload, session)
+
+
+def data_health_report(session=None):
+    """Publish per-stream coverage, staleness and repaired-stream quality."""
+    from cross_venue_tape import FILE_NAME
+    SCHEMA = "data_health_v1"
+    session = session or load_research_session()
+    try:
+        from research.data_health_report import SCHEMA, build_data_health
+
+        payload = build_data_health(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the health panel must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(DATA_HEALTH_REPORT_FILE, payload, session)
+
+
+def event_study_report(session=None):
+    """Publish the pre-registered event studies (lockboxes counted until they close)."""
+    from cross_venue_tape import FILE_NAME
+    SCHEMA = "event_study_report_v1"
+    session = session or load_research_session()
+    try:
+        from research.event_study import SCHEMA, build_from_data_dir
+
+        payload = build_from_data_dir(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the event study must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(EVENT_STUDY_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):

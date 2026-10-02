@@ -83,6 +83,24 @@ else
   echo "[fly-entrypoint] CROSS_VENUE_COLLECTOR_ENABLED!=1 -> cross-venue collector disabled."
 fi
 
+# Watch-only market context (Coinbase premium, liquidations, funding/OI/basis,
+# session flags). Public keyless feeds, no orders. Separate niced process with
+# its own restart loop in the runtime dir so its JSONL ships with the segments.
+if [ "${MARKET_CONTEXT_COLLECTOR_ENABLED:-1}" = "1" ]; then
+  MC_LOG="$DATA_DIR/market-context-collector.log"
+  if [ -f "$MC_LOG" ] && [ "$(wc -c < "$MC_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    : > "$MC_LOG"
+  fi
+  echo "[fly-entrypoint] starting market-context collector (watch-only, niced)..."
+  ( while true; do
+      nice -n 10 python /app/market_context_collector.py >> "$MC_LOG" 2>&1
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] market-context collector exited rc=$? -> restarting in 10s" >> "$MC_LOG"
+      sleep 10
+    done ) &
+else
+  echo "[fly-entrypoint] MARKET_CONTEXT_COLLECTOR_ENABLED!=1 -> market-context collector disabled."
+fi
+
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
 export PYTHONUNBUFFERED=1
 BOT_LOG="$DATA_DIR/bot.log"

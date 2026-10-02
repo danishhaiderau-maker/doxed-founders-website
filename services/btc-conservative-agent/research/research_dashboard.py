@@ -24,10 +24,12 @@ from zoneinfo import ZoneInfo
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
+import system_health_banner as _system_health_banner
 import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
 from research import ai_challenger_view as _ai_challenger_view
+from research import data_health_view as _data_health_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -228,6 +230,9 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "ai_shadow_challengers.jsonl",
     "ai_shadow_compact_prompt.jsonl",
     "cross_venue_tape_1m.jsonl",
+    "xvl_shadow_signals.jsonl",
+    "market_context_1m.jsonl",
+    "liquidations.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -397,6 +402,7 @@ def _read_api_cache_key() -> str:
 _UNCACHED_API_PATHS = (
     "/api/health", "/api/status", "/api/integrity",
     "/api/export/latest", "/api/hypotheses", "/api/streams/health", "/api/insights",
+    "/api/system-health",
 )
 
 
@@ -446,6 +452,20 @@ def _cache_read_api_response(response):
                     body,
                 )
         response.headers["X-Research-Cache"] = "MISS"
+    return response
+
+
+@app.after_request
+def _inject_system_health_banner(response):
+    return _system_health_banner.inject_banner(response)
+
+
+@app.route("/api/system-health")
+def api_system_health():
+    state_dir = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
+    report = _system_health_banner.read_report_file(state_dir / "health" / "system-health-latest.json")
+    response = jsonify(_system_health_banner.with_staleness(report))
+    response.headers["Cache-Control"] = "no-store"
     return response
 _DASHBOARD_STARTED_AT = datetime.now(timezone.utc)
 
@@ -3557,6 +3577,31 @@ def _read_research_events_v22() -> list[dict]:
     return rows
 
 
+def _deployed_policy_collection() -> dict:
+    """Registry policies awaiting evidence; tiles may pin different policy epochs."""
+    epochs: list[str] = []
+    policies = []
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        epoch = str(spec.get("policy_epoch") or "") or None
+        if epoch and epoch not in epochs:
+            epochs.append(epoch)
+        policies.append({
+            "lane": lane,
+            "policy_id": spec.get("raw_policy_id"),
+            "policy_signature": spec.get("policy_signature"),
+            "policy_epoch": epoch,
+            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+            "qualification_status": "NOT_QUALIFIED",
+        })
+    return {
+        "policy_epoch": epochs[0] if len(epochs) == 1 else None,
+        "policy_epochs": epochs,
+        "policies": policies,
+        "policy_count": len(policies),
+        "qualification_allowed": False,
+    }
+
+
 def _best_policy_research_payload():
     """One fail-closed answer based only on the newest qualified V3.1 epoch."""
     manifest = _read_json(REPORT_MANIFEST_FILE)
@@ -3578,22 +3623,8 @@ def _best_policy_research_payload():
     current_policy_signature = str(
         newest.get("policy_signature") or (newest.get("envelope") or {}).get("policy_signature") or ""
     )
-    deployed_policies = [
-        {
-            "lane": lane,
-            "policy_id": spec.get("raw_policy_id"),
-            "policy_signature": spec.get("policy_signature"),
-            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
-            "qualification_status": "NOT_QUALIFIED",
-        }
-        for lane, spec in ACTIVE_TILE_REGISTRY.items()
-    ]
-    deployed_epochs = {
-        str(spec.get("policy_epoch") or "")
-        for spec in ACTIVE_TILE_REGISTRY.values()
-        if spec.get("policy_epoch")
-    }
-    deployed_policy_epoch = next(iter(deployed_epochs)) if len(deployed_epochs) == 1 else None
+    deployed_collection = _deployed_policy_collection()
+    deployed_policy_epoch = deployed_collection["policy_epoch"]
     current = [row for row in events if str(
         row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or ""
     ) == current_epoch and str(
@@ -3682,12 +3713,7 @@ def _best_policy_research_payload():
         "epoch_id": current_epoch or None,
         "policy_epoch_id": current_policy_epoch or deployed_policy_epoch,
         "evidence_policy_signature": current_policy_signature or None,
-        "deployed_policy_collection": {
-            "policy_epoch": deployed_policy_epoch,
-            "policies": deployed_policies,
-            "policy_count": len(deployed_policies),
-            "qualification_allowed": False,
-        },
+        "deployed_policy_collection": deployed_collection,
         "last_analysis": last_analysis,
         "last_analysis_melbourne": format_melbourne_dt(last_analysis),
         "evidence": analyzed_evidence,
@@ -3968,24 +3994,7 @@ def _best_policy_research_v31_payload() -> dict:
     }
     execution_identities = collection.get("effective_paper_execution_identities") or []
     execution_identity = execution_identities[0] if len(execution_identities) == 1 else {}
-    deployed_policy_collection = report.get("deployed_policy_collection") or {
-        "policy_epoch": next(iter({
-            str(spec.get("policy_epoch")) for spec in ACTIVE_TILE_REGISTRY.values()
-            if spec.get("policy_epoch")
-        }), None),
-        "policies": [
-            {
-                "lane": lane,
-                "policy_id": spec.get("raw_policy_id"),
-                "policy_signature": spec.get("policy_signature"),
-                "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
-                "qualification_status": "NOT_QUALIFIED",
-            }
-            for lane, spec in ACTIVE_TILE_REGISTRY.items()
-        ],
-        "policy_count": len(ACTIVE_TILE_REGISTRY),
-        "qualification_allowed": False,
-    }
+    deployed_policy_collection = report.get("deployed_policy_collection") or _deployed_policy_collection()
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
@@ -7057,6 +7066,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Tile</th><th>Fills</th><th>Days</th><th>EV bp/fill [95% CI]</th><th>Halves</th><th>Win %</th><th>Max DD</th><th>Hard stops /50</th><th>Max lock overshoot bp</th><th>Verdict</th></tr></thead><tbody id="tile-paired-tiles-body"></tbody></table>
     <table><thead><tr><th>Challenger - control</th><th>Paired signals</th><th>Mean diff bp [95% CI]</th><th>Win % on paired signals (control / challenger)</th><th>Challenger better</th><th>Unpaired control / challenger</th></tr></thead><tbody id="tile-paired-pairs-body"></tbody></table>
     <p class="note" id="tile-paired-note"></p>
+    <h3>Cross-venue lead tile (XVL) - shadow stream, tape replay and parity</h3>
+    <p class="note">Shadow triggers are logged every qualifying second whether or not the tile toggle is ON. Markout: Bitfinex taker at anchor+1 to anchor+1+hold, after spread, no fee. Capacity-one mirrors the single paper slot; replay re-runs the registered rule on the cross-venue and Bitfinex tapes. HINT - 12h evidence, not validated across days.</p>
+    <table><thead><tr><th>Tile</th><th>Triggers logged</th><th>Gates</th><th>Stale-feed share</th><th>Shadow cap-1 trades / Win % / mean bp [1 h CI]</th><th>Every qualifying second</th><th>Tape replay</th><th>Parity (match / side / gap bp)</th></tr></thead><tbody id="xvl-shadow-body"></tbody></table>
+    <p class="note" id="xvl-shadow-note"></p>
     <details id="exit-combos-detail-inventory" open>
     <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
@@ -7784,7 +7797,7 @@ async function loadDecisionReadiness() {
       }).join('')
     : '<tr><td colspan="4">UNAVAILABLE — qualification gate projection was not published.</td></tr>';
   document.getElementById('decision-readiness-provenance').textContent =
-    `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
+    `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || ((d.deployed_policy_collection || {}).policy_epochs || []).join(' + ') || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
     + `Registry identities (not collection or qualification proof): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
     + `Generation: ${((tiers.currency || {}).generated_at) || d.last_analysis || 'UNAVAILABLE'} · `
@@ -8199,6 +8212,34 @@ async function loadTilePairedComparison() {
   if (note) note.textContent = `Signals filled by every tile: ${all.signals_filled_by_every_tile ?? 'n/a'}. Cohort ${d.cohort || 'n/a'}; Deflated Sharpe trials = ${d.deflated_sharpe_trials ?? 'n/a'} live hypotheses; generated ${d.generated_at || 'n/a'}.`;
 }
 
+async function loadXvlShadow() {
+  const body = document.getElementById('xvl-shadow-body');
+  const note = document.getElementById('xvl-shadow-note');
+  if (!body) return;
+  let d = null;
+  try {
+    const r = await fetch('/api/report/lead_lag_report.json');
+    d = r.ok ? await r.json() : null;
+  } catch (e) { d = null; }
+  const x = d && d.xvl;
+  if (!x || x.status !== 'OK') {
+    body.innerHTML = `<tr><td colspan="8">XVL section unavailable${x && x.status ? ' - ' + x.status : (d ? '' : ' - lead-lag report not generated yet')}.</td></tr>`;
+    return;
+  }
+  const num = (v, dp) => v == null ? 'n/a' : Number(v).toFixed(dp);
+  const pct = v => v == null ? 'n/a' : (Number(v) * 100).toFixed(1) + '%';
+  const ci = c => (c && c[0] != null) ? ` [${num(c[0], 2)}, ${num(c[1], 2)}]` : ' [CI n/a]';
+  const summary = s => (s && typeof s === 'object') ? `${s.trades ?? 'NO DATA'} / ${pct(s.win_rate)} / ${num(s.mean_net_bp, 2)}${ci(s.ci95_1h_clusters)}` : (s || 'n/a');
+  body.innerHTML = Object.entries(x.lanes || {}).map(([lane, c]) => {
+    const sh = c.shadow || {};
+    const par = c.parity || {};
+    const gates = Object.entries(sh.by_gate || {}).map(([g, n]) => `${g} ${n}`).join(', ') || 'none';
+    const parity = c.parity ? `${pct(par.match_rate)} / ${pct(par.side_agreement)} / ${num(par.mean_abs_net_gap_bp, 2)} (limit ${par.limit_bp ?? 'n/a'})` : 'n/a';
+    return `<tr><td>${lane}</td><td>${sh.triggers_logged ?? 'NO DATA'}</td><td>${gates}</td><td>${pct(sh.stale_feed_share)}</td><td>${summary(sh.capacity_one)}</td><td>${summary(sh.every_qualifying_second)}</td><td>${summary(c.replay)}</td><td>${parity}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">No cross-venue registry tiles.</td></tr>';
+  if (note) note.textContent = `${x.markout || ''}. Report generated ${d.generated_at || d.generated_utc || 'n/a'}.`;
+}
+
 async function loadExitCombos() {
   setEvidenceScope('exit-combos', ...EVIDENCE_SCOPES['exit-combos']);
   const r = await fetch('/api/exit-combos');
@@ -8225,6 +8266,7 @@ async function loadExitCombos() {
   document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
   document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
   loadTilePairedComparison();
+  loadXvlShadow();
   const shadowArchive = shadow.archive || {};
   const archiveNote = shadowArchive.archived_rows_excluded
     ? `Current stack ${shadowArchive.current_stack_version || 'n/a'} only. ${shadowArchive.archived_rows_excluded} archived shadow rows from prior stacks (${Object.entries(shadowArchive.archived_rows_by_version || {}).map(([v, n]) => v + ': ' + n).join(', ')}) are excluded and not analyzed.`
@@ -9102,6 +9144,7 @@ DECISION_NAV_LINKS = (
     ("Partial reduction", "/partial-reduction"),
     ("Evidence points", "/evidence-points"),
     ("AI vs challengers", "/ai-challengers"),
+    ("Data health", "/data-health"),
     ("Decision JSON", "/api/decision"),
 )
 
@@ -9274,6 +9317,29 @@ def ai_challengers_page():
     report, evidence = _ai_challenger_payload()
     resp = make_response(_ai_challenger_view.render_ai_challenger_html(
         report, evidence=evidence, nav_links=DECISION_NAV_LINKS))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+def _data_health_payload() -> tuple[dict, dict, dict]:
+    report, evidence = _current_lane_artifact(_data_health_view.REPORT_FILE)
+    study, _study_evidence = _current_lane_artifact(_data_health_view.EVENT_STUDY_FILE)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    generated_at = manifest.get("generated_at")
+    return report, study, {**evidence, "generated_at_display": format_melbourne_dt(generated_at) if generated_at else None}
+
+
+@app.route("/api/streams/data-health")
+def api_data_health():
+    report, study, evidence = _data_health_payload()
+    return jsonify({"evidence": evidence, "report": report or None, "event_study": study or None})
+
+
+@app.route("/data-health")
+def data_health_page():
+    report, study, evidence = _data_health_payload()
+    resp = make_response(_data_health_view.render_data_health_html(
+        report, study, evidence=evidence, nav_links=DECISION_NAV_LINKS))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 

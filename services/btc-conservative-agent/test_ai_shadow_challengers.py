@@ -1,3 +1,4 @@
+import pytest
 """Shadow AI challenger log, compact prompt, tape features and dead-input alarm."""
 
 import json
@@ -191,8 +192,15 @@ def test_compact_prompt_facts_render_and_parse():
     ok = shadow.parse_compact_response('{"p_long_success":0.61,"p_short_success":0.40,"abstain":false,"drivers":["trend","bogus"]}')
     assert ok["parse_status"] == "OK" and ok["drivers"] == ["TREND"]
     assert shadow.compact_side(ok) == "LONG"
-    weak = shadow.parse_compact_response('{"p_long_success":0.55,"p_short_success":0.45,"abstain":false}')
+    gap = shadow.parse_compact_response('{"p_long_success":0.42,"p_short_success":0.38,"abstain":false}')
+    assert shadow.compact_side(gap) == "LONG"
+    short = shadow.parse_compact_response('{"p_long_success":0.36,"p_short_success":0.44,"abstain":false}')
+    assert shadow.compact_side(short) == "SHORT"
+    weak = shadow.parse_compact_response('{"p_long_success":0.52,"p_short_success":0.50,"abstain":false}')
     assert shadow.compact_side(weak) == "NONE"
+    summary = shadow.compact_summary(gap)
+    assert summary["side_rule"] == shadow.COMPACT_SIDE_RULE and summary["side"] == "LONG"
+    assert summary["gap"] == pytest.approx(0.04)
     assert shadow.parse_compact_response("not json")["parse_status"] == "INVALID_JSON"
     assert shadow.parse_compact_response('{"p_long_success":1.4,"p_short_success":0.2,"abstain":false}')["parse_status"] == "OUT_OF_RANGE_OR_MISSING"
     abstain = shadow.parse_compact_response('{"p_long_success":0.7,"p_short_success":0.3,"abstain":true}')
@@ -380,14 +388,12 @@ def test_shadow_purpose_is_allowed_and_request_is_bounded():
 
     class _Resp:
         status_code = 200
-        text = ""
+        text = __import__("json").dumps(
+            {"choices": [{"message": {"content": '{"p_long_success":0.5}'}}],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
 
-        def json(self):
-            return {"choices": [{"message": {"content": '{"p_long_success":0.5}'}}],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        captured.update(json=json, timeout=timeout)
+    def fake_post(url, headers=None, json=None, timeout=None, stream=False):
+        captured.update(json=json, timeout=timeout, stream=stream)
         return _Resp()
 
     original_post, original_usage = bot.requests.post, bot._report_showcase_inference_usage
@@ -402,7 +408,8 @@ def test_shadow_purpose_is_allowed_and_request_is_bounded():
         assert captured["json"]["max_tokens"] == 120
         assert captured["json"]["response_format"] == {"type": "json_object"}
         assert captured["json"]["temperature"] == 0.0
-        assert captured["timeout"] == 20
+        assert captured["stream"] is True
+        assert captured["timeout"][1] == 20
         bot.call_deepseek_api([{"role": "user", "content": "x"}], purpose="trading_direction")
         assert "max_tokens" not in captured["json"] and "response_format" not in captured["json"]
     finally:
@@ -435,12 +442,19 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         calls.append((purpose, temperature, kw))
         return '{"p_long_success":0.64,"p_short_success":0.36,"abstain":false,"drivers":["TREND"]}', 12
 
+    def fake_call_with_meta(messages, temperature=0.4, *, purpose, **kw):
+        text, latency = fake_call(messages, temperature, purpose=purpose, **kw)
+        return text, latency, {"requested_model": "deepseek-flash",
+                               "served_model": "deepseek-flash", "system_fingerprint": "fp"}
+
+    original_call_with_meta = bot.call_deepseek_api_with_meta
     with bot.trade_lock:
         orders_before = len(bot.pending_orders)
     try:
         for n in names:
             setattr(bot, n, os.path.join(tmp, originals[n]))
         bot.call_deepseek_api = fake_call
+        bot.call_deepseek_api_with_meta = fake_call_with_meta
         bot._AI_SHADOW_BUDGET = shadow.CompactPromptBudget(0, 10)
         bot._AI_SHADOW_BOOK = shadow.ChallengerBook()
         bot._cross_venue_live = lambda *a, **k: live
@@ -460,7 +474,10 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         assert row["gates_orders"] is False and row["row_kind"] == "CALL"
         assert row["sides"]["compact_v5"] == "LONG"
         assert row["score_led_admission_side"] == row["sides"]["llm_score_led"] == "LONG"
-        assert row["win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
+        assert row["main_ai_win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
+        assert row["main_ai_win_prob"] is None
+        assert row["win_prob_status"] == "COMPACT_SHADOW_P_SUCCESS_SCORE_LED_SIDE"
+        assert row["win_prob"] == 64.0 and row["win_prob_source"] == shadow.COMPACT_PROMPT_ID
         assert row["sides"]["leader_10s"] == "SHORT"
         assert row["leader_features"]["leader_venue"] == "binance"
         assert row["leader_features"]["anchor_bucket_ts"] == anchor
@@ -486,6 +503,7 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         for n in names:
             setattr(bot, n, originals[n])
         bot.call_deepseek_api = original_call
+        bot.call_deepseek_api_with_meta = original_call_with_meta
         bot._AI_SHADOW_BUDGET = original_budget
         bot._AI_SHADOW_BOOK = original_book
         bot._cross_venue_live = original_live

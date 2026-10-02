@@ -94,7 +94,8 @@ class RuntimeDeclarationTests(unittest.TestCase):
         end = next(i for i in range(start + 1, len(body)) if isinstance(body[i], ast.Try))
         block = body[start:end + 1]
         api_lines = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name) and n.func.id == "call_deepseek_api"]
+            and isinstance(n.func, ast.Name)
+            and n.func.id in {"call_deepseek_api", "call_deepseek_api_with_meta"}]
         self.assertLess(block[-1].end_lineno, min(api_lines))
         inputs = self.inputs()
         inputs["quantity_capture"]["receipt"] = build_signed_quantity_constraints(

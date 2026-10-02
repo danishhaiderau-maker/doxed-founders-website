@@ -245,7 +245,9 @@ directory exists, and AMBER above 90 minutes.
 ### streams.coverage
 Fly `collection.research_coverage.collection_health` (for example
 `MULTIVERSE_TAPE_SOURCE_UNAVAILABLE` or `COLLECTOR_MATURATION_WORKER_STALLED`), the
-cross-venue tape status, AI dead inputs, and per-stream age and coverage from
+cross-venue tape status, the XVL per-second evaluator (`collection.xvl_evaluator`:
+`STALE` = ticks stopped, `DEGRADED` = shadow rows failing to write), AI dead
+inputs, and per-stream age and coverage from
 `data_streams` once worker d9f889db exposes it. AMBER only, because research
 collection does not block trading.
 

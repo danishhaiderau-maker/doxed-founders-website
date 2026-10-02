@@ -40,7 +40,8 @@ def _decide(direction="SHORT", bid=64999.0, ask=65000.0, bbo_age=1.0):
 
 def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER == (policy.LANE,)
+    assert ACTIVE_TILE_ORDER[0] == policy.LANE
+    assert len({COMBO_LANE_SPECS[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER}) == len(ACTIVE_TILE_ORDER)
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False
     assert spec["default_enabled"] is False
@@ -52,6 +53,7 @@ def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     assert policy.POLICY_ID == spec["raw_policy_id"]
     assert policy.POLICY_ID not in RETIRED_POLICY_IDENTITIES
     assert policy.POLICY_SIGNATURE == spec["policy_signature"]
+    assert len({COMBO_LANE_SPECS[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER}) == len(ACTIVE_TILE_ORDER)
     assert policy.LANE not in RETIRED_TILE_LANES
     exit_policy = spec["exit_policy"]
     assert exit_policy["max_duration_sec"] == 3600

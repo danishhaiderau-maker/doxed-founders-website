@@ -37,7 +37,10 @@ def run():
     try:
         os.environ.pop("DEEPSEEK_MODEL", None)
         os.environ.pop("DEEPSEEK_THINKING_MODE", None)
-        check("Flash is the default model", bot._deepseek_model() == "deepseek-v4-flash")
+        check("served V4.1 Flash id is the default model", bot._deepseek_model() == "deepseek-flash")
+        os.environ["DEEPSEEK_MODEL"] = "deepseek-v4-flash"
+        check("retired V4 Flash id pins to the served id", bot._deepseek_model() == "deepseek-flash")
+        os.environ.pop("DEEPSEEK_MODEL", None)
         check("thinking is disabled by default", bot._deepseek_thinking_mode() == "disabled")
 
         os.environ["DEEPSEEK_MODEL"] = "deepseek-v4-pro"
@@ -61,26 +64,24 @@ def run():
         )
 
         os.environ["DEEPSEEK_API_KEY"] = "test-only"
-        os.environ["DEEPSEEK_MODEL"] = "deepseek-v4-flash"
+        os.environ["DEEPSEEK_MODEL"] = "deepseek-flash"
         os.environ["DEEPSEEK_THINKING_MODE"] = "disabled"
         captured = {}
 
         class FakeResponse:
             status_code = 200
-            text = '{"choices":[{"message":{"content":"ok"}}]}'
+            text = (
+                '{"model":"deepseek-flash","system_fingerprint":"fp-test",'
+                '"choices":[{"message":{"content":"ok"}}],'
+                '"usage":{"prompt_tokens":11,"completion_tokens":3}}'
+            )
 
-            @staticmethod
-            def json():
-                return {
-                    "choices": [{"message": {"content": "ok"}}],
-                    "usage": {"prompt_tokens": 11, "completion_tokens": 3},
-                }
-
-        def fake_post(url, headers, json, timeout):
+        def fake_post(url, headers, json, timeout, stream=False):
             captured["url"] = url
             captured["headers"] = headers
             captured["json"] = json
             captured["timeout"] = timeout
+            captured["stream"] = stream
             return FakeResponse()
 
         def fake_usage(prompt_tokens, completion_tokens, **kwargs):
@@ -93,12 +94,18 @@ def run():
             purpose="trading_direction",
         )
         check("successful V4 response parses", text == "ok" and latency_ms >= 0)
-        check("request uses Flash", captured["json"]["model"] == "deepseek-v4-flash")
+        check("request uses the served Flash id", captured["json"]["model"] == "deepseek-flash")
+        check("request streams so the total deadline can cut it", captured["stream"] is True)
+        _t, _l, meta = bot.call_deepseek_api_with_meta(
+            [{"role": "user", "content": "test"}], purpose="trading_direction",
+        )
+        check("served model + fingerprint recorded",
+              meta["served_model"] == "deepseek-flash" and meta["system_fingerprint"] == "fp-test")
         check(
             "request explicitly disables thinking",
             captured["json"]["thinking"] == {"type": "disabled"},
         )
-        check("usage records exact model", captured["usage"][2]["model"] == "deepseek-v4-flash")
+        check("usage records exact model", captured["usage"][2]["model"] == "deepseek-flash")
         blocked_snapshot = dict(captured)
         try:
             bot.call_deepseek_api(

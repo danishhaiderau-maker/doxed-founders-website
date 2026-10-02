@@ -15,6 +15,7 @@ import csv
 import zipfile
 import io
 import json
+import system_health_banner
 import uuid
 import requests
 import glob
@@ -112,6 +113,8 @@ from combo_pathway_config import (
     is_immediate_entry_lane,
     is_independent_ai_lane,
     is_shared_ai_direction_lane,
+    is_cross_venue_clock_lane,
+    cross_venue_clock_lanes,
     is_research_candidate_lane,
     is_shadow_only_lane,
     is_static_bracket_lane,
@@ -4329,13 +4332,17 @@ def log_ai_input_full(
             "context": copy.deepcopy(ctx),
             "ai": {
                 "decision": ai_result.get("decision"),
-                "win_prob": ai_result.get("win_prob"),
+                "win_prob": evidence_win_prob(ai_result),
+                "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai_result.get("direction"),
                 "bull_score": ai_result.get("bull_score"),
                 "bear_score": ai_result.get("bear_score"),
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
+                "deepseek_model": ai_result.get("deepseek_model"),
+                "deepseek_served_model": ai_result.get("deepseek_served_model"),
+                "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -8381,8 +8388,13 @@ def _load_local_dotenv():
 _load_local_dotenv()
 DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
-DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+# DeepSeek retired "deepseek-v4-flash" (2026-10-01, inside the 18:56-21:30Z
+# provider outage) and answers those requests as "deepseek-flash"
+# (DeepSeek-V4.1-Flash).  Request the served id explicitly.
+DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
+DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-flash", "deepseek-v4-pro"})
+DEEPSEEK_RETIRED_MODEL_ALIASES = {"deepseek-v4-flash": "deepseek-flash"}
 DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
 DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
 # Hard production boundary: DeepSeek is an execution input, never a dashboard or
@@ -8401,6 +8413,14 @@ STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
 RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
+# Total wall-clock bound per DeepSeek call.  AI_TIMEOUT_SEC is only the idle
+# gap between received bytes, and DeepSeek keeps queued requests alive with
+# blank lines, so one call blocked the 180 s AI cadence for 354 s on
+# 2026-10-01.  The deadline must stay well inside that cadence.
+AI_CALL_DEADLINE_SEC = min(150.0, max(10.0, float(os.getenv("AI_CALL_DEADLINE_SEC", "75"))))
+# Abandoned (timed-out) request threads end on their own within one idle
+# timeout; refuse new calls instead of stacking more of them.
+AI_DEADLINE_MAX_ABANDONED = 2
 HEDGE_MODE = False
 SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
 # Counterfactual replay fill window. Must match MAX_POSITION_AGE_SEC so the
@@ -8467,6 +8487,10 @@ RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
 POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "10000"))
+# The expiry sweep used to fire exactly at the deadline, before the tick at
+# exit + POST_EXIT_REPLAY_SEC arrived, so most executed replays dumped at
+# 7190-7199 s as INCOMPLETE. Keep collecting this long past the deadline.
+POST_EXIT_REPLAY_GRACE_SEC = int(os.getenv("POST_EXIT_REPLAY_GRACE_SEC", "90"))
 # Sidecar JSONL that lets post-exit replay buffers survive bot restarts.
 # Each line is one tick event for one trade_id; the loader on startup rebuilds
 # any buffer whose post_exit_deadline_ts has not yet passed.
@@ -12268,7 +12292,9 @@ def persist_signal(signal, stage="UNKNOWN"):
             "ai_win_prob": signal.get("ai_win_prob"),
             "ai_decision": signal.get("ai_decision"),
             "edge_score": signal.get("edge_score_at_entry"),
-            "setup_type": signal.get("setup_type")
+            "setup_type": signal.get("setup_type"),
+            "ai_served_model": signal.get("ai_served_model"),
+            "ai_system_fingerprint": signal.get("ai_system_fingerprint"),
         }
         logger.info(f"[PERSIST] {stage} for trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
         dynamic_csv_writer("signal_persist.log", row)
@@ -12462,6 +12488,8 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         signal["ai_win_prob"] = ai.get("win_prob")
         signal["ai_decision"] = ai.get("decision")
         signal["ai_source"] = ai.get("source")
+        signal["ai_served_model"] = ai.get("deepseek_served_model")
+        signal["ai_system_fingerprint"] = ai.get("deepseek_system_fingerprint")
         ai_direction = ai.get("direction")
         invert_on = invert_signal_active()
         final_direction, inverted = apply_invert_direction(ai_direction, invert_on)
@@ -14201,7 +14229,7 @@ def _recover_compressed_shadow_chases_once(now: float = None) -> None:
         _compressed_shadow_recovery_attempted = True
 
 
-def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None, ask_qty=None):
     if price is None or float(price) <= 0:
         return
     now = time.time()
@@ -14220,6 +14248,8 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
                     low=float(price),
                     bid=None if not bid else float(bid),
                     ask=None if not ask else float(ask),
+                    bid_qty=None if not bid_qty else float(bid_qty),
+                    ask_qty=None if not ask_qty else float(ask_qty),
                 ):
                     _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
             except Exception as exc:
@@ -16078,6 +16108,17 @@ def derive_candidate_direction(long_score: int, short_score: int, raw_direction:
     return "NO_TRADE"
 
 
+def evidence_win_prob(ai_result: Optional[dict]):
+    """Win probability for evidence rows: null unless the model actually emitted one.
+
+    ``parse_ai_response_fields`` keeps a placeholder 0 for gating code when the
+    prompt does not request a win probability; logging that 0 as a forecast is wrong.
+    """
+    if not isinstance(ai_result, dict) or ai_result.get("win_prob_status") != "EMITTED":
+        return None
+    return ai_result.get("win_prob")
+
+
 def parse_ai_response_fields(text: str) -> dict:
     """Parse one shared call and derive its candidate side from directional scores."""
     json_blob = extract_ai_json_blob(text)
@@ -17661,6 +17702,9 @@ def _write_v3_shared_lane_decision(
                 "research_timing_config": copy.deepcopy((ai or {}).get("research_timing_config")),
                 "research_timing_config_sha256": (ai or {}).get("research_timing_config_sha256"),
                 "original_context_signal_ts": copy.deepcopy((ai or {}).get("original_context_signal_ts")),
+                "ai_requested_model": (ai or {}).get("deepseek_model"),
+                "ai_served_model": (ai or {}).get("deepseek_served_model"),
+                "ai_system_fingerprint": (ai or {}).get("deepseek_system_fingerprint"),
             }
         if (ai or {}).get("effective_research_admission") is not None:
             source.update({
@@ -17836,6 +17880,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
         ),
         "deepseek_model": ai_result.get("deepseek_model"),
         "deepseek_thinking_mode": ai_result.get("deepseek_thinking_mode"),
+        "deepseek_served_model": ai_result.get("deepseek_served_model"),
+        "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
         "research_lane": RESEARCH_LANE_AI_SCAN,
         "research_model": "Shared Direction Call",
         "lane_verdicts": copy.deepcopy(ai_result.get("lane_verdicts") or {}),
@@ -18059,6 +18105,7 @@ def _deepseek_config_receipt() -> tuple:
     """Return configured values without validation so failures remain journalable."""
     _load_local_dotenv()
     model = (os.getenv("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL).strip().lower()
+    model = DEEPSEEK_RETIRED_MODEL_ALIASES.get(model, model)
     mode = (
         os.getenv("DEEPSEEK_THINKING_MODE") or DEEPSEEK_DEFAULT_THINKING_MODE
     ).strip().lower()
@@ -18269,25 +18316,26 @@ def _call_deepseek_api_unrecorded(
         request_payload["response_format"] = response_format
     t0 = time.time()
     try:
-        res = requests.post(
+        status_code, body_text = _deepseek_post_with_deadline(
             DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=request_payload,
-            timeout=timeout or AI_TIMEOUT_SEC,
+            json_payload=request_payload,
+            idle_timeout=timeout or AI_TIMEOUT_SEC,
+            deadline_sec=min(float(timeout or AI_CALL_DEADLINE_SEC), AI_CALL_DEADLINE_SEC),
         )
     except requests.RequestException as e:
         raise RuntimeError(f"HTTP_ERROR:{e}") from e
     latency_ms = int((time.time() - t0) * 1000)
-    if res.status_code >= 400:
-        body = (res.text or "")[:500]
-        err = RuntimeError(f"HTTP_{res.status_code}:{body}")
-        err.http_status = res.status_code  # type: ignore[attr-defined]
+    if status_code >= 400:
+        body = (body_text or "")[:500]
+        err = RuntimeError(f"HTTP_{status_code}:{body}")
+        err.http_status = status_code  # type: ignore[attr-defined]
         err.latency_ms = latency_ms  # type: ignore[attr-defined]
         raise err
     try:
-        payload = res.json()
+        payload = json.loads(body_text)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"JSON_DECODE:{e}:{(res.text or '')[:200]}") from e
+        raise RuntimeError(f"JSON_DECODE:{e}:{(body_text or '')[:200]}") from e
     if payload.get("error"):
         err_obj = payload["error"]
         msg = err_obj.get("message", err_obj) if isinstance(err_obj, dict) else str(err_obj)
@@ -18308,10 +18356,106 @@ def _call_deepseek_api_unrecorded(
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
     _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
-    return text, latency_ms, str(payload.get("model") or "")[:64] or None
+    return text, latency_ms, {
+        "requested_model": model,
+        "served_model": str(payload.get("model") or "")[:64] or None,
+        "system_fingerprint": str(payload.get("system_fingerprint") or "")[:96] or None,
+    }
 
 
-def call_deepseek_api(
+_ai_deadline_lock = threading.Lock()
+_ai_deadline_state = {"abandoned_in_flight": 0, "deadline_exceeded_total": 0}
+
+
+def _deepseek_post_with_deadline(url, *, headers, json_payload, idle_timeout, deadline_sec):
+    """POST with a total wall-clock deadline; returns (status_code, body_text).
+
+    The request runs on a daemon worker so the caller returns at the deadline
+    even while DeepSeek trickles keep-alive bytes.  On expiry the worker is
+    told to stop and its socket is shut down; it can never deliver a late
+    verdict into a later cycle.
+    """
+    deadline_sec = max(1.0, float(deadline_sec))
+    with _ai_deadline_lock:
+        if _ai_deadline_state["abandoned_in_flight"] >= AI_DEADLINE_MAX_ABANDONED:
+            raise RuntimeError(
+                f"AI_DEADLINE_EXCEEDED:backlog={_ai_deadline_state['abandoned_in_flight']}"
+            )
+    deadline = time.monotonic() + deadline_sec
+    cancelled = threading.Event()
+    finished = threading.Event()
+    box = {"response": None, "status": None, "body": None, "error": None, "abandoned": False}
+
+    def worker():
+        try:
+            response = requests.post(
+                url, headers=headers, json=json_payload, stream=True,
+                timeout=(min(10.0, deadline_sec), min(float(idle_timeout), deadline_sec)),
+            )
+            box["response"] = response
+            chunks = []
+            if hasattr(response, "iter_content"):
+                for chunk in response.iter_content(chunk_size=16384):
+                    if cancelled.is_set() or time.monotonic() > deadline:
+                        raise TimeoutError("AI_DEADLINE_EXCEEDED")
+                    if chunk:
+                        chunks.append(chunk)
+                body = b"".join(chunks).decode("utf-8", errors="replace")
+            else:
+                body = response.text or ""
+            box["status"], box["body"] = int(response.status_code), body
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
+            box["error"] = exc
+        finally:
+            with _ai_deadline_lock:
+                if box["abandoned"]:
+                    _ai_deadline_state["abandoned_in_flight"] -= 1
+                finished.set()
+            try:
+                if box["response"] is not None:
+                    box["response"].close()
+            except Exception:
+                pass
+
+    threading.Thread(target=worker, name="deepseek-call", daemon=True).start()
+    finished.wait(max(0.0, deadline - time.monotonic()))
+    with _ai_deadline_lock:
+        timed_out = not finished.is_set()
+        if timed_out:
+            box["abandoned"] = True
+            _ai_deadline_state["abandoned_in_flight"] += 1
+            _ai_deadline_state["deadline_exceeded_total"] += 1
+    if timed_out:
+        cancelled.set()
+        _abort_streaming_response(box["response"])
+        err = RuntimeError(f"AI_DEADLINE_EXCEEDED:{deadline_sec:.0f}s")
+        err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
+        raise err
+    if box["error"] is not None:
+        if isinstance(box["error"], TimeoutError) and str(box["error"]) == "AI_DEADLINE_EXCEEDED":
+            err = RuntimeError(f"AI_DEADLINE_EXCEEDED:{deadline_sec:.0f}s")
+            err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
+            raise err
+        raise box["error"]
+    return box["status"], box["body"]
+
+
+def _abort_streaming_response(response) -> None:
+    """Best-effort socket shutdown so a blocked read on the worker returns now."""
+    if response is None:
+        return
+    try:
+        sock = response.raw._fp.fp.raw._sock  # urllib3 -> http.client -> socket
+        sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def call_deepseek_api_with_meta(
     messages,
     temperature=0.4,
     *,
@@ -18320,9 +18464,9 @@ def call_deepseek_api(
     response_format=None,
     timeout=None,
 ):
-    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    """HTTP + JSON guard for DeepSeek; returns (text, latency_ms, served-model meta)."""
     try:
-        text, latency_ms, model_echo = _call_deepseek_api_unrecorded(
+        text, latency_ms, meta = _call_deepseek_api_unrecorded(
             messages,
             temperature,
             purpose=purpose,
@@ -18334,8 +18478,22 @@ def call_deepseek_api(
         if not str(exc).startswith(AI_PROVIDER_NOT_ATTEMPTED_PREFIXES):
             record_ai_provider_outcome(purpose, ok=False, error=exc)
         raise
+    meta = dict(meta or {})
     record_ai_provider_outcome(
-        purpose, ok=True, latency_ms=latency_ms, model_echo=model_echo
+        purpose, ok=True, latency_ms=latency_ms,
+        model_echo=meta.get("served_model"),
+        system_fingerprint=meta.get("system_fingerprint"),
+        requested_model=meta.get("requested_model"),
+    )
+    return text, latency_ms, meta
+
+
+def call_deepseek_api(messages, temperature=0.4, *, purpose: str, max_tokens=None,
+                      response_format=None, timeout=None):
+    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    text, latency_ms, _meta = call_deepseek_api_with_meta(
+        messages, temperature, purpose=purpose, max_tokens=max_tokens,
+        response_format=response_format, timeout=timeout,
     )
     return text, latency_ms
 
@@ -18348,6 +18506,8 @@ def classify_ai_provider_error(exc) -> str:
     """Bounded error class only; provider bodies never reach health payloads."""
     text = str(exc or "")
     status = getattr(exc, "http_status", None)
+    if text.startswith("AI_DEADLINE_EXCEEDED"):
+        return "DEADLINE"
     if text.startswith("HTTP_ERROR:"):
         lowered = text.lower()
         if "timed out" in lowered or "timeout" in lowered:
@@ -18375,7 +18535,8 @@ def classify_ai_provider_error(exc) -> str:
 
 
 def record_ai_provider_outcome(
-    purpose, *, ok, now=None, latency_ms=None, model_echo=None, error=None
+    purpose, *, ok, now=None, latency_ms=None, model_echo=None, error=None,
+    system_fingerprint=None, requested_model=None,
 ):
     if purpose not in AI_PROVIDER_HEALTH_PURPOSES:
         return
@@ -18384,12 +18545,19 @@ def record_ai_provider_outcome(
         health = _ai_provider_health
         health["last_attempt_ts"] = now
         if ok:
+            previous = health.get("last_model_echo")
+            if model_echo and previous and model_echo != previous:
+                changes = list(health.get("served_model_changes") or [])
+                changes.append({"from": previous, "to": model_echo, "at": _epoch_iso(now)})
+                health["served_model_changes"] = changes[-10:]
             health.update({
                 "last_success_ts": now,
                 "failing_since_ts": 0.0,
                 "consecutive_failures": 0,
                 "last_latency_ms": latency_ms,
-                "last_model_echo": model_echo,
+                "last_model_echo": model_echo or previous,
+                "last_system_fingerprint": system_fingerprint,
+                "last_requested_model": requested_model,
             })
             health["successes_since_boot"] += 1
             return
@@ -18417,6 +18585,10 @@ def ai_provider_health_snapshot(now=None) -> dict:
     reference_ts = success_ts or float(health["failing_since_ts"] or 0)
     no_success_sec = max(0.0, now - reference_ts) if failures and reference_ts else 0.0
     alert = bool(failures and no_success_sec > AI_NO_SUCCESS_ALERT_SEC)
+    configured_model, _ = _deepseek_config_receipt()
+    served = health.get("last_model_echo")
+    with _ai_deadline_lock:
+        deadline_state = dict(_ai_deadline_state)
     return {
         "schema": "ai_provider_health_v1",
         "purpose": "trading_direction",
@@ -18430,12 +18602,72 @@ def ai_provider_health_snapshot(now=None) -> dict:
         "no_success_while_failing_sec": no_success_sec,
         "last_error_class": health["last_error_class"],
         "last_latency_ms": health["last_latency_ms"],
-        "last_model_echo": health["last_model_echo"],
+        "last_model_echo": served,
+        "last_system_fingerprint": health.get("last_system_fingerprint"),
+        "configured_model": configured_model,
+        "served_model_matches_configured": (served == configured_model) if served else None,
+        "served_model_changes": list(health.get("served_model_changes") or []),
+        "call_deadline_sec": AI_CALL_DEADLINE_SEC,
+        "deadline_exceeded_total": int(deadline_state["deadline_exceeded_total"]),
+        "abandoned_calls_in_flight": int(deadline_state["abandoned_in_flight"]),
         "successes_since_boot": int(health["successes_since_boot"]),
         "failures_since_boot": int(health["failures_since_boot"]),
         "alert_after_sec": AI_NO_SUCCESS_ALERT_SEC,
         "alert": "AI_NO_SUCCESS_10M" if alert else None,
+        "deepseek_balance": deepseek_balance_snapshot(now),
     }
+
+
+DEEPSEEK_BALANCE_REFRESH_SEC = 10 * 60.0
+_deepseek_balance_lock = threading.Lock()
+_deepseek_balance = {"checked_ts": 0.0, "refreshing": False, "result": None}
+
+
+def _parse_deepseek_balance(payload) -> dict:
+    """Bounded USD summary of GET /user/balance; provider text never leaves."""
+    if not isinstance(payload, dict):
+        return {"error": "BAD_RESPONSE"}
+    infos = payload.get("balance_infos") or []
+    usd = next((i for i in infos if isinstance(i, dict) and str(i.get("currency")).upper() == "USD"), None)
+    try:
+        total = float(usd["total_balance"]) if usd else None
+    except (KeyError, TypeError, ValueError):
+        total = None
+    if total is None:
+        return {"error": "NO_USD_BALANCE"}
+    status = "RED" if total < 1.0 or not payload.get("is_available") else "AMBER" if total < 5.0 else "OK"
+    return {"total_usd": total, "is_available": bool(payload.get("is_available")), "status": status}
+
+
+def _refresh_deepseek_balance() -> None:
+    result = {"error": "MISSING_API_KEY"}
+    try:
+        api_key = _deepseek_api_key()
+        if api_key:
+            res = requests.get(DEEPSEEK_BALANCE_URL, timeout=15,
+                               headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+            result = (_parse_deepseek_balance(res.json()) if res.status_code < 400
+                      else {"error": f"HTTP_{res.status_code}"})
+    except Exception as exc:
+        result = {"error": type(exc).__name__}
+    now = time.time()
+    with _deepseek_balance_lock:
+        _deepseek_balance.update({"checked_ts": now, "refreshing": False,
+                                  "result": {**result, "checked_at": _epoch_iso(now)}})
+
+
+def deepseek_balance_snapshot(now=None) -> dict:
+    """Cached read-only balance; refreshes off the request thread every 10 min."""
+    now = float(now or time.time())
+    with _deepseek_balance_lock:
+        cached = dict(_deepseek_balance["result"] or {"status": "UNKNOWN", "checked_at": None})
+        due = (not _deepseek_balance["refreshing"]
+               and now - float(_deepseek_balance["checked_ts"] or 0) >= DEEPSEEK_BALANCE_REFRESH_SEC)
+        if due:
+            _deepseek_balance["refreshing"] = True
+    if due:
+        threading.Thread(target=_refresh_deepseek_balance, name="deepseek-balance", daemon=True).start()
+    return cached
 
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
@@ -18463,6 +18695,9 @@ def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None)
         "trade_id": trade_id,
         "deepseek_model": configured_model,
         "deepseek_thinking_mode": configured_thinking_mode,
+        "deepseek_served_model": None,
+        "deepseek_system_fingerprint": None,
+        "ai_failure_class": classify_ai_provider_error(exc),
     }
 
 def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extra=None, force=False):
@@ -18541,7 +18776,8 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 "ai_direction_raw": ai_result.get("direction"),
                 "decision": ai_result.get("decision"),
                 "approved": ai_result.get("approved", False),
-                "win_prob": ai_result.get("win_prob"),
+                "win_prob": evidence_win_prob(ai_result),
+                "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "comment": (ai_result.get("comment") or "")[:2000],
                 "source": ai_result.get("source"),
                 "event": event,
@@ -18565,6 +18801,9 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                     ai_result.get("deepseek_thinking_mode") or configured_thinking_mode
                 ),
                 **csv_research_meta(),
+                "deepseek_served_model": ai_result.get("deepseek_served_model"),
+                "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
+                "ai_failure_class": ai_result.get("ai_failure_class"),
             }
         dynamic_csv_writer(CSV_AI_TRANCHE, row)
     except Exception as e:
@@ -19359,6 +19598,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
                 and not is_patient_chase_lane(lane)
             )
             or is_deterministic_bracket_lane(lane)
+            or is_cross_venue_clock_lane(lane)
         ):
             continue
         tile_ai, tile_direction, tile_spread, tile_admission_reason = _tile_view_of_shared_call(
@@ -19672,16 +19912,18 @@ def evaluate_signal_with_ai(
                 if not text:
                     text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
                 latency_ms = 5
+                call_meta = {"requested_model": _deepseek_model(), "served_model": None,
+                             "system_fingerprint": None}
                 log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
             else:
-                text, latency_ms = call_deepseek_api(
+                text, latency_ms, call_meta = call_deepseek_api_with_meta(
                     [{"role": "user", "content": prompt}],
                     temperature=temperature,
                     purpose="trading_direction",
                 )
                 log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         else:
-            text, latency_ms = call_deepseek_api(
+            text, latency_ms, call_meta = call_deepseek_api_with_meta(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
                 purpose="trading_direction",
@@ -19731,8 +19973,10 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
-            "deepseek_model": _deepseek_model(),
+            "deepseek_model": call_meta.get("requested_model") or _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "deepseek_served_model": call_meta.get("served_model"),
+            "deepseek_system_fingerprint": call_meta.get("system_fingerprint"),
         }
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
@@ -20936,7 +21180,7 @@ def log_ai(signal, ai):
         if ai.get("_tranche_logged"):
             return
         signal["_ai_logged"] = True
-        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
+        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": evidence_win_prob(ai),"win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT","comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
         dynamic_csv_writer(CSV_AI_TRANCHE, row)
         logger.info(f"[LOG AI] trade_id={signal.get('trade_id')} prob={ai.get('win_prob')} source={ai.get('source')} decision={ai.get('decision')} override={ai.get('override')} final_direction={signal.get('final_direction')} inverted={signal.get('inverted')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
@@ -20970,6 +21214,8 @@ def log_decision(signal, decision, reason, skip_stage=None, ai_extra=None):
                 "ai_source": signal.get("ai_source"),
                 "edge_trigger_reason": state.get("debug_state", {}).get("edge_trigger_reason"),
                 **csv_research_meta(signal),
+                "ai_served_model": signal.get("ai_served_model"),
+                "ai_system_fingerprint": signal.get("ai_system_fingerprint"),
             }
         if ai_extra and str(ai_extra).startswith("AI_ERROR"):
             row["ai_error_detail"] = str(ai_extra)[:500]
@@ -21098,7 +21344,7 @@ def log_blocked_signal(signal, ai, reason):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_blocked_signal"
         sr = state.get("support_resistance", {})
-        row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": ai.get("win_prob"), "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
+        row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": evidence_win_prob(ai), "ai_win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT", "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
         if "features" in signal:
             row.update({f"features_{k}": v for k,v in signal["features"].items()})
         if "context" in signal:
@@ -24112,7 +24358,9 @@ def process_pending_orders():
         with state_lock:
             grid_bid = float(state.get("bid") or 0)
             grid_ask = float(state.get("ask") or 0)
-        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask)
+            grid_bid_qty = float(state.get("bid_qty") or 0)
+            grid_ask_qty = float(state.get("ask_qty") or 0)
+        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask, grid_bid_qty, grid_ask_qty)
     except Exception:
         pass
     process_awaiting_micro_entries()
@@ -24893,8 +25141,11 @@ def process_signal(event: dict):
                         _set_lane_pipeline_stage(research_lane, "IDLE")
                         state["last_pipeline_stage"] = "IDLE"
                         return
-                log_ai_tranche_outcome(ai, event="AI_SPAWN")
-                _append_ai_history_row(ai)
+                # AI History holds one row per real AI call; cross-venue
+                # triggers are not AI calls.
+                if not is_cross_venue_clock_lane(research_lane):
+                    log_ai_tranche_outcome(ai, event="AI_SPAWN")
+                    _append_ai_history_row(ai)
             else:
                 ai_rem = ai_cooldown_remaining_sec(research_lane)
                 ai_cd = get_effective_ai_cooldown_sec(research_lane)
@@ -25184,7 +25435,7 @@ def process_signal(event: dict):
                 "trigger": event_obj.get("event_trigger", False),
                 "ai_called": True,
                 "ai_decision": ai.get("decision"),
-                "ai_win_prob": ai.get("win_prob"),
+                "ai_win_prob": evidence_win_prob(ai),
                 "ai_reason": ai.get("comment", ""),
                 "effective_threshold": pipeline_eff_thr,
             }
@@ -26887,7 +27138,9 @@ def state_monitor_loop():
                     elif is_deferred_shadow and age_from_start > SHADOW_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                     elif buf.get("post_exit"):
-                        if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
+                        if time.time() >= (
+                            _buf_float(buf.get("post_exit_deadline_ts"), 0) + POST_EXIT_REPLAY_GRACE_SEC
+                        ):
                             expired_ids.append(tid)
                     elif is_lab_or_collect and age_from_start > LAB_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
@@ -27014,6 +27267,8 @@ def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     signal["ai_win_prob"] = ai.get("win_prob")
     signal["ai_decision"] = ai.get("decision")
     signal["ai_source"] = ai.get("source")
+    signal["ai_served_model"] = ai.get("deepseek_served_model")
+    signal["ai_system_fingerprint"] = ai.get("deepseek_system_fingerprint")
     if "features" not in signal:
         signal["features"] = {}
     if "context" not in signal:
@@ -29065,6 +29320,321 @@ def cross_venue_health_snapshot() -> dict:
         return {"schema": _cvt.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
+import cross_venue_lead as _xvl
+
+# Per-second cross-venue lead evaluator for registry tiles on the
+# CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
+# qualifying second whatever the tile toggle; a paper attempt needs the tile ON,
+# a free one-slot worker and the registry rate caps. It runs ~0.6 s after each
+# second (after the 1 s tape and the collector close that second), never
+# catches up missed seconds, and does O(lookback) work per tick, so it cannot
+# starve the fill thread, the AI cadence or the segment shipper.
+XVL_EVALUATOR_ENABLED = os.getenv("XVL_EVALUATOR_ENABLED", "1").strip() == "1"
+XVL_SHADOW_FILE = _xvl.SHADOW_FILE
+XVL_HEALTH_SCHEMA = "xvl_evaluator_health_v1"
+XVL_TICK_OFFSET_SEC = 0.6
+XVL_TAPE_TAIL_SEC = 120
+XVL_MAX_TRIGGER_LATENCY_SEC = 1.5
+XVL_STALE_AFTER_SEC = 10.0
+_XVL_LOCK = threading.Lock()
+_XVL_EVALUATORS = {}
+_xvl_status = {
+    "started_ts": 0.0, "last_tick_ts": 0.0, "ticks": 0, "tick_errors": 0,
+    "last_error": None, "max_tick_ms": 0.0, "last_tick_ms": 0.0,
+    "rows_written": 0, "write_failures": 0, "thread_niced": False,
+}
+_xvl_lane_runtime = {}
+
+
+def _xvl_lane_state(lane: str) -> dict:
+    return _xvl_lane_runtime.setdefault(lane, {
+        "busy": False, "last_attempt_ts": 0.0, "submissions": deque(maxlen=512),
+        "attempts": 0, "orders_eligible": 0, "skips": {}, "last_attempt": None,
+    })
+
+
+def _xvl_count_skip(lane: str, reason: str) -> None:
+    with _XVL_LOCK:
+        skips = _xvl_lane_state(lane)["skips"]
+        skips[reason] = int(skips.get(reason, 0)) + 1
+
+
+def _xvl_lower_thread_priority() -> None:
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 5)
+        _xvl_status["thread_niced"] = True
+    except (AttributeError, OSError, PermissionError):
+        _xvl_status["thread_niced"] = False
+
+
+def _xvl_append(row: dict) -> None:
+    ok = _safe_append_jsonl(XVL_SHADOW_FILE, row, label="XVL_SHADOW", fallback_on_error=False)
+    with _XVL_LOCK:
+        _xvl_status["rows_written" if ok else "write_failures"] += 1
+
+
+def _xvl_maybe_attempt_paper(lane: str, evaluation: dict, trigger: dict, now: float) -> None:
+    """Cheap, lock-guarded gate on the evaluator thread; the attempt runs elsewhere."""
+    if evaluation.get("status") != _xvl.STATUS_TRIGGER:
+        return
+    if not is_research_lane_enabled(lane):
+        return
+    entry = (COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}
+    min_gap = float(entry.get("min_submit_interval_sec") or 5)
+    hourly_cap = int(entry.get("max_submissions_per_hour") or 60)
+    with _XVL_LOCK:
+        lane_state = _xvl_lane_state(lane)
+        if lane_state["busy"]:
+            reason = "WORKER_BUSY"
+        elif now - lane_state["last_attempt_ts"] < min_gap:
+            reason = "MIN_SUBMIT_INTERVAL"
+        elif sum(1 for ts in lane_state["submissions"] if now - ts < 3600) >= hourly_cap:
+            reason = "HOURLY_SUBMISSION_CAP"
+        else:
+            reason = None
+            lane_state["busy"] = True
+            lane_state["last_attempt_ts"] = now
+            lane_state["attempts"] += 1
+    if reason:
+        _xvl_count_skip(lane, reason)
+        return
+    threading.Thread(
+        target=_xvl_paper_attempt, args=(lane, dict(trigger)),
+        daemon=True, name=f"xvl-paper-{lane.lower()}",
+    ).start()
+
+
+def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
+    outcome = "UNKNOWN"
+    try:
+        outcome = _xvl_paper_attempt_inner(lane, trigger)
+    except Exception as exc:
+        outcome = f"ERROR:{type(exc).__name__}"
+        logger.error(f"[XVL] paper attempt failed lane={lane} error={exc} [PIPELINE ENFORCEMENT]")
+    finally:
+        with _XVL_LOCK:
+            lane_state = _xvl_lane_state(lane)
+            lane_state["busy"] = False
+            lane_state["last_attempt"] = {
+                "trigger_id": trigger.get("trigger_id"), "side": trigger.get("side"),
+                "lead_bp": trigger.get("lead_bp"), "outcome": outcome, "ts": time.time(),
+            }
+            if outcome == "ORDER_ELIGIBLE":
+                lane_state["orders_eligible"] += 1
+        if outcome != "ORDER_ELIGIBLE":
+            _xvl_count_skip(lane, outcome.split(":", 1)[0] if outcome.startswith("ERROR") else outcome)
+
+
+def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
+    if time.time() - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
+        return "TRIGGER_STALE"
+    if not is_research_data_collection() or not is_research_lane_enabled(lane):
+        return "TILE_OFF"
+    if invert_signal_active():
+        return "INVERT_SIGNAL_ACTIVE"
+    if not ensure_lane_signal_capacity(lane):
+        return "TILE_POSITION_OPEN"
+    side = str(trigger.get("side") or "").upper()
+    call_id = str(trigger["trigger_id"])
+    call_ts = datetime.fromtimestamp(float(trigger["evaluated_ts"]), timezone.utc).isoformat()
+    policy = _patient_chase_policy(lane)
+    with state_lock:
+        bid = _buf_float(state.get("bid"), 0.0)
+        ask = _buf_float(state.get("ask"), 0.0)
+        bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+        last = _buf_float(state.get("price"), 0.0)
+    reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+    signal_features = {
+        "xvl_trigger": {
+            key: copy.deepcopy(trigger.get(key)) for key in (
+                "trigger_id", "anchor_bucket_ts", "evaluated_ts", "side", "lead_bp",
+                "venue_ret_bp", "bfx_ret_bp", "venue_bbo_age_s", "collector_age_s",
+                "bfx_bbo_age_s", "bfx_bid", "bfx_ask", "spread_bps", "episode_id",
+                "episode_first", "rule",
+            )
+        },
+        "signal_clock": _xvl.SIGNAL_CLOCK,
+    }
+    decision = policy.decide_entry(
+        direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
+        reference_price=reference,
+        ai_feature={"xvl_trigger_id": call_id, "lead_bp": trigger.get("lead_bp")},
+    )
+    decision["shared_ai_call_id"] = call_id
+    decision["xvl_trigger_id"] = call_id
+    _record_adaptive_entry_decision(lane, decision)
+    accepted = decision.get("action") != "STAND_ASIDE"
+    ai = {
+        "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
+        "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
+        "raw_direction": side, "raw_decision": "XVL_TRIGGER",
+        "direction_source": _xvl_direction_source(lane),
+        "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts, "trade_id": call_id,
+        "effective_research_direction": side,
+        "effective_research_admission_policy_id": (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment"),
+        "effective_research_admission": {"applied": True, "accepted": True, "reason": "XVL_TRIGGER",
+                                         "effective_direction": side},
+    }
+    ctx = {
+        "trade_id": call_id, "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts,
+        "price": reference, "symbol": SYMBOL,
+    }
+    disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
+    reason = "XVL_TRIGGER_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
+    evidence_ready = _write_v3_shared_lane_decision(
+        lane, ai, ctx, signal_features,
+        policy_decision="ACCEPT" if accepted else "REJECT",
+        execution_disposition=disposition, exact_reason=reason,
+    )
+    if not accepted:
+        return reason
+    if not evidence_ready:
+        logger.error(f"[{lane}] order blocked: immutable pre-entry evidence unavailable [PIPELINE ENFORCEMENT]")
+        return "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
+    with _XVL_LOCK:
+        _xvl_lane_state(lane)["submissions"].append(time.time())
+    _spawn_combo_lane(
+        ctx, ai, 0.0, {**signal_features, "adaptive_entry_decision": decision}, lane,
+        f"XVL_TRIGGER_{COMBO_LANE_SPECS[lane]['combo_key']}",
+    )
+    return "ORDER_ELIGIBLE"
+
+
+def _xvl_direction_source(lane: str) -> str:
+    return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
+
+
+def _xvl_tick(now: float) -> None:
+    live = _cross_venue_live(max_age_sec=0.5)
+    quotes = _AI_SHADOW_TAPE.tail(XVL_TAPE_TAIL_SEC)
+    with state_lock:
+        bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+    for lane, evaluator in list(_XVL_EVALUATORS.items()):
+        evaluation, trigger, outcomes = evaluator.step(
+            now=now, live=live, bfx_quotes=quotes, bfx_bbo_ts=bbo_ts,
+        )
+        for row in ([trigger] if trigger else []) + list(outcomes):
+            row["research_lane"] = lane
+            _xvl_append(row)
+        if trigger:
+            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+
+
+def xvl_evaluator_loop():
+    lanes = cross_venue_clock_lanes()
+    if not XVL_EVALUATOR_ENABLED or not lanes:
+        return
+    _xvl_lower_thread_priority()
+    for lane in lanes:
+        policy = _patient_chase_policy(lane)
+        _XVL_EVALUATORS[lane] = _xvl.LeadEvaluator(
+            policy.RULE, policy_id=policy.POLICY_ID, policy_signature=policy.POLICY_SIGNATURE,
+        )
+    _xvl_status["started_ts"] = time.time()
+    next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
+    while not shutdown_event.is_set():
+        wait = next_tick - time.time()
+        if wait > 0 and shutdown_event.wait(wait):
+            break
+        now = time.time()
+        next_tick = math.floor(now) + 1 + XVL_TICK_OFFSET_SEC
+        started = time.perf_counter()
+        try:
+            _xvl_tick(now)
+        except Exception as exc:
+            with _XVL_LOCK:
+                _xvl_status["tick_errors"] += 1
+                _xvl_status["last_error"] = f"{type(exc).__name__}: {exc}"[:240]
+            logger.warning(f"[XVL] evaluator tick failed: {exc} [PIPELINE ENFORCEMENT]")
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        with _XVL_LOCK:
+            _xvl_status["ticks"] += 1
+            _xvl_status["last_tick_ts"] = now
+            _xvl_status["last_tick_ms"] = round(elapsed_ms, 3)
+            _xvl_status["max_tick_ms"] = round(max(_xvl_status["max_tick_ms"], elapsed_ms), 3)
+
+
+def xvl_evaluator_thread() -> None:
+    """Research-only thread: a crash is reported as STALE health, never an execution pause."""
+    try:
+        xvl_evaluator_loop()
+    except Exception as exc:
+        with _XVL_LOCK:
+            _xvl_status["tick_errors"] += 1
+            _xvl_status["last_error"] = f"LOOP_CRASH {type(exc).__name__}: {exc}"[:240]
+        logger.exception(f"[XVL] evaluator thread stopped: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def xvl_evaluator_snapshot() -> dict:
+    """Evaluator status, per-lane shadow counters and paper-attempt counters."""
+    now = time.time()
+    lanes = cross_venue_clock_lanes()
+    with _XVL_LOCK:
+        status = dict(_xvl_status)
+        runtime = {
+            lane: {
+                "busy": bool(row["busy"]),
+                "attempts": int(row["attempts"]),
+                "orders_eligible": int(row["orders_eligible"]),
+                "submissions_last_hour": sum(1 for ts in row["submissions"] if now - ts < 3600),
+                "skips": dict(row["skips"]),
+                "last_attempt": copy.deepcopy(row["last_attempt"]),
+            }
+            for lane, row in _xvl_lane_runtime.items()
+        }
+    last = float(status.get("last_tick_ts") or 0.0)
+    tick_age = round(now - last, 3) if last else None
+    if not XVL_EVALUATOR_ENABLED or not lanes:
+        health, reason = "DISABLED", ("XVL_EVALUATOR_ENABLED=0" if lanes else "NO_CROSS_VENUE_CLOCK_TILES")
+    elif tick_age is None:
+        started = float(status.get("started_ts") or 0.0)
+        health = "STARTING" if started and now - started < XVL_STALE_AFTER_SEC else "STALE"
+        reason = "NO_TICK_YET"
+    elif tick_age > XVL_STALE_AFTER_SEC:
+        health, reason = "STALE", f"TICK_AGE_{tick_age:.0f}S"
+    elif status.get("write_failures"):
+        health, reason = "DEGRADED", "SHADOW_WRITE_FAILURES"
+    else:
+        health, reason = "OK", None
+    return {
+        "schema": XVL_HEALTH_SCHEMA,
+        "status": health,
+        "reason": reason,
+        "mode": "SHADOW_ALWAYS_PAPER_WHEN_TILE_ON",
+        "shadow_file": XVL_SHADOW_FILE,
+        "signal_clock": _xvl.SIGNAL_CLOCK,
+        "tick_age_s": tick_age,
+        "lanes": {
+            lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
+                   "paper": runtime.get(lane, {})}
+            for lane in lanes
+        },
+        **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
+                                  "rows_written", "write_failures", "thread_niced")},
+    }
+
+
+import market_context_tape as _mct
+
+# Watch-only market-context collector (fly-entrypoint.sh, own niced process).
+# The bot only reads its live file for status/monitoring; never readiness or orders.
+MARKET_CONTEXT_COLLECTOR_ENABLED = os.getenv("MARKET_CONTEXT_COLLECTOR_ENABLED", "1").strip() == "1"
+_MARKET_CONTEXT_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def market_context_health_snapshot() -> dict:
+    try:
+        now = time.time()
+        if now - _MARKET_CONTEXT_LIVE_CACHE["read_ts"] >= 5.0:
+            live = _cvt.read_live(_mct.LIVE_FILE) if MARKET_CONTEXT_COLLECTOR_ENABLED else None
+            _MARKET_CONTEXT_LIVE_CACHE.update(read_ts=now, live=live)
+        return _mct.health_from_live(
+            _MARKET_CONTEXT_LIVE_CACHE["live"], now, enabled=MARKET_CONTEXT_COLLECTOR_ENABLED,
+        )
+    except Exception as exc:
+        return {"schema": _mct.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
     try:
         ts_list, rows = _AI_SHADOW_TAPE.snapshot()
@@ -29159,7 +29729,7 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
             _ai_shadow_status["compact_skipped"] += 1
         return row
     try:
-        text, latency_ms = call_deepseek_api(
+        text, latency_ms, call_meta = call_deepseek_api_with_meta(
             _ai_shadow.render_compact_messages(facts),
             temperature=0.0,
             purpose="trading_direction_shadow",
@@ -29170,7 +29740,9 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
         parsed = _ai_shadow.parse_compact_response(text)
         row.update({
             "call_state": "CALLED",
-            "model": _deepseek_model(),
+            "model": call_meta.get("requested_model") or _deepseek_model(),
+            "served_model": call_meta.get("served_model"),
+            "system_fingerprint": call_meta.get("system_fingerprint"),
             "latency_ms": latency_ms,
             "raw_response": str(text)[:600],
             "parsed": parsed,
@@ -29185,6 +29757,34 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
             _ai_shadow_status["compact_errors"] += 1
             _ai_shadow_status["last_compact_error"] = str(exc)[:160]
     return row
+
+
+def _ai_shadow_win_prob(ai_result: dict, challengers: dict) -> dict:
+    """Evidence win probability: the compact model's success probability for the score-led side.
+
+    The shared direction prompt does not request a win probability, so its
+    parsed ``win_prob`` is a placeholder 0; it is reported as null with its
+    status instead of as a real 0 % forecast.
+    """
+    main_status = ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT"
+    out = {
+        "main_ai_win_prob_status": main_status,
+        "main_ai_win_prob": ai_result.get("win_prob") if main_status == "EMITTED" else None,
+        "win_prob": None,
+        "win_prob_status": main_status if main_status == "EMITTED" else "UNAVAILABLE",
+        "win_prob_source": "MAIN_AI_PROMPT" if main_status == "EMITTED" else None,
+    }
+    if main_status == "EMITTED":
+        out["win_prob"] = ai_result.get("win_prob")
+        return out
+    side = (challengers.get("sides") or {}).get("llm_score_led")
+    compact = challengers.get("compact") or {}
+    p = {"LONG": compact.get("p_long_success"), "SHORT": compact.get("p_short_success")}.get(side)
+    if compact.get("parse_status") == "OK" and p is not None:
+        out.update(win_prob=round(float(p) * 100.0, 2),
+                   win_prob_status="COMPACT_SHADOW_P_SUCCESS_SCORE_LED_SIDE",
+                   win_prob_source=_ai_shadow.COMPACT_PROMPT_ID)
+    return out
 
 
 def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
@@ -29225,8 +29825,9 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
         "deepseek_model": ai_result.get("deepseek_model"),
-        "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
-        "win_prob": ai_result.get("win_prob"),
+        "deepseek_served_model": ai_result.get("deepseek_served_model"),
+        "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
+        **_ai_shadow_win_prob(ai_result, challengers),
         **challengers,
         "score_led_admission_side": challengers["sides"]["llm_score_led"],
         "admission_note": (
@@ -29449,6 +30050,7 @@ _AI_DRAIN_POST_PATHS = {
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
     "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
+    "/api/system-health",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/debug_state", "/static/dashboard.js",
 }
@@ -31530,6 +32132,7 @@ def build_static_pathway_lane_specs() -> dict:
     for tile_number, lane_id in enumerate(ACTIVE_TILE_ORDER, start=1):
         lane_spec = COMBO_LANE_SPECS[lane_id]
         policy_view = _patient_chase_policy(lane_id).dashboard_policy()
+        cross_venue_clock = is_cross_venue_clock_lane(lane_id)
         lanes.append({
             "lane": lane_id,
             "label": lane_spec["label"],
@@ -31551,11 +32154,18 @@ def build_static_pathway_lane_specs() -> dict:
             "hypothesis_result": dict(lane_spec.get("presentation", {}).get("hypothesis_result") or {}),
             "research_question": lane_spec["research_question"],
             "entry": {
-                **policy_view["entry"], "ai_cadence": ai_cadence,
-                "chase_detail": chase_detail,
+                **policy_view["entry"],
+                "ai_cadence": "No AI — per-second cross-venue evaluator" if cross_venue_clock else ai_cadence,
+                "chase_detail": policy_view["entry"]["chase_detail"] if cross_venue_clock else chase_detail,
                 "margin_usd": float(lane_spec["margin_usd"]),
                 "filters": lane_spec,
             },
+            "signal_clock": lane_spec.get("signal_clock") or "SHARED_AI_CALL",
+            "evidence_badge": (
+                "HINT — 12h evidence"
+                if str((lane_spec.get("presentation", {}).get("hypothesis_result") or {}).get("status")) == "HINT_12H_EVIDENCE"
+                else None
+            ),
             "exit": policy_view["exit"],
             "exit_path": policy_view["exit"]["profile"],
             "promotion_criteria": lane_spec["promotion_criteria"],
@@ -34543,8 +35153,20 @@ DASHBOARD_JS = """(function () {
               : c;
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + chip + '</span>';
           }).join('');
-          const badge = spec.badge
+          const badge = (spec.badge
             ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#3d2e00;border:1px solid #d4a72c;border-radius:4px;color:#f0c14b;font-size:0.72em;font-weight:700;">' + spec.badge + '</span>')
+            : '')
+            + (spec.evidence_badge
+              ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:4px;color:#ffa657;font-size:0.72em;font-weight:700;">' + spec.evidence_badge + ' · Win % ' + headlineWinLabel + '</span>')
+              : '');
+          const xvlLane = ((d.xvl_evaluator || {}).lanes || {})[spec.lane];
+          const xvlShadow = xvlLane
+            ? ('<div style="margin-top:8px;padding:7px 9px;background:#1b1530;border:1px solid #8957e5;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+              + '<strong style="color:#a371f7;">Cross-venue evaluator (' + ((d.xvl_evaluator || {}).status || 'UNKNOWN') + '):</strong> '
+              + 'shadow triggers ' + Number(xvlLane.triggers_logged || 0) + ' · qualifying ' + Number(xvlLane.qualifying || 0)
+              + ' · shadow outcomes ' + Number(xvlLane.outcomes_ok || 0) + ' · paper attempts ' + Number((xvlLane.paper || {}).attempts || 0)
+              + ' · orders ' + Number((xvlLane.paper || {}).orders_eligible || 0)
+              + '<div style="color:#8b949e;">Every qualifying lead is logged as a shadow signal whether or not this tile is ON (since process start).</div></div>')
             : '';
           const chaseTiming = spec.chase_timing || {};
           const chaseTruth = '<div style="margin-top:8px;padding:7px 9px;background:#132033;border:1px solid #1f6feb;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
@@ -34604,12 +35226,18 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
-            + chaseTruth
+            + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + (function () {
               const result = spec.hypothesis_result || {};
               if (!result.status) return '';
+              if (result.in_sample) {
+                return '<div style="margin-top:8px;padding:7px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+                  + '<strong style="color:#ffa657;">' + (result.hypothesis_id || 'Hypothesis') + ' · ' + result.status + ':</strong> ' + result.in_sample
+                  + (result.expected_live ? '<div style="margin-top:2px;color:#d29922;">Expected live: ' + result.expected_live + '</div>' : '')
+                  + '</div>';
+              }
               return '<div style="margin-top:8px;padding:7px 8px;background:#14251b;border:1px solid #238636;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
                 + '<strong style="color:#3fb950;">Analyzer hypothesis receipt:</strong> '
                 + (result.model || 'model unavailable')
@@ -38539,6 +39167,7 @@ def _build_relay_execution_state_snapshot() -> dict:
     # payload is intentionally cached while paper execution is running, so
     # these counts must travel through the live overlay as well or they freeze
     # at the values observed during the first heavy build.
+    snapshot["xvl_evaluator"] = xvl_evaluator_snapshot()
     snapshot["lane_position_counts"] = {}
     for lane_name in dict.fromkeys(
         PATHWAY_LAB_LANES + (LEGACY_ADOPTION_LANE,)
@@ -40734,6 +41363,98 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
         }
 
 
+_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None}
+_SYSTEM_HEALTH_LOCK = threading.Lock()
+
+
+def _system_health_fly_self_checks(now: float | None = None) -> list:
+    """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
+    now = float(now or time.time())
+    with state_lock:
+        ws_ts = float(state.get("ws_last_tick") or 0)
+        paused = bool(state.get("execution_paused", False))
+        live_armed = bool(state.get("live_armed", False))
+    ws_age = max(0.0, now - ws_ts) if ws_ts else None
+    checks = [
+        {
+            "id": "fly.ws_ticks",
+            "status": "GREEN" if ws_age is not None and ws_age <= 120 else "RED",
+            "observed": "never" if ws_age is None else f"{int(ws_age)}s",
+            "threshold": "<=120s",
+        },
+        {
+            "id": "fly.paused",
+            "status": "AMBER" if paused else "GREEN",
+            "observed": "paused" if paused else "running",
+            "threshold": "running",
+        },
+        {
+            "id": "fly.live_armed",
+            "status": "RED" if live_armed else "GREEN",
+            "observed": "armed" if live_armed else "disarmed",
+            "threshold": "disarmed",
+        },
+    ]
+    provider = globals().get("_ai_provider_health")
+    if isinstance(provider, dict):
+        last_ok = provider.get("last_success_ts")
+        failures = int(provider.get("consecutive_failures") or 0)
+        age = max(0.0, now - float(last_ok)) if isinstance(last_ok, (int, float)) and last_ok else None
+        checks.append({
+            "id": "fly.ai_success",
+            "status": "RED" if age is None or age > 720 or failures >= 3
+            else ("AMBER" if age > 360 else "GREEN"),
+            "observed": ("no success" if age is None else f"last success {int(age // 60)}m ago")
+            + f", {failures} consecutive failures",
+            "threshold": "<12m, <3 failures",
+        })
+    return checks
+
+
+@app.route('/api/system-health/report', methods=['POST'])
+def system_health_report():
+    if (request.content_length or 0) > system_health_banner.MAX_REPORT_BYTES:
+        return jsonify({"ok": False, "error": "report too large"}), 413
+    report = system_health_banner.sanitize_report(request.get_json(silent=True))
+    if report is None:
+        return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
+    with _SYSTEM_HEALTH_LOCK:
+        _SYSTEM_HEALTH_REPORT["report"] = report
+        _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
+    return jsonify({"ok": True, "verdict": report["verdict"]})
+
+
+@app.route('/api/system-health')
+def system_health_view():
+    with _SYSTEM_HEALTH_LOCK:
+        report = _SYSTEM_HEALTH_REPORT["report"]
+        received_at = _SYSTEM_HEALTH_REPORT["received_at"]
+    out = system_health_banner.with_staleness(report)
+    out["received_at"] = received_at
+    self_checks = _system_health_fly_self_checks()
+    out["fly_self_checks"] = self_checks
+    bad = [c for c in self_checks if c["status"] != "GREEN"]
+    if bad:
+        out["failing"] = list(out.get("failing") or []) + bad
+        rank = {"GREEN": 0, "SKIP": 0, "AMBER": 1, "RED": 2}
+        worst = max(bad, key=lambda c: rank[c["status"]])["status"]
+        if rank[worst] > rank.get(out.get("verdict"), 0):
+            out["verdict"] = worst
+    if not _admin_authed_strict():
+        out["failing"] = [
+            {k: c.get(k) for k in ("id", "status", "observed", "threshold")}
+            for c in out.get("failing") or []
+        ]
+    response = jsonify(out)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.after_request
+def _inject_system_health_banner(response):
+    return system_health_banner.inject_banner(response)
+
+
 @app.route('/api/status')
 @app.route('/status')
 def status():
@@ -40850,6 +41571,14 @@ def status():
                 "file": _cvt.FILE_NAME,
                 "mode": "SHADOW_ONLY_NO_ORDERS",
                 **cross_venue_health_snapshot(),
+            },
+            "xvl_evaluator": xvl_evaluator_snapshot(),
+            "market_context_tape": {
+                "tape_schema": _mct.SCHEMA,
+                "file": _mct.FILE_NAME,
+                "liquidations_file": _mct.LIQ_FILE_NAME,
+                "mode": "WATCH_ONLY_NO_ORDERS",
+                **market_context_health_snapshot(),
             },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
@@ -41108,6 +41837,8 @@ def ready():
         "ai_input_health": ai_input_health_snapshot(),
         # Shadow research feed health; deliberately not an input to ready_ok.
         "cross_venue_health": cross_venue_health_snapshot(),
+        "xvl_evaluator_health": xvl_evaluator_snapshot(),
+        "market_context_health": market_context_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 
@@ -46115,6 +46846,63 @@ def patch_signal_snapshot_outcome(
         logger.error(f"[SIGNAL_SNAPSHOT] patch failed trade_id={trade_id}: {e}")
 
 
+def _snapshot_shared_ai_call_id(trade_id, signal: dict, ai: dict):
+    """The shared AI call that caused this signal; a scan trade id is that call's id."""
+    explicit = (signal or {}).get("shared_ai_call_id") or (ai or {}).get("shared_ai_call_id")
+    if explicit:
+        return str(explicit)
+    return str(trade_id) if str(trade_id or "").startswith("scan-") else None
+
+
+def counterfactual_join_fields(trade_id, snapshot: dict, replay: dict) -> dict:
+    """Timestamps and causal join keys every counterfactual row must carry.
+
+    Rows written before signal snapshots recorded these keys fall back to the
+    deterministic scan-call identity; anything still unknown stays null and is
+    listed in ``join_keys_missing`` instead of being guessed.
+    """
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    replay = replay if isinstance(replay, dict) else {}
+    def _num(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            try:
+                number = datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                return None
+        return number if math.isfinite(number) and number > 0 else None
+    signal_ts = _num(snapshot.get("approve_ts"))
+    if signal_ts is None:
+        signal_ts = _num(replay.get("start_ts"))
+    shared = (snapshot.get("shared_ai_call_id") or replay.get("shared_ai_call_id")
+              or _snapshot_shared_ai_call_id(trade_id, {}, snapshot.get("ai") or {}))
+    epoch = (snapshot.get("epoch_id") or snapshot.get("collection_epoch_id")
+             or replay.get("epoch_id") or replay.get("collection_epoch_id"))
+    now = time.time()
+    out = {
+        "ts": utc_iso(),
+        "written_ts": round(now, 3),
+        "signal_ts": signal_ts,
+        "signal_utc": snapshot.get("ts") or (
+            datetime.fromtimestamp(signal_ts, timezone.utc).isoformat() if signal_ts else None),
+        "shared_ai_call_id": shared,
+        "epoch_id": epoch,
+        "research_lane": snapshot.get("research_lane") or replay.get("research_lane"),
+    }
+    out["join_keys_missing"] = [k for k in ("signal_ts", "shared_ai_call_id", "epoch_id") if not out.get(k)]
+    return out
+
+
+def _counterfactual_snapshot_with_join_keys(trade_id, snapshot: dict, replay: dict) -> dict:
+    joined = counterfactual_join_fields(trade_id, snapshot, replay)
+    enriched = dict(snapshot or {})
+    for key in ("shared_ai_call_id", "epoch_id"):
+        if not enriched.get(key) and joined.get(key):
+            enriched[key] = joined[key]
+    return enriched
+
+
 def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Persist APPROVE-time config for counterfactual / shadow research."""
     try:
@@ -46138,6 +46926,10 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "research_model": signal.get("research_model"),
             "ts": utc_iso(),
             "approve_ts": time.time(),
+            "shared_ai_call_id": _snapshot_shared_ai_call_id(trade_id, signal, ai),
+            "epoch_id": _collector_v22_epoch_id(),
+            "policy_signature": signal.get("policy_signature")
+            or (signal.get("policy_identity") or {}).get("policy_signature"),
             "approve_index": approve_idx,
             "direction": signal.get("final_direction"),
             "price": price,
@@ -46148,7 +46940,8 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "ai": {
                 "approved": True,
                 "decision": "APPROVE",
-                "win_prob": ai.get("win_prob"),
+                "win_prob": evidence_win_prob(ai),
+                "win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai.get("direction"),
                 "bull_score": ai.get("bull_score"),
                 "bear_score": ai.get("bear_score"),
@@ -47594,7 +48387,13 @@ def close_replay_buffer(trade_id):
         if replay_buffers.get(trade_id) is buf:
             replay_buffers.pop(trade_id, None)
 
-def dump_replay(trade_id: str):
+def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
+    """Append the buffer's replay row.
+
+    ``terminal_reason`` labels a dump that is not the buffer's natural end
+    (e.g. ``CENSORED_PROCESS_SHUTDOWN``) so the analyzer can tell a censored
+    path from a genuinely incomplete one and dedupe re-dumps per trade.
+    """
     global write_counter
     mv_source = None
     with replay_lock:
@@ -47632,9 +48431,26 @@ def dump_replay(trade_id: str):
                 and has_fill_origin
                 and (not is_executed or post_exit_complete)
             )
+            buf["dump_seq"] = _buf_int(buf.get("dump_seq"), 0) + 1
+            natural_reason = (
+                "POST_EXIT_HORIZON_COMPLETE"
+                if post_exit_complete
+                else "FILL_ORIGIN_BUFFER_CLOSED"
+                if replay_complete
+                else "INCOMPLETE_EXECUTED_POST_EXIT"
+                if is_executed
+                else "BUFFER_CLOSED_NO_FILL_ORIGIN"
+                if buf.get("closed") and buf.get("ticks") and not has_fill_origin
+                else "INCOMPLETE_BUFFER"
+            )
+            censored = bool(terminal_reason) and not replay_complete
             replay = {
                 "schema": "signal_replay_v4",
                 "trade_id": trade_id,
+                "dumped_ts": round(now, 3),
+                "dump_seq": buf["dump_seq"],
+                "dump_reason": terminal_reason or ("BUFFER_CLOSED" if buf.get("closed") else "EXPIRED_OR_EVICTED"),
+                "censored": censored,
                 "start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),
                 "start_price": buf["start_price"],
                 "direction": buf.get("direction"),
@@ -47650,17 +48466,8 @@ def dump_replay(trade_id: str):
                 ), 3),
                 "post_exit_complete": post_exit_complete,
                 "replay_complete": replay_complete,
-                "replay_completion_reason": (
-                    "POST_EXIT_HORIZON_COMPLETE"
-                    if post_exit_complete
-                    else "FILL_ORIGIN_BUFFER_CLOSED"
-                    if replay_complete
-                    else "INCOMPLETE_EXECUTED_POST_EXIT"
-                    if is_executed
-                    else "BUFFER_CLOSED_NO_FILL_ORIGIN"
-                    if buf.get("closed") and buf.get("ticks") and not has_fill_origin
-                    else "INCOMPLETE_BUFFER"
-                ),
+                "replay_completion_reason": terminal_reason if censored else natural_reason,
+                "natural_completion_reason": natural_reason,
                 "terminal_provenance": (
                     "SHOWCASE_STRATEGY_EXIT" if is_executed else "COUNTERFACTUAL_ONLY"
                 ),
@@ -48618,14 +49425,16 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
         }
         outcome = simulate_replay_outcome(buf)
+        snapshot = _counterfactual_snapshot_with_join_keys(trade_id, snapshot, replay)
         counterfactual = {
             "schema": "counterfactual_v2",
             "trade_id": trade_id,
+            **counterfactual_join_fields(trade_id, snapshot, replay),
             "scenario": buf["direction"],
             "executed": bool(snapshot.get("executed")),
             "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
             "lane": replay.get("lane"),
-            "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+            "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
             "edge_score": snapshot.get("edge_score"),
             "fill_price": outcome.get("fill_price"),
             "fill_delay_sec": outcome.get("fill_delay_sec"),
@@ -48805,14 +49614,16 @@ def _run_counterfactual_catchup():
                 "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
             }
             outcome = simulate_replay_outcome(buf)
+            snapshot = _counterfactual_snapshot_with_join_keys(tid, snapshot, replay)
             counterfactual = {
                 "schema": "counterfactual_v2",
                 "trade_id": tid,
+                **counterfactual_join_fields(tid, snapshot, replay),
                 "scenario": buf["direction"],
                 "executed": bool(snapshot.get("executed")),
                 "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
                 "lane": replay.get("lane"),
-                "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+                "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
                 "edge_score": snapshot.get("edge_score"),
                 "fill_price": outcome.get("fill_price"),
                 "fill_delay_sec": outcome.get("fill_delay_sec"),
@@ -50825,6 +51636,7 @@ def main():
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
+    threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
     _start_collector_worker("collector-maturation")
     _start_collector_worker("collector-v3-reconcile")
     threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()
@@ -50880,12 +51692,12 @@ def main():
                         ):
                             finalize_shadow_lane_collecting(tid, buf_copy)
                         else:
-                            dump_replay(tid)
+                            dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
                             with replay_lock:
                                 replay_buffers.pop(tid, None)
                     except Exception as e:
                         logger.error(f"[SHUTDOWN] replay finalize failed tid={tid}: {e}")
-                        dump_replay(tid)
+                        dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
                         with replay_lock:
                             replay_buffers.pop(tid, None)
                 _stop_lifecycle_pipeline_runtime(timeout=5.0)

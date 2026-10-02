@@ -49,8 +49,11 @@ def backoff_delay(attempt: int, rng: random.Random) -> float:
     return round(base * rng.uniform(0.8, 1.2), 3)
 
 
+LOG_TAG = "cross-venue"
+
+
 def _log(message: str) -> None:
-    sys.stdout.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} [cross-venue] {message}\n")
+    sys.stdout.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} [{LOG_TAG}] {message}\n")
     sys.stdout.flush()
 
 
@@ -60,13 +63,13 @@ class ConnectionWorker(threading.Thread):
     def __init__(self, venue: str, spec: dict, accumulator: cvt.VenueAccumulator,
                  stop: threading.Event, ws_factory: Optional[Callable] = None,
                  clock: Callable[[], float] = time.time, sleep: Optional[Callable] = None,
-                 seed: Optional[int] = None) -> None:
+                 seed: Optional[int] = None, parser: Optional[Callable] = None) -> None:
         super().__init__(name=f"cv-{spec['name']}", daemon=True)
         self.venue = venue
         self.spec = spec
         self.acc = accumulator
         self.stop_event = stop
-        self.parser = cvt.PARSERS[venue]
+        self.parser = parser or cvt.PARSERS[venue]
         self._factory = ws_factory
         self._clock = clock
         self._sleep = sleep or stop.wait
@@ -225,6 +228,8 @@ class Collector:
             bucket = self._minutes.setdefault(minute, {v: [] for v in self.venues})
             for v in self.venues:
                 sample = self.acc[v].close_second(sec, self._prev_quote[v])
+                # Zero taker flow while a socket is down is "unknown", not "no trades".
+                sample["up"] = all(w.connected for w in self.workers[v])
                 if sample["quote"] is not None:
                     self._prev_quote[v] = sample["quote"]
                 bucket[v].append(sample)
@@ -240,7 +245,7 @@ class Collector:
             samples = self._minutes.pop(minute)
             row = cvt.encode_minute(
                 minute,
-                {v: [{k: s[k] for k in ("sec", "mid", "last", "buy", "sell")} for s in samples[v]]
+                {v: [{k: s.get(k) for k in ("sec", "mid", "last", "buy", "sell", "up")} for s in samples[v]]
                  for v in self.venues},
                 read_bfx_mids(self.bfx_path, minute),
                 derivatives={v: self.acc[v].derivatives() for v in self.venues},

@@ -22,6 +22,7 @@ from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
+    active_tile_policy_epochs,
     active_tile_registry_signature,
 )
 
@@ -209,14 +210,16 @@ def _deployed_policy_collection() -> dict[str, Any]:
             "lane": lane,
             "policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
             "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
+            "policy_epoch": ACTIVE_TILE_REGISTRY[lane]["policy_epoch"],
             "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
             "qualification_status": "NOT_QUALIFIED",
         }
         for lane in ACTIVE_TILE_ORDER
     ]
-    epochs = {ACTIVE_TILE_REGISTRY[lane]["policy_epoch"] for lane in ACTIVE_TILE_ORDER}
+    epochs = list(active_tile_policy_epochs())
     return {
-        "policy_epoch": next(iter(epochs)) if len(epochs) == 1 else None,
+        "policy_epoch": epochs[0] if len(epochs) == 1 else None,
+        "policy_epochs": epochs,
         "policies": policies,
         "policy_count": len(policies),
         "qualification_allowed": False,
