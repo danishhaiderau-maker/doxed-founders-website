@@ -576,11 +576,15 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     inputs["tier_a_health"] = (read_json(retention_dir / "status.json") or {}).get("tier_a")
     inputs["retention_exits"] = last_retention_exits(state_dir / "logs")
     reports = Path(opts.analyzer_repo) / ANALYZER_REPORTS_SUBDIR
-    inputs["analyzer_receipt"] = read_json(reports / "analyzer_generation_receipt.json")
-    inputs["analyzer_integrity"] = read_json(reports / "analyzer_integrity_report.json")
-    inputs["analyzer_manifest_generated_at"] = (read_json(reports / "report_manifest.json") or {}).get("generated_at")
-    inputs["data_health_report"] = read_json(reports / "data_health_report.json")
-    inputs["ledger_reconciliation"] = read_json(reports / "ledger_reconciliation.json")
+
+    def analyzer_report(name: str) -> Any:
+        return read_analyzer_report(reports, name)
+
+    inputs["analyzer_receipt"] = analyzer_report("analyzer_generation_receipt.json")
+    inputs["analyzer_integrity"] = analyzer_report("analyzer_integrity_report.json")
+    inputs["analyzer_manifest_generated_at"] = (analyzer_report("report_manifest.json") or {}).get("generated_at")
+    inputs["data_health_report"] = analyzer_report("data_health_report.json")
+    inputs["ledger_reconciliation"] = analyzer_report("ledger_reconciliation.json")
     inputs["archive_last_snapshot"] = last_jsonl_row(
         Path(getattr(opts, "archive_dir", None) or DEFAULT_ARCHIVE_DIR) / "index.jsonl")
     inputs["proof_last_row"] = latest_proof_row(inputs.get("proof_active"), Path(opts.proof_dir))
@@ -617,6 +621,13 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
 
 
 ANALYZER_REPORTS_SUBDIR = Path("services") / "btc-conservative-agent" / "canonical-research-data" / "analyzer" / "reports"
+
+
+def read_analyzer_report(reports: Path, name: str) -> Any:
+    # The generation (manifest, receipt, reconciliation) is written to the analyzer
+    # dir; reports/ only mirrors part of it.
+    found = read_json(reports.parent / name)
+    return found if found is not None else read_json(reports / name)
 _RETENTION_EXIT = re.compile(r"^(\S+) pid=\d+ RETENTION exit=(-?\d+)\s*(.*)$")
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"
 

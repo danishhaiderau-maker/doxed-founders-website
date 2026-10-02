@@ -1453,3 +1453,16 @@ def test_live_endpoint_p95_under_two_seconds(tmp_path):
         assert sorted(timings)[int(len(timings) * 0.95) - 1] < 2.0
     finally:
         httpd.shutdown()
+
+
+def test_analyzer_report_reads_generation_dir_before_partial_reports_mirror(tmp_path):
+    reports = tmp_path / "analyzer" / "reports"
+    reports.mkdir(parents=True)
+    (reports.parent / "analyzer_generation_receipt.json").write_text(json.dumps({"level": "AMBER"}), encoding="utf-8")
+    (reports.parent / "analyzer_integrity_report.json").write_text(json.dumps({"report_status": "INVALID"}), encoding="utf-8")
+    (reports / "analyzer_integrity_report.json").write_text(json.dumps({"report_status": "STALE_COPY"}), encoding="utf-8")
+    (reports / "data_health_report.json").write_text(json.dumps({"status": "OK"}), encoding="utf-8")
+    assert sh.read_analyzer_report(reports, "analyzer_generation_receipt.json") == {"level": "AMBER"}
+    assert sh.read_analyzer_report(reports, "analyzer_integrity_report.json")["report_status"] == "INVALID"
+    assert sh.read_analyzer_report(reports, "data_health_report.json") == {"status": "OK"}
+    assert sh.read_analyzer_report(reports, "ledger_reconciliation.json") is None
