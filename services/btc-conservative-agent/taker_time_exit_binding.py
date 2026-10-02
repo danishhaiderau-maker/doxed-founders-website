@@ -94,8 +94,14 @@ def signal_source_detail(tile: Mapping[str, Any]) -> str:
     entry = tile.get("entry_policy") or {}
     clock = str(tile.get("signal_clock") or "own signal clock").replace("_", " ").capitalize()
     venues = "/".join(str(v).capitalize() for v in entry.get("leader_venues") or ())
-    window = f" over {entry['lookback_sec']}s" if entry.get("lookback_sec") else ""
-    source = f" ({venues} lead vs Bitfinex{window})" if venues else ""
+    kind = str(entry.get("direction_source") or "signal").upper().removeprefix("CROSS_VENUE_").lower()
+    if entry.get("lookback_sec"):
+        window = f" over {entry['lookback_sec']}s"
+    elif entry.get("premium_mean_window_sec"):
+        window = f" relative to its {int(entry['premium_mean_window_sec']) // 60}-min mean"
+    else:
+        window = ""
+    source = f" ({venues} {kind} vs Bitfinex{window})" if venues else ""
     role = str(entry.get("ai_decision_role") or "NONE").upper()
     ai = "no AI call" if role == "NONE" else f"AI role {role}, not the shared AI call"
     return f"{clock}{source}; {ai}; independent identity, order, position and ledger"

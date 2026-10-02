@@ -188,6 +188,13 @@ def test_strategy_box_names_the_registry_signal_source_not_the_shared_ai_call():
         spec = COMBO_LANE_SPECS[lane]
         if spec["uses_shared_ai_direction"] and not spec.get("signal_clock"):
             assert binding.signal_source_detail(spec) == SHARED_AI_SIGNAL_DETAIL
+    premium_like = {
+        "uses_shared_ai_direction": False, "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
+        "entry_policy": {"direction_source": "CROSS_VENUE_PREMIUM", "leader_venues": ("binance", "bybit"),
+                         "premium_mean_window_sec": 3600, "ai_decision_role": "NONE"},
+    }
+    assert binding.signal_source_detail(premium_like).startswith(
+        "Per second cross venue evaluator (Binance/Bybit premium vs Bitfinex relative to its 60-min mean); no AI call")
 
 
 def test_evaluator_counts_stale_seconds_by_feed_reason():
