@@ -260,7 +260,9 @@ def compare_with_fly(report: Mapping[str, Any], fly_state: Optional[Mapping[str,
         diff = fly["closes"] - expected
         if diff < 0 or (covered and diff != 0) or (not covered and diff > 3):
             count_bad.append(f"{lane}: Fly {fly['closes']} vs mirror {len(m_rows)}+{len(n_rows)} newer")
-            level = RED if abs(diff) > 1 or diff < 0 else (RED if level == RED else AMBER)
+            # Beyond the listed window the gap can be plain mirror lag.
+            hard = diff < 0 or (covered and abs(diff) > 1)
+            level = RED if hard or level == RED else AMBER
         elif covered and fly["pnl"] is not None and abs(fly["pnl"] - expected_pnl) > PNL_TOLERANCE_USD + 0.005 * expected:
             pnl_bad.append(f"{lane}: Fly ${fly['pnl']} vs mirror ${round(expected_pnl, 2)}")
             level = RED if level == RED else AMBER
