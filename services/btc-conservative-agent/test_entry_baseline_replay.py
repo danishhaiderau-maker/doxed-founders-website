@@ -19,6 +19,7 @@ CONSTRAINTS = build_signed_quantity_constraints(
 def _row(ts, *, bid=99, ask=101, bid_qty=2, ask_qty=2):
     return {
         "schema": "market_microstructure_1s_v1", "symbol": "BTC", "bucket_ts": ts,
+        "source_ts": ts, "observed_at_ts": ts,
         "fresh": True, "valid_bbo": True, "bid": bid, "ask": ask,
         "bid_qty": bid_qty, "ask_qty": ask_qty, "buy_qty": 0, "sell_qty": 0,
         "buy_vwap": None, "sell_vwap": None, "trade_count": 0,

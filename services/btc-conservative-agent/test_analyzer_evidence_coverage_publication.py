@@ -1,4 +1,4 @@
-import gzip
+﻿import gzip
 import hashlib
 import importlib.util
 import json
@@ -37,6 +37,7 @@ def _sha(path):
 def test_coverage_report_consumes_same_generation_and_authoritative_ledgers(tmp_path, monkeypatch):
     analyzer = _load("coverage_publication_analyzer")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT", raising=False)
     root = tmp_path / "canonical-research-data"
     derived = root / "derived" / "policy-evidence" / "generation-key"
@@ -77,6 +78,7 @@ def test_coverage_report_consumes_same_generation_and_authoritative_ledgers(tmp_
 def test_coverage_report_uses_completed_canonical_archive_index(tmp_path, monkeypatch):
     analyzer = _load("coverage_archive_index_analyzer")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT", raising=False)
     root = tmp_path / "canonical-research-data"
     derived = root / "derived" / "policy-evidence" / "generation-key"

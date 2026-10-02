@@ -1,4 +1,4 @@
-"""Actual bot reset functions with real temporary V3/deletion/session modules."""
+﻿"""Actual bot reset functions with real temporary V3/deletion/session modules."""
 import ast
 from datetime import datetime, timezone
 import hashlib
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import uuid
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -74,13 +75,19 @@ def runtime(tmp_path_factory, monkeypatch):
            "_touch_grid_book": {}, "_compressed_shadow_chase_book": {}, "_compressed_shadow_seen_call_ids": set(),
            "_discovery_touch_grid_seen_call_ids": set(), "_order_multiverse_state": {},
            "_order_multiverse_pending_src": {}, "_order_multiverse_path_complete": {},
-           "_order_multiverse_post_ttl_done": {}, "_order_multiverse_written": set()}
+           "_order_multiverse_post_ttl_done": {}, "_order_multiverse_written": set(),
+           "uuid": uuid, "threading": threading, "_data_sync_inventory_cache": {}, "_data_sync_async_inventory": {},
+           "_collection_epoch_bind_lock": threading.RLock(), "_entry_grid_written_digests": {},
+           "_entry_grid_anchor_lock": threading.Lock(), "_entry_grid_anchor_by_call": {},
+           "_data_sync_inventory_snapshot_path": lambda: root / "sync_inventory_current.json"}
     path = Path(__file__).with_name("bot.py")
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     names = {"_fresh_reset_confirm_paused", "_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",
              "_fresh_research_reset_boundary", "_perform_fresh_collection_reset_quiesced",
              "_record_execution_settings_epoch", "_execution_settings_signature",
-             "_write_research_session", "_reset_collector_epoch_state", "_collector_v22_epoch_id", "_utc_isoformat_ns"}
+             "_write_research_session", "_reset_collector_epoch_state", "_collector_v22_epoch_id", "_bound_collection_epoch_id", "_data_sync_invalidate_reset_inventory",
+             "_write_research_session_payload", "_refresh_collection_epoch_identity_cache",
+             "_utc_isoformat_ns"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(nodes) == len(names)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), env)

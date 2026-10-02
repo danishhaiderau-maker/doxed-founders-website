@@ -783,7 +783,7 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(
             candidate["policy_spec"]["fill"]["source_fill_model"]
-            == "public-tape-conservative-v3-quantity-aware"
+            == "public-tape-conservative-v4-realistic-v1"
             for candidate in report["candidates"]
         ))
 

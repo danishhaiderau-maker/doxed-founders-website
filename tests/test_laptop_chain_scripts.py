@@ -134,6 +134,14 @@ def test_promotion_waits_out_a_draining_fly_backlog_only():
     assert "-contains 'FLY_UNSHIPPED_BYTES'" in only and "-notin" in only
 
 
+def test_disclosed_promotion_warnings_reach_cycle_status_without_blocking():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    assert "promotionLevel = $null; promotionWarnings = @()" in cycle
+    after = cycle.split("Stop-Cycle 3 'PROMOTION_HEAD_KEPT_MOVING'", 1)[1].split("Set-CycleStatus 'MIGRATION'", 1)[0]
+    assert ".segment-promotion.heartbeat.json" in after and "promotionWarnings" in after
+    assert "PROMOTION_DEGRADED" in after and "Stop-Cycle" not in after
+
+
 def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
     cycle = _source("run-segment-analyzer-cycle.ps1")
     assert "[int]$LockWaitMaxSec = 900" in cycle

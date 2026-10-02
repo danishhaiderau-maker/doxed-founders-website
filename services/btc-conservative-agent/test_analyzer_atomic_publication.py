@@ -186,6 +186,7 @@ def test_policy_evidence_library_manifest_is_declared_inventory_and_status_only(
 def test_policy_evidence_reports_are_atomically_mirrored_for_archive(tmp_path, monkeypatch):
     analyzer = _load("policy_report_mirror_analyzer", AGENT / "analyzer_research_engine_v62.py")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     source = Path(analyzer.POLICY_EVIDENCE_BINDING_REPORT_FILE)
     source.write_text('{"generation":"current"}', encoding="utf-8")
     destination = analyzer._atomic_mirror_analyzer_report(source.name)

@@ -105,10 +105,17 @@ def build_generation_receipt(
         reasons.append(f"integrity {integrity_status}")
     if failed_optional:
         reasons.append("optional studies failed: " + ", ".join(failed_optional))
-    if window_level != GREEN:
+    if window_level != GREEN and window.get("truncated", True):
         reasons.append(
             "protection replay truncated "
             f"{window.get('events_selected')}/{window.get('events_eligible')} events"
+        )
+    elif window_level != GREEN:
+        marks = window.get("mark_source") or {}
+        fallback = window.get("mark_fallback_events", marks.get("fallback_events"))
+        reasons.append(
+            f"protection replay {window.get('reason') or marks.get('reason') or 'degraded'} "
+            f"({fallback} events off side-correct 1s marks)"
         )
     if blockers_level != GREEN:
         blocked = [

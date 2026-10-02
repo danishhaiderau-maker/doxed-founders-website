@@ -136,6 +136,7 @@ def test_valid_structural_context_keeps_existing_path_and_writes_no_gap():
         enrich_ai_context_upgrade=lambda v:v,_stamp_3m_exhaustion_for_ai=lambda v:v,
         sanitize_ai_inputs=lambda v:v,_runtime_git_rev_exact=lambda:'a'*40,
         _collector_v22_epoch_id=lambda:'epoch-fixture',_runtime_readiness_components=lambda now:{},
+        _ai_shadow_tape_features=lambda now=None:{},
         _safe_append_jsonl=lambda *a,**k:rows.append(a[1]) or True,AI_INPUT_LOG_FILE='x')
     exec(compile(ast.Module(body=nodes,type_ignores=[]),'bot.py','exec'),env)
     ctx, coverage = env['_build_pure_ai_context_with_evidence'](

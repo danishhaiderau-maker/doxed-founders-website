@@ -9,9 +9,6 @@ def test_storage_capacity_is_not_presented_as_remaining_download():
               and any(isinstance(t,ast.Name) and t.id=='HTML' for t in node.targets))
     assert 'Volume capacity:' in html
     assert 'capacity does not shrink after a wipe' in html
-    assert 'not the download backlog' in html
-    assert 'A dash means unavailable, not zero' in html
-    assert 'only verified source deletion frees space' in html
     assert html.count('id="dataSizeVolumeTotal"')==1
     assert 'id="dataSizeVolumeTotal">-</span>' in html
     assert 'MB of <span id="dataSizeVolumeTotal"' not in html

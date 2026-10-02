@@ -68,7 +68,8 @@ if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP
 # and the pull loop defers a parity pass while the phase is PROMOTION.
 $cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $PID; reason = $Reason
                            startedAt = (Get-UtcNowIso); phase = 'PROMOTION'; updatedAt = $null
-                           finishedAt = $null; exitCode = $null; stopReason = $null; detail = $null }
+                           finishedAt = $null; exitCode = $null; stopReason = $null; detail = $null
+                           promotionLevel = $null; promotionWarnings = @() }
 Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -133,6 +134,14 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 ('PROMOTION_DENIED:' + ($denied -join ',')) $denyDetail }
 }
 if ($promotionExit -ne 0) { Stop-Cycle 3 'PROMOTION_HEAD_KEPT_MOVING' $denyDetail }
+# A disclosed promotion warning (e.g. research.db over the Fly SQLite cap ships
+# its last copy) degrades the cycle to AMBER but never blocks it.
+$promotionHeartbeat = Read-JsonFile (Join-Path $ViewRoot '.segment-promotion.heartbeat.json')
+$cycleStatus.promotionLevel = if ($promotionHeartbeat -and $promotionHeartbeat.promotionLevel) { [string]$promotionHeartbeat.promotionLevel } else { 'GREEN' }
+$cycleStatus.promotionWarnings = @(if ($promotionHeartbeat) { @($promotionHeartbeat.promotionWarnings) | Where-Object { $_ } | ForEach-Object { [string]$_ } })
+if ($cycleStatus.promotionWarnings.Count -gt 0) {
+  Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION_DEGRADED level={0} warnings={1}" -f $cycleStatus.promotionLevel, ($cycleStatus.promotionWarnings -join ','))
+}
 Set-CycleStatus 'MIGRATION'
 
 $ErrorActionPreference = 'Continue'

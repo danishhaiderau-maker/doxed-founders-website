@@ -40,7 +40,7 @@ def _fixture(root):
     receipt = {
         "epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
         "receipt_schema": "pre_entry_features_v1", "availability_boundary": "PRE_DECISION_ONLY",
-        "captured_at_ts": 99.0,
+        "capture_schema": "measured_feature_capture_v1", "captured_at_ts": 99.0,
         "bucket_definition_signature": "collected-historical-taxonomy-42",
         "bucket_definition_schema": "test-collector-search-schema",
         "bucket_definition_version": "42",
