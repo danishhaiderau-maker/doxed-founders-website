@@ -3201,6 +3201,11 @@ def _ai_payload():
         "calibration_buckets": (cal.get("confidence_buckets") or []) if probability_mode else [],
         "expected_vs_actual": cal.get("expected_vs_actual") or {},
         "feature_attribution": cal.get("feature_attribution") or {},
+        # Attribution groups the probability cohort only, so it is empty by
+        # construction in direction-only mode; say so instead of rendering blanks.
+        "feature_attribution_status": (
+            None if probability_mode else f"NOT_COMPUTED_{calibration_status or 'DIRECTION_ONLY'}"
+        ),
         "funnel": funnel,
         "fingerprints": fp.get("clusters") or fp.get("fingerprints") or fp,
         "confidence_bands": (conf.get("filled_trades_by_band") or []) if probability_mode else [],

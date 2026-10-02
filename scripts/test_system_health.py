@@ -1536,3 +1536,21 @@ def test_analyzer_report_reads_generation_dir_before_partial_reports_mirror(tmp_
     assert sh.read_analyzer_report(reports, "analyzer_integrity_report.json")["report_status"] == "INVALID"
     assert sh.read_analyzer_report(reports, "data_health_report.json") == {"status": "OK"}
     assert sh.read_analyzer_report(reports, "ledger_reconciliation.json") is None
+
+
+def test_clean_epoch_lifecycle_defects_are_a_declared_amber_blocker_until_expiry():
+    now = ts("2026-10-03T22:30:00Z")
+    inputs = healthy(now)
+    lifecycle = {"check": "v3_policy_lifecycle_integrity", "passed": False,
+                 "found": ["ORPHAN_EXPECTED_ORDER", "POLICY_IDENTITY_CONTAMINATION"]}
+    inputs["analyzer_integrity"] = {"report_status": "INVALID", "checks": [lifecycle]}
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
+    assert check["status"] == sh.AMBER and "CLEAN_EPOCH_PENDING" in check["observed"]
+    inputs["analyzer_integrity"]["checks"] = [dict(lifecycle, found=["SOMETHING_NEW"])]
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.RED
+    inputs["analyzer_integrity"]["checks"] = [lifecycle, {"check": "schema", "passed": False, "found": []}]
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.RED
+    inputs = healthy(ts("2026-10-06T01:00:00Z"))
+    inputs["analyzer_integrity"] = {"report_status": "INVALID", "checks": [lifecycle]}
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
+    assert check["status"] == sh.RED and "EXPIRED" in check["observed"]

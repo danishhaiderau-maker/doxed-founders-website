@@ -60,7 +60,9 @@ VIOLATION_HELP = {
     "DRIFT_DIMS_DROPPED": "dimension present in the baseline vanished", "CONTRACT_ERROR": "the evaluator crashed on this contract",
     "FILL_MODEL_UNDECLARED": "headline result does not declare fill_model=REALISTIC_V1",
     "FILL_MODEL_OPTIMISTIC_HEADLINE": "an optimistic (touch/ideal/mid) fill number is shown as headline instead of a labelled shadow",
+    "DECLARED_BLOCKER_EXPIRED": "a declared blocker passed its expiry without the section recovering; re-triage it",
 }
+DECLARED_BLOCKER_FIELDS = ("id", "kinds", "severity", "reason", "fix", "eta", "expires")
 DRIFT_WINDOW = 12
 ARCHIVE_MAX_FILE_BYTES = 40_000_000
 ARCHIVE_SNAPSHOTS = 8
@@ -95,6 +97,14 @@ def validate_registry(reg: dict[str, Any]) -> dict[str, Any]:
         for t in spec.get("tables") or []:
             if "path" not in t:
                 raise ValueError(f"contract {cid} has a table without path")
+        for b in spec.get("declared_blockers") or []:
+            missing = [k for k in DECLARED_BLOCKER_FIELDS if not b.get(k)]
+            if missing:
+                raise ValueError(f"contract {cid} declared blocker lacks {missing}")
+            if b["severity"] not in (AMBER, INFO):
+                raise ValueError(f"contract {cid} declared blocker {b['id']} severity must be AMBER|INFO")
+            if parse_ts(b["expires"]) is None:
+                raise ValueError(f"contract {cid} declared blocker {b['id']} expires is not a timestamp")
     reg.setdefault("registry_hash", "sha256:" + hashlib.sha256(json.dumps(reg, sort_keys=True).encode()).hexdigest()[:16])
     return reg
 
@@ -505,8 +515,44 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         except Exception as exc:  # noqa: BLE001
             viol.append(_v("RECONCILE_ERROR", AMBER, f"{spec['reconcile']}: {type(exc).__name__}: {str(exc)[:160]}"))
 
+    active = _apply_declared_blockers(spec, obj, viol, now)
+    if active:
+        res["declared_blockers"] = active
     res.update(status=_worst(viol), violations=viol, metrics=metrics, dims=dims, tables=tables_out)
     return res
+
+
+def _apply_declared_blockers(spec: dict[str, Any], obj: Any, viol: list[dict[str, Any]], now: float) -> list[dict]:
+    """Downgrade violations a known, owned blocker explains, only while its condition holds and before it expires.
+
+    A blocker never hides a violation kind it does not list, and once ``expires`` passes the original severity
+    returns together with a DECLARED_BLOCKER_EXPIRED violation so it cannot silently become permanent.
+    """
+    active = []
+    for b in spec.get("declared_blockers") or []:
+        cond = b.get("when")
+        if cond:
+            v = get_path(obj, cond["path"])
+            if (v if v is not MISSING else None) not in cond["in"]:
+                continue
+        matched = [x for x in viol if x["kind"] in b["kinds"] and not x.get("declared_blocker")
+                   and (not b.get("match") or any(m in x["detail"] for m in b["match"]))]
+        if not matched:
+            continue
+        if now >= parse_ts(b["expires"]):
+            viol.append(_v("DECLARED_BLOCKER_EXPIRED", AMBER,
+                           f"declared blocker {b['id']} expired {b['expires']} but {len(matched)} violation(s) remain; "
+                           f"fix was: {b['fix']}"))
+            continue
+        for x in matched:
+            if _RANK.get(x["severity"], 0) > _RANK[b["severity"]]:
+                x["severity_undeclared"] = x["severity"]
+                x["severity"] = b["severity"]
+            x["declared_blocker"] = b["id"]
+            x["detail"] = (f"{x['detail']} [declared blocker {b['id']}: {b['reason']}; fix: {b['fix']}; "
+                           f"ETA {b['eta']}]")[:600]
+        active.append({k: b[k] for k in ("id", "reason", "fix", "eta", "expires")} | {"violations": len(matched)})
+    return active
 
 
 def _roster(viol: list, name: str, lanes: set, ctx: dict[str, Any], t: dict[str, Any]) -> None:
@@ -906,7 +952,9 @@ def _rec_export_tiles_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, di
 
 
 def _rec_fly_analyzer_mirror(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
-    if obj.get("ok") is False or obj.get("mirror_available") is False:
+    # In external_desktop_analyzer mode Fly answers ok=false by design; only the uploaded mirror carries data.
+    external = obj.get("mode") == "external_desktop_analyzer"
+    if obj.get("mirror_available") is False or (obj.get("ok") is False and not external):
         return [_v("DEAD_SECTION", AMBER, f"Fly {obj.get('endpoint')} panel: ok={obj.get('ok')} "
                                           f"mirror_available={obj.get('mirror_available')} - Fly dashboard shows no analyzer data")], {}
     return [], {}
@@ -1123,13 +1171,21 @@ def summary(doc: dict[str, Any] | None) -> dict[str, Any] | None:
     worst = [{"id": r["id"], "status": r["status"], "why": "; ".join(v["detail"] for v in r["violations"]
                                                                        if v["severity"] in (RED, AMBER))[:300]}
              for r in doc["contracts"] if r["status"] in (RED, AMBER)]
-    collapse = [{"id": r["id"], "kinds": sorted({v["kind"] for v in r["violations"] if v["kind"] in COLLAPSE_KINDS})}
-                for r in doc["contracts"] if any(v["kind"] in COLLAPSE_KINDS and v["severity"] in (RED, AMBER)
-                                                 for v in r["violations"])]
+    collapse = []
+    for r in doc["contracts"]:
+        hits = [v for v in r["violations"] if v["kind"] in COLLAPSE_KINDS and v["severity"] in (RED, AMBER)
+                and not v.get("declared_blocker")]
+        if hits:
+            collapse.append({"id": r["id"], "kinds": sorted({v["kind"] for v in hits}),
+                             "severity": _worst(hits)})
+    declared = [{"id": r["id"], "blockers": [b["id"] for b in r["declared_blockers"]],
+                 "eta": min(b["eta"] for b in r["declared_blockers"])}
+                for r in doc["contracts"] if r.get("declared_blockers")]
     ad = doc.get("archive_drift") or {}
     return {"generated_at": doc["generated_at"], "heavy_at": doc.get("heavy_at"), "tier": doc["tier"],
             "counts": doc["counts"], "surfaces": doc["surfaces"], "contracts_total": doc["contracts_total"],
             "registry_hash": doc["registry_hash"], "offenders": worst, "collapse": collapse,
+            "declared_blockers": declared,
             "archive_drift_findings": len(ad.get("findings") or []),
             "archive_drift_red": sum(1 for f in ad.get("findings") or [] if f["severity"] == RED),
             "coverage": {k: v for k, v in (doc.get("coverage") or {}).items() if k != "uncovered"},
