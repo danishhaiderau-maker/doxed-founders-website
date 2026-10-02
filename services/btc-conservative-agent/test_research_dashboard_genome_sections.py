@@ -101,3 +101,16 @@ def test_single_section_endpoint(monkeypatch):
     body = client.get("/api/sections/combos").get_json()
     assert body["payloads"]["/api/combos"] == {"status": 200, "data": {"rows": [1]}}
     assert client.get("/api/sections/nope").status_code == 404
+
+def test_endpoint_derivation_handles_url_variables_dynamic_prefixes_and_json_twins():
+    html = ('<script>var U="/api/system-health";fetch(U)</script><script>const R = "/api/decision";'
+            "fetch(`/api/report/${name}`); fetch('/api/streams/x?limit=5')</script>")
+    assert ds.page_apis(html) == ["/api/decision", "/api/streams/x"]
+    index = ds.section_index("", [], [("Data health", "/data-health"), ("Decision", "/decision")],
+                             {"/data-health": "", "/decision": html}, routes=["/api/streams/data-health", "/api/decision"])
+    by_path = {s["path"]: s for s in index}
+    assert by_path["/data-health"]["apis"] == ["/api/streams/data-health"]
+    assert by_path["/decision"]["apis"] == ["/api/decision", "/api/streams/x"]
+    live = {s["id"]: s for s in dashboard._section_index()}
+    assert "/api/streams/data-health" in live["page-data-health"]["apis"]
+    assert not any(api.endswith("/") for s in live.values() for api in s["apis"])
