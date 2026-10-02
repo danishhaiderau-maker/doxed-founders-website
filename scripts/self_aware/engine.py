@@ -24,6 +24,7 @@ import pandas as pd
 
 from . import (ai_scorecard, alarms, analyzer_sections, contracts, data_awareness, diagnose, digest, edges, repair, tiles,
                uptime)
+from . import data_compat
 from .ai_scorecard import json_safe
 from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, THRESHOLDS, Paths
 from .facts import collect, iso, parse_ts
@@ -65,7 +66,7 @@ class Engine:
             "views": self.job_views, "diagnose": self.job_diagnose, "uptime": self.job_uptime,
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
             "data": self.job_data, "sections": self.job_sections, "contracts": self.job_contracts,
-            "contracts_light": self.job_contracts_light,
+            "contracts_light": self.job_contracts_light, "compat": self.job_compat,
         }
 
     # ------------------------------------------------------------ state
@@ -99,6 +100,7 @@ class Engine:
         self.facts["data_awareness"] = (self.docs.get("data") or {}).get("summary")
         self.facts["analyzer_sections"] = self.docs.get("sections") or self.state.get("analyzer_sections_doc")
         self.facts["contracts"] = contracts.summary(self.docs.get("contracts"))
+        self.facts["data_compat"] = self.docs.get("compat")
         found = diagnose.run(self.paths, self.store, self.facts, self.state)
         changes = diagnose.transitions(found, self.state, now)
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
@@ -206,6 +208,14 @@ class Engine:
     def job_contracts_light(self) -> dict:
         return self._contracts("light")
 
+    def job_compat(self) -> dict:
+        doc = json_safe(data_compat.run(self.paths, self.state))
+        doc["epoch_purity"] = data_compat.epoch_purity(self.paths, doc)
+        self.docs["compat"] = doc
+        return {"counts": doc["counts"], "coverage_pct": doc["coverage"]["scanned_pct"],
+                "epoch": doc["epoch"]["epoch_id"], "segregated_bytes": doc["segregated"]["bytes"],
+                "deferred": doc["scan_deferred_for_analyzer_cycle"], "ms": doc["ms"]}
+
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
 
@@ -282,7 +292,8 @@ class Engine:
         return now - last >= CADENCE_SEC[name]
 
     def run_once(self) -> dict:
-        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "ai",
+        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "compat",
+                                                      "ai",
                                                       "edges", "contracts", "diagnose", "digest")}
 
     def loop(self) -> None:

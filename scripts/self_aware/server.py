@@ -30,6 +30,8 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/contracts          ?surface=analyzer|fly|exports|selfaware|watcher&status=RED,AMBER
   /api/selfaware/contracts/registry declarative specs (section_contracts.json) + violation legend
   /api/selfaware/contracts/<id>     ?rows=N&history=N   spec, last result, history, raw rows fetched now
+  /api/selfaware/data/compatibility ?stream=&severity=   data versions / clean epoch per stream, schema drift,
+                                    dead-in-version fields, segregated partitions + manual delete command
 """
 from __future__ import annotations
 
@@ -352,6 +354,20 @@ class Handler(BaseHTTPRequestHandler):
         doc = (self.eng.docs.get("health") or {}).get("fly_platform")
         self._send(200 if doc else 503, doc or {"error": "fly platform status not evaluated yet (every diagnose pass)"})
 
+    def data_compat(self, q):
+        doc = self.eng.docs.get("compat")
+        if not doc:
+            return self._send(503, {"error": "compatibility scan not computed yet (job runs every 30 min)"})
+        if q.get("stream"):
+            rows = [s for s in doc["streams"] if s["stream"] == q["stream"]]
+            return self._send(200 if rows else 404, {"schema": doc["schema"], "generated_at": doc["generated_at"],
+                                                     "epoch": doc["epoch"], "streams": rows})
+        streams = doc["streams"]
+        if q.get("severity"):
+            want = {s.strip().upper() for s in q["severity"].split(",")}
+            streams = [s for s in streams if s["severity"] in want]
+        self._send(200, {**{k: v for k, v in doc.items() if k != "streams"}, "streams": streams})
+
     def data_view(self, q):
         self._send(200, render_data(self.eng), "text/html")
 
@@ -410,6 +426,7 @@ ROUTES = {
     "/api/selfaware/fly-platform": Handler.fly_platform,
     "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
     "/api/selfaware/contracts/registry": Handler.contracts_registry,
+    "/api/selfaware/data/compatibility": Handler.data_compat,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
@@ -536,6 +553,34 @@ def _mb(b: Any) -> str:
     return "" if b is None else f"{float(b) / 1e6:,.1f} MB"
 
 
+def render_compat(eng) -> str:
+    doc = eng.docs.get("compat")
+    if not doc:
+        return "<h2>Data compatibility</h2><p class=m>compatibility scan warming up (every 30 min)</p>"
+    ep, seg, cov = doc["epoch"], doc["segregated"], doc["coverage"]
+    rows = []
+    for s in sorted(doc["streams"], key=lambda x: ({"RED": 0, "AMBER": 1, "GREEN": 2}[x["severity"]], -x["segregated_bytes"])):
+        if s["severity"] == "GREEN" and not s["segregated_bytes"]:
+            continue
+        vers = "; ".join(f"{k.split('=', 1)[-1]} {v:,}" for k, v in list(s["versions"].items())[:4])
+        rows.append(f"<tr><td><b style='color:{_COLOR.get(s['severity'])}'>{_e(s['severity'])}</b></td>"
+                    f"<td><a href='/api/selfaware/data/compatibility?stream={_e(s['stream'])}'>{_e(s['stream'])}</a></td>"
+                    f"<td>{s['rows']:,}<div class=m>{_e(vers)}</div></td><td>{_mb(s['segregated_bytes'])}</td>"
+                    f"<td class=m>{_e('; '.join(s['problems']))}</td></tr>")
+    parts = "".join(f"<li>{_e(k)}: {v['rows']:,} rows · {_mb(v['bytes'])} · {v['streams']} streams</li>"
+                    for k, v in seg["partitions"].items())
+    cmd = seg["delete_command"]
+    return f"""<h2>Data compatibility</h2>
+<p>epoch <b>{_e(ep['epoch_id'] or 'none declared')}</b> {_e(ep.get('started_at_utc') or '')} · release {_e(ep.get('release'))}
+· index {_e(cov['scanned_pct'])}% of {_mb(cov['bytes_total'])} · {_e(doc['counts'])} · <a href='/api/selfaware/data/compatibility'>JSON</a></p>
+<p class=m>{_e(ep.get('note') or '')}</p>
+<p><b>Segregated (never merged into current-cohort analysis): {_mb(seg['bytes'])}</b></p><ul>{parts or '<li>nothing segregated</li>'}</ul>
+<p class=m>{_e(seg['note'])}. Deletion is manual:</p>
+<pre id=wipecmd style='white-space:pre-wrap;background:#1c1d21;padding:8px'>{_e(cmd)}</pre>
+<button onclick="navigator.clipboard.writeText(document.getElementById('wipecmd').innerText)">copy delete command</button>
+<table><tr><th>sev</th><th>stream</th><th>rows · versions</th><th>segregated</th><th>problems</th></tr>{''.join(rows) or '<tr><td colspan=5>all streams compatible</td></tr>'}</table>"""
+
+
 def render_data(eng) -> str:
     doc = eng.docs.get("data")
     if not doc:
@@ -580,6 +625,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 ({_e(s['catalogued'])} catalogued, {_e(s['uncatalogued'])} auto-discovered) · pass {_e(s['ms'])} ms · <a href='/'>overview</a>
 · <a href='/api/selfaware/data'>JSON</a></div>
 <h2>Checks</h2><table>{frows or '<tr><td>no data findings yet</td></tr>'}</table>
+{render_compat(eng)}
 <h2>Capacity</h2>
 <div class=k>laptop<br><b>{_e(lap.get('bot_data_gb'))}/{_e(lap.get('cap_gb'))} GB</b><div class=m>{_e(lap.get('usage_pct'))}% · +{_e(lap.get('growth_gb_per_day'))} GB/day · {_e(lap.get('days_to_90pct_cap'))} days to 90%</div></div>
 <div class=k>Fly volume<br><b>{_e(fly.get('volume_free_gb'))} GB free</b><div class=m>{_e(fly.get('hours_to_full'))} h to full · segment store {_e(fly.get('segment_store_pct_of_cap'))}% of cap</div></div>
