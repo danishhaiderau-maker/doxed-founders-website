@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 import research_v3_candidates as rc
 from research_v3_contract import canonical_hash
 
@@ -35,29 +37,32 @@ def test_each_distinct_replay_input_is_replayed_once_and_every_input_is_covered(
     monkeypatch.setattr(rc, "protection_screen", lambda: protections)
     monkeypatch.setattr(rc, "_conservative_child_receipt", _fill_receipt)
     calls = []
-    original = rc.replay_protected_policy
+    original_cell = rc.replay_cell
 
-    def recording(prices, **kwargs):
-        spec = kwargs["policy_spec"]
-        calls.append((
-            spec["fill"]["execution_world"], kwargs["entry_price"], kwargs["fill_ts"], kwargs["margin_usd"],
-            rc.canonical_hash("protection", [spec["loss_protection"], spec["profit_protection"]]),
-        ))
-        return original(prices, **kwargs)
+    class RecordingArrays(rc.PreparedReplayArrays):
+        def __init__(self, ordered, *, direction, entry_price, leverage, fill_ts):
+            super().__init__(ordered, direction=direction, entry_price=entry_price,
+                             leverage=leverage, fill_ts=fill_ts)
+            self.inputs = (entry_price, fill_ts)
 
-    monkeypatch.setattr(rc, "replay_protected_policy", recording)
+    def recording(path, plan, **kwargs):
+        calls.append((*path.inputs, kwargs["margin_usd"], plan.floor_key, plan.hard_stop,
+                      plan.atr_sl, plan.atr_tp, plan.time_stop_sec))
+        return original_cell(path, plan, **kwargs)
+
+    monkeypatch.setattr(rc, "PreparedReplayArrays", RecordingArrays)
+    monkeypatch.setattr(rc, "replay_cell", recording)
     source = _source()
     screen = rc.evaluate_protection_screen([source])
     assert screen["input_events"] == 1
-    assert len(calls) == len(set(calls))
-    expected = {
-        (world, child["fill_price"], child["fill_ts"], 0.25,
-         rc.canonical_hash("protection", [p["loss_protection"], p["profit_protection"]]))
-        for child in source["entry_children"]
-        for p in protections
-        for world in ("CONSERVATIVE_BBO_DEPTH_V1", "IDEAL_TOUCH_DIAGNOSTIC_ONLY")
-    }
-    assert set(calls) == expected
+    # Both worlds replay the same fill once each; nothing else is replayed.
+    expected = Counter()
+    for fill_price, fill_ts in {(c["fill_price"], c["fill_ts"]) for c in source["entry_children"]}:
+        for protection in protections:
+            plan = rc.ReplayPlan(protection)
+            expected[(fill_price, fill_ts, 0.25, plan.floor_key, plan.hard_stop,
+                      plan.atr_sl, plan.atr_tp, plan.time_stop_sec)] += 2
+    assert Counter(calls) == expected
     assert len(calls) == 2 * 2 * len(protections)
 
 
