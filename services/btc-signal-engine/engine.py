@@ -41675,6 +41675,7 @@ _SEGMENT_STATUS_MAX_BYTES = 64 * 1024
 _SEGMENT_STATUS_FIELDS = (
     "shipped_seq", "laptop_acked_seq", "unshipped_bytes", "last_segment_at",
     "updated_at", "last_error", "pruning_enabled", "sink", "store_bytes", "max_store_bytes",
+    "prune_mode", "pruned_through_seq", "custody_through_seq", "prune_deleted_bytes_total",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1

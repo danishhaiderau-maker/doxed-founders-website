@@ -39,13 +39,14 @@ import sqlite3
 import uuid
 
 import research_segment_format as fmt
+import research_segment_prune as prune
 import research_segment_selection as selection
 from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
 
 STATE_SCHEMA = "research_segment_shipper_state_v1"
 STATUS_SCHEMA = "research_segment_shipper_status_v1"
 INTENT_SCHEMA = "research_segment_shipper_intent_v1"
-PRUNING_ENABLED = False
+PRUNING_ENABLED = True
 
 # The volume sink duplicates source data on the trading volume until pruning
 # exists, so it carries a hard size cap and a much higher free-space floor.
@@ -362,10 +363,56 @@ class SegmentShipper:
             except (OSError, json.JSONDecodeError):
                 previous = {}
         previous.update(fields)
-        previous.update({"schema": STATUS_SCHEMA, "pruning_enabled": PRUNING_ENABLED,
+        previous.update({"schema": STATUS_SCHEMA, "pruning_enabled": self.prune_mode() != "off",
                          "updated_at": self.clock(), "prefix": self.prefix, "sink": self.sink,
                          "max_store_bytes": self.max_store_bytes})
         _atomic_write(self.status_path, json.dumps(previous, sort_keys=True, indent=2).encode())
+
+    # ---------------------------------------------------------------- pruning
+    def prune_mode(self) -> str:
+        if not PRUNING_ENABLED or self.sink != "volume":
+            return "off"
+        return prune.read_mode(self.state_dir)[0]
+
+    def prune_pass(self) -> dict:
+        """Custody-gated prune; only between cycles, never with an intent pending."""
+        mode = self.prune_mode()
+        if mode == "off":
+            self.write_status(prune_mode="off")
+            return {"mode": "off"}
+        if (self.intent_dir / "intent.json").is_file():
+            return {"mode": mode, "skipped": "INTENT_PENDING"}
+        store_root = getattr(self.store, "root", None)
+        if store_root is None:
+            return {"mode": mode, "skipped": "NO_VOLUME_STORE_ROOT"}
+        state = self.load_state()
+        custody = prune.latest_custody(Path(store_root), self.prefix)
+        plan = prune.plan_prune(shipper_state=state, universe=self.scan(), store_root=Path(store_root),
+                                prefix=self.prefix, custody=custody, now=self.clock())
+        summary = prune.summarize(plan)
+        fields = {"prune_mode": mode, "prune_last_at": self.clock(), "prune_last_plan": summary,
+                  "custody_through_seq": plan.get("custody_through_seq")}
+        _atomic_write(self.state_dir / "prune-plan-latest.json",
+                      json.dumps({**plan, "mode": mode}, sort_keys=True, default=str).encode())
+        if mode != "enforce" or not plan["allowed"]:
+            self.write_status(**fields)
+            return {"mode": mode, "plan": summary}
+        result = prune.execute(plan, runtime_root=self.runtime_root, clock=self.clock)
+        if result["segment_bytes"]:
+            state = self.load_state()
+            state["store_bytes"] = max(0, int(state.get("store_bytes") or 0) - result["segment_bytes"])
+            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
+        previous = {}
+        try:
+            previous = json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        pruned_through = max(int(previous.get("pruned_through_seq") or 0), result["max_segment_seq"])
+        self.write_status(**fields, prune_last_result=result, pruned_through_seq=pruned_through or None,
+                          store_bytes=int(self.load_state().get("store_bytes") or 0),
+                          prune_deleted_bytes_total=int(previous.get("prune_deleted_bytes_total") or 0)
+                          + result["deleted_bytes"])
+        return {"mode": mode, "plan": summary, "result": result}
 
     # --------------------------------------------------------------- universe
     def _roots(self) -> list[tuple[Path, str]]:
@@ -1206,8 +1253,10 @@ def main() -> int:
         _log("another shipper holds the lock -> exiting")
         return 0
     _log(f"started prefix={shipper.prefix} sink={shipper.sink} interval={interval:.0f}s "
-         f"max_store_bytes={shipper.max_store_bytes} min_free={min_free} pruning=OFF")
+         f"max_store_bytes={shipper.max_store_bytes} min_free={min_free} pruning={shipper.prune_mode()}")
     last_ack_poll = 0.0
+    last_prune = 0.0
+    prune_interval = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_PRUNE_INTERVAL_SECONDS") or 600))
 
     def settle_mode() -> str:
         nonlocal priority_boosted, priority_error
@@ -1262,6 +1311,16 @@ def main() -> int:
                     _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):
                     pause = backlog_pause
+                if time.time() - last_prune >= prune_interval:
+                    last_prune = time.time()
+                    pruned = shipper.prune_pass()
+                    if pruned.get("result", {}).get("deleted"):
+                        _log(f"pruned files={pruned['result']['deleted']} bytes={pruned['result']['deleted_bytes']} "
+                             f"bound_seq={pruned['plan']['bound_seq']}")
+                    elif pruned.get("plan"):
+                        _log(f"prune {pruned['mode']}: candidates={pruned['plan']['segment_count']}seg+"
+                             f"{pruned['plan']['runtime_count']}rt bytes={pruned['plan']['candidate_bytes']} "
+                             f"deny={pruned['plan']['deny_reasons']}")
         except PlanRace as exc:
             try:
                 shipper.write_status(last_error=f"PLAN_RACE: {exc}")

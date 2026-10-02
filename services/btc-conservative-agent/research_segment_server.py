@@ -13,6 +13,10 @@ Routes (all require ``X-Bot-Admin-Token``; fail closed when unset):
     GET  /api/research-segments/<prefix>/seg/<seq>   segment bytes (streamed)
     GET  /api/research-segments/<prefix>/ack/<seq>   recorded laptop ACK
     POST /api/research-segments/<prefix>/ack         laptop ACK "through seq N"
+    GET  /api/research-segments/<prefix>/custody     latest laptop custody receipt
+    POST /api/research-segments/<prefix>/custody     laptop custody receipt (write-once per seq)
+    GET  /api/research-segments/<prefix>/prune-mode  pruning mode + last plan/result
+    POST /api/research-segments/<prefix>/prune-mode  {"mode": "off"|"dry_run"|"enforce"}
 
 Files are immutable, so nothing is rehashed per request: the segment ETag is
 the ``segment_sha256`` declared by its manifest and the manifest ETag is its
@@ -20,6 +24,10 @@ own sha256 (computed once, cached). A segment is published only once its
 manifest exists. ACKs are write-once and monotonic, and must name the exact
 manifest-chain head hash at ``through_seq``.
 
+Custody receipts are validated (``research_segment_prune.validate_custody``)
+against the manifest chain and the recorded ACK, then stored write-once; the
+shipper process alone deletes, and only up to the latest custody receipt.
+A pruned segment answers ``410 Gone`` while its manifest stays served.
 This module never deletes anything.
 """
 
@@ -35,6 +43,7 @@ import time
 from pathlib import Path
 
 import research_segment_format as fmt
+import research_segment_prune as prune
 from research_segment_store import PreconditionFailed, VolumeStore, volume_store_root
 
 ROUTE_PREFIX = "/api/research-segments/"
@@ -42,9 +51,11 @@ RECEIPT_SCHEMA = "research_segment_ack_receipt_v1"
 HEAD_SCHEMA = "research_segment_head_v1"
 CHUNK_BYTES = 64 * 1024
 MAX_ACK_BODY_BYTES = 4096
+MAX_CUSTODY_BODY_BYTES = 4 * 1024 * 1024
+MAX_MODE_BODY_BYTES = 256
 MANIFEST_CACHE_LIMIT = 4096
 _ROUTE_RE = re.compile(r"^/api/research-segments/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
-                       r"(head|files|ack|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
+                       r"(head|files|ack|custody|prune-mode|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
 
 
 def receipt_key(prefix: str, seq: int) -> str:
@@ -177,7 +188,13 @@ class SegmentServer:
             "shipper_worker_state": status.get("worker_state"),
             "shipper_next_cycle_at": status.get("next_cycle_at"),
             "laptop_acked": self.acked_head(),
-            "pruning_enabled": False,
+            "pruning_enabled": bool(status.get("pruning_enabled")),
+            "prune_mode": status.get("prune_mode"),
+            "pruned_through_seq": status.get("pruned_through_seq"),
+            "custody_through_seq": status.get("custody_through_seq"),
+            "prune_last_at": status.get("prune_last_at"),
+            "prune_deleted_bytes_total": status.get("prune_deleted_bytes_total"),
+            "prune_last_plan": status.get("prune_last_plan"),
         }
         return self._respond(start_response, "200 OK", payload)
 
@@ -220,6 +237,10 @@ class SegmentServer:
         try:
             handle = self._file(fmt.segment_key(self.prefix, seq)).open("rb")
         except FileNotFoundError:
+            pruned = self._read_json(self.state_dir / "status.json").get("pruned_through_seq")
+            if isinstance(pruned, int) and seq <= pruned:
+                return self._respond(start_response, "410 Gone", {"error": "PRUNED", "seq": seq,
+                                                                 "pruned_through_seq": pruned})
             return self._respond(start_response, "500 Internal Server Error",
                                  {"error": "SEGMENT_MISSING_FOR_PUBLISHED_MANIFEST", "seq": seq})
         size = os.fstat(handle.fileno()).st_size
@@ -289,6 +310,83 @@ class SegmentServer:
                            "received_at": received_at}
             return "201 Created", {"ok": True, "result": "RECORDED", **self._acked}
 
+    def record_custody(self, raw: bytes) -> tuple[str, dict]:
+        try:
+            receipt = json.loads(raw)
+        except ValueError:
+            return "400 Bad Request", {"error": "CUSTODY_NOT_JSON"}
+        if not isinstance(receipt, dict):
+            return "400 Bad Request", {"error": "CUSTODY_NOT_OBJECT"}
+
+        def manifest_sha(seq: int):
+            info = self.manifest_info(seq)
+            return info["sha256"] if info else None
+
+        acked = self.acked_head()["through_seq"]
+        error = prune.validate_custody(receipt, prefix=self.prefix, manifest_sha256_at=manifest_sha,
+                                       acked_seq=acked)
+        if error:
+            return "409 Conflict", {"error": error, "acked_seq": acked}
+        through = int(receipt["through_seq"])
+        latest = prune.latest_custody(self.store_root, self.prefix) or {}
+        if through < int(latest.get("through_seq") or 0):
+            return "409 Conflict", {"error": "CUSTODY_REGRESSION", "through_seq": through,
+                                    "custody_through_seq": latest.get("through_seq")}
+        received_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock()))
+        stored = fmt.canonical_json({**receipt, "received_at": received_at})
+        try:
+            self.store.put_if_absent(prune.custody_key(self.prefix, through), stored,
+                                     sha256=fmt.sha256_bytes(stored), content_type="application/json")
+        except PreconditionFailed:
+            return "200 OK", {"ok": True, "result": "ALREADY_RECORDED", "through_seq": through}
+        return "201 Created", {"ok": True, "result": "RECORDED", "through_seq": through,
+                               "verified_files": len(receipt.get("verified_files") or {})}
+
+    def _read_body(self, environ, limit: int):
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            length = -1
+        if length <= 0 or length > limit:
+            return None, ("413 Payload Too Large" if length > limit else "400 Bad Request")
+        return environ["wsgi.input"].read(length), None
+
+    def _custody(self, environ, start_response, method: str):
+        if method == "GET":
+            latest = prune.latest_custody(self.store_root, self.prefix)
+            if latest is None:
+                return self._respond(start_response, "404 Not Found", {"error": "NO_CUSTODY"})
+            summary = {k: v for k, v in latest.items() if k != "verified_files"}
+            summary["verified_files"] = len(latest.get("verified_files") or {})
+            return self._respond(start_response, "200 OK", summary)
+        raw, error = self._read_body(environ, MAX_CUSTODY_BODY_BYTES)
+        if error:
+            return self._respond(start_response, error, {"error": "CUSTODY_BODY_SIZE"})
+        status, payload = self.record_custody(raw)
+        return self._respond(start_response, status, payload)
+
+    def _prune_mode(self, environ, start_response, method: str):
+        if method == "POST":
+            raw, error = self._read_body(environ, MAX_MODE_BODY_BYTES)
+            if error:
+                return self._respond(start_response, error, {"error": "MODE_BODY_SIZE"})
+            try:
+                requested = json.loads(raw).get("mode")
+                prune.write_mode(self.state_dir, requested, clock=self.clock)
+            except (ValueError, AttributeError) as exc:
+                return self._respond(start_response, "400 Bad Request", {"error": "INVALID_MODE",
+                                                                         "detail": str(exc)})
+        mode, why = prune.read_mode(self.state_dir)
+        status = self._read_json(self.state_dir / "status.json")
+        return self._respond(start_response, "200 OK", {
+            "mode": mode, "why": why, "stored": self._read_json(prune.mode_path(self.state_dir)),
+            "pruned_through_seq": status.get("pruned_through_seq"),
+            "custody_through_seq": status.get("custody_through_seq"),
+            "prune_last_at": status.get("prune_last_at"),
+            "prune_deleted_bytes_total": status.get("prune_deleted_bytes_total"),
+            "prune_last_plan": status.get("prune_last_plan"),
+            "prune_last_result": status.get("prune_last_result")})
+
     def _post_ack(self, environ, start_response):
         try:
             length = int(environ.get("CONTENT_LENGTH") or 0)
@@ -316,6 +414,14 @@ class SegmentServer:
             return self._respond(start_response, "404 Not Found", {"error": "UNKNOWN_ROUTE"})
         route, method = match.group(2), (environ.get("REQUEST_METHOD") or "GET").upper()
         try:
+            if route == "custody":
+                if method not in ("GET", "POST"):
+                    return self._respond(start_response, "405 Method Not Allowed", {"error": "GET/POST"})
+                return self._custody(environ, start_response, method)
+            if route == "prune-mode":
+                if method not in ("GET", "POST"):
+                    return self._respond(start_response, "405 Method Not Allowed", {"error": "GET/POST"})
+                return self._prune_mode(environ, start_response, method)
             if route == "ack":
                 if method != "POST":
                     return self._respond(start_response, "405 Method Not Allowed", {"error": "POST only"})
