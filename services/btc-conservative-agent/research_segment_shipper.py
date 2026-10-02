@@ -1205,6 +1205,8 @@ def shipper_from_env(environ=None) -> SegmentShipper:
         max_sqlite_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_SQLITE_BYTES") or 512 * 1024 * 1024),
         huge_snapshot_interval=float(env.get("RESEARCH_SEGMENTS_HUGE_SNAPSHOT_INTERVAL_SECONDS")
                                      or 6 * 3600),
+        sqlite_backup_deadline=float(env.get("RESEARCH_SEGMENTS_SQLITE_BACKUP_DEADLINE_SECONDS")
+                                     or SQLITE_BACKUP_DEADLINE_SECONDS),
         baseline_genesis=(env.get("RESEARCH_SEGMENTS_BASELINE_GENESIS") or "0").strip() == "1",
         backlog_boost_bytes=int(env.get("RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES")
                                 or DEFAULT_BACKLOG_BOOST_BYTES),
