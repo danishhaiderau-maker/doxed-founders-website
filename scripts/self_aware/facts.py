@@ -97,6 +97,29 @@ def git_head(repo: Path) -> str | None:
         return None
 
 
+_ANCESTRY: dict[tuple[str, str], bool | None] = {}
+
+
+def git_contains(repo: Path, ancestor: str | None, descendant: str | None) -> bool | None:
+    """True when ``descendant`` contains ``ancestor`` (equal or a fast-forward of it); None when unknown."""
+    if not ancestor or not descendant:
+        return None
+    a, d = ancestor.lower(), descendant.lower()
+    if a.startswith(d[:12]) or d.startswith(a[:12]):
+        return True
+    key = (a, d)
+    if key not in _ANCESTRY:
+        try:
+            out = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", a, d], capture_output=True,
+                                 text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            _ANCESTRY[key] = {0: True, 1: False}.get(out.returncode)
+        except (OSError, subprocess.SubprocessError):
+            _ANCESTRY[key] = None
+        if len(_ANCESTRY) > 500:
+            _ANCESTRY.clear()
+    return _ANCESTRY.get(key)
+
+
 def laptop_load(sample_sec: float = 2.0) -> tuple[float | None, float | None]:
     """System CPU busy % over ``sample_sec`` and memory used % (Windows kernel counters, no extra deps)."""
     if os.name != "nt":
@@ -158,6 +181,10 @@ def collect(paths: Paths, store, now: float | None = None, *, probe_local: bool 
     except OSError:
         f["analyzer_dashboard_rev"] = None
     f["analyzer_head"] = git_head(paths.analyzer_repo)
+    fly_rev = (f.get("runtime") or {}).get("git_rev")
+    f["contains_fly"] = {k: git_contains(paths.analyzer_repo, fly_rev, r) for k, r in (
+        ("head", f["analyzer_head"]), ("run", (f.get("analyzer_run") or {}).get("revision")),
+        ("dash", f["analyzer_dashboard_rev"]))}
 
     mirror: dict[str, Any] = {}
     q = {

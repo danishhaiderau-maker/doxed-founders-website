@@ -278,14 +278,16 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"[self-aware] port {args.port} busy ({exc}); another instance is running", flush=True)
         return 0
+    # Serve before the engine loads so the keeper's ping sees "starting", never a hang, during a slow store open.
+    threading.Thread(target=httpd.serve_forever, name="self-aware-http", daemon=True).start()
     eng = Engine(emit_alarms=not args.no_alarms, repair_enabled=not args.no_repair)
     httpd.engine = eng
-    threading.Thread(target=eng.loop, name="self-aware-scheduler", daemon=True).start()
     print(f"[self-aware] serving http://127.0.0.1:{args.port} pid={os.getpid()} rev={eng.store.revision[:12]}", flush=True)
     try:
-        httpd.serve_forever()
+        eng.loop()
     finally:
         eng.stop()
+        httpd.shutdown()
     return 0
 
 

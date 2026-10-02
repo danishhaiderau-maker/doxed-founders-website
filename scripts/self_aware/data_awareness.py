@@ -344,11 +344,25 @@ def _gaps(ts_sorted: list[float], min_gap: float, interruptions: list[tuple[floa
 def discover(mirror: Path) -> dict[str, dict]:
     """Group mirror files by logical stream (base path without rotation suffix)."""
     groups: dict[str, dict] = {}
+    day_ago = time.time() - 86400
     for dp, dn, fn in os.walk(mirror):
         rel_dir = os.path.relpath(dp, mirror).replace("\\", "/")
         rel_dir = "" if rel_dir == "." else rel_dir
-        if rel_dir.startswith(SKIP_DIRS):
-            dn[:] = []
+        skip = next((s for s in SKIP_DIRS if rel_dir == s or rel_dir.startswith(s + "/")), None)
+        if skip:
+            # Object stores (receipts, segments): one aggregate catalog row, no field profiling.
+            g = groups.setdefault(skip + "/", {"files": [], "bytes": 0, "newest_mtime": 0.0, "dir": True,
+                                               "n_files": 0, "bytes_24h": 0})
+            for f in fn:
+                try:
+                    st = os.stat(os.path.join(dp, f))
+                except OSError:
+                    continue
+                g["n_files"] += 1
+                g["bytes"] += st.st_size
+                g["newest_mtime"] = max(g["newest_mtime"], st.st_mtime)
+                if st.st_mtime >= day_ago:
+                    g["bytes_24h"] += st.st_size
             continue
         for f in fn:
             if f.endswith(SKIP_SUFFIXES):
@@ -499,9 +513,13 @@ def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -
         mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
         den = sum((x - mx) ** 2 for x in xs)
         measured = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den) * 86400 if den else None
-    ingest = sum(s["bytes_per_day"] or 0 for s in streams)
-    retained = sum(s["bytes_per_day"] or 0 for s in streams if s.get("retention_tier") != "TIER_B")
-    slope = measured if measured is not None else retained
+    ingest = sum(s.get("bytes_per_day") or 0 for s in streams)
+    retained = sum(s.get("bytes_per_day") or 0 for s in streams if s.get("retention_tier") != "TIER_B")
+    # The analyzer keeps derived copies of the mirror (canonical, promotion view, archives), so laptop bytes grow
+    # roughly in proportion to the mirror; scale the mirror ingest by that ratio until a measured slope exists.
+    mirror_bytes = float((ret.get("sizes_after") or {}).get("mirror_tree") or 0)
+    copies = (used / mirror_bytes) if used and mirror_bytes else 1.0
+    slope = measured if measured is not None else retained * copies
     room = cap * LAPTOP_CAP_FRACTION - used
     days_to_cap = (room / slope) if slope and slope > 0 else None
     disk = (watcher_check(facts, "disk.space") or {}).get("observed") or ""
@@ -515,7 +533,9 @@ def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -
             "retention_mode": ret.get("mode"), "retention_last_run": ret.get("finished_at"),
             "growth_gb_per_day": round(slope / 1e9, 3) if slope else None,
             "growth_basis": ("measured net slope of retained bytes" if measured is not None else
-                             "sum of per-stream ingest rates excluding Tier B (measured slope after 6 h of history)"),
+                             f"estimate: per-stream ingest excluding Tier B x {copies:.1f} (laptop bytes / mirror bytes); "
+                             "replaced by the measured slope after 6 h of history"),
+            "mirror_copies_factor": round(copies, 2),
             "days_to_90pct_cap": round(days_to_cap, 1) if days_to_cap is not None else None,
             "disk_free_gb": float(m_lap.group(1)) if m_lap else None,
             "source": "bot-data-retention/status.json + per-stream rates",
@@ -594,16 +614,14 @@ def sufficiency(store, streams: dict[str, dict], fields: dict[str, dict[str, dic
             if need_s.get("min_days") and days < need_s["min_days"]:
                 short.append(f"{st} days {days:.1f} < {need_s['min_days']} (mirror horizon)")
                 etas.append(now + (need_s["min_days"] - days) * 86400)
-        if q.screens:
-            status = "BLOCKED" if blockers else "ACCUMULATING" if short else "READY"
-        else:
-            status = "BLOCKED" if full_blockers else "ACCUMULATING" if short else "READY"
+        gating = blockers if q.screens else full_blockers
+        status = "BLOCKED" if gating else "ACCUMULATING" if short else "READY"
         out.append({
             "id": q.id, "question": q.question, "status": status,
             "full_question_status": "BLOCKED" if full_blockers else ("ACCUMULATING" if short else "READY"),
             "screens": list(q.screens), "screens_released": status == "READY" and bool(q.screens),
             "blockers": blockers, "missing_for_full_answer": full_blockers, "short_samples": short,
-            "samples": samples, "eta_ready": iso(max(etas)) if etas and not blockers else None, "note": q.note,
+            "samples": samples, "eta_ready": iso(max(etas)) if etas and not gating else None, "note": q.note,
         })
     return out
 
@@ -620,6 +638,16 @@ def run(store, paths, facts: dict, state: dict, interruptions: list[tuple[float,
     streams, field_rows = [], []
     fields_by: dict[str, dict[str, dict]] = {}
     for base, g in sorted(groups.items()):
+        if g.get("dir"):
+            streams.append({"stream": base, "path": base, "catalogued": False, "kind": "dir", "cadence": "event",
+                            "what": "object store (one file per record); aggregate only",
+                            "files": g["n_files"], "bytes": g["bytes"], "bytes_per_day": g["bytes_24h"],
+                            "newest_mtime": iso(g["newest_mtime"]), "sample_rows": 0, "fields": 0, "critical": False,
+                            "status": "FRESH" if now - g["newest_mtime"] < STALE_SEC["event"] else "IDLE",
+                            "retention_tier": tier(base), "fly_location": f"{FLY_DATA_DIR}/{base}",
+                            "laptop_location": str(paths.mirror / base), "watch_alarms": [], "dead_fields": [],
+                            "bytes_per_day_basis": "bytes of files modified in the last 24 h"})
+            continue
         spec = _BY_PATH.get(base)
         doc, flds = _stream_profile(base, g, spec, now, interruptions)
         doc["retention_tier"] = tier(base)
@@ -635,7 +663,7 @@ def run(store, paths, facts: dict, state: dict, interruptions: list[tuple[float,
                             "dead_fields": [], "bytes_per_day": None, "retention_tier": tier(spec.path)})
     head = max((s.get("last_epoch") or 0) for s in streams if s.get("critical")) or None
     for s in streams:
-        if s.get("status") == "MISSING":
+        if s.get("status") == "MISSING" or s.get("kind") == "dir":
             continue
         lag = (head - s["last_epoch"]) if head and s.get("last_epoch") else None
         s["lag_vs_mirror_head_sec"] = round(lag, 1) if lag is not None else None

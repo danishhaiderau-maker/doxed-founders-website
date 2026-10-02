@@ -36,7 +36,16 @@ $mine = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 $listening = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 if ($listening.Count -gt 0) {
   $owner = $listening[0].OwningProcess
-  if (-not ($mine | Where-Object { $_.ProcessId -eq $owner })) { Write-TickLog "PORT_HELD_BY_OTHER pid=$owner"; exit 0 }
+  $ownerProc = $mine | Where-Object { $_.ProcessId -eq $owner } | Select-Object -First 1
+  if (-not $ownerProc) {
+    # The venv launcher's child interpreter owns the socket; match it through its parent.
+    $child = Get-CimInstance Win32_Process -Filter "ProcessId=$owner" -ErrorAction SilentlyContinue
+    if ($child -and ($mine | Where-Object { $_.ProcessId -eq $child.ParentProcessId -or $_.ProcessId -eq $owner })) { $ownerProc = $child }
+  }
+  if (-not $ownerProc) { Write-TickLog "PORT_HELD_BY_OTHER pid=$owner"; exit 0 }
+  if ($ownerProc.CreationDate -and ((Get-Date) - $ownerProc.CreationDate).TotalMinutes -lt 10) {
+    Write-TickLog "STARTING pid=$owner (within 10 min start grace)"; exit 0
+  }
   foreach ($p in $mine) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
   Write-Journal 'restart_hung_self_aware' 'EXECUTED' "port $Port held by self-aware pid $owner but /api/ping did not answer in 20 s"
   Write-TickLog "RESTART hung pid=$owner"

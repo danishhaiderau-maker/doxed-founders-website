@@ -308,8 +308,10 @@ def check_revision_parity(f, sig, store) -> Finding:
     if not fly:
         return Finding("inv.revision_parity", "Analyzer runs the revision Fly runs", "parity", SKIP,
                        "Fly revision unknown (runtime snapshot missing)", "analyzer revision == Fly revision")
-    match = lambda r: bool(r) and (r.startswith(fly) or fly.startswith(r[:12]))  # noqa: E731
-    ok_head, ok_run, ok_dash = match(head), match(analyzer), match(dash)
+    contains = f.get("contains_fly") or {}
+    # Laptop-only [skip ci] merges put v2c ahead of Fly; the invariant is that the analyzer contains Fly's revision.
+    match = lambda r, k: bool(r) and (r.startswith(fly) or fly.startswith(r[:12]) or contains.get(k) is True)  # noqa: E731
+    ok_head, ok_run, ok_dash = match(head, "head"), match(analyzer, "run"), match(dash, "dash")
     sev = GREEN if ok_head and ok_run else AMBER
     # The :9001 dashboard restarts at the end of a run, so a lagging dashboard is only a problem once no run is in flight.
     dash_stale = bool(dash) and not ok_dash and ar.get("state") != "RUNNING"
@@ -318,12 +320,13 @@ def check_revision_parity(f, sig, store) -> Finding:
     return Finding("inv.revision_parity", "Analyzer runs the revision Fly runs", "parity", sev,
                    f"Fly {fly[:12]}; v2c HEAD {head[:12] or '?'}; last analyzer run {analyzer[:12] or '?'} ({ar.get('state')}); "
                    f":9001 dashboard {dash[:12] or '?'}" + (" (dashboard serves an older revision with no run in flight)" if dash_stale else ""),
-                   "v2c HEAD, the latest analyzer run and (between runs) the :9001 dashboard == Fly revision",
+                   "v2c HEAD, the latest analyzer run and (between runs) the :9001 dashboard contain the Fly revision",
                    causes=[] if sev == GREEN else attribute(["deploy_maintenance", "lock_holder"], sig, [
                        {"cause": "autoff_pending", "confidence": "possible",
                         "text": "v2c auto-ff has not run yet (it follows Fly only after a successful guarded deploy).",
                         "evidence": (f.get("autoff") or [{}])[-1]}]),
-                   evidence={"fly": fly, "v2c_head": head, "analyzer_run": analyzer, "dashboard": dash},
+                   evidence={"fly": fly, "v2c_head": head, "analyzer_run": analyzer, "dashboard": dash,
+                             "contains_fly": contains},
                    drill_sql="SELECT json FROM raw_autoff_receipts ORDER BY json->>'at' DESC LIMIT 20",
                    emit_alarm=True)
 

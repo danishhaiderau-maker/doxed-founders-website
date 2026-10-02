@@ -91,9 +91,11 @@ class Handler(BaseHTTPRequestHandler):
         self._query(sql, None)
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.eng is None:
-            return self._send(503, {"error": "engine starting"})
         u = urlparse(self.path)
+        if self.eng is None:
+            if u.path.rstrip("/") == "/api/ping":
+                return self._send(200, {"ok": True, "service": "self_aware", "starting": True})
+            return self._send(503, {"error": "engine starting"})
         q = {k: v[-1] for k, v in parse_qs(u.query).items()}
         path = u.path.rstrip("/") or "/"
         try:

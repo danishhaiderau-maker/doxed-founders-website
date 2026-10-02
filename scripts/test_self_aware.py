@@ -185,6 +185,23 @@ def test_revision_parity_flags_stale_analyzer(store):
     assert diagnose.check_revision_parity(mid_run, diagnose.signals(mid_run), store).severity == "GREEN"
     after = _facts(analyzer_head="abc123", analyzer_run={"revision": "abc123", "state": "SUCCEEDED"}, analyzer_dashboard_rev="0ld")
     assert diagnose.check_revision_parity(after, diagnose.signals(after), store).severity == "AMBER"
+    ahead = _facts(analyzer_head="def456", analyzer_run={"revision": "def456", "state": "RUNNING"}, analyzer_dashboard_rev="abc123",
+                   contains_fly={"head": True, "run": True, "dash": True})
+    assert diagnose.check_revision_parity(ahead, diagnose.signals(ahead), store).severity == "GREEN"
+
+
+def test_git_contains_uses_ancestry(tmp_path):
+    import subprocess
+    from self_aware.facts import git_contains
+    repo = tmp_path / "r"
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+    repo.mkdir()
+    run("init", "-q")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "a")
+    a = run("rev-parse", "HEAD")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "b")
+    b = run("rev-parse", "HEAD")
+    assert git_contains(repo, a, b) is True and git_contains(repo, b, a) is False and git_contains(repo, a, None) is None
 
 
 def test_a_crashing_check_becomes_a_finding(paths, store, monkeypatch):
@@ -400,6 +417,8 @@ def _data_mirror(paths) -> float:
            [{"ts_epoch": now - 3600 + i * 60, "context": {"price": 100 + i, "ret_1m": 0.0, "ret_5m": 0.0,
                                                           "delta_change": 0.0, "ema_slope": i / 100}} for i in range(55)])
     _jsonl(paths.mirror / "brand_new_stream.jsonl", [{"ts": now - i, "v": i} for i in range(30)])
+    for i in range(3):
+        _jsonl(paths.mirror / "v3" / "receipts" / "x" / f"r{i}.json", [{"i": i}])
     paths.retention.mkdir(parents=True, exist_ok=True)
     (paths.retention / "status.json").write_text(json.dumps({
         "bytes_after": 26e9, "cap_bytes": 50e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
@@ -418,6 +437,7 @@ def test_data_awareness_catalog_completeness_capacity_and_sufficiency(paths, sto
     by = {s["stream"]: s for s in res["streams"]}
     assert not by["brand_new_stream.jsonl"]["catalogued"] and by["bitfinex_tape_1s"]["catalogued"]
     assert by["v3_execution"]["status"] == "MISSING"
+    assert by["v3/receipts/"]["kind"] == "dir" and by["v3/receipts/"]["files"] == 3 and by["v3/receipts/"]["bytes_per_day"] > 0
     assert by["bitfinex_tape_1s"]["fly_location"] == "/app/data/market_microstructure_1s.jsonl"
     assert "context.ret_1m=DEAD_ZERO (0.0)" in res["summary"]["watch_alarms"]["ai_calls"]
     assert "cross_venue_tape_1m" not in res["summary"]["watch_alarms"]
@@ -433,6 +453,8 @@ def test_data_awareness_catalog_completeness_capacity_and_sufficiency(paths, sto
     assert q["Q_VOL_GATE"]["status"] == "ACCUMULATING" and not q["Q_VOL_GATE"]["blockers"]
     assert q["Q_VOL_GATE"]["eta_ready"] and not q["Q_VOL_GATE"]["screens_released"]
     assert q["Q_XVENUE"]["status"] == "BLOCKED" and any("xvl_shadow_signals" in b for b in q["Q_XVENUE"]["missing_for_full_answer"])
+    assert q["Q_XVENUE"]["eta_ready"] is None  # a blocked question has no ETA until the field exists
+    assert cap["laptop"]["mirror_copies_factor"] > 1
     assert store.read("SELECT count(*) AS n FROM res_data_sufficiency WHERE screens_released")[0]["n"] == 0
 
     found = {f.id: f for f in diagnose.check_data({**facts, "now": now, "data_awareness": res["summary"]}, diagnose.signals(
