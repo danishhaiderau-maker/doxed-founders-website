@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,9 @@ from research.canonical_data_store import (  # noqa: E402
 INCREMENTAL_INDEX = "migration/.incremental-index.json"
 INCREMENTAL_SCHEMA = "canonical_migration_incremental_index_v1"
 DEFAULT_VERIFY_INTERVAL_SEC = 24 * 3600
+# Post-deploy receipt re-binding recopies ~42k small files; per-file
+# create/replace latency, not bandwidth, bounds that.
+DEFAULT_COPY_WORKERS = 8
 _CHUNK = 4 * 1024 * 1024
 
 
@@ -226,8 +230,29 @@ def _append_verified(src: Path, dst: Path, prefix_size: int, prefix_sha: str, ex
     return True
 
 
+def _copy_verified(relative: str, src: Path, dst: Path, expected_size: int, expected_sha: str,
+                   src_attested: bool) -> None:
+    if expected_sha and not src_attested and _sha256(src) != expected_sha:
+        raise RuntimeError(f"Source checksum drift: {relative}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, candidate_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".migration", dir=dst.parent)
+    os.close(fd)
+    candidate = Path(candidate_name)
+    try:
+        shutil.copy2(src, candidate)
+        if candidate.stat().st_size != expected_size:
+            raise RuntimeError(f"Copied size mismatch: {relative}")
+        actual_sha = _sha256(candidate)
+        if expected_sha and actual_sha != expected_sha:
+            raise RuntimeError(f"Copied checksum mismatch: {relative}")
+        os.replace(candidate, dst)
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
 def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool = False,
-            verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC, now: float | None = None) -> dict:
+            verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC, now: float | None = None,
+            copy_workers: int = DEFAULT_COPY_WORKERS) -> dict:
     source = source.resolve()
     destination = initialize_store(destination, REPO_ROOT)
     heartbeat, revision = _validated_heartbeat(heartbeat_path)
@@ -249,6 +274,8 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
     written_bytes = 0
     files: dict[str, dict] = {}
     normalized_state: dict[str, dict] = {}
+    entries: list[tuple[str, str, Path, int, str, dict]] = []
+    pending: list[tuple[str, Path, Path, int, str, bool]] = []
     for relative, record in sorted(state.items()):
         if not isinstance(record, dict):
             raise RuntimeError(f"Invalid sync-state row: {relative}")
@@ -288,24 +315,14 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
                 counts["appended"] += 1
                 written_bytes += expected_size - prior["size"]
         if not done:
-            if expected_sha and not src_attested and _sha256(src) != expected_sha:
-                raise RuntimeError(f"Source checksum drift: {relative}")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            fd, candidate_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".migration", dir=dst.parent)
-            os.close(fd)
-            candidate = Path(candidate_name)
-            try:
-                shutil.copy2(src, candidate)
-                if candidate.stat().st_size != expected_size:
-                    raise RuntimeError(f"Copied size mismatch: {relative}")
-                actual_sha = _sha256(candidate)
-                if expected_sha and actual_sha != expected_sha:
-                    raise RuntimeError(f"Copied checksum mismatch: {relative}")
-                os.replace(candidate, dst)
-            finally:
-                candidate.unlink(missing_ok=True)
+            pending.append((relative, src, dst, expected_size, expected_sha, src_attested))
             counts["copied"] += 1
             written_bytes += expected_size
+        entries.append((relative, key, dst, expected_size, expected_sha, record))
+    with ThreadPoolExecutor(max_workers=max(1, int(copy_workers))) as pool:
+        for future in [pool.submit(_copy_verified, *job) for job in pending]:
+            future.result()
+    for relative, key, dst, expected_size, expected_sha, record in entries:
         if dst.stat().st_size != expected_size:
             raise RuntimeError(f"Destination size mismatch: {relative}")
         if expected_sha:
@@ -412,6 +429,7 @@ def main() -> int:
     parser.add_argument("--destination", default=str(default_store_root(REPO_ROOT)))
     parser.add_argument("--full", action="store_true", help="ignore the incremental index and recopy every file")
     parser.add_argument("--verify-interval-sec", type=float, default=DEFAULT_VERIFY_INTERVAL_SEC)
+    parser.add_argument("--copy-workers", type=int, default=DEFAULT_COPY_WORKERS)
     args = parser.parse_args()
     if args.record_existing:
         if args.source:
@@ -421,7 +439,8 @@ def main() -> int:
         if not args.source:
             parser.error("--source is required unless --record-existing is used")
         receipt = migrate(Path(args.source), Path(args.destination), Path(args.heartbeat),
-                          full=args.full, verify_interval_sec=args.verify_interval_sec)
+                          full=args.full, verify_interval_sec=args.verify_interval_sec,
+                          copy_workers=args.copy_workers)
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 

@@ -3,6 +3,9 @@
 # cycle or pass can start (both mutexes are held for the whole step).
 # Windows PowerShell 5.1 compatible. Never prints credentials.
 #
+# -CycleLockHeld is only for run-segment-analyzer-cycle.ps1, which already
+# holds the cycle mutex between migration and the analyzer.
+#
 # Exit codes: 0 already at the deployed revision or fast-forwarded;
 # 2 skipped (evidence stale/missing, deploy in progress, analyzer busy);
 # 3 refused (dirty tracked files, not a fast-forward, unknown commit, parity
@@ -11,7 +14,8 @@ param(
   [string]$RepoRoot = '',
   [string]$CanonicalRoot = '',
   [string]$StateDir = '',
-  [int]$SnapshotMaxAgeSec = 600
+  [int]$SnapshotMaxAgeSec = 600,
+  [switch]$CycleLockHeld
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,13 +56,17 @@ $head = ((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select
 $head = ([string]$head).Trim().ToLowerInvariant()
 if ($head -eq $target) { exit 0 }
 
-$cycleLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')
-if (-not $cycleLock) { exit 2 }
+$cycleLock = $null
+if (-not $CycleLockHeld) {
+  $cycleLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')
+  if (-not $cycleLock) { exit 2 }
+}
 $runLock = $null
 try {
   $runLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun')
   if (-not $runLock) { exit 2 }
-  $fields = @{ from = $head; to = $target; flyRev = $flyRev; deployRun = [string]$latest.databaseId }
+  $fields = @{ from = $head; to = $target; flyRev = $flyRev; deployRun = [string]$latest.databaseId
+               caller = $(if ($CycleLockHeld) { 'cycle' } else { 'supervisor' }) }
   $dirty = @(Invoke-NativeQuiet { & git -C $cfg.RepoRoot status --porcelain --untracked-files=no } | Where-Object { $_ })
   if ($dirty.Count -gt 0) { Write-Receipt 'REFUSED_DIRTY_TRACKED' ($fields + @{ dirty = $dirty.Count }); exit 3 }
   if (-not (Resolve-FullRevision -RepoRoot $cfg.RepoRoot -Revision $target)) {

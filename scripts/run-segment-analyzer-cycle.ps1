@@ -4,8 +4,9 @@
 # Windows PowerShell 5.1 compatible. Never prints credentials.
 #
 # Exit codes: 0 analyzer pass completed; 3 promotion refused after retries;
-# 4 migration failed; 5 checkout does not contain the deployed revision;
-# otherwise run-analyzer-once.ps1's exit code.
+# 4 migration failed; 5 checkout does not contain the deployed revision and the
+# inline fast-forward could not fix it; otherwise run-analyzer-once.ps1's exit
+# code.
 param(
   [string]$RepoRoot = '',
   [string]$CanonicalRoot = '',
@@ -19,6 +20,8 @@ param(
   [int]$PromotionAttempts = 6,
   [int]$LockWaitMaxSec = 600,
   [int]$SyncMaxAgeSec = 1800,
+  [int]$InlineFfMaxWaitSec = 900,
+  [int]$InlineFfPollSec = 30,
   [string]$Reason = 'segment-cycle'
 )
 
@@ -118,20 +121,44 @@ if ($migrationExit -ne 0) { Stop-Cycle 4 }
 
 # The analyzer must run code that contains the revision Fly was running when
 # this data was promoted; an older checkout ran the 02:40Z flyMatch=False pass
-# that crashed natively. The supervisor's auto fast-forward fixes the checkout
-# before the retry.
+# that crashed natively. The supervisor's auto fast-forward cannot run while
+# this cycle holds its mutex, so a cycle that promoted a just-deployed revision
+# fast-forwards here (same guarded rules) instead of discarding its migration.
 $heartbeat = Read-JsonFile (Join-Path $ViewRoot '.segment-promotion.heartbeat.json')
 $deployedRev = if ($heartbeat) { [string]$heartbeat.deployedRevision } else { '' }
-$deployedFull = if ($deployedRev) { Resolve-FullRevision -RepoRoot $cfg.RepoRoot -Revision $deployedRev } else { $null }
-$checkoutHead = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)).Trim()
-$containsDeployed = $false
-if ($deployedFull) {
+function Test-CheckoutContainsDeployed {
+  $deployedFull = if ($deployedRev) { Resolve-FullRevision -RepoRoot $cfg.RepoRoot -Revision $deployedRev } else { $null }
+  $script:checkoutHead = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)).Trim()
+  if (-not $deployedFull) { return $false }
   Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $deployedFull $checkoutHead } | Out-Null
-  $containsDeployed = ($LASTEXITCODE -eq 0)
+  return ($LASTEXITCODE -eq 0)
 }
-if (-not $containsDeployed) {
+if (-not (Test-CheckoutContainsDeployed)) {
   Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_REVISION_MISMATCH checkout={0} deployed={1}" -f $checkoutHead, $deployedRev)
-  Stop-Cycle 5
+  $autoFfDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled')
+  if ($autoFfDisabled -or -not $deployedRev) { Stop-Cycle 5 }
+  $ffStart = [datetime]::UtcNow
+  $roots = @('-RepoRoot', $cfg.RepoRoot, '-CanonicalRoot', $cfg.CanonicalRoot, '-StateDir', $cfg.StateDir)
+  $contains = $false
+  while (-not $contains) {
+    Set-CycleStatus 'AUTO_FF'
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots | Out-Null
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'v2c-auto-ff.ps1') @roots -CycleLockHeld | Out-Null
+    $ffExit = $LASTEXITCODE
+    $contains = Test-CheckoutContainsDeployed
+    $waited = [int]([datetime]::UtcNow - $ffStart).TotalSeconds
+    if ($contains) {
+      Write-ChainLog -Config $cfg -Name $logName -Message ("AUTO_FF_INLINE ok exit={0} waited={1}s checkout={2} deployed={3}" -f $ffExit, $waited, $checkoutHead, $deployedRev)
+      break
+    }
+    # 3 is a hard refusal (dirty, not a fast-forward, parity); 2 means the
+    # deploy run has not concluded success yet and is worth waiting for.
+    if ($ffExit -eq 3 -or $waited -ge $InlineFfMaxWaitSec) {
+      Write-ChainLog -Config $cfg -Name $logName -Message ("AUTO_FF_INLINE gave_up exit={0} waited={1}s checkout={2} deployed={3}" -f $ffExit, $waited, $checkoutHead, $deployedRev)
+      Stop-Cycle 5
+    }
+    Start-Sleep -Seconds $InlineFfPollSec
+  }
 }
 Set-CycleStatus 'ANALYZER'
 
