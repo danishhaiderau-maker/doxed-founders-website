@@ -12,6 +12,7 @@ import os
 import socket
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -136,12 +137,32 @@ def test_slow_keepalive_stream_is_cut_at_the_total_deadline(ns, server):
     assert _wait_no_abandoned(ns), "cancelled worker thread did not exit"
 
 
+def _requests_with_read_timeout_after(extra_sec):
+    """Real requests whose socket read timeout lands well after the deadline.
+
+    The worker clamps its read timeout to deadline_sec, so on Windows' coarse
+    timer the socket timeout and the caller's deadline wait race; pushing the
+    socket timeout out makes the total deadline the only thing that can cut.
+    """
+    shim = types.ModuleType("requests_read_timeout_shim")
+    shim.__dict__.update(requests.__dict__)
+
+    def post(*args, timeout, **kwargs):
+        connect, read = timeout
+        return requests.post(*args, timeout=(connect, read + extra_sec), **kwargs)
+
+    shim.post = post
+    return shim
+
+
 def test_server_that_never_answers_is_cut_at_the_deadline(ns, server):
     _Handler.mode = "silent"
+    ns["requests"] = _requests_with_read_timeout_after(5.0)
     started = time.monotonic()
-    with pytest.raises(RuntimeError, match="AI_DEADLINE_EXCEEDED"):
+    with pytest.raises(RuntimeError, match=r"^AI_DEADLINE_EXCEEDED:1s$"):
         _post(ns, server, deadline=1.0, idle=60)
     assert time.monotonic() - started < 1.8
+    assert ns["_ai_deadline_state"]["deadline_exceeded_total"] == 1
 
 
 def test_abandoned_backlog_refuses_new_calls_immediately(ns, server):

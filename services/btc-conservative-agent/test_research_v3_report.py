@@ -21,6 +21,7 @@ def _causal_join_input():
         {"episode_id": "e1", "opportunity_id": "o1", "signal_ts": 100},
         {"episode_id": "e1", "opportunity_id": "o1",
          "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99,
+         "capture_schema": "measured_feature_capture_v1",
          "features": {name: "OBSERVED_BUCKET" for name in DEFAULT_CAUSAL_FEATURES}},
     )
 
@@ -117,6 +118,7 @@ class V3ReportTests(unittest.TestCase):
                         "record_id": f"pre-entry-features:{episode_id}",
                         "receipt_schema": "pre_entry_features_v1",
                         "availability_boundary": "PRE_DECISION_ONLY",
+                        "capture_schema": "measured_feature_capture_v1",
                         "captured_at_ts": 999 + index,
                         "episode_id": episode_id,
                         "opportunity_id": f"opportunity:{episode_id}",
@@ -144,7 +146,7 @@ class V3ReportTests(unittest.TestCase):
             receipts = [
                 {"episode_id": "episode-1", "opportunity_id": "opportunity:episode-1",
                  "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 1000,
-                 "features": features},
+                 "capture_schema": "measured_feature_capture_v1", "features": features},
             ]
             joined, _ = join_pre_entry_feature_receipts(opportunities, receipts)
             key, defects = _causal_feature_key(joined[0], tuple(DEFAULT_CAUSAL_FEATURES))
@@ -158,8 +160,15 @@ class V3ReportTests(unittest.TestCase):
             report = build_safe_policy_genome_v3_report(data, reports, candidates=[])
 
         deployed = report["deployed_policy_collection"]
-        self.assertEqual(deployed["policy_epoch"], "v31-analyzer-hypothesis-paper-v1")
-        self.assertEqual(deployed["policy_count"], 5)
+        registry_epochs = list(dict.fromkeys(
+            ACTIVE_TILE_REGISTRY[lane]["policy_epoch"] for lane in ACTIVE_TILE_ORDER
+        ))
+        self.assertEqual(deployed["policy_epochs"], registry_epochs)
+        self.assertEqual(
+            deployed["policy_epoch"],
+            registry_epochs[0] if len(registry_epochs) == 1 else None,
+        )
+        self.assertEqual(deployed["policy_count"], len(ACTIVE_TILE_ORDER))
         self.assertFalse(deployed["qualification_allowed"])
         self.assertEqual(
             [row["policy_id"] for row in deployed["policies"]],
