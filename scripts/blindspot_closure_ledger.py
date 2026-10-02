@@ -163,9 +163,9 @@ def gh_monitor_run() -> dict | None:
             if any("state restored=" in ln for ln in row["lines"]):
                 return row
             # a just-finished run's log may not be downloadable yet; use the previous one
-        return None
-    except Exception:
-        return None
+        return {"error": f"no readable completed run on {MONITOR_CODE_REV}+ among {len(rows)}"}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:160]}
 
 
 def gh_variables() -> dict[str, str]:
@@ -262,6 +262,8 @@ def _monitor_line(live: dict, needle: str) -> str | None:
 
 def _monitor_where(live: dict) -> str:
     run = live.get("gh_monitor") or {}
+    if run.get("error"):
+        return f"fly-bot-monitor lookup failed ({run['error']})"
     return f"fly-bot-monitor run {run.get('databaseId')} @{str(run.get('headSha'))[:9]} {run.get('createdAt')} {run.get('conclusion')}"
 
 
@@ -407,7 +409,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     # sidecars
     "F45": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor cross_venue_health rule", v_monitor_rules),
     "F46": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor market_context rule", v_monitor_rules),
-    "F47": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "shipper block in public /api/status; sidecar restart loop still OPEN", v_field("fly_status", "segment_shipper")),
+    "F47": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "shipper block in public /api/status; sidecar restart loop still OPEN", v_field("fly_status", "shipper")),
     "F48": ("FLY runtime", "-", OPEN, "relay-state pusher no status / no restart (rank 22); unassigned", None),
     "F49": ("FLY runtime", "-", OPEN, "restart loop visible via uptime only; low", None),
     # clients
@@ -566,6 +568,7 @@ EXTRA = {
     # Danish's directive items and trace-audit items with no AUDIT-3 row id
     "T-REPORTS-OK": ("ANALYZER-FIDELITY", "#304", PROG, "required analyzer reports actually pass (root fix)", v_reports_ok_now),
     "T-TOGGLES": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "per-tile toggle state in public /api/status", v_toggles),
+    "T-DELTA-CHANGE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test, ships post-freeze", None),
     "T-RELAY-GATE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "arming refused while stale-owner/pre-arming relay events unquarantined (readiness gate)", None),
     "T-TIERA-API": ("ANALYZER-FIDELITY", "#307", PROG, "Tier A promotion visible via storage.tier_a", v_check_present("storage.tier_a")),
 }
@@ -705,7 +708,7 @@ def main() -> int:
     ap.add_argument("--baseline-json", help="counts JSON from the first run (before)")
     ap.add_argument("--pr-laptop", default="#309")
     ap.add_argument("--pr-monitor", default="#310")
-    ap.add_argument("--pr-fly", default="Fly post-freeze PR (pending)")
+    ap.add_argument("--pr-fly", default="#317")
     args = ap.parse_args()
     live = None
     if not args.no_live:
