@@ -31,7 +31,7 @@ def collection_ns(now, *, ledger=None, funnel=None, guard=None):
         "COLLECTOR_TAPE_REFRESH_FRESH_SEC": 60, "_collector_maturation_worker_status": {},
         "_collector_v3_reconcile_status": {}, "COLLECTOR_WORKER_RESTART_ALARM_SEC": 600,
         "COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS": 10, "COLLECTION_TOUCH_GRID_ALARM_COVERAGE": 0.5,
-        "COLLECTOR_LATE_MATURATION_SEC": 60,
+        "COLLECTOR_LATE_MATURATION_SEC": 60, "COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC": 1800.0,
         "_LEDGER_WRITES": ledger or th.FailureCounters(clock=clock),
         "_FUNNEL_HOOK_FAILURES": funnel or th.FailureCounters(clock=clock),
         "_relay_delivery_guard": guard or RelayDeliveryGuard(Path("unused.jsonl"), clock=clock),
