@@ -56,6 +56,7 @@ WATCHER_FEATURES = (
     "parity_checker", "puller_lock", "chain_monitor_alerts", "incident_relay", "interim_status",
     "delivery_check", "fly_copy_lag", "wall_integrity", "adhoc_visibility", "check_dedupe", "amber_acks",
     "flapping", "pull_ack_run_telemetry", "epoch_parity_fields", "lifecycle_recent_red", "revision_master_ahead",
+    "parity_timeout",
 )
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}

@@ -126,3 +126,14 @@ def test_collect_meta_reads_files(tmp_path):
     m = meta.collect_meta(state_dir=state_dir, shadow_root=shadow, wall=wall, parse_ts=sh.parse_ts,
                           probe_processes=False)
     assert m["parity"]["verdict"] == "GREEN" and m["acks"] == {"acks": []} and m["wall_tail"] == ["a", "b"]
+
+
+def test_parity_timeout_attempt_is_amber_until_a_newer_report():
+    ok = {"verdict": "GREEN", "generated_at": sh.iso(NOW - 1800), "seq": 10, "counts": {}}
+    attempt = {"verdict": "TIMEOUT", "generated_at": sh.iso(NOW - 300), "checked": 40000, "tracked_files": 57000,
+               "max_lock_seconds": 600}
+    c = run({"parity": ok, "parity_attempt": attempt})["analyzer.parity_checker"]
+    assert c["status"] == "AMBER" and "lock budget" in c["hint"]
+    assert c["observed_fields"]["last_attempt"]["verdict"] == "TIMEOUT"
+    newer = {**ok, "generated_at": sh.iso(NOW - 60)}
+    assert run({"parity": newer, "parity_attempt": attempt})["analyzer.parity_checker"]["status"] == "GREEN"

@@ -57,3 +57,23 @@ def test_corrupt_cache_file_is_ignored(tmp_path):
     cache_path = tmp_path / "cache.json"
     cache_path.write_text("{not json", encoding="utf-8")
     assert parity.HashCache(cache_path).entries == {}
+
+
+def test_scan_stops_at_its_deadline_and_keeps_partial_cache(tmp_path):
+    import time
+
+    import pytest
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "a.json").write_bytes(b"alpha")
+    files = {"a.json": _entry(b"alpha")}
+    cache_path = tmp_path / "cache.json"
+    seed = parity.HashCache(cache_path, now=1000.0)
+    seed.entries = {"gone.json": [1, 1, "x", 1000.0]}
+    with pytest.raises(parity.ParityTimeout) as exc:
+        parity.classify(files, [], tree, {}, {}, seed, deadline=time.monotonic() - 1)
+    assert exc.value.checked == 0
+    seed.save(keep_unused=True)
+    assert "gone.json" in parity.HashCache(cache_path, now=1000.0).entries
+    assert parity.classify(files, [], tree, {}, {}, None, deadline=time.monotonic() + 60)["verdict"] == "GREEN"

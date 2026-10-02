@@ -91,4 +91,10 @@ if ($Parity -and $pullExit -eq 0) {
   Write-Host $parityOutput.Trim()
 }
 if ($pullExit -ne 0) { exit $pullExit }
+if ($parityExit -eq 4) {
+  # Lock budget hit: the pull itself succeeded and parity resumes from the hash cache next time.
+  # Surfaced through parity-last-attempt.json in :9011 analyzer.parity_checker, not as a failed pull.
+  Add-Content -LiteralPath $log -Value ('{0} PARITY_TIMEOUT deferred to the next parity pull' -f [datetime]::UtcNow.ToString('o')) -Encoding UTF8
+  exit 0
+}
 exit $parityExit

@@ -69,6 +69,7 @@ def collect_meta(*, state_dir: Path, shadow_root: Path, wall: Path, parse_ts: Ca
     return {
         "parity": _read_json(shadow_root / "parity-latest.json"),
         "parity_mtime": _mtime(shadow_root / "parity-latest.json"),
+        "parity_attempt": _read_json(shadow_root / "parity-last-attempt.json"),
         "puller_status": _read_json(puller / "status.json"),
         "lock_holder": holder if isinstance(holder, Mapping) else None,
         "chain_monitor": _read_json(state_dir / "laptop-chain-monitor.state.json"),
@@ -194,17 +195,30 @@ def parity_check(meta, lock, now, check, fmt_age, parse_ts, t):
     if running and (lock["held_sec"] or 0) > t["parity_lock_amber_sec"]:
         st = max(st, AMBER, key=RANK.get)
         reasons.append(f"parity scan holding the puller lock for {fmt_age(lock['held_sec'])}")
+    attempt = meta.get("parity_attempt") if isinstance(meta.get("parity_attempt"), Mapping) else {}
+    attempt_ts = parse_ts(attempt.get("generated_at"))
+    timed_out = str(attempt.get("verdict")).upper() == "TIMEOUT" and attempt_ts is not None and \
+        (gen is None or attempt_ts > gen)
+    if timed_out:
+        st = max(st, AMBER, key=RANK.get)
+        reasons.append(f"last parity attempt {fmt_age(_age(now, attempt_ts))} ago hit its "
+                       f"{attempt.get('max_lock_seconds')}s lock budget after {attempt.get('checked')}/"
+                       f"{attempt.get('tracked_files')} files (hash cache resumes it)")
     held = timing.get("lock_held_sec")
     return check("analyzer.parity_checker", "analyzer", st,
                  f"verdict={verdict} seq={report.get('seq')} age={fmt_age(age)} "
                  + (f"lock_held={held}s hashed={timing.get('hashed')} cache_hits={timing.get('hash_cache_hits')}"
                     if timing else "no timing (pre-cache parity build)")
+                 + (f"; last attempt TIMEOUT at {attempt.get('checked')}/{attempt.get('tracked_files')}"
+                    if timed_out else "")
                  + (f"; scan running {fmt_age(lock['held_sec'])}" if running else ""),
                  f"GREEN verdict within {fmt_age(t['parity_amber_sec'])} (RED {fmt_age(t['parity_red_sec'])}), "
                  f"scan holds the puller lock < {fmt_age(t['parity_lock_amber_sec'])}",
                  "; ".join(reasons),
                  fields={"verdict": verdict, "seq": report.get("seq"), "age_sec": age, "counts": dict(counts),
-                         "timing": dict(timing), "running": running})
+                         "timing": dict(timing), "running": running,
+                         "last_attempt": {k: attempt.get(k) for k in ("verdict", "generated_at", "checked",
+                                                                     "tracked_files", "timing")} if attempt else None})
 
 
 def puller_lock_check(status, lock, now, check, fmt_age, t):

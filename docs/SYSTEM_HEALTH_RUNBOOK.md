@@ -517,6 +517,13 @@ background re-evaluation. Only when the cache is older than 120 s does it wait (
 cached by size and mtime, so a slow scan with few cache hits means the cache was reset or
 the tree churned.
 
+The scan gives the lock back after `--max-lock-seconds` (default 600, env
+`RESEARCH_PARITY_MAX_LOCK_SEC`), exits 4 and writes `parity-last-attempt.json` with
+`verdict: TIMEOUT`. `parity-latest.json` keeps the last completed verdict, and the pull
+wrapper logs `PARITY_TIMEOUT` and exits 0 (the pull succeeded). The check is AMBER while the
+newest attempt is a timeout. Digests computed before the timeout stay cached, so the next
+parity pull resumes further along.
+
 <a id="laptop-puller_lock"></a>
 ### laptop.puller_lock
 Whether the shadow-root lock is starving the segment pull. Only counted while the
