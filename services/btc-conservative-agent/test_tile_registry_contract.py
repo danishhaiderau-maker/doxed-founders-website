@@ -86,22 +86,23 @@ def test_active_registry_is_trend_fade_committed_fade_lead_premium_then_baseline
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED",
         "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S",
-        "FAMILY_CONTINUOUS_AUG_ORIGINAL",
+        "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
     )
     manifest = active_tile_lifecycle_manifest()
     assert [(row["lane"], row["display_order"]) for row in manifest] == [
         ("FAMILY_TREND_FADE_60", 1), ("FAMILY_TREND_FADE_60_COMMITTED", 2),
         ("FAMILY_XVENUE_LEAD_60S", 3), ("FAMILY_XVENUE_PREMIUM_60S", 4),
-        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 5),
+        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 5), ("FAMILY_COMMITTED_FADE_MAKER_90", 6),
     ]
     fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
     committed = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60_COMMITTED"]
     lead = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"]
     premium = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_PREMIUM_60S"]
     baseline = ACTIVE_TILE_REGISTRY["FAMILY_CONTINUOUS_AUG_ORIGINAL"]
-    tiles = (fade, committed, lead, premium, baseline)
-    assert len({t["policy_signature"] for t in tiles}) == 5
-    assert [t["id_prefix"] for t in tiles] == ["ftf", "ftc", "xvl", "xvp", "caug"]
+    maker = ACTIVE_TILE_REGISTRY["FAMILY_COMMITTED_FADE_MAKER_90"]
+    tiles = (fade, committed, lead, premium, baseline, maker)
+    assert len({t["policy_signature"] for t in tiles}) == 6
+    assert [t["id_prefix"] for t in tiles] == ["ftf", "ftc", "xvl", "xvp", "caug", "cfm"]
     expected = (TREND_FADE_60_SCORE_LED_SIGNATURE if registry.SCORE_LED_PAPER_RESEARCH_ENABLED
                 else TREND_FADE_60_SIGNATURE)
     assert fade["policy_signature"] == expected
@@ -109,11 +110,12 @@ def test_active_registry_is_trend_fade_committed_fade_lead_premium_then_baseline
     assert fade["toggle_key"] == "research_lane_enabled"
     assert fade["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
     assert lead["policy_epoch"] == registry.XVENUE_LEAD_POLICY_EPOCH == "v31-trend-fade-single-tile-v5"
-    assert registry.RESEARCH_STACK_VERSION == "v31-continuous-aug-original-v7"
+    assert registry.RESEARCH_STACK_VERSION == "v31-committed-fade-maker-v8"
     assert committed["policy_epoch"] == premium["policy_epoch"] == "v31-committed-fade-premium-v6"
     assert committed["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
     assert premium["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
-    assert baseline["policy_epoch"] == registry.RESEARCH_STACK_VERSION
+    assert baseline["policy_epoch"] == registry.CONTINUOUS_AUG_POLICY_EPOCH == "v31-continuous-aug-original-v7"
+    assert maker["policy_epoch"] == maker["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
     for lane, tile in zip(ACTIVE_TILE_ORDER, tiles):
         # Only the owner-requested baseline defaults ON; the deploy gate turns every tile ON.
         default_on = tile is baseline
@@ -124,6 +126,9 @@ def test_active_registry_is_trend_fade_committed_fade_lead_premium_then_baseline
             # August capacity: the tile cap plus same-side duplicate suppression.
             assert tile["max_active_signals"] == 10
             assert tuple(map(tuple, tile["ladder"])) == registry.CONTINUOUS_AUG_LADDER
+        elif tile is maker:
+            assert tile["max_active_signals"] == 3
+            assert tile.get("ladder") in (None, ())
         else:
             assert tile["max_active_signals"] == 1
             assert tile.get("ladder") in (None, ())

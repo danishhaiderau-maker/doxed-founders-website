@@ -53,6 +53,7 @@ EVIDENCE_BADGES = {
     "HINT_12H_EVIDENCE": "HINT — 12h evidence",
     "HINT_8H_HOLDOUT_EVIDENCE": "HINT — 8h holdout evidence",
     "HINT_DEV_AND_HOLDOUT_SAME_SIGN": "HINT — dev + 12h holdout, CI spans 0",
+    "HINT_3D_WALK_FORWARD_CI_SPANS_0": "HINT — 3-day walk-forward, CI spans 0",
 }
 
 

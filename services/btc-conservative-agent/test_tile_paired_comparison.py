@@ -6,7 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-T1, T2, XVL, XVP, CBL = ACTIVE_TILE_ORDER
+T1, T2, XVL, XVP, CBL, CFM = ACTIVE_TILE_ORDER
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -68,6 +68,7 @@ def test_registered_tiles_report_without_a_paired_control():
     assert set(tpc.VERDICT_RULES) == {
         "tile_pre_registration_trade_count_v1", "tile_pre_registration_xvl_v1",
         "tile_pre_registration_committed_fade_v1", "tile_pre_registration_xvp_v1",
+        "tile_pre_registration_committed_fade_maker_v1",
     }
     assert set(tpc.VERDICT_RULES) >= {
         ACTIVE_TILE_REGISTRY[lane]["pre_registration"]["schema"]
@@ -84,14 +85,14 @@ def test_committed_fade_pairs_against_trend_fade_on_the_same_calls():
                  _fill(T2, f"c{i}", 5.0, ts, reason="PATH_END_60M")]
     rows += [_fill(T1, f"nt{i}", 1.0, T0 + i, reason="PATH_END_60M") for i in range(4)]
     report = _report(rows)
-    assert report["tile_order"] == [T1, T2, XVL, XVP, CBL]
-    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2, CBL]
+    assert report["tile_order"] == [T1, T2, XVL, XVP, CBL, CFM]
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2, CBL, CFM]
     assert not any({XVL, XVP} & {p["control"], p["challenger"]} for p in report["paired"])
     pairs = {(p["control"], p["challenger"]): p for p in report["paired"]}
     assert pairs[(T1, T2)]["paired_signals"] == 12
     assert pairs[(T1, T2)]["mean_difference_bp"] == pytest.approx(3.0)
     assert pairs[(T1, T2)]["unpaired_control_fills"] == 4
-    assert set(report["pre_registered"]) == {T1, T2, XVL, XVP}
+    assert set(report["pre_registered"]) == {T1, T2, XVL, XVP, CFM}
     assert report["pre_registered"][T1]["control_lane"] is None
     assert report["pre_registered"][T2]["control_lane"] == T1
     json.dumps(report, allow_nan=False)
@@ -186,6 +187,21 @@ def test_premium_tile_needs_shadow_parity_before_promotion_and_kills_on_bad_trad
     assert "K1_MEAN_NOT_POSITIVE_AFTER_300" in _report(flat)["pre_registered"][XVP]["verdict"]["kill_reasons"]
 
 
+def test_committed_fade_maker_kills_and_needs_shadow_before_promotion():
+    winners = [_fill(CFM, f"m{i}", 6.0 + (i % 4) * 0.5, T0 + i * 3000, reason="PATH_END_90M",
+                     dir="LONG" if i % 2 else "SHORT") for i in range(200)]
+    verdict = _report(winners, now=T0 + 200 * 3000)["pre_registered"][CFM]["verdict"]
+    checks = verdict["promotion_checks"]
+    assert checks["min_fills"] and checks["min_utc_days"] and checks["sessions"]
+    assert checks["per_fill_ev_lower_ci95_1h_gt_0"] and checks["both_sides_non_negative"]
+    assert checks["shadow_5s_delay_positive"] is False and checks["replay_parity"] is False
+    assert verdict["status"] == "COLLECTING"
+    flat = [_fill(CFM, f"z{i}", -0.5, T0 + i * 3000, reason="PATH_END_90M") for i in range(80)]
+    assert "K1_MEAN_NOT_POSITIVE_AFTER_80" in _report(flat)["pre_registered"][CFM]["verdict"]["kill_reasons"]
+    bad = [_fill(CFM, "b0", -61.0, T0, reason="PHYSICAL_HARD_STOP_40PCT")]
+    assert "K3_STOP_OR_STALE_FEED_FAILURE" in _report(bad)["pre_registered"][CFM]["verdict"]["kill_reasons"]
+
+
 def test_tile1_time_box_kills_after_fourteen_days_without_promotion():
     rows = [_fade(i, 1.0) for i in range(10)]
     registered = tpc._ts(ACTIVE_TILE_REGISTRY[T1]["pre_registration"]["registered_utc"])
@@ -224,7 +240,7 @@ def test_continuous_baseline_is_the_yardstick_not_a_trial():
     assert report["baseline_lane"] == CBL
     assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER) - 1
     pairs = {p["challenger"]: p for p in report["vs_baseline"]}
-    assert set(pairs) == {T1, T2}
+    assert set(pairs) == {T1, T2, CFM}
     assert all(p["control"] == CBL for p in report["vs_baseline"])
     assert pairs[T1]["paired_signals"] == 6
     assert pairs[T1]["mean_difference_bp"] == pytest.approx(2.0)

@@ -303,7 +303,7 @@ def test_frozen_trial_fails_closed_without_a_registered_control():
     # benchmark, a retired lane nor the candidate itself can be the control.
     assert COMPARISON_BENCHMARK_LANE is None
     assert LANES == ["FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED", "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S",
-                     "FAMILY_CONTINUOUS_AUG_ORIGINAL"]
+                     "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90"]
     for control in (COMPARISON_BENCHMARK_LANE, "CONTINUOUS", LANES[0]):
         with pytest.raises(ValueError):
             freeze_selection(LANES[0], control, selected_by="danish", frozen_at_ts=1000.0)
