@@ -35,6 +35,23 @@ V3_FIRST_RUN_SEC = 15 * 60.0
 RELAY_STALE_OWNER_SEC = 30 * 60.0
 ENTRIES_BLOCKED_SEC = 2 * 3600.0
 LAPTOP_HEALTH_SILENT_SEC = 1800.0
+ORDER_BOOK_STALE_SEC = 120.0
+ORDER_BOOK_CONSECUTIVE_FAILURES = 10
+RELAY_CACHE_STALE_SEC = 300.0
+RESTART_LOOP_WINDOW_SEC = 3600.0
+RESTART_LOOP_BOOTS = 3
+COLLECTION_FAILURE_COUNTERS: tuple[tuple[str, str], ...] = (
+    ("status", "collection.xvl_evaluator.write_failures"),
+    ("status", "collection.execution_markouts.write_failures"),
+    ("status", "collection.execution_markouts.dropped"),
+    ("status", "collection.execution_markouts.taker_capture_failures"),
+    ("status", "collection.microstructure_tape.write_failures_this_process"),
+    ("status", "collection.microstructure_tape.io_write_failures_this_process"),
+    ("status", "collection.cross_venue_tape.stats.write_failures"),
+    ("status", "collection.cross_venue_tape.stats.live_write_failures"),
+    ("ready", "cross_venue_health.stats.write_failures"),
+    ("ready", "xvl_evaluator_health.write_failures"),
+)
 
 # Field paths the deployed revision emits; absence means a contract regression
 # or a monitor blind spot, never "nothing to check". Presence only: several of
@@ -57,6 +74,7 @@ REQUIRED_FIELDS: Mapping[str, tuple[str, ...]] = {
         "lifecycle_pipeline.running", "lifecycle_pipeline.last_success_age_sec",
         "lifecycle_pipeline.blocker_counts", "lifecycle_pipeline.emergency_wal",
         "collection.cross_venue_tape.venues", "collection.market_context_tape.status",
+        "book_refresh.book_age_sec", "uptime.boot_at", "collection.execution_markouts.write_failures",
     ),
     "relay": ("state_integrity.relay_push.delivery_scheduler",),
     "system_health": ("age_sec", "stale"),
@@ -307,6 +325,92 @@ def laptop_health_findings(system_health: Mapping[str, Any] | None) -> dict[str,
             f"Fly /api/system-health last laptop push age_sec={age} stale={system_health.get('stale')} "
             f"(received_at={system_health.get('received_at')!r}; limit {LAPTOP_HEALTH_SILENT_SEC / 60:.0f} min): "
             "laptop system-health watcher is not pushing"
+        )
+    }
+
+
+def order_book_findings(status: Mapping[str, Any] | None, *, paused: bool | None) -> dict[str, str]:
+    """The REST order-book refresh loop exposes its age but nothing alerted on it."""
+    book = _dict(_dict(status).get("book_refresh"))
+    if not book or paused is not False:
+        return {}
+    problems = []
+    age = _num(book.get("book_age_sec"))
+    if age is not None and age > ORDER_BOOK_STALE_SEC:
+        problems.append(f"book_age_sec={age:.0f} (> {ORDER_BOOK_STALE_SEC:.0f}s)")
+    failures = _num(book.get("consecutive_failures"))
+    if failures is not None and failures >= ORDER_BOOK_CONSECUTIVE_FAILURES:
+        problems.append(f"{int(failures)} consecutive failures (last_error={str(book.get('last_error'))[:120]!r})")
+    if not problems:
+        return {}
+    return {"order_book_stale": "order-book refresh stalled: " + "; ".join(problems)}
+
+
+def relay_cache_findings(relay_state: Mapping[str, Any] | None, notes: list[str]) -> dict[str, str]:
+    """/api/relay-state cache age and /api/relay-execution-state 503s were exposed, never alerted."""
+    problems = []
+    age = _num(_dict(_dict(relay_state).get("relay_cache")).get("age_sec"))
+    if age is not None and age > RELAY_CACHE_STALE_SEC:
+        problems.append(f"/api/relay-state relay_cache.age_sec={age:.0f} (> {RELAY_CACHE_STALE_SEC:.0f}s)")
+    if any("relay-execution-state" in n and "HTTP 503" in n for n in notes):
+        problems.append("/api/relay-execution-state answered HTTP 503 (snapshot stale)")
+    if not problems:
+        return {}
+    return {"relay_cache_stale": "relay snapshot cache stale: " + "; ".join(problems)}
+
+
+def collection_write_failure_findings(
+    state: dict[str, Any], status: Mapping[str, Any] | None, ready: Mapping[str, Any] | None
+) -> dict[str, str]:
+    """Shadow/research writers count their failures; alert when any counter grew since the last run."""
+    sources = {"status": status, "ready": ready}
+    current: dict[str, float] = {}
+    for name, path in COLLECTION_FAILURE_COUNTERS:
+        value = _num(_get(sources.get(name), path))
+        if value is not None:
+            current[f"{name}:{path}"] = value
+    counters = state.setdefault("counters", {})
+    previous = counters.get("collection_write_failures")
+    counters["collection_write_failures"] = current
+    if not isinstance(previous, dict):
+        return {}
+    grew = {k: v - previous[k] for k, v in current.items() if k in previous and v > previous[k]}
+    if not grew:
+        return {}
+    return {
+        "collection_write_failures": (
+            f"{len(grew)} research/shadow writer failure counter(s) grew since the previous run: "
+            + ", ".join(f"{k} +{int(d)}" for k, d in sorted(grew.items())[:8])
+        )
+    }
+
+
+def restart_loop_findings(state: dict[str, Any], status: Mapping[str, Any] | None, now: float) -> dict[str, str]:
+    """Each new uptime.boot_at is a process start; three inside an hour is a restart loop."""
+    boot = _dict(_dict(status).get("uptime")).get("boot_at")
+    boots = [b for b in state.setdefault("boots", []) if isinstance(b, list) and now - b[1] <= RESTART_LOOP_WINDOW_SEC]
+    if isinstance(boot, str) and boot and all(b[0] != boot for b in boots):
+        boots.append([boot, now])
+    state["boots"] = boots
+    if len(boots) < RESTART_LOOP_BOOTS:
+        return {}
+    return {
+        "restart_loop": (
+            f"Fly bot started {len(boots)} times within {RESTART_LOOP_WINDOW_SEC / 60:.0f} min "
+            f"(boot_at: {', '.join(b[0] for b in boots[-5:])})"
+        )
+    }
+
+
+def deploy_failure_findings(deploy: Mapping[str, Any] | None) -> dict[str, str]:
+    """The newest finished image deploy failed and no later deploy succeeded (was GHA email only)."""
+    last = _dict(_dict(deploy).get("last_finished_deploy"))
+    if last.get("conclusion") not in ("failure", "timed_out"):
+        return {}
+    return {
+        "deploy_failed": (
+            f"latest fly-bot-deploy image deploy run {last.get('id')} ({last.get('event')}) on "
+            f"{str(last.get('head_sha'))[:12]} concluded {last.get('conclusion')} at {last.get('updated_at')}"
         )
     }
 

@@ -1,0 +1,16 @@
+# Historical gitleaks findings (fingerprints only: commit:file:rule:line; no secret material).
+# Accepted so the scheduled full-history scan (secret-scan-history.yml) fails only on NEW leaks.
+# Includes the Aug 2026 handoff BOT_ADMIN_TOKEN (e5312ec0, HANDOFF-2026-08-06.md) pending history scrub.
+# Add a line here only after the secret is rotated or confirmed a false positive.
+660e72ce2a0ddcc59e84b1329d25b648f03a2f0b:services/btc-signal-engine/engine.py:generic-api-key:31939
+660e72ce2a0ddcc59e84b1329d25b648f03a2f0b:services/btc-signal-engine/engine.py:generic-api-key:32423
+6a3903bf51da7bdc95453ab83d243400cc1cd2e6:scripts/bitfinex-policy-lock.json:generic-api-key:8
+806217015c0496ce8bdebee2ddcee30f8e5b2c3b:services/btc-conservative-agent/cleanup_characterization_contract.fixture:generic-api-key:133
+cd6f9129e79a5d7b94b39f9dafb7762b529f3a72:services/btc-conservative-agent/bot.py:generic-api-key:31922
+cd6f9129e79a5d7b94b39f9dafb7762b529f3a72:services/btc-conservative-agent/bot.py:generic-api-key:32406
+cd6f9129e79a5d7b94b39f9dafb7762b529f3a72:services/btc-conservative-agent/test_protected_w234_policy.py:generic-api-key:71
+e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:110
+e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:126
+e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:186
+e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:360
+e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:427
