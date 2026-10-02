@@ -1,0 +1,44 @@
+{
+  "schema": "self_aware_edges_registry_v1",
+  "registered_at": "2026-10-02T09:00:00Z",
+  "note": "Pre-registered screens. Specs are frozen by hash: editing a spec creates a new spec id/hash and restarts its evidence clock. Polarity is fixed here, never chosen in-sample. Inspired by INDICATOR-SEARCH-MODEL-A/C and AI-DIRECTION audits of 2026-10-02.",
+  "clock": {"kind": "grid", "step_sec": 300, "venue": "bitfinex_1s_mid", "entry": "decision second + 1 s", "cost": "half-spread in + half-spread out, 0 fees (paper maker/taker fees are applied by tiles, not here)"},
+  "guards": {
+    "holdout_fraction": 0.22,
+    "embargo_sec": 3600,
+    "alpha": 0.10,
+    "min_n_candidate": 300,
+    "min_n_hint": 100,
+    "min_days": 5,
+    "min_clusters": 40,
+    "hint_min_hit": 0.55,
+    "hint_min_net_bp": 0.0,
+    "require_train_sign": true,
+    "decay_rule": "holdout second half net must be >= 0 and train net must be > 0",
+    "promotion": "SHADOW_ONLY_UNTIL_USER_APPROVAL"
+  },
+  "features": {
+    "r5m": "mid return over the last 5 min (bp)",
+    "r15m": "mid return over the last 15 min (bp)",
+    "r60m": "mid return over the last 60 min (bp)",
+    "ofi1m": "taker buy-sell imbalance over the last 60 s",
+    "ofi5m": "taker buy-sell imbalance over the last 5 min",
+    "l1imb": "L1 queue imbalance (bid_qty-ask_qty)/(bid_qty+ask_qty)",
+    "tz60": "60 min trend z: r60m / (std of 1 min returns over 60 min * sqrt(60))"
+  },
+  "specs": [
+    {"id": "MOM_R5M", "feature": "r5m", "polarity": 1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "FADE_R5M", "feature": "r5m", "polarity": -1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "MOM_R15M", "feature": "r15m", "polarity": 1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "FADE_R15M", "feature": "r15m", "polarity": -1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "MOM_R60M", "feature": "r60m", "polarity": 1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "FADE_R60M", "feature": "r60m", "polarity": -1, "threshold": 0.0, "horizons": ["5m", "15m", "60m"]},
+    {"id": "OFI_1M", "feature": "ofi1m", "polarity": 1, "threshold": 0.2, "horizons": ["5m", "15m"]},
+    {"id": "FADE_OFI_1M", "feature": "ofi1m", "polarity": -1, "threshold": 0.2, "horizons": ["5m", "15m"]},
+    {"id": "OFI_5M", "feature": "ofi5m", "polarity": 1, "threshold": 0.1, "horizons": ["5m", "15m", "60m"]},
+    {"id": "L1IMB", "feature": "l1imb", "polarity": 1, "threshold": 0.2, "horizons": ["5m", "15m"]},
+    {"id": "FADE_L1IMB", "feature": "l1imb", "polarity": -1, "threshold": 0.2, "horizons": ["5m", "15m"]},
+    {"id": "TREND_Z60_FOLLOW", "feature": "tz60", "polarity": 1, "threshold": 1.0, "horizons": ["15m", "60m"]},
+    {"id": "TREND_Z60_FADE", "feature": "tz60", "polarity": -1, "threshold": 1.0, "horizons": ["15m", "60m"]}
+  ]
+}
