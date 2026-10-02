@@ -1470,7 +1470,7 @@ jobs:
           python test_ws_live_readiness_contract.py
           python -m pytest test_bbo_refresh_nonblocking.py -q
           python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py test_shadow_chase_buckets.py test_family_global_chase_gate.py -q
-          python -m pytest test_multiverse_tape_maturation.py test_collector_maturation_supervision.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
+          python -m pytest test_multiverse_tape_maturation.py test_collector_maturation_supervision.py test_multiverse_maturation_starvation.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
           python -m pytest test_paper_policy_family_trend_fade_60.py test_paper_policy_family_trend_fade_60_committed.py test_paper_policy_family_xvenue_lead.py test_paper_policy_family_xvenue_premium.py test_lead_lag_report.py test_tile_paired_comparison.py test_tile_win_rate.py test_family_policy_common.py test_family_tile_runtime_peak_persistence.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
           python -m pytest test_dual_execution_truth_closed_rows.py test_exit_shadow_world_current_stack.py test_trade_close_origin_display.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q

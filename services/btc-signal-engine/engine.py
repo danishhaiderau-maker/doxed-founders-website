@@ -226,7 +226,10 @@ from collector_v22_schema import (
     CONTROL_TTL_SEC,
     MAX_ENTRY_WINDOW_SEC,
     MAX_HOLD_PERIOD_SEC,
+    OBS_PENDING,
     OBS_SOURCE_UNAVAILABLE,
+    OBS_WAITING_120M,
+    OBS_WAITING_ENTRY_WINDOW,
     EVENT_INDEX_FILE as COLLECTOR_V22_EVENT_INDEX_FILE,
     RESEARCH_EVENTS_FILE as COLLECTOR_V22_RESEARCH_EVENTS_FILE,
     STORAGE_PRESSURE_THRESHOLD,
@@ -13919,6 +13922,13 @@ def research_collection_health(now: float = None) -> dict:
     last_pass = worker.get("last_pass_ts") or worker.get("started_ts")
     if pending and (not worker.get("alive") or (last_pass and now - float(last_pass) > 300)):
         alarms.append("COLLECTOR_MATURATION_WORKER_STALLED")
+    oldest_overdue = float(worker.get("last_oldest_overdue_ts") or 0)
+    oldest_overdue_age = (
+        round(max(0.0, now - oldest_overdue), 1) if pending and oldest_overdue else None
+    )
+    if oldest_overdue_age is not None \
+            and oldest_overdue_age > COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC:
+        alarms.append("COLLECTOR_MATURATION_FINALIZABLE_BACKLOG")
     for status in (worker, _collector_v3_reconcile_status):
         restarted = float(status.get("last_restart_ts") or 0)
         if restarted and now - restarted <= COLLECTOR_WORKER_RESTART_ALARM_SEC:
@@ -13963,6 +13973,9 @@ def research_collection_health(now: float = None) -> dict:
         "alarms": alarms,
         "multiverse": {
             "pending": pending,
+            "overdue": worker.get("last_overdue"),
+            "oldest_overdue_age_sec": oldest_overdue_age,
+            "overdue_alarm_sec": COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC,
             "written_since_boot": counters.get("multiverse_written", 0),
             "written_empty_path_since_boot": counters.get("multiverse_written_empty_path", 0),
             "written_source_never_recorded_since_boot": counters.get(
@@ -14466,6 +14479,48 @@ COLLECTOR_LATE_MATURATION_SEC = max(
 COLLECTOR_WORKER_RESTART_ALARM_SEC = 3600.0
 COLLECTOR_WORKER_RESTART_MIN_INTERVAL_SEC = 30.0
 COLLECTOR_TAPE_REFRESH_FRESH_SEC = 120.0
+# A finalizable row older than this means order-multiverse entry-grid
+# evidence is accumulating faster than maturation writes it.
+COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC = max(
+    300.0, float(os.getenv("COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC", "1800")),
+)
+COLLECTOR_WAITING_OBSERVATIONS = frozenset({
+    OBS_PENDING, OBS_WAITING_120M, OBS_WAITING_ENTRY_WINDOW,
+})
+
+
+def _collector_earliest_finalize_ts(candidate: dict) -> float:
+    """Earliest time collector_v22 can return a terminal observation.
+
+    Mirrors ``build_research_event``: no terminal status before the signal's
+    entry window closes, nor before a live fill's hold window closes.
+    """
+    try:
+        signal_ts = float(candidate.get("created_ts_ts") or 0)
+    except (TypeError, ValueError):
+        signal_ts = 0.0
+    earliest = signal_ts + float(MAX_ENTRY_WINDOW_SEC) if signal_ts > 0 else 0.0
+    try:
+        fill_ts = float(candidate.get("live_fill_ts") or 0)
+    except (TypeError, ValueError):
+        fill_ts = 0.0
+    if fill_ts > 0:
+        earliest = max(earliest, fill_ts + float(MAX_HOLD_PERIOD_SEC))
+    return earliest
+
+
+def _collector_overdue_finalize_ts(candidate: dict) -> float:
+    """Time after which a healthy tape must yield a terminal observation."""
+    earliest = _collector_earliest_finalize_ts(candidate)
+    try:
+        signal_ts = float(candidate.get("created_ts_ts") or 0)
+    except (TypeError, ValueError):
+        signal_ts = 0.0
+    if signal_ts <= 0:
+        return earliest
+    return max(earliest, signal_ts + float(MAX_ENTRY_WINDOW_SEC + MAX_HOLD_PERIOD_SEC))
+
+
 _collector_maturation_worker_status = {"alive": False, "restarts": 0}
 _collector_v3_reconcile_status = {"alive": False, "restarts": 0, "runs": 0}
 _collector_v3_reconcile_cursor: dict = {}
@@ -14674,18 +14729,28 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
     pending_ids = sorted(pending_snapshot)
     ready_ids = []
     waiting_ids = []
+    finalizable_since = {}
+    overdue_since = {}
     for pending_id in pending_ids:
         candidate = pending_snapshot.get(pending_id) or {}
         expires = float(candidate.get("expires_ts") or 0)
         closed = str(candidate.get("status") or "").upper() in (
             "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
         )
+        earliest_final = _collector_earliest_finalize_ts(candidate)
         if (
-            closed
-            or bool(candidate.get("path_complete"))
-            or (expires > 0 and now >= expires + float(POST_TTL_LOOKAHEAD_SEC))
+            (
+                closed
+                or bool(candidate.get("path_complete"))
+                or (expires > 0 and now >= expires + float(POST_TTL_LOOKAHEAD_SEC))
+            )
+            and now >= earliest_final
         ):
             ready_ids.append(pending_id)
+            finalizable_since[pending_id] = earliest_final
+            overdue = _collector_overdue_finalize_ts(candidate)
+            if now >= overdue:
+                overdue_since[pending_id] = overdue
         else:
             waiting_ids.append(pending_id)
     # Mature evidence is processed oldest-first.  The adaptive component keeps
@@ -14713,7 +14778,9 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         # The wall budget, not the item count, bounds a worker pass.
         count = min(COLLECTOR_MATURATION_WORKER_MAX_BATCH, max(count, len(ready_ids) + COLLECTOR_MATURATION_BATCH_SIZE))
     # Fewest attempts first: a mature row that keeps failing to finalize must
-    # not hold the head of every pass ahead of rows that would.
+    # not hold the head of every pass ahead of rows that would.  Attempts are
+    # counted only once a row can finalize; a row still inside its entry/hold
+    # window cannot fail, and charging it there starves it behind newer rows.
     attempts = _order_multiverse_maturation_attempts
     for stale_id in [key for key in attempts if key not in pending_snapshot]:
         attempts.pop(stale_id, None)
@@ -14746,11 +14813,16 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         ),
         default=0.0,
     )
+    oldest_overdue = min(overdue_since.values(), default=0.0)
     with state_lock:
         state["collector_maturation"] = {
             "status": "ACTIVE" if pending_ids else "IDLE",
             "pending": len(pending_ids),
             "terminal_ready": len(ready_ids),
+            "overdue": len(overdue_since),
+            "oldest_overdue_age_sec": (
+                max(0.0, now - oldest_overdue) if overdue_since else None
+            ),
             "selected": len(selected_ids),
             "base_batch_size": COLLECTOR_MATURATION_BATCH_SIZE,
             "effective_batch_size": count,
@@ -14785,7 +14857,8 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         if not isinstance(src, dict):
             continue
         processed += 1
-        attempts[pending_id] = attempts.get(pending_id, 0) + 1
+        if pending_id in finalizable_since:
+            attempts[pending_id] = attempts.get(pending_id, 0) + 1
         if src.get("collector_rejected"):
             persist_rejected_opportunity(
                 src,
@@ -14803,16 +14876,25 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         )
         # Keep collecting after TTL so a later 0.10% touch (e.g. t=37m) is
         # labeled alternative_entry_fill without lookahead into the 30m order.
-        _sync_order_multiverse(
+        record = _sync_order_multiverse(
             src,
             path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
         )
+        if (
+            pending_id in finalizable_since
+            and isinstance(record, dict)
+            and str(record.get("observation_status") or "") in COLLECTOR_WAITING_OBSERVATIONS
+        ):
+            # Still legitimately inside its path window: not a failed attempt.
+            attempts[pending_id] = max(0, attempts.get(pending_id, 1) - 1)
         time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC if from_worker else 0)
     if from_worker:
         _collector_maturation_worker_status.update({
             "last_selected": len(selected_ids),
             "last_processed": processed,
             "last_terminal_ready": len(ready_ids),
+            "last_overdue": len(overdue_since),
+            "last_oldest_overdue_ts": oldest_overdue or None,
             "last_budget_exhausted": processed < len(selected_ids),
         })
     # V2 is the durable migration source.  A rollout or crash between the V2
