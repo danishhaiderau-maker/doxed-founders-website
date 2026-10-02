@@ -65,8 +65,8 @@ DEPLOY_RUN_SLACK_SEC = 120.0
 # first laptop cycle after a guarded deploy re-promotes and re-migrates them.
 # A stale analyzer is ALLOWED_GUARDED_DEPLOY only when that deploy explains it:
 # the generation was still fresh when the run was created, the run is active or
-# concluded success, it ended at most this long ago, and the generation is
-# never older than the hard cap.
+# concluded success with Fly now running its head revision, it ended at most
+# this long ago, and the generation is never older than the hard cap.
 ANALYZER_POST_DEPLOY_GRACE_SEC = 60 * 60.0
 ANALYZER_DEPLOY_MAX_AGE_SEC = 120 * 60.0
 ACTIVE_RUN_STATUSES = frozenset({"queued", "requested", "waiting", "pending", "in_progress"})
@@ -196,19 +196,27 @@ def attribute_deploy_run(runs: list[Mapping[str, Any]], observed_at: float, now:
     return None
 
 
-def attribute_analyzer_staleness(runs: list[Mapping[str, Any]], generated: float,
-                                 now: float) -> tuple[Mapping[str, Any], float] | None:
-    """The guarded deploy run that explains a stale analyzer generation, with its end time."""
+def attribute_analyzer_staleness(runs: list[Mapping[str, Any]], generated: float, now: float,
+                                 runtime_rev: str | None) -> tuple[Mapping[str, Any], float] | None:
+    """The guarded deploy run that explains a stale analyzer generation, with its end time.
+
+    A completed run counts only if Fly now runs its head revision: inspect,
+    restart and repair dispatches of the same workflow boot nothing new and
+    re-bind no receipts.
+    """
     if now - generated > ANALYZER_DEPLOY_MAX_AGE_SEC:
         return None
+    rev = str(runtime_rev or "").strip().lower()
     for run in runs:
         created = parse_utc(run.get("createdAt"))
         if created is None or generated < created - ANALYZER_MAX_AGE_SEC:
             continue
         status = str(run.get("status") or "").lower()
+        head = str(run.get("headSha") or "").strip().lower()
         if status in ACTIVE_RUN_STATUSES:
             ended = now
-        elif status == "completed" and str(run.get("conclusion") or "").lower() == "success":
+        elif (status == "completed" and str(run.get("conclusion") or "").lower() == "success"
+              and len(rev) >= 7 and head.startswith(rev)):
             ended = parse_utc(run.get("updatedAt"))
             if ended is None:
                 continue
@@ -410,7 +418,8 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
         checks["analyzer_fresh"] = _check(None, "no completed analyzer generation recorded")
     elif now - generated > ANALYZER_MAX_AGE_SEC:
         age_text = f"analyzer generation {(now - generated) / 60:.0f} min old (> {ANALYZER_MAX_AGE_SEC / 60:.0f})"
-        attributed = attribute_analyzer_staleness(runs, generated, now) if runs is not None else None
+        attributed = (attribute_analyzer_staleness(runs, generated, now, rt.get("git_rev"))
+                      if runs is not None else None)
         if attributed is None:
             checks["analyzer_fresh"] = _check(False, age_text)
         else:
