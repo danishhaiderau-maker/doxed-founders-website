@@ -35,6 +35,8 @@ on:
           - snapshot-volume
           - fresh-start-wipe-plan
           - fresh-start-wipe-execute
+          - clean-epoch-wipe-plan
+          - clean-epoch-wipe-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -43,6 +45,10 @@ on:
         required: false
         default: false
         type: boolean
+      clean_epoch_confirm:
+        description: clean-epoch-wipe-execute only - DELETE-PRE-EPOCH:<epoch>:<cert8> printed by scripts/clean_epoch_certify.py
+        required: false
+        type: string
       lifecycle_reset_proof:
         description: Optional bounded JSON proof for one explicit lifecycle reset recovery deploy
         required: false
@@ -779,6 +785,109 @@ jobs:
 
       - name: Prove paper active with every registry tile ON
         if: ${{ success() && inputs.mode == 'fresh-start-wipe-execute' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ steps.boundary.outputs.revision }}
+        run: python scripts/fly_postdeploy_active_gate.py
+
+  clean-epoch-wipe:
+    # Hard-deletes pre-clean-epoch Fly data (clean_epoch_wipe.py --scope fly):
+    # sealed pre-epoch rotations, pre-epoch quarantine trees and fully-ACKed
+    # archived segment prefixes. Never live heads, V3 store, SQLite, restart
+    # state, relay/Bitfinex evidence or the 15-day 1s tape. Execute requires
+    # the certification confirm token, an epoch >= 2 h old and a volume
+    # snapshot created within 6 h. Relay/Bitfinex are never armed.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-wipe-plan' || inputs.mode == 'clean-epoch-wipe-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Plan (read-only)
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          epoch="$(python -c 'import re; print(re.search(r"^\s*DATA_EPOCH_ID\s*=\s*\"([^\"]+)\"", open("services/btc-conservative-agent/fly.toml", encoding="utf-8").read(), re.M).group(1))')"
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          plan="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$machine_id" "python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data --epoch $epoch")"
+          printf '%s\n' "$plan"
+          sha="$(printf '%s' "$plan" | python -c 'import json,sys; text=sys.stdin.read(); start=text.index("{"); print(json.loads(text[start:])["plan_sha256"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "plan_sha=$sha"
+            echo "epoch=$epoch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require confirm token and a fresh volume snapshot
+        if: ${{ inputs.mode == 'clean-epoch-wipe-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          EPOCH: ${{ steps.plan.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          python -c 'import os,re,sys; t=os.environ["CONFIRM"]; e=os.environ["EPOCH"]; sys.exit(0 if re.fullmatch("DELETE-PRE-EPOCH:"+re.escape(e)+":[0-9a-f]{8}", t) else "clean_epoch_confirm must be DELETE-PRE-EPOCH:"+e+":<cert8>")'
+          flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys,datetime as d
+          rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("status") or "").lower()=="created"]
+          now=d.datetime.now(d.timezone.utc)
+          fresh=[s for s in rows if (now-d.datetime.fromisoformat(str(s["created_at"]).replace("Z","+00:00"))).total_seconds()<6*3600]
+          if not fresh: sys.exit("no volume snapshot created within 6 h: run mode=snapshot-volume first")
+          print(json.dumps({"snapshot_id":fresh[0].get("id"),"created_at":fresh[0].get("created_at")}))'
+
+      - name: Enter paper maintenance boundary
+        id: boundary
+        if: ${{ inputs.mode == 'clean-epoch-wipe-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          def call(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(base + path, data=data, method="POST" if data else "GET",
+                                               headers={**headers, **({"Content-Type": "application/json"} if data else {})})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(40):
+              status = call("/api/status")
+              if (status.get("execution_paused") is True and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True):
+                  print("paper maintenance boundary established rev=" + str(status.get("source_git_rev")))
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                      handle.write("revision=" + str(status.get("source_git_rev") or "")[:12] + "\n")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("paper maintenance boundary not established")
+          PY
+
+      - name: Execute the pinned plan
+        if: ${{ inputs.mode == 'clean-epoch-wipe-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+        run: |
+          set -euo pipefail
+          flyctl machine exec --app doxed-btc-bot --timeout 600 "${{ steps.plan.outputs.machine_id }}" \
+            "python /app/clean_epoch_wipe.py execute --scope fly --data-root /app/data --epoch ${{ steps.plan.outputs.epoch }} --confirm $CONFIRM --expect-plan-sha256 ${{ steps.plan.outputs.plan_sha }}"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "${{ steps.plan.outputs.machine_id }}" "sh -lc 'df -h /app/data'"
+
+      - name: Resume paper
+        if: ${{ always() && steps.boundary.outcome != 'skipped' && steps.boundary.outcome != '' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_failure_paper_resume.py
+
+      - name: Prove paper active with every registry tile ON
+        if: ${{ success() && inputs.mode == 'clean-epoch-wipe-execute' }}
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}

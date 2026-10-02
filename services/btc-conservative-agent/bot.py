@@ -15,6 +15,7 @@ import csv
 import zipfile
 import io
 import json
+import data_epoch as _data_epoch
 import system_health_banner
 import system_health_alerts
 import runtime_uptime
@@ -41857,6 +41858,7 @@ def status():
         "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "uptime": _runtime_uptime_summary(now),
+        "data_epoch": _data_epoch_public(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -50809,7 +50811,8 @@ def _safe_append_jsonl(
             label, admission["reason"], admission["threshold"],
         )
         return False
-    line = json.dumps(row, default=str) + "\n"
+    stamp_epoch = globals().get("_data_epoch_row")
+    line = json.dumps(stamp_epoch(path, row) if stamp_epoch else row, default=str) + "\n"
     last_err = None
     # Some contract tests compile this helper in isolation; the path lock still
     # provides their local serialization while production supplies the shared
@@ -50854,6 +50857,46 @@ def _safe_append_jsonl(
     if outcome is not None:
         outcome["status"] = "WRITE_FAILED"
     return False
+
+
+DATA_EPOCH_ID = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
+_DATA_EPOCH_MANIFEST: dict | None = None
+
+
+def _open_data_epoch() -> dict | None:
+    """Boot hook: open (or keep, across restarts) the clean data epoch named by DATA_EPOCH_ID."""
+    global _DATA_EPOCH_MANIFEST
+    if not DATA_EPOCH_ID:
+        return None
+    try:
+        _DATA_EPOCH_MANIFEST = _data_epoch.ensure_runtime_manifest(
+            str(_data_sync_runtime_root()), DATA_EPOCH_ID, source_git_rev=_runtime_git_rev(),
+            bot_version=EXECUTION_FIX_VERSION,
+            segment_prefix=(os.getenv("RESEARCH_SEGMENTS_PREFIX") or "").strip(),
+        )
+    except (OSError, ValueError) as exc:
+        _DATA_EPOCH_MANIFEST = None
+        logger.error(f"[DATA EPOCH] cannot open {DATA_EPOCH_ID}: {exc}; rows stay unstamped [PIPELINE ENFORCEMENT]")
+        return None
+    logger.info(
+        f"[DATA EPOCH] {_DATA_EPOCH_MANIFEST['epoch_id']} since {_DATA_EPOCH_MANIFEST['started_at_utc']} "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return _DATA_EPOCH_MANIFEST
+
+
+def _data_epoch_row(path: str, row):
+    manifest = globals().get("_DATA_EPOCH_MANIFEST")
+    if not manifest or not isinstance(row, dict) or _data_epoch.epoch_independent(os.path.basename(path)):
+        return row
+    return _data_epoch.stamp(row, manifest["epoch_id"])
+
+
+def _data_epoch_public() -> dict:
+    manifest = _DATA_EPOCH_MANIFEST or {}
+    return {"declared": bool(manifest), "configured": DATA_EPOCH_ID, "epoch_id": manifest.get("epoch_id"),
+            "started_at_utc": manifest.get("started_at_utc"), "stamp_field": _data_epoch.STAMP_FIELD,
+            "segment_prefix": manifest.get("segment_prefix")}
 
 
 def _validate_research_ledgers_on_startup():
@@ -51643,6 +51686,7 @@ def main():
             "[AI INIT] DEEPSEEK_API_KEY missing - copy .env.example to .env in this folder "
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
+    _open_data_epoch()
     _wipe_research_on_startup_if_needed()
     _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()
