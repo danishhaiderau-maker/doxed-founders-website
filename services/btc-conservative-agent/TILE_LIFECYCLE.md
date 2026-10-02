@@ -17,10 +17,20 @@ same ordered manifest and registry signature at the exact deployed revision.
    an explicit owner request may set `default_enabled=True`, and the registry
    refuses it unless the tile stays paper-only and relay-blocked.
 3. Add the policy implementation and its focused tests.
+   A tile that owns its model call (`OWN_AI_CALL`) declares its own purpose in
+   `TRADING_AI_ALLOWED_PURPOSES`, runs the call on its own execution worker,
+   makes no call while OFF, and states the per-day cost in its PR.
 4. Wire generic registry consumers; do not add another active-tile roster.
 5. Run registry, execution-graph, signal-parity, analyzer-parity and visual QA.
 6. Deploy only at the required safe boundary, start a clean signed cohort, and
    prove two advancing collection/analyzer cycles before accepting evidence.
+
+## Baseline benchmark
+
+`FAMILY_CONTINUOUS_AUG_ORIGINAL` is the permanent baseline: paper-only,
+relay-blocked, default ON. It is never retired with an experiment roster
+change, never a promotion candidate, and every other tile is reported against
+it. Replacing it needs an explicit owner request and a new signed lane.
 
 ## Retire a tile
 

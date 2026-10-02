@@ -6,7 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-T1, T2, XVL, XVP = ACTIVE_TILE_ORDER
+T1, T2, XVL, XVP, CBL = ACTIVE_TILE_ORDER
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -69,7 +69,10 @@ def test_registered_tiles_report_without_a_paired_control():
         "tile_pre_registration_trade_count_v1", "tile_pre_registration_xvl_v1",
         "tile_pre_registration_committed_fade_v1", "tile_pre_registration_xvp_v1",
     }
-    assert set(tpc.VERDICT_RULES) >= {ACTIVE_TILE_REGISTRY[lane]["pre_registration"]["schema"] for lane in ACTIVE_TILE_ORDER}
+    assert set(tpc.VERDICT_RULES) >= {
+        ACTIVE_TILE_REGISTRY[lane]["pre_registration"]["schema"]
+        for lane in ACTIVE_TILE_ORDER if ACTIVE_TILE_REGISTRY[lane].get("pre_registration")
+    }
     json.dumps(report, allow_nan=False)
 
 
@@ -81,8 +84,8 @@ def test_committed_fade_pairs_against_trend_fade_on_the_same_calls():
                  _fill(T2, f"c{i}", 5.0, ts, reason="PATH_END_60M")]
     rows += [_fill(T1, f"nt{i}", 1.0, T0 + i, reason="PATH_END_60M") for i in range(4)]
     report = _report(rows)
-    assert report["tile_order"] == [T1, T2, XVL, XVP]
-    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2]
+    assert report["tile_order"] == [T1, T2, XVL, XVP, CBL]
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2, CBL]
     assert not any({XVL, XVP} & {p["control"], p["challenger"]} for p in report["paired"])
     pairs = {(p["control"], p["challenger"]): p for p in report["paired"]}
     assert pairs[(T1, T2)]["paired_signals"] == 12
