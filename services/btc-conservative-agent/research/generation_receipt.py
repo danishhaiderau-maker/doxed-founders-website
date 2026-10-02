@@ -67,6 +67,7 @@ def build_generation_receipt(
     integrity: Mapping[str, Any] | None = None,
     input_blockers: Mapping[str, Any] | None = None,
     protection_replay_window: Mapping[str, Any] | None = None,
+    data_epoch: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     studies = [
         _study_from_required(str(name), status)
@@ -117,7 +118,15 @@ def build_generation_receipt(
         ]
         if blocked:
             reasons.append("inputs: " + ", ".join(blocked))
-    return {
+    epoch_admitted = (data_epoch or {}).get("pre_epoch_rows_admitted")
+    if data_epoch and (epoch_admitted is None or int(epoch_admitted) > 0 or not data_epoch.get("epoch_id")):
+        level = RED
+        reasons.append(
+            f"clean epoch {data_epoch.get('epoch_id')}: "
+            + (f"{epoch_admitted} pre-epoch rows can enter results" if epoch_admitted is not None
+               else f"purity unproven ({data_epoch.get('error') or 'no audit'})")
+        )
+    receipt = {
         "schema": SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generation_id": manifest.get("generation_id"),
@@ -132,6 +141,9 @@ def build_generation_receipt(
         "protection_replay_window": window or None,
         "input_blockers": dict(input_blockers) if input_blockers else None,
     }
+    if data_epoch is not None:
+        receipt["data_epoch"] = dict(data_epoch)
+    return receipt
 
 
 def write_generation_receipt(report_dir: str | os.PathLike[str], receipt: Mapping[str, Any]) -> Path:
