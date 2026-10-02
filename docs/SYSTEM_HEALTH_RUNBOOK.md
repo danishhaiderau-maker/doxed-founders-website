@@ -227,7 +227,11 @@ Fix: the supervisor restarts a down dashboard (`run-analyzer-once.ps1 -EnsureDas
 ### analyzer.cycle
 - Running cycle duration: AMBER at 45 minutes, RED at 90 minutes.
 - The last cycle's exit code.
-- `v2c` HEAD must equal the Fly revision; `v2c-auto-ff` follows successful deploys.
+- `v2c` HEAD must contain the Fly revision, which is the same ancestry rule as the cycle's
+  `ANALYZER_REVISION_MISMATCH` guard. Laptop-only merges on top of the deployed revision
+  are GREEN. `v2c-auto-ff` follows successful deploys.
+- Exit 3 means promotion was refused. `FLY_UNSHIPPED_BYTES` > 32 MB right after a deploy
+  restart is transient; the next scheduled cycle retries.
 
 Fix: check `v2c-auto-ff.receipts.jsonl` (refusals) and the cycle phase log.
 

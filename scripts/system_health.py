@@ -462,6 +462,12 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     cache = state.setdefault("cache", {})
     inputs["registry"] = collect_registry(opts.analyzer_repo, cache.setdefault("registry", {}))
     inputs["analyzer_head"] = _git(opts.analyzer_repo, "rev-parse", "HEAD")
+    fly_rev = str(dig(inputs.get("fly_status"), "git_rev") or dig(inputs.get("fly_health"), "git_rev") or "")
+    if fly_rev and inputs["analyzer_head"]:
+        # Same rule as run-segment-analyzer-cycle.ps1: laptop-only merges on top of
+        # the deployed revision are fine.
+        inputs["analyzer_contains_fly"] = _git(opts.analyzer_repo, "merge-base", "--is-ancestor",
+                                               fly_rev, "HEAD") is not None
     master = cache.get("master") or {}
     if now - float(master.get("at") or 0) > 10 * MIN:
         line = _git(opts.analyzer_repo, "ls-remote", "origin", "refs/heads/master", timeout=30)
@@ -968,10 +974,13 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         obs = f"last cycle {fmt_age(dur)} exit={code}"
     head = str(inputs.get("analyzer_head") or "")
     if fly_rev and head and not head.startswith(fly_rev):
-        st = max(st, AMBER, key=RANK.get)
-        obs += f"; analyzer rev {head[:12]} != Fly {fly_rev[:12]}"
+        if inputs.get("analyzer_contains_fly"):
+            obs += f"; analyzer rev {head[:12]} contains Fly {fly_rev[:12]}"
+        else:
+            st = max(st, AMBER, key=RANK.get)
+            obs += f"; analyzer rev {head[:12]} does not contain Fly {fly_rev[:12]}"
     add(check("analyzer.cycle", "analyzer", st, obs,
-              f"cycle <= {fmt_age(t['cycle_amber_sec'])}, exit 0, analyzer rev == Fly rev",
+              f"cycle <= {fmt_age(t['cycle_amber_sec'])}, exit 0, analyzer rev contains Fly rev",
               "" if st == GREEN else "slow promotion/migration, failed cycle, or v2c auto-ff not yet followed Fly"))
 
     # ---------------- Exports (worker eed92197)

@@ -402,6 +402,19 @@ def test_replay_fly_ack_chasing_applied_20261002_is_not_red():
     assert legacy_red[0] == "2026-10-02T00:09:10Z"
 
 
+def test_analyzer_on_laptop_only_descendant_of_fly_rev_is_green():
+    # 2026-10-02: v2c fast-forwarded past Fly ad30ecaed to 3376338f5 (#269/#273, scripts/analyzer only);
+    # the cycle's ancestry guard ran exit 0, so the watcher must not hold analyzer.cycle AMBER.
+    now = ts("2026-10-02T00:35:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_head"] = "3376338f588e0000"
+    inputs["analyzer_contains_fly"] = True
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.cycle"]["status"] == sh.GREEN
+    inputs["analyzer_contains_fly"] = False
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.cycle"]
+    assert check["status"] == sh.AMBER and "does not contain Fly" in check["observed"]
+
+
 def test_fly_ack_frozen_while_laptop_applies_is_red_within_threshold():
     state: dict = {}
     start = ts("2026-10-01T23:50:38Z")
