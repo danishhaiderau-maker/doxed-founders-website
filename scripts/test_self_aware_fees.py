@@ -150,7 +150,8 @@ def test_ts_surface_and_code_literal_drift_is_red(tmp_path):
     root = _repo(tmp_path, sim_bps="4", relay="'BITFINEX_M2_T6.5', maker_fee_rate: 0, taker_fee_rate: 0",
                  extra={"services/btc-conservative-agent/research/sim.py": "TAKER_FEE_PCT = 0.00065\nok = fee_rate\n",
                         "services/btc-conservative-agent/test_sim.py": "TAKER_FEE_PCT = 0.00065\n",
-                        "scripts/zero.py": "maker_fee_rate: float = 0.0\n"})
+                        "scripts/zero.py": "maker_fee_rate: float = 0.0\n",
+                        "scripts/amounts.py": '"maker_fees": 0.0,\n"taker_fees": 0.0,\nentry_fee_usd = 1.5\n'})
     d = fees.drift(root, ACCOUNT_ZERO)
     fields = {(m["file"], m["field"]) for m in d["mismatches"]}
     assert ("apps/api/src/exchanges/bitfinex-sim-trading.client.ts", "SIM_FEE_BPS (as taker)") in fields
@@ -160,6 +161,7 @@ def test_ts_surface_and_code_literal_drift_is_red(tmp_path):
     assert not any("test_sim.py" in f for f, _ in fields)  # tests are fixtures, not fee surfaces
     zero = [x for x in d["literals"] if x["file"] == "scripts/zero.py"]
     assert zero and zero[0]["matches_profile"] is True and ("scripts/zero.py", "maker_fee_rate (line 1)") not in fields
+    assert not [x for x in d["literals"] if x["file"] == "scripts/amounts.py"]  # USD amounts are not rates
 
 
 @pytest.mark.parametrize("line,hit", [
