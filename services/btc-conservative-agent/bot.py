@@ -17,6 +17,7 @@ import io
 import json
 import system_health_banner
 import system_health_alerts
+import runtime_uptime
 import uuid
 import requests
 import glob
@@ -41367,7 +41368,53 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
         }
 
 
-_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None}
+_RUNTIME_UPTIME = {"tracker": None}
+_RUNTIME_UPTIME_INTERVAL_SEC = 15.0
+
+
+def _runtime_uptime_problem(now: float) -> dict | None:
+    with state_lock:
+        paused = bool(state.get("execution_paused") or state.get("manual_admin_pause"))
+        owner = _pause_owner_locked()
+        reason = str(state.get("execution_reason") or "")
+        enabled = dict(state.get("research_lane_enabled") or {})
+    lanes = [str(lane) for lane in ACTIVE_TILE_ORDER]
+    last_ok = float(_ai_provider_health.get("last_success_ts") or 0.0)
+    return runtime_uptime.problem_from(
+        paused=paused, pause_owner=owner, pause_reason=reason,
+        tiles_on=sum(1 for lane in lanes if enabled.get(lane) is True), tiles_total=len(lanes),
+        ai_success_age_sec=max(0.0, now - last_ok) if last_ok > 0 else None,
+        ai_consecutive_failures=int(_ai_provider_health.get("consecutive_failures") or 0),
+        process_age_sec=max(0.0, now - float(process_boot_time or now)),
+    )
+
+
+def runtime_uptime_loop():
+    """Observe interruptions for the uptime strip; started once boot has restored state."""
+    tracker = runtime_uptime.UptimeTracker(_data_sync_volume_root() / runtime_uptime.STATE_FILE)
+    opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
+    _RUNTIME_UPTIME["tracker"] = tracker
+    logger.info("[UPTIME] boot recorded: %s", opened.get("text"))
+    while not shutdown_event.is_set():
+        now = time.time()
+        try:
+            tracker.observe(now, _runtime_uptime_problem(now))
+        except Exception as exc:
+            logger.warning("[UPTIME] observation failed: %s", type(exc).__name__)
+        if shutdown_event.wait(_RUNTIME_UPTIME_INTERVAL_SEC):
+            break
+
+
+def _runtime_uptime_summary(now: float | None = None) -> dict:
+    tracker = _RUNTIME_UPTIME["tracker"]
+    if tracker is None:
+        return {"schema": runtime_uptime.SCHEMA, "available": False, "state": "STARTING", "colour": "amber",
+                "uninterrupted_label": "Starting: uptime tracking begins once boot completes",
+                "definition": runtime_uptime.DEFINITION}
+    return tracker.summary(now)
+
+
+_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None, "proof": None}
 _SYSTEM_HEALTH_LOCK = threading.Lock()
 # Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
 # watcher re-sends its alarm log after a restart, so nothing is written to disk.
@@ -41430,6 +41477,7 @@ def system_health_report():
     with _SYSTEM_HEALTH_LOCK:
         _SYSTEM_HEALTH_REPORT["report"] = report
         _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
+        _SYSTEM_HEALTH_REPORT["proof"] = runtime_uptime.sanitize_proof(raw.get("proof"))
         events = system_health_alerts.merge_events(_SYSTEM_HEALTH_ALARMS["events"], raw.get("alarm_events"))
         _SYSTEM_HEALTH_ALARMS["events"] = events
         if statuses:
@@ -41476,8 +41524,10 @@ def system_health_view():
     with _SYSTEM_HEALTH_LOCK:
         report = _SYSTEM_HEALTH_REPORT["report"]
         received_at = _SYSTEM_HEALTH_REPORT["received_at"]
+        proof = _SYSTEM_HEALTH_REPORT["proof"]
     out = system_health_banner.with_staleness(report)
     out["received_at"] = received_at
+    out["uptime"] = dict(_runtime_uptime_summary(), proof=None if out.get("stale") else proof)
     self_checks = _system_health_fly_self_checks()
     out["fly_self_checks"] = self_checks
     bad = [c for c in self_checks if c["status"] != "GREEN"]
@@ -41555,6 +41605,7 @@ def status():
         "ai_alert": strategy_progress["ai_provider"]["alert"],
         "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
+        "uptime": _runtime_uptime_summary(now),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -51632,6 +51683,9 @@ def main():
     # Control endpoints become available only after the private exposure audit,
     # rebuild/adoption, disarm cancellation, and EXIT_ONLY marking complete.
     _DASHBOARD_BOOTSTRAP_COMPLETE = True
+    threading.Thread(
+        target=safe_thread(runtime_uptime_loop), name="runtime-uptime", daemon=True
+    ).start()
     # Evidence processing is optional and may launch a bounded worker
     # immediately.  Start it only after the safety restore and dashboard boot
     # handoff are complete so it cannot contend with startup readiness.

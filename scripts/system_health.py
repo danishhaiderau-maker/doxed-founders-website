@@ -1414,7 +1414,18 @@ def banner_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "counts": report["counts"],
         "check_status": {c["id"]: c["status"] for c in report.get("checks") or []},
         "source": f"laptop {report.get('host')}",
+        "proof": report.get("proof"),
     }
+
+
+def proof_summary(active: Any, now: float) -> dict[str, Any] | None:
+    """48h unattended-proof progress for the uptime strip (same shape as runtime_uptime.proof_progress)."""
+    try:
+        sys.path.append(str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
+        import runtime_uptime  # noqa: PLC0415
+    except ImportError:
+        return None
+    return runtime_uptime.proof_progress(active if isinstance(active, dict) else None, now)
 
 
 ALARM_RETAIN_SEC = 30 * 24 * HOUR
@@ -1544,6 +1555,7 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
     checks = evaluate(inputs, state)
     report = summarize(checks, state, now)
     report["source_errors"] = inputs.get("errors")
+    report["proof"] = proof_summary(inputs.get("proof_active"), now)
     if alarms:
         events = alarm_transitions(report, state, now)
         for e in events:

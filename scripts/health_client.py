@@ -6,6 +6,7 @@
     snap["verdict"]                          # GREEN / AMBER / RED
     for f in health_client.failing(snap):    # failing checks, worst first
         print(f["id"], f["observed"], f["hint"], f["runbook"])
+    up = health_client.uptime()              # "Running uninterrupted: Xh Ym", last cause, 24h/7d, proof
     hist = health_client.alerts(limit=50)    # alert history, active first then newest first
     for a in hist["alerts"]:
         print(a["severity"], a["started"]["aest"], a["title"], a["duration_text"])
@@ -59,6 +60,20 @@ def alerts(limit: int | None = None, *, state_dir: str = sh.DEFAULT_STATE_DIR) -
                                                   limit=limit)
 
 
+def uptime(*, state_dir: str = sh.DEFAULT_STATE_DIR,
+           fly_status_url: str = "https://doxed-btc-bot.fly.dev/api/status") -> dict[str, Any]:
+    """Fly's uninterrupted-runtime block (same fields as the dashboards' strip) plus 48h proof progress."""
+    sys.path.append(str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
+    import runtime_uptime  # noqa: PLC0415
+
+    fly = runtime_uptime.fetch_fly_uptime(fly_status_url)
+    out = dict(fly["uptime"] or {"available": False, "uninterrupted_label": "Fly uptime unavailable"})
+    if fly["error"]:
+        out["note"] = fly["error"]
+    out["proof"] = runtime_uptime.read_proof_progress(state_dir)
+    return out
+
+
 def failing(report: dict[str, Any]) -> list[dict[str, Any]]:
     return list(report.get("failing") or [])
 
@@ -77,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
               f"age={report.get('age_sec')}s, open alarms={report.get('open_alarms')})")
         for f in failing(report):
             print(f"  {f['status']:<5} {f['id']}: {f['observed']}\n        -> {f.get('hint')}  [{f.get('runbook')}]")
+        up = uptime()
+        print(f"{up.get('uninterrupted_label')} (since {up.get('since_aest')}; "
+              f"24h interruptions={up.get('interruptions_24h')}; 7d longest={up.get('longest_run_7d_label')}; "
+              f"{(up.get('proof') or {}).get('label') or 'no proof window'})")
     return {"GREEN": 0, "AMBER": 1}.get(report.get("verdict"), 2)
 
 
