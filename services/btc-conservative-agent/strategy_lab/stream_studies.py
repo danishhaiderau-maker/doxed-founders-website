@@ -210,11 +210,17 @@ def _downsample(ticks: list, step: float = 15.0) -> list:
     return [buckets[k] for k in sorted(buckets)]
 
 
-def post_exit_regret(files: list, cache: Cache, trades: pd.DataFrame, lane_of: dict, epoch_start: float) -> tuple:
+def _is_live(path: str, frozen) -> bool:
+    """The mirror's active file is re-read every cycle; rotations and frozen archive files are cached."""
+    return path.endswith(".jsonl") and path not in frozen
+
+
+def post_exit_regret(files: list, cache: Cache, trades: pd.DataFrame, lane_of: dict, epoch_start: float,
+                     frozen=frozenset()) -> tuple:
     merged: dict = {}
     study = f"post_exit@{int(epoch_start)}"
     for path in files:
-        live = path.endswith(".jsonl")
+        live = _is_live(path, frozen)
         sig = None if live else content_signature(path)
         part = cache.get(study, sig) if sig else None
         if part is None:
@@ -226,6 +232,9 @@ def post_exit_regret(files: list, cache: Cache, trades: pd.DataFrame, lane_of: d
             if slot.get("hdr"):
                 m["hdr"] = slot["hdr"]
             m["ticks"].extend(slot.get("ticks") or [])
+    for m in merged.values():
+        # the same rotation can exist in a frozen archive and the mirror
+        m["ticks"] = [list(t) for t in sorted({tuple(t) for t in m["ticks"]})]
     exit_info = {}
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         t = trades.drop_duplicates(subset=["trade_id"], keep="last")
@@ -300,10 +309,12 @@ def _r(v, d: int = 6):
 
 # ------------------------------------------------------------------ markouts
 
-def _markout_rows(files: list, cache: Cache, study: str, epoch_start: float, keep) -> list:
+def _markout_rows(files: list, cache: Cache, study: str, epoch_start: float, keep, frozen=frozenset(),
+                  extra_rows: Iterable = (), key=None) -> list:
+    """Kept rows from every file (+ ``extra_rows`` such as Tier A), de-duplicated by ``key``."""
     rows = []
     for path in files:
-        live = path.endswith(".jsonl")
+        live = _is_live(path, frozen)
         sig = None if live else content_signature(path)
         part = cache.get(study, sig) if sig else None
         if part is None:
@@ -312,7 +323,42 @@ def _markout_rows(files: list, cache: Cache, study: str, epoch_start: float, kee
             if sig:
                 cache.put(study, sig, part)
         rows.extend(p for p in part if (p.get("ts") or 0) >= epoch_start)
-    return rows
+    for r in extra_rows:
+        p = keep(r)
+        if p and (p.get("ts") or 0) >= epoch_start:
+            rows.append(p)
+    if key is None:
+        return rows
+    seen, out = set(), []
+    for p in rows:
+        k = key(p)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    return out
+
+
+def _tier_a_rows(dataset: str, root: Optional[str], since: float) -> list:
+    """Raw Tier A rows as dicts; empty when Tier A has no such dataset yet."""
+    if not root:
+        return []
+    try:
+        from strategy_lab.client import load_tier_a
+
+        frame = load_tier_a(dataset, since=since or None, root=root, dedupe="row")
+    except Exception:
+        return []
+    out = []
+    for text in frame["row"] if len(frame) else ():
+        if isinstance(text, str) and text.startswith("{"):
+            try:
+                row = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                out.append(row)
+    return out
 
 
 def _flat_markouts(r: dict, field: str) -> dict:
@@ -323,7 +369,8 @@ def _flat_markouts(r: dict, field: str) -> dict:
     return out
 
 
-def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch_start: float) -> tuple:
+def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch_start: float,
+                          frozen=frozenset(), extra_rows: Iterable = ()) -> tuple:
     def keep(r):
         if r.get("schema") != "taker_signal_counterfactual_v1":
             return None
@@ -332,7 +379,8 @@ def taker_counterfactuals(files: list, cache: Cache, trades: pd.DataFrame, epoch
                 "spread_bps": _spread_bps(r), "exit_touch": _flat_markouts(r, "markout_exit_touch_bps"),
                 "mid": _flat_markouts(r, "markout_mid_bps")}
 
-    rows = _markout_rows(files, cache, "taker_cf", epoch_start, keep)
+    rows = _markout_rows(files, cache, "taker_cf", epoch_start, keep, frozen, extra_rows,
+                         key=lambda p: (p["ts"], p["call"], p["dir"], p["lat"]))
     tile_by_call = {}
     if trades is not None and not trades.empty and "shared_ai_call_id" in trades.columns:
         t = trades.drop_duplicates(subset=["trade_id"], keep="last")
@@ -379,7 +427,8 @@ def _counts(values: Iterable) -> dict:
     return out
 
 
-def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float) -> tuple:
+def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float, frozen=frozenset(),
+                  extra_rows: Iterable = ()) -> tuple:
     def keep(r):
         if r.get("schema") != "fill_markout_v1":
             return None
@@ -387,7 +436,8 @@ def fill_markouts(files: list, cache: Cache, lanes, epoch_start: float) -> tuple
                 "lane": str(r.get("research_lane") or "").upper(), "liq": r.get("liquidity"),
                 "mid": _flat_markouts(r, "markout_mid_bps"), "touch": _flat_markouts(r, "markout_exit_touch_bps")}
 
-    rows = _markout_rows(files, cache, "fill_mk", epoch_start, keep)
+    rows = _markout_rows(files, cache, "fill_mk", epoch_start, keep, frozen, extra_rows,
+                         key=lambda p: (p["trade_id"], p["ts"], p["liq"]))
     current = {str(l).upper() for l in lanes}
     out = []
     groups: dict = {}
@@ -441,10 +491,11 @@ def _index_events(path: str, start: int) -> tuple:
     return rows, end
 
 
-def research_events(files: list, cache: Cache, epoch_id: Optional[str], lane_of: dict, now: float) -> tuple:
+def research_events(files: list, cache: Cache, epoch_id: Optional[str], lane_of: dict, now: float,
+                    frozen=frozenset()) -> tuple:
     rows = []
     for path in files:
-        if path.endswith(".jsonl"):
+        if _is_live(path, frozen):
             head = content_signature_head(path)
             live = cache.data["live"].get(os.path.basename(path)) or {}
             start = live.get("offset", 0) if live.get("head") == head and live.get("offset", 0) <= os.path.getsize(path) else 0
@@ -459,6 +510,14 @@ def research_events(files: list, cache: Cache, epoch_id: Optional[str], lane_of:
                 part, _ = _index_events(path, 0)
                 cache.put("events", sig, part)
             rows.extend(part)
+    if frozen:
+        seen, unique = set(), []
+        for r in rows:
+            k = (r.get("id"), r.get("ts"), r.get("outcome"), r.get("obs"), r.get("lifecycle"), r.get("bytes"))
+            if k not in seen:
+                seen.add(k)
+                unique.append(r)
+        rows = unique
     epoch_rows = [r for r in rows if not epoch_id or r.get("epoch") == epoch_id]
     table = []
     agg: dict = {}
@@ -502,11 +561,22 @@ def content_signature_head(path: str) -> Optional[str]:
 
 # ------------------------------------------------------------------ driver
 
+TIER_A_DATASETS = {"fill_markouts.jsonl": "fill_markouts"}
+
+
 def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registry: Optional[dict], lanes,
                        epoch_id: Optional[str], epoch_start: float, cache_dir: Optional[str],
-                       now: Optional[float] = None) -> tuple:
+                       now: Optional[float] = None, history=None) -> tuple:
+    """``history`` (``strategy_lab.tape.HistorySources``) adds frozen archive files and
+    Tier A rows to the live mirror, epoch-bounded and de-duplicated; ``None`` = laptop defaults."""
+    from strategy_lab.tape import HistorySources, default_history_sources
+
     now = float(now if now is not None else time.time())
     t0 = time.time()
+    if not epoch_start:
+        history = HistorySources()          # history is only epoch-pure with a known epoch start
+    elif history is None:
+        history = default_history_sources()
     cache = Cache(cache_dir)
     lane_of = {str((spec or {}).get("id_prefix")): lane for lane, spec in (registry or {}).items()
                if (spec or {}).get("id_prefix")}
@@ -522,14 +592,20 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
         finally:
             timing[name] = round(time.time() - t, 2)
 
-    files = {s: rotation_files(data_dir, s) for s in STREAMS}
+    archive_files = {s: [p for folder in history.archive_dirs for p in rotation_files(folder, s)] for s in STREAMS}
+    frozen = frozenset(p for fl in archive_files.values() for p in fl)
+    files = {s: archive_files[s] + rotation_files(data_dir, s) for s in STREAMS}
+    tier_a = {s: _tier_a_rows(TIER_A_DATASETS[s], history.tier_a_root, epoch_start) if s in TIER_A_DATASETS else []
+              for s in STREAMS}
     pe = stage("post_exit_replay", lambda: post_exit_regret(files["post_exit_replay.jsonl"], cache, trades, lane_of,
-                                                            epoch_start))
+                                                            epoch_start, frozen))
     tk = stage("taker_signal_counterfactuals", lambda: taker_counterfactuals(
-        files["taker_signal_counterfactuals.jsonl"], cache, trades, epoch_start))
-    fm = stage("fill_markouts", lambda: fill_markouts(files["fill_markouts.jsonl"], cache, lanes, epoch_start))
+        files["taker_signal_counterfactuals.jsonl"], cache, trades, epoch_start, frozen,
+        tier_a["taker_signal_counterfactuals.jsonl"]))
+    fm = stage("fill_markouts", lambda: fill_markouts(files["fill_markouts.jsonl"], cache, lanes, epoch_start, frozen,
+                                                      tier_a["fill_markouts.jsonl"]))
     ev = stage("research_events_v22", lambda: research_events(files["research_events_v22.jsonl"], cache, epoch_id,
-                                                              lane_of, now))
+                                                              lane_of, now, frozen))
     tables["exit_regret_trades"], tables["exit_regret"] = pe if pe else (pd.DataFrame(), pd.DataFrame())
     tables["taker_counterfactual"], tk_meta = tk if tk else (pd.DataFrame(), {})
     tables["fill_markouts"], fm_meta = fm if fm else (pd.DataFrame(), {})
@@ -547,9 +623,13 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
         mtime = max((os.path.getmtime(p) for p in fl if os.path.exists(p)), default=None)
         name = s.replace(".jsonl", "")
         status = "ERROR" if name in errors else ("MISSING" if not fl else ("NO_EPOCH_ROWS" if not used[s] else "ANALYSED"))
+        mirror_files = [p for p in fl if p not in frozen]
+        mtime = max((os.path.getmtime(p) for p in mirror_files if os.path.exists(p)), default=mtime)
         health.append({"stream": s, "status": status, "files": len(fl), "bytes": size, "rows_used": used[s],
                        "file_age_sec": round(now - mtime, 1) if mtime else None, "content_last_at": last[s],
-                       "parse_sec": timing.get(name), "error": errors.get(name)})
+                       "parse_sec": timing.get(name), "error": errors.get(name),
+                       "archive_files": len(archive_files[s]), "mirror_files": len(mirror_files),
+                       "tier_a_rows": len(tier_a[s])})
     tables["stream_study_health"] = pd.DataFrame(health)
     cache.save()
     payload = {
@@ -564,6 +644,7 @@ def run_stream_studies(data_dir: str, *, trades: Optional[pd.DataFrame], registr
         "fill_markouts": {**fm_meta, "curves": tables["fill_markouts"].to_dict("records")},
         "research_events": {**ev_meta, "mix": tables["research_events"].to_dict("records")},
         "stream_health": health, "errors": errors,
+        "history_sources": history.describe() if history.enabled else {"archive_dirs": [], "tier_a_root": None},
         "cache": {"hits": cache.hits, "misses": cache.misses, "path": cache.path},
         "timing": {**timing, "total_sec": round(time.time() - t0, 2)},
         "method": {

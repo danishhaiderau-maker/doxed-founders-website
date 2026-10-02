@@ -280,13 +280,75 @@ def _family_block(rows: list, summary: dict, *, source: str, limit: Optional[int
     return {"source": source, "summary": summary, "rows": ordered[:limit] if limit else ordered}
 
 
+def _retired_lanes() -> frozenset:
+    try:
+        from combo_pathway_config import RETIRED_TILE_LANES
+        return frozenset(str(l).upper() for l in RETIRED_TILE_LANES)
+    except Exception:
+        return frozenset()
+
+
+def pooled_tile_family(pool: dict, labels: Optional[dict] = None) -> tuple[list, dict]:
+    """Registry tiles on raw closes + archived rollup cells (``analysis_archive.registry_tile_pool``).
+
+    Sufficient statistics carry no per-trade timestamps, so the test is an iid
+    t on the pooled mean (no hour clustering); Holm/BH across the tiles.
+    """
+    rows, pvals = [], []
+    for lane, t in (pool.get("tiles") or {}).items():
+        n = int(t.get("n") or 0)
+        tstat = t.get("t_stat")
+        p = t_two_sided_p(float(tstat), n - 1) if tstat is not None and n >= MIN_TEST_N else None
+        pvals.append(p)
+        rows.append({"key": lane, "label": (labels or {}).get(lane) or lane, "n": n, "n_tested": n if p is not None else 0,
+                     "n_raw": t.get("n_raw"), "n_archive": t.get("n_archive"),
+                     "days_raw": len(t.get("days_raw") or []), "days_archive": len(t.get("days_archive") or []),
+                     "mean_usd": _r(t.get("mean_usd")), "win_rate": _r(t.get("win_rate"), 4),
+                     "total_usd": _r(t.get("net_pnl_usd")), "ci_lo_usd": _r(t.get("ci95_lo_usd")),
+                     "ci_hi_usd": _r(t.get("ci95_hi_usd")), "p_value": _r(p)})
+    for row, ph, qb in zip(rows, holm(pvals), benjamini_hochberg(pvals)):
+        row.update({"p_holm": _r(ph), "q_bh": _r(qb), "family": "tiles_pooled",
+                    "corrected_verdict": corrected_verdict(row["mean_usd"], row["n_tested"], ph, qb)})
+    return rows, family_summary(rows, "tiles_pooled")
+
+
+def registry_pool(trades, lanes, *, epoch_id: Optional[str] = None, archive_root: Optional[str] = None,
+                  use_archive: Optional[bool] = None) -> Optional[dict]:
+    """Pooled registry-tile stats, or ``None`` when the archive is not in use (tests / Fly)."""
+    if use_archive is None:
+        from strategy_lab.tape import laptop_defaults_enabled
+        use_archive = archive_root is not None or laptop_defaults_enabled()
+    if not use_archive:
+        return None
+    import analysis_archive
+
+    return analysis_archive.registry_tile_pool(trades, lanes, epoch_id=epoch_id, root=archive_root,
+                                               retired=_retired_lanes())
+
+
 def build_main_rankings(trades: Optional[pd.DataFrame], lanes, *, labels: Optional[dict] = None,
-                        reports: Optional[dict] = None, generated_at: Optional[str] = None) -> tuple:
-    """One payload with every corrected ranking family; ``reports`` holds already-annotated report payloads."""
+                        reports: Optional[dict] = None, generated_at: Optional[str] = None,
+                        epoch_id: Optional[str] = None, archive_root: Optional[str] = None,
+                        use_archive: Optional[bool] = None) -> tuple:
+    """One payload with every corrected ranking family; ``reports`` holds already-annotated report payloads.
+
+    ``tiles_pooled`` adds archived daily rollups of the *same registry tiles and
+    current epoch* to the raw closes (retired / non-registry lanes never enter).
+    """
     reports = reports or {}
     families = {}
     tile_rows, tile_sum = tile_family(trades, lanes, labels)
     families["tiles"] = _family_block(tile_rows, tile_sum, source="trades (strategy exits, current tiles)")
+    pool, pool_error = None, None
+    try:
+        pool = registry_pool(trades, lanes, epoch_id=epoch_id, archive_root=archive_root, use_archive=use_archive)
+    except Exception as exc:  # the archive is optional evidence; never sink the rankings
+        pool_error = f"{type(exc).__name__}: {exc}"
+    if pool is not None:
+        p_rows, p_sum = pooled_tile_family(pool, labels)
+        families["tiles_pooled"] = _family_block(
+            p_rows, p_sum, source="raw closes + analysis-archive daily rollups (registry tiles, current epoch; "
+                                  "all exits incl. forced, iid t)")
     fi_rows, fi_sum = feature_impact(trades, resolve_features(trades))
     families["feature_impact"] = _family_block(fi_rows, fi_sum, source="trades (expanding quintiles)")
     for fam, report, keys in (("top_combinations", "top_combinations", ("top", "bottom")),
@@ -324,7 +386,15 @@ def build_main_rankings(trades: Optional[pd.DataFrame], lanes, *, labels: Option
         "family_summaries": {k: v["summary"] for k, v in families.items()},
         "tile_verdicts": tile_verdicts,
         "families": families,
+        "tile_pool": ({k: pool.get(k) for k in ("schema", "epoch_id", "lanes", "excluded_archive_lanes",
+                                                  "archive_root", "method")}
+                      | {"status": "OK", "rows": families["tiles_pooled"]["rows"]}) if pool is not None else
+        {"status": "ERROR" if pool_error else "NOT_USED", "error": pool_error},
     }
+    payload["method"]["tiles_pooled"] = ("raw closes plus analysis-archive daily sufficient statistics for the same "
+                                         "registry tiles and current epoch only; retired / NON_REGISTRY_LANE rows "
+                                         "stay quarantined; a (day, tile) cell is never double counted; iid t "
+                                         "(archived cells have no per-trade timestamps)")
     return payload, {"main_rankings": flat_rows(families)}
 
 
@@ -335,7 +405,7 @@ def flat_rows(families: dict) -> pd.DataFrame:
             out.append({
                 "family": fam, "key": row.get("key") or row.get("combo") or row.get("feature")
                 or (f"{row.get('regime')}|{row.get('lane')}" if row.get("regime") else None),
-                "lane": row.get("lane") or (row.get("key") if fam == "tiles" else None),
+                "lane": row.get("lane") or (row.get("key") if fam in ("tiles", "tiles_pooled") else None),
                 "n": row.get("n") if row.get("n") is not None else row.get("trades"),
                 "mean_usd": row.get("mean_usd") if row.get("mean_usd") is not None else row.get("ev_usd"),
                 "win_rate": row.get("win_rate") if row.get("win_rate") is not None else

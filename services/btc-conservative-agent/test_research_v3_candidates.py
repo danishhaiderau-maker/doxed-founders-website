@@ -75,6 +75,8 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
             "symbol": "tBTCF0:USTF0",
             "bucket_ts": ts,
             "ts": float(ts),
+            "source_ts": ts + 0.5,
+            "observed_at_ts": ts + 0.6,
             "price": 100.0 + (ts - 1000) * 0.1,
             "fresh": True,
             "valid_bbo": True,

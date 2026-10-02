@@ -465,18 +465,21 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["ack_receipt"] = None
     retention_dir = Path(getattr(opts, "retention_dir", None) or DEFAULT_RETENTION_DIR)
     inputs["retention_last_run"] = read_json(retention_dir / "last-run.json")
+    inputs["tier_a_health"] = (read_json(retention_dir / "status.json") or {}).get("tier_a")
     inputs["retention_exits"] = last_retention_exits(state_dir / "logs")
     reports = Path(opts.analyzer_repo) / ANALYZER_REPORTS_SUBDIR
     inputs["analyzer_receipt"] = read_json(reports / "analyzer_generation_receipt.json")
     inputs["analyzer_integrity"] = read_json(reports / "analyzer_integrity_report.json")
     inputs["analyzer_manifest_generated_at"] = (read_json(reports / "report_manifest.json") or {}).get("generated_at")
     inputs["data_health_report"] = read_json(reports / "data_health_report.json")
+    inputs["ledger_reconciliation"] = read_json(reports / "ledger_reconciliation.json")
     inputs["archive_last_snapshot"] = last_jsonl_row(
         Path(getattr(opts, "archive_dir", None) or DEFAULT_ARCHIVE_DIR) / "index.jsonl")
     inputs["proof_last_row"] = latest_proof_row(inputs.get("proof_active"), Path(opts.proof_dir))
     inputs["supervisor_tick_at"] = last_supervisor_tick(state_dir / "logs")
 
     inputs["mirror"] = collect_mirror(Path(opts.mirror_tree), now)
+    inputs["mirror_trades"] = read_ledger_rows(Path(opts.mirror_tree) / "trades_3factor.csv")
     inputs["exports"] = collect_exports(Path(opts.exports), now)
     cache = state.setdefault("cache", {})
     inputs["registry"] = collect_registry(opts.analyzer_repo, cache.setdefault("registry", {}))
@@ -506,6 +509,32 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
 
 ANALYZER_REPORTS_SUBDIR = Path("services") / "btc-conservative-agent" / "canonical-research-data" / "analyzer" / "reports"
 _RETENTION_EXIT = re.compile(r"^(\S+) pid=\d+ RETENTION exit=(-?\d+)\s*(.*)$")
+_AGENT_DIR = Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"
+
+
+_LEDGER_FIELDS = ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd")
+
+
+def read_ledger_rows(path: Path) -> list[dict[str, str]] | None:
+    try:
+        with open(path, newline="", encoding="utf-8", errors="replace") as handle:
+            return [{k: row.get(k) for k in _LEDGER_FIELDS} for row in csv.DictReader(handle)]
+    except OSError:
+        return None
+
+
+def _ledger_reconciliation_module():
+    """The comparison logic ships with the analyzer, from this same checkout."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ledger_reconciliation", _AGENT_DIR / "ledger_reconciliation.py")
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError):
+        return None
 
 
 def last_retention_exits(log_dir: Path, limit: int = 3) -> list[dict[str, Any]]:
@@ -1194,6 +1223,32 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   "mirror OK and every stream OK/WARMUP relative to the mirror head",
                   "" if st == GREEN else "collector feed gap on Fly or laptop pull lag"))
 
+    recon = inputs.get("ledger_reconciliation") if isinstance(inputs.get("ledger_reconciliation"), Mapping) else None
+    lr = _ledger_reconciliation_module()
+    if recon is None or lr is None:
+        add(check("ledger.reconciliation", "analyzer", SKIP,
+                  "ledger_reconciliation.json not published yet" if recon is None else "reconciliation module missing",
+                  "Fly, mirror ledger and analyzer agree on trades and PnL up to the analyzer watermark"))
+    else:
+        out = lr.compare_with_fly(recon, fstate, inputs.get("mirror_trades"))
+        st = out["level"] if out["level"] in (GREEN, AMBER, RED) else AMBER
+        per = out["breakdown"].get("per_lane") or {}
+        lanes = "; ".join(
+            f"{lane.replace('FAMILY_', '')}: fly {v['fly_n']}/mirror {v['mirror_n']}+{v['fly_newer_than_mirror']}"
+            f"/analyzer {v['analyzer_n']} (quarantined {v['quarantined']}), Win {v['win_pct']}%"
+            f" (Fly tile {v['fly_tile_win_pct']}%, Fly ledger cents {v['fly_ledger_win_pct_cents']}%)"
+            for lane, v in per.items()
+        ) or "; ".join(f"{lane.replace('FAMILY_', '')}: analyzer {v.get('n')}, Win {v.get('win_pct')}%"
+                       for lane, v in (recon.get("analyzer_cohort") or {}).items())
+        add(check("ledger.reconciliation", "analyzer", st,
+                  f"through {recon.get('source_data_through')}: {lanes}"
+                  + (f"; {'; '.join(out['reasons'])}" if out["reasons"] else ""),
+                  "same trade ids and PnL (+-$0.01) on Fly, mirror ledger and analyzer up to the analyzer "
+                  f"watermark; Win % = {recon.get('win_pct_definition')}",
+                  "" if st == GREEN else "see ledger_reconciliation.json (trades[]) and the breakdown for missing ids",
+                  json.dumps({k: out["breakdown"].get(k) for k in ("missing_in_mirror", "bounded", "fly_listed")},
+                             default=str)[:400]))
+
     # ---------------- Exports (worker eed92197)
     exp = inputs.get("exports") or {}
     if not exp.get("present"):
@@ -1493,6 +1548,22 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   "of the 50GB cap, Fly pruned <= custody",
                   "" if st == GREEN else "see C:\\DoxxedCrypto\\bot-data-retention\\status.json and "
                                          "docs/runbooks/DATA-RETENTION.md"))
+
+    tier_a = inputs.get("tier_a_health") if isinstance(inputs.get("tier_a_health"), Mapping) else None
+    if tier_a is None:
+        add(check("storage.tier_a", "storage", SKIP, "retention status has no tier_a block yet",
+                  "every Tier A dataset promotes dated Parquet; no undated or 1970 staging"))
+    else:
+        level = str(tier_a.get("level") or AMBER).upper()
+        st = level if level in (GREEN, AMBER, RED) else AMBER
+        bad = [f"{d.get('dataset')}={d.get('level')}: {'; '.join(map(str, d.get('reasons') or []))[:80]}"
+               for d in tier_a.get("datasets") or [] if isinstance(d, Mapping) and d.get("level") != GREEN]
+        add(check("storage.tier_a", "storage", st,
+                  f"{len(tier_a.get('datasets') or [])} datasets, backfilled={tier_a.get('backfilled')}"
+                  + (f"; {', '.join(bad[:5])}" if bad else "; all promoted"),
+                  "every Tier A dataset promotes dated Parquet; no undated or 1970 staging",
+                  "" if st == GREEN else "run bot_data_retention.py --tier-a-backfill (dry run first) between "
+                                         "analyzer cycles; see docs/runbooks/DATA-RETENTION.md"))
     snap = inputs.get("archive_last_snapshot")
     snap_at = parse_ts((snap or {}).get("written_at"))
     snap_age = (now - snap_at) if snap_at else None

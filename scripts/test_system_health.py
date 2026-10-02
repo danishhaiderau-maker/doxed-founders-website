@@ -966,3 +966,74 @@ def test_retention_cap_and_archive_freshness():
     checks = by_id(sh.evaluate(inputs, {}))
     assert checks["storage.retention"]["status"] == sh.AMBER
     assert checks["archive.freshness"]["status"] == sh.AMBER
+
+
+def _recon(now: float, ids_closes) -> dict:
+    trades = [{"trade_id": tid, "research_lane": lane, "close_ts": sh.iso(close), "pnl_exact": pnl,
+               "pnl_cents": round(pnl, 2), "net_pnl_basis": "TERMINAL_COST_RECEIPT_EXACT", "in_cohort": True,
+               "quarantine_reason": None} for tid, lane, close, pnl in ids_closes]
+    cohort = {lane: {"n": sum(1 for t in trades if t["research_lane"] == lane),
+                     "net_pnl_usd": sum(t["pnl_exact"] for t in trades if t["research_lane"] == lane),
+                     "win_pct": 100.0} for lane in LANES}
+    return {"schema": "ledger_reconciliation_v1", "level": "GREEN", "reasons": [], "lanes": list(LANES),
+            "source_data_through": sh.iso(now - 600), "analyzer_cohort": cohort, "mirror_ledger": cohort,
+            "quarantined": {lane: 0 for lane in LANES}, "trades": trades,
+            "win_pct_definition": "wins / closed"}
+
+
+def _reconciled_inputs(now: float) -> dict:
+    inputs = healthy(now)
+    inputs["ledger_reconciliation"] = _recon(now, [(f"t-{lane}", lane, now - 1800, 0.004) for lane in LANES])
+    inputs["mirror_trades"] = [{"trade_id": f"t-{lane}", "research_lane": lane, "close_ts": sh.iso(now - 1800),
+                                "net_pnl_usd": "0.0", "epoch_id": ""} for lane in LANES]
+    for row in inputs["fly_state"]["trades"]:
+        row["net_pnl_usd"] = 0.0
+    inputs["fly_state"]["lane_pnl_ledger"] = {lane: {"closes": 1, "net_pnl_usd": 0.0, "wins": 0} for lane in LANES}
+    return inputs
+
+
+def test_ledger_reconciliation_compares_fly_mirror_and_analyzer():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = _reconciled_inputs(now)
+    check = by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]
+    assert check["status"] == sh.GREEN, check["observed"]
+    assert "fly 1/mirror 1+0/analyzer 1" in check["observed"]
+
+    inputs["fly_state"]["lane_pnl_ledger"][LANES[0]]["closes"] = 3
+    check = by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]
+    assert check["status"] == sh.RED
+    assert "trade counts differ" in check["observed"]
+
+
+def test_read_ledger_rows_keeps_only_reconciliation_fields(tmp_path):
+    path = tmp_path / "trades_3factor.csv"
+    path.write_text("trade_id,research_lane,net_pnl_usd,extra\nt1,FAMILY_X,0.01,zzz\n", encoding="utf-8")
+    assert sh.read_ledger_rows(path) == [{"trade_id": "t1", "research_lane": "FAMILY_X", "epoch_id": None,
+                                          "close_ts": None, "ts": None, "net_pnl_usd": "0.01"}]
+    assert sh.read_ledger_rows(tmp_path / "missing.csv") is None
+
+
+def test_ledger_reconciliation_red_report_and_missing_inputs():
+    now = ts("2026-10-02T00:00:00Z")
+    assert by_id(sh.evaluate(healthy(now), {}))["ledger.reconciliation"]["status"] == sh.SKIP
+    inputs = _reconciled_inputs(now)
+    inputs["ledger_reconciliation"].update(
+        level="RED", reasons=["1 current-epoch tile trades dropped from the cohort without a reason"])
+    assert by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]["status"] == sh.RED
+    inputs = _reconciled_inputs(now)
+    inputs["fly_state"] = None
+    assert by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]["status"] == sh.AMBER
+
+
+def test_tier_a_health_drives_storage_tier_a():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = healthy(now)
+    assert by_id(sh.evaluate(inputs, {}))["storage.tier_a"]["status"] == sh.SKIP
+    inputs["tier_a_health"] = {"level": "GREEN", "backfilled": True, "datasets": [
+        {"dataset": "bitfinex_l1_tape_1s", "level": "GREEN", "reasons": []}]}
+    assert by_id(sh.evaluate(inputs, {}))["storage.tier_a"]["status"] == sh.GREEN
+    inputs["tier_a_health"] = {"level": "RED", "backfilled": False, "datasets": [
+        {"dataset": "bitfinex_l1_tape_1s", "level": "RED", "reasons": ["INVALID_DAY_ROWS"]}]}
+    check = by_id(sh.evaluate(inputs, {}))["storage.tier_a"]
+    assert check["status"] == sh.RED
+    assert "INVALID_DAY_ROWS" in check["observed"]

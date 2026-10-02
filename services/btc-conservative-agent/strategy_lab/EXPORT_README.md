@@ -99,10 +99,44 @@ and `data`. A refused component always has `data: null`: old data is never retur
 | `taker_counterfactual` | crossing the spread at each AI signal + latency: EV at the exit touch after 1/10/60/300 s, by ALL, AI decision and matched tile |
 | `fill_markouts` | post-fill mid markout curves (1/10/60/300 s, bp, signed in trade direction) per tile x liquidity |
 | `research_events` | current-epoch research_event_v2.2 rows by tile x outcome x observation status, replay eligibility, last signal |
-| `stream_study_health` | the four stream studies: files, bytes, rows used, content last-at, parse seconds, error |
+| `stream_study_health` | the four stream studies: files, bytes, rows used, content last-at, parse seconds, error, plus `archive_files`, `mirror_files`, `tier_a_rows` |
+| `event_study_hypotheses` | pre-registered event studies (H1-H5): spec hash, status, lockbox events counted, events/day, days to min sample |
+| `data_health_streams` | `data_health_report.json` per stream: status, rows, 24 h coverage, staleness, lag vs mirror head |
 
 `tile_stats` also carries `n_tested`, `p_holm`, `q_bh` and `corrected_verdict` from the `tiles`
 family (strategy exits only; admin/deploy/forced closes are excluded from the test).
+
+## Multi-day inputs and coverage
+
+The strategy lab, stream studies and the pooled tile family read the whole current epoch, not just
+the mirror's rolling window: frozen archive segments (`C:\DoxxedCrypto\archive\fly-mirror-segments-*\tree`),
+compact Tier A partitions and the mirror, unioned per second (tape) or per natural key, with the
+mirror winning on overlap, then the archive. Archive files and Tier A partitions are parsed once and
+cached by size + mtime. Override with `STRATEGY_LAB_ARCHIVE_DIRS` / `STRATEGY_LAB_TIER_A_ROOT`
+(`none` disables); it is off under pytest.
+
+`summary.json["stream_coverage"][<stream>]` (also in `strategy_lab.stream_coverage` and `stream_health.csv`):
+
+| field | meaning |
+|--|--|
+| `epoch_start` | current dataset epoch start (UTC ISO) |
+| `first_available_ts`, `last_ts` | first / last unit present after the union |
+| `horizon_hours` | `last_ts - first_available_ts` + one unit |
+| `epoch_coverage_share` | present units x unit length / (now - epoch_start): the honest epoch-wide share |
+| `in_window_present_share` | present share inside `[first_available_ts, last_ts]` only (the old `present_share`) |
+| `sources` | `{tier_a_rows, archive_rows, mirror_rows}` rows read from each source (before dedupe) |
+
+Units: tape 1 s, cross-venue 60 s, AI calls 15 min. Cross-venue-lead hypotheses and their controls are
+restricted to the cross-venue span so the treatment and control windows stay identical.
+
+`summary.json["main_rankings"]["tile_pool"]` and the `tiles_pooled` ranking family pool current-epoch
+registry-tile trades with archive daily rollups (raw trades win per day x tile, never both). Retired
+lanes and `NON_REGISTRY_LANE` are always excluded and listed in `excluded_archive_lanes`.
+
+`summary.json["event_study"]` and `["data_health"]` summarise `event_study_report.json` and
+`data_health_report.json`. Every analyzer generation's full report set is also kept under
+`C:\DoxxedCrypto\analysis-archive\report-history` (`research/report_history.py`), with the append-only
+`event_study_ledger.jsonl` and `data_health_ledger.jsonl` beside it.
 
 ## Reading the verdicts
 

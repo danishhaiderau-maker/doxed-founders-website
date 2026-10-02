@@ -393,6 +393,20 @@ def export_component(now: float, check_live: bool = True) -> tuple:
                                   and "liquidity" in marks.columns else None,
                                   ["research_lane", "horizon", "n", "markout_mid_bps", "ci_lo_bps", "ci_hi_bps"]),
         "quarantine": _records(exp.get("quarantine"), ["trade_id", "research_lane", "reason"]),
+        # Coverage over the whole epoch (not only the loaded window) with rows by source.
+        "stream_coverage": {name: {k: (cov or {}).get(k) for k in (
+            "epoch_start", "first_available", "last", "horizon_hours", "epoch_coverage_share",
+            "in_window_present_share", "sources")}
+            for name, cov in (s.get("stream_coverage") or
+                              (s.get("strategy_lab") or {}).get("stream_coverage") or {}).items()},
+        "event_study": {k: (s.get("event_study") or {}).get(k) for k in ("status", "generated_ts", "hypotheses")},
+        "data_health": {k: (s.get("data_health") or {}).get(k) for k in ("status", "status_counts", "streams")},
+        "generation_receipt": {k: (s.get("generation_receipt") or {}).get(k)
+                               for k in ("level", "complete", "reasons", "failed_required_studies", "status")},
+        "input_blockers": s.get("input_blockers") or {"status": "MISSING"},
+        "ledger_reconciliation": {k: (s.get("ledger_reconciliation") or {}).get(k)
+                                  for k in ("level", "reasons", "win_pct_definition", "analyzer_cohort", "status")},
+        "tile_pool": ((s.get("main_rankings") or {}).get("tile_pool") or {}).get("rows"),
     }
     comp = _component(OK, data=data, as_of=s.get("generated_at_ts"), max_age=EXPORT_MAX_AGE_SEC,
                       source=exp.path, now=now)
