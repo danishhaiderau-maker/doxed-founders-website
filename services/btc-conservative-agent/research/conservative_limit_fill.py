@@ -24,7 +24,7 @@ except ImportError:  # direct script/test execution
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
 RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v2"
-EVALUATOR_VERSION = "public-tape-conservative-v4-realistic-v1"
+EVALUATOR_VERSION = "public-tape-conservative-v5-realistic-v1"
 MAX_AGGRESSOR_WINDOW_SEC = 5
 FILL_MODEL = "REALISTIC_V1"
 SHADOW_FILL_MODEL = "OPTIMISTIC_TOUCH_V1"
@@ -334,7 +334,11 @@ def _evaluate_core(
         aggressor_qty = 0.0
         ambiguous = False
         qty_field, vwap_field = (("sell_qty", "sell_vwap") if side == "LONG" else ("buy_qty", "buy_vwap"))
-        amount = (_finite_positive(row.get(qty_field)) or 0.0) if row.get("trade_bucket_complete") is True else 0.0
+        # The live tape writer (microstructure_tape.build_bucket) does not emit
+        # trade_bucket_complete; only an explicit non-True value marks a
+        # partially collected trade bucket (same rule as validate_window).
+        trade_bucket_partial = "trade_bucket_complete" in row and row.get("trade_bucket_complete") is not True
+        amount = 0.0 if trade_bucket_partial else (_finite_positive(row.get(qty_field)) or 0.0)
         if amount > 0:
             opposite_field = "buy_qty" if qty_field == "sell_qty" else "sell_qty"
             opposite = _finite_positive(row.get(opposite_field)) or 0.0

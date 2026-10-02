@@ -66,3 +66,26 @@ def test_short_mirror_and_explicit_shadow_mode():
     legacy = fill(rows, side="SHORT", fill_model=SHADOW_FILL_MODEL)
     assert legacy["fill_model"] == SHADOW_FILL_MODEL and legacy["optimistic_shadow"] is None
     assert fill(rows, fill_model="IDEAL")["negative_reasons"] == ["UNKNOWN_FILL_MODEL"]
+
+
+def test_live_tape_rows_without_trade_completeness_flag_still_count_prints():
+    # microstructure_tape.build_bucket (the live writer) never emits
+    # trade_bucket_complete; only an explicit non-True value marks a partial bucket.
+    import microstructure_tape
+
+    def live(ts, **kw):
+        trades = kw.pop("trades", ())
+        return microstructure_tape.build_bucket(bucket_ts=ts, bid=kw.get("bid", 99.0), ask=kw.get("ask", 101.0),
+                                                bid_qty=2.0, ask_qty=2.0, last=100.0, source_ts=ts + 0.2,
+                                                trades=trades, symbol="BTC")
+
+    rows = [live(t) for t in range(97, 106)]
+    rows[6] = live(103, ask=100.0, trades=[{"received_ts": 103.5, "p": 99.5, "v": 0.4, "S": "SELL"}])
+    assert "trade_bucket_complete" not in rows[6]
+    got = fill(rows)
+    assert got["outcome"] == "PARTIAL_FILL" and got["fill_basis"] == "TRADE_THROUGH_PRINT"
+    assert got["filled_qty"] == 0.4
+
+    rows[6] = {**rows[6], "trade_bucket_complete": False}
+    partial = fill(rows)
+    assert partial["outcome"] == "NO_FILL" and partial["diagnostics"]["bbo_cross_without_print"] == 1

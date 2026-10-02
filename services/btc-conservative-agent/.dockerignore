@@ -37,6 +37,7 @@ research/*
 !research/conservative_limit_fill.py
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
+!research/venue_quantity_observation.py
 !research/fill_model.py
 !research/bitfinex_pair_constraints.py
 !research/runtime_baseline_declaration.py

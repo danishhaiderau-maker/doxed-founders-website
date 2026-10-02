@@ -8,6 +8,7 @@ precision is inferred from a fallback.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from research import bitfinex_pair_constraints as pair_constraints
@@ -70,6 +71,22 @@ def capture_quantity_constraints(
     if not isinstance(market, Mapping):
         return {"supported": False, "receipt": None, "reasons": reasons or ["VENUE_MARKET_METADATA_INVALID"]}
 
+    # Preserve independently useful partial metadata without changing strict
+    # venue qualification. Never include raw exchange info or credentials.
+    from research.venue_quantity_observation import capture_venue_quantity_observation
+    try:
+        import ccxt
+        adapter_version = ccxt.__version__
+    except (ImportError, AttributeError):
+        adapter_version = ""
+    observation = capture_venue_quantity_observation(
+        SimpleNamespace(id=getattr(exchange, "id", None), market=lambda _symbol: market),
+        ccxt_symbol=ccxt_symbol, evidence_symbol=evidence_symbol,
+        captured_at=captured_at, source_revision=source_revision, adapter_version=adapter_version,
+    )
+    observation_fields = ({"observation": observation["observation"], "diagnostic_metadata_supported": True}
+                          if observation["diagnostic_metadata_supported"] else {})
+
     amount_precision = (market.get("precision") or {}).get("amount")
     precision = _decimal_precision_and_step(amount_precision)
     min_lot = _positive(((market.get("limits") or {}).get("amount") or {}).get("min"))
@@ -85,7 +102,7 @@ def capture_quantity_constraints(
     if not str(captured_at or "").strip():
         reasons.append("CAPTURE_TIME_UNAVAILABLE")
     if reasons:
-        return {"supported": False, "receipt": None, "reasons": reasons}
+        return {"supported": False, "receipt": None, "reasons": reasons, **observation_fields}
 
     quantity_precision, quantity_step = precision
     market_id = str(market.get("id") or ccxt_symbol)
@@ -99,7 +116,7 @@ def capture_quantity_constraints(
         source_revision=source_revision,
         source=f"CCXT_BITFINEX_MARKET_METADATA:{market_id}",
     )
-    return {"supported": True, "receipt": receipt, "reasons": []}
+    return {"supported": True, "receipt": receipt, "reasons": [], **observation_fields}
 
 
 def capture_public_pair_constraints(
