@@ -4336,6 +4336,9 @@ def log_ai_input_full(
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
+                "deepseek_model": ai_result.get("deepseek_model"),
+                "deepseek_served_model": ai_result.get("deepseek_served_model"),
+                "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -8382,8 +8385,13 @@ def _load_local_dotenv():
 _load_local_dotenv()
 DEEPSEEK_API_KEY = (os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
-DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+# DeepSeek retired "deepseek-v4-flash" (2026-10-01, inside the 18:56-21:30Z
+# provider outage) and answers those requests as "deepseek-flash"
+# (DeepSeek-V4.1-Flash).  Request the served id explicitly.
+DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
+DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-flash", "deepseek-v4-pro"})
+DEEPSEEK_RETIRED_MODEL_ALIASES = {"deepseek-v4-flash": "deepseek-flash"}
 DEEPSEEK_DEFAULT_THINKING_MODE = "disabled"
 DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
 # Hard production boundary: DeepSeek is an execution input, never a dashboard or
@@ -8402,6 +8410,14 @@ STARTING_BALANCE = 500.0
 MAX_CONCURRENT_POSITIONS_DEFAULT = 20
 RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
+# Total wall-clock bound per DeepSeek call.  AI_TIMEOUT_SEC is only the idle
+# gap between received bytes, and DeepSeek keeps queued requests alive with
+# blank lines, so one call blocked the 180 s AI cadence for 354 s on
+# 2026-10-01.  The deadline must stay well inside that cadence.
+AI_CALL_DEADLINE_SEC = min(150.0, max(10.0, float(os.getenv("AI_CALL_DEADLINE_SEC", "75"))))
+# Abandoned (timed-out) request threads end on their own within one idle
+# timeout; refuse new calls instead of stacking more of them.
+AI_DEADLINE_MAX_ABANDONED = 2
 HEDGE_MODE = False
 SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
 # Counterfactual replay fill window. Must match MAX_POSITION_AGE_SEC so the
@@ -12268,7 +12284,9 @@ def persist_signal(signal, stage="UNKNOWN"):
             "ai_win_prob": signal.get("ai_win_prob"),
             "ai_decision": signal.get("ai_decision"),
             "edge_score": signal.get("edge_score_at_entry"),
-            "setup_type": signal.get("setup_type")
+            "setup_type": signal.get("setup_type"),
+            "ai_served_model": signal.get("ai_served_model"),
+            "ai_system_fingerprint": signal.get("ai_system_fingerprint"),
         }
         logger.info(f"[PERSIST] {stage} for trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
         dynamic_csv_writer("signal_persist.log", row)
@@ -12437,6 +12455,8 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         signal["ai_win_prob"] = ai.get("win_prob")
         signal["ai_decision"] = ai.get("decision")
         signal["ai_source"] = ai.get("source")
+        signal["ai_served_model"] = ai.get("deepseek_served_model")
+        signal["ai_system_fingerprint"] = ai.get("deepseek_system_fingerprint")
         ai_direction = ai.get("direction")
         invert_on = invert_signal_active()
         final_direction, inverted = apply_invert_direction(ai_direction, invert_on)
@@ -17334,6 +17354,9 @@ def _write_v3_shared_lane_decision(
                 "research_timing_config": copy.deepcopy((ai or {}).get("research_timing_config")),
                 "research_timing_config_sha256": (ai or {}).get("research_timing_config_sha256"),
                 "original_context_signal_ts": copy.deepcopy((ai or {}).get("original_context_signal_ts")),
+                "ai_requested_model": (ai or {}).get("deepseek_model"),
+                "ai_served_model": (ai or {}).get("deepseek_served_model"),
+                "ai_system_fingerprint": (ai or {}).get("deepseek_system_fingerprint"),
             }
         if (ai or {}).get("effective_research_admission") is not None:
             source.update({
@@ -17509,6 +17532,8 @@ def _append_ai_history_row(ai_result: dict) -> None:
         ),
         "deepseek_model": ai_result.get("deepseek_model"),
         "deepseek_thinking_mode": ai_result.get("deepseek_thinking_mode"),
+        "deepseek_served_model": ai_result.get("deepseek_served_model"),
+        "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
         "research_lane": RESEARCH_LANE_AI_SCAN,
         "research_model": "Shared Direction Call",
         "lane_verdicts": copy.deepcopy(ai_result.get("lane_verdicts") or {}),
@@ -17732,6 +17757,7 @@ def _deepseek_config_receipt() -> tuple:
     """Return configured values without validation so failures remain journalable."""
     _load_local_dotenv()
     model = (os.getenv("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL).strip().lower()
+    model = DEEPSEEK_RETIRED_MODEL_ALIASES.get(model, model)
     mode = (
         os.getenv("DEEPSEEK_THINKING_MODE") or DEEPSEEK_DEFAULT_THINKING_MODE
     ).strip().lower()
@@ -17942,25 +17968,26 @@ def _call_deepseek_api_unrecorded(
         request_payload["response_format"] = response_format
     t0 = time.time()
     try:
-        res = requests.post(
+        status_code, body_text = _deepseek_post_with_deadline(
             DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=request_payload,
-            timeout=timeout or AI_TIMEOUT_SEC,
+            json_payload=request_payload,
+            idle_timeout=timeout or AI_TIMEOUT_SEC,
+            deadline_sec=min(float(timeout or AI_CALL_DEADLINE_SEC), AI_CALL_DEADLINE_SEC),
         )
     except requests.RequestException as e:
         raise RuntimeError(f"HTTP_ERROR:{e}") from e
     latency_ms = int((time.time() - t0) * 1000)
-    if res.status_code >= 400:
-        body = (res.text or "")[:500]
-        err = RuntimeError(f"HTTP_{res.status_code}:{body}")
-        err.http_status = res.status_code  # type: ignore[attr-defined]
+    if status_code >= 400:
+        body = (body_text or "")[:500]
+        err = RuntimeError(f"HTTP_{status_code}:{body}")
+        err.http_status = status_code  # type: ignore[attr-defined]
         err.latency_ms = latency_ms  # type: ignore[attr-defined]
         raise err
     try:
-        payload = res.json()
+        payload = json.loads(body_text)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"JSON_DECODE:{e}:{(res.text or '')[:200]}") from e
+        raise RuntimeError(f"JSON_DECODE:{e}:{(body_text or '')[:200]}") from e
     if payload.get("error"):
         err_obj = payload["error"]
         msg = err_obj.get("message", err_obj) if isinstance(err_obj, dict) else str(err_obj)
@@ -17981,10 +18008,106 @@ def _call_deepseek_api_unrecorded(
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
     _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
-    return text, latency_ms, str(payload.get("model") or "")[:64] or None
+    return text, latency_ms, {
+        "requested_model": model,
+        "served_model": str(payload.get("model") or "")[:64] or None,
+        "system_fingerprint": str(payload.get("system_fingerprint") or "")[:96] or None,
+    }
 
 
-def call_deepseek_api(
+_ai_deadline_lock = threading.Lock()
+_ai_deadline_state = {"abandoned_in_flight": 0, "deadline_exceeded_total": 0}
+
+
+def _deepseek_post_with_deadline(url, *, headers, json_payload, idle_timeout, deadline_sec):
+    """POST with a total wall-clock deadline; returns (status_code, body_text).
+
+    The request runs on a daemon worker so the caller returns at the deadline
+    even while DeepSeek trickles keep-alive bytes.  On expiry the worker is
+    told to stop and its socket is shut down; it can never deliver a late
+    verdict into a later cycle.
+    """
+    deadline_sec = max(1.0, float(deadline_sec))
+    with _ai_deadline_lock:
+        if _ai_deadline_state["abandoned_in_flight"] >= AI_DEADLINE_MAX_ABANDONED:
+            raise RuntimeError(
+                f"AI_DEADLINE_EXCEEDED:backlog={_ai_deadline_state['abandoned_in_flight']}"
+            )
+    deadline = time.monotonic() + deadline_sec
+    cancelled = threading.Event()
+    finished = threading.Event()
+    box = {"response": None, "status": None, "body": None, "error": None, "abandoned": False}
+
+    def worker():
+        try:
+            response = requests.post(
+                url, headers=headers, json=json_payload, stream=True,
+                timeout=(min(10.0, deadline_sec), min(float(idle_timeout), deadline_sec)),
+            )
+            box["response"] = response
+            chunks = []
+            if hasattr(response, "iter_content"):
+                for chunk in response.iter_content(chunk_size=16384):
+                    if cancelled.is_set() or time.monotonic() > deadline:
+                        raise TimeoutError("AI_DEADLINE_EXCEEDED")
+                    if chunk:
+                        chunks.append(chunk)
+                body = b"".join(chunks).decode("utf-8", errors="replace")
+            else:
+                body = response.text or ""
+            box["status"], box["body"] = int(response.status_code), body
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
+            box["error"] = exc
+        finally:
+            with _ai_deadline_lock:
+                if box["abandoned"]:
+                    _ai_deadline_state["abandoned_in_flight"] -= 1
+                finished.set()
+            try:
+                if box["response"] is not None:
+                    box["response"].close()
+            except Exception:
+                pass
+
+    threading.Thread(target=worker, name="deepseek-call", daemon=True).start()
+    finished.wait(max(0.0, deadline - time.monotonic()))
+    with _ai_deadline_lock:
+        timed_out = not finished.is_set()
+        if timed_out:
+            box["abandoned"] = True
+            _ai_deadline_state["abandoned_in_flight"] += 1
+            _ai_deadline_state["deadline_exceeded_total"] += 1
+    if timed_out:
+        cancelled.set()
+        _abort_streaming_response(box["response"])
+        err = RuntimeError(f"AI_DEADLINE_EXCEEDED:{deadline_sec:.0f}s")
+        err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
+        raise err
+    if box["error"] is not None:
+        if isinstance(box["error"], TimeoutError) and str(box["error"]) == "AI_DEADLINE_EXCEEDED":
+            err = RuntimeError(f"AI_DEADLINE_EXCEEDED:{deadline_sec:.0f}s")
+            err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
+            raise err
+        raise box["error"]
+    return box["status"], box["body"]
+
+
+def _abort_streaming_response(response) -> None:
+    """Best-effort socket shutdown so a blocked read on the worker returns now."""
+    if response is None:
+        return
+    try:
+        sock = response.raw._fp.fp.raw._sock  # urllib3 -> http.client -> socket
+        sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def call_deepseek_api_with_meta(
     messages,
     temperature=0.4,
     *,
@@ -17993,9 +18116,9 @@ def call_deepseek_api(
     response_format=None,
     timeout=None,
 ):
-    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    """HTTP + JSON guard for DeepSeek; returns (text, latency_ms, served-model meta)."""
     try:
-        text, latency_ms, model_echo = _call_deepseek_api_unrecorded(
+        text, latency_ms, meta = _call_deepseek_api_unrecorded(
             messages,
             temperature,
             purpose=purpose,
@@ -18007,8 +18130,22 @@ def call_deepseek_api(
         if not str(exc).startswith(AI_PROVIDER_NOT_ATTEMPTED_PREFIXES):
             record_ai_provider_outcome(purpose, ok=False, error=exc)
         raise
+    meta = dict(meta or {})
     record_ai_provider_outcome(
-        purpose, ok=True, latency_ms=latency_ms, model_echo=model_echo
+        purpose, ok=True, latency_ms=latency_ms,
+        model_echo=meta.get("served_model"),
+        system_fingerprint=meta.get("system_fingerprint"),
+        requested_model=meta.get("requested_model"),
+    )
+    return text, latency_ms, meta
+
+
+def call_deepseek_api(messages, temperature=0.4, *, purpose: str, max_tokens=None,
+                      response_format=None, timeout=None):
+    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    text, latency_ms, _meta = call_deepseek_api_with_meta(
+        messages, temperature, purpose=purpose, max_tokens=max_tokens,
+        response_format=response_format, timeout=timeout,
     )
     return text, latency_ms
 
@@ -18021,6 +18158,8 @@ def classify_ai_provider_error(exc) -> str:
     """Bounded error class only; provider bodies never reach health payloads."""
     text = str(exc or "")
     status = getattr(exc, "http_status", None)
+    if text.startswith("AI_DEADLINE_EXCEEDED"):
+        return "DEADLINE"
     if text.startswith("HTTP_ERROR:"):
         lowered = text.lower()
         if "timed out" in lowered or "timeout" in lowered:
@@ -18048,7 +18187,8 @@ def classify_ai_provider_error(exc) -> str:
 
 
 def record_ai_provider_outcome(
-    purpose, *, ok, now=None, latency_ms=None, model_echo=None, error=None
+    purpose, *, ok, now=None, latency_ms=None, model_echo=None, error=None,
+    system_fingerprint=None, requested_model=None,
 ):
     if purpose not in AI_PROVIDER_HEALTH_PURPOSES:
         return
@@ -18057,12 +18197,19 @@ def record_ai_provider_outcome(
         health = _ai_provider_health
         health["last_attempt_ts"] = now
         if ok:
+            previous = health.get("last_model_echo")
+            if model_echo and previous and model_echo != previous:
+                changes = list(health.get("served_model_changes") or [])
+                changes.append({"from": previous, "to": model_echo, "at": _epoch_iso(now)})
+                health["served_model_changes"] = changes[-10:]
             health.update({
                 "last_success_ts": now,
                 "failing_since_ts": 0.0,
                 "consecutive_failures": 0,
                 "last_latency_ms": latency_ms,
-                "last_model_echo": model_echo,
+                "last_model_echo": model_echo or previous,
+                "last_system_fingerprint": system_fingerprint,
+                "last_requested_model": requested_model,
             })
             health["successes_since_boot"] += 1
             return
@@ -18090,6 +18237,10 @@ def ai_provider_health_snapshot(now=None) -> dict:
     reference_ts = success_ts or float(health["failing_since_ts"] or 0)
     no_success_sec = max(0.0, now - reference_ts) if failures and reference_ts else 0.0
     alert = bool(failures and no_success_sec > AI_NO_SUCCESS_ALERT_SEC)
+    configured_model, _ = _deepseek_config_receipt()
+    served = health.get("last_model_echo")
+    with _ai_deadline_lock:
+        deadline_state = dict(_ai_deadline_state)
     return {
         "schema": "ai_provider_health_v1",
         "purpose": "trading_direction",
@@ -18103,12 +18254,72 @@ def ai_provider_health_snapshot(now=None) -> dict:
         "no_success_while_failing_sec": no_success_sec,
         "last_error_class": health["last_error_class"],
         "last_latency_ms": health["last_latency_ms"],
-        "last_model_echo": health["last_model_echo"],
+        "last_model_echo": served,
+        "last_system_fingerprint": health.get("last_system_fingerprint"),
+        "configured_model": configured_model,
+        "served_model_matches_configured": (served == configured_model) if served else None,
+        "served_model_changes": list(health.get("served_model_changes") or []),
+        "call_deadline_sec": AI_CALL_DEADLINE_SEC,
+        "deadline_exceeded_total": int(deadline_state["deadline_exceeded_total"]),
+        "abandoned_calls_in_flight": int(deadline_state["abandoned_in_flight"]),
         "successes_since_boot": int(health["successes_since_boot"]),
         "failures_since_boot": int(health["failures_since_boot"]),
         "alert_after_sec": AI_NO_SUCCESS_ALERT_SEC,
         "alert": "AI_NO_SUCCESS_10M" if alert else None,
+        "deepseek_balance": deepseek_balance_snapshot(now),
     }
+
+
+DEEPSEEK_BALANCE_REFRESH_SEC = 10 * 60.0
+_deepseek_balance_lock = threading.Lock()
+_deepseek_balance = {"checked_ts": 0.0, "refreshing": False, "result": None}
+
+
+def _parse_deepseek_balance(payload) -> dict:
+    """Bounded USD summary of GET /user/balance; provider text never leaves."""
+    if not isinstance(payload, dict):
+        return {"error": "BAD_RESPONSE"}
+    infos = payload.get("balance_infos") or []
+    usd = next((i for i in infos if isinstance(i, dict) and str(i.get("currency")).upper() == "USD"), None)
+    try:
+        total = float(usd["total_balance"]) if usd else None
+    except (KeyError, TypeError, ValueError):
+        total = None
+    if total is None:
+        return {"error": "NO_USD_BALANCE"}
+    status = "RED" if total < 1.0 or not payload.get("is_available") else "AMBER" if total < 5.0 else "OK"
+    return {"total_usd": total, "is_available": bool(payload.get("is_available")), "status": status}
+
+
+def _refresh_deepseek_balance() -> None:
+    result = {"error": "MISSING_API_KEY"}
+    try:
+        api_key = _deepseek_api_key()
+        if api_key:
+            res = requests.get(DEEPSEEK_BALANCE_URL, timeout=15,
+                               headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+            result = (_parse_deepseek_balance(res.json()) if res.status_code < 400
+                      else {"error": f"HTTP_{res.status_code}"})
+    except Exception as exc:
+        result = {"error": type(exc).__name__}
+    now = time.time()
+    with _deepseek_balance_lock:
+        _deepseek_balance.update({"checked_ts": now, "refreshing": False,
+                                  "result": {**result, "checked_at": _epoch_iso(now)}})
+
+
+def deepseek_balance_snapshot(now=None) -> dict:
+    """Cached read-only balance; refreshes off the request thread every 10 min."""
+    now = float(now or time.time())
+    with _deepseek_balance_lock:
+        cached = dict(_deepseek_balance["result"] or {"status": "UNKNOWN", "checked_at": None})
+        due = (not _deepseek_balance["refreshing"]
+               and now - float(_deepseek_balance["checked_ts"] or 0) >= DEEPSEEK_BALANCE_REFRESH_SEC)
+        if due:
+            _deepseek_balance["refreshing"] = True
+    if due:
+        threading.Thread(target=_refresh_deepseek_balance, name="deepseek-balance", daemon=True).start()
+    return cached
 
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
@@ -18136,6 +18347,9 @@ def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None)
         "trade_id": trade_id,
         "deepseek_model": configured_model,
         "deepseek_thinking_mode": configured_thinking_mode,
+        "deepseek_served_model": None,
+        "deepseek_system_fingerprint": None,
+        "ai_failure_class": classify_ai_provider_error(exc),
     }
 
 def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extra=None, force=False):
@@ -18238,6 +18452,9 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                     ai_result.get("deepseek_thinking_mode") or configured_thinking_mode
                 ),
                 **csv_research_meta(),
+                "deepseek_served_model": ai_result.get("deepseek_served_model"),
+                "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
+                "ai_failure_class": ai_result.get("ai_failure_class"),
             }
         dynamic_csv_writer(CSV_AI_TRANCHE, row)
     except Exception as e:
@@ -19345,16 +19562,18 @@ def evaluate_signal_with_ai(
                 if not text:
                     text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
                 latency_ms = 5
+                call_meta = {"requested_model": _deepseek_model(), "served_model": None,
+                             "system_fingerprint": None}
                 log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
             else:
-                text, latency_ms = call_deepseek_api(
+                text, latency_ms, call_meta = call_deepseek_api_with_meta(
                     [{"role": "user", "content": prompt}],
                     temperature=temperature,
                     purpose="trading_direction",
                 )
                 log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
         else:
-            text, latency_ms = call_deepseek_api(
+            text, latency_ms, call_meta = call_deepseek_api_with_meta(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
                 purpose="trading_direction",
@@ -19404,8 +19623,10 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
-            "deepseek_model": _deepseek_model(),
+            "deepseek_model": call_meta.get("requested_model") or _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "deepseek_served_model": call_meta.get("served_model"),
+            "deepseek_system_fingerprint": call_meta.get("system_fingerprint"),
         }
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
@@ -20792,6 +21013,8 @@ def log_decision(signal, decision, reason, skip_stage=None, ai_extra=None):
                 "ai_source": signal.get("ai_source"),
                 "edge_trigger_reason": state.get("debug_state", {}).get("edge_trigger_reason"),
                 **csv_research_meta(signal),
+                "ai_served_model": signal.get("ai_served_model"),
+                "ai_system_fingerprint": signal.get("ai_system_fingerprint"),
             }
         if ai_extra and str(ai_extra).startswith("AI_ERROR"):
             row["ai_error_detail"] = str(ai_extra)[:500]
@@ -26841,6 +27064,8 @@ def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     signal["ai_win_prob"] = ai.get("win_prob")
     signal["ai_decision"] = ai.get("decision")
     signal["ai_source"] = ai.get("source")
+    signal["ai_served_model"] = ai.get("deepseek_served_model")
+    signal["ai_system_fingerprint"] = ai.get("deepseek_system_fingerprint")
     if "features" not in signal:
         signal["features"] = {}
     if "context" not in signal:
@@ -28955,7 +29180,7 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
             _ai_shadow_status["compact_skipped"] += 1
         return row
     try:
-        text, latency_ms = call_deepseek_api(
+        text, latency_ms, call_meta = call_deepseek_api_with_meta(
             _ai_shadow.render_compact_messages(facts),
             temperature=0.0,
             purpose="trading_direction_shadow",
@@ -28966,7 +29191,9 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
         parsed = _ai_shadow.parse_compact_response(text)
         row.update({
             "call_state": "CALLED",
-            "model": _deepseek_model(),
+            "model": call_meta.get("requested_model") or _deepseek_model(),
+            "served_model": call_meta.get("served_model"),
+            "system_fingerprint": call_meta.get("system_fingerprint"),
             "latency_ms": latency_ms,
             "raw_response": str(text)[:600],
             "parsed": parsed,
@@ -29021,6 +29248,8 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
         "deepseek_model": ai_result.get("deepseek_model"),
+        "deepseek_served_model": ai_result.get("deepseek_served_model"),
+        "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
         "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
         "win_prob": ai_result.get("win_prob"),
         **challengers,

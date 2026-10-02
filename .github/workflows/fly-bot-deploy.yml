@@ -1232,7 +1232,7 @@ jobs:
           python -m pytest test_collection_epoch_binding.py -q
           python -m pytest test_score_led_fill_revalidation.py -q
           python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
-          python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py -q
+          python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py test_ai_call_deadline.py test_analyzer_ai_served_model_cohort.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
