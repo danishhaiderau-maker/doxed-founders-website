@@ -38,6 +38,7 @@ research/*
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
 !research/fill_model.py
+!research/bitfinex_pair_constraints.py
 !research/runtime_baseline_declaration.py
 !research/scan_counterfactual_unavailable.py
 !research/reset_writer_barrier.py

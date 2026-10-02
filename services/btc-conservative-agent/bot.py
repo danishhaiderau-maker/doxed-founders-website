@@ -273,7 +273,7 @@ from research.counterfactual_normalization import (
     policy_comparability_key as _pure_policy_comparability_key,
     horizons as _pure_counterfactual_horizons,
 )
-from research.venue_quantity_constraints import capture_quantity_constraints
+from research.venue_quantity_constraints import capture_public_pair_constraints
 from research import fill_model as research_fill_model
 from scenario_c_config import (
     SCENARIO_C_LADDER_LABEL,
@@ -3903,7 +3903,7 @@ def lane_register_pending_order(order: dict):
         order.update(copy.deepcopy(frozen_identity))
         capture_helper = globals().get("_capture_runtime_quantity_constraints")
         constraint_capture = (
-            capture_helper() if callable(capture_helper) else {
+            capture_helper(requested_qty=order.get("qty")) if callable(capture_helper) else {
                 "supported": False, "receipt": None,
                 "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
             }
@@ -17538,7 +17538,7 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     epoch_id = _collector_v22_epoch_id()
     capture_helper = globals().get("_capture_runtime_quantity_constraints")
     quantity_constraints_status = (
-        capture_helper() if callable(capture_helper) else {
+        capture_helper(requested_qty=requested_qty) if callable(capture_helper) else {
             "supported": False, "receipt": None,
             "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
         }
@@ -22521,7 +22521,7 @@ def _prepare_initial_pending_order_evidence(order: dict, signal_snapshot: dict) 
     order.update(copy.deepcopy(paper_policy_identity_for_sources(
         _collector_v22_epoch_id(), order, signal_snapshot,
     )))
-    captured = _capture_runtime_quantity_constraints()
+    captured = _capture_runtime_quantity_constraints(requested_qty=order.get("qty"))
     order["signed_quantity_constraints"] = copy.deepcopy(captured.get("receipt"))
     order["quantity_constraints_status"] = copy.deepcopy(captured)
     receipt = captured.get("receipt")
@@ -46308,15 +46308,16 @@ def export_csv():
         logger.error("[EXPORT ERROR] failed to build bounded research archive", exc_info=True)
         return _research_export_error(503)
 
-def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revision=None) -> dict:
-    """Capture exact venue metadata for evidence; never invent constraints."""
+def _capture_runtime_quantity_constraints(
+    *, evidence_symbol=None, source_revision=None, requested_qty=None,
+) -> dict:
+    """Bitfinex public pair bounds (cached, unauthenticated); never invent or round up."""
     try:
-        return capture_quantity_constraints(
-            bitfinex_public,
-            ccxt_symbol=SYMBOL_CCXT,
+        return capture_public_pair_constraints(
             evidence_symbol=evidence_symbol or BITFINEX_WS_SYMBOL,
             captured_at=utc_iso(),
             source_revision=source_revision or _runtime_git_rev(),
+            requested_qty=requested_qty,
         )
     except Exception as exc:
         logger.warning(
