@@ -57,6 +57,8 @@ RUN python -c "import bitfinex_cost_profile, execution_markouts, adaptive_regime
 RUN python -c "import cross_venue_tape, cross_venue_collector"
 # Watch-only market-context collector and its tape/session/regime helpers.
 RUN python -c "import market_session_calendar, trailing_regime, market_context_tape, market_context_collector"
+# System-health banner and Alerts section (dashboard routes import both).
+RUN python -c "import system_health_banner, system_health_alerts"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data

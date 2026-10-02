@@ -16,6 +16,7 @@ import zipfile
 import io
 import json
 import system_health_banner
+import system_health_alerts
 import uuid
 import requests
 import glob
@@ -30050,7 +30051,7 @@ _AI_DRAIN_POST_PATHS = {
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
     "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
-    "/api/system-health",
+    "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/debug_state", "/static/dashboard.js",
 }
@@ -34252,6 +34253,9 @@ HTML = """<!DOCTYPE html>
   <div id="operatingMode" style="font-size:1.1rem;font-weight:700;color:#8b949e;">Mode: checking...</div>
   <div id="operatingDetails" style="font-size:0.85rem;color:#c9d1d9;margin-top:4px;">Revision, pause owner, disk and transfer: checking...</div>
   <ul id="operatingAlarms" style="margin:6px 0 0;padding-left:18px;font-size:0.85rem;"></ul>
+</div>
+<div id="alertsSection" style="margin:10px 0;padding:10px 14px;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#c9d1d9;">
+  <b>Alerts</b>: loading... <a href="/alerts" style="color:#58a6ff;">see all alerts</a>
 </div>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
   <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Execution/UI build</div>
@@ -41365,6 +41369,9 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
 
 _SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None}
 _SYSTEM_HEALTH_LOCK = threading.Lock()
+# Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
+# watcher re-sends its alarm log after a restart, so nothing is written to disk.
+_SYSTEM_HEALTH_ALARMS = {"events": [], "statuses": {}, "statuses_at": None}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -41415,13 +41422,53 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
 def system_health_report():
     if (request.content_length or 0) > system_health_banner.MAX_REPORT_BYTES:
         return jsonify({"ok": False, "error": "report too large"}), 413
-    report = system_health_banner.sanitize_report(request.get_json(silent=True))
+    raw = request.get_json(silent=True)
+    report = system_health_banner.sanitize_report(raw)
     if report is None:
         return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
+    statuses = system_health_alerts.check_statuses(raw)
     with _SYSTEM_HEALTH_LOCK:
         _SYSTEM_HEALTH_REPORT["report"] = report
         _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
-    return jsonify({"ok": True, "verdict": report["verdict"]})
+        events = system_health_alerts.merge_events(_SYSTEM_HEALTH_ALARMS["events"], raw.get("alarm_events"))
+        _SYSTEM_HEALTH_ALARMS["events"] = events
+        if statuses:
+            _SYSTEM_HEALTH_ALARMS["statuses"] = statuses
+            _SYSTEM_HEALTH_ALARMS["statuses_at"] = time.time()
+    return jsonify({"ok": True, "verdict": report["verdict"], "alarm_history": {
+        "count": len(events), "through": events[-1]["at"] if events else None,
+        "through_ts": events[-1]["ts"] if events else None}})
+
+
+def _system_health_alert_history() -> dict:
+    with _SYSTEM_HEALTH_LOCK:
+        events = list(_SYSTEM_HEALTH_ALARMS["events"])
+        statuses = dict(_SYSTEM_HEALTH_ALARMS["statuses"])
+        statuses_at = _SYSTEM_HEALTH_ALARMS["statuses_at"]
+    if statuses_at is None or time.time() - statuses_at > system_health_banner.STALE_AFTER_SEC:
+        statuses = {}
+    history = system_health_alerts.build_history(events, statuses=statuses, statuses_at=statuses_at)
+    history["source"] = "laptop watcher push (POST /api/system-health/report)"
+    return history if _admin_authed_strict() else system_health_alerts.public_view(history)
+
+
+@app.route('/api/system-health/alerts')
+def system_health_alerts_view():
+    response = jsonify(_system_health_alert_history())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route('/alerts')
+def alerts_page():
+    page = system_health_alerts.render_alerts_html(
+        _system_health_alert_history(), title="Alerts - Fly trading bot",
+        nav_links=(("Dashboard", "/"), ("Alerts JSON", "/api/system-health/alerts")),
+        source_note="Source: the laptop health watcher pushes its alarm log here; history refills within one "
+                    "watcher tick after a Fly restart.")
+    response = make_response(page)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route('/api/system-health')
@@ -41452,7 +41499,10 @@ def system_health_view():
 
 @app.after_request
 def _inject_system_health_banner(response):
-    return system_health_banner.inject_banner(response)
+    response = system_health_banner.inject_banner(response)
+    if request.path == "/":
+        response = system_health_alerts.inject_section(response)
+    return response
 
 
 @app.route('/api/status')
