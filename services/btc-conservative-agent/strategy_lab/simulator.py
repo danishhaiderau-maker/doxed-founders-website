@@ -295,14 +295,14 @@ def exit_spec_from_registry(spec: dict, leverage: float = 100.0) -> tuple:
         return tuple(sorted(rows))
 
     raw_ladder = ep.get("ladder") or ep.get("trail_ladder")
-    if not raw_ladder and family == "ATR_TRAIL_PROFIT_LOCK":
+    if not raw_ladder and family.endswith("_PROFIT_LOCK"):
         raw_ladder = spec.get("ladder")             # Scenario-C rungs live on the spec, in margin %
     ladder = ladder_bp(raw_ladder)
     be = None
     if ep.get("breakeven_trigger_margin_pct") is not None:
         be = (float(ep["breakeven_trigger_margin_pct"]) * 100.0 / lev,
               float(ep.get("breakeven_lock_margin_pct") or 0.0) * 100.0 / lev)
-    if family == "TIME_EXIT_WITH_CATASTROPHIC_STOP":
+    if family in ("TIME_EXIT_WITH_CATASTROPHIC_STOP", "TIME_EXIT_WITH_CATASTROPHIC_STOP_PROFIT_LOCK"):
         return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, ladder=ladder, breakeven=be), None
     if family in ("ATR_TRAIL", "ATR_TRAIL_PROFIT_LOCK"):
         return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, sl_atr=ep.get("initial_stop_atr_k"),
