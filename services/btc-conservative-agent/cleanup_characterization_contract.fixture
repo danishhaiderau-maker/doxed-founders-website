@@ -91,6 +91,7 @@
     "order_book_refresh_loop",
     "ohlcv_refresh_loop",
     "microstructure_capture_loop",
+    "xvl_evaluator_thread",
     "ai_shadow_maturation_loop"
   ],
   "worker_start_contract": [
@@ -116,6 +117,7 @@
     {"target": "order_book_refresh_loop", "safe_thread": true, "daemon": true},
     {"target": "ohlcv_refresh_loop", "safe_thread": true, "daemon": true},
     {"target": "microstructure_capture_loop", "safe_thread": true, "daemon": true},
+    {"target": "xvl_evaluator_thread", "safe_thread": false, "daemon": true},
     {"target": "ai_shadow_maturation_loop", "safe_thread": true, "daemon": true}
   ],
   "import_side_effect_calls": [

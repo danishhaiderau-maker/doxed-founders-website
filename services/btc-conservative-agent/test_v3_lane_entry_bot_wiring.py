@@ -301,6 +301,7 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
         "is_shared_ai_direction_lane": lambda _lane: False,
         "is_patient_chase_lane": lambda _lane: False,
         "is_deterministic_bracket_lane": lambda _lane: False,
+        "is_cross_venue_clock_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
         "_tile_view_of_shared_call": (
@@ -373,6 +374,7 @@ def test_per_tile_adaptive_decisions_share_one_pre_entry_receipt_and_every_tile_
         "is_shared_ai_direction_lane": lambda _lane: False,
         "is_patient_chase_lane": lambda _lane: False,
         "is_deterministic_bracket_lane": lambda _lane: False,
+        "is_cross_venue_clock_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
         "_tile_view_of_shared_call": (
@@ -470,6 +472,7 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
         "is_shared_ai_direction_lane": lambda _lane: False,
         "is_patient_chase_lane": lambda _lane: False,
         "is_deterministic_bracket_lane": lambda _lane: False,
+        "is_cross_venue_clock_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
         "_tile_view_of_shared_call": (
@@ -646,6 +649,7 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
         "is_shared_ai_direction_lane": lambda _lane: False,
         "is_patient_chase_lane": lambda _lane: False,
         "is_deterministic_bracket_lane": lambda _lane: False,
+        "is_cross_venue_clock_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
         "_tile_view_of_shared_call": (
