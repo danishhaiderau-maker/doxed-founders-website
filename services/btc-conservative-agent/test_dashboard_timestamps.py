@@ -4,6 +4,11 @@ Run:
     cd services/btc-conservative-agent
     python test_dashboard_timestamps.py
 """
+
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script-style suite; executed by test_script_style_suites.py",
+                allow_module_level=True)
 from pathlib import Path
 import sys
 

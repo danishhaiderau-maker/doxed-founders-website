@@ -116,6 +116,10 @@ def test_reconciler_is_idempotent_and_collision_fails_closed(tmp_path, monkeypat
     monkeypatch.setattr(research_v3_store, "_provenance_cache", {
         "evidence_provenance_schema": "v3_collection_provenance_v1", **PROVENANCE,
     })
+    bootstrap = research_v3_store.V3EvidenceStore(
+        tmp_path, epoch_id="epoch-1",
+    ).advance_emergency_idempotency_bootstrap("lifecycle")
+    assert bootstrap["complete"], bootstrap
     first = reconcile_lifecycle_completions(tmp_path, epoch_id="epoch-1", now=NOW)
     second = reconcile_lifecycle_completions(tmp_path, epoch_id="epoch-1", now=NOW + 10)
     assert first["evidence_collected_written_count"] == 1

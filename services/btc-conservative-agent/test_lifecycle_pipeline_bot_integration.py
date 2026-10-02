@@ -58,6 +58,12 @@ class _Runtime:
         }
 
 
+class _NoResetRecoveryEnv:
+    @staticmethod
+    def getenv(_name, default=None):
+        return default
+
+
 def _namespace(tmp_path, runtime=None, revision="a" * 40):
     condition = threading.Condition()
     snapshot_condition = threading.Condition()
@@ -81,6 +87,9 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_data_sync_sqlite_snapshot_condition": snapshot_condition,
         "_data_sync_sqlite_snapshot_states": {},
         "mirror_generation_lease_held": lambda _root: False,
+        "os": _NoResetRecoveryEnv(),
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_fresh_collection_lock": threading.Lock(),
     }
 
 
@@ -157,7 +166,8 @@ def test_bot_wires_start_status_and_both_shutdown_paths():
     assert calls("main", "_start_lifecycle_pipeline_runtime") == 1
     assert calls("main", "_stop_lifecycle_pipeline_runtime") == 1
     assert calls("shutdown_handler", "_stop_lifecycle_pipeline_runtime") == 1
-    assert '"lifecycle_pipeline_runtime": _lifecycle_pipeline_runtime_status()' in source
+    assert '"lifecycle_pipeline": _lifecycle_pipeline_public_status(now)' in source
+    assert calls("_lifecycle_pipeline_public_status", "_lifecycle_pipeline_runtime_status") == 1
 
 
 def test_optional_lifecycle_worker_starts_only_after_dashboard_bootstrap():

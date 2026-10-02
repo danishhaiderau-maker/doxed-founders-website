@@ -44,8 +44,16 @@ class TradeAccumulatorEpochTest(unittest.TestCase):
         self.root.mkdir()
         self.data.mkdir()
         self.lane = ACTIVE_TILE_ORDER[0]
+        # Session discovery falls back to cwd; never read the checkout's files.
+        self._cwd = os.getcwd()
+        os.chdir(base)
+        self._env = patch.dict(os.environ)
+        self._env.start()
+        os.environ.pop("BTC_AGENT_DATA_DIR", None)
 
     def tearDown(self):
+        self._env.stop()
+        os.chdir(self._cwd)
         self._tmp.cleanup()
 
     def test_reads_csv_from_data_mirror_and_follows_collector_epoch(self):

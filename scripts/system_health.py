@@ -105,6 +105,9 @@ THRESHOLDS: dict[str, float] = {
     "shipper_stall_red_sec": 9 * MIN,
     "shipper_stall_backlog_red_sec": 20 * MIN,
     "shipper_status_red_sec": 10 * MIN,
+    # Backoff 60 s doubling: 6 races is ~1 h of continuous backup misses.
+    "shipper_backup_retry_red_sec": 60 * MIN,
+    "shipper_backup_retry_max_races": 6,
     "unshipped_amber_bytes": 256 * 1024 * 1024,
     "pull_finished_red_sec": 15 * MIN,
     "pull_lag_seq_red": 30,
@@ -1249,8 +1252,25 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         seg_age = (now - last_seg) if last_seg else None
         status_age = transfer.get("segment_status_age_sec")
         backlog = unshipped > 0 or bool(err)
+        # A hot SQLite snapshot whose online backup hit its deadline backs off
+        # and retries while other streams keep shipping (research.db 10-02
+        # 17:22-17:40Z: two 180 s misses, shipped on the 3rd). That is AMBER
+        # until segments stop for the backlog window or retries run too long.
+        backup_retry = str(err or "").startswith("PLAN_RACE") and "online backup" in str(err)
+        if backup_retry:
+            since = mem.setdefault("shipper_backup_retry_since", now)
+        else:
+            mem.pop("shipper_backup_retry_since", None)
+            since = None
+        retry_for = (now - float(since)) if since is not None else None
+        races = max([int(row.get("races") or 0) for row in transfer.get("racing_paths") or []
+                     if isinstance(row, Mapping)] or [0])
+        retries_exhausted = backup_retry and (retry_for > t["shipper_backup_retry_red_sec"]
+                                              or races >= t["shipper_backup_retry_max_races"])
         st = GREEN
-        if seg_age is not None and err and seg_age > t["shipper_stall_red_sec"]:
+        if retries_exhausted:
+            st = RED
+        elif seg_age is not None and err and not backup_retry and seg_age > t["shipper_stall_red_sec"]:
             st = RED
         elif seg_age is not None and backlog and seg_age > t["shipper_stall_backlog_red_sec"]:
             st = RED
@@ -1261,14 +1281,26 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             st = AMBER
         if not transfer.get("segments_enabled", True):
             st = RED
-        add(check("shipper.progress", "shipper", st,
-                  f"shipped_seq={shipped} last segment {fmt_age(seg_age)} ago, unshipped={unshipped / 1e6:.1f}MB, "
-                  f"last_error={err or 'none'}, status age={fmt_age(status_age)}",
-                  f"new segment within {fmt_age(t['shipper_stall_red_sec'])} while last_error, within "
-                  f"{fmt_age(t['shipper_stall_backlog_red_sec'])} while backlog (RED)",
-                  "" if st == GREEN else
-                  ("PLAN_RACE/hot stream aborting every cycle or shipper thread dead; ACK will freeze"
-                   if st == RED else "backlog building or transient PLAN_RACE")))
+        obs = (f"shipped_seq={shipped} last segment {fmt_age(seg_age)} ago, unshipped={unshipped / 1e6:.1f}MB, "
+               f"last_error={err or 'none'}, status age={fmt_age(status_age)}")
+        if backup_retry:
+            obs += f"; SQLite backup deadline retry for {fmt_age(retry_for)} (max races {races})"
+        if st == GREEN:
+            hint = ""
+        elif backup_retry and st == RED:
+            hint = ("SQLite online-backup retries exhausted or no segment within the backlog window; "
+                    "hot DB too large/hot for the backup deadline")
+        elif backup_retry:
+            hint = "hot SQLite snapshot backup missed its deadline and is retrying; other streams still ship"
+        else:
+            hint = ("PLAN_RACE/hot stream aborting every cycle or shipper thread dead; ACK will freeze"
+                    if st == RED else "backlog building or transient PLAN_RACE")
+        add(check("shipper.progress", "shipper", st, obs,
+                  f"new segment within {fmt_age(t['shipper_stall_red_sec'])} while last_error (backup-deadline "
+                  f"retry: within {fmt_age(t['shipper_stall_backlog_red_sec'])}, retrying <= "
+                  f"{fmt_age(t['shipper_backup_retry_red_sec'])} and < {t['shipper_backup_retry_max_races']} races), "
+                  f"within {fmt_age(t['shipper_stall_backlog_red_sec'])} while backlog (RED)",
+                  hint))
 
     # ---------------- Laptop pull / ACK
     pull = inputs.get("pull_status") or {}
@@ -1543,6 +1575,10 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         obs = f"last cycle {fmt_age(dur)} exit={code}"
         if code not in (None, 0) and cyc.get("stopReason"):
             obs += f" ({cyc.get('stopReason')})"
+    promotion_warnings = [str(w) for w in cyc.get("promotionWarnings") or [] if w]
+    if promotion_warnings:
+        st = max(st, AMBER, key=RANK.get)
+        obs += f"; promoted with disclosed warnings: {', '.join(promotion_warnings[:3])}"
     head = str(inputs.get("analyzer_head") or "")
     if fly_rev and head and not head.startswith(fly_rev):
         if inputs.get("analyzer_contains_fly"):

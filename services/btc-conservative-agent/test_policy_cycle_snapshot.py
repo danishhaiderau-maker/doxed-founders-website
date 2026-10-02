@@ -358,7 +358,8 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
     (tmp_path / "market_microstructure_1s.jsonl").write_text("".join(
         json.dumps({
             "schema": "market_microstructure_1s_v1", "symbol": "tBTCF0:USTF0",
-            "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+            "bucket_ts": ts, "source_ts": ts, "observed_at_ts": ts,
+            "fresh": True, "valid_bbo": True,
             "ask": 100 if ts == 102 else 101, "bid": 99,
             "ask_qty": 2, "bid_qty": 2, "sell_qty": 0, "buy_qty": 0,
             "sell_vwap": None, "buy_vwap": None, "trade_count": 0,
