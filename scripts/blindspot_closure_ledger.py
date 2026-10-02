@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """BLINDSPOT-AUDIT-3 closure ledger.
 
 Every BLIND/PARTIAL component row and every earlier-audit gap gets an owner, a
@@ -407,7 +407,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "C21": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "monitor heartbeat watched by monitor itself + laptop", v_monitor_heartbeat),
 }
 
-# Earlier-audit gaps (closure table §4 + §4.3).  Only NOT ADDRESSED / contradicted
+# Earlier-audit gaps (closure table Â§4 + Â§4.3).  Only NOT ADDRESSED / contradicted
 # items get new owners; IN PROGRESS / QUEUED / CLOSED keep the audit's owner.
 GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "13": ("ANALYZER-FIDELITY", "-", OPEN, "promotion lock contention", None),
@@ -442,7 +442,7 @@ GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "78": ("COORDINATOR", "-", OPEN, "stale canonical checkout btc-v31-current (d3544f9f7)", None),
     "79": ("ANALYZER-FIDELITY", "#307", PROG, "EXPORT_README (#307); PREREGISTERED-HYPOTHESES still absent", None),
     "80": ("MONITOR", "-", OPEN, "no recurring secrets scan", None),
-    # §4.3 contradictions
+    # Â§4.3 contradictions
     "X1": ("ANALYZER-FIDELITY", "#293/#307", PROG, "data_health still STALE until analyzer runs #293", None),
     "X2": ("SELF-AWARE + BLINDSPOT-CLOSE", f"#300 + {PR_LAPTOP}", PROG, "inv.custody SKIP", v_selfaware_custody),
     "X3": ("SELF-AWARE", "#300", PROG, "Fly volume_free_gb null", None),
@@ -487,7 +487,7 @@ def parse_audit(text: str) -> tuple[list[dict], list[dict]]:
             gaps.append({"id": m.group(1), "gap": m.group(2), "source": m.group(3),
                          "audit": re.sub(r"\*", "", m.group(4)), "evidence": m.group(5)})
     for i, m in enumerate(re.finditer(r"^(\d)\. (.+)$", text.split("### 4.3", 1)[-1].split("### 4.4", 1)[0], re.M)):
-        gaps.append({"id": f"X{m.group(1)}", "gap": m.group(2)[:150], "source": "§4.3", "audit": "CONTRADICTED", "evidence": ""})
+        gaps.append({"id": f"X{m.group(1)}", "gap": m.group(2)[:150], "source": "Â§4.3", "audit": "CONTRADICTED", "evidence": ""})
     return rows, gaps
 
 
@@ -556,14 +556,14 @@ def build(audit_text: str, live: dict | None, prs: dict[str, str], baseline: dic
         "|---|---|---|---|---|---|",
     ]
     for label, items in (("Component rows (BLIND/PARTIAL)", comp),
-                         ("Earlier gaps not closed (incl. §4.3 contradictions)",
+                         ("Earlier gaps not closed (incl. Â§4.3 contradictions)",
                           [g for g in gap_out if not g["audit"].upper().startswith("CLOSED")]),
                          ("Directive / trace items", extra_out), ("**Total tracked**", all_items)):
         c = counts(items)
         lines.append(f"| {label} | {len(items)} | {c[OPEN]} | {c[PROG]} | {c[QUEUED]} | {c[CLOSED]} |")
     a = Counter(r["audit"] for r in rows)
     lines += ["", f"Audit table parse: {len(rows)} components = FULL {a['FULL']} / PARTIAL {a['PARTIAL']} / BLIND {a['BLIND']} "
-              "(the audit headline states 35/93/46; its laptop sub-total 13/43/18 does not match its own L-rows 15/36/23 — "
+              "(the audit headline states 35/93/46; its laptop sub-total 13/43/18 does not match its own L-rows 15/36/23 â€” "
               "this ledger uses the row-level statuses)."]
     if baseline:
         lines += ["", "## Before / after", "", "| Status | Before (this ledger, 2026-10-02T10:55Z) | Now |", "|---|---|---|"]
@@ -574,7 +574,7 @@ def build(audit_text: str, live: dict | None, prs: dict[str, str], baseline: dic
     for r in comp:
         lines.append(f"| {r['id']} | {md_escape(r['component'])[:60]} | {r['audit']} | {r['owner']} | {r['pr']} | "
                      f"**{r['status']}** | {md_escape(r['plan'])} | {md_escape(r['evidence']) or ('(no verifier yet)' if not r['verifier'] else '')} |")
-    lines += ["", "## Earlier-audit gaps (closure table §4) and §4.3 contradictions", "",
+    lines += ["", "## Earlier-audit gaps (closure table Â§4) and Â§4.3 contradictions", "",
               "| # | Gap | Audit status | Owner | PR | Status | Plan | Live evidence |", "|---|---|---|---|---|---|---|---|"]
     for g in gap_out:
         lines.append(f"| {g['id']} | {md_escape(g['gap'])[:70]} | {md_escape(g['audit'])} | {g['owner']} | {g['pr']} | "
@@ -594,8 +594,8 @@ def main() -> int:
     ap.add_argument("--live-dir", help="use captured JSON instead of fetching")
     ap.add_argument("--no-live", action="store_true")
     ap.add_argument("--baseline-json", help="counts JSON from the first run (before)")
-    ap.add_argument("--pr-laptop", default="laptop PR (pending)")
-    ap.add_argument("--pr-monitor", default="monitor PR (pending)")
+    ap.add_argument("--pr-laptop", default="#309")
+    ap.add_argument("--pr-monitor", default="#310")
     ap.add_argument("--pr-fly", default="Fly post-freeze PR (pending)")
     args = ap.parse_args()
     live = None
