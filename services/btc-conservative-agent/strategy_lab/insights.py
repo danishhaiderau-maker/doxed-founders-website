@@ -36,6 +36,8 @@ FLY_SNAPSHOT_MAX_AGE_SEC = 5 * 60     # laptop fly_runtime snapshot fallback whe
 TRANSFER_MAX_AGE_SEC = 15 * 60
 AI_SUCCESS_MAX_AGE_SEC = 15 * 60
 EXPORT_MAX_AGE_SEC = 45 * 60          # analyzer export freshness policy
+ARCHIVE_MAX_AGE_SEC = 12 * 3600       # system_health THRESHOLDS["archive_snapshot_red_sec"]
+RETENTION_DIR = os.environ.get("DOXXED_BOT_DATA_RETENTION_DIR") or r"C:\DoxxedCrypto\bot-data-retention"
 WALL_TAIL_LINES = 400
 
 OK, STALE, UNAVAILABLE = "OK", "STALE", "UNAVAILABLE"
@@ -382,6 +384,62 @@ def export_component(now: float, check_live: bool = True) -> tuple:
     return comp, tiles
 
 
+# --------------------------------------------------------------------------- analysis archive + retention
+def _retention_state() -> dict:
+    def optional(name: str) -> dict:
+        try:
+            return _read_json(os.path.join(RETENTION_DIR, name))
+        except (OSError, ValueError):
+            return {}
+
+    last, mode = optional("last-run.json"), optional("mode.json")
+    keys = ("mode", "finished_at", "level", "bytes_after", "cap_bytes", "usage_fraction", "deny_reasons",
+            "reclaimed_bytes", "would_reclaim_bytes", "ledger_rows")
+    return {"configured_mode": mode.get("mode") or "dry_run", **{k: last.get(k) for k in keys}}
+
+
+def archive_component(now: float, days: int = 30) -> dict:
+    """Long-horizon archive: snapshot freshness, schema compat, per-tile daily rollups, retention."""
+    client = _load_client()
+    since = datetime.fromtimestamp(now - days * 86400, timezone.utc).date().isoformat()
+    archive = client.load_archive(since=since)
+    snaps, compat, daily = archive["snapshots"], archive["compat"], archive["daily"]
+    if len(snaps) == 0:
+        return _component(UNAVAILABLE, reason="analysis archive has no verified snapshot", source=archive.root,
+                          now=now)
+    latest = snaps.iloc[-1].to_dict()
+    tiles = []
+    tile_rows = daily[daily["dimension"] == "tile"] if len(daily) else daily
+    if len(tile_rows):
+        cutoff = datetime.fromtimestamp(now - 7 * 86400, timezone.utc).date().isoformat()
+        for key, group in tile_rows.groupby("key"):
+            recent, prior = group[group["day"] >= cutoff], group[group["day"] < cutoff]
+
+            def mean(frame):
+                n = int(frame["n"].sum())
+                return round(float(frame["net_pnl_usd"].sum()) / n, 6) if n else None
+
+            tiles.append({"key": key, "days": int(group["day"].nunique()), "n": int(group["n"].sum()),
+                          "net_pnl_usd": round(float(group["net_pnl_usd"].sum()), 6),
+                          "mean_usd_last_7d": mean(recent), "mean_usd_before": mean(prior)})
+    status_counts = compat.groupby(["dataset", "status"]).size().unstack(fill_value=0).to_dict("index") \
+        if len(compat) else {}
+    data = {
+        "root": archive.root, "window_days": days,
+        "latest_snapshot": {k: latest.get(k) for k in ("snapshot_id", "generation_id", "dataset_epoch",
+                                                        "segment_seq_through", "written_at",
+                                                        "analyzer_revision")},
+        "snapshots_in_window": int(len(snaps)),
+        "schema_compat": status_counts,
+        "incompatible": _records(compat[compat["status"] != "COMPATIBLE"], ["dataset", "id", "schema_version",
+                                                                             "status"]),
+        "tiles_long_horizon": sorted(tiles, key=lambda row: -row["n"]),
+        "retention": _retention_state(),
+    }
+    return _fresh(data, as_of=_ts(latest.get("written_at")), max_age=ARCHIVE_MAX_AGE_SEC, source=archive.root,
+                  now=now, what="latest archive snapshot")
+
+
 # --------------------------------------------------------------------------- snapshot
 def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
     """Every component in one dict; stale or unavailable components are refused (``data`` None)."""
@@ -408,6 +466,7 @@ def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
     guard("transfer", lambda: transfer_component(now, health))
     guard("deploy_queue", lambda: deploy_queue_component(now))
     alerts = guard("alerts", lambda: alerts_component(now))
+    guard("analysis_archive", lambda: archive_component(now))
     refused = [{"component": k, "status": v["status"], "reason": v["reason"]}
                for k, v in components.items() if v["status"] != OK]
     hd = health.get("data") or {}
@@ -425,7 +484,7 @@ def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
         "freshness_policy": {
             "system_health_max_age_sec": HEALTH_MAX_AGE_SEC, "fly_snapshot_fallback_max_age_sec":
             FLY_SNAPSHOT_MAX_AGE_SEC, "transfer_max_age_sec": TRANSFER_MAX_AGE_SEC,
-            "analyzer_export_max_age_sec": EXPORT_MAX_AGE_SEC,
+            "analyzer_export_max_age_sec": EXPORT_MAX_AGE_SEC, "analysis_archive_max_age_sec": ARCHIVE_MAX_AGE_SEC,
             "rule": "a component older than its limit (or unreachable) is STALE/UNAVAILABLE with data=None",
         },
     }

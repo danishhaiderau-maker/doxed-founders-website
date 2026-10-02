@@ -306,7 +306,28 @@ the cause.
 - Fly volume free space: AMBER below 8 GB, RED below 4 GB (the shipper keeps a 4 GB floor).
 - Segment store against its cap: AMBER at 80%, RED at 95%.
 
-**Do not prune data.** Extend the volume or ask Danish.
+Pruning is custody-gated (approved by Danish 2026-10-02): check `storage.retention`
+first. Never delete files by hand; see `docs/runbooks/DATA-RETENTION.md`.
+
+<a id="storage-retention"></a>
+### storage.retention
+Laptop bot data against the 50 GB cap (`bot_data_retention.py`, run after every
+analyzer cycle), from `C:\DoxxedCrypto\bot-data-retention\last-run.json`, plus the
+Fly prune state from `/health` `volume.transfer`.
+- AMBER at 80% of the cap, RED at 90%; AMBER when the last run is older than 3 h,
+  RED after 12 h; AMBER at >= 80% while deletion is denied (`deny_reasons`).
+- RED whenever Fly `pruned_through_seq` is beyond `custody_through_seq` (must never happen).
+
+Fix the deny reason (parity not GREEN, no verified archive snapshot, Fly checkpoint
+unreachable) rather than forcing deletion. Unmanaged scratch outside the managed roots
+(perf snapshots, `tmp\`) is not counted and is never deleted automatically.
+
+<a id="archive-freshness"></a>
+### archive.freshness
+Age of the newest immutable analysis-archive snapshot
+(`C:\DoxxedCrypto\analysis-archive\index.jsonl`). One is written after every analyzer
+generation. AMBER after 3 h, RED after 12 h. Without a fresh verified snapshot laptop
+retention deletes nothing and Fly pruning stops advancing (fail closed).
 
 <a id="watcher-stale"></a>
 ### watcher.stale

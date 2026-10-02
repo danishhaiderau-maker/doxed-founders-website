@@ -35,7 +35,8 @@ if ($offline) {
     } else {
       $head.ok = $true
       foreach ($name in 'segments_enabled', 'sink', 'shipped_seq', 'laptop_acked_seq', 'unshipped_bytes',
-                        'store_bytes', 'max_store_bytes', 'last_segment_at', 'last_error', 'pruning_enabled') {
+                        'store_bytes', 'max_store_bytes', 'last_segment_at', 'last_error', 'pruning_enabled',
+                        'prune_mode', 'pruned_through_seq', 'custody_through_seq', 'prune_deleted_bytes_total') {
         $head[$name] = $transfer.$name
       }
     }

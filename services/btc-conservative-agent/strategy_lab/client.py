@@ -183,6 +183,193 @@ def load_latest(root: Optional[str] = None, *, tables: Optional[Iterable[str]] =
     raise StaleExportError(f"export unreadable: {last_exc}")
 
 
+DEFAULT_ARCHIVE = os.environ.get("DOXXED_ANALYSIS_ARCHIVE_DIR") or r"C:\DoxxedCrypto\analysis-archive"
+DEFAULT_COMPACT = os.environ.get("DOXXED_BOT_DATA_COMPACT_DIR") or r"C:\DoxxedCrypto\bot-data-compact"
+ARCHIVE_SUPPORTED = {"analysis_archive_snapshot": {1}, "analysis_archive_rollup": {1}}
+_ROLLUP_DIMENSIONS = ("by_tile", "by_family", "by_tile_exit", "by_tile_regime")
+
+
+class AnalysisArchive(dict):
+    """DataFrames ``snapshots``, ``daily``, ``weekly`` and ``compat`` plus ``root``."""
+
+    def __init__(self, tables: dict, root: str, since: Optional[str]):
+        super().__init__(tables)
+        self.root = root
+        self.since = since
+
+    def __repr__(self) -> str:
+        return (f"AnalysisArchive(root={self.root!r}, since={self.since!r}, "
+                f"snapshots={len(self['snapshots'])}, daily_rows={len(self['daily'])}, "
+                f"incompatible={int((self['compat']['status'] == 'INCOMPATIBLE').sum()) if len(self['compat']) else 0})")
+
+
+def _read_json(path: str) -> Optional[dict]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _snapshot_intact(root: str, entry: dict) -> bool:
+    folder = os.path.join(root, str(entry.get("path") or ""))
+    receipt_path = os.path.join(folder, "receipt.json")
+    receipt = _read_json(receipt_path) or {}
+    files = receipt.get("files") or {}
+    if not files or "snapshot.json" not in files:
+        return False
+    try:
+        if any(_sha256(os.path.join(folder, name)) != digest for name, digest in files.items()):
+            return False
+        return _sha256(receipt_path) == entry.get("receipt_sha256")
+    except OSError:
+        return False
+
+
+def _utc_ts(value) -> Optional[float]:
+    """ISO date/timestamp; a naive value is UTC (archive days are UTC days)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"unparseable timestamp {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _rollup_rows(doc: dict, label: str, key: str) -> list:
+    rows = []
+    for epoch, cells in (doc.get("epochs") or {}).items():
+        for dimension in _ROLLUP_DIMENSIONS:
+            for name, stat in ((cells or {}).get(dimension) or {}).items():
+                n = int(stat.get("n") or 0)
+                rows.append({key: label, "final": bool(doc.get("final", key == "week")), "epoch": epoch,
+                             "dimension": dimension[3:], "key": name, "n": n,
+                             "wins": stat.get("wins"), "losses": stat.get("losses"),
+                             "net_pnl_usd": stat.get("sum"),
+                             "mean_usd": (stat.get("sum") or 0.0) / n if n else None,
+                             "min_usd": stat.get("min"), "max_usd": stat.get("max")})
+    return rows
+
+
+def load_archive(since: Optional[str] = None, *, root: Optional[str] = None,
+                 verify: bool = True) -> AnalysisArchive:
+    """Long-horizon analysis archive (immutable snapshots + daily/weekly rollups).
+
+    ``since`` is an ISO date/timestamp. Documents with an unsupported
+    ``schema_version`` are excluded and listed in ``compat`` as INCOMPATIBLE;
+    with ``verify`` a snapshot whose receipt hashes no longer match is listed
+    as TAMPERED and excluded. Retention never deletes this archive.
+    """
+    base = root or DEFAULT_ARCHIVE
+    cutoff = _utc_ts(since)
+    snapshots, compat, daily, weekly = [], [], [], []
+    index = os.path.join(base, "index.jsonl")
+    if os.path.isfile(index):
+        with open(index, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if cutoff is not None and (_utc_ts(row.get("written_at")) or 0) < cutoff:
+                    continue
+                version = row.get("schema_version")
+                status = "COMPATIBLE" if version in ARCHIVE_SUPPORTED["analysis_archive_snapshot"] else "INCOMPATIBLE"
+                if status == "COMPATIBLE" and verify and not _snapshot_intact(base, row):
+                    status = "TAMPERED"
+                compat.append({"dataset": "snapshot", "id": row.get("snapshot_id"),
+                               "schema_version": version, "status": status})
+                if status == "COMPATIBLE":
+                    snapshots.append(row)
+    for kind, sink, key in (("daily", daily, "day"), ("open", daily, "day"), ("weekly", weekly, "week")):
+        folder = os.path.join(base, "rollups", kind)
+        names = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            stem = name[:-5]
+            if cutoff is not None and key == "day":
+                try:
+                    if datetime.fromisoformat(stem).replace(tzinfo=timezone.utc).timestamp() + 86400 < cutoff:
+                        continue
+                except ValueError:
+                    continue
+            doc = _read_json(os.path.join(folder, name)) or {}
+            version = doc.get("schema_version")
+            status = "COMPATIBLE" if version in ARCHIVE_SUPPORTED["analysis_archive_rollup"] else "INCOMPATIBLE"
+            compat.append({"dataset": f"rollup_{kind}", "id": stem, "schema_version": version, "status": status})
+            if status == "COMPATIBLE":
+                sink.extend(_rollup_rows(doc, stem, key))
+    columns = ["final", "epoch", "dimension", "key", "n", "wins", "losses", "net_pnl_usd", "mean_usd",
+               "min_usd", "max_usd"]
+    tables = {
+        "snapshots": pd.DataFrame(snapshots),
+        "daily": pd.DataFrame(daily, columns=["day"] + columns),
+        "weekly": pd.DataFrame(weekly, columns=["week"] + columns),
+        "compat": pd.DataFrame(compat, columns=["dataset", "id", "schema_version", "status"]),
+    }
+    return AnalysisArchive(tables, base, since)
+
+
+def load_tier_a(dataset: str, *, since: Optional[str] = None, until: Optional[str] = None,
+                schema_version: Optional[int] = None, root: Optional[str] = None,
+                parse: bool = False) -> pd.DataFrame:
+    """Compacted Tier A rows (zstd Parquet, one partition set per UTC day).
+
+    Uses the newest ``v<N>`` directory unless ``schema_version`` is given;
+    partitions whose manifest hash does not match are refused. ``parse=True``
+    expands the raw JSON ``row`` column into columns.
+    """
+    folder = os.path.join(root or DEFAULT_COMPACT, "tierA", dataset)
+    versions = sorted((int(name[1:]) for name in (os.listdir(folder) if os.path.isdir(folder) else [])
+                       if name.startswith("v") and name[1:].isdigit()))
+    if not versions:
+        return pd.DataFrame(columns=["ts", "row"])
+    version = schema_version if schema_version is not None else versions[-1]
+    if version not in versions:
+        raise KeyError(f"{dataset} has no schema_version {version}; available {versions}")
+    lo = _utc_ts(since)
+    hi = _utc_ts(until)
+    frames = []
+    vdir = os.path.join(folder, f"v{version}")
+    for part_dir in sorted(os.listdir(vdir)):
+        if not part_dir.startswith("date="):
+            continue
+        day = part_dir[5:]
+        try:
+            start = datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        if (lo is not None and start + 86400 <= lo) or (hi is not None and start > hi):
+            continue
+        for name in sorted(os.listdir(os.path.join(vdir, part_dir))):
+            if not name.endswith(".parquet"):
+                continue
+            path = os.path.join(vdir, part_dir, name)
+            manifest = _read_json(path[:-len(".parquet")] + ".manifest.json") or {}
+            if manifest.get("sha256") != _sha256(path):
+                raise StaleExportError(f"Tier A partition hash mismatch: {path}")
+            frames.append(pd.read_parquet(path))
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["ts", "row"])
+    if lo is not None:
+        out = out[out["ts"] >= lo]
+    if hi is not None:
+        out = out[out["ts"] <= hi]
+    out = out.sort_values("ts", kind="stable").reset_index(drop=True)
+    if parse and len(out):
+        expanded = pd.json_normalize([json.loads(text) if isinstance(text, str) and text.startswith("{") else {"raw": text}
+                                      for text in out["row"]])
+        out = pd.concat([out[["ts"]], expanded], axis=1)
+    out.attrs.update({"dataset": dataset, "schema_version": version})
+    return out
+
+
 if __name__ == "__main__":  # quick check: python analyzer_client.py
     exp = load_latest()
     print(repr(exp))

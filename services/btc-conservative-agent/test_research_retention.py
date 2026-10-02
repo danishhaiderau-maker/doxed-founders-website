@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -128,6 +129,25 @@ class ResearchRetentionTests(unittest.TestCase):
             )
             self.assertFalse(manifest["safety"]["live_ledgers_deleted"])
 
+    def test_closed_rotation_deletion_is_delegated_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANALYZER_ROTATED_RAW_DELETE", None)
+            root = Path(tmp)
+            now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+            for index in range(1, 5):
+                path = root / f"signal_replay.jsonl.{index}"
+                path.write_text(f'{{"trade_id":"rotated-{index}"}}\n', encoding="utf-8")
+                stamp = (now - timedelta(hours=48 - index)).timestamp()
+                os.utime(path, (stamp, stamp))
+
+            result = retention.run_analyzer_retention(root, now=now, force=True)
+
+            self.assertEqual(result["rotated_raw_inventoried"], 4)
+            self.assertEqual(result["rotated_raw_deleted"], 0)
+            self.assertEqual(result["raw_mirror_cap_status"], "DELEGATED_TO_BOT_DATA_RETENTION")
+            self.assertEqual(len(list(root.glob("signal_replay.jsonl.*"))), 4)
+
+    @mock.patch.dict(os.environ, {"ANALYZER_ROTATED_RAW_DELETE": "1"})
     def test_closed_rotations_are_snapshotted_then_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -188,6 +208,7 @@ class ResearchRetentionTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM lifecycle_genome").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM trade_genome").fetchone()[0], 1)
 
+    @mock.patch.dict(os.environ, {"ANALYZER_ROTATED_RAW_DELETE": "1"})
     def test_separate_mirror_root_is_inventoried_and_pruned(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "reports"
