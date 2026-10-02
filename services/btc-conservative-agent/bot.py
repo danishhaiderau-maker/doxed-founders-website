@@ -41022,7 +41022,7 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
             _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
                                            "updated_at": utc_iso()}
         try:
-            from data_sync_bundle_runtime import run_managed_generation
+            from data_sync_bundle_resumption import run_resumable_generation
             work = _data_sync_inventory_work_root()
             def pressure():
                 return {**_lifecycle_pipeline_pressure_probe(),
@@ -41036,7 +41036,7 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
             if maintenance.get("status") != "ADMITTED":
                 publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
                 return
-            publish(run_managed_generation(
+            publish(run_resumable_generation(
                 generation, _data_sync_runtime_root(), work / "transport-bundles",
                 pressure_probe=pressure, generation_available=retained, publish=publish))
         except Exception:
@@ -41977,10 +41977,29 @@ def _data_sync_request_async_inventory(
                 str(refresh_nonce),
             )
         )
+        # Reuse is valid only for the exact cached runtime/epoch/tile binding.
+        # This authority read is memory-only; never scan the volume in HTTP.
+        cached_generation = _data_sync_async_inventory.get("generation")
+        cached_identity = (
+            cached_generation.get("bundle_identity")
+            if isinstance(cached_generation, dict) else None
+        )
+        current_identity = _data_sync_memory_identity_payload()
+        identity_current = bool(
+            isinstance(cached_identity, dict)
+            and all(
+                isinstance(cached_identity.get(key), str)
+                and bool(cached_identity[key])
+                and cached_identity[key] == current_identity.get(key)
+                for key in ("source_git_rev", "collection_epoch_id", "tile_registry_signature")
+            )
+        )
         if (
-            deliver_completed_generation
-            or (not force_refresh and current)
-            or matching_completed_refresh
+            identity_current and (
+                deliver_completed_generation
+                or current
+                or matching_completed_refresh
+            )
         ):
             _data_sync_async_inventory["served_since_refresh"] = True
             return {

@@ -2007,9 +2007,25 @@ class V3EvidenceStore:
             # Empty-ledger completeness is constant work and is required so a
             # later emergency can safely continue an already-open lifecycle.
             # Historical indexing is deliberately not advanced here.
-            self._bootstrap_empty_ledgers()
+            try:
+                self._bootstrap_empty_ledgers()
+            except OSError as exc:
+                if (exc.errno != errno.ENOSPC
+                        or not self._mandatory_lifecycle_write(ledger, material)
+                        or not self._emergency_wal_identity_available()):
+                    raise
+                return self._defer_mandatory_to_wal(ledger, record_id, material, line)
         with self._exclusive(path):
-            head_recovery = self._recover_append_head(ledger, path)
+            try:
+                head_recovery = self._recover_append_head(ledger, path)
+            except OSError as exc:
+                # Preserve the incoming row, not only the earlier append head.
+                # The existing head remains untouched and must reconcile first.
+                if (exc.errno != errno.ENOSPC
+                        or not self._mandatory_lifecycle_write(ledger, material)
+                        or not self._emergency_wal_identity_available()):
+                    raise
+                return self._defer_mandatory_to_wal(ledger, record_id, material, line)
             if head_recovery.get("blocked") is True:
                 return {
                     "written": False, "duplicate": False, "blocked": True,
@@ -2058,9 +2074,22 @@ class V3EvidenceStore:
             # ambiguous and therefore fails closed (or durably defers a
             # mandatory lifecycle row) until the killable worker catches up.
             self._assert_bounded_jsonl_tail(path)
-            return self._emergency_append(
-                ledger, path, record_id, material, line,
-            )
+            try:
+                return self._emergency_append(
+                    ledger, path, record_id, material, line,
+                )
+            except OSError as exc:
+                # The disk can fill after the admission snapshot. Preserve the
+                # exact mandatory row in the preallocated reserve; leave any
+                # PREPARED receipt/append head intact for bounded replay. This
+                # is not a claim that the canonical append completed.
+                if (exc.errno != errno.ENOSPC
+                        or not self._mandatory_lifecycle_write(ledger, material)
+                        or not self._emergency_wal_identity_available()):
+                    raise
+                return self._defer_mandatory_to_wal(
+                    ledger, record_id, material, line,
+                )
 
     def put_market_segment(
         self,

@@ -4031,6 +4031,7 @@ def test_invalid_persisted_v2_snapshot_starts_exactly_one_async_rebuild(tmp_path
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_retain_disk_inventory_generation": lambda *args, **kwargs: "e" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4067,6 +4068,7 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
@@ -4082,8 +4084,11 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     assert len(started) == 1
     assert started[0]["daemon"] is True
     assert "_data_sync_inventory(" not in ast.unparse(node)
-    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "served_since_refresh": False, "refreshing": False})
+    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}}, "generated_at": "now", "expires_at": time.monotonic() + 10, "served_since_refresh": False, "refreshing": False})
     assert request_inventory()["status"] == "CURRENT"
+    # Fresh requests reuse a still-current identity-bound snapshot.
+    assert request_inventory(force_refresh=True)["status"] == "CURRENT"
+    state["expires_at"] = 0.0
     revalidating = request_inventory(force_refresh=True)
     assert revalidating["status"] == "STALE_REVALIDATING"
     assert revalidating["rows"] == [{"path": "a.json", "size": 1}]
@@ -4122,6 +4127,7 @@ def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4178,6 +4184,7 @@ def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4301,6 +4308,7 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
 
     state = {
         "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}},
         "generated_at": "completed-before-backoff", "expires_at": 0.0,
         "served_since_refresh": False, "refreshing": False, "error": None,
         "worker_phase": "COMPLETE", "worker_invocations": 7,
@@ -4314,6 +4322,7 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
@@ -4351,7 +4360,7 @@ def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeo
 
     state = {
         "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
-        "generation": None, "generation_id": "a" * 64,
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}}, "generation_id": "a" * 64,
         "generated_at": "completed-after-client-timeout", "expires_at": 0.0,
         "served_since_refresh": False, "refreshing": False,
         "completed_refresh_nonce": "b" * 32, "error": None,
@@ -4364,6 +4373,7 @@ def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeo
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4398,7 +4408,7 @@ def test_same_refresh_nonce_consumes_completed_generation_without_restarting_wor
     state = {
         "status": "CURRENT",
         "rows": [{"path": "sealed.json", "size": 7}],
-        "generation": None,
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}},
         "generation_id": "a" * 64,
         "generated_at": "completed",
         "expires_at": 0.0,
@@ -4416,6 +4426,7 @@ def test_same_refresh_nonce_consumes_completed_generation_without_restarting_wor
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
