@@ -259,3 +259,45 @@ Each question can be in one of three states:
 - **BLOCKED.** A required field is missing, dead or constant.
 
 `full_question_status` tracks the inputs needed for a real-outcome answer, such as skipped-signal outcomes, ADX and maker fills. It never raises an alarm.
+
+<a id="section-contracts"></a>
+## Section contracts
+
+A live process, HTTP 200 and a fresh timestamp do not prove a section shows what it claims. On 2026-10-02 the :9001 "Top 100 policy combos" collapsed to ADX x score gap x DIRECT x lane while every check stayed GREEN. Section contracts check **content**: one declarative spec per dashboard section in `scripts/self_aware/section_contracts.json`, evaluated by `scripts/self_aware/contracts.py`.
+
+- **Cadence.** `contracts_light` runs every 5 minutes on the light (cheap, freshness) contracts. `contracts` runs every 2 hours on all contracts, plus drift, archive drift and coverage. The heavy pass waits for an in-flight analyzer cycle, for up to 45 minutes. It makes at most 6 public Fly calls per run, each disk-cached for 1 hour (HTTP 429 falls back to the cache). `SELF_AWARE_CONTRACTS_FLY=0` disables Fly fetches. It never uses the admin token.
+- **Surfaces.** `analyzer` (every :9001 /details section and decision page), `fly` (public Fly API and the laptop-chain snapshots), `exports` (`analyzer-exports\latest`), `selfaware` (:9021 documents), `watcher` (:9011).
+- **What a spec declares.** Source (`http`, `fly`, `file`, `export_table` or `self`), freshness, required and live fields, tables (min rows, expected columns, live columns, min distinct values, policy-genome `genes`, roster vs Fly `active_tile_lanes`, no retired lanes), counters, invariants (`if_positive` then `then_min`), ratios, expected values, `allow_http`, `max_bytes`, a named reconciler (`lanes_vs_cohort`, `decision_vs_cohort`, `accumulator_vs_cohort`, `combos_genome`, `fly_roster`, `fly_analyzer_mirror`, ...) and the `/details` sections it `covers`.
+- **History and drift.** Each heavy pass appends one row per contract (metrics, dimensions, violation kinds) to `res_contract_history`, kept for 30 days. `DRIFT_COLLAPSE` fires when a metric falls to half or less of its median over the last 12 passes. `DRIFT_DIMS_DROPPED` fires when a column seen in most of the baseline passes vanishes. Archive drift compares the last 8 generations under `analysis-archive\generations` and `report-history`: a report disappearing, a list shrinking by half, or a column dropping.
+- **Silent vs declared emptiness.** An empty table is `EMPTY_DECLARED` (AMBER) when the page carries a status or blocker that explains it. It is `EMPTY_SILENT` (RED) when nothing says why. `LABEL_CONTRADICTION` fires when a status says OK while the content is empty or dead.
+
+| Endpoint | What it returns |
+|---|---|
+| `/contracts` | HTML: every contract with status, violations and metrics, plus archive drift and /details coverage. |
+| `/api/selfaware/contracts?surface=&status=` | Last pass: counts, per-surface status, every contract result, archive drift and coverage. |
+| `/api/selfaware/contracts/registry` | The specs and the violation-kind legend. |
+| `/api/selfaware/contracts/<id>?rows=N&history=N` | Spec, last result, history, and the raw rows behind the section, fetched now. |
+
+**Adding a section.** Add a spec to `section_contracts.json` with its `covers` entry (`details#<nav id>` or `page:<href>`). Run `pytest scripts/test_self_aware_contracts.py`. `contract.coverage` turns AMBER while a /details section has no contract.
+
+<a id="contract-analyzer"></a>
+### contract.analyzer / contract.fly / contract.exports / contract.selfaware / contract.watcher
+
+<a id="contract-fly"></a><a id="contract-exports"></a><a id="contract-selfaware"></a><a id="contract-watcher"></a>
+- **What it checks.** The worst contract status on that surface. The observed text lists the first offenders. `/api/selfaware/contracts?surface=<surface>&status=RED,AMBER` gives the full list, and `/api/selfaware/contracts/<id>?rows=50` the raw rows.
+- **If it fires.** Open the contract's drill-down. If the producer is on Fly, the fix is post-freeze; record it on the WALL. If the contract is wrong (a legitimately constant column, say), fix the spec (`allow_constant`, `declared_empty_paths`) in the same PR as the explanation.
+
+<a id="contract-collapse"></a>
+### contract.collapse: no section collapsed (RED)
+
+- **What it checks.** No `DIMENSION_COLLAPSE`, `DRIFT_COLLAPSE`, `DRIFT_DIMS_DROPPED`, `EMPTY_SILENT`, `LABEL_CONTRADICTION` or `DEAD_SECTION` on any contract. This is the check that would have caught the Top-100 collapse.
+
+<a id="contract-archive-drift"></a>
+### contract.archive_drift: archived reports keep their shape
+
+- **What it checks.** Across the last 8 archive generations no report disappears, no list shrinks by half and no column drops. It also turns AMBER when the heavy pass has not run for 5 hours.
+
+<a id="contract-coverage"></a>
+### contract.coverage: every /details section has a contract
+
+- **What it checks.** Every `REPORT_NAV_GROUPS` section and `DECISION_NAV_LINKS` page of `research_dashboard.py` (parsed from the v2c checkout, not imported) is named in a contract's `covers`.

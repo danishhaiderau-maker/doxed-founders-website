@@ -727,6 +727,59 @@ def check_analyzer_sections(f, sig, store) -> list[Finding]:
 
 # ------------------------------------------------------------- run
 
+CONTRACT_SURFACES = {"analyzer": "Analyzer :9001 sections", "fly": "Fly dashboard panels and snapshots",
+                     "exports": "Analyzer exports", "selfaware": "Self-aware :9021 documents", "watcher": "Health watcher :9011"}
+
+
+def check_contracts(f, sig, store) -> list[Finding]:
+    """Section contracts: every dashboard section carries the content it claims (rows, dimensions, reconciliation)."""
+    c = f.get("contracts")
+    ids = [f"contract.{s}" for s in CONTRACT_SURFACES] + ["contract.collapse", "contract.archive_drift", "contract.coverage"]
+    gen = parse_ts((c or {}).get("generated_at"))
+    heavy = parse_ts((c or {}).get("heavy_at"))
+    if not c or not gen or f["now"] - gen > 3 * 3600:
+        return [Finding(i, "Section contracts", "contracts", SKIP, "section contracts have not run recently",
+                        "contracts_light every 5 min, heavy every 2 h", emit_alarm=False) for i in ids]
+    drill = ("SELECT \"at\", id, json_extract_string(doc, '$.status') AS status, json_extract(doc, '$.violations') AS violations "
+             "FROM res_contract_history WHERE json_extract_string(doc, '$.status') <> 'GREEN' ORDER BY \"at\" DESC LIMIT 200")
+    out = []
+    for surface, title in CONTRACT_SURFACES.items():
+        sev = (c.get("surfaces") or {}).get(surface, GREEN)
+        bad = [o for o in c.get("offenders") or [] if o["id"].split(".")[0] == surface]
+        out.append(Finding(f"contract.{surface}", f"{title} honour their content contracts", "contracts",
+                           sev if sev in (RED, AMBER) else GREEN,
+                           "; ".join(f"{o['id']} {o['status']}: {o['why'][:160]}" for o in bad[:4]) if bad else
+                           f"every {surface} contract GREEN",
+                           "reachable JSON, required fields populated, min rows, expected dimensions, reconciled counts",
+                           evidence={"offenders": bad[:20], "api": f"/api/selfaware/contracts?surface={surface}"},
+                           drill_sql=drill))
+    col = c.get("collapse") or []
+    out.append(Finding("contract.collapse", "No section collapsed (dimensions, rows, silent emptiness)", "contracts",
+                       RED if col else GREEN,
+                       "collapsed: " + ", ".join(f"{x['id']} ({'/'.join(x['kinds'])})" for x in col[:6]) if col else
+                       "no dimension collapse, silent emptiness, label contradiction or dead Fly panel",
+                       "every section keeps its expected dimensions and row counts vs its baseline",
+                       evidence={"collapse": col}, drill_sql=drill))
+    adf, adr = c.get("archive_drift_findings") or 0, c.get("archive_drift_red") or 0
+    stale_heavy = not heavy or f["now"] - heavy > THRESHOLDS["contracts_heavy_max_age_sec"]
+    out.append(Finding("contract.archive_drift", "Archived analyzer reports keep their shape across generations", "contracts",
+                       AMBER if (adf or stale_heavy) else GREEN,
+                       (f"heavy contract pass last ran {c.get('heavy_at')}; " if stale_heavy else "") +
+                       (f"{adf} archive drift findings ({adr} RED)" if adf else "no report vanished or shrank across generations"),
+                       "reports, list lengths and columns stable across the last 8 archive generations",
+                       evidence={"api": "/api/selfaware/contracts"}, drill_sql=None))
+    unc = c.get("uncovered") or []
+    cov = c.get("coverage") or {}
+    out.append(Finding("contract.coverage", "Every /details section has a content contract", "contracts",
+                       AMBER if unc or cov.get("error") else GREEN if cov else SKIP,
+                       f"sections without a contract: {unc}" if unc else
+                       f"coverage parse failed: {cov['error']}" if cov.get("error") else
+                       f"{cov.get('covered')}/{cov.get('sections')} sections covered" if cov else
+                       "coverage is computed by the heavy pass",
+                       "each REPORT_NAV_GROUPS section is named in a contract's 'covers'", emit_alarm=bool(unc)))
+    return out
+
+
 def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> list[Finding]:
     sig = signals(facts)
     checks: list[Callable[[], Any]] = [
@@ -746,6 +799,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_engine(facts, sig, store, state),
         lambda: check_data(facts, sig, store),
         lambda: check_analyzer_sections(facts, sig, store),
+        lambda: check_contracts(facts, sig, store),
     ]
     findings: list[Finding] = []
     for fn in checks:
