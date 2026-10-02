@@ -6,7 +6,7 @@ from pathlib import Path
 SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
 
 
-def main() -> None:
+def test_paper_mode_private_api_isolation() -> None:
     skip_marker = (
         'elif (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() '
         'in ("1", "true", "yes", "on"):'
@@ -17,6 +17,10 @@ def main() -> None:
     assert "def _bitfinex_shared_key_nonce()" in SOURCE
     assert "* 10_000" in SOURCE
     assert "bitfinex_private.nonce = _bitfinex_shared_key_nonce" in SOURCE
+
+
+def main() -> None:
+    test_paper_mode_private_api_isolation()
     print("Paper-mode private API isolation tests passed")
 
 

@@ -41,7 +41,28 @@ if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   $ProgressHeartbeatFile = Join-Path $targetRoot ".fly-data-sync-loop.heartbeat.json"
 }
 $statePath = Join-Path $targetRoot ".fly-sync-state.json"
+$finalizeReceiptPath = Join-Path $targetRoot ".fly-sync-ack-finalize-receipt.json"
 $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
+# Recovery-only escape hatch for a snapshot flight that already completed on
+# Fly while the desktop owner was interrupted.  Normal runs leave this empty;
+# a supplied map is validated and reuses only the exact request identity for
+# the matching relative path, generation and source fence.
+$preseededSqliteRequestIds = @{}
+if (-not [string]::IsNullOrWhiteSpace($env:FLY_SYNC_SQLITE_REQUEST_IDS_JSON)) {
+  try {
+    $decodedRequestIds = $env:FLY_SYNC_SQLITE_REQUEST_IDS_JSON | ConvertFrom-Json
+    foreach ($property in $decodedRequestIds.PSObject.Properties) {
+      $pathKey = [string]$property.Name
+      $requestValue = [string]$property.Value
+      if (-not $pathKey -or $requestValue -notmatch '^[0-9a-f]{32}$') {
+        throw "invalid preseeded SQLite request identity"
+      }
+      $preseededSqliteRequestIds[$pathKey] = $requestValue.ToLowerInvariant()
+    }
+  } catch {
+    throw "FLY_SYNC_SQLITE_REQUEST_IDS_JSON is invalid: $($_.Exception.Message)"
+  }
+}
 Add-Type -AssemblyName System.Net.Http
 $transportAttempts = 5
 $resourcePressureCircuitThreshold = 2
@@ -59,6 +80,31 @@ $manifestPageSize = 250
 $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
+
+function Convert-FlySyncTimestamp {
+  param([object]$Value)
+  if ($null -eq $Value) { return "" }
+  $timestamp = if ($Value -is [DateTimeOffset]) {
+    [DateTimeOffset]$Value
+  } elseif ($Value -is [DateTime]) {
+    [DateTimeOffset]([DateTime]$Value)
+  } else {
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+      [string]$Value,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::AssumeUniversal,
+      [ref]$parsed
+    )) {
+      return [string]$Value
+    }
+    $parsed
+  }
+  return $timestamp.ToUniversalTime().ToString(
+      "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'",
+      [Globalization.CultureInfo]::InvariantCulture
+  )
+}
 
 function Test-DataSyncResourcePressureError {
   param([string]$Message = "")
@@ -123,7 +169,15 @@ function Invoke-DataSyncJsonRequest {
       }
       $structuredSnapshotBuilding = (
         $Stage -eq "sqlite_snapshot_lease" -and
-        [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"'
+        (
+          [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"' -or
+          # Some PowerShell/.NET error paths discard the structured 503 body
+          # even though Fly is still building the same idempotent snapshot.
+          # Keep polling that request identity instead of opening the pressure
+          # circuit on a transient plain HTTP 503.
+          ($null -ne $_.Exception.Response -and
+            [int]$_.Exception.Response.StatusCode -eq 503)
+        )
       )
       $structuredSnapshotTerminal = (
         $Stage -eq "sqlite_snapshot_lease" -and
@@ -229,7 +283,7 @@ function Get-CompleteDataSyncManifest {
   }
   $generationId = [string]$FirstPage.inventory_generation_id
   $inventorySha256 = [string]$FirstPage.inventory_sha256
-  $inventoryGeneratedAt = [string]$FirstPage.inventory_generated_at
+  $inventoryGeneratedAt = Convert-FlySyncTimestamp $FirstPage.inventory_generated_at
   if (
     $generationId -notmatch '^[0-9a-f]{64}$' -or
     $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
@@ -262,7 +316,7 @@ function Get-CompleteDataSyncManifest {
       [string]$page.inventory_status -ne "CURRENT" -or
       [string]$page.inventory_generation_id -cne $generationId -or
       [string]$page.inventory_sha256 -cne $inventorySha256 -or
-      [string]$page.inventory_generated_at -cne $inventoryGeneratedAt -or
+      (Convert-FlySyncTimestamp $page.inventory_generated_at) -cne $inventoryGeneratedAt -or
       [int64]$page.file_count -ne $expectedFileCount -or
       [int64]$page.total_bytes -ne $expectedTotalBytes -or
       [int]$page.manifest_page_count -ne $expectedPageCount -or
@@ -556,19 +610,27 @@ function Set-SqliteSnapshotLease {
   $rel = [string]$Row.path
   # One identity is reused by every transport retry. This makes a lost HTTP
   # response an idempotent poll of the same immutable snapshot flight.
-  $requestId = [guid]::NewGuid().ToString("N")
-  $lease = Invoke-DataSyncJsonRequest `
-    -Stage "sqlite_snapshot_lease" `
-    -Uri ("$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" +
-      "&request_id=$requestId" +
-      "&inventory_generation_id=$inventoryGenerationId" +
-      "&inventory_sha256=$inventorySha256" +
-      "&source_physical_size=$([int64]$Row.physical_size)" +
-      "&source_mtime_ns=$([int64]$Row.mtime_ns)" +
-      "&source_inode=$([int64]$Row.inode)" +
-      "&source_consistency_mode=$([string]$Row.consistency_mode)") `
-    -TimeoutSec $manifestTimeoutSec `
-    -MaxAttempts $sqliteSnapshotBuildingMaxAttempts
+  $requestId = if ($preseededSqliteRequestIds.ContainsKey($rel)) {
+    [string]$preseededSqliteRequestIds[$rel]
+  } else {
+    [guid]::NewGuid().ToString("N")
+  }
+  try {
+    $lease = Invoke-DataSyncJsonRequest `
+      -Stage "sqlite_snapshot_lease" `
+      -Uri ("$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" +
+        "&request_id=$requestId" +
+        "&inventory_generation_id=$inventoryGenerationId" +
+        "&inventory_sha256=$inventorySha256" +
+        "&source_physical_size=$([int64]$Row.physical_size)" +
+        "&source_mtime_ns=$([int64]$Row.mtime_ns)" +
+        "&source_inode=$([int64]$Row.inode)" +
+        "&source_consistency_mode=$([string]$Row.consistency_mode)") `
+      -TimeoutSec $manifestTimeoutSec `
+      -MaxAttempts $sqliteSnapshotBuildingMaxAttempts
+  } catch {
+    throw "SQLite snapshot lease failed for ${rel}: $($_.Exception.Message)"
+  }
   if (
     $lease.schema -ne "fly_runtime_sqlite_snapshot_lease_v1" -or
     [string]$lease.path -ne $rel -or
@@ -611,7 +673,7 @@ if ($null -eq $manifest) {
 $manifest = Get-CompleteDataSyncManifest -FirstPage $manifest
 $inventorySha256 = [string]$manifest.inventory_sha256
 $inventoryGenerationId = [string]$manifest.inventory_generation_id
-$inventoryGeneratedAt = [string]$manifest.inventory_generated_at
+$inventoryGeneratedAt = Convert-FlySyncTimestamp $manifest.inventory_generated_at
 if (
   $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
   $inventoryGenerationId -cne $inventorySha256 -or
@@ -1357,6 +1419,36 @@ $ack = Invoke-DataSyncJsonRequest `
   -Body ($finalizePayload | ConvertTo-Json -Depth 5 -Compress) `
   -TimeoutSec $ackTimeoutSec
 
+# Persist the transport result before interpreting any response field. This is
+# evidence that FINALIZE returned, not proof of complete parity; only the exact
+# validation and post-ACK identity fence below can authorize completion.
+$finalizeReceipt = [ordered]@{
+  schema = "fly_sync_ack_finalize_response_receipt_v1"
+  inventory_generation_id = $inventoryGenerationId
+  inventory_sha256 = $inventorySha256
+  inventory_generated_at = $inventoryGeneratedAt
+  inventory_file_count = [int]$manifest.file_count
+  manifest_page_count = [int]$manifest.manifest_page_count
+  ack_session_id = $ackSessionId
+  accepted = if ($ack.PSObject.Properties.Name -contains "accepted") { $ack.accepted } else { $null }
+  rejected_count = if ($ack.PSObject.Properties.Name -contains "rejected_count") { $ack.rejected_count } else { $null }
+  source_git_rev = [string]$manifest.source_git_rev
+  collection_epoch_id = [string]$manifest.collection_epoch_id
+  tile_registry_signature = [string]$manifest.tile_registry_signature
+  response_received_at = Convert-FlySyncTimestamp ([DateTimeOffset]::UtcNow)
+}
+$finalizeReceiptTmp = "$finalizeReceiptPath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+try {
+  $finalizeReceipt | ConvertTo-Json -Depth 5 | Set-Content `
+    -LiteralPath $finalizeReceiptTmp `
+    -Encoding UTF8
+  Publish-MirrorCandidate `
+    -Candidate $finalizeReceiptTmp `
+    -Destination $finalizeReceiptPath
+} finally {
+  Remove-Item -LiteralPath $finalizeReceiptTmp -Force -ErrorAction SilentlyContinue
+}
+
 # A transport-level HTTP success is not sufficient: every exact manifest row
 # must have been accepted. Missing v2 result fields and partial acceptance both
 # fail closed so an older or overloaded server can never publish false parity.
@@ -1376,7 +1468,7 @@ if ($ackAccepted -ne $ackExpected -or $ackRejected -ne 0) {
 if (
   [string]$ack.inventory_sha256 -ne $inventorySha256 -or
   [string]$ack.inventory_generation_id -ne $inventoryGenerationId -or
-  [string]$ack.inventory_generated_at -ne $inventoryGeneratedAt -or
+  (Convert-FlySyncTimestamp $ack.inventory_generated_at) -cne $inventoryGeneratedAt -or
   [int]$ack.inventory_file_count -ne [int]$manifest.file_count -or
   [int]$ack.manifest_page_count -ne [int]$manifest.manifest_page_count -or
   $ack.manifest_pages_complete -ne $true

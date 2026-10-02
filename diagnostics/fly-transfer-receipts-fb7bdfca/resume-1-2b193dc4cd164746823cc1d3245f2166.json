@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "inProgress": true,
+  "phase": "chunk_complete",
+  "updatedAt": "2026-09-19T00:45:06.6015953+10:00",
+  "syncedAt": "2026-09-19T00:45:06.6016009+10:00",
+  "source": "https://doxed-btc-bot.fly.dev",
+  "sourceRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "observedSourceRevision": "f84fff81e290",
+  "deployedRevision": "f84fff81e290",
+  "mirroredSourceRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "revisionParity": "MATCH",
+  "tileRegistrySignature": "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+  "currentFile": "v3/lifecycle_bundle_index/lifecycle_index.sqlite3",
+  "fileIndex": 4,
+  "fileCount": 16237,
+  "fileBytes": 5316608,
+  "remoteBytes": 5316608,
+  "relayEvidence": null,
+  "transferError": "System.Management.Automation.RuntimeException: SQLite snapshot lease failed for v3/qualification_horizon_index.sqlite3: Fly data-sync stage=sqlite_snapshot_lease failed after terminal snapshot lease attempt(s): Response status code does not indicate success: 503 (SERVICE UNAVAILABLE).",
+  "transferErrorType": "System.Management.Automation.RuntimeException"
+}

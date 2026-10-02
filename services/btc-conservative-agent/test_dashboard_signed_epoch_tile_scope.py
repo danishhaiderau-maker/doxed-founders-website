@@ -108,6 +108,8 @@ def test_fresh_reset_clears_in_memory_lane_totals_and_cached_tile_payload() -> N
         '"lane_lab_pnl_ledger": {}',
     ):
         assert field in reset
-    fresh_reset = _function_source("_perform_fresh_collection_reset_locked")
+    # Cache clearing occurs in the quiesced mutation phase, which is called
+    # only after the locked wrapper has proven the safe reset boundary.
+    fresh_reset = _function_source("_perform_fresh_collection_reset_quiesced")
     assert "global _cached_pathway_lane_specs" in fresh_reset
     assert "_cached_pathway_lane_specs = {}" in fresh_reset

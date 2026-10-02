@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "inProgress": true,
+  "phase": "chunk_complete",
+  "updatedAt": "2026-09-19T01:57:11.9207203+10:00",
+  "syncedAt": "2026-09-19T01:57:11.9207251+10:00",
+  "source": "https://doxed-btc-bot.fly.dev",
+  "sourceRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "observedSourceRevision": "f84fff81e290",
+  "deployedRevision": "f84fff81e290",
+  "mirroredSourceRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "revisionParity": "MATCH",
+  "tileRegistrySignature": "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+  "currentFile": "v3/receipts/production_rotation_v1/status.json",
+  "fileIndex": 13396,
+  "fileCount": 16237,
+  "fileBytes": 908,
+  "remoteBytes": 908,
+  "relayEvidence": null,
+  "transferError": "System.Management.Automation.RuntimeException: Fly sync acknowledgement did not bind to the requested inventory generation.",
+  "transferErrorType": "System.Management.Automation.RuntimeException"
+}

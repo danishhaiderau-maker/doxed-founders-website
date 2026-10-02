@@ -4207,6 +4207,11 @@ def log_ai_input_full(
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
+                "source": ai_result.get("source"),
+                "synthetic_response": bool(ai_result.get("synthetic_response", False)),
+                "provider_result_status": ai_result.get("provider_result_status"),
+                "shared_ai_call_id": ai_result.get("shared_ai_call_id") or ai_result.get("trade_id"),
+                "provider_evaluation_error": ai_result.get("provider_evaluation_error"),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -8677,6 +8682,13 @@ state = {
     "last_engine_error": "None",
     "drawdown_kill_until": None,
     "last_ai": {"win_prob": None, "direction": None, "trade_id": None, "comment": None, "ai_error": None, "factors": {}, "source": "NONE", "decision": None},
+    "last_ai_provider_result_ts": 0.0,
+    "last_ai_provider_result_source": "UNKNOWN",
+    "last_ai_provider_result_synthetic": False,
+    "last_ai_provider_result_error": False,
+    "last_ai_provider_result_status": "UNKNOWN",
+    "last_ai_provider_evaluation_error": None,
+    "last_ai_provider_result_call_id": "",
     "last_approve_outcome": {"status": None, "reason": None, "effective_threshold": None, "edge_at_approve": None, "trade_id": None, "ts": None},
     "last_ai_ts": 0.0,
     "last_ai_fp": "",
@@ -11404,6 +11416,7 @@ def build_dashboard_display(snapshot: dict) -> dict:
             "pipeline_idle": pipeline_idle,
             "research_lane": la.get("research_lane"),
             "research_model": la.get("research_model") or research_lane_label(la.get("research_lane")),
+            "provider_result": copy.deepcopy(snapshot.get("ai_provider_result") or {}),
         },
         "display_pipeline": {
             "idle_reason": pipeline_idle,
@@ -11427,6 +11440,7 @@ def sync_dashboard_branding():
                 "debug_state": copy.deepcopy(state.get("debug_state") or {}),
                 "last_ai": copy.deepcopy(state.get("last_ai") or {}),
                 "ai_outcome": state.get("ai_outcome"),
+                "ai_provider_result": _ai_provider_result_snapshot(),
             }
         branding = build_dashboard_display(snap)
         with state_lock:
@@ -14596,13 +14610,19 @@ def ai_decision_should_execute(ai: dict) -> bool:
 def continuous_score_gap_execution_tier(ai: dict) -> str:
     """Derive the Continuous lane verdict from directional scores only.
 
-    The score gap may refine an already executable shared verdict, but it may
-    never manufacture one.  In particular, an explicit NO_TRADE/CONFLICTED
-    direction or a rejected shared decision must remain non-executable for
-    every child lane, including the Continuous benchmark.
+    In the disarmed research collector, the score-led cohort deliberately
+    measures the opportunity implied by the stronger side even when the
+    model's textual verdict is REJECT.  The raw verdict is retained in the
+    receipt; it is not silently rewritten.  This is the cohort contract:
+    unequal valid scores produce a research lane, while a true tie, invalid
+    scores, explicit AI error, or live/non-research execution remains
+    fail-closed.
     """
     if not ai or ai.get("ai_error") or ai.get("zero_score_reject"):
         return "REJECT"
+    score_led_research = bool(
+        is_research_data_collection() and AI_RESEARCH_MODE_ENABLED
+    )
     shared_direction = str(
         ai.get("candidate_direction")
         or ai.get("direction")
@@ -14612,11 +14632,17 @@ def continuous_score_gap_execution_tier(ai: dict) -> str:
     shared_decision = str(ai.get("decision") or "").upper()
     raw_decision = str(ai.get("raw_decision") or shared_decision).upper()
     if (
-        bool(ai.get("explicit_abstain"))
-        or shared_direction not in ("LONG", "SHORT")
-        or shared_decision not in AI_EXECUTE_TIERS | {"APPROVE"}
-        or raw_decision in {"REJECT", "SOFT_REJECT", "AI_ERROR"}
-        or ai.get("approved") is False
+        (not score_led_research and bool(ai.get("explicit_abstain")))
+        or (not score_led_research and shared_direction not in ("LONG", "SHORT"))
+        or (
+            not score_led_research
+            and shared_decision not in AI_EXECUTE_TIERS | {"APPROVE"}
+        )
+        or (
+            not score_led_research
+            and raw_decision in {"REJECT", "SOFT_REJECT", "AI_ERROR"}
+        )
+        or (not score_led_research and ai.get("approved") is False)
     ):
         return "REJECT"
     try:
@@ -14628,7 +14654,25 @@ def continuous_score_gap_execution_tier(ai: dict) -> str:
     # that construct an AI record without the parser's zero_score_reject flag.
     if long_score + short_score < 50:
         return "REJECT"
+    # A true tie is the only score-based abstention in the score-led research
+    # cohort.  This check also prevents the legacy derive helper from ever
+    # defaulting a tie to LONG.
+    if long_score == short_score:
+        return "REJECT"
     direction = derive_candidate_direction(long_score, short_score, shared_direction)
+    if score_led_research:
+        # The disarmed score-led cohort measures every valid directional
+        # opportunity. A non-tie is admitted even when its gap is below the
+        # legacy execution threshold; the raw AI verdict remains in the
+        # receipt and downstream fill-world gates still apply. Keep the
+        # stricter helper for non-research/live callers so this exception can
+        # never widen real-exchange admission.
+        gap = abs(short_score - long_score)
+        if gap >= 15:
+            return "STRONG_APPROVE"
+        if gap >= 10:
+            return "APPROVE"
+        return "SOFT_APPROVE"
     return derive_research_decision_tier(0, long_score, short_score, direction)
 
 
@@ -16147,6 +16191,52 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
         state["ai_decision"] = ai_result.get("decision")
 
 
+def _record_ai_provider_result_receipt(ai_result: dict) -> None:
+    """Record provider completion once; dashboard projections must not refresh it."""
+    result = ai_result if isinstance(ai_result, dict) else {}
+    with state_lock:
+        state["last_ai_provider_result_ts"] = time.time()
+        state["last_ai_provider_result_source"] = str(
+            result.get("source") or "UNKNOWN"
+        ).upper()
+        state["last_ai_provider_result_synthetic"] = bool(
+            result.get("synthetic_response", False)
+        )
+        state["last_ai_provider_result_error"] = bool(result.get("ai_error", False))
+        state["last_ai_provider_result_status"] = str(
+            result.get("provider_result_status")
+            or ("ERROR" if result.get("ai_error") else "UNKNOWN")
+        ).upper()
+        state["last_ai_provider_evaluation_error"] = (
+            str(result.get("provider_evaluation_error"))
+            if result.get("provider_evaluation_error") else None
+        )
+        state["last_ai_provider_result_call_id"] = str(
+            result.get("shared_ai_call_id") or result.get("trade_id") or ""
+        )
+
+
+def _record_ai_provider_evaluation_error(error_type: str, shared_ai_call_id: str) -> None:
+    """Annotate a post-provider failure without replacing the provider receipt."""
+    with state_lock:
+        if str(state.get("last_ai_provider_result_call_id") or "") != str(shared_ai_call_id or ""):
+            return
+        state["last_ai_provider_evaluation_error"] = str(error_type or "UNKNOWN")
+
+
+def _ai_provider_result_snapshot() -> dict:
+    with state_lock:
+        return {
+            "ts": float(state.get("last_ai_provider_result_ts") or 0.0),
+            "source": state.get("last_ai_provider_result_source") or "UNKNOWN",
+            "synthetic": bool(state.get("last_ai_provider_result_synthetic", False)),
+            "error": bool(state.get("last_ai_provider_result_error", False)),
+            "status": state.get("last_ai_provider_result_status") or "UNKNOWN",
+            "evaluation_error": state.get("last_ai_provider_evaluation_error"),
+            "call_id": state.get("last_ai_provider_result_call_id") or "",
+        }
+
+
 def _emit_genome_ai_events(ai_result: dict) -> None:
     """Trading Genome v1 — emit AI_SCAN + decision events (bot flight recorder only)."""
     bridge = get_genome_bridge()
@@ -16620,6 +16710,12 @@ def log_ai_error_row(ai_result, ctx=None):
                 "error_detail": (ai_result.get("error_detail") or ai_result.get("comment") or "")[:2000],
                 "http_status": ai_result.get("http_status"),
                 "latency_ms": ai_result.get("latency_ms"),
+                "source": ai_result.get("source"),
+                "synthetic_response": bool(ai_result.get("synthetic_response", False)),
+                "provider_result_status": ai_result.get("provider_result_status"),
+                "ai_error": bool(ai_result.get("ai_error", False)),
+                "provider_evaluation_error": ai_result.get("provider_evaluation_error"),
+                "shared_ai_call_id": ai_result.get("shared_ai_call_id") or ai_result.get("trade_id"),
                 "edge_score": state.get("last_edge", 0.0),
                 "edge_threshold": get_edge_threshold(),
                 "effective_threshold": get_effective_edge_threshold(),
@@ -17338,7 +17434,39 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         return
     if not is_research_data_collection():
         return
-    ai_direction = ai.get("direction")
+    # Keep the provider's raw REJECT/NO_TRADE visible, but route a separate
+    # score-led research copy when one valid side is stronger.  This is
+    # intentionally restricted to disarmed research collection; live/non-
+    # research execution still sees the original fail-closed decision.
+    routed_ai = dict(ai)
+    # The score helper is only needed when the shared result actually carries
+    # directional scores.  Keeping the no-score compatibility path intact is
+    # important for older receipts and the isolated wiring harness.
+    score_led_tier = "REJECT"
+    if "long_score" in routed_ai and "short_score" in routed_ai:
+        score_led_tier = continuous_score_gap_execution_tier(routed_ai)
+    if score_led_tier != "REJECT":
+        long_score = int(routed_ai.get("long_score", 0) or 0)
+        short_score = int(routed_ai.get("short_score", 0) or 0)
+        score_direction = derive_candidate_direction(long_score, short_score)
+        routed_ai["raw_decision"] = str(
+            routed_ai.get("raw_decision") or routed_ai.get("decision") or ""
+        ).upper()
+        routed_ai["raw_direction"] = str(
+            routed_ai.get("raw_direction") or routed_ai.get("direction") or ""
+        ).upper()
+        routed_ai["candidate_direction"] = score_direction
+        routed_ai["direction"] = score_direction
+        routed_ai["execution_tier"] = score_led_tier
+        routed_ai["research_soft"] = score_led_tier
+        routed_ai["decision"] = "APPROVE"
+        routed_ai["approved"] = True
+        routed_ai["research_admission"] = "SCORE_LED_STRONGER_SIDE"
+        routed_ai["research_admission_reason"] = (
+            f"raw={routed_ai['raw_decision'] or 'UNKNOWN'} "
+            f"long={long_score} short={short_score} side={score_direction}"
+        )
+    ai_direction = routed_ai.get("direction")
     final_direction = ai_direction
     if state.get("invert_signal", False):
         if ai_direction == "LONG":
@@ -17360,9 +17488,9 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         ):
             continue
         detail = combo_lane_match_detail(
-            lane, ai, final_direction, spread, features=enriched,
+            lane, routed_ai, final_direction, spread, features=enriched,
         )
-        ai_accepted = str(ai.get("decision") or "").upper() == "APPROVE"
+        ai_accepted = str(routed_ai.get("decision") or "").upper() == "APPROVE"
         lane_enabled = is_research_lane_enabled(lane)
         policy_accepted = ai_accepted and bool(detail.get("passes"))
         if not ai_accepted:
@@ -17395,7 +17523,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, ai, ctx, features or {},
+            lane, routed_ai, ctx, features or {},
             policy_decision=(
                 "ERROR" if bool(ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
@@ -17424,7 +17552,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             )
             continue
         _enqueue_combo_lane_execution(
-            ctx, ai, edge_score, enriched, lane,
+            ctx, routed_ai, edge_score, enriched, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
 
@@ -17555,6 +17683,16 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         or continuous_ai.get("raw_direction")
         or ""
     ).upper()
+    # Score-led research is intentionally independent of a provider-side
+    # NO_TRADE/mismatched textual direction: unequal valid scores determine
+    # the side under study.  Non-research callers retain the original
+    # fail-closed direction contract.
+    if (
+        shared_direction not in ("LONG", "SHORT")
+        and is_research_data_collection()
+        and AI_RESEARCH_MODE_ENABLED
+    ):
+        shared_direction = derive_candidate_direction(long_score, short_score)
     continuous_ai["direction"] = (
         derive_candidate_direction(long_score, short_score, shared_direction)
         if shared_direction in ("LONG", "SHORT")
@@ -17567,16 +17705,19 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     continuous_ai["approved"] = continuous_accept
     # R2 spread floor (2026-08-04): backtest on 21 realized trades showed
     # spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
-    # Filter weak-edge signals before they enter the chase lifecycle. Only
-    # applied when AI said execute; preserves shadow data collection when AI
-    # rejected.
+    # Keep this execution-quality floor for non-research callers. The disarmed
+    # score-led cohort intentionally admits every valid non-tie so its
+    # counterfactual dataset can measure weak edges rather than silently
+    # dropping them; invalid/error/live paths remain fail-closed above.
     #
     # Stage 1 Fix #4 (2026-08-06): the prior implementation multiplied the
     # constant by 10, making the effective threshold raw gap >= 40 (8x
     # stricter than intended). The constant is now used as a RAW score-gap
     # threshold directly (raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR).
     r2_floor_blocked = False
-    if continuous_accept:
+    if continuous_accept and not (
+        is_research_data_collection() and AI_RESEARCH_MODE_ENABLED
+    ):
         spread = abs(long_score - short_score)
         if spread < CONTINUOUS_MIN_SPREAD_FLOOR:
             r2_floor_blocked = True
@@ -17679,6 +17820,8 @@ def evaluate_signal_with_ai(
     counterfactual_coverage = None
     research_context_capture = None
     research_timing_capture = {}
+    provider_call_started = False
+    provider_result_meta = None
     try:
         logger.info(
             f"[AI] START lane={research_lane} shadow={shadow_only} "
@@ -17748,6 +17891,8 @@ def evaluate_signal_with_ai(
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
+        cassette_resp = None
+        provider_event = None
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
             from demo_mode import cassette_lookup, cassette_record
             cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
@@ -17757,21 +17902,36 @@ def evaluate_signal_with_ai(
                 if not text:
                     text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
                 latency_ms = 5
-                log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+                provider_event = ("API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY")
             else:
+                provider_call_started = True
                 text, latency_ms = call_deepseek_api(
                     [{"role": "user", "content": prompt}],
                     temperature=temperature,
                     purpose="trading_direction",
                 )
-                log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+                provider_event = ("API_OK", "DEEPSEEK_RESPONSE")
         else:
+            provider_call_started = True
             text, latency_ms = call_deepseek_api(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
                 purpose="trading_direction",
             )
-            log_pipeline_event("AI", "API_OK", "DEEPSEEK_RESPONSE", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
+            provider_event = ("API_OK", "DEEPSEEK_RESPONSE")
+        provider_result_meta = {
+            "source": "CASSETTE" if cassette_resp else "FRESH",
+            "synthetic_response": bool(cassette_resp),
+            "provider_result_status": "SUCCEEDED",
+            "shared_ai_call_id": ctx.get("trade_id"),
+            "latency_ms": latency_ms,
+        }
+        _record_ai_provider_result_receipt(provider_result_meta)
+        if provider_event:
+            log_pipeline_event(
+                "AI", provider_event[0], provider_event[1], ctx.get("trade_id"),
+                state.get("last_edge"), {"latency_ms": latency_ms}, force=True,
+            )
         logger.info(f"[AI RAW RESPONSE] {text} [PIPELINE ENFORCEMENT]")
         parsed = parse_ai_response_fields(text)
         direction = parsed["direction"]
@@ -17804,7 +17964,9 @@ def evaluate_signal_with_ai(
             "long_score": factors.get("long_score", 0),
             "short_score": factors.get("short_score", 0),
             "preferred_direction": factors.get("preferred_direction"),
-            "source": "FRESH",
+            "source": provider_result_meta["source"],
+            "synthetic_response": provider_result_meta["synthetic_response"],
+            "provider_result_status": provider_result_meta["provider_result_status"],
             "approved": decision in AI_EXECUTE_TIERS,
             "trade_id": ctx.get("trade_id"),
             "shared_ai_call_id": ctx.get("trade_id"),
@@ -17906,8 +18068,29 @@ def evaluate_signal_with_ai(
             update_debug_state_always("AI_COMPLETE", {"ai_decision": ai_result.get("decision")})
         return ai_result
     except Exception as e:
-        logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
+        # A provider result is a boundary fact.  If parsing, policy gating, or
+        # telemetry fails after that boundary, preserve the provider outcome
+        # and classify the later failure separately instead of overwriting a
+        # successful response as an API error.
+        if provider_result_meta is not None:
+            ai_result.update(provider_result_meta)
+            ai_result["provider_result_status"] = "SUCCEEDED"
+            ai_result["provider_evaluation_error"] = type(e).__name__
+            _record_ai_provider_evaluation_error(
+                type(e).__name__, provider_result_meta.get("shared_ai_call_id")
+            )
+        elif provider_call_started:
+            ai_result["provider_result_status"] = "ERROR"
+            _record_ai_provider_result_receipt(ai_result)
+        else:
+            ai_result["provider_result_status"] = "NOT_CALLED"
+            ai_result["source"] = "NOT_CALLED"
+        try:
+            logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
+        except Exception:
+            # Receipt recording above must survive a broken logging sink.
+            pass
         # Preserve only evidence captured before the failed API/parsing stage.
         # An AI failure does not invalidate the already observed market context.
         if research_context_capture is not None:
@@ -28180,7 +28363,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from research_reset_progress import make_reset_progress_callback
     from uuid import uuid4
 
-    global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
+    global _cached_pathway_lane_specs, _last_fresh_maintain_ts, _cached_pathway_scorecard
     reset_anchor = time.time()
     stage = "BOUNDARY"
     boundary = None
@@ -32716,11 +32899,21 @@ DASHBOARD_JS = """(function () {
           }).join(' | ');
           const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
           const verdicts = a.lane_verdicts || {};
+          const scoreLedDirection = (
+            a.long_score != null && a.short_score != null
+            && Number(a.long_score) !== Number(a.short_score)
+            && !a.ai_error
+          )
+            ? (Number(a.long_score) > Number(a.short_score) ? 'LONG' : 'SHORT')
+            : null;
+          const scoreLedFallback = scoreLedDirection
+            ? `<span style="color:#d29922" title="The score-led research cohort selects the stronger side, but this historical row has no lane-specific receipt. It is not proof of a fill.">SCORE-LED ${scoreLedDirection} · lane receipt pending (raw ${String(a.decision || a.verdict || 'UNKNOWN').toUpperCase()})</span>`
+            : '<span style="color:#8b949e">evaluation not reached</span>';
           const familyRows = Object.keys(verdicts)
             .filter(lane => lane.startsWith('FAMILY_'))
             .sort()
             .map(lane => `<div>${laneBadge(lane, lane)}: ${formatLaneVerdict(verdicts[lane], a)} · ${formatPatientRoute(a['tile_route_' + lane.toLowerCase()])}</div>`)
-            .join('') || '<span style="color:#8b949e">evaluation not reached</span>';
+            .join('') || scoreLedFallback;
           const rawGap = a.score_gap != null
             ? Number(a.score_gap)
             : (a.long_score != null && a.short_score != null
@@ -37191,6 +37384,7 @@ def status():
         "process_alive": process_alive,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
+        "ai_provider_result": _ai_provider_result_snapshot(),
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "execution_paused": paused,
         "execution_reason": reason,

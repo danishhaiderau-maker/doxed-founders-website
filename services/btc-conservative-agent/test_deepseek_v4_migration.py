@@ -232,5 +232,9 @@ def run():
     print(f"PASS: {passed} DeepSeek V4 migration checks")
 
 
+def test_deepseek_v4_migration() -> None:
+    run()
+
+
 if __name__ == "__main__":
     run()

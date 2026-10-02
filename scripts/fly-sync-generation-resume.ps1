@@ -39,7 +39,12 @@ function Invoke-FlyGenerationResume {
     }
     $receipt = $outcome.Receipt
     if ($receipt.failureCode -cnotin @('BUNDLE_TRANSFER_DEADLINE','BUNDLE_INDEX_PREPARATION_DEADLINE')) {
-      throw 'RESUME_NON_DEADLINE_FAILURE'
+      $detail = if ($receipt.PSObject.Properties.Name -contains 'transferError' -and
+                    -not [string]::IsNullOrWhiteSpace([string]$receipt.transferError)) {
+        [string]$receipt.transferError
+      } else { 'NO_CHILD_ERROR_CAPTURED' }
+      if ($detail.Length -gt 2000) { $detail = $detail.Substring(0, 2000) }
+      throw ("RESUME_NON_DEADLINE_FAILURE: " + $detail)
     }
     if ($receipt.ok -ne $false -or $receipt.inProgress -ne $false -or $receipt.ackPending -ne $true -or
         $receipt.completionAuthority -cne 'NONE_TRANSFER_PROGRESS_ONLY' -or
@@ -74,6 +79,23 @@ function Start-FlyGenerationResume {
   if (-not $AdminToken) { $AdminToken = Import-CanonicalBotAdminToken }
   if (-not $AdminToken) { throw 'ADMIN_TOKEN_REQUIRED' }
   . (Join-Path $PSScriptRoot 'fly-sync-bundles.ps1')
+  # Scriptblock closures do not reliably resolve helper functions after the
+  # child sync throws. Keep the same reparse-point fence local to the closure
+  # so the original transfer exception is preserved in the receipt.
+  $assertUnlinkedPath = {
+    param([Parameter(Mandatory)][string]$Path)
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+      if (Test-Path -LiteralPath $current) {
+        if ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+          throw 'BUNDLE_LINK_OR_REPARSE_REJECTED'
+        }
+      }
+      $parent = [IO.Path]::GetDirectoryName($current.TrimEnd('\'))
+      if ($parent -eq $current) { break }
+      $current = $parent
+    }
+  }.GetNewClosure()
   Assert-FlyBundleUnlinkedPath -Path $ReceiptDirectory
   New-Item -ItemType Directory -Path $ReceiptDirectory -Force | Out-Null
   $scriptPath = Join-Path $PSScriptRoot 'sync-fly-bot-data.ps1'
@@ -90,10 +112,37 @@ function Start-FlyGenerationResume {
         -InitialManifest $manifest -ProgressHeartbeatFile $receiptPath -MirroredSourceRevision $Identity.source_git_rev
       return @{Success=$true; Result=$result}
     } catch {
-      if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw 'RESUME_ATTEMPT_WITHOUT_RECEIPT' }
-      Assert-FlyBundleUnlinkedPath -Path $receiptPath
+      & $assertUnlinkedPath $receiptPath
+      if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        $transferError = $_.Exception.ToString()
+        if ($transferError.Length -gt 4000) { $transferError = $transferError.Substring(0, 4000) }
+        $failureObject = [ordered]@{
+          ok = $false
+          inProgress = $false
+          ackPending = $true
+          completionAuthority = 'NONE_TRANSFER_PROGRESS_ONLY'
+          inventoryGenerationId = [string]$Identity.inventory_generation_id
+          collectionEpochId = [string]$Identity.collection_epoch_id
+          sourceRevision = [string]$Identity.source_git_rev
+          deployedRevision = [string]$Identity.source_git_rev
+          tileRegistrySignature = [string]$Identity.tile_registry_signature
+          failureCode = 'SYNC_CHILD_EXCEPTION'
+          transferError = $transferError
+          transferErrorType = $_.Exception.GetType().FullName
+        }
+        $json = ($failureObject | ConvertTo-Json -Depth 8) + [Environment]::NewLine
+        [IO.File]::WriteAllText($receiptPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        return @{Success=$false; Receipt=([pscustomobject]$failureObject)}
+      }
       if ((Get-Item -LiteralPath $receiptPath).Length -gt 65536) { throw 'RESUME_RECEIPT_LIMIT' }
-      return @{Success=$false; Receipt=(Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json)}
+      $receiptObject = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+      $transferError = $_.Exception.ToString()
+      if ($transferError.Length -gt 4000) { $transferError = $transferError.Substring(0, 4000) }
+      $receiptObject | Add-Member -MemberType NoteProperty -Name transferError -Value $transferError -Force
+      $receiptObject | Add-Member -MemberType NoteProperty -Name transferErrorType -Value $_.Exception.GetType().FullName -Force
+      $json = ($receiptObject | ConvertTo-Json -Depth 8) + [Environment]::NewLine
+      [IO.File]::WriteAllText($receiptPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+      return @{Success=$false; Receipt=$receiptObject}
     }
   }.GetNewClosure()
   Assert-FlyBundleUnlinkedPath -Path $TargetDir

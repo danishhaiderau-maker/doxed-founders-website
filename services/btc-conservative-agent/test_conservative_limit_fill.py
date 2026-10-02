@@ -35,6 +35,9 @@ def row(ts, *, bid=99, ask=101, bid_qty=2, ask_qty=2, buy_qty=0, sell_qty=0,
         "bid_qty": bid_qty, "ask_qty": ask_qty, "buy_qty": buy_qty,
         "sell_qty": sell_qty, "buy_vwap": buy_vwap, "sell_vwap": sell_vwap,
         "trade_count": trade_count,
+        # The evaluator fail-closes unless the quote's source and observation
+        # timestamps prove that this bucket was available at its bucket time.
+        "source_ts": ts, "observed_at_ts": ts,
     }
 
 

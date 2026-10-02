@@ -37,7 +37,8 @@ function Test-MirrorCandidate {
   # This legacy filename is an append-only newline-delimited crash journal,
   # not one JSON document. Validating the whole file as JSON stalls the mirror
   # as soon as a second crash record is appended.
-  if ($name -eq "crash_dump.json") {
+  if ($name -eq "crash_dump.json" -or
+      $name.EndsWith("/crash_dump.json", [System.StringComparison]::Ordinal)) {
     $name = "crash_dump.jsonl"
   }
   if ($name -match '\.json$') {

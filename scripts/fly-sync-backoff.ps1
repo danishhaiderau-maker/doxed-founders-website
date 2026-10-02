@@ -17,7 +17,12 @@ function Get-FlySyncFailureBackoffSeconds {
 
 function Test-FlySyncResourcePressureMessage {
   param([string]$Message = "")
-  return [bool]($Message -match '(?i)(?:HTTP\s+|\()(?:502|503)\)?|boot(?:ing)?|starting|restoring|server unavailable|bad gateway|timed?\s*out|timeout|task was canceled|operation was canceled')
+  # PowerShell's Invoke-RestMethod commonly surfaces HTTP failures as
+  # "Response status code does not indicate success: 503 (...)" rather than
+  # preserving an "HTTP 503" prefix.  Treat a standalone 502/503 as the
+  # same transient Fly resource-pressure class so bounded retries back off
+  # instead of hammering a one-core runtime.
+  return [bool]($Message -match '(?i)\b(?:502|503)\b|boot(?:ing)?|starting|restoring|server unavailable|bad gateway|timed?\s*out|timeout|task was canceled|operation was canceled')
 }
 
 function Get-FlySyncNextPressureFailureCount {

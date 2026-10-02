@@ -68,7 +68,18 @@ checks = [
     ),
 ]
 
-passed = sum(check(name, condition) for name, condition in checks)
-failed = len(checks) - passed
-print(f"\nRESULT: {passed} passed, {failed} failed")
-sys.exit(0 if failed == 0 else 1)
+def main() -> None:
+    passed = sum(check(name, condition) for name, condition in checks)
+    failed = len(checks) - passed
+    print(f"\nRESULT: {passed} passed, {failed} failed")
+    if failed:
+        raise AssertionError(f"{failed} dashboard timestamp checks failed")
+
+
+def test_dashboard_timestamps() -> None:
+    """Expose the standalone checks to pytest without import-time exit."""
+    main()
+
+
+if __name__ == "__main__":
+    main()

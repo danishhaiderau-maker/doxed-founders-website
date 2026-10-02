@@ -11,10 +11,12 @@ original R2 intent of raw gap >= ~5). The constant is now used as a RAW
 score-gap threshold directly. The canonical tier gate remains the stricter
 execution authority at raw gap >= 5; the R2 floor is defense in depth.
 
-Score scale is 0-100 (long_score/short_score). The canonical Continuous tier
-gate is gap >= 5; the older R2 floor remains a lower-bound safety check:
-  raw gap  3 -> REJECTED
-  raw gap  4 -> REJECTED by the canonical tier gate
+Score scale is 0-100 (long_score/short_score). The score-led research contract
+admits every valid non-tied directional gap; the legacy execution authority
+remains stricter outside that disarmed cohort:
+  raw gap  1 -> SOFT_APPROVE in score-led research
+  raw gap  3 -> SOFT_APPROVE in score-led research
+  raw gap  4 -> SOFT_APPROVE in score-led research
   raw gap  5 -> ACCEPTED (> floor)
   raw gap 10 -> ACCEPTED (well above floor)
   raw gap 30 -> ACCEPTED (well above floor; previously REJECTED under * 10 bug)
@@ -93,15 +95,38 @@ def test_floor_constant_is_four() -> None:
     )
 
 
-def test_raw_gap_three_is_rejected(monkeypatch) -> None:
-    # long 50 / short 53 -> raw gap 3 -> REJECTED
+def test_raw_gap_one_is_admitted_in_score_led_research(monkeypatch) -> None:
+    # long 50 / short 51 -> raw gap 1 -> SOFT_APPROVE
+    normalized = _run_spawn(long_score=50, short_score=51, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "SOFT_APPROVE"
+
+
+def test_raw_gap_three_is_admitted_in_score_led_research(monkeypatch) -> None:
+    # long 50 / short 53 -> raw gap 3 -> SOFT_APPROVE
     normalized = _run_spawn(long_score=50, short_score=53, monkeypatch=monkeypatch)
-    assert normalized["decision"] == "REJECT"
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "SOFT_APPROVE"
 
 
-def test_raw_gap_four_is_rejected_by_canonical_tier(monkeypatch) -> None:
+def test_51_49_textual_reject_still_admits_stronger_side(monkeypatch) -> None:
+    """The user-facing 51/49 case must remain visible as a short opportunity."""
+    normalized = _run_spawn(
+        long_score=49,
+        short_score=51,
+        monkeypatch=monkeypatch,
+        textual_decision="REJECT",
+    )
+    assert normalized["raw_decision"] == "REJECT"
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "SOFT_APPROVE"
+    assert normalized["direction"] == "SHORT"
+
+
+def test_raw_gap_four_is_admitted_in_score_led_research(monkeypatch) -> None:
     normalized = _run_spawn(long_score=50, short_score=54, monkeypatch=monkeypatch)
-    assert normalized["decision"] == "REJECT"
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "SOFT_APPROVE"
 
 
 def test_raw_gap_five_is_accepted(monkeypatch) -> None:
@@ -128,8 +153,8 @@ def test_raw_gap_thirty_is_accepted(monkeypatch) -> None:
     assert normalized["direction"] == "SHORT"
 
 
-def test_textual_reject_cannot_be_overridden_by_executable_score_gap(monkeypatch) -> None:
-    """A score gap refines an approval; it cannot manufacture one from REJECT."""
+def test_score_led_research_admits_stronger_side_despite_textual_reject(monkeypatch) -> None:
+    """Research keeps raw REJECT telemetry but admits a valid stronger side."""
     normalized = _run_spawn(
         long_score=35,
         short_score=65,
@@ -137,12 +162,13 @@ def test_textual_reject_cannot_be_overridden_by_executable_score_gap(monkeypatch
         textual_decision="REJECT",
     )
     assert normalized["raw_decision"] == "REJECT"
-    assert normalized["decision"] == "REJECT"
-    assert normalized["execution_tier"] == "REJECT"
-    assert normalized["approved"] is False
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "STRONG_APPROVE"
+    assert normalized["direction"] == "SHORT"
+    assert normalized["approved"] is True
 
 
-def test_explicit_no_trade_cannot_create_continuous_order(monkeypatch) -> None:
+def test_explicit_no_trade_with_unequal_scores_is_researched(monkeypatch) -> None:
     calls: list[dict] = []
 
     def fake_spawn_combo_lane(ctx, ai, edge_score, features, target_lane, trigger_reason):
@@ -168,9 +194,39 @@ def test_explicit_no_trade_cannot_create_continuous_order(monkeypatch) -> None:
         source_lane=bot.RESEARCH_LANE_AI_SCAN,
     )
     assert len(calls) == 1
-    assert calls[0]["direction"] == "NO_TRADE"
-    assert calls[0]["decision"] == "REJECT"
-    assert calls[0]["approved"] is False
+    assert calls[0]["direction"] == "LONG"
+    assert calls[0]["decision"] == "APPROVE"
+    assert calls[0]["execution_tier"] == "STRONG_APPROVE"
+    assert calls[0]["approved"] is True
+
+
+def test_non_research_textual_reject_remains_fail_closed(monkeypatch) -> None:
+    """The score-led exception must never widen non-research/live execution."""
+    monkeypatch.setattr(bot, "is_research_data_collection", lambda: False)
+    ai = {
+        "decision": "REJECT",
+        "raw_decision": "REJECT",
+        "approved": False,
+        "direction": "SHORT",
+        "candidate_direction": "SHORT",
+        "long_score": 35,
+        "short_score": 65,
+    }
+    assert bot.continuous_score_gap_execution_tier(ai) == "REJECT"
+
+
+def test_non_research_low_gap_keeps_execution_floor(monkeypatch) -> None:
+    """Research-only admission must not widen non-research/live routing."""
+    monkeypatch.setattr(bot, "is_research_data_collection", lambda: False)
+    ai = {
+        "decision": "APPROVE",
+        "approved": True,
+        "direction": "SHORT",
+        "candidate_direction": "SHORT",
+        "long_score": 50,
+        "short_score": 53,
+    }
+    assert bot.continuous_score_gap_execution_tier(ai) == "REJECT"
 
 
 def test_zero_gap_remains_rejected(monkeypatch) -> None:

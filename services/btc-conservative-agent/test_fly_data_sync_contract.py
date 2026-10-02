@@ -327,6 +327,58 @@ def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
     assert completeness_check < ack_body < page_ack < ack_request < exact_acceptance < post_ack_fence < analyzer_publish
 
 
+def test_finalize_response_receipt_is_atomic_durable_and_precedes_validation():
+    ack_request = SYNC_SCRIPT.index('-Stage "acknowledgement_finalize"')
+    receipt = SYNC_SCRIPT.index('$finalizeReceipt = [ordered]@{', ack_request)
+    validation = SYNC_SCRIPT.index('$ackExpected = [int]$manifest.file_count', receipt)
+    post_ack_fence = SYNC_SCRIPT.index('-Stage "manifest_post_ack_identity"', validation)
+    receipt_body = SYNC_SCRIPT[receipt:validation]
+
+    assert '$finalizeReceiptPath = Join-Path $targetRoot ".fly-sync-ack-finalize-receipt.json"' in SYNC_SCRIPT
+    assert 'schema = "fly_sync_ack_finalize_response_receipt_v1"' in receipt_body
+    for field in (
+        "inventory_generation_id", "inventory_sha256", "inventory_generated_at",
+        "inventory_file_count", "manifest_page_count", "ack_session_id", "accepted",
+        "rejected_count", "source_git_rev", "collection_epoch_id",
+        "tile_registry_signature", "response_received_at",
+    ):
+        assert f"  {field} =" in receipt_body
+    assert 'Publish-MirrorCandidate `' in receipt_body
+    assert '-Candidate $finalizeReceiptTmp `' in receipt_body
+    assert '-Destination $finalizeReceiptPath' in receipt_body
+    assert receipt < validation < post_ack_fence
+    assert "evidence that FINALIZE returned, not proof of complete parity" in SYNC_SCRIPT[
+        ack_request:validation
+    ]
+
+
+def test_sync_timestamp_normalizes_string_datetime_and_datetimeoffset():
+    function_start = SYNC_SCRIPT.index("function Convert-FlySyncTimestamp")
+    function_end = SYNC_SCRIPT.index("\nfunction Test-DataSyncResourcePressureError", function_start)
+    body = SYNC_SCRIPT[function_start:function_end]
+
+    assert "$Value -is [DateTimeOffset]" in body
+    assert "$Value -is [DateTime]" in body
+    assert "[DateTimeOffset]::TryParse(" in body
+    assert "[Globalization.CultureInfo]::InvariantCulture" in body
+    assert "[Globalization.DateTimeStyles]::AssumeUniversal" in body
+    assert "$timestamp.ToUniversalTime().ToString(" in body
+    assert '(Convert-FlySyncTimestamp $ack.inventory_generated_at) -cne $inventoryGeneratedAt' in SYNC_SCRIPT
+
+
+def test_finalize_receipt_does_not_weaken_mismatched_identity_failure():
+    receipt = SYNC_SCRIPT.index('$finalizeReceipt = [ordered]@{')
+    mismatch = SYNC_SCRIPT.index(
+        'throw "Fly sync acknowledgement did not bind to the requested inventory generation."',
+        receipt,
+    )
+    post_ack = SYNC_SCRIPT.index(
+        'Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest',
+        mismatch,
+    )
+    assert receipt < mismatch < post_ack
+
+
 def test_paged_ack_stages_every_bounded_page_before_one_complete_generation_commit():
     ack_v3 = BOT[
         BOT.index("def _data_sync_ack_v3(body: dict)"):
@@ -1730,7 +1782,12 @@ def test_sqlite_snapshot_client_binds_one_request_and_validates_server_identity(
         SYNC_SCRIPT.index("function Set-SqliteSnapshotLease"):
         SYNC_SCRIPT.index("# The long-running loop already performs",)
     ]
-    assert '$requestId = [guid]::NewGuid().ToString("N")' in lease_body
+    # Normal runs generate one id; an explicitly supplied recovery map may
+    # reuse a matching id so an interrupted snapshot flight can be resumed
+    # without creating a second server-side build.  Both paths must retain
+    # the same identity fence and a single fresh-id fallback.
+    assert '[guid]::NewGuid().ToString("N")' in lease_body
+    assert '$preseededSqliteRequestIds.ContainsKey($rel)' in lease_body
     assert '"&request_id=$requestId"' in lease_body
     assert '"&inventory_generation_id=$inventoryGenerationId"' in lease_body
     assert '"&inventory_sha256=$inventorySha256"' in lease_body

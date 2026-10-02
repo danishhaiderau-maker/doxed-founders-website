@@ -74,3 +74,120 @@ def test_global_hook_emits_before_failing_logger(monkeypatch):
     except OSError:
         pass
     assert events == ['receipt', 'logger']
+
+
+def test_provider_result_receipt_records_error_and_source_identity():
+    import ast
+    import threading
+    import time
+    from pathlib import Path
+
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "_record_ai_provider_result_receipt"
+    )
+    state = {}
+    env = {"state": state, "state_lock": threading.RLock(), "time": time}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), env)
+    env["_record_ai_provider_result_receipt"](
+        {
+            "source": "ERROR",
+            "ai_error": True,
+            "synthetic_response": False,
+            "shared_ai_call_id": "call-1",
+        }
+    )
+    assert state["last_ai_provider_result_source"] == "ERROR"
+    assert state["last_ai_provider_result_error"] is True
+    assert state["last_ai_provider_result_status"] == "ERROR"
+    assert state["last_ai_provider_evaluation_error"] is None
+    assert state["last_ai_provider_result_synthetic"] is False
+    assert state["last_ai_provider_result_call_id"] == "call-1"
+    assert state["last_ai_provider_result_ts"] > 0
+
+
+def test_post_provider_evaluation_error_annotation_preserves_call_identity():
+    import ast
+    import threading
+    from pathlib import Path
+
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "_record_ai_provider_evaluation_error"
+    )
+    state = {
+        "last_ai_provider_result_call_id": "call-1",
+        "last_ai_provider_evaluation_error": None,
+    }
+    env = {"state": state, "state_lock": threading.RLock()}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), env)
+    env["_record_ai_provider_evaluation_error"]("ValueError", "call-1")
+    assert state["last_ai_provider_evaluation_error"] == "ValueError"
+    env["_record_ai_provider_evaluation_error"]("RuntimeError", "other-call")
+    assert state["last_ai_provider_evaluation_error"] == "ValueError"
+
+
+def test_provider_boundary_contract_distinguishes_cassette_and_post_provider_failure():
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    evaluate = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "evaluate_signal_with_ai"
+    )
+    provider_calls = [
+        n for n in ast.walk(evaluate)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_record_ai_provider_result_receipt"
+    ]
+    # Exactly one call records a successful provider/cassette result and one
+    # records an attempted provider failure; later gate errors must not call it.
+    assert len(provider_calls) == 2
+    assert '"source": "CASSETTE" if cassette_resp else "FRESH"' in source
+    assert '"synthetic_response": bool(cassette_resp)' in source
+    assert '"provider_result_status": "SUCCEEDED"' in source
+    assert 'ai_result["provider_evaluation_error"] = type(e).__name__' in source
+    assert 'ai_result["provider_result_status"] = "NOT_CALLED"' in source
+    assert "_record_ai_provider_evaluation_error" in source
+
+
+def test_provider_receipt_precedes_success_telemetry_and_exports_explicit_error_fields():
+    from pathlib import Path
+
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    block = source.split("cassette_resp = None", 1)[1].split(
+        'logger.info(f"[AI RAW RESPONSE]', 1
+    )[0]
+    assert block.index("_record_ai_provider_result_receipt(provider_result_meta)") < block.index(
+        "log_pipeline_event("
+    )
+    error_log = source.split("def log_ai_error_row", 1)[1].split(
+        "def log_ai_tranche_outcome", 1
+    )[0]
+    assert '"ai_error": bool(ai_result.get("ai_error", False))' in error_log
+    assert '"provider_evaluation_error": ai_result.get("provider_evaluation_error")' in error_log
+
+
+def test_provider_provenance_is_in_durable_ai_log_rows():
+    from pathlib import Path
+
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    input_log = source.split("def log_ai_input_full", 1)[1].split(
+        "def _compose_ai_history_reason", 1
+    )[0]
+    error_log = source.split("def log_ai_error_row", 1)[1].split(
+        "def log_ai_tranche_outcome", 1
+    )[0]
+    for block in (input_log, error_log):
+        assert "provider_result_status" in block
+        assert "synthetic_response" in block
+        assert "shared_ai_call_id" in block

@@ -1,0 +1,14 @@
+{
+  "ok": false,
+  "inProgress": false,
+  "ackPending": true,
+  "completionAuthority": "NONE_TRANSFER_PROGRESS_ONLY",
+  "inventoryGenerationId": "fb7bdfca19f0a25f5736f67f13862f1e5648d98b78f1b18358211999fcf1e6d8",
+  "collectionEpochId": "epoch-7161f943f3209b89cc66d95b",
+  "sourceRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "deployedRevision": "f84fff81e2905fcf38d5f02f348bd8d9ee655816",
+  "tileRegistrySignature": "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+  "failureCode": "SYNC_CHILD_EXCEPTION",
+  "transferError": "System.Management.Automation.RuntimeException: SQLite snapshot lease failed for v3/qualification_horizon_index.sqlite3: Fly data-sync stage=sqlite_snapshot_lease failed after terminal snapshot lease attempt(s): Response status code does not indicate success: 503 (SERVICE UNAVAILABLE).",
+  "transferErrorType": "System.Management.Automation.RuntimeException"
+}
