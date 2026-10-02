@@ -68,7 +68,11 @@ $laptopFollowDeny = @(
   '^services/btc-signal-engine/',
   '^fly\.toml$',
   '^Dockerfile',
-  '^\.github/'
+  # Workflows never run on the laptop; only the ones that deploy or arm Fly mean
+  # master carries an undeployed Fly change.
+  '^\.github/workflows/fly-bot-deploy\.yml$',
+  '^\.github/workflows/rearm-live-copy\.yml$',
+  '^\.github/workflows/sync-btc-research-bot\.yml$'
 )
 $laptopFollowStamp = Join-Path $cfg.StateDir 'v2c-laptop-follow.fetch.txt'
 
