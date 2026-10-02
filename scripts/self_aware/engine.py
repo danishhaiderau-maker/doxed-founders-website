@@ -95,7 +95,16 @@ class Engine:
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
         findings = [f.to_dict() for f in found]
         repairs = repair.run(self.paths, self.facts, findings, self.state, enabled=self.repair_enabled)
-        flush = self._emit(alarms.events_for(changes, now))
+        alarm_changes = changes
+        if not self.emit_alarms:
+            self.state["alarm_baseline_at"] = None
+        elif not self.state.get("alarm_baseline_at"):
+            # Transitions seen while alarms were off never reached Alerts: publish what is open now, once.
+            alarm_changes = [c for c in changes if c["kind"] != "CLEARED"] + [
+                {"at": iso(now), "kind": "OPENED", "id": fd["id"], "from": "GREEN", "to": fd["severity"], "finding": fd}
+                for fd in findings if fd["severity"] in ("AMBER", "RED") and fd["id"] not in {c["id"] for c in changes}]
+            self.state["alarm_baseline_at"] = now
+        flush = self._emit(alarms.events_for(alarm_changes, now))
         verdict = diagnose.verdict(found)
         sig = diagnose.signals(self.facts)
         rt = self.facts.get("runtime") or {}

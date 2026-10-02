@@ -218,6 +218,22 @@ def test_digest_alarm_amber_then_clear():
     assert alarms.digest_event({"headline": "h", "attention": False}, False, NOW) is None
 
 
+def test_first_alarm_enabled_pass_publishes_open_findings(paths, store, monkeypatch):
+    from self_aware import engine as eng_mod
+
+    found = [diagnose.Finding("prog.analyzer", "t", "progress", "AMBER", "slow", "fast"),
+             diagnose.Finding("inv.custody", "t", "invariant", "GREEN", "ok", "ok")]
+    monkeypatch.setattr(eng_mod, "collect", lambda *a, **k: _facts())
+    monkeypatch.setattr(eng_mod.diagnose, "run", lambda *a, **k: found)
+    quiet = eng_mod.Engine(paths, store=store, probe_local=False, repair_enabled=False, emit_alarms=False)
+    quiet.job_diagnose()
+    loud = eng_mod.Engine(paths, store=store, probe_local=False, repair_enabled=False, emit_alarms=True)
+    loud.job_diagnose()
+    loud.job_diagnose()
+    lines = [json.loads(x) for x in (paths.chain / "health" / "alarms.jsonl").read_text().splitlines()]
+    assert [(x["check"], x["event"]) for x in lines] == [("selfaware.prog.analyzer", "AMBER")]
+
+
 # ----------------------------------------------------------------- repair
 
 def test_repair_flags_trading_and_never_executes(paths):
