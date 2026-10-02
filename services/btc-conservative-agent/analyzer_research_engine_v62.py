@@ -21448,6 +21448,70 @@ def _same_publication_dynamic_report(legacy_report, scorecard, expected_generati
     return report
 
 
+def _protection_replay_window_from_reports():
+    report = _load_json_report(os.path.join(
+        os.getenv("BTC_AGENT_REPORT_DIR") or ".", SAFE_POLICY_GENOME_V3_REPORT_FILE,
+    ), {}) or {}
+    started = globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+    try:
+        generated = datetime.fromisoformat(
+            str(report.get("generated_at")).replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError):
+        generated = None
+    if started and (generated is None or generated < float(started)):
+        return None
+    window = (report.get("candidate_screen") or {}).get("input_window")
+    return window if isinstance(window, dict) and window else None
+
+
+def _attach_generation_receipt(manifest, *, optional_errors):
+    from research.generation_receipt import (
+        RECEIPT_FILE,
+        build_generation_receipt,
+        write_generation_receipt,
+    )
+
+    input_blockers = None
+    try:
+        from research.input_blockers import collect_input_blockers
+
+        input_blockers = collect_input_blockers(
+            os.getcwd(), os.getenv("BTC_AGENT_DATA_DIR") or ".",
+        )
+    except ImportError:
+        input_blockers = None
+    except Exception as exc:
+        input_blockers = {
+            "schema": "analyzer_input_blockers_v1", "level": "AMBER",
+            "items": [{"input": "input_blockers", "status": "BLOCKED",
+                       "reason_code": "COLLECTOR_ERROR",
+                       "reason": f"{type(exc).__name__}: {exc}"[:300]}],
+        }
+    receipt = build_generation_receipt(
+        manifest,
+        optional_errors=optional_errors,
+        integrity=_load_json_report(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), {}) or {},
+        input_blockers=input_blockers,
+        protection_replay_window=_protection_replay_window_from_reports(),
+    )
+    write_generation_receipt(os.getcwd(), receipt)
+    manifest["generation_receipt"] = {
+        key: receipt[key] for key in (
+            "schema", "level", "complete", "reasons", "failed_required_studies",
+            "failed_optional_studies", "integrity_status", "protection_replay_window",
+        )
+    }
+    artifacts = manifest.setdefault("text_artifacts", [])
+    if RECEIPT_FILE not in artifacts:
+        artifacts.append(RECEIPT_FILE)
+    print(
+        f"  Generation receipt: {receipt['level']} complete={receipt['complete']} "
+        f"{'; '.join(receipt['reasons']) or 'all studies OK'} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return receipt
+
+
 def write_report_manifest(
     payload=None, *, analysis_provenance=None,
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
@@ -21507,10 +21571,24 @@ def write_report_manifest(
         # the established analyzer cycle or leak a stale policy candidate.
         print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
         policy_cycle_error = f"{type(exc).__name__}: {exc}"
+        try:
+            from research.analyzer_integrity_reconciliation import (
+                mark_analyzer_integrity_unchecked,
+            )
+
+            mark_analyzer_integrity_unchecked(
+                analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
+                policy_cycle_error,
+            )
+            print(f"  Integrity after policy cycle: UNCHECKED {PIPELINE_ENFORCEMENT_TAG}")
+        except Exception as mark_exc:
+            print(f"  ⚠️ Integrity UNCHECKED stamp failed: {type(mark_exc).__name__}: {mark_exc}")
+    cross_world_error = None
     try:
         cross_world_evidence_report()
     except Exception as exc:
         print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
+        cross_world_error = f"{type(exc).__name__}: {exc}"
     if analysis_provenance is None:
         analysis_provenance = _lifecycle_inventory_analysis_provenance()
     if incident_input.enabled:
@@ -22075,6 +22153,12 @@ def write_report_manifest(
             "available_in_generation": False,
             "generation_error": f"{type(exc).__name__}: {exc}",
         }
+    try:
+        _attach_generation_receipt(manifest, optional_errors={
+            "cross_world_evidence": cross_world_error,
+        })
+    except Exception as exc:
+        print(f"  ⚠️ Generation receipt unavailable: {type(exc).__name__}: {exc}")
     if isinstance(payload, dict):
         # The filesystem can retain optional/stale JSON artifacts which are
         # intentionally excluded from this immutable generation.  The summary

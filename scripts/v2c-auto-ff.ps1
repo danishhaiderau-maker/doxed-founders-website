@@ -54,7 +54,65 @@ if ($target -notmatch '^[0-9a-f]{40}$' -or -not $target.StartsWith($flyRev)) { e
 
 $head = ((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)
 $head = ([string]$head).Trim().ToLowerInvariant()
-if ($head -eq $target) { exit 0 }
+
+# Laptop-only follow: [skip ci] merges never trigger a deploy, so without this
+# the analyzer would run stale laptop code until the next Fly deploy (48 h in a
+# freeze). Only commits on top of the deployed revision whose subjects all carry
+# [skip ci] and that touch no Fly runtime path are followed.
+$laptopFollowDeny = @(
+  '^services/btc-conservative-agent/bot\.py$',
+  '^services/btc-conservative-agent/combo_pathway_config\.py$',
+  '^services/btc-conservative-agent/Dockerfile',
+  '^services/btc-conservative-agent/fly\.toml$',
+  '^services/btc-conservative-agent/requirements[^/]*\.txt$',
+  '^services/btc-signal-engine/',
+  '^fly\.toml$',
+  '^Dockerfile',
+  '^\.github/'
+)
+$laptopFollowStamp = Join-Path $cfg.StateDir 'v2c-laptop-follow.fetch.txt'
+
+function Get-LaptopFollowTarget([string]$From, [string]$Deployed) {
+  if ($env:DOXXED_V2C_LAPTOP_FOLLOW -eq '0') { return $null }
+  $last = $null
+  if (Test-Path -LiteralPath $laptopFollowStamp) { $last = ConvertTo-UtcDate ((Get-Content -LiteralPath $laptopFollowStamp -Raw).Trim()) }
+  $fetchEverySec = 300
+  if ($env:DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC -match '^\d+$') { $fetchEverySec = [int]$env:DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC }
+  if (-not $last -or ([datetime]::UtcNow - $last).TotalSeconds -ge $fetchEverySec) {
+    Invoke-NativeQuiet { & git -C $cfg.RepoRoot fetch --quiet origin master } | Out-Null
+    Set-Content -LiteralPath $laptopFollowStamp -Value (Get-UtcNowIso) -NoNewline -Encoding ASCII
+  }
+  $master = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse --verify --quiet 'origin/master^{commit}' }) | Select-Object -First 1)).Trim().ToLowerInvariant()
+  if ($master -notmatch '^[0-9a-f]{40}$' -or $master -eq $From) { return $null }
+  Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $Deployed $master } | Out-Null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $From $master } | Out-Null
+  if ($LASTEXITCODE -ne 0) { return $null }
+  $subjects = @(Invoke-NativeQuiet { & git -C $cfg.RepoRoot log --format=%s "$Deployed..$master" } | Where-Object { $_ })
+  $notSkip = @($subjects | Where-Object { $_ -notmatch '\[skip ci\]' })
+  $paths = @(Invoke-NativeQuiet { & git -C $cfg.RepoRoot diff --name-only $Deployed $master } | Where-Object { $_ })
+  $denied = @($paths | Where-Object { $p = $_; @($laptopFollowDeny | Where-Object { $p -match $_ }).Count -gt 0 })
+  return [pscustomobject]@{ Master = $master; Commits = $subjects.Count; NotSkip = $notSkip.Count; Denied = $denied }
+}
+
+$laptopFollow = $null
+Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $target $head } | Out-Null
+$containsDeployed = ($LASTEXITCODE -eq 0)
+if ($containsDeployed) {
+  $laptopFollow = Get-LaptopFollowTarget -From $head -Deployed $target
+  if (-not $laptopFollow) { exit 0 }
+  if ($laptopFollow.NotSkip -gt 0 -or $laptopFollow.Denied.Count -gt 0) {
+    $skippedFile = Join-Path $cfg.StateDir 'v2c-laptop-follow.skipped.txt'
+    $lastSkipped = if (Test-Path -LiteralPath $skippedFile) { (Get-Content -LiteralPath $skippedFile -Raw).Trim() } else { '' }
+    if ($lastSkipped -ne $laptopFollow.Master) {
+      Write-Receipt 'SKIPPED_LAPTOP_FOLLOW' @{ from = $head; to = $laptopFollow.Master; flyRev = $flyRev; mode = 'laptop_only'
+                                               commits = $laptopFollow.Commits; notSkipCi = $laptopFollow.NotSkip
+                                               denied = ($laptopFollow.Denied -join ',') }
+      Set-Content -LiteralPath $skippedFile -Value $laptopFollow.Master -NoNewline -Encoding ASCII
+    }
+    exit 0
+  }
+}
 
 $cycleLock = $null
 if (-not $CycleLockHeld) {
@@ -75,7 +133,18 @@ try {
   # Already containing the deployed revision (for example scripts-only commits
   # on top of it) is not drift.
   Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $target $head } | Out-Null
-  if ($LASTEXITCODE -eq 0) { exit 0 }
+  if ($LASTEXITCODE -eq 0) {
+    if (-not $laptopFollow) { exit 0 }
+    $followFields = @{} + $fields
+    $followFields['to'] = $laptopFollow.Master
+    $followFields['mode'] = 'laptop_only'
+    $followFields['commits'] = $laptopFollow.Commits
+    Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge --ff-only --quiet $laptopFollow.Master } | Out-Null
+    $after = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)).Trim().ToLowerInvariant()
+    if ($after -ne $laptopFollow.Master) { Write-Receipt 'REFUSED_LAPTOP_FOLLOW_MERGE' ($followFields + @{ after = $after }); exit 3 }
+    Write-Receipt 'FAST_FORWARDED_LAPTOP_ONLY' ($followFields + @{ after = $after })
+    exit 0
+  }
   Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $head $target } | Out-Null
   if ($LASTEXITCODE -ne 0) { Write-Receipt 'REFUSED_NOT_FAST_FORWARD' $fields; exit 3 }
   Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge --ff-only --quiet $target } | Out-Null
