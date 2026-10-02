@@ -32,9 +32,18 @@ DEFAULT_EXPORT_ROOT = r"C:\DoxxedCrypto\analyzer-exports"
 FRESHNESS_MAX_AGE_MIN = 45
 LATEST_POINTER = "latest_export_id.txt"     # not "LATEST": Windows paths are case-insensitive
 TABLES = ("tile_stats", "hypotheses", "hypothesis_trades", "family_tests", "walk_forward", "correlation",
-          "sim_parity", "stream_health", "quarantine")
+          "sim_parity", "stream_health", "quarantine", "main_rankings", "exit_regret", "exit_regret_trades",
+          "taker_counterfactual", "fill_markouts", "research_events", "stream_study_health")
+# Table owned by each staged group (stage_group); a group that did not run exports empty tables.
+GROUP_TABLES = {
+    "main_rankings": ("main_rankings",),
+    "stream_studies": ("exit_regret", "exit_regret_trades", "taker_counterfactual", "fill_markouts",
+                       "research_events", "stream_study_health"),
+}
+TILE_VERDICT_COLUMNS = ("n_tested", "p_holm", "q_bh", "corrected_verdict")
 
 _STAGED: dict = {}
+_GROUPS: dict = {}
 
 
 def export_root() -> str:
@@ -46,6 +55,16 @@ def stage_strategy_lab(payload: Optional[dict], tables: Optional[dict]) -> None:
     _STAGED.clear()
     _STAGED["payload"] = payload or {}
     _STAGED["tables"] = dict(tables or {})
+
+
+def stage_group(group: str, summary: Optional[dict], tables: Optional[dict]) -> None:
+    """Hold a non-lab report group (main rankings, stream studies) for this generation's export."""
+    _GROUPS[group] = {"summary": summary or {}, "tables": dict(tables or {})}
+
+
+def _tile_verdicts(rankings: dict) -> dict:
+    rows = (((rankings or {}).get("families") or {}).get("tiles") or {}).get("rows") or []
+    return {str(r.get("key")): r for r in rows}
 
 
 def _sha256(path: str) -> str:
@@ -171,7 +190,8 @@ def _write_table(df: pd.DataFrame, directory: str, name: str) -> dict:
 
 def _bundle_files(root: str) -> None:
     here = os.path.dirname(os.path.abspath(__file__))
-    for src, dst in (("client.py", "analyzer_client.py"), ("EXPORT_README.md", "README.md")):
+    for src, dst in (("client.py", "analyzer_client.py"), ("insights.py", "insights_client.py"),
+                     ("EXPORT_README.md", "README.md")):
         s = os.path.join(here, src)
         if os.path.isfile(s):
             tmp = os.path.join(root, dst + ".tmp")
@@ -194,11 +214,25 @@ def write_export(*, report_dir: str, data_dir: str, trades: Optional[pd.DataFram
             manifest = {}
     lab = _STAGED.get("payload") or {}
     lab_tables = _STAGED.get("tables") or {}
+    groups = dict(_GROUPS)
+    _GROUPS.clear()
+    rankings = (groups.get("main_rankings") or {}).get("summary") or {}
+    studies = (groups.get("stream_studies") or {}).get("summary") or {}
+    tiles = tile_stats(trades, registry, lanes)
+    verdicts = _tile_verdicts(rankings)
+    for col in TILE_VERDICT_COLUMNS:
+        tiles[col] = [(verdicts.get(str(lane)) or {}).get(col) for lane in tiles.get("research_lane", [])] \
+            if len(tiles) else []
     tables = {
-        "tile_stats": tile_stats(trades, registry, lanes),
+        "tile_stats": tiles,
         "stream_health": stream_health(data_dir, lab, now),
         "quarantine": quarantine_table(report_dir),
     }
+    for group, names in GROUP_TABLES.items():
+        staged = (groups.get(group) or {}).get("tables") or {}
+        for tname in names:
+            df = staged.get(tname)
+            tables[tname] = df if isinstance(df, pd.DataFrame) else pd.DataFrame()
     for name in ("hypotheses", "hypothesis_trades", "family_tests", "walk_forward", "correlation", "sim_parity"):
         df = lab_tables.get(name)
         tables[name] = df if isinstance(df, pd.DataFrame) else pd.DataFrame()
@@ -242,9 +276,17 @@ def write_export(*, report_dir: str, data_dir: str, trades: Optional[pd.DataFram
         },
         "tables": table_meta,
         "strategy_lab": lab_summary,
+        "main_rankings": {k: rankings.get(k) for k in ("status", "schema", "method", "family_summaries",
+                                                       "tile_verdicts", "error")} if rankings else
+        {"status": "NOT_RUN"},
+        "stream_studies": {k: studies.get(k) for k in ("status", "schema", "timing", "cache", "errors", "stream_health",
+                                                       "exit_regret", "taker_counterfactual",
+                                                       "fill_markouts", "research_events")} if studies else
+        {"status": "NOT_RUN"},
         "dashboard": {"export": "http://127.0.0.1:9001/api/export/latest",
                       "hypotheses": "http://127.0.0.1:9001/api/hypotheses",
-                      "streams": "http://127.0.0.1:9001/api/streams/health"},
+                      "streams": "http://127.0.0.1:9001/api/streams/health",
+                      "insights": "http://127.0.0.1:9001/api/insights"},
     }
     from strategy_lab.engine import _clean
 
