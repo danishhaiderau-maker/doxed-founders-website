@@ -44,6 +44,16 @@ RED_CLASSES = ("missing", "sealed_mismatch", "sqlite_corrupt")
 SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 HASH_CACHE_SCHEMA = "research_segment_parity_hash_cache_v1"
 HASH_REVERIFY_SEC = 24 * 3600.0
+DEFAULT_MAX_LOCK_SEC = 600.0
+EXIT_TIMEOUT = 4
+
+
+class ParityTimeout(Exception):
+    """The scan hit its lock budget; digests computed so far stay in the hash cache."""
+
+    def __init__(self, checked: int):
+        super().__init__(f"parity scan exceeded its lock budget after {checked} files")
+        self.checked = checked
 
 
 def _get(base_url: str, prefix: str, route: str, token: str) -> dict:
@@ -97,11 +107,13 @@ class HashCache:
         self.used[relpath] = [st.st_size, st.st_mtime_ns, digest, self.now]
         return digest
 
-    def save(self) -> None:
+    def save(self, keep_unused: bool = False) -> None:
+        """Persist digests; a partial (timed-out) scan keeps entries it did not reach."""
         if self.path is None:
             return
+        entries = {**self.entries, **self.used} if keep_unused else self.used
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"schema": HASH_CACHE_SCHEMA, "entries": self.used}, sort_keys=True),
+        tmp.write_text(json.dumps({"schema": HASH_CACHE_SCHEMA, "entries": entries}, sort_keys=True),
                        encoding="utf-8")
         os.replace(tmp, self.path)
 
@@ -115,14 +127,17 @@ def _sqlite_ok(path: Path) -> bool:
 
 
 def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baselines: dict,
-             pruned: dict[str, str] | None = None, hashes: HashCache | None = None) -> dict:
+             pruned: dict[str, str] | None = None, hashes: HashCache | None = None,
+             deadline: float | None = None) -> dict:
     local = {path.relative_to(tree).as_posix(): path for path in tree.rglob("*") if path.is_file()}
     pruned = pruned or {}
     hashes = hashes or HashCache(None)
     buckets: dict[str, list] = {name: [] for name in (
         "append_match", "snapshot_match", "sqlite_ok", "baseline_only", "pruned_verified",
         "missing", "sealed_mismatch", "sqlite_corrupt", "local_only")}
-    for relpath, entry in sorted(files.items()):
+    for checked, (relpath, entry) in enumerate(sorted(files.items())):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ParityTimeout(checked)
         path = local.get(relpath)
         if entry.get("baseline") and entry.get("class") == "snapshot":
             buckets["baseline_only"].append(relpath)
@@ -166,6 +181,10 @@ def main(argv=None) -> int:
     parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
     parser.add_argument("--report", required=True)
     parser.add_argument("--retention-dir", default=r"C:\DoxxedCrypto\bot-data-retention")
+    parser.add_argument("--max-lock-seconds", type=float,
+                        default=float(os.getenv("RESEARCH_PARITY_MAX_LOCK_SEC") or DEFAULT_MAX_LOCK_SEC),
+                        help="give the shadow-root lock back after this long (0 = unbounded); the hash "
+                             "cache keeps progress so the next run resumes faster")
     args = parser.parse_args(argv)
     token = os.environ.get("BOT_ADMIN_TOKEN") or ""
     if not token:
@@ -180,7 +199,9 @@ def main(argv=None) -> int:
         print(json.dumps({"verdict": "RETRY", "reason": "a puller run holds the shadow-root lock"}))
         return 3
     locked_at = time.monotonic()
+    deadline = locked_at + args.max_lock_seconds if args.max_lock_seconds else None
     hashes = HashCache(shadow_root / ".puller" / "parity-hash-cache.json")
+    attempt_path = Path(args.report).with_name("parity-last-attempt.json")
     try:
         state = json.loads((shadow_root / ".puller" / "state.json").read_text(encoding="utf-8"))
         checkpoint = _get(args.base_url, args.prefix, "files", token)
@@ -191,17 +212,34 @@ def main(argv=None) -> int:
             return 3
         from bot_data_retention import pruned_index
 
-        report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
-                          shadow_root / "tree", state.get("baselines") or {},
-                          pruned_index(args.retention_dir), hashes)
-        hashes.save()
+        try:
+            report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
+                              shadow_root / "tree", state.get("baselines") or {},
+                              pruned_index(args.retention_dir), hashes, deadline)
+        except ParityTimeout as exc:
+            hashes.save(keep_unused=True)
+            timeout = {"verdict": "TIMEOUT", "checked": exc.checked, "tracked_files": len(checkpoint["files"]),
+                       "max_lock_seconds": args.max_lock_seconds}
+            report = None
+        else:
+            hashes.save()
     finally:
         lock.release()
     released_at = time.monotonic()
+    timing = {"lock_held_sec": round(released_at - locked_at, 1), "elapsed_sec": round(released_at - started, 1),
+              "hashed": hashes.hashed, "hash_cache_hits": hashes.hits}
+    attempt = {"schema": SCHEMA + "_attempt", "generated_at": datetime.now(timezone.utc).isoformat(),
+               "prefix": args.prefix, "seq": state["applied_seq"], "timing": timing}
+    if report is None:
+        # parity-latest.json keeps the last completed verdict; the timeout is reported separately.
+        attempt.update(timeout)
+        attempt_path.write_text(json.dumps(attempt, indent=2, sort_keys=True), encoding="utf-8")
+        print(json.dumps({k: attempt[k] for k in ("verdict", "checked", "tracked_files", "seq", "timing")}))
+        return EXIT_TIMEOUT
+    attempt["verdict"] = report["verdict"]
+    attempt_path.write_text(json.dumps(attempt, indent=2, sort_keys=True), encoding="utf-8")
     report.update({
-        "timing": {"lock_held_sec": round(released_at - locked_at, 1),
-                   "elapsed_sec": round(released_at - started, 1),
-                   "hashed": hashes.hashed, "hash_cache_hits": hashes.hits},
+        "timing": timing,
         "schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(),
         "prefix": args.prefix, "seq": state["applied_seq"],
         "manifest_sha256": state["last_manifest_sha256"], "baseline": checkpoint.get("baseline"),
