@@ -52,14 +52,19 @@ function Receive-FlyTransportBundles {
   $complete = $false
   $started = $false
   $files = 0
+  $verifiedBytes = [int64]0
+  $reusedBytes = [int64]0
   $lastIndexWait = -1.0
+  $verifiedPackages = 0
+  $lastWaitPackages = 0
+  $lastIdleWait = -1.0
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     if (-not $process.Start()) { throw 'BUNDLE_CHILD_START_FAILED' }
     $started = $true
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credential goes through a private pipe, never process arguments or disk.
-    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror }
+    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror; checkpoint_root=(Join-Path $workspace '.batch-transfer-descriptor-cache') }
     $inputTask = $process.StandardInput.WriteAsync(($request | ConvertTo-Json -Depth 40 -Compress))
     if (-not $inputTask.Wait(30000)) { throw 'BUNDLE_CHILD_INPUT_TIMEOUT' }
     $process.StandardInput.Close()
@@ -74,21 +79,58 @@ function Receive-FlyTransportBundles {
       if ($line.Length -gt 2097152) { throw 'BUNDLE_RECEIPT_LIMIT' }
       $receipt = $line | ConvertFrom-Json
       if ($receipt.schema -cne 'fly_bundle_staging_receipt_v1') { throw 'BUNDLE_RECEIPT_SCHEMA' }
-      if ($receipt.status -ceq 'FAILED') { throw ('BUNDLE_TRANSFER_FAILED: ' + [string]$receipt.error) }
+      if ($receipt.status -ceq 'FAILED') {
+        $code = [string]$receipt.error
+        if ($code -cnotmatch '^[A-Z][A-Z0-9_]{1,95}$') { $code = 'BUNDLE_CLIENT_FAILED' }
+        $d = $receipt.diagnostic
+        $allowed = @('generation_id','package_sha256','phase','offset','attempts','http_status','transport_error')
+        if ($null -ne $d -and @($d.PSObject.Properties.Name).Count -eq 7 -and
+            @($d.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -eq 0 -and
+            $d.generation_id -ceq $Manifest.inventory_generation_id -and $d.package_sha256 -cmatch '^[0-9a-f]{64}$' -and
+            $d.attempts -is [long] -and $d.attempts -ge 1 -and $d.attempts -le 5 -and
+            (($d.phase -ceq 'DESCRIPTOR' -and $null -eq $d.offset) -or ($d.phase -ceq 'CHUNK' -and $d.offset -is [long] -and $d.offset -ge 0 -and $d.offset -le 67108864)) -and
+            (($null -eq $d.transport_error -and $d.http_status -is [long] -and $d.http_status -in @(429,502,503,504)) -or
+             ($null -eq $d.http_status -and $d.transport_error -cin @('TIMEOUT','CONNECTION_ERROR')))) {
+          Write-Host ('[FLY SYNC] failure_context=' + ($d | ConvertTo-Json -Compress))
+        }
+        $ix = $receipt.index_diagnostic
+        $indexKeys = @('generation_id','phase','attempts','http_status','transport_error')
+        if ($code -ceq 'BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN' -and $null -ne $ix -and
+            @($ix.PSObject.Properties.Name).Count -eq 5 -and
+            @($ix.PSObject.Properties.Name | Where-Object { $_ -cnotin $indexKeys }).Count -eq 0 -and
+            $ix.generation_id -is [string] -and $ix.generation_id -cmatch '^[0-9a-f]{64}$' -and
+            $ix.generation_id -ceq $Manifest.inventory_generation_id -and $ix.phase -ceq 'INDEX' -and
+            $ix.attempts -is [long] -and $ix.attempts -eq 2 -and
+            (($null -eq $ix.transport_error -and $ix.http_status -is [long] -and $ix.http_status -in @(429,502,503,504)) -or
+             ($null -eq $ix.http_status -and $ix.transport_error -cin @('TIMEOUT','CONNECTION_ERROR')))) {
+          Write-Host ('[FLY SYNC] index_failure_context=' + ($ix | ConvertTo-Json -Compress))
+        }
+        throw ('BUNDLE_TRANSFER_FAILED: ' + $code)
+      }
       if ($receipt.status -ceq 'INDEX_WAITING') {
-        if ($complete -or $files -ne 0) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
+        if ($complete) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
         foreach ($field in @('inventory_generation_id','inventory_sha256','source_git_rev','collection_epoch_id','tile_registry_signature')) {
           if ([string]$receipt.generation.$field -cne [string]$Manifest.$field) { throw 'BUNDLE_RECEIPT_IDENTITY' }
         }
         $elapsed = [double]$receipt.elapsed_seconds
         $retry = [double]$receipt.next_retry_seconds
         if ([double]::IsNaN($elapsed) -or [double]::IsInfinity($elapsed) -or
-            $elapsed -lt 0 -or $elapsed -gt 600 -or $elapsed -lt $lastIndexWait -or
+            $elapsed -lt 0 -or $elapsed -ge 1800 -or $elapsed -lt $lastIndexWait -or
             [double]::IsNaN($retry) -or [double]::IsInfinity($retry) -or $retry -le 0 -or $retry -gt 30) {
           throw 'BUNDLE_INDEX_WAIT_INVALID'
         }
         $lastIndexWait = $elapsed
-        & $Progress 0 'bundle_index_wait'
+        if ($receipt.PSObject.Properties.Name -contains 'idle_elapsed_seconds') {
+          $idle = $receipt.idle_elapsed_seconds
+          if (($idle -isnot [double] -and $idle -isnot [long]) -or [double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
+              $idle -lt 0 -or $idle -ge 600 -or $idle -gt $elapsed -or
+              $receipt.verified_packages -isnot [long] -or $receipt.verified_packages -ne $verifiedPackages -or
+              $retry -gt (600 - $idle) -or $retry -gt (1800 - $elapsed) -or
+              ($verifiedPackages -eq $lastWaitPackages -and $idle -lt $lastIdleWait)) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
+          $lastIdleWait = $idle
+          $lastWaitPackages = $verifiedPackages
+        } elseif ($elapsed -gt 600) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
+        & $Progress $files 'bundle_index_wait' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes })
         continue
       }
       if ($receipt.status -ceq 'COMPLETE') {
@@ -140,8 +182,11 @@ function Receive-FlyTransportBundles {
           mtime_ns=[int64]$row.mtime_ns; synced_at=[DateTimeOffset]::UtcNow.ToString('o');
           full_sha256=[string]$member.sha256; transport='GENERATION_BOUND_BUNDLE' }
         $files += 1
+        $verifiedBytes += [int64]$row.size
+        if ($reusedLocal) { $reusedBytes += [int64]$row.size }
       }
       & $SaveCheckpoint
+      $verifiedPackages += 1
       # These are transport scratch copies, not Fly evidence or the canonical
       # mirror. Reclaim only this verified package after durable checkpointing.
       if (-not $reusedLocal) {
@@ -163,11 +208,16 @@ function Receive-FlyTransportBundles {
         Remove-Item -LiteralPath $package -Force -ErrorAction Stop
       }
       }
-      & $Progress $files 'bundle_verified'
+      & $Progress $files 'bundle_verified' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes })
     }
     if (-not $process.WaitForExit(5000)) { throw 'BUNDLE_CHILD_EXIT_TIMEOUT' }
     if ($process.ExitCode -ne 0 -or -not $complete) { throw 'BUNDLE_TERMINAL_RECEIPT_MISSING' }
     return [pscustomobject]@{ Files=$files; StagingRoot=$stage; AckSent=$false }
+  } catch {
+    $failureCode = 'BUNDLE_TRANSFER_FAILED'
+    if ($_.Exception.Message -cmatch '^BUNDLE_TRANSFER_FAILED: ([A-Z][A-Z0-9_]{1,95})$') { $failureCode = $Matches[1] }
+    try { & $Progress $files 'bundle_failed' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes; Failed=$true; FailureCode=$failureCode }) } catch { }
+    throw
   } finally {
     if ($started -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit(5000) | Out-Null }
     $process.Dispose()

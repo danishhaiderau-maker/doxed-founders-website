@@ -967,7 +967,12 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                     # Store causal.direction denotes raw AI direction. An
                     # explicitly different executed side is not a conflict.
                     if row.get("raw_direction") not in (None, ""):
-                        consistent("raw_ai_direction", row.get("raw_direction"), causal.get("direction"))
+                        # Collector's causal projection retains only LONG/SHORT;
+                        # explicit NO_TRADE is represented there as UNKNOWN.
+                        # Keep the raw decision unchanged and admit only this
+                        # exact producer-defined sentinel pair, never opposite sides.
+                        if not (row.get("raw_direction") == "NO_TRADE" and causal.get("direction") == "UNKNOWN"):
+                            consistent("raw_ai_direction", row.get("raw_direction"), causal.get("direction"))
                     direction = row.get("direction") or row.get("raw_direction")
                 else:
                     direction = consistent(

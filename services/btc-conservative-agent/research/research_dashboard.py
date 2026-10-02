@@ -2217,6 +2217,15 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     """Expose canonical signed V3.1 candidates, never retired V2.2 leaders."""
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
+    if not report or report.get("report_unavailable") or report.get("schema") == "current_generation_report_unavailable_v1":
+        return {
+            "schema": "current_policy_grid_v3_1", "source_available": False,
+            "status": "SOURCE_UNAVAILABLE", "rows": [], "diagnostic_rows": [],
+            "rows_available": None, "policy_search_statistics": None,
+            "policy_episode_split": None, "search_counts": None, "evidence": None,
+            "live_policy_change_allowed": False, "blockers": source["blockers"],
+            "warning": "UNAVAILABLE — no declared atomic policy report. Whether profitable policies exist has not been established.",
+        }
     rows = []
     all_candidates = list(screen.get("descriptive_top_100") or [])
     if "profitable_conservative_top_100" in screen:
@@ -2428,6 +2437,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     }
     return {
         "schema": "current_policy_grid_v3_1",
+        "source_available": True,
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
@@ -2480,7 +2490,7 @@ def _combos_payload():
         "schema": "top_combinations_dashboard_v3_1",
         "current_evidence_source": "safe_policy_genome_v3_report.json",
         "generated_at": (_safe_policy_v3_dashboard_source()["report"] or {}).get("generated_at"),
-        "total_combos": len(current_top),
+        "total_combos": len(current_top) if policy_grid["source_available"] else None,
         "min_trades": None,
         "dimensions": ["entry", "chase", "fill", "exit", "protection", "regime"],
         "filter_note": (
@@ -2489,7 +2499,7 @@ def _combos_payload():
         ),
         "top": current_top,
         "policy_grid": policy_grid,
-        "source_available": bool(_safe_policy_v3_dashboard_source()["report"]),
+        "source_available": policy_grid["source_available"],
         "legacy_executed_combos": {
             "source_available": bool(rep),
             "status": "DESCRIPTIVE_LEGACY_EXCLUDED_FROM_V3_1_QUALIFICATION",
@@ -4707,7 +4717,7 @@ def api_research_design():
     coverage_available = isinstance(coverage, dict)
     coverage = coverage if coverage_available else {
         "schema": "phase7_regime_feature_coverage_v1",
-        "row_count": 0,
+        "row_count": None,
         "dimensions": [],
         "status": "UNKNOWN_CURRENT_GENERATION",
         "qualification_allowed": False,
@@ -4728,8 +4738,8 @@ def api_research_design():
             )
         }
         row["replay_summary"] = replay_summaries.get(definition["baseline_id"]) or {
-            "opportunities": 0, "full_fills": 0, "partial_fills": 0,
-            "no_fills": 0, "unknown": 0,
+            "opportunities": None, "full_fills": None, "partial_fills": None,
+            "no_fills": None, "unknown": None,
         }
         baselines.append(row)
     available = (
@@ -4752,7 +4762,7 @@ def api_research_design():
         "entry_baselines": baselines,
         "entry_baseline_replay": baseline_replay or {
             "schema": "entry_baseline_same_opportunity_replay_v1",
-            "same_opportunity_count": 0,
+            "same_opportunity_count": None,
             "summaries": {},
             "status": "UNKNOWN_CURRENT_GENERATION",
             "reason": baseline_source.get("reason") or "REPORT_UNAVAILABLE",
@@ -6686,6 +6696,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Exit Combinations</h2>
     <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
+    <details id="exit-combos-detail-inventory" open>
+    <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
     <p class="note">Low-dimensional family comparison. EV is divided by independent shared opportunities, not correlated family children. Missing values remain missing.</p>
     <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-body"></tbody></table>
@@ -6770,6 +6782,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Conservative PnL</th><th>EV</th></tr></thead><tbody id="exit-conservative-combos-body"></tbody></table>
     <h3>Ideal-touch diagnostic exits — not fill evidence</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Diagnostic PnL</th><th>EV</th></tr></thead><tbody id="exit-ideal-touch-combos-body"></tbody></table>
+    </details>
   </section>
   <section id="sec-exit-reason-leak">
     <h2>Exit Peak-to-Close Gap (Combined Lanes)</h2>
@@ -7533,7 +7546,7 @@ async function loadCombos() {
     if (note) note.textContent = missingResearchSource();
     document.getElementById('combos-body').innerHTML = `<tr><td colspan="9">${missingResearchSource()}</td></tr>`;
   }
-  if (d.source_available === false) {
+  if (d.source_available === false || pg.source_available === false) {
     document.getElementById('policy-grid-kpis').innerHTML = '';
     if (pgNote) pgNote.textContent = missingResearchSource();
     document.getElementById('policy-grid-body').innerHTML = `<tr><td colspan="16">${missingResearchSource()}</td></tr>`;
@@ -7560,6 +7573,18 @@ async function loadSpreadPerf() {
 
 function executionPanelSource(section, payload) {
   const root = document.getElementById('sec-' + section);
+  if (section === 'exit-combos') {
+    const inventory = document.getElementById('exit-combos-detail-inventory');
+    if (inventory) inventory.open = payload.source_available !== false;
+    if (payload.source_available === false) {
+      document.getElementById('exit-combos-note').textContent = 'Exit analysis unavailable: ' + (payload.empty_reason || 'no declared atomic report') + '. No strategy or measured results can be shown until a valid atomic report is published. Detailed table labels remain below; historical artifacts remain in Report Explorer.';
+      root.querySelectorAll('tbody').forEach(node => node.innerHTML = '<tr><td colspan="20">UNAVAILABLE — no declared atomic report.</td></tr>');
+      root.querySelectorAll('.kpis').forEach(node => node.innerHTML = '');
+      const previous = root.querySelector('.execution-source-identity');
+      if (previous) previous.textContent = '';
+      return false;
+    }
+  }
   if (payload.source_available === false) {
     root.querySelectorAll('tbody').forEach(node => node.innerHTML = '<tr><td colspan="20">UNAVAILABLE — no declared atomic report. Historical artifacts remain in Report Explorer.</td></tr>');
     root.querySelectorAll('.kpis').forEach(node => node.innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>');
@@ -7980,6 +8005,8 @@ async function loadResearchDesign() {
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
   const banner = document.getElementById('research-design-banner');
+  const cards = rows => rows.map(([label, value]) =>
+    `<div class="kpi"><small>${escape(label)}</small><div>${escape(value)}</div></div>`).join('');
   const baselineBody = document.getElementById('research-baseline-body');
   const coverageBody = document.getElementById('research-regime-coverage-body');
   try {
@@ -7996,8 +8023,8 @@ async function loadResearchDesign() {
     const coverage = d.regime_feature_coverage || {};
     document.getElementById('research-design-kpis').innerHTML = cards([
       ['Signed baselines', (d.entry_baselines || []).length],
-      ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 0],
-      ['Evaluator rows', coverage.row_count ?? 0],
+      ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 'UNKNOWN'],
+      ['Evaluator rows', coverage.row_count ?? 'UNKNOWN'],
       ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
       ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
     ]);
@@ -8007,10 +8034,10 @@ async function loadResearchDesign() {
       `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
       `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
       `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
-      `N ${row.replay_summary?.opportunities ?? 0} · full ${row.replay_summary?.full_fills ?? 0} · partial ${row.replay_summary?.partial_fills ?? 0} · no-fill ${row.replay_summary?.no_fills ?? 0} · UNKNOWN ${row.replay_summary?.unknown ?? 0}</small></td></tr>`
+      `N ${row.replay_summary?.opportunities ?? 'UNKNOWN'} · full ${row.replay_summary?.full_fills ?? 'UNKNOWN'} · partial ${row.replay_summary?.partial_fills ?? 'UNKNOWN'} · no-fill ${row.replay_summary?.no_fills ?? 'UNKNOWN'} · UNKNOWN ${row.replay_summary?.unknown ?? 'UNKNOWN'}</small></td></tr>`
     ).join('') || '<tr><td colspan="6">No signed baseline definitions are available; baseline outcomes remain UNKNOWN.</td></tr>';
     coverageBody.innerHTML = (coverage.dimensions || []).map(row =>
-      `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
+      `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 'UNKNOWN'}</td><td>${row.unknown_rows ?? 'UNKNOWN'}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
     ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
   } catch (error) {
     const detail = escape(error?.message || 'unknown response error');

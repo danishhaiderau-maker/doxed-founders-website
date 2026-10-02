@@ -41977,7 +41977,16 @@ def _data_sync_request_async_inventory(
                 str(refresh_nonce),
             )
         )
-        if (
+        # Disk-backed pages cannot be re-admitted merely by serving the async
+        # cache: the independently retained generation may have expired.
+        # This is an O(1) in-memory authority check under the same RLock.
+        disk_authority_available = (
+            not isinstance(_data_sync_async_inventory.get("generation"), dict)
+            or _data_sync_inventory_generation(
+                str(_data_sync_async_inventory.get("generation_id") or "")
+            ) is not None
+        )
+        if disk_authority_available and (
             deliver_completed_generation
             or (not force_refresh and current)
             or matching_completed_refresh

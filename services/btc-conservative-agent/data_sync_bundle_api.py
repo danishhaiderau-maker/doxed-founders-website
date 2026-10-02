@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+from datetime import datetime, timezone
 
 from flask import Response, jsonify, request
 from data_sync_bundle_transport import MAX_PACKAGE_BYTES, SCHEMA as PACKAGE_SCHEMA
@@ -71,6 +72,46 @@ def _metadata(path, expected_sha=None):
     if not isinstance(value, dict):
         raise BundleReadError("PACKAGE_METADATA_INVALID")
     return value
+
+
+def _producer_diagnostic(root, directory, expected, state):
+    """Optional bounded observation; never production liveness or ACK authority."""
+    unknown = {"status": "UNAVAILABLE", "authority": "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"}
+    if state.get("completed") is True:
+        return {**unknown, "status": "NOT_REQUIRED_PACKAGE_COMPLETE"}
+    try:
+        path = _regular_child(root, directory.name, "bundle-coordinator-status.json")
+        before = path.stat()
+        if before.st_size > 16384 or before.st_nlink != 1:
+            return unknown
+        with path.open("rb") as stream:
+            raw = stream.read(16385)
+        after = path.stat()
+        if len(raw) > 16384 or len(raw) != before.st_size or (before.st_ino, before.st_mtime_ns, before.st_size) != (after.st_ino, after.st_mtime_ns, after.st_size):
+            return unknown
+        value = json.loads(raw)
+        identity = {"generation_id": expected["inventory_generation_id"],
+                    **{k: expected[k] for k in ("source_git_rev", "collection_epoch_id", "tile_registry_signature", "page_index_sha256")}}
+        updated = datetime.fromisoformat(value["updated_at"])
+        state_mtime = _regular_child(root, directory.name, "bundle-worker-state.json").stat().st_mtime
+        if (value.get("schema") != "fly_transport_bundle_coordinator_status_v1"
+                or value.get("identity") != identity or value.get("authority") != unknown["authority"]
+                or type(value.get("terminal")) is not bool
+                or value.get("status") not in {"STARTING", "BUILDING", "COMPLETE", "FAILED", "DEFERRED", "STOPPED"}
+                or updated.tzinfo is None or updated.timestamp() > datetime.now(timezone.utc).timestamp()):
+            return unknown
+        from data_sync_bundle_runtime import COORDINATOR_ERRORS
+        result = {**unknown, "status": value["status"], "terminal": value["terminal"], "updated_at": value["updated_at"]}
+        result["scope"] = "LAST_ATTEMPT_NOT_CURRENT_LIVENESS"
+        result["checkpoint_relation"] = (
+            "MATCH" if value.get("cursor") == state.get("cursor") and updated.timestamp() >= state_mtime
+            else "CHECKPOINT_CHANGED_OR_NEWER")
+        for key in ("error", "last_error"):
+            if key in value:
+                result[key] = value[key] if isinstance(value[key], str) and value[key] in COORDINATOR_ERRORS else "BUNDLE_WORKER_FAILURE"
+        return result
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return unknown
 
 
 def register_bundle_routes(app, *, authenticated, generation_lookup, output_root):
@@ -171,7 +212,7 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
         return call
 
     def index(access):
-        generation_id, _, expected, state, entries = context(access)
+        generation_id, directory, expected, state, entries = context(access)
         packages = [
             {k: entry[k] for k in (
                 "package_sha256", "descriptor_sha256", "member_count", "payload_bytes"
@@ -181,6 +222,8 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
         return jsonify({"schema": "fly_runtime_transport_bundle_index_v1",
                         "generation": expected, "generation_id": generation_id,
                         "status": "COMPLETE" if state.get("completed") is True else "BUILDING",
+                        "status_semantics": "PACKAGE_COMPLETENESS_NOT_PRODUCER_LIVENESS",
+                        "producer": _producer_diagnostic(access[0], directory, expected, state),
                         "packages": packages, "ack_authority": "ORIGINAL_MANIFEST_ROWS_ONLY"})
 
     def package(access):

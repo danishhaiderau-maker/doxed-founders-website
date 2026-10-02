@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="3.737" timestamp="2026-09-06T22:19:22.194233+10:00" hostname="Danish"><testcase classname="services.btc-conservative-agent.test_collector_bilateral_supported_replay" name="test_actual_buckets_producer_worker_to_declared_bilateral_context[None]" time="1.187"><failure message="AssertionError: {'baseline_id': 'MARKET_ENTRY_AT_SIGNAL', 'policy_signature': 'entry-baseline-9083969fc8b2e1fbaa20b15829e47189', 'episode_id': 'counterfactual-directional-research-episode-02140a33392be0330b7cf0064e238905', 'opportunity_id': 'opp-1', ...}&#10;assert None == 'SUPPORTED'&#10; +  where None = &lt;built-in method get of dict object at 0x0000027C8708B800&gt;('model_context_status')&#10; +    where &lt;built-in method get of dict object at 0x0000027C8708B800&gt; = {'baseline_id': 'MARKET_ENTRY_AT_SIGNAL', 'policy_signature': 'entry-baseline-9083969fc8b2e1fbaa20b15829e47189', 'episode_id': 'counterfactual-directional-research-episode-02140a33392be0330b7cf0064e238905', 'opportunity_id': 'opp-1', ...}.get">tmp_path = WindowsPath('C:/Users/danis/AppData/Local/Temp/pytest-of-danis/pytest-1132/test_actual_buckets_producer_w0')
+defect = None
+
+    @pytest.mark.parametrize("defect", [None, "missing", "late"])
+    def test_actual_buckets_producer_worker_to_declared_bilateral_context(tmp_path, defect):
+        # Reuse only an explicitly synthetic pre-signal declaration, not evidence rows.
+        template = tmp_path / "template"
+        dataset(template)
+        opportunity = json.loads((template/"v3/ledgers/opportunity.jsonl").read_text())
+        opportunity.pop("baseline_schedule_snapshot")
+        opportunity.update(direction="NO_TRADE", raw_direction="NO_TRADE")
+        if defect == "missing": opportunity.pop("research_baseline_context_declaration")
+        if defect == "late": opportunity["research_baseline_context_declaration"]["declared_at_ts"] = 101
+        root = tmp_path / "actual"
+        store = V3EvidenceStore(root, epoch_id="epoch-1")
+        assert store.append("opportunity", opportunity)["written"]
+        assert store.append("decision", {"record_id":"decision:1", "episode_id":"ep-1",
+            "event_id":"event-1", "primary_outcome":"REJECTED"})["written"]
+        rows = [build_bucket(bucket_ts=ts, bid=99 if ts&lt;=100 else 105,
+            ask=101 if ts&lt;=100 else 105.1, bid_qty=.4 if ts==100 else 10,
+            ask_qty=.4 if ts==100 else 10,last=100 if ts&lt;=100 else 105,
+            source_ts=ts,trades=(),symbol="BTC") for ts in range(40,7301)]
+        (root/"market_microstructure_1s.jsonl").write_text("".join(json.dumps(r)+"\n" for r in rows))
+        result = root/"v3/receipts/future-path-worker-test.json"
+        run = subprocess.run([sys.executable,str(Path(__file__).with_name("research_v3_future_paths_worker.py")),
+            "--data-dir",str(root),"--epoch-id","epoch-1","--now-ts","7400","--max-batch","64","--result",str(result)],
+            capture_output=True,timeout=30)
+        assert run.returncode == 0
+        assert json.loads(result.read_text())["complete_count"] == 1
+        # Synthetic canonical pinning of the actual produced immutable evidence.
+        state = {}
+        for path in sorted((root/"v3").rglob("*.json*")):
+            if "receipts" in path.parts: continue
+            raw = path.read_bytes()
+            state[path.relative_to(root).as_posix()]={"size":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
+        (root/".fly-sync-state.json").write_text(json.dumps(state))
+        manifest = {"dataset_epoch":"epoch-1","epoch_id":"epoch-1","source_revision":"rev-1",
+            "deployed_revision":"rev-1","tile_config_signature":"tiles-1","dataset_checksum":sha(state)}
+        manifest["entry_hash"] = sha(manifest)
+        (root/"canonical_dataset_current.json").write_text(json.dumps(manifest))
+        generation = generation_identity(manifest,analyzer_revision="analyzer-1")
+        report = materialize_v3_opportunity_replay(root,generation=generation,canonical_manifest=manifest)
+        entries = market_entries(report)
+        assert {ep["direction"] for ep, _ in entries} == {"LONG","SHORT"}
+        for _, entry in entries:
+            if defect is None:
+&gt;               assert entry.get("model_context_status") == "SUPPORTED", entry
+E               AssertionError: {'baseline_id': 'MARKET_ENTRY_AT_SIGNAL', 'policy_signature': 'entry-baseline-9083969fc8b2e1fbaa20b15829e47189', 'episode_id': 'counterfactual-directional-research-episode-02140a33392be0330b7cf0064e238905', 'opportunity_id': 'opp-1', ...}
+E               assert None == 'SUPPORTED'
+E                +  where None = &lt;built-in method get of dict object at 0x0000027C8708B800&gt;('model_context_status')
+E                +    where &lt;built-in method get of dict object at 0x0000027C8708B800&gt; = {'baseline_id': 'MARKET_ENTRY_AT_SIGNAL', 'policy_signature': 'entry-baseline-9083969fc8b2e1fbaa20b15829e47189', 'episode_id': 'counterfactual-directional-research-episode-02140a33392be0330b7cf0064e238905', 'opportunity_id': 'opp-1', ...}.get
+
+services\btc-conservative-agent\test_collector_bilateral_supported_replay.py:60: AssertionError</failure></testcase><testcase classname="services.btc-conservative-agent.test_collector_bilateral_supported_replay" name="test_actual_buckets_producer_worker_to_declared_bilateral_context[missing]" time="1.020" /><testcase classname="services.btc-conservative-agent.test_collector_bilateral_supported_replay" name="test_actual_buckets_producer_worker_to_declared_bilateral_context[late]" time="1.058" /></testsuite></testsuites>

@@ -51,6 +51,8 @@ def main() -> int:
                 "epoch_id", "now_ts", "candidate_count", "pending_count",
                 "mature_selected", "complete_count", "unknown_count",
                 "source_tape_present", "cursor",
+                "terminal_append_dispositions", "terminal_append_authority",
+                "terminal_append_attempted_count",
             )},
         }
         temporary = result_path.with_suffix(f".{os.getpid()}.tmp")
