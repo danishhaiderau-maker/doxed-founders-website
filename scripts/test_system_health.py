@@ -611,18 +611,94 @@ def test_alarm_edge_dedupe_renotify_and_recovery():
     assert report["open_alarms"] == []
 
 
-def test_notify_channels(tmp_path):
+def test_notify_is_toast_only_even_with_legacy_channel_config(tmp_path, monkeypatch):
     events = [{"event": "OPEN", "check": "ws.ticks", "observed": "500s", "hint": "ws down", "status": "RED"},
               {"event": "AMBER", "check": "x", "observed": "", "hint": "", "status": "AMBER"}]
-    toasts, posts = [], []
-    result = sh.notify(events, tmp_path, toast=lambda t, b: toasts.append((t, b)) or True,
-                       post=lambda *a, **k: posts.append((a, k)) or ({}, None))
-    assert result["pushed"] == 1 and result["webhook"] == "not_configured" and toasts and not posts
     (tmp_path / "health").mkdir()
     (tmp_path / "health" / "alarm-channels.json").write_text(json.dumps({"webhook_url": "https://example.invalid/h"}))
-    result = sh.notify(events, tmp_path, toast=lambda t, b: True, post=lambda *a, **k: posts.append((a, k)) or ({}, None))
-    assert result["webhook"] == "ok" and "ws.ticks" in posts[0][1]["body"]["content"]
+    monkeypatch.setenv("DOXXED_ALERT_WEBHOOK_URL", "https://example.invalid/w")
+    monkeypatch.setenv("DOXXED_ALERT_TELEGRAM_BOT_TOKEN", "1:x")
+    monkeypatch.setenv("DOXXED_ALERT_TELEGRAM_CHAT_ID", "1")
+    monkeypatch.setattr(sh, "http_json", lambda *a, **k: pytest.fail("no network channel may be called"))
+    toasts = []
+    result = sh.notify(events, tmp_path, toast=lambda t, b: toasts.append((t, b)) or True)
+    assert result == {"pushed": 1, "toast": True}
+    assert toasts and "ws.ticks" in toasts[0][1]
     assert sh.notify([events[1]], tmp_path, toast=lambda t, b: True)["pushed"] == 0
+
+
+def _alarm_row(at, event="AMBER", check="analyzer.api"):
+    return {"schema": sh.ALARM_SCHEMA, "at": at, "event": event, "check": check, "status": "AMBER",
+            "observed": "o" * 900, "threshold": "t", "hint": "h", "runbook": "docs/SYSTEM_HEALTH_RUNBOOK.md#x"}
+
+
+def test_fly_push_sends_unsynced_alarm_events_in_bounded_chunks(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "t")
+    opts = sh.parse_args(["--state-dir", str(tmp_path), "--vault", str(tmp_path / "none.env")])
+    now = ts("2026-10-02T06:00:00Z")
+    log = tmp_path / "health" / "alarms.jsonl"
+    log.parent.mkdir(parents=True)
+    rows = [_alarm_row("2026-08-01T00:00:00Z")]  # older than 30 days: never sent
+    rows += [_alarm_row(f"2026-10-02T0{i // 60}:{i % 60:02d}:00Z", check=f"c{i}") for i in range(150)]
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    report = sh.summarize(sh.evaluate(healthy(now), {}), {}, now)
+    held: list = []
+
+    def fly(url, **kw):
+        body = kw["body"]
+        assert len(json.dumps(body)) < 256 * 1024
+        held.extend(body.get("alarm_events") or [])
+        last = max((sh.parse_ts(e["at"]) for e in held), default=None)
+        return {"ok": True, "alarm_history": {"count": len(held), "through_ts": last}}, None
+
+    state: dict = {}
+    first = sh.push_fly_banner(report, opts, state, now, post=fly)
+    assert first == "ok alarms=120 sent=120"
+    assert all(len(e["observed"]) <= 240 for e in held)
+    assert "check_status" in sh.banner_payload(report)
+    second = sh.push_fly_banner(report, opts, state, now, post=fly)
+    assert second == "ok alarms=150 sent=30"
+    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=150 sent=0"
+    # Fly restarted (memory-only history): its empty answer resets the cursor and the log is re-sent.
+    held.clear()
+    state["fly_alarm_sync"]["through_ts"] = None
+    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=120 sent=120"
+
+
+def test_fly_push_backs_off_when_fly_lacks_the_history_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "t")
+    opts = sh.parse_args(["--state-dir", str(tmp_path), "--vault", str(tmp_path / "none.env")])
+    now = ts("2026-10-02T06:00:00Z")
+    (tmp_path / "health").mkdir()
+    (tmp_path / "health" / "alarms.jsonl").write_text(json.dumps(_alarm_row("2026-10-02T05:00:00Z")) + "\n")
+    report = sh.summarize(sh.evaluate(healthy(now), {}), {}, now)
+    sent = []
+    old_fly = lambda url, **kw: (sent.append(len(kw["body"].get("alarm_events") or [])) or {"ok": True}, None)
+    state: dict = {}
+    assert "no alarm history endpoint" in sh.push_fly_banner(report, opts, state, now, post=old_fly)
+    sh.push_fly_banner(report, opts, state, now + 60, post=old_fly)
+    sh.push_fly_banner(report, opts, state, now + sh.ALARM_UNSUPPORTED_RETRY_SEC + 1, post=old_fly)
+    assert sent == [1, 0, 1]
+
+
+def test_neon_config_reads_env_then_uncommitted_state_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("NEON_API_KEY", raising=False)
+    monkeypatch.delenv("NEON_PROJECT_ID", raising=False)
+    assert sh.collect_neon({}, str(tmp_path)) is None
+    (tmp_path / "health").mkdir()
+    (tmp_path / "health" / "neon.env").write_text("NEON_PROJECT_ID=fancy-mode-1\n")
+    assert sh.collect_neon({}, str(tmp_path)) == {"missing": ["NEON_API_KEY"]}
+    inputs = healthy(ts("2026-10-02T00:00:00Z"))
+    inputs["neon"] = {"missing": ["NEON_API_KEY"]}
+    neon = next(c for c in sh.evaluate(inputs, {}) if c["id"] == "neon.usage")
+    assert neon["status"] == sh.SKIP and "NEON_API_KEY" in neon["observed"]
+    (tmp_path / "health" / "neon.env").write_text("NEON_API_KEY=napi_test\nNEON_PROJECT_ID=fancy-mode-1\n")
+    calls = []
+    monkeypatch.setattr(sh, "http_json", lambda url, **kw: calls.append((url, kw["headers"])) or (
+        {"project": {"data_transfer_bytes": 5_000_000_000, "compute_time_seconds": 3600}}, None))
+    out = sh.collect_neon({}, str(tmp_path))
+    assert out["data_transfer_bytes"] == 5_000_000_000
+    assert calls[0][0].endswith("/projects/fancy-mode-1") and calls[0][1]["Authorization"] == "Bearer napi_test"
 
 
 def test_incident_escalation_reads_open_alarms():
@@ -654,7 +730,8 @@ def test_server_marks_stale_verdict_amber(tmp_path):
 def test_banner_payload_is_bounded_and_secret_free():
     report = sh.summarize(sh.evaluate(healthy(ts("2026-10-02T00:00:00Z")), {}), {}, ts("2026-10-02T00:00:00Z"))
     payload = sh.banner_payload(report)
-    assert set(payload) == {"schema", "verdict", "generated_at", "open_alarms", "failing", "counts", "source"}
+    assert set(payload) == {"schema", "verdict", "generated_at", "open_alarms", "failing", "counts", "check_status",
+                            "source"}
     assert len(json.dumps(payload)) < 8000
 
 

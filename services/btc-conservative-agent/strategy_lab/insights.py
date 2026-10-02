@@ -1,10 +1,12 @@
-"""One-call agent insights feed: system health, live Fly bot, transfer/ACK, deploy queue, analyzer export.
+"""One-call agent insights feed: system health, alert history, live Fly bot, transfer/ACK, deploy queue, analyzer export.
 
     import insights_client                       # C:\\DoxxedCrypto\\analyzer-exports\\insights_client.py
     snap = insights_client.snapshot()
     snap["status"]        # COMPLETE (every component fresh) or PARTIAL
     snap["refused"]       # [{"component", "status", "reason"}] for every stale/unavailable component
     snap["components"]["fly_bot"]["data"]["tiles"]
+    snap["active_alerts"]                        # currently open RED/AMBER alerts
+    snap["components"]["alerts"]["data"]["alerts"]  # alert history, active first then newest first
 
 Also served uncached at ``http://127.0.0.1:9001/api/insights``. Every
 component carries ``status`` OK / STALE / UNAVAILABLE, ``as_of``, ``age_sec``
@@ -126,6 +128,35 @@ def health_component(now: float, timeout: float = 10.0) -> dict:
             "checks": {c.get("id"): {"status": c.get("status"), "observed": c.get("observed")}
                        for c in report.get("checks") or []}}
     return _fresh(data, as_of=as_of, max_age=HEALTH_MAX_AGE_SEC, source=source, now=now, what="system health")
+
+
+# --------------------------------------------------------------------------- alert history
+ALERTS_LIMIT = 100
+
+
+def _load_alerts_module():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (here, os.path.dirname(here)):
+        if path not in sys.path:
+            sys.path.append(path)
+    import system_health_alerts  # export-root copy, or services/btc-conservative-agent
+    return system_health_alerts
+
+
+def alerts_component(now: float) -> dict:
+    """Alert history (active first, then newest first) read directly from the watcher's alarm log."""
+    alerts = _load_alerts_module()
+    health = os.path.join(STATE_DIR, "health")
+    path = os.path.join(health, "alarms.jsonl")
+    if not os.path.isfile(path) and not os.path.isfile(os.path.join(health, "system-health-latest.json")):
+        return _component(UNAVAILABLE, reason=f"{path} missing and the watcher has never published", now=now)
+    history = alerts.history_from_file(path, os.path.join(health, "system-health-latest.json"),
+                                       now=now, limit=ALERTS_LIMIT)
+    data = {k: history[k] for k in ("counts", "retention", "events", "oldest_event_at", "timezone")}
+    data["active"] = history["active"]
+    data["alerts"] = history["alerts"]
+    # The log is read live from disk, so it is current by construction; a quiet log is not stale data.
+    return _component(OK, data=data, as_of=now, max_age=0, source=path, now=now)
 
 
 # --------------------------------------------------------------------------- fly bot
@@ -376,6 +407,7 @@ def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
     guard("fly_bot", lambda: fly_component(now, exp_holder.get("tiles"), timeout=timeout))
     guard("transfer", lambda: transfer_component(now, health))
     guard("deploy_queue", lambda: deploy_queue_component(now))
+    alerts = guard("alerts", lambda: alerts_component(now))
     refused = [{"component": k, "status": v["status"], "reason": v["reason"]}
                for k, v in components.items() if v["status"] != OK]
     hd = health.get("data") or {}
@@ -386,6 +418,8 @@ def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
         "refused": refused,
         "system_verdict": hd.get("verdict") if health.get("status") == OK else "UNKNOWN",
         "failing_checks": [f.get("id") for f in hd.get("failing") or []],
+        "active_alerts": [{k: a.get(k) for k in ("check", "title", "level", "started_at", "duration_text", "observed")}
+                          for a in (alerts.get("data") or {}).get("active") or []],
         "components": components,
         "elapsed_sec": round(_now() - t0, 2),
         "freshness_policy": {

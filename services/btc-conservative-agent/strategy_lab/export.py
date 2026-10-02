@@ -191,7 +191,8 @@ def _write_table(df: pd.DataFrame, directory: str, name: str) -> dict:
 def _bundle_files(root: str) -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     for src, dst in (("client.py", "analyzer_client.py"), ("insights.py", "insights_client.py"),
-                     ("EXPORT_README.md", "README.md")):
+                     ("EXPORT_README.md", "README.md"),
+                     (os.path.join("..", "system_health_alerts.py"), "system_health_alerts.py")):
         s = os.path.join(here, src)
         if os.path.isfile(s):
             tmp = os.path.join(root, dst + ".tmp")
