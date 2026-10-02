@@ -30683,7 +30683,7 @@ __ADMIN_ACCESS_CONTROLS__
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
 <h3>Chase entry selector — 5-minute signal-age windows</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may rest in that 5-minute signal-age window (not a 60s chase-count tick). Chase 0=0–5m, 1=5–10m, 2=10–15m, 3=15–20m, 4=20–25m, 5+=25–30m. Before the first checked window the bot waits without placing a limit. Inside a window it may reprice every 3 min without leaving the window. If a later window is unchecked, the order stays on the last enabled window until the 30-minute TTL. Example: select 2, 3 and 4 only → wait 0–10m, submit at 10–15m, rest/reprice through 20–25m, hold through 25–30m if 5+ is off.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = eligible to place/reprice in that 5-minute signal-age window, subject to other gates (not a 60s chase-count tick). Chase 0=0–5m, 1=5–10m, 2=10–15m, 3=15–20m, 4=20–25m, 5+=25–30m. Before the first checked window the bot waits without placing a limit. Inside an enabled window it may reprice every 3 min without leaving the window. Disabled windows before/between enabled windows mean virtual wait or cancellation of a resting order. Only after the last enabled window do existing orders hold their last permitted limit until TTL, with no further repricing. Example: select 2, 3 and 4 only → wait 0–10m, eligible to submit at 10–15m, rest/reprice through 20–25m, hold through 25–30m if 5+ is off.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
@@ -31088,8 +31088,8 @@ DASHBOARD_JS = """(function () {
       if (!el || !buckets) return;
       const on = Object.keys(buckets).filter(k => buckets[k]);
       el.innerHTML = on.length
-        ? `<strong>Allowed chase buckets:</strong> ${on.join(', ')} · checked = may place/chase at that tick count; unchecked = virtual wait or cancel`
-        : '<strong style="color:#ef4444">All chase buckets OFF — no limits / chases / fills</strong>';
+        ? `<strong>Allowed 5-minute signal-age windows:</strong> ${on.join(', ')} · checked = eligible to place/reprice, subject to other gates; disabled windows before/between enabled windows = virtual wait or cancel resting order. After the last enabled window, existing orders hold their last permitted limit until TTL; no further repricing.`
+        : '<strong style="color:#ef4444">All chase buckets OFF — paper limit placement/repricing and pending-order fills are blocked</strong>';
     }
     async function post(url, obj={}) {
       try {
