@@ -24,6 +24,7 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/data/fields        ?stream=&status=DEAD_ZERO,DEAD_NULL,CONSTANT&watched=1
   /api/selfaware/data/capacity
   /api/selfaware/data/sufficiency
+  /api/selfaware/sections           :9001 section health (populated, fresh, dimensions, consistency)
 """
 from __future__ import annotations
 
@@ -335,6 +336,10 @@ class Handler(BaseHTTPRequestHandler):
                                                "BLOCKED": "a required field is missing, dead or constant"},
                              "provenance": self._prov("data_sufficiency")})
 
+    def sections(self, q):
+        doc = self.eng.docs.get("sections") or self.eng.state.get("analyzer_sections_doc")
+        self._send(200 if doc else 503, doc or {"error": "section check not run yet (every 2 h)"})
+
     def data_view(self, q):
         self._send(200, render_data(self.eng), "text/html")
 
@@ -350,7 +355,7 @@ ROUTES = {
     "/data": Handler.data_view, "/api/selfaware/data": Handler.data_summary,
     "/api/selfaware/data/catalog": Handler.data_catalog, "/api/selfaware/data/completeness": Handler.data_completeness,
     "/api/selfaware/data/fields": Handler.data_fields, "/api/selfaware/data/capacity": Handler.data_capacity,
-    "/api/selfaware/data/sufficiency": Handler.data_sufficiency,
+    "/api/selfaware/data/sufficiency": Handler.data_sufficiency, "/api/selfaware/sections": Handler.sections,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}

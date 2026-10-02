@@ -33,6 +33,7 @@ from research import evidence_points_view as _evidence_points_view
 from research import ai_challenger_view as _ai_challenger_view
 from research import data_health_view as _data_health_view
 from research import archive_history_view as _archive_history_view
+from research import dashboard_sections as _dashboard_sections
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -7069,6 +7070,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
   <section id="sec-combos">
+    <h2>Policy Genome Grid - simulated over all collected data</h2>
+    <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>SIMULATED_COUNTERFACTUAL</strong> - every collected signal episode (executed, shadow, blocked, no-trade score-led side) replayed on 1 s tape across entry offset x chase x TTL x exit x side. Not execution evidence, not qualification. Live paper outcomes are listed separately below.</div>
+    <p class="note" id="genome-grid-note">Loading genome grid...</p>
+    <div class="kpis" id="genome-grid-kpis"></div>
+    <h3>Genome axes - best train-selected policy per value, with its chronological holdout</h3>
+    <table><thead><tr><th>Axis</th><th>Values</th><th>Best value</th><th>Train EV / fill</th><th>Holdout EV / fill</th><th>Holdout WR%</th><th>Holdout fills</th><th>Verdict</th><th>Confirmed policies</th><th>Weakest ranked value</th></tr></thead><tbody id="genome-grid-axes"></tbody></table>
+    <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="BBO_MARKETABLE">BBO marketable fills</option><option value="IDEAL_TOUCH">Ideal touch (diagnostic)</option></select> <select id="genome-grid-filter"><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
+    <table><thead><tr><th>#</th><th>Side</th><th>Entry offset</th><th>Chase / reprice</th><th>TTL</th><th>Exit</th><th>Loss protection</th><th>Signals</th><th>Fills</th><th>WR% all</th><th>EV / fill all</th><th>Avg R</th><th>Train EV / fill (rank key)</th><th>OOS fills</th><th>OOS WR% [95% CI]</th><th>OOS EV / fill</th><th>OOS net</th><th>Holdout</th><th>Max DD</th></tr></thead><tbody id="genome-grid-body"></tbody></table>
+    <h3>Live paper outcomes per lane (LIVE_PAPER - separate cohort)</h3>
+    <table><thead><tr><th>Lane</th><th>Registry status</th><th>Terminal closes</th><th>WR%</th><th>Net PnL</th><th>EV / close</th></tr></thead><tbody id="genome-grid-live"></tbody></table>
     <h2>Top Profitable Conservative Policy Combos</h2>
     <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. Execution fills are split into full and partial receipts. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
@@ -7961,6 +7972,71 @@ function policyGridEvidenceScope(d) {
     return ['SAVED POLICY GRID — NOT VERIFIED CURRENT', 'Available report rows are saved research, not verified current-epoch evidence. Qualification is blocked; legacy executed evidence remains separate.'];
   }
   return ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table uses the verified current-epoch policy report. Conservative execution evidence and ideal-touch diagnostics are separate; a current report alone does not establish qualification. The legacy executed cohort remains separate.'];
+}
+function genomeUsd(v) { return (v === null || v === undefined) ? '-' : (Number(v) >= 0 ? '$' : '-$') + Math.abs(Number(v)).toFixed(4); }
+function genomeExit(x) {
+  const e = x.exit || {};
+  const parts = [e.protection_id || e.mode || '?'];
+  return parts.join(' ');
+}
+function genomeLoss(x) {
+  const e = x.exit || {};
+  const parts = [];
+  if (e.atr_stop_k != null) parts.push('ATR SL ' + e.atr_stop_k);
+  if (e.thesis_cut_margin_pct != null) parts.push('thesis ' + e.thesis_cut_margin_pct + '% / ' + e.thesis_window_sec + 's');
+  if (e.time_stop_min != null) parts.push('time ' + e.time_stop_min + 'm');
+  if (e.hard_stop_margin_pct != null) parts.push('hard ' + e.hard_stop_margin_pct + '%');
+  return parts.join(' + ') || '-';
+}
+let GENOME_GRID_CACHE = null;
+function renderGenomeGridRows() {
+  const d = GENOME_GRID_CACHE || {};
+  const sel = document.getElementById('genome-grid-world');
+  const world = sel ? sel.value : 'BBO_MARKETABLE';
+  const filter = document.getElementById('genome-grid-filter');
+  const rows = ((d[filter ? filter.value : 'top_100_by_world'] || {})[world]) || [];
+  document.getElementById('genome-grid-body').innerHTML = rows.map((x, i) => {
+    const en = x.entry || {}, a = x.all || {}, t = x.train || {}, o = x.oos || {};
+    const ci = o.win_rate_ci95_pct || [];
+    const chase = en.chase_id === 'no_chase' ? 'none' : `${en.chase_id} (win ${(en.chase_windows_5m||[]).join('/')} x5m, ${Math.round((en.chase_remaining_gap_step||0)*100)}% gap, ${en.reprice_sec}s)`;
+    return `<tr><td>${i+1}</td><td>${escapeHtml(x.direction_rule||'')}</td><td>${en.offset_pct===0?'taker':en.offset_pct+'%'}</td><td>${escapeHtml(chase)}</td><td>${en.ttl_sec?Math.round(en.ttl_sec/60)+'m':'-'}</td><td>${escapeHtml(genomeExit(x))}</td><td>${escapeHtml(genomeLoss(x))}</td><td>${a.signals??0}</td><td>${a.fills??0}</td><td>${a.win_rate_pct??'-'}</td><td>${genomeUsd(a.ev_per_fill_usd)}</td><td>${a.avg_r??'-'}</td><td>${genomeUsd(t.ev_per_fill_usd)}</td><td>${o.fills??0}</td><td>${o.win_rate_pct??'-'} [${ci[0]??'-'}-${ci[1]??'-'}]</td><td>${genomeUsd(o.ev_per_fill_usd)}</td><td>${genomeUsd(o.net_pnl_usd)}</td><td>${escapeHtml(x.holdout_verdict||'-')}</td><td>${genomeUsd(a.max_drawdown_usd)}</td></tr>`;
+  }).join('') || `<tr><td colspan="19">No simulated policy has ${((d.holdout||{}).min_train_fills_for_rank)??30} train and ${((d.holdout||{}).min_oos_fills_for_rank)??10} OOS fills in this world.</td></tr>`;
+}
+async function loadGenomeGrid() {
+  const r = await fetch('/api/genome-grid');
+  const d = await r.json();
+  GENOME_GRID_CACHE = d;
+  const note = document.getElementById('genome-grid-note');
+  if (d.status !== 'OK') {
+    if (note) note.textContent = 'Genome grid UNAVAILABLE: ' + (d.reason || 'no report') + ' (' + (d.report_path || '') + '). The panel below falls back to the legacy executed-lane cohort only.';
+    ['genome-grid-kpis','genome-grid-axes','genome-grid-body','genome-grid-live'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    return;
+  }
+  const cov = d.coverage || {}, g = d.grid || {}, h = d.holdout || {}, par = d.canonical_parity || {};
+  if (note) note.textContent = `${d.note || ''} Generated ${d.generated_at} (${Math.round((d.age_sec||0)/60)} min ago) at ${String(d.code_revision||'').slice(0,9)}. Holdout ${h.rule} cut ${h.cut_utc}; ${h.selection || ''}. ${h.independence_note || ''}. ${d.cost_model}. ${d.path_model}.`;
+  document.getElementById('genome-grid-kpis').innerHTML = [
+    ['Episodes evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
+    ['Signals span', `${String(cov.first_signal_utc||'').slice(5,16)} to ${String(cov.last_signal_utc||'').slice(5,16)}`],
+    ['Policies evaluated', Number(g.policies_evaluated||0).toLocaleString()],
+    ['Ranked (train >= ' + (h.min_train_fills_for_rank??30) + ', OOS >= ' + (h.min_oos_fills_for_rank??10) + ' fills)', Number(g.policies_ranked||0).toLocaleString()],
+    ['Holdout confirmed / failed', `${(h.verdicts||{}).CONFIRMED ?? 0} / ${(h.verdicts||{}).FAILED_HOLDOUT ?? 0}`],
+    ['Entries x exits', `${g.entries} x ${g.protections}`],
+    ['Engine replay parity', `${par.status} (${par.checked ?? 0})`],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
+  const axes = d.dimension_summary || {};
+  document.getElementById('genome-grid-axes').innerHTML = Object.entries(axes).map(([axis, s]) => {
+    const vals = (s.values || []);
+    const ranked = vals.filter(v => v.best_train_ev_per_fill_usd !== null && v.best_train_ev_per_fill_usd !== undefined);
+    const best = ranked[0] || {}, worst = ranked[ranked.length - 1] || {};
+    return `<tr><td>${escapeHtml(axis)}</td><td>${s.distinct_values}</td><td>${escapeHtml(String(best.value ?? '-'))}</td><td>${genomeUsd(best.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(best.best_oos_ev_per_fill_usd)}</td><td>${best.best_oos_win_rate_pct ?? '-'}</td><td>${best.best_oos_fills ?? '-'}</td><td>${escapeHtml(best.best_holdout_verdict || '-')}</td><td>${best.confirmed_policies ?? 0}</td><td>${escapeHtml(String(worst.value ?? '-'))} (train ${genomeUsd(worst.best_train_ev_per_fill_usd)})</td></tr>`;
+  }).join('');
+  document.getElementById('genome-grid-live').innerHTML = (d.live_paper_by_lane || []).map(x =>
+    `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No terminal paper lifecycles.</td></tr>';
+  ['genome-grid-world', 'genome-grid-filter'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.bound) { el.dataset.bound = '1'; el.addEventListener('change', renderGenomeGridRows); }
+  });
+  renderGenomeGridRows();
 }
 async function loadCombos() {
   setEvidenceScope('combos', ...EVIDENCE_SCOPES.combos);
@@ -9117,7 +9193,7 @@ const SECTION_LOADERS = {
   ai: [loadAI], chase: [loadChase],
   'chase-policy-lab': [loadChasePolicyLab],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
-  combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
+  combos: [loadGenomeGrid, loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
@@ -9486,6 +9562,118 @@ def decision_page():
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
     return resp
+
+
+GENOME_GRID_REPORT_PATH = Path(
+    os.getenv("ANALYZER_GENOME_GRID_REPORT")
+    or r"C:\DoxxedCrypto\analyzer-exports\genome-grid\genome_grid_report.json"
+)
+_GENOME_GRID_PASSTHROUGH = (
+    "generated_at", "code_revision", "evidence_label", "note", "fill_worlds", "cost_model", "path_model",
+    "holdout", "coverage", "grid", "canonical_parity", "dimension_summary", "live_paper_by_lane", "rows_artifact",
+)
+
+
+def _genome_grid_payload(limit: int = 100) -> dict:
+    try:
+        report = json.loads(GENOME_GRID_REPORT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"schema": "genome_grid_dashboard_v1", "status": "UNAVAILABLE",
+                "reason": f"{type(exc).__name__}: {exc}"[:300], "report_path": str(GENOME_GRID_REPORT_PATH)}
+    generated = _dashboard_sections._parse_ts(report.get("generated_at"))
+    limit = max(1, min(int(limit), 100))
+    return {
+        "schema": "genome_grid_dashboard_v1", "status": "OK", "report_path": str(GENOME_GRID_REPORT_PATH),
+        "source_schema": report.get("schema"), "age_sec": round(time.time() - generated, 1) if generated else None,
+        **{key: report.get(key) for key in _GENOME_GRID_PASSTHROUGH},
+        "top_100_by_world": {world: list(rows or [])[:limit]
+                             for world, rows in (report.get("top_100_by_world") or {}).items()},
+        "confirmed_by_world": {world: list(rows or [])[:limit]
+                               for world, rows in (report.get("confirmed_by_world") or {}).items()},
+    }
+
+
+@app.route("/api/genome-grid")
+def api_genome_grid():
+    return jsonify(_genome_grid_payload(request.args.get("limit", 100, type=int)))
+
+
+_SECTION_PAGE_HTML: dict = {"at": 0.0, "html": {}}
+
+
+def _section_index() -> list[dict]:
+    """Every /details section and decision page with the JSON endpoints it reads."""
+    now = time.time()
+    if now - _SECTION_PAGE_HTML["at"] > 600:
+        client, pages = app.test_client(), {}
+        for _label, path in DECISION_NAV_LINKS:
+            if path.startswith("/api/") or path == "/details":
+                continue
+            try:
+                resp = client.get(path)
+                pages[path] = resp.get_data(as_text=True) if resp.status_code == 200 else ""
+            except Exception:  # noqa: BLE001 - a broken page is reported by section health
+                pages[path] = ""
+        _SECTION_PAGE_HTML.update(at=now, html=pages)
+    return _dashboard_sections.section_index(DASHBOARD_HTML, REPORT_NAV_GROUPS, DECISION_NAV_LINKS,
+                                             _SECTION_PAGE_HTML["html"])
+
+
+def _section_fetch(apis) -> dict:
+    client, out = app.test_client(), {}
+    for api in apis:
+        try:
+            resp = client.get(api)
+            out[api] = (resp.status_code, resp.get_json(silent=True))
+        except Exception as exc:  # noqa: BLE001
+            out[api] = (599, {"error": f"{type(exc).__name__}: {exc}"[:300]})
+    return out
+
+
+def _collected_opportunity_count() -> int | None:
+    path = SEGMENT_SHADOW_ROOT / "tree" / "v3" / "ledgers" / "opportunity.jsonl"
+    try:
+        with open(path, "rb") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return None
+
+
+@app.route("/api/sections")
+def api_sections():
+    return jsonify({"schema": "dashboard_sections_index_v1", "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "health": "/api/sections/health", "sections": _section_index()})
+
+
+@app.route("/api/sections/health")
+def api_sections_health():
+    now = time.time()
+    index = _section_index()
+    responses = _section_fetch(dict.fromkeys(api for entry in index for api in entry["apis"]))
+    grid = (responses.get("/api/genome-grid") or (0, None))[1]
+    combos = (responses.get("/api/combos") or (0, None))[1]
+    extra = {
+        "combos": _dashboard_sections.genome_grid_checks(grid, combos, now, _collected_opportunity_count()),
+        "genome": _dashboard_sections.safe_genome_checks(_safe_policy_v3_dashboard_source().get("report")),
+    }
+    sections = [_dashboard_sections.evaluate_section(entry, responses, now, extra.get(entry["id"])) for entry in index]
+    return jsonify({
+        "schema": "dashboard_sections_health_v1", "generated_at": datetime.now(timezone.utc).isoformat(),
+        "verdict": _dashboard_sections.verdict(sections),
+        "counts": {sev: sum(1 for s in sections if s["severity"] == sev) for sev in ("RED", "AMBER", "INFO", "GREEN")},
+        "sections": sections,
+    })
+
+
+@app.route("/api/sections/<section_id>")
+def api_section(section_id: str):
+    entry = next((item for item in _section_index() if item["id"] == section_id), None)
+    if entry is None:
+        abort(404)
+    payloads = _section_fetch(entry["apis"])
+    return jsonify({"schema": "dashboard_section_v1", "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "section": entry,
+                    "payloads": {api: {"status": status, "data": data} for api, (status, data) in payloads.items()}})
 
 
 @app.route("/favicon.ico")
