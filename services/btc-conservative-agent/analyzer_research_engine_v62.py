@@ -9202,6 +9202,8 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
                 _CURRENT_MIRROR_GENERATION_LEASE = None
 
 
+_CURRENT_MIRROR_GENERATION_LEASE = None
+_CURRENT_MIRROR_COHERENCE_TOKEN = None
 _CURRENT_GENERATION_SOURCE_HEARTBEAT = None
 
 
