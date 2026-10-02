@@ -48,10 +48,13 @@ SNAPSHOT_SCHEMA_VERSION = 1
 ROLLUP_SCHEMA_VERSION = 1
 # A day is final once this long past its UTC end (late closes have landed).
 SETTLE_HOURS = 6
-REPORT_COPY_MAX_BYTES = 2 * 1024 * 1024
+REPORT_COPY_MAX_BYTES = 16 * 1024 * 1024
+SNAPSHOT_REPORTS_MAX_GZ_BYTES = 8 * 1024 * 1024
 LONG_HORIZON_REPORT_FILE = "long_horizon_report.json"
 
-# Reports copied (gzip) into each snapshot when present and small enough.
+# Copied first (gzip); every other report the generation's manifest declares
+# follows, within REPORT_COPY_MAX_BYTES each and SNAPSHOT_REPORTS_MAX_GZ_BYTES
+# per snapshot. Skipped reports are named, with the reason, in the receipt.
 SNAPSHOT_REPORTS = (
     "main_rankings_report.json", "strategy_lab_report.json", "stream_studies_report.json",
     "regime_leaderboard.json", "feature_importance_report.json", "tile_evidence_points_report.json",
@@ -435,6 +438,58 @@ def latest_snapshot(root: Optional[str] = None) -> Optional[dict]:
     return last
 
 
+def list_snapshots(root: Optional[str] = None, limit: int = 50) -> list[dict]:
+    """Newest-first generation snapshots with their current-epoch totals (USD, CSV basis)."""
+    base = archive_root(root)
+    index = base / "index.jsonl"
+    if not index.is_file():
+        return []
+    entries = []
+    with index.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("snapshot_id") and row.get("path"):
+                entries.append(row)
+    rows = []
+    for entry in reversed(entries[-max(1, int(limit)):]):
+        snap_dir = base / str(entry["path"])
+        tiles = (_read_json(snap_dir / "snapshot.json").get("current_epoch") or {}).get("tiles") or {}
+        stats = [t.get("stats") or {} for t in tiles.values() if isinstance(t, dict)]
+        rows.append({
+            "archive_id": entry["snapshot_id"], "created_at": entry.get("written_at"),
+            "source": "analysis-archive", "path": entry["path"],
+            "generation_id": entry.get("generation_id"), "dataset_epoch": entry.get("dataset_epoch"),
+            "analyzer_revision": entry.get("analyzer_revision"), "close_window": entry.get("close_window"),
+            "reports_copied": entry.get("reports_copied"),
+            "performance": {"trades": sum(int(s.get("n") or 0) for s in stats),
+                            "net_pnl_usd": round(sum(float(s.get("sum") or 0.0) for s in stats), 6),
+                            "tiles": len(stats), "pnl_basis": "RECORDED_CSV_NET_PNL_USD"},
+        })
+    return rows
+
+
+def snapshot_dir(snapshot_id: str, root: Optional[str] = None) -> Optional[Path]:
+    """Directory of an indexed snapshot, or None (ids never resolve outside the archive)."""
+    base = archive_root(root)
+    index = base / "index.jsonl"
+    if not snapshot_id or not index.is_file():
+        return None
+    with index.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("snapshot_id") == snapshot_id:
+                path = (base / str(row.get("path") or "")).resolve()
+                if path.is_dir() and base.resolve() in path.parents:
+                    return path
+    return None
+
+
 def verify_snapshot(entry: dict, root: Optional[str] = None) -> bool:
     """True when the snapshot's receipt hashes still match every file."""
     base = archive_root(root)
@@ -448,6 +503,15 @@ def verify_snapshot(entry: dict, root: Optional[str] = None) -> bool:
         if not target.is_file() or _sha256_file(target) != digest:
             return False
     return _sha256_file(path / "receipt.json") == entry.get("receipt_sha256")
+
+
+def _snapshot_report_names(manifest: dict) -> list[str]:
+    names = list(SNAPSHOT_REPORTS)
+    for row in manifest.get("reports") or []:
+        name = str((row or {}).get("file") or "") if isinstance(row, dict) else ""
+        if name.endswith(".json") and Path(name).name == name and name not in names:
+            names.append(name)
+    return names
 
 
 def write_generation_snapshot(*, report_dir: str, data_dir: str, trades=None,
@@ -498,18 +562,28 @@ def write_generation_snapshot(*, report_dir: str, data_dir: str, trades=None,
     raw = _canonical(snapshot)
     _write_create_new(target / "snapshot.json", raw)
     files["snapshot.json"] = _sha256_bytes(raw)
-    for name in SNAPSHOT_REPORTS:
+    skipped, copied_gz = {}, 0
+    for name in _snapshot_report_names(manifest):
         source = report_path / name
         try:
-            if not source.is_file() or source.stat().st_size > REPORT_COPY_MAX_BYTES:
+            if not source.is_file():
+                continue
+            size = source.stat().st_size
+            if size > REPORT_COPY_MAX_BYTES:
+                skipped[name] = f"TOO_LARGE:{size}"
                 continue
             payload = gzip.compress(source.read_bytes(), compresslevel=9, mtime=0)
-        except OSError:
+        except OSError as exc:
+            skipped[name] = f"READ_FAILED:{type(exc).__name__}"
+            continue
+        if copied_gz + len(payload) > SNAPSHOT_REPORTS_MAX_GZ_BYTES:
+            skipped[name] = f"SNAPSHOT_BUDGET:{len(payload)}"
             continue
         _write_create_new(target / "reports" / f"{name}.gz", payload)
         files[f"reports/{name}.gz"] = _sha256_bytes(payload)
+        copied_gz += len(payload)
     receipt = _canonical({"schema": "analysis_archive_receipt_v1", "snapshot_id": snapshot_id,
-                          "files": files, "written_at": _iso(now)})
+                          "files": files, "skipped_reports": skipped, "written_at": _iso(now)})
     _write_create_new(target / "receipt.json", receipt)
     rollups = update_rollups(trades, now=now, root=root)
     entry = {"snapshot_id": snapshot_id, "path": relative.as_posix(), "written_at": _iso(now),
@@ -518,7 +592,8 @@ def write_generation_snapshot(*, report_dir: str, data_dir: str, trades=None,
              "analyzer_revision": manifest.get("analyzer_revision"),
              "segment_seq_through": snapshot["source"].get("segment_seq_through"),
              "close_window": snapshot["current_epoch"].get("close_window"),
-             "snapshot_sha256": files["snapshot.json"], "receipt_sha256": _sha256_bytes(receipt)}
+             "snapshot_sha256": files["snapshot.json"], "receipt_sha256": _sha256_bytes(receipt),
+             "reports_copied": len(files) - 1, "reports_skipped": len(skipped)}
     base.mkdir(parents=True, exist_ok=True)
     with (base / "index.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, sort_keys=True) + "\n")

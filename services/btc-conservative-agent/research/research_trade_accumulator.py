@@ -35,6 +35,53 @@ SESSION_HOURS_UTC = (
 )
 
 
+LEDGER_RECONCILIATION_FILE = "ledger_reconciliation.json"
+PNL_TOLERANCE_USD = 1e-6
+
+
+def _row_net_pnl_usd(row: dict) -> tuple[float | None, str]:
+    """Exact after-cost USD PnL, the same basis as ledger_reconciliation.
+
+    Never falls back to the CSV ``pnl`` column: that is percent of margin, and
+    ``net_pnl_usd or pnl`` turned every cent-rounded 0.00 close into a % value.
+    """
+    from research.tile_evidence_points import exact_net_pnl
+
+    return exact_net_pnl(row)
+
+
+def reconcile_with_ledger(lane_stats: dict, root: Path | None = None) -> dict:
+    """Per-lane n / exact PnL vs the analyzer's mirror-ledger reconciliation.
+
+    The accumulator stores every current-epoch registry-lane close, i.e. the
+    reconciliation's ``mirror_ledger`` cohort (quarantined closes included).
+    """
+    path = (root or _root()) / LEDGER_RECONCILIATION_FILE
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"status": "UNAVAILABLE", "source": str(path), "lanes": {}}
+    mirror = ledger.get("mirror_ledger") if isinstance(ledger.get("mirror_ledger"), dict) else {}
+    lanes, mismatched = {}, []
+    for lane in sorted(set(lane_stats) | set(mirror)):
+        acc = lane_stats.get(lane) or {}
+        led = mirror.get(lane) or {}
+        acc_n, led_n = int(acc.get("n") or 0), int(led.get("n") or 0)
+        acc_pnl, led_pnl = float(acc.get("net_pnl_usd") or 0.0), float(led.get("net_pnl_usd") or 0.0)
+        match = acc_n == led_n and abs(acc_pnl - led_pnl) <= PNL_TOLERANCE_USD * max(1, acc_n)
+        lanes[lane] = {"accumulator_n": acc_n, "ledger_n": led_n,
+                       "accumulator_net_pnl_usd": round(acc_pnl, 6), "ledger_net_pnl_usd": round(led_pnl, 6),
+                       "quarantined_in_analyzer_cohort": int((ledger.get("quarantined") or {}).get(lane) or 0),
+                       "status": "MATCH" if match else "MISMATCH"}
+        if not match:
+            mismatched.append(lane)
+    # The accumulator syncs from the CSV on its own cadence; a newer CSV than the
+    # reconciliation's watermark is lag, not a contradiction.
+    return {"status": "MISMATCH" if mismatched else "MATCH", "mismatched_lanes": mismatched,
+            "source": str(path), "ledger_generated_at": ledger.get("generated_at"),
+            "ledger_source_data_through": ledger.get("source_data_through"), "lanes": lanes}
+
+
 def _root() -> Path:
     return Path(os.getenv("RESEARCH_ACCUMULATOR_ROOT", Path(__file__).resolve().parent))
 
@@ -459,10 +506,7 @@ def sync_accumulator(
                 skipped_epoch += 1
                 continue
             tags = compute_regime_tags(row_dict)
-            try:
-                pnl = float(row_dict.get("net_pnl_usd") or row_dict.get("pnl") or 0)
-            except (TypeError, ValueError):
-                pnl = 0.0
+            pnl = _row_net_pnl_usd(row_dict)[0]
             conn.execute(
                 """
                 INSERT OR IGNORE INTO trades
@@ -482,6 +526,11 @@ def sync_accumulator(
             if conn.total_changes:
                 new_rows += 1
                 existing.add(tid)
+
+        for tid, row_json, stored in conn.execute("SELECT trade_id, row_json, net_pnl_usd FROM trades").fetchall():
+            exact = _row_net_pnl_usd(json.loads(row_json))[0]
+            if exact is not None and (stored is None or abs(float(stored) - exact) > PNL_TOLERANCE_USD):
+                conn.execute("UPDATE trades SET net_pnl_usd=? WHERE trade_id=?", (exact, tid))
 
         total = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
         conn.execute(
@@ -562,17 +611,17 @@ def build_status(root: Path | None = None, session: dict | None = None) -> dict:
     regime_totals: dict[str, int] = {}
     for row in current:
         lane = str(row.get("research_lane") or "UNKNOWN").upper()
-        try:
-            pnl = float(row.get("net_pnl_usd") or row.get("pnl") or 0)
-        except (TypeError, ValueError):
-            pnl = 0.0
-        cell = lane_totals.setdefault(lane, {"n": 0, "pnl": 0.0})
+        pnl, basis = _row_net_pnl_usd(row)
+        cell = lane_totals.setdefault(lane, {"n": 0, "pnl": 0.0, "wins": 0, "basis": {}})
         cell["n"] += 1
-        cell["pnl"] += pnl
+        cell["pnl"] += pnl or 0.0
+        cell["wins"] += int(bool(pnl and pnl > 0))
+        cell["basis"][basis] = cell["basis"].get(basis, 0) + 1
         regime_key = compute_regime_tags(row)["regime_key"]
         regime_totals[regime_key] = regime_totals.get(regime_key, 0) + 1
     lane_stats = {
-        lane: {"n": cell["n"], "pnl": round(cell["pnl"], 2)}
+        lane: {"n": cell["n"], "wins": cell["wins"], "net_pnl_usd": round(cell["pnl"], 6),
+               "pnl": round(cell["pnl"], 6), "pnl_unit": "USD", "pnl_basis_counts": cell["basis"]}
         for lane, cell in sorted(lane_totals.items(), key=lambda item: -item[1]["n"])
     }
     regime_counts = [
@@ -594,6 +643,9 @@ def build_status(root: Path | None = None, session: dict | None = None) -> dict:
         "total_trades": total,
         "last_sync": dict(last) if last else None,
         "by_lane": lane_stats,
+        "pnl_unit": "USD",
+        "pnl_definition": "exact after-cost net PnL from the terminal cost receipt (cent-rounded CSV value only when no receipt)",
+        "ledger_reconciliation": reconcile_with_ledger(lane_stats, root),
         "top_regime_cells": [{"regime": r["rk"], "n": r["n"]} for r in regime_counts],
         "db_path": str(_db_path(root).resolve()),
         "export_csv": str(_export_csv_path(root).resolve()) if _export_csv_path(root).is_file() else None,

@@ -87,6 +87,37 @@ class ArchiveTests(unittest.TestCase):
         (snap_dir / "snapshot.json").write_text("tampered")
         self.assertFalse(aa.verify_snapshot(entry, self.root))
 
+    def test_snapshot_keeps_every_declared_report_within_the_caps(self):
+        declared = [f"extra_{i}_report.json" for i in range(20)] + ["huge_report.json", "../escape.json"]
+        (self.reports / "report_manifest.json").write_text(json.dumps(
+            {"generation_id": "gen1", "dataset_epoch": "epoch-a", "analyzer_revision": "abcdef1234567",
+             "reports": [{"file": name} for name in declared]}))
+        for name in declared[:20]:
+            (self.reports / name).write_text(json.dumps({"rows": [name]}))
+        (self.reports / "huge_report.json").write_text("x")
+        with mock.patch.object(aa, "REPORT_COPY_MAX_BYTES", 0):
+            entry = aa.write_generation_snapshot(report_dir=str(self.reports), data_dir=str(self.data), trades=[],
+                                                 now=_ts("2026-10-02T12:00:00"), root=self.root)
+        receipt = json.loads((Path(self.root) / entry["path"] / "receipt.json").read_text())
+        self.assertEqual(entry["reports_copied"], 0)
+        self.assertTrue(receipt["skipped_reports"]["huge_report.json"].startswith("TOO_LARGE"))
+        self.assertNotIn("../escape.json", receipt["skipped_reports"])
+
+        entry = aa.write_generation_snapshot(report_dir=str(self.reports), data_dir=str(self.data), trades=[],
+                                             now=_ts("2026-10-02T13:00:00"), root=self.root)
+        snap = Path(self.root) / entry["path"] / "reports"
+        self.assertEqual(entry["reports_copied"], 22)  # 20 declared + huge + main_rankings
+        self.assertTrue(all((snap / f"{name}.gz").is_file() for name in declared[:20]))
+        self.assertFalse((Path(self.root).parent / "escape.json.gz").exists())
+        self.assertTrue(entry["verified"])
+
+        with mock.patch.object(aa, "SNAPSHOT_REPORTS_MAX_GZ_BYTES", 1):
+            entry = aa.write_generation_snapshot(report_dir=str(self.reports), data_dir=str(self.data), trades=[],
+                                                 now=_ts("2026-10-02T14:00:00"), root=self.root)
+        receipt = json.loads((Path(self.root) / entry["path"] / "receipt.json").read_text())
+        self.assertEqual((entry["reports_copied"], entry["reports_skipped"]), (0, 22))
+        self.assertTrue(all(v.startswith("SNAPSHOT_BUDGET") for v in receipt["skipped_reports"].values()))
+
     def test_snapshot_without_heartbeat_has_unknown_consumed_seq(self):
         entry = aa.write_generation_snapshot(report_dir=str(self.reports), data_dir=str(self.data), trades=[],
                                              now=_ts("2026-10-02T12:00:00"), root=self.root)

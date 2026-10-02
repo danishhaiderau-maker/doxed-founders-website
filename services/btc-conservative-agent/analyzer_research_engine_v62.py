@@ -799,6 +799,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Compact Summary", RESEARCH_COMPACT_SUMMARY_FILE, "Machine-readable rollup of all KPIs"),
     ("Top Leakage Trades", TOP_LEAKAGE_REPORT_FILE, "Top 50 trades — peak vs booked, money left on table"),
     ("Feature Importance", FEATURE_IMPORTANCE_REPORT_FILE, "Which trading features correlate with PnL"),
+    ("Regime Leaderboard", REGIME_LEADERBOARD_REPORT_FILE, "Regime x lane cells (day type, session, ADX, volatility, funding, liquidity) with best lane per regime; recommend-only"),
+    ("Roster Policy", ROSTER_POLICY_FILE, "Recommended lane weights from the regime leaderboard; human approval required, never auto-applied"),
     ("Chase Profit", CHASE_PROFIT_REPORT_FILE, "Incremental PnL from chase-assisted vs static fills"),
     ("Confidence × Lane", CONFIDENCE_BAND_CROSS_REPORT_FILE, "Performance by AI band per lane"),
     ("Edge Validation", EDGE_VALIDATION_REPORT_FILE, "ACTIVE / WATCHLIST / DEPRECATED status for edge filter"),

@@ -30,6 +30,14 @@ on:
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
+      - "services/btc-conservative-agent/analysis_archive.py"
+      - "services/btc-conservative-agent/analyzer_research_engine_v62.py"
+      - "services/btc-conservative-agent/test_research_trade_accumulator_epoch.py"
+      - "services/btc-conservative-agent/test_dashboard_report_publication.py"
+      - "services/btc-conservative-agent/test_past_analysis_archive_card.py"
+      - "services/btc-conservative-agent/test_genome_search_space_disclosure.py"
+      - "services/btc-conservative-agent/test_data_retention.py"
+      - "services/btc-conservative-agent/test_v31_overview_best_policy_counts.py"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
   push:
@@ -55,6 +63,14 @@ on:
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
+      - "services/btc-conservative-agent/analysis_archive.py"
+      - "services/btc-conservative-agent/analyzer_research_engine_v62.py"
+      - "services/btc-conservative-agent/test_research_trade_accumulator_epoch.py"
+      - "services/btc-conservative-agent/test_dashboard_report_publication.py"
+      - "services/btc-conservative-agent/test_past_analysis_archive_card.py"
+      - "services/btc-conservative-agent/test_genome_search_space_disclosure.py"
+      - "services/btc-conservative-agent/test_data_retention.py"
+      - "services/btc-conservative-agent/test_v31_overview_best_policy_counts.py"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
 
@@ -90,6 +106,9 @@ jobs:
       - name: Segment puller and store
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py -q -p no:cacheprovider
+      - name: Analyzer sections (accumulator, archive, dashboard publication)
+        working-directory: services/btc-conservative-agent
+        run: python -m pytest test_research_trade_accumulator_epoch.py test_dashboard_report_publication.py test_past_analysis_archive_card.py test_genome_search_space_disclosure.py test_data_retention.py::ArchiveTests test_v31_overview_best_policy_counts.py -q -p no:cacheprovider
 
   windows-powershell:
     # tests/test_laptop_chain_scripts.py runs the supervisor/monitor .ps1
