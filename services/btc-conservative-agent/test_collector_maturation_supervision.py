@@ -196,6 +196,7 @@ def _health_namespace(*, tape_status, worker, reconcile=None, pending=3):
         "COLLECTION_EMPTY_PATH_ALARM_MIN_ROWS": 5, "COLLECTION_TOUCH_GRID_ALARM_COVERAGE": 0.9,
         "COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS": 3, "COLLECTOR_TAPE_REFRESH_FRESH_SEC": 120.0,
         "COLLECTOR_WORKER_RESTART_ALARM_SEC": 3600.0, "COLLECTOR_LATE_MATURATION_SEC": 3600.0,
+        "COLLECTOR_FINALIZABLE_BACKLOG_ALARM_SEC": 1800.0,
         "_collection_stats_lock": threading.Lock(), "_collection_counters": collections.Counter(),
         "_collection_multiverse_recent": collections.deque(), "_collection_touch_grid_recent": collections.deque(),
         "_collector_tape_store_obj": _Store(tape_status),
