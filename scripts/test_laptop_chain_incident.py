@@ -84,10 +84,13 @@ class _Client(_FakeIssues):
         self.heartbeats.append(now)
 
 
-def _write(tmp_path, analyzer, active):
+def _write(tmp_path, analyzer, active, now=NOW, health=None):
     (tmp_path / "alerts").mkdir(exist_ok=True)
+    (tmp_path / "health").mkdir(exist_ok=True)
     (tmp_path / "analyzer-run.status.json").write_text(json.dumps(analyzer), encoding="utf-8-sig")
     (tmp_path / "alerts" / "active-alerts.json").write_text(json.dumps(active), encoding="utf-8")
+    report = {"generated_ts": now, "verdict": "GREEN", "open_alarms": [], "failing": []} if health is None else health
+    (tmp_path / "health" / "system-health-latest.json").write_text(json.dumps(report), encoding="utf-8")
 
 
 def _args(tmp_path, **kw):
@@ -101,12 +104,12 @@ def test_one_issue_per_incident_and_close_on_recovery(tmp_path):
     client = _Client()
     _write(tmp_path, _analyzer(3 * 3600), _alerts())
     for i in range(6):  # 30 minutes of supervisor ticks
-        _write(tmp_path, _analyzer(3 * 3600 + 300 * i), _alerts())
+        _write(tmp_path, _analyzer(3 * 3600 + 300 * i), _alerts(), now=NOW + 300 * i)
         lci.run(_args(tmp_path), client=client, now=NOW + 300 * i)
     assert len(client.issues) == 1 and client.issues[0]["labels"] == [lci.LABEL]
     assert client.comments == []
 
-    _write(tmp_path, _analyzer(60), _alerts())
+    _write(tmp_path, _analyzer(60), _alerts(), now=NOW + 1800)
     lci.run(_args(tmp_path), client=client, now=NOW + 1800)
     assert client.issues[0]["state"] == "open"
     lci.run(_args(tmp_path), client=client, now=NOW + 2100)
@@ -144,6 +147,63 @@ def test_heartbeat_is_throttled_to_every_fifteen_minutes(tmp_path):
     for i in range(7):
         lci.run(_args(tmp_path), client=client, now=NOW + 300 * i)
     assert client.heartbeats == [NOW, NOW + 900, NOW + 1800]
+
+
+def test_missing_or_stale_health_verdict_is_an_incident_not_silence(tmp_path):
+    assert set(lci.system_health_findings(None, NOW)) == {"system_health_stale"}
+    stale = lci.system_health_findings({"generated_ts": NOW - 16 * 60, "verdict": "GREEN"}, NOW)
+    assert set(stale) == {"system_health_stale"} and "16 min old" in stale["system_health_stale"]
+    assert lci.system_health_findings({"generated_ts": NOW - 60, "open_alarms": []}, NOW) == {}
+    client = _Client()
+    _write(tmp_path, _analyzer(60), _alerts(), health={"generated_ts": NOW - 3600, "open_alarms": []})
+    result = lci.run(_args(tmp_path), client=client, now=NOW)
+    assert [(d["key"], d["action"]) for d in result["decisions"]] == [("system_health_stale", "alert")]
+    assert len(client.issues) == 1
+
+
+def test_safety_reds_are_split_from_suppressible_reds():
+    report = {"generated_ts": NOW - 60, "open_alarms": ["bitfinex.exposure", "fly.paused"],
+              "failing": [{"id": "bitfinex.exposure", "observed": "qty=0.001"}, {"id": "fly.paused", "observed": "x"}]}
+    found = lci.system_health_findings(report, NOW)
+    assert set(found) == {"system_health_safety_red", "system_health_red"}
+    assert "bitfinex.exposure" in found["system_health_safety_red"] and "fly.paused" in found["system_health_red"]
+    assert lci.POLICIES["system_health_safety_red"].suppress_in_maintenance is False
+    assert lci.POLICIES["system_health_red"].suppress_in_maintenance is True
+
+
+def _snapshot(paused, owner, age_sec=60):
+    return {"ok": True, "observedAt": _iso(NOW - age_sec), "execution_paused": paused, "pause_owner": owner}
+
+
+def test_maintenance_comes_from_the_deploy_pause_in_a_fresh_runtime_snapshot():
+    assert lci.deploy_maintenance(_snapshot(True, "DEPLOY_MAINTENANCE"), NOW) is True
+    assert lci.deploy_maintenance(_snapshot(True, "SAFETY"), NOW) is False
+    assert lci.deploy_maintenance(_snapshot(False, None), NOW) is False
+    assert lci.deploy_maintenance(_snapshot(True, "DEPLOY_MAINTENANCE", age_sec=3600), NOW) is False
+    assert lci.deploy_maintenance(None, NOW) is False
+
+
+def test_deploy_maintenance_suppresses_health_red_for_at_most_ninety_minutes(tmp_path):
+    client = _Client()
+    red = lambda t: {"generated_ts": t, "open_alarms": ["fly.paused"], "failing": [{"id": "fly.paused"}]}
+    actions = []
+    for minute in (0, 30, 60, 89, 91):
+        now = NOW + minute * 60
+        _write(tmp_path, _analyzer(60), _alerts(age_sec=60 - minute * 60), now=now, health=red(now))
+        (tmp_path / "fly_runtime_snapshot_v1.json").write_text(json.dumps(
+            {"ok": True, "observedAt": _iso(now - 30), "execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE"}))
+        result = lci.run(_args(tmp_path), client=client, now=now)
+        assert result["maintenance"] is True
+        actions.append({d["key"]: d["action"] for d in result["decisions"]}.get("system_health_red"))
+    assert actions == ["suppressed"] * 4 + ["alert"]
+
+
+def test_main_exits_nonzero_when_github_push_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(lci, "run", lambda args: {"decisions": [], "resolved": [], "synced": False,
+                                                  "error": "issue sync failed: HTTPError"})
+    assert lci.main(["--state-dir", str(tmp_path)]) == 1
+    monkeypatch.setattr(lci, "run", lambda args: {"decisions": [], "resolved": [], "synced": True})
+    assert lci.main(["--state-dir", str(tmp_path)]) == 0
 
 
 def test_dry_run_makes_no_calls_and_writes_no_state(tmp_path):

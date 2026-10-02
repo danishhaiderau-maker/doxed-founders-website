@@ -43,6 +43,7 @@ def healthy(now: float) -> dict:
                            "cross_venue_tape": {"status": "OK"}},
         },
         "fly_health": {
+            "git_rev": "a76a52a0dd50", "source_git_rev": "a76a52a0dd50", "analyzer_sync_id": "sync-v6",
             "volume": {"free_bytes": 40e9, "hours_to_full": 400,
                        "transfer": {"segments_enabled": True, "shipped_seq": 100, "laptop_acked_seq": 100,
                                     "unshipped_bytes": 2_000_000, "store_bytes": 1e9, "max_store_bytes": 10e9,
@@ -61,8 +62,34 @@ def healthy(now: float) -> dict:
             "orphan_order_ids": [], "orphan_position_ids": [],
             "dashboard_truth": {"deepseek": {"status": "OK", "label": "DeepSeek OK"}},
         },
-        "analyzer_api": {"ok": True, "runtime_sync_match": True, "source_revision_parity": {"match": True},
-                         "epoch_parity": {"match": True}},
+        "analyzer_api": {"ok": True, "runtime_sync_match": True, "source_revision_parity": "MATCH",
+                         "epoch_parity": "MATCH", "runtime_analyzer_sync_id": "sync-v6",
+                         "generation_freshness": {"revision_parity": "MATCH", "epoch_parity": "MATCH",
+                                                  "generation_revision": "a76a52a0dd50ffffffff",
+                                                  "mirror_sync_receipt_age_seconds": 900.0,
+                                                  "mirror_sync_receipt_timestamp": sh.iso(now - 900)}},
+        "analyzer_status_api": {"ok": True, "required_reports_ok": True, "required_report_failures": [],
+                                "required_report_status": {"best_policy_research_report.json":
+                                                           {"available_in_generation": True, "generation_error": None}},
+                                "generated_at": sh.iso(now - 600), "upstream_sync_id": "sync-v6",
+                                "analyzer_sync_id": "sync-v6", "stale_reasons": [], "analyzer_sync_blockers": [],
+                                "analysis_run": {"started_at": sh.iso(now - 800)}},
+        "analyzer_streams": {"status": "OK", "not_fully_analysed": [], "freshness": {"age_min": 10.0},
+                             "streams": [{"stream": "ai_tranche_log.csv", "analyzer_usage": "FULL", "status": "OK",
+                                          "continuous": True, "content_lag_sec": 120.0,
+                                          "content_last_at": sh.iso(now - 720)},
+                                         {"stream": "order_multiverse.jsonl", "analyzer_usage": "HEALTH_ONLY",
+                                          "status": "IDLE", "continuous": False, "content_lag_sec": None}]},
+        "selfaware": {"generated_at": sh.iso(now - 30), "verdict": "GREEN",
+                      "engine": {"started_at": sh.iso(now - 7200), "cadence_sec": {"diagnose": 120, "views": 300},
+                                 "jobs": {"diagnose": {"last_ok": sh.iso(now - 60)},
+                                          "views": {"last_ok": sh.iso(now - 200)}}}},
+        "supervisor_probe": {"ok": True, "checked_at": now, "task_found": True, "task_state": "Ready",
+                             "last_run": sh.iso(now - 120), "last_result": 0, "pull_loop_pids": [4242],
+                             "supervisor_pids": [], "ack_watcher_pids": []},
+        "puller_state": {"applied_seq": 100, "acked_seq": 100},
+        "legacy_ack_watcher": None,
+        "legacy_ack_retired": False,
         "railway_health": {"status": "ok", "services": {"api": "ok", "database": "ok"}},
         "pull_status": {"finishedAt": sh.iso(now - 60), "appliedSeq": 100},
         "puller_status": {"applied_seq": 100},
@@ -122,7 +149,8 @@ def test_healthy_system_is_green_with_every_field():
                      "laptop.pull_ack", "laptop.supervisor", "analyzer.generation", "analyzer.api", "analyzer.cycle",
                      "exports.freshness", "streams.coverage", "dashboards.parity", "railway.relay", "railway.api",
                      "neon.usage", "bitfinex.exposure", "proof.latest", "disk.space", "ai.served_model",
-                     "deepseek.balance"):
+                     "deepseek.balance", "analyzer.reports", "streams.analysed_freshness", "selfaware.engine",
+                     "watcher.sources", "laptop.legacy_ack_watcher"):
         assert required in ids
     for c in report["checks"]:
         assert set(c) >= {"status", "observed", "threshold", "last_good_at", "hint", "runbook"}
@@ -823,7 +851,8 @@ def test_incident_escalation_reads_open_alarms():
               "failing": [{"id": "ai.success", "observed": "14m", "runbook": "docs/x#ai-success"}]}
     found = incident.system_health_findings(report, now)
     assert "system_health_red" in found and "ai.success" in found["system_health_red"]
-    assert incident.system_health_findings({**report, "generated_ts": now - 3600}, now) == {}
+    assert set(incident.system_health_findings({**report, "generated_ts": now - 3600}, now)) == {"system_health_stale"}
+    assert set(incident.system_health_findings(None, now)) == {"system_health_stale"}
     assert incident.system_health_findings({**report, "open_alarms": []}, now) == {}
 
 
@@ -834,13 +863,15 @@ def test_tick_lock_is_exclusive(tmp_path):
             assert not second
 
 
-def test_server_marks_stale_verdict_amber(tmp_path):
+def test_server_marks_stale_verdict_red(tmp_path):
     (tmp_path / "health").mkdir()
+    assert server.published(str(tmp_path))["verdict"] == sh.RED  # nothing published yet
     old = sh.utcnow() - 3600
     report = sh.summarize(sh.evaluate(healthy(old), {}), {}, old)
     (tmp_path / "health" / "system-health-latest.json").write_text(json.dumps(report))
     out = server.published(str(tmp_path))
-    assert out["stale"] is True and out["verdict"] == sh.AMBER and out["failing"][0]["id"] == "watcher.stale"
+    assert out["stale"] is True and out["verdict"] == sh.RED and out["failing"][0]["id"] == "watcher.stale"
+    assert out["failing"][0]["status"] == sh.RED and out["age_sec"] >= 3600
 
 
 def test_banner_payload_is_bounded_and_secret_free():
@@ -1037,3 +1068,388 @@ def test_tier_a_health_drives_storage_tier_a():
     check = by_id(sh.evaluate(inputs, {}))["storage.tier_a"]
     assert check["status"] == sh.RED
     assert "INVALID_DAY_ROWS" in check["observed"]
+
+
+# ------------------------------------------------- BLINDSPOT-AUDIT-3 closures
+
+COLLISION = "ValueError: POLICY_ID_SPEC_COLLISION:SCORE_LED_NON_TIE_PAPER_V2::X"
+
+
+def failing_reports(inputs: dict, generated_at: str) -> dict:
+    """The live :9001 /api/status shape on 2026-10-02 (two required reports failing)."""
+    inputs["analyzer_status_api"].update(
+        ok=False, required_reports_ok=False, generated_at=generated_at,
+        required_report_failures=["best_policy_research_report.json", "safe_policy_genome_v3_report.json"],
+        required_report_status={
+            "best_policy_research_report.json": {"available_in_generation": False, "generation_error": COLLISION},
+            "safe_policy_genome_v3_report.json": {"available_in_generation": False, "generation_error": COLLISION},
+            "dynamic_policy_analysis_report.json": {"available_in_generation": True, "generation_error": None}})
+    return inputs
+
+
+def test_analyzer_reports_amber_on_first_sight_red_after_a_generation():
+    now = ts("2026-10-02T10:50:00Z")
+    state: dict = {}
+    check = by_id(sh.evaluate(failing_reports(healthy(now), "2026-10-02T10:07:26Z"), state))["analyzer.reports"]
+    assert check["status"] == sh.AMBER
+    assert "best_policy_research_report.json" in check["observed"] and "POLICY_ID_SPEC_COLLISION" in check["observed"]
+    assert check["observed_fields"]["failing_reports"] == ["best_policy_research_report.json",
+                                                           "safe_policy_genome_v3_report.json"]
+    later = failing_reports(healthy(now + 46 * 60), "2026-10-02T10:07:26Z")
+    assert by_id(sh.evaluate(later, state))["analyzer.reports"]["status"] == sh.RED
+    state = {}
+    sh.evaluate(failing_reports(healthy(now), "2026-10-02T10:07:26Z"), state)
+    next_gen = failing_reports(healthy(now + 10 * 60), "2026-10-02T10:55:00Z")
+    assert by_id(sh.evaluate(next_gen, state))["analyzer.reports"]["status"] == sh.RED
+    assert by_id(sh.evaluate(healthy(now + 20 * 60), state))["analyzer.reports"]["status"] == sh.GREEN
+    assert "analyzer_reports_bad" not in state["memory"]
+
+
+def test_analyzer_reports_missing_field_or_endpoint_is_amber_never_green():
+    now = ts("2026-10-02T10:50:00Z")
+    inputs = healthy(now)
+    del inputs["analyzer_status_api"]["required_reports_ok"]
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.reports"]["status"] == sh.AMBER
+    inputs = healthy(now)
+    inputs["analyzer_status_api"] = None
+    inputs["errors"]["analyzer_status_api"] = "UNREACHABLE"
+    checks = by_id(sh.evaluate(inputs, {}))
+    assert checks["analyzer.reports"]["status"] == sh.AMBER
+    assert checks["analyzer.api"]["status"] == sh.AMBER  # /api/health alone is not enough
+
+
+def test_analyzer_api_not_green_when_health_ok_but_status_not_ok():
+    now = ts("2026-10-02T10:50:00Z")
+    inputs = failing_reports(healthy(now), "2026-10-02T10:07:26Z")
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.api"]
+    assert check["status"] == sh.AMBER and "/api/status ok=False while /api/health ok=True" in check["observed"]
+    assert check["observed_fields"]["status_ok"] is False and check["observed_fields"]["health_ok"] is True
+
+
+@pytest.mark.parametrize("value,expected", [("MATCH", True), ("match", True), ("MISMATCH", False),
+                                            ("NOT_MATCH", False), ("UNKNOWN", None), (None, None), (True, True),
+                                            ({"match": False}, False), ({"ok": True}, True), ({}, None)])
+def test_parity_state_parses_strings_bools_and_mappings(value, expected):
+    assert sh.parity_state(value) is expected
+
+
+def test_analyzer_api_revision_and_identity_parity():
+    now = ts("2026-10-02T10:50:00Z")
+    check = by_id(sh.evaluate(healthy(now), {}))["analyzer.api"]
+    assert check["status"] == sh.GREEN
+    assert set(check["observed_fields"]) >= {"generation_rev", "fly_rev", "sync_id_match", "receipt_age_sec"}
+    assert check["observed_fields"]["sync_id_match"] is True
+
+    inputs = healthy(now)
+    inputs["analyzer_api"]["source_revision_parity"] = "MISMATCH"
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.api"]["status"] == sh.AMBER
+    inputs = healthy(now)
+    inputs["analyzer_api"]["generation_freshness"]["revision_parity"] = "NOT_MATCH"
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.api"]["status"] == sh.AMBER
+
+    inputs = healthy(now)  # 2026-10-02: generation built from 728918be while Fly ran 29742de
+    inputs["analyzer_api"]["generation_freshness"]["generation_revision"] = "728918be8b22228e68c37b73e99b49dcb688ba86"
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.api"]
+    assert check["status"] == sh.AMBER and "generation rev 728918be8b22 != Fly a76a52a0dd50" in check["observed"]
+    assert check["observed_fields"]["generation_rev"].startswith("728918be")
+
+    inputs = healthy(now)  # upstream identity captured before the v6 deploy
+    inputs["analyzer_status_api"]["upstream_sync_id"] = "v31-trend-fade-single-tile-v5"
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.api"]
+    assert check["status"] == sh.AMBER and check["observed_fields"]["sync_id_match"] is False
+
+    inputs = healthy(now)  # analysis started on a 45-minute-old mirror receipt
+    inputs["analyzer_api"]["generation_freshness"]["mirror_sync_receipt_timestamp"] = sh.iso(now - 800 - 45 * 60)
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.api"]["status"] == sh.AMBER
+    inputs = healthy(now)
+    inputs["analyzer_api"]["generation_freshness"]["mirror_sync_receipt_age_seconds"] = 5356.8
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.api"]
+    assert check["status"] == sh.AMBER and check["observed_fields"]["receipt_age_sec"] == 5356.8
+
+
+def test_pull_ack_applied_unknown_is_amber_then_red_and_state_json_is_the_fallback():
+    now = ts("2026-10-02T10:55:00Z")
+    state: dict = {}
+    inputs = healthy(now)
+    inputs["puller_status"] = {"last_error": "PullerError: another puller run holds the shadow-root lock"}
+    inputs["pull_status"]["appliedSeq"] = None
+    check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.GREEN and check["observed_fields"]["applied_source"] == "puller state.json"
+    inputs["puller_state"] = None
+    check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.AMBER and "applied seq unknown" in check["hint"]
+    inputs["now"] = now + 31 * 60
+    inputs["pull_status"]["finishedAt"] = sh.iso(now + 31 * 60 - 30)
+    assert by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"] == sh.RED
+
+
+def test_pull_ack_failing_pull_exit_code():
+    now = ts("2026-10-02T10:55:00Z")
+    state: dict = {}
+
+    def pull(i: int, err: str) -> dict:
+        inputs = healthy(now + i * 120)
+        inputs["pull_status"].update(exitCode=2, iteration=1559 + i, error=err,
+                                     finishedAt=sh.iso(now + i * 120 - 5))
+        return inputs
+
+    assert by_id(sh.evaluate(pull(0, "HTTP 503"), state))["laptop.pull_ack"]["status"] == sh.AMBER
+    assert by_id(sh.evaluate(pull(1, "HTTP 503"), state))["laptop.pull_ack"]["status"] == sh.AMBER
+    check = by_id(sh.evaluate(pull(6, "HTTP 503"), state))["laptop.pull_ack"]
+    assert check["status"] == sh.RED and "exit=2 for 7 consecutive pulls" in check["hint"]
+    ok = healthy(now + 7 * 120)
+    ok["pull_status"].update(exitCode=0, iteration=1566)
+    assert by_id(sh.evaluate(ok, state))["laptop.pull_ack"]["status"] == sh.GREEN
+
+    # Lock refusal while the analyzer cycle's puller keeps applying: degraded, not dead.
+    state = {}
+    lock = "PullerError: another puller run holds the shadow-root lock"
+    for i in range(7):
+        inputs = pull(i, lock)
+        inputs["puller_state"]["applied_seq"] = inputs["fly_health"]["volume"]["transfer"]["shipped_seq"] = 100 + i
+        inputs["fly_health"]["volume"]["transfer"]["laptop_acked_seq"] = 100 + i
+        check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.AMBER and "another puller holds the lock" in check["hint"]
+
+
+def probe(now: float, **kw) -> dict:
+    out = {"ok": True, "checked_at": now, "task_found": True, "task_state": "Ready", "last_run": sh.iso(now - 120),
+           "last_result": 0, "pull_loop_pids": [4242], "supervisor_pids": [], "ack_watcher_pids": []}
+    out.update(kw)
+    return out
+
+
+def test_supervisor_liveness_from_task_and_process_not_log():
+    now = ts("2026-10-02T10:55:00Z")
+    inputs = healthy(now)
+    inputs["supervisor_probe"] = probe(now, task_state="Disabled")
+    assert by_id(sh.evaluate(inputs, {}))["laptop.supervisor"]["status"] == sh.RED
+    inputs["supervisor_probe"] = probe(now, last_run=sh.iso(now - 20 * 60))
+    assert by_id(sh.evaluate(inputs, {}))["laptop.supervisor"]["status"] == sh.RED
+    inputs["supervisor_probe"] = probe(now, task_found=False)
+    assert by_id(sh.evaluate(inputs, {}))["laptop.supervisor"]["status"] == sh.RED
+    state: dict = {}
+    inputs["supervisor_probe"] = probe(now, pull_loop_pids=[])
+    check = by_id(sh.evaluate(inputs, state))["laptop.supervisor"]
+    assert check["status"] == sh.AMBER and "no research-segment-pull-loop process" in check["hint"]
+    inputs["now"] = now + 11 * 60
+    inputs["supervisor_probe"] = probe(now + 11 * 60, pull_loop_pids=[])
+    assert by_id(sh.evaluate(inputs, state))["laptop.supervisor"]["status"] == sh.RED
+    inputs = healthy(now)  # probe unavailable: a fresh log line alone is never GREEN
+    inputs["supervisor_probe"] = {"ok": False, "error": "PROBE_FAILED"}
+    assert by_id(sh.evaluate(inputs, {}))["laptop.supervisor"]["status"] == sh.AMBER
+    inputs["supervisor_tick_at"] = now - 30 * 60
+    assert by_id(sh.evaluate(inputs, {}))["laptop.supervisor"]["status"] == sh.RED
+
+
+def test_probe_supervisor_parses_powershell_json_and_caches():
+    calls = []
+
+    class Done:
+        stdout = ('{"task_found":true,"task_state":"Running","last_run":"2026-10-02T11:00:27.0000000Z",'
+                  '"last_result":267009,"pull_loop_pids":34496,"supervisor_pids":[43080],"ack_watcher_pids":[]}\n')
+
+    def runner(cmd, **kw):
+        calls.append(cmd)
+        assert "-EncodedCommand" in cmd
+        return Done()
+
+    cache: dict = {}
+    out = sh.probe_supervisor(cache, 1000.0, runner=runner)
+    assert out["ok"] and out["pull_loop_pids"] == [34496] and out["supervisor_pids"] == [43080]
+    assert sh.probe_supervisor(cache, 1030.0, runner=runner)["pull_loop_pids"] == [34496]
+    assert len(calls) == 1
+    sh.probe_supervisor(cache, 1100.0, runner=lambda cmd, **kw: (_ for _ in ()).throw(OSError("x")))
+    assert cache["supervisor_probe"] == {"checked_at": 1100.0, "ok": False, "error": "PROBE_FAILED"}
+
+
+def test_legacy_ack_watcher_orphan_state_is_amber_until_retired():
+    now = ts("2026-10-02T10:55:00Z")
+    inputs = healthy(now)
+    inputs["legacy_ack_watcher"] = {"state": "WAIT_INVENTORY_NOT_ACK_ELIGIBLE", "lastPollAt": "2026-09-30T04:25:36Z"}
+    check = by_id(sh.evaluate(inputs, {}))["laptop.legacy_ack_watcher"]
+    assert check["status"] == sh.AMBER and "orphan state" in check["hint"]
+    inputs["legacy_ack_retired"] = True
+    assert by_id(sh.evaluate(inputs, {}))["laptop.legacy_ack_watcher"]["status"] == sh.GREEN
+
+
+def test_missing_data_never_scores_green():
+    now = ts("2026-10-02T10:55:00Z")
+    # Bitfinex: qty unknown is GREEN only while explicitly disarmed, and says so.
+    inputs = healthy(now)
+    inputs["relay_snapshot"]["reconciliation"] = None
+    checks = by_id(sh.evaluate(inputs, {}))
+    assert checks["bitfinex.exposure"]["status"] == sh.GREEN
+    assert "not probed (disarmed" in checks["bitfinex.exposure"]["observed"]
+    assert checks["railway.relay"]["status"] == sh.AMBER and "reconciliation=null" in checks["railway.relay"]["observed"]
+    inputs["fly_status"]["force_paper_mode"] = None
+    inputs["fly_health"]["force_paper_mode"] = None
+    assert by_id(sh.evaluate(inputs, {}))["bitfinex.exposure"]["status"] == sh.AMBER
+    # streams.coverage with no stream blocks at all.
+    inputs = healthy(now)
+    inputs["fly_status"]["collection"] = {}
+    check = by_id(sh.evaluate(inputs, {}))["streams.coverage"]
+    assert check["status"] == sh.AMBER and "no stream health reported" in check["observed"]
+    # trading.orders without toggles is not "all OFF".
+    inputs = healthy(now)
+    del inputs["fly_state"]["research_lane_enabled"]
+    check = by_id(sh.evaluate(inputs, {}))["trading.orders"]
+    assert check["status"] == sh.AMBER and "toggle state unavailable" in check["observed"]
+    inputs["runtime_snapshot"] = {"research_lane_enabled": {lane: True for lane in LANES}}
+    assert by_id(sh.evaluate(inputs, {}))["trading.orders"]["status"] == sh.GREEN
+    # decision_mix below the minimum sample is not rated.
+    assert by_id(sh.evaluate(healthy(now), {}))["ai.decision_mix"]["status"] == sh.SKIP
+    # ws_progressing missing is not True.
+    inputs = healthy(now)
+    del inputs["fly_status"]["strategy_progress"]["ws_progressing"]
+    check = by_id(sh.evaluate(inputs, {}))["ws.ticks"]
+    assert check["status"] == sh.AMBER and "not reported" in check["observed"]
+    inputs["runtime_snapshot"] = {"strategy_progress": {"ws_progressing": True}}
+    assert by_id(sh.evaluate(inputs, {}))["ws.ticks"]["status"] == sh.GREEN
+    # dashboards.parity reads the string epoch_parity.
+    inputs = healthy(now)
+    inputs["analyzer_api"]["epoch_parity"] = "MISMATCH"
+    check = by_id(sh.evaluate(inputs, {}))["dashboards.parity"]
+    assert check["status"] == sh.AMBER and "epoch parity mismatch" in check["observed"]
+
+
+def test_rate_limited_source_turns_skip_amber_after_fifteen_minutes():
+    now = ts("2026-10-02T10:55:00Z")
+    state: dict = {}
+    inputs = healthy(now)
+    inputs["fly_state"] = None
+    inputs["errors"]["fly_state"] = "HTTP_429"
+    checks = by_id(sh.evaluate(inputs, state))
+    assert checks["trading.orders"]["status"] == sh.SKIP and checks["watcher.sources"]["status"] == sh.GREEN
+    assert "fly_state=HTTP_429" in checks["watcher.sources"]["observed"]
+    inputs["now"] = now + 16 * 60
+    checks = by_id(sh.evaluate(inputs, state))
+    assert checks["trading.orders"]["status"] == sh.AMBER and "HTTP_429" in checks["trading.orders"]["observed"]
+    assert checks["trading.orphans"]["status"] == sh.AMBER
+    assert checks["watcher.sources"]["status"] == sh.AMBER
+    assert checks["watcher.sources"]["observed_fields"]["failing_sources"] == ["fly_state"]
+    recovered = healthy(now + 20 * 60)
+    checks = by_id(sh.evaluate(recovered, state))
+    assert checks["watcher.sources"]["status"] == sh.GREEN and checks["trading.orders"]["status"] == sh.GREEN
+
+
+def test_streams_analysed_freshness():
+    now = ts("2026-10-02T10:57:00Z")
+    assert by_id(sh.evaluate(healthy(now), {}))["streams.analysed_freshness"]["status"] == sh.GREEN
+    inputs = healthy(now)  # live 2026-10-02: research_events_v22 STALE yet analysed; multiverse partial
+    inputs["analyzer_streams"]["streams"].append(
+        {"stream": "research_events_v22.jsonl", "analyzer_usage": "STRATEGY_LAB", "status": "STALE",
+         "continuous": True, "content_lag_sec": None, "content_last_at": None})
+    check = by_id(sh.evaluate(inputs, {}))["streams.analysed_freshness"]
+    assert check["status"] == sh.AMBER and "research_events_v22.jsonl STALE" in check["observed"]
+    inputs = healthy(now)
+    inputs["analyzer_streams"]["not_fully_analysed"] = ["order_multiverse.jsonl"]
+    check = by_id(sh.evaluate(inputs, {}))["streams.analysed_freshness"]
+    assert check["status"] == sh.AMBER and "not fully analysed" in check["observed"]
+    inputs = healthy(now)
+    inputs["analyzer_streams"]["streams"][0]["content_lag_sec"] = 2 * 3600.0
+    assert by_id(sh.evaluate(inputs, {}))["streams.analysed_freshness"]["status"] == sh.AMBER
+    inputs = healthy(now)  # HEALTH_ONLY streams are not "analysed"
+    inputs["analyzer_streams"]["streams"][1]["content_lag_sec"] = 9 * 3600.0
+    assert by_id(sh.evaluate(inputs, {}))["streams.analysed_freshness"]["status"] == sh.GREEN
+    inputs["analyzer_streams"] = None
+    assert by_id(sh.evaluate(inputs, {}))["streams.analysed_freshness"]["status"] == sh.AMBER
+
+
+def test_selfaware_engine_real_health():
+    now = ts("2026-10-02T10:57:00Z")
+    assert by_id(sh.evaluate(healthy(now), {}))["selfaware.engine"]["status"] == sh.GREEN
+    state: dict = {}
+    inputs = healthy(now)
+    inputs["selfaware"] = None
+    assert by_id(sh.evaluate(inputs, state))["selfaware.engine"]["status"] == sh.AMBER
+    inputs["now"] = now + 16 * 60
+    assert by_id(sh.evaluate(inputs, state))["selfaware.engine"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["selfaware"]["generated_at"] = sh.iso(now - 25 * 60)
+    assert by_id(sh.evaluate(inputs, {}))["selfaware.engine"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["selfaware"]["engine"]["jobs"]["diagnose"]["last_ok"] = sh.iso(now - 21 * 60)
+    assert by_id(sh.evaluate(inputs, {}))["selfaware.engine"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["selfaware"]["engine"]["jobs"]["views"]["last_ok"] = sh.iso(now - 16 * 60)  # > 3 x 300s
+    check = by_id(sh.evaluate(inputs, {}))["selfaware.engine"]
+    assert check["status"] == sh.AMBER and "views last_ok" in check["observed"]
+
+
+def _write_latest(tmp_path: Path, generated_ts: float) -> None:
+    (tmp_path / "health").mkdir(exist_ok=True)
+    report = sh.summarize(sh.evaluate(healthy(generated_ts), {}), {}, generated_ts)
+    (tmp_path / "health" / "system-health-latest.json").write_text(json.dumps(report))
+
+
+def test_live_refresh_is_single_flight_and_serves_the_cache_at_once(tmp_path):
+    import threading
+    import time as _time
+
+    _write_latest(tmp_path, sh.utcnow() - 30)
+    gate, runs = threading.Event(), []
+
+    def slow():
+        runs.append(1)
+        gate.wait(10)
+        return sh.summarize(sh.evaluate(healthy(sh.utcnow()), {}), {}, sh.utcnow())
+
+    live = server.LiveRefresher(str(tmp_path), slow, max_age_sec=120, wait_sec=5)
+    t0 = _time.monotonic()
+    first = live.get()
+    second = live.get()
+    assert _time.monotonic() - t0 < 1.0
+    assert first["refresh"] == "started" and second["refresh"] == "running"
+    assert first["cache_source"] == "published" and 25 <= first["age_sec"] <= 60 and first["generated_at"]
+    gate.set()
+    for _ in range(100):
+        if live.runs:
+            break
+        _time.sleep(0.05)
+    assert len(runs) == 1
+    third = live.get()
+    assert third["cache_source"] == "live" and third["age_sec"] < 5
+    gate.set()
+
+
+def test_live_refresh_waits_bounded_only_when_the_cache_is_old(tmp_path):
+    import time as _time
+
+    _write_latest(tmp_path, sh.utcnow() - 600)
+    fast = lambda: sh.summarize(sh.evaluate(healthy(sh.utcnow()), {}), {}, sh.utcnow())
+    out = server.LiveRefresher(str(tmp_path), fast, max_age_sec=120, wait_sec=5).get()
+    assert out["refresh"] == "completed" and out["cache_source"] == "live" and out["age_sec"] < 5
+
+    hung = lambda: _time.sleep(30)
+    live = server.LiveRefresher(str(tmp_path), hung, max_age_sec=120, wait_sec=0.3)
+    t0 = _time.monotonic()
+    out = live.get()
+    assert _time.monotonic() - t0 < 2.0
+    assert out["refresh"] == "started" and out["cache_source"] == "published" and out["age_sec"] >= 600
+
+
+def test_live_endpoint_p95_under_two_seconds(tmp_path):
+    import threading
+    import time as _time
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    _write_latest(tmp_path, sh.utcnow() - 30)
+    slow = lambda: (_time.sleep(3), sh.summarize(sh.evaluate(healthy(sh.utcnow()), {}), {}, sh.utcnow()))[1]
+    live = server.LiveRefresher(str(tmp_path), slow)
+    opts = server.argparse.Namespace(state_dir=str(tmp_path), port=0)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(opts, live))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/api/system-health?live=1"
+        timings = []
+        for _ in range(20):
+            t0 = _time.monotonic()
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                body = json.loads(resp.read())
+            timings.append(_time.monotonic() - t0)
+            assert body["refresh"] in ("started", "running", "completed") and "age_sec" in body
+        assert sorted(timings)[int(len(timings) * 0.95) - 1] < 2.0
+    finally:
+        httpd.shutdown()

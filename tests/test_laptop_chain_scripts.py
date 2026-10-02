@@ -123,6 +123,40 @@ def test_supervisor_task_uses_system_powershell():
     assert ".cache" not in register
 
 
+def test_interim_health_tick_defers_only_on_fresh_supervisor_and_verdict_timestamps():
+    tick = _source("system-health-tick.ps1")
+    assert "Get-ScheduledTaskInfo" in tick and "LastRunTime" in tick
+    assert "generated_ts" in tick and "$FreshMinutes" in tick
+    defer = next(line for line in tick.splitlines() if line.strip().startswith("if ($carriesWatcher"))
+    assert "$runAge -lt $FreshMinutes" in defer and "$verdictAge -lt $FreshMinutes" in defer
+    assert "TAKEOVER" in tick
+
+
+@windows_only
+def test_interim_health_tick_defers_while_the_supervisor_watcher_is_fresh(tmp_path):
+    probe = _ps("(Get-ScheduledTask -TaskName DoxxedLaptopChainSupervisor -ErrorAction SilentlyContinue | "
+                "Get-ScheduledTaskInfo).LastRunTime.ToUniversalTime().ToString('o')")
+    try:
+        last_run = datetime.fromisoformat(probe.stdout.strip()[:26])
+    except ValueError:
+        pytest.skip("DoxxedLaptopChainSupervisor task not registered on this host")
+    if (datetime.utcnow() - last_run).total_seconds() > 10 * 60:
+        pytest.skip("supervisor task has not run recently on this host")
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "laptop-chain-supervisor.ps1").write_text("# runs system_health.py\n", encoding="utf-8")
+    state = tmp_path / "state"
+    (state / "health").mkdir(parents=True)
+    (state / "health" / "system-health-latest.json").write_text(json.dumps({"generated_ts": time.time()}))
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPTS / "system-health-tick.ps1"),
+         "-StateDir", str(state), "-SupervisorRepo", str(repo), "-Interim"],
+        capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0
+    log = next((state / "logs").glob("system-health-*.log")).read_text(encoding="utf-8-sig")
+    assert "DEFERRED supervisor ran" in log and "TAKEOVER" not in log
+
+
 # --- behaviour ---------------------------------------------------------------
 
 

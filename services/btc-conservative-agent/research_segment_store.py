@@ -310,7 +310,7 @@ class HttpSegmentSource(ObjectStore):
     _KEY_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,63})/(man|seg|acks/laptop)/(\d{12})\.(json|tar\.gz)$")
 
     def __init__(self, *, base_url: str, admin_token: str, prefix: str = "v1",
-                 timeout: float = 120.0, attempts: int = 5):
+                 timeout: float = 120.0, attempts: int = 5, request_deadline: float = 300.0):
         parsed = urllib.parse.urlsplit(base_url)
         loopback = parsed.hostname in ("127.0.0.1", "localhost")
         if not parsed.netloc or not (parsed.scheme == "https" or (loopback and parsed.scheme == "http")):
@@ -322,6 +322,7 @@ class HttpSegmentSource(ObjectStore):
         self._prefix = prefix
         self._timeout = float(timeout)
         self._attempts = max(1, int(attempts))
+        self._request_deadline = float(request_deadline)
         self.last_ack_response: dict | None = None
 
     def __repr__(self) -> str:
@@ -339,13 +340,18 @@ class HttpSegmentSource(ObjectStore):
 
     def _request(self, method: str, route: str, body: bytes | None = None):
         last_error = None
+        deadline = time.monotonic() + self._request_deadline
         for attempt in range(self._attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_error = f"{last_error or 'no response'}; request deadline {self._request_deadline:.0f}s exceeded"
+                break
             headers = {"X-Bot-Admin-Token": self._token, "Accept-Encoding": "identity"}
             if body is not None:
                 headers["Content-Type"] = "application/json"
             request = urllib.request.Request(self._url(route), data=body, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                with urllib.request.urlopen(request, timeout=min(self._timeout, remaining)) as response:
                     chunks, expected = [], response.headers.get("Content-Length")
                     for chunk in iter(lambda: response.read(1024 * 1024), b""):
                         chunks.append(chunk)
@@ -365,7 +371,8 @@ class HttpSegmentSource(ObjectStore):
                 last_error = f"HTTP {status}"
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
                 last_error = type(exc).__name__
-            time.sleep(min(16.0, 1.0 * (2 ** attempt)))
+            if attempt + 1 < self._attempts:
+                time.sleep(max(0.0, min(16.0, 1.0 * (2 ** attempt), deadline - time.monotonic())))
         raise StoreError(f"{method} {route} failed after retries: {last_error}")
 
     def head(self) -> dict:

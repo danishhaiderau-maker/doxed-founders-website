@@ -72,7 +72,7 @@ snap["components"]["fly_bot"]["data"]["tiles"]   # lane, accepting, Win %, close
 |--|--|--|
 | `system_health` | :9011 `/api/system-health`, else `laptop-chain\health\system-health-latest.json` | older than 15 min or unreadable |
 | `fly_bot` | live `https://doxed-btc-bot.fly.dev/api/status` (rev, paused, open/pending, AI last success, tile roster) + Win % per tile from `tile_stats` | live call fails and the laptop Fly snapshot is older than 5 min |
-| `transfer` | `segment-pull.status.json` + `fly_segment_head_snapshot_v1.json` (published / applied / ACK seq) + the health checks `shipper.progress`, `laptop.pull_ack` | last pull older than 15 min |
+| `transfer` | `segment-pull.status.json` + `fly_segment_head_snapshot_v1.json` (published / applied / ACK seq) + the health checks `shipper.progress`, `laptop.pull_ack` | last pull older than 15 min; UNKNOWN when no applied seq exists in the pull status or puller `state.json`; DEGRADED (data kept) when the seq came from `state.json` or pulls keep failing (a LOCK_BUSY streak under 3 is tolerated) |
 | `deploy_queue` | `btc-v31-current\diagnostics\WALL-STATUS-FLY.md` parsed live: Fly slot holder, state (FREE / HELD / DEPLOYING), queue in order, recent DONE | file unreadable |
 | `analyzer_export` | `load_latest()` of this folder: per-tile stats with corrected verdicts, hypothesis verdicts, main-ranking family summaries, stream health, exit regret at 1 h, taker EV at 1 s, fill markouts, quarantine | any `load_latest()` refusal (age > 45 min, hash, manifest or live-dashboard mismatch) |
 
