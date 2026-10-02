@@ -373,7 +373,8 @@ class Store:
         finally:
             cur.close()
 
-    def history(self, name: str, *, limit: int = 50, kind: str | None = None, since: str | None = None) -> list[dict]:
+    def history(self, name: str, *, limit: int = 50, kind: str | None = None, since: str | None = None,
+                id: str | None = None) -> list[dict]:  # noqa: A002
         table = f"res_{name}"
         if not self.table_exists(table):
             return []
@@ -381,6 +382,9 @@ class Store:
         if kind:
             where.append("kind = ?")
             params.append(kind)
+        if id:
+            where.append("id = ?")
+            params.append(id)
         if since:
             where.append('"at" >= ?')
             params.append(since)

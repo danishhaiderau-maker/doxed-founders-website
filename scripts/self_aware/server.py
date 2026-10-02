@@ -25,6 +25,10 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/data/capacity
   /api/selfaware/data/sufficiency
   /api/selfaware/sections           :9001 section health (populated, fresh, dimensions, consistency)
+  /contracts                        HTML section-contract view
+  /api/selfaware/contracts          ?surface=analyzer|fly|exports|selfaware|watcher&status=RED,AMBER
+  /api/selfaware/contracts/registry declarative specs (section_contracts.json) + violation legend
+  /api/selfaware/contracts/<id>     ?rows=N&history=N   spec, last result, history, raw rows fetched now
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import contracts
 from .ai_scorecard import headline as ai_headline, json_safe
 from .config import SERVER_PORT
 from .facts import parse_ts, tail_jsonl
@@ -105,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
                 return route(self, q)
             if path.startswith("/api/selfaware/ai/calls/"):
                 return self.ai_call(unquote(path.rsplit("/", 1)[1]))
+            if path.startswith("/api/selfaware/contracts/"):
+                return self.contract_detail(unquote(path.rsplit("/", 1)[1]), q)
             self._send(404, {"error": "not found", "endpoints": sorted(ROUTES)})
         except QueryRejected as exc:
             self._send(400, {"error": str(exc)})
@@ -343,6 +350,45 @@ class Handler(BaseHTTPRequestHandler):
     def data_view(self, q):
         self._send(200, render_data(self.eng), "text/html")
 
+    # ------------------------------------------------------------ section contracts
+    def contracts_summary(self, q):
+        doc = self.eng.docs.get("contracts")
+        if not doc:
+            return self._send(503, {"error": "section contracts not evaluated yet (light pass at start, heavy every 2 h)"})
+        rows = doc["contracts"]
+        if q.get("surface"):
+            rows = [r for r in rows if r["surface"] == q["surface"]]
+        if q.get("status"):
+            want = {s.strip().upper() for s in q["status"].split(",") if s.strip()}
+            rows = [r for r in rows if r["status"] in want]
+        self._send(200, {**{k: v for k, v in doc.items() if k != "contracts"}, "returned": len(rows), "contracts": rows,
+                         "detail": "/api/selfaware/contracts/<id>?rows=N&history=N drills to the raw rows behind a section",
+                         "registry": "/api/selfaware/contracts/registry", "provenance": self._prov(contracts.HISTORY_TABLE)})
+
+    def contracts_registry(self, q):
+        reg = contracts.load_registry()
+        self._send(200, {"schema": "self_aware_contract_registry_v1", "registry_hash": reg["registry_hash"],
+                         "file": str(contracts.REGISTRY_FILE.name), "contracts": reg["contracts"],
+                         "violation_kinds": contracts.VIOLATION_HELP})
+
+    def contract_detail(self, cid: str, q):
+        reg = contracts.load_registry()
+        spec = next((s for s in reg["contracts"] if s["id"] == cid), None)
+        if spec is None:
+            return self._send(404, {"error": "unknown contract", "ids": [s["id"] for s in reg["contracts"]]})
+        last = next((r for r in (self.eng.docs.get("contracts") or {}).get("contracts") or [] if r["id"] == cid), None)
+        body: dict[str, Any] = {"schema": "self_aware_contract_detail_v1", "spec": spec, "last": last}
+        n = min(int(q.get("history", 24) or 0), 500)
+        if n:
+            body["history"] = self.eng.store.history(contracts.HISTORY_TABLE, limit=n, kind="CONTRACT", id=cid)
+        rows = min(int(q.get("rows", 50) or 0), 1000)
+        if rows:
+            body["raw"] = contracts.drill(spec, contracts.Fetcher(self.eng.paths, self.eng.docs), rows)
+        self._send(200, body)
+
+    def contracts_view(self, q):
+        self._send(200, render_contracts(self.eng), "text/html")
+
 
 ROUTES = {
     "/": Handler.index, "/api/ping": Handler.ping, "/api/selfaware/health": Handler.health,
@@ -356,6 +402,8 @@ ROUTES = {
     "/api/selfaware/data/catalog": Handler.data_catalog, "/api/selfaware/data/completeness": Handler.data_completeness,
     "/api/selfaware/data/fields": Handler.data_fields, "/api/selfaware/data/capacity": Handler.data_capacity,
     "/api/selfaware/data/sufficiency": Handler.data_sufficiency, "/api/selfaware/sections": Handler.sections,
+    "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
+    "/api/selfaware/contracts/registry": Handler.contracts_registry,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
@@ -403,7 +451,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <div class=m>generated {_e(h.get('generated_at'))} · Fly {_e((h.get('fly') or {}).get('git_rev', '')[:9])}
  · paused={_e((h.get('fly') or {}).get('paused'))} · watcher {_e(h.get('watcher_verdict'))}
  · engine rev {_e(eng.store.revision[:9])} · <a href='/api/selfaware/health'>health JSON</a> · <a href='/api/selfaware/tables'>tables</a>
- · <a href='/data'>data health</a></div>
+ · <a href='/data'>data health</a> · <a href='/contracts'>section contracts</a></div>
 <h2>Hourly digest</h2><p><b>{_e(d.get('headline'))}</b><br><span class=m>{_e(d.get('summary_line'))}</span></p>
 <h2>Self-diagnosis ({len(rows)} open, {greens} green)</h2>
 <table><tr><th>sev</th><th>check</th><th>observed · probable cause</th><th></th></tr>{''.join(rows) or '<tr><td colspan=4>all green</td></tr>'}</table>
@@ -413,6 +461,45 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
 <h2>Edges (pre-registered, walk-forward holdout)</h2><table><tr><th>status</th><th>screen</th><th>n</th><th>hit</th><th>net bp</th><th>BH q</th><th>why</th></tr>{''.join(edge_rows) or '<tr><td colspan=7>no candidate, hint or watch</td></tr>'}</table>
 <p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {time.strftime('%H:%M:%S')}.</p>
 </body></html>"""
+
+def render_contracts(eng) -> str:
+    doc = eng.docs.get("contracts")
+    if not doc:
+        return "<!doctype html><meta http-equiv=refresh content=20><body style='font:14px system-ui'>section contracts warming up…"
+    rows = []
+    for r in doc["contracts"]:
+        bad = [v for v in r["violations"] if v["severity"] in ("RED", "AMBER")]
+        info = [v for v in r["violations"] if v["severity"] not in ("RED", "AMBER")]
+        rows.append(
+            f"<tr><td><b style='color:{_COLOR.get(r['status'], '#8b8d98')}'>{_e(r['status'])}</b></td>"
+            f"<td><a href='/api/selfaware/contracts/{_e(r['id'])}?rows=50'>{_e(r['id'])}</a><div class=m>{_e(r['title'])}</div></td>"
+            f"<td>{_e(r['surface'])}</td>"
+            f"<td>{'<br>'.join(_e(v['kind'] + ': ' + v['detail']) for v in bad) or '—'}"
+            f"{('<div class=m>' + _e('; '.join(v['kind'] for v in info)) + '</div>') if info else ''}</td>"
+            f"<td class=m>{_e(', '.join(f'{k}={v}' for k, v in list((r.get('metrics') or {}).items())[:6]))}</td></tr>")
+    ad = doc.get("archive_drift") or {}
+    adrows = "".join(f"<tr><td><b style='color:{_COLOR.get(f['severity'])}'>{_e(f['severity'])}</b></td><td>{_e(f['series'])}</td>"
+                     f"<td>{_e(f['report'])}</td><td>{_e(f['kind'])}: {_e(f['detail'])}</td></tr>" for f in ad.get("findings") or [])
+    cov = doc.get("coverage") or {}
+    counts = " · ".join(f"<b style='color:{_COLOR[s]}'>{s} {n}</b>" for s, n in doc["counts"].items())
+    surf = " · ".join(f"{_e(k)} <b style='color:{_COLOR.get(v)}'>{_e(v)}</b>" for k, v in doc["surfaces"].items())
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta http-equiv=refresh content=120>
+<title>Section contracts</title><style>
+body{{font:14px system-ui;background:#111113;color:#edeef0;margin:24px;max-width:1400px}}
+table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bottom:1px solid #2e3035;padding:6px;text-align:left;vertical-align:top}}
+.m{{color:#a0a1a7;font-size:12px}}a{{color:#7cb7ff}}h2{{margin-top:28px}}
+</style></head><body>
+<h1>Section contracts</h1><div class=m>{doc['contracts_total']} contracts · last {_e(doc['tier'])} pass {_e(doc['generated_at'])}
+ · heavy {_e(doc.get('heavy_at'))} · registry {_e(doc['registry_hash'][:12])} · <a href='/'>overview</a>
+ · <a href='/api/selfaware/contracts'>JSON</a> · <a href='/api/selfaware/contracts/registry'>registry</a></div>
+<p>{counts}</p><p class=m>{surf}</p>
+<p class=m>/details coverage: {_e(cov.get('covered'))}/{_e(cov.get('sections'))} sections ·
+uncovered: {_e(', '.join(s['section'] for s in cov.get('uncovered') or []) or 'none')}</p>
+<h2>Contracts</h2><table><tr><th>status</th><th>section</th><th>surface</th><th>violations</th><th>metrics</th></tr>{''.join(rows)}</table>
+<h2>Archive drift (last {len((ad.get('snapshots') or {}).get('generations') or [])} generations)</h2>
+<table>{adrows or '<tr><td>no report vanished, shrank or lost columns</td></tr>'}</table>
+</body></html>"""
+
 
 _STATUS_COLOR = {"FRESH": "#30a46c", "READY": "#30a46c", "OK": "#30a46c", "IDLE": "#8b8d98", "ACCUMULATING": "#f5a524",
                  "STALE": "#e5484d", "MISSING": "#e5484d", "BLOCKED": "#e5484d", "NO_TIMESTAMP": "#8b8d98"}

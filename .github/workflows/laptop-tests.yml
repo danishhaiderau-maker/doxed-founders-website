@@ -17,6 +17,7 @@ on:
       - "scripts/laptop_chain_incident.py"
       - "scripts/self_aware/**"
       - "scripts/test_self_aware.py"
+      - "scripts/test_self_aware_contracts.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
       - "tests/test_blindspot_closure_ledger.py"
@@ -38,6 +39,7 @@ on:
       - "scripts/laptop_chain_incident.py"
       - "scripts/self_aware/**"
       - "scripts/test_self_aware.py"
+      - "scripts/test_self_aware_contracts.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
       - "tests/test_blindspot_closure_ledger.py"
@@ -73,6 +75,7 @@ jobs:
         run: |
           tests="test_system_health.py test_system_health_meta.py test_research_segment_fly_parity.py test_laptop_chain_incident.py"
           if [ -f test_self_aware.py ]; then tests="$tests test_self_aware.py"; fi
+          if [ -f test_self_aware_contracts.py ]; then tests="$tests test_self_aware_contracts.py"; fi
           python -m pytest $tests -q -p no:cacheprovider
       - name: Laptop chain scripts (PowerShell cases skip on Linux)
         run: python -m pytest tests/test_laptop_chain_scripts.py tests/test_blindspot_closure_ledger.py -q -p no:cacheprovider
