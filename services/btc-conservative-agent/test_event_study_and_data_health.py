@@ -164,14 +164,30 @@ def test_data_health_reports_coverage_and_staleness(tmp_path):
     replay = report["signal_replay"]
     assert replay["distinct_trades"] == 2 and replay["distinct_complete"] == 1
     assert replay["distinct_censored_shutdown"] == 1
+    assert report["mirror_status"] == "OK"
     later = dh.build_data_health(str(tmp_path), now=t0 + 3600 + 4 * 3600)
-    assert {s["stream"]: s for s in later["streams"]}["binance_spot_1s"]["status"] == "STALE"
+    assert later["mirror_status"] == "STALE" and later["status"] == "ATTENTION"
+    assert {s["stream"]: s for s in later["streams"]}["binance_spot_1s"]["status"] == "OK"
+    assert {s["stream"]: s for s in later["streams"]}["trailing_regime_1m"]["status"] == "WARMUP"
 
 
 def test_data_health_empty_dir_is_missing_not_ok(tmp_path):
     report = dh.build_data_health(str(tmp_path), now=1_800_000_000)
-    assert report["status"] == "ATTENTION"
+    assert report["status"] == "ATTENTION" and report["mirror_status"] == "MISSING"
     assert all(s["status"] == "MISSING" for s in report["streams"])
+
+
+def test_stream_behind_mirror_head_is_stale(tmp_path):
+    t0 = 1_800_000_000
+    rows = [mct.encode_minute(t0 + 60 * m, {"coinbase": [100000.0] * 60, "binance_spot": [99990.0] * 60},
+                              {"coinbase": [m < 10] * 60, "binance_spot": [True] * 60},
+                              bfx_mids=[99995.0] * 60, binance_perp_mids=[None] * 60)
+            for m in range(30)]
+    _write(tmp_path / mct.FILE_NAME, rows)
+    streams = {s["stream"]: s for s in dh.build_data_health(str(tmp_path), now=t0 + 1830)["streams"]}
+    assert streams["binance_spot_1s"]["status"] == "OK"
+    assert streams["coinbase_1s"]["status"] == "STALE"
+    assert streams["coinbase_1s"]["lag_vs_mirror_head_sec"] == 1200.0
 
 
 def test_event_study_empty_dir(tmp_path):
