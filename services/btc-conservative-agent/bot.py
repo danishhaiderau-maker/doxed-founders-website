@@ -29616,6 +29616,7 @@ def xvl_evaluator_snapshot() -> dict:
 
 
 import market_context_tape as _mct
+import runtime_telemetry as _rtel
 
 # Watch-only market-context collector (fly-entrypoint.sh, own niced process).
 # The bot only reads its live file for status/monitoring; never readiness or orders.
@@ -30368,13 +30369,20 @@ TRADE_LOCK_HOLD_BUDGET_MS = max(
     50.0,
     float(os.getenv("TRADE_LOCK_HOLD_BUDGET_MS", "500")),
 )
+# A blocked acquirer (fill, exit, cancel, reprice) waiting longer than this is
+# counted as an over-budget wait; it is the trading-latency cost of contention.
+TRADE_LOCK_WAIT_BUDGET_MS = max(
+    10.0,
+    float(os.getenv("TRADE_LOCK_WAIT_BUDGET_MS", "100")),
+)
 _TRACKED_LOCK_SITE_MAX = 128
 
 
 class _TrackedRLock:
     """RLock with bounded owner diagnostics for production stall evidence."""
 
-    def __init__(self, name: str, hold_budget_ms: float = TRADE_LOCK_HOLD_BUDGET_MS):
+    def __init__(self, name: str, hold_budget_ms: float = TRADE_LOCK_HOLD_BUDGET_MS,
+                 wait_budget_ms: float | None = None):
         self._lock = threading.RLock()
         self._name = name
         self._meta_lock = threading.Lock()
@@ -30397,6 +30405,25 @@ class _TrackedRLock:
         self._hold_max_ms = 0.0
         self._hold_max_site = None
         self._hold_sites = {}
+        # ``timeout_count`` stays the total of failed acquires.  Zero-wait
+        # probes (/ready, /api/status) that merely observe a busy lock are not
+        # waits that gave up, so they are split out from bounded-wait timeouts.
+        self._probe_busy_count = 0
+        self._timed_timeout_count = 0
+        self._timeout_sites = {}
+        self._wait_budget_ms = float(
+            wait_budget_ms if wait_budget_ms is not None
+            else globals().get("TRADE_LOCK_WAIT_BUDGET_MS", 100.0)
+        )
+        self._wait_count = 0
+        self._wait_total_ms = 0.0
+        self._wait_max_ms = 0.0
+        self._wait_over_budget = 0
+        self._wait_sites = {}
+        self._interval_hold_max_ms = 0.0
+        self._interval_hold_max_site = None
+        self._interval_wait_max_ms = 0.0
+        self._interval_wait_max_site = None
 
     @staticmethod
     def _caller_site():
@@ -30415,6 +30442,9 @@ class _TrackedRLock:
         if held_ms > self._hold_max_ms:
             self._hold_max_ms = held_ms
             self._hold_max_site = site
+        if held_ms > self._interval_hold_max_ms:
+            self._interval_hold_max_ms = held_ms
+            self._interval_hold_max_site = site
         key = site or "unknown"
         stats = self._hold_sites.get(key)
         if stats is None:
@@ -30458,8 +30488,99 @@ class _TrackedRLock:
         summary["top_sites"] = sites[:max(0, int(top))]
         return summary
 
+    def telemetry_counters(self, top: int = 5, reset_interval: bool = False) -> dict:
+        """Cumulative counters plus per-interval maxima for runtime telemetry.
+
+        Only the single telemetry sampler may pass ``reset_interval=True``.
+        """
+        with self._meta_lock:
+            wait_sites = sorted(
+                (
+                    {"site": site, "count": row["count"],
+                     "total_ms": round(row.get("total_ms", 0.0), 1),
+                     "max_ms": round(row["max_ms"], 1)}
+                    for site, row in self._wait_sites.items()
+                ),
+                key=lambda row: row["total_ms"], reverse=True,
+            )[:max(0, int(top))]
+            timeout_sites = sorted(
+                (
+                    {"site": site, "count": row["count"]}
+                    for site, row in self._timeout_sites.items()
+                ),
+                key=lambda row: row["count"], reverse=True,
+            )[:max(0, int(top))]
+            out = {
+                "name": self._name,
+                "hold_budget_ms": self._hold_budget_ms,
+                "wait_budget_ms": self._wait_budget_ms,
+                "holds": self._hold_count,
+                "hold_over_budget": self._hold_over_budget,
+                "timeout_count": self._timeout_count,
+                "probe_busy_count": self._probe_busy_count,
+                "timed_timeout_count": self._timed_timeout_count,
+                "waits": self._wait_count,
+                "wait_total_ms": round(self._wait_total_ms, 1),
+                "wait_over_budget": self._wait_over_budget,
+                "interval_hold_max_ms": round(self._interval_hold_max_ms, 1),
+                "interval_hold_max_site": self._interval_hold_max_site,
+                "interval_wait_max_ms": round(self._interval_wait_max_ms, 1),
+                "interval_wait_max_site": self._interval_wait_max_site,
+                "top_wait_sites": wait_sites,
+                "top_timeout_sites": timeout_sites,
+            }
+            if reset_interval:
+                self._interval_hold_max_ms = 0.0
+                self._interval_hold_max_site = None
+                self._interval_wait_max_ms = 0.0
+                self._interval_wait_max_site = None
+        return out
+
+    @staticmethod
+    def _bump_site_locked(table, site, field, value=1.0, max_value=None):
+        key = site or "unknown"
+        row = table.get(key)
+        if row is None:
+            if len(table) >= _TRACKED_LOCK_SITE_MAX:
+                key = "OTHER"
+                row = table.get(key)
+            if row is None:
+                row = {"count": 0, field: 0.0, "max_ms": 0.0}
+                table[key] = row
+        row["count"] += 1
+        row[field] = row.get(field, 0.0) + value
+        if max_value is not None and max_value > row["max_ms"]:
+            row["max_ms"] = max_value
+
     def acquire(self, blocking=True, timeout=-1):
-        acquired = self._lock.acquire(blocking, timeout)
+        probe = (not blocking) or timeout == 0
+        waited_ms = None
+        wait_site = None
+        if probe:
+            acquired = self._lock.acquire(False)
+        else:
+            # Uncontended path costs one extra non-blocking attempt; only a
+            # contended acquire pays for timing and caller-site resolution.
+            acquired = self._lock.acquire(False)
+            if not acquired:
+                wait_site = self._caller_site()
+                started = time.monotonic()
+                acquired = self._lock.acquire(True, timeout)
+                waited_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+        if waited_ms is not None:
+            with self._meta_lock:
+                self._wait_count += 1
+                self._wait_total_ms += waited_ms
+                if waited_ms > self._wait_max_ms:
+                    self._wait_max_ms = waited_ms
+                if waited_ms > self._interval_wait_max_ms:
+                    self._interval_wait_max_ms = waited_ms
+                    self._interval_wait_max_site = wait_site
+                if waited_ms > self._wait_budget_ms:
+                    self._wait_over_budget += 1
+                self._bump_site_locked(
+                    self._wait_sites, wait_site, "total_ms", waited_ms, waited_ms
+                )
         if acquired:
             ident = threading.get_ident()
             with self._meta_lock:
@@ -30475,8 +30596,18 @@ class _TrackedRLock:
                     self._acquire_sequence += 1
                 self._owner_transition_since = 0.0
         else:
+            timeout_site = wait_site or self._caller_site()
             with self._meta_lock:
                 self._timeout_count += 1
+                if probe:
+                    self._probe_busy_count += 1
+                else:
+                    self._timed_timeout_count += 1
+                self._bump_site_locked(
+                    self._timeout_sites,
+                    f"{'probe' if probe else 'timed'}:{timeout_site}",
+                    "total",
+                )
                 self._last_timeout_at = time.time()
                 self._last_timeout_thread = threading.current_thread().name
                 self._owner_at_last_timeout = (
@@ -30529,6 +30660,8 @@ class _TrackedRLock:
             depth = self._depth
             acquire_sequence = self._acquire_sequence
             timeout_count = self._timeout_count
+            probe_busy_count = self._probe_busy_count
+            timed_timeout_count = self._timed_timeout_count
             last_timeout_at = self._last_timeout_at
             last_timeout_thread = self._last_timeout_thread
             owner_at_last_timeout = self._owner_at_last_timeout
@@ -30559,6 +30692,8 @@ class _TrackedRLock:
             "depth": depth,
             "acquire_sequence": acquire_sequence,
             "timeout_count": timeout_count,
+            "probe_busy_count": probe_busy_count,
+            "timed_timeout_count": timed_timeout_count,
             "last_timeout_at": last_timeout_at or None,
             "last_timeout_thread": last_timeout_thread,
             "owner_at_last_timeout": owner_at_last_timeout,
@@ -40752,6 +40887,46 @@ def _build_api_state_snapshot():
 
 _api_state_refresher_started = False
 _api_state_refresher_start_lock = threading.Lock()
+RUNTIME_TELEMETRY_ENABLED = os.getenv("RUNTIME_TELEMETRY_ENABLED", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+_RUNTIME_TELEMETRY = None
+
+
+def _start_runtime_telemetry():
+    """Start the once-per-minute runtime telemetry sampler (idempotent)."""
+    global _RUNTIME_TELEMETRY
+    if not RUNTIME_TELEMETRY_ENABLED or _RUNTIME_TELEMETRY is not None:
+        return
+    try:
+        sampler = _rtel.RuntimeTelemetry(
+            os.getcwd(),
+            boot_ts=float(process_boot_time),
+            pressure_fn=_bounded_process_pressure_snapshot,
+            handlers_fn=_dashboard_handler_snapshot,
+            lock_fn=lambda: trade_lock.telemetry_counters(top=3, reset_interval=True),
+            revision_fn=_runtime_git_rev,
+            crash_dump_path=os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
+            stop_event=shutdown_event,
+        )
+        sampler.start()
+        _RUNTIME_TELEMETRY = sampler
+    except Exception as e:
+        logger.error(f"[RUNTIME TELEMETRY] start failed: {type(e).__name__}: {e}")
+
+
+def _runtime_telemetry_status(now: float | None = None) -> dict:
+    sampler = _RUNTIME_TELEMETRY
+    if sampler is None:
+        return {"schema": _rtel.STATUS_SCHEMA, "file": _rtel.FILE_NAME,
+                "enabled": RUNTIME_TELEMETRY_ENABLED, "started": False,
+                "health": {"status": "UNKNOWN", "reasons": ["SAMPLER_NOT_STARTED"]}}
+    try:
+        return {"enabled": True, "started": True, "alive": sampler.is_alive(),
+                **sampler.status(now)}
+    except Exception as e:
+        return {"schema": _rtel.STATUS_SCHEMA, "enabled": True, "started": True,
+                "health": {"status": "UNKNOWN", "reasons": [f"STATUS_ERROR:{type(e).__name__}"]}}
 
 
 def _start_api_state_cache_refresher():
@@ -40771,6 +40946,7 @@ def _start_api_state_cache_refresher():
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()
+        _start_runtime_telemetry()
         logger.info(
             f"[API STATE] independent dashboard ({_API_STATE_REFRESH_INTERVAL_SEC:.1f}s), relay "
             f"({_RELAY_STATE_REFRESH_INTERVAL_SEC:.2f}s), and canonical execution "
@@ -41562,6 +41738,7 @@ def status():
         "bbo_refresh": _bbo_refresh_telemetry_snapshot(now),
         "ws_connection": _ws_connection_telemetry_snapshot(now),
         "book_refresh": _book_refresh_telemetry_snapshot(now),
+        "runtime_telemetry": _runtime_telemetry_status(now),
         **market_health,
         "live_entry_armable": armable,
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
