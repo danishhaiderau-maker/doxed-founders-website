@@ -32071,10 +32071,20 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         if _collector_v22_epoch_id() != boundary["new_epoch"]:
             raise RuntimeError("RESET_NEW_EPOCH_IDENTITY_MISMATCH")
         if bridge is not None:
-            bridge.bind_generation_identity(
-                dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
-                tile_config_signature=active_tile_registry_signature(),
-            )
+            try:
+                bridge.bind_generation_identity(
+                    dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
+                    tile_config_signature=active_tile_registry_signature(),
+                )
+            except Exception as exc:
+                # A stale bridge identity must never be resumable by an operator:
+                # only a restart with valid identity metadata clears this pause.
+                set_execution_paused("GENOME_IDENTITY_INVALID")
+                logger.error(
+                    f"[GENOME] bridge identity rebind failed closed during fresh reset: {exc}; "
+                    "GENOME_IDENTITY_INVALID requires a valid restart [PIPELINE ENFORCEMENT]"
+                )
+                raise
         # Preserve prior settings periods and start a fresh one only after
         # deletion, authority retirement and new-epoch publication succeeded.
         _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)

@@ -3,7 +3,7 @@
   "combo_version": "2026-10-02",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "8ba1130c793f",
+  "signal_hash": "3a98fc5b4aae",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-02T16:34:04.353Z"
+  "updated_at": "2026-10-02T18:39:56.564Z"
 }
