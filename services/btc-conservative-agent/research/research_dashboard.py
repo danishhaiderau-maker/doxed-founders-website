@@ -9376,6 +9376,59 @@ def _data_health_payload() -> tuple[dict, dict, dict]:
     return report, study, {**evidence, "generated_at_display": format_melbourne_dt(generated_at) if generated_at else None}
 
 
+SELF_AWARE_URL = os.getenv("DOXXED_SELF_AWARE_URL", "http://127.0.0.1:9021").rstrip("/")
+_SELF_AWARE_CACHE: dict = {"at": 0.0, "value": None}
+_SELF_AWARE_LOCK = threading.Lock()
+
+
+def _self_aware_data() -> dict:
+    """The self-aware layer's data-awareness summary; never raises, cached 30 s."""
+    with _SELF_AWARE_LOCK:
+        if _SELF_AWARE_CACHE["value"] is not None and time.time() - _SELF_AWARE_CACHE["at"] < 30:
+            return _SELF_AWARE_CACHE["value"]
+    import urllib.request
+
+    source = f"{SELF_AWARE_URL}/api/selfaware/data"
+    try:
+        with urllib.request.urlopen(source, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        value = {"status": "OK" if isinstance(data, dict) else "UNAVAILABLE", "source": source,
+                 "view": f"{SELF_AWARE_URL}/data", "reason": None, "data": data if isinstance(data, dict) else None}
+    except Exception as exc:  # the self-aware daemon must never take this page down
+        value = {"status": "UNAVAILABLE", "source": source, "view": f"{SELF_AWARE_URL}/data",
+                 "reason": f"{type(exc).__name__}: {exc}", "data": None}
+    with _SELF_AWARE_LOCK:
+        _SELF_AWARE_CACHE.update(at=time.time(), value=value)
+    return value
+
+
+def _self_aware_section(sa: dict) -> str:
+    from html import escape as esc
+    link = f"<a href='{esc(sa['view'])}'>self-aware data health (:9021)</a>"
+    data = sa.get("data")
+    if sa.get("status") != "OK" or not data:
+        return (f"<h2>Self-aware data awareness</h2><p class='sub'>UNAVAILABLE: {esc(str(sa.get('reason') or 'no data'))}. "
+                f"Open {link} directly.</p>")
+    tape = data.get("tape") or {}
+    alarms = data.get("watch_alarms") or {}
+    rows = "".join(f"<li>{esc(str(stream))}: {esc(', '.join(str(a) for a in (items or [])))}</li>"
+                   for stream, items in sorted(alarms.items()))
+    stale = data.get("stale_critical") or []
+    return ("<h2>Self-aware data awareness</h2>"
+            f"<p class='sub'>From {link}, generated {esc(str(data.get('generated_at')))}, "
+            f"mirror head {esc(str(data.get('mirror_head')))}. "
+            f"{esc(str(data.get('streams')))} streams ({esc(str(data.get('catalogued')))} catalogued); "
+            f"stale critical: {esc(', '.join(map(str, stale)) or 'none')}; "
+            f"dead fields: {esc(str(data.get('dead_field_count')))}; "
+            f"tape filled 24h: {esc(str(tape.get('fill_pct_24h')))}% with {esc(str(tape.get('gaps_24h')))} gaps.</p>"
+            + (f"<p class='sub'>Watched-field alarms:</p><ul>{rows}</ul>" if rows else ""))
+
+
+@app.route("/api/streams/self-aware-data")
+def api_self_aware_data():
+    return jsonify(_self_aware_data())
+
+
 @app.route("/api/streams/data-health")
 def api_data_health():
     report, study, evidence = _data_health_payload()
@@ -9419,7 +9472,7 @@ def data_health_page():
     compat = ("<h2>Archive schema compatibility</h2>"
               f"<p class='sub'>Archive {archive.get('status')}; details on <a href='/history'>History &amp; "
               "retention</a>.</p>" + _archive_history_view.compat_section(archive.get("data")))
-    page = page.replace("</body></html>", compat + "</body></html>", 1)
+    page = page.replace("</body></html>", compat + _self_aware_section(_self_aware_data()) + "</body></html>", 1)
     resp = make_response(page)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
