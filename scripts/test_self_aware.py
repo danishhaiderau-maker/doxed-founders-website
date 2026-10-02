@@ -141,6 +141,21 @@ def test_expired_and_filled_is_red(paths, store):
     assert fd.severity == "RED" and fd.causes[0]["cause"] == "fill_expiry_race"
 
 
+def test_expired_and_traded_in_legacy_ledgers(paths, store):
+    _jsonl(paths.mirror / "v3" / "ledgers" / "lifecycle.jsonl", [{"record_id": "r1", "fill_id": None}])
+    (paths.mirror / "expired_orders_3factor.csv").write_text(
+        f"trade_id,expired_ts,research_lane\nold-1,{NOW - 20 * 3600},L\nnew-1,{NOW - 600},L\nonly-exp,{NOW - 60},L\n")
+    (paths.mirror / "trades_3factor.csv").write_text(
+        "trade_id,ts,research_lane,exit_reason\nold-1,2026-10-01T18:00:00+00:00,L,X\nok-1,2026-10-02T00:00:00+00:00,L,X\n")
+    store.refresh_views()
+    f = _facts()
+    fd = diagnose.check_expired_filled(f, diagnose.signals(f), store)
+    assert fd.severity == "AMBER" and "1 in 24h" in fd.observed and "old-1" in fd.observed
+    (paths.mirror / "trades_3factor.csv").write_text(
+        "trade_id,ts,research_lane,exit_reason\nold-1,2026-10-01T18:00:00+00:00,L,X\nnew-1,2026-10-02T00:00:00+00:00,L,X\n")
+    assert diagnose.check_expired_filled(f, diagnose.signals(f), store).severity == "RED"
+
+
 def test_custody_ack_without_copy_is_red(store):
     f = _facts(segment_head={"shipped_seq": 100}, pull={"ackedSeq": 100, "appliedSeq": 98, "finishedAt": NOW - 30})
     assert diagnose.check_custody(f, diagnose.signals(f), store).severity == "RED"

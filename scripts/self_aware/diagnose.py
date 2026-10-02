@@ -199,18 +199,38 @@ def check_expired_filled(f, sig, store) -> Finding:
         SELECT count(*) AS n, list(coalesce(record_id, event_id))[1:10] AS ids
         FROM raw_lifecycle
         WHERE fill_id IS NOT NULL AND (terminal_ttl_expired OR terminal_no_fill OR entry_outcome = 'NO_FILL')""")
-    if rows is None:
+    # The V3 lifecycle has no trade_id, so the legacy CSV ledgers are joined on trade_id as well (same windows as the watcher).
+    legacy = _q(store, """
+        WITH e AS (SELECT trade_id, max(try_cast(expired_ts AS DOUBLE)) AS ets FROM raw_expired_csv
+                   WHERE coalesce(trade_id, '') <> '' GROUP BY 1),
+             t AS (SELECT trade_id, max(ts) AS tts, any_value(research_lane) AS lane FROM raw_trades_csv
+                   WHERE coalesce(trade_id, '') <> '' GROUP BY 1)
+        SELECT t.trade_id, t.lane, e.ets, t.tts FROM e JOIN t USING (trade_id)""")
+    if rows is None and legacy is None:
         return Finding("inv.expired_filled", "No order is both expired and filled", "invariant", SKIP,
-                       "lifecycle ledger unavailable", "0 rows expired/no-fill with a fill_id")
-    n = int(rows[0].get("n") or 0)
-    return Finding("inv.expired_filled", "No order is both expired and filled", "invariant", GREEN if n == 0 else RED,
-                   f"{n} lifecycle rows are TTL-expired/no-fill yet carry a fill_id" + (f": {rows[0].get('ids')}" if n else ""),
-                   "0 rows",
-                   causes=[] if n == 0 else [{"cause": "fill_expiry_race", "confidence": "likely",
-                                              "text": "Race between the fill and the order-expiry timer (fill-guard).",
-                                              "evidence": rows[0].get("ids")}],
-                   drill_sql="SELECT * FROM raw_lifecycle WHERE fill_id IS NOT NULL AND (terminal_ttl_expired OR "
-                             "terminal_no_fill OR entry_outcome='NO_FILL')")
+                       "lifecycle and legacy ledgers unavailable", "0 rows expired/no-fill with a fill_id")
+    n = int((rows or [{}])[0].get("n") or 0)
+    now = f["now"]
+    both = []
+    for r in legacy or []:
+        last = max(r.get("ets") or 0, parse_ts(r.get("tts")) or 0)
+        both.append((r["trade_id"], r.get("lane"), now - last if last else None))
+    red_2h = [b for b in both if b[2] is not None and b[2] <= 2 * 3600]
+    amber_24h = [b for b in both if b[2] is not None and b[2] <= 24 * 3600]
+    sev = RED if (n or red_2h) else AMBER if amber_24h else GREEN
+    ids = (rows or [{}])[0].get("ids") if n else None
+    recent = [f"{tid} ({lane}, {fmt_age(age)} ago)" for tid, lane, age in sorted(amber_24h, key=lambda b: b[2])[:6]]
+    return Finding("inv.expired_filled", "No order is both expired and filled", "invariant", sev,
+                   f"V3 lifecycle: {n} rows TTL-expired/no-fill with a fill_id" + (f" {ids}" if n else "")
+                   + f"; legacy ledgers: {len(both)} trade_ids both expired and traded, {len(amber_24h)} in 24h, "
+                     f"{len(red_2h)} in 2h" + (f": {recent}" if recent else ""),
+                   "0 in the V3 lifecycle; legacy trade_ids both expired and traded: none in 2h (RED) or 24h (AMBER)",
+                   causes=[] if sev == GREEN else [{"cause": "fill_expiry_race", "confidence": "likely",
+                                                    "text": "Race between the fill and the order-expiry timer (fill-guard, see #253/#255).",
+                                                    "evidence": ids or recent}],
+                   evidence={"v3_ids": ids, "legacy_recent": recent},
+                   drill_sql="SELECT t.trade_id, t.research_lane, t.ts, t.exit_reason, e.expired_ts, e.reason FROM "
+                             "raw_trades_csv t JOIN raw_expired_csv e USING (trade_id) ORDER BY t.ts DESC")
 
 
 def check_ai_response(f, sig, store) -> Finding:
