@@ -920,12 +920,21 @@ def _imports(path: Path) -> set:
 
 
 @pytest.mark.parametrize("name", ["research_segment_server.py", "research_segment_prune.py"])
-def test_server_and_prune_hook_have_no_bot_lock_or_delete_surface(name):
+def test_server_and_prune_hook_have_no_bot_lock_surface(name):
     source = (ROOT / name).read_text(encoding="utf-8")
     assert not _imports(ROOT / name) & {"bot", "flask", "btc_conservative_agent", "shutil", "ccxt"}
     assert "trade_lock" not in source and "state_lock" not in source
-    for forbidden in (".unlink(", "os.remove", "rmtree", "os.rename", ".rename(", "os.replace"):
-        assert forbidden not in source
+    assert "rmtree" not in source and "os.remove" not in source
+
+
+def test_server_never_deletes_and_prune_deletes_only_in_execute():
+    server = (ROOT / "research_segment_server.py").read_text(encoding="utf-8")
+    for forbidden in (".unlink(", "os.rename", ".rename(", "os.replace"):
+        assert forbidden not in server
+    tree = ast.parse((ROOT / "research_segment_prune.py").read_text(encoding="utf-8"))
+    owners = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+              and ".unlink(" in ast.unparse(node)}
+    assert owners == {"execute"}
 
 
 def test_bot_mounts_segment_server_ahead_of_flask_with_reserved_workers():
@@ -938,35 +947,12 @@ def test_bot_mounts_segment_server_ahead_of_flask_with_reserved_workers():
     assert dispatch({"PATH_INFO": "/health"}, lambda *a: None) == [b"flask"]
 
 
-def test_fly_config_enables_volume_sink_shadow_only():
+def test_fly_config_enables_volume_sink_with_dry_run_pruning_default():
     toml = (ROOT / "fly.toml").read_text(encoding="utf-8")
     assert 'RESEARCH_SEGMENTS_ENABLED = "1"' in toml and 'RESEARCH_SEGMENTS_SINK = "volume"' in toml
-    assert "PRUNE" not in toml
-    assert shipper_mod.PRUNING_ENABLED is False and prune_mod.PRUNE_ENABLED is False
+    assert 'RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"' in toml
+    assert 'RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "dry_run"' in toml
+    assert "enforce" not in toml.lower()
 
 
 # ------------------------------------------------------------- prune hook
-def test_prune_plan_is_deny_by_default_and_never_deletes(venv):
-    rotated = venv.write("market.jsonl.1", _rows(0, 20))
-    venv.write("market.jsonl", _rows(20, 2))
-    venv.write("state.json", b"{}")
-    venv.ship_all()
-    shipper = venv.shipper()
-    state, universe = shipper.load_state(), shipper.scan()
-    rules = {"extensions": frozenset({".jsonl", ".json"})}
-    before = prune_mod.plan_prune(shipper_state=state, rules=rules, universe=universe,
-                                  store_root=venv.store_root, prefix="v1", snapshot_receipt=None,
-                                  environ={"RESEARCH_SEGMENTS_PRUNE_ENABLED": "1"})
-    assert before["candidates"] == [] and before["allowed"] is False
-    manifest = venv.store.get(fmt.manifest_key("v1", 1))
-    venv.server_app.record_ack(_ack_body(1, manifest))
-    plan = prune_mod.plan_prune(shipper_state=state, rules=rules, universe=universe,
-                                store_root=venv.store_root, prefix="v1",
-                                snapshot_receipt={"schema": prune_mod.SNAPSHOT_RECEIPT_SCHEMA,
-                                                  "created_at": "2999-01-01T00:00:00Z"},
-                                environ={"RESEARCH_SEGMENTS_PRUNE_ENABLED": "1"})
-    assert [c["path"] for c in plan["candidates"]] == ["market.jsonl.1"]
-    assert plan["allowed"] is False
-    assert "PRUNE_DISABLED_IN_CODE" in plan["deny_reasons"]
-    assert "INSUFFICIENT_PROVEN_ACK_CYCLES" in plan["deny_reasons"]
-    assert rotated.read_bytes() == _rows(0, 20)

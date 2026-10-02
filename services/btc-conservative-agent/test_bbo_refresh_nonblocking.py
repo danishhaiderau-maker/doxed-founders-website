@@ -141,6 +141,7 @@ class WorkerIsolationSourceContractTest(unittest.TestCase):
             "time": time,
             "shutdown_event": shutdown,
             "BBO_REFRESH_SEC": 3.0,
+            "_last_bbo_refresh_ts": 0.0,
             "refresh_bbo_state": lambda: calls.append(time.monotonic()),
             "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
         }
@@ -149,6 +150,60 @@ class WorkerIsolationSourceContractTest(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(len(shutdown.waits), 3)
         self.assertTrue(all(0.05 <= delay <= 3.0 for delay in shutdown.waits))
+
+    def test_bbo_worker_wakes_when_the_completion_throttle_reopens(self):
+        class OneWait:
+            waits = []
+
+            def is_set(self):
+                return bool(self.waits)
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                return True
+
+        namespace = {
+            "time": time,
+            "shutdown_event": OneWait(),
+            "BBO_REFRESH_SEC": 1.25,
+            "_last_bbo_refresh_ts": 0.0,
+            "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
+        }
+
+        def slow_success():
+            time.sleep(0.2)
+            namespace["_last_bbo_refresh_ts"] = time.time()
+
+        namespace["refresh_bbo_state"] = slow_success
+        compile_function("bbo_refresh_loop", namespace)
+        namespace["bbo_refresh_loop"]()
+        (delay,) = namespace["shutdown_event"].waits
+        # Waking on start + period (1.05 s here) would land inside the
+        # completion throttle, skip the fetch and double the real period.
+        self.assertGreaterEqual(delay, 1.25)
+        self.assertLess(delay, 1.3)
+
+    def test_rest_cadence_keeps_bitfinex_quote_inside_every_registry_age_gate(self):
+        from combo_pathway_config import COMBO_LANE_SPECS
+
+        constants = {
+            node.targets[0].id: ast.literal_eval(node.value)
+            for node in TREE.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in {"BBO_REFRESH_SEC", "REST_ENTRY_RECOVERY_SEC",
+                                       "DASHBOARD_REST_MIN_INTERVAL_SEC"}
+        }
+        tightest = min(
+            float(spec["entry_policy"]["max_bbo_age_sec"])
+            for spec in COMBO_LANE_SPECS.values()
+            if spec.get("entry_policy", {}).get("max_bbo_age_sec") is not None
+        )
+        # Live p50 ticker latency ~0.23 s, observed max ~0.75 s.
+        self.assertLessEqual(constants["BBO_REFRESH_SEC"] + 0.5, tightest)
+        per_min = 60.0 / constants["BBO_REFRESH_SEC"] + 2 * 60.0 / constants["DASHBOARD_REST_MIN_INTERVAL_SEC"]
+        self.assertLess(per_min, 90 * 0.75)
+        self.assertGreaterEqual(constants["REST_ENTRY_RECOVERY_SEC"], 3)
 
     def test_entry_freshness_contract_is_not_weakened(self):
         readiness = ast.get_source_segment(

@@ -5797,7 +5797,12 @@ ANALYZER_SYNC_ID = COMBO_ANALYZER_SYNC_ID
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = bitfinex_cost_profile.FUNDING_INTERVAL_HOURS
 FUNDING_REFRESH_SEC = 60
-BBO_REFRESH_SEC = 3
+# The Bitfinex WS ticker is sparse (multi-second gaps), so this REST poll sets
+# the effective BBO age. It must stay below the tightest registry
+# max_bbo_age_sec (2.0 s on the cross-venue tile) after request latency, and
+# within the 90 req/min public ticker limit together with the dashboard fallback.
+BBO_REFRESH_SEC = 1.25
+REST_ENTRY_RECOVERY_SEC = 3
 BOOK_REFRESH_SEC = 3
 BOOK_STALE_SEC = 10
 # Cap raw P0 book depth we parse/store. Bitfinex P0 can return 1000+ levels;
@@ -21590,7 +21595,7 @@ def ensure_fresh_rest_entry_quote(now: float = None) -> bool:
     now = float(now or time.time())
     if _fresh_rest_entry_quote_ready(now):
         return True
-    if (now - float(_last_rest_entry_recovery_attempt_ts or 0)) >= BBO_REFRESH_SEC:
+    if (now - float(_last_rest_entry_recovery_attempt_ts or 0)) >= REST_ENTRY_RECOVERY_SEC:
         _last_rest_entry_recovery_attempt_ts = now
         refresh_bbo_state(force=True)
     return _fresh_rest_entry_quote_ready(time.time())
@@ -27313,7 +27318,10 @@ def bbo_refresh_loop():
                 f"[BBO WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
             )
         elapsed = max(0.0, time.monotonic() - started)
-        shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed))
+        # refresh_bbo_state() throttles on the last *completion*, so waking on
+        # start + BBO_REFRESH_SEC would be skipped and double the real period.
+        due_in = (_last_bbo_refresh_ts + BBO_REFRESH_SEC + 0.01) - time.time()
+        shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed, due_in))
 
 
 def order_book_refresh_loop():
@@ -32380,7 +32388,10 @@ def build_static_pathway_lane_specs() -> dict:
             "exit_path": policy_view["exit"]["profile"],
             "promotion_criteria": lane_spec["promotion_criteria"],
             "kill_criteria": lane_spec["kill_criteria"],
-            "expected_advantage": "Tests one complete exit family under the shared entry-direction call",
+            "expected_advantage": "Tests one complete exit family under " + (
+                f"its own {lane_spec['signal_clock']} signal (no shared AI call)"
+                if lane_spec.get("signal_clock") else "the shared entry-direction call"
+            ),
             "expected_risk": lane_spec["relay_capability"],
             "benchmark_comparison": "Compare family peers on conservative chronological OOS evidence",
             "diff_vs_benchmark": list(policy_view["strategy_detail"]),
@@ -41884,6 +41895,7 @@ _SEGMENT_STATUS_MAX_BYTES = 64 * 1024
 _SEGMENT_STATUS_FIELDS = (
     "shipped_seq", "laptop_acked_seq", "unshipped_bytes", "last_segment_at",
     "updated_at", "last_error", "pruning_enabled", "sink", "store_bytes", "max_store_bytes",
+    "prune_mode", "pruned_through_seq", "custody_through_seq", "prune_deleted_bytes_total",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1

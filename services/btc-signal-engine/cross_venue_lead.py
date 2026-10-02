@@ -236,7 +236,8 @@ class LeadEvaluator:
         self._episode: Optional[dict] = None
         self._cap1_busy_until = -1
         self.stats = {
-            "evaluations": 0, "missed_seconds": 0, "by_status": {}, "triggers_logged": 0,
+            "evaluations": 0, "missed_seconds": 0, "by_status": {}, "stale_by_reason": {},
+            "triggers_logged": 0,
             "qualifying": 0, "outcomes_ok": 0, "outcomes_missing": 0, "pending_evicted": 0,
             "last_anchor": None, "last_trigger_anchor": None,
         }
@@ -277,6 +278,9 @@ class LeadEvaluator:
         status = evaluation["status"]
         by_status = self.stats["by_status"]
         by_status[status] = by_status.get(status, 0) + 1
+        stale_by_reason = self.stats["stale_by_reason"]
+        for reason in evaluation["stale_reasons"]:
+            stale_by_reason[reason] = stale_by_reason.get(reason, 0) + 1
         if not self.qualifies(evaluation):
             self._episode = None
             evaluation["cap1_take"] = False

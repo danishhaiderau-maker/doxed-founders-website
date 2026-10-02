@@ -175,7 +175,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
 
         self.namespace.update({
             "_last_rest_entry_recovery_attempt_ts": 0.0,
-            "BBO_REFRESH_SEC": 3.0,
+            "REST_ENTRY_RECOVERY_SEC": 3.0,
             "refresh_bbo_state": refresh,
         })
         self.namespace["time"] = SimpleNamespace(time=lambda: self.now)

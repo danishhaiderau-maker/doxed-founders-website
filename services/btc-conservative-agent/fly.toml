@@ -11,7 +11,12 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"
   # Sealed research segments, shadow mode: write-once store on this volume
   # (/app/data/segment-store), served read-only at /api/research-segments/*.
-  # Hard-capped (10 GiB store, 4 GiB free floor); pruning is not enabled.
+  # Hard-capped (10 GiB store, 4 GiB free floor). Pruning is custody-gated
+  # (laptop ACK + per-file hash parity + analyzer-consumed seq + archive
+  # snapshot); it starts in dry_run and is switched via the authenticated
+  # /api/research-segments/<prefix>/prune-mode route, persisted on the volume.
+  RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"
+  RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "dry_run"
   RESEARCH_SEGMENTS_ENABLED = "1"
   RESEARCH_SEGMENTS_SINK = "volume"
   RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"
