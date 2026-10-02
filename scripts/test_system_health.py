@@ -842,7 +842,7 @@ def test_banner_payload_is_bounded_and_secret_free():
     report = sh.summarize(sh.evaluate(healthy(ts("2026-10-02T00:00:00Z")), {}), {}, ts("2026-10-02T00:00:00Z"))
     payload = sh.banner_payload(report)
     assert set(payload) == {"schema", "verdict", "generated_at", "open_alarms", "failing", "counts", "check_status",
-                            "source"}
+                            "source", "proof"}
     assert len(json.dumps(payload)) < 8000
 
 

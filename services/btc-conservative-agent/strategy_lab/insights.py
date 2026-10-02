@@ -192,7 +192,22 @@ def _fly_data(status: dict, tile_stats: Optional[list], now: float) -> dict:
         "ai_success_stale": ai_age is None or ai_age > AI_SUCCESS_MAX_AGE_SEC,
         "bitfinex_live_enabled": status.get("bitfinex_live_enabled"),
         "tiles": tiles,
+        "uptime": _uptime_view(status.get("uptime"), now),
     }
+
+
+def _uptime_view(fly_uptime, now: float) -> dict:
+    """Fly's uninterrupted-runtime block plus the laptop-side 48h proof progress."""
+    out = dict(fly_uptime) if isinstance(fly_uptime, dict) else {
+        "available": False, "uninterrupted_label": "Fly uptime unavailable",
+        "note": "Fly /api/status has no uptime block yet (ships with the next guarded deploy)"}
+    try:
+        _load_alerts_module()
+        import runtime_uptime  # export-root copy, or services/btc-conservative-agent
+        out["proof"] = runtime_uptime.read_proof_progress(STATE_DIR, now)
+    except ImportError as exc:
+        out["proof"], out["proof_error"] = None, f"runtime_uptime not importable: {exc}"
+    return out
 
 
 def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0) -> dict:

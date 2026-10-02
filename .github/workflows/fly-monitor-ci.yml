@@ -15,6 +15,7 @@ on:
       - "scripts/test_system_health.py"
       - "scripts/fixtures/system_health/**"
       - "services/btc-conservative-agent/system_health_banner.py"
+      - "services/btc-conservative-agent/runtime_uptime.py"
       - ".github/workflows/laptop-incident-relay.yml"
       - "services/btc-conservative-agent/test_volume_health_snapshot.py"
       - "scripts/test-fly-workflow-revision-contract.py"

@@ -31,6 +31,7 @@ from adaptive_regime_entry import (
 )
 from combo_pathway_config import COMBO_LANE_SPECS
 from family_policy_common import (
+    SHARED_AI_SIGNAL_DETAIL,
     PolicySpec,
     account_risk_quantity as _size,
     chase_due as _chase,
@@ -40,11 +41,70 @@ from family_policy_common import (
     exit_config as _config,
 )
 
-# CROSS_VENUE_LEAD tiles take their side from the per-second cross-venue
-# evaluator (cross_venue_lead.py), never from the shared AI call.
+# Cross-venue tiles take their side from the per-second cross-venue evaluator
+# (cross_venue_lead.py / cross_venue_premium.py), never from the shared AI call.
 CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", CROSS_VENUE_LEAD})
+CROSS_VENUE_PREMIUM = "CROSS_VENUE_PREMIUM"
+CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD, CROSS_VENUE_PREMIUM})
+DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
+# Dashboard evidence badge per registry hypothesis status (honest-label strength).
+EVIDENCE_BADGES = {
+    "HINT_12H_EVIDENCE": "HINT — 12h evidence",
+    "HINT_8H_HOLDOUT_EVIDENCE": "HINT — 8h holdout evidence",
+    "HINT_DEV_AND_HOLDOUT_SAME_SIGN": "HINT — dev + 12h holdout, CI spans 0",
+}
+
+
+def evidence_badge(tile: Mapping[str, Any]) -> str | None:
+    status = str(((tile.get("presentation") or {}).get("hypothesis_result") or {}).get("status") or "")
+    return EVIDENCE_BADGES.get(status)
+
+
+def committed_call_refusal(entry: Mapping[str, Any], raw: Mapping[str, Any],
+                           admission: Mapping[str, Any], score_led: str) -> str | None:
+    """Refusal reason when a commit-only tile must not trade this call, else None.
+
+    Tiles whose entry keeps ``trades_raw_ai_no_trade`` true and ``min_score_gap``
+    unset (Trend Fade 60) are never refused here.
+    """
+    min_gap = entry.get("min_score_gap")
+    if entry.get("trades_raw_ai_no_trade", True) and min_gap is None:
+        return None
+    if not entry.get("trades_raw_ai_no_trade", True):
+        raw_side = str(raw.get("raw_direction") or "").upper()
+        if raw_side not in _OPPOSITE or raw.get("explicit_abstain"):
+            return "RAW_AI_NO_TRADE"
+        if raw.get("score_direction_mismatch") or raw_side != score_led:
+            return "SCORE_DIRECTION_MISMATCH"
+    if min_gap is not None:
+        try:
+            gap = float(admission.get("score_gap"))
+        except (TypeError, ValueError):
+            return "SCORE_GAP_BELOW_MIN"
+        if not math.isfinite(gap) or gap < float(min_gap):
+            return "SCORE_GAP_BELOW_MIN"
+    return None
+
+
+def signal_source_detail(tile: Mapping[str, Any]) -> str:
+    """Strategy-box signal line derived from the tile's registry signal metadata."""
+    if tile.get("uses_shared_ai_direction", True) and not tile.get("signal_clock"):
+        return SHARED_AI_SIGNAL_DETAIL
+    entry = tile.get("entry_policy") or {}
+    clock = str(tile.get("signal_clock") or "own signal clock").replace("_", " ").capitalize()
+    venues = "/".join(str(v).capitalize() for v in entry.get("leader_venues") or ())
+    kind = str(entry.get("direction_source") or "signal").upper().removeprefix("CROSS_VENUE_").lower()
+    if entry.get("lookback_sec"):
+        window = f" over {entry['lookback_sec']}s"
+    elif entry.get("premium_mean_window_sec"):
+        window = f" relative to its {int(entry['premium_mean_window_sec']) // 60}-min mean"
+    else:
+        window = ""
+    source = f" ({venues} {kind} vs Bitfinex{window})" if venues else ""
+    role = str(entry.get("ai_decision_role") or "NONE").upper()
+    ai = "no AI call" if role == "NONE" else f"AI role {role}, not the shared AI call"
+    return f"{clock}{source}; {ai}; independent identity, order, position and ledger"
 
 
 class TakerTimeExitBinding:
@@ -88,7 +148,7 @@ class TakerTimeExitBinding:
         admission = dict(admission or {})
         score_led = str(admission.get("effective_direction") or "").upper()
         reason = None
-        if self.entry["direction_source"] == CROSS_VENUE_LEAD:
+        if self.entry["direction_source"] in CROSS_VENUE_SOURCES:
             reason = "NOT_A_SHARED_AI_TILE"
         elif raw.get("ai_error"):
             reason = "AI_ERROR"
@@ -96,6 +156,8 @@ class TakerTimeExitBinding:
             reason = "SCORE_LED_TREATMENT_INACTIVE"
         elif not admission.get("accepted") or score_led not in _OPPOSITE:
             reason = str(admission.get("reason") or "SCORE_LED_SIDE_UNAVAILABLE")
+        else:
+            reason = committed_call_refusal(self.entry, raw, admission, score_led)
         accepted = reason is None
         direction = (
             (_OPPOSITE[score_led] if self.entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else score_led)
@@ -214,13 +276,19 @@ class TakerTimeExitBinding:
     def dashboard_policy(self):
         tile = COMBO_LANE_SPECS[self.lane]
         entry, exit_policy = self.entry, self.exit
-        payload = _dashboard(self.spec)
+        payload = _dashboard(self.spec, signal_detail=signal_source_detail(tile))
         source = entry["direction_source"]
-        if source == CROSS_VENUE_LEAD:
+        if source in CROSS_VENUE_SOURCES:
             return self._cross_venue_dashboard_policy(payload, tile)
+        committed = not entry.get("trades_raw_ai_no_trade", True)
         side = (
             "Side = opposite of score-led AI side"
             if source == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
+        )
+        commit_chips = (
+            [f"Only committed calls: explicit AI side, gap ≥{float(entry['min_score_gap']):g}",
+             "Never fades NO_TRADE"]
+            if committed else []
         )
         max_open = int(exit_policy.get("max_open_positions") or 1)
         exit_chips = (
@@ -232,7 +300,7 @@ class TakerTimeExitBinding:
             if self.ladder else ["No ladder / break-even / trail / target"]
         )
         payload["filter_chips"] = [
-            "PAPER ONLY", side,
+            "PAPER ONLY", side, *commit_chips,
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
@@ -240,13 +308,21 @@ class TakerTimeExitBinding:
             *exit_chips,
             f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
-        payload["entry"].update({
-            "trigger": (
+        if committed:
+            trigger = (
+                "Shared three-minute call; side is the opposite of the AI's committed side "
+                f"(explicit LONG/SHORT matching the scores, gap ≥{float(entry['min_score_gap']):g}; "
+                "NO_TRADE, mismatches, small gaps, ties and errors refuse)"
+            )
+        elif entry["direction_source"] == "INVERTED_SCORE_LED_SIDE":
+            trigger = (
                 "Shared three-minute call; side is the opposite of the score-led side "
                 "(raw AI NO_TRADE and small gaps still trade; only ties/errors refuse)"
-                if entry["direction_source"] == "INVERTED_SCORE_LED_SIDE"
-                else "Shared three-minute call; score-led side"
-            ),
+            )
+        else:
+            trigger = "Shared three-minute call; score-led side"
+        payload["entry"].update({
+            "trigger": trigger,
             "entry_path": self.lane,
             "chase_detail": "No chase; one signal-time marketable limit or stand-aside",
             "direction_source": entry["direction_source"],
@@ -283,9 +359,25 @@ class TakerTimeExitBinding:
         entry, exit_policy = self.entry, self.exit
         venues = "/".join(v.capitalize() for v in entry["leader_venues"])
         hold = int(exit_policy["max_duration_sec"])
+        if entry["direction_source"] == CROSS_VENUE_PREMIUM:
+            side_chip = (
+                f"Side = {venues} premium vs {int(entry['premium_mean_window_sec']) // 60}-min mean "
+                f"≥+{entry['premium_long_threshold_bps']:g}bp long / ≤{entry['premium_short_threshold_bps']:g}bp short"
+            )
+            trigger = (
+                f"Per-second cross-venue evaluator (no AI): mean {venues} mid premium over Bitfinex minus its own "
+                f"{int(entry['premium_mean_window_sec']) // 60}-minute mean is ≥+{entry['premium_long_threshold_bps']:g}bp "
+                f"(long) or ≤{entry['premium_short_threshold_bps']:g}bp (short)"
+            )
+        else:
+            side_chip = f"Side = {venues} lead ≥{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s"
+            trigger = (
+                f"Per-second cross-venue evaluator (no AI): mean {venues} mid return led Bitfinex by ≥"
+                f"{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s"
+            )
         payload["filter_chips"] = [
-            "PAPER ONLY", "HINT — 12h evidence",
-            f"Side = {venues} lead ≥{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s",
+            "PAPER ONLY", evidence_badge(tile) or "HINT",
+            side_chip,
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Any feed >{entry['max_venue_age_sec']:g}s old → no trade",
@@ -294,10 +386,7 @@ class TakerTimeExitBinding:
             f"Max {int(exit_policy.get('max_open_positions') or 1)} open position",
         ]
         payload["entry"].update({
-            "trigger": (
-                f"Per-second cross-venue evaluator (no AI): mean {venues} mid return led Bitfinex by ≥"
-                f"{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s"
-            ),
+            "trigger": trigger,
             "entry_path": self.lane,
             "chase_detail": "No chase; one trigger-time marketable limit or stand-aside",
             "direction_source": entry["direction_source"],

@@ -1,6 +1,7 @@
 """Exercise the pre-AI import using only explicitly shipped research files."""
 from pathlib import Path
 import ast
+import re
 import shutil
 import subprocess
 import sys
@@ -63,3 +64,14 @@ def test_runtime_research_import_closure_is_shipped():
                     assert '!' + name.replace('.', '/') + '.py' in rules, name
                 if ROOT.joinpath(*name.split('.')).with_suffix('.py').exists():
                     pending.append(name)
+
+
+def test_dockerfile_research_import_smokes_are_shipped():
+    rules = (ROOT / '.dockerignore').read_text(encoding='utf-8').splitlines()
+    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    smoked = set()
+    for line in re.findall(r'RUN python -c "import ([^"]+)"', dockerfile):
+        smoked.update(name.strip() for name in line.split(',') if name.strip().startswith('research.'))
+    assert 'research.decision_model_report' in smoked
+    for name in sorted(smoked):
+        assert '!' + name.replace('.', '/') + '.py' in rules, name

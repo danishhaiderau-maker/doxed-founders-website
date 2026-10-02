@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-trend-fade-single-tile-v5",
-        "b9cdf9b974dd517bf6ef13d5f822b9d3c9ec7e022f69de2d615a614ace5f0a0e",
+        "v31-committed-fade-premium-v6",
+        "3e8d928356e3b7343623248cfd6cf121306457319d0c52751da595f539782e92",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-trend-fade-single-tile-v5",
-        "6af6dd0f54e0ad8b722498c1d87130de8a14e8667a47662f4813bf54d3496ea8",
+        "v31-committed-fade-premium-v6",
+        "67716646575e03b03ce918b1800fdb3b4162f4aea5e076d7913938c46ce6a6ed",
     ]
 
 

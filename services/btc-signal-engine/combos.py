@@ -14,9 +14,6 @@ import json
 import math
 import os
 from typing import Any
-
-from scenario_c_config import SCENARIO_C_LADDER_LABEL, SCENARIO_C_PROFILE_ID, TRAIL_LADDER_SCENARIO_C
-
 # Startup-only, explicit research treatment. A restart changes policy identity;
 # this is not a mutable per-request switch or permission to relay live orders.
 SCORE_LED_PAPER_RESEARCH_ENABLED = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
@@ -108,10 +105,13 @@ def resolve_score_led_paper_admission(
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_TREND_FADE_60 = "FAMILY_TREND_FADE_60"
-RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER = "FAMILY_TREND_FADE_60_LADDER"
+RESEARCH_LANE_FAMILY_TREND_FADE_60_COMMITTED = "FAMILY_TREND_FADE_60_COMMITTED"
 RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S = "FAMILY_XVENUE_LEAD_60S"
+RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S = "FAMILY_XVENUE_PREMIUM_60S"
 INVERTED_SCORE_LED_ADMISSION_POLICY_ID = "INVERTED_SCORE_LED_SIDE_V1"
+INVERTED_COMMITTED_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_GAP30_V1"
 CROSS_VENUE_LEAD_ADMISSION_POLICY_ID = "CROSS_VENUE_LEAD_NO_AI_V1"
+CROSS_VENUE_PREMIUM_ADMISSION_POLICY_ID = "CROSS_VENUE_PREMIUM_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -141,8 +141,9 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_TREND_FADE_60,
-    RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER,
+    RESEARCH_LANE_FAMILY_TREND_FADE_60_COMMITTED,
     RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S,
+    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -261,11 +262,22 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     return tile
 
 
-RESEARCH_STACK_VERSION = "v31-trend-fade-single-tile-v5"
+RESEARCH_STACK_VERSION = "v31-committed-fade-premium-v6"
 # Trend Fade 60 was registered in the v4 cohort and continues unchanged through
-# the v5 retirement; its policy epoch and pre-registration cohort stay pinned so
-# its identity, ledger and verdict window are not split by the roster change.
+# the v5 and v6 roster changes; its policy epoch and pre-registration cohort stay
+# pinned so its identity, ledger and verdict window are not split by them.
 TREND_FADE_60_POLICY_EPOCH = "v31-dynamic-adaptive-ladder-paper-v4"
+# Cross-venue lead was registered in the v5 cohort and continues unchanged in v6.
+XVENUE_LEAD_POLICY_EPOCH = "v31-trend-fade-single-tile-v5"
+# The shared AI prompt inputs are not part of any tile's execution signature,
+# but tiles that read the shared call's side see them. Every change to the live
+# prompt's inputs bumps this revision; the analyzer splits AI-driven tile cohorts
+# on it (diagnostics/AI-INPUT-REVISION-RECEIPT-*.md records each boundary).
+AI_PROMPT_INPUT_REVISION = "shared_direction_inputs_r2_20261002"
+AI_PROMPT_INPUT_REVISION_HISTORY = (
+    ("shared_direction_inputs_r1", "prompt v4_1 inputs before 2026-10-02 (ret_1m context 0, lower_high always False, volume_ratio vs forming bar)"),
+    (AI_PROMPT_INPUT_REVISION, "ret_1m/ret_5m from the 1 s tape, two-sided swing-structure detector, volume_ratio on closed bars"),
+)
 
 
 def _trend_fade_pre_registration(
@@ -332,15 +344,123 @@ _TREND_FADE_60_ENTRY = {
     "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
     "ai_decision_role": "FEATURE_ONLY",
 }
-TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS = 5
-_SCENARIO_C_LADDER = tuple(tuple(row) for row in TRAIL_LADDER_SCENARIO_C)
+COMMITTED_FADE_MIN_SCORE_GAP = 30.0
+# Tile 2 = Tile 1 restricted to calls where the AI committed to a side: raw
+# direction LONG/SHORT (never NO_TRADE, never a score/direction mismatch) and a
+# score gap of at least 30. Same side rule, entry, exit and capacity.
+_TREND_FADE_60_COMMITTED_ENTRY = {
+    **_TREND_FADE_60_ENTRY,
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE",
+                  "SCORE_DIRECTION_MISMATCH", "SCORE_GAP_BELOW_MIN"),
+    "trades_raw_ai_no_trade": False,
+    "min_score_gap": COMMITTED_FADE_MIN_SCORE_GAP,
+    "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED_AND_GAP_GE_30",
+}
+
+
+def _committed_fade_pre_registration(hypothesis_id: str) -> dict:
+    """INDICATOR-SEARCH-MODEL-A S2 + AI-DIRECTION-AUDIT-MODEL-A item 2; post-registration trades only."""
+    pre = {
+        "schema": "tile_pre_registration_committed_fade_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-02T07:00:00Z",
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": RESEARCH_LANE_FAMILY_TREND_FADE_60,
+        "control_meaning": "Trend Fade 60 fades every non-tie call (incl. NO_TRADE) on the same shared calls",
+        "evidence_world": "CONSERVATIVE_BBO",
+        "ci_method": "2H_CLUSTER_BOOTSTRAP_95",
+        "honest_label": "HINT — dev +12.6 bp/call [+3.3,+25.2], holdout +11.6 [-4.5,+27.9]; contaminated by the audit that proposed it",
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 150, "min_distinct_hours": 40, "min_regime_days": 3,
+            "regime_day_rule": "UTC day |r24h| >= 1.5% = trend day (up/down), else range",
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "beats_control_by_bp": 10.0,
+            "both_halves_positive": True,
+        },
+        "kill": {
+            "k1_after_fills": 150, "k1_hit_rate_below": 0.52,
+            "k2_trend_day_mean_bp_below": -15.0,
+            "k3_worst_trade_bp_below": -60.0,
+            "k4_max_drawdown_usd": 1.0,
+            "k5_max_days_without_promotion": 21,
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades across >={promote['min_distinct_hours']} "
+        f"hours and >={promote['min_regime_days']} regime-days (up, down, range); per-trade EV 2 h-cluster lower 95% CI >0; "
+        f"beats Trend Fade 60 on the same calls by >={promote['beats_control_by_bp']:g} bp/trade; both halves positive; "
+        "promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 hit rate <{kill['k1_hit_rate_below']:.0%} after {kill['k1_after_fills']} trades; "
+        f"K2 any up/down-trend day averaging <{kill['k2_trend_day_mean_bp_below']:g} bp/trade; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure); "
+        f"K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 day {kill['k5_max_days_without_promotion']} without promotion"
+    )
+    return pre
+
+
+def _xvenue_premium_pre_registration(hypothesis_id: str) -> dict:
+    """INDICATOR-SEARCH-MODEL-A S1 (premium arm, 60 s only); post-registration trades only."""
+    pre = {
+        "schema": "tile_pre_registration_xvp_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-02T07:00:00Z",
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": None,
+        "control_meaning": "No AI control: the trigger is the cross-venue premium deviation; Tile 3 is the sibling cross-venue rule",
+        "evidence_world": "CONSERVATIVE_BBO",
+        "ci_method": "1H_CLUSTER_BOOTSTRAP_95",
+        "honest_label": "HINT — 8h holdout: 1 m 78% hit, +2.0 bp/trade [+0.7,+3.2], 115 independent; thresholds fixed on dev",
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 500, "min_utc_days": 7,
+            "min_sessions_each": 3, "sessions": ("ASIA", "EU", "US"),
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "shadow_5s_delay_mean_gt_bp": 0.0,
+            "max_single_day_profit_share": 0.30,
+            "both_sides_mean_ge_bp": 0.0,
+            "max_replay_parity_gap_bp": 1.0,
+            "max_median_signal_to_fill_sec": 2.0,
+        },
+        "kill": {
+            "k1_after_fills": 300, "k1_mean_bp_at_or_below": 0.0,
+            "k2_after_fills": 300, "k2_shadow_5s_delay_mean_below_bp": -0.5,
+            "k3_worst_trade_bp_below": -45.0, "k3_max_stale_feed_fill_share": 0.01,
+            "k4_max_drawdown_usd": 0.50,
+            "k5_max_days_without_promotion": 14,
+            "k6_defect_action": "PAUSE_AND_QUARANTINE_NOT_A_STRATEGY_VERDICT",
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades over >={promote['min_utc_days']} UTC days "
+        f"incl. >={promote['min_sessions_each']} each of Asia/EU/US sessions; per-trade EV 1 h-cluster lower 95% CI >0; "
+        f"5 s-delay shadow mean >0; no day >{promote['max_single_day_profit_share']:.0%} of profit; both sides >=0; "
+        f"replay parity <={promote['max_replay_parity_gap_bp']:g} bp, median signal->fill "
+        f"<={promote['max_median_signal_to_fill_sec']:g} s; promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 mean <={kill['k1_mean_bp_at_or_below']:g} bp after {kill['k1_after_fills']} trades; "
+        f"K2 5 s-delay shadow mean <{kill['k2_shadow_5s_delay_mean_below_bp']:g} bp after {kill['k2_after_fills']}; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp or >{kill['k3_max_stale_feed_fill_share']:.0%} "
+        f"of trades on a stale feed; K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 day {kill['k5_max_days_without_promotion']} without promotion = INCONCLUSIVE; "
+        "K6 lifecycle/identity/analyzer/feed/mirror defect = pause and quarantine"
+    )
+    return pre
+
+
 def _xvenue_lead_pre_registration(hypothesis_id: str) -> dict:
     """NEXT-TILE-RESEARCH-20261002 rules; verdicts use post-registration trades only."""
     pre = {
         "schema": "tile_pre_registration_xvl_v1",
         "hypothesis_id": hypothesis_id,
         "registered_utc": "2026-10-01T21:30:00Z",
-        "registered_cohort": RESEARCH_STACK_VERSION,
+        "registered_cohort": XVENUE_LEAD_POLICY_EPOCH,
         "control_lane": None,
         "control_meaning": "No AI control: the trigger is the cross-venue lead, not a shared AI call",
         "evidence_world": "CONSERVATIVE_BBO",
@@ -425,54 +545,39 @@ COMBO_LANE_SPECS = {
         subtitle="BETA TEST — in-sample +$1.30 / 47 trades; expected heavy decay — PAPER ONLY — RELAY INELIGIBLE",
         policy_epoch=TREND_FADE_60_POLICY_EPOCH,
     ),
-    # Owner-requested variant of Trend Fade 60: identical entry and admission,
-    # exit = Scenario-C profit-lock ladder, 40 bp catastrophic stop and the 60 m
-    # time backstop; no break-even, trail or target beyond the ladder. Its own
-    # capacity holds up to five concurrent positions. Paired against Trend
-    # Fade 60 on the same calls. Owner asked for default ON; paper-only.
-    RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER: _tile(
-        lane=RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER,
-        label="Trend Fade 60 + Profit Lock · inverted AI side, Scenario-C ladder, 40 bp stop, 60-min backstop",
-        raw_policy_id="INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP_SCENARIO_C_CAP5",
-        id_prefix="ftl",
-        module="paper_policy_family_trend_fade_60_ladder.py",
-        test_module="test_paper_policy_family_trend_fade_60_ladder.py",
-        entry=dict(_TREND_FADE_60_ENTRY),
+    # Owner-approved 2026-10-02 (replaces the retired profit-lock ladder Tile 2):
+    # Trend Fade 60 restricted to calls where the AI committed to a side. It
+    # never fades NO_TRADE, a score/direction mismatch or a gap below 30; side,
+    # entry, exit, stop and capacity are identical to Tile 1 so the two pair on
+    # the same shared calls.
+    RESEARCH_LANE_FAMILY_TREND_FADE_60_COMMITTED: _tile(
+        lane=RESEARCH_LANE_FAMILY_TREND_FADE_60_COMMITTED,
+        label="Trend Fade 60 — committed calls only · inverted AI side when the AI commits (gap ≥30), 60-min hold, 40 bp stop",
+        raw_policy_id="INVERT_COMMITTED_SCORE_LED_SIDE_GAP30_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+        id_prefix="ftc",
+        module="paper_policy_family_trend_fade_60_committed.py",
+        test_module="test_paper_policy_family_trend_fade_60_committed.py",
+        entry=dict(_TREND_FADE_60_COMMITTED_ENTRY),
         exit_policy={
-            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP_PROFIT_LOCK",
+            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
             "max_duration_sec": 3600,
             "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
-            "profit_lock": "SCENARIO_C_LADDER",
-            "effective_stop": "MOST_PROTECTIVE_OF_CATASTROPHIC_STOP_AND_PROFIT_LOCK",
-            "breakeven": None, "trail": None, "take_profit": None,
+            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
             "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
-            "lock_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
-            "max_open_positions": TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS,
+            "max_open_positions": 1,
         },
-        ladder=_SCENARIO_C_LADDER,
-        ladder_label=SCENARIO_C_LADDER_LABEL,
-        ladder_profile_id=SCENARIO_C_PROFILE_ID,
         hypothesis_result={
-            "status": "UNTESTED_VARIANT_PAPER_EXPERIMENT",
-            "hypothesis_id": "H5_TREND_FADE_60_SCENC_20261002",
-            "research_question": "Does the Scenario-C profit-lock ladder beat Trend Fade 60's plain 60-minute hold on the same inverted-side taker entries?",
-            "prior_evidence": "none for the ladder variant; Trend Fade 60 itself is in-sample only",
+            "status": "HINT_DEV_AND_HOLDOUT_SAME_SIGN",
+            "hypothesis_id": "H6_TREND_FADE_60_COMMITTED_20261002",
+            "in_sample": "dev 63% / +12.6 bp per call [+3.3,+25.2] (38 h); holdout 64% / +11.6 bp [-4.5,+27.9] (12 h); skipped all 5 Trend Fade hard stops",
+            "expected_live": "0 to +6 bp/trade; trades ~45% of calls; gives up ~half the range-period profit",
         },
-        pre_registration=_trend_fade_pre_registration(
-            "H5_TREND_FADE_60_SCENC_20261002",
-            registered_utc="2026-10-02T00:00:00Z",
-            registered_cohort=RESEARCH_STACK_VERSION,
-            control_lane=RESEARCH_LANE_FAMILY_TREND_FADE_60,
-            control_meaning="Trend Fade 60 plain hold on the same inverted-side entries",
-            control_status=None,
-            honest_label="no in-sample evidence for the ladder variant; paired test vs Trend Fade 60",
-        ),
-        admission_treatment=INVERTED_SCORE_LED_ADMISSION_POLICY_ID,
-        max_active_signals=TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS,
+        pre_registration=_committed_fade_pre_registration("H6_TREND_FADE_60_COMMITTED_20261002"),
+        admission_treatment=INVERTED_COMMITTED_ADMISSION_POLICY_ID,
+        max_active_signals=1,
         entry_ttl_sec=15,
-        subtitle="PAPER EXPERIMENT — Trend Fade 60 entry + Scenario-C profit lock, up to 5 open — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE",
+        subtitle="HINT — committed-call fade, holdout CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
         policy_epoch=RESEARCH_STACK_VERSION,
-        default_enabled=True,
     ),
     # NEXT-TILE-RESEARCH-20261002: when the mean Binance/Bybit 10 s return
     # leads Bitfinex by >=8 bp, take the Bitfinex taker in their direction
@@ -517,6 +622,55 @@ COMBO_LANE_SPECS = {
         max_active_signals=1,
         entry_ttl_sec=3,
         subtitle="HINT — 12h evidence, not validated across days — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=XVENUE_LEAD_POLICY_EPOCH,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+    ),
+    # INDICATOR-SEARCH-MODEL-A signal 1 (owner-approved 2026-10-02): when the
+    # Binance/Bybit premium over Bitfinex sits in its dev-fixed tails versus its
+    # own 60-minute mean, take the Bitfinex taker in the leaders' direction and
+    # exit after 60 s (the 300 s arm was not materially better: +1.4 vs +1.8 bp
+    # non-overlapping, half the independent N). Per-second evaluator, no AI.
+    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S: _tile(
+        lane=RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
+        label="Cross-venue premium · Binance/Bybit premium over Bitfinex ≥+1.75 / ≤−1.88 bp vs its 60-min mean, 60-s hold, 40 bp stop",
+        raw_policy_id="XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_BOTHFRESH_SPREADLE3BP_TAKER_CAP5BPS|TIME_60_HARD40BP",
+        id_prefix="xvp",
+        module="paper_policy_family_xvenue_premium.py",
+        test_module="test_paper_policy_family_xvenue_premium.py",
+        entry={
+            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+            "direction_source": "CROSS_VENUE_PREMIUM",
+            "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
+            "leader_venues": ("binance", "bybit"),
+            "premium_mean_window_sec": 3600, "premium_min_mean_samples": 1200,
+            "premium_long_threshold_bps": 1.75, "premium_short_threshold_bps": -1.88,
+            "max_fill_forward_sec": 5,
+            "max_venue_age_sec": 2.0, "max_bbo_age_sec": 2.0, "max_spread_bps": 3.0,
+            "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
+            "shadow_entry_delay_sec": 1,
+            "min_submit_interval_sec": 5, "max_submissions_per_hour": 60,
+            "ai_decision_role": "NONE",
+        },
+        exit_policy={
+            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
+            "max_duration_sec": 60,
+            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
+            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+            "max_open_positions": 1,
+        },
+        hypothesis_result={
+            "status": "HINT_8H_HOLDOUT_EVIDENCE",
+            "hypothesis_id": "H7_XVENUE_PREMIUM_60S_20261002",
+            "in_sample": "8 h cross-venue holdout: 1 m 78% hit, +2.0 bp/trade after spread [+0.7,+3.2], 148 trades (115 independent), BH q 0.013; 5 m arm +2.3 bp",
+            "expected_live": "+0.5 to +1.5 bp/trade after decay; overlaps Tile 3 triggers",
+        },
+        pre_registration=_xvenue_premium_pre_registration("H7_XVENUE_PREMIUM_60S_20261002"),
+        admission_treatment=CROSS_VENUE_PREMIUM_ADMISSION_POLICY_ID,
+        max_active_signals=1,
+        entry_ttl_sec=3,
+        subtitle="HINT — 8h holdout evidence, not validated across days — PAPER ONLY — RELAY INELIGIBLE",
         policy_epoch=RESEARCH_STACK_VERSION,
         signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
     ),
@@ -531,7 +685,7 @@ RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_TREND_FADE_60
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "Tiles 1 and 2 consume the shared three-minute call, each with its own lock, order, position, ledger and analyzer cohort, and pair on identical signals. Tile 1 (Trend Fade 60, beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties, invalid scores and AI errors refuse. It holds one position at a time, is default-OFF and keeps its v4 identity and cohort unchanged. Tile 2 (Trend Fade 60 + Profit Lock) uses the identical entry with the Scenario-C profit-lock ladder, the 40 bp catastrophic stop and the 60-minute backstop (no break-even, trail or target), holds up to five concurrent positions in its own capacity and is default-ON. Tile 3 (Cross-venue lead, HINT, 12 h evidence) uses no AI and does not consume the shared call: a bounded per-second cross-venue evaluator takes a Bitfinex taker (5 bp cap, 3 s) in the direction of a >=8 bp 10 s Binance/Bybit lead over Bitfinex, only when every feed is <=2 s old and spread <=3 bp, exits after 60 s with a 40 bp catastrophic stop, holds one position, is default-OFF, and logs every qualifying lead as a shadow signal whether or not the tile is ON. Locks and stops fill at the side-correct quote that crossed them. All three carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. v5 retires the three Dynamic Adaptive tiles (all lost in conservative paper evidence) and starts the Tile 2 and Tile 3 cohorts. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort and v4 the four-tile cohort"
+    "Tiles 1 and 2 consume the shared three-minute call, each with its own lock, order, position, ledger and analyzer cohort, and pair on identical signals. Tile 1 (Trend Fade 60, beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties, invalid scores and AI errors refuse. It holds one position at a time, is default-OFF and keeps its v4 identity and cohort unchanged. Tile 2 (Trend Fade 60 - committed calls only, HINT) is identical except that it fades only calls where the AI committed to an explicit side matching the score-led side with a score gap of at least 30; it never fades NO_TRADE. Tile 3 (Cross-venue lead, HINT, 12 h evidence) and Tile 4 (Cross-venue premium, HINT, 8 h holdout evidence) use no AI and do not consume the shared call: a bounded per-second cross-venue evaluator takes a Bitfinex taker (5 bp cap, 3 s) in the leaders' direction when every feed is <=2 s old and spread <=3 bp - Tile 3 on a >=8 bp 10 s Binance/Bybit lead over Bitfinex, Tile 4 when the Binance/Bybit premium over Bitfinex is >=+1.75 bp (long) or <=-1.88 bp (short) versus its own 60-minute mean - exits after 60 s with a 40 bp catastrophic stop, holds one position, and logs every qualifying trigger as a shadow signal whether or not the tile is ON. Stops fill at the side-correct quote that crossed them. All four carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. v6 retires the Trend Fade 60 profit-lock ladder tile and starts the Tile 2 (committed) and Tile 4 (premium) cohorts; Tile 1 keeps v4 and Tile 3 keeps v5. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort, v4 the four-tile cohort and v5 the ladder/lead cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -565,6 +719,9 @@ RETIRED_TILE_LANES = frozenset({
     # Retired 2026-10-02: all three Dynamic Adaptive tiles lost in paper.
     "FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER",
     "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+    # Retired 2026-10-02 (owner): profit-lock ladder variant of Trend Fade 60,
+    # replaced by the committed-calls-only variant.
+    "FAMILY_TREND_FADE_60_LADDER",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",
@@ -580,6 +737,7 @@ RETIRED_POLICY_IDENTITIES = frozenset({
     "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
     "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1_SCENARIO_C_CAP1",
     "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1_SCENARIO_C_BE4_LOCK1_CAP1",
+    "INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP_SCENARIO_C_CAP5",
 })
 
 

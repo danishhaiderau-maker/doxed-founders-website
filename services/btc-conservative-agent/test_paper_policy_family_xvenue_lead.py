@@ -80,7 +80,7 @@ def test_registry_owns_a_paper_only_relay_ineligible_cross_venue_tile():
     assert policy.POLICY_SIGNATURE == spec["policy_signature"]
     assert spec["signal_clock"] == CROSS_VENUE_SIGNAL_CLOCK == xvl.SIGNAL_CLOCK
     assert spec["uses_shared_ai_direction"] is False
-    assert is_cross_venue_clock_lane(policy.LANE) and cross_venue_clock_lanes() == (policy.LANE,)
+    assert is_cross_venue_clock_lane(policy.LANE) and cross_venue_clock_lanes()[0] == policy.LANE
     assert policy.LANE not in RETIRED_TILE_LANES
     assert "HINT" in spec["subtitle"] and "12h evidence" in spec["subtitle"]
     assert "RELAY INELIGIBLE" in spec["subtitle"]
@@ -168,6 +168,43 @@ def test_dashboard_discloses_hint_label_and_no_ai():
     assert payload["entry"]["signal_clock"] == CROSS_VENUE_SIGNAL_CLOCK
     assert payload["exit"]["fixed_time_exit"] == "60s"
     assert payload["pre_registration"]["hypothesis_id"] == "H5_XVENUE_LEAD_60S_20261002"
+
+
+def test_strategy_box_names_the_registry_signal_source_not_the_shared_ai_call():
+    import taker_time_exit_binding as binding
+    from family_policy_common import SHARED_AI_SIGNAL_DETAIL
+
+    detail = policy.dashboard_policy()["strategy_detail"]
+    assert SHARED_AI_SIGNAL_DETAIL not in detail
+    assert not any("shared AI call;" in line.lower() for line in detail)
+    signal_line = detail[1]
+    assert signal_line == binding.signal_source_detail(COMBO_LANE_SPECS[policy.LANE])
+    assert signal_line.startswith("Per second cross venue evaluator (Binance/Bybit lead vs Bitfinex over 10s)")
+    assert "no AI call" in signal_line
+    card = next(row for row in bot.build_static_pathway_lane_specs()["lanes"] if row["lane"] == policy.LANE)
+    assert card["strategy_detail"][1] == signal_line
+    assert "shared entry-direction call" not in card["expected_advantage"]
+    for lane in ACTIVE_TILE_ORDER:
+        spec = COMBO_LANE_SPECS[lane]
+        if spec["uses_shared_ai_direction"] and not spec.get("signal_clock"):
+            assert binding.signal_source_detail(spec) == SHARED_AI_SIGNAL_DETAIL
+    premium_like = {
+        "uses_shared_ai_direction": False, "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
+        "entry_policy": {"direction_source": "CROSS_VENUE_PREMIUM", "leader_venues": ("binance", "bybit"),
+                         "premium_mean_window_sec": 3600, "ai_decision_role": "NONE"},
+    }
+    assert binding.signal_source_detail(premium_like).startswith(
+        "Per second cross venue evaluator (Binance/Bybit premium vs Bitfinex relative to its 60-min mean); no AI call")
+
+
+def test_evaluator_counts_stale_seconds_by_feed_reason():
+    evaluator = xvl.LeadEvaluator(RULE)
+    for step, bbo_age in enumerate((0.3, 2.5, 3.1)):
+        now = NOW + step + 0.6
+        evaluator.step(now=now, live=_live(now, {}), bfx_quotes=_bfx(now), bfx_bbo_ts=now - bbo_age)
+    snap = evaluator.snapshot()
+    assert snap["by_status"][xvl.STATUS_STALE] == 2
+    assert snap["stale_by_reason"] == {"BFX_BBO_STALE": 2}
 
 
 # ---- evaluator ----------------------------------------------------------------

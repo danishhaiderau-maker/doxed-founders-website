@@ -39,6 +39,9 @@ ANALYZER_USAGE = {
         "usage": FULL, "continuous": True, "consumers": ["fill_time_guard_counterfactual", "strategy_lab funding"]},
     "ai_shadow_challengers.jsonl": {"usage": FULL, "continuous": True, "consumers": ["ai_challenger_report"]},
     "ai_shadow_compact_prompt.jsonl": {"usage": FULL, "continuous": False, "consumers": ["ai_challenger_report"]},
+    "ai_shadow_regime_prompt.jsonl": {"usage": FULL, "continuous": False, "consumers": ["decision_model_report H8"]},
+    "decision_feature_snapshots.jsonl": {
+        "usage": FULL, "continuous": True, "consumers": ["decision_model_report (health, H8 labels, H9)"]},
     "decisions_3factor.csv": {"usage": FULL, "continuous": True, "consumers": ["load_data decisions (session filter)"]},
     "cycle_3m_universe.jsonl": {"usage": FULL, "continuous": True, "consumers": ["research modules"]},
     "research_events_v22.jsonl": {

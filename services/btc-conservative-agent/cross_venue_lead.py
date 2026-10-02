@@ -204,7 +204,26 @@ def shadow_outcome(side: str, entry_quote, exit_quote) -> dict:
 
 
 class LeadEvaluator:
-    """Stateful 1 Hz wrapper: episodes, capacity-1 replica flag and outcome maturity."""
+    """Stateful 1 Hz wrapper: episodes, capacity-1 replica flag and outcome maturity.
+
+    Subclasses (other cross-venue triggers) override ``evaluate``, ``qualifies``
+    and ``signal_fields`` plus the class-level identity constants; episode,
+    capacity-1 and outcome maturity logic stays shared.
+    """
+
+    ID_PREFIX = "xvl"
+    TRIGGER_SCHEMA = TRIGGER_SCHEMA
+    OUTCOME_SCHEMA = OUTCOME_SCHEMA
+    SHADOW_FILE = SHADOW_FILE
+    SIGNAL_KEY = "lead_bp"
+    # Trigger keys copied into the paper order's signal features.
+    TRIGGER_FEATURE_KEY = "xvl_trigger"
+    TRIGGER_FEATURE_FIELDS = (
+        "trigger_id", "anchor_bucket_ts", "evaluated_ts", "side", "lead_bp",
+        "venue_ret_bp", "bfx_ret_bp", "venue_bbo_age_s", "collector_age_s",
+        "bfx_bbo_age_s", "bfx_bid", "bfx_ask", "spread_bps", "episode_id",
+        "episode_first", "rule",
+    )
 
     def __init__(self, rule: LeadRule, *, policy_id: str = "", policy_signature: str = "",
                  max_pending: int = MAX_PENDING) -> None:
@@ -217,7 +236,8 @@ class LeadEvaluator:
         self._episode: Optional[dict] = None
         self._cap1_busy_until = -1
         self.stats = {
-            "evaluations": 0, "missed_seconds": 0, "by_status": {}, "triggers_logged": 0,
+            "evaluations": 0, "missed_seconds": 0, "by_status": {}, "stale_by_reason": {},
+            "triggers_logged": 0,
             "qualifying": 0, "outcomes_ok": 0, "outcomes_missing": 0, "pending_evicted": 0,
             "last_anchor": None, "last_trigger_anchor": None,
         }
@@ -225,11 +245,26 @@ class LeadEvaluator:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    def evaluate(self, *, now: float, live, bfx_quotes: Mapping[int, tuple],
+                 bfx_bbo_ts: Optional[float]) -> dict:
+        return evaluate_second(self.rule, now=now, live=live, bfx_quotes=bfx_quotes,
+                               bfx_bbo_ts=bfx_bbo_ts)
+
+    def qualifies(self, evaluation: Mapping[str, Any]) -> bool:
+        return is_qualifying_lead(evaluation, self.rule)
+
+    def signal_fields(self, evaluation: Mapping[str, Any]) -> dict:
+        return {
+            "lead_bp": evaluation["lead_bp"],
+            "venue_ret_bp": dict(evaluation["venue_ret_bp"]),
+            "bfx_ret_bp": evaluation["bfx_ret_bp"],
+        }
+
     def step(self, *, now: float, live, bfx_quotes: Mapping[int, tuple],
              bfx_bbo_ts: Optional[float]) -> tuple:
         """(evaluation, trigger_row or None, [outcome rows]) for the current anchor."""
-        evaluation = evaluate_second(self.rule, now=now, live=live, bfx_quotes=bfx_quotes,
-                                     bfx_bbo_ts=bfx_bbo_ts)
+        evaluation = self.evaluate(now=now, live=live, bfx_quotes=bfx_quotes,
+                                   bfx_bbo_ts=bfx_bbo_ts)
         anchor = evaluation["anchor_bucket_ts"]
         outcomes = self._mature(anchor, bfx_quotes)
         if self._last_anchor is not None and anchor <= self._last_anchor:
@@ -243,13 +278,16 @@ class LeadEvaluator:
         status = evaluation["status"]
         by_status = self.stats["by_status"]
         by_status[status] = by_status.get(status, 0) + 1
-        if not is_qualifying_lead(evaluation, self.rule):
+        stale_by_reason = self.stats["stale_by_reason"]
+        for reason in evaluation["stale_reasons"]:
+            stale_by_reason[reason] = stale_by_reason.get(reason, 0) + 1
+        if not self.qualifies(evaluation):
             self._episode = None
             evaluation["cap1_take"] = False
             return evaluation, None, outcomes
         episode = self._episode
         if episode is None or episode["side"] != evaluation["side"] or episode["last_anchor"] != anchor - 1:
-            episode = {"id": f"xvl-ep-{anchor}", "side": evaluation["side"], "start": anchor}
+            episode = {"id": f"{self.ID_PREFIX}-ep-{anchor}", "side": evaluation["side"], "start": anchor}
         episode["last_anchor"] = anchor
         first = episode["start"] == anchor
         self._episode = episode
@@ -260,19 +298,17 @@ class LeadEvaluator:
         if status == STATUS_TRIGGER:
             self.stats["qualifying"] += 1
             self.stats["last_trigger_anchor"] = anchor
-        trigger_id = f"xvl-{anchor}"
+        trigger_id = f"{self.ID_PREFIX}-{anchor}"
         evaluation["trigger_id"] = trigger_id
         row = {
-            "schema": TRIGGER_SCHEMA,
+            "schema": self.TRIGGER_SCHEMA,
             "trigger_id": trigger_id,
             "anchor_bucket_ts": anchor,
             "evaluated_ts": round(float(now), 3),
             "side": evaluation["side"],
             "gate": status,
             "qualifies": status == STATUS_TRIGGER,
-            "lead_bp": evaluation["lead_bp"],
-            "venue_ret_bp": dict(evaluation["venue_ret_bp"]),
-            "bfx_ret_bp": evaluation["bfx_ret_bp"],
+            **self.signal_fields(evaluation),
             "venue_bbo_age_s": dict(evaluation["venue_bbo_age_s"]),
             "collector_age_s": evaluation["collector_age_s"],
             "bfx_bbo_age_s": evaluation["bfx_bbo_age_s"],
@@ -311,7 +347,7 @@ class LeadEvaluator:
             del self._pending[trigger_id]
             self.stats["outcomes_ok" if result["status"] == "OK" else "outcomes_missing"] += 1
             out.append({
-                "schema": OUTCOME_SCHEMA,
+                "schema": self.OUTCOME_SCHEMA,
                 "trigger_id": trigger_id,
                 "anchor_bucket_ts": row["anchor_bucket_ts"],
                 "side": row["side"],
@@ -319,7 +355,7 @@ class LeadEvaluator:
                 "qualifies": row["qualifies"],
                 "cap1_take": row["cap1_take"],
                 "episode_id": row["episode_id"],
-                "lead_bp": row["lead_bp"],
+                self.SIGNAL_KEY: row[self.SIGNAL_KEY],
                 "entry_bucket_ts": row["entry_bucket_ts"],
                 "exit_bucket_ts": exit_ts,
                 "hold_sec": self.rule.hold_sec,

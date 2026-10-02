@@ -17,6 +17,7 @@ import io
 import json
 import system_health_banner
 import system_health_alerts
+import runtime_uptime
 import uuid
 import requests
 import glob
@@ -74,9 +75,12 @@ import pytz
 import bitfinex_cost_profile
 
 from combo_pathway_config import (
+    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
     ANALYZER_SYNC_ID as COMBO_ANALYZER_SYNC_ID,
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
+    AI_PROMPT_INPUT_REVISION,
+    COMMITTED_FADE_MIN_SCORE_GAP,
     TILE_ARCHITECTURE_VERSION,
     TILE_REGISTRY_SCHEMA,
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
@@ -4331,19 +4335,25 @@ def log_ai_input_full(
             "liquidity_sweep_low": upgrade.get("liquidity_sweep_low"),
             "regime_change_count_60m": upgrade.get("regime_change_count_60m"),
             "context": copy.deepcopy(ctx),
+            "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
+            "prompt_input_revision": ai_result.get("prompt_input_revision") or AI_PROMPT_INPUT_REVISION,
             "ai": {
                 "decision": ai_result.get("decision"),
                 "win_prob": evidence_win_prob(ai_result),
                 "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai_result.get("direction"),
+                "raw_direction": ai_result.get("raw_direction"),
                 "bull_score": ai_result.get("bull_score"),
                 "bear_score": ai_result.get("bear_score"),
+                "long_score": ai_result.get("long_score"),
+                "short_score": ai_result.get("short_score"),
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
                 "deepseek_model": ai_result.get("deepseek_model"),
                 "deepseek_served_model": ai_result.get("deepseek_served_model"),
                 "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
+                **ai_commit_flags(ai_result),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -5674,8 +5684,6 @@ _execution_markout_counters = {
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
 _adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "last": None}
 _adaptive_entry_stats_lock = threading.Lock()
-ret_1m_buffer = deque(maxlen=20)
-ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
 delta_buffer = deque(maxlen=200)
 delta_change_buffer = deque(maxlen=200)
@@ -5790,7 +5798,12 @@ ANALYZER_SYNC_ID = COMBO_ANALYZER_SYNC_ID
 SYMBOL_CCXT = "BTC/USDT:USDT"
 FUNDING_INTERVAL_HOURS = bitfinex_cost_profile.FUNDING_INTERVAL_HOURS
 FUNDING_REFRESH_SEC = 60
-BBO_REFRESH_SEC = 3
+# The Bitfinex WS ticker is sparse (multi-second gaps), so this REST poll sets
+# the effective BBO age. It must stay below the tightest registry
+# max_bbo_age_sec (2.0 s on the cross-venue tile) after request latency, and
+# within the 90 req/min public ticker limit together with the dashboard fallback.
+BBO_REFRESH_SEC = 1.25
+REST_ENTRY_RECOVERY_SEC = 3
 BOOK_REFRESH_SEC = 3
 BOOK_STALE_SEC = 10
 # Cap raw P0 book depth we parse/store. Bitfinex P0 can return 1000+ levels;
@@ -6919,6 +6932,34 @@ def label_swing_sequence(swings, max_labels=6):
     score = sum(score_map.get(l, 0) for l in labels)
     return labels, score
 
+
+def last_swing_pair_labels(swings) -> dict:
+    """Latest swing-high label and latest swing-low label, judged separately.
+
+    ``label_swing_sequence`` lists every high label before every low label, so
+    its last two entries are both low labels whenever two lows exist; a pattern
+    check on that tail can never see LH or HH. Two-sided flags come from here.
+    """
+    out = {}
+    for kind, up, down, eq in (("high", "HH", "LH", "EH"), ("low", "HL", "LL", "EL")):
+        seq = [s["price"] for s in swings if s["type"] == kind][-2:]
+        if len(seq) < 2:
+            out[kind] = None
+        else:
+            out[kind] = up if seq[1] > seq[0] else (down if seq[1] < seq[0] else eq)
+    last_high, last_low = out["high"], out["low"]
+    return {
+        "last_high_label": last_high,
+        "last_low_label": last_low,
+        "higher_high": last_high == "HH",
+        "lower_high": last_high == "LH",
+        "higher_low": last_low == "HL",
+        "lower_low": last_low == "LL",
+        "hh_hl_sequence_active": last_high == "HH" and last_low == "HL",
+        "lh_ll_sequence_active": last_high == "LH" and last_low == "LL",
+    }
+
+
 def compute_market_structure(candles):
     swings = extract_pivot_swings(candles[-96:] if len(candles) > 96 else candles)
     labels, score = label_swing_sequence(swings, max_labels=6)
@@ -6934,14 +6975,11 @@ def compute_market_structure(candles):
         bias = "MIXED"
     last_highs = [s["price"] for s in swings if s["type"] == "high"][-2:]
     last_lows = [s["price"] for s in swings if s["type"] == "low"][-2:]
-    hh_hl_active = len(labels) >= 2 and all(x in ("HH", "HL") for x in labels[-2:])
-    lh_ll_active = len(labels) >= 2 and all(x in ("LH", "LL") for x in labels[-2:])
     return {
         "swing_labels_last": labels,
         "structure_score": score,
         "structure_bias": bias,
-        "hh_hl_sequence_active": hh_hl_active,
-        "lh_ll_sequence_active": lh_ll_active,
+        **last_swing_pair_labels(swings),
         "last_swing_high": last_highs[-1] if last_highs else None,
         "last_swing_low": last_lows[-1] if last_lows else None,
         "pivot_count": len(swings),
@@ -7009,8 +7047,7 @@ def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
         bias = "MIXED"
     micro_support = float(lows[-1]["price"]) if lows else None
     micro_resistance = float(highs[-1]["price"]) if highs else None
-    higher_low = bool(labels) and "HL" in labels[-2:]
-    lower_high = bool(labels) and "LH" in labels[-2:]
+    pair = last_swing_pair_labels(swings)
     return {
         "micro_support": micro_support,
         "micro_resistance": micro_resistance,
@@ -7020,10 +7057,7 @@ def build_micro_sr_levels(candles=None, max_pivots: int = None) -> dict:
         "swing_labels_last": labels,
         "structure_score": score,
         "structure_bias": bias,
-        "higher_low": higher_low,
-        "lower_high": lower_high,
-        "hh_hl_sequence_active": higher_low and bool(labels) and all(x in ("HH", "HL") for x in labels[-2:]),
-        "lh_ll_sequence_active": lower_high and bool(labels) and all(x in ("LH", "LL") for x in labels[-2:]),
+        **pair,
         "last_swing_low": micro_support,
         "last_swing_high": micro_resistance,
     }
@@ -11254,14 +11288,24 @@ def populate_candle_buffers_from_candles(candles, *, force=False):
     logger.info(f"[CANDLE BUFFER PRELOAD] populated {populated} candles into buffers [PIPELINE ENFORCEMENT]")
     return populated
 
-def compute_volume_ratio():
-    if len(volume_buffer) < 1:
+VOLUME_RATIO_LOOKBACK_BARS = 20
+
+
+def compute_volume_ratio(candles=None):
+    """Last closed 15m bar volume over the mean of the 20 closed bars before it.
+
+    ``latest_candles[-1]`` is the forming bar and ``volume_buffer`` holds single
+    trade sizes, so neither is a bar-volume ratio; 1.0 means typical volume.
+    """
+    rows = latest_candles if candles is None else candles
+    closed = [float(c[5]) for c in list(rows)[-(VOLUME_RATIO_LOOKBACK_BARS + 2):-1]
+              if len(c) > 5 and c[5] is not None]
+    if len(closed) < VOLUME_RATIO_LOOKBACK_BARS + 1:
         return 0.0
-    vol_mean = np.mean(list(volume_buffer)[-50:]) if len(volume_buffer) > 50 else np.mean(list(volume_buffer))
+    vol_mean = float(np.mean(closed[:-1]))
     if vol_mean <= 0:
         return 0.0
-    current = volume_buffer[-1]
-    return float(current / vol_mean)
+    return float(closed[-1] / vol_mean)
 
 def update_candle_features():
     global last_processed_candle_ts
@@ -13270,6 +13314,7 @@ def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
         logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
         return None
     sr = raw_sr
+    tape = _ai_shadow_tape_features()
     ctx = {
         "price": nz(state_snapshot.get("price")),
         "recent_high": nz(sr.get("swing_high")),
@@ -13280,8 +13325,10 @@ def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
         "ema21": nz(state_snapshot.get("ema_status", {}).get("ema21")),
         "ema200": nz(state_snapshot.get("ema_status", {}).get("ema200")),
         "ema_slope": (nz(state_snapshot.get("ema_status", {}).get("ema9")) - nz(state_snapshot.get("ema_status", {}).get("ema21"))) / nz(state_snapshot.get("ema_status", {}).get("ema21")) if nz(state_snapshot.get("ema_status", {}).get("ema21")) != 0 else 0.0,
-        "ret_1m": nz(buffers.get("ret_1m", [0])[-1] if len(buffers.get("ret_1m", [])) > 0 else 0),
-        "ret_5m": nz(buffers.get("ret_5m", [0])[-1] if len(buffers.get("ret_5m", [])) > 0 else 0),
+        # Fractional returns from the Bitfinex 1 s tape (same source as the
+        # prompt's ret_*_bp); 0 only when the tape has no such window yet.
+        "ret_1m": nz(tape.get("ret_1m"), 0.0),
+        "ret_5m": nz(tape.get("ret_5m"), 0.0),
         "velocity": get_aggregated(velocity_buffer),
         "volume": get_aggregated(volume_buffer),
         "avg_volume": get_aggregated(volume_buffer),
@@ -16221,6 +16268,35 @@ def parse_ai_response_fields(text: str) -> dict:
         "explicit_abstain": explicit_abstain,
         "score_direction_mismatch": score_direction_mismatch,
         "score_tie": score_tie,
+    }
+
+
+def ai_commit_flags(ai_result: dict) -> dict:
+    """Commit/abstain facts of one shared call (the Tile 2 commit rule, logged on every call).
+
+    Committed = explicit LONG/SHORT, scores agree with that side, and the score
+    gap is at least ``COMMITTED_FADE_MIN_SCORE_GAP``.
+    """
+    ai_result = ai_result or {}
+    raw = str(ai_result.get("raw_direction") or "").upper()
+    try:
+        long_s = float(ai_result.get("long_score"))
+        short_s = float(ai_result.get("short_score"))
+    except (TypeError, ValueError):
+        long_s = short_s = None
+    gap = abs(long_s - short_s) if long_s is not None else None
+    score_side = None if gap is None or gap == 0 else ("LONG" if long_s > short_s else "SHORT")
+    abstain = raw not in ("LONG", "SHORT")
+    mismatch = (not abstain) and score_side is not None and raw != score_side
+    committed = (not abstain and not mismatch and not ai_result.get("ai_error")
+                 and gap is not None and gap >= COMMITTED_FADE_MIN_SCORE_GAP)
+    return {
+        "explicit_abstain": abstain,
+        "score_direction_mismatch": mismatch,
+        "score_tie": gap == 0,
+        "score_gap": gap,
+        "ai_committed": bool(committed),
+        "commit_rule": f"EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED_AND_GAP_GE_{COMMITTED_FADE_MIN_SCORE_GAP:g}",
     }
 
 
@@ -19974,11 +20050,13 @@ def evaluate_signal_with_ai(
             "shadow_only": shadow_only,
             "trade_planner": trade_plan,
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
+            "prompt_input_revision": AI_PROMPT_INPUT_REVISION,
             "deepseek_model": call_meta.get("requested_model") or _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
             "deepseek_served_model": call_meta.get("served_model"),
             "deepseek_system_fingerprint": call_meta.get("system_fingerprint"),
         }
+        ai_result.update(ai_commit_flags(ai_result))
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
         ai_result["research_baseline_context_status"] = research_context_capture
@@ -21518,7 +21596,7 @@ def ensure_fresh_rest_entry_quote(now: float = None) -> bool:
     now = float(now or time.time())
     if _fresh_rest_entry_quote_ready(now):
         return True
-    if (now - float(_last_rest_entry_recovery_attempt_ts or 0)) >= BBO_REFRESH_SEC:
+    if (now - float(_last_rest_entry_recovery_attempt_ts or 0)) >= REST_ENTRY_RECOVERY_SEC:
         _last_rest_entry_recovery_attempt_ts = now
         refresh_bbo_state(force=True)
     return _fresh_rest_entry_quote_ready(time.time())
@@ -25167,8 +25245,6 @@ def process_signal(event: dict):
                     return {"entry_resolution": "NO_ORDER", "exact_reason": "AI_COOLDOWN_ACTIVE"}
 
                 buffers = {
-                    "ret_1m": ret_1m_buffer,
-                    "ret_5m": ret_5m_buffer,
                     "velocity": velocity_buffer,
                     "volume": volume_buffer,
                     "avg_volume": get_aggregated(volume_buffer),
@@ -27243,7 +27319,10 @@ def bbo_refresh_loop():
                 f"[BBO WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
             )
         elapsed = max(0.0, time.monotonic() - started)
-        shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed))
+        # refresh_bbo_state() throttles on the last *completion*, so waking on
+        # start + BBO_REFRESH_SEC would be skipped and double the real period.
+        due_in = (_last_bbo_refresh_ts + BBO_REFRESH_SEC + 0.01) - time.time()
+        shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed, due_in))
 
 
 def order_book_refresh_loop():
@@ -28648,6 +28727,16 @@ def _paper_terminal_cost_evidence(
     }
 
 
+def _forced_close_origin(exit_reason) -> str | None:
+    """Who issued a forced close: the guarded deploy boundary, an operator, or safety."""
+    from research.close_origin import FORCED_EXIT_REASONS, close_origin_for_pause_owner
+
+    if str(exit_reason or "").strip().upper() not in FORCED_EXIT_REASONS:
+        return None
+    # Lock-free read: close callers may already hold position/trade locks.
+    return close_origin_for_pause_owner(_pause_owner_locked())
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -28866,6 +28955,7 @@ def close_position(pos: dict, exit_reason: str):
             "total_cost_usd": round(trading_fees + funding_total, 2),
             **terminal_cost_evidence,
             "exit_reason": exit_reason,
+            "close_origin": _forced_close_origin(exit_reason),
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
             "ai_win_prob": pos.get("ai_win_prob") or master.get("ai_win_prob"),
@@ -29216,6 +29306,14 @@ _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
     daily_cap=int(os.getenv("AI_SHADOW_COMPACT_DAILY_CAP", "600")),
 )
 _AI_INPUT_DEAD_DETECTOR = _ai_shadow.DeadInputDetector(AI_INPUT_DEAD_FIELD_CALLS)
+import ai_regime_shadow as _ai_regime
+import decision_feature_snapshots as _dfs
+
+AI_SHADOW_REGIME_PROMPT_FILE = _ai_regime.REGIME_PROMPT_FILE
+AI_SHADOW_REGIME_PROMPT_ENABLED = os.getenv("AI_SHADOW_REGIME_PROMPT_ENABLED", "1").strip() == "1"
+DECISION_FEATURE_SNAPSHOT_FILE = _dfs.SNAPSHOT_FILE
+_AI_REGIME_BUDGET = _ai_regime.RegimeBudget()
+_DFS_BOOK = _dfs.LabelBook()
 _AI_SHADOW_PROMPT_PAYLOADS = {}
 _AI_SHADOW_LOCK = threading.Lock()
 _ai_shadow_status = {
@@ -29228,6 +29326,12 @@ _ai_shadow_status = {
     "recent": deque(maxlen=480),
     "boot_recovered_calls": 0,
     "boot_hydrated_seconds": 0,
+    "regime_ok": 0,
+    "regime_errors": 0,
+    "regime_skipped": 0,
+    "last_regime_error": None,
+    "snapshots_logged": 0,
+    "labels_logged": 0,
 }
 
 SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_1_20261001"
@@ -29322,6 +29426,7 @@ def cross_venue_health_snapshot() -> dict:
 
 
 import cross_venue_lead as _xvl
+from taker_time_exit_binding import evidence_badge as _taker_time_evidence_badge
 
 # Per-second cross-venue lead evaluator for registry tiles on the
 # CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
@@ -29368,8 +29473,8 @@ def _xvl_lower_thread_priority() -> None:
         _xvl_status["thread_niced"] = False
 
 
-def _xvl_append(row: dict) -> None:
-    ok = _safe_append_jsonl(XVL_SHADOW_FILE, row, label="XVL_SHADOW", fallback_on_error=False)
+def _xvl_append(row: dict, path: str = XVL_SHADOW_FILE) -> None:
+    ok = _safe_append_jsonl(path, row, label="XVL_SHADOW", fallback_on_error=False)
     with _XVL_LOCK:
         _xvl_status["rows_written" if ok else "write_failures"] += 1
 
@@ -29416,9 +29521,11 @@ def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
         with _XVL_LOCK:
             lane_state = _xvl_lane_state(lane)
             lane_state["busy"] = False
+            evaluator = _XVL_EVALUATORS.get(lane)
+            signal_key = getattr(evaluator, "SIGNAL_KEY", "lead_bp")
             lane_state["last_attempt"] = {
                 "trigger_id": trigger.get("trigger_id"), "side": trigger.get("side"),
-                "lead_bp": trigger.get("lead_bp"), "outcome": outcome, "ts": time.time(),
+                signal_key: trigger.get(signal_key), "outcome": outcome, "ts": time.time(),
             }
             if outcome == "ORDER_ELIGIBLE":
                 lane_state["orders_eligible"] += 1
@@ -29445,35 +29552,33 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
         last = _buf_float(state.get("price"), 0.0)
     reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+    evaluator = _XVL_EVALUATORS.get(lane) or _xvl.LeadEvaluator
+    tag = f"{evaluator.ID_PREFIX.upper()}_TRIGGER"
     signal_features = {
-        "xvl_trigger": {
-            key: copy.deepcopy(trigger.get(key)) for key in (
-                "trigger_id", "anchor_bucket_ts", "evaluated_ts", "side", "lead_bp",
-                "venue_ret_bp", "bfx_ret_bp", "venue_bbo_age_s", "collector_age_s",
-                "bfx_bbo_age_s", "bfx_bid", "bfx_ask", "spread_bps", "episode_id",
-                "episode_first", "rule",
-            )
+        evaluator.TRIGGER_FEATURE_KEY: {
+            key: copy.deepcopy(trigger.get(key)) for key in evaluator.TRIGGER_FEATURE_FIELDS
         },
         "signal_clock": _xvl.SIGNAL_CLOCK,
     }
     decision = policy.decide_entry(
         direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
         reference_price=reference,
-        ai_feature={"xvl_trigger_id": call_id, "lead_bp": trigger.get("lead_bp")},
+        ai_feature={f"{evaluator.ID_PREFIX}_trigger_id": call_id,
+                    evaluator.SIGNAL_KEY: trigger.get(evaluator.SIGNAL_KEY)},
     )
     decision["shared_ai_call_id"] = call_id
-    decision["xvl_trigger_id"] = call_id
+    decision[f"{evaluator.ID_PREFIX}_trigger_id"] = call_id
     _record_adaptive_entry_decision(lane, decision)
     accepted = decision.get("action") != "STAND_ASIDE"
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
         "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
-        "raw_direction": side, "raw_decision": "XVL_TRIGGER",
+        "raw_direction": side, "raw_decision": tag,
         "direction_source": _xvl_direction_source(lane),
         "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts, "trade_id": call_id,
         "effective_research_direction": side,
         "effective_research_admission_policy_id": (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment"),
-        "effective_research_admission": {"applied": True, "accepted": True, "reason": "XVL_TRIGGER",
+        "effective_research_admission": {"applied": True, "accepted": True, "reason": tag,
                                          "effective_direction": side},
     }
     ctx = {
@@ -29481,7 +29586,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         "price": reference, "symbol": SYMBOL,
     }
     disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
-    reason = "XVL_TRIGGER_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
+    reason = f"{tag}_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
     evidence_ready = _write_v3_shared_lane_decision(
         lane, ai, ctx, signal_features,
         policy_decision="ACCEPT" if accepted else "REJECT",
@@ -29496,7 +29601,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         _xvl_lane_state(lane)["submissions"].append(time.time())
     _spawn_combo_lane(
         ctx, ai, 0.0, {**signal_features, "adaptive_entry_decision": decision}, lane,
-        f"XVL_TRIGGER_{COMBO_LANE_SPECS[lane]['combo_key']}",
+        f"{tag}_{COMBO_LANE_SPECS[lane]['combo_key']}",
     )
     return "ORDER_ELIGIBLE"
 
@@ -29516,7 +29621,7 @@ def _xvl_tick(now: float) -> None:
         )
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
-            _xvl_append(row)
+            _xvl_append(row, evaluator.SHADOW_FILE)
         if trigger:
             _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
 
@@ -29527,10 +29632,7 @@ def xvl_evaluator_loop():
         return
     _xvl_lower_thread_priority()
     for lane in lanes:
-        policy = _patient_chase_policy(lane)
-        _XVL_EVALUATORS[lane] = _xvl.LeadEvaluator(
-            policy.RULE, policy_id=policy.POLICY_ID, policy_signature=policy.POLICY_SIGNATURE,
-        )
+        _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
     _xvl_status["started_ts"] = time.time()
     next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
     while not shutdown_event.is_set():
@@ -29607,6 +29709,7 @@ def xvl_evaluator_snapshot() -> dict:
         "tick_age_s": tick_age,
         "lanes": {
             lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
+                   "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
                    "paper": runtime.get(lane, {})}
             for lane in lanes
         },
@@ -29760,6 +29863,109 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
     return row
 
 
+def _ai_shadow_premium_facts() -> dict:
+    evaluator = _XVL_EVALUATORS.get(RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S)
+    if evaluator is None or not hasattr(evaluator, "latest_features"):
+        return {"status": "UNAVAILABLE"}
+    try:
+        return evaluator.latest_features()
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+AI_SHADOW_HOOK_BUDGET_SEC = POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC - 6.0
+AI_SHADOW_REGIME_MIN_TIMEOUT_SEC = 5.0
+
+
+def _ai_shadow_run_regime(compact_facts: dict, premium: dict, call_id: str, now_ts: float,
+                          timeout_sec: float = AI_SHADOW_COMPACT_TIMEOUT_SEC) -> dict:
+    facts = _ai_regime.build_regime_facts(compact_facts or {}, premium)
+    row = {
+        "schema": _ai_regime.REGIME_PROMPT_SCHEMA,
+        "row_kind": "REGIME_PROMPT",
+        "shared_ai_call_id": call_id,
+        "prompt_id": _ai_regime.REGIME_PROMPT_ID,
+        "hypothesis_id": _ai_regime.HYPOTHESIS_ID,
+        "observed_at_utc": utc_iso(),
+        "decision_ts": now_ts,
+        "epoch_id": _collector_v22_epoch_id(),
+        "git_rev": _runtime_git_rev(),
+        "temperature": 0.0,
+        "max_tokens": _ai_regime.MAX_TOKENS,
+        "facts": facts,
+        "stat_rule": _ai_regime.stat_rule(facts),
+        "gates_orders": False,
+        "call_state": None,
+        "parsed": None,
+    }
+    if not AI_SHADOW_REGIME_PROMPT_ENABLED:
+        row["call_state"] = "DISABLED"
+        return row
+    if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
+        row["call_state"] = "SKIPPED_DEMO_MODE"
+        return row
+    if timeout_sec < AI_SHADOW_REGIME_MIN_TIMEOUT_SEC:
+        row["call_state"] = "SKIPPED_HOOK_DEADLINE"
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_skipped"] += 1
+        return row
+    allowed, reason = _AI_REGIME_BUDGET.acquire(now_ts)
+    if not allowed:
+        row["call_state"] = f"SKIPPED_{reason}"
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_skipped"] += 1
+        return row
+    try:
+        text, latency_ms, call_meta = call_deepseek_api_with_meta(
+            _ai_regime.render_regime_messages(facts),
+            temperature=0.0,
+            purpose="trading_direction_shadow",
+            max_tokens=_ai_regime.MAX_TOKENS,
+            response_format={"type": "json_object"},
+            timeout=min(AI_SHADOW_COMPACT_TIMEOUT_SEC, timeout_sec),
+        )
+        parsed = _ai_regime.parse_regime_response(text)
+        row.update({
+            "call_state": "CALLED",
+            "model": call_meta.get("requested_model") or _deepseek_model(),
+            "served_model": call_meta.get("served_model"),
+            "system_fingerprint": call_meta.get("system_fingerprint"),
+            "latency_ms": latency_ms,
+            "raw_response": str(text)[:400],
+            "parsed": parsed,
+        })
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_ok"] += int(parsed.get("parse_status") == "OK")
+            _ai_shadow_status["regime_errors"] += int(parsed.get("parse_status") != "OK")
+    except Exception as exc:
+        row.update({"call_state": "ERROR", "error": str(exc)[:300]})
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["regime_errors"] += 1
+            _ai_shadow_status["last_regime_error"] = str(exc)[:160]
+    return row
+
+
+def _log_decision_feature_snapshot(*, call_id, decision_ts, ctx, ai_result, tape, leader,
+                                   premium, compact_row, regime_row) -> None:
+    try:
+        snapshot = _dfs.build_snapshot(
+            call_id=call_id, decision_ts=decision_ts, decision_price=ctx.get("price"),
+            ai_result=ai_result, tape=tape, leader=leader, premium=premium,
+            compact_facts=compact_row.get("facts"),
+            regime={"call_state": regime_row.get("call_state"), "parsed": regime_row.get("parsed")},
+            tile_toggles=research_lane_enabled_map(),
+            meta={"epoch_id": _collector_v22_epoch_id(), "git_rev": _runtime_git_rev(),
+                  "decision_utc": ai_result.get("shared_ai_call_ts")},
+        )
+    except Exception as exc:
+        logger.warning(f"[DECISION SNAPSHOT] build failed: {exc} [PIPELINE ENFORCEMENT]")
+        return
+    if _safe_append_jsonl(DECISION_FEATURE_SNAPSHOT_FILE, snapshot, label="DECISION_FEATURE_SNAPSHOT"):
+        _DFS_BOOK.register(snapshot)
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["snapshots_logged"] += 1
+
+
 def _ai_shadow_win_prob(ai_result: dict, challengers: dict) -> dict:
     """Evidence win probability: the compact model's success probability for the score-led side.
 
@@ -29797,12 +30003,18 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     call_id = str(ai_result.get("shared_ai_call_id") or ai_result.get("trade_id") or ctx.get("trade_id") or "")
     if not call_id:
         return
+    hook_started = time.time()
     decision_ts = _ai_shadow_decision_ts(ai_result)
     tape = ctx.get("tape_features")
     if not isinstance(tape, dict) or tape.get("source") == "UNAVAILABLE":
         tape = _ai_shadow_tape_features(decision_ts)
     leader = _ai_shadow_leader_features(decision_ts)
     compact_row = _ai_shadow_run_compact(ctx, tape, call_id, time.time())
+    premium = _ai_shadow_premium_facts()
+    regime_row = _ai_shadow_run_regime(
+        compact_row.get("facts"), premium, call_id, decision_ts,
+        timeout_sec=AI_SHADOW_HOOK_BUDGET_SEC - (time.time() - hook_started),
+    )
     challengers = _ai_shadow.compute_challenger_sides(
         ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"), leader=leader,
     )
@@ -29825,6 +30037,7 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "git_rev": _runtime_git_rev(),
         "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
+        "prompt_input_revision": ai_result.get("prompt_input_revision") or AI_PROMPT_INPUT_REVISION,
         "deepseek_model": ai_result.get("deepseek_model"),
         "deepseek_served_model": ai_result.get("deepseek_served_model"),
         "deepseek_system_fingerprint": ai_result.get("deepseek_system_fingerprint"),
@@ -29859,6 +30072,11 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     }
     _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, call_row, label="AI_SHADOW_CHALLENGER")
     _safe_append_jsonl(AI_SHADOW_COMPACT_PROMPT_FILE, compact_row, label="AI_SHADOW_COMPACT_PROMPT")
+    _safe_append_jsonl(AI_SHADOW_REGIME_PROMPT_FILE, regime_row, label="AI_SHADOW_REGIME_PROMPT")
+    _log_decision_feature_snapshot(
+        call_id=call_id, decision_ts=decision_ts, ctx=ctx, ai_result=ai_result, tape=tape,
+        leader=leader, premium=premium, compact_row=compact_row, regime_row=regime_row,
+    )
     _AI_SHADOW_BOOK.register(call_row)
     with _AI_SHADOW_LOCK:
         _ai_shadow_status["calls_logged"] += 1
@@ -29913,6 +30131,10 @@ def _ai_shadow_boot_recover() -> None:
         _read_jsonl_tail(AI_SHADOW_CHALLENGER_FILE, 8 * 1024 * 1024), time.time(),
     )
     recovered = sum(1 for row in pending if _AI_SHADOW_BOOK.register(row))
+    snapshots = _dfs.pending_from_rows(
+        _read_jsonl_tail(DECISION_FEATURE_SNAPSHOT_FILE, 4 * 1024 * 1024), time.time(),
+    )
+    recovered += sum(1 for snap, done in snapshots if _DFS_BOOK.register(snap, done))
     with _AI_SHADOW_LOCK:
         _ai_shadow_status["boot_hydrated_seconds"] = hydrated
         _ai_shadow_status["boot_recovered_calls"] = recovered
@@ -29935,6 +30157,12 @@ def ai_shadow_maturation_loop():
             for row in _AI_SHADOW_BOOK.mature(_AI_SHADOW_TAPE, time.time()):
                 _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, row, label="AI_SHADOW_CHALLENGER")
                 _ai_shadow_note_matured(row)
+            labels = _DFS_BOOK.mature(_AI_SHADOW_TAPE, time.time())
+            for row in labels:
+                _safe_append_jsonl(DECISION_FEATURE_SNAPSHOT_FILE, row, label="DECISION_FEATURE_SNAPSHOT")
+            if labels:
+                with _AI_SHADOW_LOCK:
+                    _ai_shadow_status["labels_logged"] += len(labels)
         except Exception as exc:
             logger.warning(f"[AI SHADOW] maturation failed: {exc} [PIPELINE ENFORCEMENT]")
 
@@ -29977,6 +30205,10 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "compact_prompt_id": _ai_shadow.COMPACT_PROMPT_ID,
         "compact_enabled": AI_SHADOW_COMPACT_PROMPT_ENABLED,
         "compact_budget": _AI_SHADOW_BUDGET.snapshot(),
+        "regime_prompt_id": _ai_regime.REGIME_PROMPT_ID,
+        "regime_enabled": AI_SHADOW_REGIME_PROMPT_ENABLED,
+        "decision_snapshot_version": _dfs.FEATURE_SET_VERSION,
+        "decision_label_pending": _DFS_BOOK.pending_count(),
         "pending_calls": _AI_SHADOW_BOOK.pending_count(),
         "book": dict(_AI_SHADOW_BOOK.stats),
         "tape_ring_seconds": len(_AI_SHADOW_TAPE),
@@ -30927,6 +31159,7 @@ def research_wipe_file_paths():
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
         AI_SHADOW_CHALLENGER_FILE, AI_SHADOW_COMPACT_PROMPT_FILE,
+        AI_SHADOW_REGIME_PROMPT_FILE, DECISION_FEATURE_SNAPSHOT_FILE,
         EDGE_CENSUS_FILE,
         "pathway_scorecard.json", FILL_QUALITY_FILE, "fill_quality_report.json",
         "shadow_fill_outcome_report.json", "benchmark_vs_lanes_report.json", "pathway_lane_specs.json",
@@ -32162,16 +32395,15 @@ def build_static_pathway_lane_specs() -> dict:
                 "filters": lane_spec,
             },
             "signal_clock": lane_spec.get("signal_clock") or "SHARED_AI_CALL",
-            "evidence_badge": (
-                "HINT — 12h evidence"
-                if str((lane_spec.get("presentation", {}).get("hypothesis_result") or {}).get("status")) == "HINT_12H_EVIDENCE"
-                else None
-            ),
+            "evidence_badge": _taker_time_evidence_badge(lane_spec),
             "exit": policy_view["exit"],
             "exit_path": policy_view["exit"]["profile"],
             "promotion_criteria": lane_spec["promotion_criteria"],
             "kill_criteria": lane_spec["kill_criteria"],
-            "expected_advantage": "Tests one complete exit family under the shared entry-direction call",
+            "expected_advantage": "Tests one complete exit family under " + (
+                f"its own {lane_spec['signal_clock']} signal (no shared AI call)"
+                if lane_spec.get("signal_clock") else "the shared entry-direction call"
+            ),
             "expected_risk": lane_spec["relay_capability"],
             "benchmark_comparison": "Compare family peers on conservative chronological OOS evidence",
             "diff_vs_benchmark": list(policy_view["strategy_detail"]),
@@ -34528,9 +34760,10 @@ __ADMIN_ACCESS_CONTROLS__
 </table></div>
 
 <h2>Trades</h2>
-<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
+<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades. Export full session via /api/export_csv.</p>
+<p id="tradesTableLegend" style="color:#8b949e;font-size:0.8em;margin:0 0 8px;">Every row here is a paper position that <strong>filled</strong> and later closed; orders that never filled are listed under Expired Orders, not here. <strong>Bitfinex copy</strong> says whether the relay copied the trade to Bitfinex (relay disarmed = paper only). <strong>Analyzer stats</strong> marks closes that were not decided by the strategy (deploy-boundary force-flats, operator closes) and are excluded from strategy statistics.</p>
 <div class="activity-table-scroll" role="region" aria-label="Trades table" tabindex="0"><table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th title="Simulated paper fill. Filled, then closed = the paper position opened and has exited.">Paper fill</th><th title="Whether the Bitfinex relay copied this trade. Paper only = not sent to Bitfinex (relay disarmed or not eligible).">Bitfinex copy</th><th title="Whether this close counts in analyzer strategy statistics. Deploy-boundary and operator closes are excluded.">Analyzer stats</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table></div>
 
@@ -34573,7 +34806,7 @@ DASHBOARD_JS = """(function () {
         STOP_LOSS: 'Stop loss',
         HARD_STOP: 'Safety stop',
         TIME_EXIT: 'Maximum-hold exit',
-        ADMIN_MANUAL_CLOSE: 'Manual close',
+        ADMIN_MANUAL_CLOSE: 'Manual or deploy close',
         CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
       };
       return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
@@ -36335,11 +36568,26 @@ DASHBOARD_JS = """(function () {
           const show = truth.showcase_simulated || {};
           const bf = truth.bitfinex_authenticated || {};
           const rel = truth.relationship || {};
-          const showcaseLabel = show.status || (show.executed ? 'FILLED' : 'UNFILLED');
-          const bitfinexLabel = bf.authenticated
+          const disp = t.trade_display || {};
+          const dispFill = disp.paper_fill || {};
+          const dispCopy = disp.bitfinex_copy || {};
+          const dispClose = disp.close || {};
+          const dispStats = disp.analyzer || {};
+          const showcaseLabel = dispFill.label || show.status || (show.executed ? 'FILLED' : 'UNFILLED');
+          const bitfinexLabel = dispCopy.label || (bf.authenticated
             ? (bf.classification || 'AUTHENTICATED')
+            : 'Paper only, not copied to Bitfinex');
+          const relCode = dispCopy.relationship || rel.shadow_label || rel.divergence_classification || '';
+          const exitCauseLabel = dispClose.label
+            || (t.exit_reason ? displayExitCause(t.exit_reason) : (dispClose.code === 'STRATEGY_EXIT' ? 'Strategy exit' : displayExitCause(t.exit_reason)));
+          const forcedCloseNote = dispClose.code && dispClose.code !== 'STRATEGY_EXIT'
+            ? '<br><span style="color:#8b949e;font-size:0.76em;">not a strategy exit' + (dispClose.evidence_url ? ' · <a href="' + dispClose.evidence_url + '" target="_blank" rel="noopener" style="color:#8b949e;">deploy run</a>' : '') + '</span>'
+            : '';
+          const statsCell = dispStats.label
+            ? (dispStats.included
+              ? '<span style="color:#3fb950;">' + dispStats.label + '</span>'
+              : '<span title="Not counted in analyzer strategy statistics (EV, win rate, rankings)" style="display:inline-block;padding:1px 6px;border:1px solid #f0883e;border-radius:4px;color:#ffa657;">' + dispStats.label + '</span>')
             : '-';
-          const relLabel = rel.shadow_label || rel.divergence_classification || '-';
           const stopEvidence = tradeStopEvidence(t);
           const margin = stopEvidence.explicitMargin;
           const leverage = Number(t.leverage ?? 0);
@@ -36353,7 +36601,7 @@ DASHBOARD_JS = """(function () {
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
-            <td>${displayExitCause(t.exit_reason)}${stopEvidence.accountingContaminated ? '<br><span style="color:#f85149;font-size:0.76em;">PRE-FIX PNL ACCOUNTING CONTAMINATED · raw family PnL may be double-counted · excluded from qualification</span>' : (stopEvidence.overshoot ? '<br><span style="color:#f0c14b;font-size:0.76em;">STOP OVERSHOOT · observed loss crossed ' + stopEvidence.hardStopPct.toFixed(0) + '% trigger' + (stopEvidence.capReferenceNet == null ? '' : ' · trigger-level reference $' + stopEvidence.capReferenceNet.toFixed(2)) + ' · not reconstructed execution</span>' : '')}</td>
+            <td>${exitCauseLabel}${forcedCloseNote}${stopEvidence.accountingContaminated ? '<br><span style="color:#f85149;font-size:0.76em;">PRE-FIX PNL ACCOUNTING CONTAMINATED · raw family PnL may be double-counted · excluded from qualification</span>' : (stopEvidence.overshoot ? '<br><span style="color:#f0c14b;font-size:0.76em;">STOP OVERSHOOT · observed loss crossed ' + stopEvidence.hardStopPct.toFixed(0) + '% trigger' + (stopEvidence.capReferenceNet == null ? '' : ' · trigger-level reference $' + stopEvidence.capReferenceNet.toFixed(2)) + ' · not reconstructed execution</span>' : '')}</td>
             <td title="Percentage return on the displayed margin, not on account equity">${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
             <td>${margin > 0 ? '$' + margin.toFixed(2) : (stopEvidence.inferredMargin > 0 ? '~$' + stopEvidence.inferredMargin.toFixed(2) + ' inferred' : '-')}</td>
             <td>${notional > 0 ? '$' + notional.toFixed(2) : '-'}</td>
@@ -36362,8 +36610,8 @@ DASHBOARD_JS = """(function () {
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
             <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
             <td>${showcaseLabel}</td>
-            <td>${bitfinexLabel}</td>
-            <td>${relLabel}</td>
+            <td${relCode ? ' title="Relay relationship: ' + relCode + '"' : ''}>${bitfinexLabel}</td>
+            <td>${statsCell}</td>
           </tr>`;
         }).join('');
         safeHTML(
@@ -40146,6 +40394,8 @@ def _enrich_dashboard_trade_rows(
     evidence_index=None,
 ):
     """Join immutable relay evidence after the money-state lock is released."""
+    from research.close_origin import trade_display
+
     index = evidence_index or {}
     enriched = []
     for trade in raw_rows:
@@ -40158,6 +40408,8 @@ def _enrich_dashboard_trade_rows(
                 row["dual_execution_truth"] = split_execution_truth(row)
             except Exception:
                 pass
+        if isinstance(row, dict):
+            row["trade_display"] = trade_display(row, row.get("dual_execution_truth"))
         enriched.append(row)
     return enriched
 
@@ -41087,7 +41339,7 @@ _PUBLIC_TRADE_SAFE_KEYS = {
     "ts", "ts_melbourne", "trade_id", "final_direction", "dir",
     "entry", "exit", "dur_min", "pnl", "net_pnl_usd",
     "gross_pnl_usd", "trading_fees_usd", "fees_usd",
-    "funding_fees_usd", "close_ts_melbourne",
+    "funding_fees_usd", "close_ts_melbourne", "trade_display",
 }
 
 
@@ -41367,7 +41619,53 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
         }
 
 
-_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None}
+_RUNTIME_UPTIME = {"tracker": None}
+_RUNTIME_UPTIME_INTERVAL_SEC = 15.0
+
+
+def _runtime_uptime_problem(now: float) -> dict | None:
+    with state_lock:
+        paused = bool(state.get("execution_paused") or state.get("manual_admin_pause"))
+        owner = _pause_owner_locked()
+        reason = str(state.get("execution_reason") or "")
+        enabled = dict(state.get("research_lane_enabled") or {})
+    lanes = [str(lane) for lane in ACTIVE_TILE_ORDER]
+    last_ok = float(_ai_provider_health.get("last_success_ts") or 0.0)
+    return runtime_uptime.problem_from(
+        paused=paused, pause_owner=owner, pause_reason=reason,
+        tiles_on=sum(1 for lane in lanes if enabled.get(lane) is True), tiles_total=len(lanes),
+        ai_success_age_sec=max(0.0, now - last_ok) if last_ok > 0 else None,
+        ai_consecutive_failures=int(_ai_provider_health.get("consecutive_failures") or 0),
+        process_age_sec=max(0.0, now - float(process_boot_time or now)),
+    )
+
+
+def runtime_uptime_loop():
+    """Observe interruptions for the uptime strip; started once boot has restored state."""
+    tracker = runtime_uptime.UptimeTracker(_data_sync_volume_root() / runtime_uptime.STATE_FILE)
+    opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
+    _RUNTIME_UPTIME["tracker"] = tracker
+    logger.info("[UPTIME] boot recorded: %s", opened.get("text"))
+    while not shutdown_event.is_set():
+        now = time.time()
+        try:
+            tracker.observe(now, _runtime_uptime_problem(now))
+        except Exception as exc:
+            logger.warning("[UPTIME] observation failed: %s", type(exc).__name__)
+        if shutdown_event.wait(_RUNTIME_UPTIME_INTERVAL_SEC):
+            break
+
+
+def _runtime_uptime_summary(now: float | None = None) -> dict:
+    tracker = _RUNTIME_UPTIME["tracker"]
+    if tracker is None:
+        return {"schema": runtime_uptime.SCHEMA, "available": False, "state": "STARTING", "colour": "amber",
+                "uninterrupted_label": "Starting: uptime tracking begins once boot completes",
+                "definition": runtime_uptime.DEFINITION}
+    return tracker.summary(now)
+
+
+_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None, "proof": None}
 _SYSTEM_HEALTH_LOCK = threading.Lock()
 # Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
 # watcher re-sends its alarm log after a restart, so nothing is written to disk.
@@ -41430,6 +41728,7 @@ def system_health_report():
     with _SYSTEM_HEALTH_LOCK:
         _SYSTEM_HEALTH_REPORT["report"] = report
         _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
+        _SYSTEM_HEALTH_REPORT["proof"] = runtime_uptime.sanitize_proof(raw.get("proof"))
         events = system_health_alerts.merge_events(_SYSTEM_HEALTH_ALARMS["events"], raw.get("alarm_events"))
         _SYSTEM_HEALTH_ALARMS["events"] = events
         if statuses:
@@ -41476,8 +41775,10 @@ def system_health_view():
     with _SYSTEM_HEALTH_LOCK:
         report = _SYSTEM_HEALTH_REPORT["report"]
         received_at = _SYSTEM_HEALTH_REPORT["received_at"]
+        proof = _SYSTEM_HEALTH_REPORT["proof"]
     out = system_health_banner.with_staleness(report)
     out["received_at"] = received_at
+    out["uptime"] = dict(_runtime_uptime_summary(), proof=None if out.get("stale") else proof)
     self_checks = _system_health_fly_self_checks()
     out["fly_self_checks"] = self_checks
     bad = [c for c in self_checks if c["status"] != "GREEN"]
@@ -41555,6 +41856,7 @@ def status():
         "ai_alert": strategy_progress["ai_provider"]["alert"],
         "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
+        "uptime": _runtime_uptime_summary(now),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -42232,6 +42534,7 @@ def api_close_showcase_position():
             len(matches),
         )
         return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
+    close_origin = _forced_close_origin("ADMIN_MANUAL_CLOSE")
     close_position(matches[0], "ADMIN_MANUAL_CLOSE")
     with state_lock:
         still_open = any(
@@ -42251,11 +42554,12 @@ def api_close_showcase_position():
         trades=paper_trades,
     )
     cache_generation = _invalidate_relay_execution_snapshot()
-    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
+    logger.warning("[ADMIN] Showcase paper position closed trade_id=%s origin=%s", trade_id, close_origin)
     return jsonify({
         "status": "closed",
         "trade_id": trade_id,
         "scope": "showcase_paper_only",
+        "close_origin": close_origin,
         "money_state_generation": cache_generation,
     })
 
@@ -50025,6 +50329,8 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "AI_INPUT_LOG_FILE",
     "AI_SHADOW_CHALLENGER_FILE",
     "AI_SHADOW_COMPACT_PROMPT_FILE",
+    "AI_SHADOW_REGIME_PROMPT_FILE",
+    "DECISION_FEATURE_SNAPSHOT_FILE",
     "CSV_FALLBACK_JSONL",
     "CHASE_OFFSET_TOUCH_GRID_FILE",
     "ORDER_MULTIVERSE_FILE",
@@ -51632,6 +51938,9 @@ def main():
     # Control endpoints become available only after the private exposure audit,
     # rebuild/adoption, disarm cancellation, and EXIT_ONLY marking complete.
     _DASHBOARD_BOOTSTRAP_COMPLETE = True
+    threading.Thread(
+        target=safe_thread(runtime_uptime_loop), name="runtime-uptime", daemon=True
+    ).start()
     # Evidence processing is optional and may launch a bounded worker
     # immediately.  Start it only after the safety restore and dashboard boot
     # handoff are complete so it cannot contend with startup readiness.

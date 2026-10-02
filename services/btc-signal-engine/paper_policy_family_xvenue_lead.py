@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from adaptive_regime_entry import ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA
-from cross_venue_lead import LeadRule
+from cross_venue_lead import LeadEvaluator, LeadRule
 from taker_time_exit_binding import TakerTimeExitBinding
 
 LANE = "FAMILY_XVENUE_LEAD_60S"
@@ -19,6 +19,11 @@ SIGNAL_CLOCK = ENTRY["signal_clock"]
 RULE = LeadRule.from_policy(ENTRY, EXIT)
 
 __all__ = ("ACTION_STAND_ASIDE", "ACTION_TAKER", "DECISION_SCHEMA")
+
+
+def make_evaluator() -> LeadEvaluator:
+    return LeadEvaluator(RULE, policy_id=POLICY_ID, policy_signature=POLICY_SIGNATURE)
+
 
 lane_admission = _BINDING.lane_admission
 decide_entry = _BINDING.decide_entry

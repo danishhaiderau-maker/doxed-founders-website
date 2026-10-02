@@ -353,6 +353,13 @@ def _verdict(stat: Mapping[str, Any]) -> str:
     return "LLM_BETTER" if (stat.get("mean") or 0) > 0 else "LLM_WORSE"
 
 
+def cohort_key(call: Mapping[str, Any]) -> str:
+    """Prompt cohort; calls after an input revision are a new cohort even under the same prompt id."""
+    prompt_id = str(call.get("prompt_id") or "UNKNOWN")
+    revision = call.get("prompt_input_revision")
+    return f"{prompt_id}@{revision}" if revision else prompt_id
+
+
 def build_ai_challenger_report(challenger_rows: Iterable[Mapping[str, Any]],
                                compact_rows: Iterable[Mapping[str, Any]] = (),
                                *, epoch_id: Optional[str] = None,
@@ -363,7 +370,7 @@ def build_ai_challenger_report(challenger_rows: Iterable[Mapping[str, Any]],
     ordered = sorted(all_calls.values(), key=lambda c: _finite(c.get("decision_ts")) or 0.0)
     cohorts = defaultdict(list)
     for c in ordered:
-        cohorts[str(c.get("prompt_id") or "UNKNOWN")].append(c)
+        cohorts[cohort_key(c)].append(c)
     tests, cohort_payload = [], {}
     for prompt_id, calls in cohorts.items():
         local = []
@@ -417,6 +424,7 @@ def build_ai_challenger_report(challenger_rows: Iterable[Mapping[str, Any]],
         "horizons_sec": list(shadow.MARKOUT_HORIZONS_SEC),
         "primary_horizon_sec": PRIMARY_HORIZON_SEC,
         "current_prompt_id": ordered[-1].get("prompt_id") if ordered else None,
+        "current_cohort": cohort_key(ordered[-1]) if ordered else None,
         "method": {
             "scoring": ("side * mid-to-mid return from decision+1s; NONE is flat (0); "
                         "net subtracts half the quoted spread in and out"),

@@ -1,5 +1,5 @@
 {
-  "description": "Frozen parity cases for the two registry-owned paper tiles: Trend Fade 60 (Tile 1) and its Scenario-C profit-lock variant (Tile 2), whose side is derived from the shared direction call by their own lane admission, so the shared fingerprint matches both. The three Dynamic Adaptive tiles, the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the registry-owned shared-call paper tiles: Trend Fade 60 (Tile 1) and Trend Fade 60 committed calls only (Tile 2), whose side is derived from the shared direction call by their own lane admission, so the shared fingerprint matches both. The cross-venue tiles (XVL, XVP) are skipped by the runtime fan-out and run on their own per-second clock. The Trend Fade 60 ladder, the three Dynamic Adaptive tiles, the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
   "cases": [
     {
       "id": "trend-fade-60-long-shared-direction",
@@ -12,9 +12,10 @@
       "spread": 4,
       "expect_lanes": [
         "FAMILY_TREND_FADE_60",
-        "FAMILY_TREND_FADE_60_LADDER"
+        "FAMILY_TREND_FADE_60_COMMITTED"
       ],
       "reject_lanes": [
+        "FAMILY_TREND_FADE_60_LADDER",
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
         "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
@@ -38,9 +39,10 @@
       "spread": 5,
       "expect_lanes": [
         "FAMILY_TREND_FADE_60",
-        "FAMILY_TREND_FADE_60_LADDER"
+        "FAMILY_TREND_FADE_60_COMMITTED"
       ],
       "reject_lanes": [
+        "FAMILY_TREND_FADE_60_LADDER",
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
         "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
@@ -64,8 +66,13 @@
       "expect_benchmark": false
     },
     {
-      "id": "trend-fade-60-ladder-not-benchmark",
-      "lane": "FAMILY_TREND_FADE_60_LADDER",
+      "id": "trend-fade-60-committed-not-benchmark",
+      "lane": "FAMILY_TREND_FADE_60_COMMITTED",
+      "expect_benchmark": false
+    },
+    {
+      "id": "xvenue-premium-not-benchmark",
+      "lane": "FAMILY_XVENUE_PREMIUM_60S",
       "expect_benchmark": false
     }
   ]
