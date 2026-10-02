@@ -259,6 +259,45 @@ def test_export_is_versioned_and_loads_from_the_bundled_client(tmp_path):
     assert lab_api.streams_health(root=str(root), report_root=str(report_dir))["status"] == "OK"
 
 
+def test_client_never_reads_tables_concurrently(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    from strategy_lab import client as lab_client
+
+    root, _, _ = _export(tmp_path)
+    real_read, guard = lab_client.pd.read_parquet, threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def tracked(*args, **kwargs):
+        with guard:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            _time.sleep(0.01)
+            return real_read(*args, **kwargs)
+        finally:
+            with guard:
+                state["active"] -= 1
+
+    monkeypatch.setattr(lab_client.pd, "read_parquet", tracked)
+    errors = []
+
+    def load():
+        try:
+            load_latest(str(root), check_live=False, retries=0)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=load) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    # The threaded :9001 dashboard crashed natively on overlapping pyarrow reads.
+    assert state["peak"] == 1
+
+
 def test_client_refuses_stale_torn_or_superseded_exports(tmp_path):
     root, report_dir, _ = _export(tmp_path)
     # superseded: the analyzer has a newer generation than the export
