@@ -857,17 +857,34 @@ def _rec_decision_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
 def _rec_accumulator_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     cohort = _cohort(ctx)
     viol, met = [], {}
+    labelled_usd = obj.get("pnl_unit") == "USD"
+    if not labelled_usd:
+        viol.append(_v("UNIT_UNLABELLED", AMBER, "accumulator by_lane pnl carries no unit (pre-fix status file)"))
+    rec = obj.get("ledger_reconciliation") if isinstance(obj.get("ledger_reconciliation"), dict) else None
+    if rec is not None:
+        met["accumulator:ledger_reconciliation"] = rec.get("status")
+        if rec.get("status") == "MISMATCH":
+            for lane in rec.get("mismatched_lanes") or []:
+                r = (rec.get("lanes") or {}).get(lane) or {}
+                viol.append(_v("RECONCILE_MISMATCH", AMBER,
+                               f"{lane}: accumulator n={r.get('accumulator_n')} ${r.get('accumulator_net_pnl_usd')} vs "
+                               f"mirror ledger n={r.get('ledger_n')} ${r.get('ledger_net_pnl_usd')}"))
+        elif rec.get("status") != "MATCH":
+            viol.append(_v("RECONCILE_UNAVAILABLE", AMBER, f"accumulator ledger reconciliation: {rec.get('status')}"))
     for lane, v in (obj.get("by_lane") or {}).items():
         c = cohort.get(lane)
         if not isinstance(c, dict) or not isinstance(v, dict):
             continue
         an, cn = int(v.get("n") or 0), int(c.get("n") or 0)
-        ap, cp = _num(v.get("pnl")), _num(c.get("net_pnl_usd"))
+        ap = _num(v.get("net_pnl_usd") if labelled_usd else v.get("pnl"))
+        cp = _num(c.get("net_pnl_usd"))
         met[f"closes:{lane}:accumulator"], met[f"closes:{lane}:cohort"] = an, cn
-        if abs(an - cn) > 1:
+        # The accumulator holds the mirror-ledger cohort; the analyzer cohort drops quarantined closes.
+        if abs(an - cn) > 1 and rec is None:
             viol.append(_v("RECONCILE_MISMATCH", AMBER, f"{lane}: accumulator n={an} vs cohort n={cn}"))
         if ap is not None and cp is not None and ap * cp < 0 and abs(ap) > 0.05 and abs(cp) > 0.05:
-            viol.append(_v("UNIT_OR_SIGN_MISMATCH", AMBER, f"{lane}: accumulator pnl={ap:+.2f} (unit unlabelled) but cohort "
+            unit = "USD" if labelled_usd else "unit unlabelled"
+            viol.append(_v("UNIT_OR_SIGN_MISMATCH", AMBER, f"{lane}: accumulator pnl={ap:+.2f} ({unit}) but cohort "
                                                           f"net_pnl_usd={cp:+.3f}: opposite sign"))
     return viol, met
 

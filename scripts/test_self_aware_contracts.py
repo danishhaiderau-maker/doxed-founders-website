@@ -141,6 +141,33 @@ def test_invariant_counter_ratio_expect():
     assert ok["status"] == "GREEN"
 
 
+class _CohortFetch:
+    def __init__(self, cohort: dict):
+        self.summary = {"ledger_reconciliation": {"analyzer_cohort": cohort}}
+
+    def get(self, source):
+        return self.summary, {}
+
+
+def test_accumulator_reconciles_in_usd_against_the_ledger():
+    cohort = {"FAMILY_A": {"n": 25, "net_pnl_usd": -0.188739}}
+    ctx = _ctx(fetch=_CohortFetch(cohort))
+    legacy = {"by_lane": {"FAMILY_A": {"n": 26, "pnl": 2.49}}}
+    viol, _ = ct._rec_accumulator_vs_cohort(legacy, ctx)
+    assert {"UNIT_UNLABELLED", "UNIT_OR_SIGN_MISMATCH"} <= {v["kind"] for v in viol}
+
+    lane = {"FAMILY_A": {"accumulator_n": 26, "ledger_n": 26, "accumulator_net_pnl_usd": -0.220617,
+                         "ledger_net_pnl_usd": -0.220617, "status": "MATCH"}}
+    fixed = {"pnl_unit": "USD", "by_lane": {"FAMILY_A": {"n": 26, "net_pnl_usd": -0.220617, "pnl": -0.220617}},
+             "ledger_reconciliation": {"status": "MATCH", "mismatched_lanes": [], "lanes": lane}}
+    viol, met = ct._rec_accumulator_vs_cohort(fixed, ctx)
+    assert viol == [] and met["accumulator:ledger_reconciliation"] == "MATCH"
+
+    fixed["ledger_reconciliation"] = {"status": "MISMATCH", "mismatched_lanes": ["FAMILY_A"],
+                                      "lanes": {"FAMILY_A": {**lane["FAMILY_A"], "ledger_net_pnl_usd": -0.46}}}
+    assert [v["kind"] for v in ct._rec_accumulator_vs_cohort(fixed, ctx)[0]] == ["RECONCILE_MISMATCH"]
+
+
 def test_label_contradiction():
     spec = _spec(status_path="status", tables=[{"path": "rows", "min_rows": 1, "empty_silent_severity": "AMBER"}])
     assert "LABEL_CONTRADICTION" in _kinds(_eval(spec, {"status": "OK", "rows": []}))
