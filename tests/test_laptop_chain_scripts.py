@@ -695,6 +695,38 @@ def test_runner_restores_a_dashboard_that_dies_mid_pass(tmp_path, chain):
     assert "DASHBOARD_DOWN_MIDPASS" in log
 
 
+@windows_only
+def test_runner_refreshes_dashboard_code_once_per_checkout_revision(tmp_path, chain):
+    marker = tmp_path / "dashboard-starts.txt"
+    repo = _fake_repo(tmp_path, _counting_launcher(marker))
+    for args in (("init", "-q"), ("add", "-A"),
+                 ("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init")):
+        _git(repo, *args)
+    head = _git(repo, "rev-parse", "HEAD")
+    server = subprocess.Popen([sys.executable, "-c", (
+        "import http.server\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()\n"
+        "        self.wfile.write(b'{\"analysis_run\": null}')\n"
+        "    def log_message(self, *a): pass\n"
+        "http.server.HTTPServer(('127.0.0.1', 59431), H).serve_forever()\n"
+    )])
+    try:
+        time.sleep(1.5)
+        first = _run_runner(repo, chain)
+        second = _run_runner(repo, chain)
+    finally:
+        server.kill()
+        server.wait()
+    assert first.returncode == 6 and second.returncode == 6, first.stdout + first.stderr
+    # The listener was up throughout, so the only start is the one code refresh.
+    assert marker.read_text().split() == ["dashboard"]
+    assert (chain["state"] / "analyzer-dashboard-revision.txt").read_text() == head
+    log = "".join(p.read_text(encoding="utf-8-sig") for p in (chain["state"] / "logs").glob("analyzer-run-*.log"))
+    assert f"DASHBOARD_CODE_REFRESH from=unknown to={head} exit=0" in log
+
+
 def test_supervisor_restores_the_dashboard_during_a_running_cycle():
     supervisor = _source("laptop-chain-supervisor.ps1")
     probe = supervisor.index('"http://127.0.0.1:$Port/api/health"')

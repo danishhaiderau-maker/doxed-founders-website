@@ -122,9 +122,42 @@ function Confirm-AnalyzerDashboard {
     if (-not (Get-AnalyzerStatus)) {
       Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_NOT_READY after ${DashboardReadySec}s"
     }
+    Set-DashboardCodeRevision (Get-CheckoutRevision)
   } finally {
     Exit-SingleInstance $guard
   }
+}
+
+$dashboardRevisionFile = Join-Path $cfg.StateDir 'analyzer-dashboard-revision.txt'
+
+function Get-CheckoutRevision {
+  return [string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)
+}
+
+function Set-DashboardCodeRevision([string]$Revision) {
+  if ($Revision -match '^[0-9a-f]{40}$') { Set-Content -LiteralPath $dashboardRevisionFile -Value $Revision -NoNewline -Encoding ASCII }
+}
+
+# Passes no longer restart the dashboard, so it would keep serving with the code
+# it was started from. After a pass, restart it once (owned, loopback-only) when
+# the checkout has moved on; the restarted process serves the same generation.
+function Update-AnalyzerDashboardCode {
+  $head = Get-CheckoutRevision
+  if ($head -notmatch '^[0-9a-f]{40}$' -or -not (Get-AnalyzerStatus)) { return }
+  $served = if (Test-Path -LiteralPath $dashboardRevisionFile) { (Get-Content -LiteralPath $dashboardRevisionFile -Raw).Trim() } else { '' }
+  if ($served -eq $head) { return }
+  $guard = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerDashboard')
+  if (-not $guard) { return }
+  try {
+    $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_CODE_REFRESH from={0} to={1} exit={2} {3}" -f $(if ($served) { $served } else { 'unknown' }), $head, $dash.ExitCode, $dash.Tail)
+    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
+    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
+    if ($dash.ExitCode -eq 0) { Set-DashboardCodeRevision $head }
+  } finally {
+    Exit-SingleInstance $guard
+  }
+  Confirm-AnalyzerDashboard
 }
 
 if ($EnsureDashboardOnly) {
@@ -207,6 +240,9 @@ try {
     }
   }
   $status.state = $(if ($exitCode -eq 0) { 'COMPLETED' } elseif ($exitCode -eq 124) { 'TIMEOUT' } else { 'FAILED' })
+  try { Update-AnalyzerDashboardCode } catch {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_CODE_REFRESH_FAILED {0}" -f $_.Exception.Message)
+  }
 } catch {
   $exitCode = 1
   $status.state = 'FAILED'
