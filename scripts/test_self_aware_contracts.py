@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("duckdb")
+pytest.importorskip("pandas")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from self_aware import contracts as ct  # noqa: E402
 from self_aware import diagnose  # noqa: E402
