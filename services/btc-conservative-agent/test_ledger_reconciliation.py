@@ -103,6 +103,12 @@ class CompareWithFlyTest(unittest.TestCase):
         self.assertEqual(out["level"], "GREEN", out["reasons"])
         self.assertFalse(out["breakdown"]["bounded"])
 
+    def test_large_unlisted_gap_is_mirror_lag_amber_not_red(self):
+        listed = [{"trade_id": "d", "research_lane": FTF, "ts": "2026-10-02T05:00:00+00:00", "net_pnl_usd": 0.08}]
+        out = lr.compare_with_fly(self.report, self.fly(ftf_closes=9, listed=listed), self.mirror[:3])
+        self.assertEqual(out["level"], "AMBER", out["reasons"])
+        self.assertIn("trade counts differ", out["reasons"][0])
+
     def test_pnl_mismatch_beyond_tolerance_is_amber(self):
         out = lr.compare_with_fly(self.report, self.fly(ftf_pnl=0.5), self.mirror)
         self.assertEqual(out["level"], "AMBER")
