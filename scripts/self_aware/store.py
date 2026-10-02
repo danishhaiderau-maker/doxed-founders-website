@@ -136,7 +136,7 @@ def _reader(kind: str, pattern: str, columns: dict[str, str] | None) -> str:
         return (f"read_json({p}, format='newline_delimited', records=false, ignore_errors=true, filename=true, "
                 f"maximum_object_size=67108864)")
     if kind == "csv":
-        return f"read_csv({p}, all_varchar=true, encoding='latin-1', ignore_errors=true, filename=true)"
+        return f"read_csv({p}, all_varchar=true, encoding='utf-8', ignore_errors=true, filename=true)"
     if kind == "parquet":
         return f"read_parquet({p}, union_by_name=true, filename=true)"
     raise ValueError(kind)

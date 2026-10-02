@@ -81,6 +81,16 @@ def test_raw_views_read_files_in_place(paths, store):
     assert store.read("SELECT count(*) AS n FROM raw_alarms")[0]["n"] == 2
 
 
+def test_csv_views_read_utf8_labels(paths, store):
+    paths.mirror.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"2026-10-02T00:0{i}:00Z,AI_DECISION,Chandelier \u00b7 1.5 ATR \u2014 \u2713\n" for i in range(5))
+    (paths.mirror / "ai_tranche_log.csv").write_text("ts,event,comment\n" + body, encoding="utf-8")
+    res = {r["view"]: r for r in store.refresh_views()}
+    assert res["raw_ai_tranche"]["status"] == "OK"
+    rows = store.read("SELECT count(*) AS n, max(comment) AS c FROM raw_ai_tranche")
+    assert rows[0]["n"] == 5 and "\u00b7" in rows[0]["c"]
+
+
 # ---------------------------------------------------------- guarded query
 
 def test_query_allows_single_select_with_cap(store):
