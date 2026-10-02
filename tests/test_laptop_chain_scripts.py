@@ -933,6 +933,24 @@ def test_auto_ff_never_follows_a_deployable_or_fly_runtime_commit_without_a_depl
 
 
 @windows_only
+def test_auto_ff_follows_monitor_workflow_changes_but_not_the_deploy_workflow(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    env = {**chain["env"], "DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC": "0"}
+    run = lambda: _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot "
+                      f"'{chain['canonical']}' -StateDir '{chain['state']}'; exit $LASTEXITCODE", env)
+    assert run().returncode == 0
+    ci = _origin_commit(tmp_path, ".github/workflows/laptop-tests.yml", "x\n", "[skip ci] ci: laptop tests")
+    assert run().returncode == 0
+    assert _git(clone, "rev-parse", "HEAD") == ci
+    _origin_commit(tmp_path, ".github/workflows/fly-bot-deploy.yml", "x\n", "[skip ci] ci: deploy tweak")
+    assert run().returncode == 0
+    assert _git(clone, "rev-parse", "HEAD") == ci
+    receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["outcome"] == "SKIPPED_LAPTOP_FOLLOW" and "fly-bot-deploy.yml" in receipt["denied"]
+
+
+@windows_only
 def test_auto_ff_does_not_follow_commits_without_skip_ci(tmp_path, chain):
     clone, first, second = _ff_fixture(tmp_path, chain)
     _ff_snapshots(chain, second[:12], second)
