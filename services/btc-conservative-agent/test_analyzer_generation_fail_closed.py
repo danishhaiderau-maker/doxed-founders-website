@@ -7,7 +7,14 @@ REVISION = "8dd73bd9c485a2d4470160667c3e636c3a53365e"
 EPOCH = "epoch-current"
 
 
-def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=EPOCH):
+def _install_generation(
+    monkeypatch,
+    *,
+    mirror_revision=REVISION,
+    mirror_epoch=EPOCH,
+    report_source_revision=REVISION,
+    observed_revision=REVISION,
+):
     manifest = {
         "generation_revision": REVISION,
         "generated_at": "2026-08-28T03:30:00+10:00",
@@ -24,6 +31,8 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
             )
         },
     }
+    if report_source_revision is not None:
+        manifest["source_revision"] = report_source_revision
     compact = {
         "generated_at": manifest["generated_at"],
         "data_scope": "session",
@@ -62,19 +71,17 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
     )
     monkeypatch.setattr(dashboard, "_manifest_reports", lambda: manifest["active_tiles"])
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: mirror_revision)
-    monkeypatch.setattr(
-        dashboard,
-        "_mirror_sync_receipt",
-        lambda: {
-            "ok": True,
-            "pollOk": True,
-            "inProgress": False,
-            "revisionParity": "MATCH",
-            "sourceRevision": mirror_revision,
-            "mirroredSourceRevision": mirror_revision,
-            "observedSourceRevision": mirror_revision,
-        },
-    )
+    sync_receipt = {
+        "ok": True,
+        "pollOk": True,
+        "inProgress": False,
+        "revisionParity": "MATCH",
+        "sourceRevision": mirror_revision,
+        "mirroredSourceRevision": mirror_revision,
+    }
+    if observed_revision is not None:
+        sync_receipt["observedSourceRevision"] = observed_revision
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: dict(sync_receipt))
     monkeypatch.setattr(
         dashboard,
         "_load_bot_session",
@@ -94,7 +101,7 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
 
 
 def test_revision_mismatch_is_visible_and_blocks_every_decision_surface(monkeypatch):
-    _install_generation(monkeypatch, mirror_revision="different-revision")
+    _install_generation(monkeypatch, mirror_revision="7" * 40)
 
     with dashboard.app.test_client() as client:
         health = client.get("/api/health").get_json()
@@ -152,6 +159,131 @@ def test_exact_revision_and_epoch_match_remains_ready(monkeypatch):
     assert summary["stale"]["stale"] is False
     assert decision["status"] == "QUALIFIED"
     assert decision["live_policy_change_allowed"] is True
+
+
+def test_source_revision_requires_full_sha_or_safe_alias_with_full_anchor(monkeypatch):
+    for source_revision, mirror_revision, observed_revision in (
+        ("8", REVISION, REVISION),
+        ("not-a-source-sha", REVISION, REVISION),
+        (REVISION[:12], REVISION[:12], None),
+    ):
+        _install_generation(
+            monkeypatch,
+            report_source_revision=source_revision,
+            mirror_revision=mirror_revision,
+            observed_revision=observed_revision,
+        )
+
+        with dashboard.app.test_client() as client:
+            status = client.get("/api/status").get_json()
+
+        freshness = status["generation_freshness"]
+        assert status["source_revision_parity"] == "UNAVAILABLE"
+        assert status["ready"] is False
+        assert freshness["identity_status"] == "UNVERIFIED"
+
+
+def test_short_source_revision_matches_only_when_other_side_is_full_sha(monkeypatch):
+    _install_generation(monkeypatch, report_source_revision=REVISION[:12])
+
+    with dashboard.app.test_client() as client:
+        status = client.get("/api/status").get_json()
+
+    assert status["source_revision_parity"] == "MATCH"
+    assert status["ready"] is True
+
+
+def test_shared_alias_cannot_hide_conflicting_full_report_and_observed_shas(monkeypatch):
+    conflicting_revision = REVISION[:12] + ("f" * 28)
+    assert conflicting_revision != REVISION
+    _install_generation(
+        monkeypatch,
+        report_source_revision=REVISION,
+        mirror_revision=REVISION[:12],
+        observed_revision=conflicting_revision,
+    )
+
+    with dashboard.app.test_client() as client:
+        status = client.get("/api/status").get_json()
+        summary = client.get("/api/summary").get_json()
+        decision = client.get("/api/decision-readiness").get_json()
+
+    freshness = status["generation_freshness"]
+    assert status["source_revision_parity"] == "MISMATCH"
+    assert status["ready"] is False
+    assert freshness["source_revision_identity_status"] == "CONFLICT"
+    assert freshness["source_revision_identity_conflict"] is True
+    assert freshness["source_revision_identity_conflict_reason"] == "FULL_SOURCE_REVISION_CONFLICT"
+    assert freshness["source_revision_full_anchor"] is None
+    assert freshness["identity_status"] == "CONFLICT"
+    assert any("FULL_SOURCE_REVISION_CONFLICT" in reason for reason in summary["stale"]["reasons"])
+    assert decision["live_policy_change_allowed"] is False
+    assert decision.get("real_bitfinex_trading_allowed", False) is False
+
+
+def test_safe_aliases_resolve_only_against_one_agreed_full_sha(monkeypatch):
+    for report_revision, mirror_revision, observed_revision in (
+        (REVISION[:12], REVISION, REVISION),
+        (REVISION, REVISION[:20], REVISION),
+        (REVISION, REVISION, REVISION[:39]),
+    ):
+        _install_generation(
+            monkeypatch,
+            report_source_revision=report_revision,
+            mirror_revision=mirror_revision,
+            observed_revision=observed_revision,
+        )
+
+        with dashboard.app.test_client() as client:
+            status = client.get("/api/status").get_json()
+
+        freshness = status["generation_freshness"]
+        assert status["source_revision_parity"] == "MATCH"
+        assert freshness["observed_revision_parity"] == "MATCH"
+        assert freshness["source_revision_identity_status"] == "MATCH"
+        assert freshness["source_revision_identity_conflict"] is False
+        assert freshness["source_revision_full_anchor"] == REVISION
+        assert status["ready"] is True
+
+
+def test_epoch_prefix_is_mismatch_not_current(monkeypatch):
+    _install_generation(monkeypatch, mirror_epoch=EPOCH[:8])
+
+    with dashboard.app.test_client() as client:
+        status = client.get("/api/status").get_json()
+
+    assert EPOCH.startswith(EPOCH[:8])
+    assert status["epoch_parity"] == "MISMATCH"
+    assert status["ready"] is False
+
+
+def test_current_sync_requires_explicit_observed_fly_revision(monkeypatch):
+    _install_generation(monkeypatch, observed_revision=None)
+
+    with dashboard.app.test_client() as client:
+        status = client.get("/api/status").get_json()
+
+    freshness = status["generation_freshness"]
+    assert freshness["observed_source_revision"] is None
+    assert freshness["observed_revision_parity"] == "UNAVAILABLE"
+    assert freshness["identity_status"] == "UNVERIFIED"
+    assert status["ready"] is False
+
+
+def test_report_source_identity_never_inherits_analyzer_runtime_revision(monkeypatch):
+    _install_generation(monkeypatch, report_source_revision=None)
+
+    with dashboard.app.test_client() as client:
+        status = client.get("/api/status").get_json()
+
+    freshness = status["generation_freshness"]
+    assert status["generation_revision"] == REVISION
+    assert freshness["analyzer_generation_revision"] == REVISION
+    assert freshness["report_dataset_source_revision"] is None
+    assert freshness["generation_revision"] is None
+    assert status["source_revision_parity"] == "UNAVAILABLE"
+    assert freshness["identity_status"] == "UNVERIFIED"
+    assert status["ready"] is False
 
 
 def test_epoch_mismatch_blocks_even_when_revision_matches(monkeypatch):
@@ -230,7 +362,7 @@ def test_lanes_remain_current_for_matching_short_and_full_revision(monkeypatch):
 
 
 def test_lanes_preserve_unavailable_artifact_status_when_generation_is_stale(monkeypatch):
-    _install_generation(monkeypatch, mirror_revision="different-revision")
+    _install_generation(monkeypatch, mirror_revision="7" * 40)
     unavailable = {
         "status": "UNAVAILABLE_CURRENT_GENERATION",
         "blockers": ["CURRENT_REPORT_MISSING"],

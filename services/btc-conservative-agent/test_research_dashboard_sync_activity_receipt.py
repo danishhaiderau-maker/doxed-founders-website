@@ -6,6 +6,7 @@ from research import research_dashboard as dashboard
 
 
 NOW = datetime(2026, 9, 5, 12, tzinfo=timezone.utc).timestamp()
+REVISION = "8dd73bd9c485a2d4470160667c3e636c3a53365e"
 
 
 def timestamp(delta):
@@ -63,12 +64,12 @@ def test_fresh_string_flag_is_not_reported_as_running(monkeypatch):
 def test_expired_in_progress_never_unlocks_qualification(monkeypatch, stamp):
     monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
     monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {"epoch_id": "epoch-one"})
-    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "revision-one")
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: REVISION)
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
         "inProgress": True, "updatedAt": stamp, "ok": True, "pollOk": True,
-        "revisionParity": "MATCH", "observedSourceRevision": "revision-one",
+        "revisionParity": "MATCH", "observedSourceRevision": REVISION,
     })
-    result = dashboard._generation_freshness_meta({"source_revision": "revision-one", "fresh_epoch": {"epoch_id": "epoch-one"}})
+    result = dashboard._generation_freshness_meta({"source_revision": REVISION, "fresh_epoch": {"epoch_id": "epoch-one"}})
     assert result["revision_parity"] == result["epoch_parity"] == "MATCH"
     assert result["mirror_sync_in_progress"] is True  # compatibility/safety, not proof of a process
     assert result["current"] is False and result["qualification_allowed"] is False

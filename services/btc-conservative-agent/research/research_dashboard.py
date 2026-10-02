@@ -1065,11 +1065,101 @@ def _mirror_source_revision() -> str | None:
     return str(revision) if revision else None
 
 
-def _identity_matches(left, right) -> bool:
-    """Compare full or intentionally abbreviated immutable identities."""
+_FULL_SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHORT_SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{12,39}$")
+
+
+def _source_revision_parity(left, right) -> str:
+    """Match a full source SHA to an exact SHA or an unambiguous safe alias.
+
+    A short-to-short comparison has no authoritative identity anchor.  Very
+    short and non-hex labels are likewise metadata, not source revisions.
+    """
     left = str(left or "").strip()
     right = str(right or "").strip()
-    return bool(left and right and (left.startswith(right) or right.startswith(left)))
+    left_full = bool(_FULL_SOURCE_REVISION_RE.fullmatch(left))
+    right_full = bool(_FULL_SOURCE_REVISION_RE.fullmatch(right))
+    left_short = bool(_SHORT_SOURCE_REVISION_RE.fullmatch(left))
+    right_short = bool(_SHORT_SOURCE_REVISION_RE.fullmatch(right))
+    if left_full and right_full:
+        return "MATCH" if left == right else "MISMATCH"
+    if left_full and right_short:
+        return "MATCH" if left.startswith(right) else "MISMATCH"
+    if left_short and right_full:
+        return "MATCH" if right.startswith(left) else "MISMATCH"
+    return "UNAVAILABLE"
+
+
+def _source_revision_consensus(report_revision, mirror_revision, observed_revision) -> dict:
+    """Resolve every supplied revision against one agreed full SHA.
+
+    Pairwise prefix checks are insufficient: two different full SHAs can share
+    the same 12-character mirror alias and both appear to match it.  Establish
+    one full-SHA anchor first, reject conflicting full identities, then resolve
+    any 12--39 character aliases only against that anchor.
+    """
+    values = {
+        "report": str(report_revision or "").strip(),
+        "mirror": str(mirror_revision or "").strip(),
+        "observed": str(observed_revision or "").strip(),
+    }
+    full_values = {
+        value for value in values.values()
+        if _FULL_SOURCE_REVISION_RE.fullmatch(value)
+    }
+    if len(full_values) > 1:
+        return {
+            "anchor": None,
+            "status": "CONFLICT",
+            "conflict": True,
+            "conflict_reason": "FULL_SOURCE_REVISION_CONFLICT",
+            "field_parity": {name: "MISMATCH" for name in values},
+            "revision_parity": "MISMATCH",
+            "observed_revision_parity": "MISMATCH",
+        }
+
+    anchor = next(iter(full_values), None)
+    field_parity = {}
+    for name, value in values.items():
+        if not value or anchor is None:
+            field_parity[name] = "UNAVAILABLE"
+        elif _FULL_SOURCE_REVISION_RE.fullmatch(value):
+            field_parity[name] = "MATCH" if value == anchor else "MISMATCH"
+        elif _SHORT_SOURCE_REVISION_RE.fullmatch(value):
+            field_parity[name] = "MATCH" if anchor.startswith(value) else "MISMATCH"
+        else:
+            field_parity[name] = "UNAVAILABLE"
+
+    alias_conflict = any(value == "MISMATCH" for value in field_parity.values())
+    report_mirror = (field_parity["report"], field_parity["mirror"])
+    revision_parity = (
+        "MISMATCH" if alias_conflict
+        else "MATCH" if report_mirror == ("MATCH", "MATCH")
+        else "UNAVAILABLE"
+    )
+    observed_parity = (
+        "MISMATCH" if alias_conflict
+        else field_parity["observed"]
+    )
+    all_match = all(value == "MATCH" for value in field_parity.values())
+    return {
+        "anchor": anchor,
+        "status": "CONFLICT" if alias_conflict else "MATCH" if all_match else "UNAVAILABLE",
+        "conflict": alias_conflict,
+        "conflict_reason": "SOURCE_REVISION_ALIAS_CONFLICT" if alias_conflict else None,
+        "field_parity": field_parity,
+        "revision_parity": revision_parity,
+        "observed_revision_parity": observed_parity,
+    }
+
+
+def _exact_identity_parity(left, right) -> str:
+    """Opaque epoch identities match only by exact equality."""
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    if not left or not right:
+        return "UNAVAILABLE"
+    return "MATCH" if left == right else "MISMATCH"
 
 
 _SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC = 600
@@ -1127,9 +1217,15 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         _read_json(REPORT_MANIFEST_FILE, {}) or {}
     )
     session = _load_bot_session() or {}
-    # generation_revision identifies analyzer code. Dataset freshness instead
-    # compares the independently recorded canonical source revision.
-    generation_revision = manifest.get("source_revision") or manifest.get("generation_revision")
+    # Analyzer code identity and report data identity are independent.  Never
+    # borrow generation_revision (analyzer runtime code) when the published
+    # report omitted its canonical source_revision.
+    report_dataset_source_revision = str(
+        manifest.get("source_revision") or ""
+    ).strip() or None
+    analyzer_generation_revision = str(
+        manifest.get("generation_revision") or ""
+    ).strip() or None
     sync_receipt = _mirror_sync_receipt()
     mirror_revision = _mirror_source_revision()
     observed_revision = (
@@ -1153,17 +1249,17 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         or session.get("fresh_epoch_id")
         or session.get("epoch_id")
     )
-    revision_parity = (
-        "MATCH" if _identity_matches(generation_revision, mirror_revision)
-        else "MISMATCH" if generation_revision and mirror_revision
-        else "UNAVAILABLE"
+    revision_consensus = _source_revision_consensus(
+        report_dataset_source_revision, mirror_revision, observed_revision
     )
-    epoch_parity = (
-        "MATCH" if _identity_matches(generation_epoch, mirror_epoch)
-        else "MISMATCH" if generation_epoch and mirror_epoch
-        else "UNAVAILABLE"
-    )
+    revision_parity = revision_consensus["revision_parity"]
+    epoch_parity = _exact_identity_parity(generation_epoch, mirror_epoch)
+    observed_revision_parity = revision_consensus["observed_revision_parity"]
     reasons = []
+    if not report_dataset_source_revision:
+        reasons.append(
+            "Published report does not declare a canonical dataset source revision"
+        )
     if revision_parity != "MATCH":
         reasons.append(
             "Analyzer dataset source revision does not match the canonical Fly mirror"
@@ -1199,11 +1295,16 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         reasons.append(
             "Canonical Fly mirror synchronization revision parity is not confirmed"
         )
-    if sync_revision_parity == "MISMATCH" or (
-        observed_revision
-        and mirror_revision
-        and not _identity_matches(observed_revision, mirror_revision)
-    ):
+    if observed_revision_parity == "UNAVAILABLE":
+        reasons.append(
+            "Saved sync receipt does not declare one valid explicit observed Fly source revision"
+        )
+    if revision_consensus["conflict"]:
+        reasons.append(
+            "Source revision identity conflict across report, canonical mirror, "
+            f"and observed Fly receipt ({revision_consensus['conflict_reason']})"
+        )
+    elif observed_revision_parity == "MISMATCH":
         reasons.append(
             "Observed Fly revision has not been promoted into the canonical mirror"
         )
@@ -1212,11 +1313,7 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         and sync_receipt_ok
         and sync_poll_ok is not False
         and sync_revision_parity == "MATCH"
-        and (
-            not observed_revision
-            or not mirror_revision
-            or _identity_matches(observed_revision, mirror_revision)
-        )
+        and observed_revision_parity == "MATCH"
     )
     current = revision_parity == "MATCH" and epoch_parity == "MATCH" and sync_current
     return {
@@ -1230,11 +1327,29 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         "mirror_sync_poll_ok": sync_poll_ok,
         "mirror_sync_revision_parity": sync_revision_parity,
         "observed_source_revision": observed_revision,
-        "generation_revision": generation_revision,
+        "observed_revision_parity": observed_revision_parity,
+        "source_revision_identity_status": revision_consensus["status"],
+        "source_revision_identity_conflict": revision_consensus["conflict"],
+        "source_revision_identity_conflict_reason": revision_consensus["conflict_reason"],
+        "source_revision_full_anchor": revision_consensus["anchor"],
+        # Compatibility name now intentionally means dataset identity.  It is
+        # null when absent instead of inheriting analyzer code identity.
+        "generation_revision": report_dataset_source_revision,
+        "report_dataset_source_revision": report_dataset_source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
         "mirror_source_revision": mirror_revision,
         "generation_epoch_id": generation_epoch,
         "mirror_epoch_id": mirror_epoch,
         "reasons": reasons,
+        "identity_status": (
+            "CURRENT" if current else
+            "CONFLICT" if revision_consensus["conflict"] else
+            "UNVERIFIED" if (
+                revision_parity == "UNAVAILABLE"
+                or epoch_parity == "UNAVAILABLE"
+                or observed_revision_parity == "UNAVAILABLE"
+            ) else "STALE"
+        ),
         "qualification_allowed": current,
     }
 
