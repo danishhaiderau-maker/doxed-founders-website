@@ -48,6 +48,7 @@ CAPTURE_NAMES = {
 OPEN, PROG, QUEUED, CLOSED = "OPEN", "IN PROGRESS", "QUEUED-POST-FREEZE", "CLOSED-VERIFIED-LIVE"
 CLOSED_AUDIT = "CLOSED-AUDIT3 (not re-verified here)"
 PR_LAPTOP, PR_MONITOR, PR_FLY = "{PR_LAPTOP}", "{PR_MONITOR}", "{PR_FLY}"
+MONITOR_CODE_REV = "70f1a5e94"  # #310 squash: monitor runs before it executed the old rules
 
 
 # ---------------------------------------------------------------- live helpers
@@ -104,6 +105,8 @@ def fetch_live(timeout: float = 40.0) -> dict:
     except Exception as exc:
         live["_errors"]["w9011_live1"] = f"{type(exc).__name__}"
     live["gh_vars"] = gh_variables()
+    live["gh_monitor"] = gh_monitor_run()
+    live["gh_laptop_tests"] = gh_latest_run("laptop-tests.yml")
     return live
 
 
@@ -116,7 +119,53 @@ def load_live(live_dir: Path) -> dict:
             live[key] = None
             live["_errors"][key] = type(exc).__name__
     live["gh_vars"] = gh_variables()
+    live["gh_monitor"] = gh_monitor_run()
+    live["gh_laptop_tests"] = gh_latest_run("laptop-tests.yml")
     return live
+
+
+def _gh(*args: str, timeout: float = 60) -> str:
+    out = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=timeout,
+                         encoding="utf-8", errors="replace", cwd=str(Path(__file__).resolve().parents[1]))
+    return out.stdout or ""
+
+
+def gh_latest_run(workflow: str) -> dict | None:
+    try:
+        rows = json.loads(_gh("run", "list", "--workflow", workflow, "-L", "1", "--status", "completed",
+                              "--json", "databaseId,headSha,conclusion,createdAt,event") or "[]")
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def gh_monitor_run() -> dict | None:
+    """Latest completed scheduled monitor run that executed the #310 monitor code, with its runner output."""
+    try:
+        rows = json.loads(_gh("run", "list", "--workflow", "fly-bot-monitor.yml", "-L", "10", "--status",
+                              "completed", "--json", "databaseId,headSha,conclusion,createdAt") or "[]")
+        repo = Path(__file__).resolve().parents[1]
+        for row in rows:
+            anc = subprocess.run(["git", "merge-base", "--is-ancestor", MONITOR_CODE_REV, row["headSha"]],
+                                 cwd=str(repo), capture_output=True)
+            if anc.returncode != 0:
+                continue
+            log = ""
+            for _ in range(2):  # gh intermittently returns an empty log
+                log = _gh("run", "view", str(row["databaseId"]), "--log", timeout=120)
+                if log.strip():
+                    break
+                time.sleep(3)
+            keep = ("previous monitor run evidence", "heartbeat", "state restored=", "::warning title=fly-monitor",
+                    "::error title=fly-monitor", "::notice title=fly-monitor", "Recovered:", "Fly bot healthy",
+                    "LAPTOP_CHAIN_HEARTBEAT:")
+            row["lines"] = [ln.split("Z ", 1)[-1].strip() for ln in log.splitlines() if any(k in ln for k in keep)]
+            if any("state restored=" in ln for ln in row["lines"]):
+                return row
+            # a just-finished run's log may not be downloadable yet; use the previous one
+        return {"error": f"no readable completed run on {MONITOR_CODE_REV}+ among {len(rows)}"}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:160]}
 
 
 def gh_variables() -> dict[str, str]:
@@ -204,10 +253,72 @@ def v_w9011_latency(live: dict) -> tuple[bool, str]:
     return (ms is not None and ms < 3000), f"GET :9011/api/system-health?live=1 took {ms} ms (target < 3000)"
 
 
+def _monitor_line(live: dict, needle: str) -> str | None:
+    for ln in (live.get("gh_monitor") or {}).get("lines") or []:
+        if needle in ln:
+            return ln
+    return None
+
+
+def _monitor_where(live: dict) -> str:
+    run = live.get("gh_monitor") or {}
+    if run.get("error"):
+        return f"fly-bot-monitor lookup failed ({run['error']})"
+    return f"fly-bot-monitor run {run.get('databaseId')} @{str(run.get('headSha'))[:9]} {run.get('createdAt')} {run.get('conclusion')}"
+
+
 def v_monitor_heartbeat(live: dict) -> tuple[bool, str]:
+    """Missed schedules are measured from the heartbeat variable or, without its token, the Actions runs API."""
     hb = (live.get("gh_vars") or {}).get("FLY_MONITOR_HEARTBEAT")
     age = iso_age_sec(hb)
-    return (age is not None and age < 2700), f"GH var FLY_MONITOR_HEARTBEAT={str(hb)[:60]!r} age={age and int(age)}s"
+    if age is not None and age < 2700:
+        return True, f"GH var FLY_MONITOR_HEARTBEAT={str(hb)[:60]!r} age={int(age)}s"
+    gap = _monitor_line(live, "previous monitor run evidence")
+    state = _monitor_line(live, "state restored=")
+    ok = bool(gap) and bool(state) and (live.get("gh_monitor") or {}).get("conclusion") in ("success", "failure")
+    return ok, (f"{_monitor_where(live)}: {gap!r}; {state!r}; GH var FLY_MONITOR_HEARTBEAT unset "
+                "(FLY_MONITOR_VARIABLES_TOKEN not configured)")
+
+
+def v_monitor_rules(live: dict) -> tuple[bool, str]:
+    """A completed run on the #310 code evaluated every subsystem rule; a missing input field would
+    have raised contract_field_missing, so a run without it proves the fields were read live."""
+    run = live.get("gh_monitor") or {}
+    state = _monitor_line(live, "state restored=")
+    findings = [ln for ln in run.get("lines") or [] if "title=fly-monitor" in ln]
+    missing = [ln for ln in findings if "contract_field_missing" in ln]
+    ok = bool(state) and run.get("conclusion") in ("success", "failure") and not missing
+    summary = "; ".join(f[:90] for f in findings) or (_monitor_line(live, "Fly bot healthy") or "")[:60]
+    return ok, f"{_monitor_where(live)} findings={len(findings)} contract_field_missing={len(missing)}: {summary!r}"
+
+
+def v_monitor_line(needle: str) -> Verifier:
+    def run(live: dict) -> tuple[bool, str]:
+        ln = _monitor_line(live, needle)
+        return ln is not None, f"{_monitor_where(live)}: {ln!r}"
+    return run
+
+
+def v_laptop_tests_ci(live: dict) -> tuple[bool, str]:
+    run = live.get("gh_laptop_tests") or {}
+    ok = run.get("conclusion") == "success"
+    return ok, (f"laptop-tests.yml run {run.get('databaseId')} @{str(run.get('headSha'))[:9]} "
+                f"{run.get('event')} {run.get('createdAt')} {run.get('conclusion')}")
+
+
+def v_check_status(cid: str, expect: Callable[[dict], bool], why: str) -> Verifier:
+    def run(live: dict) -> tuple[bool, str]:
+        c = check(live, cid)
+        if c is None:
+            return False, f":9011 checks[{cid}] absent"
+        return bool(expect(c)), f":9011 checks[{cid}].status={c.get('status')} observed={str(c.get('observed'))[:90]!r} ({why})"
+    return run
+
+
+def v_report_staleness(live: dict) -> tuple[bool, str]:
+    w = live.get("w9011") or {}
+    ok = "stale" in w and isinstance(w.get("age_sec"), (int, float))
+    return ok, f":9011 report.stale={w.get('stale')} age_sec={w.get('age_sec')}"
 
 
 def v_field(src: str, *path: Any, pred: Callable[[Any], bool] = lambda v: v is not None,
@@ -271,9 +382,9 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "F10": ("FLY runtime", "-", OPEN, "state_monitor mode only; unassigned", None),
     "F12": ("FLY runtime", "-", OPEN, "book_age exposed, not alerted; unassigned", None),
     "F13": ("FLY runtime", "-", OPEN, "ohlcv errors log-only; unassigned", None),
-    "F15": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor subsystem rule on /ready.xvl_evaluator_health.tick_age_s", None),
+    "F15": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor subsystem rule on /ready.xvl_evaluator_health.tick_age_s", v_monitor_rules),
     "F16": ("FLY runtime", "-", OPEN, "split admission_eligible vs orders_submitted (rank 24); unassigned", None),
-    "F18": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "COLLECTOR_V3_RECONCILE_STALLED rule (phase!=IDLE >600s); Fly phase_age_sec field still OPEN", None),
+    "F18": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "COLLECTOR_V3_RECONCILE_STALLED rule (phase!=IDLE >600s); Fly phase_age_sec field still OPEN", v_monitor_rules),
     "F20": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "threads[main_supervisor]", v_threads("main_supervisor")),
     "F22": ("AI-PLAN", "#294", PROG, "attempt liveness / persisted last_success (rank 17); post-deploy verification pending", None),
     "F24": ("FLY runtime", "-", OPEN, "ai shadow labels owner-only; unassigned", None),
@@ -289,16 +400,16 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "F35": ("FLY runtime", "-", OPEN, "relay cache age exposed, not alerted; low", None),
     "F36": ("FLY runtime", "-", OPEN, "503 when stale; not alerted; low", None),
     "F38": ("FLY runtime", "-", OPEN, "inference flusher 4xx counted as success (rank 23); unassigned", None),
-    "F39": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor lifecycle_pipeline rule (age, blockers, emergency_wal)", None),
+    "F39": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor lifecycle_pipeline rule (age, blockers, emergency_wal)", v_monitor_rules),
     "F40": ("FLY runtime", "-", OPEN, "post-AI evidence not alerted; unassigned", None),
     "F41": ("FLY runtime", "-", OPEN, "provisional merge invisible; unassigned", None),
     "F42": ("FLY runtime", "-", OPEN, "admin-pause finalizer response-only; low", None),
     "F43": ("WATCHER", "-", OPEN, "ACK seq exposed via laptop.pull_ack; server errors not exposed", None),
     "F44": ("FLY-LOCKS", "#306 (proposed)", OPEN, "HTTP thread-cap saturation; propose to FLY-LOCKS runtime_telemetry", None),
     # sidecars
-    "F45": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor cross_venue_health rule", None),
-    "F46": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor market_context rule", None),
-    "F47": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "shipper block in public /api/status; sidecar restart loop still OPEN", v_field("fly_status", "segment_shipper")),
+    "F45": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor cross_venue_health rule", v_monitor_rules),
+    "F46": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor market_context rule", v_monitor_rules),
+    "F47": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "shipper block in public /api/status; sidecar restart loop still OPEN", v_field("fly_status", "shipper")),
     "F48": ("FLY runtime", "-", OPEN, "relay-state pusher no status / no restart (rank 22); unassigned", None),
     "F49": ("FLY runtime", "-", OPEN, "restart loop visible via uptime only; low", None),
     # clients
@@ -321,10 +432,10 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "F68": ("FLY runtime", "-", OPEN, "write_failures exposed, not alerted", None),
     "F70": ("FLY runtime", "-", OPEN, "collection counters not alerted", None),
     "F71": ("WATCHER", "#307", PROG, "market_context/tape write failures read by streams.coverage (#307)", None),
-    "F72": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "via V3 reconcile stall rule (F18)", None),
+    "F72": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "via V3 reconcile stall rule (F18)", v_monitor_rules),
     "F73": ("FLY runtime", "-", OPEN, "signal snapshot/shadow writers swallow errors; extend PR_FLY helper post-freeze", None),
     "F74": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "execution_funnel.hook_failures{hook} + alarm", v_field("fly_status", "collection", "execution_funnel", "hook_failures")),
-    "F75": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor emergency_wal != CURRENT finding", None),
+    "F75": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor emergency_wal != CURRENT finding", v_monitor_rules),
     "F77": ("FLY runtime", "-", OPEN, "control-action audit endpoint (rank 27); unassigned", None),
     "F78": ("FLY runtime", "-", OPEN, "effective-config snapshot (rank 27); unassigned", None),
     "F79": ("FLY-LOCKS", "#306 (proposed)", OPEN, "per-subsystem swallowed_errors counter (rank 26); not in #306 file list", None),
@@ -359,14 +470,14 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L31": ("WATCHER", "-", OPEN, "laptop-chain-monitor notify catch {}", None),
     "L32": ("WATCHER", "-", OPEN, "legacy SYNC_HEARTBEAT toast only", None),
     "L33": ("WATCHER", "-", OPEN, "monitor warnings toast only", None),
-    "L34": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "incident relay: stale report -> system_health_stale; deploy-aware maintenance; non-zero exit", None),
+    "L34": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "incident relay: stale report -> system_health_stale; deploy-aware maintenance; non-zero exit", needs("incident_stale_report", v_report_staleness)),
     "L35": ("SELF-AWARE", "-", OPEN, "proof receipts in stale checkout (rank 28)", None),
-    "L36": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "health-report staleness -> incident", None),
+    "L36": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "health-report staleness -> incident", needs("incident_stale_report", v_report_staleness)),
     "L37": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "interim task defers only if supervisor ticked <15 min", None),
     "L38": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, ":9011 serves cache with age; live=1 single-flight background refresh", needs("cached_live_refresh", v_w9011_latency)),
     "L39": ("WATCHER", "-", OPEN, "banner push result string only", None),
-    "L40": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor polls Fly /api/system-health age/stale -> laptop_health_silent", None),
-    "L45": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "decision_mix SKIP below min samples", None),
+    "L40": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor polls Fly /api/system-health age/stale -> laptop_health_silent", v_monitor_rules),
+    "L45": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "decision_mix SKIP below min samples", needs("missing_data_not_green", v_check_status("ai.decision_mix", lambda c: c.get("status") in ("GREEN", "AMBER", "SKIP", "RED"), "evaluated; SKIP below min samples"))),
     "L47": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "trading.orders AMBER when toggles missing", needs("missing_data_not_green", v_contradiction_trading_orders)),
     "L48": ("WATCHER", "-", OPEN, "lifecycle contradictions AMBER only", None),
     "L51": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "applied=None never GREEN", needs("pull_ack_no_none_green", v_pull_ack)),
@@ -374,8 +485,8 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L53": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "analyzer.api correctness", needs("analyzer_parity_strict", v_analyzer_api_parity)),
     "L54": ("ANALYZER-FIDELITY + BLINDSPOT-CLOSE", f"#307 + {PR_LAPTOP}", PROG, "nothing reported -> AMBER, never 'n/a' GREEN", needs("missing_data_not_green", v_streams_coverage)),
     "L55": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "parse string epoch_parity", None),
-    "L56": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "reconciliation null -> AMBER", None),
-    "L58": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "exch_qty None -> AMBER unless explicitly disarmed", None),
+    "L56": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "reconciliation null -> AMBER", needs("missing_data_not_green", v_check_status("railway.relay", lambda c: "reconciliation=null" not in str(c.get("observed")) or c.get("status") != "GREEN", "reconciliation=null is never GREEN"))),
+    "L58": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "exch_qty None -> AMBER unless explicitly disarmed", needs("missing_data_not_green", v_check_status("bitfinex.exposure", lambda c: c.get("status") != "GREEN" or "disarmed" in str(c.get("observed")), "qty not probed is GREEN only when explicitly disarmed"))),
     "L60": ("BLINDSPOT-CLOSE + SELF-AWARE", f"{PR_LAPTOP} + #300", PROG, "watcher selfaware.engine (age/jobs) RED on stale; keeper script change proposed to SELF-AWARE", needs("selfaware_engine", v_check_present("selfaware.engine"))),
     "L61": ("SELF-AWARE", "#300", PROG, "job last_ok AMBER history only", None),
     "L62": ("SELF-AWARE", "#300", PROG, "views job returns OK with errors (rank 29)", None),
@@ -384,22 +495,22 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L68": ("SELF-AWARE", "#300", PROG, "progress probes", None),
     "L69": ("SELF-AWARE", "#300", PROG, "freshness vs mirror head; Fly volume null GREEN", None),
     "L70": ("SELF-AWARE", "#300", PROG, "uptime interruptions disagree 9 vs 1", None),
-    "L71": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "frozen legacy ACK watcher state reported as orphan", None),
+    "L71": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "frozen legacy ACK watcher state reported as orphan", needs("missing_data_not_green", v_check_status("laptop.legacy_ack_watcher", lambda c: c.get("status") != "GREEN", "frozen orphan watcher reported"))),
     "L72": ("Danish", "-", OPEN, "ad-hoc :7002 proxy: register or retire", None),
     "L73": ("Danish", "-", OPEN, "ad-hoc watch_queue.ps1: register or retire", None),
     "L74": ("Danish", "-", OPEN, "ad-hoc uptime_poll2 / :9097: register or retire", None),
     # monitoring / CI
     "C1": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "heartbeat variable + monitor_schedule_gap; crash/cache-loss never closes incidents", v_monitor_heartbeat),
     "C3": ("MONITOR", "-", OPEN, "master-ahead-of-Fly not checked", None),
-    "C5": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "entries_blocked when last_poll_entry_eligible=false >2h unpaused", None),
+    "C5": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "entries_blocked when last_poll_entry_eligible=false >2h unpaused", v_monitor_rules),
     "C7": ("DATA-RETENTION", "#303", QUEUED, "FLY_MONITOR_SEGMENTS_LIVE=1 before prune goes live", None),
-    "C9": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "unset LAPTOP_CHAIN_HEARTBEAT is a finding", None),
+    "C9": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "unset LAPTOP_CHAIN_HEARTBEAT is a finding", v_monitor_line("LAPTOP_CHAIN_HEARTBEAT:")),
     "C11": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "incident maintenance from DEPLOY_MAINTENANCE (capped 90 min)", None),
-    "C12": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "subsystem_findings over /ready blocks", None),
-    "C13": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "rules over lifecycle / relay outbox / V3 reconcile", None),
+    "C12": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "subsystem_findings over /ready blocks", v_monitor_rules),
+    "C13": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "rules over lifecycle / relay outbox / V3 reconcile", v_monitor_rules),
     "C14": ("DATA-RETENTION", "#303", QUEUED, "prune dry_run until #303", None),
     "C15": ("MONITOR", "-", OPEN, "deploy failure alert = GHA email only", None),
-    "C16": ("BLINDSPOT-CLOSE", f"{PR_LAPTOP} + {PR_MONITOR}", PROG, "laptop-tests workflow; head commits without [skip ci], squash subject with [skip ci]", None),
+    "C16": ("BLINDSPOT-CLOSE", f"{PR_LAPTOP} + {PR_MONITOR}", PROG, "laptop-tests workflow; head commits without [skip ci], squash subject with [skip ci]", v_laptop_tests_ci),
     "C17": ("COORDINATOR", "-", OPEN, "production gate ignores bot-code pushes", None),
     "C18": ("Danish", "-", OPEN, "auto-deploy disabled_manually (intentional?)", None),
     "C19": ("MONITOR", "-", OPEN, "secret-scan HEAD-only", None),
@@ -418,10 +529,10 @@ GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "29": ("AI-PLAN", "-", OPEN, "dead-input detector watches challenger fields only", None),
     "33": ("FLY runtime", "-", OPEN, "Bybit funding constant", None),
     "38": ("FLY runtime", "-", OPEN, "clock skew", None),
-    "39": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "lifecycle blocker_counts / emergency WAL rule; crash dumps OPEN", None),
-    "40": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "subsystem rules (WS reconnects, REST stale, epoch parity)", None),
+    "39": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "lifecycle blocker_counts / emergency WAL rule; crash dumps OPEN", v_monitor_rules),
+    "40": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "subsystem rules (WS reconnects, REST stale, epoch parity)", v_monitor_rules),
     "41": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "rate_limits{venue}.hits_429", v_field("fly_status", "rate_limits")),
-    "43": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "fetch failure >15 min -> AMBER, not SKIP", None),
+    "43": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "fetch failure >15 min -> AMBER, not SKIP", needs("fetch_failure_not_skip", v_check_present("watcher.sources"))),
     "47": ("WATCHER", "-", OPEN, "failing[] duplicates", None),
     "48": ("WATCHER", "-", OPEN, "Fly-published health lags laptop", None),
     "50": ("WATCHER", "-", OPEN, "verdict never GREEN; no ack/expiry", None),
@@ -433,7 +544,7 @@ GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "62": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "ai_provider_health.cost_usd_24h / last_call_cost_usd", v_field("fly_status", "ai_provider_health", "last_call_cost_usd")),
     "63": ("COORDINATOR", "-", OPEN, "Fly/Railway spend, Neon forecast", None),
     "69": ("SELF-AWARE", "-", OPEN, "deploy stuck detection / in_progress after completion", None),
-    "70": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "laptop-tests workflow gives PR checks; results API still OPEN", None),
+    "70": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "laptop-tests workflow gives PR checks; results API still OPEN", v_laptop_tests_ci),
     "71": ("SELF-AWARE", "-", OPEN, "/changes timeline", None),
     "73": ("SELF-AWARE + BLINDSPOT-CLOSE", f"#300 + {PR_LAPTOP}", PROG, "unified custody (puller seqs fixed here)", v_selfaware_custody),
     "75": ("SELF-AWARE", "-", OPEN, "incident timeline", None),
@@ -457,6 +568,7 @@ EXTRA = {
     # Danish's directive items and trace-audit items with no AUDIT-3 row id
     "T-REPORTS-OK": ("ANALYZER-FIDELITY", "#304", PROG, "required analyzer reports actually pass (root fix)", v_reports_ok_now),
     "T-TOGGLES": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "per-tile toggle state in public /api/status", v_toggles),
+    "T-DELTA-CHANGE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test, ships post-freeze", None),
     "T-RELAY-GATE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "arming refused while stale-owner/pre-arming relay events unquarantined (readiness gate)", None),
     "T-TIERA-API": ("ANALYZER-FIDELITY", "#307", PROG, "Tier A promotion visible via storage.tier_a", v_check_present("storage.tier_a")),
 }
@@ -596,7 +708,7 @@ def main() -> int:
     ap.add_argument("--baseline-json", help="counts JSON from the first run (before)")
     ap.add_argument("--pr-laptop", default="#309")
     ap.add_argument("--pr-monitor", default="#310")
-    ap.add_argument("--pr-fly", default="Fly post-freeze PR (pending)")
+    ap.add_argument("--pr-fly", default="#317")
     args = ap.parse_args()
     live = None
     if not args.no_live:

@@ -17,6 +17,8 @@ on:
       - "scripts/test_self_aware.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
+      - "tests/test_blindspot_closure_ledger.py"
+      - "scripts/blindspot_closure_ledger.py"
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
       - "services/btc-conservative-agent/strategy_lab/**"
@@ -34,6 +36,8 @@ on:
       - "scripts/test_self_aware.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
+      - "tests/test_blindspot_closure_ledger.py"
+      - "scripts/blindspot_closure_ledger.py"
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
       - "services/btc-conservative-agent/strategy_lab/**"
@@ -67,7 +71,7 @@ jobs:
           if [ -f test_self_aware.py ]; then tests="$tests test_self_aware.py"; fi
           python -m pytest $tests -q -p no:cacheprovider
       - name: Laptop chain scripts (PowerShell cases skip on Linux)
-        run: python -m pytest tests/test_laptop_chain_scripts.py -q -p no:cacheprovider
+        run: python -m pytest tests/test_laptop_chain_scripts.py tests/test_blindspot_closure_ledger.py -q -p no:cacheprovider
       - name: Segment puller and store
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py -q -p no:cacheprovider
