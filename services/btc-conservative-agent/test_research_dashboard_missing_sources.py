@@ -72,17 +72,23 @@ def test_overview_real_generation_loader_handles_synthetic_unavailable(monkeypat
 
 def render_loader(name, payload, ok=True):
     page = dashboard.DASHBOARD_HTML
-    helper = page[page.index('function missingResearchSource()'):page.index('async function loadFindings()')]
     # Keep the real evidence-scope logic in this extracted-loader fixture.
     # loadCombos now calls these helpers before rendering its tables.
-    scope_helpers = (
-        page[page.index('const EVIDENCE_SCOPES ='):page.index('const navEl =')]
-        + page[page.index('function setEvidenceScope('):page.index('const showAllEl =')]
-        + page[page.index('function policyGridEvidenceScope('):page.index('async function loadCombos()')]
-    )
     start = page.index('async function ' + name + '()')
-    end = page.index('async function ', start + 15)
-    script = helper + scope_helpers + page[start:end] + """
+    ranges = [
+        (page.index('function missingResearchSource()'), page.index('async function loadFindings()')),
+        (page.index('const EVIDENCE_SCOPES ='), page.index('const navEl =')),
+        (page.index('function setEvidenceScope('), page.index('const showAllEl =')),
+        (page.index('function policyGridEvidenceScope('), page.index('async function loadCombos()')),
+        (start, page.index('async function ', start + 15)),
+    ]
+    merged = []
+    for lo, hi in sorted(ranges):
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    script = ''.join(page[lo:hi] for lo, hi in merged) + """
 const elements = {};
 const element = id => elements[id] ||= {innerHTML:'', textContent:'',
   querySelector: selector => element(id + selector)};

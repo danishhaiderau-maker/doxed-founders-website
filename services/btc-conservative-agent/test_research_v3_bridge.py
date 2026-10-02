@@ -780,6 +780,8 @@ class V3BridgeTests(unittest.TestCase):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
                 features = {
                     "research_feature_schema_version": "causal-features-v7",
+                    "capture_schema": "measured_feature_capture_v1",
+                    "captured_at_ts": 1000.0,
                     "price": 100.25, "adx": 27.0,
                     "volatility_percentile": 0.72,
                 }

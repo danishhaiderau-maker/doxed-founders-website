@@ -5,6 +5,11 @@ a restart. A deploy-maintenance pause is cleared by the deploy's own resume,
 and a deploy resume never ends an operator or safety pause.
 """
 
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script-style suite; executed by test_script_style_suites.py",
+                allow_module_level=True)
+
 import json
 import os
 import sys

@@ -48,6 +48,13 @@ def _load_functions(*names):
         "COUNTERFACTUAL_FILE": "counterfactual.jsonl",
         "_pure_offline_sim_jsonl_paths": pure_relay._offline_sim_jsonl_paths,
         "_pure_load_offline_sim_jsonl_revisions": pure_relay._load_offline_sim_jsonl_revisions,
+        "Optional": __import__("typing").Optional,
+        "math": __import__("math"),
+        "time": __import__("time"),
+        "datetime": __import__("datetime").datetime,
+        "timezone": __import__("datetime").timezone,
+        "utc_iso": lambda: "2026-01-01T00:00:00+00:00",
+        "_snapshot_shared_ai_call_id": lambda *_args: None,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
@@ -91,6 +98,9 @@ def test_offline_simulator_joins_historical_rotations_and_appends_changed_platfo
         "_compact_source_market_evidence",
         "_compact_market_path_ref",
         "_path_gap_census",
+        "counterfactual_join_fields",
+        "_counterfactual_snapshot_with_join_keys",
+        "evidence_win_prob",
     )
     snapshot = tmp_path / "signal_snapshot.jsonl"
     replay = tmp_path / "signal_replay.jsonl"
