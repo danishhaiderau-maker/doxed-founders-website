@@ -837,6 +837,17 @@ def tile_max_active_signals(lane) -> int | None:
     return int(spec["max_active_signals"])
 
 
+def tile_chase_windows(lane) -> tuple[int, ...]:
+    """Registry-owned chase windows; empty for taker tiles and lanes outside the registry."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    entry = spec.get("entry_policy") if isinstance(spec.get("entry_policy"), dict) else {}
+    return tuple(int(w) for w in (entry.get("chase_windows") or spec.get("chase_windows") or ()))
+
+
+def chasing_tile_lanes() -> tuple[str, ...]:
+    return tuple(lane for lane in ACTIVE_TILE_REGISTRY if tile_chase_windows(lane))
+
+
 def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
     """Stable cross-layer roster used by audits, APIs, dashboards and analyzers."""
     return tuple(
