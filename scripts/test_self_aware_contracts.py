@@ -161,6 +161,14 @@ def test_stale_and_http_failures():
     assert cached["status"] == "GREEN"
 
 
+def test_fly_chase_buckets_dead_vs_not_applicable():
+    spec = _spec(id="fly.chase_buckets", surface="fly", reconcile="fly_chase_buckets")
+    assert _eval(spec, {})["status"] == "GREEN"
+    dead = _eval(spec, {"chase_analytics": {"status": "UNAVAILABLE", "reason": "NO_VALIDATED_ANALYZER_BUNDLE"}})
+    assert dead["status"] == "RED" and "DEAD_SECTION" in _kinds(dead)
+    assert _eval(spec, {"chase_analytics": {"status": "NOT_APPLICABLE"}})["status"] == "GREEN"
+
+
 # ------------------------------------------------------------------ drift
 
 def test_drift_collapse_and_dims_dropped():

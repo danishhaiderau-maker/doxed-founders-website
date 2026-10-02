@@ -499,6 +499,12 @@
                 {"path": "bitfinex_live_enabled", "equals": false, "severity": "RED"}],
      "reconcile": "fly_roster"},
 
+    {"id": "fly.chase_buckets", "surface": "fly", "title": "Fly chase entry selector / virtual chase candidates panels",
+     "tier": "light", "page": "https://doxed-btc-bot.fly.dev/",
+     "source": {"kind": "file", "path": "{chain}/fly_runtime_snapshot_v1.json"},
+     "depends_on": ["bot.py chase_analytics (owner /api/state)", "registry chase_windows", "post-freeze #317"],
+     "reconcile": "fly_chase_buckets"},
+
     {"id": "fly.relay_snapshot", "surface": "fly", "title": "Fly relay snapshot", "tier": "light",
      "page": "https://doxed-btc-bot.fly.dev/", "source": {"kind": "file", "path": "{chain}/relay_status_snapshot_v1.json"},
      "depends_on": ["laptop-chain monitor polling relay state"], "freshness": {"path": "@mtime", "max_age_sec": 900}},

@@ -893,7 +893,24 @@ def _rec_fly_analyzer_mirror(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]
     return [], {}
 
 
+CHASE_ANALYTICS_OK = ("VERIFIED_RECENT_SNAPSHOT", "NOT_APPLICABLE")
+
+
+def _rec_fly_chase_buckets(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Fly 'Chase entry selector' / 'Virtual Chase Candidates' panels: verified data or an explicit NOT_APPLICABLE."""
+    ca = obj.get("chase_analytics")
+    if not isinstance(ca, dict):
+        return [_v("FIELD_NOT_EXPORTED", INFO, "chase_analytics is owner-only (/api/state with token); the runtime snapshot "
+                                               "does not carry it yet - post-freeze #317 exports it")], {}
+    status = str(ca.get("status") or "")
+    if status not in CHASE_ANALYTICS_OK:
+        return [_v("DEAD_SECTION", RED, f"Fly chase panels: chase_analytics.status={status or 'null'} "
+                                        f"(reason {ca.get('reason')}); expected {list(CHASE_ANALYTICS_OK)}")], {}
+    return [], {}
+
+
 RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
+    "fly_chase_buckets": _rec_fly_chase_buckets,
     "lanes_vs_cohort": _rec_lanes_vs_cohort,
     "export_ledger": _rec_export_ledger,
     "combos_genome": _rec_combos_genome,
