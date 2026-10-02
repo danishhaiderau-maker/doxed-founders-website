@@ -169,13 +169,17 @@ def test_every_static_serialized_jsonl_target_is_declared_before_first_write():
         if node.func.id != "_safe_append_jsonl" or not node.args:
             continue
         first = node.args[0]
-        if isinstance(first, ast.Name) and first.id != "output_file":
+        # Parameter-routed writers: their concrete targets are pinned below.
+        if isinstance(first, ast.Name) and first.id not in {"output_file", "path", "sidecar"}:
             observed_constants.add(first.id)
         elif isinstance(first, ast.Constant) and isinstance(first.value, str):
             observed_literals.add(first.value)
 
     assert observed_constants <= declared_constants
     assert observed_literals <= declared_literals
+    assert {"XVL_SHADOW_FILE", "ADAPTIVE_ENTRY_DECISIONS_FILE", "RETIRED_TILE_BOUNDARY_FILE"} <= declared_constants
+    assert {"fill_markouts.jsonl", "taker_signal_counterfactuals.jsonl",
+            "xvp_shadow_signals.jsonl"} <= declared_literals
     assert "FILL_QUALITY_FILE" in declared_constants
     assert "TYPE_B_RESEARCH_V2_EVENT_FILE" not in declared_constants
     assert "execution_funnel.jsonl" in declared_literals
@@ -972,6 +976,9 @@ def test_guarded_workflow_has_exact_paper_only_flatten_recovery_mode():
     assert 'health.get("force_paper_mode") is True' in block
     assert 'health.get("live_armed") is False' in block
     assert 'health.get("bitfinex_live_enabled") is False' in block
-    assert '"/api/reconcile/phantom-cancel"' in block
+    # #198: maintenance flatten closes paper through normal accounting, never phantom-cancel.
+    assert '"/api/positions/close"' in block
+    assert "phantom-cancel" not in block
     assert '"/api/orders/cancel"' in block
-    assert "AUTHORIZED_PAPER_UPGRADE_BOUNDARY_UNKNOWN" in block
+    assert "paper/live safety flags are not proven" in block
+    assert "paper exposure did not flatten" in block

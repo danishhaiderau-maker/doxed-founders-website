@@ -50364,10 +50364,16 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "COUNTERFACTUAL_FILE",
     "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
     "MICROSTRUCTURE_TAPE_FILE",
+    "ADAPTIVE_ENTRY_DECISIONS_FILE",
+    "RETIRED_TILE_BOUNDARY_FILE",
+    "XVL_SHADOW_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",
     "shadow_runner_study.jsonl",
+    "fill_markouts.jsonl",
+    "taker_signal_counterfactuals.jsonl",
+    "xvp_shadow_signals.jsonl",
 )
 
 
