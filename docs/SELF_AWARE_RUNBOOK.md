@@ -168,6 +168,11 @@ Every finding has an id, a severity (`GREEN`, `AMBER`, `RED` or `SKIP`), observe
 
 - **What it means.** HTTP 429 from Fly's public 60/min/IP bucket is **AMBER "rate-limited"**, not RED. It becomes RED only after 15 minutes without a fresh runtime snapshot. The fix (an owner-token bucket) is queued for the post-freeze Fly batch.
 
+<a id="fly-platform-status"></a>
+### fly.platform_status: Fly.io platform incidents vs our region and components
+
+- **What it means.** Same classifier as the watcher's `fly.platform_status` (`scripts/fly_platform_status.py`), evaluated at the end of every diagnose pass (feed cached 5 min in `state.json` `fly_platform_cache`; only fetched when local probes run). INFO notices are GREEN ("platform notice - app unaffected"); an incident on SIN or Machines/Volumes/proxy/deploys is AMBER; RED only when `fly.reachability`, `prog.feeds`, `prog.ai_cadence`, `prog.counts_advancing`, `inv.custody`, `inv.mirror_ai_lag` or a watcher `fly.*`/`ws.*`/`shipper.*` check also fails. Those findings then get a leading cause "likely Fly platform incident: <title> (<url>)". JSON: `/api/selfaware/fly-platform` and `fly_platform` in `/api/selfaware/health`; the overview page shows the block under the header.
+
 <a id="self-engine"></a>
 ### self.engine: self-aware jobs succeed
 

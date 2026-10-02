@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyzer_sections
+from . import analyzer_sections, fly_platform
 from .config import RUNBOOK, RUNBOOK_BASE, THRESHOLDS, Paths
 from .facts import iso, parse_ts, snapshot_age, watcher_check
 
@@ -809,7 +809,22 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
             res = Finding(f"self.check_error.{getattr(fn, '__name__', 'check')}", "A diagnosis check crashed", "self", AMBER,
                           f"{type(exc).__name__}: {str(exc)[:200]}", "checks run without exceptions")
         findings.extend(res if isinstance(res, list) else [res])
+    try:
+        findings.append(check_fly_platform(facts, findings, state))
+    except Exception as exc:  # noqa: BLE001
+        findings.append(Finding("self.check_error.fly_platform", "A diagnosis check crashed", "self", AMBER,
+                                f"{type(exc).__name__}: {str(exc)[:200]}", "checks run without exceptions"))
     return findings
+
+
+def check_fly_platform(f, findings: list[Finding], state: dict[str, Any]) -> Finding:
+    """Fly.io status page vs our Fly-facing findings; runs last so it can annotate them."""
+    res = fly_platform.assess(f, findings, state, f["now"])
+    f["fly_platform"] = fly_platform.fps.compact(res)
+    fly_platform.annotate(findings, res)
+    d = fly_platform.finding(res)
+    return Finding(d["id"], d["title"], d["category"], d["severity"], d["observed"], d["expected"],
+                   evidence=d["evidence"], emit_alarm=d["emit_alarm"])
 
 
 def verdict(findings: list[Finding]) -> str:

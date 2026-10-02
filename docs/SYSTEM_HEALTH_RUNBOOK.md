@@ -126,6 +126,26 @@ while deploys queue (see WALL). It turns AMBER when the last guarded deploy did 
 conclude `success`.
 Fix: read the failed run and requeue it in `diagnostics/WALL-STATUS-FLY.md`.
 
+<a id="fly-platform_status"></a>
+### fly.platform_status
+Fly.io's public status page (https://status.flyio.net, incident.io `/api/v1/summary`,
+Statuspage `/api/v2/summary.json` fallback; `scripts/fly_platform_status.py`), cached
+5 min with a 5 s timeout. Each active incident or maintenance is matched against our app
+(`doxed-btc-bot`, region `primary_region` from `services/btc-conservative-agent/fly.toml`,
+override `FLY_PLATFORM_REGION`) and the components it depends on (Customer Applications,
+Machines, Volumes, Deployments, Remote Builds, proxy/network).
+- GREEN `classification=INFO`: notices outside our region/components, e.g. "Change in
+  Status Page Provider" or maintenance in ORD/EWR. Reads "platform notice - app unaffected".
+- AMBER: an incident, or maintenance in its window, on our region or one of those components
+  while our Fly checks are healthy. Watch; do not deploy into it.
+- RED (sustained 2 ticks): such an event AND a failing `fly.*`/`ws.*`/`shipper.*`/`deploy.*`
+  check (`fly.revision` excluded). Those checks carry `platform_correlation` and their hint starts
+  with "likely Fly platform incident: <title> (<url>)": follow the status page before repairing.
+  A failing app check with no matching platform event gets `likely_platform=false`: it is ours.
+- SKIP: feed unreachable (last good snapshot is reused for up to 1 h, marked stale);
+  AMBER after 1 h unreachable. Never fails the watcher.
+The report also carries the same block at top level as `fly_platform`.
+
 <a id="ai-success"></a>
 ### ai.success
 Age of the last SUCCESSFUL model response. Attempts do not count: on 2026-10-01
