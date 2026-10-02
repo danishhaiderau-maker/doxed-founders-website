@@ -93,7 +93,10 @@ def build_generation_receipt(
 
     failed_required = [s["name"] for s in studies if s["required"] and s["status"] != "OK"]
     failed_optional = [s["name"] for s in studies if not s["required"] and s["status"] != "OK"]
-    level = _worst(*(s["level"] for s in studies), integrity_level, blockers_level, window_level)
+    # Known input limitations stay RED in analyzer_input_blockers.json but only degrade
+    # the generation; RED here means a failed required study or non-VALID integrity.
+    input_level = AMBER if _worst(blockers_level, window_level) != GREEN else GREEN
+    level = _worst(*(s["level"] for s in studies), integrity_level, input_level)
     reasons = []
     if failed_required:
         reasons.append("required studies failed: " + ", ".join(failed_required))

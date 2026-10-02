@@ -90,7 +90,9 @@ def test_receipt_flags_truncated_replay_and_blocked_inputs():
             {"input": "exit_ladder", "status": "BLOCKED", "reason_code": "NO_ELIGIBLE"}]},
         optional_errors={"cross_world_evidence": None},
     )
-    assert receipt["level"] == "RED"
+    # Known input limits degrade the generation; RED is reserved for failed studies/integrity.
+    assert receipt["level"] == "AMBER"
+    assert receipt["protection_replay_window"]["truncated"] is True
     assert receipt["complete"] is True
     assert any("150/2415" in reason for reason in receipt["reasons"])
     assert any("exit_ladder=BLOCKED" in reason for reason in receipt["reasons"])
