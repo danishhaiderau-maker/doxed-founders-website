@@ -40,9 +40,8 @@
 - Six tiles are registered: five paper experiments with no proven edge and
   the Continuous baseline benchmark (Tile 5), each with its own lock, orders,
   positions, ledger and analyzer cohort. The experiments default OFF in
-  source (the deploy turns Tiles 1-4 ON; Tile 6 stays OFF until the owner
-  toggles it); the baseline defaults ON. All are paper-only and
-  relay-ineligible.
+  source (the deploy turns them ON); the baseline defaults ON. All are
+  paper-only and relay-ineligible.
 - Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`, prefix `ftf`): its own lane
   admission trades the opposite of the shared call's score-led side (raw AI
   NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
