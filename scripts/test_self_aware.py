@@ -186,6 +186,13 @@ def test_ai_cadence_sees_a_stall_when_fly_reports_no_age(paths, store):
     assert fd.severity == "AMBER" and "DEPLOY_MAINTENANCE" in fd.observed
 
 
+def test_view_load_errors_degrade_the_engine_check(store):
+    f = _facts()
+    assert diagnose.check_engine(f, diagnose.signals(f), store, {}).severity == "GREEN"
+    fd = diagnose.check_engine(f, diagnose.signals(f), store, {"view_errors": {"raw_ai_tranche": "ERROR: bad"}})
+    assert fd.severity == "AMBER" and "raw_ai_tranche" in fd.observed
+
+
 def test_custody_ack_without_copy_is_red(store):
     f = _facts(segment_head={"shipped_seq": 100}, pull={"ackedSeq": 100, "appliedSeq": 98, "finishedAt": NOW - 30})
     assert diagnose.check_custody(f, diagnose.signals(f), store).severity == "RED"

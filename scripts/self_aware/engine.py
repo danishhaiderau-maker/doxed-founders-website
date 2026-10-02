@@ -85,8 +85,10 @@ class Engine:
     # ------------------------------------------------------------- jobs
     def job_views(self) -> dict:
         res = self.store.refresh_views()
-        return {"views": len(res), "missing": [r["view"] for r in res if r["status"] == "MISSING"],
-                "errors": [r["view"] for r in res if r["status"].startswith("ERROR")]}
+        errors = {r["view"]: str(r.get("error") or r["status"])[:200] for r in res if r["status"].startswith("ERROR")}
+        self.state["view_errors"] = errors
+        return {"status": "DEGRADED" if errors else "OK", "views": len(res),
+                "missing": [r["view"] for r in res if r["status"] == "MISSING"], "errors": sorted(errors)}
 
     def job_diagnose(self) -> dict:
         now = time.time()

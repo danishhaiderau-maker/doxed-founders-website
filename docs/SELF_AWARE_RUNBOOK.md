@@ -68,6 +68,7 @@ Auto-repair is laptop-only, journalled and capped. The daemon never restarts the
 | `nudge_watcher` | The watcher verdict is more than 20 minutes old | `schtasks /run /tn DoxxedSystemHealthWatcher` |
 | `trading_needs_human` | `inv.expired_filled` or `inv.fill_close` is RED, or the relay is armed | **FLAG only, never executed.** |
 | `start_self_aware` / `restart_hung_self_aware` | The keeper tick finds `:9021` silent | Starts the daemon, or kills only a hung self-aware process. |
+| `restart_stale_self_aware` | `:9021` answers but `/health` is older than 20 min or a job's `last_ok` is older than 3x its cadence + 10 min (after the 10 min start grace) | Restarts the daemon at most once an hour; otherwise logs `STALE (restart cooldown)` in the tick log. |
 
 Each AUTO action has a 15-minute cooldown and at most 6 runs a day. Pass `--no-repair` to journal decisions without executing them.
 

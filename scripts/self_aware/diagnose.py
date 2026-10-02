@@ -620,6 +620,7 @@ def check_engine(f, sig, store, state: dict[str, Any]) -> Finding:
     errs = {k: v for k, v in (state.get("job_errors") or {}).items() if v}
     mirror_errs = f.get("errors") or {}
     problems = [f"{k}: {v['error'][:120]}" for k, v in errs.items()] + [f"{k}: {v[:120]}" for k, v in mirror_errs.items()]
+    problems += [f"view {k} failed to load: {v[:120]}" for k, v in (state.get("view_errors") or {}).items()]
     sev = GREEN if not problems else AMBER
     return Finding("self.engine", "Self-aware engine jobs succeed", "self", sev,
                    "; ".join(problems) or "all jobs succeeded on their last run", "no job errors",
