@@ -22,6 +22,7 @@ FUNCTIONS = {
     "record_ai_provider_outcome",
     "_epoch_iso",
     "ai_provider_health_snapshot",
+    "_ai_call_cost_fields",
     "call_deepseek_api",
     "call_deepseek_api_with_meta",
 }
@@ -53,6 +54,9 @@ def compile_provider(unrecorded):
         "_ai_deadline_lock": threading.Lock(),
         "_ai_deadline_state": {"abandoned_in_flight": 0, "deadline_exceeded_total": 0},
         "AI_CALL_DEADLINE_SEC": 75.0,
+        "_AI_COST_LEDGER": type("Ledger", (), {"snapshot": staticmethod(lambda now=None: {
+            "last_call_cost_usd": None, "cost_usd_24h": 0.0, "calls_24h": 0,
+        })}),
     }
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)

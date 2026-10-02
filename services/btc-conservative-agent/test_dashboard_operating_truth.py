@@ -20,7 +20,7 @@ BOT_PATH = AGENT / "bot.py"
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
 BOT_TREE = ast.parse(BOT_SOURCE)
 HELPERS = ("_unavailable", "_dashboard_seq", "_dashboard_age_text", "_dashboard_transfer_truth",
-           "_dashboard_operating_truth", "_public_dashboard_truth", "_dashboard_tile_view",
+           "_dashboard_operating_truth", "_operating_pause_truth", "_public_dashboard_truth", "_dashboard_tile_view",
            "_dashboard_tile_offsets_text", "_dashboard_entry_rule")
 CONSTANTS = ("_DASHBOARD_DISK_ALARM_PCT", "_DASHBOARD_SEGMENT_STATUS_STALE_SEC", "_DASHBOARD_SEGMENT_SEQ_LAG")
 NOW = 1_790_000_000.0

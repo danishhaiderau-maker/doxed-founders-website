@@ -1221,7 +1221,7 @@ jobs:
           python test_fly_relay_state_pusher_contract.py
           python test_ws_live_readiness_contract.py
           python -m pytest test_bbo_refresh_nonblocking.py -q
-          python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py -q
+          python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py test_shadow_chase_buckets.py test_family_global_chase_gate.py -q
           python -m pytest test_multiverse_tape_maturation.py test_collector_maturation_supervision.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
           python -m pytest test_paper_policy_family_trend_fade_60.py test_paper_policy_family_trend_fade_60_committed.py test_paper_policy_family_xvenue_lead.py test_paper_policy_family_xvenue_premium.py test_lead_lag_report.py test_tile_paired_comparison.py test_tile_win_rate.py test_family_policy_common.py test_family_tile_runtime_peak_persistence.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
           python -m pytest test_dual_execution_truth_closed_rows.py test_exit_shadow_world_current_stack.py test_trade_close_origin_display.py -q
@@ -1289,6 +1289,7 @@ jobs:
           python -m pytest test_execution_admission_pause_truth.py -q
           python -m pytest test_reset_inventory_invalidation.py -q
           python -m pytest test_relay_owner_delivery_plan.py -q
+          python -m pytest test_relay_stale_owner_guard.py test_ddollar_gate_fail_closed.py test_thread_health.py test_ai_call_cost.py test_blindspot_runtime_telemetry.py test_orderflow_delta_change.py -q
           python -m pytest test_chase_analytics_truth.py -q
           python -m pytest test_local_fresh_collection.py -q
           python -m pytest test_local_fresh_collection_integration.py -q

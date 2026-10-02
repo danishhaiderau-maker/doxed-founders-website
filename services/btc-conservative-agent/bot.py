@@ -61,6 +61,16 @@ from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGener
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
+import thread_health as _thread_health
+import relay_delivery_guard as _relay_guard
+import ai_call_cost as _ai_call_cost
+
+_THREAD_HEALTH = _thread_health.ThreadHealthRegistry()
+_LEDGER_WRITES = _thread_health.FailureCounters()
+_FUNNEL_HOOK_FAILURES = _thread_health.FailureCounters()
+_RATE_LIMITS = _thread_health.RateLimitCounters()
+_QUEUE_COUNTERS = _thread_health.QueueCounters()
+_AI_COST_LEDGER = _ai_call_cost.AiCostLedger(_ai_call_cost.STATE_FILE)
 
 
 from position_registry import (
@@ -129,7 +139,10 @@ from combo_pathway_config import (
     resolve_score_led_paper_admission,
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
+    chasing_tile_lanes,
+    tile_chase_windows,
 )
+import shadow_chase_buckets
 from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
@@ -1239,6 +1252,7 @@ def _apply_env_live_gating() -> None:
         )
         state["bitfinex_live_enabled"] = False
         state["live_armed"] = False
+        state.pop("live_armed_at_ts", None)
         state["live_startup_requested"] = bool(requested and not force_paper)
         if force_paper:
             state["strategy_mode"] = "RESEARCH"
@@ -3125,6 +3139,15 @@ def lane_is_live(lane: str) -> bool:
     return execution_mode_for_lane(lane) == EXEC_MODE_LIVE
 
 
+def _note_ddollar_gate_error(exc) -> None:
+    logger.error(f"[DDOLLAR GATE] evaluation failed; entry blocked: {type(exc).__name__}: {exc}")
+    try:
+        import bitfinex_live_executor as bx
+        bx.record_ddollar_gate_error(exc)
+    except Exception:
+        pass
+
+
 def lane_execution_block_reason(lane: str) -> str | None:
     """Return a human-readable reason when entries are blocked, else None.
 
@@ -3145,8 +3168,9 @@ def lane_execution_block_reason(lane: str) -> str | None:
             allowed, reason = bx._ddollar_gate_ok_for_entry()
             if not allowed:
                 return f"DDOLLAR_GATE_BLOCKED ({reason})"
-        except Exception:
-            pass
+        except Exception as exc:
+            _note_ddollar_gate_error(exc)
+            return "DDOLLAR_GATE_BLOCKED (DDOLLAR_GATE_ERROR)"
         return None
     if mode == EXEC_MODE_EXIT_ONLY:
         return "EXIT_ONLY (bitfinex disarmed with open exposure)"
@@ -4066,8 +4090,10 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
                     f,
                     indent=2,
                 )
-        except Exception:
-            pass
+            _LEDGER_WRITES.success("lane_pnl")
+        except Exception as exc:
+            _LEDGER_WRITES.failure("lane_pnl", exc)
+            logger.error(f"[LEDGER] lane_pnl write failed: {type(exc).__name__}: {exc}")
 
 
 
@@ -4186,8 +4212,10 @@ def update_lane_lab_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, 
                     f,
                     indent=2,
                 )
-        except Exception:
-            pass
+            _LEDGER_WRITES.success("lane_lab_pnl")
+        except Exception as exc:
+            _LEDGER_WRITES.failure("lane_lab_pnl", exc)
+            logger.error(f"[LEDGER] lane_lab_pnl write failed: {type(exc).__name__}: {exc}")
 
 
 def get_lane_lab_pnl_ledger(lane: str = None) -> dict:
@@ -5887,6 +5915,7 @@ def _http_get_with_retry(url: str, params=None, timeout: float = 30, label: str 
         try:
             resp = _bitfinex_http_session.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
+                _RATE_LIMITS.hit("bitfinex_rest", label)
                 wait = min(2 ** attempt, 30)
                 logger.warning(f"[{label}] HTTP 429 rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
                 time.sleep(wait)
@@ -5915,6 +5944,7 @@ def _exchange_call_with_retry(fn, label: str = "EXCHANGE", max_attempts: int = 5
         try:
             return fn()
         except ccxt.RateLimitExceeded as e:
+            _RATE_LIMITS.hit("bitfinex_ccxt", label)
             last_err = e
             wait = min(2 ** attempt, 30)
             logger.warning(f"[{label}] ccxt rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
@@ -5943,6 +5973,7 @@ def _exchange_call_with_retry(fn, label: str = "EXCHANGE", max_attempts: int = 5
                 time.sleep(wait)
                 continue
             if "429" in msg or "rate" in msg:
+                _RATE_LIMITS.hit("bitfinex_ccxt", label)
                 last_err = e
                 wait = min(2 ** attempt, 30)
                 logger.warning(f"[{label}] exchange rate limit - retry {attempt + 1}/{max_attempts} in {wait}s")
@@ -8163,7 +8194,6 @@ CHASE_EXECUTION_BUCKET_ORDER = (
     "4_chases",
     "5+_chases",
 )
-CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
 CHASE_EFFICIENCY_MATRIX_FILE = "chase_efficiency_matrix_report.json"
 SPREAD_BUCKET_ORDER = ("0-1", "2", "3", "4", "5+")
 
@@ -8268,7 +8298,6 @@ def _resolve_analytics_report_path(filename: str) -> str:
         if os.path.isfile(path):
             return path
     return os.path.join(cwd, filename)
-CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 RESEARCH_EDGE_THRESHOLD_DEFAULT = 3.0
 MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden stack uses GOLDEN_STACK_CHOP_MAX
 # v78 free-run: let AI APPROVE execute — still log gate metrics/margins for analyzer sweet-spot
@@ -9430,27 +9459,27 @@ def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ac
         return {"attempted": 0, "acked": 0, "busy": True}
     try:
         with state_lock:
-            owner_filter = bool(
-                _force_paper_mode_active()
-                and state.get("live_armed") is False
-                and state.get("bitfinex_live_enabled") is False
-            )
-        if owner_filter:
-            # The OS singleton, not an HTTP 401 or a guessed identity, proves
-            # which paper process may issue current-owner events. Missing proof
-            # withholds delivery; it does not rewrite, ACK or discard history.
-            owner_id = BOT_INSTANCE_ID if is_active_dashboard_owner() else None
-            plan = _relay_event_outbox.delivery_plan(
-                limit=100, enforce_owner=True, active_owner_id=owner_id,
-                event_id=event_id,
-            )
-            rows = plan.pop("records")
-            _relay_push_state["delivery_scheduler"] = plan
-        else:
-            _relay_push_state.pop("delivery_scheduler", None)
-            rows = _relay_event_outbox.due(limit=100)
-            if event_id:
-                rows = [row for row in rows if row.get("event_id") == event_id]
+            armed = bool(state.get("live_armed") or state.get("bitfinex_live_enabled"))
+            armed_at = state.get("live_armed_at_ts")
+        # The OS singleton, not an HTTP 401 or a guessed identity, proves
+        # which process may issue current-owner events. Missing proof
+        # withholds delivery; it does not rewrite, ACK or discard history.
+        # The owner filter applies in every mode: arming or leaving
+        # FORCE_PAPER_MODE must never re-open delivery of historical events.
+        owner_id = BOT_INSTANCE_ID if is_active_dashboard_owner() else None
+        plan = _relay_event_outbox.delivery_plan(
+            limit=100, enforce_owner=True, active_owner_id=owner_id,
+            event_id=event_id,
+        )
+        rows = plan.pop("records")
+        _relay_push_state["delivery_scheduler"] = plan
+        _relay_delivery_guard.observe(
+            _relay_event_outbox.pending_index(), owner_id=owner_id, armed=armed,
+            armed_at_ts=armed_at, last_ack_ts=_relay_event_outbox.last_ack_unix(),
+        )
+        rows = _relay_delivery_guard.filter_deliverable(
+            rows, owner_id=owner_id, armed=armed, armed_at_ts=armed_at,
+        )
         acked = sum(
             1 for row in rows
             if _deliver_relay_outbox_record(row, commit_before_ack=commit_before_ack)
@@ -12103,8 +12132,8 @@ def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED"
     try:
         from execution_funnel import funnel_on_signal_expire
         funnel_on_signal_expire(signal_or_order, reason)
-    except Exception:
-        pass
+    except Exception as exc:
+        _FUNNEL_HOOK_FAILURES.failure("signal_expire", exc)
 
 
 _v3_expected_order_reconcile_lock = threading.Lock()
@@ -12728,6 +12757,9 @@ def update_orderflow(trade):
     try:
         size = float(trade.get('v', trade.get('q', 0)))
         side = trade.get('S', trade.get('side', '')).lower()
+        # Captured before the update so delta - prev_delta is this trade's signed
+        # volume (delta_change); taking it afterwards pinned delta_change at 0.
+        orderflow["prev_delta"] = orderflow.get("delta", 0.0)
         if side == "buy":
             orderflow["buy_volume"] += size
         elif side == "sell":
@@ -12736,7 +12768,6 @@ def update_orderflow(trade):
         total = orderflow["buy_volume"] + orderflow["sell_volume"]
         orderflow["imbalance"] = abs(orderflow["delta"]) / total if total > 0 else 0
         orderflow["last_update"] = time.time()
-        orderflow["prev_delta"] = orderflow.get("delta", 0.0)
     except Exception as e:
         logger.error(f"[ORDERFLOW ERROR] {e} [PIPELINE ENFORCEMENT]")
 
@@ -13564,6 +13595,7 @@ _cycle_3m_inflight_buckets = set()
 _cycle_3m_bucket_lock = threading.Lock()
 _touch_grid_book = {}
 _compressed_shadow_chase_book = {}
+_shadow_chase_bucket_book = {}
 _compressed_shadow_seen_call_ids = set()
 _compressed_shadow_recovery_attempted = False
 _discovery_touch_grid_seen_call_ids = set()
@@ -13869,8 +13901,37 @@ def research_collection_health(now: float = None) -> dict:
     if eligible_1h >= COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS and coverage is not None \
             and coverage < COLLECTION_TOUCH_GRID_ALARM_COVERAGE:
         alarms.append("TOUCH_GRID_COVERAGE_LOW")
+    runtime_failures = {}
+    try:
+        if _relay_delivery_guard.stale_owner_alarm(now):
+            alarms.append("RELAY_OUTBOX_STALE_OWNER_PENDING")
+    except Exception as exc:
+        runtime_failures["relay_guard_error"] = type(exc).__name__
+    try:
+        # Windowed so a single past failure does not latch the alarm until restart.
+        ledger_recent = _LEDGER_WRITES.recent_failure_keys(COLLECTION_HEALTH_WINDOW_SEC, now)
+        # Hooks whose function is absent from execution_funnel are reported, not
+        # alarmed: they have never recorded, so alarming would latch permanently.
+        missing_hook = ("ImportError: cannot import name",)
+        funnel_recent = _FUNNEL_HOOK_FAILURES.recent_failure_keys(
+            COLLECTION_HEALTH_WINDOW_SEC, now, exclude_error_prefixes=missing_hook,
+        )
+        runtime_failures.update({
+            "ledger_write_failures_recent": ledger_recent,
+            "ledger_write_failures_total": _LEDGER_WRITES.failures_total(),
+            "execution_funnel_hook_failures_recent": funnel_recent,
+            "execution_funnel_hook_failures_total": _FUNNEL_HOOK_FAILURES.failures_total(),
+            "execution_funnel_hooks_unavailable": _FUNNEL_HOOK_FAILURES.keys_with_error_prefix(missing_hook),
+        })
+        if ledger_recent:
+            alarms.append("LEDGER_WRITE_FAILURES")
+        if funnel_recent:
+            alarms.append("EXECUTION_FUNNEL_HOOK_FAILURES")
+    except Exception as exc:
+        runtime_failures["failure_counter_error"] = type(exc).__name__
     return {
         "schema": "research_collection_health_v1",
+        "runtime_failures": runtime_failures,
         "window_sec": COLLECTION_HEALTH_WINDOW_SEC,
         "status": "ALARM" if alarms else "OK",
         "alarms": alarms,
@@ -14326,10 +14387,30 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None
                 )
         for tid in shadow_dead:
             _compressed_shadow_chase_book.pop(tid, None)
+        for tid, tracker in list(_shadow_chase_bucket_book.items()):
+            try:
+                shadow = _compressed_shadow_chase_book.get(tid) or {}
+                seen = shadow.get("seen_stage_indexes") or ()
+                shadow_rows.extend(shadow_chase_buckets.observe(
+                    tracker, now_ts=now,
+                    bid=None if not bid else float(bid),
+                    ask=None if not ask else float(ask),
+                    last=float(price),
+                    stage_index=max(seen) if seen else None,
+                    virtual_limit_price=shadow.get("virtual_limit_price"),
+                ))
+                if tracker.get("closed"):
+                    _shadow_chase_bucket_book.pop(tid, None)
+            except Exception as exc:
+                _shadow_chase_bucket_book.pop(tid, None)
+                logger.warning(
+                    f"[SHADOW CHASE BUCKET] observe failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]"
+                )
     # Disk validation, rotation and fsync are deliberately outside the
     # ownership lock so an AI arm is never queued behind research I/O.
     for row in shadow_rows:
         _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
+    _note_shadow_chase_bucket_records(shadow_rows)
     _maybe_complete_pending_order_multiverse()
 
 
@@ -17599,6 +17680,7 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
             _compressed_shadow_seen_call_ids.discard(call_id)
         else:
             _compressed_shadow_chase_book[trade_id] = shadow_state
+            _shadow_chase_bucket_book[trade_id] = shadow_chase_buckets.new_tracker(shadow_state)
     if arm_failure_reason:
         _record_compressed_shadow_arm_result(
             call_id, "UNSUPPORTED", arm_failure_reason,
@@ -18404,6 +18486,8 @@ def _call_deepseek_api_unrecorded(
         raise RuntimeError(f"HTTP_ERROR:{e}") from e
     latency_ms = int((time.time() - t0) * 1000)
     if status_code >= 400:
+        if status_code == 429:
+            _RATE_LIMITS.hit("deepseek", purpose)
         body = (body_text or "")[:500]
         err = RuntimeError(f"HTTP_{status_code}:{body}")
         err.http_status = status_code  # type: ignore[attr-defined]
@@ -18426,12 +18510,22 @@ def _call_deepseek_api_unrecorded(
     usage = payload.get("usage") or {}
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     completion_tokens = int(usage.get("completion_tokens") or 0)
-    if prompt_tokens <= 0 and completion_tokens <= 0:
+    tokens_estimated = prompt_tokens <= 0 and completion_tokens <= 0
+    if tokens_estimated:
         prompt_text = "\n".join(
             (m.get("content") or "") for m in messages if isinstance(m, dict)
         )
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
+    try:
+        _AI_COST_LEDGER.record(
+            model,
+            {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+            if tokens_estimated else usage,
+            purpose=purpose, estimated=tokens_estimated,
+        )
+    except Exception as exc:
+        logger.warning(f"[AI COST] cost accounting failed: {type(exc).__name__}: {exc}")
     _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
     return text, latency_ms, {
         "requested_model": model,
@@ -18692,6 +18786,20 @@ def ai_provider_health_snapshot(now=None) -> dict:
         "alert_after_sec": AI_NO_SUCCESS_ALERT_SEC,
         "alert": "AI_NO_SUCCESS_10M" if alert else None,
         "deepseek_balance": deepseek_balance_snapshot(now),
+        **_ai_call_cost_fields(now),
+    }
+
+
+def _ai_call_cost_fields(now: float) -> dict:
+    try:
+        cost = _AI_COST_LEDGER.snapshot(now)
+    except Exception as exc:
+        return {"call_cost": {"status": "UNKNOWN", "error": type(exc).__name__}}
+    return {
+        "last_call_cost_usd": cost["last_call_cost_usd"],
+        "cost_usd_24h": cost["cost_usd_24h"],
+        "calls_24h": cost["calls_24h"],
+        "call_cost": cost,
     }
 
 
@@ -20768,8 +20876,8 @@ def evaluate_dashboard_execution_gate(
     registered_family = is_patient_chase_lane(lane)
     if not registered_family:
         # Spread and advisory AI-band controls remain Continuous-only. Registered
-        # families retain their signed entry policy, but the operator's exact
-        # chase-window selector below is a global paper-order timing gate.
+        # families retain their signed entry policy; the operator's chase-window
+        # selector below applies only to tiles whose registry spec chases.
         sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
         if sg_blocked:
             logger.info(
@@ -20787,6 +20895,9 @@ def evaluate_dashboard_execution_gate(
 
     if lev < 1 or lev > MAX_RESEARCH_LEVERAGE:
         return False, "LEVERAGE_OUT_OF_RANGE", False
+
+    if not tile_chase_windows(lane):
+        return True, "OK", False
 
     if not any(get_chase_execution_buckets().values()):
         return False, "CHASE_BUCKETS_ALL_OFF", False
@@ -20893,7 +21004,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
-    """Reconcile resting orders with the current global age-window selector.
+    """Reconcile resting orders of chasing tiles with the age-window selector.
 
     Disabled windows before or between enabled stages are pulled back into
     virtual wait.  A disabled window after the last enabled stage holds the
@@ -20903,6 +21014,8 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
+        if not tile_chase_windows(order.get("research_lane")):
+            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
         age_sec = _order_signal_age_sec(order, signal or {}, now)
@@ -20910,271 +21023,80 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
             _cancel_pending_for_chase_gate(order)
 
 
+_shadow_chase_bucket_records = deque(maxlen=20000)
+_shadow_chase_bucket_state = {"loaded": False, "appended": 0, "cache_key": None, "cache": None}
+_shadow_chase_bucket_records_lock = threading.Lock()
+
+
+def _note_shadow_chase_bucket_records(rows) -> None:
+    with _shadow_chase_bucket_records_lock:
+        for row in rows:
+            if isinstance(row, dict) and row.get("schema") == shadow_chase_buckets.SHADOW_CHASE_BUCKET_SCHEMA:
+                _shadow_chase_bucket_records.append(row)
+                _shadow_chase_bucket_state["appended"] += 1
+
+
+def _load_shadow_chase_bucket_records_once() -> None:
+    with _shadow_chase_bucket_records_lock:
+        if _shadow_chase_bucket_state["loaded"]:
+            return
+        _shadow_chase_bucket_state["loaded"] = True
+        marker = shadow_chase_buckets.SHADOW_CHASE_BUCKET_SCHEMA
+        loaded = []
+        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if marker not in line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        if row.get("schema") == marker:
+                            loaded.append(row)
+            except OSError:
+                continue
+        seen = {str(row.get("trade_id")) for row in _shadow_chase_bucket_records}
+        for row in loaded:
+            if str(row.get("trade_id")) not in seen:
+                _shadow_chase_bucket_records.appendleft(row)
+        _shadow_chase_bucket_state["appended"] += len(loaded)
+
+
 def _load_chase_analytics_snapshot() -> dict:
-    report_key_by_control = {
-        "0_chases": "0",
-        "1_chase": "1",
-        "2_chases": "2",
-        "3_chases": "3",
-        "4_chases": "4",
-        "5+_chases": "5+",
-    }
-    unavailable_buckets = [
-        {
-            "bucket": key,
-            "trades": None,
-            "win_rate_pct": None,
-            "sum_pnl_usd": None,
-            "ev_usd": None,
-        }
-        for key in CHASE_EXECUTION_BUCKET_ORDER
-    ]
-
-    def unavailable(reason):
-        return {
-            "status": "UNAVAILABLE",
-            "unavailable_reason": reason,
-            "buckets": unavailable_buckets,
-            "assisted": None,
-            "assisted_total": None,
-            "saved": None,
-            "ttl_expired": None,
-            "generated_at": None,
-            "provenance": None,
-        }
-
-    active = _active_analyzer_mirror_dir()
-    if active is None:
-        return unavailable("NO_VALIDATED_ANALYZER_BUNDLE")
-    try:
-        status = json.loads((active / "status.json").read_text(encoding="utf-8-sig"))
-        bundle_manifest = json.loads((active / _ANALYZER_BUNDLE_MANIFEST).read_text(encoding="utf-8-sig"))
-        report_manifest_payload = (active / "report_manifest.json").read_bytes()
-        report_manifest = json.loads(report_manifest_payload.decode("utf-8-sig"))
-        data = json.loads(
-            (active / "reports" / CHASE_EFFECTIVENESS_REPORT_FILE).read_text(encoding="utf-8-sig")
-        )
-    except (OSError, ValueError, TypeError):
-        return unavailable("ANALYZER_BUNDLE_REPORTS_UNREADABLE")
-    if not hmac.compare_digest(
-        hashlib.sha256(report_manifest_payload).hexdigest(),
-        str(bundle_manifest.get("source_report_manifest_sha256") or "").lower(),
-    ):
-        return unavailable("SOURCE_REPORT_MANIFEST_HASH_MISMATCH")
-
-    reason = _chase_analytics_identity_error(
-        status,
-        bundle_manifest,
-        report_manifest,
-        data,
-        filename=CHASE_EFFECTIVENESS_REPORT_FILE,
-        expected_schema="chase_effectiveness_v1",
-        runtime_fly_source_revision=_runtime_git_rev(),
-        runtime_epoch=_collector_v22_epoch_id(),
-        runtime_tile_config_signature=active_tile_registry_signature(),
+    """Chase-bucket panel: shadow buckets always; live-tile buckets only when a registry tile chases."""
+    _load_shadow_chase_bucket_records_once()
+    epoch_id = _collector_v22_epoch_id()
+    chasing = chasing_tile_lanes()
+    with _shadow_chase_bucket_records_lock:
+        key = (epoch_id, _shadow_chase_bucket_state["appended"], chasing)
+        if _shadow_chase_bucket_state["cache_key"] == key:
+            return dict(_shadow_chase_bucket_state["cache"])
+        rows = list(_shadow_chase_bucket_records)
+    shadow = shadow_chase_buckets.aggregate(
+        rows, epoch_id=epoch_id, margin_usd=FIXED_MARGIN_USDT, leverage=float(_state_leverage()),
     )
-    if reason:
-        return unavailable(reason)
-
-    expected_basis = {
-        "pnl_field": "net_pnl_usd",
-        "pnl_basis": "AFTER_COST_NET_PNL",
-        "ev_denominator": "current_settings_bucket_attributions_with_finite_net_pnl",
-        "bucket_field": "chase_count",
+    snapshot = {
+        "status": "SIMULATED_SHADOW" if shadow["records"] else "COLLECTING",
+        "unavailable_reason": None if shadow["records"] else "NO_COMPLETED_SHADOW_CHASE_IN_EPOCH",
+        "label": shadow_chase_buckets.SIMULATED_LABEL if not chasing else "SIMULATED (shadow)",
+        "chasing_lanes": list(chasing),
+        "epoch_id": epoch_id,
+        "buckets": shadow["buckets"],
+        "records": shadow["records"],
+        "exit_model": shadow_chase_buckets.SHADOW_CHASE_EXIT_MODEL,
+        "source": "compressed shadow chase per executable AI call (shadow only; never orders, never relays)",
+        "live": (
+            {"status": "NOT_APPLICABLE", "reason": "NO_CHASING_TILE"} if not chasing else
+            {"status": "UNAVAILABLE", "reason": "LIVE_CHASE_BUCKETS_ON_ANALYZER",
+             "note": "realised chase buckets for chasing tiles are reported by the :9001 analyzer"}
+        ),
     }
-    if data.get("metric_basis") != expected_basis:
-        return unavailable("METRIC_BASIS_UNVERIFIED")
-    runtime_settings_signature = _execution_settings_signature(_enabled_execution_settings())
-    settings_binding = data.get("execution_settings_binding")
-    if (data.get("metrics_status") != "VERIFIED_CURRENT_SETTINGS_COHORT"
-            or not isinstance(settings_binding, dict)
-            or settings_binding.get("schema") != "execution_settings_binding_v1"
-            or settings_binding.get("signature") != runtime_settings_signature):
-        return unavailable("EXECUTION_SETTINGS_MISMATCH_OR_UNBOUND")
-
-    raw = data.get("buckets")
-    if not isinstance(raw, dict):
-        return unavailable("BUCKETS_INVALID")
-    buckets = []
-    for key in CHASE_EXECUTION_BUCKET_ORDER:
-        bucket = raw.get(report_key_by_control[key])
-        if not isinstance(bucket, dict):
-            return unavailable("BUCKETS_INCOMPLETE")
-        trades = bucket.get("trades")
-        wins = bucket.get("wins")
-        values = (bucket.get("win_rate_pct"), bucket.get("sum_pnl_usd"), bucket.get("ev_usd"))
-        if (isinstance(trades, bool) or not isinstance(trades, int) or trades < 0
-                or isinstance(wins, bool) or not isinstance(wins, int) or not 0 <= wins <= trades
-                or any(isinstance(value, bool) or not isinstance(value, (int, float))
-                       or not math.isfinite(float(value)) for value in values)):
-            return unavailable("BUCKET_METRICS_INVALID")
-        win_rate, net_pnl, ev = (float(value) for value in values)
-        expected_wr = round(100.0 * wins / trades, 1) if trades else 0.0
-        expected_ev = round(net_pnl / trades, 2) if trades else 0.0
-        if (not 0.0 <= win_rate <= 100.0
-                or abs(win_rate - expected_wr) > 0.051
-                or abs(ev - expected_ev) > 0.011):
-            return unavailable("BUCKET_METRICS_INCONSISTENT")
-        buckets.append({
-            "bucket": key,
-            "trades": trades,
-            "win_rate_pct": win_rate,
-            "sum_pnl_usd": net_pnl,
-            "ev_usd": ev,
-        })
-
-    assisted = saved = ttl_expired = total_fills = None
-    try:
-        attr = json.loads(
-            (active / "reports" / CHASE_ATTRIBUTION_REPORT_FILE).read_text(encoding="utf-8-sig")
-        )
-        attr_reason = _chase_analytics_identity_error(
-            status,
-            bundle_manifest,
-            report_manifest,
-            attr,
-            filename=CHASE_ATTRIBUTION_REPORT_FILE,
-            expected_schema="chase_attribution_v1",
-            runtime_fly_source_revision=_runtime_git_rev(),
-            runtime_epoch=_collector_v22_epoch_id(),
-            runtime_tile_config_signature=active_tile_registry_signature(),
-        )
-        if not attr_reason:
-            totals = attr.get("totals") or {}
-            overnight = attr.get("overnight_watch") or {}
-            candidates = {
-                "assisted": totals.get("chase_assisted_fills"),
-                "saved": totals.get("saved_fills_heuristic"),
-                "ttl_expired": totals.get("ttl_expired"),
-                "total_fills": overnight.get("total_fills"),
-            }
-            if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
-                   for value in candidates.values()):
-                assisted = candidates["assisted"]
-                saved = candidates["saved"]
-                ttl_expired = candidates["ttl_expired"]
-                total_fills = candidates["total_fills"]
-    except (OSError, ValueError, TypeError):
-        pass
-    return {
-        "status": "VERIFIED_RECENT_SNAPSHOT",
-        "unavailable_reason": None,
-        "buckets": buckets,
-        "assisted": assisted,
-        "assisted_total": total_fills,
-        "saved": saved,
-        "ttl_expired": ttl_expired,
-        "generated_at": data.get("generated_at"),
-        "freshness_max_age_seconds": 3600,
-        "live_data_coverage_verified": False,
-        "provenance": {
-            "bundle_generation": status.get("generation"),
-            "snapshot_id": bundle_manifest.get("snapshot_id"),
-            "fly_source_revision": bundle_manifest.get("source_data_revision"),
-            "analyzer_generation_revision": bundle_manifest.get("analyzer_generation_revision"),
-            "dataset_epoch": report_manifest.get("dataset_epoch"),
-            "tile_config_signature": report_manifest.get("config_signature"),
-            "evidence_source_data_revision": report_manifest.get("source_data_revision"),
-            "execution_settings_signature": runtime_settings_signature,
-            "metric_basis": data.get("metric_basis"),
-        },
-    }
-
-
-def _chase_analytics_identity_error(
-    status, bundle_manifest, report_manifest, report, *, filename, expected_schema,
-    runtime_fly_source_revision, runtime_epoch, runtime_tile_config_signature,
-):
-    """Bind a chase report to one validated uploaded analyzer generation."""
-    if not (
-        isinstance(status, dict)
-        and status.get("schema") == _ANALYZER_BUNDLE_SCHEMA
-        and status.get("complete") is True
-        and isinstance(bundle_manifest, dict)
-        and bundle_manifest.get("schema") == _ANALYZER_BUNDLE_SCHEMA
-        and isinstance(report_manifest, dict)
-        and report_manifest.get("schema") == "report_manifest_v1"
-    ):
-        return "ANALYZER_BUNDLE_IDENTITY_INVALID"
-    if not isinstance(report, dict) or report.get("schema") != expected_schema:
-        return "REPORT_INVALID"
-    for field in (
-        "snapshot_id", "analyzer_run_id", "analyzer_generated_at",
-        "source_data_revision", "analyzer_generation_revision",
-        "analyzer_version", "cohort_schema", "data_scope",
-        "source_report_manifest_sha256",
-    ):
-        if status.get(field) != bundle_manifest.get(field):
-            return f"BUNDLE_STATUS_{field.upper()}_MISMATCH"
-    declared = [
-        row for row in (report_manifest.get("reports") or [])
-        if isinstance(row, dict) and row.get("file") == filename
-    ]
-    if len(declared) != 1:
-        return "REPORT_NOT_IN_CURRENT_PUBLICATION"
-    expected = {
-        "dataset_epoch": runtime_epoch,
-        "config_signature": runtime_tile_config_signature,
-    }
-    for field, current in expected.items():
-        published = report_manifest.get(field)
-        if (not isinstance(current, str) or not current.strip()
-                or current.lower() == "unknown"):
-            return f"CURRENT_{field.upper()}_UNAVAILABLE"
-        if (not isinstance(published, str) or not published.strip()
-                or published.strip().upper() == "UNKNOWN"):
-            return f"PUBLISHED_{field.upper()}_MISSING"
-        if published != current:
-            return f"{field.upper()}_MISMATCH"
-    # Bundle-v2's historical `source_data_revision` field contains the
-    # canonical Fly `source_git_rev`; analyzer code identity is the separate
-    # `analyzer_generation_revision` field and must never be compared to it.
-    fly_source_revision = str(bundle_manifest.get("source_data_revision") or "").lower()
-    if (not re.fullmatch(r"[0-9a-f]{7,40}", str(runtime_fly_source_revision or "").lower())
-            or fly_source_revision != str(runtime_fly_source_revision).lower()):
-        return "FLY_SOURCE_REVISION_MISMATCH"
-    analyzer_revision = str(bundle_manifest.get("analyzer_generation_revision") or "")
-    if analyzer_revision != str(report_manifest.get("generation_revision") or ""):
-        return "ANALYZER_GENERATION_REVISION_MISMATCH"
-    provenance = report.get("analysis_provenance")
-    provenance = provenance if isinstance(provenance, dict) else {}
-    for field in (
-        "generation_revision", "analyzer_revision", "source_revision",
-        "deployed_revision", "dataset_epoch", "config_signature",
-        "source_data_revision",
-    ):
-        published = report_manifest.get(field)
-        observed = report.get(field) or provenance.get(field)
-        if (not isinstance(published, str) or not published.strip()
-                or published.strip().upper() == "UNKNOWN"):
-            return f"PUBLISHED_{field.upper()}_MISSING"
-        if observed != published:
-            return f"REPORT_{field.upper()}_MISMATCH"
-    fresh_epoch = report_manifest.get("fresh_epoch")
-    if not isinstance(fresh_epoch, dict) or fresh_epoch.get("status") != "BOUND":
-        return "FRESH_EPOCH_UNBOUND"
-    report_epoch = report.get("epoch_id") or provenance.get("fresh_epoch_id")
-    if not report_epoch or report_epoch != fresh_epoch.get("epoch_id"):
-        return "REPORT_FRESH_EPOCH_MISMATCH"
-    try:
-        generated = datetime.fromisoformat(str(report["generated_at"]).replace("Z", "+00:00"))
-        published_at = datetime.fromisoformat(str(bundle_manifest["analyzer_generated_at"]).replace("Z", "+00:00"))
-        cutoff = datetime.fromisoformat(str(fresh_epoch["cutoff_utc"]).replace("Z", "+00:00"))
-        if any(value.tzinfo is None for value in (generated, published_at, cutoff)):
-            return "REPORT_TIMESTAMP_INVALID"
-        if generated < cutoff or generated > published_at:
-            return "REPORT_TIMESTAMP_OUTSIDE_CURRENT_GENERATION"
-        # Code/epoch/settings identity can stay unchanged for days while the
-        # dataset advances. A validated publication is an as-of snapshot, not
-        # proof of current live coverage. Bound display to two 30-minute cycles.
-        now = time.time()
-        if generated.timestamp() > now + 30 or published_at.timestamp() > now + 30:
-            return "REPORT_TIMESTAMP_IN_FUTURE"
-        if now - min(generated.timestamp(), published_at.timestamp()) > 3600:
-            return "ANALYZER_PUBLICATION_STALE"
-    except (KeyError, TypeError, ValueError):
-        return "REPORT_TIMESTAMP_INVALID"
-    return None
+    with _shadow_chase_bucket_records_lock:
+        _shadow_chase_bucket_state["cache_key"] = key
+        _shadow_chase_bucket_state["cache"] = snapshot
+    return dict(snapshot)
 
 
 def _load_spread_analytics_snapshot() -> dict:
@@ -22892,6 +22814,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         from execution_funnel import funnel_on_order
         funnel_on_order(signal, order)
     except Exception as _fe:
+        _FUNNEL_HOOK_FAILURES.failure("order", _fe)
         logger.debug(f"[FUNNEL] order log failed: {_fe}")
     if order.get("status") == "PENDING" and order.get("entry_type") == "SIM_LIMIT":
         _try_immediate_first_chase(order, signal)
@@ -23895,6 +23818,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         from execution_funnel import funnel_on_limit_chase
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
+        _FUNNEL_HOOK_FAILURES.failure("limit_chase", _fe)
         logger.debug(f"[FUNNEL] limit chase log failed: {_fe}")
     _emit_genome_execution_event("LIMIT_CHASED", {
         "trade_id": order.get("trade_id"),
@@ -24095,6 +24019,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         from execution_funnel import funnel_on_limit_chase
         funnel_on_limit_chase(order, old_limit, new_limit, age_min, gap_pct, chase_count)
     except Exception as _fe:
+        _FUNNEL_HOOK_FAILURES.failure("marketable_limit", _fe)
         logger.debug(f"[FUNNEL] marketable limit log failed: {_fe}")
     return True
 
@@ -24223,8 +24148,8 @@ def _update_pending_order_price_extremes(price: float):
             try:
                 from execution_funnel import funnel_update_touch
                 funnel_update_touch(order, float(price))
-            except Exception:
-                pass
+            except Exception as exc:
+                _FUNNEL_HOOK_FAILURES.failure("touch", exc)
 
 def _pending_limit_touched(
     order: dict,
@@ -24698,8 +24623,8 @@ def fill_order(order):
     try:
         from execution_funnel import funnel_on_fill
         funnel_on_fill(order, tick)
-    except Exception:
-        pass
+    except Exception as exc:
+        _FUNNEL_HOOK_FAILURES.failure("fill", exc)
     meta = trades_map.get(order["trade_id"], {})
     signal = meta.get("signal_ref", {})
     ai = meta.get("ai", {}) or signal.get("ai", {})
@@ -25939,8 +25864,8 @@ def process_signal(event: dict):
                     try:
                         from execution_funnel import funnel_on_capacity_reject
                         funnel_on_capacity_reject(signal, "MAX_ACTIVE_SIGNALS")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _FUNNEL_HOOK_FAILURES.failure("capacity_reject", exc)
                     exit_pipeline(signal, ai, "MAX_ACTIVE_SIGNALS")
                     with state_lock:
                         state["debug_state"]["last_block_reason"] = "MAX_ACTIVE_SIGNALS"
@@ -26002,6 +25927,7 @@ def process_signal(event: dict):
                 from execution_funnel import funnel_on_approve
                 funnel_on_approve(signal, ai)
             except Exception as _fe:
+                _FUNNEL_HOOK_FAILURES.failure("approve", _fe)
                 logger.debug(f"[FUNNEL] approve log failed: {_fe}")
             logger.info("[PIPELINE] -> EXECUTION STAGE -> ORDER PLACEMENT [PIPELINE ENFORCEMENT]")
             success = execute_simulated_order(signal)
@@ -26396,6 +26322,7 @@ def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: flo
             chase_count,
         )
     except Exception as exc:
+        _FUNNEL_HOOK_FAILURES.failure("policy_limit_chase", exc)
         logger.debug(f"[OFFSET029] funnel chase log failed: {exc}")
     logger.info(
         f"[OFFSET029 PAPER] LIMIT_CHASE trade_id={order.get('trade_id')} "
@@ -26654,12 +26581,14 @@ def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
         try:
             ws_tick_lifecycle_queue.get_nowait()
             ws_tick_lifecycle_queue.task_done()
+            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue")
         except Empty:
             pass
         try:
             ws_tick_lifecycle_queue.put_nowait(item)
             return True
         except Full:
+            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue")
             return False
 
 
@@ -26697,16 +26626,21 @@ def ws_tick_lifecycle_worker():
         try:
             received_ts, price = ws_tick_lifecycle_queue.get(timeout=0.5)
         except Empty:
+            _THREAD_HEALTH.beat("ws_tick_lifecycle_worker")
             continue
         try:
             # Do not apply an old tick to a position created while this worker
             # was busy. Current-price protection remains in process_positions.
             if time.time() - float(received_ts) <= WS_TICK_LIFECYCLE_MAX_AGE_SEC:
                 _tick_driven_position_exits(float(price))
+            else:
+                _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue_aged")
         except Exception as exc:
+            _THREAD_HEALTH.error("ws_tick_lifecycle_worker", exc)
             logger.error(f"[WS TICK WORKER] lifecycle error: {exc}")
         finally:
             ws_tick_lifecycle_queue.task_done()
+            _THREAD_HEALTH.beat("ws_tick_lifecycle_worker")
 
 def safe_ws_handler(message):
     try:
@@ -28397,8 +28331,8 @@ def cleanup_expired_orders():
         try:
             from execution_funnel import funnel_on_expire
             funnel_on_expire(order, "TTL_EXPIRED")
-        except Exception:
-            pass
+        except Exception as exc:
+            _FUNNEL_HOOK_FAILURES.failure("expire", exc)
         expired_n += 1
         _agent_dbg("H2", "cleanup_expired_orders", "expired", {"trade_id": order.get("trade_id"), "age_sec": int(age), "signal_expired": sig_ok, "pending_left": pending_left})
         logger.info(f"[ORDER][{order['trade_id']}] EXPIRED [PIPELINE ENFORCEMENT]")
@@ -28425,10 +28359,12 @@ def position_manager():
                 cleanup_expired_orders()
                 process_positions()
                 save_paper_lifecycle(reason="position_manager_halted_tick")
+                _THREAD_HEALTH.beat("position_manager")
                 time.sleep(5)
                 continue
             price = _observable_exit_price()
             if not price or price <= 0:
+                _THREAD_HEALTH.beat("position_manager")
                 time.sleep(1)
                 continue
             prune_signals()
@@ -28443,8 +28379,10 @@ def position_manager():
 
             pipeline_state_sync()
             print_console_dashboard()
+            _THREAD_HEALTH.beat("position_manager")
             time.sleep(_position_monitor_interval_sec())
     except Exception as e:
+        _THREAD_HEALTH.error("position_manager", e)
         logger.exception(f"Position manager crash: {e}")
         set_execution_paused("THREAD_CRASH")
 
@@ -28857,8 +28795,8 @@ def close_position(pos: dict, exit_reason: str):
         try:
             from execution_funnel import funnel_on_close
             funnel_on_close(trade_id, exit_reason, round(net_pnl, 4), hold_sec)
-        except Exception:
-            pass
+        except Exception as exc:
+            _FUNNEL_HOOK_FAILURES.failure("close", exc)
         r_multiple = compute_r(entry, pos.get("sl", 0), price)
         ai_prob = pos.get("ai_win_prob", 0) or 0
         ai_band = "0-50" if ai_prob < 50 else "50-60" if ai_prob < 60 else "60-70" if ai_prob < 70 else "70+"
@@ -31097,6 +31035,7 @@ _relay_event_outbox = RelayEventOutbox(
     PAPER_LIFECYCLE_FILE,
     shared_lock=paper_lifecycle_file_lock,
 )
+_relay_delivery_guard = _relay_guard.RelayDeliveryGuard(_relay_guard.QUARANTINE_FILE)
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
@@ -33705,16 +33644,39 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 sys.excepthook = global_exception_handler
 
 def safe_thread(fn):
+    name = getattr(fn, "__name__", "thread")
+
     def wrapper(*args, **kwargs):
+        _THREAD_HEALTH.bind(name)
         while not shutdown_event.is_set():
             try:
                 fn(*args, **kwargs)
             except Exception as e:
                 logger.exception(f"[THREAD CRASH] {fn.__name__}: {e}")
+                _THREAD_HEALTH.restart(name, e)
                 dump_system_state()
                 set_execution_paused("THREAD_CRASH")
                 time.sleep(2)
+            else:
+                if not shutdown_event.is_set():
+                    _THREAD_HEALTH.restart(name, "RETURNED")
     return wrapper
+
+
+# (interval_sec, min_stale_sec): stale when last progress is older than
+# max(3 x interval, min_stale_sec); the floor covers legitimately slow passes.
+THREAD_HEALTH_MONITORED = {
+    "tick_execution_engine": (FAST_MONITOR_INTERVAL_SEC, 30.0),
+    "position_manager": (POSITION_MONITOR_INTERVAL_SEC, 60.0),
+    "ws_tick_lifecycle_worker": (0.5, 30.0),
+    "analytics_loop": (float(ANALYTICS_INTERVAL_SEC), 0.0),
+    "main_supervisor_loop": (60.0, 0.0),
+    "api_state_cache_refresher": (_API_STATE_REFRESH_INTERVAL_SEC, 300.0),
+    "dashboard_http_watchdog_loop": (DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC, 120.0),
+    "bitfinex_live_reconcile_loop": (30.0, 300.0),
+}
+for _thread_name, (_interval, _min_stale) in THREAD_HEALTH_MONITORED.items():
+    _THREAD_HEALTH.register(_thread_name, _interval, min_stale_sec=_min_stale)
 
 
 def _bounded_process_pressure_snapshot() -> dict:
@@ -34479,6 +34441,9 @@ def dashboard_http_watchdog_loop():
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
+                _THREAD_HEALTH.error(
+                    "dashboard_http_watchdog_loop", f"probe failed {consecutive_failures}: {detail}"
+                )
                 logger.error(
                     "[HTTP WATCHDOG] localhost control probe failed %s/%s: %s",
                     consecutive_failures,
@@ -34502,6 +34467,7 @@ def dashboard_http_watchdog_loop():
                         "[HTTP WATCHDOG] restart refused: live arm, exposure, "
                         "non-force-paper mode, or unprovable trade-lock state"
                     )
+        _THREAD_HEALTH.beat("dashboard_http_watchdog_loop")
         shutdown_event.wait(DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC)
 
 def dump_threads():
@@ -34687,7 +34653,7 @@ __ADMIN_ACCESS_CONTROLS__
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseAnalyticsStatus" style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
-<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
+<table style="width:100%;max-width:820px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>Reached</th><th>N (fills)</th><th>Fill%</th><th>WR%</th><th>EV bp</th><th>EV $</th><th>PnL $</th><th>Avg fill s</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
 <h3>Directional gap hard-gate</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global normalized-gap allowlist (<strong>raw LONG/SHORT difference ÷10, rounded down</strong>). Example: LONG 65 / SHORT 35 → raw gap 30 → execution bucket 3. <strong>Checked</strong> = signals in that raw-score range MAY enter the chase workflow. <strong>Unchecked</strong> = hard block before any limit or virtual chase; the signal is still logged. Persists across restarts.</p>
 <p id="spreadGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
@@ -34837,6 +34803,7 @@ __ADMIN_ACCESS_CONTROLS__
 </div>
 
 <h2 id="activityTables">Virtual Chase Candidates</h2>
+<p id="virtualChaseApplicability" style="display:none;color:#f59e0b;font-size:0.85em;margin:4px 0 8px;"></p>
 <p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
   Approved signals waiting for a selected chase count. These are <strong>not pending orders</strong>
   and have no exchange exposure. They move to Pending Orders only when an enabled chase is reached.
@@ -35314,35 +35281,53 @@ DASHBOARD_JS = """(function () {
         executionControlSaveCount -= 1;
       }
     }
-    function renderChaseAnalyticsPanel(ch) {
+    function renderChaseAnalyticsPanel(ch, publicView) {
       ensureChaseBucketControls();
-      ch = ch && typeof ch === 'object' ? ch : {status:'UNAVAILABLE', unavailable_reason:'NO_SNAPSHOT', buckets:[]};
-      const verified = ch.status === 'VERIFIED_RECENT_SNAPSHOT';
+      const escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const ownerOnly = publicView && !(ch && ch.status);
+      ch = ch && typeof ch === 'object' && ch.status ? ch : {status:'UNAVAILABLE', unavailable_reason: ownerOnly ? 'owner-only field (public sanitized view)' : 'NO_SNAPSHOT', buckets:[]};
+      const chasing = Array.isArray(ch.chasing_lanes) ? ch.chasing_lanes : [];
+      const noTileChases = ch.status !== 'UNAVAILABLE' && chasing.length === 0;
+      const noChaseCopy = 'No current tile uses chase entries — chase styles are simulated in the :9001 genome grid.';
       const status = document.getElementById('chaseAnalyticsStatus');
       if (status) {
-        status.innerHTML = verified
-          ? '<strong style="color:#3fb950">VERIFIED RECENT SNAPSHOT</strong> · WR and EV: current-settings cohort with finite after-cost net PnL; not live coverage (maximum report age 60 min)'
-          : '<strong style="color:#f59e0b">UNAVAILABLE</strong> · ' + (ch.unavailable_reason || 'current analyzer publication not verified');
+        const label = escapeHtml(ch.label || 'SIMULATED (shadow)');
+        let html;
+        if (ch.status === 'SIMULATED_SHADOW') {
+          html = `<strong style="color:#58a6ff">${label}</strong> · ${ch.records} completed shadow chase orders this epoch · exit model ${escapeHtml(ch.exit_model || '—')} · shadow only: never orders, never relays`;
+        } else if (ch.status === 'COLLECTING') {
+          html = `<strong style="color:#f59e0b">${label} · COLLECTING</strong> · no completed shadow chase order in this epoch yet`;
+        } else {
+          html = '<strong style="color:#f59e0b">UNAVAILABLE</strong> · ' + escapeHtml(ch.unavailable_reason || 'no chase snapshot');
+        }
+        if (noTileChases) html += ' · ' + noChaseCopy + ' The selector below has no effect on current tiles.';
+        status.innerHTML = html;
       }
       const kpis = document.getElementById('chaseKpis');
       if (kpis) {
-        const assisted = ch.assisted != null ? ch.assisted : '—';
-        const total = ch.assisted_total != null ? ch.assisted_total : '—';
-        kpis.innerHTML =
-          `<span><strong>Assisted</strong> ${assisted}/${total}</span>` +
-          `<span><strong>Saved</strong> ${ch.saved != null ? ch.saved : '—'}</span>` +
-          `<span><strong>TTL expired</strong> ${ch.ttl_expired != null ? ch.ttl_expired : '—'}</span>`;
+        const live = ch.live || {};
+        kpis.innerHTML = `<span><strong>Live tile chase buckets</strong> ${escapeHtml(live.status || '—')}${live.reason ? ' · ' + escapeHtml(live.reason) : ''}</span>`;
+      }
+      const vc = document.getElementById('virtualChaseApplicability');
+      if (vc) {
+        vc.style.display = noTileChases ? '' : 'none';
+        vc.textContent = noTileChases ? noChaseCopy + ' Shadow chase outcomes are shown in the chase panel as SIMULATED (shadow).' : '';
       }
       const body = document.getElementById('chaseBucketStats');
       if (body) {
+        const v = x => (x != null ? x : '—');
         const rows = ch.buckets || [];
         body.innerHTML = rows.map(b => `<tr>
-          <td>${b.bucket || '—'}</td>
-          <td>${b.trades != null ? b.trades : '—'}</td>
-          <td>${b.win_rate_pct != null ? b.win_rate_pct : '—'}</td>
-          <td>${b.sum_pnl_usd != null ? b.sum_pnl_usd : '—'}</td>
-          <td>${b.ev_usd != null ? b.ev_usd : '—'}</td>
-        </tr>`).join('') || '<tr><td colspan="5">No chase stats yet</td></tr>';
+          <td>${escapeHtml(b.bucket || '—')}</td>
+          <td>${v(b.reached)}</td>
+          <td>${v(b.trades)}</td>
+          <td>${v(b.fill_rate_pct)}</td>
+          <td>${v(b.win_rate_pct)}</td>
+          <td>${v(b.ev_bp)}</td>
+          <td>${v(b.ev_usd)}</td>
+          <td>${v(b.sum_pnl_usd)}</td>
+          <td>${v(b.avg_time_to_fill_sec)}</td>
+        </tr>`).join('') || '<tr><td colspan="9">No chase stats yet</td></tr>';
       }
     }
     function renderSpreadAnalyticsPanel(sp) {
@@ -36472,7 +36457,7 @@ DASHBOARD_JS = """(function () {
             persistSpreadGatePrefs(d.spread_gate);
           }
         }
-        renderChaseAnalyticsPanel(d.chase_analytics || {});
+        renderChaseAnalyticsPanel(d.chase_analytics || {}, !!(d && d.public_sanitized));
         renderSpreadAnalyticsPanel(d.spread_analytics || {});
         if (d.edge_range_preset) {
         }
@@ -38389,9 +38374,11 @@ def bitfinex_live_reconcile_loop() -> None:
                         f"fill(s) adopted "
                         f"[PIPELINE ENFORCEMENT]"
                     )
+            _THREAD_HEALTH.beat("bitfinex_live_reconcile_loop")
             time.sleep(interval)
         except Exception as exc:
-            logger.debug(f"[BITFINEX LIVE] reconcile loop error: {exc}")
+            _THREAD_HEALTH.error("bitfinex_live_reconcile_loop", exc)
+            logger.warning(f"[BITFINEX LIVE] reconcile loop error: {exc}")
             time.sleep(interval)
 
 
@@ -40374,6 +40361,16 @@ def _dashboard_tile_offsets_text(tiles) -> str:
     ) or "no registered tiles"
 
 
+def _operating_pause_truth(snap: dict) -> dict:
+    if "execution_paused" in snap or "manual_admin_pause" in snap:
+        paused = bool(snap.get("execution_paused") or snap.get("manual_admin_pause"))
+        owner = snap.get("pause_owner") if paused else None
+        return {"available": True, "paused": paused, "owner": owner,
+                "label": f"PAUSED (owner {owner or 'unattributed'})" if paused else "Execution running (no pause)"}
+    return {"available": False, "paused": None, "owner": None,
+            "label": "Pause state: not available (not in this snapshot)"}
+
+
 def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None) -> dict:
     """Mode, revision, pause owner, disk, transfer and alarms: one block for owner and public views."""
     live_armed = (snap.get("live_armed") if "live_armed" in snap else state.get("live_armed")) is True
@@ -40384,14 +40381,7 @@ def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None)
         "label": ("PAPER" if paper else "LIVE COPY") + " — Bitfinex " + ("ARMED" if live_armed else "DISARMED"),
     }
     revision = snap.get("source_git_rev") or snap.get("git_rev") or None
-    if "execution_paused" in snap or "manual_admin_pause" in snap:
-        paused = bool(snap.get("execution_paused") or snap.get("manual_admin_pause"))
-        owner = snap.get("pause_owner") if paused else None
-        pause = {"available": True, "paused": paused, "owner": owner,
-                 "label": f"PAUSED (owner {owner or 'unattributed'})" if paused else "Execution running (no pause)"}
-    else:
-        pause = {"available": False, "paused": None, "owner": None,
-                 "label": "Pause state: not available (not in this snapshot)"}
+    pause = _operating_pause_truth(snap)
     alarms = []
     try:
         usage = shutil.disk_usage(_data_sync_volume_root())
@@ -41207,6 +41197,7 @@ def _start_api_state_cache_refresher():
 
 
 def _api_state_cache_refresher_loop():
+    _THREAD_HEALTH.bind("api_state_cache_refresher")
     while not shutdown_event.is_set():
         try:
             if manual_admin_pause_active():
@@ -41432,7 +41423,10 @@ def _api_state_cache_refresher_loop():
             with _api_state_cache_lock:
                 _api_state_cache["payload"] = snap
                 _api_state_cache["built_at"] = time.time()
+                _api_state_cache["full_built_at"] = _api_state_cache["built_at"]
+            _THREAD_HEALTH.beat("api_state_cache_refresher")
         except Exception as e:
+            _THREAD_HEALTH.error("api_state_cache_refresher", e)
             logger.error(f"/api/state background refresher error: {e}")
         shutdown_event.wait(_API_STATE_REFRESH_INTERVAL_SEC)
 
@@ -41612,6 +41606,33 @@ def _sanitize_public_state(state: dict) -> dict:
     return out
 
 
+def _api_state_live_overlay(cached: dict, built_at: float, now: float | None = None) -> dict:
+    """Serve pause control state live so /api/state cannot contradict /health.
+
+    The heavy snapshot is rebuilt every few seconds; pause fields are read at
+    request time (GIL-atomic dict reads, as /health does) and the dashboard
+    pause truth is recomputed from them. Returns a shallow copy.
+    """
+    now = time.time() if now is None else float(now)
+    out = dict(cached)
+    try:
+        out["execution_paused"] = bool(state.get("execution_paused", False))
+        out["execution_reason"] = state.get("execution_reason", "")
+        out["manual_admin_pause"] = bool(state.get("manual_admin_pause", False))
+        out["pause_owner"] = _pause_owner_locked()
+        truth = out.get("dashboard_truth")
+        if isinstance(truth, dict) and isinstance(truth.get("operating"), dict):
+            out["dashboard_truth"] = {
+                **truth, "operating": {**truth["operating"], "pause": _operating_pause_truth(out)},
+            }
+        out["api_state_pause_source"] = "LIVE"
+    except Exception as exc:
+        out["api_state_pause_source"] = f"SNAPSHOT ({type(exc).__name__})"
+    out["api_state_built_at"] = built_at or None
+    out["api_state_age_sec"] = round(max(0.0, now - built_at), 3) if built_at else None
+    return out
+
+
 @app.route('/api/state')
 def api_state():
     # O(1) cache return — the heavy ~108KB snapshot rebuild runs on a background
@@ -41620,8 +41641,12 @@ def api_state():
     admin_authed = _admin_authed_strict()
     with _api_state_cache_lock:
         cached = _api_state_cache.get("payload")
+        built_at = float(_api_state_cache.get("full_built_at") or _api_state_cache.get("built_at") or 0.0)
         if cached is not None:
+            cached = _api_state_live_overlay(cached, built_at)
             payload = cached if admin_authed else _sanitize_public_state(cached)
+            payload["api_state_built_at"] = cached["api_state_built_at"]
+            payload["api_state_age_sec"] = cached["api_state_age_sec"]
             resp = jsonify(payload)
             resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
             resp.headers["Pragma"] = "no-cache"
@@ -41982,6 +42007,43 @@ def _inject_system_health_banner(response):
     return response
 
 
+def _runtime_blindspot_status_fields(now: float) -> dict:
+    """Thread, queue, ledger, rate-limit and shipper telemetry; each part fails soft."""
+    fields = {}
+    parts = {
+        "threads": lambda: _THREAD_HEALTH.snapshot(now),
+        "queues": lambda: _QUEUE_COUNTERS.snapshot({
+            "signal_queue": signal_queue,
+            "event_queue": event_queue,
+            "ws_tick_lifecycle_queue": ws_tick_lifecycle_queue,
+        }, now),
+        "ledgers": lambda: {
+            name: {**row, "last_write_ts": row["last_success_ts"], "write_failures": row["failures"]}
+            for name, row in _LEDGER_WRITES.snapshot(now).items()
+        },
+        "rate_limits": lambda: _RATE_LIMITS.snapshot(now),
+        "shipper": lambda: _volume_transfer_snapshot(_data_sync_volume_root(), now),
+        "relay_outbox": lambda: _relay_delivery_guard.status(now),
+    }
+    for key, build in parts.items():
+        try:
+            fields[key] = build()
+        except Exception as exc:
+            fields[key] = {"status": "UNKNOWN", "error": type(exc).__name__}
+    return fields
+
+
+def _tile_rows_with_toggles(rows) -> list:
+    out = []
+    for row in rows:
+        try:
+            enabled = bool(is_research_lane_enabled(row.get("lane")))
+        except Exception:
+            enabled = None
+        out.append({**row, "toggle_on": enabled})
+    return out
+
+
 @app.route('/api/status')
 @app.route('/status')
 def status():
@@ -42003,6 +42065,9 @@ def status():
         require_armed=False,
         now=now,
     )
+    relay_arm_block = _relay_delivery_guard.arming_block_reason(now)
+    if armable and relay_arm_block:
+        armable, arm_block_reason = False, relay_arm_block
     trading_ready, trading_block_reason, _ = can_open_live_entry(
         require_armed=True,
         now=now,
@@ -42017,7 +42082,7 @@ def status():
     status = "paused" if paused else (
         "alive" if process_alive and strategy_progress["ok"] else "degraded"
     )
-    tile_registry = active_tile_lifecycle_manifest()
+    tile_registry = _tile_rows_with_toggles(active_tile_lifecycle_manifest())
     tile_registry_signature = active_tile_registry_signature()
     payload = {
         "status": status,
@@ -42140,7 +42205,9 @@ def status():
             },
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
+            "execution_funnel": {"hook_failures": _FUNNEL_HOOK_FAILURES.snapshot(now)},
         },
+        **_runtime_blindspot_status_fields(now),
     }
     payload["collection_epoch_parity"] = _collection_epoch_parity(payload["lifecycle_pipeline"])
     return jsonify(payload)
@@ -42290,6 +42357,15 @@ def health():
         payload["research_collection"] = research_collection_health(now)
     except Exception as exc:
         payload["research_collection"] = {"status": "UNKNOWN", "error": type(exc).__name__}
+    try:
+        scheduler = _relay_push_state.get("delivery_scheduler") or {}
+        payload["relay_outbox"] = {
+            **_relay_delivery_guard.status(now),
+            "ready_trade_heads": scheduler.get("ready_trade_heads"),
+            "owner_filter_applied": scheduler.get("owner_filter_applied"),
+        }
+    except Exception as exc:
+        payload["relay_outbox"] = {"status": "UNKNOWN", "error": type(exc).__name__}
     return jsonify(payload), (200 if process_alive else 503)
 
 
@@ -42312,6 +42388,9 @@ def ready():
         require_armed=False,
         now=now,
     )
+    relay_arm_block = _relay_delivery_guard.arming_block_reason(now)
+    if armable and relay_arm_block:
+        armable, arm_block_reason = False, relay_arm_block
     trading_ready, trading_block_reason, _ = can_open_live_entry(
         require_armed=True,
         now=now,
@@ -42338,8 +42417,14 @@ def ready():
         and runtime["rest_entry_quote_ready"]
     )
     tile_registry = active_tile_lifecycle_manifest()
+    try:
+        thread_summary = _THREAD_HEALTH.summary(now)
+    except Exception as exc:
+        thread_summary = {"ok": None, "error": type(exc).__name__}
     return jsonify({
         "ok": ready_ok,
+        # Diagnostic only; deliberately not an input to ready_ok.
+        "thread_health": thread_summary,
         "process_ready": process_ready,
         "status": (
             "ready" if ready_ok else ("alive_not_strategy_ready" if process_ready else "not_ready")
@@ -42410,6 +42495,7 @@ def api_pause():
         # can wait on trade_lock or exchange I/O.
         state["live_armed"] = False
         state["bitfinex_live_enabled"] = False
+        state.pop("live_armed_at_ts", None)
         priority = PAUSE_PRIORITIES.get("ADMIN_MANUAL", 0)
         if priority >= state.get("_pause_priority", 0):
             state["execution_paused"] = True
@@ -43894,7 +43980,11 @@ def _arm_live_control() -> tuple:
         armable, block_reason, runtime = can_open_live_entry(require_armed=False)
         if not armable:
             return False, block_reason, runtime, exchange_audit
+        relay_block = _relay_delivery_guard.arming_block_reason()
+        if relay_block:
+            return False, relay_block, runtime, exchange_audit
         with state_lock:
+            state["live_armed_at_ts"] = time.time()
             state["live_armed"] = True
             state["bitfinex_live_enabled"] = True
         save_persistent_config()
@@ -43906,6 +43996,7 @@ def _disarm_live_control(reason: str) -> dict:
         with state_lock:
             state["live_armed"] = False
             state["bitfinex_live_enabled"] = False
+            state.pop("live_armed_at_ts", None)
         save_persistent_config()
     # Flags are already false before cancellation begins. A concurrent submit
     # must acquire the same lock and will fail its armed gate; private I/O is
@@ -49098,17 +49189,19 @@ def policy_allows_early_fail(strategy: str) -> bool:
 def safe_event_put(event):
     try:
         if event_queue.qsize() > MAX_EVENT_QUEUE * 0.7:
+            _QUEUE_COUNTERS.dropped("event_queue_throttled")
             logger.warning("Queue pressure high - throttling signals")
             return
         try:
             event_queue.put(event, timeout=0.01)
         except Full:
             logger.error("[QUEUE] Overflow - dropping safely")
+            _QUEUE_COUNTERS.dropped("event_queue")
             try:
                 event_queue.get_nowait()
                 event_queue.put(event)
-            except:
-                pass
+            except Exception:
+                _QUEUE_COUNTERS.dropped("event_queue")
     except Exception as e:
         logger.error(f"safe_event_put failed: {e}")
 
@@ -49125,6 +49218,7 @@ def drain_stale_events():
     for ev in temp:
         event_queue.put_nowait(ev)
     if drained > 0:
+        _QUEUE_COUNTERS.dropped("event_queue_stale", drained)
         logger.info(f"Drained {drained} stale events")
 
 def reconcile_state():
@@ -49251,10 +49345,12 @@ def analytics_loop():
                         f"[PIPELINE ENFORCEMENT]"
                     )
                 except Exception as fe:
+                    _THREAD_HEALTH.error("analytics_loop", fe)
                     logger.debug(f"[FUNNEL] report refresh failed: {fe}")
                 try:
                     refresh_pathway_scorecard_live()
                 except Exception as pe:
+                    _THREAD_HEALTH.error("analytics_loop", pe)
                     logger.debug(f"[PATHWAY_SCORECARD] analytics refresh failed: {pe}")
                 try:
                     rep = refresh_shadow_vs_live_entry_report(os.getcwd())
@@ -49264,11 +49360,15 @@ def analytics_loop():
                             f"avg_delta=${rep.get('avg_delta_usd')} [PIPELINE ENFORCEMENT]"
                         )
                 except Exception as se:
+                    _THREAD_HEALTH.error("analytics_loop", se)
                     logger.debug(f"[SHADOW_VS_LIVE] report refresh failed: {se}")
             except Exception as e:
+                _THREAD_HEALTH.error("analytics_loop", e)
                 logger.error(f"Analytics error: {e}")
+            _THREAD_HEALTH.beat("analytics_loop")
             time.sleep(ANALYTICS_INTERVAL_SEC)
     except Exception as e:
+        _THREAD_HEALTH.error("analytics_loop", e)
         logger.exception("[CRITICAL] Analytics loop crash")
         set_execution_paused("THREAD_CRASH")
 
@@ -51667,8 +51767,10 @@ def tick_execution_engine():
             manage_open_positions()
             cleanup_expired_orders()
             pipeline_state_sync()
+            _THREAD_HEALTH.beat("tick_execution_engine")
             time.sleep(FAST_MONITOR_INTERVAL_SEC)
         except Exception as e:
+            _THREAD_HEALTH.error("tick_execution_engine", e)
             logger.error(f"[ENGINE ERROR] {e}")
             time.sleep(2)
 
@@ -52199,6 +52301,7 @@ def main():
         daemon=True,
     ).start()
     update_logger_level()
+    _THREAD_HEALTH.bind("main_supervisor_loop")
     while True:
         try:
             recover_from_crash()
@@ -52206,8 +52309,10 @@ def main():
             try:
                 supervise_collector_workers()
             except Exception as exc:
+                _THREAD_HEALTH.error("main_supervisor_loop", exc)
                 logger.error(f"[COLLECTOR_SUPERVISOR] tick failed: {exc} [PIPELINE ENFORCEMENT]")
             print_console_dashboard()
+            _THREAD_HEALTH.beat("main_supervisor_loop")
             if shutdown_event.wait(60):
                 logger.info("Shutting down...")
                 save_positions()
@@ -52240,6 +52345,7 @@ def main():
                 _stop_lifecycle_pipeline_runtime(timeout=5.0)
                 break
         except Exception as e:
+            _THREAD_HEALTH.error("main_supervisor_loop", e)
             logger.critical(f"[FATAL] Restarting after crash: {e}")
             time.sleep(5)
 

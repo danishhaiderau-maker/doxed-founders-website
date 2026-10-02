@@ -6,6 +6,8 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 from types import SimpleNamespace
 
+import thread_health
+
 
 SOURCE_PATH = Path(__file__).with_name("bot.py")
 SOURCE = SOURCE_PATH.read_text(encoding="utf-8")
@@ -40,6 +42,7 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             "Full": Full,
             "Empty": Empty,
             "ws_tick_lifecycle_queue": q,
+            "_QUEUE_COUNTERS": thread_health.QueueCounters(),
         }
         compile_function("_enqueue_ws_tick_lifecycle", ns)
         self.assertTrue(ns["_enqueue_ws_tick_lifecycle"](100.0, 1.0))
@@ -81,6 +84,8 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             "WS_TICK_LIFECYCLE_MAX_AGE_SEC": 5.0,
             "_tick_driven_position_exits": lambda price: calls.append(price),
             "logger": SimpleNamespace(error=lambda *a, **k: None),
+            "_QUEUE_COUNTERS": thread_health.QueueCounters(),
+            "_THREAD_HEALTH": thread_health.ThreadHealthRegistry(),
         }
         compile_function("ws_tick_lifecycle_worker", ns)
         q.put((time.time() - 10.0, 99.0))

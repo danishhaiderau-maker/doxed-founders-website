@@ -97,6 +97,15 @@ _STATE = {
 _DDOLLAR_GATE_MIN_DEFAULT = 2000.0
 _DDOLLAR_GATE_TTL_SEC = 60.0
 _DDOLLAR_CACHE = {"ts": 0.0, "balance": None, "reason": ""}
+_DDOLLAR_ERRORS = {"errors": 0, "last_error_ts": 0.0, "last_error": None}
+DDOLLAR_GATE_ERROR = "DDOLLAR_GATE_ERROR"
+
+
+def record_ddollar_gate_error(exc) -> None:
+    """Count a gate fetch/evaluation exception; the gate itself stays closed."""
+    _DDOLLAR_ERRORS["errors"] = int(_DDOLLAR_ERRORS["errors"]) + 1
+    _DDOLLAR_ERRORS["last_error_ts"] = time.time()
+    _DDOLLAR_ERRORS["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
 
 
 def _ddollar_gate_min() -> float:
@@ -136,6 +145,7 @@ def _fetch_ddollar_balance() -> tuple[float | None, str]:
             return None, "DDollar balance field missing in response"
         return bal, "ok"
     except Exception as exc:
+        record_ddollar_gate_error(exc)
         return None, f"DDollar fetch failed: {exc}"
 
 
@@ -157,15 +167,22 @@ def ddollar_gate_status() -> dict:
         "passed": passed,
         "reason": _DDOLLAR_CACHE["reason"] if not passed else "ok",
         "url_configured": bool((os.environ.get("DDOLLAR_GATE_URL") or "").strip()),
+        "errors": int(_DDOLLAR_ERRORS["errors"]),
+        "last_error_ts": _DDOLLAR_ERRORS["last_error_ts"] or None,
+        "last_error": _DDOLLAR_ERRORS["last_error"],
     }
 
 
 def _ddollar_gate_ok_for_entry() -> tuple[bool, str]:
-    """Gate check for entry order paths. Returns (allowed, reason)."""
-    status = ddollar_gate_status()
-    if status["passed"]:
-        return True, "ok"
-    return False, status["reason"] or f"DDollar balance {status['balance']} < min {status['minimum']}"
+    """Gate check for entry order paths. Returns (allowed, reason); fails closed."""
+    try:
+        status = ddollar_gate_status()
+        if status["passed"]:
+            return True, "ok"
+        return False, status["reason"] or f"DDollar balance {status['balance']} < min {status['minimum']}"
+    except Exception as exc:
+        record_ddollar_gate_error(exc)
+        return False, f"{DDOLLAR_GATE_ERROR}: {type(exc).__name__}"
 
 
 def _persist() -> None:

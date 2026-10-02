@@ -1604,7 +1604,8 @@ def test_decision7_chase_effectiveness_prospective_reporting_preserved():
     """Danish decision 7 — chase effectiveness reporting remains observational
     and prospective (settings epoch recorded on chase change)."""
     assert "_record_execution_settings_epoch(\"CHASE_CHANGED\")" in BOT_SOURCE
-    assert "CHASE_EFFECTIVENESS_REPORT_FILE" in BOT_SOURCE
+    analyzer_source = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8")
+    assert "CHASE_EFFECTIVENESS_REPORT_FILE" in analyzer_source
     assert "CHASE_EFFICIENCY_MATRIX_FILE" in BOT_SOURCE
 
 
