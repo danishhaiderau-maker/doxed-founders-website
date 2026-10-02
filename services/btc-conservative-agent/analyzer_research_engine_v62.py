@@ -9199,6 +9199,20 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
                 _CURRENT_MIRROR_GENERATION_LEASE = None
 
 
+_CURRENT_GENERATION_SOURCE_HEARTBEAT = None
+
+
+def _capture_generation_source_heartbeat():
+    """Freeze the promotion heartbeat this generation reads; the archive's
+    analyzer-consumed seq must never claim data promoted after the run began."""
+    global _CURRENT_GENERATION_SOURCE_HEARTBEAT
+    try:
+        path = Path(os.environ["BTC_AGENT_DATA_DIR"]) / ".fly-data-sync-loop.heartbeat.json"
+        _CURRENT_GENERATION_SOURCE_HEARTBEAT = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError):
+        _CURRENT_GENERATION_SOURCE_HEARTBEAT = None
+
+
 def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
         global _CURRENT_MIRROR_COHERENCE_TOKEN
@@ -9219,6 +9233,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             require_canonical_manifest=True,
         )
         _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
+        _capture_generation_source_heartbeat()
         session = load_research_session()
         print_data_provenance_banner(session)
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
@@ -23197,6 +23212,28 @@ def finalize_analyzer_outputs(
         except Exception as exc:
             # A failed export leaves the previous one in place; readers refuse it as stale.
             print(f"  ⚠️ Agent export failed: {type(exc).__name__}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+            export = None
+        try:
+            import analysis_archive
+
+            report_dir = os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE))
+            snapshot = analysis_archive.write_generation_snapshot(
+                report_dir=report_dir,
+                data_dir=os.environ.get("BTC_AGENT_DATA_DIR") or os.getcwd(),
+                trades=trades, export_summary=export,
+                source_heartbeat=_CURRENT_GENERATION_SOURCE_HEARTBEAT,
+            )
+            long_horizon = analysis_archive.write_long_horizon_report(
+                trades, report_dir, lanes=CURRENT_RESEARCH_LANES)
+            print(
+                f"  Analysis archive: {snapshot.get('snapshot_id')} verified={snapshot.get('verified')}; "
+                f"long-horizon days={(long_horizon.get('coverage') or {}).get('days_total')} "
+                f"(archived={(long_horizon.get('coverage') or {}).get('days_from_archive')}) "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
+            )
+        except Exception as exc:
+            # Without a verified snapshot laptop retention keeps every file (fail closed).
+            print(f"  Analysis archive failed: {type(exc).__name__}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     try:
         from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 

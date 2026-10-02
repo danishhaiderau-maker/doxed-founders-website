@@ -281,7 +281,10 @@ def test_snapshot_refuses_stale_components(tmp_path, monkeypatch):
     assert comps["fly_bot"]["status"] == "UNAVAILABLE" and comps["fly_bot"]["data"] is None
     assert comps["transfer"]["status"] == "OK" and comps["transfer"]["data"]["applied_behind_published"] == 0
     assert comps["deploy_queue"]["status"] == "OK"
-    assert {r["component"] for r in snap["refused"]} == {"system_health", "analyzer_export", "fly_bot"}
+    # The fake client has no load_archive: the archive is refused, never faked.
+    assert comps["analysis_archive"]["status"] == "UNAVAILABLE" and comps["analysis_archive"]["data"] is None
+    assert {r["component"] for r in snap["refused"]} == {"system_health", "analyzer_export", "fly_bot",
+                                                         "analysis_archive"}
     assert snap["system_verdict"] == "UNKNOWN"
 
 

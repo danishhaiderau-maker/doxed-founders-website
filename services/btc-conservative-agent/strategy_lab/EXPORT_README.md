@@ -29,7 +29,27 @@ exp.checks                          # which freshness / parity checks passed
 generation differs from the analyzer's current `report_manifest.json`, or (when :9001 is up) whose
 generation/revision differs from the dashboard. `require_revision="a76a52a"` pins a revision.
 
+## Long-horizon archive and compact Tier A data
+
+```python
+from analyzer_client import load_archive, load_tier_a
+
+arc = load_archive(since="2026-09-01")   # C:\DoxxedCrypto\analysis-archive (never auto-deleted)
+arc["snapshots"]                          # one row per verified generation snapshot
+arc["daily"], arc["weekly"]               # per epoch x tile/family/exit/regime: n, wins, net, mean
+arc["compat"]                             # COMPATIBLE / INCOMPATIBLE / TAMPERED per document
+tape = load_tier_a("bitfinex_l1_tape_1s", since="2026-09-30", parse=True)   # zstd Parquet per UTC day
+```
+
+Raw Tier B blobs (signal/post-exit replay, order multiverse) are deleted on the laptop once Fly
+ACK + hash parity + analyzer consumption + a verified snapshot cover them, so the archive and the
+generation's `long_horizon_report.json` are the source for anything older than the live window.
+Documents with an unsupported `schema_version` are excluded and listed, never silently mixed in.
+
 ## HTTP (local, read-only, 127.0.0.1:9001)
+
+- `GET /api/archive` - archive freshness, schema compat, 30-day tile rollups, retention state, long-horizon report
+- `GET /history` - History & retention page (`/data-health` also shows archive schema compat)
 
 - `GET /api/export/latest` — summary.json (`?table=hypotheses` returns that table as JSON rows)
 - `GET /api/hypotheses` — hypothesis verdicts + exploratory family tests

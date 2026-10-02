@@ -85,6 +85,12 @@ def healthy(now: float) -> dict:
         "master_sha": "a76a52a0dd50ffff",
         "laptop_disk": {"free": 300e9, "total": 1e12},
         "neon": None,
+        "retention_last_run": {"mode": "enforce", "finished_at": sh.iso(now - 900), "level": "GREEN",
+                               "bytes_after": 20e9, "cap_bytes": 50e9, "usage_fraction": 0.4,
+                               "deny_reasons": [], "reclaimed_bytes": 0, "would_reclaim_bytes": 0,
+                               "ledger_rows": 10},
+        "archive_last_snapshot": {"snapshot_id": "s1", "written_at": sh.iso(now - 900),
+                                  "segment_seq_through": 100},
     }
 
 
@@ -750,3 +756,25 @@ def test_banner_payload_is_accepted_by_fly_sanitizer():
 
 def test_refuses_onedrive_state_dir(capsys):
     assert sh.main(["--state-dir", r"C:\Users\x\OneDrive\laptop-chain", "--latest"]) == 2
+
+
+def test_retention_cap_and_archive_freshness():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = healthy(now)
+    inputs["retention_last_run"].update(level="RED", usage_fraction=0.93, bytes_after=46.5e9)
+    assert by_id(sh.evaluate(inputs, {}))["storage.retention"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["retention_last_run"]["finished_at"] = sh.iso(now - 4 * 3600)
+    assert by_id(sh.evaluate(inputs, {}))["storage.retention"]["status"] == sh.AMBER
+    inputs = healthy(now)
+    inputs["fly_health"]["volume"]["transfer"].update(pruned_through_seq=90, custody_through_seq=80)
+    assert by_id(sh.evaluate(inputs, {}))["storage.retention"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["archive_last_snapshot"]["written_at"] = sh.iso(now - 13 * 3600)
+    assert by_id(sh.evaluate(inputs, {}))["archive.freshness"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["retention_last_run"] = None
+    inputs["archive_last_snapshot"] = None
+    checks = by_id(sh.evaluate(inputs, {}))
+    assert checks["storage.retention"]["status"] == sh.AMBER
+    assert checks["archive.freshness"]["status"] == sh.AMBER

@@ -633,23 +633,46 @@ def run_analyzer_retention(
         candidates=rotation_inventory,
     )
 
-    rotation_prune = _prune_closed_rotations(
-        rotation_paths,
-        now=now,
-        minimum_age_hours=rotation_age_hours,
-        keep_latest=rotation_keep_latest,
-        acknowledged_inventory=rotation_inventory,
-    )
+    # Raw rotation deletion belongs to bot_data_retention.py, which deletes only
+    # after Fly checkpoint hashes, GREEN parity and a verified analysis-archive
+    # snapshot; deleting here (canonical only) made migration re-copy the files.
+    delete_rotations = os.getenv("ANALYZER_ROTATED_RAW_DELETE", "0").strip() == "1"
+    if delete_rotations:
+        rotation_prune = _prune_closed_rotations(
+            rotation_paths,
+            now=now,
+            minimum_age_hours=rotation_age_hours,
+            keep_latest=rotation_keep_latest,
+            acknowledged_inventory=rotation_inventory,
+        )
+    else:
+        rotation_prune = {
+            "inventoried": len(rotation_paths), "kept": len(rotation_paths), "deleted": 0,
+            "deleted_bytes": 0, "deleted_files": [], "minimum_age_hours": rotation_age_hours,
+            "keep_latest_per_ledger": rotation_keep_latest, "fingerprint_mismatches": 0,
+            "delegated_to": "bot_data_retention",
+        }
     db_prune = _prune_research_db_raw(
         db_path,
         now=now,
         retain_hours=raw_db_retain_hours,
     )
-    cap_enforcement = _enforce_raw_mirror_cap(
-        data_root,
-        cap_bytes=raw_mirror_cap_bytes,
-        acknowledged_inventory=rotation_inventory,
-    )
+    if delete_rotations:
+        cap_enforcement = _enforce_raw_mirror_cap(
+            data_root,
+            cap_bytes=raw_mirror_cap_bytes,
+            acknowledged_inventory=rotation_inventory,
+        )
+    else:
+        measured = _tree_bytes(data_root)
+        cap_enforcement = {
+            "status": "DELEGATED_TO_BOT_DATA_RETENTION", "cap_bytes": raw_mirror_cap_bytes,
+            "before_bytes": measured, "after_bytes": measured,
+            "usage_pct": round((measured / raw_mirror_cap_bytes) * 100, 3) if raw_mirror_cap_bytes else 0,
+            "acknowledged_candidates": 0, "fingerprint_mismatches": 0, "deleted": 0,
+            "deleted_bytes": 0, "deleted_files": [], "unsafe_files_deleted": 0,
+            "reason": "Raw deletion is custody-gated by bot_data_retention.py (laptop 50 GB cap).",
+        }
     _append_storage_outcome(
         daily / "storage_retention_receipt.md",
         {

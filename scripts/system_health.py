@@ -54,6 +54,8 @@ DEFAULT_SHADOW_ROOT = r"C:\DoxxedCrypto\fly-mirror-segments"
 DEFAULT_EXPORTS = r"C:\DoxxedCrypto\analyzer-exports\latest"
 DEFAULT_PROOF_DIR = r"C:\DoxxedCrypto\btc-v31-current\diagnostics"
 DEFAULT_VAULT = r"C:\DoxxedCrypto\doxedcryptofounder-secrets\vault\home-bot.env"
+DEFAULT_RETENTION_DIR = r"C:\DoxxedCrypto\bot-data-retention"
+DEFAULT_ARCHIVE_DIR = r"C:\DoxxedCrypto\analysis-archive"
 FLY_URL = "https://doxed-btc-bot.fly.dev"
 ANALYZER_URL = "http://127.0.0.1:9001"
 SERVER_PORT = 9011
@@ -107,6 +109,10 @@ THRESHOLDS: dict[str, float] = {
     "fly_free_red_bytes": 4 * 1024**3,
     "store_cap_amber_pct": 80.0,
     "store_cap_red_pct": 95.0,
+    "retention_run_amber_sec": 3 * HOUR,
+    "retention_run_red_sec": 12 * HOUR,
+    "archive_snapshot_amber_sec": 3 * HOUR,
+    "archive_snapshot_red_sec": 12 * HOUR,
     "proof_row_amber_sec": 45 * MIN,
     "supervisor_tick_red_sec": 15 * MIN,
     "watcher_stale_sec": 15 * MIN,
@@ -454,6 +460,10 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["ack_receipt"] = json.loads(last)
     except (OSError, ValueError, IndexError):
         inputs["ack_receipt"] = None
+    retention_dir = Path(getattr(opts, "retention_dir", None) or DEFAULT_RETENTION_DIR)
+    inputs["retention_last_run"] = read_json(retention_dir / "last-run.json")
+    inputs["archive_last_snapshot"] = last_jsonl_row(
+        Path(getattr(opts, "archive_dir", None) or DEFAULT_ARCHIVE_DIR) / "index.jsonl")
     inputs["proof_last_row"] = latest_proof_row(inputs.get("proof_active"), Path(opts.proof_dir))
     inputs["supervisor_tick_at"] = last_supervisor_tick(state_dir / "logs")
 
@@ -483,6 +493,17 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     inputs["neon"] = collect_neon(cache, opts.state_dir)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
     return inputs
+
+
+def last_jsonl_row(path: Path) -> dict[str, Any] | None:
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - 16384))
+            last = [l for l in handle.read().decode("utf-8", "replace").splitlines() if l.strip()][-1]
+        row = json.loads(last)
+        return row if isinstance(row, dict) else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def parse_deepseek_balance(payload: Any, err: str | None, now: float, source: str) -> dict[str, Any]:
@@ -1204,7 +1225,55 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     add(check("disk.space", "disk", st if parts else SKIP, "; ".join(parts) or "unknown",
               f"laptop >= {t['laptop_free_amber_bytes'] / 1024**3:.0f}GB, Fly >= {t['fly_free_amber_bytes'] / 1024**3:.0f}GB, "
               f"store < {t['store_cap_amber_pct']:.0f}% cap",
-              "" if st == GREEN else "data growth; DO NOT prune - raise volume or ask Danish"))
+              "" if st == GREEN else "data growth; check storage.retention (custody-gated pruning) "
+                                     "before raising the volume"))
+
+    # ---------------- Retention (laptop 50 GB cap, prune ledger) and analysis archive
+    run = inputs.get("retention_last_run")
+    if not isinstance(run, Mapping):
+        add(check("storage.retention", "storage", AMBER, "bot_data_retention has not run",
+                  "retention run within 3h, usage below 80% of cap",
+                  "run-segment-analyzer-cycle.ps1 calls bot_data_retention.py after each analyzer pass"))
+    else:
+        run_age = (now - parse_ts(run.get("finished_at"))) if parse_ts(run.get("finished_at")) else None
+        level = str(run.get("level") or AMBER)
+        st = level if level in (GREEN, AMBER, RED) else AMBER
+        if run_age is None or run_age > t["retention_run_red_sec"]:
+            st = RED
+        elif run_age > t["retention_run_amber_sec"]:
+            st = max(st, AMBER, key=RANK.get)
+        denied = run.get("deny_reasons") or []
+        if denied and st == GREEN and float(run.get("usage_fraction") or 0) >= 0.8:
+            st = AMBER
+        prune_mode = transfer.get("prune_mode") if transfer else None
+        pruned, custody = (transfer or {}).get("pruned_through_seq"), (transfer or {}).get("custody_through_seq")
+        if pruned and (custody is None or int(pruned) > int(custody)):
+            st = RED
+        used = float(run.get("bytes_after") or 0) / 1e9
+        cap = float(run.get("cap_bytes") or 0) / 1e9
+        add(check("storage.retention", "storage", st,
+                  f"laptop bot data {used:.1f}/{cap:.0f}GB ({float(run.get('usage_fraction') or 0) * 100:.0f}%), "
+                  f"mode {run.get('mode')}, last run {fmt_age(run_age)} ago, ledger rows {run.get('ledger_rows')}, "
+                  f"reclaimed {int(run.get('reclaimed_bytes') or 0) / 1e9:.2f}GB"
+                  f"{' (would ' + format(int(run.get('would_reclaim_bytes') or 0) / 1e9, '.2f') + 'GB)' if run.get('mode') == 'dry_run' else ''}; "
+                  f"deny={denied or 'none'}; Fly prune {prune_mode or 'off'} pruned<= {pruned} custody<= {custody}",
+                  "run < 3h old, usage < 80% (AMBER) / 90% (RED) of the 50GB cap, Fly pruned <= custody",
+                  "" if st == GREEN else "see C:\\DoxxedCrypto\\bot-data-retention\\status.json and "
+                                         "docs/runbooks/DATA-RETENTION.md"))
+    snap = inputs.get("archive_last_snapshot")
+    snap_at = parse_ts((snap or {}).get("written_at"))
+    snap_age = (now - snap_at) if snap_at else None
+    st = GREEN
+    if snap_age is None or snap_age > t["archive_snapshot_red_sec"]:
+        st = RED if snap_age is not None else AMBER
+    elif snap_age > t["archive_snapshot_amber_sec"]:
+        st = AMBER
+    add(check("archive.freshness", "storage", st,
+              f"last analysis snapshot {dig(snap, 'snapshot_id') or 'none'} {fmt_age(snap_age)} ago "
+              f"(seq<= {dig(snap, 'segment_seq_through')})",
+              "a verified snapshot per analyzer generation (< 3h)",
+              "" if st == GREEN else "no snapshot means retention deletes nothing; check the analyzer log "
+                                     "for 'Analysis archive failed'"))
     return checks
 
 
@@ -1553,6 +1622,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--exports", default=DEFAULT_EXPORTS)
     p.add_argument("--proof-dir", default=DEFAULT_PROOF_DIR)
     p.add_argument("--vault", default=DEFAULT_VAULT)
+    p.add_argument("--retention-dir", default=DEFAULT_RETENTION_DIR)
+    p.add_argument("--archive-dir", default=DEFAULT_ARCHIVE_DIR)
     p.add_argument("--fly-url", default=FLY_URL)
     p.add_argument("--analyzer-url", default=ANALYZER_URL)
     p.add_argument("--port", type=int, default=SERVER_PORT)

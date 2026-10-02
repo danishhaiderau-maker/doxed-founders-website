@@ -169,5 +169,25 @@ $env:ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = "$SyncMaxAgeSec"
   -RepoRoot $cfg.RepoRoot -CanonicalRoot $cfg.CanonicalRoot -StateDir $cfg.StateDir -Port $Port -Reason $Reason
 $analyzerExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message "ANALYZER exit=$analyzerExit"
+
+# Custody-gated retention (50 GB cap) runs only after a successful generation,
+# still inside this cycle's mutex so promotion/migration cannot race it. It
+# never changes the cycle's exit code; mode comes from bot-data-retention\mode.json.
+if ($analyzerExit -eq 0) {
+  Set-CycleStatus 'RETENTION'
+  $previousToken = $env:BOT_ADMIN_TOKEN
+  $ErrorActionPreference = 'Continue'
+  try {
+    $env:BOT_ADMIN_TOKEN = Get-AdminToken $cfg.VaultEnv
+    $retention = & $Python (Join-Path $cfg.RepoRoot 'services\btc-conservative-agent\bot_data_retention.py') `
+      --data-root $cfg.DataRoot --mode auto 2>&1 | Out-String
+    Write-ChainLog -Config $cfg -Name $logName -Message ("RETENTION exit={0} {1}" -f $LASTEXITCODE, $retention.Trim())
+  } catch {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("RETENTION skipped: {0}" -f $_.Exception.Message)
+  } finally {
+    $env:BOT_ADMIN_TOKEN = $previousToken
+    $ErrorActionPreference = $previous
+  }
+}
 Set-CycleStatus 'DONE' $analyzerExit
 exit $analyzerExit

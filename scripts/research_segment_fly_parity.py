@@ -7,7 +7,9 @@ laptop must hold byte-identical shipped content:
 - append streams: local length == shipped offset (minus the epoch baseline,
   plus a CSV header preamble) and the last 4 KiB match Fly's tail anchor;
 - shipped snapshots: sha256 equal; SQLite copies must pass integrity_check;
-- baseline-only files: pre-cutover history that never left Fly (informational).
+- baseline-only files: pre-cutover history that never left Fly (informational);
+- pruned_verified: sealed files the laptop deleted under custody-gated retention,
+  whose prune-ledger sha256 equals the checkpoint's (not missing).
 
 GREEN means 0 sealed mismatches and 0 missing shipped files.
 
@@ -60,10 +62,12 @@ def _sqlite_ok(path: Path) -> bool:
         return False
 
 
-def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baselines: dict) -> dict:
+def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baselines: dict,
+             pruned: dict[str, str] | None = None) -> dict:
     local = {path.relative_to(tree).as_posix(): path for path in tree.rglob("*") if path.is_file()}
+    pruned = pruned or {}
     buckets: dict[str, list] = {name: [] for name in (
-        "append_match", "snapshot_match", "sqlite_ok", "baseline_only",
+        "append_match", "snapshot_match", "sqlite_ok", "baseline_only", "pruned_verified",
         "missing", "sealed_mismatch", "sqlite_corrupt", "local_only")}
     for relpath, entry in sorted(files.items()):
         path = local.get(relpath)
@@ -85,7 +89,9 @@ def classify(files: dict[str, dict], tombstones: list[str], tree: Path, baseline
             else:
                 buckets["append_match"].append(relpath)
             continue
-        if path is None:
+        if path is None and entry.get("sha256") and pruned.get(relpath) == entry["sha256"]:
+            buckets["pruned_verified"].append(relpath)
+        elif path is None:
             buckets["missing"].append(relpath)
         elif _sha256(path) != entry.get("sha256"):
             buckets["sealed_mismatch"].append({"path": relpath, "reason": "sha256"})
@@ -106,6 +112,7 @@ def main(argv=None) -> int:
     parser.add_argument("--base-url", default="https://doxed-btc-bot.fly.dev")
     parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
     parser.add_argument("--report", required=True)
+    parser.add_argument("--retention-dir", default=r"C:\DoxxedCrypto\bot-data-retention")
     args = parser.parse_args(argv)
     token = os.environ.get("BOT_ADMIN_TOKEN") or ""
     if not token:
@@ -126,8 +133,11 @@ def main(argv=None) -> int:
             print(json.dumps({"verdict": "RETRY", "reason": "laptop is not at the checkpoint seq",
                               "fly_seq": checkpoint["seq"], "laptop_seq": state["applied_seq"]}))
             return 3
+        from bot_data_retention import pruned_index
+
         report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
-                          shadow_root / "tree", state.get("baselines") or {})
+                          shadow_root / "tree", state.get("baselines") or {},
+                          pruned_index(args.retention_dir))
     finally:
         lock.release()
     report.update({

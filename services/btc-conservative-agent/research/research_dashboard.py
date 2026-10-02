@@ -31,6 +31,7 @@ from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
 from research import ai_challenger_view as _ai_challenger_view
 from research import data_health_view as _data_health_view
+from research import archive_history_view as _archive_history_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -403,7 +404,7 @@ def _read_api_cache_key() -> str:
 _UNCACHED_API_PATHS = (
     "/api/health", "/api/status", "/api/integrity",
     "/api/export/latest", "/api/hypotheses", "/api/streams/health", "/api/insights",
-    "/api/system-health", "/api/system-health/alerts",
+    "/api/system-health", "/api/system-health/alerts", "/api/archive",
 )
 
 
@@ -9169,6 +9170,7 @@ DECISION_NAV_LINKS = (
     ("Evidence points", "/evidence-points"),
     ("AI vs challengers", "/ai-challengers"),
     ("Data health", "/data-health"),
+    ("History & retention", "/history"),
     ("Decision JSON", "/api/decision"),
 )
 
@@ -9359,11 +9361,45 @@ def api_data_health():
     return jsonify({"evidence": evidence, "report": report or None, "event_study": study or None})
 
 
+def _archive_payload() -> tuple[dict, dict]:
+    """Archive insights component (stale/unavailable carries data=None) and the long-horizon report."""
+    from strategy_lab import insights as _insights
+
+    try:
+        component = _insights.archive_component(time.time())
+    except Exception as exc:  # the archive must never take the dashboard down
+        component = {"status": "UNAVAILABLE", "reason": f"{type(exc).__name__}: {exc}", "data": None}
+    long_horizon = _read_json(str(Path(ROOT) / _archive_history_view.LONG_HORIZON_FILE), {}) or {}
+    return component, long_horizon
+
+
+@app.route("/api/archive")
+def api_archive():
+    component, long_horizon = _archive_payload()
+    return jsonify({"archive": component, "long_horizon": long_horizon or None})
+
+
+@app.route("/history")
+def archive_history_page():
+    component, long_horizon = _archive_payload()
+    resp = make_response(_archive_history_view.render_archive_html(
+        component.get("data"), long_horizon, status=component.get("status"), reason=component.get("reason"),
+        nav_links=DECISION_NAV_LINKS))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 @app.route("/data-health")
 def data_health_page():
     report, study, evidence = _data_health_payload()
-    resp = make_response(_data_health_view.render_data_health_html(
-        report, study, evidence=evidence, nav_links=DECISION_NAV_LINKS))
+    archive, _long_horizon = _archive_payload()
+    page = _data_health_view.render_data_health_html(
+        report, study, evidence=evidence, nav_links=DECISION_NAV_LINKS)
+    compat = ("<h2>Archive schema compatibility</h2>"
+              f"<p class='sub'>Archive {archive.get('status')}; details on <a href='/history'>History &amp; "
+              "retention</a>.</p>" + _archive_history_view.compat_section(archive.get("data")))
+    page = page.replace("</body></html>", compat + "</body></html>", 1)
+    resp = make_response(page)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
