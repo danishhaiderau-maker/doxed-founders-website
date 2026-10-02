@@ -163,3 +163,32 @@ instead of showing an empty or four-dimension table.
   - L2 depth for queue-position fills.
 - **Self-aware go-live:** the `self-aware-live` checkout (owned by SELF-AWARE) must be
   re-pinned to the merge commit to run the `sections` job. Requested on the WALL.
+
+## 6. Delivery status (14:25Z)
+
+- **Merged (laptop-only, `[skip ci]`, no workflow runs):**
+  - [#324](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/324)
+    -> `d1b183f11`: genome grid, panel, section APIs, self-aware job.
+  - [#326](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/326)
+    -> `7959fe1c0`: endpoint derivation for server-rendered pages and URL variables.
+- **v2c auto-followed** to `afe9b8115` at 14:10:45Z (contains #324). :9001 picks up the
+  new code at the start of the next analyzer pass (`DASHBOARD_CODE_REFRESH`). The pass
+  at 14:10 failed `MIRROR_SYNC_RECEIPT_STALE` (puller lock, BLINDSPOT-CLOSE) and the next
+  promotion was denied `FLY_UNSHIPPED_BYTES`, so :9001 still serves `768f00e7c`.
+- **Verified on v2c code:** a temporary read-only instance on :9041 against the same
+  data store, since stopped.
+  - `/api/genome-grid` returns OK.
+  - `/api/sections` lists 38 sections.
+  - `/api/sections/health` takes 13 s and reports AMBER: the Safe Genome replay window
+    and integrity, the missing `regime_leaderboard.json` report, plus the two derivation
+    flags fixed in #326.
+  - `/details` renders the panel.
+- **Screenshots:**
+  - `C:\DoxxedCrypto\analyzer-exports\genome-grid\screenshots\analyzer-genome-details-20261002.png`
+  - `C:\DoxxedCrypto\analyzer-exports\genome-grid\screenshots\analyzer-genome-details-axes-20261002.png`
+- **DoxxedGenomeGrid task:** registered, every 2 h. First run at 14:18Z: exit 0, 230 s,
+  1,167 episodes, parity MATCH.
+- **Self-aware check:** run once against live :9001. It reports `analyzer.sections` RED
+  (404 until the refresh), `analyzer.dimensions` AMBER (no checks published yet), and
+  `analyzer.consistency` GREEN. The check stays offline until SELF-AWARE re-pins
+  `self-aware-live` (requested).
