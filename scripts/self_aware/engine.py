@@ -18,12 +18,13 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
 
-from . import (ai_scorecard, alarms, analyzer_sections, contracts, data_awareness, diagnose, digest, edges, repair, tiles,
-               uptime)
+from . import (ai_scorecard, alarms, analyzer_sections, contracts, data_awareness, diagnose, digest, edges, fees, repair,
+               tiles, uptime)
 from . import data_compat
 from .ai_scorecard import json_safe
 from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, THRESHOLDS, Paths
@@ -66,7 +67,7 @@ class Engine:
             "views": self.job_views, "diagnose": self.job_diagnose, "uptime": self.job_uptime,
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
             "data": self.job_data, "sections": self.job_sections, "contracts": self.job_contracts,
-            "contracts_light": self.job_contracts_light, "compat": self.job_compat,
+            "contracts_light": self.job_contracts_light, "compat": self.job_compat, "fees": self.job_fees,
         }
 
     # ------------------------------------------------------------ state
@@ -101,6 +102,7 @@ class Engine:
         self.facts["analyzer_sections"] = self.docs.get("sections") or self.state.get("analyzer_sections_doc")
         self.facts["contracts"] = contracts.summary(self.docs.get("contracts"))
         self.facts["data_compat"] = self.docs.get("compat")
+        self.facts["fees"] = self.docs.get("fees") or self.state.get("fees_doc")
         found = diagnose.run(self.paths, self.store, self.facts, self.state)
         changes = diagnose.transitions(found, self.state, now)
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
@@ -216,6 +218,18 @@ class Engine:
                 "epoch": doc["epoch"]["epoch_id"], "segregated_bytes": doc["segregated"]["bytes"],
                 "deferred": doc["scan_deferred_for_analyzer_cycle"], "ms": doc["ms"]}
 
+    def job_fees(self, force: bool = False) -> dict:
+        self._need_facts()
+        fly_rev = (self.facts.get("runtime") or {}).get("git_rev")
+        doc = json_safe(fees.run(self.paths.home, Path(__file__).resolve().parents[2], fly_rev=fly_rev,
+                                 extra_roots=(self.paths.analyzer_repo,), force=force))
+        self.docs["fees"] = doc
+        # Kept in state so the result survives a daemon restart instead of reading SKIP until the next run.
+        self.state["fees_doc"] = doc
+        return {"status": doc["status"], "source": doc["source"], "derivatives_maker_bps": doc["derivatives_maker_bps"],
+                "derivatives_taker_bps": doc["derivatives_taker_bps"], "stale": doc["stale"],
+                "mismatches": len(doc["mismatches"]), "ms": doc["ms"]}
+
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
 
@@ -293,12 +307,12 @@ class Engine:
 
     def run_once(self) -> dict:
         return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "compat",
-                                                      "ai",
+                                                      "fees", "ai",
                                                       "edges", "contracts", "diagnose", "digest")}
 
     def loop(self) -> None:
         # Views and the cheap in-memory documents are rebuilt at start so no endpoint answers 503 after a restart.
-        for name in ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "diagnose"):
+        for name in ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "fees", "diagnose"):
             self.run_job(name)
         while not self._stop.is_set():
             now = time.time()
