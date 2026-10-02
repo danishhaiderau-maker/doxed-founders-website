@@ -1,6 +1,6 @@
 # One system-health watcher tick: evaluate every subsystem, open/close
-# edge-triggered alarms (toast, alarm log, webhook if configured, dashboard
-# banner) and keep the local read-only endpoint up. Alarms and diagnostics
+# edge-triggered alarms (RED toast, alarm log feeding the dashboards' Alerts
+# section, dashboard banner) and keep the local read-only endpoint up. Alarms and diagnostics
 # only: it never pauses, deploys, arms or touches trading.
 #
 # -Interim is used by the stand-alone DoxxedSystemHealthWatcher task while the

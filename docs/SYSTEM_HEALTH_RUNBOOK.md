@@ -17,7 +17,11 @@ closes or prunes. Repairs go through the normal guarded workflow (WALL slot,
 | Last published verdict | `python scripts/system_health.py --latest` |
 | Agent helper | `import health_client; snap = health_client.snapshot(); health_client.failing(snap)` |
 | Local endpoint | `GET http://127.0.0.1:9011/api/system-health` (`?live=1` for a fresh read-only evaluation) |
-| Alarm history | `GET http://127.0.0.1:9011/api/system-health/alarms?limit=50` |
+| Alarm events (raw) | `GET http://127.0.0.1:9011/api/system-health/alarms?limit=50` |
+| Alert history (one entry per alert) | `GET http://127.0.0.1:9011/api/system-health/alerts`, `health_client.alerts()` |
+| Alerts page, analyzer | `http://127.0.0.1:9001/alerts` (JSON: `/api/system-health/alerts`) |
+| Alerts page, Fly | `https://doxed-btc-bot.fly.dev/alerts`, plus the Alerts section on the main dashboard |
+| Agent feed | `insights_client.snapshot()["active_alerts"]` and `["components"]["alerts"]`, or `GET 127.0.0.1:9001/api/insights` |
 | Fly endpoint (after the batched deploy) | `GET https://doxed-btc-bot.fly.dev/api/system-health` |
 
 Files under `C:\DoxxedCrypto\laptop-chain\health\`:
@@ -25,8 +29,8 @@ Files under `C:\DoxxedCrypto\laptop-chain\health\`:
 - `system-health-latest.json`: the last full report (verdict, per-check detail, open alarms).
 - `alarms.jsonl`: append-only alarm log (`OPEN`, `STILL_RED`, `RECOVERED`, `AMBER`, `AMBER_CLEAR`).
 - `verdicts-YYYYMM.jsonl`: one line per tick.
-- `health-state.json`: progress memory (last success times, alarm state).
-- `alarm-channels.json`: optional webhook config (see below).
+- `health-state.json`: progress memory (last success times, alarm state, Fly alarm-sync cursor).
+- `neon.env`: optional, never committed: `NEON_API_KEY=` and `NEON_PROJECT_ID=` for `neon.usage`.
 
 ## Watcher and alarms
 
@@ -42,28 +46,29 @@ Files under `C:\DoxxedCrypto\laptop-chain\health\`:
   `trading.orphans`). It stays quiet while open, re-notifies every 6h
   (`STILL_RED`), and sends `RECOVERED` when the check is no longer RED. AMBER
   transitions are logged only.
-- **Channels:**
-  - Windows toast on the laptop.
-  - Append-only `alarms.jsonl`.
-  - Red banner on the analyzer dashboard (:9001) and the Fly dashboard, via
-    `POST /api/system-health/report`.
-  - A GitHub issue with the `laptop-chain-incident` label, which emails the
-    owner, while any RED alarm is open.
-  - Optional webhook.
-- **Webhook slot** (nothing is configured today; no credentials were invented).
-  Either set the user env `DOXXED_ALERT_WEBHOOK_URL`, which works for Discord
-  and Slack incoming webhooks and is shared with `laptop-chain-monitor.ps1`, or
-  create `C:\DoxxedCrypto\laptop-chain\health\alarm-channels.json`:
-  ```json
-  {"webhook_url": "https://discord.com/api/webhooks/...",
-   "telegram_bot_token": "123:abc", "telegram_chat_id": "123456"}
-  ```
-  Telegram can also come from `DOXXED_ALERT_TELEGRAM_BOT_TOKEN` and
-  `DOXXED_ALERT_TELEGRAM_CHAT_ID`. Never reuse `SHOWCASE_RELAY_WEBHOOK_URL`:
-  that is the trading relay.
-- **Neon slot.** Set `NEON_API_KEY` and `NEON_PROJECT_ID` (read-only key) to
-  enable `neon.usage`. The optional `NEON_EGRESS_BUDGET_BYTES_PER_HOUR`
-  defaults to 200 MB/h.
+- **Channels.** The dashboards' **Alerts** section is the primary channel:
+  Danish reviews it whenever he checks. There are no Telegram, Discord or
+  webhook channels, by owner decision.
+  - **Alerts section** on the analyzer dashboard (`:9001/alerts`, linked first in
+    its nav) and on the Fly dashboard (a section on `/` plus the full `/alerts`
+    page). Each entry shows when it started (AEST, UTC+10, with UTC), its
+    severity (RED / AMBER, or RECOVERED once cleared), the check in plain words,
+    what the watcher saw, the likely cause with a runbook link, and when it
+    cleared and how long it lasted. Active alerts are listed first.
+  - Windows toast on the laptop for RED alarms (open, still red, recovered).
+  - Append-only `alarms.jsonl`, the source of the Alerts section.
+  - Red/amber banner on both dashboards while anything is not GREEN.
+  - A GitHub issue with the `laptop-chain-incident` label while any RED alarm is open.
+- **How Fly gets the history.** The analyzer reads `alarms.jsonl` directly. Fly
+  has no access to the laptop, so every watcher tick posts the banner summary
+  plus the alarm events Fly does not hold yet to `POST /api/system-health/report`
+  (oldest first, at most 120 per tick, cursor `fly_alarm_sync` in
+  `health-state.json`). Fly keeps them in memory, bounded to the last 30 days or
+  2,000 events, and refills from the laptop within a tick or two after a restart.
+- **Neon slot.** Set `NEON_API_KEY` and `NEON_PROJECT_ID` (read-only key) in the
+  watcher's environment or in `C:\DoxxedCrypto\laptop-chain\health\neon.env`
+  (outside git) to enable `neon.usage`. The optional
+  `NEON_EGRESS_BUDGET_BYTES_PER_HOUR` defaults to 200 MB/h.
 
 ## Checks and fixes
 
@@ -278,8 +283,9 @@ Neon is unreachable from Railway.
 <a id="neon-usage"></a>
 ### neon.usage
 Neon project data-transfer and compute consumption, with an egress rate against the
-budget. SKIP until `NEON_API_KEY` and `NEON_PROJECT_ID` are set. See #261 for the egress
-fix pattern.
+budget. SKIP until `NEON_API_KEY` and `NEON_PROJECT_ID` are set (environment or
+`laptop-chain\health\neon.env`); the observed text names the missing variable. See #261
+for the egress fix pattern.
 
 <a id="bitfinex-exposure"></a>
 ### bitfinex.exposure

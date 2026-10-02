@@ -6,6 +6,9 @@
     snap["verdict"]                          # GREEN / AMBER / RED
     for f in health_client.failing(snap):    # failing checks, worst first
         print(f["id"], f["observed"], f["hint"], f["runbook"])
+    hist = health_client.alerts(limit=50)    # alert history, active first then newest first
+    for a in hist["alerts"]:
+        print(a["severity"], a["started"]["aest"], a["title"], a["duration_text"])
 
 Order of sources: the local endpoint (127.0.0.1:9011), then the published
 file, then an in-process evaluation. ``python scripts/health_client.py``
@@ -44,6 +47,16 @@ def snapshot(live: bool = False, *, endpoint: str = ENDPOINT, state_dir: str = s
     report = sh.run_once(sh.parse_args(["--state-dir", state_dir, "--no-notify", "--no-fly-banner"]), alarms=False)
     report["source"] = "in_process"
     return report
+
+
+def alerts(limit: int | None = None, *, state_dir: str = sh.DEFAULT_STATE_DIR) -> dict[str, Any]:
+    """Alert history (same data as the dashboards' Alerts section), read from the local alarm log."""
+    sys.path.append(str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
+    import system_health_alerts  # noqa: PLC0415
+
+    health = Path(state_dir) / "health"
+    return system_health_alerts.history_from_file(health / "alarms.jsonl", health / "system-health-latest.json",
+                                                  limit=limit)
 
 
 def failing(report: dict[str, Any]) -> list[dict[str, Any]]:

@@ -480,7 +480,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["laptop_disk"] = {"free": usage.free, "total": usage.total}
     except OSError:
         inputs["laptop_disk"] = None
-    inputs["neon"] = collect_neon(cache)
+    inputs["neon"] = collect_neon(cache, opts.state_dir)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
     return inputs
 
@@ -515,19 +515,31 @@ def collect_deepseek_balance(vault: Mapping[str, str], cache: dict[str, Any], no
     return result
 
 
-def collect_neon(cache: dict[str, Any]) -> dict[str, Any] | None:
+def neon_config(state_dir: str) -> dict[str, str]:
+    """NEON_API_KEY / NEON_PROJECT_ID from the environment, else ``<state>/health/neon.env`` (never in git)."""
+    file_values = load_vault(str(Path(state_dir) / "health" / "neon.env"))
+    return {name: os.environ.get(name) or file_values.get(name) or ""
+            for name in ("NEON_API_KEY", "NEON_PROJECT_ID", "NEON_EGRESS_BUDGET_BYTES_PER_HOUR")}
+
+
+def collect_neon(cache: dict[str, Any], state_dir: str = DEFAULT_STATE_DIR) -> dict[str, Any] | None:
     """Neon consumption, only when NEON_API_KEY + NEON_PROJECT_ID are configured."""
-    key, project = os.environ.get("NEON_API_KEY"), os.environ.get("NEON_PROJECT_ID")
+    cfg = neon_config(state_dir)
+    key, project = cfg["NEON_API_KEY"], cfg["NEON_PROJECT_ID"]
     if not key or not project:
-        return None
+        return {"missing": [n for n in ("NEON_API_KEY", "NEON_PROJECT_ID") if not cfg[n]]} \
+            if (key or project) else None
     payload, err = http_json(f"https://console.neon.tech/api/v2/projects/{project}",
                              headers={"Authorization": f"Bearer {key}"}, timeout=20)
     if err:
         return {"error": err}
     proj = payload.get("project") or {}
-    return {k: proj.get(k) for k in ("data_transfer_bytes", "compute_time_seconds",
-                                     "active_time_seconds", "written_data_bytes",
-                                     "consumption_period_start")}
+    out = {k: proj.get(k) for k in ("data_transfer_bytes", "compute_time_seconds",
+                                    "active_time_seconds", "written_data_bytes",
+                                    "consumption_period_start")}
+    if cfg["NEON_EGRESS_BUDGET_BYTES_PER_HOUR"]:
+        out["budget_bytes_per_hour"] = cfg["NEON_EGRESS_BUDGET_BYTES_PER_HOUR"]
+    return out
 
 
 def latest_proof_row(active: Any, proof_dir: Path) -> dict[str, Any] | None:
@@ -1105,6 +1117,9 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if neon is None:
         add(check("neon.usage", "neon", SKIP, "not configured (set NEON_API_KEY + NEON_PROJECT_ID)",
                   "egress growth below budget"))
+    elif neon.get("missing"):
+        add(check("neon.usage", "neon", SKIP, f"not configured (missing {' + '.join(neon['missing'])})",
+                  "egress growth below budget"))
     elif neon.get("error"):
         add(check("neon.usage", "neon", AMBER, f"Neon API {neon['error']}", "readable"))
     else:
@@ -1114,7 +1129,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         if prev.get("bytes") is not None and egress is not None and now > float(prev.get("ts") or now):
             rate = (float(egress) - float(prev["bytes"])) / ((now - float(prev["ts"])) / HOUR)
         mem["neon_prev"] = {"ts": now, "bytes": egress}
-        budget = float(os.environ.get("NEON_EGRESS_BUDGET_BYTES_PER_HOUR") or 200 * 1024**2)
+        budget = float(neon.get("budget_bytes_per_hour") or os.environ.get("NEON_EGRESS_BUDGET_BYTES_PER_HOUR")
+                       or 200 * 1024**2)
         st = AMBER if rate is not None and rate > budget else GREEN
         add(check("neon.usage", "neon", st,
                   f"egress this period {float(egress or 0) / 1e9:.2f}GB, rate {('%.0fMB/h' % (rate / 1e6)) if rate is not None else '?'}; "
@@ -1274,21 +1290,13 @@ def alarm_text(events: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def load_channels(state_dir: Path) -> dict[str, Any]:
-    """Webhook config: env DOXXED_ALERT_WEBHOOK_URL or <state>/health/alarm-channels.json."""
-    cfg = read_json(state_dir / "health" / "alarm-channels.json") or {}
-    if os.environ.get("DOXXED_ALERT_WEBHOOK_URL") and not cfg.get("webhook_url"):
-        cfg["webhook_url"] = os.environ["DOXXED_ALERT_WEBHOOK_URL"]
-    for key, env in (("telegram_bot_token", "DOXXED_ALERT_TELEGRAM_BOT_TOKEN"),
-                     ("telegram_chat_id", "DOXXED_ALERT_TELEGRAM_CHAT_ID")):
-        if os.environ.get(env) and not cfg.get(key):
-            cfg[key] = os.environ[env]
-    return cfg
+def notify(events: list[dict[str, Any]], state_dir: Path, *,
+           toast: Callable[[str, str], bool] | None = None) -> dict[str, Any]:
+    """Windows toast for RED OPEN / STILL_RED / RECOVERED events.
 
-
-def notify(events: list[dict[str, Any]], state_dir: Path, *, toast: Callable[[str, str], bool] | None = None,
-           post: Callable[..., Any] = http_json) -> dict[str, Any]:
-    """Push RED OPEN / STILL_RED / RECOVERED events. Returns per-channel results."""
+    There are deliberately no chat/webhook channels: the dashboards' Alerts
+    section (fed from ``alarms.jsonl``) is the primary channel.
+    """
     pushed = [e for e in events if e["event"] in ("OPEN", "STILL_RED", "RECOVERED")]
     result: dict[str, Any] = {"pushed": len(pushed)}
     if not pushed:
@@ -1297,17 +1305,6 @@ def notify(events: list[dict[str, Any]], state_dir: Path, *, toast: Callable[[st
     red = any(e["event"] != "RECOVERED" for e in pushed)
     title = "Doxxed RED alarm" if red else "Doxxed recovered"
     result["toast"] = (toast or windows_toast)(title, text)
-    cfg = load_channels(state_dir)
-    if cfg.get("webhook_url"):
-        _, err = post(cfg["webhook_url"], method="POST", timeout=15,
-                      body={"content": f"**{title}**\n{text}"[:1900], "text": f"{title}\n{text}"[:3500]})
-        result["webhook"] = err or "ok"
-    else:
-        result["webhook"] = "not_configured"
-    if cfg.get("telegram_bot_token") and cfg.get("telegram_chat_id"):
-        _, err = post(f"https://api.telegram.org/bot{cfg['telegram_bot_token']}/sendMessage", method="POST", timeout=15,
-                      body={"chat_id": cfg["telegram_chat_id"], "text": f"{title}\n{text}"[:3900]})
-        result["telegram"] = err or "ok"
     return result
 
 
@@ -1346,17 +1343,84 @@ def banner_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "failing": [{k: f.get(k) for k in ("id", "status", "observed", "threshold", "hint", "runbook", "last_good_at")}
                     for f in report["failing"][:12]],
         "counts": report["counts"],
+        "check_status": {c["id"]: c["status"] for c in report.get("checks") or []},
         "source": f"laptop {report.get('host')}",
     }
 
 
-def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace) -> str:
+ALARM_RETAIN_SEC = 30 * 24 * HOUR
+ALARM_PUSH_CHUNK = 120
+ALARM_UNSUPPORTED_RETRY_SEC = HOUR
+
+
+def read_alarm_log(path: Path, now: float, max_bytes: int = 4 * 1024 * 1024) -> list[dict[str, Any]]:
+    """Alarm events from the last 30 days, oldest first (bounded tail read)."""
+    try:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - max_bytes))
+            lines = handle.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    if size > max_bytes:
+        lines = lines[1:]
+    events = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ts = parse_ts(row.get("at")) if isinstance(row, dict) else None
+        if ts is not None and now - ts <= ALARM_RETAIN_SEC:
+            events.append({**row, "_ts": ts})
+    events.sort(key=lambda e: e["_ts"])
+    return events
+
+
+def alarm_chunk(events: list[dict[str, Any]], through_ts: float | None) -> list[dict[str, Any]]:
+    """The next oldest-first batch Fly has not acknowledged; never splits one timestamp."""
+    pending = [e for e in events if through_ts is None or e["_ts"] > through_ts + 1e-3]
+    if len(pending) > ALARM_PUSH_CHUNK:
+        cut = pending[ALARM_PUSH_CHUNK - 1]["_ts"]
+        pending = [e for e in pending if e["_ts"] <= cut]
+    trimmed = []
+    for e in pending:
+        row = {k: e.get(k) for k in ("at", "event", "check", "status", "observed", "threshold", "hint", "runbook",
+                                     "opened_at") if e.get(k) is not None}
+        for key, limit in (("observed", 240), ("threshold", 200), ("hint", 300)):
+            if isinstance(row.get(key), str):
+                row[key] = row[key][:limit]
+        trimmed.append(row)
+    return trimmed
+
+
+def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: dict[str, Any] | None = None,
+                    now: float | None = None, post: Callable[..., Any] = http_json) -> str:
+    """POST the banner summary plus the alarm events Fly does not hold yet (Fly keeps them in memory)."""
     admin = os.environ.get("BOT_ADMIN_TOKEN") or load_vault(opts.vault).get("BOT_ADMIN_TOKEN")
     if not admin:
         return "no_admin_token"
-    _, err = http_json(f"{opts.fly_url}/api/system-health/report", method="POST", timeout=15,
-                       headers={"X-Bot-Admin-Token": admin}, body=banner_payload(report))
-    return err or "ok"
+    now = utcnow() if now is None else now
+    state = {} if state is None else state
+    sync = state.setdefault("fly_alarm_sync", {})
+    body = banner_payload(report)
+    unsupported_until = float(sync.get("unsupported_until") or 0)
+    chunk: list[dict[str, Any]] = []
+    if now >= unsupported_until:
+        chunk = alarm_chunk(read_alarm_log(health_dir(opts) / "alarms.jsonl", now), sync.get("through_ts"))
+        body["alarm_events"] = chunk
+    payload, err = post(f"{opts.fly_url}/api/system-health/report", method="POST", timeout=20,
+                        headers={"X-Bot-Admin-Token": admin}, body=body)
+    if err:
+        return err
+    history = payload.get("alarm_history") if isinstance(payload, Mapping) else None
+    if isinstance(history, Mapping):
+        sync.update(through_ts=history.get("through_ts"), count=history.get("count"), synced_at=now,
+                    unsupported_until=None)
+        return f"ok alarms={history.get('count')} sent={len(chunk)}"
+    if chunk:
+        sync.update(unsupported_until=now + ALARM_UNSUPPORTED_RETRY_SEC, through_ts=None)
+    return "ok (Fly has no alarm history endpoint yet)"
 
 
 # --------------------------------------------------------------------- tick
@@ -1417,7 +1481,7 @@ def run_once(opts: argparse.Namespace, *, alarms: bool) -> dict[str, Any]:
             append_jsonl(hdir / "alarms.jsonl", e)
         delivery = notify(events, Path(opts.state_dir)) if not opts.no_notify else {"pushed": 0, "muted": True}
         report["last_delivery"] = delivery
-        report["fly_banner"] = push_fly_banner(report, opts) if not opts.no_fly_banner else "disabled"
+        report["fly_banner"] = push_fly_banner(report, opts, state, now) if not opts.no_fly_banner else "disabled"
         write_json_atomic(hdir / "system-health-latest.json", report)
         append_jsonl(hdir / f"verdicts-{datetime.now(timezone.utc):%Y%m}.jsonl",
                      {"at": report["generated_at"], "verdict": report["verdict"], "open_alarms": report["open_alarms"],

@@ -6,6 +6,7 @@ the watcher tick may call ``ensure_server`` every time without duplicates.
   GET /api/system-health          last published verdict + age/staleness
   GET /api/system-health?live=1   fresh evaluation (no alarms, no writes)
   GET /api/system-health/alarms   tail of the append-only alarm log (?limit=N)
+  GET /api/system-health/alerts   alert history: one entry per alert, active first, then newest first
   GET /api/system-health/banner   compact banner payload for dashboards
   GET /api/ping
 """
@@ -20,7 +21,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
 import system_health as sh  # noqa: E402
+import system_health_alerts as alerts  # noqa: E402
 
 _live_lock = threading.Lock()
 
@@ -89,6 +92,11 @@ def make_handler(opts: argparse.Namespace):
             if url.path == "/api/system-health/alarms":
                 limit = int(query.get("limit", ["50"])[0] or 50)
                 return self._send(200, {"alarms": alarms_tail(opts.state_dir, limit)})
+            if url.path == "/api/system-health/alerts":
+                health = Path(opts.state_dir) / "health"
+                limit = int(query.get("limit", ["0"])[0] or 0) or None
+                return self._send(200, alerts.history_from_file(health / "alarms.jsonl",
+                                                                health / "system-health-latest.json", limit=limit))
             if url.path == "/api/system-health/banner":
                 report = published(opts.state_dir)
                 if "checks" in report:

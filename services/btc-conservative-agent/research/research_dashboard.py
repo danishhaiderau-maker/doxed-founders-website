@@ -25,6 +25,7 @@ MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
 import system_health_banner as _system_health_banner
+import system_health_alerts as _system_health_alerts
 import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
@@ -402,7 +403,7 @@ def _read_api_cache_key() -> str:
 _UNCACHED_API_PATHS = (
     "/api/health", "/api/status", "/api/integrity",
     "/api/export/latest", "/api/hypotheses", "/api/streams/health", "/api/insights",
-    "/api/system-health",
+    "/api/system-health", "/api/system-health/alerts",
 )
 
 
@@ -466,6 +467,28 @@ def api_system_health():
     report = _system_health_banner.read_report_file(state_dir / "health" / "system-health-latest.json")
     response = jsonify(_system_health_banner.with_staleness(report))
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _alert_history() -> dict:
+    health = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain") / "health"
+    return _system_health_alerts.history_from_file(health / "alarms.jsonl", health / "system-health-latest.json")
+
+
+@app.route("/api/system-health/alerts")
+def api_system_health_alerts():
+    response = jsonify(_alert_history())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/alerts")
+def alerts_page():
+    response = make_response(_system_health_alerts.render_alerts_html(
+        _alert_history(), title="Alerts - laptop analyzer and system health",
+        nav_links=(("Decision", "/"),) + tuple(DECISION_NAV_LINKS[1:]) + (("Alerts JSON", "/api/system-health/alerts"),),
+        source_note="Source: the laptop watcher's alarm log (laptop-chain\\health\\alarms.jsonl), read directly."))
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 _DASHBOARD_STARTED_AT = datetime.now(timezone.utc)
 
@@ -9133,6 +9156,7 @@ SEGMENT_PARITY_FILES = (SEGMENT_SHADOW_ROOT / "parity-latest.json", SEGMENT_SHAD
 FLY_SEGMENT_HEAD_FILE = LAPTOP_CHAIN_STATE_DIR / "fly_segment_head_snapshot_v1.json"
 RELAY_STATUS_SNAPSHOT_FILE = LAPTOP_CHAIN_STATE_DIR / "relay_status_snapshot_v1.json"
 DECISION_NAV_LINKS = (
+    ("Alerts", "/alerts"),
     ("Details (full report)", "/details"),
     ("Safe Policy Genome V3.1", "/safe-policy-genome-v3.1"),
     ("Static policies", "/static-policies"),
