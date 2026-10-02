@@ -101,12 +101,42 @@ def test_a_stopped_cycle_brings_a_dead_dashboard_back():
     assert "/api/health" in stop and "-EnsureDashboardOnly" in stop and "exit $Code" in stop
     body = cycle.split("$cycleLock = Enter-SingleInstance", 1)[1]
     assert "exit 3" not in body and "exit 4" not in body
-    assert body.count("Stop-Cycle 3") == 3 and "Stop-Cycle 4" in body
+    assert body.count("Stop-Cycle 3") == 4 and "Stop-Cycle 4" in body
+
+
+def test_every_cycle_stop_carries_a_stop_reason_in_the_status_file():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    stop = cycle.split("function Stop-Cycle", 1)[1].split("\n}\n", 1)[0]
+    assert "$script:cycleStatus.stopReason = $StopReason" in stop
+    assert "stopReason = $null; detail = $null" in cycle
+    body = cycle.split("$cycleLock = Enter-SingleInstance", 1)[1]
+    calls = re.findall(r"Stop-Cycle \d+[^\n]*", body)
+    assert calls and all(re.match(r"Stop-Cycle \d+ ['(]", call) for call in calls), calls
+    tail = body.split("$analyzerExit = $LASTEXITCODE", 1)[1]
+    assert "ANALYZER_EXIT_" in tail and "$cfg.AnalyzerStatus" in tail
+
+
+def test_lock_wait_outlasts_the_parity_lock_budget():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    parity = _source("research_segment_fly_parity.py")
+    budget = float(re.search(r"DEFAULT_MAX_LOCK_SEC = ([0-9.]+)", parity).group(1))
+    wait = int(re.search(r"\[int\]\$LockWaitMaxSec = (\d+)", cycle).group(1))
+    assert wait >= budget + 120
+
+
+def test_promotion_waits_out_a_draining_fly_backlog_only():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    loop = cycle.split("for ($attempt = 1;", 1)[1].split("\n}\n", 1)[0]
+    backlog = loop.split("if ($onlyBacklog) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "$FlyBacklogWaitMaxSec" in backlog and "$attempt--" in backlog
+    assert "'PROMOTION_WAIT_FLY_BACKLOG'" in backlog and "'FLY_BACKLOG_NOT_DRAINED'" in backlog
+    only = next(line for line in loop.splitlines() if line.strip().startswith("$onlyBacklog ="))
+    assert "-contains 'FLY_UNSHIPPED_BYTES'" in only and "-notin" in only
 
 
 def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
     cycle = _source("run-segment-analyzer-cycle.ps1")
-    assert "[int]$LockWaitMaxSec = 600" in cycle
+    assert "[int]$LockWaitMaxSec = 900" in cycle
     loop = cycle.split("for ($attempt = 1;", 1)[1].split("\n}\n", 1)[0]
     lock = loop.split("if ($promotion -match 'holds the shadow-root lock') {", 1)[1].split("\n  }\n", 1)[0]
     # Lock waits are bounded by their own budget and do not use up head attempts.
