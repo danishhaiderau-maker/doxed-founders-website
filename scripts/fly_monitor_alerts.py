@@ -176,6 +176,7 @@ def evaluate(
     crashed: bool = False,
     restored: bool = True,
     escalate: frozenset[str] = frozenset(),
+    maintenance_grace_sec: float = MAINTENANCE_GRACE_SEC,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Update ``state`` in place; return (decisions, resolved).
 
@@ -201,7 +202,7 @@ def evaluate(
             state["maintenance_since"] = now
     else:
         state["maintenance_since"] = None
-    in_grace = bool(maintenance and now - state["maintenance_since"] < MAINTENANCE_GRACE_SEC)
+    in_grace = bool(maintenance and now - state["maintenance_since"] < maintenance_grace_sec)
 
     conditions: dict[str, dict[str, Any]] = state["conditions"]
     decisions: list[dict[str, Any]] = []

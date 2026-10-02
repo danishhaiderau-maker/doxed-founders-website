@@ -1,4 +1,4 @@
-"""Escalate laptop research-chain incidents to one GitHub issue per incident.
+﻿"""Escalate laptop research-chain incidents to one GitHub issue per incident.
 
 Run once per ``DoxxedLaptopChainSupervisor`` tick, after
 ``laptop-chain-monitor.ps1`` has refreshed ``alerts\\active-alerts.json``.
@@ -43,6 +43,9 @@ LABEL = "laptop-chain-incident"
 TITLE = "Laptop research chain incident"
 DEFAULT_REPO = "danishhaiderau-maker/doxed-founders-website"
 HEARTBEAT_VARIABLE = "LAPTOP_CHAIN_HEARTBEAT"
+# Guarded deploys may hold the pause for a bounded natural-exit wait, so the
+# laptop relay keeps a longer grace than the GitHub monitor's deploy window.
+DEPLOY_MAINTENANCE_GRACE_SEC = 90 * 60.0
 HEARTBEAT_EVERY_SEC = 15 * 60.0
 ANALYZER_MAX_AGE_SEC = 2 * HOUR
 MONITOR_STALE_SEC = 30 * 60.0
@@ -152,7 +155,7 @@ def deploy_maintenance(runtime_snapshot: Any, now: float) -> bool:
     """True while a fresh Fly runtime snapshot shows the guarded-deploy pause.
 
     The 90-minute cap is enforced by ``fly_monitor_alerts.evaluate`` via
-    ``maintenance_since`` / ``MAINTENANCE_GRACE_SEC``.
+    ``maintenance_since`` / ``DEPLOY_MAINTENANCE_GRACE_SEC``.
     """
     if not isinstance(runtime_snapshot, dict) or not runtime_snapshot.get("ok"):
         return False
@@ -244,7 +247,8 @@ def run(args: argparse.Namespace, *, client: Any = None, now: float | None = Non
     if args.test_alert:
         found["test_alert"] = "synthetic laptop test alert (not a real incident)"
     maintenance = deploy_maintenance(read_json(state_dir / "fly_runtime_snapshot_v1.json"), now)
-    decisions, resolved = alerts.evaluate(state, found, now=now, maintenance=maintenance, policies=POLICIES)
+    decisions, resolved = alerts.evaluate(state, found, now=now, maintenance=maintenance, policies=POLICIES,
+                                           maintenance_grace_sec=DEPLOY_MAINTENANCE_GRACE_SEC)
 
     result: dict[str, Any] = {"decisions": decisions, "resolved": [r["key"] for r in resolved], "synced": False,
                               "maintenance": maintenance}
