@@ -420,8 +420,10 @@ def test_stale_analyzer_right_after_a_successful_guarded_deploy_is_allowed_and_l
     # Replays the 2026-10-02 02:25:51Z row: generation 01:27:02Z, run 36949767912 01:11:55Z -> 01:52:17Z success.
     now = up.parse_utc("2026-10-02T02:25:51Z")
     run = {"databaseId": 36949767912, "status": "completed", "conclusion": "success", "event": "push",
+           "headSha": "1c01619482e0cb0109938e260259244f2aa6c85e",
            "createdAt": "2026-10-02T01:11:55Z", "updatedAt": "2026-10-02T01:52:17Z"}
-    row = up.evaluate_row(**_inputs(now, analyzer={"lastCompletedGenerationAt": "2026-10-02T01:27:02Z"},
+    row = up.evaluate_row(**_inputs(now, runtime=_runtime(now, git_rev="1c01619482e0"),
+                                    analyzer={"lastCompletedGenerationAt": "2026-10-02T01:27:02Z"},
                                     deploy_runs=_deploys(now, run)))
     assert row["status"] == up.ALLOWED_GUARDED_DEPLOY and row["failed_checks"] == [], row
     check = row["checks"]["analyzer_fresh"]
@@ -436,8 +438,8 @@ def test_stale_analyzer_right_after_a_successful_guarded_deploy_is_allowed_and_l
 def test_stale_analyzer_allowance_is_bounded_and_attributable():
     now = T0 + 6 * 3600
     ok = lambda r: r["checks"]["analyzer_fresh"]["ok"]  # noqa: E731
-    success = lambda created_ago, ended_ago: _run(6, now - created_ago * 60, now - ended_ago * 60,  # noqa: E731
-                                                  "completed", "success")
+    success = lambda created_ago, ended_ago: {**_run(6, now - created_ago * 60, now - ended_ago * 60,  # noqa: E731
+                                                     "completed", "success"), "headSha": "aaaaaaaaaaaa" + "0" * 28}
     # Grace ends 60 min after the run ended.
     assert ok(_stale_analyzer_row(now, 70, success(80, 59))) is True
     assert ok(_stale_analyzer_row(now, 70, success(80, 61))) is False
@@ -451,6 +453,9 @@ def test_stale_analyzer_allowance_is_bounded_and_attributable():
     assert missing["failed_checks"] == ["analyzer_fresh"]
     # A fresh generation stays a plain PASS even right after a deploy.
     assert _stale_analyzer_row(now, 10, success(40, 5))["status"] == "PASS"
+    # An inspect/restart dispatch of the workflow on another revision booted nothing Fly now runs.
+    inspect = {**success(10, 9), "headSha": "b" * 40, "event": "workflow_dispatch"}
+    assert ok(_stale_analyzer_row(now, 50, inspect)) is False
 
 
 def test_analyzer_only_allowances_do_not_extend_a_deploy_pause_run():
