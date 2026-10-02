@@ -3,7 +3,9 @@
 The laptop watcher (``scripts/system_health.py``) publishes a ``system_health_v1``
 report.  Both dashboards expose a bounded copy at ``/api/system-health`` and
 inject a small polling script into HTML pages that renders a red/amber banner
-whenever the report is not GREEN or has gone stale.  Read-only: nothing here
+whenever the report is not GREEN or has gone stale, plus an always-visible
+uninterrupted-runtime line when the payload carries ``uptime``
+(``runtime_uptime``).  Read-only: nothing here
 touches trading, relay, or exchange state.
 """
 from __future__ import annotations
@@ -134,17 +136,30 @@ def banner_script(endpoint: str = "/api/system-health") -> str:
         f'<script {BANNER_MARKER}="1">(function(){{'
         f'var U={json.dumps(endpoint)};'
         'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}'
+        'var C={green:"#1b7f3b",amber:"#9a6700",red:"#b00020"};'
+        'function uptimeHtml(u){if(!u)return "";'
+        'var s="<b>"+esc(u.uninterrupted_label||"Uptime unavailable")+"</b>";'
+        'if(u.since_aest)s+=" &middot; since "+esc(u.since_aest)+" ("+esc(u.since_utc)+")";'
+        'var li=u.last_interruption;if(li&&li.text)s+=" &middot; "+(u.running?"last interruption: ":"cause: ")+esc(li.text);'
+        'if(u.interruptions_24h!=null)s+=" &middot; 24h: "+esc(u.interruptions_24h)+" interruption"+(u.interruptions_24h===1?"":"s");'
+        'if(u.longest_run_7d_label&&u.available!==false)s+=" &middot; 7d longest: "+esc(u.longest_run_7d_label);'
+        'if(u.proof&&u.proof.label)s+=" &middot; "+esc(u.proof.label);'
+        'if(u.note)s+=" &middot; <i>"+esc(u.note)+"</i>";return s;}'
         'function draw(r){var el=document.getElementById("system-health-banner");'
-        'if(!r||(r.verdict==="GREEN"&&!r.stale)){if(el)el.remove();return;}'
+        'var u=r&&r.uptime;var bad=r&&!(r.verdict==="GREEN"&&!r.stale);'
+        'if(!r||(!bad&&!u)){if(el)el.remove();return;}'
         'if(!el){el=document.createElement("div");el.id="system-health-banner";'
-        'el.style.cssText="position:sticky;top:0;z-index:99999;padding:6px 12px;font:13px/1.4 system-ui,sans-serif;color:#fff;";'
+        'el.style.cssText="position:sticky;top:0;z-index:99999;font:13px/1.4 system-ui,sans-serif;color:#fff;overflow-wrap:anywhere;";'
         'document.body.insertBefore(el,document.body.firstChild);}'
-        'var red=r.verdict==="RED";el.style.background=red?"#b00020":"#9a6700";'
+        'var h="";if(u){h+="<div id=\\"runtime-uptime-strip\\" data-state=\\""+esc(u.state)+"\\" style=\\"padding:5px 12px;background:"'
+        '+(C[u.colour]||C.red)+"\\">"+uptimeHtml(u)+"</div>";}'
+        'if(bad){var red=r.verdict==="RED";'
         'var f=(r.failing||[]).filter(function(c){return c.status!=="GREEN";});'
         'var parts=f.slice(0,4).map(function(c){return "<b>"+esc(c.id)+"</b>: "+esc(c.observed);});'
-        'el.innerHTML="SYSTEM HEALTH "+esc(r.verdict)+(r.stale?" (stale)":"")+" &mdash; "+(parts.join(" &middot; ")||"see /api/system-health")'
+        'h+="<div style=\\"padding:6px 12px;background:"+(red?C.red:C.amber)+"\\">SYSTEM HEALTH "+esc(r.verdict)+(r.stale?" (stale)":"")+" &mdash; "+(parts.join(" &middot; ")||"see /api/system-health")'
         '+(f.length>4?" &middot; +"+(f.length-4)+" more":"")'
-        '+" &middot; <a href=\\"/alerts\\" style=\\"color:#fff;text-decoration:underline\\">all alerts</a>";}'
+        '+" &middot; <a href=\\"/alerts\\" style=\\"color:#fff;text-decoration:underline\\">all alerts</a></div>";}'
+        'el.innerHTML=h;}'
         'function poll(){fetch(U,{cache:"no-store"}).then(function(x){return x.ok?x.json():null;})'
         '.then(draw).catch(function(){});}'
         'if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",poll);}else{poll();}'
