@@ -801,6 +801,63 @@ def test_auto_ff_follows_only_a_successful_deploy_and_logs_a_receipt(tmp_path, c
     assert _run_auto_ff(clone, chain).returncode == 0
 
 
+def _origin_commit(tmp_path, name, content, message):
+    origin = tmp_path / "origin"
+    (origin / name).parent.mkdir(parents=True, exist_ok=True)
+    (origin / name).write_text(content)
+    _git(origin, "add", name)
+    _git(origin, "commit", "-q", "-m", message)
+    return _git(origin, "rev-parse", "HEAD")
+
+
+@windows_only
+def test_auto_ff_follows_laptop_only_skip_ci_commits_on_top_of_the_deploy(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    env = {**chain["env"], "DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC": "0"}
+    run = lambda: _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot "
+                      f"'{chain['canonical']}' -StateDir '{chain['state']}'; exit $LASTEXITCODE", env)
+    assert run().returncode == 0
+    assert _git(clone, "rev-parse", "HEAD") == second
+    laptop = _origin_commit(tmp_path, "scripts/x.py", "x\n", "[skip ci] fix(analyzer): laptop only")
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(clone, "rev-parse", "HEAD") == laptop
+    receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["outcome"] == "FAST_FORWARDED_LAPTOP_ONLY" and receipt["to"] == laptop
+
+
+@windows_only
+def test_auto_ff_never_follows_a_deployable_or_fly_runtime_commit_without_a_deploy(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    env = {**chain["env"], "DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC": "0"}
+    run = lambda: _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot "
+                      f"'{chain['canonical']}' -StateDir '{chain['state']}'; exit $LASTEXITCODE", env)
+    assert run().returncode == 0
+    _origin_commit(tmp_path, "services/btc-conservative-agent/bot.py", "x\n", "[skip ci] sneaky runtime change")
+    assert run().returncode == 0
+    assert _git(clone, "rev-parse", "HEAD") == second
+    receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["outcome"] == "SKIPPED_LAPTOP_FOLLOW" and "bot.py" in receipt["denied"]
+    lines = len((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines())
+    assert run().returncode == 0
+    assert len((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()) == lines
+
+
+@windows_only
+def test_auto_ff_does_not_follow_commits_without_skip_ci(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    env = {**chain["env"], "DOXXED_V2C_LAPTOP_FOLLOW_FETCH_SEC": "0"}
+    run = lambda: _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot "
+                      f"'{chain['canonical']}' -StateDir '{chain['state']}'; exit $LASTEXITCODE", env)
+    assert run().returncode == 0
+    _origin_commit(tmp_path, "scripts/y.py", "y\n", "feat: needs a deploy")
+    assert run().returncode == 0
+    assert _git(clone, "rev-parse", "HEAD") == second
+
+
 @windows_only
 def test_auto_ff_refuses_dirty_checkout_and_waits_for_a_busy_cycle(tmp_path, chain):
     clone, first, second = _ff_fixture(tmp_path, chain)

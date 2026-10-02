@@ -31,6 +31,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
 DEFAULT_ROOT = os.environ.get("DOXXED_ANALYZER_EXPORT_DIR") or r"C:\DoxxedCrypto\analyzer-exports"
@@ -228,9 +229,11 @@ def _snapshot_intact(root: str, entry: dict) -> bool:
 
 
 def _utc_ts(value) -> Optional[float]:
-    """ISO date/timestamp; a naive value is UTC (archive days are UTC days)."""
-    if not value:
+    """ISO date/timestamp or epoch seconds; a naive value is UTC (archive days are UTC days)."""
+    if value is None or value == "":
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError as exc:
@@ -317,27 +320,26 @@ def load_archive(since: Optional[str] = None, *, root: Optional[str] = None,
     return AnalysisArchive(tables, base, since)
 
 
-def load_tier_a(dataset: str, *, since: Optional[str] = None, until: Optional[str] = None,
-                schema_version: Optional[int] = None, root: Optional[str] = None,
-                parse: bool = False) -> pd.DataFrame:
-    """Compacted Tier A rows (zstd Parquet, one partition set per UTC day).
+TIER_A_TS_KEYS = ("bucket_ts", "minute_ts", "ts_epoch", "close_ts", "ts")
 
-    Uses the newest ``v<N>`` directory unless ``schema_version`` is given;
-    partitions whose manifest hash does not match are refused. ``parse=True``
-    expands the raw JSON ``row`` column into columns.
-    """
+
+def tier_a_partitions(dataset: str, *, since=None, until=None, schema_version: Optional[int] = None,
+                      root: Optional[str] = None) -> list:
+    """``[{"day", "path", "manifest_path"}]`` oldest-first; ``[]`` when the dataset is absent."""
     folder = os.path.join(root or DEFAULT_COMPACT, "tierA", dataset)
-    versions = sorted((int(name[1:]) for name in (os.listdir(folder) if os.path.isdir(folder) else [])
-                       if name.startswith("v") and name[1:].isdigit()))
+    try:
+        names = os.listdir(folder) if os.path.isdir(folder) else []
+    except OSError:
+        return []
+    versions = sorted(int(name[1:]) for name in names if name.startswith("v") and name[1:].isdigit())
     if not versions:
-        return pd.DataFrame(columns=["ts", "row"])
+        return []
     version = schema_version if schema_version is not None else versions[-1]
     if version not in versions:
         raise KeyError(f"{dataset} has no schema_version {version}; available {versions}")
-    lo = _utc_ts(since)
-    hi = _utc_ts(until)
-    frames = []
+    lo, hi = _utc_ts(since), _utc_ts(until)
     vdir = os.path.join(folder, f"v{version}")
+    out = []
     for part_dir in sorted(os.listdir(vdir)):
         if not part_dir.startswith("date="):
             continue
@@ -348,25 +350,110 @@ def load_tier_a(dataset: str, *, since: Optional[str] = None, until: Optional[st
             continue
         if (lo is not None and start + 86400 <= lo) or (hi is not None and start > hi):
             continue
-        for name in sorted(os.listdir(os.path.join(vdir, part_dir))):
-            if not name.endswith(".parquet"):
-                continue
-            path = os.path.join(vdir, part_dir, name)
-            manifest = _read_json(path[:-len(".parquet")] + ".manifest.json") or {}
-            if manifest.get("sha256") != _sha256(path):
-                raise StaleExportError(f"Tier A partition hash mismatch: {path}")
-            frames.append(pd.read_parquet(path))
-    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["ts", "row"])
-    if lo is not None:
-        out = out[out["ts"] >= lo]
-    if hi is not None:
-        out = out[out["ts"] <= hi]
-    out = out.sort_values("ts", kind="stable").reset_index(drop=True)
+        try:
+            files = sorted(os.listdir(os.path.join(vdir, part_dir)))
+        except OSError:
+            continue
+        for name in files:
+            if name.endswith(".parquet"):
+                path = os.path.join(vdir, part_dir, name)
+                out.append({"day": day, "path": path, "schema_version": version,
+                            "manifest_path": path[:-len(".parquet")] + ".manifest.json"})
+    return out
+
+
+def tier_a_partition_intact(part: dict) -> bool:
+    manifest = _read_json(part["manifest_path"]) or {}
+    try:
+        return bool(manifest.get("sha256")) and manifest.get("sha256") == _sha256(part["path"])
+    except OSError:
+        return False
+
+
+def row_timestamp(text, keys=TIER_A_TS_KEYS) -> Optional[float]:
+    """Epoch seconds from a raw Tier A JSON row (numeric or ISO value of the first present key)."""
+    if not isinstance(text, str) or not text.startswith("{"):
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    for key in keys:
+        value = doc.get(key) if isinstance(doc, dict) else None
+        if value is None or value == "":
+            continue
+        try:
+            ts = _utc_ts(value)
+        except ValueError:
+            continue
+        if ts is not None:
+            return ts / 1000.0 if ts > 1e11 else ts
+    return None
+
+
+def load_tier_a(dataset: str, *, since=None, until=None,
+                schema_version: Optional[int] = None, root: Optional[str] = None,
+                parse: bool = False, dedupe: str = "row", strict: bool = False,
+                ts_keys=TIER_A_TS_KEYS) -> pd.DataFrame:
+    """Compacted Tier A rows (zstd Parquet, one partition set per UTC day).
+
+    Uses the newest ``v<N>`` directory unless ``schema_version`` is given and
+    returns an empty ``ts``/``row`` frame when the dataset does not exist yet.
+    A partition whose manifest hash does not match is refused: skipped and
+    listed in ``attrs["refused_partitions"]`` (``strict=True`` raises instead).
+    Rows with a null ``ts`` take it from the row's own key (``bucket_ts`` for
+    the 1 s tape, ``minute_ts`` for 1 m streams). ``dedupe="row"`` drops exact
+    duplicate rows, ``dedupe="ts"`` keeps the last row per timestamp (dense
+    per-second/per-minute datasets), ``dedupe=None`` keeps everything.
+    ``since``/``until`` accept ISO strings or epoch seconds. ``parse=True``
+    expands the raw JSON ``row`` column into columns.
+    """
+    empty = pd.DataFrame(columns=["ts", "row"])
+    parts = tier_a_partitions(dataset, since=since, until=until, schema_version=schema_version, root=root)
+    lo, hi = _utc_ts(since), _utc_ts(until)
+    frames, refused = [], []
+    for part in parts:
+        if not tier_a_partition_intact(part):
+            if strict:
+                raise StaleExportError(f"Tier A partition hash mismatch: {part['path']}")
+            refused.append(part["path"])
+            continue
+        try:
+            frame = pd.read_parquet(part["path"])
+        except Exception as exc:  # unreadable partition: refuse it, keep the rest
+            if strict:
+                raise StaleExportError(f"Tier A partition unreadable: {part['path']}: {exc}") from exc
+            refused.append(part["path"])
+            continue
+        if "row" not in frame.columns:
+            refused.append(part["path"])
+            continue
+        if "ts" not in frame.columns:
+            frame["ts"] = np.nan
+        frames.append(frame[["ts", "row"]])
+    out = pd.concat(frames, ignore_index=True) if frames else empty.copy()
+    if len(out):
+        ts = pd.to_numeric(out["ts"], errors="coerce")
+        missing = ts.isna()
+        if missing.any():
+            ts[missing] = [row_timestamp(text, ts_keys) for text in out.loc[missing, "row"]]
+        out["ts"] = pd.to_numeric(ts, errors="coerce").astype(float)
+        if lo is not None:
+            out = out[out["ts"] >= lo]
+        if hi is not None:
+            out = out[out["ts"] <= hi]
+        out = out.sort_values("ts", kind="stable")
+        if dedupe == "ts":
+            out = out[out["ts"].notna()].drop_duplicates(subset=["ts"], keep="last")
+        elif dedupe == "row":
+            out = out.drop_duplicates(subset=["ts", "row"], keep="last")
+        out = out.reset_index(drop=True)
     if parse and len(out):
         expanded = pd.json_normalize([json.loads(text) if isinstance(text, str) and text.startswith("{") else {"raw": text}
                                       for text in out["row"]])
-        out = pd.concat([out[["ts"]], expanded], axis=1)
-    out.attrs.update({"dataset": dataset, "schema_version": version})
+        out = pd.concat([out[["ts"]], expanded.drop(columns=["ts"], errors="ignore")], axis=1)
+    out.attrs.update({"dataset": dataset, "schema_version": parts[0]["schema_version"] if parts else None,
+                      "partitions": len(parts), "refused_partitions": refused})
     return out
 
 

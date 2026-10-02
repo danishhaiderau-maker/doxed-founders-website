@@ -24,7 +24,8 @@ from strategy_lab import stats as S
 from strategy_lab.signals import (ai_direction, attach_funding, load_ai_calls, rv15_at, xvl_lead,
                                   xvl_signals)
 from strategy_lab.simulator import CostModel, live_fill_parity, recorded_fill_atr, simulate, spec_dict
-from strategy_lab.tape import cross_venue_mids, load_bitfinex_tape
+from strategy_lab.tape import (HistorySources, coverage_summary, cross_venue_mids, default_history_sources,
+                               load_bitfinex_tape)
 
 LIVE_TEST_MARGIN_USD = 0.25
 LIVE_TEST_LEVERAGE = 100.0
@@ -34,6 +35,10 @@ NULL_DRAWS = 400
 RNG_SEED = 20261002
 ALPHA = 0.05
 HEAVY_CACHE_FILE = "strategy_lab_heavy_cache.json"
+
+_COVERAGE_KEYS = ("epoch_start", "first_available_ts", "first_available", "last_ts", "last", "horizon_hours",
+                  "epoch_coverage_share", "in_window_present_share", "unit_sec", "present_units", "epoch_seconds",
+                  "sources", "unique_units_by_source")
 
 TRADE_COLUMNS = ["hypothesis_id", "signal_ts", "side", "fill_ts", "fill_px", "exit_ts", "exit_px", "hold_sec",
                  "reason", "quote_bp", "mid_bp", "spread_cost_bp", "fee_bp", "slippage_bp", "funding_bp",
@@ -71,11 +76,21 @@ def _clean(obj):
 
 # ---------------------------------------------------------------- signals
 class _Context:
-    def __init__(self, tape, venues, calls):
+    def __init__(self, tape, venues, calls, venue_span: Optional[dict] = None):
         self.tape = tape
         self.venues = venues
         self.calls = calls
+        self.venue_span = venue_span or {}
         self._lead = {}
+
+    def _in_venue_span(self, sig: pd.DataFrame) -> pd.DataFrame:
+        # XVL primaries and their controls are scored on the same cross-venue window,
+        # even when the Bitfinex tape (multi-day history) reaches further back.
+        lo, hi = self.venue_span.get("start_ts"), self.venue_span.get("end_ts")
+        if sig.empty or lo is None or hi is None:
+            return sig
+        ts = sig["ts"].to_numpy(float)
+        return sig[(ts >= float(lo)) & (ts <= float(hi))].reset_index(drop=True)
 
     def lead(self, window: int, mode: str) -> np.ndarray:
         key = (window, mode)
@@ -88,7 +103,8 @@ class _Context:
             if not self.venues:
                 return pd.DataFrame(columns=["ts", "side"])
             lead = self.lead(spec["window_sec"], spec["mode"])
-            return xvl_signals(self.tape, self.venues, spec["window_sec"], spec["threshold_bp"], spec["mode"], lead)
+            return self._in_venue_span(
+                xvl_signals(self.tape, self.venues, spec["window_sec"], spec["threshold_bp"], spec["mode"], lead))
         if spec["family"] == "AI_CALL":
             c = self.calls
             if c is None or c.empty:
@@ -398,7 +414,8 @@ def correlations(sims: dict, trades: Optional[pd.DataFrame], lanes) -> list:
 # ---------------------------------------------------------------- heavy cache
 def _heavy_fingerprint(tape, venues_span) -> str:
     return json.dumps({"reg": H.registry_signature(), "t0": int(tape.t0),
-                       "venue_start": (venues_span or {}).get("start_ts")}, sort_keys=True)
+                       "venue_start": (venues_span or {}).get("start_ts"),
+                       "sources": sorted(k for k, v in (tape.source_rows or {}).items() if v)}, sort_keys=True)
 
 
 def _load_heavy(cache_dir: Optional[str], fingerprint: str, now: float, interval: float) -> Optional[dict]:
@@ -428,15 +445,65 @@ def _save_heavy(cache_dir: Optional[str], fingerprint: str, now: float, families
         pass
 
 
+# ---------------------------------------------------------------- multi-day AI calls
+AI_CALL_COVERAGE_BUCKET_SEC = 900
+
+
+def load_ai_calls_union(data_dir: str, start_ts: Optional[float], history: Optional[HistorySources]) -> tuple:
+    """AI_DECISION calls from the mirror plus frozen archives, de-duplicated by call id (mirror wins).
+
+    Funding is attached from the mirror's AI input log first, then from each
+    archive's log for calls the mirror no longer carries.
+    """
+    calls = load_ai_calls(data_dir, start_ts=start_ts)
+    calls["_src"] = "mirror"
+    frames = [calls]
+    for folder in (history.archive_dirs if history is not None else ()):
+        extra = load_ai_calls(folder, start_ts=start_ts)
+        if len(extra):
+            extra["_src"] = "archive"
+            frames.append(extra)
+    rows_by = {"archive": int(sum(len(f) for f in frames if len(f) and f["_src"].iloc[0] == "archive")),
+               "tier_a": 0, "mirror": int(len(calls))}
+    merged = pd.concat(frames, ignore_index=True) if len(frames) > 1 else calls
+    merged = merged.drop_duplicates("call_id", keep="first").sort_values("ts", kind="stable").reset_index(drop=True)
+    unique = {"archive": int((merged["_src"] == "archive").sum()), "tier_a": 0,
+              "mirror": int((merged["_src"] == "mirror").sum())}
+    out = attach_funding(merged.drop(columns=["_src"]), data_dir)
+    for folder in (history.archive_dirs if history is not None else ()):
+        missing = out["funding_bp_8h"] == 0
+        if not missing.any():
+            break
+        filled = attach_funding(out.loc[missing, ["ts", "call_id", "long", "short", "gap", "raw"]], folder)
+        out.loc[missing, "funding_bp_8h"] = filled["funding_bp_8h"].to_numpy(float)
+    return out, rows_by, unique
+
+
+def _ai_call_coverage(calls: pd.DataFrame, epoch_start, now, rows_by, unique) -> dict:
+    b = AI_CALL_COVERAGE_BUCKET_SEC
+    ts = calls["ts"].to_numpy(float) if len(calls) else np.array([])
+    buckets = np.unique((ts // b).astype(np.int64)) if ts.size else np.array([], np.int64)
+    return coverage_summary(
+        epoch_start=epoch_start, first_ts=float(ts.min()) if ts.size else None,
+        last_ts=float(ts.max()) if ts.size else None, present_units=int(buckets.size),
+        window_units=int(buckets[-1] - buckets[0] + 1) if buckets.size else 0, unit_sec=b, now=now,
+        sources=rows_by, unique_by_source=unique)
+
+
 # ---------------------------------------------------------------- entry point
 def run_strategy_lab(data_dir: str, *, session: Optional[dict] = None, registry: Optional[dict] = None,
                      tile_lanes=(), trades: Optional[pd.DataFrame] = None, cache_dir: Optional[str] = None,
-                     now: Optional[float] = None, streams: Optional[list] = None) -> tuple:
+                     now: Optional[float] = None, streams: Optional[list] = None,
+                     history: Optional[HistorySources] = None) -> tuple:
     started = time.perf_counter()
     now = float(now if now is not None else time.time())
     session = session or {}
     timing = {}
     epoch_start = session.get("collector_v22_epoch_ts") or None
+    if epoch_start is not None:
+        epoch_start = float(epoch_start)
+    # History is only epoch-pure when the epoch start is known.
+    history = (history if history is not None else default_history_sources()) if epoch_start else HistorySources()
     defects = H.validate()
     payload = {
         "schema": SCHEMA, "generated_at": _iso(now), "generated_at_ts": now,
@@ -449,28 +516,34 @@ def run_strategy_lab(data_dir: str, *, session: Optional[dict] = None, registry:
                        "spread": "paid through executable quotes (ask/bid), never mid",
                        "funding": "Bitfinex funding from the AI input context when the hold crosses 00/08/16 UTC"},
         "streams": streams or [],
+        "history_sources": history.describe() if history.enabled else {"archive_dirs": [], "tier_a_root": None},
     }
     t = time.perf_counter()
-    tape = load_bitfinex_tape(data_dir, start_ts=epoch_start, cache_dir=cache_dir)
+    tape = load_bitfinex_tape(data_dir, start_ts=epoch_start, cache_dir=cache_dir, history=history)
     timing["tape_sec"] = round(time.perf_counter() - t, 2)
     if tape is None:
         payload.update(status="NO_TAPE", timing=timing)
         return _clean(payload), {}
-    payload["tape"] = tape.coverage()
+    payload["tape"] = tape.coverage(epoch_start=epoch_start, now=now)
     t = time.perf_counter()
     try:
-        cv = cross_venue_mids(data_dir, tape)
+        cv = cross_venue_mids(data_dir, tape, history=history, epoch_start=epoch_start, now=now)
     except Exception as exc:  # pragma: no cover - shadow tape optional
         cv = {"venues": {}, "span": None, "error": f"{type(exc).__name__}: {exc}"}
     payload["cross_venue"] = {"span": cv.get("span"), "venues": sorted(cv.get("venues") or {}),
-                              "error": cv.get("error")}
-    calls = load_ai_calls(data_dir, start_ts=epoch_start)
-    calls = attach_funding(calls, data_dir)
+                              "error": cv.get("error"), "coverage": cv.get("coverage")}
+    calls, call_rows, call_unique = load_ai_calls_union(data_dir, epoch_start, history)
     payload["ai_calls"] = {"n": int(len(calls)), "start": _iso(calls["ts"].min()) if len(calls) else None,
                            "end": _iso(calls["ts"].max()) if len(calls) else None,
-                           "with_funding": int((calls["funding_bp_8h"] != 0).sum()) if len(calls) else 0}
+                           "with_funding": int((calls["funding_bp_8h"] != 0).sum()) if len(calls) else 0,
+                           "coverage": _ai_call_coverage(calls, epoch_start, now, call_rows, call_unique)}
+    payload["stream_coverage"] = {
+        "market_microstructure_1s.jsonl": {k: payload["tape"].get(k) for k in _COVERAGE_KEYS},
+        "cross_venue_tape_1m.jsonl": {k: (cv.get("coverage") or {}).get(k) for k in _COVERAGE_KEYS},
+        "ai_tranche_log.csv": {k: payload["ai_calls"]["coverage"].get(k) for k in _COVERAGE_KEYS},
+    }
     timing["inputs_sec"] = round(time.perf_counter() - t, 2)
-    ctx = _Context(tape, cv.get("venues") or {}, calls)
+    ctx = _Context(tape, cv.get("venues") or {}, calls, venue_span=cv.get("span"))
 
     t = time.perf_counter()
     hyp_rows, hyp_trades, sims = run_hypotheses(ctx)
@@ -513,6 +586,11 @@ def run_strategy_lab(data_dir: str, *, session: Optional[dict] = None, registry:
             "regimes": "expanding quantiles (no full-sample thresholds)",
             "capacity": "one position per hypothesis/config, sequential",
             "tape_holes": "paths crossing a >60 s tape hole are censored, not filled",
+            "history": "tape, cross-venue minutes and AI calls are the union of Tier A partitions, frozen "
+                       "mirror archives and the live mirror, de-duplicated (mirror wins) and bounded by the "
+                       "epoch start; epoch_coverage_share = present seconds / seconds since epoch start",
+            "xvl_window": "XVL hypotheses, controls and the XVL family only take signals inside the cross-venue "
+                          "span, so a control never scores a longer window than its primary",
         },
     )
     hyp_table = pd.DataFrame([_flat_hypothesis(r) for r in hyp_rows])

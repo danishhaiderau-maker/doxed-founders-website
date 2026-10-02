@@ -9252,6 +9252,8 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
                 session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
             )
+        session_trade_ids = (set(trades["trade_id"].astype(str))
+                             if trades is not None and "trade_id" in getattr(trades, "columns", []) else None)
         trades, cohort_quarantine = split_current_tile_cohort(
             trades, session, relay_interference=relay_interference_trade_ids(),
             lifecycle_contradictions=lifecycle_contradiction_trade_ids(),
@@ -9272,6 +9274,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
                 f"{ai_outage_receipt['rows_by_frame']} {PIPELINE_ENFORCEMENT_TAG}"
             )
         write_trade_cohort_quarantine(cohort_quarantine)
+        _record_ledger_reconciliation(all_trades_unfiltered, trades, cohort_quarantine, session, session_trade_ids)
         multiverse_collection_health_report(cohort_quarantine)
         adaptive_entry_funnel_report()
         tile_paired_comparison_report(trades)
@@ -18530,10 +18533,16 @@ def exit_ladder_simulator_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
-    trades = _filter_policy_analysis_df(trades, "exit ladder simulator")
+    from research.exit_ladder_paper_cohort import filter_for_exit_ladder
+
     raw_replays = _load_jsonl_replays()
-    replays = _filter_policy_analysis_replays(
-        raw_replays, "exit ladder simulator"
+    trades, replays, ladder_cohort = filter_for_exit_ladder(
+        trades, raw_replays, epoch_id=_fresh_epoch_provenance().get("fresh_epoch_id"),
+    )
+    print(
+        f"   exit ladder simulator: {ladder_cohort['cohort']} eligibility "
+        f"{ladder_cohort['eligible_count']}/{ladder_cohort['current_registry_trades']} "
+        f"(exclusions={ladder_cohort['exclusion_reason_counts']}). {PIPELINE_ENFORCEMENT_TAG}"
     )
     raw_replays_available = len(raw_replays)
     executed_ids = set()
@@ -18702,6 +18711,7 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "replays_available": replays_considered,
         "replays_considered": replays_considered,
         "replays_matched_executed": replays_matched,
+        "cohort_receipt": ladder_cohort,
         "data_status": data_status,
         "empty_reason": empty_reason,
         "disclaimer": disclaimer,
@@ -21411,6 +21421,142 @@ def _same_publication_dynamic_report(legacy_report, scorecard, expected_generati
     return report
 
 
+def _protection_replay_window_from_reports():
+    report = _load_json_report(os.path.join(
+        os.getenv("BTC_AGENT_REPORT_DIR") or ".", SAFE_POLICY_GENOME_V3_REPORT_FILE,
+    ), {}) or {}
+    started = globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+    try:
+        generated = datetime.fromisoformat(
+            str(report.get("generated_at")).replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError):
+        generated = None
+    if started and (generated is None or generated < float(started)):
+        return None
+    window = (report.get("candidate_screen") or {}).get("input_window")
+    return window if isinstance(window, dict) and window else None
+
+
+_CURRENT_LEDGER_RECONCILIATION = None
+
+
+def _record_ledger_reconciliation(raw, cohort, quarantine, session, session_trade_ids):
+    """Mirror ledger rows (exact PnL) vs the current cohort; every exclusion needs a reason."""
+    global _CURRENT_LEDGER_RECONCILIATION
+    try:
+        import ledger_reconciliation
+
+        raw_rows = []
+        if raw is not None and not getattr(raw, "empty", True):
+            cols = [c for c in ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd",
+                                "net_pnl_usd_csv_cents", "net_pnl_basis") if c in raw.columns]
+            for row in raw[cols].to_dict("records"):
+                row["pnl_exact"] = safe_float(row.get("net_pnl_usd"))
+                row["pnl_cents"] = safe_float(row.get("net_pnl_usd_csv_cents", row.get("net_pnl_usd")))
+                raw_rows.append(row)
+        reasons = []
+        if session_trade_ids is not None:
+            reasons += [{"trade_id": str(r.get("trade_id")), "reason": "BEFORE_SESSION_START"}
+                        for r in raw_rows if str(r.get("trade_id")) not in session_trade_ids]
+        reasons += list((quarantine or {}).get("rows_detail") or [])
+        cohort_ids = (cohort["trade_id"].astype(str).tolist()
+                      if cohort is not None and "trade_id" in getattr(cohort, "columns", []) else [])
+        _CURRENT_LEDGER_RECONCILIATION = ledger_reconciliation.build_report(
+            raw_rows=raw_rows, cohort_ids=cohort_ids, quarantine_rows=reasons,
+            lanes=CURRENT_RESEARCH_LANES, epoch_id=str((session or {}).get("collector_v22_epoch_id") or ""),
+        )
+    except Exception as exc:
+        _CURRENT_LEDGER_RECONCILIATION = {
+            "schema": "ledger_reconciliation_v1", "level": "RED", "lanes": list(CURRENT_RESEARCH_LANES),
+            "reasons": [f"reconciliation failed: {type(exc).__name__}: {exc}"[:300]], "trades": [],
+        }
+
+
+def _write_ledger_reconciliation(manifest):
+    recon = _CURRENT_LEDGER_RECONCILIATION
+    if not recon:
+        return None
+    import ledger_reconciliation
+
+    try:
+        tmp = ledger_reconciliation.REPORT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(recon, handle, indent=2, default=str)
+        os.replace(tmp, ledger_reconciliation.REPORT_FILE)
+    except OSError as exc:
+        print(f"  Could not write {ledger_reconciliation.REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        return recon
+    artifacts = manifest.setdefault("text_artifacts", [])
+    if ledger_reconciliation.REPORT_FILE not in artifacts:
+        artifacts.append(ledger_reconciliation.REPORT_FILE)
+    manifest["ledger_reconciliation"] = {
+        key: recon.get(key) for key in ("level", "reasons", "source_data_through", "win_pct_definition",
+                                        "win_pct_source", "analyzer_cohort", "quarantined", "cents_display_drift")
+    }
+    return recon
+
+
+def _attach_generation_receipt(manifest, *, optional_errors):
+    from research.generation_receipt import (
+        RECEIPT_FILE,
+        build_generation_receipt,
+        write_generation_receipt,
+    )
+
+    input_blockers = None
+    try:
+        from research.input_blockers import collect_input_blockers
+
+        input_blockers = collect_input_blockers(
+            os.getcwd(), os.getenv("BTC_AGENT_DATA_DIR") or os.path.dirname(os.getcwd()), write=True,
+        )
+        artifacts = manifest.setdefault("text_artifacts", [])
+        if "analyzer_input_blockers.json" not in artifacts:
+            artifacts.append("analyzer_input_blockers.json")
+    except ImportError:
+        input_blockers = None
+    except Exception as exc:
+        input_blockers = {
+            "schema": "analyzer_input_blockers_v1", "level": "AMBER",
+            "items": [{"input": "input_blockers", "status": "BLOCKED",
+                       "reason_code": "COLLECTOR_ERROR",
+                       "reason": f"{type(exc).__name__}: {exc}"[:300]}],
+        }
+    receipt = build_generation_receipt(
+        manifest,
+        optional_errors=optional_errors,
+        integrity=_load_json_report(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), {}) or {},
+        input_blockers=input_blockers,
+        protection_replay_window=_protection_replay_window_from_reports(),
+    )
+    recon = _write_ledger_reconciliation(manifest)
+    if recon:
+        rank = {"GREEN": 0, "AMBER": 1, "RED": 2}
+        level = str(recon.get("level") or "AMBER").upper()
+        receipt["ledger_reconciliation"] = {"level": level, "reasons": list(recon.get("reasons") or [])}
+        if rank.get(level, 1) > rank.get(receipt["level"], 1):
+            receipt["level"] = level
+        receipt["reasons"] = list(receipt.get("reasons") or []) + [
+            f"ledger reconciliation: {reason}" for reason in recon.get("reasons") or []
+        ]
+    write_generation_receipt(os.getcwd(), receipt)
+    manifest["generation_receipt"] = {
+        key: receipt[key] for key in (
+            "schema", "level", "complete", "reasons", "failed_required_studies",
+            "failed_optional_studies", "integrity_status", "protection_replay_window",
+        )
+    }
+    artifacts = manifest.setdefault("text_artifacts", [])
+    if RECEIPT_FILE not in artifacts:
+        artifacts.append(RECEIPT_FILE)
+    print(
+        f"  Generation receipt: {receipt['level']} complete={receipt['complete']} "
+        f"{'; '.join(receipt['reasons']) or 'all studies OK'} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return receipt
+
+
 def write_report_manifest(
     payload=None, *, analysis_provenance=None,
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
@@ -21470,10 +21616,24 @@ def write_report_manifest(
         # the established analyzer cycle or leak a stale policy candidate.
         print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
         policy_cycle_error = f"{type(exc).__name__}: {exc}"
+        try:
+            from research.analyzer_integrity_reconciliation import (
+                mark_analyzer_integrity_unchecked,
+            )
+
+            mark_analyzer_integrity_unchecked(
+                analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
+                policy_cycle_error,
+            )
+            print(f"  Integrity after policy cycle: UNCHECKED {PIPELINE_ENFORCEMENT_TAG}")
+        except Exception as mark_exc:
+            print(f"  ⚠️ Integrity UNCHECKED stamp failed: {type(mark_exc).__name__}: {mark_exc}")
+    cross_world_error = None
     try:
         cross_world_evidence_report()
     except Exception as exc:
         print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
+        cross_world_error = f"{type(exc).__name__}: {exc}"
     if analysis_provenance is None:
         analysis_provenance = _lifecycle_inventory_analysis_provenance()
     if incident_input.enabled:
@@ -22038,6 +22198,12 @@ def write_report_manifest(
             "available_in_generation": False,
             "generation_error": f"{type(exc).__name__}: {exc}",
         }
+    try:
+        _attach_generation_receipt(manifest, optional_errors={
+            "cross_world_evidence": cross_world_error,
+        })
+    except Exception as exc:
+        print(f"  ⚠️ Generation receipt unavailable: {type(exc).__name__}: {exc}")
     if isinstance(payload, dict):
         # The filesystem can retain optional/stale JSON artifacts which are
         # intentionally excluded from this immutable generation.  The summary
@@ -23253,6 +23419,15 @@ def finalize_analyzer_outputs(
                 stc = len(trades)
         generate_all_data_companion_reports(dataset_counts, session_trade_count=stc)
     snap = _save_rolling_snapshot()
+    if _laptop_artifacts_enabled():
+        try:
+            from research.report_history import snapshot_report_set
+
+            history = snapshot_report_set(REPORTS_DIR)
+            print(f"  Report history: {history.get('status')} {history.get('path') or history.get('error') or ''} "
+                  f"{PIPELINE_ENFORCEMENT_TAG}")
+        except Exception as exc:
+            print(f"  Report history failed: {type(exc).__name__}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     archive_research_session(payload)
     try:
         from research.retention import run_analyzer_retention

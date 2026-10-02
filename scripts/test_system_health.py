@@ -74,6 +74,11 @@ def healthy(now: float) -> dict:
                            "relayExecutor": {"status": "PAUSED_HEALTHY", "healthy": True, "heartbeatAgeMs": 30000}},
         "deploy_runs": {"runs": [{"status": "completed", "conclusion": "success", "createdAt": "2026-10-01T20:00:00Z"}]},
         "analyzer_status": {"lastCompletedGenerationAt": sh.iso(now - 600), "state": "COMPLETED", "exitCode": 0},
+        "analyzer_receipt": {"generated_at": sh.iso(now - 600), "level": "GREEN", "reasons": [],
+                             "studies": [{"name": "best_policy_research_report.json", "status": "OK"}],
+                             "failed_required_studies": []},
+        "analyzer_integrity": {"report_status": "VALID"},
+        "analyzer_manifest_generated_at": sh.iso(now - 600),
         "cycle_status": {"startedAt": sh.iso(now - 1500), "finishedAt": sh.iso(now - 600), "exitCode": 0},
         "proof_active": {"status": {"result": "RUNNING"}},
         "proof_last_row": {"at": sh.iso(now - 600), "status": "PASS", "failed_checks": []},
@@ -863,6 +868,84 @@ def test_refuses_onedrive_state_dir(capsys):
     assert sh.main(["--state-dir", r"C:\Users\x\OneDrive\laptop-chain", "--latest"]) == 2
 
 
+def test_failed_required_study_or_unchecked_integrity_is_red_never_green():
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.GREEN
+    inputs["analyzer_receipt"].update(level="RED", reasons=["required studies failed: best_policy_research_report.json"],
+                                      failed_required_studies=["best_policy_research_report.json"])
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
+    assert check["status"] == sh.RED and "best_policy" in check["observed"]
+    inputs = healthy(now)
+    inputs["analyzer_integrity"] = {"report_status": "UNCHECKED"}
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.RED
+    inputs = healthy(now)
+    inputs["analyzer_receipt"] = None
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.AMBER
+    inputs["analyzer_integrity"] = {"report_status": "UNCHECKED"}
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.RED
+
+
+def test_receipt_older_than_the_current_generation_is_not_trusted():
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_receipt"]["generated_at"] = sh.iso(now - 5 * 3600)
+    inputs["analyzer_manifest_generated_at"] = sh.iso(now - 600)
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.AMBER
+
+
+def test_data_health_uses_mirror_relative_verdicts_only():
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["data_health_report"] = {"streams": [{"stream": "coinbase_1s", "status": "STALE"}]}
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.data_health"]["status"] == sh.SKIP
+    inputs["data_health_report"] = {"stream_status_basis": "mirror head", "mirror_status": "OK",
+                                    "status_counts": {"OK": 16, "WARMUP": 1},
+                                    "streams": [{"stream": "coinbase_1s", "status": "OK"},
+                                                {"stream": "trailing_regime_1m", "status": "WARMUP"}]}
+    assert by_id(sh.evaluate(inputs, {}))["analyzer.data_health"]["status"] == sh.GREEN
+    inputs["data_health_report"]["streams"].append({"stream": "liq_okx", "status": "STALE"})
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.data_health"]
+    assert check["status"] == sh.AMBER and "liq_okx=STALE" in check["observed"]
+
+
+def test_streams_coverage_reads_fly_collection_blocks_not_a_missing_data_streams_key():
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["fly_status"]["collection"].update({
+        "market_context_tape": {"enabled": True, "status": "OK", "age_sec": 5, "stale_feeds": [],
+                                "feeds": {"liq_okx": {"ok": True, "connected": True}}},
+        "microstructure_tape": {"last_bucket_ts": now - 2, "write_failures_this_process": 0},
+    })
+    check = by_id(sh.evaluate(inputs, {}))["streams.coverage"]
+    assert check["status"] == sh.GREEN
+    assert "n/a" not in check["observed"] and "market_context:OK" in check["observed"]
+    inputs["fly_status"]["collection"]["market_context_tape"].update(status="DEGRADED", stale_feeds=["liq_okx"])
+    assert by_id(sh.evaluate(inputs, {}))["streams.coverage"]["status"] == sh.AMBER
+    inputs = healthy(now)
+    inputs["fly_status"]["collection"]["microstructure_tape"] = {"last_bucket_ts": now - 3600}
+    assert by_id(sh.evaluate(inputs, {}))["streams.coverage"]["status"] == sh.AMBER
+
+
+def test_retention_lock_failures_are_not_green(tmp_path):
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["retention_exits"] = [{"exit": 0}, {"exit": 3, "detail": "shadow-root lock busy"}]
+    check = by_id(sh.evaluate(inputs, {}))["storage.retention"]
+    assert check["status"] == sh.AMBER and "lock busy" in check["observed"]
+    inputs["retention_exits"] = [{"exit": 3}, {"exit": 3}, {"exit": 3}]
+    assert by_id(sh.evaluate(inputs, {}))["storage.retention"]["status"] == sh.RED
+    inputs["retention_exits"] = [{"exit": 3}, {"exit": 0}, {"exit": 0}]
+    assert by_id(sh.evaluate(inputs, {}))["storage.retention"]["status"] == sh.GREEN
+    log = tmp_path / "segment-analyzer-cycle-20261002.log"
+    log.write_text(
+        "2026-10-02T07:56:08.89Z pid=1 RETENTION exit=3 {\"ok\": false, \"error\": \"shadow-root lock busy\"}\n"
+        "2026-10-02T08:00:00Z pid=1 MIGRATION exit=0\n"
+        "2026-10-02T09:27:41.94Z pid=2 RETENTION exit=0 {\"ok\": true}\n", encoding="utf-8")
+    rows = sh.last_retention_exits(tmp_path)
+    assert [row["exit"] for row in rows] == [3, 0]
+
+
 def test_retention_cap_and_archive_freshness():
     now = ts("2026-10-02T00:00:00Z")
     inputs = healthy(now)
@@ -883,3 +966,74 @@ def test_retention_cap_and_archive_freshness():
     checks = by_id(sh.evaluate(inputs, {}))
     assert checks["storage.retention"]["status"] == sh.AMBER
     assert checks["archive.freshness"]["status"] == sh.AMBER
+
+
+def _recon(now: float, ids_closes) -> dict:
+    trades = [{"trade_id": tid, "research_lane": lane, "close_ts": sh.iso(close), "pnl_exact": pnl,
+               "pnl_cents": round(pnl, 2), "net_pnl_basis": "TERMINAL_COST_RECEIPT_EXACT", "in_cohort": True,
+               "quarantine_reason": None} for tid, lane, close, pnl in ids_closes]
+    cohort = {lane: {"n": sum(1 for t in trades if t["research_lane"] == lane),
+                     "net_pnl_usd": sum(t["pnl_exact"] for t in trades if t["research_lane"] == lane),
+                     "win_pct": 100.0} for lane in LANES}
+    return {"schema": "ledger_reconciliation_v1", "level": "GREEN", "reasons": [], "lanes": list(LANES),
+            "source_data_through": sh.iso(now - 600), "analyzer_cohort": cohort, "mirror_ledger": cohort,
+            "quarantined": {lane: 0 for lane in LANES}, "trades": trades,
+            "win_pct_definition": "wins / closed"}
+
+
+def _reconciled_inputs(now: float) -> dict:
+    inputs = healthy(now)
+    inputs["ledger_reconciliation"] = _recon(now, [(f"t-{lane}", lane, now - 1800, 0.004) for lane in LANES])
+    inputs["mirror_trades"] = [{"trade_id": f"t-{lane}", "research_lane": lane, "close_ts": sh.iso(now - 1800),
+                                "net_pnl_usd": "0.0", "epoch_id": ""} for lane in LANES]
+    for row in inputs["fly_state"]["trades"]:
+        row["net_pnl_usd"] = 0.0
+    inputs["fly_state"]["lane_pnl_ledger"] = {lane: {"closes": 1, "net_pnl_usd": 0.0, "wins": 0} for lane in LANES}
+    return inputs
+
+
+def test_ledger_reconciliation_compares_fly_mirror_and_analyzer():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = _reconciled_inputs(now)
+    check = by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]
+    assert check["status"] == sh.GREEN, check["observed"]
+    assert "fly 1/mirror 1+0/analyzer 1" in check["observed"]
+
+    inputs["fly_state"]["lane_pnl_ledger"][LANES[0]]["closes"] = 3
+    check = by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]
+    assert check["status"] == sh.RED
+    assert "trade counts differ" in check["observed"]
+
+
+def test_read_ledger_rows_keeps_only_reconciliation_fields(tmp_path):
+    path = tmp_path / "trades_3factor.csv"
+    path.write_text("trade_id,research_lane,net_pnl_usd,extra\nt1,FAMILY_X,0.01,zzz\n", encoding="utf-8")
+    assert sh.read_ledger_rows(path) == [{"trade_id": "t1", "research_lane": "FAMILY_X", "epoch_id": None,
+                                          "close_ts": None, "ts": None, "net_pnl_usd": "0.01"}]
+    assert sh.read_ledger_rows(tmp_path / "missing.csv") is None
+
+
+def test_ledger_reconciliation_red_report_and_missing_inputs():
+    now = ts("2026-10-02T00:00:00Z")
+    assert by_id(sh.evaluate(healthy(now), {}))["ledger.reconciliation"]["status"] == sh.SKIP
+    inputs = _reconciled_inputs(now)
+    inputs["ledger_reconciliation"].update(
+        level="RED", reasons=["1 current-epoch tile trades dropped from the cohort without a reason"])
+    assert by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]["status"] == sh.RED
+    inputs = _reconciled_inputs(now)
+    inputs["fly_state"] = None
+    assert by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]["status"] == sh.AMBER
+
+
+def test_tier_a_health_drives_storage_tier_a():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = healthy(now)
+    assert by_id(sh.evaluate(inputs, {}))["storage.tier_a"]["status"] == sh.SKIP
+    inputs["tier_a_health"] = {"level": "GREEN", "backfilled": True, "datasets": [
+        {"dataset": "bitfinex_l1_tape_1s", "level": "GREEN", "reasons": []}]}
+    assert by_id(sh.evaluate(inputs, {}))["storage.tier_a"]["status"] == sh.GREEN
+    inputs["tier_a_health"] = {"level": "RED", "backfilled": False, "datasets": [
+        {"dataset": "bitfinex_l1_tape_1s", "level": "RED", "reasons": ["INVALID_DAY_ROWS"]}]}
+    check = by_id(sh.evaluate(inputs, {}))["storage.tier_a"]
+    assert check["status"] == sh.RED
+    assert "INVALID_DAY_ROWS" in check["observed"]

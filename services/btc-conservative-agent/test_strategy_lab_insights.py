@@ -228,6 +228,32 @@ def test_export_carries_rankings_and_stream_tables(tmp_path):
     again = E.write_export(report_dir=str(report_dir), data_dir=str(tmp_path), trades=tr, registry=REGISTRY,
                            lanes=LANES, root=str(tmp_path / "exp2"))
     assert again["main_rankings"] == {"status": "NOT_RUN"}             # staged groups are per generation
+    assert again["generation_receipt"] == {"status": "MISSING"}
+
+
+def test_export_summary_carries_receipt_blockers_and_reconciliation(tmp_path):
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "report_manifest.json").write_text(json.dumps({"generation_id": "g1"}))
+    (report_dir / "analyzer_generation_receipt.json").write_text(json.dumps(
+        {"level": "RED", "complete": False, "reasons": ["required studies failed: best_policy"],
+         "failed_required_studies": ["best_policy"], "integrity_status": "UNCHECKED"}))
+    (report_dir / "analyzer_input_blockers.json").write_text(json.dumps(
+        {"level": "RED", "counts": {"BLOCKED": 1}, "items": [
+            {"input": "exit_ladder", "status": "BLOCKED", "reason_code": "NO_ELIGIBLE", "reason": "0/35",
+             "evidence": {"big": list(range(50))}}]}))
+    (report_dir / "ledger_reconciliation.json").write_text(json.dumps(
+        {"level": "GREEN", "reasons": [], "win_pct_definition": "wins / closed",
+         "analyzer_cohort": {"FAMILY_A": {"n": 2, "win_pct": 50.0}}, "trades": [{"trade_id": "t"}]}))
+    E.stage_strategy_lab({}, {})
+    summary = E.write_export(report_dir=str(report_dir), data_dir=str(tmp_path), trades=None, registry=REGISTRY,
+                             lanes=LANES, root=str(tmp_path / "exp"))
+    assert summary["generation_receipt"]["level"] == "RED"
+    assert summary["generation_receipt"]["integrity_status"] == "UNCHECKED"
+    assert summary["input_blockers"]["items"] == [
+        {"input": "exit_ladder", "status": "BLOCKED", "reason_code": "NO_ELIGIBLE", "reason": "0/35"}]
+    assert summary["ledger_reconciliation"]["analyzer_cohort"]["FAMILY_A"]["win_pct"] == 50.0
+    assert "trades" not in summary["ledger_reconciliation"]
 
 
 # ------------------------------------------------------------------ insights

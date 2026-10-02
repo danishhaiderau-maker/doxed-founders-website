@@ -75,6 +75,8 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
             "symbol": "tBTCF0:USTF0",
             "bucket_ts": ts,
             "ts": float(ts),
+            "source_ts": ts + 0.5,
+            "observed_at_ts": ts + 0.6,
             "price": 100.0 + (ts - 1000) * 0.1,
             "fresh": True,
             "valid_bbo": True,
@@ -748,6 +750,26 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(
             candidate["policy_spec"]["entry"]["chase_id"] == "w234_s50_i180"
+            for candidate in report["candidates"]
+        ))
+
+    def test_tiles_sharing_a_taker_entry_with_different_exits_do_not_collide(self):
+        trend_fade = source("ftf-lane")
+        ladder = source("ftl-lane")
+        entry_id = "SCORE_LED_NON_TIE_PAPER_V2::INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS"
+        for row, exit_id in ((trend_fade, "TIME_3600_HARD40BP"),
+                             (ladder, "TIME_3600_HARD40BP_SCENARIO_C_CAP5")):
+            row["entry_children"][0].update({
+                "entry_policy_id": f"{entry_id}|{exit_id}",
+                "chase_id": f"{entry_id}|{exit_id}",
+                "offset_pct": 0.0,
+            })
+
+        report = evaluate_protection_screen([trend_fade, ladder])
+
+        self.assertTrue(report["candidates"])
+        self.assertTrue(all(
+            candidate["policy_spec"]["entry"]["chase_id"] == entry_id
             for candidate in report["candidates"]
         ))
 

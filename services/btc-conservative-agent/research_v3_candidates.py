@@ -861,6 +861,9 @@ def protection_replay_max_events() -> int | None:
     The replay materialises every entry child x protection variant per event
     and its cost grows with the epoch (1,764 events took >25 min and ~30 GB;
     ~1.7 s per replayed event plus ~2 min fixed for the 21k-policy screen).
+    Per replayed event the cost is ~1.9 s of replay, ~1.6 s of 21k-policy
+    assessment and ~34 MB of materialised episodes, so caching replays alone
+    cannot make the full epoch fit; only the replay share is cacheable.
     """
     raw = os.getenv("ANALYZER_PROTECTION_REPLAY_MAX_EVENTS", "").strip()
     try:
@@ -905,6 +908,55 @@ def select_recent_events(
             "first_signal_ts": min(chosen_ts) if chosen_ts else None,
             "last_signal_ts": max(chosen_ts) if chosen_ts else None,
         },
+    }
+
+
+PROTECTION_REPLAY_WINDOW_SUMMARY_SCHEMA = "protection_replay_window_summary_v1"
+PROTECTION_REPLAY_RED_COVERAGE_RATIO = 0.5
+
+
+def protection_replay_window_summary(receipt: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Compact, health-ready view of one replay window receipt.
+
+    RED when fewer than half of the eligible events were replayed, AMBER when
+    any eligible event was dropped, GREEN when the replay covered every one.
+    A missing receipt means the replay did not run and is never GREEN.
+    """
+    if not isinstance(receipt, Mapping) or receipt.get("schema") != PROTECTION_REPLAY_WINDOW_SCHEMA:
+        return {
+            "schema": PROTECTION_REPLAY_WINDOW_SUMMARY_SCHEMA,
+            "window_schema": PROTECTION_REPLAY_WINDOW_SCHEMA,
+            "status": "NOT_RUN",
+            "alert_level": "AMBER",
+            "reason": "PROTECTION_REPLAY_WINDOW_RECEIPT_MISSING",
+        }
+    eligible = int(receipt.get("events_eligible") or 0)
+    selected = int(receipt.get("events_selected") or 0)
+    coverage = (selected / eligible) if eligible else None
+    truncated = bool(receipt.get("truncated"))
+    if coverage is not None and coverage < PROTECTION_REPLAY_RED_COVERAGE_RATIO:
+        alert_level, reason = "RED", "PROTECTION_REPLAY_COVERAGE_BELOW_HALF"
+    elif truncated:
+        alert_level, reason = "AMBER", "PROTECTION_REPLAY_TRUNCATED"
+    else:
+        alert_level, reason = "GREEN", None
+    return {
+        "schema": PROTECTION_REPLAY_WINDOW_SUMMARY_SCHEMA,
+        "window_schema": PROTECTION_REPLAY_WINDOW_SCHEMA,
+        "status": "TRUNCATED" if truncated else "COMPLETE",
+        "alert_level": alert_level,
+        "reason": reason,
+        "policy": receipt.get("policy"),
+        "max_events": receipt.get("max_events"),
+        "events_eligible": eligible,
+        "events_selected": selected,
+        "events_dropped": max(0, eligible - selected),
+        "events_replayed": receipt.get("events_replayed"),
+        "coverage_ratio": round(coverage, 6) if coverage is not None else None,
+        "truncated": truncated,
+        "first_signal_ts": receipt.get("first_signal_ts"),
+        "last_signal_ts": receipt.get("last_signal_ts"),
+        "override_env": "ANALYZER_PROTECTION_REPLAY_MAX_EVENTS",
     }
 
 
@@ -1235,9 +1287,12 @@ def evaluate_protection_screen(
             # Actual paper children use the complete ``ENTRY|EXIT`` identity
             # as their fallback chase_id, while counterfactual children carry
             # only the chase suffix. Both describe the same entry policy.
+            # Tiles sharing one taker entry with different exits (e.g. Trend
+            # Fade and its ladder) must collapse to one candidate entry.
             canonical_chase_id = (
                 entry_id.split("_CHASE_", 1)[1]
-                if "_CHASE_" in entry_id else str(child.get("chase_id") or entry_id)
+                if "_CHASE_" in entry_id
+                else str(child.get("chase_id") or entry_id).split("|", 1)[0]
             )
             conservative_receipt = _conservative_child_receipt(
                 source, child, microstructure_by_ts=microstructure_by_ts,

@@ -465,12 +465,21 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["ack_receipt"] = None
     retention_dir = Path(getattr(opts, "retention_dir", None) or DEFAULT_RETENTION_DIR)
     inputs["retention_last_run"] = read_json(retention_dir / "last-run.json")
+    inputs["tier_a_health"] = (read_json(retention_dir / "status.json") or {}).get("tier_a")
+    inputs["retention_exits"] = last_retention_exits(state_dir / "logs")
+    reports = Path(opts.analyzer_repo) / ANALYZER_REPORTS_SUBDIR
+    inputs["analyzer_receipt"] = read_json(reports / "analyzer_generation_receipt.json")
+    inputs["analyzer_integrity"] = read_json(reports / "analyzer_integrity_report.json")
+    inputs["analyzer_manifest_generated_at"] = (read_json(reports / "report_manifest.json") or {}).get("generated_at")
+    inputs["data_health_report"] = read_json(reports / "data_health_report.json")
+    inputs["ledger_reconciliation"] = read_json(reports / "ledger_reconciliation.json")
     inputs["archive_last_snapshot"] = last_jsonl_row(
         Path(getattr(opts, "archive_dir", None) or DEFAULT_ARCHIVE_DIR) / "index.jsonl")
     inputs["proof_last_row"] = latest_proof_row(inputs.get("proof_active"), Path(opts.proof_dir))
     inputs["supervisor_tick_at"] = last_supervisor_tick(state_dir / "logs")
 
     inputs["mirror"] = collect_mirror(Path(opts.mirror_tree), now)
+    inputs["mirror_trades"] = read_ledger_rows(Path(opts.mirror_tree) / "trades_3factor.csv")
     inputs["exports"] = collect_exports(Path(opts.exports), now)
     cache = state.setdefault("cache", {})
     inputs["registry"] = collect_registry(opts.analyzer_repo, cache.setdefault("registry", {}))
@@ -496,6 +505,53 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     inputs["neon"] = collect_neon(cache, opts.state_dir, now)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
     return inputs
+
+
+ANALYZER_REPORTS_SUBDIR = Path("services") / "btc-conservative-agent" / "canonical-research-data" / "analyzer" / "reports"
+_RETENTION_EXIT = re.compile(r"^(\S+) pid=\d+ RETENTION exit=(-?\d+)\s*(.*)$")
+_AGENT_DIR = Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"
+
+
+_LEDGER_FIELDS = ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd")
+
+
+def read_ledger_rows(path: Path) -> list[dict[str, str]] | None:
+    try:
+        with open(path, newline="", encoding="utf-8", errors="replace") as handle:
+            return [{k: row.get(k) for k in _LEDGER_FIELDS} for row in csv.DictReader(handle)]
+    except OSError:
+        return None
+
+
+def _ledger_reconciliation_module():
+    """The comparison logic ships with the analyzer, from this same checkout."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ledger_reconciliation", _AGENT_DIR / "ledger_reconciliation.py")
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError):
+        return None
+
+
+def last_retention_exits(log_dir: Path, limit: int = 3) -> list[dict[str, Any]]:
+    """Newest-last RETENTION exit codes from the cycle logs (last-run.json only records successes)."""
+    rows: list[dict[str, Any]] = []
+    for log in sorted(log_dir.glob("segment-analyzer-cycle-*.log"))[-2:]:
+        try:
+            with open(log, "rb") as handle:
+                handle.seek(max(0, handle.seek(0, os.SEEK_END) - 200_000))
+                lines = handle.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            m = _RETENTION_EXIT.match(line.strip())
+            if m:
+                rows.append({"at": parse_ts(m.group(1)), "exit": int(m.group(2)), "detail": m.group(3)[:200]})
+    return rows[-limit:]
 
 
 def last_jsonl_row(path: Path) -> dict[str, Any] | None:
@@ -1125,6 +1181,74 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
               f"cycle <= {fmt_age(t['cycle_amber_sec'])}, exit 0, analyzer rev contains Fly rev",
               "" if st == GREEN else "slow promotion/migration, failed cycle, or v2c auto-ff not yet followed Fly"))
 
+    # ---------------- Analyzer studies + integrity (a pass can exit 0 while studies throw)
+    receipt = inputs.get("analyzer_receipt") if isinstance(inputs.get("analyzer_receipt"), Mapping) else None
+    integrity = inputs.get("analyzer_integrity") if isinstance(inputs.get("analyzer_integrity"), Mapping) else {}
+    integrity_status = str(integrity.get("report_status") or "MISSING").upper()
+    manifest_at = parse_ts(inputs.get("analyzer_manifest_generated_at"))
+    receipt_at = parse_ts((receipt or {}).get("generated_at"))
+    if receipt is None or (manifest_at and receipt_at and receipt_at < manifest_at - 30 * MIN):
+        st = RED if integrity_status in ("INVALID", "UNCHECKED") else AMBER
+        add(check("analyzer.studies", "analyzer", st,
+                  f"no generation receipt for the current generation; integrity {integrity_status}",
+                  "generation receipt GREEN: every required study OK and integrity VALID",
+                  "analyzer revision predates the generation receipt, or the receipt step failed"))
+    else:
+        st = str(receipt.get("level") or AMBER).upper()
+        st = st if st in (GREEN, AMBER, RED) else AMBER
+        if integrity_status != "VALID":
+            st = RED
+        reasons = list(receipt.get("reasons") or [])
+        add(check("analyzer.studies", "analyzer", st,
+                  "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID",
+                  "every required study OK, integrity VALID, protection replay not truncated, inputs not BLOCKED",
+                  "" if st == GREEN else "see analyzer_generation_receipt.json and the analyzer-once log",
+                  ", ".join(receipt.get("failed_required_studies") or [])[:200]))
+
+    dh = inputs.get("data_health_report") if isinstance(inputs.get("data_health_report"), Mapping) else None
+    if dh is None:
+        add(check("analyzer.data_health", "analyzer", SKIP, "data_health_report.json not found", "streams OK"))
+    elif not dh.get("stream_status_basis"):
+        add(check("analyzer.data_health", "analyzer", SKIP,
+                  "report predates mirror-relative verdicts (#293); wall-clock STALE verdicts ignored",
+                  "streams judged against the mirror head"))
+    else:
+        bad = [f"{s.get('stream')}={s.get('status')}" for s in dh.get("streams") or []
+               if isinstance(s, Mapping) and str(s.get("status")) not in ("OK", "WARMUP")]
+        mirror = str(dh.get("mirror_status") or "MISSING")
+        st = AMBER if bad or mirror != "OK" else GREEN
+        add(check("analyzer.data_health", "analyzer", st,
+                  f"mirror {mirror} ({fmt_age(dh.get('mirror_staleness_sec'))} behind wall clock); "
+                  f"streams {dh.get('status_counts')}" + (f"; {', '.join(bad[:6])}" if bad else ""),
+                  "mirror OK and every stream OK/WARMUP relative to the mirror head",
+                  "" if st == GREEN else "collector feed gap on Fly or laptop pull lag"))
+
+    recon = inputs.get("ledger_reconciliation") if isinstance(inputs.get("ledger_reconciliation"), Mapping) else None
+    lr = _ledger_reconciliation_module()
+    if recon is None or lr is None:
+        add(check("ledger.reconciliation", "analyzer", SKIP,
+                  "ledger_reconciliation.json not published yet" if recon is None else "reconciliation module missing",
+                  "Fly, mirror ledger and analyzer agree on trades and PnL up to the analyzer watermark"))
+    else:
+        out = lr.compare_with_fly(recon, fstate, inputs.get("mirror_trades"))
+        st = out["level"] if out["level"] in (GREEN, AMBER, RED) else AMBER
+        per = out["breakdown"].get("per_lane") or {}
+        lanes = "; ".join(
+            f"{lane.replace('FAMILY_', '')}: fly {v['fly_n']}/mirror {v['mirror_n']}+{v['fly_newer_than_mirror']}"
+            f"/analyzer {v['analyzer_n']} (quarantined {v['quarantined']}), Win {v['win_pct']}%"
+            f" (Fly tile {v['fly_tile_win_pct']}%, Fly ledger cents {v['fly_ledger_win_pct_cents']}%)"
+            for lane, v in per.items()
+        ) or "; ".join(f"{lane.replace('FAMILY_', '')}: analyzer {v.get('n')}, Win {v.get('win_pct')}%"
+                       for lane, v in (recon.get("analyzer_cohort") or {}).items())
+        add(check("ledger.reconciliation", "analyzer", st,
+                  f"through {recon.get('source_data_through')}: {lanes}"
+                  + (f"; {'; '.join(out['reasons'])}" if out["reasons"] else ""),
+                  "same trade ids and PnL (+-$0.01) on Fly, mirror ledger and analyzer up to the analyzer "
+                  f"watermark; Win % = {recon.get('win_pct_definition')}",
+                  "" if st == GREEN else "see ledger_reconciliation.json (trades[]) and the breakdown for missing ids",
+                  json.dumps({k: out["breakdown"].get(k) for k in ("missing_in_mirror", "bounded", "fly_listed")},
+                             default=str)[:400]))
+
     # ---------------- Exports (worker eed92197)
     exp = inputs.get("exports") or {}
     if not exp.get("present"):
@@ -1156,6 +1280,31 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if isinstance(dead, Mapping) and dead.get("status") == "DEAD_INPUT":
         issues.append(f"AI dead inputs {[d.get('path') for d in dead.get('dead_fields') or []][:5]}")
     per_stream = []
+    mct = dig(status, "collection", "market_context_tape", default=None)
+    if isinstance(mct, Mapping) and mct.get("enabled", True):
+        per_stream.append(f"market_context:{mct.get('status')}/{fmt_age(mct.get('age_sec'))}")
+        if mct.get("status") not in (None, "OK"):
+            issues.append(f"market_context {mct.get('status')} stale_feeds={mct.get('stale_feeds')}")
+        for feed, info in (mct.get("feeds") or {}).items():
+            if isinstance(info, Mapping) and (info.get("ok") is False or info.get("connected") is False):
+                issues.append(f"market_context feed {feed} down")
+    micro = dig(status, "collection", "microstructure_tape", default=None)
+    if isinstance(micro, Mapping):
+        last_bucket = micro.get("last_bucket_ts")
+        age = (now - float(last_bucket)) if isinstance(last_bucket, (int, float)) else None
+        per_stream.append(f"bitfinex_1s:{fmt_age(age)}")
+        if age is None or age > t["streams_stale_amber_sec"]:
+            issues.append(f"bitfinex 1s tape last bucket {fmt_age(age)} ago")
+        if int(micro.get("write_failures_this_process") or 0) or int(micro.get("io_write_failures_this_process") or 0):
+            issues.append("bitfinex 1s tape write failures")
+    if isinstance(cross, Mapping):
+        per_stream.append(f"cross_venue:{cross.get('status')}/{fmt_age(cross.get('collector_age_s'))}")
+    if isinstance(xvl, Mapping):
+        for lane, info in (xvl.get("lanes") or {}).items():
+            by = (info or {}).get("by_status") or {}
+            evals = int((info or {}).get("evaluations") or 0)
+            if evals:
+                per_stream.append(f"xvl_stale_feed:{100.0 * int(by.get('STALE_FEED') or 0) / evals:.0f}%")
     if isinstance(streams, Mapping):
         for name, info in streams.items():
             if not isinstance(info, Mapping):
@@ -1170,7 +1319,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         add(check("streams.coverage", "streams", SKIP, "Fly unreachable", "all streams fresh"))
     else:
         add(check("streams.coverage", "streams", AMBER if issues else GREEN,
-                  "; ".join(issues) or f"collection OK; streams {', '.join(per_stream) or 'n/a (d9f889db pending)'}",
+                  "; ".join(issues) or f"collection OK; streams {', '.join(per_stream) or 'none reported by Fly'}",
                   f"collection OK, every stream fresher than {fmt_age(t['streams_stale_amber_sec'])}",
                   "" if not issues else "collector worker stalled, tape source missing, or venue feed stale"))
 
@@ -1375,6 +1524,17 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         pruned, custody = (transfer or {}).get("pruned_through_seq"), (transfer or {}).get("custody_through_seq")
         if pruned and (custody is None or int(pruned) > int(custody)):
             st = RED
+        exits = [row for row in inputs.get("retention_exits") or [] if isinstance(row, Mapping)]
+        failed_runs = [row for row in exits if row.get("exit") != 0]
+        exit_note = ""
+        if exits:
+            exit_note = f"; recent exits {[row.get('exit') for row in exits]}"
+            if len(exits) >= 3 and len(failed_runs) == len(exits):
+                st = RED
+            elif exits[-1].get("exit") != 0 or len(failed_runs) >= 2:
+                st = max(st, AMBER, key=RANK.get)
+            if failed_runs:
+                exit_note += f" (last failure: {str(failed_runs[-1].get('detail'))[:80]})"
         used = float(run.get("bytes_after") or 0) / 1e9
         cap = float(run.get("cap_bytes") or 0) / 1e9
         add(check("storage.retention", "storage", st,
@@ -1382,10 +1542,28 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   f"mode {run.get('mode')}, last run {fmt_age(run_age)} ago, ledger rows {run.get('ledger_rows')}, "
                   f"reclaimed {int(run.get('reclaimed_bytes') or 0) / 1e9:.2f}GB"
                   f"{' (would ' + format(int(run.get('would_reclaim_bytes') or 0) / 1e9, '.2f') + 'GB)' if run.get('mode') == 'dry_run' else ''}; "
-                  f"deny={denied or 'none'}; Fly prune {prune_mode or 'off'} pruned<= {pruned} custody<= {custody}",
-                  "run < 3h old, usage < 80% (AMBER) / 90% (RED) of the 50GB cap, Fly pruned <= custody",
+                  f"deny={denied or 'none'}; Fly prune {prune_mode or 'off'} pruned<= {pruned} custody<= {custody}"
+                  f"{exit_note}",
+                  "run < 3h old, last run exit 0 and <2 of the last 3 failed, usage < 80% (AMBER) / 90% (RED) "
+                  "of the 50GB cap, Fly pruned <= custody",
                   "" if st == GREEN else "see C:\\DoxxedCrypto\\bot-data-retention\\status.json and "
                                          "docs/runbooks/DATA-RETENTION.md"))
+
+    tier_a = inputs.get("tier_a_health") if isinstance(inputs.get("tier_a_health"), Mapping) else None
+    if tier_a is None:
+        add(check("storage.tier_a", "storage", SKIP, "retention status has no tier_a block yet",
+                  "every Tier A dataset promotes dated Parquet; no undated or 1970 staging"))
+    else:
+        level = str(tier_a.get("level") or AMBER).upper()
+        st = level if level in (GREEN, AMBER, RED) else AMBER
+        bad = [f"{d.get('dataset')}={d.get('level')}: {'; '.join(map(str, d.get('reasons') or []))[:80]}"
+               for d in tier_a.get("datasets") or [] if isinstance(d, Mapping) and d.get("level") != GREEN]
+        add(check("storage.tier_a", "storage", st,
+                  f"{len(tier_a.get('datasets') or [])} datasets, backfilled={tier_a.get('backfilled')}"
+                  + (f"; {', '.join(bad[:5])}" if bad else "; all promoted"),
+                  "every Tier A dataset promotes dated Parquet; no undated or 1970 staging",
+                  "" if st == GREEN else "run bot_data_retention.py --tier-a-backfill (dry run first) between "
+                                         "analyzer cycles; see docs/runbooks/DATA-RETENTION.md"))
     snap = inputs.get("archive_last_snapshot")
     snap_at = parse_ts((snap or {}).get("written_at"))
     snap_age = (now - snap_at) if snap_at else None

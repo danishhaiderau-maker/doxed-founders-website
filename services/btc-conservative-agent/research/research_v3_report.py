@@ -18,6 +18,7 @@ from research_v3_candidates import (
     evaluate_protection_screen,
     load_candidate_inputs,
     protection_replay_max_events,
+    protection_replay_window_summary,
 )
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
@@ -33,6 +34,9 @@ from combo_pathway_config import (
 REPORT_FILE = "safe_policy_genome_v3_report.json"
 EXHAUSTIVE_POLICY_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
 EXHAUSTIVE_POLICY_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
+# Compact replay-window receipt for health/insights; also embedded in the main
+# report as ``protection_replay_window``.
+PROTECTION_REPLAY_WINDOW_FILE = "protection_replay_window.json"
 
 
 _PRE_ENTRY_FEATURE_PATHS = {
@@ -1162,12 +1166,18 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             )
             if str(row.get("episode_id") or "") not in quarantined_episode_ids
         ]
+        # Selected events can still fail per-event identity checks or be
+        # quarantined; the receipt states how many were actually replayed.
+        replay_window["events_replayed"] = len(candidate_inputs)
         incident_index.add(candidate_inputs)
         candidate_screen = evaluate_protection_screen(
             candidate_inputs,
             progress_callback=emit_candidate_progress,
         )
-        candidate_screen["input_window"] = replay_window
+        candidate_screen["input_window"] = {
+            **replay_window,
+            "alert_level": protection_replay_window_summary(replay_window)["alert_level"],
+        }
         candidates = candidate_screen["candidates"]
     incident_episodes = sorted({str(row.get("episode_id") or "") for row in opportunities
                                 if incident_index.reasons(row)})
@@ -1263,6 +1273,17 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         tile_config_signature=active_tile_registry_signature(),
         report_blockers=report_blockers,
     )
+    replay_window_summary = {
+        **protection_replay_window_summary(
+            (candidate_screen or {}).get("input_window") if candidate_screen is not None else None
+        ),
+        "generated_at": generated_at,
+        "epoch_id": epoch_id,
+        "report_file": REPORT_FILE,
+        "report_key": "protection_replay_window",
+    }
+    if candidate_screen is None:
+        replay_window_summary["reason"] = "CANDIDATES_SUPPLIED_EXTERNALLY"
     from research.shared_context_coverage import build_shared_context_coverage
     report = {
         "shared_context_coverage": build_shared_context_coverage(data_dir, epoch_id, lifecycles),
@@ -1332,6 +1353,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
         "candidate_screen": persisted_candidate_screen,
+        "protection_replay_window": replay_window_summary,
         "exhaustive_policy_results": exhaustive_manifest,
         "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
@@ -1361,4 +1383,5 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     if episode_quarantine["episode_count"]:
         _atomic_json(Path(report_dir) / "episode_execution_quarantine.json", episode_quarantine)
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
+    _atomic_json(Path(report_dir) / PROTECTION_REPLAY_WINDOW_FILE, replay_window_summary)
     return report

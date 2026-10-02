@@ -241,6 +241,46 @@ Fix: the supervisor restarts a down dashboard (`run-analyzer-once.ps1 -EnsureDas
 
 Fix: check `v2c-auto-ff.receipts.jsonl` (refusals) and the cycle phase log.
 
+<a id="analyzer-studies"></a>
+### analyzer.studies
+Reads `analyzer_generation_receipt.json` and `analyzer_integrity_report.json` from the
+published analyzer reports. An analyzer pass exits 0 even when a study throws, so this is
+the only check that sees it.
+- RED: a required study is ERROR/MISSING/INVALID (for example Best Policy Research), or
+  integrity is `INVALID` or `UNCHECKED` (the policy cycle failed, so lifecycle and
+  order-resolution integrity were never verified), or the protection replay kept fewer
+  than half of the eligible events.
+- AMBER: an optional study failed, an input is BLOCKED/DEGRADED, the protection replay is
+  truncated, or there is no receipt for the current generation.
+Fix: read the receipt `reasons` and the `analyzer-once-*.out.log` line for the study.
+
+<a id="analyzer-data_health"></a>
+### analyzer.data_health
+`data_health_report.json` per-stream verdicts, judged against the mirror head (#293).
+AMBER when the mirror is STALE or any stream is not OK/WARMUP. Reports without
+`stream_status_basis` used wall-clock staleness (always STALE) and are SKIP.
+
+<a id="storage-tier_a"></a>
+### storage.tier_a
+Per-dataset Tier A promotion health from `bot-data-retention\status.json` `tier_a`.
+RED for rows dated outside 2020-2100 (the old 1970 partitions), unverified Parquet,
+a closed day still unpromoted 24 h after settling, or undated rows remaining after
+the one-shot backfill. AMBER while rows are undated or closed days are awaiting
+promotion. Repair: `bot_data_retention.py --tier-a-backfill --dry-run`, then the
+enforce run between analyzer cycles. It holds the cycle mutex and the shadow-root lock.
+
+<a id="ledger-reconciliation"></a>
+### ledger.reconciliation
+One trade-count and PnL reconciliation per current tile across Fly `/api/state`
+`trades`, the mirror ledger (`trades_3factor.csv`) and the analyzer cohort, bounded to
+the analyzer's `source_data_through` watermark (`ledger_reconciliation.json`).
+The analyzer side is RED when a current-epoch tile trade leaves the cohort without a
+quarantine reason. AMBER for one Fly close missing from the mirror, one mirror
+trade absent inside Fly's listed window, or any PnL difference above $0.01; RED
+for two or more missing ids. Canonical Win % is wins (exact terminal-cost net PnL
+> 0) over all closed trades. The CSV's cent-rounded `net_pnl_usd` turns sub-cent
+winners into 0.00, so a Win % computed from it reads low (`cents_display_drift`).
+
 <a id="exports-freshness"></a>
 ### exports.freshness
 Freshness of `C:\DoxxedCrypto\analyzer-exports\latest`. When `analyzer_client` is

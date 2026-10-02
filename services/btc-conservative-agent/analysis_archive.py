@@ -754,6 +754,75 @@ def long_horizon_report(trades, *, now: Optional[float] = None, root: Optional[s
     return _clean(report)
 
 
+NON_REGISTRY_LANE = "NON_REGISTRY_LANE"
+
+
+def _epoch_of(trades, lanes: set) -> Optional[str]:
+    counts: dict[str, int] = {}
+    for row in _trade_rows(trades):
+        if row["lane"] in lanes and row["epoch"] != "UNKNOWN":
+            counts[row["epoch"]] = counts.get(row["epoch"], 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def registry_tile_pool(trades, lanes: Iterable[str], *, epoch_id: Optional[str] = None,
+                       root: Optional[str] = None, retired: Iterable[str] = (),
+                       now: Optional[float] = None, horizon_days: int = 90) -> dict:
+    """Exact pooled sufficient statistics per *current registry* tile, current epoch only.
+
+    Per (day, lane) cell of ``epoch_id``: the raw closed trades are used when
+    present; the archived (final or open) rollup cell is used when the raw
+    ledger no longer holds that day, or holds fewer closes than the archive
+    (rotated/pruned raw rows). A cell is never counted twice. Lanes outside
+    ``lanes``, every ``retired`` lane and ``NON_REGISTRY_LANE`` are never
+    pooled (their archived rows stay quarantined in the archive). Read-only:
+    incompatible archive files are skipped, not moved.
+    """
+    retired_set = {str(l).upper() for l in retired} | {NON_REGISTRY_LANE}
+    wanted = [str(l).upper() for l in lanes if str(l).upper() not in retired_set]
+    wanted_set = set(wanted)
+    now = float(now if now is not None else datetime.now(timezone.utc).timestamp())
+    epoch = epoch_id or _epoch_of(trades, wanted_set)
+    raw = day_stats(trades)
+    archive = load_archive(_iso(now - horizon_days * 86400), root=root, move_incompatible=False)
+    archived: dict[str, dict] = {}
+    for day, doc in list(archive["daily"].items()) + list(archive["open_days"].items()):
+        cell = (doc.get("epochs") or {}).get(epoch) if epoch else None
+        # a final daily rollup supersedes an open one for the same day
+        if cell and (day not in archived or doc.get("final")):
+            archived[day] = cell
+    tiles: dict[str, dict] = {}
+    excluded = sorted({lane for cell in archived.values() for lane in (cell.get("by_tile") or {})
+                       if str(lane).upper() not in wanted_set})
+    for lane in wanted:
+        pooled = empty_stats()
+        n_raw = n_arch = 0
+        days_raw: list[str] = []
+        days_arch: list[str] = []
+        for day in sorted(set(raw) | set(archived)):
+            raw_cell = (((raw.get(day) or {}).get(epoch) or {}).get("by_tile") or {}).get(lane) if epoch else None
+            arch_cell = ((archived.get(day) or {}).get("by_tile") or {}).get(lane)
+            raw_n = int((raw_cell or {}).get("n") or 0)
+            arch_n = int((arch_cell or {}).get("n") or 0)
+            if arch_n > raw_n:
+                pooled = merge_stats(pooled, arch_cell)
+                n_arch += arch_n
+                days_arch.append(day)
+            elif raw_n:
+                pooled = merge_stats(pooled, raw_cell)
+                n_raw += raw_n
+                days_raw.append(day)
+        tiles[lane] = {**describe(pooled), "stats": pooled, "n_raw": n_raw, "n_archive": n_arch,
+                       "days_raw": days_raw, "days_archive": days_arch}
+    return _clean({
+        "schema": "registry_tile_pool_v1", "epoch_id": epoch, "lanes": wanted, "tiles": tiles,
+        "excluded_archive_lanes": excluded, "archive_root": archive["root"],
+        "method": ("per (day, lane) cell of the current epoch: raw closed trades, or the archived rollup cell "
+                   "when the raw ledger lacks that day or holds fewer closes; registry lanes only; retired and "
+                   "non-registry lanes are never pooled; iid normal CI from n/sum/sum-of-squares"),
+    })
+
+
 def write_long_horizon_report(trades, report_dir: str, *, lanes=None, now: Optional[float] = None,
                               root: Optional[str] = None) -> dict:
     report = long_horizon_report(trades, now=now, root=root, lanes=lanes)
