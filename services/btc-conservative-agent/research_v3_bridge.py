@@ -1381,7 +1381,39 @@ def dual_write_terminal_paper_schedule(
     }
 
 
-def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
+def dual_write_paper_cancel(order: Mapping[str, Any], signal: Mapping[str, Any], reason: str, *, epoch_id: str, data_dir: str, recovery_provenance=None) -> dict[str, Any]:
+    """Observed zero-fill paper cancellation, never a profitable closed trade."""
+    from paper_research_obligations import enqueue_cancel
+    checked = {"paper_only": True, "live_armed": False}
+    enqueue_cancel(checked, dict(order), dict(signal), reason, epoch_id=epoch_id, provenance=recovery_provenance)
+    event_id = str(order["trade_id"])
+    identity = _causal_identity(event_id, signal, order)
+    policy = _paper_policy_identity(str(epoch_id), order, signal)
+    schedule = copy.deepcopy(order["research_chase_schedule"])
+    common = {"event_id": event_id, "episode_id": identity["episode_id"],
+              **policy, **_explicit_causal_ids(epoch_id=str(epoch_id), event_id=event_id,
+                  episode_id=identity["episode_id"], include_schedule=True, include_fill=False),
+              "research_chase_schedule": schedule,
+              "schedule_sha256": hashlib.sha256(canonical_json(schedule).encode()).hexdigest(),
+              "requested_qty": checked["paper_research_obligations"][0]["order"]["requested_qty"],
+              "filled_qty": 0, "terminal_reason": str(reason), "terminal_ts": schedule["terminal_ts"],
+              "outcome_state": "NO_FILL", "paper_observation": True,
+              "authenticated_exchange_actual": False, "ranking_eligible": False,
+              "ranking_blocker": "ZERO_FILL_CANCELLATION_NOT_REALIZED_PNL"}
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    writes = []
+    for ledger, suffix in (("execution", "paper-cancel"), ("lifecycle", "paper-cancelled")):
+        row = {**common, "record_id": f"{ledger}:{event_id}:{suffix}",
+               "observation_status": "PAPER_ORDER_CANCELLED", "terminal": True}
+        kwargs = {} if recovery_provenance is None else {"paper_close_recovery_provenance": recovery_provenance}
+        receipt = store.append(ledger, row, **kwargs)
+        writes.append(receipt)
+        if receipt.get("blocked") or receipt.get("deferred"):
+            break
+    return {"schema": "v3_paper_cancel_receipt_v1", "epoch_id": str(epoch_id), "writes": writes}
+
+
+def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str, recovery_provenance=None) -> dict[str, Any]:
     """Write an observed paper fill once, without claiming exchange execution."""
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order, position)
@@ -1401,10 +1433,14 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    def append_fill(ledger, row):
+        if recovery_provenance is None:
+            return store.append(ledger, row)
+        return store.append(ledger, row, paper_close_recovery_provenance=recovery_provenance)
     fill_ts = _first(position.get("entry_ts"), order.get("fill_ts"))
     atr_evidence = _paper_fill_atr_evidence(position, order, fill_ts=fill_ts, event_id=event_id)
     execution_receipt = _paper_fill_execution_receipt(order, position, signal)
-    execution = store.append("execution", {
+    execution = append_fill("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
         "fill_price": _first(position.get("entry"), order.get("fill_price")),
@@ -1415,7 +1451,7 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **execution_receipt,
         **lifecycle_identity,
     })
-    lifecycle = store.append("lifecycle", {
+    lifecycle = append_fill("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-filled", "episode_id": identity["episode_id"], "event_id": event_id,
         "observation_status": "PAPER_POSITION_OPEN", "outcome_state": "PARTIAL_FILL" if order.get("partial_fill") else "FULL_FILL",
         "effective_execution_mode": "PAPER_OBSERVED",
@@ -1427,7 +1463,7 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
             "writes": [execution, lifecycle], "store_verification": store.verify()}
 
 
-def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any], outcome: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
+def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any], outcome: Mapping[str, Any], *, epoch_id: str, data_dir: str, recovery_provenance=None, prepare_only=False, write_plan=None) -> dict[str, Any]:
     """Write the observed terminal paper result while replay paths continue."""
     event_id = str(_first(position.get("trade_id"), signal.get("trade_id"), outcome.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, position, outcome)
@@ -1435,6 +1471,45 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     # signal must never override it during terminal attribution.
     policy = _paper_policy_identity(str(epoch_id), position, outcome, signal)
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    prepared_rows = []
+    def append_close(ledger, row):
+        if prepare_only:
+            prepared_rows.append({"ledger": ledger, "row": copy.deepcopy(row)})
+            return {"ledger": ledger, "record_id": row["record_id"], "prepared": True}
+        if recovery_provenance is None:
+            return store.append(ledger, row)
+        return store.append(ledger, row, paper_close_recovery_provenance=recovery_provenance)
+    if write_plan is not None:
+        if (prepare_only or write_plan.get("schema") != "paper_close_write_plan_v1"
+                or write_plan.get("epoch_id") != str(epoch_id)
+                or write_plan.get("event_id") != event_id):
+            raise ValueError("PAPER_CLOSE_WRITE_PLAN_IDENTITY_MISMATCH")
+        plan_material = {key: value for key, value in write_plan.items() if key != "sha256"}
+        if write_plan.get("sha256") != hashlib.sha256(json.dumps(plan_material, sort_keys=True, allow_nan=False).encode()).hexdigest():
+            raise ValueError("PAPER_CLOSE_WRITE_PLAN_HASH_MISMATCH")
+        plan_keys = [(planned["ledger"], planned["row"].get("record_id")) for planned in write_plan["rows"]]
+        required_keys = {("execution", f"execution:{event_id}:paper-close"),
+                         ("lifecycle", f"lifecycle:{event_id}:paper-closed")}
+        if len(plan_keys) != len(set(plan_keys)) or not required_keys.issubset(plan_keys):
+            raise ValueError("PAPER_CLOSE_WRITE_PLAN_INCOMPLETE_OR_DUPLICATE")
+        for planned in write_plan["rows"]:
+            ledger = planned["ledger"]
+            row = planned["row"]
+            expected_id = {"execution": f"execution:{event_id}:paper-close",
+                           "lifecycle": f"lifecycle:{event_id}:paper-closed"}.get(ledger)
+            valid_id = row.get("record_id") == expected_id if expected_id else (
+                ledger == "market_segment" and str(row.get("record_id") or "").startswith(f"market-segment:{event_id}:"))
+            if not valid_id or row.get("event_id") != event_id or row.get("epoch_id", str(epoch_id)) != str(epoch_id):
+                raise ValueError("PAPER_CLOSE_WRITE_PLAN_ROW_IDENTITY_MISMATCH")
+        writes = []
+        for planned in write_plan["rows"]:
+            if planned["ledger"] not in ("execution", "lifecycle", "market_segment"):
+                raise ValueError("PAPER_CLOSE_WRITE_PLAN_LEDGER_INVALID")
+            receipt = append_close(planned["ledger"], planned["row"])
+            writes.append(receipt)
+            if receipt.get("blocked") or receipt.get("deferred"):
+                break
+        return {**copy.deepcopy(write_plan["result"]), "writes": writes}
     schedule = (
         position.get("research_chase_schedule")
         or signal.get("research_chase_schedule")
@@ -1519,7 +1594,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
                 "research_lane": policy["paper_policy_spec"].get("research_lane"),
                 **causal_ids, **policy,
             }
-            segment_writes.append(store.append("market_segment", {
+            segment_writes.append(append_close("market_segment", {
                 "record_id": f"market-segment:{event_id}:{segment_ref['sha256']}",
                 "episode_id": identity["episode_id"],
                 "event_id": event_id,
@@ -1551,7 +1626,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         filled_quantity=_first(outcome.get("execution_qty"), position.get("qty")),
     ))
     economics = canonical_terminal_economics(outcome)
-    execution = store.append("execution", {
+    execution = append_close("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
         "entry_price": entry_price, "exit_price": outcome.get("exit"),
@@ -1586,7 +1661,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         ),
         "authenticated_exchange_actual": False, "paper_observation": True, **lifecycle_identity,
     })
-    lifecycle = store.append("lifecycle", {
+    lifecycle = append_close("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-closed", "episode_id": identity["episode_id"], "event_id": event_id,
         "observation_status": "PAPER_POSITION_CLOSED",
         "outcome_state": normalize_lifecycle_outcome(
@@ -1604,9 +1679,17 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
         **lifecycle_identity,
     })
-    return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
-            **causal_ids, **policy,
-            "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
+    result = {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
+              **causal_ids, **policy}
+    if prepare_only:
+        plan = {"schema": "paper_close_write_plan_v1", "epoch_id": str(epoch_id),
+                "event_id": event_id, "rows": prepared_rows, "result": result}
+        plan["sha256"] = hashlib.sha256(json.dumps(plan, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        return plan
+    return {**result, "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
+
+
+dual_write_paper_close.supports_durable_write_plan = True
 
 
 def dual_write_lifecycle_qualification_horizon(

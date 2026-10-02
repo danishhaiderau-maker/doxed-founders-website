@@ -28,6 +28,16 @@ EVALUATOR_VERSION = "public-tape-conservative-v3-quantity-aware"
 MAX_AGGRESSOR_WINDOW_SEC = 5
 
 
+def _quote_available_at(row, ts):
+    source = _finite_positive(row.get("source_ts"))
+    observed = _finite_positive(row.get("observed_at_ts", row.get("source_ts")))
+    if source is None or observed is None or source > observed or source > ts + 1 or observed >= ts + 1:
+        return None
+    if ts + 1 - source > 3.5:
+        return None
+    return max(float(ts), observed)
+
+
 def _finite_positive(value: Any) -> float | None:
     try:
         number = float(value)
@@ -214,6 +224,10 @@ def evaluate_limit_fill(
         if row.get("valid_bbo") is not True:
             incomplete.add("INVALID_BBO_BUCKET")
             continue
+        available_at = _quote_available_at(row, ts)
+        if available_at is None:
+            incomplete.add("QUOTE_OBSERVATION_TIME_UNPROVEN")
+            continue
 
         quote = _finite_positive(row.get("ask" if side == "LONG" else "bid"))
         visible = _finite_positive(row.get("ask_qty" if side == "LONG" else "bid_qty")) or 0.0
@@ -240,6 +254,10 @@ def evaluate_limit_fill(
                 incomplete.add("STALE_OR_INVALID_AGGRESSOR_WINDOW")
                 window_invalid = True
                 break
+            if _quote_available_at(candidate, candidate_ts) is None:
+                incomplete.add("QUOTE_OBSERVATION_TIME_UNPROVEN")
+                window_invalid = True
+                break
             window_rows.append(candidate)
         if window_invalid:
             continue
@@ -253,7 +271,7 @@ def evaluate_limit_fill(
         aggressor_qty = 0.0
         ambiguous = False
         qty_field, vwap_field = (("sell_qty", "sell_vwap") if side == "LONG" else ("buy_qty", "buy_vwap"))
-        amount = _finite_positive(row.get(qty_field)) or 0.0
+        amount = (_finite_positive(row.get(qty_field)) or 0.0) if row.get("trade_bucket_complete") is True else 0.0
         if amount > 0:
             opposite_field = "buy_qty" if qty_field == "sell_qty" else "sell_qty"
             opposite = _finite_positive(row.get(opposite_field)) or 0.0
@@ -286,6 +304,7 @@ def evaluate_limit_fill(
         evidence = {
             "interval": interval,
             "ts": ts,
+            "available_at": available_at,
             "quote": quote,
             "visible": visible,
             "aggressor": aggressor_qty,
@@ -379,12 +398,22 @@ def evaluate_limit_fill(
             "visible_executable_qty": best_partial["visible"],
             "matching_aggressor_qty": best_partial["aggressor"],
             "aggressor_corroborated": bool(best_partial["aggressor"] > 0),
+            # Aggregate prints are retrospective corroboration, never proof
+            # available at the earlier BBO observation used for this fill.
+            "aggressor_available_at_ts": (
+                max(float(best_partial["ts"] + 1),
+                    _finite_positive(by_ts[best_partial["ts"]].get("trade_collected_at_ts"))
+                    or float(best_partial["ts"] + 1))
+                if best_partial["aggressor"] > 0 else None
+            ),
+            "aggressor_time_semantics": "POST_BUCKET_CORROBORATION_NOT_FILL_TRIGGER",
             "fill_price": interval["limit_price"],
             # A conservative replay books at the declared limit, never at the
             # potentially better displayed quote.  Preserve that deliberate
             # price concession and the elapsed schedule time explicitly so a
             # downstream analyst need not reverse engineer either value.
-            "fill_latency_sec": int(best_partial["ts"] - schedule[0]["start_ts"]),
+            "fill_latency_sec": best_partial["available_at"] - schedule[0]["start_ts"],
+            "quote_observed_at_ts": best_partial["available_at"],
             "price_concession_per_unit": round(max(
                 0.0,
                 interval["limit_price"] - best_partial["quote"]

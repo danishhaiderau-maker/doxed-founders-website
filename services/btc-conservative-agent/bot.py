@@ -212,7 +212,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_cancel, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -3449,6 +3449,8 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
 # preventing the next scheduled AI opportunity from being recorded.
 _post_ai_evidence_workers = {}
 _post_ai_evidence_workers_lock = threading.Lock()
+from evidence_phase_trace import EvidencePhaseTrace
+_post_ai_evidence_phase_trace = EvidencePhaseTrace()
 _post_ai_evidence_status = {
     "submitted": 0,
     "rejected": 0,
@@ -3481,24 +3483,28 @@ def _record_post_ai_evidence_gap(hook: str, reason: str, key: str, detail: str =
 
 
 def _run_post_ai_evidence_hook(job: dict) -> None:
+    from contextlib import nullcontext
     payload = job.get("payload") or {}
     hook = str(payload.get("hook") or "")
     ctx = payload.get("ctx") or {}
     ai_result = payload.get("ai_result") or {}
     research_lane = str(payload.get("research_lane") or "")
-    if hook == "reversal_study":
-        started = start_reversal_study_replay(ctx, ai_result, research_lane)
-        if started is False:
-            _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
-    elif hook == "ai_reason":
-        log_ai_reason_research(ctx, ai_result, research_lane)
-    else:
+    if hook not in ("reversal_study", "ai_reason"):
         raise ValueError(f"unknown post-AI evidence hook: {hook}")
-    with state_lock:
-        _post_ai_evidence_status["completed"] += 1
-        _post_ai_evidence_status["last_complete_ts"] = time.time()
-        _post_ai_evidence_status["last_completed_hook"] = hook
-        scheduled_ai_cycle_state["last_completed_hook"] = hook
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    with trace.hook(hook, job.get("key")) if trace else nullcontext():
+        if hook == "reversal_study":
+            with trace.phase("replay_start") if trace else nullcontext():
+                started = start_reversal_study_replay(ctx, ai_result, research_lane)
+            if started is False:
+                _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
+        else:
+            log_ai_reason_research(ctx, ai_result, research_lane)
+        with trace.acquire(state_lock, "completion_lock_wait") if trace else state_lock:
+            _post_ai_evidence_status["completed"] += 1
+            _post_ai_evidence_status["last_complete_ts"] = time.time()
+            _post_ai_evidence_status["last_completed_hook"] = hook
+            scheduled_ai_cycle_state["last_completed_hook"] = hook
 
 
 def _post_ai_dead_letter(hook: str, row: dict) -> None:
@@ -3569,6 +3575,9 @@ def post_ai_evidence_health_snapshot() -> dict:
         snapshot["workers"] = {
             hook: worker.snapshot() for hook, worker in _post_ai_evidence_workers.items()
         }
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    if trace is not None:
+        snapshot["phase_timing"] = trace.snapshot()
     return snapshot
 
 
@@ -5433,6 +5442,7 @@ recent_trades = deque(maxlen=50)
 # the WebSocket handler with an HTTP call.
 venue_fill_trade_tape = deque(maxlen=5000)
 venue_fill_trade_tape_lock = threading.Lock()
+venue_fill_trade_retention = {"started_ts": time.time(), "last_evicted_ts": 0.0}
 _microstructure_last_bucket = 0
 _microstructure_rows_written = 0
 _microstructure_write_failures = 0
@@ -9380,6 +9390,12 @@ def _commit_local_paper_lifecycle_transition(
                     with trade_lock:
                         before = _build_paper_lifecycle_payload(f"local_paper_transition:{event}")
                         target = copy.deepcopy(before)
+                        # Carry obligations before a mutator appends another.
+                        target = _relay_event_outbox.decorate_lifecycle(target)
+                        from paper_evidence_capacity import initialize_legacy, reserve_entry
+                        target = initialize_legacy(target)
+                        if event == "ORDER_PLACED":
+                            target = reserve_entry(target, str(trade_id))
                         target_mutator(target)
                         for snapshot in (before, target):
                             if snapshot.get("paper_only") is not True or snapshot.get("live_armed") is not False:
@@ -9400,6 +9416,10 @@ def _commit_local_paper_lifecycle_transition(
                 if canonical_lock is not None:
                     canonical_lock.release()
     except Exception as exc:
+        if event == "ORDER_PLACED" and str(exc) == "NEW_ENTRY_EVIDENCE_CAPACITY_EXHAUSTED":
+            # Admission rejection is not a trading-engine outage. Existing
+            # positions retain their reserved close capacity and keep running.
+            raise RuntimeError("NEW_ENTRY_EVIDENCE_CAPACITY_EXHAUSTED") from exc
         set_execution_paused("PAPER_LIFECYCLE_COMMIT_FAILED")
         raise RuntimeError(f"local paper lifecycle commit failed for {event}") from exc
     return True
@@ -10823,37 +10843,43 @@ def process_virtual_chase_chase6_market_conversions(price: float):
         until = float(order.get("virtual_chase_6_wait_until") or 0)
         if until <= 0 or now < until:
             continue
-        tid = order.get("trade_id")
-        meta = trades_map.get(tid, {})
-        signal = meta.get("signal_ref") or {}
-        limit_price = float(order.get("limit_price") or 0)
-        # This path is the explicit final market conversion.  Freeze the order
-        # type before price resolution so it cannot accidentally reuse the
-        # passive limit walker and its hard-limit boundary.
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
-        fill_px = resolve_sim_fill_price(order)
-        slippage = None
-        if limit_price > 0 and fill_px:
-            direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
-            if direction == "LONG":
-                slippage = round(float(fill_px) - limit_price, 4)
-            elif direction == "SHORT":
-                slippage = round(limit_price - float(fill_px), 4)
-        order["fill_price"] = fill_px
-        order["limit_price"] = fill_px
-        order["market_conversion"] = True
-        if signal:
-            signal["market_conversion"] = True
-            signal["conversion_slippage"] = slippage
-            signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
-            signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
-            _record_virtual_chase_execution_metrics(signal, order)
-        logger.info(
-            f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
-            f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
-        )
-        fill_order(order)
+        fill_claim = _paper_fill_ownership.claim(order, trade_lock)
+        if fill_claim is None:
+            continue
+        try:
+            tid = order.get("trade_id")
+            meta = trades_map.get(tid, {})
+            signal = meta.get("signal_ref") or {}
+            limit_price = float(order.get("limit_price") or 0)
+            # This path is the explicit final market conversion.  Freeze the order
+            # type before price resolution so it cannot accidentally reuse the
+            # passive limit walker and its hard-limit boundary.
+            order["entry_type"] = "SIM_MARKET"
+            order["fee_type"] = "TAKER"
+            fill_px = resolve_sim_fill_price(order)
+            slippage = None
+            if limit_price > 0 and fill_px:
+                direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+                if direction == "LONG":
+                    slippage = round(float(fill_px) - limit_price, 4)
+                elif direction == "SHORT":
+                    slippage = round(limit_price - float(fill_px), 4)
+            order["fill_price"] = fill_px
+            order["limit_price"] = fill_px
+            order["market_conversion"] = True
+            if signal:
+                signal["market_conversion"] = True
+                signal["conversion_slippage"] = slippage
+                signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+                signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
+                _record_virtual_chase_execution_metrics(signal, order)
+            logger.info(
+                f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
+                f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
+            )
+            fill_order(order, _fill_claim=fill_claim)
+        finally:
+            _paper_fill_ownership.release(fill_claim, trade_lock)
 
 
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
@@ -20437,6 +20463,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         return False
     # Schedule, policy identity and venue constraints may perform filesystem or
     # venue reads.  Finish them before taking the transition/state locks.
+    if (COMBO_LANE_SPECS.get(str(lane or "")) or {}).get("paper_only") is True:
+        # This is a newly created, unsubmitted simulation order, not an
+        # inference from absent historical fill evidence.
+        order["filled_qty"] = 0.0
+        order["paper_fill_accounting_schema"] = "paper_initial_unfilled_v1"
     _prepare_initial_pending_order_evidence(order, target_signal)
 
     def target_mutator(target):
@@ -21395,6 +21426,7 @@ def _commit_relay_limit_chase(
         "event_seq": chase_count, "executable": True,
     }
     resolved_fill_model = _resolve_fill_model(signal, {**order, "limit_price": new_limit})
+    committed_schedule = {}
 
     def mutate_order(row):
         row["limit_price"] = new_limit
@@ -21415,6 +21447,15 @@ def _commit_relay_limit_chase(
                 or int(rows[0].get("limit_chase_count") or 0) != chase_count - 1):
             raise RuntimeError("pending chase target generation changed")
         mutate_order(rows[0])
+        schedule_reprice = globals().get("append_research_reprice_interval")
+        if callable(schedule_reprice):
+            schedule = schedule_reprice(
+                rows[0], None, now=now, chase_step_index=chase_count,
+                reference_price=reference_price or old_limit, limit_price=new_limit,
+                reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
+            )
+            if schedule is not None:
+                committed_schedule.update(copy.deepcopy(schedule))
 
     def live_mutator():
         if (
@@ -21424,8 +21465,12 @@ def _commit_relay_limit_chase(
         ):
             raise RuntimeError("pending chase changed before commit")
         mutate_order(order)
+        if committed_schedule:
+            order["research_chase_schedule"] = copy.deepcopy(committed_schedule)
         if isinstance(signal, dict):
             mutate_order(signal)
+            if committed_schedule:
+                signal["research_chase_schedule"] = copy.deepcopy(committed_schedule)
             signal["submitted_order_event_seq"] = chase_count
             signal["submitted_order_limit_price"] = new_limit
             signal["fill_model"] = copy.deepcopy(resolved_fill_model)
@@ -21452,14 +21497,7 @@ def _commit_relay_limit_chase(
                 master["source_order_market_evidence"] = copy.deepcopy(summary)
                 master["limit_price"] = new_limit
                 master["limit_chase_count"] = chase_count
-    schedule_reprice = globals().get("append_research_reprice_interval")
-    if callable(schedule_reprice):
-        schedule_reprice(
-            order, signal if isinstance(signal, dict) else None, now=now,
-            chase_step_index=chase_count, reference_price=reference_price or old_limit,
-            limit_price=new_limit,
-            reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
-        )
+    # Reprice schedule is already in the authoritative committed postimage.
     collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
     if callable(collector_refresh):
         collector_refresh(order, signal if isinstance(signal, dict) else None)
@@ -22001,6 +22039,8 @@ def _pending_limit_ready_for_fill(
 
 
 FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
+from paper_fill_ownership import FillOwnership, wrap_fill, wrap_fill_batch
+_paper_fill_ownership = FillOwnership(lambda tid: fill_handoff_trade_ids.discard(tid))
 
 
 def stale_fill_direction_conflict(order: dict, signal: dict, *, now: float, latest_ai: dict, latest_ai_ts: float, current_context: dict = None) -> str:
@@ -22160,8 +22200,16 @@ def process_pending_orders():
                     f"[SIM] limit touched - filling despite prior await_confirm "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
-            fill_px = resolve_sim_fill_price(order)
+            fill_claim = _paper_fill_ownership.claim(order, trade_lock)
+            if fill_claim is None:
+                continue
+            try:
+                fill_px = resolve_sim_fill_price(order)
+            except BaseException:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
+                raise
             if not fill_px or float(order.get("filled_qty") or 0) <= 0:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
                 # A touched BBO without eligible cached depth is not a fill.
                 # Keep the order pending for the next authoritative snapshot;
                 # never manufacture quantity merely to advance the lifecycle.
@@ -22184,22 +22232,29 @@ def process_pending_orders():
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
-            fills.append((order, fill_signal))
-    for order, fill_signal, reason in cancelled_at_fill:
-        schedule_close = globals().get("close_research_order_schedule")
-        if callable(schedule_close):
-            schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(
-                order, fill_signal if isinstance(fill_signal, dict) else None,
-                lifecycle_final=True,
-            )
-        _record_expired_order(order, reason)
-        expire_signal_for_order(order, reason)
-        logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
-    for order, fill_signal in fills:
-        fill_order(order)
+            fills.append((order, fill_signal, fill_claim))
+    try:
+        for order, fill_signal, reason in cancelled_at_fill:
+            schedule_close = globals().get("close_research_order_schedule")
+            if callable(schedule_close):
+                schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
+            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+            if callable(collector_refresh):
+                collector_refresh(
+                    order, fill_signal if isinstance(fill_signal, dict) else None,
+                    lifecycle_final=True,
+                )
+            _record_expired_order(order, reason)
+            expire_signal_for_order(order, reason)
+            logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
+        for order, fill_signal, fill_claim in fills:
+            fill_order(order, _fill_claim=fill_claim)
+    finally:
+        for order, fill_signal, fill_claim in fills:
+            _paper_fill_ownership.release(fill_claim, trade_lock)
+
+process_pending_orders = wrap_fill_batch(process_pending_orders, _paper_fill_ownership, lambda: trade_lock)
+
 
 def fill_order(order):
     def clear_fill_handoff():
@@ -22278,6 +22333,28 @@ def fill_order(order):
         or candidate_pos.get("research_lane")
     )
     position_opened_relay_ts = utc_iso()
+    # Freeze fill research material before the lifecycle write. A crash after
+    # promotion must not discard the terminal entry schedule or measured size.
+    frozen_fill_order = copy.deepcopy(order)
+    frozen_fill_signal = _stable_pending_signal_copy(signal)
+    fill_commit_ts = time.time()
+    schedule_close = globals().get("close_research_order_schedule")
+    if callable(schedule_close):
+        schedule_close(frozen_fill_order, frozen_fill_signal, now=fill_commit_ts,
+                       reason="PARTIAL_FILL_SIM_RESIDUAL_CANCELLED" if order.get("partial_fill") else "FILLED")
+    _append_paper_action_receipt(
+        frozen_fill_order, frozen_fill_signal,
+        action_generation=int(order.get("limit_chase_count") or 0) + 1,
+        action_type="FILL_PROMOTED", policy_due_ts=fill_commit_ts,
+        eligibility_ts=fill_commit_ts, dispatch_start_ts=fill_commit_ts,
+        acknowledgement_ts=fill_commit_ts, fill_ts=fill_commit_ts,
+        fill_price=order.get("fill_price") or order.get("limit_price"),
+        filled_qty=order.get("filled_qty") or order.get("qty"),
+    )
+    if isinstance(frozen_fill_order.get("research_chase_schedule"), dict):
+        candidate_pos["research_chase_schedule"] = copy.deepcopy(frozen_fill_order["research_chase_schedule"])
+        candidate_pos["chase_schedule_authoritative"] = frozen_fill_order["research_chase_schedule"].get("authoritative") is True
+    frozen_fill_position = copy.deepcopy(candidate_pos)
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
     fill_px = order.get("fill_price") or order.get("limit_price") or candidate_pos.get("entry")
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
@@ -22293,6 +22370,12 @@ def fill_order(order):
         target.setdefault("positions", []).append(
             _canonicalize_paper_position_snapshot(copy.deepcopy(candidate_pos))
         )
+        lane_spec = COMBO_LANE_SPECS.get(str(candidate_pos.get("research_lane") or ""))
+        if lane_spec and lane_spec.get("paper_only") is True:
+            from paper_research_obligations import enqueue_fill
+            from research_v3_store import _collection_provenance
+            enqueue_fill(target, frozen_fill_order, frozen_fill_signal, frozen_fill_position,
+                         epoch_id=_collector_v22_epoch_id(), provenance=_collection_provenance())
 
     def live_mutator():
         pos, registered = promote_pending_to_open(
@@ -22312,6 +22395,12 @@ def fill_order(order):
                 "outcome": "OPEN",
             })
         transition_result["pos"] = pos
+        if isinstance(frozen_fill_order.get("research_chase_schedule"), dict):
+            order["research_chase_schedule"] = copy.deepcopy(frozen_fill_order["research_chase_schedule"])
+            order["chase_schedule_authoritative"] = frozen_fill_order["research_chase_schedule"].get("authoritative") is True
+            if isinstance(signal, dict):
+                signal["research_chase_schedule"] = copy.deepcopy(frozen_fill_order["research_chase_schedule"])
+                signal["chase_schedule_authoritative"] = order["chase_schedule_authoritative"]
 
     _commit_paper_lifecycle_transition(
         "POSITION_OPENED", str(order.get("trade_id") or ""),
@@ -22347,42 +22436,17 @@ def fill_order(order):
         )
         clear_fill_handoff()
         return
-    fill_commit_ts = time.time()
-    schedule_close = globals().get("close_research_order_schedule")
-    if callable(schedule_close):
-        schedule_close(
-            order,
-            signal if isinstance(signal, dict) else None,
-            now=fill_commit_ts,
-            reason=(
-                "PARTIAL_FILL_SIM_RESIDUAL_CANCELLED"
-                if order.get("partial_fill") else "FILLED"
-            ),
-        )
     terminal_schedule = order.get("research_chase_schedule")
     if isinstance(terminal_schedule, dict):
         pos["research_chase_schedule"] = terminal_schedule
         pos["chase_schedule_authoritative"] = (
             terminal_schedule.get("authoritative") is True
         )
-    _append_paper_action_receipt(
-        order,
-        signal,
-        action_generation=int(order.get("limit_chase_count") or 0) + 1,
-        action_type="FILL_PROMOTED",
-        policy_due_ts=fill_commit_ts,
-        eligibility_ts=fill_commit_ts,
-        dispatch_start_ts=fill_commit_ts,
-        acknowledgement_ts=fill_commit_ts,
-        fill_ts=fill_commit_ts,
-        fill_price=order.get("fill_price") or order.get("limit_price"),
-        filled_qty=order.get("filled_qty") or order.get("qty"),
-    )
     try:
         fill_identity_receipt = dual_write_paper_fill(
-            order,
-            signal if isinstance(signal, dict) else {},
-            pos,
+            frozen_fill_order,
+            frozen_fill_signal,
+            frozen_fill_position,
             epoch_id=_collector_v22_epoch_id(),
             data_dir=os.getcwd(),
         )
@@ -22413,6 +22477,9 @@ def fill_order(order):
     # or graceful shutdown — a non-graceful crash orphaned every open position).
     save_positions()
     pipeline_state_sync()
+
+fill_order = wrap_fill(fill_order, _paper_fill_ownership, lambda: trade_lock)
+
 
 def _observable_exit_price() -> float:
     """Best available mark for risk-reducing exits, never for new entries."""
@@ -23801,6 +23868,10 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     _last_ws_trade_fp = trade_fp
     _last_ws_trade_fp_ts = tick_now
     with venue_fill_trade_tape_lock:
+        if len(venue_fill_trade_tape) == venue_fill_trade_tape.maxlen:
+            venue_fill_trade_retention["last_evicted_ts"] = max(
+                venue_fill_trade_retention["last_evicted_ts"],
+                float(venue_fill_trade_tape[0].get("received_ts") or 0))
         venue_fill_trade_tape.append({
             "p": price,
             "v": size,
@@ -24004,13 +24075,19 @@ def microstructure_capture_loop():
     global _microstructure_last_bucket, _microstructure_rows_written
     global _microstructure_write_failures, _microstructure_admission_suppressions
     global _microstructure_io_write_failures
+    from microstructure_bucket_clock import observed_bucket, trade_interval_proof
+    def stream_state():
+        return {"generation": int(state.get("ws_connection_generation") or 0),
+                "connected_ts": state.get("ws_connected_ts") or float("inf"),
+                "connected": state.get("ws_transport_connected") is True,
+                "ready": state.get("ws_ready") is True,
+                "trades_subscribed": "trades" in (state.get("ws_channel_ids") or {}),
+                "last_disconnect": state.get("ws_last_disconnect_ts")}
     next_bucket = int(time.time()) + 1
     while not shutdown_event.is_set():
-        wait = max(0.01, next_bucket + 1.0 - time.time())
+        wait = max(0.01, next_bucket - time.time())
         if shutdown_event.wait(wait):
             break
-        bucket = next_bucket
-        next_bucket += 1
         with state_lock:
             bid = state.get("bid")
             ask = state.get("ask")
@@ -24024,16 +24101,42 @@ def microstructure_capture_loop():
                 float(state.get("ws_last_tick") or 0.0),
                 float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0.0),
             )
+            observed_at = time.time()
+            stream_start = stream_state()
+        scheduling = observed_bucket(next_bucket, observed_at)
+        if not scheduling["ready"]:
+            continue
+        bucket = scheduling["bucket_ts"]
+        next_bucket = scheduling["next_bucket"]
+        # Freeze the BBO before waiting for this second's trade interval. A
+        # late writer skips missing seconds; it never stamps new quotes back
+        # into old buckets to catch up with wall time.
+        if shutdown_event.wait(max(0.0, bucket + 1.0 - time.time())):
+            break
         with venue_fill_trade_tape_lock:
+            retention = dict(venue_fill_trade_retention)
             bucket_trades = [
                 dict(row) for row in venue_fill_trade_tape
                 if bucket <= float((row or {}).get("received_ts") or 0) < bucket + 1
             ]
+            trades_collected_at = time.time()
+        with state_lock:
+            stream_end = stream_state()
+        trade_proof = trade_interval_proof(bucket, trades_collected_at, retention, stream_start, stream_end)
         row = build_microstructure_bucket(
             bucket_ts=bucket, bid=bid, ask=ask, bid_qty=bid_qty,
             ask_qty=ask_qty, last=last, source_ts=source_ts,
             trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
         )
+        row.update(observed_at_ts=observed_at, quote_valid_from_ts=observed_at,
+                   trade_interval_end_ts=bucket + 1, trade_collected_at_ts=trades_collected_at,
+                   trade_bucket_complete=trade_proof["complete"], trade_coverage=trade_proof,
+                   collection_gap={key: scheduling[key] for key in (
+                       "skipped_bucket_count", "skipped_start_ts", "skipped_end_ts_exclusive", "gap_reason")})
+        # Metadata is part of the immutable row binding, not an unsigned sidecar.
+        row.pop("row_sha256", None)
+        row["row_sha256"] = hashlib.sha256(json.dumps(
+            row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
         append_outcome = {}
         if _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
@@ -25362,6 +25465,48 @@ def _record_expired_order(source: dict, reason: str):
     return row
 
 
+def _commit_local_paper_cancel(order, reason, *, dispatch_ts, final_status="CANCELLED"):
+    """Commit zero-fill cancellation and its terminal evidence before live removal."""
+    from paper_research_obligations import enqueue_cancel
+    from research_v3_store import _collection_provenance
+    tid = str(order.get("trade_id") or "")
+    filled = order.get("filled_qty")
+    if (order.get("paper_fill_accounting_schema") != "paper_initial_unfilled_v1"
+            or type(filled) not in (int, float) or filled != 0
+            or order.get("partial_fill") or order.get("bitfinex_order_id")):
+        return {"trade_id": tid, "confirmed": False, "finalized": False,
+                "retained": True, "failure_reason": "PAPER_CANCEL_ZERO_FILL_UNPROVEN"}
+    frozen = copy.deepcopy(order)
+    master = trades_map.get(tid, {}).get("signal_ref") if tid else None
+    frozen_signal = _stable_pending_signal_copy(master)
+    now = time.time()
+    frozen.update(status=str(final_status or "CANCELLED").upper(), cancel_confirmed=True,
+                  cancel_confirmed_reason=reason, cancel_confirmed_ts=now)
+    close_research_order_schedule(frozen, frozen_signal, now=now, reason=reason)
+    _append_paper_action_receipt(frozen, frozen_signal,
+        action_generation=int(order.get("limit_chase_count") or 0) + 1,
+        action_type="CANCEL_CONFIRMED", policy_due_ts=dispatch_ts,
+        eligibility_ts=dispatch_ts, dispatch_start_ts=dispatch_ts, acknowledgement_ts=now)
+    def target_mutator(target):
+        matches = [r for r in target.get("pending_orders", []) if r.get("trade_id") == tid]
+        if len(matches) != 1 or matches[0].get("filled_qty") != 0 or matches[0].get("partial_fill"):
+            raise RuntimeError("PAPER_CANCEL_TARGET_FILL_CHANGED")
+        if any(r.get("trade_id") == tid for r in target.get("positions", [])):
+            raise RuntimeError("PAPER_CANCEL_TARGET_HAS_POSITION")
+        enqueue_cancel(target, frozen, frozen_signal, reason,
+                       epoch_id=_collector_v22_epoch_id(), provenance=_collection_provenance())
+        target["pending_orders"] = [r for r in target.get("pending_orders", []) if r.get("trade_id") != tid]
+    def live_mutator():
+        order.clear()
+        order.update(copy.deepcopy(frozen))
+        lane_unregister_pending_order(order)
+    _commit_local_paper_lifecycle_transition("ORDER_CANCELLED", tid,
+        {"research_lane": order.get("research_lane")}, target_mutator=target_mutator,
+        live_mutator=live_mutator)
+    return {"trade_id": tid, "exchange_order_id": "", "confirmed": True,
+            "finalized": True, "retained": False, "failure_reason": ""}
+
+
 def _cancel_pending_order_confirmed(
     order: dict,
     reason: str,
@@ -25422,6 +25567,15 @@ def _cancel_pending_order_confirmed(
             if order not in lane_bucket:
                 lane_bucket.append(order)
 
+    paper_spec = COMBO_LANE_SPECS.get(str(order.get("research_lane") or "")) or {}
+    if not oid and paper_spec.get("paper_only") is True:
+        result = _commit_local_paper_cancel(order, reason, dispatch_ts=cancel_dispatch_ts, final_status=final_status)
+        if result.get("finalized"):
+            if record_expired:
+                result["expired_row"] = _record_expired_order(order, reason)
+            if expire_signal:
+                result["signal_expired"] = bool(expire_signal_for_order(order, reason))
+        return result
     if oid:
         # RLock exposes _is_owned on CPython. If a caller accidentally invokes
         # this helper under an outer trade_lock, fail closed without making a
@@ -25764,9 +25918,30 @@ def manage_open_positions():
     logger.debug("[ENGINE] manage_open_positions called")
     monitor_positions()
 
+_paper_research_replay_next = 0.0
+
+
+def _replay_paper_research_obligation():
+    global _paper_research_replay_next
+    now = time.monotonic()
+    if now < _paper_research_replay_next:
+        return
+    _paper_research_replay_next = now + 30.0
+    try:
+        from paper_research_obligations import replay_one
+        replay_one(_relay_event_outbox, paper_lifecycle_file_lock,
+                   dual_write_paper_close, data_dir=os.getcwd(),
+                   epoch_id=_collector_v22_epoch_id(), source_revision=_runtime_git_rev_exact(),
+                   fill_writer=dual_write_paper_fill, cancel_writer=dual_write_paper_cancel)
+    except Exception as exc:
+        # Keep the durable obligation; evidence failure must not suppress exits.
+        logger.error("[PAPER_RESEARCH] replay retained: %s", type(exc).__name__)
+
+
 def position_manager():
     try:
         while not shutdown_event.is_set():
+            _replay_paper_research_obligation()
             if is_engine_halted():
                 # A market-data hard stop freezes new pending/chase/fill work,
                 # but protective exits for already-open positions must continue
@@ -26464,6 +26639,13 @@ def close_position(pos: dict, exit_reason: str):
             row for row in target.get("positions") or []
             if str(row.get("trade_id") or "") != str(trade_id)
         ]
+        lane_spec = COMBO_LANE_SPECS.get(str(pos.get("research_lane") or ""))
+        if lane_spec and lane_spec.get("paper_only") is True:
+            from paper_research_obligations import enqueue_close
+            from research_v3_store import _collection_provenance
+            enqueue_close(target, pos, master if isinstance(master, dict) else {},
+                          trade_row, epoch_id=_collector_v22_epoch_id(),
+                          provenance=_collection_provenance())
 
     def live_mutator():
         if source_pos not in open_positions or not source_pos.get("_close_in_progress"):
@@ -26495,7 +26677,10 @@ def close_position(pos: dict, exit_reason: str):
         target_mutator=target_mutator, live_mutator=live_mutator,
         canonical_lock=position_close_lock,
     )
-    if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
+    # Registered paper-only families emit through their durable obligation.
+    # A second direct emission could re-read changing market tape before replay.
+    if (not COMBO_LANE_SPECS.get(str(pos.get("research_lane") or ""), {}).get("paper_only")
+            and not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry"))):
         try:
             close_identity_receipt = dual_write_paper_close(
                 pos, master if isinstance(master, dict) else {}, trade_row,
@@ -34301,13 +34486,8 @@ _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
 
 def _dashboard_signal_ref_lite(sig: dict) -> dict:
     """Copy only fields required by active-signal and relay rendering."""
-    if not isinstance(sig, dict):
-        return {}
-    return {
-        key: copy.deepcopy(value)
-        for key, value in sig.items()
-        if key in _DASHBOARD_ACTIVE_SIGNAL_KEYS
-    }
+    from dashboard_bounded_projection import project_fields
+    return project_fields(sig, _DASHBOARD_ACTIVE_SIGNAL_KEYS)
 
 
 def _snapshot_bounded_trades_map_locked(
@@ -49759,6 +49939,9 @@ def _safe_append_jsonl(
     Existing callers retain the boolean contract. Callers that need telemetry
     classification may supply ``outcome``; admission is still evaluated once.
     """
+    from contextlib import nullcontext
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    phase = trace.phase if trace else lambda name: nullcontext()
     terminal_labels = {
         "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "EXECUTION_SETTINGS",
         "DUPLICATE_INTENT_AUDIT", "COUNTERFACTUAL", "PATH_REPLAY",
@@ -49811,20 +49994,25 @@ def _safe_append_jsonl(
     # provides their local serialization while production supplies the shared
     # reset barrier.
     research_gate = globals().get("_research_write_gate") or threading.RLock()
-    with research_gate, _jsonl_path_lock(path):
+    with (trace.acquire(research_gate, "research_gate_wait") if trace else research_gate), (trace.acquire(_jsonl_path_lock(path), "path_lock_wait") if trace else _jsonl_path_lock(path)):
         _jsonl_serialized_append_targets.add(os.path.abspath(path))
         for attempt in range(CSV_WRITE_RETRIES):
             try:
-                _validate_or_quarantine_jsonl(path, label)
-                rotate_log(path)
+                with phase("validation"):
+                    _validate_or_quarantine_jsonl(path, label)
+                with phase("rotation"):
+                    rotate_log(path)
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
+                    with phase("append_write"):
+                        f.write(line)
+                        f.flush()
+                    with phase("file_fsync"):
+                        os.fsync(f.fileno())
                 try:
-                    _persist_jsonl_validation_receipt(
-                        path, _jsonl_validation_signature(path)
-                    )
+                    with phase("validation_receipt"):
+                        _persist_jsonl_validation_receipt(
+                            path, _jsonl_validation_signature(path)
+                        )
                 except Exception as receipt_error:
                     # The evidence row is already durable. Never retry it merely
                     # because its acceleration receipt failed; force the next

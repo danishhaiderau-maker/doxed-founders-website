@@ -1,6 +1,23 @@
 from research.fill_time_guard_counterfactual import build_fill_time_guard_counterfactual
 
 
+def test_prior_price_never_uses_future_observation_from_old_bucket():
+    from research.fill_time_guard_counterfactual import _prior_price
+    tape = [{"bucket_ts": 99, "source_ts": 99, "last": 10},
+            {"bucket_ts": 100, "source_ts": 200, "last": 20}]
+    assert _prior_price(tape, 101) == 10
+    assert _prior_price([{"bucket_ts": 100, "observed_at_ts": 100.5, "last": 20}], 100.1) is None
+    assert _prior_price([{"bucket_ts": 100, "observed_at_ts": None, "last": 20}], 101) is None
+
+
+def test_flow_totals_are_available_only_after_complete_interval():
+    from research.fill_time_guard_counterfactual import _flow_available_at
+    assert _flow_available_at({'bucket_ts': 100}) == 101
+    assert _flow_available_at({'bucket_ts': 100, 'trade_collected_at_ts': 102}) == 102
+    assert _flow_available_at({'bucket_ts': 100, 'trade_bucket_complete': False}) is None
+    assert _flow_available_at({'bucket_ts': 100, 'trade_collected_at_ts': None}) is None
+
+
 def _tape(start=1000):
     return [
         {"bucket_ts": start, "last": 100.0, "buy_qty": 1.0, "sell_qty": 3.0},
@@ -59,6 +76,9 @@ def test_order_flow_confirmation_is_direction_normalized():
         ], **common,
     )
     values = {row["trade_id"]: row["order_flow_adverse_imbalance"]["30"] for row in report["trade_features"]}
+    # The 1060 bucket ends at 1061, after the fill: only 1030's 4/1 flow is available.
+    assert values["short"] == 0.6
+    assert values["long"] == -0.6
     assert values["short"] > 0
     assert values["long"] < 0
     assert report["microstructure_order_flow_candidates"][0]["blocked"] == 1

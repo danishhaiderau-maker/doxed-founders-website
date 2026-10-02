@@ -1277,7 +1277,7 @@ class V3EvidenceStore:
         if path.parent.exists():
             _fsync_directory(path.parent)
 
-    def _recover_append_head(self, ledger: str, path: Path) -> dict[str, Any]:
+    def _recover_append_head(self, ledger: str, path: Path, *, recovery_material=None) -> dict[str, Any]:
         """Finish exactly one interrupted ledger append before admitting another."""
         head_path = self._append_head_path(ledger)
         try:
@@ -1298,6 +1298,21 @@ class V3EvidenceStore:
             return {"recovered": False, "blocked": True,
                     "reason": "LEDGER_APPEND_HEAD_INVALID"}
         expected_pre = head.get("pre_signature")
+        expected_identity = self._identity_binding()
+        if recovery_material is not None:
+            expected_identity = {key: recovery_material[key] for key in (
+                "epoch_id", "source_revision", "deployed_revision", "tile_config_signature")}
+            try:
+                original = json.loads(payload)
+                expected = dict(recovery_material)
+                for item in (original, expected):
+                    item.pop("processing_revision", None)
+                    item.pop("recovery_provenance_schema", None)
+                if original != expected:
+                    raise ValueError("frozen material differs")
+            except (ValueError, TypeError, AttributeError):
+                return {"recovered": False, "blocked": True,
+                        "reason": "PAPER_RECOVERY_PREPARED_CONTENT_CONFLICT"}
         valid = bool(
             head.get("schema") == "v3_ledger_append_head_v1"
             and head.get("state") == "PREPARED"
@@ -1309,7 +1324,7 @@ class V3EvidenceStore:
             and len(payload) == length
             and payload.endswith(b"\n")
             and head.get("row_sha256") == hashlib.sha256(payload).hexdigest()
-            and head.get("identity") == self._identity_binding()
+            and head.get("identity") == expected_identity
             and head.get("ledger_generation") == self._active_ledger_generation(ledger)
             and (expected_pre is None or (
                 isinstance(expected_pre, dict)
@@ -1348,6 +1363,7 @@ class V3EvidenceStore:
         if unchanged_eof:
             self._publish_record_receipt(
                 ledger, record_id, offset=offset, payload=payload, state="PREPARED",
+                identity=expected_identity,
             )
             with path.open("ab") as handle:
                 handle.write(payload); handle.flush(); os.fsync(handle.fileno())
@@ -1363,13 +1379,14 @@ class V3EvidenceStore:
             )
         self._publish_record_receipt(
             ledger, record_id, offset=offset, payload=payload, state="COMMITTED",
+            identity=expected_identity,
         )
         final_signature = _path_signature(path)
         if final_signature is None:
             raise RuntimeError("LEDGER_MISSING_AFTER_HEAD_RECOVERY")
         self._atomic_json_receipt(self._completeness_path(ledger), {
             "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-            "identity": self._identity_binding(),
+            "identity": expected_identity,
             "ledger_generation": self._active_ledger_generation(ledger),
             "ledger_signature": self._signature_payload(final_signature),
             "tail_anchor": anchor,
@@ -1398,13 +1415,13 @@ class V3EvidenceStore:
         )
 
     def _publish_record_receipt(
-        self, ledger: str, record_id: str, *, offset: int, payload: bytes, state: str
+        self, ledger: str, record_id: str, *, offset: int, payload: bytes, state: str, identity=None
     ) -> dict[str, Any]:
         receipt = {
             "schema": "emergency_record_idempotency_v1", "state": state,
             "ledger": ledger, "record_id": record_id,
             "row_sha256": hashlib.sha256(payload).hexdigest(),
-            "offset": int(offset), "length": len(payload), "identity": self._identity_binding(),
+            "offset": int(offset), "length": len(payload), "identity": dict(identity) if identity is not None else self._identity_binding(),
             "ledger_generation": self._active_ledger_generation(ledger),
         }
         self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
@@ -1977,17 +1994,82 @@ class V3EvidenceStore:
         """Count exact durable IDs without copying a warm cache."""
         return len(cls._cached_ids(path))
 
-    def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
+    def _paper_close_recovery_duplicate(self, ledger, material):
+        """Read-only exact-byte proof across processing-revision changes."""
+        receipt_path = self._record_receipt_path(ledger, material["record_id"])
+        def checked_receipt_path():
+            self._assert_contained(receipt_path)
+            for component in (receipt_path, *receipt_path.parents):
+                if component.is_symlink() or (component.exists() and
+                        getattr(component.lstat(), "st_file_attributes", 0) & 0x400):
+                    raise ValueError("PAPER_CLOSE_RECOVERY_RECEIPT_LINKED")
+                if component == self.root:
+                    break
+            return receipt_path
+        checked_receipt_path()
+        if not receipt_path.exists():
+            return None
+        if receipt_path.stat().st_size > 64 * 1024:
+            raise ValueError("PAPER_CLOSE_RECOVERY_RECEIPT_OVERSIZED")
+        with receipt_path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            encoded = handle.read(64 * 1024 + 1)
+            after = os.fstat(handle.fileno())
+        current = checked_receipt_path().stat()
+        identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if len(encoded) > 64 * 1024:
+            raise ValueError("PAPER_CLOSE_RECOVERY_RECEIPT_OVERSIZED")
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise ValueError("PAPER_CLOSE_RECOVERY_RECEIPT_CHANGED")
+        receipt = json.loads(encoded)
+        if (receipt.get("schema") != "emergency_record_idempotency_v1"
+                or receipt.get("state") != "COMMITTED"
+                or receipt.get("ledger") != ledger
+                or receipt.get("record_id") != material["record_id"]
+                or (receipt.get("identity") or {}).get("epoch_id") != self.epoch_id):
+            return None
+        path = self.resolve_receipt_ledger_generation(ledger, receipt)
+        raw = self._bounded_slice(path, int(receipt.get("offset", -1)), int(receipt.get("length", -1)))
+        if raw is None or hashlib.sha256(raw).hexdigest() != receipt.get("row_sha256"):
+            raise ValueError("PAPER_CLOSE_RECOVERY_BYTES_UNPROVEN")
+        existing = json.loads(raw)
+        expected = dict(material)
+        # Processing metadata is not part of the original economic event.
+        for item in (existing, expected):
+            item.pop("processing_revision", None)
+            item.pop("recovery_provenance_schema", None)
+        if existing != expected:
+            raise ValueError("PAPER_CLOSE_RECOVERY_CONTENT_CONFLICT")
+        return {"written": False, "duplicate": True, "ledger": ledger,
+                "record_id": material["record_id"], "recovery_bytes_verified": True}
+
+    def append(self, ledger: str, row: dict[str, Any], *, paper_close_recovery_provenance=None) -> dict[str, Any]:
         path = self.ledger_path(ledger)
         record_id = str(row.get("record_id") or "")
         if not record_id:
             raise ValueError("record_id is required")
+        provenance = _collection_provenance()
+        if paper_close_recovery_provenance is not None:
+            frozen = dict(paper_close_recovery_provenance)
+            if (ledger not in {"execution", "lifecycle", "market_segment"}
+                    or frozen.get("epoch_id") != self.epoch_id
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(frozen.get("source_revision") or ""))
+                    or frozen.get("evidence_provenance_schema") != "v3_collection_provenance_v1"
+                    or any(not isinstance(frozen.get(key), str) or not frozen[key]
+                           for key in ("deployed_revision", "tile_config_signature", "config_signature"))):
+                raise ValueError("INVALID_PAPER_CLOSE_RECOVERY_PROVENANCE")
+            provenance = {key: frozen[key] for key in (
+                "evidence_provenance_schema", "source_revision", "deployed_revision",
+                "tile_config_signature", "config_signature",
+            )}
+            provenance["processing_revision"] = _collection_provenance()["source_revision"]
+            provenance["recovery_provenance_schema"] = "paper_close_recovery_v1"
         material = dict(row)
         material.update({
             "schema": EVIDENCE_SCHEMA,
             "ledger": ledger,
             "epoch_id": self.epoch_id,
-            **_collection_provenance(),
+            **provenance,
         })
         if ledger == "opportunity":
             # Every producer path converges here.  Stamp the complete available
@@ -2003,6 +2085,16 @@ class V3EvidenceStore:
             material['research_timing_capture_status'] = timing
             material['research_timing_declarations'] = timing['declarations']
         line = canonical_json(material) + "\n"
+        if paper_close_recovery_provenance is not None:
+            with self._exclusive(path):
+                recovered = self._recover_append_head(ledger, path, recovery_material=material)
+                if recovered.get("blocked"):
+                    return {"written": False, "duplicate": False, "blocked": True,
+                            "record_id": record_id, "ledger": ledger,
+                            "reason": recovered["reason"]}
+                duplicate = self._paper_close_recovery_duplicate(ledger, material)
+            if duplicate is not None:
+                return duplicate
         if not storage_blocks_new_nonessential_research(str(self.root)):
             # Empty-ledger completeness is constant work and is required so a
             # later emergency can safely continue an already-open lifecycle.

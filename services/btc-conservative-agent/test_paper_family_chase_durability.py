@@ -67,6 +67,11 @@ def test_actual_family_chase_commits_snapshot_without_relay(tmp_path, lane):
 @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EACCES])
 def test_disk_failure_preserves_live_and_old_snapshot(tmp_path, monkeypatch, code):
     ns, order, signal, outbox, paused, schedules, relay = fixture(tmp_path, next(iter(COMBO_LANE_SPECS)))
+    from research_order_schedule import append_reprice_interval
+    ns["append_research_reprice_interval"] = append_reprice_interval
+    order["research_chase_schedule"] = {"authoritative": True, "intervals": [
+        {"start_ts": 10, "end_ts": None, "reference_price": 100}], "quantity_events": []}
+    initial_schedule = copy.deepcopy(order["research_chase_schedule"])
     before = outbox.path.read_bytes()
     def fail(*args): raise OSError(code, "injected")
     monkeypatch.setattr(outbox, "_atomic_write", fail)
@@ -74,6 +79,7 @@ def test_disk_failure_preserves_live_and_old_snapshot(tmp_path, monkeypatch, cod
         ns["_apply_family_policy_chase"](order, signal, 100, 200)
     assert outbox.path.read_bytes() == before and order["limit_price"] == 90
     assert signal["limit_price"] == 90 and schedules == [] and relay == []
+    assert order["research_chase_schedule"] == initial_schedule
     assert paused == ["PAPER_LIFECYCLE_COMMIT_FAILED"]
 
 
@@ -184,6 +190,12 @@ def test_actual_callsite_payloads_dispatch_to_local_commit(tmp_path, call_index)
               entry_price=95, research_lane=lane, caller_reason="test",
               target_mutator=lambda target: target["pending_orders"][0].update(limit_price=95),
               live_mutator=lambda: order.update(limit_price=95))
+    if isinstance(calls[call_index].args[0], ast.Constant) and calls[call_index].args[0].value == "ORDER_PLACED":
+        # Placement preimage cannot already contain the order being admitted.
+        empty = {"paper_only": True, "live_armed": False, "pending_orders": [], "positions": []}
+        outbox._atomic_write(outbox.decorate_lifecycle(empty))
+        ns["_build_paper_lifecycle_payload"] = lambda *a, **k: copy.deepcopy(empty)
+        ns["target_mutator"] = lambda target: target["pending_orders"].append(dict(order, limit_price=95))
     expression = ast.fix_missing_locations(ast.Module(body=[ast.Expr(value=calls[call_index])], type_ignores=[]))
     exec(compile(expression, "actual-lifecycle-callsite", "exec"), ns)
     assert json.loads(outbox.path.read_text())["pending_orders"][0]["limit_price"] == 95

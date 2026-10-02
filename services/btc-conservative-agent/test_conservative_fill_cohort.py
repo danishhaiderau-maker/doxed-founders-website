@@ -26,6 +26,8 @@ def tape_row(ts, *, ask=101, bid=99, ask_qty=2, bid_qty=2,
     return {
         "schema": "market_microstructure_1s_v1", "symbol": symbol,
         "bucket_ts": ts, "fresh": fresh, "valid_bbo": True,
+        "source_ts": ts, "observed_at_ts": ts,
+        "trade_bucket_complete": True, "trade_collected_at_ts": ts + 1,
         "ask": ask, "bid": bid, "ask_qty": ask_qty, "bid_qty": bid_qty,
         "sell_qty": sell_qty, "buy_qty": buy_qty,
         "sell_vwap": sell_vwap, "buy_vwap": buy_vwap,
@@ -94,6 +96,16 @@ def test_missing_qty_is_unsupported():
     result = build_conservative_fill_cohort([e], [tape_row(i) for i in range(100, 103)])
     assert result["receipts"][0]["outcome"] == "UNSUPPORTED"
     assert result["receipts"][0]["negative_reasons"] == ["MISSING_REQUESTED_QTY"]
+
+
+def test_missing_observation_evidence_cannot_claim_cohort_fill():
+    rows = [tape_row(i, ask=100) for i in range(100, 103)]
+    for row in rows:
+        row.pop("source_ts")
+        row.pop("observed_at_ts")
+    receipt = build_conservative_fill_cohort([event()], rows)["receipts"][0]
+    assert receipt["outcome"] == "UNSUPPORTED"
+    assert "QUOTE_OBSERVATION_TIME_UNPROVEN" in receipt["negative_reasons"]
 
 
 def test_missing_signed_quantity_constraints_are_unknown_unsupported():

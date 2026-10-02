@@ -7,6 +7,7 @@ source position/order being removed.
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -20,21 +21,81 @@ class RelayEventOutbox:
     SCHEMA = "relay_event_outbox_v1"
     WAL_SCHEMA = "paper_lifecycle_transition_wal_v1"
 
-    def __init__(self, path: str | os.PathLike[str], ack_limit: int = 512, shared_lock=None):
+    def __init__(self, path: str | os.PathLike[str], ack_limit: int = 512, shared_lock=None,
+                 snapshot_reserve_bytes=None, readers_share_generation_lease=False,
+                 protective_journal_bytes=None, protective_epoch_id=None):
         self.path = Path(path)
         self.ack_limit = max(1, int(ack_limit))
         self._lock = shared_lock or threading.RLock()
+        self._snapshot_reserve = None
+        self._protected_journal = None
+        self.snapshot_publication_pending = False
+        if snapshot_reserve_bytes is not None:
+            if readers_share_generation_lease is not True or shared_lock is None:
+                raise ValueError("PAPER_SNAPSHOT_READER_LEASE_REQUIRED")
+            from paper_snapshot_reserve import PaperSnapshotReserve
+            self._snapshot_reserve = PaperSnapshotReserve(self.path, snapshot_reserve_bytes)
         self._wake = threading.Event()
         self._pending: dict[str, dict] = {}
         self._acks: list[dict] = []
         self._highwater: dict[str, int] = {}
         self.healthy = True
         self.recovery_error = None
+        if protective_journal_bytes is not None:
+            from paper_snapshot_journal import PaperSnapshotJournal
+            self._protected_journal = PaperSnapshotJournal(
+                self.path, protective_journal_bytes, epoch_id=protective_epoch_id)
+            self._protected_journal.provision()
+            # Validate reset identity before _load can recover any canonical WAL.
+            self.read_snapshot()
         self._load()
 
     @staticmethod
     def canonical_body(payload: dict) -> bytes:
         return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    def read_snapshot(self) -> dict:
+        """Copy a complete generation under the same lock as reserve writes.
+
+        Returning decoded data rather than an open handle prevents callers
+        from retaining a reusable slot inode beyond the generation lease.
+        """
+        with self._lock:
+            with self.path.open("r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            if self._protected_journal is not None:
+                latest = self._protected_journal.latest()
+                if latest and self._state_sha256(latest["value"]) != self._state_sha256(value):
+                    if latest["predecessor_sha256"] != self._state_sha256(value):
+                        raise RuntimeError("PAPER_JOURNAL_PREDECESSOR_MISMATCH")
+                    self.snapshot_publication_pending = True
+                    return copy.deepcopy(latest["value"])
+            self.snapshot_publication_pending = False
+            return value
+
+    def enable_protective_journal(self, capacity, *, epoch_id):
+        from paper_snapshot_journal import PaperSnapshotJournal
+        with self._lock:
+            journal = PaperSnapshotJournal(self.path, capacity, epoch_id=epoch_id)
+            journal.provision()
+            self._protected_journal = journal
+            effective = self.read_snapshot()
+            if self.snapshot_publication_pending:
+                self._atomic_write(effective)
+            self._pending.clear()
+            self._acks.clear()
+            self._highwater.clear()
+            self._load()
+
+    def assert_entry_snapshot_budget(self, target, reserved_growth_bytes):
+        if self._protected_journal is None:
+            raise RuntimeError("PAPER_JOURNAL_NOT_PROVISIONED")
+        if self.snapshot_publication_pending:
+            raise RuntimeError("PAPER_SNAPSHOT_PUBLICATION_PENDING")
+        if type(reserved_growth_bytes) is not int or reserved_growth_bytes < 0:
+            raise ValueError("PAPER_SNAPSHOT_GROWTH_INVALID")
+        if len(self.canonical_body(target)) + reserved_growth_bytes > self._protected_journal.capacity:
+            raise RuntimeError("NEW_ENTRY_SNAPSHOT_BYTE_CAPACITY_EXHAUSTED")
 
     @classmethod
     def payload_sha256(cls, payload: dict) -> str:
@@ -44,8 +105,7 @@ class RelayEventOutbox:
         if not self.path.exists():
             return
         try:
-            with self._lock, self.path.open("r", encoding="utf-8") as handle:
-                value = json.load(handle)
+            value = self.read_snapshot()
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             # Never spin-crash on a corrupt delivery file. Preserve the exact
             # bytes and fail closed; an operator can reconcile it against the
@@ -110,6 +170,35 @@ class RelayEventOutbox:
                 self._wake.set()
 
     def _atomic_write(self, value: dict) -> None:
+        if self._protected_journal is not None:
+            if value.get("paper_only") is not True or value.get("live_armed") is not False:
+                raise ValueError("PROTECTED_JOURNAL_REQUIRES_DISARMED_PAPER")
+            effective = self.read_snapshot()
+            incoming_generation = int(value.get("generation", -1))
+            effective_generation = int(effective.get("generation", -1))
+            if (incoming_generation < effective_generation or
+                    (incoming_generation == effective_generation and self._state_sha256(value) != self._state_sha256(effective))):
+                raise RuntimeError("PAPER_JOURNAL_STALE_POSTIMAGE")
+            with self.path.open("r", encoding="utf-8") as handle:
+                predecessor = json.load(handle)
+            self._protected_journal.commit(value, predecessor_sha256=self._state_sha256(predecessor))
+            try:
+                self._atomic_write_canonical(value)
+                self.snapshot_publication_pending = False
+            except OSError as exc:
+                if exc.errno != errno.ENOSPC:
+                    raise
+                # Postimage is durable. Runtime consumers use read_snapshot;
+                # the old canonical inode remains unchanged for sync readers.
+                self.snapshot_publication_pending = True
+            return
+        self._atomic_write_canonical(value)
+
+    def _atomic_write_canonical(self, value: dict) -> None:
+        if self._snapshot_reserve is not None:
+            with self._lock:
+                self._snapshot_reserve.write(value)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
         try:
@@ -141,8 +230,7 @@ class RelayEventOutbox:
     def _persist(self, state_payload: dict | None = None) -> None:
         if self.path.exists():
             try:
-                with self.path.open("r", encoding="utf-8") as existing:
-                    disk_value = json.load(existing)
+                disk_value = self.read_snapshot()
                 if isinstance(disk_value, dict) and disk_value.get("transition_wal"):
                     raise RuntimeError("paper lifecycle transition WAL is unresolved")
             except (OSError, ValueError, json.JSONDecodeError):
@@ -157,8 +245,7 @@ class RelayEventOutbox:
         value = state_payload
         if value is None and self.path.exists():
             try:
-                with self.path.open("r", encoding="utf-8") as existing:
-                    candidate = json.load(existing)
+                candidate = self.read_snapshot()
                 if candidate.get("schema") == "paper_lifecycle_v1":
                     value = candidate
             except (OSError, ValueError, json.JSONDecodeError):
@@ -218,8 +305,7 @@ class RelayEventOutbox:
         with self._lock:
             if not self.path.exists():
                 raise ValueError("paper lifecycle preimage is missing")
-            with self.path.open("r", encoding="utf-8") as handle:
-                preimage = json.load(handle)
+            preimage = self.read_snapshot()
             if not isinstance(preimage, dict) or preimage.get("schema") != "paper_lifecycle_v1":
                 raise ValueError("paper lifecycle preimage is invalid")
             if preimage.get("transition_wal"):
@@ -260,8 +346,7 @@ class RelayEventOutbox:
     def commit_prepared(self, event_id: str) -> dict:
         """Publish PREPARED target plus PENDING event in one durable generation."""
         with self._lock:
-            with self.path.open("r", encoding="utf-8") as handle:
-                prepared = json.load(handle)
+            prepared = self.read_snapshot()
             wal = prepared.get("transition_wal") if isinstance(prepared, dict) else None
             if not isinstance(wal, dict) or wal.get("transition_id") != event_id:
                 raise ValueError("paper lifecycle prepared transition mismatch")
@@ -433,13 +518,21 @@ class RelayEventOutbox:
         with self._lock:
             prior_generation = -1
             if self.path.exists():
-                with self.path.open("r", encoding="utf-8") as handle:
-                    current = json.load(handle)
+                current = self.read_snapshot()
                 if isinstance(current, dict) and current.get("transition_wal"):
                     raise RuntimeError("paper lifecycle transition WAL is unresolved")
                 if isinstance(current, dict):
                     prior_generation = int(current.get("generation") or 0)
             value = copy.deepcopy(payload)
+            # Ordinary state saves must not discard unacknowledged research.
+            if "paper_research_obligations" not in value and prior_generation >= 0:
+                value["paper_research_obligations"] = copy.deepcopy(
+                    current.get("paper_research_obligations") or []
+                )
+            if "paper_evidence_capacity" not in value and prior_generation >= 0 and "paper_evidence_capacity" in current:
+                value["paper_evidence_capacity"] = copy.deepcopy(current["paper_evidence_capacity"])
+            if "paper_research_replay" not in value and prior_generation >= 0 and "paper_research_replay" in current:
+                value["paper_research_replay"] = copy.deepcopy(current["paper_research_replay"])
             value["generation"] = prior_generation + 1
             value["transition_wal"] = None
             value["relay_events"] = {
