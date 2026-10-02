@@ -213,3 +213,19 @@ def test_ai_tiles_split_by_prompt_input_revision_and_clock_tiles_are_not():
         tpc.UNJOINED_INPUT_REVISION: {"n": 1, "mean_bp": 1.0},
     }
     assert XVL not in cohorts and XVP not in cohorts
+
+
+def test_continuous_baseline_is_the_yardstick_not_a_trial():
+    rows = []
+    for i in range(6):
+        ts = T0 + i * 3600
+        rows += [_fill(CBL, f"b{i}", 1.0, ts), _fill(T1, f"b{i}", 3.0, ts, reason="PATH_END_60M")]
+    report = _report(rows)
+    assert report["baseline_lane"] == CBL
+    assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER) - 1
+    pairs = {p["challenger"]: p for p in report["vs_baseline"]}
+    assert set(pairs) == {T1, T2}
+    assert all(p["control"] == CBL for p in report["vs_baseline"])
+    assert pairs[T1]["paired_signals"] == 6
+    assert pairs[T1]["mean_difference_bp"] == pytest.approx(2.0)
+    assert XVL not in pairs and XVP not in pairs
