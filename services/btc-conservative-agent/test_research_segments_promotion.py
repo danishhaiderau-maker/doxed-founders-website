@@ -244,3 +244,70 @@ def test_incremental_migration_refuses_a_source_changed_after_staging(tmp_path, 
     staged.write_bytes(b"Q" * staged.stat().st_size)
     with pytest.raises(RuntimeError, match="Source checksum drift"):
         migration.migrate(view, store, view / promotion.HEARTBEAT_NAME)
+
+
+def _receipt(i: int, revision: str) -> bytes:
+    return json.dumps({"schema": "emergency_record_idempotency_v1", "state": "COMMITTED", "record_id": f"r{i:04d}",
+                       "identity": {"deployed_revision": revision}}, sort_keys=True).encode() + b"\n"
+
+
+def _receipt_env(tmp_path, count: int):
+    env, head, health = _synced(tmp_path)
+    for i in range(count):
+        env.write(f"v3/receipts/idem/d/{i:04x}.json", _receipt(i, "aaaaaaaaaaaa"))
+    return env, _resync(env), health
+
+
+def test_mtime_only_source_rewrite_is_neither_recopied_nor_remigrated(tmp_path, monkeypatch):
+    env, head, health = _receipt_env(tmp_path, 6)
+    view = tmp_path / "view"
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, now=1000.0)
+    migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, now=1000.0)
+    tree = env.shadow / "tree"
+    touched = sorted((tree / "v3" / "receipts").rglob("*.json"))
+    view_mtimes = {p.name: (view / p.relative_to(tree)).stat().st_mtime_ns for p in touched}
+    for path in touched:
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, now=1001.0)
+    assert receipt["files_copied"] == 0 and receipt["files_rehashed_unchanged"] == len(touched)
+    assert {p.name: (view / p.relative_to(tree)).stat().st_mtime_ns for p in touched} == view_mtimes
+    migrated = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, now=1001.0)
+    assert migrated["files_copied"] == 0 and migrated["files_reused"] == migrated["files_verified"]
+    # The index now carries the new source mtime, so the next pass is a plain stat reuse.
+    again = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, now=1002.0)
+    assert again["files_rehashed_unchanged"] == 0 and again["files_copied"] == 0
+
+
+def test_post_deploy_receipt_rebinding_is_copied_in_parallel_and_byte_exact(tmp_path, monkeypatch):
+    count = 40
+    env, head, health = _receipt_env(tmp_path, count)
+    view = tmp_path / "view"
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, copy_workers=4)
+    migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, copy_workers=4)
+    # A Fly boot re-binds every receipt to the new revision: same size, new bytes.
+    for i in range(count):
+        env.write(f"v3/receipts/idem/d/{i:04x}.json", _receipt(i, "bbbbbbbbbbbb"))
+    head = _resync(env)
+    staged = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, copy_workers=4)
+    assert staged["files_copied"] == count and staged["files_rehashed_unchanged"] == 0
+    migrated = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, copy_workers=4)
+    assert migrated["files_copied"] == count
+    tree = env.shadow / "tree"
+    assert _tree_bytes(view) == _tree_bytes(tree)
+    receipts = {rel: data for rel, data in _tree_bytes(store).items() if rel.startswith("v3/receipts/")}
+    assert receipts == {rel: data for rel, data in _tree_bytes(tree).items() if rel.startswith("v3/receipts/")}
+    assert all(b"bbbbbbbbbbbb" in data for data in receipts.values()) and len(receipts) == count
+    index = json.loads((store / migration.INCREMENTAL_INDEX).read_text(encoding="utf-8"))["files"]
+    state = json.loads((view / promotion.SYNC_STATE_NAME).read_text(encoding="utf-8"))
+    assert {k: v["sha256"] for k, v in index.items()} == {k: v["sha256"] for k, v in state.items()}
+    leftovers = [p for p in store.rglob("*.migration")]
+    assert leftovers == []

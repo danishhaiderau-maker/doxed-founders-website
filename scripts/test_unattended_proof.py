@@ -409,3 +409,64 @@ def test_deploy_runs_accepts_powershell5_value_wrapper():
     wrapped, err2 = up._deploy_runs(_deploys(now, {"value": [run], "Count": 1}), now)
     assert err == err2 == ""
     assert flat == wrapped == [run]
+
+
+def _stale_analyzer_row(now, generated_ago_min, *runs):
+    return up.evaluate_row(**_inputs(now, analyzer={"lastCompletedGenerationAt": up.iso(now - generated_ago_min * 60)},
+                                     deploy_runs=_deploys(now, *runs)))
+
+
+def test_stale_analyzer_right_after_a_successful_guarded_deploy_is_allowed_and_labelled():
+    # Replays the 2026-10-02 02:25:51Z row: generation 01:27:02Z, run 36949767912 01:11:55Z -> 01:52:17Z success.
+    now = up.parse_utc("2026-10-02T02:25:51Z")
+    run = {"databaseId": 36949767912, "status": "completed", "conclusion": "success", "event": "push",
+           "createdAt": "2026-10-02T01:11:55Z", "updatedAt": "2026-10-02T01:52:17Z"}
+    row = up.evaluate_row(**_inputs(now, analyzer={"lastCompletedGenerationAt": "2026-10-02T01:27:02Z"},
+                                    deploy_runs=_deploys(now, run)))
+    assert row["status"] == up.ALLOWED_GUARDED_DEPLOY and row["failed_checks"] == [], row
+    check = row["checks"]["analyzer_fresh"]
+    assert check["ok"] is True and check["boundary"] is True
+    assert check["detail"].startswith("ALLOWED_GUARDED_DEPLOY: analyzer generation 59 min old (> 45)")
+    assert "36949767912" in check["detail"] and "ended 34 min ago" in check["detail"]
+    assert row["observed"]["analyzer_deploy_run_id"] == 36949767912
+    active = _stale_analyzer_row(T0 + 3600, 50, _run(5, T0 + 3600 - 30 * 60))
+    assert active["status"] == up.ALLOWED_GUARDED_DEPLOY and "(active," in active["checks"]["analyzer_fresh"]["detail"]
+
+
+def test_stale_analyzer_allowance_is_bounded_and_attributable():
+    now = T0 + 6 * 3600
+    ok = lambda r: r["checks"]["analyzer_fresh"]["ok"]  # noqa: E731
+    success = lambda created_ago, ended_ago: _run(6, now - created_ago * 60, now - ended_ago * 60,  # noqa: E731
+                                                  "completed", "success")
+    # Grace ends 60 min after the run ended.
+    assert ok(_stale_analyzer_row(now, 70, success(80, 59))) is True
+    assert ok(_stale_analyzer_row(now, 70, success(80, 61))) is False
+    # Already stale before the deploy started: not the deploy's fault.
+    assert ok(_stale_analyzer_row(now, 100, success(50, 10))) is False
+    # Hard cap on generation age even with a long run.
+    assert ok(_stale_analyzer_row(now, 121, success(110, 5))) is False
+    # A failed or cancelled deploy never excuses staleness; no evidence fails closed.
+    assert ok(_stale_analyzer_row(now, 50, _run(7, now - 40 * 60, now - 5 * 60, "completed", "failure"))) is False
+    missing = up.evaluate_row(**_inputs(now, analyzer={"lastCompletedGenerationAt": up.iso(now - 50 * 60)}))
+    assert missing["failed_checks"] == ["analyzer_fresh"]
+    # A fresh generation stays a plain PASS even right after a deploy.
+    assert _stale_analyzer_row(now, 10, success(40, 5))["status"] == "PASS"
+
+
+def test_analyzer_only_allowances_do_not_extend_a_deploy_pause_run():
+    ends = T0 + 48 * 3600
+    analyzer_only = {"paper_running": {"ok": True, "detail": "paper running"},
+                     "analyzer_fresh": {"ok": True, "detail": "ALLOWED_GUARDED_DEPLOY: ...", "boundary": True}}
+    paused = {"paper_running": {"ok": True, "detail": "ALLOWED_GUARDED_DEPLOY: paused", "boundary": True}}
+    rows = []
+    for i in range(97):
+        row = _row(T0 + 60 + i * 1800)
+        if i == 10:
+            row = {**row, "status": up.ALLOWED_GUARDED_DEPLOY, "checks": paused}
+        elif i in (11, 12):
+            row = {**row, "status": up.ALLOWED_GUARDED_DEPLOY, "checks": analyzer_only}
+        rows.append(row)
+    assert up.verdict(rows, t0=T0, ends_at=ends, now=ends + 1)["result"] == "PASS"
+    rows[11] = {**rows[11], "checks": paused}
+    rows[12] = {**rows[12], "checks": paused}
+    assert up.verdict(rows, t0=T0, ends_at=ends, now=ends + 1)["result"] == "FAIL"

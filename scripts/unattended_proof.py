@@ -61,6 +61,14 @@ ALLOWED_GUARDED_DEPLOY = "ALLOWED_GUARDED_DEPLOY"
 BOUNDARY_STATUSES = frozenset({"BOUNDARY", ALLOWED_GUARDED_DEPLOY})
 GUARDED_DEPLOY_MAX_PAUSE_SEC = 45 * 60.0
 DEPLOY_RUN_SLACK_SEC = 120.0
+# Every Fly boot re-binds ~42k idempotency receipts to the new revision, so the
+# first laptop cycle after a guarded deploy re-promotes and re-migrates them.
+# A stale analyzer is ALLOWED_GUARDED_DEPLOY only when that deploy explains it:
+# the generation was still fresh when the run was created, the run is active or
+# concluded success, it ended at most this long ago, and the generation is
+# never older than the hard cap.
+ANALYZER_POST_DEPLOY_GRACE_SEC = 60 * 60.0
+ANALYZER_DEPLOY_MAX_AGE_SEC = 120 * 60.0
 ACTIVE_RUN_STATUSES = frozenset({"queued", "requested", "waiting", "pending", "in_progress"})
 
 
@@ -185,6 +193,29 @@ def attribute_deploy_run(runs: list[Mapping[str, Any]], observed_at: float, now:
             continue
         if created - DEPLOY_RUN_SLACK_SEC <= observed_at <= ended + DEPLOY_RUN_SLACK_SEC:
             return run
+    return None
+
+
+def attribute_analyzer_staleness(runs: list[Mapping[str, Any]], generated: float,
+                                 now: float) -> tuple[Mapping[str, Any], float] | None:
+    """The guarded deploy run that explains a stale analyzer generation, with its end time."""
+    if now - generated > ANALYZER_DEPLOY_MAX_AGE_SEC:
+        return None
+    for run in runs:
+        created = parse_utc(run.get("createdAt"))
+        if created is None or generated < created - ANALYZER_MAX_AGE_SEC:
+            continue
+        status = str(run.get("status") or "").lower()
+        if status in ACTIVE_RUN_STATUSES:
+            ended = now
+        elif status == "completed" and str(run.get("conclusion") or "").lower() == "success":
+            ended = parse_utc(run.get("updatedAt"))
+            if ended is None:
+                continue
+        else:
+            continue
+        if now - ended <= ANALYZER_POST_DEPLOY_GRACE_SEC:
+            return run, ended
     return None
 
 
@@ -372,12 +403,27 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
                                                  f"(> {SEGMENT_ACK_MAX_LAG_SEC / 60:.0f} min) and {laptop_detail}")
 
     # Analyzer generation fresh.
+    analyzer_boundary = False
     generated = parse_utc((analyzer or {}).get("lastCompletedGenerationAt") or (analyzer or {}).get("lastSuccessAt"))
     observed["analyzer_generation_at"] = iso(generated) if generated else None
     if generated is None:
         checks["analyzer_fresh"] = _check(None, "no completed analyzer generation recorded")
     elif now - generated > ANALYZER_MAX_AGE_SEC:
-        checks["analyzer_fresh"] = _check(False, f"analyzer generation {(now - generated) / 60:.0f} min old (> {ANALYZER_MAX_AGE_SEC / 60:.0f})")
+        age_text = f"analyzer generation {(now - generated) / 60:.0f} min old (> {ANALYZER_MAX_AGE_SEC / 60:.0f})"
+        attributed = attribute_analyzer_staleness(runs, generated, now) if runs is not None else None
+        if attributed is None:
+            checks["analyzer_fresh"] = _check(False, age_text)
+        else:
+            run, ended = attributed
+            analyzer_boundary = True
+            observed["analyzer_deploy_run_id"] = run.get("databaseId")
+            phase = ("active" if str(run.get("status")).lower() in ACTIVE_RUN_STATUSES
+                     else f"ended {(now - ended) / 60:.0f} min ago")
+            checks["analyzer_fresh"] = _check(
+                True, f"{ALLOWED_GUARDED_DEPLOY}: {age_text}; post-deploy receipt re-promotion after guarded "
+                      f"deploy run {run.get('databaseId')} ({phase}, grace "
+                      f"{ANALYZER_POST_DEPLOY_GRACE_SEC / 60:.0f} min, cap {ANALYZER_DEPLOY_MAX_AGE_SEC / 60:.0f} min)",
+                boundary=True)
     else:
         checks["analyzer_fresh"] = _check(True, f"analyzer generation {(now - generated) / 60:.0f} min old")
 
@@ -453,9 +499,19 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
         checks["no_manual_intervention"] = _check(True, detail)
 
     failed = [name for name, c in checks.items() if c["ok"] is not True]
-    status = "FAIL" if failed else ALLOWED_GUARDED_DEPLOY if boundary else "PASS"
+    status = "FAIL" if failed else ALLOWED_GUARDED_DEPLOY if boundary or analyzer_boundary else "PASS"
     return {"schema": ROW_SCHEMA, "kind": "ROW", "at": iso(now), "status": status,
             "failed_checks": failed, "checks": checks, "observed": observed}
+
+
+def _is_pause_boundary(row: Mapping[str, Any]) -> bool:
+    """A boundary row that paused paper; an analyzer-only post-deploy allowance is not a pause."""
+    if row.get("status") not in BOUNDARY_STATUSES:
+        return False
+    checks = row.get("checks")
+    if not isinstance(checks, Mapping) or "paper_running" not in checks:
+        return True
+    return bool((checks.get("paper_running") or {}).get("boundary"))
 
 
 def verdict(rows: list[Mapping[str, Any]], *, t0: float, ends_at: float, now: float) -> dict[str, Any]:
@@ -474,7 +530,7 @@ def verdict(rows: list[Mapping[str, Any]], *, t0: float, ends_at: float, now: fl
     run_start = None
     for row in rows:
         at = parse_utc(row.get("at"))
-        if row.get("status") in BOUNDARY_STATUSES:
+        if _is_pause_boundary(row):
             run_start = run_start if run_start is not None else at
             if at is not None and run_start is not None and at - run_start >= GUARDED_DEPLOY_MAX_PAUSE_SEC:
                 reasons.append(f"deploy boundary not resumed within {GUARDED_DEPLOY_MAX_PAUSE_SEC / 60:.0f} min (since {iso(run_start)})")
@@ -536,7 +592,10 @@ def start(state_dir: Path, receipt_dir: Path, now: float, *, force: bool = False
         "baseline": {k: runtime.get(k) for k in ("git_rev", "tile_registry_signature", "active_tile_lanes",
                                                  "research_lane_enabled", "execution_paused", "live_armed",
                                                  "bitfinex_live_enabled")},
-        "thresholds": {"analyzer_max_age_min": ANALYZER_MAX_AGE_SEC / 60, "ws_max_age_sec": WS_MAX_AGE_SEC,
+        "thresholds": {"analyzer_max_age_min": ANALYZER_MAX_AGE_SEC / 60,
+                       "analyzer_post_deploy_grace_min": ANALYZER_POST_DEPLOY_GRACE_SEC / 60,
+                       "analyzer_deploy_max_age_min": ANALYZER_DEPLOY_MAX_AGE_SEC / 60,
+                       "ws_max_age_sec": WS_MAX_AGE_SEC,
                        "segment_ack_tolerance_seq": SEGMENT_ACK_TOLERANCE_SEQ,
                        "segment_ack_max_lag_min": SEGMENT_ACK_MAX_LAG_SEC / 60,
                        "snapshot_max_age_min": SNAPSHOT_MAX_AGE_SEC / 60, "max_row_gap_min": MAX_ROW_GAP_SEC / 60,

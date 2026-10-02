@@ -18,8 +18,11 @@ copying so no segment is applied mid-copy.
 The view persists between cycles and is updated incrementally: unchanged files
 (same source and view size/mtime as the index recorded) are reused, append-only
 growth is verified against the recorded prefix hash and only the tail is
-written, and anything else is recopied. A periodic verify pass re-hashes every
-reused file; a missing or unreadable index forces a full rebuild.
+written, a same-size source whose bytes still hash to the recorded sha256
+(mtime-only rewrite) is reused without touching the view, and anything else is
+recopied. Full-file copies run on a bounded thread pool. A periodic verify pass
+re-hashes every reused file; a missing or unreadable index forces a full
+rebuild.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import shutil
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,6 +52,9 @@ RECEIPT_SCHEMA = "research_segment_promotion_view_v1"
 DEFAULT_VERIFY_INTERVAL_SEC = 24 * 3600
 _CHUNK = 4 * 1024 * 1024
 DEFAULT_MAX_UNSHIPPED_BYTES = 32 * 1024 * 1024
+# Every Fly boot re-binds ~42k small idempotency receipts to the new revision;
+# per-file create/replace latency, not bandwidth, bounds copying them.
+DEFAULT_COPY_WORKERS = 8
 # Per-append integrity caches keyed to the Fly inode/mtime of their source;
 # meaningless off-host and never read by the analyzer.
 FLY_LOCAL_ONLY_SUFFIXES = (".jsonl.validation.json",)
@@ -107,6 +114,16 @@ def _append_tail(source: Path, target: Path, prefix_size: int, prefix_sha: str) 
             dst.truncate()
     shutil.copystat(source, target)
     return digest.hexdigest()
+
+
+def _refresh_file(source: Path, target: Path, recorded_sha: str | None) -> tuple[str, bool]:
+    """Return (sha256, copied). A source that still hashes to recorded_sha is not copied."""
+    if recorded_sha is not None:
+        sha = _sha256_file(source)
+        if sha == recorded_sha:
+            return sha, False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _copy_hashed(source, target), True
 
 
 def _load_index(view_root: Path) -> dict | None:
@@ -185,7 +202,7 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
                max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES,
                genesis_at: float | None = None, full: bool = False,
                verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC,
-               now: float | None = None) -> dict:
+               now: float | None = None, copy_workers: int = DEFAULT_COPY_WORKERS) -> dict:
     shadow_root = refuse_unsafe_root(shadow_root, "shadow root")
     view_root = refuse_unsafe_root(view_root, "promotion view")
     tree = shadow_root / "tree"
@@ -218,8 +235,9 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         _write_json_atomic(view_root / INDEX_NAME, {"schema": INDEX_SCHEMA, "complete": False, "files": previous,
                                                    "last_verified_at": last_verified})
         files, sync_state, byte_count = {}, {}, 0
-        counts = {"reused": 0, "appended": 0, "copied": 0, "removed": 0}
+        counts = {"reused": 0, "rehashed_unchanged": 0, "appended": 0, "copied": 0, "removed": 0}
         written_bytes = 0
+        entries, refresh = [], {}
         for source in sorted(path for path in tree.rglob("*") if path.is_file()):
             relative = source.relative_to(tree).as_posix()
             target = view_root / relative
@@ -229,11 +247,12 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             view_intact = bool(view_stat and view_stat.st_size == prior["size"]
                                and view_stat.st_mtime_ns == prior["mtime_ns"])
             sha = None
+            verify_failed = False
             if (view_intact and src_stat.st_size == prior.get("src_size")
                     and src_stat.st_mtime_ns == prior.get("src_mtime_ns")):
                 sha = prior["sha256"]
                 if verify and (_sha256_file(target) != sha or _sha256_file(source) != sha):
-                    sha = None
+                    sha, verify_failed = None, True
                 else:
                     counts["reused"] += 1
             if sha is None and view_intact and src_stat.st_size > prior["size"]:
@@ -242,10 +261,23 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
                     counts["appended"] += 1
                     written_bytes += src_stat.st_size - prior["size"]
             if sha is None:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                sha = _copy_hashed(source, target)
-                counts["copied"] += 1
-                written_bytes += src_stat.st_size
+                # The view still holds the recorded bytes (size+mtime intact), so
+                # a same-size source with the recorded hash needs no copy.
+                same_bytes_possible = (view_intact and not verify and not verify_failed
+                                       and src_stat.st_size == prior["size"])
+                refresh[relative] = (source, target, prior["sha256"] if same_bytes_possible else None)
+            entries.append((relative, target, src_stat, sha))
+        with ThreadPoolExecutor(max_workers=max(1, int(copy_workers))) as pool:
+            futures = {rel: pool.submit(_refresh_file, *job) for rel, job in refresh.items()}
+            results = {rel: future.result() for rel, future in futures.items()}
+        for relative, target, src_stat, sha in entries:
+            if sha is None:
+                sha, copied = results[relative]
+                if copied:
+                    counts["copied"] += 1
+                    written_bytes += src_stat.st_size
+                else:
+                    counts["rehashed_unchanged"] += 1
             stat = target.stat()
             if stat.st_size != src_stat.st_size:
                 raise PromotionRefused([f"VIEW_SIZE_MISMATCH:{relative}"])
@@ -286,7 +318,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     return {"schema": RECEIPT_SCHEMA, "staged_at": _utc_now(), "view": str(view_root),
             "files": len(sync_state), "bytes": byte_count, "applied_seq": state["applied_seq"],
             "mode": "FULL_REBUILD" if rebuild else ("INCREMENTAL_VERIFIED" if verify else "INCREMENTAL"),
-            "files_reused": counts["reused"], "files_appended": counts["appended"],
+            "files_reused": counts["reused"], "files_rehashed_unchanged": counts["rehashed_unchanged"],
+            "files_appended": counts["appended"],
             "files_copied": counts["copied"], "files_removed": counts["removed"], "bytes_written": written_bytes,
             "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision}
 
@@ -306,6 +339,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-unshipped-bytes", type=int, default=DEFAULT_MAX_UNSHIPPED_BYTES)
     parser.add_argument("--full", action="store_true", help="rebuild the view from scratch")
     parser.add_argument("--verify-interval-sec", type=float, default=DEFAULT_VERIFY_INTERVAL_SEC)
+    parser.add_argument("--copy-workers", type=int, default=DEFAULT_COPY_WORKERS)
     args = parser.parse_args(argv)
     try:
         source = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
@@ -314,7 +348,8 @@ def main(argv=None) -> int:
                              head=source.head(), health=_health(args.base_url),
                              max_unshipped_bytes=args.max_unshipped_bytes,
                              genesis_at=genesis_window_end(source.get(fmt.manifest_key(args.prefix, 1))),
-                             full=args.full, verify_interval_sec=args.verify_interval_sec)
+                             full=args.full, verify_interval_sec=args.verify_interval_sec,
+                             copy_workers=args.copy_workers)
     except PromotionRefused as exc:
         print(json.dumps({"ok": False, "deny_reasons": exc.reasons}, indent=2))
         return 3

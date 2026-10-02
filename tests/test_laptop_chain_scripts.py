@@ -714,3 +714,39 @@ def test_supervisor_fast_forwards_before_starting_a_cycle_and_cycle_refuses_old_
     assert "merge-base --is-ancestor $deployedFull $checkoutHead" in check and "Stop-Cycle 5" in check
     assert "'.segment-promotion.index.json'" in cycle
     assert "PYTHONFAULTHANDLER" in _source("run-analyzer-once.ps1")
+
+@windows_only
+def test_cycle_lock_held_auto_ff_fast_forwards_while_the_cycle_mutex_is_owned(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    holder = subprocess.Popen(
+        [POWERSHELL, "-NoProfile", "-Command",
+         f". '{SCRIPTS / 'laptop-chain-common.ps1'}'; $h = Enter-SingleInstance -Name (Get-ChainMutexName "
+         f"'LaptopSegmentAnalyzerCycle'); 'held'; Start-Sleep 30"],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]})
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        result = _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot '{chain['canonical']}' "
+                     f"-StateDir '{chain['state']}' -CycleLockHeld; exit $LASTEXITCODE", chain["env"])
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _git(clone, "rev-parse", "HEAD") == second
+    finally:
+        holder.kill()
+    receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["outcome"] == "FAST_FORWARDED" and receipt["caller"] == "cycle"
+
+
+def test_cycle_fast_forwards_inline_instead_of_discarding_a_post_deploy_migration():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    gate = cycle[cycle.index("ANALYZER_REVISION_MISMATCH"):cycle.index("Set-CycleStatus 'ANALYZER'")]
+    # Fresh deploy-run evidence first, then the guarded fast-forward under the mutex this cycle holds.
+    assert gate.index("laptop-status-snapshots.ps1") < gate.index("v2c-auto-ff.ps1")
+    assert "-CycleLockHeld" in gate and "v2c-auto-ff.disabled" in gate
+    # Bounded: a hard refusal or the wait budget still stops the cycle before any analyzer pass.
+    assert "$ffExit -eq 3 -or $waited -ge $InlineFfMaxWaitSec" in gate and "Stop-Cycle 5" in gate
+    assert "Test-CheckoutContainsDeployed" in gate.split("AUTO_FF_INLINE ok")[0]
+    assert "[int]$InlineFfMaxWaitSec = 900" in cycle
+    auto_ff = _source("v2c-auto-ff.ps1")
+    assert "if (-not $CycleLockHeld)" in auto_ff
+    # The analyzer-run mutex is always taken, whoever calls.
+    assert auto_ff.count("Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAnalyzerRun')") == 1
