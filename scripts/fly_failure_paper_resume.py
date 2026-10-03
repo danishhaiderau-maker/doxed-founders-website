@@ -127,8 +127,9 @@ def main() -> int:
     if not token:
         raise RuntimeError("BOT_ADMIN_TOKEN is missing")
     prior = parse_prior(os.environ.get("PRIOR_OPERATOR_STATE", ""))
+    timeout = int(os.environ.get("FAILURE_RESUME_TIMEOUT_SEC") or 12 * 60)
     try:
-        result = guaranteed_resume(_http_clients(token), prior)
+        result = guaranteed_resume(_http_clients(token), prior, timeout=timeout)
     except Exception as exc:
         print(f"::error::paper was NOT resumed after the failed deploy: {exc}", flush=True)
         raise
