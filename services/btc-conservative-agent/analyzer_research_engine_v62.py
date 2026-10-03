@@ -105,6 +105,10 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
+ENTRY_BASELINE_REPLAY_RECEIPTS_FILE = "entry_baseline_replay_episode_receipts.jsonl.gz"
+# Written only by temp file + os.replace, so mirrors and the published
+# generation may share their inode instead of holding another full copy.
+HARDLINK_SAFE_REPORT_FILES = frozenset({ENTRY_BASELINE_REPLAY_REPORT_FILE, ENTRY_BASELINE_REPLAY_RECEIPTS_FILE})
 DISCOVERY_COHORT_SCORECARD_REPORT_FILE = "discovery_cohort_scorecard_report.json"
 CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE = "conservative_shadow_terminal_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
@@ -20843,6 +20847,11 @@ def _atomic_mirror_analyzer_report(source_name):
     destination_dir = Path(REPORTS_DIR)
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
+    if source.name in HARDLINK_SAFE_REPORT_FILES:
+        import storage_links
+
+        storage_links.link_or_copy(source, destination)
+        return destination
     temporary = destination_dir / f".{source.name}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
         shutil.copy2(source, temporary)
@@ -21907,10 +21916,13 @@ def write_report_manifest(
         baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
+        from research.entry_baseline_replay import write_replay_report
+
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(json.dumps(baseline_replay, indent=2), encoding="utf-8")
-        os.replace(temporary, target)
+        replay_sidecar = write_replay_report(
+            baseline_replay, target, sidecar_name=ENTRY_BASELINE_REPLAY_RECEIPTS_FILE,
+        )
+        _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
         replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         reports.append({
             "title": "Same-Opportunity Entry Baseline Replay",
@@ -21922,6 +21934,7 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
+            "episode_receipts_sidecar": replay_sidecar,
         })
     except Exception as exc:
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
@@ -22374,6 +22387,9 @@ def write_report_manifest(
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
+    if any(row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE and row.get("episode_receipts_sidecar")
+           for row in reports):
+        manifest["text_artifacts"].append(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
     manifest["generation_id"] = hashlib.sha256(
         json.dumps(
             {
@@ -22535,7 +22551,12 @@ def _publish_completed_report_generation(manifest):
                 raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
             if source.is_file():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+                if name in HARDLINK_SAFE_REPORT_FILES:
+                    import storage_links
+
+                    storage_links.link_or_copy(source, destination)
+                else:
+                    shutil.copy2(source, destination)
         (staging / REPORT_MANIFEST_FILE).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
