@@ -26409,7 +26409,12 @@ def process_signal(event: dict):
             return {"entry_resolution": "ORDER_SUBMITTED", "exact_reason": "ORDER_SUBMITTED"}
 
         except Exception as e:
-            logger.error(f"[PIPELINE FATAL] lane={research_lane} {e} [PIPELINE ENFORCEMENT]")
+            _crash_site = _exception_site(e)
+            _record_pipeline_error(research_lane, e, _crash_site)
+            logger.error(
+                f"[PIPELINE FATAL] lane={research_lane} site={_crash_site} {e} [PIPELINE ENFORCEMENT]",
+                exc_info=True,
+            )
             full_pipeline_trace("[PIPELINE]", f"CRASH_{str(e)}", trade_id if 'trade_id' in locals() else None)
             if 'signal' in locals():
                 _crash_ai = ai if 'ai' in locals() else None
@@ -27560,12 +27565,10 @@ def state_monitor_loop():
                         expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
-                if len(replay_buffers) > MAX_REPLAY_BUFFERS:
-                    sorted_ids = sorted(replay_buffers, key=lambda k: replay_buffers[k].get("start_ts", 0))
-                    excess = len(replay_buffers) - MAX_REPLAY_BUFFERS
-                    for tid in sorted_ids[:excess]:
-                        if tid not in expired_ids:
-                            expired_ids.append(tid)
+                for tid in replay_capacity_evictions(replay_buffers, expired_ids, MAX_REPLAY_BUFFERS):
+                    cls = _replay_eviction_class(replay_buffers[tid])
+                    _REPLAY_CAPACITY_EVICTIONS[cls] = _REPLAY_CAPACITY_EVICTIONS.get(cls, 0) + 1
+                    expired_ids.append(tid)
             for tid in expired_ids:
                 with replay_lock:
                     buf = replay_buffers.get(tid)
@@ -30757,6 +30760,19 @@ def _analyzer_view_authed() -> bool:
 
 _dashboard_handler_lock = threading.Lock()
 _dashboard_active_handlers = {}
+_dashboard_overload_rejections = {}
+
+
+def _record_overload_rejection(cap_name, reason, now=None):
+    cap = str(cap_name or "unclassified")[:24]
+    why = str(reason or "unknown")[:32]
+    ts = time.time() if now is None else float(now)
+    with _dashboard_handler_lock:
+        bucket = _dashboard_overload_rejections.setdefault(cap, {"total": 0, "by_reason": {}, "last_ts": None})
+        bucket["total"] += 1
+        if why in bucket["by_reason"] or len(bucket["by_reason"]) < 16:
+            bucket["by_reason"][why] = bucket["by_reason"].get(why, 0) + 1
+        bucket["last_ts"] = ts
 _DASHBOARD_TELEMETRY_STATIC_ROUTES = frozenset({
     "/api/data-sync/manifest", "/api/data-sync/sqlite-snapshot",
     "/api/data-sync/file", "/api/data-sync/ack", "/api/data-sync/lifecycle-ack",
@@ -30792,6 +30808,10 @@ def _dashboard_handler_snapshot(now=None):
     now = float(now if now is not None else time.monotonic())
     with _dashboard_handler_lock:
         rows = [dict(row) for row in _dashboard_active_handlers.values()]
+        rejected = {
+            cap: {"total": row["total"], "by_reason": dict(row["by_reason"]), "last_ts": row["last_ts"]}
+            for cap, row in list(_dashboard_overload_rejections.items())[:32]
+        }
     by_cap = {}
     for row in rows[:32]:
         cap = str(row.get("cap_name") or "unclassified")[:24]
@@ -30805,7 +30825,12 @@ def _dashboard_handler_snapshot(now=None):
         }:
             route = "UNCLASSIFIED"
         bucket["routes"][route] = bucket["routes"].get(route, 0) + 1
-    return {"active_total": len(rows[:32]), "by_cap": by_cap}
+    return {
+        "active_total": len(rows[:32]),
+        "by_cap": by_cap,
+        "rejected_total": sum(row["total"] for row in rejected.values()),
+        "rejected_by_cap": rejected,
+    }
 
 
 @app.before_request
@@ -32626,7 +32651,80 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         _resume_agent_debug_writes()
 
 replay_buffers: Dict[str, Dict] = {}
-MAX_REPLAY_BUFFERS = 100
+MAX_REPLAY_BUFFERS = max(1, int(os.getenv("MAX_REPLAY_BUFFERS", "100")))
+# Capacity eviction order (oldest first within a class). Executed trades hold a
+# buffer for their hold plus POST_EXIT_REPLAY_SEC; evicting by age alone killed
+# ~90% of executed replays before the post-exit horizon once paper volume rose.
+_REPLAY_EVICTION_PRIORITY = {"shadow": 0, "executed": 1, "executed_post_exit": 2}
+_REPLAY_CAPACITY_EVICTIONS: Dict[str, int] = {}
+
+
+def _replay_eviction_class(buf) -> str:
+    if str((buf or {}).get("lane") or "") != "executed":
+        return "shadow"
+    return "executed_post_exit" if buf.get("post_exit") else "executed"
+
+
+def replay_capacity_evictions(buffers, already_expired, cap) -> list:
+    """Buffer ids to evict so at most ``cap`` survive: research shadows first, executed post-exit last."""
+    expired = set(already_expired)
+    excess = len(buffers) - len(expired & set(buffers)) - int(cap)
+    if excess <= 0:
+        return []
+    order = sorted((k for k in buffers if k not in expired), key=lambda k: (
+        _REPLAY_EVICTION_PRIORITY[_replay_eviction_class(buffers[k])], buffers[k].get("start_ts", 0)))
+    return order[:excess]
+
+
+def replay_buffer_status() -> dict:
+    with replay_lock:
+        by_class: Dict[str, int] = {}
+        for buf in replay_buffers.values():
+            cls = _replay_eviction_class(buf)
+            by_class[cls] = by_class.get(cls, 0) + 1
+        evicted = dict(_REPLAY_CAPACITY_EVICTIONS)
+    return {"active": sum(by_class.values()), "cap": MAX_REPLAY_BUFFERS, "active_by_class": by_class,
+            "capacity_evictions": evicted,
+            "executed_capacity_evictions": evicted.get("executed", 0) + evicted.get("executed_post_exit", 0)}
+
+
+_PIPELINE_ERRORS_LOCK = threading.Lock()
+_PIPELINE_ERRORS: Dict[str, Any] = {"total": 0, "by_site": {}, "last": None}
+
+
+def _exception_site(exc) -> str:
+    tb = getattr(exc, "__traceback__", None)
+    frame = None
+    for frame in traceback.extract_tb(tb):
+        pass
+    if frame is None:
+        return "unknown"
+    return f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
+
+
+def _record_pipeline_error(lane, exc, site, now=None) -> None:
+    key = str(site)[:120]
+    with _PIPELINE_ERRORS_LOCK:
+        _PIPELINE_ERRORS["total"] += 1
+        by_site = _PIPELINE_ERRORS["by_site"]
+        if key in by_site or len(by_site) < 32:
+            by_site[key] = by_site.get(key, 0) + 1
+        _PIPELINE_ERRORS["last"] = {
+            "ts": time.time() if now is None else float(now),
+            "lane": str(lane or "")[:48],
+            "site": key,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:160],
+        }
+
+
+def pipeline_error_status() -> dict:
+    with _PIPELINE_ERRORS_LOCK:
+        return {
+            "total": _PIPELINE_ERRORS["total"],
+            "by_site": dict(_PIPELINE_ERRORS["by_site"]),
+            "last": dict(_PIPELINE_ERRORS["last"]) if _PIPELINE_ERRORS["last"] else None,
+        }
 # Align pre-exit ring with post-exit (10000 * 1s interval covers 120m + slack).
 # Compact horizon receipts are also persisted before any rotation so a truncated
 # buffer is CENSORED, never treated as $0.
@@ -42445,6 +42543,8 @@ def _runtime_blindspot_status_fields(now: float) -> dict:
         "rate_limits": lambda: _RATE_LIMITS.snapshot(now),
         "shipper": lambda: _volume_transfer_snapshot(_data_sync_volume_root(), now),
         "relay_outbox": lambda: _relay_delivery_guard.status(now),
+        "replay_buffers": replay_buffer_status,
+        "pipeline_errors": pipeline_error_status,
     }
     for key, build in parts.items():
         try:
@@ -51869,6 +51969,10 @@ def _create_dashboard_server():
             self, request, *, reason, path_label="UNCLASSIFIED",
             cap_name="dispatch", admission_sec=0.0,
         ):
+            try:
+                _record_overload_rejection(cap_name, reason)
+            except Exception:
+                pass
             self._bounded_request_log(
                 event="rejected",
                 path_label=path_label,
