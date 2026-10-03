@@ -45,6 +45,9 @@ COLLECTION_FAILURE_COUNTERS: tuple[tuple[str, str], ...] = (
     ("status", "collection.execution_markouts.write_failures"),
     ("status", "collection.execution_markouts.dropped"),
     ("status", "collection.execution_markouts.taker_capture_failures"),
+    ("status", "collection.shadow_exit_recorder.write_failures"),
+    ("status", "collection.shadow_exit_recorder.errors"),
+    ("status", "collection.shadow_exit_recorder.dropped_full"),
     ("status", "collection.microstructure_tape.write_failures_this_process"),
     ("status", "collection.microstructure_tape.io_write_failures_this_process"),
     ("status", "collection.cross_venue_tape.stats.write_failures"),
@@ -404,6 +407,33 @@ def collection_write_failure_findings(
             + ", ".join(f"{k} +{int(d)}" for k, d in sorted(grew.items())[:8])
         )
     }
+
+
+def shadow_exit_recorder_findings(state: dict[str, Any], status: Mapping[str, Any] | None) -> dict[str, str]:
+    """Observation-only recorder must advance: closed trades submitted since the last run must be drained."""
+    rec = _dict(_dict(_dict(status).get("collection")).get("shadow_exit_recorder"))
+    if not rec or rec.get("enabled") is False:
+        return {}
+    keys = ("submitted", "written", "skipped", "errors", "write_failures")
+    nums = {k: _num(rec.get(k)) for k in keys}
+    if any(v is None for v in nums.values()):
+        return {}
+    counters = state.setdefault("counters", {})
+    previous = counters.get("shadow_exit_recorder")
+    counters["shadow_exit_recorder"] = nums
+    if not isinstance(previous, dict) or nums["submitted"] < (_num(previous.get("submitted")) or 0.0):
+        return {}
+    drained = lambda c: sum(_num(c.get(k)) or 0.0 for k in keys[1:])  # noqa: E731
+    pending = nums["submitted"] - drained(nums)
+    if nums["submitted"] > 0 and rec.get("worker_alive") is False:
+        problem = "worker thread is dead"
+    elif pending > 0 and drained(nums) <= drained(previous) and nums["submitted"] >= previous["submitted"]:
+        problem = f"{int(pending)} submitted path(s) not drained since the previous run"
+    else:
+        return {}
+    return {"shadow_exit_recorder_stalled": (
+        f"shadow-exit recorder not advancing: {problem} (submitted={int(nums['submitted'])}, "
+        f"written={int(nums['written'])}, queue_depth={rec.get('queue_depth')})")}
 
 
 def restart_loop_findings(state: dict[str, Any], status: Mapping[str, Any] | None, now: float) -> dict[str, str]:

@@ -178,6 +178,16 @@ def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def tile_lane_for_trade_id(trade_id) -> str | None:
+    """Active tile whose registry ``id_prefix`` starts this paper trade id, else None."""
+    text = str(trade_id or "")
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        prefix = str(spec.get("id_prefix") or "")
+        if prefix and (text.startswith(prefix + "-") or text.startswith(prefix + "_")):
+            return lane
+    return None
+
+
 # Each tile owns its own concurrent pending+open+awaiting capacity. One shared
 # three-minute AI call places at most one order per tile, and an order can rest
 # for entry_ttl_sec (1800s), so a tile needs ~10 slots to never refuse a cycle.
@@ -324,6 +334,80 @@ ALL_SHADOW_EXITS = tuple(SHADOW_EXIT_SET)
 
 def _shadow_exits_except(*live: str) -> tuple[str, ...]:
     return tuple(x for x in ALL_SHADOW_EXITS if x not in live)
+
+
+# Shadow-exit recorder view of SHADOW_EXIT_SET (shadow_exit_paths.py kinds).
+# Every tile replays the whole catalog under its own time backstop and hard
+# stop; ids the tile lists in ``shadow_exits`` are its card's shadow-only exits
+# (role CARD_SHADOW), the rest are CATALOG comparisons. Observation only: none
+# of this reaches execution or the policy signature.
+SHADOW_EXIT_FAMILY_KINDS = {
+    "LATE_BREAKEVEN": "LATE_BREAKEVEN", "LATE_ATR_TRAIL": "LATE_ATR_TRAIL",
+    "LATE_GIVEBACK": "GIVEBACK", "LATE_LADDER": "LADDER",
+    "CONDITIONAL_EARLY_CUT": "CONDITIONAL_EARLY_CUT", "ATR_STOP": "ATR_HARD_STOP",
+    "ATR_HARD_STOP": "ATR_HARD_STOP", "LATE_COMPOSITE": "COMPOSITE",
+}
+SHADOW_EXIT_KINDS = frozenset({*SHADOW_EXIT_FAMILY_KINDS.values(), "HOLD"})
+SHADOW_EXIT_DEFAULT_HARD_STOP_BP = 40.0
+SHADOW_EXIT_DEFAULT_BACKSTOP_SEC = 7200
+
+
+def _shadow_exit_guard(lane=None) -> dict:
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    exit_policy = spec.get("exit_policy") or {}
+    stop = exit_policy.get("hard_stop_bps", exit_policy.get("hard_stop_margin_pct", SHADOW_EXIT_DEFAULT_HARD_STOP_BP))
+    backstop = exit_policy.get("max_duration_sec", SHADOW_EXIT_DEFAULT_BACKSTOP_SEC)
+    return {"hard_stop_bp": float(stop), "backstop_sec": int(backstop)}
+
+
+def _shadow_exit_recorder_specs(key: str, item: dict, guard: dict, role: str) -> list[dict]:
+    family = item.get("family")
+    base = {"label": item.get("label") or key, "role": role}
+    if family == "LATE_BREAKEVEN":
+        body = {"kind": "LATE_BREAKEVEN", "arm_bp": item["be_arm_bp"], "floor_bp": item["be_floor_bp"]}
+    elif family == "LATE_ATR_TRAIL":
+        body = {"kind": "LATE_ATR_TRAIL", "arm_atr": item["trail_arm_atr"], "trail_atr": item["trail_k"]}
+    elif family == "LATE_GIVEBACK":
+        body = {"kind": "GIVEBACK", "arm_bp": item["gb_arm_bp"], "giveback_frac": round(1.0 - item["gb_keep"], 6)}
+    elif family == "LATE_LADDER":
+        body = {"kind": "LADDER", "rungs_bp": tuple(tuple(r) for r in item["ladder"])}
+    elif family == "CONDITIONAL_EARLY_CUT":
+        body = {"kind": "CONDITIONAL_EARLY_CUT", "cut_bp": item["thesis_bp"], "within_sec": item["thesis_sec"],
+                "max_mfe_bp": item["thesis_max_mfe"]}
+    elif family == "ATR_STOP":
+        body = {"kind": "ATR_HARD_STOP", "stop_atr": item["atr_stop_k"]}
+    elif family == "ATR_HARD_STOP":
+        return [{"id": key, **base, "kind": "ATR_HARD_STOP", "stop_atr": item["hard_atr_k"],
+                 "clamp_bp": tuple(item["hard_clamp_bp"]), "backstop_sec": guard["backstop_sec"]}]
+    elif family == "LATE_COMPOSITE":
+        be, trail = f"{key}:be", f"{key}:trail"
+        return [
+            {"id": be, **base, "role": "COMPOSITE_MEMBER", "kind": "LATE_BREAKEVEN",
+             "arm_bp": item["be_arm_bp"], "floor_bp": item["be_floor_bp"], **guard},
+            {"id": trail, **base, "role": "COMPOSITE_MEMBER", "kind": "LATE_ATR_TRAIL",
+             "arm_atr": item["trail_arm_atr"], "trail_atr": item["trail_k"], **guard},
+            {"id": key, **base, "kind": "COMPOSITE", "members": (be, trail)},
+        ]
+    else:
+        raise ValueError(f"UNSUPPORTED_SHADOW_EXIT_FAMILY:{key}:{family}")
+    return [{"id": key, **base, **body, **guard}]
+
+
+def tile_shadow_exit_set(lane=None) -> tuple:
+    """Recorder specs for a tile (or the defaults for any non-tile signal lane), from SHADOW_EXIT_SET."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    card = set(spec.get("shadow_exits") or ())
+    guard = _shadow_exit_guard(lane)
+    out = []
+    for key, item in SHADOW_EXIT_SET.items():
+        out.extend(_shadow_exit_recorder_specs(key, item, guard, "CARD_SHADOW" if key in card else "CATALOG"))
+    out.append({"id": "tile_stop_backstop_only", "label": "Only the hard stop and time backstop",
+                "role": "REFERENCE", "kind": "HOLD", **guard})
+    out.append({"id": "hold_to_horizon", "label": "Hold to the time backstop (no stop)", "role": "REFERENCE",
+                "kind": "HOLD", "backstop_sec": guard["backstop_sec"]})
+    return tuple(out)
+
+
 
 
 # Exit rule ids for the card and the first-trigger-wins order the runtime's
@@ -1238,6 +1322,17 @@ def validate_tile_registry() -> tuple[str, ...]:
             defects.append(f"{lane}:PAPER_ONLY_STATE_WITHOUT_GATE")
         if state == "BENCHMARK" and not spec.get("is_benchmark"):
             defects.append(f"{lane}:BENCHMARK_STATE_WITHOUT_ROLE")
+        try:
+            recorder_specs = tile_shadow_exit_set(lane)
+        except (KeyError, TypeError, ValueError):
+            defects.append(f"{lane}:INVALID_SHADOW_EXIT_SET")
+        else:
+            if any(item.get("kind") not in SHADOW_EXIT_KINDS for item in recorder_specs):
+                defects.append(f"{lane}:UNSUPPORTED_SHADOW_EXIT_KIND")
+            recorder_ids = [item["id"] for item in recorder_specs]
+            if len(recorder_ids) != len(set(recorder_ids)) or any(
+                    member not in recorder_ids for item in recorder_specs for member in item.get("members") or ()):
+                defects.append(f"{lane}:SHADOW_EXIT_COMPOSITE_UNKNOWN_MEMBER")
         surfaces = tuple(spec.get("component_surfaces") or ())
         if surfaces != TILE_COMPONENT_SURFACES:
             missing_surfaces = sorted(set(TILE_COMPONENT_SURFACES).difference(surfaces))

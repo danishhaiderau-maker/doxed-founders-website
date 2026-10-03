@@ -341,6 +341,7 @@ REPORT_NAV_GROUPS = (
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
+        ("shadow-exits", "Shadow Exits", "shadow_exit_report.json"),
     )),
     ("deep-group", "Diagnostics & Exports", (
         ("explorer", "Report Explorer", None),
@@ -7583,6 +7584,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
+  <section id="sec-shadow-exits">
+    <h2>Shadow exits &mdash; every exit idea on the same recorded paths</h2>
+    <p class="note" id="shadow-exits-note">Loading shadow-exit report&hellip;</p>
+    <div class="kpis" id="shadow-exits-kpis"></div>
+    <div id="shadow-exits-body"></div>
+    <p class="note">Observation only: shadow exits never place, change or cancel an order. Composites are first-trigger-wins. Give-back = in at least the meaningful profit before the exit, then closed negative. JSON: <a href="/api/research/shadow_exits">/api/research/shadow_exits</a>.</p>
+  </section>
   <section id="sec-runtime-incidents">
     <h2>Runtime incident &amp; restart history</h2>
     <p class="note" id="runtime-incidents-note">Loading retained application crash receipts…</p>
@@ -7660,6 +7668,7 @@ const EVIDENCE_SCOPES = {
   'runtime-incidents': ['RETAINED APPLICATION RECEIPTS', 'Application watchdog/crash receipts are shown separately. Fly platform and deployment causes remain unavailable unless an authoritative platform receipt exists.'],
   'pathway-audit': ['MIXED INTEGRITY REPORTS', 'Combines current runtime checks with historical lane/report contracts.'],
   horizon: ['LEGACY POST-EXIT REPLAY', 'Historical recovery/horizon evidence; not the current pinned policy grid.'],
+  'shadow-exits': ['OBSERVATION-ONLY SHADOW EXITS \u2014 REALISTIC_V1', 'Every configured exit replayed on the same recorded trade/signal path. Live current-epoch recorder rows are the headline; laptop backfill is descriptive archive evidence and never ranks.'],
 };
 const navEl = document.getElementById('nav');
 const subnavEl = document.getElementById('subnav');
@@ -9685,6 +9694,59 @@ async function loadRuntimeIncidents() {
   ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
 }
 
+async function loadShadowExits() {
+  const esc = value => String(value == null ? '' : value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+  const num = (v, d = 2) => v == null || Number.isNaN(Number(v)) ? '-' : Number(v).toFixed(d);
+  const pct = v => v == null ? '-' : (100 * Number(v)).toFixed(1) + '%';
+  const ci = pair => Array.isArray(pair) && pair[0] != null ? `[${num(pair[0], 1)}, ${num(pair[1], 1)}]` : '';
+  const note = document.getElementById('shadow-exits-note');
+  const body = document.getElementById('shadow-exits-body');
+  let d;
+  try {
+    const r = await fetch('/api/research/shadow_exits');
+    d = await r.json();
+  } catch (err) {
+    note.textContent = 'Shadow-exit report unavailable: ' + err;
+    body.innerHTML = '';
+    return;
+  }
+  if (d.status !== 'OK') {
+    note.textContent = 'Shadow-exit report unavailable: ' + (d.empty_reason || d.status || 'unknown') + '. Nothing is inferred until a report exists.';
+    document.getElementById('shadow-exits-kpis').innerHTML = '';
+    body.innerHTML = '';
+    return;
+  }
+  const cov = d.coverage || {};
+  const src = cov.by_source || {};
+  note.textContent = `Generated ${esc((d.generated_at || '').slice(0, 19))}Z (age ${num((d.age_sec || 0) / 60, 0)} min) · fill model ${esc((d.fill_model || {}).fill_model || '-')} · meaningful profit ${num(d.meaningful_profit_bp, 0)} bp · market context joined ${cov.market_context_joined || 0}/${cov.records || 0}.`;
+  document.getElementById('shadow-exits-kpis').innerHTML = [
+    ['Live recorder rows', src.RUNTIME_REPLAY || 0],
+    ['Backfill: replay rows', src.BACKFILL_SIGNAL_REPLAY || 0],
+    ['Backfill: 1s-tape signals', src.BACKFILL_TAPE_1S || 0],
+    ['Exit sets', Object.keys(d.shadow_exit_sets || {}).length],
+  ].map(([k, v]) => `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  const table = (rows, caption) => {
+    if (!rows || !rows.length) return '';
+    const sorted = rows.slice().sort((a, b) => (b.ev_bp ?? -1e9) - (a.ev_bp ?? -1e9));
+    return `<table class="shadow-exit-table"><caption>${esc(caption)}</caption><thead><tr><th>Exit</th><th>Kind</th><th>N</th><th>EV bp/signal</th><th>EV 95% CI</th><th>Win</th><th>Win CI</th><th>Give-back</th><th>Gave back of meaningful</th><th>Exit min</th><th>Δ vs actual</th><th>Δ vs hold</th></tr></thead><tbody>` +
+      sorted.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.n)}</td><td>${num(x.ev_bp)}</td><td>${ci(x.ci_bp)}</td><td>${pct(x.win_rate)}</td><td>${Array.isArray(x.win_rate_ci) && x.win_rate_ci[0] != null ? `[${pct(x.win_rate_ci[0])}, ${pct(x.win_rate_ci[1])}]` : ''}</td><td>${pct(x.giveback_rate)}</td><td>${pct(x.giveback_rate_of_meaningful)}</td><td>${num(x.mean_exit_min, 1)}</td><td>${num(x.delta_vs_actual_bp)}</td><td>${num(x.delta_vs_hold_to_horizon_bp)}</td></tr>`).join('') +
+      '</tbody></table>';
+  };
+  const cohorts = Object.values(d.cohorts || {});
+  body.innerHTML = cohorts.map(c => {
+    const groups = (c.groups || []).filter(g => (g.exits || []).length || (g.signal_taker_exits || []).length);
+    const head = `<h3>${esc(c.cohort)} <span class="note">${esc(c.role)} · ${esc(c.records)} records</span></h3>`;
+    if (!groups.length) return head + '<p class="note">No records in this cohort yet.</p>';
+    return head + groups.map(g =>
+      `<details ${c.cohort === d.headline_cohort ? 'open' : ''}><summary>${esc(g.group)} — ${esc(g.filled)} filled trades, ${esc(g.unfilled_signals)} unfilled signals</summary>` +
+      table(g.exits, 'Paper trades: shadow exits on the executable path after the fill') +
+      table(g.signal_taker_exits, 'Unfilled signals: shadow exits on the REALISTIC_V1 taker-at-signal counterfactual path') +
+      '</details>').join('');
+  }).join('');
+}
+
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
   lanes: [loadLanes],
@@ -9697,6 +9759,7 @@ const SECTION_LOADERS = {
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+  'shadow-exits': [loadShadowExits],
 };
 const SECTION_REFRESHES = new Map();
 
@@ -10124,6 +10187,40 @@ def api_research_index():
                        "/api/research/forward_tracker?verdict=FORWARD_CONFIRMED",
                        "/api/research/mix_match_structures?cohort=XVENUE_EVALUATOR&sort=nested_oos_fine.ev_bp"]
     return jsonify(out)
+
+
+SHADOW_EXIT_REPORT_PATH = Path(
+    os.getenv("ANALYZER_SHADOW_EXIT_REPORT")
+    or r"C:\DoxxedCrypto\analyzer-exports\shadow-exits\shadow_exit_report.json"
+)
+SHADOW_EXIT_REPORT_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _shadow_exit_payload() -> dict:
+    try:
+        if SHADOW_EXIT_REPORT_PATH.stat().st_size > SHADOW_EXIT_REPORT_MAX_BYTES:
+            return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE", "empty_reason": "REPORT_TOO_LARGE"}
+        report = json.loads(SHADOW_EXIT_REPORT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema": "shadow_exit_dashboard_v1", "status": "MISSING", "empty_reason": "NO_SHADOW_EXIT_REPORT",
+                "report_path": str(SHADOW_EXIT_REPORT_PATH)}
+    except (OSError, ValueError) as exc:
+        return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE",
+                "empty_reason": f"REPORT_UNREADABLE:{type(exc).__name__}"}
+    if not isinstance(report, dict) or report.get("schema") != "shadow_exit_report_v1":
+        return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE", "empty_reason": "REPORT_SCHEMA_MISMATCH"}
+    try:
+        generated = datetime.strptime(str(report.get("generated_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        generated = None
+    return {"schema": "shadow_exit_dashboard_v1", "status": "OK", "report_path": str(SHADOW_EXIT_REPORT_PATH),
+            "age_sec": round(time.time() - generated, 1) if generated else None, **report}
+
+
+@app.route("/api/research/shadow_exits")
+def api_research_shadow_exits():
+    return jsonify(_shadow_exit_payload())
 
 
 @app.route("/api/research/<dataset>")

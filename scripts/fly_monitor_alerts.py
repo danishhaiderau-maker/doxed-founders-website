@@ -93,6 +93,8 @@ POLICIES: Mapping[str, Policy] = {
     "relay_cache_stale": Policy(2, 15 * 60.0, 6 * HOUR, True, WARNING),
     # Counters only grow on a real write failure; a restart resets the baseline.
     "collection_write_failures": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    # Observation-only shadow-exit recorder stopped draining closed trades.
+    "shadow_exit_recorder_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True, WARNING),
     # A deploy restarts once; three starts in an hour is a crash loop, never suppressed.
     "restart_loop": Policy(1, 0.0, 3 * HOUR, False),
     # Persists until a later image deploy succeeds.

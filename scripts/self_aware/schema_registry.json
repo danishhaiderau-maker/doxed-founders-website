@@ -8012,6 +8012,238 @@
 ]
 }
 },
+"shadow_exit_paths.jsonl": {
+"schema=shadow_exit_path_v1": {
+"collection_epoch_id": [
+"string"
+],
+"counterfactual.limit_touch": [
+"object"
+],
+"counterfactual.taker_at_signal": [
+"object"
+],
+"counterfactual.taker_shadow_exits": [
+"array"
+],
+"data_epoch_id": [
+"string"
+],
+"direction": [
+"string"
+],
+"entry_context.adx": [
+"number"
+],
+"entry_context.atr3m_pct": [
+"number"
+],
+"entry_context.atr_source": [
+"string"
+],
+"entry_context.depth_imbalance": [
+"number"
+],
+"entry_context.missing": [
+"array"
+],
+"entry_context.regime": [
+"string"
+],
+"entry_context.rv_label": [
+"null"
+],
+"entry_context.rv_pct_rank": [
+"null"
+],
+"entry_context.session": [
+"string"
+],
+"entry_context.signal_to_fill_latency_sec": [
+"number"
+],
+"entry_context.spread_bp": [
+"number"
+],
+"entry_context.top_ask_qty": [
+"number"
+],
+"entry_context.top_bid_qty": [
+"number"
+],
+"entry_price": [
+"number"
+],
+"exit_latency_sec": [
+"number"
+],
+"extra.decision_id": [
+"string"
+],
+"extra.episode_source": [
+"string"
+],
+"extra.limit_offset_pct": [
+"number"
+],
+"extra.replay_complete": [
+"bool"
+],
+"extra.replay_completion_reason": [
+"string"
+],
+"extremes.mae_bp": [
+"number"
+],
+"extremes.mfe_bp": [
+"number"
+],
+"extremes.peak_t_sec": [
+"number"
+],
+"extremes.trough_t_sec": [
+"number"
+],
+"fee_bp": [
+"number"
+],
+"fill_model": [
+"string"
+],
+"fill_ts": [
+"number"
+],
+"filled": [
+"bool"
+],
+"hold_extremes": [
+"null"
+],
+"hold_extremes.mae_bp": [
+"number"
+],
+"hold_extremes.mfe_bp": [
+"number"
+],
+"hold_extremes.peak_t_sec": [
+"number"
+],
+"hold_extremes.trough_t_sec": [
+"number"
+],
+"horizon_sec": [
+"number"
+],
+"horizons.1": [
+"object"
+],
+"horizons.10": [
+"object"
+],
+"horizons.2": [
+"object"
+],
+"horizons.30": [
+"object"
+],
+"horizons.5": [
+"object"
+],
+"horizons.60": [
+"object"
+],
+"lane": [
+"string"
+],
+"market_context.join": [
+"string"
+],
+"market_context.liquidations_file": [
+"string"
+],
+"market_context.source_file": [
+"string"
+],
+"market_context.source_schema": [
+"string"
+],
+"market_context.window_end_ts": [
+"number"
+],
+"market_context.window_start_ts": [
+"number"
+],
+"meaningful_profit_bp": [
+"number"
+],
+"path.close": [
+"array"
+],
+"path.exit_minute": [
+"number"
+],
+"path.high": [
+"array"
+],
+"path.low": [
+"array"
+],
+"path.minutes": [
+"number"
+],
+"path.step_sec": [
+"number"
+],
+"path.truncated": [
+"bool"
+],
+"path.unit_bp": [
+"number"
+],
+"path_side": [
+"string"
+],
+"policy_signature": [
+"string"
+],
+"record_id": [
+"string"
+],
+"recorder_version": [
+"string"
+],
+"research_lane": [
+"string"
+],
+"schema": [
+"string"
+],
+"shadow_exit_set_id": [
+"string"
+],
+"shadow_exits": [
+"array"
+],
+"side_fallback_ticks": [
+"number"
+],
+"signal_ts": [
+"number"
+],
+"source": [
+"string"
+],
+"tick_count": [
+"number"
+],
+"tile": [
+"string"
+],
+"trade_id": [
+"string"
+]
+}
+},
 "shadow_outcome.jsonl": {
 "schema=shadow_outcome_v2": {
 "adx_at_signal": [

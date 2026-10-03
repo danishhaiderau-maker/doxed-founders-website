@@ -84,6 +84,9 @@ ANALYZER_USAGE = {
                                            "consumers": ["stream_studies taker counterfactual EV"]},
     "fill_markouts.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
                             "consumers": ["stream_studies post-fill markout curves"]},
+    "shadow_exit_paths.jsonl": {"usage": FULL, "continuous": False,
+                                "consumers": ["shadow_exit_report (all rotations, Shadow exits section)"],
+                                "schemas": ["shadow_exit_path_v1"]},
 }
 
 
