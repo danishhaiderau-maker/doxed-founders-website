@@ -366,6 +366,11 @@ class FeedRouter:
         self.routes = dict(routes)
         self.msgs = 0
         self.last_msg_ts = None
+        self.last_keepalive_ts = None
+
+    def on_keepalive(self, recv_ts: float) -> None:
+        """A plain-text keepalive reply (e.g. OKX "pong"): the socket is alive, no market data."""
+        self.last_keepalive_ts = recv_ts
 
     def on_events(self, routed: Iterable[tuple], recv_ts: float) -> None:
         self.msgs += 1
@@ -558,9 +563,15 @@ def health_from_live(live: Optional[Mapping[str, Any]], now: float, *, enabled: 
     for name, f in (live.get("feeds") or {}).items():
         last = f.get("last_msg_ts")
         fage = None if last is None else round(now - float(last), 1)
-        ok = bool(f.get("connected")) and fage is not None and fage <= FEED_STALE_SEC
+        # Liquidations are sparse: minutes without one is normal, so a keepalive
+        # round-trip also proves the socket alive. Market-data feeds still need data.
+        alive = last
+        if name in LIQ_FEED_VENUE and f.get("last_keepalive_ts") is not None:
+            alive = max(float(last or 0.0), float(f["last_keepalive_ts"]))
+        alive_age = None if alive is None else round(now - float(alive), 1)
+        ok = bool(f.get("connected")) and alive_age is not None and alive_age <= FEED_STALE_SEC
         out["feeds"][name] = {"connected": bool(f.get("connected")), "age_sec": fage,
-                              "reconnects": f.get("reconnects"), "ok": ok}
+                              "alive_age_sec": alive_age, "reconnects": f.get("reconnects"), "ok": ok}
         if not ok:
             stale.append(name)
     for venue, d in (live.get("derivatives") or {}).items():

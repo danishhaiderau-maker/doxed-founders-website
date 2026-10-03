@@ -13,6 +13,7 @@
 !relay_delivery_guard.py
 !ai_call_cost.py
 !shadow_chase_buckets.py
+!monitor_api.py
 
 # Test and local QA modules are not runtime dependencies. Keep them in Git and
 # CI, but do not ship 100+ harness files in the production trading image.

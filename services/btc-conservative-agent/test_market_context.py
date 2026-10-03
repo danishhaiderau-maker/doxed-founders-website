@@ -153,6 +153,54 @@ def test_health_marks_stale_feeds_and_never_affects_orders():
     assert mct.health_from_live(live, now, enabled=False)["status"] == "DISABLED"
 
 
+def test_sparse_liquidation_feed_is_alive_on_keepalive_but_market_data_is_not():
+    now = 10_000.0
+    live = {"schema": mct.LIVE_SCHEMA, "written_ts": now - 2,
+            "feeds": {"liq_okx": {"connected": True, "last_msg_ts": now - 600, "last_keepalive_ts": now - 10},
+                      "coinbase": {"connected": True, "last_msg_ts": now - 600, "last_keepalive_ts": now - 10},
+                      "liq_bybit": {"connected": False, "last_msg_ts": now - 5, "last_keepalive_ts": now - 5}},
+            "derivatives": {}}
+    h = mct.health_from_live(live, now)
+    assert h["feeds"]["liq_okx"] == {"connected": True, "age_sec": 600.0, "alive_age_sec": 10.0,
+                                     "reconnects": None, "ok": True}
+    assert h["stale_feeds"] == ["coinbase", "liq_bybit"]
+
+
+def test_plain_pong_keepalive_reaches_the_router_without_counting_as_data():
+    import threading
+
+    import cross_venue_collector as cvc
+
+    router = mct.FeedRouter({})
+    stop = threading.Event()
+    clock = iter([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+
+    class FakeWS:
+        queue = ["pong", '{"arg": {"channel": "liquidation-orders"}, "data": []}']
+
+        def send(self, _):
+            pass
+
+        def settimeout(self, _):
+            pass
+
+        def recv(self):
+            if self.queue:
+                return self.queue.pop(0)
+            stop.set()
+            return None
+
+        def close(self):
+            pass
+
+    spec = mct.FEEDS["liq_okx"]["connection"]
+    worker = cvc.ConnectionWorker("liq_okx", spec, router, stop, ws_factory=lambda url: FakeWS(),
+                                  clock=lambda: next(clock), parser=lambda data: [])
+    worker.run_session()
+    assert router.last_keepalive_ts == 102.0
+    assert router.msgs == 1 and router.last_msg_ts == 103.0
+
+
 def test_live_file_is_excluded_but_tapes_ship():
     assert mct.LIVE_FILE in rss.EXCLUDED_NAMES
     assert mct.FILE_NAME not in rss.EXCLUDED_NAMES

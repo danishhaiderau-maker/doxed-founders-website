@@ -1316,6 +1316,30 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
     )
 
 
+def tile_pre_registration_summary(lane: str) -> dict:
+    """Public pre-registration view of one active tile, read from this registry only.
+
+    Deliberately not part of ``active_tile_lifecycle_manifest``: adding it there
+    would change ``active_tile_registry_signature`` without a policy change.
+    """
+    spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+    pre = spec.get("pre_registration") or {}
+    hypothesis = spec.get("hypothesis_result") or {}
+    return {
+        "declared": bool(pre),
+        "schema": pre.get("schema"),
+        "hypothesis_id": pre.get("hypothesis_id") or hypothesis.get("hypothesis_id"),
+        "status": hypothesis.get("status"),
+        "registered_at": pre.get("registered_utc"),
+        "registered_cohort": pre.get("registered_cohort"),
+        "evidence_world": pre.get("evidence_world"),
+        "ci_method": pre.get("ci_method"),
+        "honest_label": pre.get("honest_label"),
+        "promote": {"summary": spec.get("promotion_criteria"), "thresholds": dict(pre.get("promotion") or {})},
+        "kill": {"summary": spec.get("kill_criteria"), "thresholds": dict(pre.get("kill") or {})},
+    }
+
+
 def active_tile_registry_signature() -> str:
     """Deterministic identity shared by runtime, mirror, analyzer and monitors."""
     payload = {

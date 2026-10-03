@@ -105,7 +105,11 @@ class ConnectionWorker(threading.Thread):
                 now = self._clock()
                 if message:
                     last_rx = now
-                    if message != "pong":
+                    if message == "pong":
+                        on_keepalive = getattr(self.acc, "on_keepalive", None)
+                        if on_keepalive is not None:
+                            on_keepalive(now)
+                    else:
                         try:
                             data = json.loads(message)
                         except ValueError:
