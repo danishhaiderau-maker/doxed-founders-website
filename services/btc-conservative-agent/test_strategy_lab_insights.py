@@ -366,3 +366,40 @@ def test_fly_data_joins_win_rate_from_export():
     tile = data["tiles"][0]
     assert tile["win_pct"] == 50.0 and tile["accepting"] is True and tile["corrected_verdict"] == "NOT_SIGNIFICANT"
     assert data["ai_success_stale"] is False and data["open_positions"] == 1
+
+
+def test_fly_data_names_the_source_of_every_null_tile_field():
+    status = {"active_tiles": [{"lane": "FAMILY_A"}, {"lane": "FAMILY_XVENUE_LEAD_60S"}, {"lane": "FAMILY_Z"}],
+              "strategy_progress": {"combo_lane_execution": {"FAMILY_A": {"accepting": True, "completed": 3}}},
+              "collection": {"xvl_evaluator": {"lanes": {"FAMILY_XVENUE_LEAD_60S": {
+                  "paper": {"attempts": 300, "orders_eligible": 182, "submissions_last_hour": 1, "busy": False}}}}}}
+    tiles = {t["lane"]: t for t in I._fly_data(status, None, time.time(), "STALE")["tiles"]}
+    assert tiles["FAMILY_A"]["execution_source"] == "strategy_progress.combo_lane_execution"
+    xvl = tiles["FAMILY_XVENUE_LEAD_60S"]
+    assert xvl["execution_source"] == "collection.xvl_evaluator.paper"
+    assert xvl["paper_attempts"] == 300 and xvl["orders_eligible"] == 182 and xvl["worker_busy"] is False
+    assert tiles["FAMILY_Z"]["execution_source"] == "NOT_REPORTED_BY_FLY"
+    assert all(t["win_pct"] is None and t["win_pct_source"].startswith("analyzer export STALE")
+               for t in tiles.values())
+    fresh = I._fly_data(status, [{"research_lane": "FAMILY_A", "win_rate": 0.5}], time.time(), "OK")["tiles"]
+    assert fresh[1]["win_pct_source"] == "lane not in analyzer export tile_stats"
+
+
+CURRENT_WALL = """\
+2026-10-01T21:12:36Z | XVL-TILE3 (xvl-takeover) QUEUED, NOT claiming slot: taken over PR #267
+2026-10-02T22:33:13Z | SELFAWARE-RED-TRIAGE | CLAIM (laptop-only; no Fly deploy): triage 5 RED alerts | CLAIMED
+2026-10-02T23:00:00Z | BATCH-X | QUEUED for the post-freeze slot | QUEUED
+2026-10-02T23:10:00Z | SECTION-CONTRACTS (5412bd97) | DONE (laptop-only) | DONE
+2026-10-03T00:26:26Z | COMPLETION-AUDIT to STORAGE-DEDUPE | INFO: analyzer pass running slowly | INFO
+"""
+
+
+def test_parse_wall_reads_current_pipe_format_and_ages_out_stale_queue():
+    q = I.parse_wall(CURRENT_WALL.splitlines(), now=I._ts("2026-10-03T00:30:00Z"))
+    assert q["entries_parsed"] == 5 and q["latest_entry_at"] == "2026-10-03T00:26:26Z"
+    assert [e["task"] for e in q["queue"]] == ["BATCH-X"]
+    assert [e["task"] for e in q["stale_queue"]] == ["XVL-TILE3"]
+    assert [e["task"] for e in q["recent_done"]] == ["SECTION-CONTRACTS"]
+    done = CURRENT_WALL + "2026-10-03T00:40:00Z | BATCH-X | merged and deployed | DONE\n"
+    q2 = I.parse_wall(done.splitlines(), now=I._ts("2026-10-03T00:41:00Z"))
+    assert q2["queue"] == [] and "COMPLETION-AUDIT" not in {e["task"] for e in q2["queue"]}

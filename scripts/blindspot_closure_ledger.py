@@ -37,6 +37,12 @@ SOURCES = {
     "a9001_insights": "http://127.0.0.1:9001/api/insights?live_parity=0",
     "w9011": "http://127.0.0.1:9011/api/system-health",
     "sa9021": "http://127.0.0.1:9021/api/selfaware/health",
+    "a9001_export": "http://127.0.0.1:9001/api/export/latest",
+    "a9001_dhr": "http://127.0.0.1:9001/api/report/data_health_report.json",
+    "sa9021_receipts": "http://127.0.0.1:9021/api/selfaware/receipts",
+    "sa9021_fields": "http://127.0.0.1:9021/api/selfaware/data/fields?watched=1",
+    "sa9021_history": "http://127.0.0.1:9021/api/selfaware/findings/history?limit=5",
+    "sa9021_changes": "http://127.0.0.1:9021/api/selfaware/changes?limit=20",
 }
 CAPTURE_NAMES = {
     "fly_health": "health.json", "fly_ready": "ready.json", "fly_status": "api_status.json",
@@ -48,8 +54,18 @@ CAPTURE_NAMES = {
 
 OPEN, PROG, QUEUED, CLOSED = "OPEN", "IN PROGRESS", "QUEUED-POST-FREEZE", "CLOSED-VERIFIED-LIVE"
 CLOSED_AUDIT = "CLOSED-AUDIT3 (not re-verified here)"
+# Triage outcomes. Each still needs its live precondition (fix PR is a draft + self-aware declares the
+# blocker; the item is observed live; the owner is a live worker) or it falls back to OPEN.
+POSTF, NEEDS_DANISH, OWNED = "POST_FREEZE", "NEEDS_DANISH", "OWNED_BY"
+TRIAGED = (POSTF, NEEDS_DANISH, OWNED)
+STATUS_ORDER = (OPEN, PROG, QUEUED, POSTF, NEEDS_DANISH, OWNED, CLOSED)
+REPO_URL = "https://github.com/danishhaiderau-maker/doxed-founders-website"
+TRACKED_PRS = (306, 317, 345, 351, 365)
+TRIAGE_IDS = ("F44", "F79", "L9", "L10", "L14", "L25", "L35", "L72", "L73", "L74", "C17", "C18",
+              "17", "18", "20", "21", "29", "55", "57", "63", "69", "71", "75", "76", "77", "78")
 PR_LAPTOP, PR_MONITOR, PR_FLY = "{PR_LAPTOP}", "{PR_MONITOR}", "{PR_FLY}"
 PR_LAPTOP2, PR_MONITOR2 = "{PR_LAPTOP2}", "{PR_MONITOR2}"
+PR_A = "{PR_A}"
 MONITOR_CODE_REV = "70f1a5e94"  # #310 squash: monitor runs before it executed the old rules
 MONITOR_ROUND2_REV = "d6798e6c0"  # #322 squash: order-book / relay-cache / write-failure / restart / deploy rules
 PR_POSTFREEZE = "post-freeze backlog"
@@ -123,6 +139,17 @@ def _gh_live(live: dict) -> None:
         live["gh_monitor2"] = gh_monitor_run(MONITOR_ROUND2_REV)
     live["gh_laptop_tests"] = gh_latest_run("laptop-tests.yml")
     live["gh_secret_history"] = gh_latest_run("secret-scan-history.yml")
+    live["gh_prs"] = gh_prs(TRACKED_PRS)
+
+
+def gh_prs(numbers) -> dict[str, dict]:
+    out = {}
+    for n in numbers:
+        try:
+            out[str(n)] = json.loads(_gh("pr", "view", str(n), "--json", "number,isDraft,state,baseRefName,title"))
+        except Exception as exc:  # missing evidence, never closure
+            out[str(n)] = {"error": type(exc).__name__}
+    return out
 
 
 def load_live(live_dir: Path) -> dict:
@@ -442,6 +469,150 @@ def v_reports_ok_now(live: dict) -> tuple[bool, str]:
     return ok is True, f":9001/api/status.required_reports_ok={ok} failures={dig(live, 'a9001_status', 'required_report_failures')}"
 
 
+# ---------------------------------------------------------------- triage verifiers (BLINDSPOT-OWNER)
+def _finding(live: dict, fid: str) -> dict | None:
+    for f in dig(live, "sa9021", "findings", default=[]) or []:
+        if isinstance(f, dict) and f.get("id") == fid:
+            return f
+    return None
+
+
+def v_post_freeze(prs: tuple[int, ...], blocker: str) -> Verifier:
+    """POST_FREEZE holds only while every fix PR is an open draft and :9021 declares the blocker with an ETA."""
+    def run(live: dict) -> tuple[bool, str]:
+        states = []
+        ok = True
+        for n in prs:
+            pr = dig(live, "gh_prs", str(n), default={}) or {}
+            draft = pr.get("state") == "OPEN" and pr.get("isDraft") is True
+            ok &= draft
+            states.append(f"#{n} {pr.get('state')}{' draft' if pr.get('isDraft') else ''}")
+        f = _finding(live, "selfaware.expected_blockers") or {}
+        row = next((b for b in dig(f, "evidence", "blockers", default=[]) or [] if b.get("id") == blocker), None)
+        ok &= row is not None and row.get("overdue") is False
+        decl = f"{blocker} eta {row.get('eta')}" if row else f"{blocker} NOT declared"
+        return ok, f"gh {', '.join(states)}; :9021 selfaware.expected_blockers[{f.get('severity')}] {decl}"
+    return run
+
+
+def v_adhoc(kind: str, needle: str, *, present: bool) -> Verifier:
+    def run(live: dict) -> tuple[bool, str]:
+        c = check(live, "laptop.adhoc_processes")
+        if c is None or not has_feature(live, "adhoc_visibility"):
+            return False, ":9011 laptop.adhoc_processes absent"
+        rows = dig(c, "observed_fields", kind, default=[]) or []
+        found = any(needle == str(r.get("port") if kind == "listeners" else r.get("script")) for r in rows)
+        return found == present, f":9011 laptop.adhoc_processes.{kind}={json.dumps(rows)[:120]}"
+    return run
+
+
+def v_cycle_phase(live: dict) -> tuple[bool, str]:
+    c = check(live, "analyzer.cycle") or {}
+    obs = str(c.get("observed") or "")
+    ok = "phase=" in obs or "stopReason" in obs or "last completed" in obs
+    return ok and c.get("status") is not None, f":9011 analyzer.cycle[{c.get('status')}] {obs[:110]!r}"
+
+
+def v_promotion_lock(live: dict) -> tuple[bool, str]:
+    ok_cycle, ev_cycle = v_cycle_phase(live)
+    lock = check(live, "laptop.puller_lock") or {}
+    fields = lock.get("observed_fields") or {}
+    ok = ok_cycle and "lock_holder" in fields and "last_attempt_result" in fields
+    return ok, f"{ev_cycle}; :9011 laptop.puller_lock.lock_holder={fields.get('lock_holder')} result={fields.get('last_attempt_result')}"
+
+
+def v_launcher(live: dict) -> tuple[bool, str]:
+    c = check(live, "analyzer.api") or {}
+    f = c.get("observed_fields") or {}
+    return ("health_ok" in f and "status_ok" in f), (
+        f":9011 analyzer.api[{c.get('status')}] health_ok={f.get('health_ok')} status_ok={f.get('status_ok')}")
+
+
+def v_heavy_cache(live: dict) -> tuple[bool, str]:
+    h = dig(live, "a9001_export", "summary", "strategy_lab", "heavy")
+    ok = isinstance(h, dict) and bool(h.get("computed_at")) and bool(h.get("source"))
+    return ok, f":9001/api/export/latest summary.strategy_lab.heavy={json.dumps(h)[:110]}"
+
+
+def v_proof(live: dict) -> tuple[bool, str]:
+    rec = dig(live, "sa9021_receipts", "proof", default={}) or {}
+    res = dig(live, "w9011", "proof", "result")
+    ok = bool(rec.get("receipt")) and res is not None
+    return ok, f":9021 receipts.proof.receipt={Path(str(rec.get('receipt'))).name} :9011 proof.result={res}"
+
+
+def v_dead_input_watch(live: dict) -> tuple[bool, str]:
+    rows = dig(live, "sa9021_fields", "fields", default=[]) or []
+    live_inputs = [r for r in rows if r.get("stream") == "ai_calls" and str(r.get("field", "")).startswith("context.")
+                   and r.get("watched")]
+    names = [f"{r['field']}={r.get('status')}" for r in live_inputs]
+    return bool(live_inputs), f":9021 data/fields watched live-prompt inputs: {names}"
+
+
+def v_findings_history(live: dict) -> tuple[bool, str]:
+    ev = dig(live, "sa9021_history", "events", default=[]) or []
+    kinds = sorted({e.get("kind") for e in ev if isinstance(e, dict)})
+    return bool(ev) and bool(set(kinds) & {"OPENED", "CLEARED", "CHANGED"}), (
+        f":9021 findings/history events={len(ev)} kinds={kinds} latest={ev[0].get('at') if ev else None}")
+
+
+def v_exports_http(live: dict) -> tuple[bool, str]:
+    exp = live.get("a9001_export") or {}
+    dhr = live.get("a9001_dhr") or {}
+    ok = bool(exp.get("summary")) and bool(dhr.get("generated_ts"))
+    return ok, f":9001/api/export/latest summary={bool(exp.get('summary'))}; /api/report/data_health_report.json generated_ts={dhr.get('generated_ts')}"
+
+
+def v_changes_timeline(live: dict) -> tuple[bool, str]:
+    doc = live.get("sa9021_changes") or {}
+    src = doc.get("sources") or {}
+    ok = doc.get("schema") == "self_aware_changes_v1" and bool(doc.get("events")) and all(
+        s.get("status") == "OK" for s in src.values())
+    return ok, f":9021 /api/selfaware/changes total={doc.get('total')} kinds={doc.get('kinds')} sources={ {k: v.get('status') for k, v in src.items()} }"
+
+
+def v_insights_tiles(live: dict) -> tuple[bool, str]:
+    data = dig(live, "a9001_insights", "components", "fly_bot", "data", default={}) or {}
+    tiles = data.get("tiles") or []
+    ok = bool(tiles) and all(t.get("execution_source") and t.get("win_pct_source") for t in tiles)
+    return ok, f":9001 insights fly_bot.tiles={len(tiles)} sources={[(t.get('execution_source'), t.get('win_pct_source')) for t in tiles][:2]}"
+
+
+def v_deploy_queue(live: dict) -> tuple[bool, str]:
+    d = dig(live, "a9001_insights", "components", "deploy_queue", "data", default={}) or {}
+    age = d.get("latest_entry_age_sec")
+    ok = "stale_queue" in d and isinstance(age, (int, float)) and age < 6 * 3600
+    return ok, (f":9001 insights deploy_queue latest_entry_at={d.get('latest_entry_at')} age={age} "
+                f"queue={len(d.get('queue') or [])} stale_queue={len(d.get('stale_queue') or [])}")
+
+
+_MOJIBAKE = ("\u0393\u00c7", "\u00e2\u20ac", "\u00c3")
+
+
+def v_deploy_receipts(live: dict) -> tuple[bool, str]:
+    runs = dig(live, "sa9021_receipts", "deploys", default=[]) or []
+    bad = [r.get("databaseId") for r in runs if any(m in str(r.get("displayTitle") or "") for m in _MOJIBAKE)]
+    stuck = [r.get("databaseId") for r in runs[:1] if r.get("status") != "completed"]
+    return bool(runs) and not bad and not stuck, f":9021 receipts.deploys={len(runs)} mojibake={bad} newest_not_completed={stuck}"
+
+
+def v_agents_roster(live: dict) -> tuple[bool, str]:
+    text = (Path(__file__).resolve().parents[1] / "AGENTS.md").read_text(encoding="utf-8")
+    lanes = [str(t.get("lane") or "") for t in dig(live, "fly_status", "active_tiles", default=[]) or []
+             if isinstance(t, dict)]
+    missing = [lane for lane in lanes if f"`{lane}`" not in text]
+    return bool(lanes) and all(lanes) and not missing, (
+        f"Fly /api/status.active_tiles={lanes}; missing from AGENTS.md: {missing}")
+
+
+def v_cycle_under_freshness(live: dict) -> tuple[bool, str]:
+    c = check(live, "analyzer.generation") or {}
+    obs = str(c.get("observed") or "")
+    m = re.search(r"last completed generation (\d+)m ago", obs)
+    ok = c.get("status") == "GREEN" and m is not None and int(m.group(1)) < 45
+    return ok, f":9011 analyzer.generation[{c.get('status')}] {obs[:100]!r}"
+
+
 # ---------------------------------------------------------------- plan
 # id -> (owner, pr, planned status, plan, verifier or None)
 P = dict
@@ -479,7 +650,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "F41": ("FLY runtime", PR_POSTFREEZE, QUEUED, "provisional merge invisible; unassigned", None),
     "F42": ("FLY runtime", PR_POSTFREEZE, QUEUED, "admin-pause finalizer response-only; low", None),
     "F43": ("FLY runtime", PR_POSTFREEZE, QUEUED, "ACK seq exposed via laptop.pull_ack; research-segment server error counter needs a Fly field", None),
-    "F44": ("FLY-LOCKS", "#306 (proposed)", OPEN, "HTTP thread-cap saturation; propose to FLY-LOCKS runtime_telemetry", None),
+    "F44": ("BLINDSPOT-OWNER", "#306 + #365", POSTF, "HTTP thread-cap saturation: #306 runtime_telemetry http_handlers (active per cap) + #365 rejected_total/rejected_by_cap; Fly, #351 steps 2+13", v_post_freeze((306, 365), "BLINDSPOT-F44-HTTP-SATURATION")),
     # sidecars
     "F45": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor cross_venue_health rule", v_monitor_rules),
     "F46": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor market_context rule", v_monitor_rules),
@@ -512,7 +683,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "F75": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "GH monitor emergency_wal != CURRENT finding", v_monitor_rules),
     "F77": ("FLY runtime", PR_POSTFREEZE, QUEUED, "control-action audit endpoint (rank 27); unassigned", None),
     "F78": ("FLY runtime", PR_POSTFREEZE, QUEUED, "effective-config snapshot (rank 27); unassigned", None),
-    "F79": ("FLY-LOCKS", "#306 (proposed)", OPEN, "per-subsystem swallowed_errors counter (rank 26); not in #306 file list", None),
+    "F79": ("BLINDSPOT-OWNER", "#317", POSTF, "swallowed-error counters = #317 thread_health_v1 failure counters; Fly, #351 step 3", v_post_freeze((317,), "BLINDSPOT-F79-SWALLOWED-ERRORS")),
     # laptop
     "L1": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "laptop.supervisor by scheduled-task + process check, not log grep", needs("supervisor_process_check", v_check_present("laptop.supervisor"))),
     "L2": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "pull status keeps seqs; exitCode!=0 surfaced", needs("pull_ack_no_none_green", v_pull_ack)),
@@ -522,12 +693,12 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L6": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "pull_ack consistent with monitor SEGMENT_ACK_STALE", needs("pull_ack_no_none_green", v_pull_ack)),
     "L7": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, ":9011 analyzer.parity_checker (verdict, age, scan lock hold, hash-cache timing)", needs("parity_checker", v_check_present("analyzer.parity_checker"))),
     "L8": ("ANALYZER-FIDELITY", "#304/#307", PROG, "cycle history + consecutive_failures (rank 20)", None),
-    "L9": ("ANALYZER-FIDELITY", "-", OPEN, "promotion lock holder/exit 3 surfaced (rank 20)", None),
-    "L10": ("ANALYZER-FIDELITY", "-", OPEN, "migration log-only (rank 20)", None),
+    "L9": ("BLINDSPOT-OWNER", "-", OPEN, "promotion exit 3 / lock holder surfaced: cycle status stopReason+promotionLevel -> :9011 analyzer.cycle; lock holder -> laptop.puller_lock", v_promotion_lock),
+    "L10": ("BLINDSPOT-OWNER", "-", OPEN, "migration no longer log-only: MIGRATION_FAILED exits 4 into cycle stopReason; phase=MIGRATION visible in :9011 analyzer.cycle", v_cycle_phase),
     "L11": ("ANALYZER-FIDELITY", "#304", PROG, "inline auto-FF observed", None),
     "L12": ("ANALYZER-FIDELITY", "#304", PROG, "REFUSED_* auto-ff receipts not surfaced", None),
     "L13": ("ANALYZER-FIDELITY + BLINDSPOT-CLOSE", f"#304 + {PR_LAPTOP}", PROG, "generation receipt (#304) + analyzer.reports from :9001/api/status", needs("analyzer_reports", v_analyzer_reports)),
-    "L14": ("ANALYZER-9001", "-", OPEN, "launcher stdout only; low", None),
+    "L14": ("BLINDSPOT-OWNER", "-", OPEN, "launcher outcome visible as :9011 analyzer.api health_ok/status_ok", v_launcher),
     "L15": ("ANALYZER-FIDELITY + BLINDSPOT-CLOSE", f"#304 + {PR_LAPTOP}", PROG, "#304 fixes POLICY_ID_SPEC_COLLISION; watcher analyzer.reports RED when required_reports_ok=false >1 generation", needs("analyzer_reports", v_analyzer_reports)),
     "L16": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "analyzer.api not GREEN when /api/status.ok=false", needs("analyzer_reports", v_analyzer_reports)),
     "L17": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "parse string revision_parity; compare generation rev to Fly rev", needs("analyzer_parity_strict", v_analyzer_api_parity)),
@@ -536,7 +707,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L20": ("ANALYZER-9001", "#302", PROG, "dashboard code refresh", None),
     "L23": ("ANALYZER-FIDELITY", "#307", PROG, "export swallow", None),
     "L24": ("ANALYZER-FIDELITY", "#307", PROG, "engine swallow", None),
-    "L25": ("ANALYZER-FIDELITY", "-", OPEN, "heavy cache invisible", None),
+    "L25": ("BLINDSPOT-OWNER", "-", OPEN, "heavy cache visible in export summary.strategy_lab.heavy", v_heavy_cache),
     "L26": ("ANALYZER-FIDELITY + BLINDSPOT-CLOSE", f"#307 + {PR_LAPTOP}", PROG, "#307 fixes stream studies; watcher streams.analysed_freshness detects stale-content ANALYSED", needs("streams_analysed_freshness", v_check_present("streams.analysed_freshness"))),
     "L27": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "streams.analysed_freshness reads /api/streams/health content_lag_sec + not_fully_analysed", needs("streams_analysed_freshness", v_check_present("streams.analysed_freshness"))),
     "L28": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "insights transfer not OK with applied_seq=null", v_insights_transfer),
@@ -545,7 +716,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L32": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, "SYNC_HEARTBEAT_* critical -> :9011 laptop.chain_monitor RED", needs("chain_monitor_alerts", v_check_present("laptop.chain_monitor"))),
     "L33": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, "monitor warnings -> :9011 laptop.chain_monitor AMBER", needs("chain_monitor_alerts", v_check_present("laptop.chain_monitor"))),
     "L34": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "incident relay: stale report -> system_health_stale; deploy-aware maintenance; non-zero exit", needs("incident_stale_report", v_report_staleness)),
-    "L35": ("SELF-AWARE", "-", OPEN, "proof receipts in stale checkout (rank 28)", None),
+    "L35": ("BLINDSPOT-OWNER", "-", OPEN, "proof receipt path + verdict on :9021 receipts.proof and :9011 proof", v_proof),
     "L36": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "health-report staleness -> incident", needs("incident_stale_report", v_report_staleness)),
     "L37": ("BLINDSPOT-CLOSE", f"{PR_LAPTOP} + {PR_LAPTOP2}", PROG, "interim task defers only if supervisor ticked <15 min; decision file -> :9011 watcher.interim", needs("interim_status", v_check_status("watcher.interim", lambda c: c.get("status") == "GREEN", "interim decision fresh"))),
     "L38": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, ":9011 serves cache with age; live=1 single-flight background refresh", needs("cached_live_refresh", v_w9011_latency)),
@@ -570,9 +741,9 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "L69": ("SELF-AWARE", "#300", PROG, "freshness vs mirror head; Fly volume null GREEN", None),
     "L70": ("SELF-AWARE", "#300", PROG, "uptime interruptions disagree 9 vs 1", None),
     "L71": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "frozen legacy ACK watcher state reported as orphan", needs("missing_data_not_green", v_check_status("laptop.legacy_ack_watcher", lambda c: c.get("status") != "GREEN", "frozen orphan watcher reported"))),
-    "L72": ("Danish", "-", OPEN, "ad-hoc :7002 proxy: register or retire (now visible in :9011 laptop.adhoc_processes)", None),
-    "L73": ("Danish", "-", OPEN, "ad-hoc watch_queue.ps1: register or retire (now visible in :9011 laptop.adhoc_processes)", None),
-    "L74": ("Danish", "-", OPEN, "ad-hoc uptime_poll2 / :9097: register or retire (now visible in :9011 laptop.adhoc_processes)", None),
+    "L72": ("BLINDSPOT-OWNER", "-", NEEDS_DANISH, "ad-hoc :7002 fly-dashboard-proxy (from btc-v31-laptop-retire-wt). Default: retire it; the Fly dashboard is reachable directly", v_adhoc("listeners", "7002", present=True)),
+    "L73": ("BLINDSPOT-OWNER", "-", OPEN, "orphan watch_queue.ps1 (watched long-merged #262/#263, git fetch every 90s) retired", v_adhoc("scripts", "watch_queue.ps1", present=False)),
+    "L74": ("BLINDSPOT-OWNER", "-", OPEN, "ad-hoc :9097 http.server (tmp-alerts-history) retired; uptime_poll2 already gone", v_adhoc("listeners", "9097", present=False)),
     # monitoring / CI
     "C1": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "heartbeat variable + monitor_schedule_gap; crash/cache-loss never closes incidents", v_monitor_heartbeat),
     "C3": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, ":9011 fly.revision compares Fly git_rev to origin/master (master ahead = deploy queued)", needs("revision_master_ahead", v_check_status("fly.revision", lambda c: "master=" in str(c.get("observed")) and "master=?" not in str(c.get("observed")), "master compared"))),
@@ -585,8 +756,8 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "C14": ("DATA-RETENTION", "#303", QUEUED, "prune dry_run until #303", None),
     "C15": ("BLINDSPOT-CLOSE", PR_MONITOR2, PROG, "GH monitor deploy_failed rule on last finished guarded deploy", v_monitor_rules2),
     "C16": ("BLINDSPOT-CLOSE", f"{PR_LAPTOP} + {PR_MONITOR}", PROG, "laptop-tests workflow; head commits without [skip ci], squash subject with [skip ci]", v_laptop_tests_ci),
-    "C17": ("COORDINATOR", "-", OPEN, "production gate ignores bot-code pushes", None),
-    "C18": ("Danish", "-", OPEN, "auto-deploy disabled_manually (intentional?)", None),
+    "C17": ("BLINDSPOT-OWNER", "-", NEEDS_DANISH, "master has no branch protection/rulesets, so bitfinex-production-gate is advisory. Default: make bitfinex-policy a required status check (not wider push paths)", None),
+    "C18": ("BLINDSPOT-OWNER", "-", NEEDS_DANISH, "Fly auto-deploy disabled_manually. Default: keep it disabled; deploy only via the guarded fly-bot-deploy workflow per #351", None),
     "C19": ("BLINDSPOT-CLOSE", PR_MONITOR2, PROG, "daily full-history gitleaks (secret-scan-history.yml) with fingerprinted .gitleaksignore", v_secret_history),
     "C20": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, ":9011 coordination.wall validates line format + last-entry age", needs("wall_integrity", v_check_present("coordination.wall"))),
     "C21": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "monitor heartbeat watched by monitor itself + laptop", v_monitor_heartbeat),
@@ -596,11 +767,11 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
 # items get new owners; IN PROGRESS / QUEUED / CLOSED keep the audit's owner.
 GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "13": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, "promotion/parity lock contention visible as :9011 laptop.puller_lock (holder, hold time, refused pulls); cycle-side fix stays ANALYZER-FIDELITY", needs("puller_lock", v_field_in_check("laptop.puller_lock", "lock_holder"))),
-    "17": ("ANALYZER-FIDELITY", "-", OPEN, "cycle length vs 45-min freshness", None),
-    "18": ("ANALYZER-FIDELITY", "-", OPEN, "multiverse HEALTH_ONLY", None),
-    "20": ("ANALYZER-FIDELITY", "-", OPEN, "signal_replay completion", None),
-    "21": ("ANALYZER-FIDELITY", "-", OPEN, "PIPELINE_ERROR race / capacity censoring", None),
-    "29": ("AI-PLAN", "-", OPEN, "dead-input detector watches challenger fields only", None),
+    "17": ("BLINDSPOT-OWNER", "-", OPEN, "analyzer cycle vs 45-min freshness: closes when the latest generation completed <45 min ago and is GREEN", v_cycle_under_freshness),
+    "18": ("BLINDSPOT-OWNER", "#345", POSTF, "multiverse HEALTH_ONLY -> analysed rows ship in #345 (Fly); visible now as :9011 streams.analysed_freshness", v_post_freeze((345,), "BLINDSPOT-GAP18-MULTIVERSE-HEALTH-ONLY")),
+    "20": ("BLINDSPOT-OWNER", "#365", POSTF, "267/294 executed replays INCOMPLETE_EXECUTED_POST_EXIT: oldest-first eviction at MAX_REPLAY_BUFFERS=100; #365 evicts shadows first + replay_buffers status (#351 step 13)", v_post_freeze((365,), "BLINDSPOT-GAP20-REPLAY-EVICTION")),
+    "21": ("BLINDSPOT-OWNER", "#365", POSTF, "PIPELINE_ERROR dict-size race still fires (2026-10-02T15:18:50Z) with no site; #365 records crash site + traceback; capacity censoring 0 blocks/24h", v_post_freeze((365,), "BLINDSPOT-GAP21-PIPELINE-ERROR-SITE")),
+    "29": ("BLINDSPOT-OWNER", "-", OPEN, "dead-input detector now watches live-prompt ai_calls.context inputs (delta_change DEAD_ZERO alarms; fix T-DELTA-CHANGE)", v_dead_input_watch),
     "33": ("FLY runtime", PR_POSTFREEZE, QUEUED, "Bybit funding constant", None),
     "38": ("FLY runtime", PR_POSTFREEZE, QUEUED, "clock skew", None),
     "39": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "lifecycle blocker_counts / emergency WAL rule; crash dumps OPEN", v_monitor_rules),
@@ -612,19 +783,19 @@ GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "50": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, "AMBER acks with expiry (health/acks.json); RED never ackable", needs("amber_acks", v_acks_supported)),
     "51": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, ":9011 watcher.flapping (>=4 changes in 12 ticks)", needs("flapping", v_check_present("watcher.flapping"))),
     "54": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "watcher parses revision lag / receipt age (source fix = ANALYZER-FIDELITY)", needs("analyzer_parity_strict", v_analyzer_api_parity)),
-    "55": ("SECTION-CONTRACTS", "-", OPEN, "insights tile fields null (content correctness; handed 13:14Z)", None),
+    "55": ("BLINDSPOT-OWNER", PR_A, OPEN, "insights fly_bot tiles: execution falls back to xvl_evaluator paper stats; every null names its source", v_insights_tiles),
     "56": ("BLINDSPOT-CLOSE", PR_LAPTOP, PROG, "puller seqs preserved; insights transfer honest", needs("pull_ack_no_none_green", v_pull_ack)),
-    "57": ("SECTION-CONTRACTS", "-", OPEN, "deploy_queue stale WALL scrape (content correctness; handed 13:14Z)", None),
+    "57": ("BLINDSPOT-OWNER", PR_A, OPEN, "deploy_queue parses the current WALL pipe format; terminal states pop; >24h entries move to stale_queue", v_deploy_queue),
     "62": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "ai_provider_health.cost_usd_24h / last_call_cost_usd", v_field("fly_status", "ai_provider_health", "last_call_cost_usd")),
-    "63": ("COORDINATOR", "-", OPEN, "Fly/Railway spend, Neon forecast", None),
-    "69": ("SECTION-CONTRACTS", "-", OPEN, "deploy in_progress after completion (content correctness; handed 13:14Z)", None),
+    "63": ("BLINDSPOT-OWNER", "-", NEEDS_DANISH, "Neon forecast live in :9011 neon.usage; Fly/Railway spend needs billing access. Default: add only if read-only billing tokens are provided", v_check_present("neon.usage")),
+    "69": ("BLINDSPOT-OWNER", PR_A, OPEN, "deploy receipt completes (stuck fixed earlier); gh output decoded as UTF-8 so titles carry no mojibake", v_deploy_receipts),
     "70": ("BLINDSPOT-CLOSE", PR_MONITOR, PROG, "laptop-tests workflow gives PR checks; results API still OPEN", v_laptop_tests_ci),
-    "71": ("SELF-AWARE", "-", OPEN, "/changes timeline", None),
+    "71": ("BLINDSPOT-OWNER", PR_A, OPEN, "GET :9021 /api/selfaware/changes: deploys, fast-forwards, manual, Fly pause/revision/tiles/arm, AI model/prompt, epochs", v_changes_timeline),
     "73": ("SELF-AWARE + BLINDSPOT-CLOSE", f"#300 + {PR_LAPTOP}", PROG, "unified custody (puller seqs fixed here)", v_selfaware_custody),
-    "75": ("SELF-AWARE", "-", OPEN, "incident timeline", None),
-    "76": ("ANALYZER-FIDELITY", "-", OPEN, "exports over HTTP", None),
-    "77": ("SECTION-CONTRACTS", "-", OPEN, "AGENTS.md roster vs live registry drift (content correctness; handed 13:14Z)", None),
-    "78": ("COORDINATOR", "-", OPEN, "stale canonical checkout btc-v31-current (d3544f9f7)", None),
+    "75": ("BLINDSPOT-OWNER", "-", OPEN, "incident timeline = :9021 findings/history OPENED/CLEARED events", v_findings_history),
+    "76": ("BLINDSPOT-OWNER", "-", OPEN, "exports over HTTP: :9001 /api/export/latest + /api/report/<name>.json", v_exports_http),
+    "77": ("BLINDSPOT-OWNER", "-", OPEN, "every live Fly tile lane is named in AGENTS.md (#360 retire updates both together)", v_agents_roster),
+    "78": ("BLINDSPOT-OWNER", "-", NEEDS_DANISH, "btc-v31-current is d3544f9f7 with ~1635 dirty paths; :9021 receipts.revisions pins what runs. Default: keep it as the diagnostics/WALL folder only; run code from master worktrees", v_field("sa9021_receipts", "revisions", "self_aware")),
     "79": ("ANALYZER-FIDELITY", "#307", PROG, "EXPORT_README (#307); PREREGISTERED-HYPOTHESES still absent", None),
     "80": ("BLINDSPOT-CLOSE", PR_MONITOR2, PROG, "daily full-history gitleaks (secret-scan-history.yml)", v_secret_history),
     # Â§4.3 contradictions
@@ -642,7 +813,7 @@ EXTRA = {
     # Danish's directive items and trace-audit items with no AUDIT-3 row id
     "T-REPORTS-OK": ("ANALYZER-FIDELITY", "#304", PROG, "required analyzer reports actually pass (root fix)", v_reports_ok_now),
     "T-TOGGLES": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "per-tile toggle state in public /api/status", v_toggles),
-    "T-DELTA-CHANGE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test, ships post-freeze", None),
+    "T-DELTA-CHANGE": ("BLINDSPOT-OWNER", "#317", POSTF, "update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test in #317, ships post-freeze", v_post_freeze((317,), "T-DELTA-CHANGE")),
     "T-RELAY-GATE": ("BLINDSPOT-CLOSE", PR_FLY, QUEUED, "arming refused while stale-owner/pre-arming relay events unquarantined (readiness gate)", None),
     "T-TIERA-API": ("ANALYZER-FIDELITY", "#307", PROG, "Tier A promotion visible via storage.tier_a", v_check_present("storage.tier_a")),
 }
@@ -687,7 +858,11 @@ def resolve(plan: tuple, live: dict | None, prs: dict[str, str]) -> dict:
             passed, evidence = verifier(live)
         except Exception as exc:  # broken verifier is never closure
             passed, evidence = False, f"verifier error {type(exc).__name__}"
-        if passed:
+        if status in TRIAGED or status.startswith(OWNED):
+            if not passed:
+                evidence = f"precondition for {status} failed -> OPEN; " + evidence
+                status = OPEN
+        elif passed:
             status = CLOSED
     return {"owner": owner, "pr": pr, "status": status, "plan": note, "evidence": evidence,
             "verifier": verifier is not None}
@@ -744,22 +919,34 @@ def build(audit_text: str, live: dict | None, prs: dict[str, str], baseline: dic
         "",
         "## Counts",
         "",
-        "| Scope | Items | OPEN | IN PROGRESS | QUEUED-POST-FREEZE | CLOSED-VERIFIED-LIVE |",
-        "|---|---|---|---|---|---|",
+        "| Scope | Items | " + " | ".join(STATUS_ORDER) + " |",
+        "|---|---|" + "---|" * len(STATUS_ORDER),
     ]
     for label, items in (("Component rows (BLIND/PARTIAL)", comp),
                          ("Earlier gaps not closed (incl. Â§4.3 contradictions)",
                           [g for g in gap_out if not g["audit"].upper().startswith("CLOSED")]),
                          ("Directive / trace items", extra_out), ("**Total tracked**", all_items)):
         c = counts(items)
-        lines.append(f"| {label} | {len(items)} | {c[OPEN]} | {c[PROG]} | {c[QUEUED]} | {c[CLOSED]} |")
+        lines.append(f"| {label} | {len(items)} | " + " | ".join(str(c[s]) for s in STATUS_ORDER) + " |")
+    by_id = {i["id"]: i for i in comp + gap_out}
+    triage = [by_id[t] for t in TRIAGE_IDS if t in by_id]
+    if triage:
+        ct = counts(triage)
+        lines += ["", f"## BLINDSPOT-OWNER triage of the {len(TRIAGE_IDS)} items open on 2026-10-03", "",
+                  "| Final state | Count | Items |", "|---|---|---|"]
+        for s in STATUS_ORDER:
+            if ct[s]:
+                lines.append(f"| {s} | {ct[s]} | {', '.join(i['id'] for i in triage if i['status'] == s)} |")
+        lines += ["", "| Item | State | PR | Plan / recommended default | Live evidence |", "|---|---|---|---|---|"]
+        for i in triage:
+            lines.append(f"| {i['id']} | **{i['status']}** | {i['pr']} | {md_escape(i['plan'])} | {md_escape(i['evidence'])} |")
     a = Counter(r["audit"] for r in rows)
     lines += ["", f"Audit table parse: {len(rows)} components = FULL {a['FULL']} / PARTIAL {a['PARTIAL']} / BLIND {a['BLIND']} "
               "(the audit headline states 35/93/46; its laptop sub-total 13/43/18 does not match its own L-rows 15/36/23 â€” "
               "this ledger uses the row-level statuses)."]
     if baseline:
         lines += ["", "## Before / after", "", "| Status | Before (this ledger, 2026-10-02T10:55Z) | Now |", "|---|---|---|"]
-        for s in (OPEN, PROG, QUEUED, CLOSED):
+        for s in STATUS_ORDER:
             lines.append(f"| {s} | {baseline.get(s, 0)} | {c_all[s]} |")
     lines += ["", "## Component rows", "",
               "| Row | Component | Audit | Owner | PR | Status | Plan | Live evidence |", "|---|---|---|---|---|---|---|---|"]
@@ -791,6 +978,7 @@ def main() -> int:
     ap.add_argument("--pr-fly", default="#317")
     ap.add_argument("--pr-laptop2", default="#323")
     ap.add_argument("--pr-monitor2", default="#322")
+    ap.add_argument("--pr-a", default="-", help="BLINDSPOT-OWNER laptop PR")
     args = ap.parse_args()
     live = None
     if not args.no_live:
@@ -799,7 +987,7 @@ def main() -> int:
             live["_captured"] = Path(args.live_dir).name
     baseline = json.loads(Path(args.baseline_json).read_text()) if args.baseline_json else None
     prs = {PR_LAPTOP: args.pr_laptop, PR_MONITOR: args.pr_monitor, PR_FLY: args.pr_fly,
-           PR_LAPTOP2: args.pr_laptop2, PR_MONITOR2: args.pr_monitor2}
+           PR_LAPTOP2: args.pr_laptop2, PR_MONITOR2: args.pr_monitor2, PR_A: args.pr_a}
     text = build(Path(args.audit).read_text(encoding="utf-8"), live, prs, baseline)
     Path(args.out).write_text(text, encoding="utf-8")
     print(text.split("## Component rows")[0])

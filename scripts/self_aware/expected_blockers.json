@@ -1,0 +1,55 @@
+{
+  "schema": "selfaware_expected_blockers_v1",
+  "note": "Known gaps whose fix is written but cannot ship before a deploy window. Each entry must name its fix and an ETA; once the ETA passes the entry turns RED until it is re-triaged or removed.",
+  "blockers": [
+    {
+      "id": "BLINDSPOT-GAP20-REPLAY-EVICTION",
+      "ledger": "gap 20",
+      "reason": "executed signal_replay buffers are evicted oldest-first at MAX_REPLAY_BUFFERS=100 before the 120-min post-exit horizon (267/294 executed replays INCOMPLETE_EXECUTED_POST_EXIT)",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/365",
+      "deploy": "#351 step 13 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z"
+    },
+    {
+      "id": "BLINDSPOT-GAP21-PIPELINE-ERROR-SITE",
+      "ledger": "gap 21",
+      "reason": "PIPELINE_ERROR 'dictionary changed size during iteration' still fires on Fly with no crash site or traceback",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/365",
+      "deploy": "#351 step 13 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z"
+    },
+    {
+      "id": "BLINDSPOT-F44-HTTP-SATURATION",
+      "ledger": "F44",
+      "reason": "Fly dashboard HTTP handler caps have no active-handler or rejection counters",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/306 + https://github.com/danishhaiderau-maker/doxed-founders-website/pull/365",
+      "deploy": "#351 steps 2 and 13 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z"
+    },
+    {
+      "id": "BLINDSPOT-F79-SWALLOWED-ERRORS",
+      "ledger": "F79",
+      "reason": "Fly worker threads swallow exceptions without a counter",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/317",
+      "deploy": "#351 step 3 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z"
+    },
+    {
+      "id": "BLINDSPOT-GAP18-MULTIVERSE-HEALTH-ONLY",
+      "ledger": "gap 18",
+      "reason": "multiverse collection is HEALTH_ONLY: the analyzer gets health counters but not analysed rows",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/345",
+      "deploy": "#351 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z"
+    },
+    {
+      "id": "T-DELTA-CHANGE",
+      "ledger": "gap 29",
+      "reason": "ai_calls.context.delta_change is always 0.0 on Fly (dead AI input)",
+      "fix": "https://github.com/danishhaiderau-maker/doxed-founders-website/pull/317",
+      "deploy": "#351 step 3 (Fly, post-freeze)",
+      "eta": "2026-10-04T15:00:00Z",
+      "match": {"finding": "data.dead_fields", "observed_contains": "ai_calls.context.delta_change"}
+    }
+  ]
+}
