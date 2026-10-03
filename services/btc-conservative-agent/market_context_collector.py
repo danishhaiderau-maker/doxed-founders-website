@@ -476,6 +476,7 @@ class Collector:
         for feed, w in self.workers.items():
             feeds[feed] = {"connected": w.connected, "reconnects": w.reconnects,
                            "last_error": w.last_error, "last_msg_ts": self.routers[feed].last_msg_ts,
+                           "last_keepalive_ts": self.routers[feed].last_keepalive_ts,
                            "msgs": self.routers[feed].msgs}
         latest = self.rest.latest
         return {

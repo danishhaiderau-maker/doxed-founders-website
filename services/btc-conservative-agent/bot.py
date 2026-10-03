@@ -19,6 +19,7 @@ import data_epoch as _data_epoch
 import system_health_banner
 import system_health_alerts
 import runtime_uptime
+import monitor_api
 import uuid
 import requests
 import glob
@@ -119,6 +120,7 @@ from combo_pathway_config import (
     any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
+    tile_pre_registration_summary,
     combo_entry_mode,
     combo_lane_match_detail,
     combo_lane_matches,
@@ -31208,11 +31210,15 @@ _AI_DRAIN_POST_PATHS = {
 # leave open (still rate-limited) so the public dashboard / health checks work.
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
-    "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
+    "/api/ready", "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
     "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
-    "/debug_state", "/static/dashboard.js",
+    "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
 }
+# Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
+# that token is never accepted by _admin_authed() or any other route.
+_MONITOR_DIGEST_PATH = "/api/monitor/digest"
+_MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
 # Loopback still allowed so the local Flask test client and home operator
@@ -31486,6 +31492,8 @@ def _emergency_api_guard():
 
     # Read-only GETs are allowed without a token (still rate-limited above).
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
+        return None
+    if method == "GET" and path == _MONITOR_DIGEST_PATH:
         return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
@@ -32024,6 +32032,7 @@ scheduled_ai_cycle_state = {
     "last_poll_entry_eligible": None,
     "last_poll_reason": None,
     "skipped_busy": 0,
+    "completed_since_boot": 0,
 }
 process_lock = threading.RLock()
 positions_file_lock = threading.RLock()
@@ -42990,6 +42999,8 @@ _SYSTEM_HEALTH_LOCK = threading.Lock()
 # Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
 # watcher re-sends its alarm log after a restart, so nothing is written to disk.
 _SYSTEM_HEALTH_ALARMS = {"events": [], "statuses": {}, "statuses_at": None}
+# Memory-only; the next watcher tick refills it after a Fly restart.
+_MONITOR_DIGEST = {"digest": None, "received_ts": None}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -43045,7 +43056,10 @@ def system_health_report():
     if report is None:
         return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
     statuses = system_health_alerts.check_statuses(raw)
+    digest = monitor_api.sanitize_digest(raw.get("monitor_digest"))
     with _SYSTEM_HEALTH_LOCK:
+        if digest is not None:
+            _MONITOR_DIGEST.update(digest=digest, received_ts=time.time())
         _SYSTEM_HEALTH_REPORT["report"] = report
         _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
         _SYSTEM_HEALTH_REPORT["proof"] = runtime_uptime.sanitize_proof(raw.get("proof"))
@@ -43116,6 +43130,262 @@ def system_health_view():
     response = jsonify(out)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+_MONITOR_CACHE_SEC = 15.0
+_MONITOR_CACHE = {}
+_MONITOR_CACHE_LOCK = threading.Lock()
+
+
+def _monitor_response(payload: dict, max_bytes: int, status: int = 200):
+    response = jsonify(monitor_api.fit_to_budget(payload, max_bytes))
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _monitor_cached(key: str, build) -> dict:
+    """Bound load from several pollers: rebuild a monitor payload at most every 15 s."""
+    now = time.time()
+    with _MONITOR_CACHE_LOCK:
+        hit = _MONITOR_CACHE.get(key)
+        if hit and 0.0 <= now - hit[0] < _MONITOR_CACHE_SEC:
+            return copy.deepcopy(hit[1])
+    payload = build(now)
+    with _MONITOR_CACHE_LOCK:
+        _MONITOR_CACHE[key] = (now, payload)
+    return copy.deepcopy(payload)
+
+
+def _monitor_part(build):
+    try:
+        return build()
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _monitor_lane_rows(lanes) -> tuple[dict, float]:
+    """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger)."""
+    session_start = _showcase_trade_session_start()
+    rows = {lane: [] for lane in lanes}
+    if not trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC):
+        raise TimeoutError("monitor lanes timed out waiting for trade_lock")
+    try:
+        for row in trades:
+            if not isinstance(row, dict):
+                continue
+            bucket = rows.get(_normalize_lane_key(row.get("research_lane") or ""))
+            if bucket is None or (session_start and not _trade_row_in_session(row, session_start)):
+                continue
+            bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
+                           row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total")))
+    finally:
+        trade_lock.release()
+    shaped = {}
+    for lane, raw in rows.items():
+        shaped[lane] = []
+        for ts, net, margin, leverage, direction, slippage in raw:
+            try:
+                notional = float(margin or 0.0) * float(leverage or 0.0)
+            except (TypeError, ValueError):
+                notional = 0.0
+            shaped[lane].append({"close_ts": parse_ts(ts or "") or None, "net_pnl_usd": net,
+                                 "notional_usd": notional, "direction": direction,
+                                 "book_slippage_usd": slippage})
+    return shaped, session_start
+
+
+def _monitor_lanes_payload(now: float) -> dict:
+    manifest = active_tile_lifecycle_manifest()
+    lanes = [tile["lane"] for tile in manifest]
+    enabled = research_lane_enabled_map()
+    rows, session_start = _monitor_lane_rows(lanes)
+    xvl_lanes = _monitor_part(lambda: xvl_evaluator_snapshot().get("lanes") or {})
+    return {
+        "schema": monitor_api.LANES_SCHEMA,
+        "boot_id": BOT_INSTANCE_ID,
+        "generated_at": monitor_api.utc_iso(now),
+        "git_rev": _runtime_git_rev(),
+        "tile_registry_signature": active_tile_registry_signature(),
+        "scope": {
+            "active_lanes_only": True,
+            "session_start_at": monitor_api.utc_iso(session_start) if session_start else None,
+            "pnl": "booked net_pnl_usd under the bot's conservative fill model; never recomputed",
+            "drawdown": "peak-to-trough of cumulative booked net from 0, in close order",
+            "mean_bp": "sum(net) / sum(margin x leverage) x 1e4",
+        },
+        "lanes": [
+            {
+                "lane": tile["lane"],
+                "label": tile["label"],
+                "display_order": tile["display_order"],
+                "on": enabled.get(tile["lane"]),
+                **monitor_api.lane_stats(rows.get(tile["lane"]) or []),
+                "latency": monitor_api.latency_brief(
+                    ((xvl_lanes.get(tile["lane"]) or {}) if "error" not in xvl_lanes else {}).get("latency")
+                ),
+            }
+            for tile in manifest
+        ],
+    }
+
+
+def _monitor_relay_known(now: float, statuses: dict, failing: list) -> dict:
+    guard = _relay_delivery_guard.status(now)
+    railway = next((c for c in failing if c.get("id") == "railway.relay"), None)
+    return {
+        "fly_arming_block_reason": guard.get("arming_block_reason"),
+        "fly_outbox_pending_total": guard.get("pending_total"),
+        "fly_outbox_stale_owner_pending": guard.get("stale_owner_pending"),
+        "laptop_railway_relay_check": statuses.get("railway.relay"),
+        "laptop_bitfinex_exposure_check": statuses.get("bitfinex.exposure"),
+        "laptop_railway_relay_observed": (railway or {}).get("observed"),
+        "source": "Fly relay outbox guard + laptop watcher checks railway.relay / bitfinex.exposure",
+    }
+
+
+def _monitor_summary_payload(now: float) -> dict:
+    hb = state.get("last_heartbeat", last_heartbeat)
+    progress = _strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)
+    provider = progress.get("ai_provider") or {}
+    scheduled = progress.get("scheduled_ai_cycle") or {}
+    evidence = progress.get("post_ai_evidence") or {}
+    armable, arm_block_reason, _ = can_open_live_entry(require_armed=False, now=now)
+    relay_gate_block = _relay_delivery_guard.arming_block_reason(now)
+    if armable and relay_gate_block:
+        armable, arm_block_reason = False, relay_gate_block
+    xvl = _monitor_part(xvl_evaluator_snapshot)
+    cross_venue = _monitor_part(cross_venue_health_snapshot)
+    market_context = _monitor_part(market_context_health_snapshot)
+    collection = _monitor_part(lambda: research_collection_health(now))
+    transfer = _monitor_part(lambda: _volume_health_snapshot(now).get("transfer") or {})
+    epoch = _monitor_part(_data_epoch_public)
+    with _SYSTEM_HEALTH_LOCK:
+        report = copy.deepcopy(_SYSTEM_HEALTH_REPORT["report"])
+        statuses = dict(_SYSTEM_HEALTH_ALARMS["statuses"])
+        statuses_at = _SYSTEM_HEALTH_ALARMS["statuses_at"]
+    if statuses_at is None or now - statuses_at > system_health_banner.STALE_AFTER_SEC:
+        statuses = {}
+    watcher = system_health_banner.with_staleness(report, now)
+    lanes = _monitor_part(lambda: _monitor_cached("lanes", _monitor_lanes_payload))
+    completed_ts = float(scheduled.get("completed_ts") or 0.0)
+    return {
+        "schema": monitor_api.SUMMARY_SCHEMA,
+        "boot_id": BOT_INSTANCE_ID,
+        "generated_at": monitor_api.utc_iso(now),
+        "git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "epoch": {
+            "data_epoch_id": epoch.get("epoch_id"),
+            "data_epoch_declared": epoch.get("declared"),
+            "data_epoch_started_at": epoch.get("started_at_utc"),
+            "collection_epoch_id": _monitor_part(_bound_collection_epoch_id),
+        },
+        "safety": {
+            "force_paper_mode": _force_paper_mode_active(),
+            "live_armed": bool(state.get("live_armed", False)),
+            "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+            "live_entry_armable": armable,
+            "live_entry_arm_block_reason": None if armable else arm_block_reason,
+            "relay": _monitor_part(lambda: _monitor_relay_known(now, statuses, watcher.get("failing") or [])),
+        },
+        "pause": {
+            "execution_paused": bool(state.get("execution_paused", False)),
+            "pause_owner": _pause_owner_locked(),
+            "execution_reason": state.get("execution_reason", ""),
+        },
+        "ages_sec": {
+            "heartbeat": round(max(0.0, now - float(hb or 0)), 1),
+            "process_startup": progress.get("process_startup_age_sec"),
+            "ws": progress.get("ws_age_sec"),
+            "ai_success": progress.get("ai_age_sec"),
+            "ai_attempt": progress.get("ai_attempt_age_sec"),
+            "evaluation": progress.get("evaluation_age_sec"),
+            "cycle_completed": round(now - completed_ts, 1) if completed_ts else None,
+            "xvl_tick": xvl.get("tick_age_s"),
+            "cross_venue_collector": cross_venue.get("collector_age_s"),
+            "tape_latest_bucket": (collection.get("tape_source") or {}).get("latest_bucket_age_sec"),
+        },
+        "progress": {
+            "strategy_ok": progress.get("ok"),
+            "reasons": progress.get("reasons"),
+            "xvl_status": xvl.get("status"),
+            "cross_venue_status": cross_venue.get("status"),
+            "market_context_status": market_context.get("status"),
+            "market_context_stale_feeds": market_context.get("stale_feeds"),
+            "research_collection_status": collection.get("status"),
+        },
+        "counters_since_boot": {
+            "ai_successes": provider.get("successes_since_boot"),
+            "ai_failures": provider.get("failures_since_boot"),
+            "cycles_completed": scheduled.get("completed_since_boot"),
+            "post_ai_evidence_submitted": evidence.get("submitted"),
+            "post_ai_evidence_completed": evidence.get("completed"),
+            "post_ai_evidence_rejected": evidence.get("rejected"),
+            "xvl_ticks": xvl.get("ticks"),
+            "xvl_rows_written": xvl.get("rows_written"),
+            "cross_venue_rows_written": (cross_venue.get("stats") or {}).get("rows_written"),
+            "multiverse_written": (collection.get("multiverse") or {}).get("written_since_boot"),
+            "tape_rows_ingested": (collection.get("tape_source") or {}).get("rows_ingested"),
+        },
+        "custody": {
+            key: transfer.get(key)
+            for key in ("shipped_seq", "laptop_acked_seq", "custody_through_seq", "pruned_through_seq",
+                        "last_segment_at", "last_error")
+        },
+        "tiles": [
+            {
+                "lane": row.get("lane"),
+                "on": row.get("on"),
+                "closes": row.get("closes"),
+                "net_usd": row.get("net_usd"),
+                "latency_p50_s": (row.get("latency") or {}).get("signal_to_fill_p50_s"),
+                "latency_n": (row.get("latency") or {}).get("n"),
+            }
+            for row in lanes.get("lanes") or []
+        ],
+        "laptop_watcher": {
+            "verdict": watcher.get("verdict"),
+            "age_sec": watcher.get("age_sec"),
+            "stale": watcher.get("stale"),
+            "counts": watcher.get("counts"),
+        },
+        "open_alarms": [
+            {"id": alarm.get("id"), "first_seen": alarm.get("since")}
+            for alarm in (watcher.get("open_alarms") or [])
+        ],
+        "detail": {"lanes": "/api/monitor/lanes", "readiness": "/api/ready", "health": "/health"},
+    }
+
+
+@app.route('/api/monitor/summary')
+def monitor_summary():
+    return _monitor_response(_monitor_cached("summary", _monitor_summary_payload), monitor_api.MAX_SUMMARY_BYTES)
+
+
+@app.route('/api/monitor/lanes')
+def monitor_lanes():
+    try:
+        payload = _monitor_cached("lanes", _monitor_lanes_payload)
+    except TimeoutError:
+        response = _monitor_response({"schema": monitor_api.LANES_SCHEMA, "boot_id": BOT_INSTANCE_ID,
+                                      "error": "TRADE_LOCK_BUSY"}, monitor_api.MAX_LANES_BYTES, status=503)
+        response.headers["Retry-After"] = "5"
+        return response
+    return _monitor_response(payload, monitor_api.MAX_LANES_BYTES)
+
+
+@app.route('/api/monitor/digest')
+def monitor_digest():
+    if not _MONITOR_READ_TOKEN:
+        return _monitor_response({"error": "not found"}, 256, status=404)
+    if not monitor_api.bearer_matches(request.headers.get("Authorization"), _MONITOR_READ_TOKEN):
+        return _monitor_response({"error": "unauthorized"}, 256, status=401)
+    with _SYSTEM_HEALTH_LOCK:
+        stored = copy.deepcopy(_MONITOR_DIGEST)
+    return _monitor_response(monitor_api.digest_view(stored, time.time(), BOT_INSTANCE_ID),
+                             monitor_api.MAX_DIGEST_BYTES + 1024)
 
 
 @app.after_request
@@ -43538,7 +43808,10 @@ def ready():
         and runtime["system_ready"]
         and runtime["rest_entry_quote_ready"]
     )
-    tile_registry = active_tile_lifecycle_manifest()
+    tile_registry = [
+        {**tile, "pre_registration": tile_pre_registration_summary(tile["lane"])}
+        for tile in active_tile_lifecycle_manifest()
+    ]
     try:
         thread_summary = _THREAD_HEALTH.summary(now)
     except Exception as exc:
@@ -52908,6 +53181,7 @@ def periodic_pipeline_loop():
                         "owner": None,
                         "owner_ident": None,
                         "completed_ts": time.time(),
+                        "completed_since_boot": int(scheduled_ai_cycle_state.get("completed_since_boot") or 0) + 1,
                         "stage": "IDLE",
                         "stage_started_ts": 0.0,
                     })

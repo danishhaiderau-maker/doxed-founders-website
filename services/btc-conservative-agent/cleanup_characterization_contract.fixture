@@ -70,6 +70,9 @@
     ["GET", "/api/system-health", "system_health_view"],
     ["POST", "/api/system-health/report", "system_health_report"],
     ["GET", "/api/system-health/alerts", "system_health_alerts_view"],
+    ["GET", "/api/monitor/summary", "monitor_summary"],
+    ["GET", "/api/monitor/lanes", "monitor_lanes"],
+    ["GET", "/api/monitor/digest", "monitor_digest"],
     ["GET", "/alerts", "alerts_page"]
   ],
   "main_workers": [
