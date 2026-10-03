@@ -117,6 +117,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_AI_SCAN,
     RETIRED_TILE_LANES,
     tile_max_active_signals,
+    tile_shadow_exit_set,
+    tile_lane_for_trade_id,
     any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
@@ -182,6 +184,7 @@ from multiverse_entry_grid import (
     split_entry_grid,
 )
 import execution_markouts
+import shadow_exit_paths
 from research_order_schedule import (
     append_action_timing_receipt,
     append_reprice_interval as append_research_reprice_interval,
@@ -27424,6 +27427,35 @@ def adaptive_entry_status_snapshot() -> dict:
         return copy.deepcopy(_adaptive_entry_stats)
 
 
+SHADOW_EXIT_PATH_FILE = shadow_exit_paths.FILE_NAME
+SHADOW_EXIT_RECORDER_ENABLED = os.getenv("SHADOW_EXIT_RECORDER_ENABLED", "1").strip() == "1"
+
+
+def _shadow_exit_set_for(meta) -> tuple:
+    return tile_shadow_exit_set((meta or {}).get("research_lane"))
+
+
+_SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
+    writer=lambda row: _safe_append_jsonl(SHADOW_EXIT_PATH_FILE, row, label="SHADOW_EXIT_PATH"),
+    shadow_set_for=_shadow_exit_set_for,
+    enabled=SHADOW_EXIT_RECORDER_ENABLED,
+    max_queue=32,
+)
+
+
+def _submit_shadow_exit_path(payload) -> None:
+    """Hand a finished replay to the observation worker; never raises, never blocks."""
+    try:
+        _SHADOW_EXIT_RECORDER.start()
+        _SHADOW_EXIT_RECORDER.submit(payload)
+    except Exception as exc:
+        logger.warning(f"[SHADOW_EXIT] submit failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def shadow_exit_recorder_status_snapshot() -> dict:
+    return _SHADOW_EXIT_RECORDER.status()
+
+
 def execution_markout_status_snapshot() -> dict:
     return {
         **dict(_execution_markout_counters),
@@ -31300,6 +31332,7 @@ _READ_ONLY_GET_PATHS = {
     "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
+    "/api/shadow_exits/summary",
 }
 # Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
 # that token is never accepted by _admin_authed() or any other route.
@@ -32321,7 +32354,7 @@ def research_wipe_file_paths():
         # these names here so a fresh epoch removes stale active files without
         # restoring any runtime constant or writer that could recreate them.
         "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
-        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
+        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, SHADOW_EXIT_PATH_FILE,
         COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         COLLECTOR_V22_EVENT_INDEX_FILE,
         COLLECTOR_V22_PROVISIONAL_FILE,
@@ -32382,7 +32415,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
-        CYCLE_3M_UNIVERSE_FILE,
+        SHADOW_EXIT_PATH_FILE, CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
         ORDER_MULTIVERSE_ENTRY_GRID_FILE,
@@ -43495,6 +43528,28 @@ def monitor_digest():
                              monitor_api.MAX_DIGEST_BYTES + 1024)
 
 
+@app.route('/api/research/shadow_exits')
+def research_shadow_exits():
+    """Admin-only (not in _READ_ONLY_GET_PATHS): recorder status, per-tile running aggregates, recent rows."""
+    limit = max(0, min(50, request.args.get("limit", 20, type=int) or 0))
+    return jsonify({
+        "schema": "shadow_exit_runtime_view_v1",
+        "status": _SHADOW_EXIT_RECORDER.status(),
+        "shadow_exit_set_default": [dict(item) for item in tile_shadow_exit_set(None)],
+        "tile_shadow_exit_set_ids": {
+            lane: shadow_exit_paths.shadow_exit_set_id(tile_shadow_exit_set(lane)) for lane in ACTIVE_TILE_ORDER
+        },
+        "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
+        "recent": _SHADOW_EXIT_RECORDER.recent(limit),
+        "observation_only": True,
+    })
+
+
+@app.route('/api/shadow_exits/summary')
+def shadow_exits_public_summary():
+    return jsonify(_SHADOW_EXIT_RECORDER.public_summary())
+
+
 @app.after_request
 def _inject_system_health_banner(response):
     response = system_health_banner.inject_banner(response)
@@ -43678,6 +43733,7 @@ def status():
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
                 **execution_markout_status_snapshot(),
             },
+            "shadow_exit_recorder": shadow_exit_recorder_status_snapshot(),
             "adaptive_entry": {
                 "file": ADAPTIVE_ENTRY_DECISIONS_FILE,
                 **adaptive_entry_status_snapshot(),
@@ -50524,6 +50580,7 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
     """
     global write_counter
     mv_source = None
+    shadow_exit_payload = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -50628,6 +50685,20 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
             }
             if _safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY"):
                 write_counter += 1
+            if buf.get("closed") and not terminal_reason:
+                policy_identity = buf.get("policy_identity") if isinstance(buf.get("policy_identity"), dict) else {}
+                shadow_exit_payload = {"replay": replay, "meta": {
+                    "start_ts": buf.get("start_ts"),
+                    "research_lane": (buf.get("research_lane") or policy_identity.get("research_lane")
+                                      or tile_lane_for_trade_id(trade_id)),
+                    "policy_signature": buf.get("policy_signature"),
+                    "collection_epoch_id": buf.get("collection_epoch_id"),
+                    "limit_price": buf.get("limit_price") or buf.get("original_limit_price"),
+                    "atr14_pct_3m": buf.get("atr14_pct_3m"),
+                    "adx_at_signal": buf.get("adx_at_signal"),
+                    "regime": buf.get("regime") or buf.get("entry_regime"),
+                    "entry_features": buf.get("entry_features"),
+                }}
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,
@@ -50658,6 +50729,8 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
                     }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
+    if shadow_exit_payload is not None:
+        _submit_shadow_exit_path(shadow_exit_payload)
     if mv_source:
         _sync_order_multiverse(mv_source, path_complete=True)
 
@@ -52147,6 +52220,7 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "ADAPTIVE_ENTRY_DECISIONS_FILE",
     "RETIRED_TILE_BOUNDARY_FILE",
     "XVL_SHADOW_FILE",
+    "SHADOW_EXIT_PATH_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",

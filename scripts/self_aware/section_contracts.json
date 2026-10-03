@@ -215,6 +215,13 @@
                 {"path": "evidence_classes.shadow_lab.reasons", "name": "shadow_reasons", "min_rows": 1,
                  "live_columns": ["avg_left_usd", "avg_mfe_margin_pct", "avg_leakage_margin_pct"]}]},
 
+    {"id": "analyzer.shadow_exits", "surface": "analyzer", "title": "Execution: shadow exits", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#shadow-exits", "covers": ["details#shadow-exits"],
+     "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research/shadow_exits"},
+     "depends_on": ["shadow_exit_report.json"], "freshness": {"path": "generated_at", "max_age_sec": 4500},
+     "tables": [{"path": "cohorts.BACKFILL_ARCHIVE.groups", "name": "archive_groups", "min_rows": 1,
+                 "live_columns": ["records", "filled"]}]},
+
     {"id": "analyzer.report_explorer", "surface": "analyzer", "title": "Report explorer + manifest", "tier": "heavy",
      "page": "http://127.0.0.1:9001/details#explorer", "covers": ["details#explorer"],
      "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/manifest"},

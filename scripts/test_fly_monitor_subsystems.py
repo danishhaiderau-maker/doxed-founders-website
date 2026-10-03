@@ -358,6 +358,27 @@ def test_collection_write_failures_alert_only_when_a_counter_grows():
     assert sub.collection_write_failure_findings(state, status, None) == {}
 
 
+def test_shadow_exit_recorder_must_advance_and_feeds_failure_counters():
+    state = alerts.empty_state()
+    rec = {"enabled": True, "worker_alive": True, "queue_depth": 0, "submitted": 4, "written": 4,
+           "skipped": 0, "errors": 0, "write_failures": 0, "dropped_full": 0}
+    status = lambda **kw: {"collection": {"shadow_exit_recorder": {**rec, **kw}}}  # noqa: E731
+    assert sub.shadow_exit_recorder_findings(state, status()) == {}
+    assert sub.shadow_exit_recorder_findings(state, status(submitted=6, written=6)) == {}
+    found = sub.shadow_exit_recorder_findings(state, status(submitted=9, written=6, queue_depth=3))
+    assert "3 submitted path(s) not drained" in found["shadow_exit_recorder_stalled"]
+    dead = sub.shadow_exit_recorder_findings(state, status(submitted=9, written=9, worker_alive=False))
+    assert "worker thread is dead" in dead["shadow_exit_recorder_stalled"]
+    assert sub.shadow_exit_recorder_findings(state, status(submitted=0, written=0, worker_alive=False)) == {}
+    assert sub.shadow_exit_recorder_findings(state, status(enabled=False, worker_alive=False)) == {}
+    assert "shadow_exit_recorder_stalled" in alerts.POLICIES
+    paths = {path for _name, path in sub.COLLECTION_FAILURE_COUNTERS}
+    assert {"collection.shadow_exit_recorder.write_failures", "collection.shadow_exit_recorder.errors",
+            "collection.shadow_exit_recorder.dropped_full"} <= paths
+    # Not required until the recorder revision is deployed: the monitor probes the live app.
+    assert "collection.shadow_exit_recorder.written" not in sub.REQUIRED_FIELDS["status"]
+
+
 def test_restart_loop_needs_three_distinct_boots_within_an_hour():
     state = alerts.empty_state()
     for i, boot in enumerate(["2026-10-02T09:00:00Z", "2026-10-02T09:00:00Z", "2026-10-02T09:20:00Z"]):

@@ -18726,6 +18726,21 @@ LADDER_SIM_PROFILES = {
 }
 
 
+def shadow_exit_cycle_report():
+    """Side-by-side shadow exits on recorded paths; observation-only and isolated from the cycle."""
+    print(f"\n=== SHADOW EXITS {ANALYZER_SYNC_ID} ===")
+    try:
+        from research import shadow_exit_report
+
+        mirror = Path(_agent_data_path(shadow_exit_report.sxp.FILE_NAME)).parent
+        out_dir = Path(os.getenv("SHADOW_EXIT_OUT_DIR", shadow_exit_report.DEFAULT_OUT_DIR))
+        report = shadow_exit_report.build_report(mirror, out_dir / "backfill")
+        path = shadow_exit_report.write_report(report, out_dir)
+        print(f"   shadow exits: {report['sources']['records']} records -> {path} ({report['build_sec']}s)")
+    except Exception as exc:  # noqa: BLE001 - one report must not stop the analyzer cycle
+        print(f"   shadow exits report failed: {type(exc).__name__}: {exc}")
+
+
 def exit_ladder_simulator_report(trades=None, session=None):
     """Replay tick paths with alternate ladder rungs — data-driven exit optimization."""
     if session is None:
@@ -20095,6 +20110,7 @@ def pre_test_analytics_reports(
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
+    shadow_exit_cycle_report()
     correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     first_15m_outcome_report(trades=trades, session=session)
