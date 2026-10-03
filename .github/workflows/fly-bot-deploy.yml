@@ -28,6 +28,7 @@ on:
           - resume-paper
           - restart-only
           - inspect-runtime
+          - probe-reset-writers
           - repair-execution-funnel
           - repair-lifecycle-tail
           - repair-lifecycle-cursor
@@ -1728,6 +1729,24 @@ jobs:
               + json.dumps({"positions": remaining_positions, "orders": remaining_orders, "actions": actions}, sort_keys=True)
           )
           PY
+
+  probe-reset-writers:
+    # Read-only: samples reset deletion targets twice over minutes, which the
+    # bounded inspect-runtime probes cannot do.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'probe-reset-writers'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Sample reset targets and their writers without mutation
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          writer_probe_b64="$(base64 -w0 scripts/fly-reset-writer-probe.py)"
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label reset-writer-probe --deadline-sec 900 -- \
+            python -c "import base64; exec(base64.b64decode('${writer_probe_b64}'))"
 
   inspect-runtime:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
