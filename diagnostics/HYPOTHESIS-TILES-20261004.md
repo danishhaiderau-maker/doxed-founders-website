@@ -1,6 +1,8 @@
 # Hypothesis tiles — final rules, re-checked numbers, deploy needs (2026-10-04)
 
-Status: **draft POST-FREEZE PR, not merged, not deployed.** Every tile is
+Status: **draft POST-FREEZE PR
+[#403](https://github.com/danishhaiderau-maker/doxed-founders-website/pull/403),
+not merged, not deployed.** Every tile is
 paper-only, relay-ineligible and default OFF; Bitfinex stays DISARMED. The
 registry (`combo_pathway_config.py`) is the only roster source. Stack version
 `v31-danish-tiles-late-protection-v11`.
