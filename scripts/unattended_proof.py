@@ -325,9 +325,19 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
     elif not isinstance(toggles, Mapping):
         checks["tiles_all_on"] = _check(None, f"tile toggles not observed (error={rt.get('toggles_error')!r})")
     else:
-        off = [lane for lane in lanes if toggles.get(lane) is not True]
-        checks["tiles_all_on"] = (_check(True, f"{len(lanes)}/{len(lanes)} tiles ON") if not off
-                                  else _check(False, f"tiles OFF: {', '.join(off)}"))
+        held = {part.strip() for part in str(os.environ.get("PAPER_TILES_HOLD_OFF") or "").split(",") if part.strip()}
+        active = [lane for lane in lanes if lane not in held]
+        off = [lane for lane in active if toggles.get(lane) is not True]
+        held_on = [lane for lane in lanes if lane in held and toggles.get(lane) is not False]
+        held_note = f" (held OFF: {', '.join(sorted(held & set(lanes)))})" if held & set(lanes) else ""
+        if not active:
+            checks["tiles_all_on"] = _check(False, "every runtime tile is held OFF")
+        elif off or held_on:
+            checks["tiles_all_on"] = _check(False, "; ".join(
+                part for part in (f"tiles OFF: {', '.join(off)}" if off else "",
+                                  f"held tiles ON: {', '.join(held_on)}" if held_on else "") if part))
+        else:
+            checks["tiles_all_on"] = _check(True, f"{len(active)}/{len(active)} tiles ON{held_note}")
 
     # AI advancing: runtime says progressing, cadence rules clean, and a new
     # SUCCESSFUL model response since the last row. A completed cycle whose
