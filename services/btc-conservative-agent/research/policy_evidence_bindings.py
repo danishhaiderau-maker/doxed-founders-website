@@ -6,6 +6,7 @@ and fails closed when a schedule or a required market horizon is absent.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import gzip
 import json
@@ -49,7 +50,7 @@ def complete_conservative_future_path(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path, *, drop_keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not path.is_file():
         return rows
@@ -60,8 +61,32 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError(f"V3_LEDGER_ROW_NOT_OBJECT:{path.name}:{number}")
+            for key in drop_keys:
+                value.pop(key, None)
             rows.append(value)
     return rows
+
+
+# ``entry_children`` is ~97% of order_intent bytes and no binding or evaluator
+# rule reads it; retaining it held several GB per full-ledger load.
+UNUSED_INTENT_KEYS = ("entry_children",)
+_RECENT_BINDING_INDEX: dict[str, tuple[str, dict[str, Any]]] = {}
+
+
+def _binding_inputs_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    paths = [root / "ledgers" / f"{name}.jsonl" for name in LEDGERS]
+    paths.append(root / "recovery_ledgers" / "market_segment.jsonl")
+    for path in paths:
+        digest.update(path.as_posix().encode("utf-8") + b"\0")
+        if not path.is_file():
+            digest.update(b"\0MISSING\n")
+            continue
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _key(row: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -235,12 +260,32 @@ def authoritative_schedule_intents(
     ]
 
 
-def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
-    """Return deterministic binding coverage for every persisted policy decision."""
+def build_v3_binding_index(v3_root: str | Path, *, reuse_recent: bool = False) -> dict[str, Any]:
+    """Return deterministic binding coverage for every persisted policy decision.
+
+    ``reuse_recent`` returns a copy of this process's previous build when every
+    input ledger is byte-identical, so one analyzer generation parses the
+    ledgers once instead of once per consumer.
+    """
     root = Path(v3_root).resolve()
     if root.name != "v3":
         raise ValueError("V3_BINDING_ROOT_MUST_BE_V3")
-    ledgers = {name: _read_jsonl(root / "ledgers" / f"{name}.jsonl") for name in LEDGERS}
+    inputs = _binding_inputs_digest(root)
+    recent = _RECENT_BINDING_INDEX.get(str(root))
+    if reuse_recent and recent is not None and recent[0] == inputs:
+        return copy.deepcopy(recent[1])
+    report = _build_v3_binding_index(root)
+    _RECENT_BINDING_INDEX.clear()
+    _RECENT_BINDING_INDEX[str(root)] = (inputs, copy.deepcopy(report))
+    return report
+
+
+def _build_v3_binding_index(root: Path) -> dict[str, Any]:
+    ledgers = {
+        name: _read_jsonl(root / "ledgers" / f"{name}.jsonl",
+                          drop_keys=UNUSED_INTENT_KEYS if name == "order_intent" else ())
+        for name in LEDGERS
+    }
     # Fly is the raw-data authority and atomically refreshes ``ledgers``.  The
     # local analyzer may additionally bind checksum-verified archived paths
     # from this separate append-only derived overlay.  Keeping the authorities

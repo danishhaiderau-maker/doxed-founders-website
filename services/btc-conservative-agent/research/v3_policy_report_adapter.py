@@ -16,6 +16,7 @@ from research.best_policy_research import (
     REQUIRED_QUALIFICATION_GATES,
     qualification_gate_details,
 )
+from research.v3_ledger_index import iter_canonical_rows
 
 
 _CONSERVATIVE_INTENT_FIELDS = (
@@ -83,6 +84,17 @@ def load_v3_cycle_snapshot(data_dir=".") -> dict:
         count = 0
         path = ledger_root / f"{name}.jsonl"
         boundary = _snapshot_size(path)
+        if name not in ("opportunity", "decision"):
+            # Only counted and digested: hash the verified canonical bytes
+            # instead of re-parsing and re-serializing every row.
+            for canonical in iter_canonical_rows(path, byte_limit=boundary):
+                count += 1
+                digest.update(name.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(canonical)
+                digest.update(b"\n")
+            counts[name] = count
+            continue
         for row in _iter_jsonl(path, byte_limit=boundary):
             count += 1
             digest.update(name.encode("utf-8"))

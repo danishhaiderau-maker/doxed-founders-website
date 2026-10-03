@@ -951,13 +951,39 @@ def _rec_export_tiles_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, di
     return viol, met
 
 
+FLY_MIRROR_PUBLISH_GRACE_SEC = 1800
+FLY_MIRROR_RED_AGE_SEC = 4 * 3600
+
+
 def _rec_fly_analyzer_mirror(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     # In external_desktop_analyzer mode Fly answers ok=false by design; only the uploaded mirror carries data.
     external = obj.get("mode") == "external_desktop_analyzer"
     if obj.get("mirror_available") is False or (obj.get("ok") is False and not external):
         return [_v("DEAD_SECTION", AMBER, f"Fly {obj.get('endpoint')} panel: ok={obj.get('ok')} "
                                           f"mirror_available={obj.get('mirror_available')} - Fly dashboard shows no analyzer data")], {}
-    return [], {}
+    served = str((obj.get("mirror_status") or {}).get("analyzer_generated_at") or "")
+    served_ts = parse_ts(served)
+    if served_ts is None:
+        return [_v("NO_TIMESTAMP", AMBER, f"Fly {obj.get('endpoint')} panel: mirror_status.analyzer_generated_at absent")], {}
+    try:
+        summ, _meta = ctx["fetch"].get({"kind": "file", "path": "{exports}/summary.json"})
+    except Exception:  # noqa: BLE001 - a missing local export only drops the generation match
+        summ = None
+    local = str(((summ or {}).get("generation") or {}).get("analyzer_completed_at") or "") if isinstance(summ, dict) else ""
+    local_ts = parse_ts(local)
+    now = ctx.get("now") or time.time()
+    metrics = {"mirror_age_min": round((now - served_ts) / 60, 1), "mirror_matches_local_generation": served == local}
+    if local_ts is None or served == local or local_ts <= served_ts:
+        return [], metrics
+    # The cycle publishes right after each pass; one unpublished generation older
+    # than the grace window means the publisher stopped.
+    lag = now - local_ts
+    if lag <= FLY_MIRROR_PUBLISH_GRACE_SEC:
+        return [], metrics
+    sev = RED if now - served_ts > FLY_MIRROR_RED_AGE_SEC else AMBER
+    return [_v("STALE", sev, f"Fly {obj.get('endpoint')} panel serves analyzer generation {served}; laptop generation "
+                             f"{local} finished {lag / 60:.0f} min ago and is not published "
+                             "(see laptop-chain analyzer-mirror-publish.status.json)")], metrics
 
 
 CHASE_ANALYTICS_OK = ("VERIFIED_RECENT_SNAPSHOT", "NOT_APPLICABLE")

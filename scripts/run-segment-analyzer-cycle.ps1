@@ -26,6 +26,8 @@ param(
   [int]$SyncMaxAgeSec = 1800,
   [int]$InlineFfMaxWaitSec = 900,
   [int]$InlineFfPollSec = 30,
+  [string]$GenomeGridReport = 'C:\DoxxedCrypto\analyzer-exports\genome-grid\genome_grid_report.json',
+  [int]$MirrorPublishTimeoutSec = 600,
   [string]$Reason = 'segment-cycle'
 )
 
@@ -210,6 +212,33 @@ if ($analyzerExit -ne 0) {
   if (-not $knownCause) { $knownCause = [regex]::Match($runDetail, '[A-Z][A-Z_]{6,}(?=\W|$)').Value }
   $cycleStatus.stopReason = if ($knownCause) { "ANALYZER_EXIT_${analyzerExit}:$knownCause" } else { "ANALYZER_EXIT_$analyzerExit" }
   $cycleStatus.detail = if ($runDetail.Length -gt 400) { $runDetail.Substring(0, 400) } else { $runDetail }
+}
+
+# Fly's /analysis, /api/analyzer/summary and /api/analyzer/genome serve only an
+# uploaded analyzer_mirror_bundle_v2. Publication is a derived mirror step: a
+# failure is logged and receipted but never changes the cycle's exit code.
+if ($analyzerExit -eq 0) {
+  Set-CycleStatus 'MIRROR_PUBLISH'
+  $publishArgs = @((Join-Path $cfg.RepoRoot 'scripts\publish_analyzer_mirror.py'),
+                   '--report-root', (Join-Path $cfg.DataRoot 'analyzer'), '--base-url', $cfg.SourceUrl,
+                   '--vault-env', $cfg.VaultEnv, '--receipt', (Join-Path $cfg.StateDir 'analyzer-mirror-publish.status.json'))
+  if ($GenomeGridReport -and (Test-Path -LiteralPath $GenomeGridReport -PathType Leaf)) { $publishArgs += @('--supplemental', $GenomeGridReport) }
+  $ErrorActionPreference = 'Continue'
+  try {
+    $publishJob = Start-Job -ScriptBlock { param($Py, $PyArgs) & $Py @PyArgs 2>&1 | Out-String } -ArgumentList $Python, $publishArgs
+    if (Wait-Job -Job $publishJob -Timeout $MirrorPublishTimeoutSec) {
+      $publish = (Receive-Job -Job $publishJob | Out-String).Trim()
+      Write-ChainLog -Config $cfg -Name $logName -Message ("MIRROR_PUBLISH {0}" -f $publish)
+    } else {
+      Stop-Job -Job $publishJob
+      Write-ChainLog -Config $cfg -Name $logName -Message ("MIRROR_PUBLISH timeout after {0}s" -f $MirrorPublishTimeoutSec)
+    }
+    Remove-Job -Job $publishJob -Force
+  } catch {
+    Write-ChainLog -Config $cfg -Name $logName -Message ("MIRROR_PUBLISH skipped: {0}" -f $_.Exception.Message)
+  } finally {
+    $ErrorActionPreference = $previous
+  }
 }
 
 # Custody-gated retention (50 GB cap) runs only after a successful generation,

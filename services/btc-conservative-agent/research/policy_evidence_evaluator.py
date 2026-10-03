@@ -20,6 +20,7 @@ from research.conservative_limit_fill import evaluate_limit_fill
 from research.policy_evidence_bindings import (
     ALL_OPPORTUNITY_FUTURE_ROLE,
     authoritative_future_path_segments,
+    UNUSED_INTENT_KEYS,
     authoritative_schedule_intents,
     build_v3_binding_index,
     complete_conservative_future_path,
@@ -224,7 +225,7 @@ def _validate_projection(config: Mapping[str, Any], decision_ids: set[str]) -> t
     }, reasons
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path, *, observe=None, drop_keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     rows = []
@@ -235,6 +236,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError(f"V3_LEDGER_ROW_NOT_OBJECT:{path.name}:{number}")
+            if observe is not None:
+                observe(value)
+            for key in drop_keys:
+                value.pop(key, None)
             rows.append(value)
     return rows
 
@@ -1013,16 +1018,21 @@ def build_v3_conservative_results(
     root = Path(v3_root).resolve()
     if root.name != "v3":
         raise ValueError("V3_EVALUATOR_ROOT_MUST_BE_V3")
+    # The incident index inspects every nested value, so it sees each full
+    # intent row before the unused heavy keys are released.
     ledgers = {
-        name: _read_jsonl(root / "ledgers" / f"{name}.jsonl")
+        name: _read_jsonl(root / "ledgers" / f"{name}.jsonl", observe=lambda row: incident_index.add((row,)),
+                          drop_keys=UNUSED_INTENT_KEYS)
+        if name == "order_intent" else _read_jsonl(root / "ledgers" / f"{name}.jsonl")
         for name in ("decision", "opportunity", "order_intent", "market_segment", "execution", "lifecycle", "pre_entry_features")
     }
     recovery_segments = _read_jsonl(
         root / "recovery_ledgers" / "market_segment.jsonl"
     )
     ledgers["market_segment"].extend(recovery_segments)
-    for rows in ledgers.values():
-        incident_index.add(rows)
+    for name, rows in ledgers.items():
+        if name != "order_intent":
+            incident_index.add(rows)
     # The collector stores causal features separately from opportunities. Join
     # only the exact epoch/opportunity/episode, before projecting evaluator
     # features. The shared normalizer retains real observation timestamps and
@@ -1062,7 +1072,7 @@ def build_v3_conservative_results(
                     canonical_json(matches[0]).encode()).hexdigest()
         joined_opportunities.extend(joined)
     ledgers["opportunity"] = joined_opportunities
-    bindings = build_v3_binding_index(root)["bindings"]
+    bindings = build_v3_binding_index(root, reuse_recent=True)["bindings"]
     decisions = {str(row.get("event_id") or ""): row for row in ledgers["decision"]}
     opportunities = {_identity(row): row for row in ledgers["opportunity"]}
     intents: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}

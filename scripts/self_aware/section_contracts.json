@@ -570,21 +570,11 @@
 
     {"id": "fly.analyzer_summary", "surface": "fly", "title": "Fly dashboard analyzer panel (summary)", "tier": "heavy",
      "page": "https://doxed-btc-bot.fly.dev/analysis", "source": {"kind": "fly", "path": "/api/analyzer/summary"},
-     "depends_on": ["laptop analyzer-report upload to Fly mirror"], "reconcile": "fly_analyzer_mirror",
-     "declared_blockers": [{"id": "ANALYZER_MIRROR_PUBLISHER_RETIRED", "kinds": ["DEAD_SECTION"],
-                            "when": {"path": "mirror_available", "in": [false]}, "severity": "AMBER",
-                            "reason": "no laptop job uploads analyzer_mirror_bundle_v2 to Fly /api/data-sync/analyzer-report since #213 retired the legacy mirror-sync tree (2026-09-30); Fly answers mirror_available=false",
-                            "fix": "new laptop analyzer-bundle publisher (laptop-only; owner TBD) - Fly route already accepts the bundle, no Fly deploy needed",
-                            "eta": "UNSCHEDULED (post-freeze item on WALL-STATUS-FLY)", "expires": "2026-10-06T00:00:00Z"}]},
+     "depends_on": ["laptop scripts/publish_analyzer_mirror.py upload after each analyzer cycle"], "reconcile": "fly_analyzer_mirror"},
 
     {"id": "fly.analyzer_genome", "surface": "fly", "title": "Fly dashboard analyzer panel (genome)", "tier": "heavy",
      "page": "https://doxed-btc-bot.fly.dev/analysis", "source": {"kind": "fly", "path": "/api/analyzer/genome"},
-     "depends_on": ["laptop analyzer-report upload to Fly mirror"], "reconcile": "fly_analyzer_mirror",
-     "declared_blockers": [{"id": "ANALYZER_MIRROR_PUBLISHER_RETIRED", "kinds": ["DEAD_SECTION"],
-                            "when": {"path": "mirror_available", "in": [false]}, "severity": "AMBER",
-                            "reason": "no laptop job uploads analyzer_mirror_bundle_v2 to Fly /api/data-sync/analyzer-report since #213 retired the legacy mirror-sync tree (2026-09-30); Fly answers mirror_available=false",
-                            "fix": "new laptop analyzer-bundle publisher (laptop-only; owner TBD) - Fly route already accepts the bundle, no Fly deploy needed",
-                            "eta": "UNSCHEDULED (post-freeze item on WALL-STATUS-FLY)", "expires": "2026-10-06T00:00:00Z"}]},
+     "depends_on": ["laptop scripts/publish_analyzer_mirror.py upload after each analyzer cycle"], "reconcile": "fly_analyzer_mirror"},
 
     {"id": "export.summary", "surface": "exports", "title": "Analyzer export summary.json", "tier": "light",
      "page": "C:/DoxxedCrypto/analyzer-exports/latest/summary.json", "source": {"kind": "file", "path": "{exports}/summary.json"},
