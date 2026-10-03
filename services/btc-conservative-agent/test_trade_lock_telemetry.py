@@ -27,6 +27,7 @@ TIMED_ACQUIRE_ALLOWLIST = {
     "api_relay_state",
     "_build_dashboard_truth",
     "_build_api_state_snapshot",
+    "_monitor_lane_rows",
 }
 
 

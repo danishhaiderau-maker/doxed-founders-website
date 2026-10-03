@@ -25,6 +25,9 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
 
+# This script runs at import (pytest collection); restore the readiness function at the end so the
+# stub below does not leak into other test modules sharing the imported ``bot``.
+_ORIGINAL_RECOMPUTE_SYSTEM_READINESS = bot._recompute_system_readiness
 
 passed = 0
 failed = 0
@@ -227,6 +230,8 @@ check(
 )
 check("execution_paused cleared", bot.state.get("execution_paused") is False)
 
+
+bot._recompute_system_readiness = _ORIGINAL_RECOMPUTE_SYSTEM_READINESS
 
 print("\n" + "=" * 72)
 print(f"PASS={passed} FAIL={failed}")

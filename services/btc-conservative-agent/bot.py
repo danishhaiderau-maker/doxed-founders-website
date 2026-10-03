@@ -43278,7 +43278,7 @@ def monitor_lanes():
     return _monitor_response(payload, monitor_api.MAX_LANES_BYTES)
 
 
-@app.route(_MONITOR_DIGEST_PATH)
+@app.route('/api/monitor/digest')
 def monitor_digest():
     if not _MONITOR_READ_TOKEN:
         return _monitor_response({"error": "not found"}, 256, status=404)
