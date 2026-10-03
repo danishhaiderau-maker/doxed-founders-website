@@ -52,3 +52,28 @@ def test_failure_cleanup_only_runs_after_mutation_started(maintenance, deploy):
     assert eval(evaluated, {"__builtins__": {}}) == (maintenance in {"success", "failure"} or deploy in {"success", "failure"})
     assert "id: paper_maintenance" in WORKFLOW.split("      - name: Enter durable authenticated paper maintenance boundary\n", 1)[1].split("      - name:", 1)[0]
     assert "id: deploy_source" in WORKFLOW.split("      - name: Deploy the exact source revision\n", 1)[1].split("      - name:", 1)[0]
+
+
+def test_offline_seal_repair_proves_hold_then_sleeps_then_restores_in_order():
+    job = WORKFLOW.split("  repair-v22-seals-offline:\n", 1)[1].split("\n  clean-epoch-boundary-reset:\n", 1)[0]
+    steps = [
+        "Bind the failed deploy and the exact crash-looping revision",
+        "Prove every relay is PAUSED, disarmed and flat from durable Railway state",
+        "Prove the seal crash loop, a flat paper lifecycle and the exact orphan plan",
+        "Require the confirm token",
+        "Hold the machine on sleep so bot.py is not running",
+        "Quarantine exactly the proven receipts with no bot process running",
+        "Restore the image entrypoint and prove a held-down boot",
+        "Re-prove every relay is PAUSED, disarmed and flat",
+    ]
+    offsets = [job.index("      - name: " + step) for step in steps]
+    assert offsets == sorted(offsets)
+    assert 'EXPECTED_GENERATIONS: "1,2"' in job
+    assert job.count('DURABLE_RELAYS_ONLY_RECOVERY: "YES"') == 2
+    assert '--command "sleep infinity"' in job and '--command "/fly-entrypoint.sh"' in job
+    assert "offline-execute" in job and "--confirm ${CONFIRM}" in job
+    for mutating in steps[3:]:
+        step = job.split("      - name: " + mutating + "\n", 1)[1].split("      - name:", 1)[0]
+        assert "if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}" in step
+    for forbidden in ("rm -", "unlink", "resume", "/api/arm", "flyctl deploy"):
+        assert forbidden not in job

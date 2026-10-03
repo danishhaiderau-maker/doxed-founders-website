@@ -42,6 +42,8 @@ on:
           - clean-epoch-reset-execute
           - repair-v22-seals-plan
           - repair-v22-seals-execute
+          - repair-v22-seals-offline-plan
+          - repair-v22-seals-offline-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -1038,6 +1040,174 @@ jobs:
           set -euo pipefail
           python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label seal-execute --deadline-sec 600 -- \
             python /app/v22_seal_repair.py execute --runtime-root /app/data/runtime --confirm "$CONFIRM"
+
+  repair-v22-seals-offline:
+    # One-off recovery when orphan v22 seal receipts crash the bot at boot, so
+    # /health cannot prove the hold. The held-down proof becomes: the failed
+    # deploy run and exact revision, a crash loop on V22_SEAL_RECEIPT_INVALID,
+    # a flat unarmed durable paper lifecycle, and every relay PAUSED, disarmed
+    # and flat from durable Railway state. Execute holds the machine on
+    # `sleep infinity` so bot.py is not running, moves only the receipts of
+    # generations 1 and 2 into seals/quarantine/ (never deletes) with hashes
+    # verified before and after, then restores the image entrypoint and proves
+    # a held-down boot. Any failure leaves the machine down.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-offline-plan' || inputs.mode == 'repair-v22-seals-offline-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+      EXPECTED_GENERATIONS: "1,2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Bind the failed deploy and the exact crash-looping revision
+        env:
+          RECOVERY_FAILED_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip().lower()
+          run_id = str(os.environ.get("RECOVERY_FAILED_RUN_ID") or "").strip()
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("offline seal repair requires an exact 12-character unready revision")
+          if not run_id.isdigit():
+              raise SystemExit("offline seal repair requires the failed deploy run id")
+          api = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          def fetch(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+                  return json.load(response)
+          run = fetch(f"{api}/runs/{run_id}")
+          if (str(run.get("head_sha") or "")[:12] != expected or run.get("conclusion") != "failure"
+                  or run.get("event") != "workflow_dispatch" or run.get("name") != "Deploy Fly BTC bot"):
+              raise SystemExit("offline seal repair does not bind the expected failed deployment")
+          jobs = [j for j in fetch(f"{api}/runs/{run_id}/jobs?per_page=100").get("jobs") or [] if j.get("name") == "test-and-deploy"]
+          steps = jobs[0].get("steps") or [] if len(jobs) == 1 else []
+          deployed = [s for s in steps if s.get("name") == "Deploy the exact source revision" and s.get("conclusion") == "success"]
+          failed = [s for s in steps if s.get("name") == "Re-enter maintenance and flatten the exact deployed revision" and s.get("conclusion") == "failure"]
+          if len(deployed) != 1 or len(failed) != 1:
+              raise SystemExit("failed run lacks a deployed image and a failed post-deploy maintenance boundary")
+          print(f"Bound offline seal repair to failed run {run_id} revision {expected}")
+          PY
+
+      - name: Prove every relay is PAUSED, disarmed and flat from durable Railway state
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+        run: |
+          npm ci
+          npx prisma generate
+          node scripts/check-relay-flat.mjs
+
+      - name: Prove the seal crash loop, a flat paper lifecycle and the exact orphan plan
+        id: proof
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          proof="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" \
+            "python /app/v22_seal_repair.py offline-proof --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS}" || true)"
+          printf '%s\n' "$proof"
+          token="$(printf '%s\n' "$proof" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="PROVEN", "offline held-down proof refused"; print(rows[0]["plan"]["confirm_token"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "token=$token"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require the confirm token
+        if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}
+        env:
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          TOKEN: ${{ steps.proof.outputs.token }}
+        run: |
+          if [ "$CONFIRM" != "$TOKEN" ]; then
+            echo "clean_epoch_confirm must be $TOKEN"
+            exit 1
+          fi
+
+      - name: Hold the machine on sleep so bot.py is not running
+        if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.proof.outputs.machine_id }}
+        run: |
+          set -euo pipefail
+          flyctl machine update "$MACHINE_ID" --app doxed-btc-bot --command "sleep infinity" --skip-health-checks --yes
+          for attempt in $(seq 1 30); do
+            if out="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$MACHINE_ID" "python /app/v22_seal_repair.py processes" 2>/dev/null)" \
+                && printf '%s\n' "$out" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0]["sleep_hold"] is True and rows[0]["bot_processes"]==[]'; then
+              printf '%s\n' "$out"
+              echo "machine held on sleep (attempt $attempt)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "machine did not come up held on sleep"
+          exit 1
+
+      - name: Quarantine exactly the proven receipts with no bot process running
+        if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.proof.outputs.machine_id }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+        run: |
+          set -euo pipefail
+          result="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$MACHINE_ID" \
+            "python /app/v22_seal_repair.py offline-execute --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS} --confirm ${CONFIRM}" || true)"
+          printf '%s\n' "$result"
+          printf '%s\n' "$result" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="COMPLETE" and all(rows[0]["checks"].values()), "offline quarantine did not complete; machine stays held on sleep"'
+
+      - name: Restore the image entrypoint and prove a held-down boot
+        if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.proof.outputs.machine_id }}
+        run: |
+          set -euo pipefail
+          flyctl machine update "$MACHINE_ID" --app doxed-btc-bot --command "/fly-entrypoint.sh" --skip-health-checks --yes
+          python - <<'PY'
+          import json, os, time, urllib.request
+          expected = os.environ["EXPECTED_UNREADY_REVISION"]
+          want = {"execution_paused": True, "live_armed": False, "bitfinex_live_enabled": False, "force_paper_mode": True}
+          last = None
+          for attempt in range(1, 121):
+              try:
+                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+                      health = json.load(response)
+                  if str(health.get("source_git_rev") or "")[:12] == expected and all(health.get(k) == v for k, v in want.items()):
+                      print(json.dumps({"schema": "v22_seal_offline_boot_v1", "revision": expected, "attempt": attempt,
+                                        "pause_owner": health.get("pause_owner"), **want}, sort_keys=True))
+                      break
+                  last = {k: health.get(k) for k in ("source_git_rev", *want)}
+              except Exception as exc:  # noqa: BLE001
+                  last = type(exc).__name__
+              time.sleep(10)
+          else:
+              raise SystemExit(f"repaired revision did not boot held down: {last}")
+          PY
+
+      - name: Re-prove every relay is PAUSED, disarmed and flat
+        if: ${{ inputs.mode == 'repair-v22-seals-offline-execute' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+        run: node scripts/check-relay-flat.mjs
 
   clean-epoch-boundary-reset:
     # Guarded Fresh Collection reset (POST /api/wipe_fly_only, no laptop signal)
