@@ -272,6 +272,21 @@ def _archived_prefix_candidates(data_root: Path, plan: Plan) -> None:
                             f"ARCHIVED_SHIPPER_STATE_{prefix}", f"{state_dir.name}/{rel}")
 
 
+SEALED_GENERATION_KEEP = "SEALED_V22_GENERATION_RECEIPT_BOUND"
+
+
+def _seal_receipt_rel(rel: str) -> str | None:
+    """Receipt that authorizes a top-level sealed research_events_v22 generation, else None.
+
+    collector_v22 refuses every read while a receipt names a missing file, so a
+    receipt-bound generation is never a wipe candidate.
+    """
+    m = ROTATION_RE.match(rel)
+    if not m or "/" in rel or m.group("base") != "research_events_v22.jsonl":
+        return None
+    return f"research_events_v22.seals/generation-{int(rel.rsplit('.', 1)[1])}.json"
+
+
 def _fly_runtime_decision(rel: str, mtime_ns: int | None, plan: Plan, epoch_age: float) -> str | None:
     """Delete reason for one runtime-relative file, else None (caller records keep)."""
     name = rel.rsplit("/", 1)[-1]
@@ -311,6 +326,10 @@ def plan_fly(plan: Plan, data_root: Path, *, now: float) -> None:
             if reason:
                 plan.keep(root_name, rel, st.st_size, reason)
                 continue
+            receipt = _seal_receipt_rel(rel)
+            if receipt and (root / receipt).exists():
+                plan.keep(root_name, rel, st.st_size, SEALED_GENERATION_KEEP)
+                continue
             delete = _fly_runtime_decision(rel, st.st_mtime_ns, plan, epoch_age)
             if delete:
                 plan.delete(root_name, str(root / rel), st.st_size, st.st_mtime_ns, delete, rel)
@@ -338,6 +357,10 @@ def plan_fly_from_checkpoint(plan: Plan, files_doc: dict, data_size: dict | None
         reason = keep_reason(rel, scope="fly")
         if reason:
             plan.keep("fly_runtime", rel, size, reason)
+            continue
+        receipt = _seal_receipt_rel(rel)
+        if receipt and receipt in files:
+            plan.keep("fly_runtime", rel, size, SEALED_GENERATION_KEEP)
             continue
         delete = _fly_runtime_decision(rel, None, plan, max(now - plan.epoch_start, DIGEST_GRID_MIN_EPOCH_AGE_SEC))
         if delete:

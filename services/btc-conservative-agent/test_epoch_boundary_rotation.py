@@ -171,7 +171,7 @@ def test_v3_ledgers_are_assessed_never_mutated(tmp_path):
     assert receipt["ledgers"]["execution"]["head_decision"] == "ABSENT"
 
 
-def test_wipe_plan_reaches_the_sealed_pre_epoch_v22_generation_but_not_its_seals(tmp_path):
+def test_wipe_plan_keeps_a_receipt_bound_v22_generation_and_its_seal(tmp_path):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     started = time.time()
@@ -188,6 +188,20 @@ def test_wipe_plan_reaches_the_sealed_pre_epoch_v22_generation_but_not_its_seals
     plan = clean_epoch_wipe.Plan("fly", EPOCH, started, False)
     clean_epoch_wipe.plan_fly(plan, tmp_path, now=started + 7200)
     deleted = {c["rel"]: c["reason"] for c in plan.candidates}
-    assert deleted.get(sealed.name, "").startswith("PRE_EPOCH_SEALED_ROTATION")
+    assert sealed.name not in deleted
+    assert plan.kept[clean_epoch_wipe.SEALED_GENERATION_KEEP]["files"] == 1
     assert not any(rel.startswith(("research_events_v22.seals", "data_epoch_boundary")) for rel in deleted)
     assert "research_events_v22.provisional.json" not in deleted
+
+
+def test_wipe_plan_still_reaches_an_unsealed_numbered_v22_file(tmp_path):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    started = time.time()
+    stray = runtime / f"{ebr.RESEARCH_EVENTS_FILE}.4"
+    stray.write_text("{}\n", encoding="utf-8")
+    os.utime(stray, (started - 3600, started - 3600))
+    plan = clean_epoch_wipe.Plan("fly", EPOCH, started, False)
+    clean_epoch_wipe.plan_fly(plan, tmp_path, now=started + 7200)
+    deleted = {c["rel"]: c["reason"] for c in plan.candidates}
+    assert deleted.get(stray.name, "").startswith("PRE_EPOCH_SEALED_ROTATION")

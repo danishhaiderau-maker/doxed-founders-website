@@ -425,3 +425,28 @@ def test_no_old_archival_or_accounting_reset_hooks_remain_in_actual_body():
     assert not calls.intersection({"_seal_past_analysis_with_fallback", "create_research_archive_receipt",
                                    "reset_all_research_files", "_reset_runtime_log_handlers", "reset_runtime_state",
                                    "reset_session_risk_state", "load_session_trades_from_csv"})
+
+
+def test_reset_quarantines_the_receipt_of_each_v22_generation_it_deletes(runtime):
+    from collector_v22 import event_already_written, research_event_generation_paths, rotate_research_events
+    from collector_v22 import write_research_event_once
+    from collector_v22_schema import OBS_DATA_ERROR, RESEARCH_EVENTS_FILE
+    root = str(runtime["root"])
+    event = {"event_id": "old-epoch", "trade_id": "old-epoch", "collector_version": "collector_v2.2",
+             "observation_status": OBS_DATA_ERROR, "primary_outcome": "REJECTED",
+             "envelope": {"signal_ts": 1700000000.0}}
+    assert write_research_event_once(event, data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    sealed = runtime["root"] / f"{RESEARCH_EVENTS_FILE}.1"
+    assert sealed.is_file()
+    result = run(runtime)
+    assert result["ok"], result
+    assert not sealed.exists()
+    seals = runtime["root"] / "research_events_v22.seals"
+    assert not (seals / "generation-1.json").exists()
+    quarantined = list((seals / "quarantine").glob("*/generation-1.json"))
+    assert len(quarantined) == 1
+    operation = json.loads(Path(result["operation_receipt"]).read_text())
+    assert operation["v22_seal_retirement"]["moved"] == ["generation-1.json"]
+    assert research_event_generation_paths(root) == [str(runtime["root"] / RESEARCH_EVENTS_FILE)]
+    assert not event_already_written("old-epoch", data_dir=root)
