@@ -38,6 +38,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import sys
 import time
@@ -49,6 +50,7 @@ from typing import Optional
 
 import analysis_archive
 import data_retention_policy as policy
+import storage_links
 
 SCHEMA = "bot_data_retention_status_v1"
 LEDGER_SCHEMA = "bot_data_prune_ledger_v1"
@@ -73,7 +75,14 @@ DEFAULTS = {
     "segment_archive_days": 7.0,
     "settle_hours": 6.0,
     "max_delete_bytes_per_run": 20 * GB,
+    "wof_max_bytes_per_run": 4 * GB,
+    # Laptop-only derived artifacts (never mirror data, ledgers, recovery state or evidence objects).
+    "session_archive_keep": 10,
+    "session_archive_min_age_days": 3.0,
+    "log_roots": (r"C:\DoxxedCrypto\laptop-chain\logs", r"C:\DoxxedCrypto\fly-mirror-segments\logs"),
+    "log_retain_days": 14.0,
 }
+LOG_SUFFIXES = (".log", ".out", ".err")
 MODE_DRY_RUN = "dry_run"
 MODE_ENFORCE = "enforce"
 
@@ -112,16 +121,24 @@ def _atomic_json(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
-def tree_bytes(root: Path) -> int:
+def tree_bytes(root: Path, seen: Optional[set] = None) -> int:
+    """Physical bytes under root: a hardlinked file counts once (across calls sharing ``seen``)."""
     total = 0
     if not root.is_dir():
         return 0
+    seen = set() if seen is None else seen
     for directory, _dirs, files in os.walk(root):
         for name in files:
             try:
-                total += os.path.getsize(os.path.join(directory, name))
+                st = os.stat(os.path.join(directory, name))
             except OSError:
                 continue
+            if st.st_ino:
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+            total += st.st_size
     return total
 
 
@@ -1099,8 +1116,154 @@ class Retention:
             roots[f"historical_{index}"] = Path(extra)
         return roots
 
+    def storage_dedupe_report(self, *, settle_sec: float = storage_links.DEFAULT_SETTLE_SEC) -> dict:
+        """Hardlink savings and settled files still held as separate physical copies across the three layers."""
+        layers = (("tree", self.tree), ("view", self.view), ("canonical", self.data_root))
+        logical = physical = duplicate = files = wof_saved = 0
+        seen: set = set()
+        by_rel: dict[str, list] = {}
+        for name, root in layers:
+            if not root.is_dir():
+                continue
+            for directory, _dirs, names in os.walk(root):
+                for leaf in names:
+                    full = os.path.join(directory, leaf)
+                    try:
+                        st = os.stat(full)
+                    except OSError:
+                        continue
+                    files += 1
+                    logical += st.st_size
+                    key = (st.st_dev, st.st_ino)
+                    if not st.st_ino or key not in seen:
+                        physical += st.st_size
+                        seen.add(key)
+                        if st.st_size >= storage_links.COMPRESS_MIN_BYTES:
+                            alloc = storage_links.allocated_bytes(full)
+                            if alloc is not None and alloc < st.st_size:
+                                wof_saved += st.st_size - alloc
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    if storage_links.linkable(rel) and self.now - st.st_mtime >= settle_sec:
+                        by_rel.setdefault(rel, []).append((key, st.st_size))
+        for rel, copies in by_rel.items():
+            distinct = {key: size for key, size in copies}
+            if len(distinct) > 1 and len(set(distinct.values())) == 1:
+                duplicate += (len(distinct) - 1) * next(iter(distinct.values()))
+        alarms = 0
+        alarm_log = self.state_dir / storage_links.DEFAULT_ALARM_LOG.name
+        if alarm_log.is_file():
+            cutoff = self.now - 86400
+            for line in alarm_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                ts = _parse_ts(row.get("at"))
+                if row.get("code") == "LINK_FALLBACK_COPY" and ts and ts >= cutoff:
+                    alarms += 1
+        return {"layers_logical_gb": round(logical / GB, 3), "layers_physical_gb": round(physical / GB, 3),
+                "hardlink_saved_gb": round((logical - physical) / GB, 3),
+                "compression_saved_gb": round(wof_saved / GB, 3),
+                "layers_on_disk_gb": round((physical - wof_saved) / GB, 3),
+                "duplicate_physical_gb": round(duplicate / GB, 3), "files": files,
+                "link_fallback_alarms_24h": alarms, "settle_hours": round(settle_sec / 3600, 2),
+                "links_enabled": storage_links.links_enabled()}
+
+    def _safe_dedupe_report(self) -> dict:
+        try:
+            return self.storage_dedupe_report()
+        except OSError as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def compress_roots(self) -> list[Path]:
+        roots = [self.tree, self.view, self.data_root,
+                 analysis_archive.archive_root(self.cfg.get("archive_root"))]
+        return roots + [Path(extra) for extra in self.cfg.get("historical_roots") or ()]
+
+    def _safe_compress(self, *, dry: bool) -> dict:
+        try:
+            return storage_links.compress_settled(
+                self.compress_roots(), now=self.now, dry_run=dry,
+                max_bytes=int(self.cfg.get("wof_max_bytes_per_run", 4 * GB)))
+        except OSError as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def session_archive_root(self) -> Path:
+        return self.data_root / "analyzer" / "research_session_archives"
+
+    def artifact_candidates(self) -> list[dict]:
+        """Bounded generations for laptop derived artifacts.
+
+        Session archives: the newest ``session_archive_keep`` generations and
+        anything younger than ``session_archive_min_age_days`` stay. Evidence
+        objects (``_evidence_objects``) and staging dirs are never candidates;
+        a deleted session only drops its hardlink to an evidence object.
+        Logs: rotated log files older than ``log_retain_days``. Junctions are
+        never followed.
+        """
+        out = []
+        root = self.session_archive_root()
+        if root.is_dir() and not storage_links._is_reparse(str(root)):
+            sessions = sorted((p for p in root.iterdir() if p.is_dir() and p.name.startswith("session_")
+                               and not storage_links._is_reparse(str(p))),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+            keep = int(self.cfg.get("session_archive_keep", 10))
+            min_age = float(self.cfg.get("session_archive_min_age_days", 3.0)) * 86400
+            for path in sessions[keep:]:
+                mtime = path.stat().st_mtime
+                if self.now - mtime < min_age:
+                    continue
+                out.append({"kind": "SESSION_ARCHIVE", "path": path, "mtime": mtime,
+                            "bytes": tree_bytes(path)})
+        retain = float(self.cfg.get("log_retain_days", 14.0)) * 86400
+        for log_root in self.cfg.get("log_roots") or ():
+            log_root = Path(log_root)
+            if not log_root.is_dir() or storage_links._is_reparse(str(log_root)):
+                continue
+            for path in sorted(log_root.iterdir()):
+                if not path.is_file() or not path.name.lower().endswith(LOG_SUFFIXES):
+                    continue
+                st = path.stat()
+                if self.now - st.st_mtime >= retain:
+                    out.append({"kind": "LOG", "path": path, "mtime": st.st_mtime, "bytes": st.st_size})
+        return out
+
+    def prune_artifacts(self, *, mode: str) -> dict:
+        ledger = self.state_dir / "artifact-prune-ledger.jsonl"
+        result = {"candidates": 0, "deleted": 0, "bytes": 0, "errors": 0}
+        for item in self.artifact_candidates():
+            result["candidates"] += 1
+            result["bytes"] += item["bytes"]
+            if mode != MODE_ENFORCE:
+                continue
+            refuse_onedrive(item["path"])
+            try:
+                if item["kind"] == "SESSION_ARCHIVE":
+                    shutil.rmtree(item["path"])
+                else:
+                    _unlink(item["path"])
+            except OSError:
+                result["errors"] += 1
+                continue
+            result["deleted"] += 1
+            with ledger.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"schema": "laptop_artifact_prune_v1", "logged_at": _iso(_utc_now()),
+                                         "kind": item["kind"], "path": str(item["path"]),
+                                         "bytes": item["bytes"], "mtime": _iso(item["mtime"])}) + "\n")
+        return result
+
+    def _safe_prune_artifacts(self, *, mode: str) -> dict:
+        try:
+            return self.prune_artifacts(mode=mode)
+        except OSError as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
     def sizes(self) -> dict[str, int]:
-        return {name: tree_bytes(path) for name, path in self.roots().items()}
+        # Roots are measured in order with one shared inode set, so the
+        # promotion view and canonical store only count bytes they do not
+        # share with the mirror tree and the sum is the physical footprint.
+        seen: set = set()
+        return {name: tree_bytes(path, seen) for name, path in self.roots().items()}
 
     def mode(self, requested: str) -> str:
         if requested in (MODE_DRY_RUN, MODE_ENFORCE):
@@ -1169,15 +1332,21 @@ class Retention:
                   "copies": [], "sha256": digest}
         if not ok:
             return result
+        released: set = set()
         for root_name, copy in self._copies(item["relpath"]):
             if not copy.is_file():
                 continue
-            size = copy.stat().st_size
-            if root_name != "tree" and (size != item["bytes"] or _sha256_file(copy) != digest):
+            st = copy.stat()
+            size = st.st_size
+            shared = bool(st.st_ino) and (st.st_dev, st.st_ino) in released
+            if root_name != "tree" and not shared and (size != item["bytes"] or _sha256_file(copy) != digest):
                 result["copies"].append({"root": root_name, "kept": "CONTENT_DIFFERS"})
                 continue
-            result["copies"].append({"root": root_name, "bytes": size})
-            result["bytes"] += size
+            result["copies"].append({"root": root_name, "bytes": size, "hardlink_of_previous": shared})
+            if not shared:
+                result["bytes"] += size
+            if st.st_ino:
+                released.add((st.st_dev, st.st_ino))
             if mode == MODE_ENFORCE:
                 _unlink(copy)
                 self.ledger.append({"logged_at": _iso(_utc_now()), "action": "DELETE", "root": root_name,
@@ -1263,10 +1432,14 @@ class Retention:
         level = "RED" if usage >= float(self.cfg["red_fraction"]) else (
             "AMBER" if usage >= float(self.cfg["amber_fraction"]) else "GREEN")
         custody = self._post_custody(gates, dry=dry)
+        wof = self._safe_compress(dry=dry)
+        artifacts = self._safe_prune_artifacts(mode=mode)
         status = {
             "schema": SCHEMA, "policy_version": policy.POLICY_VERSION, "mode": mode,
             "started_at": _iso(started), "finished_at": _iso(_utc_now()),
             "cap_bytes": cap_bytes, "bytes_before": total_before, "bytes_after": total_after,
+            "sizes_basis": "physical_v1", "storage_dedupe": self._safe_dedupe_report(), "wof_compaction": wof,
+            "laptop_artifacts": artifacts,
             "usage_fraction": round(usage, 4), "level": level, "sizes_before": before, "sizes_after": after,
             "gates": _gate_summary(gates), "deny_reasons": gates["deny_reasons"],
             "candidates": len(plan),

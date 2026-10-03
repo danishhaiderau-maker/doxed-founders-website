@@ -243,7 +243,7 @@ class LaptopRetentionTests(unittest.TestCase):
             "shadow_root": str(base / "shadow"), "view_root": str(base / "view"),
             "segment_archive_root": str(base / "segments"), "compact_root": str(base / "compact"),
             "state_dir": str(base / "state"), "archive_root": str(base / "archive"),
-            "historical_roots": (), "cap_bytes": 10 ** 12,
+            "historical_roots": (), "log_roots": (), "cap_bytes": 10 ** 12,
         })
         self.tree = base / "shadow" / "tree"
         self.view = base / "view"
@@ -326,6 +326,61 @@ class LaptopRetentionTests(unittest.TestCase):
         self.assertEqual(bdr.pruned_index(self.cfg["state_dir"]),
                          {"signal_replay.jsonl.7": hashlib.sha256(content).hexdigest()})
         self.assertEqual(status["reclaimed_bytes"], 3 * len(content))
+
+    def test_hardlinked_layers_are_counted_and_reclaimed_once(self):
+        content = b'{"a":1}\n' * 1000
+        self._mirror("signal_replay.jsonl.7", content, copies=False)
+        for root in (self.view, self.canonical):
+            os.link(self.tree / "signal_replay.jsonl.7", root / "signal_replay.jsonl.7")
+        self._mirror("chase_offset_touch_grid.jsonl.4", content)
+        retention = bdr.Retention(self.cfg, self.canonical, now=self.now)
+        sizes = retention.sizes()
+        self.assertEqual(sizes["mirror_tree"], 2 * len(content))
+        self.assertEqual(sizes["promotion_view"] + sizes["canonical"], 2 * len(content))
+        dedupe = retention.storage_dedupe_report()
+        self.assertEqual(dedupe["layers_logical_gb"], round(6 * len(content) / bdr.GB, 3))
+        self.assertEqual(dedupe["duplicate_physical_gb"], round(2 * len(content) / bdr.GB, 3))
+        self._gates()
+        status = self._run(bdr.MODE_ENFORCE)
+        for root in (self.tree, self.view, self.canonical):
+            self.assertFalse((root / "signal_replay.jsonl.7").exists())
+        self.assertEqual(status["reclaimed_bytes"], len(content))
+        self.assertEqual(status["sizes_basis"], "physical_v1")
+        self.assertIn("wof_compaction", status)
+
+    def test_laptop_artifacts_keep_bounded_generations_and_evidence_objects(self):
+        archives = self.canonical / "analyzer" / "research_session_archives"
+        objects = archives / "_evidence_objects"
+        objects.mkdir(parents=True)
+        (objects / "abc.json").write_text("{}")
+        for index in range(5):
+            session = archives / f"session_2026100{index}_000000_x"
+            session.mkdir()
+            (session / "report.json").write_text("x" * 100)
+            age = self.now - (10 - index) * DAY
+            os.utime(session, (age, age))
+        young = archives / "session_20261009_000000_young"
+        young.mkdir()
+        logs = self.base / "logs"
+        logs.mkdir()
+        for name, age_days in (("old.log", 20), ("new.log", 1), ("state.json", 30)):
+            (logs / name).write_text("x")
+            os.utime(logs / name, (self.now - age_days * DAY,) * 2)
+        self.cfg.update({"session_archive_keep": 2, "session_archive_min_age_days": 3.0,
+                         "log_roots": (str(logs),), "log_retain_days": 14.0})
+        retention = bdr.Retention(self.cfg, self.canonical, now=self.now)
+        dry = retention.prune_artifacts(mode=bdr.MODE_DRY_RUN)
+        self.assertEqual(dry["candidates"], 5)
+        self.assertEqual(len(list(archives.iterdir())), 7)
+        done = retention.prune_artifacts(mode=bdr.MODE_ENFORCE)
+        self.assertEqual(done["deleted"], 5)
+        left = sorted(p.name for p in archives.iterdir())
+        self.assertEqual(left, ["_evidence_objects", "session_20261004_000000_x", "session_20261009_000000_young"])
+        self.assertTrue((objects / "abc.json").is_file())
+        self.assertEqual(sorted(p.name for p in logs.iterdir()), ["new.log", "state.json"])
+        rows = (Path(self.cfg["state_dir"]) / "artifact-prune-ledger.jsonl").read_text().splitlines()
+        self.assertEqual(len(rows), 5)
+        self.assertFalse((Path(self.cfg["state_dir"]) / "prune-ledger.jsonl").exists())
 
     def test_custody_receipt_is_bounded_by_ack_parity_and_analyzer(self):
         self._mirror("signal_replay.jsonl.7", b"x\n")

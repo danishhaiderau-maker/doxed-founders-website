@@ -26,6 +26,7 @@ from research.canonical_data_store import (  # noqa: E402
     initialize_store,
     publish_parity_status,
 )
+import storage_links  # noqa: E402
 
 
 INCREMENTAL_INDEX = "migration/.incremental-index.json"
@@ -211,6 +212,7 @@ def _append_verified(src: Path, dst: Path, prefix_size: int, prefix_sha: str, ex
             tail.update(chunk)
     if not expected_sha or digest.hexdigest() != expected_sha:
         return False
+    storage_links.ensure_private(dst)
     with src.open("rb") as handle, dst.open("r+b") as out:
         handle.seek(prefix_size)
         out.seek(prefix_size)
@@ -231,9 +233,16 @@ def _append_verified(src: Path, dst: Path, prefix_size: int, prefix_sha: str, ex
 
 
 def _copy_verified(relative: str, src: Path, dst: Path, expected_size: int, expected_sha: str,
-                   src_attested: bool) -> None:
+                   src_attested: bool, link: bool = False) -> None:
     if expected_sha and not src_attested and _sha256(src) != expected_sha:
         raise RuntimeError(f"Source checksum drift: {relative}")
+    if link and expected_sha:
+        outcome = storage_links.link_or_copy(src, dst, expected_sha256=expected_sha)
+        if dst.stat().st_size != expected_size:
+            raise RuntimeError(f"Linked size mismatch: {relative}")
+        if outcome == "COPIED_FALLBACK" and _sha256(dst) != expected_sha:
+            raise RuntimeError(f"Copied checksum mismatch: {relative}")
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, candidate_name = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".migration", dir=dst.parent)
     os.close(fd)
@@ -252,7 +261,8 @@ def _copy_verified(relative: str, src: Path, dst: Path, expected_size: int, expe
 
 def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool = False,
             verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC, now: float | None = None,
-            copy_workers: int = DEFAULT_COPY_WORKERS) -> dict:
+            copy_workers: int = DEFAULT_COPY_WORKERS,
+            link_settle_sec: float | None = storage_links.DEFAULT_SETTLE_SEC) -> dict:
     source = source.resolve()
     destination = initialize_store(destination, REPO_ROOT)
     heartbeat, revision = _validated_heartbeat(heartbeat_path)
@@ -270,7 +280,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
     verify = index is not None and now - last_verified >= verify_interval_sec
     copied = 0
     copied_bytes = 0
-    counts = {"reused": 0, "appended": 0, "copied": 0}
+    counts = {"reused": 0, "appended": 0, "copied": 0, "linked": 0}
     written_bytes = 0
     files: dict[str, dict] = {}
     normalized_state: dict[str, dict] = {}
@@ -305,6 +315,19 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
         dst_stat = dst.stat() if prior and dst.is_file() else None
         dst_intact = bool(dst_stat and dst_stat.st_size == prior["size"] and dst_stat.st_mtime_ns == prior["dst_mtime_ns"])
         done = False
+        # Settled view files are hardlinked (one physical copy shared with the
+        # view and the shadow tree); hot streams keep a private snapshot.
+        link = (link_settle_sec is not None and link_settle_sec >= 0 and storage_links.links_enabled()
+                and src_attested and storage_links.linkable(key)
+                and storage_links.settled(src_stat, now, link_settle_sec))
+        if link:
+            if storage_links.same_file(src, dst) and (not verify or _sha256(dst) == expected_sha):
+                counts["reused"] += 1
+            else:
+                pending.append((relative, src, dst, expected_size, expected_sha, src_attested, True))
+                counts["linked"] += 1
+            entries.append((relative, key, dst, expected_size, expected_sha, record))
+            continue
         if dst_intact and src_attested and prior["sha256"] == expected_sha:
             done = not verify or _sha256(dst) == expected_sha
             if done:
@@ -315,7 +338,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
                 counts["appended"] += 1
                 written_bytes += expected_size - prior["size"]
         if not done:
-            pending.append((relative, src, dst, expected_size, expected_sha, src_attested))
+            pending.append((relative, src, dst, expected_size, expected_sha, src_attested, False))
             counts["copied"] += 1
             written_bytes += expected_size
         entries.append((relative, key, dst, expected_size, expected_sha, record))
@@ -413,6 +436,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
         "files_reused": counts["reused"],
         "files_appended": counts["appended"],
         "files_copied": counts["copied"],
+        "files_linked": counts["linked"],
         "bytes_written": written_bytes,
         "promotion_level": str(heartbeat.get("promotionLevel") or "GREEN"),
         "promotion_warnings": [str(item) for item in heartbeat.get("promotionWarnings") or []],
@@ -432,6 +456,8 @@ def main() -> int:
     parser.add_argument("--full", action="store_true", help="ignore the incremental index and recopy every file")
     parser.add_argument("--verify-interval-sec", type=float, default=DEFAULT_VERIFY_INTERVAL_SEC)
     parser.add_argument("--copy-workers", type=int, default=DEFAULT_COPY_WORKERS)
+    parser.add_argument("--link-settle-sec", type=float, default=storage_links.DEFAULT_SETTLE_SEC,
+                        help="hardlink view files untouched this long (negative disables)")
     args = parser.parse_args()
     if args.record_existing:
         if args.source:
@@ -442,7 +468,7 @@ def main() -> int:
             parser.error("--source is required unless --record-existing is used")
         receipt = migrate(Path(args.source), Path(args.destination), Path(args.heartbeat),
                           full=args.full, verify_interval_sec=args.verify_interval_sec,
-                          copy_workers=args.copy_workers)
+                          copy_workers=args.copy_workers, link_settle_sec=args.link_settle_sec)
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 

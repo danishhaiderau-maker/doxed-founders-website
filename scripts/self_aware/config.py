@@ -57,6 +57,9 @@ THRESHOLDS = {
     "laptop_days_to_cap_red": 2.0,
     "fly_hours_to_full_amber": 72.0,
     "fly_hours_to_full_red": 24.0,
+    "laptop_disk_days_amber": 14.0,
+    "laptop_disk_days_red": 5.0,
+    "duplicate_copies_amber_gb": 1.0,
     "data_doc_max_age_sec": 2 * 3600,
     "sections_doc_max_age_sec": 3 * 3600,
     "contracts_heavy_max_age_sec": 5 * 3600,
@@ -89,6 +92,9 @@ class Paths:
         "SELF_AWARE_DIAGNOSTICS", r"C:\DoxxedCrypto\btc-v31-current\diagnostics"))
     analyzer_repo: Path = field(default_factory=lambda: _env_path("SELF_AWARE_ANALYZER_REPO", r"C:\DoxxedCrypto\v2c"))
     retention: Path = field(default_factory=lambda: _env_path("SELF_AWARE_RETENTION", r"C:\DoxxedCrypto\bot-data-retention"))
+    segment_manifests: Path = field(default_factory=lambda: _env_path(
+        "SELF_AWARE_SEGMENT_MANIFESTS", r"C:\DoxxedCrypto\fly-segments\v2\man"))
+    laptop_root: Path = field(default_factory=lambda: _env_path("SELF_AWARE_LAPTOP_ROOT", r"C:\DoxxedCrypto"))
 
     @property
     def store(self) -> Path:

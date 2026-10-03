@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -497,31 +498,128 @@ def tape_completeness(store, now: float, interruptions: list[tuple[float, float,
 
 # ------------------------------------------------------------------ capacity
 
+SLOPE_MIN_SPAN_SEC = 6 * 3600
+# A drop this large between two samples is a one-off reclaim (manual dedupe, scratch purge, accounting change),
+# not steady-state retention; the slope restarts after it so it cannot hide real growth.
+RECLAIM_STEP_BYTES = 2e9
+GROWTH_KINDS = ("APPEND", "SEAL", "BASELINE")
+
+
+def _record(hist: list, now: float, value: float, *, min_gap: float = 600, keep: int = 400) -> None:
+    if value and (not hist or now - hist[-1][0] >= min_gap):
+        hist.append([now, value])
+        del hist[:-keep]
+
+
+def _slope_per_day(hist: list, now: float, *, window_sec: float = 3 * 86400, invert: bool = False) -> float | None:
+    """Least-squares bytes/day over the window, restarted after the latest one-off reclaim step."""
+    recent = [(t, (-b if invert else b)) for t, b in hist if t >= now - window_sec]
+    for i in range(len(recent) - 1, 0, -1):
+        if recent[i - 1][1] - recent[i][1] >= RECLAIM_STEP_BYTES:
+            recent = recent[i:]
+            break
+    if len(recent) < 3 or recent[-1][0] - recent[0][0] < SLOPE_MIN_SPAN_SEC:
+        return None
+    xs = [t for t, _ in recent]
+    ys = [b for _, b in recent]
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    den = sum((x - mx) ** 2 for x in xs)
+    return (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den) * 86400 if den else None
+
+
+def fly_ingest_from_manifests(manifest_dir: Path, now: float, window_sec: float = 86400) -> dict | None:
+    """Real Fly->laptop ingest from the archived segment manifests (member payload bytes, not stream samples)."""
+    if not manifest_dir or not Path(manifest_dir).is_dir():
+        return None
+    growth = churn = 0
+    kinds: dict[str, int] = {}
+    t0 = t1 = None
+    manifests = 0
+    for entry in os.scandir(manifest_dir):
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            if entry.stat().st_mtime < now - window_sec - 3600:
+                continue
+            doc = json.loads(Path(entry.path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        end = doc.get("window_end")
+        if not isinstance(end, (int, float)) or end < now - window_sec:
+            continue
+        manifests += 1
+        t0 = end if t0 is None else min(t0, end)
+        t1 = end if t1 is None else max(t1, end)
+        for member in doc.get("members") or []:
+            size = int(member.get("size") or 0)
+            kind = str(member.get("kind") or "")
+            kinds[kind] = kinds.get(kind, 0) + size
+            if kind in GROWTH_KINDS:
+                growth += size
+            else:
+                churn += size
+    if not manifests or t0 is None or t1 is None or t1 - t0 < 3600:
+        return None
+    span = t1 - t0
+    return {"append_gb_per_day": round(growth / span * 86400 / 1e9, 3),
+            "snapshot_churn_gb_per_day": round(churn / span * 86400 / 1e9, 3),
+            "bytes_by_kind": kinds, "manifests": manifests, "span_h": round(span / 3600, 2),
+            "basis": "sum of APPEND/SEAL/BASELINE member bytes in archived segment manifests"}
+
+
+def _disk_usage(root: Path) -> tuple[int, int] | None:
+    try:
+        usage = shutil.disk_usage(str(root))
+    except OSError:
+        return None
+    return int(usage.free), int(usage.total)
+
+
 def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -> dict:
     ret = read_json(paths.retention / "status.json") or {}
     used = float(ret.get("bytes_after") or 0)
     cap = float(ret.get("cap_bytes") or 50e9)
+    # Retention sizes became physical (hardlinks counted once) with sizes_basis=physical_v1; logical history
+    # from before would fake a huge negative slope, so it is dropped once.
+    basis = ret.get("sizes_basis") or "logical"
+    if state.get("capacity_basis") != basis:
+        state["capacity_basis"] = basis
+        state["capacity_history"] = []
+        state["capacity_area_history"] = {}
     hist = state.setdefault("capacity_history", [])
-    if used and (not hist or now - hist[-1][0] >= 600):
-        hist.append([now, used])
-        del hist[:-400]
-    recent = [(t, b) for t, b in hist if t >= now - 3 * 86400]
-    measured = None
-    if len(recent) >= 3 and recent[-1][0] - recent[0][0] >= 6 * 3600:
-        xs = [t for t, _ in recent]
-        ys = [b for _, b in recent]
-        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
-        den = sum((x - mx) ** 2 for x in xs)
-        measured = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den) * 86400 if den else None
-    ingest = sum(s.get("bytes_per_day") or 0 for s in streams)
+    _record(hist, now, used)
+    measured = _slope_per_day(hist, now)
+    sizes = ret.get("sizes_after") or {}
+    area_hist = state.setdefault("capacity_area_history", {})
+    by_area_growth = {}
+    for area, value in sizes.items():
+        series = area_hist.setdefault(area, [])
+        _record(series, now, float(value or 0))
+        slope_area = _slope_per_day(series, now)
+        by_area_growth[area] = round(slope_area / 1e9, 3) if slope_area is not None else None
+    ingest_streams = sum(s.get("bytes_per_day") or 0 for s in streams)
     retained = sum(s.get("bytes_per_day") or 0 for s in streams if s.get("retention_tier") != "TIER_B")
-    # The analyzer keeps derived copies of the mirror (canonical, promotion view, archives), so laptop bytes grow
-    # roughly in proportion to the mirror; scale the mirror ingest by that ratio until a measured slope exists.
-    mirror_bytes = float((ret.get("sizes_after") or {}).get("mirror_tree") or 0)
+    fly_real = fly_ingest_from_manifests(getattr(paths, "segment_manifests", None), now)
+    real_ingest = fly_real["append_gb_per_day"] * 1e9 if fly_real else None
+    mirror_bytes = float(sizes.get("mirror_tree") or 0)
     copies = (used / mirror_bytes) if used and mirror_bytes else 1.0
-    slope = measured if measured is not None else retained * copies
+    # Until 6 h of history exists, project from the measured Fly ingest (falling back to stream samples)
+    # times the physical laptop/mirror ratio.
+    base_ingest = real_ingest if real_ingest is not None else retained
+    slope = measured if measured is not None else base_ingest * copies
     room = cap * LAPTOP_CAP_FRACTION - used
     days_to_cap = (room / slope) if slope and slope > 0 else None
+    # Whole-disk truth: every writer on the laptop volume, managed or not.
+    disk_now = _disk_usage(getattr(paths, "laptop_root", Path("C:\\")))
+    disk_hist = state.setdefault("disk_free_history", [])
+    disk_slope = None
+    if disk_now:
+        _record(disk_hist, now, float(disk_now[0]))
+        freed = _slope_per_day(disk_hist, now, invert=True)
+        disk_slope = freed
+    disk_days = (disk_now[0] / disk_slope) if disk_now and disk_slope and disk_slope > 0 else None
+    unmanaged = (disk_slope - measured) if disk_slope is not None and measured is not None else None
+    dedupe = ret.get("storage_dedupe") or {}
     disk = (watcher_check(facts, "disk.space") or {}).get("observed") or ""
     m_free = re.search(r"Fly volume free ([\d.]+)GB \(([\d.]+)h to full\)", disk)
     m_seg = re.search(r"segment store ([\d.]+)% of cap", disk)
@@ -529,22 +627,35 @@ def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -
     return {
         "laptop": {
             "bot_data_gb": round(used / 1e9, 2), "cap_gb": round(cap / 1e9, 1), "usage_pct": round(100 * used / cap, 1) if cap else None,
-            "by_area_gb": {k: round(v / 1e9, 2) for k, v in (ret.get("sizes_after") or {}).items()},
+            "sizes_basis": basis,
+            "by_area_gb": {k: round(v / 1e9, 2) for k, v in sizes.items()},
+            "by_area_growth_gb_per_day": by_area_growth,
             "retention_mode": ret.get("mode"), "retention_last_run": ret.get("finished_at"),
             "growth_gb_per_day": round(slope / 1e9, 3) if slope else None,
-            "growth_basis": ("measured net slope of retained bytes" if measured is not None else
-                             f"estimate: per-stream ingest excluding Tier B x {copies:.1f} (laptop bytes / mirror bytes); "
-                             "replaced by the measured slope after 6 h of history"),
+            "growth_basis": ("measured net slope of physical bot-data bytes (restarted after one-off reclaims)"
+                             if measured is not None else
+                             f"estimate: {'measured Fly append ingest' if real_ingest is not None else 'per-stream ingest excluding Tier B'}"
+                             f" x {copies:.1f} (physical laptop bytes / mirror bytes); replaced by the measured slope after 6 h"),
             "mirror_copies_factor": round(copies, 2),
             "days_to_90pct_cap": round(days_to_cap, 1) if days_to_cap is not None else None,
-            "disk_free_gb": float(m_lap.group(1)) if m_lap else None,
-            "source": "bot-data-retention/status.json + per-stream rates",
+            "disk_free_gb": round(disk_now[0] / 1e9, 2) if disk_now else (float(m_lap.group(1)) if m_lap else None),
+            "disk_growth_gb_per_day": round(disk_slope / 1e9, 3) if disk_slope is not None else None,
+            "disk_days_to_full": round(disk_days, 1) if disk_days is not None else None,
+            "unmanaged_growth_gb_per_day": round(unmanaged / 1e9, 3) if unmanaged is not None else None,
+            "duplicate_physical_gb": dedupe.get("duplicate_physical_gb"),
+            "hardlink_saved_gb": dedupe.get("hardlink_saved_gb"),
+            "link_fallback_alarms_24h": dedupe.get("link_fallback_alarms_24h"),
+            "source": "bot-data-retention/status.json (physical) + disk free history + segment manifests",
         },
         "fly": {
             "volume_free_gb": float(m_free.group(1)) if m_free else None,
             "hours_to_full": float(m_free.group(2)) if m_free else None,
             "segment_store_pct_of_cap": float(m_seg.group(1)) if m_seg else None,
-            "ingest_gb_per_day": round(ingest / 1e9, 3), "source": "watcher disk.space (no Fly call) + per-stream rates",
+            "ingest_gb_per_day": (fly_real["append_gb_per_day"] if fly_real else round(ingest_streams / 1e9, 3)),
+            "ingest_basis": fly_real["basis"] if fly_real else "sum of sampled per-stream rates (manifests unavailable)",
+            "snapshot_churn_gb_per_day": fly_real["snapshot_churn_gb_per_day"] if fly_real else None,
+            "stream_sample_ingest_gb_per_day": round(ingest_streams / 1e9, 3),
+            "source": "watcher disk.space (no Fly call) + archived segment manifests",
         },
         "tier_a": [{"dataset": d.get("dataset"), "bytes": d.get("bytes"), "partitions": d.get("partitions"),
                     "status": d.get("status")} for d in (ret.get("tier_a_schema") or [])],

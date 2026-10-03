@@ -634,7 +634,8 @@ def check_data(f, sig, store) -> list[Finding]:
     """Data awareness: critical streams fresh, every slot filled, watched fields alive, room to grow."""
     d = f.get("data_awareness")
     t = THRESHOLDS
-    ids = ("data.freshness", "data.completeness", "data.dead_fields", "data.capacity", "data.sufficiency")
+    ids = ("data.freshness", "data.completeness", "data.dead_fields", "data.capacity", "data.duplicates",
+           "data.sufficiency")
     gen = parse_ts((d or {}).get("generated_at"))
     if not d or not gen or f["now"] - gen > t["data_doc_max_age_sec"]:
         return [Finding(i, "Data awareness", "data", SKIP, "data awareness has not run recently", "data job every 30 min",
@@ -689,17 +690,34 @@ def check_data(f, sig, store) -> list[Finding]:
     cap = d.get("capacity") or {}
     lap, fly = cap.get("laptop") or {}, cap.get("fly") or {}
     days, hours = lap.get("days_to_90pct_cap"), fly.get("hours_to_full")
+    disk_days = lap.get("disk_days_to_full")
     sev = GREEN
-    if (days is not None and days < t["laptop_days_to_cap_red"]) or (hours is not None and hours < t["fly_hours_to_full_red"]):
+    if ((days is not None and days < t["laptop_days_to_cap_red"]) or (hours is not None and hours < t["fly_hours_to_full_red"])
+            or (disk_days is not None and disk_days < t["laptop_disk_days_red"])):
         sev = RED
-    elif (days is not None and days < t["laptop_days_to_cap_amber"]) or (hours is not None and hours < t["fly_hours_to_full_amber"]):
+    elif ((days is not None and days < t["laptop_days_to_cap_amber"]) or (hours is not None and hours < t["fly_hours_to_full_amber"])
+            or (disk_days is not None and disk_days < t["laptop_disk_days_amber"])):
         sev = AMBER
-    out.append(Finding("data.capacity", "Room to keep collecting (laptop 50 GB cap, Fly volume)", "data", sev,
-                       f"laptop {lap.get('bot_data_gb')}/{lap.get('cap_gb')} GB ({lap.get('usage_pct')}%), growing "
-                       f"{lap.get('growth_gb_per_day')} GB/day -> {days} days to 90% of cap; Fly volume "
-                       f"{fly.get('volume_free_gb')} GB free, {hours} h to full, ingest {fly.get('ingest_gb_per_day')} GB/day",
-                       f"laptop >= {t['laptop_days_to_cap_amber']:.0f} days and Fly >= {t['fly_hours_to_full_amber']:.0f} h of headroom",
+    out.append(Finding("data.capacity", "Room to keep collecting (laptop 50 GB cap, laptop disk, Fly volume)", "data", sev,
+                       f"laptop bot data {lap.get('bot_data_gb')}/{lap.get('cap_gb')} GB physical ({lap.get('usage_pct')}%), growing "
+                       f"{lap.get('growth_gb_per_day')} GB/day -> {days} days to 90% of cap; laptop disk "
+                       f"{lap.get('disk_free_gb')} GB free, {lap.get('disk_growth_gb_per_day')} GB/day "
+                       f"({lap.get('unmanaged_growth_gb_per_day')} GB/day outside bot data) -> {disk_days} days; Fly volume "
+                       f"{fly.get('volume_free_gb')} GB free, {hours} h to full, real ingest {fly.get('ingest_gb_per_day')} GB/day "
+                       f"(+{fly.get('snapshot_churn_gb_per_day')} GB/day snapshot churn)",
+                       f"laptop cap >= {t['laptop_days_to_cap_amber']:.0f} days, disk >= {t['laptop_disk_days_amber']:.0f} days "
+                       f"and Fly >= {t['fly_hours_to_full_amber']:.0f} h of headroom",
                        evidence={"laptop": lap, "fly": fly}))
+    dup_gb = lap.get("duplicate_physical_gb")
+    fallbacks = lap.get("link_fallback_alarms_24h") or 0
+    dsev = SKIP if dup_gb is None else (AMBER if dup_gb >= t["duplicate_copies_amber_gb"] or fallbacks else GREEN)
+    out.append(Finding("data.duplicates", "One physical copy of every settled mirror file", "data", dsev,
+                       "retention has not reported storage_dedupe yet" if dup_gb is None else
+                       f"{dup_gb} GB of settled files still held as separate physical copies across tree/view/canonical; "
+                       f"hardlinks save {lap.get('hardlink_saved_gb')} GB; {fallbacks} link-fallback copies in 24 h",
+                       f"settled duplicate copies < {t['duplicate_copies_amber_gb']} GB and no link-fallback copies",
+                       evidence={"duplicate_physical_gb": dup_gb, "hardlink_saved_gb": lap.get("hardlink_saved_gb"),
+                                 "link_fallback_alarms_24h": fallbacks}))
     suff = d.get("sufficiency") or []
     out.append(Finding("data.sufficiency", "Research questions: data present and enough samples", "data", GREEN,
                        "; ".join(f"{q['id']} {q['status']}" + (f" (ETA {q['eta_ready'][:10]})" if q.get("eta_ready") else "")
