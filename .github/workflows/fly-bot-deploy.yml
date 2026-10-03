@@ -1111,6 +1111,11 @@ jobs:
           npx prisma generate
           node scripts/check-relay-flat.mjs
 
+      - name: Stage the reviewed repair CLI for the guest
+        # The crash-looping image may predate the offline modes; the exact
+        # checked-out CLI runs against the image's collector_v22 helpers.
+        run: echo "GUEST_B64=$(base64 -w0 services/btc-conservative-agent/v22_seal_repair.py)" >> "$GITHUB_ENV"
+
       - name: Prove the seal crash loop, a flat paper lifecycle and the exact orphan plan
         id: proof
         env:
@@ -1118,8 +1123,11 @@ jobs:
         run: |
           set -euo pipefail
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
-          proof="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" \
-            "python /app/v22_seal_repair.py offline-proof --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS}" || true)"
+          guest() {
+            flyctl machine exec --app doxed-btc-bot --timeout "$2" "$1" \
+              "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v22_seal_repair.py']+sys.argv[1:]; exec(compile(base64.b64decode('${GUEST_B64}'),'v22_seal_repair.py','exec'),{'__name__':'__main__'})\" $3"
+          }
+          proof="$(guest "$machine_id" 60 "offline-proof --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS}" || true)"
           printf '%s\n' "$proof"
           token="$(printf '%s\n' "$proof" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="PROVEN", "offline held-down proof refused"; print(rows[0]["plan"]["confirm_token"])')"
           {
@@ -1146,8 +1154,12 @@ jobs:
         run: |
           set -euo pipefail
           flyctl machine update "$MACHINE_ID" --app doxed-btc-bot --command "sleep infinity" --skip-health-checks --yes
+          guest() {
+            flyctl machine exec --app doxed-btc-bot --timeout "$2" "$1" \
+              "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v22_seal_repair.py']+sys.argv[1:]; exec(compile(base64.b64decode('${GUEST_B64}'),'v22_seal_repair.py','exec'),{'__name__':'__main__'})\" $3"
+          }
           for attempt in $(seq 1 30); do
-            if out="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$MACHINE_ID" "python /app/v22_seal_repair.py processes" 2>/dev/null)" \
+            if out="$(guest "$MACHINE_ID" 30 processes 2>/dev/null)" \
                 && printf '%s\n' "$out" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0]["sleep_hold"] is True and rows[0]["bot_processes"]==[]'; then
               printf '%s\n' "$out"
               echo "machine held on sleep (attempt $attempt)"
@@ -1166,8 +1178,11 @@ jobs:
           CONFIRM: ${{ inputs.clean_epoch_confirm }}
         run: |
           set -euo pipefail
-          result="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$MACHINE_ID" \
-            "python /app/v22_seal_repair.py offline-execute --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS} --confirm ${CONFIRM}" || true)"
+          guest() {
+            flyctl machine exec --app doxed-btc-bot --timeout "$2" "$1" \
+              "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v22_seal_repair.py']+sys.argv[1:]; exec(compile(base64.b64decode('${GUEST_B64}'),'v22_seal_repair.py','exec'),{'__name__':'__main__'})\" $3"
+          }
+          result="$(guest "$MACHINE_ID" 60 "offline-execute --data-dir /app/data --expected-rev ${EXPECTED_UNREADY_REVISION} --expect-generations ${EXPECTED_GENERATIONS} --confirm ${CONFIRM}" || true)"
           printf '%s\n' "$result"
           printf '%s\n' "$result" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="COMPLETE" and all(rows[0]["checks"].values()), "offline quarantine did not complete; machine stays held on sleep"'
 
