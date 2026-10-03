@@ -390,3 +390,93 @@ def test_seal_repair_cli_requires_token_and_the_maintenance_hold(tmp_path, capsy
                                 fetch=lambda _url: held) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "COMPLETE" and out["remaining_orphans"] == []
+
+
+def _offline_fixture(tmp_path, *, crash_boots=3, positions=()):
+    data = tmp_path / "data"
+    runtime = data / "runtime"
+    runtime.mkdir(parents=True)
+    root = str(runtime)
+    for name in ("o1", "o2"):
+        assert write_research_event_once(_event(name), data_dir=root)[0]
+        rotate_research_events(data_dir=root)
+    assert write_research_event_once(_event("o3"), data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    _retire_generation_file(runtime, 1)
+    _retire_generation_file(runtime, 2)
+    (runtime / "paper_lifecycle_v1.json").write_text(json.dumps(
+        {"paper_only": True, "live_armed": False, "positions": list(positions), "pending_orders": []}), "utf-8")
+    (runtime / "config-7002.json").write_text(json.dumps(
+        {"live_armed": False, "bitfinex_live_enabled": False, "execution_paused": True}), "utf-8")
+    boot = ("[fly-entrypoint] bot starting -> /app/data/bot.log\n"
+            "CRITICAL === GLOBAL CRASH DETECTED ===\nRuntimeError: V22_SEAL_RECEIPT_INVALID:2\n"
+            "[fly-entrypoint] bot exited rc=1 -> restarting in 3s\n")
+    (data / "bot.log").write_text(boot * crash_boots + "[fly-entrypoint] bot starting -> /app/data/bot.log\n", "utf-8")
+    return data
+
+
+def _offline_args(data, mode, *extra):
+    return [mode, "--data-dir", str(data), "--expected-rev", "e205cd5c28d9", "--expect-generations", "1,2", *extra]
+
+
+def test_offline_proof_requires_a_seal_crash_loop_and_a_flat_unarmed_lifecycle(tmp_path, capsys):
+    import v22_seal_repair
+
+    env = {"SOURCE_GIT_REV": "e205cd5c28d9438a"}
+    data = _offline_fixture(tmp_path)
+    assert v22_seal_repair.main(_offline_args(data, "offline-proof"), env=env) == 0
+    proof = json.loads(capsys.readouterr().out)
+    assert proof["status"] == "PROVEN" and proof["crash_loop"]["recent_seal_crashes"] == 3
+    assert [row["generation"] for row in proof["plan"]["orphans"]] == [1, 2]
+    assert v22_seal_repair.main(_offline_args(data, "offline-proof"), env={"SOURCE_GIT_REV": "a2c89f2ee154"}) == 9
+    assert "revision mismatch" in json.loads(capsys.readouterr().out)["violations"]
+    stale = time.time() + 3600
+    assert v22_seal_repair.main(_offline_args(data, "offline-proof"), env=env, now=stale) == 9
+    assert "bot.log not advancing" in json.loads(capsys.readouterr().out)["violations"]
+
+    other = tmp_path / "few"
+    other.mkdir()
+    few = _offline_fixture(other, crash_boots=2)
+    assert v22_seal_repair.main(_offline_args(few, "offline-proof"), env=env) == 9
+    capsys.readouterr()
+    exposed = tmp_path / "exposed"
+    exposed.mkdir()
+    open_paper = _offline_fixture(exposed, positions=[{"id": "p1"}])
+    assert v22_seal_repair.main(_offline_args(open_paper, "offline-proof"), env=env) == 9
+    assert "paper lifecycle not flat" in json.loads(capsys.readouterr().out)["violations"]
+    assert v22_seal_repair.main([*_offline_args(data, "offline-proof")[:-1], "1"], env=env) == 9
+    capsys.readouterr()
+
+
+def test_offline_execute_moves_only_the_expected_receipts_with_no_bot_process(tmp_path, capsys):
+    import v22_seal_repair
+
+    env = {"SOURCE_GIT_REV": "e205cd5c28d9438a"}
+    data = _offline_fixture(tmp_path)
+    seals = data / "runtime" / "research_events_v22.seals"
+    kept_sha = collector_v22._sha256_file(str(seals / "generation-3.json"))
+    assert v22_seal_repair.main(_offline_args(data, "offline-proof"), env=env) == 0
+    token = json.loads(capsys.readouterr().out)["plan"]["confirm_token"]
+
+    proc = tmp_path / "proc"
+    (proc / "41").mkdir(parents=True)
+    (proc / "41" / "cmdline").write_bytes(b"python\0/app/btc_conservative_agent.py\0")
+    assert v22_seal_repair.main(_offline_args(data, "offline-execute", "--confirm", token),
+                                env=env, proc_root=str(proc)) == 9
+    assert "bot process is running" in json.loads(capsys.readouterr().out)["violations"]
+    (proc / "41" / "cmdline").write_bytes(b"sleep\0infinity\0")
+    assert v22_seal_repair.main(_offline_args(data, "offline-execute", "--confirm", "QUARANTINE-V22-SEALS:bad"),
+                                env=env, proc_root=str(proc)) == 9
+    assert (seals / "generation-1.json").is_file() and (seals / "generation-2.json").is_file()
+    capsys.readouterr()
+
+    assert v22_seal_repair.main(_offline_args(data, "offline-execute", "--confirm", token),
+                                env=env, proc_root=str(proc)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "COMPLETE" and out["moved"] == ["generation-1.json", "generation-2.json"]
+    assert all(out["checks"].values())
+    assert sorted(p.name for p in seals.glob("generation-*.json")) == ["generation-3.json"]
+    assert collector_v22._sha256_file(str(seals / "generation-3.json")) == kept_sha
+    assert event_already_written("o3", data_dir=str(data / "runtime"))
+    assert v22_seal_repair.main(["processes"], proc_root=str(proc)) == 0
+    assert json.loads(capsys.readouterr().out) == {"bot_processes": [], "sleep_hold": True}
