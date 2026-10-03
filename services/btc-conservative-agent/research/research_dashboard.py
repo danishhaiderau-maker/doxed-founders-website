@@ -34,6 +34,7 @@ from research import ai_challenger_view as _ai_challenger_view
 from research import data_health_view as _data_health_view
 from research import archive_history_view as _archive_history_view
 from research import dashboard_sections as _dashboard_sections
+from research import research_api_cache as _research_cache
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -7080,6 +7081,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .empty-state { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; overflow-wrap: anywhere; word-break: break-word; }
   .receipt-details { margin-top: 8px; }
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable::after { content: ' \2195'; color: var(--muted); font-size: 0.75em; }
+  th.sortable.sort-asc::after { content: ' \25B2'; color: var(--text); }
+  th.sortable.sort-desc::after { content: ' \25BC'; color: var(--text); }
+  tr.row-failed td { background: rgba(248, 81, 73, 0.10); }
+  tr.row-negtrain td { background: rgba(210, 153, 34, 0.08); }
+  .badge-warn { color: #e3b341; font-weight: 600; }
+  .badge-failed { color: #ffb4b4; font-weight: 600; }
+  .badge-ok { color: #7ee787; font-weight: 600; }
+  table.heat td.hcell { text-align: center; font-size: 0.8rem; white-space: nowrap; }
+  tfoot td { font-weight: 600; border-top: 2px solid var(--border); }
   .receipt-details summary { cursor: pointer; font-weight: 600; }
   .receipt-details pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: inherit; background: rgba(0,0,0,.18); }
 </style></head><body>
@@ -7215,10 +7227,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Genome axes - best train-selected REALISTIC_V1 policy for each value, with its chronological holdout</h3>
     <table><thead><tr><th>Axis</th><th>Value</th><th>Policies</th><th>Best REALISTIC_V1 policy (train-selected)</th><th>Train EV / fill</th><th>Holdout EV / fill</th><th>Holdout WR%</th><th>Holdout fills</th><th>Verdict</th><th>EV / fill 1h-cluster 95% CI</th><th>n_eff</th><th>Shadow: optimistic touch train EV (comparison, not headline)</th></tr></thead><tbody id="genome-grid-axes"></tbody></table>
     <div class="stale-banner" id="genome-grid-fill-model" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;">Fill model: loading...</div>
-    <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="REALISTIC_V1">REALISTIC_V1 (headline)</option><option value="OPTIMISTIC_TOUCH_SHADOW">Optimistic touch (comparison shadow - not headline)</option></select> <select id="genome-grid-filter"><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
-    <table><thead><tr><th>#</th><th>Side</th><th>Entry offset</th><th>Chase / reprice</th><th>TTL</th><th>Exit</th><th>Loss protection</th><th>Signals</th><th>Fills</th><th>WR% all</th><th>EV / fill all</th><th>Avg R</th><th>Train EV / fill (rank key)</th><th>OOS fills</th><th>OOS WR% [95% CI]</th><th>OOS EV / fill</th><th>OOS net</th><th>Holdout</th><th>Max DD</th><th>EV / fill 1h-cluster 95% CI</th><th>n_eff</th><th>EV / fill by episode class</th></tr></thead><tbody id="genome-grid-body"></tbody></table>
-    <h3>Live paper outcomes per lane (LIVE_PAPER - separate cohort)</h3>
-    <table><thead><tr><th>Lane</th><th>Registry status</th><th>Fill model</th><th>Terminal closes</th><th>WR%</th><th>Net PnL</th><th>EV / close</th></tr></thead><tbody id="genome-grid-live"></tbody></table>
+    <div class="stale-banner" id="genome-top-honesty" style="display:block;background:#2d2a1f;border-color:#d29922;color:#f0e0b0;">Honesty note: loading...</div>
+    <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="REALISTIC_V1">REALISTIC_V1 (headline)</option><option value="OPTIMISTIC_TOUCH_SHADOW">Optimistic touch (comparison shadow - not headline)</option></select> <select id="genome-grid-filter"><option value="top_100_by_oos_net">Top 100 by out-of-sample (holdout) net $ - default</option><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
+    <p class="note">Click any column header to sort. FAILED_HOLDOUT rows stay visible and are marked red. JSON: <a href="/api/research/top_100_policies">/api/research/top_100_policies</a>; every policy: <a href="/api/research/policy_totals?limit=50">/api/research/policy_totals</a>.</p>
+    <table id="genome-grid-table"><thead id="genome-grid-head"></thead><tbody id="genome-grid-body"></tbody><tfoot id="genome-grid-foot"></tfoot></table>
+    <h3>Per-family totals - each family / ingredient group's top policy by out-of-sample net $ (REALISTIC_V1)</h3>
+    <table id="genome-family-totals-table"><thead id="genome-family-totals-head"></thead><tbody id="genome-family-totals"></tbody></table>
+    <h3>Per-family best result - train-selected policy with its holdout, plus nested walk-forward inside the family</h3>
+    <table id="genome-family-table-table"><thead id="genome-family-table-head"></thead><tbody id="genome-family-table"></tbody></table>
+    <h3>Live paper outcomes per lane (LIVE_PAPER - separate cohort, sorted by net $)</h3>
+    <table id="genome-grid-live-table"><thead id="genome-grid-live-head"></thead><tbody id="genome-grid-live"></tbody><tfoot id="genome-grid-live-foot"></tfoot></table>
+    <h2 id="mix-match">Mix &amp; Match - regime-aware combination search (in-sample vs nested out-of-sample vs forward)</h2>
+    <div class="stale-banner" id="mm-warning" style="display:block;background:#2d2a1f;border-color:#d29922;color:#f0e0b0;">Mix &amp; Match: loading...</div>
+    <div class="kpis" id="mm-kpis"></div>
+    <h3>Selection procedures: in-sample pick vs nested walk-forward vs forward <select id="mm-cohort"></select></h3>
+    <table id="mm-structures-table"><thead id="mm-structures-head"></thead><tbody id="mm-structures"></tbody></table>
+    <h3>Most probable strategies (fine-block nested-OOS lower 95% CI, n_eff &gt;= 30)</h3>
+    <table id="mm-probable-table"><thead id="mm-probable-head"></thead><tbody id="mm-probable"></tbody></table>
+    <h3>Ingredient verdicts - does each ingredient / regime filter help out of sample?</h3>
+    <table id="mm-ingredients-table"><thead id="mm-ingredients-head"></thead><tbody id="mm-ingredients"></tbody></table>
+    <h3>Regime map - nested OOS EV bp of the train-best policy per regime cell x family <select id="mm-regime"></select></h3>
+    <div style="overflow-x:auto"><table class="heat" id="mm-heat"></table></div>
+    <h3>Regime-switching meta-policy record (stand aside when no cell policy is positive on prior blocks)</h3>
+    <table id="mm-meta-table"><thead id="mm-meta-head"></thead><tbody id="mm-meta"></tbody></table>
+    <h3>Forward leaderboard - frozen candidates scored only on episodes signalled after their freeze</h3>
+    <p class="note" id="mm-forward-note"></p>
+    <table id="mm-forward-table"><thead id="mm-forward-head"></thead><tbody id="mm-forward"></tbody></table>
+    <p class="note">Research APIs (precomputed per genome generation, never computed on request): <a href="/api/research">/api/research</a> index; e.g. <a href="/api/research/regime_map?regime=trend&amp;sort=oos_ev_bp">/api/research/regime_map?regime=trend&amp;sort=oos_ev_bp</a>, <a href="/api/research/forward_tracker?verdict=FORWARD_CONFIRMED">/api/research/forward_tracker?verdict=FORWARD_CONFIRMED</a>.</p>
     <h2>Top Profitable Conservative Policy Combos</h2>
     <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. Execution fills are split into full and partial receipts. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
@@ -8137,6 +8172,59 @@ function genomeClassSplit(x) {
   return Object.entries(x.by_episode_class || {}).map(([k, v]) =>
     `${GENOME_CLASS_LABELS[k] || k} ${v.fills}f ${genomeUsd(v.ev_per_fill_usd)}`).join('; ') || '-';
 }
+function sortHead(cols) {
+  return '<tr>' + cols.map(c => `<th class="sortable">${c}</th>`).join('') + '</tr>';
+}
+function sortableTable(id) {
+  const table = document.getElementById(id);
+  if (!table || table.dataset.sortBound) return;
+  table.dataset.sortBound = '1';
+  table.addEventListener('click', ev => {
+    const th = ev.target.closest('th');
+    if (!th || !th.classList.contains('sortable') || !table.tHead || !table.tHead.contains(th)) return;
+    const idx = Array.from(th.parentNode.children).indexOf(th);
+    const desc = !th.classList.contains('sort-desc');
+    table.tHead.querySelectorAll('th').forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+    th.classList.add(desc ? 'sort-desc' : 'sort-asc');
+    const body = table.tBodies[0];
+    const val = tr => {
+      const td = tr.children[idx];
+      if (!td) return null;
+      const raw = String(td.dataset.v != null ? td.dataset.v : td.textContent).trim();
+      if (raw === '' || raw === '-') return null;
+      const n = parseFloat(raw.replace(/[$,%+]/g, ''));
+      return Number.isFinite(n) && /^[\s$+\-]*[\d.]/.test(raw) ? n : raw.toLowerCase();
+    };
+    const rows = Array.from(body.rows).filter(r => r.children.length > 1);
+    rows.sort((a, b) => {
+      const x = val(a), y = val(b);
+      if (x === y) return 0;
+      if (x === null) return 1;
+      if (y === null) return -1;
+      if (typeof x === 'number' && typeof y === 'number') return desc ? y - x : x - y;
+      return desc ? String(y).localeCompare(String(x)) : String(x).localeCompare(String(y));
+    });
+    rows.forEach(r => body.appendChild(r));
+  });
+}
+function fmtBp(v) { return v == null ? '-' : Number(v).toFixed(2); }
+function fmtCi(ci) { return !ci || ci[0] == null ? '-' : `[${Number(ci[0]).toFixed(1)}, ${Number(ci[1]).toFixed(1)}]`; }
+function verdictCell(v) {
+  const bad = v === 'FAILED_HOLDOUT' || v === 'FORWARD_FAILED' || v === 'HURTS_OOS';
+  const good = v === 'CONFIRMED' || v === 'FORWARD_CONFIRMED' || v === 'HELPS_OOS';
+  return `<td class="${bad ? 'badge-failed' : good ? 'badge-ok' : v === 'NEGATIVE_TRAIN' ? 'badge-warn' : ''}">${escapeHtml(v || '-')}</td>`;
+}
+function verdictRowClass(v) { return v === 'FAILED_HOLDOUT' ? 'row-failed' : v === 'NEGATIVE_TRAIN' ? 'row-negtrain' : ''; }
+const TOTALS_HEAD = ['OOS net rank', 'Train EV rank', 'Side', 'Entry', 'Exit / protection', 'Family', 'Fills', 'Wins / losses',
+  'WR%', 'Net $', 'Net in-sample $', 'Net OOS $ (sort key)', 'Avg $ / trade', 'Avg bp', 'Train EV bp', 'OOS EV bp', 'Max DD $', 'Trades / day', 'Holdout'];
+function totalsRow(x, rankCell) {
+  return `<tr class="${verdictRowClass(x.holdout_verdict)}">${rankCell}<td>${x.train_rank ?? '-'}</td><td>${escapeHtml(x.direction_rule || '')}</td><td>${escapeHtml(x.entry_id || '')}</td><td>${escapeHtml(x.protection_id || '')}</td><td>${escapeHtml(x.policy_family || '')}</td><td>${x.fills ?? 0}</td><td data-v="${x.wins ?? 0}">${x.wins ?? 0} / ${x.losses ?? 0}</td><td>${x.win_rate_pct ?? '-'}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.net_in_sample_usd)}</td><td>${genomeUsd(x.net_oos_usd)}</td><td>${genomeUsd(x.avg_pnl_usd)}</td><td>${fmtBp(x.avg_pnl_bp)}</td><td>${fmtBp(x.train_ev_bp)}</td><td>${fmtBp(x.oos_ev_bp)}</td><td>${genomeUsd(x.max_drawdown_usd)}</td><td>${x.trades_per_day ?? '-'}</td>${verdictCell(x.holdout_verdict)}</tr>`;
+}
+function totalsFoot(rows, label, cols) {
+  const s = k => rows.reduce((a, r) => a + Number(r[k] || 0), 0);
+  const fills = s('fills'), net = s('net_pnl_usd');
+  return `<tr><td colspan="${cols}">${escapeHtml(label)}</td><td>${fills}</td><td>${s('wins')} / ${s('losses')}</td><td>${fills ? (100 * s('wins') / fills).toFixed(2) : '-'}</td><td>${genomeUsd(net)}</td><td>${genomeUsd(s('net_in_sample_usd'))}</td><td>${genomeUsd(s('net_oos_usd'))}</td><td>${fills ? genomeUsd(net / fills) : '-'}</td><td colspan="6"></td></tr>`;
+}
 function renderGenomeGridRows() {
   const d = GENOME_GRID_CACHE || {};
   const sel = document.getElementById('genome-grid-world');
@@ -8153,12 +8241,25 @@ function renderGenomeGridRows() {
         : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? 0}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
   }
   const filter = document.getElementById('genome-grid-filter');
-  const rows = ((d[filter ? filter.value : 'top_100_by_world'] || {})[world]) || [];
+  const mode = filter ? filter.value : 'top_100_by_oos_net';
+  const head = document.getElementById('genome-grid-head'), foot = document.getElementById('genome-grid-foot');
+  document.querySelectorAll('#genome-grid-head th').forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+  if (mode === 'top_100_by_oos_net') {
+    const top = world === d.headline_fill_world ? (d.top_100_by_oos_net || []) : [];
+    head.innerHTML = sortHead(TOTALS_HEAD);
+    document.getElementById('genome-grid-body').innerHTML = top.map(x => totalsRow(x, `<td>${x.oos_net_rank ?? '-'}</td>`)).join('')
+      || `<tr><td colspan="${TOTALS_HEAD.length}">${world !== d.headline_fill_world ? 'The out-of-sample net ranking is REALISTIC_V1 only; the optimistic world is a comparison shadow.' : 'No per-policy totals in this report (research layer ' + escapeHtml(((d.research_layer || {}).status) || 'absent') + ').'}</td></tr>`;
+    foot.innerHTML = top.length ? totalsFoot(top, `Totals over the ${top.length} rows shown (all policies: /api/research/policy_totals)`, 6) : '';
+    return;
+  }
+  foot.innerHTML = '';
+  head.innerHTML = sortHead(['#', 'Side', 'Entry offset', 'Chase / reprice', 'TTL', 'Exit', 'Loss protection', 'Signals', 'Fills', 'WR% all', 'EV / fill all', 'Avg R', 'Train EV / fill (rank key)', 'OOS fills', 'OOS WR% [95% CI]', 'OOS EV / fill', 'OOS net', 'Holdout', 'Max DD', 'EV / fill 1h-cluster 95% CI', 'n_eff', 'EV / fill by episode class']);
+  const rows = ((d[mode] || {})[world]) || [];
   document.getElementById('genome-grid-body').innerHTML = rows.map((x, i) => {
     const en = x.entry || {}, a = x.all || {}, t = x.train || {}, o = x.oos || {};
     const ci = o.win_rate_ci95_pct || [];
     const chase = en.chase_id === 'no_chase' ? 'none' : `${en.chase_id} (win ${(en.chase_windows_5m||[]).join('/')} x5m, ${Math.round((en.chase_remaining_gap_step||0)*100)}% gap, ${en.reprice_sec}s)`;
-    return `<tr><td>${i+1}</td><td>${escapeHtml(x.direction_rule||'')}</td><td>${en.offset_pct===0?'taker':en.offset_pct+'%'}</td><td>${escapeHtml(chase)}</td><td>${en.ttl_sec?Math.round(en.ttl_sec/60)+'m':'-'}</td><td>${escapeHtml(genomeExit(x))}</td><td>${escapeHtml(genomeLoss(x))}</td><td>${a.signals??0}</td><td>${a.fills??0}</td><td>${a.win_rate_pct??'-'}</td><td>${genomeUsd(a.ev_per_fill_usd)}</td><td>${a.avg_r??'-'}</td><td>${genomeUsd(t.ev_per_fill_usd)}</td><td>${o.fills??0}</td><td>${o.win_rate_pct??'-'} [${ci[0]??'-'}-${ci[1]??'-'}]</td><td>${genomeUsd(o.ev_per_fill_usd)}</td><td>${genomeUsd(o.net_pnl_usd)}</td><td>${escapeHtml(x.holdout_verdict||'-')}</td><td>${genomeUsd(a.max_drawdown_usd)}</td><td>${genomeCi((x.cluster_1h||{}).all)}</td><td>${((x.cluster_1h||{}).all||{}).n_eff ?? '-'}</td><td>${escapeHtml(genomeClassSplit(x))}</td></tr>`;
+    return `<tr class="${x.holdout_verdict === 'FAILED_HOLDOUT' ? 'row-failed' : ''}"><td>${i+1}</td><td>${escapeHtml(x.direction_rule||'')}</td><td>${en.offset_pct===0?'taker':en.offset_pct+'%'}</td><td>${escapeHtml(chase)}</td><td>${en.ttl_sec?Math.round(en.ttl_sec/60)+'m':'-'}</td><td>${escapeHtml(genomeExit(x))}</td><td>${escapeHtml(genomeLoss(x))}</td><td>${a.signals??0}</td><td>${a.fills??0}</td><td>${a.win_rate_pct??'-'}</td><td>${genomeUsd(a.ev_per_fill_usd)}</td><td>${a.avg_r??'-'}</td><td>${genomeUsd(t.ev_per_fill_usd)}</td><td>${o.fills??0}</td><td>${o.win_rate_pct??'-'} [${ci[0]??'-'}-${ci[1]??'-'}]</td><td>${genomeUsd(o.ev_per_fill_usd)}</td><td>${genomeUsd(o.net_pnl_usd)}</td><td>${escapeHtml(x.holdout_verdict||'-')}</td><td>${genomeUsd(a.max_drawdown_usd)}</td><td>${genomeCi((x.cluster_1h||{}).all)}</td><td>${((x.cluster_1h||{}).all||{}).n_eff ?? '-'}</td><td>${escapeHtml(genomeClassSplit(x))}</td></tr>`;
   }).join('') || `<tr><td colspan="22">No simulated policy has ${((d.holdout||{}).min_train_fills_for_rank)??30} train and ${((d.holdout||{}).min_oos_fills_for_rank)??10} OOS fills in this world.</td></tr>`;
 }
 async function loadGenomeGrid() {
@@ -8220,13 +8321,141 @@ async function loadGenomeGrid() {
       return `<tr>${head}<td>${escapeHtml(String(v.value ?? '-'))}</td><td>${v.policies ?? '-'}</td><td>${escapeHtml(v.best_policy_id || '-')}</td><td>${genomeUsd(v.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(v.best_oos_ev_per_fill_usd)}</td><td>${v.best_oos_win_rate_pct ?? '-'}</td><td>${v.best_oos_fills ?? '-'}</td><td>${escapeHtml(v.best_holdout_verdict || '-')}</td><td>${genomeCi(c)}</td><td>${c.n_eff ?? '-'}</td><td>${v.shadow_best_policy_id ? genomeUsd(v.shadow_best_train_ev_per_fill_usd) : '-'}</td></tr>`;
     }).join('');
   }).join('');
-  document.getElementById('genome-grid-live').innerHTML = (d.live_paper_by_lane || []).map(x =>
-    `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${escapeHtml(x.fill_model || 'UNDECLARED')}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="7">No terminal paper lifecycles.</td></tr>';
+  const lanes = [...(d.live_paper_by_lane || [])].sort((a, b) => (b.net_pnl_usd || 0) - (a.net_pnl_usd || 0));
+  document.getElementById('genome-grid-live-head').innerHTML = sortHead(['Lane', 'Registry status', 'Fill model', 'Terminal closes', 'Wins / losses', 'WR%', 'Net $ (sort key)', 'EV / close', 'Avg bp', 'Max DD $', 'Trades / day']);
+  document.getElementById('genome-grid-live').innerHTML = lanes.map(x =>
+    `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${escapeHtml(x.fill_model || 'UNDECLARED')}</td><td>${x.terminal_closes}</td><td data-v="${x.wins ?? 0}">${x.wins ?? 0} / ${x.losses ?? '-'}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td><td>${fmtBp(x.avg_pnl_bp)}</td><td>${genomeUsd(x.max_drawdown_usd)}</td><td>${x.trades_per_day ?? '-'}</td></tr>`).join('') || '<tr><td colspan="11">No terminal paper lifecycles.</td></tr>';
+  const ls = k => lanes.reduce((a, r) => a + Number(r[k] || 0), 0), lc = ls('terminal_closes');
+  document.getElementById('genome-grid-live-foot').innerHTML = lanes.length ? `<tr><td colspan="3">Totals over ${lanes.length} lanes (LIVE_PAPER, mixed lanes - descriptive)</td><td>${lc}</td><td>${ls('wins')} / ${ls('losses')}</td><td>${lc ? (100 * ls('wins') / lc).toFixed(2) : '-'}</td><td>${genomeUsd(ls('net_pnl_usd'))}</td><td>${lc ? genomeUsd(ls('net_pnl_usd') / lc) : '-'}</td><td colspan="3"></td></tr>` : '';
+  const fam = d.family_totals || [];
+  document.getElementById('genome-family-totals-head').innerHTML = sortHead(['Family / group', 'Policies', 'Positive-OOS policies', 'Top policy', 'Fills', 'Wins / losses', 'WR%', 'Net $', 'Net in-sample $', 'Net OOS $ (sort key)', 'Avg $ / trade', 'Avg bp', 'OOS EV bp', 'Max DD $', 'Trades / day', 'Holdout']);
+  document.getElementById('genome-family-totals').innerHTML = fam.map(x =>
+    `<tr class="${verdictRowClass(x.holdout_verdict)}"><td title="${escapeHtml(x.description || '')}">${escapeHtml(x.group)}</td><td>${x.policies ?? 0}</td><td>${x.positive_oos_policies ?? 0}</td><td>${escapeHtml(x.policy_id || 'not in grid')}</td><td>${x.fills ?? '-'}</td><td data-v="${x.wins ?? ''}">${x.wins ?? '-'} / ${x.losses ?? '-'}</td><td>${x.win_rate_pct ?? '-'}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.net_in_sample_usd)}</td><td>${genomeUsd(x.net_oos_usd)}</td><td>${genomeUsd(x.avg_pnl_usd)}</td><td>${fmtBp(x.avg_pnl_bp)}</td><td>${fmtBp(x.oos_ev_bp)}</td><td>${genomeUsd(x.max_drawdown_usd)}</td><td>${x.trades_per_day ?? '-'}</td>${verdictCell(x.holdout_verdict)}</tr>`).join('')
+    || '<tr><td colspan="16">No per-family totals in this report.</td></tr>';
+  const top = d.top_100_by_oos_net || [], headWorld = ((d.headline_vs_shadow || {})[d.headline_fill_world] || {});
+  const topCounts = top.reduce((a, x) => { a[x.holdout_verdict] = (a[x.holdout_verdict] || 0) + 1; return a; }, {});
+  const hv = headWorld.holdout_verdicts || {};
+  const hon = document.getElementById('genome-top-honesty');
+  if (hon) hon.textContent = `HONESTY: the default order is the 30% chronological holdout's net $, read AFTER ${Number(headWorld.policies || 0).toLocaleString()} ${d.headline_fill_world || ''} policies were evaluated on the same episodes - the top of any list of thousands sorted by its own outcome is selection-biased (winner's curse), so a high holdout rank is not a forward expectation. Holdout verdicts of these ${top.length} rows: ${Object.entries(topCounts).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'} (NEGATIVE_TRAIN = lost money before the cut, profitable only after it - a regime flip, not a confirmed edge; marked amber; FAILED_HOLDOUT marked red). Whole ${d.headline_fill_world || ''} grid: ${Object.entries(hv).map(([k, v]) => `${k} ${v}`).join(', ')}. Only the nested walk-forward and the forward tracker in Mix & Match below are honest out-of-sample estimates. Simulated counterfactual, REALISTIC_V1 fills, zero fees, $25 notional per trade.`;
+  ['genome-grid-table', 'genome-family-totals-table', 'genome-grid-live-table'].forEach(sortableTable);
   ['genome-grid-world', 'genome-grid-filter'].forEach(id => {
     const el = document.getElementById(id);
     if (el && !el.dataset.bound) { el.dataset.bound = '1'; el.addEventListener('change', renderGenomeGridRows); }
   });
   renderGenomeGridRows();
+}
+let MM = {};
+function mmRuleText(r) {
+  if (!r) return '-';
+  if (r.mapping) return `regime ${r.regime}: ` + Object.entries(r.mapping).map(([c, p]) => `${c} -> ${p ? (p.policy_id || p) : 'stand aside'}`).join('; ');
+  const f = (r.filters || []).map(x => x.join('=')).join(' & ');
+  return `${r.policy_id || '-'}${r.base && r.base !== 'ALL_EPISODES' ? ' on ' + r.base : ''}${f ? ' where ' + f : ''}${r.regime ? ' in ' + [].concat(r.regime).join('=') : ''}`;
+}
+function mmSum(s) {
+  s = s || {};
+  return `<td>${fmtBp(s.ev_bp)}</td><td>${fmtCi(s.ci_bp)}</td><td>${s.fills ?? 0}</td><td>${s.n_eff ?? '-'}</td>`;
+}
+function mmForwardFor(cohort, procedure) {
+  const rows = (MM.forward || []).filter(r => r.cohort === cohort && r.procedure === procedure).sort((a, b) => String(b.batch_id).localeCompare(String(a.batch_id)));
+  const r = rows[0];
+  return r ? `${r.verdict} (${(r.forward || {}).fills ?? 0}f, ${fmtBp((r.forward || {}).ev_bp)} bp)` : 'not frozen';
+}
+function renderMixMatch() {
+  const sel = document.getElementById('mm-cohort');
+  const cohort = sel && sel.value ? sel.value : 'AI_DECISION';
+  const sm = (MM.summary || []).find(s => s.cohort === cohort) || {};
+  const mt = sm.multiple_testing || {};
+  const idx = MM.index || {}, fwdAll = MM.forward || [];
+  const counts = fwdAll.reduce((a, r) => { a[r.verdict] = (a[r.verdict] || 0) + 1; return a; }, {});
+  const ci = idx.contract_inputs || {};
+  document.getElementById('mm-warning').textContent = idx.status !== 'OK'
+    ? `Research API cache UNAVAILABLE (${idx.reason || 'no cache'}): Mix & Match is computed in the 2-hourly genome cycle.`
+    : `${sm.warning || ''} ${Number(mt.configurations_searched_full_data || 0).toLocaleString()} configurations searched for ${cohort}; every nested-OOS number below re-runs the whole selection on prior blocks only and scores the next block once. Deflated Sharpe uses ${mt.trials_used_for_deflation ?? '-'} trials. Combos with fewer than 30 effective trades are rejected. In-sample columns are labelled and overfit by construction. Forward verdicts follow ${((fwdAll[0] || {}).forward_rules) || 'FORWARD_RULES_V1'} (Bonferroni within each freeze batch); a FORWARD_CONFIRMED row only flags a draft paper-only tile proposal - nothing is deployed automatically.`;
+  document.getElementById('mm-kpis').innerHTML = [
+    ['Generation', `${String(idx.generation || '-').slice(0, 34)}`],
+    ['Cache age', idx.age_sec == null ? '-' : `${Math.round(idx.age_sec / 60)} min`],
+    ['Episodes / policies (' + cohort + ')', `${sm.episodes ?? '-'} / ${sm.policies ?? '-'}`],
+    ['UTC days', (sm.utc_days || []).join(', ') || '-'],
+    ['Configurations searched', Number(mt.configurations_searched_full_data || 0).toLocaleString()],
+    ['Forward candidates', `${fwdAll.length} (${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'})`],
+    ['Forward hash chain', ci.forward_chain_ok === true ? 'OK' : ci.forward_chain_ok === false ? 'BROKEN' : '-'],
+  ].map(([l, v]) => `<div class="kpi"><div class="lbl">${escapeHtml(l)}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
+  document.getElementById('mm-structures-head').innerHTML = sortHead(['Procedure', 'What it selects', 'Full-data rule (in-sample pick)', 'In-sample EV bp', 'In-sample fills',
+    'Nested OOS (UTC day) EV bp', 'CI 95%', 'Fills', 'n_eff', 'Nested OOS (fine blocks) EV bp', 'CI 95%', 'Fills', 'n_eff', 'Max DD $', 'Trades / day', 'Deflated Sharpe P', 'Forward']);
+  const structs = (MM.structures || []).filter(s => s.cohort === cohort);
+  const metas = (MM.meta || []).filter(m => m.cohort === cohort);
+  document.getElementById('mm-structures').innerHTML = structs.map(s => {
+    const f = s.nested_oos_fine || {}, ins = s.full_data_in_sample || {};
+    return `<tr><td>${escapeHtml(s.id)}</td><td>${escapeHtml(s.procedure || '')}</td><td>${escapeHtml(mmRuleText(s.full_data_rule))}</td><td>${fmtBp(ins.ev_bp)}</td><td>${ins.fills ?? 0}</td>${mmSum(s.nested_oos)}${mmSum(f)}<td>${genomeUsd(f.max_drawdown_usd)}</td><td>${f.trades_per_day ?? '-'}</td><td>${((s.deflation_fine || {}).deflated_sharpe_prob) ?? '-'}</td><td>${escapeHtml(mmForwardFor(cohort, s.id))}</td></tr>`;
+  }).join('') || '<tr><td colspan="17">No selection procedures for this cohort.</td></tr>';
+  document.getElementById('mm-probable-head').innerHTML = sortHead(['Rank', 'Cohort', 'Strategy', 'Kind', 'Exact rule (full-data)', 'Nested OOS EV bp', 'CI 95%', 'Fills', 'n_eff', 'Max DD $', 'Trades / day', 'Deflated Sharpe P', 'Forward']);
+  document.getElementById('mm-probable').innerHTML = (MM.probable || []).map(m => {
+    const f = m.nested_oos_fine || {};
+    return `<tr><td>${m.rank}</td><td>${escapeHtml(m.cohort)}</td><td>${escapeHtml(m.id)}</td><td>${escapeHtml(m.kind)}</td><td>${escapeHtml(mmRuleText(m.full_data_rule))}</td>${mmSum(f)}<td>${genomeUsd(f.max_drawdown_usd)}</td><td>${f.trades_per_day ?? '-'}</td><td>${((m.deflation || {}).deflated_sharpe_prob) ?? '-'}</td><td>${escapeHtml(mmForwardFor(m.cohort, m.id))}</td></tr>`;
+  }).join('') || '<tr><td colspan="13">No strategy reaches 30 effective nested-OOS trades.</td></tr>';
+  document.getElementById('mm-ingredients-head').innerHTML = sortHead(['Ingredient', 'Kind', 'Nested OOS EV bp with', 'Without', 'Delta bp', 'Folds better', 'Folds worse', 'OOS fills with', 'CI 95% with', 'n_eff with', 'Verdict']);
+  document.getElementById('mm-ingredients').innerHTML = (MM.ingredients || []).filter(r => r.cohort === cohort).map(r =>
+    `<tr><td title="${escapeHtml(r.description || '')}">${escapeHtml(r.ingredient)}</td><td>${escapeHtml(r.kind || '')}</td><td>${fmtBp(r.nested_oos_ev_bp_with)}</td><td>${fmtBp(r.nested_oos_ev_bp_without)}</td><td>${fmtBp(r.delta_bp)}</td><td>${r.folds_better ?? '-'}</td><td>${r.folds_worse ?? '-'}</td><td>${r.oos_fills_with ?? '-'}</td><td>${fmtCi(r.ci_bp_with)}</td><td>${r.n_eff_with ?? '-'}</td>${verdictCell(r.verdict)}</tr>`).join('')
+    || '<tr><td colspan="11">No ingredient verdicts for this cohort.</td></tr>';
+  const rsel = document.getElementById('mm-regime');
+  const rmap = (MM.regimes || []).filter(r => r.cohort === cohort);
+  const regimes = [...new Set(rmap.map(r => r.regime))];
+  if (rsel && rsel.dataset.cohort !== cohort) {
+    rsel.dataset.cohort = cohort;
+    rsel.innerHTML = regimes.map(r => `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
+  }
+  const reg = rsel && rsel.value ? rsel.value : regimes[0];
+  const cells = rmap.filter(r => r.regime === reg);
+  const cellNames = [...new Set(cells.map(r => r.cell))], groups = [...new Set(cells.map(r => r.group))];
+  const heat = document.getElementById('mm-heat');
+  heat.innerHTML = '<thead><tr><th>Regime cell \\ family</th>' + groups.map(gn => `<th>${escapeHtml(gn)}</th>`).join('') + '</tr></thead><tbody>' + cellNames.map(c =>
+    `<tr><td>${escapeHtml(c)}</td>` + groups.map(gn => {
+      const r = cells.find(x => x.cell === c && x.group === gn) || {};
+      const ev = r.oos_ev_bp;
+      const thin = (r.oos_fills || 0) < 20;
+      const bg = ev == null || thin ? 'transparent' : ev > 0 ? `rgba(46,160,67,${Math.min(0.85, 0.15 + Math.abs(ev) / 20)})` : `rgba(248,81,73,${Math.min(0.85, 0.15 + Math.abs(ev) / 20)})`;
+      return `<td class="hcell" style="background:${bg}${thin ? ';color:var(--muted)' : ''}" title="${thin ? 'fewer than 20 OOS fills - not interpretable; ' : ''}OOS CI ${fmtCi(r.oos_ci_bp)}, n_eff ${r.oos_n_eff ?? '-'}, folds ${r.folds_scored ?? 0}; in-sample best ${escapeHtml(r.insample_best_policy || '-')} ${fmtBp(r.insample_ev_bp)} bp">${ev == null ? '-' : fmtBp(ev)}<br><span class="note">n=${r.oos_fills ?? 0}</span></td>`;
+    }).join('') + '</tr>').join('') + '</tbody>';
+  if (!cells.length) heat.innerHTML = '<tbody><tr><td>No regime map for this cohort.</td></tr></tbody>';
+  else heat.insertAdjacentHTML('beforeend', `<caption class="note" style="caption-side:bottom;text-align:left">Green / red = positive / negative nested-OOS EV (bp per trade) of the policy chosen on prior blocks inside that regime cell; cells with fewer than 20 OOS fills are greyed (not interpretable). Hover for the CI.</caption>`);
+  document.getElementById('mm-meta-head').innerHTML = sortHead(['Meta-policy', 'Regime', 'Nested OOS EV bp', 'CI 95%', 'Fills', 'n_eff', 'Max DD $', 'Trades / day', 'In-sample EV bp', 'Full-data mapping', 'Deflated Sharpe P', 'Forward']);
+  document.getElementById('mm-meta').innerHTML = metas.map(m => {
+    const o = m.nested_oos || {};
+    return `<tr><td>${escapeHtml(m.id)}</td><td>${escapeHtml(m.regime)}</td>${mmSum(o)}<td>${genomeUsd(o.max_drawdown_usd)}</td><td>${o.trades_per_day ?? '-'}</td><td>${fmtBp((m.full_data_in_sample || {}).ev_bp)}</td><td>${escapeHtml(mmRuleText({regime: m.regime, mapping: m.full_data_mapping}))}</td><td>${((m.deflation || {}).deflated_sharpe_prob) ?? '-'}</td><td>${escapeHtml(mmForwardFor(cohort, m.id))}</td></tr>`;
+  }).join('') || '<tr><td colspan="12">No meta-policies for this cohort.</td></tr>';
+  document.getElementById('mm-forward-note').textContent = `${fwdAll.length} frozen candidates across batches ${[...new Set(fwdAll.map(r => r.batch_id))].join(', ') || '-'}; frozen rules are append-only (hash chain ${ci.forward_chain_ok === false ? 'BROKEN' : 'verified'}). Forward = episodes signalled strictly after the freeze; INSUFFICIENT until 30 fills and 30 effective trades.`;
+  document.getElementById('mm-forward-head').innerHTML = sortHead(['Candidate', 'Label', 'Cohort', 'Rule', 'Frozen at (UTC)', 'Forward fills', 'WR%', 'Net $ (sort key)', 'EV bp', 'CI 95%', 'n_eff', 'Max DD $', 'Lower bound (Bonferroni) bp', 'Verdict', 'Tile proposal']);
+  document.getElementById('mm-forward').innerHTML = fwdAll.map(r => {
+    const f = r.forward || {};
+    return `<tr><td>${escapeHtml(r.candidate_id)}</td><td>${escapeHtml(r.label)}${r.procedure ? ' ' + escapeHtml(r.procedure) : ''}</td><td>${escapeHtml(r.cohort)}</td><td>${escapeHtml(mmRuleText(r.rule))}</td><td>${escapeHtml(r.frozen_at_utc || '')}</td><td>${f.fills ?? 0}</td><td>${f.win_rate_pct ?? '-'}</td><td>${genomeUsd(f.net_pnl_usd)}</td><td>${fmtBp(f.ev_bp)}</td><td>${fmtCi(f.ci_bp)}</td><td>${f.n_eff ?? '-'}</td><td>${genomeUsd(f.max_drawdown_usd)}</td><td>${fmtBp(r.lower_bound_bonferroni_bp)}</td>${verdictCell(r.verdict)}<td>${r.tile_proposal ? 'DRAFT PROPOSAL' : '-'}</td></tr>`;
+  }).join('') || '<tr><td colspan="15">No frozen candidates yet.</td></tr>';
+  const fam = (MM.families || []);
+  document.getElementById('genome-family-table-head').innerHTML = sortHead(['Family / group', 'Policies', 'Holdout-confirmed', 'Best train-selected policy', 'Train EV bp', 'Holdout EV bp', 'Holdout fills', 'Holdout verdict', 'Best OOS-net policy', 'Its OOS net $', 'Nested WF EV bp (within family)', 'CI 95%', 'Fills', 'n_eff']);
+  document.getElementById('genome-family-table').innerHTML = fam.map(r =>
+    `<tr class="${r.best_train_holdout_verdict === 'FAILED_HOLDOUT' ? 'row-failed' : ''}"><td title="${escapeHtml(r.description || '')}">${escapeHtml(r.group)}</td><td>${r.policies ?? 0}</td><td>${r.confirmed_policies ?? '-'}</td><td>${escapeHtml(r.best_train_policy || (r.status === 'NOT_IN_GRID' ? 'not in grid' : '-'))}</td><td>${fmtBp(r.best_train_ev_bp)}</td><td>${fmtBp(r.best_train_holdout_ev_bp)}</td><td>${r.best_train_holdout_fills ?? '-'}</td>${verdictCell(r.best_train_holdout_verdict)}<td>${escapeHtml(r.best_oos_net_policy || '-')}</td><td>${genomeUsd(r.best_oos_net_usd)}</td><td>${fmtBp(r.nested_wf_ev_bp)}</td><td>${fmtCi(r.nested_wf_ci_bp)}</td><td>${r.nested_wf_fills ?? '-'}</td><td>${r.nested_wf_n_eff ?? '-'}</td></tr>`).join('')
+    || '<tr><td colspan="14">No per-family table in the research cache.</td></tr>';
+  ['mm-structures-table', 'mm-probable-table', 'mm-ingredients-table', 'mm-meta-table', 'mm-forward-table', 'genome-family-table-table'].forEach(sortableTable);
+}
+async function loadMixMatch() {
+  const get = url => fetch(url).then(r => r.json()).catch(() => ({}));
+  const [index, summary, structures, probable, ingredients, regimes, meta, forward, families] = await Promise.all([
+    get('/api/research'), get('/api/research/mix_match_summary'), get('/api/research/mix_match_structures?limit=200'),
+    get('/api/research/most_probable'), get('/api/research/ingredient_verdicts?limit=500'), get('/api/research/regime_map?limit=1000'),
+    get('/api/research/meta_policies'), get('/api/research/forward_tracker?limit=500'), get('/api/research/family_table?cohort=AI_DECISION'),
+  ]);
+  MM = {index, summary: summary.rows || [], structures: structures.rows || [], probable: probable.rows || [], ingredients: ingredients.rows || [],
+        regimes: regimes.rows || [], meta: meta.rows || [], forward: forward.rows || [], families: families.rows || []};
+  const sel = document.getElementById('mm-cohort');
+  if (sel) {
+    const cohorts = MM.summary.map(s => s.cohort);
+    const cur = sel.value;
+    sel.innerHTML = cohorts.map(c => `<option value="${escapeHtml(c)}"${c === (cur || 'AI_DECISION') ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+    ['mm-cohort', 'mm-regime'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && !el.dataset.bound) { el.dataset.bound = '1'; el.addEventListener('change', renderMixMatch); }
+    });
+  }
+  renderMixMatch();
 }
 async function loadCombos() {
   setEvidenceScope('combos', ...EVIDENCE_SCOPES.combos);
@@ -9383,7 +9612,7 @@ const SECTION_LOADERS = {
   ai: [loadAI], chase: [loadChase],
   'chase-policy-lab': [loadChasePolicyLab],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
-  combos: [loadGenomeGrid, loadCombos], 'spread-perf': [loadSpreadPerf],
+  combos: [loadGenomeGrid, loadMixMatch, loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
@@ -9763,6 +9992,7 @@ _GENOME_GRID_PASSTHROUGH = (
     "holdout", "coverage", "grid", "canonical_parity", "dimension_summary", "live_paper_by_lane", "rows_artifact",
     "fill_model", "headline_fill_world", "shadow_fill_worlds", "headline_vs_shadow",
     "episode_integrity", "episode_cohorts", "episode_class_summary", "walk_forward_by_utc_day",
+    "research_layer", "top_100_by_oos_net", "family_totals", "policy_totals_reconciliation", "forward_tracker",
 )
 
 
@@ -9791,6 +10021,36 @@ def _genome_grid_payload(limit: int = 100) -> dict:
 @app.route("/api/genome-grid")
 def api_genome_grid():
     return jsonify(_genome_grid_payload(request.args.get("limit", 100, type=int)))
+
+
+RESEARCH_API_DIR = Path(os.getenv("ANALYZER_RESEARCH_API_DIR") or GENOME_GRID_REPORT_PATH.parent)
+_RESEARCH_CONTRACT_KEYS = (
+    "research_layer_status", "research_layer_error", "families_expected", "families_present_table",
+    "families_present_totals", "regimes_expected", "regimes_present", "cohorts_present", "reconciliation",
+    "forward_chain_ok", "forward_verdicts", "sort_keys", "top_100_totals", "datasets",
+)
+
+
+@app.route("/api/research")
+def api_research_index():
+    out = _research_cache.index(RESEARCH_API_DIR / _research_cache.DB_NAME)
+    try:
+        summary = json.loads((RESEARCH_API_DIR / _research_cache.SUMMARY_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        summary = {}
+    out["contract_inputs"] = {key: summary.get(key) for key in _RESEARCH_CONTRACT_KEYS}
+    out["examples"] = ["/api/research/top_100_policies", "/api/research/policy_totals?sort=train_rank&order=asc&limit=50",
+                       "/api/research/policy_totals?holdout_verdict=FAILED_HOLDOUT&q=FADE",
+                       "/api/research/regime_map?cohort=AI_DECISION&regime=trend&sort=oos_ev_bp",
+                       "/api/research/forward_tracker?verdict=FORWARD_CONFIRMED",
+                       "/api/research/mix_match_structures?cohort=XVENUE_EVALUATOR&sort=nested_oos_fine.ev_bp"]
+    return jsonify(out)
+
+
+@app.route("/api/research/<dataset>")
+def api_research_dataset(dataset: str):
+    status, out = _research_cache.query(RESEARCH_API_DIR / _research_cache.DB_NAME, dataset, request.args.to_dict())
+    return jsonify(out), status
 
 
 _SECTION_PAGE_HTML: dict = {"at": 0.0, "html": {}}
@@ -9849,7 +10109,8 @@ def api_sections_health():
     grid = (responses.get("/api/genome-grid") or (0, None))[1]
     combos = (responses.get("/api/combos") or (0, None))[1]
     extra = {
-        "combos": _dashboard_sections.genome_grid_checks(grid, combos, now, _collected_opportunity_count()),
+        "combos": _dashboard_sections.genome_grid_checks(grid, combos, now, _collected_opportunity_count())
+        + _dashboard_sections.research_api_checks((responses.get("/api/research") or (0, None))[1], grid),
         "genome": _dashboard_sections.safe_genome_checks(_safe_policy_v3_dashboard_source().get("report")),
     }
     sections = [_dashboard_sections.evaluate_section(entry, responses, now, extra.get(entry["id"])) for entry in index]

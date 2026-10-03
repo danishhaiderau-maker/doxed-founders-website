@@ -1064,7 +1064,8 @@ def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], ent
     del pnl0
     if matrix_out is not None:
         matrix_out.update(values=values, codes=codes, classes=classes,
-                          ts=np.array([episodes[r["idx"]]["signal_ts"] for r in done], dtype=np.float64))
+                          ts=np.array([episodes[r["idx"]]["signal_ts"] for r in done], dtype=np.float64),
+                          episode_idx=np.array([r["idx"] for r in done], dtype=np.int64))
     n_oos = int(is_oos.sum())
     n_train = len(done) - n_oos
     rows = []
@@ -1287,22 +1288,34 @@ def live_paper_by_lane(mirror: Path) -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001
         active, retired = set(), set()
     by_lane: dict[str, list[float]] = defaultdict(list)
+    seen_ts: dict[str, list[float]] = defaultdict(list)
     for row in _read_jsonl(mirror / "v3" / "ledgers" / "lifecycle.jsonl"):
         pnl = _num(row.get("net_pnl_usd"))
         if row.get("terminal") is True and pnl is not None:
-            by_lane[str(row.get("research_lane") or "UNKNOWN")].append(pnl)
+            lane = str(row.get("research_lane") or "UNKNOWN")
+            by_lane[lane].append(pnl)
+            marks = [t for t in (_num(row.get("mae_ts")), _num(row.get("mfe_ts"))) if t]
+            if marks:
+                seen_ts[lane].append(max(marks))
     out = []
     for lane, vals in sorted(by_lane.items()):
         arr = np.array(vals)
+        curve = np.cumsum(arr)
+        span = (max(seen_ts[lane]) - min(seen_ts[lane])) / 86400.0 if len(seen_ts[lane]) > 1 else 0.0
         status = "ACTIVE_REGISTRY" if lane in active else "RETIRED_QUARANTINED" if lane in retired else "NON_TILE_OR_CONTROL"
         out.append({"lane": lane, "evidence_label": "LIVE_PAPER", "registry_status": status,
                     "fill_model": "FLY_PAPER_PRE_REALISTIC_V1",
                     "fill_model_note": "Fly paper fills predate REALISTIC_V1 (post-freeze clean epoch); not comparable "
                                        "with the REALISTIC_V1 headline rows",
-                    "terminal_closes": len(vals), "wins": int((arr > 0).sum()),
+                    "terminal_closes": len(vals), "wins": int((arr > 0).sum()), "losses": int((arr < 0).sum()),
                     "win_rate_pct": round(100 * float((arr > 0).mean()), 2),
                     "net_pnl_usd": round(float(arr.sum()), 6), "ev_per_close_usd": round(float(arr.mean()), 6),
+                    "avg_pnl_bp": _bp(float(arr.mean())),
+                    "max_drawdown_usd": round(float(np.min(curve - np.maximum.accumulate(np.maximum(curve, 0.0)))), 6),
+                    "max_drawdown_basis": "ledger append order (close order); peak includes the zero start",
+                    "trades_per_day": round(len(vals) / span, 2) if span >= 1 / 24 else None,
                     "comparable_with_current_roster": status == "ACTIVE_REGISTRY"})
+    out.sort(key=lambda x: (-x["net_pnl_usd"], x["lane"]))
     return out
 
 
@@ -1431,6 +1444,7 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
                  for world in WORLDS}
     walk_forward: dict[str, Any] = {}
     class_summary: dict[str, Any] = {}
+    layer: dict[str, Any] | None = None
     if matrix:
         index = {id(r): k for k, r in enumerate(rows)}
         for r in {id(r): r for lst in (*top_by_world.values(), *confirmed.values()) for r in lst}.values():
@@ -1467,6 +1481,11 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
                 for klass in sorted(set(matrix["classes"].tolist()))},
             "note": "best_headline_policy_by_class is in-sample (all fills, no holdout) - descriptive only",
         }
+        from research import genome_research_layer as research_layer  # noqa: PLC0415
+
+        layer = research_layer.compute(sys.modules[__name__], mirror, tape, episodes, matrix, row_keys(entries, protections),
+                                       entries, protections, rows, out_dir, generation=signature,
+                                       code_revision=_revision())
         del matrix
     report = {
         "schema": SCHEMA,
@@ -1556,11 +1575,21 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         "inputs": {"tape_files": tape.receipts, "mirror": str(mirror), "tier_a": str(tier_a)},
         "runtime_sec": round(time.time() - started, 1),
     }
+    if layer is not None:
+        from research import genome_research_layer as research_layer  # noqa: PLC0415
+
+        report.update(research_layer.report_block(layer))
     out_dir.mkdir(parents=True, exist_ok=True)
     blob = gzip.compress("\n".join(json.dumps(r, separators=(",", ":"), default=str) for r in rows).encode("utf-8"))
     report["rows_artifact"] = {"file": "genome_grid_rows.jsonl.gz", "rows": len(rows), "sha256": hashlib.sha256(blob).hexdigest()}
     _atomic_write(out_dir / "genome_grid_rows.jsonl.gz", blob)
     _atomic_write(out_dir / "genome_grid_report.json", json.dumps(report, indent=1, default=str).encode("utf-8"))
+    if layer is not None:
+        try:
+            research_layer.materialize(layer, report, out_dir)
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"research_api_cache": "FAILED", "error": f"{type(exc).__name__}: {exc}"[:300]}),
+                  file=sys.stderr)
     return report
 
 
