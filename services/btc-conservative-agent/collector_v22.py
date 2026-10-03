@@ -1359,6 +1359,80 @@ def research_event_generation_stat_signature(
     return tuple(rows)
 
 
+_EVENT_SEAL_QUARANTINE_SCHEMA = "research_event_v22_seal_quarantine_v1"
+
+
+def plan_orphan_event_seals(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> dict:
+    """Read-only: canonical seal receipts whose sealed generation file no longer exists.
+
+    A retired (deleted) sealed generation leaves its receipt behind; the
+    receipt then fails ``_load_valid_event_seals`` for every reader. Receipts
+    whose file is present are never orphans, whatever their content.
+    """
+    seal_dir = _event_seal_dir(root)
+    orphans = []
+    if os.path.isdir(seal_dir):
+        for name in sorted(os.listdir(seal_dir)):
+            path = os.path.join(seal_dir, name)
+            if not (name.startswith("generation-") and name.endswith(".json") and os.path.isfile(path)):
+                continue
+            try:
+                generation = int(name[len("generation-"):-len(".json")])
+            except ValueError:
+                continue
+            if generation <= 0 or name != f"generation-{generation}.json":
+                continue
+            if os.path.isfile(os.path.join(root, f"{events_file}.{generation}")):
+                continue
+            orphans.append({"name": name, "generation": generation,
+                            "bytes": os.path.getsize(path), "sha256": _sha256_file(path)})
+    body = {"schema": _EVENT_SEAL_QUARANTINE_SCHEMA, "events_file": events_file, "orphans": orphans}
+    body["plan_sha256"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return body
+
+
+def quarantine_orphan_event_seals(
+    root: str, *, expected_plan_sha256: str, events_file: str = RESEARCH_EVENTS_FILE,
+    stamp: Optional[str] = None,
+) -> dict:
+    """Move orphan seal receipts into ``seals/quarantine/<stamp>/``; never deletes.
+
+    Runs under the collector writer lock so no rotation can interleave. The
+    index rebuilds from the surviving generations on its next reconcile
+    because the generation signature changes.
+    """
+    import time as _time
+
+    with _event_writer_exclusive(root):
+        if os.path.isfile(_event_rotation_path(root)):
+            raise RuntimeError("V22_ROTATION_IN_PROGRESS")
+        plan = plan_orphan_event_seals(root, events_file)
+        if plan["plan_sha256"] != expected_plan_sha256:
+            raise RuntimeError("V22_SEAL_QUARANTINE_PLAN_CHANGED")
+        if not plan["orphans"]:
+            return {**plan, "status": "NOTHING_TO_QUARANTINE", "moved": []}
+        stamp = stamp or _time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime())
+        target = os.path.join(_event_seal_dir(root), "quarantine", stamp)
+        if os.path.exists(target):
+            raise RuntimeError("V22_SEAL_QUARANTINE_TARGET_EXISTS")
+        os.makedirs(target)
+        manifest_path = os.path.join(target, "quarantine_manifest.json")
+        _atomic_json(manifest_path, {**plan, "status": "PREPARED"})
+        moved = []
+        for row in plan["orphans"]:
+            source = os.path.join(_event_seal_dir(root), row["name"])
+            if _sha256_file(source) != row["sha256"]:
+                raise RuntimeError("V22_SEAL_QUARANTINE_RECEIPT_CHANGED")
+            os.replace(source, os.path.join(target, row["name"]))
+            moved.append(row["name"])
+        _fsync_parent(os.path.join(_event_seal_dir(root), "x"))
+        _atomic_json(manifest_path, {**plan, "status": "COMPLETE", "moved": moved})
+        _load_valid_event_seals(root, events_file, validate_hash=False)
+        return {**plan, "status": "COMPLETE", "moved": moved,
+                "quarantine_dir": os.path.relpath(target, root).replace(os.sep, "/")}
+
+
 def _recover_event_rotation(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> Optional[dict]:
     """Finish or roll back the single hash-bound rotation transaction."""
     pending_path = _event_rotation_path(root)

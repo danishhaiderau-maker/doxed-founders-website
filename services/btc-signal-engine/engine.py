@@ -33248,6 +33248,16 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 scope_deletions[name] = scoped
                 operation.update(scope_deletions=scope_deletions)
                 store._atomic_json_receipt(operation_path, operation)
+        # Deleting a sealed research_events_v22 generation leaves its seal
+        # receipt naming a missing file, which every collector read rejects.
+        stage = "V22_SEAL_RETIREMENT"
+        from collector_v22 import plan_orphan_event_seals, quarantine_orphan_event_seals
+        seal_plan = plan_orphan_event_seals(str(root))
+        seal_retirement = quarantine_orphan_event_seals(
+            str(root), expected_plan_sha256=seal_plan["plan_sha256"])
+        operation.update(v22_seal_retirement={key: seal_retirement.get(key) for key in
+                                              ("status", "plan_sha256", "moved", "quarantine_dir")})
+        store._atomic_json_receipt(operation_path, operation)
         stage = "GENOME_RESET"
         genome_reset = operation.get("genome_reset", {})
         if bridge is not None and not resume:

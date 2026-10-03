@@ -304,3 +304,89 @@ def test_cross_process_duplicate_is_idempotent_and_conflict_fails_closed(tmp_pat
     outcome = results.get(timeout=1.0)
     assert outcome[:2] == ("error", "RuntimeError")
     assert outcome[2] == "V22_EVENT_ID_CONFLICT:shared"
+
+
+def _retire_generation_file(root, generation):
+    os.remove(os.path.join(str(root), f"{RESEARCH_EVENTS_FILE}.{generation}"))
+
+
+def test_retired_generation_receipt_breaks_reads_until_quarantined(tmp_path):
+    root = str(tmp_path)
+    assert write_research_event_once(_event("old-1"), data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    assert write_research_event_once(_event("old-2"), data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    assert write_research_event_once(_event("live"), data_dir=root)[0]
+    _retire_generation_file(tmp_path, 1)
+    _retire_generation_file(tmp_path, 2)
+    with pytest.raises(RuntimeError, match="V22_SEAL_RECEIPT_INVALID"):
+        event_already_written("live", data_dir=root)
+
+    plan = collector_v22.plan_orphan_event_seals(root)
+    assert [row["generation"] for row in plan["orphans"]] == [1, 2]
+    result = collector_v22.quarantine_orphan_event_seals(
+        root, expected_plan_sha256=plan["plan_sha256"], stamp="20261004T000000Z")
+    assert result["status"] == "COMPLETE" and result["moved"] == ["generation-1.json", "generation-2.json"]
+    quarantine = tmp_path / "research_events_v22.seals" / "quarantine" / "20261004T000000Z"
+    assert sorted(p.name for p in quarantine.iterdir()) == [
+        "generation-1.json", "generation-2.json", "quarantine_manifest.json"]
+    manifest = json.loads((quarantine / "quarantine_manifest.json").read_text("utf-8"))
+    assert manifest["status"] == "COMPLETE" and manifest["plan_sha256"] == plan["plan_sha256"]
+
+    assert research_event_generation_paths(root) == [str(tmp_path / RESEARCH_EVENTS_FILE)]
+    assert event_already_written("live", data_dir=root)
+    assert not event_already_written("old-1", data_dir=root)
+    assert write_research_event_once(_event("after-repair"), data_dir=root)[0]
+    assert rotate_research_events(data_dir=root)["generation"] == 1
+    assert collector_v22.plan_orphan_event_seals(root)["orphans"] == []
+
+
+def test_quarantine_leaves_receipts_with_present_files_and_binds_to_the_plan(tmp_path):
+    root = str(tmp_path)
+    for name in ("g1", "g2"):
+        assert write_research_event_once(_event(name), data_dir=root)[0]
+        rotate_research_events(data_dir=root)
+    _retire_generation_file(tmp_path, 1)
+    plan = collector_v22.plan_orphan_event_seals(root)
+    assert [row["generation"] for row in plan["orphans"]] == [1]
+    with pytest.raises(RuntimeError, match="V22_SEAL_QUARANTINE_PLAN_CHANGED"):
+        collector_v22.quarantine_orphan_event_seals(root, expected_plan_sha256="0" * 64)
+    assert (tmp_path / "research_events_v22.seals" / "generation-1.json").is_file()
+    collector_v22.quarantine_orphan_event_seals(root, expected_plan_sha256=plan["plan_sha256"])
+    assert (tmp_path / "research_events_v22.seals" / "generation-2.json").is_file()
+    assert research_event_generation_paths(root)[0] == str(tmp_path / f"{RESEARCH_EVENTS_FILE}.2")
+    assert event_already_written("g2", data_dir=root)
+
+
+def test_quarantine_without_orphans_is_a_no_op(tmp_path):
+    root = str(tmp_path)
+    assert write_research_event_once(_event("only"), data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    plan = collector_v22.plan_orphan_event_seals(root)
+    result = collector_v22.quarantine_orphan_event_seals(root, expected_plan_sha256=plan["plan_sha256"])
+    assert result["status"] == "NOTHING_TO_QUARANTINE"
+    assert not (tmp_path / "research_events_v22.seals" / "quarantine").exists()
+
+
+def test_seal_repair_cli_requires_token_and_the_maintenance_hold(tmp_path, capsys):
+    import v22_seal_repair
+
+    root = str(tmp_path)
+    assert write_research_event_once(_event("x"), data_dir=root)[0]
+    rotate_research_events(data_dir=root)
+    _retire_generation_file(tmp_path, 1)
+    assert v22_seal_repair.main(["plan", "--runtime-root", root]) == 0
+    token = json.loads(capsys.readouterr().out)["confirm_token"]
+    assert token.startswith("QUARANTINE-V22-SEALS:")
+    assert v22_seal_repair.main(["execute", "--runtime-root", root, "--confirm", "QUARANTINE-V22-SEALS:bad"]) == 5
+    running = {"execution_paused": False, "pause_owner": None, "live_armed": False,
+               "bitfinex_live_enabled": False, "force_paper_mode": True}
+    assert v22_seal_repair.main(["execute", "--runtime-root", root, "--confirm", token],
+                                fetch=lambda _url: running) == 7
+    assert (tmp_path / "research_events_v22.seals" / "generation-1.json").is_file()
+    held = {**running, "execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE"}
+    capsys.readouterr()
+    assert v22_seal_repair.main(["execute", "--runtime-root", root, "--confirm", token],
+                                fetch=lambda _url: held) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "COMPLETE" and out["remaining_orphans"] == []

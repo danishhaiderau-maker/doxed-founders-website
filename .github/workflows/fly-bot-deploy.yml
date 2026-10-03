@@ -40,6 +40,8 @@ on:
           - clean-epoch-wipe-execute
           - clean-epoch-reset-plan
           - clean-epoch-reset-execute
+          - repair-v22-seals-plan
+          - repair-v22-seals-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -976,6 +978,67 @@ jobs:
           print("held down rev=" + str(health.get("source_git_rev")))
           PY
 
+  repair-v22-seals:
+    # Moves research_events_v22 seal receipts whose sealed generation file was
+    # deleted into research_events_v22.seals/quarantine/<stamp>/ (never deletes)
+    # so collector_v22 reads and the event index reconcile again. Execute
+    # requires QUARANTINE-V22-SEALS:<plan sha12> and the paper maintenance hold
+    # (paused DEPLOY_MAINTENANCE, disarmed, force-paper); paper is never resumed.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v22-seals-plan' || inputs.mode == 'repair-v22-seals-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Plan (read-only)
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label seal-plan --deadline-sec 600 -- python /app/v22_seal_repair.py plan --runtime-root /app/data/runtime)"
+          printf '%s\n' "$plan"
+          token="$(printf '%s' "$plan" | python -c 'import json,sys; text=sys.stdin.read(); start=text.index("{"); print(json.loads(text[start:])["confirm_token"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "token=$token"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require confirm token and the maintenance hold
+        if: ${{ inputs.mode == 'repair-v22-seals-execute' }}
+        env:
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          TOKEN: ${{ steps.plan.outputs.token }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          if os.environ["CONFIRM"] != os.environ["TOKEN"]:
+              raise SystemExit("clean_epoch_confirm must be " + os.environ["TOKEN"])
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=30) as response:
+              health = json.load(response)
+          expected = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
+                      "bitfinex_live_enabled": False, "force_paper_mode": True}
+          bad = {k: health.get(k) for k, v in expected.items() if health.get(k) != v}
+          if bad:
+              raise SystemExit("maintenance hold not proven: " + json.dumps(bad))
+          print("held down rev=" + str(health.get("source_git_rev")))
+          PY
+
+      - name: Quarantine orphan seal receipts
+        if: ${{ inputs.mode == 'repair-v22-seals-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+        run: |
+          set -euo pipefail
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label seal-execute --deadline-sec 600 -- \
+            python /app/v22_seal_repair.py execute --runtime-root /app/data/runtime --confirm "$CONFIRM"
+
   clean-epoch-boundary-reset:
     # Guarded Fresh Collection reset (POST /api/wipe_fly_only, no laptop signal)
     # at the clean-epoch paper boundary, right after the epoch deploy: removes
@@ -1082,16 +1145,40 @@ jobs:
           printf '%s\n' "$before" > reset-plan-before.json
           read -r present relay_sha < <(printf '%s' "$before" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("ok") is True and not d.get("protected_candidates"), "boundary plan is not clean"; r=d["relay_evidence"]; assert r.get("readable") is True, "relay evidence unreadable"; print(",".join(d["protected_present"]) or "-", r["pending_ids_sha256"])')
           python - <<'PY'
-          import json, os, urllib.request
-          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=b"{}", method="POST",
-                                           headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
-          with urllib.request.urlopen(request, timeout=900) as response:
-              body = json.load(response)
-          reset = body.get("reset") or {}
-          print(json.dumps({"status": body.get("status"), "reset_ok": reset.get("ok"), "reset_id": reset.get("reset_id"),
-                            "epoch": reset.get("epoch_id") or reset.get("new_epoch_id")}, sort_keys=True))
-          if body.get("status") != "ok":
-              raise SystemExit("guarded reset refused or failed")
+          import json, os, time, urllib.error, urllib.request
+          # Refusals returned before any archive, deletion or epoch work starts.
+          retryable = {"fresh_collection_state_lock_timeout", "fresh_collection_trade_lock_timeout",
+                       "fresh_collection_sync_scheduler_busy", "fresh_collection_sync_builder_active",
+                       "fresh_collection_cleanup_lease_busy", "fresh_collection_epoch_writer_busy",
+                       "fresh_collection_research_writer_busy"}
+          def attempt():
+              request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=b"{}", method="POST",
+                                               headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=900) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  try:
+                      return json.loads(exc.read() or b"{}") | {"http_status": exc.code}
+                  except ValueError:
+                      return {"status": "error", "http_status": exc.code}
+          for number in range(1, 9):
+              body = attempt()
+              reset = body.get("reset") or {}
+              print(json.dumps({"attempt": number, "http_status": body.get("http_status", 200), "status": body.get("status"),
+                                "message": body.get("message"), "reset_ok": reset.get("ok"), "error": reset.get("error"),
+                                "failed_stage": reset.get("failed_stage"), "wipe_aborted": reset.get("wipe_aborted"),
+                                "payload_deletion_completed": reset.get("payload_deletion_completed"),
+                                "operation_receipt": reset.get("operation_receipt"), "summary": reset.get("summary"),
+                                "epoch": reset.get("epoch_id") or reset.get("new_epoch_id")}, sort_keys=True), flush=True)
+              if body.get("status") == "ok":
+                  break
+              if not (reset.get("wipe_aborted") is True and reset.get("error") in retryable
+                      and not reset.get("operation_receipt")):
+                  raise SystemExit("guarded reset refused or failed")
+              time.sleep(30)
+          else:
+              raise SystemExit("guarded reset still refused after bounded retries (no reset work started)")
           PY
           [ "$present" = "-" ] && present=""
           python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$MACHINE_ID" --label reset-verify --deadline-sec 1800 -- \

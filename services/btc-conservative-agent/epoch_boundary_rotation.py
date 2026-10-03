@@ -4,9 +4,12 @@ Runs once per epoch, right after the bot opens a *new* ``data_epoch.json``.
 
 * ``research_events_v22.jsonl``: the head is sealed into the next numbered
   generation through ``collector_v22.rotate_research_events`` (crash-safe,
-  under the collector's real writer lock, never deletes), so
-  ``clean_epoch_wipe`` sees a pre-epoch sealed rotation it may remove. The
-  provisional store, seals and indexes are untouched.
+  under the collector's real writer lock, never deletes). A sealed
+  generation stays bound to its ``research_events_v22.seals`` receipt:
+  ``clean_epoch_wipe`` keeps it, and the guarded Fresh Collection reset
+  retires it and then quarantines the orphaned receipt
+  (``collector_v22.quarantine_orphan_event_seals``). The provisional store
+  and indexes are untouched.
 * V3 ledgers are restart-recovery state. Their generation pointers are bound
   to the deployed revision, so adopting a legacy generation 0 here would
   invalidate every later append after the next deploy. They are assessed
