@@ -60,7 +60,7 @@ RUN python -c "import ai_shadow_challengers, ai_regime_shadow, decision_feature_
 # Watch-only market-context collector and its tape/session/regime helpers.
 RUN python -c "import market_session_calendar, trailing_regime, market_context_tape, market_context_collector"
 # System-health banner and Alerts section (dashboard routes import both).
-RUN python -c "import system_health_banner, system_health_alerts, runtime_uptime"
+RUN python -c "import system_health_banner, system_health_alerts, runtime_uptime, monitor_api"
 # Thread heartbeats, relay stale-owner delivery guard, AI call cost and shadow chase buckets load at bot import.
 RUN python -c "import thread_health, relay_delivery_guard, ai_call_cost, shadow_chase_buckets"
 
