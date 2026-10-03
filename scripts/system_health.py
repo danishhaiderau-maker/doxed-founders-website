@@ -604,7 +604,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         return read_analyzer_report(reports, name)
 
     inputs["analyzer_receipt"] = analyzer_report("analyzer_generation_receipt.json")
-    inputs["analyzer_integrity"] = analyzer_report("analyzer_integrity_report.json")
+    inputs["analyzer_integrity"] = read_generation_integrity(reports, inputs["analyzer_receipt"])
     inputs["analyzer_manifest_generated_at"] = (analyzer_report("report_manifest.json") or {}).get("generated_at")
     inputs["data_health_report"] = analyzer_report("data_health_report.json")
     inputs["ledger_reconciliation"] = analyzer_report("ledger_reconciliation.json")
@@ -652,6 +652,20 @@ def read_analyzer_report(reports: Path, name: str) -> Any:
     # dir; reports/ only mirrors part of it.
     found = read_json(reports.parent / name)
     return found if found is not None else read_json(reports / name)
+
+
+def read_generation_integrity(reports: Path, receipt: Any) -> Any:
+    # A running pass rewrites the analyzer-dir integrity report before its receipt, so
+    # mid-pass that copy belongs to the next generation; judge the receipt against the
+    # integrity report of its own generation.
+    name = "analyzer_integrity_report.json"
+    candidates = [read_json(reports.parent / name), read_json(reports / name)]
+    gid = receipt.get("generation_id") if isinstance(receipt, Mapping) else None
+    if gid:
+        for found in candidates:
+            if isinstance(found, Mapping) and found.get("generation_id") == gid:
+                return found
+    return next((found for found in candidates if found is not None), None)
 _RETENTION_EXIT = re.compile(r"^(\S+) pid=\d+ RETENTION exit=(-?\d+)\s*(.*)$")
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"
 

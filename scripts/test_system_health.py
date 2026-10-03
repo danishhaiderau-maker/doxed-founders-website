@@ -1538,6 +1538,24 @@ def test_analyzer_report_reads_generation_dir_before_partial_reports_mirror(tmp_
     assert sh.read_analyzer_report(reports, "ledger_reconciliation.json") is None
 
 
+def test_integrity_is_read_from_the_receipts_generation_while_a_pass_is_running(tmp_path):
+    reports = tmp_path / "analyzer" / "reports"
+    reports.mkdir(parents=True)
+    receipt = {"level": "RED", "generation_id": "gen-a"}
+    (reports.parent / "analyzer_integrity_report.json").write_text(
+        json.dumps({"report_status": "VALID", "generated_at": "2026-10-03T13:42:35Z"}), encoding="utf-8")
+    (reports / "analyzer_integrity_report.json").write_text(
+        json.dumps({"report_status": "INVALID", "generation_id": "gen-a"}), encoding="utf-8")
+    assert sh.read_generation_integrity(reports, receipt) == {"report_status": "INVALID", "generation_id": "gen-a"}
+    # Same generation in the analyzer dir wins; no generation binding keeps the analyzer-dir copy.
+    (reports.parent / "analyzer_integrity_report.json").write_text(
+        json.dumps({"report_status": "INVALID", "generation_id": "gen-a", "dir": True}), encoding="utf-8")
+    assert sh.read_generation_integrity(reports, receipt)["dir"] is True
+    assert sh.read_generation_integrity(reports, {"level": "RED"})["dir"] is True
+    assert sh.read_generation_integrity(reports, None)["dir"] is True
+    assert sh.read_generation_integrity(tmp_path / "missing" / "reports", receipt) is None
+
+
 def test_clean_epoch_lifecycle_defects_are_a_declared_amber_blocker_until_expiry():
     now = ts("2026-10-03T22:30:00Z")
     inputs = healthy(now)
