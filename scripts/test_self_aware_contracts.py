@@ -196,6 +196,32 @@ def test_fly_chase_buckets_dead_vs_not_applicable():
     assert _eval(spec, {"chase_analytics": {"status": "NOT_APPLICABLE"}})["status"] == "GREEN"
 
 
+class _GenerationFetch:
+    def __init__(self, completed_at: str):
+        self.summary = {"generation": {"analyzer_completed_at": completed_at}}
+
+    def get(self, source):
+        return self.summary, {}
+
+
+def test_fly_analyzer_mirror_must_serve_the_current_laptop_generation():
+    def iso(offset_sec: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() - offset_sec))
+
+    panel = {"mode": "external_desktop_analyzer", "ok": False, "endpoint": "summary", "mirror_available": True,
+             "mirror_status": {"analyzer_generated_at": iso(3000)}}
+    dead = ct._rec_fly_analyzer_mirror({**panel, "mirror_available": False}, _ctx(fetch=_GenerationFetch(iso(60))))
+    assert [v["kind"] for v in dead[0]] == ["DEAD_SECTION"]
+    same = ct._rec_fly_analyzer_mirror(panel, _ctx(fetch=_GenerationFetch(panel["mirror_status"]["analyzer_generated_at"])))
+    assert same[0] == [] and same[1]["mirror_matches_local_generation"] is True
+    # A newer laptop generation inside the publish grace window is not yet a failure.
+    assert ct._rec_fly_analyzer_mirror(panel, _ctx(fetch=_GenerationFetch(iso(300))))[0] == []
+    lagging = ct._rec_fly_analyzer_mirror(panel, _ctx(fetch=_GenerationFetch(iso(2400))))[0]
+    assert [(v["kind"], v["severity"]) for v in lagging] == [("STALE", "AMBER")]
+    ancient = {**panel, "mirror_status": {"analyzer_generated_at": iso(5 * 3600)}}
+    assert [v["severity"] for v in ct._rec_fly_analyzer_mirror(ancient, _ctx(fetch=_GenerationFetch(iso(2400))))[0]] == ["RED"]
+
+
 def test_fill_model_headline_requires_realistic_v1():
     spec = _spec(id="analyzer.genome_grid_fill_model", reconcile="fill_model_headline")
     good = {"fill_model": {"fill_model": "REALISTIC_V1", "shadow_fill_model": "OPTIMISTIC_TOUCH_V1"},

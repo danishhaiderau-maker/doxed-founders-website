@@ -342,3 +342,51 @@ def test_publication_symlink_is_rejected_without_modifying_target(tmp_path):
     else:
         raise AssertionError("symlink publication target accepted")
     assert outside.read_text(encoding="utf-8") == '{"preserved":true}'
+
+
+def _with_entry_children(v3: Path) -> None:
+    intents_path = v3 / "ledgers" / "order_intent.jsonl"
+    intents = [json.loads(line) for line in intents_path.read_text().splitlines()]
+    _write(intents_path, [dict(row, entry_children=[{"child": i, "start_ts": i} for i in range(50)])
+                          for row in intents])
+
+
+def test_intent_children_never_change_bindings_and_reuse_requires_identical_ledgers(tmp_path, monkeypatch):
+    v3, _ = _fixture(tmp_path)
+    plain = build_v3_binding_index(v3)
+    _with_entry_children(v3)
+    builds = []
+    original = bindings_module._build_v3_binding_index
+    monkeypatch.setattr(bindings_module, "_build_v3_binding_index",
+                        lambda root: builds.append(root) or original(root))
+    heavy = build_v3_binding_index(v3)
+    assert heavy == plain and len(builds) == 1
+
+    reused = build_v3_binding_index(v3, reuse_recent=True)
+    assert reused == heavy and len(builds) == 1
+    reused["bindings"].clear()
+    assert build_v3_binding_index(v3, reuse_recent=True) == heavy and len(builds) == 1
+
+    assert build_v3_binding_index(v3) == heavy and len(builds) == 2
+    with (v3 / "ledgers" / "decision.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert build_v3_binding_index(v3, reuse_recent=True) == heavy and len(builds) == 3
+
+
+def test_evaluator_incident_index_still_inspects_full_intent_rows(tmp_path, monkeypatch):
+    from research import runtime_identity_incidents
+    from research.policy_evidence_evaluator import build_v3_conservative_results
+
+    v3, _ = _fixture(tmp_path)
+    _with_entry_children(v3)
+    seen = []
+    original = runtime_identity_incidents.IncidentEpisodeIndex.add
+
+    def recording(self, rows):
+        rows = list(rows)
+        seen.extend(len(row.get("entry_children") or []) for row in rows)
+        return original(self, rows)
+
+    monkeypatch.setattr(runtime_identity_incidents.IncidentEpisodeIndex, "add", recording)
+    build_v3_conservative_results(v3)
+    assert sorted(seen)[-1] == 50 and seen.count(50) == 1

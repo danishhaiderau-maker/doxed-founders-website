@@ -142,6 +142,15 @@ def test_disclosed_promotion_warnings_reach_cycle_status_without_blocking():
     assert "PROMOTION_DEGRADED" in after and "Stop-Cycle" not in after
 
 
+def test_successful_generation_is_published_to_the_fly_mirror_without_gating_the_cycle():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    publish = cycle.split("Set-CycleStatus 'MIRROR_PUBLISH'", 1)[1].split("Set-CycleStatus 'RETENTION'", 1)[0]
+    assert "if ($analyzerExit -eq 0) {\n  Set-CycleStatus 'MIRROR_PUBLISH'" in cycle
+    assert "publish_analyzer_mirror.py" in publish and "analyzer-mirror-publish.status.json" in publish
+    assert "Wait-Job -Job $publishJob -Timeout $MirrorPublishTimeoutSec" in publish
+    assert "$analyzerExit =" not in publish and "Stop-Cycle" not in publish
+
+
 def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
     cycle = _source("run-segment-analyzer-cycle.ps1")
     assert "[int]$LockWaitMaxSec = 900" in cycle

@@ -234,17 +234,19 @@ def _deployed_policy_collection() -> dict[str, Any]:
     }
 
 
-def _read_ledger(path: Path) -> list[dict[str, Any]]:
-    rows = []
+def _iter_ledger(path: Path):
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 row = json.loads(line)
                 if isinstance(row, dict):
-                    rows.append(row)
+                    yield row
     except FileNotFoundError:
-        pass
-    return rows
+        return
+
+
+def _read_ledger(path: Path) -> list[dict[str, Any]]:
+    return list(_iter_ledger(path))
 
 
 def _recover_expired_order_resolutions(
@@ -897,7 +899,17 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     )
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
     independence_clusters = _shared_call_independence_clusters(opportunities, decisions)
-    order_intents = [row for row in scoped(_read_ledger(store.ledger_path("order_intent"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    # Stream intents: the incident index sees each full row, then the unused
+    # ``entry_children`` (~97% of the ledger) is released instead of retained.
+    order_intents = []
+    for row in _iter_ledger(store.ledger_path("order_intent")):
+        if selected_epoch is None or str(row.get("epoch_id") or "") != selected_epoch:
+            continue
+        if str(row.get("episode_id") or "") not in allowed_episodes:
+            continue
+        incident_index.add((row,))
+        row.pop("entry_children", None)
+        order_intents.append(row)
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
@@ -905,7 +917,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         row for row in scoped(_read_ledger(store.ledger_path("market_segment")))
         if str(row.get("episode_id") or "") in allowed_episodes
     ]
-    for incident_rows in (opportunities, decisions, order_intents, lifecycles, executions,
+    for incident_rows in (opportunities, decisions, lifecycles, executions,
                           market_segment_rows, pre_entry_feature_receipts):
         incident_index.add(incident_rows)
     pre_signal_context_segments = [
