@@ -111,3 +111,14 @@ def test_reset_plan_dry_runs_execute_gates_before_any_mutation():
     assert "data_epoch.json" in plan and "printenv SOURCE_GIT_REV" in plan and "snapshots list" in plan
     for mutating in ("/api/pause", "/api/wipe_fly_only", "flyctl machine update", "flyctl deploy", "rm -"):
         assert mutating not in plan
+
+
+def test_reset_writer_probe_is_a_read_only_detached_sample():
+    job = WORKFLOW.split("  probe-reset-writers:\n", 1)[1].split("\n  inspect-runtime:\n", 1)[0]
+    assert "inputs.mode == 'probe-reset-writers'" in job
+    assert "scripts/fly_detached_exec.py" in job and "fly-reset-writer-probe.py" in job
+    for mutating in ("/api/", "flyctl machine update", "flyctl deploy", "rm -", "clean_epoch_confirm"):
+        assert mutating not in job
+    probe = (ROOT / "scripts/fly-reset-writer-probe.py").read_text(encoding="utf-8")
+    for mutating in ("os.remove", "unlink", "write_text", "open(path, \"w", ".write(", "os.rename", "os.replace"):
+        assert mutating not in probe
