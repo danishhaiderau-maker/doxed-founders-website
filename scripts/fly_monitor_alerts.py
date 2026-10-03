@@ -73,6 +73,8 @@ POLICIES: Mapping[str, Policy] = {
     "monitor_schedule_gap": Policy(1, 0.0, 12 * HOUR, False, WARNING),
     # Shadow/research subsystems (never inputs to ready_ok, so not covered by not_ready).
     "xvl_evaluator_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    # Rolling median over the last fills; a restart empties the window.
+    "xvl_signal_to_fill_slow": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "cross_venue_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "cross_venue_reconnects": Policy(2, 30 * 60.0, 6 * HOUR, True, WARNING),
     "market_context_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
