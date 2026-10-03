@@ -10,6 +10,10 @@ Research only (SIMULATED_COUNTERFACTUAL, REALISTIC_V1 counterfactual replay on t
    current genome outcome matrix, and applies the pre-declared FORWARD_RULES_V1 verdict.
 
 FORWARD_CONFIRMED candidates are flagged as paper-tile proposals (draft registry PR only); nothing is deployed.
+
+Registered paper tiles can also be frozen into the chain (``freeze_registry_tiles``, kind ``REGISTRY_TILE``) under an
+explicit batch id. Their exact registry rule is hashed here, but they are scored by their own pre-registration in
+``tile_paired_comparison_report.json``, never by the genome grid.
 """
 from __future__ import annotations
 
@@ -41,6 +45,10 @@ FORWARD_RULES = {
 }
 RULES_SHA = hashlib.sha256(json.dumps(FORWARD_RULES, sort_keys=True).encode()).hexdigest()[:16]
 MAX_PER_COHORT = 60
+REGISTRY_TILE_KIND = "REGISTRY_TILE"
+REGISTRY_TILE_COHORT = "REGISTRY_TILES"
+REGISTRY_TILE_VERDICT = "SCORED_BY_TILE_PRE_REGISTRATION"
+REGISTRY_TILE_VERDICT_SOURCE = "tile_paired_comparison_report.json"
 
 
 def _sha(text: str) -> str:
@@ -107,13 +115,36 @@ def candidates_from(mix: Mapping[str, Any]) -> list[dict[str, Any]]:
     return uniq[:MAX_PER_COHORT]
 
 
+def registry_tile_candidates(registry: Mapping[str, Mapping[str, Any]], lanes: Iterable[str]) -> list[dict[str, Any]]:
+    """Exact registry rules of registered paper tiles, as forward-tracker candidates."""
+    out = []
+    for lane in lanes:
+        spec = registry[lane]
+        rule = {"lane": lane, "raw_policy_id": spec["raw_policy_id"], "policy_signature": spec["policy_signature"],
+                "policy_epoch": spec.get("policy_epoch"), "entry_policy": spec.get("entry_policy"),
+                "exit_policy": spec.get("exit_policy")}
+        out.append({"label": "PRE_REGISTERED_TILE", "kind": REGISTRY_TILE_KIND, "cohort": REGISTRY_TILE_COHORT,
+                    "procedure": (spec.get("pre_registration") or {}).get("hypothesis_id"), "rule": rule,
+                    "rule_sha": rule_sha(rule),
+                    "at_freeze": {"honest_label": (spec.get("pre_registration") or {}).get("honest_label")}})
+    return out
+
+
+def freeze_registry_tiles(root: Path, registry: Mapping[str, Mapping[str, Any]], lanes: Iterable[str], *,
+                          batch_id: str, now: float | None = None, code_revision: str | None = None) -> dict[str, Any]:
+    """Append one named batch of registered tiles to the hash chain (once per batch id)."""
+    return freeze_batch(root, registry_tile_candidates(registry, lanes), now=now, batch_id=batch_id,
+                        code_revision=code_revision)
+
+
 def freeze_batch(root: Path, candidates: list[Mapping[str, Any]], *, now: float | None = None,
-                 generation: str | None = None, code_revision: str | None = None) -> dict[str, Any]:
-    """Append today's batch (once per UTC day). Never rewrites existing lines."""
+                 generation: str | None = None, code_revision: str | None = None,
+                 batch_id: str | None = None) -> dict[str, Any]:
+    """Append one batch (once per UTC day, or once per explicit ``batch_id``). Never rewrites existing lines."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     now = float(now if now is not None else time.time())
-    batch_id = time.strftime("%Y-%m-%d", time.gmtime(now))
+    batch_id = batch_id or time.strftime("%Y-%m-%d", time.gmtime(now))
     rows, chain = load_frozen(root)
     if not chain["chain_ok"]:
         return {"status": "REFUSED_CHAIN_BROKEN", "batch_id": batch_id, "chain": chain}
@@ -189,6 +220,10 @@ def score(root: Path, grids: Mapping[str, "mm.Grid"], *, now: float | None = Non
         g = grids.get(rec.get("cohort"))
         base = {k: rec.get(k) for k in ("candidate_id", "batch_id", "batch_size", "frozen_at_utc", "label", "kind",
                                         "cohort", "procedure", "rule", "rule_sha", "at_freeze")}
+        if rec.get("kind") == REGISTRY_TILE_KIND:
+            out.append(base | {"status": REGISTRY_TILE_VERDICT, "verdict": REGISTRY_TILE_VERDICT,
+                               "verdict_source": REGISTRY_TILE_VERDICT_SOURCE})
+            continue
         if g is None:
             out.append(base | {"status": "UNSCORABLE_COHORT_ABSENT", "verdict": "INSUFFICIENT"})
             continue

@@ -27,9 +27,29 @@ same ordered manifest and registry signature at the exact deployed revision.
 
 A tile that only changes how an existing side rule enters (for example a
 resting maker limit instead of a taker) reuses a generic binding
-(`taker_time_exit_binding.py`, `maker_time_exit_binding.py`) and adds no
-runtime branch; its thin policy module wraps the binding that matches its
-registry `entry_policy.mode`, and the binding refuses any other mode.
+(`taker_time_exit_binding.py`, `maker_time_exit_binding.py`,
+`maker_chase_time_exit_binding.py`, `maker_confirm_market_time_exit_binding.py`)
+and adds no runtime branch; its thin
+policy module wraps the binding that matches its registry
+`entry_policy.mode`, and the binding refuses any other mode. The maker-chase
+binding reprices through the generic family chase. A cross-venue clock tile
+supplies `make_evaluator()` and its own shadow file; the per-second loop,
+capacity and submission throttles are generic. A new shadow file must be
+added to the JSONL append literals, research dashboard list, reset
+inventory and `scripts/self_aware/schema_registry.json`.
+
+Every specification carries plain-English card metadata (signal, side,
+order, chase, time limit, sessions and stand-aside gates; live exits in
+first-trigger-wins order; risk: early cut, hard stop, size, max concurrent,
+kill rules). `tile_card_sections(lane)` renders the ENTRY / EXIT / RISK
+MANAGEMENT sections for both dashboards, and the registry validator fails
+if any section is missing. Size is stated as margin and notional
+("$0.25 margin @100x ≈ $25 notional"), never as a maximum loss. Tile
+numbers are derived from `ACTIVE_TILE_ORDER`; never hard-code "Tile N".
+
+The analyzer cycle freezes the active roster into the forward-tracker
+hash chain once per `RESEARCH_STACK_VERSION` (batch
+`REGISTRY-<version>`); bump the version with every roster or rule change.
 
 ## Baseline benchmark
 

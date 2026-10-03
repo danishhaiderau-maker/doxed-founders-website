@@ -8,8 +8,70 @@ branch in the bot.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+UTC_SESSION_HOURS = {"ASIA": (0, 8), "EU": (8, 16), "US": (16, 24)}
+
+
+def utc_session(ts: float, hours: Mapping[str, Any] | None = None) -> str:
+    """Session label of a UTC timestamp (Asia 0-8, EU 8-16, US 16-24 by default)."""
+    hour = time.gmtime(float(ts)).tm_hour
+    for name, span in (hours or UTC_SESSION_HOURS).items():
+        lo, hi = int(span[0]), int(span[1])
+        if lo <= hour < hi:
+            return str(name).upper()
+    return "UNKNOWN"
+
+
+def session_gated(entry: Mapping[str, Any], ts: float) -> bool:
+    """True when the registry entry restricts sessions and ``ts`` falls outside them."""
+    allowed = tuple(str(s).upper() for s in entry.get("allowed_sessions") or ())
+    if not allowed or set(allowed) >= set(UTC_SESSION_HOURS):
+        return False
+    return utc_session(ts, entry.get("session_hours_utc")) not in allowed
+
+
+def registry_protections(exit_policy: Mapping[str, Any]) -> dict[str, Any]:
+    """PolicySpec keyword arguments for a registry exit policy's late-armed protections.
+
+    ``breakeven`` / ``trail`` / ``early_cut`` are optional dicts in margin % at
+    the tile's leverage (bp of price at 100x); absent keys leave the PolicySpec
+    defaults, so a plain time-exit tile is unchanged.
+    """
+    out: dict[str, Any] = {}
+    be = exit_policy.get("breakeven")
+    if be:
+        out["breakeven_trigger_margin_pct"] = float(be["trigger_margin_pct"])
+        out["breakeven_lock_margin_pct"] = float(be["lock_margin_pct"])
+    trail = exit_policy.get("trail")
+    if trail:
+        out["trail_atr_k"] = float(trail["atr_k"])
+        out["trail_activation_atr_k"] = float(trail["arm_atr_k"])
+    cut = exit_policy.get("early_cut")
+    if cut:
+        out["thesis_cut_margin_pct"] = float(cut["cut_margin_pct"])
+        out["thesis_window_sec"] = int(cut["window_sec"])
+        if cut.get("max_peak_margin_pct") is not None:
+            out["thesis_cut_max_peak_margin_pct"] = float(cut["max_peak_margin_pct"])
+    return out
+
+
+def protection_chips(exit_policy: Mapping[str, Any]) -> list[str]:
+    """Dashboard chips for the registry exit policy's late-armed protections."""
+    chips = []
+    be = exit_policy.get("breakeven")
+    if be:
+        chips.append(f"Break-even armed at +{float(be['trigger_margin_pct']):g}bp → stop +{float(be['lock_margin_pct']):g}bp")
+    trail = exit_policy.get("trail")
+    if trail:
+        chips.append(f"ATR trail {float(trail['atr_k']):g} ATR, armed after +{float(trail['arm_atr_k']):g} ATR")
+    cut = exit_policy.get("early_cut")
+    if cut:
+        chips.append(f"Early cut {float(cut['cut_margin_pct']):g}bp in {int(cut['window_sec']) // 60}m if MFE "
+                     f"<=+{float(cut.get('max_peak_margin_pct') or 0):g}bp")
+    return chips or ["No ladder / break-even / trail / target"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +90,9 @@ class PolicySpec:
     hard_stop_margin_pct: float = 30.0
     thesis_cut_margin_pct: float | None = None
     thesis_window_sec: int = 0
+    # Optional: the thesis cut applies only while the peak margin return has
+    # never exceeded this value (a trade that ever ran is left to the stops).
+    thesis_cut_max_peak_margin_pct: float | None = None
     atr_target_k: float | None = None
     chandelier_atr_k: float | None = None
     trail_activation_atr_k: float | None = None
@@ -270,6 +335,10 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
         spec.thesis_cut_margin_pct is not None
         and float(age_sec or 0) <= float(spec.thesis_window_sec)
         and current_margin_pct <= float(spec.thesis_cut_margin_pct)
+        and (
+            spec.thesis_cut_max_peak_margin_pct is None
+            or _margin_return_pct(entry, sign, peak, leverage) <= float(spec.thesis_cut_max_peak_margin_pct)
+        )
     ):
         return ExitAction("THESIS_FAST_CUT", remaining, price, stop_price, 0.0, peak)
 
@@ -298,6 +367,8 @@ def exit_config(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
     if spec.breakeven_trigger_margin_pct is None:
         for key in ("breakeven_trigger_margin_pct", "breakeven_lock_margin_pct", "effective_stop"):
             config.pop(key)
+    if spec.thesis_cut_max_peak_margin_pct is None:
+        config.pop("thesis_cut_max_peak_margin_pct")
     return config
 
 
@@ -315,6 +386,7 @@ def _exit_config_base(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]
         "hard_stop_margin_pct": spec.hard_stop_margin_pct,
         "thesis_cut_margin_pct": spec.thesis_cut_margin_pct,
         "thesis_window_sec": spec.thesis_window_sec,
+        "thesis_cut_max_peak_margin_pct": spec.thesis_cut_max_peak_margin_pct,
         "atr_tp_multiple": spec.atr_target_k,
         "chandelier_atr_k": spec.chandelier_atr_k,
         "trail_activation_atr_k": spec.trail_activation_atr_k,

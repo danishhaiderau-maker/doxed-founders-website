@@ -791,7 +791,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
-    ("Tile Paired Comparison", TILE_PAIRED_COMPARISON_REPORT_FILE, "Tile 1 vs Tile 2 vs Tile 3 on identical shared-AI signals (both filled), 6 h-cluster CIs, and each pre-registered tile scored against its frozen promotion and kill rules"),
+    ("Tile Paired Comparison", TILE_PAIRED_COMPARISON_REPORT_FILE, "Every shared-AI registry tile paired on identical signals (both filled), 6 h-cluster CIs, and each pre-registered tile scored against its frozen promotion and kill rules"),
     ("Adaptive Entry Funnel", ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE, "Every signal-time taker/maker/stand-aside decision joined to its fill, expiry or skip and scored against the taker-at-signal counterfactual; superseded stack versions quarantined"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),

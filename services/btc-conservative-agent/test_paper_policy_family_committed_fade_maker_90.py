@@ -1,4 +1,4 @@
-"""Dedicated contract for Tile 4: committed-call fade, maker 0.10% offset entry, 90-min hold."""
+"""Dedicated contract for the committed-call fade, maker 0.10% offset entry, 90-min hold."""
 import copy
 
 import pytest
@@ -37,7 +37,7 @@ def _ai(long_score=70, short_score=30, raw_direction=None, **extra):
 def test_registry_owns_a_paper_only_relay_ineligible_default_off_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[-1] == policy.LANE
+    assert ACTIVE_TILE_ORDER[4] == policy.LANE
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["relay_capability"] == "BLOCKED_UNQUALIFIED"
     assert spec["default_enabled"] is False

@@ -63,7 +63,9 @@ def test_analyzer_lane_rows_and_paired_panel_show_win_pct():
 
 
 def test_paired_comparison_reports_win_counts_and_excludes_unfilled_rows():
-    t1, t2 = "SYNTHETIC_TILE_A", ACTIVE_TILE_ORDER[-1]
+    t2 = next(lane for lane in reversed(ACTIVE_TILE_ORDER)
+              if ACTIVE_TILE_REGISTRY[lane].get("uses_shared_ai_direction", True) is not False)
+    t1 = "SYNTHETIC_TILE_A"
     registry = {t1: {"label": "A"}, t2: ACTIVE_TILE_REGISTRY[t2]}
     base = 1_790_000_000.0
     rows = []

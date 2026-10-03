@@ -44,19 +44,20 @@ and registry tile geometry). Call rows also carry `leader_features` and a
 `derivatives` block (Bitfinex funding/mark/index/OI plus leader-venue
 derivatives).
 
-## Cross-venue lead tile (XVL)
+## Cross-venue session-follow tile
 
-`FAMILY_XVENUE_LEAD_60S` (paper only, relay-ineligible) reads
-`cross_venue_live.json` and the Bitfinex 1 s tape on its own `xvl-evaluator`
-thread, once per second at `floor(t)+1.6 s` with anchor bucket `floor(t)-1`
-(no catch-up; missed seconds are counted). Lead = mean(Binance, Bybit 10 s mid
-return) − Bitfinex 10 s mid return. A trigger needs |lead| >= 8 bp, every feed
-<= 2 s old and spread <= 3 bp. Shadow rows are always written; when the tile is
-ON a one-slot worker submits a taker paper order (5 bp cap, 3 s TTL) through the
-standard lane spawn path, with >=5 s between submissions and <=60 per hour, and
-refuses stale triggers (>1.5 s) or an open position. Exit: 60 s time exit
-(`PATH_END_1M`) or 40 bp catastrophic stop. An evaluator crash is recorded and
-never pauses execution. Health: `/ready.xvl_evaluator_health`.
+The cross-venue lead and premium tiles were retired (their lanes are in
+`RETIRED_TILE_LANES`). The generic per-second evaluator loop, feeds, shadow
+collection and submit-latency instrumentation remain and now serve only
+`FAMILY_XVENUE_SESSION_FOLLOW_60M` (paper only, relay-ineligible). It reads
+`cross_venue_live.json` and the Bitfinex 1 s tape on its evaluator thread, once
+per second with anchor bucket `floor(t)-1` (no catch-up; missed seconds are
+counted), combines the generic lead and premium rules (`cross_venue_lead`,
+`cross_venue_premium`) with the UTC session-side gate in
+`cross_venue_session_follow`, and writes `xvs_shadow_signals.jsonl`. Entry,
+exit and risk parameters live only in its `combo_pathway_config.py` registry
+entry. An evaluator crash is recorded and never pauses execution. Health:
+`/ready.xvl_evaluator_health`.
 
 ## Analyzer
 
@@ -67,10 +68,11 @@ leader-follow rule (enter at the Bitfinex ask/bid 1 s after the trigger, exit at
 the opposite side, capacity 1) with hour-cluster robust CIs, cluster bootstrap
 and Benjamini–Hochberg FDR. The pre-registered rule is 10 s / 2 bp. Prices
 only; fees are deliberately not modelled here. Its `xvl` section replays the
-registered XVL rule on the tapes (capacity one), summarises the shadow stream
+registered session-follow rule on the tapes (capacity one, session-gated),
+summarises the `xvs` shadow stream
 (gates, stale-feed share, cap-1 and every-qualifying-second outcomes with 1 h
 cluster CIs) and reports anchor-matched shadow-vs-replay parity; the :9001
-Exit Combinations page renders it. The XVL kill/promotion verdict is in
+Exit Combinations page renders it. The session-follow kill/promotion verdict is in
 `tile_paired_comparison_report.json`.
 
 ## Monitoring

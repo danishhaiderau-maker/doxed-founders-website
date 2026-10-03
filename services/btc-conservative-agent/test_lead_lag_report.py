@@ -132,10 +132,10 @@ def _xvl_step_rows(hours=3, step_every=300, step_bp=15.0, lag=3, half_spread=0.5
 
 
 def _shadow_rows_from(trades, signature):
-    from cross_venue_lead import OUTCOME_SCHEMA, TRIGGER_SCHEMA
+    from cross_venue_session_follow import OUTCOME_SCHEMA, TRIGGER_SCHEMA
     triggers, outcomes = [], []
     for t in trades:
-        base = {"trigger_id": f"xvl-{t['anchor']}", "anchor_bucket_ts": t["anchor"], "side": t["side"],
+        base = {"trigger_id": f"xvs-{t['anchor']}", "anchor_bucket_ts": t["anchor"], "side": t["side"],
                 "gate": "TRIGGER", "qualifies": True, "cap1_take": True, "policy_signature": signature}
         triggers.append({"schema": TRIGGER_SCHEMA, **base})
         outcomes.append({"schema": OUTCOME_SCHEMA, **base, "status": "OK",
@@ -143,23 +143,26 @@ def _shadow_rows_from(trades, signature):
     return triggers, outcomes
 
 
+XVS_LANE = "FAMILY_XVENUE_SESSION_FOLLOW_60M"
+
+
 def test_xvl_section_replays_the_registered_rule_and_matches_the_shadow_stream():
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
-    lane = "FAMILY_XVENUE_LEAD_60S"
-    signature = ACTIVE_TILE_REGISTRY[lane]["policy_signature"]
-    rows, quotes = _xvl_step_rows()
+    signature = ACTIVE_TILE_REGISTRY[XVS_LANE]["policy_signature"]
+    rows, quotes = _xvl_step_rows(hours=6)
     report = llr.build_lead_lag_report(rows, quotes)
-    cell = report["xvl"]["lanes"][lane]
-    assert cell["rule"]["lead_threshold_bps"] == 8.0
-    assert cell["replay"]["trades"] >= 30
-    assert cell["replay"]["mean_net_bp"] > 5 and cell["replay"]["win_rate"] == 1.0
+    cell = report["xvl"]["lanes"][XVS_LANE]
+    assert cell["rule"]["lead"]["lead_threshold_bps"] == 8.0
+    assert cell["rule"]["allowed_sessions"] == ["ASIA", "EU", "US"]
+    assert cell["replay"]["trades"] >= 3
     assert cell["shadow"]["triggers_logged"] == 0
 
-    trades = llr.xvl_replay_trades(llr.Aligned(rows, quotes), llr._xvl_rules()[lane][0])
-    foreign = _shadow_rows_from(trades[:3], "other-signature")
+    trades = llr.session_follow_replay_trades(llr.Aligned(rows, quotes), llr._xvl_rules()[XVS_LANE][0])
+    assert trades and all(u["anchor"] > t["anchor"] + 3600 for t, u in zip(trades, trades[1:]))
+    foreign = _shadow_rows_from(trades[:2], "other-signature")
     triggers, outcomes = _shadow_rows_from(trades, signature)
     report = llr.build_lead_lag_report(rows, quotes, xvl_rows=(triggers + foreign[0], outcomes + foreign[1]))
-    cell = report["xvl"]["lanes"][lane]
+    cell = report["xvl"]["lanes"][XVS_LANE]
     assert cell["shadow"]["triggers_logged"] == len(trades)
     assert cell["shadow"]["by_gate"] == {"TRIGGER": len(trades)}
     assert cell["shadow"]["capacity_one"]["trades"] == len(trades)
@@ -168,8 +171,20 @@ def test_xvl_section_replays_the_registered_rule_and_matches_the_shadow_stream()
     assert parity["mean_abs_net_gap_bp"] == 0.0
 
 
+def test_session_follow_replay_gates_sessions_and_conflicts():
+    from dataclasses import replace
+    rows, quotes = _xvl_step_rows(hours=6)
+    al = llr.Aligned(rows, quotes)
+    rule = llr._xvl_rules()[XVS_LANE][0]
+    everywhere = llr.session_follow_replay_trades(al, rule)
+    assert everywhere
+    # T0 is 00:00 UTC, so a six-hour tape is entirely the Asia session.
+    eu_only = llr.session_follow_replay_trades(al, replace(rule, allowed_sessions=("EU",)))
+    assert eu_only == []
+
+
 def test_xvl_shadow_loader_reads_rotations_and_no_data_still_reports_the_shadow():
-    from cross_venue_lead import SHADOW_FILE
+    from cross_venue_session_follow import SHADOW_FILE
     tmp = tempfile.mkdtemp()
     triggers, outcomes = _shadow_rows_from(
         [{"anchor": T0 + 10, "side": "LONG", "net_bp": 2.0},
@@ -182,7 +197,7 @@ def test_xvl_shadow_loader_reads_rotations_and_no_data_still_reports_the_shadow(
     assert [len(x) for x in loaded] == [2, 2]
     report = llr.build_from_data_dir(tmp)
     assert report["status"] == "NO_DATA"
-    cell = report["xvl"]["lanes"]["FAMILY_XVENUE_LEAD_60S"]
+    cell = report["xvl"]["lanes"][XVS_LANE]
     assert cell["shadow"]["triggers_logged"] == 2
     assert cell["shadow"]["capacity_one"]["win_rate"] == 0.5
     assert cell["replay"] == "UNAVAILABLE_NO_BITFINEX_BBO"

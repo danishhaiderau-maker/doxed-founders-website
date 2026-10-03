@@ -88,7 +88,7 @@ import pytz
 import bitfinex_cost_profile
 
 from combo_pathway_config import (
-    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
+    tile_card_sections as combo_tile_card_sections,
     ANALYZER_SYNC_ID as COMBO_ANALYZER_SYNC_ID,
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
@@ -24776,6 +24776,9 @@ def process_limit_chase(price: float):
             "[PIPELINE ENFORCEMENT]"
         )
         return
+    # Confirm-to-market is part of a tile's registry entry rule, not a chase,
+    # so the global chase selector never disables it.
+    _process_family_confirm_market(time.time())
     if not limit_chase_enabled() or price is None or price <= 0:
         return
     enforce_dashboard_chase_gates_on_pending()
@@ -27017,6 +27020,89 @@ def _process_ws_ticker_update(payload) -> bool:
         )
     _recompute_system_readiness(tick_now)
     return True
+
+
+def _confirm_market_signal_price(order: dict, signal: dict) -> float:
+    for source in (signal, order):
+        if not isinstance(source, dict):
+            continue
+        decision = source.get("adaptive_entry_decision") or {}
+        for value in (decision.get("reference_price"), source.get("signal_price")):
+            try:
+                if value is not None and float(value) > 0:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _process_family_confirm_market(now: float) -> int:
+    """Run registry confirm-to-market entries: HOLD, convert to the capped taker, or DROP."""
+    with trade_lock:
+        pending = [
+            o for o in pending_orders
+            if isinstance(o, dict) and o.get("status") == "PENDING"
+            and str(o.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES
+            and str(o.get("research_lane") or "").upper() not in PLATFORM_RELAY_ELIGIBLE_LANES
+        ]
+    acted = 0
+    for order in pending:
+        lane = _normalize_lane_key(order)
+        policy = _patient_chase_policy(lane)
+        confirm = getattr(policy, "confirm_market_action", None)
+        if not callable(confirm) or not lane_orders_allowed(lane):
+            continue
+        if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+            continue
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+        old_limit = float(order.get("limit_price") or 0)
+        with state_lock:
+            bid = float(state.get("bid") or 0)
+            ask = float(state.get("ask") or 0)
+        confirmed_ts = float(order["last_chase_ts"]) if order.get("urgent_marketable_chase") and order.get(
+            "last_chase_ts") else None
+        verdict = confirm(
+            direction=direction, signal_price=_confirm_market_signal_price(order, signal),
+            limit_price=old_limit, bid=bid, ask=ask, confirmed_ts=confirmed_ts, now=now,
+        )
+        action = verdict.get("action")
+        if action == "MARKET":
+            chase_count = int(order.get("limit_chase_count") or 0) + 1
+            committed = _commit_relay_limit_chase(
+                order, signal, direction=direction, old_limit=old_limit,
+                new_limit=float(verdict["limit_price"]), chase_count=chase_count, now=now,
+                urgent_marketable=True, reference_price=float(verdict.get("confirm_price") or old_limit),
+            )
+            if committed is None:
+                continue
+            order["relay_eligible"] = False
+            if isinstance(signal, dict):
+                signal["relay_eligible"] = False
+                signal["confirm_market_reason"] = verdict.get("reason")
+            acted += 1
+            logger.info(
+                f"[CONFIRM MARKET PAPER] trade_id={tid} lane={lane} old={fmt(old_limit)} "
+                f"cap_limit={fmt(float(verdict['limit_price']))} confirm={fmt(float(verdict.get('confirm_price') or 0))} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+        elif action == "DROP":
+            reason = str(verdict.get("reason") or "CONFIRM_MARKET_DROP")
+            result = _cancel_pending_order_confirmed(order, reason, record_expired=True, expire_signal=True)
+            if not result.get("finalized"):
+                continue
+            _emit_genome_execution_event("ORDER_CANCELLED", {
+                "trade_id": tid, "reason": reason,
+                "chase_count": int(order.get("limit_chase_count") or 0),
+                "research_lane": lane,
+            })
+            acted += 1
+            logger.info(f"[CONFIRM MARKET PAPER] dropped trade_id={tid} lane={lane} reason={reason} "
+                        "[PIPELINE ENFORCEMENT]")
+    if acted:
+        pipeline_state_sync()
+    return acted
 
 
 def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
@@ -30792,8 +30878,8 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
 
 
 def _ai_shadow_premium_facts() -> dict:
-    evaluator = _XVL_EVALUATORS.get(RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S)
-    if evaluator is None or not hasattr(evaluator, "latest_features"):
+    evaluator = next((e for e in list(_XVL_EVALUATORS.values()) if hasattr(e, "latest_features")), None)
+    if evaluator is None:
         return {"status": "UNAVAILABLE"}
     try:
         return evaluator.latest_features()
@@ -33562,6 +33648,7 @@ def build_static_pathway_lane_specs() -> dict:
             "is_deterministic_bracket": False,
             "badge": "PAPER_ONLY_FAMILY",
             "tile_number": tile_number,
+            "card_sections": combo_tile_card_sections(lane_id),
             "entry_mode_label": lane_spec["raw_policy_id"].split("|", 1)[0],
             "filter_chips": policy_view["filter_chips"],
             "toggle_key": lane_spec["toggle_key"],
@@ -36652,6 +36739,25 @@ DASHBOARD_JS = """(function () {
             + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
             + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
+          const cardEsc = (s) => String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+          const cardList = (rows) => '<ul style="margin:4px 0 0 0;padding-left:16px;">' + (rows || []).map(function (r) {
+            return '<li style="margin:2px 0;">' + cardEsc(r) + '</li>';
+          }).join('') + '</ul>';
+          const cardBox = (title, color, inner) => '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + color + ';border-radius:6px;overflow-wrap:anywhere;">'
+            + '<div style="font-weight:700;letter-spacing:0.04em;color:' + color + ';font-size:0.92em;">' + title + '</div>' + inner + '</div>';
+          const cs = spec.card_sections || null;
+          const cardSections = cs
+            ? ('<div class="tile-card-sections" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px;font-size:0.76em;line-height:1.42;color:#c9d1d9;">'
+              + cardBox('ENTRY', '#58a6ff', cardList(cs.entry))
+              + cardBox('EXIT', '#3fb950', '<div style="color:#8b949e;margin-top:2px;">Live, ' + cardEsc((cs.exit || {}).order || 'first trigger wins') + ':</div>'
+                + cardList((cs.exit || {}).live)
+                + '<div style="color:#8b949e;margin-top:6px;">Shadow-only (recorded, never executed):</div>'
+                + ((((cs.exit || {}).shadow) || []).length
+                  ? '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">' + cardEsc(((cs.exit || {}).shadow || []).join(' · ')) + '</div>'
+                  : '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">none</div>'))
+              + cardBox('RISK MANAGEMENT', '#f0883e', cardList(cs.risk))
+              + '</div>')
+            : '';
           let orderBanner = '';
           // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
           // execution_mode_for_lane() so the dashboard never lies. Fall back
@@ -36703,6 +36809,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
+            + cardSections
             + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
@@ -52047,6 +52154,7 @@ _JSONL_SERIALIZED_APPEND_LITERALS = (
     "fill_markouts.jsonl",
     "taker_signal_counterfactuals.jsonl",
     "xvp_shadow_signals.jsonl",
+    "xvs_shadow_signals.jsonl",
 )
 
 

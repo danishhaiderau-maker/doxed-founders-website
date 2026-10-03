@@ -20,7 +20,7 @@ RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 DATA_RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v31-committed-fade-maker-v9"
+ROSTER_PHASE = "v31-danish-tiles-late-protection-v11"
 ROSTER_NOTES = (
     "Active stack is derived exclusively from ACTIVE_TILE_REGISTRY: one shared "
     "direction call feeding independent paper-only, relay-ineligible lifecycles. "

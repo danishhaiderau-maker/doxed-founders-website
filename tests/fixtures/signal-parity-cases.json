@@ -73,7 +73,7 @@
       "expect_benchmark": false
     },
     {
-      "id": "xvenue-premium-not-benchmark",
+      "id": "retired-xvenue-premium-not-benchmark",
       "lane": "FAMILY_XVENUE_PREMIUM_60S",
       "expect_benchmark": false
     }

@@ -63,6 +63,7 @@ class ExitSpec:
     giveback: Optional[float] = None
     ladder: tuple = field(default_factory=tuple)      # ((trigger_bp, lock_bp), ...)
     breakeven: Optional[tuple] = None                 # (trigger_bp, lock_bp)
+    early_cut: Optional[tuple] = None                 # (cut_bp <= 0, window_sec, max_peak_bp)
 
     @property
     def needs_atr(self) -> bool:
@@ -78,6 +79,8 @@ class ExitSpec:
             parts.append(f"ladder{len(self.ladder)}")
         if self.breakeven:
             parts.append("be{0:g}-{1:g}".format(*self.breakeven))
+        if self.early_cut:
+            parts.append("cut{0:g}w{1:g}p{2:g}".format(*self.early_cut))
         return "_".join(parts)
 
 
@@ -178,7 +181,14 @@ def _exit_path(tape: Tape, j: int, fill_px: float, sign: int, spec: ExitSpec, at
     elif spec.tp_atr is not None and np.isfinite(atr_bp):
         tp = spec.tp_atr * atr_bp
     hit_tp = (u >= tp) if tp is not None else np.zeros(u.shape, bool)
-    anyhit = (hit_stop | hit_hard | hit_tp)
+    hit_cut = np.zeros(u.shape, bool)
+    if spec.early_cut:
+        cut_bp, window_sec, max_peak_bp = spec.early_cut
+        within = np.arange(len(u)) <= int(window_sec)
+        hit_cut = within & (u <= float(cut_bp))
+        if max_peak_bp is not None:
+            hit_cut &= peak <= float(max_peak_bp)
+    anyhit = (hit_stop | hit_hard | hit_cut | hit_tp)
     anyhit[0] = False                                   # second 0 is the fill second
     if anyhit.any():
         k = int(np.argmax(anyhit))
@@ -186,6 +196,8 @@ def _exit_path(tape: Tape, j: int, fill_px: float, sign: int, spec: ExitSpec, at
             return k, float(u[k]), "HARD_STOP", False
         if hit_stop[k]:
             return k, float(u[k]), "STOP", False
+        if hit_cut[k]:
+            return k, float(u[k]), "EARLY_CUT", False
         return k, float(tp), "TAKE_PROFIT", False
     if len(u) < tcap + 1:                               # tape hole or tape end before the time exit
         return len(u) - 1, math.nan, "CENSORED", True
@@ -311,6 +323,17 @@ def exit_spec_from_registry(spec: dict, leverage: float = 100.0) -> tuple:
               float(ep.get("breakeven_lock_margin_pct") or 0.0) * 100.0 / lev)
     if family in ("TIME_EXIT_WITH_CATASTROPHIC_STOP", "TIME_EXIT_WITH_CATASTROPHIC_STOP_PROFIT_LOCK"):
         return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, ladder=ladder, breakeven=be), None
+    if family == "COMPOSITE_FIRST_TRIGGER_WINS":
+        be_raw, trail, cut = ep.get("breakeven"), ep.get("trail") or {}, ep.get("early_cut")
+        if be_raw:
+            be = (float(be_raw["trigger_margin_pct"]) * 100.0 / lev, float(be_raw["lock_margin_pct"]) * 100.0 / lev)
+        early_cut = None
+        if cut:
+            peak_cap = cut.get("max_peak_margin_pct")
+            early_cut = (float(cut["cut_margin_pct"]) * 100.0 / lev, int(cut["window_sec"]),
+                         None if peak_cap is None else float(peak_cap) * 100.0 / lev)
+        return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, arm_atr=trail.get("arm_atr_k"),
+                        trail_atr=trail.get("atr_k"), ladder=ladder, breakeven=be, early_cut=early_cut), None
     if family in ("ATR_TRAIL", "ATR_TRAIL_PROFIT_LOCK"):
         return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, sl_atr=ep.get("initial_stop_atr_k"),
                         arm_atr=ep.get("trail_activation_atr_k"), trail_atr=ep.get("trail_atr_k"),

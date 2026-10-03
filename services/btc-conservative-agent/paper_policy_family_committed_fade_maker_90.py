@@ -1,4 +1,4 @@
-"""Tile 4: committed-call fade with a maker entry — opposite of an explicit AI side, passive limit 0.10% beyond the signal price resting 30 min without chase, 90-min hold, 40 bp catastrophic stop (paper only)."""
+"""Committed-call fade with a maker entry — opposite of an explicit AI side, passive limit 0.10% beyond the signal price resting 30 min without chase, 90-min hold, 40 bp catastrophic stop (paper only)."""
 from __future__ import annotations
 
 from adaptive_regime_entry import ACTION_MAKER, ACTION_STAND_ASIDE, DECISION_SCHEMA
