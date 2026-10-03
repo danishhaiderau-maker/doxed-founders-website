@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-committed-fade-maker-v9",
+  "engine_version": "v31-danish-tiles-late-protection-v11",
   "combo_version": "2026-10-03",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "a28296e27054",
+  "signal_hash": "84de12a1121f",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-03T16:10:12.529Z"
+  "updated_at": "2026-10-03T17:55:52.194Z"
 }
