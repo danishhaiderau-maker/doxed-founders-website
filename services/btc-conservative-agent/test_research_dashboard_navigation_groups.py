@@ -9,7 +9,7 @@ def test_navigation_preserves_all_sections_and_remaps_saved_sections():
     expected = set('summary findings regime lanes ai chase chase-policy-lab chase-threshold chase-delay combos indicator-edge spread-perf exit-combos exit-reason-leak shadow-exits ladder-sim exits genome research-design evidence-coverage edge explorer archives download runtime-incidents pathway-audit horizon'.split())
     groups=dashboard.REPORT_NAV_GROUPS
     ids=[item[0] for _,_,items in groups for item in items]
-    assert len(ids)==26 and set(ids)==expected
+    assert len(ids)==27 and set(ids)==expected
     for sid in ids:
         assert f'id="sec-{sid}"' in dashboard.DASHBOARD_HTML
     page=dashboard.DASHBOARD_HTML
