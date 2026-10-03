@@ -7,13 +7,23 @@ from research import research_dashboard as dashboard
 
 
 def _grid(generated_at=None, **over):
-    summary = {axis: {"distinct_values": need, "values": []} for axis, need in ds.GENOME_AXIS_MINIMUMS.items()}
+    summary = {axis: {"distinct_values": need, "headline_fill_world": "REALISTIC_V1",
+                      "values": [{"value": str(i), "best_policy_id": f"{axis}-{i}", "best_fill_world": "REALISTIC_V1"}
+                                 for i in range(need)]}
+               for axis, need in ds.GENOME_AXIS_MINIMUMS.items()}
+    top = [{"policy_id": f"p{i}", "by_episode_class": {"AI_COMMITTED": {"fills": 3}}, "cluster_1h": {"all": {}}}
+           for i in range(150)]
     rep = {"schema": "genome_grid_report_v1",
            "generated_at": generated_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "evidence_label": "SIMULATED_COUNTERFACTUAL", "holdout": {"min_oos_fills_for_rank": 10},
-           "coverage": {"episodes_evaluated": 900}, "grid": {"policies_evaluated": 20000, "policies_ranked": 40},
+           "headline_fill_world": "REALISTIC_V1",
+           "coverage": {"episodes_evaluated": 900, "evaluated_by_class": {"AI_COMMITTED": 400, "AI_NO_TRADE_SCORE_LED": 500}},
+           "episode_integrity": {"status": "PASS", "episodes": 900, "unique_decision_ids": 900, "duplicate_decision_ids": 0,
+                                 "classes": {"AI_COMMITTED": 400, "AI_NO_TRADE_SCORE_LED": 500}},
+           "walk_forward_by_utc_day": {"AI_DECISION": {"folds": []}},
+           "grid": {"policies_evaluated": 20000, "policies_ranked": 40},
            "canonical_parity": {"status": "MATCH", "checked": 400}, "dimension_summary": summary,
-           "top_100_by_world": {"BBO_MARKETABLE": [{"policy_id": f"p{i}"} for i in range(150)], "IDEAL_TOUCH": []}}
+           "top_100_by_world": {"REALISTIC_V1": top, "OPTIMISTIC_TOUCH_SHADOW": []}}
     rep.update(over)
     return rep
 
@@ -27,7 +37,8 @@ def test_genome_grid_api_unavailable_then_ok(tmp_path, monkeypatch):
     path.write_text(json.dumps(_grid()), encoding="utf-8")
     body = client.get("/api/genome-grid?limit=20").get_json()
     assert body["status"] == "OK" and body["evidence_label"] == "SIMULATED_COUNTERFACTUAL"
-    assert len(body["top_100_by_world"]["BBO_MARKETABLE"]) == 20 and body["age_sec"] < 60
+    assert len(body["top_100_by_world"]["REALISTIC_V1"]) == 20 and body["age_sec"] < 60
+    assert body["episode_integrity"]["status"] == "PASS" and "walk_forward_by_utc_day" in body
 
 
 def test_combos_section_loads_genome_grid_before_legacy_table():
@@ -55,12 +66,14 @@ def test_collapsed_top100_is_red_and_full_grid_is_green():
     green = ds.genome_grid_checks(_grid(), legacy, now, collected_opportunities=1200)
     assert {c["severity"] for c in green} == {ds.GREEN}
     collapsed = _grid()
-    collapsed["dimension_summary"]["entry_offset_pct"]["distinct_values"] = 1
+    collapsed["dimension_summary"]["entry_offset_pct"].update(distinct_values=1, values=collapsed["dimension_summary"]["entry_offset_pct"]["values"][:1])
     stale = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 13 * 3600))
     checks = {c["id"]: c["severity"] for c in ds.genome_grid_checks(
         dict(collapsed, generated_at=stale, canonical_parity={"status": "MISMATCH"}), legacy, now, 5000)}
     assert checks == {"genome_grid_present": ds.GREEN, "genome_grid_fresh": ds.RED, "genome_axes_complete": ds.AMBER,
-                      "genome_ranked_rows": ds.GREEN, "genome_engine_parity": ds.RED, "genome_vs_collected": ds.AMBER}
+                      "genome_ranked_rows": ds.GREEN, "genome_engine_parity": ds.RED, "genome_vs_collected": ds.AMBER,
+                      "genome_episode_integrity": ds.GREEN, "genome_axes_headline_world": ds.GREEN,
+                      "genome_axes_distinct": ds.GREEN, "genome_top100_inference": ds.GREEN}
 
 
 def test_safe_genome_window_and_empty_shortlist_are_amber():

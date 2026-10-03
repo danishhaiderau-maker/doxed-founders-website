@@ -7206,14 +7206,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Policy Genome Grid - simulated over all collected data</h2>
-    <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>SIMULATED_COUNTERFACTUAL</strong> - every collected signal episode (executed, shadow, blocked, no-trade score-led side) replayed on 1 s tape across entry offset x chase x TTL x exit x side. Not execution evidence, not qualification. Live paper outcomes are listed separately below.</div>
+    <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>SIMULATED_COUNTERFACTUAL</strong> - one episode per unique AI decision (committed calls, score-led side of no-trade calls) replayed on 1 s tape across entry offset x chase x TTL x exit x side. Cross-venue evaluator triggers and duplicate/reversal-study rows are excluded and counted. Not execution evidence, not qualification. Live paper outcomes are listed separately below.</div>
     <p class="note" id="genome-grid-note">Loading genome grid...</p>
     <div class="kpis" id="genome-grid-kpis"></div>
-    <h3>Genome axes - best train-selected policy per value, with its chronological holdout</h3>
-    <table><thead><tr><th>Axis</th><th>Values</th><th>Best value</th><th>Train EV / fill</th><th>Holdout EV / fill</th><th>Holdout WR%</th><th>Holdout fills</th><th>Verdict</th><th>Confirmed policies</th><th>Weakest ranked value</th></tr></thead><tbody id="genome-grid-axes"></tbody></table>
+    <div class="stale-banner" id="genome-grid-integrity" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;">Episode integrity: loading...</div>
+    <h3>Episode classes and walk-forward by UTC day (REALISTIC_V1)</h3>
+    <table><thead><tr><th>Cohort / class</th><th>Episodes</th><th>Days scored</th><th>Walk-forward OOS fills</th><th>OOS EV / fill</th><th>OOS EV bp</th><th>1h-cluster 95% CI (bp)</th><th>n_eff</th><th>Policies selected per day</th></tr></thead><tbody id="genome-grid-wf"></tbody></table>
+    <h3>Genome axes - best train-selected REALISTIC_V1 policy for each value, with its chronological holdout</h3>
+    <table><thead><tr><th>Axis</th><th>Value</th><th>Policies</th><th>Best REALISTIC_V1 policy (train-selected)</th><th>Train EV / fill</th><th>Holdout EV / fill</th><th>Holdout WR%</th><th>Holdout fills</th><th>Verdict</th><th>EV / fill 1h-cluster 95% CI</th><th>n_eff</th><th>Shadow: optimistic touch train EV (comparison, not headline)</th></tr></thead><tbody id="genome-grid-axes"></tbody></table>
     <div class="stale-banner" id="genome-grid-fill-model" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;">Fill model: loading...</div>
     <h3>Top 100 simulated policies <select id="genome-grid-world"><option value="REALISTIC_V1">REALISTIC_V1 (headline)</option><option value="OPTIMISTIC_TOUCH_SHADOW">Optimistic touch (comparison shadow - not headline)</option></select> <select id="genome-grid-filter"><option value="top_100_by_world">Top 100 by train EV (all verdicts)</option><option value="confirmed_by_world">Holdout-confirmed only</option></select></h3>
-    <table><thead><tr><th>#</th><th>Side</th><th>Entry offset</th><th>Chase / reprice</th><th>TTL</th><th>Exit</th><th>Loss protection</th><th>Signals</th><th>Fills</th><th>WR% all</th><th>EV / fill all</th><th>Avg R</th><th>Train EV / fill (rank key)</th><th>OOS fills</th><th>OOS WR% [95% CI]</th><th>OOS EV / fill</th><th>OOS net</th><th>Holdout</th><th>Max DD</th></tr></thead><tbody id="genome-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Side</th><th>Entry offset</th><th>Chase / reprice</th><th>TTL</th><th>Exit</th><th>Loss protection</th><th>Signals</th><th>Fills</th><th>WR% all</th><th>EV / fill all</th><th>Avg R</th><th>Train EV / fill (rank key)</th><th>OOS fills</th><th>OOS WR% [95% CI]</th><th>OOS EV / fill</th><th>OOS net</th><th>Holdout</th><th>Max DD</th><th>EV / fill 1h-cluster 95% CI</th><th>n_eff</th><th>EV / fill by episode class</th></tr></thead><tbody id="genome-grid-body"></tbody></table>
     <h3>Live paper outcomes per lane (LIVE_PAPER - separate cohort)</h3>
     <table><thead><tr><th>Lane</th><th>Registry status</th><th>Fill model</th><th>Terminal closes</th><th>WR%</th><th>Net PnL</th><th>EV / close</th></tr></thead><tbody id="genome-grid-live"></tbody></table>
     <h2>Top Profitable Conservative Policy Combos</h2>
@@ -8125,6 +8128,15 @@ function genomeLoss(x) {
   return parts.join(' + ') || '-';
 }
 let GENOME_GRID_CACHE = null;
+const GENOME_CLASS_LABELS = {AI_COMMITTED: 'committed', AI_NO_TRADE_SCORE_LED: 'no-trade score-led', AI_COMMITTED_SCORE_CONFLICT: 'score conflict', AI_SIGNAL_REPLAY: 'replay-only'};
+function genomeCi(c) {
+  const ci = (c || {}).ev_ci95_usd || [];
+  return ci[0] == null ? '-' : `[${genomeUsd(ci[0])}, ${genomeUsd(ci[1])}]`;
+}
+function genomeClassSplit(x) {
+  return Object.entries(x.by_episode_class || {}).map(([k, v]) =>
+    `${GENOME_CLASS_LABELS[k] || k} ${v.fills}f ${genomeUsd(v.ev_per_fill_usd)}`).join('; ') || '-';
+}
 function renderGenomeGridRows() {
   const d = GENOME_GRID_CACHE || {};
   const sel = document.getElementById('genome-grid-world');
@@ -8146,8 +8158,8 @@ function renderGenomeGridRows() {
     const en = x.entry || {}, a = x.all || {}, t = x.train || {}, o = x.oos || {};
     const ci = o.win_rate_ci95_pct || [];
     const chase = en.chase_id === 'no_chase' ? 'none' : `${en.chase_id} (win ${(en.chase_windows_5m||[]).join('/')} x5m, ${Math.round((en.chase_remaining_gap_step||0)*100)}% gap, ${en.reprice_sec}s)`;
-    return `<tr><td>${i+1}</td><td>${escapeHtml(x.direction_rule||'')}</td><td>${en.offset_pct===0?'taker':en.offset_pct+'%'}</td><td>${escapeHtml(chase)}</td><td>${en.ttl_sec?Math.round(en.ttl_sec/60)+'m':'-'}</td><td>${escapeHtml(genomeExit(x))}</td><td>${escapeHtml(genomeLoss(x))}</td><td>${a.signals??0}</td><td>${a.fills??0}</td><td>${a.win_rate_pct??'-'}</td><td>${genomeUsd(a.ev_per_fill_usd)}</td><td>${a.avg_r??'-'}</td><td>${genomeUsd(t.ev_per_fill_usd)}</td><td>${o.fills??0}</td><td>${o.win_rate_pct??'-'} [${ci[0]??'-'}-${ci[1]??'-'}]</td><td>${genomeUsd(o.ev_per_fill_usd)}</td><td>${genomeUsd(o.net_pnl_usd)}</td><td>${escapeHtml(x.holdout_verdict||'-')}</td><td>${genomeUsd(a.max_drawdown_usd)}</td></tr>`;
-  }).join('') || `<tr><td colspan="19">No simulated policy has ${((d.holdout||{}).min_train_fills_for_rank)??30} train and ${((d.holdout||{}).min_oos_fills_for_rank)??10} OOS fills in this world.</td></tr>`;
+    return `<tr><td>${i+1}</td><td>${escapeHtml(x.direction_rule||'')}</td><td>${en.offset_pct===0?'taker':en.offset_pct+'%'}</td><td>${escapeHtml(chase)}</td><td>${en.ttl_sec?Math.round(en.ttl_sec/60)+'m':'-'}</td><td>${escapeHtml(genomeExit(x))}</td><td>${escapeHtml(genomeLoss(x))}</td><td>${a.signals??0}</td><td>${a.fills??0}</td><td>${a.win_rate_pct??'-'}</td><td>${genomeUsd(a.ev_per_fill_usd)}</td><td>${a.avg_r??'-'}</td><td>${genomeUsd(t.ev_per_fill_usd)}</td><td>${o.fills??0}</td><td>${o.win_rate_pct??'-'} [${ci[0]??'-'}-${ci[1]??'-'}]</td><td>${genomeUsd(o.ev_per_fill_usd)}</td><td>${genomeUsd(o.net_pnl_usd)}</td><td>${escapeHtml(x.holdout_verdict||'-')}</td><td>${genomeUsd(a.max_drawdown_usd)}</td><td>${genomeCi((x.cluster_1h||{}).all)}</td><td>${((x.cluster_1h||{}).all||{}).n_eff ?? '-'}</td><td>${escapeHtml(genomeClassSplit(x))}</td></tr>`;
+  }).join('') || `<tr><td colspan="22">No simulated policy has ${((d.holdout||{}).min_train_fills_for_rank)??30} train and ${((d.holdout||{}).min_oos_fills_for_rank)??10} OOS fills in this world.</td></tr>`;
 }
 async function loadGenomeGrid() {
   const r = await fetch('/api/genome-grid');
@@ -8156,7 +8168,7 @@ async function loadGenomeGrid() {
   const note = document.getElementById('genome-grid-note');
   if (d.status !== 'OK') {
     if (note) note.textContent = 'Genome grid UNAVAILABLE: ' + (d.reason || 'no report') + ' (' + (d.report_path || '') + '). The panel below falls back to the legacy executed-lane cohort only.';
-    ['genome-grid-kpis','genome-grid-axes','genome-grid-body','genome-grid-live'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    ['genome-grid-kpis','genome-grid-axes','genome-grid-body','genome-grid-live','genome-grid-wf'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
     return;
   }
   const cov = d.coverage || {}, g = d.grid || {}, h = d.holdout || {}, par = d.canonical_parity || {};
@@ -8168,8 +8180,29 @@ async function loadGenomeGrid() {
     worldSel.innerHTML = worlds.map(w => `<option value="${escapeHtml(w)}"${w === d.headline_fill_world ? ' selected' : ''}>${escapeHtml(w)} ${w === d.headline_fill_world ? '(headline)' : '(comparison shadow - not headline)'}</option>`).join('');
   }
   if (note) note.textContent = `${d.note || ''} Generated ${d.generated_at} (${Math.round((d.age_sec||0)/60)} min ago) at ${String(d.code_revision||'').slice(0,9)}. Holdout ${h.rule} cut ${h.cut_utc}; ${h.selection || ''}. ${h.independence_note || ''}. ${d.cost_model}. ${d.path_model}.`;
+  const integ = d.episode_integrity || {}, cohorts = d.episode_cohorts || {};
+  const excl = (cohorts.EXCLUDED_DUPLICATES || {}).v3 || {}, xv = (cohorts.XVENUE_EVALUATOR || {}).unique_triggers || {};
+  const integEl = document.getElementById('genome-grid-integrity');
+  if (integEl) {
+    const ok = integ.status === 'PASS';
+    integEl.style.background = ok ? '#1f2d3d' : '#3d1f1f';
+    integEl.textContent = !integ.status
+      ? 'EPISODE INTEGRITY UNDECLARED - this report predates episode hygiene; cross-venue triggers and duplicate rows may be mixed into the AI episodes. Do not quote it.'
+      : ok
+        ? `Episode integrity PASS: ${integ.episodes} episodes = ${integ.unique_decision_ids} unique AI decisions, classes ${Object.entries(integ.classes || {}).map(([k, v]) => `${GENOME_CLASS_LABELS[k] || k} ${v}`).join(', ')}. Excluded v3 rows: ${Object.entries(excl).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}. Cross-venue evaluator triggers (separate cohort, not in this grid): ${Object.entries(xv).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}.`
+        : `EPISODE INTEGRITY ${integ.status}: ${(integ.violations || []).join('; ')}`;
+  }
+  const wf = d.walk_forward_by_utc_day || {};
+  const wfEl = document.getElementById('genome-grid-wf');
+  if (wfEl) wfEl.innerHTML = Object.entries(wf).map(([cohort, w]) => {
+    const p = w.pooled_oos || {}, c = p.cluster_1h || {}, ci = c.ev_ci95_bp || [];
+    const scored = (w.folds || []).filter(f => f.status === 'SCORED');
+    const picks = scored.map(f => `${f.test_day_utc}: ${f.selected_policy_id} (${f.test_fills}f ${genomeUsd(f.test_ev_per_fill_usd)})`).join('; ');
+    return `<tr><td>${escapeHtml(GENOME_CLASS_LABELS[cohort] || cohort)}</td><td>${w.episodes ?? '-'}</td><td>${scored.length}</td><td>${p.fills ?? '-'}</td><td>${genomeUsd(p.ev_per_fill_usd)}</td><td>${p.ev_per_fill_bp ?? '-'}</td><td>${ci[0] == null ? '-' : `[${ci[0]}, ${ci[1]}]`}</td><td>${c.n_eff ?? '-'}</td><td>${escapeHtml(picks || '-')}</td></tr>`;
+  }).join('') || '<tr><td colspan="9">No walk-forward block in this report.</td></tr>';
   document.getElementById('genome-grid-kpis').innerHTML = [
-    ['Episodes evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
+    ['AI decisions evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
+    ['Excluded v3 rows (xvenue / duplicates / no side)', String(cov.v3_opportunities_excluded_declared ?? '-')],
     ['Signals span', `${String(cov.first_signal_utc||'').slice(5,16)} to ${String(cov.last_signal_utc||'').slice(5,16)}`],
     ['Policies evaluated', Number(g.policies_evaluated||0).toLocaleString()],
     ['Ranked (train >= ' + (h.min_train_fills_for_rank??30) + ', OOS >= ' + (h.min_oos_fills_for_rank??10) + ' fills)', Number(g.policies_ranked||0).toLocaleString()],
@@ -8178,11 +8211,14 @@ async function loadGenomeGrid() {
     ['Engine replay parity', `${par.status} (${par.checked ?? 0})`],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
   const axes = d.dimension_summary || {};
-  document.getElementById('genome-grid-axes').innerHTML = Object.entries(axes).map(([axis, s]) => {
+  document.getElementById('genome-grid-axes').innerHTML = Object.entries(axes).filter(([axis]) => axis !== 'fill_world').map(([axis, s]) => {
     const vals = (s.values || []);
-    const ranked = vals.filter(v => v.best_train_ev_per_fill_usd !== null && v.best_train_ev_per_fill_usd !== undefined);
-    const best = ranked[0] || {}, worst = ranked[ranked.length - 1] || {};
-    return `<tr><td>${escapeHtml(axis)}</td><td>${s.distinct_values}</td><td>${escapeHtml(String(best.value ?? '-'))}</td><td>${genomeUsd(best.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(best.best_oos_ev_per_fill_usd)}</td><td>${best.best_oos_win_rate_pct ?? '-'}</td><td>${best.best_oos_fills ?? '-'}</td><td>${escapeHtml(best.best_holdout_verdict || '-')}</td><td>${best.confirmed_policies ?? 0}</td><td>${escapeHtml(String(worst.value ?? '-'))} (train ${genomeUsd(worst.best_train_ev_per_fill_usd)})</td></tr>`;
+    const legacy = !s.headline_fill_world;
+    return vals.map((v, i) => {
+      const c = v.best_cluster_1h || {};
+      const head = i === 0 ? `<td rowspan="${vals.length}">${escapeHtml(axis)}${legacy ? ' (legacy report: worlds mixed)' : ''}</td>` : '';
+      return `<tr>${head}<td>${escapeHtml(String(v.value ?? '-'))}</td><td>${v.policies ?? '-'}</td><td>${escapeHtml(v.best_policy_id || '-')}</td><td>${genomeUsd(v.best_train_ev_per_fill_usd)}</td><td>${genomeUsd(v.best_oos_ev_per_fill_usd)}</td><td>${v.best_oos_win_rate_pct ?? '-'}</td><td>${v.best_oos_fills ?? '-'}</td><td>${escapeHtml(v.best_holdout_verdict || '-')}</td><td>${genomeCi(c)}</td><td>${c.n_eff ?? '-'}</td><td>${v.shadow_best_policy_id ? genomeUsd(v.shadow_best_train_ev_per_fill_usd) : '-'}</td></tr>`;
+    }).join('');
   }).join('');
   document.getElementById('genome-grid-live').innerHTML = (d.live_paper_by_lane || []).map(x =>
     `<tr><td>${escapeHtml(x.lane)}</td><td>${escapeHtml(x.registry_status)}</td><td>${escapeHtml(x.fill_model || 'UNDECLARED')}</td><td>${x.terminal_closes}</td><td>${x.win_rate_pct}</td><td>${genomeUsd(x.net_pnl_usd)}</td><td>${genomeUsd(x.ev_per_close_usd)}</td></tr>`).join('') || '<tr><td colspan="7">No terminal paper lifecycles.</td></tr>';
@@ -9726,6 +9762,7 @@ _GENOME_GRID_PASSTHROUGH = (
     "generated_at", "code_revision", "evidence_label", "note", "fill_worlds", "cost_model", "path_model",
     "holdout", "coverage", "grid", "canonical_parity", "dimension_summary", "live_paper_by_lane", "rows_artifact",
     "fill_model", "headline_fill_world", "shadow_fill_worlds", "headline_vs_shadow",
+    "episode_integrity", "episode_cohorts", "episode_class_summary", "walk_forward_by_utc_day",
 )
 
 

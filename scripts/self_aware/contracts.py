@@ -1053,8 +1053,53 @@ def _rec_edges_fill_model(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     return viol, met
 
 
+GENOME_AI_EPISODE_CLASSES = ("AI_COMMITTED", "AI_COMMITTED_SCORE_CONFLICT", "AI_NO_TRADE_SCORE_LED", "AI_SIGNAL_REPLAY")
+
+
+def _rec_genome_grid_content(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Genome grid content: one episode per AI decision, no mixed classes, REALISTIC_V1 axes that differ per value."""
+    if not isinstance(obj, dict) or obj.get("status") != "OK":
+        return [_v("RECONCILE_SKIPPED", INFO, "genome grid payload unavailable")], {}
+    viol = []
+    integ = obj.get("episode_integrity") or {}
+    classes = (obj.get("coverage") or {}).get("evaluated_by_class") or integ.get("classes") or {}
+    foreign = {c: n for c, n in classes.items() if c not in GENOME_AI_EPISODE_CLASSES}
+    met = {"genome:episodes": integ.get("episodes"), "genome:unique_decisions": integ.get("unique_decision_ids"),
+           "genome:duplicate_decisions": integ.get("duplicate_decision_ids"), "genome:foreign_classes": len(foreign)}
+    if not integ:
+        viol.append(_v("GENOME_EPISODES_UNDECLARED", RED, "no episode_integrity: cross-venue triggers and duplicate rows "
+                       "may be counted as AI episodes in the genome headline"))
+    elif integ.get("status") != "PASS" or integ.get("duplicate_decision_ids"):
+        viol.append(_v("GENOME_DUPLICATE_EPISODES", RED, f"integrity {integ.get('status')}: "
+                       f"{'; '.join(integ.get('violations') or [])}"))
+    if foreign:
+        viol.append(_v("GENOME_MIXED_EPISODE_CLASSES", RED, f"non-AI classes in the AI genome cohort: {foreign}"))
+    head = obj.get("headline_fill_world")
+    summary = obj.get("dimension_summary") or {}
+    optimistic = sorted(axis for axis, s in summary.items()
+                        if axis == "fill_world" or s.get("headline_fill_world") != HEADLINE_FILL_MODEL
+                        or any(v.get("best_fill_world") not in (None, HEADLINE_FILL_MODEL) for v in s.get("values") or []))
+    if head != HEADLINE_FILL_MODEL or optimistic:
+        viol.append(_v("GENOME_AXES_OPTIMISTIC", RED, f"headline_fill_world={head}; axes selecting outside "
+                       f"{HEADLINE_FILL_MODEL}: {optimistic[:6]}"))
+    identical = [axis for axis, s in summary.items()
+                 if len([v for v in s.get("values") or [] if v.get("best_policy_id")]) >= 2
+                 and len({v.get("best_policy_id") for v in s.get("values") or [] if v.get("best_policy_id")}) < 2]
+    if identical:
+        viol.append(_v("GENOME_AXES_IDENTICAL", RED, f"every value row shows one policy on axes {identical[:6]}"))
+    met["genome:axes"] = len(summary)
+    met["genome:axis_value_rows"] = sum(len(s.get("values") or []) for s in summary.values())
+    top = (obj.get("top_100_by_world") or {}).get(HEADLINE_FILL_MODEL) or []
+    lacking = sum(1 for r in top if not r.get("by_episode_class") or not r.get("cluster_1h"))
+    if lacking or not obj.get("walk_forward_by_utc_day"):
+        viol.append(_v("GENOME_INFERENCE_MISSING", AMBER, f"{lacking}/{len(top)} headline rows lack class split or "
+                       "1h-cluster CI, or no walk-forward by UTC day"))
+    return viol, met
+
+
 RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
     "fill_model_headline": _rec_fill_model_headline,
+    "genome_grid_content": _rec_genome_grid_content,
     "edges_fill_model": _rec_edges_fill_model,
     "fly_chase_buckets": _rec_fly_chase_buckets,
     "lanes_vs_cohort": _rec_lanes_vs_cohort,

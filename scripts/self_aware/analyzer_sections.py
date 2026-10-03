@@ -44,6 +44,7 @@ def _grid_on_disk(now: float) -> dict[str, Any]:
     cov, grid = rep.get("coverage") or {}, rep.get("grid") or {}
     return {"present": True, "path": str(GENOME_GRID_REPORT), "generated_at": rep.get("generated_at"),
             "age_sec": round(now - gen, 1) if gen else None, "episodes_evaluated": cov.get("episodes_evaluated"),
+            "excluded_declared": cov.get("v3_opportunities_excluded_declared") or 0,
             "episodes_collected": cov.get("episodes_collected"), "last_signal_utc": cov.get("last_signal_utc"),
             "policies_evaluated": grid.get("policies_evaluated"), "policies_ranked": grid.get("policies_ranked"),
             "parity": (rep.get("canonical_parity") or {}).get("status")}
@@ -122,8 +123,10 @@ def findings(doc: dict[str, Any] | None, now: float, max_age_sec: float) -> list
             problems.append(("RED", f"genome grid {age / 3600:.1f} h old"))
         elif age > GRID_AMBER_SEC:
             problems.append(("AMBER", f"genome grid {age / 3600:.1f} h old"))
-        if collected and (grid.get("episodes_evaluated") or 0) < 0.5 * collected:
-            problems.append(("AMBER", f"genome grid evaluated {grid.get('episodes_evaluated')} episodes vs "
+        accounted = (grid.get("episodes_evaluated") or 0) + (grid.get("excluded_declared") or 0)
+        if collected and accounted < 0.5 * collected:
+            problems.append(("AMBER", f"genome grid evaluated {grid.get('episodes_evaluated')} episodes "
+                                      f"(+{grid.get('excluded_declared') or 0} declared exclusions) vs "
                                       f"{collected} collected opportunities"))
         if grid.get("parity") == "MISMATCH":
             problems.append(("RED", "genome grid replay disagrees with the engine's canonical replay"))
