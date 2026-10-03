@@ -271,9 +271,9 @@ def test_maturity_rendering_distinguishes_unavailable_empty_zero_and_populated(m
 def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     source = dashboard.DASHBOARD_HTML
     assert "html, body { width: 100%; max-width: 100%; overflow-x: hidden; }" in source
-    assert "main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }" in source
-    assert ".table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto;" in source
-    assert ".table-scroll table { display: table; width: max-content; min-width: 100%;" in source
+    assert "main { padding: 20px clamp(12px, 1vw, 24px); width: 100%; max-width: none; min-width: 0; overflow: hidden; }" in source
+    assert ".table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow: auto; max-height: 80vh;" in source
+    assert ".table-scroll table { display: table; width: 100%; min-width: 100%;" in source
     assert "function ensureScrollableTables(root = document)" in source
     assert ".badge { display: inline-block; flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere;" in source
     assert "nav button { flex: 0 0 auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere;" in source

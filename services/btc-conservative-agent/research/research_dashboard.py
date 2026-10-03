@@ -3890,7 +3890,7 @@ def api_safe_policy_genome_v3():
 def safe_policy_genome_v3_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3.1</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div class="banner bad"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong><br><span class="muted">Any ideal-touch values below are diagnostic replay values, never conservative execution results.</span></div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><h3>Conservative execution leaders by stop</h3><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Conservative execution leaders by chase × stop</h3><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div><h3>Ideal-touch diagnostic hypotheses</h3><p class="muted">Supplied OOS paths without supported execution are hypotheses only; their diagnostic PnL cannot qualify a policy.</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supplied OOS</th><th>Supported execution</th><th>Touches</th><th>Diagnostic PnL</th><th>Diagnostic DD</th><th>Status</th></tr></thead><tbody id="scenario-diagnostics"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Diagnostic net USD</th><th>Diagnostic max DD</th><th>Evidence</th><th>Eligibility</th><th>Blockers</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:none;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div class="banner bad"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong><br><span class="muted">Any ideal-touch values below are diagnostic replay values, never conservative execution results.</span></div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><h3>Conservative execution leaders by stop</h3><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Conservative execution leaders by chase × stop</h3><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div><h3>Ideal-touch diagnostic hypotheses</h3><p class="muted">Supplied OOS paths without supported execution are hypotheses only; their diagnostic PnL cannot qualify a policy.</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supplied OOS</th><th>Supported execution</th><th>Touches</th><th>Diagnostic PnL</th><th>Diagnostic DD</th><th>Status</th></tr></thead><tbody id="scenario-diagnostics"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Diagnostic net USD</th><th>Diagnostic max DD</th><th>Evidence</th><th>Eligibility</th><th>Blockers</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
 <script>
 function standaloneGenomeCountCards(d) {
   const c = d.collection || {}, s = d.search_progress || {}, cs = d.candidate_screen || {};
@@ -3947,7 +3947,7 @@ def api_cross_world_evidence():
 def cross_world_evidence_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cross-World Evidence</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1400px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.value{font-size:22px;font-weight:700}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Cross-World Evidence</h1><div id="banner" class="banner bad">Loading current manifest report…</div><div class="card"><strong>Strict causal join:</strong> epoch + opportunity + policy + schedule + tape + fill. Missing or duplicate identity remains NOT_COMPUTABLE; diagnostic touch is never relabelled as a fill.</div><div id="worlds" class="grid"></div><div class="card"><h2>Join summary and blockers</h2><pre id="detail"></pre></div></div>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:none;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.value{font-size:22px;font-weight:700}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Cross-World Evidence</h1><div id="banner" class="banner bad">Loading current manifest report…</div><div class="card"><strong>Strict causal join:</strong> epoch + opportunity + policy + schedule + tape + fill. Missing or duplicate identity remains NOT_COMPUTABLE; diagnostic touch is never relabelled as a fill.</div><div id="worlds" class="grid"></div><div class="card"><h2>Join summary and blockers</h2><pre id="detail"></pre></div></div>
 <script>fetch('/api/cross-world-evidence').then(r=>r.json()).then(d=>{const j=d.join_summary||{},worlds=d.worlds||{};document.getElementById('banner').textContent=(j.status||d.status||'NOT_COMPUTABLE')+' · epoch '+String(d.epoch_id||'UNKNOWN')+' · revision '+String(d.source_revision||'UNKNOWN')+' · comparisons '+String(j.pairwise_computable_comparisons??0)+' · disagreements '+String(j.pairwise_disagreements??0);document.getElementById('worlds').innerHTML=Object.entries(worlds).map(([name,w])=>'<div class="card"><small>'+name+'</small><div class="value">'+String(w.status||'NOT_COMPUTABLE')+'</div><div>current observed '+String(w.rows_observed??0)+' · complete identity '+String(w.rows_with_complete_explicit_identity??0)+' · unique joinable '+String(w.unique_joinable_rows??0)+'</div><div>excluded legacy/missing epoch '+String((w.rows_excluded_missing_epoch??0)+(w.rows_excluded_other_epoch??0))+'</div></div>').join('')||'<div class="card">No current world inventory is available.</div>';document.getElementById('detail').textContent=JSON.stringify({epoch_id:d.epoch_id,source_revision:d.source_revision,join_summary:j,worlds:worlds,source_inventory:d.source_inventory},null,2)}).catch(e=>{document.getElementById('banner').textContent='FAILED TO LOAD · '+e});</script></body></html>
 """)
 
@@ -4371,7 +4371,7 @@ def _research_page(title: str, endpoint: str, mode: str):
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }}</title><style>
 *{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}
-.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;overflow:hidden}.note{max-width:100%;overflow-wrap:anywhere;padding:14px;border:1px solid #8b6f19;background:#2d260f;border-radius:8px}
+.wrap{width:100%;max-width:none;min-width:0;margin:auto;overflow:hidden}.note{max-width:100%;overflow-wrap:anywhere;padding:14px;border:1px solid #8b6f19;background:#2d260f;border-radius:8px}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:12px;margin:16px 0}.kpi{min-width:0;overflow-wrap:anywhere;background:#161b22;border:1px solid #30363d;padding:12px;border-radius:8px}
 table{display:block;width:100%;max-width:100%;overflow-x:auto;border-collapse:collapse;background:#161b22}th,td{padding:9px;border:1px solid #30363d;text-align:left;font-size:13px;white-space:nowrap}th{background:#21262d}.bad{color:#f2cc60}.good{color:#3fb950}
 @media(max-width:600px){body{padding:12px}.kpis{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}
@@ -4479,7 +4479,7 @@ def _v31_evidence_payload(kind: str) -> dict:
 def _v31_evidence_page(title: str, endpoint: str, kind: str):
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title>
-<style>*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;overflow:hidden}.banner,.card{min-width:0;max-width:100%;overflow-wrap:anywhere;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.banner{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}.scroll{display:block;width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px;border:1px solid #30363d;text-align:left;white-space:nowrap;font-size:13px}th{background:#21262d}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}</style></head>
+<style>*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:none;min-width:0;margin:auto;overflow:hidden}.banner,.card{min-width:0;max-width:100%;overflow-wrap:anywhere;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.banner{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}.scroll{display:block;width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px;border:1px solid #30363d;text-align:left;white-space:nowrap;font-size:13px}th{background:#21262d}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}</style></head>
 <body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1><div id="banner" class="banner">Loading current signed V3.1 evidence…</div><div id="grid" class="grid"></div><div class="card"><div class="scroll"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div><pre id="detail"></pre></div></div>
 <script>
 function maturityCountCards(d) {
@@ -7032,7 +7032,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   nav.subnav button.active { opacity: 1; }
   .lane-toggle { display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 4px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
   .lane-toggle input { accent-color: var(--accent); }
-  main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }
+  main { padding: 20px clamp(12px, 1vw, 24px); width: 100%; max-width: none; min-width: 0; overflow: hidden; }
   section { display: none; min-width: 0; max-width: 100%; }
   section.active { display: block; }
   .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
@@ -7045,9 +7045,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
   #lifecycle-bundle-kpis { grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
   #lifecycle-bundle-kpis .val { overflow-wrap: normal; word-break: normal; }
-  .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
+  .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow: auto; max-height: 80vh; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
   .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none; overflow: visible; border-collapse: collapse; font-size: 0.9rem; margin-top: 0; }
+  .table-scroll table { display: table; width: 100%; min-width: 100%; max-width: none; overflow: visible; border-collapse: separate; border-spacing: 0; border-top: 1px solid var(--border); border-left: 1px solid var(--border); font-size: 0.8rem; margin-top: 0; }
+  .table-scroll th, .table-scroll td { border-width: 0 1px 1px 0; padding: 4px 7px; line-height: 1.3; vertical-align: top; overflow-wrap: break-word; }
+  .table-scroll thead th { position: sticky; top: 0; z-index: 2; background: var(--panel); white-space: normal; vertical-align: bottom; }
+  .table-scroll table.sticky-first td:first-child, .table-scroll table.sticky-first th:first-child { position: sticky; left: 0; z-index: 1; background: var(--bg); box-shadow: 1px 0 0 var(--border); }
+  .table-scroll table.sticky-first tr:nth-child(even) td:first-child { background: #101820; }
+  .table-scroll table.sticky-first thead th:first-child { z-index: 3; background: var(--panel); }
   .table-scroll table[hidden] { display: none; }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
@@ -7584,6 +7589,47 @@ function ensureScrollableTables(root = document) {
   });
 }
 ensureScrollableTables();
+// Long policy identities (SIDE|ENTRY|EXIT, OFFSET_0.30_CHASE_...) have no
+// spaces; a <wbr> after each '|' or '_' in a long token lets them wrap without
+// changing their text, copy or sort value.
+const LONG_TOKEN_RE = /[^\s]{12,}/;
+const POLICY_BREAK_RE = /[|_](?=\S)/;
+const wrappedCellText = new WeakMap();
+function refineTableLayout(root = document) {
+  root.querySelectorAll('main .table-scroll > table').forEach(table => {
+    const grouped = table.tHead && table.tHead.rows.length > 1;
+    const spanned = table.querySelector('td[rowspan]:not([rowspan="1"]), th[rowspan]:not([rowspan="1"])');
+    table.classList.toggle('sticky-first', !grouped && !spanned);
+  });
+  root.querySelectorAll('main .table-scroll td, main .table-scroll th').forEach(cell => {
+    const text = cell.textContent;
+    if (wrappedCellText.get(cell) === text || !LONG_TOKEN_RE.test(text)) return;
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const value = walker.currentNode.nodeValue;
+      if (LONG_TOKEN_RE.test(value) && POLICY_BREAK_RE.test(value)) nodes.push(walker.currentNode);
+    }
+    nodes.forEach(node => {
+      const frag = document.createDocumentFragment();
+      node.nodeValue.split(/(?<=[|_])(?=\S)/).forEach((part, i) => {
+        if (i) frag.appendChild(document.createElement('wbr'));
+        frag.appendChild(document.createTextNode(part));
+      });
+      node.parentNode.replaceChild(frag, node);
+    });
+    if (!cell.title && cell.tagName === 'TD') cell.title = text.trim();
+    wrappedCellText.set(cell, cell.textContent);
+  });
+}
+let tableLayoutQueued = false;
+function queueTableLayout() {
+  if (tableLayoutQueued) return;
+  tableLayoutQueued = true;
+  requestAnimationFrame(() => { tableLayoutQueued = false; refineTableLayout(); });
+}
+new MutationObserver(queueTableLayout).observe(document.querySelector('main'), { childList: true, subtree: true, characterData: true });
+queueTableLayout();
 const EVIDENCE_SCOPES = {
   summary: ['FRESHNESS UNVERIFIED — READ-ONLY', 'Waiting for exact-generation freshness receipts. Saved policy and historical executed evidence remain separate and are not qualification proof.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
