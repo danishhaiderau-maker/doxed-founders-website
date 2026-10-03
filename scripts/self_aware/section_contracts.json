@@ -130,6 +130,15 @@
      "allow_http": {"404": "AMBER"},
      "reconcile": "research_api_content"},
 
+    {"id": "analyzer.indicator_edge", "surface": "analyzer", "title": "Indicator Edge forward scorer: daily, pre-registered, scoring live bars", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#indicator-edge", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research/indicator_edge"},
+     "depends_on": ["research/indicator_forward_scorer.py", "research/indicator_edge_cycle.py", "scripts/run-genome-grid.ps1",
+                    "analyzer-exports/indicator-edge/indicator_edge_report.json", "analyzer-exports/genome-grid/forward-tracker/indicator_edge_frozen.jsonl"],
+     "allow_http": {"404": "AMBER"},
+     "freshness": {"path": "generated_at", "max_age_sec": 93600},
+     "required": ["status", "feature_set_sha", "trial_count", "prereg.chain.chain_ok", "status_inventory.counts"],
+     "reconcile": "indicator_edge"},
+
     {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",
      "page": "http://127.0.0.1:9021/edges", "source": {"kind": "self", "doc": "health"},
      "depends_on": ["scripts/self_aware/edges.py", "res_edges"],

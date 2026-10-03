@@ -30785,6 +30785,25 @@ def market_context_health_snapshot() -> dict:
         return {"schema": _mct.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
+import indicator_edge_spec as _ies
+
+# Observation-only indicator engine (fly-entrypoint.sh, own niced process).
+# The bot only reads its live file for status/monitoring; never readiness or orders.
+INDICATOR_ENGINE_ENABLED = os.getenv("INDICATOR_ENGINE_ENABLED", "1").strip() == "1"
+_INDICATOR_ENGINE_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def indicator_engine_health_snapshot() -> dict:
+    try:
+        now = time.time()
+        if now - _INDICATOR_ENGINE_LIVE_CACHE["read_ts"] >= 5.0:
+            live = _cvt.read_live(_ies.LIVE_FILE) if INDICATOR_ENGINE_ENABLED else None
+            _INDICATOR_ENGINE_LIVE_CACHE.update(read_ts=now, live=live)
+        return _ies.health_from_live(_INDICATOR_ENGINE_LIVE_CACHE["live"], now, enabled=INDICATOR_ENGINE_ENABLED)
+    except Exception as exc:
+        return {"schema": _ies.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
     try:
         ts_list, rows = _AI_SHADOW_TAPE.snapshot()
@@ -43397,6 +43416,7 @@ def _monitor_summary_payload(now: float) -> dict:
     xvl = _monitor_part(xvl_evaluator_snapshot)
     cross_venue = _monitor_part(cross_venue_health_snapshot)
     market_context = _monitor_part(market_context_health_snapshot)
+    indicator_engine = _monitor_part(indicator_engine_health_snapshot)
     collection = _monitor_part(lambda: research_collection_health(now))
     transfer = _monitor_part(lambda: _volume_health_snapshot(now).get("transfer") or {})
     epoch = _monitor_part(_data_epoch_public)
@@ -43445,6 +43465,7 @@ def _monitor_summary_payload(now: float) -> dict:
             "cycle_completed": round(now - completed_ts, 1) if completed_ts else None,
             "xvl_tick": xvl.get("tick_age_s"),
             "cross_venue_collector": cross_venue.get("collector_age_s"),
+            "indicator_engine_last_bar_close": indicator_engine.get("last_bar_close_age_sec"),
             "tape_latest_bucket": (collection.get("tape_source") or {}).get("latest_bucket_age_sec"),
         },
         "progress": {
@@ -43454,6 +43475,7 @@ def _monitor_summary_payload(now: float) -> dict:
             "cross_venue_status": cross_venue.get("status"),
             "market_context_status": market_context.get("status"),
             "market_context_stale_feeds": market_context.get("stale_feeds"),
+            "indicator_engine_status": indicator_engine.get("status"),
             "research_collection_status": collection.get("status"),
         },
         "counters_since_boot": {
@@ -43727,6 +43749,12 @@ def status():
                 "liquidations_file": _mct.LIQ_FILE_NAME,
                 "mode": "WATCH_ONLY_NO_ORDERS",
                 **market_context_health_snapshot(),
+            },
+            "indicator_engine": {
+                "bar_schema": _ies.BAR_SCHEMA,
+                "file": _ies.BAR_FILE,
+                "mode": "OBSERVATION_ONLY_NO_ORDERS",
+                **indicator_engine_health_snapshot(),
             },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
@@ -44012,6 +44040,7 @@ def ready():
         "cross_venue_health": cross_venue_health_snapshot(),
         "xvl_evaluator_health": xvl_evaluator_snapshot(),
         "market_context_health": market_context_health_snapshot(),
+        "indicator_engine_health": indicator_engine_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 

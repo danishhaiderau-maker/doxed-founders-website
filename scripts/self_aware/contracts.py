@@ -1196,7 +1196,27 @@ def _rec_research_api_content(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict
     return viol, met
 
 
+def _rec_indicator_edge(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Indicator Edge scorer: pre-registration intact, scoring live bars, one trial per feature x window."""
+    if not isinstance(obj, dict):
+        return [_v("INDICATOR_EDGE_UNAVAILABLE", AMBER, "no indicator edge report")], {}
+    status = obj.get("status")
+    met = {"indicator_edge:eligible_rows": (obj.get("inputs") or {}).get("eligible_rows"),
+           "indicator_edge:scored_days": obj.get("scored_days"), "indicator_edge:status": status}
+    viol = []
+    if status in ("PREREG_CHAIN_BROKEN", "PREREG_TAMPERED"):
+        viol.append(_v("FORWARD_CHAIN_BROKEN", RED, f"indicator edge pre-registration {status}"))
+    elif status != "OK":
+        viol.append(_v("INDICATOR_EDGE_NOT_SCORING", AMBER, f"scorer status {status}"))
+    feats = obj.get("features") or []
+    windows = len((obj.get("rules") or {}).get("windows_min") or [])
+    if status == "OK" and obj.get("trial_count") != len(feats) * windows:
+        viol.append(_v("RECONCILE_MISMATCH", RED, f"trial_count {obj.get('trial_count')} != {len(feats)} features x {windows} windows"))
+    return viol, met
+
+
 RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
+    "indicator_edge": _rec_indicator_edge,
     "fill_model_headline": _rec_fill_model_headline,
     "genome_grid_content": _rec_genome_grid_content,
     "research_api_content": _rec_research_api_content,

@@ -44,6 +44,9 @@ EXCLUDED_NAMES = frozenset({
     # Market-context collector live state, replaced every 5 s; the evidence is
     # market_context_1m.jsonl and liquidations.jsonl.
     "market_context_live.json",
+    # Indicator engine live state, replaced every 5 s; the evidence is
+    # indicator_bars_v1.jsonl.
+    "indicator_engine_live.json",
 })
 
 # Fly-local validation caches rewritten on every append to their ledger; they

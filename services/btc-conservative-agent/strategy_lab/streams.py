@@ -87,6 +87,11 @@ ANALYZER_USAGE = {
     "shadow_exit_paths.jsonl": {"usage": FULL, "continuous": False,
                                 "consumers": ["shadow_exit_report (all rotations, Shadow exits section)"],
                                 "schemas": ["shadow_exit_path_v1"]},
+    "indicator_bars_v1.jsonl": {
+        "usage": FULL, "continuous": True,
+        "consumers": ["indicator_forward_scorer (all rotations)", "Indicator Edge dashboard section"],
+        "schemas": ["indicator_bars_v1"],
+        "note": "one row per closed 3-minute bar; scored forward only against the frozen pre-registration"},
 }
 
 

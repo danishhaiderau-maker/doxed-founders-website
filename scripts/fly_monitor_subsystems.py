@@ -54,6 +54,8 @@ COLLECTION_FAILURE_COUNTERS: tuple[tuple[str, str], ...] = (
     ("status", "collection.cross_venue_tape.stats.live_write_failures"),
     ("ready", "cross_venue_health.stats.write_failures"),
     ("ready", "xvl_evaluator_health.write_failures"),
+    ("ready", "indicator_engine_health.write_failures"),
+    ("ready", "indicator_engine_health.compute_failures"),
 )
 
 # Field paths the deployed revision emits; absence means a contract regression
@@ -160,6 +162,14 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
         findings["market_context_stale"] = (
             f"market-context collector {context.get('status')!r} age_sec={context.get('age_sec')} "
             f"stale_feeds={context.get('stale_feeds')}"
+        )
+
+    engine = _dict(ready.get("indicator_engine_health"))
+    if engine.get("status") in ("ENGINE_DOWN", "STALLED", "UNAVAILABLE"):
+        findings["indicator_engine_stalled"] = (
+            f"indicator engine {engine.get('status')!r}: last bar closed "
+            f"{engine.get('last_bar_close_age_sec')}s ago (bars must advance every 180s), "
+            f"live age_sec={engine.get('age_sec')} rows_written={engine.get('rows_written')}"
         )
 
     if paused is False:

@@ -172,6 +172,29 @@ def test_market_context_degraded_or_down_but_not_disabled():
     assert "market_context_stale" not in sub.ready_block_findings(off, paused=False)
 
 
+def test_indicator_engine_stalled_or_down_but_not_degraded_or_absent():
+    for status in ("ENGINE_DOWN", "STALLED"):
+        payload = _with(READY, "indicator_engine_health",
+                        {"status": status, "last_bar_close_age_sec": 900.0, "age_sec": 2.0, "rows_written": 7})
+        msg = sub.ready_block_findings(payload, paused=True)["indicator_engine_stalled"]
+        assert "900.0" in msg and "180s" in msg
+    for status in ("OK", "DEGRADED", "DISABLED"):
+        payload = _with(READY, "indicator_engine_health", {"status": status})
+        assert "indicator_engine_stalled" not in sub.ready_block_findings(payload, paused=False)
+    # A revision without the engine reports nothing (no false alarm before the deploy).
+    assert "indicator_engine_stalled" not in sub.ready_block_findings(READY, paused=False)
+    assert "indicator_engine_stalled" in alerts.POLICIES
+
+
+def test_indicator_engine_write_and_compute_failures_are_counted():
+    state = {}
+    base = _with(READY, "indicator_engine_health", {"status": "OK", "write_failures": 0, "compute_failures": 0})
+    assert sub.collection_write_failure_findings(state, STATUS, base) == {}
+    grew = _with(base, "indicator_engine_health.compute_failures", 2)
+    msg = sub.collection_write_failure_findings(state, STATUS, grew)["collection_write_failures"]
+    assert "indicator_engine_health.compute_failures +2" in msg
+
+
 def test_ai_input_dead_only_while_unpaused():
     dead = _with(READY, "ai_input_health", {"status": "DEAD_INPUT", "prompt_id": "p",
                                             "dead_fields": [{"path": "funding.rate", "kind": "constant"}]})
