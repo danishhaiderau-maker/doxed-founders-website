@@ -104,6 +104,35 @@ def test_xvl_evaluator_stale_on_status_or_tick_age():
         assert "xvl_evaluator_stale" not in found
 
 
+def _xvl_latency(status, p50):
+    return {"status": "OK", "tick_age_s": 0.8, "lanes": {"FAMILY_XVENUE_SESSION_FOLLOW_60M": {"latency": {
+        "status": status, "target_median_signal_to_fill_s": 2.0,
+        "stages": {"signal_to_fill": {"n": 40, "p50_s": p50, "p90_s": p50 + 3}},
+    }}}}
+
+
+def test_xvl_signal_to_fill_slow_only_when_the_runtime_gate_says_slow():
+    found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", _xvl_latency("SLOW", 9.3)), paused=False)
+    assert "FAMILY_XVENUE_SESSION_FOLLOW_60M median signal->fill 9.3s" in found["xvl_signal_to_fill_slow"]
+    assert "xvl_signal_to_fill_slow" in alerts.POLICIES
+    for status, p50 in (("OK", 1.4), ("INSUFFICIENT_FILLS", 9.3)):
+        found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", _xvl_latency(status, p50)), paused=False)
+        assert "xvl_signal_to_fill_slow" not in found
+
+
+def test_preentry_evidence_degraded_only_on_dead_receipts_or_barrier_timeouts():
+    block = {"status": "DEGRADED", "tick_age_s": 0.8, "lanes": {}, "preentry_evidence": {
+        "health": "DEGRADED", "dead": 1, "barrier_timeouts": 0, "pending": 0, "last_error": "V3_LANE_DECISION not durable",
+    }}
+    found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", block), paused=False)
+    assert "dead=1" in found["preentry_evidence_degraded"]
+    assert "preentry_evidence_degraded" in alerts.POLICIES
+    for health in ("OK", "SYNC_FALLBACK", "DISABLED"):
+        block["preentry_evidence"]["health"] = health
+        found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", block), paused=False)
+        assert "preentry_evidence_degraded" not in found
+
+
 def test_cross_venue_down_or_collector_age_but_not_disabled():
     down = _with(READY, "cross_venue_health", {"status": "DOWN", "reason": "COLLECTOR_HEARTBEAT_STALE",
                                                "collector_age_s": 400.0, "stale_venues": []})
@@ -141,6 +170,29 @@ def test_market_context_degraded_or_down_but_not_disabled():
         assert "deriv_okx" in sub.ready_block_findings(payload, paused=True)["market_context_stale"]
     off = _with(READY, "market_context_health", {"status": "DISABLED", "stale_feeds": []})
     assert "market_context_stale" not in sub.ready_block_findings(off, paused=False)
+
+
+def test_indicator_engine_stalled_or_down_but_not_degraded_or_absent():
+    for status in ("ENGINE_DOWN", "STALLED"):
+        payload = _with(READY, "indicator_engine_health",
+                        {"status": status, "last_bar_close_age_sec": 900.0, "age_sec": 2.0, "rows_written": 7})
+        msg = sub.ready_block_findings(payload, paused=True)["indicator_engine_stalled"]
+        assert "900.0" in msg and "180s" in msg
+    for status in ("OK", "DEGRADED", "DISABLED"):
+        payload = _with(READY, "indicator_engine_health", {"status": status})
+        assert "indicator_engine_stalled" not in sub.ready_block_findings(payload, paused=False)
+    # A revision without the engine reports nothing (no false alarm before the deploy).
+    assert "indicator_engine_stalled" not in sub.ready_block_findings(READY, paused=False)
+    assert "indicator_engine_stalled" in alerts.POLICIES
+
+
+def test_indicator_engine_write_and_compute_failures_are_counted():
+    state = {}
+    base = _with(READY, "indicator_engine_health", {"status": "OK", "write_failures": 0, "compute_failures": 0})
+    assert sub.collection_write_failure_findings(state, STATUS, base) == {}
+    grew = _with(base, "indicator_engine_health.compute_failures", 2)
+    msg = sub.collection_write_failure_findings(state, STATUS, grew)["collection_write_failures"]
+    assert "indicator_engine_health.compute_failures +2" in msg
 
 
 def test_ai_input_dead_only_while_unpaused():
@@ -327,6 +379,27 @@ def test_collection_write_failures_alert_only_when_a_counter_grows():
     assert "execution_markouts.dropped +3" in found
     # a restart resets counters to 0: new baseline, no alert
     assert sub.collection_write_failure_findings(state, status, None) == {}
+
+
+def test_shadow_exit_recorder_must_advance_and_feeds_failure_counters():
+    state = alerts.empty_state()
+    rec = {"enabled": True, "worker_alive": True, "queue_depth": 0, "submitted": 4, "written": 4,
+           "skipped": 0, "errors": 0, "write_failures": 0, "dropped_full": 0}
+    status = lambda **kw: {"collection": {"shadow_exit_recorder": {**rec, **kw}}}  # noqa: E731
+    assert sub.shadow_exit_recorder_findings(state, status()) == {}
+    assert sub.shadow_exit_recorder_findings(state, status(submitted=6, written=6)) == {}
+    found = sub.shadow_exit_recorder_findings(state, status(submitted=9, written=6, queue_depth=3))
+    assert "3 submitted path(s) not drained" in found["shadow_exit_recorder_stalled"]
+    dead = sub.shadow_exit_recorder_findings(state, status(submitted=9, written=9, worker_alive=False))
+    assert "worker thread is dead" in dead["shadow_exit_recorder_stalled"]
+    assert sub.shadow_exit_recorder_findings(state, status(submitted=0, written=0, worker_alive=False)) == {}
+    assert sub.shadow_exit_recorder_findings(state, status(enabled=False, worker_alive=False)) == {}
+    assert "shadow_exit_recorder_stalled" in alerts.POLICIES
+    paths = {path for _name, path in sub.COLLECTION_FAILURE_COUNTERS}
+    assert {"collection.shadow_exit_recorder.write_failures", "collection.shadow_exit_recorder.errors",
+            "collection.shadow_exit_recorder.dropped_full"} <= paths
+    # Not required until the recorder revision is deployed: the monitor probes the live app.
+    assert "collection.shadow_exit_recorder.written" not in sub.REQUIRED_FIELDS["status"]
 
 
 def test_restart_loop_needs_three_distinct_boots_within_an_hour():

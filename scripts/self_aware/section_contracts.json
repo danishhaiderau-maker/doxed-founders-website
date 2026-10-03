@@ -130,6 +130,15 @@
      "allow_http": {"404": "AMBER"},
      "reconcile": "research_api_content"},
 
+    {"id": "analyzer.indicator_edge", "surface": "analyzer", "title": "Indicator Edge forward scorer: daily, pre-registered, scoring live bars", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#indicator-edge", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research/indicator_edge"},
+     "depends_on": ["research/indicator_forward_scorer.py", "research/indicator_edge_cycle.py", "scripts/run-genome-grid.ps1",
+                    "analyzer-exports/indicator-edge/indicator_edge_report.json", "analyzer-exports/genome-grid/forward-tracker/indicator_edge_frozen.jsonl"],
+     "allow_http": {"404": "AMBER"},
+     "freshness": {"path": "generated_at", "max_age_sec": 93600},
+     "required": ["status", "feature_set_sha", "trial_count", "prereg.chain.chain_ok", "status_inventory.counts"],
+     "reconcile": "indicator_edge"},
+
     {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",
      "page": "http://127.0.0.1:9021/edges", "source": {"kind": "self", "doc": "health"},
      "depends_on": ["scripts/self_aware/edges.py", "res_edges"],
@@ -214,6 +223,13 @@
                  "live_columns": ["avg_left_usd", "avg_mfe_margin_pct"]},
                 {"path": "evidence_classes.shadow_lab.reasons", "name": "shadow_reasons", "min_rows": 1,
                  "live_columns": ["avg_left_usd", "avg_mfe_margin_pct", "avg_leakage_margin_pct"]}]},
+
+    {"id": "analyzer.shadow_exits", "surface": "analyzer", "title": "Execution: shadow exits", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#shadow-exits", "covers": ["details#shadow-exits"],
+     "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research/shadow_exits"},
+     "depends_on": ["shadow_exit_report.json"], "freshness": {"path": "generated_at", "max_age_sec": 4500},
+     "tables": [{"path": "cohorts.BACKFILL_ARCHIVE.groups", "name": "archive_groups", "min_rows": 1,
+                 "live_columns": ["records", "filled"]}]},
 
     {"id": "analyzer.report_explorer", "surface": "analyzer", "title": "Report explorer + manifest", "tier": "heavy",
      "page": "http://127.0.0.1:9001/details#explorer", "covers": ["details#explorer"],

@@ -46,6 +46,8 @@
     ["POST", "/api/set_threshold", "set_threshold"],
     ["POST", "/api/set_ai_bands", "set_ai_bands"],
     ["POST", "/api/set_chase_buckets", "set_chase_buckets"],
+    ["GET", "/api/research/shadow_exits", "research_shadow_exits"],
+    ["GET", "/api/shadow_exits/summary", "shadow_exits_public_summary"],
     ["GET", "/api/spread-gate", "api_spread_gate"],
     ["POST", "/api/spread-gate", "api_spread_gate"],
     ["OPTIONS", "/api/spread-gate", "api_spread_gate"],
@@ -70,6 +72,9 @@
     ["GET", "/api/system-health", "system_health_view"],
     ["POST", "/api/system-health/report", "system_health_report"],
     ["GET", "/api/system-health/alerts", "system_health_alerts_view"],
+    ["GET", "/api/monitor/summary", "monitor_summary"],
+    ["GET", "/api/monitor/lanes", "monitor_lanes"],
+    ["GET", "/api/monitor/digest", "monitor_digest"],
     ["GET", "/alerts", "alerts_page"]
   ],
   "main_workers": [

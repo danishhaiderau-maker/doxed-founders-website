@@ -137,6 +137,7 @@ class FillRuntime:
             "_commit_paper_lifecycle_transition": commit_transition,
             "_canonicalize_paper_position_snapshot": lambda row: row,
             "log_lane_opportunity_event": lambda *a, **k: None,
+            "_xvl_latency_mark_order": lambda *a, **k: None,
             "_emit_genome_execution_event": lambda *a, **k: None,
             "_relay_mirror": lambda *a, **k: None,
             "_mark_fill_replay_buffer_executed": lambda trade_id, px: None,

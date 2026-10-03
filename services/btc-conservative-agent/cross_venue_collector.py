@@ -105,7 +105,11 @@ class ConnectionWorker(threading.Thread):
                 now = self._clock()
                 if message:
                     last_rx = now
-                    if message != "pong":
+                    if message == "pong":
+                        on_keepalive = getattr(self.acc, "on_keepalive", None)
+                        if on_keepalive is not None:
+                            on_keepalive(now)
+                    else:
                         try:
                             data = json.loads(message)
                         except ValueError:
@@ -246,7 +250,8 @@ class Collector:
             samples = self._minutes.pop(minute)
             row = cvt.encode_minute(
                 minute,
-                {v: [{k: s.get(k) for k in ("sec", "mid", "last", "buy", "sell", "up")} for s in samples[v]]
+                {v: [{k: s.get(k) for k in ("sec", "mid", "last", "buy", "sell", "up", "imb5", "imb20")}
+                     for s in samples[v]]
                  for v in self.venues},
                 read_bfx_mids(self.bfx_path, minute),
                 derivatives={v: self.acc[v].derivatives() for v in self.venues},

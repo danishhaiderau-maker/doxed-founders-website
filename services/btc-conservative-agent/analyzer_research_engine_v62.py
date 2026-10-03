@@ -105,6 +105,10 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
+ENTRY_BASELINE_REPLAY_RECEIPTS_FILE = "entry_baseline_replay_episode_receipts.jsonl.gz"
+# Written only by temp file + os.replace, so mirrors and the published
+# generation may share their inode instead of holding another full copy.
+HARDLINK_SAFE_REPORT_FILES = frozenset({ENTRY_BASELINE_REPLAY_REPORT_FILE, ENTRY_BASELINE_REPLAY_RECEIPTS_FILE})
 DISCOVERY_COHORT_SCORECARD_REPORT_FILE = "discovery_cohort_scorecard_report.json"
 CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE = "conservative_shadow_terminal_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
@@ -787,7 +791,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
-    ("Tile Paired Comparison", TILE_PAIRED_COMPARISON_REPORT_FILE, "Tile 1 vs Tile 2 vs Tile 3 on identical shared-AI signals (both filled), 6 h-cluster CIs, and each pre-registered tile scored against its frozen promotion and kill rules"),
+    ("Tile Paired Comparison", TILE_PAIRED_COMPARISON_REPORT_FILE, "Every shared-AI registry tile paired on identical signals (both filled), 6 h-cluster CIs, and each pre-registered tile scored against its frozen promotion and kill rules"),
     ("Adaptive Entry Funnel", ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE, "Every signal-time taker/maker/stand-aside decision joined to its fill, expiry or skip and scored against the taker-at-signal counterfactual; superseded stack versions quarantined"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
@@ -18722,6 +18726,21 @@ LADDER_SIM_PROFILES = {
 }
 
 
+def shadow_exit_cycle_report():
+    """Side-by-side shadow exits on recorded paths; observation-only and isolated from the cycle."""
+    print(f"\n=== SHADOW EXITS {ANALYZER_SYNC_ID} ===")
+    try:
+        from research import shadow_exit_report
+
+        mirror = Path(_agent_data_path(shadow_exit_report.sxp.FILE_NAME)).parent
+        out_dir = Path(os.getenv("SHADOW_EXIT_OUT_DIR", shadow_exit_report.DEFAULT_OUT_DIR))
+        report = shadow_exit_report.build_report(mirror, out_dir / "backfill")
+        path = shadow_exit_report.write_report(report, out_dir)
+        print(f"   shadow exits: {report['sources']['records']} records -> {path} ({report['build_sec']}s)")
+    except Exception as exc:  # noqa: BLE001 - one report must not stop the analyzer cycle
+        print(f"   shadow exits report failed: {type(exc).__name__}: {exc}")
+
+
 def exit_ladder_simulator_report(trades=None, session=None):
     """Replay tick paths with alternate ladder rungs — data-driven exit optimization."""
     if session is None:
@@ -20091,6 +20110,7 @@ def pre_test_analytics_reports(
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
+    shadow_exit_cycle_report()
     correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     first_15m_outcome_report(trades=trades, session=session)
@@ -20843,6 +20863,11 @@ def _atomic_mirror_analyzer_report(source_name):
     destination_dir = Path(REPORTS_DIR)
     destination_dir.mkdir(parents=True, exist_ok=True)
     destination = destination_dir / source.name
+    if source.name in HARDLINK_SAFE_REPORT_FILES:
+        import storage_links
+
+        storage_links.link_or_copy(source, destination)
+        return destination
     temporary = destination_dir / f".{source.name}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
         shutil.copy2(source, temporary)
@@ -21907,10 +21932,13 @@ def write_report_manifest(
         baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
+        from research.entry_baseline_replay import write_replay_report
+
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(json.dumps(baseline_replay, indent=2), encoding="utf-8")
-        os.replace(temporary, target)
+        replay_sidecar = write_replay_report(
+            baseline_replay, target, sidecar_name=ENTRY_BASELINE_REPLAY_RECEIPTS_FILE,
+        )
+        _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
         replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         reports.append({
             "title": "Same-Opportunity Entry Baseline Replay",
@@ -21922,6 +21950,7 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
+            "episode_receipts_sidecar": replay_sidecar,
         })
     except Exception as exc:
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
@@ -22374,6 +22403,9 @@ def write_report_manifest(
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
+    if any(row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE and row.get("episode_receipts_sidecar")
+           for row in reports):
+        manifest["text_artifacts"].append(ENTRY_BASELINE_REPLAY_RECEIPTS_FILE)
     manifest["generation_id"] = hashlib.sha256(
         json.dumps(
             {
@@ -22535,7 +22567,12 @@ def _publish_completed_report_generation(manifest):
                 raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
             if source.is_file():
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+                if name in HARDLINK_SAFE_REPORT_FILES:
+                    import storage_links
+
+                    storage_links.link_or_copy(source, destination)
+                else:
+                    shutil.copy2(source, destination)
         (staging / REPORT_MANIFEST_FILE).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )

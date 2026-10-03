@@ -398,6 +398,7 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     findings.update(subsystems.relay_cache_findings(relay_state, notes))
     findings.update(subsystems.collection_write_failure_findings(state, status_payload, ready))
     findings.update(subsystems.restart_loop_findings(state, status_payload, now))
+    findings.update(subsystems.shadow_exit_recorder_findings(state, status_payload))
     findings.update(subsystems.deploy_failure_findings(deploy))
     findings.update(subsystems.contract_findings({
         "health": health, "ready": ready, "status": status_payload, "relay": relay, "system_health": system_health,

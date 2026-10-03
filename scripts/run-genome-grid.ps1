@@ -38,6 +38,21 @@ try {
   } finally { Pop-Location }
   $tail = ($out.Trim() -split "`r?`n" | Select-Object -Last 3) -join ' | '
   Add-Content -LiteralPath $log -Encoding UTF8 -Value ('{0} pid={1} exit={2} sec={3:n0} {4}' -f [datetime]::UtcNow.ToString('o'), $PID, $code, ([datetime]::UtcNow - $started).TotalSeconds, $tail)
+  # Indicator Edge forward scorer rides the same cadence; its outcome never changes this task's exit code.
+  $edge = Join-Path $service 'research\indicator_edge_cycle.py'
+  if (Test-Path -LiteralPath $edge) {
+    $edgeStarted = [datetime]::UtcNow
+    Push-Location $service
+    try {
+      $edgeOut = & $Python $edge 2>&1 | Out-String
+      $edgeCode = $LASTEXITCODE
+    } catch {
+      $edgeOut = $_.Exception.Message
+      $edgeCode = -1
+    } finally { Pop-Location }
+    $edgeTail = ($edgeOut.Trim() -split "`r?`n" | Select-Object -Last 2) -join ' | '
+    Add-Content -LiteralPath $log -Encoding UTF8 -Value ('{0} pid={1} indicator_edge exit={2} sec={3:n0} {4}' -f [datetime]::UtcNow.ToString('o'), $PID, $edgeCode, ([datetime]::UtcNow - $edgeStarted).TotalSeconds, $edgeTail)
+  }
   exit $code
 } finally {
   $handle.Dispose()

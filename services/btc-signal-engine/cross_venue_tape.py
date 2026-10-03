@@ -28,10 +28,14 @@ LIVE_SCHEMA = "cross_venue_live_v1"
 # Rewritten every second; operational state, never shipped as evidence.
 LIVE_FILE = "cross_venue_live.json"
 HEALTH_SCHEMA = "cross_venue_health_v1"
-COLLECTOR_VERSION = "cross_venue_collector_v1_20261001"
+COLLECTOR_VERSION = "cross_venue_collector_v1_20261004"
 
 PRICE_UNIT = 0.05
 QTY_UNIT = 0.001
+# Binance book imbalance (bid - ask) / (bid + ask) per second, stored as ints.
+IMBALANCE_UNIT = 0.001
+DEPTH5_STREAM = "btcusdt@depth5@100ms"
+DEPTH20_STREAM = "btcusdt@depth20@500ms"
 MAX_QUOTE_AGE_SEC = 3.5
 ROTATE_BYTES = 20 * 1024 * 1024
 LIVE_HISTORY_SEC = 150
@@ -51,7 +55,7 @@ VENUES = {
         "symbol": "BTCUSDT",
         "connections": (
             {"name": "binance_public",
-             "url": "wss://fstream.binance.com/public/stream?streams=btcusdt@depth5@100ms",
+             "url": f"wss://fstream.binance.com/public/stream?streams={DEPTH5_STREAM}/{DEPTH20_STREAM}",
              "subscribe": None, "app_ping": None},
             {"name": "binance_market",
              "url": "wss://fstream.binance.com/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s",
@@ -99,6 +103,19 @@ def _finite(value: Any) -> Optional[float]:
 #   ("bbo", bid, ask, exch_ms) | ("trade", price, qty_btc, "BUY"|"SELL", exch_ms)
 #   ("deriv", {field: value})
 # --------------------------------------------------------------------------
+def book_imbalance(bids: Iterable, asks: Iterable, levels: int) -> Optional[float]:
+    """(bid qty - ask qty) / (bid qty + ask qty) over the first ``levels`` levels."""
+    try:
+        bq = sum(float(level[1]) for level in list(bids)[:levels])
+        aq = sum(float(level[1]) for level in list(asks)[:levels])
+    except (TypeError, ValueError, IndexError):
+        return None
+    total = bq + aq
+    if not math.isfinite(total) or total <= 0:
+        return None
+    return (bq - aq) / total
+
+
 def parse_binance(message: Mapping[str, Any]) -> list:
     data = message.get("data") if isinstance(message.get("data"), Mapping) else message
     kind = data.get("e")
@@ -106,8 +123,16 @@ def parse_binance(message: Mapping[str, Any]) -> list:
         bids, asks = data.get("b") or [], data.get("a") or []
         if not bids or not asks:
             return []
+        if message.get("stream") == DEPTH20_STREAM:
+            # Book-imbalance evidence only; the BBO keeps coming from depth5@100ms.
+            imb = book_imbalance(bids, asks, 20)
+            return [] if imb is None else [("depth", "imb20", imb)]
         bid, ask = _finite(bids[0][0]), _finite(asks[0][0])
-        return [("bbo", bid, ask, _finite(data.get("T") or data.get("E")))] if bid and ask else []
+        out = [("bbo", bid, ask, _finite(data.get("T") or data.get("E")))] if bid and ask else []
+        imb = book_imbalance(bids, asks, 5)
+        if imb is not None:
+            out.append(("depth", "imb5", imb))
+        return out
     if kind == "aggTrade":
         price, qty = _finite(data.get("p")), _finite(data.get("q"))
         if not price or not qty:
@@ -212,6 +237,8 @@ class VenueAccumulator:
         self._flow_by_sec: dict = {}
         self._lat_ms: deque = deque(maxlen=512)
         self._deriv: dict = {}
+        self._depth_by_sec: dict = {}
+        self._depth_last: dict = {}
         self._keep = int(keep_seconds)
         self.last_msg_ts = None
         self.msgs = 0
@@ -243,7 +270,11 @@ class VenueAccumulator:
                 elif kind == "deriv":
                     self._deriv.update({k: v for k, v in event[1].items() if v is not None})
                     self._deriv["updated_ts"] = recv_ts
-            for store in (self._quote_by_sec, self._flow_by_sec):
+                elif kind == "depth":
+                    _, key, value = event
+                    self._depth_by_sec.setdefault(sec, {})[key] = value
+                    self._depth_last[key] = (value, recv_ts)
+            for store in (self._quote_by_sec, self._flow_by_sec, self._depth_by_sec):
                 if len(store) > self._keep:
                     for old in sorted(store)[: len(store) - self._keep]:
                         store.pop(old, None)
@@ -253,10 +284,19 @@ class VenueAccumulator:
         with self._lock:
             quote = self._quote_by_sec.pop(sec, None) or prev_quote
             flow = self._flow_by_sec.pop(sec, None)
-            for old in [s for s in self._quote_by_sec if s < sec]:
-                self._quote_by_sec.pop(old, None)
-            for old in [s for s in self._flow_by_sec if s < sec]:
-                self._flow_by_sec.pop(old, None)
+            depth = self._depth_by_sec.pop(sec, None) or {}
+            for store in (self._quote_by_sec, self._flow_by_sec, self._depth_by_sec):
+                for old in [s for s in store if s < sec]:
+                    store.pop(old, None)
+            imbalance = {}
+            for key in ("imb5", "imb20"):
+                value = depth.get(key)
+                if value is None:
+                    last = self._depth_last.get(key)
+                    # Same staleness bound as the quote: at most MAX_QUOTE_AGE_SEC old.
+                    if last is not None and 0.0 <= sec + 1.0 - last[1] <= MAX_QUOTE_AGE_SEC:
+                        value = last[0]
+                imbalance[key] = value
         mid = None
         if quote is not None and 0.0 <= sec + 1.0 - quote[2] <= MAX_QUOTE_AGE_SEC:
             mid = (quote[0] + quote[1]) / 2.0
@@ -267,6 +307,8 @@ class VenueAccumulator:
             "last": None if flow is None else flow[2],
             "buy": 0.0 if flow is None else flow[0],
             "sell": 0.0 if flow is None else flow[1],
+            "imb5": imbalance.get("imb5"),
+            "imb20": imbalance.get("imb20"),
         }
 
     def derivatives(self) -> dict:
@@ -328,6 +370,11 @@ def encode_minute(minute_ts: int, venue_samples: Mapping[str, list],
         if any("up" in s for s in seq):
             # Per-second connection mask: b/s zeros at a '0' second are unknown flow.
             row["venues"][venue]["up"] = "".join("1" if s.get("up") else "0" for s in seq)
+        for key in ("imb5", "imb20"):
+            if any(s.get(key) is not None for s in seq):
+                row["venues"][venue][key] = [None if s.get(key) is None else int(round(s[key] / IMBALANCE_UNIT))
+                                             for s in seq]
+                row["imbalance_unit"] = IMBALANCE_UNIT
     basis = {}
     for venue, v in row["venues"].items():
         vals = []

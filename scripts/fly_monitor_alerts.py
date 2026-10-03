@@ -73,9 +73,15 @@ POLICIES: Mapping[str, Policy] = {
     "monitor_schedule_gap": Policy(1, 0.0, 12 * HOUR, False, WARNING),
     # Shadow/research subsystems (never inputs to ready_ok, so not covered by not_ready).
     "xvl_evaluator_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    # Rolling median over the last fills; a restart empties the window.
+    "xvl_signal_to_fill_slow": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    # Dead-lettered receipts or barrier timeouts persist until restart.
+    "preentry_evidence_degraded": Policy(1, 0.0, 6 * HOUR, True),
     "cross_venue_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "cross_venue_reconnects": Policy(2, 30 * 60.0, 6 * HOUR, True, WARNING),
     "market_context_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    # Observation-only indicator engine: a closed bar must land every 3 minutes.
+    "indicator_engine_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "ai_input_dead": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "bbo_refresh_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "lifecycle_stalled": Policy(2, 30 * 60.0, 6 * HOUR, True),
@@ -89,6 +95,8 @@ POLICIES: Mapping[str, Policy] = {
     "relay_cache_stale": Policy(2, 15 * 60.0, 6 * HOUR, True, WARNING),
     # Counters only grow on a real write failure; a restart resets the baseline.
     "collection_write_failures": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    # Observation-only shadow-exit recorder stopped draining closed trades.
+    "shadow_exit_recorder_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True, WARNING),
     # A deploy restarts once; three starts in an hour is a crash loop, never suppressed.
     "restart_loop": Policy(1, 0.0, 3 * HOUR, False),
     # Persists until a later image deploy succeeds.

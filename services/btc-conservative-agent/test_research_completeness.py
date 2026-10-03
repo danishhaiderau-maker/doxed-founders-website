@@ -302,7 +302,10 @@ def test_frozen_trial_fails_closed_without_a_registered_control():
     # No comparison benchmark: promotion stays gated because neither the
     # benchmark, a retired lane nor the candidate itself can be the control.
     assert COMPARISON_BENCHMARK_LANE is None
-    assert LANES == ["FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL"]
+    assert LANES == ["FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
+                     "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
+                     "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_MAKER_60",
+                     "FAMILY_XVENUE_SESSION_FOLLOW_60M"]
     for control in (COMPARISON_BENCHMARK_LANE, "CONTINUOUS", LANES[0]):
         with pytest.raises(ValueError):
             freeze_selection(LANES[0], control, selected_by="danish", frozen_at_ts=1000.0)

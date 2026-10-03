@@ -49,12 +49,14 @@ LIVE_LEDGER_FILES = (
     "candles_3factor.csv",
     "signal_snapshot.jsonl",
     "signal_replay.jsonl",
+    "shadow_exit_paths.jsonl",
     "trade_lifecycle.jsonl",
     "trade_outcome.jsonl",
     "shadow_outcome.jsonl",
     "shadow_lane_outcome.jsonl",
     "lane_opportunity_capture.jsonl",
     "execution_funnel.jsonl",
+    "indicator_bars_v1.jsonl",
 )
 
 

@@ -19,6 +19,7 @@ import data_epoch as _data_epoch
 import system_health_banner
 import system_health_alerts
 import runtime_uptime
+import monitor_api
 import uuid
 import requests
 import glob
@@ -49,6 +50,7 @@ import hmac
 from html import escape as html_escape
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
+import statistics
 from collections import deque
 import collections
 from bounded_evidence_worker import BoundedEvidenceWorker
@@ -86,7 +88,7 @@ import pytz
 import bitfinex_cost_profile
 
 from combo_pathway_config import (
-    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
+    tile_card_sections as combo_tile_card_sections,
     ANALYZER_SYNC_ID as COMBO_ANALYZER_SYNC_ID,
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
@@ -115,9 +117,12 @@ from combo_pathway_config import (
     RESEARCH_LANE_AI_SCAN,
     RETIRED_TILE_LANES,
     tile_max_active_signals,
+    tile_shadow_exit_set,
+    tile_lane_for_trade_id,
     any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
+    tile_pre_registration_summary,
     combo_entry_mode,
     combo_lane_match_detail,
     combo_lane_matches,
@@ -179,6 +184,7 @@ from multiverse_entry_grid import (
     split_entry_grid,
 )
 import execution_markouts
+import shadow_exit_paths
 from research_order_schedule import (
     append_action_timing_receipt,
     append_reprice_interval as append_research_reprice_interval,
@@ -3551,6 +3557,9 @@ def _write_pending_order_evidence(job: dict) -> None:
     payload = job.get("payload") or {}
     order = payload.get("order") or {}
     master_signal = payload.get("signal") or {}
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(order, master_signal)
     collector_bridge = globals().get("_promote_collector_v22_registered_order")
     if callable(collector_bridge):
         collector_bridge(order, master_signal)
@@ -14149,6 +14158,9 @@ def _restore_collector_v22_provisionals() -> int:
     global _collector_v22_last_merge
     restored = _merge_collector_v22_provisionals(reason="STARTUP")
     _collector_v22_last_merge = time.time()
+    preentry_replay = globals().get("_replay_preentry_evidence_handoffs")
+    if callable(preentry_replay):
+        preentry_replay()
     replay = globals().get("_replay_cancellation_evidence_handoffs")
     if callable(replay):
         replay()
@@ -14920,6 +14932,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
     if not isinstance(source, dict):
         return None
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(source)
     if not _collector_source_in_current_epoch(source):
         logger.warning(
             "[COLLECTOR_V22] stale pre-reset source refused during maturation "
@@ -15205,6 +15220,9 @@ def _refresh_collector_v22_registered_order_evidence(
         return False
     if not isinstance(order, dict):
         return False
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(order, signal)
     tid = str(order.get("trade_id") or "")
     source = _order_multiverse_pending_src.get(tid)
     if not tid or not isinstance(source, dict) or source.get("collector_rejected"):
@@ -15550,6 +15568,9 @@ def _write_fill_evidence_handoff(job: dict) -> None:
     trade_id = str(receipt.get("trade_id") or "")
     if not receipt_id or not expected_epoch_id or not trade_id:
         raise ValueError("fill evidence receipt identity is incomplete")
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(receipt, receipt.get("order_snapshot"), receipt.get("signal_snapshot"))
     if _collector_v22_epoch_id() != expected_epoch_id:
         if not _append_fill_evidence_handoff({
             "schema": "fill_evidence_handoff_result_v1",
@@ -15806,6 +15827,343 @@ def _enqueue_fill_evidence_handoff(
             "[EVIDENCE GAP]"
         )
         return False
+
+
+# Submit-first pre-entry evidence for the cross-venue signal-clock tiles. The
+# research rows written between a trigger and its paper order (V3 lane decision,
+# provisional multiverse event, duplicate-intent audit) are fsync'd to a
+# journal before the order, then materialized by one worker. Any writer of later
+# evidence for the same call/trade first drains every earlier pending receipt
+# (FIFO prefix) under the collector lock, so a terminal or lifecycle row can
+# never precede its provisional rows. A failed, stale or backlogged queue turns
+# deferral off and the synchronous fail-closed path is used again.
+PREENTRY_EVIDENCE_DEFERRAL_ENABLED = os.getenv("PREENTRY_EVIDENCE_DEFERRAL", "1").strip() == "1"
+PREENTRY_EVIDENCE_PENDING_SCHEMA = "pre_entry_evidence_handoff_pending_v1"
+PREENTRY_EVIDENCE_RESULT_SCHEMA = "pre_entry_evidence_handoff_result_v1"
+PREENTRY_EVIDENCE_KINDS = ("V3_LANE_DECISION", "MULTIVERSE_PROVISIONAL", "DUPLICATE_INTENT_AUDIT")
+PREENTRY_EVIDENCE_MAX_PENDING = 32
+PREENTRY_EVIDENCE_MAX_PENDING_AGE_SEC = 30.0
+PREENTRY_EVIDENCE_FAILURE_COOLDOWN_SEC = 600.0
+PREENTRY_EVIDENCE_MAX_ATTEMPTS = 3
+PREENTRY_EVIDENCE_BARRIER_TIMEOUT_SEC = 10.0
+PREENTRY_EVIDENCE_COMPACT_BYTES = 8 * 1024 * 1024
+_preentry_evidence_lock = threading.Lock()
+_preentry_evidence_journal_lock = threading.Lock()
+_preentry_evidence_tls = threading.local()
+_preentry_evidence_pending = collections.OrderedDict()
+_preentry_evidence_seq = 0
+_preentry_evidence_worker = None
+_preentry_evidence_status = {
+    "enqueued": 0, "applied": 0, "epoch_preserved": 0, "failures": 0, "dead": 0,
+    "journal_failures": 0, "barrier_drains": 0, "barrier_timeouts": 0, "replayed": 0,
+    "compactions": 0, "sync_fallbacks": 0, "last_failure_ts": 0.0, "last_error": None,
+    "last_apply_lag_s": None, "max_apply_lag_s": 0.0,
+}
+
+
+def _preentry_evidence_journal_path() -> str:
+    return os.path.join(str(_data_sync_runtime_root()), "pre_entry_evidence_handoffs.jsonl")
+
+
+def _preentry_evidence_count(key: str, amount=1) -> None:
+    with _preentry_evidence_lock:
+        _preentry_evidence_status[key] = _preentry_evidence_status.get(key, 0) + amount
+
+
+def _preentry_evidence_failed(error: str) -> None:
+    with _preentry_evidence_lock:
+        _preentry_evidence_status["failures"] += 1
+        _preentry_evidence_status["last_failure_ts"] = time.time()
+        _preentry_evidence_status["last_error"] = str(error)[:240]
+
+
+def _preentry_evidence_ready() -> bool:
+    """Deferral is allowed only while the queue is healthy and keeping up."""
+    if not PREENTRY_EVIDENCE_DEFERRAL_ENABLED or _cancellation_evidence_reset_fence:
+        return False
+    now = time.time()
+    with _preentry_evidence_lock:
+        status = _preentry_evidence_status
+        if now - float(status["last_failure_ts"] or 0.0) < PREENTRY_EVIDENCE_FAILURE_COOLDOWN_SEC:
+            return False
+        if len(_preentry_evidence_pending) >= PREENTRY_EVIDENCE_MAX_PENDING:
+            return False
+        oldest = next(iter(_preentry_evidence_pending.values()), None)
+    return not oldest or now - float(oldest.get("enqueued_ts") or now) <= PREENTRY_EVIDENCE_MAX_PENDING_AGE_SEC
+
+
+def _preentry_evidence_deferrable(lane) -> bool:
+    return bool(is_cross_venue_clock_lane(str(lane or "").upper()) and _preentry_evidence_ready())
+
+
+def _preentry_evidence_keys(*sources) -> set:
+    keys = set()
+    for source in sources:
+        if isinstance(source, dict):
+            for field in ("shared_ai_call_id", "trade_id"):
+                value = str(source.get(field) or "")
+                if value:
+                    keys.add(value)
+    return keys
+
+
+def _get_preentry_evidence_worker():
+    global _preentry_evidence_worker
+    with _preentry_evidence_lock:
+        if _preentry_evidence_worker is None:
+            _preentry_evidence_worker = BoundedEvidenceWorker(
+                lambda job: _drain_preentry_evidence(through=job["key"]),
+                max_queue=256,
+                max_retries=0,
+                name="pre-entry-evidence",
+            )
+        return _preentry_evidence_worker
+
+
+def _shutdown_preentry_evidence_worker(timeout: float = 5.0) -> bool:
+    global _preentry_evidence_worker
+    worker = _preentry_evidence_worker
+    if worker is None:
+        return True
+    drained = worker.shutdown(drain_timeout=timeout)
+    if drained:
+        with _preentry_evidence_lock:
+            if _preentry_evidence_worker is worker:
+                _preentry_evidence_worker = None
+    return drained
+
+
+def _enqueue_preentry_evidence(kind: str, keys, payload: dict, *, lane: str) -> bool:
+    """fsync one receipt, then hand it to the worker; False means write synchronously."""
+    global _preentry_evidence_seq
+    if kind not in PREENTRY_EVIDENCE_KINDS:
+        raise ValueError(f"unknown pre-entry evidence kind {kind}")
+    try:
+        epoch_id = _collector_v22_epoch_id()
+        with _preentry_evidence_lock:
+            _preentry_evidence_seq += 1
+            seq = _preentry_evidence_seq
+        now = time.time()
+        identity = {"collector_epoch_id": epoch_id, "kind": kind, "keys": sorted(keys),
+                    "enqueued_ts": now, "pid": os.getpid(), "seq": seq}
+        receipt = {
+            "schema": PREENTRY_EVIDENCE_PENDING_SCHEMA,
+            "receipt_id": hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "collector_epoch_id": epoch_id,
+            "kind": kind,
+            "research_lane": str(lane or "").upper(),
+            "keys": sorted(keys),
+            "seq": seq,
+            "enqueued_ts": now,
+            "created_at": utc_iso(),
+            "payload": payload,
+        }
+    except Exception as exc:
+        logger.error(f"[PRE-ENTRY EVIDENCE] receipt build failed kind={kind} error={exc} [PIPELINE ENFORCEMENT]")
+        _preentry_evidence_count("sync_fallbacks")
+        return False
+    if not _append_durable_handoff_row(
+        _preentry_evidence_journal_path(), receipt, _preentry_evidence_journal_lock, "pre-entry",
+    ):
+        _preentry_evidence_count("journal_failures")
+        _preentry_evidence_failed("journal append failed")
+        _preentry_evidence_count("sync_fallbacks")
+        return False
+    with _preentry_evidence_lock:
+        _preentry_evidence_pending[receipt["receipt_id"]] = receipt
+        _preentry_evidence_status["enqueued"] += 1
+    try:
+        _get_preentry_evidence_worker().submit(receipt["receipt_id"], {}, source_ts=now)
+    except Exception as exc:
+        # Durable and pending: the next barrier or restart replay applies it.
+        logger.error(f"[PRE-ENTRY EVIDENCE] dispatch failed kind={kind} error={exc} [EVIDENCE GAP]")
+    return True
+
+
+def _apply_preentry_receipt(receipt: dict) -> bool:
+    """Materialize one receipt; the caller holds the collector epoch lock."""
+    receipt_id = receipt["receipt_id"]
+    payload = receipt.get("payload") or {}
+    kind = receipt.get("kind")
+    if _collector_v22_epoch_id() != receipt.get("collector_epoch_id"):
+        status, ok = "EPOCH_MISMATCH_PRESERVED", True
+    else:
+        _preentry_evidence_tls.applying = True
+        try:
+            if kind == "V3_LANE_DECISION":
+                ok = bool(_write_v3_shared_lane_decision(
+                    payload["lane"], payload["ai"], payload["ctx"], payload["features"],
+                    **payload["decision"],
+                ))
+            elif kind == "MULTIVERSE_PROVISIONAL":
+                _sync_order_multiverse(payload["signal"], path_complete=False)
+                ok = True
+            elif kind == "DUPLICATE_INTENT_AUDIT":
+                ok = bool(_safe_append_jsonl(
+                    DUPLICATE_INTENT_AUDIT_FILE, payload["row"], label="DUPLICATE_INTENT_AUDIT",
+                ))
+            else:
+                ok = False
+        except Exception as exc:
+            logger.error(f"[PRE-ENTRY EVIDENCE] {kind} failed receipt={receipt_id[:12]} error={exc} [EVIDENCE GAP]")
+            ok = False
+        finally:
+            _preentry_evidence_tls.applying = False
+        status = "APPLIED"
+    if not ok:
+        receipt["attempts"] = int(receipt.get("attempts") or 0) + 1
+        _preentry_evidence_failed(f"{kind} not durable")
+        if receipt["attempts"] < PREENTRY_EVIDENCE_MAX_ATTEMPTS:
+            return False
+        # Terminal for replay: applying it later could land after the trade's
+        # terminal rows. The payload stays in the journal and the V3 writer has
+        # already dead-lettered the pre-entry evidence failure.
+        logger.error(f"[PRE-ENTRY EVIDENCE] {kind} dead receipt={receipt_id[:12]} keys={receipt.get('keys')} [EVIDENCE GAP]")
+        _append_durable_handoff_row(_preentry_evidence_journal_path(), {
+            "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
+            "status": "DEAD_LETTERED", "attempts": receipt["attempts"], "completed_at": utc_iso(),
+        }, _preentry_evidence_journal_lock, "pre-entry")
+        with _preentry_evidence_lock:
+            _preentry_evidence_pending.pop(receipt_id, None)
+            _preentry_evidence_status["dead"] += 1
+        return False
+    if not _append_durable_handoff_row(_preentry_evidence_journal_path(), {
+        "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
+        "status": status, "completed_at": utc_iso(),
+    }, _preentry_evidence_journal_lock, "pre-entry"):
+        _preentry_evidence_count("journal_failures")
+        _preentry_evidence_failed("result append failed")
+    lag = round(time.time() - float(receipt.get("enqueued_ts") or time.time()), 3)
+    with _preentry_evidence_lock:
+        _preentry_evidence_pending.pop(receipt_id, None)
+        _preentry_evidence_status["applied" if status == "APPLIED" else "epoch_preserved"] += 1
+        _preentry_evidence_status["last_apply_lag_s"] = lag
+        _preentry_evidence_status["max_apply_lag_s"] = max(_preentry_evidence_status["max_apply_lag_s"], lag)
+    return True
+
+
+def _compact_preentry_evidence_journal() -> None:
+    path = _preentry_evidence_journal_path()
+    with _preentry_evidence_journal_lock:
+        if _preentry_evidence_pending or _preentry_evidence_status["dead"]:
+            return
+        try:
+            if os.path.getsize(path) <= PREENTRY_EVIDENCE_COMPACT_BYTES:
+                return
+            os.replace(path, path + ".1")
+        except OSError:
+            return
+    _preentry_evidence_count("compactions")
+
+
+def _quiesce_preentry_evidence(timeout: float = 5.0) -> bool:
+    """Stop the worker and apply every pending receipt (fresh-collection reset)."""
+    if not _shutdown_preentry_evidence_worker(timeout=timeout):
+        return False
+    return _drain_preentry_evidence(through=next(reversed(_preentry_evidence_pending), None), timeout=timeout)
+
+
+def _drain_preentry_evidence(*, keys=(), through: str = None, timeout: float = None) -> bool:
+    """Apply every pending receipt up to the last one matching ``keys``/``through``."""
+    if not _preentry_evidence_pending or getattr(_preentry_evidence_tls, "applying", False):
+        return True
+    wait = PREENTRY_EVIDENCE_BARRIER_TIMEOUT_SEC if timeout is None else timeout
+    if not _collector_epoch_lock.acquire(timeout=wait):
+        _preentry_evidence_count("barrier_timeouts")
+        _preentry_evidence_failed("barrier timeout")
+        logger.error(f"[PRE-ENTRY EVIDENCE] barrier timeout keys={sorted(keys)} [EVIDENCE GAP]")
+        return False
+    try:
+        with _preentry_evidence_lock:
+            ordered = list(_preentry_evidence_pending.values())
+        wanted = set(keys)
+        last = -1
+        for index, receipt in enumerate(ordered):
+            if receipt["receipt_id"] == through or wanted.intersection(receipt.get("keys") or ()):
+                last = index
+        ok = True
+        for receipt in ordered[:last + 1]:
+            with _preentry_evidence_lock:
+                still_pending = receipt["receipt_id"] in _preentry_evidence_pending
+            if still_pending:
+                ok = _apply_preentry_receipt(receipt) and ok
+    finally:
+        _collector_epoch_lock.release()
+    _compact_preentry_evidence_journal()
+    return ok
+
+
+def _preentry_evidence_barrier(*sources) -> bool:
+    """Called before any later evidence write for a call/trade; no-op when idle."""
+    if not _preentry_evidence_pending:
+        return True
+    keys = _preentry_evidence_keys(*sources)
+    if not keys:
+        return True
+    with _preentry_evidence_lock:
+        matched = any(keys.intersection(r.get("keys") or ()) for r in _preentry_evidence_pending.values())
+    if not matched:
+        return True
+    _preentry_evidence_count("barrier_drains")
+    return _drain_preentry_evidence(keys=keys)
+
+
+def _replay_preentry_evidence_handoffs() -> int:
+    """Re-queue receipts an interrupted process journaled but never applied."""
+    path = _preentry_evidence_journal_path()
+    pending, terminal = collections.OrderedDict(), set()
+    for candidate in (path + ".1", path):
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    receipt_id = str(row.get("receipt_id") or "")
+                    if len(receipt_id) != 64:
+                        continue
+                    if row.get("schema") == PREENTRY_EVIDENCE_PENDING_SCHEMA and row.get("kind") in PREENTRY_EVIDENCE_KINDS:
+                        pending.setdefault(receipt_id, row)
+                    elif row.get("schema") == PREENTRY_EVIDENCE_RESULT_SCHEMA:
+                        terminal.add(receipt_id)
+        except OSError as exc:
+            logger.warning(f"[PRE-ENTRY EVIDENCE] replay unavailable: {exc}")
+            return 0
+    replay = [row for receipt_id, row in pending.items() if receipt_id not in terminal]
+    replay.sort(key=lambda row: (float(row.get("enqueued_ts") or 0.0), int(row.get("seq") or 0)))
+    with _preentry_evidence_lock:
+        for row in replay:
+            _preentry_evidence_pending.setdefault(row["receipt_id"], row)
+        _preentry_evidence_status["replayed"] += len(replay)
+    if replay:
+        _drain_preentry_evidence(through=replay[-1]["receipt_id"])
+    return len(replay)
+
+
+def preentry_evidence_snapshot() -> dict:
+    now = time.time()
+    with _preentry_evidence_lock:
+        status = dict(_preentry_evidence_status)
+        pending = len(_preentry_evidence_pending)
+        oldest = next(iter(_preentry_evidence_pending.values()), None)
+    oldest_age = round(now - float(oldest.get("enqueued_ts") or now), 3) if oldest else None
+    if not PREENTRY_EVIDENCE_DEFERRAL_ENABLED:
+        health = "DISABLED"
+    elif status["dead"] or status["barrier_timeouts"]:
+        health = "DEGRADED"
+    elif not _preentry_evidence_ready():
+        health = "SYNC_FALLBACK"
+    else:
+        health = "OK"
+    return {
+        "schema": "pre_entry_evidence_queue_v1", "health": health, "pending": pending,
+        "oldest_pending_age_s": oldest_age, **status,
+    }
 
 
 @_collector_epoch_serialized
@@ -17854,6 +18212,9 @@ def _append_v3_lane_entry_resolution(
     """Best-effort append; never changes execution and never fabricates PnL."""
     if not source or not _shared_ai_call_id(ctx=source):
         return
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(source)
     try:
         dual_write_lane_entry_resolution(
             source, lane=lane, entry_resolution=resolution, exact_reason=reason,
@@ -22642,7 +23003,7 @@ def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: fl
     with trade_lock:
         pending_count = sum(1 for order in pending_orders if order.get("status") == "PENDING")
         open_count = len(open_positions)
-    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, {
+    row = {
         "schema": "duplicate_intent_audit_v1",
         "ts": utc_iso(),
         "decision": decision,
@@ -22664,7 +23025,15 @@ def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: fl
         "open_count": open_count,
         "max_pending_orders": MAX_PENDING_ORDERS,
         "bot_version": EXECUTION_FIX_VERSION,
-    }, label="DUPLICATE_INTENT_AUDIT")
+    }
+    deferrable = globals().get("_preentry_evidence_deferrable")
+    if decision == "ALLOW_DISTINCT" and callable(deferrable) and deferrable(signal.get("research_lane")):
+        if _enqueue_preentry_evidence(
+            "DUPLICATE_INTENT_AUDIT", _preentry_evidence_keys(signal), {"row": row},
+            lane=signal.get("research_lane"),
+        ):
+            return
+    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, row, label="DUPLICATE_INTENT_AUDIT")
 
 
 def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
@@ -23390,6 +23759,7 @@ def _account_registered_order_submission(
         signal["submitted_order_limit_price"] = submitted_order.get("limit_price")
         signal["_order_submission_accounted"] = True
     lane = signal.get("research_lane")
+    _xvl_latency_mark_order(lane, signal, "submit_ts", submitted_order.get("created_ts"))
     edge = signal.get("edge_score_at_entry")
     increment_pipeline_funnel("ORDER_SUBMITTED")
     log_lane_opportunity_event(
@@ -24409,6 +24779,9 @@ def process_limit_chase(price: float):
             "[PIPELINE ENFORCEMENT]"
         )
         return
+    # Confirm-to-market is part of a tile's registry entry rule, not a chase,
+    # so the global chase selector never disables it.
+    _process_family_confirm_market(time.time())
     if not limit_chase_enabled() or price is None or price <= 0:
         return
     enforce_dashboard_chase_gates_on_pending()
@@ -25093,6 +25466,10 @@ def fill_order(order):
     )
     pos = transition_result["pos"]
     if fill_lane:
+        _xvl_latency_mark_order(
+            fill_lane, order if order.get("shared_ai_call_id") else signal, "fill_ts",
+            order.get("fill_ts"),
+        )
         log_lane_opportunity_event(
             fill_lane, "FILLED", order.get("trade_id"),
             order.get("signal_dir") or order.get("dir"),
@@ -25923,7 +26300,11 @@ def process_signal(event: dict):
                 direction=signal.get("final_direction") or ai.get("direction"),
             )
             _arm_chase_offset_touch_grid(signal)
-            _sync_order_multiverse(signal, path_complete=False)
+            if not (_preentry_evidence_deferrable(research_lane) and _enqueue_preentry_evidence(
+                "MULTIVERSE_PROVISIONAL", _preentry_evidence_keys(signal),
+                {"signal": _stable_pending_signal_copy(signal)}, lane=research_lane,
+            )):
+                _sync_order_multiverse(signal, path_complete=False)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -26409,7 +26790,12 @@ def process_signal(event: dict):
             return {"entry_resolution": "ORDER_SUBMITTED", "exact_reason": "ORDER_SUBMITTED"}
 
         except Exception as e:
-            logger.error(f"[PIPELINE FATAL] lane={research_lane} {e} [PIPELINE ENFORCEMENT]")
+            _crash_site = _exception_site(e)
+            _record_pipeline_error(research_lane, e, _crash_site)
+            logger.error(
+                f"[PIPELINE FATAL] lane={research_lane} site={_crash_site} {e} [PIPELINE ENFORCEMENT]",
+                exc_info=True,
+            )
             full_pipeline_trace("[PIPELINE]", f"CRASH_{str(e)}", trade_id if 'trade_id' in locals() else None)
             if 'signal' in locals():
                 _crash_ai = ai if 'ai' in locals() else None
@@ -26637,6 +27023,89 @@ def _process_ws_ticker_update(payload) -> bool:
         )
     _recompute_system_readiness(tick_now)
     return True
+
+
+def _confirm_market_signal_price(order: dict, signal: dict) -> float:
+    for source in (signal, order):
+        if not isinstance(source, dict):
+            continue
+        decision = source.get("adaptive_entry_decision") or {}
+        for value in (decision.get("reference_price"), source.get("signal_price")):
+            try:
+                if value is not None and float(value) > 0:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _process_family_confirm_market(now: float) -> int:
+    """Run registry confirm-to-market entries: HOLD, convert to the capped taker, or DROP."""
+    with trade_lock:
+        pending = [
+            o for o in pending_orders
+            if isinstance(o, dict) and o.get("status") == "PENDING"
+            and str(o.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES
+            and str(o.get("research_lane") or "").upper() not in PLATFORM_RELAY_ELIGIBLE_LANES
+        ]
+    acted = 0
+    for order in pending:
+        lane = _normalize_lane_key(order)
+        policy = _patient_chase_policy(lane)
+        confirm = getattr(policy, "confirm_market_action", None)
+        if not callable(confirm) or not lane_orders_allowed(lane):
+            continue
+        if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+            continue
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+        old_limit = float(order.get("limit_price") or 0)
+        with state_lock:
+            bid = float(state.get("bid") or 0)
+            ask = float(state.get("ask") or 0)
+        confirmed_ts = float(order["last_chase_ts"]) if order.get("urgent_marketable_chase") and order.get(
+            "last_chase_ts") else None
+        verdict = confirm(
+            direction=direction, signal_price=_confirm_market_signal_price(order, signal),
+            limit_price=old_limit, bid=bid, ask=ask, confirmed_ts=confirmed_ts, now=now,
+        )
+        action = verdict.get("action")
+        if action == "MARKET":
+            chase_count = int(order.get("limit_chase_count") or 0) + 1
+            committed = _commit_relay_limit_chase(
+                order, signal, direction=direction, old_limit=old_limit,
+                new_limit=float(verdict["limit_price"]), chase_count=chase_count, now=now,
+                urgent_marketable=True, reference_price=float(verdict.get("confirm_price") or old_limit),
+            )
+            if committed is None:
+                continue
+            order["relay_eligible"] = False
+            if isinstance(signal, dict):
+                signal["relay_eligible"] = False
+                signal["confirm_market_reason"] = verdict.get("reason")
+            acted += 1
+            logger.info(
+                f"[CONFIRM MARKET PAPER] trade_id={tid} lane={lane} old={fmt(old_limit)} "
+                f"cap_limit={fmt(float(verdict['limit_price']))} confirm={fmt(float(verdict.get('confirm_price') or 0))} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+        elif action == "DROP":
+            reason = str(verdict.get("reason") or "CONFIRM_MARKET_DROP")
+            result = _cancel_pending_order_confirmed(order, reason, record_expired=True, expire_signal=True)
+            if not result.get("finalized"):
+                continue
+            _emit_genome_execution_event("ORDER_CANCELLED", {
+                "trade_id": tid, "reason": reason,
+                "chase_count": int(order.get("limit_chase_count") or 0),
+                "research_lane": lane,
+            })
+            acted += 1
+            logger.info(f"[CONFIRM MARKET PAPER] dropped trade_id={tid} lane={lane} reason={reason} "
+                        "[PIPELINE ENFORCEMENT]")
+    if acted:
+        pipeline_state_sync()
+    return acted
 
 
 def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
@@ -26956,6 +27425,35 @@ def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
 def adaptive_entry_status_snapshot() -> dict:
     with _adaptive_entry_stats_lock:
         return copy.deepcopy(_adaptive_entry_stats)
+
+
+SHADOW_EXIT_PATH_FILE = shadow_exit_paths.FILE_NAME
+SHADOW_EXIT_RECORDER_ENABLED = os.getenv("SHADOW_EXIT_RECORDER_ENABLED", "1").strip() == "1"
+
+
+def _shadow_exit_set_for(meta) -> tuple:
+    return tile_shadow_exit_set((meta or {}).get("research_lane"))
+
+
+_SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
+    writer=lambda row: _safe_append_jsonl(SHADOW_EXIT_PATH_FILE, row, label="SHADOW_EXIT_PATH"),
+    shadow_set_for=_shadow_exit_set_for,
+    enabled=SHADOW_EXIT_RECORDER_ENABLED,
+    max_queue=32,
+)
+
+
+def _submit_shadow_exit_path(payload) -> None:
+    """Hand a finished replay to the observation worker; never raises, never blocks."""
+    try:
+        _SHADOW_EXIT_RECORDER.start()
+        _SHADOW_EXIT_RECORDER.submit(payload)
+    except Exception as exc:
+        logger.warning(f"[SHADOW_EXIT] submit failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def shadow_exit_recorder_status_snapshot() -> dict:
+    return _SHADOW_EXIT_RECORDER.status()
 
 
 def execution_markout_status_snapshot() -> dict:
@@ -27560,12 +28058,10 @@ def state_monitor_loop():
                         expired_ids.append(tid)
                     elif not is_deferred_shadow and time.time() - buf.get("last_update", buf.get("start_ts", 0)) > REPLAY_TTL_SEC:
                         expired_ids.append(tid)
-                if len(replay_buffers) > MAX_REPLAY_BUFFERS:
-                    sorted_ids = sorted(replay_buffers, key=lambda k: replay_buffers[k].get("start_ts", 0))
-                    excess = len(replay_buffers) - MAX_REPLAY_BUFFERS
-                    for tid in sorted_ids[:excess]:
-                        if tid not in expired_ids:
-                            expired_ids.append(tid)
+                for tid in replay_capacity_evictions(replay_buffers, expired_ids, MAX_REPLAY_BUFFERS):
+                    cls = _replay_eviction_class(replay_buffers[tid])
+                    _REPLAY_CAPACITY_EVICTIONS[cls] = _REPLAY_CAPACITY_EVICTIONS.get(cls, 0) + 1
+                    expired_ids.append(tid)
             for tid in expired_ids:
                 with replay_lock:
                     buf = replay_buffers.get(tid)
@@ -29503,6 +29999,9 @@ def close_position(pos: dict, exit_reason: str):
         canonical_lock=position_close_lock,
     )
     if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
+        preentry_barrier = globals().get("_preentry_evidence_barrier")
+        if callable(preentry_barrier):
+            preentry_barrier(pos, master)
         try:
             close_identity_receipt = dual_write_paper_close(
                 pos, master if isinstance(master, dict) else {}, trade_row,
@@ -29772,32 +30271,141 @@ from taker_time_exit_binding import evidence_badge as _taker_time_evidence_badge
 # Per-second cross-venue lead evaluator for registry tiles on the
 # CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
 # qualifying second whatever the tile toggle; a paper attempt needs the tile ON,
-# a free one-slot worker and the registry rate caps. It runs ~0.6 s after each
-# second (after the 1 s tape and the collector close that second), never
+# a free one-slot worker and the registry rate caps. It runs 0.3-0.6 s after each
+# second (once the 1 s tape and the collector have closed that second), never
 # catches up missed seconds, and does O(lookback) work per tick, so it cannot
 # starve the fill thread, the AI cadence or the segment shipper.
 XVL_EVALUATOR_ENABLED = os.getenv("XVL_EVALUATOR_ENABLED", "1").strip() == "1"
 XVL_SHADOW_FILE = _xvl.SHADOW_FILE
 XVL_HEALTH_SCHEMA = "xvl_evaluator_health_v1"
 XVL_TICK_OFFSET_SEC = 0.6
+# The venue collector closes second s at s+1+CLOSE_LAG_SEC (0.3) and the
+# Bitfinex tape ring gets bucket s at s+1.0; the tick fires as soon as both
+# hold the anchor second, polling from READY_MIN_OFFSET up to TICK_OFFSET.
+XVL_READY_TICK_ENABLED = os.getenv("XVL_READY_TICK", "1").strip() == "1"
+XVL_READY_MIN_OFFSET_SEC = 0.3 if XVL_READY_TICK_ENABLED else XVL_TICK_OFFSET_SEC
+XVL_READY_POLL_SEC = 0.02
 XVL_TAPE_TAIL_SEC = 120
 XVL_MAX_TRIGGER_LATENCY_SEC = 1.5
 XVL_STALE_AFTER_SEC = 10.0
 _XVL_LOCK = threading.Lock()
 _XVL_EVALUATORS = {}
+_XVL_ATTEMPT_QUEUES = {}
 _xvl_status = {
     "started_ts": 0.0, "last_tick_ts": 0.0, "ticks": 0, "tick_errors": 0,
     "last_error": None, "max_tick_ms": 0.0, "last_tick_ms": 0.0,
     "rows_written": 0, "write_failures": 0, "thread_niced": False,
+    "attempt_workers": 0, "ready_ticks": 0, "fallback_ticks": 0, "last_tick_offset_s": None,
 }
 _xvl_lane_runtime = {}
+
+# Signal->submit->fill telemetry for IMMEDIATE (taker-at-signal) cross-venue
+# tiles. "signal" is the evaluator's evaluated_ts (the shared_ai_call_ts of the
+# trigger), the clock the tiles' pre-registered median signal->fill gate uses.
+XVL_LATENCY_SCHEMA = "xvl_signal_latency_v1"
+XVL_LATENCY_WINDOW = 200
+XVL_LATENCY_MIN_FILLS = 10
+XVL_LATENCY_OPEN_MAX = 64
+XVL_LATENCY_DEFAULT_TARGET_SEC = 2.0
+XVL_LATENCY_STAGES = (
+    ("signal_to_attempt", "signal_ts", "attempt_ts"),
+    ("attempt_to_evidence", "attempt_ts", "evidence_ts"),
+    ("evidence_to_submit", "evidence_ts", "submit_ts"),
+    ("submit_to_fill", "submit_ts", "fill_ts"),
+    ("signal_to_submit", "signal_ts", "submit_ts"),
+    ("signal_to_fill", "signal_ts", "fill_ts"),
+)
 
 
 def _xvl_lane_state(lane: str) -> dict:
     return _xvl_lane_runtime.setdefault(lane, {
         "busy": False, "last_attempt_ts": 0.0, "submissions": deque(maxlen=512),
         "attempts": 0, "orders_eligible": 0, "skips": {}, "last_attempt": None,
+        "latency_open": {}, "latency_samples": deque(maxlen=XVL_LATENCY_WINDOW),
     })
+
+
+def _xvl_latency_target_sec(lane: str) -> float:
+    promote = ((COMBO_LANE_SPECS.get(lane) or {}).get("pre_registration") or {}).get("promotion") or {}
+    try:
+        return float(promote.get("max_median_signal_to_fill_sec") or XVL_LATENCY_DEFAULT_TARGET_SEC)
+    except (TypeError, ValueError):
+        return XVL_LATENCY_DEFAULT_TARGET_SEC
+
+
+def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None) -> None:
+    """Stamp one stage for one trigger; never raises into the order path."""
+    lane = str(lane or "").upper()
+    key = str(trigger_id or "")
+    if not key or not is_cross_venue_clock_lane(lane):
+        return
+    try:
+        stamp = float(ts if ts is not None else time.time())
+        with _XVL_LOCK:
+            lane_state = _xvl_lane_state(lane)
+            open_rows = lane_state["latency_open"]
+            row = open_rows.get(key)
+            if row is None:
+                if signal_ts is None:
+                    return
+                while len(open_rows) >= XVL_LATENCY_OPEN_MAX:
+                    open_rows.pop(next(iter(open_rows)))
+                row = open_rows[key] = {"trigger_id": key, "signal_ts": float(signal_ts)}
+            row.setdefault(stage, stamp)
+            if stage == "submit_ts" and not row.get("_sampled"):
+                row["_sampled"] = True
+                lane_state["latency_samples"].append(row)
+            if stage == "fill_ts":
+                open_rows.pop(key, None)
+    except Exception as exc:
+        logger.warning(f"[XVL] latency mark failed lane={lane} stage={stage}: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _xvl_latency_mark_order(lane, record: dict, stage: str, ts=None) -> None:
+    if not isinstance(record, dict):
+        return
+    _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage,
+                      _buf_float(ts, 0.0) or None)
+
+
+def _xvl_quantile(values: list, q: float):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 3)
+
+
+def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+    stages = {}
+    for name, start, end in XVL_LATENCY_STAGES:
+        deltas = [
+            float(row[end]) - float(row[start]) for row in samples
+            if row.get(start) is not None and row.get(end) is not None
+        ]
+        stages[name] = {
+            "n": len(deltas),
+            "p50_s": round(statistics.median(deltas), 3) if deltas else None,
+            "p90_s": _xvl_quantile(deltas, 0.9),
+        }
+    target = _xvl_latency_target_sec(lane)
+    fill = stages["signal_to_fill"]
+    if fill["n"] < XVL_LATENCY_MIN_FILLS:
+        status = "INSUFFICIENT_FILLS"
+    elif fill["p50_s"] > target:
+        status = "SLOW"
+    else:
+        status = "OK"
+    last = samples[-1] if samples else {}
+    return {
+        "schema": XVL_LATENCY_SCHEMA,
+        "status": status,
+        "target_median_signal_to_fill_s": target,
+        "min_fills": XVL_LATENCY_MIN_FILLS,
+        "window": XVL_LATENCY_WINDOW,
+        "signal_clock": "TRIGGER_EVALUATED_TS",
+        "stages": stages,
+        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts", "fill_ts")},
+    }
 
 
 def _xvl_count_skip(lane: str, reason: str) -> None:
@@ -29845,10 +30453,47 @@ def _xvl_maybe_attempt_paper(lane: str, evaluation: dict, trigger: dict, now: fl
     if reason:
         _xvl_count_skip(lane, reason)
         return
+    _xvl_latency_mark(lane, trigger.get("trigger_id"), "gate_ts", now,
+                      signal_ts=float(trigger.get("evaluated_ts") or now))
+    attempt_queue = _XVL_ATTEMPT_QUEUES.get(lane)
+    if attempt_queue is not None:
+        try:
+            attempt_queue.put_nowait(dict(trigger))
+            return
+        except Full:
+            pass
     threading.Thread(
         target=_xvl_paper_attempt, args=(lane, dict(trigger)),
         daemon=True, name=f"xvl-paper-{lane.lower()}",
     ).start()
+
+
+def _xvl_attempt_worker(lane: str, attempt_queue: Queue) -> None:
+    while not shutdown_event.is_set():
+        try:
+            trigger = attempt_queue.get(timeout=1.0)
+        except Empty:
+            continue
+        _xvl_paper_attempt(lane, trigger)
+
+
+def _xvl_start_attempt_workers(lanes) -> None:
+    """One long-lived attempt worker per lane, started before the evaluator nices itself.
+
+    Linux threads inherit the creating thread's nice value; attempts spawned from
+    the niced evaluator ran the whole evidence + order path at nice 5 behind the
+    AI cycle, collectors and shipper. The busy flag still allows one in flight.
+    """
+    for lane in lanes:
+        if lane in _XVL_ATTEMPT_QUEUES:
+            continue
+        attempt_queue = Queue(maxsize=1)
+        _XVL_ATTEMPT_QUEUES[lane] = attempt_queue
+        threading.Thread(
+            target=_xvl_attempt_worker, args=(lane, attempt_queue),
+            daemon=True, name=f"xvl-paper-{lane.lower()}",
+        ).start()
+    _xvl_status["attempt_workers"] = len(_XVL_ATTEMPT_QUEUES)
 
 
 def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
@@ -29875,8 +30520,11 @@ def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
 
 
 def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
-    if time.time() - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
+    attempt_ts = time.time()
+    if attempt_ts - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
         return "TRIGGER_STALE"
+    _xvl_latency_mark(lane, trigger.get("trigger_id"), "attempt_ts", attempt_ts,
+                      signal_ts=float(trigger.get("evaluated_ts") or attempt_ts))
     if not is_research_data_collection() or not is_research_lane_enabled(lane):
         return "TILE_OFF"
     if invert_signal_active():
@@ -29928,16 +30576,24 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     }
     disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
     reason = f"{tag}_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
-    evidence_ready = _write_v3_shared_lane_decision(
-        lane, ai, ctx, signal_features,
-        policy_decision="ACCEPT" if accepted else "REJECT",
-        execution_disposition=disposition, exact_reason=reason,
+    verdict = {
+        "policy_decision": "ACCEPT" if accepted else "REJECT",
+        "execution_disposition": disposition, "exact_reason": reason,
+    }
+    evidence_ready = accepted and _preentry_evidence_deferrable(lane) and _enqueue_preentry_evidence(
+        "V3_LANE_DECISION", {call_id},
+        {"lane": lane, "ai": copy.deepcopy(ai), "ctx": copy.deepcopy(ctx),
+         "features": copy.deepcopy(signal_features), "decision": verdict},
+        lane=lane,
     )
+    if not evidence_ready:
+        evidence_ready = _write_v3_shared_lane_decision(lane, ai, ctx, signal_features, **verdict)
     if not accepted:
         return reason
     if not evidence_ready:
         logger.error(f"[{lane}] order blocked: immutable pre-entry evidence unavailable [PIPELINE ENFORCEMENT]")
         return "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
+    _xvl_latency_mark(lane, call_id, "evidence_ts")
     with _XVL_LOCK:
         _xvl_lane_state(lane)["submissions"].append(time.time())
     _spawn_combo_lane(
@@ -29951,40 +30607,78 @@ def _xvl_direction_source(lane: str) -> str:
     return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
 
 
-def _xvl_tick(now: float) -> None:
-    live = _cross_venue_live(max_age_sec=0.5)
+def _xvl_tick(now: float, live=None) -> None:
+    if live is None:
+        live = _cross_venue_live(max_age_sec=0.5)
     quotes = _AI_SHADOW_TAPE.tail(XVL_TAPE_TAIL_SEC)
     with state_lock:
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+    steps = []
     for lane, evaluator in list(_XVL_EVALUATORS.items()):
         evaluation, trigger, outcomes = evaluator.step(
             now=now, live=live, bfx_quotes=quotes, bfx_bbo_ts=bbo_ts,
         )
+        if trigger:
+            trigger["research_lane"] = lane
+            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+        steps.append((lane, evaluator, trigger, outcomes))
+    # Shadow rows are fsync'd appends; hand the attempt off first.
+    for lane, evaluator, trigger, outcomes in steps:
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
             _xvl_append(row, evaluator.SHADOW_FILE)
-        if trigger:
-            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+
+
+def _xvl_anchor_ready(live, anchor: int) -> bool:
+    """True once the anchor second is closed in both the venue collector and the Bitfinex tape."""
+    latest = _AI_SHADOW_TAPE.latest_ts()
+    if latest is None or latest < anchor or not isinstance(live, dict):
+        return False
+    end = live.get("history_end_ts")
+    return isinstance(end, (int, float)) and end >= anchor
+
+
+def _xvl_wait_anchor_ready(deadline: float):
+    """Poll for the anchor second's data until ``deadline``; returns (now, live, ready)."""
+    while True:
+        now = time.time()
+        live = _cross_venue_live(max_age_sec=0.0)
+        if _xvl_anchor_ready(live, int(math.floor(now)) - 1):
+            return now, live, True
+        if now + XVL_READY_POLL_SEC >= deadline:
+            break
+        if shutdown_event.wait(XVL_READY_POLL_SEC):
+            break
+    wait = deadline - time.time()
+    if wait > 0:
+        shutdown_event.wait(wait)
+    return time.time(), None, False
 
 
 def xvl_evaluator_loop():
     lanes = cross_venue_clock_lanes()
     if not XVL_EVALUATOR_ENABLED or not lanes:
         return
+    _xvl_start_attempt_workers(lanes)
     _xvl_lower_thread_priority()
     for lane in lanes:
         _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
     _xvl_status["started_ts"] = time.time()
-    next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
+    second = math.floor(time.time()) + 1
     while not shutdown_event.is_set():
-        wait = next_tick - time.time()
+        wait = second + XVL_READY_MIN_OFFSET_SEC - time.time()
         if wait > 0 and shutdown_event.wait(wait):
             break
-        now = time.time()
-        next_tick = math.floor(now) + 1 + XVL_TICK_OFFSET_SEC
+        now, live, ready = _xvl_wait_anchor_ready(math.floor(time.time()) + XVL_TICK_OFFSET_SEC)
+        if shutdown_event.is_set():
+            break
+        second = math.floor(now) + 1
         started = time.perf_counter()
+        with _XVL_LOCK:
+            _xvl_status["ready_ticks" if ready else "fallback_ticks"] += 1
+            _xvl_status["last_tick_offset_s"] = round(now - math.floor(now), 3)
         try:
-            _xvl_tick(now)
+            _xvl_tick(now, live)
         except Exception as exc:
             with _XVL_LOCK:
                 _xvl_status["tick_errors"] += 1
@@ -30026,8 +30720,13 @@ def xvl_evaluator_snapshot() -> dict:
             }
             for lane, row in _xvl_lane_runtime.items()
         }
+        latency_samples = {
+            lane: [dict(sample) for sample in row.get("latency_samples") or ()]
+            for lane, row in _xvl_lane_runtime.items()
+        }
     last = float(status.get("last_tick_ts") or 0.0)
     tick_age = round(now - last, 3) if last else None
+    preentry = preentry_evidence_snapshot()
     if not XVL_EVALUATOR_ENABLED or not lanes:
         health, reason = "DISABLED", ("XVL_EVALUATOR_ENABLED=0" if lanes else "NO_CROSS_VENUE_CLOCK_TILES")
     elif tick_age is None:
@@ -30038,6 +30737,8 @@ def xvl_evaluator_snapshot() -> dict:
         health, reason = "STALE", f"TICK_AGE_{tick_age:.0f}S"
     elif status.get("write_failures"):
         health, reason = "DEGRADED", "SHADOW_WRITE_FAILURES"
+    elif preentry["health"] == "DEGRADED":
+        health, reason = "DEGRADED", "PREENTRY_EVIDENCE_DEGRADED"
     else:
         health, reason = "OK", None
     return {
@@ -30051,11 +30752,14 @@ def xvl_evaluator_snapshot() -> dict:
         "lanes": {
             lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
                    "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
-                   "paper": runtime.get(lane, {})}
+                   "paper": runtime.get(lane, {}),
+                   "latency": _xvl_latency_snapshot(lane, latency_samples.get(lane, []))}
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
-                                  "rows_written", "write_failures", "thread_niced")},
+                                  "rows_written", "write_failures", "thread_niced", "attempt_workers",
+                                  "ready_ticks", "fallback_ticks", "last_tick_offset_s")},
+        "preentry_evidence": preentry,
     }
 
 
@@ -30079,6 +30783,25 @@ def market_context_health_snapshot() -> dict:
         )
     except Exception as exc:
         return {"schema": _mct.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+import indicator_edge_spec as _ies
+
+# Observation-only indicator engine (fly-entrypoint.sh, own niced process).
+# The bot only reads its live file for status/monitoring; never readiness or orders.
+INDICATOR_ENGINE_ENABLED = os.getenv("INDICATOR_ENGINE_ENABLED", "1").strip() == "1"
+_INDICATOR_ENGINE_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def indicator_engine_health_snapshot() -> dict:
+    try:
+        now = time.time()
+        if now - _INDICATOR_ENGINE_LIVE_CACHE["read_ts"] >= 5.0:
+            live = _cvt.read_live(_ies.LIVE_FILE) if INDICATOR_ENGINE_ENABLED else None
+            _INDICATOR_ENGINE_LIVE_CACHE.update(read_ts=now, live=live)
+        return _ies.health_from_live(_INDICATOR_ENGINE_LIVE_CACHE["live"], now, enabled=INDICATOR_ENGINE_ENABLED)
+    except Exception as exc:
+        return {"schema": _ies.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
@@ -30206,8 +30929,8 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
 
 
 def _ai_shadow_premium_facts() -> dict:
-    evaluator = _XVL_EVALUATORS.get(RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S)
-    if evaluator is None or not hasattr(evaluator, "latest_features"):
+    evaluator = next((e for e in list(_XVL_EVALUATORS.values()) if hasattr(e, "latest_features")), None)
+    if evaluator is None:
         return {"status": "UNAVAILABLE"}
     try:
         return evaluator.latest_features()
@@ -30624,11 +31347,16 @@ _AI_DRAIN_POST_PATHS = {
 # leave open (still rate-limited) so the public dashboard / health checks work.
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
-    "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
+    "/api/ready", "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
     "/api/system-health", "/api/system-health/alerts", "/alerts",
     "/api/analyzer/genome", "/api/download_debug_config",
-    "/debug_state", "/static/dashboard.js",
+    "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
+    "/api/shadow_exits/summary",
 }
+# Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
+# that token is never accepted by _admin_authed() or any other route.
+_MONITOR_DIGEST_PATH = "/api/monitor/digest"
+_MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
 # Loopback still allowed so the local Flask test client and home operator
@@ -30757,6 +31485,19 @@ def _analyzer_view_authed() -> bool:
 
 _dashboard_handler_lock = threading.Lock()
 _dashboard_active_handlers = {}
+_dashboard_overload_rejections = {}
+
+
+def _record_overload_rejection(cap_name, reason, now=None):
+    cap = str(cap_name or "unclassified")[:24]
+    why = str(reason or "unknown")[:32]
+    ts = time.time() if now is None else float(now)
+    with _dashboard_handler_lock:
+        bucket = _dashboard_overload_rejections.setdefault(cap, {"total": 0, "by_reason": {}, "last_ts": None})
+        bucket["total"] += 1
+        if why in bucket["by_reason"] or len(bucket["by_reason"]) < 16:
+            bucket["by_reason"][why] = bucket["by_reason"].get(why, 0) + 1
+        bucket["last_ts"] = ts
 _DASHBOARD_TELEMETRY_STATIC_ROUTES = frozenset({
     "/api/data-sync/manifest", "/api/data-sync/sqlite-snapshot",
     "/api/data-sync/file", "/api/data-sync/ack", "/api/data-sync/lifecycle-ack",
@@ -30792,6 +31533,10 @@ def _dashboard_handler_snapshot(now=None):
     now = float(now if now is not None else time.monotonic())
     with _dashboard_handler_lock:
         rows = [dict(row) for row in _dashboard_active_handlers.values()]
+        rejected = {
+            cap: {"total": row["total"], "by_reason": dict(row["by_reason"]), "last_ts": row["last_ts"]}
+            for cap, row in list(_dashboard_overload_rejections.items())[:32]
+        }
     by_cap = {}
     for row in rows[:32]:
         cap = str(row.get("cap_name") or "unclassified")[:24]
@@ -30805,7 +31550,12 @@ def _dashboard_handler_snapshot(now=None):
         }:
             route = "UNCLASSIFIED"
         bucket["routes"][route] = bucket["routes"].get(route, 0) + 1
-    return {"active_total": len(rows[:32]), "by_cap": by_cap}
+    return {
+        "active_total": len(rows[:32]),
+        "by_cap": by_cap,
+        "rejected_total": sum(row["total"] for row in rejected.values()),
+        "rejected_by_cap": rejected,
+    }
 
 
 @app.before_request
@@ -30880,6 +31630,8 @@ def _emergency_api_guard():
 
     # Read-only GETs are allowed without a token (still rate-limited above).
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
+        return None
+    if method == "GET" and path == _MONITOR_DIGEST_PATH:
         return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
@@ -31418,6 +32170,7 @@ scheduled_ai_cycle_state = {
     "last_poll_entry_eligible": None,
     "last_poll_reason": None,
     "skipped_busy": 0,
+    "completed_since_boot": 0,
 }
 process_lock = threading.RLock()
 positions_file_lock = threading.RLock()
@@ -31620,7 +32373,7 @@ def research_wipe_file_paths():
         # these names here so a fresh epoch removes stale active files without
         # restoring any runtime constant or writer that could recreate them.
         "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
-        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
+        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, SHADOW_EXIT_PATH_FILE,
         COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         COLLECTOR_V22_EVENT_INDEX_FILE,
         COLLECTOR_V22_PROVISIONAL_FILE,
@@ -31681,7 +32434,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
-        CYCLE_3M_UNIVERSE_FILE,
+        SHADOW_EXIT_PATH_FILE, CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
         ORDER_MULTIVERSE_ENTRY_GRID_FILE,
@@ -32025,6 +32778,12 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_fill_evidence_not_quiescent",
                 "summary": "Reset aborted before archive: fill evidence worker did not drain"}
+    if not _quiesce_preentry_evidence(timeout=5.0):
+        with _cancellation_evidence_worker_lock:
+            _cancellation_evidence_reset_fence = False
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_preentry_evidence_not_quiescent",
+                "summary": "Reset aborted before archive: pre-entry evidence queue did not drain"}
     _FRESH_RESET_LIFECYCLE_RESTART_PENDING = (
         _FRESH_RESET_LIFECYCLE_RESTART_PENDING or lifecycle_was_registered
     )
@@ -32626,7 +33385,80 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         _resume_agent_debug_writes()
 
 replay_buffers: Dict[str, Dict] = {}
-MAX_REPLAY_BUFFERS = 100
+MAX_REPLAY_BUFFERS = max(1, int(os.getenv("MAX_REPLAY_BUFFERS", "100")))
+# Capacity eviction order (oldest first within a class). Executed trades hold a
+# buffer for their hold plus POST_EXIT_REPLAY_SEC; evicting by age alone killed
+# ~90% of executed replays before the post-exit horizon once paper volume rose.
+_REPLAY_EVICTION_PRIORITY = {"shadow": 0, "executed": 1, "executed_post_exit": 2}
+_REPLAY_CAPACITY_EVICTIONS: Dict[str, int] = {}
+
+
+def _replay_eviction_class(buf) -> str:
+    if str((buf or {}).get("lane") or "") != "executed":
+        return "shadow"
+    return "executed_post_exit" if buf.get("post_exit") else "executed"
+
+
+def replay_capacity_evictions(buffers, already_expired, cap) -> list:
+    """Buffer ids to evict so at most ``cap`` survive: research shadows first, executed post-exit last."""
+    expired = set(already_expired)
+    excess = len(buffers) - len(expired & set(buffers)) - int(cap)
+    if excess <= 0:
+        return []
+    order = sorted((k for k in buffers if k not in expired), key=lambda k: (
+        _REPLAY_EVICTION_PRIORITY[_replay_eviction_class(buffers[k])], buffers[k].get("start_ts", 0)))
+    return order[:excess]
+
+
+def replay_buffer_status() -> dict:
+    with replay_lock:
+        by_class: Dict[str, int] = {}
+        for buf in replay_buffers.values():
+            cls = _replay_eviction_class(buf)
+            by_class[cls] = by_class.get(cls, 0) + 1
+        evicted = dict(_REPLAY_CAPACITY_EVICTIONS)
+    return {"active": sum(by_class.values()), "cap": MAX_REPLAY_BUFFERS, "active_by_class": by_class,
+            "capacity_evictions": evicted,
+            "executed_capacity_evictions": evicted.get("executed", 0) + evicted.get("executed_post_exit", 0)}
+
+
+_PIPELINE_ERRORS_LOCK = threading.Lock()
+_PIPELINE_ERRORS: Dict[str, Any] = {"total": 0, "by_site": {}, "last": None}
+
+
+def _exception_site(exc) -> str:
+    tb = getattr(exc, "__traceback__", None)
+    frame = None
+    for frame in traceback.extract_tb(tb):
+        pass
+    if frame is None:
+        return "unknown"
+    return f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}"
+
+
+def _record_pipeline_error(lane, exc, site, now=None) -> None:
+    key = str(site)[:120]
+    with _PIPELINE_ERRORS_LOCK:
+        _PIPELINE_ERRORS["total"] += 1
+        by_site = _PIPELINE_ERRORS["by_site"]
+        if key in by_site or len(by_site) < 32:
+            by_site[key] = by_site.get(key, 0) + 1
+        _PIPELINE_ERRORS["last"] = {
+            "ts": time.time() if now is None else float(now),
+            "lane": str(lane or "")[:48],
+            "site": key,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:160],
+        }
+
+
+def pipeline_error_status() -> dict:
+    with _PIPELINE_ERRORS_LOCK:
+        return {
+            "total": _PIPELINE_ERRORS["total"],
+            "by_site": dict(_PIPELINE_ERRORS["by_site"]),
+            "last": dict(_PIPELINE_ERRORS["last"]) if _PIPELINE_ERRORS["last"] else None,
+        }
 # Align pre-exit ring with post-exit (10000 * 1s interval covers 120m + slack).
 # Compact horizon receipts are also persisted before any rotation so a truncated
 # buffer is CENSORED, never treated as $0.
@@ -32868,6 +33700,7 @@ def build_static_pathway_lane_specs() -> dict:
             "is_deterministic_bracket": False,
             "badge": "PAPER_ONLY_FAMILY",
             "tile_number": tile_number,
+            "card_sections": combo_tile_card_sections(lane_id),
             "entry_mode_label": lane_spec["raw_policy_id"].split("|", 1)[0],
             "filter_chips": policy_view["filter_chips"],
             "toggle_key": lane_spec["toggle_key"],
@@ -35930,12 +36763,25 @@ DASHBOARD_JS = """(function () {
               ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:4px;color:#ffa657;font-size:0.72em;font-weight:700;">' + spec.evidence_badge + ' · Win % ' + headlineWinLabel + '</span>')
               : '');
           const xvlLane = ((d.xvl_evaluator || {}).lanes || {})[spec.lane];
+          const xvlLat = (xvlLane || {}).latency || {};
+          const xvlStages = xvlLat.stages || {};
+          const xvlSec = (v) => (v === null || v === undefined) ? '—' : (Number(v).toFixed(2) + ' s');
+          const xvlLatColor = xvlLat.status === 'OK' ? '#3fb950' : (xvlLat.status === 'SLOW' ? '#f85149' : '#8b949e');
+          const xvlLatency = xvlLane && xvlLat.schema
+            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Signal→fill latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
+              + 'median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
+              + ' · target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+              + ' · signal→submit ' + xvlSec((xvlStages.signal_to_submit || {}).p50_s)
+              + ' · evidence ' + xvlSec((xvlStages.attempt_to_evidence || {}).p50_s)
+              + ' · submit→fill ' + xvlSec((xvlStages.submit_to_fill || {}).p50_s) + '</div>')
+            : '';
           const xvlShadow = xvlLane
             ? ('<div style="margin-top:8px;padding:7px 9px;background:#1b1530;border:1px solid #8957e5;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
               + '<strong style="color:#a371f7;">Cross-venue evaluator (' + ((d.xvl_evaluator || {}).status || 'UNKNOWN') + '):</strong> '
               + 'shadow triggers ' + Number(xvlLane.triggers_logged || 0) + ' · qualifying ' + Number(xvlLane.qualifying || 0)
               + ' · shadow outcomes ' + Number(xvlLane.outcomes_ok || 0) + ' · paper attempts ' + Number((xvlLane.paper || {}).attempts || 0)
               + ' · orders ' + Number((xvlLane.paper || {}).orders_eligible || 0)
+              + xvlLatency
               + '<div style="color:#8b949e;">Every qualifying lead is logged as a shadow signal whether or not this tile is ON (since process start).</div></div>')
             : '';
           const chaseTiming = spec.chase_timing || {};
@@ -35945,6 +36791,25 @@ DASHBOARD_JS = """(function () {
             + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
             + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
+          const cardEsc = (s) => String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+          const cardList = (rows) => '<ul style="margin:4px 0 0 0;padding-left:16px;">' + (rows || []).map(function (r) {
+            return '<li style="margin:2px 0;">' + cardEsc(r) + '</li>';
+          }).join('') + '</ul>';
+          const cardBox = (title, color, inner) => '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + color + ';border-radius:6px;overflow-wrap:anywhere;">'
+            + '<div style="font-weight:700;letter-spacing:0.04em;color:' + color + ';font-size:0.92em;">' + title + '</div>' + inner + '</div>';
+          const cs = spec.card_sections || null;
+          const cardSections = cs
+            ? ('<div class="tile-card-sections" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px;font-size:0.76em;line-height:1.42;color:#c9d1d9;">'
+              + cardBox('ENTRY', '#58a6ff', cardList(cs.entry))
+              + cardBox('EXIT', '#3fb950', '<div style="color:#8b949e;margin-top:2px;">Live, ' + cardEsc((cs.exit || {}).order || 'first trigger wins') + ':</div>'
+                + cardList((cs.exit || {}).live)
+                + '<div style="color:#8b949e;margin-top:6px;">Shadow-only (recorded, never executed):</div>'
+                + ((((cs.exit || {}).shadow) || []).length
+                  ? '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">' + cardEsc(((cs.exit || {}).shadow || []).join(' · ')) + '</div>'
+                  : '<div style="color:#8b949e;font-size:0.95em;margin-top:2px;">none</div>'))
+              + cardBox('RISK MANAGEMENT', '#f0883e', cardList(cs.risk))
+              + '</div>')
+            : '';
           let orderBanner = '';
           // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
           // execution_mode_for_lane() so the dashboard never lies. Fall back
@@ -35996,6 +36861,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
+            + cardSections
             + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
@@ -42292,6 +43158,8 @@ _SYSTEM_HEALTH_LOCK = threading.Lock()
 # Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
 # watcher re-sends its alarm log after a restart, so nothing is written to disk.
 _SYSTEM_HEALTH_ALARMS = {"events": [], "statuses": {}, "statuses_at": None}
+# Memory-only; the next watcher tick refills it after a Fly restart.
+_MONITOR_DIGEST = {"digest": None, "received_ts": None}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -42347,7 +43215,10 @@ def system_health_report():
     if report is None:
         return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
     statuses = system_health_alerts.check_statuses(raw)
+    digest = monitor_api.sanitize_digest(raw.get("monitor_digest"))
     with _SYSTEM_HEALTH_LOCK:
+        if digest is not None:
+            _MONITOR_DIGEST.update(digest=digest, received_ts=time.time())
         _SYSTEM_HEALTH_REPORT["report"] = report
         _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
         _SYSTEM_HEALTH_REPORT["proof"] = runtime_uptime.sanitize_proof(raw.get("proof"))
@@ -42420,6 +43291,287 @@ def system_health_view():
     return response
 
 
+_MONITOR_CACHE_SEC = 15.0
+_MONITOR_CACHE = {}
+_MONITOR_CACHE_LOCK = threading.Lock()
+
+
+def _monitor_response(payload: dict, max_bytes: int, status: int = 200):
+    response = jsonify(monitor_api.fit_to_budget(payload, max_bytes))
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _monitor_cached(key: str, build) -> dict:
+    """Bound load from several pollers: rebuild a monitor payload at most every 15 s."""
+    now = time.time()
+    with _MONITOR_CACHE_LOCK:
+        hit = _MONITOR_CACHE.get(key)
+        if hit and 0.0 <= now - hit[0] < _MONITOR_CACHE_SEC:
+            return copy.deepcopy(hit[1])
+    payload = build(now)
+    with _MONITOR_CACHE_LOCK:
+        _MONITOR_CACHE[key] = (now, payload)
+    return copy.deepcopy(payload)
+
+
+def _monitor_part(build):
+    try:
+        return build()
+    except Exception as exc:
+        return {"error": type(exc).__name__}
+
+
+def _monitor_lane_rows(lanes) -> tuple[dict, float]:
+    """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger)."""
+    session_start = _showcase_trade_session_start()
+    rows = {lane: [] for lane in lanes}
+    if not trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC):
+        raise TimeoutError("monitor lanes timed out waiting for trade_lock")
+    try:
+        for row in trades:
+            if not isinstance(row, dict):
+                continue
+            bucket = rows.get(_normalize_lane_key(row.get("research_lane") or ""))
+            if bucket is None or (session_start and not _trade_row_in_session(row, session_start)):
+                continue
+            bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
+                           row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total")))
+    finally:
+        trade_lock.release()
+    shaped = {}
+    for lane, raw in rows.items():
+        shaped[lane] = []
+        for ts, net, margin, leverage, direction, slippage in raw:
+            try:
+                notional = float(margin or 0.0) * float(leverage or 0.0)
+            except (TypeError, ValueError):
+                notional = 0.0
+            shaped[lane].append({"close_ts": parse_ts(ts or "") or None, "net_pnl_usd": net,
+                                 "notional_usd": notional, "direction": direction,
+                                 "book_slippage_usd": slippage})
+    return shaped, session_start
+
+
+def _monitor_lanes_payload(now: float) -> dict:
+    manifest = active_tile_lifecycle_manifest()
+    lanes = [tile["lane"] for tile in manifest]
+    enabled = research_lane_enabled_map()
+    rows, session_start = _monitor_lane_rows(lanes)
+    xvl_lanes = _monitor_part(lambda: xvl_evaluator_snapshot().get("lanes") or {})
+    return {
+        "schema": monitor_api.LANES_SCHEMA,
+        "boot_id": BOT_INSTANCE_ID,
+        "generated_at": monitor_api.utc_iso(now),
+        "git_rev": _runtime_git_rev(),
+        "tile_registry_signature": active_tile_registry_signature(),
+        "scope": {
+            "active_lanes_only": True,
+            "session_start_at": monitor_api.utc_iso(session_start) if session_start else None,
+            "pnl": "booked net_pnl_usd under the bot's conservative fill model; never recomputed",
+            "drawdown": "peak-to-trough of cumulative booked net from 0, in close order",
+            "mean_bp": "sum(net) / sum(margin x leverage) x 1e4",
+        },
+        "lanes": [
+            {
+                "lane": tile["lane"],
+                "label": tile["label"],
+                "display_order": tile["display_order"],
+                "on": enabled.get(tile["lane"]),
+                **monitor_api.lane_stats(rows.get(tile["lane"]) or []),
+                "latency": monitor_api.latency_brief(
+                    ((xvl_lanes.get(tile["lane"]) or {}) if "error" not in xvl_lanes else {}).get("latency")
+                ),
+            }
+            for tile in manifest
+        ],
+    }
+
+
+def _monitor_relay_known(now: float, statuses: dict, failing: list) -> dict:
+    guard = _relay_delivery_guard.status(now)
+    railway = next((c for c in failing if c.get("id") == "railway.relay"), None)
+    return {
+        "fly_arming_block_reason": guard.get("arming_block_reason"),
+        "fly_outbox_pending_total": guard.get("pending_total"),
+        "fly_outbox_stale_owner_pending": guard.get("stale_owner_pending"),
+        "laptop_railway_relay_check": statuses.get("railway.relay"),
+        "laptop_bitfinex_exposure_check": statuses.get("bitfinex.exposure"),
+        "laptop_railway_relay_observed": (railway or {}).get("observed"),
+        "source": "Fly relay outbox guard + laptop watcher checks railway.relay / bitfinex.exposure",
+    }
+
+
+def _monitor_summary_payload(now: float) -> dict:
+    hb = state.get("last_heartbeat", last_heartbeat)
+    progress = _strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)
+    provider = progress.get("ai_provider") or {}
+    scheduled = progress.get("scheduled_ai_cycle") or {}
+    evidence = progress.get("post_ai_evidence") or {}
+    armable, arm_block_reason, _ = can_open_live_entry(require_armed=False, now=now)
+    relay_gate_block = _relay_delivery_guard.arming_block_reason(now)
+    if armable and relay_gate_block:
+        armable, arm_block_reason = False, relay_gate_block
+    xvl = _monitor_part(xvl_evaluator_snapshot)
+    cross_venue = _monitor_part(cross_venue_health_snapshot)
+    market_context = _monitor_part(market_context_health_snapshot)
+    indicator_engine = _monitor_part(indicator_engine_health_snapshot)
+    collection = _monitor_part(lambda: research_collection_health(now))
+    transfer = _monitor_part(lambda: _volume_health_snapshot(now).get("transfer") or {})
+    epoch = _monitor_part(_data_epoch_public)
+    with _SYSTEM_HEALTH_LOCK:
+        report = copy.deepcopy(_SYSTEM_HEALTH_REPORT["report"])
+        statuses = dict(_SYSTEM_HEALTH_ALARMS["statuses"])
+        statuses_at = _SYSTEM_HEALTH_ALARMS["statuses_at"]
+    if statuses_at is None or now - statuses_at > system_health_banner.STALE_AFTER_SEC:
+        statuses = {}
+    watcher = system_health_banner.with_staleness(report, now)
+    lanes = _monitor_part(lambda: _monitor_cached("lanes", _monitor_lanes_payload))
+    completed_ts = float(scheduled.get("completed_ts") or 0.0)
+    return {
+        "schema": monitor_api.SUMMARY_SCHEMA,
+        "boot_id": BOT_INSTANCE_ID,
+        "generated_at": monitor_api.utc_iso(now),
+        "git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "epoch": {
+            "data_epoch_id": epoch.get("epoch_id"),
+            "data_epoch_declared": epoch.get("declared"),
+            "data_epoch_started_at": epoch.get("started_at_utc"),
+            "collection_epoch_id": _monitor_part(_bound_collection_epoch_id),
+        },
+        "safety": {
+            "force_paper_mode": _force_paper_mode_active(),
+            "live_armed": bool(state.get("live_armed", False)),
+            "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+            "live_entry_armable": armable,
+            "live_entry_arm_block_reason": None if armable else arm_block_reason,
+            "relay": _monitor_part(lambda: _monitor_relay_known(now, statuses, watcher.get("failing") or [])),
+        },
+        "pause": {
+            "execution_paused": bool(state.get("execution_paused", False)),
+            "pause_owner": _pause_owner_locked(),
+            "execution_reason": state.get("execution_reason", ""),
+        },
+        "ages_sec": {
+            "heartbeat": round(max(0.0, now - float(hb or 0)), 1),
+            "process_startup": progress.get("process_startup_age_sec"),
+            "ws": progress.get("ws_age_sec"),
+            "ai_success": progress.get("ai_age_sec"),
+            "ai_attempt": progress.get("ai_attempt_age_sec"),
+            "evaluation": progress.get("evaluation_age_sec"),
+            "cycle_completed": round(now - completed_ts, 1) if completed_ts else None,
+            "xvl_tick": xvl.get("tick_age_s"),
+            "cross_venue_collector": cross_venue.get("collector_age_s"),
+            "indicator_engine_last_bar_close": indicator_engine.get("last_bar_close_age_sec"),
+            "tape_latest_bucket": (collection.get("tape_source") or {}).get("latest_bucket_age_sec"),
+        },
+        "progress": {
+            "strategy_ok": progress.get("ok"),
+            "reasons": progress.get("reasons"),
+            "xvl_status": xvl.get("status"),
+            "cross_venue_status": cross_venue.get("status"),
+            "market_context_status": market_context.get("status"),
+            "market_context_stale_feeds": market_context.get("stale_feeds"),
+            "indicator_engine_status": indicator_engine.get("status"),
+            "research_collection_status": collection.get("status"),
+        },
+        "counters_since_boot": {
+            "ai_successes": provider.get("successes_since_boot"),
+            "ai_failures": provider.get("failures_since_boot"),
+            "cycles_completed": scheduled.get("completed_since_boot"),
+            "post_ai_evidence_submitted": evidence.get("submitted"),
+            "post_ai_evidence_completed": evidence.get("completed"),
+            "post_ai_evidence_rejected": evidence.get("rejected"),
+            "xvl_ticks": xvl.get("ticks"),
+            "xvl_rows_written": xvl.get("rows_written"),
+            "cross_venue_rows_written": (cross_venue.get("stats") or {}).get("rows_written"),
+            "multiverse_written": (collection.get("multiverse") or {}).get("written_since_boot"),
+            "tape_rows_ingested": (collection.get("tape_source") or {}).get("rows_ingested"),
+        },
+        "custody": {
+            key: transfer.get(key)
+            for key in ("shipped_seq", "laptop_acked_seq", "custody_through_seq", "pruned_through_seq",
+                        "last_segment_at", "last_error")
+        },
+        "tiles": [
+            {
+                "lane": row.get("lane"),
+                "on": row.get("on"),
+                "closes": row.get("closes"),
+                "net_usd": row.get("net_usd"),
+                "latency_p50_s": (row.get("latency") or {}).get("signal_to_fill_p50_s"),
+                "latency_n": (row.get("latency") or {}).get("n"),
+            }
+            for row in lanes.get("lanes") or []
+        ],
+        "laptop_watcher": {
+            "verdict": watcher.get("verdict"),
+            "age_sec": watcher.get("age_sec"),
+            "stale": watcher.get("stale"),
+            "counts": watcher.get("counts"),
+        },
+        "open_alarms": [
+            {"id": alarm.get("id"), "first_seen": alarm.get("since")}
+            for alarm in (watcher.get("open_alarms") or [])
+        ],
+        "detail": {"lanes": "/api/monitor/lanes", "readiness": "/api/ready", "health": "/health"},
+    }
+
+
+@app.route('/api/monitor/summary')
+def monitor_summary():
+    return _monitor_response(_monitor_cached("summary", _monitor_summary_payload), monitor_api.MAX_SUMMARY_BYTES)
+
+
+@app.route('/api/monitor/lanes')
+def monitor_lanes():
+    try:
+        payload = _monitor_cached("lanes", _monitor_lanes_payload)
+    except TimeoutError:
+        response = _monitor_response({"schema": monitor_api.LANES_SCHEMA, "boot_id": BOT_INSTANCE_ID,
+                                      "error": "TRADE_LOCK_BUSY"}, monitor_api.MAX_LANES_BYTES, status=503)
+        response.headers["Retry-After"] = "5"
+        return response
+    return _monitor_response(payload, monitor_api.MAX_LANES_BYTES)
+
+
+@app.route('/api/monitor/digest')
+def monitor_digest():
+    if not _MONITOR_READ_TOKEN:
+        return _monitor_response({"error": "not found"}, 256, status=404)
+    if not monitor_api.bearer_matches(request.headers.get("Authorization"), _MONITOR_READ_TOKEN):
+        return _monitor_response({"error": "unauthorized"}, 256, status=401)
+    with _SYSTEM_HEALTH_LOCK:
+        stored = copy.deepcopy(_MONITOR_DIGEST)
+    return _monitor_response(monitor_api.digest_view(stored, time.time(), BOT_INSTANCE_ID),
+                             monitor_api.MAX_DIGEST_BYTES + 1024)
+
+
+@app.route('/api/research/shadow_exits')
+def research_shadow_exits():
+    """Admin-only (not in _READ_ONLY_GET_PATHS): recorder status, per-tile running aggregates, recent rows."""
+    limit = max(0, min(50, request.args.get("limit", 20, type=int) or 0))
+    return jsonify({
+        "schema": "shadow_exit_runtime_view_v1",
+        "status": _SHADOW_EXIT_RECORDER.status(),
+        "shadow_exit_set_default": [dict(item) for item in tile_shadow_exit_set(None)],
+        "tile_shadow_exit_set_ids": {
+            lane: shadow_exit_paths.shadow_exit_set_id(tile_shadow_exit_set(lane)) for lane in ACTIVE_TILE_ORDER
+        },
+        "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
+        "recent": _SHADOW_EXIT_RECORDER.recent(limit),
+        "observation_only": True,
+    })
+
+
+@app.route('/api/shadow_exits/summary')
+def shadow_exits_public_summary():
+    return jsonify(_SHADOW_EXIT_RECORDER.public_summary())
+
+
 @app.after_request
 def _inject_system_health_banner(response):
     response = system_health_banner.inject_banner(response)
@@ -42445,6 +43597,8 @@ def _runtime_blindspot_status_fields(now: float) -> dict:
         "rate_limits": lambda: _RATE_LIMITS.snapshot(now),
         "shipper": lambda: _volume_transfer_snapshot(_data_sync_volume_root(), now),
         "relay_outbox": lambda: _relay_delivery_guard.status(now),
+        "replay_buffers": replay_buffer_status,
+        "pipeline_errors": pipeline_error_status,
     }
     for key, build in parts.items():
         try:
@@ -42596,11 +43750,18 @@ def status():
                 "mode": "WATCH_ONLY_NO_ORDERS",
                 **market_context_health_snapshot(),
             },
+            "indicator_engine": {
+                "bar_schema": _ies.BAR_SCHEMA,
+                "file": _ies.BAR_FILE,
+                "mode": "OBSERVATION_ONLY_NO_ORDERS",
+                **indicator_engine_health_snapshot(),
+            },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
                 **execution_markout_status_snapshot(),
             },
+            "shadow_exit_recorder": shadow_exit_recorder_status_snapshot(),
             "adaptive_entry": {
                 "file": ADAPTIVE_ENTRY_DECISIONS_FILE,
                 **adaptive_entry_status_snapshot(),
@@ -42838,7 +43999,10 @@ def ready():
         and runtime["system_ready"]
         and runtime["rest_entry_quote_ready"]
     )
-    tile_registry = active_tile_lifecycle_manifest()
+    tile_registry = [
+        {**tile, "pre_registration": tile_pre_registration_summary(tile["lane"])}
+        for tile in active_tile_lifecycle_manifest()
+    ]
     try:
         thread_summary = _THREAD_HEALTH.summary(now)
     except Exception as exc:
@@ -42876,6 +44040,7 @@ def ready():
         "cross_venue_health": cross_venue_health_snapshot(),
         "xvl_evaluator_health": xvl_evaluator_snapshot(),
         "market_context_health": market_context_health_snapshot(),
+        "indicator_engine_health": indicator_engine_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 
@@ -47005,6 +48170,8 @@ def shutdown_handler(signum, frame):
     logger.warning(f"[SHUTDOWN] Cancellation evidence drained={cancellation_drained}")
     fill_evidence_drained = _shutdown_fill_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Fill evidence drained={fill_evidence_drained}")
+    preentry_drained = _shutdown_preentry_evidence_worker(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Pre-entry evidence drained={preentry_drained}")
     post_ai_drained = _shutdown_post_ai_evidence_workers(timeout=2.0)
     logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     combo_drained = _shutdown_combo_lane_execution_workers(timeout=5.0)
@@ -49442,6 +50609,7 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
     """
     global write_counter
     mv_source = None
+    shadow_exit_payload = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -49546,6 +50714,20 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
             }
             if _safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY"):
                 write_counter += 1
+            if buf.get("closed") and not terminal_reason:
+                policy_identity = buf.get("policy_identity") if isinstance(buf.get("policy_identity"), dict) else {}
+                shadow_exit_payload = {"replay": replay, "meta": {
+                    "start_ts": buf.get("start_ts"),
+                    "research_lane": (buf.get("research_lane") or policy_identity.get("research_lane")
+                                      or tile_lane_for_trade_id(trade_id)),
+                    "policy_signature": buf.get("policy_signature"),
+                    "collection_epoch_id": buf.get("collection_epoch_id"),
+                    "limit_price": buf.get("limit_price") or buf.get("original_limit_price"),
+                    "atr14_pct_3m": buf.get("atr14_pct_3m"),
+                    "adx_at_signal": buf.get("adx_at_signal"),
+                    "regime": buf.get("regime") or buf.get("entry_regime"),
+                    "entry_features": buf.get("entry_features"),
+                }}
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,
@@ -49576,6 +50758,8 @@ def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
                     }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
+    if shadow_exit_payload is not None:
+        _submit_shadow_exit_path(shadow_exit_payload)
     if mv_source:
         _sync_order_multiverse(mv_source, path_complete=True)
 
@@ -51065,6 +52249,7 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "ADAPTIVE_ENTRY_DECISIONS_FILE",
     "RETIRED_TILE_BOUNDARY_FILE",
     "XVL_SHADOW_FILE",
+    "SHADOW_EXIT_PATH_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",
@@ -51072,6 +52257,7 @@ _JSONL_SERIALIZED_APPEND_LITERALS = (
     "fill_markouts.jsonl",
     "taker_signal_counterfactuals.jsonl",
     "xvp_shadow_signals.jsonl",
+    "xvs_shadow_signals.jsonl",
 )
 
 
@@ -51869,6 +53055,10 @@ def _create_dashboard_server():
             self, request, *, reason, path_label="UNCLASSIFIED",
             cap_name="dispatch", admission_sec=0.0,
         ):
+            try:
+                _record_overload_rejection(cap_name, reason)
+            except Exception:
+                pass
             self._bounded_request_log(
                 event="rejected",
                 path_label=path_label,
@@ -52202,6 +53392,7 @@ def periodic_pipeline_loop():
                         "owner": None,
                         "owner_ident": None,
                         "completed_ts": time.time(),
+                        "completed_since_boot": int(scheduled_ai_cycle_state.get("completed_since_boot") or 0) + 1,
                         "stage": "IDLE",
                         "stage_started_ts": 0.0,
                     })

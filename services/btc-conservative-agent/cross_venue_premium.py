@@ -1,7 +1,6 @@
-"""Per-second cross-venue premium-extreme (XVP) evaluator shared by runtime, shadow and analyzer.
+"""Generic per-second cross-venue premium-extreme rule and evaluator shared by runtime, shadow and analyzer.
 
-Rule (pre-registered as H7_XVENUE_PREMIUM_60S_20261002, INDICATOR-SEARCH-MODEL-A
-signal 1, ``xv_prem_dev60``): the premium is the mean over Binance and Bybit of
+Rule (INDICATOR-SEARCH-MODEL-A signal 1, ``xv_prem_dev60``): the premium is the mean over Binance and Bybit of
 ``(venue_mid / bitfinex_mid - 1) * 1e4`` for one epoch-second bucket. Its
 deviation is the premium minus its own trailing 3600-bucket mean (the current
 bucket included; at least 1200 premium samples required). A deviation

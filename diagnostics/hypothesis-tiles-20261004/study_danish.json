@@ -1,0 +1,2018 @@
+{
+ "schema": "danish_confirmed_fade_study_v1",
+ "generated_at": "2026-10-03T16:17:04Z",
+ "fill_model": "REALISTIC_V1",
+ "fees": "ZERO (BITFINEX_ZERO)",
+ "latency_sec": 6.5,
+ "committed_signals": 569,
+ "evaluable_spread_ok": 482,
+ "tape_span_utc": [
+  "2026-09-28T13:39:50Z",
+  "2026-10-03T15:08:48Z"
+ ],
+ "ASIA_EU": {
+  "label": "ASIA+EU (the tile)",
+  "signals": 320,
+  "days": [
+   "2026-09-30",
+   "2026-10-01",
+   "2026-10-02",
+   "2026-10-03"
+  ],
+  "cap": 3,
+  "designs": {
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | DANISH_A_EARLY_STOP": {
+    "n": 99,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 11.3,
+    "ev_bp_per_signal": 3.5,
+    "fill_rate_pct": 30.9,
+    "win_rate": 60.6,
+    "net_usd": 2.798,
+    "avg_win_bp": 31.6,
+    "avg_loss_bp": -19.92,
+    "max_dd_usd": -0.757,
+    "ci95_1h_bp": [
+     0.53,
+     23.44
+    ],
+    "n_eff_clusters_1h": 38,
+    "gave_back_pct": 26.3,
+    "gave_back_of_positive_pct": 30.2,
+    "sharpe_per_trade": 0.2443,
+    "trades_per_day": 29.1,
+    "ci95_2h_bp": [
+     1.25,
+     23.25
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 12.82,
+     "2026-10-01": 16.47,
+     "2026-10-02": 7.08,
+     "2026-10-03": 4.14
+    },
+    "by_day_n": {
+     "2026-09-30": 26,
+     "2026-10-01": 33,
+     "2026-10-02": 26,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      8.67,
+      48
+     ],
+     "EU": [
+      13.78,
+      51
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      6.09,
+      55
+     ],
+     "SHORT": [
+      17.82,
+      44
+     ]
+    },
+    "maker_fill_share_pct": 27.3,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 11,
+     "PROFIT_PROTECTION_FLOOR": 26,
+     "THESIS_FAST_CUT": 11,
+     "TIME_STOP": 51
+    },
+    "test_days_fixed_rule": {
+     "n": 73,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 10.76,
+     "ev_bp_per_signal": 3.71,
+     "fill_rate_pct": 34.4,
+     "win_rate": 65.8,
+     "net_usd": 1.964,
+     "avg_win_bp": 26.95,
+     "avg_loss_bp": -20.31,
+     "max_dd_usd": -0.757,
+     "ci95_1h_bp": [
+      -1.11,
+      25.37
+     ],
+     "n_eff_clusters_1h": 29,
+     "gave_back_pct": 27.4,
+     "gave_back_of_positive_pct": 29.4,
+     "sharpe_per_trade": 0.2524
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 27,
+     "CHASE_MARKET": 72,
+     "CAP_SKIP": 4
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 27,
+     "CHASE_MARKET": 72
+    },
+    "filled_signals": 99
+   },
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | DANISH_NO_EARLY_STOP": {
+    "n": 93,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 11.36,
+    "ev_bp_per_signal": 3.3,
+    "fill_rate_pct": 29.1,
+    "win_rate": 63.4,
+    "net_usd": 2.641,
+    "avg_win_bp": 32.31,
+    "avg_loss_bp": -24.99,
+    "max_dd_usd": -0.728,
+    "ci95_1h_bp": [
+     -0.58,
+     24.63
+    ],
+    "n_eff_clusters_1h": 38,
+    "gave_back_pct": 29.0,
+    "gave_back_of_positive_pct": 31.4,
+    "sharpe_per_trade": 0.2329,
+    "trades_per_day": 27.3,
+    "ci95_2h_bp": [
+     1.32,
+     24.44
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 10.64,
+     "2026-10-01": 18.25,
+     "2026-10-02": 7.83,
+     "2026-10-03": 4.14
+    },
+    "by_day_n": {
+     "2026-09-30": 24,
+     "2026-10-01": 30,
+     "2026-10-02": 25,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      8.09,
+      46
+     ],
+     "EU": [
+      14.56,
+      47
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      6.96,
+      50
+     ],
+     "SHORT": [
+      16.48,
+      43
+     ]
+    },
+    "maker_fill_share_pct": 28.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 16,
+     "PROFIT_PROTECTION_FLOOR": 26,
+     "TIME_STOP": 51
+    },
+    "test_days_fixed_rule": {
+     "n": 69,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 11.61,
+     "ev_bp_per_signal": 3.78,
+     "fill_rate_pct": 32.5,
+     "win_rate": 68.1,
+     "net_usd": 2.003,
+     "avg_win_bp": 27.43,
+     "avg_loss_bp": -22.18,
+     "max_dd_usd": -0.728,
+     "ci95_1h_bp": [
+      -1.22,
+      27.88
+     ],
+     "n_eff_clusters_1h": 29,
+     "gave_back_pct": 29.0,
+     "gave_back_of_positive_pct": 29.9,
+     "sharpe_per_trade": 0.2645
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 30,
+     "CHASE_MARKET": 73,
+     "CAP_SKIP": 4
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 26,
+     "CHASE_MARKET": 67
+    },
+    "filled_signals": 93
+   },
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | BASE_TIME_90M_HARD40": {
+    "n": 80,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 14.46,
+    "ev_bp_per_signal": 3.61,
+    "fill_rate_pct": 25.0,
+    "win_rate": 57.5,
+    "net_usd": 2.891,
+    "avg_win_bp": 44.72,
+    "avg_loss_bp": -26.5,
+    "max_dd_usd": -0.778,
+    "ci95_1h_bp": [
+     1.52,
+     29.37
+    ],
+    "n_eff_clusters_1h": 35,
+    "gave_back_pct": 36.2,
+    "gave_back_of_positive_pct": 38.7,
+    "sharpe_per_trade": 0.2806,
+    "trades_per_day": 23.5,
+    "ci95_2h_bp": [
+     1.96,
+     25.85
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 13.6,
+     "2026-10-01": 24.81,
+     "2026-10-02": 7.24,
+     "2026-10-03": 4.14
+    },
+    "by_day_n": {
+     "2026-09-30": 23,
+     "2026-10-01": 27,
+     "2026-10-02": 16,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      14.6,
+      40
+     ],
+     "EU": [
+      14.31,
+      40
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      11.34,
+      46
+     ],
+     "SHORT": [
+      18.67,
+      34
+     ]
+    },
+    "maker_fill_share_pct": 28.7,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 17,
+     "TIME_STOP": 63
+    },
+    "test_days_fixed_rule": {
+     "n": 57,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 14.8,
+     "ev_bp_per_signal": 3.98,
+     "fill_rate_pct": 26.9,
+     "win_rate": 59.6,
+     "net_usd": 2.109,
+     "avg_win_bp": 41.85,
+     "avg_loss_bp": -25.18,
+     "max_dd_usd": -0.778,
+     "ci95_1h_bp": [
+      -1.23,
+      33.11
+     ],
+     "n_eff_clusters_1h": 27,
+     "gave_back_pct": 40.4,
+     "gave_back_of_positive_pct": 40.4,
+     "sharpe_per_trade": 0.3139
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 32,
+     "CHASE_MARKET": 77,
+     "CAP_SKIP": 5
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 23,
+     "CHASE_MARKET": 57
+    },
+    "filled_signals": 80
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | DANISH_A_EARLY_STOP": {
+    "n": 57,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 16.84,
+    "ev_bp_per_signal": 3.0,
+    "fill_rate_pct": 17.8,
+    "win_rate": 73.7,
+    "net_usd": 2.399,
+    "avg_win_bp": 31.23,
+    "avg_loss_bp": -23.46,
+    "max_dd_usd": -0.522,
+    "ci95_1h_bp": [
+     0.36,
+     38.9
+    ],
+    "n_eff_clusters_1h": 24,
+    "gave_back_pct": 17.5,
+    "gave_back_of_positive_pct": 19.2,
+    "sharpe_per_trade": 0.3335,
+    "trades_per_day": 16.7,
+    "ci95_2h_bp": [
+     0.68,
+     35.85
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 26.95,
+     "2026-10-01": 28.11,
+     "2026-10-02": -1.34,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 21,
+     "2026-10-01": 15,
+     "2026-10-02": 20,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      18.96,
+      25
+     ],
+     "EU": [
+      15.18,
+      32
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      14.18,
+      24
+     ],
+     "SHORT": [
+      18.77,
+      33
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -0.62,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 6,
+     "PROFIT_PROTECTION_FLOOR": 23,
+     "THESIS_FAST_CUT": 4,
+     "TIME_STOP": 24
+    },
+    "test_days_fixed_rule": {
+     "n": 36,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 10.94,
+     "ev_bp_per_signal": 1.86,
+     "fill_rate_pct": 17.0,
+     "win_rate": 75.0,
+     "net_usd": 0.984,
+     "avg_win_bp": 24.06,
+     "avg_loss_bp": -28.45,
+     "max_dd_usd": -0.522,
+     "ci95_1h_bp": [
+      -5.9,
+      34.11
+     ],
+     "n_eff_clusters_1h": 15,
+     "gave_back_pct": 16.7,
+     "gave_back_of_positive_pct": 18.2,
+     "sharpe_per_trade": 0.2701
+    }
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | DANISH_NO_EARLY_STOP": {
+    "n": 54,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 17.34,
+    "ev_bp_per_signal": 2.93,
+    "fill_rate_pct": 16.9,
+    "win_rate": 75.9,
+    "net_usd": 2.341,
+    "avg_win_bp": 32.16,
+    "avg_loss_bp": -29.4,
+    "max_dd_usd": -0.562,
+    "ci95_1h_bp": [
+     -0.47,
+     39.61
+    ],
+    "n_eff_clusters_1h": 24,
+    "gave_back_pct": 18.5,
+    "gave_back_of_positive_pct": 19.6,
+    "sharpe_per_trade": 0.3307,
+    "trades_per_day": 15.8,
+    "ci95_2h_bp": [
+     -0.11,
+     36.05
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 28.12,
+     "2026-10-01": 28.11,
+     "2026-10-02": -2.58,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 20,
+     "2026-10-01": 15,
+     "2026-10-02": 18,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      20.9,
+      24
+     ],
+     "EU": [
+      14.5,
+      30
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      16.0,
+      23
+     ],
+     "SHORT": [
+      18.34,
+      31
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -0.13,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 8,
+     "PROFIT_PROTECTION_FLOOR": 21,
+     "TIME_STOP": 25
+    },
+    "test_days_fixed_rule": {
+     "n": 34,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 11.01,
+     "ev_bp_per_signal": 1.77,
+     "fill_rate_pct": 16.0,
+     "win_rate": 76.5,
+     "net_usd": 0.935,
+     "avg_win_bp": 24.85,
+     "avg_loss_bp": -34.0,
+     "max_dd_usd": -0.562,
+     "ci95_1h_bp": [
+      -8.22,
+      34.15
+     ],
+     "n_eff_clusters_1h": 15,
+     "gave_back_pct": 14.7,
+     "gave_back_of_positive_pct": 16.1,
+     "sharpe_per_trade": 0.2601
+    }
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | BASE_TIME_90M_HARD40": {
+    "n": 49,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 20.65,
+    "ev_bp_per_signal": 3.16,
+    "fill_rate_pct": 15.3,
+    "win_rate": 65.3,
+    "net_usd": 2.53,
+    "avg_win_bp": 47.69,
+    "avg_loss_bp": -30.24,
+    "max_dd_usd": -0.5,
+    "ci95_1h_bp": [
+     1.28,
+     45.57
+    ],
+    "n_eff_clusters_1h": 23,
+    "gave_back_pct": 26.5,
+    "gave_back_of_positive_pct": 28.9,
+    "sharpe_per_trade": 0.3524,
+    "trades_per_day": 14.4,
+    "ci95_2h_bp": [
+     2.77,
+     41.11
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 27.23,
+     "2026-10-01": 32.46,
+     "2026-10-02": 0.62,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 19,
+     "2026-10-01": 15,
+     "2026-10-02": 14,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      22.42,
+      24
+     ],
+     "EU": [
+      18.95,
+      25
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      13.2,
+      23
+     ],
+     "SHORT": [
+      27.24,
+      26
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -0.8,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 10,
+     "TIME_STOP": 39
+    },
+    "test_days_fixed_rule": {
+     "n": 30,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 16.48,
+     "ev_bp_per_signal": 2.33,
+     "fill_rate_pct": 14.2,
+     "win_rate": 66.7,
+     "net_usd": 1.236,
+     "avg_win_bp": 41.85,
+     "avg_loss_bp": -34.26,
+     "max_dd_usd": -0.5,
+     "ci95_1h_bp": [
+      -4.16,
+      40.8
+     ],
+     "n_eff_clusters_1h": 15,
+     "gave_back_pct": 23.3,
+     "gave_back_of_positive_pct": 25.9,
+     "sharpe_per_trade": 0.343
+    }
+   },
+   "TAKER_AT_SIGNAL | DANISH_A_EARLY_STOP": {
+    "n": 113,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 7.35,
+    "ev_bp_per_signal": 2.6,
+    "fill_rate_pct": 35.3,
+    "win_rate": 49.6,
+    "net_usd": 2.076,
+    "avg_win_bp": 32.18,
+    "avg_loss_bp": -17.05,
+    "max_dd_usd": -0.827,
+    "ci95_1h_bp": [
+     -1.8,
+     19.66
+    ],
+    "n_eff_clusters_1h": 38,
+    "gave_back_pct": 24.8,
+    "gave_back_of_positive_pct": 33.3,
+    "sharpe_per_trade": 0.177,
+    "trades_per_day": 33.2,
+    "ci95_2h_bp": [
+     1.34,
+     16.67
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 1.52,
+     "2026-10-01": 15.42,
+     "2026-10-02": 5.65,
+     "2026-10-03": 3.9
+    },
+    "by_day_n": {
+     "2026-09-30": 30,
+     "2026-10-01": 35,
+     "2026-10-02": 33,
+     "2026-10-03": 15
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      3.88,
+      51
+     ],
+     "EU": [
+      10.2,
+      62
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      7.02,
+      56
+     ],
+     "SHORT": [
+      7.68,
+      57
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 12,
+     "PROFIT_PROTECTION_FLOOR": 22,
+     "THESIS_FAST_CUT": 23,
+     "TIME_STOP": 56
+    },
+    "test_days_fixed_rule": {
+     "n": 83,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 9.46,
+     "ev_bp_per_signal": 3.7,
+     "fill_rate_pct": 39.2,
+     "win_rate": 55.4,
+     "net_usd": 1.962,
+     "avg_win_bp": 30.76,
+     "avg_loss_bp": -17.03,
+     "max_dd_usd": -0.827,
+     "ci95_1h_bp": [
+      -2.84,
+      25.67
+     ],
+     "n_eff_clusters_1h": 28,
+     "gave_back_pct": 22.9,
+     "gave_back_of_positive_pct": 29.2,
+     "sharpe_per_trade": 0.2269
+    }
+   },
+   "TAKER_AT_SIGNAL | DANISH_NO_EARLY_STOP": {
+    "n": 95,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 10.26,
+    "ev_bp_per_signal": 3.04,
+    "fill_rate_pct": 29.7,
+    "win_rate": 56.8,
+    "net_usd": 2.436,
+    "avg_win_bp": 36.07,
+    "avg_loss_bp": -23.75,
+    "max_dd_usd": -0.71,
+    "ci95_1h_bp": [
+     -1.91,
+     24.23
+    ],
+    "n_eff_clusters_1h": 39,
+    "gave_back_pct": 29.5,
+    "gave_back_of_positive_pct": 34.1,
+    "sharpe_per_trade": 0.2087,
+    "trades_per_day": 27.9,
+    "ci95_2h_bp": [
+     0.15,
+     22.05
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 5.98,
+     "2026-10-01": 15.14,
+     "2026-10-02": 12.15,
+     "2026-10-03": 4.35
+    },
+    "by_day_n": {
+     "2026-09-30": 27,
+     "2026-10-01": 32,
+     "2026-10-02": 22,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      2.82,
+      46
+     ],
+     "EU": [
+      17.24,
+      49
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      6.9,
+      53
+     ],
+     "SHORT": [
+      14.5,
+      42
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 19,
+     "PROFIT_PROTECTION_FLOOR": 19,
+     "TIME_STOP": 57
+    },
+    "test_days_fixed_rule": {
+     "n": 68,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 11.95,
+     "ev_bp_per_signal": 3.83,
+     "fill_rate_pct": 32.1,
+     "win_rate": 64.7,
+     "net_usd": 2.032,
+     "avg_win_bp": 31.27,
+     "avg_loss_bp": -23.46,
+     "max_dd_usd": -0.71,
+     "ci95_1h_bp": [
+      -3.5,
+      30.02
+     ],
+     "n_eff_clusters_1h": 29,
+     "gave_back_pct": 27.9,
+     "gave_back_of_positive_pct": 30.2,
+     "sharpe_per_trade": 0.2654
+    }
+   },
+   "TAKER_AT_SIGNAL | BASE_TIME_90M_HARD40": {
+    "n": 81,
+    "eligible_signals": 320,
+    "ev_bp_per_fill": 15.56,
+    "ev_bp_per_signal": 3.94,
+    "fill_rate_pct": 25.3,
+    "win_rate": 53.1,
+    "net_usd": 3.15,
+    "avg_win_bp": 51.55,
+    "avg_loss_bp": -25.17,
+    "max_dd_usd": -0.76,
+    "ci95_1h_bp": [
+     -0.94,
+     33.05
+    ],
+    "n_eff_clusters_1h": 35,
+    "gave_back_pct": 33.3,
+    "gave_back_of_positive_pct": 38.6,
+    "sharpe_per_trade": 0.2778,
+    "trades_per_day": 23.8,
+    "ci95_2h_bp": [
+     0.74,
+     29.89
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 14.08,
+     "2026-10-01": 26.64,
+     "2026-10-02": 9.67,
+     "2026-10-03": 4.35
+    },
+    "by_day_n": {
+     "2026-09-30": 25,
+     "2026-10-01": 26,
+     "2026-10-02": 16,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      9.93,
+      41
+     ],
+     "EU": [
+      21.32,
+      40
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      9.48,
+      46
+     ],
+     "SHORT": [
+      23.55,
+      35
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 18,
+     "TIME_STOP": 63
+    },
+    "test_days_fixed_rule": {
+     "n": 56,
+     "eligible_signals": 212,
+     "ev_bp_per_fill": 16.22,
+     "ev_bp_per_signal": 4.28,
+     "fill_rate_pct": 26.4,
+     "win_rate": 60.7,
+     "net_usd": 2.27,
+     "avg_win_bp": 42.82,
+     "avg_loss_bp": -24.89,
+     "max_dd_usd": -0.76,
+     "ci95_1h_bp": [
+      -1.84,
+      36.88
+     ],
+     "n_eff_clusters_1h": 26,
+     "gave_back_pct": 33.9,
+     "gave_back_of_positive_pct": 35.8,
+     "sharpe_per_trade": 0.3403
+    }
+   }
+  },
+  "nested_joint": {
+   "days": [
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03"
+   ],
+   "folds": [
+    {
+     "test_day": "2026-10-01",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "DANISH_A_EARLY_STOP",
+     "train_bp_per_signal": 0.422,
+     "session_gate": null,
+     "test_n": 35,
+     "test_ev_bp_per_fill": 15.42,
+     "base_test_n": 33,
+     "base_test_ev_bp_per_fill": 16.47
+    },
+    {
+     "test_day": "2026-10-02",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "BASE_TIME_90M_HARD40",
+     "train_bp_per_signal": 5.12,
+     "session_gate": null,
+     "test_n": 16,
+     "test_ev_bp_per_fill": 9.67,
+     "base_test_n": 26,
+     "base_test_ev_bp_per_fill": 7.08
+    },
+    {
+     "test_day": "2026-10-03",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "BASE_TIME_90M_HARD40",
+     "train_bp_per_signal": 4.207,
+     "session_gate": null,
+     "test_n": 14,
+     "test_ev_bp_per_fill": 4.35,
+     "base_test_n": 14,
+     "base_test_ev_bp_per_fill": 4.14
+    }
+   ],
+   "nested_oos": {
+    "n": 65,
+    "eligible_signals": 212,
+    "ev_bp_per_fill": 11.62,
+    "ev_bp_per_signal": 3.56,
+    "fill_rate_pct": 30.7,
+    "win_rate": 56.9,
+    "net_usd": 1.889,
+    "avg_win_bp": 37.04,
+    "avg_loss_bp": -21.97,
+    "max_dd_usd": -0.76,
+    "ci95_1h_bp": [
+     -4.11,
+     30.41
+    ],
+    "n_eff_clusters_1h": 27,
+    "gave_back_pct": 29.2,
+    "gave_back_of_positive_pct": 33.9,
+    "sharpe_per_trade": 0.2583,
+    "ci95_2h_bp": [
+     -1.66,
+     24.6
+    ],
+    "by_day_ev_bp": {
+     "2026-10-01": 15.42,
+     "2026-10-02": 9.67,
+     "2026-10-03": 4.35
+    },
+    "by_day_n": {
+     "2026-10-01": 35,
+     "2026-10-02": 16,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      10.2,
+      34
+     ],
+     "EU": [
+      13.18,
+      31
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      7.36,
+      39
+     ],
+     "SHORT": [
+      18.02,
+      26
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 10,
+     "PROFIT_PROTECTION_FLOOR": 7,
+     "THESIS_FAST_CUT": 6,
+     "TIME_STOP": 42
+    }
+   },
+   "base_same_days": {
+    "n": 73,
+    "eligible_signals": 212,
+    "ev_bp_per_fill": 10.76,
+    "ev_bp_per_signal": 3.71,
+    "fill_rate_pct": 34.4,
+    "win_rate": 65.8,
+    "net_usd": 1.964,
+    "avg_win_bp": 26.95,
+    "avg_loss_bp": -20.31,
+    "max_dd_usd": -0.757,
+    "ci95_1h_bp": [
+     -1.11,
+     25.37
+    ],
+    "n_eff_clusters_1h": 29,
+    "gave_back_pct": 27.4,
+    "gave_back_of_positive_pct": 29.4,
+    "sharpe_per_trade": 0.2524,
+    "ci95_2h_bp": [
+     0.21,
+     25.33
+    ],
+    "by_day_ev_bp": {
+     "2026-10-01": 16.47,
+     "2026-10-02": 7.08,
+     "2026-10-03": 4.14
+    },
+    "by_day_n": {
+     "2026-10-01": 33,
+     "2026-10-02": 26,
+     "2026-10-03": 14
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      12.49,
+      35
+     ],
+     "EU": [
+      9.18,
+      38
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      5.92,
+      38
+     ],
+     "SHORT": [
+      16.02,
+      35
+     ]
+    },
+    "maker_fill_share_pct": 21.9,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 8,
+     "PROFIT_PROTECTION_FLOOR": 24,
+     "THESIS_FAST_CUT": 5,
+     "TIME_STOP": 36
+    }
+   },
+   "designs_tried": 9,
+   "deflation": {
+    "expected_max_sharpe_under_null": 0.0865,
+    "deflated_sharpe_prob": 0.8056
+   }
+  },
+  "early_stop_cost_benefit": {
+   "DANISH_A_EARLY_STOP": {
+    "cut_trades": 31,
+    "would_have_recovered": 17,
+    "losses_saved": 14,
+    "cost_bp_total": 612.6,
+    "benefit_bp_total": 430.0,
+    "net_bp_total": -182.6
+   }
+  }
+ },
+ "ALL_SESSIONS": {
+  "label": "all sessions (for the US split)",
+  "signals": 482,
+  "days": [
+   "2026-09-30",
+   "2026-10-01",
+   "2026-10-02",
+   "2026-10-03"
+  ],
+  "cap": 3,
+  "designs": {
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | DANISH_A_EARLY_STOP": {
+    "n": 139,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 5.6,
+    "ev_bp_per_signal": 1.62,
+    "fill_rate_pct": 28.8,
+    "win_rate": 54.7,
+    "net_usd": 1.946,
+    "avg_win_bp": 28.5,
+    "avg_loss_bp": -22.03,
+    "max_dd_usd": -1.159,
+    "ci95_1h_bp": [
+     -3.53,
+     16.14
+    ],
+    "n_eff_clusters_1h": 51,
+    "gave_back_pct": 27.3,
+    "gave_back_of_positive_pct": 33.3,
+    "sharpe_per_trade": 0.1313,
+    "trades_per_day": 40.8,
+    "ci95_2h_bp": [
+     -3.35,
+     16.56
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 15.24,
+     "2026-10-01": 8.04,
+     "2026-10-02": -0.97,
+     "2026-10-03": 0.7
+    },
+    "by_day_n": {
+     "2026-09-30": 29,
+     "2026-10-01": 47,
+     "2026-10-02": 51,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      8.55,
+      45
+     ],
+     "EU": [
+      13.78,
+      51
+     ],
+     "US": [
+      -7.18,
+      43
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      0.93,
+      78
+     ],
+     "SHORT": [
+      11.57,
+      61
+     ]
+    },
+    "maker_fill_share_pct": 27.3,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 21,
+     "PROFIT_PROTECTION_FLOOR": 31,
+     "THESIS_FAST_CUT": 21,
+     "TIME_STOP": 66
+    },
+    "test_days_fixed_rule": {
+     "n": 110,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 3.06,
+     "ev_bp_per_signal": 0.95,
+     "fill_rate_pct": 31.0,
+     "win_rate": 55.5,
+     "net_usd": 0.841,
+     "avg_win_bp": 23.85,
+     "avg_loss_bp": -22.82,
+     "max_dd_usd": -1.159,
+     "ci95_1h_bp": [
+      -6.27,
+      14.68
+     ],
+     "n_eff_clusters_1h": 40,
+     "gave_back_pct": 29.1,
+     "gave_back_of_positive_pct": 34.4,
+     "sharpe_per_trade": 0.0785
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 38,
+     "CHASE_MARKET": 101,
+     "CAP_SKIP": 8
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 38,
+     "CHASE_MARKET": 101
+    },
+    "filled_signals": 139
+   },
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | DANISH_NO_EARLY_STOP": {
+    "n": 127,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 5.87,
+    "ev_bp_per_signal": 1.55,
+    "fill_rate_pct": 26.3,
+    "win_rate": 58.3,
+    "net_usd": 1.863,
+    "avg_win_bp": 29.66,
+    "avg_loss_bp": -27.35,
+    "max_dd_usd": -1.157,
+    "ci95_1h_bp": [
+     -4.23,
+     17.08
+    ],
+    "n_eff_clusters_1h": 51,
+    "gave_back_pct": 30.7,
+    "gave_back_of_positive_pct": 34.5,
+    "sharpe_per_trade": 0.1282,
+    "trades_per_day": 37.3,
+    "ci95_2h_bp": [
+     -3.77,
+     17.33
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 13.48,
+     "2026-10-01": 8.78,
+     "2026-10-02": 0.09,
+     "2026-10-03": 0.7
+    },
+    "by_day_n": {
+     "2026-09-30": 27,
+     "2026-10-01": 42,
+     "2026-10-02": 46,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      7.87,
+      43
+     ],
+     "EU": [
+      14.56,
+      47
+     ],
+     "US": [
+      -7.51,
+      37
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      1.82,
+      69
+     ],
+     "SHORT": [
+      10.68,
+      58
+     ]
+    },
+    "maker_fill_share_pct": 27.6,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 29,
+     "PROFIT_PROTECTION_FLOOR": 31,
+     "TIME_STOP": 67
+    },
+    "test_days_fixed_rule": {
+     "n": 100,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 3.81,
+     "ev_bp_per_signal": 1.07,
+     "fill_rate_pct": 28.2,
+     "win_rate": 59.0,
+     "net_usd": 0.953,
+     "avg_win_bp": 24.9,
+     "avg_loss_bp": -26.53,
+     "max_dd_usd": -1.157,
+     "ci95_1h_bp": [
+      -7.06,
+      17.02
+     ],
+     "n_eff_clusters_1h": 40,
+     "gave_back_pct": 32.0,
+     "gave_back_of_positive_pct": 35.2,
+     "sharpe_per_trade": 0.0919
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 42,
+     "CHASE_MARKET": 103,
+     "CAP_SKIP": 8
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 35,
+     "CHASE_MARKET": 92
+    },
+    "filled_signals": 127
+   },
+   "CONFIRM_0.10_3BP_MKT_CAP5_TTL1800 | BASE_TIME_90M_HARD40": {
+    "n": 110,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 7.7,
+    "ev_bp_per_signal": 1.76,
+    "fill_rate_pct": 22.8,
+    "win_rate": 52.7,
+    "net_usd": 2.119,
+    "avg_win_bp": 40.49,
+    "avg_loss_bp": -28.86,
+    "max_dd_usd": -1.216,
+    "ci95_1h_bp": [
+     -4.35,
+     20.47
+    ],
+    "n_eff_clusters_1h": 48,
+    "gave_back_pct": 38.2,
+    "gave_back_of_positive_pct": 42.0,
+    "sharpe_per_trade": 0.1586,
+    "trades_per_day": 32.3,
+    "ci95_2h_bp": [
+     -4.14,
+     19.49
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 16.21,
+     "2026-10-01": 13.42,
+     "2026-10-02": -2.25,
+     "2026-10-03": 0.7
+    },
+    "by_day_n": {
+     "2026-09-30": 26,
+     "2026-10-01": 37,
+     "2026-10-02": 35,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      14.87,
+      37
+     ],
+     "EU": [
+      14.31,
+      40
+     ],
+     "US": [
+      -8.34,
+      33
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      4.71,
+      63
+     ],
+     "SHORT": [
+      11.72,
+      47
+     ]
+    },
+    "maker_fill_share_pct": 29.1,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 30,
+     "TIME_STOP": 80
+    },
+    "test_days_fixed_rule": {
+     "n": 84,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 5.07,
+     "ev_bp_per_signal": 1.2,
+     "fill_rate_pct": 23.7,
+     "win_rate": 51.2,
+     "net_usd": 1.065,
+     "avg_win_bp": 37.33,
+     "avg_loss_bp": -28.76,
+     "max_dd_usd": -1.216,
+     "ci95_1h_bp": [
+      -8.67,
+      20.72
+     ],
+     "n_eff_clusters_1h": 38,
+     "gave_back_pct": 42.9,
+     "gave_back_of_positive_pct": 45.6,
+     "sharpe_per_trade": 0.1132
+    },
+    "entry_outcomes_uncapped": {
+     "LIMIT": 44,
+     "CHASE_MARKET": 108,
+     "CAP_SKIP": 9
+    },
+    "fills_by_entry_kind": {
+     "LIMIT": 32,
+     "CHASE_MARKET": 78
+    },
+    "filled_signals": 110
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | DANISH_A_EARLY_STOP": {
+    "n": 80,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 6.67,
+    "ev_bp_per_signal": 1.11,
+    "fill_rate_pct": 16.6,
+    "win_rate": 61.3,
+    "net_usd": 1.334,
+    "avg_win_bp": 28.8,
+    "avg_loss_bp": -28.3,
+    "max_dd_usd": -1.317,
+    "ci95_1h_bp": [
+     -7.12,
+     24.07
+    ],
+    "n_eff_clusters_1h": 33,
+    "gave_back_pct": 25.0,
+    "gave_back_of_positive_pct": 29.0,
+    "sharpe_per_trade": 0.1402,
+    "trades_per_day": 23.5,
+    "ci95_2h_bp": [
+     -6.34,
+     22.36
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 25.87,
+     "2026-10-01": 11.21,
+     "2026-10-02": -8.6,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 22,
+     "2026-10-01": 23,
+     "2026-10-02": 34,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      20.18,
+      23
+     ],
+     "EU": [
+      15.18,
+      32
+     ],
+     "US": [
+      -16.65,
+      25
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      2.0,
+      39
+     ],
+     "SHORT": [
+      11.11,
+      41
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -2.18,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 16,
+     "PROFIT_PROTECTION_FLOOR": 25,
+     "THESIS_FAST_CUT": 8,
+     "TIME_STOP": 31
+    },
+    "test_days_fixed_rule": {
+     "n": 58,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": -0.61,
+     "ev_bp_per_signal": -0.1,
+     "fill_rate_pct": 16.3,
+     "win_rate": 56.9,
+     "net_usd": -0.089,
+     "avg_win_bp": 22.61,
+     "avg_loss_bp": -31.26,
+     "max_dd_usd": -1.317,
+     "ci95_1h_bp": [
+      -12.63,
+      16.01
+     ],
+     "n_eff_clusters_1h": 23,
+     "gave_back_pct": 27.6,
+     "gave_back_of_positive_pct": 32.7,
+     "sharpe_per_trade": -0.0158
+    }
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | DANISH_NO_EARLY_STOP": {
+    "n": 77,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 7.39,
+    "ev_bp_per_signal": 1.18,
+    "fill_rate_pct": 16.0,
+    "win_rate": 66.2,
+    "net_usd": 1.422,
+    "avg_win_bp": 28.67,
+    "avg_loss_bp": -34.36,
+    "max_dd_usd": -1.22,
+    "ci95_1h_bp": [
+     -6.88,
+     25.22
+    ],
+    "n_eff_clusters_1h": 33,
+    "gave_back_pct": 22.1,
+    "gave_back_of_positive_pct": 25.0,
+    "sharpe_per_trade": 0.1503,
+    "trades_per_day": 22.6,
+    "ci95_2h_bp": [
+     -6.36,
+     22.62
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 26.93,
+     "2026-10-01": 12.21,
+     "2026-10-02": -9.31,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 21,
+     "2026-10-01": 24,
+     "2026-10-02": 31,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      22.36,
+      22
+     ],
+     "EU": [
+      14.5,
+      30
+     ],
+     "US": [
+      -14.32,
+      25
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      3.48,
+      37
+     ],
+     "SHORT": [
+      11.0,
+      40
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -1.97,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 19,
+     "PROFIT_PROTECTION_FLOOR": 25,
+     "TIME_STOP": 33
+    },
+    "test_days_fixed_rule": {
+     "n": 56,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 0.06,
+     "ev_bp_per_signal": 0.01,
+     "fill_rate_pct": 15.8,
+     "win_rate": 62.5,
+     "net_usd": 0.008,
+     "avg_win_bp": 22.47,
+     "avg_loss_bp": -37.29,
+     "max_dd_usd": -1.22,
+     "ci95_1h_bp": [
+      -13.06,
+      16.28
+     ],
+     "n_eff_clusters_1h": 23,
+     "gave_back_pct": 21.4,
+     "gave_back_of_positive_pct": 25.5,
+     "sharpe_per_trade": 0.0014
+    }
+   },
+   "CFM_MAKER_0.10_no_chase_TTL1800 | BASE_TIME_90M_HARD40": {
+    "n": 67,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 8.11,
+    "ev_bp_per_signal": 1.13,
+    "fill_rate_pct": 13.9,
+    "win_rate": 53.7,
+    "net_usd": 1.358,
+    "avg_win_bp": 43.28,
+    "avg_loss_bp": -32.73,
+    "max_dd_usd": -1.246,
+    "ci95_1h_bp": [
+     -8.27,
+     26.95
+    ],
+    "n_eff_clusters_1h": 33,
+    "gave_back_pct": 34.3,
+    "gave_back_of_positive_pct": 39.0,
+    "sharpe_per_trade": 0.1466,
+    "trades_per_day": 19.7,
+    "ci95_2h_bp": [
+     -8.25,
+     25.31
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 26.42,
+     "2026-10-01": 10.42,
+     "2026-10-02": -9.73,
+     "2026-10-03": -1.06
+    },
+    "by_day_n": {
+     "2026-09-30": 20,
+     "2026-10-01": 23,
+     "2026-10-02": 23,
+     "2026-10-03": 1
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      20.48,
+      22
+     ],
+     "EU": [
+      18.95,
+      25
+     ],
+     "US": [
+      -19.05,
+      20
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      2.22,
+      33
+     ],
+     "SHORT": [
+      13.82,
+      34
+     ]
+    },
+    "maker_fill_share_pct": 100.0,
+    "maker_markout_60s_bp": -2.38,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 21,
+     "TIME_STOP": 46
+    },
+    "test_days_fixed_rule": {
+     "n": 47,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 0.32,
+     "ev_bp_per_signal": 0.04,
+     "fill_rate_pct": 13.2,
+     "win_rate": 48.9,
+     "net_usd": 0.037,
+     "avg_win_bp": 37.31,
+     "avg_loss_bp": -35.13,
+     "max_dd_usd": -1.246,
+     "ci95_1h_bp": [
+      -14.79,
+      18.04
+     ],
+     "n_eff_clusters_1h": 24,
+     "gave_back_pct": 36.2,
+     "gave_back_of_positive_pct": 42.5,
+     "sharpe_per_trade": 0.0069
+    }
+   },
+   "TAKER_AT_SIGNAL | DANISH_A_EARLY_STOP": {
+    "n": 160,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 3.11,
+    "ev_bp_per_signal": 1.03,
+    "fill_rate_pct": 33.2,
+    "win_rate": 48.8,
+    "net_usd": 1.244,
+    "avg_win_bp": 27.41,
+    "avg_loss_bp": -20.01,
+    "max_dd_usd": -1.341,
+    "ci95_1h_bp": [
+     -4.3,
+     12.2
+    ],
+    "n_eff_clusters_1h": 52,
+    "gave_back_pct": 23.8,
+    "gave_back_of_positive_pct": 32.8,
+    "sharpe_per_trade": 0.0811,
+    "trades_per_day": 47.0,
+    "ci95_2h_bp": [
+     -2.78,
+     10.37
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 5.17,
+     "2026-10-01": 5.53,
+     "2026-10-02": -0.04,
+     "2026-10-03": 1.51
+    },
+    "by_day_n": {
+     "2026-09-30": 33,
+     "2026-10-01": 56,
+     "2026-10-02": 58,
+     "2026-10-03": 13
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      3.01,
+      48
+     ],
+     "EU": [
+      10.2,
+      62
+     ],
+     "US": [
+      -5.58,
+      50
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      2.14,
+      81
+     ],
+     "SHORT": [
+      4.11,
+      79
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 23,
+     "PROFIT_PROTECTION_FLOOR": 30,
+     "THESIS_FAST_CUT": 35,
+     "TIME_STOP": 72
+    },
+    "test_days_fixed_rule": {
+     "n": 127,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 2.57,
+     "ev_bp_per_signal": 0.92,
+     "fill_rate_pct": 35.8,
+     "win_rate": 51.2,
+     "net_usd": 0.818,
+     "avg_win_bp": 25.02,
+     "avg_loss_bp": -20.95,
+     "max_dd_usd": -1.341,
+     "ci95_1h_bp": [
+      -5.92,
+      14.1
+     ],
+     "n_eff_clusters_1h": 40,
+     "gave_back_pct": 22.8,
+     "gave_back_of_positive_pct": 30.9,
+     "sharpe_per_trade": 0.0683
+    }
+   },
+   "TAKER_AT_SIGNAL | DANISH_NO_EARLY_STOP": {
+    "n": 133,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 5.23,
+    "ev_bp_per_signal": 1.44,
+    "fill_rate_pct": 27.6,
+    "win_rate": 56.4,
+    "net_usd": 1.739,
+    "avg_win_bp": 30.81,
+    "avg_loss_bp": -27.84,
+    "max_dd_usd": -1.179,
+    "ci95_1h_bp": [
+     -4.81,
+     17.04
+    ],
+    "n_eff_clusters_1h": 54,
+    "gave_back_pct": 30.1,
+    "gave_back_of_positive_pct": 34.8,
+    "sharpe_per_trade": 0.1149,
+    "trades_per_day": 39.0,
+    "ci95_2h_bp": [
+     -4.55,
+     15.57
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 10.43,
+     "2026-10-01": 5.04,
+     "2026-10-02": 2.32,
+     "2026-10-03": 1.84
+    },
+    "by_day_n": {
+     "2026-09-30": 32,
+     "2026-10-01": 49,
+     "2026-10-02": 40,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      2.06,
+      41
+     ],
+     "EU": [
+      17.24,
+      49
+     ],
+     "US": [
+      -5.42,
+      43
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      2.4,
+      71
+     ],
+     "SHORT": [
+      8.47,
+      62
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 33,
+     "PROFIT_PROTECTION_FLOOR": 25,
+     "TIME_STOP": 75
+    },
+    "test_days_fixed_rule": {
+     "n": 101,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 3.58,
+     "ev_bp_per_signal": 1.02,
+     "fill_rate_pct": 28.5,
+     "win_rate": 59.4,
+     "net_usd": 0.905,
+     "avg_win_bp": 26.1,
+     "avg_loss_bp": -29.37,
+     "max_dd_usd": -1.179,
+     "ci95_1h_bp": [
+      -7.79,
+      17.39
+     ],
+     "n_eff_clusters_1h": 41,
+     "gave_back_pct": 30.7,
+     "gave_back_of_positive_pct": 34.1,
+     "sharpe_per_trade": 0.0854
+    }
+   },
+   "TAKER_AT_SIGNAL | BASE_TIME_90M_HARD40": {
+    "n": 113,
+    "eligible_signals": 482,
+    "ev_bp_per_fill": 8.72,
+    "ev_bp_per_signal": 2.04,
+    "fill_rate_pct": 23.4,
+    "win_rate": 50.4,
+    "net_usd": 2.464,
+    "avg_win_bp": 44.61,
+    "avg_loss_bp": -27.81,
+    "max_dd_usd": -1.258,
+    "ci95_1h_bp": [
+     -4.7,
+     25.12
+    ],
+    "n_eff_clusters_1h": 49,
+    "gave_back_pct": 34.5,
+    "gave_back_of_positive_pct": 40.6,
+    "sharpe_per_trade": 0.1689,
+    "trades_per_day": 33.2,
+    "ci95_2h_bp": [
+     -4.26,
+     22.46
+    ],
+    "by_day_ev_bp": {
+     "2026-09-30": 17.68,
+     "2026-10-01": 12.92,
+     "2026-10-02": -0.72,
+     "2026-10-03": 0.51
+    },
+    "by_day_n": {
+     "2026-09-30": 29,
+     "2026-10-01": 38,
+     "2026-10-02": 34,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      8.63,
+      37
+     ],
+     "EU": [
+      21.32,
+      40
+     ],
+     "US": [
+      -5.19,
+      36
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      3.92,
+      63
+     ],
+     "SHORT": [
+      14.77,
+      50
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 31,
+     "TIME_STOP": 82
+    },
+    "test_days_fixed_rule": {
+     "n": 84,
+     "eligible_signals": 355,
+     "ev_bp_per_fill": 5.63,
+     "ev_bp_per_signal": 1.33,
+     "fill_rate_pct": 23.7,
+     "win_rate": 52.4,
+     "net_usd": 1.182,
+     "avg_win_bp": 36.84,
+     "avg_loss_bp": -28.7,
+     "max_dd_usd": -1.258,
+     "ci95_1h_bp": [
+      -8.12,
+      22.06
+     ],
+     "n_eff_clusters_1h": 37,
+     "gave_back_pct": 36.9,
+     "gave_back_of_positive_pct": 41.3,
+     "sharpe_per_trade": 0.1258
+    }
+   }
+  },
+  "nested_joint": {
+   "days": [
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03"
+   ],
+   "folds": [
+    {
+     "test_day": "2026-10-01",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "DANISH_NO_EARLY_STOP",
+     "train_bp_per_signal": 2.629,
+     "session_gate": null,
+     "test_n": 49,
+     "test_ev_bp_per_fill": 5.04,
+     "base_test_n": 47,
+     "base_test_ev_bp_per_fill": 8.04
+    },
+    {
+     "test_day": "2026-10-02",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "BASE_TIME_90M_HARD40",
+     "train_bp_per_signal": 3.774,
+     "session_gate": null,
+     "test_n": 34,
+     "test_ev_bp_per_fill": -0.72,
+     "base_test_n": 51,
+     "base_test_ev_bp_per_fill": -0.97
+    },
+    {
+     "test_day": "2026-10-03",
+     "selected_entry": "TAKER_AT_SIGNAL",
+     "selected_exit": "BASE_TIME_90M_HARD40",
+     "train_bp_per_signal": 2.191,
+     "session_gate": null,
+     "test_n": 12,
+     "test_ev_bp_per_fill": 0.51,
+     "base_test_n": 12,
+     "base_test_ev_bp_per_fill": 0.7
+    }
+   ],
+   "nested_oos": {
+    "n": 95,
+    "eligible_signals": 355,
+    "ev_bp_per_fill": 2.41,
+    "ev_bp_per_signal": 0.64,
+    "fill_rate_pct": 26.8,
+    "win_rate": 54.7,
+    "net_usd": 0.572,
+    "avg_win_bp": 28.73,
+    "avg_loss_bp": -29.42,
+    "max_dd_usd": -1.23,
+    "ci95_1h_bp": [
+     -10.26,
+     18.26
+    ],
+    "n_eff_clusters_1h": 38,
+    "gave_back_pct": 34.7,
+    "gave_back_of_positive_pct": 38.8,
+    "sharpe_per_trade": 0.0577,
+    "ci95_2h_bp": [
+     -9.81,
+     16.15
+    ],
+    "by_day_ev_bp": {
+     "2026-10-01": 5.04,
+     "2026-10-02": -0.72,
+     "2026-10-03": 0.51
+    },
+    "by_day_n": {
+     "2026-10-01": 49,
+     "2026-10-02": 34,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      6.15,
+      28
+     ],
+     "EU": [
+      14.68,
+      30
+     ],
+     "US": [
+      -10.37,
+      37
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      1.42,
+      53
+     ],
+     "SHORT": [
+      3.65,
+      42
+     ]
+    },
+    "maker_fill_share_pct": 0.0,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 26,
+     "PROFIT_PROTECTION_FLOOR": 13,
+     "TIME_STOP": 56
+    }
+   },
+   "base_same_days": {
+    "n": 110,
+    "eligible_signals": 355,
+    "ev_bp_per_fill": 3.06,
+    "ev_bp_per_signal": 0.95,
+    "fill_rate_pct": 31.0,
+    "win_rate": 55.5,
+    "net_usd": 0.841,
+    "avg_win_bp": 23.85,
+    "avg_loss_bp": -22.82,
+    "max_dd_usd": -1.159,
+    "ci95_1h_bp": [
+     -6.27,
+     14.68
+    ],
+    "n_eff_clusters_1h": 40,
+    "gave_back_pct": 29.1,
+    "gave_back_of_positive_pct": 34.4,
+    "sharpe_per_trade": 0.0785,
+    "ci95_2h_bp": [
+     -6.44,
+     15.1
+    ],
+    "by_day_ev_bp": {
+     "2026-10-01": 8.04,
+     "2026-10-02": -0.97,
+     "2026-10-03": 0.7
+    },
+    "by_day_n": {
+     "2026-10-01": 47,
+     "2026-10-02": 51,
+     "2026-10-03": 12
+    },
+    "by_session_ev_bp": {
+     "ASIA": [
+      12.67,
+      32
+     ],
+     "EU": [
+      9.18,
+      38
+     ],
+     "US": [
+      -10.44,
+      40
+     ]
+    },
+    "by_side_ev_bp": {
+     "LONG": [
+      -0.67,
+      60
+     ],
+     "SHORT": [
+      7.54,
+      50
+     ]
+    },
+    "maker_fill_share_pct": 24.5,
+    "maker_markout_60s_bp": null,
+    "exit_reasons": {
+     "PHYSICAL_HARD_STOP": 18,
+     "PROFIT_PROTECTION_FLOOR": 29,
+     "THESIS_FAST_CUT": 15,
+     "TIME_STOP": 48
+    }
+   },
+   "designs_tried": 9,
+   "deflation": {
+    "expected_max_sharpe_under_null": 0.0375,
+    "deflated_sharpe_prob": 0.5489
+   }
+  },
+  "early_stop_cost_benefit": {
+   "DANISH_A_EARLY_STOP": {
+    "cut_trades": 57,
+    "would_have_recovered": 28,
+    "losses_saved": 29,
+    "cost_bp_total": 821.4,
+    "benefit_bp_total": 876.9,
+    "net_bp_total": 55.5
+   }
+  }
+ }
+}

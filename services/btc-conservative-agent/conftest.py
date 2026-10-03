@@ -9,6 +9,10 @@ import pytest
 # Tests that need them set them explicitly.
 for _name in ("BTC_AGENT_DATA_DIR", "BTC_AGENT_REPORT_DIR"):
     os.environ.pop(_name, None)
+# Submit-first pre-entry evidence is applied by a background worker against the
+# process cwd; suites that chdir into temp dirs keep the synchronous path unless
+# a test enables it (bot.PREENTRY_EVIDENCE_DEFERRAL_ENABLED) and drains it.
+os.environ.setdefault("PREENTRY_EVIDENCE_DEFERRAL", "0")
 
 _SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 # cwd-relative runtime state that cwd-fallback readers (bot, accumulator,

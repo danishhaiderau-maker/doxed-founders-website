@@ -94,8 +94,8 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
         text=True,
     )
     assert result.stdout.splitlines() == [
-        "v31-retire-trend-fade-v8",
-        "f164b9a64bc8b861b6900aa11e350223eaa8007ce1f521a94f24116fdef58cf2",
+        "v31-danish-tiles-late-protection-v11",
+        "55c1c899aa315d3d3849f10a558d31da03a5df1e781e6c003ac27191a56c63ef",
     ]
 
 

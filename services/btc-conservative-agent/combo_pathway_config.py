@@ -104,12 +104,20 @@ def resolve_score_led_paper_admission(
     return result
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
-RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S = "FAMILY_XVENUE_LEAD_60S"
-RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S = "FAMILY_XVENUE_PREMIUM_60S"
 RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL = "FAMILY_CONTINUOUS_AUG_ORIGINAL"
+RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90 = "FAMILY_COMMITTED_FADE_MAKER_90"
+COMMITTED_FADE_MAKER_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_MAKER_V1"
+RESEARCH_LANE_FAMILY_NOTRADE_FOLLOW_MAKER_60 = "FAMILY_NOTRADE_FOLLOW_MAKER_60"
+RESEARCH_LANE_FAMILY_XVENUE_SESSION_FOLLOW_60M = "FAMILY_XVENUE_SESSION_FOLLOW_60M"
+RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90 = "FAMILY_COMMITTED_FADE_TAKER_90"
+RESEARCH_LANE_FAMILY_DANISH_CF = "FAMILY_DANISH_CF"
+RESEARCH_LANE_FAMILY_DANISH_CF_NOES = "FAMILY_DANISH_CF_NOES"
+RESEARCH_LANE_FAMILY_DANISH_CF_ALL_SESSIONS = "FAMILY_DANISH_CF_ALL_SESSIONS"
+DANISH_CF_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_CONFIRM_MARKET_V1"
+NOTRADE_FOLLOW_MAKER_ADMISSION_POLICY_ID = "SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_MAKER_CHASE_V1"
+XVENUE_SESSION_FOLLOW_ADMISSION_POLICY_ID = "CROSS_VENUE_LEAD_OR_PREMIUM_SESSION_MAP_NO_AI_V1"
+COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_TAKER_V1"
 CONTINUOUS_AUG_ADMISSION_POLICY_ID = "OWN_AI_CALL_AUG_V3_HIGHER_SCORE_GAP5_V1"
-CROSS_VENUE_LEAD_ADMISSION_POLICY_ID = "CROSS_VENUE_LEAD_NO_AI_V1"
-CROSS_VENUE_PREMIUM_ADMISSION_POLICY_ID = "CROSS_VENUE_PREMIUM_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -137,10 +145,17 @@ TILE_COMPONENT_SURFACES = (
 )
 TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
+# Display order; every user-facing "Tile N" number is derived from it
+# (tile_number), never hard-coded.
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S,
-    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
+    RESEARCH_LANE_FAMILY_DANISH_CF,
+    RESEARCH_LANE_FAMILY_DANISH_CF_NOES,
+    RESEARCH_LANE_FAMILY_DANISH_CF_ALL_SESSIONS,
     RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL,
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90,
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
+    RESEARCH_LANE_FAMILY_NOTRADE_FOLLOW_MAKER_60,
+    RESEARCH_LANE_FAMILY_XVENUE_SESSION_FOLLOW_60M,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -163,6 +178,16 @@ def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def tile_lane_for_trade_id(trade_id) -> str | None:
+    """Active tile whose registry ``id_prefix`` starts this paper trade id, else None."""
+    text = str(trade_id or "")
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        prefix = str(spec.get("id_prefix") or "")
+        if prefix and (text.startswith(prefix + "-") or text.startswith(prefix + "_")):
+            return lane
+    return None
+
+
 # Each tile owns its own concurrent pending+open+awaiting capacity. One shared
 # three-minute AI call places at most one order per tile, and an order can rest
 # for entry_ttl_sec (1800s), so a tile needs ~10 slots to never refuse a cycle.
@@ -181,7 +206,11 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           pre_registration: dict | None = None,
           admission_treatment: str | None = None,
           default_enabled: bool = False,
-          signal_clock: str | None = None) -> dict:
+          signal_clock: str | None = None,
+          signal_summary: str = "",
+          live_exit_order: tuple[str, ...] = (),
+          shadow_exits: tuple[str, ...] = (),
+          early_cut_shadow_reason: str | None = None) -> dict:
     # Score-led admission only describes tiles triggered by the shared AI call.
     if SCORE_LED_PAPER_RESEARCH_ENABLED and signal_clock is None:
         raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
@@ -237,6 +266,12 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "promotion_criteria": "Conservative chronological OOS, bounded drawdown, cross-world parity and every live gate GREEN",
         "kill_criteria": "Stop new entries on identity, fill, lifecycle, protection, mirror, analyzer or dashboard contradiction",
         "research_question": f"Does {raw_policy_id} retain positive conservative OOS EV with bounded drawdown?",
+        # Card metadata (outside the policy signature): plain-English signal,
+        # live exit rules in first-trigger-wins order, and shadow-only exits.
+        "signal_summary": signal_summary,
+        "live_exit_order": tuple(live_exit_order),
+        "shadow_exits": tuple(shadow_exits),
+        "early_cut_shadow_reason": early_cut_shadow_reason,
     }
     if pre_registration:
         tile["pre_registration"] = pre_registration
@@ -259,12 +294,145 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     return tile
 
 
-RESEARCH_STACK_VERSION = "v31-retire-trend-fade-v8"
-# Cross-venue lead was registered in the v5 cohort and continues unchanged.
-XVENUE_LEAD_POLICY_EPOCH = "v31-trend-fade-single-tile-v5"
-# Cross-venue premium was registered in v6 and continues unchanged through the
-# v7 Continuous addition and the v8 Trend Fade retirement.
-XVENUE_PREMIUM_POLICY_EPOCH = "v31-committed-fade-premium-v6"
+RESEARCH_STACK_VERSION = "v31-danish-tiles-late-protection-v11"
+
+# Shadow-only exits: evaluated on every filled trade's path by the shadow-exit
+# recorder and never executed. Units follow research/genome_grid_study.py
+# (bp of price == margin % at 100x); each spec runs with the tile's own time
+# backstop and its 40 bp hard stop unless it overrides the hard stop.
+SHADOW_EXIT_SCHEMA = "tile_shadow_exit_set_v1"
+SHADOW_EXIT_SET = {
+    "LATE_BE_20_5": {"family": "LATE_BREAKEVEN", "be_arm_bp": 20.0, "be_floor_bp": 5.0,
+                     "label": "Break-even armed at +20 bp, stop to +5 bp"},
+    "LATE_BE_25_3": {"family": "LATE_BREAKEVEN", "be_arm_bp": 25.0, "be_floor_bp": 3.0,
+                     "label": "Break-even armed at +25 bp, stop to +3 bp"},
+    "LATE_BE_30_5": {"family": "LATE_BREAKEVEN", "be_arm_bp": 30.0, "be_floor_bp": 5.0,
+                     "label": "Break-even armed at +30 bp, stop to +5 bp"},
+    "LATE_TRAIL_1.5ATR_ARM2ATR": {"family": "LATE_ATR_TRAIL", "trail_k": 1.5, "trail_arm_atr": 2.0,
+                                  "label": "ATR trail 1.5 ATR behind the peak, armed after +2.0 ATR"},
+    "LATE_TRAIL_2ATR_ARM2ATR": {"family": "LATE_ATR_TRAIL", "trail_k": 2.0, "trail_arm_atr": 2.0,
+                                "label": "ATR trail 2.0 ATR behind the peak, armed after +2.0 ATR"},
+    "LATE_GIVEBACK_KEEP50_ARM20": {"family": "LATE_GIVEBACK", "gb_keep": 0.5, "gb_arm_bp": 20.0,
+                                   "label": "Give-back stop keeping 50% of the peak, armed after +20 bp"},
+    "LATE_LADDER_20_5_30_15_45_30": {"family": "LATE_LADDER", "ladder": ((20.0, 5.0), (30.0, 15.0), (45.0, 30.0)),
+                                     "label": "Profit-lock ladder +20→+5, +30→+15, +45→+30 bp"},
+    "COND_CUT_12_5M_MFE2": {"family": "CONDITIONAL_EARLY_CUT", "thesis_bp": -12.0, "thesis_sec": 300,
+                            "thesis_max_mfe": 2.0,
+                            "label": "Early cut at −12 bp within 5 min, only if the trade never ran past +2 bp"},
+    "COND_CUT_10_3M_MFE2": {"family": "CONDITIONAL_EARLY_CUT", "thesis_bp": -10.0, "thesis_sec": 180,
+                            "thesis_max_mfe": 2.0,
+                            "label": "Early cut at −10 bp within 3 min, only if the trade never ran past +2 bp"},
+    "ATR_STOP_1.5": {"family": "ATR_STOP", "atr_stop_k": 1.5, "label": "Protective stop 1.5 ATR below entry"},
+    "ATR_HARD_STOP_3ATR_25_60": {"family": "ATR_HARD_STOP", "hard_atr_k": 3.0, "hard_clamp_bp": (25.0, 60.0),
+                                 "label": "Hard stop 3 ATR, clamped to 25-60 bp (replaces the 40 bp stop in shadow)"},
+    "COMPOSITE_LATE_BE20_5_TRAIL1.5_ARM2": {
+        "family": "LATE_COMPOSITE", "be_arm_bp": 20.0, "be_floor_bp": 5.0, "trail_k": 1.5, "trail_arm_atr": 2.0,
+        "label": "Composite: break-even +20→+5 bp and ATR trail 1.5 armed at +2.0 ATR"},
+}
+ALL_SHADOW_EXITS = tuple(SHADOW_EXIT_SET)
+
+
+def _shadow_exits_except(*live: str) -> tuple[str, ...]:
+    return tuple(x for x in ALL_SHADOW_EXITS if x not in live)
+
+
+# Shadow-exit recorder view of SHADOW_EXIT_SET (shadow_exit_paths.py kinds).
+# Every tile replays the whole catalog under its own time backstop and hard
+# stop; ids the tile lists in ``shadow_exits`` are its card's shadow-only exits
+# (role CARD_SHADOW), the rest are CATALOG comparisons. Observation only: none
+# of this reaches execution or the policy signature.
+SHADOW_EXIT_FAMILY_KINDS = {
+    "LATE_BREAKEVEN": "LATE_BREAKEVEN", "LATE_ATR_TRAIL": "LATE_ATR_TRAIL",
+    "LATE_GIVEBACK": "GIVEBACK", "LATE_LADDER": "LADDER",
+    "CONDITIONAL_EARLY_CUT": "CONDITIONAL_EARLY_CUT", "ATR_STOP": "ATR_HARD_STOP",
+    "ATR_HARD_STOP": "ATR_HARD_STOP", "LATE_COMPOSITE": "COMPOSITE",
+}
+SHADOW_EXIT_KINDS = frozenset({*SHADOW_EXIT_FAMILY_KINDS.values(), "HOLD"})
+SHADOW_EXIT_DEFAULT_HARD_STOP_BP = 40.0
+SHADOW_EXIT_DEFAULT_BACKSTOP_SEC = 7200
+
+
+def _shadow_exit_guard(lane=None) -> dict:
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    exit_policy = spec.get("exit_policy") or {}
+    stop = exit_policy.get("hard_stop_bps", exit_policy.get("hard_stop_margin_pct", SHADOW_EXIT_DEFAULT_HARD_STOP_BP))
+    backstop = exit_policy.get("max_duration_sec", SHADOW_EXIT_DEFAULT_BACKSTOP_SEC)
+    return {"hard_stop_bp": float(stop), "backstop_sec": int(backstop)}
+
+
+def _shadow_exit_recorder_specs(key: str, item: dict, guard: dict, role: str) -> list[dict]:
+    family = item.get("family")
+    base = {"label": item.get("label") or key, "role": role}
+    if family == "LATE_BREAKEVEN":
+        body = {"kind": "LATE_BREAKEVEN", "arm_bp": item["be_arm_bp"], "floor_bp": item["be_floor_bp"]}
+    elif family == "LATE_ATR_TRAIL":
+        body = {"kind": "LATE_ATR_TRAIL", "arm_atr": item["trail_arm_atr"], "trail_atr": item["trail_k"]}
+    elif family == "LATE_GIVEBACK":
+        body = {"kind": "GIVEBACK", "arm_bp": item["gb_arm_bp"], "giveback_frac": round(1.0 - item["gb_keep"], 6)}
+    elif family == "LATE_LADDER":
+        body = {"kind": "LADDER", "rungs_bp": tuple(tuple(r) for r in item["ladder"])}
+    elif family == "CONDITIONAL_EARLY_CUT":
+        body = {"kind": "CONDITIONAL_EARLY_CUT", "cut_bp": item["thesis_bp"], "within_sec": item["thesis_sec"],
+                "max_mfe_bp": item["thesis_max_mfe"]}
+    elif family == "ATR_STOP":
+        body = {"kind": "ATR_HARD_STOP", "stop_atr": item["atr_stop_k"]}
+    elif family == "ATR_HARD_STOP":
+        return [{"id": key, **base, "kind": "ATR_HARD_STOP", "stop_atr": item["hard_atr_k"],
+                 "clamp_bp": tuple(item["hard_clamp_bp"]), "backstop_sec": guard["backstop_sec"]}]
+    elif family == "LATE_COMPOSITE":
+        be, trail = f"{key}:be", f"{key}:trail"
+        return [
+            {"id": be, **base, "role": "COMPOSITE_MEMBER", "kind": "LATE_BREAKEVEN",
+             "arm_bp": item["be_arm_bp"], "floor_bp": item["be_floor_bp"], **guard},
+            {"id": trail, **base, "role": "COMPOSITE_MEMBER", "kind": "LATE_ATR_TRAIL",
+             "arm_atr": item["trail_arm_atr"], "trail_atr": item["trail_k"], **guard},
+            {"id": key, **base, "kind": "COMPOSITE", "members": (be, trail)},
+        ]
+    else:
+        raise ValueError(f"UNSUPPORTED_SHADOW_EXIT_FAMILY:{key}:{family}")
+    return [{"id": key, **base, **body, **guard}]
+
+
+def tile_shadow_exit_set(lane=None) -> tuple:
+    """Recorder specs for a tile (or the defaults for any non-tile signal lane), from SHADOW_EXIT_SET."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    card = set(spec.get("shadow_exits") or ())
+    guard = _shadow_exit_guard(lane)
+    out = []
+    for key, item in SHADOW_EXIT_SET.items():
+        out.extend(_shadow_exit_recorder_specs(key, item, guard, "CARD_SHADOW" if key in card else "CATALOG"))
+    out.append({"id": "tile_stop_backstop_only", "label": "Only the hard stop and time backstop",
+                "role": "REFERENCE", "kind": "HOLD", **guard})
+    out.append({"id": "hold_to_horizon", "label": "Hold to the time backstop (no stop)", "role": "REFERENCE",
+                "kind": "HOLD", "backstop_sec": guard["backstop_sec"]})
+    return tuple(out)
+
+
+
+
+# Exit rule ids for the card and the first-trigger-wins order the runtime's
+# family_policy_common.exit_action evaluates.
+LIVE_EXIT_RULES = frozenset({
+    "HARD_STOP", "BREAKEVEN_LOCK", "ATR_TRAIL", "EARLY_CUT", "TIME_EXIT",
+    # Continuous (Aug-2026 replica) rules, evaluated by its own policy module.
+    "EARLY_FAIL", "STOP_LOSS", "PROFIT_LOCK_LADDER", "THESIS_FAST_CUT", "THESIS_INVALIDATED", "PEAK_FLOOR",
+})
+RISK_EXIT_RULES = frozenset({"HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS", "THESIS_FAST_CUT"})
+
+
+def registry_live_exit_order(exit_policy: dict) -> tuple[str, ...]:
+    """First-trigger-wins order of family_policy_common.exit_action for a registry exit policy."""
+    order = ["HARD_STOP"]
+    if exit_policy.get("breakeven"):
+        order.append("BREAKEVEN_LOCK")
+    if exit_policy.get("trail"):
+        order.append("ATR_TRAIL")
+    if exit_policy.get("early_cut"):
+        order.append("EARLY_CUT")
+    order.append("TIME_EXIT")
+    return tuple(order)
+
+
 # Shared-call commit telemetry (decision snapshots): explicit side matching the
 # score-led side with at least this score gap.
 AI_COMMIT_MIN_SCORE_GAP = 30.0
@@ -279,7 +447,7 @@ AI_PROMPT_INPUT_REVISION_HISTORY = (
 )
 
 
-# Tile 5 = exact replica of the early-August 2026 Continuous (d018ef31, before
+# Continuous = exact replica of the early-August 2026 Continuous (d018ef31, before
 # the NO_TRADE prompt 636fa9ca4/f0620b33b, #136 demotion and #233 retirement).
 # It makes its own DeepSeek call with the verbatim v3 prompt after every
 # shared three-minute call; see paper_policy_family_continuous_aug_original.py.
@@ -323,8 +491,14 @@ _CONTINUOUS_AUG_EXIT = {
     "exit_order": ("EARLY_FAIL", "STOP_LOSS", "PROFIT_LOCK_LADDER",
                    "THESIS_FAST_CUT", "THESIS_INVALIDATED", "TIME_EXIT"),
 }
-# Registered in v7; pinned so the v8 retirement does not split its cohort.
+# Registered in v7; pinned so the v8 retirement, the v9 committed-fade maker
+# addition and the v10 hypothesis tiles do not split its cohort.
 CONTINUOUS_AUG_POLICY_EPOCH = "v31-continuous-aug-original-v7"
+# Registered in v9; pinned so later additions do not split its cohort.
+COMMITTED_FADE_MAKER_POLICY_EPOCH = "v31-committed-fade-maker-v9"
+# H9-H11 and the Danish tiles were never deployed before v11; they register
+# together in this release.
+HYPOTHESIS_TILES_POLICY_EPOCH = RESEARCH_STACK_VERSION
 CONTINUOUS_AUG_CARD_TEXT = "Exact replica of Aug-2026 Continuous (realistic fills; August touch-fill shadow alongside)"
 
 
@@ -353,6 +527,11 @@ def _continuous_aug_original_tile() -> dict:
         subtitle="BASELINE BENCHMARK — " + CONTINUOUS_AUG_CARD_TEXT + " — PAPER ONLY — RELAY INELIGIBLE",
         policy_epoch=CONTINUOUS_AUG_POLICY_EPOCH,
         default_enabled=True,
+        signal_summary=("own DeepSeek call with the verbatim August v3 prompt after every shared three-minute call; "
+                        "trades the higher score's side"),
+        live_exit_order=tuple(_CONTINUOUS_AUG_EXIT["exit_order"]),
+        shadow_exits=(),
+        early_cut_shadow_reason=None,
     )
     tile.update({
         "baseline_role": "BASELINE_BENCHMARK",
@@ -367,223 +546,597 @@ def _continuous_aug_original_tile() -> dict:
     return tile
 
 
-def _xvenue_premium_pre_registration(hypothesis_id: str) -> dict:
-    """INDICATOR-SEARCH-MODEL-A S1 (premium arm, 60 s only); post-registration trades only."""
+def _committed_fade_maker_pre_registration(hypothesis_id: str) -> dict:
+    """PROFIT-TILE-DESIGN-20261003; verdicts use post-registration REALISTIC_V1 paper trades only."""
     pre = {
-        "schema": "tile_pre_registration_xvp_v1",
+        "schema": "tile_pre_registration_committed_fade_maker_v1",
         "hypothesis_id": hypothesis_id,
-        "registered_utc": "2026-10-02T07:00:00Z",
-        "registered_cohort": XVENUE_PREMIUM_POLICY_EPOCH,
+        "registered_utc": "2026-10-03T00:00:00Z",
+        "registered_cohort": COMMITTED_FADE_MAKER_POLICY_EPOCH,
         "control_lane": None,
-        "control_meaning": "No AI control: the trigger is the cross-venue premium deviation; Tile 3 is the sibling cross-venue rule",
-        "evidence_world": "CONSERVATIVE_BBO",
+        "control_meaning": ("No live control lane: the analyzer's REALISTIC_V1 counterfactual of the same committed "
+                            "calls (taker 60-min fade and the unfaded side) is the comparison; Continuous is the baseline"),
+        "evidence_world": "REALISTIC_V1",
         "ci_method": "1H_CLUSTER_BOOTSTRAP_95",
-        "honest_label": "HINT — 8h holdout: 1 m 78% hit, +2.0 bp/trade [+0.7,+3.2], 115 independent; thresholds fixed on dev",
+        "variants_tried": 3416,
+        "honest_label": ("HINT — fails the pre-set bar: 3 days, in-sample +9.5 bp/trade (1 h-cluster CI [-13,+37]), "
+                         "day-fold walk-forward +5.0 bp [-15,+30], deflated Sharpe ~0 after 3,416 variants, "
+                         "edge shrank daily, 4 h unseen window negative"),
         "promotion": {
             "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
-            "min_fills": 500, "min_utc_days": 7,
+            "min_fills": 150, "min_utc_days": 7,
             "min_sessions_each": 3, "sessions": ("ASIA", "EU", "US"),
             "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_sides_mean_ge_bp": 0.0,
+            "both_halves_positive": True,
             "shadow_5s_delay_mean_gt_bp": 0.0,
             "max_single_day_profit_share": 0.30,
-            "both_sides_mean_ge_bp": 0.0,
             "max_replay_parity_gap_bp": 1.0,
-            "max_median_signal_to_fill_sec": 2.0,
         },
         "kill": {
-            "k1_after_fills": 300, "k1_mean_bp_at_or_below": 0.0,
-            "k2_after_fills": 300, "k2_shadow_5s_delay_mean_below_bp": -0.5,
-            "k3_worst_trade_bp_below": -45.0, "k3_max_stale_feed_fill_share": 0.01,
-            "k4_max_drawdown_usd": 0.50,
-            "k5_max_days_without_promotion": 14,
+            "k1_after_fills": 80, "k1_mean_bp_at_or_below": 0.0,
+            "k2_after_fills": 150, "k2_upper_ci95_lt_bp": 2.0,
+            "k3_worst_trade_bp_below": -60.0, "k3_max_stale_feed_fill_share": 0.01,
+            "k4_max_drawdown_usd": 1.0,
+            "k5_max_days_without_promotion": 21,
             "k6_defect_action": "PAUSE_AND_QUARANTINE_NOT_A_STRATEGY_VERDICT",
         },
     }
     promote, kill = pre["promotion"], pre["kill"]
     pre["promotion_summary"] = (
         f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades over >={promote['min_utc_days']} UTC days "
-        f"incl. >={promote['min_sessions_each']} each of Asia/EU/US sessions; per-trade EV 1 h-cluster lower 95% CI >0; "
-        f"5 s-delay shadow mean >0; no day >{promote['max_single_day_profit_share']:.0%} of profit; both sides >=0; "
-        f"replay parity <={promote['max_replay_parity_gap_bp']:g} bp, median signal->fill "
-        f"<={promote['max_median_signal_to_fill_sec']:g} s; promotion = owner review, never relay"
-    )
-    pre["kill_summary"] = (
-        f"K1 mean <={kill['k1_mean_bp_at_or_below']:g} bp after {kill['k1_after_fills']} trades; "
-        f"K2 5 s-delay shadow mean <{kill['k2_shadow_5s_delay_mean_below_bp']:g} bp after {kill['k2_after_fills']}; "
-        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp or >{kill['k3_max_stale_feed_fill_share']:.0%} "
-        f"of trades on a stale feed; K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
-        f"K5 day {kill['k5_max_days_without_promotion']} without promotion = INCONCLUSIVE; "
-        "K6 lifecycle/identity/analyzer/feed/mirror defect = pause and quarantine"
-    )
-    return pre
-
-
-def _xvenue_lead_pre_registration(hypothesis_id: str) -> dict:
-    """NEXT-TILE-RESEARCH-20261002 rules; verdicts use post-registration trades only."""
-    pre = {
-        "schema": "tile_pre_registration_xvl_v1",
-        "hypothesis_id": hypothesis_id,
-        "registered_utc": "2026-10-01T21:30:00Z",
-        "registered_cohort": XVENUE_LEAD_POLICY_EPOCH,
-        "control_lane": None,
-        "control_meaning": "No AI control: the trigger is the cross-venue lead, not a shared AI call",
-        "evidence_world": "CONSERVATIVE_BBO",
-        "ci_method": "1H_CLUSTER_BOOTSTRAP_95",
-        "honest_label": "HINT — 12h evidence: 160 trades, 65% wins, +2.43 bp after spread, OOS half +2.53 bp",
-        "promotion": {
-            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
-            "min_fills": 1000, "min_utc_days": 5,
-            "min_asia_sessions": 3, "min_asia_session_fills": 50,
-            "asia_session_utc_hours": (0, 8),
-            "per_fill_ev_lower_ci95_gt_bp": 0.0,
-            "min_positive_days_of_first_5": 4,
-            "both_halves_positive": True,
-            "max_single_hour_profit_share": 0.15,
-            "max_replay_parity_gap_bp": 1.0,
-            "max_median_signal_to_fill_sec": 2.0,
-            "max_stop_overshoot_bp": 10.0,
-        },
-        "kill": {
-            "k1_after_fills": 150, "k1_mean_bp_at_or_below": 0.0,
-            "k2_after_fills": 400, "k2_upper_ci95_lt_bp": 0.5,
-            "k3_worst_trade_bp_below": -45.0, "k3_max_stale_feed_fill_share": 0.01,
-            "k4_max_drawdown_usd": 0.50,
-            "k5_max_days_without_promotion": 10,
-            "k6_defect_action": "PAUSE_AND_QUARANTINE_NOT_A_STRATEGY_VERDICT",
-        },
-    }
-    promote, kill = pre["promotion"], pre["kill"]
-    pre["promotion_summary"] = (
-        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades over >={promote['min_utc_days']} UTC days "
-        f"incl. >={promote['min_asia_sessions']} Asia sessions with >={promote['min_asia_session_fills']} trades; "
-        f"per-trade EV 1 h-cluster lower 95% CI >0; net positive on >={promote['min_positive_days_of_first_5']} of the "
-        f"first 5 days and both halves; no hour >{promote['max_single_hour_profit_share']:.0%} of profit; replay parity "
-        f"<={promote['max_replay_parity_gap_bp']:g} bp, median signal->fill <={promote['max_median_signal_to_fill_sec']:g} s, "
-        f"stops within {promote['max_stop_overshoot_bp']:g} bp; promotion = owner review, never relay"
+        f"incl. >={promote['min_sessions_each']} each of Asia/EU/US sessions; per-trade EV 1 h-cluster lower 95% CI >0 "
+        f"(REALISTIC_V1); both sides and both halves >=0; 5 s-delay shadow mean >0; no day "
+        f">{promote['max_single_day_profit_share']:.0%} of profit; replay parity <={promote['max_replay_parity_gap_bp']:g} bp; "
+        "promotion = owner review, never relay"
     )
     pre["kill_summary"] = (
         f"K1 mean <={kill['k1_mean_bp_at_or_below']:g} bp after {kill['k1_after_fills']} trades; "
         f"K2 1 h-cluster upper 95% CI <+{kill['k2_upper_ci95_lt_bp']:g} bp after {kill['k2_after_fills']} trades; "
-        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp or >{kill['k3_max_stale_feed_fill_share']:.0%} "
-        f"of trades on a stale feed; K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure) or "
+        f">{kill['k3_max_stale_feed_fill_share']:.0%} of trades on a stale feed; K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
         f"K5 day {kill['k5_max_days_without_promotion']} without promotion = INCONCLUSIVE; "
         "K6 lifecycle/identity/analyzer/feed/mirror defect = pause and quarantine"
     )
     return pre
 
 
+# Committed fade (maker) = fade only committed AI calls (explicit LONG/SHORT matching the
+# scores), entered with a passive limit 0.10% beyond the decision-time price
+# that rests 30 minutes without chase, then a 90-minute time exit and a 40 bp
+# catastrophic stop. PROFIT-TILE-DESIGN-20261003 under REALISTIC_V1 fills.
+_COMMITTED_FADE_MAKER_ENTRY = {
+    "mode": "MAKER_LIMIT_OFFSET",
+    "offset_pct": 0.10, "offset_reference": "LAST_PRICE_AT_DECISION",
+    "chase_windows": (), "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "maker_ttl_sec": 1800, "never_cross_touch": True, "marketable_fallback": False,
+    "direction_source": "INVERTED_SCORE_LED_SIDE",
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE",
+                  "SCORE_DIRECTION_MISMATCH", "BBO_STALE"),
+    "trades_raw_ai_no_trade": False, "min_score_gap": None,
+    "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED",
+    "max_bbo_age_sec": 5.0,
+    "ai_decision_role": "FEATURE_ONLY",
+    "fill_model": "REALISTIC_V1",
+}
+_COMMITTED_FADE_MAKER_EXIT = {
+    "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
+    "max_duration_sec": 5400,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+    "max_open_positions": 3,
+}
+
+# HYPOTHESIS-TILES-20261004 sessions: the runtime's own UTC session labels.
+HYPOTHESIS_SESSION_HOURS_UTC = {"ASIA": (0, 8), "EU": (8, 16), "US": (16, 24)}
+
+
+def _hypothesis_pre_registration(hypothesis_id: str, *, honest_label: str, control_meaning: str,
+                                 variants_tried: int, min_fills: int, k1_after_fills: int,
+                                 k2_after_fills: int | None, k4_max_drawdown_usd: float,
+                                 sessions: tuple[str, ...] = ("ASIA", "EU", "US"),
+                                 k5_max_days_without_promotion: int | None = 21,
+                                 decisions: tuple[str, ...] = ()) -> dict:
+    """HYPOTHESIS-TILES-20261004; verdicts use post-registration REALISTIC_V1 paper trades only.
+
+    ``k2_after_fills`` / ``k5_max_days_without_promotion`` of None omit that
+    kill rule (owner-specified tiles carry exactly the owner's kill rules plus
+    the K3 stop/feed and K6 defect safety checks).
+    """
+    pre = {
+        "schema": "tile_pre_registration_hypothesis_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-04T00:00:00Z",
+        "registered_cohort": HYPOTHESIS_TILES_POLICY_EPOCH,
+        "control_lane": None,
+        "control_meaning": control_meaning,
+        "evidence_world": "REALISTIC_V1",
+        "ci_method": "1H_CLUSTER_BOOTSTRAP_95",
+        "variants_tried": variants_tried,
+        "honest_label": honest_label,
+        "pre_registered_decisions": tuple(decisions),
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": min_fills, "min_utc_days": 7,
+            "min_sessions_each": 3, "sessions": tuple(sessions),
+            "session_hours_utc": {s: HYPOTHESIS_SESSION_HOURS_UTC[s] for s in sessions},
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_halves_positive": True,
+            "max_single_day_profit_share": 0.30,
+            "max_replay_parity_gap_bp": 1.0,
+        },
+        "kill": {
+            "k1_after_fills": k1_after_fills, "k1_mean_bp_at_or_below": 0.0,
+            "k2_after_fills": k2_after_fills, "k2_upper_ci95_lt_bp": 2.0,
+            "k3_worst_trade_bp_below": -60.0, "k3_max_stale_feed_fill_share": 0.01,
+            "k4_max_drawdown_usd": k4_max_drawdown_usd,
+            "k5_max_days_without_promotion": k5_max_days_without_promotion,
+            "k6_defect_action": "PAUSE_AND_QUARANTINE_NOT_A_STRATEGY_VERDICT",
+        },
+    }
+    if k2_after_fills is None:
+        pre["kill"]["k2_upper_ci95_lt_bp"] = None
+    promote, kill = pre["promotion"], pre["kill"]
+    session_names = "/".join(s.title() if s != "EU" and s != "US" else s for s in sessions)
+    session_hours = "/".join(f"{lo}-{hi}" for lo, hi in promote["session_hours_utc"].values())
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades over >={promote['min_utc_days']} UTC days "
+        f"incl. >={promote['min_sessions_each']} each of {session_names} sessions (UTC {session_hours}); per-trade EV "
+        "1 h-cluster lower 95% CI >0 (REALISTIC_V1); both halves positive; no day "
+        f">{promote['max_single_day_profit_share']:.0%} of profit; replay parity <={promote['max_replay_parity_gap_bp']:g} bp; "
+        "promotion = owner review, never relay"
+    )
+    parts = [f"K1 mean <={kill['k1_mean_bp_at_or_below']:g} bp after {kill['k1_after_fills']} trades"]
+    if kill["k2_after_fills"] is not None:
+        parts.append(f"K2 1 h-cluster upper 95% CI <+{kill['k2_upper_ci95_lt_bp']:g} bp after {kill['k2_after_fills']} trades")
+    parts.append(f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure) or "
+                 f">{kill['k3_max_stale_feed_fill_share']:.0%} of trades on a stale feed")
+    parts.append(f"K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}")
+    if kill["k5_max_days_without_promotion"] is not None:
+        parts.append(f"K5 day {kill['k5_max_days_without_promotion']} without promotion = INCONCLUSIVE")
+    parts.append("K6 lifecycle/identity/analyzer/feed/mirror defect = pause and quarantine")
+    pre["kill_summary"] = "; ".join(parts)
+    return pre
+
+
+# Late-armed protections adopted by the HYPOTHESIS-TILES-20261004 re-test
+# (nested walk-forward by UTC day, REALISTIC_V1, capped per signal): none was
+# significantly worse than the time exit, so each tile runs them as one
+# composite, first trigger wins (family_policy_common.exit_action order).
+LATE_BREAKEVEN_20_5 = {"trigger_margin_pct": 20.0, "lock_margin_pct": 5.0}
+LATE_ATR_TRAIL_1_5_ARM_2 = {"atr_k": 1.5, "arm_atr_k": 2.0, "atr_source": "FILL_TIME_3M_ATR14"}
+CONDITIONAL_EARLY_CUT_12_5M = {"cut_margin_pct": -12.0, "window_sec": 300, "max_peak_margin_pct": 2.0}
+
+
+def _composite_exit(*, max_duration_sec: int, max_open_positions: int, breakeven: dict | None = None,
+                    trail: dict | None = None, early_cut: dict | None = None,
+                    volatility_scaling: str) -> dict:
+    policy = {
+        "family": "COMPOSITE_FIRST_TRIGGER_WINS",
+        "max_duration_sec": int(max_duration_sec),
+        "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+        "ladder": None, "take_profit": None,
+        "breakeven": dict(breakeven) if breakeven else None,
+        "trail": dict(trail) if trail else None,
+        "early_cut": dict(early_cut) if early_cut else None,
+        "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+        "max_open_positions": int(max_open_positions),
+        "volatility_scaling": volatility_scaling,
+    }
+    policy["exit_order"] = registry_live_exit_order(policy)
+    return policy
+
+
+# H9 = the score-led side of shared calls where the raw AI abstained
+# (NO_TRADE), entered with a 0.15% passive limit chased 25% of the remaining
+# gap every 3 minutes in minutes 10-25 (1 h TTL), then the late-armed
+# composite exit, a 60-minute backstop and a 40 bp catastrophic stop.
+_NOTRADE_FOLLOW_MAKER_ENTRY = {
+    "mode": "MAKER_LIMIT_OFFSET_CHASE",
+    "offset_pct": 0.15, "offset_reference": "LAST_PRICE_AT_DECISION",
+    "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180,
+    "maker_ttl_sec": 3600, "never_cross_touch": True, "marketable_fallback": False,
+    "direction_source": "SCORE_LED_SIDE",
+    "refuse_on": ("RAW_AI_COMMITTED", "SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "BBO_STALE"),
+    "trades_raw_ai_no_trade": True, "trades_only_raw_ai_no_trade": True, "min_score_gap": None,
+    "max_bbo_age_sec": 5.0,
+    "ai_decision_role": "ABSTENTION_GATE_SIDE_FROM_SCORES",
+    "volatility_scaling": "NONE - ATR/vol/ADX-scaled offsets and regime chase tested and rejected nested-OOS",
+    "fill_model": "REALISTIC_V1",
+}
+_NOTRADE_FOLLOW_MAKER_EXIT = _composite_exit(
+    max_duration_sec=3600, max_open_positions=10,
+    breakeven=LATE_BREAKEVEN_20_5, trail=LATE_ATR_TRAIL_1_5_ARM_2,
+    volatility_scaling="ATR trail armed after +2 ATR; the ATR-scaled hard stop stays shadow-only",
+)
+# H10 = this tile's own copy of the generic cross-venue lead and premium rules;
+# either trigger takes the Bitfinex taker in its direction inside the frozen
+# session map; late break-even, 60-minute backstop, 40 bp stop, three open.
+XVENUE_SESSION_MAP_SOURCE = (
+    "research API META_SESSION XVENUE cell at generation 4a3290296f55@2026-10-03T15:06:11Z: "
+    "ASIA/EU/US all FOLLOW|TAKER_AT_SIGNAL|XV_TIME_3600_HARD40BP (train EV +0.20/+0.63/+3.75 bp)"
+)
+_XVENUE_SESSION_FOLLOW_ENTRY = {
+    "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "direction_source": "CROSS_VENUE_LEAD_OR_PREMIUM",
+    "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
+    "leader_venues": ("binance", "bybit"),
+    "lookback_sec": 10, "lead_threshold_bps": 8.0,
+    "premium_mean_window_sec": 3600, "premium_min_mean_samples": 1200,
+    "premium_long_threshold_bps": 1.75, "premium_short_threshold_bps": -1.88,
+    "max_fill_forward_sec": 5,
+    "opposite_triggers": "CONFLICT_NO_TRADE",
+    "allowed_sessions": ("ASIA", "EU", "US"),
+    "session_hours_utc": HYPOTHESIS_SESSION_HOURS_UTC,
+    "session_map_source": XVENUE_SESSION_MAP_SOURCE,
+    "max_venue_age_sec": 2.0, "max_bbo_age_sec": 2.0, "max_spread_bps": 3.0,
+    "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
+    "shadow_entry_delay_sec": 1,
+    "min_submit_interval_sec": 5, "max_submissions_per_hour": 60,
+    "ai_decision_role": "NONE",
+    "volatility_scaling": "NONE - taker at the trigger",
+}
+_XVENUE_SESSION_FOLLOW_EXIT = _composite_exit(
+    max_duration_sec=3600, max_open_positions=3, breakeven=LATE_BREAKEVEN_20_5,
+    volatility_scaling="NONE - the late ATR trail was significantly worse capped per signal",
+)
+# H11 = the committed-fade side of the maker tile entered as a taker at the
+# signal inside Asia+EU (pre-registered session rule), late-armed composite,
+# conditional early cut, 90-minute backstop, 40 bp stop.
+_COMMITTED_FADE_TAKER_ENTRY = {
+    "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "direction_source": "INVERTED_SCORE_LED_SIDE",
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE",
+                  "SCORE_DIRECTION_MISMATCH", "BBO_STALE", "SPREAD_ABOVE_MAX", "SESSION_GATED"),
+    "trades_raw_ai_no_trade": False, "min_score_gap": None,
+    "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED",
+    "allowed_sessions": ("ASIA", "EU"),
+    "session_hours_utc": HYPOTHESIS_SESSION_HOURS_UTC,
+    "max_bbo_age_sec": 5.0, "max_spread_bps": 3.0,
+    "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
+    "ai_decision_role": "FEATURE_ONLY",
+    "volatility_scaling": "NONE - ATR-scaled maker offsets tied with taker; taker is the simpler rule",
+    "fill_model": "REALISTIC_V1",
+}
+_COMMITTED_FADE_TAKER_EXIT = _composite_exit(
+    max_duration_sec=5400, max_open_positions=3,
+    breakeven=LATE_BREAKEVEN_20_5, trail=LATE_ATR_TRAIL_1_5_ARM_2, early_cut=CONDITIONAL_EARLY_CUT_12_5M,
+    volatility_scaling="ATR trail armed after +2 ATR; the ATR-scaled hard stop stays shadow-only",
+)
+# Danish "Confirmed Fade" (owner spec 2026-10-04): fade committed AI calls with
+# a resting limit 0.10% better than the signal; if price moves 3 bp our way
+# before it fills, cancel and take the market within a 5 bp cap (skip when the
+# cap is exceeded); unfilled after 30 minutes the signal is dropped.
+DANISH_SESSIONS_ASIA_EU = ("ASIA", "EU")
+DANISH_SESSIONS_ALL = ("ASIA", "EU", "US")
+
+
+def _danish_entry(sessions: tuple[str, ...]) -> dict:
+    return {
+        "mode": "MAKER_LIMIT_OFFSET_CONFIRM_MARKET",
+        "offset_pct": 0.10, "offset_reference": "LAST_PRICE_AT_DECISION",
+        "chase_windows": (), "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+        "maker_ttl_sec": 1800, "never_cross_touch": True, "marketable_fallback": False,
+        "confirm_move_bps": 3.0, "confirm_market_cap_bps": 5.0, "confirm_taker_ttl_sec": 3,
+        "direction_source": "INVERTED_SCORE_LED_SIDE",
+        "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE",
+                      "SCORE_DIRECTION_MISMATCH", "BBO_STALE", "SPREAD_ABOVE_MAX", "SESSION_GATED",
+                      "CONFIRM_CAP_EXCEEDED"),
+        "trades_raw_ai_no_trade": False, "min_score_gap": None,
+        "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED",
+        "allowed_sessions": tuple(sessions),
+        "session_hours_utc": HYPOTHESIS_SESSION_HOURS_UTC,
+        "max_bbo_age_sec": 5.0, "max_spread_bps": 3.0,
+        "ai_decision_role": "FEATURE_ONLY",
+        "volatility_scaling": "NONE",
+        "fill_model": "REALISTIC_V1",
+    }
+
+
+def _danish_exit(*, early_cut: bool) -> dict:
+    return _composite_exit(
+        max_duration_sec=5400, max_open_positions=3, breakeven=LATE_BREAKEVEN_20_5,
+        early_cut=CONDITIONAL_EARLY_CUT_12_5M if early_cut else None,
+        volatility_scaling="NONE - owner spec; fixed bp protections",
+    )
+
+
+def _danish_pre_registration(hypothesis_id: str, *, sessions: tuple[str, ...], honest_label: str) -> dict:
+    return _hypothesis_pre_registration(
+        hypothesis_id,
+        honest_label=honest_label,
+        control_meaning=("Committed fade (maker) and (taker) trade the same committed calls and side; paired by "
+                         "shared call. The Danish tiles differ from each other only in the early cut and sessions"),
+        variants_tried=3, min_fills=150, k1_after_fills=80, k2_after_fills=None,
+        k4_max_drawdown_usd=1.0, sessions=sessions, k5_max_days_without_promotion=None,
+        decisions=("kill = mean <= 0 after 80 closes, or drawdown $1.00 (owner rule)",),
+    )
+
 
 COMBO_LANE_SPECS = {
-    # NEXT-TILE-RESEARCH-20261002: when the mean Binance/Bybit 10 s return
-    # leads Bitfinex by >=8 bp, take the Bitfinex taker in their direction
-    # and exit after 60 s. Other venues are price data only; fees are
-    # Bitfinex-only. Triggered by the per-second evaluator, never by the AI.
-    RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S: _tile(
-        lane=RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S,
-        label="Cross-venue lead · follow Binance/Bybit ≥8 bp lead over 10 s, 60-s hold, 40 bp catastrophic stop",
-        raw_policy_id="XVENUE_LEAD_W10S_TH8BP_BOTHFRESH_SPREADLE3BP_TAKER_CAP5BPS|TIME_60_HARD40BP",
-        id_prefix="xvl",
-        module="paper_policy_family_xvenue_lead.py",
-        test_module="test_paper_policy_family_xvenue_lead.py",
-        entry={
-            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
-            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-            "direction_source": "CROSS_VENUE_LEAD",
-            "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
-            "leader_venues": ("binance", "bybit"),
-            "lookback_sec": 10, "lead_threshold_bps": 8.0,
-            "max_venue_age_sec": 2.0, "max_bbo_age_sec": 2.0, "max_spread_bps": 3.0,
-            "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
-            "shadow_entry_delay_sec": 1,
-            "min_submit_interval_sec": 5, "max_submissions_per_hour": 60,
-            "ai_decision_role": "NONE",
-        },
-        exit_policy={
-            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
-            "max_duration_sec": 60,
-            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
-            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
-            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
-            "max_open_positions": 1,
-        },
+    # Owner spec 2026-10-04 (HYPOTHESIS-TILES-20261004 "Danish"): three
+    # variants of one confirmed-fade design differing only in the early cut
+    # and the session gate.
+    RESEARCH_LANE_FAMILY_DANISH_CF: _tile(
+        lane=RESEARCH_LANE_FAMILY_DANISH_CF,
+        label="Danish · confirmed fade of committed AI calls, Asia+EU, 0.10% limit or 3 bp confirm-to-market",
+        raw_policy_id=("DANISH_CONFIRMED_FADE_COMMITTED_ASIA_EU_SPREADLE3BP_MAKER_0.10_CONFIRM3BP_TAKER_CAP5BPS_TTL1800"
+                       "|TIME_5400_BE20TO5_CUT12BP5M_MFE2_HARD40BP_CAP3"),
+        id_prefix="dcf",
+        module="paper_policy_family_danish_cf.py",
+        test_module="test_paper_policy_family_danish_cf.py",
+        entry=_danish_entry(DANISH_SESSIONS_ASIA_EU),
+        exit_policy=_danish_exit(early_cut=True),
         hypothesis_result={
-            "status": "HINT_12H_EVIDENCE",
-            "hypothesis_id": "H5_XVENUE_LEAD_60S_20261002",
-            "in_sample": "160 trades / 12 h, 65% wins, +2.43 bp after spread; OOS half +2.53 bp; corr -0.14 vs Trend Fade",
-            "expected_live": "+0.6 to +1.3 bp/trade after decay; 150-280 trades/day",
+            "status": "HINT_4D_REPLAY_CI_LOWER_NEAR_0",
+            "hypothesis_id": "DANISH_CF_A_20261004",
+            "in_sample": ("REALISTIC_V1 2026-09-30..10-03, Asia+EU, 3 slots: 99 fills +11.30 bp/fill, 1 h-cluster CI "
+                          "[+0.5,+23.4], n_eff 38, max DD -$0.76; 27 limit fills, 72 confirm-to-market, 4 cap skips"),
+            "corrected": ("fixed rule on test days +10.76 bp [-1.1,+25.4]; the early cut alone cost -183 bp vs the time "
+                          "exit (31 cut, 17 would have recovered); nested joint selection preferred a taker entry"),
+            "expected_live": "-4 to +8 bp/trade after decay (central ~+2); ~25 trades/day",
         },
-        pre_registration=_xvenue_lead_pre_registration("H5_XVENUE_LEAD_60S_20261002"),
-        admission_treatment=CROSS_VENUE_LEAD_ADMISSION_POLICY_ID,
-        max_active_signals=1,
-        entry_ttl_sec=3,
-        subtitle="HINT — 12h evidence, not validated across days — PAPER ONLY — RELAY INELIGIBLE",
-        policy_epoch=XVENUE_LEAD_POLICY_EPOCH,
-        signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+        pre_registration=_danish_pre_registration(
+            "DANISH_CF_A_20261004", sessions=DANISH_SESSIONS_ASIA_EU,
+            honest_label=("HINT - 4 days, +11.3 bp/trade, 1 h-cluster CI [+0.5,+23.4] in-sample; test days "
+                          "+10.8 bp [-1.1,+25.4]; the early cut was net negative in the replay"),
+        ),
+        admission_treatment=DANISH_CF_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=1800,
+        subtitle="HINT — owner design, 4-day replay — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_summary="fade the shared AI's committed LONG/SHORT call (explicit side matching the score-led side)",
+        live_exit_order=registry_live_exit_order(_danish_exit(early_cut=True)),
+        shadow_exits=_shadow_exits_except("LATE_BE_20_5", "COND_CUT_12_5M_MFE2"),
     ),
-    # INDICATOR-SEARCH-MODEL-A signal 1 (owner-approved 2026-10-02): when the
-    # Binance/Bybit premium over Bitfinex sits in its dev-fixed tails versus its
-    # own 60-minute mean, take the Bitfinex taker in the leaders' direction and
-    # exit after 60 s (the 300 s arm was not materially better: +1.4 vs +1.8 bp
-    # non-overlapping, half the independent N). Per-second evaluator, no AI.
-    RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S: _tile(
-        lane=RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
-        label="Cross-venue premium · Binance/Bybit premium over Bitfinex ≥+1.75 / ≤−1.88 bp vs its 60-min mean, 60-s hold, 40 bp stop",
-        raw_policy_id="XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_BOTHFRESH_SPREADLE3BP_TAKER_CAP5BPS|TIME_60_HARD40BP",
-        id_prefix="xvp",
-        module="paper_policy_family_xvenue_premium.py",
-        test_module="test_paper_policy_family_xvenue_premium.py",
-        entry={
-            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
-            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-            "direction_source": "CROSS_VENUE_PREMIUM",
-            "signal_clock": CROSS_VENUE_SIGNAL_CLOCK,
-            "leader_venues": ("binance", "bybit"),
-            "premium_mean_window_sec": 3600, "premium_min_mean_samples": 1200,
-            "premium_long_threshold_bps": 1.75, "premium_short_threshold_bps": -1.88,
-            "max_fill_forward_sec": 5,
-            "max_venue_age_sec": 2.0, "max_bbo_age_sec": 2.0, "max_spread_bps": 3.0,
-            "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
-            "shadow_entry_delay_sec": 1,
-            "min_submit_interval_sec": 5, "max_submissions_per_hour": 60,
-            "ai_decision_role": "NONE",
-        },
-        exit_policy={
-            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
-            "max_duration_sec": 60,
-            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
-            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
-            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
-            "max_open_positions": 1,
-        },
+    RESEARCH_LANE_FAMILY_DANISH_CF_NOES: _tile(
+        lane=RESEARCH_LANE_FAMILY_DANISH_CF_NOES,
+        label="Danish — no early stop · confirmed fade of committed AI calls, Asia+EU, no early cut",
+        raw_policy_id=("DANISH_CONFIRMED_FADE_COMMITTED_ASIA_EU_SPREADLE3BP_MAKER_0.10_CONFIRM3BP_TAKER_CAP5BPS_TTL1800"
+                       "|TIME_5400_BE20TO5_HARD40BP_CAP3"),
+        id_prefix="dcn",
+        module="paper_policy_family_danish_cf_noes.py",
+        test_module="test_paper_policy_family_danish_cf_noes.py",
+        entry=_danish_entry(DANISH_SESSIONS_ASIA_EU),
+        exit_policy=_danish_exit(early_cut=False),
         hypothesis_result={
-            "status": "HINT_8H_HOLDOUT_EVIDENCE",
-            "hypothesis_id": "H7_XVENUE_PREMIUM_60S_20261002",
-            "in_sample": "8 h cross-venue holdout: 1 m 78% hit, +2.0 bp/trade after spread [+0.7,+3.2], 148 trades (115 independent), BH q 0.013; 5 m arm +2.3 bp",
-            "expected_live": "+0.5 to +1.5 bp/trade after decay; overlaps Tile 3 triggers",
+            "status": "HINT_4D_REPLAY_CI_SPANS_0",
+            "hypothesis_id": "DANISH_CF_NOES_20261004",
+            "in_sample": ("REALISTIC_V1 2026-09-30..10-03, Asia+EU, 3 slots: 93 fills +11.36 bp/fill, 1 h-cluster CI "
+                          "[-0.6,+24.6]"),
+            "corrected": "fixed rule on test days +11.61 bp [-1.2,+27.9]",
+            "expected_live": "-4 to +8 bp/trade after decay (central ~+2); ~23 trades/day",
         },
-        pre_registration=_xvenue_premium_pre_registration("H7_XVENUE_PREMIUM_60S_20261002"),
-        admission_treatment=CROSS_VENUE_PREMIUM_ADMISSION_POLICY_ID,
-        max_active_signals=1,
-        entry_ttl_sec=3,
-        subtitle="HINT — 8h holdout evidence, not validated across days — PAPER ONLY — RELAY INELIGIBLE",
-        policy_epoch=XVENUE_PREMIUM_POLICY_EPOCH,
-        signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+        pre_registration=_danish_pre_registration(
+            "DANISH_CF_NOES_20261004", sessions=DANISH_SESSIONS_ASIA_EU,
+            honest_label="HINT - 4 days, +11.4 bp/trade, 1 h-cluster CI [-0.6,+24.6]; test days +11.6 bp [-1.2,+27.9]",
+        ),
+        admission_treatment=DANISH_CF_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=1800,
+        subtitle="HINT — owner design, 4-day replay — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_summary="fade the shared AI's committed LONG/SHORT call (explicit side matching the score-led side)",
+        live_exit_order=registry_live_exit_order(_danish_exit(early_cut=False)),
+        shadow_exits=_shadow_exits_except("LATE_BE_20_5"),
+        early_cut_shadow_reason="owner variant without the early stop; the conditional cut is recorded in shadow",
+    ),
+    RESEARCH_LANE_FAMILY_DANISH_CF_ALL_SESSIONS: _tile(
+        lane=RESEARCH_LANE_FAMILY_DANISH_CF_ALL_SESSIONS,
+        label="Danish — all sessions · confirmed fade of committed AI calls, every session, early cut",
+        raw_policy_id=("DANISH_CONFIRMED_FADE_COMMITTED_ALL_SESSIONS_SPREADLE3BP_MAKER_0.10_CONFIRM3BP_TAKER_CAP5BPS_TTL1800"
+                       "|TIME_5400_BE20TO5_CUT12BP5M_MFE2_HARD40BP_CAP3"),
+        id_prefix="dca",
+        module="paper_policy_family_danish_cf_all_sessions.py",
+        test_module="test_paper_policy_family_danish_cf_all_sessions.py",
+        entry=_danish_entry(DANISH_SESSIONS_ALL),
+        exit_policy=_danish_exit(early_cut=True),
+        hypothesis_result={
+            "status": "HINT_4D_REPLAY_CI_SPANS_0",
+            "hypothesis_id": "DANISH_CF_ALL_SESSIONS_20261004",
+            "in_sample": ("REALISTIC_V1 2026-09-30..10-03, all sessions, 3 slots: 139 fills +5.6 bp/fill, 1 h-cluster "
+                          "CI [-3.5,+16.1]; US session -7.2 bp/fill"),
+            "corrected": "fixed rule on test days +3.06 bp/fill; Asia+EU minus all +1.27 bp/signal [-0.17,+3.21]",
+            "expected_live": "-6 to +5 bp/trade after decay (central ~0); ~35 trades/day",
+        },
+        pre_registration=_danish_pre_registration(
+            "DANISH_CF_ALL_SESSIONS_20261004", sessions=DANISH_SESSIONS_ALL,
+            honest_label=("HINT - 4 days, +5.6 bp/trade, 1 h-cluster CI [-3.5,+16.1]; the US session lost "
+                          "in-sample (control for the Asia+EU session gate)"),
+        ),
+        admission_treatment=DANISH_CF_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=1800,
+        subtitle="HINT — owner design without the session gate — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_summary="fade the shared AI's committed LONG/SHORT call (explicit side matching the score-led side)",
+        live_exit_order=registry_live_exit_order(_danish_exit(early_cut=True)),
+        shadow_exits=_shadow_exits_except("LATE_BE_20_5", "COND_CUT_12_5M_MFE2"),
     ),
     # Owner-requested 2026-10-03: the August Continuous tile (demoted to a
     # label in #136, retired in #233) restored as a permanent paper-only baseline.
     RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL: _continuous_aug_original_tile(),
+    # PROFIT-TILE-DESIGN-20261003: the genome FADE/time-exit winner reduced to
+    # its clean source (committed calls only; fading NO_TRADE calls loses),
+    # maker entry and a 90-minute hold. Three slots so evidence accrues ~3x
+    # faster than one; 1 h-cluster CIs absorb the overlap.
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90: _tile(
+        lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90,
+        label="Committed fade (maker) · inverted committed AI side, 0.10% maker limit 30 min, 90-min hold, 40 bp stop",
+        raw_policy_id="INVERT_COMMITTED_SCORE_LED_SIDE_MAKER_OFFSET_0.10_NOCHASE_TTL1800|TIME_5400_HARD40BP",
+        id_prefix="cfm",
+        module="paper_policy_family_committed_fade_maker_90.py",
+        test_module="test_paper_policy_family_committed_fade_maker_90.py",
+        entry=dict(_COMMITTED_FADE_MAKER_ENTRY),
+        exit_policy=dict(_COMMITTED_FADE_MAKER_EXIT),
+        hypothesis_result={
+            "status": "HINT_3D_WALK_FORWARD_CI_SPANS_0",
+            "hypothesis_id": "H8_COMMITTED_FADE_MAKER_90_20261003",
+            "in_sample": ("REALISTIC_V1, 2026-09-30..10-02, 3 slots: 67 trades +8.9 bp/trade, 1 h-cluster CI [-7,+28]; "
+                          "1 slot: 24 trades +9.5 bp, every day positive; all fills +13.5 bp [-3,+32], n_eff 28"),
+            "corrected": ("day-fold walk-forward 19 trades +5.0 bp [-15,+30]; deflated Sharpe ~0 after 3,416 variants; "
+                          "unseen 17:12-21:30Z window -20 bp (n_eff ~4)"),
+            "expected_live": "-5 to +6 bp/trade after decay (central ~+2); 15-25 trades/day",
+        },
+        pre_registration=_committed_fade_maker_pre_registration("H8_COMMITTED_FADE_MAKER_90_20261003"),
+        admission_treatment=COMMITTED_FADE_MAKER_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=1800,
+        subtitle="HINT — 3-day REALISTIC_V1 walk-forward, CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=COMMITTED_FADE_MAKER_POLICY_EPOCH,
+        signal_summary="fade the shared AI's committed LONG/SHORT call (explicit side matching the score-led side)",
+        live_exit_order=("HARD_STOP", "TIME_EXIT"),
+        shadow_exits=ALL_SHADOW_EXITS,
+        early_cut_shadow_reason=("policy frozen in the deploying stack; the re-test rule would adopt the composite "
+                                 "and the conditional cut - owner-approved follow-up, shadow until then"),
+    ),
+    # HYPOTHESIS-TILES-20261004 H9: follow the score-led side only when the
+    # AI abstains; ten slots because the edge needs concurrency (cap 3 lost).
+    RESEARCH_LANE_FAMILY_NOTRADE_FOLLOW_MAKER_60: _tile(
+        lane=RESEARCH_LANE_FAMILY_NOTRADE_FOLLOW_MAKER_60,
+        label="No-trade follow (maker) · score-led side on AI NO_TRADE, 0.15% maker + 25% chase, late BE + ATR trail, 60-min backstop",
+        raw_policy_id=("SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_MAKER_OFFSET_0.15_CHASE_w234_s25_i180_TTL3600"
+                       "|TIME_3600_BE20TO5_TRAIL1.5ATR_ARM2ATR_HARD40BP_CAP10"),
+        id_prefix="ntf",
+        module="paper_policy_family_notrade_follow_maker_60.py",
+        test_module="test_paper_policy_family_notrade_follow_maker_60.py",
+        entry=dict(_NOTRADE_FOLLOW_MAKER_ENTRY),
+        exit_policy=dict(_NOTRADE_FOLLOW_MAKER_EXIT),
+        hypothesis_result={
+            "status": "HINT_4D_NESTED_WF_CI_SPANS_0",
+            "hypothesis_id": "H9_NOTRADE_FOLLOW_MAKER_60_20261004",
+            "in_sample": ("REALISTIC_V1 2026-09-30..10-03, 10 slots: 337 fills +3.05 bp/fill, 1 h-cluster CI [-4.7,+11.2], "
+                          "n_eff 61, max DD -$3.00; uncapped +6.19 bp; 3 slots -2.47 bp"),
+            "corrected": ("nested day-fold walk-forward base rule +4.54 bp/fill [-3.8,+13.3] (232 fills, 3 folds); "
+                          "deflated Sharpe 0.16; late-armed composite vs time exit capped per signal +0.21 bp "
+                          "(not worse) - adopted; conditional cut -0.87 bp per fill - shadow only"),
+            "expected_live": "-2 to +5 bp/trade after decay (central ~+1.5); ~100 trades/day",
+        },
+        pre_registration=_hypothesis_pre_registration(
+            "H9_NOTRADE_FOLLOW_MAKER_60_20261004",
+            honest_label=("HINT - 4 days, nested walk-forward +4.5 bp/trade, 1 h-cluster CI [-3.8,+13.3], edge needs "
+                          "10 concurrent slots (3 slots lost), one trend day carries most of the profit"),
+            control_meaning=("No live control lane: the analyzer's REALISTIC_V1 counterfactual of the same NO_TRADE calls "
+                             "(taker entry, inverted side) is the comparison; Continuous is the baseline"),
+            variants_tried=1079, min_fills=500, k1_after_fills=300, k2_after_fills=600,
+            k4_max_drawdown_usd=3.0,
+            decisions=("composite late break-even +20->+5 bp and ATR trail 1.5 armed at +2 ATR adopted (not "
+                       "significantly worse nested-OOS)", "conditional early cut shadow-only (worse)"),
+        ),
+        admission_treatment=NOTRADE_FOLLOW_MAKER_ADMISSION_POLICY_ID,
+        max_active_signals=10,
+        entry_ttl_sec=3600,
+        subtitle="HINT — 4-day nested walk-forward, CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_summary="follow the score-led side only when the shared AI returned NO_TRADE",
+        live_exit_order=registry_live_exit_order(_NOTRADE_FOLLOW_MAKER_EXIT),
+        shadow_exits=_shadow_exits_except("COMPOSITE_LATE_BE20_5_TRAIL1.5_ARM2"),
+        early_cut_shadow_reason="conditional cut on top of the composite was -0.87 bp/fill nested-OOS (worse)",
+    ),
+    # HYPOTHESIS-TILES-20261004 H10: one tile for both cross-venue triggers
+    # with a 60-minute hold, gated by the session map frozen at registration.
+    RESEARCH_LANE_FAMILY_XVENUE_SESSION_FOLLOW_60M: _tile(
+        lane=RESEARCH_LANE_FAMILY_XVENUE_SESSION_FOLLOW_60M,
+        label="Cross-venue session follow · Binance/Bybit lead or premium, frozen session map, taker, late BE, 60-min backstop",
+        raw_policy_id=("XVENUE_LEAD8BP_OR_PREMIUM_L1.75_S1.88BP_SESSIONMAP_ASIA_EU_US_SPREADLE3BP_TAKER_CAP5BPS"
+                       "|TIME_3600_BE20TO5_HARD40BP_CAP3"),
+        id_prefix="xvs",
+        module="paper_policy_family_xvenue_session_follow_60m.py",
+        test_module="test_paper_policy_family_xvenue_session_follow_60m.py",
+        entry=dict(_XVENUE_SESSION_FOLLOW_ENTRY),
+        exit_policy=dict(_XVENUE_SESSION_FOLLOW_EXIT),
+        hypothesis_result={
+            "status": "HINT_SHORT_RECHECK_CI_SPANS_0",
+            "hypothesis_id": "H10_XVENUE_SESSION_FOLLOW_60M_20261004",
+            "in_sample": ("research nested OOS +1.09 bp/trade [-1.5,+4.2], 655 fills, n_eff 222 (10-min clusters); "
+                          "REALISTIC_V1 re-check on shadow triggers 2026-10-02..03, 3 slots, 8.9 s latency: "
+                          "93 fills +2.96 bp, 1 h-cluster CI [-7.3,+13.5], max DD -$1.10"),
+            "corrected": ("one nested fold only; session re-selection unstable; 3 s latency replay -2.05 bp at 3 slots; "
+                          "uncapped every-trigger mean +0.75 bp [-3.6,+5.5]"),
+            "expected_live": "-2 to +3 bp/trade after decay (central ~+0.5); ~70 trades/day",
+        },
+        pre_registration=_hypothesis_pre_registration(
+            "H10_XVENUE_SESSION_FOLLOW_60M_20261004",
+            honest_label=("HINT - 1.3-day REALISTIC_V1 re-check +3.0 bp/trade, 1 h-cluster CI [-7.3,+13.5]; "
+                          "the frozen session map admits all three sessions"),
+            control_meaning=("No live control lane: the tile's own shadow outcome of every qualifying trigger (logged "
+                             "whether or not the tile is ON) is the comparison"),
+            variants_tried=83, min_fills=500, k1_after_fills=300, k2_after_fills=500,
+            k4_max_drawdown_usd=1.0,
+            decisions=("late break-even +20->+5 bp adopted (not worse)",
+                       "late ATR trail rejected (significantly worse capped per signal)",
+                       "conditional early cut shadow-only (one fold)"),
+        ),
+        admission_treatment=XVENUE_SESSION_FOLLOW_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=3,
+        subtitle="HINT — 1.3-day re-check, CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+        signal_summary=("Binance/Bybit lead Bitfinex by >=8 bp over 10 s, or their premium over Bitfinex leaves its "
+                        "60-minute mean (+1.75 / -1.88 bp); trade in the leaders' direction"),
+        live_exit_order=registry_live_exit_order(_XVENUE_SESSION_FOLLOW_EXIT),
+        shadow_exits=_shadow_exits_except("LATE_BE_20_5"),
+        early_cut_shadow_reason="only one nested fold; not adopted live",
+    ),
+    # HYPOTHESIS-TILES-20261004 H11: the maker tile's committed-fade side
+    # with a taker entry; it beat the maker rule nested-OOS per signal.
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90: _tile(
+        lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
+        label="Committed fade (taker) · inverted committed AI side, Asia+EU, taker, late BE + ATR trail, 90-min backstop",
+        raw_policy_id=("INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_TAKER_CAP5BPS"
+                       "|TIME_5400_BE20TO5_TRAIL1.5ATR_ARM2ATR_CUT12BP5M_MFE2_HARD40BP_CAP3"),
+        id_prefix="cft",
+        module="paper_policy_family_committed_fade_taker_90.py",
+        test_module="test_paper_policy_family_committed_fade_taker_90.py",
+        entry=dict(_COMMITTED_FADE_TAKER_ENTRY),
+        exit_policy=dict(_COMMITTED_FADE_TAKER_EXIT),
+        hypothesis_result={
+            "status": "HINT_4D_NESTED_WF_CI_SPANS_0",
+            "hypothesis_id": "H11_COMMITTED_FADE_TAKER_90_20261004",
+            "in_sample": ("REALISTIC_V1 2026-09-30..10-03, 3 slots: 119 fills +8.36 bp/fill, 1 h-cluster CI [-4.2,+22.8], "
+                          "max DD -$0.95; the maker rule on the same calls 71 fills +9.30 bp (1.88 vs 1.25 bp per signal)"),
+            "corrected": ("nested day-fold entry selection chose taker in 2/3 folds: +6.79 bp/fill, 1.51 bp/signal vs "
+                          "maker 4.38 bp/fill, 0.55 bp/signal on the same days; deflated Sharpe 0.66 (13 entries)"),
+            "expected_live": "-4 to +6 bp/trade after decay (central ~+2); ~35 trades/day",
+        },
+        pre_registration=_hypothesis_pre_registration(
+            "H11_COMMITTED_FADE_TAKER_90_20261004",
+            honest_label=("HINT - 4 days, nested walk-forward +6.8 bp/trade, 1 h-cluster CI [-6.0,+21.6]; "
+                          "US session negative in-sample and on test days (-11.0 bp, n 39)"),
+            control_meaning="Committed fade (maker) trades the same calls and side; paired by shared call",
+            variants_tried=13, min_fills=150, k1_after_fills=80, k2_after_fills=150,
+            k4_max_drawdown_usd=1.0, sessions=("ASIA", "EU"),
+            decisions=("Asia+EU session gate adopted by the pre-registered rule (nested gate chose it 2/2 folds)",
+                       "composite late break-even +20->+5 bp and ATR trail 1.5 armed at +2 ATR adopted "
+                       "(capped per signal -1.66 bp [-4.45,+1.03], not significantly worse)",
+                       "conditional early cut -12 bp in 5 min if MFE <=+2 bp live (+0.56 bp on top of the composite)"),
+        ),
+        admission_treatment=COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=3,
+        subtitle="HINT — 4-day nested walk-forward, CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=HYPOTHESIS_TILES_POLICY_EPOCH,
+        signal_summary="fade the shared AI's committed LONG/SHORT call (explicit side matching the score-led side)",
+        live_exit_order=registry_live_exit_order(_COMMITTED_FADE_TAKER_EXIT),
+        shadow_exits=_shadow_exits_except("COMPOSITE_LATE_BE20_5_TRAIL1.5_ARM2", "COND_CUT_12_5M_MFE2"),
+    ),
 }
 COMPARISON_BENCHMARK_LANE = None
-PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S
+PRIMARY_PRODUCTION_LANE = COMBO_EXECUTION_LANES[0]
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S
+RESEARCH_CANDIDATE_LANE = COMBO_EXECUTION_LANES[0]
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "Tile 1 (Cross-venue lead, HINT, 12 h evidence) and Tile 2 (Cross-venue premium, HINT, 8 h holdout evidence) use no AI and do not consume the shared call: a bounded per-second cross-venue evaluator takes a Bitfinex taker (5 bp cap, 3 s) in the leaders' direction when every feed is <=2 s old and spread <=3 bp - Tile 1 on a >=8 bp 10 s Binance/Bybit lead over Bitfinex, Tile 2 when the Binance/Bybit premium over Bitfinex is >=+1.75 bp (long) or <=-1.88 bp (short) versus its own 60-minute mean - exits after 60 s with a 40 bp catastrophic stop, holds one position, and logs every qualifying trigger as a shadow signal whether or not the tile is ON. Stops fill at the side-correct quote that crossed them. Both carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. Tile 3 (Continuous, Aug-2026 original, BASELINE BENCHMARK) is an exact replica of the early-August Continuous tile: after every shared three-minute call it makes its own DeepSeek call with the verbatim v3 prompt (never NO_TRADE, temperature 0), takes the higher score's side when the gap is >=5, the scores sum to >=50 and the side does not fight confirmed structure, rests a 0.1% maker limit chased 25% of the remaining gap every 60 s for 10 minutes, and exits on the Scenario C ladder, a -12% thesis cut (MFE protect 5%), a 30% stop, a -32% early fail, a 40/10 peak floor or the 2 h cap. Its primary ledger uses realistic BBO/depth fills with the August touch fill recorded as a shadow; it is default-ON, paper-only, relay-ineligible and never promoted or retired for performance. v8 retires Trend Fade 60 and Trend Fade 60 committed calls (owner, XVENUE-INVERT-STUDY-20261003); the cross-venue tiles keep their v5/v6 cohorts and Continuous keeps v7. v7 added Continuous; v6 retired the Trend Fade 60 profit-lock ladder tile. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort, v4 the four-tile cohort and v5 the ladder/lead cohort"
+    "Every tile number is derived from the registry display order (tile_number). Danish, Danish - no early stop and Danish - all sessions (HINT, owner design) fade the shared AI's committed LONG/SHORT calls: a resting limit 0.10% better than the decision-time price; if price moves 3 bp our way first the limit is cancelled and a taker taken within a 5 bp cap (skipped above it); unfilled after 30 minutes the signal is dropped. Spread <=3 bp and BBO <=5 s old. Exit first trigger wins: 40 bp catastrophic stop, break-even armed at +20 bp moving the stop to +5 bp, a -12 bp early cut in the first 5 minutes only if the trade never ran past +2 bp (not on the no-early-stop variant), 90-minute backstop. Danish and Danish - no early stop trade Asia+EU (UTC 00-16); Danish - all sessions trades every session. Up to three each; kill at mean <=0 after 80 trades or a $1.00 drawdown. Continuous (Aug-2026 original, BASELINE BENCHMARK) is an exact replica of the early-August Continuous tile: its own DeepSeek call with the verbatim v3 prompt after every shared three-minute call, a 0.1% maker limit chased 25% every 60 s for 10 minutes, Scenario C ladder, -12% thesis cut, 30% stop, -32% early fail, 40/10 peak floor, 2 h cap; default-ON, paper-only, relay-ineligible, never promoted or retired for performance. Committed fade (maker, HINT) rests a 0.10% maker limit for 30 minutes on committed calls, 90-minute hold and 40 bp stop (policy frozen). Committed fade (taker, H11) takes the same committed calls as a taker inside Asia+EU with the late-armed composite (break-even +20->+5 bp, ATR trail 1.5 armed at +2 ATR), the conditional early cut, a 90-minute backstop and a 40 bp stop. No-trade follow (maker, H9) follows the score-led side on AI NO_TRADE with a 0.15% chased maker limit, the late-armed composite, a 60-minute backstop, ten slots. Cross-venue session follow (H10) takes a Bitfinex taker on either generic cross-venue trigger inside its frozen session map with a late break-even, 60-minute backstop, 40 bp stop, three slots. All research tiles are default-OFF, paper-only and relay-ineligible with pre-registered promotion and kill rules; each records the shared shadow-exit set (SHADOW_EXIT_SET). v11 retires the cross-venue lead and premium tiles (owner: losing), adds the three Danish tiles and the late-armed protections; Continuous keeps v7 and Committed fade (maker) keeps v9. Earlier cohorts remain quarantined"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -593,6 +1146,14 @@ EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
+
+
+def tile_number(lane: str) -> int | None:
+    """1-based user-facing tile number derived from the registry display order."""
+    try:
+        return ACTIVE_TILE_ORDER.index(str(lane or "").upper()) + 1
+    except ValueError:
+        return None
 
 
 def active_tile_policy_epochs() -> tuple[str, ...]:
@@ -623,6 +1184,10 @@ RETIRED_TILE_LANES = frozenset({
     # Retired 2026-10-03 (owner): both Trend Fade 60 tiles
     # (diagnostics/XVENUE-INVERT-STUDY-20261003.md).
     "FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED",
+    # Retired 2026-10-04 (owner): both cross-venue tiles were losing
+    # (diagnostics/HYPOTHESIS-TILES-20261004.md); the generic cross-venue
+    # evaluator, feeds and shadow collection stay.
+    "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",
@@ -641,6 +1206,8 @@ RETIRED_POLICY_IDENTITIES = frozenset({
     "INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP_SCENARIO_C_CAP5",
     "INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
     "INVERT_COMMITTED_SCORE_LED_SIDE_GAP30_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+    "XVENUE_LEAD_W10S_TH8BP_BOTHFRESH_SPREADLE3BP_TAKER_CAP5BPS|TIME_60_HARD40BP",
+    "XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_BOTHFRESH_SPREADLE3BP_TAKER_CAP5BPS|TIME_60_HARD40BP",
 })
 
 
@@ -651,6 +1218,48 @@ def tile_has_partial_exits(spec: dict) -> bool:
     """True when the tile's exit policy closes a position in more than one part."""
     exit_policy = spec.get("exit_policy") or {}
     return bool(exit_policy.get("partial_take_profits")) or exit_policy.get("family") == "HYBRID_RUNNER"
+
+
+def _tile_card_metadata_defects(spec: dict) -> list[str]:
+    """Every tile must carry complete ENTRY / EXIT / RISK MANAGEMENT card metadata."""
+    out = []
+    order = tuple(spec.get("live_exit_order") or ())
+    if not order:
+        out.append("CARD_MISSING_LIVE_EXIT_ORDER")
+    unknown = sorted(set(order).difference(LIVE_EXIT_RULES))
+    if unknown:
+        out.append("CARD_UNKNOWN_EXIT_RULE:" + ",".join(unknown))
+    exit_policy = spec.get("exit_policy") if isinstance(spec.get("exit_policy"), dict) else {}
+    if exit_policy.get("family") == "COMPOSITE_FIRST_TRIGGER_WINS":
+        if order != registry_live_exit_order(exit_policy) or tuple(exit_policy.get("exit_order") or ()) != order:
+            out.append("CARD_EXIT_ORDER_DIFFERS_FROM_RUNTIME")
+    unknown_shadow = sorted(set(spec.get("shadow_exits") or ()).difference(SHADOW_EXIT_SET))
+    if unknown_shadow:
+        out.append("UNKNOWN_SHADOW_EXIT:" + ",".join(unknown_shadow))
+    if not any(r in RISK_EXIT_RULES and r not in ("HARD_STOP", "STOP_LOSS") for r in order) \
+            and not spec.get("early_cut_shadow_reason"):
+        out.append("EARLY_CUT_NEITHER_LIVE_NOR_SHADOW_WITH_REASON")
+    entry = spec.get("entry_policy") if isinstance(spec.get("entry_policy"), dict) else {}
+    if entry.get("confirm_move_bps") is not None and (
+        spec.get("platform_relay_eligible") or spec.get("live_copy_eligible")
+    ):
+        out.append("CONFIRM_MARKET_ENTRY_MUST_BE_RELAY_INELIGIBLE")
+    try:
+        from tile_card_sections import card_section_defects
+    except ImportError:
+        out.append("CARD_SECTIONS_GENERATOR_MISSING")
+    else:
+        out.extend(card_section_defects(spec, SHADOW_EXIT_SET))
+    return out
+
+
+def tile_card_sections(lane: str) -> dict | None:
+    """Plain-English ENTRY / EXIT / RISK MANAGEMENT sections for one active tile."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper())
+    if not spec:
+        return None
+    from tile_card_sections import card_sections
+    return card_sections(spec, SHADOW_EXIT_SET)
 
 
 def validate_tile_registry() -> tuple[str, ...]:
@@ -713,6 +1322,17 @@ def validate_tile_registry() -> tuple[str, ...]:
             defects.append(f"{lane}:PAPER_ONLY_STATE_WITHOUT_GATE")
         if state == "BENCHMARK" and not spec.get("is_benchmark"):
             defects.append(f"{lane}:BENCHMARK_STATE_WITHOUT_ROLE")
+        try:
+            recorder_specs = tile_shadow_exit_set(lane)
+        except (KeyError, TypeError, ValueError):
+            defects.append(f"{lane}:INVALID_SHADOW_EXIT_SET")
+        else:
+            if any(item.get("kind") not in SHADOW_EXIT_KINDS for item in recorder_specs):
+                defects.append(f"{lane}:UNSUPPORTED_SHADOW_EXIT_KIND")
+            recorder_ids = [item["id"] for item in recorder_specs]
+            if len(recorder_ids) != len(set(recorder_ids)) or any(
+                    member not in recorder_ids for item in recorder_specs for member in item.get("members") or ()):
+                defects.append(f"{lane}:SHADOW_EXIT_COMPOSITE_UNKNOWN_MEMBER")
         surfaces = tuple(spec.get("component_surfaces") or ())
         if surfaces != TILE_COMPONENT_SURFACES:
             missing_surfaces = sorted(set(TILE_COMPONENT_SURFACES).difference(surfaces))
@@ -722,6 +1342,7 @@ def validate_tile_registry() -> tuple[str, ...]:
                 f"missing={','.join(missing_surfaces) or '-'}:"
                 f"extra={','.join(extra_surfaces) or '-'}"
             )
+        defects.extend(f"{lane}:{d}" for d in _tile_card_metadata_defects(spec))
     overlap = set(lanes).intersection(RETIRED_TILE_LANES)
     if overlap:
         defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
@@ -757,6 +1378,7 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
         {
             "lane": lane,
             "display_order": index,
+            "tile_number": index,
             "label": ACTIVE_TILE_REGISTRY[lane]["label"],
             "raw_policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
             "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
@@ -780,9 +1402,37 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
             "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
             "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
             "component_surfaces": tuple(ACTIVE_TILE_REGISTRY[lane]["component_surfaces"]),
+            "signal_summary": ACTIVE_TILE_REGISTRY[lane]["signal_summary"],
+            "live_exit_order": tuple(ACTIVE_TILE_REGISTRY[lane]["live_exit_order"]),
+            "shadow_exits": tuple(ACTIVE_TILE_REGISTRY[lane]["shadow_exits"]),
+            "early_cut_shadow_reason": ACTIVE_TILE_REGISTRY[lane]["early_cut_shadow_reason"],
         }
         for index, lane in enumerate(ACTIVE_TILE_ORDER, start=1)
     )
+
+
+def tile_pre_registration_summary(lane: str) -> dict:
+    """Public pre-registration view of one active tile, read from this registry only.
+
+    Deliberately not part of ``active_tile_lifecycle_manifest``: adding it there
+    would change ``active_tile_registry_signature`` without a policy change.
+    """
+    spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+    pre = spec.get("pre_registration") or {}
+    hypothesis = spec.get("hypothesis_result") or {}
+    return {
+        "declared": bool(pre),
+        "schema": pre.get("schema"),
+        "hypothesis_id": pre.get("hypothesis_id") or hypothesis.get("hypothesis_id"),
+        "status": hypothesis.get("status"),
+        "registered_at": pre.get("registered_utc"),
+        "registered_cohort": pre.get("registered_cohort"),
+        "evidence_world": pre.get("evidence_world"),
+        "ci_method": pre.get("ci_method"),
+        "honest_label": pre.get("honest_label"),
+        "promote": {"summary": spec.get("promotion_criteria"), "thresholds": dict(pre.get("promotion") or {})},
+        "kill": {"summary": spec.get("kill_criteria"), "thresholds": dict(pre.get("kill") or {})},
+    }
 
 
 def active_tile_registry_signature() -> str:

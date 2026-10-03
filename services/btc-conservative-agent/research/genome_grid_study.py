@@ -72,7 +72,8 @@ DUPLICATE_SIGNAL_SEC = 90
 TWIN_SIGNAL_SEC = 5.0
 GENOME_COHORT = "AI_DECISION"
 AI_EPISODE_CLASSES = ("AI_COMMITTED", "AI_COMMITTED_SCORE_CONFLICT", "AI_NO_TRADE_SCORE_LED", "AI_SIGNAL_REPLAY")
-XVENUE_EPISODE_CLASSES = ("XVENUE_LEAD", "XVENUE_PREMIUM")
+# XVENUE_SESSION_FOLLOW (xvs-*) re-uses the lead/premium triggers: its own cohort, never a new trigger.
+XVENUE_EPISODE_CLASSES = ("XVENUE_LEAD", "XVENUE_PREMIUM", "XVENUE_SESSION_FOLLOW")
 CLUSTER_SEC = 3600
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 20261003
@@ -278,6 +279,8 @@ def decision_identity(raw: Any) -> tuple[str, bool]:
 
 def xvenue_class(decision_id: str, lanes: Iterable[str] = ()) -> str | None:
     import combo_pathway_config as registry  # noqa: PLC0415
+    if decision_id.startswith("xvs-"):
+        return "XVENUE_SESSION_FOLLOW"
     if decision_id.startswith("xvp-"):
         return "XVENUE_PREMIUM"
     if decision_id.startswith("xvl-"):
@@ -285,6 +288,8 @@ def xvenue_class(decision_id: str, lanes: Iterable[str] = ()) -> str | None:
     for lane in lanes:
         name = str(lane or "").upper()
         if registry.is_cross_venue_clock_lane(name) or "XVENUE" in name:
+            if "SESSION_FOLLOW" in name:
+                return "XVENUE_SESSION_FOLLOW"
             return "XVENUE_PREMIUM" if "PREMIUM" in name else "XVENUE_LEAD"
     return None
 
@@ -1601,7 +1606,7 @@ def measure_latency(mirror: Path) -> dict[str, Any]:
         exclude = {lane for lane in lanes if registry.is_cross_venue_clock_lane(lane)}
     except Exception:  # noqa: BLE001
         exclude = set()
-    exclude |= {"FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S"}
+    exclude |= {"FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_XVENUE_SESSION_FOLLOW_60M"}
     return fm.measure_decision_latency(mirror / "v3" / "ledgers", exclude_lanes=exclude)
 
 

@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-retire-trend-fade-v8",
-        "f164b9a64bc8b861b6900aa11e350223eaa8007ce1f521a94f24116fdef58cf2",
+        "v31-danish-tiles-late-protection-v11",
+        "55c1c899aa315d3d3849f10a558d31da03a5df1e781e6c003ac27191a56c63ef",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-retire-trend-fade-v8",
-        "13102d40b0021ab30a94c57b40697f7e2ce35608be19646947a11289da6ebc35",
+        "v31-danish-tiles-late-protection-v11",
+        "3b14123fa0bf3fe1cb6a57badd06b96b555d451059e61042a95cadd0c3d6fa96",
     ]
 
 

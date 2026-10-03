@@ -74,38 +74,41 @@ RETIRED_DYNAMIC_ADAPTIVE_LANES = (
     "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
 )
 
-# Identities frozen at registration; the v8 Trend Fade retirement must not alter
-# them, so each surviving cohort continues across the roster change.
-XVENUE_LEAD_SIGNATURE = "99abf913fa4e71698094b7babcd4f5afb1cd221ad98b9ffab8ce2f80f2b220d7"
-XVENUE_PREMIUM_SIGNATURE = "39ad7a3f1b960e90a60423e14ee086f3ca495683728856a2ff359ca27b6dbe1f"
+# Identities frozen at registration; card metadata (ENTRY / EXIT / RISK text)
+# sits outside the signature, so surviving cohorts continue across roster changes.
 CONTINUOUS_AUG_SIGNATURE = "527bad3dfed8ba4d67df5423fb293c0a517eca4fc5c125c5b049385cda039224"
+COMMITTED_FADE_MAKER_SIGNATURE = "edcdb8e8060a953fb8af155031122f8edba6f6425e2152680a06fcadc5a77bc1"
 RETIRED_TREND_FADE_LANES = ("FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED")
+RETIRED_XVENUE_LANES = ("FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S")
+EXPECTED_ORDER = (
+    "FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
+    "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
+    "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_MAKER_60",
+    "FAMILY_XVENUE_SESSION_FOLLOW_60M",
+)
 
 
-def test_active_registry_is_lead_premium_then_baseline():
+def test_active_registry_is_danish_then_baseline_then_hypotheses():
     import combo_pathway_config as registry
 
-    assert ACTIVE_TILE_ORDER == (
-        "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL",
-    )
+    assert ACTIVE_TILE_ORDER == EXPECTED_ORDER
     manifest = active_tile_lifecycle_manifest()
-    assert [(row["lane"], row["display_order"]) for row in manifest] == [
-        ("FAMILY_XVENUE_LEAD_60S", 1), ("FAMILY_XVENUE_PREMIUM_60S", 2),
-        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 3),
+    assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
+        (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    lead = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"]
-    premium = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_PREMIUM_60S"]
-    baseline = ACTIVE_TILE_REGISTRY["FAMILY_CONTINUOUS_AUG_ORIGINAL"]
-    tiles = (lead, premium, baseline)
-    assert [t["id_prefix"] for t in tiles] == ["xvl", "xvp", "caug"]
-    assert [t["policy_signature"] for t in tiles] == [
-        XVENUE_LEAD_SIGNATURE, XVENUE_PREMIUM_SIGNATURE, CONTINUOUS_AUG_SIGNATURE,
-    ]
-    assert lead["policy_epoch"] == registry.XVENUE_LEAD_POLICY_EPOCH == "v31-trend-fade-single-tile-v5"
-    assert premium["policy_epoch"] == registry.XVENUE_PREMIUM_POLICY_EPOCH == "v31-committed-fade-premium-v6"
-    assert premium["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 9))
+    tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in EXPECTED_ORDER]
+    danish = tiles[:3]
+    baseline, maker, fade_taker, notrade, session = tiles[3:]
+    assert [t["id_prefix"] for t in tiles] == ["dcf", "dcn", "dca", "caug", "cfm", "cft", "ntf", "xvs"]
+    assert baseline["policy_signature"] == CONTINUOUS_AUG_SIGNATURE
+    assert maker["policy_signature"] == COMMITTED_FADE_MAKER_SIGNATURE
+    assert len({t["policy_signature"] for t in tiles}) == 8
     assert baseline["policy_epoch"] == registry.CONTINUOUS_AUG_POLICY_EPOCH == "v31-continuous-aug-original-v7"
-    assert registry.RESEARCH_STACK_VERSION == "v31-retire-trend-fade-v8"
+    assert registry.RESEARCH_STACK_VERSION == "v31-danish-tiles-late-protection-v11"
+    assert maker["policy_epoch"] == maker["pre_registration"]["registered_cohort"] == "v31-committed-fade-maker-v9"
+    for tile in (*danish, notrade, session, fade_taker):
+        assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
     for lane, tile in zip(ACTIVE_TILE_ORDER, tiles):
         # Only the owner-requested baseline defaults ON; the deploy gate turns every tile ON.
         default_on = tile is baseline
@@ -116,12 +119,89 @@ def test_active_registry_is_lead_premium_then_baseline():
             # August capacity: the tile cap plus same-side duplicate suppression.
             assert tile["max_active_signals"] == 10
             assert tuple(map(tuple, tile["ladder"])) == registry.CONTINUOUS_AUG_LADDER
-        else:
-            assert tile["max_active_signals"] == 1
+        elif tile is notrade:
+            assert tile["max_active_signals"] == 10
             assert tile.get("ladder") in (None, ())
-    assert lead["entry_policy"]["direction_source"] == "CROSS_VENUE_LEAD"
-    assert premium["entry_policy"]["direction_source"] == "CROSS_VENUE_PREMIUM"
-    assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == "FAMILY_XVENUE_LEAD_60S"
+        else:
+            assert tile["max_active_signals"] == 3
+            assert tile.get("ladder") in (None, ())
+    for tile in danish:
+        assert tile["entry_policy"]["mode"] == "MAKER_LIMIT_OFFSET_CONFIRM_MARKET"
+        assert tile["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
+    assert session["entry_policy"]["direction_source"] == "CROSS_VENUE_LEAD_OR_PREMIUM"
+    assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == EXPECTED_ORDER[0]
+
+
+def test_cross_venue_lead_and_premium_are_one_atomic_retirement():
+    import json
+
+    import taker_time_exit_binding
+    import tile_paired_comparison
+
+    for lane in RETIRED_XVENUE_LANES:
+        assert lane in RETIRED_TILE_LANES
+        assert lane not in ACTIVE_TILE_REGISTRY and lane not in COMBO_EXECUTION_LANES
+        assert lane not in json.dumps(ACTIVE_TILE_REGISTRY, default=list)
+    assert taker_time_exit_binding.CROSS_VENUE_SOURCES == {"CROSS_VENUE_LEAD_OR_PREMIUM"}
+    for schema in tile_paired_comparison.VERDICT_RULES:
+        assert "xvenue_lead" not in schema and "xvenue_premium" not in schema
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    for gone in ("paper_policy_family_xvenue_lead.py", "paper_policy_family_xvenue_premium.py",
+                 "test_paper_policy_family_xvenue_lead.py", "test_paper_policy_family_xvenue_premium.py"):
+        assert not (service_dir / gone).exists(), gone
+        assert not (service_dir.parent / "btc-signal-engine" / gone).exists(), gone
+    # Generic evaluator primitives stay for the session-follow tile.
+    for kept in ("cross_venue_lead.py", "cross_venue_premium.py", "cross_venue_session_follow.py", "cross_venue_tape.py"):
+        assert (service_dir / kept).is_file(), kept
+
+
+def test_every_tile_publishes_entry_exit_risk_card_sections():
+    import combo_pathway_config as registry
+
+    for lane in ACTIVE_TILE_ORDER:
+        sections = registry.tile_card_sections(lane)
+        assert sections["entry"] and sections["exit"]["live"] and sections["risk"], lane
+        risk = " ".join(sections["risk"])
+        assert "margin @100x" in risk and "notional" in risk, lane
+        assert "max loss" not in " ".join(
+            [*sections["entry"], *sections["exit"]["live"], *sections["exit"]["shadow"], risk]
+        ).lower(), lane
+
+
+def test_validator_fails_when_a_tile_lacks_card_metadata():
+    lane = "FAMILY_COMMITTED_FADE_MAKER_90"
+    spec = ACTIVE_TILE_REGISTRY[lane]
+    original = dict(spec)
+    try:
+        for key in ("signal_summary", "live_exit_order"):
+            spec.clear()
+            spec.update(original)
+            spec[key] = "" if key == "signal_summary" else ()
+            defects = validate_tile_registry()
+            assert any(d.startswith(f"{lane}:") for d in defects), (key, defects)
+        spec.clear()
+        spec.update(original)
+        spec["shadow_exits"] = ("NOT_A_SHADOW_EXIT",)
+        assert any(d.startswith(f"{lane}:") for d in validate_tile_registry())
+    finally:
+        spec.clear()
+        spec.update(original)
+    assert validate_tile_registry() == ()
+
+
+def test_composite_exit_order_matches_runtime_first_trigger_order():
+    import combo_pathway_config as registry
+
+    for lane in ("FAMILY_DANISH_CF", "FAMILY_COMMITTED_FADE_TAKER_90",
+                 "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M"):
+        spec = ACTIVE_TILE_REGISTRY[lane]
+        exit_policy = spec["exit_policy"]
+        assert exit_policy["family"] == "COMPOSITE_FIRST_TRIGGER_WINS"
+        order = tuple(registry.registry_live_exit_order(exit_policy))
+        assert tuple(exit_policy["exit_order"]) == order == tuple(spec["live_exit_order"])
+    noes = ACTIVE_TILE_REGISTRY["FAMILY_DANISH_CF_NOES"]
+    assert "EARLY_CUT" not in noes["live_exit_order"]
+    assert noes["early_cut_shadow_reason"]
 
 
 def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
@@ -141,8 +221,16 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     ):
         assert raw in RETIRED_POLICY_IDENTITIES
     assert not hasattr(registry, "COMMITTED_FADE_MIN_SCORE_GAP")
-    assert "INVERTED_SCORE_LED_SIDE" not in taker_time_exit_binding.DIRECTION_SOURCES
-    assert not hasattr(taker_time_exit_binding, "committed_call_refusal")
+    # The generic inverted-side and commit-rule primitives stay only while an
+    # active tile (the committed-fade maker) is registered on them.
+    inverted_users = [lane for lane in ACTIVE_TILE_ORDER
+                      if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
+    assert inverted_users == [
+        "FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
+        "FAMILY_COMMITTED_FADE_MAKER_90", "FAMILY_COMMITTED_FADE_TAKER_90",
+    ]
+    assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
+    assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
         assert schema not in tile_paired_comparison.VERDICT_RULES
         assert schema not in tile_paired_comparison.EXTRA_STATS
@@ -201,7 +289,7 @@ def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
 
 
 def test_default_on_is_refused_for_anything_but_a_paper_only_relay_blocked_tile():
-    lane = "FAMILY_XVENUE_PREMIUM_60S"
+    lane = "FAMILY_COMMITTED_FADE_MAKER_90"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:

@@ -75,11 +75,26 @@ def _fill_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     sign = {"LONG": 1, "SHORT": -1}.get(str(row.get("dir") or row.get("direction") or "").upper())
     if reason in STOP_LIKE_REASONS and stop and exit_price and entry and sign:
         overshoot = sign * (stop - exit_price) / entry * 1e4
+    # Cross-venue triggers stamp shared_ai_call_ts with the evaluator's
+    # evaluated_ts; signal_age_sec/entry_delay start later, at signal creation.
+    call_ts = _ts(row.get("shared_ai_call_ts"))
+    held = _finite(row.get("outcome_duration_sec"))
+    fill_ts = _ts(row.get("fill_ts")) or (close_ts - held if held is not None else None)
+    signal_to_fill = fill_ts - call_ts if call_ts is not None and fill_ts is not None else None
     return {
         "lane": lane, "call": call, "close_ts": close_ts, "pnl_usd": pnl,
         "bp": pnl / notional * 1e4 if notional > 0 else None,
         "reason": reason, "overshoot_bp": overshoot, "side": sign, "entry": entry,
+        "signal_to_fill_sec": signal_to_fill if signal_to_fill is not None and 0 <= signal_to_fill <= 3600 else None,
     }
+
+
+def _median_signal_to_fill_sec(fills: list[dict[str, Any]]) -> float | None:
+    values = sorted(r["signal_to_fill_sec"] for r in fills if r.get("signal_to_fill_sec") is not None)
+    if not values:
+        return None
+    mid = len(values) // 2
+    return round(values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0, 3)
 
 
 def _cluster_ci(rows: Sequence[tuple[float, float]],
@@ -220,82 +235,11 @@ def _paired(by_lane: Mapping[str, list[dict[str, Any]]], a: str, b: str) -> dict
     }
 
 
-def _xvl_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
-    """1 h-cluster CI, UTC-day, Asia-session and single-hour concentration facts."""
-    fills = sorted(fills, key=lambda r: r["close_ts"])
-    bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
-    lo, hi = _cluster_ci(bps, cluster_sec=3600)
-    days: dict[str, float] = {}
-    asia: dict[str, int] = {}
-    hours: dict[int, float] = {}
-    start_h, end_h = pre["promotion"].get("asia_session_utc_hours", (0, 8))
-    for r in fills:
-        moment = datetime.fromtimestamp(r["close_ts"], timezone.utc)
-        day = moment.date().isoformat()
-        days[day] = days.get(day, 0.0) + r["pnl_usd"]
-        if start_h <= moment.hour < end_h:
-            asia[day] = asia.get(day, 0) + 1
-        hour = int(r["close_ts"] // 3600)
-        hours[hour] = hours.get(hour, 0.0) + r["pnl_usd"]
-    total = sum(r["pnl_usd"] for r in fills)
-    first5 = [days[d] for d in sorted(days)[:5]]
-    return {
-        "mean_bp": round(sum(v for _, v in bps) / len(bps), 4) if bps else None,
-        "per_fill_ev_ci95_bp_1h": [lo, hi],
-        "utc_days": len(days),
-        "asia_sessions_qualified": sum(
-            1 for n in asia.values() if n >= pre["promotion"]["min_asia_session_fills"]
-        ),
-        "first_5_days_observed": len(first5),
-        "positive_days_of_first_5": sum(1 for v in first5 if v > 0),
-        "max_single_hour_profit_share": round(max(hours.values()) / total, 4) if fills and total > 0 else None,
-    }
-
-
-def _xvl_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-                 dsr: float | None, now_ts: float) -> dict[str, Any]:
-    promote, kill = pre["promotion"], pre["kill"]
-    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
-    fills = int(stats.get("fills") or 0)
-    mean = stats.get("mean_bp")
-    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
-    kills = []
-    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
-        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_150")
-    if fills >= kill["k2_after_fills"] and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]:
-        kills.append("K2_UPPER_CI_BELOW_HALF_BP_AFTER_400")
-    worst = stats.get("worst_fill_bp")
-    stale_share = stats.get("stale_feed_fill_share")
-    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
-        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
-    ):
-        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
-    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
-        kills.append("K4_DRAWDOWN")
-    share = stats.get("max_single_hour_profit_share")
-    parity = stats.get("replay_parity_gap_bp")
-    latency = stats.get("median_signal_to_fill_sec")
-    overshoot = stats.get("max_lock_or_stop_overshoot_bp")
-    checks = {
-        "min_fills": fills >= promote["min_fills"],
-        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
-        "asia_sessions": (stats.get("asia_sessions_qualified") or 0) >= promote["min_asia_sessions"],
-        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
-        "positive_days_of_first_5": (stats.get("first_5_days_observed") or 0) >= 5
-        and (stats.get("positive_days_of_first_5") or 0) >= promote["min_positive_days_of_first_5"],
-        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
-        "no_hour_dominates": share is not None and share <= promote["max_single_hour_profit_share"],
-        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
-        "signal_to_fill_latency": latency is not None and latency <= promote["max_median_signal_to_fill_sec"],
-        "stops_within_limit": overshoot is None or overshoot <= promote["max_stop_overshoot_bp"],
-    }
-    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
-
-
 def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any], age_days: float,
             *, deflated_sharpe: float | None) -> dict[str, Any]:
     promoted = all(checks.values())
-    if not promoted and age_days > kill["k5_max_days_without_promotion"]:
+    k5 = kill.get("k5_max_days_without_promotion")
+    if not promoted and k5 is not None and age_days > k5:
         kills.append("K5_TIME_BOX_INCONCLUSIVE")
     status = "KILL" if kills else ("PROMOTION_ELIGIBLE_FOR_OWNER_REVIEW" if promoted else "COLLECTING")
     return {
@@ -305,21 +249,22 @@ def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any
     }
 
 
-XVP_SESSIONS_UTC = {"ASIA": (0, 8), "EU": (8, 13), "US": (13, 21)}
+# Session map the committed-fade maker registration (v9) counts session days on.
+DEFAULT_SESSIONS_UTC = {"ASIA": (0, 8), "EU": (8, 13), "US": (13, 21)}
 
 
-def _xvp_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+def _session_side_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
     """1 h-cluster CI, UTC days, per-session days, day concentration and per-side means."""
     fills = sorted(fills, key=lambda r: r["close_ts"])
     bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
     lo, hi = _cluster_ci(bps, cluster_sec=3600)
     days: dict[str, float] = {}
-    sessions: dict[str, set] = {name: set() for name in XVP_SESSIONS_UTC}
+    sessions: dict[str, set] = {name: set() for name in DEFAULT_SESSIONS_UTC}
     for r in fills:
         moment = datetime.fromtimestamp(r["close_ts"], timezone.utc)
         day = moment.date().isoformat()
         days[day] = days.get(day, 0.0) + r["pnl_usd"]
-        for name, (start_h, end_h) in XVP_SESSIONS_UTC.items():
+        for name, (start_h, end_h) in DEFAULT_SESSIONS_UTC.items():
             if start_h <= moment.hour < end_h:
                 sessions[name].add(day)
     total = sum(r["pnl_usd"] for r in fills)
@@ -332,27 +277,28 @@ def _xvp_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dic
         "per_fill_ev_ci95_bp_1h": [lo, hi],
         "utc_days": len(days),
         "session_days": {name: len(v) for name, v in sessions.items()},
-        "session_hours_utc": {k: list(v) for k, v in XVP_SESSIONS_UTC.items()},
+        "session_hours_utc": {k: list(v) for k, v in DEFAULT_SESSIONS_UTC.items()},
         "max_single_day_profit_share": round(max(days.values()) / total, 4) if fills and total > 0 else None,
         "side_mean_bp": {k: (round(sum(v) / len(v), 4) if v else None) for k, v in side_bp.items()},
+        "median_signal_to_fill_sec": _median_signal_to_fill_sec(fills),
     }
 
 
-def _xvp_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-                 dsr: float | None, now_ts: float) -> dict[str, Any]:
-    """Shadow 5 s-delay, replay parity and signal-to-fill facts come from the analyzer's
-    cross-venue report when present; until then those checks stay False (no promotion)."""
+def _committed_fade_maker_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                                  dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """1 h-cluster/session/side/day facts; the 5 s-delay shadow and replay parity
+    stay False until the analyzer supplies them."""
     promote, kill = pre["promotion"], pre["kill"]
-    lo, _ = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
     fills = int(stats.get("fills") or 0)
     mean = stats.get("mean_bp")
     age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
     delay5 = stats.get("shadow_5s_delay_mean_bp")
     kills = []
     if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
-        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_300")
-    if fills >= kill["k2_after_fills"] and delay5 is not None and delay5 < kill["k2_shadow_5s_delay_mean_below_bp"]:
-        kills.append("K2_5S_DELAY_SHADOW_NEGATIVE_AFTER_300")
+        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_80")
+    if fills >= kill["k2_after_fills"] and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]:
+        kills.append("K2_UPPER_CI_BELOW_2BP_AFTER_150")
     worst = stats.get("worst_fill_bp")
     stale_share = stats.get("stale_feed_fill_share")
     if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
@@ -365,7 +311,6 @@ def _xvp_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mappi
     sides = stats.get("side_mean_bp") or {}
     share = stats.get("max_single_day_profit_share")
     parity = stats.get("replay_parity_gap_bp")
-    latency = stats.get("median_signal_to_fill_sec")
     checks = {
         "min_fills": fills >= promote["min_fills"],
         "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
@@ -376,19 +321,71 @@ def _xvp_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mappi
         "both_sides_non_negative": all(
             sides.get(s) is not None and sides[s] >= promote["both_sides_mean_ge_bp"] for s in ("LONG", "SHORT")
         ),
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
         "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
-        "signal_to_fill_latency": latency is not None and latency <= promote["max_median_signal_to_fill_sec"],
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
+def _hypothesis_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """Session/side/day facts with session days counted on the registration's own UTC session map."""
+    out = _session_side_extra_stats(fills, pre)
+    hours = {name: tuple(span) for name, span in pre["promotion"]["session_hours_utc"].items()}
+    sessions: dict[str, set] = {name: set() for name in hours}
+    for r in fills:
+        moment = datetime.fromtimestamp(r["close_ts"], timezone.utc)
+        for name, (start_h, end_h) in hours.items():
+            if start_h <= moment.hour < end_h:
+                sessions[name].add(moment.date().isoformat())
+    out["session_days"] = {name: len(v) for name, v in sessions.items()}
+    out["session_hours_utc"] = {name: list(span) for name, span in hours.items()}
+    return out
+
+
+def _hypothesis_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                        dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """Generic H9+ verdict; replay parity stays False until the analyzer supplies it."""
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    mean = stats.get("mean_bp")
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    kills = []
+    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
+        kills.append(f"K1_MEAN_NOT_POSITIVE_AFTER_{kill['k1_after_fills']}")
+    if (kill.get("k2_after_fills") is not None and fills >= kill["k2_after_fills"]
+            and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]):
+        kills.append(f"K2_UPPER_CI_BELOW_{kill['k2_upper_ci95_lt_bp']:g}BP_AFTER_{kill['k2_after_fills']}")
+    worst = stats.get("worst_fill_bp")
+    stale_share = stats.get("stale_feed_fill_share")
+    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
+        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
+    ):
+        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    sessions = stats.get("session_days") or {}
+    share = stats.get("max_single_day_profit_share")
+    parity = stats.get("replay_parity_gap_bp")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
+        "sessions": all((sessions.get(s) or 0) >= promote["min_sessions_each"] for s in promote["sessions"]),
+        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "no_day_dominates": share is not None and share <= promote["max_single_day_profit_share"],
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
+        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
     }
     return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
 
 
 VERDICT_RULES = {
-    "tile_pre_registration_xvl_v1": _xvl_verdict,
-    "tile_pre_registration_xvp_v1": _xvp_verdict,
+    "tile_pre_registration_committed_fade_maker_v1": _committed_fade_maker_verdict,
+    "tile_pre_registration_hypothesis_v1": _hypothesis_verdict,
 }
 EXTRA_STATS = {
-    "tile_pre_registration_xvl_v1": _xvl_extra_stats,
-    "tile_pre_registration_xvp_v1": _xvp_extra_stats,
+    "tile_pre_registration_committed_fade_maker_v1": _session_side_extra_stats,
+    "tile_pre_registration_hypothesis_v1": _hypothesis_extra_stats,
 }
 
 

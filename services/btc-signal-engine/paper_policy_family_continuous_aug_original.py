@@ -1,4 +1,4 @@
-"""Tile 5: Continuous (Aug-2026 original) — exact replica of the early-August 2026 Continuous tile (paper only).
+"""Continuous (Aug-2026 original) — exact replica of the early-August 2026 Continuous tile (paper only).
 
 Reference: Fly bot v15-typeb-opportunity-v2 at d018ef31 (archive
 C:/Danish HD/Final-Bot-Local-Archive-2026-08-12), before the NO_TRADE prompt

@@ -45,12 +45,17 @@ COLLECTION_FAILURE_COUNTERS: tuple[tuple[str, str], ...] = (
     ("status", "collection.execution_markouts.write_failures"),
     ("status", "collection.execution_markouts.dropped"),
     ("status", "collection.execution_markouts.taker_capture_failures"),
+    ("status", "collection.shadow_exit_recorder.write_failures"),
+    ("status", "collection.shadow_exit_recorder.errors"),
+    ("status", "collection.shadow_exit_recorder.dropped_full"),
     ("status", "collection.microstructure_tape.write_failures_this_process"),
     ("status", "collection.microstructure_tape.io_write_failures_this_process"),
     ("status", "collection.cross_venue_tape.stats.write_failures"),
     ("status", "collection.cross_venue_tape.stats.live_write_failures"),
     ("ready", "cross_venue_health.stats.write_failures"),
     ("ready", "xvl_evaluator_health.write_failures"),
+    ("ready", "indicator_engine_health.write_failures"),
+    ("ready", "indicator_engine_health.compute_failures"),
 )
 
 # Field paths the deployed revision emits; absence means a contract regression
@@ -119,6 +124,27 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
             f"cross-venue lead evaluator stopped ticking: status={xvl.get('status')!r} "
             f"reason={xvl.get('reason')!r} tick_age_s={tick_age} (> {XVL_TICK_STALE_SEC:.0f}s)"
         )
+    slow = []
+    for lane, block in sorted(_dict(xvl.get("lanes")).items()):
+        latency = _dict(_dict(block).get("latency"))
+        if latency.get("status") != "SLOW":
+            continue
+        fill = _dict(_dict(latency.get("stages")).get("signal_to_fill"))
+        slow.append(
+            f"{lane} median signal->fill {fill.get('p50_s')}s (p90 {fill.get('p90_s')}s, n={fill.get('n')}) "
+            f"> {latency.get('target_median_signal_to_fill_s')}s"
+        )
+    if slow:
+        findings["xvl_signal_to_fill_slow"] = (
+            "cross-venue IMMEDIATE tiles miss the pre-registered signal->fill gate: " + "; ".join(slow)
+        )
+    preentry = _dict(xvl.get("preentry_evidence"))
+    if preentry.get("health") == "DEGRADED":
+        findings["preentry_evidence_degraded"] = (
+            f"submit-first pre-entry evidence queue degraded: dead={preentry.get('dead')} "
+            f"barrier_timeouts={preentry.get('barrier_timeouts')} pending={preentry.get('pending')} "
+            f"last_error={preentry.get('last_error')!r}"
+        )
 
     cross = _dict(ready.get("cross_venue_health"))
     collector_age = _num(cross.get("collector_age_s"))
@@ -136,6 +162,14 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
         findings["market_context_stale"] = (
             f"market-context collector {context.get('status')!r} age_sec={context.get('age_sec')} "
             f"stale_feeds={context.get('stale_feeds')}"
+        )
+
+    engine = _dict(ready.get("indicator_engine_health"))
+    if engine.get("status") in ("ENGINE_DOWN", "STALLED", "UNAVAILABLE"):
+        findings["indicator_engine_stalled"] = (
+            f"indicator engine {engine.get('status')!r}: last bar closed "
+            f"{engine.get('last_bar_close_age_sec')}s ago (bars must advance every 180s), "
+            f"live age_sec={engine.get('age_sec')} rows_written={engine.get('rows_written')}"
         )
 
     if paused is False:
@@ -383,6 +417,33 @@ def collection_write_failure_findings(
             + ", ".join(f"{k} +{int(d)}" for k, d in sorted(grew.items())[:8])
         )
     }
+
+
+def shadow_exit_recorder_findings(state: dict[str, Any], status: Mapping[str, Any] | None) -> dict[str, str]:
+    """Observation-only recorder must advance: closed trades submitted since the last run must be drained."""
+    rec = _dict(_dict(_dict(status).get("collection")).get("shadow_exit_recorder"))
+    if not rec or rec.get("enabled") is False:
+        return {}
+    keys = ("submitted", "written", "skipped", "errors", "write_failures")
+    nums = {k: _num(rec.get(k)) for k in keys}
+    if any(v is None for v in nums.values()):
+        return {}
+    counters = state.setdefault("counters", {})
+    previous = counters.get("shadow_exit_recorder")
+    counters["shadow_exit_recorder"] = nums
+    if not isinstance(previous, dict) or nums["submitted"] < (_num(previous.get("submitted")) or 0.0):
+        return {}
+    drained = lambda c: sum(_num(c.get(k)) or 0.0 for k in keys[1:])  # noqa: E731
+    pending = nums["submitted"] - drained(nums)
+    if nums["submitted"] > 0 and rec.get("worker_alive") is False:
+        problem = "worker thread is dead"
+    elif pending > 0 and drained(nums) <= drained(previous) and nums["submitted"] >= previous["submitted"]:
+        problem = f"{int(pending)} submitted path(s) not drained since the previous run"
+    else:
+        return {}
+    return {"shadow_exit_recorder_stalled": (
+        f"shadow-exit recorder not advancing: {problem} (submitted={int(nums['submitted'])}, "
+        f"written={int(nums['written'])}, queue_depth={rec.get('queue_depth')})")}
 
 
 def restart_loop_findings(state: dict[str, Any], status: Mapping[str, Any] | None, now: float) -> dict[str, str]:

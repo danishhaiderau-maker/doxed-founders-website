@@ -25,6 +25,53 @@ same ordered manifest and registry signature at the exact deployed revision.
 6. Deploy only at the required safe boundary, start a clean signed cohort, and
    prove two advancing collection/analyzer cycles before accepting evidence.
 
+A tile that only changes how an existing side rule enters (for example a
+resting maker limit instead of a taker) reuses a generic binding
+(`taker_time_exit_binding.py`, `maker_time_exit_binding.py`,
+`maker_chase_time_exit_binding.py`, `maker_confirm_market_time_exit_binding.py`)
+and adds no runtime branch; its thin
+policy module wraps the binding that matches its registry
+`entry_policy.mode`, and the binding refuses any other mode. The maker-chase
+binding reprices through the generic family chase. A cross-venue clock tile
+supplies `make_evaluator()` and its own shadow file; the per-second loop,
+capacity and submission throttles are generic. A new shadow file must be
+added to the JSONL append literals, research dashboard list, reset
+inventory and `scripts/self_aware/schema_registry.json`.
+
+Every specification carries plain-English card metadata (signal, side,
+order, chase, time limit, sessions and stand-aside gates; live exits in
+first-trigger-wins order; risk: early cut, hard stop, size, max concurrent,
+kill rules). `tile_card_sections(lane)` renders the ENTRY / EXIT / RISK
+MANAGEMENT sections for both dashboards, and the registry validator fails
+if any section is missing. Size is stated as margin and notional
+("$0.25 margin @100x ≈ $25 notional"), never as a maximum loss. Tile
+numbers are derived from `ACTIVE_TILE_ORDER`; never hard-code "Tile N".
+
+The analyzer cycle freezes the active roster into the forward-tracker
+hash chain once per `RESEARCH_STACK_VERSION` (batch
+`REGISTRY-<version>`); bump the version with every roster or rule change.
+
+## Shadow exits
+
+`SHADOW_EXIT_SET` is the one named shadow-exit catalog; a tile's `shadow_exits`
+ids are the ones its card lists. `tile_shadow_exit_set(lane)` translates the
+whole catalog into recorder specs for every tile (including the empty-card
+baseline), each guarded by that tile's own hard stop and `max_duration_sec`
+backstop, with `role` CARD_SHADOW / CATALOG / REFERENCE. The set is metadata
+only: it is outside `policy_signature`, places no order, and is validated by
+`validate_tile_registry()` (family translation, supported kinds, composite
+members). On every closed
+replay buffer the runtime hands the path to the bounded `ShadowExitRecorder`
+worker (`shadow_exit_paths.py`), which writes one `shadow_exit_path_v1` row to
+`shadow_exit_paths.jsonl`: MFE/MAE horizons, a compact minute path, entry
+context, counterfactual entries and every shadow exit scored with REALISTIC_V1
+booking. The analyzer `research/shadow_exit_report.py` builds the "Shadow exits"
+dashboard section; live current-epoch rows are the headline cohort and laptop
+backfill (`research/shadow_exit_backfill.py`) is descriptive archive only.
+Adding a new exit family requires the evaluator, `SHADOW_EXIT_FAMILY_KINDS` and
+tests in one change; retiring a tile removes nothing here because the catalog is
+generic.
+
 ## Baseline benchmark
 
 `FAMILY_CONTINUOUS_AUG_ORIGINAL` is the permanent baseline: paper-only,

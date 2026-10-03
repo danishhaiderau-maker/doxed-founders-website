@@ -97,7 +97,9 @@ try:
         EXECUTION_FIX_VERSION as EXPECTED_BOT_VERSION,
         RESEARCH_DASHBOARD_VERSION,
         ACTIVE_TILE_REGISTRY,
+        active_tile_lifecycle_manifest,
         active_tile_registry_signature,
+        tile_card_sections,
     )
     from pathway_lane_roster import (
         ANALYZER_COMPARE_LANES,
@@ -123,6 +125,12 @@ except ImportError as _registry_exc:
 
     def active_tile_registry_signature() -> str:
         return "REGISTRY_UNAVAILABLE"
+
+    def active_tile_lifecycle_manifest() -> tuple:
+        return ()
+
+    def tile_card_sections(lane: str):
+        return None
 
     def is_ai_focused_lane(lane: str) -> bool:
         u = str(lane or "").upper().strip()
@@ -237,10 +245,12 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "cross_venue_tape_1m.jsonl",
     "xvl_shadow_signals.jsonl",
     "xvp_shadow_signals.jsonl",
+    "xvs_shadow_signals.jsonl",
     "ai_shadow_regime_prompt.jsonl",
     "decision_feature_snapshots.jsonl",
     "market_context_1m.jsonl",
     "liquidations.jsonl",
+    "indicator_bars_v1.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -324,6 +334,7 @@ REPORT_NAV_GROUPS = (
     ("lanes-group", "Strategy Research", (
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
         ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
+        ("indicator-edge", "Indicator Edge", None),
         ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
     )),
     ("trading-group", "Execution", (
@@ -332,6 +343,7 @@ REPORT_NAV_GROUPS = (
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
+        ("shadow-exits", "Shadow Exits", "shadow_exit_report.json"),
     )),
     ("deep-group", "Diagnostics & Exports", (
         ("explorer", "Report Explorer", None),
@@ -4867,6 +4879,26 @@ def api_lanes():
     })
 
 
+@app.route("/api/tile-cards")
+def api_tile_cards():
+    """Registry-ordered ENTRY / EXIT / RISK MANAGEMENT card sections (same generator as the Fly dashboard)."""
+    if REGISTRY_IMPORT_ERROR:
+        return jsonify({"status": "REGISTRY_UNAVAILABLE", "error": REGISTRY_IMPORT_ERROR, "tiles": []})
+    tiles = [
+        {
+            "lane": row["lane"],
+            "tile_number": row["tile_number"],
+            "label": row["label"],
+            "policy_epoch": row["policy_epoch"],
+            "paper_only": row["paper_only"],
+            "relay_eligible": row["relay_eligible"],
+            "card_sections": tile_card_sections(row["lane"]),
+        }
+        for row in active_tile_lifecycle_manifest()
+    ]
+    return jsonify({"status": "OK", "tile_registry_signature": active_tile_registry_signature(), "tiles": tiles})
+
+
 @app.route("/api/chase")
 def api_chase():
     lane = request.args.get("lane") or ""
@@ -5238,6 +5270,11 @@ def api_research_design():
         baseline_replay["episode_receipt_count"] = len(receipts)
         baseline_replay["episode_receipts_omitted"] = True
         baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
+    elif isinstance(baseline_replay, dict) and isinstance(baseline_replay.get("episode_receipts_sidecar"), dict):
+        binding = baseline_replay.pop("episode_receipts_sidecar")
+        baseline_replay["episode_receipt_count"] = binding.get("count")
+        baseline_replay["episode_receipts_omitted"] = True
+        baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
     return jsonify({
         "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True, shadow_source.get("manifest")),
         "schema": "research_design_dashboard_v1",
@@ -5414,6 +5451,11 @@ def api_report(filename):
     if path is None:
         abort(404)
     try:
+        if safe == "entry_baseline_replay_report.json":
+            # Receipts live in a verified gzip sidecar; serve the full report shape.
+            from research.entry_baseline_replay import load_replay_report
+
+            return jsonify(load_replay_report(Path(path)))
         with open(path, encoding="utf-8") as f:
             return jsonify(json.load(f))
     except Exception:
@@ -7103,6 +7145,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   tfoot td { font-weight: 600; border-top: 2px solid var(--border); }
   .receipt-details summary { cursor: pointer; font-weight: 600; }
   .receipt-details pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: inherit; background: rgba(0,0,0,.18); }
+
+  .tile-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,560px),1fr)); gap:12px; margin:10px 0 14px; }
+  .tile-card { min-width:0; border:1px solid #30363d; border-radius:10px; padding:10px 12px; background:#0d1117; }
+  .tile-card-title { font-weight:700; margin-bottom:6px; overflow-wrap:anywhere; }
+  .tile-card-sections { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; font-size:0.82em; line-height:1.42; }
+  .tile-card-section { min-width:0; padding:6px 8px; background:#161b22; border:1px solid #30363d; border-radius:6px; overflow-wrap:anywhere; }
+  .tile-card-section ul { margin:4px 0 0; padding-left:16px; }
+  .tile-card-section.entry { border-left:3px solid #58a6ff; } .tile-card-section.exit { border-left:3px solid #3fb950; } .tile-card-section.risk { border-left:3px solid #f0883e; }
+  .tile-card-head { font-weight:700; letter-spacing:0.04em; }
+  .tile-card-sub, .tile-card-shadow { color:#8b949e; margin-top:4px; }
 </style></head><body>
 {% if registry_error %}<div id="registry-unavailable-banner" class="stale-banner" style="display:block"><strong>REGISTRY UNAVAILABLE</strong> — the canonical tile registry could not be imported, so no roster, sync id or signature can be verified. Every figure on this page is unverified. ({{ registry_error }})</div>{% endif %}
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
@@ -7173,6 +7225,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Current Lane Analysis</h2>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
     <p class="note" id="lanes-evidence-note"></p>
+    <div id="tile-cards" class="tile-cards"></div>
     <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual outcomes are not actual fills or executed PnL. Both paper and counterfactual evidence may support research qualification under the same completeness, execution-model and holdout gates; model-supported results do not prove live fills.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Win %</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
@@ -7224,6 +7277,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
+  </section>
+  <section id="sec-indicator-edge">
+    <h2>Indicator Edge - forward-scored indicators from our own data</h2>
+    <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>OBSERVATION ONLY - FORWARD, PRE-REGISTERED</strong> - 52 indicators computed on closed 3-minute bars from the Fly 1 s Bitfinex tape, cross-venue feeds, funding, OI and liquidations. Each is scored only on bars closed after its hash-chained freeze: mid move in the signal direction at +3/+15/+60/+120 min, minus a 2 bp round trip, entering 2 s (and 9 s) after the decision. No tile, order or relay is affected.</div>
+    <p class="note" id="indicator-edge-note">Loading indicator edge...</p>
+    <div class="kpis" id="indicator-edge-kpis"></div>
+    <h3>Today in plain English</h3>
+    <div class="note" id="indicator-edge-daily" style="max-width:1100px;line-height:1.5;"></div>
+    <h3>Indicator availability (latest healthy bar)</h3>
+    <div class="note" id="indicator-edge-availability"></div>
+    <h3>Ranking <select id="indicator-edge-filter"><option value="all">All features</option><option value="independent">Independent only (best of each |rho| &gt; 0.7 cluster)</option><option value="labelled">HINT and PROMISING only</option></select></h3>
+    <p class="note">Labels: HINT = 3+ scored days, sign held every day and net &gt; 0 after costs. PROMISING = 7+ days, Benjamini-Hochberg significant (1 h-cluster bootstrap), sign held on 5 of 7 days, positive in 2+ sessions and still positive at 9 s latency. Everything else is NOISE. Only PROMISING features feed the week-2 combination grid.</p>
+    <table id="indicator-edge-table"><thead id="indicator-edge-head"></thead><tbody id="indicator-edge-body"></tbody></table>
+    <h3>Correlation clusters</h3>
+    <div class="note" id="indicator-edge-clusters"></div>
+    <h3>Combination grid (week 2, PROMISING only)</h3>
+    <p class="note" id="indicator-edge-combos-note"></p>
+    <table id="indicator-edge-combos-table"><thead><tr><th>Combination</th><th>Family</th><th>Label</th><th>Forward days</th><th>Signals</th><th>Hit %</th><th>Net bp</th><th>q (FDR)</th></tr></thead><tbody id="indicator-edge-combos"></tbody></table>
   </section>
   <section id="sec-combos">
     <h2>Policy Genome Grid - simulated over all collected data</h2>
@@ -7542,6 +7613,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
+  <section id="sec-shadow-exits">
+    <h2>Shadow exits &mdash; every exit idea on the same recorded paths</h2>
+    <p class="note" id="shadow-exits-note">Loading shadow-exit report&hellip;</p>
+    <div class="kpis" id="shadow-exits-kpis"></div>
+    <div id="shadow-exits-body"></div>
+    <p class="note">Observation only: shadow exits never place, change or cancel an order. Composites are first-trigger-wins. Give-back = in at least the meaningful profit before the exit, then closed negative. JSON: <a href="/api/research/shadow_exits">/api/research/shadow_exits</a>.</p>
+  </section>
   <section id="sec-runtime-incidents">
     <h2>Runtime incident &amp; restart history</h2>
     <p class="note" id="runtime-incidents-note">Loading retained application crash receipts…</p>
@@ -7655,6 +7733,7 @@ const EVIDENCE_SCOPES = {
   'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
+  'indicator-edge': ['FORWARD PRE-REGISTERED INDICATOR SCORING - OBSERVATION ONLY', 'Bars closed after the hash-chained freeze only; labels follow the frozen rules and FDR family. Not a tile and not a qualification result.'],
   combos: ['POLICY GRID FRESHNESS UNVERIFIED', 'Waiting for policy-report source and generation receipts. Legacy executed evidence remains separate; no current-epoch claim is established yet.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared exit report and freshness receipts. Paper and shadow/lab evidence remain separate.'],
@@ -7671,6 +7750,7 @@ const EVIDENCE_SCOPES = {
   'runtime-incidents': ['RETAINED APPLICATION RECEIPTS', 'Application watchdog/crash receipts are shown separately. Fly platform and deployment causes remain unavailable unless an authoritative platform receipt exists.'],
   'pathway-audit': ['MIXED INTEGRITY REPORTS', 'Combines current runtime checks with historical lane/report contracts.'],
   horizon: ['LEGACY POST-EXIT REPLAY', 'Historical recovery/horizon evidence; not the current pinned policy grid.'],
+  'shadow-exits': ['OBSERVATION-ONLY SHADOW EXITS \u2014 REALISTIC_V1', 'Every configured exit replayed on the same recorded trade/signal path. Live current-epoch recorder rows are the headline; laptop backfill is descriptive archive evidence and never ranks.'],
 };
 const navEl = document.getElementById('nav');
 const subnavEl = document.getElementById('subnav');
@@ -8142,7 +8222,34 @@ function laneEvidenceMetric(current, row, field, money=false) {
   const value = money ? fmtExecutionUsd(row[field]) : row[field];
   return stale ? value + ' · stale since ' + (current.stale_since || 'unknown') : value;
 }
+function tileCardEsc(s) {
+  return String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+}
+function tileCardList(rows) {
+  return '<ul>' + (rows || []).map(r => '<li>' + tileCardEsc(r) + '</li>').join('') + '</ul>';
+}
+async function loadTileCards() {
+  const host = document.getElementById('tile-cards');
+  if (!host) return;
+  try {
+    const d = await (await fetch('/api/tile-cards')).json();
+    host.innerHTML = (d.tiles || []).map(t => {
+      const cs = t.card_sections || {};
+      const ex = cs.exit || {};
+      return '<div class="tile-card"><div class="tile-card-title">Tile ' + t.tile_number + ' · ' + tileCardEsc(t.label) + '</div>'
+        + '<div class="tile-card-sections">'
+        + '<div class="tile-card-section entry"><div class="tile-card-head">ENTRY</div>' + tileCardList(cs.entry) + '</div>'
+        + '<div class="tile-card-section exit"><div class="tile-card-head">EXIT</div><div class="tile-card-sub">Live, ' + tileCardEsc(ex.order || 'first trigger wins') + ':</div>' + tileCardList(ex.live)
+        + '<div class="tile-card-sub">Shadow-only (recorded, never executed):</div><div class="tile-card-shadow">' + tileCardEsc((ex.shadow || []).join(' · ') || 'none') + '</div></div>'
+        + '<div class="tile-card-section risk"><div class="tile-card-head">RISK MANAGEMENT</div>' + tileCardList(cs.risk) + '</div>'
+        + '</div></div>';
+    }).join('') || '<p class="note">Tile registry unavailable.</p>';
+  } catch (e) {
+    host.innerHTML = '<p class="note">Tile cards unavailable: ' + tileCardEsc(e) + '</p>';
+  }
+}
 async function loadLanes() {
+  loadTileCards();
   const rCurrent = await fetch('/api/lanes');
   const current = await rCurrent.json();
   const noteCurrent = document.getElementById('lanes-filter-note');
@@ -9669,6 +9776,139 @@ async function loadRuntimeIncidents() {
   ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
 }
 
+async function loadShadowExits() {
+  const esc = value => String(value == null ? '' : value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+  const num = (v, d = 2) => v == null || Number.isNaN(Number(v)) ? '-' : Number(v).toFixed(d);
+  const pct = v => v == null ? '-' : (100 * Number(v)).toFixed(1) + '%';
+  const ci = pair => Array.isArray(pair) && pair[0] != null ? `[${num(pair[0], 1)}, ${num(pair[1], 1)}]` : '';
+  const note = document.getElementById('shadow-exits-note');
+  const body = document.getElementById('shadow-exits-body');
+  let d;
+  try {
+    const r = await fetch('/api/research/shadow_exits');
+    d = await r.json();
+  } catch (err) {
+    note.textContent = 'Shadow-exit report unavailable: ' + err;
+    body.innerHTML = '';
+    return;
+  }
+  if (d.status !== 'OK') {
+    note.textContent = 'Shadow-exit report unavailable: ' + (d.empty_reason || d.status || 'unknown') + '. Nothing is inferred until a report exists.';
+    document.getElementById('shadow-exits-kpis').innerHTML = '';
+    body.innerHTML = '';
+    return;
+  }
+  const cov = d.coverage || {};
+  const src = cov.by_source || {};
+  note.textContent = `Generated ${esc((d.generated_at || '').slice(0, 19))}Z (age ${num((d.age_sec || 0) / 60, 0)} min) · fill model ${esc((d.fill_model || {}).fill_model || '-')} · meaningful profit ${num(d.meaningful_profit_bp, 0)} bp · market context joined ${cov.market_context_joined || 0}/${cov.records || 0}.`;
+  document.getElementById('shadow-exits-kpis').innerHTML = [
+    ['Live recorder rows', src.RUNTIME_REPLAY || 0],
+    ['Backfill: replay rows', src.BACKFILL_SIGNAL_REPLAY || 0],
+    ['Backfill: 1s-tape signals', src.BACKFILL_TAPE_1S || 0],
+    ['Exit sets', Object.keys(d.shadow_exit_sets || {}).length],
+  ].map(([k, v]) => `<div class="kpi"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  const table = (rows, caption) => {
+    if (!rows || !rows.length) return '';
+    const sorted = rows.slice().sort((a, b) => (b.ev_bp ?? -1e9) - (a.ev_bp ?? -1e9));
+    return `<table class="shadow-exit-table"><caption>${esc(caption)}</caption><thead><tr><th>Exit</th><th>Kind</th><th>N</th><th>EV bp/signal</th><th>EV 95% CI</th><th>Win</th><th>Win CI</th><th>Give-back</th><th>Gave back of meaningful</th><th>Exit min</th><th>Δ vs actual</th><th>Δ vs hold</th></tr></thead><tbody>` +
+      sorted.map(x => `<tr><td>${esc(x.id)}</td><td>${esc(x.kind)}</td><td>${esc(x.n)}</td><td>${num(x.ev_bp)}</td><td>${ci(x.ci_bp)}</td><td>${pct(x.win_rate)}</td><td>${Array.isArray(x.win_rate_ci) && x.win_rate_ci[0] != null ? `[${pct(x.win_rate_ci[0])}, ${pct(x.win_rate_ci[1])}]` : ''}</td><td>${pct(x.giveback_rate)}</td><td>${pct(x.giveback_rate_of_meaningful)}</td><td>${num(x.mean_exit_min, 1)}</td><td>${num(x.delta_vs_actual_bp)}</td><td>${num(x.delta_vs_hold_to_horizon_bp)}</td></tr>`).join('') +
+      '</tbody></table>';
+  };
+  const cohorts = Object.values(d.cohorts || {});
+  body.innerHTML = cohorts.map(c => {
+    const groups = (c.groups || []).filter(g => (g.exits || []).length || (g.signal_taker_exits || []).length);
+    const head = `<h3>${esc(c.cohort)} <span class="note">${esc(c.role)} · ${esc(c.records)} records</span></h3>`;
+    if (!groups.length) return head + '<p class="note">No records in this cohort yet.</p>';
+    return head + groups.map(g =>
+      `<details ${c.cohort === d.headline_cohort ? 'open' : ''}><summary>${esc(g.group)} — ${esc(g.filled)} filled trades, ${esc(g.unfilled_signals)} unfilled signals</summary>` +
+      table(g.exits, 'Paper trades: shadow exits on the executable path after the fill') +
+      table(g.signal_taker_exits, 'Unfilled signals: shadow exits on the REALISTIC_V1 taker-at-signal counterfactual path') +
+      '</details>').join('');
+  }).join('');
+}
+
+function ieNum(v, digits = 2, signed = false) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+  const n = Number(v);
+  return (signed && n > 0 ? '+' : '') + n.toFixed(digits);
+}
+
+let INDICATOR_EDGE = null;
+
+function renderIndicatorEdgeTable() {
+  const d = INDICATOR_EDGE || {};
+  const mode = (document.getElementById('indicator-edge-filter') || {}).value || 'all';
+  const rows = (d.features || []).filter(f => mode === 'all' || (mode === 'independent' ? f.independent : f.label !== 'NOISE'));
+  const labelColor = {PROMISING: '#3fb950', HINT: '#d29922', NOISE: '#8b949e'};
+  document.getElementById('indicator-edge-head').innerHTML = sortHead(['#', 'Feature', 'Label', 'Window', 'Signals / day', 'Hit %', 'Net bp 2 s / 9 s', 'Rank IC', 'Top-bottom bp', 'MFE / MAE bp', 'q (FDR)', 'Best regime', 'Cluster']);
+  document.getElementById('indicator-edge-body').innerHTML = rows.map((f, i) => {
+    const b = f.best || {};
+    return `<tr><td>${i + 1}</td><td title="${escapeHtml(f.family + ' / ' + f.role)}">${escapeHtml(f.feature)}</td>`
+      + `<td style="color:${labelColor[f.label] || '#c9d1d9'};font-weight:600">${escapeHtml(f.label)}</td>`
+      + `<td>+${escapeHtml(String(f.best_window_min))}m</td><td>${ieNum(f.signals_per_day, 1)}</td>`
+      + `<td>${b.hit_rate === null || b.hit_rate === undefined ? '-' : (100 * b.hit_rate).toFixed(1)}</td>`
+      + `<td>${ieNum(b.mean_net_bp, 2, true)} / ${ieNum(b.mean_net_bp_9s, 2, true)}</td>`
+      + `<td>${ieNum(b.rank_ic, 3, true)}</td><td>${ieNum(b.top_bottom_spread_bp, 2, true)}</td>`
+      + `<td>${ieNum(b.mfe_bp, 1, true)} / ${ieNum(b.mae_bp, 1, true)}</td><td>${ieNum(b.q_value, 3)}</td>`
+      + `<td>${escapeHtml(f.best_regime || '-')}</td><td>${f.independent ? 'independent' : escapeHtml('-> ' + (f.cluster_rep || ''))}</td></tr>`;
+  }).join('') || '<tr><td colspan="13">No scored features yet.</td></tr>';
+}
+
+async function loadIndicatorEdge() {
+  const note = document.getElementById('indicator-edge-note');
+  let d;
+  try {
+    const r = await fetch('/api/research/indicator_edge');
+    d = await r.json();
+  } catch (e) {
+    note.textContent = 'Indicator edge unavailable: ' + e;
+    return;
+  }
+  INDICATOR_EDGE = d;
+  setEvidenceScope('indicator-edge', ...EVIDENCE_SCOPES['indicator-edge']);
+  if (d.status === 'UNAVAILABLE') {
+    note.textContent = 'No indicator edge report yet (' + (d.reason || 'missing') + '). The scorer runs with the 2-hourly genome grid task.';
+    ['indicator-edge-kpis', 'indicator-edge-daily', 'indicator-edge-availability', 'indicator-edge-body', 'indicator-edge-clusters', 'indicator-edge-combos'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    return;
+  }
+  const pre = d.prereg || {}, inp = d.inputs || {}, lc = d.label_counts || {}, inv = (d.status_inventory || {}).counts || {};
+  const age = d.age_sec === null || d.age_sec === undefined ? '-' : (d.age_sec / 3600).toFixed(1) + ' h ago';
+  note.textContent = `Scorer status ${d.status}; generated ${d.generated_at || '-'} (${age}); bars ${inp.first_bar_utc || '-'} to ${inp.last_bar_utc || '-'}.`;
+  document.getElementById('indicator-edge-kpis').innerHTML = [
+    ['Scored days', String(d.scored_days ?? 0)],
+    ['Eligible bars / shipped', `${inp.eligible_rows ?? 0} / ${inp.bar_rows ?? 0}`],
+    ['PROMISING / HINT / NOISE', `${lc.PROMISING ?? 0} / ${lc.HINT ?? 0} / ${lc.NOISE ?? 0}`],
+    ['Independent signals', String((d.clusters || {}).independent_count ?? 0)],
+    ['Indicators available / warming / unavailable', `${inv.AVAILABLE ?? 0} / ${inv.WARMING_UP ?? 0} / ${inv.UNAVAILABLE ?? 0}`],
+    ['Trials in the FDR family', String(d.trial_count ?? '-')],
+    ['Pre-registration', pre.prereg_id ? `${pre.prereg_id} (${String(pre.line_sha || '').slice(0, 12)})` : 'NOT FROZEN'],
+    ['Chain', (pre.chain || {}).chain_ok ? 'intact' : 'BROKEN'],
+  ].map(([l, v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
+  const ds = d.daily_summary || {};
+  document.getElementById('indicator-edge-daily').innerHTML = escapeHtml(ds.paragraph || 'No daily summary yet.')
+    + (ds.intraday_paragraph ? `<br><span style="opacity:.75">Latest run: ${escapeHtml(ds.intraday_paragraph)}</span>` : '');
+  const groups = {};
+  ((d.status_inventory || {}).indicators || []).forEach(x => { (groups[x.status] = groups[x.status] || []).push(`${x.num} ${x.id}`); });
+  document.getElementById('indicator-edge-availability').innerHTML = Object.keys(groups).sort().map(k =>
+    `<div><strong>${escapeHtml(k)}</strong> (${groups[k].length}): ${escapeHtml(groups[k].join(', '))}</div>`).join('') || 'No bars yet.';
+  renderIndicatorEdgeTable();
+  const cl = d.clusters || {};
+  document.getElementById('indicator-edge-clusters').innerHTML = (cl.clusters || []).map(c =>
+    `<div><strong>${escapeHtml(c.representative)}</strong> keeps: ${escapeHtml(c.members.filter(m => m !== c.representative).join(', '))}</div>`).join('') || 'No clusters above the threshold.';
+  const co = d.combinations || {};
+  document.getElementById('indicator-edge-combos-note').textContent = `${co.status || 'GATED'}: ${co.gate_reason || 'not evaluated'}; frozen variants ${co.frozen_variants ?? 0}; tile-package proposals ${(co.tile_proposals || []).length} (proposals only - never registered automatically).`;
+  document.getElementById('indicator-edge-combos').innerHTML = (co.rows || []).map(r => {
+    const s = r.stats || {};
+    return `<tr><td>${escapeHtml(r.combo_id)}</td><td>${escapeHtml(r.family)}</td><td>${escapeHtml(r.label)}</td><td>${r.forward_days ?? 0}</td><td>${s.signals ?? 0}</td>`
+      + `<td>${s.hit_rate === null || s.hit_rate === undefined ? '-' : (100 * s.hit_rate).toFixed(1)}</td><td>${ieNum(s.mean_net_bp, 2, true)}</td><td>${ieNum(s.q_value, 3)}</td></tr>`;
+  }).join('');
+  sortableTable('indicator-edge-table');
+  const filt = document.getElementById('indicator-edge-filter');
+  if (filt && !filt.dataset.bound) { filt.dataset.bound = '1'; filt.addEventListener('change', renderIndicatorEdgeTable); }
+}
+
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
   lanes: [loadLanes],
@@ -9676,11 +9916,13 @@ const SECTION_LOADERS = {
   'chase-policy-lab': [loadChasePolicyLab],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
   combos: [loadGenomeGrid, loadMixMatch, loadCombos], 'spread-perf': [loadSpreadPerf],
+  'indicator-edge': [loadIndicatorEdge],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+  'shadow-exits': [loadShadowExits],
 };
 const SECTION_REFRESHES = new Map();
 
@@ -10094,6 +10336,64 @@ _RESEARCH_CONTRACT_KEYS = (
 )
 
 
+INDICATOR_EDGE_REPORT_PATH = Path(
+    os.getenv("ANALYZER_INDICATOR_EDGE_REPORT")
+    or r"C:\DoxxedCrypto\analyzer-exports\indicator-edge\indicator_edge_report.json"
+)
+_INDICATOR_EDGE_PASSTHROUGH = (
+    "generated_at", "feature_set_version", "feature_set_sha", "prereg", "rules", "trial_count", "scored_features",
+    "inputs", "label_counts", "scored_days", "status_inventory", "top5", "daily_summary", "compute_sec",
+)
+_INDICATOR_EDGE_WINDOW_KEYS = ("label", "signals", "hit_rate", "mean_net_bp", "mean_net_bp_9s", "mean_exec_bp",
+                               "rank_ic", "top_bottom_spread_bp", "mfe_bp", "mae_bp", "q_value")
+
+
+def _indicator_edge_payload(args: dict) -> tuple[dict, int]:
+    """Compact Indicator Edge report; ``feature=<id>`` returns one feature with its daily and regime splits."""
+    try:
+        report = json.loads(INDICATOR_EDGE_REPORT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"schema": "indicator_edge_dashboard_v1", "status": "UNAVAILABLE",
+                "reason": f"{type(exc).__name__}: {exc}"[:300], "report_path": str(INDICATOR_EDGE_REPORT_PATH)}, 404
+    feats = report.get("features") or []
+    if args.get("feature"):
+        hit = next((f for f in feats if f.get("feature") == args["feature"]), None)
+        if hit is None:
+            return {"schema": "indicator_edge_feature_v1", "status": "UNKNOWN_FEATURE", "feature": args["feature"]}, 404
+        return {"schema": "indicator_edge_feature_v1", "status": "OK", "generated_at": report.get("generated_at"),
+                "feature": hit}, 200
+    if args.get("label"):
+        feats = [f for f in feats if f.get("label") == args["label"].upper()]
+    if args.get("independent") in ("1", "true"):
+        feats = [f for f in feats if f.get("independent")]
+    generated = _dashboard_sections._parse_ts(report.get("generated_at"))
+    combos = report.get("combinations") or {}
+    clusters = report.get("clusters") or {}
+    return {
+        "schema": "indicator_edge_dashboard_v1", "status": report.get("status"),
+        "report_path": str(INDICATOR_EDGE_REPORT_PATH),
+        "age_sec": round(time.time() - generated, 1) if generated else None,
+        **{key: report.get(key) for key in _INDICATOR_EDGE_PASSTHROUGH},
+        "clusters": {k: clusters.get(k) for k in ("threshold_abs_rho", "independent_count", "representatives", "clusters")},
+        "combinations": {**{k: combos.get(k) for k in ("grid_id", "status", "gate_reason", "shape", "frozen_variants",
+                                                       "newly_frozen", "tile_proposals")},
+                         "rows": [{k: r.get(k) for k in ("combo_id", "family", "variant", "label", "forward_days")}
+                                  | {"stats": {k: (r.get("stats") or {}).get(k) for k in _INDICATOR_EDGE_WINDOW_KEYS}}
+                                  for r in (combos.get("rows") or [])[:100]]},
+        "features": [{k: f.get(k) for k in ("feature", "indicator", "num", "family", "role", "variant", "label",
+                                            "best_window_min", "best_regime", "signals_per_day", "best",
+                                            "cluster_rep", "independent")}
+                     | {"by_window": {w: {k: t.get(k) for k in _INDICATOR_EDGE_WINDOW_KEYS}
+                                      for w, t in (f.get("windows") or {}).items()}} for f in feats],
+    }, 200
+
+
+@app.route("/api/research/indicator_edge")
+def api_research_indicator_edge():
+    payload, status = _indicator_edge_payload(request.args.to_dict())
+    return jsonify(payload), status
+
+
 @app.route("/api/research")
 def api_research_index():
     out = _research_cache.index(RESEARCH_API_DIR / _research_cache.DB_NAME)
@@ -10106,8 +10406,43 @@ def api_research_index():
                        "/api/research/policy_totals?holdout_verdict=FAILED_HOLDOUT&q=FADE",
                        "/api/research/regime_map?cohort=AI_DECISION&regime=trend&sort=oos_ev_bp",
                        "/api/research/forward_tracker?verdict=FORWARD_CONFIRMED",
+                       "/api/research/indicator_edge", "/api/research/indicator_edge?label=HINT&independent=1",
                        "/api/research/mix_match_structures?cohort=XVENUE_EVALUATOR&sort=nested_oos_fine.ev_bp"]
     return jsonify(out)
+
+
+SHADOW_EXIT_REPORT_PATH = Path(
+    os.getenv("ANALYZER_SHADOW_EXIT_REPORT")
+    or r"C:\DoxxedCrypto\analyzer-exports\shadow-exits\shadow_exit_report.json"
+)
+SHADOW_EXIT_REPORT_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _shadow_exit_payload() -> dict:
+    try:
+        if SHADOW_EXIT_REPORT_PATH.stat().st_size > SHADOW_EXIT_REPORT_MAX_BYTES:
+            return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE", "empty_reason": "REPORT_TOO_LARGE"}
+        report = json.loads(SHADOW_EXIT_REPORT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"schema": "shadow_exit_dashboard_v1", "status": "MISSING", "empty_reason": "NO_SHADOW_EXIT_REPORT",
+                "report_path": str(SHADOW_EXIT_REPORT_PATH)}
+    except (OSError, ValueError) as exc:
+        return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE",
+                "empty_reason": f"REPORT_UNREADABLE:{type(exc).__name__}"}
+    if not isinstance(report, dict) or report.get("schema") != "shadow_exit_report_v1":
+        return {"schema": "shadow_exit_dashboard_v1", "status": "UNAVAILABLE", "empty_reason": "REPORT_SCHEMA_MISMATCH"}
+    try:
+        generated = datetime.strptime(str(report.get("generated_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        generated = None
+    return {"schema": "shadow_exit_dashboard_v1", "status": "OK", "report_path": str(SHADOW_EXIT_REPORT_PATH),
+            "age_sec": round(time.time() - generated, 1) if generated else None, **report}
+
+
+@app.route("/api/research/shadow_exits")
+def api_research_shadow_exits():
+    return jsonify(_shadow_exit_payload())
 
 
 @app.route("/api/research/<dataset>")
