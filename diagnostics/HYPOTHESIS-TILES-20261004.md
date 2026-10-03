@@ -187,8 +187,12 @@ was written during this work.
    - mirror parity passes;
    - the first analyzer cycle reports `registry_freeze.status = FROZEN`;
    - two advancing collection/analyzer cycles.
-4. Tiles stay OFF until the owner switches them on. A toggle never arms
-   Bitfinex.
+4. The registry default is OFF. Per Danish's directive (one final
+   integrated release, wipe, fresh epoch, ALL tiles ON), the post-deploy gate
+   turns every registry tile ON for paper. All tiles stay relay-ineligible,
+   and a toggle never arms Bitfinex. The current `PAPER_TILES_HOLD_OFF` value
+   names XVL/XVP, which no longer exist in the roster, so it becomes a no-op;
+   clear it after deploy.
 5. Owner follow-ups, not in this PR:
    - CFM adopting composite + cut (needs a new signed policy identity);
    - any relay eligibility (needs explicit approval plus the qualification
