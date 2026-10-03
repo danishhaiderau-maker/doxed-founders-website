@@ -43153,9 +43153,9 @@ def _monitor_summary_payload(now: float) -> dict:
     scheduled = progress.get("scheduled_ai_cycle") or {}
     evidence = progress.get("post_ai_evidence") or {}
     armable, arm_block_reason, _ = can_open_live_entry(require_armed=False, now=now)
-    relay_arm_block = _relay_delivery_guard.arming_block_reason(now)
-    if armable and relay_arm_block:
-        armable, arm_block_reason = False, relay_arm_block
+    relay_gate_block = _relay_delivery_guard.arming_block_reason(now)
+    if armable and relay_gate_block:
+        armable, arm_block_reason = False, relay_gate_block
     xvl = _monitor_part(xvl_evaluator_snapshot)
     cross_venue = _monitor_part(cross_venue_health_snapshot)
     market_context = _monitor_part(market_context_health_snapshot)
