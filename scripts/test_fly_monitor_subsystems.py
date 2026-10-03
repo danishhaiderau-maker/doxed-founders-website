@@ -120,6 +120,19 @@ def test_xvl_signal_to_fill_slow_only_when_the_runtime_gate_says_slow():
         assert "xvl_signal_to_fill_slow" not in found
 
 
+def test_preentry_evidence_degraded_only_on_dead_receipts_or_barrier_timeouts():
+    block = {"status": "DEGRADED", "tick_age_s": 0.8, "lanes": {}, "preentry_evidence": {
+        "health": "DEGRADED", "dead": 1, "barrier_timeouts": 0, "pending": 0, "last_error": "V3_LANE_DECISION not durable",
+    }}
+    found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", block), paused=False)
+    assert "dead=1" in found["preentry_evidence_degraded"]
+    assert "preentry_evidence_degraded" in alerts.POLICIES
+    for health in ("OK", "SYNC_FALLBACK", "DISABLED"):
+        block["preentry_evidence"]["health"] = health
+        found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", block), paused=False)
+        assert "preentry_evidence_degraded" not in found
+
+
 def test_cross_venue_down_or_collector_age_but_not_disabled():
     down = _with(READY, "cross_venue_health", {"status": "DOWN", "reason": "COLLECTOR_HEARTBEAT_STALE",
                                                "collector_age_s": 400.0, "stale_venues": []})

@@ -3552,6 +3552,9 @@ def _write_pending_order_evidence(job: dict) -> None:
     payload = job.get("payload") or {}
     order = payload.get("order") or {}
     master_signal = payload.get("signal") or {}
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(order, master_signal)
     collector_bridge = globals().get("_promote_collector_v22_registered_order")
     if callable(collector_bridge):
         collector_bridge(order, master_signal)
@@ -14150,6 +14153,9 @@ def _restore_collector_v22_provisionals() -> int:
     global _collector_v22_last_merge
     restored = _merge_collector_v22_provisionals(reason="STARTUP")
     _collector_v22_last_merge = time.time()
+    preentry_replay = globals().get("_replay_preentry_evidence_handoffs")
+    if callable(preentry_replay):
+        preentry_replay()
     replay = globals().get("_replay_cancellation_evidence_handoffs")
     if callable(replay):
         replay()
@@ -14921,6 +14927,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
     if not isinstance(source, dict):
         return None
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(source)
     if not _collector_source_in_current_epoch(source):
         logger.warning(
             "[COLLECTOR_V22] stale pre-reset source refused during maturation "
@@ -15206,6 +15215,9 @@ def _refresh_collector_v22_registered_order_evidence(
         return False
     if not isinstance(order, dict):
         return False
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(order, signal)
     tid = str(order.get("trade_id") or "")
     source = _order_multiverse_pending_src.get(tid)
     if not tid or not isinstance(source, dict) or source.get("collector_rejected"):
@@ -15551,6 +15563,9 @@ def _write_fill_evidence_handoff(job: dict) -> None:
     trade_id = str(receipt.get("trade_id") or "")
     if not receipt_id or not expected_epoch_id or not trade_id:
         raise ValueError("fill evidence receipt identity is incomplete")
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(receipt, receipt.get("order_snapshot"), receipt.get("signal_snapshot"))
     if _collector_v22_epoch_id() != expected_epoch_id:
         if not _append_fill_evidence_handoff({
             "schema": "fill_evidence_handoff_result_v1",
@@ -15807,6 +15822,343 @@ def _enqueue_fill_evidence_handoff(
             "[EVIDENCE GAP]"
         )
         return False
+
+
+# Submit-first pre-entry evidence for the cross-venue signal-clock tiles. The
+# research rows written between a trigger and its paper order (V3 lane decision,
+# provisional multiverse event, duplicate-intent audit) are fsync'd to a
+# journal before the order, then materialized by one worker. Any writer of later
+# evidence for the same call/trade first drains every earlier pending receipt
+# (FIFO prefix) under the collector lock, so a terminal or lifecycle row can
+# never precede its provisional rows. A failed, stale or backlogged queue turns
+# deferral off and the synchronous fail-closed path is used again.
+PREENTRY_EVIDENCE_DEFERRAL_ENABLED = os.getenv("PREENTRY_EVIDENCE_DEFERRAL", "1").strip() == "1"
+PREENTRY_EVIDENCE_PENDING_SCHEMA = "pre_entry_evidence_handoff_pending_v1"
+PREENTRY_EVIDENCE_RESULT_SCHEMA = "pre_entry_evidence_handoff_result_v1"
+PREENTRY_EVIDENCE_KINDS = ("V3_LANE_DECISION", "MULTIVERSE_PROVISIONAL", "DUPLICATE_INTENT_AUDIT")
+PREENTRY_EVIDENCE_MAX_PENDING = 32
+PREENTRY_EVIDENCE_MAX_PENDING_AGE_SEC = 30.0
+PREENTRY_EVIDENCE_FAILURE_COOLDOWN_SEC = 600.0
+PREENTRY_EVIDENCE_MAX_ATTEMPTS = 3
+PREENTRY_EVIDENCE_BARRIER_TIMEOUT_SEC = 10.0
+PREENTRY_EVIDENCE_COMPACT_BYTES = 8 * 1024 * 1024
+_preentry_evidence_lock = threading.Lock()
+_preentry_evidence_journal_lock = threading.Lock()
+_preentry_evidence_tls = threading.local()
+_preentry_evidence_pending = collections.OrderedDict()
+_preentry_evidence_seq = 0
+_preentry_evidence_worker = None
+_preentry_evidence_status = {
+    "enqueued": 0, "applied": 0, "epoch_preserved": 0, "failures": 0, "dead": 0,
+    "journal_failures": 0, "barrier_drains": 0, "barrier_timeouts": 0, "replayed": 0,
+    "compactions": 0, "sync_fallbacks": 0, "last_failure_ts": 0.0, "last_error": None,
+    "last_apply_lag_s": None, "max_apply_lag_s": 0.0,
+}
+
+
+def _preentry_evidence_journal_path() -> str:
+    return os.path.join(str(_data_sync_runtime_root()), "pre_entry_evidence_handoffs.jsonl")
+
+
+def _preentry_evidence_count(key: str, amount=1) -> None:
+    with _preentry_evidence_lock:
+        _preentry_evidence_status[key] = _preentry_evidence_status.get(key, 0) + amount
+
+
+def _preentry_evidence_failed(error: str) -> None:
+    with _preentry_evidence_lock:
+        _preentry_evidence_status["failures"] += 1
+        _preentry_evidence_status["last_failure_ts"] = time.time()
+        _preentry_evidence_status["last_error"] = str(error)[:240]
+
+
+def _preentry_evidence_ready() -> bool:
+    """Deferral is allowed only while the queue is healthy and keeping up."""
+    if not PREENTRY_EVIDENCE_DEFERRAL_ENABLED or _cancellation_evidence_reset_fence:
+        return False
+    now = time.time()
+    with _preentry_evidence_lock:
+        status = _preentry_evidence_status
+        if now - float(status["last_failure_ts"] or 0.0) < PREENTRY_EVIDENCE_FAILURE_COOLDOWN_SEC:
+            return False
+        if len(_preentry_evidence_pending) >= PREENTRY_EVIDENCE_MAX_PENDING:
+            return False
+        oldest = next(iter(_preentry_evidence_pending.values()), None)
+    return not oldest or now - float(oldest.get("enqueued_ts") or now) <= PREENTRY_EVIDENCE_MAX_PENDING_AGE_SEC
+
+
+def _preentry_evidence_deferrable(lane) -> bool:
+    return bool(is_cross_venue_clock_lane(str(lane or "").upper()) and _preentry_evidence_ready())
+
+
+def _preentry_evidence_keys(*sources) -> set:
+    keys = set()
+    for source in sources:
+        if isinstance(source, dict):
+            for field in ("shared_ai_call_id", "trade_id"):
+                value = str(source.get(field) or "")
+                if value:
+                    keys.add(value)
+    return keys
+
+
+def _get_preentry_evidence_worker():
+    global _preentry_evidence_worker
+    with _preentry_evidence_lock:
+        if _preentry_evidence_worker is None:
+            _preentry_evidence_worker = BoundedEvidenceWorker(
+                lambda job: _drain_preentry_evidence(through=job["key"]),
+                max_queue=256,
+                max_retries=0,
+                name="pre-entry-evidence",
+            )
+        return _preentry_evidence_worker
+
+
+def _shutdown_preentry_evidence_worker(timeout: float = 5.0) -> bool:
+    global _preentry_evidence_worker
+    worker = _preentry_evidence_worker
+    if worker is None:
+        return True
+    drained = worker.shutdown(drain_timeout=timeout)
+    if drained:
+        with _preentry_evidence_lock:
+            if _preentry_evidence_worker is worker:
+                _preentry_evidence_worker = None
+    return drained
+
+
+def _enqueue_preentry_evidence(kind: str, keys, payload: dict, *, lane: str) -> bool:
+    """fsync one receipt, then hand it to the worker; False means write synchronously."""
+    global _preentry_evidence_seq
+    if kind not in PREENTRY_EVIDENCE_KINDS:
+        raise ValueError(f"unknown pre-entry evidence kind {kind}")
+    try:
+        epoch_id = _collector_v22_epoch_id()
+        with _preentry_evidence_lock:
+            _preentry_evidence_seq += 1
+            seq = _preentry_evidence_seq
+        now = time.time()
+        identity = {"collector_epoch_id": epoch_id, "kind": kind, "keys": sorted(keys),
+                    "enqueued_ts": now, "pid": os.getpid(), "seq": seq}
+        receipt = {
+            "schema": PREENTRY_EVIDENCE_PENDING_SCHEMA,
+            "receipt_id": hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "collector_epoch_id": epoch_id,
+            "kind": kind,
+            "research_lane": str(lane or "").upper(),
+            "keys": sorted(keys),
+            "seq": seq,
+            "enqueued_ts": now,
+            "created_at": utc_iso(),
+            "payload": payload,
+        }
+    except Exception as exc:
+        logger.error(f"[PRE-ENTRY EVIDENCE] receipt build failed kind={kind} error={exc} [PIPELINE ENFORCEMENT]")
+        _preentry_evidence_count("sync_fallbacks")
+        return False
+    if not _append_durable_handoff_row(
+        _preentry_evidence_journal_path(), receipt, _preentry_evidence_journal_lock, "pre-entry",
+    ):
+        _preentry_evidence_count("journal_failures")
+        _preentry_evidence_failed("journal append failed")
+        _preentry_evidence_count("sync_fallbacks")
+        return False
+    with _preentry_evidence_lock:
+        _preentry_evidence_pending[receipt["receipt_id"]] = receipt
+        _preentry_evidence_status["enqueued"] += 1
+    try:
+        _get_preentry_evidence_worker().submit(receipt["receipt_id"], {}, source_ts=now)
+    except Exception as exc:
+        # Durable and pending: the next barrier or restart replay applies it.
+        logger.error(f"[PRE-ENTRY EVIDENCE] dispatch failed kind={kind} error={exc} [EVIDENCE GAP]")
+    return True
+
+
+def _apply_preentry_receipt(receipt: dict) -> bool:
+    """Materialize one receipt; the caller holds the collector epoch lock."""
+    receipt_id = receipt["receipt_id"]
+    payload = receipt.get("payload") or {}
+    kind = receipt.get("kind")
+    if _collector_v22_epoch_id() != receipt.get("collector_epoch_id"):
+        status, ok = "EPOCH_MISMATCH_PRESERVED", True
+    else:
+        _preentry_evidence_tls.applying = True
+        try:
+            if kind == "V3_LANE_DECISION":
+                ok = bool(_write_v3_shared_lane_decision(
+                    payload["lane"], payload["ai"], payload["ctx"], payload["features"],
+                    **payload["decision"],
+                ))
+            elif kind == "MULTIVERSE_PROVISIONAL":
+                _sync_order_multiverse(payload["signal"], path_complete=False)
+                ok = True
+            elif kind == "DUPLICATE_INTENT_AUDIT":
+                ok = bool(_safe_append_jsonl(
+                    DUPLICATE_INTENT_AUDIT_FILE, payload["row"], label="DUPLICATE_INTENT_AUDIT",
+                ))
+            else:
+                ok = False
+        except Exception as exc:
+            logger.error(f"[PRE-ENTRY EVIDENCE] {kind} failed receipt={receipt_id[:12]} error={exc} [EVIDENCE GAP]")
+            ok = False
+        finally:
+            _preentry_evidence_tls.applying = False
+        status = "APPLIED"
+    if not ok:
+        receipt["attempts"] = int(receipt.get("attempts") or 0) + 1
+        _preentry_evidence_failed(f"{kind} not durable")
+        if receipt["attempts"] < PREENTRY_EVIDENCE_MAX_ATTEMPTS:
+            return False
+        # Terminal for replay: applying it later could land after the trade's
+        # terminal rows. The payload stays in the journal and the V3 writer has
+        # already dead-lettered the pre-entry evidence failure.
+        logger.error(f"[PRE-ENTRY EVIDENCE] {kind} dead receipt={receipt_id[:12]} keys={receipt.get('keys')} [EVIDENCE GAP]")
+        _append_durable_handoff_row(_preentry_evidence_journal_path(), {
+            "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
+            "status": "DEAD_LETTERED", "attempts": receipt["attempts"], "completed_at": utc_iso(),
+        }, _preentry_evidence_journal_lock, "pre-entry")
+        with _preentry_evidence_lock:
+            _preentry_evidence_pending.pop(receipt_id, None)
+            _preentry_evidence_status["dead"] += 1
+        return False
+    if not _append_durable_handoff_row(_preentry_evidence_journal_path(), {
+        "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
+        "status": status, "completed_at": utc_iso(),
+    }, _preentry_evidence_journal_lock, "pre-entry"):
+        _preentry_evidence_count("journal_failures")
+        _preentry_evidence_failed("result append failed")
+    lag = round(time.time() - float(receipt.get("enqueued_ts") or time.time()), 3)
+    with _preentry_evidence_lock:
+        _preentry_evidence_pending.pop(receipt_id, None)
+        _preentry_evidence_status["applied" if status == "APPLIED" else "epoch_preserved"] += 1
+        _preentry_evidence_status["last_apply_lag_s"] = lag
+        _preentry_evidence_status["max_apply_lag_s"] = max(_preentry_evidence_status["max_apply_lag_s"], lag)
+    return True
+
+
+def _compact_preentry_evidence_journal() -> None:
+    path = _preentry_evidence_journal_path()
+    with _preentry_evidence_journal_lock:
+        if _preentry_evidence_pending or _preentry_evidence_status["dead"]:
+            return
+        try:
+            if os.path.getsize(path) <= PREENTRY_EVIDENCE_COMPACT_BYTES:
+                return
+            os.replace(path, path + ".1")
+        except OSError:
+            return
+    _preentry_evidence_count("compactions")
+
+
+def _quiesce_preentry_evidence(timeout: float = 5.0) -> bool:
+    """Stop the worker and apply every pending receipt (fresh-collection reset)."""
+    if not _shutdown_preentry_evidence_worker(timeout=timeout):
+        return False
+    return _drain_preentry_evidence(through=next(reversed(_preentry_evidence_pending), None), timeout=timeout)
+
+
+def _drain_preentry_evidence(*, keys=(), through: str = None, timeout: float = None) -> bool:
+    """Apply every pending receipt up to the last one matching ``keys``/``through``."""
+    if not _preentry_evidence_pending or getattr(_preentry_evidence_tls, "applying", False):
+        return True
+    wait = PREENTRY_EVIDENCE_BARRIER_TIMEOUT_SEC if timeout is None else timeout
+    if not _collector_epoch_lock.acquire(timeout=wait):
+        _preentry_evidence_count("barrier_timeouts")
+        _preentry_evidence_failed("barrier timeout")
+        logger.error(f"[PRE-ENTRY EVIDENCE] barrier timeout keys={sorted(keys)} [EVIDENCE GAP]")
+        return False
+    try:
+        with _preentry_evidence_lock:
+            ordered = list(_preentry_evidence_pending.values())
+        wanted = set(keys)
+        last = -1
+        for index, receipt in enumerate(ordered):
+            if receipt["receipt_id"] == through or wanted.intersection(receipt.get("keys") or ()):
+                last = index
+        ok = True
+        for receipt in ordered[:last + 1]:
+            with _preentry_evidence_lock:
+                still_pending = receipt["receipt_id"] in _preentry_evidence_pending
+            if still_pending:
+                ok = _apply_preentry_receipt(receipt) and ok
+    finally:
+        _collector_epoch_lock.release()
+    _compact_preentry_evidence_journal()
+    return ok
+
+
+def _preentry_evidence_barrier(*sources) -> bool:
+    """Called before any later evidence write for a call/trade; no-op when idle."""
+    if not _preentry_evidence_pending:
+        return True
+    keys = _preentry_evidence_keys(*sources)
+    if not keys:
+        return True
+    with _preentry_evidence_lock:
+        matched = any(keys.intersection(r.get("keys") or ()) for r in _preentry_evidence_pending.values())
+    if not matched:
+        return True
+    _preentry_evidence_count("barrier_drains")
+    return _drain_preentry_evidence(keys=keys)
+
+
+def _replay_preentry_evidence_handoffs() -> int:
+    """Re-queue receipts an interrupted process journaled but never applied."""
+    path = _preentry_evidence_journal_path()
+    pending, terminal = collections.OrderedDict(), set()
+    for candidate in (path + ".1", path):
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    receipt_id = str(row.get("receipt_id") or "")
+                    if len(receipt_id) != 64:
+                        continue
+                    if row.get("schema") == PREENTRY_EVIDENCE_PENDING_SCHEMA and row.get("kind") in PREENTRY_EVIDENCE_KINDS:
+                        pending.setdefault(receipt_id, row)
+                    elif row.get("schema") == PREENTRY_EVIDENCE_RESULT_SCHEMA:
+                        terminal.add(receipt_id)
+        except OSError as exc:
+            logger.warning(f"[PRE-ENTRY EVIDENCE] replay unavailable: {exc}")
+            return 0
+    replay = [row for receipt_id, row in pending.items() if receipt_id not in terminal]
+    replay.sort(key=lambda row: (float(row.get("enqueued_ts") or 0.0), int(row.get("seq") or 0)))
+    with _preentry_evidence_lock:
+        for row in replay:
+            _preentry_evidence_pending.setdefault(row["receipt_id"], row)
+        _preentry_evidence_status["replayed"] += len(replay)
+    if replay:
+        _drain_preentry_evidence(through=replay[-1]["receipt_id"])
+    return len(replay)
+
+
+def preentry_evidence_snapshot() -> dict:
+    now = time.time()
+    with _preentry_evidence_lock:
+        status = dict(_preentry_evidence_status)
+        pending = len(_preentry_evidence_pending)
+        oldest = next(iter(_preentry_evidence_pending.values()), None)
+    oldest_age = round(now - float(oldest.get("enqueued_ts") or now), 3) if oldest else None
+    if not PREENTRY_EVIDENCE_DEFERRAL_ENABLED:
+        health = "DISABLED"
+    elif status["dead"] or status["barrier_timeouts"]:
+        health = "DEGRADED"
+    elif not _preentry_evidence_ready():
+        health = "SYNC_FALLBACK"
+    else:
+        health = "OK"
+    return {
+        "schema": "pre_entry_evidence_queue_v1", "health": health, "pending": pending,
+        "oldest_pending_age_s": oldest_age, **status,
+    }
 
 
 @_collector_epoch_serialized
@@ -17855,6 +18207,9 @@ def _append_v3_lane_entry_resolution(
     """Best-effort append; never changes execution and never fabricates PnL."""
     if not source or not _shared_ai_call_id(ctx=source):
         return
+    preentry_barrier = globals().get("_preentry_evidence_barrier")
+    if callable(preentry_barrier):
+        preentry_barrier(source)
     try:
         dual_write_lane_entry_resolution(
             source, lane=lane, entry_resolution=resolution, exact_reason=reason,
@@ -22643,7 +22998,7 @@ def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: fl
     with trade_lock:
         pending_count = sum(1 for order in pending_orders if order.get("status") == "PENDING")
         open_count = len(open_positions)
-    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, {
+    row = {
         "schema": "duplicate_intent_audit_v1",
         "ts": utc_iso(),
         "decision": decision,
@@ -22665,7 +23020,15 @@ def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: fl
         "open_count": open_count,
         "max_pending_orders": MAX_PENDING_ORDERS,
         "bot_version": EXECUTION_FIX_VERSION,
-    }, label="DUPLICATE_INTENT_AUDIT")
+    }
+    deferrable = globals().get("_preentry_evidence_deferrable")
+    if decision == "ALLOW_DISTINCT" and callable(deferrable) and deferrable(signal.get("research_lane")):
+        if _enqueue_preentry_evidence(
+            "DUPLICATE_INTENT_AUDIT", _preentry_evidence_keys(signal), {"row": row},
+            lane=signal.get("research_lane"),
+        ):
+            return
+    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, row, label="DUPLICATE_INTENT_AUDIT")
 
 
 def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
@@ -25929,7 +26292,11 @@ def process_signal(event: dict):
                 direction=signal.get("final_direction") or ai.get("direction"),
             )
             _arm_chase_offset_touch_grid(signal)
-            _sync_order_multiverse(signal, path_complete=False)
+            if not (_preentry_evidence_deferrable(research_lane) and _enqueue_preentry_evidence(
+                "MULTIVERSE_PROVISIONAL", _preentry_evidence_keys(signal),
+                {"signal": _stable_pending_signal_copy(signal)}, lane=research_lane,
+            )):
+                _sync_order_multiverse(signal, path_complete=False)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -29509,6 +29876,9 @@ def close_position(pos: dict, exit_reason: str):
         canonical_lock=position_close_lock,
     )
     if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
+        preentry_barrier = globals().get("_preentry_evidence_barrier")
+        if callable(preentry_barrier):
+            preentry_barrier(pos, master)
         try:
             close_identity_receipt = dual_write_paper_close(
                 pos, master if isinstance(master, dict) else {}, trade_row,
@@ -29778,14 +30148,20 @@ from taker_time_exit_binding import evidence_badge as _taker_time_evidence_badge
 # Per-second cross-venue lead evaluator for registry tiles on the
 # CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
 # qualifying second whatever the tile toggle; a paper attempt needs the tile ON,
-# a free one-slot worker and the registry rate caps. It runs ~0.6 s after each
-# second (after the 1 s tape and the collector close that second), never
+# a free one-slot worker and the registry rate caps. It runs 0.3-0.6 s after each
+# second (once the 1 s tape and the collector have closed that second), never
 # catches up missed seconds, and does O(lookback) work per tick, so it cannot
 # starve the fill thread, the AI cadence or the segment shipper.
 XVL_EVALUATOR_ENABLED = os.getenv("XVL_EVALUATOR_ENABLED", "1").strip() == "1"
 XVL_SHADOW_FILE = _xvl.SHADOW_FILE
 XVL_HEALTH_SCHEMA = "xvl_evaluator_health_v1"
 XVL_TICK_OFFSET_SEC = 0.6
+# The venue collector closes second s at s+1+CLOSE_LAG_SEC (0.3) and the
+# Bitfinex tape ring gets bucket s at s+1.0; the tick fires as soon as both
+# hold the anchor second, polling from READY_MIN_OFFSET up to TICK_OFFSET.
+XVL_READY_TICK_ENABLED = os.getenv("XVL_READY_TICK", "1").strip() == "1"
+XVL_READY_MIN_OFFSET_SEC = 0.3 if XVL_READY_TICK_ENABLED else XVL_TICK_OFFSET_SEC
+XVL_READY_POLL_SEC = 0.02
 XVL_TAPE_TAIL_SEC = 120
 XVL_MAX_TRIGGER_LATENCY_SEC = 1.5
 XVL_STALE_AFTER_SEC = 10.0
@@ -29796,7 +30172,7 @@ _xvl_status = {
     "started_ts": 0.0, "last_tick_ts": 0.0, "ticks": 0, "tick_errors": 0,
     "last_error": None, "max_tick_ms": 0.0, "last_tick_ms": 0.0,
     "rows_written": 0, "write_failures": 0, "thread_niced": False,
-    "attempt_workers": 0,
+    "attempt_workers": 0, "ready_ticks": 0, "fallback_ticks": 0, "last_tick_offset_s": None,
 }
 _xvl_lane_runtime = {}
 
@@ -30077,11 +30453,18 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     }
     disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
     reason = f"{tag}_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
-    evidence_ready = _write_v3_shared_lane_decision(
-        lane, ai, ctx, signal_features,
-        policy_decision="ACCEPT" if accepted else "REJECT",
-        execution_disposition=disposition, exact_reason=reason,
+    verdict = {
+        "policy_decision": "ACCEPT" if accepted else "REJECT",
+        "execution_disposition": disposition, "exact_reason": reason,
+    }
+    evidence_ready = accepted and _preentry_evidence_deferrable(lane) and _enqueue_preentry_evidence(
+        "V3_LANE_DECISION", {call_id},
+        {"lane": lane, "ai": copy.deepcopy(ai), "ctx": copy.deepcopy(ctx),
+         "features": copy.deepcopy(signal_features), "decision": verdict},
+        lane=lane,
     )
+    if not evidence_ready:
+        evidence_ready = _write_v3_shared_lane_decision(lane, ai, ctx, signal_features, **verdict)
     if not accepted:
         return reason
     if not evidence_ready:
@@ -30101,20 +30484,52 @@ def _xvl_direction_source(lane: str) -> str:
     return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
 
 
-def _xvl_tick(now: float) -> None:
-    live = _cross_venue_live(max_age_sec=0.5)
+def _xvl_tick(now: float, live=None) -> None:
+    if live is None:
+        live = _cross_venue_live(max_age_sec=0.5)
     quotes = _AI_SHADOW_TAPE.tail(XVL_TAPE_TAIL_SEC)
     with state_lock:
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+    steps = []
     for lane, evaluator in list(_XVL_EVALUATORS.items()):
         evaluation, trigger, outcomes = evaluator.step(
             now=now, live=live, bfx_quotes=quotes, bfx_bbo_ts=bbo_ts,
         )
+        if trigger:
+            trigger["research_lane"] = lane
+            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+        steps.append((lane, evaluator, trigger, outcomes))
+    # Shadow rows are fsync'd appends; hand the attempt off first.
+    for lane, evaluator, trigger, outcomes in steps:
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
             _xvl_append(row, evaluator.SHADOW_FILE)
-        if trigger:
-            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+
+
+def _xvl_anchor_ready(live, anchor: int) -> bool:
+    """True once the anchor second is closed in both the venue collector and the Bitfinex tape."""
+    latest = _AI_SHADOW_TAPE.latest_ts()
+    if latest is None or latest < anchor or not isinstance(live, dict):
+        return False
+    end = live.get("history_end_ts")
+    return isinstance(end, (int, float)) and end >= anchor
+
+
+def _xvl_wait_anchor_ready(deadline: float):
+    """Poll for the anchor second's data until ``deadline``; returns (now, live, ready)."""
+    while True:
+        now = time.time()
+        live = _cross_venue_live(max_age_sec=0.0)
+        if _xvl_anchor_ready(live, int(math.floor(now)) - 1):
+            return now, live, True
+        if now + XVL_READY_POLL_SEC >= deadline:
+            break
+        if shutdown_event.wait(XVL_READY_POLL_SEC):
+            break
+    wait = deadline - time.time()
+    if wait > 0:
+        shutdown_event.wait(wait)
+    return time.time(), None, False
 
 
 def xvl_evaluator_loop():
@@ -30126,16 +30541,21 @@ def xvl_evaluator_loop():
     for lane in lanes:
         _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
     _xvl_status["started_ts"] = time.time()
-    next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
+    second = math.floor(time.time()) + 1
     while not shutdown_event.is_set():
-        wait = next_tick - time.time()
+        wait = second + XVL_READY_MIN_OFFSET_SEC - time.time()
         if wait > 0 and shutdown_event.wait(wait):
             break
-        now = time.time()
-        next_tick = math.floor(now) + 1 + XVL_TICK_OFFSET_SEC
+        now, live, ready = _xvl_wait_anchor_ready(math.floor(time.time()) + XVL_TICK_OFFSET_SEC)
+        if shutdown_event.is_set():
+            break
+        second = math.floor(now) + 1
         started = time.perf_counter()
+        with _XVL_LOCK:
+            _xvl_status["ready_ticks" if ready else "fallback_ticks"] += 1
+            _xvl_status["last_tick_offset_s"] = round(now - math.floor(now), 3)
         try:
-            _xvl_tick(now)
+            _xvl_tick(now, live)
         except Exception as exc:
             with _XVL_LOCK:
                 _xvl_status["tick_errors"] += 1
@@ -30183,6 +30603,7 @@ def xvl_evaluator_snapshot() -> dict:
         }
     last = float(status.get("last_tick_ts") or 0.0)
     tick_age = round(now - last, 3) if last else None
+    preentry = preentry_evidence_snapshot()
     if not XVL_EVALUATOR_ENABLED or not lanes:
         health, reason = "DISABLED", ("XVL_EVALUATOR_ENABLED=0" if lanes else "NO_CROSS_VENUE_CLOCK_TILES")
     elif tick_age is None:
@@ -30193,6 +30614,8 @@ def xvl_evaluator_snapshot() -> dict:
         health, reason = "STALE", f"TICK_AGE_{tick_age:.0f}S"
     elif status.get("write_failures"):
         health, reason = "DEGRADED", "SHADOW_WRITE_FAILURES"
+    elif preentry["health"] == "DEGRADED":
+        health, reason = "DEGRADED", "PREENTRY_EVIDENCE_DEGRADED"
     else:
         health, reason = "OK", None
     return {
@@ -30211,7 +30634,9 @@ def xvl_evaluator_snapshot() -> dict:
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
-                                  "rows_written", "write_failures", "thread_niced", "attempt_workers")},
+                                  "rows_written", "write_failures", "thread_niced", "attempt_workers",
+                                  "ready_ticks", "fallback_ticks", "last_tick_offset_s")},
+        "preentry_evidence": preentry,
     }
 
 
@@ -32181,6 +32606,12 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_fill_evidence_not_quiescent",
                 "summary": "Reset aborted before archive: fill evidence worker did not drain"}
+    if not _quiesce_preentry_evidence(timeout=5.0):
+        with _cancellation_evidence_worker_lock:
+            _cancellation_evidence_reset_fence = False
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_preentry_evidence_not_quiescent",
+                "summary": "Reset aborted before archive: pre-entry evidence queue did not drain"}
     _FRESH_RESET_LIFECYCLE_RESTART_PENDING = (
         _FRESH_RESET_LIFECYCLE_RESTART_PENDING or lifecycle_was_registered
     )
@@ -47174,6 +47605,8 @@ def shutdown_handler(signum, frame):
     logger.warning(f"[SHUTDOWN] Cancellation evidence drained={cancellation_drained}")
     fill_evidence_drained = _shutdown_fill_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Fill evidence drained={fill_evidence_drained}")
+    preentry_drained = _shutdown_preentry_evidence_worker(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Pre-entry evidence drained={preentry_drained}")
     post_ai_drained = _shutdown_post_ai_evidence_workers(timeout=2.0)
     logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     combo_drained = _shutdown_combo_lane_execution_workers(timeout=5.0)

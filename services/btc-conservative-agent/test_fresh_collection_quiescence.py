@@ -35,6 +35,7 @@ def reset_env(tmp_path):
     env["_stop_lifecycle_pipeline_runtime"] = Mock(side_effect=lambda **_: events.append("stop") or True)
     env["_shutdown_cancellation_evidence_worker"] = Mock(return_value=True)
     env["_shutdown_fill_evidence_worker"] = Mock(return_value=True)
+    env["_quiesce_preentry_evidence"] = Mock(return_value=True)
     env["_raw_generation_cleanup_gate_acquire"] = Mock(side_effect=lambda: events.append("lease") or True)
     env["_raw_generation_cleanup_gate_release"] = Mock(side_effect=lambda: events.append("release"))
 
@@ -124,6 +125,15 @@ def test_failed_stop_aborts_before_archive(reset_env):
     reset_env["_perform_fresh_collection_reset_quiesced"].assert_not_called()
     reset_env["_raw_generation_cleanup_gate_acquire"].assert_not_called()
     reset_env["_start_lifecycle_pipeline_runtime"].assert_not_called()
+
+
+def test_undrained_preentry_evidence_aborts_before_archive(reset_env):
+    reset_env["_quiesce_preentry_evidence"].return_value = False
+    result = invoke(reset_env)
+    assert result["error"] == "fresh_collection_preentry_evidence_not_quiescent"
+    assert reset_env["_cancellation_evidence_reset_fence"] is False
+    reset_env["_perform_fresh_collection_reset_quiesced"].assert_not_called()
+    reset_env["_raw_generation_cleanup_gate_acquire"].assert_not_called()
 
 
 @pytest.mark.parametrize("kind", ["inventory", "async", "worker", "snapshot", "lease", "scheduler", "writer", "epoch"])
