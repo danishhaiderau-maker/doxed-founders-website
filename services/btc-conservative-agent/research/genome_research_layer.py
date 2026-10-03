@@ -45,12 +45,27 @@ def compute(gg: Any, mirror: Path, tape: Any, episodes: list[Mapping[str, Any]],
         root = Path(out_dir) / FORWARD_DIR
         cands = [c for mix in mixes.values() for c in ft.candidates_from(mix)]
         out["freeze"] = ft.freeze_batch(root, cands, generation=generation, code_revision=code_revision)
+        out["registry_freeze"] = freeze_active_registry_tiles(root, code_revision=code_revision)
         out["forward"] = ft.score(root, grids)
     except Exception as exc:  # noqa: BLE001
         out = {"status": "FAILED", "error": f"{type(exc).__name__}: {exc}"[:500],
                "trace": traceback.format_exc()[-1500:]}
     out["runtime_sec"] = round(time.time() - started, 1)
     return out
+
+
+def registry_batch_id(stack_version: str) -> str:
+    return f"REGISTRY-{stack_version}"
+
+
+def freeze_active_registry_tiles(root: Path, *, code_revision: str | None = None,
+                                 now: float | None = None) -> dict[str, Any]:
+    """Freeze the active registry roster once per registry version (idempotent per batch id)."""
+    from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY, RESEARCH_STACK_VERSION
+
+    return ft.freeze_registry_tiles(root, ACTIVE_TILE_REGISTRY, ACTIVE_TILE_ORDER,
+                                    batch_id=registry_batch_id(RESEARCH_STACK_VERSION), now=now,
+                                    code_revision=code_revision)
 
 
 def report_block(layer: Mapping[str, Any]) -> dict[str, Any]:
@@ -66,7 +81,8 @@ def report_block(layer: Mapping[str, Any]) -> dict[str, Any]:
         "policy_totals_reconciliation": layer["reconciliation"],
         "mix_match": layer["mixes"],
         "forward_tracker": {k: fwd.get(k) for k in ("scored_at", "rules", "rules_sha", "chain", "candidates", "verdicts",
-                                                    "batches", "proposals", "proposal_policy")} | {"freeze": layer.get("freeze")},
+                                                    "batches", "proposals", "proposal_policy")}
+                           | {"freeze": layer.get("freeze"), "registry_freeze": layer.get("registry_freeze")},
     }
 
 

@@ -96,8 +96,16 @@ def test_registry_exit_specs_map_every_active_tile():
         assert ex is not None or str(why).startswith("EXIT_NOT_TAPE_REPLAYABLE:"), (lane, why)
     ex, why = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY[cpc.RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL])
     assert ex is None and why == "EXIT_NOT_TAPE_REPLAYABLE:AUG_CONTINUOUS_SCENARIO_C:THESIS_FAST_CUT+THESIS_INVALIDATED"
-    xvl = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"])[0]
-    assert xvl.tcap_sec == 60 and xvl.hard_bp == pytest.approx(40.0) and not xvl.needs_atr
+    cfm = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_COMMITTED_FADE_MAKER_90"])[0]
+    assert cfm.tcap_sec == 5400 and cfm.hard_bp == pytest.approx(40.0) and not cfm.needs_atr
+    danish = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_DANISH_CF"])[0]
+    assert danish.tcap_sec == 5400 and danish.hard_bp == pytest.approx(40.0)
+    assert danish.breakeven == pytest.approx((20.0, 5.0)) and danish.early_cut == pytest.approx((-12.0, 300, 2.0))
+    assert danish.trail_atr is None and not danish.needs_atr
+    noes = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_DANISH_CF_NOES"])[0]
+    assert noes.early_cut is None and noes.breakeven == pytest.approx((20.0, 5.0))
+    h9 = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_NOTRADE_FOLLOW_MAKER_60"])[0]
+    assert (h9.trail_atr, h9.arm_atr) == (1.5, 2.0) and h9.needs_atr and h9.early_cut is None
     ladder_spec = {"exit_policy": {"family": "ATR_TRAIL_PROFIT_LOCK", "initial_stop_atr_k": 1.5,
                                    "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0,
                                    "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
@@ -106,21 +114,35 @@ def test_registry_exit_specs_map_every_active_tile():
     assert ladder.ladder and ladder.needs_atr
 
 
+def test_composite_exit_cuts_early_only_without_an_early_peak():
+    mid = np.full(800, 60000.0)
+    mid[60:] = 60000.0 * (1 - 15e-4)                # -15 bp at 60 s, never above entry before it
+    tape = _tape_from_mid(mid)
+    sig = pd.DataFrame({"ts": [T0 + 1], "side": [1]})
+    spec = ExitSpec(tcap_sec=600, hard_bp=40.0, breakeven=(20.0, 5.0), early_cut=(-12.0, 300, 2.0))
+    out = simulate(tape, sig, EntrySpec(kind="TAKER"), spec)
+    assert out.iloc[0].reason == "EARLY_CUT"
+    late = np.full(800, 60000.0)
+    late[400:] = 60000.0 * (1 - 15e-4)              # same drawdown after the 5-minute window
+    out_late = simulate(_tape_from_mid(late), sig, EntrySpec(kind="TAKER"), spec)
+    assert out_late.iloc[0].reason == "TIME"
+
+
 def test_live_fill_parity_replays_a_time_exit_exactly():
-    mid = np.full(4000, 60000.0)
-    mid[2000:] = 59900.0
+    mid = np.full(7000, 60000.0)
     tape = _tape_from_mid(mid)
     fill = T0 + 100
+    lane_id = "FAMILY_COMMITTED_FADE_MAKER_90"
     trades = pd.DataFrame([{
-        "research_lane": "FAMILY_XVENUE_LEAD_60S", "trade_id": "xvl-1", "dir": "SHORT",
-        "entry": 59999.5, "exit": 60000.5, "dur_min": 1.0, "exit_reason": "PATH_END_1M",
-        "close_ts": pd.Timestamp(fill + 60, unit="s", tz="UTC").isoformat(),
+        "research_lane": lane_id, "trade_id": "cfm-1", "dir": "SHORT",
+        "entry": 59999.5, "exit": 60000.5, "dur_min": 90.0, "exit_reason": "PATH_END_90M",
+        "close_ts": pd.Timestamp(fill + 5400, unit="s", tz="UTC").isoformat(),
     }, {
-        "research_lane": "FAMILY_XVENUE_LEAD_60S", "trade_id": "xvl-2", "dir": "LONG", "entry": 1, "exit": 1,
+        "research_lane": lane_id, "trade_id": "cfm-2", "dir": "LONG", "entry": 1, "exit": 1,
         "dur_min": 1, "exit_reason": "ADMIN_MANUAL_CLOSE", "close_ts": pd.Timestamp(fill, unit="s", tz="UTC").isoformat(),
     }])
-    p = live_fill_parity(tape, trades, cpc.ACTIVE_TILE_REGISTRY, ["FAMILY_XVENUE_LEAD_60S"])
-    lane = p["lanes"]["FAMILY_XVENUE_LEAD_60S"]
+    p = live_fill_parity(tape, trades, cpc.ACTIVE_TILE_REGISTRY, [lane_id])
+    lane = p["lanes"][lane_id]
     assert lane["compared"] == 1 and lane["mae_bp"] == pytest.approx(0.0, abs=1e-6) and lane["verdict"] == "PASS"
 
 
@@ -237,8 +259,8 @@ def _export(tmp_path, manifest_gen="gen-1"):
         {"trade_id": "x", "research_lane": "CONTINUOUS", "reason": "NON_REGISTRY_LANE"}]}), encoding="utf-8")
     stage_strategy_lab({"status": "OK", "hypotheses": [{"id": "H", "verdict": "INSUFFICIENT"}]},
                        {"hypotheses": pd.DataFrame([{"id": "H", "verdict": "INSUFFICIENT", "full_n": 3}])})
-    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_XVENUE_LEAD_60S", "net_pnl_usd": 0.05,
-                            "close_ts": "2026-10-01T10:00:00+00:00", "exit_reason": "PATH_END_1M"}])
+    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_DANISH_CF", "net_pnl_usd": 0.05,
+                            "close_ts": "2026-10-01T10:00:00+00:00", "exit_reason": "PATH_END_90M"}])
     root = tmp_path / "exports"
     summary = write_export(report_dir=str(report_dir), data_dir=str(tmp_path), trades=trades,
                            registry=cpc.ACTIVE_TILE_REGISTRY, lanes=list(cpc.ACTIVE_TILE_REGISTRY), root=str(root))
@@ -253,7 +275,7 @@ def test_export_is_versioned_and_loads_from_the_bundled_client(tmp_path):
     assert (root / "history" / summary["export_id"] / "hypotheses.csv").is_file()
     exp = load_latest(str(root), check_live=False, retries=0)
     assert exp["hypotheses"].iloc[0]["id"] == "H"
-    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_XVENUE_LEAD_60S", "n"] == 1
+    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_DANISH_CF", "n"] == 1
     assert len(exp["quarantine"]) == 1 and exp.checks["manifest_parity"] == "MATCH"
     assert exp.summary["generation"]["generation_id"] == "gen-1"
     view = lab_api.export_latest(root=str(root), report_root=str(report_dir), table="tile_stats")

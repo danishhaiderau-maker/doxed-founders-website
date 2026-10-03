@@ -52,7 +52,7 @@ def _exit(margin_pct, *, direction="LONG", age=60.0, peak_margin=None, **ctx):
 def test_registry_identity_is_paper_only_default_on_and_never_relay():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[-2] == policy.LANE
+    assert ACTIVE_TILE_ORDER[3] == policy.LANE
     assert spec["raw_policy_id"] == policy.POLICY_ID
     assert spec["paper_only"] is True and spec["execution_scope"] == "PAPER_ONLY"
     assert spec["platform_relay_eligible"] is False and spec["live_copy_eligible"] is False

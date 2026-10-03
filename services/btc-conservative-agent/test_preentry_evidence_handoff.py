@@ -18,7 +18,7 @@ import pytest
 import ai_shadow_challengers as ai_shadow
 import bot
 import cross_venue_lead as xvl
-import paper_policy_family_xvenue_lead as xvl_policy
+import paper_policy_family_xvenue_session_follow_60m as xvs_policy
 
 
 class _HeldWorker:
@@ -65,14 +65,14 @@ def _journal(path):
 
 
 def _enqueue_trade(call_id, trade_id):
-    v3 = {"lane": xvl_policy.LANE, "ai": {"shared_ai_call_id": call_id},
+    v3 = {"lane": xvs_policy.LANE, "ai": {"shared_ai_call_id": call_id},
           "ctx": {"shared_ai_call_id": call_id}, "features": {},
           "decision": {"policy_decision": "ACCEPT", "execution_disposition": "ORDER_ELIGIBLE",
                        "exact_reason": "XVL_TRIGGER_AND_POLICY_PASS"}}
-    assert bot._enqueue_preentry_evidence("V3_LANE_DECISION", {call_id}, v3, lane=xvl_policy.LANE)
+    assert bot._enqueue_preentry_evidence("V3_LANE_DECISION", {call_id}, v3, lane=xvs_policy.LANE)
     signal = {"trade_id": trade_id, "shared_ai_call_id": call_id}
     assert bot._enqueue_preentry_evidence(
-        "MULTIVERSE_PROVISIONAL", bot._preentry_evidence_keys(signal), {"signal": signal}, lane=xvl_policy.LANE,
+        "MULTIVERSE_PROVISIONAL", bot._preentry_evidence_keys(signal), {"signal": signal}, lane=xvs_policy.LANE,
     )
 
 
@@ -104,7 +104,7 @@ def test_entry_resolution_waits_for_the_lane_decision(queue, monkeypatch):
     _enqueue_trade("xvl-1", "xvl-aaa")
     monkeypatch.setattr(bot, "dual_write_lane_entry_resolution",
                         lambda source, **k: queue["calls"].append(("RESOLUTION", k["entry_resolution"])))
-    bot._append_v3_lane_entry_resolution({"shared_ai_call_id": "xvl-1"}, xvl_policy.LANE, "NO_ORDER", "TEST")
+    bot._append_v3_lane_entry_resolution({"shared_ai_call_id": "xvl-1"}, xvs_policy.LANE, "NO_ORDER", "TEST")
     assert queue["calls"][0] == ("V3", "xvl-1") and queue["calls"][-1] == ("RESOLUTION", "NO_ORDER")
 
 
@@ -147,7 +147,7 @@ def test_failed_materialization_turns_deferral_off(queue, monkeypatch):
     for _ in range(bot.PREENTRY_EVIDENCE_MAX_ATTEMPTS):
         bot._preentry_evidence_barrier({"shared_ai_call_id": "xvl-1"})
     assert bot._preentry_evidence_status["dead"] == 1
-    assert not bot._preentry_evidence_deferrable(xvl_policy.LANE)
+    assert not bot._preentry_evidence_deferrable(xvs_policy.LANE)
     assert bot.preentry_evidence_snapshot()["health"] == "DEGRADED"
     # The multiverse row still lands; the dead receipt keeps its payload in the
     # journal but is never replayed after the trade's later evidence.
@@ -162,13 +162,13 @@ def test_failed_materialization_turns_deferral_off(queue, monkeypatch):
 def test_backlog_or_journal_failure_uses_the_synchronous_path(queue, monkeypatch):
     monkeypatch.setattr(bot, "PREENTRY_EVIDENCE_MAX_PENDING", 2)
     _enqueue_trade("xvl-1", "xvl-aaa")
-    assert not bot._preentry_evidence_deferrable(xvl_policy.LANE)
+    assert not bot._preentry_evidence_deferrable(xvs_policy.LANE)
     bot._preentry_evidence_barrier({"trade_id": "xvl-aaa"})
-    assert bot._preentry_evidence_deferrable(xvl_policy.LANE)
+    assert bot._preentry_evidence_deferrable(xvs_policy.LANE)
     assert not bot._preentry_evidence_deferrable("AI_SCAN")
     monkeypatch.setattr(bot, "_append_durable_handoff_row", lambda *a, **k: False)
-    assert not bot._enqueue_preentry_evidence("V3_LANE_DECISION", {"xvl-3"}, {}, lane=xvl_policy.LANE)
-    assert not bot._preentry_evidence_deferrable(xvl_policy.LANE)
+    assert not bot._enqueue_preentry_evidence("V3_LANE_DECISION", {"xvl-3"}, {}, lane=xvs_policy.LANE)
+    assert not bot._preentry_evidence_deferrable(xvs_policy.LANE)
 
 
 def _attempt_env(monkeypatch, order):
@@ -201,9 +201,9 @@ def test_attempt_submits_before_the_lane_decision_is_written(queue, monkeypatch)
         return True
 
     monkeypatch.setattr(bot, "_write_v3_shared_lane_decision", slow_v3)
-    assert bot._xvl_paper_attempt_inner(xvl_policy.LANE, trigger) == "ORDER_ELIGIBLE"
+    assert bot._xvl_paper_attempt_inner(xvs_policy.LANE, trigger) == "ORDER_ELIGIBLE"
     assert order == ["SUBMIT"]
-    sample = list(bot._xvl_lane_runtime[xvl_policy.LANE]["latency_samples"])[0]
+    sample = list(bot._xvl_lane_runtime[xvs_policy.LANE]["latency_samples"])[0]
     assert sample["submit_ts"] - sample["attempt_ts"] < 0.25
     bot._preentry_evidence_barrier({"shared_ai_call_id": trigger["trigger_id"]})
     assert order == ["SUBMIT", "V3"]
@@ -214,7 +214,7 @@ def test_attempt_keeps_the_synchronous_fail_closed_path_when_not_deferrable(queu
     trigger = _attempt_env(monkeypatch, order)
     monkeypatch.setattr(bot, "PREENTRY_EVIDENCE_DEFERRAL_ENABLED", False)
     monkeypatch.setattr(bot, "_write_v3_shared_lane_decision", lambda *a, **k: order.append("V3") or False)
-    assert bot._xvl_paper_attempt_inner(xvl_policy.LANE, trigger) == "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
+    assert bot._xvl_paper_attempt_inner(xvs_policy.LANE, trigger) == "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
     assert order == ["V3"]
 
 
@@ -225,7 +225,7 @@ def test_rejected_verdicts_stay_synchronous(queue, monkeypatch):
         "decide_entry": staticmethod(lambda **k: {"action": "STAND_ASIDE", "reason": "TEST"}),
     })())
     monkeypatch.setattr(bot, "_write_v3_shared_lane_decision", lambda *a, **k: order.append("V3") or True)
-    assert bot._xvl_paper_attempt_inner(xvl_policy.LANE, trigger) == "ADAPTIVE_TEST"
+    assert bot._xvl_paper_attempt_inner(xvs_policy.LANE, trigger) == "ADAPTIVE_TEST"
     assert order == ["V3"] and not bot._preentry_evidence_pending
 
 
@@ -246,7 +246,7 @@ def test_tick_hands_off_the_trigger_before_writing_shadow_rows(monkeypatch):
         def step(self, **kwargs):
             return {"status": xvl.STATUS_TRIGGER}, {"trigger_id": "xvl-1"}, [{"trigger_id": "xvl-0"}]
 
-    monkeypatch.setattr(bot, "_XVL_EVALUATORS", {xvl_policy.LANE: FakeEvaluator()})
+    monkeypatch.setattr(bot, "_XVL_EVALUATORS", {xvs_policy.LANE: FakeEvaluator()})
     monkeypatch.setattr(bot, "_xvl_maybe_attempt_paper", lambda lane, e, t, now: order.append(("ATTEMPT", t["trigger_id"])))
     monkeypatch.setattr(bot, "_xvl_append", lambda row, path: order.append(("APPEND", row["trigger_id"])))
     bot._xvl_tick(time.time(), live={})
@@ -286,7 +286,7 @@ def test_wait_returns_on_readiness_and_falls_back_at_the_deadline(monkeypatch):
 
 def test_earlier_tick_sees_the_same_policy_inputs():
     """Readiness changes when the anchor is evaluated, not the 10 s window or thresholds."""
-    rule = xvl_policy.RULE
+    rule = xvs_policy.RULE.lead
     anchor = 1_790_000_000
     w = int(rule.lookback_sec)
     history = [100.0] * 40

@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-continuous-aug-original-v7",
+  "engine_version": "v31-danish-tiles-late-protection-v11",
   "combo_version": "2026-10-03",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "664875d69bac",
+  "signal_hash": "ce27d41db3a0",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-03T04:17:05.661Z"
+  "updated_at": "2026-10-03T16:44:41.538Z"
 }

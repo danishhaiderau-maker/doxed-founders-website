@@ -1016,7 +1016,7 @@ def xvenue_episodes(gg: Any, mirror: Path, tape: Any) -> list[dict[str, Any]]:
         did = gg.decision_identity(call)[0] if call else ""
         klass = gg.xvenue_class(did) if did else None
         ts, px = _num(row.get("signal_ts")), _num(row.get("signal_price"))
-        if not klass or did in seen or ts is None or not px or row.get("raw_direction") not in ("LONG", "SHORT"):
+        if klass not in ("XVENUE_LEAD", "XVENUE_PREMIUM") or did in seen or ts is None or not px or row.get("raw_direction") not in ("LONG", "SHORT"):
             continue
         seen.add(did)
         feat = row.get("feature_snapshot_at_signal") or {}

@@ -7,7 +7,7 @@ import grokbot_digest as gd  # noqa: E402
 
 # Assembled at runtime so secret scanners do not flag a test fixture.
 SECRET = "".join(["fake", "-cred-", "Qz7Lm", "Xw2Rt", "Kp9Vn", "Hs4Jd", "Bc8Fg", "Ty3Ue"])
-LANE = "FAMILY_XVENUE_PREMIUM_60S"
+LANE = "FAMILY_XVENUE_SESSION_FOLLOW_60M"
 
 
 def _payloads():

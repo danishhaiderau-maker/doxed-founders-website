@@ -21,12 +21,19 @@ from adaptive_regime_entry import (
     price_tick,
 )
 from combo_pathway_config import COMBO_LANE_SPECS
-from family_policy_common import PolicySpec, dashboard_policy as _dashboard
+from family_policy_common import (
+    PolicySpec,
+    dashboard_policy as _dashboard,
+    protection_chips,
+    registry_protections,
+    session_gated,
+)
 from taker_time_exit_binding import (
     CROSS_VENUE_SOURCES,
     DIRECTION_SOURCES,
     TakerTimeExitBinding,
     evidence_badge,
+    session_chips,
     signal_source_detail,
 )
 
@@ -48,11 +55,13 @@ def passive_offset_limit(direction: str, reference_price: float, offset_pct: flo
 
 
 class MakerTimeExitBinding(TakerTimeExitBinding):
+    ENTRY_MODE = MAKER_ENTRY_MODE
+
     def __init__(self, lane: str, label: str):
         spec = COMBO_LANE_SPECS[lane]
         entry, exit_policy = spec["entry_policy"], spec["exit_policy"]
-        if entry.get("mode") != MAKER_ENTRY_MODE:
-            raise ValueError(f"{lane}: entry mode {entry.get('mode')!r} is not {MAKER_ENTRY_MODE}")
+        if entry.get("mode") != self.ENTRY_MODE:
+            raise ValueError(f"{lane}: entry mode {entry.get('mode')!r} is not {self.ENTRY_MODE}")
         if entry["direction_source"] not in DIRECTION_SOURCES - CROSS_VENUE_SOURCES:
             raise ValueError(f"{lane}: maker binding serves shared-AI tiles only")
         if tuple(entry.get("chase_windows") or ()):
@@ -73,6 +82,7 @@ class MakerTimeExitBinding(TakerTimeExitBinding):
             hard_stop_margin_pct=float(exit_policy["hard_stop_margin_pct"]),
             max_duration_sec=int(exit_policy["max_duration_sec"]),
             margin_cap_usd=float(spec["requested_margin_usd"]),
+            **registry_protections(exit_policy),
         )
         self._contract = AdaptiveRegimeEntry(
             lane=lane, policy_id=self.policy_id, policy_signature=self.policy_signature,
@@ -122,10 +132,14 @@ class MakerTimeExitBinding(TakerTimeExitBinding):
 
         if direction not in _OPPOSITE:
             return stand_aside("NO_DIRECTION")
+        if session_gated(entry, signal_ts):
+            return stand_aside("SESSION_GATED")
         if bid <= 0 or ask <= 0 or ask <= bid:
             return stand_aside("BBO_UNAVAILABLE")
         if bbo_age is None or bbo_age > float(entry["max_bbo_age_sec"]):
             return stand_aside("BBO_STALE")
+        if entry.get("max_spread_bps") is not None and spread_bps > float(entry["max_spread_bps"]):
+            return stand_aside("SPREAD_ABOVE_MAX")
         limit = passive_offset_limit(direction, reference, float(entry["offset_pct"]), bid, ask, tick)
         if limit is None or limit <= 0:
             return stand_aside("REFERENCE_UNAVAILABLE")
@@ -152,11 +166,12 @@ class MakerTimeExitBinding(TakerTimeExitBinding):
             "PAPER ONLY", evidence_badge(tile) or "HINT",
             "Side = opposite of score-led AI side" if inverted else "Side = score-led AI side",
             *(["Only committed calls: explicit AI side matching the scores", "Never fades NO_TRADE"] if committed else []),
+            *session_chips(entry),
             f"Maker limit {offset:g}% beyond the signal price, rests {ttl_min}m, no chase",
             f"BBO older than {float(entry['max_bbo_age_sec']):g}s → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
             f"{hold_min}m time exit after fill",
-            "No ladder / break-even / trail / target",
+            *protection_chips(exit_policy),
             f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
         payload["entry"].update({

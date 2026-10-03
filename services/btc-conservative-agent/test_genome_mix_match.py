@@ -89,6 +89,40 @@ def test_forward_tracker_is_append_only_and_scores_only_after_freeze(tmp_path):
     assert ft.freeze_batch(tmp_path, cands, now=freeze_at + 86400)["status"] == "REFUSED_CHAIN_BROKEN"
 
 
+def test_registry_tiles_freeze_once_per_named_batch_and_defer_to_their_pre_registration(tmp_path):
+    from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
+
+    lanes = [lane for lane in ACTIVE_TILE_ORDER if ACTIVE_TILE_REGISTRY[lane].get("pre_registration")]
+    now = T0 + 86400
+    out = ft.freeze_registry_tiles(tmp_path, ACTIVE_TILE_REGISTRY, lanes, batch_id="2026-10-04-DANISH-TILES", now=now)
+    assert out == {"status": "FROZEN", "batch_id": "2026-10-04-DANISH-TILES", "frozen": len(lanes)}
+    again = ft.freeze_registry_tiles(tmp_path, ACTIVE_TILE_REGISTRY, lanes, batch_id="2026-10-04-DANISH-TILES", now=now)
+    assert again["status"] == "ALREADY_FROZEN_TODAY"
+    rows, chain = ft.load_frozen(tmp_path)
+    assert chain["chain_ok"] and [r["rule"]["lane"] for r in rows] == lanes
+    for row in rows:
+        spec = ACTIVE_TILE_REGISTRY[row["rule"]["lane"]]
+        assert row["rule"]["policy_signature"] == spec["policy_signature"]
+        assert row["rule_sha"] == ft.rule_sha(row["rule"])
+    doc = ft.score(tmp_path, {}, now=now + 60)
+    assert {r["verdict"] for r in doc["rows"]} == {ft.REGISTRY_TILE_VERDICT}
+    assert all(r["verdict_source"] == "tile_paired_comparison_report.json" for r in doc["rows"])
+
+
+
+def test_analyzer_cycle_freezes_the_active_roster_once_per_registry_version(tmp_path):
+    from combo_pathway_config import ACTIVE_TILE_ORDER, RESEARCH_STACK_VERSION
+    from research import genome_research_layer as layer
+
+    now = T0 + 86400
+    first = layer.freeze_active_registry_tiles(tmp_path, code_revision="abc", now=now)
+    batch = f"REGISTRY-{RESEARCH_STACK_VERSION}"
+    assert first == {"status": "FROZEN", "batch_id": batch, "frozen": len(ACTIVE_TILE_ORDER)}
+    assert layer.freeze_active_registry_tiles(tmp_path, now=now + 3600)["status"] == "ALREADY_FROZEN_TODAY"
+    rows, chain = ft.load_frozen(tmp_path)
+    assert chain["chain_ok"] and [r["rule"]["lane"] for r in rows] == list(ACTIVE_TILE_ORDER)
+    assert {r["batch_id"] for r in rows} == {batch} and {r["code_revision"] for r in rows} == {"abc"}
+
 @pytest.mark.parametrize("sm,low,want", [
     ({"fills": 10, "n_eff": 10, "ev_bp": 9, "ci_bp": [1, 20]}, 0.5, "INSUFFICIENT"),
     ({"fills": 40, "n_eff": 35, "ev_bp": 9, "ci_bp": [1, 20]}, 0.5, "FORWARD_CONFIRMED"),

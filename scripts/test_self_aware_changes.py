@@ -15,7 +15,7 @@ from self_aware import changes  # noqa: E402
 from self_aware.config import Paths  # noqa: E402
 from self_aware.store import Store  # noqa: E402
 
-TILES = ["FAMILY_XVENUE_LEAD_60S"]
+TILES = ["FAMILY_XVENUE_SESSION_FOLLOW_60M"]
 RECEIPTS = {
     "deploys": [{"databaseId": 1, "status": "completed", "conclusion": "success", "headSha": "29742de53a5cacc9",
                  "createdAt": "2026-10-02T09:47:03Z", "updatedAt": "2026-10-02T10:35:08Z", "displayTitle": "feat"}],
@@ -67,7 +67,7 @@ def test_snapshot_missing_a_field_is_not_a_change(store):
     ], sources=["t"])
     ev = changes.runtime_transitions(store)
     assert [(e["at"], e["kind"]) for e in ev] == [("2026-10-02T15:45:00Z", "ACTIVE_TILES")]
-    assert "FAMILY_XVENUE_LEAD_60S" in ev[0]["detail"]["before"]
+    assert "FAMILY_XVENUE_SESSION_FOLLOW_60M" in ev[0]["detail"]["before"]
 
 
 def test_ai_sightings_and_epochs_and_receipts(store, tmp_path):

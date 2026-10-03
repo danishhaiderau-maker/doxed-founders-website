@@ -1,6 +1,6 @@
-"""Per-second cross-venue lead (XVL) evaluator shared by runtime, shadow and analyzer.
+"""Generic per-second cross-venue lead rule and evaluator shared by runtime, shadow and analyzer.
 
-Rule (pre-registered as H5_XVENUE_LEAD_60S_20261002): ``lead`` is the mean of
+Rule: ``lead`` is the mean of
 the Binance and Bybit mid returns over the last ``lookback_sec`` seconds minus
 the Bitfinex mid return over the same seconds. ``|lead| >= threshold`` on fresh
 feeds is a trigger in ``sign(lead)``.

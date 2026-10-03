@@ -97,7 +97,9 @@ try:
         EXECUTION_FIX_VERSION as EXPECTED_BOT_VERSION,
         RESEARCH_DASHBOARD_VERSION,
         ACTIVE_TILE_REGISTRY,
+        active_tile_lifecycle_manifest,
         active_tile_registry_signature,
+        tile_card_sections,
     )
     from pathway_lane_roster import (
         ANALYZER_COMPARE_LANES,
@@ -123,6 +125,12 @@ except ImportError as _registry_exc:
 
     def active_tile_registry_signature() -> str:
         return "REGISTRY_UNAVAILABLE"
+
+    def active_tile_lifecycle_manifest() -> tuple:
+        return ()
+
+    def tile_card_sections(lane: str):
+        return None
 
     def is_ai_focused_lane(lane: str) -> bool:
         u = str(lane or "").upper().strip()
@@ -237,6 +245,7 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "cross_venue_tape_1m.jsonl",
     "xvl_shadow_signals.jsonl",
     "xvp_shadow_signals.jsonl",
+    "xvs_shadow_signals.jsonl",
     "ai_shadow_regime_prompt.jsonl",
     "decision_feature_snapshots.jsonl",
     "market_context_1m.jsonl",
@@ -4867,6 +4876,26 @@ def api_lanes():
     })
 
 
+@app.route("/api/tile-cards")
+def api_tile_cards():
+    """Registry-ordered ENTRY / EXIT / RISK MANAGEMENT card sections (same generator as the Fly dashboard)."""
+    if REGISTRY_IMPORT_ERROR:
+        return jsonify({"status": "REGISTRY_UNAVAILABLE", "error": REGISTRY_IMPORT_ERROR, "tiles": []})
+    tiles = [
+        {
+            "lane": row["lane"],
+            "tile_number": row["tile_number"],
+            "label": row["label"],
+            "policy_epoch": row["policy_epoch"],
+            "paper_only": row["paper_only"],
+            "relay_eligible": row["relay_eligible"],
+            "card_sections": tile_card_sections(row["lane"]),
+        }
+        for row in active_tile_lifecycle_manifest()
+    ]
+    return jsonify({"status": "OK", "tile_registry_signature": active_tile_registry_signature(), "tiles": tiles})
+
+
 @app.route("/api/chase")
 def api_chase():
     lane = request.args.get("lane") or ""
@@ -7104,6 +7133,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   tfoot td { font-weight: 600; border-top: 2px solid var(--border); }
   .receipt-details summary { cursor: pointer; font-weight: 600; }
   .receipt-details pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: inherit; background: rgba(0,0,0,.18); }
+
+  .tile-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,560px),1fr)); gap:12px; margin:10px 0 14px; }
+  .tile-card { min-width:0; border:1px solid #30363d; border-radius:10px; padding:10px 12px; background:#0d1117; }
+  .tile-card-title { font-weight:700; margin-bottom:6px; overflow-wrap:anywhere; }
+  .tile-card-sections { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; font-size:0.82em; line-height:1.42; }
+  .tile-card-section { min-width:0; padding:6px 8px; background:#161b22; border:1px solid #30363d; border-radius:6px; overflow-wrap:anywhere; }
+  .tile-card-section ul { margin:4px 0 0; padding-left:16px; }
+  .tile-card-section.entry { border-left:3px solid #58a6ff; } .tile-card-section.exit { border-left:3px solid #3fb950; } .tile-card-section.risk { border-left:3px solid #f0883e; }
+  .tile-card-head { font-weight:700; letter-spacing:0.04em; }
+  .tile-card-sub, .tile-card-shadow { color:#8b949e; margin-top:4px; }
 </style></head><body>
 {% if registry_error %}<div id="registry-unavailable-banner" class="stale-banner" style="display:block"><strong>REGISTRY UNAVAILABLE</strong> — the canonical tile registry could not be imported, so no roster, sync id or signature can be verified. Every figure on this page is unverified. ({{ registry_error }})</div>{% endif %}
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
@@ -7174,6 +7213,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Current Lane Analysis</h2>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
     <p class="note" id="lanes-evidence-note"></p>
+    <div id="tile-cards" class="tile-cards"></div>
     <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual outcomes are not actual fills or executed PnL. Both paper and counterfactual evidence may support research qualification under the same completeness, execution-model and holdout gates; model-supported results do not prove live fills.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Win %</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
@@ -8091,7 +8131,34 @@ function laneEvidenceMetric(current, row, field, money=false) {
   const value = money ? fmtExecutionUsd(row[field]) : row[field];
   return stale ? value + ' · stale since ' + (current.stale_since || 'unknown') : value;
 }
+function tileCardEsc(s) {
+  return String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+}
+function tileCardList(rows) {
+  return '<ul>' + (rows || []).map(r => '<li>' + tileCardEsc(r) + '</li>').join('') + '</ul>';
+}
+async function loadTileCards() {
+  const host = document.getElementById('tile-cards');
+  if (!host) return;
+  try {
+    const d = await (await fetch('/api/tile-cards')).json();
+    host.innerHTML = (d.tiles || []).map(t => {
+      const cs = t.card_sections || {};
+      const ex = cs.exit || {};
+      return '<div class="tile-card"><div class="tile-card-title">Tile ' + t.tile_number + ' · ' + tileCardEsc(t.label) + '</div>'
+        + '<div class="tile-card-sections">'
+        + '<div class="tile-card-section entry"><div class="tile-card-head">ENTRY</div>' + tileCardList(cs.entry) + '</div>'
+        + '<div class="tile-card-section exit"><div class="tile-card-head">EXIT</div><div class="tile-card-sub">Live, ' + tileCardEsc(ex.order || 'first trigger wins') + ':</div>' + tileCardList(ex.live)
+        + '<div class="tile-card-sub">Shadow-only (recorded, never executed):</div><div class="tile-card-shadow">' + tileCardEsc((ex.shadow || []).join(' · ') || 'none') + '</div></div>'
+        + '<div class="tile-card-section risk"><div class="tile-card-head">RISK MANAGEMENT</div>' + tileCardList(cs.risk) + '</div>'
+        + '</div></div>';
+    }).join('') || '<p class="note">Tile registry unavailable.</p>';
+  } catch (e) {
+    host.innerHTML = '<p class="note">Tile cards unavailable: ' + tileCardEsc(e) + '</p>';
+  }
+}
 async function loadLanes() {
+  loadTileCards();
   const rCurrent = await fetch('/api/lanes');
   const current = await rCurrent.json();
   const noteCurrent = document.getElementById('lanes-filter-note');

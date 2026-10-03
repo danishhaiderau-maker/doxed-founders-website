@@ -3754,6 +3754,24 @@
 "tape.tape_age_s": [
 "number"
 ],
+"tile_toggles.FAMILY_COMMITTED_FADE_MAKER_90": [
+"bool"
+],
+"tile_toggles.FAMILY_COMMITTED_FADE_TAKER_90": [
+"bool"
+],
+"tile_toggles.FAMILY_DANISH_CF": [
+"bool"
+],
+"tile_toggles.FAMILY_DANISH_CF_ALL_SESSIONS": [
+"bool"
+],
+"tile_toggles.FAMILY_DANISH_CF_NOES": [
+"bool"
+],
+"tile_toggles.FAMILY_NOTRADE_FOLLOW_MAKER_60": [
+"bool"
+],
 "tile_toggles.FAMILY_TREND_FADE_60": [
 "bool"
 ],
@@ -3766,7 +3784,7 @@
 "tile_toggles.FAMILY_XVENUE_PREMIUM_60S": [
 "bool"
 ],
-"tile_toggles.FAMILY_COMMITTED_FADE_MAKER_90": [
+"tile_toggles.FAMILY_XVENUE_SESSION_FOLLOW_60M": [
 "bool"
 ]
 },
@@ -13996,6 +14014,189 @@
 "number"
 ],
 "venue_premium_bp.bybit": [
+"number"
+]
+}
+},
+"xvs_shadow_signals.jsonl": {
+"schema=xvs_shadow_outcome_v1": {
+"anchor_bucket_ts": [
+"number"
+],
+"cap1_take": [
+"bool"
+],
+"entry_ask": [
+"number"
+],
+"entry_bid": [
+"number"
+],
+"entry_bucket_ts": [
+"number"
+],
+"entry_price": [
+"number"
+],
+"episode_id": [
+"string"
+],
+"exit_ask": [
+"number"
+],
+"exit_bid": [
+"number"
+],
+"exit_bucket_ts": [
+"number"
+],
+"exit_price": [
+"number"
+],
+"fee_applied": [
+"bool"
+],
+"gate": [
+"string"
+],
+"gross_mid_bp": [
+"number"
+],
+"hold_sec": [
+"number"
+],
+"net_bp_after_spread": [
+"number"
+],
+"policy_signature": [
+"string"
+],
+"qualifies": [
+"bool"
+],
+"schema": [
+"string"
+],
+"shadow_only": [
+"bool"
+],
+"side": [
+"string"
+],
+"status": [
+"string"
+],
+"trigger_id": [
+"string"
+],
+"trigger_source": [
+"string"
+],
+"win": [
+"bool"
+]
+},
+"schema=xvs_shadow_trigger_v1": {
+"anchor_bucket_ts": [
+"number"
+],
+"bfx_ask": [
+"number"
+],
+"bfx_bbo_age_s": [
+"number"
+],
+"bfx_bid": [
+"number"
+],
+"cap1_take": [
+"bool"
+],
+"collector_age_s": [
+"number"
+],
+"entry_bucket_ts": [
+"number"
+],
+"episode_first": [
+"bool"
+],
+"episode_id": [
+"string"
+],
+"evaluated_ts": [
+"number"
+],
+"exit_bucket_ts": [
+"number"
+],
+"gate": [
+"string"
+],
+"lead_bp": [
+"number"
+],
+"lead_status": [
+"string"
+],
+"policy_id": [
+"string"
+],
+"policy_signature": [
+"string"
+],
+"premium_dev_bp": [
+"null"
+],
+"premium_status": [
+"string"
+],
+"qualifies": [
+"bool"
+],
+"rule.allowed_sessions": [
+"array"
+],
+"rule.entry_delay_sec": [
+"number"
+],
+"rule.hold_sec": [
+"number"
+],
+"rule.lead": [
+"object"
+],
+"rule.premium": [
+"object"
+],
+"schema": [
+"string"
+],
+"session": [
+"string"
+],
+"shadow_only": [
+"bool"
+],
+"side": [
+"string"
+],
+"spread_bps": [
+"number"
+],
+"stale_reasons": [
+"null"
+],
+"trigger_id": [
+"string"
+],
+"trigger_source": [
+"string"
+],
+"venue_bbo_age_s.binance": [
+"number"
+],
+"venue_bbo_age_s.bybit": [
 "number"
 ]
 }

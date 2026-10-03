@@ -105,7 +105,7 @@ def test_xvl_evaluator_stale_on_status_or_tick_age():
 
 
 def _xvl_latency(status, p50):
-    return {"status": "OK", "tick_age_s": 0.8, "lanes": {"FAMILY_XVENUE_LEAD_60S": {"latency": {
+    return {"status": "OK", "tick_age_s": 0.8, "lanes": {"FAMILY_XVENUE_SESSION_FOLLOW_60M": {"latency": {
         "status": status, "target_median_signal_to_fill_s": 2.0,
         "stages": {"signal_to_fill": {"n": 40, "p50_s": p50, "p90_s": p50 + 3}},
     }}}}
@@ -113,7 +113,7 @@ def _xvl_latency(status, p50):
 
 def test_xvl_signal_to_fill_slow_only_when_the_runtime_gate_says_slow():
     found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", _xvl_latency("SLOW", 9.3)), paused=False)
-    assert "FAMILY_XVENUE_LEAD_60S median signal->fill 9.3s" in found["xvl_signal_to_fill_slow"]
+    assert "FAMILY_XVENUE_SESSION_FOLLOW_60M median signal->fill 9.3s" in found["xvl_signal_to_fill_slow"]
     assert "xvl_signal_to_fill_slow" in alerts.POLICIES
     for status, p50 in (("OK", 1.4), ("INSUFFICIENT_FILLS", 9.3)):
         found = sub.ready_block_findings(_with(READY, "xvl_evaluator_health", _xvl_latency(status, p50)), paused=False)
