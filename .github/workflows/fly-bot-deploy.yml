@@ -1424,7 +1424,37 @@ jobs:
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
           plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label reset-plan --deadline-sec 1800 -- python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime || true)"
           printf '%s\n' "$plan"
-          printf '%s' "$plan" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("mode")=="plan" and d.get("ok") is True and not d.get("protected_candidates"), "reset plan is not clean: protected candidates or incomplete inventory"'
+          printf '%s' "$plan" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); g=d.get("execute_gates") or {}; assert d.get("mode")=="plan" and d.get("ok") is True and not d.get("protected_candidates") and g.get("ok") is True, "reset plan is not clean: protected=" + json.dumps(d.get("protected_candidates")) + " incomplete=" + json.dumps(d.get("incomplete_inventory")) + " execute_gates=" + json.dumps(g.get("failures", "MISSING: image predates execute-gate dry run"))'
+          # Execute takes the epoch from fly.toml at the dispatch ref and refuses
+          # outside the 60 min window or without a 6 h snapshot; check them here.
+          live="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" "sh -c 'cat /app/data/runtime/data_epoch.json; echo; printenv SOURCE_GIT_REV'" || true)"
+          snapshots="$(flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json)"
+          LIVE="$live" SNAPSHOTS="$snapshots" EPOCH="$epoch" python - <<'PY'
+          import datetime as d, json, os, re
+          lines = [x for x in os.environ["LIVE"].splitlines() if x.strip()]
+          manifest = next((json.loads(x) for x in lines if x.lstrip().startswith("{")), {})
+          revision = next((x.strip() for x in lines if re.fullmatch(r"[0-9a-f]{40}", x.strip())), "")
+          failures = []
+          if manifest.get("epoch_id") != os.environ["EPOCH"]:
+              failures.append(f"dispatch-ref fly.toml DATA_EPOCH_ID={os.environ['EPOCH']} but live data epoch={manifest.get('epoch_id')}: dispatch from the ref whose fly.toml opened the live epoch")
+          now = d.datetime.now(d.timezone.utc)
+          try:
+              age = (now - d.datetime.fromisoformat(str(manifest.get("started_at_utc")).replace("Z", "+00:00"))).total_seconds()
+          except ValueError:
+              age = None
+          if age is None or age > 3600:
+              failures.append(f"epoch window: opened {age} s ago (execute requires <= 3600 s)")
+          rows = [s for s in (json.loads(os.environ["SNAPSHOTS"]) or []) if str(s.get("status") or "").lower() == "created"]
+          if not any((now - d.datetime.fromisoformat(str(s["created_at"]).replace("Z", "+00:00"))).total_seconds() < 6 * 3600 for s in rows):
+              failures.append("no volume snapshot created within 6 h: run mode=snapshot-volume first")
+          if not revision:
+              failures.append("live SOURCE_GIT_REV unavailable")
+          print(json.dumps({"epoch": manifest.get("epoch_id"), "epoch_age_s": age, "revision": revision,
+                            "execute_token": f"RESET-AT-BOUNDARY:{os.environ['EPOCH']}:{revision[:12]}",
+                            "execute_gate_failures": failures}, sort_keys=True))
+          if failures:
+              raise SystemExit("reset plan execute gates failed: " + "; ".join(failures))
+          PY
           # The boundary reset opens V3 read-only and inspects the emergency WAL
           # under the adopted identity; run the same checks so a plan cannot be
           # clean while execute would 409.

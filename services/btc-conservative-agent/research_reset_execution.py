@@ -63,25 +63,14 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
     if expected_plan_sha256 is not None and plan["plan_sha256"] != expected_plan_sha256:
         raise ResearchDeletionRejected("RESET_PLAN_CHANGED")
     targets = plan["targets"]
-    if len(targets) > max_files or plan["target_bytes"] > max_total_bytes:
-        raise ResearchDeletionRejected("RESET_TARGET_BUDGET_EXCEEDED")
-    paths, expected = [], {}
-    context = {
-        "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
-        "retained": [{key: row[key] for key in
-                      ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target") if key in row}
-                     for row in plan["retained"]],
-        "bytes_basis": plan["bytes_basis"], "hardlinked_target_count": plan["hardlinked_target_count"],
-    }
     # Admission is metadata-only and shared with the final deleter. Run it
     # before hashing gigabytes, including for prospective preflight receipts.
-    candidate_paths = [row["absolute_path"] for row in targets]
-    validate_exact_research_deletion(
-        root=root, targets=candidate_paths, allowed_paths=candidate_paths,
-        receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
+    context, admission = admit_research_reset_plan(
+        plan, receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
         protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
-        receipt_context=context, prospective_receipt_parent=validate_only,
-        progress_callback=progress_callback)
+        validate_only=validate_only, progress_callback=progress_callback)
+    retained = admission["context"]
+    paths, expected = [], {}
     hashed_bytes = 0
     _notify_reset_progress(progress_callback, 'EXECUTOR_FINGERPRINT', 0, len(targets), 0)
     for row in targets:
@@ -126,7 +115,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                 "scope_root": str(root), "scope_name": scope_name,
                 "scope_binding": plan["scope_binding"], "scope_binding_sha256": plan["scope_binding_sha256"],
                 "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
-                "retained": plan["retained"], "target_count": len(paths),
+                **_retained_summary(retained), "target_count": len(paths),
                 "expected_sha256_by_path": expected, "target_bytes": plan["target_bytes"],
                 "deletion_performed": False, "receipt_created": False,
                 "requires_fresh_validation_before_execution": True}
@@ -142,7 +131,47 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
             "scope_root": str(root), "scope_name": scope_name,
             "scope_binding": plan["scope_binding"], "scope_binding_sha256": plan["scope_binding_sha256"],
             "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
-            "deletion_receipt": receipt, "retained": plan["retained"],
+            "deletion_receipt": receipt, **_retained_summary(retained),
+            "retained_receipt": receipt.get("retained_receipt"),
             "hardlinked_target_count": plan["hardlinked_target_count"],
             "bytes_basis": plan["bytes_basis"], "physical_bytes_reclaimed": None,
-            "raw_payload_copies_created": False, "retained_count": len(plan["retained"])}
+            "raw_payload_copies_created": False}
+
+
+RETAINED_CONTEXT_KEYS = ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked",
+                         "verified_sibling_target")
+
+
+def receipt_context_for_plan(plan: Mapping) -> dict:
+    return {
+        "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
+        "retained": [{key: row[key] for key in RETAINED_CONTEXT_KEYS if key in row} for row in plan["retained"]],
+        "bytes_basis": plan["bytes_basis"], "hardlinked_target_count": plan["hardlinked_target_count"],
+    }
+
+
+def admit_research_reset_plan(plan: Mapping, *, receipt_path, quiescent: bool,
+                              recovery_states: Mapping[str, str], protected_paths=(),
+                              max_files=100000, max_total_bytes=64 * 1024**3,
+                              validate_only=True, progress_callback=None) -> tuple[dict, dict]:
+    """Every metadata-only execute gate for one inventory plan; never hashes or writes.
+
+    The executor and the read-only reset plan share this so a clean plan cannot
+    be refused by execute for a budget, admission or receipt-context rule.
+    """
+    targets = plan["targets"]
+    if len(targets) > max_files or plan["target_bytes"] > max_total_bytes:
+        raise ResearchDeletionRejected("RESET_TARGET_BUDGET_EXCEEDED")
+    context = receipt_context_for_plan(plan)
+    candidate_paths = [row["absolute_path"] for row in targets]
+    admission = validate_exact_research_deletion(
+        root=Path(plan["scope_root"]), targets=candidate_paths, allowed_paths=candidate_paths,
+        receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
+        protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
+        receipt_context=context, prospective_receipt_parent=validate_only,
+        progress_callback=progress_callback)
+    return context, admission
+
+
+def _retained_summary(binding: Mapping) -> dict:
+    return {key: binding[key] for key in ("retained_count", "retained_sha256", "retained_bytes")}

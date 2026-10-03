@@ -33337,13 +33337,15 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         _cached_pathway_lane_specs = {}
         _last_fresh_maintain_ts = reset_anchor
         deleted = list(result["deletion_receipt"]["deleted"])
-        retained = list(result["retained"])
+        # Retained rows live in hash-bound sidecars; operation receipts stay
+        # under the resume read limit. Counts are plan-time per scope.
+        retained_count = int(result["retained_count"])
+        retained_receipts = [result.get("retained_receipt")]
         for scoped in scope_deletions.values():
             deleted.extend(scoped["deletion_receipt"]["deleted"])
-            retained.extend(scoped["retained"])
+            retained_count += int(scoped["retained_count"])
+            retained_receipts.append(scoped.get("retained_receipt"))
         deleted.extend(genome_reset.get("deletion_receipt", {}).get("deleted", []))
-        deleted_set = set(deleted)
-        retained = [row for row in retained if row.get("absolute_path") not in deleted_set]
         summary = f"deleted {len(deleted)} exact research file(s); accounting/recovery retained"
         with state_lock:
             state["last_fresh_reset_ts"] = reset_anchor
@@ -33357,11 +33359,13 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             collection_epoch_id=boundary["new_epoch"], fresh_collection_signal_ts=signal_ts,
         )
         operation.update(stage="COMPLETE", new_epoch_id=boundary["new_epoch"], summary=summary,
-                         deleted=deleted, retained=retained)
+                         deleted=deleted, retained_count=retained_count,
+                         retained_receipts=retained_receipts)
         store._atomic_json_receipt(operation_path, operation)
         return {"ok": True, "wipe_aborted": False, "reset_mode": "DISCARD_OLD_RESEARCH",
                 "summary": summary, "deleted": deleted,
-                "retained": retained, "deletion_receipt": result["deletion_receipt"],
+                "retained_count": retained_count, "retained_receipts": retained_receipts,
+                "deletion_receipt": result["deletion_receipt"],
                 "scope_deletions": scope_deletions,
                 "operation_receipt": str(operation_path), "new_epoch_id": boundary["new_epoch"],
                 "raw_payload_copies_created": False, "accounting_preserved": True,

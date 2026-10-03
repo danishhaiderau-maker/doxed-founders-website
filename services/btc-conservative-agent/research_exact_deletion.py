@@ -15,6 +15,50 @@ class ResearchDeletionRejected(ValueError):
     pass
 
 
+# The retained-file list is bounded by rows (the inventory scans at most 200000
+# entries), never by encoded bytes: rows carry up to three paths, so 200000 rows
+# can encode to gigabytes. Receipts and operation records must stay below the
+# 16/64 MiB resume and reconciliation read limits, so the list lives in a
+# ``<receipt>.retained.jsonl`` sidecar bound into the receipt by sha256/count.
+MAX_RETAINED_ROWS = 200000
+MAX_RECEIPT_CONTEXT_BYTES = 64 * 1024
+RETAINED_SIDECAR_SUFFIX = ".retained.jsonl"
+
+
+def _retained_lines(retained):
+    for row in retained:
+        yield (json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+
+
+def retained_binding(retained) -> dict:
+    """Streamed sha256/count/bytes of the canonical retained JSONL sidecar."""
+    digest, size, count = hashlib.sha256(), 0, 0
+    for line in _retained_lines(retained):
+        digest.update(line)
+        size += len(line)
+        count += 1
+    return {"retained_sha256": digest.hexdigest(), "retained_count": count, "retained_bytes": size}
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with io_path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_retained_sidecar(path: Path, retained, expected: Mapping) -> None:
+    with io_path(path).open("xb") as handle:
+        for line in _retained_lines(retained):
+            handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if (_file_sha256(path) != expected["retained_sha256"]
+            or io_path(path).stat().st_size != expected["retained_bytes"]):
+        raise ResearchDeletionRejected("RETAINED_SIDECAR_MISMATCH")
+
+
 def _checked_path(raw, root: Path) -> Path:
     path = Path(os.path.abspath(os.fspath(raw)))
     if path == root or root not in path.parents:
@@ -109,6 +153,12 @@ def reconcile_research_deletion(receipt_path) -> dict:
                               context=receipt.get("context"))
     if receipt.get("progress_seed_sha256") != previous:
         raise ResearchDeletionRejected("JOURNAL_SEED_MISMATCH")
+    context = receipt.get("context")
+    if isinstance(context, dict) and "retained_sha256" in context:
+        sidecar = _checked_path(str(receipt_path) + RETAINED_SIDECAR_SUFFIX, root)
+        if (receipt.get("retained_receipt") != str(sidecar) or not io_path(sidecar).is_file()
+                or _file_sha256(sidecar) != context["retained_sha256"]):
+            raise ResearchDeletionRejected("RETAINED_SIDECAR_MISMATCH")
     if io_path(journal).exists():
         with io_path(journal).open("rb") as handle:
             for sequence in range(2 * len(inventory) + 1):
@@ -182,7 +232,7 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
             raise ResearchDeletionRejected("INVALID_RECEIPT_CONTEXT_IDENTITY")
         retained = receipt_context.get("retained")
         allowed_row_keys = {"path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target"}
-        if not isinstance(retained, list) or len(retained) > 200000 or any(
+        if not isinstance(retained, list) or len(retained) > MAX_RETAINED_ROWS or any(
                 not isinstance(row, dict) or set(row) - allowed_row_keys for row in retained):
             raise ResearchDeletionRejected("INVALID_RETAINED_METADATA")
         if any("verified_sibling_target" in row and (
@@ -190,8 +240,13 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
                 or not row["verified_sibling_target"] or len(row["verified_sibling_target"]) > 4096)
                 for row in retained):
             raise ResearchDeletionRejected("INVALID_RETAINED_ALIAS_TARGET")
-        encoded_context = json.dumps(dict(receipt_context), sort_keys=True, allow_nan=False)
-        if len(encoded_context.encode()) > 32 * 1024**2:
+        try:
+            compact = {key: receipt_context[key] for key in sorted(keys - {"retained"})}
+            compact.update(retained_binding(retained))
+            encoded_context = json.dumps(compact, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ResearchDeletionRejected("INVALID_RETAINED_METADATA") from exc
+        if len(encoded_context.encode()) > MAX_RECEIPT_CONTEXT_BYTES:
             raise ResearchDeletionRejected("RECEIPT_CONTEXT_LIMIT_EXCEEDED")
         context = json.loads(encoded_context)
     root = Path(os.path.abspath(os.fspath(root)))
@@ -243,6 +298,11 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
     journal = _checked_path(str(receipt) + ".progress.jsonl", root)
     if journal in paths or journal in allowed or io_path(journal).exists():
         raise ResearchDeletionRejected("UNSAFE_PROGRESS_PATH")
+    retained_sidecar = None
+    if context is not None:
+        retained_sidecar = _checked_path(str(receipt) + RETAINED_SIDECAR_SUFFIX, root)
+        if retained_sidecar in paths or retained_sidecar in allowed or io_path(retained_sidecar).exists():
+            raise ResearchDeletionRejected("UNSAFE_RETAINED_SIDECAR_PATH")
     forbidden_suffixes = {".py", ".ps1", ".js", ".mjs", ".ts", ".toml", ".yaml", ".yml", ".pem", ".key", ".exe", ".dll"}
     for path in paths:
         parts = tuple(p.lower() for p in path.relative_to(root).parts)
@@ -273,7 +333,8 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
                 raise ResearchDeletionRejected("AMBIGUOUS_EXPECTED_HASH_BINDING")
             expected_hashes[str(path)] = digest
     return {"root": root, "paths": paths, "receipt": receipt, "journal": journal,
-            "context": context, "expected_hashes": expected_hashes}
+            "context": context, "expected_hashes": expected_hashes,
+            "retained_sidecar": retained_sidecar}
 
 
 def _notify_reset_progress(callback, phase, completed, total, fingerprinted_bytes):
@@ -306,8 +367,9 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         max_files=max_files, max_total_bytes=max_total_bytes,
         expected_sha256_by_path=expected_sha256_by_path, receipt_context=receipt_context,
         progress_callback=progress_callback)
-    root, paths, receipt, journal, context, expected_hashes = (
-        admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes"))
+    root, paths, receipt, journal, context, expected_hashes, retained_sidecar = (
+        admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes",
+                                   "retained_sidecar"))
     inventory = []
     hashed_bytes = 0
     _notify_reset_progress(progress_callback, 'DELETER_FINGERPRINT', 0, len(paths), 0)
@@ -334,6 +396,10 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
               "deleted": [], "deleted_bytes": 0, "receipt_path": str(receipt),
               "progress_journal": str(journal), "expected_sha256_by_path": expected_hashes,
               "context": context}
+    if retained_sidecar is not None:
+        # Durable and verified before the receipt that names it can exist.
+        _write_retained_sidecar(retained_sidecar, receipt_context["retained"], context)
+        result["retained_receipt"] = str(retained_sidecar)
     result["progress_seed_sha256"] = _progress_seed(root=root, receipt_path=receipt, inventory=inventory, context=context)
     _write_receipt(receipt, result, first=True)
     with io_path(journal).open("xb") as handle:

@@ -224,14 +224,20 @@ def test_same_proof_different_inventory_receipt_rejected(tmp_path):
         original = json.loads(path.read_text())
         # Construct a genuinely self-consistent alternative receipt with the
         # same context/proof and canonical receipt path, but another target.
+        sidecar = path.with_name(path.name + '.retained.jsonl')
+        retained = [json.loads(line) for line in sidecar.read_text().splitlines()]
+        context = {key: value for key, value in original['context'].items()
+                   if key not in {'retained_sha256', 'retained_count', 'retained_bytes'}}
         path.unlink()
+        sidecar.unlink()
         path.with_name(path.name + '.progress.jsonl').unlink()
         substitute = tmp_path/'alternate.jsonl'
         substitute.write_text('other')
         digest = hashlib.sha256(substitute.read_bytes()).hexdigest()
-        delete_exact_research_files(root=tmp_path, targets=[substitute], allowed_paths=[substitute],
+        forged = delete_exact_research_files(root=tmp_path, targets=[substitute], allowed_paths=[substitute],
             receipt_path=path, quiescent=True, recovery_states={'owners':'RECONCILED'},
-            expected_sha256_by_path={str(substitute):digest}, receipt_context=original['context'])
+            expected_sha256_by_path={str(substitute):digest}, receipt_context={**context, 'retained': retained})
+        assert forged['context'] == original['context']
         with pytest.raises(ResearchDeletionRejected, match='RAW_TARGET_BINDING_MISMATCH'):
             module.reset_local_research(**args, validate_only=False)
 
