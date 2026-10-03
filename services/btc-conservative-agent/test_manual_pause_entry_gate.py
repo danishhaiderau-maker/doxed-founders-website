@@ -19,6 +19,10 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
 
+# This module runs at collection time; keep the collector epoch bind out of the source folder.
+bot.RESEARCH_SESSION_FILE = os.path.join(
+    tempfile.mkdtemp(prefix="manual-pause-session-"), "research_session.json"
+)
 
 passed = 0
 failed = 0

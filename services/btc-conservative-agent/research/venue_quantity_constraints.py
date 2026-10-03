@@ -8,9 +8,14 @@ precision is inferred from a fallback.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Any, Mapping
 
-from research.quantity_execution import build_signed_quantity_constraints
+from research import bitfinex_pair_constraints as pair_constraints
+from research.quantity_execution import (
+    build_signed_quantity_constraints,
+    build_signed_quantity_constraints_v2,
+)
 
 
 def _positive(value: Any) -> Decimal | None:
@@ -55,10 +60,32 @@ def capture_quantity_constraints(
     try:
         market = exchange.market(ccxt_symbol)
     except Exception:
-        market = None
-        reasons.append("VENUE_MARKET_METADATA_UNAVAILABLE")
+        # A fresh public client has no markets until load_markets(); ccxt caches
+        # the result, so this costs one public request per process.
+        try:
+            exchange.load_markets()
+            market = exchange.market(ccxt_symbol)
+        except Exception:
+            market = None
+            reasons.append("VENUE_MARKET_METADATA_UNAVAILABLE")
     if not isinstance(market, Mapping):
         return {"supported": False, "receipt": None, "reasons": reasons or ["VENUE_MARKET_METADATA_INVALID"]}
+
+    # Preserve independently useful partial metadata without changing strict
+    # venue qualification. Never include raw exchange info or credentials.
+    from research.venue_quantity_observation import capture_venue_quantity_observation
+    try:
+        import ccxt
+        adapter_version = ccxt.__version__
+    except (ImportError, AttributeError):
+        adapter_version = ""
+    observation = capture_venue_quantity_observation(
+        SimpleNamespace(id=getattr(exchange, "id", None), market=lambda _symbol: market),
+        ccxt_symbol=ccxt_symbol, evidence_symbol=evidence_symbol,
+        captured_at=captured_at, source_revision=source_revision, adapter_version=adapter_version,
+    )
+    observation_fields = ({"observation": observation["observation"], "diagnostic_metadata_supported": True}
+                          if observation["diagnostic_metadata_supported"] else {})
 
     amount_precision = (market.get("precision") or {}).get("amount")
     precision = _decimal_precision_and_step(amount_precision)
@@ -75,7 +102,7 @@ def capture_quantity_constraints(
     if not str(captured_at or "").strip():
         reasons.append("CAPTURE_TIME_UNAVAILABLE")
     if reasons:
-        return {"supported": False, "receipt": None, "reasons": reasons}
+        return {"supported": False, "receipt": None, "reasons": reasons, **observation_fields}
 
     quantity_precision, quantity_step = precision
     market_id = str(market.get("id") or ccxt_symbol)
@@ -89,4 +116,46 @@ def capture_quantity_constraints(
         source_revision=source_revision,
         source=f"CCXT_BITFINEX_MARKET_METADATA:{market_id}",
     )
-    return {"supported": True, "receipt": receipt, "reasons": []}
+    return {"supported": True, "receipt": receipt, "reasons": [], **observation_fields}
+
+
+def capture_public_pair_constraints(
+    *,
+    evidence_symbol: str,
+    captured_at: str,
+    source_revision: str,
+    requested_qty: Any = None,
+    fetch: Any = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Signed receipt from Bitfinex public pair info plus the intent-size check.
+
+    The receipt is persisted even when the intent is below the venue minimum,
+    so the analyzer sees why it is unsupported; ``supported`` stays False.
+    """
+    fetched = pair_constraints.fetch_pair_constraints(evidence_symbol, now=now, fetch=fetch)
+    constraints = fetched.get("constraints")
+    reasons = list(fetched.get("reasons") or [])
+    if not str(source_revision or "").strip():
+        reasons.append("SOURCE_REVISION_UNAVAILABLE")
+    if not str(captured_at or "").strip():
+        reasons.append("CAPTURE_TIME_UNAVAILABLE")
+    if not fetched.get("supported") or reasons:
+        return {"supported": False, "receipt": None, "venue_constraints": constraints,
+                "quantity_check": None, "reasons": reasons or ["VENUE_PAIR_INFO_UNAVAILABLE"]}
+    receipt = build_signed_quantity_constraints_v2(
+        symbol=evidence_symbol,
+        quantity_precision=constraints["amount_precision"],
+        min_lot=constraints["min_amount"],
+        max_lot=constraints["max_amount"],
+        price_sig_digits=constraints["price_sig_digits"],
+        captured_at=captured_at,
+        source_revision=source_revision,
+        source=f"{constraints['source']}@{constraints['fetched_at']}",
+    )
+    check = None
+    if requested_qty is not None:
+        check = pair_constraints.check_intent_quantity(requested_qty, constraints)
+        reasons = list(check["reasons"])
+    return {"supported": not reasons, "receipt": receipt, "venue_constraints": constraints,
+            "quantity_check": check, "cache": fetched.get("cache"), "reasons": reasons}

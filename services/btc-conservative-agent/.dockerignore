@@ -8,6 +8,11 @@
 
 # 2. Re-include Python source at the repo root (bot, analyzer, pathways, executors).
 !*.py
+# Imported by bot.py at startup; listed explicitly so a narrower whitelist keeps them.
+!thread_health.py
+!relay_delivery_guard.py
+!ai_call_cost.py
+!shadow_chase_buckets.py
 
 # Test and local QA modules are not runtime dependencies. Keep them in Git and
 # CI, but do not ship 100+ harness files in the production trading image.
@@ -35,8 +40,12 @@ research/*
 !research/shadow_outcome_reconstruction.py
 !research/conservative_fill_cohort.py
 !research/conservative_limit_fill.py
+!research/fill_model.py
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
+!research/venue_quantity_observation.py
+!research/fill_model.py
+!research/bitfinex_pair_constraints.py
 !research/runtime_baseline_declaration.py
 !research/scan_counterfactual_unavailable.py
 !research/reset_writer_barrier.py

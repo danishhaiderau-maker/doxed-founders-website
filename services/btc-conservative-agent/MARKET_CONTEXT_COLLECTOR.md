@@ -58,8 +58,14 @@ One minute row holds:
   status is `CALENDAR_MISSING_YEAR` and no window is claimed. **Add the 2027
   table before 2027-01-01.**
 - `regime`: Bitfinex 1-minute-close rv15 ranked against the trailing 7 days only
-  (`trailing_regime`, `WARMUP` for the first day). Restarts reseed from the tail
-  of the file.
+  (`trailing_regime`, `WARMUP` until 1,440 minutes of history). On boot the
+  collector rehydrates that history from the Bitfinex 1 s tape (active file plus
+  rotations, about 55 h) with the live rv15 formula, and fills older parts of
+  the 7-day window from rv15 values already stamped in `market_context_1m`
+  rotations. A deploy or restart therefore keeps labelling; only a volume with
+  less than one day of tape starts in `WARMUP`. The seed receipt
+  (`tape_minutes`, `tape_rv_n`, `context_rv_n`, `labels_ready`, `elapsed_ms`)
+  is in `/api/status.collection.market_context_tape.regime.seed`.
 - `meta`: collector version, calendar version, CPU %, RSS, message counts,
   reconnects, REST latency and errors.
 

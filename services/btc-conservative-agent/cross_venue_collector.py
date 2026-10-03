@@ -30,6 +30,7 @@ from collections import deque
 from typing import Callable, Optional
 
 import cross_venue_tape as cvt
+from data_epoch import activate_from_env, stamp_active
 
 SILENT_RECONNECT_SEC = 30.0
 APP_PING_SEC = 15.0
@@ -282,7 +283,7 @@ class Collector:
         os.rename(self.tape_path, f"{self.tape_path}.{max(suffixes, default=0) + 1}")
 
     def _append(self, row: dict) -> bool:
-        line = (json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+        line = (json.dumps(stamp_active(row), separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
         try:
             self._rotate_if_needed()
             with open(self.tape_path, "ab") as handle:
@@ -365,6 +366,7 @@ class Collector:
 
 def main() -> int:
     venues = [v.strip() for v in os.getenv("CROSS_VENUE_VENUES", "binance,bybit,okx").split(",") if v.strip()]
+    activate_from_env(os.getcwd())
     collector = Collector(os.getcwd(), venues)
 
     def _stop(*_):

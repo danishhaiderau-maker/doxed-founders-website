@@ -23,7 +23,7 @@ Fly prunes only `seq ≤ min(custody.through_seq, latest ACK)` and only after tw
 | What | Rule |
 |--|--|
 | Segment bytes | seq ≤ bound and ≥ 6 h old; manifests kept; reads return `410 PRUNED` |
-| Runtime rotations | sealed snapshot shipped at seq ≤ bound, in `verified_files` with equal sha, unchanged since shipped, not baseline; Tier B ≥ 12 h (keep newest 2), others ≥ 24 h (keep newest 3) |
+| Runtime rotations | sealed snapshot shipped at seq ≤ bound, in `verified_files` with equal sha, unchanged since shipped, not baseline; Tier B ≥ 12 h (keep newest 2), others ≥ 24 h (keep newest 3); the 1 s tape (market_microstructure_1s) ≥ 15 days because a restarted bot rebuilds its 14-day minute-bar store from those rotations |
 | Never | `PROTECTED` paths, live files, `chase_offset_touch_grid` / `order_multiverse_entry_grid` rotations |
 | Per pass | ≤ 4 GiB |
 | Ledger | `runtime/retention/prune_ledger.jsonl` (append-only, ships to the laptop) |

@@ -34,6 +34,7 @@ def test_registered_family_uses_global_virtual_defer_and_minimum_bucket():
         "state": {"ai_enabled": True, "leverage": 100},
         "MAX_RESEARCH_LEVERAGE": 100,
         "is_patient_chase_lane": lambda lane: str(lane).startswith("FAMILY_"),
+        "tile_chase_windows": lambda lane: (2, 3, 4) if str(lane).startswith("FAMILY_") else (),
         "lane_orders_allowed": lambda _lane: True,
         "_signal_spread_gate_blocked": lambda *_args: (_ for _ in ()).throw(
             AssertionError("family must not inherit the Continuous spread gate")
@@ -62,8 +63,54 @@ def test_registered_family_uses_global_virtual_defer_and_minimum_bucket():
     assert gate(selected, {}, stage="submit") == (True, "OK", False)
 
 
+def _taker_gate(buckets, registry_windows):
+    namespace = {
+        "state_lock": threading.RLock(),
+        "state": {"ai_enabled": True, "leverage": 100},
+        "MAX_RESEARCH_LEVERAGE": 100,
+        "is_patient_chase_lane": lambda _lane: True,
+        "tile_chase_windows": registry_windows,
+        "lane_orders_allowed": lambda _lane: True,
+        "ensure_signal_capacity": lambda: True,
+        "get_chase_execution_buckets": lambda: buckets,
+        "dashboard_virtual_chase_submit_ready": lambda _signal: False,
+        "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+        "logger": type("Logger", (), {"info": lambda *_args, **_kwargs: None})(),
+    }
+    _compile_functions("evaluate_dashboard_execution_gate", namespace=namespace)
+    return namespace["evaluate_dashboard_execution_gate"]
+
+
+def test_unchecking_window_zero_or_all_never_delays_or_blocks_a_taker_tile():
+    keys = ("0_chases", "1_chase", "2_chases", "3_chases", "4_chases", "5+_chases")
+    without_zero = {key: key != "0_chases" for key in keys}
+    all_off = {key: False for key in keys}
+    for buckets in (without_zero, all_off):
+        gate = _taker_gate(buckets, lambda _lane: ())
+        taker = {"research_lane": "FAMILY_TAKER", "age_bucket": 0}
+        assert gate(taker, {}, stage="promote") == (True, "OK", False)
+        assert gate(taker, {}, stage="submit") == (True, "OK", False)
+        chasing = _taker_gate(buckets, lambda _lane: (0, 1))
+        expected = (False, "CHASE_BUCKETS_ALL_OFF", False) if buckets is all_off else (False, "CHASE_BUCKET_DEFER", True)
+        assert chasing(taker, {}, stage="promote") == expected
+
+
+def test_current_registry_taker_tiles_pass_with_window_zero_unchecked():
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY, chasing_tile_lanes, tile_chase_windows
+
+    keys = ("0_chases", "1_chase", "2_chases", "3_chases", "4_chases", "5+_chases")
+    gate = _taker_gate({key: key != "0_chases" for key in keys}, tile_chase_windows)
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        if tuple(spec["entry_policy"].get("chase_windows") or ()):
+            continue
+        assert lane not in chasing_tile_lanes()
+        assert gate({"research_lane": lane}, {}, stage="promote") == (True, "OK", False)
+    assert tile_chase_windows("NOT_A_REGISTERED_LANE") == ()
+
+
 def test_settings_change_reconciles_existing_family_pending_orders():
     source = ast.get_source_segment(BOT_SOURCE, _function("enforce_dashboard_chase_gates_on_pending"))
+    assert 'if not tile_chase_windows(order.get("research_lane")):' in source
     assert 'is_patient_chase_lane(order.get("research_lane"))' not in source
     assert "chase_age_window_should_cancel(age_sec)" in source
     assert "_cancel_pending_for_chase_gate(order)" in source
@@ -163,6 +210,9 @@ def test_family_offset_policy_remains_separate_from_global_chase_timing_gate():
     assert "registered_family = is_patient_chase_lane(lane)" in gate
     assert "if not registered_family:" in gate
     assert 'if not any(get_chase_execution_buckets().values()):' in gate
+    assert gate.index("if not tile_chase_windows(lane):") < gate.index(
+        "if not any(get_chase_execution_buckets().values()):"
+    )
 
 
 def test_family_reprice_directly_obeys_global_age_window_gate():

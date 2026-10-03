@@ -10,6 +10,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from data_epoch import stamp_active
+
 logger = logging.getLogger(__name__)
 
 LAYER_TABLES = {
@@ -484,7 +486,7 @@ class ResearchStore:
         path = os.path.join(self.mirror_dir, filename)
         try:
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, default=str) + "\n")
+                fh.write(json.dumps(stamp_active(row), default=str) + "\n")
         except OSError as exc:
             logger.warning("[GENOME] JSONL mirror write failed %s: %s", path, exc)
 

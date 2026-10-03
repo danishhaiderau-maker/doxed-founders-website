@@ -40,6 +40,7 @@ from pathlib import Path
 
 import data_retention_policy as policy
 import research_segment_format as fmt
+from tape_minute_bars import DEFAULT_RETENTION_MINUTES as TAPE_STORE_RETENTION_MINUTES
 
 PRUNE_ENABLED = True
 REQUIRED_PROVEN_ACK_CYCLES = 2
@@ -54,6 +55,12 @@ TIER_B_MIN_AGE_HOURS = 12.0
 TIER_B_KEEP_LATEST = 2
 OTHER_MIN_AGE_HOURS = 24.0
 OTHER_KEEP_LATEST = 3
+# The restarted bot rebuilds its minute-bar store (collector late maturation,
+# future paths) from the 1 s tape rotations on disk, so Fly keeps the tape for
+# the whole store window even after the laptop holds a verified copy.
+RUNTIME_CONSUMED_MIN_AGE_HOURS = {
+    "market_microstructure_1s.jsonl": TAPE_STORE_RETENTION_MINUTES / 60.0 + 24.0,
+}
 MAX_DELETE_BYTES_PER_PASS = 4 * 1024 ** 3
 LEDGER_RELPATH = "retention/prune_ledger.jsonl"
 MAX_VERIFIED_FILES = 20000
@@ -204,7 +211,8 @@ def _runtime_candidates(shipper_state: dict, universe: dict, bound: int, now: fl
     for base, rows in by_base.items():
         tier_b = base in policy.TIER_B_BASES
         keep = TIER_B_KEEP_LATEST if tier_b else OTHER_KEEP_LATEST
-        min_age = TIER_B_MIN_AGE_HOURS if tier_b else OTHER_MIN_AGE_HOURS
+        min_age = max(TIER_B_MIN_AGE_HOURS if tier_b else OTHER_MIN_AGE_HOURS,
+                      RUNTIME_CONSUMED_MIN_AGE_HOURS.get(base, 0.0))
         newest_first = sorted(rows, key=lambda row: row[3][1].st_mtime, reverse=True)
         for index, (_gen, relpath, tracked, (path, stat)) in enumerate(newest_first):
             reason = None

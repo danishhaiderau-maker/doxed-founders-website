@@ -66,3 +66,28 @@ def test_missing_revision_fails_closed():
         "receipt": None,
         "reasons": ["SOURCE_REVISION_UNAVAILABLE"],
     }
+
+
+def test_unloaded_markets_are_loaded_once_and_unpublished_min_notional_stays_unsupported():
+    class _Exchange:
+        def __init__(self):
+            self.loaded = False
+            self.load_calls = 0
+
+        def load_markets(self):
+            self.load_calls += 1
+            self.loaded = True
+
+        def market(self, symbol):
+            if not self.loaded:
+                raise RuntimeError("bitfinex markets not loaded")
+            return {"id": "tBTCF0:USTF0", "precision": {"amount": 8, "price": 5},
+                    "limits": {"amount": {"min": 4e-05, "max": 100.0}, "cost": {"min": None, "max": None}}}
+
+    ex = _Exchange()
+    out = capture_quantity_constraints(ex, ccxt_symbol="BTC/USDT:USDT", evidence_symbol="tBTCF0:USTF0",
+                                       captured_at="2026-10-03T00:00:00Z", source_revision="rev")
+    assert ex.load_calls == 1
+    assert out["supported"] is False and out["receipt"] is None
+    assert "VENUE_MARKET_METADATA_UNAVAILABLE" not in out["reasons"]
+    assert out["reasons"] == ["VENUE_MIN_NOTIONAL_UNAVAILABLE"]
