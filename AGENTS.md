@@ -37,11 +37,12 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Three tiles are registered: two owner-approved cross-venue paper
-  experiments with no proven edge and the Continuous baseline benchmark
-  (Tile 3), each with its own lock, orders, positions, ledger and analyzer
-  cohort. The two experiments default OFF in source (the deploy turns them
-  ON); the baseline defaults ON. All are paper-only and relay-ineligible.
+- Four tiles are registered: two owner-approved cross-venue paper
+  experiments with no proven edge, the Continuous baseline benchmark
+  (Tile 3) and the committed-fade maker paper experiment (Tile 4), each with
+  its own lock, orders, positions, ledger and analyzer cohort. The experiments
+  default OFF in source (the deploy turns them ON); the baseline defaults ON.
+  All are paper-only and relay-ineligible.
 - Tile 1, Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), "HINT -
   12h evidence", uses no AI: a bounded per-second evaluator
   (`cross_venue_lead.py`, its own thread, separate from the 180 s AI cadence)
@@ -88,6 +89,20 @@
   as the labelled `aug_touch_fill_shadow`. It is not rechecked against the
   shared call at fill time. Every other tile is paired against it
   (`vs_baseline`); it is never a deflated-Sharpe trial.
+- Tile 4, Committed fade (maker) (`FAMILY_COMMITTED_FADE_MAKER_90`, prefix
+  `cfm`), "HINT - 3-day REALISTIC_V1 walk-forward, CI spans 0": fades only
+  shared calls where the AI committed to an explicit LONG/SHORT equal to the
+  score-led side, with no gap floor (NO_TRADE, mismatches, ties and errors
+  refuse), entered as one passive maker limit 0.10% beyond the decision-time last price
+  (never past the touch, no chase, expires unfilled after 30 min, BBO older
+  than 5 s stands aside), exits at 90 minutes after fill or a 40 bp
+  catastrophic stop; three concurrent signals (`maker_time_exit_binding.py`).
+  Pre-registration H8: promotion (owner review, never relay) needs >=150 fills
+  over >=7 UTC days with >=3 each of ASIA/EU/US sessions, 1 h-cluster lower
+  95% CI > 0, the 5 s-delay shadow positive, both sides >= 0, both halves
+  positive, no day > 30% of profit and replay parity <=1 bp; kill when the mean
+  is <=0 after 80 fills, the upper CI < +2 bp after 150, a trade < -60 bp or
+  >1% stale-feed share, drawdown > $1, day 21, or pause on any defect.
 - Trend Fade 60 (`FAMILY_TREND_FADE_60`), Trend Fade 60 - committed calls
   only (`FAMILY_TREND_FADE_60_COMMITTED`), the Trend Fade 60 ladder, the
   three Dynamic Adaptive tiles

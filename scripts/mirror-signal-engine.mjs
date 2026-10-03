@@ -145,6 +145,7 @@ const activePolicyFiles = [
   'family_policy_common.py',
   'adaptive_regime_entry.py',
   'taker_time_exit_binding.py',
+  'maker_time_exit_binding.py',
   'scenario_c_config.py',
   'cross_venue_tape.py',
   'cross_venue_lead.py',
