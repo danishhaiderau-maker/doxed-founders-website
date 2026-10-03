@@ -32414,8 +32414,8 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
-        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, SHADOW_EXIT_PATH_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
-        CYCLE_3M_UNIVERSE_FILE,
+        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
+        SHADOW_EXIT_PATH_FILE, CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
         ORDER_MULTIVERSE_ENTRY_GRID_FILE,
