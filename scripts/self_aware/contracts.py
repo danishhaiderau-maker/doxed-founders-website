@@ -1123,9 +1123,83 @@ def _rec_genome_grid_content(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]
     return viol, met
 
 
+def _forward_chain_ok(path: Path) -> bool | None:
+    if not path.exists():
+        return None
+    prev = "GENESIS"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        if json.loads(line).get("prev_sha") != prev:
+            return False
+        prev = hashlib.sha256(line.encode("utf-8")).hexdigest()
+    return True
+
+
+def _rec_research_api_content(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Research API cache: fresh (same generation as the genome report), every family/regime present, sort order
+    descending, totals equal the genome rows artifact, forward-tracker freezes append-only (re-hashed from disk)."""
+    if not isinstance(obj, dict) or obj.get("status") != "OK":
+        return [_v("RESEARCH_API_UNAVAILABLE", RED, f"research API cache {None if not isinstance(obj, dict) else obj.get('status')}")], {}
+    ci = obj.get("contract_inputs") or {}
+    viol, met = [], {"research:age_sec": obj.get("age_sec"), "research:datasets": len(obj.get("datasets") or [])}
+    gg = ctx.get("genome_grid") or {}
+    if gg.get("generated_at") and gg.get("generated_at") != obj.get("generated_at"):
+        viol.append(_v("RESEARCH_API_STALE", AMBER, f"cache generation {obj.get('generated_at')} != genome report {gg.get('generated_at')}"))
+    if (obj.get("age_sec") or 0) > 12 * 3600:
+        viol.append(_v("RESEARCH_API_STALE", RED, f"cache {obj.get('age_sec', 0) / 3600:.1f} h old"))
+    if ci.get("research_layer_status") != "OK":
+        viol.append(_v("RESEARCH_LAYER_FAILED", RED, f"research layer {ci.get('research_layer_status')}: {ci.get('research_layer_error')}"))
+    empty = [d["name"] for d in obj.get("datasets") or [] if not d.get("rows") and d["name"] not in ("forward_batches",)]
+    if empty:
+        viol.append(_v("RESEARCH_DATASET_EMPTY", AMBER, f"empty datasets {empty}"))
+    for label, have in (("families (totals)", ci.get("families_present_totals")), ("families (table)", ci.get("families_present_table")),
+                        ("regimes", ci.get("regimes_present"))):
+        want = ci.get("regimes_expected" if label == "regimes" else "families_expected") or []
+        missing = sorted(set(want) - set(have or []))
+        met[f"research:{label}"] = len(have or [])
+        if missing or not want:
+            viol.append(_v("RESEARCH_INCOMPLETE", AMBER, f"{label} missing {missing or 'expected list'}"))
+    for key, s in (ci.get("sort_keys") or {}).items():
+        vals = [v for v in s.get("values") or [] if v is not None]
+        if any(a < b for a, b in zip(vals, vals[1:])):
+            viol.append(_v("RESEARCH_SORT_ORDER", RED, f"{key} not descending by {s.get('key')}"))
+    top = ci.get("top_100_totals") or []
+    if (ci.get("reconciliation") or {}).get("status") != "PASS":
+        viol.append(_v("RESEARCH_TOTALS_MISMATCH", RED, f"matrix reconciliation {(ci.get('reconciliation') or {}).get('status')}"))
+    root = ctx.get("genome_grid_dir")
+    rows_file = Path(root) / "genome_grid_rows.jsonl.gz" if root else None
+    if rows_file and rows_file.exists() and top:
+        want = {t["policy_id"]: t for t in top}
+        worst, seen = 0.0, 0
+        with gzip.open(rows_file, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                if '"' + HEADLINE_FILL_MODEL + '"' not in line:
+                    continue
+                r = json.loads(line)
+                t = want.get(r.get("policy_id")) if r.get("fill_world") == HEADLINE_FILL_MODEL else None
+                if t is None:
+                    continue
+                seen += 1
+                worst = max(worst, abs(float(r["all"]["net_pnl_usd"]) - t["net_pnl_usd"]),
+                            abs(float(r["oos"]["net_pnl_usd"]) - t["net_oos_usd"]),
+                            abs(float(r["train"]["net_pnl_usd"]) - t["net_in_sample_usd"]),
+                            abs(int(r["all"]["fills"]) - t["fills"]))
+        met["research:top100_rows_matched"] = seen
+        met["research:top100_max_diff"] = round(worst, 9)
+        if seen != len(want) or worst > 1e-4:
+            viol.append(_v("RESEARCH_TOTALS_MISMATCH", RED, f"top-100 totals vs rows artifact: matched {seen}/{len(want)}, max diff {worst:.6f}"))
+    chain = _forward_chain_ok(Path(root) / "forward-tracker" / "frozen_candidates.jsonl") if root else None
+    met["research:forward_chain_ok"] = chain
+    if chain is False or ci.get("forward_chain_ok") is False:
+        viol.append(_v("FORWARD_CHAIN_BROKEN", RED, "frozen forward candidates were edited (prev_sha chain broken)"))
+    return viol, met
+
+
 RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
     "fill_model_headline": _rec_fill_model_headline,
     "genome_grid_content": _rec_genome_grid_content,
+    "research_api_content": _rec_research_api_content,
     "edges_fill_model": _rec_edges_fill_model,
     "fly_chase_buckets": _rec_fly_chase_buckets,
     "lanes_vs_cohort": _rec_lanes_vs_cohort,
@@ -1166,7 +1240,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
     rt = facts.get("runtime") or {}
     ctx: dict[str, Any] = {"now": now, "store": store, "facts": facts, "docs": docs,
                            "roster": rt.get("active_tile_lanes") or [], "retired": retired_lanes(paths.analyzer_repo),
-                           "genome_grid": _genome_grid(paths)}
+                           "genome_grid": _genome_grid(paths), "genome_grid_dir": Path(paths.exports).parent / "genome-grid"}
     fetch = fetcher or Fetcher(paths, docs)
     ctx["fetch"] = fetch
     specs = [s for s in reg["contracts"] if tier == "heavy" or s["tier"] == "light"]

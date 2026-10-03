@@ -232,6 +232,54 @@ def genome_content_checks(grid: Mapping[str, Any]) -> list[dict[str, Any]]:
     return checks
 
 
+def _descending(values: Iterable[Any]) -> bool:
+    vals = [v for v in values if v is not None]
+    return all(a >= b for a, b in zip(vals, vals[1:]))
+
+
+def research_api_checks(index: Mapping[str, Any] | None, grid: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Materialized research API: present, same generation as the genome report, complete, sorted, reconciled."""
+    index = index or {}
+    if index.get("status") != "OK":
+        return [{"id": "research_api_present", "severity": RED, "observed": f"research API cache {index.get('status')}: "
+                 f"{index.get('reason') or 'missing'}", "expected": "research_api_cache.sqlite3 materialized by the genome cycle"}]
+    ci = index.get("contract_inputs") or {}
+    checks = [{"id": "research_api_present", "severity": GREEN, "observed": f"generation {index.get('generation')}",
+               "expected": "research API cache present"}]
+    same = (grid or {}).get("generated_at") == index.get("generated_at")
+    checks.append({"id": "research_api_generation", "severity": GREEN if same else AMBER,
+                   "observed": f"cache {index.get('generated_at')} vs genome report {(grid or {}).get('generated_at')}",
+                   "expected": "cache materialized from the current genome report"})
+    layer = ci.get("research_layer_status")
+    checks.append({"id": "research_layer_ok", "severity": GREEN if layer == "OK" else RED,
+                   "observed": f"research layer {layer} {ci.get('research_layer_error') or ''}".strip(),
+                   "expected": "mix-and-match, totals and forward tracker computed"})
+    missing_fam = sorted(set(ci.get("families_expected") or []) - set(ci.get("families_present_totals") or []))
+    missing_tab = sorted(set(ci.get("families_expected") or []) - set(ci.get("families_present_table") or []))
+    missing_reg = sorted(set(ci.get("regimes_expected") or []) - set(ci.get("regimes_present") or []))
+    incomplete = missing_fam or missing_tab or missing_reg or not ci.get("families_expected")
+    checks.append({"id": "research_families_regimes_complete", "severity": AMBER if incomplete else GREEN,
+                   "observed": (f"missing families totals {missing_fam}, table {missing_tab}; regimes {missing_reg}"
+                                if incomplete else f"{len(ci.get('families_expected') or [])} families, "
+                                f"{len(ci.get('regimes_expected') or [])} regimes, cohorts {ci.get('cohorts_present')}"),
+                   "expected": "every family group and every regime appears"})
+    unsorted = [k for k, s in (ci.get("sort_keys") or {}).items() if not _descending(s.get("values") or [])]
+    checks.append({"id": "research_sort_order", "severity": RED if unsorted else GREEN,
+                   "observed": f"not descending: {unsorted}" if unsorted else f"{len(ci.get('sort_keys') or {})} tables descending by their key",
+                   "expected": "Top 100 by OOS net $, family totals and live lanes sorted descending"})
+    bad = [t["policy_id"] for t in ci.get("top_100_totals") or []
+           if t["wins"] + t["losses"] > t["fills"] or abs(t["net_in_sample_usd"] + t["net_oos_usd"] - t["net_pnl_usd"]) > 1e-4]
+    rec = (ci.get("reconciliation") or {}).get("status")
+    checks.append({"id": "research_totals_reconcile", "severity": RED if bad or rec != "PASS" else GREEN,
+                   "observed": f"matrix reconciliation {rec}; inconsistent rows {bad[:3]}",
+                   "expected": "totals equal the per-trade outcome matrix; in-sample + OOS = all; wins + losses <= fills"})
+    chain = ci.get("forward_chain_ok")
+    checks.append({"id": "research_forward_chain", "severity": RED if chain is False else GREEN if chain else AMBER,
+                   "observed": f"forward hash chain {chain}; verdicts {ci.get('forward_verdicts')}",
+                   "expected": "frozen candidates append-only (prev_sha chain intact)"})
+    return checks
+
+
 def safe_genome_checks(report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """Wiring of the Safe Policy Genome section: replay window, shortlist, integrity."""
     report = report or {}

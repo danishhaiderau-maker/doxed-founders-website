@@ -123,6 +123,13 @@
      "allow_http": {"404": "AMBER"},
      "reconcile": "genome_grid_content"},
 
+    {"id": "analyzer.research_api_content", "surface": "analyzer", "title": "Research APIs (Mix & Match, totals, forward tracker): fresh, complete, sorted, reconciled", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#combos", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research"},
+     "depends_on": ["research/genome_research_layer.py", "research/research_api_cache.py", "research/genome_forward_tracker.py",
+                    "analyzer-exports/genome-grid/research_api_cache.sqlite3", "analyzer-exports/genome-grid/forward-tracker/frozen_candidates.jsonl"],
+     "allow_http": {"404": "AMBER"},
+     "reconcile": "research_api_content"},
+
     {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",
      "page": "http://127.0.0.1:9021/edges", "source": {"kind": "self", "doc": "health"},
      "depends_on": ["scripts/self_aware/edges.py", "res_edges"],
