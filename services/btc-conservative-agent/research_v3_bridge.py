@@ -551,41 +551,110 @@ def _paper_path_receipt(rows: list[Mapping[str, Any]], *, direction: str, entry_
             "time_to_mae_sec": round(mae_ts - start, 3)}
 
 
+MICROSTRUCTURE_TAPE_NAME = "market_microstructure_1s.jsonl"
+# The pre-signal window ends at "now", so it lives in the last few hundred KB of
+# the append-only tape. Rows are appended in bucket order; the guard band only
+# absorbs small out-of-order appends before the scan may stop.
+RECENT_SEGMENT_INITIAL_TAIL_BYTES = 256 * 1024
+RECENT_SEGMENT_GUARD_SEC = 60.0
+LAST_RECENT_SEGMENT_SCAN: dict[str, Any] = {}
+
+
+class _SegmentAccumulator:
+    def __init__(self, start_ts: float, end_ts: float):
+        self.start_ts, self.end_ts = float(start_ts), float(end_ts)
+        self.rows_by_ts: dict[float, dict[str, Any]] = {}
+        self.parse_errors = 0
+        self.invalid_timestamp_rows = 0
+        self.invalid_price_rows = 0
+        self.min_ts: float | None = None
+
+    def add_line(self, line: str) -> None:
+        try:
+            raw = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            self.parse_errors += 1
+            return
+        if not isinstance(raw, Mapping):
+            return
+        ts = _timestamp(_first(raw.get("bucket_ts"), raw.get("ts"), raw.get("t")))
+        if ts is None or not math.isfinite(ts):
+            self.invalid_timestamp_rows += 1
+            return
+        if self.min_ts is None or ts < self.min_ts:
+            self.min_ts = ts
+        if ts < self.start_ts or ts > self.end_ts:
+            return
+        price = _positive_finite(_first(raw.get("last"), raw.get("price"), raw.get("mark")))
+        if price is None:
+            self.invalid_price_rows += 1
+            return
+        row = dict(raw)
+        # Candidate replay consumes explicit ts/price while the full
+        # BBO/depth row remains available for conservative fills.
+        row["ts"] = ts
+        row["price"] = price
+        self.rows_by_ts[ts] = row
+
+
 def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load the immutable one-second tape covering one observed paper path."""
-    source = Path(data_dir) / "market_microstructure_1s.jsonl"
-    rows_by_ts: dict[float, dict[str, Any]] = {}
-    parse_errors = 0
-    invalid_timestamp_rows = 0
-    invalid_price_rows = 0
-    invalid_bbo_rows = 0
-    invalid_depth_rows = 0
+    source = Path(data_dir) / MICROSTRUCTURE_TAPE_NAME
+    acc = _SegmentAccumulator(start_ts, end_ts)
     if source.is_file() and end_ts >= start_ts:
         with source.open("r", encoding="utf-8-sig") as handle:
             for line in handle:
-                try:
-                    raw = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    parse_errors += 1
-                    continue
-                if not isinstance(raw, Mapping):
-                    continue
-                ts = _timestamp(_first(raw.get("bucket_ts"), raw.get("ts"), raw.get("t")))
-                if ts is None or not math.isfinite(ts):
-                    invalid_timestamp_rows += 1
-                    continue
-                if ts < start_ts or ts > end_ts:
-                    continue
-                price = _positive_finite(_first(raw.get("last"), raw.get("price"), raw.get("mark")))
-                if price is None:
-                    invalid_price_rows += 1
-                    continue
-                row = dict(raw)
-                # Candidate replay consumes explicit ts/price while the full
-                # BBO/depth row remains available for conservative fills.
-                row["ts"] = ts
-                row["price"] = price
-                rows_by_ts[ts] = row
+                acc.add_line(line)
+    return _market_segment_coverage(acc)
+
+
+def _recent_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Same rows and coverage as ``_paper_market_segment`` for a window near the tape head.
+
+    Reads backwards in doubling chunks until the scanned span starts at least
+    ``RECENT_SEGMENT_GUARD_SEC`` before the window (or reaches the file start),
+    so the foreground cost is bounded by the window, not by hours of tape.
+    ``parse_errors`` / ``invalid_timestamp_rows`` count lines in the scanned span.
+    """
+    source = Path(data_dir) / MICROSTRUCTURE_TAPE_NAME
+    acc = None
+    scanned = 0
+    if source.is_file() and end_ts >= start_ts:
+        with source.open("rb") as handle:
+            size = handle.seek(0, 2)
+            span = RECENT_SEGMENT_INITIAL_TAIL_BYTES
+            while span * 2 < size:
+                handle.seek(size - span)
+                trial = _SegmentAccumulator(start_ts, end_ts)
+                for raw_line in handle.read(span).split(b"\n")[1:]:
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        trial.add_line(raw_line.decode("utf-8"))
+                    except UnicodeDecodeError:
+                        trial.parse_errors += 1
+                scanned += span
+                if trial.min_ts is not None and trial.min_ts <= float(start_ts) - RECENT_SEGMENT_GUARD_SEC:
+                    acc = trial
+                    break
+                span *= 2
+    if acc is None:
+        rows, coverage = _paper_market_segment(data_dir, start_ts=start_ts, end_ts=end_ts)
+        scanned += source.stat().st_size if source.is_file() else 0
+    else:
+        rows, coverage = _market_segment_coverage(acc)
+    LAST_RECENT_SEGMENT_SCAN.clear()
+    LAST_RECENT_SEGMENT_SCAN.update({"bytes_scanned": scanned, "start_ts": float(start_ts), "end_ts": float(end_ts)})
+    return rows, coverage
+
+
+def _market_segment_coverage(acc: _SegmentAccumulator) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    start_ts, end_ts, rows_by_ts = acc.start_ts, acc.end_ts, acc.rows_by_ts
+    parse_errors = acc.parse_errors
+    invalid_timestamp_rows = acc.invalid_timestamp_rows
+    invalid_price_rows = acc.invalid_price_rows
+    invalid_bbo_rows = 0
+    invalid_depth_rows = 0
     rows = [rows_by_ts[key] for key in sorted(rows_by_ts)]
     times = list(sorted(rows_by_ts))
     gaps = [right - left for left, right in zip(times, times[1:])]
@@ -634,7 +703,7 @@ def _pre_signal_market_segment(
     data_dir: str, signal_ts: float,
 ) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
     """Freeze one shared, causal lookback without implying future path data."""
-    rows, coverage = _paper_market_segment(
+    rows, coverage = _recent_market_segment(
         data_dir,
         start_ts=float(signal_ts) - PRE_SIGNAL_CONTEXT_SEC,
         end_ts=float(signal_ts),

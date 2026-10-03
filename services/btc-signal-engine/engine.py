@@ -49,6 +49,7 @@ import hmac
 from html import escape as html_escape
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
+import statistics
 from collections import deque
 import collections
 from bounded_evidence_worker import BoundedEvidenceWorker
@@ -23390,6 +23391,7 @@ def _account_registered_order_submission(
         signal["submitted_order_limit_price"] = submitted_order.get("limit_price")
         signal["_order_submission_accounted"] = True
     lane = signal.get("research_lane")
+    _xvl_latency_mark_order(lane, signal, "submit_ts", submitted_order.get("created_ts"))
     edge = signal.get("edge_score_at_entry")
     increment_pipeline_funnel("ORDER_SUBMITTED")
     log_lane_opportunity_event(
@@ -25093,6 +25095,10 @@ def fill_order(order):
     )
     pos = transition_result["pos"]
     if fill_lane:
+        _xvl_latency_mark_order(
+            fill_lane, order if order.get("shared_ai_call_id") else signal, "fill_ts",
+            order.get("fill_ts"),
+        )
         log_lane_opportunity_event(
             fill_lane, "FILLED", order.get("trade_id"),
             order.get("signal_dir") or order.get("dir"),
@@ -29785,19 +29791,122 @@ XVL_MAX_TRIGGER_LATENCY_SEC = 1.5
 XVL_STALE_AFTER_SEC = 10.0
 _XVL_LOCK = threading.Lock()
 _XVL_EVALUATORS = {}
+_XVL_ATTEMPT_QUEUES = {}
 _xvl_status = {
     "started_ts": 0.0, "last_tick_ts": 0.0, "ticks": 0, "tick_errors": 0,
     "last_error": None, "max_tick_ms": 0.0, "last_tick_ms": 0.0,
     "rows_written": 0, "write_failures": 0, "thread_niced": False,
+    "attempt_workers": 0,
 }
 _xvl_lane_runtime = {}
+
+# Signal->submit->fill telemetry for IMMEDIATE (taker-at-signal) cross-venue
+# tiles. "signal" is the evaluator's evaluated_ts (the shared_ai_call_ts of the
+# trigger), the clock the tiles' pre-registered median signal->fill gate uses.
+XVL_LATENCY_SCHEMA = "xvl_signal_latency_v1"
+XVL_LATENCY_WINDOW = 200
+XVL_LATENCY_MIN_FILLS = 10
+XVL_LATENCY_OPEN_MAX = 64
+XVL_LATENCY_DEFAULT_TARGET_SEC = 2.0
+XVL_LATENCY_STAGES = (
+    ("signal_to_attempt", "signal_ts", "attempt_ts"),
+    ("attempt_to_evidence", "attempt_ts", "evidence_ts"),
+    ("evidence_to_submit", "evidence_ts", "submit_ts"),
+    ("submit_to_fill", "submit_ts", "fill_ts"),
+    ("signal_to_submit", "signal_ts", "submit_ts"),
+    ("signal_to_fill", "signal_ts", "fill_ts"),
+)
 
 
 def _xvl_lane_state(lane: str) -> dict:
     return _xvl_lane_runtime.setdefault(lane, {
         "busy": False, "last_attempt_ts": 0.0, "submissions": deque(maxlen=512),
         "attempts": 0, "orders_eligible": 0, "skips": {}, "last_attempt": None,
+        "latency_open": {}, "latency_samples": deque(maxlen=XVL_LATENCY_WINDOW),
     })
+
+
+def _xvl_latency_target_sec(lane: str) -> float:
+    promote = ((COMBO_LANE_SPECS.get(lane) or {}).get("pre_registration") or {}).get("promotion") or {}
+    try:
+        return float(promote.get("max_median_signal_to_fill_sec") or XVL_LATENCY_DEFAULT_TARGET_SEC)
+    except (TypeError, ValueError):
+        return XVL_LATENCY_DEFAULT_TARGET_SEC
+
+
+def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, signal_ts: float = None) -> None:
+    """Stamp one stage for one trigger; never raises into the order path."""
+    lane = str(lane or "").upper()
+    key = str(trigger_id or "")
+    if not key or not is_cross_venue_clock_lane(lane):
+        return
+    try:
+        stamp = float(ts if ts is not None else time.time())
+        with _XVL_LOCK:
+            lane_state = _xvl_lane_state(lane)
+            open_rows = lane_state["latency_open"]
+            row = open_rows.get(key)
+            if row is None:
+                if signal_ts is None:
+                    return
+                while len(open_rows) >= XVL_LATENCY_OPEN_MAX:
+                    open_rows.pop(next(iter(open_rows)))
+                row = open_rows[key] = {"trigger_id": key, "signal_ts": float(signal_ts)}
+            row.setdefault(stage, stamp)
+            if stage == "submit_ts" and not row.get("_sampled"):
+                row["_sampled"] = True
+                lane_state["latency_samples"].append(row)
+            if stage == "fill_ts":
+                open_rows.pop(key, None)
+    except Exception as exc:
+        logger.warning(f"[XVL] latency mark failed lane={lane} stage={stage}: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _xvl_latency_mark_order(lane, record: dict, stage: str, ts=None) -> None:
+    if not isinstance(record, dict):
+        return
+    _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage,
+                      _buf_float(ts, 0.0) or None)
+
+
+def _xvl_quantile(values: list, q: float):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 3)
+
+
+def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
+    stages = {}
+    for name, start, end in XVL_LATENCY_STAGES:
+        deltas = [
+            float(row[end]) - float(row[start]) for row in samples
+            if row.get(start) is not None and row.get(end) is not None
+        ]
+        stages[name] = {
+            "n": len(deltas),
+            "p50_s": round(statistics.median(deltas), 3) if deltas else None,
+            "p90_s": _xvl_quantile(deltas, 0.9),
+        }
+    target = _xvl_latency_target_sec(lane)
+    fill = stages["signal_to_fill"]
+    if fill["n"] < XVL_LATENCY_MIN_FILLS:
+        status = "INSUFFICIENT_FILLS"
+    elif fill["p50_s"] > target:
+        status = "SLOW"
+    else:
+        status = "OK"
+    last = samples[-1] if samples else {}
+    return {
+        "schema": XVL_LATENCY_SCHEMA,
+        "status": status,
+        "target_median_signal_to_fill_s": target,
+        "min_fills": XVL_LATENCY_MIN_FILLS,
+        "window": XVL_LATENCY_WINDOW,
+        "signal_clock": "TRIGGER_EVALUATED_TS",
+        "stages": stages,
+        "last": {k: last.get(k) for k in ("trigger_id", "signal_ts", "attempt_ts", "evidence_ts", "submit_ts", "fill_ts")},
+    }
 
 
 def _xvl_count_skip(lane: str, reason: str) -> None:
@@ -29845,10 +29954,47 @@ def _xvl_maybe_attempt_paper(lane: str, evaluation: dict, trigger: dict, now: fl
     if reason:
         _xvl_count_skip(lane, reason)
         return
+    _xvl_latency_mark(lane, trigger.get("trigger_id"), "gate_ts", now,
+                      signal_ts=float(trigger.get("evaluated_ts") or now))
+    attempt_queue = _XVL_ATTEMPT_QUEUES.get(lane)
+    if attempt_queue is not None:
+        try:
+            attempt_queue.put_nowait(dict(trigger))
+            return
+        except Full:
+            pass
     threading.Thread(
         target=_xvl_paper_attempt, args=(lane, dict(trigger)),
         daemon=True, name=f"xvl-paper-{lane.lower()}",
     ).start()
+
+
+def _xvl_attempt_worker(lane: str, attempt_queue: Queue) -> None:
+    while not shutdown_event.is_set():
+        try:
+            trigger = attempt_queue.get(timeout=1.0)
+        except Empty:
+            continue
+        _xvl_paper_attempt(lane, trigger)
+
+
+def _xvl_start_attempt_workers(lanes) -> None:
+    """One long-lived attempt worker per lane, started before the evaluator nices itself.
+
+    Linux threads inherit the creating thread's nice value; attempts spawned from
+    the niced evaluator ran the whole evidence + order path at nice 5 behind the
+    AI cycle, collectors and shipper. The busy flag still allows one in flight.
+    """
+    for lane in lanes:
+        if lane in _XVL_ATTEMPT_QUEUES:
+            continue
+        attempt_queue = Queue(maxsize=1)
+        _XVL_ATTEMPT_QUEUES[lane] = attempt_queue
+        threading.Thread(
+            target=_xvl_attempt_worker, args=(lane, attempt_queue),
+            daemon=True, name=f"xvl-paper-{lane.lower()}",
+        ).start()
+    _xvl_status["attempt_workers"] = len(_XVL_ATTEMPT_QUEUES)
 
 
 def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
@@ -29875,8 +30021,11 @@ def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
 
 
 def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
-    if time.time() - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
+    attempt_ts = time.time()
+    if attempt_ts - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
         return "TRIGGER_STALE"
+    _xvl_latency_mark(lane, trigger.get("trigger_id"), "attempt_ts", attempt_ts,
+                      signal_ts=float(trigger.get("evaluated_ts") or attempt_ts))
     if not is_research_data_collection() or not is_research_lane_enabled(lane):
         return "TILE_OFF"
     if invert_signal_active():
@@ -29938,6 +30087,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     if not evidence_ready:
         logger.error(f"[{lane}] order blocked: immutable pre-entry evidence unavailable [PIPELINE ENFORCEMENT]")
         return "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
+    _xvl_latency_mark(lane, call_id, "evidence_ts")
     with _XVL_LOCK:
         _xvl_lane_state(lane)["submissions"].append(time.time())
     _spawn_combo_lane(
@@ -29971,6 +30121,7 @@ def xvl_evaluator_loop():
     lanes = cross_venue_clock_lanes()
     if not XVL_EVALUATOR_ENABLED or not lanes:
         return
+    _xvl_start_attempt_workers(lanes)
     _xvl_lower_thread_priority()
     for lane in lanes:
         _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
@@ -30026,6 +30177,10 @@ def xvl_evaluator_snapshot() -> dict:
             }
             for lane, row in _xvl_lane_runtime.items()
         }
+        latency_samples = {
+            lane: [dict(sample) for sample in row.get("latency_samples") or ()]
+            for lane, row in _xvl_lane_runtime.items()
+        }
     last = float(status.get("last_tick_ts") or 0.0)
     tick_age = round(now - last, 3) if last else None
     if not XVL_EVALUATOR_ENABLED or not lanes:
@@ -30051,11 +30206,12 @@ def xvl_evaluator_snapshot() -> dict:
         "lanes": {
             lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
                    "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
-                   "paper": runtime.get(lane, {})}
+                   "paper": runtime.get(lane, {}),
+                   "latency": _xvl_latency_snapshot(lane, latency_samples.get(lane, []))}
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
-                                  "rows_written", "write_failures", "thread_niced")},
+                                  "rows_written", "write_failures", "thread_niced", "attempt_workers")},
     }
 
 
@@ -35930,12 +36086,25 @@ DASHBOARD_JS = """(function () {
               ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:4px;color:#ffa657;font-size:0.72em;font-weight:700;">' + spec.evidence_badge + ' · Win % ' + headlineWinLabel + '</span>')
               : '');
           const xvlLane = ((d.xvl_evaluator || {}).lanes || {})[spec.lane];
+          const xvlLat = (xvlLane || {}).latency || {};
+          const xvlStages = xvlLat.stages || {};
+          const xvlSec = (v) => (v === null || v === undefined) ? '—' : (Number(v).toFixed(2) + ' s');
+          const xvlLatColor = xvlLat.status === 'OK' ? '#3fb950' : (xvlLat.status === 'SLOW' ? '#f85149' : '#8b949e');
+          const xvlLatency = xvlLane && xvlLat.schema
+            ? ('<div style="margin-top:4px;"><strong style="color:' + xvlLatColor + ';">Signal→fill latency ' + (xvlLat.status || 'UNKNOWN') + ':</strong> '
+              + 'median ' + xvlSec((xvlStages.signal_to_fill || {}).p50_s) + ' (p90 ' + xvlSec((xvlStages.signal_to_fill || {}).p90_s) + ', n=' + Number((xvlStages.signal_to_fill || {}).n || 0) + ')'
+              + ' · target ≤' + xvlSec(xvlLat.target_median_signal_to_fill_s)
+              + ' · signal→submit ' + xvlSec((xvlStages.signal_to_submit || {}).p50_s)
+              + ' · evidence ' + xvlSec((xvlStages.attempt_to_evidence || {}).p50_s)
+              + ' · submit→fill ' + xvlSec((xvlStages.submit_to_fill || {}).p50_s) + '</div>')
+            : '';
           const xvlShadow = xvlLane
             ? ('<div style="margin-top:8px;padding:7px 9px;background:#1b1530;border:1px solid #8957e5;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
               + '<strong style="color:#a371f7;">Cross-venue evaluator (' + ((d.xvl_evaluator || {}).status || 'UNKNOWN') + '):</strong> '
               + 'shadow triggers ' + Number(xvlLane.triggers_logged || 0) + ' · qualifying ' + Number(xvlLane.qualifying || 0)
               + ' · shadow outcomes ' + Number(xvlLane.outcomes_ok || 0) + ' · paper attempts ' + Number((xvlLane.paper || {}).attempts || 0)
               + ' · orders ' + Number((xvlLane.paper || {}).orders_eligible || 0)
+              + xvlLatency
               + '<div style="color:#8b949e;">Every qualifying lead is logged as a shadow signal whether or not this tile is ON (since process start).</div></div>')
             : '';
           const chaseTiming = spec.chase_timing || {};
