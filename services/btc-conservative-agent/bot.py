@@ -23391,7 +23391,7 @@ def _account_registered_order_submission(
         signal["submitted_order_limit_price"] = submitted_order.get("limit_price")
         signal["_order_submission_accounted"] = True
     lane = signal.get("research_lane")
-    _xvl_latency_mark_order(lane, signal, "submit_ts", _buf_float(submitted_order.get("created_ts"), 0.0) or None)
+    _xvl_latency_mark_order(lane, signal, "submit_ts", submitted_order.get("created_ts"))
     edge = signal.get("edge_score_at_entry")
     increment_pipeline_funnel("ORDER_SUBMITTED")
     log_lane_opportunity_event(
@@ -25097,7 +25097,7 @@ def fill_order(order):
     if fill_lane:
         _xvl_latency_mark_order(
             fill_lane, order if order.get("shared_ai_call_id") else signal, "fill_ts",
-            _buf_float(order.get("fill_ts"), 0.0) or None,
+            order.get("fill_ts"),
         )
         log_lane_opportunity_event(
             fill_lane, "FILLED", order.get("trade_id"),
@@ -29862,10 +29862,11 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
         logger.warning(f"[XVL] latency mark failed lane={lane} stage={stage}: {exc} [PIPELINE ENFORCEMENT]")
 
 
-def _xvl_latency_mark_order(lane, record: dict, stage: str, ts: float = None) -> None:
+def _xvl_latency_mark_order(lane, record: dict, stage: str, ts=None) -> None:
     if not isinstance(record, dict):
         return
-    _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage, ts)
+    _xvl_latency_mark(lane or record.get("research_lane"), record.get("shared_ai_call_id"), stage,
+                      _buf_float(ts, 0.0) or None)
 
 
 def _xvl_quantile(values: list, q: float):
