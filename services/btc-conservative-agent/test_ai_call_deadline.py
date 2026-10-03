@@ -165,6 +165,56 @@ def test_server_that_never_answers_is_cut_at_the_deadline(ns, server):
     assert ns["_ai_deadline_state"]["deadline_exceeded_total"] == 1
 
 
+def _threading_where_worker_always_finishes_first():
+    """finished.wait() outlasts the worker, pinning the worker-wins race order."""
+    shim = types.ModuleType("threading_worker_first_shim")
+    shim.__dict__.update(threading.__dict__)
+
+    class Event(threading.Event):
+        def wait(self, timeout=None):
+            return super().wait(None if timeout is None else timeout + 3.0)
+
+    shim.Event = Event
+    return shim
+
+
+@pytest.mark.parametrize("worker_error", ["read_timeout", "deadline_check"])
+def test_worker_timeout_winning_the_race_is_still_a_counted_deadline(ns, worker_error):
+    def post(*_args, timeout, **_kwargs):
+        time.sleep(timeout[1])
+        if worker_error == "read_timeout":
+            raise requests.exceptions.ReadTimeout("Read timed out.")
+        raise TimeoutError("AI_DEADLINE_EXCEEDED")
+
+    fake_requests = types.ModuleType("requests_worker_timeout_shim")
+    fake_requests.__dict__.update(requests.__dict__)
+    fake_requests.post = post
+    ns["requests"] = fake_requests
+    ns["threading"] = _threading_where_worker_always_finishes_first()
+    with pytest.raises(RuntimeError, match=r"^AI_DEADLINE_EXCEEDED:1s$") as info:
+        ns["_deepseek_post_with_deadline"](
+            "http://unused", headers={}, json_payload={}, idle_timeout=60, deadline_sec=1.0,
+        )
+    assert info.value.latency_ms == 1000
+    assert ns["classify_ai_provider_error"](info.value) == "DEADLINE"
+    assert ns["_ai_deadline_state"] == {"abandoned_in_flight": 0, "deadline_exceeded_total": 1}
+
+
+def test_early_worker_timeout_is_not_relabelled_as_deadline(ns):
+    def post(*_args, **_kwargs):
+        raise requests.exceptions.ReadTimeout("Read timed out.")
+
+    fake_requests = types.ModuleType("requests_early_timeout_shim")
+    fake_requests.__dict__.update(requests.__dict__)
+    fake_requests.post = post
+    ns["requests"] = fake_requests
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        ns["_deepseek_post_with_deadline"](
+            "http://unused", headers={}, json_payload={}, idle_timeout=60, deadline_sec=5.0,
+        )
+    assert ns["_ai_deadline_state"]["deadline_exceeded_total"] == 0
+
+
 def test_abandoned_backlog_refuses_new_calls_immediately(ns, server):
     _Handler.mode = "fast"
     ns["_ai_deadline_state"]["abandoned_in_flight"] = ns["AI_DEADLINE_MAX_ABANDONED"]

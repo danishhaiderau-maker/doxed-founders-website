@@ -141,8 +141,10 @@ def test_snapshot_is_versioned_and_never_gates_orders():
     json.dumps(snap)
 
 
-def test_bot_logs_regime_and_snapshot_alongside_the_live_call(monkeypatch):
+def test_bot_logs_regime_and_snapshot_alongside_the_live_call(monkeypatch, tmp_path):
     import bot
+    # RESEARCH_SESSION_FILE is cwd-relative: the hook binds a collector epoch.
+    monkeypatch.setattr(bot, "RESEARCH_SESSION_FILE", str(tmp_path / "research_session.json"))
     written = {}
     monkeypatch.setattr(bot, "_safe_append_jsonl",
                         lambda path, row, **kw: written.setdefault(path, []).append(row) or True)
@@ -164,8 +166,9 @@ def test_bot_logs_regime_and_snapshot_alongside_the_live_call(monkeypatch):
     assert bot._DFS_BOOK.pending_count() == 1
 
 
-def test_regime_is_skipped_when_the_hook_deadline_is_near(monkeypatch):
+def test_regime_is_skipped_when_the_hook_deadline_is_near(monkeypatch, tmp_path):
     import bot
+    monkeypatch.setattr(bot, "RESEARCH_SESSION_FILE", str(tmp_path / "research_session.json"))
     monkeypatch.setattr(bot, "call_deepseek_api_with_meta", lambda *a, **k: pytest.fail("must not call"))
     row = bot._ai_shadow_run_regime(COMPACT, PREMIUM, "c", 1.0, timeout_sec=2.0)
     assert row["call_state"] == "SKIPPED_HOOK_DEADLINE"

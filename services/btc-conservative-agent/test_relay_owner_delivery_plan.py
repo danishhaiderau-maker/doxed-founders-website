@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from relay_delivery_guard import RelayDeliveryGuard
 from relay_event_outbox import RelayEventOutbox
 
 
@@ -118,17 +119,21 @@ def test_default_due_keeps_legacy_unfiltered_behavior(tmp_path):
     assert [row["event_id"] for row in box.due()] == [old["event_id"], missing["event_id"]]
 
 
-def load_drain(box, *, active=True, force_paper=True, live=False, enabled=False):
+def load_drain(box, *, active=True, force_paper=True, live=False, enabled=False, armed_at=None):
     tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name == "_drain_relay_event_outbox_once"]
     sent = []
+    state = {"live_armed": live, "bitfinex_live_enabled": enabled}
+    if armed_at is not None:
+        state["live_armed_at_ts"] = armed_at
     ns = {
         "_relay_event_drain_lock": threading.Lock(), "state_lock": threading.RLock(),
-        "state": {"live_armed": live, "bitfinex_live_enabled": enabled},
+        "state": state,
         "_force_paper_mode_active": lambda: force_paper,
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
         "_relay_event_outbox": box, "_relay_push_state": {},
+        "_relay_delivery_guard": RelayDeliveryGuard(box.path.with_name("quarantine.jsonl")),
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), "bot.py", "exec"), ns)
@@ -165,23 +170,25 @@ def test_lost_singleton_does_not_guess_a_deliverable_owner(tmp_path):
 @pytest.mark.parametrize("flags", [
     {"force_paper": False}, {"live": True}, {"enabled": True}, {"live": None},
 ])
-def test_filter_never_changes_nonconfirmed_paper_money_path(tmp_path, flags):
+def test_stale_owner_is_withheld_in_every_mode(tmp_path, flags):
     box = RelayEventOutbox(tmp_path / "outbox.json")
     old = enqueue(box, "old", "old-owner")
-    ns, sent = load_drain(box, **flags)
+    ns, sent = load_drain(box, armed_at=1.0, **flags)
     ns["_drain_relay_event_outbox_once"]()
-    assert sent == [old["event_id"]]
-    assert "delivery_scheduler" not in ns["_relay_push_state"]
+    ns["_drain_relay_event_outbox_once"](old["event_id"])
+    assert sent == []
+    assert ns["_relay_push_state"]["delivery_scheduler"]["owner_filter_applied"] is True
+    assert box.pending_count() == 1
 
 
-def test_leaving_paper_scope_clears_old_filter_diagnostic(tmp_path):
+def test_leaving_paper_scope_keeps_owner_filter(tmp_path):
     box = RelayEventOutbox(tmp_path / "outbox.json")
-    old = enqueue(box, "old", "old-owner")
+    enqueue(box, "old", "old-owner")
     ns, sent = load_drain(box)
     ns["_drain_relay_event_outbox_once"]()
     assert sent == []
-    assert ns["_relay_push_state"]["delivery_scheduler"]["owner_filter_applied"] is True
     ns["state"]["live_armed"] = True
+    ns["state"]["live_armed_at_ts"] = 1.0
     ns["_drain_relay_event_outbox_once"]()
-    assert sent == [old["event_id"]]
-    assert "delivery_scheduler" not in ns["_relay_push_state"]
+    assert sent == []
+    assert ns["_relay_push_state"]["delivery_scheduler"]["owner_filter_applied"] is True

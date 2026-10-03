@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
+from data_epoch import STAMP_FIELD as DATA_EPOCH_STAMP_FIELD, active_epoch_id
 from combo_pathway_config import active_tile_registry_signature
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -1056,7 +1057,8 @@ class V3EvidenceStore:
         current = self._active_ledger_generation(ledger)
         legacy_migration = None
         legacy_ref = None
-        if current["generation"] > 0:
+        # Ledgers opted in while empty never had a generation 0 to migrate.
+        if current["generation"] > 0 and self._legacy_migration_path(ledger).exists():
             legacy_migration = self._load_legacy_migration(ledger)
             legacy_ref = {
                 "schema": "v3_ledger_generation_ref_v1", "state": "ACTIVE",
@@ -2214,6 +2216,9 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
             **_collection_provenance(),
         })
+        data_epoch_id = active_epoch_id()
+        if data_epoch_id:
+            material.setdefault(DATA_EPOCH_STAMP_FIELD, data_epoch_id)
         if ledger == "opportunity":
             # Every producer path converges here.  Stamp the complete available
             # causal identity once rather than relying on each bridge caller to

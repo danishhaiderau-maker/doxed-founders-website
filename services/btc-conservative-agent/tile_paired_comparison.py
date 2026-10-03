@@ -511,6 +511,11 @@ def _input_revision_cohorts(by_lane, lanes, revisions: Mapping[str, str]) -> dic
     return out
 
 
+def baseline_lane(registry: Mapping[str, Mapping[str, Any]], lanes: Sequence[str]) -> str | None:
+    """First tile in display order whose registry spec declares a ``baseline_role``."""
+    return next((lane for lane in lanes if (registry.get(lane) or {}).get("baseline_role")), None)
+
+
 def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, Mapping[str, Any]],
                  tile_order: Sequence[str], now_ts: float | None = None,
                  call_revisions: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -522,9 +527,12 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
         if fill and fill["lane"] in by_lane:
             by_lane[fill["lane"]].append(fill)
     stats = {lane: _tile_stats(by_lane[lane]) for lane in lanes}
-    trials = len(lanes)
+    baseline = baseline_lane(registry, lanes)
+    # The baseline is a yardstick, not a tested hypothesis.
+    hypothesis_lanes = [lane for lane in lanes if lane != baseline]
+    trials = len(hypothesis_lanes)
     srs = []
-    for lane in lanes:
+    for lane in hypothesis_lanes:
         values = [r["bp"] for r in by_lane[lane] if r["bp"] is not None]
         if len(values) >= 3:
             mean, sd, _, _ = _moments(values)
@@ -534,13 +542,18 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
     if len(srs) >= 2:
         mu = sum(srs) / len(srs)
         sr_variance = sum((s - mu) ** 2 for s in srs) / (len(srs) - 1)
-    # Only tiles fed by the shared AI call can share a signal; cross-venue
-    # clock tiles are reported on their own and never paired.
+    # Only tiles keyed to the shared AI call (reading it or making their own
+    # call on it) can share a signal; cross-venue clock tiles are never paired.
     paired_lanes = [
         lane for lane in lanes
         if (registry.get(lane) or {}).get("uses_shared_ai_direction", True) is not False
+        or (registry.get(lane) or {}).get("own_ai_call")
     ]
     pairs = [_paired(by_lane, a, b) for i, a in enumerate(paired_lanes) for b in paired_lanes[i + 1:]]
+    vs_baseline = (
+        [_paired(by_lane, baseline, lane) for lane in paired_lanes if lane != baseline]
+        if baseline in paired_lanes else []
+    )
     common = set.intersection(*[
         {r["call"] for r in by_lane[lane] if r["call"] and r["bp"] is not None} for lane in paired_lanes
     ]) if paired_lanes else set()
@@ -591,6 +604,8 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
         "deflated_sharpe_trials": trials,
         "tiles": stats,
         "paired": pairs,
+        "baseline_lane": baseline,
+        "vs_baseline": vs_baseline,
         "all_tiles_paired": all_paired,
         "pre_registered": pre_registered,
         "input_revision_cohorts": {

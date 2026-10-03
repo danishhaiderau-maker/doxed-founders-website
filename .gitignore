@@ -117,6 +117,8 @@ services/btc-conservative-agent/crash_dump.json
 services/btc-conservative-agent/config-*.json
 services/btc-conservative-agent/*.log.*
 services/btc-conservative-agent/research_session*.json
+# V3 evidence store created by tests that resolve the store from os.getcwd().
+services/btc-conservative-agent/v3/
 services/btc-conservative-agent/bot_analyzer_sync.json
 services/btc-conservative-agent/repo_version_sync.json
 services/btc-conservative-agent/bitfinex_live_state.json

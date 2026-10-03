@@ -92,7 +92,10 @@ def test_maker_fills_only_when_the_opposite_quote_crosses():
 def test_registry_exit_specs_map_every_active_tile():
     for lane, spec in cpc.ACTIVE_TILE_REGISTRY.items():
         ex, why = exit_spec_from_registry(spec)
-        assert ex is not None, (lane, why)
+        # AI thesis exits are declared non-replayable, never approximated by a tape-only spec.
+        assert ex is not None or str(why).startswith("EXIT_NOT_TAPE_REPLAYABLE:"), (lane, why)
+    ex, why = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY[cpc.RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL])
+    assert ex is None and why == "EXIT_NOT_TAPE_REPLAYABLE:AUG_CONTINUOUS_SCENARIO_C:THESIS_FAST_CUT+THESIS_INVALIDATED"
     ftf = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"])[0]
     assert ftf.tcap_sec == 3600 and ftf.hard_bp == pytest.approx(40.0) and not ftf.needs_atr
     ladder_spec = {"exit_policy": {"family": "ATR_TRAIL_PROFIT_LOCK", "initial_stop_atr_k": 1.5,

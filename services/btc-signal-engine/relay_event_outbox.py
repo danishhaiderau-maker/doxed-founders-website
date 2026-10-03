@@ -527,6 +527,26 @@ class RelayEventOutbox:
         with self._lock:
             return len(self._pending)
 
+    def pending_index(self) -> list[dict]:
+        """Identity view of every pending event without copying payloads."""
+        with self._lock:
+            return [
+                {
+                    "event_id": row.get("event_id"), "trade_id": row.get("trade_id"),
+                    "event_type": row.get("event_type"), "event_seq": row.get("event_seq"),
+                    "payload_sha256": row.get("payload_sha256"),
+                    "created_at_unix": row.get("created_at_unix"),
+                    "bot_instance_id": (row.get("payload") or {}).get("bot_instance_id"),
+                }
+                for row in self._pending.values()
+            ]
+
+    def last_ack_unix(self) -> float | None:
+        with self._lock:
+            stamps = [float(row.get("acknowledged_at_unix") or 0.0) for row in self._acks]
+        latest = max(stamps, default=0.0)
+        return latest or None
+
     def decorate_lifecycle(self, payload: dict) -> dict:
         """Bind delivery state into the same canonical lifecycle generation."""
         with self._lock:

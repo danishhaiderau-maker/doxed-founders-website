@@ -12,7 +12,9 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot
 
 
-def test_watchdog_and_dashboard_snapshot_need_no_revision_global():
+def test_watchdog_and_dashboard_snapshot_need_no_revision_global(monkeypatch, tmp_path):
+    # The state snapshot opens the V3 store under the cwd.
+    monkeypatch.chdir(tmp_path)
     assert not hasattr(bot, "SOURCE_GIT_REV")
     watchdog = bot._watchdog_crash_context()
     snapshot = bot._build_api_state_snapshot()

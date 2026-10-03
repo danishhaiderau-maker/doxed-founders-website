@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from data_epoch import valid_epoch_id as valid_data_epoch_id
 from lifecycle_pipeline_worker import LEDGER_NAMES, create_request, verify_result
 from production_rotation_orchestrator import (
     DEFAULT_TARGET_BYTES, ProductionRotationOrchestrator,
@@ -125,6 +126,10 @@ def _minimal_worker_environment(source_revision: str | None = None) -> dict[str,
     # environment input.
     if os.environ.get("SCORE_LED_PAPER_RESEARCH_ENABLED") == "1":
         environment["SCORE_LED_PAPER_RESEARCH_ENABLED"] = "1"
+    # The clean data epoch is release identity too; only a well-formed id passes.
+    data_epoch_id = (os.environ.get("DATA_EPOCH_ID") or "").strip()
+    if valid_data_epoch_id(data_epoch_id):
+        environment["DATA_EPOCH_ID"] = data_epoch_id
     return environment
 
 

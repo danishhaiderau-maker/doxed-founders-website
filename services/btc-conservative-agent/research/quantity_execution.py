@@ -14,6 +14,9 @@ from typing import Any, Mapping
 
 
 CONSTRAINT_SCHEMA = "signed_quantity_constraints_v1"
+CONSTRAINT_SCHEMA_V2 = "signed_quantity_constraints_v2"
+CONSTRAINT_SCHEMAS = (CONSTRAINT_SCHEMA, CONSTRAINT_SCHEMA_V2)
+MIN_NOTIONAL_NOT_PUBLISHED = "NOT_PUBLISHED_BY_VENUE"
 DECISION_SCHEMA = "quantity_execution_decision_v1"
 INTEGRITY_BINDING = "SHA256_CANONICAL_PAYLOAD_NOT_CRYPTOGRAPHIC_SIGNATURE"
 
@@ -27,6 +30,22 @@ def _decimal(value: Any) -> Decimal | None:
 
 
 def _payload(raw: Mapping[str, Any]) -> dict[str, Any]:
+    if raw.get("schema") == CONSTRAINT_SCHEMA_V2:
+        return {
+            "schema": CONSTRAINT_SCHEMA_V2,
+            "symbol": str(raw.get("symbol") or "").strip(),
+            "quantity_step": str(raw.get("quantity_step") or "").strip(),
+            "quantity_precision": raw.get("quantity_precision"),
+            "min_lot": str(raw.get("min_lot") or "").strip(),
+            "max_lot": str(raw.get("max_lot") or "").strip(),
+            "min_notional": str(raw.get("min_notional") or "").strip(),
+            "min_notional_status": str(raw.get("min_notional_status") or "").strip(),
+            "price_sig_digits": raw.get("price_sig_digits"),
+            "captured_at": str(raw.get("captured_at") or "").strip(),
+            "source_revision": str(raw.get("source_revision") or "").strip(),
+            "source": str(raw.get("source") or "").strip(),
+            "integrity_binding": str(raw.get("integrity_binding") or "").strip(),
+        }
     return {
         "schema": CONSTRAINT_SCHEMA,
         "symbol": str(raw.get("symbol") or "").strip(),
@@ -69,6 +88,30 @@ def build_signed_quantity_constraints(
     return raw
 
 
+def build_signed_quantity_constraints_v2(
+    *, symbol: str, quantity_precision: int, min_lot: Any, max_lot: Any,
+    price_sig_digits: int, captured_at: str, source_revision: str, source: str,
+) -> dict[str, Any]:
+    """Receipt for venues that publish amount bounds but no minimum order value."""
+    raw = {
+        "schema": CONSTRAINT_SCHEMA_V2,
+        "symbol": symbol,
+        "quantity_step": str(Decimal(1).scaleb(-int(quantity_precision))),
+        "quantity_precision": quantity_precision,
+        "min_lot": str(min_lot),
+        "max_lot": str(max_lot),
+        "min_notional": "",
+        "min_notional_status": MIN_NOTIONAL_NOT_PUBLISHED,
+        "price_sig_digits": price_sig_digits,
+        "captured_at": captured_at,
+        "source_revision": source_revision,
+        "source": source,
+        "integrity_binding": INTEGRITY_BINDING,
+    }
+    raw["payload_sha256"] = _sha256(_payload(raw))
+    return raw
+
+
 def validate_signed_quantity_constraints(
     raw: Mapping[str, Any] | None, *, symbol: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
@@ -76,7 +119,8 @@ def validate_signed_quantity_constraints(
         return None, ["SIGNED_QUANTITY_CONSTRAINTS_MISSING"]
     payload = _payload(raw)
     reasons: list[str] = []
-    if raw.get("schema") != CONSTRAINT_SCHEMA:
+    v2 = raw.get("schema") == CONSTRAINT_SCHEMA_V2
+    if raw.get("schema") not in CONSTRAINT_SCHEMAS:
         reasons.append("QUANTITY_CONSTRAINT_SCHEMA_INVALID")
     if not payload["symbol"]:
         reasons.append("QUANTITY_CONSTRAINT_SYMBOL_MISSING")
@@ -92,7 +136,18 @@ def validate_signed_quantity_constraints(
         reasons.append("QUANTITY_PRECISION_MISSING_OR_INVALID")
     if min_lot is None:
         reasons.append("MIN_LOT_MISSING_OR_INVALID")
-    if min_notional is None:
+    max_lot = _decimal(payload.get("max_lot")) if v2 else None
+    if v2:
+        if payload["min_notional"] or payload["min_notional_status"] != MIN_NOTIONAL_NOT_PUBLISHED:
+            reasons.append("MIN_NOTIONAL_STATUS_INVALID")
+        if max_lot is None:
+            reasons.append("MAX_LOT_MISSING_OR_INVALID")
+        elif min_lot is not None and max_lot < min_lot:
+            reasons.append("MAX_LOT_BELOW_MIN_LOT")
+        sig = payload["price_sig_digits"]
+        if isinstance(sig, bool) or not isinstance(sig, int) or sig <= 0:
+            reasons.append("PRICE_SIG_DIGITS_MISSING_OR_INVALID")
+    elif min_notional is None:
         reasons.append("MIN_NOTIONAL_MISSING_OR_INVALID")
     if not payload["captured_at"]:
         reasons.append("QUANTITY_CONSTRAINT_CAPTURE_TIME_MISSING")
@@ -116,7 +171,8 @@ def validate_signed_quantity_constraints(
         **payload,
         "quantity_step": str(step),
         "min_lot": str(min_lot),
-        "min_notional": str(min_notional),
+        "min_notional": None if v2 else str(min_notional),
+        **({"max_lot": str(max_lot)} if v2 else {}),
         "payload_sha256": supplied_hash,
     }, []
 
@@ -161,18 +217,28 @@ def apply_quantity_constraints(
         base["reasons"] = list(dict.fromkeys(reasons))
         return base
     base["constraints"] = normalized
+    max_lot = _decimal(normalized.get("max_lot"))
+    if max_lot is not None and requested > max_lot:
+        base["constraints"] = normalized
+        base["reasons"] = ["REQUESTED_QTY_ABOVE_MAX_LOT"]
+        return base
     remaining = max(Decimal(0), requested - accumulated)
     raw = min(raw, remaining)
     step = Decimal(normalized["quantity_step"])
     rounded = (raw / step).to_integral_value(rounding=ROUND_DOWN) * step
     min_lot = Decimal(normalized["min_lot"])
-    min_notional = Decimal(normalized["min_notional"])
+    min_notional = (
+        Decimal(normalized["min_notional"]) if normalized["min_notional"] is not None else None
+    )
     notional = rounded * price
     base["raw_partial_quantity"] = float(raw)
     base["rounded_executable_quantity"] = float(rounded)
     base["executable_notional"] = float(notional)
     base["minimum_lot_decision"] = "PASS" if rounded >= min_lot else "FAIL"
-    base["minimum_notional_decision"] = "PASS" if notional >= min_notional else "FAIL"
+    base["minimum_notional_decision"] = (
+        MIN_NOTIONAL_NOT_PUBLISHED if min_notional is None
+        else "PASS" if notional >= min_notional else "FAIL"
+    )
     if raw <= 0:
         base["final_classification"] = "NO_FILL" if accumulated == 0 else "PARTIAL_FILL"
         base["reasons"] = ["NO_RAW_PARTIAL_QUANTITY"]
@@ -185,7 +251,7 @@ def apply_quantity_constraints(
         base["final_classification"] = "NO_FILL" if accumulated == 0 else "PARTIAL_FILL"
         base["reasons"] = ["MINIMUM_LOT_NOT_MET"]
         return base
-    if notional < min_notional:
+    if min_notional is not None and notional < min_notional:
         base["final_classification"] = "NO_FILL" if accumulated == 0 else "PARTIAL_FILL"
         base["reasons"] = ["MINIMUM_NOTIONAL_NOT_MET"]
         return base

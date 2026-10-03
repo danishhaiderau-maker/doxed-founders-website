@@ -65,8 +65,14 @@ ANALYZER_USAGE = {
     "order_multiverse_entry_grid.jsonl": {
         "usage": HEALTH_ONLY, "continuous": False, "consumers": ["multiverse_collection_health"]},
     "chase_offset_touch_grid.jsonl": {
-        "usage": FULL, "continuous": False, "consumers": ["compressed shadow schedule rows", "multiverse health"],
-        "note": "compressed shadow rows read the active file only; now include the closed rotation"},
+        "usage": FULL, "continuous": False,
+        "consumers": ["compressed shadow schedule rows", "multiverse health",
+                      "shadow_chase_bucket_v1 chase-bucket outcomes (Fly chase panel)"],
+        "schemas": ["chase_offset_touch_grid_v1", "compressed_chase_shadow_v1",
+                    "compressed_chase_arm_receipt_v1", "shadow_chase_bucket_v1"],
+        "note": "compressed shadow rows read the active file only; now include the closed rotation. "
+                "shadow_chase_bucket_v1 is one SHADOW_ONLY outcome per compressed shadow order "
+                "(chase count, fill, time-to-fill, MFE/MAE, net bp at a 30 min mark)"},
     "post_exit_replay.jsonl": {
         "usage": STRATEGY_LAB, "continuous": False, "consumers": ["stream_studies exit-timing regret (all rotations)"]},
     "opportunity_capture.jsonl": {"usage": FULL, "continuous": False, "consumers": ["opportunity capture reports"]},

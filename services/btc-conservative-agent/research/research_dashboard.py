@@ -8238,7 +8238,7 @@ function renderGenomeGridRows() {
       ? 'UNDECLARED FILL MODEL (legacy report) - these numbers are not a REALISTIC_V1 headline.'
       : shadow
         ? `${world}: COMPARISON SHADOW - NOT HEADLINE. Optimistic touch fills, no latency; never quote these as results. Headline = ${d.headline_fill_world}.`
-        : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? 0}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
+        : `HEADLINE fill model ${fmDecl.fill_model} (${fmDecl.fill_model_fingerprint || ''}): measured latency ${lat.latency_sec ?? '-'}s (${lat.source || '-'}, n=${lat.n ?? '-'}), taker at opposite BBO with size walk, limits fill only on trade-through or queue consumption, exits with ${fmDecl.exit_latency_sec ?? '-'}s latency, fees ${fmDecl.fee_profile_id || '-'}.`;
   }
   const filter = document.getElementById('genome-grid-filter');
   const mode = filter ? filter.value : 'top_100_by_oos_net';
@@ -8302,14 +8302,14 @@ async function loadGenomeGrid() {
     return `<tr><td>${escapeHtml(GENOME_CLASS_LABELS[cohort] || cohort)}</td><td>${w.episodes ?? '-'}</td><td>${scored.length}</td><td>${p.fills ?? '-'}</td><td>${genomeUsd(p.ev_per_fill_usd)}</td><td>${p.ev_per_fill_bp ?? '-'}</td><td>${ci[0] == null ? '-' : `[${ci[0]}, ${ci[1]}]`}</td><td>${c.n_eff ?? '-'}</td><td>${escapeHtml(picks || '-')}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No walk-forward block in this report.</td></tr>';
   document.getElementById('genome-grid-kpis').innerHTML = [
-    ['AI decisions evaluated', `${cov.episodes_evaluated ?? 0} / ${cov.episodes_collected ?? 0}`],
+    ['AI decisions evaluated', `${cov.episodes_evaluated ?? '-'} / ${cov.episodes_collected ?? '-'}`],
     ['Excluded v3 rows (xvenue / duplicates / no side)', String(cov.v3_opportunities_excluded_declared ?? '-')],
     ['Signals span', `${String(cov.first_signal_utc||'').slice(5,16)} to ${String(cov.last_signal_utc||'').slice(5,16)}`],
     ['Policies evaluated', Number(g.policies_evaluated||0).toLocaleString()],
     ['Ranked (train >= ' + (h.min_train_fills_for_rank??30) + ', OOS >= ' + (h.min_oos_fills_for_rank??10) + ' fills)', Number(g.policies_ranked||0).toLocaleString()],
-    ['Holdout confirmed / failed (' + (d.headline_fill_world || 'all worlds') + ')', `${headVerdicts.CONFIRMED ?? 0} / ${headVerdicts.FAILED_HOLDOUT ?? 0}`],
+    ['Holdout confirmed / failed (' + (d.headline_fill_world || 'all worlds') + ')', `${headVerdicts.CONFIRMED ?? '-'} / ${headVerdicts.FAILED_HOLDOUT ?? '-'}`],
     ['Entries x exits', `${g.entries} x ${g.protections}`],
-    ['Engine replay parity', `${par.status} (${par.checked ?? 0})`],
+    ['Engine replay parity', `${par.status} (${par.checked ?? '-'})`],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
   const axes = d.dimension_summary || {};
   document.getElementById('genome-grid-axes').innerHTML = Object.entries(axes).filter(([axis]) => axis !== 'fill_world').map(([axis, s]) => {
@@ -8739,11 +8739,13 @@ async function loadTilePairedComparison() {
   tilesBody.innerHTML = (d.tile_order || []).map(lane => {
     const s = (d.tiles || {})[lane] || {};
     const v = (pre[lane] || {}).verdict;
-    const verdict = v ? `${pre[lane].hypothesis_id}: ${v.status}${(v.kill_reasons || []).length ? ' (' + v.kill_reasons.join(', ') + ')' : ''}` : 'CONTROL (no pre-registration)';
+    const verdict = v ? `${pre[lane].hypothesis_id}: ${v.status}${(v.kill_reasons || []).length ? ' (' + v.kill_reasons.join(', ') + ')' : ''}` : (lane === d.baseline_lane ? 'BASELINE BENCHMARK (never promoted)' : 'CONTROL (no pre-registration)');
     const honest = v && pre[lane].honest_label ? `<br><span class="note">${pre[lane].honest_label}</span>` : '';
     return `<tr><td>${(d.labels || {})[lane] || lane}<br><span class="note">${lane}</span></td><td>${s.fills ?? 'n/a'}</td><td>${num(s.days_observed, 2)}</td><td>${num(s.per_fill_ev_bp, 2)}${ci(s.per_fill_ev_ci95_bp)}</td><td>${num(s.first_half_ev_bp, 2)} / ${num(s.second_half_ev_bp, 2)}</td><td>${winPctLabel(s.wins, s.losses, s.fills)}</td><td>${s.max_drawdown_usd == null ? 'n/a' : '$' + num(s.max_drawdown_usd, 2)}</td><td>${s.max_hard_stops_in_rolling_50 ?? 'n/a'}</td><td>${num(s.max_lock_or_stop_overshoot_bp, 2)}</td><td>${verdict}${honest}</td></tr>`;
   }).join('') || '<tr><td colspan="10">No registry tiles.</td></tr>';
-  pairsBody.innerHTML = (d.paired || []).map(p =>
+  const baselinePairs = d.vs_baseline || [];
+  const pairRows = baselinePairs.concat((d.paired || []).filter(p => !d.baseline_lane || (p.control !== d.baseline_lane && p.challenger !== d.baseline_lane)));
+  pairsBody.innerHTML = pairRows.map(p =>
     `<tr><td>${p.challenger} - ${p.control}</td><td>${p.paired_signals}</td><td>${num(p.mean_difference_bp, 2)}${ci(p.difference_ci95_bp)}</td><td>${winPctLabel(p.control_wins, p.control_losses, p.paired_signals)} / ${winPctLabel(p.challenger_wins, p.challenger_losses, p.paired_signals)}</td><td>${p.challenger_better_signals ?? 'n/a'}</td><td>${p.unpaired_control_fills ?? 'n/a'} / ${p.unpaired_challenger_fills ?? 'n/a'}</td></tr>`
   ).join('') || ((d.tile_order || []).length < 2
     ? '<tr><td colspan="6">No paired control: only one registered tile.</td></tr>'

@@ -18,6 +18,8 @@ import time
 import uuid
 import threading
 
+from data_epoch import stamp_active
+
 # ── Paths ─────────────────────────────────────────────────────────────────
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 ATOMIC_LOG_PATH = os.path.join(_SERVICE_DIR, "ai_call_atomic.jsonl")
@@ -65,7 +67,7 @@ def atomic_log(call_id: str, payload: dict, lane_id: str = "") -> None:
     with _LOCK:
         # Atomic write: write + flush + fsync (best-effort on Windows)
         with open(ATOMIC_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(stamp_active(payload), ensure_ascii=False, default=str) + "\n")
             f.flush()
             try:
                 os.fsync(f.fileno())
@@ -82,7 +84,7 @@ def atomic_log(call_id: str, payload: dict, lane_id: str = "") -> None:
                 "ts": payload.get("timestamp_unix_ms", 0),
                 "error": payload.get("ai_error", False),
             }
-            f.write(json.dumps(index_entry, ensure_ascii=False) + "\n")
+            f.write(json.dumps(stamp_active(index_entry), ensure_ascii=False) + "\n")
             f.flush()
 
 
