@@ -320,3 +320,11 @@ def test_pre_start_refuses_a_stale_plan_hash(tmp_path, monkeypatch, capsys):
 def test_pre_start_cannot_be_combined_with_previews():
     with pytest.raises(SystemExit):
         wipe.main(["plan", "--scope", "laptop", "--pre-start", "--simulate-now"])
+
+
+def test_read_only_archive_files_are_deleted(tmp_path):
+    import stat
+    path = _write(tmp_path / "archive" / "receipt.json")
+    os.chmod(path, stat.S_IREAD)
+    wipe._unlink(str(path))
+    assert not path.exists()

@@ -411,8 +411,18 @@ def _load_certification(path: Path) -> dict | None:
         return None
 
 
+def _unlink(path: str) -> None:
+    """Archived generations are written read-only on Windows; an approved hard delete clears that bit."""
+    try:
+        os.unlink(path)
+    except PermissionError:
+        import stat  # noqa: PLC0415
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        os.unlink(path)
+
+
 def execute(plan_doc: dict, *, receipts_dir: Path, scope: str, cert_sha8: str,
-            unlink: Callable[[str], None] = os.unlink) -> dict:
+            unlink: Callable[[str], None] = _unlink) -> dict:
     started = time.time()
     deleted, freed, skipped = [], 0, []
     for row in plan_doc["candidates"]:
