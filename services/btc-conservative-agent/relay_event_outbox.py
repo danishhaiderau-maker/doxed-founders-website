@@ -111,10 +111,11 @@ class RelayEventOutbox:
 
     def _atomic_write(self, value: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
         fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, separators=(",", ":"), sort_keys=True)
+                handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(name, self.path)
