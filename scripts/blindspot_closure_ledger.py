@@ -605,12 +605,25 @@ def v_agents_roster(live: dict) -> tuple[bool, str]:
         f"Fly /api/status.active_tiles={lanes}; missing from AGENTS.md: {missing}")
 
 
-def v_cycle_under_freshness(live: dict) -> tuple[bool, str]:
-    c = check(live, "analyzer.generation") or {}
-    obs = str(c.get("observed") or "")
-    m = re.search(r"last completed generation (\d+)m ago", obs)
-    ok = c.get("status") == "GREEN" and m is not None and int(m.group(1)) < 45
-    return ok, f":9011 analyzer.generation[{c.get('status')}] {obs[:100]!r}"
+WALL = Path(r"C:\DoxxedCrypto\btc-v31-current\diagnostics\WALL-STATUS-FLY.md")
+_WALL_DONE = ("DONE", "RELEASED", "ABANDONED", "SUPERSEDED")
+
+
+def v_owned_by(worker: str, wall: Path | None = None) -> Verifier:
+    """OWNED_BY holds only while the worker has a CLAIM on the WALL and has not posted a terminal state since."""
+    def run(live: dict) -> tuple[bool, str]:
+        path = wall or WALL
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            return False, f"WALL unreadable: {type(exc).__name__}"
+        mine = [ln for ln in lines if re.match(rf"^\S+ \| {re.escape(worker)} \|", ln)]
+        claim = next((ln for ln in mine if "| CLAIM" in ln), None)
+        last_state = mine[-1].rsplit("|", 1)[-1].strip() if mine else None
+        ok = claim is not None and last_state not in _WALL_DONE
+        return ok, f"WALL {worker}: claim at {claim.split(' |', 1)[0] if claim else None}, latest state {last_state}"
+    return run
+
 
 
 # ---------------------------------------------------------------- plan
@@ -767,7 +780,7 @@ PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
 # items get new owners; IN PROGRESS / QUEUED / CLOSED keep the audit's owner.
 GAP_PLAN: dict[str, tuple[str, str, str, str, Verifier | None]] = {
     "13": ("BLINDSPOT-CLOSE", PR_LAPTOP2, PROG, "promotion/parity lock contention visible as :9011 laptop.puller_lock (holder, hold time, refused pulls); cycle-side fix stays ANALYZER-FIDELITY", needs("puller_lock", v_field_in_check("laptop.puller_lock", "lock_holder"))),
-    "17": ("BLINDSPOT-OWNER", "-", OPEN, "analyzer cycle vs 45-min freshness: closes when the latest generation completed <45 min ago and is GREEN", v_cycle_under_freshness),
+    "17": ("ANALYZER-PERF", "-", f"{OWNED}:ANALYZER-PERF", "analyzer pass 48-78 min > 45-min freshness (01:05Z pass 48 min under storage-dedupe I/O; 02:10Z generation FAILED exit -1073741819 access violation); ANALYZER-PERF claim 01:12Z covers pass time + crash", v_owned_by("ANALYZER-PERF")),
     "18": ("BLINDSPOT-OWNER", "#345", POSTF, "multiverse HEALTH_ONLY -> analysed rows ship in #345 (Fly); visible now as :9011 streams.analysed_freshness", v_post_freeze((345,), "BLINDSPOT-GAP18-MULTIVERSE-HEALTH-ONLY")),
     "20": ("BLINDSPOT-OWNER", "#365", POSTF, "267/294 executed replays INCOMPLETE_EXECUTED_POST_EXIT: oldest-first eviction at MAX_REPLAY_BUFFERS=100; #365 evicts shadows first + replay_buffers status (#351 step 13)", v_post_freeze((365,), "BLINDSPOT-GAP20-REPLAY-EVICTION")),
     "21": ("BLINDSPOT-OWNER", "#365", POSTF, "PIPELINE_ERROR dict-size race still fires (2026-10-02T15:18:50Z) with no site; #365 records crash site + traceback; capacity censoring 0 blocks/24h", v_post_freeze((365,), "BLINDSPOT-GAP21-PIPELINE-ERROR-SITE")),
@@ -904,7 +917,7 @@ def build(audit_text: str, live: dict | None, prs: dict[str, str], baseline: dic
         extra_out.append({"id": k, **resolve(plan, live, prs)})
 
     def counts(items: list[dict]) -> Counter:
-        return Counter(i["status"] for i in items)
+        return Counter(i["status"].split(":", 1)[0] for i in items)
 
     all_items = comp + [g for g in gap_out if not g["audit"].upper().startswith("CLOSED")] + extra_out
     c_all = counts(all_items)
@@ -936,7 +949,7 @@ def build(audit_text: str, live: dict | None, prs: dict[str, str], baseline: dic
                   "| Final state | Count | Items |", "|---|---|---|"]
         for s in STATUS_ORDER:
             if ct[s]:
-                lines.append(f"| {s} | {ct[s]} | {', '.join(i['id'] for i in triage if i['status'] == s)} |")
+                lines.append(f"| {s} | {ct[s]} | {', '.join(i['id'] + (i['status'][len(OWNED):] if s == OWNED else '') for i in triage if i['status'].split(':', 1)[0] == s)} |")
         lines += ["", "| Item | State | PR | Plan / recommended default | Live evidence |", "|---|---|---|---|---|"]
         for i in triage:
             lines.append(f"| {i['id']} | **{i['status']}** | {i['pr']} | {md_escape(i['plan'])} | {md_escape(i['evidence'])} |")

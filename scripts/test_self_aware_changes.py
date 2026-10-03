@@ -57,6 +57,19 @@ def test_runtime_transitions_report_pause_resume_revision_and_tiles_only_on_chan
     assert not any(e["at"] in ("2026-10-02T10:02:00Z", "2026-10-02T10:03:00Z") for e in ev)
 
 
+def test_snapshot_missing_a_field_is_not_a_change(store):
+    store.append("runtime_history", [
+        _health("2026-10-02T15:00:00Z"),
+        _health("2026-10-02T15:27:00Z", tiles=None),
+        _health("2026-10-02T15:31:00Z"),
+        _health("2026-10-02T15:40:00Z", tiles=None),
+        _health("2026-10-02T15:45:00Z", tiles=["FAMILY_Y"]),
+    ], sources=["t"])
+    ev = changes.runtime_transitions(store)
+    assert [(e["at"], e["kind"]) for e in ev] == [("2026-10-02T15:45:00Z", "ACTIVE_TILES")]
+    assert "FAMILY_XVENUE_LEAD_60S" in ev[0]["detail"]["before"]
+
+
 def test_ai_sightings_and_epochs_and_receipts(store, tmp_path):
     store.publish("ai_calls", pd.DataFrame({
         "call_id": ["a", "b", "c"], "ts": [1790617329.5, 1790812473.2, 1790812500.0],
