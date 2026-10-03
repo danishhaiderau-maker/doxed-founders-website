@@ -569,6 +569,7 @@ def test_waiting_chase_is_not_reported_as_an_order():
         "trade_lock": threading.RLock(),
         "increment_pipeline_funnel": lambda stage: events.append(("funnel", stage)),
         "log_lane_opportunity_event": lambda *args, **_kwargs: events.append(("lane", args[1])),
+        "_xvl_latency_mark_order": lambda *a, **k: None,
         "relay_publishes_approve_outcome": lambda _lane: True,
         "record_approve_outcome": lambda *args, **kwargs: (
             events.append(("relay", args[1]))

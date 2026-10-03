@@ -119,6 +119,20 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
             f"cross-venue lead evaluator stopped ticking: status={xvl.get('status')!r} "
             f"reason={xvl.get('reason')!r} tick_age_s={tick_age} (> {XVL_TICK_STALE_SEC:.0f}s)"
         )
+    slow = []
+    for lane, block in sorted(_dict(xvl.get("lanes")).items()):
+        latency = _dict(_dict(block).get("latency"))
+        if latency.get("status") != "SLOW":
+            continue
+        fill = _dict(_dict(latency.get("stages")).get("signal_to_fill"))
+        slow.append(
+            f"{lane} median signal->fill {fill.get('p50_s')}s (p90 {fill.get('p90_s')}s, n={fill.get('n')}) "
+            f"> {latency.get('target_median_signal_to_fill_s')}s"
+        )
+    if slow:
+        findings["xvl_signal_to_fill_slow"] = (
+            "cross-venue IMMEDIATE tiles miss the pre-registered signal->fill gate: " + "; ".join(slow)
+        )
 
     cross = _dict(ready.get("cross_venue_health"))
     collector_age = _num(cross.get("collector_age_s"))
