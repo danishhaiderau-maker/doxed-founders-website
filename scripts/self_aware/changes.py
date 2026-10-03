@@ -17,25 +17,14 @@ RUNTIME_FIELDS = (
     ("live_armed", "LIVE_ARMED"), ("tiles", "ACTIVE_TILES"),
 )
 _RUNTIME_SQL = """
-WITH r AS (
-  SELECT "at",
-         json_extract_string(doc, '$.fly.git_rev') AS git_rev,
-         json_extract_string(doc, '$.fly.paused') AS paused,
-         coalesce(json_extract_string(doc, '$.fly.pause_owner'), '') AS pause_owner,
-         json_extract_string(doc, '$.fly.live_armed') AS live_armed,
-         CAST(json_extract(doc, '$.fly.active_tile_lanes') AS VARCHAR) AS tiles
-  FROM res_runtime_history
-  WHERE kind = 'HEALTH' AND json_extract_string(doc, '$.fly.git_rev') IS NOT NULL
-), l AS (
-  SELECT *, LAG(git_rev) OVER w AS p_git_rev, LAG(paused) OVER w AS p_paused,
-         LAG(pause_owner) OVER w AS p_pause_owner, LAG(live_armed) OVER w AS p_live_armed,
-         LAG(tiles) OVER w AS p_tiles
-  FROM r WINDOW w AS (ORDER BY "at")
-)
-SELECT * FROM l
-WHERE p_git_rev IS NOT NULL AND (git_rev IS DISTINCT FROM p_git_rev OR paused IS DISTINCT FROM p_paused
-   OR pause_owner IS DISTINCT FROM p_pause_owner OR live_armed IS DISTINCT FROM p_live_armed
-   OR tiles IS DISTINCT FROM p_tiles)
+SELECT "at",
+       json_extract_string(doc, '$.fly.git_rev') AS git_rev,
+       json_extract_string(doc, '$.fly.paused') AS paused,
+       coalesce(json_extract_string(doc, '$.fly.pause_owner'), '') AS pause_owner,
+       json_extract_string(doc, '$.fly.live_armed') AS live_armed,
+       CAST(json_extract(doc, '$.fly.active_tile_lanes') AS VARCHAR) AS tiles
+FROM res_runtime_history
+WHERE kind = 'HEALTH' AND json_extract_string(doc, '$.fly.git_rev') IS NOT NULL
 ORDER BY "at"
 """
 _AI_SQL = """
@@ -76,11 +65,17 @@ def from_receipts(doc: dict[str, Any] | None) -> list[dict[str, Any]]:
 def runtime_transitions(store) -> list[dict[str, Any]]:
     if not store.table_exists("res_runtime_history"):
         return []
-    out = []
+    # A snapshot missing a field (Fly unreachable, partial status) is not a change: diff against the
+    # last value actually observed for that field.
+    out, last = [], {}
     for r in store.read(_RUNTIME_SQL):
         for col, kind in RUNTIME_FIELDS:
-            before, after = r.get(f"p_{col}"), r.get(col)
-            if before == after:
+            after = r.get(col)
+            if after is None or after == "null":
+                continue
+            before = last.get(col)
+            last[col] = after
+            if before is None or before == after:
                 continue
             if col == "paused":
                 kind = "PAUSE" if str(after).lower() == "true" else "RESUME"

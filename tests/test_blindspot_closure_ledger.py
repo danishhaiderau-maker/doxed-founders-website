@@ -101,3 +101,17 @@ def test_triage_rows_all_have_a_live_verifier_or_a_danish_default():
         assert plan[4] is not None or plan[2] == ledger.NEEDS_DANISH, tid
         if plan[2] == ledger.NEEDS_DANISH:
             assert "Default:" in plan[3], tid
+
+
+def test_owned_by_holds_only_while_the_worker_claim_is_open(tmp_path):
+    wall = tmp_path / "WALL.md"
+    wall.write_text("2026-10-03T01:12:15Z | ANALYZER-PERF | CLAIM (laptop-only): pass time | CLAIMED\n"
+                    "2026-10-03T02:48:46Z | ANALYZER-PERF | PROGRESS | IN_PROGRESS\n", encoding="utf-8")
+    v = ledger.v_owned_by("ANALYZER-PERF", wall)
+    assert v({})[0]
+    plan = ("ANALYZER-PERF", "-", f"{ledger.OWNED}:ANALYZER-PERF", "p", v)
+    assert ledger.resolve(plan, {}, {})["status"] == "OWNED_BY:ANALYZER-PERF"
+    with wall.open("a", encoding="utf-8") as fh:
+        fh.write("2026-10-03T05:00:00Z | ANALYZER-PERF | finished | DONE\n")
+    assert not v({})[0] and ledger.resolve(plan, {}, {})["status"] == ledger.OPEN
+    assert not ledger.v_owned_by("NOBODY", wall)({})[0]

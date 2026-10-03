@@ -1,28 +1,57 @@
 # BLINDSPOT closure ledger (AUDIT-3)
 
-Generated 2026-10-02T14:39:25Z by `scripts/blindspot_closure_ledger.py` at `11e4a876e`.
+Generated 2026-10-03T02:55:17Z by `scripts/blindspot_closure_ledger.py` at `d5c3c882c`.
 Rule: an item is **CLOSED-VERIFIED-LIVE** only when its live verifier passes against the live API in this run (endpoint + field + value in the Evidence column). A merged PR or a WALL claim never closes an item.
 Live sources: fetched now; fetch errors: {}
 
 ## Counts
 
-| Scope | Items | OPEN | IN PROGRESS | QUEUED-POST-FREEZE | CLOSED-VERIFIED-LIVE |
-|---|---|---|---|---|---|
-| Component rows (BLIND/PARTIAL) | 137 | 12 | 16 | 47 | 62 |
-| Earlier gaps not closed (incl. Â§4.3 contradictions) | 72 | 14 | 22 | 22 | 14 |
-| Directive / trace items | 5 | 0 | 0 | 3 | 2 |
-| **Total tracked** | 214 | 26 | 38 | 72 | 78 |
+| Scope | Items | OPEN | IN PROGRESS | QUEUED-POST-FREEZE | POST_FREEZE | NEEDS_DANISH | OWNED_BY | CLOSED-VERIFIED-LIVE |
+|---|---|---|---|---|---|---|---|---|
+| Component rows (BLIND/PARTIAL) | 137 | 0 | 17 | 47 | 2 | 3 | 0 | 68 |
+| Earlier gaps not closed (incl. Â§4.3 contradictions) | 72 | 0 | 22 | 22 | 3 | 2 | 1 | 22 |
+| Directive / trace items | 5 | 0 | 0 | 2 | 1 | 0 | 0 | 2 |
+| **Total tracked** | 214 | 0 | 39 | 71 | 6 | 5 | 1 | 92 |
+
+## BLINDSPOT-OWNER triage of the 26 items open on 2026-10-03
+
+| Final state | Count | Items |
+|---|---|---|
+| POST_FREEZE | 5 | F44, F79, 18, 20, 21 |
+| NEEDS_DANISH | 5 | L72, C17, C18, 63, 78 |
+| OWNED_BY | 1 | 17:ANALYZER-PERF |
+| CLOSED-VERIFIED-LIVE | 15 | L9, L10, L14, L25, L35, L73, L74, 29, 55, 57, 69, 71, 75, 76, 77 |
+
+| Item | State | PR | Plan / recommended default | Live evidence |
+|---|---|---|---|---|
+| F44 | **POST_FREEZE** | #306 + #365 | HTTP thread-cap saturation: #306 runtime_telemetry http_handlers (active per cap) + #365 rejected_total/rejected_by_cap; Fly, #351 steps 2+13 | gh #306 OPEN draft, #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-F44-HTTP-SATURATION eta 2026-10-04T15:00:00Z |
+| F79 | **POST_FREEZE** | #317 | swallowed-error counters = #317 thread_health_v1 failure counters; Fly, #351 step 3 | gh #317 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-F79-SWALLOWED-ERRORS eta 2026-10-04T15:00:00Z |
+| L9 | **CLOSED-VERIFIED-LIVE** | - | promotion exit 3 / lock holder surfaced: cycle status stopReason+promotionLevel -> :9011 analyzer.cycle; lock holder -> laptop.puller_lock | :9011 analyzer.cycle[GREEN] 'cycle running 1s (phase=PROMOTION); analyzer rev 7ce045518f33 contains Fly 29742de53a5c'; :9011 laptop.puller_lock.lock_holder=research_segment_promotion result=OK |
+| L10 | **CLOSED-VERIFIED-LIVE** | - | migration no longer log-only: MIGRATION_FAILED exits 4 into cycle stopReason; phase=MIGRATION visible in :9011 analyzer.cycle | :9011 analyzer.cycle[GREEN] 'cycle running 1s (phase=PROMOTION); analyzer rev 7ce045518f33 contains Fly 29742de53a5c' |
+| L14 | **CLOSED-VERIFIED-LIVE** | - | launcher outcome visible as :9011 analyzer.api health_ok/status_ok | :9011 analyzer.api[GREEN] health_ok=True status_ok=True |
+| L25 | **CLOSED-VERIFIED-LIVE** | - | heavy cache visible in export summary.strategy_lab.heavy | :9001/api/export/latest summary.strategy_lab.heavy={"computed_at": "2026-10-03T01:27:53Z", "interval_sec": 0.0, "source": "COMPUTED"} |
+| L35 | **CLOSED-VERIFIED-LIVE** | - | proof receipt path + verdict on :9021 receipts.proof and :9011 proof | :9021 receipts.proof.receipt=unattended-proof-20261002T114917Z.jsonl :9011 proof.result=FAILING |
+| L72 | **NEEDS_DANISH** | - | ad-hoc :7002 fly-dashboard-proxy (from btc-v31-laptop-retire-wt). Default: retire it; the Fly dashboard is reachable directly | :9011 laptop.adhoc_processes.listeners=[{"port": 7002, "pid": "22488"}] |
+| L73 | **CLOSED-VERIFIED-LIVE** | - | orphan watch_queue.ps1 (watched long-merged #262/#263, git fetch every 90s) retired | :9011 laptop.adhoc_processes.scripts=[] |
+| L74 | **CLOSED-VERIFIED-LIVE** | - | ad-hoc :9097 http.server (tmp-alerts-history) retired; uptime_poll2 already gone | :9011 laptop.adhoc_processes.listeners=[{"port": 7002, "pid": "22488"}] |
+| C17 | **NEEDS_DANISH** | - | master has no branch protection/rulesets, so bitfinex-production-gate is advisory. Default: make bitfinex-policy a required status check (not wider push paths) |  |
+| C18 | **NEEDS_DANISH** | - | Fly auto-deploy disabled_manually. Default: keep it disabled; deploy only via the guarded fly-bot-deploy workflow per #351 |  |
+| 17 | **OWNED_BY:ANALYZER-PERF** | - | analyzer pass 48-78 min > 45-min freshness (01:05Z pass 48 min under storage-dedupe I/O; 02:10Z generation FAILED exit -1073741819 access violation); ANALYZER-PERF claim 01:12Z covers pass time + crash | WALL ANALYZER-PERF: claim at 2026-10-03T01:12:15Z, latest state IN_PROGRESS |
+| 18 | **POST_FREEZE** | #345 | multiverse HEALTH_ONLY -> analysed rows ship in #345 (Fly); visible now as :9011 streams.analysed_freshness | gh #345 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP18-MULTIVERSE-HEALTH-ONLY eta 2026-10-04T15:00:00Z |
+| 20 | **POST_FREEZE** | #365 | 267/294 executed replays INCOMPLETE_EXECUTED_POST_EXIT: oldest-first eviction at MAX_REPLAY_BUFFERS=100; #365 evicts shadows first + replay_buffers status (#351 step 13) | gh #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP20-REPLAY-EVICTION eta 2026-10-04T15:00:00Z |
+| 21 | **POST_FREEZE** | #365 | PIPELINE_ERROR dict-size race still fires (2026-10-02T15:18:50Z) with no site; #365 records crash site + traceback; capacity censoring 0 blocks/24h | gh #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP21-PIPELINE-ERROR-SITE eta 2026-10-04T15:00:00Z |
+| 29 | **CLOSED-VERIFIED-LIVE** | - | dead-input detector now watches live-prompt ai_calls.context inputs (delta_change DEAD_ZERO alarms; fix T-DELTA-CHANGE) | :9021 data/fields watched live-prompt inputs: ['context.delta_change=DEAD_ZERO', 'context.ema_slope=OK', 'context.price=OK', 'context.ret_1m=OK', 'context.ret_5m=OK'] |
+| 55 | **CLOSED-VERIFIED-LIVE** | #366 | insights fly_bot tiles: execution falls back to xvl_evaluator paper stats; every null names its source | :9001 insights fly_bot.tiles=4 sources=[('strategy_progress.combo_lane_execution', 'analyzer export tile_stats'), ('strategy_progress.combo_lane_execution', 'analyzer export tile_stats')] |
+| 57 | **CLOSED-VERIFIED-LIVE** | #366 | deploy_queue parses the current WALL pipe format; terminal states pop; >24h entries move to stale_queue | :9001 insights deploy_queue latest_entry_at=2026-10-03T02:48:46Z age=377.3 queue=0 stale_queue=6 |
+| 63 | **NEEDS_DANISH** | - | Neon forecast live in :9011 neon.usage; Fly/Railway spend needs billing access. Default: add only if read-only billing tokens are provided | :9011 checks[neon.usage].status=GREEN observed='MTD egress 12.26GB (2.5% of 500GB incl.), rate 26.4MB/h (hour 01:00Z); compute 13.1 CU-h; ' |
+| 69 | **CLOSED-VERIFIED-LIVE** | #366 | deploy receipt completes (stuck fixed earlier); gh output decoded as UTF-8 so titles carry no mojibake | :9021 receipts.deploys=8 mojibake=[] newest_not_completed=[] |
+| 71 | **CLOSED-VERIFIED-LIVE** | #366 | GET :9021 /api/selfaware/changes: deploys, fast-forwards, manual, Fly pause/revision/tiles/arm, AI model/prompt, epochs | :9021 /api/selfaware/changes total=38 kinds=['ACTIVE_TILES', 'DEPLOY', 'FLY_REVISION', 'LAPTOP_FAST_FORWARD', 'MANUAL', 'PAUSE', 'PAUSE_OWNER', 'RESUME'] sources={'receipts': 'OK', 'runtime_history': 'OK', 'ai_calls': 'OK', 'research_session': 'OK'} |
+| 75 | **CLOSED-VERIFIED-LIVE** | - | incident timeline = :9021 findings/history OPENED/CLEARED events | :9021 findings/history events=5 kinds=['CHANGED', 'CLEARED', 'OPENED'] latest=2026-10-03T02:53:42Z |
+| 76 | **CLOSED-VERIFIED-LIVE** | - | exports over HTTP: :9001 /api/export/latest + /api/report/<name>.json | :9001/api/export/latest summary=True; /api/report/data_health_report.json generated_ts=1790990877.86 |
+| 77 | **CLOSED-VERIFIED-LIVE** | - | every live Fly tile lane is named in AGENTS.md (#360 retire updates both together) | Fly /api/status.active_tiles=['FAMILY_TREND_FADE_60', 'FAMILY_TREND_FADE_60_COMMITTED', 'FAMILY_XVENUE_LEAD_60S', 'FAMILY_XVENUE_PREMIUM_60S']; missing from AGENTS.md: [] |
+| 78 | **NEEDS_DANISH** | - | btc-v31-current is d3544f9f7 with ~1635 dirty paths; :9021 receipts.revisions pins what runs. Default: keep it as the diagnostics/WALL folder only; run code from master worktrees | http://127.0.0.1:9021/api/selfaware/receipts.revisions.self_aware="d5c3c882c31236169e488d97c4c0a63bbbbf28ea" |
 
 Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit headline states 35/93/46; its laptop sub-total 13/43/18 does not match its own L-rows 15/36/23 â€” this ledger uses the row-level statuses).
-
-## Before / after
-
-| Status | Before (this ledger, 2026-10-02T10:55Z) | Now |
-|---|---|---|
-| OPEN | 77 | 26 |
-| IN PROGRESS | 94 | 38 |
-| QUEUED-POST-FREEZE | 42 | 72 |
-| CLOSED-VERIFIED-LIVE | 0 | 78 |
 
 ## Component rows
 
@@ -35,11 +64,11 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | F8 | `ws_watchdog` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | export ws_stale_count; unassigned | (no verifier yet) |
 | F9 | `ws_tick_lifecycle_worker` | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | threads[ws_tick_lifecycle_worker] + dropped-tick counter | Fly/api/status.threads.ws_tick_lifecycle_worker.last_tick_age_sec=null |
 | F10 | `state_monitor_loop` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | state_monitor mode only; unassigned | (no verifier yet) |
-| F12 | `order_book_refresh_loop` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor order_book_stale rule (book_age_sec / consecutive_failures, unpaused) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F12 | `order_book_refresh_loop` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor order_book_stale rule (book_age_sec / consecutive_failures, unpaused) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F13 | `ohlcv_refresh_loop` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | ohlcv errors log-only; unassigned | (no verifier yet) |
-| F15 | `xvl_evaluator_thread` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor subsystem rule on /ready.xvl_evaluator_health.tick_age_s | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F15 | `xvl_evaluator_thread` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor subsystem rule on /ready.xvl_evaluator_health.tick_age_s | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F16 | `xvl-paper-*` threads | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | split admission_eligible vs orders_submitted (rank 24); unassigned | (no verifier yet) |
-| F18 | collector V3 reconcile worker | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | COLLECTOR_V3_RECONCILE_STALLED rule (phase!=IDLE >600s); Fly phase_age_sec field still OPEN | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F18 | collector V3 reconcile worker | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | COLLECTOR_V3_RECONCILE_STALLED rule (phase!=IDLE >600s); Fly phase_age_sec field still OPEN | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F20 | main supervisor loop | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | threads[main_supervisor] | Fly/api/status.threads.main_supervisor.last_tick_age_sec=null |
 | F22 | DeepSeek call thread | PARTIAL | AI-PLAN | #294 | **IN PROGRESS** | attempt liveness / persisted last_success (rank 17); post-deploy verification pending | (no verifier yet) |
 | F24 | `ai_shadow_maturation_loop` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | ai shadow labels owner-only; unassigned | (no verifier yet) |
@@ -52,20 +81,20 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | F32 | `bitfinex_live_reconcile_loop` | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | threads[bitfinex_live_reconcile] + WARNING-level errors (pre-arming gate) | Fly/api/status.threads.bitfinex_live_reconcile.last_tick_age_sec=null |
 | F33 | relay outbox drain | BLIND | BLINDSPOT-CLOSE | #317 + #310 | **QUEUED-POST-FREEZE** | relay_outbox age/owner fields + never-deliver guard (Fly, post-freeze); GH monitor relay_stale_owner_pending alert from existing fields (laptop/CI, live after merge) | Fly /health.relay_outbox absent; /api/relay-state stale_owner_pending=22 |
 | F34 | `/api/state` cache refresher | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | /api/state pause read live + api_state_age_sec | (no verifier yet) |
-| F35 | `/api/relay-state` cache | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor relay_cache_stale rule on /api/relay-state relay_cache.age_sec | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| F36 | `/api/relay-execution-state` cache | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor relay_cache_stale on relay-execution-state 503 | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F35 | `/api/relay-state` cache | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor relay_cache_stale rule on /api/relay-state relay_cache.age_sec | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| F36 | `/api/relay-execution-state` cache | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor relay_cache_stale on relay-execution-state 503 | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F38 | inference-usage flusher | BLIND | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | inference flusher 4xx counted as success (rank 23); unassigned | (no verifier yet) |
-| F39 | `lifecycle_pipeline_runtime` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor lifecycle_pipeline rule (age, blockers, emergency_wal) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F39 | `lifecycle_pipeline_runtime` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor lifecycle_pipeline rule (age, blockers, emergency_wal) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F40 | post-AI evidence workers | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | post-AI evidence not alerted; unassigned | (no verifier yet) |
 | F41 | collector-v22 provisional merge | BLIND | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | provisional merge invisible; unassigned | (no verifier yet) |
 | F42 | admin-pause finalizer | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | admin-pause finalizer response-only; low | (no verifier yet) |
 | F43 | research-segment server (raw handler) | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | ACK seq exposed via laptop.pull_ack; research-segment server error counter needs a Fly field | (no verifier yet) |
-| F44 | HTTP thread-cap semaphores | BLIND | FLY-LOCKS | #306 (proposed) | **OPEN** | HTTP thread-cap saturation; propose to FLY-LOCKS runtime_telemetry | (no verifier yet) |
-| F45 | `cross_venue_collector` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor cross_venue_health rule | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| F46 | `market_context_collector` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor market_context rule | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F44 | HTTP thread-cap semaphores | BLIND | BLINDSPOT-OWNER | #306 + #365 | **POST_FREEZE** | HTTP thread-cap saturation: #306 runtime_telemetry http_handlers (active per cap) + #365 rejected_total/rejected_by_cap; Fly, #351 steps 2+13 | gh #306 OPEN draft, #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-F44-HTTP-SATURATION eta 2026-10-04T15:00:00Z |
+| F45 | `cross_venue_collector` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor cross_venue_health rule | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| F46 | `market_context_collector` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor market_context rule | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F47 | `research_segment_shipper` | PARTIAL | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | shipper block in public /api/status; sidecar restart loop still OPEN | Fly/api/status.shipper=null |
 | F48 | `fly_relay_state_pusher` | BLIND | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | relay-state pusher no status / no restart (rank 22); unassigned | (no verifier yet) |
-| F49 | entrypoint bot restart loop | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor restart_loop rule (>=3 boot_at changes per hour) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F49 | entrypoint bot restart loop | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor restart_loop rule (>=3 boot_at changes per hour) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F51 | Bitfinex private (ccxt + nonce lock) | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | private keys probe skipped in force-paper; pre-arming gate | (no verifier yet) |
 | F52 | DDOLLAR gate | PARTIAL | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | DDOLLAR gate fail-CLOSED + error counter (freeze-exception candidate) | Fly/api/status.bitfinex_live.ddollar_gate.errors=null |
 | F53 | Neon (`DATABASE_URL`) | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | Neon reachability not probed; unassigned | (no verifier yet) |
@@ -80,30 +109,30 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | F65 | lane PnL ledgers `lane_pnl_ledger.json`, `lane_lab_pnl_ledge | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | ledgers.lane_pnl write_failures counted + alarm (freeze-exception candidate) | Fly/api/status.ledgers.lane_pnl.write_failures=null |
 | F66 | `trades_3factor.csv` + `csv_write_fallback.jsonl` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | csv fallback replayed at startup; no counter | (no verifier yet) |
 | F67 | `open_positions.json`, `paper_lifecycle_v1.json` | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | corrupt restore pauses; no age field | (no verifier yet) |
-| F68 | `xvl_`/`xvp_shadow_signals.jsonl` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor collection_write_failures rule (counter growth) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| F70 | adaptive entry, fill markouts, taker counterfactuals | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor collection_write_failures over xvl/markouts/tape counters | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F68 | `xvl_`/`xvp_shadow_signals.jsonl` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor collection_write_failures rule (counter growth) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| F70 | adaptive entry, fill markouts, taker counterfactuals | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor collection_write_failures over xvl/markouts/tape counters | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F71 | cross-venue / market-context / liquidation tapes | PARTIAL | WATCHER | #307 | **IN PROGRESS** | market_context/tape write failures read by streams.coverage (#307) | (no verifier yet) |
-| F72 | collector v22 SQLite + V3 store | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | via V3 reconcile stall rule (F18) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F72 | collector v22 SQLite + V3 store | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | via V3 reconcile stall rule (F18) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F73 | signal snapshots, shadow outcomes, counterfactuals, near-mis | BLIND | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | signal snapshot/shadow writers swallow errors; extend PR_FLY helper post-freeze | (no verifier yet) |
 | F74 | execution-funnel hooks (fill/close/expire/capacity/touch/exp | BLIND | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | execution_funnel.hook_failures{hook} + alarm | Fly/api/status.collection.execution_funnel.hook_failures=null |
-| F75 | emergency WAL | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor emergency_wal != CURRENT finding | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| F75 | emergency WAL | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor emergency_wal != CURRENT finding | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | F77 | 64 Flask routes incl. ~25 control POSTs (pause/resume/toggle | PARTIAL | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | control-action audit endpoint (rank 27); unassigned | (no verifier yet) |
 | F78 | 244 env flags (e.g. `FORCE_PAPER_MODE`, `SCORE_LED_PAPER_RES | BLIND | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | effective-config snapshot (rank 27); unassigned | (no verifier yet) |
-| F79 | 455 broad except sites (bot.py 244; 110 `pass`, 263 log-only | BLIND | FLY-LOCKS | #306 (proposed) | **OPEN** | per-subsystem swallowed_errors counter (rank 26); not in #306 file list | (no verifier yet) |
-| L1 | laptop-chain supervisor (5-min) | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | laptop.supervisor by scheduled-task + process check, not log grep | :9011 checks[laptop.supervisor].status=GREEN observed='task state=Running last run 12s ago result=267009; pull loop pid(s) [34496]; log TICK 5m a' |
-| L2 | segment pull loop | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | pull status keeps seqs; exitCode!=0 surfaced | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
-| L3 | pull wrapper | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | wrapper failures surface via segment-pull.status exitCode rule | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
-| L4 | puller | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | puller lock refusal preserves applied/acked seqs + consecutive_failures | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
+| F79 | 455 broad except sites (bot.py 244; 110 `pass`, 263 log-only | BLIND | BLINDSPOT-OWNER | #317 | **POST_FREEZE** | swallowed-error counters = #317 thread_health_v1 failure counters; Fly, #351 step 3 | gh #317 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-F79-SWALLOWED-ERRORS eta 2026-10-04T15:00:00Z |
+| L1 | laptop-chain supervisor (5-min) | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | laptop.supervisor by scheduled-task + process check, not log grep | :9011 checks[laptop.supervisor].status=GREEN observed='task state=Running last run 14s ago result=267009; pull loop pid(s) [34496]; log TICK 5m a' |
+| L2 | segment pull loop | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | pull status keeps seqs; exitCode!=0 surfaced | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
+| L3 | pull wrapper | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | wrapper failures surface via segment-pull.status exitCode rule | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
+| L4 | puller | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | puller lock refusal preserves applied/acked seqs + consecutive_failures | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
 | L5 | puller HTTP source | BLIND | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | bounded run deadline; status.json run_seconds/max_run_seconds/deadline_reached surfaced in laptop.pull_ack | :9011 checks[laptop.pull_ack].observed_fields.max_run_seconds=900.0 |
-| L6 | ACK writer | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | pull_ack consistent with monitor SEGMENT_ACK_STALE | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
-| L7 | parity checker | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 analyzer.parity_checker (verdict, age, scan lock hold, hash-cache timing) | :9011 checks[analyzer.parity_checker].status=GREEN observed='verdict=GREEN seq=2345 age=57m no timing (pre-cache parity build)' |
+| L6 | ACK writer | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | pull_ack consistent with monitor SEGMENT_ACK_STALE | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
+| L7 | parity checker | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 analyzer.parity_checker (verdict, age, scan lock hold, hash-cache timing) | :9011 checks[analyzer.parity_checker].status=GREEN observed='verdict=GREEN seq=2556 age=36m lock_held=151.8s hashed=957 cache_hits=77232' |
 | L8 | analyzer cycle | PARTIAL | ANALYZER-FIDELITY | #304/#307 | **IN PROGRESS** | cycle history + consecutive_failures (rank 20) | (no verifier yet) |
-| L9 | promotion | BLIND | ANALYZER-FIDELITY | - | **OPEN** | promotion lock holder/exit 3 surfaced (rank 20) | (no verifier yet) |
-| L10 | migration | BLIND | ANALYZER-FIDELITY | - | **OPEN** | migration log-only (rank 20) | (no verifier yet) |
+| L9 | promotion | BLIND | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | promotion exit 3 / lock holder surfaced: cycle status stopReason+promotionLevel -> :9011 analyzer.cycle; lock holder -> laptop.puller_lock | :9011 analyzer.cycle[GREEN] 'cycle running 1s (phase=PROMOTION); analyzer rev 7ce045518f33 contains Fly 29742de53a5c'; :9011 laptop.puller_lock.lock_holder=research_segment_promotion result=OK |
+| L10 | migration | BLIND | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | migration no longer log-only: MIGRATION_FAILED exits 4 into cycle stopReason; phase=MIGRATION visible in :9011 analyzer.cycle | :9011 analyzer.cycle[GREEN] 'cycle running 1s (phase=PROMOTION); analyzer rev 7ce045518f33 contains Fly 29742de53a5c' |
 | L11 | inline auto-FF | PARTIAL | ANALYZER-FIDELITY | #304 | **IN PROGRESS** | inline auto-FF observed | (no verifier yet) |
 | L12 | supervisor auto-FF | BLIND | ANALYZER-FIDELITY | #304 | **IN PROGRESS** | REFUSED_* auto-ff receipts not surfaced | (no verifier yet) |
 | L13 | analyzer runner | PARTIAL | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #304 + #309 | **CLOSED-VERIFIED-LIVE** | generation receipt (#304) + analyzer.reports from :9001/api/status | :9011 checks[analyzer.reports].status=GREEN vs :9001/api/status.required_reports_ok=True |
-| L14 | analyzer launcher | PARTIAL | ANALYZER-9001 | - | **OPEN** | launcher stdout only; low | (no verifier yet) |
+| L14 | analyzer launcher | PARTIAL | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | launcher outcome visible as :9011 analyzer.api health_ok/status_ok | :9011 analyzer.api[GREEN] health_ok=True status_ok=True |
 | L15 | **required analyzer reports** | BLIND | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #304 + #309 | **CLOSED-VERIFIED-LIVE** | #304 fixes POLICY_ID_SPEC_COLLISION; watcher analyzer.reports RED when required_reports_ok=false >1 generation | :9011 checks[analyzer.reports].status=GREEN vs :9001/api/status.required_reports_ok=True |
 | L16 | :9001 dashboard process | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | analyzer.api not GREEN when /api/status.ok=false | :9011 checks[analyzer.reports].status=GREEN vs :9001/api/status.required_reports_ok=True |
 | L17 | :9001 revision parity | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | parse string revision_parity; compare generation rev to Fly rev | :9011 analyzer.api.status=GREEN observed='ok on /api/health and /api/status; generation rev 29742de53a5c == Fly 29742de53a5c; sync i'; :9001 generation_revision=29742de53a5c Fly source_git_rev=29742de53a5c |
@@ -112,32 +141,32 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | L20 | dashboard code refresh | PARTIAL | ANALYZER-9001 | #302 | **IN PROGRESS** | dashboard code refresh | (no verifier yet) |
 | L23 | analyzer exports | PARTIAL | ANALYZER-FIDELITY | #307 | **IN PROGRESS** | export swallow | (no verifier yet) |
 | L24 | strategy_lab engine | PARTIAL | ANALYZER-FIDELITY | #307 | **IN PROGRESS** | engine swallow | (no verifier yet) |
-| L25 | strategy_lab heavy cache | BLIND | ANALYZER-FIDELITY | - | **OPEN** | heavy cache invisible | (no verifier yet) |
-| L26 | stream studies | BLIND | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #307 + #309 | **CLOSED-VERIFIED-LIVE** | #307 fixes stream studies; watcher streams.analysed_freshness detects stale-content ANALYSED | :9011 checks[streams.analysed_freshness].status=AMBER observed='research_events_v22.jsonl STALE (content end unknown); not fully analysed: order_multivers' |
-| L27 | `/api/streams/health` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | streams.analysed_freshness reads /api/streams/health content_lag_sec + not_fully_analysed | :9011 checks[streams.analysed_freshness].status=AMBER observed='research_events_v22.jsonl STALE (content end unknown); not fully analysed: order_multivers' |
-| L28 | insights aggregator | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | insights transfer not OK with applied_seq=null | :9001/api/insights transfer.status=OK applied_seq=2361 reason='None' |
+| L25 | strategy_lab heavy cache | BLIND | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | heavy cache visible in export summary.strategy_lab.heavy | :9001/api/export/latest summary.strategy_lab.heavy={"computed_at": "2026-10-03T01:27:53Z", "interval_sec": 0.0, "source": "COMPUTED"} |
+| L26 | stream studies | BLIND | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #307 + #309 | **CLOSED-VERIFIED-LIVE** | #307 fixes stream studies; watcher streams.analysed_freshness detects stale-content ANALYSED | :9011 checks[streams.analysed_freshness].status=AMBER observed='market_microstructure_1s.jsonl content 64m behind; cross_venue_tape_1m.jsonl content 65m b' |
+| L27 | `/api/streams/health` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | streams.analysed_freshness reads /api/streams/health content_lag_sec + not_fully_analysed | :9011 checks[streams.analysed_freshness].status=AMBER observed='market_microstructure_1s.jsonl content 64m behind; cross_venue_tape_1m.jsonl content 65m b' |
+| L28 | insights aggregator | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | insights transfer not OK with applied_seq=null | :9001/api/insights transfer.status=OK applied_seq=2571 reason='None' |
 | L29 | analyzer client | PARTIAL | ANALYZER-FIDELITY | #307 | **IN PROGRESS** | client live-check swallow | (no verifier yet) |
 | L31 | laptop-chain monitor | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | monitor alerts surface as :9011 laptop.chain_monitor (not toast-only) | :9011 checks[laptop.chain_monitor].status=GREEN observed='0 active monitor alerts []; checked 1s ago' |
 | L32 | monitor: legacy SYNC_HEARTBEAT | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | SYNC_HEARTBEAT_* critical -> :9011 laptop.chain_monitor RED | :9011 checks[laptop.chain_monitor].status=GREEN observed='0 active monitor alerts []; checked 1s ago' |
 | L33 | monitor: shipper / AI input / cross-venue / XVL | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | monitor warnings -> :9011 laptop.chain_monitor AMBER | :9011 checks[laptop.chain_monitor].status=GREEN observed='0 active monitor alerts []; checked 1s ago' |
-| L34 | incident relay | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | incident relay: stale report -> system_health_stale; deploy-aware maintenance; non-zero exit | :9011 report.stale=False age_sec=218.1 |
-| L35 | unattended proof | PARTIAL | SELF-AWARE | - | **OPEN** | proof receipts in stale checkout (rank 28) | (no verifier yet) |
-| L36 | health watcher tick | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | health-report staleness -> incident | :9011 report.stale=False age_sec=218.1 |
-| L37 | health interim task | BLIND | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | interim task defers only if supervisor ticked <15 min; decision file -> :9011 watcher.interim | :9011 checks[watcher.interim].status=GREEN observed='DEFERRED 2m ago (supervisor ran 3.2m ago, verdict 3.0m old, carriesWatcher=True)' (interim decision fresh) |
-| L38 | :9011 server | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | :9011 serves cache with age; live=1 single-flight background refresh | GET :9011/api/system-health?live=1 took 0 ms (target < 3000) |
-| L39 | Fly banner push | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | banner push result -> :9011 watcher.delivery (consecutive failures) | :9011 checks[watcher.delivery].status=GREEN observed='last Fly banner push: ok alarms=110 sent=2; 0 consecutive failures; last toast push=0' (push result recorded) |
-| L40 | Fly `/api/system-health` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor polls Fly /api/system-health age/stale -> laptop_health_silent | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| L45 | SH `ai.decision_mix` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | decision_mix SKIP below min samples | :9011 checks[ai.decision_mix].status=GREEN observed='8/70 neutral in 6.0h' (evaluated; SKIP below min samples) |
+| L34 | incident relay | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | incident relay: stale report -> system_health_stale; deploy-aware maintenance; non-zero exit | :9011 report.stale=False age_sec=265.4 |
+| L35 | unattended proof | PARTIAL | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | proof receipt path + verdict on :9021 receipts.proof and :9011 proof | :9021 receipts.proof.receipt=unattended-proof-20261002T114917Z.jsonl :9011 proof.result=FAILING |
+| L36 | health watcher tick | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | health-report staleness -> incident | :9011 report.stale=False age_sec=265.4 |
+| L37 | health interim task | BLIND | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | interim task defers only if supervisor ticked <15 min; decision file -> :9011 watcher.interim | :9011 checks[watcher.interim].status=GREEN observed='DEFERRED 2m ago (supervisor ran 3.2m ago, verdict 2.9m old, carriesWatcher=True)' (interim decision fresh) |
+| L38 | :9011 server | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | :9011 serves cache with age; live=1 single-flight background refresh | GET :9011/api/system-health?live=1 took 15 ms (target < 3000) |
+| L39 | Fly banner push | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | banner push result -> :9011 watcher.delivery (consecutive failures) | :9011 checks[watcher.delivery].status=GREEN observed='last Fly banner push: ok alarms=361 sent=0; 0 consecutive failures; last toast push=0' (push result recorded) |
+| L40 | Fly `/api/system-health` | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | GH monitor polls Fly /api/system-health age/stale -> laptop_health_silent | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| L45 | SH `ai.decision_mix` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | decision_mix SKIP below min samples | :9011 checks[ai.decision_mix].status=GREEN observed='66/118 neutral in 6.0h' (evaluated; SKIP below min samples) |
 | L47 | SH `trading.orders` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | trading.orders AMBER when toggles missing | :9011 trading.orders.status=GREEN; Fly self-checks=4 |
-| L48 | SH `trading.orphans` / `trading.lifecycle` | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | lifecycle contradictions RED within 2h, AMBER within 24h | :9011 checks[trading.lifecycle].status=AMBER observed="4 expired+filled contradictions in 24h (0 in 2.0h) ['fal-39ccb12d2316', 'flb-4bc059d70908'" |
-| L51 | SH `laptop.pull_ack` | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | applied=None never GREEN | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
+| L48 | SH `trading.orphans` / `trading.lifecycle` | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | lifecycle contradictions RED within 2h, AMBER within 24h | :9011 checks[trading.lifecycle].status=GREEN observed='0 expired+filled contradictions in 24h (0 in 2.0h) []; unlinked lifecycle rows=0' |
+| L51 | SH `laptop.pull_ack` | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | applied=None never GREEN | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
 | L52 | SH `analyzer.generation` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | analyzer.reports alongside analyzer.generation | :9011 checks[analyzer.reports].status=GREEN vs :9001/api/status.required_reports_ok=True |
 | L53 | SH `analyzer.api` | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | analyzer.api correctness | :9011 analyzer.api.status=GREEN observed='ok on /api/health and /api/status; generation rev 29742de53a5c == Fly 29742de53a5c; sync i'; :9001 generation_revision=29742de53a5c Fly source_git_rev=29742de53a5c |
-| L54 | SH `streams.coverage` | BLIND | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #307 + #309 | **CLOSED-VERIFIED-LIVE** | nothing reported -> AMBER, never 'n/a' GREEN | :9011 checks[streams.coverage].observed='collection OK; streams market_context:OK/2s, bitfinex_1s:1s, cross_venue:OK/1s, xvl_stale_' |
+| L54 | SH `streams.coverage` | BLIND | ANALYZER-FIDELITY + BLINDSPOT-CLOSE | #307 + #309 | **CLOSED-VERIFIED-LIVE** | nothing reported -> AMBER, never 'n/a' GREEN | :9011 checks[streams.coverage].observed='collection OK; streams market_context:OK/5s, bitfinex_1s:2s, cross_venue:OK/1s, xvl_stale_' |
 | L55 | SH `dashboards.parity` | PARTIAL | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | parse string epoch_parity; exposed in dashboards.parity observed_fields | :9011 checks[dashboards.parity].observed_fields.epoch_parity="MATCH" |
-| L56 | SH `railway.relay` / `railway.api` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | reconciliation null -> AMBER | :9011 checks[railway.relay].status=AMBER observed='mode=PAUSED armedAt=None executor=PAUSED_HEALTHY hb=28s snapshot 10s old reconciliation=nu' (reconciliation=null is never GREEN) |
+| L56 | SH `railway.relay` / `railway.api` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | reconciliation null -> AMBER | :9011 checks[railway.relay].status=AMBER observed='mode=PAUSED armedAt=None executor=PAUSED_HEALTHY hb=29s snapshot 11s old reconciliation=nu' (reconciliation=null is never GREEN) |
 | L58 | SH `bitfinex.exposure` | PARTIAL | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | exch_qty None -> AMBER unless explicitly disarmed | :9011 checks[bitfinex.exposure].status=GREEN observed='disarmed (live_armed=False, force_paper=True), exchange qty not probed (disarmed: Fly live' (qty not probed is GREEN only when explicitly disarmed) |
-| L60 | self-aware keeper | BLIND | BLINDSPOT-CLOSE + SELF-AWARE | #309 + #300 | **CLOSED-VERIFIED-LIVE** | watcher selfaware.engine (age/jobs) RED on stale; keeper script change proposed to SELF-AWARE | :9011 checks[selfaware.engine].status=GREEN observed='9 jobs on time; diagnose 2m ago, health generated 4s ago (self-aware verdict RED)' |
+| L60 | self-aware keeper | BLIND | BLINDSPOT-CLOSE + SELF-AWARE | #309 + #300 | **CLOSED-VERIFIED-LIVE** | watcher selfaware.engine (age/jobs) RED on stale; keeper script change proposed to SELF-AWARE | :9011 checks[selfaware.engine].status=GREEN observed='13 jobs on time; diagnose 3m ago, health generated 68s ago (self-aware verdict RED)' |
 | L61 | SA engine scheduler (8 jobs) | PARTIAL | SELF-AWARE | #300 | **IN PROGRESS** | job last_ok AMBER history only | (no verifier yet) |
 | L62 | SA job `views` | PARTIAL | SELF-AWARE | #300 | **IN PROGRESS** | views job returns OK with errors (rank 29) | (no verifier yet) |
 | L63 | SA `inv.custody` | BLIND | SELF-AWARE + BLINDSPOT-CLOSE | #300 + #309 | **IN PROGRESS** | custody SKIP; puller seq preservation feeds it | :9021 findings[inv.custody].status=None |
@@ -145,26 +174,26 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | L68 | SA progress probes (ai_cadence, tile_orders, feeds, counts_a | PARTIAL | SELF-AWARE | #300 | **IN PROGRESS** | progress probes | (no verifier yet) |
 | L69 | SA `data.*` freshness/completeness/dead_fields/capacity/suff | PARTIAL | SELF-AWARE | #300 | **IN PROGRESS** | freshness vs mirror head; Fly volume null GREEN | (no verifier yet) |
 | L70 | SA uptime | PARTIAL | SELF-AWARE | #300 | **IN PROGRESS** | uptime interruptions disagree 9 vs 1 | (no verifier yet) |
-| L71 | legacy ACK watcher | BLIND | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | frozen legacy ACK watcher state reported as orphan | :9011 checks[laptop.legacy_ack_watcher].status=AMBER observed='laptop-ack-watcher.status.json state=WAIT_INVENTORY_NOT_ACK_ELIGIBLE last poll 58.2h ago; ' (frozen orphan watcher reported) |
-| L72 | ad-hoc `fly-dashboard-proxy` :7002 | BLIND | Danish | - | **OPEN** | ad-hoc :7002 proxy: register or retire (now visible in :9011 laptop.adhoc_processes) | (no verifier yet) |
-| L73 | ad-hoc `xvl-scratch\watch_queue.ps1` (writes WALL) | BLIND | Danish | - | **OPEN** | ad-hoc watch_queue.ps1: register or retire (now visible in :9011 laptop.adhoc_processes) | (no verifier yet) |
-| L74 | ad-hoc `uptime_poll2.py`, `http.server` :9097 | BLIND | Danish | - | **OPEN** | ad-hoc uptime_poll2 / :9097: register or retire (now visible in :9011 laptop.adhoc_processes) | (no verifier yet) |
-| C1 | `fly-bot-monitor` cron */15 | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | heartbeat variable + monitor_schedule_gap; crash/cache-loss never closes incidents | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success: 'previous monitor run evidence 2026-10-02T13:54:24Z via cached state; gap 24 min'; 'state restored=True crashed=False clean_streak=0 incident_close_allowed=False'; GH var FLY_MONITOR_HEARTBEAT unset (FLY_MONITOR_VARIABLES_TOKEN not configured) |
-| C3 | revision / registry drift | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 fly.revision compares Fly git_rev to origin/master (master ahead = deploy queued) | :9011 checks[fly.revision].status=GREEN observed='fly=29742de53a5c master=07f269903ce5 (master ahead; deploy queued)' (master compared) |
-| C5 | cadence rules | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | entries_blocked when last_poll_entry_eligible=false >2h unpaused | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| L71 | legacy ACK watcher | BLIND | BLINDSPOT-CLOSE | #309 | **IN PROGRESS** | frozen legacy ACK watcher state reported as orphan | :9011 checks[laptop.legacy_ack_watcher].status=GREEN observed='legacy ACK watcher explicitly retired (marker file)' (frozen orphan watcher reported) |
+| L72 | ad-hoc `fly-dashboard-proxy` :7002 | BLIND | BLINDSPOT-OWNER | - | **NEEDS_DANISH** | ad-hoc :7002 fly-dashboard-proxy (from btc-v31-laptop-retire-wt). Default: retire it; the Fly dashboard is reachable directly | :9011 laptop.adhoc_processes.listeners=[{"port": 7002, "pid": "22488"}] |
+| L73 | ad-hoc `xvl-scratch\watch_queue.ps1` (writes WALL) | BLIND | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | orphan watch_queue.ps1 (watched long-merged #262/#263, git fetch every 90s) retired | :9011 laptop.adhoc_processes.scripts=[] |
+| L74 | ad-hoc `uptime_poll2.py`, `http.server` :9097 | BLIND | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | ad-hoc :9097 http.server (tmp-alerts-history) retired; uptime_poll2 already gone | :9011 laptop.adhoc_processes.listeners=[{"port": 7002, "pid": "22488"}] |
+| C1 | `fly-bot-monitor` cron */15 | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | heartbeat variable + monitor_schedule_gap; crash/cache-loss never closes incidents | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success: 'previous monitor run evidence 2026-10-03T02:00:20Z via cached state; gap 36 min'; 'state restored=True crashed=False clean_streak=0 incident_close_allowed=False'; GH var FLY_MONITOR_HEARTBEAT unset (FLY_MONITOR_VARIABLES_TOKEN not configured) |
+| C3 | revision / registry drift | PARTIAL | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 fly.revision compares Fly git_rev to origin/master (master ahead = deploy queued) | :9011 checks[fly.revision].status=GREEN observed='fly=29742de53a5c master=7ce045518f33 (master ahead; deploy queued)' (master compared) |
+| C5 | cadence rules | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | entries_blocked when last_poll_entry_eligible=false >2h unpaused | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | C7 | segment transfer lag | PARTIAL | DATA-RETENTION | #303 | **QUEUED-POST-FREEZE** | FLY_MONITOR_SEGMENTS_LIVE=1 before prune goes live | (no verifier yet) |
-| C9 | laptop dead-man (GH var > 2h) | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | unset LAPTOP_CHAIN_HEARTBEAT is a finding | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success: 'LAPTOP_CHAIN_HEARTBEAT: 1790950266' |
-| C11 | laptop incident issues | PARTIAL | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | incident maintenance capped 90 min; heartbeat + cap -> :9011 laptop.incident_relay | :9011 checks[laptop.incident_relay].status=GREEN observed="heartbeat 5m ago; maintenance=none; open conditions ['system_health_red']" |
-| C12 | `/ready` subsystem blocks (xvl, cross_venue, market_context, | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | subsystem_findings over /ready blocks | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| C13 | `/api/status` pipelines (lifecycle, relay outbox, v3 reconci | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | rules over lifecycle / relay outbox / V3 reconcile | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| C9 | laptop dead-man (GH var > 2h) | PARTIAL | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | unset LAPTOP_CHAIN_HEARTBEAT is a finding | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success: 'LAPTOP_CHAIN_HEARTBEAT: 1790994054' |
+| C11 | laptop incident issues | PARTIAL | BLINDSPOT-CLOSE | #309 + #323 | **CLOSED-VERIFIED-LIVE** | incident maintenance capped 90 min; heartbeat + cap -> :9011 laptop.incident_relay | :9011 checks[laptop.incident_relay].status=GREEN observed="heartbeat 10m ago; maintenance=none; open conditions ['system_health_red']" |
+| C12 | `/ready` subsystem blocks (xvl, cross_venue, market_context, | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | subsystem_findings over /ready blocks | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| C13 | `/api/status` pipelines (lifecycle, relay outbox, v3 reconci | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | rules over lifecycle / relay outbox / V3 reconcile | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | C14 | Fly prune / custody | PARTIAL | DATA-RETENTION | #303 | **QUEUED-POST-FREEZE** | prune dry_run until #303 | (no verifier yet) |
-| C15 | `fly-bot-deploy` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor deploy_failed rule on last finished guarded deploy | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| C16 | `fly-monitor-ci` / `research-segments-ci` | PARTIAL | BLINDSPOT-CLOSE | #309 + #310 | **CLOSED-VERIFIED-LIVE** | laptop-tests workflow; head commits without [skip ci], squash subject with [skip ci] | laptop-tests.yml run 37020905071 @252fd1d25 pull_request 2026-10-02T14:35:14Z success |
-| C17 | `bitfinex-production-gate` | PARTIAL | COORDINATOR | - | **OPEN** | production gate ignores bot-code pushes | (no verifier yet) |
-| C18 | `auto-deploy` (Railway/Vercel) | BLIND | Danish | - | **OPEN** | auto-deploy disabled_manually (intentional?) | (no verifier yet) |
+| C15 | `fly-bot-deploy` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | GH monitor deploy_failed rule on last finished guarded deploy | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| C16 | `fly-monitor-ci` / `research-segments-ci` | PARTIAL | BLINDSPOT-CLOSE | #309 + #310 | **CLOSED-VERIFIED-LIVE** | laptop-tests workflow; head commits without [skip ci], squash subject with [skip ci] | laptop-tests.yml run 37085727295 @76c29fe6e pull_request 2026-10-03T01:20:40Z success |
+| C17 | `bitfinex-production-gate` | PARTIAL | BLINDSPOT-OWNER | - | **NEEDS_DANISH** | master has no branch protection/rulesets, so bitfinex-production-gate is advisory. Default: make bitfinex-policy a required status check (not wider push paths) | (no verifier yet) |
+| C18 | `auto-deploy` (Railway/Vercel) | BLIND | BLINDSPOT-OWNER | - | **NEEDS_DANISH** | Fly auto-deploy disabled_manually. Default: keep it disabled; deploy only via the guarded fly-bot-deploy workflow per #351 | (no verifier yet) |
 | C19 | `secret-scan` | PARTIAL | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | daily full-history gitleaks (secret-scan-history.yml) with fingerprinted .gitleaksignore | secret-scan-history.yml run 37015247367 @d6798e6c0 workflow_dispatch 2026-10-02T13:46:33Z success (full-history gitleaks) |
-| C20 | WALL `diagnostics/WALL-STATUS-FLY.md` | BLIND | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 coordination.wall validates line format + last-entry age | :9011 checks[coordination.wall].status=GREEN observed='last entry 4m ago; 0 malformed of last 40' |
-| C21 | GHA scheduler itself | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | monitor heartbeat watched by monitor itself + laptop | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success: 'previous monitor run evidence 2026-10-02T13:54:24Z via cached state; gap 24 min'; 'state restored=True crashed=False clean_streak=0 incident_close_allowed=False'; GH var FLY_MONITOR_HEARTBEAT unset (FLY_MONITOR_VARIABLES_TOKEN not configured) |
+| C20 | WALL `diagnostics/WALL-STATUS-FLY.md` | BLIND | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 coordination.wall validates line format + last-entry age | :9011 checks[coordination.wall].status=GREEN observed='last entry 115s ago; 0 malformed of last 40' |
+| C21 | GHA scheduler itself | BLIND | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | monitor heartbeat watched by monitor itself + laptop | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success: 'previous monitor run evidence 2026-10-03T02:00:20Z via cached state; gap 36 min'; 'state restored=True crashed=False clean_streak=0 incident_close_allowed=False'; GH var FLY_MONITOR_HEARTBEAT unset (FLY_MONITOR_VARIABLES_TOKEN not configured) |
 
 ## Earlier-audit gaps (closure table Â§4) and Â§4.3 contradictions
 
@@ -182,15 +211,15 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | 10 | `streams.coverage` no-op | IN PROGRESS #304 | audit owner | #304 | **IN PROGRESS** | `streams.coverage` no-op |  |
 | 11 | market_context unread by checks | IN PROGRESS #304 | audit owner | #304 | **IN PROGRESS** | market_context unread by checks |  |
 | 12 | Failed retention shows GREEN | IN PROGRESS #304 (#301 merged lock retry) | audit owner | #304 (#301 merged lock retry) | **IN PROGRESS** | Failed retention shows GREEN |  |
-| 13 | Promotion lock contention | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | promotion/parity lock contention visible as :9011 laptop.puller_lock (holder, hold time, r | :9011 checks[laptop.puller_lock].observed_fields.lock_holder=null |
+| 13 | Promotion lock contention | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | promotion/parity lock contention visible as :9011 laptop.puller_lock (holder, hold time, r | :9011 checks[laptop.puller_lock].observed_fields.lock_holder="research_segment_promotion" |
 | 14 | Trade/PnL disagreement Fly/mirror/analyzer | IN PROGRESS #307 | audit owner | #307 | **IN PROGRESS** | Trade/PnL disagreement Fly/mirror/analyzer |  |
 | 15 | Lane PnL cent rounding | QUEUED | audit owner | - | **QUEUED-POST-FREEZE** | Lane PnL cent rounding |  |
 | 16 | Deploy force-flats contaminate stats | QUEUED (partly #299) | audit owner | (partly #299) | **QUEUED-POST-FREEZE** | Deploy force-flats contaminate stats |  |
-| 17 | Analyzer cycle vs 45-min freshness | NOT ADDRESSED | ANALYZER-FIDELITY | - | **OPEN** | cycle length vs 45-min freshness |  |
-| 18 | 0.9 GB multiverse HEALTH_ONLY | NOT ADDRESSED | ANALYZER-FIDELITY | - | **OPEN** | multiverse HEALTH_ONLY |  |
+| 17 | Analyzer cycle vs 45-min freshness | NOT ADDRESSED | ANALYZER-PERF | - | **OWNED_BY:ANALYZER-PERF** | analyzer pass 48-78 min > 45-min freshness (01:05Z pass 48 min under storage-dedupe I/O; 0 | WALL ANALYZER-PERF: claim at 2026-10-03T01:12:15Z, latest state IN_PROGRESS |
+| 18 | 0.9 GB multiverse HEALTH_ONLY | NOT ADDRESSED | BLINDSPOT-OWNER | #345 | **POST_FREEZE** | multiverse HEALTH_ONLY -> analysed rows ship in #345 (Fly); visible now as :9011 streams.a | gh #345 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP18-MULTIVERSE-HEALTH-ONLY eta 2026-10-04T15:00:00Z |
 | 19 | Counterfactual rows lack join keys | QUEUED L377 | audit owner | L377 | **QUEUED-POST-FREEZE** | Counterfactual rows lack join keys |  |
-| 20 | 22% signal_replay completion | NOT ADDRESSED | ANALYZER-FIDELITY | - | **OPEN** | signal_replay completion |  |
-| 21 | PIPELINE_ERROR race / capacity censoring | NOT ADDRESSED | ANALYZER-FIDELITY | - | **OPEN** | PIPELINE_ERROR race / capacity censoring |  |
+| 20 | 22% signal_replay completion | NOT ADDRESSED | BLINDSPOT-OWNER | #365 | **POST_FREEZE** | 267/294 executed replays INCOMPLETE_EXECUTED_POST_EXIT: oldest-first eviction at MAX_REPLA | gh #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP20-REPLAY-EVICTION eta 2026-10-04T15:00:00Z |
+| 21 | PIPELINE_ERROR race / capacity censoring | NOT ADDRESSED | BLINDSPOT-OWNER | #365 | **POST_FREEZE** | PIPELINE_ERROR dict-size race still fires (2026-10-02T15:18:50Z) with no site; #365 record | gh #365 OPEN draft; :9021 selfaware.expected_blockers[AMBER] BLINDSPOT-GAP21-PIPELINE-ERROR-SITE eta 2026-10-04T15:00:00Z |
 | 22 | Data catalog API | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 23 | Per-slot completeness | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 24 | Dead/constant field detection | CLOSED (detection) | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
@@ -198,7 +227,7 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | 26 | Archive size vs capacity | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 27 | Research sufficiency | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 28 | Live prompt ret_1m/ret_5m/delta_change zero | QUEUED (fix in #294 deployed, unverified) | audit owner | (fix in #294 deployed, unverified) | **QUEUED-POST-FREEZE** | Live prompt ret_1m/ret_5m/delta_change zero |  |
-| 29 | Dead-input detector watches challenger fields only | NOT ADDRESSED | AI-PLAN | - | **OPEN** | dead-input detector watches challenger fields only |  |
+| 29 | Dead-input detector watches challenger fields only | NOT ADDRESSED | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | dead-input detector now watches live-prompt ai_calls.context inputs (delta_change DEAD_ZER | :9021 data/fields watched live-prompt inputs: ['context.delta_change=DEAD_ZERO', 'context.ema_slope=OK', 'context.price=OK', 'context.ret_1m=OK', 'context.ret_5m=OK'] |
 | 30 | Regime stuck WARMUP | QUEUED #306 | audit owner | #306 | **QUEUED-POST-FREEZE** | Regime stuck WARMUP |  |
 | 31 | `win_prob` always 0 | QUEUED L377 | audit owner | L377 | **QUEUED-POST-FREEZE** | `win_prob` always 0 |  |
 | 32 | `captured_at_ts` null | QUEUED L377 | audit owner | L377 | **QUEUED-POST-FREEZE** | `captured_at_ts` null |  |
@@ -208,15 +237,15 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | 36 | No CPU/RSS/thread telemetry | QUEUED #306 | audit owner | #306 | **QUEUED-POST-FREEZE** | No CPU/RSS/thread telemetry |  |
 | 37 | Trade-lock health | QUEUED #306 | audit owner | #306 | **QUEUED-POST-FREEZE** | Trade-lock health |  |
 | 38 | Clock skew | NOT ADDRESSED | FLY runtime | post-freeze backlog | **QUEUED-POST-FREEZE** | clock skew |  |
-| 39 | Crash dumps / lifecycle backlog age | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | lifecycle blocker_counts / emergency WAL rule; crash dumps OPEN | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
-| 40 | Epoch parity / retired boundary / WS reconnects / REST stale exposed b | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | subsystem rules (WS reconnects, REST stale, epoch parity) | fly-bot-monitor run 37018840609 @7959fe1c0 2026-10-02T14:17:36Z success findings=0 contract_field_missing=0: '' |
+| 39 | Crash dumps / lifecycle backlog age | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | lifecycle blocker_counts / emergency WAL rule; crash dumps OPEN | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
+| 40 | Epoch parity / retired boundary / WS reconnects / REST stale exposed b | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | subsystem rules (WS reconnects, REST stale, epoch parity) | fly-bot-monitor run 37090346405 @7ce045518 2026-10-03T02:35:41Z success findings=0 contract_field_missing=0: '' |
 | 41 | Exchange 429s per venue | NOT ADDRESSED | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | rate_limits{venue}.hits_429 | Fly/api/status.rate_limits=null |
 | 42 | Fly 60/min limit starves laptop | QUEUED L385 | audit owner | L385 | **QUEUED-POST-FREEZE** | Fly 60/min limit starves laptop |  |
 | 43 | Watcher SKIP on 429 (fail-open) | NOT ADDRESSED | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | fetch failure >15 min -> AMBER, not SKIP | :9011 checks[watcher.sources].status=GREEN observed='all 8 sources answered' |
 | 44 | `/api/state/lite` + owner bucket | QUEUED L363 | audit owner | L363 | **QUEUED-POST-FREEZE** | `/api/state/lite` + owner bucket |  |
 | 45 | Relay snapshot top lock holder | QUEUED #306 | audit owner | #306 | **QUEUED-POST-FREEZE** | Relay snapshot top lock holder |  |
 | 46 | `fly.ai_success` RED during deploy pause | QUEUED L363 | audit owner | L363 | **QUEUED-POST-FREEZE** | `fly.ai_success` RED during deploy pause |  |
-| 47 | `failing[]` duplicates | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | summarize dedupes checks by id (worst wins) | :9011 48 checks, 9 failing, duplicate ids=[] |
+| 47 | `failing[]` duplicates | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | summarize dedupes checks by id (worst wins) | :9011 49 checks, 5 failing, duplicate ids=[] |
 | 48 | Fly-published health lags laptop | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | :9011 watcher.fly_copy lag of Fly-published copy | :9011 checks[watcher.fly_copy].status=GREEN observed='Fly copy generated 5m ago; lag behind previous local verdict 0s' (lag measured) |
 | 49 | `/summary` `/live` 401 undocumented | QUEUED L363 | audit owner | L363 | **QUEUED-POST-FREEZE** | `/summary` `/live` 401 undocumented |  |
 | 50 | Verdict never GREEN; no ack/expiry | NOT ADDRESSED | BLINDSPOT-CLOSE | #323 | **CLOSED-VERIFIED-LIVE** | AMBER acks with expiry (health/acks.json); RED never ackable | :9011 report.acked=[] (AMBER-only acks) |
@@ -224,30 +253,30 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 | 52 | `neon.usage` GREEN on zero | CLOSED #295 | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 53 | "Noneh to full" | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 54 | `:9001/api/health` hides revision lag/stale receipt | NOT ADDRESSED at source | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | watcher parses revision lag / receipt age (source fix = ANALYZER-FIDELITY) | :9011 analyzer.api.status=GREEN observed='ok on /api/health and /api/status; generation rev 29742de53a5c == Fly 29742de53a5c; sync i'; :9001 generation_revision=29742de53a5c Fly source_git_rev=29742de53a5c |
-| 55 | Insights tile fields null | NOT ADDRESSED | SECTION-CONTRACTS | - | **OPEN** | insights tile fields null (content correctness; handed 13:14Z) |  |
-| 56 | Insights transfer seqs null | NOT ADDRESSED | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | puller seqs preserved; insights transfer honest | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2359 applied=2359 (puller status) fly_acked=2359 last pull 0s ago exit' |
-| 57 | `deploy_queue` stale WALL scrape | NOT ADDRESSED | SECTION-CONTRACTS | - | **OPEN** | deploy_queue stale WALL scrape (content correctness; handed 13:14Z) |  |
+| 55 | Insights tile fields null | NOT ADDRESSED | BLINDSPOT-OWNER | #366 | **CLOSED-VERIFIED-LIVE** | insights fly_bot tiles: execution falls back to xvl_evaluator paper stats; every null name | :9001 insights fly_bot.tiles=4 sources=[('strategy_progress.combo_lane_execution', 'analyzer export tile_stats'), ('strategy_progress.combo_lane_execution', 'analyzer export tile_stats')] |
+| 56 | Insights transfer seqs null | NOT ADDRESSED | BLINDSPOT-CLOSE | #309 | **CLOSED-VERIFIED-LIVE** | puller seqs preserved; insights transfer honest | :9011 checks[laptop.pull_ack].status=GREEN observed='published=2570 applied=2570 (puller status) fly_acked=2569 last pull 111s ago ex' |
+| 57 | `deploy_queue` stale WALL scrape | NOT ADDRESSED | BLINDSPOT-OWNER | #366 | **CLOSED-VERIFIED-LIVE** | deploy_queue parses the current WALL pipe format; terminal states pop; >24h entries move t | :9001 insights deploy_queue latest_entry_at=2026-10-03T02:48:46Z age=377.3 queue=0 stale_queue=6 |
 | 58 | `selfaware.*` generic titles | QUEUED | audit owner | - | **QUEUED-POST-FREEZE** | `selfaware.*` generic titles |  |
 | 59 | Per-call AI API | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 60 | Fly `ai_call_v1` hash/tokens/cost | QUEUED L363/L385 | audit owner | L363/L385 | **QUEUED-POST-FREEZE** | Fly `ai_call_v1` hash/tokens/cost |  |
 | 61 | AI scorecard | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 62 | DeepSeek burn rate | NOT ADDRESSED | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | ai_provider_health.cost_usd_24h / last_call_cost_usd | Fly/api/status.ai_provider_health.last_call_cost_usd=null |
-| 63 | Fly/Railway spend, Neon forecast | NOT ADDRESSED | COORDINATOR | - | **OPEN** | Fly/Railway spend, Neon forecast |  |
+| 63 | Fly/Railway spend, Neon forecast | NOT ADDRESSED | BLINDSPOT-OWNER | - | **NEEDS_DANISH** | Neon forecast live in :9011 neon.usage; Fly/Railway spend needs billing access. Default: a | :9011 checks[neon.usage].status=GREEN observed='MTD egress 12.26GB (2.5% of 500GB incl.), rate 26.4MB/h (hour 01:00Z); compute 13.1 CU-h; ' |
 | 64 | Edge state machine | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 65 | Regime playbook | CLOSED (descriptive; regime input dead) | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 66 | Proof status API | CLOSED via :9021 | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 67 | Proof false-fails `segments_acked` | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 68 | 48h proof never completes | IN PROGRESS (restart after #304, L383) | audit owner | (restart after #304, L383) | **IN PROGRESS** | 48h proof never completes |  |
-| 69 | Deploy API stuck detection / mojibake | NOT ADDRESSED | SECTION-CONTRACTS | - | **OPEN** | deploy in_progress after completion (content correctness; handed 13:14Z) |  |
-| 70 | Tests/CI results API | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | laptop-tests workflow gives PR checks; results API still OPEN | laptop-tests.yml run 37020905071 @252fd1d25 pull_request 2026-10-02T14:35:14Z success |
-| 71 | `/changes` timeline | NOT ADDRESSED | SELF-AWARE | - | **OPEN** | /changes timeline |  |
+| 69 | Deploy API stuck detection / mojibake | NOT ADDRESSED | BLINDSPOT-OWNER | #366 | **CLOSED-VERIFIED-LIVE** | deploy receipt completes (stuck fixed earlier); gh output decoded as UTF-8 so titles carry | :9021 receipts.deploys=8 mojibake=[] newest_not_completed=[] |
+| 70 | Tests/CI results API | NOT ADDRESSED | BLINDSPOT-CLOSE | #310 | **CLOSED-VERIFIED-LIVE** | laptop-tests workflow gives PR checks; results API still OPEN | laptop-tests.yml run 37085727295 @76c29fe6e pull_request 2026-10-03T01:20:40Z success |
+| 71 | `/changes` timeline | NOT ADDRESSED | BLINDSPOT-OWNER | #366 | **CLOSED-VERIFIED-LIVE** | GET :9021 /api/selfaware/changes: deploys, fast-forwards, manual, Fly pause/revision/tiles | :9021 /api/selfaware/changes total=38 kinds=['ACTIVE_TILES', 'DEPLOY', 'FLY_REVISION', 'LAPTOP_FAST_FORWARD', 'MANUAL', 'PAUSE', 'PAUSE_OWNER', 'RESUME'] sources={'receipts': 'OK', 'runtime_history': 'OK', 'ai_calls': 'OK', 'research_session': 'OK'} |
 | 72 | One-call coordinator brief | CLOSED (digest) | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
 | 73 | Unified custody view | NOT ADDRESSED | SELF-AWARE + BLINDSPOT-CLOSE | #300 + #309 | **IN PROGRESS** | unified custody (puller seqs fixed here) | :9021 findings[inv.custody].status=None |
 | 74 | Uptime API | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
-| 75 | Incident timeline | NOT ADDRESSED | SELF-AWARE | - | **OPEN** | incident timeline |  |
-| 76 | Analyzer exports over HTTP | NOT ADDRESSED | ANALYZER-FIDELITY | - | **OPEN** | exports over HTTP |  |
-| 77 | AGENTS.md roster drift / registry lint | NOT ADDRESSED | SECTION-CONTRACTS | - | **OPEN** | AGENTS.md roster vs live registry drift (content correctness; handed 13:14Z) |  |
-| 78 | Stale canonical checkout / no pinned deployed-source export | NOT ADDRESSED | COORDINATOR | - | **OPEN** | stale canonical checkout btc-v31-current (d3544f9f7) |  |
+| 75 | Incident timeline | NOT ADDRESSED | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | incident timeline = :9021 findings/history OPENED/CLEARED events | :9021 findings/history events=5 kinds=['CHANGED', 'CLEARED', 'OPENED'] latest=2026-10-03T02:53:42Z |
+| 76 | Analyzer exports over HTTP | NOT ADDRESSED | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | exports over HTTP: :9001 /api/export/latest + /api/report/<name>.json | :9001/api/export/latest summary=True; /api/report/data_health_report.json generated_ts=1790990877.86 |
+| 77 | AGENTS.md roster drift / registry lint | NOT ADDRESSED | BLINDSPOT-OWNER | - | **CLOSED-VERIFIED-LIVE** | every live Fly tile lane is named in AGENTS.md (#360 retire updates both together) | Fly /api/status.active_tiles=['FAMILY_TREND_FADE_60', 'FAMILY_TREND_FADE_60_COMMITTED', 'FAMILY_XVENUE_LEAD_60S', 'FAMILY_XVENUE_PREMIUM_60S']; missing from AGENTS.md: [] |
+| 78 | Stale canonical checkout / no pinned deployed-source export | NOT ADDRESSED | BLINDSPOT-OWNER | - | **NEEDS_DANISH** | btc-v31-current is d3544f9f7 with ~1635 dirty paths; :9021 receipts.revisions pins what ru | http://127.0.0.1:9021/api/selfaware/receipts.revisions.self_aware="d5c3c882c31236169e488d97c4c0a63bbbbf28ea" |
 | 79 | PREREGISTERED-HYPOTHESES missing; EXPORT_README wrong | NOT ADDRESSED | ANALYZER-FIDELITY | #307 | **IN PROGRESS** | EXPORT_README (#307); PREREGISTERED-HYPOTHESES still absent |  |
 | 80 | No recurring secrets scan | NOT ADDRESSED | BLINDSPOT-CLOSE | #322 | **CLOSED-VERIFIED-LIVE** | daily full-history gitleaks (secret-scan-history.yml) | secret-scan-history.yml run 37015247367 @d6798e6c0 workflow_dispatch 2026-10-02T13:46:33Z success (full-history gitleaks) |
 | 81 | SA tile stats mix retired lanes | CLOSED | audit | - | **CLOSED-AUDIT3 (not re-verified here)** | closed live in AUDIT-3 |  |
@@ -266,20 +295,22 @@ Audit table parse: 174 components = FULL 37 / PARTIAL 86 / BLIND 51 (the audit h
 |---|---|---|---|---|---|
 | T-REPORTS-OK | ANALYZER-FIDELITY | #304 | **CLOSED-VERIFIED-LIVE** | required analyzer reports actually pass (root fix) | :9001/api/status.required_reports_ok=True failures=[] |
 | T-TOGGLES | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | per-tile toggle state in public /api/status | Fly /api/status.active_tiles[].toggle_on=[None, None, None, None] |
-| T-DELTA-CHANGE | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test, ships post-freeze |  |
+| T-DELTA-CHANGE | BLINDSPOT-OWNER | #317 | **POST_FREEZE** | update_orderflow set prev_delta after the update, so delta_change (live AI prompt) was always 0.0; fixed + test in #317, ships post-freeze | gh #317 OPEN draft; :9021 selfaware.expected_blockers[AMBER] T-DELTA-CHANGE eta 2026-10-04T15:00:00Z |
 | T-RELAY-GATE | BLINDSPOT-CLOSE | #317 | **QUEUED-POST-FREEZE** | arming refused while stale-owner/pre-arming relay events unquarantined (readiness gate) |  |
-| T-TIERA-API | ANALYZER-FIDELITY | #307 | **CLOSED-VERIFIED-LIVE** | Tier A promotion visible via storage.tier_a | :9011 checks[storage.tier_a].status=RED observed='23 datasets, backfilled=True; ai_decisions=RED: UNDATED_AFTER_BACKFILL, closed_trades=RED:' |
+| T-TIERA-API | ANALYZER-FIDELITY | #307 | **CLOSED-VERIFIED-LIVE** | Tier A promotion visible via storage.tier_a | :9011 checks[storage.tier_a].status=AMBER observed='23 datasets, backfilled=True; ai_calls=AMBER: , ai_confidence_calibration=AMBER: , ai_deci' |
 
 ## Machine summary
 
 ```json
 {
- "generated_at": "2026-10-02T14:39:25Z",
+ "generated_at": "2026-10-03T02:55:17Z",
  "counts": {
-  "QUEUED-POST-FREEZE": 72,
-  "CLOSED-VERIFIED-LIVE": 78,
-  "IN PROGRESS": 38,
-  "OPEN": 26
+  "QUEUED-POST-FREEZE": 71,
+  "CLOSED-VERIFIED-LIVE": 92,
+  "IN PROGRESS": 39,
+  "POST_FREEZE": 6,
+  "NEEDS_DANISH": 5,
+  "OWNED_BY": 1
  },
  "total": 214
 }
