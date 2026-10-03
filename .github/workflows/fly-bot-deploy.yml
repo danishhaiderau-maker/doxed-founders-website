@@ -44,6 +44,8 @@ on:
           - repair-v22-seals-execute
           - repair-v22-seals-offline-plan
           - repair-v22-seals-offline-execute
+          - repair-v3-markers-offline-plan
+          - repair-v3-markers-offline-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -1224,6 +1226,175 @@ jobs:
           DURABLE_RELAYS_ONLY_RECOVERY: "YES"
         run: node scripts/check-relay-flat.mjs
 
+  repair-v3-markers-offline:
+    # After a held deploy, V3 ledger completeness markers stamped by earlier
+    # revisions make open_read_only refuse the boundary reset ("V3 read
+    # authority identity conflict"). The running revision already treats them
+    # as absent. Plan proves the exact live revision is paused, flat and
+    # disarmed, every relay is PAUSED/disarmed/flat, and lists the stale
+    # markers. Execute holds the machine on `sleep infinity`, moves only those
+    # markers to /app/data/quarantine/v3_completeness_markers/ (outside the
+    # reset scope; never deletes) with hashes verified, requires the reset
+    # pre-flight to pass, then restores the entrypoint and proves a held boot.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'repair-v3-markers-offline-plan' || inputs.mode == 'repair-v3-markers-offline-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXPECTED_REVISION: ${{ inputs.expected_unready_revision }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Prove the exact live revision is paused, flat, disarmed and paper-only
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          expected = os.environ["EXPECTED_REVISION"].strip().lower()
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("repair-v3-markers requires the exact 12-character live revision")
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/status?fresh=1",
+                                           headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"})
+          with urllib.request.urlopen(request, timeout=45) as response:
+              status = json.load(response)
+          progress = status.get("strategy_progress") or {}
+          facts = {"revision": str(status.get("source_git_rev") or "")[:12], "execution_paused": status.get("execution_paused"),
+                   "live_armed": status.get("live_armed"), "bitfinex_live_enabled": status.get("bitfinex_live_enabled"),
+                   "force_paper_mode": status.get("force_paper_mode"), "open_positions": progress.get("open_positions"),
+                   "pending_orders": progress.get("pending_orders"), "pause_owner": status.get("pause_owner")}
+          print(json.dumps(facts, sort_keys=True))
+          if (facts["revision"] != expected or facts["execution_paused"] is not True or facts["live_armed"] is not False
+                  or facts["bitfinex_live_enabled"] is not False or facts["force_paper_mode"] is not True
+                  or facts["open_positions"] != 0 or facts["pending_orders"] != 0):
+              raise SystemExit("live revision is not proven paused, flat, disarmed and paper-only")
+          PY
+
+      - name: Prove every relay is PAUSED, disarmed and flat from durable Railway state
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+        run: |
+          npm ci
+          npx prisma generate
+          node scripts/check-relay-flat.mjs
+
+      - name: Stage the reviewed marker CLI for the guest
+        run: echo "GUEST_B64=$(base64 -w0 services/btc-conservative-agent/v3_marker_quarantine.py)" >> "$GITHUB_ENV"
+
+      - name: Plan the stale completeness markers
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          guest() {
+            flyctl machine exec --app doxed-btc-bot --timeout "$2" "$1" \
+              "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v3_marker_quarantine.py']+sys.argv[1:]; exec(compile(base64.b64decode('${GUEST_B64}'),'v3_marker_quarantine.py','exec'),{'__name__':'__main__'})\" $3"
+          }
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          proof="$(guest "$machine_id" 60 "offline-proof --data-dir /app/data --expected-rev ${EXPECTED_REVISION}" || true)"
+          printf '%s\n' "$proof"
+          token="$(printf '%s\n' "$proof" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="PROVEN", "marker plan refused"; print(rows[0]["plan"]["confirm_token"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "token=$token"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require the confirm token
+        if: ${{ inputs.mode == 'repair-v3-markers-offline-execute' }}
+        env:
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          TOKEN: ${{ steps.plan.outputs.token }}
+        run: |
+          if [ "$CONFIRM" != "$TOKEN" ]; then
+            echo "clean_epoch_confirm must be $TOKEN"
+            exit 1
+          fi
+
+      - name: Hold the machine on sleep so bot.py is not running
+        if: ${{ inputs.mode == 'repair-v3-markers-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+        run: |
+          set -euo pipefail
+          flyctl machine update "$MACHINE_ID" --app doxed-btc-bot --command "sleep infinity" --skip-health-checks --yes
+          for attempt in $(seq 1 30); do
+            if out="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$MACHINE_ID" "python /app/v22_seal_repair.py processes" 2>/dev/null)" \
+                && printf '%s\n' "$out" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0]["sleep_hold"] is True and rows[0]["bot_processes"]==[]'; then
+              printf '%s\n' "$out"
+              echo "machine held on sleep (attempt $attempt)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "machine did not come up held on sleep"
+          exit 1
+
+      - name: Quarantine exactly the planned markers with no bot process running
+        if: ${{ inputs.mode == 'repair-v3-markers-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+        run: |
+          set -euo pipefail
+          guest() {
+            flyctl machine exec --app doxed-btc-bot --timeout "$2" "$1" \
+              "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v3_marker_quarantine.py']+sys.argv[1:]; exec(compile(base64.b64decode('${GUEST_B64}'),'v3_marker_quarantine.py','exec'),{'__name__':'__main__'})\" $3"
+          }
+          result="$(guest "$MACHINE_ID" 60 "offline-execute --data-dir /app/data --expected-rev ${EXPECTED_REVISION} --confirm ${CONFIRM}" || true)"
+          printf '%s\n' "$result"
+          printf '%s\n' "$result" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("status")=="COMPLETE" and all(rows[0]["checks"].values()) and rows[0]["preflight_after"]["ok"] is True, "marker quarantine or reset pre-flight did not pass; machine stays held on sleep"'
+
+      - name: Restore the image entrypoint and prove a held-down boot
+        if: ${{ inputs.mode == 'repair-v3-markers-offline-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+        run: |
+          set -euo pipefail
+          flyctl machine update "$MACHINE_ID" --app doxed-btc-bot --command "/fly-entrypoint.sh" --skip-health-checks --yes
+          python - <<'PY'
+          import json, os, time, urllib.request
+          expected = os.environ["EXPECTED_REVISION"]
+          want = {"execution_paused": True, "live_armed": False, "bitfinex_live_enabled": False, "force_paper_mode": True}
+          last = None
+          for attempt in range(1, 121):
+              try:
+                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+                      health = json.load(response)
+                  if str(health.get("source_git_rev") or "")[:12] == expected and all(health.get(k) == v for k, v in want.items()):
+                      print(json.dumps({"schema": "v3_marker_offline_boot_v1", "revision": expected, "attempt": attempt,
+                                        "pause_owner": health.get("pause_owner"), **want}, sort_keys=True))
+                      break
+                  last = {k: health.get(k) for k in ("source_git_rev", *want)}
+              except Exception as exc:  # noqa: BLE001
+                  last = type(exc).__name__
+              time.sleep(10)
+          else:
+              raise SystemExit(f"revision did not boot held down: {last}")
+          PY
+
+      - name: Re-prove every relay is PAUSED, disarmed and flat
+        if: ${{ inputs.mode == 'repair-v3-markers-offline-execute' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+        run: node scripts/check-relay-flat.mjs
+
   clean-epoch-boundary-reset:
     # Guarded Fresh Collection reset (POST /api/wipe_fly_only, no laptop signal)
     # at the clean-epoch paper boundary, right after the epoch deploy: removes
@@ -1254,6 +1425,14 @@ jobs:
           plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label reset-plan --deadline-sec 1800 -- python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime || true)"
           printf '%s\n' "$plan"
           printf '%s' "$plan" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("mode")=="plan" and d.get("ok") is True and not d.get("protected_candidates"), "reset plan is not clean: protected candidates or incomplete inventory"'
+          # The boundary reset opens V3 read-only and inspects the emergency WAL
+          # under the adopted identity; run the same checks so a plan cannot be
+          # clean while execute would 409.
+          preflight_b64="$(base64 -w0 services/btc-conservative-agent/v3_marker_quarantine.py)"
+          preflight="$(flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" \
+            "python -c \"import base64,sys; sys.path.insert(0,'/app'); sys.argv=['v3_marker_quarantine.py']+sys.argv[1:]; exec(compile(base64.b64decode('${preflight_b64}'),'v3_marker_quarantine.py','exec'),{'__name__':'__main__'})\" preflight --data-dir /app/data" || true)"
+          printf '%s\n' "$preflight"
+          printf '%s\n' "$preflight" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0].get("ok") is True, "reset identity pre-flight failed: run repair-v3-markers-offline-plan"'
           {
             echo "machine_id=$machine_id"
             echo "epoch=$epoch"
