@@ -222,10 +222,12 @@ def plan_reclaim(db: str, junk: list[Path], keep: list[Path], *, prefix_matching
     keep_roots = [os.path.normcase(os.path.abspath(p)).rstrip(os.sep) for p in keep]
     keep_by_sha: dict[tuple, str] = {}
     keep_by_rel: dict[str, list[tuple[str, int]]] = {}
+    keep_inodes: set[tuple] = set()
     junk_rows = []
     for path, size, sha, dev, ino in conn.execute("SELECT path, size, sha256, dev, ino FROM files"):
         k = _under(path, keep_roots)
         if k:
+            keep_inodes.add((dev, ino))
             if sha:
                 keep_by_sha.setdefault((sha, size), path)
             keep_by_rel.setdefault(os.path.basename(os.path.normcase(path)), []).append((path, size))
@@ -237,7 +239,8 @@ def plan_reclaim(db: str, junk: list[Path], keep: list[Path], *, prefix_matching
     plan = {"COVERED_IDENTICAL": [], "COVERED_PREFIX": [], "REGENERABLE": [], "DUPLICATE_WITHIN_JUNK": [],
             "UNIQUE_RETAIN": [], "UNHASHED": []}
     for path, size, sha, dev, ino, root in sorted(junk_rows):
-        parts = path.lower().split(os.sep)
+        # Only components below the junk root count; the root's own ancestors never do.
+        parts = os.path.relpath(path, root).lower().split(os.sep)
         if any(part.startswith(REGENERABLE_PARTS) or part in REGENERABLE_PARTS for part in parts):
             plan["REGENERABLE"].append({"path": path, "bytes": size})
             continue
@@ -270,7 +273,19 @@ def plan_reclaim(db: str, junk: list[Path], keep: list[Path], *, prefix_matching
         retained_sha[(sha, size)] = path
         plan["UNIQUE_RETAIN"].append({"path": path, "bytes": size, "sha256": sha, "root": root})
     conn.commit()
-    summary = {k: {"files": len(v), "gb": round(sum(r["bytes"] for r in v) / 1e9, 3)} for k, v in plan.items()}
+    # Deleting a hardlink frees nothing while another name (a keep file or an
+    # earlier junk name) still holds the inode; only the last name is physical.
+    inode_of = {path: (dev, ino) for path, _size, _sha, dev, ino, _root in junk_rows}
+    counted: set[tuple] = set()
+    for rows in plan.values():
+        for row in rows:
+            key = inode_of.get(row["path"])
+            shared = key is not None and key[1] and (key in keep_inodes or key in counted)
+            row["physical_bytes"] = 0 if shared else row["bytes"]
+            if key is not None and key[1]:
+                counted.add(key)
+    summary = {k: {"files": len(v), "gb": round(sum(r["bytes"] for r in v) / 1e9, 3),
+                   "physical_gb": round(sum(r["physical_bytes"] for r in v) / 1e9, 3)} for k, v in plan.items()}
     return {"summary": summary, "plan": plan, "junk_roots": junk_roots, "keep_roots": keep_roots}
 
 
