@@ -133,6 +133,13 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
         findings["xvl_signal_to_fill_slow"] = (
             "cross-venue IMMEDIATE tiles miss the pre-registered signal->fill gate: " + "; ".join(slow)
         )
+    preentry = _dict(xvl.get("preentry_evidence"))
+    if preentry.get("health") == "DEGRADED":
+        findings["preentry_evidence_degraded"] = (
+            f"submit-first pre-entry evidence queue degraded: dead={preentry.get('dead')} "
+            f"barrier_timeouts={preentry.get('barrier_timeouts')} pending={preentry.get('pending')} "
+            f"last_error={preentry.get('last_error')!r}"
+        )
 
     cross = _dict(ready.get("cross_venue_health"))
     collector_age = _num(cross.get("collector_age_s"))
