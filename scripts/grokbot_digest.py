@@ -9,7 +9,8 @@ It never calls Fly, Railway or Bitfinex, never uses a token, binds no port and
 writes nothing except the optional ``--out`` file. Serving the digest publicly
 is a separate, post-freeze step (a Fly GET route behind a dedicated read-only
 monitor token, fed by the watcher push), see
-``diagnostics/GROKBOT-PROMPT-20261003.md`` in the canonical workspace.
+``diagnostics/GROKBOT-PROMPT-20261003.md`` in the canonical workspace. The watcher
+(``system_health.py``) attaches the digest to that push only when GROKBOT_DIGEST_PUSH=1.
 
   python scripts/grokbot_digest.py                 print the digest
   python scripts/grokbot_digest.py --out <file>    also write it atomically
@@ -43,6 +44,7 @@ SOURCES: dict[str, str] = {
     "selfaware_tiles": f"{SELFAWARE}/api/selfaware/tiles?window=24h",
     "selfaware_fees": f"{SELFAWARE}/api/selfaware/fees",
     "selfaware_capacity": f"{SELFAWARE}/api/selfaware/data/capacity",
+    "selfaware_ai": f"{SELFAWARE}/api/selfaware/ai/scorecard",
     "analyzer_status": f"{ANALYZER}/api/status",
     "analyzer_sections": f"{ANALYZER}/api/sections/health",
     "analyzer_insights": f"{ANALYZER}/api/insights",
@@ -150,12 +152,33 @@ def _capacity(c: Any) -> dict[str, Any]:
     return {"laptop": laptop, "fly": fly}
 
 
-def build(fetch: Callable[[str], tuple[Any, str | None]] = http_json, now: float | None = None) -> dict[str, Any]:
+AI_WINDOWS = ("24h", "all")
+AI_HORIZONS = ("5m", "60m")
+AI_STRATEGIES = ("AI_ABSTAIN_RESPECTING", "AI_SCORE_LED", "ALWAYS_LONG", "RANDOM")
+
+
+def _ai_scorecard(sc: Any) -> dict[str, Any]:
+    """Headline hit rate / net bp per horizon; AI_ABSTAIN_RESPECTING scores only the calls the AI did not abstain on."""
+    headline = (sc or {}).get("headline") or {}
+    out: dict[str, Any] = {}
+    for window in AI_WINDOWS:
+        for horizon in AI_HORIZONS:
+            cells = (headline.get(window) or {}).get(horizon) or {}
+            row = {s: pick(cells.get(s), ("n", "hit_rate", "net_bp", "net_lo", "net_hi"))
+                   for s in AI_STRATEGIES if isinstance(cells.get(s), Mapping)}
+            if row:
+                out.setdefault(window, {})[horizon] = row
+    return out
+
+
+def build(fetch: Callable[[str], tuple[Any, str | None]] = http_json, now: float | None = None,
+          overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """``overrides`` supplies a source payload in-process (the watcher passes its own report instead of self-GET)."""
     now = time.time() if now is None else now
     raw: dict[str, Any] = {}
     sources: dict[str, Any] = {}
     for name, url in SOURCES.items():
-        payload, err = fetch(url)
+        payload, err = (overrides[name], None) if overrides and name in overrides else fetch(url)
         raw[name] = payload if isinstance(payload, Mapping) else None
         sources[name] = {"ok": err is None and raw[name] is not None, "error": scrub(err)}
     fees = raw["selfaware_fees"] or {}
@@ -176,6 +199,7 @@ def build(fetch: Callable[[str], tuple[Any, str | None]] = http_json, now: float
         "fees": {**pick(fees, ("status", "source", "stale", "age_sec", "matches_cost_profile", "matches_everywhere")),
                  "mismatch_count": len(fees.get("mismatches") or [])},
         "capacity": _capacity(raw["selfaware_capacity"]),
+        "ai_scorecard": _ai_scorecard(raw["selfaware_ai"]),
     }
 
 

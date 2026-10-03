@@ -2379,8 +2379,55 @@ def alarm_chunk(events: list[dict[str, Any]], through_ts: float | None) -> list[
     return trimmed
 
 
+MONITOR_DIGEST_ENV = "GROKBOT_DIGEST_PUSH"
+MONITOR_DIGEST_INTERVAL_SEC = 5 * MIN
+MONITOR_DIGEST_MAX_BYTES = 64 * 1024
+MONITOR_DIGEST_FETCH_TIMEOUT_SEC = 8.0
+MONITOR_DIGEST_BUDGET_SEC = 30.0
+
+
+def _build_monitor_digest(report: Mapping[str, Any]) -> dict[str, Any]:
+    import grokbot_digest  # noqa: PLC0415
+
+    deadline = time.monotonic() + MONITOR_DIGEST_BUDGET_SEC
+
+    def fetch(url: str) -> tuple[Any, str | None]:
+        if time.monotonic() >= deadline:
+            return None, "DIGEST_BUDGET_EXCEEDED"
+        return grokbot_digest.http_json(url, timeout=MONITOR_DIGEST_FETCH_TIMEOUT_SEC)
+
+    return grokbot_digest.build(fetch, overrides={"watcher": {**report, "age_sec": 0.0, "stale": False}})
+
+
+def monitor_digest_for_push(report: Mapping[str, Any], state: dict[str, Any], now: float,
+                            builder: Callable[[Mapping[str, Any]], Any] | None = None) -> dict[str, Any] | None:
+    """Redacted grokbot digest for Fly's read-only monitor route; off unless GROKBOT_DIGEST_PUSH=1.
+
+    Rebuilt at most every MONITOR_DIGEST_INTERVAL_SEC and attached only on the push that built it, so Fly's
+    receive time is the digest's freshness. Any failure omits the digest and never blocks the banner push.
+    """
+    if os.environ.get(MONITOR_DIGEST_ENV) != "1":
+        return None
+    sync = state.setdefault("monitor_digest", {})
+    if now - float(sync.get("built_at") or 0) < MONITOR_DIGEST_INTERVAL_SEC:
+        return None
+    sync["built_at"] = now
+    try:
+        digest = (builder or _build_monitor_digest)(report)
+        size = len(json.dumps(digest, separators=(",", ":")).encode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - the digest is optional; the banner push must still happen
+        sync.update(status=f"error:{type(exc).__name__}", bytes=None)
+        return None
+    if size > MONITOR_DIGEST_MAX_BYTES:
+        sync.update(status="too_large", bytes=size)
+        return None
+    sync.update(status="attached", bytes=size)
+    return digest
+
+
 def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: dict[str, Any] | None = None,
-                    now: float | None = None, post: Callable[..., Any] = http_json) -> str:
+                    now: float | None = None, post: Callable[..., Any] = http_json,
+                    digest_builder: Callable[[Mapping[str, Any]], Any] | None = None) -> str:
     """POST the banner summary plus the alarm events Fly does not hold yet (Fly keeps them in memory)."""
     admin = os.environ.get("BOT_ADMIN_TOKEN") or load_vault(opts.vault).get("BOT_ADMIN_TOKEN")
     if not admin:
@@ -2394,6 +2441,9 @@ def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: 
     if now >= unsupported_until:
         chunk = alarm_chunk(read_alarm_log(health_dir(opts) / "alarms.jsonl", now), sync.get("through_ts"))
         body["alarm_events"] = chunk
+    digest = monitor_digest_for_push(report, state, now, digest_builder)
+    if digest is not None:
+        body["monitor_digest"] = digest
     payload, err = post(f"{opts.fly_url}/api/system-health/report", method="POST", timeout=20,
                         headers={"X-Bot-Admin-Token": admin}, body=body)
     if err:
