@@ -107,8 +107,7 @@ def test_reset_plan_dry_runs_execute_gates_before_any_mutation():
     reset = WORKFLOW.split("  clean-epoch-boundary-reset:\n", 1)[1]
     plan = reset.split("      - name: Plan (read-only)\n", 1)[1].split("      - name:", 1)[0]
     assert 'g.get("ok") is True' in plan and "execute_gates" in plan
-    assert "dispatch-ref fly.toml DATA_EPOCH_ID=" in plan
-    assert "age > 3600" in plan and "6 * 3600" in plan
-    assert "RESET-AT-BOUNDARY:" in plan and "execute_gate_failures" in plan
+    assert 'EPOCH="$epoch" python scripts/fly_reset_plan_live_gates.py' in plan
+    assert "data_epoch.json" in plan and "printenv SOURCE_GIT_REV" in plan and "snapshots list" in plan
     for mutating in ("/api/pause", "/api/wipe_fly_only", "flyctl machine update", "flyctl deploy", "rm -"):
         assert mutating not in plan
