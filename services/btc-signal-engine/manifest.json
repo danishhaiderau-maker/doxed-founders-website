@@ -1,9 +1,9 @@
 {
   "engine_version": "v31-retire-trend-fade-v8",
-  "combo_version": "2026-10-02",
+  "combo_version": "2026-10-03",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
   "signal_hash": "eca23aa2c0f2",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-02T22:56:22.408Z"
+  "updated_at": "2026-10-03T00:06:13.827Z"
 }
