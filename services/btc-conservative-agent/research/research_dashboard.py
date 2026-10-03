@@ -5238,6 +5238,11 @@ def api_research_design():
         baseline_replay["episode_receipt_count"] = len(receipts)
         baseline_replay["episode_receipts_omitted"] = True
         baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
+    elif isinstance(baseline_replay, dict) and isinstance(baseline_replay.get("episode_receipts_sidecar"), dict):
+        binding = baseline_replay.pop("episode_receipts_sidecar")
+        baseline_replay["episode_receipt_count"] = binding.get("count")
+        baseline_replay["episode_receipts_omitted"] = True
+        baseline_replay["episode_receipts_url"] = "/api/report/entry_baseline_replay_report.json"
     return jsonify({
         "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True, shadow_source.get("manifest")),
         "schema": "research_design_dashboard_v1",
@@ -5414,6 +5419,11 @@ def api_report(filename):
     if path is None:
         abort(404)
     try:
+        if safe == "entry_baseline_replay_report.json":
+            # Receipts live in a verified gzip sidecar; serve the full report shape.
+            from research.entry_baseline_replay import load_replay_report
+
+            return jsonify(load_replay_report(Path(path)))
         with open(path, encoding="utf-8") as f:
             return jsonify(json.load(f))
     except Exception:
