@@ -248,3 +248,75 @@ def test_rejected_or_pending_certification_never_unlocks(tmp_path):
     assert rejected["status"] == "REJECTED" and not data_epoch.certified(rejected, EPOCH)
     empty = data_epoch.certification_doc(manifest, checks=[], now=time.time())
     assert empty["status"] == "REJECTED"
+
+
+@pytest.mark.parametrize("rel", [
+    "genome-grid/forward-tracker/frozen_candidates.jsonl", "genome-grid/forward-tracker/forward_scores.json",
+    "shadow-exits/backfill/signal_replay_backfill.jsonl", "shadow-exits/shadow_exit_report.json",
+    "indicator/pre_registration.json", "hypothesis-tiles/report.json", "deploy-receipts/registry_receipt.json",
+])
+def test_preserved_research_is_kept_on_both_scopes(rel):
+    for scope in ("laptop", "fly"):
+        assert wipe.keep_reason(rel, scope=scope) == "PRESERVED_RESEARCH", (rel, scope)
+
+
+HELD = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
+        "bitfinex_live_enabled": False, "force_paper_mode": True}
+
+
+def test_held_down_requires_every_hold_flag():
+    assert wipe.held_down_violations(HELD) == []
+    for key, bad in (("execution_paused", False), ("pause_owner", "OPERATOR"), ("live_armed", True),
+                     ("bitfinex_live_enabled", True), ("force_paper_mode", False)):
+        assert wipe.held_down_violations({**HELD, key: bad}), key
+
+
+def _pre_start_root(tmp_path, monkeypatch):
+    root = tmp_path / "exports"
+    old = _write(root / "history" / "gen1" / "report.json", age_sec=DAY)
+    keep = _write(root / "genome-grid" / "forward-tracker" / "frozen_candidates.jsonl", age_sec=DAY)
+    tape = _write(root / "tree" / "market_microstructure_1s.jsonl.3", age_sec=DAY)
+    monkeypatch.setattr(wipe, "LAPTOP_ROOTS", {"analyzer_exports": {"path": str(root), "kind": "all"}})
+    monkeypatch.setattr(wipe, "_analyzer_cycle_running", lambda path=None: False)
+    return old, keep, tape
+
+
+def _plan_sha(tmp_path, capsys):
+    out = tmp_path / "plan.json"
+    assert wipe.main(["plan", "--scope", "laptop", "--pre-start", "--out", str(out)]) == 0
+    capsys.readouterr()
+    return json.loads(out.read_text("utf-8"))["plan_sha256"]
+
+
+def test_pre_start_executes_only_with_token_and_hold(tmp_path, monkeypatch, capsys):
+    old, keep, tape = _pre_start_root(tmp_path, monkeypatch)
+    sha = _plan_sha(tmp_path, capsys)
+    receipts = tmp_path / "receipts"
+    base = ["execute", "--scope", "laptop", "--pre-start", "--expect-plan-sha256", sha, "--receipts-dir", str(receipts)]
+    monkeypatch.setattr(wipe, "_fetch_health", lambda url: HELD)
+    assert wipe.main(base + ["--confirm", "DELETE-PRE-START:000000000000"]) == 5
+    monkeypatch.setattr(wipe, "_fetch_health", lambda url: {**HELD, "execution_paused": False})
+    assert wipe.main(base + ["--confirm", wipe.pre_start_token(sha)]) == 7
+    def down(url):
+        raise OSError("unreachable")
+    monkeypatch.setattr(wipe, "_fetch_health", down)
+    assert wipe.main(base + ["--confirm", wipe.pre_start_token(sha)]) == 7
+    assert old.exists()
+    monkeypatch.setattr(wipe, "_fetch_health", lambda url: HELD)
+    assert wipe.main(base + ["--confirm", wipe.pre_start_token(sha)]) == 0
+    assert not old.exists() and keep.exists() and tape.exists()
+    receipt = json.loads(next((receipts / wipe.PRE_START_LABEL).glob("receipt-laptop-*.json")).read_text("utf-8"))
+    assert receipt["deleted_files"] == 1 and receipt["plan_sha256"] == sha
+
+
+def test_pre_start_refuses_a_stale_plan_hash(tmp_path, monkeypatch, capsys):
+    old, _, _ = _pre_start_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(wipe, "_fetch_health", lambda url: HELD)
+    assert wipe.main(["execute", "--scope", "laptop", "--pre-start", "--expect-plan-sha256", "f" * 64,
+                      "--confirm", "DELETE-PRE-START:ffffffffffff", "--receipts-dir", str(tmp_path / "r")]) == 5
+    assert old.exists()
+
+
+def test_pre_start_cannot_be_combined_with_previews():
+    with pytest.raises(SystemExit):
+        wipe.main(["plan", "--scope", "laptop", "--pre-start", "--simulate-now"])

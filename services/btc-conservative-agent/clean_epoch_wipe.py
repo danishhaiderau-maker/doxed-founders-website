@@ -4,6 +4,11 @@ Dry run is the default. Nothing is deleted unless ``execute`` is given the
 declared epoch id, the confirmation token and the sha256 of a plan produced in
 the same boundary, and the epoch passed its 2 h certification.
 
+``--pre-start`` (Danish: wipe while the bot is held down, before the final start)
+plans everything existing now and executes only with
+``--confirm DELETE-PRE-START:<plan sha256[:12]>`` while the bot reports the
+paper maintenance hold (paused by DEPLOY_MAINTENANCE, disarmed, paper-only).
+
     # laptop (Danish runs these by hand)
     python clean_epoch_wipe.py plan --scope laptop --epoch ce-20261004-v31-clean
     python clean_epoch_wipe.py execute --scope laptop --epoch ce-20261004-v31-clean \
@@ -42,6 +47,9 @@ import data_epoch
 PLAN_SCHEMA = "clean_epoch_wipe_plan_v1"
 RECEIPT_SCHEMA = "clean_epoch_wipe_receipt_v1"
 CONFIRM_PREFIX = "DELETE-PRE-EPOCH"
+PRE_START_PREFIX = "DELETE-PRE-START"
+PRE_START_LABEL = "pre-start"
+HELD_DOWN_URLS = {"laptop": "https://doxed-btc-bot.fly.dev/health", "fly": "http://127.0.0.1:7002/health"}
 DIGEST_GRID_MIN_EPOCH_AGE_SEC = 6 * 3600
 ROTATION_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv|log))\.(?P<n>[1-9][0-9]*)(?:\.gz)?$")
 DIGEST_GRID_BASES = frozenset({"chase_offset_touch_grid.jsonl", "order_multiverse_entry_grid.jsonl"})
@@ -53,6 +61,11 @@ CODE_SUFFIXES = (".py", ".pyc", ".ps1", ".psm1", ".psd1", ".cmd", ".bat", ".sh",
 SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".sqlite3-wal", ".sqlite3-shm")
 SECRET_TOKENS = ("secret", "credential", "vault", ".env", "token", "fly.toml", "apikey", "api_key", "private_key")
 CONFIG_TOKENS = ("config", "pathway_lane_specs")
+# Irreplaceable research that outlives an epoch: forward-tracker hash chains, pre-registrations, the shadow-exit
+# backfill, hypothesis study output and signed registry/deploy/visual-QA receipts.
+PRESERVED_RESEARCH_TOKENS = ("forward-tracker", "forward_tracker", "pre_registration", "pre-registration",
+                             "shadow-exits", "hypothesis-tiles", "registry_receipt", "registry-receipt",
+                             "deploy_receipt", "deploy-receipt", "visual-qa", "visual_qa")
 RELAY_TOKENS = ("relay", "bitfinex", "live_copy", "exchange_", "platform-relay", "live-copy", "rearm")
 # The bot's restart-recovery state lives on Fly; laptop copies of it are pre-epoch data. The laptop keeps only
 # its own live chain state (locks, leases, ACKs, cursors, epoch manifest and receipts).
@@ -98,6 +111,8 @@ def keep_reason(relpath: str, *, scope: str) -> str | None:
         return "MARKET_TAPE_1S"
     if any(t in lower for t in RELAY_TOKENS):
         return "RELAY_BITFINEX_EVIDENCE"
+    if any(t in lower for t in PRESERVED_RESEARCH_TOKENS):
+        return "PRESERVED_RESEARCH"
     if base in data_epoch.EPOCH_INDEPENDENT_BASES or any(d in parts for d in MARKET_DATASETS):
         return "MARKET_DATA_EPOCH_INDEPENDENT"
     if any(t in lower for t in CONFIG_TOKENS):
@@ -371,6 +386,24 @@ def _analyzer_cycle_running(path: str | None = None) -> bool:
         return False
 
 
+def held_down_violations(health: dict) -> list[str]:
+    """Why the bot is not in the paper maintenance hold a pre-start wipe requires (empty = held)."""
+    expected = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
+                "bitfinex_live_enabled": False, "force_paper_mode": True}
+    return [f"{k}={health.get(k)!r}" for k, v in expected.items() if health.get(k) != v]
+
+
+def _fetch_health(url: str) -> dict:
+    import urllib.request  # noqa: PLC0415
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def pre_start_token(plan_sha256: str) -> str:
+    return f"{PRE_START_PREFIX}:{plan_sha256[:12]}"
+
+
 def _load_certification(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -428,7 +461,9 @@ def _summary(doc: dict, examples: int = 15) -> dict:
 
 def build_plan(args, now: float) -> tuple[Plan, dict | None]:
     manifest = None
-    if args.simulate_now:
+    if args.pre_start:
+        epoch_id, start = PRE_START_LABEL, now
+    elif args.simulate_now:
         epoch_id, start = args.epoch or "ce-00000000-dry-run", now
     else:
         if args.scope == "fly" and args.data_root:
@@ -467,8 +502,13 @@ def main(argv=None) -> int:
     ap.add_argument("--certification", help="certification JSON (laptop default C:\\DoxxedCrypto\\clean-epoch\\certification.json)")
     ap.add_argument("--receipts-dir", help="where receipts go (laptop default C:\\DoxxedCrypto\\clean-epoch; fly <data-root>/runtime/clean-epoch-receipts)")
     ap.add_argument("--out", help="write the full plan JSON here")
+    ap.add_argument("--pre-start", action="store_true",
+                    help="plan/execute everything existing now while the bot is held down (no certification)")
+    ap.add_argument("--health-url", help="pre-start hold check (default per scope)")
     args = ap.parse_args(argv)
-    if args.scope == "laptop" and not args.manifest and not args.simulate_now:
+    if args.pre_start and (args.simulate_now or args.fly_files_json):
+        ap.error("--pre-start plans the live tree; it cannot be combined with previews")
+    if args.scope == "laptop" and not args.manifest and not args.simulate_now and not args.pre_start:
         args.manifest = os.path.join(LAPTOP_ROOTS["mirror_tree"]["path"], data_epoch.MANIFEST_NAME)
     now = time.time()
     plan, manifest = build_plan(args, now)
@@ -479,6 +519,8 @@ def main(argv=None) -> int:
         print(json.dumps({"dry_run": True, **_summary(doc)}, indent=1, sort_keys=True, default=str))
         return 0
     # ---- execute: every gate fails closed
+    if args.pre_start:
+        return _execute_pre_start(args, doc)
     if plan.simulated or not manifest:
         print(json.dumps({"error": "SIMULATED_PLAN_NOT_EXECUTABLE"}))
         return 2
@@ -514,6 +556,31 @@ def main(argv=None) -> int:
         print(json.dumps({"error": "PLAN_SHA256_MISMATCH", "plan_sha256": doc["plan_sha256"]}))
         return 6
     receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=cert_sha8)
+    print(json.dumps({"executed": True, **receipt}, indent=1, sort_keys=True, default=str))
+    return 0
+
+
+def _execute_pre_start(args, doc: dict, fetch: Callable[[str], dict] | None = None) -> int:
+    if args.confirm != pre_start_token(doc["plan_sha256"]):
+        print(json.dumps({"error": "CONFIRMATION_REQUIRED", "expected_form": f"{PRE_START_PREFIX}:<plan sha256[:12]>"}))
+        return 5
+    if args.expect_plan_sha256 != doc["plan_sha256"]:
+        print(json.dumps({"error": "PLAN_SHA256_MISMATCH", "plan_sha256": doc["plan_sha256"]}))
+        return 6
+    try:
+        violations = held_down_violations((fetch or _fetch_health)(args.health_url or HELD_DOWN_URLS[args.scope]))
+    except Exception as exc:  # noqa: BLE001 - any doubt fails closed
+        violations = [f"health unavailable: {type(exc).__name__}"]
+    if violations:
+        print(json.dumps({"error": "BOT_NOT_HELD_DOWN", "violations": violations}))
+        return 7
+    if args.scope == "laptop" and _analyzer_cycle_running():
+        print(json.dumps({"error": "ANALYZER_CYCLE_RUNNING", "hint": "stop the laptop chain first"}))
+        return 4
+    receipts = Path(args.receipts_dir or (LAPTOP_RECEIPTS if args.scope == "laptop"
+                                          else os.path.join(args.data_root or "/app/data", "runtime",
+                                                            "clean-epoch-receipts")))
+    receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=PRE_START_LABEL)
     print(json.dumps({"executed": True, **receipt}, indent=1, sort_keys=True, default=str))
     return 0
 
