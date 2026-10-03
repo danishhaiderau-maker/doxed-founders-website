@@ -328,3 +328,12 @@ The one fee API is `GET http://127.0.0.1:9021/api/selfaware/fees` (`?detail=1` a
 - **If it fires RED.** If the account changed (Bitfinex fee change), edit only `MAKER_FEE_RATE`/`TAKER_FEE_RATE` (and `FEE_VERIFIED_AT`) in `bitfinex_cost_profile.py`; the profile id and signature follow. Then update every TS surface listed. That is a cross-layer change (AGENTS.md): Fly needs a post-freeze deploy and the analyzer cohort changes. If a code literal fired, replace it with `bitfinex_cost_profile.fee_rates()` / `fee_usd()`. `apps/api/**` changes redeploy the Railway relay API, so during a deploy freeze they go in a draft PR.
 - **If it is AMBER.** Check `last_attempt.account_error` in the endpoint: `HTTP 500 ... apikey: invalid` or `permission` means the key lacks Account read; `nonce: small` means another caller is ahead of the shared nonce scale (the job retries once). Never fix it by raising the nonce scale.
 
+
+<a id="selfaware-expected-blockers"></a>
+## selfaware.expected_blockers: known gaps waiting for a deploy window
+
+Some gaps already have a written fix that cannot ship yet (for example, a Fly change during a deploy freeze). They are declared in `scripts/self_aware/expected_blockers.json`, each with its ledger item, reason, fix PR, deploy step and ETA.
+
+- **What it does.** Runs after every other check. A blocker with a `match` (finding id plus an optional `observed` substring) adds an `expected_blockers` entry to that finding's evidence, so the finding names its fix and ETA. It never changes the finding's severity.
+- **Severity.** GREEN: nothing declared. AMBER: every declared blocker is still before its ETA (no alarm). RED: at least one ETA has passed (alarm).
+- **If it fires RED.** The fix did not ship on time, or it shipped and the entry was not removed. Check the PR and the deployed revision. Remove the entry once the fix is verified live, or move the ETA with a reason after re-triage.

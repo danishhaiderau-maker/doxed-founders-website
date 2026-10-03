@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyzer_sections, data_compat, fly_platform
+from . import analyzer_sections, data_compat, expected_blockers, fly_platform
 from .config import RUNBOOK, RUNBOOK_BASE, THRESHOLDS, Paths
 from .facts import iso, parse_ts, snapshot_age, watcher_check
 
@@ -890,7 +890,21 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
     except Exception as exc:  # noqa: BLE001
         findings.append(Finding("self.check_error.fly_platform", "A diagnosis check crashed", "self", AMBER,
                                 f"{type(exc).__name__}: {str(exc)[:200]}", "checks run without exceptions"))
+    try:
+        findings.append(check_expected_blockers(facts, findings))
+    except Exception as exc:  # noqa: BLE001
+        findings.append(Finding("self.check_error.expected_blockers", "A diagnosis check crashed", "self", AMBER,
+                                f"{type(exc).__name__}: {str(exc)[:200]}", "checks run without exceptions"))
     return findings
+
+
+def check_expected_blockers(f, findings: list[Finding]) -> Finding:
+    """Known gaps with a written fix waiting for a deploy window; runs last so it can annotate the others."""
+    res = expected_blockers.assess(findings, f["now"])
+    return Finding("selfaware.expected_blockers", "Declared expected blockers are within their ETA", "self",
+                   res["severity"], res["observed"],
+                   "every declared blocker's fix ships before its ETA, then the entry is removed",
+                   evidence={"blockers": res["blockers"]}, emit_alarm=res["severity"] == RED)
 
 
 def check_fly_platform(f, findings: list[Finding], state: dict[str, Any]) -> Finding:

@@ -171,6 +171,10 @@ if ($offline) {
 } else {
   $previousPreference = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
+  # gh writes UTF-8; Windows PowerShell 5 decodes native output with the console code page (cp437),
+  # which turned a title's U+2026 ellipsis into cp437 mojibake in every downstream receipt.
+  $previousEncoding = $null
+  try { $previousEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch { }
   try {
     $raw = & gh run list --repo $deployRepo --workflow fly-bot-deploy.yml --limit 8 `
       --json databaseId,status,conclusion,createdAt,updatedAt,event,headSha,displayTitle 2>$null | Out-String
@@ -184,7 +188,10 @@ if ($offline) {
     }
   } catch {
     $deploys.error = 'GH_RUN_LIST_FAILED'
-  } finally { $ErrorActionPreference = $previousPreference }
+  } finally {
+    $ErrorActionPreference = $previousPreference
+    if ($null -ne $previousEncoding) { try { [Console]::OutputEncoding = $previousEncoding } catch { } }
+  }
 }
 Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_deploy_runs_snapshot_v1.json') -Value $deploys -Depth 5
 Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1} runtime_ok={2} deploy_runs_ok={3}" -f $head.ok, $relay.ok, $runtime.ok, $deploys.ok)

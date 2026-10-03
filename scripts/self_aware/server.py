@@ -13,6 +13,8 @@ Endpoints (all GET, JSON unless noted):
   /api/selfaware/edges/playbook
   /api/selfaware/tiles              ?window=24h|7d|all
   /api/selfaware/receipts
+  /api/selfaware/changes            ?since=ISO&kind=DEPLOY,PAUSE,...&limit=  deploys, fast-forwards, manual
+                                    interventions, Fly pause/revision/tile/arm transitions, AI model/prompt, epochs
   /api/selfaware/digest             ?history=N
   /api/selfaware/repairs            ?limit=
   /api/selfaware/tables             raw views + result tables + provenance
@@ -44,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import contracts
+from . import changes, contracts
 from .ai_scorecard import headline as ai_headline, json_safe
 from .config import SERVER_PORT
 from .facts import parse_ts, tail_jsonl
@@ -234,6 +236,10 @@ class Handler(BaseHTTPRequestHandler):
     def receipts(self, q):
         doc = self.eng.docs.get("receipts")
         self._send(200 if doc else 503, doc or {"error": "receipts not computed yet"})
+
+    def changes(self, q):
+        self._send(200, changes.timeline(self.eng.store, self.eng.docs.get("receipts"), self.eng.paths.mirror,
+                                         since=q.get("since"), kinds=q.get("kind"), limit=int(q.get("limit", 200))))
 
     def digest(self, q):
         n = min(int(q.get("history", 0) or 0), 200)
@@ -427,6 +433,7 @@ ROUTES = {
     "/api/selfaware/ai/calls": Handler.ai_calls, "/api/selfaware/ai/scorecard": Handler.ai_scorecard,
     "/api/selfaware/edges": Handler.edges, "/api/selfaware/edges/playbook": Handler.playbook,
     "/api/selfaware/tiles": Handler.tiles, "/api/selfaware/receipts": Handler.receipts,
+    "/api/selfaware/changes": Handler.changes,
     "/api/selfaware/digest": Handler.digest, "/api/selfaware/repairs": Handler.repairs,
     "/api/selfaware/tables": Handler.tables, "/api/selfaware/query": Handler.query,
     "/data": Handler.data_view, "/api/selfaware/data": Handler.data_summary,

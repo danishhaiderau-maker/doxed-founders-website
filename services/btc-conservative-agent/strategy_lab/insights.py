@@ -167,25 +167,47 @@ def alerts_component(now: float) -> dict:
 
 
 # --------------------------------------------------------------------------- fly bot
-def _fly_data(status: dict, tile_stats: Optional[list], now: float) -> dict:
+def _tile_execution(lane, lanes_exec: dict, xvl_lanes: dict) -> dict:
+    """Execution counters for one tile, naming where they came from (or why they are absent)."""
+    ex = lanes_exec.get(lane)
+    if isinstance(ex, dict):
+        return {"accepting": ex.get("accepting"), "active": ex.get("active"), "completed": ex.get("completed"),
+                "queued": ex.get("queued"), "execution_source": "strategy_progress.combo_lane_execution"}
+    paper = (xvl_lanes.get(lane) or {}).get("paper") if isinstance(xvl_lanes.get(lane), dict) else None
+    if isinstance(paper, dict):
+        # Cross-venue tiles run on their own evaluator worker, which reports attempts rather than a queue.
+        return {"accepting": None, "active": None, "completed": None, "queued": None,
+                "execution_source": "collection.xvl_evaluator.paper",
+                "paper_attempts": paper.get("attempts"), "orders_eligible": paper.get("orders_eligible"),
+                "submissions_last_hour": paper.get("submissions_last_hour"), "worker_busy": paper.get("busy")}
+    return {"accepting": None, "active": None, "completed": None, "queued": None,
+            "execution_source": "NOT_REPORTED_BY_FLY"}
+
+
+def _fly_data(status: dict, tile_stats: Optional[list], now: float, export_status: Optional[str] = None) -> dict:
     sp = status.get("strategy_progress") or {}
     lanes_exec = sp.get("combo_lane_execution") or {}
+    xvl_lanes = ((status.get("collection") or {}).get("xvl_evaluator") or {}).get("lanes") or {}
     stats = {str(r.get("research_lane")): r for r in tile_stats or []}
     tiles = []
     for spec in status.get("active_tiles") or []:
         lane = spec.get("lane")
-        ex = lanes_exec.get(lane) or {}
         st = stats.get(str(lane)) or {}
         win = st.get("win_rate")
+        if st:
+            source = "analyzer export tile_stats"
+        elif tile_stats is None:
+            source = f"analyzer export {export_status or 'UNAVAILABLE'}: win/PnL withheld until a fresh export"
+        else:
+            source = "lane not in analyzer export tile_stats"
         tiles.append({
             "lane": lane, "label": spec.get("label"), "id_prefix": spec.get("id_prefix"),
             "lifecycle_state": spec.get("lifecycle_state"), "paper_only": spec.get("paper_only"),
-            "relay_eligible": spec.get("relay_eligible"), "accepting": ex.get("accepting"),
-            "active": ex.get("active"), "completed": ex.get("completed"), "queued": ex.get("queued"),
+            "relay_eligible": spec.get("relay_eligible"), **_tile_execution(lane, lanes_exec, xvl_lanes),
             "win_pct": round(100.0 * float(win), 1) if isinstance(win, (int, float)) else None,
             "closed_trades": st.get("n"), "net_pnl_usd": st.get("net_pnl_usd"),
             "corrected_verdict": st.get("corrected_verdict"),
-            "win_pct_source": "analyzer export tile_stats" if st else "not in analyzer export",
+            "win_pct_source": source,
         })
     ai_ts = _ts(status.get("last_ai_success_at"))
     ai_age = round(now - ai_ts, 1) if ai_ts else None
@@ -215,10 +237,11 @@ def _uptime_view(fly_uptime, now: float) -> dict:
     return out
 
 
-def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0) -> dict:
+def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0,
+                 export_status: Optional[str] = None) -> dict:
     try:
         status = _get_json(FLY_STATUS_URL, timeout)
-        return _component(OK, data=_fly_data(status, tile_stats, now), as_of=now, max_age=0,
+        return _component(OK, data=_fly_data(status, tile_stats, now, export_status), as_of=now, max_age=0,
                           source=FLY_STATUS_URL, now=now)
     except Exception as exc:
         live_error = f"{type(exc).__name__}: {exc}"
@@ -230,7 +253,7 @@ def fly_component(now: float, tile_stats: Optional[list], timeout: float = 20.0)
                                               f"({type(exc).__name__})", max_age=FLY_SNAPSHOT_MAX_AGE_SEC, now=now)
     status = snap.get("status") if isinstance(snap.get("status"), dict) else snap
     as_of = _ts(snap.get("observedAt") or snap.get("observed_at")) or os.path.getmtime(path)
-    comp = _fresh(_fly_data(status, tile_stats, now), as_of=as_of, max_age=FLY_SNAPSHOT_MAX_AGE_SEC,
+    comp = _fresh(_fly_data(status, tile_stats, now, export_status), as_of=as_of, max_age=FLY_SNAPSHOT_MAX_AGE_SEC,
                   source=path, now=now, what="laptop Fly runtime snapshot")
     comp["reason"] = f"live /api/status failed ({live_error})" + (f"; {comp['reason']}" if comp["reason"] else "")
     return comp
@@ -305,12 +328,44 @@ def transfer_component(now: float, health: Optional[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- deploy queue (WALL)
-_WALL_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \| ([^(|]+?) \(([^)]*)\) (.*)$")
+_WALL_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) \| (.*)$")
+_WALL_LEGACY = re.compile(r"^([^(|,:]{1,60}?) \(([^)]*)\) (.*)$")
+_WALL_STATE = re.compile(r"^[A-Z][A-Z_\-]{1,30}$")
+WALL_TERMINAL_STATES = frozenset({"DONE", "CLOSED", "POST_FREEZE", "RELEASED", "ABANDONED", "SUPERSEDED"})
+QUEUE_STALE_SEC = 24 * 3600
 
 
 def _wall_key(tag: str, worker: str) -> str:
-    # The task tag is the stable identity; the worker label in parentheses varies between posts.
-    return tag.strip()
+    # The task tag is the stable identity; the worker label in parentheses and "to <recipient>" vary between posts.
+    return re.split(r"\s+to\s+", tag.strip(), maxsplit=1)[0].strip()
+
+
+def _parse_wall_line(raw: str):
+    """(ts, tag, worker, text, trailing_state) for both WALL formats, else None.
+
+    Legacy: ``TS | TAG (worker) text``; current: ``TS | TAG | text | STATE``.
+    """
+    m = _WALL_TS.match(raw.strip())
+    if not m:
+        return None
+    ts, rest = m.groups()
+    legacy = _WALL_LEGACY.match(rest)
+    if legacy:
+        tag, worker, text = legacy.groups()
+        text = text.lstrip("| ").strip()
+    else:
+        parts = rest.split(" | ")
+        if len(parts) < 2:
+            return None
+        if len(parts[0]) > 60:
+            return None
+        tag, worker, text = parts[0], "", " | ".join(parts[1:]).strip()
+    state = None
+    if " | " in text:
+        head, tail = text.rsplit(" | ", 1)
+        if _WALL_STATE.match(tail.strip()):
+            text, state = head.strip(), tail.strip()
+    return ts, tag, worker, text, state
 
 
 def parse_wall(lines, now: float) -> dict:
@@ -318,10 +373,10 @@ def parse_wall(lines, now: float) -> dict:
     holder, holder_since, entries, last = None, None, [], {}
     queued_at: dict = {}
     for raw in lines:
-        m = _WALL_LINE.match(raw.strip())
-        if not m:
+        parsed = _parse_wall_line(raw)
+        if not parsed:
             continue
-        ts, tag, worker, text = m.groups()
+        ts, tag, worker, text, trailing = parsed
         key = _wall_key(tag, worker)
         up = text.upper()
         # "PRIORITY CLAIM of the next Fly slot" queues at the head; it does not take a held slot.
@@ -336,14 +391,20 @@ def parse_wall(lines, now: float) -> dict:
             holder, holder_since = None, None
         if up.startswith("QUEUED") or " QUEUED" in up[:40]:
             queued_at.setdefault(key, ts)
-        if up.startswith("DONE") or "SLOT RELEASED" in up or claims:
+        if up.startswith("DONE") or "SLOT RELEASED" in up or claims or trailing in WALL_TERMINAL_STATES:
             queued_at.pop(key, None)
-        state = re.split(r"[,:;(]", text, maxsplit=1)[0].strip()[:60]
+        state = trailing or re.split(r"[,:;(]", text, maxsplit=1)[0].strip()[:60]
         last[key] = {"task": key, "worker": re.sub(r"^worker\s+", "", worker.strip()), "at": ts, "state": state,
                      "text": text[:400]}
         entries.append((ts, key))
-    queue = [{**last[k], "queued_since": t} for k, t in sorted(queued_at.items(), key=lambda kv: kv[1])
-             if k != holder]
+    queue, stale_queue = [], []
+    for k, t in sorted(queued_at.items(), key=lambda kv: kv[1]):
+        if k == holder:
+            continue
+        row = {**last[k], "queued_since": t}
+        since = _ts(t.replace("0000-", ""))
+        # A queue slot nobody has closed for a day is reported as stale, not as a live queue position.
+        (stale_queue if since is None or now - since > QUEUE_STALE_SEC else queue).append(row)
     holder_entry = last.get(holder) if holder else None
     recent_done = [last[k] for k in last if last[k]["state"].upper().startswith("DONE")]
     recent_done.sort(key=lambda r: r["at"], reverse=True)
@@ -353,7 +414,8 @@ def parse_wall(lines, now: float) -> dict:
         "slot_holder_latest": holder_entry,
         "slot_state": "FREE" if not holder else (
             "DEPLOYING" if holder_entry and "IN PROGRESS" in holder_entry["text"].upper() else "HELD"),
-        "queue": queue, "recent_done": recent_done[:5],
+        "queue": queue, "stale_queue": stale_queue, "queue_stale_after_sec": QUEUE_STALE_SEC,
+        "recent_done": recent_done[:5],
         "latest_entry_at": entries[-1][0] if entries else None,
         "latest_entry_age_sec": round(now - last_ts, 1) if last_ts else None,
         "entries_parsed": len(entries),
@@ -534,7 +596,8 @@ def snapshot(*, check_live: bool = True, timeout: float = 20.0) -> dict:
         return comp
 
     guard("analyzer_export", _export)
-    guard("fly_bot", lambda: fly_component(now, exp_holder.get("tiles"), timeout=timeout))
+    guard("fly_bot", lambda: fly_component(now, exp_holder.get("tiles"), timeout=timeout,
+                                                export_status=exp_holder.get("status")))
     guard("transfer", lambda: transfer_component(now, health))
     guard("deploy_queue", lambda: deploy_queue_component(now))
     alerts = guard("alerts", lambda: alerts_component(now))

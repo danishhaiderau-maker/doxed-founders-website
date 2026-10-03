@@ -56,3 +56,48 @@ def test_round2_verifiers_need_live_evidence():
     assert not ledger.v_field_in_check("laptop.pull_ack", "max_run_seconds", not_none=True)(c)[0]
     assert ledger.v_field_in_check("laptop.pull_ack", "max_run_seconds")(c)[0]
     assert ledger.v_secret_history({"gh_secret_history": {"conclusion": "success"}})[0]
+
+
+def _sa_blockers(*rows):
+    return {"findings": [{"id": "selfaware.expected_blockers", "severity": "AMBER", "evidence": {"blockers": list(rows)}}]}
+
+
+def test_post_freeze_needs_open_draft_prs_and_a_declared_pending_blocker():
+    v = ledger.v_post_freeze((365,), "B20")
+    live = {"gh_prs": {"365": {"state": "OPEN", "isDraft": True}},
+            "sa9021": _sa_blockers({"id": "B20", "eta": "2026-10-04T15:00:00Z", "overdue": False})}
+    assert v(live)[0]
+    assert not v({**live, "gh_prs": {"365": {"state": "MERGED", "isDraft": False}}})[0]
+    assert not v({**live, "sa9021": _sa_blockers({"id": "B20", "eta": "x", "overdue": True})})[0]
+    assert not v({**live, "sa9021": _sa_blockers()})[0]
+
+
+def test_triaged_states_fall_back_to_open_when_their_precondition_fails_and_never_close():
+    yes, no = (lambda live: (True, "ok")), (lambda live: (False, "missing"))
+    assert ledger.resolve(("o", "-", ledger.POSTF, "p", yes), {}, {})["status"] == ledger.POSTF
+    assert ledger.resolve(("o", "-", ledger.POSTF, "p", no), {}, {})["status"] == ledger.OPEN
+    assert ledger.resolve(("o", "-", ledger.NEEDS_DANISH, "p", yes), {}, {})["status"] == ledger.NEEDS_DANISH
+    assert ledger.resolve(("o", "-", ledger.NEEDS_DANISH, "p", None), {}, {})["status"] == ledger.NEEDS_DANISH
+    assert ledger.resolve(("o", "-", ledger.OPEN, "p", yes), {}, {})["status"] == ledger.CLOSED
+
+
+def test_adhoc_retirement_and_deploy_receipt_verifiers():
+    c = {"id": "laptop.adhoc_processes", "observed_fields": {"listeners": [{"port": 7002, "pid": "1"}], "scripts": []}}
+    live = {"w9011": {"features": ["adhoc_visibility"], "checks": [c]}}
+    assert ledger.v_adhoc("listeners", "7002", present=True)(live)[0]
+    assert ledger.v_adhoc("listeners", "9097", present=False)(live)[0]
+    assert ledger.v_adhoc("scripts", "watch_queue.ps1", present=False)(live)[0]
+    assert not ledger.v_adhoc("listeners", "9097", present=False)({"w9011": {"features": [], "checks": [c]}})[0]
+    good = {"sa9021_receipts": {"deploys": [{"databaseId": 1, "status": "completed", "displayTitle": "feat: tiles\u2026"}]}}
+    bad = {"sa9021_receipts": {"deploys": [{"databaseId": 1, "status": "completed", "displayTitle": "feat \u0393\u00c7\u00aa"}]}}
+    assert ledger.v_deploy_receipts(good)[0] and not ledger.v_deploy_receipts(bad)[0]
+    assert not ledger.v_deploy_receipts({})[0]
+
+
+def test_triage_rows_all_have_a_live_verifier_or_a_danish_default():
+    for tid in ledger.TRIAGE_IDS:
+        plan = ledger.PLAN.get(tid) or ledger.GAP_PLAN.get(tid)
+        assert plan is not None, tid
+        assert plan[4] is not None or plan[2] == ledger.NEEDS_DANISH, tid
+        if plan[2] == ledger.NEEDS_DANISH:
+            assert "Default:" in plan[3], tid
