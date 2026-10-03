@@ -62,3 +62,13 @@ def test_refusal_is_before_restart_and_listener_cleanup():
     guard=source.index('if ($Once -and $discoveredEnginePids.Count -gt 0)')
     assert guard < source.index('if ($Restart -and $discoveredEnginePids.Count')
     assert guard < source.index('Stop-ListenPortFast $AnalyzerPort')
+
+
+def test_once_nowait_runs_in_foreground_and_never_waits_for_console_input():
+    source=LAUNCHER.read_text(encoding='utf-8-sig')
+    detached=source.index('if ($NoWait -and -not $Once) {')
+    foreground=source.index('$exitCode = 0')
+    finally_block=source.rindex('} finally {')
+    assert detached < foreground
+    assert 'if ($NoWait) {' not in source[detached:foreground]
+    assert 'if (-not $NoWait) { Wait-ForKey }' in source[finally_block:]

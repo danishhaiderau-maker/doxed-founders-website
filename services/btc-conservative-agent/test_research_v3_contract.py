@@ -6,6 +6,7 @@ from research_v3_contract import (
     SAFE_POLICY_GENOME_CONTRACT,
     build_policy_identity,
     normalize_lifecycle_outcome,
+    normalize_regime_observation,
     validate_policy_spec,
 )
 from research_v3_ranking import REQUIRED_GATES, rank_safe_policies
@@ -34,6 +35,35 @@ class ResearchV3ContractTests(unittest.TestCase):
         self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED", net_pnl_usd=-2), "REALIZED_LOSS")
         self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED", net_pnl_usd=0), "REALIZED_ZERO_PNL")
         self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED"), "CENSORED")
+
+    def test_regime_observation_preserves_timestamp_without_inventing_causality(self):
+        first = normalize_regime_observation(
+            {"value": " bear ", "observed_ts": 99}, signal_ts=100,
+        )
+        second = normalize_regime_observation(
+            {"value": "BEAR", "observed_ts": 98}, signal_ts=100,
+        )
+        self.assertEqual(first["value"], "BEAR")
+        self.assertEqual(second["value"], "BEAR")
+        self.assertEqual(first["observed_ts"], 99.0)
+        self.assertTrue(first["qualification_eligible"])
+
+        legacy = normalize_regime_observation(" bull ", signal_ts=100)
+        self.assertEqual(legacy["value"], "BULL")
+        self.assertEqual(legacy["status"], "LEGACY_SCALAR_DESCRIPTIVE_ONLY")
+        self.assertFalse(legacy["qualification_eligible"])
+
+        for invalid in ({}, {"value": "BULL"}, {"value": []}, {"value": "UNKNOWN", "observed_ts": 99}):
+            observation = normalize_regime_observation(invalid, signal_ts=100)
+            self.assertIsNone(observation["value"])
+            self.assertFalse(observation["qualification_eligible"])
+
+        future = normalize_regime_observation(
+            {"value": "BULL", "observed_ts": 101}, signal_ts=100,
+        )
+        self.assertIsNone(future["value"])
+        self.assertEqual(future["observed_ts"], 101.0)
+        self.assertEqual(future["reason"], "REGIME_OBSERVATION_POST_SIGNAL")
 
     def test_identity_changes_for_cost_or_data_snapshot(self):
         spec = _protected_spec()

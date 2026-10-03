@@ -1,9 +1,30 @@
-"""Static regression checks for the two-tile accounting contract."""
+"""Static and executable checks for tile accounting presentation truth."""
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 
 SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+
+
+def _run_pathway_helper(expression: str):
+    helpers = SOURCE[
+        SOURCE.index("function pathwayMetricNumber("):
+        SOURCE.index("function renderPathwayLab(")
+    ]
+    node = shutil.which("node")
+    assert node, "Node is required for executable tile presentation QA"
+    result = subprocess.run(
+        [node, "-e", helpers + "\nconsole.log(JSON.stringify(" + expression + "));"],
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 def _render_chunk() -> str:
@@ -28,15 +49,15 @@ def test_tile_headlines_always_use_executed_fresh_collection_metrics():
     assert "headlineClosed" in chunk
     assert "headlinePnl" in chunk
     assert "headlineEv" in chunk
-    assert "current execution-settings period; earlier rows remain separate" in chunk
+    assert "active execution-settings period; earlier rows remain separate" in chunk
     assert "labPrimaryTrades" not in chunk
     assert "v2ChkPass" not in chunk
 
 
 def test_tile_ev_is_unavailable_when_there_are_no_approvals():
     chunk = _render_chunk()
-    assert "const headlineEv = headlineApprovals > 0" in chunk
-    assert "const headlineEvLabel = headlineEv == null ? '—'" in chunk
+    assert "const headlineEv = headlineApprovals > 0 && headlineEvAvailable" in chunk
+    assert "const headlineEvLabel = headlineEv == null ? 'Unavailable'" in chunk
     assert "statRow('EV/appr', headlineEvLabel)" in chunk
     assert "· EV ' + headlineEvLabel + '/approve" in chunk
     assert "headlineApprovals ? headlinePnl / headlineApprovals : 0" not in chunk
@@ -66,8 +87,160 @@ def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
     assert "def _reconcile_settings_periods_to_headline" in SOURCE
     chunk = _render_chunk()
     assert "Settings-period breakdown" in chunk
-    assert "Legacy baseline" in chunk
+    assert "LEGACY SETTINGS BASELINE" in chunk
     assert "Not recorded" in chunk
+
+
+def test_active_settings_period_is_never_presented_as_evidence_freshness():
+    chunk = _render_chunk()
+    assert "ACTIVE SETTINGS PERIOD" in chunk
+    assert "ACTIVE SETTINGS PERIOD METRICS" in chunk
+    assert "DATA FRESHNESS IS SEPARATE" in chunk
+    assert "Active settings period:" in chunk
+    assert "not an evidence-freshness claim" in chunk
+    assert " · CURRENT'" not in chunk
+    assert "CURRENT PERIOD METRICS" not in chunk
+
+
+def test_runtime_metrics_and_research_facts_are_separate_and_fail_unverified():
+    expression = "pathwayTileFacts(" + json.dumps({
+        "server_ts": "2026-09-14T12:00:00Z",
+        "price_ts": "2026-09-14T11:59:58Z",
+        "fresh_epoch_id": "epoch-live",
+    }) + "," + json.dumps({"session_stats_source": "analyzer"}) + "," + json.dumps({
+        "scope": "SIGNED_FRESH_EPOCH",
+    }) + "," + json.dumps({"current": True, "start": 1789000000}) + ",{})"
+    facts = _run_pathway_helper(expression)
+    assert facts["runtime_response"] != "UNAVAILABLE"
+    assert facts["runtime_market"] != "UNAVAILABLE"
+    assert facts["metrics_source"] == "SIGNED PAPER LEDGER"
+    assert facts["metrics_period"] == "ACTIVE SETTINGS PERIOD"
+    assert facts["metrics_epoch"] == "epoch-live"
+    assert facts["metrics_source_observation"] == "UNAVAILABLE"
+    assert facts["metrics_freshness"] == "FRESHNESS UNVERIFIED"
+    assert facts["report_publication"] == "UNAVAILABLE"
+    assert facts["report_identity"] == "UNAVAILABLE"
+    assert facts["report_qualification"] == "UNAVAILABLE"
+    assert facts["report_freshness"] == "FRESHNESS UNVERIFIED"
+
+
+def test_legacy_and_malformed_timestamps_never_gain_freshness():
+    facts = _run_pathway_helper(
+        "pathwayTileFacts({server_ts:'bad',price_ts:null},"
+        "{session_scope:'ALL_HISTORY'},"
+        "{metrics_source:'LEGACY LEDGER',metrics_freshness_status:'HISTORICAL'},"
+        "null,{status:'PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL'})"
+    )
+    assert facts["runtime_response"] == "UNAVAILABLE"
+    assert facts["runtime_market"] == "UNAVAILABLE"
+    assert facts["metrics_period"] == "ALL_HISTORY"
+    assert facts["metrics_freshness"] == "HISTORICAL/STALE"
+    assert facts["report_freshness"] == (
+        "HISTORICAL/STALE · DIAGNOSTIC · FRESHNESS UNVERIFIED"
+    )
+
+
+def test_tile_timestamp_contract_rejects_each_bad_type_and_invalid_iso():
+    bad_values = [
+        None, True, False, {}, [], 1789000000,
+        "2026-09-14T12:00:00",
+        "2026-02-30T12:00:00Z",
+        "2026-09-14T25:00:00Z",
+        "2026-09-14T12:00:00+15:00",
+    ]
+    expression = (
+        json.dumps(bad_values)
+        + ".map(value => pathwayIsoTimestamp(value))"
+    )
+    assert _run_pathway_helper(expression) == [None] * len(bad_values)
+    assert _run_pathway_helper(
+        "[pathwayIsoTimestamp('2026-09-14T12:00:00Z'),"
+        "pathwayIsoTimestamp('2026-09-14T12:00:00+10:00'),"
+        "pathwayTimestamp(1789000000,false).valid,"
+        "pathwayTimestamp(1789000000,true).valid]"
+    ) == ["2026-09-14T12:00:00Z", "2026-09-14T12:00:00+10:00", False, True]
+
+
+def test_tile_revision_and_epoch_contract_rejects_bad_identifiers():
+    assert _run_pathway_helper(
+        "[pathwayFullRevision('" + "a" * 40 + "'),"
+        "pathwayFullRevision('short'),pathwayFullRevision('" + "g" * 40 + "'),"
+        "pathwayFullRevision(true),pathwayFullRevision({}),"
+        "pathwayEpochId('epoch-current'),pathwayEpochId('current'),"
+        "pathwayEpochId(true),pathwayEpochId({})]"
+    ) == ["a" * 40, None, None, None, None, "epoch-current", None, None, None]
+
+
+def test_tile_parity_and_complete_provenance_control_current_badge():
+    report = {
+        "freshness_status": "CURRENT",
+        "report_published_at": "2026-09-14T11:30:00Z",
+        "dataset_source_revision": "b" * 40,
+        "epoch_id": "epoch-current",
+        "qualification": "NOT_QUALIFIED",
+        "source_revision_parity": "MATCH",
+    }
+    expression = "pathwayTileFacts({}, {}, {}, null, " + json.dumps(report) + ")"
+    facts = _run_pathway_helper(expression)
+    assert facts["report_freshness"] == "CURRENT"
+    assert facts["report_qualification"] == "NOT_QUALIFIED"
+
+    for parity in (None, "UNKNOWN", "MATCH "):
+        report["source_revision_parity"] = parity
+        facts = _run_pathway_helper(
+            "pathwayTileFacts({}, {}, {}, null, " + json.dumps(report) + ")"
+        )
+        assert facts["report_freshness"] == "FRESHNESS UNVERIFIED"
+    for parity in ("MISMATCH", "CONFLICT"):
+        report["source_revision_parity"] = parity
+        facts = _run_pathway_helper(
+            "pathwayTileFacts({}, {}, {}, null, " + json.dumps(report) + ")"
+        )
+        assert facts["report_freshness"] == "HISTORICAL/STALE"
+
+    report["source_revision_parity"] = "MATCH"
+    for field, value in (
+        ("report_published_at", "2026-09-14T11:30:00"),
+        ("dataset_source_revision", "b" * 12),
+        ("epoch_id", 7),
+    ):
+        malformed = {**report, field: value}
+        facts = _run_pathway_helper(
+            "pathwayTileFacts({}, {}, {}, null, " + json.dumps(malformed) + ")"
+        )
+        assert facts["report_freshness"] == "FRESHNESS UNVERIFIED"
+
+
+def test_legacy_hypothesis_cannot_promote_itself_with_current_flags():
+    diagnostic = {
+        "status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL",
+        "freshness_status": "CURRENT",
+        "report_published_at": "2026-09-14T11:30:00Z",
+        "dataset_source_revision": "c" * 40,
+        "epoch_id": "epoch-current",
+        "qualification": "QUALIFIED",
+        "source_revision_parity": "MATCH",
+    }
+    facts = _run_pathway_helper(
+        "pathwayTileFacts({}, {}, {}, null, " + json.dumps(diagnostic) + ")"
+    )
+    assert facts["report_freshness"] == (
+        "HISTORICAL/STALE · DIAGNOSTIC · FRESHNESS UNVERIFIED"
+    )
+    assert facts["report_qualification"] == "DIAGNOSTIC ONLY · NOT QUALIFIED"
+
+
+def test_true_zero_is_distinct_from_unavailable_for_tile_money():
+    assert _run_pathway_helper(
+        "[pathwayMetricAvailable({},'pnl',0),"
+        "pathwayMetricAvailable({pnl:false},'pnl',0),"
+        "pathwayMetricNumber(0),pathwayMetricNumber(null)]"
+    ) == [True, False, 0, None]
+    chunk = _render_chunk()
+    assert "result.oos_net_usd || 0" not in chunk
+    assert "headlinePnlRaw" in chunk
+    assert "headlinePnlLabel" in chunk
+    assert "diagnostic net ' + (resultNet == null ? 'Unavailable'" in chunk
 
 
 def test_server_is_authoritative_for_execution_gate_controls():

@@ -109,7 +109,7 @@ class FounderOsChatProvider {
         this.founderOsMetadata = true;
         this.client = {
             baseUrl: (0, credentials_1.proxyBaseUrl)(creds.apiBaseUrl),
-            bearer: (0, credentials_1.bearerFromCredentials)(creds),
+            bearer: (0, credentials_1.authorizationHeaderFromCredentials)(creds),
         };
     }
     client;

@@ -30,7 +30,7 @@ async function fetchMemoryContext(creds, token) {
         const res = await fetch(url.toString(), {
             method: 'GET',
             headers: {
-                Authorization: `Bearer ${(0, credentials_1.bearerFromCredentials)(creds)}`,
+                Authorization: (0, credentials_1.authorizationHeaderFromCredentials)(creds),
                 Accept: 'application/json',
             },
             signal: controller.signal,

@@ -51,6 +51,7 @@ exports.createDebugSquasherStatus = createDebugSquasherStatus;
  * Wired in extension.ts:activate() via createDebugSquasherStatus().
  */
 const vscode = __importStar(require("vscode"));
+const credentials_1 = require("./credentials");
 const POLL_INTERVAL_MS = 2 * 60 * 1000;
 let consentPromptShownThisSession = false;
 /**
@@ -119,7 +120,7 @@ function renderStatus(status, run) {
 async function fetchLatest(creds) {
     const url = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/latest`;
     const res = await fetch(url, {
-        headers: { Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}` },
+        headers: { Authorization: (0, credentials_1.authorizationHeaderFromCredentials)(creds) },
     });
     if (!res.ok)
         return null;
@@ -145,7 +146,7 @@ async function maybePromptConsent(creds, _context) {
     try {
         const consentUrl = `${creds.apiBaseUrl.replace(/\/$/, '')}/api/debug-squasher/consent`;
         const headers = {
-            Authorization: `Bearer fos_${creds.nodeId}:${creds.nodeToken}`,
+            Authorization: (0, credentials_1.authorizationHeaderFromCredentials)(creds),
         };
         const checkRes = await fetch(consentUrl, { headers });
         if (!checkRes.ok)

@@ -18,9 +18,15 @@ import { FounderCopilotService } from '../events/founder-copilot.service';
 import { FounderNodeVaultSyncService } from './founder-node-vault-sync.service';
 import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
 import type { VaultMergePatch } from '@dcf/utils';
+import {
+  founderNodeIntMetric,
+  founderRemoteCapability,
+  founderRemoteCapabilityReset,
+} from './founder-node-capability';
 
 const PAIRING_TTL_MS = 30 * 60 * 1000;
 const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+const HEARTBEAT_TRANSACTION_ATTEMPTS = 3;
 
 @Injectable()
 export class FounderNodeService {
@@ -170,6 +176,7 @@ export class FounderNodeService {
         platform: input.platform ?? null,
         appVersion: input.appVersion ?? null,
         vaultHealthy: true,
+        ...founderRemoteCapabilityReset(),
       },
       update: {
         userId: row.userId,
@@ -180,6 +187,7 @@ export class FounderNodeService {
         platform: input.platform ?? null,
         appVersion: input.appVersion ?? null,
         vaultHealthy: true,
+        ...founderRemoteCapabilityReset(),
       },
     });
 
@@ -209,37 +217,74 @@ export class FounderNodeService {
     return node;
   }
 
-  async heartbeat(nodeDbId: string, input: FounderNodeHeartbeat) {
-    const node = await this.prisma.founderNode.update({
-      where: { id: nodeDbId },
-      data: {
-        status: 'online',
-        lastSeenAt: new Date(),
-        label: input.label,
-        ramGb: input.ramGb ?? null,
-        storageGb: input.storageGb ?? null,
-        storageFreeGb: input.storageFreeGb ?? null,
-        vaultHealthy: input.vaultHealthy,
-        platform: input.platform,
-        appVersion: input.appVersion,
-        ollamaEnabled: input.ollamaEnabled ?? false,
-        ollamaBaseUrl: input.ollamaBaseUrl ?? null,
-        ollamaModel: input.ollamaModel ?? null,
-      },
-    });
-    void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
-    // FounderNodeHeartbeat now declares workspaces/sessions (Phase A); no cast needed.
+  async heartbeat(
+    nodeDbId: string,
+    input: FounderNodeHeartbeat,
+    authenticated: { userId: string; nodeId: string },
+  ) {
+    const observedAt = new Date();
+    const hasSessionSnapshot = Array.isArray(input.sessions);
+    const capability = hasSessionSnapshot
+      ? founderRemoteCapability(input.ide, observedAt)
+      : founderRemoteCapabilityReset();
     const workspaces = input.workspaces;
-    const sessions = input.sessions;
-    await this.desktopBridge.saveBridgePayload(node.userId, node.nodeId, input.label, {
-      bridge: input.desktopBridge,
-      workspaces: Array.isArray(workspaces) ? workspaces : undefined,
-      sessions: Array.isArray(sessions) ? sessions : undefined,
+    const sessions = hasSessionSnapshot ? input.sessions : undefined;
+    const node = await this.withSerializableHeartbeatTransaction(async (transaction) => {
+      const updated = await transaction.founderNode.update({
+        where: {
+          id: nodeDbId,
+          userId: authenticated.userId,
+          nodeId: authenticated.nodeId,
+        },
+        data: {
+          status: 'online',
+          lastSeenAt: observedAt,
+          label: input.label,
+          ramGb: founderNodeIntMetric(input.ramGb),
+          storageGb: founderNodeIntMetric(input.storageGb),
+          storageFreeGb: founderNodeIntMetric(input.storageFreeGb),
+          vaultHealthy: input.vaultHealthy,
+          platform: input.platform,
+          appVersion: input.appVersion,
+          ...capability,
+          ollamaEnabled: input.ollamaEnabled ?? false,
+          ollamaBaseUrl: input.ollamaBaseUrl ?? null,
+          ollamaModel: input.ollamaModel ?? null,
+        },
+      });
+      await this.desktopBridge.saveBridgePayload(updated.userId, updated.nodeId, input.label, {
+        bridge: input.desktopBridge,
+        workspaces: Array.isArray(workspaces) ? workspaces : undefined,
+        sessions,
+      }, transaction);
+      return updated;
     });
+
+    void this.vaultSync.onNodeHeartbeat(node.userId, node.nodeId);
     if (input.founderCloud) {
       void this.persistFounderCloudFromHeartbeat(node.userId, input.label, input.founderCloud);
     }
     return { success: true, status: 'online' as const };
+  }
+
+  private async withSerializableHeartbeatTransaction<T>(
+    operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= HEARTBEAT_TRANSACTION_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        const retryable =
+          error != null &&
+          typeof error === 'object' &&
+          'code' in error &&
+          error.code === 'P2034';
+        if (!retryable || attempt === HEARTBEAT_TRANSACTION_ATTEMPTS) throw error;
+      }
+    }
+    throw new Error('Heartbeat transaction retry limit exceeded.');
   }
 
   private async persistFounderCloudFromHeartbeat(

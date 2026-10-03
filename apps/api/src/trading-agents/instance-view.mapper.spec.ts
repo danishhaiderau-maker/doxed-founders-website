@@ -76,7 +76,7 @@ test('session reset preserves PAUSED disarm metadata in the replacement dashboar
     { relayExecutionMode: 'LIVE', relayArmedAt: '2026-09-06T00:00:00Z', realTradingConfirmedAt: '2026-09-06T00:00:00Z' },
   ]) {
     const original = { ...prior };
-    const replacement = {
+    const replacement: Record<string, unknown> = {
       ...buildFreshInstanceDashboardState('live', 500),
       ...activeLiveRelayArmForSessionReset('PAUSED', prior),
     };

@@ -8,6 +8,33 @@ from datetime import datetime, timedelta, timezone
 from research import research_dashboard as dashboard
 
 
+def test_regime_renderer_never_interpolates_observation_objects():
+    html = dashboard.DASHBOARD_HTML
+    escape = re.search(r"function escapeHtml\(value\) \{.*?\n\}", html, re.S)
+    helper = re.search(r"function displayRegime\(value\) \{.*?\n\}", html, re.S)
+    assert escape and helper
+    cases = [
+        " bull ",
+        {"value": "bear", "observed_ts": 99},
+        {},
+        {"value": {"label": "BULL"}},
+        None,
+        "UNKNOWN",
+    ]
+    script = (
+        escape.group(0) + "\n" + helper.group(0)
+        + "\nconsole.log(JSON.stringify(" + json.dumps(cases)
+        + ".map(displayRegime)));"
+    )
+    result = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        check=True, capture_output=True, text=True, timeout=15,
+    )
+    assert json.loads(result.stdout) == ["BULL", "BEAR", "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"]
+    assert "${displayRegime(row.regime)}" in html
+    assert "${displayRegime(r.regime)}" in html
+
+
 def test_failed_publication_guidance_requires_recovery_not_waiting():
     node = shutil.which("node")
     assert node, "Node is required to execute failure guidance"

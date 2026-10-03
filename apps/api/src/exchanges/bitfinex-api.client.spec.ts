@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import './bitfinex-auth-trade-stream.spec';
 import {
@@ -296,6 +297,92 @@ test('native limit update keeps the existing order id and sends only the in-plac
       lev: 10,
       meta: { aff_code: 'doxxedcrypto' },
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('timed-out limit submit is recovered by CID history lookup without a second submission', async () => {
+  resetBitfinexNonceLanesForTests();
+  const originalFetch = globalThis.fetch;
+  const apiSecret = 'local-timeout-fixture-secret';
+  const rawClientOrderId = 0xf1234567;
+  const normalizedCid = rawClientOrderId & 0x7fffffff;
+  const originalOrderId = 241234567891;
+  const requests: Array<{
+    path: string;
+    bodyText: string;
+    headers: Headers;
+  }> = [];
+
+  globalThis.fetch = (async (url, init) => {
+    const path = new URL(String(url)).pathname;
+    const bodyText = String(init?.body ?? '');
+    const headers = new Headers(init?.headers);
+    requests.push({ path, bodyText, headers });
+    if (path === '/v2/auth/w/order/submit') {
+      throw new DOMException('synthetic limit-submit timeout', 'TimeoutError');
+    }
+    assert.equal(path, '/v2/auth/r/orders/hist');
+    const historyRow = activeOrderRow();
+    historyRow[0] = originalOrderId;
+    historyRow[2] = normalizedCid;
+    return new Response(JSON.stringify([historyRow]), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const creds = {
+      apiKey: 'local-timeout-fixture-key',
+      apiSecret,
+      testnet: false,
+    };
+    const client = new BitfinexTradingClient();
+    await assert.rejects(
+      client.submitLimitOrder(creds, {
+        direction: 'LONG',
+        qty: 0.00004,
+        price: 63_066,
+        leverage: 100,
+        clientOrderId: rawClientOrderId,
+      }),
+      /limit-submit timeout/i,
+    );
+
+    const recovered = await client.findOrderHistoryByClientOrderId(
+      creds,
+      rawClientOrderId,
+    );
+    assert.equal(recovered?.id, originalOrderId);
+    assert.equal(recovered?.cid, normalizedCid);
+    assert.equal(
+      requests.filter((request) => request.path === '/v2/auth/w/order/submit').length,
+      1,
+      'history recovery must not submit the same order again',
+    );
+    assert.deepEqual(JSON.parse(requests[0].bodyText), {
+      type: 'LIMIT',
+      symbol: BITFINEX_BTC_PERP_SYMBOL,
+      amount: '0.00004',
+      price: '63066.00',
+      lev: 100,
+      meta: { aff_code: 'doxxedcrypto' },
+      cid: normalizedCid,
+    });
+    assert.deepEqual(JSON.parse(requests[1].bodyText), { limit: 250 });
+
+    for (const request of requests) {
+      const nonce = request.headers.get('bfx-nonce');
+      assert.ok(nonce, 'every authenticated request must carry its signed nonce');
+      assert.equal(request.headers.get('bfx-apikey'), creds.apiKey);
+      assert.equal(
+        request.headers.get('bfx-signature'),
+        createHmac('sha384', apiSecret)
+          .update(`/api${request.path}${nonce}${request.bodyText}`)
+          .digest('hex'),
+        `HMAC must bind the exact ${request.path} payload`,
+      );
+    }
+    assert.ok(BigInt(requests[1].headers.get('bfx-nonce')!) > BigInt(requests[0].headers.get('bfx-nonce')!));
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -63,6 +63,74 @@ def _unknown(generation: Mapping[str, Any], blockers: Sequence[str], **extra: An
     }
 
 
+def _coverage_counts(receipts: Sequence[Mapping[str, Any]], *, conditional: bool) -> dict[str, Any]:
+    """Describe source/arm/entry denominators without treating arms as samples."""
+    valid = [item for item in receipts if isinstance(item, Mapping)]
+    by_source: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for item in valid:
+        key = (
+            str(item.get("opportunity_id") or ""),
+            str(item.get("source_episode_id") or item.get("episode_id") or ""),
+        )
+        if all(key):
+            by_source.setdefault(key, []).append(item)
+    source_keys = set(by_source)
+    arm_keys = {
+        (*key, str(item.get("direction") or "").upper())
+        for item in valid
+        for key in [(
+            str(item.get("opportunity_id") or ""),
+            str(item.get("source_episode_id") or item.get("episode_id") or ""),
+        )]
+        if all(key) and str(item.get("direction") or "").upper() in {"LONG", "SHORT"}
+    }
+    bilateral_groups = sum(
+        any(item.get("directional_coverage") == "BOTH_SIDES_CAPTURED" for item in group)
+        for group in by_source.values()
+    )
+    expected_arms = sum(
+        2 if any(item.get("directional_coverage") == "BOTH_SIDES_CAPTURED" for item in group)
+        else len({str(item.get("direction") or "").upper() for item in group}
+                 & {"LONG", "SHORT"})
+        for group in by_source.values()
+    )
+    entry_counts = Counter({name: 0 for name in ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")})
+    entry_result_count = 0
+    eligible_entries = 0
+    field = "conditional_results" if conditional else "results"
+    for item in valid:
+        for result in item.get(field) or []:
+            if not isinstance(result, Mapping) or _conditional_entry(result) != conditional:
+                continue
+            entry_result_count += 1
+            outcome = str(result.get("outcome_state") or "UNKNOWN").upper()
+            if outcome not in entry_counts:
+                outcome = "UNKNOWN"
+            entry_counts[outcome] += 1
+            receipt = result.get("conservative_receipt")
+            if (isinstance(receipt, Mapping) and result.get("supported") is True
+                    and outcome in {"FULL_FILL", "PARTIAL_FILL"}):
+                eligible_entries += 1
+    return {
+        "schema": "conservative_shadow_coverage_denominators_v1",
+        "source_opportunity_count": len(source_keys),
+        "source_opportunity_count_basis": "UNIQUE_OPPORTUNITY_PLUS_SOURCE_EPISODE_NOT_DIRECTIONAL_ARMS",
+        "expected_directional_arm_count": expected_arms,
+        "present_directional_arm_count": len(arm_keys),
+        "missing_directional_arm_count": max(0, expected_arms - len(arm_keys)),
+        "directional_arm_expectation_basis": (
+            "TWO_ARMS_PER_SOURCE_OPPORTUNITY" if bilateral_groups == len(by_source) and by_source
+            else "MIXED_DECLARED_BILATERAL_AND_LEGACY_PRESENT_ARMS" if bilateral_groups
+            else "LEGACY_PRESENT_ARMS_ONLY_NO_BILATERAL_EXPECTATION_DECLARED"
+        ),
+        "directional_arms_are_independent_samples": False,
+        "entry_result_count": entry_result_count,
+        "entry_outcome_result_counts": dict(entry_counts),
+        "eligible_terminal_entry_count": eligible_entries,
+        "eligible_terminal_entry_basis": "SUPPORTED_FULL_OR_PARTIAL_CONSERVATIVE_ENTRY_RESULT",
+    }
+
+
 def _signed(label: str, body: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(body), "signature": stable_hash(label, body)}
 
@@ -433,6 +501,12 @@ def _build_shadow_report(
     receipts = baseline_report.get("episode_receipts") if isinstance(baseline_report.get("episode_receipts"), list) else []
     episode_counts = Counter(str(item.get("episode_id") or "") for item in receipts if isinstance(item, Mapping))
     duplicate_episodes = sorted(key for key, count in episode_counts.items() if key and count > 1)
+    counting_receipts = [
+        item for item in receipts
+        if isinstance(item, Mapping)
+        and str(item.get("episode_id") or "") not in duplicate_episodes
+    ]
+    coverage_denominators = _coverage_counts(counting_receipts, conditional=conditional)
     eligible_entries = []
     for episode in receipts:
         if not isinstance(episode, Mapping) or str(episode.get("episode_id") or "") in duplicate_episodes:
@@ -484,6 +558,17 @@ def _build_shadow_report(
             "results_total": replay_count, "results_truncated": replay_count > len(diagnostic_results),
             "profitability_supported": False, "ranking_eligible": False,
             "live_qualification": False,
+            "coverage_denominators": {
+                **coverage_denominators,
+                "source_candidate_attempt_count": replay_count,
+                "source_candidate_attempts_are_independent_samples": False,
+                "terminal_replay_attempted_count": replay_count,
+                "terminal_complete_replay_count": 0,
+                "terminal_unknown_replay_count": replay_count,
+                "unique_evaluated_composite_count": 0,
+                "terminal_evaluator_call_count": 0,
+                "alias_reused_terminal_result_count": 0,
+            },
             "source_basis": "CURRENT_IN_MEMORY_INPUTS_MODEL_ABSENT_NO_SEGMENT_IO",
         }
     reason_counts: Counter[str] = Counter()
@@ -499,6 +584,9 @@ def _build_shadow_report(
     complete = unknown = replay_count = 0
     terminal_evaluated_count = 0
     evaluated_composite_signatures: set[str] = set()
+    evaluated_composite_keys: set[tuple[str, str, str, str]] = set()
+    terminal_evaluation_cache: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    alias_reused_terminal_results = 0
     for episode in sorted((item for item in receipts if isinstance(item, Mapping)),
                           key=lambda item: (str(item.get("opportunity_id") or ""), str(item.get("episode_id") or ""))):
         episode_id, opportunity_id = str(episode.get("episode_id") or ""), str(episode.get("opportunity_id") or "")
@@ -609,7 +697,7 @@ def _build_shadow_report(
                         "declared_contract": context.get("declared_contract")}
                        if context.get("calculation_mode") == "DECLARED_EXECUTION_RATE_MODEL_V1" else {}),
                 })
-                coverage = _signed("shadow-path-coverage-policy", {
+                coverage_policy = _signed("shadow-path-coverage-policy", {
                     "schema": "shadow_path_coverage_policy_v1",
                     "sampling_interval_sec": context.get("sampling_interval_sec"),
                     "first_sample_offset_sec": context.get("first_sample_offset_sec"),
@@ -620,18 +708,41 @@ def _build_shadow_report(
                     "row_schema": context.get("row_schema"), "source_segment_schema": context.get("source_segment_schema"),
                     "coverage_provenance": context.get("coverage_provenance"), **bindings,
                 })
-                terminal_evaluated_count += 1
-                if conditional:
-                    from research.conservative_shadow_terminal import evaluate_conditional_shadow_terminal
-                terminal_evaluator = evaluate_conditional_shadow_terminal if conditional else evaluate_shadow_terminal
-                terminal = terminal_evaluator(
-                    generation=generation, entry_receipt=entry_receipt, entry_receipt_sha256=entry_sha,
-                    future_path_rows=path_rows, future_path_sha256=path_sha,
-                    required_horizon_end_ts=context.get("required_horizon_end_ts"),
-                    policy_spec=composite_spec, policy_signature=policy_signature,
-                    position_context=position, cost_model=costs, coverage_policy=coverage,
-                    source_segment_receipts=source_receipts, source_segment_payloads=payloads,
+                baseline_schedule_sha256 = str(
+                    entry_receipt.get("schedule_sha256") or ""
                 )
+                lifecycle_bindings = {
+                    "schema": "shadow_terminal_lifecycle_bindings_v1",
+                    "parent_opportunity_id": opportunity_id,
+                    "parent_episode_id": episode_id,
+                    "source_episode_id": str(episode.get("source_episode_id") or episode_id),
+                    "direction": str(entry_receipt.get("direction") or "").upper(),
+                    "baseline_id": key[2],
+                    "baseline_schedule_sha256": baseline_schedule_sha256,
+                    "terminal_schedule_sha256": _sha(composite_spec),
+                    "terminal_policy_signature": policy_signature,
+                    "entry_receipt_sha256": entry_sha,
+                }
+                evaluation_key = (episode_id, opportunity_id, key[2], policy_signature)
+                evaluated_composite_keys.add(evaluation_key)
+                terminal = terminal_evaluation_cache.get(evaluation_key)
+                if terminal is None:
+                    terminal_evaluated_count += 1
+                    if conditional:
+                        from research.conservative_shadow_terminal import evaluate_conditional_shadow_terminal
+                    terminal_evaluator = evaluate_conditional_shadow_terminal if conditional else evaluate_shadow_terminal
+                    terminal = terminal_evaluator(
+                        generation=generation, entry_receipt=entry_receipt, entry_receipt_sha256=entry_sha,
+                        future_path_rows=path_rows, future_path_sha256=path_sha,
+                        required_horizon_end_ts=context.get("required_horizon_end_ts"),
+                        policy_spec=composite_spec, policy_signature=policy_signature,
+                        position_context=position, cost_model=costs, coverage_policy=coverage_policy,
+                        source_segment_receipts=source_receipts, source_segment_payloads=payloads,
+                        lifecycle_bindings=lifecycle_bindings,
+                    )
+                    terminal_evaluation_cache[evaluation_key] = terminal
+                else:
+                    alias_reused_terminal_results += 1
                 status = terminal.get("status")
                 complete += status == "COMPLETE"; unknown += status != "COMPLETE"
                 reason_counts.update(terminal.get("blockers") or [])
@@ -666,6 +777,17 @@ def _build_shadow_report(
         "complete_result_stream_status": "CALLER_SINK_USED" if result_sink is not None else "NOT_REQUESTED",
         "profitability_supported": complete > 0 and unknown == 0 and not duplicate_episodes and not truncated,
         "ranking_eligible": False, "live_qualification": False,
+        "coverage_denominators": {
+            **coverage_denominators,
+            "source_candidate_attempt_count": replay_count,
+            "source_candidate_attempts_are_independent_samples": False,
+            "terminal_replay_attempted_count": replay_count,
+            "terminal_complete_replay_count": complete,
+            "terminal_unknown_replay_count": unknown,
+            "unique_evaluated_composite_count": len(evaluated_composite_keys),
+            "terminal_evaluator_call_count": terminal_evaluated_count,
+            "alias_reused_terminal_result_count": alias_reused_terminal_results,
+        },
         "source_basis": "CURRENT_IN_MEMORY_INPUTS_AND_HASH_VERIFIED_CANONICAL_SEGMENTS",
         "evaluation_scope": "ENTRY_PLUS_SINGLE_POSITION_EXIT",
         "portfolio_competition_status": "NOT_SIMULATED",

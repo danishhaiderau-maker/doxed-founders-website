@@ -20,7 +20,9 @@ def html():
 
 def run_helpers(expression):
     page = html()
-    helpers = page[page.index("function metricNumber("):page.index("function fmtAdxBucket(")]
+    helpers = page[page.index("function escapeHtml("):page.index("function ensureScrollableTables(")]
+    helpers += page[page.index("function metricNumber("):page.index("function fmtAdxBucket(")]
+    helpers += page[page.index("function fmtResearchBucket("):page.index("async function loadSummary(")]
     node = shutil.which("node")
     assert node, "Node is required for executable dashboard presentation QA"
     result = subprocess.run([node, "-e", helpers + "\nconsole.log(JSON.stringify(" + expression + "));"],
@@ -127,6 +129,301 @@ def test_current_is_not_claimed_as_qualified():
     assert "Best-policy evidence is current/pinned" not in source
 
 
+def test_global_presentation_distinguishes_freshness_unverified_from_stale_and_current():
+    unverified = {"stale": {"stale": False, "generation_freshness": {"current": None}}}
+    stale = {"stale": {"stale": True, "generation_freshness": {"current": False}}}
+    current = {"stale": {"stale": False, "generation_freshness": {"current": True}},
+               "scope": "FRESH-COLLECTION", "data_scope": "SESSION"}
+
+    assert run_helpers("generationFreshnessUnverified(" + json.dumps(unverified) + ")") is True
+    assert run_helpers("analyzerHeaderScope(" + json.dumps(unverified) + ")") == \
+        "FRESHNESS UNVERIFIED · READ-ONLY"
+    assert run_helpers("analyzerHeaderScope(" + json.dumps(stale) + ")") == \
+        "STALE SAVED ANALYZER GENERATION · READ-ONLY"
+    assert run_helpers("analyzerHeaderScope(" + json.dumps(current) + ")") == \
+        "FRESH-COLLECTION · SESSION"
+
+    source = html()
+    assert "⚠ Analyzer freshness unverified — read-only." in source
+    assert "Saved reports must not be treated as current or safe." in source
+    assert "FORENSIC EXPORT · FRESHNESS UNVERIFIED" in source
+    assert "const scopeLabel = analyzerHeaderScope(d);" in source
+
+
+def test_old_fresh_collection_publication_has_truthful_read_only_header_and_diagnostics():
+    stale_fresh_collection = {
+        "scope": "FRESH-COLLECTION",
+        "data_scope": "SESSION",
+        "stale": {
+            "stale": True,
+            "publication_freshness": {
+                "status": "STALE",
+                "age_seconds": 172800,
+                "max_age_seconds": 86400,
+                "reason": "REPORT_PUBLICATION_EXCEEDS_UTC_AGE_POLICY",
+            },
+            "reasons": ["Saved analyzer report publication exceeds the named UTC age policy"],
+        },
+    }
+    assert run_helpers(
+        "analyzerHeaderScope(" + json.dumps(stale_fresh_collection) + ")"
+    ) == "STALE SAVED FRESH-COLLECTION REPORT · READ-ONLY"
+
+    source = html()
+    assert "⚠ Stale saved fresh-collection report — read-only." in source
+    assert "Show exact parity and freshness receipts" in source
+    assert "publication_freshness: stale.publication_freshness || {}" in source
+    assert "const scopeLabel = analyzerHeaderScope(d);" in source
+    assert "document.getElementById('exec-text').textContent = formatExecutiveText" in source
+
+
+def test_publication_age_cannot_be_hidden_by_current_generation_flag():
+    stale_publication = {
+        "scope": "FRESH-COLLECTION",
+        "data_scope": "SESSION",
+        "stale": {
+            "stale": False,
+            "generation_freshness": {"current": True},
+            "publication_freshness": {
+                "stale": True,
+                "status": "STALE",
+                "age_seconds": 172800,
+                "max_age_seconds": 86400,
+            },
+        },
+    }
+    result = run_helpers(
+        "analyzerHeaderScope(" + json.dumps(stale_publication) + ")"
+    )
+    assert result == "STALE SAVED FRESH-COLLECTION REPORT · READ-ONLY"
+    scope = run_helpers(
+        "summaryEvidenceScope(" + json.dumps(stale_publication) + ")"
+    )
+    assert "STALE SAVED" in scope[0]
+
+
+def test_identity_strip_keeps_analyzer_code_and_report_data_roles_separate():
+    identity = {
+        "status": "STALE",
+        "analyzer_generation_revision": "a" * 40,
+        "report_dataset_source_revision": "b" * 40,
+        "local_mirror_source_revision": "c" * 40,
+        "report_to_mirror_revision_parity": "MISMATCH",
+        "mirror_to_fly_revision_parity": "UNAVAILABLE",
+    }
+    label = run_helpers("analyzerIdentityLabel(" + json.dumps(identity) + ")")
+    assert label == (
+        "Identity STALE · analyzer " + "a" * 12
+        + " · report data " + "b" * 12
+        + " · local mirror " + "c" * 12
+        + " · report→mirror MISMATCH · mirror→Fly UNAVAILABLE"
+    )
+    source = html()
+    assert 'id="identity-summary"' in source
+    assert "function analyzerIdentityLabel(identity)" in source
+    assert "value.report_dataset_source_revision" in source
+    assert "value.local_mirror_source_revision" in source
+
+
+def test_runtime_and_research_report_facts_are_separate_and_reuse_readiness_dimensions():
+    payload = {
+        "runtime_observed_at": "2026-09-14T12:00:00+00:00",
+        "generated_at": "2026-09-14T11:30:00+00:00",
+        "fresh_epoch_id": "epoch-current",
+        "service_ready": True,
+        "report_bundle_ready": True,
+        "qualification_ready": False,
+        "stale": False,
+        "generation_freshness": {"current": True},
+        "identity": {
+            "status": "CURRENT",
+            "analyzer_generation_revision": "a" * 40,
+            "report_dataset_source_revision": "b" * 40,
+            "local_mirror_source_revision": "b" * 40,
+            "report_to_mirror_revision_parity": "MATCH",
+            "mirror_to_fly_revision_parity": "MATCH",
+        },
+    }
+    facts = run_helpers("analyzerResearchFacts(" + json.dumps(payload) + ")")
+    assert "Runtime response observation 2026-09-14T12:00:00+00:00" in facts
+    assert "Research report publication 2026-09-14T11:30:00+00:00" in facts
+    assert "Identity CURRENT" in facts
+    assert "service READY · reports READY · qualification BLOCKED" in facts
+    assert facts.endswith("CURRENT REPORT")
+    source = html()
+    assert 'id="research-provenance-summary"' in source
+    assert "provenanceEl.textContent = analyzerResearchFactsFromPresentation(presentation)" in source
+
+
+def test_analyzer_timestamp_contract_rejects_bad_types_and_invalid_iso():
+    bad_values = [
+        None, True, False, {}, [], 1789000000,
+        "2026-09-14T12:00:00",
+        "2026-02-30T12:00:00Z",
+        "2026-09-14T25:00:00Z",
+        "2026-09-14T12:00:00+15:00",
+    ]
+    assert run_helpers(
+        json.dumps(bad_values) + ".map(value => analyzerIsoTimestamp(value))"
+    ) == [None] * len(bad_values)
+    assert run_helpers(
+        "[analyzerIsoTimestamp('2026-09-14T12:00:00Z'),"
+        "analyzerIsoTimestamp('2026-09-14T12:00:00+10:00')]"
+    ) == ["2026-09-14T12:00:00Z", "2026-09-14T12:00:00+10:00"]
+
+
+def test_analyzer_revision_and_epoch_contract_rejects_bad_identifiers():
+    assert run_helpers(
+        "[analyzerFullRevision('" + "a" * 40 + "'),"
+        "analyzerFullRevision('short'),analyzerFullRevision('" + "g" * 40 + "'),"
+        "analyzerFullRevision(true),analyzerFullRevision({}),"
+        "analyzerEpochId('epoch-current'),analyzerEpochId('current'),"
+        "analyzerEpochId(true),analyzerEpochId({})]"
+    ) == ["a" * 40, None, None, None, None, "epoch-current", None, None, None]
+
+
+def test_analyzer_parity_dominates_positive_flags_and_bad_provenance():
+    payload = {
+        "runtime_observed_at": "2026-09-14T12:00:00Z",
+        "generated_at": "2026-09-14T11:30:00Z",
+        "fresh_epoch_id": "epoch-current",
+        "service_ready": True,
+        "report_bundle_ready": True,
+        "qualification_ready": False,
+        "stale": False,
+        "generation_freshness": {"current": True},
+        "identity": {
+            "status": "CURRENT",
+            "analyzer_generation_revision": "a" * 40,
+            "report_dataset_source_revision": "b" * 40,
+            "local_mirror_source_revision": "b" * 40,
+            "report_to_mirror_revision_parity": "MATCH",
+            "mirror_to_fly_revision_parity": "MATCH",
+        },
+    }
+    assert run_helpers(
+        "normalizeAnalyzerPresentation(" + json.dumps(payload) + ").report_freshness"
+    ) == "CURRENT REPORT"
+    assert run_helpers(
+        "analyzerHeaderFromPresentation(normalizeAnalyzerPresentation("
+        + json.dumps(payload) + "))"
+    ) == "CURRENT ANALYZER REPORT · NOT QUALIFIED"
+
+    for parity in (None, "UNKNOWN", "MATCH "):
+        changed = json.loads(json.dumps(payload))
+        changed["identity"]["mirror_to_fly_revision_parity"] = parity
+        assert run_helpers(
+            "normalizeAnalyzerPresentation(" + json.dumps(changed) + ").report_freshness"
+        ) == "FRESHNESS UNVERIFIED"
+    for parity in ("MISMATCH", "CONFLICT"):
+        changed = json.loads(json.dumps(payload))
+        changed["identity"]["mirror_to_fly_revision_parity"] = parity
+        assert run_helpers(
+            "normalizeAnalyzerPresentation(" + json.dumps(changed) + ").report_freshness"
+        ) == "HISTORICAL/STALE"
+
+    for path, value in (
+        ("generated_at", "2026-09-14T11:30:00"),
+        ("fresh_epoch_id", {}),
+        ("report_dataset_source_revision", "short"),
+    ):
+        changed = json.loads(json.dumps(payload))
+        if path in changed:
+            changed[path] = value
+        else:
+            changed["identity"][path] = value
+        assert run_helpers(
+            "normalizeAnalyzerPresentation(" + json.dumps(changed) + ").report_freshness"
+        ) == "FRESHNESS UNVERIFIED"
+
+
+def test_analyzer_runtime_clock_is_distinct_and_shared_normalization_agrees():
+    payload = {
+        "runtime_observed_at": "not-a-time",
+        "generated_at": "2026-09-14T11:30:00Z",
+        "fresh_epoch_id": "epoch-current",
+        "report_bundle_ready": True,
+        "qualification_ready": False,
+        "stale": False,
+        "generation_freshness": {"current": True},
+        "identity": {
+            "status": "CURRENT",
+            "analyzer_generation_revision": "a" * 40,
+            "report_dataset_source_revision": "b" * 40,
+            "local_mirror_source_revision": "b" * 40,
+            "report_to_mirror_revision_parity": "MATCH",
+            "mirror_to_fly_revision_parity": "MATCH",
+        },
+    }
+    normalized = run_helpers(
+        "normalizeAnalyzerPresentation(" + json.dumps(payload) + ")"
+    )
+    assert normalized["runtime_observed_at"] is None
+    assert normalized["runtime_observation_label"] == "UNAVAILABLE"
+    assert normalized["report_freshness"] == "CURRENT REPORT"
+    facts = run_helpers(
+        "analyzerResearchFactsFromPresentation(normalizeAnalyzerPresentation("
+        + json.dumps(payload) + "))"
+    )
+    assert "Runtime response observation UNAVAILABLE" in facts
+    assert facts.endswith(normalized["report_freshness"])
+    assert run_helpers(
+        "analyzerHeaderFromPresentation(normalizeAnalyzerPresentation("
+        + json.dumps(payload) + "))"
+    ) == "CURRENT ANALYZER REPORT · NOT QUALIFIED"
+
+
+def test_malformed_failed_or_no_data_status_never_invents_publication():
+    malformed_failed = {
+        "generated_at": True,
+        "analysis_run": {"phase": "FAILED"},
+        "generation_freshness": {"current": True},
+        "report_bundle_ready": True,
+    }
+    assert run_helpers(
+        "analyzerAttemptLabel(" + json.dumps(malformed_failed) + ")"
+    ) == "Latest analysis attempt FAILED · no report published"
+    assert run_helpers(
+        "analyzerReportFreshnessLabel(" + json.dumps(malformed_failed) + ")"
+    ) == "FRESHNESS UNVERIFIED"
+    assert run_helpers("analyzerAttemptLabel({})") == "no run yet"
+
+
+def test_stale_failed_report_and_no_data_remain_distinct_from_runtime_observation():
+    stale_failed = {
+        "runtime_observed_at": "2026-09-14T12:00:00+00:00",
+        "generated_at": "2026-09-10T01:00:00+00:00",
+        "analysis_run": {"phase": "FAILED"},
+        "service_ready": True,
+        "report_bundle_ready": False,
+        "qualification_ready": False,
+        "stale": True,
+        "generation_freshness": {"current": False},
+        "identity": {"status": "STALE"},
+    }
+    facts = run_helpers("analyzerResearchFacts(" + json.dumps(stale_failed) + ")")
+    assert "Runtime response observation 2026-09-14T12:00:00+00:00" in facts
+    assert "Research report publication 2026-09-10T01:00:00+00:00" in facts
+    assert "service READY · reports BLOCKED · qualification BLOCKED" in facts
+    assert facts.endswith("HISTORICAL/STALE")
+    assert run_helpers(
+        "analyzerReportFreshnessLabel(" + json.dumps(stale_failed) + ")"
+    ) == "HISTORICAL/STALE"
+
+    no_data = run_helpers("analyzerResearchFacts({analysis_run:{phase:'FAILED'}})")
+    assert "Runtime response observation UNAVAILABLE" in no_data
+    assert "Research report publication UNAVAILABLE" in no_data
+    assert "qualification UNKNOWN" in no_data
+    assert no_data.endswith("FRESHNESS UNVERIFIED")
+
+
+def test_pathway_audit_presents_analyzer_code_and_report_data_as_distinct_rows():
+    source = html()
+    assert "['Analyzer code revision', currentSync.analyzer_code_revision" in source
+    assert "['Report data revision', currentSync.report_dataset_source_revision || 'UNAVAILABLE']" in source
+    assert "['Analyzer source revision'" not in source
+
+
 def test_old_launch_instruction_replaced_without_changing_findings():
     raw = "Finding: policy A has 12 UNKNOWN episodes\ncd C:\\Old Laptop\\Final Bots\nRetained historical cohort"
     display = run_helpers("formatExecutiveText(" + json.dumps(raw) + ")")
@@ -146,9 +443,22 @@ def test_no_direct_unavailable_currency_or_percentage_templates_remain():
     assert "fmtPct(p.win_rate_pct)" in source
 
 
+def test_missing_oos_counts_are_unavailable_while_true_zero_is_preserved():
+    source = html()
+    assert "oos_episodes??0" not in source
+    assert "oos_episodes ?? 0" not in source
+    assert "oos_episodes||0" not in source
+    assert "oos_episodes || 0" not in source
+    assert "oos_episodes ?? 'UNAVAILABLE'" in source
+    assert run_helpers("[({oos_episodes:0}).oos_episodes ?? 'UNAVAILABLE',"
+                       "({}).oos_episodes ?? 'UNAVAILABLE']") == [0, "UNAVAILABLE"]
+
+
 def render_loader(name, payload, target):
     page = html()
-    helpers = page[page.index("function metricNumber("):page.index("function fmtAdxBucket(")]
+    helpers = page[page.index("function escapeHtml("):page.index("function ensureScrollableTables(")]
+    helpers += page[page.index("function metricNumber("):page.index("function fmtAdxBucket(")]
+    helpers += page[page.index("function fmtResearchBucket("):page.index("async function loadSummary(")]
     helpers += page[page.index("function laneApprovalCount("):page.index("async function loadLanes(")]
     helpers += page[page.index("function executionPanelSource("):page.index("async function loadChaseThreshold(")]
     start = page.index("async function " + name + "(")

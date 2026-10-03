@@ -193,6 +193,7 @@ test('labels copy-first exchange evidence without inventing a Showcase fill', ()
           tradeId: 'cont-copy-first', direction: 'SHORT', entry: 63060, exit: 63051,
           durationMin: 1.5, exitReason: 'PROFIT_LOCK', pnlPct: 2.38, netUsd: 0.49,
           grossUsd: 0.49, tradeFeesUsd: 0, fundingUsd: 0,
+          aiBand: 'UNKNOWN',
           sourceFillTime: null,
           exchangeOrderAckTime: '2026-08-15 18:48:03 AEST',
           exchangeFillTime: '2026-08-15 18:48:43 AEST',

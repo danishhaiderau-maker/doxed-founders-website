@@ -21,6 +21,15 @@ def _rebind(values):
                 "policy_signature": values["policy_signature"], "generation": values["generation"]}
     values["entry_receipt_sha256"] = entry_sha
     values["future_path_sha256"] = path_sha
+    if "lifecycle_bindings" in values:
+        values["lifecycle_bindings"] = {
+            **values["lifecycle_bindings"],
+            "direction": values["entry_receipt"].get("direction"),
+            "baseline_schedule_sha256": values["entry_receipt"].get("schedule_sha256"),
+            "entry_receipt_sha256": entry_sha,
+            "terminal_schedule_sha256": _sha(values["policy_spec"]),
+            "terminal_policy_signature": values["policy_signature"],
+        }
     for key, label in (
         ("position_context", "conservative-shadow-position-context"),
         ("cost_model", "conservative-shadow-cost-model"),
@@ -53,6 +62,7 @@ def _inputs():
         "fill_price": 100, "filled_qty": 0.4, "direction": "LONG",
         "quantity_attempts": [{"accepted": True, "rounded_executable_quantity": .4,
                                "execution_price": 100, "trigger_bucket_ts": 10}],
+        "schedule_sha256": "b" * 64,
         "symbol": "BTCUSD",
         "quantity_constraints": build_signed_quantity_constraints(
             symbol="BTCUSD", quantity_step="0.1", quantity_precision=1,
@@ -110,6 +120,18 @@ def _inputs():
         "source_segment_receipts": [{**segment_receipt,
                                      "receipt_sha256": _sha(segment_receipt)}],
         "source_segment_payloads": [segment_payload],
+        "lifecycle_bindings": {
+            "schema": "shadow_terminal_lifecycle_bindings_v1",
+            "parent_opportunity_id": "opportunity-1",
+            "parent_episode_id": "episode-1",
+            "source_episode_id": "source-episode-1",
+            "direction": "LONG",
+            "baseline_id": "baseline-1",
+            "baseline_schedule_sha256": "b" * 64,
+            "terminal_schedule_sha256": _sha(policy),
+            "terminal_policy_signature": policy_sha,
+            "entry_receipt_sha256": entry_sha,
+        },
     }
 
 
@@ -130,7 +152,106 @@ def test_complete_shadow_terminal_reuses_exit_policy_and_accounts_partial_quanti
     assert receipt["net_pnl_usd"] == 1.07
     assert receipt["spread_slippage_basis"] == "EMBEDDED_IN_ENTRY_AND_EXECUTABLE_EXIT_PRICES"
     assert receipt["simulation_model"] == "SAFE_POLICY_REPLAY_V3_EXECUTABLE_EXIT_BBO_DEPTH"
+    lifecycle = receipt["lifecycle_trace"]
+    assert lifecycle["scope"] == "ENTRY_PLUS_SINGLE_POSITION_EXIT_AFTER_LAST_ACCEPTED_ENTRY_FILL"
+    assert lifecycle["entry"]["filled_quantity"] == "0.4"
+    assert lifecycle["entry"]["requested_quantity"] is None
+    assert lifecycle["exit"]["final_residual_quantity"] == "0"
+    assert lifecycle["exit"]["events"][-1]["remaining_quantity"] == "0"
+    assert lifecycle["lifecycle_sha256"] == receipt["lifecycle_trace_sha256"]
+    assert receipt["receipt_sha256"] == _sha({
+        key: value for key, value in receipt.items() if key != "receipt_sha256"
+    })
     assert len(receipt["receipt_sha256"]) == 64
+
+
+def test_lifecycle_records_partial_entry_and_partial_exit_with_zero_residual():
+    values = _inputs()
+    values["entry_receipt"].update({
+        "requested_qty": .6,
+        "filled_qty": .4,
+        "fill_price": 100,
+        "quantity_attempts": [
+            {"accepted": True, "rounded_executable_quantity": .2,
+             "execution_price": 99, "trigger_bucket_ts": 9},
+            {"accepted": True, "rounded_executable_quantity": .2,
+             "execution_price": 101, "trigger_bucket_ts": 10},
+        ],
+    })
+    values["policy_spec"]["profit_protection"]["partial_take_profits"] = [[1, .5]]
+    values["policy_signature"] = canonical_hash("v3-policy", values["policy_spec"])
+    _rebind(values)
+
+    receipt = evaluate_shadow_terminal(**values)
+
+    assert receipt["status"] == "COMPLETE", receipt["blockers"]
+    lifecycle = receipt["lifecycle_trace"]
+    assert [event["timestamp"] for event in lifecycle["entry"]["events"]] == [9, 10]
+    assert lifecycle["entry"]["requested_quantity"] == "0.6"
+    assert lifecycle["entry"]["filled_quantity"] == "0.4"
+    assert lifecycle["entry"]["unfilled_quantity"] == "0.2"
+    assert [event["timestamp"] for event in lifecycle["exit"]["events"]] == sorted(
+        event["timestamp"] for event in lifecycle["exit"]["events"]
+    )
+    assert lifecycle["exit"]["events"][0]["event_type"] == "PARTIAL_EXIT_FILL"
+    assert lifecycle["exit"]["events"][-1]["remaining_quantity"] == "0"
+    assert lifecycle["exit"]["final_residual_quantity"] == "0"
+    assert "PROTECTIVE_EXITS_INTERLEAVED_WITH_STAGGERED_ENTRY_FILLS_NOT_MODELED" in lifecycle["scope_limitations"]
+
+
+def test_missing_lifecycle_binding_is_unknown_not_complete():
+    values = _inputs()
+    values["lifecycle_bindings"] = None
+
+    receipt = evaluate_shadow_terminal(**values)
+
+    assert receipt["status"] == "UNKNOWN"
+    assert receipt["lifecycle_trace_status"] == "UNKNOWN"
+    assert "LIFECYCLE_BINDINGS_SCHEMA_INVALID" in receipt["blockers"]
+
+
+def test_inconsistent_lifecycle_schedule_binding_is_unknown():
+    values = _inputs()
+    values["lifecycle_bindings"]["terminal_schedule_sha256"] = "c" * 64
+
+    receipt = evaluate_shadow_terminal(**values)
+
+    assert receipt["status"] == "UNKNOWN"
+    assert "LIFECYCLE_TERMINAL_SCHEDULE_SHA256_MISMATCH" in receipt["blockers"]
+
+
+def test_missing_or_unordered_replay_trace_is_unknown(monkeypatch):
+    import research.conservative_shadow_terminal as terminal_module
+
+    original = terminal_module.replay_protected_policy
+
+    def replay_without_trace(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["trace"] = []
+        return result
+
+    monkeypatch.setattr(terminal_module, "replay_protected_policy", replay_without_trace)
+    receipt = evaluate_shadow_terminal(**_inputs())
+
+    assert receipt["status"] == "UNKNOWN"
+    assert "LIFECYCLE_EXIT_TRACE_MISSING" in receipt["blockers"]
+
+
+def test_unordered_replay_trace_is_unknown(monkeypatch):
+    import research.conservative_shadow_terminal as terminal_module
+
+    original = terminal_module.replay_protected_policy
+
+    def replay_with_reversed_trace(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["trace"] = list(reversed(result["trace"]))
+        return result
+
+    monkeypatch.setattr(terminal_module, "replay_protected_policy", replay_with_reversed_trace)
+    receipt = evaluate_shadow_terminal(**_inputs())
+
+    assert receipt["status"] == "UNKNOWN"
+    assert "LIFECYCLE_EXIT_TRACE_NOT_STRICTLY_ORDERED" in receipt["blockers"]
 
 
 def test_missing_second_in_required_horizon_is_unknown():
@@ -345,6 +466,7 @@ def test_actual_conservative_limit_fill_receipt_round_trips_to_terminal_replay()
     entry = evaluate_limit_fill(
         [{"schema": "market_microstructure_1s_v1", "symbol": "BTCUSD",
           "bucket_ts": 10, "fresh": True, "valid_bbo": True,
+          "source_ts": 10, "observed_at_ts": 10.5,
           "bid": 99.9, "ask": 100, "bid_qty": 1, "ask_qty": .4,
           "trade_count": 0, "buy_qty": 0, "sell_qty": 0}],
         direction="LONG", requested_qty=.4,

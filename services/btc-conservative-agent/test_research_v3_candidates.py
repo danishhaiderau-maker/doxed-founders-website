@@ -606,7 +606,10 @@ class V3CandidateTests(unittest.TestCase):
             store.append("opportunity", {
                 "record_id": "opportunity:episode-1", "episode_id": "episode-1",
                 "signal_ts": 1000,
-                "feature_snapshot_at_signal": {"market_context": {"regime_label": "BULL"}},
+                "feature_snapshot_at_signal": {
+                    "regime": {"value": " bear ", "observed_ts": 999},
+                    "market_context": {"regime_label": "BULL"},
+                },
             })
             store.append("order_intent", {
                 "record_id": "order-intent:event-1", "episode_id": "episode-1",
@@ -621,7 +624,10 @@ class V3CandidateTests(unittest.TestCase):
             rows = load_candidate_inputs(tmp, epoch_id="epoch-clean")
 
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["regime"], "BULL")
+            self.assertEqual(rows[0]["regime"], "BEAR")
+            self.assertEqual(rows[0]["regime_observed_ts"], 999.0)
+            self.assertEqual(rows[0]["regime_observation_status"], "CAUSAL")
+            self.assertTrue(rows[0]["regime_qualification_eligible"])
 
     def test_one_minute_fallback_is_adverse_first(self):
         candle = [{"t": 60, "o": 100, "h": 102, "l": 98, "c": 101}]

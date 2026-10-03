@@ -6,6 +6,7 @@ from collections import Counter
 from functools import lru_cache
 from typing import Any, Iterable
 
+from research_v3_contract import normalize_regime_observation
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_liquidation_buffer import verify_liquidation_buffer_receipt
@@ -18,6 +19,16 @@ REQUIRED_MEASURED_COST_FIELDS = (
     "entry_slippage_usd", "exit_slippage_usd", "slippage_usd",
     "latency_cost_usd", "gross_pnl_usd", "net_pnl_usd",
 )
+
+
+def _qualification_regime_label(row: dict[str, Any]) -> str:
+    """Do not let timestamped JSON envelopes become distinct regime labels."""
+    observation = normalize_regime_observation(
+        row.get("regime"),
+        signal_ts=row.get("signal_ts"),
+        scalar_observed_ts=row.get("regime_observed_ts"),
+    )
+    return str(observation["value"]) if observation["qualification_eligible"] else "UNKNOWN"
 
 
 def _measured_cost_evidence(
@@ -336,7 +347,11 @@ def validate_policy(
     risk.pop("realized_zero", None)
     budget = drawdown_budget_gate(risk, max_drawdown_usd=max_drawdown_usd, max_drawdown_pct=max_drawdown_pct, min_cvar95_usd=min_cvar95_usd)
     bootstrap = episode_block_bootstrap(values)
-    regimes = {str(row.get("regime") or "UNKNOWN") for row in episodes if str(row.get("regime") or "UNKNOWN") != "UNKNOWN"}
+    regimes = {
+        regime
+        for row in episodes
+        if (regime := _qualification_regime_label(row)) != "UNKNOWN"
+    }
     adjusted_required_probability = 1.0 - (0.05 / max(1, int(policies_tested)))
     probability = float(bootstrap.get("probability_mean_positive") or 0)
     executed_episode_ids = [

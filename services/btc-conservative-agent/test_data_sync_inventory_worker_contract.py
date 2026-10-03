@@ -251,7 +251,10 @@ def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_trans
     assert 'result_path.read_text(encoding="utf-8")' in source
     assert "timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS" in source
     assert "_DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS = 15.0" in source
+    assert "def _data_sync_inventory_slice_seconds()" in source
+    assert 'os.getenv("DATA_SYNC_INVENTORY_SLICE_SECONDS"' in source
     assert '"inventory_elapsed_budget_seconds": (' in source
+    assert "_data_sync_inventory_slice_seconds()" in source
     assert "except BaseException as exc:" in source
     assert "transient_paths = [request_path, result_path]" in source
     assert 'request_path.parent.glob(f"*{nonce}*")' in source
@@ -264,7 +267,7 @@ def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_trans
 
 def test_parent_limits_each_resumable_inventory_slice_to_one_manifest_page():
     source = BOT_PATH.read_text(encoding="utf-8")
-    assert '"inventory_file_budget": _DATA_SYNC_MANIFEST_PAGE_DEFAULT' in source
+    assert '"inventory_file_budget": _data_sync_inventory_file_budget()' in source
     assert '"inventory_page_rows": _DATA_SYNC_MANIFEST_PAGE_DEFAULT' in source
 
 
@@ -1242,3 +1245,221 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
         )
     }
     assert "v3/ledgers/decision.jsonl" not in invalid_pointer_rows
+
+
+def test_worker_preserves_quarantine_code_without_serializing_exception_text(tmp_path, monkeypatch):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "f" * 32
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(_request(volume, nonce)), encoding="utf-8")
+    private_detail = "untrusted binding detail: /private/runtime/receipt.json"
+
+    def fail(*_args):
+        raise worker.InventoryWorkerError(
+            "QUARANTINE_COMPONENT_BINDING_INVALID", private_detail,
+        )
+
+    monkeypatch.setattr(worker, "_build_resumable", fail)
+    assert worker.run(request_path, result_path, nonce) == 1
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["failure_code"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert result["failure_stage"] == "BUILD_RESUMABLE"
+    assert re.fullmatch(r"[0-9a-f]{64}", result["failure_fingerprint"])
+    assert isinstance(result["volume_free_bytes"], int)
+    assert result["volume_free_bytes"] >= 0
+    assert "failure_reason" not in result
+    assert private_detail not in json.dumps(result, sort_keys=True)
+
+
+def test_worker_labels_release_failure_without_masking_build_stage_contract(tmp_path, monkeypatch):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "e" * 32
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(_request(volume, nonce)), encoding="utf-8")
+    worker_receipt = {
+        "request_fingerprint": "a" * 64,
+        "checkpoint_path": "checkpoint.json",
+        "database_path": "inventory.sqlite",
+        "files_seen": 0,
+        "dirs_seen": 0,
+        "rows_written": 0,
+        "phase": "FILE_START",
+        "invocations": 1,
+        "pages_written": 0,
+        "pages_total": 1,
+        "scan_units_completed": 0,
+        "directories_frozen": 0,
+        "directory_entries_frozen": 0,
+        "pending_directories": 1,
+        "current_directory_files_remaining": 0,
+        "generation_directory_limit": 100,
+        "generation_entry_limit": 100,
+        "generation_spool_bytes": 0,
+        "spool_bytes_used": 0,
+        "invocation_files_seen": 0,
+        "invocation_dirs_seen": 0,
+    }
+    monkeypatch.setattr(
+        worker,
+        "_build_resumable",
+        lambda *_args: (None, dict(worker_receipt)),
+    )
+    private_detail = "lease release detail: /private/runtime/lease.json"
+
+    def fail_release(*_args):
+        raise worker.InventoryWorkerError("GENERATION_LEASE_RELEASE_FAILED", private_detail)
+
+    monkeypatch.setattr(worker, "_release_generation_lease", fail_release)
+    assert worker.run(request_path, result_path, nonce) == 1
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    # The unallowlisted exception code remains redacted to the stable public
+    # contract; the separate stage pinpoints which bounded operation failed.
+    assert result["failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert result["failure_stage"] == "RELEASE_LEASE"
+    assert private_detail not in json.dumps(result, sort_keys=True)
+
+
+def test_worker_keeps_build_stage_and_redacts_private_exception_class_when_cleanup_also_fails(
+    tmp_path, monkeypatch,
+):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "d" * 32
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(_request(volume, nonce)), encoding="utf-8")
+    private_build_detail = "build failure: /private/runtime/build-token"
+    private_release_detail = "release failure: /private/runtime/lease-token"
+
+    private_exception = type("PrivateBuildToken", (RuntimeError,), {})
+
+    def fail_build(*_args):
+        raise private_exception(private_build_detail)
+
+    def fail_release(*_args):
+        raise worker.InventoryWorkerError(
+            "GENERATION_LEASE_RELEASE_FAILED", private_release_detail,
+        )
+
+    monkeypatch.setattr(worker, "_build_resumable", fail_build)
+    monkeypatch.setattr(worker, "_release_generation_lease", fail_release)
+    assert worker.run(request_path, result_path, nonce) == 1
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert result["failure_stage"] == "BUILD_RESUMABLE"
+    assert "failure_kind" not in result
+    assert private_build_detail not in serialized
+    assert private_release_detail not in serialized
+    assert "PrivateBuildToken" not in serialized
+
+
+def test_publish_generation_keeps_primary_error_when_temporary_cleanup_fails(
+    tmp_path, monkeypatch,
+):
+    worker = _load_worker()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    class BadDescriptorConnection:
+        @staticmethod
+        def execute(*_args):
+            return [("{not-json",)]
+
+    original_unlink = Path.unlink
+
+    def fail_only_temporary_index(path, *args, **kwargs):
+        if path.name.startswith("page-index."):
+            raise OSError("temporary index cleanup failed")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(worker.Path, "unlink", fail_only_temporary_index)
+    with pytest.raises(json.JSONDecodeError):
+        worker._publish_generation(
+            {}, tmp_path, "a" * 64, staging, BadDescriptorConnection(),
+        )
+
+
+def test_build_resumable_keeps_checkpoint_error_when_quarantine_fails(
+    tmp_path, monkeypatch,
+):
+    worker = _load_worker()
+    paths = (
+        tmp_path / "checkpoint.json",
+        tmp_path / "progress.json",
+        tmp_path / "inventory.sqlite",
+        tmp_path / "staging",
+    )
+    causal = worker.CheckpointError("causal checkpoint failure")
+    monkeypatch.setattr(worker, "_state_paths", lambda *_args: paths)
+    monkeypatch.setattr(worker, "_request_fingerprint", lambda _request: "a" * 64)
+    monkeypatch.setattr(worker, "_generation_limits", lambda _request: (1, 1, 1))
+    monkeypatch.setattr(worker, "_load_checkpoint", lambda *_args: (_ for _ in ()).throw(causal))
+    monkeypatch.setattr(
+        worker, "_quarantine", lambda *_args: (_ for _ in ()).throw(OSError("quarantine failed")),
+    )
+    with pytest.raises(worker.CheckpointError) as raised:
+        worker._build_resumable({"_volume": tmp_path}, tmp_path)
+    assert raised.value is causal
+
+
+def test_build_resumable_keeps_causal_error_when_close_and_quarantine_fail(
+    tmp_path, monkeypatch,
+):
+    worker = _load_worker()
+    paths = (
+        tmp_path / "checkpoint.json",
+        tmp_path / "progress.json",
+        tmp_path / "inventory.sqlite",
+        tmp_path / "staging",
+    )
+
+    class Result:
+        @staticmethod
+        def fetchone():
+            return (0,)
+
+    class CloseFailingConnection:
+        @staticmethod
+        def execute(*_args):
+            return Result()
+
+        @staticmethod
+        def close():
+            raise OSError("connection close failed")
+
+    checkpoint = {
+        "invocations": 1,
+        "rows_written": 0,
+        "directories_frozen": 0,
+        "directory_entries_frozen": 0,
+        "phase": "SCAN",
+        "top_level_complete": False,
+        "top_level_after": None,
+        "roots": [],
+        "pending_dirs": [],
+        "current_dir": None,
+        "files_seen": 0,
+        "dirs_seen": 0,
+    }
+    causal = worker.InventoryWorkerError("SNAPSHOT_INTEGRITY_FAILED", "causal build failure")
+    monkeypatch.setattr(worker, "_state_paths", lambda *_args: paths)
+    monkeypatch.setattr(worker, "_request_fingerprint", lambda _request: "a" * 64)
+    monkeypatch.setattr(worker, "_generation_limits", lambda _request: (1, 1, 1))
+    monkeypatch.setattr(worker, "_load_checkpoint", lambda *_args: dict(checkpoint))
+    monkeypatch.setattr(worker, "_open_database", lambda *_args: CloseFailingConnection())
+    monkeypatch.setattr(worker, "_spool_counters", lambda _connection: (0, 0))
+    monkeypatch.setattr(worker, "_budgets", lambda _request: (1, 1, 60))
+    monkeypatch.setattr(
+        worker, "_row", lambda *_args: (_ for _ in ()).throw(causal),
+    )
+    monkeypatch.setattr(
+        worker, "_quarantine", lambda *_args: (_ for _ in ()).throw(OSError("quarantine failed")),
+    )
+    with pytest.raises(worker.InventoryWorkerError) as raised:
+        worker._build_resumable({
+            "_volume": tmp_path,
+            "top_level_receipt_names": ["receipt.json"],
+        }, tmp_path)
+    assert raised.value is causal

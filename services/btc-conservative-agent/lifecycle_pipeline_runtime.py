@@ -28,12 +28,15 @@ from production_rotation_orchestrator import (
 logger = logging.getLogger(__name__)
 
 RUNTIME_SCHEMA = "lifecycle_pipeline_runtime_status_v1"
-MIN_BACKOFF_SEC = 180.0
-MAX_BACKOFF_SEC = 1800.0
+MIN_BACKOFF_SEC = 30.0
+MAX_BACKOFF_SEC = 600.0
 DEFAULT_INTERVAL_SEC = 180.0
 BACKLOG_INTERVAL_SEC = 1.0
-DEFAULT_WALL_TIMEOUT_SEC = 75.0
-DEFAULT_CPU_LIMIT_SEC = 60
+# Receipt-bootstrap of large append ledgers on shared-cpu-1x needs more than
+# the original 60s RLIMIT_CPU / 75s wall; otherwise every cycle times out with
+# records_indexed=0 and inventory stays WAITING_RECEIPT_BOOTSTRAP forever.
+DEFAULT_WALL_TIMEOUT_SEC = 300.0
+DEFAULT_CPU_LIMIT_SEC = 240
 DEFAULT_RSS_LIMIT_BYTES = 512 * 1024 * 1024
 
 
@@ -108,6 +111,11 @@ def _minimal_worker_environment(source_revision: str | None = None) -> dict[str,
     allowed = (
         "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
         "LANG", "LC_ALL",
+        # Non-secret cooperative bootstrap throughput knobs (capped in
+        # research_v3_store). Without these the credential-free worker stays on
+        # the default 64-record step and identity rebind catch-up takes hours.
+        "V3_BOOTSTRAP_RECORDS_PER_STEP",
+        "V3_BOOTSTRAP_BYTES_PER_STEP",
     )
     environment = {key: os.environ[key] for key in allowed if os.environ.get(key)}
     environment["PYTHONIOENCODING"] = "utf-8"

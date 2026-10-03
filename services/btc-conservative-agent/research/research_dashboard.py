@@ -251,6 +251,8 @@ BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
+ANALYZER_REPORT_PUBLICATION_UTC_MAX_AGE_SECONDS = 24 * 60 * 60
+ANALYZER_REPORT_PUBLICATION_UTC_POLICY = "ANALYZER_REPORT_PUBLICATION_UTC_24H_V1"
 POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
@@ -542,10 +544,24 @@ def _integrity_payload() -> dict:
     )
 
 
+def _integrity_receipt_is_qualification_ready(receipt: dict | None) -> bool:
+    """Only a current explicitly-VALID integrity receipt can unlock a claim.
+
+    Missing receipts and legacy/unknown status values remain inspectable, but
+    are not evidence that a policy can be called qualified.
+    """
+    return bool(
+        isinstance(receipt, dict)
+        and receipt.get("valid") is True
+        and str(receipt.get("report_status") or "").strip().upper() == "VALID"
+    )
+
+
 def _integrity_with_generation_freshness(receipt: dict | None) -> dict:
     rep = dict(receipt or {})
     if not rep:
-        rep = {"valid": True, "report_status": "UNKNOWN", "checks": [], "banner": None}
+        # Absence is unknown, never an implicitly valid integrity receipt.
+        rep = {"valid": None, "report_status": "UNKNOWN", "checks": [], "banner": None}
     freshness = _generation_freshness_meta()
     rep["generation_freshness"] = freshness
     if not freshness["current"]:
@@ -574,10 +590,89 @@ def _integrity_with_generation_freshness(receipt: dict | None) -> dict:
     return rep
 
 
-def _summary_stale_meta(compact: dict) -> dict:
+def _publication_freshness_meta(
+    compact: dict | None,
+    manifest: dict | None = None,
+    *,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Classify saved-report age under the named UTC publication policy.
+
+    Timestamp absence or invalidity is reported as unknown evidence. It does
+    not become an age-based stale claim: only a parsed publication older than
+    the explicit maximum age does that.
+    """
+    compact = compact if isinstance(compact, dict) else {}
+    manifest = manifest if isinstance(manifest, dict) else {}
+    source = None
+    generated_at = compact.get("generated_at")
+    if generated_at not in (None, ""):
+        source = "compact.generated_at"
+    else:
+        generated_at = manifest.get("generated_at")
+        if generated_at not in (None, ""):
+            source = "manifest.generated_at"
+
+    base = {
+        "policy": ANALYZER_REPORT_PUBLICATION_UTC_POLICY,
+        "source": source,
+        "generated_at": generated_at or None,
+        "age_seconds": None,
+        "max_age_seconds": ANALYZER_REPORT_PUBLICATION_UTC_MAX_AGE_SECONDS,
+        "stale": False,
+    }
+    if source is None:
+        return {
+            **base,
+            "status": "UNKNOWN_MISSING_TIMESTAMP",
+            "reason": "REPORT_PUBLICATION_TIMESTAMP_MISSING",
+        }
+
+    published_at = _parse_utc_dt(generated_at)
+    if published_at is None:
+        return {
+            **base,
+            "status": "UNKNOWN_INVALID_TIMESTAMP",
+            "reason": "REPORT_PUBLICATION_TIMESTAMP_INVALID",
+        }
+    published_at = published_at.astimezone(timezone.utc)
+    observed_at = now_utc or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    else:
+        observed_at = observed_at.astimezone(timezone.utc)
+    age_seconds = int((observed_at - published_at).total_seconds())
+    base.update({
+        "generated_at": published_at.isoformat(),
+        "age_seconds": age_seconds,
+    })
+    if age_seconds < 0:
+        return {
+            **base,
+            "status": "UNKNOWN_FUTURE_TIMESTAMP",
+            "reason": "REPORT_PUBLICATION_TIMESTAMP_IN_FUTURE",
+        }
+    if age_seconds > ANALYZER_REPORT_PUBLICATION_UTC_MAX_AGE_SECONDS:
+        return {
+            **base,
+            "status": "STALE",
+            "stale": True,
+            "reason": "REPORT_PUBLICATION_EXCEEDS_UTC_AGE_POLICY",
+        }
+    return {
+        **base,
+        "status": "FRESH",
+        "reason": "REPORT_PUBLICATION_WITHIN_UTC_AGE_POLICY",
+    }
+
+
+def _summary_stale_meta(compact: dict, manifest: dict | None = None) -> dict:
     """Detect when dashboard JSON is from pre-wipe / pre-session analyzer run."""
     session = _load_bot_session() or {}
     compact = compact or {}
+    manifest = manifest if isinstance(manifest, dict) else (
+        _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    )
     reasons = []
     stale = False
     gen_at = compact.get("generated_at")
@@ -614,6 +709,13 @@ def _summary_stale_meta(compact: dict) -> dict:
         stale = True
         reasons.extend(freshness["reasons"])
 
+    publication_freshness = _publication_freshness_meta(compact, manifest)
+    if publication_freshness["stale"]:
+        stale = True
+        reasons.append(
+            "Saved analyzer report publication exceeds the named UTC age policy"
+        )
+
     return {
         "stale": stale,
         "reasons": reasons,
@@ -623,6 +725,7 @@ def _summary_stale_meta(compact: dict) -> dict:
         "trades_csv_rows": trades_rows,
         "report_generated_at": gen_at,
         "generation_freshness": freshness,
+        "publication_freshness": publication_freshness,
     }
 
 
@@ -1065,14 +1168,118 @@ def _mirror_source_revision() -> str | None:
     return str(revision) if revision else None
 
 
-def _identity_matches(left, right) -> bool:
-    """Compare full or intentionally abbreviated immutable identities."""
+_FULL_SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHORT_SOURCE_REVISION_RE = re.compile(r"^[0-9a-f]{12,39}$")
+
+
+def _source_revision_parity(left, right) -> str:
+    """Compare one full SHA with either the full SHA or its safe short alias."""
     left = str(left or "").strip()
     right = str(right or "").strip()
-    return bool(left and right and (left.startswith(right) or right.startswith(left)))
+    left_full = bool(_FULL_SOURCE_REVISION_RE.fullmatch(left))
+    right_full = bool(_FULL_SOURCE_REVISION_RE.fullmatch(right))
+    left_short = bool(_SHORT_SOURCE_REVISION_RE.fullmatch(left))
+    right_short = bool(_SHORT_SOURCE_REVISION_RE.fullmatch(right))
+    if left_full and right_full:
+        return "MATCH" if left == right else "MISMATCH"
+    if left_full and right_short:
+        return "MATCH" if left.startswith(right) else "MISMATCH"
+    if left_short and right_full:
+        return "MATCH" if right.startswith(left) else "MISMATCH"
+    return "UNAVAILABLE"
+
+
+def _source_revision_consensus(report_revision, mirror_revision, observed_revision) -> dict:
+    """Resolve every supplied revision against one agreed full SHA.
+
+    Pairwise prefix checks are insufficient: two different full SHAs can share
+    the same 12-character mirror alias and both appear to match it. Establish
+    one full-SHA anchor first, reject conflicting full identities, then resolve
+    any 12--39 character aliases only against that anchor.
+    """
+    values = {
+        "report": str(report_revision or "").strip(),
+        "mirror": str(mirror_revision or "").strip(),
+        "observed": str(observed_revision or "").strip(),
+    }
+    full_values = {
+        value for value in values.values()
+        if _FULL_SOURCE_REVISION_RE.fullmatch(value)
+    }
+    if len(full_values) > 1:
+        return {
+            "anchor": None,
+            "status": "CONFLICT",
+            "conflict": True,
+            "conflict_reason": "FULL_SOURCE_REVISION_CONFLICT",
+            "field_parity": {name: "MISMATCH" for name in values},
+            "revision_parity": "MISMATCH",
+            "observed_revision_parity": "MISMATCH",
+        }
+
+    anchor = next(iter(full_values), None)
+    field_parity = {}
+    for name, value in values.items():
+        if not value or anchor is None:
+            field_parity[name] = "UNAVAILABLE"
+        elif _FULL_SOURCE_REVISION_RE.fullmatch(value):
+            field_parity[name] = "MATCH" if value == anchor else "MISMATCH"
+        elif _SHORT_SOURCE_REVISION_RE.fullmatch(value):
+            field_parity[name] = "MATCH" if anchor.startswith(value) else "MISMATCH"
+        else:
+            field_parity[name] = "UNAVAILABLE"
+
+    alias_conflict = any(value == "MISMATCH" for value in field_parity.values())
+    report_mirror = (field_parity["report"], field_parity["mirror"])
+    revision_parity = (
+        "MISMATCH" if alias_conflict
+        else "MATCH" if report_mirror == ("MATCH", "MATCH")
+        else "UNAVAILABLE"
+    )
+    observed_parity = (
+        "MISMATCH" if alias_conflict
+        else field_parity["observed"]
+    )
+    all_match = all(value == "MATCH" for value in field_parity.values())
+    return {
+        "anchor": anchor,
+        "status": "CONFLICT" if alias_conflict else "MATCH" if all_match else "UNAVAILABLE",
+        "conflict": alias_conflict,
+        "conflict_reason": "SOURCE_REVISION_ALIAS_CONFLICT" if alias_conflict else None,
+        "field_parity": field_parity,
+        "revision_parity": revision_parity,
+        "observed_revision_parity": observed_parity,
+    }
+
+
+def _exact_identity_parity(left, right) -> str:
+    """Compare opaque identities exactly; prefixes have no identity authority."""
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    if not left or not right:
+        return "UNAVAILABLE"
+    return "MATCH" if left == right else "MISMATCH"
 
 
 _SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC = 600
+
+
+def _receipt_alias_value(receipt: dict, *keys: str) -> tuple[object | None, bool]:
+    """Return one compatibility value and reject contradictory aliases.
+
+    A saved receipt is an untrusted historical claim.  Compatibility aliases
+    are supported only when every supplied spelling has the same type and
+    value; choosing the first spelling would let a contradictory receipt make
+    a running or failed transfer look idle/current.
+    """
+    values = [receipt[key] for key in keys if key in receipt]
+    if not values:
+        return None, False
+    first = values[0]
+    conflict = any(
+        type(value) is not type(first) or value != first for value in values[1:]
+    )
+    return first, conflict
 
 
 def _mirror_sync_activity_meta(receipt: dict, *, now_ts: float | None = None) -> dict:
@@ -1082,11 +1289,15 @@ def _mirror_sync_activity_meta(receipt: dict, *, now_ts: float | None = None) ->
     the historical in-progress flag separately as a fail-closed gate; an expired
     activity claim cannot be upgraded to proof that synchronization completed.
     """
-    stamp = next((receipt[key] for key in ("updatedAt", "updated_at", "syncedAt", "synced_at")
-                  if key in receipt), None)
+    receipt = receipt if isinstance(receipt, dict) else {}
+    stamp, timestamp_alias_conflict = _receipt_alias_value(
+        receipt, "updatedAt", "updated_at", "syncedAt", "synced_at",
+    )
     age = None
-    freshness = "MISSING_TIMESTAMP"
-    if stamp not in (None, ""):
+    freshness = (
+        "CONTRADICTORY_ALIASES" if timestamp_alias_conflict else "MISSING_TIMESTAMP"
+    )
+    if not timestamp_alias_conflict and stamp not in (None, ""):
         try:
             if not isinstance(stamp, str):
                 raise ValueError("timestamp must be an explicit timezone-aware string")
@@ -1099,8 +1310,12 @@ def _mirror_sync_activity_meta(receipt: dict, *, now_ts: float | None = None) ->
         except (ValueError, TypeError, OverflowError, OSError):
             freshness = "INVALID_TIMESTAMP"
             age = None
-    in_progress = receipt.get("inProgress", receipt.get("in_progress"))
-    if freshness != "FRESH":
+    in_progress, activity_alias_conflict = _receipt_alias_value(
+        receipt, "inProgress", "in_progress",
+    )
+    if timestamp_alias_conflict or activity_alias_conflict:
+        status = "UNKNOWN_CONTRADICTORY_ALIASES"
+    elif freshness != "FRESH":
         status = "UNKNOWN_" + freshness
     elif type(in_progress) is not bool:
         status = "UNKNOWN_ACTIVITY_FLAG"
@@ -1112,6 +1327,9 @@ def _mirror_sync_activity_meta(receipt: dict, *, now_ts: float | None = None) ->
         "mirror_sync_receipt_timestamp": stamp,
         "mirror_sync_receipt_age_seconds": round(age, 3) if age is not None else None,
         "mirror_sync_activity_receipt_max_age_seconds": _SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC,
+        "mirror_sync_activity_alias_conflict": (
+            timestamp_alias_conflict or activity_alias_conflict
+        ),
         "mirror_sync_owner_verified": False,
         "mirror_sync_activity_basis": "SAVED_RECEIPT_ONLY_NOT_PROCESS_OR_PROGRESS_PROOF",
     }
@@ -1127,43 +1345,75 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         _read_json(REPORT_MANIFEST_FILE, {}) or {}
     )
     session = _load_bot_session() or {}
-    # generation_revision identifies analyzer code. Dataset freshness instead
-    # compares the independently recorded canonical source revision.
-    generation_revision = manifest.get("source_revision") or manifest.get("generation_revision")
+    # These are intentionally distinct identities.  A report can be produced
+    # by newer analyzer code from older mirror data; neither identifier may
+    # stand in for the other when deciding whether a report is current.
+    report_dataset_source_revision = str(manifest.get("source_revision") or "").strip() or None
+    analyzer_generation_revision = str(manifest.get("generation_revision") or "").strip() or None
     sync_receipt = _mirror_sync_receipt()
+    sync_receipt = sync_receipt if isinstance(sync_receipt, dict) else {}
     mirror_revision = _mirror_source_revision()
-    observed_revision = (
-        sync_receipt.get("observedSourceRevision")
-        or sync_receipt.get("observed_source_revision")
+    observed_revision, observed_revision_alias_conflict = _receipt_alias_value(
+        sync_receipt, "observedSourceRevision", "observed_source_revision",
     )
-    sync_in_progress = bool(
-        sync_receipt.get("inProgress") or sync_receipt.get("in_progress")
+    raw_sync_in_progress, sync_in_progress_alias_conflict = _receipt_alias_value(
+        sync_receipt, "inProgress", "in_progress",
+    )
+    # Only the JSON boolean true is a running-transfer claim.  In particular,
+    # the string "false" must not become truthy and make a bad receipt look
+    # like a confirmed downloader state.
+    sync_in_progress = (
+        raw_sync_in_progress is True and not sync_in_progress_alias_conflict
     )
     sync_activity = _mirror_sync_activity_meta(sync_receipt)
-    sync_revision_parity = str(
-        sync_receipt.get("revisionParity")
-        or sync_receipt.get("revision_parity")
-        or "UNAVAILABLE"
-    ).upper()
+    sync_activity_receipt_current = (
+        sync_activity["mirror_sync_receipt_freshness"] == "FRESH"
+    )
+    sync_activity_idle = (
+        sync_activity["mirror_sync_activity_status"]
+        == "REPORTED_IDLE_OWNER_UNVERIFIED"
+    )
+    raw_sync_revision_parity, sync_revision_parity_alias_conflict = _receipt_alias_value(
+        sync_receipt, "revisionParity", "revision_parity",
+    )
+    sync_revision_parity = (
+        "CONTRADICTORY_ALIASES"
+        if sync_revision_parity_alias_conflict
+        else str(raw_sync_revision_parity or "UNAVAILABLE").upper()
+    )
     sync_receipt_ok = sync_receipt.get("ok") is True
-    sync_poll_ok = sync_receipt.get("pollOk", sync_receipt.get("poll_ok"))
+    sync_poll_ok, sync_poll_alias_conflict = _receipt_alias_value(
+        sync_receipt, "pollOk", "poll_ok",
+    )
+    sync_poll_receipt_status = (
+        "CONTRADICTORY_ALIASES" if sync_poll_alias_conflict else
+        "CONFIRMED" if sync_poll_ok is True else
+        "FAILED" if sync_poll_ok is False else
+        "MISSING_OR_NULL" if sync_poll_ok is None else
+        "INVALID"
+    )
     generation_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
     mirror_epoch = (
         session.get("collector_v22_epoch_id")
         or session.get("fresh_epoch_id")
         or session.get("epoch_id")
     )
-    revision_parity = (
-        "MATCH" if _identity_matches(generation_revision, mirror_revision)
-        else "MISMATCH" if generation_revision and mirror_revision
-        else "UNAVAILABLE"
+    revision_consensus = _source_revision_consensus(
+        report_dataset_source_revision,
+        mirror_revision,
+        None if observed_revision_alias_conflict else observed_revision,
     )
-    epoch_parity = (
-        "MATCH" if _identity_matches(generation_epoch, mirror_epoch)
-        else "MISMATCH" if generation_epoch and mirror_epoch
-        else "UNAVAILABLE"
+    revision_parity = revision_consensus["revision_parity"]
+    epoch_parity = _exact_identity_parity(generation_epoch, mirror_epoch)
+    observed_revision_parity = (
+        "UNAVAILABLE" if observed_revision_alias_conflict else
+        revision_consensus["observed_revision_parity"]
     )
     reasons = []
+    if not report_dataset_source_revision:
+        reasons.append(
+            "Published report does not declare a canonical dataset source revision"
+        )
     if revision_parity != "MATCH":
         reasons.append(
             "Analyzer dataset source revision does not match the canonical Fly mirror"
@@ -1175,6 +1425,26 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
             "Analyzer generation epoch does not match the canonical Fly mirror epoch"
             if epoch_parity == "MISMATCH"
             else "Analyzer or mirror epoch identity is unavailable"
+        )
+    if sync_activity["mirror_sync_activity_alias_conflict"]:
+        reasons.append(
+            "Saved mirror sync activity compatibility aliases conflict; current downloader activity is unknown"
+        )
+    elif not sync_activity_receipt_current:
+        receipt_freshness = sync_activity["mirror_sync_receipt_freshness"]
+        reasons.append(
+            "Saved canonical Fly mirror synchronization activity receipt is "
+            f"{receipt_freshness}; current downloader ownership and transfer "
+            "state are unknown"
+        )
+    elif (
+        not sync_activity_idle
+        and not sync_in_progress
+        and sync_activity["mirror_sync_activity_status"] == "UNKNOWN_ACTIVITY_FLAG"
+    ):
+        reasons.append(
+            "Saved mirror sync activity flag is invalid; current downloader "
+            "activity is unknown"
         )
     if sync_in_progress:
         receipt_freshness = sync_activity["mirror_sync_receipt_freshness"]
@@ -1193,30 +1463,49 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         reasons.append(
             "Canonical Fly mirror synchronization receipt is failed or unavailable"
         )
-    if sync_poll_ok is False:
+    if sync_poll_receipt_status == "CONTRADICTORY_ALIASES":
+        reasons.append(
+            "Canonical Fly mirror synchronization poll compatibility aliases conflict"
+        )
+    elif sync_poll_receipt_status == "FAILED":
         reasons.append("Canonical Fly mirror synchronization poll failed")
-    if sync_revision_parity != "MATCH":
+    elif sync_poll_receipt_status == "MISSING_OR_NULL":
+        reasons.append(
+            "Canonical Fly mirror synchronization poll receipt is missing or null"
+        )
+    elif sync_poll_receipt_status == "INVALID":
+        reasons.append("Canonical Fly mirror synchronization poll receipt is invalid")
+    if sync_revision_parity_alias_conflict:
+        reasons.append(
+            "Canonical Fly mirror synchronization revision-parity compatibility aliases conflict"
+        )
+    elif sync_revision_parity != "MATCH":
         reasons.append(
             "Canonical Fly mirror synchronization revision parity is not confirmed"
         )
-    if sync_revision_parity == "MISMATCH" or (
-        observed_revision
-        and mirror_revision
-        and not _identity_matches(observed_revision, mirror_revision)
-    ):
+    if observed_revision_alias_conflict:
         reasons.append(
-            "Observed Fly revision has not been promoted into the canonical mirror"
+            "Observed Fly revision compatibility aliases conflict; Fly identity is unverified"
         )
+    elif observed_revision_parity == "UNAVAILABLE":
+        reasons.append(
+            "Saved sync receipt does not declare one valid explicit observed Fly source revision"
+        )
+    if revision_consensus["conflict"]:
+        reasons.append(
+            "Source revision identity conflict across report, canonical mirror, "
+            f"and observed Fly receipt ({revision_consensus['conflict_reason']})"
+        )
+    elif observed_revision_parity == "MISMATCH":
+        reasons.append("Observed Fly revision has not been promoted into the canonical mirror")
     sync_current = bool(
         not sync_in_progress
+        and sync_activity_receipt_current
+        and sync_activity_idle
         and sync_receipt_ok
-        and sync_poll_ok is not False
+        and sync_poll_receipt_status == "CONFIRMED"
         and sync_revision_parity == "MATCH"
-        and (
-            not observed_revision
-            or not mirror_revision
-            or _identity_matches(observed_revision, mirror_revision)
-        )
+        and observed_revision_parity == "MATCH"
     )
     current = revision_parity == "MATCH" and epoch_parity == "MATCH" and sync_current
     return {
@@ -1228,14 +1517,108 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         **sync_activity,
         "mirror_sync_receipt_ok": sync_receipt_ok,
         "mirror_sync_poll_ok": sync_poll_ok,
+        "mirror_sync_poll_receipt_status": sync_poll_receipt_status,
         "mirror_sync_revision_parity": sync_revision_parity,
+        "observed_revision_parity": observed_revision_parity,
+        "source_revision_identity_status": revision_consensus["status"],
+        "source_revision_identity_conflict": revision_consensus["conflict"],
+        "source_revision_identity_conflict_reason": revision_consensus["conflict_reason"],
+        "source_revision_full_anchor": revision_consensus["anchor"],
+        "mirror_sync_alias_conflicts": {
+            "activity": sync_activity["mirror_sync_activity_alias_conflict"],
+            "in_progress": sync_in_progress_alias_conflict,
+            "poll": sync_poll_alias_conflict,
+            "revision_parity": sync_revision_parity_alias_conflict,
+            "observed_revision": observed_revision_alias_conflict,
+        },
         "observed_source_revision": observed_revision,
-        "generation_revision": generation_revision,
+        # Compatibility alias: this value is report data identity, never the
+        # analyzer code revision. New consumers should use the explicit names.
+        "generation_revision": report_dataset_source_revision,
+        "report_dataset_source_revision": report_dataset_source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
         "mirror_source_revision": mirror_revision,
         "generation_epoch_id": generation_epoch,
         "mirror_epoch_id": mirror_epoch,
         "reasons": reasons,
+        "identity_status": (
+            "CURRENT" if current else
+            "CONFLICT" if revision_consensus["conflict"] else
+            "UNVERIFIED" if (
+                revision_parity == "UNAVAILABLE"
+                or epoch_parity == "UNAVAILABLE"
+                or observed_revision_parity == "UNAVAILABLE"
+            ) else "STALE"
+        ),
         "qualification_allowed": current,
+    }
+
+
+def _analyzer_identity_projection(manifest: dict | None = None, freshness: dict | None = None) -> dict:
+    """Return one explicit report/analyzer/mirror identity receipt.
+
+    This is presentation and gating metadata only.  It never asserts that a
+    local mirror is live Fly state, and it keeps unavailable fields null rather
+    than borrowing a revision from another role.
+    """
+    manifest = manifest if isinstance(manifest, dict) else (
+        _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    )
+    freshness = freshness if isinstance(freshness, dict) else _generation_freshness_meta(manifest)
+    fresh_epoch = manifest.get("fresh_epoch") if isinstance(manifest.get("fresh_epoch"), dict) else {}
+    report_source = str(manifest.get("source_revision") or "").strip() or None
+    analyzer_revision = str(manifest.get("generation_revision") or "").strip() or None
+    report_deployed_revision = str(manifest.get("deployed_revision") or "").strip() or None
+    source_data_revision = str(manifest.get("source_data_revision") or "").strip() or None
+    report_epoch = str(fresh_epoch.get("epoch_id") or manifest.get("dataset_epoch") or "").strip() or None
+    mirror_revision = freshness.get("mirror_source_revision") or None
+    mirror_epoch = freshness.get("mirror_epoch_id") or None
+    observed_fly_revision = freshness.get("observed_source_revision") or None
+    reasons = list(dict.fromkeys(
+        [str(reason) for reason in (freshness.get("reasons") or []) if str(reason).strip()]
+        + (["Published report does not declare a canonical dataset source revision"] if not report_source else [])
+        + (["Published report does not declare an analyzer generation revision"] if not analyzer_revision else [])
+    ))
+    if freshness.get("current") is True:
+        status = "CURRENT"
+    elif freshness.get("source_revision_identity_conflict") is True:
+        status = "CONFLICT"
+    elif (
+        not report_source
+        or not mirror_revision
+        or freshness.get("revision_parity") == "UNAVAILABLE"
+        or freshness.get("epoch_parity") == "UNAVAILABLE"
+        or freshness.get("observed_revision_parity") == "UNAVAILABLE"
+        or freshness.get("mirror_sync_receipt_freshness") != "FRESH"
+    ):
+        status = "UNVERIFIED"
+    else:
+        status = "STALE"
+    return {
+        "schema": "analyzer_report_identity_v1",
+        "status": status,
+        "current": freshness.get("current") is True,
+        "publication_time": manifest.get("generated_at") or None,
+        "analyzer_generation_revision": analyzer_revision,
+        "report_dataset_source_revision": report_source,
+        "report_deployed_revision": report_deployed_revision,
+        "source_data_revision": source_data_revision,
+        "report_epoch_id": report_epoch,
+        "local_mirror_source_revision": mirror_revision,
+        "local_mirror_epoch_id": mirror_epoch,
+        "observed_fly_source_revision": observed_fly_revision,
+        "observed_fly_identity_basis": "SAVED_SYNC_RECEIPT_ONLY",
+        "mirror_sync_receipt_freshness": freshness.get("mirror_sync_receipt_freshness"),
+        "mirror_sync_receipt_age_seconds": freshness.get("mirror_sync_receipt_age_seconds"),
+        "report_to_mirror_revision_parity": freshness.get("revision_parity"),
+        "report_to_mirror_epoch_parity": freshness.get("epoch_parity"),
+        "mirror_to_fly_revision_parity": freshness.get("observed_revision_parity"),
+        "source_revision_identity_conflict": freshness.get("source_revision_identity_conflict") is True,
+        "source_revision_identity_conflict_reason": freshness.get("source_revision_identity_conflict_reason"),
+        "source_revision_full_anchor": freshness.get("source_revision_full_anchor"),
+        "mirror_sync_claimed_revision_parity": freshness.get("mirror_sync_revision_parity"),
+        "mirror_to_fly_poll_status": freshness.get("mirror_sync_poll_receipt_status"),
+        "reasons": reasons,
     }
 
 
@@ -1263,6 +1646,46 @@ def _shared_context_projection(report: dict, freshness: dict) -> dict:
     return out
 
 
+def _pre_ai_unavailable_assessment_projection(report: dict, freshness: dict) -> dict:
+    """Expose bounded pre-AI gap counts; never an outcome or AI verdict."""
+    out = {
+        "status": "UNAVAILABLE_OR_STALE",
+        "qualification_authority": False,
+        "outcome_authority": False,
+        "ranking_input": False,
+        "ai_treatment": "AI_NOT_CALLED_NOT_REJECTED",
+        "execution_treatment": "NOT_AN_ORDER_FILL_OR_NO_FILL",
+    }
+    assessment = report.get("pre_ai_unavailable_assessment")
+    if freshness.get("current") is not True or not isinstance(assessment, dict):
+        return out
+    if assessment.get("schema") != "scan_counterfactual_unavailable_assessment_v1":
+        return out
+    identity = assessment.get("identity")
+    counts = assessment.get("counts")
+    if (not isinstance(identity, dict) or not isinstance(counts, dict)
+            or identity.get("selected_epoch_id") != report.get("epoch_id")):
+        out["status"] = "EPOCH_IDENTITY_UNAVAILABLE_OR_MISMATCH"
+        return out
+    current_gaps = counts.get("current_diagnostic_gap_rows")
+    invalid_current = counts.get("invalid_current_receipt_rows")
+    if (type(current_gaps) is not int or current_gaps < 0
+            or type(invalid_current) is not int or invalid_current < 0):
+        out["status"] = "ASSESSMENT_COUNTS_INVALID"
+        return out
+    out.update({
+        "status": str(assessment.get("status") or "UNKNOWN"),
+        "current_diagnostic_gap_rows": current_gaps,
+        "invalid_current_receipt_rows": invalid_current,
+        "reason_counts": dict(assessment.get("reason_counts") or {}),
+        "qualification_blocked_by_unobserved_pre_ai_coverage": (
+            assessment.get("qualification_blocked_by_unobserved_pre_ai_coverage") is True
+        ),
+        "qualification_effect": str(assessment.get("qualification_effect") or "NONE"),
+    })
+    return out
+
+
 def _bounded_safe_policy_payload(report: dict) -> dict:
     """Public Safe/Top APIs expose summaries; full artifact stays downloadable."""
     if not report:
@@ -1271,7 +1694,8 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
         key: report.get(key)
         for key in (
             "schema", "extension", "generated_at", "status", "qualification",
-            "note", "epoch_id", "epoch_scope", "integrity", "collection",
+            "note", "epoch_id", "epoch_scope", "integrity", "integrity_ready", "collection",
+            "pre_ai_unavailable_assessment",
             "search", "search_progress", "blockers", "number_one_strategy",
             "live_policy_change_allowed", "real_bitfinex_trading_allowed",
             "analysis_provenance", "cohort_schema", "generation_revision",
@@ -2869,6 +3293,9 @@ def _pathway_audit_payload():
     manifest_sync = manifest.get("analyzer_sync_id")
     manifest_registry = manifest.get("tile_registry_signature")
     expected_registry = active_tile_registry_signature()
+    analyzer_code_revision = str(manifest.get("generation_revision") or "").strip() or None
+    report_dataset_source_revision = str(manifest.get("source_revision") or "").strip() or None
+    mirror_source_revision = _mirror_source_revision()
     current_sync = {
         "status": "CURRENT_MATCH" if (
             manifest_sync == EXPECTED_ANALYZER_SYNC_ID
@@ -2879,9 +3306,16 @@ def _pathway_audit_payload():
             and manifest_registry == expected_registry
         ),
         "generated_at": manifest.get("generated_at"),
-        "generation_revision": manifest.get("generation_revision"),
-        "analyzer_source_revision": manifest.get("generation_revision"),
-        "mirror_source_revision": _mirror_source_revision(),
+        # Compatibility names retained for older dashboard clients.  Both
+        # identify analyzer code, never the report's input dataset.
+        "generation_revision": analyzer_code_revision,
+        "analyzer_source_revision": analyzer_code_revision,
+        "analyzer_code_revision": analyzer_code_revision,
+        "report_dataset_source_revision": report_dataset_source_revision,
+        "mirror_source_revision": mirror_source_revision,
+        "report_to_mirror_revision_parity": _source_revision_parity(
+            report_dataset_source_revision, mirror_source_revision
+        ),
         "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id"),
         "analyzer_sync_id": manifest_sync,
         "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -3169,6 +3603,11 @@ def api_health():
         "ok": bool(runtime_sync_ok and freshness["current"]),
         "alive": True,
         "ready": bool(runtime_sync_ok and freshness["current"]),
+        # ``ready`` remains the legacy current-generation signal.  Consumers
+        # that need to distinguish a healthy listener from a usable report
+        # bundle must read the explicit dimensions from /api/status.
+        "service_ready": bool(runtime_sync_ok),
+        "readiness_detail_endpoint": "/api/status",
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
         "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -3197,6 +3636,7 @@ def api_runtime_incidents():
 
 @app.route("/api/status")
 def api_status():
+    runtime_observed_at = datetime.now(timezone.utc).isoformat()
     manifest = _read_json(REPORT_MANIFEST_FILE)
     compact = _read_json(COMPACT_SUMMARY_FILE)
     safe_genome = _current_generation_report(SAFE_POLICY_GENOME_V3_REPORT_FILE)
@@ -3240,10 +3680,11 @@ def api_status():
         if isinstance(tile, dict)
         and str(tile.get("policy_signature") or "").strip()
     })
-    analyzer_source_revision = manifest.get("generation_revision")
-    mirror_source_revision = _mirror_source_revision()
     freshness = _generation_freshness_meta(manifest)
-    source_revision_parity = freshness["revision_parity"]
+    identity = _analyzer_identity_projection(manifest, freshness)
+    analyzer_source_revision = identity["analyzer_generation_revision"]
+    mirror_source_revision = identity["local_mirror_source_revision"]
+    source_revision_parity = identity["report_to_mirror_revision_parity"]
     required_report_status = manifest.get("required_report_status") or {}
     required_report_failures = sorted(
         str(name)
@@ -3254,6 +3695,32 @@ def api_status():
         or status.get("current_generation_valid") is False
     )
     required_reports_ok = bool(required_report_status) and not required_report_failures
+    integrity = _integrity_payload()
+    integrity_ready = _integrity_receipt_is_qualification_ready(integrity)
+    integrity_validity = (
+        True if integrity_ready else
+        False if integrity.get("valid") is False else
+        None
+    )
+    safe_ranking = safe_genome.get("safe_policy_ranking")
+    safe_ranking = safe_ranking if isinstance(safe_ranking, dict) else {}
+    policy_qualification_claimed = bool(
+        safe_genome.get("number_one_strategy")
+        and safe_ranking.get("qualification") == "QUALIFIED"
+        and safe_genome.get("live_policy_change_allowed") is True
+    )
+    service_ready = bool(runtime_sync_ok)
+    report_bundle_ready = bool(
+        service_ready
+        and report_sync_ok is True
+        and freshness["current"]
+        and required_reports_ok
+    )
+    qualification_ready = bool(
+        report_bundle_ready
+        and integrity_ready
+        and policy_qualification_claimed
+    )
     dashboard_started_dt = _parse_utc_dt(_DASHBOARD_STARTED_AT.isoformat())
     report_generated_dt = _parse_utc_dt(previous_report_at)
     restart_observed = bool(
@@ -3269,12 +3736,18 @@ def api_status():
             and required_reports_ok
         ),
         "alive": True,
-        "ready": bool(
-            runtime_sync_ok
-            and report_sync_ok is True
-            and freshness["current"]
-            and required_reports_ok
+        # Compatibility alias: this is report-bundle readiness, not listener
+        # liveness and not a strategy qualification verdict.
+        "ready": report_bundle_ready,
+        "service_ready": service_ready,
+        "report_bundle_ready": report_bundle_ready,
+        "qualification_ready": qualification_ready,
+        "qualification_ready_scope": (
+            "CURRENT_REPORT_BUNDLE_VALID_INTEGRITY_AND_EXPLICIT_QUALIFIED_POLICY"
         ),
+        "integrity_report_valid": integrity_validity,
+        "integrity_report_status": integrity.get("report_status") or "UNKNOWN",
+        "qualified_policy_claimed_by_report": policy_qualification_claimed,
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
         "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -3297,14 +3770,17 @@ def api_status():
         "public_url": PUBLIC_URL,
         "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "report_analyzer_sync_id": manifest_sync,
-        "generation_revision": manifest.get("generation_revision"),
-        "generation_revision_label": "ANALYZER_SOURCE_REVISION",
+        "generation_revision": analyzer_source_revision,
+        "generation_revision_label": "ANALYZER_CODE_REVISION",
         "analyzer_source_revision": analyzer_source_revision,
+        "report_dataset_source_revision": identity["report_dataset_source_revision"],
+        "report_deployed_revision": identity["report_deployed_revision"],
         "mirror_source_revision": mirror_source_revision,
         "fly_mirror_source_revision": mirror_source_revision,
         "source_revision_parity": source_revision_parity,
         "epoch_parity": freshness["epoch_parity"],
         "generation_freshness": freshness,
+        "identity": identity,
         "stale": freshness["stale"],
         "stale_reasons": freshness["reasons"],
         "source_data_revision": manifest.get("source_data_revision"),
@@ -3332,7 +3808,10 @@ def api_status():
         ),
         "generated_at": previous_report_at,
         "generated_at_melbourne": format_melbourne_dt(previous_report_at),
-        "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),
+        # This timestamp is the /api/status response observation itself. It is
+        # deliberately separate from immutable report publication time.
+        "runtime_observed_at": runtime_observed_at,
+        "melbourne_now": format_melbourne_dt(runtime_observed_at),
         "timezone": "Australia/Melbourne",
         "report_count": len(_manifest_reports()),
         "last_files": {
@@ -3581,37 +4060,9 @@ def api_best_policy_research():
 @app.route("/api/safe-policy-genome-v3.1")
 def api_safe_policy_genome_v3():
     source = _safe_policy_v3_dashboard_source()
-    payload = dict(source["report"])
-    report_was_missing = not payload
-    if not payload:
-        payload = {
-            "schema": "safe_policy_genome_v3_1_report_v1",
-            "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
-            "status": "V3_REPORT_NOT_GENERATED",
-            "qualification": "NO_SAFE_QUALIFIED_POLICY",
-            "number_one_strategy": None,
-            "live_policy_change_allowed": False,
-            "real_bitfinex_trading_allowed": False,
-            "collection": {},
-            "blockers": ["V3_REPORT_NOT_GENERATED"],
-        }
-    freshness = source.get("generation_freshness") or {
-        "current": True, "stale": False, "revision_parity": "MATCH",
-        "epoch_parity": "MATCH", "reasons": [],
-    }
-    if (
-        not report_was_missing
-        and payload.get("status") != "REPORT_NOT_IN_CURRENT_GENERATION"
-        and not freshness["current"]
-    ):
-        payload["status"] = "STALE_GENERATION"
-        payload["qualification"] = "STALE_GENERATION_NOT_QUALIFICATION_ELIGIBLE"
-        payload["number_one_strategy"] = None
-        payload["live_policy_change_allowed"] = False
-        payload["real_bitfinex_trading_allowed"] = False
-        payload["blockers"] = source["blockers"]
-        payload["generation_freshness"] = freshness
-    return jsonify(_bounded_safe_policy_payload(payload))
+    return jsonify(_bounded_safe_policy_payload(
+        _safe_policy_v3_public_projection(source)
+    ))
 
 
 @app.route("/safe-policy-genome-v3")
@@ -3636,7 +4087,7 @@ function standaloneGenomeCountCards(d) {
 }
 </script>
 <script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=standaloneGenomeCountCards(d);document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>Insufficient execution evidence for family leaders.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">Insufficient execution evidence for drawdown leaders.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.diagnostic_replay_net_pnl_usd??'—')+'</td><td>'+String(r.diagnostic_replay_max_drawdown_usd??'—')+'</td><td>'+String(r.metric_evidence||'IDEAL_TOUCH_DIAGNOSTIC_ONLY')+'</td><td>'+String(r.qualification_eligibility||'NOT QUALIFICATION ELIGIBLE')+'</td><td>'+(r.descriptive_blockers||[]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">Insufficient execution evidence; exhaustive zero-information hypotheses remain internal.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script>
-<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},byChase=sweep.best_by_chase_and_stop||{},diag=sweep.diagnostic_hypotheses_by_stop||{},sortStops=entries=>Object.entries(entries).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=sortStops(byStop).map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.supported_conservative_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">INSUFFICIENT EXECUTION EVIDENCE — no supported conservative Scenario C leader.</td></tr>';const chaseRows=[];Object.entries(byChase).forEach(([chase,stops])=>Object.entries(stops||{}).forEach(([stop,row])=>chaseRows.push({chase,stop,row:row||{}})));document.getElementById('scenario-chase-stops').innerHTML=chaseRows.map(x=>'<tr><td>'+x.chase+'</td><td>'+x.stop+'</td><td>'+String(x.row.supported_conservative_episodes??'—')+'</td><td>'+String(x.row.sealed_oos_net_usd??'—')+'</td><td>'+String(x.row.max_drawdown_usd??'—')+'</td><td>'+String(x.row.expectancy_lcb_usd??'—')+'</td></tr>').join('')||'<tr><td colspan="6">INSUFFICIENT EXECUTION EVIDENCE — no supported chase × stop leader.</td></tr>';document.getElementById('scenario-diagnostics').innerHTML=sortStops(diag).flatMap(([stop,items])=>(items||[]).map(row=>'<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.oos_episodes??0)+'</td><td>'+String(row.supported_conservative_episodes??0)+'</td><td>'+String(row.diagnostic_touches??0)+'</td><td>'+String(row.diagnostic_net_pnl_usd??'—')+'</td><td>'+String(row.diagnostic_max_drawdown_usd??'—')+'</td><td>IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT QUALIFICATION ELIGIBLE</td></tr>')).join('')||'<tr><td colspan="8">No Scenario C ideal-touch diagnostic hypotheses.</td></tr>';});</script></body></html>
+<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},byChase=sweep.best_by_chase_and_stop||{},diag=sweep.diagnostic_hypotheses_by_stop||{},sortStops=entries=>Object.entries(entries).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=sortStops(byStop).map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.supported_conservative_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">INSUFFICIENT EXECUTION EVIDENCE — no supported conservative Scenario C leader.</td></tr>';const chaseRows=[];Object.entries(byChase).forEach(([chase,stops])=>Object.entries(stops||{}).forEach(([stop,row])=>chaseRows.push({chase,stop,row:row||{}})));document.getElementById('scenario-chase-stops').innerHTML=chaseRows.map(x=>'<tr><td>'+x.chase+'</td><td>'+x.stop+'</td><td>'+String(x.row.supported_conservative_episodes??'—')+'</td><td>'+String(x.row.sealed_oos_net_usd??'—')+'</td><td>'+String(x.row.max_drawdown_usd??'—')+'</td><td>'+String(x.row.expectancy_lcb_usd??'—')+'</td></tr>').join('')||'<tr><td colspan="6">INSUFFICIENT EXECUTION EVIDENCE — no supported chase × stop leader.</td></tr>';document.getElementById('scenario-diagnostics').innerHTML=sortStops(diag).flatMap(([stop,items])=>(items||[]).map(row=>'<tr><td>'+stop+'</td><td>'+String(row.policy_id??'—')+'</td><td>'+String(row.oos_episodes??'UNAVAILABLE')+'</td><td>'+String(row.supported_conservative_episodes??'UNAVAILABLE')+'</td><td>'+String(row.diagnostic_touches??'UNAVAILABLE')+'</td><td>'+String(row.diagnostic_net_pnl_usd??'—')+'</td><td>'+String(row.diagnostic_max_drawdown_usd??'—')+'</td><td>IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT QUALIFICATION ELIGIBLE</td></tr>')).join('')||'<tr><td colspan="8">No Scenario C ideal-touch diagnostic hypotheses.</td></tr>';});</script></body></html>
 """)
 
 
@@ -3717,6 +4168,13 @@ def _safe_policy_v3_dashboard_source() -> dict:
     screen = report.get("candidate_screen") or {}
     ranking = report.get("safe_policy_ranking") or {}
     freshness = _generation_freshness_meta()
+    integrity = _integrity_payload()
+    integrity_ready = _integrity_receipt_is_qualification_ready(integrity)
+    report_claims_qualification = bool(
+        report.get("number_one_strategy")
+        and ranking.get("qualification") == "QUALIFIED"
+        and report.get("live_policy_change_allowed") is True
+    )
     if not report:
         freshness = dict(freshness)
         freshness.update({"current": False, "stale": True})
@@ -3730,21 +4188,89 @@ def _safe_policy_v3_dashboard_source() -> dict:
             blockers.append(f"SOURCE_REVISION_PARITY_{freshness['revision_parity']}")
         if freshness["epoch_parity"] != "MATCH":
             blockers.append(f"EPOCH_PARITY_{freshness['epoch_parity']}")
+    if report_claims_qualification and not integrity_ready:
+        blockers.append("ANALYZER_INTEGRITY_RECEIPT_NOT_VALID_FOR_QUALIFICATION")
     return {
         "report": report,
         "screen": screen,
         "ranking": ranking,
         "epoch_id": epoch_id,
+        "integrity": integrity,
+        "integrity_ready": integrity_ready,
+        "report_claims_qualification": report_claims_qualification,
         "qualified": bool(
             freshness["current"]
-            and
-            report.get("number_one_strategy")
-            and ranking.get("qualification") == "QUALIFIED"
-            and report.get("live_policy_change_allowed") is True
+            and integrity_ready
+            and report_claims_qualification
         ),
         "blockers": sorted(set(blockers)),
         "generation_freshness": freshness,
     }
+
+
+def _safe_policy_v3_public_projection(source: dict) -> dict:
+    """Project a current report without treating stored claims as authorization."""
+    payload = dict(source.get("report") or {})
+    report_was_missing = not payload
+    if not payload:
+        payload = {
+            "schema": "safe_policy_genome_v3_1_report_v1",
+            "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
+            "status": "V3_REPORT_NOT_GENERATED",
+            "qualification": "NO_SAFE_QUALIFIED_POLICY",
+            "number_one_strategy": None,
+            "live_policy_change_allowed": False,
+            "real_bitfinex_trading_allowed": False,
+            "collection": {},
+            "blockers": ["V3_REPORT_NOT_GENERATED"],
+        }
+    freshness = source.get("generation_freshness") or {
+        "current": True, "stale": False, "revision_parity": "MATCH",
+        "epoch_parity": "MATCH", "reasons": [],
+    }
+    integrity = source.get("integrity") if isinstance(source.get("integrity"), dict) else {}
+    integrity_ready = source.get("integrity_ready") is True
+    report_claims_qualification = source.get("report_claims_qualification") is True
+
+    def block_qualification(status: str, qualification: str, warning: str) -> None:
+        # The immutable report remains downloadable for historical inspection;
+        # only its current dashboard projection loses authorization fields.
+        payload["status"] = status
+        payload["qualification"] = qualification
+        payload["number_one_strategy"] = None
+        payload["live_policy_change_allowed"] = False
+        payload["real_bitfinex_trading_allowed"] = False
+        payload["blockers"] = source["blockers"]
+        payload["generation_freshness"] = freshness
+        payload["warning"] = warning
+        ranking = payload.get("safe_policy_ranking")
+        if isinstance(ranking, dict):
+            ranking = dict(ranking)
+            ranking["qualification"] = qualification
+            ranking["number_one"] = None
+            ranking["number_one_strategy"] = None
+            ranking["blockers"] = source["blockers"]
+            payload["safe_policy_ranking"] = ranking
+
+    if (
+        not report_was_missing
+        and payload.get("status") != "REPORT_NOT_IN_CURRENT_GENERATION"
+        and not freshness["current"]
+    ):
+        block_qualification(
+            "STALE_GENERATION",
+            "STALE_GENERATION_NOT_QUALIFICATION_ELIGIBLE",
+            "Current V3.1 report is stale; qualification is blocked pending a fresh mirror receipt.",
+        )
+    elif report_claims_qualification and not integrity_ready:
+        block_qualification(
+            "INTEGRITY_BLOCKED",
+            "INTEGRITY_RECEIPT_INVALID_OR_UNAVAILABLE",
+            "Current V3.1 report integrity is invalid or unavailable; qualification is blocked.",
+        )
+    payload["integrity"] = integrity
+    payload["integrity_ready"] = integrity_ready
+    return payload
 
 
 def _best_policy_research_v31_payload() -> dict:
@@ -3819,6 +4345,8 @@ def _best_policy_research_v31_payload() -> dict:
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
+    integrity_ready = source.get("integrity_ready") is True
+    report_claims_qualification = source.get("report_claims_qualification") is True
     # Real sources always include this receipt. The fallback keeps isolated
     # test/extension stubs compatible without weakening production behavior.
     freshness = source.get("generation_freshness") or {
@@ -3840,9 +4368,13 @@ def _best_policy_research_v31_payload() -> dict:
         "status": (
             "QUALIFIED" if qualified else
             "STALE GENERATION — QUALIFICATION BLOCKED" if not freshness["current"] else
+            "INTEGRITY RECEIPT INVALID — QUALIFICATION BLOCKED"
+            if report_claims_qualification and not integrity_ready else
             "NO QUALIFIED POLICY"
         ),
         "qualification": (
+            "INTEGRITY_RECEIPT_INVALID_OR_UNAVAILABLE"
+            if report_claims_qualification and not integrity_ready else
             report.get("qualification") or "NO_SAFE_QUALIFIED_POLICY"
         ) if freshness["current"] else "STALE_GENERATION_NOT_QUALIFICATION_ELIGIBLE",
         "live_policy_change_allowed": qualified,
@@ -4160,17 +4692,24 @@ table{display:block;width:100%;max-width:100%;overflow-x:auto;border-collapse:co
 <script>
 const mode={{ mode|tojson }}; const endpoint={{ endpoint|tojson }};
 const money=v=>v==null?'—':'$'+Number(v).toFixed(4); const pct=(w,n)=>n?((100*w/n).toFixed(1)+'%'):'—';
+const regimeText=value=>{
+ const scalar=value&&typeof value==='object'?value.value:value;
+ const text=typeof scalar==='string'?scalar.trim().toUpperCase():'';
+ return text&& !['UNKNOWN','UNK','NONE','NULL','N/A','NA','NAN'].includes(text)
+  ? text.replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))
+  : 'UNKNOWN';
+};
 fetch(endpoint).then(r=>r.json()).then(d=>{
  document.getElementById('note').textContent=(d.warning||'')+' Status: '+(d.status||'—')+' · Live policy changes: '+(d.live_policy_change_allowed?'YES':'NO');
  let cards=[]; let rows=[];
  if(mode==='static'){
   cards=[['Epoch',d.epoch_id],['Independent episodes',d.independent_episodes??'UNAVAILABLE'],['Train / OOS',(d.training_episodes??'UNAVAILABLE')+' / '+(d.oos_episodes??'UNAVAILABLE')],['Profitable descriptive policies',d.status==='UNAVAILABLE_CURRENT_GENERATION'?'UNAVAILABLE':(d.profitable_policies||[]).length]];
   document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
-  rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>—</td><td>${x.oos_episodes??0}</td><td>—</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>${money(x.max_drawdown_usd)}</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`);
+  rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>—</td><td>${x.oos_episodes??'UNAVAILABLE'}</td><td>—</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>${money(x.max_drawdown_usd)}</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`);
  } else if(mode==='dynamic'){
   cards=[['Epoch',d.epoch_id],['Qualified OOS winner',d.winner_kind==='NONE'?'NONE — qualification incomplete':(d.winner_kind||'NONE')],['Descriptive regime leader',d.relative_leader_kind||'NONE'],['Static comparison EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic comparison EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
-  rows=(d.regimes||[]).flatMap(group=>(group.policies||[]).map(x=>`<tr><td>${group.regime}</td><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>${x.oos_episodes??0}</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>NO</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`));
+  rows=(d.regimes||[]).flatMap(group=>(group.policies||[]).map(x=>`<tr><td>${regimeText(group.regime)}</td><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>${x.oos_episodes??'UNAVAILABLE'}</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>NO</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`));
  } else {
   const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, scope=c.epoch_scope||{}, g=d.generic_shadow_terminals||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{}, signedAvailable=c.available===true;
   cards=[['Current rejected paths',d.current_epoch_rejected??'UNAVAILABLE'],['Signed per-lane shadow episodes',signedAvailable?(cov.independent_shared_ai_episodes??0):('UNAVAILABLE · '+(c.reason||'report missing'))],['Signed per-lane records',signedAvailable?(cov.deduped_lane_records??0):'UNAVAILABLE'],['Generic shadow terminal outcomes',g.terminal_outcomes??'UNAVAILABLE'],['Generic counterfactual terminals',g.generic_terminal_outcomes??'UNAVAILABLE'],['Tile LAB shadow terminals',g.tile_lab_terminal_outcomes??'UNAVAILABLE'],['Preserved legacy/unscoped',signedAvailable?(scope.legacy_unscoped_rows??0):'UNAVAILABLE'],['Foreign / malformed',signedAvailable?(Number(scope.foreign_epoch_rows||0)+Number(scope.malformed_current_identity_rows||0)):'UNAVAILABLE'],['Paired signed episodes',signedAvailable?(cov.paired_multi_lane_episodes??0):'UNAVAILABLE'],['Provisional exclusions',signedAvailable?(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0):'UNAVAILABLE'],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
@@ -4324,7 +4863,10 @@ def api_summary():
             mirror_size = json.loads(mirror_size_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError, TypeError):
             mirror_size = {}
-    stale_meta = _summary_stale_meta(compact)
+    stale_meta = _summary_stale_meta(compact, manifest)
+    identity = _analyzer_identity_projection(
+        manifest, stale_meta.get("generation_freshness")
+    )
     # The atomic manifest is the authority for the current generation.  An old
     # real_edge artifact used to repopulate an intentionally empty fresh epoch
     # (for example 0 current trades became 44 historical trades).  Keep such an
@@ -4515,6 +5057,7 @@ def api_summary():
         "executive_text": _read_text(EXECUTIVE_SUMMARY_FILE),
         "coverage_status": (compact.get("coverage") or {}).get("confidence_status"),
         "stale": stale_meta,
+        "identity": identity,
         "integrity": _integrity_payload(),
         "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
@@ -4693,8 +5236,15 @@ def api_leakage():
 def _genome_payload():
     # V3.1 Safe Policy Genome is the canonical current collector/analyzer
     # surface. The older research.db DNA engine is a legacy fallback only.
-    safe_v31 = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
-    if safe_v31.get("schema"):
+    source = _safe_policy_v3_dashboard_source()
+    source_report = source.get("report") or {}
+    safe_v31 = _safe_policy_v3_public_projection(source)
+    current_v31_report = bool(
+        source_report
+        and not source_report.get("report_unavailable")
+        and source_report.get("schema") != "current_generation_report_unavailable_v1"
+    )
+    if current_v31_report:
         # The dashboard overview needs a bounded summary, not the complete
         # chase x stop grid. Shipping the full candidate screen made a simple
         # tab click parse/render more than a megabyte of nested policy cells.
@@ -4735,9 +5285,12 @@ def _genome_payload():
             "search_progress": safe_v31.get("search_progress") or {},
             "candidate_screen": candidate_screen,
             "shared_context_coverage": _shared_context_projection(
-                safe_v31, _generation_freshness_meta()),
+                safe_v31, source["generation_freshness"]),
+            "pre_ai_unavailable_assessment": _pre_ai_unavailable_assessment_projection(
+                safe_v31, source["generation_freshness"]),
             "safe_policy_ranking": bounded.get("safe_policy_ranking") or {},
-            "integrity": safe_v31.get("integrity") or {},
+            "integrity": bounded.get("integrity") or {},
+            "integrity_ready": bounded.get("integrity_ready") is True,
             "blockers": list(safe_v31.get("blockers") or []),
             "number_one_strategy": safe_v31.get("number_one_strategy"),
             "live_policy_change_allowed": safe_v31.get("live_policy_change_allowed") is True,
@@ -6761,6 +7314,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="badge" id="updated">—</span>
   </div>
 </header>
+<p class="note" id="research-provenance-summary">Runtime and report provenance loading…</p>
 <nav id="nav"></nav>
 <nav id="subnav" class="subnav" style="display:none"></nav>
 <main>
@@ -6774,6 +7328,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
     </div>
+    <p class="note" id="identity-summary">Identity receipts loading…</p>
     <details id="overview-evidence-details">
     <summary>Inspect performance, storage and lifecycle evidence</summary>
     <p class="note">These receipts may be unavailable until a current mirror and analyzer generation are published. Downloaded bytes are not source cleanup.</p>
@@ -7054,6 +7609,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="genome-kpis"></div>
     <h3>Shared market-context evidence coverage</h3>
     <p class="note" id="genome-shared-context"></p>
+    <p class="note" id="genome-pre-ai-unavailable"></p>
     <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
     <pre id="genome-cluster"></pre>
@@ -7145,6 +7701,13 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[ch]));
+}
+function displayRegime(value) {
+  const scalar = value && typeof value === 'object' ? value.value : value;
+  const text = typeof scalar === 'string' ? scalar.trim().toUpperCase() : '';
+  return text && !['UNKNOWN', 'UNK', 'NONE', 'NULL', 'N/A', 'NA', 'NAN'].includes(text)
+    ? escapeHtml(text)
+    : 'UNKNOWN';
 }
 function ensureScrollableTables(root = document) {
   root.querySelectorAll('main table').forEach(table => {
@@ -7326,11 +7889,12 @@ function missedProofTouchLabel(row) {
 function summaryEvidenceScope(data) {
   const stale = data?.stale || {};
   const freshness = stale.generation_freshness || {};
-  if (stale.stale === true || freshness.current === false) return [
+  const publication = stale.publication_freshness || {};
+  if (stale.stale === true || freshness.current === false || publication.stale === true) return [
     'STALE SAVED POLICY + SEPARATE HISTORICAL EXECUTED — READ-ONLY',
     'Saved policy evidence is not current session data. Freshness/parity must recover before qualification; historical executed results remain a separate cohort.'
   ];
-  if (stale.stale === false && freshness.current === true && data?.integrity?.valid === true
+  if (stale.stale === false && freshness.current === true && publication.stale !== true && data?.integrity?.valid === true
       && data.integrity.report_status === 'VALID') return [
     'CURRENT PINNED POLICY + SEPARATE HISTORICAL EXECUTED',
     'Exact-generation freshness is verified for policy reports. Current does not mean qualified; compact executed results and preserved history use separate cohorts.'
@@ -7338,9 +7902,159 @@ function summaryEvidenceScope(data) {
   return ['FRESHNESS UNVERIFIED — READ-ONLY',
     'No complete freshness receipt is available. Do not treat saved policy or historical executed results as current qualified evidence.'];
 }
+function generationFreshnessUnverified(data) {
+  const stale = data?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  return stale.stale === false && freshness.current !== true;
+}
+function isFreshCollectionReport(data) {
+  const scope = String(data?.scope || '').trim().toUpperCase();
+  const dataScope = String(data?.data_scope || '').trim().toUpperCase();
+  return scope === 'FRESH-COLLECTION' || scope === 'FRESH COLLECTION'
+    || (dataScope === 'SESSION' && data?.stale?.fresh_collection_mode === true);
+}
+function analyzerHeaderScope(data) {
+  const stale = data?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  const publication = stale.publication_freshness || {};
+  const savedEvidenceStale = stale.stale === true
+    || freshness.current === false
+    || publication.stale === true;
+  if (savedEvidenceStale && isFreshCollectionReport(data)) {
+    return 'STALE SAVED FRESH-COLLECTION REPORT · READ-ONLY';
+  }
+  if (savedEvidenceStale) return 'STALE SAVED ANALYZER GENERATION · READ-ONLY';
+  if (generationFreshnessUnverified(data)) return 'FRESHNESS UNVERIFIED · READ-ONLY';
+  if (data?.all_data_fallback_active) return 'FRESH COLLECTION · reports/all_data fallback';
+  return (data?.scope || 'ALL-DATA') + ' · ' + (data?.data_scope || '').toUpperCase();
+}
+function analyzerIsoTimestamp(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:[.][0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$/.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  const hour = Number(match[4]), minute = Number(match[5]), second = Number(match[6]);
+  if (month < 1 || month > 12 || day < 1
+      || day > new Date(Date.UTC(year, month, 0)).getUTCDate()
+      || hour > 23 || minute > 59 || second > 59) return null;
+  if (match[7] !== 'Z') {
+    const offsetHour = Number(match[7].slice(1, 3));
+    const offsetMinute = Number(match[7].slice(4, 6));
+    if (offsetHour > 14 || offsetMinute > 59
+        || (offsetHour === 14 && offsetMinute !== 0)) return null;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+function analyzerFullRevision(value) {
+  return typeof value === 'string' && /^[0-9a-f]{40}$/.test(value)
+    ? value : null;
+}
+function analyzerEpochId(value) {
+  return typeof value === 'string'
+    && /^epoch-[A-Za-z0-9._-]+$/.test(value) && value.length <= 128
+    ? value : null;
+}
+function analyzerParity(value) {
+  return typeof value === 'string' && /^(MATCH|MISMATCH|CONFLICT)$/.test(value)
+    ? value : null;
+}
+function normalizeAnalyzerIdentity(identity) {
+  const value = identity && typeof identity === 'object' && !Array.isArray(identity)
+    ? identity : {};
+  const analyzerRevision = analyzerFullRevision(value.analyzer_generation_revision);
+  const reportRevision = analyzerFullRevision(value.report_dataset_source_revision);
+  const mirrorRevision = analyzerFullRevision(value.local_mirror_source_revision);
+  const reportParity = analyzerParity(value.report_to_mirror_revision_parity);
+  const flyParity = analyzerParity(value.mirror_to_fly_revision_parity);
+  const rawStatus = typeof value.status === 'string' ? value.status.toUpperCase() : '';
+  const stale = /STALE|MISMATCH|CONFLICT/.test(rawStatus)
+    || ['MISMATCH', 'CONFLICT'].includes(reportParity)
+    || ['MISMATCH', 'CONFLICT'].includes(flyParity);
+  const current = !stale && rawStatus === 'CURRENT'
+    && Boolean(analyzerRevision && reportRevision && mirrorRevision)
+    && reportParity === 'MATCH' && flyParity === 'MATCH';
+  return {
+    status: stale ? 'STALE' : (current ? 'CURRENT' : 'UNVERIFIED'),
+    analyzer_revision: analyzerRevision,
+    report_revision: reportRevision,
+    mirror_revision: mirrorRevision,
+    report_parity: reportParity,
+    fly_parity: flyParity,
+  };
+}
+function shortIdentity(value) {
+  const revision = analyzerFullRevision(value);
+  return revision ? revision.slice(0, 12) : 'UNAVAILABLE';
+}
+function analyzerIdentityLabel(identity) {
+  const value = normalizeAnalyzerIdentity(identity);
+  return `Identity ${value.status} · analyzer ${shortIdentity(value.analyzer_revision)}`
+    + ` · report data ${shortIdentity(value.report_revision)}`
+    + ` · local mirror ${shortIdentity(value.mirror_revision)}`
+    + ` · report→mirror ${value.report_parity || 'UNAVAILABLE'}`
+    + ` · mirror→Fly ${value.fly_parity || 'UNAVAILABLE'}`;
+}
+function readinessLabel(value) {
+  return value === true ? 'READY' : value === false ? 'BLOCKED' : 'UNKNOWN';
+}
+function normalizeAnalyzerPresentation(d) {
+  const value = d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  const freshness = value.generation_freshness
+    && typeof value.generation_freshness === 'object'
+    && !Array.isArray(value.generation_freshness)
+    ? value.generation_freshness : {};
+  const identity = normalizeAnalyzerIdentity(value.identity);
+  const runtimeObservedAt = analyzerIsoTimestamp(value.runtime_observed_at);
+  const reportPublishedAt = analyzerIsoTimestamp(value.generated_at);
+  const epoch = analyzerEpochId(value.fresh_epoch_id);
+  const stale = value.stale === true || freshness.current === false
+    || identity.status === 'STALE';
+  const current = !stale
+    && value.report_bundle_ready === true
+    && freshness.current === true
+    && identity.status === 'CURRENT'
+    && Boolean(reportPublishedAt && epoch);
+  return {
+    runtime_observed_at: runtimeObservedAt,
+    runtime_observation_label: runtimeObservedAt ? fmtMelb(runtimeObservedAt) : 'UNAVAILABLE',
+    report_published_at: reportPublishedAt,
+    report_publication_label: reportPublishedAt || 'UNAVAILABLE',
+    epoch: epoch,
+    identity: identity,
+    identity_label: analyzerIdentityLabel(value.identity),
+    service_ready: value.service_ready,
+    report_bundle_ready: value.report_bundle_ready,
+    qualification_ready: value.qualification_ready,
+    report_freshness: stale ? 'HISTORICAL/STALE'
+      : (current ? 'CURRENT REPORT' : 'FRESHNESS UNVERIFIED'),
+  };
+}
+function analyzerReportFreshnessLabel(d) {
+  return normalizeAnalyzerPresentation(d).report_freshness;
+}
+function analyzerResearchFactsFromPresentation(value) {
+  return `Runtime response observation ${value.runtime_observed_at || 'UNAVAILABLE'}`
+    + ` · Research report publication ${value.report_publication_label}`
+    + ` · ${value.identity_label}`
+    + ` · service ${readinessLabel(value.service_ready)}`
+    + ` · reports ${readinessLabel(value.report_bundle_ready)}`
+    + ` · qualification ${readinessLabel(value.qualification_ready)}`
+    + ` · ${value.report_freshness}`;
+}
+function analyzerResearchFacts(d) {
+  return analyzerResearchFactsFromPresentation(normalizeAnalyzerPresentation(d));
+}
+function analyzerHeaderFromPresentation(value) {
+  if (value.report_freshness !== 'CURRENT REPORT') {
+    return `${value.report_freshness} · READ-ONLY`;
+  }
+  return value.qualification_ready === true
+    ? 'CURRENT ANALYZER REPORT · QUALIFICATION READY'
+    : 'CURRENT ANALYZER REPORT · NOT QUALIFIED';
+}
 function analyzerAttemptLabel(d) {
-  const generated = typeof d.generated_at === 'string' && d.generated_at
-    ? d.generated_at.slice(0, 19) : null;
+  const generatedAt = analyzerIsoTimestamp(d && d.generated_at);
+  const generated = generatedAt ? generatedAt.slice(0, 19) : null;
   const phase = (d.analysis_run || {}).phase;
   if (phase === 'FAILED') {
     return 'Latest analysis attempt FAILED · ' + (generated
@@ -7394,6 +8108,13 @@ async function loadSummary() {
   const storage = d.storage || {};
   const integrity = d.integrity || {};
   const lifecycleBundles = d.lifecycle_bundles || {};
+  const identity = d.identity || {};
+  const identityEl = document.getElementById('identity-summary');
+  if (identityEl) {
+    identityEl.textContent = analyzerIdentityLabel(identity);
+    const reasons = Array.isArray(identity.reasons) ? identity.reasons : [];
+    identityEl.title = reasons.join('\n') || 'No machine-readable identity receipts were published.';
+  }
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
     if (integrity.valid === false || integrity.report_status === 'INVALID') {
@@ -7421,15 +8142,38 @@ async function loadSummary() {
   setEvidenceScope('summary', ...EVIDENCE_SCOPES.summary);
   const banner = document.getElementById('stale-banner');
   if (banner) {
-    if (stale.stale) {
+    if (stale.stale === true) {
       const reasonList = stale.reasons || [];
       const reasons = reasonList.join('\n');
+      const freshnessReceipts = JSON.stringify({
+        publication_freshness: stale.publication_freshness || {},
+        generation_freshness: stale.generation_freshness || {},
+      }, null, 2);
       banner.style.display = 'block';
-      banner.innerHTML = '<strong>⚠ Stale saved analyzer generation — read-only.</strong> '
+      banner.style.background = '#3d1f1f';
+      banner.style.borderColor = '#f85149';
+      banner.style.color = '#ffb4b4';
+      const staleTitle = isFreshCollectionReport(d)
+        ? '⚠ Stale saved fresh-collection report — read-only.'
+        : '⚠ Stale saved analyzer generation — read-only.';
+      banner.innerHTML = '<strong>' + staleTitle + '</strong> '
         + escapeHtml(`${reasonList.length || 'One or more'} parity/freshness receipt${reasonList.length === 1 ? '' : 's'} are not green. `)
         + escapeHtml(analyzerRecoveryGuidance(d))
         + '<details class="receipt-details"><summary>Show exact parity and freshness receipts</summary><pre>'
-        + escapeHtml(reasons || 'No machine-readable reason was published.') + '</pre></details>';
+        + escapeHtml((reasons || 'No machine-readable reason was published.')
+          + '\n\n' + freshnessReceipts) + '</pre></details>';
+    } else if (generationFreshnessUnverified(d)) {
+      const reasonList = (stale.generation_freshness || {}).reasons || [];
+      banner.style.display = 'block';
+      banner.style.background = '#3d2a1f';
+      banner.style.borderColor = '#d29922';
+      banner.style.color = '#f8e3a1';
+      banner.innerHTML = '<strong>⚠ Analyzer freshness unverified — read-only.</strong> '
+        + 'No complete exact-generation freshness receipt is available. '
+        + 'Saved reports must not be treated as current or safe.'
+        + '<details class="receipt-details"><summary>Show freshness receipts</summary><pre>'
+        + escapeHtml(reasonList.join('\n') || 'No machine-readable freshness reason was published.')
+        + '</pre></details>';
     } else if (d.all_data_fallback_active) {
       banner.style.display = 'block';
       banner.style.background = '#1f2d3d';
@@ -7441,23 +8185,23 @@ async function loadSummary() {
       banner.style.display = 'none';
     }
   }
-  const scopeLabel = stale.stale
-    ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
-    : d.all_data_fallback_active
-      ? 'FRESH COLLECTION · reports/all_data fallback'
-      : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
+  const scopeLabel = analyzerHeaderScope(d);
   document.getElementById('scope').textContent = scopeLabel;
   const bundleProvenance = document.getElementById('bundle-provenance');
   if (bundleProvenance) {
     const generated = d.generated_at || 'UNKNOWN';
     const reasons = (stale.reasons || []).join(' · ');
-    bundleProvenance.style.background = stale.stale ? '#3d2a1f' : '#153526';
-    bundleProvenance.style.borderColor = stale.stale ? '#d29922' : '#3dd68c';
-    bundleProvenance.style.color = stale.stale ? '#f8e3a1' : '#9df0c8';
+    const freshnessUnverified = generationFreshnessUnverified(d);
+    bundleProvenance.style.background = stale.stale || freshnessUnverified ? '#3d2a1f' : '#153526';
+    bundleProvenance.style.borderColor = stale.stale || freshnessUnverified ? '#d29922' : '#3dd68c';
+    bundleProvenance.style.color = stale.stale || freshnessUnverified ? '#f8e3a1' : '#9df0c8';
     bundleProvenance.textContent = stale.stale
       ? `FORENSIC EXPORT · STALE SAVED ANALYZER GENERATION · report ${generated}`
         + `${reasons ? ' · ' + reasons : ''}`
         + ' · inspect MANIFEST.json generation_current and provenance before use'
+      : freshnessUnverified
+        ? `FORENSIC EXPORT · FRESHNESS UNVERIFIED · report ${generated}`
+          + ' · not current or safe; inspect MANIFEST.json generation_current and provenance before use'
       : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
         + ' · current does not mean qualified; inspect MANIFEST.json';
   }
@@ -7744,22 +8488,22 @@ async function loadCombos() {
     ['Maximum rows per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
     ['Configured family-balanced capacity', (Number(selection.families_evaluated ?? 0) * Number(selection.per_family_cap ?? 0)).toLocaleString()],
     ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
-    ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
-    ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
+    ['Policies with terminal OOS fills', policyStats.terminal_oos_policies_tested == null ? 'UNAVAILABLE' : Number(policyStats.terminal_oos_policies_tested).toLocaleString()],
+    ['Profitable terminal OOS policies', policyStats.profitable_terminal_oos_policies == null ? 'UNAVAILABLE' : Number(policyStats.profitable_terminal_oos_policies).toLocaleString()],
     ['Entry configurations', Number(searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian ?? 0).toLocaleString()],
     ['Theoretical search space', Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian ?? 0).toLocaleString()],
-    ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
-    ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 0} / ${policySplit.oos_episodes ?? 0}`],
+    ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 'UNAVAILABLE'],
+    ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 'UNAVAILABLE'} / ${policySplit.oos_episodes ?? 'UNAVAILABLE'}`],
     ['Cross-family comparison', comparison.status || 'INSUFFICIENT_SHARED_COHORT'],
     ['Same-cohort policies', Number(comparison.eligible_policy_count ?? 0).toLocaleString()],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
-    const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
+    const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? 'UNAVAILABLE'} · protection ${p.protection_model ?? '—'}`;
     const fillRate = p.conservative_fill_rate == null ? 'UNAVAILABLE' : `${(Number(p.conservative_fill_rate) * 100).toFixed(2)}%`;
     const executionWinsLosses = p.oos_wins == null ? 'UNAVAILABLE' : `${p.oos_wins} / ${p.oos_losses}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.supported_conservative_episodes ?? 0}</td>`
+      + `<td>${p.oos_episodes ?? 'UNAVAILABLE'}</td><td>${p.supported_conservative_episodes ?? 'UNAVAILABLE'}</td>`
       + `<td>${p.full_fills ?? 0}</td><td>${p.partial_fills ?? 0}</td><td>${p.no_fills ?? 0}</td><td>${p.unsupported_episodes ?? 0}</td>`
       + `<td>${fillRate}</td><td>${executionWinsLosses}</td>`
       + `<td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_expectancy_usd)}</td><td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td>`
@@ -7769,8 +8513,8 @@ async function loadCombos() {
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · protection ${p.protection_model ?? '—'}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td>`
       + `<td><strong>${p.policy_id||'—'}</strong><br><small>${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.diagnostic_touch_episodes||0}</td><td>${p.diagnostic_no_touch_episodes||0}</td>`
-      + `<td>${p.diagnostic_replay_wins||0} / ${p.diagnostic_replay_losses||0}</td>`
+      + `<td>${p.oos_episodes ?? 'UNAVAILABLE'}</td><td>${p.diagnostic_touch_episodes ?? 'UNAVAILABLE'}</td><td>${p.diagnostic_no_touch_episodes ?? 'UNAVAILABLE'}</td>`
+      + `<td>${p.diagnostic_replay_wins ?? 'UNAVAILABLE'} / ${p.diagnostic_replay_losses ?? 'UNAVAILABLE'}</td>`
       + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.diagnostic_replay_max_drawdown_usd)}</td>`
       + `<td class="bad">IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · NOT QUALIFICATION ELIGIBLE</td></tr>`;
   }).join('') || '<tr><td colspan="10">No positive ideal-touch diagnostic policy exists in the current rolling generation.</td></tr>';
@@ -7919,7 +8663,7 @@ async function loadChasePolicyLab() {
       + `<td>${fillRate}</td><td>shadow net ${shadow.net_pnl_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.net_pnl_usd)} / EV ${shadow.ev_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.ev_usd)}<br><small>return ${fmtPct(shadow.net_return_pct)} / ${fmtPct(shadow.ev_return_pct)} · executed ${(row.executed||{}).pnl_usd ?? 'UNAVAILABLE'} / ${(row.executed||{}).ev_usd ?? 'UNAVAILABLE'}</small></td>`
       + `<td>${shadow.max_drawdown_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.max_drawdown_usd)} / ${shadow.tail_loss_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.tail_loss_usd)}<br><small>${fmtPct(shadow.max_drawdown_pct)} / ${fmtPct(shadow.tail_loss_pct)}</small></td><td>${fmtPct(shadow.avg_mfe_pct)} / ${fmtPct(shadow.avg_mae_pct)}</td>`
       + `<td>${fmtPct(row.coverage_pct)} / ${confidence.label||'INSUFFICIENT'} / ${fmtPct(confidence.fill_rate_wilson_lower_95_pct)}</td>`
-      + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${compressedScheduleQualification(row.qualification_status)}</td></tr>`;
+      + `<td>${(row.regimes||[]).map(displayRegime).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${compressedScheduleQualification(row.qualification_status)}</td></tr>`;
   }).join('') || '<tr><td colspan="12">No signed compressed shadow schedule evidence is available in this generation.</td></tr>';
   }
   if (proof.source_available === false) {
@@ -7942,7 +8686,7 @@ async function loadChasePolicyLab() {
     return `<tr><td><strong>${row.classification}</strong></td><td>${row.episode_id||'—'}<br><small>${row.policy_id||'—'}</small></td><td>${row.direction||'—'}</td>`
       + `<td>${missedProofTouchLabel(row)} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : fmtExecutionUsd(row.net_pnl_usd)}</td>`
       + `<td>${fmtPct(row.mfe_pct)} / ${fmtPct(row.mae_pct)}</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
-      + `<td>${row.regime||'UNAVAILABLE'} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
+      + `<td>${displayRegime(row.regime)} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
   }).join('') || `<tr><td colspan="8">${proof.empty_reason || 'No proof rows exist.'}</td></tr>`;
 }
 
@@ -8152,7 +8896,8 @@ async function loadPathwayAudit() {
     ['Analyzer expected', d.expected_analyzer_sync_id || 'n/a'],
     ['Exchange', d.expected_exchange || 'bitfinex'],
     ['Current analyzer↔registry', currentSync.status || 'CURRENT STATUS UNAVAILABLE'],
-    ['Analyzer source revision', currentSync.analyzer_source_revision || currentSync.generation_revision || 'n/a'],
+    ['Analyzer code revision', currentSync.analyzer_code_revision || currentSync.analyzer_source_revision || currentSync.generation_revision || 'n/a'],
+    ['Report data revision', currentSync.report_dataset_source_revision || 'UNAVAILABLE'],
     ['Local mirror source revision (not live Fly)', currentSync.mirror_source_revision || 'n/a'],
     ['Current epoch', currentSync.epoch_id || 'n/a'],
     ['Analyzer integrity', ais.report_status || (ais.valid === true ? 'VALID' : 'n/a')],
@@ -8242,7 +8987,7 @@ async function loadRegime() {
   document.getElementById('regime-body').innerHTML = (d.regimes||[]).map(r => {
     const ok = r.conclusion_allowed ? 'yes' : 'no';
     const cls = r.conclusion_allowed ? 'green' : 'amber';
-    return `<tr><td>${r.regime}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>${fmtExecutionUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
+    return `<tr><td>${displayRegime(r.regime)}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>${fmtExecutionUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
   }).join('') || `<tr><td colspan="6">${regimeAvailable ? 'The saved report contains no regime cells.' : missingResearchSource()}</td></tr>`;
   if (!regimeAvailable) {
     document.getElementById('regime-note').textContent = missingResearchSource();
@@ -8427,6 +9172,14 @@ async function loadGenome() {
   document.getElementById('genome-shared-context').textContent = coverage.status === 'CURRENT_EPOCH_EVIDENCE_ONLY'
     ? `Cumulative cohort: eligible ${count('eligible_lanes')}, evaluated ${count('cohort_evaluated_lanes')}, evidence-bound ${count('cohort_bound_lanes')}, pending ${count('cohort_pending_lanes')}. Evaluation complete: ${flag('cohort_evaluation_complete')}. Current page only: ${count('page_lanes')} lanes, ${count('bound_lanes')} evidence-bound. Scan truncated: ${flag('truncated')}. Evidence binding is not a completed trade, a profitable strategy, or qualification for live trading.`
     : 'Shared context coverage UNKNOWN: current matching-epoch evidence is unavailable. Evidence binding is not trade qualification.';
+  const preAi = d.pre_ai_unavailable_assessment || {};
+  const preAiCount = key => Number.isSafeInteger(preAi[key]) && preAi[key] >= 0 ? preAi[key] : 'UNKNOWN';
+  const preAiReasons = Object.entries(preAi.reason_counts || {}).map(([reason, amount]) => `${reason}:${amount}`).join(', ');
+  document.getElementById('genome-pre-ai-unavailable').textContent = preAi.status === 'CURRENT_EPOCH_DIAGNOSTIC_GAPS'
+    ? `Pre-AI context coverage gap: ${preAiCount('current_diagnostic_gap_rows')} current scans (${preAiReasons || 'reason not reported'}). AI was not called; these are not AI rejections, orders, fills, no-fills, or ranking observations. Qualification is blocked until valid context is recovered and observed.`
+    : preAi.status === 'CURRENT_EPOCH_DIAGNOSTIC_RECEIPTS_INVALID'
+      ? `Pre-AI context diagnostic receipts are invalid (${preAiCount('invalid_current_receipt_rows')}); they are excluded from outcomes and block qualification pending repair.`
+      : `Pre-AI context diagnostic assessment: ${preAi.status || 'UNAVAILABLE'}. It never represents an AI rejection, order, fill, no-fill, or qualification evidence.`;
   if (d.collector_generation === 'V3.1') {
     const c = d.collection || {}, s = d.search_progress || {}, cs = d.candidate_screen || {};
     const rows = cs.descriptive_top_100 || [];
@@ -8501,7 +9254,7 @@ async function loadGenome() {
     }, null, 2);
     document.getElementById('genome-replay').textContent = JSON.stringify({integrity:d.integrity, safe_policy_ranking:d.safe_policy_ranking}, null, 2);
     document.getElementById('genome-discoveries').innerHTML = rows.length ? rows.slice(0, 20).map(row =>
-      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · diagnostic net ${fmtExecutionUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD ${fmtExecutionUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
+      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 'UNAVAILABLE'} · OOS=${row.oos_episodes ?? 'UNAVAILABLE'} · diagnostic net ${fmtExecutionUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD ${fmtExecutionUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
     ).join('') : '<p class="note">No matured V3.1 policy rows yet. See the blockers above.</p>';
     return;
   }
@@ -8731,27 +9484,35 @@ async function loadArchives() {
 async function loadStatus() {
   const r = await fetch('/api/status');
   const d = await r.json();
+  const presentation = normalizeAnalyzerPresentation(d);
   // Runtime status owns both the latest attempt and its saved-report timestamp.
   // A report-only summary refresh must never overwrite this global header.
   document.getElementById('updated').textContent = analyzerAttemptLabel(d);
+  document.getElementById('scope').textContent = analyzerHeaderFromPresentation(presentation);
   const syncEl = document.getElementById('sync');
   if (syncEl && d.expected_analyzer_sync_id) {
-    syncEl.textContent = d.expected_analyzer_sync_id + (d.analyzer_sync_match === true ? ' ✓' : (d.analyzer_sync_match === false ? ' ⚠' : ''));
+    syncEl.textContent = d.expected_analyzer_sync_id
+      + ` · service ${readinessLabel(presentation.service_ready)}`
+      + ` · reports ${readinessLabel(presentation.report_bundle_ready)}`
+      + ` · qualification ${readinessLabel(presentation.qualification_ready)}`;
+    syncEl.title = 'Service is listener/runtime identity. Reports require a current complete bundle. Qualification also requires a VALID integrity receipt and an explicit qualified policy.';
   }
+  const provenanceEl = document.getElementById('research-provenance-summary');
+  if (provenanceEl) provenanceEl.textContent = analyzerResearchFactsFromPresentation(presentation);
   const revisionEl = document.getElementById('revision');
   if (revisionEl) {
-    const revision = d.generation_revision || 'UNKNOWN';
-    revisionEl.textContent = `analyzer rev ${revision.slice(0, 12)}`;
-    revisionEl.title = `Analyzer source revision: ${revision} · Local mirror source revision (not live Fly): ${d.mirror_source_revision || 'UNAVAILABLE'} · parity: ${d.source_revision_parity || 'UNAVAILABLE'}`;
+    const identity = presentation.identity;
+    revisionEl.textContent = `analyzer ${shortIdentity(identity.analyzer_revision)} · data ${shortIdentity(identity.report_revision)}`;
+    revisionEl.title = `Analyzer code revision: ${identity.analyzer_revision || 'UNAVAILABLE'} · Report dataset source revision: ${identity.report_revision || 'UNAVAILABLE'} · Local mirror source revision (not live Fly): ${identity.mirror_revision || 'UNAVAILABLE'} · report-to-mirror parity: ${identity.report_parity || 'UNAVAILABLE'} · mirror-to-Fly parity: ${identity.fly_parity || 'UNAVAILABLE'}`;
   }
   const epochEl = document.getElementById('epoch');
   if (epochEl) {
-    const epoch = d.fresh_epoch_id || 'UNBOUND';
+    const epoch = presentation.epoch || 'UNBOUND';
     epochEl.textContent = epoch === 'UNBOUND' ? 'epoch UNBOUND' : `epoch ${epoch.replace(/^epoch-/, '').slice(0, 8)}`;
     epochEl.title = `Signed collection epoch: ${epoch}`;
   }
   const melbEl = document.getElementById('melb-clock');
-  if (melbEl && d.melbourne_now) melbEl.textContent = d.melbourne_now;
+  if (melbEl) melbEl.textContent = presentation.runtime_observation_label;
   return d;
 }
 

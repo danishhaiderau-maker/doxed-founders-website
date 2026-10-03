@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import {
   buildOwnerHttpsRequestOptions,
+  classifyFlatAuditFailure,
   describeOwnerFetchError,
   hasFullOwnerOrderState,
   isCompleteStoredExchangeOrderAuditFlat,
@@ -16,6 +17,22 @@ import {
   ownerFetchErrorChain,
   refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
+
+test('audit failures are bounded and expose only allowlisted classifications', async () => {
+  for (const [message, expected] of [
+    ['Flat audit requires a paused, disarmed relay', 'RELAY_NOT_PAUSED_DISARMED'],
+    ['Bitfinex credentials unavailable (DECRYPT_FAILED)', 'CREDENTIAL_DECRYPT_FAILED'],
+    ['Bitfinex credentials unavailable (FINGERPRINT_REQUIRED_MISSING)', 'CREDENTIAL_FINGERPRINT_REQUIRED_MISSING'],
+    ['secret-token private-user-id', 'UNCLASSIFIED_RESPONSE'],
+  ]) {
+    assert.equal(await classifyFlatAuditFailure(new Response(JSON.stringify({ message }))), expected);
+  }
+  assert.equal(await classifyFlatAuditFailure(new Response('x'.repeat(4097))), 'RESPONSE_TOO_LARGE');
+  assert.equal(await classifyFlatAuditFailure(new Response('not json')), 'UNREADABLE_RESPONSE');
+  await assert.rejects(refreshPausedRelayAudit('https://api.example.test', 'secret', 'user',
+    async () => new Response(JSON.stringify({ message: 'Flat audit requires a paused, disarmed relay' }), { status: 400 })),
+  /HTTP 400 code=RELAY_NOT_PAUSED_DISARMED/);
+});
 
 test('credential resolver receipt accepts only the legacy text or an allowlisted exact code', () => {
   assert.equal(isCredentialResolutionUnavailableError(

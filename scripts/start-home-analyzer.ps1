@@ -396,7 +396,7 @@ if ($Once) { $pyArgs += "--once" }
 $pyArgs += "--owner-port=$AnalyzerPort"
 $pyArgs += $expectedRevisionMarker
 
-if ($NoWait) {
+if ($NoWait -and -not $Once) {
   Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
   Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
@@ -441,5 +441,5 @@ try {
   } else {
     Write-Host "Analyzer loop ended." -ForegroundColor Yellow
   }
-  Wait-ForKey
+  if (-not $NoWait) { Wait-ForKey }
 }

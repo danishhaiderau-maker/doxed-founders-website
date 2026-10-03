@@ -16,12 +16,13 @@ GENERATION = {
 def test_declared_terminal_economics_reaches_discovery_provenance_and_leader(tmp_path):
     from research.shadow_result_stream import digest
     root, evaluator, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     terminal = shadow["results"][0]["terminal"]
     terminal.update(economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256="d" * 64)
     terminal["receipt_sha256"] = digest({k: v for k, v in terminal.items() if k != "receipt_sha256"})
     report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=shadow)
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     provenance = report["shadow_terminal_provenance"][0]
     leader = report["profitability_evidence_by_world"]["CONSERVATIVE_BBO"]["descriptive_leader"]
     for item in (provenance, leader):
@@ -141,8 +142,11 @@ def shadow_inputs(root):
     result["policy_signature"] = canonical_hash("entry-baseline", unsigned)
     result["baseline_spec"]["policy_signature"] = result["policy_signature"]
     receipt = result["conservative_receipt"]
-    receipt.update({"schedule_sha256": "s" * 64, "requested_qty": .4,
-                    "tape_hashes": ["t" * 64], "tape_ids": ["tape-1"]})
+    # The terminal lifecycle contract validates these as hexadecimal SHA-256
+    # values.  Keep this legacy fixture valid rather than making its simulated
+    # terminal fail before the publication boundary is exercised.
+    receipt.update({"schedule_sha256": "a" * 64, "requested_qty": .4,
+                    "tape_hashes": ["b" * 64], "tape_ids": ["tape-1"]})
     # Entry identity changed above; rebuild the composite-bound model context.
     from research.conservative_shadow_report import build_composite_policy_identity
     identity = build_composite_policy_identity(result, candidates[0])[1]
@@ -154,7 +158,7 @@ def shadow_inputs(root):
         root, expected_generation=GENERATION, baseline_report=baseline,
         policy_candidates=candidates, policy_artifact_receipt=artifact, research_model=model)
     assert shadow["complete_replay_count"] == 1
-    return baseline, shadow
+    return baseline, shadow, {"candidates": candidates, "receipt": artifact}
 
 
 def test_valid_same_generation_verifies_gzip_hash_and_rows(tmp_path):
@@ -330,10 +334,11 @@ def test_baseline_order_does_not_change_diagnostics(tmp_path):
 
 def test_complete_composite_shadow_populates_conservative_leader(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     world = report["profitability_evidence_by_world"]["CONSERVATIVE_BBO"]
     assert world["available"] is True
     assert world["descriptive_leader"]["policy_signature"] == shadow["results"][0]["policy_signature"]
@@ -354,49 +359,60 @@ def test_complete_composite_shadow_populates_conservative_leader(tmp_path):
 
 def test_tampered_shadow_terminal_receipt_is_rejected(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     shadow["results"][0]["terminal"]["net_pnl_usd"] += 1
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     assert report["input_counts"]["shadow_terminal_rows_added"] == 0
     assert report["unjoinable_counts"]["shadow_terminal:TERMINAL_RECEIPT_SHA256_INVALID"] == 1
 
 
 def test_shadow_generation_mismatch_fails_whole_publication(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     shadow["generation"] = {**GENERATION, "epoch_id": "foreign"}
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     assert report["status"] == "UNKNOWN"
     assert "INPUT_GENERATION_MISMATCH" in report["blockers"]
 
 
-def test_exact_shadow_duplicates_deduplicate_but_conflicts_block(tmp_path):
+def test_exact_shadow_duplicates_deduplicate_but_stale_source_candidate_blocks(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     shadow["results"].append(json.loads(json.dumps(shadow["results"][0])))
     shadow["candidate_replay_count"] = 2
     shadow["complete_replay_count"] = 2
     shadow["results_total"] = 2
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     assert report["input_counts"]["shadow_terminal_rows_added"] == 1
     assert report["input_counts"]["shadow_terminal_exact_duplicates_deduplicated"] == 1
     shadow["results"][1]["source_candidate_policy_id"] = "same-exit-different-source-candidate"
     shadow["results"][1]["source_candidate_policy_signature"] = "different-source-signature"
     correlated = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
-    assert correlated["input_counts"]["shadow_terminal_rows_added"] == 1
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
+    # Aliases can share a terminal result, but an alias from a candidate that
+    # is not in the current verified artifact cannot lend that PnL to the
+    # current scorecard.
+    assert correlated["input_counts"]["shadow_terminal_rows_added"] == 0
     assert correlated["input_counts"]["shadow_terminal_exact_duplicates_deduplicated"] == 1
+    assert correlated["unjoinable_counts"][
+        "shadow_terminal:SOURCE_CANDIDATE_POLICY_SIGNATURE_NOT_CURRENT"
+    ] == 1
     shadow["results"][1]["terminal"]["net_pnl_usd"] += 1
     conflict = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     assert conflict["input_counts"]["shadow_terminal_rows_added"] == 0
     assert conflict["input_counts"]["shadow_terminal_conflicting_duplicate_groups"] == 1
 
@@ -406,29 +422,33 @@ def test_shadow_world_does_not_convert_observed_paper_rows(tmp_path):
         terminal_outcome_status="REALIZED_COST_COMPLETE", profitability_supported=True,
         net_pnl_usd=2, observed_cost_model_id="paper-cost",
         observed_execution_model="PAPER_OBSERVED")])
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     assert report["profitability_evidence_by_world"]["OBSERVED_PAPER"]["available"] is True
     assert report["profitability_evidence_by_world"]["CONSERVATIVE_BBO"]["available"] is True
     assert report["scorecard"]["pnl_sum_across_worlds"] is False
 
 
 def test_large_truncated_unknown_aggregate_is_preserved_without_double_count(tmp_path):
-    root, status, baseline = inputs(tmp_path)
+    root, status, _ = inputs(tmp_path)
+    baseline, current_shadow, policy_artifact = shadow_inputs(root)
     shadow = {"schema": "generation_bound_conservative_shadow_report_v1",
               "generation": dict(GENERATION), "status": "BUILT_INCOMPLETE",
               "blockers": ["RESEARCH_MODEL_MISSING"], "candidate_replay_count": 1000,
               "complete_replay_count": 0, "unknown_replay_count": 1000,
               "results_total": 1000, "results_truncated": True,
               "reason_counts": {"RESEARCH_MODEL_MISSING": 1000},
+              "candidate_artifact_sha256": current_shadow["candidate_artifact_sha256"],
               "results": [{"episode_id": "e1", "opportunity_id": "o1", "baseline_id": "b1",
                            "policy_signature": "composite-1", "status": "UNKNOWN",
                            "blockers": ["RESEARCH_MODEL_MISSING"]}]}
     report = build_discovery_scorecard_publication(
         root, expected_generation=GENERATION, evaluator_status=status,
-        baseline_report=baseline, shadow_terminal_report=shadow)
+        baseline_report=baseline, shadow_terminal_report=shadow,
+        current_policy_artifact=policy_artifact)
     aggregate = report["shadow_terminal_aggregate"]
     assert aggregate["unknown_replay_count"] == 1000
     assert aggregate["reason_counts"] == {"RESEARCH_MODEL_MISSING": 1000}
@@ -466,13 +486,14 @@ def test_invalid_shadow_aggregate_count_fails_closed(tmp_path):
 
 def test_invalid_shadow_reason_bounds_or_blocker_type_fail_closed(tmp_path):
     root, status, _ = inputs(tmp_path)
-    baseline, shadow = shadow_inputs(root)
+    baseline, shadow, policy_artifact = shadow_inputs(root)
     for changes, expected in (
         ({"reason_counts": {"MISSING": 1}}, "SHADOW_TERMINAL_REASON_COUNT_EXCEEDS_UNKNOWN_REPLAYS"),
         ({"blockers": "ERROR"}, "SHADOW_TERMINAL_AGGREGATE_INVALID:blockers"),
     ):
         report = build_discovery_scorecard_publication(
             root, expected_generation=GENERATION, evaluator_status=status,
-            baseline_report=baseline, shadow_terminal_report={**shadow, **changes})
+            baseline_report=baseline, shadow_terminal_report={**shadow, **changes},
+            current_policy_artifact=policy_artifact)
         assert report["status"] == "UNKNOWN"
         assert expected in report["blockers"]

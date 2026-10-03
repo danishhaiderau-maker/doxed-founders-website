@@ -40,6 +40,27 @@ MAX_GENERATION_SPOOL_BYTES = 1024 * 1024 * 1024
 GENERATION_LEASE_STALE_SECONDS = 600.0
 DEFAULT_PAGE_ROWS = 250
 MAX_PAGE_ROWS = 1000
+SAFE_FAILURE_CODES = frozenset({
+    "DIRECTORY_ENTRY_LIMIT_EXCEEDED",
+    "DIRECTORY_SCAN_FAILED",
+    "GENERATION_DIRECTORY_LIMIT_EXCEEDED",
+    "GENERATION_ENTRY_LIMIT_EXCEEDED",
+    "GENERATION_LEASE_ACTIVE",
+    "GENERATION_SPOOL_LIMIT_EXCEEDED",
+    "INVENTORY_CAPACITY_DEFERRED",
+    "INVENTORY_SQLITE_FAILED",
+    "INVENTORY_WORKER_FAILED",
+    "QUARANTINE_COMPONENT_BINDING_INVALID",
+    "SNAPSHOT_INTEGRITY_FAILED",
+})
+SAFE_FAILURE_STAGES = frozenset({
+    "REQUEST_VALIDATE",
+    "GENERATION_LEASE",
+    "BUILD_RESUMABLE",
+    "RELEASE_LEASE",
+    "PUBLISH_RESULT",
+    "CLEANUP_STATE",
+})
 
 
 class CheckpointError(ValueError):
@@ -71,6 +92,40 @@ class InventoryWorkerError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def _safe_failure_code(exc: BaseException) -> str:
+    """Return a bounded worker failure code without serializing exception text."""
+    candidate = getattr(exc, "code", None)
+    if candidate is None and isinstance(exc, RuntimeError):
+        candidate = str(exc)
+    if candidate is None and isinstance(exc, sqlite3.DatabaseError):
+        candidate = (
+            "GENERATION_SPOOL_LIMIT_EXCEEDED"
+            if "full" in str(exc).lower()
+            else "INVENTORY_SQLITE_FAILED"
+        )
+    code = str(candidate or "")
+    return code if code in SAFE_FAILURE_CODES else "INVENTORY_WORKER_FAILED"
+
+
+def _failure_fingerprint(request: dict, stage: str, code: str) -> str:
+    """Bind a public failure receipt without serializing paths or exception text."""
+    request_fingerprint = _request_fingerprint(request)
+    canonical = json.dumps({
+        "code": str(code),
+        "request_fingerprint": request_fingerprint,
+        "stage": str(stage),
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _safe_volume_free_bytes(request: dict) -> int | None:
+    """Report a bounded capacity fact; never turn an error into a fake zero."""
+    try:
+        return max(0, int(shutil.disk_usage(Path(request["_volume"])).free))
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
 
 
 def _within(candidate: Path, root: Path) -> bool:
@@ -485,9 +540,15 @@ def _acquire_generation_lease(path: Path, nonce: str) -> None:
                 # by this worker. A stale malformed legacy/crash artifact can
                 # therefore be reclaimed by lstat age; a fresh unknown owner
                 # remains fail-closed.
+                # A dead lease owner can never finish or release. Reclaim
+                # immediately when the recorded PID is gone; only unknown /
+                # still-alive owners stay gated by the stale-age window.
                 reclaim = bool(
-                    age > GENERATION_LEASE_STALE_SECONDS
-                    and ((owner_known and not _process_alive(owner_pid)) or not owner_known)
+                    (owner_known and not _process_alive(owner_pid))
+                    or (
+                        age > GENERATION_LEASE_STALE_SECONDS
+                        and not owner_known
+                    )
                 )
                 if reclaim:
                     try:
@@ -1135,7 +1196,14 @@ def _publish_generation(
             "top_files": top_files,
         }
     finally:
-        index_temporary.unlink(missing_ok=True)
+        # A temporary-index cleanup failure must never replace the classified
+        # build error that caused this finally block to run.  The temporary
+        # file is confined to the resumable work area and will be retried by
+        # normal bounded cleanup on the next invocation.
+        try:
+            index_temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]:
@@ -1170,7 +1238,12 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
         if checkpoint["phase"] == "SCAN" and page_count:
             raise CheckpointError("inventory database has premature pages")
     except (CheckpointError, InventoryWorkerError):
-        _quarantine((checkpoint_path, database_path, staging))
+        # Quarantine is forensic best-effort cleanup.  It must not replace the
+        # causal checkpoint/integrity code with an unrelated filesystem error.
+        try:
+            _quarantine((checkpoint_path, database_path, staging))
+        except Exception:
+            pass
         raise
     file_budget, directory_budget, elapsed_budget = _budgets(request)
     page_rows = min(MAX_PAGE_ROWS, max(1, int(
@@ -1407,8 +1480,16 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             _atomic_json(checkpoint_path, checkpoint)
         return generation, receipt
     except (CheckpointError, InventoryWorkerError, sqlite3.DatabaseError):
-        connection.close()
-        _quarantine((checkpoint_path, database_path, staging))
+        # Preserve the original classified build error even if cleanup itself
+        # encounters a locked/failed filesystem or database handle.
+        try:
+            connection.close()
+        except Exception:
+            pass
+        try:
+            _quarantine((checkpoint_path, database_path, staging))
+        except Exception:
+            pass
         raise
     finally:
         try:
@@ -1432,6 +1513,7 @@ def _rows_sha256(rows: list[dict]) -> str:
 def run(request_path: Path, result_path: Path, nonce: str) -> int:
     request = None
     lease_path = None
+    failure_stage = "REQUEST_VALIDATE"
     try:
         if hasattr(os, "nice"):
             try:
@@ -1441,11 +1523,22 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         request = _load_request(request_path, result_path, nonce)
         fingerprint = _request_fingerprint(request)
         lease_path = _generation_lease_path(request_path.parent, fingerprint)
+        failure_stage = "GENERATION_LEASE"
         _acquire_generation_lease(lease_path, nonce)
+        failure_stage = "BUILD_RESUMABLE"
         try:
             generation, worker_receipt = _build_resumable(request, request_path.parent)
-        finally:
-            _release_generation_lease(lease_path, nonce)
+        except BaseException:
+            # Preserve the causal build-stage receipt. A best-effort lease
+            # release must not overwrite a real build failure with a later
+            # cleanup label, otherwise operators diagnose the wrong repair.
+            try:
+                _release_generation_lease(lease_path, nonce)
+            except BaseException:
+                pass
+            raise
+        failure_stage = "RELEASE_LEASE"
+        _release_generation_lease(lease_path, nonce)
         generated_unix = time.time()
         base = {
             "schema": RESULT_SCHEMA,
@@ -1486,6 +1579,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "invocation_dirs_seen": worker_receipt["invocation_dirs_seen"],
                 "retry_after_seconds": _building_retry_seconds(worker_receipt),
             }
+            failure_stage = "PUBLISH_RESULT"
             _atomic_json(result_path, payload)
             return 75
         payload = {
@@ -1501,19 +1595,19 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "page_index_path": generation["page_index_path"],
             "page_index_sha256": generation["page_index_sha256"],
         }
+        failure_stage = "PUBLISH_RESULT"
         _atomic_json(result_path, payload)
+        failure_stage = "CLEANUP_STATE"
         _cleanup_completed_state(request, request_path.parent)
         return 0
     except BaseException as exc:
         if request is not None:
             try:
-                failure_code = getattr(exc, "code", None)
-                if failure_code is None and isinstance(exc, sqlite3.DatabaseError):
-                    failure_code = (
-                        "GENERATION_SPOOL_LIMIT_EXCEEDED"
-                        if "full" in str(exc).lower()
-                        else "INVENTORY_SQLITE_FAILED"
-                    )
+                failure_code = _safe_failure_code(exc)
+                safe_stage = (
+                    failure_stage
+                    if failure_stage in SAFE_FAILURE_STAGES else "BUILD_RESUMABLE"
+                )
                 _atomic_json(result_path, {
                     "schema": RESULT_SCHEMA,
                     "status": "FAILED",
@@ -1522,9 +1616,12 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                     "launched_unix": float(request.get("launched_unix") or 0.0),
                     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "generated_unix": time.time(),
-                    "failure_kind": type(exc).__name__,
-                    "failure_code": failure_code or "INVENTORY_WORKER_FAILED",
-                    "failure_reason": str(exc)[:500],
+                    "failure_code": failure_code,
+                    "failure_stage": safe_stage,
+                    "failure_fingerprint": _failure_fingerprint(
+                        request, safe_stage, failure_code,
+                    ),
+                    "volume_free_bytes": _safe_volume_free_bytes(request),
                     "retry_after_seconds": 30,
                 })
             except BaseException:

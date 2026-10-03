@@ -67,6 +67,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             "ws_ready": False,
             "ohlcv_ready": True,
             "ema_status": {"ema9": 1.0, "ema21": 1.0, "ema200": 1.0},
+            "support_resistance": {"swing_high": 65_000.0, "swing_low": 63_000.0},
             "pathway_safety_block": False,
             "last_ready_ts": 0.0,
             "rest_quote_stale": False,
@@ -146,6 +147,8 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
                 "_market_data_health_snapshot",
                 "_fresh_rest_entry_quote_ready",
                 "ensure_fresh_rest_entry_quote",
+                "_finite_positive_sr_value",
+                "_sr_swing_pair_ready",
                 "_runtime_readiness_components",
                 "_recompute_system_readiness",
                 "can_progress_new_entry",
@@ -363,6 +366,43 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
         )
         self.assertTrue(stable["system_ready"])
         self.assertTrue(stable["signal_generation_ready"])
+
+    def test_valid_sr_preserves_normal_readiness_gates(self):
+        self._make_ws_ready()
+        runtime = self.namespace["_runtime_readiness_components"](self.now)
+        self.assertTrue(runtime["sr_ready"])
+        self.assertTrue(runtime["structural_prerequisites_ready"])
+        self.assertTrue(runtime["system_ready"])
+        self.assertTrue(runtime["signal_generation_ready"])
+        self.assertNotIn("SR_NOT_READY", runtime["readiness_reasons"])
+
+    def test_invalid_sr_never_authorizes_system_or_signal_readiness(self):
+        invalid_pairs = (
+            (None, 63_000.0),
+            (65_000.0, None),
+            (False, 63_000.0),
+            ("65000", 63_000.0),
+            (float("nan"), 63_000.0),
+            (float("inf"), 63_000.0),
+            (-65_000.0, 63_000.0),
+            (65_000.0, -63_000.0),
+            (63_000.0, 65_000.0),
+            (65_000.0, 65_000.0),
+        )
+        for swing_high, swing_low in invalid_pairs:
+            with self.subTest(swing_high=swing_high, swing_low=swing_low):
+                self._make_ws_ready()
+                self.state["support_resistance"] = {
+                    "swing_high": swing_high,
+                    "swing_low": swing_low,
+                }
+                runtime = self.namespace["_recompute_system_readiness"](self.now)
+                self.assertFalse(runtime["sr_ready"])
+                self.assertFalse(runtime["structural_prerequisites_ready"])
+                self.assertFalse(runtime["system_ready"])
+                self.assertFalse(runtime["signal_generation_ready"])
+                self.assertIn("SR_NOT_READY", runtime["readiness_reasons"])
+                self.assertEqual(self.state["last_ready_ts"], 0)
 
     def test_force_paper_boundary_is_unchanged_after_quote_recovery(self):
         self._make_ws_ready()

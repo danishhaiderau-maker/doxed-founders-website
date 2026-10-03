@@ -7,8 +7,10 @@ from pathlib import Path
 
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 from research.research_v3_report import (
+    _source_revision,
     build_safe_policy_genome_v3_report,
     join_pre_entry_feature_receipts,
+    normalize_pre_entry_feature_receipt,
 )
 from research import research_dashboard as dashboard
 from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES, _causal_feature_key
@@ -22,6 +24,17 @@ def _causal_join_input():
          "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99,
          "features": {name: "OBSERVED_BUCKET" for name in DEFAULT_CAUSAL_FEATURES}},
     )
+
+
+def test_source_revision_requires_canonical_mirror_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOURCE_GIT_REV", "a" * 40)
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "b" * 40)
+    assert _source_revision(tmp_path) == "UNKNOWN"
+
+    (tmp_path / "canonical_dataset_current.json").write_text(
+        json.dumps({"source_revision": "c" * 40}), encoding="utf-8"
+    )
+    assert _source_revision(tmp_path) == "c" * 40
 
 
 @pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), "-Infinity", None])
@@ -64,6 +77,22 @@ def test_causal_join_missing_identities_cannot_match_empty_strings():
     assert joined[0]["pre_entry_features"] == {}
     assert joined[0]["pre_entry_feature_blockers"] == ["PRE_ENTRY_OPPORTUNITY_IDENTITY_MISSING"]
     assert coverage["dynamic_schema_complete_opportunities"] == 0
+
+
+def test_pre_entry_regime_envelope_normalizes_without_losing_causal_timestamp():
+    _, receipt = _causal_join_input()
+    receipt["capture_schema"] = "measured_feature_capture_v1"
+    receipt["features"]["regime"] = {"value": " bear ", "observed_ts": 98}
+
+    normalized, blockers = normalize_pre_entry_feature_receipt(receipt, signal_ts=100)
+
+    assert blockers == []
+    assert normalized["regime"] == {"value": "BEAR", "observed_ts": 98.0}
+
+    receipt["features"]["regime"] = {"value": "BULL", "observed_ts": 101}
+    normalized, blockers = normalize_pre_entry_feature_receipt(receipt, signal_ts=100)
+    assert "regime" not in normalized
+    assert "POST_ENTRY_FEATURE_LEAKAGE:regime" in blockers
 
 
 class V3ReportTests(unittest.TestCase):

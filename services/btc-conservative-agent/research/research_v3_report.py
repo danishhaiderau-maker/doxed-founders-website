@@ -13,12 +13,17 @@ from pathlib import Path
 from typing import Any
 
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
-from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
+from research_v3_contract import (
+    SAFE_POLICY_GENOME_CONTRACT,
+    normalize_lifecycle_outcome,
+    normalize_regime_observation,
+)
 from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
 from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
+from research.scan_unavailable_assessment import load_pre_ai_unavailable_assessment
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
@@ -115,6 +120,33 @@ def normalize_pre_entry_feature_receipt(
         value = _nested_feature(features, _PRE_ENTRY_FEATURE_PATHS[name])
         if value in (None, ""):
             blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
+            continue
+        if name == "regime":
+            regime_observation = normalize_regime_observation(
+                value,
+                signal_ts=signal_at,
+                # A scalar in this receipt is causally timestamped by the
+                # explicit pre-decision capture boundary, unlike a bare
+                # historical candidate row.
+                scalar_observed_ts=captured_at,
+            )
+            if not regime_observation["qualification_eligible"]:
+                reason = regime_observation["reason"]
+                if reason in {
+                    "REGIME_OBSERVATION_TIMESTAMP_MISSING",
+                    "REGIME_OBSERVATION_TIMESTAMP_INVALID",
+                    "REGIME_SIGNAL_TIMESTAMP_INVALID",
+                }:
+                    blockers.append("FEATURE_TIMESTAMP_MISSING:regime")
+                elif reason == "REGIME_OBSERVATION_POST_SIGNAL":
+                    blockers.append("POST_ENTRY_FEATURE_LEAKAGE:regime")
+                else:
+                    blockers.append("MISSING_PRE_ENTRY_FEATURE:regime")
+                continue
+            normalized[name] = {
+                "value": regime_observation["value"],
+                "observed_ts": regime_observation["observed_ts"],
+            }
             continue
         if isinstance(value, dict) and "value" in value:
             observation = value.get("value")
@@ -316,13 +348,12 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _source_revision(data_dir: str | Path) -> str:
-    """Resolve the mirrored source identity without invoking Git or the runtime."""
-    runtime_revision = str(
-        os.getenv("SOURCE_GIT_REV")
-        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-        or os.getenv("GIT_REVISION")
-        or ""
-    ).strip()
+    """Resolve only the canonical mirror's dataset identity.
+
+    The analyzer process revision is a different role.  It must never fill a
+    missing mirror source revision, otherwise a report can falsely appear to
+    describe the code that happened to publish it rather than the data read.
+    """
     for name in ("canonical_dataset_current.json", ".fly-sync-state.json"):
         try:
             payload = json.loads((Path(data_dir) / name).read_text(encoding="utf-8"))
@@ -335,14 +366,8 @@ def _source_revision(data_dir: str | Path) -> str:
             or ""
         ).strip()
         if revision:
-            # The canonical manifest may intentionally store Fly's 12-character
-            # display revision while the analyzer process is pinned to the full
-            # commit. Preserve the full identity only when it proves the same
-            # revision; otherwise fail closed to the canonical mirror value.
-            if runtime_revision and runtime_revision.startswith(revision):
-                return runtime_revision
             return revision
-    return runtime_revision or "UNKNOWN"
+    return "UNKNOWN"
 
 
 def _exhaustive_policy_row(
@@ -771,6 +796,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     cutoff = _fresh_cutoff(data_dir)
     selected_epoch = _select_current_epoch(all_opportunities, cutoff)
     epoch_id = selected_epoch or "V3_NOT_STARTED"
+    source_revision = _source_revision(data_dir)
+    # This is intentionally outside the V3 outcome ledgers: a pre-AI context
+    # failure is a coverage gap, not an opportunity, decision, order, fill, or
+    # lifecycle. The bounded assessment is report-only and cannot be supplied
+    # to the candidate/ranking evaluator as a synthetic result.
+    pre_ai_unavailable_assessment = load_pre_ai_unavailable_assessment(
+        Path(data_dir) / "ai_input_log.jsonl",
+        epoch_id=selected_epoch,
+        source_revision=source_revision,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=epoch_id)
     verification = store.verify()
     def scoped(rows):
@@ -1071,6 +1106,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ranking = dict(ranking)
         ranking["number_one"] = None
         ranking["qualification"] = "BLOCKED_ORDER_RESOLUTION_INTEGRITY"
+    if pre_ai_unavailable_assessment.get(
+        "qualification_blocked_by_unobserved_pre_ai_coverage"
+    ) is True:
+        # A failed prerequisite did not produce a trade result and must never
+        # be relabelled as a rejection/no-fill. It does, however, leave an
+        # unobserved slice of the current opportunity universe, so a candidate
+        # cannot be called fully qualified while that coverage gap is present.
+        ranking = dict(ranking)
+        ranking["number_one"] = None
+        ranking["qualification"] = "BLOCKED_PRE_AI_COVERAGE_UNAVAILABLE"
     exhaustive_manifest = _persist_exhaustive_policies(
         report_dir,
         list(candidates or []),
@@ -1118,7 +1163,6 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "independent_episodes": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
         })
     generated_at = datetime.now(timezone.utc).isoformat()
-    source_revision = _source_revision(data_dir)
     analyzer_revision = str(
         os.getenv("SOURCE_GIT_REV")
         or os.getenv("RAILWAY_GIT_COMMIT_SHA")
@@ -1133,6 +1177,10 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else [])
         + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else [])
         + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else [])
+        + (["PRE_AI_CONTEXT_COVERAGE_UNAVAILABLE"]
+           if pre_ai_unavailable_assessment.get(
+               "qualification_blocked_by_unobserved_pre_ai_coverage"
+           ) is True else [])
         + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else [])
     )
     strategy_leaders = build_three_tier_strategy_leaders(
@@ -1158,6 +1206,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "deployed_policy_collection": _deployed_policy_collection(),
         "contract": SAFE_POLICY_GENOME_CONTRACT,
         "integrity": verification,
+        "pre_ai_unavailable_assessment": pre_ai_unavailable_assessment,
         "epoch_scope": {
             "selected_epoch_id": selected_epoch,
             "fresh_cutoff_ts": cutoff,

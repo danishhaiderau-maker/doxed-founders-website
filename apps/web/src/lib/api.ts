@@ -6341,6 +6341,7 @@ export function dispatchToIdeSession(
   sessionId: string,
   prompt: string,
   ideProvider = 'cursor',
+  targetNodeId?: string,
 ) {
   return apiFetch<{ id: string; status: string }>(
     `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/dispatch`,
@@ -6349,6 +6350,7 @@ export function dispatchToIdeSession(
       body: JSON.stringify({
         prompt,
         ideProvider,
+        targetNodeId,
       }),
     },
     token,
@@ -6364,12 +6366,22 @@ export type IdeDispatchStatus = {
   sessionId: string;
   delivered: boolean;
   failed: boolean;
+  error?: string | null;
+  executionStatus?: string;
 };
 
 export function fetchIdeDispatchStatus(token: string, dispatchId: string) {
   return apiFetch<IdeDispatchStatus>(
     `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}`,
     undefined,
+    token,
+  );
+}
+
+export function cancelIdeDispatch(token: string, dispatchId: string, reason = 'Cancelled from Founder IDE Remote Access') {
+  return apiFetch<IdeDispatchStatus>(
+    `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}/cancel`,
+    { method: 'POST', body: JSON.stringify({ reason }) },
     token,
   );
 }

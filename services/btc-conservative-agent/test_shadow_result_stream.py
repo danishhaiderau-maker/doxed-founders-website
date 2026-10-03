@@ -11,7 +11,7 @@ from test_discovery_scorecard_publication import GENERATION, inputs, shadow_inpu
 
 
 def complete_report(root, count=121):
-    baseline, report = shadow_inputs(root)
+    baseline, report, policy_artifact = shadow_inputs(root)
     template = report["results"][0]
     rows = []
     for i in range(count):
@@ -23,9 +23,8 @@ def complete_report(root, count=121):
         rows.append(row)
     report.update(results=rows, candidate_replay_count=count, complete_replay_count=count,
                   unknown_replay_count=0, results_total=count, results_truncated=False,
-                  status="BUILT", blockers=[], candidate_policy_count=count,
-                  candidate_artifact_sha256="c" * 64)
-    return baseline, report
+                  status="BUILT", blockers=[], candidate_policy_count=count)
+    return baseline, report, policy_artifact
 
 
 def attach(root, report, rows, name="shadow.jsonl.gz"):
@@ -38,15 +37,17 @@ def attach(root, report, rows, name="shadow.jsonl.gz"):
 
 def test_full_stream_over_100_matches_uncapped_discovery(tmp_path):
     root, evaluator, _ = inputs(tmp_path)
-    baseline, full = complete_report(root)
+    baseline, full, policy_artifact = complete_report(root)
     reference = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=full)
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=full,
+        current_policy_artifact=policy_artifact)
     capped = copy.deepcopy(full)
     capped.update(results=full["results"][:100], results_truncated=True,
                   status="BUILT_INCOMPLETE", blockers=["RESULT_STREAM_CONSUMER_NOT_BOUND"])
     attach(root, capped, full["results"])
     actual = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=capped)
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=capped,
+        current_policy_artifact=policy_artifact)
     assert actual["input_counts"] == reference["input_counts"]
     assert actual["scorecard"] == reference["scorecard"]
     assert actual["shadow_terminal_aggregate"]["full_result_stream_verified"] is True
@@ -55,10 +56,47 @@ def test_full_stream_over_100_matches_uncapped_discovery(tmp_path):
     assert actual["live_qualification"] is False
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+def test_same_generation_stale_policy_artifact_is_rejected(tmp_path, streamed):
+    root, evaluator, _ = inputs(tmp_path)
+    baseline, report, policy_artifact = complete_report(root, 2)
+    report["candidate_artifact_sha256"] = "d" * 64
+    if streamed:
+        attach(root, report, report["results"])
+    actual = build_discovery_scorecard_publication(
+        root, expected_generation=GENERATION, evaluator_status=evaluator,
+        baseline_report=baseline, shadow_terminal_report=report,
+        current_policy_artifact=policy_artifact,
+    )
+    assert actual["status"] == "UNKNOWN"
+    assert actual["scorecard"] is None
+    assert actual["blockers"] == ["SHADOW_TERMINAL_CANDIDATE_ARTIFACT_MISMATCH"]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_unknown_source_candidate_signature_never_admits_terminal_pnl(tmp_path, streamed):
+    root, evaluator, _ = inputs(tmp_path)
+    baseline, report, policy_artifact = complete_report(root, 2)
+    report["results"][0]["source_candidate_policy_signature"] = "unknown-signature"
+    if streamed:
+        attach(root, report, report["results"])
+    actual = build_discovery_scorecard_publication(
+        root, expected_generation=GENERATION, evaluator_status=evaluator,
+        baseline_report=baseline, shadow_terminal_report=report,
+        current_policy_artifact=policy_artifact,
+    )
+    assert actual["input_counts"]["shadow_terminal_rows_added"] == 1
+    assert actual["unjoinable_counts"][
+        "shadow_terminal:SOURCE_CANDIDATE_POLICY_SIGNATURE_NOT_CURRENT"
+    ] == 1
+    assert actual["profitability_supported"] is False
+    assert actual["live_qualification"] is False
+
+
 @pytest.mark.parametrize("fault", ["missing", "corrupt", "truncate", "generation", "report", "count", "incomplete"])
 def test_bad_stream_never_consumed(tmp_path, fault):
     root, evaluator, _ = inputs(tmp_path)
-    baseline, report = complete_report(root, 2)
+    baseline, report, policy_artifact = complete_report(root, 2)
     attach(root, report, report["results"])
     path = root / "shadow.jsonl.gz"
     if fault == "missing":
@@ -76,7 +114,8 @@ def test_bad_stream_never_consumed(tmp_path, fault):
     else:
         report["result_stream"]["complete"] = False
     result = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
-        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=report)
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=report,
+        current_policy_artifact=policy_artifact)
     assert result["status"] == "UNKNOWN"
     assert result["scorecard"] is None
 
@@ -143,11 +182,12 @@ def test_disk_scorecard_exact_matched_episodes_and_duplicates():
 
 def test_explicit_separate_stream_publication_root(tmp_path):
     root, evaluator, _ = inputs(tmp_path)
-    baseline, report = complete_report(root, 2)
+    baseline, report, policy_artifact = complete_report(root, 2)
     publication = tmp_path / "publication"
     attach(publication, report, report["results"])
     kwargs = dict(expected_generation=GENERATION, evaluator_status=evaluator,
-                  baseline_report=baseline, shadow_terminal_report=report)
+                  baseline_report=baseline, shadow_terminal_report=report,
+                  current_policy_artifact=policy_artifact)
     assert build_discovery_scorecard_publication(root, **kwargs)["status"] == "UNKNOWN"
     assert build_discovery_scorecard_publication(root, stream_artifact_root=tmp_path / "wrong", **kwargs)["status"] == "UNKNOWN"
     actual = build_discovery_scorecard_publication(root, stream_artifact_root=publication, **kwargs)
@@ -214,10 +254,11 @@ def test_three_default_indexes_share_one_total_disk_ceiling():
 
 def test_discovery_shared_index_budget_fails_unknown_without_sampling(tmp_path):
     root, evaluator, _ = inputs(tmp_path)
-    baseline, report = complete_report(root, 121)
+    baseline, report, policy_artifact = complete_report(root, 121)
     attach(root, report, report["results"])
     result = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
         evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=report,
+        current_policy_artifact=policy_artifact,
         index_budget_bytes=3 * 16384)
     assert result["status"] == "UNKNOWN"
     assert result["scorecard"] is None
@@ -254,12 +295,13 @@ def test_index_oversized_keys_fail_explicitly():
 
 def test_full_stream_declared_provenance_matches_unsampled_reference(tmp_path):
     root, evaluator, _ = inputs(tmp_path)
-    baseline, report = complete_report(root, 121)
+    baseline, report, policy_artifact = complete_report(root, 121)
     for row in report["results"]:
         row["terminal"].update(economics_evidence_basis="DECLARED_SIMULATION",
                                declared_contract_sha256="e" * 64)
         row["terminal"]["receipt_sha256"] = digest({k: v for k, v in row["terminal"].items() if k != "receipt_sha256"})
-    kwargs = dict(expected_generation=GENERATION, evaluator_status=evaluator, baseline_report=baseline)
+    kwargs = dict(expected_generation=GENERATION, evaluator_status=evaluator,
+                  baseline_report=baseline, current_policy_artifact=policy_artifact)
     reference = build_discovery_scorecard_publication(root, shadow_terminal_report=report, **kwargs)
     streamed = copy.deepcopy(report)
     streamed.update(results=report["results"][:100], results_truncated=True)

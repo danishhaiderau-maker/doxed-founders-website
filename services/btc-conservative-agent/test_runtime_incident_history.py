@@ -72,8 +72,7 @@ def test_both_dashboard_restart_labels_execute_without_truthy_coercion():
     from pathlib import Path
 
     root = Path(__file__).parent
-    for path, variable in ((root / "bot.py", "event"),
-                           (root / "research" / "research_dashboard.py", "row")):
+    for path, variable in ((root / "research" / "research_dashboard.py", "row"),):
         source = path.read_text(encoding="utf-8")
         expression = re.search(
             rf"{variable}\.restart_requested\s*===\s*true\s*\?\s*'YES'\s*:\s*"
@@ -87,6 +86,28 @@ def test_both_dashboard_restart_labels_execute_without_truthy_coercion():
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == ['YES', 'NO', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN']
 
+    # The main dashboard uses longer application-scoped labels so YES cannot
+    # be mistaken for an observed Fly machine or deployment restart.
+    source = (root / "bot.py").read_text(encoding="utf-8")
+    body = re.search(
+        r"const applicationRestartLabel = event =>(?P<body>.*?)\n\s*safeHTML\('runtimeIncidentTable'",
+        source,
+        re.DOTALL,
+    )
+    assert body
+    script = (
+        "const applicationRestartLabel = event =>" + body.group("body").strip() + ";"
+        "console.log(JSON.stringify([true,false,null,undefined,'false',1].map(value=>"
+        "applicationRestartLabel({restart_requested:value}))));"
+    )
+    result = subprocess.run([shutil.which('node'), '-e', script],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    labels = json.loads(result.stdout)
+    assert labels[0].startswith('YES ') and labels[0].endswith('application watchdog request only')
+    assert labels[1].startswith('NO ') and labels[1].endswith('no application watchdog request')
+    assert all(label.startswith('UNKNOWN ') and label.endswith('not recorded') for label in labels[2:])
+
 
 def test_dashboard_wires_runtime_history_without_platform_inference():
     source = (__import__("pathlib").Path(__file__).with_name("bot.py")).read_text(encoding="utf-8")
@@ -95,7 +116,9 @@ def test_dashboard_wires_runtime_history_without_platform_inference():
     assert "No retained application incident receipts" in source
     assert "history.platform_history_status" in source
     assert "const incidentText = value =>" in source
-    assert "event.restart_requested === true ? 'YES' : event.restart_requested === false ? 'NO' : 'UNKNOWN'" in source
+    assert "const applicationRestartLabel = event =>" in source
+    assert "application watchdog request only" in source
+    assert "not a Fly machine/deployment restart" in source
 
 
 def test_research_dashboard_exposes_read_only_runtime_incident_view():

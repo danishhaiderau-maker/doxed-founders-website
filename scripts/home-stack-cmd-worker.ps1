@@ -150,7 +150,9 @@ switch ($Action) {
   }
   "wipe-research" {
     if (Test-PortOpen $BotPort) {
-      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/reset" -Method POST -UseBasicParsing -TimeoutSec 180 | Out-Null
+      # Fresh Collection = laptop wipe only. Never hit Fly. Never arm live.
+      $headers = Get-BotAdminHeaders
+      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/wipe_local_only" -Method POST -Headers $headers -UseBasicParsing -TimeoutSec 180 | Out-Null
     }
   }
   "pause-trading" {

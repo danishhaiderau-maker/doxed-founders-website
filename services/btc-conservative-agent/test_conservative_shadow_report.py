@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 
 from research.conservative_shadow_report import (
     build_composite_policy_identity, build_conservative_shadow_report,
@@ -30,6 +31,7 @@ def _fixture(tmp_path, *, model=True):
              "fill_price": 100, "filled_qty": .4, "direction": "LONG", "symbol": "BTCUSD",
              "quantity_attempts": [{"accepted": True, "rounded_executable_quantity": .4,
                                     "execution_price": 100, "trigger_bucket_ts": 10}],
+             "schedule_sha256": "b" * 64,
              "quantity_constraints": build_signed_quantity_constraints(
                  symbol="BTCUSD", quantity_step="0.1", quantity_precision=1, min_lot="0.1",
                  min_notional="1", captured_at="2026-01-01T00:00:00Z",
@@ -91,6 +93,32 @@ def _fixture(tmp_path, *, model=True):
     return baseline, candidates, artifact, research
 
 
+def _bilateral_fixture(tmp_path, *, short_outcome="PARTIAL_FILL", short_context=True):
+    baseline, candidates, artifact, model = _fixture(tmp_path)
+    long_episode = baseline["episode_receipts"][0]
+    long_episode.update(source_episode_id="source-e1", direction="LONG",
+                        directional_coverage="BOTH_SIDES_CAPTURED")
+    long_episode["results"][0]["outcome_state"] = "FULL_FILL"
+    long_episode["results"][0]["conservative_receipt"]["final_classification"] = "FULL_FILL"
+    short_episode = deepcopy(long_episode)
+    short_episode.update(episode_id="e2", direction="SHORT")
+    short_result = short_episode["results"][0]
+    short_result["outcome_state"] = short_outcome
+    short_result["conservative_receipt"]["direction"] = "SHORT"
+    if short_outcome in {"NO_FILL", "UNKNOWN"}:
+        short_result["conservative_receipt"] = {}
+    baseline.update(same_opportunity_count=1, directional_episode_count=2,
+                    independent_sample_basis="SOURCE_OPPORTUNITY_NOT_DIRECTIONAL_VARIANTS")
+    baseline["episode_receipts"].append(short_episode)
+    if short_context:
+        short_model_context = deepcopy(model["contexts"][0])
+        short_model_context["episode_id"] = "e2"
+        model["contexts"].append(short_model_context)
+        body = {key: value for key, value in model.items() if key != "signature"}
+        model["signature"] = stable_hash("conservative-shadow-research-model", body)
+    return baseline, candidates, artifact, model
+
+
 def test_explicit_current_model_runs_complete_end_to_end(tmp_path):
     baseline, candidates, artifact, model = _fixture(tmp_path)
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
@@ -118,6 +146,100 @@ def test_missing_model_is_unknown_without_zero_cost_defaults(tmp_path):
     assert report["results"][0]["net_pnl_usd"] is None
     assert report["status"] == "BUILT_INCOMPLETE"
     assert report["profitability_supported"] is False
+
+
+def test_bilateral_denominators_keep_source_opportunity_as_statistical_unit(tmp_path):
+    baseline, candidates, artifact, model = _bilateral_fixture(tmp_path)
+    report = build_conservative_shadow_report(
+        tmp_path, expected_generation=GEN, baseline_report=baseline,
+        policy_candidates=candidates, policy_artifact_receipt=artifact,
+        research_model=model,
+    )
+    coverage = report["coverage_denominators"]
+    assert coverage["source_opportunity_count"] == 1
+    assert coverage["expected_directional_arm_count"] == 2
+    assert coverage["present_directional_arm_count"] == 2
+    assert coverage["missing_directional_arm_count"] == 0
+    assert coverage["entry_outcome_result_counts"] == {
+        "FULL_FILL": 1, "PARTIAL_FILL": 1, "NO_FILL": 0, "UNKNOWN": 0,
+    }
+    assert coverage["eligible_terminal_entry_count"] == 2
+    assert coverage["directional_arms_are_independent_samples"] is False
+    assert coverage["source_candidate_attempts_are_independent_samples"] is False
+
+
+def test_declared_bilateral_source_reports_a_missing_directional_arm(tmp_path):
+    baseline, candidates, artifact, model = _fixture(tmp_path)
+    baseline["episode_receipts"][0].update(
+        source_episode_id="source-e1", direction="LONG",
+        directional_coverage="BOTH_SIDES_CAPTURED",
+    )
+    report = build_conservative_shadow_report(
+        tmp_path, expected_generation=GEN, baseline_report=baseline,
+        policy_candidates=candidates, policy_artifact_receipt=artifact,
+        research_model=model,
+    )
+    coverage = report["coverage_denominators"]
+    assert coverage["source_opportunity_count"] == 1
+    assert coverage["expected_directional_arm_count"] == 2
+    assert coverage["present_directional_arm_count"] == 1
+    assert coverage["missing_directional_arm_count"] == 1
+
+
+def test_bilateral_asymmetry_is_one_complete_and_one_unknown_terminal_replay(tmp_path):
+    baseline, candidates, artifact, model = _bilateral_fixture(tmp_path, short_context=False)
+    report = build_conservative_shadow_report(
+        tmp_path, expected_generation=GEN, baseline_report=baseline,
+        policy_candidates=candidates, policy_artifact_receipt=artifact,
+        research_model=model,
+    )
+    coverage = report["coverage_denominators"]
+    assert coverage["terminal_replay_attempted_count"] == 2
+    assert coverage["terminal_complete_replay_count"] == 1
+    assert coverage["terminal_unknown_replay_count"] == 1
+    assert report["profitability_supported"] is False
+    assert next(row for row in report["results"] if row["episode_id"] == "e2")["net_pnl_usd"] is None
+
+
+def test_no_fill_arm_is_counted_but_never_promoted_to_terminal_pnl(tmp_path):
+    baseline, candidates, artifact, model = _bilateral_fixture(
+        tmp_path, short_outcome="NO_FILL", short_context=False,
+    )
+    report = build_conservative_shadow_report(
+        tmp_path, expected_generation=GEN, baseline_report=baseline,
+        policy_candidates=candidates, policy_artifact_receipt=artifact,
+        research_model=model,
+    )
+    coverage = report["coverage_denominators"]
+    assert coverage["entry_outcome_result_counts"]["NO_FILL"] == 1
+    assert coverage["eligible_terminal_entry_count"] == 1
+    assert coverage["source_candidate_attempt_count"] == 1
+    assert all(row["episode_id"] != "e2" for row in report["results"])
+
+
+def test_source_candidate_aliases_reuse_one_unique_composite_evaluation(tmp_path):
+    baseline, candidates, artifact, model = _fixture(tmp_path)
+    alias = deepcopy(candidates[0])
+    alias["policy_id"] = "p1-alias"
+    alias["policy_spec"]["entry"] = {"entry_policy_id": "ignored-source-entry"}
+    alias["policy_spec"]["portfolio"] = {"concurrency_cap": 9, "size_scale": 0.1}
+    alias["policy_signature"] = canonical_hash("v3-policy", alias["policy_spec"])
+    candidates.append(alias)
+    candidates.sort(key=lambda item: (item["policy_signature"], item["policy_id"]))
+    artifact["candidate_count"] = 2
+    artifact["candidates_sha256"] = hashlib.sha256(canonical_json(candidates).encode()).hexdigest()
+    report = build_conservative_shadow_report(
+        tmp_path, expected_generation=GEN, baseline_report=baseline,
+        policy_candidates=candidates, policy_artifact_receipt=artifact,
+        research_model=model,
+    )
+    coverage = report["coverage_denominators"]
+    assert coverage["source_candidate_attempt_count"] == 2
+    assert coverage["terminal_complete_replay_count"] == 2
+    assert coverage["unique_evaluated_composite_count"] == 1
+    assert coverage["terminal_evaluator_call_count"] == 1
+    assert coverage["alias_reused_terminal_result_count"] == 1
+    assert len({row["policy_signature"] for row in report["results"]}) == 1
 
 
 def test_missing_explicit_context_provenance_is_unknown(tmp_path):

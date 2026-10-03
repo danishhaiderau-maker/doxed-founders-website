@@ -6,6 +6,7 @@ from research import research_dashboard as dashboard
 
 
 NOW = datetime(2026, 9, 5, 12, tzinfo=timezone.utc).timestamp()
+REVISION = "8dd73bd9c485a2d4470160667c3e636c3a53365e"
 
 
 def timestamp(delta):
@@ -36,7 +37,18 @@ def test_missing_invalid_and_unzoned_receipts_have_unknown_activity(stamp, fresh
 def test_missing_timestamp_does_not_use_filesystem_mtime_or_secondary_invalid_fallback():
     assert dashboard._mirror_sync_activity_meta({}, now_ts=NOW)["mirror_sync_activity_status"] == "UNKNOWN_MISSING_TIMESTAMP"
     result = dashboard._mirror_sync_activity_meta({"updatedAt": "invalid", "syncedAt": timestamp(0)}, now_ts=NOW)
-    assert result["mirror_sync_receipt_freshness"] == "INVALID_TIMESTAMP"
+    assert result["mirror_sync_receipt_freshness"] == "CONTRADICTORY_ALIASES"
+    assert result["mirror_sync_activity_alias_conflict"] is True
+
+
+def test_conflicting_activity_aliases_fail_closed():
+    result = dashboard._mirror_sync_activity_meta({
+        "updatedAt": timestamp(0),
+        "inProgress": False,
+        "in_progress": True,
+    }, now_ts=NOW)
+    assert result["mirror_sync_activity_status"] == "UNKNOWN_CONTRADICTORY_ALIASES"
+    assert result["mirror_sync_activity_alias_conflict"] is True
 
 
 def test_documented_completed_receipt_timestamp_alias_is_supported():
@@ -55,6 +67,7 @@ def test_fresh_string_flag_is_not_reported_as_running(monkeypatch):
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: None)
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {"updatedAt": timestamp(0), "inProgress": "false"})
     result = dashboard._generation_freshness_meta({})
+    assert result["mirror_sync_in_progress"] is False
     assert any("activity flag is invalid" in reason for reason in result["reasons"])
     assert not any("synchronization is in progress" in reason for reason in result["reasons"])
 
@@ -63,15 +76,62 @@ def test_fresh_string_flag_is_not_reported_as_running(monkeypatch):
 def test_expired_in_progress_never_unlocks_qualification(monkeypatch, stamp):
     monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
     monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {"epoch_id": "epoch-one"})
-    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "revision-one")
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: REVISION)
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
         "inProgress": True, "updatedAt": stamp, "ok": True, "pollOk": True,
-        "revisionParity": "MATCH", "observedSourceRevision": "revision-one",
+        "revisionParity": "MATCH", "observedSourceRevision": REVISION,
     })
-    result = dashboard._generation_freshness_meta({"source_revision": "revision-one", "fresh_epoch": {"epoch_id": "epoch-one"}})
+    result = dashboard._generation_freshness_meta({"source_revision": REVISION, "fresh_epoch": {"epoch_id": "epoch-one"}})
     assert result["revision_parity"] == result["epoch_parity"] == "MATCH"
     assert result["mirror_sync_in_progress"] is True  # compatibility/safety, not proof of a process
     assert result["current"] is False and result["qualification_allowed"] is False
     assert result["mirror_sync_activity_status"].startswith("UNKNOWN_")
     assert any("current downloader activity is unknown" in reason for reason in result["reasons"])
     assert "Canonical Fly mirror synchronization is in progress" not in result["reasons"]
+
+
+def test_stale_idle_receipt_never_unlocks_qualification(monkeypatch):
+    monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {"epoch_id": "epoch-one"})
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "revision-one")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "inProgress": False, "updatedAt": timestamp(-601), "ok": True,
+        "pollOk": True, "revisionParity": "MATCH",
+        "observedSourceRevision": "revision-one",
+    })
+    result = dashboard._generation_freshness_meta({
+        "source_revision": "revision-one", "fresh_epoch": {"epoch_id": "epoch-one"},
+    })
+    assert result["mirror_sync_activity_status"] == "UNKNOWN_STALE"
+    assert result["current"] is False
+    assert result["stale"] is True
+    assert result["qualification_allowed"] is False
+    assert any("activity receipt is STALE" in reason for reason in result["reasons"])
+
+
+@pytest.mark.parametrize("conflict", (
+    {"inProgress": False, "in_progress": True},
+    {"pollOk": True, "poll_ok": False},
+    {"revisionParity": "MATCH", "revision_parity": "MISMATCH"},
+    {"observedSourceRevision": "revision-one", "observed_source_revision": "other-revision"},
+))
+def test_conflicting_sync_compatibility_aliases_never_unlock_qualification(monkeypatch, conflict):
+    monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {"epoch_id": "epoch-one"})
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "revision-one")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "inProgress": False,
+        "updatedAt": timestamp(0),
+        "ok": True,
+        "pollOk": True,
+        "revisionParity": "MATCH",
+        "observedSourceRevision": "revision-one",
+        **conflict,
+    })
+    result = dashboard._generation_freshness_meta({
+        "source_revision": "revision-one", "fresh_epoch": {"epoch_id": "epoch-one"},
+    })
+    assert result["current"] is False
+    assert result["qualification_allowed"] is False
+    assert any(result["mirror_sync_alias_conflicts"].values())
+    assert any("compatibility aliases conflict" in reason for reason in result["reasons"])

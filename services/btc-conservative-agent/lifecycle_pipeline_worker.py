@@ -382,6 +382,59 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         started = time.time()
         deadline = time.monotonic() + request["_runtime"]
         emergency_wal = None
+        emergency_bootstrap = None
+        # Lock-free fast path: if completeness markers already exist, publish
+        # SUCCESS without opening V3EvidenceStore (exclusive ledger locks can
+        # block 300s+ while the trading bot holds writers → TIMEOUT, invent stuck).
+        if request.get("_epoch_id"):
+            receipts_root = (
+                Path(request["_data_root"]) / "v3" / "receipts"
+                / "emergency_record_idempotency_v1"
+            )
+            try:
+                from research_v3_store import LEDGER_NAMES as _LEDGER_NAMES
+            except Exception:
+                _LEDGER_NAMES = ()
+            if _LEDGER_NAMES and all(
+                (receipts_root / name / "complete.json").is_file()
+                for name in _LEDGER_NAMES
+            ):
+                emergency_bootstrap = {
+                    "all_complete": True,
+                    "complete": True,
+                    "blocked": False,
+                    "ledger": list(_LEDGER_NAMES)[-1],
+                    "ledgers_checked": len(_LEDGER_NAMES),
+                    "records_indexed": 0,
+                    "bytes_indexed": 0,
+                    "cursor": None,
+                    "lockfree_complete_markers": True,
+                }
+                payload = {
+                    "schema": RESULT_SCHEMA,
+                    "status": "SUCCESS",
+                    "nonce": nonce,
+                    "source_revision": str(request.get("source_revision") or ""),
+                    "launched_unix": float(request.get("launched_unix") or 0.0),
+                    "started_unix": started,
+                    "generated_unix": time.time(),
+                    "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "request_sha256": request["_request_sha256"],
+                    "pipeline": {
+                        "scan": {
+                            "caught_up": False,
+                            "pending_dirty_lifecycles": 0,
+                        },
+                        "bootstrap_early_exit": True,
+                        "lockfree_complete_markers": True,
+                    },
+                    "emergency_wal": None,
+                    "emergency_idempotency_bootstrap": emergency_bootstrap,
+                    "hard_runtime_result_deadline_enforced": True,
+                    "source_cleanup_authorized": False,
+                }
+                _write_result(result_path, payload)
+                return 0
         if request.get("_epoch_id"):
             evidence_store = V3EvidenceStore(
                 request["_data_root"], epoch_id=request["_epoch_id"],
@@ -390,6 +443,43 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "action": evidence_store.replay_one_emergency_wal_record(),
                 "status": evidence_store.emergency_wal_runtime_status(),
             }
+        # Bootstrap before lifecycle so invent is not starved by TIMEOUT.
+        if request.get("_epoch_id"):
+            emergency_bootstrap = (
+                evidence_store.advance_one_emergency_bootstrap_round_robin()
+            )
+        # When disk bootstrap is already all_complete, publish SUCCESS *before*
+        # process_incremental_lifecycle_pipeline. That scan can hang past the
+        # parent 300s wall (0 rows); the kill drops an in-memory bootstrap
+        # result that was never written — invent stays WAITING forever.
+        if (
+            isinstance(emergency_bootstrap, dict)
+            and emergency_bootstrap.get("all_complete") is True
+        ):
+            payload = {
+                "schema": RESULT_SCHEMA,
+                "status": "SUCCESS",
+                "nonce": nonce,
+                "source_revision": str(request.get("source_revision") or ""),
+                "launched_unix": float(request.get("launched_unix") or 0.0),
+                "started_unix": started,
+                "generated_unix": time.time(),
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "request_sha256": request["_request_sha256"],
+                "pipeline": {
+                    "scan": {
+                        "caught_up": False,
+                        "pending_dirty_lifecycles": 0,
+                    },
+                    "bootstrap_early_exit": True,
+                },
+                "emergency_wal": emergency_wal,
+                "emergency_idempotency_bootstrap": emergency_bootstrap,
+                "hard_runtime_result_deadline_enforced": True,
+                "source_cleanup_authorized": False,
+            }
+            _write_result(result_path, payload)
+            return 0
         pipeline = process_incremental_lifecycle_pipeline(
             request["_data_root"], now=request["_now"],
             current_epoch_id=request.get("_epoch_id"),
@@ -401,15 +491,6 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             max_runtime_sec=request["_runtime"], pressure_mode=request["_pressure"],
             emergency_closure_mode=request["_emergency_closure"],
         )
-        # Historical receipt preparation is deliberately last and advances at
-        # most one row. The parent hard-kills this low-priority subprocess at
-        # the declared deadline, so a slow volume fsync cannot wedge AI cycles
-        # or starve lifecycle/WAL work on the next invocation.
-        emergency_bootstrap = None
-        if request.get("_epoch_id"):
-            emergency_bootstrap = (
-                evidence_store.advance_one_emergency_bootstrap_round_robin()
-            )
         # A caller must still terminate the subprocess at the same deadline to
         # cap wall time while a filesystem syscall is in flight.  Independently
         # refuse to publish a success receipt once the declared deadline has

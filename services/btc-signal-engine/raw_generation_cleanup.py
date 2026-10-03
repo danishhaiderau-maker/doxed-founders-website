@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -30,6 +31,7 @@ _REV = re.compile(r"[0-9a-f]{7,64}")
 _KINDS = frozenset({"V3", "V22"})
 _LEDGER = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _LEASE_KINDS = ("reader", "sync", "analyzer")
+MINIMUM_QUARANTINE_AGE_SECONDS = 24 * 60 * 60
 
 
 class RawGenerationCleanupRejected(RuntimeError):
@@ -281,11 +283,54 @@ def verify_generation(
 class RawGenerationCleanupTransaction:
     """Two-phase, restart-safe quarantine and purge; mutation defaults OFF."""
 
-    def __init__(self, authority_root: Path, *, enabled: bool = False):
+    def __init__(self, authority_root: Path, *, enabled: bool = False,
+                 minimum_quarantine_age_seconds: float = MINIMUM_QUARANTINE_AGE_SECONDS):
         self.root = authority_root.resolve()
         self.enabled = bool(enabled)
+        try:
+            configured_age = float(minimum_quarantine_age_seconds)
+        except (TypeError, ValueError) as exc:
+            raise RawGenerationCleanupRejected(["MINIMUM_QUARANTINE_AGE_INVALID"]) from exc
+        if not math.isfinite(configured_age):
+            raise RawGenerationCleanupRejected(["MINIMUM_QUARANTINE_AGE_INVALID"])
+        self.minimum_quarantine_age_seconds = max(
+            float(MINIMUM_QUARANTINE_AGE_SECONDS), configured_age,
+        )
         self.tx_root = self.root / "raw_generation_cleanup_transactions"
         self.quarantine_root = self.root / "raw_generation_cleanup_quarantine"
+
+    @staticmethod
+    def _now(value: datetime | None) -> datetime:
+        current = value or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise RawGenerationCleanupRejected(["PURGE_NOW_TIMEZONE_MISSING"])
+        return current.astimezone(timezone.utc)
+
+    def _verify_quarantine_age(
+        self, committed: Mapping[str, Any], generation_id: str, *, now: datetime | None,
+    ) -> float:
+        if (committed.get("schema") != TX_SCHEMA
+                or committed.get("state") != "QUARANTINED"
+                or committed.get("generation_id") != generation_id):
+            raise RawGenerationCleanupRejected(["COMMITTED_QUARANTINE_RECEIPT_INVALID"])
+        value = committed.get("committed_at")
+        if not isinstance(value, str) or not value.strip():
+            raise RawGenerationCleanupRejected(["QUARANTINE_COMMITTED_AT_INVALID"])
+        try:
+            committed_at = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            if committed_at.tzinfo is None or committed_at.utcoffset() is None:
+                raise ValueError("timezone missing")
+            committed_at = committed_at.astimezone(timezone.utc)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise RawGenerationCleanupRejected(["QUARANTINE_COMMITTED_AT_INVALID"]) from exc
+        age_seconds = (self._now(now) - committed_at).total_seconds()
+        if age_seconds < 0:
+            raise RawGenerationCleanupRejected(["QUARANTINE_COMMITTED_AT_IN_FUTURE"])
+        if age_seconds < self.minimum_quarantine_age_seconds:
+            raise RawGenerationCleanupRejected([
+                "RAW_GENERATION_MINIMUM_QUARANTINE_AGE_NOT_MET",
+            ])
+        return age_seconds
 
     def _paths(self, generation_id: str) -> tuple[Path, Path]:
         key = hashlib.sha256(generation_id.encode()).hexdigest()[:24]
@@ -349,19 +394,29 @@ class RawGenerationCleanupTransaction:
                 "free_bytes_after": free_after, "free_bytes_delta": free_after - free_before}
 
     def purge(self, generation_id: str, *, dry_run: bool = True,
-              failpoint: str | None = None) -> dict[str, Any]:
+              failpoint: str | None = None, now: datetime | None = None) -> dict[str, Any]:
         tx, quarantine = self._paths(generation_id)
         committed_path = tx / "QUARANTINED.json"
         if not committed_path.is_file() or not quarantine.is_dir():
             raise RawGenerationCleanupRejected(["COMMITTED_QUARANTINE_REQUIRED"])
-        committed = json.loads(committed_path.read_text("utf-8"))
+        try:
+            committed = json.loads(committed_path.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RawGenerationCleanupRejected([
+                "COMMITTED_QUARANTINE_RECEIPT_UNREADABLE",
+            ]) from exc
+        quarantine_age_seconds = self._verify_quarantine_age(
+            committed, generation_id, now=now,
+        )
         declared = committed.get("members")
         exact_bytes = _verify_quarantine_members(
             quarantine, declared, committed.get("source_bytes"),
         )
         if dry_run or not self.enabled:
             return {"status": "DRY_RUN_QUARANTINE_RETAINED" if dry_run else "DISABLED_QUARANTINE_RETAINED",
-                    "generation_id": generation_id, "planned_freed_bytes": exact_bytes, "freed_bytes": 0}
+                    "generation_id": generation_id, "planned_freed_bytes": exact_bytes, "freed_bytes": 0,
+                    "quarantine_age_seconds": quarantine_age_seconds,
+                    "minimum_quarantine_age_seconds": self.minimum_quarantine_age_seconds}
         staging = quarantine.with_name(f".{quarantine.name}.purging")
         purge_prepared = {"schema": TX_SCHEMA, "state": "PURGE_PREPARED",
                           "generation_id": generation_id,
@@ -387,7 +442,8 @@ class RawGenerationCleanupTransaction:
         _write_once(tx / "PURGED.json", receipt)
         return receipt
 
-    def reconcile_purges(self, generation_id: str | None = None) -> list[dict[str, Any]]:
+    def reconcile_purges(self, generation_id: str | None = None, *,
+                         now: datetime | None = None) -> list[dict[str, Any]]:
         """Finish only a previously isolated purge staging tree."""
         results = []
         if not self.enabled or not self.tx_root.is_dir():
@@ -399,6 +455,16 @@ class RawGenerationCleanupTransaction:
             row = json.loads(prepared_path.read_text("utf-8"))
             if generation_id is not None and row.get("generation_id") != generation_id:
                 continue
+            committed_path = tx / "QUARANTINED.json"
+            try:
+                committed = json.loads(committed_path.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RawGenerationCleanupRejected([
+                    "COMMITTED_QUARANTINE_RECEIPT_UNREADABLE",
+                ]) from exc
+            self._verify_quarantine_age(
+                committed, str(row.get("generation_id") or ""), now=now,
+            )
             quarantine = self.root / row["quarantine"]
             staging = self.root / row["staging"]
             if quarantine.exists() or not staging.is_dir():

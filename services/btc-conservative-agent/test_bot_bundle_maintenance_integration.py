@@ -53,6 +53,7 @@ def harness(tmp_path, *, queued=False):
         _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS=7200, _DATA_SYNC_INVENTORY_GENERATION_MAX=8,
         _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS=7200,
         _data_sync_inventory_work_root=lambda: work, _data_sync_runtime_root=lambda: source,
+        _data_sync_inventory_capacity_available=lambda: True,
         _data_sync_inventory_snapshot_path=lambda: tmp_path / "snapshot.json",
         _runtime_git_rev=lambda: "same-source", _data_sync_receipt_bootstrap_gate=lambda: {"complete": True})
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT), "exec"), namespace)

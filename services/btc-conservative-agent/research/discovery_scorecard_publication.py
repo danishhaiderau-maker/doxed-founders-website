@@ -155,6 +155,36 @@ def _receipt_sha(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(material).encode()).hexdigest()
 
 
+def _current_policy_binding(value: Any, expected: Mapping[str, str]):
+    """Validate the independently verified policy artifact from this invocation."""
+    if not isinstance(value, Mapping):
+        return "", set(), ["CURRENT_POLICY_ARTIFACT_BINDING_MISSING"]
+    receipt = value.get("receipt")
+    candidates = value.get("candidates")
+    if (not isinstance(receipt, Mapping)
+            or receipt.get("schema") != "policy_candidate_artifact_receipt_v1"):
+        return "", set(), ["CURRENT_POLICY_ARTIFACT_RECEIPT_INVALID"]
+    generation, defects = _generation(receipt.get("evaluation_generation"), "CURRENT_POLICY_ARTIFACT")
+    if defects:
+        return "", set(), defects
+    if generation != expected:
+        return "", set(), ["CURRENT_POLICY_ARTIFACT_GENERATION_MISMATCH"]
+    if not isinstance(candidates, list) or any(not isinstance(item, Mapping) for item in candidates):
+        return "", set(), ["CURRENT_POLICY_CANDIDATES_INVALID"]
+    normalized = [dict(item) for item in candidates]
+    normalized.sort(key=lambda item: (
+        str(item.get("policy_signature") or ""), str(item.get("policy_id") or "")))
+    signatures = [str(item.get("policy_signature") or "").strip() for item in normalized]
+    if any(not signature for signature in signatures):
+        return "", set(), ["CURRENT_POLICY_CANDIDATE_SIGNATURE_INVALID"]
+    if receipt.get("candidate_count") != len(normalized):
+        return "", set(), ["CURRENT_POLICY_ARTIFACT_CANDIDATE_COUNT_MISMATCH"]
+    candidates_sha256 = hashlib.sha256(canonical_json(normalized).encode()).hexdigest()
+    if receipt.get("candidates_sha256") != candidates_sha256:
+        return "", set(), ["CURRENT_POLICY_ARTIFACT_CANDIDATES_SHA256_MISMATCH"]
+    return candidates_sha256, set(signatures), []
+
+
 def _observed_regime_feature(receipt: Mapping[str, Any], name: str) -> Any:
     features = receipt.get("regime_features_at_signal")
     item = features.get(name) if isinstance(features, Mapping) else None
@@ -226,6 +256,59 @@ def _shadow_aggregate(report: Mapping[str, Any], verified_stream=None) -> tuple[
         )
         if returned_complete != counts["complete_replay_count"] and verified_stream is None:
             defects.append("SHADOW_TERMINAL_COMPLETE_RESULTS_OMITTED_OR_MISMATCHED")
+    coverage = report.get("coverage_denominators")
+    normalized_coverage = None
+    if coverage is not None:
+        if (not isinstance(coverage, Mapping)
+                or coverage.get("schema") != "conservative_shadow_coverage_denominators_v1"):
+            defects.append("SHADOW_COVERAGE_DENOMINATORS_INVALID:schema")
+        else:
+            coverage_count_fields = (
+                "source_opportunity_count", "expected_directional_arm_count",
+                "present_directional_arm_count", "missing_directional_arm_count",
+                "entry_result_count", "eligible_terminal_entry_count",
+                "source_candidate_attempt_count", "terminal_replay_attempted_count",
+                "terminal_complete_replay_count", "terminal_unknown_replay_count",
+                "unique_evaluated_composite_count", "terminal_evaluator_call_count",
+                "alias_reused_terminal_result_count",
+            )
+            invalid_fields = [
+                field for field in coverage_count_fields
+                if isinstance(coverage.get(field), bool)
+                or not isinstance(coverage.get(field), int)
+                or coverage.get(field) < 0
+            ]
+            entry_counts = coverage.get("entry_outcome_result_counts")
+            if (not isinstance(entry_counts, Mapping)
+                    or set(entry_counts) != {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"}
+                    or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                           for value in entry_counts.values())):
+                invalid_fields.append("entry_outcome_result_counts")
+            for field in invalid_fields:
+                defects.append(f"SHADOW_COVERAGE_DENOMINATORS_INVALID:{field}")
+            if not invalid_fields:
+                if (coverage["expected_directional_arm_count"]
+                        != coverage["present_directional_arm_count"]
+                        + coverage["missing_directional_arm_count"]):
+                    defects.append("SHADOW_COVERAGE_DIRECTIONAL_ARM_COUNT_MISMATCH")
+                if sum(entry_counts.values()) != coverage["entry_result_count"]:
+                    defects.append("SHADOW_COVERAGE_ENTRY_RESULT_COUNT_MISMATCH")
+                if (coverage["eligible_terminal_entry_count"]
+                        > entry_counts["FULL_FILL"] + entry_counts["PARTIAL_FILL"]):
+                    defects.append("SHADOW_COVERAGE_ELIGIBLE_ENTRY_COUNT_MISMATCH")
+                if (coverage.get("directional_arms_are_independent_samples") is not False
+                        or coverage.get("source_candidate_attempts_are_independent_samples") is not False):
+                    defects.append("SHADOW_COVERAGE_INDEPENDENCE_BASIS_INVALID")
+                normalized_coverage = dict(coverage)
+                # The top-level replay aggregate is the canonical count source.
+                # Rebuild its redundant coverage projection so callers that add
+                # or stream rows cannot create two competing denominators.
+                normalized_coverage.update(
+                    source_candidate_attempt_count=counts["candidate_replay_count"],
+                    terminal_replay_attempted_count=counts["candidate_replay_count"],
+                    terminal_complete_replay_count=counts["complete_replay_count"],
+                    terminal_unknown_replay_count=counts["unknown_replay_count"],
+                )
     effective_blockers = list(report.get("blockers") or [])
     effective_status = report.get("status")
     if verified_stream is not None:
@@ -239,6 +322,7 @@ def _shadow_aggregate(report: Mapping[str, Any], verified_stream=None) -> tuple[
         "results_returned_count": len(results), "results_truncated": truncated,
         "full_result_stream_verified": verified_stream is not None,
         "reason_counts": dict(sorted(normalized_reasons.items())),
+        "coverage_denominators": normalized_coverage,
     }, sorted(set(defects))
 
 
@@ -385,7 +469,9 @@ def _unknown_dynamic_shadow(source, episode, entry_result, generation):
         "episode_id": source.get("episode_id"), "opportunity_id": source.get("opportunity_id"),
         "evidence_world": "CONSERVATIVE_BBO", "direction": episode.get("direction"),
         "policy_id": signature, "policy_signature": signature,
+        "schedule_sha256": receipt.get("schedule_sha256"),
         "original_requested_qty": receipt.get("requested_qty"),
+        "tape_hashes": receipt.get("tape_hashes"), "tape_ids": receipt.get("tape_ids"),
         "cost_model_id": terminal.get("cost_model_id"), "simulation_model": terminal.get("simulation_model"),
         "economics_evidence_basis": terminal.get("economics_evidence_basis"),
         "declared_contract_sha256": terminal.get("declared_contract_sha256"),
@@ -516,6 +602,7 @@ def build_discovery_scorecard_publication(
     canonical_root: str | Path, *, expected_generation: Mapping[str, Any],
     evaluator_status: Mapping[str, Any], baseline_report: Mapping[str, Any],
     shadow_terminal_report: Mapping[str, Any] | None = None,
+    current_policy_artifact: Mapping[str, Any] | None = None,
     stream_artifact_root: str | Path | None = None,
     index_budget_bytes: int = 2 * 1024 * 1024 * 1024,
     evaluator_max_bytes: int = 2 * 1024 * 1024 * 1024,
@@ -537,6 +624,7 @@ def build_discovery_scorecard_publication(
             return _build_discovery_scorecard_publication(canonical_root,
                     expected_generation=expected_generation, evaluator_status=evaluator_status,
                     baseline_report=baseline_report, shadow_terminal_report=shadow_terminal_report,
+                    current_policy_artifact=current_policy_artifact,
                     _stream=stream, _adapted=adapted, _index_max_bytes=index_share,
                     _resources=resources, _evaluator_max_bytes=evaluator_max_bytes,
                     _dynamic_unknown=dynamic_unknown, _dynamic_feature_names=dynamic_feature_names,
@@ -547,7 +635,8 @@ def build_discovery_scorecard_publication(
 
 def _build_discovery_scorecard_publication(
     canonical_root, *, expected_generation, evaluator_status, baseline_report,
-    shadow_terminal_report=None, _stream=None, _adapted=None, _index_max_bytes=None,
+    shadow_terminal_report=None, current_policy_artifact=None,
+    _stream=None, _adapted=None, _index_max_bytes=None,
     _resources=None, _evaluator_max_bytes=2 * 1024 * 1024 * 1024,
     _dynamic_unknown=None, _dynamic_feature_names=None, _dynamic_protocol=None, _dynamic_limits=None,
 ):
@@ -584,6 +673,22 @@ def _build_discovery_scorecard_publication(
         blockers.append("INPUT_GENERATION_MISMATCH")
     if blockers:
         return _unknown(expected, blockers)
+    current_candidate_sha256 = ""
+    current_candidate_signatures: set[str] = set()
+    if (shadow_terminal_report is not None
+            and (shadow_terminal_report.get("candidate_artifact_sha256") is not None
+                 or shadow_terminal_report.get("result_stream") is not None
+                 or bool(shadow_terminal_report.get("results")))):
+        current_candidate_sha256, current_candidate_signatures, defects = _current_policy_binding(
+            current_policy_artifact, expected)
+        if defects:
+            return _unknown(expected, defects)
+        bound_hashes = [shadow_terminal_report.get("candidate_artifact_sha256")]
+        stream_receipt = shadow_terminal_report.get("result_stream")
+        if isinstance(stream_receipt, Mapping):
+            bound_hashes.append(stream_receipt.get("candidate_artifact_sha256"))
+        if any(value != current_candidate_sha256 for value in bound_hashes):
+            return _unknown(expected, ["SHADOW_TERMINAL_CANDIDATE_ARTIFACT_MISMATCH"])
     shadow_aggregate = None
     if shadow_terminal_report is not None:
         shadow_aggregate, defects = _shadow_aggregate(shadow_terminal_report, _stream)
@@ -773,6 +878,13 @@ def _build_discovery_scorecard_publication(
                           "source_candidate_policy_signature"):
                 if not str(source.get(field) or "").strip():
                     reasons.append(f"COMPOSITE_PROVENANCE_MISSING:{field}")
+            source_candidate_signatures = [
+                str(item.get("source_candidate_policy_signature") or "").strip()
+                for item in variants
+            ]
+            if any(signature and signature not in current_candidate_signatures
+                   for signature in source_candidate_signatures):
+                reasons.append("SOURCE_CANDIDATE_POLICY_SIGNATURE_NOT_CURRENT")
             if (source.get("evaluated_scope") != "ENTRY_PLUS_SINGLE_POSITION_EXIT"
                     or source.get("portfolio_competition_status") != "NOT_SIMULATED"):
                 reasons.append("COMPOSITE_EVALUATION_SCOPE_INVALID")

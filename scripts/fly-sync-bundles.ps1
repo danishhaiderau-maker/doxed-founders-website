@@ -39,14 +39,27 @@ function Receive-FlyTransportBundles {
   }
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-  [void]$start.ArgumentList.Add($ClientScript)
+  # Windows PowerShell 5.1 / .NET Framework exposes ArgumentList as null.
+  # Prefer ArgumentList on runtimes that provide it; otherwise quote Arguments.
+  if ($null -ne $start.ArgumentList) {
+    [void]$start.ArgumentList.Add($ClientScript)
+  } else {
+    $escapedClient = $ClientScript.Replace('"', '\"')
+    $start.Arguments = '"' + $escapedClient + '"'
+  }
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
   $start.RedirectStandardInput = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
-  $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
-  $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  # .NET Framework ProcessStartInfo lacks Standard*Encoding; write UTF-8 bytes
+  # on BaseStream instead so the Python client always sees utf-8 JSON.
+  $utf8NoBom = [Text.UTF8Encoding]::new($false)
+  $encodingProperty = $start.GetType().GetProperty('StandardInputEncoding')
+  if ($null -ne $encodingProperty -and $encodingProperty.CanWrite) {
+    $start.StandardInputEncoding = $utf8NoBom
+    $start.StandardOutputEncoding = $utf8NoBom
+  }
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $start
   $complete = $false
@@ -65,8 +78,11 @@ function Receive-FlyTransportBundles {
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credential goes through a private pipe, never process arguments or disk.
     $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror; checkpoint_root=(Join-Path $workspace '.batch-transfer-descriptor-cache') }
-    $inputTask = $process.StandardInput.WriteAsync(($request | ConvertTo-Json -Depth 40 -Compress))
+    $requestJson = ($request | ConvertTo-Json -Depth 40 -Compress)
+    $requestBytes = $utf8NoBom.GetBytes($requestJson)
+    $inputTask = $process.StandardInput.BaseStream.WriteAsync($requestBytes, 0, $requestBytes.Length)
     if (-not $inputTask.Wait(30000)) { throw 'BUNDLE_CHILD_INPUT_TIMEOUT' }
+    $process.StandardInput.BaseStream.Flush()
     $process.StandardInput.Close()
     while ($true) {
       $lineTask = $process.StandardOutput.ReadLineAsync()
@@ -112,8 +128,14 @@ function Receive-FlyTransportBundles {
         foreach ($field in @('inventory_generation_id','inventory_sha256','source_git_rev','collection_epoch_id','tile_registry_signature')) {
           if ([string]$receipt.generation.$field -cne [string]$Manifest.$field) { throw 'BUNDLE_RECEIPT_IDENTITY' }
         }
-        $elapsed = [double]$receipt.elapsed_seconds
-        $retry = [double]$receipt.next_retry_seconds
+        # ConvertFrom-Json on Windows PowerShell 5.1 yields Int32/Decimal for many
+        # JSON numbers; coerce before range checks instead of requiring [double]/[long].
+        try {
+          $elapsed = [double]$receipt.elapsed_seconds
+          $retry = [double]$receipt.next_retry_seconds
+        } catch {
+          throw 'BUNDLE_INDEX_WAIT_INVALID'
+        }
         if ([double]::IsNaN($elapsed) -or [double]::IsInfinity($elapsed) -or
             $elapsed -lt 0 -or $elapsed -ge 1800 -or $elapsed -lt $lastIndexWait -or
             [double]::IsNaN($retry) -or [double]::IsInfinity($retry) -or $retry -le 0 -or $retry -gt 30) {
@@ -121,10 +143,15 @@ function Receive-FlyTransportBundles {
         }
         $lastIndexWait = $elapsed
         if ($receipt.PSObject.Properties.Name -contains 'idle_elapsed_seconds') {
-          $idle = $receipt.idle_elapsed_seconds
-          if (($idle -isnot [double] -and $idle -isnot [long]) -or [double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
+          try {
+            $idle = [double]$receipt.idle_elapsed_seconds
+            $waitPackages = [long]$receipt.verified_packages
+          } catch {
+            throw 'BUNDLE_INDEX_WAIT_INVALID'
+          }
+          if ([double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
               $idle -lt 0 -or $idle -ge 600 -or $idle -gt $elapsed -or
-              $receipt.verified_packages -isnot [long] -or $receipt.verified_packages -ne $verifiedPackages -or
+              $waitPackages -ne $verifiedPackages -or
               $retry -gt (600 - $idle) -or $retry -gt (1800 - $elapsed) -or
               ($verifiedPackages -eq $lastWaitPackages -and $idle -lt $lastIdleWait)) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
           $lastIdleWait = $idle
@@ -168,7 +195,15 @@ function Receive-FlyTransportBundles {
         if (-not $reusedLocal) {
         $parent = Split-Path -Parent $destination
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        # Deep receipt paths plus ".<guid>.download" and File.Replace's
+        # ".replace-backup" exceed Windows MAX_PATH; stage those under the
+        # short same-volume mirror subdirectory, as the per-file path does.
         $candidate = $destination + '.' + [guid]::NewGuid().ToString('N') + '.download'
+        if (($candidate.Length + '.replace-backup'.Length) -gt 240) {
+          $candidateDir = Join-Path $mirror '.fly-sync-candidates'
+          New-Item -ItemType Directory -Path $candidateDir -Force | Out-Null
+          $candidate = Join-Path $candidateDir ([guid]::NewGuid().ToString('N') + '.download')
+        }
         try {
           [IO.File]::Copy($staged, $candidate, $false)
           Test-MirrorCandidate -Path $candidate -RelativePath $rel -ExpectedSize ([int64]$row.size)

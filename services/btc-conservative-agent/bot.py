@@ -810,7 +810,12 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
     # without these fields caused V2/V3 to silently mint an epoch-v22-* alias
     # while the dashboard continued to advertise the official epoch-* id.
     # Only a new, explicitly confirmed reset is allowed to replace them.
-    if fcm and not fresh_collection_reset:
+    #
+    # wipe_fly_only flips fresh_collection_mode OFF after binding the official
+    # epoch-* id. Preserve the binding even when FCM is false so a later
+    # startup rewrite cannot leave manifests UNAVAILABLE while the in-memory
+    # identity cache stays stuck on a stale BOUND epoch.
+    if not fresh_collection_reset:
         for key in (
             "collector_v22_epoch_ts",
             "collector_v22_epoch_id",
@@ -818,6 +823,14 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         ):
             if prev.get(key) not in (None, ""):
                 payload[key] = prev.get(key)
+        if not fcm:
+            for key in (
+                "fresh_collection_start_time",
+                "fresh_collection_start_iso",
+                "fresh_collection_start_iso_utc",
+            ):
+                if prev.get(key) not in (None, ""):
+                    payload[key] = prev.get(key)
     if fresh_collection_reset and fresh_start is not None:
         cutoff = _utc_isoformat_ns(float(fresh_start))
         material = f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}"
@@ -41830,15 +41843,24 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         disk_generation = _data_sync_validate_disk_inventory_generation(
             result, work_root
         )
-        # Freeze the admission identity, not whatever happens to be current at
-        # the later HTTP request. Epoch/config changes abort optional batching.
-        if (v3_runtime_identity["source_revision"] == _runtime_git_rev()
-                and v3_runtime_identity["epoch_id"] == _collector_v22_epoch_id()
-                and v3_runtime_identity["tile_config_signature"] == active_tile_registry_signature()):
+        # Stamp only the official session-bound epoch. `_collector_v22_epoch_id()`
+        # synthesizes epoch-v22-* when the session is empty; that made COMPLETE
+        # gens seal under a synthetic id, then fail disk_authority forever after
+        # an official rebind (CURRENT never publishes). Prefer seal-time session.
+        session_epoch = str(
+            (_load_research_session_meta() or {}).get("collector_v22_epoch_id") or ""
+        ).strip()
+        live_rev = _runtime_git_rev()
+        live_tile = active_tile_registry_signature()
+        if (
+            session_epoch
+            and v3_runtime_identity["source_revision"] == live_rev
+            and v3_runtime_identity["tile_config_signature"] == live_tile
+        ):
             disk_generation["bundle_identity"] = {
-                "source_git_rev": v3_runtime_identity["source_revision"],
-                "collection_epoch_id": v3_runtime_identity["epoch_id"],
-                "tile_registry_signature": v3_runtime_identity["tile_config_signature"],
+                "source_git_rev": live_rev,
+                "collection_epoch_id": session_epoch,
+                "tile_registry_signature": live_tile,
             }
         # Receipt bootstrap and the physical inventory run concurrently after
         # restart. Re-check at the publication boundary so a scan admitted
@@ -42954,10 +42976,31 @@ def api_data_sync_manifest():
                 raw_cursor=raw_cursor,
             )
         except (OSError, TypeError, ValueError) as exc:
+            # Missing page-index mid-STALE boxes every full manifest at 400 and
+            # prevents observing the in-flight rebuild. Drop the broken pointer
+            # so the next poll returns BUILDING without paging the dead gen.
+            broken_gid = str(inventory_generation_id or "")
+            with _data_sync_inventory_cache_condition:
+                cached_gid = str(
+                    _data_sync_async_inventory.get("generation_id") or ""
+                )
+                cached_gen = _data_sync_async_inventory.get("generation")
+                if (
+                    broken_gid
+                    and cached_gid == broken_gid
+                    and isinstance(cached_gen, dict)
+                ):
+                    _data_sync_async_inventory["generation"] = None
+                    _data_sync_async_inventory["rows"] = None
+                    if not _data_sync_async_inventory.get("refreshing"):
+                        _data_sync_async_inventory["status"] = "BUILDING"
+                    _data_sync_inventory_cache_condition.notify_all()
             return jsonify({
                 "error": str(exc),
                 "inventory_status": "INVALID_CURSOR",
                 "inventory_generation_id": inventory_generation_id,
+                "inventory_pointer_cleared": True,
+                "retry_after_seconds": 2,
             }), 400
     elif inventory_generation_id and not targeted_path and not identity_only:
         try:
@@ -43608,6 +43651,7 @@ def _data_sync_ack_v3(body: dict):
         "inventory_file_count": int(generation["file_count"]),
         "manifest_page_count": int(generation["page_count"]),
         "manifest_pages_complete": True,
+        "ack_session_id": session_id,
         "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
     })
 

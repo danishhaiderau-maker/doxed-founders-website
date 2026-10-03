@@ -1,11 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { apiUrl } from '@/lib/api-base';
 import { RefreshCw } from 'lucide-react';
+import {
+  applyDecisionLogUpdate,
+  createDecisionLogState,
+  DecisionLogRequestScope,
+  getDecisionLogState,
+} from './decision-log-state';
 
 type RoutingDecision = {
   id: string;
@@ -24,34 +30,79 @@ type RoutingDecision = {
 
 export default function DecisionLogPage() {
   const { data: session } = useSession();
-  const [decisions, setDecisions] = useState<RoutingDecision[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const accessToken = session?.accessToken ?? null;
+  const currentAccessToken = useRef<string | null>(accessToken);
+  currentAccessToken.current = accessToken;
+  const requestScope = useRef(new DecisionLogRequestScope());
+  const [storedState, setStoredState] = useState(() =>
+    createDecisionLogState<RoutingDecision>(accessToken));
+  const { decisions, loading, error } = getDecisionLogState(storedState, accessToken);
 
   const load = useCallback(async () => {
-    if (!session?.accessToken) return;
-    setLoading(true);
-    setErr(null);
+    const request = requestScope.current.begin(accessToken);
+    if (!request) {
+      setStoredState(createDecisionLogState<RoutingDecision>(null));
+      return;
+    }
+    setStoredState((state) => ({
+      ...getDecisionLogState(state, accessToken),
+      loading: true,
+      error: null,
+    }));
     try {
       const res = await fetch(apiUrl('/api/flight-recorder/recent?limit=50'), {
-        headers: { Authorization: `Bearer ${session.accessToken}` },
+        headers: { Authorization: `Bearer ${request.accessToken}` },
+        signal: request.controller.signal,
       });
       if (!res.ok) {
-        setErr(`Failed to load (${res.status})`);
-        setDecisions([]);
+        setStoredState((state) => applyDecisionLogUpdate(
+          state,
+          request,
+          currentAccessToken.current,
+          requestScope.current,
+          (current) => ({
+            ...current,
+            decisions: [],
+            loading: false,
+            error: `Failed to load (${res.status})`,
+          }),
+        ));
       } else {
         const data = (await res.json()) as RoutingDecision[];
-        setDecisions(Array.isArray(data) ? data : []);
+        setStoredState((state) => applyDecisionLogUpdate(
+          state,
+          request,
+          currentAccessToken.current,
+          requestScope.current,
+          (current) => ({
+            ...current,
+            decisions: Array.isArray(data) ? data : [],
+            loading: false,
+            error: null,
+          }),
+        ));
       }
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      if (!request.controller.signal.aborted) {
+        setStoredState((state) => applyDecisionLogUpdate(
+          state,
+          request,
+          currentAccessToken.current,
+          requestScope.current,
+          (current) => ({
+            ...current,
+            decisions: [],
+            loading: false,
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        ));
+      }
     }
-  }, [session?.accessToken]);
+  }, [accessToken]);
 
   useEffect(() => {
     void load();
+    return () => requestScope.current.cancel();
   }, [load]);
 
   return (
@@ -77,7 +128,7 @@ export default function DecisionLogPage() {
           <button
             type="button"
             onClick={load}
-            disabled={loading}
+            disabled={!accessToken || loading}
             className="flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:border-zinc-500 disabled:opacity-50"
           >
             <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
@@ -85,16 +136,16 @@ export default function DecisionLogPage() {
           </button>
         </div>
 
-        {!session?.accessToken ? (
+        {!accessToken ? (
           <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-6 text-sm text-amber-100">
             <Link href="/login?callbackUrl=/founder-ide/decisions" className="font-semibold underline">
               Sign in
             </Link>{' '}
             to view your routing decisions.
           </div>
-        ) : err ? (
+        ) : error ? (
           <div className="rounded-xl border border-rose-500/30 bg-rose-950/15 p-6 text-sm text-rose-100">
-            {err}
+            {error}
           </div>
         ) : decisions.length === 0 && !loading ? (
           <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-8 text-center text-sm text-zinc-500">

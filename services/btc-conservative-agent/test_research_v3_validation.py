@@ -36,6 +36,31 @@ def episode(index, pnl, *, state="FULL_FILL", regime=None, measured_costs=True):
 
 
 class V3ValidationTests(unittest.TestCase):
+    def test_regime_coverage_counts_causal_labels_not_timestamped_json(self):
+        rows = [episode(index, 1.0) for index in range(1, 5)]
+        rows[0]["regime"] = {"value": "bear", "observed_ts": 9_999}
+        rows[1]["regime"] = {"value": "BEAR", "observed_ts": 19_999}
+        rows[2]["regime"] = {"value": "BULL"}  # no causal timestamp
+        rows[3]["regime"] = {"value": "SIDEWAYS", "observed_ts": 40_001}
+
+        report = validate_policy(
+            rows,
+            policy_id="p",
+            starting_equity_usd=1000,
+            max_drawdown_usd=100,
+            max_drawdown_pct=10,
+            min_cvar95_usd=-10,
+            policies_tested=1,
+            conservative_execution=True,
+            neighborhood_stable=True,
+            sealed_holdout=False,
+            minimum_episodes=1,
+            minimum_regimes=2,
+        )
+
+        self.assertEqual(report["regimes"], ["BEAR"])
+        self.assertFalse(report["gates"]["regime_coverage_pass"])
+
     def test_empty_scored_cohort_has_unavailable_risk_not_perfect_zeroes(self):
         report = validate_policy([], policy_id="p", starting_equity_usd=1000,
             max_drawdown_usd=100, max_drawdown_pct=10, min_cvar95_usd=-10,

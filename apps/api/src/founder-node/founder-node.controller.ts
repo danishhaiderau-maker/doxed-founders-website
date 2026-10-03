@@ -190,7 +190,9 @@ export class FounderNodeController {
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Body() body: FounderNodeHeartbeat,
   ) {
-    return this.nodes.heartbeat(req.founderNode.nodeDbId, body);
+    return this.nodes.heartbeat(req.founderNode.nodeDbId, body, {
+      userId: req.founderNode.userId, nodeId: req.founderNode.nodeId,
+    });
   }
 
   @UseGuards(FounderNodeGuard)
@@ -326,7 +328,7 @@ export class FounderNodeController {
   @UseGuards(FounderNodeGuard)
   @Get('pending-dispatches')
   pendingDispatches(@Req() req: { founderNode: FounderNodeRequestUser }) {
-    return this.ideBridge.getPendingDispatches(req.founderNode.userId);
+    return this.ideBridge.getPendingDispatches(req.founderNode.userId, req.founderNode.nodeId);
   }
 
   /** Claim one pending dispatch before executing — prevents double paste races. */
@@ -335,8 +337,9 @@ export class FounderNodeController {
   claimDispatch(
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('id') id: string,
+    @Body() body?: unknown,
   ) {
-    return this.ideBridge.claimDispatch(req.founderNode.userId, id);
+    return this.ideBridge.claimDispatch(req.founderNode.userId, req.founderNode.nodeId, id, body);
   }
 
   /**
@@ -349,10 +352,9 @@ export class FounderNodeController {
   completeDispatch(
     @Req() req: { founderNode: FounderNodeRequestUser },
     @Param('id') id: string,
-    @Body() body: { result?: string; error?: string },
+    @Body() body: { claimToken?: unknown; result?: unknown; error?: unknown },
   ) {
-    const result = body.error ? `error: ${body.error}` : body.result;
-    return this.ideBridge.markDispatched(id, result);
+    return this.ideBridge.markDispatched(req.founderNode.userId, req.founderNode.nodeId, id, body);
   }
 
   /**
@@ -384,6 +386,21 @@ export class FounderNodeController {
     return this.workspaceSessions.patchConversationForUser(
       req.founderNode.userId,
       body.conversation,
+    );
+  }
+
+  /** Claim-token-bound poll used by an executing Founder desktop to observe an owner cancellation. */
+  @Post('dispatch/:id/cancel-status')
+  cancelStatus(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    return this.ideBridge.getRemoteCancellationStatus(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+      id,
+      body,
     );
   }
 }

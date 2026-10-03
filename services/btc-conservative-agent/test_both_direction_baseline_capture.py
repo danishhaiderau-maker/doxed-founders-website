@@ -14,12 +14,29 @@ def fresh(direction="LONG"):
     row.update(epoch_id="epoch-1", deployed_revision="rev-1", signal_price=100,
                signal_time_bbo={"bid": 99, "ask": 101, "bid_qty": 2, "ask_qty": 2},
                direction=direction, raw_direction=direction)
+    for quote in row["market_microstructure_rows"]:
+        quote["source_ts"] = quote["bucket_ts"]
+        quote["observed_at_ts"] = quote["bucket_ts"]
     row["baseline_schedule_snapshot"] = materialize_signal_time_baseline_schedules(row)
     return row
 
 
 def entry(receipt):
     return next(item for item in receipt["results"] if item["baseline_id"] == "MARKET_ENTRY_AT_SIGNAL")
+
+
+def test_missing_quote_observation_time_keeps_both_sides_unknown():
+    row = fresh()
+    for quote in row["market_microstructure_rows"]:
+        quote.pop("source_ts")
+        quote.pop("observed_at_ts")
+    report = materialize_same_opportunity_replay([row])
+    assert {item["direction"] for item in report["episode_receipts"]} == {"LONG", "SHORT"}
+    for receipt in report["episode_receipts"]:
+        result = entry(receipt)
+        assert result["outcome_state"] == "UNKNOWN"
+        assert result["supported"] is False
+        assert "QUOTE_OBSERVATION_TIME_UNPROVEN" in result["rejection_codes"]
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT", "NO_TRADE", "UNKNOWN", None])

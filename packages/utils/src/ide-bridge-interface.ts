@@ -5,6 +5,8 @@
  */
 
 export interface BridgeWorkspace {
+  /** Authenticated reporting-node binding, assigned by the API, not the client. */
+  targetNodeId?: string;
   /** Unique workspace/session ID from the IDE */
   id: string;
   /** Human-readable workspace name (e.g., "Founder OS redesign") */
@@ -24,6 +26,8 @@ export interface BridgeWorkspace {
 }
 
 export interface BridgeSession {
+  /** Authenticated reporting-node binding, assigned by the API, not the client. */
+  targetNodeId?: string;
   /** Session ID from the IDE */
   id: string;
   /** Cursor composer UUID when ideProvider is cursor (same as id for SQLite-backed sessions) */

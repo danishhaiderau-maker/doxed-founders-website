@@ -53,6 +53,13 @@ def owner(tmp_path, identity, *, enabled=False, leases=None):
                                      leases=lambda _generation: leases or {"reader": [], "sync": [], "analyzer": []})
 
 
+def age_quarantine_receipt(service):
+    receipt_path = next(service.tx.tx_root.glob("*/QUARANTINED.json"))
+    receipt = json.loads(receipt_path.read_text("utf-8"))
+    receipt["committed_at"] = "2000-01-01T00:00:00Z"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+
 def test_owner_is_disabled_dry_run_and_retains_source(tmp_path):
     source, identity = persisted_authority(tmp_path)
     result = owner(tmp_path, identity).quarantine("V3:decision:1")
@@ -82,6 +89,7 @@ def test_owner_quarantine_then_explicit_purge_one_generation(tmp_path):
     service = owner(tmp_path, identity, enabled=True)
     quarantined = service.quarantine("V3:decision:1", dry_run=False)
     assert quarantined["status"] == "QUARANTINED_SOURCE_RETAINED" and not source.exists()
+    age_quarantine_receipt(service)
     purged = service.purge("V3:decision:1", dry_run=False)
     assert purged["state"] == "PURGED" and purged["freed_bytes"] > 0
     assert {"free_bytes_before", "free_bytes_after", "free_bytes_delta"} <= set(purged)
@@ -179,6 +187,7 @@ def test_restart_is_audit_only_then_explicit_bounded_replay(tmp_path):
     assert service.replay("V3:decision:1", "QUARANTINE") == [
         {"generation_id": "V3:decision:1", "status": "QUARANTINED_RECOVERED"}
     ]
+    age_quarantine_receipt(service)
     with pytest.raises(RuntimeError, match="FAILPOINT_AFTER_PURGE_ISOLATION"):
         service.tx.purge("V3:decision:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
     audit = service.audit_recovery()

@@ -288,13 +288,13 @@ async function manageConnection(context) {
 /**
  * Twitter / Founder OS identity lives on doxxedcrypto.digital.
  * Once the account is linked to Founder Node (heartbeat), the IDE reads
- * ~/FounderVault/node-config.json — no Skycode GitHub/Google/Apple and no
+ * ~/FounderVault/node-config.json — no GitHub/Google/Apple cloud OAuth and no
  * manual pairing-code paste in the IDE.
  */
 async function connectFounderOsAccount(context) {
     const hasVault = (0, credentials_1.vaultFileExists)();
     const choice = await vscode.window.showInformationMessage(hasVault
-        ? 'Founder Node vault is already on this machine. Sign in with Twitter on Founder OS only if you need to manage your cloud account. AI in this IDE uses the Node token — not Skycode cloud login.'
+        ? 'Founder Node vault is already on this machine. Sign in with Twitter on Founder OS only if you need to manage your cloud account. AI in this IDE uses the Node token — not third-party cloud login.'
         : 'Sign in to Founder OS with Twitter, then open Founder Node on this PC so it can write ~/FounderVault/node-config.json. After that, Founder IDE loads credentials automatically (no pairing code in the IDE).', 'Open Twitter login', 'Open Builder settings', hasVault ? 'Reload vault now' : 'Cancel');
     if (choice === 'Open Twitter login') {
         void vscode.env.openExternal(vscode.Uri.parse('https://doxxedcrypto.digital/login?callbackUrl=/settings/builder'));

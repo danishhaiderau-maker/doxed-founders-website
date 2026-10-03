@@ -31,6 +31,7 @@ def harness(retained_at, *, served=False, expires=0):
         _data_sync_inventory_generations={generation:dict(storage='disk_pages_v2',retained_at=retained_at)} if retained_at is not None else {},
         _data_sync_bundle_retention_allowed_locked=lambda _:True,
         _start_data_sync_bundle_reservation_hydration=lambda:None,
+        _data_sync_inventory_capacity_available=lambda:True,
         _DATA_SYNC_BUNDLE_REGISTRY=SimpleNamespace(ready=True),
         _data_sync_inventory_refresh_worker=lambda:None)
     exec(compile(ast.Module(body=nodes,type_ignores=[]),str(source),'exec'),ns)

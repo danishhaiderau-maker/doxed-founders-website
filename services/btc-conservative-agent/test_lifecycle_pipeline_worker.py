@@ -75,7 +75,7 @@ def test_pressure_worker_returns_verified_bounded_success(tmp_path):
     assert receipt["source_cleanup_authorized"] is False
 
 
-def test_worker_runs_lifecycle_before_one_observable_bootstrap_step(tmp_path, monkeypatch):
+def test_worker_runs_bootstrap_before_lifecycle_so_invent_is_not_starved(tmp_path, monkeypatch):
     work = tmp_path / "v3" / "lifecycle_worker"
     work.mkdir(parents=True)
     launch = worker.create_request(
@@ -115,7 +115,7 @@ def test_worker_runs_lifecycle_before_one_observable_bootstrap_step(tmp_path, mo
     receipt = worker.verify_result(
         launch["request_path"], launch["result_path"], launch["nonce"],
     )
-    assert order == ["wal", "lifecycle", "bootstrap"]
+    assert order == ["wal", "bootstrap", "lifecycle"]
     assert receipt["pipeline"] == {"processed": 1}
     assert receipt["emergency_idempotency_bootstrap"] == {
         "ledger": "decision", "complete": False,

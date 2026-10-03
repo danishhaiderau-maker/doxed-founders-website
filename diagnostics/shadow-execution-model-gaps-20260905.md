@@ -40,6 +40,18 @@ fixtures is not evidence that historical data supplies its required inputs.
 
 ## Next implementation boundary
 
+### Root read-only causal-input check after 83ba91b
+
+The retained local opportunity ledger contains 1,577 rows and has SHA-256
+`600e5561f47098e1c1aeb08f17f451928f7429942f83d413441053a10179bb72`.
+Running the prior committed and repaired signal-time builders on those rows
+produced 87 usable MARKET_ENTRY_AT_SIGNAL input projections in both versions;
+the nested-BBO fix newly unmasked zero rows in this retained ledger. No rows
+were rewritten. This is diagnostic recomputation, not historical capture,
+verified fills, current Fly parity or qualification. The nested-BBO defect is
+real and regression-tested, but is not proven to explain this dataset's missing
+outcomes. Schedule, sizing, context and terminal-model gaps remain separate.
+
 Wire the collection context through collector, immutable ledgers/segments,
 transfer manifest, analyzer loader/evaluator and coverage UI in one reviewed
 change. Test both observed and unavailable branches, revision/config identity,

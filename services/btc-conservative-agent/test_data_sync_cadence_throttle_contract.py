@@ -114,6 +114,9 @@ def _async_inventory_function(state, monotonic_value):
             starts[-1]["started"] = True
 
     def retained_generation(generation_id):
+        # These cadence fixtures model a retained current-generation record;
+        # cache expiry and runtime identity remain independent gates below.
+        # Dedicated expired-disk-authority tests execute the real TTL lookup.
         generation = state.get("generation")
         if (isinstance(generation, dict) and generation_id
                 and generation_id == generation.get("generation_id")):
@@ -121,16 +124,17 @@ def _async_inventory_function(state, monotonic_value):
         return None
 
     namespace = {
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "time": SimpleNamespace(monotonic=lambda: monotonic_value),
         "threading": SimpleNamespace(Thread=Thread),
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
-        "_data_sync_inventory_refresh_worker": lambda: None,
         "_data_sync_inventory_generation": retained_generation,
+        "_data_sync_inventory_refresh_worker": lambda: None,
+        "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_memory_identity_payload": lambda: {
             "source_git_rev": "rev", "collection_epoch_id": "epoch",
             "tile_registry_signature": "tile",
@@ -203,18 +207,26 @@ def test_low_requested_interval_is_clamped_for_poll_and_post_sync_sleep():
     assert post_sync == 180
 
 
-def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
+def test_default_cadence_is_bounded_to_180_seconds_and_cache_outlasts_poll():
     source = LOOP_PATH.read_text(encoding="utf-8")
     tree = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    def constant_product(node):
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return constant_product(node.left) * constant_product(node.right)
+        raise AssertionError("TTL must be a numeric constant or constant product")
     ttl = next(
-        ast.literal_eval(node.value)
+        constant_product(node.value)
         for node in tree.body
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS" for target in node.targets)
     )
     assert "[int]$IntervalSec = 180" in source
-    assert ttl == 150.0
-    assert ttl < 180
+    # Large Fly volumes need CURRENT to remain syncable for a full mirror pass;
+    # a 150s TTL races multi-hour revalidation and livelocks desktop sync.
+    assert ttl == 2 * 60 * 60
+    assert ttl >= 180
 
 
 def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():

@@ -8,6 +8,7 @@ import {
   fetchIdeBridgeSessions,
   fetchIdeBridgeWorkspaces,
   dispatchToIdeSession,
+  cancelIdeDispatch,
   fetchIdeDispatchStatus,
   critiqueWithSecondBrain,
   type BridgeSession,
@@ -16,6 +17,13 @@ import {
 } from '@/lib/api';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
+import {
+  applyDispatchMessageView,
+  bindDispatchMessage,
+  pollDispatchOnce,
+  selectFounderIdeNode,
+  type DispatchMessageView,
+} from './founder-ide-chat-state';
 
 type ChatMsg = {
   id: string;
@@ -24,6 +32,7 @@ type ChatMsg = {
   at: string;
   pending?: boolean;
   status?: string;
+  dispatchId?: string;
 };
 
 /**
@@ -79,7 +88,10 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
 
   const aiDropdownRef = useRef<HTMLDivElement>(null);
   const dispatchPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dispatchStartedAtRef = useRef(0);
+  const dispatchGenerationRef = useRef(0);
+  const dispatchScopeRef = useRef({ accessToken, nodeId });
+  const dispatchPlaceholderSequenceRef = useRef(0);
+  dispatchScopeRef.current = { accessToken, nodeId };
   /** Guard against re-entrant mic clicks while SpeechRecognition is spinning
    *  up — the previous toggle handler would otherwise race against the new
    *  one and the underlying Web Speech API repeatedly re-initializes, which
@@ -120,22 +132,25 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
 
   // ── Load status + workspaces + sessions ──────────────────────────────────
   const load = useCallback(async () => {
+    const isCurrent = () => dispatchScopeRef.current.accessToken === accessToken &&
+      dispatchScopeRef.current.nodeId === nodeId;
     try {
       const [status, ws, ss] = await Promise.all([
         fetchFounderNodeStatus(accessToken),
         fetchIdeBridgeWorkspaces(accessToken).catch(() => []),
         fetchIdeBridgeSessions(accessToken).catch(() => []),
       ]);
+      if (!isCurrent()) return;
       setNodes(status.nodes ?? []);
-      setWorkspaces(ws);
-      setSessions(ss);
+      setWorkspaces(ws.filter((workspace) => workspace.targetNodeId === nodeId && workspace.ideProvider === 'founder-ide-next'));
+      setSessions(ss.filter((session) => session.targetNodeId === nodeId && session.ideProvider === 'founder-ide-next'));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load workspace state');
+      if (isCurrent()) setError(e instanceof Error ? e.message : 'Failed to load workspace state');
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [accessToken]);
+  }, [accessToken, nodeId]);
 
   useEffect(() => {
     void load();
@@ -162,12 +177,24 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     }
   }, []);
 
-  useEffect(() => () => stopDispatchPoll(), [stopDispatchPoll]);
+  useEffect(() => {
+    dispatchGenerationRef.current += 1;
+    stopDispatchPoll();
+    setMessages([]);
+    setBusy(false);
+    setError(null);
+    setNotice(null);
+
+    return () => {
+      dispatchGenerationRef.current += 1;
+      stopDispatchPoll();
+    };
+  }, [accessToken, nodeId, stopDispatchPoll]);
 
   // ── Derived state ────────────────────────────────────────────────────────
   const onlineNode = useMemo(
-    () => nodes.find((n) => n.status === 'online') ?? nodes[0] ?? null,
-    [nodes],
+    () => selectFounderIdeNode(nodes, nodeId),
+    [nodeId, nodes],
   );
   const isOnline = Boolean(onlineNode?.status === 'online');
 
@@ -202,65 +229,53 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     [selectedWorkspaceId, workspaces],
   );
   const selectedTargetTitle = selectedSession?.title ?? selectedWorkspace?.title ?? null;
+  const pendingDispatch = useMemo(
+    () => [...messages].reverse().find((message) => message.pending && message.dispatchId) ?? null,
+    [messages],
+  );
 
   // ── Dispatch poll ────────────────────────────────────────────────────────
   const pollDispatch = useCallback(
-    (dispatchId: string) => {
+    (dispatchId: string, messageId: string, generation: number) => {
       stopDispatchPoll();
-      dispatchStartedAtRef.current = Date.now();
+      const startedAt = Date.now();
+      const operationScope = { accessToken, nodeId };
+      const isCurrent = () =>
+        dispatchGenerationRef.current === generation &&
+        dispatchScopeRef.current.accessToken === operationScope.accessToken &&
+        dispatchScopeRef.current.nodeId === operationScope.nodeId;
+      const finish = (view: DispatchMessageView) => {
+        setMessages((previous) => applyDispatchMessageView(previous, messageId, dispatchId, view));
+        if (view.notice) setNotice(view.notice);
+      };
       const tick = async () => {
-        if (Date.now() - dispatchStartedAtRef.current > DISPATCH_POLL_TIMEOUT_MS) {
-          setNotice('Delivery timed out — is Founder IDE online?');
+        const result = await pollDispatchOnce({
+          startedAt,
+          timeoutMs: DISPATCH_POLL_TIMEOUT_MS,
+          now: Date.now,
+          fetchStatus: () => fetchIdeDispatchStatus(operationScope.accessToken, dispatchId),
+          isCurrent,
+        });
+        if (result.kind === 'stale') return;
+      if (result.kind === 'status') {
+        finish(result.view);
+        if (result.view.terminal) {
           stopDispatchPoll();
           return;
-        }
-        try {
-          const s = await fetchIdeDispatchStatus(accessToken, dispatchId);
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === `dispatch:${dispatchId}`
-                ? { ...m, status: s.status, pending: s.status === 'PENDING' || s.status === 'DISPATCHING' }
-                : m,
-            ),
-          );
-          if (s.delivered) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === `dispatch:${dispatchId}`
-                  ? { ...m, pending: false, status: 'Delivered to Founder IDE' }
-                  : m,
-              ),
-            );
-            setNotice('Delivered to Founder IDE.');
-            stopDispatchPoll();
-            return;
           }
-          if (s.failed) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === `dispatch:${dispatchId}`
-                  ? { ...m, pending: false, status: `Failed: ${s.result ?? 'unknown'}` }
-                  : m,
-              ),
-            );
-            setNotice(`Delivery failed: ${s.result ?? 'unknown error'}`);
-            stopDispatchPoll();
-            return;
-          }
-          dispatchPollRef.current = setTimeout(tick, DISPATCH_POLL_INTERVAL_MS);
-        } catch {
-          dispatchPollRef.current = setTimeout(tick, DISPATCH_POLL_INTERVAL_MS);
         }
+        if (!isCurrent()) return;
+        dispatchPollRef.current = setTimeout(() => void tick(), DISPATCH_POLL_INTERVAL_MS);
       };
       void tick();
     },
-    [accessToken, stopDispatchPoll],
+    [accessToken, nodeId, stopDispatchPoll],
   );
 
   // ── Send ─────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || busy) return;
 
     // Always a clear, actionable error — never a silently-disabled send.
     if (!isOnline) {
@@ -279,6 +294,24 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     setBusy(true);
     setError(null);
     setNotice(null);
+    stopDispatchPoll();
+    const generation = ++dispatchGenerationRef.current;
+    const operationScope = { accessToken, nodeId };
+    const isCurrent = () =>
+      dispatchGenerationRef.current === generation &&
+      dispatchScopeRef.current.accessToken === operationScope.accessToken &&
+      dispatchScopeRef.current.nodeId === operationScope.nodeId;
+    setMessages((previous) =>
+      previous.map((message) =>
+        message.dispatchId && message.pending
+          ? {
+              ...message,
+              pending: false,
+              status: 'Status tracking stopped by a newer dispatch · final outcome unknown',
+            }
+          : message,
+      ),
+    );
 
     const userMsg: ChatMsg = {
       id: `u:${Date.now()}`,
@@ -286,9 +319,9 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
       text,
       at: new Date().toISOString(),
     };
-    const dispatchId = `dispatch:${Date.now()}`;
+    const placeholderId = `dispatch-local:${Date.now()}:${++dispatchPlaceholderSequenceRef.current}`;
     const pendingMsg: ChatMsg = {
-      id: dispatchId,
+      id: placeholderId,
       role: 'assistant',
       text: `Dispatching to ${selectedTargetTitle}…`,
       at: new Date().toISOString(),
@@ -301,25 +334,49 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     try {
       // Retarget dispatch from Cursor → Founder IDE by forcing ideProvider.
       const created = await dispatchToIdeSession(
-        accessToken,
+        operationScope.accessToken,
         selectedSession.id,
         text,
-        'founder-ide',
+        'founder-ide-next',
+        operationScope.nodeId,
       );
-      pollDispatch(created.id);
+      if (!isCurrent()) return;
+      setMessages((previous) => bindDispatchMessage(previous, placeholderId, created.id));
+      pollDispatch(created.id, placeholderId, generation);
     } catch (e) {
+      if (!isCurrent()) return;
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === dispatchId
+          m.id === placeholderId
             ? { ...m, pending: false, status: `error: ${e instanceof Error ? e.message : 'failed'}` }
             : m,
         ),
       );
       setNotice(`Dispatch failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     } finally {
+      if (isCurrent()) setBusy(false);
+    }
+  }, [accessToken, busy, input, isOnline, nodeId, pollDispatch, projects.length, selectedSession, selectedTargetTitle, stopDispatchPoll, voice]);
+
+  const handleCancelDispatch = useCallback(async () => {
+    const dispatchId = pendingDispatch?.dispatchId;
+    if (!dispatchId || !accessToken) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await cancelIdeDispatch(accessToken, dispatchId);
+      setMessages((previous) => previous.map((message) =>
+        message.dispatchId === dispatchId && message.pending
+          ? { ...message, status: 'Cancellation requested — waiting for the local Builder to stop' }
+          : message,
+      ));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Cancellation request failed');
+    } finally {
       setBusy(false);
     }
-  }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, selectedWorkspace, voice]);
+  }, [accessToken, pendingDispatch?.dispatchId]);
 
   /** Second Brain: cheap expert critique of the latest assistant reply (never DeepSeek). */
   const handleSecondBrainReview = useCallback(async () => {
@@ -720,6 +777,14 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                 placeholder='Message your Founder IDE — dispatched to the open project'
                 className='min-h-[40px] flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/40'
               />
+              <button
+                type='button'
+                onClick={() => void handleCancelDispatch()}
+                disabled={busy || !pendingDispatch?.dispatchId}
+                className='min-h-[40px] rounded-xl border border-rose-500/50 bg-rose-950/30 px-3 py-2 text-sm font-semibold text-rose-100 transition hover:bg-rose-900/40 disabled:opacity-40'
+              >
+                Cancel run
+              </button>
               <button
                 type='button'
                 onClick={() => void handleSend()}

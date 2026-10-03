@@ -155,8 +155,8 @@ const ADVANCED_COMMANDS: HomeCmd[] = [
   },
   {
     id: 'wipe-research',
-    label: '🗑 Wipe research CSVs',
-    hint: 'Fresh collection reset — archive + wipe CSV/JSONL, restart at $500',
+    label: '🗑 Fresh Collection (laptop wipe)',
+    hint: 'Laptop-only wipe via local :7002 POST /api/wipe_local_only — does NOT touch Fly. Never arms Bitfinex.',
     path: '/cmd/wipe-research',
     tone: 'danger',
   },

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -57,6 +58,106 @@ EXECUTION_WORLDS = (
     "CONSERVATIVE_BBO_DEPTH_V1",
     "AUTHENTICATED_ACTUAL",
 )
+
+
+# A regime is a label observed at a particular causal boundary.  It is not the
+# Phase-7 market taxonomy, so this helper deliberately does not project labels
+# such as BULL/BEAR into a different vocabulary.  Keeping the observation
+# envelope here prevents reports, candidates, and validation from each making
+# a subtly different (and potentially forward-looking) interpretation.
+_REGIME_UNKNOWN_LABELS = frozenset({
+    "", "UNKNOWN", "UNK", "NONE", "NULL", "N/A", "NA", "NAN",
+    "INF", "+INF", "-INF", "INFINITY", "+INFINITY", "-INFINITY",
+})
+
+
+def _finite_positive_timestamp(value: Any) -> float | None:
+    """Return an epoch timestamp only when it is a finite positive scalar."""
+    if isinstance(value, bool):
+        return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timestamp if math.isfinite(timestamp) and timestamp > 0 else None
+
+
+def normalize_regime_observation(
+    value: Any,
+    *,
+    signal_ts: Any,
+    scalar_observed_ts: Any = None,
+) -> dict[str, Any]:
+    """Normalize one regime observation without inventing causal availability.
+
+    Current collectors record ``{"value": label, "observed_ts": epoch}``.
+    A legacy scalar can still be displayed descriptively, but it is not
+    qualification-eligible unless its caller supplies an explicit pre-signal
+    capture timestamp.  Invalid, collection-shaped, or post-signal evidence is
+    represented as UNKNOWN rather than being silently bucketed or backfilled.
+    """
+    result: dict[str, Any] = {
+        "schema": "causal_regime_observation_v1",
+        "value": None,
+        "observed_ts": None,
+        "status": "UNKNOWN",
+        "qualification_eligible": False,
+        "reason": None,
+    }
+
+    envelope = isinstance(value, Mapping)
+    if envelope:
+        if "value" not in value:
+            result["reason"] = "REGIME_OBSERVATION_VALUE_MISSING"
+            return result
+        raw_label = value.get("value")
+        observed_raw = value.get("observed_ts")
+        if observed_raw in (None, ""):
+            result["reason"] = "REGIME_OBSERVATION_TIMESTAMP_MISSING"
+            return result
+    elif isinstance(value, str):
+        raw_label = value
+        observed_raw = scalar_observed_ts
+    else:
+        result["reason"] = "REGIME_OBSERVATION_INVALID_TYPE"
+        return result
+
+    if not isinstance(raw_label, str):
+        result["reason"] = "REGIME_OBSERVATION_INVALID_LABEL"
+        return result
+    label = raw_label.strip().upper()
+    if label in _REGIME_UNKNOWN_LABELS:
+        result["reason"] = "REGIME_OBSERVATION_UNKNOWN"
+        return result
+    result["value"] = label
+
+    if observed_raw in (None, ""):
+        # Keep a readable historical label, but do not let an un-timestamped
+        # scalar satisfy a causal regime-coverage gate.
+        result["status"] = "LEGACY_SCALAR_DESCRIPTIVE_ONLY"
+        result["reason"] = "REGIME_OBSERVATION_TIMESTAMP_MISSING"
+        return result
+
+    observed_ts = _finite_positive_timestamp(observed_raw)
+    if observed_ts is None:
+        result["value"] = None
+        result["reason"] = "REGIME_OBSERVATION_TIMESTAMP_INVALID"
+        return result
+    result["observed_ts"] = observed_ts
+    normalized_signal_ts = _finite_positive_timestamp(signal_ts)
+    if normalized_signal_ts is None:
+        result["value"] = None
+        result["reason"] = "REGIME_SIGNAL_TIMESTAMP_INVALID"
+        return result
+    if observed_ts > normalized_signal_ts:
+        result["value"] = None
+        result["reason"] = "REGIME_OBSERVATION_POST_SIGNAL"
+        return result
+
+    result["status"] = "CAUSAL"
+    result["qualification_eligible"] = True
+    result["reason"] = None
+    return result
 
 LEDGER_NAMES = (
     "opportunity",

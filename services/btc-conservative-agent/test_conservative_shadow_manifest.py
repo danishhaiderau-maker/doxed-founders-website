@@ -40,14 +40,17 @@ def test_actual_terminal_builder_is_staged_with_explicit_model(tmp_path, monkeyp
     monkeypatch.setattr(builder, "load_current_policy_candidates", lambda *a, **kw: (candidates, receipt))
     target = tmp_path / analyzer.CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE
     monkeypatch.setattr(analyzer, "_atomic_mirror_analyzer_report", lambda name: target)
+    policy_binding = {}
     report, mirrored = analyzer._write_conservative_shadow_report(
         tmp_path, tmp_path, baseline, policy_cycle_succeeded=True, research_model=model,
+        policy_artifact_binding_sink=policy_binding,
     )
     assert mirrored == target
     assert json.loads(json.dumps(report)) == json.loads(target.read_text())
     assert report["complete_replay_count"] == 1
     assert report["results"][0]["net_pnl_usd"] == 1.07
     assert report["live_qualification"] is False
+    assert policy_binding == {"candidates": candidates, "receipt": receipt}
     assert not target.with_suffix(".json.tmp").exists()
 
 

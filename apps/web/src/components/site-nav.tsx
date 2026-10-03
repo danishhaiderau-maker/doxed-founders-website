@@ -326,6 +326,8 @@ function MobileNavDrawer({
   fallbackRole: ReturnType<typeof resolveGamifiedRole>;
 }) {
   const [query, setQuery] = useState('');
+  const drawerRef = useRef<HTMLElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(HUB_NAV_ROWS.map((r) => r.id)),
   );
@@ -335,9 +337,13 @@ function MobileNavDrawer({
       setQuery('');
       return;
     }
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
+    searchRef.current?.focus();
     return () => {
-      document.body.style.overflow = '';
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
     };
   }, [open]);
 
@@ -362,10 +368,34 @@ function MobileNavDrawer({
       <button
         type="button"
         aria-label="Close menu"
+        tabIndex={-1}
+        aria-hidden="true"
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
         onClick={onClose}
       />
-      <aside className="absolute inset-y-0 right-0 flex w-full flex-col border-l border-zinc-800 bg-[#07070c] shadow-2xl sm:max-w-sm">
+      <aside
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
+        onKeyDown={(event) => {
+          if (event.key !== 'Tab') return;
+          const controls = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]',
+          ) ?? []).filter((element) => element.getClientRects().length > 0);
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (!first || !last) return;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }}
+        className="absolute inset-y-0 right-0 flex w-full flex-col border-l border-zinc-800 bg-[#07070c] shadow-2xl sm:max-w-sm"
+      >
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
           <p className="text-sm font-bold text-white">Menu</p>
           <button
@@ -382,7 +412,9 @@ function MobileNavDrawer({
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
             <input
+              ref={searchRef}
               type="search"
+              aria-label="Find a page"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Find a page…"
@@ -399,6 +431,7 @@ function MobileNavDrawer({
               <div key={row.id} className="mb-2 overflow-hidden rounded-xl border border-zinc-800/80">
                 <button
                   type="button"
+                  aria-expanded={isExpanded}
                   onClick={() =>
                     setExpanded((prev) => {
                       const next = new Set(prev);
@@ -570,7 +603,12 @@ function SiteNavInner() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
-  const [accountPreview, setAccountPreview] = useState<AccountOverview | null>(null);
+  const accountToken = session?.accessToken ?? null;
+  const [accountPreviewState, setAccountPreviewState] = useState<{
+    accessToken: string | null;
+    data: AccountOverview | null;
+  }>({ accessToken: null, data: null });
+  const accountPreview = accountPreviewState.accessToken === accountToken ? accountPreviewState.data : null;
   const profileRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLDivElement>(null);
 
@@ -578,19 +616,34 @@ function SiteNavInner() {
     session?.user?.id ?? accountPreview?.userId ?? getActiveUserId(session?.user?.id);
 
   useEffect(() => {
-    if (!session?.accessToken) {
-      setAccountPreview(null);
+    let cancelled = false;
+    if (!accountToken) {
+      setAccountPreviewState({ accessToken: null, data: null });
       return;
     }
-    fetchAccountOverview(session.accessToken)
-      .then(setAccountPreview)
-      .catch(() => setAccountPreview(null));
-  }, [session?.accessToken]);
+    fetchAccountOverview(accountToken)
+      .then((data) => {
+        if (!cancelled) setAccountPreviewState({ accessToken: accountToken, data });
+      })
+      .catch(() => {
+        if (!cancelled) setAccountPreviewState({ accessToken: accountToken, data: null });
+      });
+    return () => { cancelled = true; };
+  }, [accountToken]);
 
   useEffect(() => {
     setOpenDropdown(null);
     setMobileOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    const desktopBreakpoint = window.matchMedia('(min-width: 768px)');
+    const closeHiddenDrawer = () => {
+      if (desktopBreakpoint.matches) setMobileOpen(false);
+    };
+    desktopBreakpoint.addEventListener('change', closeHiddenDrawer);
+    return () => desktopBreakpoint.removeEventListener('change', closeHiddenDrawer);
+  }, []);
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
@@ -646,8 +699,8 @@ function SiteNavInner() {
 
   return (
     <>
-      <div ref={navRef} className="relative flex min-w-0 flex-1 flex-col items-end gap-1">
-        <nav className="flex min-w-0 max-w-full items-center gap-1 text-sm">
+      <div ref={navRef} className="relative flex w-full min-w-0 flex-1 basis-full flex-col items-end gap-1 md:basis-auto">
+        <nav className="flex w-full min-w-0 max-w-full items-center justify-end gap-1 text-sm">
         {/* Founder Chat + App download — placed before nav dropdowns (between brand and section links) */}
         <FounderChatLauncher />
         <DownloadAppLauncher />
@@ -699,6 +752,8 @@ function SiteNavInner() {
           onClick={() => setMobileOpen(true)}
           className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm font-medium text-zinc-200 md:hidden"
           aria-label="Open menu"
+          aria-expanded={mobileOpen}
+          aria-haspopup="dialog"
         >
           <Menu className="h-4 w-4" />
           Menu

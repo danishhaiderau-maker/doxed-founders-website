@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
-from combo_pathway_config import active_tile_registry_signature
+try:
+    from combo_pathway_config import active_tile_registry_signature
+except ImportError:  # master combo may lag registry-signature helper
+    def active_tile_registry_signature() -> str:
+        return "unavailable"
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
 
@@ -33,6 +37,35 @@ _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
 _BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
 _BOOTSTRAP_RECORDS_PER_STEP = 64
+
+
+def _bootstrap_records_per_step() -> int:
+    """Effective cooperative record budget (env or in-process ops mutation)."""
+    raw = str(os.environ.get("V3_BOOTSTRAP_RECORDS_PER_STEP") or "").strip()
+    if raw:
+        try:
+            return max(1, min(512, int(raw)))
+        except ValueError:
+            return int(_BOOTSTRAP_RECORDS_PER_STEP)
+    # Honor force-bootstrap in-process raises when env is unset.
+    try:
+        return max(1, min(4096, int(_BOOTSTRAP_RECORDS_PER_STEP)))
+    except (TypeError, ValueError):
+        return 64
+
+
+def _bootstrap_bytes_per_step() -> int:
+    """Effective cooperative byte budget (env or in-process ops mutation)."""
+    raw = str(os.environ.get("V3_BOOTSTRAP_BYTES_PER_STEP") or "").strip()
+    if raw:
+        try:
+            return max(1, min(32 * 1024 * 1024, int(raw)))
+        except ValueError:
+            return int(_BOOTSTRAP_BYTES_PER_STEP)
+    try:
+        return max(1, min(64 * 1024 * 1024, int(_BOOTSTRAP_BYTES_PER_STEP)))
+    except (TypeError, ValueError):
+        return 8 * 1024 * 1024
 
 
 def _first_present(*values: Any) -> Any:
@@ -1411,8 +1444,8 @@ class V3EvidenceStore:
         return receipt
 
     def advance_emergency_idempotency_bootstrap(
-        self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP,
-        max_records: int = _BOOTSTRAP_RECORDS_PER_STEP,
+        self, ledger: str, *, max_bytes: int | None = None,
+        max_records: int | None = None,
     ) -> dict[str, Any]:
         """Cooperatively index a bounded ledger prefix outside pressure only.
 
@@ -1425,8 +1458,12 @@ class V3EvidenceStore:
         path = self.ledger_path(ledger)
         if storage_blocks_new_nonessential_research(str(self.root)):
             return {"complete": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
-        limit = max(1, min(int(max_bytes), _BOOTSTRAP_BYTES_PER_STEP))
-        record_limit = max(1, min(int(max_records), _BOOTSTRAP_RECORDS_PER_STEP))
+        byte_ceiling = _bootstrap_bytes_per_step()
+        record_ceiling = _bootstrap_records_per_step()
+        requested_bytes = byte_ceiling if max_bytes is None else int(max_bytes)
+        requested_records = record_ceiling if max_records is None else int(max_records)
+        limit = max(1, min(requested_bytes, byte_ceiling))
+        record_limit = max(1, min(requested_records, record_ceiling))
         with self._exclusive(path):
             signature = _path_signature(path)
             if signature is None:
@@ -1539,7 +1576,7 @@ class V3EvidenceStore:
         for checked in range(len(ledgers)):
             ledger = ledgers[index]
             result = self.advance_emergency_idempotency_bootstrap(
-                ledger, max_records=_BOOTSTRAP_RECORDS_PER_STEP,
+                ledger, max_records=_bootstrap_records_per_step(),
             )
             total_records_indexed += int(result.get("records_indexed") or 0)
             total_bytes_indexed += int(result.get("bytes_indexed") or 0)

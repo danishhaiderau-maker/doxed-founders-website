@@ -1,9 +1,17 @@
 """Focused regressions for fresh analyzer-dashboard truthfulness fixes."""
+from datetime import datetime, timezone
 import json
 
 import pytest
 
 from research import research_dashboard as dashboard
+
+
+NOW = datetime(2026, 9, 5, 12, tzinfo=timezone.utc).timestamp()
+
+
+def _activity_timestamp(delta=0):
+    return datetime.fromtimestamp(NOW + delta, timezone.utc).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -201,26 +209,108 @@ def test_dashboard_labels_completion_units_and_family_cohorts_separately():
 
 
 def test_status_labels_analyzer_and_mirror_revisions_separately(monkeypatch):
+    analyzer_code_revision = "a" * 40
+    report_dataset_source_revision = "b" * 40
     manifest = {
-        "generation_revision": "abc123full",
+        "generation_revision": analyzer_code_revision,
+        "source_revision": report_dataset_source_revision,
         "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
         "fresh_epoch": {"epoch_id": "epoch-clean"},
     }
     monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}))
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
-    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: report_dataset_source_revision)
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
         "ok": True,
         "pollOk": True,
         "inProgress": False,
         "revisionParity": "MATCH",
-        "observedSourceRevision": "abc123",
+        "observedSourceRevision": report_dataset_source_revision,
     })
     payload = dashboard.app.test_client().get("/api/status").get_json()
-    assert payload["generation_revision_label"] == "ANALYZER_SOURCE_REVISION"
-    assert payload["analyzer_source_revision"] == "abc123full"
-    assert payload["mirror_source_revision"] == "abc123"
+    assert payload["generation_revision_label"] == "ANALYZER_CODE_REVISION"
+    assert payload["generation_revision"] == analyzer_code_revision
+    assert payload["analyzer_source_revision"] == analyzer_code_revision
+    assert payload["report_dataset_source_revision"] == report_dataset_source_revision
+    assert payload["mirror_source_revision"] == report_dataset_source_revision
     assert payload["source_revision_parity"] == "MATCH"
+
+
+def test_status_does_not_infer_missing_report_source_from_analyzer_code(monkeypatch):
+    analyzer_code_revision = "a" * 40
+    mirror_source_revision = "b" * 40
+    manifest = {
+        "generation_revision": analyzer_code_revision,
+        "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}))
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: mirror_source_revision)
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "ok": True,
+        "pollOk": True,
+        "inProgress": False,
+        "revisionParity": "MATCH",
+        "observedSourceRevision": mirror_source_revision,
+    })
+
+    payload = dashboard.app.test_client().get("/api/status").get_json()
+
+    assert payload["generation_revision"] == analyzer_code_revision
+    assert payload["analyzer_source_revision"] == analyzer_code_revision
+    assert payload["report_dataset_source_revision"] is None
+    assert payload["mirror_source_revision"] == mirror_source_revision
+    assert payload["source_revision_parity"] == "UNAVAILABLE"
+    assert payload["source_revision_parity"] != "MATCH"
+
+
+def test_pathway_audit_sync_keeps_code_report_and_mirror_roles_separate(monkeypatch):
+    analyzer_code_revision = "a" * 40
+    report_dataset_source_revision = "b" * 40
+    manifest = {
+        "generation_revision": analyzer_code_revision,
+        "source_revision": report_dataset_source_revision,
+        "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
+        "tile_registry_signature": dashboard.active_tile_registry_signature(),
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}))
+    monkeypatch.setattr(dashboard, "_read_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_read_contract_receipt", lambda _name: ({}, {"status": "NOT_PUBLISHED"}))
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: report_dataset_source_revision)
+
+    current_sync = dashboard._pathway_audit_payload()["current_sync"]
+
+    assert current_sync["generation_revision"] == analyzer_code_revision
+    assert current_sync["analyzer_source_revision"] == analyzer_code_revision
+    assert current_sync["analyzer_code_revision"] == analyzer_code_revision
+    assert current_sync["report_dataset_source_revision"] == report_dataset_source_revision
+    assert current_sync["mirror_source_revision"] == report_dataset_source_revision
+    assert current_sync["report_to_mirror_revision_parity"] == "MATCH"
+
+
+def test_pathway_audit_sync_missing_report_source_is_unavailable(monkeypatch):
+    analyzer_code_revision = "a" * 40
+    mirror_source_revision = "b" * 40
+    manifest = {
+        "generation_revision": analyzer_code_revision,
+        "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
+        "tile_registry_signature": dashboard.active_tile_registry_signature(),
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}))
+    monkeypatch.setattr(dashboard, "_read_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_read_contract_receipt", lambda _name: ({}, {"status": "NOT_PUBLISHED"}))
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: mirror_source_revision)
+
+    current_sync = dashboard._pathway_audit_payload()["current_sync"]
+
+    assert current_sync["analyzer_code_revision"] == analyzer_code_revision
+    assert current_sync["report_dataset_source_revision"] is None
+    assert current_sync["mirror_source_revision"] == mirror_source_revision
+    assert current_sync["report_to_mirror_revision_parity"] == "UNAVAILABLE"
+    assert current_sync["report_to_mirror_revision_parity"] != "MATCH"
 
 
 def test_generation_is_stale_while_new_fly_revision_is_syncing(monkeypatch):
@@ -261,10 +351,12 @@ def test_freshness_compares_dataset_source_when_analyzer_code_revision_differs(m
         "collector_v22_epoch_id": "epoch-clean",
     })
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "577a188d2abc")
+    monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
         "ok": True,
         "pollOk": True,
         "inProgress": False,
+        "updatedAt": _activity_timestamp(),
         "revisionParity": "MATCH",
         "observedSourceRevision": "577a188d2abc",
     })
@@ -326,3 +418,103 @@ def test_generation_fails_closed_when_mirror_sync_receipt_missing(monkeypatch):
     assert freshness["qualification_allowed"] is False
     assert freshness["mirror_sync_receipt_ok"] is False
     assert freshness["mirror_sync_revision_parity"] == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("poll_receipt", ({}, {"pollOk": None}))
+def test_generation_never_treats_missing_or_null_mirror_poll_as_current(
+    monkeypatch, poll_receipt
+):
+    manifest = {
+        "generation_revision": "abc123full",
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "collector_v22_epoch_id": "epoch-clean",
+    })
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
+    monkeypatch.setattr(dashboard.time, "time", lambda: NOW)
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "ok": True,
+        "inProgress": False,
+        "updatedAt": _activity_timestamp(),
+        "revisionParity": "MATCH",
+        "observedSourceRevision": "abc123",
+        **poll_receipt,
+    })
+
+    freshness = dashboard._generation_freshness_meta(manifest)
+
+    assert freshness["mirror_sync_receipt_ok"] is True
+    assert freshness["mirror_sync_poll_ok"] is None
+    assert freshness["mirror_sync_poll_receipt_status"] == "MISSING_OR_NULL"
+    assert freshness["current"] is False
+    assert freshness["qualification_allowed"] is False
+    assert any("poll receipt is missing or null" in reason for reason in freshness["reasons"])
+
+
+def test_old_saved_report_exposes_publication_age_and_marks_summary_stale(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "fresh_collection_mode": True,
+    })
+    monkeypatch.setattr(dashboard, "_generation_freshness_meta", lambda: {
+        "current": True,
+        "reasons": [],
+    })
+    compact = {
+        "generated_at": "2026-09-12T00:00:00Z",
+        "data_scope": "session",
+        "session_scope": "FRESH-COLLECTION",
+    }
+    manifest = {"generated_at": "2026-09-12T00:05:00Z"}
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    publication_helper = dashboard._publication_freshness_meta
+    monkeypatch.setattr(
+        dashboard,
+        "_publication_freshness_meta",
+        lambda c, m: publication_helper(c, m, now_utc=now),
+    )
+
+    meta = dashboard._summary_stale_meta(compact, manifest)
+
+    assert meta["stale"] is True
+    assert meta["publication_freshness"] == {
+        "policy": dashboard.ANALYZER_REPORT_PUBLICATION_UTC_POLICY,
+        "source": "compact.generated_at",
+        "generated_at": "2026-09-12T00:00:00+00:00",
+        "age_seconds": 172800,
+        "max_age_seconds": dashboard.ANALYZER_REPORT_PUBLICATION_UTC_MAX_AGE_SECONDS,
+        "stale": True,
+        "status": "STALE",
+        "reason": "REPORT_PUBLICATION_EXCEEDS_UTC_AGE_POLICY",
+    }
+    assert any("publication exceeds" in reason for reason in meta["reasons"])
+
+
+@pytest.mark.parametrize("generated_at", [None, "not-a-timestamp"])
+def test_publication_unknown_does_not_create_an_age_stale_claim(generated_at):
+    publication = dashboard._publication_freshness_meta(
+        {"generated_at": generated_at},
+        {},
+        now_utc=datetime(2026, 9, 14, tzinfo=timezone.utc),
+    )
+    assert publication["status"].startswith("UNKNOWN_")
+    assert publication["age_seconds"] is None
+    assert publication["stale"] is False
+
+
+def test_manifest_publication_fallback_stays_fresh_at_policy_boundary():
+    now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+    boundary = datetime.fromtimestamp(
+        now.timestamp() - dashboard.ANALYZER_REPORT_PUBLICATION_UTC_MAX_AGE_SECONDS,
+        timezone.utc,
+    ).isoformat()
+    publication = dashboard._publication_freshness_meta(
+        {}, {"generated_at": boundary}, now_utc=now
+    )
+    assert publication["source"] == "manifest.generated_at"
+    assert publication["status"] == "FRESH"
+    assert publication["stale"] is False
+    assert publication["age_seconds"] == publication["max_age_seconds"]

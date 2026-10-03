@@ -102,7 +102,7 @@ async function handleParticipantRequest(request, _context, stream, deps, token) 
     ];
     const client = {
         baseUrl: (0, credentials_1.proxyBaseUrl)(deps.creds.apiBaseUrl),
-        bearer: (0, credentials_1.bearerFromCredentials)(deps.creds),
+        bearer: (0, credentials_1.authorizationHeaderFromCredentials)(deps.creds),
     };
     const cfg = vscode.workspace.getConfiguration('founderOs');
     const timeoutMs = cfg.get('requestTimeoutMs') ?? 120_000;

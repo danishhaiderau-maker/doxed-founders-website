@@ -25,6 +25,9 @@ from research.platform_relay_evidence import _validate_platform_relay_evidence_p
 
 ROOT = Path(__file__).resolve().parent
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
+BOUNDARY_BOT = (ROOT.parents[1] / ".score-led-boundary" / "services" / "btc-conservative-agent" / "bot.py").read_text(
+    encoding="utf-8"
+)
 ENTRYPOINT = (ROOT / "fly-entrypoint.sh").read_text(encoding="utf-8")
 SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
     encoding="utf-8"
@@ -334,6 +337,7 @@ def test_paged_ack_stages_every_bounded_page_before_one_complete_generation_comm
     ]
     assert 'operation == "STAGE_PAGE"' in ack_v3
     assert 'operation != "FINALIZE"' in ack_v3
+    assert '"ack_session_id": session_id' in ack_v3
     assert 'for page_index in range(int(generation["page_count"]))' in ack_v3
     assert '"missing_page_index": page_index' in ack_v3
     assert ack_v3.index('operation == "STAGE_PAGE"') < ack_v3.index(
@@ -345,6 +349,16 @@ def test_paged_ack_stages_every_bounded_page_before_one_complete_generation_comm
     assert SYNC_SCRIPT.index('$stagePayload.operation = "STAGE_PAGE"') < SYNC_SCRIPT.index(
         '$finalizePayload.operation = "FINALIZE"'
     )
+
+
+def test_finalize_response_binds_the_exact_ack_session_in_both_server_sources():
+    for label, source in (("root", BOT), ("boundary", BOUNDARY_BOT)):
+        start = source.index("def _data_sync_ack_v3(body: dict)")
+        end = source.index("@app.route('/api/data-sync/ack'", start)
+        ack_v3 = source[start:end]
+        final_commit = ack_v3[ack_v3.rindex("_write_data_sync_ack(compact_ack)"):]
+        assert '"operation": "FINALIZE"' in final_commit, label
+        assert '"ack_session_id": session_id' in final_commit, label
 
 
 def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
@@ -944,10 +958,6 @@ def test_data_sync_inventory_cache_is_short_ttl_single_flight():
         "threading": threading,
         "_data_sync_inventory": inventory,
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 0.2,
-        # This isolated inventory fixture starts after reservation hydration.
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
-        "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_inventory_cache": {
             "expires_at": 0.0, "refreshing": False, "rows": None,
@@ -1005,10 +1015,6 @@ def test_data_sync_inventory_forced_refresh_bypasses_stale_rows_and_serializes()
         "time": time,
         "_data_sync_inventory": inventory,
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
-        # This isolated inventory fixture starts after reservation hydration.
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
-        "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_inventory_cache": {
             "expires_at": 0.0, "refreshed_at": 0.0,
@@ -1070,10 +1076,6 @@ def test_failed_forced_refresh_never_releases_stale_rows_to_waiter():
         "time": time,
         "_data_sync_inventory": inventory,
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
-        # This isolated inventory fixture starts after reservation hydration.
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
-        "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_inventory_cache": cache,
     }
@@ -3075,9 +3077,6 @@ def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
         "re": re,
         "hmac": __import__("hmac"),
         "threading": threading,
-        # This isolated inventory fixture starts after reservation hydration.
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_inventory_generations": {},
@@ -3955,15 +3954,20 @@ def test_full_inventory_admission_and_promotion_are_bootstrap_fenced():
 
     bootstrap.clear()
     bootstrap.update({
-        "required": False, "status": "NOT_REQUIRED", "complete": True,
+        "required": False, "status": "PENDING", "complete": False,
         "blocked": False,
     })
     not_required = namespace["_data_sync_receipt_bootstrap_gate"]()
     assert not_required["required"] is False
     assert not_required["status"] == "NOT_REQUIRED"
     assert not_required["complete"] is True
-    bootstrap["complete"] = False
-    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is False
+    # Stale PENDING/incomplete flags must not block when required is false.
+    bootstrap.update({"status": "PENDING", "complete": False})
+    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is True
+    # Missing required key (dead lifecycle owner) also admits inventory.
+    bootstrap.clear()
+    missing = namespace["_data_sync_receipt_bootstrap_gate"]()
+    assert missing["required"] is False and missing["complete"] is True
 
     route = BOT[BOT.index("def api_data_sync_manifest") : BOT.index("_data_sync_identity_cache_lock")]
     assert route.index('elif not receipt_bootstrap["complete"]') < route.index(
@@ -4025,12 +4029,14 @@ def test_invalid_persisted_v2_snapshot_starts_exactly_one_async_rebuild(tmp_path
                 RuntimeError("inventory top-files summary is invalid")
             )
         ),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_retain_disk_inventory_generation": lambda *args, **kwargs: "e" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4061,12 +4067,15 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
             json.dumps(rows, separators=(",", ":"), sort_keys=True, ensure_ascii=True).encode("utf-8")
         ).hexdigest(),
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
@@ -4082,12 +4091,20 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     assert len(started) == 1
     assert started[0]["daemon"] is True
     assert "_data_sync_inventory(" not in ast.unparse(node)
-    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "served_since_refresh": False, "refreshing": False})
+    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}}, "generated_at": "now", "expires_at": time.monotonic() + 10, "served_since_refresh": False, "refreshing": False})
     assert request_inventory()["status"] == "CURRENT"
+    forced = request_inventory(force_refresh=True)
+    assert forced["status"] == "STALE_REVALIDATING"
+    assert forced["rows"] == [{"path": "a.json", "size": 1}]
+    assert len(started) == 2
+    # A matching force-refresh request must revalidate even during the normal
+    # cache lifetime. Restore an idle CURRENT state to exercise expiry too.
+    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}}, "generated_at": "now", "expires_at": time.monotonic() - 1, "served_since_refresh": False, "refreshing": False})
+    state["expires_at"] = time.monotonic() - 1
     revalidating = request_inventory(force_refresh=True)
     assert revalidating["status"] == "STALE_REVALIDATING"
     assert revalidating["rows"] == [{"path": "a.json", "size": 1}]
-    assert len(started) == 2
+    assert len(started) == 3
 
     state.update({"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "served_since_refresh": False, "refreshing": False})
     namespace["_data_sync_load_persisted_inventory_snapshot"] = lambda: {
@@ -4097,6 +4114,195 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     stale = request_inventory()
     assert stale["status"] == "STALE_REVALIDATING"
     assert stale["rows"] == [{"path": "prior.json", "size": 1}]
+
+
+def test_async_inventory_serves_retained_current_when_capacity_blocks_refresh():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    started = []
+    hydration_requested = []
+    loaded = []
+    retained = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    identity = {
+        "source_git_rev": "rev",
+        "collection_epoch_id": "epoch",
+        "tile_registry_signature": "tile",
+    }
+    generation = {
+        "generation_id": "e" * 64,
+        "bundle_identity": dict(identity),
+    }
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "generated_at": None, "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False, "error": None,
+    }
+    namespace = {
+        "time": time, "datetime": datetime,
+        "threading": SimpleNamespace(Thread=FakeThread),
+        # Reservation hydration is deliberately requested before the capacity
+        # fence.  That bounded metadata path may create its own small runtime
+        # directories; this contract asserts only that no inventory worker is
+        # launched while the fence is active.
+        "_start_data_sync_bundle_reservation_hydration": (
+            lambda: hydration_requested.append(True)
+        ),
+        "_data_sync_inventory_capacity_available": lambda: False,
+        "_data_sync_volume_free_bytes": lambda: 123,
+        "_data_sync_inventory_failure_fingerprint": lambda **_kwargs: "0" * 64,
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_bundle_retention_allowed_locked": lambda _generation_id: True,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: dict(identity),
+        "_data_sync_inventory_generation": (
+            lambda generation_id: generation
+            if generation_id == generation["generation_id"] else None
+        ),
+        "_data_sync_load_persisted_inventory_snapshot": lambda: (
+            loaded.append(True)
+            or {
+                "generation": dict(generation),
+                "generated_at": datetime.now(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+            }
+        ),
+        "_data_sync_retain_disk_inventory_generation": (
+            lambda disk_generation, _generated_at, *, status, **_kwargs: (
+                retained.append((dict(disk_generation), status))
+                or disk_generation["generation_id"]
+            )
+        ),
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 150.0,
+        "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 7200.0,
+        "hmac": hmac, "uuid": uuid,
+        "utc_iso": lambda: "2026-09-14T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    result = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="a" * 32,
+    )
+
+    assert result["status"] == "CURRENT"
+    assert result["generation_id"] == generation["generation_id"]
+    assert result["capacity_deferred"] is True
+    assert result["retry_after_seconds"] == 30
+    assert loaded == [True]
+    assert retained == [(generation, "CURRENT")]
+    assert started == []
+    assert hydration_requested == [True]
+
+    # A second forced poll under the same pressure must serve the retained
+    # descriptor rather than reloading or retaining a duplicate generation.
+    repeated = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="b" * 32,
+    )
+    assert repeated["status"] == "CURRENT"
+    assert loaded == [True]
+    assert retained == [(generation, "CURRENT")]
+    assert started == []
+    assert hydration_requested == [True, True]
+
+
+@pytest.mark.parametrize("case", ("expired", "source", "epoch", "tile"))
+def test_async_inventory_capacity_recovery_rejects_expired_or_identity_mismatch(case):
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    started = []
+    hydration_requested = []
+    retained_statuses = []
+    expected_identity = {
+        "source_git_rev": "rev",
+        "collection_epoch_id": "epoch",
+        "tile_registry_signature": "tile",
+    }
+    persisted_identity = dict(expected_identity)
+    if case == "source":
+        persisted_identity["source_git_rev"] = "old-revision"
+    elif case == "epoch":
+        persisted_identity["collection_epoch_id"] = "old-epoch"
+    elif case == "tile":
+        persisted_identity["tile_registry_signature"] = "old-tile"
+    generated_at = datetime.now(timezone.utc)
+    if case == "expired":
+        generated_at = datetime.fromtimestamp(time.time() - 7201, timezone.utc)
+    generation = {
+        "generation_id": "f" * 64,
+        "bundle_identity": persisted_identity,
+    }
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs)
+
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "generated_at": None, "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False, "error": None,
+    }
+    namespace = {
+        "time": time, "datetime": datetime,
+        "threading": SimpleNamespace(Thread=FakeThread),
+        "_start_data_sync_bundle_reservation_hydration": (
+            lambda: hydration_requested.append(True)
+        ),
+        "_data_sync_inventory_capacity_available": lambda: False,
+        "_data_sync_volume_free_bytes": lambda: 123,
+        "_data_sync_inventory_failure_fingerprint": lambda **_kwargs: "0" * 64,
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_bundle_retention_allowed_locked": lambda _generation_id: True,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: dict(expected_identity),
+        "_data_sync_inventory_generation": lambda _generation_id: None,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: {
+            "generation": dict(generation),
+            "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        },
+        "_data_sync_retain_disk_inventory_generation": (
+            lambda _generation, _generated_at, *, status, **_kwargs: (
+                retained_statuses.append(status) or "f" * 64
+            )
+        ),
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 150.0,
+        "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 7200.0,
+        "hmac": hmac, "uuid": uuid,
+        "utc_iso": lambda: "2026-09-14T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    result = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="a" * 32,
+    )
+
+    assert result["status"] == "STALE"
+    assert result["capacity_deferred"] is True
+    assert state["status"] == "STALE"
+    assert retained_statuses == ["STALE"]
+    assert started == []
+    assert hydration_requested == [True]
 
 
 def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
@@ -4116,12 +4322,15 @@ def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
     }
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=None),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4172,12 +4381,15 @@ def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
     }
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4227,11 +4439,10 @@ def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
         "subprocess": SimpleNamespace(
             run=run_subprocess, DEVNULL=subprocess.DEVNULL,
         ),
-        "logger": SimpleNamespace(error=lambda message: logged.append(str(message))),
-        # This isolated inventory fixture starts after reservation hydration.
-        "_start_data_sync_bundle_reservation_hydration": lambda: None,
-        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
-        "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
+        "logger": SimpleNamespace(
+            error=lambda *args: logged.append(" ".join(str(arg) for arg in args))
+        ),
+        "re": re,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
         "_data_sync_inventory_work_root": lambda: work,
@@ -4248,6 +4459,8 @@ def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
         "_DATA_SYNC_INVENTORY_WORKER_NAME": "data_sync_inventory_worker.py",
         "_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS": 300,
         "_DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS": 15.0,
+        "_data_sync_inventory_file_budget": lambda: 250,
+        "_data_sync_inventory_slice_seconds": lambda: 15.0,
         "_DATA_SYNC_MANIFEST_PAGE_DEFAULT": 250,
         "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
         "_DATA_SYNC_EXTENSIONS": frozenset({".json"}),
@@ -4256,7 +4469,29 @@ def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
         "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
         "_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES": frozenset({
             "INVENTORY_WORKER_FAILED", "DIRECTORY_SCAN_FAILED",
+            "QUARANTINE_COMPONENT_BINDING_INVALID",
         }),
+        "_DATA_SYNC_INVENTORY_WORKER_PROGRESS_PHASES": frozenset({
+            "SCAN", "FINALIZE",
+        }),
+        "_data_sync_inventory_public_failure_code": lambda value: (
+            str(value) if str(value) in {
+                "INVENTORY_CAPACITY_DEFERRED",
+                "INVENTORY_WORKER_FAILED",
+                "QUARANTINE_COMPONENT_BINDING_INVALID",
+            } else None
+        ),
+        "_data_sync_inventory_public_worker_phase": lambda value: (
+            str(value) if str(value) in {
+                "CAPACITY_DEFERRED", "COMPLETE", "FINALIZE", "SCAN",
+                "VALIDATING_INDEX", "WAITING_RECEIPT_BOOTSTRAP",
+            } else None
+        ),
+        "_DATA_SYNC_INVENTORY_FAILURE_STAGES": frozenset({
+            "BUILD_RESUMABLE", "RELEASE_LEASE", "PARENT_REFRESH",
+        }),
+        "_data_sync_inventory_failure_fingerprint": lambda **_kwargs: "0" * 64,
+        "_data_sync_volume_free_bytes": lambda: 123,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     namespace["_data_sync_inventory_refresh_worker"]("c" * 32)
@@ -4270,10 +4505,13 @@ def test_parent_timeout_exposes_generic_current_and_last_worker_failure(tmp_path
 
     state = _exercise_parent_inventory_worker_failure(tmp_path, timeout)
     assert state["refreshing"] is False
-    assert state["error"] == "TimeoutExpired", state["_logged"]
+    assert state["error"] == "INVENTORY_WORKER_FAILED", state["_logged"]
     assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
+    assert state["last_worker_failure_stage"] == "PARENT_REFRESH"
+    assert state["last_worker_failure_fingerprint"] == "0" * 64
+    assert state["last_worker_failure_volume_free_bytes"] == 123
 
 
 def test_parent_malformed_result_exposes_generic_current_and_last_worker_failure(tmp_path):
@@ -4284,10 +4522,403 @@ def test_parent_malformed_result_exposes_generic_current_and_last_worker_failure
 
     state = _exercise_parent_inventory_worker_failure(tmp_path, malformed)
     assert state["refreshing"] is False
-    assert state["error"] == "JSONDecodeError", state["_logged"]
+    assert state["error"] == "INVENTORY_WORKER_FAILED", state["_logged"]
     assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
+    assert state["last_worker_failure_stage"] == "PARENT_REFRESH"
+    assert state["last_worker_failure_fingerprint"] == "0" * 64
+    assert state["last_worker_failure_volume_free_bytes"] == 123
+
+
+def test_parent_preserves_quarantine_binding_failure_code(tmp_path):
+    def failed(command, **_kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        nonce = command[command.index("--nonce") + 1]
+        result_path.write_text(json.dumps({
+            "schema": "fly_runtime_inventory_worker_result_v2",
+            "status": "FAILED",
+            "nonce": nonce,
+            "source_revision": "a" * 40,
+            "launched_unix": 0.0,
+            "generated_unix": time.time() + 1,
+            "failure_code": "QUARANTINE_COMPONENT_BINDING_INVALID",
+            "failure_stage": "BUILD_RESUMABLE",
+            "failure_fingerprint": "f" * 64,
+            "volume_free_bytes": 321,
+        }), encoding="utf-8")
+        return SimpleNamespace(returncode=1)
+
+    state = _exercise_parent_inventory_worker_failure(tmp_path, failed)
+    assert state["worker_failure_code"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert state["last_worker_failure_code"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert state["last_worker_failure_stage"] == "BUILD_RESUMABLE"
+    assert state["last_worker_failure_fingerprint"] == "f" * 64
+    assert state["last_worker_failure_volume_free_bytes"] == 321
+
+
+def test_parent_rejects_unallowlisted_building_phase_without_publishing_it(tmp_path):
+    private_phase = "PrivateWorkerPhase: /private/runtime/path"
+
+    def malformed_progress(command, **_kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        nonce = command[command.index("--nonce") + 1]
+        result_path.write_text(json.dumps({
+            "schema": "fly_runtime_inventory_worker_result_v2",
+            "status": "BUILDING",
+            "nonce": nonce,
+            "source_revision": "a" * 40,
+            "launched_unix": 0.0,
+            "generated_unix": time.time() + 1,
+            "phase": private_phase,
+        }), encoding="utf-8")
+        return SimpleNamespace(returncode=75)
+
+    state = _exercise_parent_inventory_worker_failure(tmp_path, malformed_progress)
+    assert state.get("worker_phase") is None
+    assert state["error"] == "INVENTORY_WORKER_FAILED"
+    assert private_phase not in json.dumps(state, sort_keys=True)
+
+
+def test_inventory_capacity_preflight_defers_after_metadata_hydration_without_worker_launch():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    started = []
+    hydrated = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs)
+
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "refreshing": False, "worker_active": False,
+    }
+    namespace = {
+        "time": time,
+        "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_capacity_available": lambda: False,
+        "_start_data_sync_bundle_reservation_hydration": lambda: hydrated.append(True),
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_bundle_retention_allowed_locked": lambda _generation_id: True,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_volume_free_bytes": lambda: 123,
+        "_data_sync_inventory_failure_fingerprint": lambda **_kwargs: "0" * 64,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "utc_iso": lambda: "2026-09-14T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"]()
+    assert result["status"] == "EMPTY"
+    assert result["error"] == "INVENTORY_CAPACITY_DEFERRED"
+    assert result["worker_phase"] == "CAPACITY_DEFERRED"
+    assert state["worker_failure_code"] == "INVENTORY_CAPACITY_DEFERRED"
+    assert state["last_worker_failure_code"] == "INVENTORY_CAPACITY_DEFERRED"
+    assert started == []
+    assert hydrated == [True]
+
+
+def test_inventory_capacity_preflight_preserves_an_active_worker_after_metadata_hydration():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    hydrated = []
+    state = {
+        "status": "BUILDING", "rows": None, "generation": None,
+        "refreshing": True, "active_refresh_nonce": "a" * 32,
+        "refresh_started_at": "2026-09-14T00:00:00Z",
+        "worker_phase": "SCANNING", "worker_failure_code": None,
+        "last_worker_failure_code": None, "error": None,
+        "retry_after_seconds": 2,
+    }
+    before = dict(state)
+    namespace = {
+        "time": time,
+        "_data_sync_inventory_capacity_available": lambda: False,
+        "_start_data_sync_bundle_reservation_hydration": lambda: hydrated.append(True),
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_bundle_retention_allowed_locked": lambda _generation_id: True,
+        "_data_sync_volume_free_bytes": lambda: 123,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "utc_iso": lambda: "2026-09-14T00:00:01Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"]()
+    assert result["status"] == "BUILDING"
+    assert result["refreshing"] is True
+    assert result["refresh_nonce"] == "a" * 32
+    assert result["capacity_deferred"] is True
+    assert result["retry_after_seconds"] == 30
+    assert state == before
+    assert hydrated == [True]
+
+
+def test_inventory_capacity_preflight_serves_current_cache_before_admission_gate():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    hydrated = []
+    identity = {
+        "source_git_rev": "a" * 40,
+        "collection_epoch_id": "epoch-current",
+        "tile_registry_signature": "b" * 64,
+    }
+    state = {
+        "status": "CURRENT", "rows": None,
+        "generation": {"bundle_identity": dict(identity)},
+        "generation_id": "c" * 64,
+        "expires_at": time.monotonic() + 60,
+        "served_since_refresh": True,
+        "refreshing": False,
+    }
+    namespace = {
+        "time": time, "hmac": hmac,
+        "_data_sync_memory_identity_payload": lambda: dict(identity),
+        "_data_sync_inventory_generation": lambda generation_id: (
+            {"generation_id": generation_id} if generation_id == "c" * 64 else None
+        ),
+        "_data_sync_inventory_capacity_available": lambda: False,
+        "_start_data_sync_bundle_reservation_hydration": lambda: hydrated.append(True),
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_bundle_retention_allowed_locked": lambda _generation_id: True,
+        "_data_sync_volume_free_bytes": lambda: 123,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "utc_iso": lambda: "2026-09-14T00:00:01Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="d" * 32,
+    )
+    assert result["status"] == "CURRENT"
+    assert result["generation_id"] == "c" * 64
+    assert state["status"] == "CURRENT"
+    assert state["refreshing"] is False
+    assert hydrated == [True]
+
+
+def test_inventory_capacity_preflight_uses_the_existing_512_mib_reserve():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_inventory_capacity_available"
+    )
+    free_bytes = {"value": 512 * 1024 * 1024}
+    namespace = {
+        "shutil": SimpleNamespace(
+            disk_usage=lambda _path: SimpleNamespace(free=free_bytes["value"])
+        ),
+        "_data_sync_volume_root": lambda: Path("/volume"),
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    assert namespace["_data_sync_inventory_capacity_available"]() is True
+    free_bytes["value"] -= 1
+    assert namespace["_data_sync_inventory_capacity_available"]() is False
+
+
+def test_identity_only_manifest_exposes_only_safe_inventory_failure_codes():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "api_data_sync_manifest"
+    )
+
+    class FakeApp:
+        @staticmethod
+        def route(*_args, **_kwargs):
+            return lambda function: function
+
+    inventory_state = {
+        "refreshing": False,
+        "active_refresh_nonce": None,
+        "refresh_started_at": None,
+        "refresh_completed_at": None,
+        "last_failure_at": "2026-09-14T00:00:00Z",
+        "error": "QUARANTINE_COMPONENT_BINDING_INVALID",
+        "worker_phase": "FAILED",
+        "worker_failure_code": "QUARANTINE_COMPONENT_BINDING_INVALID",
+        "last_worker_failure_code": "QUARANTINE_COMPONENT_BINDING_INVALID",
+        "last_worker_failure_at": "2026-09-14T00:00:00Z",
+    }
+    namespace = {
+        "app": FakeApp(),
+        "request": SimpleNamespace(args={"identity_only": "1"}),
+        "jsonify": lambda payload: payload,
+        "_data_sync_manifest_identity_only": lambda _args: True,
+        "_data_sync_manifest_force_refresh": lambda _args: False,
+        "_data_sync_async_inventory": inventory_state,
+        "_data_sync_volume_root": lambda: Path("/volume"),
+        "shutil": SimpleNamespace(
+            disk_usage=lambda _path: SimpleNamespace(total=1024, used=512, free=512)
+        ),
+        "_read_data_sync_ack": lambda: {},
+        "_load_research_session_meta": lambda: {},
+        "state": {"fresh_collection_signal_ts": 0.0},
+        "_update_data_sync_identity_epoch_cache": lambda **_kwargs: None,
+        "active_tile_lifecycle_manifest": lambda: [],
+        "active_tile_registry_signature": lambda: "a" * 64,
+        "_runtime_git_rev": lambda: "b" * 40,
+        "_data_sync_optional_file_audit": lambda: [],
+        "_lifecycle_pipeline_runtime_status": lambda: {},
+        "_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES": frozenset({
+            "INVENTORY_CAPACITY_DEFERRED",
+            "INVENTORY_WORKER_FAILED",
+            "QUARANTINE_COMPONENT_BINDING_INVALID",
+        }),
+        "_data_sync_inventory_public_failure_code": lambda value: (
+            str(value) if str(value) in {
+                "INVENTORY_CAPACITY_DEFERRED",
+                "INVENTORY_WORKER_FAILED",
+                "QUARANTINE_COMPONENT_BINDING_INVALID",
+            } else None
+        ),
+        "_data_sync_inventory_public_worker_phase": lambda value: (
+            str(value) if str(value) in {
+                "CAPACITY_DEFERRED", "COMPLETE", "FINALIZE", "SCAN",
+                "VALIDATING_INDEX", "WAITING_RECEIPT_BOOTSTRAP",
+            } else None
+        ),
+        "_data_sync_inventory_failure_diagnostic": lambda: {
+            "stage": "BUILD_RESUMABLE",
+            "fingerprint": "f" * 64,
+            "volume_free_bytes": 123,
+        },
+        "utc_iso": lambda: "2026-09-14T00:00:01Z",
+        "EXECUTION_FIX_VERSION": "test",
+        "TILE_REGISTRY_SCHEMA": "test",
+        "TILE_ARCHITECTURE_VERSION": "test",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    payload = namespace["api_data_sync_manifest"]()
+    assert payload["inventory_worker"]["failure_code"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert payload["inventory_worker"]["last_failure_code"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert payload["inventory_worker"]["last_failure_stage"] == "BUILD_RESUMABLE"
+    assert payload["inventory_worker"]["last_failure_fingerprint"] == "f" * 64
+    assert payload["inventory_worker"]["last_failure_volume_free_bytes"] == 123
+    assert payload["inventory_error"] == "QUARANTINE_COMPONENT_BINDING_INVALID"
+    assert "failure_reason" not in json.dumps(payload, sort_keys=True)
+    private_value = "PrivateInventoryFailure: /private/runtime/path"
+    inventory_state.update({
+        "error": private_value,
+        "worker_phase": private_value,
+        "worker_failure_code": private_value,
+        "last_worker_failure_code": private_value,
+    })
+    payload = namespace["api_data_sync_manifest"]()
+    serialized = json.dumps(payload, sort_keys=True)
+    assert payload["inventory_error"] is None
+    assert payload["inventory_worker"]["phase"] is None
+    assert payload["inventory_worker"]["failure_code"] is None
+    assert payload["inventory_worker"]["last_failure_code"] is None
+    assert private_value not in serialized
+
+
+def test_capacity_deferred_manifest_publishes_a_bounded_retry_to_clients():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "api_data_sync_manifest"
+    )
+
+    class FakeApp:
+        @staticmethod
+        def route(*_args, **_kwargs):
+            return lambda function: function
+
+    class FakeResponse(dict):
+        def __init__(self, payload):
+            super().__init__(payload)
+            self.headers = {}
+
+    inventory_state = {
+        "refreshing": False,
+        "active_refresh_nonce": None,
+        "refresh_started_at": None,
+        "refresh_completed_at": None,
+        "last_failure_at": "2026-09-14T00:00:00Z",
+        "error": "INVENTORY_CAPACITY_DEFERRED",
+        "worker_phase": "CAPACITY_DEFERRED",
+        "worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+        "last_worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+        "last_worker_failure_at": "2026-09-14T00:00:00Z",
+        "retry_after_seconds": 30,
+    }
+    namespace = {
+        "app": FakeApp(),
+        "request": SimpleNamespace(args={"identity_only": "1"}),
+        "jsonify": FakeResponse,
+        "_data_sync_manifest_identity_only": lambda _args: True,
+        "_data_sync_manifest_force_refresh": lambda _args: False,
+        "_data_sync_async_inventory": inventory_state,
+        "_data_sync_volume_root": lambda: Path("/volume"),
+        "shutil": SimpleNamespace(
+            disk_usage=lambda _path: SimpleNamespace(total=1024, used=512, free=512)
+        ),
+        "_read_data_sync_ack": lambda: {},
+        "_load_research_session_meta": lambda: {},
+        "state": {"fresh_collection_signal_ts": 0.0},
+        "_update_data_sync_identity_epoch_cache": lambda **_kwargs: None,
+        "active_tile_lifecycle_manifest": lambda: [],
+        "active_tile_registry_signature": lambda: "a" * 64,
+        "_runtime_git_rev": lambda: "b" * 40,
+        "_data_sync_optional_file_audit": lambda: [],
+        "_lifecycle_pipeline_runtime_status": lambda: {},
+        "_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES": frozenset({
+            "INVENTORY_CAPACITY_DEFERRED",
+            "INVENTORY_WORKER_FAILED",
+            "QUARANTINE_COMPONENT_BINDING_INVALID",
+        }),
+        "_data_sync_inventory_public_failure_code": lambda value: (
+            str(value) if str(value) in {
+                "INVENTORY_CAPACITY_DEFERRED",
+                "INVENTORY_WORKER_FAILED",
+                "QUARANTINE_COMPONENT_BINDING_INVALID",
+            } else None
+        ),
+        "_data_sync_inventory_public_worker_phase": lambda value: (
+            str(value) if str(value) in {
+                "CAPACITY_DEFERRED", "COMPLETE", "FINALIZE", "SCAN",
+                "VALIDATING_INDEX", "WAITING_RECEIPT_BOOTSTRAP",
+            } else None
+        ),
+        "_data_sync_inventory_failure_diagnostic": lambda: {
+            "stage": "PARENT_REFRESH",
+            "fingerprint": "0" * 64,
+            "volume_free_bytes": 123,
+        },
+        "utc_iso": lambda: "2026-09-14T00:00:01Z",
+        "EXECUTION_FIX_VERSION": "test",
+        "TILE_REGISTRY_SCHEMA": "test",
+        "TILE_ARCHITECTURE_VERSION": "test",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    response = namespace["api_data_sync_manifest"]()
+    assert response["inventory_build_status"] == "DEFERRED"
+    assert response["retry_after_seconds"] == 30
+    assert response.headers["Retry-After"] == "30"
+    assert response["inventory_worker"]["last_failure_stage"] == "PARENT_REFRESH"
+    assert response["inventory_worker"]["last_failure_fingerprint"] == "0" * 64
+    assert response["inventory_worker"]["last_failure_volume_free_bytes"] == 123
+    assert response["inventory_error"] == "INVENTORY_CAPACITY_DEFERRED"
 
 
 def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl():
@@ -4301,6 +4932,7 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
 
     state = {
         "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}},
         "generated_at": "completed-before-backoff", "expires_at": 0.0,
         "served_since_refresh": False, "refreshing": False, "error": None,
         "worker_phase": "COMPLETE", "worker_invocations": 7,
@@ -4308,12 +4940,15 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
     }
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
@@ -4340,7 +4975,7 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
     assert len(started) == 1
 
 
-def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeout():
+def test_completed_inventory_revalidates_for_new_force_refresh_nonce_after_client_timeout():
     tree = ast.parse(BOT)
     node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_request_async_inventory")
     started = []
@@ -4351,19 +4986,22 @@ def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeo
 
     state = {
         "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
-        "generation": None, "generation_id": "a" * 64,
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}}, "generation_id": "a" * 64,
         "generated_at": "completed-after-client-timeout", "expires_at": 0.0,
         "served_since_refresh": False, "refreshing": False,
         "completed_refresh_nonce": "b" * 32, "error": None,
     }
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,
@@ -4375,10 +5013,18 @@ def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeo
     result = namespace["_data_sync_request_async_inventory"](
         force_refresh=True, refresh_nonce="c" * 32,
     )
-    assert result["status"] == "CURRENT"
+    assert result["status"] == "STALE_REVALIDATING"
     assert result["generated_at"] == "completed-after-client-timeout"
-    assert state["served_since_refresh"] is True
-    assert started == []
+    assert result["refresh_nonce"] == "c" * 32
+    assert result["rows"] == [{"path": "sealed.json", "size": 7}]
+    assert state["served_since_refresh"] is False
+    assert len(started) == 1
+    joined = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="c" * 32,
+    )
+    assert joined["status"] == "STALE_REVALIDATING"
+    assert joined["refresh_nonce"] == "c" * 32
+    assert len(started) == 1
 
 
 def test_same_refresh_nonce_consumes_completed_generation_without_restarting_worker():
@@ -4398,7 +5044,7 @@ def test_same_refresh_nonce_consumes_completed_generation_without_restarting_wor
     state = {
         "status": "CURRENT",
         "rows": [{"path": "sealed.json", "size": 7}],
-        "generation": None,
+        "generation": {"bundle_identity": {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"}},
         "generation_id": "a" * 64,
         "generated_at": "completed",
         "expires_at": 0.0,
@@ -4410,12 +5056,15 @@ def test_same_refresh_nonce_consumes_completed_generation_without_restarting_wor
     namespace = {
         "time": time,
         "threading": SimpleNamespace(Thread=FakeThread),
-        # This isolated inventory fixture starts after reservation hydration.
+        # Model completed reservation hydration in this isolated function fixture.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_capacity_available": lambda: True,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
+        "_data_sync_memory_identity_payload": lambda: {"source_git_rev": "rev", "collection_epoch_id": "epoch", "tile_registry_signature": "tile"},
+        "_data_sync_inventory_generation": lambda *_args: {},
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda *args: None,

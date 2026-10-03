@@ -14,7 +14,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
+from research_v3_contract import (
+    LADDERS,
+    PARTIAL_TAKE_PROFIT_PLANS,
+    canonical_hash,
+    normalize_regime_observation,
+)
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
@@ -561,6 +566,16 @@ def _identity_text(value: Any) -> str | None:
     return text or None
 
 
+def _qualification_regime_label(row: Mapping[str, Any]) -> str:
+    """Return a scalar regime only when its causal timestamp is valid."""
+    observation = normalize_regime_observation(
+        row.get("regime"),
+        signal_ts=row.get("signal_ts"),
+        scalar_observed_ts=row.get("regime_observed_ts"),
+    )
+    return str(observation["value"]) if observation["qualification_eligible"] else "UNKNOWN"
+
+
 def _candidate_receipt_identity(
     receipt: Mapping[str, Any],
     source: Mapping[str, Any],
@@ -896,6 +911,15 @@ def load_candidate_inputs(
                 one_minute_rows.extend(_load_segment(root, ref))
         feature = opportunity.get("feature_snapshot_at_signal") or {}
         market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
+        raw_regime = feature.get("regime")
+        if raw_regime in (None, ""):
+            raw_regime = feature.get("market_regime")
+        if raw_regime in (None, ""):
+            raw_regime = market_context.get("regime_label")
+        regime_observation = normalize_regime_observation(
+            raw_regime,
+            signal_ts=opportunity.get("signal_ts"),
+        )
         fill_execution = next((
             row for row in executions
             if _number(row.get("fill_ts")) is not None and _number(row.get("fill_price")) is not None
@@ -931,12 +955,11 @@ def load_candidate_inputs(
                 if isinstance(ref, Mapping) and ref.get("sha256")
             ],
             "signal_ts": opportunity.get("signal_ts"),
-            "regime": (
-                feature.get("regime")
-                or feature.get("market_regime")
-                or market_context.get("regime_label")
-                or "UNKNOWN"
-            ),
+            "regime": regime_observation["value"] or "UNKNOWN",
+            "regime_observed_ts": regime_observation["observed_ts"],
+            "regime_observation_status": regime_observation["status"],
+            "regime_qualification_eligible": regime_observation["qualification_eligible"],
+            "regime_observation_reason": regime_observation["reason"],
             "direction": intent.get("executed_direction"),
             **atr_projection,
             "leverage": intent.get("leverage") or 100.0,
@@ -1293,6 +1316,10 @@ def evaluate_protection_screen(
                         "evidence_collected_at": source.get("evidence_collected_at"),
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
                         "regime": source.get("regime"),
+                        "regime_observed_ts": source.get("regime_observed_ts"),
+                        "regime_observation_status": source.get("regime_observation_status"),
+                        "regime_qualification_eligible": source.get("regime_qualification_eligible"),
+                        "regime_observation_reason": source.get("regime_observation_reason"),
                         "replay_path_basis": replay_path_basis,
                         "receipt_identity": _validation_receipt_identity(policy_receipt),
                         "policy_outcomes": {policy_id: outcome},
@@ -1414,8 +1441,13 @@ def evaluate_protection_screen(
             if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
         )
         regime_breakdown = {}
-        for regime in sorted({str(row.get("regime") or "UNKNOWN") for row in oos}):
-            regime_rows = [row for row in oos if str(row.get("regime") or "UNKNOWN") == regime]
+        qualification_regimes = {
+            id(row): _qualification_regime_label(row) for row in oos
+        }
+        for regime in sorted(set(qualification_regimes.values())):
+            regime_rows = [
+                row for row in oos if qualification_regimes[id(row)] == regime
+            ]
             regime_pnls = [
                 float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
                 for row in regime_rows

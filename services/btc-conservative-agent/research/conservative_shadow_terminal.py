@@ -38,6 +38,220 @@ def _finite(value: Any, *, positive: bool = False) -> float | None:
     return number
 
 
+def _quantity(value: Any, *, positive: bool = False) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        quantity = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not quantity.is_finite() or (positive and quantity <= 0):
+        return None
+    return quantity
+
+
+def _quantity_text(value: Decimal) -> str:
+    return "0" if value == 0 else format(value.normalize(), "f")
+
+
+def _derived_lifecycle_trace(
+    *, lifecycle_bindings: Mapping[str, Any] | None,
+    entry_receipt: Mapping[str, Any], entry_receipt_sha256: str,
+    fill_events: Sequence[tuple[float, float, float]],
+    exact_exit_quantities: Mapping[int, Decimal], replay: Mapping[str, Any],
+    normalized_rows: Sequence[Mapping[str, Any]], policy_spec: Mapping[str, Any],
+    policy_signature: str,
+    cost_treatment: Mapping[str, Any], coverage: Mapping[str, Any],
+    horizon: float, conditional: bool,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Derive one closed event ledger from the already-supported replay.
+
+    This does not reconstruct interleaved entry/protection behavior.  The
+    source path starts only after the last accepted entry fill, matching the
+    existing single-position terminal model.
+    """
+    blockers: list[str] = []
+    bindings = dict(lifecycle_bindings) if isinstance(lifecycle_bindings, Mapping) else {}
+    if bindings.get("schema") != "shadow_terminal_lifecycle_bindings_v1":
+        blockers.append("LIFECYCLE_BINDINGS_SCHEMA_INVALID")
+    required_text = (
+        "parent_opportunity_id", "parent_episode_id", "source_episode_id",
+        "baseline_id", "baseline_schedule_sha256", "terminal_schedule_sha256",
+        "terminal_policy_signature", "direction", "entry_receipt_sha256",
+    )
+    for field in required_text:
+        value = str(bindings.get(field) or "").strip()
+        if not value or value.upper() in {"UNKNOWN", "UNAVAILABLE", "NONE", "NULL", "MISSING"}:
+            blockers.append(f"LIFECYCLE_BINDING_MISSING:{field}")
+    direction = str(entry_receipt.get("direction") or "").upper()
+    if str(bindings.get("direction") or "").upper() != direction:
+        blockers.append("LIFECYCLE_DIRECTION_MISMATCH")
+    if bindings.get("entry_receipt_sha256") != entry_receipt_sha256:
+        blockers.append("LIFECYCLE_ENTRY_RECEIPT_SHA256_MISMATCH")
+    if bindings.get("baseline_schedule_sha256") != entry_receipt.get("schedule_sha256"):
+        blockers.append("LIFECYCLE_BASELINE_SCHEDULE_SHA256_MISMATCH")
+    if bindings.get("terminal_schedule_sha256") != _sha(policy_spec):
+        blockers.append("LIFECYCLE_TERMINAL_SCHEDULE_SHA256_MISMATCH")
+    if bindings.get("terminal_policy_signature") != policy_signature:
+        blockers.append("LIFECYCLE_TERMINAL_POLICY_SIGNATURE_MISMATCH")
+    for field in ("baseline_schedule_sha256", "terminal_schedule_sha256"):
+        digest = str(bindings.get(field) or "").lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            blockers.append(f"LIFECYCLE_BINDING_INVALID:{field}")
+
+    accepted_attempts = [
+        attempt for attempt in entry_receipt.get("quantity_attempts") or []
+        if isinstance(attempt, Mapping) and attempt.get("accepted") is True
+    ]
+    if len(accepted_attempts) != len(fill_events):
+        blockers.append("LIFECYCLE_ENTRY_EVENT_COUNT_MISMATCH")
+    entry_events = []
+    cumulative = Decimal(0)
+    for sequence, attempt in enumerate(sorted(
+        accepted_attempts,
+        key=lambda item: (
+            _finite(item.get("trigger_bucket_ts"))
+            if _finite(item.get("trigger_bucket_ts")) is not None else float("inf")
+        ),
+    ), start=1):
+        quantity = _quantity(attempt.get("rounded_executable_quantity"), positive=True)
+        timestamp = _finite(attempt.get("trigger_bucket_ts"))
+        price = _finite(attempt.get("execution_price"), positive=True)
+        if quantity is None or timestamp is None or int(timestamp) != timestamp or price is None:
+            blockers.append("LIFECYCLE_ENTRY_EVENT_INVALID")
+            continue
+        cumulative += quantity
+        entry_events.append({
+            "sequence": sequence,
+            "event_type": "ENTRY_FILL_ACCEPTED",
+            "timestamp": int(timestamp),
+            "price": price,
+            "filled_quantity": _quantity_text(quantity),
+            "cumulative_filled_quantity": _quantity_text(cumulative),
+        })
+    filled_quantity = _quantity(entry_receipt.get("filled_qty"), positive=True)
+    if filled_quantity is None or cumulative != filled_quantity:
+        blockers.append("LIFECYCLE_ENTRY_QUANTITY_NOT_RECONCILED")
+    requested_raw = entry_receipt.get("requested_qty")
+    requested_quantity = None if requested_raw is None else _quantity(requested_raw, positive=True)
+    if requested_raw is not None and requested_quantity is None:
+        blockers.append("LIFECYCLE_REQUESTED_ENTRY_QUANTITY_INVALID")
+    if requested_quantity is not None and filled_quantity is not None and requested_quantity < filled_quantity:
+        blockers.append("LIFECYCLE_REQUESTED_ENTRY_QUANTITY_BELOW_FILLED")
+    unfilled_quantity = (
+        requested_quantity - filled_quantity
+        if requested_quantity is not None and filled_quantity is not None else None
+    )
+
+    trace_rows = replay.get("trace")
+    if not isinstance(trace_rows, list) or not trace_rows:
+        blockers.append("LIFECYCLE_EXIT_TRACE_MISSING")
+        trace_rows = []
+    trace_timestamps = []
+    partial_exit_timestamps = set()
+    for trace in trace_rows:
+        if not isinstance(trace, Mapping):
+            blockers.append("LIFECYCLE_EXIT_TRACE_INVALID")
+            continue
+        timestamp = _finite(trace.get("ts"))
+        if timestamp is None or int(timestamp) != timestamp:
+            blockers.append("LIFECYCLE_EXIT_TRACE_TIMESTAMP_INVALID")
+            continue
+        trace_timestamps.append(int(timestamp))
+        partials = trace.get("partial_exits") or []
+        if not isinstance(partials, list) or not all(isinstance(item, Mapping) for item in partials):
+            blockers.append("LIFECYCLE_EXIT_TRACE_INVALID")
+        elif partials:
+            partial_exit_timestamps.add(int(timestamp))
+    if trace_timestamps != sorted(trace_timestamps) or len(trace_timestamps) != len(set(trace_timestamps)):
+        blockers.append("LIFECYCLE_EXIT_TRACE_NOT_STRICTLY_ORDERED")
+
+    exit_prices = {int(row["ts"]): float(row["price"]) for row in normalized_rows}
+    exit_events = []
+    remaining = filled_quantity or Decimal(0)
+    terminal_ts = int(float(replay.get("exit_ts"))) if _finite(replay.get("exit_ts")) is not None else None
+    for sequence, (timestamp, quantity) in enumerate(sorted(exact_exit_quantities.items()), start=1):
+        if not isinstance(quantity, Decimal) or not quantity.is_finite() or quantity <= 0:
+            blockers.append("LIFECYCLE_EXIT_QUANTITY_INVALID")
+            continue
+        if timestamp not in exit_prices:
+            blockers.append("LIFECYCLE_EXIT_PRICE_MISSING")
+            continue
+        remaining -= quantity
+        if remaining < 0:
+            blockers.append("LIFECYCLE_EXIT_EXCEEDS_POSITION")
+        exit_events.append({
+            "sequence": sequence,
+            "event_type": (
+                "PARTIAL_AND_TERMINAL_EXIT_FILL"
+                if timestamp in partial_exit_timestamps and timestamp == terminal_ts else
+                "PARTIAL_EXIT_FILL" if timestamp in partial_exit_timestamps else
+                "TERMINAL_EXIT_FILL"
+            ),
+            "timestamp": timestamp,
+            "price": exit_prices[timestamp],
+            "filled_quantity": _quantity_text(quantity),
+            "remaining_quantity": _quantity_text(remaining),
+            "terminal_reason": replay.get("exit_reason") if timestamp == terminal_ts else None,
+        })
+    if filled_quantity is None or sum(exact_exit_quantities.values(), Decimal(0)) != filled_quantity:
+        blockers.append("LIFECYCLE_EXIT_QUANTITY_NOT_RECONCILED")
+    if remaining != 0:
+        blockers.append("LIFECYCLE_FINAL_RESIDUAL_NOT_ZERO")
+    if not exit_events or terminal_ts is None or exit_events[-1]["timestamp"] != terminal_ts:
+        blockers.append("LIFECYCLE_TERMINAL_EXIT_EVENT_MISSING")
+    if blockers:
+        return None, blockers
+
+    body = {
+        "schema": "derived_shadow_terminal_lifecycle_v1",
+        "status": "COMPLETE",
+        "authority": (
+            "DECLARED_SIMULATION_CONDITIONAL" if conditional else
+            "DECLARED_SIMULATION" if cost_treatment.get("economics_evidence_basis") == "DECLARED_SIMULATION" else
+            "SIMULATED_CONSERVATIVE_BBO_DEPTH"
+        ),
+        "scope": "ENTRY_PLUS_SINGLE_POSITION_EXIT_AFTER_LAST_ACCEPTED_ENTRY_FILL",
+        "scope_limitations": [
+            "PATH_STARTS_AFTER_LAST_ACCEPTED_ENTRY_FILL",
+            "PROTECTIVE_EXITS_INTERLEAVED_WITH_STAGGERED_ENTRY_FILLS_NOT_MODELED",
+            "ONE_BASELINE_FILLED_POSITION",
+        ],
+        "bindings": bindings,
+        "bindings_sha256": _sha(bindings),
+        "entry": {
+            "classification": str(entry_receipt.get("final_classification") or "").upper(),
+            "requested_quantity": _quantity_text(requested_quantity) if requested_quantity is not None else None,
+            "filled_quantity": _quantity_text(filled_quantity),
+            "unfilled_quantity": _quantity_text(unfilled_quantity) if unfilled_quantity is not None else None,
+            "requested_quantity_coverage": (
+                "PRESENT" if requested_quantity is not None else "UNAVAILABLE_IN_SOURCE_RECEIPT"
+            ),
+            "events": entry_events,
+        },
+        "exit": {
+            "events": exit_events,
+            "final_residual_quantity": "0",
+            "terminal_reason": replay.get("exit_reason"),
+        },
+        "cost_treatment": dict(cost_treatment),
+        "maturity": {
+            "status": "TERMINAL_WITH_COMPLETE_REQUIRED_HORIZON_EVIDENCE",
+            "required_horizon_end_ts": horizon,
+            "terminal_exit_ts": terminal_ts,
+        },
+        "coverage": {
+            "path_start_basis": coverage.get("path_start_basis"),
+            "path_end_basis": coverage.get("path_end_basis"),
+            "sampling_interval_sec": coverage.get("sampling_interval_sec"),
+            "first_sample_offset_sec": coverage.get("first_sample_offset_sec"),
+            "required_horizon_complete": True,
+        },
+    }
+    body["lifecycle_sha256"] = _sha(body)
+    return body, []
+
+
 def _signed(mapping: Any, *, schema: str, label: str) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(mapping, Mapping):
         return {}, [f"{label}_MISSING"]
@@ -79,6 +293,7 @@ def evaluate_shadow_terminal(
     coverage_policy: Mapping[str, Any],
     source_segment_receipts: Sequence[Mapping[str, Any]],
     source_segment_payloads: Sequence[bytes],
+    lifecycle_bindings: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Replay one signed policy on a hash-bound, complete executable path."""
     return _evaluate_shadow_terminal(**locals(), conditional=False)
@@ -86,6 +301,7 @@ def evaluate_shadow_terminal(
 
 def evaluate_conditional_shadow_terminal(**kwargs) -> dict[str, Any]:
     """Explicit venue-acceptance-conditional replay, never execution qualification."""
+    kwargs.setdefault("lifecycle_bindings", None)
     body = _evaluate_shadow_terminal(**kwargs, conditional=True)
     body.pop("receipt_sha256", None)
     body.update(schema="generation_bound_conditional_shadow_terminal_v1",
@@ -104,7 +320,7 @@ def evaluate_conditional_shadow_terminal(**kwargs) -> dict[str, Any]:
 def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256,
         future_path_rows, future_path_sha256, required_horizon_end_ts, policy_spec,
         policy_signature, position_context, cost_model, coverage_policy,
-        source_segment_receipts, source_segment_payloads, conditional):
+        source_segment_receipts, source_segment_payloads, lifecycle_bindings, conditional):
     blockers: list[str] = []
     normalized_generation = {}
     for field in GENERATION_FIELDS:
@@ -396,14 +612,14 @@ def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256
         for event in trace.get("partial_exits") or []:
             depth_required[int(float(trace["ts"]))] += float(event["fraction"]) * filled_qty
     depth_required[int(float(replay["exit_ts"]))] += float(replay["remaining_fraction_at_terminal"]) * filled_qty
-    exact_exit_quantities = None
-    if declared_rates:
-        from research.declared_shadow_model import exact_replay_exit_quantities
-        try:
-            exact_exit_quantities = exact_replay_exit_quantities(replay, policy_spec, entry_receipt["filled_qty"])
-        except (ValueError, KeyError, InvalidOperation) as exc:
-            return _unknown(normalized_generation, [str(exc)])
-        depth_required = {ts: float(qty) for ts, qty in exact_exit_quantities.items()}
+    from research.declared_shadow_model import exact_replay_exit_quantities
+    try:
+        exact_exit_quantities = exact_replay_exit_quantities(
+            replay, policy_spec, entry_receipt["filled_qty"]
+        )
+    except (ValueError, KeyError, InvalidOperation) as exc:
+        return _unknown(normalized_generation, [str(exc)])
+    depth_required = {ts: float(qty) for ts, qty in exact_exit_quantities.items()}
     visible = {int(row["ts"]): float(row["exit_visible_qty"]) for row in normalized_rows}
     if any(visible.get(ts, -1.0) + 1e-12 < qty for ts, qty in depth_required.items()):
         return _unknown(normalized_generation, ["EXIT_VISIBLE_DEPTH_INSUFFICIENT"],
@@ -428,6 +644,42 @@ def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256
                        ("trading_fees_usd", "funding_usd", "latency_cost_usd")}
     total_cost = sum(float(value) for value in cost_fields.values())
     gross = float(replay["gross_pnl_usd"])
+    cost_treatment = {
+        "economics_evidence_basis": declared_economics.get("economics_evidence_basis") or (
+            "DECLARED_SIMULATION_CONDITIONAL" if conditional else "SIGNED_INPUT_COST_MODEL"
+        ),
+        "trading_fees_usd": cost_fields["trading_fees_usd"],
+        "funding_usd": cost_fields["funding_usd"],
+        "latency_cost_usd": cost_fields["latency_cost_usd"],
+        "spread_slippage_usd": 0.0,
+        "spread_slippage_basis": "EMBEDDED_IN_ENTRY_AND_EXECUTABLE_EXIT_PRICES",
+        "total_cost_usd": round(total_cost, 8),
+    }
+    lifecycle_trace, lifecycle_blockers = _derived_lifecycle_trace(
+        lifecycle_bindings=lifecycle_bindings,
+        entry_receipt=entry_receipt,
+        entry_receipt_sha256=entry_receipt_sha256,
+        fill_events=fill_events,
+        exact_exit_quantities=exact_exit_quantities,
+        replay=replay,
+        normalized_rows=normalized_rows,
+        policy_spec=policy_spec,
+        policy_signature=policy_signature,
+        cost_treatment=cost_treatment,
+        coverage=coverage,
+        horizon=horizon,
+        conditional=conditional,
+    )
+    if lifecycle_blockers:
+        return _unknown(
+            normalized_generation, lifecycle_blockers,
+            entry_receipt_sha256=entry_receipt_sha256,
+            future_path_sha256=future_path_sha256,
+            normalized_future_path_sha256=_sha(normalized_rows),
+            source_segment_hashes=sorted(set(segment_hashes)),
+            policy_signature=policy_signature,
+            lifecycle_trace_status="UNKNOWN",
+        )
     body = {
         "schema": SCHEMA, "status": "COMPLETE", "generation": normalized_generation,
         "blockers": [], "profitability_supported": True, "ranking_eligible": False,
@@ -466,6 +718,8 @@ def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256
         "exit_reason": replay["exit_reason"], "partial_exit_count": replay["partial_exit_count"],
         "mfe_pct": replay["mfe_pct"], "mae_pct": replay["mae_pct"],
         "required_horizon_end_ts": horizon,
+        "lifecycle_trace": lifecycle_trace,
+        "lifecycle_trace_sha256": lifecycle_trace["lifecycle_sha256"],
         **declared_economics,
     }
     body["receipt_sha256"] = _sha(body)

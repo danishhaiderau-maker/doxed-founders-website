@@ -421,6 +421,38 @@ export function isCompleteStoredExchangeOrderAuditFlat(audit) {
   );
 }
 
+export async function classifyFlatAuditFailure(response) {
+  const reader = response.body?.getReader?.();
+  if (!reader) return 'RESPONSE_UNAVAILABLE';
+  try {
+    const chunks = [];
+    let size = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 4096) return 'RESPONSE_TOO_LARGE';
+      chunks.push(Buffer.from(value));
+    }
+    const message = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.message;
+    const known = new Map([
+      ['Flat audit requires a paused, disarmed relay', 'RELAY_NOT_PAUSED_DISARMED'],
+      ['Flat-audit refresh requires a paused, disarmed relay', 'RELAY_NOT_PAUSED_DISARMED'],
+      ['Relay or ledger state changed during flat audit; no audit published', 'AUDIT_STATE_CHANGED'],
+      ['userId query param is required', 'USER_SCOPE_MISSING'],
+      ['confirmation must equal REFRESH_PAUSED_FLAT_AUDIT', 'CONFIRMATION_INVALID'],
+    ]);
+    for (const code of CREDENTIAL_RESOLUTION_FAILURE_CODES) {
+      known.set(`Bitfinex credentials unavailable (${code})`, `CREDENTIAL_${code}`);
+    }
+    return known.get(message) ?? 'UNCLASSIFIED_RESPONSE';
+  } catch {
+    return 'UNREADABLE_RESPONSE';
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
 export async function refreshPausedRelayAudit(
   apiUrl,
   adminSecret,
@@ -451,7 +483,8 @@ export async function refreshPausedRelayAudit(
     signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) {
-    throw new Error(`authenticated platform audit refresh failed HTTP ${response.status}`);
+    const failureCode = await classifyFlatAuditFailure(response);
+    throw new Error(`authenticated platform audit refresh failed HTTP ${response.status} code=${failureCode}`);
   }
 }
 

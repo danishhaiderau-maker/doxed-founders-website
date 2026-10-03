@@ -5,6 +5,18 @@
 app = "doxed-btc-bot"
 primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested syd host (mem_overcommit)
 
+# Cooperative receipt-bootstrap throughput (capped in research_v3_store.py).
+# Raised temporarily so identity-rebind catch-up (lifecycle ~33MB) finishes in
+# tens of minutes instead of hours without changing trading gates.
+[env]
+  V3_BOOTSTRAP_RECORDS_PER_STEP = "512"
+  LIFECYCLE_WALL_TIMEOUT_SEC = "300"
+  LIFECYCLE_CPU_LIMIT_SEC = "240"
+  # Faster inventory SCAN on the shared Fly volume without invalidating the
+  # durable checkpoint fingerprint (slice/file budget are outside stable identity).
+  DATA_SYNC_INVENTORY_SLICE_SECONDS = "60"
+  DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"
+
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]
   internal_port = 7002
