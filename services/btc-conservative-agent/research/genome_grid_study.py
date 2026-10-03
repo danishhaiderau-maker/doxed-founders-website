@@ -69,6 +69,14 @@ HOLDOUT_TRAIN_FRACTION = 0.7
 MIN_OOS_FILLS_FOR_RANK = 10
 MIN_TRAIN_FILLS_FOR_RANK = 30
 DUPLICATE_SIGNAL_SEC = 90
+TWIN_SIGNAL_SEC = 5.0
+GENOME_COHORT = "AI_DECISION"
+AI_EPISODE_CLASSES = ("AI_COMMITTED", "AI_COMMITTED_SCORE_CONFLICT", "AI_NO_TRADE_SCORE_LED", "AI_SIGNAL_REPLAY")
+XVENUE_EPISODE_CLASSES = ("XVENUE_LEAD", "XVENUE_PREMIUM")
+CLUSTER_SEC = 3600
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 20261003
+WALK_FORWARD_MIN_CLASS_EPISODES = 60
 HEADLINE_WORLD = fm.FILL_MODEL_VERSION
 SHADOW_WORLD = "OPTIMISTIC_TOUCH_SHADOW"
 WORLDS = (HEADLINE_WORLD, SHADOW_WORLD)
@@ -255,11 +263,49 @@ def tape_atr14_pct(tape: Tape, ts: float, bar_sec: int = 180, bars: int = 14) ->
     return float(np.mean(tr) / close[-1] * 100.0) if close[-1] else None
 
 
-def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """One episode per collected signal: every v3 opportunity plus every signal_replay start."""
-    led = mirror / "v3" / "ledgers"
+def decision_identity(raw: Any) -> tuple[str, bool]:
+    """Canonical decision id of a ledger/replay id and whether it is a reversal-study derivative.
+
+    ``rev-scan-x`` (reversal study, side inverted) and ``lane-decision:<lane>:scan-x`` belong to the AI call
+    ``scan-x``; ids of the per-second cross-venue evaluator are ``xvp-*`` / ``xvl-*``.
+    """
+    s = str(raw or "").strip()
+    if s.startswith("lane-decision:"):
+        s = s.rsplit(":", 1)[-1]
+    rev = s.startswith("rev-")
+    return (s[4:] if rev else s), rev
+
+
+def xvenue_class(decision_id: str, lanes: Iterable[str] = ()) -> str | None:
     import combo_pathway_config as registry  # noqa: PLC0415
+    if decision_id.startswith("xvp-"):
+        return "XVENUE_PREMIUM"
+    if decision_id.startswith("xvl-"):
+        return "XVENUE_LEAD"
+    for lane in lanes:
+        name = str(lane or "").upper()
+        if registry.is_cross_venue_clock_lane(name) or "XVENUE" in name:
+            return "XVENUE_PREMIUM" if "PREMIUM" in name else "XVENUE_LEAD"
+    return None
+
+
+def _near(sorted_ts: list[float], ts: float, window: float) -> bool:
+    k = bisect.bisect_left(sorted_ts, ts - window)
+    return k < len(sorted_ts) and sorted_ts[k] <= ts + window
+
+
+def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """One episode per unique AI decision, classified; cross-venue triggers and duplicate rows never enter.
+
+    v3 opportunities are keyed by ``shared_ai_call_id``. Triggers of the per-second cross-venue evaluator
+    (``xvp-*`` / ``xvl-*``, Tiles 3/4) form a separate cohort even when the row also carries CONTROL_V1, and
+    identity-less CONTROL_V1 rows (reversal-study ``rev-scan-*`` twins of an AI call, often side-inverted) are
+    duplicates, not decisions. ``signal_replay`` starts add AI calls the v3 ledger lacks; reversal-study starts
+    are derivatives of their call. Every dropped row is counted under ``excluded_*_by_reason``.
+    """
+    led = mirror / "v3" / "ledgers"
     lanes_by_episode: dict[str, Counter] = defaultdict(Counter)
+    event_ids: dict[str, set[str]] = defaultdict(set)
     scores: dict[str, tuple[float, float]] = {}
     outcomes: dict[str, Counter] = defaultdict(Counter)
     for row in _read_jsonl(led / "decision.jsonl"):
@@ -267,14 +313,27 @@ def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[
         if not ep:
             continue
         lanes_by_episode[ep][str(row.get("research_lane") or "UNKNOWN")] += 1
+        if row.get("event_id"):
+            event_ids[ep].add(str(row["event_id"]))
         ls, ss = _num(row.get("long_score")), _num(row.get("short_score"))
         if ls is not None and ss is not None:
             scores[ep] = (ls, ss)
         outcomes[ep][str(row.get("outcome_state") or "UNKNOWN")] += 1
+    opportunities = list(_read_jsonl(led / "opportunity.jsonl"))
+
+    def call_of(row: Mapping[str, Any]) -> str:
+        call = str(row.get("shared_ai_call_id") or "")
+        return "" if call.upper() in ("", "UNKNOWN", "NONE") else decision_identity(call)[0]
+
+    v3_ai_ids = {c for c in map(call_of, opportunities) if c and not xvenue_class(c)}
     episodes: list[dict[str, Any]] = []
     stats: Counter = Counter()
+    excluded_v3: Counter = Counter()
+    excluded_replay: Counter = Counter()
+    xvenue_ids: dict[str, set[str]] = defaultdict(set)
+    kept_ids: set[str] = set()
     seen: set[str] = set()
-    for row in _read_jsonl(led / "opportunity.jsonl"):
+    for row in opportunities:
         ep = str(row.get("episode_id") or "")
         ts, price = _num(row.get("signal_ts")), _num(row.get("signal_price"))
         if not ep or ep in seen or ts is None:
@@ -282,27 +341,46 @@ def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[
             continue
         seen.add(ep)
         lanes = [lane for lane in lanes_by_episode[ep] if lane != "UNKNOWN"]
-        if lanes and all(registry.is_cross_venue_clock_lane(lane) for lane in lanes):
-            # Per-second cross-venue signals with 60 s exits are a different clock, not an AI decision episode.
-            stats["opportunity_cross_venue_clock_excluded"] += 1
+        call = call_of(row)
+        ids = {decision_identity(e) for e in event_ids[ep]}
+        xv = xvenue_class(call, lanes) or next((c for c in (xvenue_class(i) for i, _ in ids) if c), None)
+        if xv:
+            # Per-second cross-venue triggers are a different clock and signal source, never an AI decision.
+            xvenue_ids[xv].add(call or ep)
+            excluded_v3[xv] += 1
+            continue
+        if not call:
+            bases = {i for i, _ in ids}
+            if bases & v3_ai_ids:
+                excluded_v3["DUPLICATE_OF_AI_DECISION"] += 1
+            elif ids and all(rev for _, rev in ids):
+                excluded_v3["REVERSAL_STUDY_ORPHAN"] += 1
+            else:
+                excluded_v3["IDENTITY_INCOMPLETE_NO_SHARED_AI_CALL_ID"] += 1
+            continue
+        if call in kept_ids:
+            excluded_v3["DUPLICATE_OF_AI_DECISION"] += 1
             continue
         price_source = "SIGNAL_PRICE"
         if not price:
             i = int(ts) - tape.t0
             mid = (tape.bid[i] + tape.ask[i]) / 2 if 0 <= i < len(tape.bid) else float("nan")
             if mid != mid:
-                stats["opportunity_no_signal_price"] += 1
+                excluded_v3["NO_SIGNAL_PRICE"] += 1
                 continue
             price, price_source = float(mid), "TAPE_MID_AT_SIGNAL"
             stats["opportunity_price_from_tape_mid"] += 1
         raw = str(row.get("raw_direction") or "")
-        direction, side_basis = raw, "AI_RAW_DIRECTION"
-        if raw not in ("LONG", "SHORT"):
-            ls, ss = scores.get(ep, (None, None))
-            if ls is None or ls == ss:
-                stats["opportunity_no_side"] += 1
-                continue
-            direction, side_basis = ("LONG" if ls > ss else "SHORT"), "SCORE_LED_SIDE"
+        ls, ss = scores.get(ep, (None, None))
+        score_side = None if ls is None or ls == ss else ("LONG" if ls > ss else "SHORT")
+        if raw in ("LONG", "SHORT"):
+            direction, side_basis = raw, "AI_RAW_DIRECTION"
+            klass = "AI_COMMITTED_SCORE_CONFLICT" if score_side and score_side != raw else "AI_COMMITTED"
+        elif score_side:
+            direction, side_basis, klass = score_side, "SCORE_LED_SIDE", "AI_NO_TRADE_SCORE_LED"
+        else:
+            excluded_v3["NO_SIDE"] += 1
+            continue
         feat = row.get("feature_snapshot_at_signal") or {}
         atr, atr_source = _num(feat.get("atr14_pct_3m")), "FEATURE_ATR14_PCT_3M"
         if not atr or atr <= 0:
@@ -310,8 +388,10 @@ def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[
         regime = feat.get("regime_label") or feat.get("regime")
         if isinstance(regime, Mapping):
             regime = regime.get("value")
+        kept_ids.add(call)
         episodes.append({
-            "episode_id": ep, "signal_ts": ts, "signal_price": price, "direction": direction,
+            "episode_id": ep, "decision_id": call, "episode_class": klass, "cohort": GENOME_COHORT,
+            "signal_ts": ts, "signal_price": price, "direction": direction,
             "side_basis": side_basis, "source": "V3_OPPORTUNITY", "atr14_pct": atr, "atr_source": atr_source,
             "price_source": price_source,
             "regime": str(regime or "UNKNOWN"), "lanes": sorted(lanes_by_episode[ep]),
@@ -319,7 +399,17 @@ def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[
         })
         stats[f"side_{side_basis}"] += 1
         stats[f"atr_{atr_source if atr else 'MISSING'}"] += 1
-    v3_ts = {d: sorted(e["signal_ts"] for e in episodes if e["direction"] == d) for d in ("LONG", "SHORT")}
+    # Two v3 rows of one call less than TWIN_SIGNAL_SEC apart cannot be separate 3-minute AI decisions.
+    episodes.sort(key=lambda e: (e["signal_ts"], e["episode_id"]))
+    deduped: list[dict[str, Any]] = []
+    for e in episodes:
+        if deduped and e["signal_ts"] - deduped[-1]["signal_ts"] < TWIN_SIGNAL_SEC:
+            excluded_v3["DUPLICATE_TWIN_SIGNAL"] += 1
+            continue
+        deduped.append(e)
+    episodes = deduped
+    ai_ts = sorted(e["signal_ts"] for e in episodes)
+    starts: list[tuple[bool, float, str, float, str, str]] = []
     seen_sr: set[str] = set()
     for path in _rotations(mirror / "signal_replay.jsonl"):
         for row in _read_jsonl(path):
@@ -331,25 +421,79 @@ def load_episodes(mirror: Path, tape: Tape) -> tuple[list[dict[str, Any]], dict[
             if ts is None or not price or row.get("direction") not in ("LONG", "SHORT"):
                 stats["signal_replay_skipped"] += 1
                 continue
-            lane = str(row.get("lane") or "unknown")
-            near = v3_ts[row["direction"]]
-            k = bisect.bisect_left(near, ts - DUPLICATE_SIGNAL_SEC)
-            if k < len(near) and near[k] <= ts + DUPLICATE_SIGNAL_SEC:
-                # The same AI call already appears as a v3 opportunity; count it once.
-                stats["signal_replay_duplicate_of_v3"] += 1
-                continue
-            episodes.append({
-                "episode_id": f"signal_replay:{tid}", "signal_ts": ts, "signal_price": price,
-                "direction": row["direction"], "side_basis": "SIGNAL_REPLAY_DIRECTION",
-                "source": f"SIGNAL_REPLAY_{lane.upper()}", "atr14_pct": tape_atr14_pct(tape, ts),
-                "atr_source": "TAPE_ATR14_3M", "regime": "UNKNOWN", "lanes": [lane], "decision_outcomes": {},
-            })
-            stats[f"signal_replay_{lane}"] += 1
+            did, rev = decision_identity(tid)
+            starts.append((rev, ts, did, price, row["direction"], str(row.get("lane") or "unknown")))
+    starts.sort()  # originals before reversal-study derivatives, then chronological
+    for rev, ts, did, price, direction, lane in starts:
+        xv = xvenue_class(did)
+        if xv:
+            xvenue_ids[xv].add(did)
+            excluded_replay[xv] += 1
+            continue
+        if did in kept_ids or did in v3_ai_ids or _near(ai_ts, ts, DUPLICATE_SIGNAL_SEC):
+            # The same AI decision is already an episode (any side: reversal starts invert it); count it once.
+            excluded_replay["DUPLICATE_OF_AI_DECISION"] += 1
+            continue
+        if rev:
+            excluded_replay["REVERSAL_STUDY_ORPHAN"] += 1
+            continue
+        kept_ids.add(did)
+        bisect.insort(ai_ts, ts)
+        episodes.append({
+            "episode_id": f"signal_replay:{did}", "decision_id": did, "episode_class": "AI_SIGNAL_REPLAY",
+            "cohort": GENOME_COHORT, "signal_ts": ts, "signal_price": price,
+            "direction": direction, "side_basis": "SIGNAL_REPLAY_DIRECTION",
+            "source": f"SIGNAL_REPLAY_{lane.upper()}", "atr14_pct": tape_atr14_pct(tape, ts),
+            "atr_source": "TAPE_ATR14_3M", "regime": "UNKNOWN", "lanes": [lane], "decision_outcomes": {},
+        })
+        stats[f"signal_replay_{lane}"] += 1
     episodes.sort(key=lambda e: (e["signal_ts"], e["episode_id"]))
-    return episodes, dict(stats)
+    out: dict[str, Any] = dict(stats)
+    out["admitted_by_class"] = dict(Counter(e["episode_class"] for e in episodes))
+    out["excluded_v3_by_reason"] = dict(excluded_v3)
+    out["excluded_signal_replay_by_reason"] = dict(excluded_replay)
+    out["v3_opportunity_rows"] = len(opportunities)
+    out["v3_opportunities_admitted"] = sum(1 for e in episodes if e["source"] == "V3_OPPORTUNITY")
+    out["xvenue_unique_triggers"] = {k: len(v) for k, v in sorted(xvenue_ids.items())}
+    return episodes, out
+
+
+def episode_integrity(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The AI genome cohort must hold exactly one episode per AI decision and only AI episode classes."""
+    ids = Counter(e.get("decision_id") for e in episodes)
+    eps = Counter(e.get("episode_id") for e in episodes)
+    classes = Counter(e.get("episode_class") for e in episodes)
+    cohorts = Counter(e.get("cohort") for e in episodes)
+    ts = sorted(float(e["signal_ts"]) for e in episodes)
+    dup_ids = sorted(str(i) for i, n in ids.items() if i and n > 1)
+    missing = ids.get(None, 0) + ids.get("", 0)
+    foreign = {str(c): n for c, n in classes.items() if c not in AI_EPISODE_CLASSES}
+    twins = sum(1 for a, b in zip(ts, ts[1:]) if b - a < TWIN_SIGNAL_SEC)
+    violations = []
+    if dup_ids:
+        violations.append(f"DUPLICATE_DECISION_ID x{len(dup_ids)}: {dup_ids[:5]}")
+    if missing:
+        violations.append(f"MISSING_DECISION_ID x{missing}")
+    if any(n > 1 for n in eps.values()):
+        violations.append("DUPLICATE_EPISODE_ID")
+    if foreign:
+        violations.append(f"MIXED_EPISODE_CLASSES {foreign} in the {GENOME_COHORT} cohort")
+    if set(cohorts) - {GENOME_COHORT}:
+        violations.append(f"MIXED_COHORTS {dict(cohorts)}")
+    if twins:
+        violations.append(f"TWIN_SIGNALS x{twins} within {TWIN_SIGNAL_SEC:g}s")
+    return {"status": "FAIL" if violations else "PASS", "cohort": GENOME_COHORT, "episodes": len(episodes),
+            "unique_decision_ids": len([i for i in ids if i]), "duplicate_decision_ids": len(dup_ids),
+            "missing_decision_ids": missing, "twin_signals": twins, "twin_window_sec": TWIN_SIGNAL_SEC,
+            "classes": dict(classes), "allowed_classes": list(AI_EPISODE_CLASSES), "foreign_classes": foreign,
+            "violations": violations}
 
 
 # ----------------------------------------------------------- policy grid
+
+class EpisodeIntegrityError(RuntimeError):
+    """The AI-decision cohort holds duplicate decisions or non-AI classes; the study refuses to publish."""
+
 
 def registry_protections() -> dict[str, dict[str, Any]]:
     """Exits of the active AI-clock tiles, read from the canonical registry (no second tile list).
@@ -902,7 +1046,8 @@ def _stats(pnl: list[float], signals: int, r: list[float] | None = None,
 
 
 def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], entries: list[dict[str, Any]],
-              protections: dict[str, dict[str, Any]], cut_ts: float) -> list[dict[str, Any]]:
+              protections: dict[str, dict[str, Any]], cut_ts: float,
+              matrix_out: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     done = sorted((r for r in results if r["status"] == "EVALUATED"), key=lambda r: episodes[r["idx"]]["signal_ts"])
     keys = row_keys(entries, protections)
     if not done:
@@ -911,6 +1056,15 @@ def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], ent
     codes = np.stack([r["code"] for r in done])
     assert values.shape[1] == len(keys), (values.shape, len(keys))
     is_oos = np.array([episodes[r["idx"]]["signal_ts"] >= cut_ts for r in done])
+    classes = np.array([str(episodes[r["idx"]].get("episode_class") or "UNCLASSIFIED") for r in done])
+    filled_all = codes >= 0
+    pnl0 = np.where(filled_all, values[:, :, 0], 0.0)
+    class_totals = {c: (int((classes == c).sum()), filled_all[classes == c].sum(axis=0), pnl0[classes == c].sum(axis=0))
+                    for c in sorted(set(classes.tolist()))}
+    del pnl0
+    if matrix_out is not None:
+        matrix_out.update(values=values, codes=codes, classes=classes,
+                          ts=np.array([episodes[r["idx"]]["signal_ts"] for r in done], dtype=np.float64))
     n_oos = int(is_oos.sum())
     n_train = len(done) - n_oos
     rows = []
@@ -961,9 +1115,91 @@ def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], ent
             "train": _stats(a["train"], a["sig_train"]),
             "oos": _stats(a["oos"], a["sig_oos"], a["oos_r"]),
             "exit_reasons": dict(Counter(a["exit"]).most_common(8)),
+            "by_episode_class": {c: {"signals": s, "fills": int(f[k]), "net_pnl_usd": round(float(p[k]), 6),
+                                     "ev_per_fill_usd": round(float(p[k]) / int(f[k]), 6) if f[k] else None}
+                                 for c, (s, f, p) in class_totals.items()},
         })
         rows[-1]["holdout_verdict"] = holdout_verdict(rows[-1])
     return rows
+
+
+def _bp(usd: float | None) -> float | None:
+    return None if usd is None else round(usd / (MARGIN_USD * LEVERAGE) * 1e4, 2)
+
+
+def cluster_bootstrap(pnl: Iterable[float], ts: Iterable[float], *, cluster_sec: int = CLUSTER_SEC,
+                      resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
+    """EV-per-fill 95% CI from a block bootstrap over UTC-hour clusters, and the implied effective independent n.
+
+    Fills within the same hour share overlapping price paths; resampling whole hours keeps that dependence.
+    ``n_eff = n * var_iid(mean) / var_cluster_bootstrap(mean)``, clipped to [1, n].
+    """
+    p = np.asarray(list(pnl), dtype=np.float64)
+    t = np.asarray(list(ts), dtype=np.float64)
+    n = int(len(p))
+    out: dict[str, Any] = {"method": "1H_CLUSTER_BLOCK_BOOTSTRAP_95", "cluster_sec": cluster_sec, "fills": n,
+                           "resamples": resamples}
+    if n < 2:
+        return out | {"clusters": n, "ev_ci95_usd": [None, None], "ev_ci95_bp": [None, None], "n_eff": float(n),
+                      "ci_excludes_zero": False}
+    _, inv = np.unique(np.floor(t / cluster_sec).astype(np.int64), return_inverse=True)
+    sums, counts = np.bincount(inv, weights=p), np.bincount(inv).astype(np.float64)
+    c = len(sums)
+    draw = np.random.default_rng(seed).integers(0, c, size=(resamples, c))
+    means = sums[draw].sum(axis=1) / counts[draw].sum(axis=1)
+    lo, hi = (float(x) for x in np.percentile(means, [2.5, 97.5]))
+    var_boot, var_iid = float(means.var(ddof=1)), float(p.var(ddof=1)) / n
+    n_eff = float(n) if var_boot <= 0 else min(float(n), max(1.0, n * var_iid / var_boot))
+    return out | {"clusters": c, "ev_ci95_usd": [round(lo, 6), round(hi, 6)], "ev_ci95_bp": [_bp(lo), _bp(hi)],
+                  "n_eff": round(n_eff, 1), "ci_excludes_zero": bool(lo > 0 or hi < 0)}
+
+
+def row_cluster_stats(matrix: Mapping[str, Any], k: int, cut_ts: float) -> dict[str, Any]:
+    filled = matrix["codes"][:, k] >= 0
+    pnl, ts = matrix["values"][filled, k, 0], matrix["ts"][filled]
+    oos = ts >= cut_ts
+    return {"all": cluster_bootstrap(pnl, ts), "oos": cluster_bootstrap(pnl[oos], ts[oos])}
+
+
+def walk_forward_by_day(matrix: Mapping[str, Any], policy_ids: list[str], key_mask: np.ndarray, *,
+                        episode_mask: np.ndarray | None = None,
+                        min_train_fills: int = MIN_TRAIN_FILLS_FOR_RANK) -> dict[str, Any]:
+    """Walk-forward by UTC day: pick the best train-EV policy on all prior days, score it on the next day only."""
+    ts = matrix["ts"]
+    em = np.ones(len(ts), dtype=bool) if episode_mask is None else np.asarray(episode_mask, dtype=bool)
+    cols = np.flatnonzero(key_mask)
+    days = np.floor(ts / 86400).astype(np.int64)
+    filled = matrix["codes"][:, cols] >= 0
+    pnl = np.where(filled, matrix["values"][:, cols, 0], 0.0)
+    folds: list[dict[str, Any]] = []
+    oos_pnl: list[float] = []
+    oos_ts: list[float] = []
+    for d in sorted(set(days[em].tolist()))[1:]:
+        tr, te = em & (days < d), em & (days == d)
+        f, s = filled[tr].sum(axis=0), pnl[tr].sum(axis=0)
+        fold: dict[str, Any] = {"test_day_utc": time.strftime("%Y-%m-%d", time.gmtime(d * 86400)),
+                                "train_episodes": int(tr.sum()), "test_episodes": int(te.sum())}
+        ok = f >= min_train_fills
+        if not ok.any():
+            folds.append(fold | {"status": "NO_ELIGIBLE_POLICY"})
+            continue
+        ev = np.where(ok, s / np.maximum(f, 1), -np.inf)
+        j = int(np.argmax(ev))
+        hit = filled[te, j]
+        tp = pnl[te, j][hit]
+        oos_pnl.extend(tp.tolist())
+        oos_ts.extend(ts[te][hit].tolist())
+        folds.append(fold | {"status": "SCORED", "selected_policy_id": policy_ids[cols[j]],
+                             "train_fills": int(f[j]), "train_ev_per_fill_usd": round(float(ev[j]), 6),
+                             "test_fills": int(len(tp)), "test_net_pnl_usd": round(float(tp.sum()), 6),
+                             "test_ev_per_fill_usd": round(float(tp.mean()), 6) if len(tp) else None,
+                             "test_ev_per_fill_bp": _bp(float(tp.mean())) if len(tp) else None})
+    pooled = _stats(oos_pnl, sum(f["test_episodes"] for f in folds if f.get("status") == "SCORED"))
+    pooled["ev_per_fill_bp"] = _bp(pooled.get("ev_per_fill_usd"))
+    pooled["cluster_1h"] = cluster_bootstrap(oos_pnl, oos_ts)
+    return {"rule": "WALK_FORWARD_BY_UTC_DAY", "fill_world": HEADLINE_WORLD, "min_train_fills": min_train_fills,
+            "selection": "argmax train EV/fill over all prior UTC days among REALISTIC_V1 policies; next day scored once",
+            "episodes": int(em.sum()), "folds": folds, "pooled_oos": pooled}
 
 
 def holdout_verdict(row: Mapping[str, Any]) -> str:
@@ -978,7 +1214,6 @@ def holdout_verdict(row: Mapping[str, Any]) -> str:
 
 AXES = {
     "direction_rule": lambda r: r["direction_rule"],
-    "fill_world": lambda r: r["fill_world"],
     "entry_offset_pct": lambda r: r["entry"]["offset_pct"],
     "chase_id": lambda r: r["entry"]["chase_id"],
     "entry_ttl_sec": lambda r: r["entry"]["ttl_sec"],
@@ -999,29 +1234,48 @@ AXES = {
 }
 
 
+def _best_ranked(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    ranked = [r for r in items if r["holdout_verdict"] != "INSUFFICIENT"]
+    return max(ranked, key=lambda r: r["train"]["ev_per_fill_usd"]) if ranked else None
+
+
 def dimension_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Per genome axis: each value's best train-selected policy with its holdout result, so a collapsed axis is visible."""
+    """Per genome axis and value: the best train-selected REALISTIC_V1 policy with its chronological holdout.
+
+    Each value row is selected only among that value's headline-world policies, so rows differ by construction;
+    the optimistic touch world appears only in the labelled ``shadow_*`` columns and can never be a winner.
+    """
     out = {}
     for axis, key in AXES.items():
-        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        groups: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
         for r in rows:
-            groups[str(key(r))].append(r)
+            groups[str(key(r))][r["fill_world"]].append(r)
         values = []
-        for value, items in groups.items():
-            ranked = [r for r in items if r["holdout_verdict"] != "INSUFFICIENT"]
-            best = max(ranked, key=lambda r: r["train"]["ev_per_fill_usd"]) if ranked else None
+        for value, by_world in groups.items():
+            items = by_world[HEADLINE_WORLD]
+            best, shadow = _best_ranked(items), _best_ranked(by_world[SHADOW_WORLD])
             values.append({
-                "value": value, "policies": len(items), "pooled_fills": sum(r["all"]["fills"] for r in items),
+                "value": value, "fill_world": HEADLINE_WORLD, "policies": len(items),
+                "pooled_fills": sum(r["all"]["fills"] for r in items),
                 "confirmed_policies": sum(1 for r in items if r["holdout_verdict"] == "CONFIRMED"),
                 "best_policy_id": best["policy_id"] if best else None,
+                "best_fill_world": best["fill_world"] if best else None,
                 "best_train_ev_per_fill_usd": best["train"]["ev_per_fill_usd"] if best else None,
                 "best_holdout_verdict": best["holdout_verdict"] if best else None,
                 "best_oos_ev_per_fill_usd": best["oos"]["ev_per_fill_usd"] if best else None,
                 "best_oos_win_rate_pct": best["oos"]["win_rate_pct"] if best else None,
                 "best_oos_fills": best["oos"]["fills"] if best else None,
+                "best_cluster_1h": (best.get("cluster_1h") or {}).get("all") if best else None,
+                "shadow_label": f"{SHADOW_WORLD} - comparison shadow, not headline",
+                "shadow_best_policy_id": shadow["policy_id"] if shadow else None,
+                "shadow_best_train_ev_per_fill_usd": shadow["train"]["ev_per_fill_usd"] if shadow else None,
+                "shadow_best_oos_ev_per_fill_usd": shadow["oos"]["ev_per_fill_usd"] if shadow else None,
             })
         values.sort(key=lambda v: (v["best_train_ev_per_fill_usd"] is None, -(v["best_train_ev_per_fill_usd"] or 0)))
-        out[axis] = {"distinct_values": len(values), "values": values}
+        ranked = [v for v in values if v["best_policy_id"]]
+        out[axis] = {"distinct_values": len(values), "ranked_values": len(ranked),
+                     "distinct_best_policies": len({v["best_policy_id"] for v in ranked}),
+                     "headline_fill_world": HEADLINE_WORLD, "values": values}
     return out
 
 
@@ -1129,6 +1383,9 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
     started = time.time()
     tape = load_tape(mirror, tier_a)
     episodes, episode_stats = load_episodes(mirror, tape)
+    integrity = episode_integrity(episodes)
+    if integrity["status"] != "PASS":
+        raise EpisodeIntegrityError(json.dumps(integrity["violations"])[:600])
     protections = protection_specs()
     entries = entry_specs()
     latency = measure_latency(mirror)
@@ -1163,11 +1420,54 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
     evaluated = [r["idx"] for r in results if r["status"] == "EVALUATED"]
     ts_sorted = sorted(episodes[i]["signal_ts"] for i in evaluated)
     cut_ts = ts_sorted[int(len(ts_sorted) * HOLDOUT_TRAIN_FRACTION)] if ts_sorted else 0.0
-    rows = aggregate(results, episodes, entries, protections, cut_ts)
+    matrix: dict[str, Any] = {}
+    rows = aggregate(results, episodes, entries, protections, cut_ts, matrix_out=matrix)
     parity = canonical_parity_sample([episodes[i] for i in evaluated], tape, protections)
     ranked = sorted((r for r in rows if r["holdout_verdict"] != "INSUFFICIENT"),
                     key=lambda r: r["train"]["ev_per_fill_usd"], reverse=True)
     verdicts = Counter(r["holdout_verdict"] for r in rows)
+    top_by_world = {world: [r for r in ranked if r["fill_world"] == world][:100] for world in WORLDS}
+    confirmed = {world: [r for r in ranked if r["fill_world"] == world and r["holdout_verdict"] == "CONFIRMED"][:100]
+                 for world in WORLDS}
+    walk_forward: dict[str, Any] = {}
+    class_summary: dict[str, Any] = {}
+    if matrix:
+        index = {id(r): k for k, r in enumerate(rows)}
+        for r in {id(r): r for lst in (*top_by_world.values(), *confirmed.values()) for r in lst}.values():
+            r["cluster_1h"] = row_cluster_stats(matrix, index[id(r)], cut_ts)
+        headline_rows = [r for r in rows if r["fill_world"] == HEADLINE_WORLD]
+        for key in AXES.values():
+            groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for r in headline_rows:
+                groups[str(key(r))].append(r)
+            for items in groups.values():
+                best = _best_ranked(items)
+                if best is not None and "cluster_1h" not in best:
+                    best["cluster_1h"] = row_cluster_stats(matrix, index[id(best)], cut_ts)
+        policy_ids = [r["policy_id"] for r in rows]
+        headline_keys = np.array([r["fill_world"] == HEADLINE_WORLD for r in rows])
+        walk_forward[GENOME_COHORT] = walk_forward_by_day(matrix, policy_ids, headline_keys)
+        for klass in AI_EPISODE_CLASSES:
+            mask = matrix["classes"] == klass
+            if int(mask.sum()) >= WALK_FORWARD_MIN_CLASS_EPISODES:
+                walk_forward[klass] = walk_forward_by_day(matrix, policy_ids, headline_keys, episode_mask=mask)
+        head = top_by_world[HEADLINE_WORLD][:1]
+        class_summary = {
+            "evaluated_by_class": dict(Counter(matrix["classes"].tolist())),
+            "headline_top_policy": ({"policy_id": head[0]["policy_id"], "by_episode_class": head[0]["by_episode_class"]}
+                                    if head else None),
+            "best_headline_policy_by_class": {
+                klass: next(({"policy_id": r["policy_id"], **r["by_episode_class"][klass],
+                              "ev_per_fill_bp": _bp(r["by_episode_class"][klass]["ev_per_fill_usd"])}
+                             for r in sorted((r for r in rows if r["fill_world"] == HEADLINE_WORLD
+                                              and (r["by_episode_class"].get(klass) or {}).get("fills", 0)
+                                              >= MIN_TRAIN_FILLS_FOR_RANK),
+                                             key=lambda r: -(r["by_episode_class"][klass]["ev_per_fill_usd"] or 0))),
+                            None)
+                for klass in sorted(set(matrix["classes"].tolist()))},
+            "note": "best_headline_policy_by_class is in-sample (all fills, no holdout) - descriptive only",
+        }
+        del matrix
     report = {
         "schema": SCHEMA,
         "generated_at": _iso(time.time()),
@@ -1177,10 +1477,24 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         "headline_fill_world": HEADLINE_WORLD,
         "shadow_fill_worlds": [SHADOW_WORLD],
         "headline_vs_shadow": headline_vs_shadow(rows),
-        "note": ("Simulated on collected 1 s Bitfinex tape for every collected signal episode (executed, shadow, "
-                 "blocked, and score-led side of no-trade calls). Not execution evidence and not qualification; live "
-                 "paper outcomes are listed separately as LIVE_PAPER. Retired tiles appear only as parameter sets "
-                 "evaluated over market data."),
+        "note": ("Simulated on collected 1 s Bitfinex tape for one episode per unique AI decision (committed calls, "
+                 "score-led side of no-trade calls, and signal-replay AI calls the v3 ledger lacks). Cross-venue "
+                 "evaluator triggers and duplicate/reversal-study rows are excluded and counted. Not execution "
+                 "evidence and not qualification; live paper outcomes are listed separately as LIVE_PAPER. Retired "
+                 "tiles appear only as parameter sets evaluated over market data."),
+        "episode_integrity": integrity,
+        "episode_cohorts": {
+            GENOME_COHORT: {"status": "EVALUATED", "classes": list(AI_EPISODE_CLASSES),
+                            "admitted_by_class": episode_stats.get("admitted_by_class")},
+            "XVENUE_EVALUATOR": {"status": "EXCLUDED_FROM_AI_GENOME", "classes": list(XVENUE_EPISODE_CLASSES),
+                                 "unique_triggers": episode_stats.get("xvenue_unique_triggers"),
+                                 "note": "per-second cross-venue evaluator triggers (Tiles 3/4) run on a 60 s clock; "
+                                         "they are not AI decisions and are studied separately (XVENUE-INVERT-STUDY)"},
+            "EXCLUDED_DUPLICATES": {"v3": episode_stats.get("excluded_v3_by_reason"),
+                                    "signal_replay": episode_stats.get("excluded_signal_replay_by_reason")},
+        },
+        "episode_class_summary": class_summary,
+        "walk_forward_by_utc_day": walk_forward,
         "fill_worlds": {
             HEADLINE_WORLD: "HEADLINE. Shared research/fill_model.py REALISTIC_V1: taker at the opposite BBO of the "
                             f"first fresh quote at signal + measured latency ({lat_sec:g}s, {latency['source']}) with "
@@ -1201,13 +1515,17 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
                     "min_train_fills_for_rank": MIN_TRAIN_FILLS_FOR_RANK, "min_oos_fills_for_rank": MIN_OOS_FILLS_FOR_RANK,
                     "verdicts": dict(verdicts),
                     "independence_note": "episodes minutes apart share overlapping price paths; win-rate CIs assume "
-                                         "independence and are optimistic"},
+                                         "independence and are optimistic - use cluster_1h (1 h block-bootstrap EV "
+                                         "CI and n_eff) and walk_forward_by_utc_day for inference"},
         "coverage": {
             "episodes_collected": len(episodes),
             "episode_status": dict(Counter(r["status"] for r in results)),
             "episodes_evaluated": len(evaluated),
             "episodes_from_cache": cached, "grid_signature": signature,
             "evaluated_by_source": dict(Counter(episodes[i]["source"] for i in evaluated)),
+            "evaluated_by_class": dict(Counter(episodes[i]["episode_class"] for i in evaluated)),
+            "v3_opportunity_rows": episode_stats.get("v3_opportunity_rows"),
+            "v3_opportunities_excluded_declared": sum((episode_stats.get("excluded_v3_by_reason") or {}).values()),
             "evaluated_by_atr_source": dict(Counter(episodes[i]["atr_source"] for i in evaluated)),
             "episode_inputs": episode_stats,
             "first_signal_utc": _iso(min(ts_sorted)) if ts_sorted else None,
@@ -1232,9 +1550,8 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         },
         "canonical_parity": parity,
         "dimension_summary": dimension_summary(rows),
-        "top_100_by_world": {world: [r for r in ranked if r["fill_world"] == world][:100] for world in WORLDS},
-        "confirmed_by_world": {world: [r for r in ranked if r["fill_world"] == world
-                                       and r["holdout_verdict"] == "CONFIRMED"][:100] for world in WORLDS},
+        "top_100_by_world": top_by_world,
+        "confirmed_by_world": confirmed,
         "live_paper_by_lane": live_paper_by_lane(mirror),
         "inputs": {"tape_files": tape.receipts, "mirror": str(mirror), "tier_a": str(tier_a)},
         "runtime_sec": round(time.time() - started, 1),
@@ -1294,8 +1611,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.ignore_cycle and analyzer_cycle_busy(Path(args.cycle_status)):
         print(json.dumps({"status": "SKIPPED_ANALYZER_CYCLE_ACTIVE", "cycle_status": args.cycle_status}))
         return 0
-    rep = run(Path(args.mirror), Path(args.tier_a), Path(args.out_dir), workers=args.workers,
-              max_episodes=args.max_episodes)
+    try:
+        rep = run(Path(args.mirror), Path(args.tier_a), Path(args.out_dir), workers=args.workers,
+                  max_episodes=args.max_episodes)
+    except EpisodeIntegrityError as exc:
+        print(json.dumps({"status": "EPISODE_INTEGRITY_FAILED", "violations": str(exc)}))
+        return 2
     print(json.dumps({"status": "OK", "generated_at": rep["generated_at"], "coverage": rep["coverage"]["episode_status"],
                       "policies": rep["grid"]["policies_evaluated"], "parity": rep["canonical_parity"]["status"],
                       "runtime_sec": rep["runtime_sec"]}))

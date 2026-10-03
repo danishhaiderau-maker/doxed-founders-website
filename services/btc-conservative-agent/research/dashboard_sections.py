@@ -23,10 +23,12 @@ FRESH_RED_SEC = 12 * 3600
 LEGACY_COMBO_DIMENSIONS = ("adx_bucket", "directional_spread_bucket", "entry_mode_bucket", "research_lane")
 # Minimum distinct values per genome axis before the section counts as collapsed.
 GENOME_AXIS_MINIMUMS = {
-    "direction_rule": 2, "fill_world": 2, "entry_offset_pct": 5, "chase_id": 3, "entry_ttl_sec": 2,
+    "direction_rule": 2, "entry_offset_pct": 5, "chase_id": 3, "entry_ttl_sec": 2,
     "exit_family": 4, "atr_stop_k": 3, "atr_tp_k": 1, "profit_ladder": 2, "thesis_cut_margin_pct": 2,
     "time_stop_min": 2, "mfe_giveback": 2, "atr_trail_k": 2, "chandelier_atr_k": 2, "partial_plan": 2,
 }
+GENOME_HEADLINE_FILL_WORLD = "REALISTIC_V1"
+GENOME_AI_EPISODE_CLASSES = ("AI_COMMITTED", "AI_COMMITTED_SCORE_CONFLICT", "AI_NO_TRADE_SCORE_LED", "AI_SIGNAL_REPLAY")
 CORE_SECTIONS = ("summary", "combos", "genome", "lanes", "evidence-coverage")
 CORE_PAGES = ("/data-health", "/safe-policy-genome-v3.1", "/decision")
 EXTRA_SECTION_APIS = {"combos": ("/api/genome-grid",), "genome": ("/api/safe-policy-genome-v3.1",)}
@@ -171,11 +173,62 @@ def genome_grid_checks(grid: Mapping[str, Any] | None, combos: Mapping[str, Any]
                    "expected": "MATCH against research_v3_policy_replay"})
     cov = grid.get("coverage") or {}
     evaluated = int(cov.get("episodes_evaluated") or 0)
+    declared = int(cov.get("v3_opportunities_excluded_declared") or 0)
     if collected_opportunities:
-        ratio = evaluated / collected_opportunities
+        ratio = (evaluated + declared) / collected_opportunities
         checks.append({"id": "genome_vs_collected", "severity": AMBER if ratio < 0.5 else GREEN,
-                       "observed": f"{evaluated} episodes evaluated vs {collected_opportunities} collected opportunities ({ratio:.0%})",
-                       "expected": ">= 50% of collected opportunities (rest censored by tape window/ATR)"})
+                       "observed": f"{evaluated} AI episodes evaluated + {declared} declared exclusions (cross-venue, "
+                                   f"duplicates, no side) vs {collected_opportunities} collected opportunities ({ratio:.0%})",
+                       "expected": ">= 50% of collected opportunities accounted (rest censored by tape window/ATR)"})
+    checks.extend(genome_content_checks(grid))
+    return checks
+
+
+def genome_content_checks(grid: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Content contract: one episode per AI decision, no mixed classes, REALISTIC_V1-only axes that differ per value."""
+    checks: list[dict[str, Any]] = []
+    integ = grid.get("episode_integrity") or {}
+    classes = (grid.get("coverage") or {}).get("evaluated_by_class") or integ.get("classes") or {}
+    foreign = {c: n for c, n in classes.items() if c not in GENOME_AI_EPISODE_CLASSES}
+    if not integ:
+        sev, obs = RED, "no episode_integrity declared: cross-venue triggers and duplicate rows may be counted as AI episodes"
+    elif integ.get("status") != "PASS" or integ.get("duplicate_decision_ids") or foreign:
+        sev, obs = RED, (f"integrity {integ.get('status')}, duplicate decision ids {integ.get('duplicate_decision_ids')}, "
+                         f"foreign classes {foreign}: {'; '.join(integ.get('violations') or [])[:200]}")
+    else:
+        sev, obs = GREEN, f"{integ.get('episodes')} episodes = {integ.get('unique_decision_ids')} unique AI decisions; {classes}"
+    checks.append({"id": "genome_episode_integrity", "severity": sev, "observed": obs,
+                   "expected": "one episode per unique AI decision; only AI episode classes in the genome cohort"})
+    summary = grid.get("dimension_summary") or {}
+    head = grid.get("headline_fill_world")
+    optimistic = sorted(axis for axis, s in summary.items()
+                        if axis == "fill_world" or s.get("headline_fill_world") != GENOME_HEADLINE_FILL_WORLD
+                        or any(v.get("best_fill_world") not in (None, GENOME_HEADLINE_FILL_WORLD)
+                               for v in s.get("values") or []))
+    bad = head != GENOME_HEADLINE_FILL_WORLD or optimistic
+    checks.append({"id": "genome_axes_headline_world", "severity": RED if bad else GREEN,
+                   "observed": (f"headline_fill_world={head}; axes not restricted to {GENOME_HEADLINE_FILL_WORLD}: "
+                                f"{optimistic[:6]}") if bad else f"{len(summary)} axes select within {GENOME_HEADLINE_FILL_WORLD}",
+                   "expected": "headline and every axis winner are REALISTIC_V1; optimistic fills only in shadow columns"})
+    identical = []
+    for axis, s in summary.items():
+        picks = [v.get("best_policy_id") for v in s.get("values") or [] if v.get("best_policy_id")]
+        if len(picks) >= 2 and len(set(picks)) < 2:
+            identical.append(axis)
+    tops = {((s.get("values") or [{}])[0] or {}).get("best_policy_id") for s in summary.values()}
+    rows_identical = len(summary) > 1 and all(len(s.get("values") or []) <= 1 for s in summary.values()) and len(tops) == 1
+    checks.append({"id": "genome_axes_distinct", "severity": RED if identical or rows_identical else GREEN,
+                   "observed": (f"axes whose value rows all show one policy: {identical[:6]}" if identical else
+                                "every axis shows the same single row" if rows_identical else
+                                f"{sum(len(s.get('values') or []) for s in summary.values())} per-value rows"),
+                   "expected": "each axis value shows its own best train-selected policy"})
+    top = (grid.get("top_100_by_world") or {}).get(GENOME_HEADLINE_FILL_WORLD) or []
+    lacking = sum(1 for r in top if not r.get("by_episode_class") or not r.get("cluster_1h"))
+    wf = grid.get("walk_forward_by_utc_day") or {}
+    checks.append({"id": "genome_top100_inference", "severity": AMBER if lacking or not wf else GREEN,
+                   "observed": f"{len(top) - lacking}/{len(top)} headline rows carry class split + 1h-cluster CI; "
+                               f"walk-forward cohorts {sorted(wf)}",
+                   "expected": "every headline Top-100 row has by_episode_class and cluster_1h; walk-forward by UTC day"})
     return checks
 
 

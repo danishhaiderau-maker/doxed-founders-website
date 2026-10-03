@@ -117,6 +117,12 @@
      "allow_http": {"404": "AMBER"},
      "reconcile": "fill_model_headline"},
 
+    {"id": "analyzer.genome_grid_content", "surface": "analyzer", "title": "Genome grid content: unique AI-decision episodes, no mixed classes, REALISTIC_V1 per-value axes", "tier": "heavy",
+     "page": "http://127.0.0.1:9001/details#combos", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/genome-grid"},
+     "depends_on": ["genome_grid_study.py load_episodes/episode_integrity/dimension_summary", "analyzer-exports/genome-grid/genome_grid_report.json"],
+     "allow_http": {"404": "AMBER"},
+     "reconcile": "genome_grid_content"},
+
     {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",
      "page": "http://127.0.0.1:9021/edges", "source": {"kind": "self", "doc": "health"},
      "depends_on": ["scripts/self_aware/edges.py", "res_edges"],
