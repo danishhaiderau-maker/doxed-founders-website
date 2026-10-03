@@ -10,7 +10,8 @@ import {
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { btcToSats, satsToBtc, type CopyRelaySimLedger, type CopyRelaySimOrder } from '@dcf/utils';
 
-const SIM_FEE_BPS = 4;
+// Must equal bitfinex_cost_profile (BITFINEX_ZERO); selfaware.fees.truth compares them.
+const SIM_FEE_BPS = 0;
 
 function orderAmount(direction: 'LONG' | 'SHORT', qty: number): number {
   return direction === 'LONG' ? Math.abs(qty) : -Math.abs(qty);
