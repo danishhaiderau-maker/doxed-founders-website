@@ -205,6 +205,7 @@ def test_handler_snapshot_is_bounded_and_uses_only_fixed_labels():
         "time": type("Clock", (), {"monotonic": staticmethod(lambda: 100.0)}),
         "_dashboard_handler_lock": threading.Lock(),
         "_dashboard_active_handlers": active,
+        "_dashboard_overload_rejections": {},
         "_DASHBOARD_TELEMETRY_STATIC_ROUTES": frozenset({"/api/status"}),
     }
     module = ast.Module(body=[HANDLER_SNAPSHOT_FUNCTION], type_ignores=[])
