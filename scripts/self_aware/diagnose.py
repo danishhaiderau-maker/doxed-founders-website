@@ -691,20 +691,24 @@ def check_data(f, sig, store) -> list[Finding]:
     lap, fly = cap.get("laptop") or {}, cap.get("fly") or {}
     days, hours = lap.get("days_to_90pct_cap"), fly.get("hours_to_full")
     disk_days = lap.get("disk_days_to_full")
+    cap_exceeded = str(lap.get("retention_cap_status") or "").startswith("CAP_EXCEEDED")
     sev = GREEN
-    if ((days is not None and days < t["laptop_days_to_cap_red"]) or (hours is not None and hours < t["fly_hours_to_full_red"])
+    if (cap_exceeded or (days is not None and days < t["laptop_days_to_cap_red"])
+            or (hours is not None and hours < t["fly_hours_to_full_red"])
             or (disk_days is not None and disk_days < t["laptop_disk_days_red"])):
         sev = RED
     elif ((days is not None and days < t["laptop_days_to_cap_amber"]) or (hours is not None and hours < t["fly_hours_to_full_amber"])
             or (disk_days is not None and disk_days < t["laptop_disk_days_amber"])):
         sev = AMBER
-    out.append(Finding("data.capacity", "Room to keep collecting (laptop 50 GB cap, laptop disk, Fly volume)", "data", sev,
+    out.append(Finding("data.capacity", "Room to keep collecting (laptop retention cap, laptop disk, Fly volume)", "data", sev,
+                       (f"RETENTION ALARM {lap.get('retention_alarm') or lap.get('retention_cap_status')}; " if cap_exceeded else "") +
                        f"laptop bot data {lap.get('bot_data_gb')}/{lap.get('cap_gb')} GB physical ({lap.get('usage_pct')}%), growing "
                        f"{lap.get('growth_gb_per_day')} GB/day -> {days} days to 90% of cap; laptop disk "
                        f"{lap.get('disk_free_gb')} GB free, {lap.get('disk_growth_gb_per_day')} GB/day "
                        f"({lap.get('unmanaged_growth_gb_per_day')} GB/day outside bot data) -> {disk_days} days; Fly volume "
                        f"{fly.get('volume_free_gb')} GB free, {hours} h to full, real ingest {fly.get('ingest_gb_per_day')} GB/day "
                        f"(+{fly.get('snapshot_churn_gb_per_day')} GB/day snapshot churn)",
+                       f"retention within cap without crossing the protected floor, "
                        f"laptop cap >= {t['laptop_days_to_cap_amber']:.0f} days, disk >= {t['laptop_disk_days_amber']:.0f} days "
                        f"and Fly >= {t['fly_hours_to_full_amber']:.0f} h of headroom",
                        evidence={"laptop": lap, "fly": fly}))

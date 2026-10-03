@@ -2015,7 +2015,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
               "" if st == GREEN else "data growth; check storage.retention (custody-gated pruning) "
                                      "before raising the volume"))
 
-    # ---------------- Retention (laptop 50 GB cap, prune ledger) and analysis archive
+    # ---------------- Retention (laptop bot-data cap, prune ledger) and analysis archive
     run = inputs.get("retention_last_run")
     if not isinstance(run, Mapping):
         add(check("storage.retention", "storage", AMBER, "bot_data_retention has not run",
@@ -2057,7 +2057,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   f"deny={denied or 'none'}; Fly prune {prune_mode or 'off'} pruned<= {pruned} custody<= {custody}"
                   f"{exit_note}",
                   "run < 3h old, last run exit 0 and <2 of the last 3 failed, usage < 80% (AMBER) / 90% (RED) "
-                  "of the 50GB cap, Fly pruned <= custody",
+                  f"of the {cap:.0f}GB cap, cap never met by crossing the protected floor, Fly pruned <= custody",
                   "" if st == GREEN else "see C:\\DoxxedCrypto\\bot-data-retention\\status.json and "
                                          "docs/runbooks/DATA-RETENTION.md"))
 

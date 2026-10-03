@@ -7,7 +7,7 @@ Four laptop-only views over the Fly mirror (zero Fly calls):
                   size, estimated rows, retention tier, first/last timestamp and freshness vs the mirror head;
 * completeness  - per stream and hour: expected vs actual rows, gaps (attributed to Fly interruptions when
                   they overlap), plus field liveness (null %, distinct, constant, all-zero -> DEAD);
-* capacity      - laptop bot data vs the 50 GB cap and Fly volume vs its size, growth rates, days to full;
+* capacity      - laptop bot data vs the retention cap (default 120 GB) and Fly volume vs its size, growth rates, days to full;
 * sufficiency   - for each research question, are the fields present and alive and are there enough
                   independent samples; what is missing; when it will be ready. READY questions release
                   their pre-registered gated screens in the edge tracker.
@@ -40,6 +40,7 @@ WHOLE_FILE_BYTES = 2_500_000
 MAX_ROWS = 3000
 FLATTEN_DEPTH = 3
 LAPTOP_CAP_FRACTION = 0.9
+LAPTOP_CAP_DEFAULT_BYTES = 120e9  # bot_data_retention.DEFAULTS["cap_bytes"]
 GAP_MIN_SEC = {"second": 5, "minute": 180}
 STALE_SEC = {"second": 180, "minute": 600, "event": 6 * 3600}
 SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index", "corrupt_evidence_quarantine",
@@ -578,7 +579,7 @@ def _disk_usage(root: Path) -> tuple[int, int] | None:
 def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -> dict:
     ret = read_json(paths.retention / "status.json") or {}
     used = float(ret.get("bytes_after") or 0)
-    cap = float(ret.get("cap_bytes") or 50e9)
+    cap = float(ret.get("cap_bytes") or LAPTOP_CAP_DEFAULT_BYTES)
     # Retention sizes became physical (hardlinks counted once) with sizes_basis=physical_v1; logical history
     # from before would fake a huge negative slope, so it is dropped once.
     basis = ret.get("sizes_basis") or "logical"
@@ -631,6 +632,9 @@ def capacity(paths, facts: dict, streams: list[dict], state: dict, now: float) -
             "by_area_gb": {k: round(v / 1e9, 2) for k, v in sizes.items()},
             "by_area_growth_gb_per_day": by_area_growth,
             "retention_mode": ret.get("mode"), "retention_last_run": ret.get("finished_at"),
+            "retention_cap_status": (ret.get("cap") or {}).get("status"),
+            "retention_cap_refused": (ret.get("cap") or {}).get("refused_count"),
+            "retention_alarm": ret.get("alarm"),
             "growth_gb_per_day": round(slope / 1e9, 3) if slope else None,
             "growth_basis": ("measured net slope of physical bot-data bytes (restarted after one-off reclaims)"
                              if measured is not None else

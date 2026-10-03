@@ -456,6 +456,78 @@ class LaptopRetentionTests(unittest.TestCase):
         self.assertEqual(status["cap"]["status"], "CAP_EXCEEDED_NOTHING_ELIGIBLE")
         self.assertEqual(status["level"], "RED")
 
+    def _day(self, days_ago: float) -> str:
+        return datetime.fromtimestamp(self.now - days_ago * DAY, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def _epoch(self, ts: float) -> None:
+        for root in (self.tree, self.view, self.canonical):
+            (root / bdr.SESSION_FILE).write_text(json.dumps({"collector_v22_epoch_ts": ts}))
+
+    def _compact_part(self, dataset: str, day: str) -> Path:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        part = Path(self.cfg["compact_root"]) / "tierA" / dataset / "v1" / f"date={day}"
+        part.mkdir(parents=True)
+        pq.write_table(pa.table({"ts": [1.0]}).replace_schema_metadata({"schema_version": "1"}),
+                       part / "part-0000.parquet")
+        rollups = Path(self.cfg["archive_root"]) / "rollups" / "daily"
+        rollups.mkdir(parents=True, exist_ok=True)
+        (rollups / f"{day}.json").write_text("{}")
+        return part / "part-0000.parquet"
+
+    def test_default_cap_is_120_gb(self):
+        self.assertEqual(bdr.DEFAULTS["cap_bytes"], 120 * bdr.GB)
+        self.assertEqual(bdr.DEFAULTS["protected_window_days"], 14.0)
+
+    def test_cap_pressure_refuses_protected_floor_and_alarms(self):
+        self.cfg["cap_bytes"] = 1
+        self._epoch(self.now - 3 * DAY)
+        old_tape = self._compact_part("bitfinex_l1_tape_1s", self._day(20))
+        young_tape = self._compact_part("bitfinex_l1_tape_1s", self._day(5))
+        old_ledger = self._compact_part("closed_trades", self._day(30))
+        self._gates()
+        status = self._run(bdr.MODE_ENFORCE)
+        self.assertFalse(old_tape.exists())
+        self.assertTrue(young_tape.exists() and old_ledger.exists())
+        cap = status["cap"]
+        self.assertEqual(cap["status"], "CAP_EXCEEDED_PROTECTED_FLOOR")
+        self.assertEqual({row["reason"] for row in cap["refused"]}, {"INSIDE_PROTECTED_FLOOR", "LEDGER_DATASET"})
+        self.assertEqual(cap["protected_floor"]["floor_ts"], self.now - 14 * DAY)
+        self.assertEqual(status["level"], "RED")
+        self.assertIn("CAP_EXCEEDED_PROTECTED_FLOOR", status["alarm"])
+        last = json.loads((Path(self.cfg["state_dir"]) / "last-run.json").read_text())
+        self.assertEqual(last["cap_status"], "CAP_EXCEEDED_PROTECTED_FLOOR")
+        self.assertTrue(last["alarm"])
+
+    def test_protected_floor_covers_current_epoch_and_fails_closed(self):
+        self.assertEqual(bdr.Retention(self.cfg, self.canonical, now=self.now).protected_floor()["floor_ts"],
+                         self.now)
+        self._epoch(self.now - 20 * DAY)
+        floor = bdr.Retention(self.cfg, self.canonical, now=self.now).protected_floor()["floor_ts"]
+        self.assertEqual(floor, self.now - 20 * DAY)
+        refusal = bdr.Retention._floor_refusal
+        self.assertEqual(refusal({"day": self._day(17), "mtime": 0}, floor), "INSIDE_PROTECTED_FLOOR")
+        self.assertIsNone(refusal({"day": self._day(25), "mtime": 0}, floor))
+        tape = "bitfinex_l1_tape_1s"
+        self.assertEqual(refusal({"dataset": tape, "mtime": self.now - 2 * DAY}, floor), "INSIDE_PROTECTED_FLOOR")
+        self.assertIsNone(refusal({"dataset": tape, "mtime": self.now - 30 * DAY}, floor))
+        self.assertEqual(refusal({"dataset": "v3_execution", "mtime": self.now - 90 * DAY}, floor), "LEDGER_DATASET")
+
+    def test_cap_pressure_keeps_young_legacy_tape(self):
+        self.cfg["cap_bytes"] = 1
+        self._epoch(self.now - 3 * DAY)
+        legacy = Path(self.cfg["compact_root"]) / "legacy" / "bitfinex_l1_tape_1s" / "v0"
+        young = legacy / f"date={self._day(2)}" / "part-0000.parquet"
+        old = legacy / f"date={self._day(40)}" / "part-0000.parquet"
+        for path in (young, old):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"legacy")
+        self._gates()
+        status = self._run(bdr.MODE_ENFORCE)
+        self.assertTrue(young.exists())
+        self.assertFalse(old.exists())
+        self.assertEqual(status["cap"]["refused"][0]["tier"], "LEGACY_INCOMPATIBLE")
+
     def test_tier_a_compaction_writes_zstd_parquet_with_schema_version(self):
         import pyarrow.parquet as pq
         rows = [json.dumps({"ts": _ts("2026-09-30T10:00:00") + i, "bid": 1}) for i in range(5)]
