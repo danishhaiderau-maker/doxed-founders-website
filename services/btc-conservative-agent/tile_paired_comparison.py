@@ -75,11 +75,26 @@ def _fill_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     sign = {"LONG": 1, "SHORT": -1}.get(str(row.get("dir") or row.get("direction") or "").upper())
     if reason in STOP_LIKE_REASONS and stop and exit_price and entry and sign:
         overshoot = sign * (stop - exit_price) / entry * 1e4
+    # Cross-venue triggers stamp shared_ai_call_ts with the evaluator's
+    # evaluated_ts; signal_age_sec/entry_delay start later, at signal creation.
+    call_ts = _ts(row.get("shared_ai_call_ts"))
+    held = _finite(row.get("outcome_duration_sec"))
+    fill_ts = _ts(row.get("fill_ts")) or (close_ts - held if held is not None else None)
+    signal_to_fill = fill_ts - call_ts if call_ts is not None and fill_ts is not None else None
     return {
         "lane": lane, "call": call, "close_ts": close_ts, "pnl_usd": pnl,
         "bp": pnl / notional * 1e4 if notional > 0 else None,
         "reason": reason, "overshoot_bp": overshoot, "side": sign, "entry": entry,
+        "signal_to_fill_sec": signal_to_fill if signal_to_fill is not None and 0 <= signal_to_fill <= 3600 else None,
     }
+
+
+def _median_signal_to_fill_sec(fills: list[dict[str, Any]]) -> float | None:
+    values = sorted(r["signal_to_fill_sec"] for r in fills if r.get("signal_to_fill_sec") is not None)
+    if not values:
+        return None
+    mid = len(values) // 2
+    return round(values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2.0, 3)
 
 
 def _cluster_ci(rows: Sequence[tuple[float, float]],
@@ -276,6 +291,7 @@ def _xvl_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dic
         "first_5_days_observed": len(first5),
         "positive_days_of_first_5": sum(1 for v in first5 if v > 0),
         "max_single_hour_profit_share": round(max(hours.values()) / total, 4) if fills and total > 0 else None,
+        "median_signal_to_fill_sec": _median_signal_to_fill_sec(fills),
     }
 
 
@@ -425,6 +441,7 @@ def _xvp_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dic
         "session_hours_utc": {k: list(v) for k, v in XVP_SESSIONS_UTC.items()},
         "max_single_day_profit_share": round(max(days.values()) / total, 4) if fills and total > 0 else None,
         "side_mean_bp": {k: (round(sum(v) / len(v), 4) if v else None) for k, v in side_bp.items()},
+        "median_signal_to_fill_sec": _median_signal_to_fill_sec(fills),
     }
 
 
