@@ -80,9 +80,13 @@ def test_desktop_uses_full_width_with_compact_sticky_tables():
 
 def test_long_policy_identities_wrap_without_changing_text():
     source = dashboard.DASHBOARD_HTML
+    block = source[source.index("function addBreakHints"):source.index("function queueTableLayout")]
 
-    assert "const POLICY_BREAK_RE = /[|_](?=\\S)/;" in source
-    assert "node.nodeValue.split(/(?<=[|_])(?=\\S)/)" in source
-    assert "frag.appendChild(document.createElement('wbr'));" in source
+    assert "'|': [/\\|(?=\\S)/, /(?<=\\|)(?=\\S)/]," in source
+    assert "'|_': [/[|_](?=\\S)/, /(?<=[|_])(?=\\S)/]," in source
+    assert "frag.appendChild(document.createElement('wbr'));" in block
+    # Underscore hints only where the '|' hints still leave the table too wide.
+    assert "if (wrapper.scrollWidth > wrapper.clientWidth + 1) cells.forEach(cell => addBreakHints(cell, '|_'));" in block
     assert "new MutationObserver(queueTableLayout).observe(document.querySelector('main')" in source
-    assert "innerHTML" not in source[source.index("function refineTableLayout"):source.index("function queueTableLayout")]
+    assert "window.addEventListener('resize', queueTableLayout);" in source
+    assert "innerHTML" not in block
