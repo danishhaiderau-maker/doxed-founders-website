@@ -241,6 +241,7 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "decision_feature_snapshots.jsonl",
     "market_context_1m.jsonl",
     "liquidations.jsonl",
+    "indicator_bars_v1.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -324,6 +325,7 @@ REPORT_NAV_GROUPS = (
     ("lanes-group", "Strategy Research", (
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
         ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
+        ("indicator-edge", "Indicator Edge", None),
         ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
     )),
     ("trading-group", "Execution", (
@@ -7235,6 +7237,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="kpis" id="chase-delay-kpis"></div>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
+  <section id="sec-indicator-edge">
+    <h2>Indicator Edge - forward-scored indicators from our own data</h2>
+    <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>OBSERVATION ONLY - FORWARD, PRE-REGISTERED</strong> - 52 indicators computed on closed 3-minute bars from the Fly 1 s Bitfinex tape, cross-venue feeds, funding, OI and liquidations. Each is scored only on bars closed after its hash-chained freeze: mid move in the signal direction at +3/+15/+60/+120 min, minus a 2 bp round trip, entering 2 s (and 9 s) after the decision. No tile, order or relay is affected.</div>
+    <p class="note" id="indicator-edge-note">Loading indicator edge...</p>
+    <div class="kpis" id="indicator-edge-kpis"></div>
+    <h3>Today in plain English</h3>
+    <div class="note" id="indicator-edge-daily" style="max-width:1100px;line-height:1.5;"></div>
+    <h3>Indicator availability (latest healthy bar)</h3>
+    <div class="note" id="indicator-edge-availability"></div>
+    <h3>Ranking <select id="indicator-edge-filter"><option value="all">All features</option><option value="independent">Independent only (best of each |rho| &gt; 0.7 cluster)</option><option value="labelled">HINT and PROMISING only</option></select></h3>
+    <p class="note">Labels: HINT = 3+ scored days, sign held every day and net &gt; 0 after costs. PROMISING = 7+ days, Benjamini-Hochberg significant (1 h-cluster bootstrap), sign held on 5 of 7 days, positive in 2+ sessions and still positive at 9 s latency. Everything else is NOISE. Only PROMISING features feed the week-2 combination grid.</p>
+    <table id="indicator-edge-table"><thead id="indicator-edge-head"></thead><tbody id="indicator-edge-body"></tbody></table>
+    <h3>Correlation clusters</h3>
+    <div class="note" id="indicator-edge-clusters"></div>
+    <h3>Combination grid (week 2, PROMISING only)</h3>
+    <p class="note" id="indicator-edge-combos-note"></p>
+    <table id="indicator-edge-combos-table"><thead><tr><th>Combination</th><th>Family</th><th>Label</th><th>Forward days</th><th>Signals</th><th>Hit %</th><th>Net bp</th><th>q (FDR)</th></tr></thead><tbody id="indicator-edge-combos"></tbody></table>
+  </section>
   <section id="sec-combos">
     <h2>Policy Genome Grid - simulated over all collected data</h2>
     <div class="stale-banner" style="display:block;background:#1f2d3d;border-color:#58a6ff;color:#cfe3ff;"><strong>SIMULATED_COUNTERFACTUAL</strong> - one episode per unique AI decision (committed calls, score-led side of no-trade calls) replayed on 1 s tape across entry offset x chase x TTL x exit x side. Cross-venue evaluator triggers and duplicate/reversal-study rows are excluded and counted. Not execution evidence, not qualification. Live paper outcomes are listed separately below.</div>
@@ -7665,6 +7685,7 @@ const EVIDENCE_SCOPES = {
   'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
+  'indicator-edge': ['FORWARD PRE-REGISTERED INDICATOR SCORING - OBSERVATION ONLY', 'Bars closed after the hash-chained freeze only; labels follow the frozen rules and FDR family. Not a tile and not a qualification result.'],
   combos: ['POLICY GRID FRESHNESS UNVERIFIED', 'Waiting for policy-report source and generation receipts. Legacy executed evidence remains separate; no current-epoch claim is established yet.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared exit report and freshness receipts. Paper and shadow/lab evidence remain separate.'],
@@ -9679,6 +9700,86 @@ async function loadRuntimeIncidents() {
   ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
 }
 
+function ieNum(v, digits = 2, signed = false) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+  const n = Number(v);
+  return (signed && n > 0 ? '+' : '') + n.toFixed(digits);
+}
+
+let INDICATOR_EDGE = null;
+
+function renderIndicatorEdgeTable() {
+  const d = INDICATOR_EDGE || {};
+  const mode = (document.getElementById('indicator-edge-filter') || {}).value || 'all';
+  const rows = (d.features || []).filter(f => mode === 'all' || (mode === 'independent' ? f.independent : f.label !== 'NOISE'));
+  const labelColor = {PROMISING: '#3fb950', HINT: '#d29922', NOISE: '#8b949e'};
+  document.getElementById('indicator-edge-head').innerHTML = sortHead(['#', 'Feature', 'Label', 'Window', 'Signals / day', 'Hit %', 'Net bp 2 s / 9 s', 'Rank IC', 'Top-bottom bp', 'MFE / MAE bp', 'q (FDR)', 'Best regime', 'Cluster']);
+  document.getElementById('indicator-edge-body').innerHTML = rows.map((f, i) => {
+    const b = f.best || {};
+    return `<tr><td>${i + 1}</td><td title="${escapeHtml(f.family + ' / ' + f.role)}">${escapeHtml(f.feature)}</td>`
+      + `<td style="color:${labelColor[f.label] || '#c9d1d9'};font-weight:600">${escapeHtml(f.label)}</td>`
+      + `<td>+${escapeHtml(String(f.best_window_min))}m</td><td>${ieNum(f.signals_per_day, 1)}</td>`
+      + `<td>${b.hit_rate === null || b.hit_rate === undefined ? '-' : (100 * b.hit_rate).toFixed(1)}</td>`
+      + `<td>${ieNum(b.mean_net_bp, 2, true)} / ${ieNum(b.mean_net_bp_9s, 2, true)}</td>`
+      + `<td>${ieNum(b.rank_ic, 3, true)}</td><td>${ieNum(b.top_bottom_spread_bp, 2, true)}</td>`
+      + `<td>${ieNum(b.mfe_bp, 1, true)} / ${ieNum(b.mae_bp, 1, true)}</td><td>${ieNum(b.q_value, 3)}</td>`
+      + `<td>${escapeHtml(f.best_regime || '-')}</td><td>${f.independent ? 'independent' : escapeHtml('-> ' + (f.cluster_rep || ''))}</td></tr>`;
+  }).join('') || '<tr><td colspan="13">No scored features yet.</td></tr>';
+}
+
+async function loadIndicatorEdge() {
+  const note = document.getElementById('indicator-edge-note');
+  let d;
+  try {
+    const r = await fetch('/api/research/indicator_edge');
+    d = await r.json();
+  } catch (e) {
+    note.textContent = 'Indicator edge unavailable: ' + e;
+    return;
+  }
+  INDICATOR_EDGE = d;
+  setEvidenceScope('indicator-edge', ...EVIDENCE_SCOPES['indicator-edge']);
+  if (d.status === 'UNAVAILABLE') {
+    note.textContent = 'No indicator edge report yet (' + (d.reason || 'missing') + '). The scorer runs with the 2-hourly genome grid task.';
+    ['indicator-edge-kpis', 'indicator-edge-daily', 'indicator-edge-availability', 'indicator-edge-body', 'indicator-edge-clusters', 'indicator-edge-combos'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    return;
+  }
+  const pre = d.prereg || {}, inp = d.inputs || {}, lc = d.label_counts || {}, inv = (d.status_inventory || {}).counts || {};
+  const age = d.age_sec === null || d.age_sec === undefined ? '-' : (d.age_sec / 3600).toFixed(1) + ' h ago';
+  note.textContent = `Scorer status ${d.status}; generated ${d.generated_at || '-'} (${age}); bars ${inp.first_bar_utc || '-'} to ${inp.last_bar_utc || '-'}.`;
+  document.getElementById('indicator-edge-kpis').innerHTML = [
+    ['Scored days', String(d.scored_days ?? 0)],
+    ['Eligible bars / shipped', `${inp.eligible_rows ?? 0} / ${inp.bar_rows ?? 0}`],
+    ['PROMISING / HINT / NOISE', `${lc.PROMISING ?? 0} / ${lc.HINT ?? 0} / ${lc.NOISE ?? 0}`],
+    ['Independent signals', String((d.clusters || {}).independent_count ?? 0)],
+    ['Indicators available / warming / unavailable', `${inv.AVAILABLE ?? 0} / ${inv.WARMING_UP ?? 0} / ${inv.UNAVAILABLE ?? 0}`],
+    ['Trials in the FDR family', String(d.trial_count ?? '-')],
+    ['Pre-registration', pre.prereg_id ? `${pre.prereg_id} (${String(pre.line_sha || '').slice(0, 12)})` : 'NOT FROZEN'],
+    ['Chain', (pre.chain || {}).chain_ok ? 'intact' : 'BROKEN'],
+  ].map(([l, v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${escapeHtml(String(v))}</div></div>`).join('');
+  const ds = d.daily_summary || {};
+  document.getElementById('indicator-edge-daily').innerHTML = escapeHtml(ds.paragraph || 'No daily summary yet.')
+    + (ds.intraday_paragraph ? `<br><span style="opacity:.75">Latest run: ${escapeHtml(ds.intraday_paragraph)}</span>` : '');
+  const groups = {};
+  ((d.status_inventory || {}).indicators || []).forEach(x => { (groups[x.status] = groups[x.status] || []).push(`${x.num} ${x.id}`); });
+  document.getElementById('indicator-edge-availability').innerHTML = Object.keys(groups).sort().map(k =>
+    `<div><strong>${escapeHtml(k)}</strong> (${groups[k].length}): ${escapeHtml(groups[k].join(', '))}</div>`).join('') || 'No bars yet.';
+  renderIndicatorEdgeTable();
+  const cl = d.clusters || {};
+  document.getElementById('indicator-edge-clusters').innerHTML = (cl.clusters || []).map(c =>
+    `<div><strong>${escapeHtml(c.representative)}</strong> keeps: ${escapeHtml(c.members.filter(m => m !== c.representative).join(', '))}</div>`).join('') || 'No clusters above the threshold.';
+  const co = d.combinations || {};
+  document.getElementById('indicator-edge-combos-note').textContent = `${co.status || 'GATED'}: ${co.gate_reason || 'not evaluated'}; frozen variants ${co.frozen_variants ?? 0}; tile-package proposals ${(co.tile_proposals || []).length} (proposals only - never registered automatically).`;
+  document.getElementById('indicator-edge-combos').innerHTML = (co.rows || []).map(r => {
+    const s = r.stats || {};
+    return `<tr><td>${escapeHtml(r.combo_id)}</td><td>${escapeHtml(r.family)}</td><td>${escapeHtml(r.label)}</td><td>${r.forward_days ?? 0}</td><td>${s.signals ?? 0}</td>`
+      + `<td>${s.hit_rate === null || s.hit_rate === undefined ? '-' : (100 * s.hit_rate).toFixed(1)}</td><td>${ieNum(s.mean_net_bp, 2, true)}</td><td>${ieNum(s.q_value, 3)}</td></tr>`;
+  }).join('');
+  sortableTable('indicator-edge-table');
+  const filt = document.getElementById('indicator-edge-filter');
+  if (filt && !filt.dataset.bound) { filt.dataset.bound = '1'; filt.addEventListener('change', renderIndicatorEdgeTable); }
+}
+
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
   lanes: [loadLanes],
@@ -9686,6 +9787,7 @@ const SECTION_LOADERS = {
   'chase-policy-lab': [loadChasePolicyLab],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
   combos: [loadGenomeGrid, loadMixMatch, loadCombos], 'spread-perf': [loadSpreadPerf],
+  'indicator-edge': [loadIndicatorEdge],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
@@ -10104,6 +10206,64 @@ _RESEARCH_CONTRACT_KEYS = (
 )
 
 
+INDICATOR_EDGE_REPORT_PATH = Path(
+    os.getenv("ANALYZER_INDICATOR_EDGE_REPORT")
+    or r"C:\DoxxedCrypto\analyzer-exports\indicator-edge\indicator_edge_report.json"
+)
+_INDICATOR_EDGE_PASSTHROUGH = (
+    "generated_at", "feature_set_version", "feature_set_sha", "prereg", "rules", "trial_count", "scored_features",
+    "inputs", "label_counts", "scored_days", "status_inventory", "top5", "daily_summary", "compute_sec",
+)
+_INDICATOR_EDGE_WINDOW_KEYS = ("label", "signals", "hit_rate", "mean_net_bp", "mean_net_bp_9s", "mean_exec_bp",
+                               "rank_ic", "top_bottom_spread_bp", "mfe_bp", "mae_bp", "q_value")
+
+
+def _indicator_edge_payload(args: dict) -> tuple[dict, int]:
+    """Compact Indicator Edge report; ``feature=<id>`` returns one feature with its daily and regime splits."""
+    try:
+        report = json.loads(INDICATOR_EDGE_REPORT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"schema": "indicator_edge_dashboard_v1", "status": "UNAVAILABLE",
+                "reason": f"{type(exc).__name__}: {exc}"[:300], "report_path": str(INDICATOR_EDGE_REPORT_PATH)}, 404
+    feats = report.get("features") or []
+    if args.get("feature"):
+        hit = next((f for f in feats if f.get("feature") == args["feature"]), None)
+        if hit is None:
+            return {"schema": "indicator_edge_feature_v1", "status": "UNKNOWN_FEATURE", "feature": args["feature"]}, 404
+        return {"schema": "indicator_edge_feature_v1", "status": "OK", "generated_at": report.get("generated_at"),
+                "feature": hit}, 200
+    if args.get("label"):
+        feats = [f for f in feats if f.get("label") == args["label"].upper()]
+    if args.get("independent") in ("1", "true"):
+        feats = [f for f in feats if f.get("independent")]
+    generated = _dashboard_sections._parse_ts(report.get("generated_at"))
+    combos = report.get("combinations") or {}
+    clusters = report.get("clusters") or {}
+    return {
+        "schema": "indicator_edge_dashboard_v1", "status": report.get("status"),
+        "report_path": str(INDICATOR_EDGE_REPORT_PATH),
+        "age_sec": round(time.time() - generated, 1) if generated else None,
+        **{key: report.get(key) for key in _INDICATOR_EDGE_PASSTHROUGH},
+        "clusters": {k: clusters.get(k) for k in ("threshold_abs_rho", "independent_count", "representatives", "clusters")},
+        "combinations": {**{k: combos.get(k) for k in ("grid_id", "status", "gate_reason", "shape", "frozen_variants",
+                                                       "newly_frozen", "tile_proposals")},
+                         "rows": [{k: r.get(k) for k in ("combo_id", "family", "variant", "label", "forward_days")}
+                                  | {"stats": {k: (r.get("stats") or {}).get(k) for k in _INDICATOR_EDGE_WINDOW_KEYS}}
+                                  for r in (combos.get("rows") or [])[:100]]},
+        "features": [{k: f.get(k) for k in ("feature", "indicator", "num", "family", "role", "variant", "label",
+                                            "best_window_min", "best_regime", "signals_per_day", "best",
+                                            "cluster_rep", "independent")}
+                     | {"by_window": {w: {k: t.get(k) for k in _INDICATOR_EDGE_WINDOW_KEYS}
+                                      for w, t in (f.get("windows") or {}).items()}} for f in feats],
+    }, 200
+
+
+@app.route("/api/research/indicator_edge")
+def api_research_indicator_edge():
+    payload, status = _indicator_edge_payload(request.args.to_dict())
+    return jsonify(payload), status
+
+
 @app.route("/api/research")
 def api_research_index():
     out = _research_cache.index(RESEARCH_API_DIR / _research_cache.DB_NAME)
@@ -10116,6 +10276,7 @@ def api_research_index():
                        "/api/research/policy_totals?holdout_verdict=FAILED_HOLDOUT&q=FADE",
                        "/api/research/regime_map?cohort=AI_DECISION&regime=trend&sort=oos_ev_bp",
                        "/api/research/forward_tracker?verdict=FORWARD_CONFIRMED",
+                       "/api/research/indicator_edge", "/api/research/indicator_edge?label=HINT&independent=1",
                        "/api/research/mix_match_structures?cohort=XVENUE_EVALUATOR&sort=nested_oos_fine.ev_bp"]
     return jsonify(out)
 

@@ -84,6 +84,11 @@ ANALYZER_USAGE = {
                                            "consumers": ["stream_studies taker counterfactual EV"]},
     "fill_markouts.jsonl": {"usage": STRATEGY_LAB, "continuous": False,
                             "consumers": ["stream_studies post-fill markout curves"]},
+    "indicator_bars_v1.jsonl": {
+        "usage": FULL, "continuous": True,
+        "consumers": ["indicator_forward_scorer (all rotations)", "Indicator Edge dashboard section"],
+        "schemas": ["indicator_bars_v1"],
+        "note": "one row per closed 3-minute bar; scored forward only against the frozen pre-registration"},
 }
 
 

@@ -80,6 +80,8 @@ POLICIES: Mapping[str, Policy] = {
     "cross_venue_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "cross_venue_reconnects": Policy(2, 30 * 60.0, 6 * HOUR, True, WARNING),
     "market_context_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    # Observation-only indicator engine: a closed bar must land every 3 minutes.
+    "indicator_engine_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "ai_input_dead": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "bbo_refresh_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "lifecycle_stalled": Policy(2, 30 * 60.0, 6 * HOUR, True),

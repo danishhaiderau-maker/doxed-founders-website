@@ -95,6 +95,8 @@ LEDGER_DATASETS = frozenset({
     "v3_order_intent", "v3_execution", "v3_lifecycle", "v3_decision", "v3_opportunity",
     "closed_trades", "trade_outcomes", "trade_lifecycle", "fill_quality", "fill_markouts",
     "expired_orders", "decisions", "ai_decisions", "quarantine_receipts",
+    # Forward-only indicator evidence scored against a frozen pre-registration.
+    "indicator_bars_v1",
 })
 SESSION_FILE = "research_session.json"
 MODE_DRY_RUN = "dry_run"

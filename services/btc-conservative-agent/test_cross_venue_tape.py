@@ -19,7 +19,9 @@ import cross_venue_tape as cvt
 def test_binance_parser_reads_depth_aggtrade_and_mark_price():
     depth = {"stream": "btcusdt@depth5@100ms", "data": {
         "e": "depthUpdate", "T": 1000, "b": [["83514.50", "2.9"]], "a": [["83514.60", "1.0"]]}}
-    assert cvt.parse_binance(depth) == [("bbo", 83514.5, 83514.6, 1000.0)]
+    events = cvt.parse_binance(depth)
+    assert events[0] == ("bbo", 83514.5, 83514.6, 1000.0)
+    assert events[1][:2] == ("depth", "imb5") and events[1][2] == pytest.approx((2.9 - 1.0) / 3.9)
     sell = {"data": {"e": "aggTrade", "p": "83447.2", "q": "3.316", "T": 5, "m": True}}
     buy = {"data": {"e": "aggTrade", "p": "83447.2", "q": "0.5", "T": 6, "m": False}}
     assert cvt.parse_binance(sell) == [("trade", 83447.2, 3.316, "SELL", 5.0)]
@@ -28,6 +30,34 @@ def test_binance_parser_reads_depth_aggtrade_and_mark_price():
                      "T": 1790841600000}}
     assert cvt.parse_binance(mark) == [("deriv", {"funding_rate": 5.036e-05, "mark": 83452.1,
                                                   "index": 83503.6, "next_funding_ms": 1790841600000.0})]
+
+
+def test_binance_depth20_emits_imbalance_only_and_never_moves_the_bbo():
+    bids = [[str(100 - i * 0.1), "1.0"] for i in range(20)]
+    asks = [[str(100.1 + i * 0.1), "3.0"] for i in range(20)]
+    msg = {"stream": cvt.DEPTH20_STREAM, "data": {"e": "depthUpdate", "T": 5, "b": bids, "a": asks}}
+    events = cvt.parse_binance(msg)
+    assert events == [("depth", "imb20", pytest.approx((20.0 - 60.0) / 80.0))]
+    assert cvt.book_imbalance([], [], 5) is None
+    assert cvt.book_imbalance([["1", "0"]], [["2", "0"]], 5) is None
+    public = next(c for c in cvt.VENUES["binance"]["connections"] if c["name"] == "binance_public")
+    assert cvt.DEPTH5_STREAM in public["url"] and cvt.DEPTH20_STREAM in public["url"]
+
+
+def test_binance_imbalance_is_encoded_per_second_and_carried_forward_boundedly():
+    acc = cvt.VenueAccumulator("binance")
+    acc.on_events([("bbo", 100.0, 100.1, None), ("depth", "imb5", 0.25), ("depth", "imb20", -0.5)], 10.2)
+    first = acc.close_second(10, None)
+    assert first["imb5"] == 0.25 and first["imb20"] == -0.5
+    assert acc.close_second(11, None)["imb5"] == 0.25
+    assert acc.close_second(20, None)["imb5"] is None
+    samples = {"binance": [dict(first, sec=0)] + [{"sec": s, "mid": None, "buy": 0.0, "sell": 0.0}
+                                                   for s in range(1, 60)]}
+    row = cvt.encode_minute(0, samples, [100.0] * 60)
+    assert row["imbalance_unit"] == cvt.IMBALANCE_UNIT
+    assert row["venues"]["binance"]["imb5"][0] == 250
+    assert row["venues"]["binance"]["imb20"][0] == -500
+    assert row["venues"]["binance"]["imb5"][1] is None
 
 
 def test_bybit_ticker_deltas_merge_and_every_push_reconfirms_the_book():

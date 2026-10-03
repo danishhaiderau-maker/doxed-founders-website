@@ -51,6 +51,7 @@ TIER_A_DATASETS = {
     "cross_venue_tape_1m.jsonl": ("cross_venue_tape_1m", 1, ("minute_ts", "ts", "t", "timestamp")),
     "market_context_1m.jsonl": ("market_context_1m", 1, ("minute_ts", "ts", "t", "timestamp")),
     "liquidations.jsonl": ("liquidations", 1, ("ts", "recv_ts", "exch_ts", "event_ts", "timestamp")),
+    "indicator_bars_v1.jsonl": ("indicator_bars_v1", 1, ("bar_close_ts", "bar_ts", "ts")),
     "ai_input_log.jsonl": ("ai_calls", 1, ("ts", "ts_epoch", "timestamp", "logged_at", "created_at")),
     "ai_shadow_challengers.jsonl": ("ai_shadow_challengers", 1,
                                     ("decision_ts", "decision_utc", "tape_features.as_of_ts", "ts", "timestamp",

@@ -59,6 +59,8 @@ RUN python -c "import cross_venue_tape, cross_venue_collector"
 RUN python -c "import ai_shadow_challengers, ai_regime_shadow, decision_feature_snapshots, research.decision_model_report"
 # Watch-only market-context collector and its tape/session/regime helpers.
 RUN python -c "import market_session_calendar, trailing_regime, market_context_tape, market_context_collector"
+# Observation-only indicator engine process, its registry and pure computation.
+RUN python -c "import indicator_edge_spec, indicator_engine_core, indicator_engine; assert not indicator_edge_spec.validate_spec()"
 # System-health banner and Alerts section (dashboard routes import both).
 RUN python -c "import system_health_banner, system_health_alerts, runtime_uptime, monitor_api"
 # Thread heartbeats, relay stale-owner delivery guard, AI call cost and shadow chase buckets load at bot import.

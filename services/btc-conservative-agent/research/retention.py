@@ -55,6 +55,7 @@ LIVE_LEDGER_FILES = (
     "shadow_lane_outcome.jsonl",
     "lane_opportunity_capture.jsonl",
     "execution_funnel.jsonl",
+    "indicator_bars_v1.jsonl",
 )
 
 

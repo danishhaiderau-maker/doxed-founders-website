@@ -101,6 +101,25 @@ else
   echo "[fly-entrypoint] MARKET_CONTEXT_COLLECTOR_ENABLED!=1 -> market-context collector disabled."
 fi
 
+# Live Indicator Edge engine: pure observation. Reads the tape/minute files the
+# collectors write and appends one indicator_bars_v1 row per closed 3-minute
+# bar. No network, no orders, no bot import. Separate niced process with its
+# own restart loop in the runtime dir so its JSONL ships with the segments.
+if [ "${INDICATOR_ENGINE_ENABLED:-1}" = "1" ]; then
+  IE_LOG="$DATA_DIR/indicator-engine.log"
+  if [ -f "$IE_LOG" ] && [ "$(wc -c < "$IE_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    : > "$IE_LOG"
+  fi
+  echo "[fly-entrypoint] starting indicator engine (observation-only, niced)..."
+  ( while true; do
+      OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 nice -n 10 python /app/indicator_engine.py >> "$IE_LOG" 2>&1
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] indicator engine exited rc=$? -> restarting in 10s" >> "$IE_LOG"
+      sleep 10
+    done ) &
+else
+  echo "[fly-entrypoint] INDICATOR_ENGINE_ENABLED!=1 -> indicator engine disabled."
+fi
+
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
 export PYTHONUNBUFFERED=1
 BOT_LOG="$DATA_DIR/bot.log"
