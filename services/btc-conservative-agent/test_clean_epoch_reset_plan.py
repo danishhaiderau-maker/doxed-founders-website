@@ -107,6 +107,73 @@ def test_relay_evidence_is_counted_and_verify_detects_change(tmp_path):
     assert "RELAY_PENDING_EVIDENCE_CHANGED" in out["failures"]
 
 
+def _proof(root: Path) -> dict:
+    from research_reset_inventory import PROOF_SCHEMA
+    return {"schema": PROOF_SCHEMA, "runtime_root": str(root), "retired_epoch_id": "old",
+            "new_epoch_id": "new", "source_revision": "a" * 40, "recovery_receipt_sha256": "b" * 64,
+            "writers_quiesced": True, "paper_only": True, "live_disarmed": True, "epoch_retired": True,
+            "pending_paper_orders": 0, "open_paper_positions": 0, "pending_wal_records": 0,
+            "pending_recovery_records": 0}
+
+
+def _execute_preflight(root: Path):
+    from research_reset_execution import execute_research_reset
+    (root / "research_reset_receipts").mkdir(exist_ok=True)
+    return execute_research_reset(runtime_root=root, proof=_proof(root), quiescent=True,
+                                  recovery_states={"emergency_wal": "NOT_PRESENT"},
+                                  receipt_path=root / "research_reset_receipts" / "x" / "deletion.json",
+                                  validate_only=True)
+
+
+def test_plan_execute_gates_match_the_executor_targets(tmp_path):
+    root = _runtime(tmp_path)
+    out = crp.plan(str(root))
+    gates = out["execute_gates"]
+    assert gates["ok"] is True, gates["failures"]
+    scope = gates["scopes"][0]
+    assert scope["status"] == "ADMITTED" and scope["scope"] == "runtime"
+    executed = _execute_preflight(root)
+    assert executed["status"] == "VALIDATED"
+    assert scope["target_count"] == executed["target_count"] == out["would_delete_files"]
+    assert scope["retained_count"] == executed["retained_count"]
+    assert scope["receipt_context_bytes"] < 4096
+
+
+def test_plan_fails_exactly_when_execute_would_refuse_the_receipt_context(tmp_path, monkeypatch):
+    import research_exact_deletion
+    from research_exact_deletion import ResearchDeletionRejected
+    root = _runtime(tmp_path)
+    monkeypatch.setattr(research_exact_deletion, "MAX_RETAINED_ROWS", 1)
+    out = crp.plan(str(root))
+    assert out["ok"] is False
+    assert out["execute_gates"]["failures"] == ["runtime:INVALID_RETAINED_METADATA"]
+    try:
+        _execute_preflight(root)
+    except ResearchDeletionRejected as exc:
+        assert str(exc) == "INVALID_RETAINED_METADATA"
+    else:
+        raise AssertionError("execute admitted what the plan refused")
+
+
+def test_plan_fails_on_target_budget_and_v3_identity_conflict(tmp_path, monkeypatch):
+    import research_reset_execution
+    root = _runtime(tmp_path)
+    original = research_reset_execution.admit_research_reset_plan
+    monkeypatch.setattr(research_reset_execution, "admit_research_reset_plan",
+                        lambda plan, **kw: original(plan, **{**kw, "max_files": 1}))
+    assert "runtime:RESET_TARGET_BUDGET_EXCEEDED" in crp.plan(str(root))["execute_gates"]["failures"]
+    monkeypatch.setattr(research_reset_execution, "admit_research_reset_plan", original)
+    markers = root / "v3" / "receipts" / "emergency_record_idempotency_v1"
+    for ledger, rev in (("decision", "1" * 40), ("execution", "2" * 40)):
+        (markers / ledger).mkdir(parents=True)
+        (markers / ledger / "complete.json").write_text(json.dumps(
+            {"schema": "emergency_record_index_complete_v1", "ledger": ledger,
+             "identity": {"epoch_id": "e", "source_revision": rev, "deployed_revision": rev,
+                          "tile_config_signature": "a" * 64}}), "utf-8")
+    failures = crp.plan(str(root))["execute_gates"]["failures"]
+    assert any(f.startswith("V3_IDENTITY_OR_WAL:") and "identity conflict" in f for f in failures)
+
+
 def test_cli_exit_codes(tmp_path, capsys):
     root = _runtime(tmp_path)
     assert crp.main(["plan", "--runtime-root", str(root)]) == 0

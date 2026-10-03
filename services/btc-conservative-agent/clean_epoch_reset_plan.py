@@ -70,14 +70,106 @@ def plan(runtime_root: str) -> dict:
             if protected(row["path"]):
                 violations.append(row["path"])
     pointers = sorted(p.parent.name for p in (root / GENERATION_POINTERS).glob("*/ACTIVE.json"))
-    ok = not violations and not incomplete
+    gates = execute_gates(root)
+    ok = not violations and not incomplete and gates["ok"]
     return {"schema": SCHEMA, "mode": "plan", "read_only": True, "ok": ok, "runtime_root": str(root),
+            "execute_gates": gates,
             "scopes": scopes, "would_delete": dict(sorted(categories.items())),
             "would_delete_files": sum(b["files"] for b in categories.values()),
             "would_delete_bytes": sum(b["bytes"] for b in categories.values()),
             "protected_candidates": sorted(violations), "incomplete_inventory": incomplete,
             "v3_generation_pointers": pointers, "relay_evidence": relay_evidence(root),
             "protected_present": _protected_inventory(root)}
+
+
+def _as_proven(result: dict) -> dict:
+    """The plan execute builds once the boundary proof exists: candidates become targets."""
+    targets = [{k: v for k, v in row.items() if k != "reason"} for row in result["retained"]
+               if row.get("reason") == CANDIDATE_REASON]
+    retained = [row for row in result["retained"] if row.get("reason") != CANDIDATE_REASON]
+    return {**result, "targets": targets, "retained": retained,
+            "target_count": len(targets), "target_bytes": sum(int(r["size_bytes"]) for r in targets),
+            "hardlinked_target_count": sum(bool(r.get("hardlinked")) for r in targets),
+            "proof_sha256": hashlib.sha256(b"clean_epoch_reset_plan_dry_run").hexdigest()}
+
+
+def execute_gates(root: Path) -> dict:
+    """Dry-run every execute gate that can be evaluated read-only while the bot runs.
+
+    Per scope: inventory completeness, target budget, deletion admission and the
+    receipt-context binding, through the same ``admit_research_reset_plan`` the
+    executor calls. Boundary: V3 read identity, emergency WAL, recovery and
+    auxiliary audits. Quiescence/flat/disarmed are proven by the caller at execute.
+    """
+    from research_exact_deletion import ResearchDeletionRejected
+    from research_reset_execution import admit_research_reset_plan
+
+    failures, scopes = [], []
+    for name in _scopes(root):
+        label = name or "runtime"
+        row = {"scope": label}
+        try:
+            result = plan_research_reset(str(root), proof=None, allow_fly_runtime_aliases=True, scope_name=name)
+            if result.get("complete") is not True or result.get("errors"):
+                raise ResearchDeletionRejected("RESET_INVENTORY_INCOMPLETE")
+            proven = _as_proven(result)
+            scope_root = Path(proven["scope_root"])
+            context, admission = admit_research_reset_plan(
+                proven, receipt_path=scope_root / "research_reset_receipts" / "plan-dry-run" / "deletion.json",
+                quiescent=True, recovery_states={"reset_plan_dry_run": "NOT_PRESENT"}, validate_only=True)
+            binding = admission["context"]
+            row.update(status="ADMITTED", target_count=proven["target_count"],
+                       target_bytes=proven["target_bytes"], retained_count=binding["retained_count"],
+                       retained_bytes=binding["retained_bytes"],
+                       receipt_context_bytes=len(json.dumps(binding, sort_keys=True).encode()))
+        except (ResearchDeletionRejected, ValueError, OSError) as exc:
+            row.update(status="REFUSED", code=str(exc) or type(exc).__name__)
+            failures.append(f"{label}:{row['code']}")
+        scopes.append(row)
+    boundary = _boundary_gates(root)
+    failures.extend(boundary["failures"])
+    return {"ok": not failures, "failures": failures, "scopes": scopes, "boundary": boundary}
+
+
+def _boundary_gates(root: Path) -> dict:
+    import os
+    from research_reset_auxiliary_audit import audit_auxiliary_cleanup
+    from research_reset_recovery_audit import audit_research_reset_recovery
+    from v3_marker_quarantine import preflight
+
+    failures = []
+    revision = str(os.getenv("SOURCE_GIT_REV") or "")[:12].lower()
+    identity = preflight(str(root), revision)
+    if identity.get("ok") is not True:
+        failures.append("V3_IDENTITY_OR_WAL:" + str(identity.get("open_read_only")) + "/" + str(identity.get("wal")))
+    adopted = identity.get("adopted_identity")
+    # No ACTIVE authority means execute binds the legacy session identity,
+    # which only the running bot can read; the audit then runs at execute.
+    recovery = {"status": "SKIPPED_NO_ADOPTED_IDENTITY"}
+    if adopted and adopted.get("epoch_id"):
+        try:
+            audit = audit_research_reset_recovery(str(root), expected_identity=adopted)
+            recovery = {key: audit.get(key) for key in ("complete", "safe_for_reset_recovery_scope",
+                                                         "pending_or_unknown_count", "blockers")}
+            if (audit.get("complete") is not True or audit.get("safe_for_reset_recovery_scope") is not True
+                    or audit.get("pending_or_unknown_count") != 0):
+                failures.append("RESET_RECOVERY_NOT_PROVEN_CLEAR")
+        except (ValueError, OSError) as exc:
+            recovery = {"status": "ERROR", "error": str(exc)}
+            failures.append("RESET_RECOVERY_NOT_PROVEN_CLEAR")
+    auxiliary = []
+    for path in ([root, root.parent] if root.name == "runtime" else [root]):
+        try:
+            audit = audit_auxiliary_cleanup(str(path))
+            auxiliary.append({"path": str(path), **{key: audit.get(key) for key in
+                              ("complete", "safe", "pending_or_unknown_count")}})
+            if (audit.get("complete") is not True or audit.get("safe") is not True
+                    or audit.get("pending_or_unknown_count") != 0):
+                failures.append("RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR")
+        except (ValueError, OSError) as exc:
+            auxiliary.append({"path": str(path), "error": str(exc)})
+            failures.append("RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR")
+    return {"identity": identity, "recovery": recovery, "auxiliary": auxiliary, "failures": failures}
 
 
 def relay_evidence(root: Path) -> dict:

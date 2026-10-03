@@ -306,7 +306,10 @@ def test_managed_alias_executor_deletes_only_runtime_payload(tmp_path, monkeypat
     assert result["status"] == "COMPLETE" and not target.exists()
     assert (sibling / "signal_replay.jsonl").read_bytes() == b"must-stay"
     assert (alias / "signal_replay.jsonl").read_bytes() == b"must-not-traverse"
-    assert result["retained"][0]["verified_sibling_target"] == str(sibling)
+    import json
+    from pathlib import Path
+    retained = [json.loads(line) for line in Path(result["retained_receipt"]).read_text().splitlines()]
+    assert retained[0]["verified_sibling_target"] == str(sibling)
 
 
 def test_real_managed_symlink_if_host_permits(tmp_path):

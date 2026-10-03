@@ -70,12 +70,18 @@ def test_success_preserves_retained_and_emits_metadata_receipts(tmp_path):
     assert result["status"] == "COMPLETE"
     assert not live.exists() and not payload.exists()
     assert essential.exists() and metadata.exists()
-    assert {row["absolute_path"] for row in result["retained"]} == {str(metadata), str(essential)}
+    sidecar = Path(result["retained_receipt"])
+    rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
+    assert {row["absolute_path"] for row in rows} == {str(metadata), str(essential)}
+    assert result["retained_count"] == 2
+    assert result["retained_sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
     receipt = json.loads(args["receipt_path"].read_text())
     assert len(receipt["expected_sha256_by_path"]) == 2
     assert receipt["context"]["plan_sha256"] == result["plan_sha256"]
     assert receipt["context"]["proof_sha256"] == result["proof_sha256"]
-    assert {row["absolute_path"] for row in receipt["context"]["retained"]} == {str(metadata), str(essential)}
+    assert "retained" not in receipt["context"]
+    assert receipt["context"]["retained_sha256"] == result["retained_sha256"]
+    assert receipt["retained_receipt"] == str(sidecar) == str(args["receipt_path"]) + ".retained.jsonl"
     assert Path(receipt["progress_journal"]).exists()
     assert result["physical_bytes_reclaimed"] is None
     assert result["raw_payload_copies_created"] is False
@@ -163,11 +169,76 @@ def test_crash_receipt_already_retains_boundary_identity_and_retained_paths(tmp_
     assert receipt["status"] == "PREPARED"
     assert len(receipt["context"]["proof_sha256"]) == 64
     assert len(receipt["context"]["plan_sha256"]) == 64
-    assert receipt["context"]["retained"][0]["absolute_path"] == str(essential)
+    sidecar = Path(receipt["retained_receipt"])
+    assert json.loads(sidecar.read_text().splitlines()[0])["absolute_path"] == str(essential)
     assert essential.exists() and not target.exists()
     from research_exact_deletion import reconcile_research_deletion
     assert reconcile_research_deletion(args["receipt_path"])["counts"] == {"ABSENT_AFTER_INTENT": 1}
-    receipt["context"]["retained"] = []
+    original_sidecar = sidecar.read_bytes()
+    sidecar.write_bytes(b"")
+    with pytest.raises(ResearchDeletionRejected, match="RETAINED_SIDECAR_MISMATCH"):
+        reconcile_research_deletion(args["receipt_path"])
+    sidecar.write_bytes(original_sidecar)
+    receipt["context"]["retained_count"] = 0
     args["receipt_path"].write_text(json.dumps(receipt))
     with pytest.raises(ResearchDeletionRejected, match="JOURNAL_SEED_MISMATCH"):
         reconcile_research_deletion(args["receipt_path"])
+
+
+def _worst_case_rows(count, path_chars):
+    long = "/app/data/runtime/" + "d" * path_chars
+    return [{"path": f"{long}/{i}", "absolute_path": f"{long}/{i}", "reason": "ESSENTIAL_X" * 4,
+             "category": "C" * 48, "size_bytes": 2**53, "hardlinked": True,
+             "verified_sibling_target": "t" * 4096} for i in range(count)]
+
+
+def test_receipt_context_is_constant_size_at_the_200k_row_worst_case():
+    from research_exact_deletion import MAX_RECEIPT_CONTEXT_BYTES, MAX_RETAINED_ROWS, retained_binding
+    sample = 1000
+    binding = retained_binding(_worst_case_rows(sample, 3000))
+    # Inline, 200k worst-case rows would be gigabytes: far beyond the 16 MiB
+    # resume and 64 MiB reconciliation read limits, so no byte cap could cover them.
+    assert binding["retained_bytes"] * (MAX_RETAINED_ROWS // sample) > 1024**3
+    context = {"plan_sha256": "a" * 64, "proof_sha256": "b" * 64, "bytes_basis": "LOGICAL",
+               "hardlinked_target_count": 2**53, **binding,
+               "retained_count": MAX_RETAINED_ROWS, "retained_bytes": 2**53}
+    assert len(json.dumps(context, sort_keys=True).encode()) < MAX_RECEIPT_CONTEXT_BYTES // 100
+
+
+def test_row_cap_is_the_bound_and_sidecar_is_written_before_receipt(tmp_path):
+    from research_exact_deletion import MAX_RETAINED_ROWS, validate_exact_research_deletion
+    args = settings(tmp_path)
+    root = args["runtime_root"]
+    target = put(root, "signal_replay.jsonl")
+    base = {"plan_sha256": "a" * 64, "proof_sha256": "b" * 64, "bytes_basis": "LOGICAL",
+            "hardlinked_target_count": 0}
+    common = dict(root=root, targets=[target], allowed_paths=[target], receipt_path=args["receipt_path"],
+                  quiescent=True, recovery_states=args["recovery_states"])
+    rows = [{"path": f"r/{i}", "absolute_path": str(root / f"r/{i}"), "reason": "ESSENTIAL_X"}
+            for i in range(MAX_RETAINED_ROWS)]
+    admitted = validate_exact_research_deletion(**common, receipt_context={**base, "retained": rows})
+    assert admitted["context"]["retained_count"] == MAX_RETAINED_ROWS
+    assert admitted["retained_sidecar"] == Path(str(args["receipt_path"]) + ".retained.jsonl")
+    with pytest.raises(ResearchDeletionRejected, match="INVALID_RETAINED_METADATA"):
+        validate_exact_research_deletion(**common, receipt_context={**base, "retained": rows + rows[:1]})
+    Path(str(args["receipt_path"]) + ".retained.jsonl").write_text("stale")
+    with pytest.raises(ResearchDeletionRejected, match="UNSAFE_RETAINED_SIDECAR_PATH"):
+        validate_exact_research_deletion(**common, receipt_context={**base, "retained": rows[:1]})
+    assert target.exists()
+
+
+def test_execute_receipt_stays_small_with_many_retained_files(tmp_path):
+    args = settings(tmp_path)
+    root = args["runtime_root"]
+    target = put(root, "signal_replay.jsonl")
+    keep = root / "keep" / ("k" * 40)
+    keep.mkdir(parents=True)
+    for i in range(1200):
+        (keep / f"open_positions_{i:05d}.json").write_bytes(b"")
+    from research_reset_inventory import plan_research_reset
+    plan = plan_research_reset(str(root), proof=args["proof"])
+    assert len(plan["retained"]) >= 1200
+    result = execution.execute_research_reset(**args)
+    assert result["status"] == "COMPLETE" and not target.exists()
+    assert result["retained_count"] == len(plan["retained"])
+    assert args["receipt_path"].stat().st_size < 64 * 1024
