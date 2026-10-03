@@ -395,3 +395,38 @@ def test_post_deploy_receipt_rebinding_is_copied_in_parallel_and_byte_exact(tmp_
     assert {k: v["sha256"] for k, v in index.items()} == {k: v["sha256"] for k, v in state.items()}
     leftovers = [p for p in store.rglob("*.migration")]
     assert leftovers == []
+
+def test_settled_files_are_hardlinked_across_layers_and_writers_copy_on_write(tmp_path, monkeypatch):
+    import time as _time
+
+    import storage_links
+
+    env, head, health = _synced(tmp_path)
+    tree = env.shadow / "tree"
+    old = _time.time() - 8 * 3600
+    for rel in ("v3/ledgers/decision.jsonl", "v3/ledgers/opportunity.jsonl", "research.db"):
+        os.utime(tree / rel, (old, old))
+    view = tmp_path / "view"
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health,
+                                   link_settle_sec=3600)
+    assert receipt["files_linked"] == 2 and receipt["files_link_fallback_copied"] == 0
+    linked = tree / "v3/ledgers/opportunity.jsonl"
+    assert storage_links.same_file(linked, view / "v3/ledgers/opportunity.jsonl")
+    assert not storage_links.same_file(tree / "research.db", view / "research.db")
+    assert not storage_links.same_file(tree / "research_session.json", view / "research_session.json")
+
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    result = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, link_settle_sec=3600)
+    assert result["files_verified"] == 4 and result["files_linked"] == 2
+    assert storage_links.same_file(linked, store / "v3/ledgers/opportunity.jsonl")
+
+    before = (view / "v3/ledgers/opportunity.jsonl").read_bytes()
+    env.write("v3/ledgers/opportunity.jsonl", _rows(4, 3), append=True)
+    _resync(env)
+    assert linked.read_bytes().startswith(before) and len(linked.read_bytes()) > len(before)
+    assert (view / "v3/ledgers/opportunity.jsonl").read_bytes() == before
+    assert (store / "v3/ledgers/opportunity.jsonl").read_bytes() == before
+    assert not storage_links.same_file(linked, view / "v3/ledgers/opportunity.jsonl")

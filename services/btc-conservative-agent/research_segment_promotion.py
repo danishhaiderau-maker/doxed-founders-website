@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import research_segment_format as fmt
+import storage_links
 from research_segment_puller import STATE_SCHEMA, PullerError, _RunLock, refuse_unsafe_root
 from research_segment_store import HttpSegmentSource, StoreError
 
@@ -88,14 +89,31 @@ def _sha256_file(path: Path) -> str:
 
 
 def _copy_hashed(source: Path, target: Path) -> str:
-    """Copy source to target in one pass, returning the sha256 of the bytes written."""
+    """Copy source to target in one pass, returning the sha256 of the bytes written.
+
+    The copy is staged beside the target and swapped in, never written over
+    the existing name: the old target may be a hardlink shared with the tree.
+    """
     digest = hashlib.sha256()
-    with source.open("rb") as src, target.open("wb") as dst:
-        for chunk in iter(lambda: src.read(_CHUNK), b""):
-            digest.update(chunk)
-            dst.write(chunk)
-    shutil.copystat(source, target)
+    candidate = target.with_name(f".{target.name}.{os.getpid()}.promote.tmp")
+    try:
+        with source.open("rb") as src, candidate.open("wb") as dst:
+            for chunk in iter(lambda: src.read(_CHUNK), b""):
+                digest.update(chunk)
+                dst.write(chunk)
+        shutil.copystat(source, candidate)
+        os.replace(candidate, target)
+    finally:
+        candidate.unlink(missing_ok=True)
     return digest.hexdigest()
+
+
+def _link_hashed(source: Path, target: Path, recorded_sha: str | None) -> tuple[str, str]:
+    """Hardlink a settled source into the view after hashing it; (sha256, outcome)."""
+    sha = recorded_sha if recorded_sha and storage_links.same_file(source, target) else _sha256_file(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    outcome = storage_links.link_or_copy(source, target, expected_sha256=sha)
+    return sha, outcome
 
 
 def _append_tail(source: Path, target: Path, prefix_size: int, prefix_sha: str) -> str | None:
@@ -115,6 +133,7 @@ def _append_tail(source: Path, target: Path, prefix_size: int, prefix_sha: str) 
             remaining -= len(chunk)
         if digest.hexdigest() != prefix_sha:
             return None
+        storage_links.ensure_private(target)
         with target.open("r+b") as dst:
             dst.seek(prefix_size)
             for chunk in iter(lambda: src.read(_CHUNK), b""):
@@ -236,7 +255,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
                max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES,
                genesis_at: float | None = None, full: bool = False,
                verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC,
-               now: float | None = None, copy_workers: int = DEFAULT_COPY_WORKERS) -> dict:
+               now: float | None = None, copy_workers: int = DEFAULT_COPY_WORKERS,
+               link_settle_sec: float | None = storage_links.DEFAULT_SETTLE_SEC) -> dict:
     shadow_root = refuse_unsafe_root(shadow_root, "shadow root")
     view_root = refuse_unsafe_root(view_root, "promotion view")
     tree = shadow_root / "tree"
@@ -273,9 +293,11 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         _write_json_atomic(view_root / INDEX_NAME, {"schema": INDEX_SCHEMA, "complete": False, "files": previous,
                                                    "last_verified_at": last_verified})
         files, sync_state, byte_count = {}, {}, 0
-        counts = {"reused": 0, "rehashed_unchanged": 0, "appended": 0, "copied": 0, "removed": 0}
+        counts = {"reused": 0, "rehashed_unchanged": 0, "appended": 0, "copied": 0, "removed": 0,
+                  "linked": 0, "link_fallback_copies": 0, "link_deferred": 0}
         written_bytes = 0
-        entries, refresh = [], {}
+        entries, refresh, links = [], {}, {}
+        link_on = link_settle_sec is not None and link_settle_sec >= 0 and storage_links.links_enabled()
         for source in sorted(path for path in tree.rglob("*") if path.is_file()):
             relative = source.relative_to(tree).as_posix()
             target = view_root / relative
@@ -284,6 +306,18 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             view_stat = target.stat() if prior and target.is_file() else None
             view_intact = bool(view_stat and view_stat.st_size == prior["size"]
                                and view_stat.st_mtime_ns == prior["mtime_ns"])
+            # Settled files share the tree's inode (the puller copies-on-write
+            # before any append); hot streams keep a private snapshot copy.
+            if link_on and storage_links.linkable(relative) and storage_links.settled(src_stat, now, link_settle_sec):
+                unchanged = (view_intact and src_stat.st_size == prior.get("src_size")
+                             and src_stat.st_mtime_ns == prior.get("src_mtime_ns"))
+                if unchanged and not verify and storage_links.same_file(source, target):
+                    counts["reused"] += 1
+                    entries.append((relative, target, src_stat, prior["sha256"]))
+                else:
+                    links[relative] = (source, target, prior["sha256"] if unchanged and not verify else None)
+                    entries.append((relative, target, src_stat, None))
+                continue
             sha = None
             verify_failed = False
             if (view_intact and src_stat.st_size == prior.get("src_size")
@@ -307,9 +341,20 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             entries.append((relative, target, src_stat, sha))
         with ThreadPoolExecutor(max_workers=max(1, int(copy_workers))) as pool:
             futures = {rel: pool.submit(_refresh_file, *job) for rel, job in refresh.items()}
+            link_futures = {rel: pool.submit(_link_hashed, *job) for rel, job in links.items()}
             results = {rel: future.result() for rel, future in futures.items()}
+            link_results = {rel: future.result() for rel, future in link_futures.items()}
         for relative, target, src_stat, sha in entries:
-            if sha is None:
+            if sha is None and relative in link_results:
+                sha, outcome = link_results[relative]
+                if outcome in ("LINKED", "ALREADY_LINKED"):
+                    counts["linked"] += 1
+                elif outcome == "DEFERRED_IN_USE":
+                    counts["link_deferred"] += 1
+                else:
+                    counts["link_fallback_copies"] += 1
+                    written_bytes += src_stat.st_size
+            elif sha is None:
                 sha, copied = results[relative]
                 if copied:
                     counts["copied"] += 1
@@ -363,6 +408,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             "files_reused": counts["reused"], "files_rehashed_unchanged": counts["rehashed_unchanged"],
             "files_appended": counts["appended"],
             "files_copied": counts["copied"], "files_removed": counts["removed"], "bytes_written": written_bytes,
+            "files_linked": counts["linked"], "files_link_fallback_copied": counts["link_fallback_copies"],
+            "files_link_deferred": counts["link_deferred"],
             "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision,
             "promotion_level": heartbeat["promotionLevel"], "promotion_warnings": warnings}
 
@@ -383,6 +430,8 @@ def main(argv=None) -> int:
     parser.add_argument("--full", action="store_true", help="rebuild the view from scratch")
     parser.add_argument("--verify-interval-sec", type=float, default=DEFAULT_VERIFY_INTERVAL_SEC)
     parser.add_argument("--copy-workers", type=int, default=DEFAULT_COPY_WORKERS)
+    parser.add_argument("--link-settle-sec", type=float, default=storage_links.DEFAULT_SETTLE_SEC,
+                        help="hardlink tree files untouched this long (negative disables)")
     args = parser.parse_args(argv)
     try:
         source = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
@@ -392,7 +441,7 @@ def main(argv=None) -> int:
                              max_unshipped_bytes=args.max_unshipped_bytes,
                              genesis_at=genesis_window_end(source.get(fmt.manifest_key(args.prefix, 1))),
                              full=args.full, verify_interval_sec=args.verify_interval_sec,
-                             copy_workers=args.copy_workers)
+                             copy_workers=args.copy_workers, link_settle_sec=args.link_settle_sec)
     except PromotionRefused as exc:
         print(json.dumps({"ok": False, "deny_reasons": exc.reasons}, indent=2))
         return 3

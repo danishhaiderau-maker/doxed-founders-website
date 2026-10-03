@@ -34,7 +34,8 @@ def paths(tmp_path: Path) -> Paths:
     p = Paths(home=tmp_path / "home", chain=tmp_path / "chain", mirror=tmp_path / "mirror",
               mirror_archive=tmp_path / "archive-mirror", puller=tmp_path / "puller", exports=tmp_path / "exports",
               archive=tmp_path / "analysis-archive", diagnostics=tmp_path / "diag", analyzer_repo=tmp_path / "v2c",
-              retention=tmp_path / "retention")
+              retention=tmp_path / "retention", segment_manifests=tmp_path / "segment-manifests",
+              laptop_root=tmp_path)
     (p.chain / "health").mkdir(parents=True)
     return p
 
@@ -553,3 +554,32 @@ def test_data_endpoints_and_view(paths, store):
     finally:
         srv.shutdown()
         srv.server_close()
+
+def test_capacity_uses_manifest_ingest_and_restarts_slope_after_reclaim(paths):
+    man = paths.segment_manifests
+    man.mkdir(parents=True)
+    for i in range(13):
+        end = NOW - 12 * 3600 + i * 3600
+        (man / f"{i:06d}.json").write_text(json.dumps({"window_end": end, "members": [
+            {"kind": "APPEND", "size": 100_000_000}, {"kind": "SNAPSHOT", "size": 50_000_000}]}), encoding="utf-8")
+    fly = data_awareness.fly_ingest_from_manifests(man, NOW)
+    assert fly["manifests"] == 13 and fly["span_h"] == 12.0
+    assert fly["append_gb_per_day"] == pytest.approx(1.3 * 2, rel=1e-3)
+    assert fly["snapshot_churn_gb_per_day"] == pytest.approx(0.65 * 2, rel=1e-3)
+    # A one-off 20 GB purge followed by steady growth: only the growth after the purge counts.
+    hist = [[NOW - 20 * 3600 + h * 3600, 40e9 + h * 1e8] for h in range(8)]
+    hist += [[NOW - 12 * 3600 + h * 3600, 20e9 + h * 1e8] for h in range(13)]
+    assert data_awareness._slope_per_day(hist, NOW) == pytest.approx(2.4e9, rel=1e-6)
+    (paths.retention).mkdir(parents=True, exist_ok=True)
+    (paths.retention / "status.json").write_text(json.dumps({
+        "bytes_after": 20e9, "cap_bytes": 50e9, "sizes_basis": "physical_v1",
+        "sizes_after": {"mirror_tree": 10e9, "canonical": 10e9},
+        "storage_dedupe": {"duplicate_physical_gb": 2.5, "hardlink_saved_gb": 6.0, "link_fallback_alarms_24h": 0}}),
+        encoding="utf-8")
+    state = {"capacity_basis": "logical", "capacity_history": [[NOW - 7200, 30e9]]}
+    cap = data_awareness.capacity(paths, {}, [{"bytes_per_day": 1e8}], state, NOW)
+    assert state["capacity_history"] == [[NOW, 20e9]]  # logical history dropped on the basis change
+    assert cap["fly"]["ingest_gb_per_day"] == fly["append_gb_per_day"]
+    assert cap["fly"]["stream_sample_ingest_gb_per_day"] == 0.1
+    assert cap["laptop"]["growth_gb_per_day"] == pytest.approx(fly["append_gb_per_day"] * 2, rel=1e-3)
+    assert cap["laptop"]["duplicate_physical_gb"] == 2.5 and cap["laptop"]["disk_free_gb"] > 0

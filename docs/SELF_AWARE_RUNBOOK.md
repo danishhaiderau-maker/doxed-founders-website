@@ -252,8 +252,17 @@ The `data` job runs at start and every 30 minutes, taking about 15 s and 12 CPU-
 <a id="data-capacity"></a>
 ### data.capacity: room to keep collecting
 
-- **Thresholds.** Laptop: AMBER under 7 days to 90% of the 50 GB cap, RED under 2. Fly volume: AMBER under 72 hours to full, RED under 24.
-- **Growth basis.** Until 6 hours of history exist, laptop growth is the sum of the per-stream ingest rates excluding Tier B (reconstructible, pruned by retention). After that it is the measured net slope of retained bytes.
+- **Thresholds.** Laptop bot data: AMBER under 7 days to 90% of the 50 GB cap, RED under 2. Laptop disk (every writer on the volume): AMBER under 14 days to full, RED under 5. Fly volume: AMBER under 72 hours to full, RED under 24.
+- **Growth basis.** Bot-data sizes are physical (`sizes_basis: physical_v1`): a file hardlinked into the tree, promotion view and canonical store counts once. Until 6 hours of history exist, growth is the measured Fly append ingest (APPEND/SEAL/BASELINE member bytes in `fly-segments/v2/man`) times the physical laptop/mirror ratio. After that it is the measured net slope. A drop of 2 GB or more between samples is treated as a one-off reclaim, and the slope restarts after it.
+- **Laptop disk.** `disk_growth_gb_per_day` is the slope of free space on the laptop volume. `unmanaged_growth_gb_per_day` is the part not explained by bot data (scratch, worktrees, perf runs). When it dominates, run `scripts/storage_dedupe.py inventory/report` to find the writer.
+- **Fly ingest.** `ingest_gb_per_day` comes from the segment manifests. `snapshot_churn_gb_per_day` is re-shipped snapshot bytes (they overwrite, they do not accumulate). `stream_sample_ingest_gb_per_day` is the old per-stream estimate, which understated ingest about 4x.
+
+<a id="data-duplicates"></a>
+### data.duplicates: one physical copy of every settled mirror file
+
+- **What it checks.** Settled files (untouched for 6 hours or more, not SQLite, WAL, lock or temp files) with the same relative path and size in the tree, promotion view and canonical store must share one inode. AMBER when 1 GB or more is still held as separate copies, or when any `LINK_FALLBACK_COPY` alarm was raised in 24 hours (`bot-data-retention/storage-link-alarms.jsonl`).
+- **How it is kept.** Promotion and migration hardlink settled files after verifying their sha256. Every in-place writer (puller append, promotion tail append, migration append) first calls `storage_links.ensure_private` (copy-on-write), so the other layers never change underneath a reader. The retention keeper also WOF-compresses settled text files (LZX, about 16x on grid rotations). The bytes are unchanged, so digest references and receipts stay valid.
+- **If it fires.** A fallback means a hardlink failed (other volume, link limit). Check the alarm row. Duplicates without alarms usually clear on the next promotion/migration cycle. Set `DOXXED_MIRROR_HARDLINKS=0` only to roll back to private copies.
 
 <a id="data-sufficiency"></a>
 ### data.sufficiency: research questions (informational)

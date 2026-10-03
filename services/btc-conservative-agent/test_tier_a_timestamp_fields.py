@@ -284,7 +284,7 @@ class BackfillTests(unittest.TestCase):
             "shadow_root": str(base / "shadow"), "view_root": str(base / "view"),
             "segment_archive_root": str(base / "segments"), "compact_root": str(base / "compact"),
             "state_dir": str(base / "state"), "archive_root": str(base / "archive"),
-            "historical_roots": (), "cap_bytes": 10 ** 12,
+            "historical_roots": (), "log_roots": (), "cap_bytes": 10 ** 12,
         })
         self.tree = base / "shadow" / "tree"
         self.tree.mkdir(parents=True)
@@ -404,7 +404,7 @@ class RetentionStatusTests(unittest.TestCase):
             cfg.update({"shadow_root": str(base / "shadow"), "view_root": str(base / "view"),
                         "segment_archive_root": str(base / "segments"), "compact_root": str(base / "compact"),
                         "state_dir": str(base / "state"), "archive_root": str(base / "archive"),
-                        "historical_roots": (), "cap_bytes": 10 ** 12})
+                        "historical_roots": (), "log_roots": (), "cap_bytes": 10 ** 12})
             (base / "shadow" / "tree").mkdir(parents=True)
             (base / "shadow" / "tree" / "liquidations.jsonl").write_text(
                 json.dumps({"ts": DAY1, "side": "buy"}) + "\n")

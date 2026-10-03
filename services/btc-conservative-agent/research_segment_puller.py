@@ -34,6 +34,7 @@ from pathlib import Path
 import research_segment_format as fmt
 from research_segment_store import (HttpSegmentSource, ObjectStore, PreconditionFailed, StoreError,
                                     store_from_env)
+from storage_links import ensure_private
 
 PULLER_VERSION = "research_segment_puller_v1"
 STATE_SCHEMA = "research_segment_puller_state_v1"
@@ -303,6 +304,10 @@ class SegmentPuller:
             return
         if size == end == base:
             return
+        # Settled tree files may be hardlinked into the promotion view and the
+        # canonical store; an in-place write must never reach those snapshots.
+        if target.exists():
+            ensure_private(target)
         if base < size < end:
             # Crash mid-apply left a partial tail: truncate back to the known
             # base offset and re-apply.
