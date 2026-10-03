@@ -494,12 +494,14 @@ first. Never delete files by hand; see `docs/runbooks/DATA-RETENTION.md`.
 
 <a id="storage-retention"></a>
 ### storage.retention
-Laptop bot data against the 50 GB cap (`bot_data_retention.py`, run after every
+Laptop bot data against the 120 GB cap (`bot_data_retention.py`, run after every
 analyzer cycle), from `C:\DoxxedCrypto\bot-data-retention\last-run.json`, plus the
 Fly prune state from `/health` `volume.transfer`.
 - AMBER at 80% of the cap, RED at 90%; AMBER when the last run is older than 3 h,
   RED after 12 h; AMBER at >= 80% while deletion is denied (`deny_reasons`).
 - RED whenever Fly `pruned_through_seq` is beyond `custody_through_seq` (must never happen).
+- RED when retention refused to meet the cap by crossing the protected floor (`cap_status`
+  `CAP_EXCEEDED_*`, `alarm` set in `last-run.json`).
 
 Fix the deny reason (parity not GREEN, no verified archive snapshot, Fly checkpoint
 unreachable) rather than forcing deletion. Unmanaged scratch outside the managed roots

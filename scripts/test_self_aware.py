@@ -458,7 +458,7 @@ def _data_mirror(paths) -> float:
         _jsonl(paths.mirror / "v3" / "receipts" / "x" / f"r{i}.json", [{"i": i}])
     paths.retention.mkdir(parents=True, exist_ok=True)
     (paths.retention / "status.json").write_text(json.dumps({
-        "bytes_after": 26e9, "cap_bytes": 50e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
+        "bytes_after": 26e9, "cap_bytes": 120e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
         "sizes_after": {"mirror_tree": 5.3e9}, "tier_a_schema": [{"dataset": "ai_calls", "bytes": 1, "partitions": 1,
                                                                   "status": "COMPATIBLE"}]}), encoding="utf-8")
     return now
@@ -549,7 +549,7 @@ def test_data_endpoints_and_view(paths, store):
         dead = get("/api/selfaware/data/fields?status=DEAD_ZERO&watched=1")["fields"]
         assert {f["field"] for f in dead} == {"context.ret_1m", "context.ret_5m", "context.delta_change"}
         assert get("/api/selfaware/data/completeness")["streams"]
-        assert get("/api/selfaware/data/capacity")["laptop"]["cap_gb"] == 50.0
+        assert get("/api/selfaware/data/capacity")["laptop"]["cap_gb"] == 120.0
         assert b"Research sufficiency" in raw("/data")
     finally:
         srv.shutdown()
@@ -572,7 +572,7 @@ def test_capacity_uses_manifest_ingest_and_restarts_slope_after_reclaim(paths):
     assert data_awareness._slope_per_day(hist, NOW) == pytest.approx(2.4e9, rel=1e-6)
     (paths.retention).mkdir(parents=True, exist_ok=True)
     (paths.retention / "status.json").write_text(json.dumps({
-        "bytes_after": 20e9, "cap_bytes": 50e9, "sizes_basis": "physical_v1",
+        "bytes_after": 20e9, "cap_bytes": 120e9, "sizes_basis": "physical_v1",
         "sizes_after": {"mirror_tree": 10e9, "canonical": 10e9},
         "storage_dedupe": {"duplicate_physical_gb": 2.5, "hardlink_saved_gb": 6.0, "link_fallback_alarms_24h": 0}}),
         encoding="utf-8")
@@ -583,3 +583,24 @@ def test_capacity_uses_manifest_ingest_and_restarts_slope_after_reclaim(paths):
     assert cap["fly"]["stream_sample_ingest_gb_per_day"] == 0.1
     assert cap["laptop"]["growth_gb_per_day"] == pytest.approx(fly["append_gb_per_day"] * 2, rel=1e-3)
     assert cap["laptop"]["duplicate_physical_gb"] == 2.5 and cap["laptop"]["disk_free_gb"] > 0
+
+
+def test_capacity_defaults_to_120gb_and_refused_cap_is_red(paths, store):
+    now = _data_mirror(paths)
+    store.refresh_views()
+    (paths.retention / "status.json").write_text(json.dumps({
+        "bytes_after": 26e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
+        "sizes_after": {"mirror_tree": 5.3e9}}), encoding="utf-8")
+    res = data_awareness.run(store, paths, _facts(), {}, [], now=now)
+    assert res["capacity"]["laptop"]["cap_gb"] == 120.0
+    assert res["capacity"]["laptop"]["retention_cap_status"] is None
+    (paths.retention / "status.json").write_text(json.dumps({
+        "bytes_after": 26e9, "cap_bytes": 120e9, "mode": "enforce", "finished_at": "2026-10-02T09:27:41Z",
+        "sizes_after": {"mirror_tree": 5.3e9}, "alarm": "CAP_EXCEEDED_PROTECTED_FLOOR: refused 3 protected file(s)",
+        "cap": {"status": "CAP_EXCEEDED_PROTECTED_FLOOR", "refused_count": 3}}), encoding="utf-8")
+    res = data_awareness.run(store, paths, _facts(), {}, [], now=now)
+    lap = res["capacity"]["laptop"]
+    assert lap["retention_cap_status"] == "CAP_EXCEEDED_PROTECTED_FLOOR" and lap["retention_cap_refused"] == 3
+    found = {f.id: f for f in diagnose.check_data({**_facts(), "now": now, "data_awareness": res["summary"]}, {}, store)}
+    assert found["data.capacity"].severity == "RED"
+    assert "RETENTION ALARM CAP_EXCEEDED_PROTECTED_FLOOR" in found["data.capacity"].observed

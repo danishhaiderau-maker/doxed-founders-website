@@ -1,4 +1,4 @@
-# Data retention runbook (Fly ≤ a few GB, laptop ≤ 50 GB)
+# Data retention runbook (Fly ≤ a few GB, laptop ≤ 120 GB)
 
 Retention never deletes anything that has not been proven safe by custody. Historical evidence stays
 immutable: the analysis archive is never auto-deleted, and relay/Bitfinex evidence, current-epoch live
@@ -53,9 +53,16 @@ fails if `pruned_through_seq` ever exceeds custody or the ACK.
   canonical) of a rotation is deleted once custody gates pass and it is ≥ 24 h old. Each copy's size and
   sha must match or nothing is deleted.
 - **Segment archive** (`C:\DoxxedCrypto\fly-segments`): segment bytes ≤ custody bound and ≥ 7 days old.
-- **Cap**: 50 GB over the managed roots. AMBER at 80 %, RED at 90 %. Under pressure the order is
-  legacy → Tier B (any age) → segment archive (any age) → Tier A raw covered by compaction → Tier A
-  partitions with a final daily rollup. The analysis archive is never touched. ≤ 20 GB per run.
+- **Cap**: 120 GB over the managed roots (`--cap-gb` overrides). AMBER at 80 %, RED at 90 %. Under
+  pressure the order is legacy → Tier B (any age) → segment archive (any age) → Tier A raw covered by
+  compaction → Tier A partitions with a final daily rollup. The analysis archive is never touched.
+  ≤ 20 GB per run.
+- **Protected floor**: cap pressure never deletes legacy, Tier A raw or Tier A compact data newer
+  than `min(now − 14 days, current collection epoch start)` (epoch from `research_session.json`;
+  unknown epoch = nothing older is deletable), and never the ledger datasets (`v3_*`, closed trades,
+  trade outcomes/lifecycle, fills, expired orders, decisions, quarantine receipts). If the cap can only
+  be met by crossing the floor the run refuses, `cap.status` = `CAP_EXCEEDED_PROTECTED_FLOOR`, `level`
+  = RED with an `alarm`, and self-aware `data.capacity` goes RED.
 - Gates fail closed: parity GREEN for the same prefix, parity seq ≤ ACK, verified snapshot, analyzer
   consumed seq present, Fly `/files` checkpoint fetched. `deny_reasons` lists every closed gate.
 

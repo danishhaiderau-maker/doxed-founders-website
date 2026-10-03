@@ -1,4 +1,4 @@
-"""Laptop bot-data retention: custody-gated pruning under a hard 50 GB cap.
+"""Laptop bot-data retention: custody-gated pruning under a hard 120 GB cap.
 
 Runs at the end of every successful segment analyzer cycle (inside the
 ``LaptopSegmentAnalyzerCycle`` mutex) and on demand::
@@ -20,9 +20,12 @@ Nothing is deleted unless ALL of these hold for it:
   completed analyzer generation consumed it and its findings are archived;
 * class: Tier B (reconstructible path blobs) as a sealed rotation older than
   ``tier_b_min_age_hours``; Tier A raw rotations and compact partitions only
-  under cap pressure, after their compact copy / daily rollup is verified;
+  under cap pressure, after their compact copy / daily rollup is verified, and
+  never for ledger datasets or data inside the protected floor (last
+  ``protected_window_days`` of the 1 s tape and the current collection epoch);
   PROTECTED paths (ledgers, relay/Bitfinex evidence, recovery state,
-  quarantine, SQLite, research-event generations) never.
+  quarantine, SQLite, research-event generations) never. A cap that can only
+  be met by crossing the floor is refused and reported RED.
 
 Tier A streams are compacted incrementally into zstd Parquet partitioned by
 UTC day (``<compact-root>/tierA/<dataset>/v<schema>/date=YYYY-MM-DD/``).
@@ -68,7 +71,10 @@ DEFAULTS = {
     "historical_roots": (r"C:\DoxxedCrypto\archive",),
     "prefix": "v2",
     "base_url": "https://doxed-btc-bot.fly.dev",
-    "cap_bytes": 50 * GB,
+    "cap_bytes": 120 * GB,
+    # Cap pressure never deletes Tier A data (raw, compact or legacy) newer than
+    # min(now - this window, current collection epoch start).
+    "protected_window_days": 14.0,
     "amber_fraction": 0.80,
     "red_fraction": 0.90,
     "tier_b_min_age_hours": 24.0,
@@ -83,6 +89,14 @@ DEFAULTS = {
     "log_retain_days": 14.0,
 }
 LOG_SUFFIXES = (".log", ".out", ".err")
+# Tier A datasets that are order/fill/position/trade ledgers or quarantine
+# evidence: cap pressure never deletes their raw rotations or compact copies.
+LEDGER_DATASETS = frozenset({
+    "v3_order_intent", "v3_execution", "v3_lifecycle", "v3_decision", "v3_opportunity",
+    "closed_trades", "trade_outcomes", "trade_lifecycle", "fill_quality", "fill_markouts",
+    "expired_orders", "decisions", "ai_decisions", "quarantine_receipts",
+})
+SESSION_FILE = "research_session.json"
 MODE_DRY_RUN = "dry_run"
 MODE_ENFORCE = "enforce"
 
@@ -1305,7 +1319,7 @@ class Retention:
             if not compactor.covered(path, spec[0]):
                 continue
             out.append({"relpath": relpath, "tier": policy.TIER_A, "path": path, "mtime": path.stat().st_mtime,
-                        "bytes": path.stat().st_size})
+                        "bytes": path.stat().st_size, "dataset": spec[0]})
         return out
 
     def segment_candidates(self, gates: dict, *, min_age_days: float) -> list[dict]:
@@ -1374,7 +1388,8 @@ class Retention:
             if not (base / f"{day}.json").is_file():
                 continue
             out.append({"relpath": path.relative_to(self.compact_root).as_posix(), "tier": "TIER_A_COMPACT",
-                        "path": path, "mtime": path.stat().st_mtime, "bytes": path.stat().st_size, "day": day})
+                        "path": path, "mtime": path.stat().st_mtime, "bytes": path.stat().st_size, "day": day,
+                        "dataset": path.parent.parent.parent.name})
         return sorted(out, key=lambda item: (item["day"], item["relpath"]))
 
     # ------------------------------------------------------------------ run
@@ -1431,6 +1446,12 @@ class Retention:
         usage = total_after / cap_bytes if cap_bytes else 0.0
         level = "RED" if usage >= float(self.cfg["red_fraction"]) else (
             "AMBER" if usage >= float(self.cfg["amber_fraction"]) else "GREEN")
+        alarm = None
+        if str(cap.get("status") or "").startswith("CAP_EXCEEDED"):
+            level = "RED"
+            alarm = (f"{cap['status']}: {total_after / GB:.1f} GB > {cap_bytes / GB:.0f} GB cap; refused "
+                     f"{cap.get('refused_count', 0)} protected file(s) ({cap.get('refused_bytes', 0) / GB:.2f} GB) "
+                     "instead of pruning them")
         custody = self._post_custody(gates, dry=dry)
         wof = self._safe_compress(dry=dry)
         artifacts = self._safe_prune_artifacts(mode=mode)
@@ -1440,7 +1461,8 @@ class Retention:
             "cap_bytes": cap_bytes, "bytes_before": total_before, "bytes_after": total_after,
             "sizes_basis": "physical_v1", "storage_dedupe": self._safe_dedupe_report(), "wof_compaction": wof,
             "laptop_artifacts": artifacts,
-            "usage_fraction": round(usage, 4), "level": level, "sizes_before": before, "sizes_after": after,
+            "usage_fraction": round(usage, 4), "level": level, "alarm": alarm,
+            "sizes_before": before, "sizes_after": after,
             "gates": _gate_summary(gates), "deny_reasons": gates["deny_reasons"],
             "candidates": len(plan),
             "deleted_files": sum(1 for row in plan if row["bytes"]) if not dry else 0,
@@ -1457,26 +1479,76 @@ class Retention:
         if dry:
             _atomic_json(self.state_dir / "status-dry-run.json", status)
         _atomic_json(self.state_dir / "last-run.json", {k: status[k] for k in (
-            "mode", "finished_at", "level", "bytes_after", "cap_bytes", "usage_fraction", "deny_reasons",
-            "reclaimed_bytes", "would_reclaim_bytes", "ledger_rows")} | {"tier_a_level": status["tier_a"]["level"]})
+            "mode", "finished_at", "level", "alarm", "bytes_after", "cap_bytes", "usage_fraction", "deny_reasons",
+            "reclaimed_bytes", "would_reclaim_bytes", "ledger_rows")} | {"tier_a_level": status["tier_a"]["level"],
+                                                                         "cap_status": cap.get("status")})
         return status
+
+    def protected_floor(self) -> dict:
+        """Oldest instant cap pressure may delete Tier A data before; unknown epoch fails closed (now)."""
+        window_days = float(self.cfg.get("protected_window_days", 14.0))
+        epochs = []
+        for root in (self.tree, self.view, self.data_root):
+            ts = policy.parse_timestamp(_read_json(root / SESSION_FILE).get("collector_v22_epoch_ts"))
+            if ts is not None:
+                epochs.append(ts)
+        epoch = min(epochs) if epochs else None
+        floor = min(self.now - window_days * 86400, epoch) if epoch is not None else self.now
+        return {"floor_ts": floor, "floor_at": _iso(floor), "window_days": window_days,
+                "epoch_start_ts": epoch, "epoch_start_at": _iso(epoch) if epoch is not None else None,
+                "epoch_known": epoch is not None}
+
+    @staticmethod
+    def _floor_refusal(item: dict, floor_ts: float) -> Optional[str]:
+        if item.get("dataset") in LEDGER_DATASETS:
+            return "LEDGER_DATASET"
+        day = item.get("day")
+        if day and policy.valid_day(day):
+            data_end = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() + 86400
+        else:
+            data_end = float(item["mtime"])
+        return "INSIDE_PROTECTED_FLOOR" if data_end > floor_ts else None
+
+    def _legacy_candidates(self) -> list[dict]:
+        datasets = set(policy.tier_a_specs())
+        out = []
+        for base in (self.compact_root / "legacy",
+                     analysis_archive.archive_root(self.cfg.get("archive_root")) / "legacy"):
+            for path in base.rglob("*"):
+                if not path.is_file():
+                    continue
+                parts = path.relative_to(base).parts
+                dataset = next((p for p in parts if p in datasets), None)
+                day = next((p.split("=", 1)[1] for p in parts if p.startswith("date=")), None)
+                st = path.stat()
+                out.append({"relpath": str(path), "tier": "LEGACY_INCOMPATIBLE", "path": path,
+                            "mtime": st.st_mtime, "bytes": st.st_size, "dataset": dataset, "day": day})
+        return out
 
     def _enforce_cap(self, gates: dict, compactor: Compactor, *, mode: str, total: int) -> dict:
         cap_bytes = int(self.cfg["cap_bytes"])
         if total <= cap_bytes:
             return {"status": "WITHIN_CAP", "deleted": []}
+        floor = self.protected_floor()
         deleted: list[dict] = []
-        legacy = [p for p in (self.compact_root / "legacy").rglob("*") if p.is_file()] \
-            + [p for p in (analysis_archive.archive_root(self.cfg.get("archive_root")) / "legacy").rglob("*")
-               if p.is_file()]
-        for path in sorted(legacy, key=lambda p: p.stat().st_mtime):
+        refused: list[dict] = []
+
+        def refuse(item: dict) -> bool:
+            why = self._floor_refusal(item, floor["floor_ts"])
+            if why:
+                refused.append({"relpath": item["relpath"], "tier": item["tier"], "bytes": item["bytes"],
+                                "dataset": item.get("dataset"), "reason": why})
+            return bool(why)
+
+        for item in sorted(self._legacy_candidates(), key=lambda it: it["mtime"]):
             if total <= cap_bytes:
                 break
-            item = {"relpath": str(path), "tier": "LEGACY_INCOMPATIBLE", "path": path,
-                    "mtime": path.stat().st_mtime, "bytes": path.stat().st_size}
+            if refuse(item):
+                continue
             row = self._delete_plain(item, gates, mode=mode, reason="CAP_LEGACY_FIRST", root_name="legacy")
             deleted.append(row)
             total -= row["bytes"]
+        guarded = {"tier_a_raw_compacted", "tier_a_compact_with_rollup"}
         stages = (
             ("tier_b_any_age", lambda: self.tier_b_candidates(gates, min_age_hours=0.0), "mirror"),
             ("segment_archive_any_age", lambda: self.segment_candidates(gates, min_age_days=0.0), "segment_archive"),
@@ -1487,14 +1559,21 @@ class Retention:
             for item in sorted(produce(), key=lambda it: it["mtime"]):
                 if total <= cap_bytes:
                     break
+                if stage in guarded and refuse(item):
+                    continue
                 if kind == "mirror":
                     row = self._delete_mirror_file(item, gates, mode=mode, reason=f"CAP_{stage.upper()}")
                 else:
                     row = self._delete_plain(item, gates, mode=mode, reason=f"CAP_{stage.upper()}", root_name=kind)
                 deleted.append(row)
                 total -= row["bytes"]
-        return {"status": "WITHIN_CAP" if total <= cap_bytes else "CAP_EXCEEDED_NOTHING_ELIGIBLE",
-                "deleted": deleted, "projected_bytes": total}
+        if total <= cap_bytes:
+            status = "WITHIN_CAP"
+        else:
+            status = "CAP_EXCEEDED_PROTECTED_FLOOR" if refused else "CAP_EXCEEDED_NOTHING_ELIGIBLE"
+        return {"status": status, "deleted": deleted, "projected_bytes": total,
+                "protected_floor": floor, "refused_count": len(refused),
+                "refused_bytes": sum(row["bytes"] for row in refused), "refused": refused[:50]}
 
     def verified_sealed_files(self, gates: dict) -> dict[str, str]:
         """relpath -> sha256 of top-level rotations whose laptop bytes equal Fly's and were analyzed.

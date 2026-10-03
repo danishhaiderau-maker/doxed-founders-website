@@ -241,7 +241,7 @@ if ($analyzerExit -eq 0) {
   }
 }
 
-# Custody-gated retention (50 GB cap) runs only after a successful generation,
+# Custody-gated retention (120 GB cap) runs only after a successful generation,
 # still inside this cycle's mutex so promotion/migration cannot race it. It
 # never changes the cycle's exit code; mode comes from bot-data-retention\mode.json.
 if ($analyzerExit -eq 0) {
