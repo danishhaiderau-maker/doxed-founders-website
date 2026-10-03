@@ -97,3 +97,31 @@ def test_write_atomic(tmp_path):
     gd.write_atomic(out, {"schema": gd.SCHEMA})
     assert json.loads(out.read_text(encoding="utf-8")) == {"schema": gd.SCHEMA}
     assert not list(out.parent.glob("*.tmp"))
+
+
+def test_ai_scorecard_headline_is_bounded_to_allowlisted_cells():
+    cell = {"n": 177, "hit_rate": 0.4124, "net_bp": -2.03, "net_lo": -3.96, "net_hi": -0.16, "rows": [SECRET]}
+    scorecard = {"headline": {"24h": {"5m": {"AI_ABSTAIN_RESPECTING": cell, "INVERT_AI": cell},
+                                      "60m": {"RANDOM": dict(cell, n=1106)}}},
+                 "rows": [{"sql": SECRET}], "provenance": {"path": "C:\\DoxxedCrypto\\x.duckdb"}}
+    digest = gd.build(_fetch({gd.SOURCES["selfaware_ai"]: scorecard}), now=1791034000.0)
+    ai = digest["ai_scorecard"]
+    assert SECRET not in json.dumps(digest) and "DoxxedCrypto" not in json.dumps(digest)
+    assert ai == {"24h": {"5m": {"AI_ABSTAIN_RESPECTING": {k: cell[k] for k in ("n", "hit_rate", "net_bp",
+                                                                                "net_lo", "net_hi")}},
+                          "60m": {"RANDOM": {"n": 1106, "hit_rate": 0.4124, "net_bp": -2.03, "net_lo": -3.96,
+                                             "net_hi": -0.16}}}}
+
+
+def test_overrides_replace_a_source_without_fetching_it():
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return None, "UNREACHABLE"
+
+    report = {"verdict": "GREEN", "counts": {"GREEN": 3}, "failing": [], "open_alarms": [], "age_sec": 0.0}
+    digest = gd.build(fetch, now=1791034000.0, overrides={"watcher": report})
+    assert gd.SOURCES["watcher"] not in fetched and len(fetched) == len(gd.SOURCES) - 1
+    assert digest["sources"]["watcher"] == {"ok": True, "error": None}
+    assert digest["watcher"]["verdict"] == "GREEN"

@@ -1572,3 +1572,53 @@ def test_clean_epoch_lifecycle_defects_are_a_declared_amber_blocker_until_expiry
     inputs["analyzer_integrity"] = {"report_status": "INVALID", "checks": [lifecycle]}
     check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
     assert check["status"] == sh.RED and "EXPIRED" in check["observed"]
+
+
+def test_monitor_digest_attach_is_off_by_default_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "t")
+    monkeypatch.delenv(sh.MONITOR_DIGEST_ENV, raising=False)
+    opts = sh.parse_args(["--state-dir", str(tmp_path), "--vault", str(tmp_path / "none.env")])
+    now = ts("2026-10-02T06:00:00Z")
+    report = sh.summarize(sh.evaluate(healthy(now), {}), {}, now)
+    bodies: list = []
+    fly = lambda url, **kw: (bodies.append(kw["body"]) or {"ok": True}, None)
+    built: list = []
+
+    def builder(rep):
+        built.append(rep)
+        return {"schema": "grokbot_digest_v1", "read_only": True}
+
+    state: dict = {}
+    sh.push_fly_banner(report, opts, state, now, post=fly, digest_builder=builder)
+    assert "monitor_digest" not in bodies[-1] and built == [] and "monitor_digest" not in state
+
+    monkeypatch.setenv(sh.MONITOR_DIGEST_ENV, "1")
+    sh.push_fly_banner(report, opts, state, now, post=fly, digest_builder=builder)
+    assert bodies[-1]["monitor_digest"] == {"schema": "grokbot_digest_v1", "read_only": True}
+    assert state["monitor_digest"]["status"] == "attached" and built == [report]
+    sh.push_fly_banner(report, opts, state, now + 60, post=fly, digest_builder=builder)
+    assert "monitor_digest" not in bodies[-1] and len(built) == 1
+
+    huge = lambda rep: {"schema": "grokbot_digest_v1", "pad": "x" * (sh.MONITOR_DIGEST_MAX_BYTES + 1)}
+    later = now + sh.MONITOR_DIGEST_INTERVAL_SEC + 1
+    assert sh.push_fly_banner(report, opts, state, later, post=fly, digest_builder=huge).startswith("ok")
+    assert "monitor_digest" not in bodies[-1] and state["monitor_digest"]["status"] == "too_large"
+
+    def broken(rep):
+        raise RuntimeError("analyzer down")
+
+    later += sh.MONITOR_DIGEST_INTERVAL_SEC + 1
+    assert sh.push_fly_banner(report, opts, state, later, post=fly, digest_builder=broken).startswith("ok")
+    assert "monitor_digest" not in bodies[-1] and state["monitor_digest"]["status"] == "error:RuntimeError"
+
+
+def test_monitor_digest_default_builder_uses_the_report_not_a_self_get(monkeypatch):
+    import grokbot_digest as gd  # noqa: PLC0415
+
+    urls: list = []
+    monkeypatch.setattr(gd, "http_json", lambda url, timeout=20.0: (urls.append(url) or (None, "UNREACHABLE")))
+    now = ts("2026-10-02T06:00:00Z")
+    report = sh.summarize(sh.evaluate(healthy(now), {}), {}, now)
+    digest = sh._build_monitor_digest(report)
+    assert gd.SOURCES["watcher"] not in urls and digest["sources"]["watcher"]["ok"] is True
+    assert digest["watcher"]["verdict"] == report["verdict"]
