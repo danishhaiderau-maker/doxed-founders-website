@@ -31458,6 +31458,9 @@ DASHBOARD_JS = """(function () {
         EARLY_FAIL: 'Early thesis failure',
         STOP_LOSS: 'Stop loss',
         HARD_STOP: 'Safety stop',
+        PHYSICAL_HARD_STOP_30PCT: 'Physical hard stop (30% margin)',
+        INITIAL_ATR_STOP: 'Initial ATR stop (normal family policy exit — not a feed fault)',
+        PROFIT_PROTECTION_STOP: 'Profit-protection / trail stop',
         TIME_EXIT: 'Maximum-hold exit',
         ADMIN_MANUAL_CLOSE: 'Manual close',
         CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
@@ -32281,9 +32284,14 @@ DASHBOARD_JS = """(function () {
         const epoch = status.epoch_id || 'unbound';
         const alreadyOn = !!status.fresh_collection_mode;
         const confirmMsg = alreadyOn
-          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch? That quarantines Fly volume research dumps via POST /api/fresh_epoch_reset and the desktop mirror then syncs the empty epoch (quarantine stays out of the active tree).\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
-          : ('Start a fresh collection epoch on Fly? This calls POST /api/fresh_epoch_reset: quarantines Fly volume research dumps, resets session counters, and signals the desktop mirror.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
+          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch? That quarantines Fly volume research dumps via POST /api/fresh_epoch_reset and the desktop mirror then syncs the empty epoch (quarantine stays out of the active tree).\\n\\nPrefer finishing CURRENT inventory transfer over wipe when research bytes are still usable.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
+          : ('Start a fresh collection epoch on Fly? This calls POST /api/fresh_epoch_reset: quarantines Fly volume research dumps, resets session counters, and signals the desktop mirror.\\n\\nPrefer finishing CURRENT inventory transfer over wipe when research bytes are still usable.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
         if (!confirm(confirmMsg)) return;
+        const typed = prompt('Type FRESH EPOCH to confirm destructive Fly quarantine wipe (cancel aborts; no wipe is sent):');
+        if (String(typed || '').trim() !== 'FRESH EPOCH') {
+          alert('Fresh Collection aborted — confirmation phrase did not match. No wipe was sent.');
+          return;
+        }
         const freshStatusRes = await fetch('/api/fresh_epoch_reset', {
           method: 'GET',
           credentials: 'same-origin',
