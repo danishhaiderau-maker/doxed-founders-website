@@ -16042,9 +16042,8 @@ def _apply_preentry_receipt(receipt: dict) -> bool:
 def _compact_preentry_evidence_journal() -> None:
     path = _preentry_evidence_journal_path()
     with _preentry_evidence_journal_lock:
-        with _preentry_evidence_lock:
-            if _preentry_evidence_pending or _preentry_evidence_status["dead"]:
-                return
+        if _preentry_evidence_pending or _preentry_evidence_status["dead"]:
+            return
         try:
             if os.path.getsize(path) <= PREENTRY_EVIDENCE_COMPACT_BYTES:
                 return
@@ -16052,6 +16051,13 @@ def _compact_preentry_evidence_journal() -> None:
         except OSError:
             return
     _preentry_evidence_count("compactions")
+
+
+def _quiesce_preentry_evidence(timeout: float = 5.0) -> bool:
+    """Stop the worker and apply every pending receipt (fresh-collection reset)."""
+    if not _shutdown_preentry_evidence_worker(timeout=timeout):
+        return False
+    return _drain_preentry_evidence(through=next(reversed(_preentry_evidence_pending), None), timeout=timeout)
 
 
 def _drain_preentry_evidence(*, keys=(), through: str = None, timeout: float = None) -> bool:
@@ -32600,9 +32606,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_fill_evidence_not_quiescent",
                 "summary": "Reset aborted before archive: fill evidence worker did not drain"}
-    if not _shutdown_preentry_evidence_worker(timeout=5.0) or not _drain_preentry_evidence(
-        through=next(reversed(_preentry_evidence_pending), None), timeout=5.0,
-    ):
+    if not _quiesce_preentry_evidence(timeout=5.0):
         with _cancellation_evidence_worker_lock:
             _cancellation_evidence_reset_fence = False
         return {"ok": False, "wipe_aborted": True,
