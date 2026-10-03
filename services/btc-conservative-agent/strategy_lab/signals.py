@@ -82,7 +82,7 @@ def ai_direction(calls: pd.DataFrame, source: str) -> np.ndarray:
     llm = np.sign(calls["gap"].to_numpy(float)).astype(int)
     if source == "LLM_SCORE":
         return llm
-    if source == "INV_LLM":            # the deployed ftf rule: inverted score-led side, ties refused
+    if source == "INV_LLM":            # retired Trend Fade 60 rule (research replay only): inverted score-led side, ties refused
         return -llm
     raise ValueError(f"unknown AI direction source {source}")
 

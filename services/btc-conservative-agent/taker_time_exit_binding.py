@@ -2,10 +2,10 @@
 
 Everything is read from the bound lane's registry spec:
 
-* ``entry_policy.direction_source`` chooses the tile's side from the one shared
-  AI call. ``SCORE_LED_SIDE`` trades the score-led side; ``INVERTED_SCORE_LED_SIDE``
-  trades the opposite side. Only a score tie, invalid scores or an AI error
-  refuse; raw AI NO_TRADE and a small score gap are logged features, not gates.
+* ``entry_policy.direction_source`` chooses the tile's side: ``SCORE_LED_SIDE``
+  trades the score-led side of the one shared AI call (only a score tie,
+  invalid scores or an AI error refuse); the cross-venue sources take their
+  side from the per-second cross-venue evaluator.
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
@@ -46,7 +46,7 @@ from family_policy_common import (
 CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
 CROSS_VENUE_PREMIUM = "CROSS_VENUE_PREMIUM"
 CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD, CROSS_VENUE_PREMIUM})
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
+DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
 # Dashboard evidence badge per registry hypothesis status (honest-label strength).
 EVIDENCE_BADGES = {
@@ -59,32 +59,6 @@ EVIDENCE_BADGES = {
 def evidence_badge(tile: Mapping[str, Any]) -> str | None:
     status = str(((tile.get("presentation") or {}).get("hypothesis_result") or {}).get("status") or "")
     return EVIDENCE_BADGES.get(status)
-
-
-def committed_call_refusal(entry: Mapping[str, Any], raw: Mapping[str, Any],
-                           admission: Mapping[str, Any], score_led: str) -> str | None:
-    """Refusal reason when a commit-only tile must not trade this call, else None.
-
-    Tiles whose entry keeps ``trades_raw_ai_no_trade`` true and ``min_score_gap``
-    unset (Trend Fade 60) are never refused here.
-    """
-    min_gap = entry.get("min_score_gap")
-    if entry.get("trades_raw_ai_no_trade", True) and min_gap is None:
-        return None
-    if not entry.get("trades_raw_ai_no_trade", True):
-        raw_side = str(raw.get("raw_direction") or "").upper()
-        if raw_side not in _OPPOSITE or raw.get("explicit_abstain"):
-            return "RAW_AI_NO_TRADE"
-        if raw.get("score_direction_mismatch") or raw_side != score_led:
-            return "SCORE_DIRECTION_MISMATCH"
-    if min_gap is not None:
-        try:
-            gap = float(admission.get("score_gap"))
-        except (TypeError, ValueError):
-            return "SCORE_GAP_BELOW_MIN"
-        if not math.isfinite(gap) or gap < float(min_gap):
-            return "SCORE_GAP_BELOW_MIN"
-    return None
 
 
 def signal_source_detail(tile: Mapping[str, Any]) -> str:
@@ -156,13 +130,8 @@ class TakerTimeExitBinding:
             reason = "SCORE_LED_TREATMENT_INACTIVE"
         elif not admission.get("accepted") or score_led not in _OPPOSITE:
             reason = str(admission.get("reason") or "SCORE_LED_SIDE_UNAVAILABLE")
-        else:
-            reason = committed_call_refusal(self.entry, raw, admission, score_led)
         accepted = reason is None
-        direction = (
-            (_OPPOSITE[score_led] if self.entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else score_led)
-            if accepted else "NO_TRADE"
-        )
+        direction = score_led if accepted else "NO_TRADE"
         lane_ai = copy.deepcopy(raw)
         lane_ai.update({
             "raw_direction": str(raw.get("raw_direction") or raw.get("direction") or "UNKNOWN").upper(),
@@ -280,16 +249,6 @@ class TakerTimeExitBinding:
         source = entry["direction_source"]
         if source in CROSS_VENUE_SOURCES:
             return self._cross_venue_dashboard_policy(payload, tile)
-        committed = not entry.get("trades_raw_ai_no_trade", True)
-        side = (
-            "Side = opposite of score-led AI side"
-            if source == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
-        )
-        commit_chips = (
-            [f"Only committed calls: explicit AI side, gap ≥{float(entry['min_score_gap']):g}",
-             "Never fades NO_TRADE"]
-            if committed else []
-        )
         max_open = int(exit_policy.get("max_open_positions") or 1)
         exit_chips = (
             [
@@ -300,7 +259,7 @@ class TakerTimeExitBinding:
             if self.ladder else ["No ladder / break-even / trail / target"]
         )
         payload["filter_chips"] = [
-            "PAPER ONLY", side, *commit_chips,
+            "PAPER ONLY", "Side = score-led AI side",
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
@@ -308,19 +267,7 @@ class TakerTimeExitBinding:
             *exit_chips,
             f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
-        if committed:
-            trigger = (
-                "Shared three-minute call; side is the opposite of the AI's committed side "
-                f"(explicit LONG/SHORT matching the scores, gap ≥{float(entry['min_score_gap']):g}; "
-                "NO_TRADE, mismatches, small gaps, ties and errors refuse)"
-            )
-        elif entry["direction_source"] == "INVERTED_SCORE_LED_SIDE":
-            trigger = (
-                "Shared three-minute call; side is the opposite of the score-led side "
-                "(raw AI NO_TRADE and small gaps still trade; only ties/errors refuse)"
-            )
-        else:
-            trigger = "Shared three-minute call; score-led side"
+        trigger = "Shared three-minute call; score-led side"
         payload["entry"].update({
             "trigger": trigger,
             "entry_path": self.lane,
