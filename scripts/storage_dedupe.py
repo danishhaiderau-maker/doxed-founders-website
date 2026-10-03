@@ -72,7 +72,8 @@ def sha256_file(path: str, limit: int | None = None) -> str:
 
 
 def connect(db: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(db, timeout=600)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     return conn
 
