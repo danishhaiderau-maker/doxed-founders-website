@@ -56,3 +56,20 @@ def test_resume_paper_mode_is_resume_only_and_proves_tiles_on():
     for forbidden in ("flyctl deploy", "machines restart", "flatten", "positions/close", "rearm", "arm-live"):
         assert forbidden not in text
     assert "expected_bootstrap_revision" in str(job)
+
+
+def test_pre_start_wipe_stays_held_and_needs_the_plan_token():
+    job = _workflow()["jobs"]["clean-epoch-wipe"]
+    assert job["env"]["PRE_START"] == "${{ inputs.keep_maintenance_pause == true }}"
+    text = "\n".join(str(step.get("run") or "") for step in job["steps"])
+    assert 'scope_args="--pre-start"' in text
+    assert 'want="DELETE-PRE-START:"+os.environ["PLAN_SHA"][:12]' in text
+    assert "flyctl machine exec --app doxed-btc-bot --timeout 600" not in text
+    assert text.count("scripts/fly_detached_exec.py") == 2
+    resume = _step(job, "Resume paper")
+    gate = _step(job, "Prove paper active with every registry tile ON")
+    for step in (resume, gate):
+        assert "inputs.keep_maintenance_pause != true" in step["if"]
+    held = _step(job, "Prove the pre-start hold survived the wipe")
+    assert "inputs.keep_maintenance_pause == true" in held["if"]
+    assert '"pause_owner": "DEPLOY_MAINTENANCE"' in held["run"]

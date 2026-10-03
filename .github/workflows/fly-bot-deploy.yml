@@ -851,13 +851,20 @@ jobs:
     # state, relay/Bitfinex evidence or the 15-day 1s tape. Execute requires
     # the certification confirm token, an epoch >= 2 h old and a volume
     # snapshot created within 6 h. Relay/Bitfinex are never armed.
+    # keep_maintenance_pause=true selects the pre-start wipe (Danish: wipe while
+    # held down before the final start): --pre-start plan, confirm
+    # DELETE-PRE-START:<plan sha12>, and paper is never resumed.
     if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-wipe-plan' || inputs.mode == 'clean-epoch-wipe-execute')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+      PRE_START: ${{ inputs.keep_maintenance_pause == true }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Plan (read-only)
@@ -868,13 +875,15 @@ jobs:
           set -euo pipefail
           epoch="$(python -c 'import re; print(re.search(r"^\s*DATA_EPOCH_ID\s*=\s*\"([^\"]+)\"", open("services/btc-conservative-agent/fly.toml", encoding="utf-8").read(), re.M).group(1))')"
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
-          plan="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$machine_id" "python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data --epoch $epoch")"
+          if [ "$PRE_START" = "true" ]; then scope_args="--pre-start"; else scope_args="--epoch $epoch"; fi
+          plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label wipe-plan --deadline-sec 1800 -- python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data $scope_args)"
           printf '%s\n' "$plan"
           sha="$(printf '%s' "$plan" | python -c 'import json,sys; text=sys.stdin.read(); start=text.index("{"); print(json.loads(text[start:])["plan_sha256"])')"
           {
             echo "machine_id=$machine_id"
             echo "plan_sha=$sha"
             echo "epoch=$epoch"
+            echo "scope_args=$scope_args"
           } >> "$GITHUB_OUTPUT"
 
       - name: Require confirm token and a fresh volume snapshot
@@ -883,9 +892,14 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           CONFIRM: ${{ inputs.clean_epoch_confirm }}
           EPOCH: ${{ steps.plan.outputs.epoch }}
+          PLAN_SHA: ${{ steps.plan.outputs.plan_sha }}
         run: |
           set -euo pipefail
-          python -c 'import os,re,sys; t=os.environ["CONFIRM"]; e=os.environ["EPOCH"]; sys.exit(0 if re.fullmatch("DELETE-PRE-EPOCH:"+re.escape(e)+":[0-9a-f]{8}", t) else "clean_epoch_confirm must be DELETE-PRE-EPOCH:"+e+":<cert8>")'
+          if [ "$PRE_START" = "true" ]; then
+            python -c 'import os,sys; t=os.environ["CONFIRM"]; want="DELETE-PRE-START:"+os.environ["PLAN_SHA"][:12]; sys.exit(0 if t==want else "clean_epoch_confirm must be "+want)'
+          else
+            python -c 'import os,re,sys; t=os.environ["CONFIRM"]; e=os.environ["EPOCH"]; sys.exit(0 if re.fullmatch("DELETE-PRE-EPOCH:"+re.escape(e)+":[0-9a-f]{8}", t) else "clean_epoch_confirm must be DELETE-PRE-EPOCH:"+e+":<cert8>")'
+          fi
           flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys,datetime as d
           rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("status") or "").lower()=="created"]
           now=d.datetime.now(d.timezone.utc)
@@ -929,23 +943,38 @@ jobs:
           CONFIRM: ${{ inputs.clean_epoch_confirm }}
         run: |
           set -euo pipefail
-          flyctl machine exec --app doxed-btc-bot --timeout 600 "${{ steps.plan.outputs.machine_id }}" \
-            "python /app/clean_epoch_wipe.py execute --scope fly --data-root /app/data --epoch ${{ steps.plan.outputs.epoch }} --confirm $CONFIRM --expect-plan-sha256 ${{ steps.plan.outputs.plan_sha }}"
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label wipe-execute --deadline-sec 3600 -- \
+            python /app/clean_epoch_wipe.py execute --scope fly --data-root /app/data ${{ steps.plan.outputs.scope_args }} --confirm "$CONFIRM" --expect-plan-sha256 "${{ steps.plan.outputs.plan_sha }}"
           flyctl machine exec --app doxed-btc-bot --timeout 30 "${{ steps.plan.outputs.machine_id }}" "sh -lc 'df -h /app/data'"
 
       - name: Resume paper
-        if: ${{ always() && steps.boundary.outcome != 'skipped' && steps.boundary.outcome != '' }}
+        if: ${{ always() && inputs.keep_maintenance_pause != true && steps.boundary.outcome != 'skipped' && steps.boundary.outcome != '' }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
         run: python scripts/fly_failure_paper_resume.py
 
       - name: Prove paper active with every registry tile ON
-        if: ${{ success() && inputs.mode == 'clean-epoch-wipe-execute' }}
+        if: ${{ success() && inputs.mode == 'clean-epoch-wipe-execute' && inputs.keep_maintenance_pause != true }}
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ steps.boundary.outputs.revision }}
         run: python scripts/fly_postdeploy_active_gate.py
+
+      - name: Prove the pre-start hold survived the wipe
+        if: ${{ success() && inputs.mode == 'clean-epoch-wipe-execute' && inputs.keep_maintenance_pause == true }}
+        run: |
+          python - <<'PY'
+          import json, urllib.request
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=30) as response:
+              health = json.load(response)
+          expected = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
+                      "bitfinex_live_enabled": False, "force_paper_mode": True}
+          bad = {k: health.get(k) for k, v in expected.items() if health.get(k) != v}
+          if bad:
+              raise SystemExit("pre-start hold lost: " + json.dumps(bad))
+          print("held down rev=" + str(health.get("source_git_rev")))
+          PY
 
   clean-epoch-boundary-reset:
     # Guarded Fresh Collection reset (POST /api/wipe_fly_only, no laptop signal)
