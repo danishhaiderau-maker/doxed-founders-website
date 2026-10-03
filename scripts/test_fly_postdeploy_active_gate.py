@@ -166,3 +166,34 @@ def test_keep_maintenance_pause_defaults_false():
     block = WORKFLOW[WORKFLOW.index("keep_maintenance_pause:"):]
     block = block[: block.index("lifecycle_reset_proof:")]
     assert "default: false" in block
+
+
+class _HeldBot(_Bot):
+    def __call__(self, path, payload=None):
+        if path == "/api/toggle_research_lane":
+            self.toggles.append((payload["lane"], payload["enabled"]))
+            self.enabled[payload["lane"]] = payload["enabled"]
+            return {"lane": payload["lane"], "enabled": payload["enabled"]}
+        return super().__call__(path, payload)
+
+
+def test_held_off_lanes_are_turned_off_and_required_off(monkeypatch):
+    monkeypatch.setenv("PAPER_TILES_HOLD_OFF", " FAMILY_ATR_TRAIL ,")
+    bot = _HeldBot({"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True})
+    receipt = gate.enable_all_registry_tiles(bot)
+    assert bot.toggles == [("FAMILY_ATR_TRAIL", False), ("FAMILY_CHANDELIER_3", True)]
+    assert receipt["tiles_all_on"] is True and receipt["held_off"] == ["FAMILY_ATR_TRAIL"]
+    assert receipt["held_not_off"] == []
+
+
+def test_held_lane_left_on_fails_the_receipt():
+    status = {"active_tiles": [{"lane": lane} for lane in LANES]}
+    state = {"research_lane_enabled": dict.fromkeys(LANES, True)}
+    receipt = gate.tiles_all_on_receipt(status, state, frozenset({"FAMILY_ATR_TRAIL"}))
+    assert receipt["tiles_all_on"] is False and receipt["held_not_off"] == ["FAMILY_ATR_TRAIL"]
+    assert gate.tiles_all_on_receipt(status, state, frozenset(LANES))["tiles_all_on"] is False
+
+
+def test_hold_off_list_comes_from_repository_variable():
+    assert "PAPER_TILES_HOLD_OFF: ${{ vars.PAPER_TILES_HOLD_OFF }}" in WORKFLOW
+    assert gate.held_off_lanes({}) == frozenset()

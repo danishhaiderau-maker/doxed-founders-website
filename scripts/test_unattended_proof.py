@@ -490,3 +490,15 @@ def test_analyzer_only_allowances_do_not_extend_a_deploy_pause_run():
     rows[11] = {**rows[11], "checks": paused}
     rows[12] = {**rows[12], "checks": paused}
     assert up.verdict(rows, t0=T0, ends_at=ends, now=ends + 1)["result"] == "FAIL"
+
+
+def test_held_off_tiles_are_excluded_but_must_stay_off(monkeypatch):
+    now = T0 + 60
+    pair = ["TILE_A", "TILE_B"]
+    monkeypatch.setenv("PAPER_TILES_HOLD_OFF", "TILE_B")
+    held = _runtime(now, active_tile_lanes=pair, research_lane_enabled={"TILE_A": True, "TILE_B": False})
+    row = up.evaluate_row(**_inputs(now, runtime=held))
+    assert row["status"] == "PASS"
+    assert row["checks"]["tiles_all_on"]["detail"] == "1/1 tiles ON (held OFF: TILE_B)"
+    leaked = _runtime(now, active_tile_lanes=pair, research_lane_enabled=dict.fromkeys(pair, True))
+    assert up.evaluate_row(**_inputs(now, runtime=leaked))["failed_checks"] == ["tiles_all_on"]
