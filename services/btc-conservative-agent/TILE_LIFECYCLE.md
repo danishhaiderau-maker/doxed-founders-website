@@ -25,6 +25,12 @@ same ordered manifest and registry signature at the exact deployed revision.
 6. Deploy only at the required safe boundary, start a clean signed cohort, and
    prove two advancing collection/analyzer cycles before accepting evidence.
 
+A tile that only changes how an existing side rule enters (for example a
+resting maker limit instead of a taker) reuses a generic binding
+(`taker_time_exit_binding.py`, `maker_time_exit_binding.py`) and adds no
+runtime branch; its thin policy module wraps the binding that matches its
+registry `entry_policy.mode`, and the binding refuses any other mode.
+
 ## Baseline benchmark
 
 `FAMILY_CONTINUOUS_AUG_ORIGINAL` is the permanent baseline: paper-only,

@@ -382,13 +382,58 @@ def _xvp_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mappi
     return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
 
 
+def _committed_fade_maker_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                                  dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """Same 1 h-cluster/session/side/day facts as the premium tile; the 5 s-delay
+    shadow and replay parity stay False until the analyzer supplies them."""
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    mean = stats.get("mean_bp")
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    delay5 = stats.get("shadow_5s_delay_mean_bp")
+    kills = []
+    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
+        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_80")
+    if fills >= kill["k2_after_fills"] and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]:
+        kills.append("K2_UPPER_CI_BELOW_2BP_AFTER_150")
+    worst = stats.get("worst_fill_bp")
+    stale_share = stats.get("stale_feed_fill_share")
+    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
+        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
+    ):
+        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    sessions = stats.get("session_days") or {}
+    sides = stats.get("side_mean_bp") or {}
+    share = stats.get("max_single_day_profit_share")
+    parity = stats.get("replay_parity_gap_bp")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
+        "sessions": all((sessions.get(s) or 0) >= promote["min_sessions_each"] for s in promote["sessions"]),
+        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "shadow_5s_delay_positive": delay5 is not None and delay5 > promote["shadow_5s_delay_mean_gt_bp"],
+        "no_day_dominates": share is not None and share <= promote["max_single_day_profit_share"],
+        "both_sides_non_negative": all(
+            sides.get(s) is not None and sides[s] >= promote["both_sides_mean_ge_bp"] for s in ("LONG", "SHORT")
+        ),
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
+        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
 VERDICT_RULES = {
     "tile_pre_registration_xvl_v1": _xvl_verdict,
     "tile_pre_registration_xvp_v1": _xvp_verdict,
+    "tile_pre_registration_committed_fade_maker_v1": _committed_fade_maker_verdict,
 }
 EXTRA_STATS = {
     "tile_pre_registration_xvl_v1": _xvl_extra_stats,
     "tile_pre_registration_xvp_v1": _xvp_extra_stats,
+    "tile_pre_registration_committed_fade_maker_v1": _xvp_extra_stats,
 }
 
 

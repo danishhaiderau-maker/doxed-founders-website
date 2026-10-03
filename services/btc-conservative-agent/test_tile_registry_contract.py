@@ -87,25 +87,29 @@ def test_active_registry_is_lead_premium_then_baseline():
 
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL",
+        "FAMILY_COMMITTED_FADE_MAKER_90",
     )
     manifest = active_tile_lifecycle_manifest()
     assert [(row["lane"], row["display_order"]) for row in manifest] == [
         ("FAMILY_XVENUE_LEAD_60S", 1), ("FAMILY_XVENUE_PREMIUM_60S", 2),
-        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 3),
+        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 3), ("FAMILY_COMMITTED_FADE_MAKER_90", 4),
     ]
     lead = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"]
     premium = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_PREMIUM_60S"]
     baseline = ACTIVE_TILE_REGISTRY["FAMILY_CONTINUOUS_AUG_ORIGINAL"]
-    tiles = (lead, premium, baseline)
-    assert [t["id_prefix"] for t in tiles] == ["xvl", "xvp", "caug"]
-    assert [t["policy_signature"] for t in tiles] == [
+    maker = ACTIVE_TILE_REGISTRY["FAMILY_COMMITTED_FADE_MAKER_90"]
+    tiles = (lead, premium, baseline, maker)
+    assert [t["id_prefix"] for t in tiles] == ["xvl", "xvp", "caug", "cfm"]
+    assert [t["policy_signature"] for t in tiles[:3]] == [
         XVENUE_LEAD_SIGNATURE, XVENUE_PREMIUM_SIGNATURE, CONTINUOUS_AUG_SIGNATURE,
     ]
+    assert len({t["policy_signature"] for t in tiles}) == 4
     assert lead["policy_epoch"] == registry.XVENUE_LEAD_POLICY_EPOCH == "v31-trend-fade-single-tile-v5"
     assert premium["policy_epoch"] == registry.XVENUE_PREMIUM_POLICY_EPOCH == "v31-committed-fade-premium-v6"
     assert premium["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
     assert baseline["policy_epoch"] == registry.CONTINUOUS_AUG_POLICY_EPOCH == "v31-continuous-aug-original-v7"
-    assert registry.RESEARCH_STACK_VERSION == "v31-retire-trend-fade-v8"
+    assert registry.RESEARCH_STACK_VERSION == "v31-committed-fade-maker-v9"
+    assert maker["policy_epoch"] == maker["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
     for lane, tile in zip(ACTIVE_TILE_ORDER, tiles):
         # Only the owner-requested baseline defaults ON; the deploy gate turns every tile ON.
         default_on = tile is baseline
@@ -116,6 +120,9 @@ def test_active_registry_is_lead_premium_then_baseline():
             # August capacity: the tile cap plus same-side duplicate suppression.
             assert tile["max_active_signals"] == 10
             assert tuple(map(tuple, tile["ladder"])) == registry.CONTINUOUS_AUG_LADDER
+        elif tile is maker:
+            assert tile["max_active_signals"] == 3
+            assert tile.get("ladder") in (None, ())
         else:
             assert tile["max_active_signals"] == 1
             assert tile.get("ladder") in (None, ())
@@ -141,8 +148,13 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     ):
         assert raw in RETIRED_POLICY_IDENTITIES
     assert not hasattr(registry, "COMMITTED_FADE_MIN_SCORE_GAP")
-    assert "INVERTED_SCORE_LED_SIDE" not in taker_time_exit_binding.DIRECTION_SOURCES
-    assert not hasattr(taker_time_exit_binding, "committed_call_refusal")
+    # The generic inverted-side and commit-rule primitives stay only while an
+    # active tile (the committed-fade maker) is registered on them.
+    inverted_users = [lane for lane in ACTIVE_TILE_ORDER
+                      if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
+    assert inverted_users == ["FAMILY_COMMITTED_FADE_MAKER_90"]
+    assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
+    assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
         assert schema not in tile_paired_comparison.VERDICT_RULES
         assert schema not in tile_paired_comparison.EXTRA_STATS
