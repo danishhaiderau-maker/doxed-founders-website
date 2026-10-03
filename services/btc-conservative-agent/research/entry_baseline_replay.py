@@ -1230,3 +1230,99 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
     ):
         raise ValueError("BASELINE_CONTEXT_PINNED_GENERATION_CHANGED_DURING_REPLAY")
     return report
+
+
+# ------------------------------------------------------------ on-disk sidecar
+EPISODE_RECEIPTS_SIDECAR_FILE = "entry_baseline_replay_episode_receipts.jsonl.gz"
+EPISODE_RECEIPTS_SIDECAR_SCHEMA = "entry_baseline_replay_episode_receipts_sidecar_v1"
+
+
+def write_replay_report(report: Mapping[str, Any], target: Path,
+                        sidecar_name: str = EPISODE_RECEIPTS_SIDECAR_FILE) -> dict:
+    """Write the replay report with ``episode_receipts`` split into a gzip JSONL sidecar.
+
+    Per-episode receipts are ~65% of the report and grow with every episode;
+    the JSON keeps every other key plus an ``episode_receipts_sidecar`` binding
+    (file, sha256 of the compressed bytes, sha256 of the JSONL, count). Both
+    files are staged and swapped in with ``os.replace`` (never written in
+    place), sidecar first, so a reader never sees a report pointing at a
+    missing or different sidecar. ``load_replay_report`` restores the
+    in-memory shape exactly.
+    """
+    import gzip
+    import os
+
+    target = Path(target)
+    sidecar = target.with_name(sidecar_name)
+    receipts = report.get("episode_receipts")
+    receipts = receipts if isinstance(receipts, list) else []
+    staged = sidecar.with_name(f".{sidecar.name}.{os.getpid()}.tmp")
+    lines = hashlib.sha256()
+    try:
+        with staged.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6, mtime=0) as gz:
+            for receipt in receipts:
+                line = json.dumps(receipt, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+                lines.update(line)
+                gz.write(line)
+        file_sha = hashlib.sha256(staged.read_bytes()).hexdigest()
+        binding = {
+            "schema": EPISODE_RECEIPTS_SIDECAR_SCHEMA,
+            "file": sidecar.name,
+            "format": "jsonl.gz",
+            "count": len(receipts),
+            "sha256": file_sha,
+            "jsonl_sha256": lines.hexdigest(),
+            "size_bytes": staged.stat().st_size,
+            "key_index": list(report).index("episode_receipts") if "episode_receipts" in report else len(report),
+        }
+        os.replace(staged, sidecar)
+    finally:
+        staged.unlink(missing_ok=True)
+    body = {key: value for key, value in report.items() if key != "episode_receipts"}
+    body["episode_receipts_sidecar"] = binding
+    staged_report = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        staged_report.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        os.replace(staged_report, target)
+    finally:
+        staged_report.unlink(missing_ok=True)
+    return binding
+
+
+def load_episode_receipts(report_path: Path, binding: Mapping[str, Any]) -> list:
+    """Read and verify the sidecar named by ``binding`` next to ``report_path``."""
+    import gzip
+
+    if not isinstance(binding, Mapping) or binding.get("schema") != EPISODE_RECEIPTS_SIDECAR_SCHEMA:
+        raise ValueError("BASELINE_REPLAY_SIDECAR_BINDING_INVALID")
+    name = str(binding.get("file") or "")
+    if not name or Path(name).name != name:
+        raise ValueError("BASELINE_REPLAY_SIDECAR_PATH_INVALID")
+    sidecar = Path(report_path).with_name(name)
+    raw = sidecar.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != binding.get("sha256"):
+        raise ValueError("BASELINE_REPLAY_SIDECAR_SHA256_MISMATCH")
+    data = gzip.decompress(raw)
+    if hashlib.sha256(data).hexdigest() != binding.get("jsonl_sha256"):
+        raise ValueError("BASELINE_REPLAY_SIDECAR_CONTENT_MISMATCH")
+    receipts = [json.loads(line) for line in data.splitlines() if line.strip()]
+    if len(receipts) != int(binding.get("count") or 0):
+        raise ValueError("BASELINE_REPLAY_SIDECAR_COUNT_MISMATCH")
+    return receipts
+
+
+def load_replay_report(report_path: Path, *, with_receipts: bool = True) -> dict:
+    """Load a replay report from disk in its in-memory shape (sidecar receipts restored).
+
+    Reports written before the sidecar split still carry ``episode_receipts``
+    inline and load unchanged.
+    """
+    report_path = Path(report_path)
+    report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+    binding = report.get("episode_receipts_sidecar") if isinstance(report, dict) else None
+    if binding is not None and "episode_receipts" not in report and with_receipts:
+        receipts = load_episode_receipts(report_path, binding)
+        items = [(key, value) for key, value in report.items() if key != "episode_receipts_sidecar"]
+        position = min(max(int(binding.get("key_index", len(items))), 0), len(items))
+        report = dict(items[:position] + [("episode_receipts", receipts)] + items[position:])
+    return report
