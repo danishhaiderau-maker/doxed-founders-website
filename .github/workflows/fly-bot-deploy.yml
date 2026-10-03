@@ -25,6 +25,7 @@ on:
           - recover-stalled-runtime
           - resume-bootstrap
           - resume-predeploy-abort
+          - resume-paper
           - restart-only
           - inspect-runtime
           - repair-execution-funnel
@@ -208,6 +209,53 @@ jobs:
           python scripts/fly_resume_predeploy_abort.py preserve-maintenance
           --incumbent "$EXPECTED_INCUMBENT_REVISION"
           --candidate "$EXPECTED_CANDIDATE_SHA"
+  resume-paper:
+    # Resumes paper on the revision already running on Fly after a guarded
+    # deploy left it in DEPLOY_MAINTENANCE (e.g. acceptance timed out while the
+    # new revision was still booting). Never deploys, restarts, flattens or
+    # arms: it binds the exact live revision, waits for receipt-bootstrap
+    # readiness, resumes through the deploy-owned /api/resume path (operator
+    # and safety pauses are retained), then turns every registry tile ON and
+    # proves two advancing AI cycles.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-paper'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bind the exact live paper-only revision
+        env:
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          expected = str(os.environ.get("EXPECTED_BOOTSTRAP_REVISION") or "").strip().lower()
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("resume-paper requires expected_bootstrap_revision = exact 12-character live revision")
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+              health = json.load(response)
+          if str(health.get("source_git_rev") or "").lower() != expected:
+              raise SystemExit("live Fly revision does not match expected_bootstrap_revision")
+          if not (health.get("force_paper_mode") is True and health.get("live_armed") is False and health.get("bitfinex_live_enabled") is False):
+              raise SystemExit("live Fly revision is not provably paper-only and disarmed")
+          print(json.dumps({"revision": expected, "paper_only": True}))
+          PY
+
+      - name: Resume paper once receipt bootstrap is ready
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FAILURE_RESUME_TIMEOUT_SEC: "5400"
+        run: python scripts/fly_failure_paper_resume.py
+
+      - name: Prove paper active with every registry tile ON
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: python scripts/fly_postdeploy_active_gate.py
   repair-execution-tail:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
     runs-on: ubuntu-latest
@@ -908,7 +956,7 @@ jobs:
     # opened <= 60 min ago and a volume snapshot <= 6 h old. Never arms relay.
     if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'clean-epoch-reset-plan' || inputs.mode == 'clean-epoch-reset-execute')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
     steps:
@@ -923,7 +971,7 @@ jobs:
           set -euo pipefail
           epoch="$(python -c 'import re; print(re.search(r"^\s*DATA_EPOCH_ID\s*=\s*\"([^\"]+)\"", open("services/btc-conservative-agent/fly.toml", encoding="utf-8").read(), re.M).group(1))')"
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
-          plan="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$machine_id" "python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime" || true)"
+          plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label reset-plan --deadline-sec 1800 -- python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime || true)"
           printf '%s\n' "$plan"
           printf '%s' "$plan" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("mode")=="plan" and d.get("ok") is True and not d.get("protected_candidates"), "reset plan is not clean: protected candidates or incomplete inventory"'
           {
@@ -998,7 +1046,7 @@ jobs:
           EPOCH: ${{ steps.plan.outputs.epoch }}
         run: |
           set -euo pipefail
-          before="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$MACHINE_ID" "python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime" || true)"
+          before="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$MACHINE_ID" --label reset-plan-before --deadline-sec 1800 -- python /app/clean_epoch_reset_plan.py plan --runtime-root /app/data/runtime || true)"
           printf '%s\n' "$before" > reset-plan-before.json
           read -r present relay_sha < <(printf '%s' "$before" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("ok") is True and not d.get("protected_candidates"), "boundary plan is not clean"; r=d["relay_evidence"]; assert r.get("readable") is True, "relay evidence unreadable"; print(",".join(d["protected_present"]) or "-", r["pending_ids_sha256"])')
           python - <<'PY'
@@ -1014,8 +1062,8 @@ jobs:
               raise SystemExit("guarded reset refused or failed")
           PY
           [ "$present" = "-" ] && present=""
-          flyctl machine exec --app doxed-btc-bot --timeout 300 "$MACHINE_ID" \
-            "python /app/clean_epoch_reset_plan.py verify --runtime-root /app/data/runtime --epoch $EPOCH --expect-present=$present --expect-relay-sha256=$relay_sha" | tee reset-verify.json
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$MACHINE_ID" --label reset-verify --deadline-sec 1800 -- \
+            python /app/clean_epoch_reset_plan.py verify --runtime-root /app/data/runtime --epoch "$EPOCH" "--expect-present=$present" "--expect-relay-sha256=$relay_sha" | tee reset-verify.json
           python -c 'import json; lines=[x for x in open("reset-verify.json") if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); assert d.get("ok") is True, d.get("failures")'
           flyctl machine exec --app doxed-btc-bot --timeout 30 "$MACHINE_ID" "sh -lc 'df -h /app/data'"
 
@@ -1430,7 +1478,7 @@ jobs:
   test-and-deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: services/btc-conservative-agent
@@ -2162,15 +2210,22 @@ jobs:
                   raise RuntimeError("exact postdeploy paper maintenance status is not proven")
               return status
 
-          # Never mutate a different or partially booted revision.
+          # Never mutate a different or partially booted revision. First boot
+          # of a new epoch restores state and seeds tape for ~5+ min before
+          # /api/status leaves its minimal boot=starting payload.
           last = None
-          for attempt in range(1, 41):
+          addressable_deadline = time.monotonic() + 15 * 60
+          attempt = 0
+          while time.monotonic() < addressable_deadline:
+              attempt += 1
               try:
                   exact_safe_status()
                   break
               except Exception as exc:
                   last = exc
-                  time.sleep(min(attempt, 5))
+                  if attempt % 12 == 0:
+                      print(f"postdeploy addressability attempt={attempt} waiting: {type(exc).__name__}", flush=True)
+                  time.sleep(5)
           else:
               raise SystemExit(f"exact deployed revision never became safely addressable: {type(last).__name__}")
 
@@ -2393,6 +2448,11 @@ jobs:
           PY
 
       - name: Complete receipt bootstrap inside exact-revision maintenance
+        # A held maintenance deploy (clean-epoch boundary) must reach its
+        # 60-min boundary reset before the long first-boot bootstrap ends; the
+        # later resume (fly_failure_paper_resume.py) still requires bootstrap
+        # COMPLETE before paper can resume.
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ github.sha }}

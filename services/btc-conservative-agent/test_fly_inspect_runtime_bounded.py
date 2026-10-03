@@ -109,7 +109,7 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert gate_start < resume_start
     section = source[gate_start:resume_start]
     deploy_job = source.split("  test-and-deploy:", 1)[1]
-    assert "timeout-minutes: 90" in deploy_job
+    assert "timeout-minutes: 120" in deploy_job
 
     assert "observed_bootstrap_rows = 21_353" in section
     assert "conservative_records_per_cycle = 64" in section
