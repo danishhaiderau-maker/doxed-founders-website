@@ -22,11 +22,11 @@ def test_narrow_viewport_scrolls_each_table_without_widening_page():
 
     assert '<meta name="viewport" content="width=device-width, initial-scale=1"/>' in source
     assert "html, body { width: 100%; max-width: 100%; overflow-x: hidden; }" in source
-    assert "main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }" in source
-    assert ".table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto;" in source
+    assert "main { padding: 20px clamp(12px, 1vw, 24px); width: 100%; max-width: none; min-width: 0; overflow: hidden; }" in source
+    assert ".table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow: auto; max-height: 80vh;" in source
     assert "overscroll-behavior-inline: contain;" in source
     assert "-webkit-overflow-scrolling: touch;" in source
-    assert ".table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none;" in source
+    assert ".table-scroll table { display: table; width: 100%; min-width: 100%; max-width: none;" in source
 
 
 def test_desktop_table_semantics_and_data_hooks_are_unchanged():
@@ -66,3 +66,23 @@ def test_archive_download_links_remain_inside_generic_mobile_table_scrollers():
     assert 'href="/download/archive/${encodeURIComponent(sid)}"' in source
     assert 'href="/download/past-analysis/${encodeURIComponent(id)}"' in source
     assert "root.querySelectorAll('main table')" in source
+
+
+def test_desktop_uses_full_width_with_compact_sticky_tables():
+    source = dashboard.DASHBOARD_HTML
+
+    assert "max-width: 1200px" not in source
+    assert ".table-scroll thead th { position: sticky; top: 0;" in source
+    assert ".table-scroll table.sticky-first td:first-child, .table-scroll table.sticky-first th:first-child { position: sticky; left: 0;" in source
+    # Sticky first column would overlap the second column on rowspan/grouped tables.
+    assert "table.classList.toggle('sticky-first', !grouped && !spanned);" in source
+
+
+def test_long_policy_identities_wrap_without_changing_text():
+    source = dashboard.DASHBOARD_HTML
+
+    assert "const POLICY_BREAK_RE = /[|_](?=\\S)/;" in source
+    assert "node.nodeValue.split(/(?<=[|_])(?=\\S)/)" in source
+    assert "frag.appendChild(document.createElement('wbr'));" in source
+    assert "new MutationObserver(queueTableLayout).observe(document.querySelector('main')" in source
+    assert "innerHTML" not in source[source.index("function refineTableLayout"):source.index("function queueTableLayout")]
