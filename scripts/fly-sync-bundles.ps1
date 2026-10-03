@@ -39,14 +39,24 @@ function Receive-FlyTransportBundles {
   }
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = (Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-  [void]$start.ArgumentList.Add($ClientScript)
+  # Windows PowerShell 5.1 ProcessStartInfo has no usable ArgumentList (null);
+  # .NET Core / pwsh expose ArgumentList. Prefer Arguments for 5.1 compatibility.
+  if ($null -ne $start.ArgumentList) {
+    [void]$start.ArgumentList.Add($ClientScript)
+  } else {
+    $escapedClient = '"' + ($ClientScript -replace '"', '\"') + '"'
+    $start.Arguments = $escapedClient
+  }
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
   $start.RedirectStandardInput = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
-  $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
-  $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  # Standard*Encoding exists on .NET Core ProcessStartInfo; absent on Windows
+  # PowerShell 5.1 / .NET Framework — skip rather than fail the whole transfer.
+  $utf8NoBom = [Text.UTF8Encoding]::new($false)
+  try { $start.StandardInputEncoding = $utf8NoBom } catch { }
+  try { $start.StandardOutputEncoding = $utf8NoBom } catch { }
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $start
   $complete = $false
@@ -64,9 +74,14 @@ function Receive-FlyTransportBundles {
     $started = $true
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credential goes through a private pipe, never process arguments or disk.
+    # Windows PowerShell 5.1 stdin is not UTF-8 by default; write explicit UTF-8
+    # bytes so Python json.loads(sys.stdin.buffer.read()) does not decode-fail.
     $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror; checkpoint_root=(Join-Path $workspace '.batch-transfer-descriptor-cache') }
-    $inputTask = $process.StandardInput.WriteAsync(($request | ConvertTo-Json -Depth 40 -Compress))
+    $json = ($request | ConvertTo-Json -Depth 40 -Compress)
+    $payload = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    $inputTask = $process.StandardInput.BaseStream.WriteAsync($payload, 0, $payload.Length)
     if (-not $inputTask.Wait(30000)) { throw 'BUNDLE_CHILD_INPUT_TIMEOUT' }
+    $process.StandardInput.BaseStream.Flush()
     $process.StandardInput.Close()
     while ($true) {
       $lineTask = $process.StandardOutput.ReadLineAsync()
@@ -121,10 +136,13 @@ function Receive-FlyTransportBundles {
         }
         $lastIndexWait = $elapsed
         if ($receipt.PSObject.Properties.Name -contains 'idle_elapsed_seconds') {
-          $idle = $receipt.idle_elapsed_seconds
-          if (($idle -isnot [double] -and $idle -isnot [long]) -or [double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
+          # Windows PowerShell 5.1 ConvertFrom-Json yields Int32 for small ints and
+          # Double for floats; accept numeric types rather than requiring [long].
+          $idle = [double]$receipt.idle_elapsed_seconds
+          $verifiedPkgCount = [int64]$receipt.verified_packages
+          if ([double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
               $idle -lt 0 -or $idle -ge 600 -or $idle -gt $elapsed -or
-              $receipt.verified_packages -isnot [long] -or $receipt.verified_packages -ne $verifiedPackages -or
+              $verifiedPkgCount -ne $verifiedPackages -or
               $retry -gt (600 - $idle) -or $retry -gt (1800 - $elapsed) -or
               ($verifiedPackages -eq $lastWaitPackages -and $idle -lt $lastIdleWait)) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
           $lastIdleWait = $idle
@@ -216,6 +234,20 @@ function Receive-FlyTransportBundles {
   } catch {
     $failureCode = 'BUNDLE_TRANSFER_FAILED'
     if ($_.Exception.Message -cmatch '^BUNDLE_TRANSFER_FAILED: ([A-Z][A-Z0-9_]{1,95})$') { $failureCode = $Matches[1] }
+    # The child can carry credentials, URLs and server diagnostics on its
+    # exception/stderr channel.  Only the already-validated bounded failure
+    # code is safe for the operational log; structured receipt diagnostics
+    # above retain the allowed stage/page/status fields.
+    Write-Host ('[FLY SYNC] bundle_failure=' + $failureCode)
+    try {
+      if ($started -and $null -ne $stderr) {
+        if ($stderr.Wait(2000)) {
+          # Consume the redirected stream so the child can exit cleanly, but
+          # never forward arbitrary stderr into a durable desktop transcript.
+          $null = $stderr.Result
+        }
+      }
+    } catch { }
     try { & $Progress $files 'bundle_failed' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes; Failed=$true; FailureCode=$failureCode }) } catch { }
     throw
   } finally {

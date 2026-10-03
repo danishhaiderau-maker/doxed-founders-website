@@ -193,7 +193,10 @@ def test_full_sync_reuses_authenticated_loop_preflight_without_duplicate_fetch()
     # the checksum acknowledgement remains after all file reconciliation.
     assert '-Stage "acknowledgement_finalize"' in child_source
     assert "$ack = Invoke-DataSyncJsonRequest" in child_source
-    assert "AckAccepted = $ack.accepted" in child_source
+    assert "AckAccepted = [bool]$ackSucceeded" in child_source
+    assert "AckAcceptedCount = [int64]$ackAccepted" in child_source
+    assert "AckExpectedCount = [int64]$ackExpected" in child_source
+    assert "AckRejectedCount = [int64]$ackRejected" in child_source
     assert "Canonical manifest commit failed" in child_source
 
 
