@@ -91,7 +91,7 @@ from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
     AI_PROMPT_INPUT_REVISION,
-    COMMITTED_FADE_MIN_SCORE_GAP,
+    AI_COMMIT_MIN_SCORE_GAP,
     CONTINUOUS_AUG_ADMISSION_POLICY_ID,
     TILE_ARCHITECTURE_VERSION,
     TILE_REGISTRY_SCHEMA,
@@ -16461,10 +16461,10 @@ def parse_ai_response_fields(text: str) -> dict:
 
 
 def ai_commit_flags(ai_result: dict) -> dict:
-    """Commit/abstain facts of one shared call (the Tile 2 commit rule, logged on every call).
+    """Commit/abstain facts of one shared call (decision-snapshot telemetry, logged on every call).
 
     Committed = explicit LONG/SHORT, scores agree with that side, and the score
-    gap is at least ``COMMITTED_FADE_MIN_SCORE_GAP``.
+    gap is at least ``AI_COMMIT_MIN_SCORE_GAP``.
     """
     ai_result = ai_result or {}
     raw = str(ai_result.get("raw_direction") or "").upper()
@@ -16478,14 +16478,14 @@ def ai_commit_flags(ai_result: dict) -> dict:
     abstain = raw not in ("LONG", "SHORT")
     mismatch = (not abstain) and score_side is not None and raw != score_side
     committed = (not abstain and not mismatch and not ai_result.get("ai_error")
-                 and gap is not None and gap >= COMMITTED_FADE_MIN_SCORE_GAP)
+                 and gap is not None and gap >= AI_COMMIT_MIN_SCORE_GAP)
     return {
         "explicit_abstain": abstain,
         "score_direction_mismatch": mismatch,
         "score_tie": gap == 0,
         "score_gap": gap,
         "ai_committed": bool(committed),
-        "commit_rule": f"EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED_AND_GAP_GE_{COMMITTED_FADE_MIN_SCORE_GAP:g}",
+        "commit_rule": f"EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED_AND_GAP_GE_{AI_COMMIT_MIN_SCORE_GAP:g}",
     }
 
 

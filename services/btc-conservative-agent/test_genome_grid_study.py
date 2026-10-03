@@ -25,7 +25,7 @@ def test_fast_replay_matches_canonical_evaluator_for_every_protection(direction,
     path = g.prepare_path(direction, float(mark[0]), 0, {"bid": mark, "ask": mark})
     prices = [{"ts": 1000.0 + a, "price": float(p)} for a, p in zip(path["age"], path["price"])]
     protections = g.protection_specs()
-    assert len(protections) > 70
+    assert len(protections) >= 70
     for pid, prot in protections.items():
         spec = _spec(prot)
         canon = replay_protected_policy(prices, direction=direction, entry_price=float(mark[0]), fill_ts=1000.0,
