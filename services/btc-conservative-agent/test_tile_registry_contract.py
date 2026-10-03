@@ -74,47 +74,41 @@ RETIRED_DYNAMIC_ADAPTIVE_LANES = (
     "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
 )
 
-# Trend Fade 60 identity frozen at registration; the v5 roster change must not
-# alter it, so its cohort continues across the retirement.
-TREND_FADE_60_SIGNATURE = "a0a04faefaba977b203ad0a84117612ca7d487b0ce22f9d55504f3554b927d65"
-TREND_FADE_60_SCORE_LED_SIGNATURE = "1936f510d2ff7d0c3aaaa4a5c14431637a02362cb2980a24b2f474b91a4743e0"
+# Identities frozen at registration; the v8 Trend Fade retirement must not alter
+# them, so each surviving cohort continues across the roster change.
+XVENUE_LEAD_SIGNATURE = "99abf913fa4e71698094b7babcd4f5afb1cd221ad98b9ffab8ce2f80f2b220d7"
+XVENUE_PREMIUM_SIGNATURE = "39ad7a3f1b960e90a60423e14ee086f3ca495683728856a2ff359ca27b6dbe1f"
+CONTINUOUS_AUG_SIGNATURE = "527bad3dfed8ba4d67df5423fb293c0a517eca4fc5c125c5b049385cda039224"
+RETIRED_TREND_FADE_LANES = ("FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED")
 
 
-def test_active_registry_is_trend_fade_committed_fade_lead_premium_then_baseline():
+def test_active_registry_is_lead_premium_then_baseline():
     import combo_pathway_config as registry
 
     assert ACTIVE_TILE_ORDER == (
-        "FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_COMMITTED",
-        "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S",
-        "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
+        "FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL",
+        "FAMILY_COMMITTED_FADE_MAKER_90",
     )
     manifest = active_tile_lifecycle_manifest()
     assert [(row["lane"], row["display_order"]) for row in manifest] == [
-        ("FAMILY_TREND_FADE_60", 1), ("FAMILY_TREND_FADE_60_COMMITTED", 2),
-        ("FAMILY_XVENUE_LEAD_60S", 3), ("FAMILY_XVENUE_PREMIUM_60S", 4),
-        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 5), ("FAMILY_COMMITTED_FADE_MAKER_90", 6),
+        ("FAMILY_XVENUE_LEAD_60S", 1), ("FAMILY_XVENUE_PREMIUM_60S", 2),
+        ("FAMILY_CONTINUOUS_AUG_ORIGINAL", 3), ("FAMILY_COMMITTED_FADE_MAKER_90", 4),
     ]
-    fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
-    committed = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60_COMMITTED"]
     lead = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"]
     premium = ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_PREMIUM_60S"]
     baseline = ACTIVE_TILE_REGISTRY["FAMILY_CONTINUOUS_AUG_ORIGINAL"]
     maker = ACTIVE_TILE_REGISTRY["FAMILY_COMMITTED_FADE_MAKER_90"]
-    tiles = (fade, committed, lead, premium, baseline, maker)
-    assert len({t["policy_signature"] for t in tiles}) == 6
-    assert [t["id_prefix"] for t in tiles] == ["ftf", "ftc", "xvl", "xvp", "caug", "cfm"]
-    expected = (TREND_FADE_60_SCORE_LED_SIGNATURE if registry.SCORE_LED_PAPER_RESEARCH_ENABLED
-                else TREND_FADE_60_SIGNATURE)
-    assert fade["policy_signature"] == expected
-    assert fade["raw_policy_id"].endswith("INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP")
-    assert fade["toggle_key"] == "research_lane_enabled"
-    assert fade["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
+    tiles = (lead, premium, baseline, maker)
+    assert [t["id_prefix"] for t in tiles] == ["xvl", "xvp", "caug", "cfm"]
+    assert [t["policy_signature"] for t in tiles[:3]] == [
+        XVENUE_LEAD_SIGNATURE, XVENUE_PREMIUM_SIGNATURE, CONTINUOUS_AUG_SIGNATURE,
+    ]
+    assert len({t["policy_signature"] for t in tiles}) == 4
     assert lead["policy_epoch"] == registry.XVENUE_LEAD_POLICY_EPOCH == "v31-trend-fade-single-tile-v5"
-    assert registry.RESEARCH_STACK_VERSION == "v31-committed-fade-maker-v8"
-    assert committed["policy_epoch"] == premium["policy_epoch"] == "v31-committed-fade-premium-v6"
-    assert committed["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
+    assert premium["policy_epoch"] == registry.XVENUE_PREMIUM_POLICY_EPOCH == "v31-committed-fade-premium-v6"
     assert premium["pre_registration"]["registered_cohort"] == "v31-committed-fade-premium-v6"
     assert baseline["policy_epoch"] == registry.CONTINUOUS_AUG_POLICY_EPOCH == "v31-continuous-aug-original-v7"
+    assert registry.RESEARCH_STACK_VERSION == "v31-committed-fade-maker-v9"
     assert maker["policy_epoch"] == maker["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
     for lane, tile in zip(ACTIVE_TILE_ORDER, tiles):
         # Only the owner-requested baseline defaults ON; the deploy gate turns every tile ON.
@@ -132,29 +126,43 @@ def test_active_registry_is_trend_fade_committed_fade_lead_premium_then_baseline
         else:
             assert tile["max_active_signals"] == 1
             assert tile.get("ladder") in (None, ())
-    assert committed["exit_policy"] == fade["exit_policy"]
-    assert committed["entry_policy"]["min_score_gap"] == 30.0
-    assert committed["entry_policy"]["trades_raw_ai_no_trade"] is False
-    assert committed["pre_registration"]["control_lane"] == "FAMILY_TREND_FADE_60"
+    assert lead["entry_policy"]["direction_source"] == "CROSS_VENUE_LEAD"
     assert premium["entry_policy"]["direction_source"] == "CROSS_VENUE_PREMIUM"
-    assert fade["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
-    assert fade["entry_policy"]["mode"] == "TAKER_AT_SIGNAL"
-    assert fade["exit_policy"]["max_duration_sec"] == 3600 and fade["exit_policy"]["hard_stop_bps"] == 40
-    pre = fade["pre_registration"]
-    assert pre["registered_cohort"] == "v31-dynamic-adaptive-ladder-paper-v4"
-    assert pre["control_lane"] is None
-    assert pre["promotion"] == {
-        "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY", "min_fills": 150,
-        "per_fill_ev_lower_ci95_gt_bp": 0.0, "both_halves_positive": True,
-        "max_2h_window_profit_share": 0.30,
-    }
-    assert pre["kill"] == {
-        "k1_after_fills": 40, "k1_net_usd_at_or_below": -0.40,
-        "k2_after_fills": 80, "k2_net_usd_at_or_below": 0.0,
-        "k3_worst_trade_bp_below": -60.0, "k4_max_drawdown_usd": 1.0,
-        "k5_max_days_without_promotion": 14,
-    }
-    assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == "FAMILY_TREND_FADE_60"
+    assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == "FAMILY_XVENUE_LEAD_60S"
+
+
+def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
+    import json
+
+    import combo_pathway_config as registry
+    import taker_time_exit_binding
+    import tile_paired_comparison
+
+    for lane in RETIRED_TREND_FADE_LANES:
+        assert lane in RETIRED_TILE_LANES
+        assert lane not in ACTIVE_TILE_REGISTRY and lane not in COMBO_EXECUTION_LANES
+        assert lane not in json.dumps(ACTIVE_TILE_REGISTRY, default=list)
+    for raw in (
+        "INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+        "INVERT_COMMITTED_SCORE_LED_SIDE_GAP30_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+    ):
+        assert raw in RETIRED_POLICY_IDENTITIES
+    assert not hasattr(registry, "COMMITTED_FADE_MIN_SCORE_GAP")
+    # The generic inverted-side and commit-rule primitives stay only while an
+    # active tile (the committed-fade maker) is registered on them.
+    inverted_users = [lane for lane in ACTIVE_TILE_ORDER
+                      if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
+    assert inverted_users == ["FAMILY_COMMITTED_FADE_MAKER_90"]
+    assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
+    assert callable(taker_time_exit_binding.committed_call_refusal)
+    for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
+        assert schema not in tile_paired_comparison.VERDICT_RULES
+        assert schema not in tile_paired_comparison.EXTRA_STATS
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    for gone in ("paper_policy_family_trend_fade_60.py", "paper_policy_family_trend_fade_60_committed.py",
+                 "test_paper_policy_family_trend_fade_60.py", "test_paper_policy_family_trend_fade_60_committed.py"):
+        assert not (service_dir / gone).exists(), gone
+        assert not (service_dir.parent / "btc-signal-engine" / gone).exists(), gone
 
 
 def test_trend_fade_ladder_is_one_atomic_retirement():
@@ -205,7 +213,7 @@ def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
 
 
 def test_default_on_is_refused_for_anything_but_a_paper_only_relay_blocked_tile():
-    lane = "FAMILY_TREND_FADE_60_COMMITTED"
+    lane = "FAMILY_XVENUE_PREMIUM_60S"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:

@@ -96,8 +96,8 @@ def test_registry_exit_specs_map_every_active_tile():
         assert ex is not None or str(why).startswith("EXIT_NOT_TAPE_REPLAYABLE:"), (lane, why)
     ex, why = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY[cpc.RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL])
     assert ex is None and why == "EXIT_NOT_TAPE_REPLAYABLE:AUG_CONTINUOUS_SCENARIO_C:THESIS_FAST_CUT+THESIS_INVALIDATED"
-    ftf = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"])[0]
-    assert ftf.tcap_sec == 3600 and ftf.hard_bp == pytest.approx(40.0) and not ftf.needs_atr
+    xvl = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_XVENUE_LEAD_60S"])[0]
+    assert xvl.tcap_sec == 60 and xvl.hard_bp == pytest.approx(40.0) and not xvl.needs_atr
     ladder_spec = {"exit_policy": {"family": "ATR_TRAIL_PROFIT_LOCK", "initial_stop_atr_k": 1.5,
                                    "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0,
                                    "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
@@ -112,15 +112,15 @@ def test_live_fill_parity_replays_a_time_exit_exactly():
     tape = _tape_from_mid(mid)
     fill = T0 + 100
     trades = pd.DataFrame([{
-        "research_lane": "FAMILY_TREND_FADE_60", "trade_id": "ftf-1", "dir": "SHORT",
-        "entry": 59999.5, "exit": 59900.5, "dur_min": 60.0, "exit_reason": "PATH_END_60M",
-        "close_ts": pd.Timestamp(fill + 3600, unit="s", tz="UTC").isoformat(),
+        "research_lane": "FAMILY_XVENUE_LEAD_60S", "trade_id": "xvl-1", "dir": "SHORT",
+        "entry": 59999.5, "exit": 60000.5, "dur_min": 1.0, "exit_reason": "PATH_END_1M",
+        "close_ts": pd.Timestamp(fill + 60, unit="s", tz="UTC").isoformat(),
     }, {
-        "research_lane": "FAMILY_TREND_FADE_60", "trade_id": "ftf-2", "dir": "LONG", "entry": 1, "exit": 1,
+        "research_lane": "FAMILY_XVENUE_LEAD_60S", "trade_id": "xvl-2", "dir": "LONG", "entry": 1, "exit": 1,
         "dur_min": 1, "exit_reason": "ADMIN_MANUAL_CLOSE", "close_ts": pd.Timestamp(fill, unit="s", tz="UTC").isoformat(),
     }])
-    p = live_fill_parity(tape, trades, cpc.ACTIVE_TILE_REGISTRY, ["FAMILY_TREND_FADE_60"])
-    lane = p["lanes"]["FAMILY_TREND_FADE_60"]
+    p = live_fill_parity(tape, trades, cpc.ACTIVE_TILE_REGISTRY, ["FAMILY_XVENUE_LEAD_60S"])
+    lane = p["lanes"]["FAMILY_XVENUE_LEAD_60S"]
     assert lane["compared"] == 1 and lane["mae_bp"] == pytest.approx(0.0, abs=1e-6) and lane["verdict"] == "PASS"
 
 
@@ -237,8 +237,8 @@ def _export(tmp_path, manifest_gen="gen-1"):
         {"trade_id": "x", "research_lane": "CONTINUOUS", "reason": "NON_REGISTRY_LANE"}]}), encoding="utf-8")
     stage_strategy_lab({"status": "OK", "hypotheses": [{"id": "H", "verdict": "INSUFFICIENT"}]},
                        {"hypotheses": pd.DataFrame([{"id": "H", "verdict": "INSUFFICIENT", "full_n": 3}])})
-    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_TREND_FADE_60", "net_pnl_usd": 0.05,
-                            "close_ts": "2026-10-01T10:00:00+00:00", "exit_reason": "PATH_END_60M"}])
+    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_XVENUE_LEAD_60S", "net_pnl_usd": 0.05,
+                            "close_ts": "2026-10-01T10:00:00+00:00", "exit_reason": "PATH_END_1M"}])
     root = tmp_path / "exports"
     summary = write_export(report_dir=str(report_dir), data_dir=str(tmp_path), trades=trades,
                            registry=cpc.ACTIVE_TILE_REGISTRY, lanes=list(cpc.ACTIVE_TILE_REGISTRY), root=str(root))
@@ -253,7 +253,7 @@ def test_export_is_versioned_and_loads_from_the_bundled_client(tmp_path):
     assert (root / "history" / summary["export_id"] / "hypotheses.csv").is_file()
     exp = load_latest(str(root), check_live=False, retries=0)
     assert exp["hypotheses"].iloc[0]["id"] == "H"
-    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_TREND_FADE_60", "n"] == 1
+    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_XVENUE_LEAD_60S", "n"] == 1
     assert len(exp["quarantine"]) == 1 and exp.checks["manifest_parity"] == "MATCH"
     assert exp.summary["generation"]["generation_id"] == "gen-1"
     view = lab_api.export_latest(root=str(root), report_root=str(report_dir), table="tile_stats")

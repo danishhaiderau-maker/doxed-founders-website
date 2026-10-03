@@ -66,7 +66,7 @@ def _decide(direction="LONG", bid=64999.0, ask=65000.0, bbo_age=0.5):
 def test_registry_owns_a_paper_only_relay_ineligible_premium_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[3] == policy.LANE and policy.LANE in COMBO_EXECUTION_LANES
+    assert ACTIVE_TILE_ORDER[1] == policy.LANE and policy.LANE in COMBO_EXECUTION_LANES
     assert ACTIVE_TILE_ORDER.index(policy.LANE) == ACTIVE_TILE_ORDER.index(RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S) + 1
     assert spec["paper_only"] is True and spec["execution_scope"] == "PAPER_ONLY"
     assert spec["platform_relay_eligible"] is False and spec["live_copy_eligible"] is False

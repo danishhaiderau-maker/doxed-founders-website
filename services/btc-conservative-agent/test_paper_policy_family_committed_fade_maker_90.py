@@ -1,4 +1,4 @@
-"""Dedicated contract for Tile 6: committed-call fade, maker 0.10% offset entry, 90-min hold."""
+"""Dedicated contract for Tile 4: committed-call fade, maker 0.10% offset entry, 90-min hold."""
 import copy
 
 import pytest

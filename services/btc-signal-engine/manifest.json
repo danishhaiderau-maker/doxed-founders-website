@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-committed-fade-maker-v8",
-  "combo_version": "2026-10-02",
+  "engine_version": "v31-committed-fade-maker-v9",
+  "combo_version": "2026-10-03",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "7bdafbac5b14",
+  "signal_hash": "eca23aa2c0f2",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-02T23:42:02.909Z"
+  "updated_at": "2026-10-03T01:27:49.826Z"
 }

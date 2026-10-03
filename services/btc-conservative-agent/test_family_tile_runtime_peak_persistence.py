@@ -21,7 +21,7 @@ def _position() -> dict:
         "dir": "LONG",
         "atr14_3m": 1.0,
         "atr14_pct_3m": 1.0,
-        "entry_ts": time.time() - 60,
+        "entry_ts": time.time() - 10,
         "leverage": 100.0,
         "qty": 1.0,
         "policy_remaining_fraction": 1.0,

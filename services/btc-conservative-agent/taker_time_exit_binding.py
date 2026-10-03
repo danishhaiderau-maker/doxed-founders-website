@@ -2,10 +2,12 @@
 
 Everything is read from the bound lane's registry spec:
 
-* ``entry_policy.direction_source`` chooses the tile's side from the one shared
-  AI call. ``SCORE_LED_SIDE`` trades the score-led side; ``INVERTED_SCORE_LED_SIDE``
-  trades the opposite side. Only a score tie, invalid scores or an AI error
-  refuse; raw AI NO_TRADE and a small score gap are logged features, not gates.
+* ``entry_policy.direction_source`` chooses the tile's side: ``SCORE_LED_SIDE``
+  trades the score-led side of the one shared AI call and
+  ``INVERTED_SCORE_LED_SIDE`` the opposite side (only a score tie, invalid
+  scores or an AI error refuse, unless the entry declares a commit rule via
+  ``trades_raw_ai_no_trade`` / ``min_score_gap``); the cross-venue sources take
+  their side from the per-second cross-venue evaluator.
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
@@ -67,7 +69,7 @@ def committed_call_refusal(entry: Mapping[str, Any], raw: Mapping[str, Any],
     """Refusal reason when a commit-only tile must not trade this call, else None.
 
     Tiles whose entry keeps ``trades_raw_ai_no_trade`` true and ``min_score_gap``
-    unset (Trend Fade 60) are never refused here.
+    unset are never refused here.
     """
     min_gap = entry.get("min_score_gap")
     if entry.get("trades_raw_ai_no_trade", True) and min_gap is None:
@@ -281,16 +283,6 @@ class TakerTimeExitBinding:
         source = entry["direction_source"]
         if source in CROSS_VENUE_SOURCES:
             return self._cross_venue_dashboard_policy(payload, tile)
-        committed = not entry.get("trades_raw_ai_no_trade", True)
-        side = (
-            "Side = opposite of score-led AI side"
-            if source == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
-        )
-        commit_chips = (
-            [f"Only committed calls: explicit AI side, gap ≥{float(entry['min_score_gap']):g}",
-             "Never fades NO_TRADE"]
-            if committed else []
-        )
         max_open = int(exit_policy.get("max_open_positions") or 1)
         exit_chips = (
             [
@@ -301,7 +293,7 @@ class TakerTimeExitBinding:
             if self.ladder else ["No ladder / break-even / trail / target"]
         )
         payload["filter_chips"] = [
-            "PAPER ONLY", side, *commit_chips,
+            "PAPER ONLY", "Side = score-led AI side",
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
@@ -309,19 +301,7 @@ class TakerTimeExitBinding:
             *exit_chips,
             f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
-        if committed:
-            trigger = (
-                "Shared three-minute call; side is the opposite of the AI's committed side "
-                f"(explicit LONG/SHORT matching the scores, gap ≥{float(entry['min_score_gap']):g}; "
-                "NO_TRADE, mismatches, small gaps, ties and errors refuse)"
-            )
-        elif entry["direction_source"] == "INVERTED_SCORE_LED_SIDE":
-            trigger = (
-                "Shared three-minute call; side is the opposite of the score-led side "
-                "(raw AI NO_TRADE and small gaps still trade; only ties/errors refuse)"
-            )
-        else:
-            trigger = "Shared three-minute call; score-led side"
+        trigger = "Shared three-minute call; score-led side"
         payload["entry"].update({
             "trigger": trigger,
             "entry_path": self.lane,

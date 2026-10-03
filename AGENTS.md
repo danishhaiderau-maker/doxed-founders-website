@@ -37,34 +37,13 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Six tiles are registered: five paper experiments with no proven edge and
-  the Continuous baseline benchmark (Tile 5), each with its own lock, orders,
-  positions, ledger and analyzer cohort. The experiments default OFF in
-  source (the deploy turns them ON); the baseline defaults ON. All are
-  paper-only and relay-ineligible.
-- Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`, prefix `ftf`): its own lane
-  admission trades the opposite of the shared call's score-led side (raw AI
-  NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
-  refuse), enters taker at the signal with a 5 bp price cap and 15 s TTL, stands
-  aside when the spread exceeds 1.68 bp or the BBO is stale, and exits only at
-  60 minutes or a 40 bp catastrophic stop booked at the crossing quote (one
-  position). Label: "in-sample +$1.30 / 47 trades; expected heavy decay". Its
-  policy epoch and signature are pinned so its cohort continues across
-  registry-version bumps. The shared AI input revision
-  (`AI_PROMPT_INPUT_REVISION`) is logged per call; the analyzer splits Tile 1
-  at each revision boundary instead of re-signing the tile.
-- Tile 2, Trend Fade 60 - committed calls only
-  (`FAMILY_TREND_FADE_60_COMMITTED`, prefix `ftc`): identical to Tile 1 except
-  it only fades calls where the AI committed to an explicit LONG/SHORT that
-  equals the score-led side with a score gap >= 30; it never fades NO_TRADE or
-  a score/side mismatch. Tile 1 is its paired control. Pre-registration:
-  promotion (owner review, never relay) needs >=150 fills over >=40 h and >=3
-  regime-days, 2 h-cluster lower 95% CI > 0, beating Tile 1 by 10 bp on paired
-  signals and both halves positive; kill when hit rate < 52% after 150 fills,
-  trend-day mean < -15 bp, any trade < -60 bp, drawdown > $1, or day 21. It
-  replaced the retired Trend Fade 60 + Profit Lock ladder tile
-  (`FAMILY_TREND_FADE_60_LADDER`, prefix `ftl`), whose history is opaque archive.
-- Tile 3, Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), "HINT -
+- Four tiles are registered: two owner-approved cross-venue paper
+  experiments with no proven edge, the Continuous baseline benchmark
+  (Tile 3) and the committed-fade maker paper experiment (Tile 4), each with
+  its own lock, orders, positions, ledger and analyzer cohort. The experiments
+  default OFF in source (the deploy turns them ON); the baseline defaults ON.
+  All are paper-only and relay-ineligible.
+- Tile 1, Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`), "HINT -
   12h evidence", uses no AI: a bounded per-second evaluator
   (`cross_venue_lead.py`, its own thread, separate from the 180 s AI cadence)
   takes a Bitfinex taker entry (5 bp cap, 3 s TTL) in the direction of the mean
@@ -79,7 +58,7 @@
   profit, and shadow/paper parity within 1 bp; kill when the mean is not
   positive after 150 trades, the upper CI is below 0.5 bp after 400, on a -45 bp
   trade or >1% stale-feed share, drawdown above $0.50, or day 10.
-- Tile 4, Cross-venue premium (`FAMILY_XVENUE_PREMIUM_60S`, prefix `xvp`), "HINT
+- Tile 2, Cross-venue premium (`FAMILY_XVENUE_PREMIUM_60S`, prefix `xvp`), "HINT
   - 8h holdout evidence", uses no AI and shares the per-second evaluator thread
   (`cross_venue_premium.py`): the premium is the mean Binance/Bybit mid over the
   Bitfinex mid in bp; a deviation from its own trailing 60-minute mean (>=1200
@@ -95,7 +74,7 @@
   the 5 s-delay shadow < -0.5 bp after 300, a trade < -45 bp or >1% stale,
   drawdown > $0.50, day 14, or pause on any execution defect. Cross-venue tiles
   are excluded from shared-AI pairing and scored alone.
-- Tile 5, Continuous - August 2026 replica (`FAMILY_CONTINUOUS_AUG_ORIGINAL`,
+- Tile 3, Continuous - August 2026 replica (`FAMILY_CONTINUOUS_AUG_ORIGINAL`,
   prefix `caug`) is the permanent baseline benchmark: paper-only, never
   relay-eligible, and the one tile that defaults ON. It replicates the
   early-August Continuous: its own DeepSeek call on the shared 180 s cadence
@@ -110,11 +89,11 @@
   as the labelled `aug_touch_fill_shadow`. It is not rechecked against the
   shared call at fill time. Every other tile is paired against it
   (`vs_baseline`); it is never a deflated-Sharpe trial.
-- Tile 6, Committed fade (maker) (`FAMILY_COMMITTED_FADE_MAKER_90`, prefix
-  `cfm`), "HINT - 3-day REALISTIC_V1 walk-forward, CI spans 0": the same
-  committed-call side rule as Tile 2 without the gap floor (explicit LONG/SHORT
-  equal to the score-led side; NO_TRADE, mismatches, ties and errors refuse),
-  entered as one passive maker limit 0.10% beyond the decision-time last price
+- Tile 4, Committed fade (maker) (`FAMILY_COMMITTED_FADE_MAKER_90`, prefix
+  `cfm`), "HINT - 3-day REALISTIC_V1 walk-forward, CI spans 0": fades only
+  shared calls where the AI committed to an explicit LONG/SHORT equal to the
+  score-led side, with no gap floor (NO_TRADE, mismatches, ties and errors
+  refuse), entered as one passive maker limit 0.10% beyond the decision-time last price
   (never past the touch, no chase, expires unfilled after 30 min, BBO older
   than 5 s stands aside), exits at 90 minutes after fill or a 40 bp
   catastrophic stop; three concurrent signals (`maker_time_exit_binding.py`).
@@ -124,11 +103,13 @@
   positive, no day > 30% of profit and replay parity <=1 bp; kill when the mean
   is <=0 after 80 fills, the upper CI < +2 bp after 150, a trade < -60 bp or
   >1% stale-feed share, drawdown > $1, day 21, or pause on any defect.
-- The Trend Fade 60 ladder, the three Dynamic Adaptive tiles
+- Trend Fade 60 (`FAMILY_TREND_FADE_60`), Trend Fade 60 - committed calls
+  only (`FAMILY_TREND_FADE_60_COMMITTED`), the Trend Fade 60 ladder, the
+  three Dynamic Adaptive tiles
   (`FAMILY_ADAPTIVE_REGIME`, `FAMILY_ADAPTIVE_REGIME_LADDER`,
   `FAMILY_ADAPTIVE_REGIME_LADDER_BE`), the five former family tiles and the
   legacy `CONTINUOUS` lane token are retired (`RETIRED_TILE_LANES`); their
-  history is opaque archive data. The token stays retired: Tile 5 is a new
+  history is opaque archive data. The token stays retired: Tile 3 is a new
   lane with its own signed identity, not a revival of archived rows. A future tile is promoted only if it passes the OOS
   promotion gate.
   The number of tiles is not an architecture constant; the frozen

@@ -1,8 +1,8 @@
 {
-  "description": "Frozen parity cases for the registry-owned shared-call paper tiles: Trend Fade 60 (Tile 1) and Trend Fade 60 committed calls only (Tile 2), whose side is derived from the shared direction call by their own lane admission, so the shared fingerprint matches both. The cross-venue tiles (XVL, XVP) are skipped by the runtime fan-out and run on their own per-second clock. The Trend Fade 60 ladder, the three Dynamic Adaptive tiles, the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the registry roster. The Continuous August baseline is the only active tile on the shared 180 s cadence (its own call); the cross-venue tiles (XVL, XVP) are skipped by the runtime fan-out and run on their own per-second clock. Trend Fade 60, Trend Fade 60 committed calls only, the Trend Fade 60 ladder, the three Dynamic Adaptive tiles, the five family tiles and the legacy Continuous lane are retired and must never match or be a benchmark.",
   "cases": [
     {
-      "id": "trend-fade-60-long-shared-direction",
+      "id": "shared-call-long-shared-direction",
       "ai": {
         "win_prob": 0,
         "bull_score": 8,
@@ -11,10 +11,11 @@
       "direction": "LONG",
       "spread": 4,
       "expect_lanes": [
-        "FAMILY_TREND_FADE_60",
-        "FAMILY_TREND_FADE_60_COMMITTED"
+        "FAMILY_CONTINUOUS_AUG_ORIGINAL"
       ],
       "reject_lanes": [
+        "FAMILY_TREND_FADE_60",
+        "FAMILY_TREND_FADE_60_COMMITTED",
         "FAMILY_TREND_FADE_60_LADDER",
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
@@ -29,7 +30,7 @@
       ]
     },
     {
-      "id": "trend-fade-60-short-shared-direction",
+      "id": "shared-call-short-shared-direction",
       "ai": {
         "win_prob": 0,
         "bull_score": 3,
@@ -38,10 +39,11 @@
       "direction": "SHORT",
       "spread": 5,
       "expect_lanes": [
-        "FAMILY_TREND_FADE_60",
-        "FAMILY_TREND_FADE_60_COMMITTED"
+        "FAMILY_CONTINUOUS_AUG_ORIGINAL"
       ],
       "reject_lanes": [
+        "FAMILY_TREND_FADE_60",
+        "FAMILY_TREND_FADE_60_COMMITTED",
         "FAMILY_TREND_FADE_60_LADDER",
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
@@ -61,12 +63,12 @@
       "expect_benchmark": false
     },
     {
-      "id": "trend-fade-60-not-benchmark",
+      "id": "retired-trend-fade-60-not-benchmark",
       "lane": "FAMILY_TREND_FADE_60",
       "expect_benchmark": false
     },
     {
-      "id": "trend-fade-60-committed-not-benchmark",
+      "id": "retired-trend-fade-60-committed-not-benchmark",
       "lane": "FAMILY_TREND_FADE_60_COMMITTED",
       "expect_benchmark": false
     },

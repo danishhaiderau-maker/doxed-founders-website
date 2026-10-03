@@ -21,7 +21,7 @@ import system_health_server as server  # noqa: E402
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "system_health"
 TICK = 5 * 60.0
-LANES = ["FAMILY_TREND_FADE_60", "SYNTHETIC_TILE_B", "SYNTHETIC_TILE_C"]
+LANES = ["FAMILY_XVENUE_LEAD_60S", "SYNTHETIC_TILE_B", "SYNTHETIC_TILE_C"]
 
 
 def ts(text: str) -> float:
@@ -401,9 +401,9 @@ def test_analyzer_down_during_cycle_is_amber_until_bound():
 def test_fill_expiry_contradiction():
     now = ts("2026-10-02T03:00:00Z")
     inputs = healthy(now)
-    inputs["fly_state"]["expired_orders"] = [{"trade_id": "t-FAMILY_TREND_FADE_60", "expired_ts": now - 600}]
+    inputs["fly_state"]["expired_orders"] = [{"trade_id": "t-FAMILY_XVENUE_LEAD_60S", "expired_ts": now - 600}]
     check = by_id(sh.evaluate(inputs, {}))["trading.lifecycle"]
-    assert check["status"] == sh.RED and "t-FAMILY_TREND_FADE_60" in check["observed"]
+    assert check["status"] == sh.RED and "t-FAMILY_XVENUE_LEAD_60S" in check["observed"]
     inputs = healthy(now)
     inputs["mirror"]["expired"] = {"old": now - 10 * 3600}
     inputs["mirror"]["filled"] = {"old": now - 10 * 3600}

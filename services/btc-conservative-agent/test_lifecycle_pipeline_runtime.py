@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-committed-fade-maker-v8",
-        "526ee71df20477e8ec46d80f6f0a8c54db33a2485d07ea113fe99c405079fc1b",
+        "v31-committed-fade-maker-v9",
+        "ed3527c4def60b2b392fc7be54607f0cb52de81b889f8c7f243bc9e724c52998",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-committed-fade-maker-v8",
-        "583c62811f59b1a14bec3c0b44cfa025c8aa683ab090f1620ea0528b79becb49",
+        "v31-committed-fade-maker-v9",
+        "cec815e96108f964894c36c214d22beac04d7608dcf6d6175262f82d3d3b7548",
     ]
 
 
