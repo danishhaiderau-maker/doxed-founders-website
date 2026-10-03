@@ -1432,6 +1432,9 @@ jobs:
           # useful without downloading or disclosing the complete bot log.
           run_probe LATEST_TRACEBACK_CONTEXT flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "sh -lc 'grep -n -B 8 -A 48 \"Traceback (most recent call last):\" /app/data/bot.log | tail -n 120'"
+          reset_seal_probe_b64="$(base64 -w0 scripts/fly-reset-seal-probe.py)"
+          run_probe RESET_AND_V22_SEALS flyctl machine exec --app doxed-btc-bot --timeout 44 "$machine_id" \
+            "python -c \"import base64; exec(base64.b64decode('${reset_seal_probe_b64}'))\""
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
