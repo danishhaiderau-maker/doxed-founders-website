@@ -80,6 +80,8 @@ REQUIRED_FIELDS: Mapping[str, tuple[str, ...]] = {
         "lifecycle_pipeline.blocker_counts", "lifecycle_pipeline.emergency_wal",
         "collection.cross_venue_tape.venues", "collection.market_context_tape.status",
         "book_refresh.book_age_sec", "uptime.boot_at", "collection.execution_markouts.write_failures",
+        "collection.shadow_exit_recorder.write_failures", "collection.shadow_exit_recorder.errors",
+        "collection.shadow_exit_recorder.dropped_full",
     ),
     "relay": ("state_integrity.relay_push.delivery_scheduler",),
     "system_health": ("age_sec", "stale"),

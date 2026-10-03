@@ -43,6 +43,7 @@ STATUS = {
         }},
         "market_context_tape": {"status": "OK", "stale_feeds": []},
         "execution_markouts": {"write_failures": 0, "dropped": 0, "taker_capture_failures": 0},
+        "shadow_exit_recorder": {"write_failures": 0, "errors": 0, "dropped_full": 0},
         "xvl_evaluator": {"write_failures": 0},
     },
 }
