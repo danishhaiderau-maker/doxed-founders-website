@@ -7035,7 +7035,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   main { padding: 20px clamp(12px, 1vw, 24px); width: 100%; max-width: none; min-width: 0; overflow: hidden; }
   section { display: none; min-width: 0; max-width: 100%; }
   section.active { display: block; }
-  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 12px; margin-bottom: 20px; }
   #decision-readiness { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
   #decision-readiness .val { font-size: 1rem; overflow-wrap: break-word; word-break: normal; }
   #genome-kpis { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
@@ -7054,6 +7054,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .table-scroll table.sticky-first tr:nth-child(even) td:first-child { background: #101820; }
   .table-scroll table.sticky-first thead th:first-child { z-index: 3; background: var(--panel); }
   .table-scroll table[hidden] { display: none; }
+  @media (max-width: 1600px) {
+    .table-scroll table { font-size: 0.75rem; }
+    .table-scroll th, .table-scroll td { padding: 3px 5px; }
+  }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
   tr:nth-child(even) { background: #101820; }
@@ -7590,36 +7594,46 @@ function ensureScrollableTables(root = document) {
 }
 ensureScrollableTables();
 // Long policy identities (SIDE|ENTRY|EXIT, OFFSET_0.30_CHASE_...) have no
-// spaces; a <wbr> after each '|' or '_' in a long token lets them wrap without
-// changing their text, copy or sort value.
-const LONG_TOKEN_RE = /[^\s]{12,}/;
-const POLICY_BREAK_RE = /[|_](?=\S)/;
-const wrappedCellText = new WeakMap();
+// spaces. <wbr> hints let them wrap without changing their text, copy or sort
+// value: always after '|', and after '_' only in tables that still overflow.
+const LONG_TOKEN_RE = /[^\s]{16,}/;
+const BREAK_HINTS = {
+  '|': [/\|(?=\S)/, /(?<=\|)(?=\S)/],
+  '|_': [/[|_](?=\S)/, /(?<=[|_])(?=\S)/],
+};
+const hintedCells = new WeakMap();
+function addBreakHints(cell, level) {
+  const text = cell.textContent;
+  const done = hintedCells.get(cell);
+  if (done && done.text === text && (done.level === level || done.level === '|_')) return;
+  if (!LONG_TOKEN_RE.test(text)) return;
+  const [breakRe, splitRe] = BREAK_HINTS[level];
+  const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const value = walker.currentNode.nodeValue;
+    if (LONG_TOKEN_RE.test(value) && breakRe.test(value)) nodes.push(walker.currentNode);
+  }
+  nodes.forEach(node => {
+    const frag = document.createDocumentFragment();
+    node.nodeValue.split(splitRe).forEach((part, i) => {
+      if (i) frag.appendChild(document.createElement('wbr'));
+      frag.appendChild(document.createTextNode(part));
+    });
+    node.parentNode.replaceChild(frag, node);
+  });
+  if (!cell.title && cell.tagName === 'TD') cell.title = text.trim();
+  hintedCells.set(cell, { text, level });
+}
 function refineTableLayout(root = document) {
   root.querySelectorAll('main .table-scroll > table').forEach(table => {
     const grouped = table.tHead && table.tHead.rows.length > 1;
     const spanned = table.querySelector('td[rowspan]:not([rowspan="1"]), th[rowspan]:not([rowspan="1"])');
     table.classList.toggle('sticky-first', !grouped && !spanned);
-  });
-  root.querySelectorAll('main .table-scroll td, main .table-scroll th').forEach(cell => {
-    const text = cell.textContent;
-    if (wrappedCellText.get(cell) === text || !LONG_TOKEN_RE.test(text)) return;
-    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
-    const nodes = [];
-    while (walker.nextNode()) {
-      const value = walker.currentNode.nodeValue;
-      if (LONG_TOKEN_RE.test(value) && POLICY_BREAK_RE.test(value)) nodes.push(walker.currentNode);
-    }
-    nodes.forEach(node => {
-      const frag = document.createDocumentFragment();
-      node.nodeValue.split(/(?<=[|_])(?=\S)/).forEach((part, i) => {
-        if (i) frag.appendChild(document.createElement('wbr'));
-        frag.appendChild(document.createTextNode(part));
-      });
-      node.parentNode.replaceChild(frag, node);
-    });
-    if (!cell.title && cell.tagName === 'TD') cell.title = text.trim();
-    wrappedCellText.set(cell, cell.textContent);
+    const cells = table.querySelectorAll('td, th');
+    cells.forEach(cell => addBreakHints(cell, '|'));
+    const wrapper = table.parentElement;
+    if (wrapper.scrollWidth > wrapper.clientWidth + 1) cells.forEach(cell => addBreakHints(cell, '|_'));
   });
 }
 let tableLayoutQueued = false;
@@ -7628,7 +7642,8 @@ function queueTableLayout() {
   tableLayoutQueued = true;
   requestAnimationFrame(() => { tableLayoutQueued = false; refineTableLayout(); });
 }
-new MutationObserver(queueTableLayout).observe(document.querySelector('main'), { childList: true, subtree: true, characterData: true });
+new MutationObserver(queueTableLayout).observe(document.querySelector('main'), { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+window.addEventListener('resize', queueTableLayout);
 queueTableLayout();
 const EVIDENCE_SCOPES = {
   summary: ['FRESHNESS UNVERIFIED — READ-ONLY', 'Waiting for exact-generation freshness receipts. Saved policy and historical executed evidence remain separate and are not qualification proof.'],
