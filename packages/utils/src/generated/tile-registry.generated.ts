@@ -2,9 +2,9 @@
 // Source: services/btc-conservative-agent/combo_pathway_config.py
 // Regenerate: python scripts/generate-tile-registry-ts.py
 
-export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL"];
+export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S", "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90"];
 
-export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["xvl", "xvp", "caug"];
+export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["xvl", "xvp", "caug", "cfm"];
 
 /** Lanes and trade-id prefixes of tiles the registry marks platform_relay_eligible. */
 export const RELAY_ELIGIBLE_TILE_LANES: readonly string[] = [];

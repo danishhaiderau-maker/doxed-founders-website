@@ -107,6 +107,8 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S = "FAMILY_XVENUE_LEAD_60S"
 RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S = "FAMILY_XVENUE_PREMIUM_60S"
 RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL = "FAMILY_CONTINUOUS_AUG_ORIGINAL"
+RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90 = "FAMILY_COMMITTED_FADE_MAKER_90"
+COMMITTED_FADE_MAKER_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_MAKER_V1"
 CONTINUOUS_AUG_ADMISSION_POLICY_ID = "OWN_AI_CALL_AUG_V3_HIGHER_SCORE_GAP5_V1"
 CROSS_VENUE_LEAD_ADMISSION_POLICY_ID = "CROSS_VENUE_LEAD_NO_AI_V1"
 CROSS_VENUE_PREMIUM_ADMISSION_POLICY_ID = "CROSS_VENUE_PREMIUM_NO_AI_V1"
@@ -141,6 +143,7 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S,
     RESEARCH_LANE_FAMILY_XVENUE_PREMIUM_60S,
     RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL,
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -259,7 +262,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     return tile
 
 
-RESEARCH_STACK_VERSION = "v31-retire-trend-fade-v8"
+RESEARCH_STACK_VERSION = "v31-committed-fade-maker-v9"
 # Cross-venue lead was registered in the v5 cohort and continues unchanged.
 XVENUE_LEAD_POLICY_EPOCH = "v31-trend-fade-single-tile-v5"
 # Cross-venue premium was registered in v6 and continues unchanged through the
@@ -323,8 +326,10 @@ _CONTINUOUS_AUG_EXIT = {
     "exit_order": ("EARLY_FAIL", "STOP_LOSS", "PROFIT_LOCK_LADDER",
                    "THESIS_FAST_CUT", "THESIS_INVALIDATED", "TIME_EXIT"),
 }
-# Registered in v7; pinned so the v8 retirement does not split its cohort.
+# Registered in v7; pinned so the v8 retirement and the v9 committed-fade maker
+# addition do not split its cohort.
 CONTINUOUS_AUG_POLICY_EPOCH = "v31-continuous-aug-original-v7"
+COMMITTED_FADE_MAKER_POLICY_EPOCH = RESEARCH_STACK_VERSION
 CONTINUOUS_AUG_CARD_TEXT = "Exact replica of Aug-2026 Continuous (realistic fills; August touch-fill shadow alongside)"
 
 
@@ -472,6 +477,88 @@ def _xvenue_lead_pre_registration(hypothesis_id: str) -> dict:
     return pre
 
 
+def _committed_fade_maker_pre_registration(hypothesis_id: str) -> dict:
+    """PROFIT-TILE-DESIGN-20261003; verdicts use post-registration REALISTIC_V1 paper trades only."""
+    pre = {
+        "schema": "tile_pre_registration_committed_fade_maker_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-03T00:00:00Z",
+        "registered_cohort": COMMITTED_FADE_MAKER_POLICY_EPOCH,
+        "control_lane": None,
+        "control_meaning": ("No live control lane: the analyzer's REALISTIC_V1 counterfactual of the same committed "
+                            "calls (taker 60-min fade and the unfaded side) is the comparison; Continuous is the baseline"),
+        "evidence_world": "REALISTIC_V1",
+        "ci_method": "1H_CLUSTER_BOOTSTRAP_95",
+        "variants_tried": 3416,
+        "honest_label": ("HINT — fails the pre-set bar: 3 days, in-sample +9.5 bp/trade (1 h-cluster CI [-13,+37]), "
+                         "day-fold walk-forward +5.0 bp [-15,+30], deflated Sharpe ~0 after 3,416 variants, "
+                         "edge shrank daily, 4 h unseen window negative"),
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 150, "min_utc_days": 7,
+            "min_sessions_each": 3, "sessions": ("ASIA", "EU", "US"),
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_sides_mean_ge_bp": 0.0,
+            "both_halves_positive": True,
+            "shadow_5s_delay_mean_gt_bp": 0.0,
+            "max_single_day_profit_share": 0.30,
+            "max_replay_parity_gap_bp": 1.0,
+        },
+        "kill": {
+            "k1_after_fills": 80, "k1_mean_bp_at_or_below": 0.0,
+            "k2_after_fills": 150, "k2_upper_ci95_lt_bp": 2.0,
+            "k3_worst_trade_bp_below": -60.0, "k3_max_stale_feed_fill_share": 0.01,
+            "k4_max_drawdown_usd": 1.0,
+            "k5_max_days_without_promotion": 21,
+            "k6_defect_action": "PAUSE_AND_QUARANTINE_NOT_A_STRATEGY_VERDICT",
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades over >={promote['min_utc_days']} UTC days "
+        f"incl. >={promote['min_sessions_each']} each of Asia/EU/US sessions; per-trade EV 1 h-cluster lower 95% CI >0 "
+        f"(REALISTIC_V1); both sides and both halves >=0; 5 s-delay shadow mean >0; no day "
+        f">{promote['max_single_day_profit_share']:.0%} of profit; replay parity <={promote['max_replay_parity_gap_bp']:g} bp; "
+        "promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 mean <={kill['k1_mean_bp_at_or_below']:g} bp after {kill['k1_after_fills']} trades; "
+        f"K2 1 h-cluster upper 95% CI <+{kill['k2_upper_ci95_lt_bp']:g} bp after {kill['k2_after_fills']} trades; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure) or "
+        f">{kill['k3_max_stale_feed_fill_share']:.0%} of trades on a stale feed; K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 day {kill['k5_max_days_without_promotion']} without promotion = INCONCLUSIVE; "
+        "K6 lifecycle/identity/analyzer/feed/mirror defect = pause and quarantine"
+    )
+    return pre
+
+
+# Tile 4 = fade only committed AI calls (explicit LONG/SHORT matching the
+# scores), entered with a passive limit 0.10% beyond the decision-time price
+# that rests 30 minutes without chase, then a 90-minute time exit and a 40 bp
+# catastrophic stop. PROFIT-TILE-DESIGN-20261003 under REALISTIC_V1 fills.
+_COMMITTED_FADE_MAKER_ENTRY = {
+    "mode": "MAKER_LIMIT_OFFSET",
+    "offset_pct": 0.10, "offset_reference": "LAST_PRICE_AT_DECISION",
+    "chase_windows": (), "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "maker_ttl_sec": 1800, "never_cross_touch": True, "marketable_fallback": False,
+    "direction_source": "INVERTED_SCORE_LED_SIDE",
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE",
+                  "SCORE_DIRECTION_MISMATCH", "BBO_STALE"),
+    "trades_raw_ai_no_trade": False, "min_score_gap": None,
+    "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED",
+    "max_bbo_age_sec": 5.0,
+    "ai_decision_role": "FEATURE_ONLY",
+    "fill_model": "REALISTIC_V1",
+}
+_COMMITTED_FADE_MAKER_EXIT = {
+    "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
+    "max_duration_sec": 5400,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+    "max_open_positions": 3,
+}
+
 
 COMBO_LANE_SPECS = {
     # NEXT-TILE-RESEARCH-20261002: when the mean Binance/Bybit 10 s return
@@ -572,6 +659,35 @@ COMBO_LANE_SPECS = {
     # Owner-requested 2026-10-03: the August Continuous tile (demoted to a
     # label in #136, retired in #233) restored as a permanent paper-only baseline.
     RESEARCH_LANE_FAMILY_CONTINUOUS_AUG_ORIGINAL: _continuous_aug_original_tile(),
+    # PROFIT-TILE-DESIGN-20261003: the genome FADE/time-exit winner reduced to
+    # its clean source (committed calls only; fading NO_TRADE calls loses),
+    # maker entry and a 90-minute hold. Three slots so evidence accrues ~3x
+    # faster than one; 1 h-cluster CIs absorb the overlap.
+    RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90: _tile(
+        lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_MAKER_90,
+        label="Committed fade (maker) · inverted committed AI side, 0.10% maker limit 30 min, 90-min hold, 40 bp stop",
+        raw_policy_id="INVERT_COMMITTED_SCORE_LED_SIDE_MAKER_OFFSET_0.10_NOCHASE_TTL1800|TIME_5400_HARD40BP",
+        id_prefix="cfm",
+        module="paper_policy_family_committed_fade_maker_90.py",
+        test_module="test_paper_policy_family_committed_fade_maker_90.py",
+        entry=dict(_COMMITTED_FADE_MAKER_ENTRY),
+        exit_policy=dict(_COMMITTED_FADE_MAKER_EXIT),
+        hypothesis_result={
+            "status": "HINT_3D_WALK_FORWARD_CI_SPANS_0",
+            "hypothesis_id": "H8_COMMITTED_FADE_MAKER_90_20261003",
+            "in_sample": ("REALISTIC_V1, 2026-09-30..10-02, 3 slots: 67 trades +8.9 bp/trade, 1 h-cluster CI [-7,+28]; "
+                          "1 slot: 24 trades +9.5 bp, every day positive; all fills +13.5 bp [-3,+32], n_eff 28"),
+            "corrected": ("day-fold walk-forward 19 trades +5.0 bp [-15,+30]; deflated Sharpe ~0 after 3,416 variants; "
+                          "unseen 17:12-21:30Z window -20 bp (n_eff ~4)"),
+            "expected_live": "-5 to +6 bp/trade after decay (central ~+2); 15-25 trades/day",
+        },
+        pre_registration=_committed_fade_maker_pre_registration("H8_COMMITTED_FADE_MAKER_90_20261003"),
+        admission_treatment=COMMITTED_FADE_MAKER_ADMISSION_POLICY_ID,
+        max_active_signals=3,
+        entry_ttl_sec=1800,
+        subtitle="HINT — 3-day REALISTIC_V1 walk-forward, CI spans 0 — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=COMMITTED_FADE_MAKER_POLICY_EPOCH,
+    ),
 }
 COMPARISON_BENCHMARK_LANE = None
 PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S
@@ -583,7 +699,7 @@ RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_XVENUE_LEAD_60S
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "Tile 1 (Cross-venue lead, HINT, 12 h evidence) and Tile 2 (Cross-venue premium, HINT, 8 h holdout evidence) use no AI and do not consume the shared call: a bounded per-second cross-venue evaluator takes a Bitfinex taker (5 bp cap, 3 s) in the leaders' direction when every feed is <=2 s old and spread <=3 bp - Tile 1 on a >=8 bp 10 s Binance/Bybit lead over Bitfinex, Tile 2 when the Binance/Bybit premium over Bitfinex is >=+1.75 bp (long) or <=-1.88 bp (short) versus its own 60-minute mean - exits after 60 s with a 40 bp catastrophic stop, holds one position, and logs every qualifying trigger as a shadow signal whether or not the tile is ON. Stops fill at the side-correct quote that crossed them. Both carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. Tile 3 (Continuous, Aug-2026 original, BASELINE BENCHMARK) is an exact replica of the early-August Continuous tile: after every shared three-minute call it makes its own DeepSeek call with the verbatim v3 prompt (never NO_TRADE, temperature 0), takes the higher score's side when the gap is >=5, the scores sum to >=50 and the side does not fight confirmed structure, rests a 0.1% maker limit chased 25% of the remaining gap every 60 s for 10 minutes, and exits on the Scenario C ladder, a -12% thesis cut (MFE protect 5%), a 30% stop, a -32% early fail, a 40/10 peak floor or the 2 h cap. Its primary ledger uses realistic BBO/depth fills with the August touch fill recorded as a shadow; it is default-ON, paper-only, relay-ineligible and never promoted or retired for performance. v8 retires Trend Fade 60 and Trend Fade 60 committed calls (owner, XVENUE-INVERT-STUDY-20261003); the cross-venue tiles keep their v5/v6 cohorts and Continuous keeps v7. v7 added Continuous; v6 retired the Trend Fade 60 profit-lock ladder tile. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort, v4 the four-tile cohort and v5 the ladder/lead cohort"
+    "Tile 1 (Cross-venue lead, HINT, 12 h evidence) and Tile 2 (Cross-venue premium, HINT, 8 h holdout evidence) use no AI and do not consume the shared call: a bounded per-second cross-venue evaluator takes a Bitfinex taker (5 bp cap, 3 s) in the leaders' direction when every feed is <=2 s old and spread <=3 bp - Tile 1 on a >=8 bp 10 s Binance/Bybit lead over Bitfinex, Tile 2 when the Binance/Bybit premium over Bitfinex is >=+1.75 bp (long) or <=-1.88 bp (short) versus its own 60-minute mean - exits after 60 s with a 40 bp catastrophic stop, holds one position, and logs every qualifying trigger as a shadow signal whether or not the tile is ON. Stops fill at the side-correct quote that crossed them. Both carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. Tile 3 (Continuous, Aug-2026 original, BASELINE BENCHMARK) is an exact replica of the early-August Continuous tile: after every shared three-minute call it makes its own DeepSeek call with the verbatim v3 prompt (never NO_TRADE, temperature 0), takes the higher score's side when the gap is >=5, the scores sum to >=50 and the side does not fight confirmed structure, rests a 0.1% maker limit chased 25% of the remaining gap every 60 s for 10 minutes, and exits on the Scenario C ladder, a -12% thesis cut (MFE protect 5%), a 30% stop, a -32% early fail, a 40/10 peak floor or the 2 h cap. Its primary ledger uses realistic BBO/depth fills with the August touch fill recorded as a shadow; it is default-ON, paper-only, relay-ineligible and never promoted or retired for performance. Tile 4 (Committed fade - maker, HINT, 3-day REALISTIC_V1 walk-forward) fades only shared calls where the AI committed to an explicit LONG/SHORT matching the score-led side (never NO_TRADE, no gap floor), rests one passive maker limit 0.10% beyond the decision-time price for 30 minutes (never past the touch, no chase, expires unfilled; stand aside when the BBO is older than 5 s), exits 90 minutes after the fill or at a 40 bp catastrophic stop, holds up to three signals, and is default-OFF, paper-only and relay-ineligible. v9 adds the committed-fade maker tile; every other tile keeps its cohort. v8 retires Trend Fade 60 and Trend Fade 60 committed calls (owner, XVENUE-INVERT-STUDY-20261003); the cross-venue tiles keep their v5/v6 cohorts and Continuous keeps v7. v7 added Continuous; v6 retired the Trend Fade 60 profit-lock ladder tile. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort, v4 the four-tile cohort and v5 the ladder/lead cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

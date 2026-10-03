@@ -3,9 +3,11 @@
 Everything is read from the bound lane's registry spec:
 
 * ``entry_policy.direction_source`` chooses the tile's side: ``SCORE_LED_SIDE``
-  trades the score-led side of the one shared AI call (only a score tie,
-  invalid scores or an AI error refuse); the cross-venue sources take their
-  side from the per-second cross-venue evaluator.
+  trades the score-led side of the one shared AI call and
+  ``INVERTED_SCORE_LED_SIDE`` the opposite side (only a score tie, invalid
+  scores or an AI error refuse, unless the entry declares a commit rule via
+  ``trades_raw_ai_no_trade`` / ``min_score_gap``); the cross-venue sources take
+  their side from the per-second cross-venue evaluator.
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
@@ -46,19 +48,46 @@ from family_policy_common import (
 CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
 CROSS_VENUE_PREMIUM = "CROSS_VENUE_PREMIUM"
 CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD, CROSS_VENUE_PREMIUM})
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
+DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
 # Dashboard evidence badge per registry hypothesis status (honest-label strength).
 EVIDENCE_BADGES = {
     "HINT_12H_EVIDENCE": "HINT — 12h evidence",
     "HINT_8H_HOLDOUT_EVIDENCE": "HINT — 8h holdout evidence",
     "HINT_DEV_AND_HOLDOUT_SAME_SIGN": "HINT — dev + 12h holdout, CI spans 0",
+    "HINT_3D_WALK_FORWARD_CI_SPANS_0": "HINT — 3-day walk-forward, CI spans 0",
 }
 
 
 def evidence_badge(tile: Mapping[str, Any]) -> str | None:
     status = str(((tile.get("presentation") or {}).get("hypothesis_result") or {}).get("status") or "")
     return EVIDENCE_BADGES.get(status)
+
+
+def committed_call_refusal(entry: Mapping[str, Any], raw: Mapping[str, Any],
+                           admission: Mapping[str, Any], score_led: str) -> str | None:
+    """Refusal reason when a commit-only tile must not trade this call, else None.
+
+    Tiles whose entry keeps ``trades_raw_ai_no_trade`` true and ``min_score_gap``
+    unset are never refused here.
+    """
+    min_gap = entry.get("min_score_gap")
+    if entry.get("trades_raw_ai_no_trade", True) and min_gap is None:
+        return None
+    if not entry.get("trades_raw_ai_no_trade", True):
+        raw_side = str(raw.get("raw_direction") or "").upper()
+        if raw_side not in _OPPOSITE or raw.get("explicit_abstain"):
+            return "RAW_AI_NO_TRADE"
+        if raw.get("score_direction_mismatch") or raw_side != score_led:
+            return "SCORE_DIRECTION_MISMATCH"
+    if min_gap is not None:
+        try:
+            gap = float(admission.get("score_gap"))
+        except (TypeError, ValueError):
+            return "SCORE_GAP_BELOW_MIN"
+        if not math.isfinite(gap) or gap < float(min_gap):
+            return "SCORE_GAP_BELOW_MIN"
+    return None
 
 
 def signal_source_detail(tile: Mapping[str, Any]) -> str:
@@ -130,8 +159,13 @@ class TakerTimeExitBinding:
             reason = "SCORE_LED_TREATMENT_INACTIVE"
         elif not admission.get("accepted") or score_led not in _OPPOSITE:
             reason = str(admission.get("reason") or "SCORE_LED_SIDE_UNAVAILABLE")
+        else:
+            reason = committed_call_refusal(self.entry, raw, admission, score_led)
         accepted = reason is None
-        direction = score_led if accepted else "NO_TRADE"
+        direction = (
+            (_OPPOSITE[score_led] if self.entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else score_led)
+            if accepted else "NO_TRADE"
+        )
         lane_ai = copy.deepcopy(raw)
         lane_ai.update({
             "raw_direction": str(raw.get("raw_direction") or raw.get("direction") or "UNKNOWN").upper(),
