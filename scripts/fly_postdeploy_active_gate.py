@@ -6,6 +6,9 @@ whatever its state before maintenance; tiles stay relay-ineligible and the
 relay/Bitfinex are never armed. It then proves: paper execution unpaused with
 no pause owner, live relay disarmed, and the scheduled AI cycle completing at
 least twice after the gate started. Any failure fails the run.
+
+Lanes listed in ``PAPER_TILES_HOLD_OFF`` (comma-separated) are operator-held:
+they are toggled OFF instead of ON and the receipt requires them OFF.
 """
 
 from __future__ import annotations
@@ -24,16 +27,24 @@ POLL_SEC = 10
 TRANSIENT_HTTP = {502, 503, 504}
 
 
-def tile_enable_plan(current_enabled: dict, registry_lanes: list[str]) -> list[str]:
-    """Registry lanes that are not ON yet; every boundary ends with all tiles ON."""
-    return [lane for lane in registry_lanes if current_enabled.get(lane) is not True]
+def held_off_lanes(environ=None) -> frozenset[str]:
+    raw = str((os.environ if environ is None else environ).get("PAPER_TILES_HOLD_OFF") or "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def tiles_all_on_receipt(status: dict, state: dict) -> dict:
+def tile_enable_plan(current_enabled: dict, registry_lanes: list[str], held: frozenset[str] = frozenset()) -> list[str]:
+    """Registry lanes that are not ON yet; every boundary ends with all non-held tiles ON."""
+    return [lane for lane in registry_lanes if lane not in held and current_enabled.get(lane) is not True]
+
+
+def tiles_all_on_receipt(status: dict, state: dict, held: frozenset[str] = frozenset()) -> dict:
     lanes = [str(t.get("lane")) for t in status.get("active_tiles") or [] if t.get("lane")]
     enabled = state.get("research_lane_enabled") or {}
-    off = [lane for lane in lanes if enabled.get(lane) is not True]
-    return {"lanes": lanes, "tiles_off": off, "tiles_all_on": bool(lanes) and not off,
+    off = [lane for lane in lanes if lane not in held and enabled.get(lane) is not True]
+    held_on = [lane for lane in lanes if lane in held and enabled.get(lane) is not False]
+    active = [lane for lane in lanes if lane not in held]
+    return {"lanes": lanes, "tiles_off": off, "held_off": sorted(held & set(lanes)), "held_not_off": held_on,
+            "tiles_all_on": bool(active) and not off and not held_on,
             "execution_paused": status.get("execution_paused"),
             "pause_owner": status.get("pause_owner") or "",
             "live_armed": status.get("live_armed"),
@@ -55,16 +66,24 @@ def enable_all_registry_tiles(request) -> dict:
     lanes = [str(t.get("lane")) for t in status.get("active_tiles") or [] if t.get("lane")]
     if not lanes:
         raise SystemExit("registry roster missing from /api/status active_tiles")
+    held = held_off_lanes()
     state = request("/api/state", None)
-    for lane in tile_enable_plan(state.get("research_lane_enabled") or {}, lanes):
+    current = state.get("research_lane_enabled") or {}
+    for lane in [lane for lane in lanes if lane in held and current.get(lane) is not False]:
+        result = request("/api/toggle_research_lane", {"lane": lane, "enabled": False})
+        if result.get("enabled") is not False:
+            raise SystemExit(f"tile toggle OFF failed for held lane {lane}")
+        print(json.dumps({"held_off_tile": lane}), flush=True)
+    for lane in tile_enable_plan(current, lanes, held):
         result = request("/api/toggle_research_lane", {"lane": lane, "enabled": True})
         if result.get("enabled") is not True:
             raise SystemExit(f"tile toggle ON failed for {lane}")
         print(json.dumps({"enabled_tile": lane}), flush=True)
-    receipt = tiles_all_on_receipt(request("/api/status", None), request("/api/state", None))
+    receipt = tiles_all_on_receipt(request("/api/status", None), request("/api/state", None), held)
     print("tiles receipt " + json.dumps(receipt, sort_keys=True), flush=True)
     if not receipt["tiles_all_on"]:
-        raise SystemExit("registry tiles not all ON: " + ",".join(receipt["tiles_off"]))
+        raise SystemExit("registry tiles not all ON (held lanes OFF): "
+                         + ",".join(receipt["tiles_off"] + receipt["held_not_off"]))
     if receipt["live_armed"] is not False or receipt["bitfinex_live_enabled"] is not False:
         raise SystemExit("live relay/Bitfinex must stay disarmed")
     return receipt

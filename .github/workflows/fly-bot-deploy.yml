@@ -133,6 +133,9 @@ concurrency:
   group: fly-btc-production
   cancel-in-progress: false
 
+env:
+  PAPER_TILES_HOLD_OFF: ${{ vars.PAPER_TILES_HOLD_OFF }}
+
 jobs:
   resume-bootstrap:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
