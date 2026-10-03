@@ -75,6 +75,8 @@ POLICIES: Mapping[str, Policy] = {
     "xvl_evaluator_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
     # Rolling median over the last fills; a restart empties the window.
     "xvl_signal_to_fill_slow": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    # Dead-lettered receipts or barrier timeouts persist until restart.
+    "preentry_evidence_degraded": Policy(1, 0.0, 6 * HOUR, True),
     "cross_venue_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "cross_venue_reconnects": Policy(2, 30 * 60.0, 6 * HOUR, True, WARNING),
     "market_context_stale": Policy(2, 30 * 60.0, 6 * HOUR, True),
