@@ -1,9 +1,9 @@
 {
   "engine_version": "v31-continuous-aug-original-v7",
-  "combo_version": "2026-10-02",
+  "combo_version": "2026-10-03",
   "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "7bdafbac5b14",
+  "signal_hash": "6f178a0b0776",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-02T18:50:28.124Z"
+  "updated_at": "2026-10-03T01:05:49.942Z"
 }
