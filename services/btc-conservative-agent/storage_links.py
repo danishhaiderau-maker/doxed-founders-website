@@ -233,6 +233,10 @@ def unique_bytes(roots: Iterable[Path]) -> dict:
 # in-place write makes Windows decompress the file first; nothing breaks.
 NEVER_COMPRESS_SUFFIXES = NEVER_LINK_SUFFIXES + (".gz", ".zst", ".zip", ".parquet", ".xz", ".bz2", ".7z", ".png")
 COMPRESS_MIN_BYTES = 1024 * 1024
+# The emergency evidence WAL proves its reserve is physically allocated
+# (EMERGENCY_WAL_RESERVE_NOT_PHYSICALLY_ALLOCATED); a compressed reserve makes
+# every V3 evidence store refuse to open.
+NEVER_COMPRESS_DIRS = frozenset({"emergency_evidence_wal_v2"})
 COMPRESS_ALGORITHM = "lzx"
 COMPRESS_ENV = "DOXXED_MIRROR_WOF"
 
@@ -294,6 +298,7 @@ def compress_settled(roots: Iterable[Path], *, now: Optional[float] = None,
             continue
         for directory, dirs, names in os.walk(root):
             dirs[:] = [d for d in dirs if not d.startswith(".")
+                       and d.lower() not in NEVER_COMPRESS_DIRS
                        and not os.path.islink(os.path.join(directory, d))
                        and not _is_reparse(os.path.join(directory, d))]
             for leaf in names:

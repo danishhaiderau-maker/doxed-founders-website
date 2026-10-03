@@ -124,6 +124,21 @@ class CompressSettledTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(out["verify_failed"], 0)
 
+    def test_emergency_wal_reserve_is_never_compressed(self):
+        self._settled("data/v3/emergency_evidence_wal_v2/mandatory-reserve.bin")
+        self._settled("data/v3/ledgers/order_intent.jsonl.1")
+        calls = []
+
+        def runner(cmd, **_kw):
+            calls.append(cmd[-1])
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(sl, "compression_enabled", return_value=True), \
+                mock.patch.object(sl, "allocated_bytes", return_value=None):
+            out = sl.compress_settled([self.root / "data"], runner=runner)
+        self.assertEqual(out["candidates"], 1)
+        self.assertEqual([Path(call).name for call in calls], ["order_intent.jsonl.1"])
+
     def test_dry_run_and_budget(self):
         self._settled("a/x.jsonl.1")
         self._settled("a/x.jsonl.2")
