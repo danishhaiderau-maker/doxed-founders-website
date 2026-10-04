@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
+
 SCHEMA = "analyzer_input_blockers_v1"
 REPORT_FILE = "analyzer_input_blockers.json"
 
@@ -41,17 +43,16 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
-        with open(path, "r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+        for line in epoch_lines(path, "r", encoding="utf-8-sig"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     except OSError:
         pass
     return rows
@@ -59,8 +60,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _read_trades(data_dir: Path) -> list[dict[str, Any]]:
     try:
-        with open(data_dir / TRADES_CSV, "r", encoding="utf-8-sig", newline="") as handle:
-            return list(csv.DictReader(handle))
+        with guarded_open(data_dir / TRADES_CSV, "r", encoding="utf-8-sig", newline="") as handle:
+            return epoch_csv_rows(csv.DictReader(handle), TRADES_CSV)
     except OSError:
         return []
 

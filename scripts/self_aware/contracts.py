@@ -18,6 +18,7 @@ degraded (declared empty, dead column, stale, roster drift), INFO = noted only.
 from __future__ import annotations
 
 import ast
+import calendar
 import gzip
 import hashlib
 import json
@@ -584,12 +585,34 @@ def _worst(viol: list[dict[str, Any]]) -> str:
 
 # ------------------------------------------------------------------ drift
 
-def drift(spec: dict[str, Any], result: dict[str, Any], history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compare this evaluation with the last ``DRIFT_WINDOW`` stored ones (newest first)."""
+def baseline_identity(paths: Paths, facts: dict[str, Any]) -> dict[str, Any]:
+    """What a drift baseline must share with the current evaluation: the data epoch and the tile registry.
+
+    A reset epoch or a tile roster change is a new population, so evaluations
+    from before it (retired tiles, emptied pre-epoch sections) never count.
+    """
+    manifest = read_json(Path(paths.mirror) / "data_epoch.json") or {}
+    runtime = facts.get("runtime") or {}
+    return {"epoch_id": manifest.get("epoch_id"),
+            "tile_registry_signature": runtime.get("tile_registry_signature")}
+
+
+def _epoch_started_ts(paths: Paths) -> float | None:
+    manifest = read_json(Path(paths.mirror) / "data_epoch.json") or {}
+    try:
+        return float(manifest["started_at_ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def drift(spec: dict[str, Any], result: dict[str, Any], history: list[dict[str, Any]],
+          identity: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Compare this evaluation with the last ``DRIFT_WINDOW`` stored ones (newest first) of the same baseline identity."""
     d = spec.get("drift") or {}
     if d.get("disabled") or result["status"] == SKIP:
         return []
-    base = [h for h in history if h.get("id") == spec["id"] and h.get("metrics") is not None][:DRIFT_WINDOW]
+    base = [h for h in history if h.get("id") == spec["id"] and h.get("metrics") is not None
+            and (identity is None or h.get("baseline") == identity)][:DRIFT_WINDOW]
     if len(base) < int(d.get("min_history", 2)):
         return []
     out = []
@@ -669,10 +692,23 @@ def archive_snapshots(paths: Paths) -> list[tuple[str, Path]]:
     return sorted(snaps)
 
 
-def archive_drift(paths: Paths, cache: dict[str, Any], *, max_snapshots: int = ARCHIVE_SNAPSHOTS) -> dict[str, Any]:
-    """Per report: list lengths and column sets across archived snapshots; flag collapse, dropped columns, disappearance."""
+def _snapshot_ts(key: str) -> float | None:
+    try:
+        return float(calendar.timegm(time.strptime(key[:16], "%Y%m%dT%H%M%SZ")))
+    except ValueError:
+        return None
+
+
+def archive_drift(paths: Paths, cache: dict[str, Any], *, max_snapshots: int = ARCHIVE_SNAPSHOTS,
+                  since_ts: float | None = None) -> dict[str, Any]:
+    """Per report: list lengths and column sets across archived snapshots; flag collapse, dropped columns, disappearance.
+
+    ``since_ts`` (the data epoch start) keeps snapshots of earlier epochs out of the baseline.
+    """
     t0 = time.time()
     snaps = archive_snapshots(paths)
+    if since_ts is not None:
+        snaps = [s for s in snaps if (_snapshot_ts(s[0]) or 0) >= since_ts]
     by_report: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     present: dict[str, set[str]] = {}
     skipped = []
@@ -1265,6 +1301,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
     ctx["fetch"] = fetch
     specs = [s for s in reg["contracts"] if tier == "heavy" or s["tier"] == "light"]
     history = store.history(HISTORY_TABLE, limit=4000, kind="CONTRACT") if store is not None else []
+    identity = baseline_identity(paths, facts)
     hist_by: dict[str, list] = {}
     for h in history:
         hist_by.setdefault(h.get("id"), []).append(h)
@@ -1274,7 +1311,9 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
             obj, meta = fetch.get(spec["source"], int(spec.get("max_bytes", DEFAULT_MAX_BYTES)))
             res = evaluate(spec, obj, meta, ctx)
             if tier == "heavy":
-                res["violations"].extend(drift(spec, res, hist_by.get(spec["id"], [])))
+                res["violations"].extend(drift(spec, res, hist_by.get(spec["id"], []), identity))
+                res["drift_baseline"] = {**identity, "evaluations": sum(
+                    1 for h in hist_by.get(spec["id"], []) if h.get("baseline") == identity)}
             else:
                 # Drift is judged only by the heavy pass; keep its verdict so light passes do not flap it.
                 old = (state.get("contracts_last") or {}).get(spec["id"]) or {}
@@ -1298,7 +1337,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
         except (OSError, ValueError):
             cache = {}
         try:
-            extra["archive_drift"] = archive_drift(paths, cache)
+            extra["archive_drift"] = archive_drift(paths, cache, since_ts=_epoch_started_ts(paths))
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(cache, default=str), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
@@ -1308,7 +1347,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
         state["contracts_heavy_at"] = iso(now)
         if store is not None:
             store.append(HISTORY_TABLE, [{"at": iso(now), "kind": "CONTRACT", "id": r["id"], "status": r["status"],
-                                          "metrics": r.get("metrics"), "dims": r.get("dims"),
+                                          "metrics": r.get("metrics"), "dims": r.get("dims"), "baseline": identity,
                                           "violations": [v["kind"] for v in r["violations"]]} for r in results],
                          sources=["section_contracts.json", "dashboard APIs", "exports", "laptop-chain snapshots"])
     else:
