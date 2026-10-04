@@ -1,9 +1,11 @@
-"""Indicator Edge analyzer cycle (laptop): score -> combination grid -> daily summary -> weekly report.
+"""Indicator Edge analyzer cycle (laptop): score -> combination grid -> daily summary -> weekly report -> labels.
 
 Run by scripts/run-genome-grid.ps1 after the genome study (every 2 h; the daily paragraph is appended once per
 UTC day, the weekly markdown once per completed week). Read-only on the mirror and the tape; writes only under
 the analyzer-exports indicator-edge folder, the pre-registration chain (combination freezes, append-only) and
-the weekly diagnostics file. Never touches Fly, trading, tiles, the relay or Bitfinex.
+the weekly diagnostics file. Never touches Fly, trading, tiles, the relay or Bitfinex. It also writes the per-bar
+forward labels (``indicator_edge_labels.jsonl``) from the outcomes the scorer already computed, so single-feature
+and combination studies can run on one table.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from typing import Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from research import indicator_edge_combos as combos  # noqa: E402
+from research import indicator_edge_labels as labels  # noqa: E402
 from research import indicator_edge_prereg as prereg  # noqa: E402
 from research import indicator_edge_weekly as weekly  # noqa: E402
 from research import indicator_forward_scorer as sc  # noqa: E402
@@ -29,6 +32,10 @@ def run(data_dir: str, out_dir: str, prereg_root: Path, diag_dir: Path, *, now: 
     report = sc.score(data_dir, out_dir, prereg_root=prereg_root, now=now, tape=tape, rows=rows, context=ctx)
     report["combinations"] = combos.evaluate(report, ctx, prereg_root=prereg_root, out_dir=out_dir, now=now)
     res = sc.write_outputs(report, out_dir)
+    try:
+        lab = labels.write_from_context(ctx, out_dir)
+    except (OSError, ValueError, KeyError) as exc:  # the scoreboard is already written; labels are additive
+        lab = {"labels": None, "label_rows": 0, "labels_error": f"{type(exc).__name__}: {exc}"}
     frozen_at = (report.get("prereg") or {}).get("frozen_at")
     week_path = None
     if frozen_at:
@@ -38,7 +45,7 @@ def run(data_dir: str, out_dir: str, prereg_root: Path, diag_dir: Path, *, now: 
     return {"status": report["status"], "eligible_rows": report["inputs"]["eligible_rows"],
             "scored_days": report["scored_days"], "label_counts": report["label_counts"],
             "combinations": report["combinations"]["status"], "weekly": str(week_path) if week_path else None,
-            "compute_sec": report["compute_sec"]} | res
+            "compute_sec": report["compute_sec"]} | res | lab
 
 
 def main(argv: Sequence[str] | None = None) -> int:
