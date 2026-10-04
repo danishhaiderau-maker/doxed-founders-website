@@ -18343,7 +18343,10 @@ def _v3_lane_policy_material(lane: str) -> dict:
         "raw_policy_id": spec.get("raw_policy_id") or lane,
         "deterministic_entry_offset_pct": entry_offset_fraction,
         "entry_limit_policy": entry_limit_policy,
-        "entry_ttl_sec": float(SIGNAL_TTL_SEC),
+        # The lane's declared entry TTL (also carried by its research chase schedule, which
+        # order-intent / execution rows hash). Hashing the global SIGNAL_TTL_SEC here minted a
+        # second policy signature per episode for the 3s taker tiles (POLICY_IDENTITY_CONTAMINATION).
+        "entry_ttl_sec": float(spec.get("entry_ttl_sec") or SIGNAL_TTL_SEC),
         "exit_config": get_exit_config_for_lane(lane),
         # Every lane decision produced here describes the canonical LOCAL
         # paper lifecycle. Relay eligibility is a separate capability: an

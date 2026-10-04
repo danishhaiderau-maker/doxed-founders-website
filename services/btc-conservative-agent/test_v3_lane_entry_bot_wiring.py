@@ -693,7 +693,7 @@ def test_verdict_and_resolution_share_one_policy_material_builder():
     )
     assert "lane_policy = _v3_lane_policy_material(lane)" in decision
     assert "lane_policy=_v3_lane_policy_material(lane)" in resolution
-    assert '"entry_ttl_sec": float(SIGNAL_TTL_SEC)' in SOURCE
+    assert '"entry_ttl_sec": float(spec.get("entry_ttl_sec") or SIGNAL_TTL_SEC)' in SOURCE
     assert "dual_write_paper_order_intent(" in SOURCE
 
 
