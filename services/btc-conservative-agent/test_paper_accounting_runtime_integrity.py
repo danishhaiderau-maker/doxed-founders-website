@@ -38,6 +38,7 @@ FUNCTIONS = (
 )
 CONSTANTS = (
     "STATS_EXCLUDED_EXIT_REASONS",
+    "LANE_LEDGER_WL_BASIS",
     "CSV_FALLBACK_JSONL",
     "CSV_OVERFLOW_RESTKEY",
     "CSV_MALFORMED_QUARANTINE_SUFFIX",
@@ -86,6 +87,7 @@ def _load(trades=None, session_filter=None):
         "_trade_row_in_session": session_filter or (lambda row, start: True),
         "trades": trades if trades is not None else [],
         "ACTIVE_TILE_REGISTRY": ACTIVE_TILE_REGISTRY,
+        "monitor_api": __import__("monitor_api"),
     }
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace

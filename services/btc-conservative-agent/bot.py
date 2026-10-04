@@ -4185,8 +4185,13 @@ def _segregate_lane_pnl_ledger_for_epoch() -> dict:
 
 def update_lane_pnl_ledger(
     lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None, exit_reason: str = None,
+    net_pnl_bp: float = None,
 ):
     """Per-lane equity curve stats — independent attribution for Pathway Lab.
+
+    W/L is classified from the trade's price-based net bp (``net_pnl_bp``,
+    ``monitor_api.wl_class``), the same rule as the API ledger
+    (``_derive_lane_pnl_ledger_from_trades``); USD sums stay booked USD.
 
     Forced closes (``STATS_EXCLUDED_EXIT_REASONS``) are not strategy outcomes
     and are left out, matching ``_derive_lane_pnl_ledger_from_trades``.
@@ -4214,10 +4219,12 @@ def update_lane_pnl_ledger(
             bucket["closes"] = int(bucket.get("closes", 0)) + 1
             bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + float(net_pnl_usd or 0), 2)
             bucket["equity_usd"] = round(float(STARTING_BALANCE) + bucket["net_pnl_usd"], 2)
-            if net_pnl_usd > 0:
+            bucket["wl_basis"] = LANE_LEDGER_WL_BASIS
+            wl = monitor_api.wl_class(net_pnl_bp, net_usd=float(net_pnl_usd or 0))
+            if wl == "W":
                 bucket["wins"] = int(bucket.get("wins", 0)) + 1
                 bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + net_pnl_usd, 2)
-            elif net_pnl_usd < 0:
+            elif wl == "L":
                 bucket["losses"] = int(bucket.get("losses", 0)) + 1
                 bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + net_pnl_usd, 2)
             d = str(direction or "").upper()
@@ -4234,6 +4241,9 @@ def update_lane_pnl_ledger(
             _LEDGER_WRITES.failure("lane_pnl", exc)
             logger.error(f"[LEDGER] lane_pnl write failed: {type(exc).__name__}: {exc}")
 
+
+
+LANE_LEDGER_WL_BASIS = "PRICE_BP_NET_OF_FEES"
 
 
 # Forced closes (guarded-deploy flatten, operator close, admin flatten) are
@@ -4302,10 +4312,12 @@ def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
         bucket["closes"] = int(bucket.get("closes", 0)) + 1
         bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + pnl, 2)
         bucket["equity_usd"] = round(float(STARTING_BALANCE) + bucket["net_pnl_usd"], 2)
-        if pnl > 0:
+        bucket["wl_basis"] = LANE_LEDGER_WL_BASIS
+        wl = monitor_api.wl_class(monitor_api.trade_net_bp(row), net_usd=pnl)
+        if wl == "W":
             bucket["wins"] = int(bucket.get("wins", 0)) + 1
             bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + pnl, 2)
-        elif pnl < 0:
+        elif wl == "L":
             bucket["losses"] = int(bucket.get("losses", 0)) + 1
             bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + pnl, 2)
         d = str(row.get("final_direction") or row.get("dir") or "").upper()
@@ -30380,6 +30392,13 @@ def close_position(pos: dict, exit_reason: str):
             "market_bid_ask_spread_usd_at_entry": pos.get("market_bid_ask_spread_usd_at_entry"),
             "market_bid_ask_spread_bps_at_entry": pos.get("market_bid_ask_spread_bps_at_entry"),
             "net_pnl_usd": round(net_pnl, 2),
+            # Unrounded, price-based return (net of fees and funding) over the
+            # original entry notional: the W/L source for every lane ledger.
+            "net_pnl_usd_raw": round(net_pnl, 6),
+            "net_pnl_bp": (
+                round(net_pnl / (float(entry) * float(pnl_components["original_qty"])) * 1e4, 4)
+                if float(entry) > 0 and float(pnl_components["original_qty"] or 0) > 0 else None
+            ),
             "gross_pnl_usd": round(gross_pnl, 2),
             "pnl_accounting_schema": "terminal_single_count_v1",
             "partial_realized_pnl_usd": round(
@@ -30638,6 +30657,7 @@ def close_position(pos: dict, exit_reason: str):
         net_pnl,
         pos.get("dir"),
         exit_reason=exit_reason,
+        net_pnl_bp=trade_row.get("net_pnl_bp"),
     )
     log_lane_opportunity_event(
         pos.get("research_lane") or (master or {}).get("research_lane"),
@@ -44258,13 +44278,13 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
                            row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
-                           row.get("pnl")))
+                           row.get("pnl"), monitor_api.trade_net_bp(row)))
     finally:
         trade_lock.release()
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
-        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct in raw:
+        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct, net_bp in raw:
             try:
                 notional = float(margin or 0.0) * float(leverage or 0.0)
             except (TypeError, ValueError):
@@ -44273,7 +44293,9 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                                  "notional_usd": notional, "direction": direction,
                                  "book_slippage_usd": slippage,
                                  # Precise per-trade bp source (net_pnl_usd is cent-rounded).
-                                 "pnl_margin_pct": pnl_margin_pct, "leverage": leverage})
+                                 "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
+                                 # W/L source: price-based net bp (same rule as the lane ledgers).
+                                 "net_pnl_bp": net_bp})
     return shaped, session_start
 
 
