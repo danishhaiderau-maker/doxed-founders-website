@@ -444,7 +444,7 @@ def test_lock_refusal_keeps_sequences_and_counts_failures(tmp_path, monkeypatch,
     holder = puller_mod._RunLock(env.shadow / ".puller" / "run.lock", holder="research_segment_promotion")
     try:
         for expected_failures in (1, 2):
-            code, out = _main(env, monkeypatch, capsys)
+            code, out = _main(env, monkeypatch, capsys, "--lock-wait-seconds", "0")
             assert code == 2 and "holds the shadow-root lock" in out["error"]
             status = _puller_status(env)
             assert status["last_attempt_result"] == "LOCK_BUSY"
@@ -465,6 +465,46 @@ def test_lock_refusal_keeps_sequences_and_counts_failures(tmp_path, monkeypatch,
     status = _puller_status(env)
     assert code == 0 and status["last_attempt_result"] == "OK" and status["consecutive_failures"] == 0
     assert status["lock_holder"] is None and status["last_error"] is None
+
+
+def test_pull_waits_out_a_short_promotion_lock_instead_of_exit_2(tmp_path, monkeypatch, capsys):
+    # 2026-10-04 11:25Z/11:27Z: pulls landed inside the analyzer cycle's ~30 s segment
+    # promotion and exited 2 (LOCK_BUSY) although nothing was wrong.
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 3))
+    env.ship_all()
+    holder = puller_mod._RunLock(env.shadow / ".puller" / "run.lock", holder="research_segment_promotion")
+    sleeps: list[float] = []
+
+    def fake_sleep(sec):
+        sleeps.append(sec)
+        if len(sleeps) == 3:
+            holder.release()
+
+    monkeypatch.setattr(puller_mod.time, "sleep", fake_sleep)
+    code, out = _main(env, monkeypatch, capsys, "--lock-wait-seconds", "60")
+    assert code == 0 and out["ok"] and out["applied_seq"] == 1
+    assert len(sleeps) == 3 and all(0 < s <= puller_mod.LOCK_POLL_SEC for s in sleeps)
+    assert _puller_status(env)["last_attempt_result"] == "OK"
+
+
+def test_lock_wait_is_bounded_and_still_reports_the_holder(tmp_path):
+    lock_path = tmp_path / ".puller" / "run.lock"
+    holder = puller_mod._RunLock(lock_path, holder="research_segment_promotion")
+    now = [0.0]
+
+    def fake_sleep(sec):
+        now[0] += sec
+
+    try:
+        with pytest.raises(puller_mod.LockBusyError) as exc:
+            puller_mod.acquire_run_lock(lock_path, "research_segment_puller", wait_sec=10,
+                                        sleep=fake_sleep, clock=lambda: now[0])
+        assert 10 <= now[0] < 10 + puller_mod.LOCK_POLL_SEC
+        assert exc.value.holder["holder"] == "research_segment_promotion"
+    finally:
+        holder.release()
+    assert puller_mod.DEFAULT_LOCK_WAIT_SEC > 80  # longer than any promotion seen on 2026-10-04
 
 
 def test_errors_fall_back_to_state_json_and_never_null_sequences(tmp_path, monkeypatch, capsys):
