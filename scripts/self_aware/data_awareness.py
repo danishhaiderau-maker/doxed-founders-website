@@ -316,9 +316,12 @@ def profile_fields(rows: list[dict], spec: StreamSpec | None) -> list[dict]:
             "status": status, "watched": k in watch,
             "alarm": k in watch and status in ("DEAD_NULL", "DEAD_ZERO", "CONSTANT"),
         })
+    # Same evidence bar as DEAD_NULL/DEAD_ZERO: a watched field absent from a handful of rows (a fresh epoch's
+    # first unfilled records) is not yet a dead field.
     for w in watch - set(keys):
+        status = "MISSING" if len(rows) >= 20 else "MISSING_FEW_ROWS" if rows else "NO_ROWS"
         out.append({"field": w, "n": 0, "null_pct": None, "distinct": 0, "zero_pct": None, "constant_value": None,
-                    "status": "MISSING" if rows else "NO_ROWS", "watched": True, "alarm": bool(rows)})
+                    "status": status, "watched": True, "alarm": status == "MISSING"})
     return out
 
 
