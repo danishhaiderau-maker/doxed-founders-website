@@ -4127,6 +4127,21 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
 
 
 
+# Forced closes (guarded-deploy flatten, operator close, admin flatten) are
+# excluded from every tile/strategy statistic, exactly like the analyzer
+# (research/close_origin.FORCED_EXIT_REASONS).  The Trades table still shows them.
+STATS_EXCLUDED_EXIT_REASONS = frozenset({
+    "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
+})
+
+
+def _trade_row_is_forced_close(row) -> bool:
+    """True when a closed row was force-closed (never a strategy outcome)."""
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("exit_reason") or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS
+
+
 def _trade_row_net_pnl_usd(row) -> float:
     """Canonical realized PnL of one closed trade row (0.0 is a real value)."""
     for key in ("net_pnl_usd", "net", "pnl"):
@@ -4158,7 +4173,7 @@ def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
         if not isinstance(row, dict):
             continue
         lane = _normalize_lane_key(row.get("research_lane") or "")
-        if not lane:
+        if not lane or _trade_row_is_forced_close(row):
             continue
         pnl = _trade_row_net_pnl_usd(row)
         bucket = ledger.setdefault(lane, {
@@ -22134,20 +22149,123 @@ def _trade_row_in_session(trade: dict, session_start: float) -> bool:
         pass
     return False
 
-def _showcase_trade_session_start() -> float:
-    """Epoch for trade filtering: full history unless fresh collection is on.
+_EPOCH_BOUNDARY_TTL_SEC = 30.0
+_epoch_boundary_cache: dict = {"at": 0.0, "value": (0.0, None)}
+_reset_receipt_anchor_cache: dict = {}
 
-    The signed fresh-collection boundary is durable across process restarts;
-    ``bot_start_time`` is not.  Using the latter hid valid clean-epoch trades
-    whenever Fly restarted.
+
+def _latest_reset_receipt_anchor() -> float:
+    """``reset_anchor`` of the newest COMPLETE research reset receipt (0.0 if none).
+
+    ``/api/wipe_fly_only`` turns Fresh Collection back OFF after the reset, so
+    the research_session anchor alone cannot carry the boundary.  The
+    hash-bound receipt (binding.json ``reset_anchor``) is durable across
+    restarts.  Each receipt is read once per (name, mtime).
     """
-    if not state.get("fresh_collection_mode", False):
-        return 0.0
-    session = _load_research_session_meta() or {}
     try:
-        return float(session.get("fresh_collection_start_time") or bot_start_time or 0.0)
+        root = Path(_data_sync_runtime_root()) / "research_reset_receipts"
+        dirs = [d for d in root.iterdir() if d.is_dir()]
+    except Exception:
+        return 0.0
+    try:
+        dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
+    best = 0.0
+    for d in dirs[:8]:
+        op_path, binding_path = d / "operation.json", d / "binding.json"
+        try:
+            key = (d.name, op_path.stat().st_mtime_ns)
+        except OSError:
+            continue
+        cached = _reset_receipt_anchor_cache.get(key)
+        if cached is None:
+            cached = 0.0
+            try:
+                with open(op_path, "r", encoding="utf-8") as fh:
+                    op = json.load(fh)
+                if str((op or {}).get("stage") or "").upper() == "COMPLETE":
+                    with open(binding_path, "r", encoding="utf-8") as fh:
+                        cached = float((json.load(fh) or {}).get("reset_anchor") or 0.0)
+            except Exception:
+                cached = 0.0
+            _reset_receipt_anchor_cache[key] = cached
+        best = max(best, cached)
+    return best
+
+
+def _current_epoch_boundary(force: bool = False) -> tuple:
+    """(cutoff_ts, source) of the current epoch for every epoch-facing counter.
+
+    The newest of: the declared data epoch start, the last completed research
+    reset (state and durable receipt), and the signed Fresh Collection anchor.
+    ``(0.0, None)`` means no boundary is known (full history).
+    """
+    now = time.time()
+    cached = _epoch_boundary_cache
+    if not force and now - float(cached.get("at") or 0.0) < _EPOCH_BOUNDARY_TTL_SEC:
+        return cached["value"]
+    candidates = []
+    try:
+        session = _load_research_session_meta() or {}
+        candidates.append((float(session.get("fresh_collection_start_time") or 0.0), "fresh_collection"))
     except (TypeError, ValueError):
-        return float(bot_start_time or 0.0)
+        pass
+    try:
+        candidates.append((float(state.get("last_fresh_reset_ts") or 0.0), "reset_receipt"))
+    except (TypeError, ValueError):
+        pass
+    candidates.append((_latest_reset_receipt_anchor(), "reset_receipt"))
+    manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
+    started = manifest.get("started_at_utc") if isinstance(manifest, dict) else None
+    if started:
+        try:
+            candidates.append((
+                datetime.fromisoformat(str(started).replace("Z", "+00:00")).timestamp(),
+                "data_epoch",
+            ))
+        except (TypeError, ValueError):
+            pass
+    best = (0.0, None)
+    for ts, source in candidates:
+        if ts and ts > best[0]:
+            best = (float(ts), source)
+    if not best[0] and state.get("fresh_collection_mode", False):
+        best = (float(bot_start_time or 0.0), "bot_start")
+    _epoch_boundary_cache.update(at=now, value=best)
+    return best
+
+
+def _current_epoch_cutoff_utc() -> str | None:
+    ts, _ = _current_epoch_boundary()
+    return _utc_isoformat_ns(ts) if ts else None
+
+
+def _epoch_trade_scope_fields() -> dict:
+    """Epoch-facing scope labels shared by the heavy /api/state build and the live overlay."""
+    ts, source = _current_epoch_boundary()
+    cutoff = _utc_isoformat_ns(ts) if ts else None
+    return {
+        "fresh_epoch_cutoff_utc": cutoff,
+        "trade_scope": "SIGNED_FRESH_EPOCH" if cutoff else "ALL_HISTORY",
+        "trade_scope_cutoff_utc": cutoff,
+        "trade_scope_source": source,
+        "stats_excluded_exit_reasons": sorted(STATS_EXCLUDED_EXIT_REASONS),
+    }
+
+
+def _showcase_trade_session_start() -> float:
+    """Epoch for trade filtering: the current epoch boundary (full history if none).
+
+    The boundary is durable across process restarts; ``bot_start_time`` is
+    not.  Using the latter hid valid clean-epoch trades whenever Fly
+    restarted, and keying on ``fresh_collection_mode`` alone counted every
+    pre-reset trade after ``/api/wipe_fly_only`` (which turns the mode off).
+    """
+    try:
+        return float(_current_epoch_boundary()[0] or 0.0)
+    except Exception:
+        return 0.0
 
 def _recompute_research_balance_from_trades():
     """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
@@ -33788,6 +33906,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         with state_lock:
             state["last_fresh_reset_ts"] = reset_anchor
             state["last_fresh_reset_summary"] = summary
+            _epoch_boundary_cache["at"] = 0.0
             state["execution_paused"] = True
             if send_local_signal:
                 state["fresh_collection_signal_ts"] = reset_anchor
@@ -34453,12 +34572,18 @@ def _scope_pathway_specs_to_signed_epoch(
     session_trades: list,
     lane_opportunity_counters: dict,
     epoch_cutoff_utc: str,
+    ledger: dict | None = None,
 ) -> dict:
-    """Replace cumulative tile headlines with the current signed-epoch truth."""
+    """Replace cumulative tile headlines with the current signed-epoch truth.
+
+    ``ledger`` is the full-session lane ledger; ``session_trades`` may be the
+    display-limited Trades table, so it is only the fallback.
+    """
     if not epoch_cutoff_utc:
         return payload
     scoped = copy.deepcopy(payload or {})
-    ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
+    if not isinstance(ledger, dict):
+        ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
     counters = lane_opportunity_counters or {}
     for row in scoped.get("lanes") or []:
         lane = str(row.get("lane") or "").upper()
@@ -41201,6 +41326,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         }
     finally:
         state_lock.release()
+    snapshot.update(_epoch_trade_scope_fields())
     phase_started = time.perf_counter()
     split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
     phase_timings["relay_evidence_load"] = (time.perf_counter() - phase_started) * 1000
@@ -41789,6 +41915,8 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
     ledger = _derive_lane_pnl_ledger_from_trades(rows)
     realized = sum(float(bucket.get("net_pnl_usd") or 0.0) for bucket in ledger.values())
     for row in rows:
+        if _trade_row_is_forced_close(row):
+            continue
         if not _normalize_lane_key(row.get("research_lane") or ""):
             realized += _trade_row_net_pnl_usd(row)
     return len(rows), round(realized, 2), ledger
@@ -42433,6 +42561,26 @@ def _attach_patient_chase_routes(
     return enriched, counts
 
 
+def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
+    """Tile ``closed`` = current-epoch strategy closes from the full-session ledger.
+
+    The Trades table is display-limited (``_DASHBOARD_TRADES_MAX`` rows), so
+    counting closes from it dropped older closes of busy lanes (e.g. the cft
+    closes while rnd's newer ones were still visible).  The ledger covers the
+    whole epoch and excludes forced closes (ADMIN_MANUAL_CLOSE etc.).
+    """
+    ledger = lane_ledger if isinstance(lane_ledger, dict) else {}
+    for lane, counts in (tile_route_counts or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        bucket = ledger.get(lane) or ledger.get(str(lane).upper()) or {}
+        try:
+            counts["closed"] = int(bucket.get("closes") or 0)
+        except (TypeError, ValueError):
+            counts["closed"] = 0
+        counts["closed_source"] = "epoch_lane_ledger_excl_forced"
+
+
 def _build_api_state_snapshot():
     """Build the full /api/state payload dict.
 
@@ -42583,6 +42731,7 @@ def _build_api_state_snapshot():
                 signals=list(bounded_trades_map.values()), pending=pending_orders_copy,
                 positions=positions_copy, closed=trades_copy, expired=expired_orders_copy,
             )
+        _apply_ledger_closed_counts(tile_route_counts, session_lane_ledger)
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
         snapshot["tile_route_counts"] = tile_route_counts
@@ -42770,10 +42919,8 @@ def _build_api_state_snapshot():
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         _epoch_id, _epoch_cutoff, _epoch_kind = _fresh_epoch_identity_from_session()
         snapshot["fresh_epoch_id"] = _epoch_id
-        snapshot["fresh_epoch_cutoff_utc"] = _epoch_cutoff
         snapshot["fresh_epoch_kind"] = _epoch_kind
-        snapshot["trade_scope"] = "SIGNED_FRESH_EPOCH" if _epoch_cutoff else "ALL_HISTORY"
-        snapshot["trade_scope_cutoff_utc"] = _epoch_cutoff
+        snapshot.update(_epoch_trade_scope_fields())
         # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
         # after restart), report an honest "NO_AI_CALL_YET" status instead of
         # silently falling back to state.feature_snapshot (a live orderflow
@@ -43064,6 +43211,12 @@ def _api_state_cache_refresher_loop():
                     "equity",
                     "source_git_rev",
                     "fresh_epoch_id",
+                    "fresh_epoch_cutoff_utc",
+                    "trade_scope",
+                    "trade_scope_cutoff_utc",
+                    "trade_scope_source",
+                    "stats_excluded_exit_reasons",
+                    "last_fresh_reset_ts",
                     "tile_registry_signature",
                     "active_tiles",
                     "tile_architecture_version",
@@ -43151,6 +43304,9 @@ def _api_state_cache_refresher_loop():
                         pending=snap.get("orders") or [], positions=snap.get("positions") or [],
                         closed=snap.get("trades") or [], expired=snap.get("expired_orders") or [],
                     )
+                _apply_ledger_closed_counts(
+                    snap["tile_route_counts"], snap.get("lane_pnl_ledger") or {}
+                )
                 # Keep tile summaries on the same live signed-epoch overlay as
                 # positions/orders.  Reusing the cached heavy presentation here
                 # made approvals/fills stay at their pre-resume zero values even
@@ -43160,6 +43316,7 @@ def _api_state_cache_refresher_loop():
                     snap.get("trades") or [],
                     snap.get("lane_opportunity_counters") or {},
                     snap.get("fresh_epoch_cutoff_utc") or "",
+                    ledger=snap.get("lane_pnl_ledger"),
                 )
                 paused_shadow_stats = snap.get("paused_shadow_stats")
                 if isinstance(paused_shadow_stats, dict):

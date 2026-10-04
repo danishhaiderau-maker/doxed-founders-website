@@ -25,6 +25,7 @@ BOT_TREE = ast.parse(BOT_SOURCE)
 
 FUNCTIONS = (
     "_trade_row_net_pnl_usd",
+    "_trade_row_is_forced_close",
     "_derive_lane_pnl_ledger_from_trades",
     "_session_trade_accounting_locked",
     "paper_order_identity_violation",
@@ -36,6 +37,7 @@ FUNCTIONS = (
     "_replay_csv_write_fallback_locked",
 )
 CONSTANTS = (
+    "STATS_EXCLUDED_EXIT_REASONS",
     "CSV_FALLBACK_JSONL",
     "CSV_OVERFLOW_RESTKEY",
     "CSV_MALFORMED_QUARANTINE_SUFFIX",
@@ -226,6 +228,22 @@ def test_session_headline_equals_lane_ledger_sum() -> None:
     lane_sum = round(sum(b["net_pnl_usd"] for b in ledger.values()), 2)
     assert lane_sum == 0.29
     assert realized == 0.30
+
+
+def test_forced_closes_are_excluded_from_tile_and_strategy_stats() -> None:
+    rows = [
+        {"research_lane": "FAMILY_COMMITTED_FADE_TAKER_90", "net_pnl_usd": "0.04", "exit_reason": "TIME_EXIT"},
+        {"research_lane": "FAMILY_COMMITTED_FADE_TAKER_90", "net_pnl_usd": "0.03", "exit_reason": "ADMIN_MANUAL_CLOSE"},
+        {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "net_pnl_usd": "-0.05", "exit_reason": "ADMIN_FORCE_FLAT"},
+        {"research_lane": "", "net_pnl_usd": "0.50", "exit_reason": "CIRCUIT_BREAKER_ADMIN_MANUAL"},
+    ]
+    ns = _load(trades=rows)
+    count, realized, ledger = ns["_session_trade_accounting_locked"](1.0)
+    assert count == 4  # the Trades table still lists every epoch row
+    assert ledger["FAMILY_COMMITTED_FADE_TAKER_90"]["closes"] == 1
+    assert ledger["FAMILY_COMMITTED_FADE_TAKER_90"]["net_pnl_usd"] == 0.04
+    assert "FAMILY_RANDOM_CONTROL_TAKER_90" not in ledger
+    assert realized == 0.04
 
 
 def test_dashboard_snapshots_use_the_single_session_aggregate() -> None:

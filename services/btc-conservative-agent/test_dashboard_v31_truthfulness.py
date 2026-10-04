@@ -78,9 +78,21 @@ def test_fly_health_probe_is_liveness_only() -> None:
     assert "can_open_live_entry" not in body
 
 
+def _epoch_session_start(namespace: dict):
+    from datetime import datetime
+    import time as _time
+
+    namespace.setdefault("time", _time)
+    namespace.setdefault("datetime", datetime)
+    namespace.setdefault("_EPOCH_BOUNDARY_TTL_SEC", 30.0)
+    namespace.setdefault("_epoch_boundary_cache", {"at": 0.0, "value": (0.0, None)})
+    namespace.setdefault("_latest_reset_receipt_anchor", lambda: 0.0)
+    _isolated_function("_current_epoch_boundary", namespace)
+    return _isolated_function("_showcase_trade_session_start", namespace)
+
+
 def test_fresh_session_uses_signed_epoch_cutoff_across_bot_restart() -> None:
-    fn = _isolated_function(
-        "_showcase_trade_session_start",
+    fn = _epoch_session_start(
         {
             "state": {"fresh_collection_mode": True},
             "_load_research_session_meta": lambda: {
@@ -90,6 +102,67 @@ def test_fresh_session_uses_signed_epoch_cutoff_across_bot_restart() -> None:
         },
     )
     assert fn() == 1_000.0
+
+
+def test_epoch_scope_survives_wipe_fly_only_turning_fresh_collection_off() -> None:
+    # /api/wipe_fly_only flips fresh_collection_mode back OFF after the reset;
+    # the durable reset receipt still bounds every epoch-facing counter.
+    fn = _epoch_session_start(
+        {
+            "state": {"fresh_collection_mode": False, "last_fresh_reset_ts": 0.0},
+            "_load_research_session_meta": lambda: {},
+            "_latest_reset_receipt_anchor": lambda: 1_791_103_100.0,
+            "_DATA_EPOCH_MANIFEST": {"started_at_utc": "2026-10-04T08:13:26Z"},
+            "bot_start_time": 1_791_103_000.0,
+        },
+    )
+    assert fn() == 1_791_103_100.0
+
+
+def test_epoch_scope_falls_back_to_declared_data_epoch_start() -> None:
+    fn = _epoch_session_start(
+        {
+            "state": {"fresh_collection_mode": False},
+            "_load_research_session_meta": lambda: {"fresh_collection_start_time": 5.0},
+            "_DATA_EPOCH_MANIFEST": {"started_at_utc": "2026-10-04T08:13:26Z"},
+            "bot_start_time": 0.0,
+        },
+    )
+    assert fn() == 1_791_101_606.0
+
+
+def test_no_boundary_means_full_history() -> None:
+    fn = _epoch_session_start(
+        {
+            "state": {"fresh_collection_mode": False},
+            "_load_research_session_meta": lambda: {},
+            "bot_start_time": 2_000.0,
+        },
+    )
+    assert fn() == 0.0
+
+
+def test_tile_closed_counts_come_from_the_epoch_ledger_not_the_trades_table() -> None:
+    fn = _isolated_function("_apply_ledger_closed_counts", {})
+    counts = {
+        "FAMILY_COMMITTED_FADE_TAKER_90": {"closed": 0, "open": 3},
+        "FAMILY_RANDOM_CONTROL_TAKER_90": {"closed": 3, "open": 3},
+    }
+    fn(counts, {"FAMILY_COMMITTED_FADE_TAKER_90": {"closes": 3},
+                "FAMILY_RANDOM_CONTROL_TAKER_90": {"closes": 3}})
+    assert counts["FAMILY_COMMITTED_FADE_TAKER_90"]["closed"] == 3
+    assert counts["FAMILY_RANDOM_CONTROL_TAKER_90"]["closed"] == 3
+    assert counts["FAMILY_COMMITTED_FADE_TAKER_90"]["open"] == 3
+    for builder in ("_build_api_state_snapshot", "_api_state_cache_refresher_loop"):
+        assert "_apply_ledger_closed_counts(" in _function_source(builder)
+
+
+def test_live_overlay_carries_epoch_scope_fields() -> None:
+    body = _function_source("_api_state_cache_refresher_loop")
+    for key in ('"fresh_epoch_cutoff_utc"', '"trade_scope"', '"trade_scope_cutoff_utc"'):
+        assert key in body
+    assert "_epoch_trade_scope_fields()" in _function_source("_build_relay_execution_state_snapshot")
+    assert "_epoch_trade_scope_fields()" in _function_source("_build_api_state_snapshot")
 
 
 def test_trade_table_labels_signed_epoch_scope_instead_of_generic_session() -> None:
