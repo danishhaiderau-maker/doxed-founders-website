@@ -565,6 +565,33 @@ def _sha256_file_range(path: Path, start: int, end: int) -> str:
     return digest.hexdigest()
 
 
+# The analyzer cycle's segment promotion holds the shadow-root lock for ~20-80 s
+# while it stages the view. A pull that lands inside that window used to exit 2
+# (LOCK_BUSY) at once, which reads as a failed pull on the watcher; wait it out.
+DEFAULT_LOCK_WAIT_SEC = 150.0
+LOCK_POLL_SEC = 2.0
+
+
+def acquire_run_lock(path: Path, holder: str, wait_sec: float = 0.0, poll_sec: float = LOCK_POLL_SEC,
+                     sleep=None, clock=None) -> "_RunLock":
+    """Take the shadow-root run lock, retrying a busy lock for up to ``wait_sec``.
+
+    Raises LockBusyError (with the current holder) once the wait is spent, so a lock
+    that stays held longer than any promotion still surfaces as LOCK_BUSY / exit 2.
+    """
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    deadline = clock() + max(0.0, float(wait_sec or 0.0))
+    while True:
+        try:
+            return _RunLock(path, holder=holder)
+        except LockBusyError:
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise
+            sleep(min(poll_sec, remaining))
+
+
 def _remote_head_summary(store) -> dict:
     try:
         head = store.head()
@@ -609,6 +636,10 @@ def main(argv=None) -> int:
                         default=float(os.getenv("RESEARCH_SEGMENTS_MAX_RUN_SEC") or 900),
                         help="stop fetching new segments after this long (0 = unbounded); "
                              "applied segments stay durable and the next run resumes")
+    parser.add_argument("--lock-wait-seconds", type=float,
+                        default=float(os.getenv("RESEARCH_SEGMENTS_LOCK_WAIT_SEC") or DEFAULT_LOCK_WAIT_SEC),
+                        help="wait this long for a busy shadow-root lock (e.g. a segment promotion) "
+                             "before giving up with LOCK_BUSY / exit 2 (0 = fail at once)")
     args = parser.parse_args(argv)
     lock = None
     puller = None
@@ -622,7 +653,7 @@ def main(argv=None) -> int:
         puller = SegmentPuller(store=store, shadow_root=Path(args.shadow_root),
                                archive_root=Path(args.archive_root), prefix=args.prefix,
                                write_ack=not args.no_ack)
-        lock = _RunLock(puller.meta / "run.lock", holder="research_segment_puller")
+        lock = acquire_run_lock(puller.meta / "run.lock", "research_segment_puller", args.lock_wait_seconds)
         result = puller.pull_once(max_segments=args.max_segments, max_run_seconds=args.max_run_seconds)
         if args.source == "http":
             result["remote_head"] = _remote_head_summary(store)
