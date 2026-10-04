@@ -43871,7 +43871,7 @@ def monitor_digest():
                              monitor_api.MAX_DIGEST_BYTES + 1024)
 
 
-@app.route(_MONITOR_INTEGRITY_PATH)
+@app.route('/api/monitor/integrity')
 def monitor_integrity():
     """Read-only: 1 s tape continuity, AI call window, fill markouts, process identity (monitor_integrity.py).
 
