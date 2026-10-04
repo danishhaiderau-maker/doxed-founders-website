@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from datetime import datetime
 from pathlib import Path
 
 
@@ -42,9 +43,15 @@ def _compile_scope_helper():
 
     namespace = {
         "copy": copy,
+        "datetime": datetime,
+        "_LANE_OPPORTUNITY_COUNTERS_SINCE_TS": 0.0,
+        "_current_epoch_id_for_display": lambda: "ce-test-epoch",
         "_derive_lane_pnl_ledger_from_trades": derive,
         "_session_stats_from_lane_metrics": lambda metrics: dict(metrics),
     }
+    cover = ast.Module(body=[_function("_lane_counters_cover_epoch")], type_ignores=[])
+    ast.fix_missing_locations(cover)
+    exec(compile(cover, str(BOT_PATH), "exec"), namespace)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace["_scope_pathway_specs_to_signed_epoch"]
 
@@ -95,7 +102,10 @@ def test_api_snapshot_scopes_ledger_and_tile_specs_from_same_trade_slice() -> No
     assert "_scope_pathway_specs_to_signed_epoch(" in body
     assert "trades_copy," in body
     assert "_epoch_cutoff," in body
-    assert "current signed clean-epoch total" in BOT_SOURCE
+    assert "ledger=snapshot.get(\"lane_pnl_ledger\")" in body
+    assert "only (manual/forced closes excluded)" in BOT_SOURCE
+    # A missing scope is not evidence of history: never claim it.
+    assert "historical/analyzer total" not in BOT_SOURCE
 
 
 def test_fresh_reset_clears_in_memory_lane_totals_and_cached_tile_payload() -> None:

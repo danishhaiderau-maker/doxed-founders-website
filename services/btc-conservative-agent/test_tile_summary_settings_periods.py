@@ -38,7 +38,10 @@ def test_tile_headlines_always_use_executed_fresh_collection_metrics():
 def test_tile_ev_is_unavailable_when_there_are_no_approvals():
     chunk = _render_chunk()
     assert "const headlineEv = headlineApprovals > 0" in chunk
-    assert "const headlineEvLabel = headlineEv == null ? '\u2014'" in chunk
+    assert "(headlineEv == null ? '\u2014'" in chunk
+    # Unknown approvals (no report / counters younger than the epoch) read n/a.
+    assert "const headlineEvLabel = stats.approvals_known === false" in chunk
+    assert "(stats.approvals_known === false ? 'n/a' : headlineApprovals)" in chunk
     assert "statRow('EV/appr', headlineEvLabel)" in chunk
     assert "EV ' + headlineEvLabel + '/approve" in chunk
     assert "headlineApprovals ? headlinePnl / headlineApprovals : 0" not in chunk
