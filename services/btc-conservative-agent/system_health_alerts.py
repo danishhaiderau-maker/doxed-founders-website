@@ -242,6 +242,63 @@ def merge_events(existing: list, incoming, now: float | None = None) -> list:
     return events[-RETAIN_EVENTS:]
 
 
+STATE_FILE = "system_health_alert_state_v1.json"
+STATE_SCHEMA = "system_health_alert_state_v1"
+
+
+def save_state(path, *, events: list, statuses: dict | None, statuses_at: float | None,
+               digest=None, digest_ts: float | None = None, now: float | None = None) -> bool:
+    """Persist the pushed alarm history (and the last monitor digest) so a Fly restart or deploy keeps it.
+
+    Atomic replace; never raises (a failed write only means the next watcher push refills the view).
+    """
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    doc = {"schema": STATE_SCHEMA, "saved_at": _iso(now), "saved_ts": now,
+           "events": list(events or [])[-RETAIN_EVENTS:], "statuses": dict(statuses or {}),
+           "statuses_at": statuses_at, "digest": digest, "digest_ts": digest_ts}
+    tmp = None
+    try:
+        target = os.fspath(path)
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        tmp = f"{target}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, separators=(",", ":"), default=str)
+        os.replace(tmp, target)
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            if tmp:
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def load_state(path, now: float | None = None) -> dict:
+    """The persisted state, re-sanitized and bounded; empty on a missing, foreign or corrupt file."""
+    empty = {"events": [], "statuses": {}, "statuses_at": None, "digest": None, "digest_ts": None}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(doc, dict) or doc.get("schema") != STATE_SCHEMA:
+        return empty
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    cutoff = now - RETAIN_DAYS * 86400
+    merged = {}
+    for raw in (doc.get("events") or [])[-RETAIN_EVENTS:]:
+        event = sanitize_event(raw)
+        if event is not None and event["ts"] >= cutoff:
+            merged.setdefault(_key(event), event)
+    statuses = doc.get("statuses") if isinstance(doc.get("statuses"), dict) else {}
+    statuses = {str(k)[:64]: v for k, v in statuses.items() if v in _STATUSES}
+    statuses_at = doc.get("statuses_at") if isinstance(doc.get("statuses_at"), (int, float)) else None
+    digest_ts = doc.get("digest_ts") if isinstance(doc.get("digest_ts"), (int, float)) else None
+    return {"events": sorted(merged.values(), key=lambda e: e["ts"]), "statuses": statuses,
+            "statuses_at": statuses_at, "digest": doc.get("digest"), "digest_ts": digest_ts}
+
+
 def read_events_file(path, now: float | None = None) -> list:
     """Bounded tail of ``alarms.jsonl`` as sanitized events (oldest first)."""
     try:
