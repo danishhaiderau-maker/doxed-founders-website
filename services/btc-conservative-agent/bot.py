@@ -31022,7 +31022,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         evaluator.TRIGGER_FEATURE_KEY: {
             key: copy.deepcopy(trigger.get(key)) for key in evaluator.TRIGGER_FEATURE_FIELDS
         },
-        "signal_clock": getattr(policy, "SIGNAL_CLOCK", None) or _xvl.SIGNAL_CLOCK,
+        "signal_clock": _xvl_trigger_signal_clock(policy, evaluator),
     }
     decision = policy.decide_entry(
         direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
@@ -31076,6 +31076,20 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         f"{tag}_{COMBO_LANE_SPECS[lane]['combo_key']}",
     )
     return "ORDER_ELIGIBLE"
+
+
+def _xvl_trigger_signal_clock(policy, evaluator) -> str:
+    """The clock that produced an evaluator trigger.
+
+    The evaluator owns the clock (a CVD trigger is a 3 m bar close for every
+    tile that consumes it).  B2 declares no tile-level ``signal_clock`` (it is
+    a shared-AI tile that also rides the bar clock), so falling back to the
+    per-second cross-venue clock stamped a different pre-entry payload than
+    GS-03/B1 for the same CVD trigger and the receipt collided.
+    """
+    return (getattr(evaluator, "SIGNAL_CLOCK", None)
+            or getattr(policy, "SIGNAL_CLOCK", None)
+            or _xvl.SIGNAL_CLOCK)
 
 
 def _xvl_direction_source(lane: str) -> str:

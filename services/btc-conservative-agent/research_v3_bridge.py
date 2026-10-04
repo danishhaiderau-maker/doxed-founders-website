@@ -79,8 +79,18 @@ def _pre_entry_features_receipt(
     *, store: V3EvidenceStore, source: Mapping[str, Any],
     identity: Mapping[str, Any], causal_ids: Mapping[str, Any], signal_ts: float,
     segment_refs: list[dict[str, Any]], features: Mapping[str, Any],
+    lane: str | None = None,
 ) -> dict[str, Any]:
-    """Append one immutable, lane-independent pre-decision feature receipt."""
+    """Append one immutable pre-decision feature receipt.
+
+    The episode receipt (``pre-entry-features:<episode>``) is shared by every
+    lane deciding the same trigger, so the analyzer joins exactly one receipt
+    per opportunity.  When a lane's pre-entry payload differs from the one a
+    sibling lane already wrote for that episode, the receipt is keyed per lane
+    (``pre-entry-features:<episode>:lane:<LANE>``, ``receipt_scope: LANE``)
+    instead of colliding: tiles sharing a trigger never block each other.  A
+    collision is raised only for the same record id with a different payload.
+    """
     features = copy.deepcopy(dict(features))
     _assert_pre_decision_feature_snapshot(features)
     search = compact_search_receipt()
@@ -117,22 +127,46 @@ def _pre_entry_features_receipt(
             "market_context_segment_refs": copy.deepcopy(segment_refs),
         },
     }
-    row["receipt_payload_sha256"] = hashlib.sha256(
-        canonical_json(row).encode("utf-8")
-    ).hexdigest()
+    row["receipt_payload_sha256"] = _receipt_payload_sha256(row)
     write = store.append("pre_entry_features", row)
-    if write.get("duplicate"):
-        ledger_path = store.ledger_path("pre_entry_features")
-        stat = ledger_path.stat()
-        existing_hash = _existing_pre_entry_payload_hash(
-            str(ledger_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns),
-            row["record_id"],
-        )
-        if existing_hash != row["receipt_payload_sha256"]:
+    if write.get("duplicate") and not _same_pre_entry_receipt(store, row):
+        lane_name = str(lane or "").strip().upper()
+        if not lane_name:
             raise ValueError(
                 f"PRE_ENTRY_FEATURE_RECEIPT_COLLISION:{row['record_id']}"
             )
+        lane_row = dict(row)
+        lane_row.pop("receipt_payload_sha256", None)
+        lane_row.update({
+            "record_id": f"{row['record_id']}:lane:{lane_name}",
+            "receipt_scope": PRE_ENTRY_RECEIPT_SCOPE_LANE,
+            "research_lane": lane_name,
+            "episode_receipt_record_id": row["record_id"],
+        })
+        lane_row["receipt_payload_sha256"] = _receipt_payload_sha256(lane_row)
+        write = store.append("pre_entry_features", lane_row)
+        if write.get("duplicate") and not _same_pre_entry_receipt(store, lane_row):
+            raise ValueError(
+                f"PRE_ENTRY_FEATURE_RECEIPT_COLLISION:{lane_row['record_id']}"
+            )
     return write
+
+
+PRE_ENTRY_RECEIPT_SCOPE_LANE = "LANE"
+
+
+def _receipt_payload_sha256(row: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(dict(row)).encode("utf-8")).hexdigest()
+
+
+def _same_pre_entry_receipt(store: V3EvidenceStore, row: Mapping[str, Any]) -> bool:
+    ledger_path = store.ledger_path("pre_entry_features")
+    stat = ledger_path.stat()
+    existing_hash = _existing_pre_entry_payload_hash(
+        str(ledger_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns),
+        str(row["record_id"]),
+    )
+    return existing_hash == row["receipt_payload_sha256"]
 
 
 def write_pre_entry_evidence_failure(
@@ -1167,6 +1201,7 @@ def dual_write_lane_decision(
     feature_receipt = _pre_entry_features_receipt(
         store=store, source=source, identity=identity, causal_ids=causal_ids,
         signal_ts=signal_ts, segment_refs=segment_refs, features=pre_entry_features,
+        lane=lane_name,
     )
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}",

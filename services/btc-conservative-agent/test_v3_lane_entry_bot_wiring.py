@@ -544,9 +544,21 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
     }
 
     mutated = {**base_features, "price": 101.0}
+    # A lane with a different pre-entry view is keyed per lane, not dropped.
+    assert persist(
+        "MUTATED", ai, ctx, mutated,
+        policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
+        exact_reason="APPROVE",
+    )
+    pre_entry_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "pre_entry_features.jsonl").read_text().splitlines()
+    ]
+    assert [row.get("receipt_scope") for row in pre_entry_rows] == [None, "LANE"]
+    assert pre_entry_rows[1]["research_lane"] == "MUTATED"
     with pytest.raises(ValueError, match="PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
         persist(
-            "MUTATED", ai, ctx, mutated,
+            "MUTATED", ai, ctx, {**base_features, "price": 102.0},
             policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
             exact_reason="APPROVE",
         )
