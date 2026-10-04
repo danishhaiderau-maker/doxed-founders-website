@@ -17,6 +17,8 @@ REVIEWED_FAILED_DELETERS = {
         '200d3aa69b2c8b33636dc51c8b93c3f0d02d73b2755e9740327b99c546bf676b',
     '85e1072af97cdb634594e2d87fb23681100d7482':
         'a53b24ca9c8ae66c6d570c6238f704b314310818dd3e47529c5a9f3ce9f72fad',
+    'f187f4937ec7a1a0ce2fadddfed4181ea24521b2':
+        '3a64a7c7f21f238b712df4f4765f1f57d737fb046503635dfa517f48d10538e6',
 }
 REVIEWED_HANDLED_ATTEMPT = "66791b9ec3e200588082b1bc"
 REVIEWED_RECEIPT_HASHES = {
@@ -43,7 +45,64 @@ ADDITIONAL_REVIEWED_ATTEMPTS = {
             'operation': 'c30d21f9e87185aa67d1f16bfbd1734dfba6218440771c2c23bd5bb16b86d511',
         },
     },
+    # indicator_engine.py (out-of-process sidecar) appended indicator_bars_v1.jsonl
+    # between the executor plan and the deleter fingerprint; nothing was unlinked.
+    # The deploy that ships this retirement restarts the failed process, so the
+    # incident is bound by its exact receipt bytes, mtime and anchor instead of
+    # same-process kernel continuity.
+    '82c947633a5aca8f44bccd9d': {
+        'revision': 'f187f4937ec7a1a0ce2fadddfed4181ea24521b2',
+        'rejection_code': 'EXPECTED_SHA256_MISMATCH',
+        'hashes': {
+            'active': '364bf8a392b76a4d02d09160ee489c7025d5e4528f869fb917eb8865bd3729f3',
+            'binding': '38f7f4c8dff5d75c87b1aca8ad904bb7ed59160c43a8d848483f6e2c06733be6',
+            'operation': '9cf1f2e536e0d0bb9a3045fe0d217abfa10367c6ee41785148af07f0e68e665f',
+        },
+        'restart_continuity': {
+            'operation_mtime': 1791071331.8508656,
+            'reset_anchor': 1791070952.7492979,
+            'new_epoch_id': 'epoch-bf1b84db46d495e8bcd81061',
+            'retired_epoch_id': 'epoch-v22-da3e5308a31e370d877c',
+        },
+    },
 }
+
+
+def _restart_continuity(incident, *, reset_anchor, operation_mtime):
+    pinned = incident['restart_continuity']
+    if (abs(float(reset_anchor) - pinned['reset_anchor']) > .00001
+            or abs(float(operation_mtime) - pinned['operation_mtime']) > .00001
+            or not float(reset_anchor) < float(operation_mtime)):
+        raise ResearchDeletionRejected("ABORT_RESTART_CONTINUITY_MISMATCH")
+    return {"operation_mtime": float(operation_mtime), "reset_anchor": float(reset_anchor),
+            "continuity": "HASH_BOUND_RECEIPTS_ACROSS_RESTART"}
+
+
+def retire_registered_active_attempt(*, root, volume_root, held_lease, quiescence_probe):
+    """Abort the active pointer only when it names a restart-bound reviewed incident.
+
+    Returns None (no mutation) when there is no pointer or it is not such an
+    incident; otherwise returns the abort receipt or raises without mutation.
+    """
+    root = Path(root).absolute()
+    pointer_path = _checked_path(root / "research_reset_receipts" / "ACTIVE_RESET.json", root)
+    if not pointer_path.exists():
+        return None
+    raw = pointer_path.read_bytes()
+    if len(raw) > 64 * 1024:
+        raise ResearchDeletionRejected("ABORT_RECEIPT_CHANGED")
+    reset_id = json.loads(raw).get("reset_id")
+    incident = ADDITIONAL_REVIEWED_ATTEMPTS.get(reset_id)
+    if incident is None or 'restart_continuity' not in incident:
+        return None
+    pinned = incident['restart_continuity']
+    return abort_predeletion_reset(
+        root=root, volume_root=volume_root() if callable(volume_root) else volume_root,
+        reset_id=reset_id, expected_sha256=dict(incident['hashes']),
+        old_epoch=pinned['retired_epoch_id'], failed_revision=incident['revision'],
+        held_lease=held_lease, quiescence_probe=quiescence_probe,
+        reviewed_deleter_sha256=REVIEWED_FAILED_DELETERS[incident['revision']],
+        expected_new_epoch=pinned['new_epoch_id'])
 
 
 def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old_epoch,
@@ -105,8 +164,18 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
             raise ResearchDeletionRejected("ABORT_RECEIPT_CHANGED")
         rows[key] = json.loads(raw[key])
     active, binding, operation = (rows[key] for key in ("active", "binding", "operation"))
-    kernel = verify_handled_reset_kernel_continuity(reset_anchor=binding.get("reset_anchor"),
-        operation_mtime=paths["operation"].stat().st_mtime, reset_id=reset_id)
+    restart_bound = incident is not None and 'restart_continuity' in incident
+
+    def continuity():
+        if restart_bound:
+            try:
+                return _restart_continuity(incident, reset_anchor=binding.get("reset_anchor"),
+                                           operation_mtime=paths["operation"].stat().st_mtime)
+            except (TypeError, ValueError):
+                raise ResearchDeletionRejected("ABORT_RESTART_CONTINUITY_MISMATCH")
+        return verify_handled_reset_kernel_continuity(reset_anchor=binding.get("reset_anchor"),
+            operation_mtime=paths["operation"].stat().st_mtime, reset_id=reset_id)
+    kernel = continuity()
     proof = binding.get("proof") or {}
     evidence = binding.get("boundary_evidence") or {}
     import pandas as pd
@@ -147,7 +216,8 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
         "reset_id": reset_id, "old_epoch": old_epoch, "failed_revision": failed_revision,
         "expected_sha256": expected_sha256, "quiescence_probe": probe,
         "reset_pointer_exclusion": "ACTUAL_HELD_MIRROR_LEASE", "kernel_continuity": kernel,
-        "basis": "EXACT_HANDLED_ATTEMPT_SAME_PROCESS_PREUNLINK_FAILURE_NOT_CRASH_RECOVERY",
+        "basis": ("EXACT_HANDLED_ATTEMPT_HASH_BOUND_PREUNLINK_FAILURE_ACROSS_RESTART" if restart_bound
+                  else "EXACT_HANDLED_ATTEMPT_SAME_PROCESS_PREUNLINK_FAILURE_NOT_CRASH_RECOVERY"),
         "source_ordering_contract": "EXACT_DELETER_RECEIPT_AND_PROGRESS_PRECEDE_FIRST_UNLINK",
         "reviewed_deleter_sha256": reviewed_deleter_sha256,
         "incident_artifacts_preserved": True}
@@ -160,8 +230,7 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
             stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
     _fsync_directory(directory)
     if quiescence_probe() != probe: raise ResearchDeletionRejected("ABORT_BOUNDARY_CHANGED")
-    if verify_handled_reset_kernel_continuity(reset_anchor=binding.get("reset_anchor"),
-            operation_mtime=paths["operation"].stat().st_mtime, reset_id=reset_id) != kernel:
+    if continuity() != kernel:
         raise ResearchDeletionRejected("ABORT_KERNEL_CHANGED")
     if any(read(path) != raw[key] for key, path in paths.items()):
         raise ResearchDeletionRejected("ABORT_POINTER_CHANGED")

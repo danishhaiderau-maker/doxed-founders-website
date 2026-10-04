@@ -197,8 +197,10 @@ def test_engine_and_core_import_no_bot_network_or_trading_module():
     import indicator_engine_core as core
     allowed = {"__future__", "glob", "json", "os", "re", "signal", "sys", "threading", "time", "uuid", "math",
                "collections", "typing", "cross_venue_collector", "cross_venue_tape", "indicator_edge_spec",
-               "indicator_engine_core", "data_epoch", "cross_venue_lead", "cross_venue_premium", "tape_minute_bars"}
-    for module in (ie, core):
+               "indicator_engine_core", "data_epoch", "cross_venue_lead", "cross_venue_premium", "tape_minute_bars",
+               "research_reset_writer_fence", "research_reset_receipt_state", "contextlib", "pathlib", "fcntl"}
+    import research_reset_writer_fence as fence
+    for module in (ie, core, fence):
         with open(module.__file__, encoding="utf-8") as h:
             tree = ast.parse(h.read())
         names = set()
