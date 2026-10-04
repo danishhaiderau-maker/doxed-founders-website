@@ -87,6 +87,40 @@ def test_relay_stale_owner_alarm_after_thirty_minutes(tmp_path):
     assert "RELAY_OUTBOX_STALE_OWNER_PENDING" in collection_ns(later, guard=guard)(later)["alarms"]
 
 
+def test_relay_stale_owner_alarm_clears_once_pre_epoch_backlog_retires(tmp_path):
+    clock = {"now": 10_000.0}
+    guard = RelayDeliveryGuard(tmp_path / "relay_outbox_quarantine.jsonl", clock=lambda: clock["now"])
+    epoch = {"epoch_id": "ce-test", "started_at_ts": 5_000.0}
+    backlog = [{"event_id": f"e{i}", "bot_instance_id": "old", "created_at_unix": 1.0 + i} for i in range(22)]
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
+    clock["now"] += STALE_OWNER_ALARM_SEC + 1
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
+    assert "RELAY_OUTBOX_STALE_OWNER_PENDING" in collection_ns(clock["now"], guard=guard)(clock["now"])["alarms"]
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None, epoch=epoch)
+    health = collection_ns(clock["now"], guard=guard)(clock["now"])
+    assert "RELAY_OUTBOX_STALE_OWNER_PENDING" not in health["alarms"]
+    status = guard.status()
+    assert status["stale_owner_pending"] == 0 and status["retired_pre_epoch_total"] == 22
+    assert status["retirement_ledger"] == "relay_outbox_retired.jsonl" and status["last_retired_ts"] == clock["now"]
+    # A new in-epoch stale-owner event still raises the alarm after 30 minutes.
+    fresh = {"event_id": "new", "bot_instance_id": "old", "created_at_unix": 9_000.0}
+    guard.observe(backlog + [fresh], owner_id="me", armed=False, armed_at_ts=None, epoch=epoch)
+    clock["now"] += STALE_OWNER_ALARM_SEC + 1
+    guard.observe(backlog + [fresh], owner_id="me", armed=False, armed_at_ts=None, epoch=epoch)
+    assert "RELAY_OUTBOX_STALE_OWNER_PENDING" in collection_ns(clock["now"], guard=guard)(clock["now"])["alarms"]
+
+
+def test_health_relay_outbox_exposes_retirement_fields():
+    drain = ast.get_source_segment(SOURCE, next(
+        n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_drain_relay_event_outbox_once"))
+    assert "epoch=_relay_outbox_data_epoch()" in drain
+    assert "retired_event_ids=_relay_delivery_guard.retired_event_ids()" in drain
+    assert drain.index("_relay_delivery_guard.observe(") < drain.index("_relay_event_outbox.delivery_plan(")
+    status = RelayDeliveryGuard(Path("unused.jsonl")).status()
+    for key in ("retired_pre_epoch_total", "retirement_ledger", "last_retired_ts"):
+        assert key in status
+
+
 def test_monitor_rules_alert_on_new_alarm_codes():
     sys.path.insert(0, str(BOT.resolve().parents[2] / "scripts"))
     import fly_monitor_rules as rules

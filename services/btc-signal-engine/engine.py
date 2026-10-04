@@ -9492,6 +9492,14 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         return False
 
 
+def _relay_outbox_data_epoch() -> dict | None:
+    """Active clean data epoch for relay-outbox retirement; None (retire nothing) when undeclared."""
+    try:
+        return _data_epoch.active_manifest()
+    except Exception:
+        return None
+
+
 def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ack=None) -> dict:
     if not _relay_event_drain_lock.acquire(blocking=False):
         return {"attempted": 0, "acked": 0, "busy": True}
@@ -9505,16 +9513,20 @@ def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ac
         # The owner filter applies in every mode: arming or leaving
         # FORCE_PAPER_MODE must never re-open delivery of historical events.
         owner_id = BOT_INSTANCE_ID if is_active_dashboard_owner() else None
-        plan = _relay_event_outbox.delivery_plan(
-            limit=100, enforce_owner=True, active_owner_id=owner_id,
-            event_id=event_id,
-        )
-        rows = plan.pop("records")
-        _relay_push_state["delivery_scheduler"] = plan
+        # Observe first: it quarantines held events and, while disarmed, retires
+        # pre-epoch stale-owner ones (append-only relay_outbox_retired.jsonl), so
+        # the scheduler counts below never report them as stale again.
         _relay_delivery_guard.observe(
             _relay_event_outbox.pending_index(), owner_id=owner_id, armed=armed,
             armed_at_ts=armed_at, last_ack_ts=_relay_event_outbox.last_ack_unix(),
+            epoch=_relay_outbox_data_epoch(),
         )
+        plan = _relay_event_outbox.delivery_plan(
+            limit=100, enforce_owner=True, active_owner_id=owner_id,
+            event_id=event_id, retired_event_ids=_relay_delivery_guard.retired_event_ids(),
+        )
+        rows = plan.pop("records")
+        _relay_push_state["delivery_scheduler"] = plan
         rows = _relay_delivery_guard.filter_deliverable(
             rows, owner_id=owner_id, armed=armed, armed_at_ts=armed_at,
         )
@@ -43495,6 +43507,7 @@ def _monitor_relay_known(now: float, statuses: dict, failing: list) -> dict:
         "fly_arming_block_reason": guard.get("arming_block_reason"),
         "fly_outbox_pending_total": guard.get("pending_total"),
         "fly_outbox_stale_owner_pending": guard.get("stale_owner_pending"),
+        "fly_outbox_retired_pre_epoch_total": guard.get("retired_pre_epoch_total"),
         "laptop_railway_relay_check": statuses.get("railway.relay"),
         "laptop_bitfinex_exposure_check": statuses.get("bitfinex.exposure"),
         "laptop_railway_relay_observed": (railway or {}).get("observed"),
