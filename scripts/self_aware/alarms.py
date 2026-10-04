@@ -88,6 +88,38 @@ def events_for(transitions: list[dict[str, Any]], now: float) -> list[dict[str, 
     return out
 
 
+STILL_RED_EVERY_SEC = 30 * 60
+
+
+def still_red_events(findings: list[dict[str, Any]], changes: list[dict[str, Any]], state: dict[str, Any],
+                     now: float, every: float = STILL_RED_EVERY_SEC) -> list[dict[str, Any]]:
+    """Refresh the observed text of RED findings that stay RED (``STILL_RED``).
+
+    Alarms are edge-triggered, so an open RED kept the observed text of the
+    moment it opened (e.g. "last successful analyzer run 3h ago") while the
+    digest showed the current value. One refresh per check every ``every``
+    seconds keeps the Alerts entry on the same live finding the digest uses.
+    """
+    changed = {c.get("id") for c in changes or []}
+    last = state.setdefault("still_red_at", {})
+    out = []
+    reds = set()
+    for fd in findings or []:
+        if fd.get("severity") != "RED" or not fd.get("emit_alarm", True):
+            continue
+        reds.add(fd["id"])
+        if fd["id"] in changed:
+            last[fd["id"]] = now
+            continue
+        prev = last.get(fd["id"])
+        if prev is None or now - float(prev) >= every:
+            out.append(_event("STILL_RED", ALARM_PREFIX + fd["id"], "RED", fd, now, None))
+            last[fd["id"]] = now
+    for cid in [k for k in last if k not in reds]:
+        last.pop(cid, None)
+    return out
+
+
 def digest_event(digest: dict[str, Any], active: bool, now: float) -> dict[str, Any] | None:
     """Hourly digest as an Alerts entry: AMBER while it reports something, AMBER_CLEAR when quiet again."""
     finding = {"observed": digest.get("headline"), "expected": "hourly digest: nothing broke, no edge candidate",

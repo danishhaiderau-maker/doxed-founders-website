@@ -607,3 +607,33 @@ def test_capacity_defaults_to_120gb_and_refused_cap_is_red(paths, store):
     found = {f.id: f for f in diagnose.check_data({**_facts(), "now": now, "data_awareness": res["summary"]}, {}, store)}
     assert found["data.capacity"].severity == "RED"
     assert "RETENTION ALARM CAP_EXCEEDED_PROTECTED_FLOOR" in found["data.capacity"].observed
+
+
+def test_still_red_refreshes_observed_text_and_mirror_empty_is_warmup(tmp_path):
+    from self_aware import alarms, facts
+
+    state: dict = {}
+    red = {"id": "prog.analyzer", "severity": "RED", "observed": "last successful analyzer run 61m ago",
+           "expected": "x", "causes": []}
+    first = alarms.still_red_events([red], [], state, 1000.0)
+    assert [e["event"] for e in first] == ["STILL_RED"]
+    assert "61m" in first[0]["observed"] and first[0]["check"].endswith("prog.analyzer")
+    assert alarms.still_red_events([red], [], state, 1100.0) == []
+    assert len(alarms.still_red_events([red], [], state, 1000.0 + alarms.STILL_RED_EVERY_SEC)) == 1
+    assert alarms.still_red_events([{**red, "severity": "GREEN"}], [], state, 99999.0) == []
+    assert "prog.analyzer" not in state["still_red_at"]
+
+    class _Paths:
+        mirror = tmp_path
+
+    class _Store:
+        paths = _Paths()
+
+        def read(self, sql):
+            raise RuntimeError('IO Error: No files found that match the pattern "ai_tranche_log.csv"')
+
+    row, err = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
+    assert err is None and row["status"] == "EMPTY_WARMUP"
+    (tmp_path / "ai_tranche_log.csv").write_text("ts\n1\n")
+    row, err = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
+    assert err and "IO Error" in err

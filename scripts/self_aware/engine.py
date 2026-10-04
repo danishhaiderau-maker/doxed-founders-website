@@ -117,7 +117,10 @@ class Engine:
                 {"at": iso(now), "kind": "OPENED", "id": fd["id"], "from": "GREEN", "to": fd["severity"], "finding": fd}
                 for fd in findings if fd["severity"] in ("AMBER", "RED") and fd["id"] not in {c["id"] for c in changes}]
             self.state["alarm_baseline_at"] = now
-        flush = self._emit(alarms.events_for(alarm_changes, now))
+        events = alarms.events_for(alarm_changes, now)
+        if self.emit_alarms:
+            events += alarms.still_red_events(findings, alarm_changes, self.state, now)
+        flush = self._emit(events)
         verdict = diagnose.verdict(found)
         sig = diagnose.signals(self.facts)
         rt = self.facts.get("runtime") or {}
