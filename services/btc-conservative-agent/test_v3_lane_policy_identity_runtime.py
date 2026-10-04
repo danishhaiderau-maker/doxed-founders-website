@@ -48,3 +48,13 @@ def test_relay_registry_is_derived_and_all_family_tiles_fail_closed():
         config.COMBO_LANE_SPECS[lane]["platform_relay_eligible"] is False
         for lane in config.COMBO_EXECUTION_LANES
     )
+
+
+def test_v3_lane_policy_material_hashes_the_lane_entry_ttl():
+    """Decision rows must hash the same declared entry TTL as order-intent rows (chase schedule)."""
+    function = _function_node("_v3_lane_policy_material")
+    source = ast.unparse(function)
+    assert "'entry_ttl_sec': float(spec.get('entry_ttl_sec') or SIGNAL_TTL_SEC)" in source
+    # Every executable tile declares its own TTL (3s for the FREEZE21 taker tiles), so the
+    # SIGNAL_TTL_SEC fallback never applies to them.
+    assert all(config.COMBO_LANE_SPECS[lane].get("entry_ttl_sec") for lane in config.COMBO_EXECUTION_LANES)
