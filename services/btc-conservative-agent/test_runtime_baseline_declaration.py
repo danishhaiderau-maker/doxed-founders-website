@@ -65,16 +65,17 @@ class RuntimeDeclarationTests(unittest.TestCase):
     def test_executable_lane_source_for_all_verdicts(self):
         tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8-sig"))
         fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_write_v3_shared_lane_decision")
+        stamp = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_stamp_feature_capture")
         import copy
         from datetime import datetime
         captured = []
-        namespace = dict(copy=copy, datetime=datetime, SYMBOL="tBTCUSD",
+        namespace = dict(copy=copy, datetime=datetime, math=__import__("math"), SYMBOL="tBTCUSD",
             _shared_ai_call_id=lambda **kw: "call", invert_signal_active=lambda: False,
             _v3_lane_policy_material=lambda lane: {}, _collector_v22_epoch_id=lambda: "epoch",
             os=__import__("os"),
             dual_write_lane_decision=lambda source, **kw: captured.append(source) or {
                 "store_verification": {"passed": True}, "writes": [{"ledger": "pre_entry_features"}]})
-        exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), namespace)
+        exec(compile(ast.Module(body=[stamp, fn], type_ignores=[]), "bot.py", "exec"), namespace)
         declaration = build_runtime_baseline_declaration(**self.inputs())["declaration"]
         for verdict in ("APPROVE", "REJECT", "NO_TRADE"):
             self.assertTrue(namespace[fn.name]("lane", {"decision": verdict,
