@@ -128,6 +128,9 @@ THRESHOLDS: dict[str, float] = {
     "pull_finished_red_sec": 15 * MIN,
     "pull_lag_seq_red": 30,
     "pull_lag_red_sec": 15 * MIN,
+    # Danish's AMBER rule: lag above this many batches for pull_lag_amber_sec or more.
+    "pull_lag_amber_seq": 5,
+    "pull_lag_amber_sec": 15 * MIN,
     "ack_lag_red_sec": 15 * MIN,
     "ack_lag_seq_red": 10,
     "analyzer_gen_amber_sec": 45 * MIN,
@@ -1423,12 +1426,19 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             ambers.append(msg)
     elif exit_code == 0:
         mem.pop("pull_fail", None)
+    # AMBER on lag only when it stays above pull_lag_amber_seq batches for pull_lag_amber_sec; the
+    # normal gap between pulls (a batch or two published since the last pull) is not a fault.
+    # Once raised it latches until lag has stayed <= the limit for one full pull cycle: a pull
+    # that both started and finished after lag was first seen back under the limit.
+    lag_amber = pull_lag_amber_state(mem, pull_lag, pull.get("startedAt"), pull.get("finishedAt"), now, t)
+    if lag_amber:
+        ambers.append(lag_amber)
     st = RED if reasons else AMBER if ambers else GREEN
-    if st == GREEN and pull_lag:
-        st = AMBER if behind_for > 5 * MIN else GREEN
     add(check("laptop.pull_ack", "laptop", st,
               f"published={published} applied={applied} ({applied_src}) fly_acked={fly_acked} last pull "
               f"{fmt_age(finished_age)} ago exit={exit_code} (last receipt through {receipt.get('through_seq')})",
+              f"AMBER when lag > {t['pull_lag_amber_seq']} batches for >= {fmt_age(t['pull_lag_amber_sec'])} "
+              f"(clears after lag <= {t['pull_lag_amber_seq']} for one full pull cycle) or pull exit != 0; "
               f"applied known and advancing or ==published within {fmt_age(t['pull_lag_red_sec'])}, pull exit 0 "
               f"(RED after >1 failing pull and {fmt_age(t['pull_exit_red_sec'])}), Fly ACK advancing within "
               f"{fmt_age(t['ack_lag_red_sec'])} and <= {t['ack_lag_seq_red']} behind applied",
@@ -2459,6 +2469,41 @@ def monitor_digest_for_push(report: Mapping[str, Any], state: dict[str, Any], no
         return None
     sync.update(status="attached", bytes=size)
     return digest
+
+
+def pull_lag_amber_state(mem: dict[str, Any], pull_lag: int | None, started_at: Any, finished_at: Any,
+                         now: float, t: Mapping[str, Any]) -> str | None:
+    """AMBER reason for sustained pull lag (Danish's rule), or None.
+
+    Raised when lag > pull_lag_amber_seq has held for >= pull_lag_amber_sec. Cleared only after lag
+    has stayed <= pull_lag_amber_seq for one full pull cycle (a pull started and finished after lag
+    was first seen back under the limit); a fresh excursion above the limit restarts that wait.
+    """
+    limit = int(t["pull_lag_amber_seq"])
+    latched = mem.get("pull_lag_amber")
+    if pull_lag is None:
+        return latched.get("reason") if isinstance(latched, Mapping) else None
+    if pull_lag > limit:
+        mem.pop("pull_lag_ok_since", None)
+        over_since = float(mem.setdefault("pull_lag_over_since", now))
+        over_for = now - over_since
+        if over_for >= t["pull_lag_amber_sec"]:
+            reason = (f"applied behind published by {pull_lag} batches (> {limit}) for {fmt_age(over_for)}")
+            mem["pull_lag_amber"] = {"since": over_since, "reason": reason}
+            return reason
+        return latched.get("reason") if isinstance(latched, Mapping) else None
+    mem.pop("pull_lag_over_since", None)
+    if not isinstance(latched, Mapping):
+        mem.pop("pull_lag_ok_since", None)
+        return None
+    ok_since = float(mem.setdefault("pull_lag_ok_since", now))
+    started, finished = parse_ts(started_at), parse_ts(finished_at)
+    if started is not None and finished is not None and started >= ok_since and finished >= started:
+        mem.pop("pull_lag_amber", None)
+        mem.pop("pull_lag_ok_since", None)
+        return None
+    return (f"lag back to {pull_lag} (<= {limit}) for {fmt_age(now - ok_since)}; "
+            f"clears after one full pull cycle at or under the limit")
 
 
 def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: dict[str, Any] | None = None,
