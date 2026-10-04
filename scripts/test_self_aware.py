@@ -437,6 +437,9 @@ def test_field_liveness_classifies_dead_constant_and_missing():
     assert f["label"]["status"] == "CONSTANT" and f["label"]["alarm"]
     assert f["epoch_id"]["status"] == "DEAD_NULL" and f["absent"]["status"] == "MISSING"
     assert f["free_text"]["status"] == "CONSTANT" and not f["free_text"]["alarm"]  # unwatched constants never alarm
+    few = {r["field"]: r for r in data_awareness.profile_fields(rows[:3], spec)}
+    assert few["absent"]["status"] == "MISSING_FEW_ROWS" and not few["absent"]["alarm"]
+    assert f["absent"]["alarm"]
 
 
 def _data_mirror(paths) -> float:
