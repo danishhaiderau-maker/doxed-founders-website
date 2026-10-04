@@ -34,6 +34,7 @@ import {
   buildFreshInstanceDashboardState,
   applyInstanceDashboardPatch,
   activeLiveRelayArmForSessionReset,
+  executorTelemetryForSessionReset,
   readInstanceScope,
   USER_INSTANCE_STARTING_BALANCE,
 } from './instance-view.mapper';
@@ -970,6 +971,7 @@ export class TradingAgentInstancesService {
         data: {
           dashboardState: {
             ...fresh,
+            ...executorTelemetryForSessionReset(dash),
             ...preservedLiveArm,
             copyRelaySim: nextSim,
             copyRelayReconcile: null,

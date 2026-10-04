@@ -103,6 +103,22 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
     // the bot re-adopts its own book and resumes the same trades. Persist the new
     // epoch key so we stop re-detecting, but do NOT sever user copy sessions.
     const prevSeverKey = severKeyFromStored(dash, prevKey);
+    // A missing fresh-reset timestamp (0) under the same bot version is an
+    // unknown, not a new reset: the bot reports 0 while it boots/restores
+    // during a guarded deploy. Treating X -> 0 -> X as two epoch changes wiped
+    // every copy session twice per deploy (and the executor heartbeat with it,
+    // which flapped the railway.relay watcher check). Keep the stored epoch.
+    if (
+      epoch.freshResetTs <= 0
+      && prevSeverKey != null
+      && prevSeverKey.startsWith(`${epoch.botVersion}|`)
+      && prevSeverKey !== `${epoch.botVersion}|0`
+    ) {
+      this.logger.warn(
+        `Showcase epoch ${epoch.key} has no fresh-reset timestamp (stored ${prevKey}) — treated as unknown, no copy-session sever`,
+      );
+      return;
+    }
     if (prevSeverKey != null && prevSeverKey === severKeyFromEpoch(epoch)) {
       this.logger.warn(
         `Showcase epoch restart detected (${prevKey} -> ${epoch.key}) — continuity preserved, skipping copy-session sever`,

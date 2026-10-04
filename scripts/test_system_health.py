@@ -1656,3 +1656,26 @@ def test_monitor_digest_default_builder_uses_the_report_not_a_self_get(monkeypat
     digest = sh._build_monitor_digest(report)
     assert gd.SOURCES["watcher"] not in urls and digest["sources"]["watcher"]["ok"] is True
     assert digest["watcher"]["verdict"] == report["verdict"]
+
+
+def test_disarmed_executor_starting_blip_is_a_restart_window_not_a_flap():
+    """Railway restart / Showcase session reset leaves one STARTING read; only a lasting one is AMBER."""
+    now = ts("2026-10-04T09:55:35Z")
+    state: dict = {}
+    inputs = healthy(now)
+    inputs["relay_snapshot"]["relayExecutor"] = {"status": "STARTING", "healthy": False, "heartbeatAgeMs": None}
+    first = by_id(sh.evaluate(inputs, state))["railway.relay"]
+    assert first["status"] == sh.GREEN
+    assert "STARTING within restart/session-reset grace" in first["observed"]
+    # Still STARTING past the grace window: a real stall.
+    later = healthy(now + 9 * 60)
+    later["relay_snapshot"]["relayExecutor"] = {"status": "STARTING", "healthy": False, "heartbeatAgeMs": None}
+    assert by_id(sh.evaluate(later, state))["railway.relay"]["status"] == sh.AMBER
+    # Recovered heartbeat clears the window.
+    assert by_id(sh.evaluate(healthy(now + 10 * 60), state))["railway.relay"]["status"] == sh.GREEN
+    assert "relay_executor_starting_since" not in state.get("memory", {})
+    # Never a grace while armed: arming stays RED.
+    armed = healthy(now)
+    armed["relay_snapshot"].update(relayArmedAt="2026-10-04T09:00:00Z")
+    armed["relay_snapshot"]["relayExecutor"] = {"status": "STARTING", "healthy": False}
+    assert by_id(sh.evaluate(armed, {}))["railway.relay"]["status"] == sh.RED

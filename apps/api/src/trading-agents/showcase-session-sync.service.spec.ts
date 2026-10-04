@@ -97,3 +97,37 @@ test('epoch_change while Cheetah is not ACTIVE still resets copy sessions', asyn
   assert.equal(calls.includes('USER_RELAY_STOP'), true);
   assert.equal(calls.includes('persist-epoch'), true);
 });
+
+test('missing fresh-reset ts under the same version never severs copy sessions', async () => {
+  const calls: string[] = [];
+  const stored = {
+    showcaseSessionEpoch: 'v13|1000|1111',
+    showcaseSessionBotVersion: 'v13',
+    showcaseSessionFreshResetTs: 1111,
+  };
+  const prisma = {
+    tradingAgent: {
+      findUnique: async () => ({ id: 'agent-1', dashboardState: stored }),
+      update: async () => {
+        calls.push('persist-epoch');
+        return {};
+      },
+    },
+    tradingAgentInstance: { findFirst: async () => null },
+    signalCycle: { updateMany: async () => ({ count: 0 }) },
+  };
+  const instances = {
+    resetAllUserCopySessions: async () => {
+      calls.push('USER_RELAY_STOP');
+      return { resetCount: 1 };
+    },
+  };
+  const botBridge = { isEnabled: () => true, invalidateCache: () => calls.push('invalidate') };
+  const service = new ShowcaseSessionSyncService(prisma as never, botBridge as never, instances as never);
+  // Guarded deploy boot: same version, fresh-reset ts not reported yet.
+  await service.syncFromBotState({ bot_version: 'v13', bot_start_time: 2000, last_fresh_reset_ts: 0 } as never);
+  assert.equal(calls.length, 0);
+  // A genuinely new fresh reset still severs.
+  await service.syncFromBotState({ bot_version: 'v13', bot_start_time: 2000, last_fresh_reset_ts: 2222 } as never);
+  assert.equal(calls.includes('USER_RELAY_STOP'), true);
+});

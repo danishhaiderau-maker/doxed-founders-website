@@ -247,6 +247,31 @@ export function activeLiveRelayArmForSessionReset(
   };
 }
 
+/**
+ * Executor-worker liveness telemetry survives a Showcase session reset.
+ *
+ * The reset replaces the whole dashboard JSON to clear session counters, but
+ * `relayExecutor` / `lastTickAt` are the isolated worker's heartbeat, not
+ * session data. Dropping them made ops relay-status read the executor as
+ * STARTING / unhealthy (no heartbeat) until the next paused heartbeat, so the
+ * laptop watcher flapped railway.relay AMBER after every Fly deploy. Freshness
+ * is still enforced from `observedAt`, so nothing here can make a stale or
+ * stuck worker look healthy, and no arm metadata is carried.
+ */
+export function executorTelemetryForSessionReset(
+  dashboardState: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const executor = dashboardState.relayExecutor;
+  if (executor && typeof executor === 'object' && !Array.isArray(executor)) {
+    out.relayExecutor = executor;
+  }
+  if (typeof dashboardState.lastTickAt === 'string' && Number.isFinite(Date.parse(dashboardState.lastTickAt))) {
+    out.lastTickAt = dashboardState.lastTickAt;
+  }
+  return out;
+}
+
 /** Merge a partial dashboard patch without clobbering nested relay-sim fields. */
 export function applyDashboardPatch(
   dash: Record<string, unknown>,

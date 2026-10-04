@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   activeLiveRelayArmForSessionReset,
+  executorTelemetryForSessionReset,
   buildFreshInstanceDashboardState,
   applyInstanceDashboardPatch,
   readInstanceScope,
@@ -153,4 +154,25 @@ test('paper copy fidelity keeps its active sim epoch', () => {
   });
 
   assert.equal(start?.toISOString(), '2026-07-28T03:00:00.000Z');
+});
+
+test('session reset keeps the executor heartbeat but never arm metadata', () => {
+  const heartbeat = {
+    status: 'PAUSED_HEALTHY',
+    healthy: true,
+    serviceRole: 'executor-worker',
+    observedAt: '2026-10-04T09:55:00.000Z',
+  };
+  assert.deepEqual(
+    executorTelemetryForSessionReset({
+      relayExecutor: heartbeat,
+      lastTickAt: '2026-10-04T09:54:58.000Z',
+      relayExecutionMode: 'LIVE',
+      relayArmedAt: '2026-10-04T09:00:00.000Z',
+      copyRelayReconcile: { alert: null },
+    }),
+    { relayExecutor: heartbeat, lastTickAt: '2026-10-04T09:54:58.000Z' },
+  );
+  assert.deepEqual(executorTelemetryForSessionReset({ relayExecutor: [], lastTickAt: 'not-a-date' }), {});
+  assert.deepEqual(executorTelemetryForSessionReset({}), {});
 });
