@@ -21,7 +21,8 @@ censor as the scoreboard), so a feature's hit is ``sides[f] * dir[w] > 0`` and i
 
 ``coverage(rows)`` is the per-indicator audit behind ``INDICATOR-COVERAGE`` reports: for each of the 52
 Appendix A indicators, presence, % non-null raw, distinct values, min/median/max, signal counts and a status
-(OK / MISSING / DEAD / CONSTANT / WARMUP / UNAVAILABLE).
+(OK / MISSING / DEAD / CONSTANT / WARMUP / UNAVAILABLE) plus the stamped ``reason`` for WARMUP / UNAVAILABLE
+(e.g. ``INSUFFICIENT_SWINGS`` for a quiet-regime PITCHFORK, which is not DEAD).
 
 Observation only: no tile, order, relay or Fly state is read or written.
 """
@@ -52,6 +53,22 @@ COVERAGE_FILE = "indicator_edge_coverage.json"
 REGIME_KEYS = ("vol_tercile", "trend_state", "session", "spread_bucket", "ttf_bucket", "ai_class", "ai_side")
 # A raw value that is null on more than this share of AVAILABLE rows is DEAD (the indicator claims to be computed).
 DEAD_NULL_SHARE = 0.95
+# Rows written before engine ``indicator_engine_v1_20261004b`` stamped a quiet-regime PITCHFORK as AVAILABLE with
+# raw null and score 0; that return was only reachable with < 3 confirmed swings, so such a cell is read as
+# WARMING_UP / INSUFFICIENT_SWINGS (what the current engine writes, with ``status_reasons``).
+LEGACY_NULL_AVAILABLE_REASON = {"PITCHFORK_12H@F:STATE": "INSUFFICIENT_SWINGS"}
+
+
+def _cell(row: Mapping[str, Any], fid: str) -> tuple[list | None, str | None]:
+    """``(cell, reason)`` with legacy AVAILABLE-but-null cells normalised to WARMING_UP plus their reason."""
+    cell = (row.get("f") or {}).get(fid)
+    if not (isinstance(cell, list) and len(cell) >= 4):
+        return None, None
+    reason = (row.get("status_reasons") or {}).get(fid)
+    legacy = LEGACY_NULL_AVAILABLE_REASON.get(fid)
+    if legacy and cell[3] == spec.STATUS_AVAILABLE and cell[0] is None and not cell[1]:
+        return [None, None, None, spec.STATUS_WARMING_UP], legacy
+    return cell, reason
 
 
 def _bp(x: float) -> float | None:
@@ -172,8 +189,12 @@ def coverage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         fids = [f for f in all_fids if spec.indicator_of(f)["id"] == ind["id"]]
         primary = fids[0]
         present = sum(1 for r in rows if any(f in (r.get("f") or {}) for f in fids))
-        cells = [(r.get("f") or {}).get(primary) for r in rows]
-        cells = [c for c in cells if isinstance(c, list) and len(c) >= 4]
+        pairs = [_cell(r, primary) for r in rows]
+        cells = [c for c, _ in pairs if c is not None]
+        reasons: dict[str, int] = {}
+        for c, why in pairs:
+            if why and c is not None and c[3] != spec.STATUS_AVAILABLE:
+                reasons[why] = reasons.get(why, 0) + 1
         st = {}
         for c in cells:
             st[c[3]] = st.get(c[3], 0) + 1
@@ -184,10 +205,9 @@ def coverage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         signals = 0
         if ind["scored"]:
             for r in rows:
-                f = r.get("f") or {}
                 for fid in fids:
-                    c = f.get(fid)
-                    if isinstance(c, list) and len(c) >= 4 and c[3] == spec.STATUS_AVAILABLE and _num(c[1]):
+                    c, _ = _cell(r, fid)
+                    if c is not None and c[3] == spec.STATUS_AVAILABLE and _num(c[1]):
                         signals += 1
         if not present:
             status = "MISSING"
@@ -213,6 +233,9 @@ def coverage(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "signals": signals if ind["scored"] else None,
             "silent": bool(ind["scored"] and status == "OK" and signals == 0),
             "status": status,
+            # dominant reason a non-AVAILABLE cell gave (e.g. INSUFFICIENT_SWINGS), null when none was stamped
+            "reason": max(reasons, key=reasons.get) if reasons and status in ("WARMUP", "UNAVAILABLE") else None,
+            "reason_counts": dict(sorted(reasons.items())),
         })
     epochs = sorted({str(r.get("data_epoch_id")) for r in rows})
     return {"schema": COVERAGE_SCHEMA, "rows": n, "data_epoch_ids": epochs,

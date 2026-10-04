@@ -379,6 +379,23 @@ def test_pitchfork_needs_240_bars_and_three_confirmed_swings():
     assert out[3] == "A" and out[1] in (-1, 0, 1)
 
 
+def test_pitchfork_without_three_swings_is_warming_up_with_a_reason_not_a_null_available_cell():
+    sha = spec.feature_set_sha()
+    quiet = walk(400, vol=0.00002)   # no 0.8% swing inside 240 bars
+    reasons = {}
+    assert feat(core.ind_pitchfork, quiet, 240, reasons)["PITCHFORK_12H@F:STATE"] == [None, None, None, "W"]
+    assert core.REASON_INSUFFICIENT_SWINGS == "INSUFFICIENT_SWINGS"
+    assert reasons == {"PITCHFORK_12H@F:STATE": "INSUFFICIENT_SWINGS"}
+    out = core.compute_features(quiet)
+    assert out["f"]["PITCHFORK_12H@F:STATE"][3] == "W"
+    assert out["reasons"] == {"PITCHFORK_12H@F:STATE": "INSUFFICIENT_SWINGS"}
+    # Under 240 bars it is plain warm-up (no reason); with swings it is AVAILABLE and no reason is stamped.
+    assert core.compute_features(walk(100))["reasons"] == {}
+    assert core.compute_features(walk(400, vol=0.003))["reasons"] == {}
+    # Status codes are not part of the frozen spec: the pre-registered feature-set sha does not move.
+    assert spec.feature_set_sha() == sha and sha.startswith("18076a9143db")
+
+
 # ---------------------------------------------------------------------------
 # Family F: derivatives
 # ---------------------------------------------------------------------------

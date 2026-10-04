@@ -113,7 +113,8 @@ def test_coverage_lists_all_52_and_classifies_each_status():
         r = _row(T0 + k * spec.BAR_SEC, score=1 if k % 3 else 0, raw=50.0 + k)
         f = r["f"]
         f["EMA_200@F:STATE"] = [10.0, 1, 50.0, "A"]                               # CONSTANT raw
-        f["PITCHFORK_12H@F:STATE"] = [None, 0, None, "A"]                         # DEAD: AVAILABLE, raw null
+        f["ZIGZAG_MSB@F:BREAKOUT"] = [None, 0, None, "A"]                         # DEAD: AVAILABLE, raw null
+        f["PITCHFORK_12H@F:STATE"] = [None, 0, None, "A"]                         # legacy quiet regime -> WARMUP
         f["EMA_288@F:STATE"] = [None, None, None, "W"]                            # WARMUP
         f["FUNDING@F:REVERSION"] = [None, None, None, "U"]                        # UNAVAILABLE
         f["HV@F:REVERSION"] = [3.0 + k, 0, 50.0, "A"]                             # OK but silent
@@ -125,13 +126,33 @@ def test_coverage_lists_all_52_and_classifies_each_status():
     assert by["RSI"]["status"] == "OK" and by["RSI"]["distinct"] == 10 and by["RSI"]["pct_non_null"] == 100.0
     assert by["RSI"]["min"] == 50.0 and by["RSI"]["max"] == 59.0 and by["RSI"]["signals"] == 6
     assert by["EMA_200"]["status"] == "CONSTANT"
-    assert by["PITCHFORK_12H"]["status"] == "DEAD"
+    assert by["ZIGZAG_MSB"]["status"] == "DEAD" and by["ZIGZAG_MSB"]["reason"] is None
+    assert by["PITCHFORK_12H"]["status"] == "WARMUP" and by["PITCHFORK_12H"]["reason"] == "INSUFFICIENT_SWINGS"
     assert by["EMA_288"]["status"] == "WARMUP"
     assert by["FUNDING"]["status"] == "UNAVAILABLE"
     assert by["HV"]["status"] == "OK" and by["HV"]["silent"] is True
     assert by["ATR"]["signals"] is None and by["ATR"]["status"] == "CONSTANT"             # unscored label, same raw
     assert by["CVD"]["status"] == "MISSING" and by["CVD"]["present_rows"] == 0
     assert sum(cov["counts"].values()) == 52
+
+
+def test_coverage_reads_stamped_insufficient_swings_as_warmup_not_dead():
+    rows = []
+    for k in range(10):
+        r = _row(T0 + k * spec.BAR_SEC)
+        if k < 8:   # current engine: WARMING_UP + status_reasons
+            r["f"]["PITCHFORK_12H@F:STATE"] = [None, None, None, "W"]
+            r["status_reasons"] = {"PITCHFORK_12H@F:STATE": "INSUFFICIENT_SWINGS"}
+        else:       # legacy rows from before indicator_engine_v1_20261004b
+            r["f"]["PITCHFORK_12H@F:STATE"] = [None, 0, None, "A"]
+        rows.append(r)
+    pf = {i["id"]: i for i in labels.coverage(rows)["indicators"]}["PITCHFORK_12H"]
+    assert pf["status"] == "WARMUP" and pf["reason"] == "INSUFFICIENT_SWINGS"
+    assert pf["reason_counts"] == {"INSUFFICIENT_SWINGS": 10} and pf["status_counts"] == {"WARMING_UP": 10}
+    # Once swings exist the computed cells are AVAILABLE with a raw value and the indicator is OK again.
+    rows[-1]["f"]["PITCHFORK_12H@F:STATE"] = [12.5, 1, None, "A"]
+    pf = {i["id"]: i for i in labels.coverage(rows)["indicators"]}["PITCHFORK_12H"]
+    assert pf["status"] == "OK" and pf["reason"] is None and pf["signals"] == 1
 
 
 def test_coverage_cli_writes_the_audit(tmp_path, capsys):
