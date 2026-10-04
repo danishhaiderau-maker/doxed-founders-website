@@ -25518,6 +25518,8 @@ def _pending_limit_ready_for_fill(
             )
             evidence["entry_path"] = "MARKETABLE_FALLBACK"
             order["venue_fill_gate"] = evidence
+            if executable and isinstance(evidence, dict) and evidence.get("fill_basis"):
+                order["venue_fill_gate_admitted"] = dict(evidence)
             persist_market_evidence(evidence, executable)
             return executable
         return False
@@ -25533,10 +25535,18 @@ def _pending_limit_ready_for_fill(
             recent_market_trades=recent_market_trades or [],
             now=now,
         )
+        # state_monitor_loop and position_manager both run process_pending_orders:
+        # a later re-check of the same generation (placement_check False, no print
+        # yet) overwrote the admitting MARKETABLE_AT_PLACEMENT evidence with
+        # fill_basis None before the fill receipt read it (4 freeze21b receipts).
+        # Keep the admitting evidence; the receipt prefers it for its generation.
         order["venue_fill_gate"] = evidence
+        if executable and isinstance(evidence, dict) and evidence.get("fill_basis"):
+            order["venue_fill_gate_admitted"] = dict(evidence)
         persist_market_evidence(evidence, executable)
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
+
 
 
 FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
