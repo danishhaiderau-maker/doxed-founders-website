@@ -4276,6 +4276,25 @@ def _trade_row_net_pnl_usd(row) -> float:
     return 0.0
 
 
+def _empty_lane_pnl_bucket(lane: str) -> dict:
+    """A zero ``lane_pnl_ledger`` row (same shape as a derived bucket)."""
+    return {
+        "lane": lane,
+        "net_pnl_usd": 0.0,
+        "gross_wins_usd": 0.0,
+        "gross_losses_usd": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "closes": 0,
+        "long_closes": 0,
+        "short_closes": 0,
+        "long_pnl_usd": 0.0,
+        "short_pnl_usd": 0.0,
+        "equity_usd": float(STARTING_BALANCE),
+        "wl_basis": LANE_LEDGER_WL_BASIS,
+    }
+
+
 def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
     """Rebuild per-lane PnL ledger from a session trades list.
 
@@ -31291,6 +31310,24 @@ def _xvl_trigger_signal_clock(policy, evaluator) -> str:
             or _xvl.SIGNAL_CLOCK)
 
 
+def _tile_row_with_display_signal_clock(tile: dict) -> dict:
+    """/ready display copy: ``entry_policy.signal_clock`` from the evaluator when the spec omits it.
+
+    B2 declares no tile-level clock but rides the 3 m bar-close CVD evaluator
+    (see ``_xvl_trigger_signal_clock``); a null clock read as "unknown" in
+    audits.  Display only: the registry (and its signature) is untouched.
+    """
+    policy = tile.get("entry_policy") if isinstance(tile, dict) else None
+    if not isinstance(policy, dict) or policy.get("signal_clock"):
+        return tile
+    evaluator = (globals().get("_XVL_EVALUATORS") or {}).get(tile.get("lane"))
+    clock = getattr(evaluator, "SIGNAL_CLOCK", None) if evaluator is not None else None
+    if not clock:
+        return tile
+    return {**tile, "entry_policy": {**policy, "signal_clock": clock,
+                                     "signal_clock_source": "evaluator:" + type(evaluator).__name__}}
+
+
 def _xvl_direction_source(lane: str) -> str:
     return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
 
@@ -42230,6 +42267,12 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
         and (not session_start or _trade_row_in_session(row, session_start))
     ]
     ledger = _derive_lane_pnl_ledger_from_trades(rows)
+    # Every active tile gets a row, so a tile with no epoch close yet (e.g. B2)
+    # shows an explicit zero instead of a missing ledger row.
+    for lane in globals().get("ACTIVE_TILE_ORDER") or ():
+        lane_key = _normalize_lane_key(lane)
+        if lane_key and lane_key not in ledger:
+            ledger[lane_key] = _empty_lane_pnl_bucket(lane_key)
     realized = sum(float(bucket.get("net_pnl_usd") or 0.0) for bucket in ledger.values())
     for row in rows:
         if _trade_row_is_forced_close(row):
@@ -42953,6 +42996,31 @@ def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
         except (TypeError, ValueError):
             counts["closed"] = 0
         counts["closed_source"] = "epoch_lane_ledger_excl_forced"
+    _floor_selected_calls(tile_route_counts)
+
+
+def _floor_selected_calls(tile_route_counts: dict) -> None:
+    """``selected_calls`` covers the whole epoch, never fewer than the epoch's orders.
+
+    ``selected_calls`` counts the distinct shared-AI calls joined from the
+    display-capped AI history / trades / expired lists, so on the live overlay
+    it fell far behind the epoch order counts (H-B 0 selected with 2 fills; the
+    funnel showed 5 selected vs 22 submitted).  Every submitted order came from
+    one selected call on that tile, so the epoch order count is a hard floor.
+    """
+    for counts in (tile_route_counts or {}).values():
+        if not isinstance(counts, dict):
+            continue
+        try:
+            linked = int(counts.get("selected_calls") or 0)
+            orders = sum(int(counts.get(key) or 0) for key in ("pending", "open", "closed", "expired"))
+        except (TypeError, ValueError):
+            continue
+        counts["selected_calls_linked"] = linked
+        counts["selected_calls"] = max(linked, orders)
+        counts["selected_calls_basis"] = (
+            "linked_shared_ai_calls" if linked >= orders else "epoch_order_floor"
+        )
 
 
 def _build_api_state_snapshot():
@@ -45420,11 +45488,14 @@ def ready():
         and runtime["system_ready"]
         and runtime["rest_entry_quote_ready"]
     )
-    tile_registry = [
-        {**tile, "entry_policy": _ready_entry_policy_view(tile.get("entry_policy")),
-         "pre_registration": tile_pre_registration_summary(tile["lane"])}
-        for tile in active_tile_lifecycle_manifest()
-    ]
+    tile_registry = []
+    for tile in active_tile_lifecycle_manifest():
+        row = _tile_row_with_display_signal_clock(tile)
+        tile_registry.append({
+            **row,
+            "entry_policy": _ready_entry_policy_view(row.get("entry_policy")),
+            "pre_registration": tile_pre_registration_summary(tile["lane"]),
+        })
     try:
         thread_summary = _THREAD_HEALTH.summary(now)
     except Exception as exc:
