@@ -109,6 +109,35 @@ def test_engine_writes_one_identity_stamped_row_per_closed_bar(tmp_path):
         assert r["bar_close_ts"] <= r["ts"]  # never printed before the bar closed
 
 
+def test_status_reasons_are_stamped_only_when_present_and_announced_in_the_schema_registry(tmp_path, monkeypatch):
+    import pathlib
+    import data_epoch as de
+    feed = Feed(tmp_path)
+    warm_at = T0 + 3 * 3600 - 30
+    engine = start_engine(tmp_path, feed, warm_at)
+    run(engine, feed, warm_at, warm_at + 540)
+    assert rows(tmp_path) and all("status_reasons" not in r for r in rows(tmp_path))   # 60 bars: plain warm-up
+    real = ie.core.compute_features
+
+    def quiet(*a, **kw):   # a post-warm-up quiet regime: PITCHFORK has < 3 swings
+        out = real(*a, **kw)
+        out["f"]["PITCHFORK_12H@F:STATE"] = [None, None, None, "W"]
+        return dict(out, reasons={"PITCHFORK_12H@F:STATE": ie.core.REASON_INSUFFICIENT_SWINGS})
+    monkeypatch.setattr(ie.core, "compute_features", quiet)
+    run(engine, feed, warm_at + 540, warm_at + 1080)
+    out = rows(tmp_path)
+    late = [r for r in out if "status_reasons" in r]
+    assert late and late[-1]["status_reasons"] == {"PITCHFORK_12H@F:STATE": "INSUFFICIENT_SWINGS"}
+    assert late[-1]["engine_version"] == ie.ENGINE_VERSION
+    registry = json.loads((pathlib.Path(__file__).resolve().parents[2] / "scripts" / "self_aware"
+                           / "schema_registry.json").read_text())
+    announced = registry["streams"][spec.BAR_FILE]["schema=" + spec.BAR_SCHEMA]
+    assert announced["status_reasons.PITCHFORK_12H@F:STATE"] == ["string"]
+    fp = de.fingerprint(late)
+    assert "status_reasons.PITCHFORK_12H@F:STATE" in fp["fields"]
+    assert "status_reasons.PITCHFORK_12H@F:STATE" not in {d["field"] for d in de.dead_fields(fp, min_rows=1)}
+
+
 def test_engine_waits_for_live_cross_venue_minutes_but_not_forever(tmp_path):
     feed = Feed(tmp_path, with_xv=True)
     warm_at = T0 + 2 * 3600 - 30

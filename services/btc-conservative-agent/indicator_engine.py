@@ -42,7 +42,7 @@ import indicator_engine_core as core
 from data_epoch import activate_from_env, stamp_active
 from research_reset_writer_fence import sidecar_append_admitted
 
-ENGINE_VERSION = "indicator_engine_v1_20261004"
+ENGINE_VERSION = "indicator_engine_v1_20261004b"  # b: PITCHFORK INSUFFICIENT_SWINGS -> W
 POLL_SEC = 2.0
 CLOSE_LAG_SEC = 8.0
 INPUT_WAIT_MAX_SEC = 60.0
@@ -355,6 +355,8 @@ class Engine:
             "f": features["f"],
             "compute_ms": compute_ms,
         }
+        if features.get("reasons"):
+            row["status_reasons"] = dict(features["reasons"])
         self.stats["compute_ms_last"] = compute_ms
         self.stats["compute_ms_max"] = max(compute_ms, self.stats["compute_ms_max"] or 0.0)
         if self._append(row):

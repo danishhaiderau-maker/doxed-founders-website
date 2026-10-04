@@ -22,6 +22,8 @@ from cross_venue_premium import PremiumRule, PremiumTracker
 from tape_minute_bars import row_prices
 
 A, W, U = spec.STATUS_AVAILABLE, spec.STATUS_WARMING_UP, spec.STATUS_UNAVAILABLE
+# Why a post-warm-up cell is WARMING_UP (row field ``status_reasons``: feature_id -> reason; omitted when empty).
+REASON_INSUFFICIENT_SWINGS = "INSUFFICIENT_SWINGS"
 BAR_SEC = spec.BAR_SEC
 TAPE_OK_FRESH_SEC = 120
 TAPE_MIN_FRESH_SEC = 20
@@ -1455,14 +1457,22 @@ def ind_zigzag(s: Series) -> dict:
     return {fid: _feat((c - sh[2]) / c * 1e4, score, None, A)}
 
 
-def ind_pitchfork(s: Series, bars: int = 240) -> dict:
+def ind_pitchfork(s: Series, bars: int = 240, reasons: Optional[dict] = None) -> dict:
+    """Andrews pitchfork over the last 3 confirmed 0.8% swings inside ``bars`` bars.
+
+    Fewer than 3 such swings (a quiet regime) is WARMING_UP with reason ``INSUFFICIENT_SWINGS`` in ``reasons``,
+    not AVAILABLE with a null raw: the rule cannot be evaluated, so the cell must not read as a dead field.
+    Status codes are not part of ``spec_document()``, so the frozen feature-set sha is unchanged.
+    """
     fid = "PITCHFORK_12H@F:STATE"
     i = s.n - 1
     if i < bars:
         return {fid: _feat(None, None, None, W)}
     swings = [sw for sw in zigzag_swings(s, 0.8, i - 1) if sw[1] >= i - bars]
     if len(swings) < 3:
-        return {fid: _feat(None, 0, None, A)}
+        if reasons is not None:
+            reasons[fid] = REASON_INSUFFICIENT_SWINGS
+        return {fid: _feat(None, None, None, W)}
     p0, p1, p2 = swings[-3], swings[-2], swings[-1]
     mi, mp = (p1[1] + p2[1]) / 2.0, (p1[2] + p2[2]) / 2.0
     if mi == p0[1]:
@@ -1624,9 +1634,11 @@ def compute_features(bars: list, *, xv_seen: Optional[Mapping[str, bool]] = None
     for fn in (ind_ema, ind_ichimoku, ind_supertrend, ind_psar, ind_hma, ind_linreg, ind_tema, ind_rsi, ind_stoch,
                ind_macd, ind_cci, ind_willr, ind_ao, ind_kst, ind_cmo, ind_roc, ind_dpo, ind_vp_session, ind_avwap,
                ind_obv, ind_ad, ind_vwma, ind_mfi, ind_cmf, ind_klinger, ind_eom, ind_net_taker, ind_cvd,
-               ind_xvenue_flow, ind_keltner, ind_donchian, ind_hv, ind_stddev_z, ind_zigzag, ind_pitchfork,
+               ind_xvenue_flow, ind_keltner, ind_donchian, ind_hv, ind_stddev_z, ind_zigzag,
                ind_liq, ind_funding, ind_oi, ind_xvenue_lead):
         f.update(fn(s))
+    reasons: dict = {}
+    f.update(ind_pitchfork(s, reasons=reasons))
     f.update(ind_book_imbalance(s, xv_seen or {}))
     f.update(ind_bb(s, regime))
     f.update(ind_atr_regime(s, regime))
@@ -1639,7 +1651,7 @@ def compute_features(bars: list, *, xv_seen: Optional[Mapping[str, bool]] = None
     ordered = {}
     for fid in spec.feature_ids():
         ordered[fid] = f.get(fid) or _feat(None, None, None, W)
-    return {"f": ordered, "regime": regime, "levels": levels}
+    return {"f": ordered, "regime": regime, "levels": levels, "reasons": reasons}
 
 
 def row_health(bars: list) -> dict:
