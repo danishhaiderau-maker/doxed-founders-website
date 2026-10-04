@@ -15993,7 +15993,10 @@ def _write_fill_evidence_handoff(job: dict) -> None:
             epoch_id=expected_epoch_id,
             data_dir=str(receipt.get("data_dir") or os.getcwd()),
         )
-        _tile_fill_index_record(trade_id, fill_identity_receipt.get("fill_evidence"))
+        # Monitor-only index; must never fail the required v3 fill step.
+        index_record = globals().get("_tile_fill_index_record")
+        if callable(index_record):
+            index_record(trade_id, fill_identity_receipt.get("fill_evidence"))
         identity = {
             key: fill_identity_receipt[key]
             for key in FILL_EVIDENCE_IDENTITY_KEYS
