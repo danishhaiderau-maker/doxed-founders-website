@@ -40,6 +40,7 @@ import cross_venue_tape as cvt
 import indicator_edge_spec as spec
 import indicator_engine_core as core
 from data_epoch import activate_from_env, stamp_active
+from research_reset_writer_fence import sidecar_append_admitted
 
 ENGINE_VERSION = "indicator_engine_v1_20261004"
 POLL_SEC = 2.0
@@ -209,7 +210,7 @@ class Engine:
         self._last_status_log = 0.0
         self.last_row: Optional[dict] = None
         self.stats = {"rows_written": 0, "late_rows_written": 0, "bytes_written": 0, "bytes_today": 0, "day": None,
-                      "write_failures": 0, "live_write_failures": 0, "compute_failures": 0, "bars_skipped": 0,
+                      "write_failures": 0, "reset_fenced_skips": 0, "live_write_failures": 0, "compute_failures": 0, "bars_skipped": 0,
                       "input_wait_timeouts": 0, "cpu_pct_1m": None, "rss_mb": None, "compute_ms_last": None,
                       "compute_ms_max": None, "warm": {}}
 
@@ -377,11 +378,17 @@ class Engine:
     def _append(self, row: dict) -> bool:
         try:
             data = (json.dumps(stamp_active(row), separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
-            self._rotate_if_needed()
-            with open(self.out_path, "ab") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
+            # The bar file is a reset deletion target; this process is outside
+            # the bot's in-process reset barriers.
+            with sidecar_append_admitted(self.dir) as admitted:
+                if not admitted:
+                    self.stats["reset_fenced_skips"] += 1
+                    return False
+                self._rotate_if_needed()
+                with open(self.out_path, "ab") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
         except (OSError, ValueError) as exc:
             self.stats["write_failures"] += 1
             cvc._log(f"append failed: {type(exc).__name__}: {exc}")

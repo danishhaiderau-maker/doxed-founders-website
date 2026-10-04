@@ -32792,6 +32792,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     cleanup_acquired = False
     epoch_acquired = False
     research_acquired = False
+    sidecar_fence = None
     result = None
     try:
         # These scheduling conditions must remain held, not merely sampled:
@@ -32832,8 +32833,16 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
                     "error": "fresh_collection_research_writer_busy",
                     "summary": "Reset aborted before archive: research writer is active"}
             return result
+        sidecar_fence = _fresh_reset_sidecar_fence_acquire()
+        if sidecar_fence is None:
+            result = {"ok": False, "wipe_aborted": True,
+                    "error": "fresh_collection_sidecar_writer_busy",
+                    "summary": "Reset aborted before archive: an out-of-process research writer holds the fence"}
+            return result
         result = _perform_fresh_collection_reset_quiesced(send_local_signal=send_local_signal)
     finally:
+        if sidecar_fence is not None:
+            _fresh_reset_sidecar_fence_release(sidecar_fence)
         if research_acquired:
             _research_write_gate.release()
         if epoch_acquired:
@@ -32868,9 +32877,32 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     return result
 
 
+_FRESH_RESET_SIDECAR_FENCE = None
+FRESH_RESET_SIDECAR_FENCE_TIMEOUT_SEC = 10.0
+
+
+def _fresh_reset_sidecar_fence_acquire():
+    """Exclude out-of-process research writers (fly-entrypoint sidecars)."""
+    global _FRESH_RESET_SIDECAR_FENCE
+    from research_reset_writer_fence import ExclusiveResetFence
+    fence = ExclusiveResetFence(_data_sync_runtime_root())
+    if not fence.acquire(FRESH_RESET_SIDECAR_FENCE_TIMEOUT_SEC):
+        return None
+    _FRESH_RESET_SIDECAR_FENCE = fence
+    return fence
+
+
+def _fresh_reset_sidecar_fence_release(fence) -> None:
+    global _FRESH_RESET_SIDECAR_FENCE
+    if _FRESH_RESET_SIDECAR_FENCE is fence:
+        _FRESH_RESET_SIDECAR_FENCE = None
+    fence.release()
+
+
 def _fresh_research_reset_assert_quiesced() -> None:
     """Re-check the actual held barriers on both first execution and resume."""
     if (not _fresh_collection_lock.locked() or _LIFECYCLE_PIPELINE_RUNTIME is not None
+            or not getattr(_FRESH_RESET_SIDECAR_FENCE, "held", False)
             or getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None) is None
             or any(not gate._is_owned() for gate in (
                 _research_write_gate, _collector_epoch_lock,
@@ -33027,6 +33059,43 @@ def _fresh_research_reset_boundary(reset_anchor: float) -> dict:
                                 "append_rotation_recovery": "RECONCILED", "volume_cleanup": "RECONCILED"}}
 
 
+def _fresh_research_reset_retire_reviewed_attempt() -> str | None:
+    """Retire one registered pre-unlink failed attempt so a fresh reset can bind.
+
+    Only exact hash-bound incidents in ``research_reset_predeletion_abort`` are
+    eligible; any other pointer is left to the resume path, which refuses it.
+    """
+    from research_reset_predeletion_abort import retire_registered_active_attempt
+
+    def retirement_quiescence_probe():
+        if not state_lock.acquire(timeout=2.0):
+            raise RuntimeError("RESET_STATE_LOCK_TIMEOUT")
+        try:
+            paused = state.get("execution_paused") is True
+            disarmed = state.get("live_armed") is False
+        finally:
+            state_lock.release()
+        if not trade_lock.acquire(timeout=2.0):
+            raise RuntimeError("RESET_TRADE_LOCK_TIMEOUT")
+        try:
+            pending_count, open_count = len(pending_orders), len(open_positions)
+        finally:
+            trade_lock.release()
+        return {"execution_paused": paused, "paper_only": _force_paper_mode_active() is True,
+                "live_disarmed": disarmed, "epoch_id": _collector_v22_epoch_id(),
+                "pending_orders": pending_count, "open_positions": open_count}
+
+    receipt = retire_registered_active_attempt(
+        root=_data_sync_runtime_root(), volume_root=_data_sync_volume_root,
+        held_lease=getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None),
+        quiescence_probe=retirement_quiescence_probe)
+    if receipt is None:
+        return None
+    logger.warning("[FRESH RESET] retired reviewed pre-deletion attempt %s; incident receipts preserved",
+                   receipt["reset_id"])
+    return receipt["reset_id"]
+
+
 def _fresh_research_reset_resume() -> dict | None:
     """Resume one hash-bound operation; never replace an incomplete reset anchor."""
     from research_exact_deletion import _checked_path, reconcile_research_deletion
@@ -33149,6 +33218,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                                     stage=stage, status="STARTED")
     _pause_agent_debug_writes()
     try:
+        _fresh_research_reset_assert_quiesced()
+        retired_attempt = _fresh_research_reset_retire_reviewed_attempt()
         resume = _fresh_research_reset_resume()
         boundary = resume or _fresh_research_reset_boundary(reset_anchor)
         if resume:
@@ -33168,10 +33239,13 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             # alias-backed custom DB is not implicit deletion authorization.
             _checked_path(Path(bridge.store.base_dir).absolute() / "research.db", root)
         preflights = []
+        target_stability = None
         if not resume:
             stage = "ALL_SCOPES_PREFLIGHT"
             write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
                                             stage=stage, status="STARTED")
+            from research_reset_target_stability import assert_targets_stable, sample_targets
+            stability_sample = sample_targets(root, proof, [None, *physical_scopes])
             for name in [None, *physical_scopes]:
                 scope_root = root if name is None else _managed_fly_alias(root, root / name)
                 if scope_root is None:
@@ -33187,6 +33261,15 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 preflights.append({key: preflight[key] for key in
                     ("scope_root", "scope_name", "scope_binding", "scope_binding_sha256",
                      "plan_sha256", "proof_sha256", "target_count", "target_bytes")})
+            try:
+                target_stability = assert_targets_stable(
+                    stability_sample, sample_targets(root, proof, [None, *physical_scopes]))
+            except Exception as exc:
+                unstable = getattr(exc, "unstable_targets", None) or []
+                if unstable:
+                    logger.error("[FRESH RESET] targets changed under barriers: %s",
+                                 [row["path"] for row in unstable[:20]])
+                raise
             write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
                                             stage=stage, status="PASSED")
         receipt_dir.mkdir(parents=True, exist_ok=bool(resume))
@@ -33201,6 +33284,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                        "wal_exists": boundary["wal_exists"], "recovery_states": boundary["recovery_states"],
                        "physical_scopes": physical_scopes,
                        "preflights": preflights,
+                       "target_stability": target_stability,
+                       "retired_predeletion_attempt": retired_attempt,
                        "new_tile_config_signature": active_tile_registry_signature()}
             store._atomic_json_receipt(receipt_dir / "binding.json", binding)
             store._atomic_json_receipt(operation_path, operation)

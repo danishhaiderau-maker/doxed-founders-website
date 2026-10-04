@@ -52,10 +52,46 @@ def _scopes(root: Path) -> list[str | None]:
     return [None, *(name for name in PHYSICAL_SCOPES if (root / name).is_symlink())]
 
 
+def _candidate_sample(root: Path) -> dict:
+    rows = {}
+    for name in _scopes(root):
+        result = plan_research_reset(str(root), proof=None, allow_fly_runtime_aliases=True, scope_name=name)
+        for row in result.get("retained", []):
+            if row.get("reason") == CANDIDATE_REASON:
+                rows[row["absolute_path"]] = (row["path"], row["category"], int(row["size_bytes"]),
+                                              int(row["mtime_ns"]), int(row["inode"]))
+    return rows
+
+
+def target_stability(before: dict, after: dict, window_sec: float) -> dict:
+    """Report targets that changed across the plan window; informational only.
+
+    The paused bot keeps collecting research through writers that the reset's
+    in-process gate blocks only while it is held, and sidecars honor the
+    cross-process fence only during the reset. Changes here are therefore
+    expected; the blocking two-sample check runs inside the reset under every
+    barrier, before any reset pointer is written.
+    """
+    changed = []
+    for path in sorted(set(before) | set(after)):
+        old, new = before.get(path), after.get(path)
+        if old != new:
+            row = old or new
+            changed.append({"path": row[0], "category": row[1],
+                            "size_delta": (new[2] if new else 0) - (old[2] if old else 0),
+                            "appeared": old is None, "vanished": new is None})
+    return {"blocking": False, "window_sec": round(window_sec, 1), "sampled_targets": len(before),
+            "changed_count": len(changed), "changed": changed[:50],
+            "blocking_check": "RESET_TARGETS_CHANGED_UNDER_BARRIERS (in-reset, pre-pointer)"}
+
+
 def plan(runtime_root: str) -> dict:
+    import time
     root = Path(runtime_root)
     categories: dict[str, dict] = {}
     violations, scopes, incomplete = [], [], []
+    started = time.monotonic()
+    before = {}
     for name in _scopes(root):
         result = plan_research_reset(str(root), proof=None, allow_fly_runtime_aliases=True, scope_name=name)
         scopes.append(name or "runtime")
@@ -64,6 +100,8 @@ def plan(runtime_root: str) -> dict:
         for row in result.get("retained", []):
             if row.get("reason") != CANDIDATE_REASON:
                 continue
+            before[row["absolute_path"]] = (row["path"], row["category"], int(row["size_bytes"]),
+                                            int(row["mtime_ns"]), int(row["inode"]))
             bucket = categories.setdefault(row["category"], {"files": 0, "bytes": 0})
             bucket["files"] += 1
             bucket["bytes"] += int(row.get("size_bytes") or 0)
@@ -71,9 +109,10 @@ def plan(runtime_root: str) -> dict:
                 violations.append(row["path"])
     pointers = sorted(p.parent.name for p in (root / GENERATION_POINTERS).glob("*/ACTIVE.json"))
     gates = execute_gates(root)
+    stability = target_stability(before, _candidate_sample(root), time.monotonic() - started)
     ok = not violations and not incomplete and gates["ok"]
     return {"schema": SCHEMA, "mode": "plan", "read_only": True, "ok": ok, "runtime_root": str(root),
-            "execute_gates": gates,
+            "execute_gates": gates, "target_stability": stability,
             "scopes": scopes, "would_delete": dict(sorted(categories.items())),
             "would_delete_files": sum(b["files"] for b in categories.values()),
             "would_delete_bytes": sum(b["bytes"] for b in categories.values()),
@@ -169,7 +208,38 @@ def _boundary_gates(root: Path) -> dict:
         except (ValueError, OSError) as exc:
             auxiliary.append({"path": str(path), "error": str(exc)})
             failures.append("RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR")
-    return {"identity": identity, "recovery": recovery, "auxiliary": auxiliary, "failures": failures}
+    active_reset = active_reset_gate(root)
+    if active_reset["status"] not in {"ABSENT", "COMPLETE", "RETIREABLE_REVIEWED_ATTEMPT"}:
+        failures.append("RESET_ACTIVE_POINTER_NOT_RETIREABLE:" + active_reset["status"])
+    return {"identity": identity, "recovery": recovery, "auxiliary": auxiliary,
+            "active_reset": active_reset, "failures": failures}
+
+
+def active_reset_gate(root: Path) -> dict:
+    """Predict whether execute can bind: an active pointer must be a registered,
+    byte-exact restart-bound incident, else execute refuses it at resume."""
+    import research_reset_predeletion_abort as abort
+    from research_reset_receipt_state import active_reset_receipt_exists
+
+    receipts = root / "research_reset_receipts"
+    pointer = receipts / "ACTIVE_RESET.json"
+    try:
+        if not active_reset_receipt_exists(root):
+            return {"status": "COMPLETE" if pointer.exists() else "ABSENT"}
+        reset_id = json.loads(pointer.read_bytes()).get("reset_id")
+        incident = abort.ADDITIONAL_REVIEWED_ATTEMPTS.get(reset_id)
+        if incident is None or "restart_continuity" not in incident:
+            return {"status": "UNREGISTERED_ACTIVE_POINTER", "reset_id": reset_id}
+        paths = {"active": pointer, "binding": receipts / reset_id / "binding.json",
+                 "operation": receipts / reset_id / "operation.json"}
+        observed = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()}
+        later = [name for name in ("deletion.json", "deletion.json.progress.jsonl", "genome-deletion.json")
+                 if (receipts / reset_id / name).exists()]
+        if observed != incident["hashes"] or later:
+            return {"status": "REGISTERED_ATTEMPT_CHANGED", "reset_id": reset_id, "later_stage_files": later}
+        return {"status": "RETIREABLE_REVIEWED_ATTEMPT", "reset_id": reset_id}
+    except (OSError, ValueError) as exc:
+        return {"status": "UNREADABLE", "error": type(exc).__name__}
 
 
 def relay_evidence(root: Path) -> dict:

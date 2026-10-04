@@ -55,6 +55,7 @@ def runtime(tmp_path_factory, monkeypatch):
            "datetime": datetime, "timezone": timezone, "time": SimpleNamespace(time=lambda: 1788580800.125),
            "logger": Mock(), **locks, "_LIFECYCLE_PIPELINE_RUNTIME": None,
            "_RAW_GENERATION_GATE_LOCAL": SimpleNamespace(mirror=object()),
+           "_FRESH_RESET_SIDECAR_FENCE": SimpleNamespace(held=True), "_data_sync_volume_root": lambda: root.parent,
            "state": {"execution_paused": True, "execution_reason": "ADMIN_MANUAL", "live_armed": False,
                      "account_balance": 502, "daily_pnl_usd": 2},
            "pending_orders": [], "open_positions": [], "trades": [{"id": "old", "pnl": 2}],
@@ -83,6 +84,7 @@ def runtime(tmp_path_factory, monkeypatch):
     path = Path(__file__).with_name("bot.py")
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     names = {"_fresh_reset_confirm_paused", "_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",
+             "_fresh_research_reset_retire_reviewed_attempt",
              "_fresh_research_reset_boundary", "_perform_fresh_collection_reset_quiesced",
              "_record_execution_settings_epoch", "_execution_settings_signature",
              "_write_research_session", "_reset_collector_epoch_state", "_collector_v22_epoch_id", "_bound_collection_epoch_id", "_data_sync_invalidate_reset_inventory",
@@ -450,3 +452,60 @@ def test_reset_quarantines_the_receipt_of_each_v22_generation_it_deletes(runtime
     assert operation["v22_seal_retirement"]["moved"] == ["generation-1.json"]
     assert research_event_generation_paths(root) == [str(runtime["root"] / RESEARCH_EVENTS_FILE)]
     assert not event_already_written("old-epoch", data_dir=root)
+
+
+def test_registered_failed_attempt_is_retired_then_fresh_reset_completes(runtime, monkeypatch):
+    """82c947 path: pre-unlink EXPECTED_SHA256_MISMATCH, redeploy, then retire + fresh reset."""
+    import research_reset_execution
+    import research_exact_deletion
+    import research_reset_predeletion_abort as abort_module
+    from research.mirror_generation_lease import MirrorGenerationLease
+    from research_exact_deletion import ResearchDeletionRejected
+
+    real_delete = research_reset_execution.delete_exact_research_files
+    def mismatch(**kwargs):
+        raise ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
+    monkeypatch.setattr(research_reset_execution, "delete_exact_research_files", mismatch)
+    failed = run(runtime, send_local_signal=False)
+    assert failed["failed_stage"] == "PAYLOAD_DELETION" and failed["error"] == "EXPECTED_SHA256_MISMATCH"
+    receipts = runtime["root"] / "research_reset_receipts"
+    reset_id = json.loads((receipts / "ACTIVE_RESET.json").read_text())["reset_id"]
+    directory = receipts / reset_id
+    binding = json.loads((directory / "binding.json").read_text())
+    hashes = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in (
+        ("active", receipts / "ACTIVE_RESET.json"), ("binding", directory / "binding.json"),
+        ("operation", directory / "operation.json"))}
+    failed_revision = binding["boundary_evidence"]["deployed_revision"]
+    deleter = hashlib.sha256(Path(research_exact_deletion.__file__).read_bytes()).hexdigest()
+    monkeypatch.setattr(abort_module, "REVIEWED_FAILED_DELETERS", {failed_revision: deleter})
+    monkeypatch.setattr(abort_module, "ADDITIONAL_REVIEWED_ATTEMPTS", {reset_id: {
+        "revision": failed_revision, "rejection_code": "EXPECTED_SHA256_MISMATCH", "hashes": hashes,
+        "restart_continuity": {"operation_mtime": (directory / "operation.json").stat().st_mtime,
+                               "reset_anchor": binding["reset_anchor"],
+                               "new_epoch_id": binding["proof"]["new_epoch_id"],
+                               "retired_epoch_id": binding["proof"]["retired_epoch_id"]}}})
+    # Paper resume and reset resume are both blocked by the failed pointer.
+    from research_reset_receipt_state import active_reset_receipt_exists
+    assert active_reset_receipt_exists(runtime["root"]) is True
+
+    # The redeploy: new process, later clock, real held mirror lease.
+    monkeypatch.setattr(research_reset_execution, "delete_exact_research_files", real_delete)
+    monkeypatch.setenv("SOURCE_GIT_REV", "e" * 40)
+    runtime["time"] = SimpleNamespace(time=lambda: 1788581400.5)
+    lease = MirrorGenerationLease(runtime["root"].parent).acquire(timeout_seconds=0)
+    runtime["_RAW_GENERATION_GATE_LOCAL"] = SimpleNamespace(mirror=lease)
+    try:
+        result = run(runtime, send_local_signal=False)
+    finally:
+        lease.release()
+    assert result["ok"], result
+    assert not runtime["payload"].exists()
+    assert json.loads((directory / "predeletion-aborted.json").read_text())["reset_id"] == reset_id
+    assert (directory / "binding.json").exists() and (directory / "operation.json").exists()
+    new_pointer = json.loads((receipts / "ACTIVE_RESET.json").read_text())
+    assert new_pointer["reset_id"] != reset_id
+    new_binding = json.loads((receipts / new_pointer["reset_id"] / "binding.json").read_text())
+    assert new_binding["retired_predeletion_attempt"] == reset_id
+    assert new_binding["target_stability"]["status"] == "STABLE"
+    assert active_reset_receipt_exists(runtime["root"]) is False
+    assert runtime["accounting"].read_text() == "accounting-must-survive\n"

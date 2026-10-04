@@ -21,7 +21,7 @@ TARGET_CHANGED_BEFORE_DELETE VALIDATE_ONLY_REQUIRES_BOOLEAN RESET_INVENTORY_INCO
 RESET_BOUNDARY_PROOF_INVALID RESET_PLAN_CHANGED RESET_TARGET_BUDGET_EXCEEDED
 RESET_TARGET_CHANGED_AFTER_PLAN RESET_TARGET_CHANGED_DURING_VALIDATION
 ARCHIVE_EXPECTED_HASH_MISSING ARCHIVE_SHA256_MISMATCH RESET_PHYSICAL_SCOPE_CHANGED
-RESET_EXPECTED_TARGET_MAP_CHANGED
+RESET_EXPECTED_TARGET_MAP_CHANGED RESET_TARGETS_CHANGED_UNDER_BARRIERS
 """.split())
 
 
@@ -39,4 +39,11 @@ def reset_failure_fields(error):
                     and type(detail.get('mismatch_count')) is int
                     and 1 <= detail['mismatch_count'] <= 100000):
                 result['hash_mismatch'] = {k: detail[k] for k in (*keys, 'mismatch_count')}
+        stability = getattr(error, 'target_stability', None)
+        if code == 'RESET_TARGETS_CHANGED_UNDER_BARRIERS' and isinstance(stability, dict):
+            count, hashes = stability.get('unstable_target_count'), stability.get('unstable_target_path_sha256')
+            if (type(count) is int and 1 <= count <= 100000 and isinstance(hashes, list) and len(hashes) <= 5
+                    and all(isinstance(h, str) and re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes)):
+                result['target_stability'] = {'unstable_target_count': count,
+                                              'unstable_target_path_sha256': list(hashes)}
     return result

@@ -179,3 +179,53 @@ def test_cli_exit_codes(tmp_path, capsys):
     assert crp.main(["plan", "--runtime-root", str(root)]) == 0
     assert json.loads(capsys.readouterr().out)["mode"] == "plan"
     assert crp.main(["verify", "--runtime-root", str(root), "--epoch", EPOCH]) == 2
+
+
+def _pointer(root: Path, reset_id: str, stage: str = "FAILED") -> dict:
+    import hashlib
+    receipts = root / "research_reset_receipts"
+    (receipts / reset_id).mkdir(parents=True, exist_ok=True)
+    files = {"active": receipts / "ACTIVE_RESET.json", "binding": receipts / reset_id / "binding.json",
+             "operation": receipts / reset_id / "operation.json"}
+    files["binding"].write_text(json.dumps({"reset_anchor": 1}))
+    files["operation"].write_text(json.dumps({"stage": stage}))
+    files["active"].write_text(json.dumps({"reset_id": reset_id}))
+    return {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in files.items()}
+
+
+def test_active_reset_gate_predicts_execute_binding(tmp_path, monkeypatch):
+    import research_reset_predeletion_abort as abort
+    root = _runtime(tmp_path)
+    assert crp.active_reset_gate(root)["status"] == "ABSENT"
+    _pointer(root, "a" * 24, stage="COMPLETE")
+    assert crp.active_reset_gate(root)["status"] == "COMPLETE"
+    hashes = _pointer(root, "b" * 24)
+    assert crp.active_reset_gate(root)["status"] == "UNREGISTERED_ACTIVE_POINTER"
+    monkeypatch.setattr(abort, "ADDITIONAL_REVIEWED_ATTEMPTS", {"b" * 24: {
+        "hashes": hashes, "restart_continuity": {}}})
+    assert crp.active_reset_gate(root) == {"status": "RETIREABLE_REVIEWED_ATTEMPT", "reset_id": "b" * 24}
+    (root / "research_reset_receipts" / ("b" * 24) / "deletion.json.progress.jsonl").write_text("")
+    assert crp.active_reset_gate(root)["status"] == "REGISTERED_ATTEMPT_CHANGED"
+
+
+def test_plan_fails_on_unretireable_active_pointer(tmp_path):
+    root = _runtime(tmp_path)
+    _pointer(root, "c" * 24)
+    result = crp.plan(str(root))
+    assert result["ok"] is False
+    assert "RESET_ACTIVE_POINTER_NOT_RETIREABLE:UNREGISTERED_ACTIVE_POINTER" in result["execute_gates"]["failures"]
+
+
+def test_plan_reports_target_churn_without_blocking(tmp_path, monkeypatch):
+    root = _runtime(tmp_path)
+    real = crp._candidate_sample
+    def churn(path):
+        (root / "indicator_bars_v1.jsonl").open("a").write('{"x":1}\n')
+        return real(path)
+    monkeypatch.setattr(crp, "_candidate_sample", churn)
+    baseline = crp.plan(str(root))
+    stability = baseline["target_stability"]
+    assert stability["blocking"] is False
+    assert any(row["path"] == "indicator_bars_v1.jsonl" for row in stability["changed"])
+    monkeypatch.setattr(crp, "_candidate_sample", real)
+    assert crp.plan(str(root))["target_stability"]["changed_count"] == 0

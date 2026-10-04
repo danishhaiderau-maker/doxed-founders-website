@@ -21,6 +21,7 @@ TREE = ast.parse(SOURCE, filename=str(BOT_PATH))
 TIMED_ACQUIRE_ALLOWLIST = {
     "_perform_fresh_collection_reset_locked",
     "_fresh_research_reset_assert_quiesced",
+    "retirement_quiescence_probe",
     "_strategy_progress_health_snapshot",
     "_dashboard_http_restart_allowed",
     "_build_relay_execution_state_snapshot",

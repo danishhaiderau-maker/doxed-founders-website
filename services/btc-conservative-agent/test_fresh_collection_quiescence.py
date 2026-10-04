@@ -38,6 +38,8 @@ def reset_env(tmp_path):
     env["_quiesce_preentry_evidence"] = Mock(return_value=True)
     env["_raw_generation_cleanup_gate_acquire"] = Mock(side_effect=lambda: events.append("lease") or True)
     env["_raw_generation_cleanup_gate_release"] = Mock(side_effect=lambda: events.append("release"))
+    env["_fresh_reset_sidecar_fence_acquire"] = Mock(return_value=object())
+    env["_fresh_reset_sidecar_fence_release"] = Mock()
 
     def reset_body(**kwargs):
         assert env["_research_write_gate"]._is_owned()
@@ -312,3 +314,26 @@ def test_failure_cleanup_cannot_hang_on_state_owner_or_write_unlocked(reset_env,
         if owner.ident is not None:
             owner.join(2)
     assert not owner.is_alive()
+
+
+def test_busy_sidecar_fence_aborts_before_archive_and_releases_gates(reset_env):
+    reset_env["_fresh_reset_sidecar_fence_acquire"].return_value = None
+    result = invoke(reset_env)
+    assert result["wipe_aborted"] is True
+    assert result["error"] == "fresh_collection_sidecar_writer_busy"
+    reset_env["_perform_fresh_collection_reset_quiesced"].assert_not_called()
+    reset_env["_fresh_reset_sidecar_fence_release"].assert_not_called()
+    assert not reset_env["_research_write_gate"]._is_owned()
+    reset_env["_raw_generation_cleanup_gate_release"].assert_called_once()
+
+
+def test_sidecar_fence_is_held_for_the_reset_and_released_after(reset_env):
+    fence = object()
+    reset_env["_fresh_reset_sidecar_fence_acquire"].return_value = fence
+    def body(**kwargs):
+        reset_env["_fresh_reset_sidecar_fence_release"].assert_not_called()
+        reset_env["epoch"] = "new-epoch"
+        return {"ok": True}
+    reset_env["_perform_fresh_collection_reset_quiesced"].side_effect = body
+    assert invoke(reset_env)["ok"] is True
+    reset_env["_fresh_reset_sidecar_fence_release"].assert_called_once_with(fence)
