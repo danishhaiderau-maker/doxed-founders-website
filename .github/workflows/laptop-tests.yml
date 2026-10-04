@@ -133,9 +133,9 @@ jobs:
       - name: Analyzer sections (accumulator, archive, dashboard publication)
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_research_trade_accumulator_epoch.py test_dashboard_report_publication.py test_past_analysis_archive_card.py test_genome_search_space_disclosure.py test_data_retention.py::ArchiveTests test_v31_overview_best_policy_counts.py -q -p no:cacheprovider
-      - name: Indicator Edge scorer, per-bar forward labels and spec (offline)
+      - name: Indicator Edge scorer, per-bar forward labels, Strategist export and spec (offline)
         working-directory: services/btc-conservative-agent
-        run: python -m pytest test_indicator_edge_labels.py test_indicator_forward_scorer.py test_indicator_edge_spec.py -q -p no:cacheprovider
+        run: python -m pytest test_indicator_edge_labels.py test_indicator_edge_export.py test_indicator_forward_scorer.py test_indicator_edge_spec.py -q -p no:cacheprovider
       - name: Per-signal research table and walk-forward scorer (offline, PR-D)
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_signal_research_table.py test_fill_model.py -q -p no:cacheprovider

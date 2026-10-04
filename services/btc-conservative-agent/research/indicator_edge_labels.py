@@ -131,12 +131,20 @@ def write_jsonl(rows: Sequence[Mapping[str, Any]], path: str | os.PathLike) -> s
     return str(path)
 
 
-def write_from_context(ctx: Mapping[str, Any], out_dir: str) -> dict[str, Any]:
-    """Cycle hook: label the scorer's eligible rows from the outcomes it already computed (no second tape load)."""
+def from_context(ctx: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Label the scorer's eligible rows from the outcomes it already computed (no second tape load)."""
     rows, oc, dts = ctx.get("rows"), ctx.get("outcomes"), ctx.get("dts")
     if not rows or oc is None or dts is None:
+        return []
+    return label_rows(rows, oc, dts, eligible=[True] * len(rows))
+
+
+def write_from_context(ctx: Mapping[str, Any], out_dir: str,
+                       labelled: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Cycle hook: write :func:`from_context` (or the already-built ``labelled``) to ``LABEL_FILE``."""
+    labelled = from_context(ctx) if labelled is None else labelled
+    if not labelled:
         return {"labels": None, "label_rows": 0}
-    labelled = label_rows(rows, oc, dts, eligible=[True] * len(rows))
     path = write_jsonl(labelled, Path(out_dir) / LABEL_FILE)
     return {"labels": path, "label_rows": len(labelled),
             "label_rows_matured": sum(1 for r in labelled if r["matured"])}
