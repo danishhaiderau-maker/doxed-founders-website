@@ -179,6 +179,39 @@ with bot.app.test_client() as client:
     resumed = client.post("/api/resume", json=DEPLOY, environ_base=LOOPBACK)
 check("deploy resume clears legacy pause", (resumed.get_json() or {}).get("status") == "resumed")
 
+print("\n[6] Active reset pointer: deploy resume retains an operator hold, nothing else resumes")
+reset_state()
+bot._resume_active_reset_receipt_exists = lambda: True
+with bot.app.test_client() as client:
+    client.post("/api/pause", environ_base=LOOPBACK)
+    retained = client.post("/api/resume", json=DEPLOY, environ_base=LOOPBACK)
+    body = retained.get_json() or {}
+    check("deploy resume retains operator hold during reset", retained.status_code == 200
+          and body.get("status") == "operator_pause_retained" and body.get("pause_owner") == "OPERATOR",
+          detail=f"{retained.status_code} {body}")
+    check("operator hold still paused", bot.state.get("execution_paused") is True and owner() == "OPERATOR")
+    bare = client.post("/api/resume", json={}, environ_base=LOOPBACK)
+    check("operator resume still blocked by reset", bare.status_code == 409
+          and (bare.get_json() or {}).get("reason") == "FRESH_COLLECTION_RESET_IN_PROGRESS", detail=str(bare.get_json()))
+    check("still paused after blocked resume", bot.state.get("execution_paused") is True)
+reset_state()
+with bot.app.test_client() as client:
+    client.post("/api/pause", json={"owner": "DEPLOY_MAINTENANCE"}, environ_base=LOOPBACK)
+    blocked = client.post("/api/resume", json=DEPLOY, environ_base=LOOPBACK)
+check("deploy pause is not resumed during reset", blocked.status_code == 409
+      and bot.state.get("execution_paused") is True, detail=str(blocked.get_json()))
+bot._fresh_collection_lock.acquire()
+try:
+    reset_state()
+    with bot.app.test_client() as client:
+        client.post("/api/pause", environ_base=LOOPBACK)
+        retained = client.post("/api/resume", json=DEPLOY, environ_base=LOOPBACK)
+    check("operator hold retained while reset lock is held",
+          (retained.get_json() or {}).get("status") == "operator_pause_retained", detail=str(retained.get_json()))
+finally:
+    bot._fresh_collection_lock.release()
+bot._resume_active_reset_receipt_exists = lambda: False
+
 with open(config_path, "r", encoding="utf-8") as handle:
     saved = json.load(handle)
 check("pause_intent is a persisted config key", "pause_intent" in saved)
