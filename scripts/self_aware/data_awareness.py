@@ -97,7 +97,11 @@ CATALOG: tuple[StreamSpec, ...] = (
     StreamSpec("ai_shadow_compact_prompt", "ai_shadow_compact_prompt.jsonl", "Shadow compact-prompt calls", "deepseek",
                "event", ("observed_at_utc", "ts")),
     StreamSpec("adaptive_entry_decisions", "adaptive_entry_decisions.jsonl", "Per-signal adaptive entry decision per tile",
-               "bitfinex", "event", ("signal_ts", "ts"), watch=("ai_feature.win_prob", "ai_feature.long_score", "spread_bps")),
+               "bitfinex", "event", ("signal_ts", "ts"),
+               # ai_feature.win_prob is not watched: the score-led shared prompt does not request a win
+               # probability, so the producer carries parse_ai_response_fields' placeholder 0 (DEAD_ZERO by
+               # construction). Evidence rows use evidence_win_prob (null unless EMITTED) instead.
+               watch=("ai_feature.long_score", "ai_feature.short_score", "spread_bps")),
     StreamSpec("pre_entry_features", "v3/ledgers/pre_entry_features.jsonl", "Pre-decision feature snapshot (ADX/ATR/RSI...)",
                "bitfinex", "event", ("features.cycle_3m_universe.captured_ts", "captured_at_ts", "recorded_at"),
                watch=("features.adx", "features.adx_normalized", "features.atr14_pct_3m", "captured_at_ts")),
@@ -157,7 +161,7 @@ class Question:
 QUESTIONS: tuple[Question, ...] = (
     Question("Q_VOL_GATE", "Skip / take / wait when volatility is high",
              (("bitfinex_tape_1s", "bid"), ("bitfinex_tape_1s", "ask"), ("bitfinex_tape_1s", "buy_qty")),
-             (("market_context_1m", "regime.label"), ("adaptive_entry_decisions", "ai_feature.win_prob"),
+             (("market_context_1m", "regime.label"), ("adaptive_entry_decisions", "ai_feature.long_score"),
               ("counterfactual", "epoch_id"), ("counterfactual", "opportunity_id")),
              {"edge_events": {"min_days": 5, "min_clusters": 40, "min_n": 300}},
              ("VOLHI_MOM_R15M", "VOLHI_FADE_R15M", "VOLLO_MOM_R15M", "VOLLO_FADE_R15M"),

@@ -305,6 +305,11 @@ def build_history(events: list, *, now: float | None = None, statuses: dict | No
             if current is not None:
                 current.update(cleared_ts=ts, clear_note="superseded by a newer alert")
                 done.append(open_.pop(key))
+            amber = open_.get((cid, "AMBER")) if level == "RED" else None
+            if amber is not None:
+                # One check is in one state: escalating to RED ends its AMBER episode.
+                amber.update(cleared_ts=ts, clear_note="escalated to RED")
+                done.append(open_.pop((cid, "AMBER")))
             open_[key] = _episode(cid, level, ts, event)
         elif kind == "STILL_RED":
             if current is None:

@@ -744,7 +744,8 @@ def test_fly_push_sends_unsynced_alarm_events_in_bounded_chunks(tmp_path, monkey
     def fly(url, **kw):
         body = kw["body"]
         assert len(json.dumps(body)) < 256 * 1024
-        held.extend(body.get("alarm_events") or [])
+        held.extend(e for e in body.get("alarm_events") or []
+                    if (e["at"], e["check"]) not in {(h["at"], h["check"]) for h in held})  # Fly de-duplicates
         last = max((sh.parse_ts(e["at"]) for e in held), default=None)
         return {"ok": True, "alarm_history": {"count": len(held), "through_ts": last}}, None
 
@@ -756,10 +757,15 @@ def test_fly_push_sends_unsynced_alarm_events_in_bounded_chunks(tmp_path, monkey
     second = sh.push_fly_banner(report, opts, state, now, post=fly)
     assert second == "ok alarms=150 sent=30"
     assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=150 sent=0"
-    # Fly restarted (memory-only history): its empty answer resets the cursor and the log is re-sent.
+    # Fly restarted (memory-only history) and a new event arrived: the push that sends only the new event
+    # sees Fly's count shrink, rewinds the cursor, and the whole log is re-sent on the next ticks.
     held.clear()
-    state["fly_alarm_sync"]["through_ts"] = None
-    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=120 sent=120"
+    rows.append(_alarm_row("2026-10-02T05:59:00Z", check="new"))
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=1 sent=1 (Fly history reset; resending)"
+    assert state["fly_alarm_sync"]["through_ts"] is None
+    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=121 sent=120"
+    assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=151 sent=31"
 
 
 def test_fly_push_backs_off_when_fly_lacks_the_history_endpoint(tmp_path, monkeypatch):
@@ -1339,7 +1345,16 @@ def test_missing_data_never_scores_green():
     checks = by_id(sh.evaluate(inputs, {}))
     assert checks["bitfinex.exposure"]["status"] == sh.GREEN
     assert "not probed (disarmed" in checks["bitfinex.exposure"]["observed"]
-    assert checks["railway.relay"]["status"] == sh.AMBER and "reconciliation=null" in checks["railway.relay"]["observed"]
+    # Deliberately PAUSED relay: null reconciliation is expected, not a gap.
+    assert checks["railway.relay"]["status"] == sh.GREEN
+    assert "reconciliation=null (expected: relay disarmed)" in checks["railway.relay"]["observed"]
+    # Unknown mode: null reconciliation stays AMBER; any armedAt stays RED.
+    inputs["relay_snapshot"].update(relayExecutionMode="", status="")
+    relay = by_id(sh.evaluate(inputs, {}))["railway.relay"]
+    assert relay["status"] == sh.AMBER and "reconciliation=null" in relay["observed"]
+    inputs["relay_snapshot"].update(relayExecutionMode="PAUSED", status="PAUSED", relayArmedAt="2026-10-02T10:00:00Z")
+    assert by_id(sh.evaluate(inputs, {}))["railway.relay"]["status"] == sh.RED
+    inputs["relay_snapshot"].update(relayArmedAt=None)
     inputs["fly_status"]["force_paper_mode"] = None
     inputs["fly_health"]["force_paper_mode"] = None
     assert by_id(sh.evaluate(inputs, {}))["bitfinex.exposure"]["status"] == sh.AMBER
@@ -1564,6 +1579,11 @@ def test_clean_epoch_lifecycle_defects_are_a_declared_amber_blocker_until_expiry
     inputs["analyzer_integrity"] = {"report_status": "INVALID", "checks": [lifecycle]}
     check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
     assert check["status"] == sh.AMBER and "CLEAN_EPOCH_PENDING" in check["observed"]
+    assert "final-e" not in check["observed"] and "{epoch}" not in check["observed"]
+    # The disclosure names whichever epoch the generation receipt read, never a hard-coded one.
+    inputs["analyzer_receipt"] = dict(inputs["analyzer_receipt"] or {}, data_epoch={
+        "epoch_id": "ce-test-live", "pre_epoch_rows_admitted": 0})
+    assert "live epoch ce-test-live" in by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["observed"]
     inputs["analyzer_integrity"]["checks"] = [dict(lifecycle, found=["SOMETHING_NEW"])]
     assert by_id(sh.evaluate(inputs, {}))["analyzer.studies"]["status"] == sh.RED
     inputs["analyzer_integrity"]["checks"] = [lifecycle, {"check": "schema", "passed": False, "found": []}]
