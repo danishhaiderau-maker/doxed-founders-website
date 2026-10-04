@@ -10,6 +10,13 @@ import fly_postdeploy_active_gate as gate
 
 LANES = ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TRAIL"]
 WORKFLOW = (Path(__file__).resolve().parents[1] / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
+RETIRED = frozenset({"FAMILY_DANISH_CF", "FAMILY_CONTINUOUS_AUG_ORIGINAL"})
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_checkout_registry(monkeypatch, request):
+    if not request.node.name.startswith("test_checkout_registry_"):
+        monkeypatch.setattr(gate, "checkout_registry", lambda: (list(LANES), RETIRED))
 
 
 def _active_status(**overrides):
@@ -197,3 +204,42 @@ def test_held_lane_left_on_fails_the_receipt():
 def test_hold_off_list_comes_from_repository_variable():
     assert "PAPER_TILES_HOLD_OFF: ${{ vars.PAPER_TILES_HOLD_OFF }}" in WORKFLOW
     assert gate.held_off_lanes({}) == frozenset()
+
+
+def test_checkout_registry_is_the_freeze21_roster_with_the_old_tiles_retired():
+    lanes, retired = gate.checkout_registry()
+    assert lanes == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+                     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90"]
+    assert {"FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
+            "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
+            "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M"} <= retired
+
+
+def test_running_roster_must_equal_the_checked_out_registry(monkeypatch):
+    monkeypatch.setattr(gate, "checkout_registry", lambda: (["FAMILY_ATR_TRAIL", "FAMILY_CHANDELIER_3"], RETIRED))
+    with pytest.raises(SystemExit, match="does not match the checked-out registry"):
+        gate.enable_all_registry_tiles(_Bot({}))
+
+
+def test_retired_lane_on_or_listed_fails_the_receipt():
+    status = {"active_tiles": [{"lane": lane} for lane in LANES]}
+    state = {"research_lane_enabled": {**dict.fromkeys(LANES, True), "FAMILY_DANISH_CF": True}}
+    receipt = gate.tiles_all_on_receipt(status, state, expected=LANES, retired=RETIRED)
+    assert receipt["tiles_all_on"] is False and receipt["retired_on"] == ["FAMILY_DANISH_CF"]
+    listed = {"active_tiles": [{"lane": lane} for lane in [*LANES, "FAMILY_DANISH_CF"]]}
+    clean = {"research_lane_enabled": dict.fromkeys(LANES, True)}
+    receipt = gate.tiles_all_on_receipt(listed, clean, expected=LANES, retired=RETIRED)
+    assert receipt["tiles_all_on"] is False and receipt["roster_matches_checkout"] is False
+    assert receipt["retired_on_roster"] == ["FAMILY_DANISH_CF"]
+    ok = gate.tiles_all_on_receipt(status, {"research_lane_enabled": {**clean["research_lane_enabled"],
+                                                                     "FAMILY_DANISH_CF": False}},
+                                   expected=LANES, retired=RETIRED)
+    assert ok["tiles_all_on"] is True and ok["roster_matches_checkout"] is True
+
+
+def test_freeze_override_is_forwarded_only_when_fully_declared():
+    assert gate.freeze_override_payload({}) is None
+    assert gate.freeze_override_payload({"RESEARCH_FREEZE_OVERRIDE": "BREAK_21_DAY_RESEARCH_FREEZE"}) is None
+    assert gate.freeze_override_payload({"RESEARCH_FREEZE_OVERRIDE": "BREAK_21_DAY_RESEARCH_FREEZE",
+                                         "RESEARCH_FREEZE_OVERRIDE_REASON": "KILL_RULE:X:K4"}) == {
+        "confirmation": "BREAK_21_DAY_RESEARCH_FREEZE", "reason": "KILL_RULE:X:K4"}

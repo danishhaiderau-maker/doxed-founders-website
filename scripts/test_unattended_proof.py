@@ -148,12 +148,12 @@ def test_after_the_boundary_the_run_must_succeed():
 
 def test_tiles_come_from_the_runtime_roster_not_a_fixed_lane_list():
     now = T0 + 60
-    single = _runtime(now, active_tile_lanes=["FAMILY_XVENUE_SESSION_FOLLOW_60M"],
-                      research_lane_enabled={"FAMILY_XVENUE_SESSION_FOLLOW_60M": True})
+    single = _runtime(now, active_tile_lanes=["FAMILY_PREMIUM_REVERSION_60M"],
+                      research_lane_enabled={"FAMILY_PREMIUM_REVERSION_60M": True})
     row = up.evaluate_row(**_inputs(now, runtime=single))
     assert row["status"] == "PASS" and row["checks"]["tiles_all_on"]["detail"] == "1/1 tiles ON"
-    off = _runtime(now, active_tile_lanes=["FAMILY_XVENUE_SESSION_FOLLOW_60M"],
-                   research_lane_enabled={"FAMILY_XVENUE_SESSION_FOLLOW_60M": False, "FAMILY_ATR_TRAIL": True})
+    off = _runtime(now, active_tile_lanes=["FAMILY_PREMIUM_REVERSION_60M"],
+                   research_lane_enabled={"FAMILY_PREMIUM_REVERSION_60M": False, "FAMILY_ATR_TRAIL": True})
     assert up.evaluate_row(**_inputs(now, runtime=off))["failed_checks"] == ["tiles_all_on"]
     pair = ["TILE_A", "TILE_B"]
     both = _runtime(now, active_tile_lanes=pair, research_lane_enabled=dict.fromkeys(pair, True))

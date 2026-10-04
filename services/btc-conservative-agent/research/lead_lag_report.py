@@ -431,13 +431,19 @@ def derivatives_section(al: Aligned) -> dict:
 # Cross-venue tiles: tape replay, live shadow stream and parity
 # ---------------------------------------------------------------------------
 def _xvl_rules() -> dict:
-    """{lane: (SessionFollowRule, policy_signature)} for registry tiles on the cross-venue clock."""
+    """{lane: (rule, policy_signature)} for registry tiles on the cross-venue clock.
+
+    A ``CROSS_VENUE_PREMIUM`` tile carries a ``PremiumRule``; a lead-or-premium
+    tile a ``SessionFollowRule``.
+    """
     from combo_pathway_config import ACTIVE_TILE_REGISTRY, cross_venue_clock_lanes
+    from cross_venue_premium import PremiumRule
     from cross_venue_session_follow import SessionFollowRule
     out = {}
     for lane in cross_venue_clock_lanes():
         spec = ACTIVE_TILE_REGISTRY[lane]
-        out[lane] = (SessionFollowRule.from_policy(spec["entry_policy"], spec["exit_policy"]),
+        cls = PremiumRule if spec["entry_policy"].get("direction_source") == "CROSS_VENUE_PREMIUM" else SessionFollowRule
+        out[lane] = (cls.from_policy(spec["entry_policy"], spec["exit_policy"]),
                      str(spec.get("policy_signature") or ""))
     return out
 
@@ -550,17 +556,28 @@ def session_follow_replay_trades(al: Aligned, rule) -> list:
                          {"lead_bp": lead, "premium_dev_bp": dev})
 
 
+def premium_replay_trades(al: Aligned, rule) -> list:
+    """Capacity-one replay of a premium-deviation rule (same markout as the shadow)."""
+    side, dev = _premium_sides(al, rule)
+    if side is None:
+        return []
+    return _capacity_one(al, side, rule.entry_delay_sec, rule.hold_sec, {"premium_dev_bp": dev})
+
+
 def _replay_for(rule):
-    return session_follow_replay_trades
+    from cross_venue_premium import PremiumRule
+    return premium_replay_trades if isinstance(rule, PremiumRule) else session_follow_replay_trades
 
 
 def load_xvl_shadow_rows(data_dir: str) -> tuple:
-    """Trigger and outcome rows from the registered cross-venue tile's shadow stream (XVS)."""
+    """Trigger and outcome rows from the cross-venue tiles' shadow streams (premium XVP and session-follow XVS)."""
+    import cross_venue_premium as premium
     import cross_venue_session_follow as follow
-    trigger_schemas = {follow.TRIGGER_SCHEMA}
-    outcome_schemas = {follow.OUTCOME_SCHEMA}
+    trigger_schemas = {follow.TRIGGER_SCHEMA, premium.TRIGGER_SCHEMA}
+    outcome_schemas = {follow.OUTCOME_SCHEMA, premium.OUTCOME_SCHEMA}
     triggers, outcomes = [], []
-    paths = list(_generations(os.path.join(data_dir, follow.SHADOW_FILE)))
+    paths = [path for name in (premium.SHADOW_FILE, follow.SHADOW_FILE)
+             for path in _generations(os.path.join(data_dir, name))]
     for path in paths:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:

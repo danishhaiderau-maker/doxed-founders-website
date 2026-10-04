@@ -53,6 +53,8 @@ def _side_text(entry: dict) -> str:
         "SCORE_LED_SIDE": "Side: the higher AI score's side (follow)",
         "OWN_AI_CALL_HIGHER_SCORE": "Side: the higher score's side from the tile's own AI call",
         "CROSS_VENUE_LEAD_OR_PREMIUM": "Side: the leading venues' direction; opposite triggers never trade",
+        "CROSS_VENUE_PREMIUM": "Side: toward the leading venues when their premium leaves its mean (convergence)",
+        "RANDOM_COIN_ON_COMMITTED_CALL": "Side: deterministic coin flip per call (execution-cost control, not the AI)",
     }.get(source, f"Side: {source.replace('_', ' ').lower() or 'not declared'}")
 
 

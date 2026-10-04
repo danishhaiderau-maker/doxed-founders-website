@@ -6,8 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-DCF, DCN, DCA, CBL, CFM, CFT, NTF, XVS = ACTIVE_TILE_ORDER
-DANISH = (DCF, DCN, DCA)
+CFT, NTT, XVS, RND = ACTIVE_TILE_ORDER
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -65,9 +64,7 @@ def test_registered_tiles_report_without_a_paired_control():
     assert report["paired"] == []
     assert report["tiles"][XVS]["fills"] == 5
     assert report["pre_registered"][XVS]["verdict"]["status"] == "COLLECTING"
-    assert set(tpc.VERDICT_RULES) == {
-        "tile_pre_registration_committed_fade_maker_v1", "tile_pre_registration_hypothesis_v1",
-    }
+    assert set(tpc.VERDICT_RULES) == set(tpc.EXTRA_STATS) == {"tile_pre_registration_freeze21_v1"}
     assert set(tpc.VERDICT_RULES) >= {
         ACTIVE_TILE_REGISTRY[lane]["pre_registration"]["schema"]
         for lane in ACTIVE_TILE_ORDER if ACTIVE_TILE_REGISTRY[lane].get("pre_registration")
@@ -77,14 +74,14 @@ def test_registered_tiles_report_without_a_paired_control():
 
 def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows = [_fill(XVS, f"xvs-{i}", 2.0, T0 + i * 600, reason="PATH_END_60M") for i in range(4)]
-    rows += [_fill(CBL, f"b{i}", 1.0, T0 + i * 600) for i in range(4)]
-    rows += [_fill(DCF, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
+    rows += [_fill(RND, f"b{i}", 1.0, T0 + i * 600) for i in range(4)]
+    rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
-    assert report["tile_order"] == [DCF, DCN, DCA, CBL, CFM, CFT, NTF, XVS]
-    assert report["all_tiles_paired"]["paired_tiles"] == [DCF, DCN, DCA, CBL, CFM, CFT, NTF]
-    assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {(DCF, DCN), (DCF, DCA), (CBL, CFM)}
+    assert report["tile_order"] == [CFT, NTT, XVS, RND]
+    assert report["all_tiles_paired"]["paired_tiles"] == [CFT, NTT, RND]
+    assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {(CFT, NTT), (CFT, RND)}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
-    assert set(report["pre_registered"]) == {DCF, DCN, DCA, CFM, CFT, NTF, XVS}
+    assert set(report["pre_registered"]) == {CFT, NTT, XVS, RND}
     json.dumps(report, allow_nan=False)
 
 
@@ -100,39 +97,6 @@ def test_deflated_sharpe_penalises_more_trials():
     one = tpc.deflated_sharpe(values, trials=1, sr_variance=None)
     three = tpc.deflated_sharpe(values, trials=3, sr_variance=0.05)
     assert 0.0 < three < one < 1.0
-
-
-def test_committed_fade_maker_kills_and_needs_shadow_before_promotion():
-    winners = [_fill(CFM, f"m{i}", 6.0 + (i % 4) * 0.5, T0 + i * 3000, reason="PATH_END_90M",
-                     dir="LONG" if i % 2 else "SHORT") for i in range(200)]
-    verdict = _report(winners, now=T0 + 200 * 3000)["pre_registered"][CFM]["verdict"]
-    checks = verdict["promotion_checks"]
-    assert checks["min_fills"] and checks["min_utc_days"] and checks["sessions"]
-    assert checks["per_fill_ev_lower_ci95_1h_gt_0"] and checks["both_sides_non_negative"]
-    assert checks["shadow_5s_delay_positive"] is False and checks["replay_parity"] is False
-    assert verdict["status"] == "COLLECTING"
-    flat = [_fill(CFM, f"z{i}", -0.5, T0 + i * 3000, reason="PATH_END_90M") for i in range(80)]
-    assert "K1_MEAN_NOT_POSITIVE_AFTER_80" in _report(flat)["pre_registered"][CFM]["verdict"]["kill_reasons"]
-    bad = [_fill(CFM, "b0", -61.0, T0, reason="PHYSICAL_HARD_STOP_40PCT")]
-    assert "K3_STOP_OR_STALE_FEED_FAILURE" in _report(bad)["pre_registered"][CFM]["verdict"]["kill_reasons"]
-
-
-def test_session_follow_time_box_kills_after_its_registered_days_without_promotion():
-    rows = [_fill(XVS, f"xvs-{i}", 1.0, T0 + i * 3600, reason="PATH_END_60M") for i in range(10)]
-    pre = ACTIVE_TILE_REGISTRY[XVS]["pre_registration"]
-    registered = tpc._ts(pre["registered_utc"])
-    now = registered + (pre["kill"]["k5_max_days_without_promotion"] + 0.5) * 86400
-    verdict = _report(rows, now=now)["pre_registered"][XVS]["verdict"]
-    assert verdict["kill_reasons"] == ["K5_TIME_BOX_INCONCLUSIVE"]
-
-
-def test_danish_tiles_have_no_time_box_and_use_the_owner_kill_rule():
-    for lane in DANISH:
-        pre = ACTIVE_TILE_REGISTRY[lane]["pre_registration"]
-        assert pre["kill"]["k5_max_days_without_promotion"] is None and pre["kill"]["k2_after_fills"] is None
-        rows = [_fill(lane, f"d{i}", 1.0, T0 + i * 3600, reason="PATH_END_90M") for i in range(10)]
-        verdict = _report(rows, now=tpc._ts(pre["registered_utc"]) + 400 * 86400)["pre_registered"][lane]["verdict"]
-        assert verdict["kill_reasons"] == [] and verdict["status"] == "COLLECTING"
 
 
 def test_ai_tiles_split_by_prompt_input_revision_and_clock_tiles_are_not():
@@ -157,48 +121,80 @@ def test_ai_tiles_split_by_prompt_input_revision_and_clock_tiles_are_not():
     assert XVS not in cohorts
 
 
-def test_continuous_baseline_is_the_yardstick_not_a_trial():
+def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
     rows = []
     for i in range(6):
         ts = T0 + i * 3600
-        rows += [_fill(CBL, f"b{i}", 1.0, ts), _fill(A, f"b{i}", 3.0, ts)]
-    registry = {**ACTIVE_TILE_REGISTRY, A: {"label": "A"}}
-    order = (*ACTIVE_TILE_ORDER, A)
-    report = tpc.build_report(trades=rows, registry=registry, tile_order=order, now_ts=T0 + 3600)
-    assert report["baseline_lane"] == CBL
-    assert report["deflated_sharpe_trials"] == len(order) - 1
-    pairs = {p["challenger"]: p for p in report["vs_baseline"]}
-    assert set(pairs) == {A, *DANISH, CFM, NTF, CFT}
-    assert all(p["control"] == CBL for p in report["vs_baseline"])
-    assert pairs[A]["paired_signals"] == 6
-    assert pairs[A]["mean_difference_bp"] == pytest.approx(2.0)
-    assert XVS not in pairs
+        rows += [_fill(RND, f"b{i}", -1.0, ts), _fill(CFT, f"b{i}", 3.0, ts)]
+    report = _report(rows)
+    assert report["baseline_lane"] is None
+    # Three Bonferroni hypotheses; the control is not a trial.
+    assert report["deflated_sharpe_trials"] == 3
+    verdict = report["pre_registered"][CFT]["verdict"]
+    assert report["pre_registered"][CFT]["control_lane"] == RND
+    assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)
+    control = report["pre_registered"][RND]["verdict"]
+    assert control["role"] == "CONTROL" and control["status"] == "CONTROL_COLLECTING"
+    assert control["execution_cost_bp"] == pytest.approx(-1.0)
 
 
-@pytest.mark.parametrize("lane, k1, k4, k5", [
-    (DCF, 80, 1.0, None), (DCN, 80, 1.0, None), (DCA, 80, 1.0, None),
-    (NTF, 300, 3.0, 21), (XVS, 300, 1.0, 21), (CFT, 80, 1.0, 21),
-])
-def test_hypothesis_tiles_kill_rules_follow_their_registration(lane, k1, k4, k5):
+def test_cluster_ci_alpha_widens_the_interval():
+    rows = [(T0 + i * 3600, float((i * 7) % 11 - 5)) for i in range(60)]
+    lo95, hi95 = tpc._cluster_ci(rows, cluster_sec=3600)
+    lo_b, hi_b = tpc._cluster_ci(rows, cluster_sec=3600, alpha=0.05 / 3)
+    assert lo_b <= lo95 < hi95 <= hi_b
+
+
+@pytest.mark.parametrize("lane, k1, k4", [(CFT, 80, 3.0), (NTT, 80, 5.0), (XVS, 80, 3.0)])
+def test_hypothesis_kill_rules_count_distinct_hours_not_fills(lane, k1, k4):
     pre = ACTIVE_TILE_REGISTRY[lane]["pre_registration"]
-    assert pre["schema"] == "tile_pre_registration_hypothesis_v1"
-    assert pre["kill"]["k1_after_fills"] == k1 and pre["kill"]["k4_max_drawdown_usd"] == k4
-    assert pre["kill"]["k5_max_days_without_promotion"] == k5
-    flat = [_fill(lane, f"z{i}", -0.5, T0 + i * 3000, reason="PATH_END") for i in range(k1)]
-    kills = _report(flat)["pre_registered"][lane]["verdict"]["kill_reasons"]
-    assert f"K1_MEAN_NOT_POSITIVE_AFTER_{k1}" in kills
+    assert pre["schema"] == "tile_pre_registration_freeze21_v1" and pre["role"] == "HYPOTHESIS"
+    assert pre["kill"]["k1_after_distinct_hours"] == k1 and pre["kill"]["k4_max_drawdown_usd"] == k4
+    # k1 fills inside a handful of hours are not enough: n_eff counts hours.
+    crowded = [_fill(lane, f"c{i}", -0.5, T0 + (i % 5) * 3600 + i, reason="PATH_END") for i in range(k1)]
+    assert _report(crowded)["pre_registered"][lane]["verdict"]["kill_reasons"] == []
+    spread = [_fill(lane, f"z{i}", -0.5, T0 + i * 3600, reason="PATH_END") for i in range(k1)]
+    verdict = _report(spread)["pre_registered"][lane]["verdict"]
+    assert f"K1_MEAN_NOT_POSITIVE_AFTER_{k1}_HOURS" in verdict["kill_reasons"] and verdict["status"] == "KILL"
     bad = [_fill(lane, "b0", -61.0, T0, reason="PHYSICAL_HARD_STOP_40PCT")]
     assert "K3_STOP_OR_STALE_FEED_FAILURE" in _report(bad)["pre_registered"][lane]["verdict"]["kill_reasons"]
 
 
-def test_hypothesis_tile_sessions_use_the_runtime_session_map_and_need_parity():
-    n = ACTIVE_TILE_REGISTRY[CFT]["pre_registration"]["promotion"]["min_fills"]
-    winners = [_fill(CFT, f"w{i}", 6.0 + (i % 4) * 0.5, T0 + i * 3000, reason="PATH_END",
-                     dir="LONG" if i % 2 else "SHORT") for i in range(n + 50)]
-    verdict = _report(winners, now=T0 + (n + 50) * 3000)["pre_registered"][CFT]["verdict"]
-    checks = verdict["promotion_checks"]
-    assert checks["min_fills"] and checks["min_utc_days"] and checks["sessions"]
-    assert checks["per_fill_ev_lower_ci95_1h_gt_0"] and checks["both_halves_positive"]
-    assert checks["replay_parity"] is False and verdict["status"] == "COLLECTING"
-    stats = _report(winners)["tiles"][CFT]
+def _day21(lane):
+    return tpc._ts(ACTIVE_TILE_REGISTRY[lane]["pre_registration"]["registered_utc"]) + 21.5 * 86400
+
+
+def test_day21_pass_needs_target_bonferroni_ci_and_beating_the_control():
+    start = tpc._ts(ACTIVE_TILE_REGISTRY[CFT]["pre_registration"]["registered_utc"])
+    rows = []
+    for i in range(320):
+        ts = start + i * 3600 + 60
+        rows += [_fill(CFT, f"w{i}", 6.0 + (i % 4) * 0.5, ts, reason="PATH_END", dir="LONG" if i % 2 else "SHORT"),
+                 _fill(RND, f"w{i}", -1.0 + (i % 3), ts, reason="PATH_END")]
+    verdict = _report(rows, now=_day21(CFT))["pre_registered"][CFT]["verdict"]
+    assert verdict["n_eff_distinct_hours"] == 320
+    assert verdict["promotion_checks"]["n_eff_target"] and verdict["promotion_checks"]["beats_control"]
+    assert verdict["status"] == "DAY21_PASS" and verdict["day21_status"] == "DAY21_PASS"
+    early = _report(rows, now=_day21(CFT) - 5 * 86400)["pre_registered"][CFT]["verdict"]
+    assert early["status"] == "COLLECTING" and early["day21_status"] == "PENDING"
+    assert early["day21_status_if_decided_now"] == "DAY21_PASS"
+
+
+def test_day21_fail_and_inconclusive():
+    start = tpc._ts(ACTIVE_TILE_REGISTRY[XVS]["pre_registration"]["registered_utc"])
+    flat = [_fill(XVS, f"f{i}", 0.5 if i % 2 else -0.6, start + i * 3600, reason="PATH_END") for i in range(60)]
+    assert _report(flat, now=_day21(XVS))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_FAIL"
+    thin = [_fill(XVS, f"t{i}", 4.0 + (i % 3), start + i * 3600, reason="PATH_END") for i in range(40)]
+    assert _report(thin, now=_day21(XVS))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_INCONCLUSIVE"
+
+
+def test_profitable_random_control_flags_the_fill_model():
+    start = tpc._ts(ACTIVE_TILE_REGISTRY[RND]["pre_registration"]["registered_utc"])
+    rows = [_fill(RND, f"r{i}", 5.0 + (i % 3), start + i * 3600, reason="PATH_END") for i in range(100)]
+    assert _report(rows)["pre_registered"][RND]["verdict"]["status"] == "FILL_MODEL_SUSPECT"
+
+
+def test_hypothesis_tile_sessions_use_the_registered_session_map():
+    stats = _report([_fill(CFT, "w0", 6.0, T0, reason="PATH_END")])["tiles"][CFT]
     assert stats["session_hours_utc"] == {"ASIA": [0, 8], "EU": [8, 16]}
+    assert stats["bonferroni_alpha"] == pytest.approx(0.05 / 3)

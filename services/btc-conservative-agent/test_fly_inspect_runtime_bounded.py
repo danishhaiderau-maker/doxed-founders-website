@@ -94,8 +94,8 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
         text=True,
     )
     assert result.stdout.splitlines() == [
-        "v31-danish-tiles-late-protection-v11",
-        "55c1c899aa315d3d3849f10a558d31da03a5df1e781e6c003ac27191a56c63ef",
+        "v31-freeze21-3h1c-v12",
+        "03d1e249b0a135af7c6c29016b586f68247fbc539e38ec1068b89aa030f57305",
     ]
 
 

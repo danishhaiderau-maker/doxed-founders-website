@@ -1,11 +1,11 @@
-"""Committed-call fade with a maker entry — opposite of an explicit AI side, passive limit 0.10% beyond the signal price resting 30 min without chase, 90-min hold, 40 bp catastrophic stop (paper only)."""
+"""FREEZE21 H-B: NO_TRADE-lean follow with a taker entry - score-led side only when the raw AI abstained, marketable limit at the signal (5 bp cap, 3 s), 60-min hold, break-even and ATR trail, 40 bp catastrophic stop, up to ten open (paper only)."""
 from __future__ import annotations
 
-from adaptive_regime_entry import ACTION_MAKER, ACTION_STAND_ASIDE, DECISION_SCHEMA
-from maker_time_exit_binding import MakerTimeExitBinding
+from adaptive_regime_entry import ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA
+from taker_time_exit_binding import TakerTimeExitBinding
 
-LANE = "FAMILY_COMMITTED_FADE_MAKER_90"
-_BINDING = MakerTimeExitBinding(LANE, "Committed fade (maker) · inverted committed AI side, 0.10% maker limit, 90-min hold, 40 bp stop")
+LANE = "FAMILY_NOTRADE_FOLLOW_TAKER_60"
+_BINDING = TakerTimeExitBinding(LANE, "NO_TRADE-lean follow (taker) · score-led side on AI NO_TRADE, taker at signal, 60-min hold, BE + ATR trail, 40 bp stop")
 POLICY_ID = _BINDING.policy_id
 POLICY_SIGNATURE = _BINDING.policy_signature
 ENTRY = _BINDING.entry
@@ -15,7 +15,7 @@ ADAPTIVE_ENTRY = True
 CHASE_STEP = SPEC.chase_step
 MIN_CLOSED_CANDLES = _BINDING.MIN_CLOSED_CANDLES
 
-__all__ = ("ACTION_MAKER", "ACTION_STAND_ASIDE", "DECISION_SCHEMA")
+__all__ = ("ACTION_STAND_ASIDE", "ACTION_TAKER", "DECISION_SCHEMA")
 
 lane_admission = _BINDING.lane_admission
 decide_entry = _BINDING.decide_entry

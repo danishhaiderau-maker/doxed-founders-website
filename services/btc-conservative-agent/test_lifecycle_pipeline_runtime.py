@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-danish-tiles-late-protection-v11",
-        "55c1c899aa315d3d3849f10a558d31da03a5df1e781e6c003ac27191a56c63ef",
+        "v31-freeze21-3h1c-v12",
+        "03d1e249b0a135af7c6c29016b586f68247fbc539e38ec1068b89aa030f57305",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-danish-tiles-late-protection-v11",
-        "3b14123fa0bf3fe1cb6a57badd06b96b555d451059e61042a95cadd0c3d6fa96",
+        "v31-freeze21-3h1c-v12",
+        "343923a9f07557baa1794a5bcd49c09d4a6b784539bede5178375b75d08fa729",
     ]
 
 

@@ -553,6 +553,10 @@ def main(argv=None) -> int:
         return 0
     # ---- execute: every gate fails closed
     if args.pre_start:
+        refusal = _research_freeze_refusal(args, now)
+        if refusal:
+            print(json.dumps(refusal, sort_keys=True, default=str))
+            return 8
         return _execute_pre_start(args, doc)
     if plan.simulated or not manifest:
         print(json.dumps({"error": "SIMULATED_PLAN_NOT_EXECUTABLE"}))
@@ -591,6 +595,27 @@ def main(argv=None) -> int:
     receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=cert_sha8)
     print(json.dumps({"executed": True, **receipt}, indent=1, sort_keys=True, default=str))
     return 0
+
+
+def _research_freeze_refusal(args, now: float) -> dict | None:
+    """A pre-start wipe restarts collection: refused inside the 21-day freeze without the env override."""
+    import research_freeze
+    manifest = None
+    try:
+        if args.manifest:
+            manifest = data_epoch.load_manifest(args.manifest)
+        elif args.scope == "fly":
+            manifest = data_epoch.load_manifest(Path(args.data_root or "/app/data") / "runtime")
+        else:
+            manifest = data_epoch.load_manifest(
+                os.path.join(LAPTOP_ROOTS["mirror_tree"]["path"], data_epoch.MANIFEST_NAME))
+    except (OSError, ValueError):
+        manifest = None
+    verdict = research_freeze.check(research_freeze.ACTION_PRE_START_WIPE, manifest, now)
+    if verdict["allowed"]:
+        return None
+    return {"error": verdict["error"], "summary": verdict["summary"], "research_freeze": verdict["freeze"],
+            "override_env": [research_freeze.OVERRIDE_ENV, research_freeze.OVERRIDE_REASON_ENV]}
 
 
 def _execute_pre_start(args, doc: dict, fetch: Callable[[str], dict] | None = None) -> int:

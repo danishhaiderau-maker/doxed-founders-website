@@ -98,8 +98,8 @@ def _median_signal_to_fill_sec(fills: list[dict[str, Any]]) -> float | None:
 
 
 def _cluster_ci(rows: Sequence[tuple[float, float]],
-                cluster_sec: int = CLUSTER_SEC) -> tuple[float | None, float | None]:
-    """95% CI of the mean of values, resampling time clusters (``(ts, value)``)."""
+                cluster_sec: int = CLUSTER_SEC, alpha: float = 0.05) -> tuple[float | None, float | None]:
+    """Two-sided ``1 - alpha`` CI (default 95%) of the mean of values, resampling time clusters (``(ts, value)``)."""
     clusters: dict[int, list[float]] = {}
     for ts, value in rows:
         clusters.setdefault(int(ts // cluster_sec), []).append(value)
@@ -112,7 +112,9 @@ def _cluster_ci(rows: Sequence[tuple[float, float]],
         sample = [v for _ in groups for v in rng.choice(groups)]
         means.append(sum(sample) / len(sample))
     means.sort()
-    return round(means[int(0.025 * len(means))], 4), round(means[int(0.975 * len(means)) - 1], 4)
+    lo_i = int((alpha / 2.0) * len(means))
+    hi_i = max(lo_i, int((1.0 - alpha / 2.0) * len(means)) - 1)
+    return round(means[lo_i], 4), round(means[hi_i], 4)
 
 
 def _moments(values: Sequence[float]) -> tuple[float, float, float, float]:
@@ -235,21 +237,7 @@ def _paired(by_lane: Mapping[str, list[dict[str, Any]]], a: str, b: str) -> dict
     }
 
 
-def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any], age_days: float,
-            *, deflated_sharpe: float | None) -> dict[str, Any]:
-    promoted = all(checks.values())
-    k5 = kill.get("k5_max_days_without_promotion")
-    if not promoted and k5 is not None and age_days > k5:
-        kills.append("K5_TIME_BOX_INCONCLUSIVE")
-    status = "KILL" if kills else ("PROMOTION_ELIGIBLE_FOR_OWNER_REVIEW" if promoted else "COLLECTING")
-    return {
-        "status": status, "kill_reasons": kills, "promotion_checks": dict(checks),
-        "deflated_sharpe": deflated_sharpe, "days_since_registration": round(age_days, 3),
-        "action_on_kill": "Toggle OFF and retire per TILE_LIFECYCLE.md (owner decision; never automatic)",
-    }
-
-
-# Session map the committed-fade maker registration (v9) counts session days on.
+# Fallback UTC session map for session-day counts (registrations carry their own).
 DEFAULT_SESSIONS_UTC = {"ASIA": (0, 8), "EU": (8, 13), "US": (13, 21)}
 
 
@@ -284,49 +272,6 @@ def _session_side_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any
     }
 
 
-def _committed_fade_maker_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-                                  dsr: float | None, now_ts: float) -> dict[str, Any]:
-    """1 h-cluster/session/side/day facts; the 5 s-delay shadow and replay parity
-    stay False until the analyzer supplies them."""
-    promote, kill = pre["promotion"], pre["kill"]
-    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
-    fills = int(stats.get("fills") or 0)
-    mean = stats.get("mean_bp")
-    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
-    delay5 = stats.get("shadow_5s_delay_mean_bp")
-    kills = []
-    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
-        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_80")
-    if fills >= kill["k2_after_fills"] and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]:
-        kills.append("K2_UPPER_CI_BELOW_2BP_AFTER_150")
-    worst = stats.get("worst_fill_bp")
-    stale_share = stats.get("stale_feed_fill_share")
-    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
-        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
-    ):
-        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
-    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
-        kills.append("K4_DRAWDOWN")
-    sessions = stats.get("session_days") or {}
-    sides = stats.get("side_mean_bp") or {}
-    share = stats.get("max_single_day_profit_share")
-    parity = stats.get("replay_parity_gap_bp")
-    checks = {
-        "min_fills": fills >= promote["min_fills"],
-        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
-        "sessions": all((sessions.get(s) or 0) >= promote["min_sessions_each"] for s in promote["sessions"]),
-        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
-        "shadow_5s_delay_positive": delay5 is not None and delay5 > promote["shadow_5s_delay_mean_gt_bp"],
-        "no_day_dominates": share is not None and share <= promote["max_single_day_profit_share"],
-        "both_sides_non_negative": all(
-            sides.get(s) is not None and sides[s] >= promote["both_sides_mean_ge_bp"] for s in ("LONG", "SHORT")
-        ),
-        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
-        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
-    }
-    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
-
-
 def _hypothesis_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
     """Session/side/day facts with session days counted on the registration's own UTC session map."""
     out = _session_side_extra_stats(fills, pre)
@@ -342,51 +287,100 @@ def _hypothesis_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any])
     return out
 
 
-def _hypothesis_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-                        dsr: float | None, now_ts: float) -> dict[str, Any]:
-    """Generic H9+ verdict; replay parity stays False until the analyzer supplies it."""
-    promote, kill = pre["promotion"], pre["kill"]
-    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+def _freeze21_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """Hypothesis facts plus n_eff (distinct UTC close hours) and the Bonferroni 1 h-cluster CI."""
+    out = _hypothesis_extra_stats(fills, pre)
+    alpha = float(pre["day21"]["per_test_alpha"])
+    bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
+    lo, hi = _cluster_ci(bps, cluster_sec=3600, alpha=alpha)
+    out["distinct_close_hours"] = len({int(r["close_ts"] // 3600) for r in fills})
+    out["bonferroni_alpha"] = alpha
+    out["per_fill_ev_ci_bonferroni_bp_1h"] = [lo, hi]
+    return out
+
+
+def _freeze21_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                      dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """FREEZE21 rules: kill on n_eff (distinct hours), day-21 PASS/FAIL/INCONCLUSIVE; the control only reports."""
+    target, kill, day21 = pre["target"], pre["kill"], pre["day21"]
+    n_eff = int(stats.get("distinct_close_hours") or 0)
     fills = int(stats.get("fills") or 0)
     mean = stats.get("mean_bp")
+    lo, hi = stats.get("per_fill_ev_ci_bonferroni_bp_1h") or [None, None]
     age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    decided = age_days >= float(day21["decision_day"])
     kills = []
-    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
-        kills.append(f"K1_MEAN_NOT_POSITIVE_AFTER_{kill['k1_after_fills']}")
-    if (kill.get("k2_after_fills") is not None and fills >= kill["k2_after_fills"]
-            and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]):
-        kills.append(f"K2_UPPER_CI_BELOW_{kill['k2_upper_ci95_lt_bp']:g}BP_AFTER_{kill['k2_after_fills']}")
     worst = stats.get("worst_fill_bp")
     stale_share = stats.get("stale_feed_fill_share")
     if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
         stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
     ):
         kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
-    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+    common = {
+        "n_eff_distinct_hours": n_eff, "target_distinct_hours": target["min_distinct_hours"],
+        "fills": fills, "mean_bp": mean, "ci_bonferroni_bp_1h": [lo, hi],
+        "days_since_registration": round(age_days, 3), "decision_day": day21["decision_day"],
+        "deflated_sharpe": dsr, "role": pre["role"],
+        "action_on_kill": kill["action"],
+    }
+    if pre["role"] == "CONTROL":
+        suspect = lo is not None and lo > day21["pass_lower_ci_gt_bp"]
+        if kills:
+            status = "KILL"
+        elif suspect:
+            status = "FILL_MODEL_SUSPECT"
+        else:
+            status = "CONTROL_REPORTED" if (decided or n_eff >= target["min_distinct_hours"]) else "CONTROL_COLLECTING"
+        return {**common, "status": status, "kill_reasons": kills, "promotion_checks": {},
+                "execution_cost_bp": mean, "day21_status": ("REPORTED" if decided else "PENDING")}
+    if (kill.get("k1_after_distinct_hours") is not None and n_eff >= kill["k1_after_distinct_hours"]
+            and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]):
+        kills.append(f"K1_MEAN_NOT_POSITIVE_AFTER_{kill['k1_after_distinct_hours']}_HOURS")
+    if kill.get("k4_max_drawdown_usd") is not None and (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
         kills.append("K4_DRAWDOWN")
+    diff = paired.get("mean_difference_bp") if paired else None
     sessions = stats.get("session_days") or {}
     share = stats.get("max_single_day_profit_share")
-    parity = stats.get("replay_parity_gap_bp")
+    promote = pre["promotion"]
     checks = {
-        "min_fills": fills >= promote["min_fills"],
-        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
+        "n_eff_target": n_eff >= target["min_distinct_hours"],
+        "min_fills": fills >= target["min_fills"],
+        "min_utc_days": (stats.get("utc_days") or 0) >= target["min_utc_days"],
         "sessions": all((sessions.get(s) or 0) >= promote["min_sessions_each"] for s in promote["sessions"]),
-        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "bonferroni_lower_ci_gt_0": lo is not None and lo > day21["pass_lower_ci_gt_bp"],
         "no_day_dominates": share is not None and share <= promote["max_single_day_profit_share"],
-        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
-        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
     }
-    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+    if pre.get("control_lane"):
+        checks["beats_control"] = diff is not None and diff > 0
+    if (mean is not None and mean <= day21["fail_mean_at_or_below_bp"]) or (
+            hi is not None and hi < day21["fail_upper_ci_lt_bp"]):
+        day21_status = "DAY21_FAIL"
+    elif checks["n_eff_target"] and checks["bonferroni_lower_ci_gt_0"] and checks.get("beats_control", True):
+        day21_status = "DAY21_PASS"
+    else:
+        day21_status = "DAY21_INCONCLUSIVE"
+    if kills:
+        status = "KILL"
+    elif decided:
+        status = day21_status
+    else:
+        status = "COLLECTING"
+    return {**common, "status": status, "kill_reasons": kills, "promotion_checks": checks,
+            "vs_control_mean_difference_bp": diff,
+            "day21_status": day21_status if decided else "PENDING",
+            "day21_status_if_decided_now": day21_status}
 
 
 VERDICT_RULES = {
-    "tile_pre_registration_committed_fade_maker_v1": _committed_fade_maker_verdict,
-    "tile_pre_registration_hypothesis_v1": _hypothesis_verdict,
+    "tile_pre_registration_freeze21_v1": _freeze21_verdict,
 }
 EXTRA_STATS = {
-    "tile_pre_registration_committed_fade_maker_v1": _session_side_extra_stats,
-    "tile_pre_registration_hypothesis_v1": _hypothesis_extra_stats,
+    "tile_pre_registration_freeze21_v1": _freeze21_extra_stats,
 }
+
+
+def _is_control(registry: Mapping[str, Mapping[str, Any]], lane: str) -> bool:
+    return ((registry.get(lane) or {}).get("pre_registration") or {}).get("role") == "CONTROL"
 
 
 UNJOINED_INPUT_REVISION = "UNJOINED"
@@ -432,8 +426,8 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
             by_lane[fill["lane"]].append(fill)
     stats = {lane: _tile_stats(by_lane[lane]) for lane in lanes}
     baseline = baseline_lane(registry, lanes)
-    # The baseline is a yardstick, not a tested hypothesis.
-    hypothesis_lanes = [lane for lane in lanes if lane != baseline]
+    # The baseline and a declared CONTROL are yardsticks, not tested hypotheses.
+    hypothesis_lanes = [lane for lane in lanes if lane != baseline and not _is_control(registry, lane)]
     trials = len(hypothesis_lanes)
     srs = []
     for lane in hypothesis_lanes:
@@ -484,7 +478,10 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
         extra = EXTRA_STATS.get(pre.get("schema"))
         if extra and by_lane[lane]:
             stats[lane].update(extra(by_lane[lane], pre))
-        vs_control = next((p for p in pairs if p["control"] == pre.get("control_lane") and p["challenger"] == lane), {})
+        control = pre.get("control_lane")
+        vs_control = (
+            _paired(by_lane, control, lane) if control and control in paired_lanes and lane in paired_lanes else {}
+        )
         rule = VERDICT_RULES.get(pre.get("schema"))
         pre_registered[lane] = {
             "hypothesis_id": pre["hypothesis_id"],

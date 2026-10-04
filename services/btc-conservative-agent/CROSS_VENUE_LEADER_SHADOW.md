@@ -44,20 +44,24 @@ and registry tile geometry). Call rows also carry `leader_features` and a
 `derivatives` block (Bitfinex funding/mark/index/OI plus leader-venue
 derivatives).
 
-## Cross-venue session-follow tile
+## Cross-venue premium-reversion tile (FREEZE21 H-C)
 
-The cross-venue lead and premium tiles were retired (their lanes are in
-`RETIRED_TILE_LANES`). The generic per-second evaluator loop, feeds, shadow
-collection and submit-latency instrumentation remain and now serve only
-`FAMILY_XVENUE_SESSION_FOLLOW_60M` (paper only, relay-ineligible). It reads
+The cross-venue lead and premium 60 s tiles and the session-follow tile
+(`FAMILY_XVENUE_SESSION_FOLLOW_60M`, retired in v12) are in
+`RETIRED_TILE_LANES`. The generic per-second evaluator loop, feeds, shadow
+collection and submit-latency instrumentation remain and now serve
+`FAMILY_PREMIUM_REVERSION_60M` (paper only, relay-ineligible, no AI). It reads
 `cross_venue_live.json` and the Bitfinex 1 s tape on its evaluator thread, once
 per second with anchor bucket `floor(t)-1` (no catch-up; missed seconds are
-counted), combines the generic lead and premium rules (`cross_venue_lead`,
-`cross_venue_premium`) with the UTC session-side gate in
-`cross_venue_session_follow`, and writes `xvs_shadow_signals.jsonl`. Entry,
-exit and risk parameters live only in its `combo_pathway_config.py` registry
-entry. An evaluator crash is recorded and never pauses execution. Health:
-`/ready.xvl_evaluator_health`.
+counted), evaluates the generic premium rule (`cross_venue_premium`: Binance/
+Bybit premium versus its trailing 60-minute mean, fixed +1.75/-1.88 bp tails,
+side toward the leaders) and writes `xvp_shadow_signals.jsonl`. Paper attempts
+are limited to one per 15 minutes and four per hour (`min_submit_interval_sec`,
+`max_submissions_per_hour` in its registry entry); the hold is 60 minutes with
+a 40 bp stop. Entry, exit and risk parameters live only in its
+`combo_pathway_config.py` registry entry. `cross_venue_session_follow.py` stays
+as a generic primitive for `research/lead_lag_report.py`. An evaluator crash is
+recorded and never pauses execution. Health: `/ready.xvl_evaluator_health`.
 
 ## Analyzer
 
@@ -67,12 +71,13 @@ Bitfinex response 1–30 s after leader moves, and the after-spread markout of a
 leader-follow rule (enter at the Bitfinex ask/bid 1 s after the trigger, exit at
 the opposite side, capacity 1) with hour-cluster robust CIs, cluster bootstrap
 and Benjamini–Hochberg FDR. The pre-registered rule is 10 s / 2 bp. Prices
-only; fees are deliberately not modelled here. Its `xvl` section replays the
-registered session-follow rule on the tapes (capacity one, session-gated),
-summarises the `xvs` shadow stream
+only; fees are deliberately not modelled here. Its `xvl` section replays each
+registered cross-venue clock tile's rule on the tapes (capacity one; the
+premium rule for H-C, the session-gated lead-or-premium rule for a
+session-follow tile), summarises the `xvp` / `xvs` shadow streams
 (gates, stale-feed share, cap-1 and every-qualifying-second outcomes with 1 h
 cluster CIs) and reports anchor-matched shadow-vs-replay parity; the :9001
-Exit Combinations page renders it. The session-follow kill/promotion verdict is in
+Exit Combinations page renders it. The H-C kill and day-21 verdict is in
 `tile_paired_comparison_report.json`.
 
 ## Monitoring
