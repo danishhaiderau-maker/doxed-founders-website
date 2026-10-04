@@ -679,7 +679,8 @@ _RETENTION_EXIT = re.compile(r"^(\S+) pid=\d+ RETENTION exit=(-?\d+)\s*(.*)$")
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"
 
 
-_LEDGER_FIELDS = ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd")
+# exit_reason: the reconciliation drops forced closes (ADMIN_MANUAL_CLOSE...) exactly as Fly's tiles do.
+_LEDGER_FIELDS = ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd", "exit_reason")
 
 
 def read_ledger_rows(path: Path) -> list[dict[str, str]] | None:
