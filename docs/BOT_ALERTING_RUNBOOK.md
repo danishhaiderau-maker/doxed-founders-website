@@ -129,6 +129,32 @@ block (cached 30s): `total_bytes`, `used_bytes`, `free_bytes`, `used_pct`,
 samples), plus `volume.transfer` with the segment-shipper status and the
 legacy `sync_ack.json` age.
 
+## Clean-epoch purity on the laptop (#420)
+
+`data.compat_epoch_purity` is GREEN only when the latest analyzer generation receipt reports
+`data_epoch.pre_epoch_rows_admitted == 0`. `clean_epoch_certify` also needs every `data.compat_*`
+finding GREEN. When purity is RED after a boundary reset, read `pre_epoch_rows_admitted_by_stream` in
+`canonical-research-data/analyzer/analyzer_generation_receipt.json`:
+
+- **Files Fly deleted at the reset** (the shipper sent a TOMBSTONE): the puller keeps them in
+  `fly-mirror-segments/tree` as custody copies and records them in `.puller/state.json` under
+  `tombstoned`. Promotion skips them (receipt `files_retired_custody`, heartbeat
+  `retiredCustodyPaths`). The migration then moves the canonical copy to
+  `canonical-research-data/migration/retired/<UTC stamp>/` and ledgers it in
+  `migration/retired_ledger.jsonl` (receipt `files_retired`). Nothing is deleted. Files Fly removed
+  through custody-gated pruning (`retention/prune_ledger.jsonl`) stay analyzer input. A stream Fly
+  writes again in the new epoch drops out of `tombstoned` on its own.
+- **Read-guarded streams** (`data_epoch.READ_GUARDED_BASES`): the reset keeps them on purpose. Every
+  analyzer reader filters through the epoch guard, so they appear under
+  `pre_epoch_rows_read_guarded_by_stream` (data.compat AMBER), never as admitted.
+- **Ops ledgers** (`data_epoch.NON_EVIDENCE_BASES`) are not audited.
+- **Anything else** is a real leak: a new reader or a retained evidence stream. Fix the reader and add
+  it to `test_read_guarded_streams_have_only_guarded_readers`.
+
+If promotion shows `files_retired_custody == 0` while the receipt still names a retired file, check
+that `.puller/state.json` has `tombstoned` and `tombstoned_backfill`. The first pull after upgrading
+backfills the map from the archived manifests, or from the tombstone markers if a manifest is missing.
+
 ## 48h unattended proof
 
 `python scripts/unattended_proof.py --start` records T0 and a baseline
