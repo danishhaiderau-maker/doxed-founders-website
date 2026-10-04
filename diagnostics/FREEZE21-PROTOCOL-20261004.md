@@ -199,7 +199,7 @@ The evaluator health snapshot is `GET /api/status` ->
 reports `by_status`, `stale_by_reason` (cumulative since process start) and the
 paper attempt counters; `lanes.FAMILY_GS03_CVD_DIV_TAKER.engine` is the
 `regime_bars_3m_v1` engine (`hydrated`, `bars`, latest ATR percentile, ADX and
-spread). The same object rides on `/api/state` as `xvl_evaluator`.
+spread).
 
 ### Expected alerts during the freeze
 
