@@ -12035,6 +12035,10 @@ def build_dashboard_display(snapshot: dict) -> dict:
             ai_note += f" (table below may show prior call: {la.get('decision')})"
     pipeline_idle = dbg.get("pipeline_idle_reason") or dbg.get("edge_trigger_reason")
     funnel = dict(snapshot.get("pipeline_funnel_counters") or {})
+    if funnel.get("schema") == "epoch_pipeline_funnel_v1":
+        # AI/gate counters are since-boot; order counts are the epoch funnel.
+        funnel = {**dict(snapshot.get("pipeline_funnel_counters_since_boot") or {}),
+                  **{k: funnel.get(k) for k in ("ORDER_SUBMITTED", "FILLED", "CLOSED", "EXPIRED", "PENDING")}}
     edge_thr_ui = snapshot.get("edge_threshold")
     edge_eff = (dbg.get("edge_components") or {}).get("effective_threshold")
     if _sole_ai_research_mode():
@@ -42829,6 +42833,63 @@ def _attach_patient_chase_routes(
     return enriched, counts
 
 
+EPOCH_PIPELINE_FUNNEL_SCHEMA = "epoch_pipeline_funnel_v1"
+
+
+def _epoch_pipeline_funnel(tile_route_counts: dict, since_boot=None) -> dict:
+    """Epoch-scoped order funnel summed from ``tile_route_counts``.
+
+    The legacy ``pipeline_funnel_counters`` were in-memory since-boot counters
+    incremented on one submit path only (FILLED 1 against 28 epoch fills).
+    This view uses the same per-lane epoch counts as the tiles, so forced
+    closes are excluded exactly as in ``tile_route_counts.closed``.  The
+    since-boot counters stay available under their own, labelled key.
+    """
+    totals = {"selected_calls": 0, "pending": 0, "open": 0, "closed": 0, "expired": 0}
+    for counts in (tile_route_counts or {}).values():
+        if not isinstance(counts, dict):
+            continue
+        for key in totals:
+            try:
+                totals[key] += int(counts.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    filled = totals["open"] + totals["closed"]
+    ts, source = _current_epoch_boundary()
+    return {
+        "schema": EPOCH_PIPELINE_FUNNEL_SCHEMA,
+        "SELECTED_CALLS": totals["selected_calls"],
+        "ORDER_SUBMITTED": totals["pending"] + filled + totals["expired"],
+        "PENDING": totals["pending"],
+        "FILLED": filled,
+        "OPEN": totals["open"],
+        "CLOSED": totals["closed"],
+        "EXPIRED": totals["expired"],
+        "scope": {
+            "epoch_cutoff_utc": _utc_isoformat_ns(ts) if ts else None,
+            "epoch_cutoff_source": source,
+            "source": "sum(tile_route_counts) over active tiles",
+            "forced_closes": "excluded (STATS_EXCLUDED_EXIT_REASONS), same as tile_route_counts.closed",
+            "since_boot_key": "pipeline_funnel_counters_since_boot",
+        },
+        "lanes": len([c for c in (tile_route_counts or {}).values() if isinstance(c, dict)]),
+        "since_boot_ai": {k: (since_boot or {}).get(k) for k in ("AI_CALLED", "AI_APPROVE", "AI_REJECT")
+                          if (since_boot or {}).get(k) is not None},
+    }
+
+
+def _publish_epoch_pipeline_funnel(snapshot: dict, tile_route_counts: dict) -> None:
+    """``pipeline_funnel_counters`` = the epoch funnel; legacy counters keep a labelled key."""
+    current = snapshot.get("pipeline_funnel_counters")
+    if isinstance(current, dict) and current.get("schema") != EPOCH_PIPELINE_FUNNEL_SCHEMA:
+        legacy = dict(current)  # fresh in-memory since-boot counters
+    else:
+        legacy = snapshot.get("pipeline_funnel_counters_since_boot")
+        legacy = dict(legacy) if isinstance(legacy, dict) else {}
+    snapshot["pipeline_funnel_counters_since_boot"] = legacy
+    snapshot["pipeline_funnel_counters"] = _epoch_pipeline_funnel(tile_route_counts, legacy)
+
+
 def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
     """Tile ``closed`` = current-epoch strategy closes from the full-session ledger.
 
@@ -43000,6 +43061,7 @@ def _build_api_state_snapshot():
                 positions=positions_copy, closed=trades_copy, expired=expired_orders_copy,
             )
         _apply_ledger_closed_counts(tile_route_counts, session_lane_ledger)
+        _publish_epoch_pipeline_funnel(snapshot, tile_route_counts)
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
         snapshot["tile_route_counts"] = tile_route_counts
@@ -43578,6 +43640,7 @@ def _api_state_cache_refresher_loop():
                 _apply_ledger_closed_counts(
                     snap["tile_route_counts"], snap.get("lane_pnl_ledger") or {}
                 )
+                _publish_epoch_pipeline_funnel(snap, snap["tile_route_counts"])
                 # Keep tile summaries on the same live signed-epoch overlay as
                 # positions/orders.  Reusing the cached heavy presentation here
                 # made approvals/fills stay at their pre-resume zero values even
@@ -44267,14 +44330,21 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     """Booked closes of the active lanes in the dashboard's trade session (same rows as lane_pnl_ledger)."""
     session_start = _showcase_trade_session_start()
     rows = {lane: [] for lane in lanes}
+    forced = {lane: 0 for lane in lanes}
     if not trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC):
         raise TimeoutError("monitor lanes timed out waiting for trade_lock")
     try:
         for row in trades:
             if not isinstance(row, dict):
                 continue
-            bucket = rows.get(_normalize_lane_key(row.get("research_lane") or ""))
+            lane_key = _normalize_lane_key(row.get("research_lane") or "")
+            bucket = rows.get(lane_key)
             if bucket is None or (session_start and not _trade_row_in_session(row, session_start)):
+                continue
+            if _trade_row_is_forced_close(row):
+                # Same rule as tile_route_counts / lane_pnl_ledger: an admin or
+                # guarded-deploy flatten is never a strategy outcome.
+                forced[lane_key] += 1
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
                            row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
@@ -44296,7 +44366,13 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                                  "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
                                  # W/L source: price-based net bp (same rule as the lane ledgers).
                                  "net_pnl_bp": net_bp})
+    _MONITOR_LANE_FORCED_EXCLUDED.clear()
+    _MONITOR_LANE_FORCED_EXCLUDED.update(forced)
     return shaped, session_start
+
+
+# Per-lane count of forced closes dropped by the last _monitor_lane_rows build.
+_MONITOR_LANE_FORCED_EXCLUDED: dict = {}
 
 
 def _monitor_lanes_payload(now: float) -> dict:
@@ -44314,6 +44390,10 @@ def _monitor_lanes_payload(now: float) -> dict:
         "scope": {
             "active_lanes_only": True,
             "session_start_at": monitor_api.utc_iso(session_start) if session_start else None,
+            **_epoch_trade_scope_fields(),
+            "include_forced": False,
+            "closes": "current-epoch strategy closes; forced closes excluded (same as tile_route_counts.closed)",
+            "wl": "W/L by price-based net bp (wl_basis PRICE_BP_NET_OF_FEES)",
             "pnl": "booked net_pnl_usd under the bot's conservative fill model; never recomputed",
             "drawdown": "peak-to-trough of cumulative booked net from 0, in close order",
             "mean_bp": "sum(net) / sum(margin x leverage) x 1e4",
@@ -44325,6 +44405,7 @@ def _monitor_lanes_payload(now: float) -> dict:
                 "display_order": tile["display_order"],
                 "on": enabled.get(tile["lane"]),
                 **monitor_api.lane_stats(rows.get(tile["lane"]) or []),
+                "forced_closes_excluded": int(_MONITOR_LANE_FORCED_EXCLUDED.get(tile["lane"]) or 0),
                 "latency": monitor_api.latency_brief(
                     ((xvl_lanes.get(tile["lane"]) or {}) if "error" not in xvl_lanes else {}).get("latency")
                 ),
@@ -44600,6 +44681,20 @@ def _tile_rows_with_toggles(rows) -> list:
     return out
 
 
+def _status_epoch_pipeline_funnel() -> dict:
+    """The epoch funnel from the last /api/state snapshot (no lock, no rebuild)."""
+    try:
+        payload = _api_state_cache.get("payload") or {}
+        funnel = payload.get("pipeline_funnel_counters") if isinstance(payload, dict) else None
+        if isinstance(funnel, dict) and funnel.get("schema") == EPOCH_PIPELINE_FUNNEL_SCHEMA:
+            out = copy.deepcopy(funnel)
+            out["snapshot_built_at"] = _api_state_cache.get("built_at")
+            return out
+    except Exception as exc:
+        return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "error": type(exc).__name__}
+    return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "status": "STATE_SNAPSHOT_WARMING"}
+
+
 @app.route('/api/status')
 @app.route('/status')
 def status():
@@ -44658,6 +44753,7 @@ def status():
         "canonical_epoch": _canonical_epoch_public(),
         "runtime_hygiene": _runtime_hygiene_public(),
         "research_freeze": _research_freeze_public(),
+        "pipeline_funnel": _status_epoch_pipeline_funnel(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
