@@ -166,6 +166,11 @@ def join_pre_entry_feature_receipts(
     """Join exactly one causal receipt per opportunity; ambiguity is UNKNOWN."""
     by_episode: dict[str, list[dict[str, Any]]] = {}
     for receipt in receipts:
+        if str(receipt.get("receipt_scope") or "") == "LANE":
+            # Lane-keyed receipts (a lane whose pre-entry view differed from
+            # the shared episode receipt) belong to that lane's decision, not
+            # to the opportunity; the episode receipt stays the one join key.
+            continue
         by_episode.setdefault(str(receipt.get("episode_id") or ""), []).append(receipt)
     joined, blocker_counts = [], Counter()
     receipt_joined = schema_complete = 0

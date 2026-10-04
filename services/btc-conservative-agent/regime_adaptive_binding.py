@@ -27,7 +27,7 @@ from typing import Any, Mapping
 import gs_regime_exit_stack as stack
 import regime_bars_3m as bars3m
 from adaptive_regime_entry import ACTION_MAKER, ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA, price_tick
-from combo_pathway_config import COMBO_LANE_SPECS
+from combo_pathway_config import BAR_CLOSE_SIGNAL_CLOCK, COMBO_LANE_SPECS
 from cross_venue_lead import STATUS_TRIGGER
 from cross_venue_premium import PremiumEvaluator, PremiumRule
 from family_policy_common import ExitAction, utc_session
@@ -371,6 +371,10 @@ class CvdDivergenceEvaluator:
 
     ID_PREFIX = "cvd"
     SHADOW_FILE = None
+    # Every CVD trigger is a 3 m bar-close event, whichever tile consumes it
+    # (GS-03 / B1 declare the clock on the tile; B2 is a shared-AI tile whose
+    # QUIET/VIOLENT branch rides this clock via ``bar_clock_trigger``).
+    SIGNAL_CLOCK = BAR_CLOSE_SIGNAL_CLOCK
     SIGNAL_KEY = "cvd_divergence_score"
     TRIGGER_FEATURE_KEY = "cvd_trigger"
     TRIGGER_FEATURE_FIELDS = ("trigger_id", "evaluated_ts", "side", "bar_close_ts", "cvd_divergence_score",

@@ -849,6 +849,19 @@ class V3BridgeTests(unittest.TestCase):
             )
             mutated = copy.deepcopy(source)
             mutated["feature_snapshot_at_signal"]["price"] = 101.0
+            # A sibling lane whose pre-entry view differs gets its own
+            # lane-keyed receipt; it never blocks (or is blocked by) siblings.
+            lane_write = dual_write_lane_decision(
+                mutated, lane="FAMILY_MFE_GIVEBACK",
+                lane_policy={"policy_id": "FAMILY_MFE_GIVEBACK"}, **common,
+            )
+            self.assertTrue(lane_write["writes"][0]["written"])
+            self.assertTrue(lane_write["writes"][0]["record_id"].endswith(":lane:FAMILY_MFE_GIVEBACK"))
+            self.assertEqual(
+                len(store.ledger_path("pre_entry_features").read_text().splitlines()), 2,
+            )
+            # The same lane re-writing a different payload is a real collision.
+            mutated["feature_snapshot_at_signal"]["price"] = 102.0
             with self.assertRaisesRegex(ValueError, "PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
                 dual_write_lane_decision(
                     mutated, lane="FAMILY_MFE_GIVEBACK",

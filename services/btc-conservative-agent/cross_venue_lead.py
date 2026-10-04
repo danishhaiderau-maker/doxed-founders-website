@@ -213,6 +213,9 @@ class LeadEvaluator:
 
     ID_PREFIX = "xvl"
     TRIGGER_SCHEMA = TRIGGER_SCHEMA
+    # The clock that produced a trigger belongs to the evaluator, not the tile:
+    # tiles sharing a trigger must stamp the same clock in pre-entry evidence.
+    SIGNAL_CLOCK = SIGNAL_CLOCK
     OUTCOME_SCHEMA = OUTCOME_SCHEMA
     SHADOW_FILE = SHADOW_FILE
     SIGNAL_KEY = "lead_bp"
