@@ -92,6 +92,14 @@ if ($offline) {
     $cycle = $progress.scheduled_ai_cycle
     $runtime.ready_status = $ready.status
     $runtime.ws_age = $ready.ws_age
+    $runtime.ws_transport_connected = $ready.ws_transport_connected
+    $wsConn = $ready.ws_connection
+    if ($wsConn) {
+      $runtime.ws_connection = [ordered]@{
+        reconnect_count = $wsConn.reconnect_count; generation = $wsConn.generation
+        connected_age_sec = $wsConn.connected_age_sec; last_disconnect_reason = $wsConn.last_disconnect_reason
+      }
+    }
     $runtime.active_tile_lanes = @($ready.active_tiles | ForEach-Object { [string]$_.lane })
     $inputHealth = $ready.ai_input_health
     if ($inputHealth) {
@@ -130,6 +138,7 @@ if ($offline) {
       ai_stale_after_sec = $progress.ai_stale_after_sec; evaluation_age_sec = $progress.evaluation_age_sec
       process_startup_age_sec = $progress.process_startup_age_sec
       ws_age_sec = $progress.ws_age_sec; ws_progressing = $progress.ws_progressing
+      ws_heartbeat_age_sec = $progress.ws_heartbeat_age_sec
       scheduled_ai_cycle = [ordered]@{
         completed_ts = $cycle.completed_ts; last_poll_ts = $cycle.last_poll_ts
         last_poll_entry_eligible = $cycle.last_poll_entry_eligible; stage = $cycle.stage

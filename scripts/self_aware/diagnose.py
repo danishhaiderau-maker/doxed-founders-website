@@ -84,15 +84,17 @@ def signals(f: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
     eval_age = sp.get("evaluation_age_sec")
     ws_age = sp.get("ws_age_sec", rt.get("ws_age"))
+    ws_live_age, _ws_basis = bfx_ws_liveness_age(rt)
     fly_proc = watcher_check(f, "fly.process") or {}
     timeouts = "timed out" in str(fly_proc.get("observed") or "").lower() or "timeout" in str(fly_proc.get("observed") or "").lower()
     cpu = (isinstance(eval_age, (int, float)) and eval_age > THRESHOLDS["evaluation_age_cpu_sec"]) or \
-          (isinstance(ws_age, (int, float)) and ws_age > 30 and not rt.get("execution_paused")) or timeouts
+          (isinstance(ws_live_age, (int, float)) and ws_live_age > THRESHOLDS["bfx_ws_heartbeat_amber_sec"]
+           and not rt.get("execution_paused")) or timeouts
     s["cpu_saturation"] = {"on": bool(cpu), "detail": f"evaluation_age={eval_age} ws_age={ws_age} fly.process='{fly_proc.get('observed')}'"}
 
     cvh = rt.get("cross_venue_health") or {}
     stale_venues = list(cvh.get("stale_venues") or [])
-    bfx_stale = isinstance(ws_age, (int, float)) and ws_age > THRESHOLDS["venue_stale_sec"]
+    bfx_stale = isinstance(ws_live_age, (int, float)) and ws_live_age > THRESHOLDS["venue_stale_sec"]
     s["stale_venue_feed"] = {"on": bool(stale_venues) or bfx_stale or (cvh and cvh.get("status") not in (None, "OK")),
                              "detail": f"cross_venue={cvh.get('status')} stale={stale_venues} bitfinex_ws_age={ws_age}"}
 
@@ -509,31 +511,70 @@ def check_orders_on_tiles(f, sig, store) -> Finding:
                              "FROM raw_decision GROUP BY ALL ORDER BY 5 DESC")
 
 
-def check_feeds(f, sig, store) -> Finding:
+def bfx_ws_liveness_age(rt: dict[str, Any]) -> tuple[Any, str]:
+    """(age, basis) of the Bitfinex WS transport: heartbeat age, else data-tick age (older snapshots)."""
+    sp = rt.get("strategy_progress") or {}
+    hb = sp.get("ws_heartbeat_age_sec")
+    if isinstance(hb, (int, float)):
+        return hb, "heartbeat"
+    return sp.get("ws_age_sec", rt.get("ws_age")), "tick"
+
+
+def bfx_reconnect_storm(rt: dict[str, Any], state: dict[str, Any] | None, now: float) -> tuple[int, int | None]:
+    """(reconnects inside the storm window, current count); history kept in ``state``."""
+    conn = rt.get("ws_connection") or {}
+    count = conn.get("reconnect_count")
+    if state is None or not isinstance(count, (int, float)) or isinstance(count, bool):
+        return 0, None
+    count = int(count)
+    window = THRESHOLDS["bfx_ws_reconnect_storm_window_sec"]
+    hist = [h for h in (state.get("bfx_ws_reconnects") or []) if isinstance(h, list) and len(h) == 2]
+    if hist and count < hist[-1][1]:
+        hist = []  # Fly restarted: the counter is per boot.
+    hist = [h for h in hist if now - float(h[0]) <= window] + [[now, count]]
+    state["bfx_ws_reconnects"] = hist[-200:]
+    return count - min(int(h[1]) for h in hist), count
+
+
+def check_feeds(f, sig, store, state: dict[str, Any] | None = None) -> Finding:
     rt = f.get("runtime") or {}
     sp = rt.get("strategy_progress") or {}
     cvh = rt.get("cross_venue_health") or {}
     xvl = rt.get("xvl_evaluator_health") or {}
     ws_age = sp.get("ws_age_sec", rt.get("ws_age"))
+    live_age, basis = bfx_ws_liveness_age(rt)
+    amber_sec = THRESHOLDS["bfx_ws_heartbeat_amber_sec" if basis == "heartbeat" else "bfx_ws_tick_fallback_amber_sec"]
+    storm, reconnects = bfx_reconnect_storm(rt, state, f.get("now") or 0.0)
     stale = list(cvh.get("stale_venues") or [])
     problems = []
-    if isinstance(ws_age, (int, float)) and ws_age > 30:
-        problems.append(f"Bitfinex WS age {fmt_age(ws_age)}")
+    if isinstance(live_age, (int, float)) and live_age > amber_sec:
+        problems.append(f"Bitfinex WS {basis} age {fmt_age(live_age)}")
+    if rt.get("ws_transport_connected") is False:
+        problems.append("Bitfinex WS transport disconnected")
+    if storm >= THRESHOLDS["bfx_ws_reconnect_storm_count"]:
+        problems.append(f"Bitfinex WS reconnect storm: {storm} reconnects in "
+                        f"{fmt_age(THRESHOLDS['bfx_ws_reconnect_storm_window_sec'])}")
     if stale:
         problems.append(f"stale venues {stale}")
     if cvh and cvh.get("status") not in (None, "OK"):
         problems.append(f"cross-venue {cvh.get('status')} ({cvh.get('reason')})")
     if xvl and xvl.get("status") not in (None, "OK"):
         problems.append(f"XVL evaluator {xvl.get('status')} ({xvl.get('reason')})")
-    sev = GREEN if not problems else (RED if isinstance(ws_age, (int, float)) and ws_age > THRESHOLDS["venue_stale_sec"] else AMBER)
+    sev = GREEN if not problems else (
+        RED if isinstance(live_age, (int, float)) and live_age > THRESHOLDS["venue_stale_sec"] else AMBER)
     if sig["runtime_snapshot_stale"]["on"]:
         sev, problems = SKIP, [sig["runtime_snapshot_stale"]["detail"]]
     return Finding("prog.feeds", "Every venue feed is fresh", "progress", sev,
-                   "; ".join(problems) or f"Bitfinex WS {fmt_age(ws_age)}, cross-venue {cvh.get('status')} "
+                   "; ".join(problems) or f"Bitfinex WS {basis} {fmt_age(live_age)} (tick {fmt_age(ws_age)}, "
+                                          f"reconnects {reconnects}), cross-venue {cvh.get('status')} "
                                           f"(collector {cvh.get('collector_age_s')}s), XVL {xvl.get('status')}",
-                   "Bitfinex WS <= 30s, no stale cross-venue collector, XVL evaluator OK",
+                   f"Bitfinex WS heartbeat <= {THRESHOLDS['bfx_ws_heartbeat_amber_sec']}s, transport connected, "
+                   f"< {THRESHOLDS['bfx_ws_reconnect_storm_count']} reconnects per "
+                   f"{fmt_age(THRESHOLDS['bfx_ws_reconnect_storm_window_sec'])}, no stale cross-venue collector, "
+                   "XVL evaluator OK",
                    causes=[] if sev in (GREEN, SKIP) else attribute(["stale_venue_feed", "cpu_saturation", "deploy_maintenance"], sig),
-                   evidence={"cross_venue_health": cvh, "xvl": xvl, "ws_age": ws_age})
+                   evidence={"cross_venue_health": cvh, "xvl": xvl, "ws_age": ws_age, "ws_liveness_age": live_age,
+                             "ws_liveness_basis": basis, "ws_reconnects_in_window": storm})
 
 
 def check_advancing(f, sig, store, state: dict[str, Any]) -> Finding:
@@ -884,7 +925,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_mirror_lag(facts, sig, store),
         lambda: check_ai_cadence(facts, sig, store),
         lambda: check_orders_on_tiles(facts, sig, store),
-        lambda: check_feeds(facts, sig, store),
+        lambda: check_feeds(facts, sig, store, state),
         lambda: check_advancing(facts, sig, store, state),
         lambda: check_analyzer(facts, sig, store),
         lambda: check_fly_reachability(facts, sig, store, state),
