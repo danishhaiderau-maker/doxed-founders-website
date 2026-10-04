@@ -13,7 +13,6 @@ on:
       - '**/.cursor/rules/**'
       # Bot research artifacts (handled by separate sync workflow)
       - 'services/btc-conservative-agent/**'
-      - 'services/btc-signal-engine/**'
       - '.edge-analysis/**'
   pull_request:
 
@@ -27,18 +26,10 @@ jobs:
           node-version: '20'
       - run: node scripts/verify-bitfinex-production-lock.mjs
       - run: node scripts/verify-bitfinex-policy-lock.mjs
-      # The committed signal-engine mirror must already match the canonical
-      # sources. Regenerate it and fail on any drift instead of patching the
-      # checkout, so a PR cannot pass here and then fail the deploy parity gate.
-      - name: Require committed signal-engine mirror
-        run: |
-          node scripts/mirror-signal-engine.mjs
-          git status --porcelain -- services/btc-signal-engine
-          git diff --exit-code -- services/btc-signal-engine
-          test -z "$(git status --porcelain --untracked-files=all -- services/btc-signal-engine)"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install -r services/btc-conservative-agent/requirements.txt pytest
-      - run: python -m pytest services/btc-conservative-agent/test_signal_engine_mirror_parity.py -q
-      - run: node scripts/verify-signal-parity.mjs --full
+      # The btc-signal-engine byte-copy mirror was removed (POST-FREEZE PR-C);
+      # the behavioural combo-fixture + import-flag probe runs on the canonical bot.
+      - run: python scripts/signal_probe.py --full

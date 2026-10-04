@@ -64,6 +64,7 @@ from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGener
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
+import relay_stack_mode as _relay_stack_mode
 import thread_health as _thread_health
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
@@ -3990,7 +3991,7 @@ def lane_register_pending_order(order: dict):
     )
     if not queued:
         logger.warning(
-            f"[ORDER EVIDENCE] duplicate/full/stopped enqueue trade_id={tid} "
+            f"[ORDER EVIDENCE] queue full/stopped enqueue trade_id={tid} "
             f"source_ts={source_ts} [PIPELINE ENFORCEMENT]"
         )
     persist = globals().get("save_paper_lifecycle")
@@ -5161,38 +5162,70 @@ CIRCUIT_BREAKER_CANCEL_REASONS = frozenset({
 })
 
 
+# Outcomes where another path already owns or finished the order: not a
+# retained (unconfirmed) cancellation, so never counted as one.
+CIRCUIT_BREAKER_SKIP_REASONS = frozenset({
+    "CANCEL_IN_PROGRESS", "ALREADY_FINALIZED", "ALREADY_FILLED_OR_CLOSED", "FILL_CLAIMED", "EXCHANGE_FILL_RACE",
+})
+CANCEL_CLAIM_STALE_SEC = 120.0
+CIRCUIT_BREAKER_SWEEP_WAIT_SEC = 15.0
+_circuit_breaker_sweep_lock = threading.Lock()
+
+
 def circuit_breaker_cancel_pending(reason: str):
-    """Cancel pending orders on WS stale / API errors — optional flatten log for research."""
+    """Cancel pending orders on WS stale / API errors — optional flatten log for research.
+
+    Serialized: the pause finalizer and pipeline threads can all call this for
+    one pause. A later caller waits for the running sweep (bounded) and then
+    only sees orders that are still pending, so no order is cancelled twice.
+    """
     if reason not in CIRCUIT_BREAKER_CANCEL_REASONS:
         return 0
-    cancelled = 0
-    failed = 0
-    expire_reason = f"CIRCUIT_BREAKER_{reason}"
-    with trade_lock:
-        candidates = [
-            o for o in list(pending_orders)
-            if isinstance(o, dict)
-            and str(o.get("status") or "").upper()
-            in ("PENDING", "CANCEL_PENDING_LIVE")
-        ]
-    for o in candidates:
-        outcome = _cancel_pending_order_confirmed(
-            o,
-            expire_reason,
-            record_expired=True,
-            expire_signal=True,
-        )
-        if outcome.get("finalized"):
-            cancelled += 1
-        else:
-            failed += 1
-    if cancelled or failed:
-        logger.warning(
-            f"[CIRCUIT_BREAKER] confirmed_cancelled={cancelled} "
-            f"retained_unconfirmed={failed} reason={reason} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-    return cancelled
+    sweep_lock = globals().get("_circuit_breaker_sweep_lock") or __import__("threading").Lock()
+    skip_reasons = globals().get("CIRCUIT_BREAKER_SKIP_REASONS") or frozenset()
+    if getattr(trade_lock, "_is_owned", lambda: False)():
+        # Never wait for the sweep lock while holding trade_lock (the running
+        # sweep needs trade_lock). Cancels under trade_lock already fail closed.
+        acquired = sweep_lock.acquire(blocking=False)
+    else:
+        acquired = sweep_lock.acquire(timeout=float(globals().get("CIRCUIT_BREAKER_SWEEP_WAIT_SEC", 15.0)))
+    if not acquired:
+        logger.info(f"[CIRCUIT_BREAKER] sweep already running; skipped duplicate reason={reason}")
+        return 0
+    try:
+        cancelled = 0
+        failed = 0
+        skipped = 0
+        expire_reason = f"CIRCUIT_BREAKER_{reason}"
+        with trade_lock:
+            candidates = [
+                o for o in list(pending_orders)
+                if isinstance(o, dict)
+                and str(o.get("status") or "").upper()
+                in ("PENDING", "CANCEL_PENDING_LIVE")
+            ]
+        for o in candidates:
+            outcome = _cancel_pending_order_confirmed(
+                o,
+                expire_reason,
+                record_expired=True,
+                expire_signal=True,
+            )
+            if outcome.get("finalized"):
+                cancelled += 1
+            elif str(outcome.get("failure_reason") or "") in skip_reasons:
+                skipped += 1
+            else:
+                failed += 1
+        if cancelled or failed:
+            logger.warning(
+                f"[CIRCUIT_BREAKER] confirmed_cancelled={cancelled} "
+                f"retained_unconfirmed={failed} handled_elsewhere={skipped} reason={reason} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+        return cancelled
+    finally:
+        sweep_lock.release()
 
 
 def live_copy_coordination_state() -> str:
@@ -9298,6 +9331,10 @@ _relay_http_session.mount("https://", _relay_http_adapter)
 _relay_http_session.mount("http://", _relay_http_adapter)
 _relay_event_outbox = None  # initialized with the canonical lifecycle lock below
 _relay_event_drain_lock = threading.Lock()
+# RELAY_STACK_MODE=research_only (fly.toml while paper-only research): no relay
+# HTTP delivery, no relay-state pusher/background refresher, stale-owner state
+# reported as INFO. Boot-time constant; see relay_stack_mode.py.
+RELAY_STACK_RESEARCH_ONLY = _relay_stack_mode.research_only()
 
 
 def _platform_relay_keepalive_url() -> str:
@@ -9315,6 +9352,13 @@ def _platform_relay_keepalive_url() -> str:
 def _platform_relay_connection_keepalive_loop():
     """Event-driven relay drain with a bounded local crash-recovery tick."""
     while not shutdown_event.is_set():
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # Local observation only: the guard still sees the pending index
+            # (and any retirement it owns); delivery is refused below, so no
+            # relay HTTP call, ACK or rewrite happens while research-only.
+            _drain_relay_event_outbox_once()
+            shutdown_event.wait(_relay_stack_mode.RESEARCH_ONLY_OUTBOX_OBSERVE_SEC)
+            continue
         _drain_relay_event_outbox_once()
         _drain_partial_reduction_outbox_once()
         # Enqueue wakes this lane immediately. The timeout is only bounded
@@ -9434,6 +9478,12 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
 
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
+    if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+        # Withheld, not failed: the durable event stays pending and unchanged.
+        _relay_push_state["research_only_withheld_total"] = int(
+            _relay_push_state.get("research_only_withheld_total") or 0
+        ) + 1
+        return False
     payload = record.get("payload") or {}
     event_id = str(record.get("event_id") or "")
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
@@ -13651,6 +13701,12 @@ _compressed_shadow_lock = threading.RLock()
 _collector_v22_merge_guard = threading.Lock()
 _collector_v22_merge_inflight = False
 _collector_v22_last_merge = 0.0
+# Set when the legacy v22 seal index is invalid (V22_SEAL_*). The bot keeps
+# running (v3 is the canonical evidence store) and raises a collection ALARM
+# instead of exiting: on 4 Oct 2026 an orphaned seal receipt left by a
+# clean-epoch reset made every boot raise V22_SEAL_RECEIPT_INVALID:2 here,
+# and the entrypoint restarted the bot 407 times (07:49-08:35 AEDT).
+_collector_v22_seal_degraded: dict = {}
 _cancellation_evidence_handoff_lock = threading.Lock()
 _cancellation_evidence_worker = None
 _cancellation_evidence_worker_lock = threading.Lock()
@@ -13948,10 +14004,15 @@ def research_collection_health(now: float = None) -> dict:
         alarms.append("TOUCH_GRID_COVERAGE_LOW")
     runtime_failures = {}
     try:
-        if _relay_delivery_guard.stale_owner_alarm(now):
+        # A deliberately disabled relay (RELAY_STACK_MODE=research_only) cannot
+        # drain its outbox; its stale-owner state is INFO on /health, not ALARM.
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False) and _relay_delivery_guard.stale_owner_alarm(now):
             alarms.append("RELAY_OUTBOX_STALE_OWNER_PENDING")
     except Exception as exc:
         runtime_failures["relay_guard_error"] = type(exc).__name__
+    if globals().get("_collector_v22_seal_degraded"):
+        alarms.append("COLLECTOR_V22_SEAL_DEGRADED")
+        runtime_failures["collector_v22_seal_degraded"] = dict(_collector_v22_seal_degraded)
     try:
         # Windowed so a single past failure does not latch the alarm until restart.
         ledger_recent = _LEDGER_WRITES.recent_failure_keys(COLLECTION_HEALTH_WINDOW_SEC, now)
@@ -14127,6 +14188,41 @@ def _merge_collector_v22_provisionals(*, reason: str) -> int:
     return restored
 
 
+def _merge_collector_v22_provisionals_guarded(*, reason: str) -> int:
+    """Merge, but degrade (never crash) on an invalid legacy v22 seal index.
+
+    Only V22_SEAL_* integrity errors are absorbed. The provisional journal and
+    the seal receipts are left untouched for the guarded offline repair
+    (workflow ``repair-v22-seals-offline-*``); a later successful merge clears
+    the degraded state. Any other error still propagates.
+    """
+    global _collector_v22_seal_degraded
+    try:
+        restored = _merge_collector_v22_provisionals(reason=reason)
+    except RuntimeError as exc:
+        if not str(exc).startswith("V22_SEAL_"):
+            raise
+        now = time.time()
+        previous = _collector_v22_seal_degraded or {}
+        _collector_v22_seal_degraded = {
+            "error": str(exc)[:200],
+            "reason": reason,
+            "since_ts": previous.get("since_ts") or now,
+            "last_ts": now,
+            "occurrences": int(previous.get("occurrences") or 0) + 1,
+            "repair": "repair-v22-seals-offline-plan, then -execute",
+        }
+        logger.critical(
+            f"[COLLECTOR_V22] seal index invalid ({exc}); provisional merge skipped, "
+            f"journal kept, bot continues degraded reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return 0
+    if _collector_v22_seal_degraded:
+        logger.info("[COLLECTOR_V22] seal index valid again; degraded state cleared [PIPELINE ENFORCEMENT]")
+        _collector_v22_seal_degraded = {}
+    return restored
+
+
 def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> bool:
     """Run periodic durable reconciliation on a low-priority daemon."""
     global _collector_v22_merge_inflight, _collector_v22_last_merge
@@ -14139,7 +14235,10 @@ def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> boo
     def worker():
         global _collector_v22_merge_inflight, _collector_v22_last_merge
         try:
-            _merge_collector_v22_provisionals(reason=reason)
+            _merge_collector_v22_provisionals_guarded(reason=reason)
+            compact = globals().get("_compact_evidence_handoff_journals")
+            if callable(compact):
+                compact()  # cheap stat unless >=16 MiB or 24 h since the last compaction
         finally:
             with _collector_v22_merge_guard:
                 _collector_v22_last_merge = time.time()
@@ -14156,8 +14255,13 @@ def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> boo
 def _restore_collector_v22_provisionals() -> int:
     """Startup recovery; bounded polls repeat this merge as a safety net."""
     global _collector_v22_last_merge
-    restored = _merge_collector_v22_provisionals(reason="STARTUP")
+    restored = (globals().get("_merge_collector_v22_provisionals_guarded")
+                or (lambda reason: _merge_collector_v22_provisionals()))(reason="STARTUP")
     _collector_v22_last_merge = time.time()
+    compact = globals().get("_compact_evidence_handoff_journals")
+    if callable(compact):
+        # Before replay: a multi-GB journal made every boot re-read history.
+        compact()
     preentry_replay = globals().get("_replay_preentry_evidence_handoffs")
     if callable(preentry_replay):
         preentry_replay()
@@ -15480,6 +15584,12 @@ def _replay_cancellation_evidence_handoffs() -> int:
                 if not receipt_id:
                     continue
                 if row.get("schema") == "cancellation_evidence_handoff_pending_v1":
+                    remember = globals().get("_remember_cancellation_handoff")
+                    if callable(remember):
+                        remember(receipt_id, (
+                            f"final:{row.get('collector_epoch_id')}:{row.get('trade_id')}"
+                            if row.get("lifecycle_final") and row.get("trade_id") else None
+                        ))
                     if len(receipt_id) != 64 or not row.get("collector_epoch_id"):
                         logger.error(
                             f"[COLLECTOR_V22] malformed cancellation handoff identity "
@@ -15532,9 +15642,49 @@ def _enqueue_cancellation_evidence_handoff(
         "order_snapshot": order_snapshot,
         "signal_snapshot": signal_snapshot,
     }
+    seen = globals().get("_cancellation_handoff_seen")
+    once_key = (
+        f"final:{epoch_id}:{identity['trade_id']}" if lifecycle_final and identity["trade_id"] else None
+    )
+    if seen is not None:
+        with _cancellation_evidence_handoff_lock:
+            if receipt_id in seen or (once_key and once_key in seen):
+                # Already journaled (concurrent pause paths / repeated finalizer):
+                # the durable receipt exists, so this is not an evidence gap.
+                _cancellation_handoff_seen_stats["duplicates_skipped"] += 1
+                return True
+            # Reserve before the append so a concurrent caller cannot journal it too.
+            for key in (receipt_id, once_key):
+                if key:
+                    seen[key] = None
     if not _append_cancellation_evidence_handoff(receipt):
+        if seen is not None:
+            with _cancellation_evidence_handoff_lock:
+                for key in (receipt_id, once_key):
+                    if key:
+                        seen.pop(key, None)
         return False
+    if seen is not None:
+        _remember_cancellation_handoff(receipt_id, once_key)  # LRU order + bound
     return _dispatch_cancellation_evidence_handoff(receipt)
+
+
+# Receipt ids (and per-trade final-cancellation keys) already journaled to
+# cancellation_evidence_handoffs.jsonl, so each cancellation is written once.
+# Bounded; seeded from the journal by the startup replay.
+CANCELLATION_HANDOFF_SEEN_MAX = 100_000
+_cancellation_handoff_seen: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_cancellation_handoff_seen_stats = {"duplicates_skipped": 0}
+
+
+def _remember_cancellation_handoff(receipt_id: str, once_key: str | None = None) -> None:
+    with _cancellation_evidence_handoff_lock:
+        for key in (receipt_id, once_key):
+            if key:
+                _cancellation_handoff_seen[key] = None
+                _cancellation_handoff_seen.move_to_end(key)
+        while len(_cancellation_handoff_seen) > CANCELLATION_HANDOFF_SEEN_MAX:
+            _cancellation_handoff_seen.popitem(last=False)
 
 
 FILL_EVIDENCE_IDENTITY_KEYS = (
@@ -28852,6 +29002,7 @@ def _cancel_pending_order_confirmed(
         if owns_cancel_claim:
             with trade_lock:
                 order.pop("cancel_claim_in_progress", None)
+                order.pop("cancel_claim_ts", None)
 
     with trade_lock:
         oid = str(order.get("bitfinex_order_id") or "")
@@ -28875,8 +29026,22 @@ def _cancel_pending_order_confirmed(
         ):
             result["failure_reason"] = "FILL_CLAIMED"
             return result
+        if not fill_claim_owner and order.get("cancel_claim_in_progress"):
+            # Another path (pause finalizer, pipeline thread, chase) is already
+            # cancelling this order: never cancel, expire, or write its
+            # cancellation evidence twice. A claim older than the stale bound
+            # (crashed holder) is taken over instead of wedging the order.
+            try:
+                claim_age = time.time() - float(order.get("cancel_claim_ts") or 0.0)
+            except (TypeError, ValueError):
+                claim_age = float("inf")
+            if claim_age < float(globals().get("CANCEL_CLAIM_STALE_SEC", 120.0)):
+                result["failure_reason"] = "CANCEL_IN_PROGRESS"
+                return result
+            order.pop("cancel_claim_in_progress", None)
         if not fill_claim_owner and not order.get("cancel_claim_in_progress"):
             order["cancel_claim_in_progress"] = str(reason)
+            order["cancel_claim_ts"] = time.time()
             owns_cancel_claim = True
         if oid:
             # Freeze every local fill/chase path while the private cancellation
@@ -40080,8 +40245,16 @@ _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     # bounded execution authority (the existing four-second stale fence still
     # fails closed) without allowing an operator override to recreate the
     # sub-second rebuild loop.
-    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "1.0")),
+    float(os.getenv(
+        "RELAY_EXECUTION_REFRESH_INTERVAL_SEC",
+        "1.0",
+    )),
 )
+if RELAY_STACK_RESEARCH_ONLY and not os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC"):
+    # research_only: no relay consumes sub-5s execution authority. 5 s refresh;
+    # the stale fence below follows (3x refresh = 15 s) and still fails closed.
+    _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
+        _RELAY_EXECUTION_REFRESH_INTERVAL_SEC, float(_relay_stack_mode.RESEARCH_ONLY_EXECUTION_REFRESH_SEC))
 _RELAY_EXECUTION_MAX_STALE_SEC = max(
     _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
     # A successful build currently takes roughly 0.4-0.7s on the 1x Fly VM.
@@ -40991,6 +41164,8 @@ def _build_relay_execution_state_snapshot() -> dict:
         ) if _relay_push_state["last_ts"] else None,
         "recent_deliveries_count": len(_relay_delivery_history_snapshot(10)),
         "delivery_scheduler": copy.deepcopy(_relay_push_state.get("delivery_scheduler")),
+        # Monitors downgrade stale-owner findings to INFO when research_only.
+        "relay_stack": _relay_stack_mode.status(),
     }
     ddollar_gate_summary = None
     try:
@@ -41087,6 +41262,10 @@ def api_relay_state(force_rebuild: bool = False):
         cached = _cached_relay_state_response("BACKGROUND")
         if cached is not None:
             return cached
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # No background refresher in research-only mode: one bounded
+            # on-demand build (the refresh lock below stays non-blocking).
+            return api_relay_state(force_rebuild=True)
         return jsonify({
             "api_state_error": "no bounded-fresh relay snapshot is available",
             "bot_version": EXECUTION_FIX_VERSION,
@@ -42570,7 +42749,9 @@ def _start_api_state_cache_refresher():
         except Exception as e:
             logger.error(f"/api/relay-execution-state initial cache build error: {e}")
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
-        threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # Research-only: /api/relay-state builds on demand (no pusher polls it).
+            threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()
         _start_runtime_telemetry()
         logger.info(
@@ -43436,20 +43617,23 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
             if bucket is None or (session_start and not _trade_row_in_session(row, session_start)):
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
-                           row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total")))
+                           row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
+                           row.get("pnl")))
     finally:
         trade_lock.release()
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
-        for ts, net, margin, leverage, direction, slippage in raw:
+        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct in raw:
             try:
                 notional = float(margin or 0.0) * float(leverage or 0.0)
             except (TypeError, ValueError):
                 notional = 0.0
             shaped[lane].append({"close_ts": parse_ts(ts or "") or None, "net_pnl_usd": net,
                                  "notional_usd": notional, "direction": direction,
-                                 "book_slippage_usd": slippage})
+                                 "book_slippage_usd": slippage,
+                                 # Precise per-trade bp source (net_pnl_usd is cent-rounded).
+                                 "pnl_margin_pct": pnl_margin_pct, "leverage": leverage})
     return shaped, session_start
 
 
@@ -43540,6 +43724,7 @@ def _monitor_summary_payload(now: float) -> dict:
             "data_epoch_declared": epoch.get("declared"),
             "data_epoch_started_at": epoch.get("started_at_utc"),
             "collection_epoch_id": _monitor_part(_bound_collection_epoch_id),
+            "canonical_epoch_id": _monitor_part(_canonical_epoch_public).get("canonical_epoch_id"),
         },
         "safety": {
             "force_paper_mode": _force_paper_mode_active(),
@@ -43773,6 +43958,8 @@ def status():
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "uptime": _runtime_uptime_summary(now),
         "data_epoch": _data_epoch_public(),
+        "canonical_epoch": _canonical_epoch_public(),
+        "runtime_hygiene": _runtime_hygiene_public(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -44045,6 +44232,8 @@ def health():
             **_relay_delivery_guard.status(now),
             "ready_trade_heads": scheduler.get("ready_trade_heads"),
             "owner_filter_applied": scheduler.get("owner_filter_applied"),
+            "relay_stack": _relay_stack_mode.status(),
+            "research_only_withheld_total": _relay_push_state.get("research_only_withheld_total", 0),
         }
     except Exception as exc:
         payload["relay_outbox"] = {"status": "UNKNOWN", "error": type(exc).__name__}
@@ -52913,6 +53102,10 @@ def _open_data_epoch() -> dict | None:
         logger.error(f"[DATA EPOCH] cannot open {DATA_EPOCH_ID}: {exc}; rows stay unstamped [PIPELINE ENFORCEMENT]")
         return None
     _data_epoch.activate(_DATA_EPOCH_MANIFEST)
+    for _hook_name in ("_archive_pre_epoch_ledgers_on_open", "_bind_epoch_aliases"):
+        _hook = globals().get(_hook_name)
+        if callable(_hook):
+            _hook(_DATA_EPOCH_MANIFEST)
     try:
         import epoch_boundary_rotation
         epoch_boundary_rotation.start_boundary_thread(_data_sync_runtime_root(), _DATA_EPOCH_MANIFEST,
@@ -52924,6 +53117,154 @@ def _open_data_epoch() -> dict | None:
         "[PIPELINE ENFORCEMENT]"
     )
     return _DATA_EPOCH_MANIFEST
+
+
+# Boot-time runtime hygiene (moves only; never deletes). Surfaced on /health.
+_runtime_hygiene_status: dict = {}
+PRE_EPOCH_LEDGER_ARCHIVE_ENABLED = os.getenv("PRE_EPOCH_LEDGER_ARCHIVE", "1").strip().lower() not in {
+    "0", "false", "no", "off"}
+
+
+def _archive_pre_epoch_ledgers_on_open(manifest: dict | None) -> dict | None:
+    """Move whole pre-epoch flat ledgers out of the clean epoch before any writer starts.
+
+    Runs synchronously at boot (before restore/load and engine threads). Files
+    with any write after the epoch start stay in place for the analyzer guard.
+    """
+    if not manifest or not PRE_EPOCH_LEDGER_ARCHIVE_ENABLED:
+        return None
+    try:
+        import runtime_hygiene
+        doc = runtime_hygiene.archive_pre_epoch_ledgers(_data_sync_runtime_root(), manifest)
+    except Exception as exc:
+        logger.error(f"[DATA EPOCH] pre-epoch ledger archive failed: {exc} [PIPELINE ENFORCEMENT]")
+        _runtime_hygiene_status["pre_epoch_archive"] = {"status": "ERROR", "error": str(exc)[:200]}
+        return None
+    if doc:
+        _runtime_hygiene_status["pre_epoch_archive"] = {
+            "epoch_id": doc.get("epoch_id"), "archived": doc.get("archived"),
+            "archived_bytes": doc.get("archived_bytes"), "mixed_left_in_place": doc.get("mixed_left_in_place"),
+            "archive_dir": doc.get("archive_dir"),
+        }
+        if doc.get("archived"):
+            logger.info(
+                f"[DATA EPOCH] archived {len(doc['archived'])} pre-epoch ledgers to {doc.get('archive_dir')} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+    return doc
+
+
+def _sweep_orphan_runtime_tmp() -> dict | None:
+    """Quarantine dead-process atomic-write temp files (provisional/lifecycle/snapshot)."""
+    try:
+        import runtime_hygiene
+        import collector_v22_provisional
+        doc = runtime_hygiene.sweep_orphan_tmp(
+            _data_sync_runtime_root(), writer_lock=getattr(collector_v22_provisional, "_LOCK", None))
+    except Exception as exc:
+        logger.warning(f"[RUNTIME HYGIENE] orphan tmp sweep failed: {exc}")
+        return None
+    _runtime_hygiene_status["orphan_tmp"] = {k: doc.get(k) for k in ("status", "moved_count", "moved_bytes")}
+    if doc.get("moved"):
+        logger.info(f"[RUNTIME HYGIENE] quarantined {len(doc['moved'])} orphaned temp files")
+    return doc
+
+
+def _compact_evidence_handoff_journals(force: bool = False) -> dict:
+    """Archive resolved cancellation/fill handoff rows; unresolved pending rows are kept verbatim."""
+    out = {}
+    try:
+        import runtime_hygiene
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "error": str(exc)[:200]}
+    terminal = ("APPLIED", "EPOCH_MISMATCH_PRESERVED")
+    for kind, path_fn, lock, prefix in (
+        ("cancellation", _cancellation_evidence_handoff_path, _cancellation_evidence_handoff_lock,
+         "cancellation_evidence_handoff"),
+        ("fill", _fill_evidence_handoff_path, _fill_evidence_handoff_lock, "fill_evidence_handoff"),
+    ):
+        try:
+            doc = runtime_hygiene.compact_handoff_journal(
+                path_fn(), lock=lock, pending_schema=f"{prefix}_pending_v1",
+                result_schema=f"{prefix}_result_v1", terminal_statuses=terminal,
+                runtime_root=_data_sync_runtime_root(), force=force,
+            )
+        except Exception as exc:
+            logger.warning(f"[RUNTIME HYGIENE] {kind} handoff compaction failed: {exc}")
+            doc = {"status": "ERROR", "error": str(exc)[:200]}
+        out[kind] = {k: doc.get(k) for k in ("status", "bytes", "archived_bytes", "unresolved_kept", "archived_to")
+                     if doc.get(k) is not None}
+        if doc.get("status") == "COMPACTED":
+            logger.info(
+                f"[RUNTIME HYGIENE] {kind} handoff journal compacted: {doc.get('archived_bytes')} bytes archived, "
+                f"{doc.get('unresolved_kept')} unresolved rows kept"
+            )
+    _runtime_hygiene_status["handoff_compaction"] = out
+    return out
+
+
+def _runtime_hygiene_public() -> dict:
+    out = dict(_runtime_hygiene_status)
+    stats = globals().get("_cancellation_handoff_seen_stats")
+    if isinstance(stats, dict):
+        out["cancellation_handoff_duplicates_skipped"] = int(stats.get("duplicates_skipped") or 0)
+    return out
+
+
+def _epoch_alias_ids() -> dict:
+    """Derived epoch ids. They are bound into seals/handoff receipts, so they are never rewritten."""
+    aliases = {}
+    for key, fn in (
+        ("collector_v22_epoch_id", lambda: _bound_collection_epoch_id()),
+        ("fresh_epoch_id", lambda: _fresh_epoch_identity_from_session()[0]),
+    ):
+        try:
+            aliases[key] = fn() or None
+        except Exception:
+            aliases[key] = None
+    return aliases
+
+
+def _canonical_epoch_public() -> dict:
+    """One canonical epoch id for every consumer: DATA_EPOCH_ID when declared.
+
+    collector_v22_epoch_id (also the research-timing and genome dataset epoch)
+    and fresh_epoch_id are aliases, published here and bound in
+    data_epoch_boundary/<epoch>.epoch_aliases.json so readers join on one id.
+    """
+    manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
+    aliases = _epoch_alias_ids()
+    canonical, source = manifest.get("epoch_id"), "DATA_EPOCH_ID"
+    if not canonical:
+        source = "collector_v22_epoch_id" if aliases.get("collector_v22_epoch_id") else (
+            "fresh_epoch_id" if aliases.get("fresh_epoch_id") else None)
+        canonical = aliases.get(source) if source else None
+    return {"canonical_epoch_id": canonical, "source": source,
+            "started_at_utc": manifest.get("started_at_utc"), "aliases": aliases}
+
+
+def _bind_epoch_aliases(manifest: dict | None) -> dict | None:
+    """Persist which derived ids belong to the canonical epoch (history kept, never deleted)."""
+    if not manifest or not manifest.get("epoch_id"):
+        return None
+    try:
+        path = Path(_data_sync_runtime_root()) / "data_epoch_boundary" / f"{manifest['epoch_id']}.epoch_aliases.json"
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = {}
+        if not isinstance(doc, dict) or doc.get("canonical_epoch_id") != manifest["epoch_id"]:
+            doc = {"schema": "canonical_epoch_aliases_v1", "canonical_epoch_id": manifest["epoch_id"],
+                   "started_at_utc": manifest.get("started_at_utc"), "bindings": []}
+        aliases = _epoch_alias_ids()
+        bindings = doc.setdefault("bindings", [])
+        if not bindings or bindings[-1].get("aliases") != aliases:
+            bindings.append({"aliases": aliases, "bound_at_ts": time.time(), "boot_id": globals().get("BOT_INSTANCE_ID")})
+            _data_epoch.write_json_atomic(path, doc)
+        return doc
+    except Exception as exc:
+        logger.warning(f"[DATA EPOCH] alias binding not written: {exc}")
+        return None
 
 
 def _data_epoch_row(path: str, row):
@@ -52939,8 +53280,11 @@ def _data_epoch_boundary_status(manifest: dict) -> dict | None:
     try:
         import epoch_boundary_rotation
         root = _data_sync_runtime_root()
-        return {stream: (epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}).get("status")
-                for stream in ("research_events_v22", "v3")}
+        out = {stream: (epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}).get("status")
+               for stream in ("research_events_v22", "v3")}
+        plain = epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], "pre_epoch_archive") or {}
+        out["plain_ledgers"] = (f"ARCHIVED_{len(plain.get('archived') or [])}" if plain else None)
+        return out
     except Exception:
         return None
 
@@ -53750,6 +54094,7 @@ def main():
         )
     _open_data_epoch()
     _wipe_research_on_startup_if_needed()
+    _sweep_orphan_runtime_tmp()
     _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()
     load_persistent_config()

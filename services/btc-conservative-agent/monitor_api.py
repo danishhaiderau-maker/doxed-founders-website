@@ -173,12 +173,35 @@ def _num(value: Any, default: float = 0.0) -> float:
     return out if out == out else default
 
 
+def trade_bp(row: Mapping[str, Any]) -> tuple[float | None, str | None]:
+    """Per-trade return in bp of notional, from the most precise booked field.
+
+    ``pnl_margin_pct`` (the trade row's ``pnl``: net / margin * 100, 2 dp) is
+    bp-exact at 100x (bp = pct * 100 / leverage). ``net_pnl_usd`` is booked at
+    cent precision, i.e. 4 bp steps on a $25 notional, so it is the fallback.
+    """
+    pct, lev = row.get("pnl_margin_pct"), row.get("leverage")
+    try:
+        if pct is not None and lev not in (None, "") and float(lev) > 0:
+            value = float(pct) * 100.0 / float(lev)
+            if value == value:
+                return value, "pnl_margin_pct"
+    except (TypeError, ValueError):
+        pass
+    notional = _num(row.get("notional_usd"))
+    if notional > 0 and row.get("net_pnl_usd") is not None:
+        return _num(row.get("net_pnl_usd")) / notional * 1e4, "net_pnl_usd"
+    return None, None
+
+
 def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
     """Closed-trade stats for one lane from booked rows (net_pnl_usd as booked, never recomputed)."""
     ordered = sorted(rows, key=lambda r: _num(r.get("close_ts")))
     closes = wins = losses = 0
     net = long_net = short_net = notional = slip_sum = 0.0
     slip_n = 0
+    bp_weighted = bp_notional = 0.0
+    bp_bases: set[str] = set()
     cumulative = peak = drawdown = 0.0
     last_ts = None
     for row in ordered:
@@ -192,7 +215,13 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
             long_net += pnl
         elif direction == "SHORT":
             short_net += pnl
-        notional += max(0.0, _num(row.get("notional_usd")))
+        row_notional = max(0.0, _num(row.get("notional_usd")))
+        notional += row_notional
+        bp, basis = trade_bp(row)
+        if bp is not None and row_notional > 0:
+            bp_weighted += bp * row_notional
+            bp_notional += row_notional
+            bp_bases.add(basis)
         if row.get("book_slippage_usd") is not None:
             slip_sum += _num(row.get("book_slippage_usd"))
             slip_n += 1
@@ -208,7 +237,9 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
         "long_net_usd": round(long_net, 4),
         "short_net_usd": round(short_net, 4),
         "mean_usd": round(net / closes, 4) if closes else None,
-        "mean_bp": round(net / notional * 1e4, 2) if notional > 0 else None,
+        # Notional-weighted per-trade bp (== net / notional when every row is exact).
+        "mean_bp": round(bp_weighted / bp_notional, 2) if bp_notional > 0 else None,
+        "mean_bp_basis": (next(iter(bp_bases)) if len(bp_bases) == 1 else "MIXED" if bp_bases else None),
         "max_drawdown_usd": round(drawdown, 4),
         "last_trade_at": utc_iso(last_ts) if last_ts else None,
         "mean_book_slippage_usd": round(slip_sum / slip_n, 4) if slip_n else None,
