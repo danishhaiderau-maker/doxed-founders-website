@@ -21761,7 +21761,7 @@ def _record_ledger_reconciliation(raw, cohort, quarantine, session, session_trad
         raw_rows = []
         if raw is not None and not getattr(raw, "empty", True):
             cols = [c for c in ("trade_id", "research_lane", "epoch_id", "close_ts", "ts", "net_pnl_usd",
-                                "net_pnl_usd_csv_cents", "net_pnl_basis") if c in raw.columns]
+                                "net_pnl_usd_csv_cents", "net_pnl_basis", "exit_reason") if c in raw.columns]
             for row in raw[cols].to_dict("records"):
                 row["pnl_exact"] = safe_float(row.get("net_pnl_usd"))
                 row["pnl_cents"] = safe_float(row.get("net_pnl_usd_csv_cents", row.get("net_pnl_usd")))
@@ -21773,9 +21773,16 @@ def _record_ledger_reconciliation(raw, cohort, quarantine, session, session_trad
         reasons += list((quarantine or {}).get("rows_detail") or [])
         cohort_ids = (cohort["trade_id"].astype(str).tolist()
                       if cohort is not None and "trade_id" in getattr(cohort, "columns", []) else [])
+        cutoff = None
+        try:
+            start = _session_start_ts(session or {})
+            cutoff = None if start is None or pd.isna(start) else float(start.timestamp())
+        except Exception:
+            cutoff = None
         _CURRENT_LEDGER_RECONCILIATION = ledger_reconciliation.build_report(
             raw_rows=raw_rows, cohort_ids=cohort_ids, quarantine_rows=reasons,
             lanes=CURRENT_RESEARCH_LANES, epoch_id=str((session or {}).get("collector_v22_epoch_id") or ""),
+            epoch_cutoff_ts=cutoff,
         )
     except Exception as exc:
         _CURRENT_LEDGER_RECONCILIATION = {
