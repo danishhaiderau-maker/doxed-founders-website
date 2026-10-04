@@ -37,11 +37,19 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- FREEZE21 (owner-approved 2026-10-04 15:02 AEDT,
-  `diagnostics/FREEZE21-PROTOCOL-20261004.md`): four tiles are registered, in
+- FREEZE21B (owner-approved 2026-10-04 15:02 AEDT, re-declared 17:53/17:54
+  AEDT: "every strategy must be a visible paper tile";
+  `diagnostics/FREEZE21-PROTOCOL-20261004.md`): eleven tiles are registered, in
   this display order (tile numbers are derived from `COMBO_EXECUTION_LANES` and
   are never hard-coded): H-A Committed fade (taker), H-B NO_TRADE follow
-  (taker), H-C Premium reversion (no AI) and the Random control. Each has its
+  (taker), H-C Premium reversion (no AI), the Random control, then Grok
+  Strategist's GS-01 premium follow + ATR TP, GS-02 NO_TRADE follow with a
+  regime entry, GS-03 CVD divergence (no AI), GS-04 NO_TRADE follow + ATR TP,
+  B1 CVD divergence regime-managed, B2 regime switcher and B3 committed fade
+  regime-managed. The GS/B tiles share `regime_bars_3m.py` (3 m ATR/ADX/CVD
+  bars from the 1 s tape), `gs_regime_exit_stack.py` and
+  `regime_adaptive_binding.py`; each carries
+  `tile_pre_registration_gs20261004_v1`. Each has its
   own lock, orders, positions, ledger and analyzer cohort. All are paper-only
   and relay-ineligible and all default ON for the 21-day freeze. Every tile
   card on the Fly dashboard and the :9001 analyzer shows ENTRY / EXIT / RISK
@@ -51,7 +59,7 @@
   registry validator fails when any tile lacks `signal_summary`,
   `live_exit_order`, known `shadow_exits` or a complete card.
 - 21-day research freeze (`research_freeze.py`): one declared data epoch
-  (`DATA_EPOCH_ID = ce-20261004-v31-freeze21` in `fly.toml`); the freeze runs
+  (`DATA_EPOCH_ID = ce-20261004-v31-freeze21b` in `fly.toml`); the freeze runs
   21 days from that epoch's `data_epoch.json` start. Inside it every reset path
   (`/api/reset`, `/api/toggle_fresh_collection`, `/api/wipe_fly_only`,
   `/api/fresh_epoch_reset`, `clean_epoch_wipe.py --pre-start execute`) refuses

@@ -55,6 +55,7 @@ def _side_text(entry: dict) -> str:
         "CROSS_VENUE_LEAD_OR_PREMIUM": "Side: the leading venues' direction; opposite triggers never trade",
         "CROSS_VENUE_PREMIUM": "Side: toward the leading venues when their premium leaves its mean (convergence)",
         "RANDOM_COIN_ON_COMMITTED_CALL": "Side: deterministic coin flip per call (execution-cost control, not the AI)",
+        "CVD_DIVERGENCE_3M": "Side: LONG when price falls while Bitfinex CVD rises, SHORT on the reverse (reversion)",
     }.get(source, f"Side: {source.replace('_', ' ').lower() or 'not declared'}")
 
 
@@ -95,8 +96,13 @@ def entry_lines(spec: dict) -> list[str]:
         lines.append("Chase: none")
         lines.append(f"Time limit: unfilled after {_minutes(entry.get('taker_ttl_sec') or spec.get('entry_ttl_sec'))}"
                      " - cancelled")
+    elif mode == "REGIME_ADAPTIVE":
+        lines.extend(regime_entry_lines(entry))
     else:
         lines.append(f"Order: {mode.replace('_', ' ').lower() or 'not declared'}")
+    if entry.get("fade_allowed_sessions"):
+        lines.append("Committed fade: " + _sessions_text({**entry, "allowed_sessions": entry["fade_allowed_sessions"]})
+                     + f", spread <= {_num(entry['fade_max_spread_bps'])} bp")
     lines.append(_sessions_text(entry))
     gates = []
     if entry.get("max_spread_bps") is not None:
@@ -109,6 +115,93 @@ def entry_lines(spec: dict) -> list[str]:
     if gates:
         lines.append("Stand aside if: " + ", ".join(gates))
     return lines
+
+
+def _exec_text(cell: dict | None, entry: dict) -> str:
+    if not cell:
+        return "stand aside (no order)"
+    kind = cell.get("kind")
+    if kind == "TAKER":
+        return f"taker at the signal within a {_num(entry.get('taker_protection_bps') or 0)} bp cap"
+    windows = tuple(cell.get("chase_windows") or ())
+    chase = (f"; reprice every {_minutes(cell['reprice_sec'])} in minutes {(min(windows) - 1) * 5}-{max(windows) * 5} "
+             f"moving {_num(float(cell['gap_step']) * 100)}% of the gap to the touch" if windows else "; no chase")
+    if kind == "TOUCH":
+        return (f"post-only limit at the touch{chase}; at {_minutes(cell['ttl_sec'])} a taker fallback only if price "
+                f"drifted <= {_num(cell['fallback_favourable_atr_k'])} ATR our way and no more than "
+                f"{_num(cell['fallback_adverse_bp'])} bp against, else missed")
+    return (f"post-only limit {_num(cell['offset_atr_k'])} ATR better than the last price (never through the touch)"
+            f"{chase}; unfilled after {_minutes(cell['ttl_sec'])} - missed")
+
+
+def regime_entry_lines(entry: dict) -> list[str]:
+    reg = entry.get("regime_classifier") or {}
+    parts = [f"VIOLENT if 3-min ATR percentile (24 h) >= {_num(reg['violent_atr_pct_gte'])} or spread >= "
+             f"{_num(reg['violent_spread_bp_gte'])} bp"]
+    if reg.get("trend_adx_gte") is not None:
+        parts.append(f"TREND if ADX(14) >= {_num(reg['trend_adx_gte'])}")
+    parts.append("otherwise QUIET (last closed 3-minute Bitfinex bar at the signal)")
+    lines = ["Regime: " + "; ".join(parts)]
+    triggers = entry.get("regime_trigger") or {}
+    cells = entry.get("regime_exec") or {}
+    for regime in ("QUIET", "TREND", "VIOLENT"):
+        if regime == "TREND" and reg.get("trend_adx_gte") is None:
+            continue
+        trig = triggers.get(regime)
+        prefix = f"Order {regime}" + (f" ({trig.replace('_', ' ').lower()})" if trig else "")
+        lines.append(f"{prefix}: {_exec_text(cells.get(regime), entry)}")
+    return lines
+
+
+def _regime_profile_text(name: str, prof: dict) -> str:
+    bits = []
+    if prof.get("tp1_atr"):
+        bits.append(f"{int(float(prof['tp1_frac']) * 100)}% off at max({_num(prof['tp1_floor'])} bp, "
+                    f"{_num(prof['tp1_atr'])} ATR) maker, rest stop to {_bp(prof['lock_bp'])}")
+    if prof.get("tp_atr"):
+        bits.append(f"maker take-profit at max({_num(prof['tp_floor'])} bp, {_num(prof['tp_atr'])} ATR)")
+    if prof.get("be_atr"):
+        bits.append(f"break-even at max({_num(prof['be_floor'])} bp, {_num(prof['be_atr'])} ATR) → stop "
+                    f"{_bp(prof['lock_bp'])}")
+    if prof.get("trail_atr"):
+        bits.append(f"ATR trail max({_num(prof['trail_floor'])} bp, {_num(prof['trail_atr'])} ATR) armed at "
+                    f"max({_num(prof['trail_arm_floor'])} bp, {_num(prof['trail_arm_atr'])} ATR)")
+    if prof.get("gb_arm"):
+        bits.append(f"give-back {_num(float(prof['gb_frac']) * 100)}% of the peak after {_bp(prof['gb_arm'])}")
+    if prof.get("shock_k"):
+        bits.append(f"volatility-shock exit (60 s range >= {_num(prof['shock_k'])} ATR against us"
+                    + (", only after break-even" if prof.get("shock_profit_only") else "") + ")")
+    if prof.get("flip"):
+        bits.append("indicator-flip exit at a bar close" + (" after break-even" if prof.get("flip_profit_only") else ""))
+    bits.append(f"time backstop {_minutes(prof['time_sec'])}")
+    return f"{name}: " + "; ".join(bits)
+
+
+def regime_exit_lines(exit_policy: dict) -> list[str]:
+    profiles = exit_policy.get("profiles") or {}
+    mapping = exit_policy.get("regime_profiles") or {}
+    if set(profiles) == {"ALL"}:
+        return [_regime_profile_text("All regimes", profiles["ALL"])]
+    out = []
+    for regime in ("QUIET", "TREND", "VIOLENT"):
+        name = mapping.get(regime)
+        if name:
+            out.append(_regime_profile_text(f"{regime} ({name.split('_')[0]} set)", profiles[name]))
+    return out
+
+
+def _regime_risk_lines(exit_policy: dict) -> list[str]:
+    profiles = exit_policy.get("profiles") or {}
+    mapping = exit_policy.get("regime_profiles") or {}
+    names = ["ALL"] if set(profiles) == {"ALL"} else [mapping[r] for r in ("QUIET", "TREND", "VIOLENT") if mapping.get(r)]
+    cut, hard = [], []
+    for name in dict.fromkeys(names):
+        prof = profiles[name]
+        label = "" if name == "ALL" else f" ({name})"
+        how = "any tick" if int(prof.get("cut_close_sec") or 1) <= 1 else f"on {_minutes(prof['cut_close_sec'])} closes"
+        cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how})")
+        hard.append(f"Hard stop{label} {_bp(-float(prof['hard_bp']))}")
+    return cut + hard
 
 
 def _live_exit_text(rule: str, exit_policy: dict, spec: dict) -> str | None:
@@ -150,6 +243,12 @@ def _live_exit_text(rule: str, exit_policy: dict, spec: dict) -> str | None:
 
 def exit_sections(spec: dict, shadow_exit_set: dict | None = None) -> dict:
     exit_policy = dict(spec.get("exit_policy") or {})
+    if exit_policy.get("profiles"):
+        shadow_set = shadow_exit_set or {}
+        shadow = [str((shadow_set.get(k) or {}).get("label") or k) for k in tuple(spec.get("shadow_exits") or ())]
+        return {"order": "first trigger wins (" + ", ".join(
+                    r.replace("_", " ").lower() for r in spec.get("live_exit_order") or ()) + ")",
+                "live": regime_exit_lines(exit_policy), "shadow": shadow}
     live = []
     for rule in tuple(spec.get("live_exit_order") or ()):
         if rule in ("HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS"):
@@ -167,7 +266,10 @@ def risk_lines(spec: dict, leverage: float = DEFAULT_LEVERAGE) -> list[str]:
     lines = []
     order = tuple(spec.get("live_exit_order") or ())
     cut_rules = [r for r in order if r in ("EARLY_CUT", "EARLY_FAIL")]
-    if cut_rules:
+    if exit_policy.get("profiles"):
+        lines.extend(_regime_risk_lines(exit_policy))
+        order = ()
+    elif cut_rules:
         for rule in cut_rules:
             lines.append(_live_exit_text(rule, exit_policy, spec))
     elif spec.get("early_cut_shadow_reason"):

@@ -81,7 +81,11 @@ def _fill_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     held = _finite(row.get("outcome_duration_sec"))
     fill_ts = _ts(row.get("fill_ts")) or (close_ts - held if held is not None else None)
     signal_to_fill = fill_ts - call_ts if call_ts is not None and fill_ts is not None else None
+    mfe_margin_pct = _finite(row.get("max_pnl_pct"))
+    policy_state = row.get("policy_state") if isinstance(row.get("policy_state"), Mapping) else {}
     return {
+        "mfe_bp": mfe_margin_pct * 100.0 / leverage if mfe_margin_pct is not None and leverage > 0 else None,
+        "be_armed": policy_state.get("be_armed_age") is not None if policy_state else None,
         "lane": lane, "call": call, "close_ts": close_ts, "pnl_usd": pnl,
         "bp": pnl / notional * 1e4 if notional > 0 else None,
         "reason": reason, "overshoot_bp": overshoot, "side": sign, "entry": entry,
@@ -371,11 +375,102 @@ def _freeze21_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: 
             "day21_status_if_decided_now": day21_status}
 
 
+def _gs_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """GS-20261004 facts: n_eff (distinct UTC close hours), 1 h-cluster CI95, one-sided Bonferroni bound,
+    give-back share, break-even-armed negative share and signal->fill latency."""
+    kill = pre["kill"]
+    k = max(1, int(kill.get("bonferroni_k") or 1))
+    rows = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
+    lo, hi = _cluster_ci(rows, cluster_sec=3600)
+    # One-sided alpha 0.05/k lower bound == lower end of a two-sided 1 - 2*alpha/k interval.
+    b_lo, _ = _cluster_ci(rows, cluster_sec=3600, alpha=min(0.999, 2.0 * 0.05 / k))
+    bps = [v for _, v in rows]
+    armed = [r for r in fills if r.get("mfe_bp") is not None and r["mfe_bp"] >= float(kill["giveback_mfe_arm_bp"])]
+    be = [r for r in fills if r.get("be_armed")]
+    return {
+        "mean_bp": round(sum(bps) / len(bps), 4) if bps else None,
+        "distinct_close_hours": len({int(r["close_ts"] // 3600) for r in fills}),
+        "per_fill_ev_ci95_bp_1h": [lo, hi],
+        "bonferroni_k": k,
+        "bonferroni_lower_bound_bp_1h": b_lo,
+        "giveback_armed_trades": len(armed),
+        "giveback_share": round(sum(1 for r in armed if r["bp"] is not None and r["bp"] <= 0) / len(armed), 4)
+        if armed else None,
+        "be_armed_trades": len(be),
+        "be_armed_negative_share": round(sum(1 for r in be if r["bp"] is not None and r["bp"] < 0) / len(be), 4)
+        if be else None,
+        "signal_to_fill_p50_sec": _median_signal_to_fill_sec(fills),
+    }
+
+
+def _gs_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                dsr: float | None, now_ts: float) -> dict[str, Any]:
+    """GS-20261004 rules (live part): harm/give-back/worst-trade/BE/latency kills any time; at the epoch end
+    PASS_FORWARD, KILLED (futility) or INSUFFICIENT. Fill-rate and random-control kills are scored offline."""
+    target, kill, decision = pre["target"], pre["kill"], pre["decision"]
+    fills = int(stats.get("fills") or 0)
+    n_eff = int(stats.get("distinct_close_hours") or 0)
+    mean = stats.get("mean_bp")
+    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    b_lo = stats.get("bonferroni_lower_bound_bp_1h")
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    decided = age_days >= float(decision["decision_day"])
+    kills = []
+    if fills >= kill["harm_after_fills"] and mean is not None and mean <= kill["harm_mean_bp_at_or_below"] \
+            and hi is not None and hi < kill["harm_ci95_upper_below_bp"]:
+        kills.append("HARM")
+    gb = stats.get("giveback_share")
+    if fills >= kill["giveback_after_fills"] and gb is not None and gb > kill["giveback_rate_above"]:
+        kills.append("GIVEBACK")
+    worst = stats.get("worst_fill_bp")
+    if kill.get("worst_trade_below_bp") is not None and worst is not None and worst < kill["worst_trade_below_bp"]:
+        kills.append("WORST_TRADE")
+    be = stats.get("be_armed_negative_share")
+    if kill.get("be_armed_negative_share_above") is not None and be is not None \
+            and be > kill["be_armed_negative_share_above"]:
+        kills.append("BE_ARMED_NEGATIVE")
+    lat = stats.get("signal_to_fill_p50_sec")
+    if kill.get("latency_p50_above_sec") is not None and lat is not None and fills >= 10 \
+            and lat > kill["latency_p50_above_sec"]:
+        kills.append("LATENCY")
+    futile = n_eff >= kill["futility_min_n_eff"] and (
+        (mean is not None and mean < kill["futility_mean_below_bp"]) or b_lo is None or b_lo <= 0)
+    enough = fills >= target["min_fills"] and n_eff >= target["min_n_eff"]
+    checks = {
+        "min_fills": fills >= target["min_fills"], "min_n_eff": n_eff >= target["min_n_eff"],
+        "mean_gt_0": mean is not None and mean > pre["promotion"]["mean_bp_gt"],
+        "bonferroni_lower_bound_gt_0": b_lo is not None and b_lo > 0,
+        "beats_offline_random_control": "OFFLINE",
+    }
+    if kills:
+        day_end = "KILLED"
+    elif not enough:
+        day_end = "INSUFFICIENT"
+    elif futile:
+        day_end = "KILLED"
+    elif checks["mean_gt_0"] and checks["bonferroni_lower_bound_gt_0"]:
+        day_end = "PASS_FORWARD"
+    else:
+        day_end = "KILLED"
+    status = "KILL" if kills else (day_end if decided else "COLLECTING")
+    return {
+        "status": status, "kill_reasons": kills, "promotion_checks": checks,
+        "fills": fills, "n_eff_distinct_hours": n_eff, "target_n_eff": target["min_n_eff"],
+        "mean_bp": mean, "ci95_bp_1h": [lo, hi], "bonferroni_lower_bound_bp_1h": b_lo,
+        "days_since_registration": round(age_days, 3), "decision_day": decision["decision_day"],
+        "deflated_sharpe": dsr, "role": pre["role"], "action_on_kill": kill["action"],
+        "offline_only": ["fill_rate", "random_control_edge"],
+        "day21_status": day_end if decided else "PENDING", "day21_status_if_decided_now": day_end,
+    }
+
+
 VERDICT_RULES = {
     "tile_pre_registration_freeze21_v1": _freeze21_verdict,
+    "tile_pre_registration_gs20261004_v1": _gs_verdict,
 }
 EXTRA_STATS = {
     "tile_pre_registration_freeze21_v1": _freeze21_extra_stats,
+    "tile_pre_registration_gs20261004_v1": _gs_extra_stats,
 }
 
 

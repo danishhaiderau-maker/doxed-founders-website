@@ -103,6 +103,7 @@
     "ohlcv_refresh_loop",
     "microstructure_capture_loop",
     "xvl_evaluator_thread",
+    "regime_bars_boot_hydrate",
     "ai_shadow_maturation_loop"
   ],
   "worker_start_contract": [
@@ -130,6 +131,7 @@
     {"target": "ohlcv_refresh_loop", "safe_thread": true, "daemon": true},
     {"target": "microstructure_capture_loop", "safe_thread": true, "daemon": true},
     {"target": "xvl_evaluator_thread", "safe_thread": false, "daemon": true},
+    {"target": "regime_bars_boot_hydrate", "safe_thread": false, "daemon": true},
     {"target": "ai_shadow_maturation_loop", "safe_thread": true, "daemon": true}
   ],
   "import_side_effect_calls": [

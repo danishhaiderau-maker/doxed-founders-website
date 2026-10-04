@@ -1,4 +1,4 @@
-"""FREEZE21 contract: the declared registry and epoch stay frozen; reset and tile-OFF paths refuse without the override."""
+"""FREEZE21B contract: the declared registry and epoch stay frozen; reset and tile-OFF paths refuse without the override."""
 import json
 import os
 import subprocess
@@ -51,19 +51,30 @@ def test_fly_toml_declares_the_one_freeze_epoch():
 
 
 def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
-    roles = []
+    roles, gs = [], []
     for lane in rf.FREEZE_ROSTER:
         pre = cfg.COMBO_LANE_SPECS[lane]["pre_registration"]
-        assert pre["schema"] == "tile_pre_registration_freeze21_v1" and pre["freeze_id"] == rf.FREEZE_ID
-        assert pre["target"]["min_distinct_hours"] >= 150 and pre["target"]["min_fills"] > 0
-        assert {"k3_worst_trade_bp_below", "k6_defect_action", "k1_after_distinct_hours"} <= set(pre["kill"])
-        assert pre["day21"]["decision_day"] == rf.FREEZE_DAYS
-        assert {"pass", "fail", "inconclusive"} <= set(pre["day21"])
+        assert pre["freeze_id"] == rf.FREEZE_ID
+        if pre["schema"] == "tile_pre_registration_gs20261004_v1":
+            # FREEZE21B: Grok Strategist's GS-20261004-01..04 and B1..B3 rules.
+            assert pre["target"]["min_fills"] == 30 and pre["target"]["min_n_eff"] == 30
+            assert {"harm_after_fills", "harm_mean_bp_at_or_below", "futility_mean_below_bp", "bonferroni_k",
+                    "giveback_rate_above", "action"} <= set(pre["kill"])
+            assert pre["decision"]["decision_day"] == rf.FREEZE_DAYS
+            assert {"pass", "fail", "inconclusive"} <= set(pre["decision"])
+            gs.append(pre["hypothesis_id"])
+        else:
+            assert pre["schema"] == "tile_pre_registration_freeze21_v1"
+            assert pre["target"]["min_distinct_hours"] >= 150 and pre["target"]["min_fills"] > 0
+            assert {"k3_worst_trade_bp_below", "k6_defect_action", "k1_after_distinct_hours"} <= set(pre["kill"])
+            assert pre["day21"]["decision_day"] == rf.FREEZE_DAYS
+            assert {"pass", "fail", "inconclusive"} <= set(pre["day21"])
         assert cfg.COMBO_LANE_SPECS[lane]["default_enabled"] is True
         assert cfg.COMBO_LANE_SPECS[lane]["paper_only"] is True
         assert cfg.COMBO_LANE_SPECS[lane]["platform_relay_eligible"] is False
         roles.append(pre["role"])
-    assert roles.count("HYPOTHESIS") == 3 and roles.count("CONTROL") == 1
+    assert roles.count("HYPOTHESIS") == 10 and roles.count("CONTROL") == 1
+    assert len(rf.FREEZE_ROSTER) == 11 and len(gs) == 7
 
 
 def test_status_window_opening_active_complete():

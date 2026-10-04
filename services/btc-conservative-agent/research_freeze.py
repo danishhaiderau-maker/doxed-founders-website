@@ -1,6 +1,7 @@
-"""21-day research freeze (FREEZE21-20261004): one declared epoch, no tile or reset churn until day 21.
+"""21-day research freeze (FREEZE21B-20261004): one declared epoch, no tile or reset churn until day 21.
 
-Owner-approved 2026-10-04 15:02 AEDT (diagnostics/FREEZE21-PROTOCOL-20261004.md).
+Owner-approved 2026-10-04 15:02 AEDT and re-declared 17:53/17:54 AEDT as FREEZE21B with
+eleven tiles (diagnostics/FREEZE21-PROTOCOL-20261004.md, "FREEZE21B" section).
 The freeze window is ``[started_at, started_at + 21 days)`` of the data-epoch
 manifest whose ``epoch_id`` is :data:`FREEZE_DATA_EPOCH_ID` (opened by the
 first boot with ``DATA_EPOCH_ID`` set to it). Inside the window:
@@ -35,27 +36,35 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 SCHEMA = "research_freeze_v1"
-FREEZE_ID = "FREEZE21-20261004"
-FREEZE_DATA_EPOCH_ID = "ce-20261004-v31-freeze21"
+FREEZE_ID = "FREEZE21B-20261004"
+FREEZE_DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
 FREEZE_DAYS = 21
 FREEZE_SEC = FREEZE_DAYS * 86400
 # "ACTIVE" = the guard applies inside the window; "LIFTED" = owner ended it.
 FREEZE_STATUS = "ACTIVE"
-FREEZE_DECLARED_UTC = "2026-10-04T04:02:00Z"
-FREEZE_APPROVED_BY = "Danish (owner), 2026-10-04 15:02 AEDT, SYSTEM-REVIEW-20261004"
+FREEZE_DECLARED_UTC = "2026-10-04T06:53:00Z"
+FREEZE_APPROVED_BY = ("Danish (owner), 2026-10-04 15:02 AEDT, SYSTEM-REVIEW-20261004; re-declared as FREEZE21B "
+                      "with the GS-20261004-01..04 and B1..B3 paper tiles, 17:53/17:54 AEDT")
 # The registry frozen for 21 days (combo_pathway_config); CI compares these.
-FREEZE_REGISTRY_VERSION = "v31-freeze21-3h1c-v12"
+FREEZE_REGISTRY_VERSION = "v31-freeze21b-11t-v13"
 FREEZE_ROSTER = (
     "FAMILY_COMMITTED_FADE_TAKER_90",
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
     "FAMILY_PREMIUM_REVERSION_60M",
     "FAMILY_RANDOM_CONTROL_TAKER_90",
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+    "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+    "FAMILY_GS03_CVD_DIV_TAKER",
+    "FAMILY_GS04_NOTRADE_ATR_TP",
+    "FAMILY_GSB1_CVD_DIV_REGIME",
+    "FAMILY_GSB2_REGIME_SWITCHER",
+    "FAMILY_GSB3_COMMITTED_FADE_REGIME",
 )
 # active_tile_registry_signature() per SCORE_LED_PAPER_RESEARCH_ENABLED mode:
 # Fly runs score-led ("1"); the hypothesis mode is the unset/laptop default.
 FREEZE_REGISTRY_SIGNATURES = {
-    "score_led": "03d1e249b0a135af7c6c29016b586f68247fbc539e38ec1068b89aa030f57305",
-    "hypothesis": "343923a9f07557baa1794a5bcd49c09d4a6b784539bede5178375b75d08fa729",
+    "score_led": "3c75a34e174ab7744971c8c0a408a28eba2e9562356b6151c2a097a609ad045d",
+    "hypothesis": "758a6033e31c230aa966392263d9d4951712d57535c8d1d1f6f97082af0f0000",
 }
 FREEZE_REGISTRY_SIGNATURE = FREEZE_REGISTRY_SIGNATURES["score_led"]  # the deployed Fly identity
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"

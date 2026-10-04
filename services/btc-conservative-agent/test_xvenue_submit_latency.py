@@ -77,7 +77,7 @@ def test_attempt_workers_start_before_the_evaluator_nices_itself(monkeypatch):
     order = []
     monkeypatch.setattr(bot, "_XVL_ATTEMPT_QUEUES", {})
     monkeypatch.setattr(bot, "XVL_EVALUATOR_ENABLED", True)
-    monkeypatch.setattr(bot, "cross_venue_clock_lanes", lambda: (xvs_policy.LANE,))
+    monkeypatch.setattr(bot, "evaluator_loop_lanes", lambda: (xvs_policy.LANE,))
     real_start = bot._xvl_start_attempt_workers
     monkeypatch.setattr(bot, "_xvl_start_attempt_workers", lambda lanes: order.append("workers") or real_start(lanes))
     monkeypatch.setattr(bot, "_xvl_lower_thread_priority", lambda: order.append("nice"))

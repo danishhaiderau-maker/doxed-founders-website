@@ -45,6 +45,7 @@ def _load_fanout(namespace):
     """The shared fan-out plus the per-tile verdict helper it delegates to."""
     namespace.setdefault("_patient_chase_policy", lambda _lane: None)
     namespace.setdefault("is_cross_venue_clock_lane", lambda _lane: False)
+    namespace.setdefault("is_evaluator_clock_lane", lambda _lane: False)
     _load_bot_function("_record_tile_decision_and_dispatch", namespace)
     return _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
 

@@ -44,10 +44,11 @@ def test_active_order_producing_lanes_derive_from_registry() -> None:
         spec = config.COMBO_LANE_SPECS[lane]
         assert spec.get("is_legacy") is False
         assert spec.get("is_independent_ai") is False
-        # Cross-venue clock tiles and own-AI-call tiles never consume the shared AI call.
+        # Evaluator-clock tiles (cross-venue, 3 m CVD bar close) and own-AI-call
+        # tiles never consume the shared AI call.
         own_ai_call = spec.get("own_ai_call") is True
         assert spec.get("uses_shared_ai_direction") is not (
-            config.is_cross_venue_clock_lane(lane) or own_ai_call
+            config.is_evaluator_clock_lane(lane) or own_ai_call
         )
 
 

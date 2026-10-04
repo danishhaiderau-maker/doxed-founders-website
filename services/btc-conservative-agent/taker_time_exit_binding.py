@@ -62,8 +62,11 @@ CROSS_VENUE_PREMIUM = "CROSS_VENUE_PREMIUM"
 CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD_OR_PREMIUM, CROSS_VENUE_PREMIUM})
 # Execution-cost control: the commit rule's calls with a deterministic coin side.
 RANDOM_COIN_ON_COMMITTED_CALL = "RANDOM_COIN_ON_COMMITTED_CALL"
+# GS-03 / B1: side from the 3 m CVD-divergence event (regime_bars_3m.py), never the AI.
+CVD_DIVERGENCE_3M = "CVD_DIVERGENCE_3M"
 DIRECTION_SOURCES = (
-    frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", RANDOM_COIN_ON_COMMITTED_CALL}) | CROSS_VENUE_SOURCES
+    frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", RANDOM_COIN_ON_COMMITTED_CALL, CVD_DIVERGENCE_3M})
+    | CROSS_VENUE_SOURCES
 )
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
 
@@ -87,6 +90,7 @@ EVIDENCE_BADGES = {
     "FREEZE21_HYPOTHESIS_HINT_CI_SPANS_0": "FREEZE21 hypothesis — HINT, CI spans 0",
     "FREEZE21_HYPOTHESIS_DESCRIPTIVE_ONLY": "FREEZE21 hypothesis — descriptive only, no replay",
     "FREEZE21_CONTROL": "FREEZE21 control — random side, measures execution cost",
+    "GS20261004_DISCOVERY_ONLY_CI_SPANS_0": "GS pre-registered — discovery only, CI spans 0",
 }
 
 
@@ -190,7 +194,7 @@ class TakerTimeExitBinding:
         admission = dict(admission or {})
         score_led = str(admission.get("effective_direction") or "").upper()
         reason = None
-        if self.entry["direction_source"] in CROSS_VENUE_SOURCES:
+        if self.entry["direction_source"] in CROSS_VENUE_SOURCES | {CVD_DIVERGENCE_3M}:
             reason = "NOT_A_SHARED_AI_TILE"
         elif raw.get("ai_error"):
             reason = "AI_ERROR"
