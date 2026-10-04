@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 AGENT = ROOT / "services" / "btc-conservative-agent"
 MODULE_PATH = AGENT / "chase_offset_touch_grid.py"
-ENGINE_PATH = ROOT / "services" / "btc-signal-engine" / "engine.py"
+ENGINE_PATH = AGENT / "bot.py"  # canonical bot (the btc-signal-engine mirror was removed)
 ANALYZER_PATH = AGENT / "analyzer_research_engine_v62.py"
 
 

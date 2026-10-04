@@ -304,6 +304,15 @@ def test_relay_scheduler_absent_when_owner_filter_off_is_not_stale():
     assert "relay_stale_owner_pending" not in state["since"]
 
 
+def test_relay_stale_owner_is_not_alerted_when_relay_stack_research_only():
+    state = alerts.empty_state()
+    stuck = _with(RELAY, "state_integrity.relay_push.delivery_scheduler.counts.stale_owner_pending", 22)
+    disabled = _with(stuck, "state_integrity.relay_push.relay_stack", {"relay_stack_mode": "research_only"})
+    assert sub.relay_findings(state, disabled, NOW) == {}
+    assert sub.relay_findings(state, disabled, NOW + 60 * MIN) == {}
+    assert "relay_stale_owner_pending" not in state["since"]
+
+
 # --- entries blocked --------------------------------------------------------
 
 def test_entries_blocked_after_two_hours_unpaused_only():
