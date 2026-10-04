@@ -375,6 +375,11 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
         # the epoch itself, so the stream is declared once no post-epoch row is merely timestamp-inferred.
         epoch_declared = bool(manifest and de.unstampable(base) and classes.get(de.CURRENT_UNSTAMPED)
                               and not classes.get(de.UNSTAMPED_POST_EPOCH))
+        # Under a declared epoch a stream that has written no row since the epoch start has nothing to declare
+        # yet (its older rows are classified PRE_EPOCH and handled by the purity/retention rules); it is judged
+        # on its first post-epoch row.
+        quiet_this_epoch = bool(manifest and not any(classes.get(c) for c in (
+            de.CURRENT, de.CURRENT_UNSTAMPED, de.UNSTAMPED_POST_EPOCH, de.UNDATED)))
         problems = []
         sev = "GREEN"
         non_evidence, guarded = de.non_evidence(base), de.read_guarded(base)
@@ -412,7 +417,8 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
             "stream": base, "files": len(rels), "bytes": total_bytes,
             "scanned_pct": round(100.0 * scanned / total_bytes, 1) if total_bytes else 100.0,
             "rows": sum(versions.values()), "versions": dict(sorted(versions.items(), key=lambda kv: -kv[1])),
-            "version_declared": bool(real_versions) or epoch_declared, "epoch_independent": independent,
+            "version_declared": bool(real_versions) or epoch_declared or quiet_this_epoch,
+            "quiet_this_epoch": quiet_this_epoch, "epoch_independent": independent,
             "non_evidence": non_evidence, "read_guarded": guarded,
             "current_version": current, "classes": classes, "segregated": segregated,
             "segregated_bytes": sum(s["bytes"] for s in segregated.values()),

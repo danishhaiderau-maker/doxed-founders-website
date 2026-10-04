@@ -81,6 +81,11 @@ def test_interim_delivery_fly_copy_and_wall():
     good = [f"{sh.iso(NOW - 60)} | OWNER | msg | DONE"]
     assert run({"wall_tail": ["# header", *good]})["coordination.wall"]["status"] == "GREEN"
     assert run({"wall_tail": [*good, "free text line"]})["coordination.wall"]["status"] == "AMBER"
+    md_row = [f"| DEPLOY-COORDINATOR | {sh.iso(NOW - 30)} | AMBER | paper ACTIVE"]
+    three = [f"{sh.iso(NOW - 40)} | HYPOTHESIS-TILES | DONE: study complete"]
+    wall = run({"wall_tail": [*good, *three, *md_row]})["coordination.wall"]
+    assert wall["status"] == "GREEN" and wall["observed_fields"]["last_entry_age_sec"] == 30
+    assert run({"wall_tail": [f"| {sh.iso(NOW)} | {sh.iso(NOW)} | x"]})["coordination.wall"]["status"] == "AMBER"
 
 
 def test_dedupe_keeps_worst_and_acks_never_hide_red():

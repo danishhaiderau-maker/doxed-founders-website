@@ -23,6 +23,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import statistics
 import time
 import urllib.error
@@ -296,6 +297,27 @@ def column_profile(rows: list[Any], cap: int = 5000) -> dict[str, dict[str, Any]
     return out
 
 
+# A fresh clean epoch starts with empty epoch-scoped analyzer sections; that is expected warmup, not a
+# silent collapse. Inside this window an empty analyzer/export table, or a status still reading UNKNOWN /
+# INSUFFICIENT, is reported as INFO (EMPTY_WARMUP / EXPECT_WARMUP); after it the normal RED/AMBER returns.
+# A contract opts out with "warmup_sec": 0 or sets its own window.
+EPOCH_WARMUP_SEC = 72 * 3600
+WARMUP_SURFACES = {"analyzer", "exports"}
+WARMUP_STATUS_VALUES = {None, "UNKNOWN", "WARMUP", "WARMING_UP", "INSUFFICIENT", "INSUFFICIENT_DATA", "NO_DATA", "EMPTY"}
+
+
+def _warming(spec: dict[str, Any], ctx: dict[str, Any]) -> str | None:
+    """Why an empty epoch-scoped section is expected right now (fresh-epoch warmup), or None."""
+    if spec.get("surface") not in WARMUP_SURFACES:
+        return None
+    age = ctx.get("epoch_age_sec")
+    window = float(spec.get("warmup_sec", EPOCH_WARMUP_SEC))
+    if age is None or window <= 0 or age < 0 or age >= window:
+        return None
+    return (f"epoch {ctx.get('epoch_id') or '?'} is {age / 3600:.1f}h old "
+            f"(warmup {window / 3600:.0f}h)")
+
+
 def _v(kind: str, sev: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"kind": kind, "severity": sev, "detail": detail[:400], **extra}
 
@@ -410,6 +432,9 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
             if why:
                 viol.append(_v("EMPTY_DECLARED", t.get("empty_declared_severity", AMBER),
                                f"{name}: {n} rows < {min_rows}; declared reason {why}"))
+            elif _warming(spec, ctx):
+                viol.append(_v("EMPTY_WARMUP", INFO,
+                               f"{name}: {n} rows < {min_rows}; fresh-epoch warmup: {_warming(spec, ctx)}"))
             else:
                 viol.append(_v("EMPTY_SILENT", t.get("empty_silent_severity", RED),
                                f"{name}: {n} rows < {min_rows} with no declared status/blocker explaining it"))
@@ -482,6 +507,11 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         if v is MISSING and not ex.get("required", True):
             continue
         if (v if v is not MISSING else None) not in allowed:
+            got = v if v is not MISSING else None
+            if (got is None or isinstance(got, str)) and got in WARMUP_STATUS_VALUES and _warming(spec, ctx):
+                viol.append(_v("EXPECT_WARMUP", INFO, f"{ex['path']}={json.dumps(got)} (expected {allowed}); "
+                                                      f"fresh-epoch warmup: {_warming(spec, ctx)}"))
+                continue
             viol.append(_v(ex.get("kind", "UNEXPECTED_VALUE"), ex.get("severity", AMBER),
                            f"{ex['path']}={json.dumps(None if v is MISSING else v, default=str)[:80]} (expected {allowed})"
                            + (f": {ex['why']}" if ex.get("why") else "")))
@@ -699,6 +729,17 @@ def _snapshot_ts(key: str) -> float | None:
         return None
 
 
+# Lists of defects (orphans, errors, mismatches, blockers...) are expected to shrink: a defect list going to
+# zero is a recovery, not a collapse (e.g. entry_resolution_integrity.orphan_expected_orders 5 -> 0).
+DEFECT_LIST_RE = re.compile(r"(orphan|error|fail|mismatch|violation|blocker|missing|stale|conflict|contaminat|"
+                            r"quarantin|reject|anomal|issue|problem|warning|incident|unresolved|dangling|leak|breach)",
+                            re.IGNORECASE)
+
+
+def _defect_list(path: str) -> bool:
+    return bool(DEFECT_LIST_RE.search(path.rsplit(".", 1)[-1]))
+
+
 def archive_drift(paths: Paths, cache: dict[str, Any], *, max_snapshots: int = ARCHIVE_SNAPSHOTS,
                   since_ts: float | None = None) -> dict[str, Any]:
     """Per report: list lengths and column sets across archived snapshots; flag collapse, dropped columns, disappearance.
@@ -760,7 +801,7 @@ def archive_drift(paths: Paths, cache: dict[str, Any], *, max_snapshots: int = A
                 hist = [s["lists"].get(lp) for s in prev if isinstance(s["lists"].get(lp), int)]
                 med = statistics.median(hist) if hist else 0
                 now_n = cur["lists"].get(lp)
-                if med >= 5 and (now_n is None or now_n <= 0.5 * med):
+                if med >= 5 and (now_n is None or now_n <= 0.5 * med) and not (now_n is not None and _defect_list(lp)):
                     findings.append({"series": sname, "report": name, "kind": "REPORT_LIST_COLLAPSE",
                                      "severity": RED if not now_n else AMBER, "path": lp,
                                      "detail": f"{lp}: {now_n if now_n is not None else 'absent'} rows vs median {med:g} "
@@ -1299,6 +1340,9 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
                            "genome_grid": _genome_grid(paths), "genome_grid_dir": Path(paths.exports).parent / "genome-grid"}
     fetch = fetcher or Fetcher(paths, docs)
     ctx["fetch"] = fetch
+    started = _epoch_started_ts(paths)
+    ctx["epoch_age_sec"] = (now - started) if started else None
+    ctx["epoch_id"] = (read_json(Path(paths.mirror) / "data_epoch.json") or {}).get("epoch_id")
     specs = [s for s in reg["contracts"] if tier == "heavy" or s["tier"] == "light"]
     history = store.history(HISTORY_TABLE, limit=4000, kind="CONTRACT") if store is not None else []
     identity = baseline_identity(paths, facts)
@@ -1372,7 +1416,7 @@ def _slim(r: dict[str, Any]) -> dict[str, Any]:
 def summary(doc: dict[str, Any] | None) -> dict[str, Any] | None:
     if not doc:
         return None
-    worst = [{"id": r["id"], "status": r["status"], "why": "; ".join(v["detail"] for v in r["violations"]
+    worst = [{"id": r["id"], "surface": r.get("surface"), "status": r["status"], "why": "; ".join(v["detail"] for v in r["violations"]
                                                                        if v["severity"] in (RED, AMBER))[:300]}
              for r in doc["contracts"] if r["status"] in (RED, AMBER)]
     collapse = []

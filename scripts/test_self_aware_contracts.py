@@ -448,3 +448,46 @@ def test_declared_blocker_downgrades_only_matching_violations_until_expiry():
         ct.validate_registry({"contracts": [_spec(declared_blockers=[dict(blocker, severity="GREEN")])]})
     with pytest.raises(ValueError):
         ct.validate_registry({"contracts": [_spec(declared_blockers=[{"id": "x"}])]})
+
+
+# ------------------------------------------------------------------ fresh-epoch warmup / export offenders
+
+def test_empty_analyzer_table_is_warmup_info_inside_a_fresh_epoch_and_red_after():
+    spec = _spec(tables=[{"path": "rows", "min_rows": 3}], expect=[{"path": "status", "in": ["OK"]}])
+    warm = _eval(spec, {"rows": [1], "status": "UNKNOWN"}, epoch_age_sec=3600, epoch_id="ce-x")
+    assert warm["status"] == "GREEN" and {v["kind"] for v in warm["violations"]} == {"EMPTY_WARMUP", "EXPECT_WARMUP"}
+    assert "ce-x" in warm["violations"][0]["detail"]
+    late = _eval(spec, {"rows": [1], "status": "UNKNOWN"}, epoch_age_sec=ct.EPOCH_WARMUP_SEC + 1, epoch_id="ce-x")
+    assert late["status"] == "RED" and "EMPTY_SILENT" in _kinds(late)
+    assert "EMPTY_SILENT" in _kinds(_eval(spec, {"rows": []}))  # epoch age unknown: no warmup
+    # Non-epoch surfaces, opted-out contracts and real wrong statuses keep their severity.
+    assert "EMPTY_SILENT" in _kinds(_eval({**spec, "surface": "fly"}, {"rows": []}, epoch_age_sec=60))
+    assert "EMPTY_SILENT" in _kinds(_eval({**spec, "warmup_sec": 0}, {"rows": []}, epoch_age_sec=60))
+    assert "UNEXPECTED_VALUE" in _kinds(_eval(spec, {"rows": [1, 2, 3], "status": "BROKEN"}, epoch_age_sec=60))
+
+
+def test_export_offenders_are_listed_under_the_exports_surface(store):
+    summ = {"generated_at": ct.iso(time.time()), "heavy_at": ct.iso(time.time()), "tier": "heavy",
+            "counts": {}, "surfaces": {"exports": "RED"}, "contracts_total": 1, "registry_hash": "h",
+            "offenders": [{"id": "export.summary", "surface": "exports", "status": "RED", "why": "rows: 0 < 1"}],
+            "collapse": [], "declared_blockers": [], "coverage": {"sections": 1, "covered": 1}, "uncovered": []}
+    found = {f.id: f for f in diagnose.check_contracts({"now": time.time(), "contracts": summ}, {}, store)}
+    assert found["contract.exports"].severity == "RED" and "export.summary" in found["contract.exports"].observed
+    legacy = {**summ, "offenders": [{"id": "export.summary", "status": "RED", "why": "x"}]}
+    found = {f.id: f for f in diagnose.check_contracts({"now": time.time(), "contracts": legacy}, {}, store)}
+    assert "export.summary" in found["contract.exports"].observed
+    none_listed = {**summ, "offenders": []}
+    found = {f.id: f for f in diagnose.check_contracts({"now": time.time(), "contracts": none_listed}, {}, store)}
+    assert "GREEN" not in found["contract.exports"].observed
+
+
+def test_archive_drift_treats_a_defect_list_going_to_zero_as_recovery(paths):
+    gen = paths.archive / "generations" / "2026-10-04"
+    for i, n in enumerate((6, 5, 6, 0)):
+        rd = gen / f"20261004T0{i}0000Z" / "reports"
+        rd.mkdir(parents=True)
+        with gzip.open(rd / "genome.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"collection": {"integrity": {"orphan_expected_orders": [{"o": j} for j in range(n)],
+                                                    "fills": [{"f": j} for j in range(n)]}}}, fh)
+    paths_hit = {f["path"] for f in ct.archive_drift(paths, {})["findings"] if f["kind"] == "REPORT_LIST_COLLAPSE"}
+    assert paths_hit == {"collection.integrity.fills"}

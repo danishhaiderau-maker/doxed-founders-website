@@ -176,8 +176,14 @@ def test_unstampable_csv_counts_as_declared_once_every_post_epoch_row_is_epoch_d
     (m / "trend_health.csv").write_text(f"ts,score\n{START + 5},1\n{START + 6},2\n", encoding="utf-8")
     _write(m / "execution_funnel.jsonl", [{"ts": START + 5, "stage": "scan", "data_epoch_id": EPOCH}])
     _write(m / "xvl_shadow_signals.jsonl", [{"ts": START + 5, "side": "LONG"}])
+    # Written only before the epoch: nothing to declare until its first post-epoch row.
+    (m / "expired_orders_3factor.csv").write_text(f"ts,score\n{START - 50},1\n", encoding="utf-8")
+    _write(m / "approved_but_rejected.jsonl", [{"ts": START - 50, "side": "LONG"}])
     doc = _run(paths, monkeypatch)
     by = {s["stream"]: s for s in doc["streams"]}
+    assert by["approved_but_rejected.jsonl"]["quiet_this_epoch"] is True
+    assert by["expired_orders_3factor.csv"]["version_declared"] is True
+    assert by["xvl_shadow_signals.jsonl"]["quiet_this_epoch"] is False
     assert by["trend_health.csv"]["version_declared"] is True
     assert by["execution_funnel.jsonl"]["version_declared"] is True
     assert doc["undeclared_streams"] == ["xvl_shadow_signals.jsonl"]

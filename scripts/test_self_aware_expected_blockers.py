@@ -24,10 +24,13 @@ def _dead(observed="ai_calls.context.delta_change=DEAD_ZERO (0.0)", severity="AM
 
 def test_shipped_registry_is_valid_and_names_a_fix_and_eta_for_every_blocker():
     blockers = eb.load()
-    assert blockers, "registry must not be empty while post-freeze fixes are pending"
     for b in blockers:
         assert b["fix"].startswith("https://github.com/") and parse_ts(b["eta"])
-    assert any((b.get("match") or {}).get("finding") == "data.dead_fields" for b in blockers)
+    # A blocker leaves the registry once its fix is deployed; the retirement keeps the audit trail.
+    doc = json.loads(eb.REGISTRY.read_text(encoding="utf-8"))
+    live = {b["id"] for b in blockers}
+    for r in doc.get("retired") or []:
+        assert r["id"] not in live and r.get("retired_at") and r.get("reason")
 
 
 def test_registry_rejects_missing_fields_duplicates_and_bad_eta(tmp_path):
@@ -66,7 +69,8 @@ def test_green_finding_is_not_annotated():
     assert "expected_blockers" not in f.evidence
 
 
-def test_diagnose_summary_finding_alarms_only_when_overdue():
+def test_diagnose_summary_finding_alarms_only_when_overdue(monkeypatch):
+    monkeypatch.setattr(eb, "load", lambda *a, **k: [BLOCKER])
     pending = diagnose.check_expected_blockers({"now": BEFORE}, [_dead()])
     assert pending.id == "selfaware.expected_blockers" and pending.severity == "AMBER" and not pending.emit_alarm
     overdue = diagnose.check_expected_blockers({"now": parse_ts("2030-01-01T00:00:00Z")}, [])

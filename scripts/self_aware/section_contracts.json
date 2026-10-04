@@ -137,6 +137,7 @@
      "allow_http": {"404": "AMBER"},
      "freshness": {"path": "generated_at", "max_age_sec": 93600},
      "required": ["status", "feature_set_sha", "trial_count", "prereg.chain.chain_ok", "status_inventory.counts"],
+     "covers": ["details#indicator-edge"],
      "reconcile": "indicator_edge"},
 
     {"id": "selfaware.edges_fill_model", "surface": "selfaware", "title": "Edge tracker hit rates are REALISTIC_V1 (net of spread)", "tier": "heavy",

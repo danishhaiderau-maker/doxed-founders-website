@@ -348,23 +348,47 @@ def fly_copy_check(published, local_ts, now, check, fmt_age, parse_ts, t):
                  fields={"lag_sec": lag, "published_verdict": published.get("verdict")})
 
 
+def wall_entry_ts(line: str, parse_ts) -> float | None:
+    """Timestamp of a well-formed WALL entry, else None.
+
+    Writers use two shapes: 'ts | owner | msg [| STATE]' and the markdown-row form '| owner | ts | [STATE |] msg'.
+    Well-formed = at least three non-empty '|' fields with an ISO timestamp in the first or second one and an
+    owner in the other.
+    """
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    fields = [f.strip() for f in text.split("|")]
+    if len(fields) < 3 or not all(fields[:3]):
+        return None
+    for i in (0, 1):
+        if re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d", fields[i]):
+            ts = parse_ts(fields[i])
+            owner = fields[1 - i]
+            if ts and owner and not re.match(r"^\d{4}-\d\d-\d\dT", owner):
+                return ts
+    return None
+
+
 def wall_check(lines, now, check, fmt_age, parse_ts, t):
     if lines is None:
         return check("coordination.wall", "coordination", AMBER, "WALL-STATUS-FLY.md unreadable",
                      "WALL readable and well-formed")
     entries = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
     recent = entries[-int(t["wall_recent_lines"]):]
-    bad = [ln for ln in recent if not WALL_LINE.match(ln)]
+    bad = [ln for ln in recent if wall_entry_ts(ln, parse_ts) is None]
     last_ts = None
     for ln in reversed(entries):
-        last_ts = parse_ts(ln.split("|", 1)[0].strip())
+        last_ts = wall_entry_ts(ln, parse_ts)
         if last_ts:
             break
     age = _age(now, last_ts)
     st = AMBER if bad or age is None or age > t["wall_quiet_amber_sec"] else GREEN
     return check("coordination.wall", "coordination", st,
                  f"last entry {fmt_age(age)} ago; {len(bad)} malformed of last {len(recent)}",
-                 "every recent line is 'timestamp | owner | msg | STATE'",
+                 "every recent line is 'timestamp | owner | msg [| STATE]' or '| owner | timestamp | ... |'",
                  "; ".join(b[:80] for b in bad[:3]),
                  fields={"last_entry_age_sec": age, "malformed_recent": len(bad), "recent": len(recent)})
 
