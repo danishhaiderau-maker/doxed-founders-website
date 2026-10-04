@@ -905,3 +905,24 @@ class V3CandidateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_cycle_atr_index_reads_through_the_epoch_guard(tmp_path):
+    import json as _json
+
+    import analyzer_epoch_guard as aeg
+    import data_epoch as de
+    from research_v3_candidates import _cycle_atr_by_event
+
+    start = 1_791_000_000.0
+    (tmp_path / "cycle_3m_universe.jsonl").write_text("\n".join(_json.dumps(r) for r in (
+        {"trade_id": "pre", "atr14_pct_3m": 0.2, "ts": start - 30},
+        {"trade_id": "post", "atr14_pct_3m": 0.3, "ts": start + 30},
+    )) + "\n", encoding="utf-8")
+    try:
+        aeg.set_process_guard(aeg.EpochGuard(de.new_manifest("ce-20261004-test", started_at_ts=start)))
+        assert _cycle_atr_by_event(tmp_path) == {"post": 0.3}
+        assert _cycle_atr_by_event(tmp_path / "missing") == {}
+    finally:
+        aeg.set_process_guard(None)
+    assert _cycle_atr_by_event(tmp_path) == {"pre": 0.2, "post": 0.3}
