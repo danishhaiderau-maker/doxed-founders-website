@@ -2350,6 +2350,11 @@ def proof_summary(active: Any, now: float) -> dict[str, Any] | None:
 ALARM_RETAIN_SEC = 30 * 24 * HOUR
 ALARM_PUSH_CHUNK = 120
 ALARM_UNSUPPORTED_RETRY_SEC = HOUR
+# Fly keeps at most this many alarm events (system_health_alerts.RETAIN_EVENTS).
+FLY_ALARM_RETAIN_EVENTS = 2000
+# A caught-up cursor while Fly holds fewer events than the local log means Fly lost history the shrink rule
+# missed (e.g. the first post-restart push came from an older watcher); rewind at most this often.
+ALARM_GAP_REWIND_COOLDOWN_SEC = HOUR
 
 
 def read_alarm_log(path: Path, now: float, max_bytes: int = 4 * 1024 * 1024) -> list[dict[str, Any]]:
@@ -2452,8 +2457,10 @@ def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: 
     body = banner_payload(report)
     unsupported_until = float(sync.get("unsupported_until") or 0)
     chunk: list[dict[str, Any]] = []
+    local_events: list[dict[str, Any]] = []
     if now >= unsupported_until:
-        chunk = alarm_chunk(read_alarm_log(health_dir(opts) / "alarms.jsonl", now), sync.get("through_ts"))
+        local_events = read_alarm_log(health_dir(opts) / "alarms.jsonl", now)
+        chunk = alarm_chunk(local_events, sync.get("through_ts"))
         body["alarm_events"] = chunk
     digest = monitor_digest_for_push(report, state, now, digest_builder)
     if digest is not None:
@@ -2477,9 +2484,18 @@ def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: 
         cursor = sync.get("through_ts") if not chunk else sent_through
         if cursor is None and not chunk:
             cursor = through
-        sync.update(through_ts=None if restarted else cursor, count=count, synced_at=now,
-                    unsupported_until=None, last_reset_at=now if restarted else sync.get("last_reset_at"))
-        return f"ok alarms={count} sent={len(chunk)}" + (" (Fly history reset; resending)" if restarted else "")
+        newest_local = local_events[-1]["_ts"] if local_events else None
+        caught_up = newest_local is None or (cursor is not None and cursor >= newest_local - 1e-3)
+        last_reset = float(sync.get("last_reset_at") or 0)
+        gap = (not restarted and caught_up and isinstance(count, int)
+               and count < min(len(local_events), FLY_ALARM_RETAIN_EVENTS)
+               and now - last_reset >= ALARM_GAP_REWIND_COOLDOWN_SEC)
+        rewind = restarted or gap
+        sync.update(through_ts=None if rewind else cursor, count=count, synced_at=now,
+                    unsupported_until=None, last_reset_at=now if rewind else sync.get("last_reset_at"))
+        note = (" (Fly history reset; resending)" if restarted else
+                f" (Fly holds {count} of {len(local_events)} events; resending)" if gap else "")
+        return f"ok alarms={count} sent={len(chunk)}" + note
     if chunk:
         sync.update(unsupported_until=now + ALARM_UNSUPPORTED_RETRY_SEC, through_ts=None)
     return "ok (Fly has no alarm history endpoint yet)"
