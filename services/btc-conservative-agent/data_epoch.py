@@ -68,6 +68,12 @@ NON_EVIDENCE_BASES = frozenset({
 READ_GUARDED_BASES = frozenset({
     "taker_signal_counterfactuals.jsonl", "adaptive_entry_decisions.jsonl", "expired_orders_3factor.csv",
 })
+# Low-frequency ledgers whose writer stamps data_epoch_id + bot_version on every row
+# (pinned by test_execution_settings_history_rows_declare_epoch). Rows without a
+# stamp were written before the writer stamped; the compatibility monitor treats
+# them as LEGACY for the data-version declaration (row classification and the
+# analyzer epoch guard are unchanged).
+STAMPED_WRITER_BASES = frozenset({"execution_settings_history.jsonl"})
 # Streams whose writer cannot add a column/field; classified by timestamp.
 UNSTAMPABLE_PREFIXES = ("v3/",)
 UNSTAMPABLE_SUFFIXES = (".csv",)

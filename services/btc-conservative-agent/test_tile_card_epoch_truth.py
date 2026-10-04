@@ -180,3 +180,15 @@ def test_boot_segregates_after_session_trades_load():
     main_src = BOT_SOURCE[BOT_SOURCE.index("    load_session_trades_from_csv()\n    _recompute_research_balance_from_trades()"):]
     assert main_src.index("_segregate_lane_pnl_ledger_for_epoch()") < main_src.index("_start_api_state_cache_refresher()")
     assert "exit_reason=exit_reason," in BOT_SOURCE
+
+
+def test_execution_settings_history_rows_declare_epoch():
+    """Every execution_settings_history row carries data_epoch_id + bot_version (data.compat_declared)."""
+    body = ast.get_source_segment(BOT_SOURCE, next(
+        n for n in BOT_TREE.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_record_execution_settings_epoch"))
+    assert '"bot_version": EXECUTION_FIX_VERSION' in body
+    assert 'row["data_epoch_id"] = epoch_id' in body
+    assert 'globals().get("_DATA_EPOCH_MANIFEST")' in body
+    import data_epoch
+    assert "execution_settings_history.jsonl" in data_epoch.STAMPED_WRITER_BASES
