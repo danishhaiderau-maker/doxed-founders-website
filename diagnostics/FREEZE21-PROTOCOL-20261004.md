@@ -194,5 +194,19 @@ offline by Grok Strategist. Kill action: owner decision, tile OFF with
 
 As above, with 11 lanes: the gate receipt lists all eleven ON, and
 `research_freeze.epoch_id` is `ce-20261004-v31-freeze21b` on day 1/21.
-`/api/xvl_evaluator` (the health snapshot) also reports `regime_bars_3m`
-(`hydrated`, bar count, latest ATR percentile, ADX and spread).
+The evaluator health snapshot is `GET /api/status` ->
+`collection.xvl_evaluator` (there is no `/api/xvl_evaluator` route). Per lane it
+reports `by_status`, `stale_by_reason` (cumulative since process start) and the
+paper attempt counters; `lanes.FAMILY_GS03_CVD_DIV_TAKER.engine` is the
+`regime_bars_3m_v1` engine (`hydrated`, `bars`, latest ATR percentile, ADX and
+spread).
+
+### Expected alerts during the freeze
+
+- `proof.latest` FAILING on `no_manual_intervention`: the 19:37 AEDT
+  (08:37Z) manual flatten inside the FREEZE21B boundary reset is a deliberate
+  owner-approved intervention; the proof window clears once it rolls out of
+  the window. Not a defect.
+- Fresh-epoch warmup (analyzer studies/genome below their row minimums,
+  `MEAN_WARMING_UP` on GS-01/H-C for the first hour) and an external market
+  stream marked DEGRADED are expected and are not freeze defects.
