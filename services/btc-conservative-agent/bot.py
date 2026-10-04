@@ -20,6 +20,10 @@ import system_health_banner
 import system_health_alerts
 import runtime_uptime
 import monitor_api
+try:
+    import monitor_integrity as _monitor_integrity
+except Exception:  # pragma: no cover - read-only telemetry must never block boot
+    _monitor_integrity = None
 import uuid
 import requests
 import glob
@@ -5770,6 +5774,10 @@ _microstructure_rows_written = 0
 _microstructure_write_failures = 0
 _microstructure_admission_suppressions = 0
 _microstructure_io_write_failures = 0
+# Read-only monitor telemetry (GET /api/monitor/integrity); observers never raise.
+_TAPE_CONTINUITY = _monitor_integrity.TapeContinuityTracker() if _monitor_integrity else None
+_AI_CALL_WINDOW = _monitor_integrity.AiCallWindow() if _monitor_integrity else None
+_FILL_MARKOUT_AGG = _monitor_integrity.FillMarkoutAggregator() if _monitor_integrity else None
 _fill_markout_book = execution_markouts.MarkoutBook()
 _taker_counterfactual_book = execution_markouts.MarkoutBook()
 _execution_markout_counters = {
@@ -19356,6 +19364,10 @@ def record_ai_provider_outcome(
     if purpose not in AI_PROVIDER_HEALTH_PURPOSES:
         return
     now = float(now or time.time())
+    ai_window = globals().get("_AI_CALL_WINDOW")  # read-only monitor telemetry; never raises
+    if ai_window is not None:
+        ai_window.observe(ok=bool(ok), latency_ms=latency_ms, now=now,
+                          error_class=None if ok else classify_ai_provider_error(error))
     with _ai_provider_health_lock:
         health = _ai_provider_health
         health["last_attempt_ts"] = now
@@ -27379,6 +27391,9 @@ def microstructure_capture_loop():
     global _microstructure_write_failures, _microstructure_admission_suppressions
     global _microstructure_io_write_failures
     next_bucket = int(time.time()) + 1
+    tape_continuity = globals().get("_TAPE_CONTINUITY")  # read-only monitor telemetry; never raises
+    if tape_continuity is not None:
+        tape_continuity.prime(_monitor_integrity.read_last_bucket_ts(MICROSTRUCTURE_TAPE_FILE))
     while not shutdown_event.is_set():
         wait = max(0.01, next_bucket + 1.0 - time.time())
         if shutdown_event.wait(wait):
@@ -27413,11 +27428,12 @@ def microstructure_capture_loop():
         except Exception as exc:
             logger.debug(f"[AI SHADOW] tape ring append skipped: {exc}")
         append_outcome = {}
-        if _safe_append_jsonl(
+        written = _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
             label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
             outcome=append_outcome,
-        ):
+        )
+        if written:
             _microstructure_last_bucket = bucket
             _microstructure_rows_written += 1
         else:
@@ -27426,6 +27442,9 @@ def microstructure_capture_loop():
                 _microstructure_admission_suppressions += 1
             else:
                 _microstructure_io_write_failures += 1
+        if tape_continuity is not None:
+            tape_continuity.observe(bucket, written=bool(written), fresh=(row or {}).get("fresh"),
+                                    valid_bbo=(row or {}).get("valid_bbo"))
         _sample_execution_markouts(bid, ask, last, source_ts)
 
 
@@ -27436,6 +27455,9 @@ def _sample_execution_markouts(bid, ask, last, quote_ts) -> None:
         (_taker_counterfactual_book, execution_markouts.TAKER_FILE, "TAKER_SIGNAL_COUNTERFACTUAL", "taker_rows_written"),
     ):
         for row in book.sample(now=now, bid=bid, ask=ask, last=last, quote_ts=quote_ts):
+            fill_agg = globals().get("_FILL_MARKOUT_AGG") if label == "FILL_MARKOUT" else None
+            if fill_agg is not None:  # read-only monitor telemetry; never raises
+                fill_agg.observe(row, now=now)
             if _safe_append_jsonl(path, row, label=label, fallback_on_error=False):
                 _execution_markout_counters[counter] += 1
             else:
@@ -31535,6 +31557,8 @@ _READ_ONLY_GET_PATHS = {
 # Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
 # that token is never accepted by _admin_authed() or any other route.
 _MONITOR_DIGEST_PATH = "/api/monitor/digest"
+# Admin token OR the read-only MONITOR_READ_TOKEN bearer; authenticated in the handler.
+_MONITOR_INTEGRITY_PATH = "/api/monitor/integrity"
 _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -31810,7 +31834,7 @@ def _emergency_api_guard():
     # Read-only GETs are allowed without a token (still rate-limited above).
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
         return None
-    if method == "GET" and path == _MONITOR_DIGEST_PATH:
+    if method == "GET" and path in (_MONITOR_DIGEST_PATH, _MONITOR_INTEGRITY_PATH):
         return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
@@ -43855,6 +43879,38 @@ def monitor_digest():
         stored = copy.deepcopy(_MONITOR_DIGEST)
     return _monitor_response(monitor_api.digest_view(stored, time.time(), BOT_INSTANCE_ID),
                              monitor_api.MAX_DIGEST_BYTES + 1024)
+
+
+@app.route('/api/monitor/integrity')
+def monitor_integrity():
+    """Read-only: 1 s tape continuity, AI call window, fill markouts, process identity (monitor_integrity.py).
+
+    Auth: X-Bot-Admin-Token (or admin cookie) or ``Authorization: Bearer <MONITOR_READ_TOKEN>``.
+    No state lock, no trade lock, no file I/O on the request path.
+    """
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, 256, status=401)
+    if _monitor_integrity is None or _TAPE_CONTINUITY is None or _AI_CALL_WINDOW is None:
+        return _monitor_response({"schema": "monitor_integrity_v1", "error": "MODULE_UNAVAILABLE"}, 256, status=503)
+    now = time.time()
+    extras = {}
+    freeze_public = globals().get("_research_freeze_public")
+    if callable(freeze_public):
+        extras["research_freeze"] = freeze_public
+    payload = _monitor_integrity.build_payload(
+        now=now, tape=_TAPE_CONTINUITY, ai=_AI_CALL_WINDOW, fills=globals().get("_FILL_MARKOUT_AGG"),
+        identity=_monitor_integrity.process_identity(
+            pid=os.getpid(), git_rev=_runtime_git_rev(), boot_id=BOT_INSTANCE_ID,
+            process_started_ts=globals().get("process_boot_time")),
+        extras=extras, fit=monitor_api.fit_to_budget)
+    payload["boot_id"] = BOT_INSTANCE_ID
+    return _monitor_response(payload, _monitor_integrity.MAX_BYTES + 1024)
+
+
+def monitor_integrity_authorized() -> bool:
+    return _monitor_integrity is not None and _monitor_integrity.is_authorized(
+        admin_ok=_admin_authed(), authorization=request.headers.get("Authorization"),
+        monitor_token=_MONITOR_READ_TOKEN, bearer_matches=monitor_api.bearer_matches)
 
 
 @app.route('/api/research/shadow_exits')
