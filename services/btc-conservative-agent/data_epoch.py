@@ -52,10 +52,13 @@ EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bund
 # ledger, runtime telemetry, tile-retirement and pre-entry handoff receipts). They legitimately span epochs
 # (restart recovery / audit trail), are read by no analyzer path, and are excluded from the epoch-purity
 # audit and from the compatibility RED rule (issue #420). Top-level runtime files only.
+# The laptop canonical store's hash-chained migration journal: validated from genesis on every
+# analyzer run, so it spans every epoch by design, and it holds dataset provenance, not strategy rows.
+PROVENANCE_JOURNAL_BASES = frozenset({"canonical_dataset_manifest.jsonl"})
 NON_EVIDENCE_BASES = frozenset({
     "relay_outbox_quarantine.jsonl", "relay_outbox_retired.jsonl", "runtime_telemetry_1m.jsonl",
     "retired_tile_boundary_receipts.jsonl", "pre_entry_evidence_handoffs.jsonl",
-})
+}) | PROVENANCE_JOURNAL_BASES
 # Evidence streams that survive the boundary reset in a live Fly head (unknown to the reset inventory or
 # kept as accounting) and may therefore hold pre-epoch rows, but whose EVERY analyzer reader admits rows
 # through the epoch guard (classify / EpochGuard) or an epoch-start bound. Their pre-epoch rows are on disk
