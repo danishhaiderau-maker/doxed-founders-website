@@ -766,6 +766,20 @@ def test_fly_push_sends_unsynced_alarm_events_in_bounded_chunks(tmp_path, monkey
     assert state["fly_alarm_sync"]["through_ts"] is None
     assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=121 sent=120"
     assert sh.push_fly_banner(report, opts, state, now, post=fly) == "ok alarms=151 sent=31"
+    # The shrink was missed (an older watcher already synced the post-restart count): a caught-up cursor while
+    # Fly holds fewer events than the local log rewinds once per cooldown and refills Fly.
+    newest = held[-1]
+    held[:] = [newest]
+    state["fly_alarm_sync"].update(count=1, last_reset_at=None)
+    later = now + 60
+    assert sh.push_fly_banner(report, opts, state, later, post=fly) == "ok alarms=1 sent=0 (Fly holds 1 of 151 events; resending)"
+    assert sh.push_fly_banner(report, opts, state, later, post=fly) == "ok alarms=121 sent=120"
+    assert sh.push_fly_banner(report, opts, state, later, post=fly) == "ok alarms=151 sent=31"
+    assert sh.push_fly_banner(report, opts, state, later, post=fly) == "ok alarms=151 sent=0"
+    # Inside the cooldown a persistent shortfall (Fly rejected an event) does not rewind again.
+    state["fly_alarm_sync"]["count"] = 150
+    held.pop(0)
+    assert sh.push_fly_banner(report, opts, state, later + 60, post=fly) == "ok alarms=150 sent=0"
 
 
 def test_fly_push_backs_off_when_fly_lacks_the_history_endpoint(tmp_path, monkeypatch):
