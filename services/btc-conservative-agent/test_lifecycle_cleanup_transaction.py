@@ -14,7 +14,6 @@ from lifecycle_bundles import COMPLETION_SCHEMA, LifecycleKey, materialize_bundl
 from research_v3_contract import canonical_json
 
 BOT_SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
-ENGINE_SOURCE = (Path(__file__).parents[1] / "btc-signal-engine" / "engine.py").read_text(encoding="utf-8")
 
 
 def _fixture(tmp_path: Path):

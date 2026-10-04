@@ -117,3 +117,27 @@ def test_test_alert_fires_once_and_resolves_after_two_clean_runs():
     assert _run(state, {"test_alert": "synthetic"}, 0)[0] == {"test_alert": "alert"}
     assert _run(state, {}, 900) == ({}, [])
     assert _run(state, {}, 1800) == ({}, ["test_alert"])
+
+
+def test_every_collection_alarm_finding_has_a_policy_and_never_crashes_the_run():
+    # 4 Oct 2026: relay_outbox_stale_owner had no policy, so evaluate() raised
+    # KeyError and the scheduled liveness/readiness check failed outright.
+    import fly_monitor_rules as rules
+
+    health = {
+        "research_collection": {
+            "alarms": ["RELAY_OUTBOX_STALE_OWNER_PENDING", "LEDGER_WRITE_FAILURES",
+                       "EXECUTION_FUNNEL_HOOK_FAILURES", "COLLECTOR_V22_SEAL_DEGRADED"],
+            "runtime_failures": {"collector_v22_seal_degraded": {"error": "V22_SEAL_RECEIPT_INVALID:2"}},
+        },
+        "relay_outbox": {"stale_owner_pending": 3, "stale_owner_age_sec": 2000.0},
+    }
+    findings = rules.collection_findings(health)
+    assert set(findings) == {"relay_outbox_stale_owner", "ledger_write_failures",
+                             "execution_funnel_hook_failures", "collector_v22_seal_degraded"}
+    assert set(findings) <= set(alerts.POLICIES)
+    state = alerts.empty_state()
+    decisions, _ = alerts.evaluate(state, {**findings, "brand_new_rule": "x"}, now=0, maintenance=False)
+    by_key = {d["key"]: d for d in decisions}
+    assert by_key["brand_new_rule"]["severity"] == alerts.WARNING
+    assert all(d["severity"] == alerts.WARNING for d in decisions)

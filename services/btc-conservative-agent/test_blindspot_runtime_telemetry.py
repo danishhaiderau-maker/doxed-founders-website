@@ -68,7 +68,8 @@ def test_funnel_hook_failure_alarms():
 def test_never_implemented_funnel_hook_is_reported_not_alarmed():
     funnel = th.FailureCounters(clock=lambda: 10_000.0)
     try:
-        from execution_funnel import funnel_on_limit_chase  # noqa: F401
+        # funnel_on_limit_chase now exists; probe a hook that never did.
+        from execution_funnel import funnel_on_never_implemented_hook  # noqa: F401
     except ImportError as exc:
         funnel.failure("limit_chase", exc)
     health = collection_ns(10_000.0, funnel=funnel)(10_000.0)

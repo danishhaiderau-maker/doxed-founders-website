@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 import bitfinex_cost_profile
+from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
 
 REPORT_FILE = "tile_evidence_points_report.json"
 REPORT_SCHEMA = "tile_evidence_points_v1"
@@ -712,8 +713,8 @@ def _read_csv(path: str | None) -> list[dict[str, Any]]:
     if not path or not Path(path).is_file():
         return []
     csv.field_size_limit(1 << 30)
-    with open(path, encoding="utf-8-sig", errors="replace", newline="") as handle:
-        return list(csv.DictReader(handle))
+    with guarded_open(path, encoding="utf-8-sig", errors="replace", newline="") as handle:
+        return epoch_csv_rows(csv.DictReader(handle), path)
 
 
 def rotation_family(path: str | None) -> list[Path]:
@@ -740,22 +741,29 @@ def _read_jsonl(path: str | None, keep: Callable[[dict], bool] | None = None,
                 project: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     rows = []
     for member in rotation_family(path):
-        with open(member, encoding="utf-8-sig", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if isinstance(row, dict) and (keep is None or keep(row)):
-                    rows.append({k: row.get(k) for k in project} if project else row)
+        for line in epoch_lines(member, encoding="utf-8-sig", errors="replace"):
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(row, dict) and (keep is None or keep(row)):
+                rows.append({k: row.get(k) for k in project} if project else row)
     return rows
 
 
-def load_evidence_inputs(resolve: Callable[[str], str | None]) -> dict[str, Any]:
-    """Read every source ledger through the analyzer's data-path resolver."""
+def load_evidence_inputs(resolve: Callable[[str], str | None],
+                         admit: Callable[[str, dict], bool] | None = None) -> dict[str, Any]:
+    """Read every source ledger through the analyzer's data-path resolver.
+
+    ``admit`` is the analyzer's clean-epoch guard; the expiry ledger survives the
+    boundary reset with pre-epoch rows (``data_epoch.READ_GUARDED_BASES``, #420).
+    """
+    expired = _read_csv(resolve(EXPIRED_FILE))
+    if admit is not None:
+        expired = [row for row in expired if admit(EXPIRED_FILE, row)]
     return {
         "trades": _read_csv(resolve(TRADES_FILE)),
-        "expired": _read_csv(resolve(EXPIRED_FILE)),
+        "expired": expired,
         "opportunities": _read_jsonl(resolve(OPPORTUNITY_FILE),
                                      lambda r: r.get("event") in {"ORDER_SUBMITTED", "FILLED"},
                                      ("lane", "trade_id", "event", "ts")),

@@ -19,6 +19,8 @@ import os
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
+from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
+
 SCHEMA = "adaptive_entry_funnel_v1"
 REPORT_FILE = "adaptive_entry_funnel_report.json"
 DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
@@ -47,14 +49,13 @@ def _finite(value):
 def _read_jsonl(path: str) -> list[dict[str, Any]]:
     rows = []
     try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+        for line in epoch_lines(path, encoding="utf-8"):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     except OSError:
         return []
     return rows
@@ -62,8 +63,8 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
 
 def _read_csv(path: str) -> list[dict[str, Any]]:
     try:
-        with open(path, newline="", encoding="utf-8-sig") as handle:
-            return list(csv.DictReader(handle))
+        with guarded_open(path, newline="", encoding="utf-8-sig") as handle:
+            return epoch_csv_rows(csv.DictReader(handle), path)
     except OSError:
         return []
 
@@ -188,13 +189,23 @@ def build_report(*, decisions, taker_counterfactuals, trades, expired,
     }
 
 
+def _admitted(admit, path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows the analyzer epoch guard admits (``admit(relpath, row)``); all rows when no guard is given."""
+    if admit is None:
+        return rows
+    name = os.path.basename(path)
+    return [row for row in rows if admit(name, row)]
+
+
 def build_report_from_paths(*, decisions_path, counterfactual_path, trades_path,
-                            expired_path, current_version) -> dict[str, Any]:
+                            expired_path, current_version, admit=None) -> dict[str, Any]:
+    # ``admit`` is the analyzer's clean-epoch guard: these streams survive the boundary reset
+    # with pre-epoch rows (data_epoch.READ_GUARDED_BASES), so every row passes it (#420).
     report = build_report(
-        decisions=_read_jsonl(decisions_path),
-        taker_counterfactuals=_read_jsonl(counterfactual_path),
-        trades=_read_csv(trades_path),
-        expired=_read_csv(expired_path),
+        decisions=_admitted(admit, decisions_path, _read_jsonl(decisions_path)),
+        taker_counterfactuals=_admitted(admit, counterfactual_path, _read_jsonl(counterfactual_path)),
+        trades=_admitted(admit, trades_path, _read_csv(trades_path)),
+        expired=_admitted(admit, expired_path, _read_csv(expired_path)),
         current_version=current_version,
     )
     report["inputs"] = {

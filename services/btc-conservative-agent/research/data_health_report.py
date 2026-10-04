@@ -28,6 +28,7 @@ from collections import Counter
 from typing import Callable, Iterable, Optional
 
 import cross_venue_tape as cvt
+from analyzer_epoch_guard import epoch_lines
 import market_context_tape as mct
 
 SCHEMA = "data_health_v1"
@@ -66,16 +67,15 @@ def _generations(path: str) -> list:
 def _iter_json(paths: Iterable[str]):
     for path in paths:
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(row, dict):
-                        yield row
+            for line in epoch_lines(path, "r", encoding="utf-8", errors="replace"):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    yield row
         except OSError:
             continue
 
@@ -319,22 +319,21 @@ def signal_replay_health(data_dir: str, max_bytes: int = REPLAY_MAX_BYTES) -> di
     reasons = Counter()
     for g in reversed(picked):
         try:
-            with open(g, "rb") as handle:
-                for line in handle:
-                    head = line[:HEAD_BYTES]
-                    tid = _TRADE_ID_RE.search(head)
-                    if not tid:
-                        continue
-                    rows += 1
-                    reason = _REASON_RE.search(head)
-                    lane = _LANE_RE.search(head)
-                    complete = _COMPLETE_RE.search(head)
-                    r = reason.group(1).decode() if reason else "UNKNOWN"
-                    reasons[r] += 1
-                    c = per_trade.setdefault(tid.group(1).decode(), {"complete": False, "reasons": set(), "lane": None})
-                    c["complete"] |= bool(complete and complete.group(1) == b"true")
-                    c["reasons"].add(r)
-                    c["lane"] = lane.group(1).decode() if lane else c["lane"]
+            for line in epoch_lines(g, "rb", relpath="signal_replay.jsonl"):
+                head = line[:HEAD_BYTES]
+                tid = _TRADE_ID_RE.search(head)
+                if not tid:
+                    continue
+                rows += 1
+                reason = _REASON_RE.search(head)
+                lane = _LANE_RE.search(head)
+                complete = _COMPLETE_RE.search(head)
+                r = reason.group(1).decode() if reason else "UNKNOWN"
+                reasons[r] += 1
+                c = per_trade.setdefault(tid.group(1).decode(), {"complete": False, "reasons": set(), "lane": None})
+                c["complete"] |= bool(complete and complete.group(1) == b"true")
+                c["reasons"].add(r)
+                c["lane"] = lane.group(1).decode() if lane else c["lane"]
         except OSError:
             continue
     distinct = len(per_trade)

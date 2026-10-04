@@ -17,6 +17,7 @@ import re
 from collections import Counter
 from typing import Any, Iterable, Iterator, Mapping, Optional
 
+from analyzer_epoch_guard import epoch_lines
 from multiverse_entry_grid import GRID_FILE, rotation_family
 
 SCHEMA = "multiverse_collection_health_v1"
@@ -47,10 +48,9 @@ def _signature(path: str) -> Optional[tuple]:
 
 def _lines(path: str) -> Iterator[str]:
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if line.strip():
-                    yield line
+        for line in epoch_lines(path, "r", encoding="utf-8", errors="replace"):
+            if line.strip():
+                yield line
     except OSError:
         return
 

@@ -14,6 +14,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from analyzer_epoch_guard import epoch_lines
+
 REPORT_SCHEMA = "research_completeness_report_v1"
 LIFECYCLE_FIELDS = (
     "session_label", "mae_ts", "mfe_ts", "fill_revalidation_count",
@@ -50,19 +52,18 @@ def load_shadow_rows(data_dir: str | Path) -> tuple[list[dict[str, Any]], dict[s
         path = Path(data_dir) / name
         count = 0
         if path.is_file():
-            with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-                for line in handle:
-                    if count >= MAX_SHADOW_ROWS_PER_FILE:
-                        receipt["truncated"] = True
-                        break
-                    try:
-                        row = json.loads(line)
-                    except (json.JSONDecodeError, TypeError):
-                        receipt["parse_errors"] += 1
-                        continue
-                    if isinstance(row, dict):
-                        rows.append(row)
-                        count += 1
+            for line in epoch_lines(path, "r", encoding="utf-8-sig", errors="replace"):
+                if count >= MAX_SHADOW_ROWS_PER_FILE:
+                    receipt["truncated"] = True
+                    break
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    receipt["parse_errors"] += 1
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+                    count += 1
         receipt["files"][name] = count
     return rows, receipt
 

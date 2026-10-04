@@ -43,6 +43,12 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   # v1/v2 stay readable/ACKable (no shipper writes them) until the laptop holds
   # every seq; only then may clean-epoch-wipe remove them.
   RESEARCH_SEGMENTS_ARCHIVE_PREFIXES = "v1=/app/data/segment-shipper,v2=/app/data/segment-shipper-v2"
+  # Paper-only research: the Bitfinex copy relay is disarmed and PAUSED, so no
+  # relay-state pusher, no /api/relay-state background refresher, no outbox HTTP
+  # delivery, a 5 s (not 1 s) canonical execution refresh, and the stale-owner
+  # outbox state is INFO instead of a permanent collection ALARM. Set "active"
+  # (plus the re-arm runbook) only when the relay is deliberately re-enabled.
+  RELAY_STACK_MODE = "research_only"
 
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]

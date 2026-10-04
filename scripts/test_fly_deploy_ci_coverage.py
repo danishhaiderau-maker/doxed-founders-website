@@ -12,7 +12,7 @@ def _focused_gate() -> str:
     start = text.index(
         "      - name: Verify transactional and local research safety regressions"
     )
-    end = text.index("      - name: Verify canonical signal-engine parity", start)
+    end = text.index("      - name: Verify canonical signal probe", start)
     return text[start:end]
 
 

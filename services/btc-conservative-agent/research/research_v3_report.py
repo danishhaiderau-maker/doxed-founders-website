@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from analyzer_epoch_guard import epoch_csv_rows, guarded_open
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import (
@@ -265,6 +266,10 @@ def _recover_expired_order_resolutions(
     path = Path(data_dir) / "expired_orders_3factor.csv"
     if not path.is_file():
         return {}
+    # READ_GUARDED stream (#420): under a declared clean epoch only rows of that epoch may resolve an edge.
+    import data_epoch as _de
+
+    epoch_manifest = _de.load_manifest(Path(data_dir) / _de.MANIFEST_NAME)
     decision_by_call_lane: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for decision in expected_decisions:
         shared_call = str(decision.get("shared_ai_call_id") or "").strip()
@@ -273,8 +278,10 @@ def _recover_expired_order_resolutions(
             decision_by_call_lane.setdefault((shared_call, lane), []).append(decision)
     candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
+        with guarded_open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            for row in epoch_csv_rows(csv.DictReader(handle), path):
+                if epoch_manifest and _de.classify_row(path.name, row, epoch_manifest) not in _de.COMPATIBLE_CLASSES:
+                    continue
                 shared_call = str(row.get("shared_ai_call_id") or "").strip()
                 lane = str(row.get("research_lane") or "").strip().upper()
                 trade_id = str(row.get("trade_id") or "").strip()

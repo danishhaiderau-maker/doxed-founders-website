@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import research_segment_format as fmt
+import segment_custody
 import storage_links
 from research_segment_puller import STATE_SCHEMA, PullerError, _RunLock, refuse_unsafe_root
 from research_segment_store import HttpSegmentSource, StoreError
@@ -282,6 +283,9 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         # The view is not consumable while it is being updated.
         for name in (SYNC_STATE_NAME, HEARTBEAT_NAME):
             (view_root / name).unlink(missing_ok=True)
+        # Files Fly retired outside custody pruning (e.g. the clean-epoch boundary
+        # reset) stay in the shadow tree but are not current Fly data (#420).
+        retired = segment_custody.retired_custody_paths(state, tree)
         rebuild = full or index is None
         if rebuild:
             _clear_view(view_root)
@@ -294,12 +298,15 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
                                                    "last_verified_at": last_verified})
         files, sync_state, byte_count = {}, {}, 0
         counts = {"reused": 0, "rehashed_unchanged": 0, "appended": 0, "copied": 0, "removed": 0,
-                  "linked": 0, "link_fallback_copies": 0, "link_deferred": 0}
+                  "linked": 0, "link_fallback_copies": 0, "link_deferred": 0, "retired_custody": 0}
         written_bytes = 0
         entries, refresh, links = [], {}, {}
         link_on = link_settle_sec is not None and link_settle_sec >= 0 and storage_links.links_enabled()
         for source in sorted(path for path in tree.rglob("*") if path.is_file()):
             relative = source.relative_to(tree).as_posix()
+            if relative in retired:
+                counts["retired_custody"] += 1
+                continue
             target = view_root / relative
             src_stat = source.stat()
             prior = previous.get(relative)
@@ -399,6 +406,7 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         "promotionLevel": "AMBER" if warnings else "GREEN",
         "promotionWarnings": warnings,
         "fileCount": len(sync_state),
+        "retiredCustodyPaths": len(retired),
     }
     (view_root / SYNC_STATE_NAME).write_text(json.dumps(sync_state, sort_keys=True, indent=1), encoding="utf-8")
     (view_root / HEARTBEAT_NAME).write_text(json.dumps(heartbeat, sort_keys=True, indent=2), encoding="utf-8")
@@ -410,6 +418,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             "files_copied": counts["copied"], "files_removed": counts["removed"], "bytes_written": written_bytes,
             "files_linked": counts["linked"], "files_link_fallback_copied": counts["link_fallback_copies"],
             "files_link_deferred": counts["link_deferred"],
+            "files_retired_custody": counts["retired_custody"],
+            "retired_custody_sample": sorted(retired)[:20],
             "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision,
             "promotion_level": heartbeat["promotionLevel"], "promotion_warnings": warnings}
 

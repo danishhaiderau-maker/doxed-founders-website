@@ -1,6 +1,5 @@
 # Python bots / research (not used by Next.js deploy)
 services/btc-conservative-agent/
-services/btc-signal-engine/
 
 # Local-only research snapshots
 .edge-analysis/

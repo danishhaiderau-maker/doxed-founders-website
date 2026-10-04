@@ -45,6 +45,26 @@ INTEGRITY_KEYS = frozenset({
 EPOCH_INDEPENDENT_BASES = frozenset({
     "market_microstructure_1s.jsonl", "cross_venue_tape_1m.jsonl", "market_context_1m.jsonl", "liquidations.jsonl",
 })
+# Content-addressed / tape directories that are not row streams of one epoch.
+EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",
+                         "research-timing-declarations", "corrupt_evidence_quarantine")
+# Operational ledgers that are never analyzer evidence (relay delivery guard archive and its retirement
+# ledger, runtime telemetry, tile-retirement and pre-entry handoff receipts). They legitimately span epochs
+# (restart recovery / audit trail), are read by no analyzer path, and are excluded from the epoch-purity
+# audit and from the compatibility RED rule (issue #420). Top-level runtime files only.
+NON_EVIDENCE_BASES = frozenset({
+    "relay_outbox_quarantine.jsonl", "relay_outbox_retired.jsonl", "runtime_telemetry_1m.jsonl",
+    "retired_tile_boundary_receipts.jsonl", "pre_entry_evidence_handoffs.jsonl",
+})
+# Evidence streams that survive the boundary reset in a live Fly head (unknown to the reset inventory or
+# kept as accounting) and may therefore hold pre-epoch rows, but whose EVERY analyzer reader admits rows
+# through the epoch guard (classify / EpochGuard) or an epoch-start bound. Their pre-epoch rows are on disk
+# (wiped only by clean-epoch-wipe after certification) yet cannot reach a current-cohort result, so the
+# purity audit reports them as guarded instead of admitted. The reader set is pinned by
+# test_analyzer_epoch_guard_wiring.py::test_read_guarded_streams_have_only_guarded_readers.
+READ_GUARDED_BASES = frozenset({
+    "taker_signal_counterfactuals.jsonl", "adaptive_entry_decisions.jsonl", "expired_orders_3factor.csv",
+})
 # Streams whose writer cannot add a column/field; classified by timestamp.
 UNSTAMPABLE_PREFIXES = ("v3/",)
 UNSTAMPABLE_SUFFIXES = (".csv",)
@@ -258,6 +278,16 @@ def epoch_independent(relpath: str) -> bool:
     return base_of(relpath).rsplit("/", 1)[-1] in EPOCH_INDEPENDENT_BASES and "/" not in base_of(relpath)
 
 
+def non_evidence(relpath: str) -> bool:
+    base = base_of(relpath)
+    return "/" not in base and base in NON_EVIDENCE_BASES
+
+
+def read_guarded(relpath: str) -> bool:
+    base = base_of(relpath)
+    return "/" not in base and base in READ_GUARDED_BASES
+
+
 def unstampable(relpath: str) -> bool:
     base = base_of(relpath)
     return base.startswith(UNSTAMPABLE_PREFIXES) or base.endswith(UNSTAMPABLE_SUFFIXES)
@@ -468,11 +498,18 @@ def schema_drift(announced: dict[str, list[str]] | None, fp: dict) -> dict:
 
 # ------------------------------------------------------------------ certification
 
-def certification_doc(manifest: dict, *, checks: list[dict], now: float) -> dict:
-    """GREEN only when the epoch is >= 2 h old and every check is GREEN."""
-    age = now - float(manifest["started_at_ts"])
+def certification_doc(manifest: dict, *, checks: list[dict], now: float, window: dict | None = None) -> dict:
+    """GREEN only when the certification window is >= 2 h old and every check is GREEN.
+
+    The window opens at the epoch start unless a later window was declared on
+    the same epoch (``window`` = the declaration record).
+    """
+    epoch_start = float(manifest["started_at_ts"])
+    window_start = max(epoch_start, float((window or {}).get("window_start_ts") or epoch_start))
+    age = now - epoch_start
+    window_age = now - window_start
     failing = [c for c in checks if c.get("severity") != "GREEN"]
-    if age < CERTIFICATION_WINDOW_SEC:
+    if window_age < CERTIFICATION_WINDOW_SEC:
         status = "PENDING"
     elif failing or not checks:
         status = "REJECTED"
@@ -480,8 +517,9 @@ def certification_doc(manifest: dict, *, checks: list[dict], now: float) -> dict
         status = "CERTIFIED"
     return {"schema": CERTIFICATION_SCHEMA, "epoch_id": manifest["epoch_id"], "started_at_utc": manifest["started_at_utc"],
             "checked_at_utc": utc_iso(now), "epoch_age_sec": round(age, 1),
-            "window_sec": CERTIFICATION_WINDOW_SEC, "status": status, "checks": checks,
-            "failing": [c.get("id") for c in failing]}
+            "window_started_at_utc": utc_iso(window_start), "window_age_sec": round(window_age, 1),
+            "window_declaration": window, "window_sec": CERTIFICATION_WINDOW_SEC, "status": status,
+            "checks": checks, "failing": [c.get("id") for c in failing]}
 
 
 def certified(cert: Any, epoch_id: str) -> bool:
