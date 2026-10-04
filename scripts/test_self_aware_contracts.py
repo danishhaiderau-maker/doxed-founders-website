@@ -466,6 +466,18 @@ def test_empty_analyzer_table_is_warmup_info_inside_a_fresh_epoch_and_red_after(
     assert "UNEXPECTED_VALUE" in _kinds(_eval(spec, {"rows": [1, 2, 3], "status": "BROKEN"}, epoch_age_sec=60))
 
 
+def test_zero_byte_export_csv_is_an_empty_table_not_unreachable(paths):
+    exports = Path(paths.exports)
+    exports.mkdir(parents=True, exist_ok=True)
+    (exports / "quarantine.csv").write_bytes(b"")
+    doc, meta = ct._export_table(paths, "quarantine")
+    assert doc["rows"] == [] and meta["code"] == 200 and meta.get("empty_file") and "error" not in meta
+    assert ct._export_table(paths, "missing")[0] is ct.MISSING
+    spec = _spec(surface="exports", tables=[{"path": "rows", "min_rows": 10}])
+    assert _eval(spec, doc, epoch_age_sec=3600, epoch_id="ce-x")["status"] == "GREEN"
+    assert "EMPTY_SILENT" in _kinds(_eval(spec, doc, epoch_age_sec=ct.EPOCH_WARMUP_SEC + 1))
+
+
 def test_export_offenders_are_listed_under_the_exports_surface(store):
     summ = {"generated_at": ct.iso(time.time()), "heavy_at": ct.iso(time.time()), "tier": "heavy",
             "counts": {}, "surfaces": {"exports": "RED"}, "contracts_total": 1, "registry_hash": "h",
