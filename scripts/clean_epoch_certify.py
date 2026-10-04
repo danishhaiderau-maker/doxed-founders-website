@@ -8,7 +8,8 @@ CERTIFIED requires, at check time:
   * every required finding is GREEN now: section contracts (``contract.*``), analyzer sections /
     dimensions / consistency, field-populated checks (``data.completeness``, ``data.dead_fields``,
     ``data.freshness``) and every ``data.compat_*`` check (one epoch, stamped rows, analyzer purity);
-  * no required finding turned RED at any point since the window opened (findings history);
+  * no required finding was RED at any point since the window opened (findings history: a transition
+    to RED, or out of RED, i.e. RED when the window opened); a truncated history fails closed;
   * no finding at all is RED now;
   * the compatibility document names the same epoch and shows stamped CURRENT rows.
 
@@ -55,6 +56,7 @@ WINDOW_MAX_LEAD_SEC = 24 * 3600
 REQUIRED_PREFIXES = ("contract.", "analyzer.sections", "analyzer.dimensions", "analyzer.consistency",
                      "data.completeness", "data.dead_fields", "data.freshness", "data.compat_")
 HEALTH_MAX_AGE_SEC = 15 * 60
+HISTORY_LIMIT = 5000
 
 
 def _get(base: str, path: str) -> dict:
@@ -170,10 +172,15 @@ def evaluate(manifest: dict, health: dict, history: list[dict], compat: dict, no
     red_now = [f["id"] for f in findings if f.get("severity") == "RED"]
     add("no_red_now", not red_now, f"RED now: {red_now[:20]}")
     start = max(float(manifest["started_at_ts"]), float((window or {}).get("window_start_ts") or 0))
-    window_red = sorted({e["id"] for e in history
-                         if required(str(e.get("id"))) and e.get("to") == "RED" and (_ts(e.get("at")) or 0) >= start})
+    in_window = [e for e in history if (_ts(e.get("at")) or 0) >= start]
+    # Leaving RED inside the window means the finding was RED when the window opened.
+    window_red = sorted({e["id"] for e in in_window
+                         if required(str(e.get("id"))) and "RED" in (e.get("to"), e.get("from"))})
     opened = "declared window " + de.utc_iso(start) if window else "epoch start"
     add("required.no_red_in_window", not window_red, f"required findings RED since {opened}: {window_red[:20]}")
+    truncated = len(history) >= HISTORY_LIMIT and min((_ts(e.get("at")) or 0) for e in history) > start
+    add("required.window_history_complete", not truncated,
+        f"{len(history)} findings-history events since {opened}" + (" (truncated)" if truncated else ""))
     epoch = (compat or {}).get("epoch") or {}
     add("compat.same_epoch", epoch.get("epoch_id") == manifest["epoch_id"],
         f"compat epoch {epoch.get('epoch_id')} vs manifest {manifest['epoch_id']}")
@@ -210,7 +217,7 @@ def main(argv=None) -> int:
     window = declared_window(Path(args.windows), manifest["epoch_id"])
     since = de.utc_iso(max(float(manifest["started_at_ts"]), float((window or {}).get("window_start_ts") or 0)))
     health = _get(args.base, "/api/selfaware/health")
-    history = _get(args.base, "/api/selfaware/findings/history?limit=2000&since=" + since).get("events") or []
+    history = _get(args.base, f"/api/selfaware/findings/history?limit={HISTORY_LIMIT}&since={since}").get("events") or []
     try:
         compat = _get(args.base, "/api/selfaware/data/compatibility?severity=RED,AMBER,GREEN")
     except OSError:
