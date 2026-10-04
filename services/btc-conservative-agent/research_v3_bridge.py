@@ -418,6 +418,28 @@ def _paper_fill_atr_evidence(position, order, *, fill_ts, event_id):
     return result
 
 
+FILL_BASIS_UNCLASSIFIED = "UNCLASSIFIED"
+
+
+def _admitting_fill_gate(order: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The venue-gate evidence that admitted this fill.
+
+    ``venue_fill_gate`` is the latest check, which a concurrent re-check can
+    overwrite after the fill was admitted.  ``venue_fill_gate_admitted`` is
+    used when it belongs to the order's current limit generation and price.
+    """
+    gate = order.get("venue_fill_gate")
+    gate = gate if isinstance(gate, Mapping) else {}
+    admitted = order.get("venue_fill_gate_admitted")
+    if not isinstance(admitted, Mapping) or not admitted.get("fill_basis") or gate.get("fill_basis"):
+        return gate
+    same_generation = (
+        admitted.get("limit_generation") == gate.get("limit_generation", admitted.get("limit_generation"))
+        and admitted.get("limit_price") == gate.get("limit_price", admitted.get("limit_price"))
+    )
+    return admitted if same_generation else gate
+
+
 def _paper_fill_execution_receipt(
     order: Mapping[str, Any], position: Mapping[str, Any], signal: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -426,8 +448,7 @@ def _paper_fill_execution_receipt(
     evidence = evidence if isinstance(evidence, Mapping) else {}
     observation = evidence.get("latest_observation")
     observation = observation if isinstance(observation, Mapping) else {}
-    gate = order.get("venue_fill_gate")
-    gate = gate if isinstance(gate, Mapping) else {}
+    gate = _admitting_fill_gate(order)
     source = observation or gate
     verdict = str(_first(source.get("verdict"), source.get("gate_verdict")) or "").upper()
 
@@ -460,7 +481,9 @@ def _paper_fill_execution_receipt(
         "conservative_fill_supported": supported,
         "fill_model": fill_model,
         "fill_model_role": gate.get("fill_model_role"),
-        "fill_basis": fill_basis,
+        # A filled row never carries a null basis: a fill admitted without
+        # venue-gate evidence (legacy SIM_MARKET paths) is labelled explicitly.
+        "fill_basis": fill_basis or FILL_BASIS_UNCLASSIFIED,
         "fill_id": gate.get("fill_id"),
         "tape_id": gate.get("tape_id"),
         "queue_estimate": copy.deepcopy(gate.get("queue_estimate")),
