@@ -1758,6 +1758,15 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
     })
     return {"schema": "v3_paper_fill_receipt_v1", "epoch_id": str(epoch_id), **identity,
             **causal_ids, **policy,
+            # Read-only echo for the monitor tile index (same values as the execution row).
+            "fill_evidence": {
+                "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
+                "fill_price": _first(position.get("entry"), order.get("fill_price")),
+                "fill_basis": execution_receipt.get("fill_basis"),
+                "fill_model": execution_receipt.get("fill_model"),
+                "execution_basis": execution_receipt.get("execution_basis"),
+                "queue_estimate": copy.deepcopy(execution_receipt.get("queue_estimate")),
+            },
             "writes": [execution, lifecycle], "store_verification": store.verify()}
 
 

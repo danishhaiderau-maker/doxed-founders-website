@@ -20,6 +20,7 @@ import system_health_banner
 import system_health_alerts
 import runtime_uptime
 import monitor_api
+import monitor_tiles
 try:
     import monitor_integrity as _monitor_integrity
 except Exception:  # pragma: no cover - read-only telemetry must never block boot
@@ -15877,6 +15878,31 @@ def _remember_cancellation_handoff(receipt_id: str, once_key: str | None = None)
             _cancellation_handoff_seen.popitem(last=False)
 
 
+# Fill evidence per trade for /api/monitor/tiles/trades (fill_basis is not on
+# the closed trade row).  Since-boot, bounded, own lock; never trade_lock.
+_TILE_FILL_INDEX_MAX = 5000
+_TILE_FILL_INDEX = collections.OrderedDict()
+_TILE_FILL_INDEX_LOCK = threading.Lock()
+
+
+def _tile_fill_index_record(trade_id, evidence) -> None:
+    if not trade_id or not isinstance(evidence, dict):
+        return
+    try:
+        with _TILE_FILL_INDEX_LOCK:
+            _TILE_FILL_INDEX[str(trade_id)] = dict(evidence)
+            _TILE_FILL_INDEX.move_to_end(str(trade_id))
+            while len(_TILE_FILL_INDEX) > _TILE_FILL_INDEX_MAX:
+                _TILE_FILL_INDEX.popitem(last=False)
+    except Exception as exc:
+        logger.debug(f"[MONITOR TILES] fill index skipped: {exc}")
+
+
+def _tile_fill_index_snapshot() -> dict:
+    with _TILE_FILL_INDEX_LOCK:
+        return dict(_TILE_FILL_INDEX)
+
+
 FILL_EVIDENCE_IDENTITY_KEYS = (
     "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
     "schedule_id", "fill_id", "tape_id",
@@ -15967,6 +15993,7 @@ def _write_fill_evidence_handoff(job: dict) -> None:
             epoch_id=expected_epoch_id,
             data_dir=str(receipt.get("data_dir") or os.getcwd()),
         )
+        _tile_fill_index_record(trade_id, fill_identity_receipt.get("fill_evidence"))
         identity = {
             key: fill_identity_receipt[key]
             for key in FILL_EVIDENCE_IDENTITY_KEYS
@@ -27850,6 +27877,11 @@ def microstructure_capture_loop():
         except Exception as exc:
             logger.debug(f"[AI SHADOW] tape ring append skipped: {exc}")
         try:
+            # Read-only replay slice for /api/monitor/tape (own lock, bounded).
+            _TILE_TAPE_RING.append(row)
+        except Exception as exc:
+            logger.debug(f"[MONITOR TAPE] ring append skipped: {exc}")
+        try:
             # GS/B 3-minute regime/CVD bars (paper tiles); never blocks capture.
             regime_bars_3m.ENGINE.observe_row(row)
         except Exception as exc:
@@ -30776,6 +30808,7 @@ AI_SHADOW_COMPACT_MAX_TOKENS = max(32, int(os.getenv("AI_SHADOW_COMPACT_MAX_TOKE
 AI_SHADOW_COMPACT_TIMEOUT_SEC = max(5.0, float(os.getenv("AI_SHADOW_COMPACT_TIMEOUT_SEC", "20")))
 AI_INPUT_DEAD_FIELD_CALLS = max(2, int(os.getenv("AI_INPUT_DEAD_FIELD_CALLS", "20")))
 _AI_SHADOW_TAPE = _ai_shadow.TapeRing()
+_TILE_TAPE_RING = monitor_tiles.TapeSliceRing()
 _AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
 _AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
 _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
@@ -32034,6 +32067,12 @@ _MONITOR_DIGEST_PATH = "/api/monitor/digest"
 # Admin token OR the read-only MONITOR_READ_TOKEN bearer; authenticated in the handler.
 _MONITOR_INTEGRITY_PATH = "/api/monitor/integrity"
 _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_READ_TOKEN"), _BOT_ADMIN_TOKEN)
+# Read-only tile audit data API: same auth as integrity (admin or the monitor
+# bearer), checked in each handler; never public, never a write.
+_MONITOR_TILE_PATHS = frozenset({
+    "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
+    "/api/monitor/tiles/totals", "/api/monitor/tape",
+})
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
 # Loopback still allowed so the local Flask test client and home operator
@@ -32309,6 +32348,8 @@ def _emergency_api_guard():
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
         return None
     if method == "GET" and path in (_MONITOR_DIGEST_PATH, _MONITOR_INTEGRITY_PATH):
+        return None
+    if method == "GET" and path in _MONITOR_TILE_PATHS:
         return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
@@ -44610,6 +44651,284 @@ def monitor_integrity_authorized() -> bool:
     return _monitor_integrity is not None and _monitor_integrity.is_authorized(
         admin_ok=_admin_authed(), authorization=request.headers.get("Authorization"),
         monitor_token=_MONITOR_READ_TOKEN, bearer_matches=monitor_api.bearer_matches)
+
+
+# ---------------------------------------------------------------------------
+# Read-only tile audit data API (/api/monitor/tiles/*, /api/monitor/tape).
+# Pure shaping in monitor_tiles.py.  Handlers read shallow copies of the
+# in-memory books (list()/dict() copies are atomic under the GIL), never take
+# the trade lock, never call an exchange, platform bridge or AI client, and
+# never write.
+# Scope: the current epoch as held in memory by this process (closed rows,
+# open positions, pending orders, the capped expired tail, dashboard route
+# counts) - every payload says so in ``scope``.
+# ---------------------------------------------------------------------------
+_MONITOR_TILES_SOURCE = "in_memory_books (trades, open_positions, pending_orders, expired_orders tail)"
+
+
+def _monitor_tile_short_names() -> dict:
+    out = {}
+    for lane in ACTIVE_TILE_ORDER:
+        label = str((ACTIVE_TILE_REGISTRY.get(lane) or {}).get("label") or "")
+        token = label.split(" ", 1)[0] if label else lane
+        out[lane] = "CTRL" if token.upper() == "CONTROL" else token
+    return out
+
+
+def _monitor_tiles_common(now: float) -> dict:
+    return {
+        "boot_id": BOT_INSTANCE_ID,
+        "generated_at": monitor_api.utc_iso(now),
+        "git_rev": _runtime_git_rev(),
+        "data_epoch_id": _current_epoch_id_for_display(),
+        "tile_registry_signature": _monitor_part(active_tile_registry_signature),
+        "read_only": True,
+        "paper_only": True,
+    }
+
+
+def _monitor_tiles_scope(args, *, include_forced_default: bool) -> dict:
+    """Parse the shared query parameters; raises monitor_tiles.BadRequest."""
+    epoch_id = monitor_tiles.resolve_epoch(args.get("epoch"), _current_epoch_id_for_display())
+    cutoff_ts, cutoff_source = _current_epoch_boundary()
+    since = monitor_tiles.parse_ts_param(args.get("since"), "since")
+    until = monitor_tiles.parse_ts_param(args.get("until"), "until")
+    if since is None and cutoff_ts:
+        since = float(cutoff_ts)
+    if cutoff_ts and since is not None and since < float(cutoff_ts) - 1.0:
+        raise monitor_tiles.BadRequest("SINCE_BEFORE_EPOCH_CUTOFF")
+    lanes = monitor_tiles.parse_lanes(args.getlist("lane"), ACTIVE_TILE_ORDER) or list(ACTIVE_TILE_ORDER)
+    return {
+        "epoch": epoch_id,
+        "since": since, "since_utc": monitor_api.utc_iso(since) if since else None,
+        "until": until, "until_utc": monitor_api.utc_iso(until) if until else None,
+        "epoch_cutoff_utc": _current_epoch_cutoff_utc(), "epoch_cutoff_source": cutoff_source,
+        "lanes": lanes,
+        "include_forced": monitor_tiles.parse_bool(args.get("include_forced"), include_forced_default),
+        "be_band_bp": monitor_tiles.parse_be_band(args.get("be_band_bp")),
+        "forced_exit_reasons": sorted(STATS_EXCLUDED_EXIT_REASONS),
+        "source": _MONITOR_TILES_SOURCE,
+    }
+
+
+def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "expired")) -> dict:
+    """``tile_trade_row_v1`` rows per lane for the scope (no trade lock, no file I/O)."""
+    lanes = set(scope["lanes"])
+    short = _monitor_tile_short_names()
+    fills = _tile_fill_index_snapshot()
+    sources = {
+        "closed": list(trades),
+        "open": [row for row in list(open_positions) if isinstance(row, dict) and row.get("status") == "OPEN"],
+        "pending": list(pending_orders),
+        "expired": list(expired_orders),
+    }
+    out = {lane: [] for lane in scope["lanes"]}
+    for status in statuses:
+        for raw in sources.get(status) or ():
+            if not isinstance(raw, dict):
+                continue
+            raw = dict(raw)
+            lane = _normalize_lane_key(raw.get("research_lane") or "")
+            if lane not in lanes:
+                continue
+            row = monitor_tiles.tile_trade_row(
+                raw, status=status, short_names=short, epoch_id=scope["epoch"],
+                forced_reasons=STATS_EXCLUDED_EXIT_REASONS,
+                fill_evidence=fills.get(str(raw.get("trade_id") or "")),
+                parse_ts=parse_ts, be_band_bp=scope["be_band_bp"])
+            if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                continue
+            out[lane].append(row)
+    return out
+
+
+def _monitor_tiles_route_counts() -> dict:
+    """tile_route_counts from the last /api/state snapshot (built off-lock by the refresher)."""
+    with _api_state_cache_lock:
+        payload = _api_state_cache.get("payload")
+        built_at = _api_state_cache.get("built_at")
+    counts = (payload or {}).get("tile_route_counts") if isinstance(payload, dict) else None
+    return {"counts": copy.deepcopy(counts) if isinstance(counts, dict) else {},
+            "built_at": monitor_api.utc_iso(built_at) if built_at else None}
+
+
+def _monitor_tiles_guard(build, max_bytes: int):
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    try:
+        payload = build(time.time())
+    except monitor_tiles.BadRequest as exc:
+        return _monitor_response({"error": "bad_request", "reason": str(exc)[:120]}, 512, status=400)
+    except Exception as exc:
+        logger.warning(f"[MONITOR TILES] {request.path} failed: {type(exc).__name__}: {exc}")
+        return _monitor_response({"error": type(exc).__name__}, 512, status=500)
+    return _monitor_response(payload, max_bytes)
+
+
+def _monitor_tile_signal_clocks(lane: str) -> dict:
+    spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+    clocks = {"registry": spec.get("signal_clock")}
+    evaluator = _XVL_EVALUATORS.get(lane)
+    if evaluator is not None:
+        clocks["evaluator"] = getattr(evaluator, "SIGNAL_CLOCK", None)
+        clocks["evaluator_class"] = type(evaluator).__name__
+    for module in spec.get("implementation_modules") or ():
+        loaded = sys.modules.get(str(module))
+        if loaded is not None:
+            clocks[f"module:{module}"] = getattr(loaded, "SIGNAL_CLOCK", None)
+    clocks["evaluator_loop_lane"] = lane in evaluator_loop_lanes()
+    return clocks
+
+
+@app.route('/api/monitor/tiles/specs', methods=["GET"])
+def monitor_tiles_specs():
+    """Full, unprojected registry spec per active tile (+ signal clocks, fill model)."""
+    lane_filter = request.args.getlist("lane")
+
+    def build(now):
+        lanes = monitor_tiles.parse_lanes(lane_filter, ACTIVE_TILE_ORDER) or list(ACTIVE_TILE_ORDER)
+        manifest = {row["lane"]: row for row in active_tile_lifecycle_manifest()}
+        key = "tiles_specs:" + ",".join(lanes)
+
+        def make(_now):
+            return {
+                "schema": monitor_tiles.TILE_SPECS_SCHEMA,
+                **_monitor_tiles_common(_now),
+                "scope": {"lanes": lanes, "source": "combo_pathway_config.ACTIVE_TILE_REGISTRY"},
+                "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+                "fill_model": {"paper_fill_model": globals().get("PAPER_FILL_MODEL"),
+                               "headline_role": getattr(globals().get("research_fill_model"), "HEADLINE_ROLE", None)},
+                "tiles": [
+                    monitor_tiles.tile_spec(lane, ACTIVE_TILE_REGISTRY.get(lane) or {},
+                                            signal_clocks=_monitor_part(lambda: _monitor_tile_signal_clocks(lane)),
+                                            manifest_row=None)
+                    | {"tile_short": _monitor_tile_short_names().get(lane),
+                       "display_order": (manifest.get(lane) or {}).get("display_order"),
+                       "toggle_on": _monitor_part(lambda: bool(is_research_lane_enabled(lane)))}
+                    for lane in lanes
+                ],
+            }
+        return _monitor_cached(key, make)
+
+    budget = (monitor_tiles.MAX_TILE_SPECS_LANE_BYTES if len(lane_filter) == 1 and "," not in lane_filter[0]
+              else monitor_tiles.MAX_TILE_SPECS_BYTES)
+    return _monitor_tiles_guard(build, budget)
+
+
+@app.route('/api/monitor/tiles/trades', methods=["GET"])
+def monitor_tiles_trades():
+    """Per-trade rows (open, closed, pending, expired), cursor-paginated, whole rows only."""
+    args = request.args
+
+    def build(now):
+        scope = _monitor_tiles_scope(args, include_forced_default=True)
+        status = str(args.get("status") or "all").strip().lower()
+        if status not in monitor_tiles.TRADE_STATUSES:
+            raise monitor_tiles.BadRequest("BAD_STATUS")
+        limit = monitor_tiles.parse_limit(args.get("limit"))
+        statuses = ("closed", "open", "pending", "expired") if status == "all" else (status,)
+        by_lane = _monitor_tiles_rows(scope, statuses)
+        rows = [row for lane_rows in by_lane.values() for row in lane_rows
+                if scope["include_forced"] or not (row.get("exit") or {}).get("forced_close")]
+        page = monitor_tiles.trades_page(rows, cursor=args.get("cursor"), limit=limit,
+                                         max_bytes=monitor_tiles.MAX_TILE_TRADES_BYTES, epoch=scope["epoch"])
+        return {
+            "schema": monitor_tiles.TILE_TRADES_SCHEMA,
+            **_monitor_tiles_common(now),
+            "scope": {**scope, "status": status, "limit": limit,
+                      "expired_rows_note": f"in-memory expired tail is capped at {MAX_EXPIRED_ORDERS} rows",
+                      "fill_basis_note": "fill evidence is indexed since boot; older fills show "
+                                         + monitor_tiles.FILL_BASIS_NOT_INDEXED},
+            "total_matching": len(rows),
+            **page,
+        }
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
+
+
+@app.route('/api/monitor/tiles/counters', methods=["GET"])
+def monitor_tiles_counters():
+    """Per-lane epoch counters (orders, fills, expiries, closes) + since-boot skips."""
+    args = request.args
+
+    def build(now):
+        scope = _monitor_tiles_scope(args, include_forced_default=True)
+        key = "tiles_counters:" + json.dumps(scope, sort_keys=True, default=str)
+
+        def make(_now):
+            by_lane = _monitor_tiles_rows(scope)
+            route = _monitor_tiles_route_counts()
+            xvl_lanes = _monitor_part(lambda: xvl_evaluator_snapshot().get("lanes") or {})
+            with state_lock:
+                opportunity = copy.deepcopy(state.get("lane_opportunity_counters") or {})
+            return {
+                "schema": monitor_tiles.TILE_COUNTERS_SCHEMA,
+                **_monitor_tiles_common(_now),
+                "scope": {**scope, "route_counts_built_at": route["built_at"],
+                          "route_counts_source": "/api/state tile_route_counts (epoch, forced excluded from closed)"},
+                "lanes": [
+                    monitor_tiles.counters_view(
+                        lane, rows=by_lane.get(lane) or [], route_counts=route["counts"].get(lane),
+                        xvl_lane=(xvl_lanes or {}).get(lane) if isinstance(xvl_lanes, dict) else None,
+                        opportunity=opportunity.get(lane), boot_id=BOT_INSTANCE_ID)
+                    for lane in scope["lanes"]
+                ],
+            }
+        return _monitor_cached(key, make)
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_COUNTERS_BYTES)
+
+
+@app.route('/api/monitor/tiles/totals', methods=["GET"])
+def monitor_tiles_totals():
+    """Per-lane closed-trade totals: W/L/BE by price bp, unrounded USD, forced excluded by default."""
+    args = request.args
+
+    def build(now):
+        scope = _monitor_tiles_scope(args, include_forced_default=False)
+        key = "tiles_totals:" + json.dumps(scope, sort_keys=True, default=str)
+
+        def make(_now):
+            by_lane = _monitor_tiles_rows(scope, ("closed",))
+            route = _monitor_tiles_route_counts()
+            view = monitor_tiles.totals_view(by_lane, include_forced=scope["include_forced"],
+                                             be_band_bp=scope["be_band_bp"], route_counts=route["counts"])
+            return {
+                "schema": monitor_tiles.TILE_TOTALS_SCHEMA,
+                **_monitor_tiles_common(_now),
+                "scope": {**scope, "wl_basis": "PRICE_BP_NET_OF_FEES",
+                          "route_counts_built_at": route["built_at"]},
+                **view,
+            }
+        return _monitor_cached(key, make)
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TOTALS_BYTES)
+
+
+@app.route('/api/monitor/tape', methods=["GET"])
+def monitor_tape():
+    """1 s Bitfinex tape slice (<= 900 s) from an in-memory 3 h ring; older ranges get a pointer."""
+    args = request.args
+
+    def build(now):
+        to_ts = monitor_tiles.parse_ts_param(args.get("to_ts"), "to_ts")
+        from_ts = monitor_tiles.parse_ts_param(args.get("from_ts"), "from_ts")
+        if to_ts is None:
+            to_ts = now
+        if from_ts is None:
+            from_ts = to_ts - 60.0
+        fields = [f.strip() for f in str(args.get("fields") or "").split(",") if f.strip()] or None
+        view = monitor_tiles.tape_view(_TILE_TAPE_RING, from_ts=from_ts, to_ts=to_ts, fields=fields, now=now)
+        return {
+            "schema": monitor_tiles.TAPE_SCHEMA,
+            **_monitor_tiles_common(now),
+            "scope": {"venue": "bitfinex", "symbol": BITFINEX_WS_SYMBOL, "from_ts": from_ts, "to_ts": to_ts,
+                      "max_slice_sec": monitor_tiles.MAX_TAPE_SLICE_SEC,
+                      "source": "in-memory ring fed by the market_microstructure_1s writer"},
+            **view,
+        }
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TAPE_BYTES)
 
 
 @app.route('/api/research/shadow_exits')
