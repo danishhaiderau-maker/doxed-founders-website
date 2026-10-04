@@ -47,6 +47,12 @@ THRESHOLDS = {
     "analyzer_cycle_slow_sec": 25 * 60,
     "snapshot_max_age_sec": 15 * 60,
     "venue_stale_sec": 120,
+    # Bitfinex WS liveness: the heartbeat (every ~15 s per channel) is the transport
+    # clock. Data-tick age is not: a quiet tape routinely leaves it at 25-50 s.
+    "bfx_ws_heartbeat_amber_sec": 60,
+    "bfx_ws_tick_fallback_amber_sec": 60,
+    "bfx_ws_reconnect_storm_count": 3,
+    "bfx_ws_reconnect_storm_window_sec": 15 * 60,
     "rate_limit_persistent_sec": 15 * 60,
     "evaluation_age_cpu_sec": 90,
     "evidence_keep_files": 500,

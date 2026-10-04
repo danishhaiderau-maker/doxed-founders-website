@@ -648,3 +648,66 @@ def test_still_red_refreshes_observed_text_and_mirror_empty_is_warmup(tmp_path):
     (tmp_path / "ai_tranche_log.csv").write_text("ts\n1\n")
     row, err = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
     assert err and "IO Error" in err
+
+
+def _feeds_rt(observed_at: float = NOW - 30, **sp) -> dict:
+    progress = {"ws_age_sec": 3.0, "ws_progressing": True, **sp}
+    return {"observedAt": observed_at, "git_rev": "abc", "execution_paused": False, "ws_transport_connected": True,
+            "strategy_progress": progress, "ws_connection": {"reconnect_count": 0, "generation": 1},
+            "cross_venue_health": {"status": "OK", "stale_venues": []}, "xvl_evaluator_health": {"status": "OK"}}
+
+
+def test_feeds_quiet_tape_tick_age_is_not_an_alarm_when_the_heartbeat_is_fresh(store):
+    # 2026-10-04 22:23 AEDT: "Bitfinex WS age 30s" AMBER with heartbeat 7s and 0 reconnects.
+    for tick in (30.0, 46.0, 51.0):
+        f = _facts(runtime=_feeds_rt(ws_age_sec=tick, ws_heartbeat_age_sec=7.0))
+        fd = diagnose.check_feeds(f, diagnose.signals(f), store, {})
+        assert fd.severity == "GREEN", fd.observed
+        assert not diagnose.signals(f)["cpu_saturation"]["on"]
+
+
+def test_feeds_heartbeat_age_ambers_over_60s_and_reds_over_venue_stale(store):
+    f = _facts(runtime=_feeds_rt(ws_age_sec=70.0, ws_heartbeat_age_sec=65.0))
+    fd = diagnose.check_feeds(f, diagnose.signals(f), store, {})
+    assert fd.severity == "AMBER" and "heartbeat age" in fd.observed
+    f = _facts(runtime=_feeds_rt(ws_age_sec=200.0, ws_heartbeat_age_sec=150.0))
+    assert diagnose.check_feeds(f, diagnose.signals(f), store, {}).severity == "RED"
+
+
+def test_feeds_old_snapshot_without_heartbeat_falls_back_to_tick_age_at_60s(store):
+    f = _facts(runtime=_feeds_rt(ws_age_sec=45.0))
+    assert diagnose.check_feeds(f, diagnose.signals(f), store, {}).severity == "GREEN"
+    f = _facts(runtime=_feeds_rt(ws_age_sec=75.0))
+    fd = diagnose.check_feeds(f, diagnose.signals(f), store, {})
+    assert fd.severity == "AMBER" and "tick age" in fd.observed
+
+
+def test_feeds_reconnect_storm_ambers_and_a_restart_resets_the_counter(store):
+    state: dict = {}
+    for i, count in enumerate((0, 1, 2)):
+        rt = _feeds_rt(ws_heartbeat_age_sec=3.0)
+        rt["ws_connection"]["reconnect_count"] = count
+        f = _facts(runtime=rt, now=NOW + i * 60)
+        assert diagnose.check_feeds(f, diagnose.signals(f), store, state).severity == "GREEN"
+    rt = _feeds_rt(ws_heartbeat_age_sec=3.0)
+    rt["ws_connection"]["reconnect_count"] = 3
+    f = _facts(runtime=rt, now=NOW + 180)
+    fd = diagnose.check_feeds(f, diagnose.signals(f), store, state)
+    assert fd.severity == "AMBER" and "reconnect storm" in fd.observed
+    # Fly restart: the per-boot counter drops back to 0, which is not a storm.
+    rt = _feeds_rt(ws_heartbeat_age_sec=3.0)
+    f = _facts(runtime=rt, now=NOW + 240)
+    assert diagnose.check_feeds(f, diagnose.signals(f), store, state).severity == "GREEN"
+    # Reconnects spread beyond the 15-minute window are not a storm either.
+    for i, count in enumerate((1, 2, 3, 4)):
+        rt = _feeds_rt(observed_at=NOW + 300 + i * 600 - 30, ws_heartbeat_age_sec=3.0)
+        rt["ws_connection"]["reconnect_count"] = count
+        f = _facts(runtime=rt, now=NOW + 300 + i * 600)
+        assert diagnose.check_feeds(f, diagnose.signals(f), store, state).severity == "GREEN", count
+
+
+def test_feeds_disconnected_transport_ambers(store):
+    rt = _feeds_rt(ws_heartbeat_age_sec=3.0)
+    rt["ws_transport_connected"] = False
+    f = _facts(runtime=rt)
+    assert diagnose.check_feeds(f, diagnose.signals(f), store, {}).severity == "AMBER"
