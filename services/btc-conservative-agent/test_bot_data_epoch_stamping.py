@@ -98,3 +98,15 @@ def test_fly_toml_declares_epoch_and_fresh_segment_prefix():
     assert data_epoch.valid_epoch_id(epoch)
     assert 'RESEARCH_SEGMENTS_PREFIX = "v3"' in toml and 'RESEARCH_SEGMENTS_BASELINE_GENESIS = "1"' in toml
     assert "v2=/app/data/segment-shipper-v2" in toml
+
+
+def test_boundary_status_explains_why_research_events_were_not_rotated(tmp_path):
+    import epoch_boundary_rotation as ebr
+
+    manifest = {"epoch_id": "ce-test", "started_at_utc": "2026-10-04T08:13:26Z",
+                "started_at_ts": 1791108806.0}
+    ns = _hooks(tmp_path, "ce-test")
+    ebr.rotate_research_events_at_boundary(tmp_path, manifest)
+    out = ns["_data_epoch_boundary_status"](manifest)
+    assert out["research_events_v22"] == "NOT_ROTATED"
+    assert out["research_events_v22_head"] == "ABSENT" and out["research_events_v22_decided_at"]

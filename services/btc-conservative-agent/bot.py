@@ -53764,8 +53764,13 @@ def _data_epoch_boundary_status(manifest: dict) -> dict | None:
     try:
         import epoch_boundary_rotation
         root = _data_sync_runtime_root()
-        out = {stream: (epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}).get("status")
-               for stream in ("research_events_v22", "v3")}
+        receipts = {stream: epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}
+                    for stream in ("research_events_v22", "v3")}
+        out = {stream: doc.get("status") for stream, doc in receipts.items()}
+        # Why the head was (not) sealed: ALREADY_CURRENT / EMPTY / ABSENT mean nothing pre-epoch was left to seal.
+        rev = receipts["research_events_v22"]
+        out["research_events_v22_head"] = rev.get("head_decision")
+        out["research_events_v22_decided_at"] = rev.get("decided_at_utc")
         plain = epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], "pre_epoch_archive") or {}
         out["plain_ledgers"] = (f"ARCHIVED_{len(plain.get('archived') or [])}" if plain else None)
         return out
