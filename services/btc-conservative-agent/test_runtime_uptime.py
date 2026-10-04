@@ -37,7 +37,7 @@ def test_first_boot_then_running_is_green_and_counts_from_first_healthy_observat
     assert s["state"] == "RUNNING" and s["colour"] == "green"
     assert s["uninterrupted_label"] == "Running uninterrupted: 3h 12m"
     assert s["uninterrupted_sec"] == int(3 * H + 12 * 60)
-    assert s["since_aest"].endswith("AEST") and s["since_utc"].endswith("UTC")
+    assert s["since_aest"].endswith(("AEST", "AEDT")) and s["since_utc"].endswith("UTC")
     assert s["last_interruption"]["kind"] == "first_boot"
     assert s["interruptions_24h"] == 1
 
@@ -287,3 +287,13 @@ def test_watcher_banner_payload_carries_proof():
     report = {"verdict": "GREEN", "generated_at": _iso(now), "failing": [], "counts": {}, "proof": proof}
     assert sh.banner_payload(report)["proof"]["label"] == "Proof: 3h / 48h"
     assert sh.proof_summary(None, now) is None
+
+
+def test_clock_labels_use_sydney_daylight_saving() -> None:
+    import runtime_uptime as ru
+    from datetime import datetime, timezone
+
+    ts = datetime(2026, 10, 4, 8, 41, tzinfo=timezone.utc).timestamp()
+    assert ru.clock(ts, ts) == {"aest": "19:41 AEDT", "utc": "08:41 UTC"}
+    winter = datetime(2026, 7, 1, 7, 39, tzinfo=timezone.utc).timestamp()
+    assert ru.clock(winter, winter)["aest"] == "17:39 AEST"

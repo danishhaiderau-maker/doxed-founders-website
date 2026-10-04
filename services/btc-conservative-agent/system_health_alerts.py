@@ -24,7 +24,14 @@ RETAIN_DAYS = 30
 RETAIN_EVENTS = 2000
 MAX_EVENTS_PER_PUSH = 400
 READ_TAIL_BYTES = 4 * 1024 * 1024
-AEST = timezone(timedelta(hours=10), "AEST")
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _SYDNEY = _ZoneInfo("Australia/Sydney")
+except Exception:  # Windows without tzdata
+    _SYDNEY = None
+_AEST_FIXED = timezone(timedelta(hours=10), "AEST")
+_AEDT = timezone(timedelta(hours=11), "AEDT")
+AEST = _AEST_FIXED  # legacy name; labels use to_sydney()
 RUNBOOK_BASE = "https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/"
 _EVENTS = ("OPEN", "STILL_RED", "RECOVERED", "AMBER", "AMBER_CLEAR")
 _STATUSES = ("GREEN", "AMBER", "RED", "SKIP")
@@ -153,6 +160,31 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _sydney_tz_for(moment: datetime):
+    """Australia/Sydney offset for an aware instant: AEDT (UTC+11) in summer, AEST (UTC+10) otherwise.
+
+    Uses the IANA zone when available; Windows without the ``tzdata`` package
+    falls back to the NSW rule (DST from the first Sunday of October 02:00
+    AEST to the first Sunday of April 03:00 AEDT).
+    """
+    if _SYDNEY is not None:
+        return _SYDNEY
+    utc = moment.astimezone(timezone.utc)
+
+    def first_sunday(year: int, month: int) -> datetime:
+        day = datetime(year, month, 1, tzinfo=timezone.utc)
+        return day + timedelta(days=(6 - day.weekday()) % 7)
+
+    start = first_sunday(utc.year, 10) - timedelta(hours=8)   # 02:00 AEST = 16:00Z Saturday
+    end = first_sunday(utc.year, 4) - timedelta(hours=8)      # 03:00 AEDT = 16:00Z Saturday
+    return _AEDT if (utc >= start or utc < end) else _AEST_FIXED
+
+
+def to_sydney(moment: datetime) -> datetime:
+    """Convert an aware datetime to Danish's local Australia/Sydney time."""
+    return moment.astimezone(_sydney_tz_for(moment))
+
+
 def _text(value, limit: int) -> str | None:
     if value is None:
         return None
@@ -160,11 +192,15 @@ def _text(value, limit: int) -> str | None:
 
 
 def times(ts: float | None) -> dict | None:
-    """The same instant in Danish's local AEST (UTC+10) and in UTC."""
+    """The same instant in Danish's local Sydney time (AEDT/AEST by date) and in UTC.
+
+    The key stays ``aest`` for API compatibility; the label carries the real
+    abbreviation (AEDT, UTC+11, during daylight saving).
+    """
     if ts is None:
         return None
     moment = datetime.fromtimestamp(ts, timezone.utc)
-    return {"aest": moment.astimezone(AEST).strftime("%Y-%m-%d %H:%M AEST"),
+    return {"aest": to_sydney(moment).strftime("%Y-%m-%d %H:%M %Z"),
             "utc": moment.strftime("%H:%M UTC"), "iso": _iso(ts)}
 
 
@@ -399,7 +435,7 @@ def build_history(events: list, *, now: float | None = None, statuses: dict | No
     if limit:
         ordered = ordered[:limit]
     return {
-        "schema": SCHEMA, "generated_at": _iso(now), "timezone": "AEST (UTC+10) and UTC",
+        "schema": SCHEMA, "generated_at": _iso(now), "timezone": "Australia/Sydney (AEDT UTC+11 / AEST UTC+10) and UTC",
         "retention": {"days": RETAIN_DAYS, "max_events": RETAIN_EVENTS},
         "events": len(events or []),
         "oldest_event_at": events[0]["at"] if events else None,
@@ -501,7 +537,7 @@ def render_alerts_html(history: dict, *, title: str = "Alerts", nav_links=(), so
         "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<meta http-equiv='refresh' content='60'><title>{_esc(title)}</title><style>{_STYLE}</style></head>"
         f"<body><div class='wrap'><div class='nav'>{nav}</div><h1 id='alerts'>{_esc(title)}</h1>"
-        f"<p class='muted'>Every alert the system-health watcher raised, newest first. Times are AEST (UTC+10) with UTC in "
+        f"<p class='muted'>Every alert the system-health watcher raised, newest first. Times are Sydney local time (AEDT, UTC+11, during daylight saving; AEST, UTC+10, otherwise) with UTC in "
         f"brackets. RED means trading, data safety or custody is affected; AMBER means degraded, look soon; RECOVERED "
         f"means it cleared by itself. Kept for {RETAIN_DAYS} days (up to {RETAIN_EVENTS} events). {_esc(source_note)}</p>"
         f"<p class='muted'>Updated {_when(generated)} &middot; {counts.get('active', 0)} active "
@@ -536,7 +572,7 @@ def section_script(endpoint: str = "/api/system-health/alerts", page: str = "/al
         '+(c.active_red||0)+" RED, "+(c.active_amber||0)+" AMBER) &middot; "+(c.total||0)+" in the last 30 days &middot; '
         '<a href=\\""+P+"\\">see all alerts</a></span></div>"+(rows?"<div style=\\"overflow-x:auto\\"><table style=\\"width:100%;'
         'border-collapse:collapse;font-size:.85rem;margin-top:6px\\"><thead><tr style=\\"color:#8b949e;text-align:left\\">'
-        '<th>Started (AEST / UTC)</th><th>Severity</th><th>What happened</th><th>Likely cause</th><th>Cleared</th></tr></thead>'
+        '<th>Started (Sydney / UTC)</th><th>Severity</th><th>What happened</th><th>Likely cause</th><th>Cleared</th></tr></thead>'
         '<tbody>"+rows+"</tbody></table></div>":"<div style=\\"color:#8b949e\\">No alerts recorded yet.</div>");}'
         'function poll(){fetch(U,{cache:"no-store"}).then(function(x){return x.ok?x.json():null;}).then(draw)'
         '.catch(function(){draw(null);});}'

@@ -123,7 +123,7 @@ def test_insights_exposes_alert_history(monkeypatch, tmp_path):
     comp = insights.alerts_component(time.time())
     assert comp["status"] == insights.OK
     assert [a["check"] for a in comp["data"]["active"]] == ["ws.ticks", "deepseek.balance"]
-    assert comp["data"]["alerts"][0]["started"]["aest"].endswith("AEST")
+    assert comp["data"]["alerts"][0]["started"]["aest"].endswith(("AEST", "AEDT"))
     monkeypatch.setattr(insights, "STATE_DIR", str(tmp_path / "absent"))
     assert insights.alerts_component(time.time())["status"] == insights.UNAVAILABLE
 
@@ -146,3 +146,26 @@ def test_state_round_trips_and_survives_corruption(tmp_path):
     assert sha.load_state(path, now=NOW)["events"] == []
     assert sha.load_state(tmp_path / "missing.json", now=NOW)["digest"] is None
     assert not list(path.parent.glob("*.tmp-*"))
+
+
+def test_alert_times_follow_sydney_daylight_saving() -> None:
+    import system_health_alerts as sha
+    from datetime import datetime, timezone
+
+    summer = datetime(2026, 10, 4, 8, 41, tzinfo=timezone.utc).timestamp()
+    winter = datetime(2026, 7, 1, 1, 0, tzinfo=timezone.utc).timestamp()
+    assert sha.times(summer)["aest"] == "2026-10-04 19:41 AEDT"
+    assert sha.times(winter)["aest"] == "2026-07-01 11:00 AEST"
+    # The tzdata-less fallback (Windows laptop) applies the same NSW rule.
+    saved = sha._SYDNEY
+    try:
+        sha._SYDNEY = None
+        assert sha.times(summer)["aest"] == "2026-10-04 19:41 AEDT"
+        assert sha.times(winter)["aest"] == "2026-07-01 11:00 AEST"
+        assert sha.times(datetime(2026, 10, 3, 15, 59, tzinfo=timezone.utc).timestamp())["aest"].endswith("AEST")
+        assert sha.times(datetime(2027, 4, 3, 16, 0, tzinfo=timezone.utc).timestamp())["aest"].endswith("AEST")
+        assert sha.times(datetime(2027, 4, 3, 15, 59, tzinfo=timezone.utc).timestamp())["aest"].endswith("AEDT")
+    finally:
+        sha._SYDNEY = saved
+    page = sha.render_alerts_html({"alerts": [], "counts": {}, "generated_at": None})
+    assert "Times are AEST (UTC+10)" not in page and "AEDT" in page

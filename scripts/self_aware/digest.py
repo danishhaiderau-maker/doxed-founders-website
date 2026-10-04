@@ -12,11 +12,43 @@ from typing import Any
 
 from .facts import iso, parse_ts
 
-AEST = timezone(timedelta(hours=10), "AEST")
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _SYDNEY = _ZoneInfo("Australia/Sydney")
+except Exception:  # Windows without tzdata
+    _SYDNEY = None
+_AEST_FIXED = timezone(timedelta(hours=10), "AEST")
+_AEDT = timezone(timedelta(hours=11), "AEDT")
+AEST = _AEST_FIXED  # legacy name; labels use to_sydney()
+
+
+def _sydney_tz_for(moment: datetime):
+    """Australia/Sydney offset for an aware instant: AEDT (UTC+11) in summer, AEST (UTC+10) otherwise.
+
+    Uses the IANA zone when available; Windows without the ``tzdata`` package
+    falls back to the NSW rule (DST from the first Sunday of October 02:00
+    AEST to the first Sunday of April 03:00 AEDT).
+    """
+    if _SYDNEY is not None:
+        return _SYDNEY
+    utc = moment.astimezone(timezone.utc)
+
+    def first_sunday(year: int, month: int) -> datetime:
+        day = datetime(year, month, 1, tzinfo=timezone.utc)
+        return day + timedelta(days=(6 - day.weekday()) % 7)
+
+    start = first_sunday(utc.year, 10) - timedelta(hours=8)   # 02:00 AEST = 16:00Z Saturday
+    end = first_sunday(utc.year, 4) - timedelta(hours=8)      # 03:00 AEDT = 16:00Z Saturday
+    return _AEDT if (utc >= start or utc < end) else _AEST_FIXED
+
+
+def to_sydney(moment: datetime) -> datetime:
+    """Convert an aware datetime to Danish's local Australia/Sydney time."""
+    return moment.astimezone(_sydney_tz_for(moment))
 
 
 def _aest(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).astimezone(AEST).strftime("%Y-%m-%d %H:%M AEST")
+    return to_sydney(datetime.fromtimestamp(ts, timezone.utc)).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def _dur(sec: float | None) -> str:

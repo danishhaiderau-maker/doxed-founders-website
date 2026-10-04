@@ -24,7 +24,14 @@ from pathlib import Path
 
 SCHEMA = "runtime_uptime_v1"
 STATE_FILE = "runtime_uptime_v1.json"
-AEST = timezone(timedelta(hours=10), "AEST")
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _SYDNEY = _ZoneInfo("Australia/Sydney")
+except Exception:  # Windows without tzdata
+    _SYDNEY = None
+_AEST_FIXED = timezone(timedelta(hours=10), "AEST")
+_AEDT = timezone(timedelta(hours=11), "AEDT")
+AEST = _AEST_FIXED  # legacy name; labels use to_sydney()
 HISTORY_SEC = 7 * 24 * 3600
 MAX_HISTORY = 500
 PERSIST_EVERY_SEC = 60.0
@@ -39,6 +46,31 @@ PROOF_WINDOW_HOURS = 48.0
 DEFINITION = ("Time since the last interruption: process restart/deploy, execution pause (any owner), "
               "paper off (no registry tile ON), or AI cadence stall (no successful AI response for "
               f"{int(AI_STALL_SEC // 60)} min or {AI_STALL_FAILURES} consecutive failures). A restart resets it.")
+
+
+def _sydney_tz_for(moment: datetime):
+    """Australia/Sydney offset for an aware instant: AEDT (UTC+11) in summer, AEST (UTC+10) otherwise.
+
+    Uses the IANA zone when available; Windows without the ``tzdata`` package
+    falls back to the NSW rule (DST from the first Sunday of October 02:00
+    AEST to the first Sunday of April 03:00 AEDT).
+    """
+    if _SYDNEY is not None:
+        return _SYDNEY
+    utc = moment.astimezone(timezone.utc)
+
+    def first_sunday(year: int, month: int) -> datetime:
+        day = datetime(year, month, 1, tzinfo=timezone.utc)
+        return day + timedelta(days=(6 - day.weekday()) % 7)
+
+    start = first_sunday(utc.year, 10) - timedelta(hours=8)   # 02:00 AEST = 16:00Z Saturday
+    end = first_sunday(utc.year, 4) - timedelta(hours=8)      # 03:00 AEDT = 16:00Z Saturday
+    return _AEDT if (utc >= start or utc < end) else _AEST_FIXED
+
+
+def to_sydney(moment: datetime) -> datetime:
+    """Convert an aware datetime to Danish's local Australia/Sydney time."""
+    return moment.astimezone(_sydney_tz_for(moment))
 
 
 def _iso(ts: float | None) -> str | None:
@@ -59,14 +91,18 @@ def _parse(value) -> float | None:
 
 
 def clock(ts: float | None, now: float | None = None) -> dict:
-    """``{"aest": "17:39 AEST", "utc": "07:39 UTC"}``; the date is added when not today (AEST)."""
+    """``{"aest": "17:39 AEDT", "utc": "06:39 UTC"}`` in Australia/Sydney time (AEDT/AEST by date).
+
+    The key stays ``aest`` for API compatibility; the label carries the real
+    abbreviation. The date is added when not today (local).
+    """
     if ts is None:
         return {"aest": None, "utc": None}
     moment = datetime.fromtimestamp(float(ts), timezone.utc)
-    today = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc).astimezone(AEST).date()
-    local = moment.astimezone(AEST)
+    today = to_sydney(datetime.fromtimestamp(time.time() if now is None else now, timezone.utc)).date()
+    local = to_sydney(moment)
     fmt = "%H:%M" if local.date() == today else "%d %b %H:%M"
-    return {"aest": local.strftime(fmt) + " AEST", "utc": moment.strftime(fmt) + " UTC"}
+    return {"aest": local.strftime(fmt) + " " + local.strftime("%Z"), "utc": moment.strftime(fmt) + " UTC"}
 
 
 def duration(sec: float | None) -> str:
