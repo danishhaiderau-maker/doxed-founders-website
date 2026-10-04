@@ -31,7 +31,7 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   # gate (diagnostics/CLEAN-EPOCH-RUNBOOK-20261003.md).
   # FREEZE21 (research_freeze.py): the one declared epoch for the 21-day
   # research freeze; changing it during the freeze fails CI.
-  DATA_EPOCH_ID = "ce-20261004-v31-freeze21"
+  DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
   # v3 begins at a genesis BASELINE segment, so only clean-epoch bytes ship.
   RESEARCH_SEGMENTS_PREFIX = "v3"
   RESEARCH_SEGMENTS_STATE_DIR = "/app/data/segment-shipper-v3"

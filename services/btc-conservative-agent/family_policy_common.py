@@ -128,6 +128,10 @@ class ExitAction:
     remaining_fraction: float
     peak_price: float
     partial_key: str | None = None
+    # Price the paper ledger books for this action when it differs from the
+    # tick that fired it (a resting maker take-profit fills at its limit).
+    book_price: float | None = None
+    maker: bool = False
 
 
 def _direction_sign(direction: str) -> int:

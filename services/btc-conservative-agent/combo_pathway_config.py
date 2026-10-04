@@ -112,10 +112,30 @@ COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID = "INVERTED_COMMITTED_SCORE_LED_SIDE_TA
 NOTRADE_FOLLOW_TAKER_ADMISSION_POLICY_ID = "SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_TAKER_V1"
 PREMIUM_REVERSION_ADMISSION_POLICY_ID = "CROSS_VENUE_PREMIUM_DEV60M_REVERSION_NO_AI_V1"
 RANDOM_CONTROL_ADMISSION_POLICY_ID = "RANDOM_COIN_SIDE_ON_COMMITTED_CALL_TAKER_V1"
+# FREEZE21B additions (owner, 2026-10-04 17:53/17:54 AEDT): Grok Strategist's
+# pre-registered rules PREREG-GS-20261004 (GS-01..04) and -B (B1..B3) as
+# visible paper tiles (regime_adaptive_binding.py).
+RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
+RESEARCH_LANE_FAMILY_GS02_NOTRADE_REGIME_ENTRY = "FAMILY_GS02_NOTRADE_REGIME_ENTRY"
+RESEARCH_LANE_FAMILY_GS03_CVD_DIV_TAKER = "FAMILY_GS03_CVD_DIV_TAKER"
+RESEARCH_LANE_FAMILY_GS04_NOTRADE_ATR_TP = "FAMILY_GS04_NOTRADE_ATR_TP"
+RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME = "FAMILY_GSB1_CVD_DIV_REGIME"
+RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER = "FAMILY_GSB2_REGIME_SWITCHER"
+RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME = "FAMILY_GSB3_COMMITTED_FADE_REGIME"
+GS_PREMIUM_FOLLOW_ADMISSION_POLICY_ID = "GS01_CROSS_VENUE_PREMIUM_FOLLOW_NO_AI_V1"
+GS_NOTRADE_FOLLOW_ADMISSION_POLICY_ID = "GS_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_V1"
+GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID = "GS_CVD_DIVERGENCE_3M_EVENT_NO_AI_V1"
+GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID = "GSB2_CVD_DIVERGENCE_OR_COMMITTED_FADE_BY_REGIME_V1"
+GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SIDE_REGIME_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
+# Tiles on this clock are triggered at a closed 3-minute Bitfinex bar by the
+# CVD-divergence evaluator (regime_bars_3m.py), never by the shared AI call.
+BAR_CLOSE_SIGNAL_CLOCK = "BAR_CLOSE_3M_CVD_EVALUATOR"
+EVALUATOR_SIGNAL_CLOCKS = frozenset({CROSS_VENUE_SIGNAL_CLOCK, BAR_CLOSE_SIGNAL_CLOCK})
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
+PARTIAL_EXIT_RELAY_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
 TILE_ARCHITECTURE_VERSION = 3
 # Complete atomic add/retire contract from the V3.1 objective.  Every active
 # tile declares this same surface roster, so a registry consumer can prove it
@@ -146,6 +166,13 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_NOTRADE_FOLLOW_TAKER_60,
     RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
+    RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
+    RESEARCH_LANE_FAMILY_GS02_NOTRADE_REGIME_ENTRY,
+    RESEARCH_LANE_FAMILY_GS03_CVD_DIV_TAKER,
+    RESEARCH_LANE_FAMILY_GS04_NOTRADE_ATR_TP,
+    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
+    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
+    RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -284,7 +311,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     return tile
 
 
-RESEARCH_STACK_VERSION = "v31-freeze21-3h1c-v12"
+RESEARCH_STACK_VERSION = "v31-freeze21b-11t-v13"
 
 # Shadow-only exits: evaluated on every filled trade's path by the shadow-exit
 # recorder and never executed. Units follow research/genome_grid_study.py
@@ -406,12 +433,19 @@ LIVE_EXIT_RULES = frozenset({
     "HARD_STOP", "BREAKEVEN_LOCK", "ATR_TRAIL", "EARLY_CUT", "TIME_EXIT",
     # Continuous (Aug-2026 replica) rules, evaluated by its own policy module.
     "EARLY_FAIL", "STOP_LOSS", "PROFIT_LOCK_LADDER", "THESIS_FAST_CUT", "THESIS_INVALIDATED", "PEAK_FLOOR",
+    # GS-20261004 regime stacks (gs_regime_exit_stack.py).
+    "THESIS_CUT", "VOL_SHOCK", "MFE_GIVEBACK", "INDICATOR_FLIP", "ATR_TAKE_PROFIT", "LADDER_TP1",
+    "LADDER_LOCK", "TIME_BACKSTOP",
 })
-RISK_EXIT_RULES = frozenset({"HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS", "THESIS_FAST_CUT"})
+RISK_EXIT_RULES = frozenset({"HARD_STOP", "EARLY_CUT", "EARLY_FAIL", "STOP_LOSS", "THESIS_FAST_CUT", "THESIS_CUT"})
 
 
 def registry_live_exit_order(exit_policy: dict) -> tuple[str, ...]:
-    """First-trigger-wins order of family_policy_common.exit_action for a registry exit policy."""
+    """First-trigger-wins order of family_policy_common.exit_action for a registry exit policy.
+
+    GS/B regime exit stacks (gs_regime_exit_stack) declare their own order."""
+    if exit_policy.get("family") == "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS":
+        return tuple(exit_policy["exit_order"])
     order = ["HARD_STOP"]
     if exit_policy.get("breakeven"):
         order.append("BREAKEVEN_LOCK")
@@ -447,7 +481,7 @@ AI_PROMPT_INPUT_REVISION_HISTORY = (
 # never as extra live tiles.
 # ---------------------------------------------------------------------------
 FREEZE21_POLICY_EPOCH = RESEARCH_STACK_VERSION
-FREEZE21_ID = "FREEZE21-20261004"
+FREEZE21_ID = "FREEZE21B-20261004"  # judged in the freeze21b epoch (re-declared 17:53 AEDT)
 FREEZE21_REGISTERED_UTC = "2026-10-04T04:02:00Z"
 FREEZE21_DECISION_DAY = 21
 # Bonferroni across the three hypotheses (the control is not a trial).
@@ -858,6 +892,409 @@ COMBO_LANE_SPECS = {
         shadow_exits=_shadow_exits_except("COMPOSITE_LATE_BE20_5_TRAIL1.5_ARM2", "COND_CUT_12_5M_MFE2"),
     ),
 }
+# ---------------------------------------------------------------------------
+# FREEZE21B additions (owner Danish, 2026-10-04 17:53 + 17:54 AEDT: "every
+# strategy must be a visible paper tile"). Grok Strategist's pre-registered
+# shadow rules become paper tiles with the specs frozen in
+# /workspace/grok-strategist/preregistration/PREREG-GS-20261004{,-B}.{md,json}:
+# GS-01..04 (06:20:20Z) and B1..B3 (06:34:58Z). $25 notional (0.25 margin at
+# 100x), one open position per tile, paper only, relay fail-closed. Entry,
+# regime and exit mechanics: regime_bars_3m.py, gs_regime_exit_stack.py,
+# regime_adaptive_binding.py. Deviations from the offline specs are listed in
+# diagnostics/FREEZE21-PROTOCOL-20261004.md (freeze21b section).
+# ---------------------------------------------------------------------------
+FREEZE21B_ID = "FREEZE21B-20261004"
+FREEZE21B_REGISTERED_UTC = "2026-10-04T06:53:00Z"
+GS_PREREG_PATH = "grok-strategist/preregistration/PREREG-GS-20261004.json"
+GSB_PREREG_PATH = "grok-strategist/preregistration/PREREG-GS-20261004-B.json"
+GS_REGIME_EXIT_FAMILY = "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS"
+GS_FREE_SPREAD_GUARD_BPS = 10.0  # execution sanity guard only; the GS specs have no spread filter
+
+
+def _gs_pre_registration(rule_id: str, *, prereg_path: str, registered_utc: str, bonferroni_k: int,
+                         honest_label: str, giveback_arm_bp: float, extra_kills: dict | None = None,
+                         decisions: tuple[str, ...] = ()) -> dict:
+    """GS pre-registration (schema ``tile_pre_registration_gs20261004_v1``); judged at the freeze21b epoch end."""
+    kill = {
+        "harm_after_fills": 30, "harm_mean_bp_at_or_below": -2.0, "harm_ci95_upper_below_bp": 0.0,
+        "futility_min_n_eff": 30, "futility_mean_below_bp": 1.0, "bonferroni_k": int(bonferroni_k),
+        "control_min_edge_bp": 2.0, "control_scoring": "OFFLINE_GROK_STRATEGIST_RANDOM_SIDE_SAME_TRIGGERS",
+        "giveback_after_fills": 30, "giveback_mfe_arm_bp": float(giveback_arm_bp), "giveback_rate_above": 0.25,
+        **(extra_kills or {}),
+        "action": ("owner decision: toggle OFF with the documented freeze override "
+                   "(reason KILL_RULE:<lane>:<rule>), then retire after the freeze"),
+    }
+    pre = {
+        "schema": "tile_pre_registration_gs20261004_v1",
+        "hypothesis_id": rule_id,
+        "role": "HYPOTHESIS",
+        "freeze_id": FREEZE21B_ID,
+        "registered_utc": registered_utc,
+        "source_prereg": prereg_path,
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": None,
+        "control_meaning": ("Random-direction control on the same triggers, scored offline by Grok Strategist "
+                            "(no live control tile per rule)"),
+        "evidence_world": "REALISTIC_V1",
+        "ci_method": "1H_CLUSTER_BOOTSTRAP",
+        "metric": "net bp per closed fill (live); Strategist's per-signal score (misses = 0) is the offline cross-check",
+        "variants_tried": int(bonferroni_k),
+        "honest_label": honest_label,
+        "pre_registered_decisions": tuple(decisions),
+        "target": {"min_fills": 30, "min_n_eff": 30,
+                   "meaning": "n_eff = distinct UTC hours with at least one closed fill in the freeze21b epoch"},
+        "promotion": {"meaning": "PASS_FORWARD_TO_OWNER_REVIEW_NEVER_RELAY", "min_fills": 30, "min_n_eff": 30,
+                      "mean_bp_gt": 0.0, "bonferroni_k": int(bonferroni_k), "family_alpha": 0.05},
+        "kill": kill,
+        "decision": {
+            "decision_day": FREEZE21_DECISION_DAY,
+            "anchor": "FREEZE_EPOCH_START (freeze21b data_epoch.json started_at)",
+            "pass": ("PASS_FORWARD: fills >= 30, n_eff >= 30, mean > 0 and the one-sided 1 h-cluster lower bound at "
+                     f"alpha 0.05/{int(bonferroni_k)} > 0 (and beats the offline random control by >= 2 bp)"),
+            "fail": "KILLED: any kill rule fires (harm any time; futility at the epoch end)",
+            "inconclusive": "INSUFFICIENT: fewer than 30 fills or n_eff < 30 at the epoch end",
+        },
+    }
+    parts = [f"harm: after 30 fills mean <= -2 bp with CI95 upper < 0",
+             f"futility at epoch end: n_eff >= 30 and mean < +1 bp or Bonferroni(k={int(bonferroni_k)}) lower bound <= 0",
+             "control: must beat the random side on the same triggers by >= 2 bp (offline)",
+             f"give-back: MFE >= {giveback_arm_bp:g} bp then closed <= 0 in > 25% of trades after 30 fills"]
+    for key, text in (("fill_rate_below", "fill rate < {v:.0%} after 40 signals"),
+                      ("latency_p50_above_sec", "signal->submit p50 > {v:g} s"),
+                      ("data_missing_share_above", "Bitfinex trade fields missing > {v:.0%} -> INSUFFICIENT_DATA"),
+                      ("be_armed_negative_share_above", "> {v:.0%} of break-even-armed trades close negative"),
+                      ("worst_trade_below_bp", "any trade < {v:g} bp")):
+        if kill.get(key) is not None:
+            parts.append(text.format(v=kill[key]))
+    pre["promotion_summary"] = (f"Pre-registered {rule_id} ({FREEZE21B_ID}): target >= 30 fills and n_eff >= 30 "
+                                f"distinct hours; epoch end: {pre['decision']['pass']}")
+    pre["kill_summary"] = "; ".join(parts)
+    return pre
+
+
+# GS simple stack (gslib.simulate_exit): first trigger wins in the order
+# HARD, BREAKEVEN_LOCK, ATR_TRAIL, MFE_GIVEBACK, EARLY_CUT, ATR_TAKE_PROFIT,
+# then the time stop. ATR = 3 m ATR14 in bp at the signal (4 bp when missing).
+def _gs_simple_exit(*, tp_atr: float | None, be_atr: float, trail_atr: float | None = None,
+                    trail_arm_atr: float | None = None) -> dict:
+    profile = {
+        "stack": "GS_SIMPLE_V1", "hard_bp": 35.0, "cut_bp": 8.0, "cut_win_sec": 300, "cut_close_sec": 1,
+        "time_sec": 3600, "be_atr": be_atr, "be_floor": 6.0, "lock_bp": 1.0,
+        "trail_atr": trail_atr, "trail_arm_atr": trail_arm_atr, "trail_floor": 5.0, "trail_arm_floor": 8.0,
+        "tp_atr": tp_atr, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+        "order": ("HARD_STOP", "BREAKEVEN_LOCK", "ATR_TRAIL", "MFE_GIVEBACK", "THESIS_CUT", "ATR_TAKE_PROFIT"),
+    }
+    order = ["HARD_STOP", "BREAKEVEN_LOCK"] + (["ATR_TRAIL"] if trail_atr else []) + ["THESIS_CUT"] \
+        + (["ATR_TAKE_PROFIT"] if tp_atr else []) + ["TIME_BACKSTOP"]
+    return {
+        "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 3600,
+        "hard_stop_bps": 35.0, "hard_stop_margin_pct": 35.0,
+        "profiles": {"ALL": profile}, "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
+        "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
+        "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
+        "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+        "max_open_positions": 1, "exit_order": tuple(order),
+    }
+
+
+def _b_profile(*, hard, cut, cut_close, time_sec, tp1_atr, tp1_floor, tp_atr, tp_floor, be_atr, be_floor=6.0,
+               trail_atr=None, trail_arm_atr=None, gb_arm, gb_frac, shock_k=1.5, shock_profit_only=False,
+               flip_profit_only=False) -> dict:
+    return {
+        "stack": "DYNLIB_REGIME_V1", "hard_bp": float(hard), "cut_bp": float(cut), "cut_win_sec": 300,
+        "cut_close_sec": int(cut_close), "time_sec": int(time_sec),
+        "tp1_atr": tp1_atr, "tp1_floor": float(tp1_floor), "tp1_frac": 0.5, "lock_bp": 2.0,
+        "tp_atr": tp_atr, "tp_floor": float(tp_floor), "be_atr": be_atr, "be_floor": float(be_floor),
+        "trail_atr": trail_atr, "trail_arm_atr": trail_arm_atr, "trail_floor": 5.0, "trail_arm_floor": 8.0,
+        "gb_arm": gb_arm, "gb_frac": gb_frac, "shock_k": shock_k, "shock_profit_only": bool(shock_profit_only),
+        "flip": True, "flip_profit_only": bool(flip_profit_only),
+        "order": ("HARD_STOP", "THESIS_CUT", "VOL_SHOCK", "BREAKEVEN_LOCK", "ATR_TRAIL", "MFE_GIVEBACK",
+                  "INDICATOR_FLIP", "ATR_TAKE_PROFIT"),
+    }
+
+
+# PREREG-GS-20261004-B profiles (dynlib PR / PR_REV), byte-for-byte numbers.
+GSB_PROFILES = {
+    "MOM_QUIET": _b_profile(hard=30, cut=8, cut_close=1, time_sec=7200, tp1_atr=1.0, tp1_floor=6, tp_atr=2.0,
+                            tp_floor=10, be_atr=1.0, gb_arm=10, gb_frac=0.5),
+    "MOM_TREND": _b_profile(hard=30, cut=8, cut_close=1, time_sec=10800, tp1_atr=1.5, tp1_floor=8, tp_atr=None,
+                            tp_floor=10, be_atr=1.0, trail_atr=3.0, trail_arm_atr=1.5, gb_arm=15, gb_frac=0.5),
+    "MOM_VIOLENT": _b_profile(hard=35, cut=9, cut_close=1, time_sec=5400, tp1_atr=1.0, tp1_floor=8, tp_atr=2.0,
+                              tp_floor=12, be_atr=0.75, trail_atr=1.5, trail_arm_atr=1.0, gb_arm=12, gb_frac=0.4),
+    "REV_QUIET": _b_profile(hard=30, cut=9, cut_close=60, time_sec=7200, tp1_atr=1.5, tp1_floor=6, tp_atr=2.5,
+                            tp_floor=10, be_atr=1.5, gb_arm=15, gb_frac=0.5, shock_profit_only=True,
+                            flip_profit_only=True),
+    "REV_TREND": _b_profile(hard=30, cut=8, cut_close=60, time_sec=7200, tp1_atr=1.0, tp1_floor=6, tp_atr=2.0,
+                            tp_floor=10, be_atr=1.0, gb_arm=10, gb_frac=0.5, shock_profit_only=False,
+                            flip_profit_only=True),
+    "REV_VIOLENT": _b_profile(hard=35, cut=9, cut_close=60, time_sec=5400, tp1_atr=1.0, tp1_floor=8, tp_atr=2.5,
+                              tp_floor=12, be_atr=1.0, trail_atr=2.0, trail_arm_atr=1.5, gb_arm=12, gb_frac=0.4,
+                              shock_profit_only=True, flip_profit_only=True),
+}
+GSB_LIVE_EXIT_ORDER = ("HARD_STOP", "THESIS_CUT", "VOL_SHOCK", "BREAKEVEN_LOCK", "ATR_TRAIL", "MFE_GIVEBACK",
+                       "INDICATOR_FLIP", "ATR_TAKE_PROFIT", "LADDER_TP1", "LADDER_LOCK", "TIME_BACKSTOP")
+
+
+def _gsb_exit(regime_profiles: dict) -> dict:
+    used = {name: GSB_PROFILES[name] for name in sorted(set(v for v in regime_profiles.values() if v))}
+    return {
+        "family": GS_REGIME_EXIT_FAMILY,
+        "max_duration_sec": max(p["time_sec"] for p in used.values()),
+        "hard_stop_bps": max(p["hard_bp"] for p in used.values()),
+        "hard_stop_margin_pct": max(p["hard_bp"] for p in used.values()),
+        "profiles": used, "regime_profiles": dict(regime_profiles),
+        "partial_take_profits": (("LADDER_TP1", 0.5),),
+        "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
+        "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
+        "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+        "max_open_positions": 1, "exit_order": GSB_LIVE_EXIT_ORDER,
+    }
+
+
+# Regime classifiers (last closed 3 m bar at the signal; regime_bars_3m.classify_regime).
+GS02_REGIME = {"violent_atr_pct_gte": 66.0, "violent_spread_bp_gte": 2.0, "trend_adx_gte": None}
+GSB_REGIME = {"violent_atr_pct_gte": 80.0, "violent_spread_bp_gte": 3.0, "trend_adx_gte": 25.0}
+# Entry executions (dynlib.do_entry / gslib.limit_entry). Reprice times are
+# seconds after the order rests: the first second of every reprice_sec step
+# inside the declared 5-minute windows (window w covers [(w-1)*300, w*300)).
+GS_EXEC = {
+    "TAKER": {"kind": "TAKER"},
+    "TOUCH": {"kind": "TOUCH", "offset_atr_k": 0.0, "chase_windows": (1, 2), "gap_step": 1.0, "reprice_sec": 60,
+              "ttl_sec": 600, "fallback": "TAKER_IF_DRIFT_LE_0.5ATR_FAVOURABLE_AND_GE_-8BP",
+              "fallback_favourable_atr_k": 0.5, "fallback_adverse_bp": 8.0, "order_ttl_sec": 660},
+    "OFFSET": {"kind": "OFFSET", "offset_atr_k": 0.25, "chase_windows": (1, 2, 3), "gap_step": 0.5,
+               "reprice_sec": 120, "ttl_sec": 900, "order_ttl_sec": 900},
+    "DEEP_0.75": {"kind": "DEEP", "offset_atr_k": 0.75, "chase_windows": (), "gap_step": 0.0, "reprice_sec": 180,
+                  "ttl_sec": 1200, "order_ttl_sec": 1200},
+    "DEEP_1.5": {"kind": "DEEP", "offset_atr_k": 1.5, "chase_windows": (), "gap_step": 0.0, "reprice_sec": 180,
+                 "ttl_sec": 1200, "order_ttl_sec": 1200},
+    "GS02_VIOLENT": {"kind": "LIMIT_ATR", "offset_atr_k": 1.0, "chase_windows": (2, 3), "gap_step": 0.25,
+                     "reprice_sec": 180, "ttl_sec": 1800, "order_ttl_sec": 1800},
+}
+
+
+def _gs_entry(*, mode: str, direction_source: str, ai_role: str, regime: dict | None,
+              regime_exec: dict, **extra) -> dict:
+    return {
+        "mode": mode, "offset_pct": 0.0, "chase_windows": (), "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+        "direction_source": direction_source,
+        "allowed_sessions": FREEZE21_SESSIONS_ALL, "session_hours_utc": HYPOTHESIS_SESSION_HOURS_UTC,
+        "max_bbo_age_sec": 5.0, "max_spread_bps": GS_FREE_SPREAD_GUARD_BPS,
+        "taker_protection_bps": 5.0, "taker_ttl_sec": 3,
+        "regime_classifier": dict(regime) if regime else None,
+        "regime_exec": {k: (dict(GS_EXEC[v]) if v else None) for k, v in regime_exec.items()},
+        "regime_source": "REGIME_BARS_3M_LAST_CLOSED_BAR_AT_SIGNAL",
+        "ai_decision_role": ai_role, "fill_model": "REALISTIC_V1",
+        **extra,
+    }
+
+
+_GS01_ENTRY = _gs_entry(
+    mode="TAKER_AT_SIGNAL", direction_source="CROSS_VENUE_PREMIUM", ai_role="NONE", regime=None,
+    regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
+    signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+    **{k: _PREMIUM_REVERSION_ENTRY[k] for k in (
+        "leader_venues", "premium_mean_window_sec", "premium_min_mean_samples", "premium_long_threshold_bps",
+        "premium_short_threshold_bps", "max_fill_forward_sec", "max_venue_age_sec", "shadow_entry_delay_sec")},
+    trigger_stream="H-C premium rule (same thresholds and 3 bp spread gate), own evaluator instance",
+    min_submit_interval_sec=5, max_submissions_per_hour=60,
+)
+_GS01_ENTRY.update({"max_bbo_age_sec": 2.0, "max_spread_bps": 3.0})
+_GS_NOTRADE_KEYS = {
+    "refuse_on": ("RAW_AI_COMMITTED", "SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "BBO_STALE"),
+    "trades_raw_ai_no_trade": True, "trades_only_raw_ai_no_trade": True, "min_score_gap": None,
+}
+_GS02_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="SCORE_LED_SIDE", ai_role="ABSTENTION_GATE_SIDE_FROM_SCORES",
+    regime=GS02_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "GS02_VIOLENT"},
+    **_GS_NOTRADE_KEYS,
+)
+_GS04_ENTRY = _gs_entry(
+    mode="TAKER_AT_SIGNAL", direction_source="SCORE_LED_SIDE", ai_role="ABSTENTION_GATE_SIDE_FROM_SCORES",
+    regime=None, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"}, **_GS_NOTRADE_KEYS,
+)
+_CVD_TRIGGER = {"cvd_indicator": "CVD_DIVERGENCE_20", "cvd_lookback_bars": 20, "bar_sec": 180,
+                "trigger_event": "TRANSITION_INTO_LONG_OR_SHORT_AT_BAR_CLOSE"}
+_GS03_ENTRY = _gs_entry(
+    mode="TAKER_AT_SIGNAL", direction_source="CVD_DIVERGENCE_3M", ai_role="NONE", regime=None,
+    regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
+    signal_clock=BAR_CLOSE_SIGNAL_CLOCK, min_submit_interval_sec=5, max_submissions_per_hour=60, **_CVD_TRIGGER,
+)
+_GSB1_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="CVD_DIVERGENCE_3M", ai_role="NONE", regime=GSB_REGIME,
+    regime_exec={"QUIET": "TOUCH", "TREND": None, "VIOLENT": "DEEP_0.75"},
+    signal_clock=BAR_CLOSE_SIGNAL_CLOCK, min_submit_interval_sec=5, max_submissions_per_hour=60,
+    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "VIOLENT": "CVD_DIVERGENCE_20"}, **_CVD_TRIGGER,
+)
+_COMMITTED_FADE_KEYS = {
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
+                  "BBO_STALE", "FADE_SPREAD_ABOVE_MAX", "FADE_SESSION_GATED"),
+    "trades_raw_ai_no_trade": False, "min_score_gap": None, "commit_rule": "EXPLICIT_RAW_SIDE_EQUALS_SCORE_LED",
+    "fade_allowed_sessions": FREEZE21_SESSIONS_ASIA_EU, "fade_max_spread_bps": 3.0,
+    "fade_definition": "H-A committed fade (frozen scorer: explicit side == score-led side, Asia+EU, spread <= 3 bp)",
+}
+_GSB2_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
+    regime=GSB_REGIME, regime_exec={"QUIET": "TOUCH", "TREND": "OFFSET", "VIOLENT": "DEEP_0.75"},
+    bar_clock_trigger="CVD_DIVERGENCE_20", min_submit_interval_sec=5, max_submissions_per_hour=60,
+    regime_trigger={"QUIET": "CVD_DIVERGENCE_3M", "TREND": "COMMITTED_FADE", "VIOLENT": "CVD_DIVERGENCE_3M"},
+    flip_indicator={"QUIET": "CVD_DIVERGENCE_20", "TREND": "CVD_TREND_20", "VIOLENT": "CVD_DIVERGENCE_20"},
+    **_CVD_TRIGGER, **_COMMITTED_FADE_KEYS,
+)
+_GSB3_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
+    regime=GSB_REGIME, regime_exec={"QUIET": "TOUCH", "TREND": "OFFSET", "VIOLENT": "DEEP_1.5"},
+    flip_indicator={"QUIET": "CVD_TREND_20", "TREND": "CVD_TREND_20", "VIOLENT": "CVD_TREND_20"},
+    **_COMMITTED_FADE_KEYS,
+)
+_GS01_EXIT = _gs_simple_exit(tp_atr=2.5, be_atr=2.0)
+_GS02_EXIT = _gs_simple_exit(tp_atr=None, be_atr=1.5, trail_atr=2.0, trail_arm_atr=2.0)
+_GS03_EXIT = dict(_GS02_EXIT)
+_GS04_EXIT = dict(_GS01_EXIT)
+_GSB1_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": None, "VIOLENT": "MOM_VIOLENT"})
+_GSB2_EXIT = _gsb_exit({"QUIET": "REV_QUIET", "TREND": "MOM_TREND", "VIOLENT": "REV_VIOLENT"})
+_GSB3_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": "MOM_TREND", "VIOLENT": "MOM_VIOLENT"})
+GS_SHADOW_REASON = "pre-registered stack: its own thesis cut is live; the shared catalog is shadow-only comparison"
+
+
+def _gs_tile(*, lane, label, raw_policy_id, id_prefix, module, entry, exit_policy, pre, hypothesis, subtitle,
+             signal_summary, admission, signal_clock=None, entry_ttl_sec=3, relay=None) -> dict:
+    return _tile(
+        lane=lane, label=label, raw_policy_id=raw_policy_id, id_prefix=id_prefix,
+        module=module, test_module="test_" + module, entry=dict(entry), exit_policy=dict(exit_policy),
+        relay_capability=relay or "BLOCKED_UNQUALIFIED",
+        hypothesis_result=hypothesis, pre_registration=pre, admission_treatment=admission,
+        max_active_signals=1, entry_ttl_sec=entry_ttl_sec, subtitle=subtitle, policy_epoch=FREEZE21_POLICY_EPOCH,
+        default_enabled=True, signal_clock=signal_clock, signal_summary=signal_summary,
+        live_exit_order=tuple(exit_policy["exit_order"]), shadow_exits=ALL_SHADOW_EXITS,
+    )
+
+
+_GS_HONEST = "SHADOW RULE PROMOTED TO A PAPER TILE BY OWNER ORDER - discovery-only evidence, CI spans 0"
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
+        label="GS-01 Premium follow + ATR TP · H-C premium trigger, taker, maker TP 2.5 ATR, BE 2 ATR, 60-min stop",
+        raw_policy_id="GS01_XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_FOLLOW_TAKER_CAP5BPS|GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1",
+        id_prefix="gs1", module="paper_policy_family_gs01_xv_premium_atr_tp.py",
+        entry=_GS01_ENTRY, exit_policy=_GS01_EXIT, signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+        admission=GS_PREMIUM_FOLLOW_ADMISSION_POLICY_ID,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-01",
+                    "in_sample": "discovery only (pre-freeze21, in-sample selection); see PREREG-GS-20261004.md"},
+        pre=_gs_pre_registration(
+            "GS-20261004-01", prereg_path=GS_PREREG_PATH, registered_utc="2026-10-04T06:20:20Z", bonferroni_k=4,
+            honest_label=_GS_HONEST, giveback_arm_bp=8.0, extra_kills={"latency_p50_above_sec": 5.0},
+            decisions=("same trigger stream as H-C (own evaluator instance, no shadow file)",)),
+        subtitle="GS-01 — premium follow, ATR take-profit — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("H-C's cross-venue premium trigger (Binance/Bybit premium vs its 60-min mean "
+                        ">=+1.75 / <=-1.88 bp); taker toward convergence; ATR-scaled maker take-profit"),
+    ),
+    RESEARCH_LANE_FAMILY_GS02_NOTRADE_REGIME_ENTRY: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS02_NOTRADE_REGIME_ENTRY,
+        label="GS-02 No-trade follow, regime entry · score-led side on AI NO_TRADE, taker when quiet, 1 ATR limit when violent, BE + ATR trail",
+        raw_policy_id="GS02_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_QUIET_TAKER_VIOLENT_LIMIT1ATR_W23_S25_I180_TTL1800|GS_BE1.5ATR_TRAIL2ATR_ARM2ATR_CUT8BP5M_HARD35BP_T60M_CAP1",
+        id_prefix="gs2", module="paper_policy_family_gs02_notrade_regime_entry.py",
+        entry=_GS02_ENTRY, exit_policy=_GS02_EXIT, admission=GS_NOTRADE_FOLLOW_ADMISSION_POLICY_ID,
+        entry_ttl_sec=1800,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-02",
+                    "in_sample": "cap 1 +1.75 bp/signal [-3.74, 7.94] n_eff 49 (discovery only)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-02", prereg_path=GS_PREREG_PATH, registered_utc="2026-10-04T06:20:20Z", bonferroni_k=4,
+            honest_label=_GS_HONEST, giveback_arm_bp=8.0,
+            extra_kills={"fill_rate_below": 0.60, "fill_rate_after_signals": 40}),
+        subtitle="GS-02 — NO_TRADE follow, regime-adaptive entry — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("follow the score-led side when the shared AI returned NO_TRADE; taker in QUIET, a "
+                        "post-only limit 1 ATR away in VIOLENT (ATR pct >= 66 or spread >= 2 bp)"),
+    ),
+    RESEARCH_LANE_FAMILY_GS03_CVD_DIV_TAKER: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS03_CVD_DIV_TAKER,
+        label="GS-03 CVD divergence (no AI) · 3-min price vs Bitfinex CVD slope divergence, taker, BE + ATR trail",
+        raw_policy_id="GS03_CVD_DIVERGENCE_20BAR_3M_TRANSITION_TAKER_CAP5BPS|GS_BE1.5ATR_TRAIL2ATR_ARM2ATR_CUT8BP5M_HARD35BP_T60M_CAP1",
+        id_prefix="gs3", module="paper_policy_family_gs03_cvd_div_taker.py",
+        entry=_GS03_ENTRY, exit_policy=_GS03_EXIT, signal_clock=BAR_CLOSE_SIGNAL_CLOCK,
+        admission=GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-03",
+                    "in_sample": "indicator-only rule; discovery only (see PREREG-GS-20261004.md)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-03", prereg_path=GS_PREREG_PATH, registered_utc="2026-10-04T06:20:20Z", bonferroni_k=4,
+            honest_label=_GS_HONEST, giveback_arm_bp=8.0, extra_kills={"data_missing_share_above": 0.10}),
+        subtitle="GS-03 — CVD divergence reversion, indicator only — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("at a 3-minute bar close: 20-bar price slope and Bitfinex CVD slope disagree "
+                        "(price down + CVD up = LONG, reverse = SHORT); trade the transition as a taker"),
+    ),
+    RESEARCH_LANE_FAMILY_GS04_NOTRADE_ATR_TP: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS04_NOTRADE_ATR_TP,
+        label="GS-04 No-trade follow + ATR TP · score-led side on AI NO_TRADE, taker, maker TP 2.5 ATR, BE 2 ATR (entry-isolation control)",
+        raw_policy_id="GS04_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_TAKER_CAP5BPS|GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1",
+        id_prefix="gs4", module="paper_policy_family_gs04_notrade_atr_tp.py",
+        entry=_GS04_ENTRY, exit_policy=_GS04_EXIT, admission=GS_NOTRADE_FOLLOW_ADMISSION_POLICY_ID,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-04",
+                    "in_sample": "exit-only contrast to GS-02 / H-B on the same NO_TRADE triggers (discovery only)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-04", prereg_path=GS_PREREG_PATH, registered_utc="2026-10-04T06:20:20Z", bonferroni_k=4,
+            honest_label=_GS_HONEST, giveback_arm_bp=8.0),
+        subtitle="GS-04 — NO_TRADE follow, ATR take-profit (entry-isolation control) — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("follow the score-led side when the shared AI returned NO_TRADE, always as a taker; "
+                        "isolates GS-02's entry by sharing its trigger with a different exit"),
+    ),
+    RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
+        label="B1 CVD divergence, regime-managed · touch limit when quiet, stand aside in trend, deep 0.75 ATR limit when violent, momentum exit set",
+        raw_policy_id="GSB1_CVD_DIVERGENCE_3M_QUIET_TOUCH_TREND_ASIDE_VIOLENT_DEEP0.75ATR|DYN_MOM_QUIET_VIOLENT_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
+        id_prefix="gb1", module="paper_policy_family_gsb1_cvd_div_regime.py",
+        entry=_GSB1_ENTRY, exit_policy=_GSB1_EXIT, signal_clock=BAR_CLOSE_SIGNAL_CLOCK,
+        admission=GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID, entry_ttl_sec=1200,
+        relay=PARTIAL_EXIT_RELAY_CAPABILITY,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B1",
+                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-B1", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
+            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
+            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
+                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
+        subtitle="B1 — CVD divergence with regime-specific entry and exits — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("the GS-03 CVD divergence event; QUIET: passive touch limit with re-pegs and a guarded "
+                        "taker fallback; TREND: stand aside; VIOLENT: deep 0.75 ATR limit, 20-min TTL"),
+    ),
+    RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
+        label="B2 Regime switcher · CVD divergence reversion in quiet/violent, committed-AI fade in trend, regime exits",
+        raw_policy_id="GSB2_QUIET_VIOLENT_CVD_DIVERGENCE_REV_TREND_COMMITTED_FADE_MOM_OFFSET0.25ATR|DYN_REV_QUIET_VIOLENT_MOM_TREND_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
+        id_prefix="gb2", module="paper_policy_family_gsb2_regime_switcher.py",
+        entry=_GSB2_ENTRY, exit_policy=_GSB2_EXIT, admission=GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID,
+        entry_ttl_sec=1200, relay=PARTIAL_EXIT_RELAY_CAPABILITY,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B2",
+                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-B2", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
+            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
+            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
+                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0}),
+        subtitle="B2 — regime switcher (CVD reversion / committed fade) — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("QUIET and VIOLENT: the CVD divergence event (reversion exit set); TREND (ADX >= 25): fade "
+                        "the shared AI's committed call (H-A definition) with a 0.25 ATR offset limit"),
+    ),
+    RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
+        label="B3 Committed fade, regime-managed · H-A's committed-AI fade with touch / 0.25 ATR offset / deep 1.5 ATR entries and momentum exits",
+        raw_policy_id="GSB3_INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_QUIET_TOUCH_TREND_OFFSET0.25ATR_VIOLENT_DEEP1.5ATR|DYN_MOM_ALL_REGIMES_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
+        id_prefix="gb3", module="paper_policy_family_gsb3_committed_fade_regime.py",
+        entry=_GSB3_ENTRY, exit_policy=_GSB3_EXIT, admission=GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID,
+        entry_ttl_sec=1200, relay=PARTIAL_EXIT_RELAY_CAPABILITY,
+        hypothesis={"status": "GS20261004_DISCOVERY_ONLY_CI_SPANS_0", "hypothesis_id": "GS-20261004-B3",
+                    "in_sample": "discovery only (see PREREG-GS-20261004-B.md)"},
+        pre=_gs_pre_registration(
+            "GS-20261004-B3", prereg_path=GSB_PREREG_PATH, registered_utc="2026-10-04T06:34:58Z", bonferroni_k=3,
+            honest_label=_GS_HONEST, giveback_arm_bp=10.0,
+            extra_kills={"be_armed_negative_share_above": 0.10, "worst_trade_below_bp": -45.0,
+                         "fill_rate_below": 0.60, "fill_rate_after_signals": 40, "latency_p50_above_sec": 5.0},
+            decisions=("committed fade follows H-A and the frozen scorer, not the prereg prose 'gap >= 30'",)),
+        subtitle="B3 — committed-AI fade with regime entries and exits — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("fade the shared AI's committed LONG/SHORT call (H-A definition, Asia+EU, spread <= 3 bp); "
+                        "entry and exits chosen by the regime of the last closed 3-minute bar"),
+    ),
+})
+
 COMPARISON_BENCHMARK_LANE = None
 PRIMARY_PRODUCTION_LANE = COMBO_EXECUTION_LANES[0]
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
@@ -868,7 +1305,7 @@ RESEARCH_CANDIDATE_LANE = COMBO_EXECUTION_LANES[0]
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "21-day research freeze (FREEZE21-20261004, owner-approved 2026-10-04 15:02 AEDT): one declared data epoch, no tile adds, removals or resets until day 21 unless the documented freeze override is used (research_freeze.py). Four tiles, every number derived from the registry display order: H-A Committed fade (taker) fades the shared AI's committed LONG/SHORT calls as a taker inside Asia+EU with the late-armed composite (break-even +20->+5 bp, ATR trail 1.5 armed at +2 ATR), the conditional early cut, a 90-minute backstop and a 40 bp stop (rule unchanged from v11). H-B No-trade follow (taker) follows the score-led side only when the AI returned NO_TRADE, as a taker (the maker version never filled), with the composite exit, a 60-minute backstop, ten slots. H-C Premium reversion (no AI) takes a Bitfinex taker toward Binance/Bybit when their premium leaves its 60-minute mean by the fixed +1.75/-1.88 bp tails, 60-minute hold and 40 bp stop only. The Control trades H-A's calls with H-A's entry and exits but a deterministic random side, measuring pure execution cost. Every tile is paper-only and relay-ineligible, default ON for the freeze, with a pre-registered target of 150 distinct hours, a kill rule (mean <=0 after 80 distinct hours for the hypotheses) and a day-21 decision (Bonferroni across the three hypotheses). v12 retires the three Danish tiles, Committed fade (maker), No-trade follow (maker), Cross-venue session follow and the Continuous baseline (replaced by the random control); earlier cohorts remain quarantined"
+    "21-day research freeze FREEZE21B-20261004 (owner-approved 2026-10-04 15:02 AEDT, re-declared 17:53/17:54 AEDT with every strategy as a visible paper tile): one declared data epoch (ce-20261004-v31-freeze21b), no tile adds, removals or resets until day 21 unless the documented freeze override is used (research_freeze.py). Eleven paper-only, relay-ineligible tiles, default ON. H-A Committed fade (taker), H-B No-trade follow (taker), H-C Premium reversion (no AI) and the random Control keep their v12 rules and signatures unchanged. v13 adds Grok Strategist's pre-registered rules as live paper tiles: GS-01 premium follow with an ATR maker take-profit and break-even (own evaluator of H-C's trigger), GS-02 NO_TRADE follow with a regime-adaptive entry (taker when quiet, post-only 1 ATR limit when violent), GS-03 3-minute CVD-divergence reversion (indicator only, no AI), GS-04 NO_TRADE follow as a taker with GS-01's exits (entry-isolation control), and B1 (CVD divergence, regime-managed), B2 (regime switcher: CVD divergence when quiet/violent, committed fade when trending) and B3 (committed fade, regime-managed) with regime-specific touch/offset/deep limits and the MOM/REV exit stacks (break-even, ATR trail, MFE give-back, volatility shock, indicator flip, ATR take-profit, TP1 ladder). Each GS/B tile carries its own pre-registration (>= 30 fills and n_eff >= 30 distinct hours, harm/futility/give-back kills, Bonferroni within its family, day-21 decision); discovery-only evidence, CI spans 0. Earlier cohorts remain quarantined"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -958,7 +1395,6 @@ RETIRED_POLICY_IDENTITIES = frozenset({
 })
 
 
-PARTIAL_EXIT_RELAY_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
 
 
 def tile_has_partial_exits(spec: dict) -> bool:
@@ -1050,7 +1486,7 @@ def validate_tile_registry() -> tuple[str, ...]:
             not spec.get("paper_only")
             or spec.get("platform_relay_eligible")
             or spec.get("live_copy_eligible")
-            or spec.get("relay_capability") != "BLOCKED_UNQUALIFIED"
+            or spec.get("relay_capability") not in ("BLOCKED_UNQUALIFIED", PARTIAL_EXIT_RELAY_CAPABILITY)
         ):
             defects.append(f"{lane}:DEFAULT_ON_REQUIRES_PAPER_ONLY_RELAY_BLOCKED")
         # Exchange-side partial reductions are not wired; a partial-exit tile
@@ -1250,6 +1686,22 @@ def is_cross_venue_clock_lane(lane: str) -> bool:
 
 def cross_venue_clock_lanes() -> tuple[str, ...]:
     return tuple(lane for lane in ACTIVE_TILE_ORDER if is_cross_venue_clock_lane(lane))
+
+
+def is_evaluator_clock_lane(lane: str) -> bool:
+    """Tiles triggered only by an evaluator clock (cross-venue or 3 m bar close), never by an AI call."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    return spec.get("signal_clock") in EVALUATOR_SIGNAL_CLOCKS
+
+
+def evaluator_loop_lanes() -> tuple[str, ...]:
+    """Lanes the 1 Hz evaluator loop drives: evaluator-clock tiles plus shared-AI tiles whose
+    entry also declares a ``bar_clock_trigger`` (GS-B2: CVD events in QUIET/VIOLENT)."""
+    return tuple(
+        lane for lane in ACTIVE_TILE_ORDER
+        if is_evaluator_clock_lane(lane)
+        or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("bar_clock_trigger"))
+    )
 
 
 def _session_from_features(features: dict) -> str:

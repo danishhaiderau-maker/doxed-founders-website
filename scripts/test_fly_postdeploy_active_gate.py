@@ -206,10 +206,14 @@ def test_hold_off_list_comes_from_repository_variable():
     assert gate.held_off_lanes({}) == frozenset()
 
 
-def test_checkout_registry_is_the_freeze21_roster_with_the_old_tiles_retired():
+def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     lanes, retired = gate.checkout_registry()
     assert lanes == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60",
-                     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90"]
+                     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90",
+                     "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+                     "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GS04_NOTRADE_ATR_TP",
+                     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+                     "FAMILY_GSB3_COMMITTED_FADE_REGIME"]
     assert {"FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
             "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
             "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M"} <= retired

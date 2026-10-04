@@ -92,6 +92,7 @@ import pytz
 
 import bitfinex_cost_profile
 import research_freeze as _research_freeze
+import regime_bars_3m
 
 from combo_pathway_config import (
     tile_card_sections as combo_tile_card_sections,
@@ -142,6 +143,8 @@ from combo_pathway_config import (
     is_shared_ai_direction_lane,
     is_cross_venue_clock_lane,
     cross_venue_clock_lanes,
+    is_evaluator_clock_lane,
+    evaluator_loop_lanes,
     is_research_candidate_lane,
     is_shadow_only_lane,
     is_static_bracket_lane,
@@ -1438,6 +1441,9 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "context": context,
         "controls": copy.deepcopy(signal.get("controls") or {}),
         "decision": copy.deepcopy(signal.get("decision") or {}),
+        # GS/B regime tiles: the signal-time regime / exit-profile decision
+        # that selects the position's exit stack.
+        "adaptive_entry_decision": copy.deepcopy(signal.get("adaptive_entry_decision") or {}),
         "edge_score_at_entry": signal.get("edge_score_at_entry"),
         "entry_delay_sec": round(entry_delay_sec, 3),
         "order_age_sec": round(order_age_sec, 3),
@@ -4898,6 +4904,18 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
                 "entry_thesis": pos.get("entry_thesis") or {},
                 "market_context": copy.deepcopy(state.get("market_context") or {}),
             }
+    if getattr(policy, "MARKET_EXIT_CONTEXT", False):
+        # GS/B regime exit stacks: 3-minute bar indicators and 60 s shock
+        # inputs from the shared microstructure engine, the streaming stack
+        # state persisted on the position, and the signal-time regime decision.
+        entry_ts_val = float(pos.get("entry_ts") or now)
+        exit_kwargs["market_context"] = regime_bars_3m.ENGINE.exit_context(entry_ts_val, now)
+        exit_kwargs["policy_state"] = pos.setdefault("policy_state", {})
+        decision = pos.get("adaptive_entry_decision") or (
+            (trades_map.get(pos.get("trade_id"), {}).get("signal_ref") or {}).get("adaptive_entry_decision")
+        )
+        exit_kwargs["entry_decision"] = copy.deepcopy(decision or {})
+        exit_kwargs["fill_ts"] = entry_ts_val
     action = policy.exit_action(
         entry=entry, direction=direction, price=price, atr_abs=atr_abs,
         atr_pct=_buf_float(pos.get("atr14_pct_3m"), 0.0), age_sec=age,
@@ -4908,8 +4926,18 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     if not action:
         with trade_lock:
             source_pos["policy_peak_price"] = current_peak
+            if "policy_state" in pos:
+                source_pos["policy_state"] = copy.deepcopy(pos["policy_state"])
         return False
     pos["policy_peak_price"] = action.peak_price
+    book_price = getattr(action, "book_price", None)
+    if book_price:
+        # The rule's own booking price (side-correct trigger tick, or the
+        # resting maker target) is what close_position books.
+        pos["_exit_eval_price"] = float(book_price)
+    if getattr(action, "maker", False) and float(action.remaining_fraction) <= 0:
+        pos["exit_fee_type"] = "MAKER"
+    fill_px = float(book_price) if book_price else float(price)
     if action.partial_key is not None:
         pos.setdefault("policy_completed_partials", []).append(action.partial_key)
     close_fraction = float(action.close_fraction)
@@ -4921,7 +4949,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     pos.setdefault("policy_original_qty", original_qty)
     close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
     dir_factor = 1.0 if direction == "LONG" else -1.0
-    realized_gross = (float(price) - entry) * dir_factor * close_qty
+    realized_gross = (fill_px - entry) * dir_factor * close_qty
     # Only genuine reductions belong in the partial-realized accumulator.
     # A terminal family action is priced once by close_position's remaining
     # runner calculation. Recording it here as a partial and then closing the
@@ -4933,7 +4961,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
         pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
     receipt = {
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
-        "remaining_fraction": remaining_after, "price": float(price), "policy_id": pos.get("policy_id"),
+        "remaining_fraction": remaining_after, "price": fill_px, "policy_id": pos.get("policy_id"),
         "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
         "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
         "cumulative_realized_net_usd": _buf_float(
@@ -4972,7 +5000,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
         {
             "direction": pos.get("dir"), "prior_qty": prior_qty,
             "reduced_qty": close_qty, "remaining_qty": pos["qty"],
-            "fill_price": float(price), "reduce_only": True,
+            "fill_price": fill_px, "reduce_only": True,
             "research_lane": pos.get("research_lane"),
         },
         target_mutator=target_mutator, live_mutator=live_mutator,
@@ -6724,6 +6752,9 @@ def _is_trigger_consistent_exit_reason(reason) -> bool:
         reason in _TRIGGER_CONSISTENT_EXIT_REASONS
         or bool(_HARD_STOP_REASON.fullmatch(reason))
         or bool(_TIME_EXIT_REASON.fullmatch(reason))
+        # GS/B regime exit stacks (gs_regime_exit_stack) book the trigger tick
+        # or, for a maker take-profit, the resting target itself.
+        or reason.startswith("GS_")
     )
 
 
@@ -16062,7 +16093,7 @@ def _preentry_evidence_ready() -> bool:
 
 
 def _preentry_evidence_deferrable(lane) -> bool:
-    return bool(is_cross_venue_clock_lane(str(lane or "").upper()) and _preentry_evidence_ready())
+    return bool(is_evaluator_clock_lane(str(lane or "").upper()) and _preentry_evidence_ready())
 
 
 def _preentry_evidence_keys(*sources) -> set:
@@ -20700,7 +20731,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
                 and not is_patient_chase_lane(lane)
             )
             or is_deterministic_bracket_lane(lane)
-            or is_cross_venue_clock_lane(lane)
+            or is_evaluator_clock_lane(lane)
         ):
             continue
         if getattr(_patient_chase_policy(lane), "OWN_AI_CALL", False):
@@ -24960,6 +24991,9 @@ def process_limit_chase(price: float):
     # Confirm-to-market is part of a tile's registry entry rule, not a chase,
     # so the global chase selector never disables it.
     _process_family_confirm_market(time.time())
+    # GS/B regime limits re-peg on their own pre-registered schedule (an
+    # entry rule like confirm-to-market, not the global chase selector).
+    _process_family_regime_entry(time.time())
     if not limit_chase_enabled() or price is None or price <= 0:
         return
     enforce_dashboard_chase_gates_on_pending()
@@ -25395,7 +25429,9 @@ def process_pending_orders():
             fill_policy = TILE_POLICY_MODULES.get(str(order.get("research_lane") or "").upper())
             # An own-AI tile is never rechecked against the shared call: that
             # is a different prompt, and its replicated rule had no fill recheck.
-            revalidation_reason = "" if getattr(fill_policy, "OWN_AI_CALL", False) else stale_fill_direction_conflict(
+            revalidation_reason = "" if (
+                getattr(fill_policy, "OWN_AI_CALL", False) or getattr(fill_policy, "SKIP_FILL_REVALIDATION", False)
+            ) else stale_fill_direction_conflict(
                 order,
                 fill_signal,
                 now=time.time(),
@@ -26099,7 +26135,7 @@ def process_signal(event: dict):
                         return
                 # AI History holds one row per real AI call; cross-venue
                 # triggers are not AI calls.
-                if not is_cross_venue_clock_lane(research_lane):
+                if not is_evaluator_clock_lane(research_lane) and not ai.get("evaluator_trigger"):
                     log_ai_tranche_outcome(ai, event="AI_SPAWN")
                     _append_ai_history_row(ai)
             else:
@@ -27217,6 +27253,81 @@ def _confirm_market_signal_price(order: dict, signal: dict) -> float:
     return 0.0
 
 
+def _process_family_regime_entry(now: float) -> int:
+    """GS/B regime limits: HOLD, re-peg toward the touch, taker fallback (TOUCH), or DROP at TTL."""
+    with trade_lock:
+        pending = [
+            o for o in pending_orders
+            if isinstance(o, dict) and o.get("status") == "PENDING"
+            and str(o.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES
+            and str(o.get("research_lane") or "").upper() not in PLATFORM_RELAY_ELIGIBLE_LANES
+        ]
+    acted = 0
+    for order in pending:
+        lane = _normalize_lane_key(order)
+        policy = _patient_chase_policy(lane)
+        regime_action = getattr(policy, "regime_entry_action", None)
+        if not callable(regime_action) or not lane_orders_allowed(lane):
+            continue
+        if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+            continue
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        decision = (signal or {}).get("adaptive_entry_decision") or order.get("adaptive_entry_decision") or {}
+        if decision.get("action") != "MAKER":
+            continue
+        direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+        old_limit = float(order.get("limit_price") or 0)
+        with state_lock:
+            bid = float(state.get("bid") or 0)
+            ask = float(state.get("ask") or 0)
+        verdict = regime_action(
+            order=order, decision=decision, bid=bid, ask=ask, now=now,
+            created_ts=float(order.get("created_ts") or now),
+        )
+        action = verdict.get("action")
+        if action == "STEP_NO_CHANGE":
+            with trade_lock:
+                order["regime_reprice_index"] = int(verdict.get("step_index") or 0)
+            continue
+        if action in ("REPRICE", "MARKET"):
+            chase_count = int(order.get("limit_chase_count") or 0) + 1
+            committed = _commit_relay_limit_chase(
+                order, signal, direction=direction, old_limit=old_limit,
+                new_limit=float(verdict["limit_price"]), chase_count=chase_count, now=now,
+                urgent_marketable=(action == "MARKET"), reference_price=old_limit,
+            )
+            if committed is None:
+                continue
+            with trade_lock:
+                if action == "REPRICE":
+                    order["regime_reprice_index"] = int(verdict.get("step_index") or 0)
+                else:
+                    order["regime_fallback_done"] = True
+                    order["regime_fallback_drift_bp"] = verdict.get("drift_bp")
+            acted += 1
+            logger.info(
+                f"[REGIME ENTRY PAPER] trade_id={tid} lane={lane} action={action} reason={verdict.get('reason')} "
+                f"old={fmt(old_limit)} new={fmt(float(verdict['limit_price']))} [PIPELINE ENFORCEMENT]"
+            )
+        elif action == "DROP":
+            reason = str(verdict.get("reason") or "REGIME_ENTRY_DROP")
+            result = _cancel_pending_order_confirmed(order, reason, record_expired=True, expire_signal=True)
+            if not result.get("finalized"):
+                continue
+            _emit_genome_execution_event("ORDER_CANCELLED", {
+                "trade_id": tid, "reason": reason,
+                "chase_count": int(order.get("limit_chase_count") or 0),
+                "research_lane": lane,
+            })
+            acted += 1
+            logger.info(f"[REGIME ENTRY PAPER] dropped trade_id={tid} lane={lane} reason={reason} "
+                        "[PIPELINE ENFORCEMENT]")
+    if acted:
+        pipeline_state_sync()
+    return acted
+
+
 def _process_family_confirm_market(now: float) -> int:
     """Run registry confirm-to-market entries: HOLD, convert to the capped taker, or DROP."""
     with trade_lock:
@@ -27429,6 +27540,11 @@ def microstructure_capture_loop():
             _AI_SHADOW_TAPE.append_bucket(row)
         except Exception as exc:
             logger.debug(f"[AI SHADOW] tape ring append skipped: {exc}")
+        try:
+            # GS/B 3-minute regime/CVD bars (paper tiles); never blocks capture.
+            regime_bars_3m.ENGINE.observe_row(row)
+        except Exception as exc:
+            logger.debug(f"[REGIME BARS] observe skipped: {exc}")
         append_outcome = {}
         written = _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
@@ -30540,7 +30656,7 @@ def _xvl_latency_mark(lane: str, trigger_id, stage: str, ts: float = None, *, si
     """Stamp one stage for one trigger; never raises into the order path."""
     lane = str(lane or "").upper()
     key = str(trigger_id or "")
-    if not key or not is_cross_venue_clock_lane(lane):
+    if not key or lane not in evaluator_loop_lanes():
         return
     try:
         stamp = float(ts if ts is not None else time.time())
@@ -30750,7 +30866,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         evaluator.TRIGGER_FEATURE_KEY: {
             key: copy.deepcopy(trigger.get(key)) for key in evaluator.TRIGGER_FEATURE_FIELDS
         },
-        "signal_clock": _xvl.SIGNAL_CLOCK,
+        "signal_clock": getattr(policy, "SIGNAL_CLOCK", None) or _xvl.SIGNAL_CLOCK,
     }
     decision = policy.decide_entry(
         direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
@@ -30765,7 +30881,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
         "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
-        "raw_direction": side, "raw_decision": tag,
+        "raw_direction": side, "raw_decision": tag, "evaluator_trigger": True,
         "direction_source": _xvl_direction_source(lane),
         "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts, "trade_id": call_id,
         "effective_research_direction": side,
@@ -30827,6 +30943,8 @@ def _xvl_tick(now: float, live=None) -> None:
         steps.append((lane, evaluator, trigger, outcomes))
     # Shadow rows are fsync'd appends; hand the attempt off first.
     for lane, evaluator, trigger, outcomes in steps:
+        if not getattr(evaluator, "SHADOW_FILE", None):
+            continue  # GS/B evaluators: the paper order ledger is the only record
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
             _xvl_append(row, evaluator.SHADOW_FILE)
@@ -30859,7 +30977,7 @@ def _xvl_wait_anchor_ready(deadline: float):
 
 
 def xvl_evaluator_loop():
-    lanes = cross_venue_clock_lanes()
+    lanes = evaluator_loop_lanes()
     if not XVL_EVALUATOR_ENABLED or not lanes:
         return
     _xvl_start_attempt_workers(lanes)
@@ -30895,6 +31013,20 @@ def xvl_evaluator_loop():
             _xvl_status["max_tick_ms"] = round(max(_xvl_status["max_tick_ms"], elapsed_ms), 3)
 
 
+def regime_bars_boot_hydrate() -> None:
+    """Warm the GS/B 3-minute regime/CVD bar engine from the durable 1 s tape (paper research only)."""
+    started = time.time()
+    try:
+        count = regime_bars_3m.hydrate_engine_from_tape(MICROSTRUCTURE_TAPE_FILE, started)
+        logger.info(
+            f"[REGIME BARS] boot hydrated_seconds={count} bars={len(regime_bars_3m.ENGINE.bars)} "
+            f"elapsed={time.time() - started:.1f}s [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        regime_bars_3m.ENGINE.hydrate([])
+        logger.warning(f"[REGIME BARS] boot hydration failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
 def xvl_evaluator_thread() -> None:
     """Research-only thread: a crash is reported as STALE health, never an execution pause."""
     try:
@@ -30909,7 +31041,7 @@ def xvl_evaluator_thread() -> None:
 def xvl_evaluator_snapshot() -> dict:
     """Evaluator status, per-lane shadow counters and paper-attempt counters."""
     now = time.time()
-    lanes = cross_venue_clock_lanes()
+    lanes = evaluator_loop_lanes()
     with _XVL_LOCK:
         status = dict(_xvl_status)
         runtime = {
@@ -30963,7 +31095,15 @@ def xvl_evaluator_snapshot() -> dict:
                                   "rows_written", "write_failures", "thread_niced", "attempt_workers",
                                   "ready_ticks", "fallback_ticks", "last_tick_offset_s")},
         "preentry_evidence": preentry,
+        "regime_bars_3m": _regime_bars_snapshot(),
     }
+
+
+def _regime_bars_snapshot() -> dict:
+    try:
+        return regime_bars_3m.ENGINE.snapshot()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:160]}
 
 
 import market_context_tape as _mct
@@ -33997,7 +34137,7 @@ def build_static_pathway_lane_specs() -> dict:
     for tile_number, lane_id in enumerate(ACTIVE_TILE_ORDER, start=1):
         lane_spec = COMBO_LANE_SPECS[lane_id]
         policy_view = _patient_chase_policy(lane_id).dashboard_policy()
-        cross_venue_clock = is_cross_venue_clock_lane(lane_id)
+        cross_venue_clock = is_evaluator_clock_lane(lane_id)
         lanes.append({
             "lane": lane_id,
             "label": lane_spec["label"],
@@ -34021,8 +34161,14 @@ def build_static_pathway_lane_specs() -> dict:
             "research_question": lane_spec["research_question"],
             "entry": {
                 **policy_view["entry"],
-                "ai_cadence": "No AI — per-second cross-venue evaluator" if cross_venue_clock else ai_cadence,
-                "chase_detail": policy_view["entry"]["chase_detail"] if cross_venue_clock else chase_detail,
+                "ai_cadence": (
+                    policy_view["entry"].get("cadence_label") or "No AI — per-second cross-venue evaluator"
+                ) if cross_venue_clock else (policy_view["entry"].get("cadence_label") or ai_cadence),
+                "chase_detail": (
+                    policy_view["entry"]["chase_detail"]
+                    if cross_venue_clock or getattr(_patient_chase_policy(lane_id), "MARKET_EXIT_CONTEXT", False)
+                    else chase_detail
+                ),
                 "margin_usd": float(lane_spec["margin_usd"]),
                 "filters": lane_spec,
             },
@@ -54603,6 +54749,7 @@ def main():
     threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
+    threading.Thread(target=regime_bars_boot_hydrate, name="regime-bars-hydrate", daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
     _start_collector_worker("collector-maturation")

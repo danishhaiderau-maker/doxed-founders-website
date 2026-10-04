@@ -100,3 +100,99 @@ Day-21 decision (anchor: `started_at` of the freeze data epoch):
 4. Prove the guard: an unforced `POST /api/toggle_research_lane
    {"lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "enabled": false}` returns 409
    `RESEARCH_FREEZE_ACTIVE` (re-enable is not needed: nothing changed).
+
+---
+
+## FREEZE21B (re-declared 2026-10-04 17:53/17:54 AEDT)
+
+Owner orders (Danish, 4 Oct 2026, relayed by the boss agent):
+
+- 17:53 AEDT: add Grok Strategist's B rules (B1..B3,
+  `PREREG-GS-20261004-B`) as visible paper tiles and start a fresh
+  21-day epoch with them.
+- 17:54 AEDT: scope change — "every strategy must be a visible paper
+  tile": also add the four earlier shadow rules GS-20261004-01..04
+  (`PREREG-GS-20261004`) as paper tiles. Eleven tiles in total.
+
+`research_freeze.py` now declares `FREEZE21B-20261004` over data epoch
+`ce-20261004-v31-freeze21b` (`fly.toml` `DATA_EPOCH_ID`), registry
+`v31-freeze21b-11t-v13`. The `ce-20261004-v31-freeze21` epoch (started
+05:46:11Z) ran about three hours and is quarantined like every earlier
+cohort. The same guards, opening-hour boundary reset and override apply.
+
+### Roster (display order)
+
+| # | Lane | Prefix | Trigger | Entry | Exit |
+|---|------|--------|---------|-------|------|
+| 1 | `FAMILY_COMMITTED_FADE_TAKER_90` (H-A) | cft | shared AI, committed calls inverted | taker | v12 composite (unchanged) |
+| 2 | `FAMILY_NOTRADE_FOLLOW_TAKER_60` (H-B) | ntt | shared AI, raw NO_TRADE | taker | v12 composite (unchanged) |
+| 3 | `FAMILY_PREMIUM_REVERSION_60M` (H-C) | pmr | cross-venue premium (no AI) | taker | 60 min / 40 bp (unchanged) |
+| 4 | `FAMILY_RANDOM_CONTROL_TAKER_90` (control) | rnd | H-A calls, coin side | taker | H-A's (unchanged) |
+| 5 | `FAMILY_GS01_XV_PREMIUM_ATR_TP` (GS-01) | gs1 | cross-venue premium, own evaluator | taker, spread <= 3 bp | TP max(8, 2.5 ATR) maker; BE max(6, 2 ATR) -> +1; cut 8 bp/5 min; 35 bp; 60 min |
+| 6 | `FAMILY_GS02_NOTRADE_REGIME_ENTRY` (GS-02) | gs2 | shared AI, raw NO_TRADE | QUIET taker; VIOLENT (ATR pct >= 66 or spread >= 2 bp) 1 ATR post-only limit, 25 % chase in windows 2-3, 30 min TTL | BE 1.5 ATR; trail 2 ATR armed at 2 ATR; cut; 35 bp; 60 min |
+| 7 | `FAMILY_GS03_CVD_DIV_TAKER` (GS-03) | gs3 | 3 m CVD divergence event (no AI) | taker at bar close | GS-02's |
+| 8 | `FAMILY_GS04_NOTRADE_ATR_TP` (GS-04) | gs4 | shared AI, raw NO_TRADE | taker | GS-01's |
+| 9 | `FAMILY_GSB1_CVD_DIV_REGIME` (B1) | gb1 | 3 m CVD divergence | QUIET touch (re-peg 60 s, guarded taker fallback at 600 s); TREND aside; VIOLENT deep 0.75 ATR | MOM_QUIET / MOM_VIOLENT, flip = divergence |
+| 10 | `FAMILY_GSB2_REGIME_SWITCHER` (B2) | gb2 | QUIET/VIOLENT: CVD divergence; TREND: committed fade | touch / 0.25 ATR offset / deep 0.75 ATR | REV_QUIET / MOM_TREND / REV_VIOLENT |
+| 11 | `FAMILY_GSB3_COMMITTED_FADE_REGIME` (B3) | gb3 | shared AI, committed fade | touch / 0.25 ATR offset / deep 1.5 ATR | MOM_QUIET / MOM_TREND / MOM_VIOLENT, flip = CVD trend |
+
+B regimes: VIOLENT if 3 m ATR percentile >= 80 or spread >= 3 bp, TREND if
+ADX >= 25, else QUIET. All GS/B tiles: one open position, paper only, relay
+ineligible, default ON, `max_active_signals = 1`.
+
+### Pre-registration (each GS/B tile, `tile_pre_registration_gs20261004_v1`)
+
+Target >= 30 fills and n_eff >= 30 distinct UTC close hours. Kill any time on
+harm (after 30 fills mean <= -2 bp and CI95 upper < 0), give-back (MFE >= arm,
+then closed <= 0 in > 25 % after 30 fills), and per rule: worst trade < -45 bp,
+> 10 % of break-even-armed trades negative, signal->fill p50 > 5 s. Day 21:
+PASS_FORWARD (mean > 0 and the one-sided 1 h-cluster lower bound at alpha
+0.05/k > 0; k = 4 for GS, 3 for B), KILLED (futility or any kill) or
+INSUFFICIENT. `tile_paired_comparison.py` scores this live. The fill-rate kill
+(< 60 % after 40 signals) and the random-control edge (>= 2 bp) are scored
+offline by Grok Strategist. Kill action: owner decision, tile OFF with
+`KILL_RULE:<lane>:<rule>`, retire after the freeze.
+
+### Spec deviations (documented, accepted for the live paper run)
+
+1. A maker take-profit (and TP1) fills when the side-correct mark moves past
+   the target; it books at the target. There is no aggressor trade-through
+   print check.
+2. Marketable exits book the side-correct tick that fired the rule, not the
+   REALISTIC worse-of-1 s price.
+3. The REV thesis cut is checked on the first tick at or after each 60 s close.
+4. Taker latency is the live path (about 1-2 s after the bar close for CVD),
+   not a fixed 2 s.
+5. The committed fade follows H-A's live definition (no score-gap >= 30
+   filter): Asia+EU sessions, spread <= 3 bp.
+6. Both preregs bind judging to the `ce-20261004-v31-freeze21` epoch; the
+   live run is `ce-20261004-v31-freeze21b`. Grok Strategist must confirm the
+   move.
+7. The ATR percentile needs 160 closed bars. The engine hydrates 26 h of the
+   durable 1 s tape at boot. A missing input never classifies as VIOLENT
+   (QUIET fallback; TREND needs ADX).
+8. The QUIET touch order has a 660 s order TTL backstop; the fallback
+   decision happens at 600 s.
+9. GS-01 runs its own instance of H-C's premium rule (same thresholds, 3 bp
+   spread gate, 5 s minimum submit gap, no shadow file).
+10. The fill-rate kill and the random-control kill are scored offline.
+11. The GS-02 violent limit uses ref = last price (as in `gslib`), not the
+    prose "mid".
+12. A 10 bp spread sanity guard was added on GS-02/03/04 and B1..B3 (the
+    specs have no spread filter).
+13. The live metric is net bp per closed fill. Strategist's per-signal score
+    (misses = 0) is the cross-check.
+14. If a position's signal-time decision is missing (for example after a
+    restart), its exit stack falls back to the first profile and 4 bp ATR.
+15. Resting GS/B limits are never cancelled by fill-time AI revalidation
+    (`SKIP_FILL_REVALIDATION`): the offline spec has none.
+16. The day-21 verdict clock counts from each prereg's `registered_utc`
+    (H-*: 04:02Z, GS/B: 06:53Z), which is a few hours before the freeze21b
+    epoch start. The freeze window itself is the epoch's 21 days.
+
+### Post-deploy verification (freeze21b)
+
+As above, with 11 lanes: the gate receipt lists all eleven ON, and
+`research_freeze.epoch_id` is `ce-20261004-v31-freeze21b` on day 1/21.
+`/api/xvl_evaluator` (the health snapshot) also reports `regime_bars_3m`
+(`hydrated`, bar count, latest ATR percentile, ADX and spread).

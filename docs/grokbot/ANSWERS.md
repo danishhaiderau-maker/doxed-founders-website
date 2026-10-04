@@ -105,7 +105,16 @@ roster is exactly four tiles, all paper-only and relay-ineligible:
 The Danish, Continuous, maker and session-follow tiles are retired. Each tile's `pre_registration`
 (target n_eff, kill rules K1/K3/K4/K6, day-21 pass/fail/inconclusive) is in `active_tiles`.
 
-The freeze runs 21 days from the start of data epoch `ce-20261004-v31-freeze21`;
+From FREEZE21B (registry `v31-freeze21b-11t-v13`, owner order 2026-10-04 17:53/17:54 AEDT) seven
+more paper tiles run beside those four: Grok Strategist's `FAMILY_GS01_XV_PREMIUM_ATR_TP`,
+`FAMILY_GS02_NOTRADE_REGIME_ENTRY`, `FAMILY_GS03_CVD_DIV_TAKER`, `FAMILY_GS04_NOTRADE_ATR_TP`,
+`FAMILY_GSB1_CVD_DIV_REGIME`, `FAMILY_GSB2_REGIME_SWITCHER` and `FAMILY_GSB3_COMMITTED_FADE_REGIME`
+(prefixes `gs1`..`gs4`, `gb1`..`gb3`; one open position each; pre-registration
+`tile_pre_registration_gs20261004_v1`: >= 30 fills and n_eff >= 30 distinct hours, harm/futility/
+give-back kills, day-21 PASS_FORWARD/KILLED/INSUFFICIENT; discovery-only evidence).
+
+The freeze runs 21 days from the start of data epoch `ce-20261004-v31-freeze21b` (it replaced
+`ce-20261004-v31-freeze21`, which ran about 3 hours on 4 Oct);
 `/api/status.research_freeze` shows `status` (`OPENING`/`ACTIVE`/`COMPLETE`), `day` and
 `ends_at_utc`. While it is guarded, resets and tile-OFF toggles answer 409
 `RESEARCH_FREEZE_ACTIVE` unless sent with the documented `freeze_override`; a 409 there is the

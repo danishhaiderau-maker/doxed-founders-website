@@ -39,7 +39,11 @@ def test_partial_exit_tiles_can_never_be_relay_capable_while_reductions_are_unwi
     import combo_pathway_config as registry
 
     partial = [lane for lane, spec in ACTIVE_TILE_REGISTRY.items() if registry.tile_has_partial_exits(spec)]
-    assert partial == []
+    # FREEZE21B: only the B regime tiles carry a TP1 ladder partial, and they stay relay-blocked.
+    assert partial == list(GS_B_ORDER)
+    for lane in partial:
+        assert ACTIVE_TILE_REGISTRY[lane]["relay_capability"] == registry.PARTIAL_EXIT_RELAY_CAPABILITY
+        assert ACTIVE_TILE_REGISTRY[lane]["platform_relay_eligible"] is False
     lane = ACTIVE_TILE_ORDER[0]
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
@@ -85,13 +89,22 @@ RETIRED_FREEZE21_LANES = (
     "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
     "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M",
 )
-EXPECTED_ORDER = (
+FREEZE21_ORDER = (
     "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60",
     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90",
 )
+GS_ORDER = (
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+    "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GS04_NOTRADE_ATR_TP",
+)
+GS_B_ORDER = (
+    "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
+)
+# FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
+EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER
 
 
-def test_active_registry_is_three_hypotheses_then_the_control():
+def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles():
     import combo_pathway_config as registry
 
     assert ACTIVE_TILE_ORDER == EXPECTED_ORDER
@@ -99,15 +112,27 @@ def test_active_registry_is_three_hypotheses_then_the_control():
     assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
         (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 5))
-    tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in EXPECTED_ORDER]
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 12))
+    gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + GS_B_ORDER]
+    assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gs2", "gs3", "gs4", "gb1", "gb2", "gb3"]
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 11
+    for tile in gs_tiles:
+        assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
+        assert tile["default_enabled"] is True and tile["paper_only"] is True
+        assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
+        assert tile["max_active_signals"] == 1
+        assert tile["entry_policy"]["mode"] == ("TAKER_AT_SIGNAL" if not tile["entry_policy"]["regime_classifier"]
+                                                else "REGIME_ADAPTIVE")
+        assert tile["pre_registration"]["schema"] == "tile_pre_registration_gs20261004_v1"
+        assert tile["pre_registration"]["role"] == "HYPOTHESIS"
+    tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in FREEZE21_ORDER]
     fade, notrade, premium, control = tiles
     assert [t["id_prefix"] for t in tiles] == ["cft", "ntt", "pmr", "rnd"]
     assert fade["policy_signature"].startswith(COMMITTED_FADE_TAKER_SIGNATURE_PREFIX)
     assert len({t["policy_signature"] for t in tiles}) == 4
-    assert registry.RESEARCH_STACK_VERSION == "v31-freeze21-3h1c-v12"
+    assert registry.RESEARCH_STACK_VERSION == "v31-freeze21b-11t-v13"
     assert registry.BENCHMARK_LANE is None
-    for lane, tile in zip(ACTIVE_TILE_ORDER, tiles):
+    for lane, tile in zip(FREEZE21_ORDER, tiles):
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         # Every frozen tile defaults ON for the 21-day freeze (paper only, relay blocked).
         assert tile["default_enabled"] is True and combo_toggle_defaults()[lane] is True
@@ -209,7 +234,8 @@ def test_composite_exit_order_matches_runtime_first_trigger_order():
     for lane in ACTIVE_TILE_ORDER:
         spec = ACTIVE_TILE_REGISTRY[lane]
         exit_policy = spec["exit_policy"]
-        assert exit_policy["family"] == "COMPOSITE_FIRST_TRIGGER_WINS"
+        assert exit_policy["family"] == (
+            "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS" if lane in GS_ORDER + GS_B_ORDER else "COMPOSITE_FIRST_TRIGGER_WINS")
         order = tuple(registry.registry_live_exit_order(exit_policy))
         assert tuple(exit_policy["exit_order"]) == order == tuple(spec["live_exit_order"])
     premium = ACTIVE_TILE_REGISTRY["FAMILY_PREMIUM_REVERSION_60M"]
@@ -238,7 +264,8 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     # active tile (H-A, the committed fade) is registered on them.
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
-    assert inverted_users == ["FAMILY_COMMITTED_FADE_TAKER_90"]
+    assert inverted_users == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GSB2_REGIME_SWITCHER",
+                              "FAMILY_GSB3_COMMITTED_FADE_REGIME"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):

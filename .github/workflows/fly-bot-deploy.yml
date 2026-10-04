@@ -2054,6 +2054,7 @@ jobs:
           python test_tile_summary_settings_periods.py
           python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py test_research_freeze.py -q
           python -m pytest test_paper_policy_family_committed_fade_taker_90.py test_paper_policy_family_notrade_follow_taker_60.py test_paper_policy_family_premium_reversion_60m.py test_paper_policy_family_random_control_taker_90.py -q
+          python -m pytest test_paper_policy_family_gs01_xv_premium_atr_tp.py test_paper_policy_family_gs02_notrade_regime_entry.py test_paper_policy_family_gs03_cvd_div_taker.py test_paper_policy_family_gs04_notrade_atr_tp.py test_paper_policy_family_gsb1_cvd_div_regime.py test_paper_policy_family_gsb2_regime_switcher.py test_paper_policy_family_gsb3_committed_fade_regime.py test_gs_regime_engine.py -q
           python -m pytest test_lifecycle_tail_repair.py -q
           python -m pytest test_lifecycle_cursor_rebind.py -q
           python -m pytest test_execution_tail_repair.py -q

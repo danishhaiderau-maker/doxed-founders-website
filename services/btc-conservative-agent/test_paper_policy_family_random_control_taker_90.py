@@ -32,10 +32,10 @@ def _ai(long_score=70, short_score=30, raw_direction=None, **extra):
             "decision": "APPROVE", "long_score": long_score, "short_score": short_score, **extra}
 
 
-def test_registry_owns_the_last_tile_as_a_never_promoted_control():
+def test_registry_owns_the_fourth_tile_as_a_never_promoted_control():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[-1] == policy.LANE
+    assert ACTIVE_TILE_ORDER[3] == policy.LANE  # FREEZE21B: the GS/B tiles follow the control
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["id_prefix"] == "rnd" and spec["admission_treatment"] == RANDOM_CONTROL_ADMISSION_POLICY_ID

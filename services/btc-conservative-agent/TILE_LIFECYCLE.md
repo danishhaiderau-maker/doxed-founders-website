@@ -87,8 +87,9 @@ but no tile declares it today.
 
 ## 21-day research freeze
 
-`research_freeze.py` declares one freeze (`FREEZE21-20261004`) over one data
-epoch (`ce-20261004-v31-freeze21`): 21 days from that epoch's
+`research_freeze.py` declares one freeze (`FREEZE21B-20261004`, eleven tiles;
+it replaced `FREEZE21-20261004` the same day by owner order) over one data
+epoch (`ce-20261004-v31-freeze21b`): 21 days from that epoch's
 `data_epoch.json` start. During the freeze:
 
 - no tile is added, removed or reordered and no rule changes: CI
