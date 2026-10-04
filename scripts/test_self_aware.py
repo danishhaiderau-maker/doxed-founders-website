@@ -202,6 +202,17 @@ def test_custody_ack_without_copy_is_red(store):
     assert diagnose.check_custody(f, diagnose.signals(f), store).severity == "GREEN"
 
 
+def test_custody_one_lock_busy_pull_is_a_deferral_not_a_failure(store):
+    base = {"ackedSeq": 100, "appliedSeq": 100, "finishedAt": NOW - 30, "lastParityAt": NOW - 60,
+            "error": "LockBusyError: another puller run holds the shadow-root lock", "lastAttemptResult": "LOCK_BUSY"}
+    f = _facts(segment_head={"shipped_seq": 101}, pull={**base, "consecutiveFailures": 1})
+    fd = diagnose.check_custody(f, diagnose.signals(f), store)
+    assert fd.severity == "GREEN" and "deferred" in fd.observed
+    f = _facts(segment_head={"shipped_seq": 101}, pull={**base, "consecutiveFailures": 4, "lockHolder": {"pid": 7}})
+    fd = diagnose.check_custody(f, diagnose.signals(f), store)
+    assert fd.severity == "AMBER" and "4 consecutive" in fd.observed
+
+
 def test_http_429_is_amber_until_persistent(store):
     state: dict = {}
     w = {"checks": [{"id": "fly.process", "status": "RED", "observed": "HTTP 429 Too Many Requests"}],

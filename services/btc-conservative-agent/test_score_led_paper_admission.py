@@ -573,6 +573,7 @@ def test_real_lane_writer_records_none_gap_for_nonfinite_or_malformed_scores(
         "os": __import__("os"),
         "_research_decision_integrity_failure": lambda **_kwargs: False,
     }
+    namespace["_stamp_feature_capture"] = _load_bot_function("_stamp_feature_capture", namespace)
     writer = _load_bot_function("_write_v3_shared_lane_decision", namespace)
     ai = {
         "shared_ai_call_id": "writer-score-led",

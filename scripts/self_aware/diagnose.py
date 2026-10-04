@@ -283,9 +283,18 @@ def check_custody(f, sig, store) -> Finding:
     if applied is not None and int(applied) < int(acked):
         sev = RED
         problems.append(f"acked {acked} > applied {applied} (ACK without a local copy)")
-    if pull.get("error"):
+    lock_busy = (str(pull.get("lastAttemptResult") or "") == "LOCK_BUSY"
+                 or "LockBusyError" in str(pull.get("error") or ""))
+    busy_streak = int(pull.get("consecutiveFailures") or 1) if lock_busy else 0
+    if lock_busy and busy_streak < 3 and lag <= THRESHOLDS["segment_ack_lag_seq"]:
+        # The shadow-root lock is shared with the analyzer cycle's PROMOTION step (and parity/retention):
+        # one pull deferred while promotion holds it is by design, not a second puller. The OS lock is
+        # released when its holder dies, so a dead process cannot leave it held.
+        problems.append("pull deferred: shadow-root lock held by promotion/parity (retries next iteration)")
+    elif pull.get("error"):
         sev = max(sev, AMBER, key=_RANK.get)
-        problems.append(f"pull error: {str(pull.get('error'))[:120]}")
+        problems.append(f"pull error: {str(pull.get('error'))[:120]}"
+                        + (f" ({busy_streak} consecutive; holder {pull.get('lockHolder')})" if lock_busy else ""))
     if parity_age is not None and parity_age > THRESHOLDS["parity_max_age_sec"]:
         sev = max(sev, AMBER, key=_RANK.get)
         problems.append(f"last parity {fmt_age(parity_age)} ago")
