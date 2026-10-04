@@ -82,16 +82,19 @@ REPO = "danishhaiderau-maker/doxed-founders-website"
 MIN = 60.0
 HOUR = 3600.0
 
-# Integrity INVALID whose only failure is these lifecycle defects is a known, owned blocker. The clean
-# epoch ce-20261004-v31-final-e is live (#351/#336 shipped), but until #420 the laptop kept serving the
-# pre-epoch files Fly retired at the boundary reset as analyzer input. AMBER until it expires, then RED
-# again so it cannot silently become permanent.
+# Railway relay modes that mean "deliberately not executing"; reconciliation=null is expected in them.
+RELAY_DISARMED_MODES = frozenset({"PAUSED", "DISARMED", "RESEARCH_ONLY"})
+
+# Integrity INVALID whose only failure is these lifecycle defects is a known, owned blocker of the live clean
+# epoch (whichever epoch the analyzer receipt / data_epoch.json declares; never hard-coded here). AMBER until it
+# expires, then RED again so it cannot silently become permanent.
 CLEAN_EPOCH_PENDING = {
     "id": "CLEAN_EPOCH_PENDING",
     "check": "v3_policy_lifecycle_integrity",
     "defects": frozenset({"CAUSAL_IDENTITY_ALIAS_EXCLUDED", "ORPHAN_EXPECTED_ORDER", "POLICY_IDENTITY_CONTAMINATION"}),
-    "fix": "#420 fix (Fly-retired custody copies leave the analyzer view) + next analyzer generation + clean_epoch_certify on ce-20261004-v31-final-e (live since 2026-10-04T01:40:18Z; #351/#336 shipped)",
-    "eta": "2026-10-04T15:00Z",
+    "fix": ("#420/#435 (retired custody + provenance journal leave the analyzer view), #434 (one policy signature per "
+            "episode) + next analyzer generation + clean_epoch_certify on the live epoch {epoch}"),
+    "eta": "2026-10-05T00:00Z",
     "expires": "2026-10-06T00:00:00Z",
 }
 
@@ -961,9 +964,11 @@ def _fail_open_guard(checks: list[dict[str, Any]], errors: Mapping[str, Any], do
                                         "are blind", fields={"failing_sources": sorted(long_down)})
 
 
-def declared_integrity_blocker(integrity: Mapping[str, Any], now: float) -> tuple[str | None, bool]:
+def declared_integrity_blocker(integrity: Mapping[str, Any], now: float,
+                               epoch_id: str | None = None) -> tuple[str | None, bool]:
     """(disclosure, expired) when integrity fails only on CLEAN_EPOCH_PENDING defects, else (None, False)."""
-    b = CLEAN_EPOCH_PENDING
+    b = dict(CLEAN_EPOCH_PENDING)
+    b["fix"] = b["fix"].format(epoch=epoch_id or "(declared in data_epoch.json)")
     failed = [c for c in integrity.get("checks") or [] if isinstance(c, Mapping) and c.get("passed") is False]
     if not failed or any(c.get("check") != b["check"] for c in failed):
         return None, False
@@ -1652,7 +1657,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         reasons = list(receipt.get("reasons") or [])
         if integrity_status != "VALID":
             st = RED
-            declared, expired = declared_integrity_blocker(integrity, now)
+            declared, expired = declared_integrity_blocker(
+                integrity, now, ((receipt.get("data_epoch") or {}).get("epoch_id")))
             if declared and not expired and not receipt.get("failed_required_studies") \
                     and not any(str(r).startswith("clean epoch") for r in reasons):
                 st = AMBER
@@ -1885,13 +1891,20 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         if st == GREEN and (snap_age is None or snap_age > t["relay_snapshot_amber_sec"] or not executor.get("healthy")
                             or float(executor.get("heartbeatAgeMs") or 0) > t["relay_heartbeat_amber_ms"]):
             st = AMBER
-        if st == GREEN and recon_raw is None:
+        # A deliberately disarmed relay (PAUSED / DISARMED / research-only, no armedAt) has no exchange
+        # position to reconcile, so a null reconciliation is the expected state, not a gap. Arming stays
+        # strict above: any armedAt or non-disarmed mode is RED regardless of reconciliation.
+        mode = str(relay.get("relayExecutionMode") or relay.get("status") or "").upper()
+        null_expected = recon_raw is None and not relay.get("relayArmedAt") and mode in RELAY_DISARMED_MODES
+        if st == GREEN and recon_raw is None and not null_expected:
             st, relay_hint = AMBER, "Railway relay status reports reconciliation=null: exchange reconciliation unverified"
+        recon_label = ("null (expected: relay disarmed)" if null_expected else "null") if recon_raw is None else (
+            "alert" if recon.get("alert") else "ok")
         obs = (f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
                f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old "
-               f"reconciliation={'null' if recon_raw is None else ('alert' if recon.get('alert') else 'ok')}")
+               f"reconciliation={recon_label}")
     add(check("railway.relay", "railway", st, obs,
-              "relay PAUSED/disarmed, executor healthy, reconciliation reported without alert",
+              "relay PAUSED/disarmed, executor healthy, reconciliation reported without alert (null OK while disarmed)",
               "" if st == GREEN else ("relay ARMED or reconciliation mismatch - verify on Railway immediately"
                                       if st == RED else relay_hint)))
     if rail is None:
@@ -2451,9 +2464,22 @@ def push_fly_banner(report: Mapping[str, Any], opts: argparse.Namespace, state: 
         return err
     history = payload.get("alarm_history") if isinstance(payload, Mapping) else None
     if isinstance(history, Mapping):
-        sync.update(through_ts=history.get("through_ts"), count=history.get("count"), synced_at=now,
-                    unsupported_until=None)
-        return f"ok alarms={history.get('count')} sent={len(chunk)}"
+        previous = sync.get("count")
+        count = history.get("count")
+        through = history.get("through_ts")
+        restarted = isinstance(previous, int) and isinstance(count, int) and count < previous
+        # Fly keeps alarm history in memory: after a restart it holds only what this push sent, so its
+        # through_ts would skip every older event. A shrinking count rewinds the cursor and the log is
+        # re-sent oldest-first (Fly de-duplicates).
+        # Advance by what this push delivered (oldest-first), not by Fly's newest event: while re-sending
+        # after a reset Fly already holds newer events, and its through_ts would skip the gap.
+        sent_through = parse_ts(chunk[-1].get("at")) if chunk else None
+        cursor = sync.get("through_ts") if not chunk else sent_through
+        if cursor is None and not chunk:
+            cursor = through
+        sync.update(through_ts=None if restarted else cursor, count=count, synced_at=now,
+                    unsupported_until=None, last_reset_at=now if restarted else sync.get("last_reset_at"))
+        return f"ok alarms={count} sent={len(chunk)}" + (" (Fly history reset; resending)" if restarted else "")
     if chunk:
         sync.update(unsupported_until=now + ALARM_UNSUPPORTED_RETRY_SEC, through_ts=None)
     return "ok (Fly has no alarm history endpoint yet)"

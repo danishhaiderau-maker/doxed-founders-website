@@ -90,8 +90,8 @@
                             "match": ["top100", "materialized_policy_rows", "Top-100 canonical grid"],
                             "severity": "AMBER",
                             "reason": "current-epoch Fly lifecycle evidence fails closed (ORPHAN_EXPECTED_ORDER, CAUSAL_IDENTITY_ALIAS_EXCLUDED, POLICY_IDENTITY_CONTAMINATION), so no policy has terminal OOS evidence and the profitable-only top-100 is empty",
-                            "fix": "#420 fix (Fly-retired custody copies leave the analyzer view) + next analyzer generation + clean_epoch_certify on ce-20261004-v31-final-e (live since 2026-10-04T01:40:18Z; #351/#336 shipped)",
-                            "eta": "2026-10-04T15:00Z", "expires": "2026-10-06T00:00:00Z"}],
+                            "fix": "#420/#435 (retired custody + provenance journal leave the analyzer view), #434 (one policy signature per episode) + next analyzer generation + clean_epoch_certify on the live epoch declared in data_epoch.json",
+                            "eta": "2026-10-05T00:00Z", "expires": "2026-10-06T00:00:00Z"}],
      "reconcile": "combos_genome"},
 
     {"id": "analyzer.safe_policy_genome_page", "surface": "analyzer", "title": "Safe Policy Genome V3.1 page", "tier": "heavy",
