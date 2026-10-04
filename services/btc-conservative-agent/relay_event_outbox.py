@@ -376,7 +376,7 @@ class RelayEventOutbox:
     def delivery_plan(
         self, now: float | None = None, limit: int = 100, *,
         enforce_owner: bool = False, active_owner_id: str | None = None,
-        event_id: str | None = None,
+        event_id: str | None = None, retired_event_ids=frozenset(),
     ) -> dict:
         """Derive a delivery schedule without changing durable pending evidence.
 
@@ -385,12 +385,19 @@ class RelayEventOutbox:
         trade's earliest sequence BEFORE filtering so its successors cannot
         bypass missing history. Unrelated eligible heads are limited only after
         filtering, preventing stale heads from consuming the whole batch.
+
+        ``retired_event_ids`` (relay_outbox_retirement_v1, owned by the bot's
+        delivery guard) are pre-epoch stale-owner events that can never be
+        delivered: they stay in the durable outbox, are counted only as
+        ``retired_pre_epoch_pending``, never become ready and still block their
+        trade's successors.
         """
         counts = {
             "pending_total": 0, "stale_owner_pending": 0,
             "missing_owner_pending": 0, "owner_unverified_pending": 0,
             "blocked_by_stale_owner_predecessor": 0,
             "blocked_by_missing_owner_predecessor": 0,
+            "retired_pre_epoch_pending": 0, "blocked_by_retired_predecessor": 0,
             "ready_trade_heads": 0,
         }
         result = {
@@ -405,11 +412,13 @@ class RelayEventOutbox:
         now = time.time() if now is None else float(now)
         owner = active_owner_id if isinstance(active_owner_id, str) else ""
         owner_verified = bool(owner and owner == owner.strip())
+        retired = frozenset(retired_event_ids or ())
         with self._lock:
             groups: dict[str, list[dict]] = {}
             for row in self._pending.values():
                 groups.setdefault(str(row.get("trade_id")), []).append(row)
-            counts["pending_total"] = len(self._pending)
+            # Retired rows are counted (once) by the per-row loop below, not as pending.
+            counts["pending_total"] = len(self._pending) - sum(1 for key in self._pending if key in retired)
             for rows in groups.values():
                 rows.sort(key=lambda row: (int(row.get("event_seq") or 0), float(row.get("created_at_unix") or 0)))
             ready = []
@@ -417,7 +426,9 @@ class RelayEventOutbox:
                 head = rows[0]
                 head_owner = (head.get("payload") or {}).get("bot_instance_id")
                 head_block = None
-                if enforce_owner:
+                if head.get("event_id") in retired:
+                    head_block = "RETIRED_PRE_EPOCH"
+                elif enforce_owner:
                     if not owner_verified:
                         head_block = "OWNER_UNVERIFIED_PENDING"
                     elif not isinstance(head_owner, str) or not head_owner:
@@ -427,7 +438,11 @@ class RelayEventOutbox:
                 for index, row in enumerate(rows):
                     reason = None
                     row_owner = (row.get("payload") or {}).get("bot_instance_id")
-                    if enforce_owner:
+                    if row.get("event_id") in retired:
+                        reason = "RETIRED_PRE_EPOCH_PENDING"
+                    elif head_block == "RETIRED_PRE_EPOCH":
+                        reason = "BLOCKED_BY_RETIRED_PREDECESSOR"
+                    elif enforce_owner:
                         if not owner_verified:
                             reason = "OWNER_UNVERIFIED_PENDING"
                         elif not isinstance(row_owner, str) or not row_owner:

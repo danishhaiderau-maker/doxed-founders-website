@@ -96,6 +96,11 @@ age exceeds a few minutes.
 
 ## Known false alarms
 
+- `RELAY_OUTBOX_STALE_OWNER_PENDING` / monitor `relay_stale_owner_pending` with 22 events from old
+  `dashboard-*` owners, created before the clean epoch: these were held forever and alarmed forever.
+  After the relay-retire deploy they are retired into `relay_outbox_retired.jsonl` (never delivered,
+  never deleted) and the alarm clears. A stale-owner event created inside the current epoch still
+  alarms and is real (see `BOT_ALERTING_RUNBOOK.md`, "Relay outbox: retired pre-epoch stale-owner events").
 - `liq_okx` DEGRADED/flapping: see 7 (until the post-freeze deploy).
 - `analyzer.studies` AMBER `CLEAN_EPOCH_PENDING`: see 6 (until the #420 fix has run one analyzer
   generation and `clean_epoch_certify` passes on `ce-20261004-v31-final-e`).

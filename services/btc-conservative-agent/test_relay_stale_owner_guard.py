@@ -30,12 +30,13 @@ def load_functions(names, ns):
     return ns
 
 
-def drain_ns(box, guard, *, live=False, armed_at=None, active=True):
+def drain_ns(box, guard, *, live=False, armed_at=None, active=True, epoch=None):
     sent = []
     state = {"live_armed": live, "bitfinex_live_enabled": live}
     if armed_at is not None:
         state["live_armed_at_ts"] = armed_at
     ns = load_functions(["_drain_relay_event_outbox_once"], {
+        "_relay_outbox_data_epoch": lambda: epoch,
         "_relay_event_drain_lock": threading.Lock(), "state_lock": threading.RLock(),
         "state": state, "_force_paper_mode_active": lambda: not live,
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
@@ -220,3 +221,149 @@ def test_status_and_ready_armable_apply_relay_gate():
     source = BOT.read_text(encoding="utf-8")
     assert source.count("relay_arm_block = _relay_delivery_guard.arming_block_reason(now)") == 2
     assert "_relay_event_outbox.due(" not in source
+
+
+# ------------------------------------------------- pre-epoch retirement (relay_outbox_retirement_v1)
+EPOCH_START = 1_791_000_000.0  # data epoch start (final-e style)
+EPOCH = {"epoch_id": "ce-test-final-e", "started_at_ts": EPOCH_START}
+
+
+def _backlog(n=22, created=EPOCH_START - 6 * 86400, owner="dashboard-7002-pid-662-old"):
+    return [{"event_id": f"t{i}:0", "trade_id": f"t{i}", "event_type": "LIMIT_UPDATED", "event_seq": 0,
+             "payload_sha256": f"{i:064x}", "created_at_unix": created + i, "bot_instance_id": owner}
+            for i in range(n)]
+
+
+def test_pre_epoch_stale_owner_backlog_retires_and_alarm_clears(tmp_path):
+    clock = {"now": EPOCH_START + 3600}
+    qpath = tmp_path / guard_mod.QUARANTINE_FILE
+    guard = RelayDeliveryGuard(qpath, clock=lambda: clock["now"])
+    backlog = _backlog()
+    # Live today: quarantined on an earlier pass, alarm latched after 30 min.
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
+    clock["now"] += guard_mod.STALE_OWNER_ALARM_SEC + 1
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None)
+    assert guard.stale_owner_alarm() is True
+    quarantine_before = qpath.read_bytes()
+
+    observed = guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None, epoch=EPOCH)
+    assert observed["retired_now"] == 22 and observed["retired_pre_epoch_pending"] == 22
+    assert observed["stale_owner_pending"] == 0 and observed["pending_total"] == 0
+    assert guard.stale_owner_alarm() is False
+    status = guard.status()
+    assert status["stale_owner_alarm"] is False and status["retired_pre_epoch_total"] == 22
+    assert status["retirement_ledger"] == guard_mod.RETIRED_FILE and status["last_retired_ts"] == round(clock["now"], 3)
+    assert qpath.read_bytes() == quarantine_before  # quarantine ledger untouched
+    rows = [json.loads(line) for line in guard.retired_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 22
+    assert set(rows[0]) >= {"event_id", "trade_id", "event_type", "event_seq", "payload_sha256", "created_at_unix",
+                            "bot_instance_id", "quarantine_reason", "retired_reason", "data_epoch_id",
+                            "data_epoch_started_at", "retired_at_unix"}
+    assert {(r["schema"], r["retired_reason"], r["quarantine_reason"], r["data_epoch_id"]) for r in rows} == {
+        (guard_mod.RETIREMENT_SCHEMA, "PRE_EPOCH_STALE_OWNER", "STALE_OWNER", "ce-test-final-e")}
+    assert rows[0]["data_epoch_started_at"] == "2026-10-03T04:00:00Z"
+
+
+def test_in_epoch_stale_owner_event_still_alarms(tmp_path):
+    clock = {"now": EPOCH_START + 7200}
+    guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE, clock=lambda: clock["now"])
+    fresh = _backlog(1, created=EPOCH_START + 60)  # stale owner, but born inside the epoch
+    guard.observe(fresh, owner_id="me", armed=False, armed_at_ts=None, epoch=EPOCH)
+    clock["now"] += guard_mod.STALE_OWNER_ALARM_SEC + 1
+    observed = guard.observe(fresh, owner_id="me", armed=False, armed_at_ts=None, epoch=EPOCH)
+    assert observed["retired_now"] == 0 and observed["stale_owner_pending"] == 1
+    assert guard.stale_owner_alarm() is True
+    assert not guard.retired_path.exists()
+
+
+@pytest.mark.parametrize("case", ["armed", "no_epoch", "owner_unverified", "not_quarantined_yet_pre_arming"])
+def test_retirement_preconditions(tmp_path, case):
+    guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE, clock=lambda: EPOCH_START + 3600)
+    backlog = _backlog(2)
+    kwargs = {"owner_id": "me", "armed": False, "armed_at_ts": None, "epoch": EPOCH}
+    if case == "armed":
+        kwargs.update(armed=True, armed_at_ts=EPOCH_START)
+    elif case == "no_epoch":
+        kwargs["epoch"] = None
+    elif case == "owner_unverified":
+        kwargs["owner_id"] = None
+    else:  # current owner, pre-arming hold: sticky but never a stale-owner retirement
+        backlog = _backlog(2, owner="me")
+        kwargs.update(armed=True, armed_at_ts=EPOCH_START + 10)
+    observed = guard.observe(backlog, **kwargs)
+    assert observed["retired_now"] == 0 and guard.status()["retired_pre_epoch_total"] == 0
+
+
+def test_retired_event_is_never_deliverable_even_after_arming(tmp_path):
+    box = RelayEventOutbox(tmp_path / "outbox.json")
+    stale = enqueue(box, "old", "old-owner")
+    with box._lock:  # the live backlog was created days before the epoch boundary
+        box._pending[stale["event_id"]]["created_at_unix"] = EPOCH_START - 86400
+        box._persist()
+    before = box.path.read_bytes()
+    guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE)
+    ns, sent = drain_ns(box, guard, epoch=EPOCH)
+    ns["_drain_relay_event_outbox_once"]()
+    ns["_drain_relay_event_outbox_once"]()
+    assert guard.status()["retired_pre_epoch_total"] == 1
+    counts = ns["_relay_push_state"]["delivery_scheduler"]["counts"]
+    assert counts["stale_owner_pending"] == 0 and counts["retired_pre_epoch_pending"] == 1
+    assert counts["pending_total"] == 0
+    # Arm (and even present the original owner identity): still held, still retained, never re-signed.
+    ns["state"].update({"live_armed": True, "bitfinex_live_enabled": True, "live_armed_at_ts": EPOCH_START - 10 ** 6})
+    ns["BOT_INSTANCE_ID"] = "old-owner"
+    for _ in range(3):
+        ns["_drain_relay_event_outbox_once"]()
+        ns["_drain_relay_event_outbox_once"](stale["event_id"])
+    assert sent == []
+    assert box.pending_count() == 1 and box.path.read_bytes() == before
+    assert guard.filter_deliverable([{**stale, "bot_instance_id": "old-owner"}], owner_id="old-owner",
+                                    armed=True, armed_at_ts=1.0) == []
+
+
+def test_retirement_is_idempotent_across_restart(tmp_path):
+    qpath = tmp_path / guard_mod.QUARANTINE_FILE
+    backlog = _backlog()
+    guard = RelayDeliveryGuard(qpath, clock=lambda: EPOCH_START + 3600)
+    guard.observe(backlog, owner_id="me", armed=False, armed_at_ts=None, epoch=EPOCH)
+    ledger = guard.retired_path.read_bytes()
+    quarantine = qpath.read_bytes()
+    restarted = RelayDeliveryGuard(qpath, clock=lambda: EPOCH_START + 7200)
+    assert restarted.status()["retired_pre_epoch_total"] == 22
+    assert restarted.status()["last_retired_ts"] == EPOCH_START + 3600
+    observed = restarted.observe(backlog, owner_id="me-after-restart", armed=False, armed_at_ts=None, epoch=EPOCH)
+    assert observed["retired_now"] == 0 and observed["retired_pre_epoch_pending"] == 22
+    assert observed["stale_owner_pending"] == 0
+    assert restarted.retired_path.read_bytes() == ledger and qpath.read_bytes() == quarantine
+
+
+def test_retirement_write_failure_keeps_alarm(tmp_path):
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("file", encoding="utf-8")
+    guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE, clock=lambda: EPOCH_START + 3600,
+                               retired_path=blocked / guard_mod.RETIRED_FILE)
+    observed = guard.observe(_backlog(3), owner_id="me", armed=False, armed_at_ts=None, epoch=EPOCH)
+    assert observed["retired_now"] == 0 and observed["stale_owner_pending"] == 3
+    assert guard.status()["retirement_write_failures"] == 1
+
+
+def test_delivery_plan_counts_retired_separately_and_keeps_them_blocking():
+    box = RelayEventOutbox.__new__(RelayEventOutbox)
+    RelayEventOutbox.__init__(box, Path("/nonexistent/never-written.json"))
+    rows = {
+        "a:0": {"event_id": "a:0", "trade_id": "a", "event_seq": 0, "created_at_unix": 1.0,
+                "payload": {"bot_instance_id": "old"}},
+        "a:1": {"event_id": "a:1", "trade_id": "a", "event_seq": 1, "created_at_unix": 2.0,
+                "payload": {"bot_instance_id": "me"}},
+        "b:0": {"event_id": "b:0", "trade_id": "b", "event_seq": 0, "created_at_unix": 3.0,
+                "payload": {"bot_instance_id": "me"}},
+    }
+    box._pending = rows
+    plan = box.delivery_plan(now=10.0, enforce_owner=True, active_owner_id="me",
+                             retired_event_ids=frozenset({"a:0"}))
+    assert plan["counts"]["retired_pre_epoch_pending"] == 1
+    assert plan["counts"]["stale_owner_pending"] == 0 and plan["counts"]["pending_total"] == 2
+    assert plan["counts"]["blocked_by_retired_predecessor"] == 1
+    assert [r["event_id"] for r in plan["records"]] == ["b:0"]
+    legacy = box.delivery_plan(now=10.0, enforce_owner=True, active_owner_id="me")
+    assert legacy["counts"]["stale_owner_pending"] == 1 and legacy["counts"]["retired_pre_epoch_pending"] == 0
