@@ -14,3 +14,8 @@ e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:1
 e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:186
 e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:360
 e5312ec0be1ec4a8df5217dbcf95166e27c3fdf7:HANDOFF-2026-08-06.md:generic-api-key:427
+# scripts/test_grokbot_digest.py fixtures in f03794f5 (branch ops/grokbot-monitor-20261003 / pr/391): obviously fake
+# "sk-live-ABC...xyz" alphabet placeholder and tile-name dict keys; master now assembles the fixture at runtime.
+f03794f506359996c5e7cbbe74b9e80d84c8abdb:scripts/test_grokbot_digest.py:generic-api-key:8
+f03794f506359996c5e7cbbe74b9e80d84c8abdb:scripts/test_grokbot_digest.py:generic-api-key:33
+f03794f506359996c5e7cbbe74b9e80d84c8abdb:scripts/test_grokbot_digest.py:generic-api-key:64
