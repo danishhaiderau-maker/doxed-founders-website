@@ -27,6 +27,8 @@ param(
   [int]$InlineFfMaxWaitSec = 900,
   [int]$InlineFfPollSec = 30,
   [string]$GenomeGridReport = 'C:\DoxxedCrypto\analyzer-exports\genome-grid\genome_grid_report.json',
+  # Indicator Edge scoreboard + coverage + per-bar labels for Grok Strategist (written by indicator_edge_cycle.py).
+  [string]$IndicatorEdgeExport = 'C:\DoxxedCrypto\analyzer-exports\indicator-edge\indicator_edge_export.json',
   [int]$MirrorPublishTimeoutSec = 600,
   [string]$Reason = 'segment-cycle'
 )
@@ -223,6 +225,7 @@ if ($analyzerExit -eq 0) {
                    '--report-root', (Join-Path $cfg.DataRoot 'analyzer'), '--base-url', $cfg.SourceUrl,
                    '--vault-env', $cfg.VaultEnv, '--receipt', (Join-Path $cfg.StateDir 'analyzer-mirror-publish.status.json'))
   if ($GenomeGridReport -and (Test-Path -LiteralPath $GenomeGridReport -PathType Leaf)) { $publishArgs += @('--supplemental', $GenomeGridReport) }
+  if ($IndicatorEdgeExport -and (Test-Path -LiteralPath $IndicatorEdgeExport -PathType Leaf)) { $publishArgs += @('--supplemental', $IndicatorEdgeExport) }
   $ErrorActionPreference = 'Continue'
   try {
     $publishJob = Start-Job -ScriptBlock { param($Py, $PyArgs) & $Py @PyArgs 2>&1 | Out-String } -ArgumentList $Python, $publishArgs

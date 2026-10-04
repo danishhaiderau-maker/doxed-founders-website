@@ -5,7 +5,8 @@ UTC day, the weekly markdown once per completed week). Read-only on the mirror a
 the analyzer-exports indicator-edge folder, the pre-registration chain (combination freezes, append-only) and
 the weekly diagnostics file. Never touches Fly, trading, tiles, the relay or Bitfinex. It also writes the per-bar
 forward labels (``indicator_edge_labels.jsonl``) from the outcomes the scorer already computed, so single-feature
-and combination studies can run on one table.
+and combination studies can run on one table, and ``indicator_edge_export.json`` (scoreboard + coverage audit +
+compact labels) that run-segment-analyzer-cycle.ps1 publishes to Fly for Grok Strategist.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typing import Sequence
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from research import indicator_edge_combos as combos  # noqa: E402
+from research import indicator_edge_export as export  # noqa: E402
 from research import indicator_edge_labels as labels  # noqa: E402
 from research import indicator_edge_prereg as prereg  # noqa: E402
 from research import indicator_edge_weekly as weekly  # noqa: E402
@@ -29,13 +31,21 @@ def run(data_dir: str, out_dir: str, prereg_root: Path, diag_dir: Path, *, now: 
         tape="load", rows=None) -> dict:
     now = float(now if now is not None else time.time())
     ctx: dict = {}
+    rows = list(rows) if rows is not None else sc.load_bar_rows(data_dir)
     report = sc.score(data_dir, out_dir, prereg_root=prereg_root, now=now, tape=tape, rows=rows, context=ctx)
     report["combinations"] = combos.evaluate(report, ctx, prereg_root=prereg_root, out_dir=out_dir, now=now)
     res = sc.write_outputs(report, out_dir)
+    labelled: list = []
     try:
-        lab = labels.write_from_context(ctx, out_dir)
+        labelled = labels.from_context(ctx)
+        lab = labels.write_from_context(ctx, out_dir, labelled)
     except (OSError, ValueError, KeyError) as exc:  # the scoreboard is already written; labels are additive
         lab = {"labels": None, "label_rows": 0, "labels_error": f"{type(exc).__name__}: {exc}"}
+    try:  # Strategist export (analyzer mirror supplemental): scoreboard + coverage + compact per-bar labels
+        doc = export.build(report, labelled, labels.coverage(rows), now=now)
+        lab |= {"export": export.write(doc, out_dir), "export_label_rows": doc["labels"]["rows_exported"]}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        lab |= {"export": None, "export_error": f"{type(exc).__name__}: {exc}"}
     frozen_at = (report.get("prereg") or {}).get("frozen_at")
     week_path = None
     if frozen_at:
