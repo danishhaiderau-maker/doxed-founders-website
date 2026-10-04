@@ -64,7 +64,7 @@ RUN python -c "import indicator_edge_spec, indicator_engine_core, indicator_engi
 # System-health banner and Alerts section (dashboard routes import both).
 RUN python -c "import system_health_banner, system_health_alerts, runtime_uptime, monitor_api"
 # Thread heartbeats, relay stale-owner delivery guard, AI call cost and shadow chase buckets load at bot import.
-RUN python -c "import thread_health, relay_delivery_guard, relay_stack_mode, ai_call_cost, shadow_chase_buckets"
+RUN python -c "import thread_health, relay_delivery_guard, relay_stack_mode, runtime_hygiene, ai_call_cost, shadow_chase_buckets"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
