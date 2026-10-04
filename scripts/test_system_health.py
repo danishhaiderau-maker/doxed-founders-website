@@ -1679,3 +1679,67 @@ def test_disarmed_executor_starting_blip_is_a_restart_window_not_a_flap():
     armed["relay_snapshot"].update(relayArmedAt="2026-10-04T09:00:00Z")
     armed["relay_snapshot"]["relayExecutor"] = {"status": "STARTING", "healthy": False}
     assert by_id(sh.evaluate(armed, {}))["railway.relay"]["status"] == sh.RED
+
+
+def _pull_lag_inputs(now: float, published: int, applied: int, pull_started: float) -> dict:
+    inputs = healthy(now)
+    inputs["fly_health"]["volume"]["transfer"].update(shipped_seq=published, laptop_acked_seq=applied,
+                                                      last_segment_at=now - 30)
+    inputs["puller_status"]["applied_seq"] = inputs["pull_status"]["appliedSeq"] = applied
+    inputs["pull_status"].update(startedAt=sh.iso(pull_started), finishedAt=sh.iso(pull_started + 2), exitCode=0)
+    inputs["ack_receipt"]["through_seq"] = applied
+    return inputs
+
+
+def test_pull_ack_normal_gap_between_pulls_is_green_not_a_flap():
+    # 21:45-22:05 2026-10-04: published ran 1-2 batches ahead of applied between pulls and the
+    # old "any lag for >5m" rule flipped laptop.pull_ack AMBER/GREEN four times.
+    now = ts("2026-10-04T10:45:00Z")
+    state: dict = {}
+    applied = 500
+    for step in range(12):
+        when = now + step * 150
+        applied += step % 2
+        inputs = _pull_lag_inputs(when, applied + 2, applied, when - 100)
+        assert by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"] == sh.GREEN, step
+
+
+def test_pull_ack_amber_needs_lag_over_5_for_15m_and_clears_after_a_full_pull_cycle():
+    now = ts("2026-10-04T11:00:00Z")
+    state: dict = {}
+    applied = 500
+    # Lag 8 (> 5) but applied keeps advancing, so this is AMBER territory only, never RED.
+    for minute in (0, 5, 10):
+        applied += 1
+        inputs = _pull_lag_inputs(now + minute * 60, applied + 8, applied, now + minute * 60 - 60)
+        assert by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"] == sh.GREEN, minute
+    applied += 1
+    inputs = _pull_lag_inputs(now + 15 * 60, applied + 8, applied, now + 14 * 60)
+    check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.AMBER and "> 5" in check["hint"]
+    # Lag back to 3, but the latest pull started before lag dropped: still AMBER.
+    applied += 5
+    drop = now + 17 * 60
+    inputs = _pull_lag_inputs(drop, applied + 3, applied, drop - 90)
+    check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.AMBER and "full pull cycle" in check["hint"]
+    # A full pull cycle (started and finished after the drop) at or under 5 clears it.
+    inputs = _pull_lag_inputs(drop + 180, applied + 4, applied, drop + 60)
+    assert by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"] == sh.GREEN
+
+
+def test_pull_ack_lag_excursion_shorter_than_15m_never_ambers():
+    now = ts("2026-10-04T12:00:00Z")
+    state: dict = {}
+    applied = 600
+    for minute, lag in ((0, 9), (5, 9), (10, 9), (14, 2), (16, 9), (20, 9), (25, 9)):
+        applied += 1
+        inputs = _pull_lag_inputs(now + minute * 60, applied + lag, applied, now + minute * 60 - 60)
+        assert by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]["status"] == sh.GREEN, minute
+
+
+def test_pull_ack_nonzero_exit_is_amber():
+    now = ts("2026-10-04T13:00:00Z")
+    inputs = _pull_lag_inputs(now, 700, 700, now - 60)
+    inputs["pull_status"]["exitCode"] = 1
+    assert by_id(sh.evaluate(inputs, {}))["laptop.pull_ack"]["status"] == sh.AMBER
