@@ -119,3 +119,26 @@ def test_clean_terminal_receipt_keeps_prior_partial_cumulative_unchanged():
     }))
 
     assert detail == {"contaminated": False}
+
+
+def test_partial_exit_receipts_accept_csv_python_repr():
+    # trades_3factor.csv stores the receipt list via str(list): single-quoted Python repr.
+    receipts = [
+        {"ts": "2026-10-04T09:18:28+00:00", "reason": "GS_LADDER_TP1", "close_fraction": 0.5,
+         "remaining_fraction": 0.5, "cumulative_realized_net_usd": 0.1, "realized_gross_usd": None},
+        {"remaining_fraction": 0.0, "cumulative_realized_net_usd": 0.3, "realized_gross_usd": None},
+    ]
+    assert analyzer._partial_exit_receipts(str(receipts)) == receipts
+    assert analyzer._partial_exit_receipts(json.dumps(receipts)) == receipts
+    detail = analyzer._family_terminal_double_count_detail(pd.Series({
+        "partial_exit_receipts": str(receipts),
+        "execution_entry_price": 100.0, "execution_exit_price": 101.0, "execution_qty": 0.2,
+    }))
+    assert detail["contaminated"] is True
+
+
+def test_partial_exit_receipts_reject_non_literal_text():
+    assert analyzer._partial_exit_receipts("__import__('os').system('true')") == []
+    assert analyzer._partial_exit_receipts("[{'a': 1}") == []
+    assert analyzer._partial_exit_receipts("{'a': 1}") == []
+    assert analyzer._partial_exit_receipts("") == []
