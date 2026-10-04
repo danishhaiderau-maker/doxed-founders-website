@@ -41153,6 +41153,12 @@ def _build_relay_execution_state_snapshot() -> dict:
             "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
             "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
             **_execution_control_fields_locked(),
+            # Pause intent is only meaningful while a manual pause is active;
+            # the heavy presentation payload is built while paused, so the live
+            # overlay must carry the cleared value after resume.
+            "pause_intent": (
+                state.get("pause_intent") if state.get("manual_admin_pause") else None
+            ),
             "retired_tile_lanes": sorted(RETIRED_TILE_LANES),
             "shared_research_ai_observation_enabled": shared_research_ai_observation_enabled(),
             "research_lane_enabled": copy.deepcopy(state.get("research_lane_enabled") or {}),
@@ -43024,6 +43030,8 @@ def _api_state_cache_refresher_loop():
                     "_pause_priority",
                     "last_execution_admission",
                     "manual_admin_pause",
+                    "pause_intent",
+                    "pause_owner",
                     "research_lane_enabled",
                     "live_armed",
                     "max_active_signals",
@@ -44654,6 +44662,8 @@ def api_pause():
         manual_admin_pause=True,
         live_armed=False,
         bitfinex_live_enabled=False,
+        pause_intent=pause_owner,
+        pause_owner=pause_owner,
     )
     logger.warning(f"[ADMIN] Manual pause via /api/pause owner={pause_owner} [PIPELINE ENFORCEMENT]")
     worker, result = _start_pause_finalization()
@@ -44926,6 +44936,7 @@ def _api_resume_with_reset_intent_held():
         execution_reason=remaining_reason,
         manual_admin_pause=False,
         pause_owner=remaining_owner,
+        pause_intent=None,
     )
     logger.info(
         f"[ADMIN] Manual resume via /api/resume "

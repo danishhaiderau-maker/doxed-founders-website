@@ -221,3 +221,24 @@ print(f"PASS={passed} FAIL={failed}")
 print("=" * 72)
 if failed:
     sys.exit(1)
+
+
+def test_resume_clears_pause_intent_on_the_cached_dashboard_payload() -> None:
+    """After a guarded-deploy resume /api/state must not keep DEPLOY_MAINTENANCE."""
+    import ast as _ast
+    from pathlib import Path as _Path
+
+    source = _Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    tree = _ast.parse(source)
+
+    def body(name: str) -> str:
+        node = next(n for n in tree.body if isinstance(n, _ast.FunctionDef) and n.name == name)
+        return _ast.get_source_segment(source, node) or ""
+
+    resume = body("api_resume")
+    assert 'state["pause_intent"] = None' in resume
+    assert "pause_intent=None," in resume
+    overlay = body("_api_state_cache_refresher_loop")
+    assert '"pause_intent",' in overlay and '"pause_owner",' in overlay
+    relay = body("_build_relay_execution_state_snapshot")
+    assert '"pause_intent": (' in relay
