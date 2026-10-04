@@ -271,3 +271,55 @@ def test_baseline_member_validation():
         fmt.validate_member({**good, "source_sha256": "nope"}, 0)
     with pytest.raises(fmt.SegmentFormatError):
         fmt.validate_member({**good, "size": 11}, 0)
+
+
+def _retire_sealed_then_rotate_again(env: Env, active) -> None:
+    env.write("tape.jsonl", _rows(0, 10))
+    env.ship_all()
+    env.write("tape.jsonl", _rows(10, 2), append=True)
+    os.rename(active, active.with_name("tape.jsonl.1"))
+    env.write("tape.jsonl", _rows(100, 3))
+    env.ship_all()
+    env.puller().pull_once()
+    assert "tape.jsonl.1" in env.puller().load_state()["baselines"]
+    # A boundary reset retires the sealed generation on Fly ...
+    (env.runtime / "tape.jsonl.1").unlink()
+    env.clock[0] += 1
+    env.ship_all()
+    env.puller().pull_once()
+    # ... and the next rotation seals the new stream (shipped from byte 0) onto the same name.
+    env.write("tape.jsonl", _rows(103, 2), append=True)
+    os.rename(active, active.with_name("tape.jsonl.1"))
+    env.write("tape.jsonl", _rows(200, 1))
+    env.ship_all()
+
+
+def test_seal_onto_a_retired_name_ignores_its_stale_baseline(tmp_path):
+    env = _epoch(tmp_path)
+    active = env.runtime / "tape.jsonl"
+    _retire_sealed_then_rotate_again(env, active)
+    result = env.puller().pull_once()
+    assert result["applied_seq"] == result["acked_seq"]
+    assert _tree(env) == {"tape.jsonl.1": _rows(100, 5), "tape.jsonl": _rows(200, 1)}
+    state = env.puller().load_state()
+    assert "tape.jsonl.1" not in state["baselines"]
+    assert "tape.jsonl.1" not in state["tombstoned"]
+    kept = [p.read_bytes() for p in (env.shadow / "quarantine").rglob("tape.jsonl.1")]
+    assert kept == [_rows(10, 2)]
+
+
+def test_seal_onto_a_retired_name_reapplied_after_crash(tmp_path, monkeypatch):
+    env = _epoch(tmp_path)
+    active = env.runtime / "tape.jsonl"
+    _retire_sealed_then_rotate_again(env, active)
+    real_save = puller_mod.SegmentPuller.save_state
+
+    def crash_on_save(self, state):
+        raise OSError("sleep during checkpoint")
+
+    monkeypatch.setattr(puller_mod.SegmentPuller, "save_state", crash_on_save)
+    with pytest.raises(OSError):
+        env.puller().pull_once()
+    monkeypatch.setattr(puller_mod.SegmentPuller, "save_state", real_save)
+    env.puller().pull_once()
+    assert _tree(env) == {"tape.jsonl.1": _rows(100, 5), "tape.jsonl": _rows(200, 1)}
