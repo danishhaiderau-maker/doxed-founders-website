@@ -154,6 +154,7 @@ def test_stream_names_cover_rotations_and_ledgers(tmp_path):
     assert eg.stream_relpath(tmp_path, tmp_path / "v3" / "ledgers" / "decision.jsonl.2") == "v3/ledgers/decision.jsonl"
     assert eg.stream_relpath(tmp_path, tmp_path / "market_microstructure_1s.jsonl") is None
     assert eg.stream_relpath(tmp_path, tmp_path / "x.validation.json") is None
+    assert eg.stream_relpath(tmp_path, tmp_path / "canonical_dataset_manifest.jsonl") is None
 
 
 # ------------------------------------------------------------------ analyzer readers
@@ -258,3 +259,11 @@ def test_engine_trade_readers_admit_only_current_epoch(tmp_path, guard, monkeypa
     block = engine._epoch_receipt_block()
     assert block["pre_epoch_rows_admitted"] == 0, block["read_monitor"]["unguarded_stream_reads"]
     assert block["pre_epoch_rows_retained_by_stream"] == {"trades_3factor.csv": 2}
+
+
+def test_provenance_journal_is_non_evidence_for_the_purity_audit():
+    import data_epoch as de
+
+    assert de.non_evidence("canonical_dataset_manifest.jsonl")
+    assert "canonical_dataset_manifest.jsonl" in de.NON_EVIDENCE_BASES
+    assert not de.non_evidence("v3/canonical_dataset_manifest.jsonl")

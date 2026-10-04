@@ -155,6 +155,9 @@ def stream_relpath(root: str | os.PathLike, path: str | os.PathLike) -> str | No
     base = m.group("base")
     if base.endswith(_SKIP_SUFFIXES) or base.startswith(de.EPOCH_AUDIT_SKIP_DIRS) or de.epoch_independent(base):
         return None
+    if base in de.PROVENANCE_JOURNAL_BASES:
+        # Chain validation reads the whole journal from genesis; its rows are provenance, not evidence.
+        return None
     return base
 
 
