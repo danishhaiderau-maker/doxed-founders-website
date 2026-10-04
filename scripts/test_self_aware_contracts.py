@@ -287,6 +287,59 @@ def test_archive_drift_flags_vanished_and_shrunk_reports(paths):
     assert any(k == "REPORT_LIST_COLLAPSE" for _, k in kinds)
 
 
+def test_drift_baseline_is_the_current_epoch_and_tile_registry(paths):
+    spec = _spec()
+    old = {"epoch_id": "ce-20261004-v31-final", "tile_registry_signature": "11tiles"}
+    cur = {"epoch_id": "ce-20261004-v31-final-e", "tile_registry_signature": "8tiles"}
+    pre = [{"id": spec["id"], "metrics": {"rows:top": 13}, "dims": {"active_tiles:keys": ["FAMILY_XVENUE_LEAD_60S", "A"]},
+            "baseline": old} for _ in range(8)]
+    unstamped = [{"id": spec["id"], "metrics": {"rows:top": 13}, "dims": {"active_tiles:keys": ["X", "A"]}}] * 3
+    res = {"status": "GREEN", "metrics": {"rows:top": 0}, "dims": {"active_tiles:keys": ["A"]}, "violations": []}
+    assert ct.drift(spec, res, pre + unstamped, cur) == []
+    same = [{"id": spec["id"], "metrics": {"rows:top": 10}, "dims": {"active_tiles:keys": ["A", "B"]}, "baseline": cur}] * 3
+    kinds = {v["kind"] for v in ct.drift(spec, res, same + pre, cur)}
+    assert kinds == {"DRIFT_COLLAPSE", "DRIFT_DIMS_DROPPED"}
+    (paths.mirror / "data_epoch.json").parent.mkdir(parents=True, exist_ok=True)
+    (paths.mirror / "data_epoch.json").write_text(json.dumps({"epoch_id": cur["epoch_id"], "started_at_ts": 1.0}))
+    assert ct.baseline_identity(paths, {"runtime": {"tile_registry_signature": "8tiles"}}) == cur
+
+
+def test_archive_drift_ignores_snapshots_before_the_epoch(paths):
+    gen = paths.archive / "generations" / "2026-10-04"
+    for stamp, n in (("20261004T000000Z", 50), ("20261004T010000Z", 50), ("20261004T020000Z", 0), ("20261004T030000Z", 0)):
+        rd = gen / stamp / "reports"
+        rd.mkdir(parents=True)
+        with gzip.open(rd / "archive.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"tiles_long_horizon": [{"a": j} for j in range(n)]}, fh)
+    assert any(f["kind"] == "REPORT_LIST_COLLAPSE" for f in ct.archive_drift(paths, {})["findings"])
+    epoch_start = ct._snapshot_ts("20261004T014018Z")
+    out = ct.archive_drift(paths, {}, since_ts=epoch_start)
+    assert out["findings"] == [] and out["snapshots"]["generations"] == ["20261004T020000Z", "20261004T030000Z"]
+
+
+def test_tile_stats_count_only_epoch_closes_and_list_every_roster_lane():
+    import pandas as pd
+
+    from self_aware import tiles
+
+    class _Store:
+        def frame(self, _sql):
+            return pd.DataFrame({"lane": ["FAMILY_XVENUE_LEAD_60S", "FAMILY_DANISH_CF"], "fill_id": ["f1", "f2"],
+                                 "close_ts": ["2026-10-04T00:30:00Z", "2026-10-04T02:30:00Z"], "net_usd": [1.0, -0.5],
+                                 "exit_reason": ["TP", "SL"], "revision": ["r", "r"]})
+
+    facts = {"runtime": {"active_tile_lanes": ["FAMILY_DANISH_CF", "FAMILY_NOTRADE_FOLLOW_MAKER_60"],
+                         "research_lane_enabled": {"FAMILY_DANISH_CF": True, "FAMILY_NOTRADE_FOLLOW_MAKER_60": True}}}
+    start = ct._snapshot_ts("20261004T014018Z")
+    df = tiles.tile_stats(_Store(), facts, now=start + 7200, epoch_start_ts=start)
+    assert set(df["lane"]) == {"FAMILY_DANISH_CF", "FAMILY_NOTRADE_FOLLOW_MAKER_60"}
+    quiet = df[df["lane"] == "FAMILY_NOTRADE_FOLLOW_MAKER_60"].iloc[0]
+    assert quiet["closes"] == 0 and quiet["in_roster"]
+    assert df[(df["lane"] == "FAMILY_DANISH_CF") & (df["window"] == "all")].iloc[0]["closes"] == 1
+    legacy = tiles.tile_stats(_Store(), facts, now=start + 7200)
+    assert "FAMILY_XVENUE_LEAD_60S" in set(legacy["lane"])
+
+
 def test_coverage_reads_nav_groups_from_dashboard_source(paths):
     rd = paths.analyzer_repo / "services" / "btc-conservative-agent" / "research"
     rd.mkdir(parents=True)

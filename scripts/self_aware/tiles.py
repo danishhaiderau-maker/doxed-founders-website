@@ -10,8 +10,12 @@ import pandas as pd
 from .facts import iso, parse_ts
 
 
-def tile_stats(store, facts: dict, now: float | None = None) -> pd.DataFrame:
+def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: float | None = None) -> pd.DataFrame:
+    """Per-lane close stats; with a declared data epoch only its closes count and every roster lane gets a row."""
     now = time.time() if now is None else now
+    rt = facts.get("runtime") or {}
+    enabled = rt.get("research_lane_enabled") or {}
+    roster = set(rt.get("active_tile_lanes") or [])
     try:
         df = store.frame("""
             SELECT research_lane AS lane, fill_id, max(close_ts) AS close_ts, sum(net_pnl_usd) AS net_usd,
@@ -19,13 +23,19 @@ def tile_stats(store, facts: dict, now: float | None = None) -> pd.DataFrame:
             FROM raw_execution WHERE fill_id IS NOT NULL AND close_ts IS NOT NULL GROUP BY 1, 2""")
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
-    if df.empty:
-        return df
-    df["close_epoch"] = [parse_ts(x) for x in df["close_ts"]]
-    rt = facts.get("runtime") or {}
-    enabled = rt.get("research_lane_enabled") or {}
-    roster = set(rt.get("active_tile_lanes") or [])
+    if not df.empty:
+        df["close_epoch"] = [parse_ts(x) for x in df["close_ts"]]
+        if epoch_start_ts is not None:
+            df = df[df["close_epoch"] >= float(epoch_start_ts)]
     rows = []
+    if epoch_start_ts is not None:
+        closed = set(df["lane"]) if not df.empty else set()
+        rows += [{"lane": lane, "window": "all", "closes": 0, "wins": 0, "win_rate": None, "net_usd": 0.0,
+                  "mean_usd": None, "worst_usd": None, "best_usd": None, "last_close": None, "in_roster": True,
+                  "enabled": bool(enabled.get(lane, False)), "exit_reasons": "{}"}
+                 for lane in sorted(roster - closed)]
+    if df.empty:
+        return pd.DataFrame(rows)
     for lane, g in df.groupby("lane"):
         for wname, wsec in (("24h", 86400), ("7d", 7 * 86400), ("all", None)):
             w = g if wsec is None else g[g["close_epoch"] >= now - wsec]

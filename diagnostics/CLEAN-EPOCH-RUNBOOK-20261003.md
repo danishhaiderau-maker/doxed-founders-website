@@ -95,6 +95,22 @@ python scripts\clean_epoch_certify.py --epoch ce-20261004-v31-clean
 - `PENDING` (< 2 h) or `REJECTED` (lists failing checks) → fix, re-run; never wipe.
 - `CERTIFIED` prints `confirm token: DELETE-PRE-EPOCH:ce-20261004-v31-clean:<cert8>`.
 
+#### Fresh certification window on the same epoch
+Planned laptop-chain downtime during a reset (self-aware/analyzer down, findings RED while they
+restart) must not permanently poison an epoch. After the cause is fixed and the chain is proven to
+advance, declare a fresh window forward in time — no new epoch, no deploy:
+```
+python scripts\clean_epoch_certify.py --declare-window now --reason "<why>"            # plan only, prints ISO start + token
+python scripts\clean_epoch_certify.py --declare-window <ISO start> --reason "<why>" --confirm CERT-WINDOW:<epoch>:<YYYYmmddTHHMMSSZ>
+```
+- Refused if the start precedes the epoch start, is > 5 min in the past (a window can never be
+  declared over already-observed REDs), or is > 24 h ahead; `--reason` is mandatory.
+- Confirm appends the declaration to `C:\DoxxedCrypto\clean-epoch\certification-windows.jsonl` and a
+  `| CERT-WINDOW | ... |` line to `diagnostics\WALL-STATUS-FLY.md` with the window start.
+- Later certify runs use the latest declaration for the epoch: the 2 h age and
+  `required.no_red_in_window` count from the window start. Every other gate is unchanged: required
+  findings GREEN now (AMBER fails), no RED now, same epoch, stamped CURRENT rows, fresh self-aware.
+
 ### 3. Wipe — dry-run diff first, then execute
 Laptop (between analyzer cycles; execute refuses while a cycle runs):
 ```
