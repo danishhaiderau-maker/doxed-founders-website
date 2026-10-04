@@ -44517,6 +44517,12 @@ def api_live_copy_coordination():
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    # Retaining an operator/safety pause on a deploy-owned resume mutates
+    # nothing, so it is answered even while a reset holds the lock or pointer;
+    # every other resume stays blocked by an active reset.
+    retained = _deploy_retained_pause_response(request.get_json(silent=True) or {})
+    if retained is not None:
+        return retained
     if not _fresh_collection_lock.acquire(blocking=False):
         return _resume_blocked_by_reset("FRESH_COLLECTION_RESET_IN_PROGRESS")
     try:
@@ -44556,6 +44562,31 @@ def _resume_blocked_by_reset(reason: str):
     return response
 
 
+def _deploy_retained_pause_response(body: dict):
+    """``operator_pause_retained`` for a deploy-owned resume of an operator/safety pause, else None."""
+    if str(body.get("owner") or "").strip().upper() != PAUSE_OWNER_DEPLOY_MAINTENANCE:
+        return None
+    with state_lock:
+        active_reason = str(state.get("execution_reason") or "")
+        manual_paused = bool(state.get("manual_admin_pause", False))
+        pause_owner = _pause_owner_locked()
+    if active_reason == "GENOME_IDENTITY_INVALID":
+        return None
+    # A manual pause is durable across deploy+restart. Deploy tooling resumes
+    # with owner=DEPLOY_MAINTENANCE and may only end its own (or an
+    # unattributed legacy) pause; a deliberate operator pause survives the
+    # deploy until the operator resumes (a resume without owner).
+    if not (manual_paused and pause_owner in _DEPLOY_RETAINED_PAUSE_OWNERS):
+        return None
+    return jsonify({
+        "status": "operator_pause_retained",
+        "execution_paused": True,
+        "reason": f"{pause_owner}_PAUSE_RETAINED",
+        "pause_owner": pause_owner,
+        "active_pause_reason": active_reason or "ADMIN_MANUAL",
+    })
+
+
 def _api_resume_with_reset_intent_held():
     runtime = _recompute_system_readiness()
     # The system_ready latch can't stabilize while the bot is paused (the
@@ -44572,7 +44603,6 @@ def _api_resume_with_reset_intent_held():
     with state_lock:
         active_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause", False))
-        pause_owner = _pause_owner_locked()
     if active_reason == "GENOME_IDENTITY_INVALID":
         response = jsonify({
             "status": "resume_blocked",
@@ -44583,18 +44613,9 @@ def _api_resume_with_reset_intent_held():
         })
         response.status_code = 409
         return response
-    # A manual pause is durable across deploy+restart. Deploy tooling resumes
-    # with owner=DEPLOY_MAINTENANCE and may only end its own (or an
-    # unattributed legacy) pause; a deliberate operator pause survives the
-    # deploy until the operator resumes (a resume without owner).
-    if manual_paused and deploy_owned_resume and pause_owner in _DEPLOY_RETAINED_PAUSE_OWNERS:
-        return jsonify({
-            "status": "operator_pause_retained",
-            "execution_paused": True,
-            "reason": f"{pause_owner}_PAUSE_RETAINED",
-            "pause_owner": pause_owner,
-            "active_pause_reason": active_reason or "ADMIN_MANUAL",
-        })
+    retained = _deploy_retained_pause_response(body)
+    if retained is not None:
+        return retained
     ws_healthy = bool(runtime.get("ws_transport_ready", False))
     if not runtime.get("system_ready"):
         # Real WS issue (not just a paused pipeline) — keep blocking.
