@@ -108,7 +108,8 @@ python scripts\clean_epoch_certify.py --declare-window <ISO start> --reason "<wh
 - Confirm appends the declaration to `C:\DoxxedCrypto\clean-epoch\certification-windows.jsonl` and a
   `| CERT-WINDOW | ... |` line to `diagnostics\WALL-STATUS-FLY.md` with the window start.
 - Later certify runs use the latest declaration for the epoch: the 2 h age and
-  `required.no_red_in_window` count from the window start. Every other gate is unchanged: required
+  `required.no_red_in_window` count from the window start (a required finding already RED when the
+  window opened counts as RED in the window; a truncated findings history fails closed). Every other gate is unchanged: required
   findings GREEN now (AMBER fails), no RED now, same epoch, stamped CURRENT rows, fresh self-aware.
 
 ### 3. Wipe — dry-run diff first, then execute
