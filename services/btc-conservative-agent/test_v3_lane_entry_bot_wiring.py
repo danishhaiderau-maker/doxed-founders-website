@@ -618,7 +618,9 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
             lambda source, **kwargs: dead_letters.append((source, kwargs))
         ),
         "logger": QuietLogger(),
+        "math": __import__("math"),
     }
+    load_function("_stamp_feature_capture", namespace)
     writer = load_function("_write_v3_shared_lane_decision", namespace)
     assert writer(
         "FAMILY_ONE",

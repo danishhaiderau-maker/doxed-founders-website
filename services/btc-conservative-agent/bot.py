@@ -18478,6 +18478,43 @@ def _v3_record_preorder_terminal_if_needed(
     return True
 
 
+def _stamp_feature_capture(features, signal_ts) -> dict:
+    """Copy a pre-decision feature snapshot with its capture clock.
+
+    pre_entry_features.captured_at_ts was always null because no producer set
+    ``capture_schema``/``captured_at_ts``.  The shared feature snapshot is
+    sealed before the shared AI call, so its own timestamp (when present) or
+    the shared call time is an upper bound that never post-dates the signal.
+    ``captured_at_source`` says which one was used.  Evidence-only: the copy is
+    written to the research ledger and never feeds a decision.
+    """
+    snapshot = copy.deepcopy(features) if isinstance(features, dict) else {}
+    if snapshot.get("capture_schema") and snapshot.get("captured_at_ts") is not None:
+        return snapshot
+    try:
+        bound = float(signal_ts)
+    except (TypeError, ValueError):
+        return snapshot
+    if not math.isfinite(bound) or bound <= 0:
+        return snapshot
+    own = None
+    for key in ("captured_at_ts", "feature_ts", "snapshot_ts", "features_ts", "ts"):
+        value = snapshot.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and 0 < value <= bound:
+            own = value
+            break
+    snapshot["capture_schema"] = "measured_feature_capture_v1"
+    snapshot["captured_at_ts"] = own if own is not None else bound
+    snapshot["captured_at_source"] = "FEATURE_SNAPSHOT_TS" if own is not None else "SHARED_AI_CALL_TS"
+    return snapshot
+
+
 def _write_v3_shared_lane_decision(
     lane: str,
     ai: dict,
@@ -18542,7 +18579,7 @@ def _write_v3_shared_lane_decision(
                 "long_score": long_score,
                 "short_score": short_score,
                 "score_gap": score_gap,
-                "feature_snapshot_at_signal": copy.deepcopy(features or {}),
+                "feature_snapshot_at_signal": _stamp_feature_capture(features, signal_ts),
                 "research_baseline_context_declaration": copy.deepcopy((ai or {}).get("research_baseline_context_declaration")),
                 "research_baseline_context_status": copy.deepcopy((ai or {}).get("research_baseline_context_status")),
                 "research_timing_config": copy.deepcopy((ai or {}).get("research_timing_config")),
