@@ -24,11 +24,12 @@ from typing import Iterable, Optional
 import numpy as np
 import pandas as pd
 
+from analyzer_epoch_guard import guarded_read, process_guard, stream_name
 from strategy_lab.stats import cluster_ci
 
 SCHEMA = "stream_studies_v1"
 REPORT_FILE = "stream_studies_report.json"
-CACHE_SCHEMA = "stream_studies_cache_v1"
+CACHE_SCHEMA = "stream_studies_cache_v2_epoch_guarded"
 POST_EXIT_HORIZONS = (300, 900, 1800, 3600)
 MARKOUT_HORIZONS = ("1s", "10s", "60s", "300s")
 CLUSTER_SEC = 3600
@@ -67,7 +68,9 @@ def _open(path: str):
 def content_signature(path: str) -> Optional[str]:
     try:
         st = os.stat(path)
-        with open(path, "rb") as fh:
+        with guarded_read(stream_name(path), "inventory"):
+            fh = open(path, "rb")
+        with fh:
             head = fh.read(65536)
             if st.st_size > 131072:
                 fh.seek(st.st_size - 65536)
@@ -120,12 +123,18 @@ class Cache:
         os.replace(tmp, self.path)
 
 
+def _guarded_open(path: str):
+    with guarded_read(stream_name(path)):
+        return _open(path)
+
+
 def _iter_json(path: str, start: int = 0):
-    with _open(path) as fh:
+    rel, guard = stream_name(path), process_guard()
+    with _guarded_open(path) as fh:
         if start:
             fh.seek(start)
         for raw in fh:
-            if not raw.strip():
+            if not raw.strip() or not guard.admit_line(rel, raw):
                 continue
             try:
                 yield json.loads(raw)
@@ -474,7 +483,8 @@ def _event_compact(r: dict, nbytes: int) -> dict:
 
 def _index_events(path: str, start: int) -> tuple:
     rows, end = [], start
-    with _open(path) as fh:
+    rel, guard = stream_name(path), process_guard()
+    with _guarded_open(path) as fh:
         if start:
             fh.seek(start)
         while True:
@@ -484,6 +494,8 @@ def _index_events(path: str, start: int) -> tuple:
             if not raw.endswith(b"\n"):
                 break  # torn tail: re-read next cycle
             end += len(raw)
+            if not guard.admit_line(rel, raw):
+                continue
             try:
                 rows.append(_event_compact(json.loads(raw), len(raw)))
             except ValueError:

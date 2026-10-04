@@ -241,6 +241,78 @@ def funnel_on_expire(order: dict, reason: str = "TTL_EXPIRED") -> None:
     _append_jsonl(FUNNEL_FILE, row)
 
 
+def funnel_on_limit_chase(order: dict, old_limit: float, new_limit: float, age_min: float = None,
+                          market_gap_pct: float = None, chase_count: int = None) -> None:
+    """One LIMIT_CHASED stage per committed paper reprice (maker-tile fill-rate evidence).
+
+    bot.py has called this hook since the OFFSET029 chase landed, but the
+    function never existed, so every chase raised ImportError and showed up as
+    ``execution_funnel_hooks_unavailable=['policy_limit_chase', ...]``.
+    """
+    tid = str((order or {}).get("trade_id") or "")
+    if not tid:
+        return
+    row = {
+        "schema": "execution_funnel_v1",
+        "ts": _utc_iso(),
+        "trade_id": tid,
+        "stage": "LIMIT_CHASED",
+        "research_lane": order.get("research_lane"),
+        "entry_mode": order.get("entry_mode"),
+        "old_limit_price": old_limit,
+        "new_limit_price": new_limit,
+        "limit_price": new_limit,
+        "order_age_min": age_min,
+        "market_gap_pct": market_gap_pct,
+        "chase_count": chase_count,
+        "invert_on": _invert_on(order),
+    }
+    with _lock:
+        st = _states.setdefault(tid, {"trade_id": tid})
+        st["limit_price"] = new_limit
+        st["chase_count"] = chase_count
+    _append_jsonl(FUNNEL_FILE, row)
+
+
+def funnel_on_signal_expire(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED") -> None:
+    """Terminal SIGNAL_EXPIRED stage for a signal/order that ended without a fill.
+
+    Like ``funnel_on_limit_chase`` this hook was called by bot.py but missing
+    here (``signal_expire`` in ``execution_funnel_hooks_unavailable``), so the
+    expiry side of the maker fill-rate denominator was never recorded.
+    """
+    src = signal_or_order or {}
+    tid = str(src.get("trade_id") or "")
+    if not tid:
+        return
+    now = time.time()
+    try:
+        created = float(src.get("created_ts") or src.get("signal_ts") or now)
+    except (TypeError, ValueError):
+        created = now
+    row = {
+        "schema": "execution_funnel_v1",
+        "ts": _utc_iso(),
+        "trade_id": tid,
+        "stage": "SIGNAL_EXPIRED",
+        "filled": False,
+        "fill_reason": reason,
+        "research_lane": src.get("research_lane"),
+        "status_at_expire": src.get("status"),
+        "age_at_expire_sec": round(max(0.0, now - created), 1),
+        "limit_price": src.get("limit_price"),
+        "invert_on": _invert_on(src),
+    }
+    with _lock:
+        st = _states.setdefault(tid, {"trade_id": tid})
+        if st.get("filled"):
+            # A filled trade's signal clock ending is not a terminal miss.
+            return
+        st["terminal_reason"] = st.get("terminal_reason") or reason
+        st["filled"] = False
+    _append_jsonl(FUNNEL_FILE, row)
+
+
 def funnel_update_touch(order: dict, price: float) -> None:
     tid = str(order.get("trade_id") or "")
     if not tid or order.get("status") != "PENDING":
@@ -354,6 +426,8 @@ def build_funnel_summary(cwd: str = None) -> dict:
     filled = sum(1 for s in by_tid.values() if s.get("filled"))
     closed = sum(1 for s in by_tid.values() if s.get("closed"))
     terminals = Counter(s.get("terminal_reason") or s.get("fill_reason") for s in by_tid.values() if s.get("terminal_reason") or s.get("fill_reason"))
+    stage_counts = Counter(str(r.get("stage") or "") for r in rows)
+    chased_ids = {str(r.get("trade_id")) for r in rows if r.get("stage") == "LIMIT_CHASED" and r.get("trade_id")}
     summary = {
         "cwd": cwd,
         "generated_at": _utc_iso(),
@@ -368,6 +442,10 @@ def build_funnel_summary(cwd: str = None) -> dict:
         "fill_to_close_rate_pct": round(100 * closed / filled, 1) if filled else 0,
         "approve_to_fill_rate_pct": round(100 * filled / approves, 1) if approves else 0,
         "terminal_reasons": dict(terminals),
+        "signal_expired_count": stage_counts.get("SIGNAL_EXPIRED", 0),
+        "order_expired_count": stage_counts.get("ORDER_EXPIRED", 0),
+        "limit_chase_count": stage_counts.get("LIMIT_CHASED", 0),
+        "chased_trade_count": len(chased_ids),
         "unaccounted_approves": max(0, approves - filled - sum(1 for s in by_tid.values() if s.get("terminal_reason"))),
     }
     out = os.path.join(cwd, FUNNEL_SUMMARY_FILE)

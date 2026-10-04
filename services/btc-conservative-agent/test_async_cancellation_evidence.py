@@ -15,7 +15,6 @@ from bounded_evidence_worker import BoundedEvidenceWorker
 
 BOT_PATH = Path(__file__).with_name("bot.py")
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
-ENGINE_PATH = BOT_PATH.parents[1] / "btc-signal-engine" / "engine.py"
 TREE = ast.parse(BOT_SOURCE)
 
 
@@ -456,6 +455,3 @@ def test_replay_ignores_torn_tail_and_dispatches_only_pending_rows(tmp_path):
     assert ns["_replay_cancellation_evidence_handoffs"]() == 1
     assert [row["receipt_id"] for row in dispatched] == [pending_id]
 
-
-def test_mirrored_runtime_sources_are_byte_identical():
-    assert BOT_PATH.read_bytes() == ENGINE_PATH.read_bytes()

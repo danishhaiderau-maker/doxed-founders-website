@@ -3,9 +3,6 @@ import re
 
 
 SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
-ENGINE_SOURCE = (
-    Path(__file__).parents[1] / "btc-signal-engine" / "engine.py"
-).read_text(encoding="utf-8")
 ANALYZER_SOURCES = [
     Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
     (Path(__file__).with_name("research") / "analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
@@ -124,7 +121,6 @@ def test_execution_and_research_hard_stop_policy_stay_in_parity():
 
     expected = assigned_value(SOURCE, "MAX_SL_MARGIN_PCT")
     assert expected == 30.0
-    assert assigned_value(ENGINE_SOURCE, "MAX_SL_MARGIN_PCT") == expected
     assert assigned_value(CANONICAL_ANALYZER_SOURCE, "HARD_STOP_MARGIN_PCT") == expected
     assert "Hard SL margin cap: {HARD_STOP_MARGIN_PCT:g}%" in CANONICAL_ANALYZER_SOURCE
 

@@ -12,7 +12,9 @@ Incompatible rows are segregated into a labelled partition: a byte-range manifes
 result; deletion stays a manual ``clean-epoch-wipe`` run by Danish.
 
 Severity: AMBER when mixed versions would enter one analysis or a schema appears unannounced; RED once a
-clean epoch is declared and a pre-epoch / foreign-epoch row sits in an analyzer-visible file.
+clean epoch is declared and a pre-epoch / foreign-epoch row sits in an analyzer-visible file, unless the
+current-epoch analyzer generation proves (read monitor, :func:`reconcile_retained`) that the stream's
+pre-epoch rows stayed retained on disk and never entered a result.
 """
 from __future__ import annotations
 
@@ -528,12 +530,57 @@ def epoch_purity(paths, doc: dict) -> dict:
     if block.get("epoch_id") != epoch["epoch_id"]:
         return {**base, "severity": "RED",
                 "observed": f"analyzer read epoch {block.get('epoch_id')} but the declared epoch is {epoch['epoch_id']}"}
+    if block.get("pre_epoch_rows_admitted") is None:
+        return {**base, "severity": "RED",
+                "observed": "analyzer generation could not account for pre-epoch rows: " + str(block.get("error"))}
     admitted = int(block.get("pre_epoch_rows_admitted") or 0)
     if admitted:
-        return {**base, "severity": "RED", "observed": f"{admitted} pre-epoch rows entered analyzer results"}
+        by_stream = block.get("pre_epoch_rows_admitted_by_stream") or {}
+        sites = {k: (v or {}).get("sites", [])[:1] for k, v in
+                 ((block.get("read_monitor") or {}).get("unguarded_stream_reads") or {}).items() if k in by_stream}
+        return {**base, "severity": "RED",
+                "observed": f"{admitted} pre-epoch rows entered analyzer results: " +
+                            "; ".join(f"{k} {n} via {sites.get(k) or 'unmonitored read'}"
+                                      for k, n in sorted(by_stream.items(), key=lambda kv: -kv[1])[:6])}
+    retained = int(block.get("pre_epoch_rows_retained") or 0)
     return {**base, "severity": "GREEN",
             "observed": f"generation {receipt.get('generation_id')} read epoch {block.get('epoch_id')} only; "
-                        f"{int(block.get('pre_epoch_rows_rejected') or 0)} pre-epoch rows rejected at load"}
+                        f"{int(block.get('pre_epoch_rows_rejected') or 0)} pre-epoch rows rejected at load"
+                        + (f"; {retained} retained on disk, never opened unguarded" if retained else "")}
+
+
+def reconcile_retained(doc: dict, purity: dict | None) -> dict:
+    """Pre-epoch rows the analyzer provably never admitted are retained, not mixed.
+
+    Retained files are kept on purpose. A stream stops being RED only when the
+    current-epoch generation receipt has an active read monitor, reports purity
+    GREEN and does not name the stream among admitted pre-epoch rows; anything
+    less keeps the file-level RED.
+    """
+    epoch = doc.get("epoch") or {}
+    block = (purity or {}).get("data_epoch") or {}
+    monitor = block.get("read_monitor") or {}
+    proven = bool(epoch.get("declared") and (purity or {}).get("severity") == "GREEN" and monitor.get("active")
+                  and block.get("epoch_id") == epoch.get("epoch_id"))
+    admitted = block.get("pre_epoch_rows_admitted_by_stream") or {}
+    total_rows = streams = 0
+    for s in doc.get("streams") or []:
+        bad = {c: n for c, n in (s.get("classes") or {}).items() if c in (de.PRE_EPOCH, de.FOREIGN)}
+        if not bad or not proven or s["stream"] in admitted:
+            continue
+        rows = sum(bad.values())
+        s["retained_pre_epoch_rows"] = rows
+        s["problems"] = [p for p in s["problems"] if not p.startswith("pre-epoch/foreign rows")]
+        s["severity"] = "AMBER" if s["problems"] else "GREEN"
+        s["problems"].append(f"{rows} pre-epoch/foreign rows retained on disk; excluded at load "
+                             f"(generation {purity.get('generation_id')})")
+        total_rows += rows
+        streams += 1
+    doc["counts"] = {sev: sum(1 for x in doc.get("streams") or [] if x["severity"] == sev)
+                     for sev in ("RED", "AMBER", "GREEN")}
+    doc["retained"] = {"proven": proven, "generation_id": (purity or {}).get("generation_id"),
+                       "streams": streams, "rows": total_rows}
+    return doc
 
 
 # ------------------------------------------------------------------ findings
@@ -554,9 +601,12 @@ def findings(doc: dict | None, now: float, max_age_sec: float, epoch_purity: dic
     mixed = [s for s in streams if any("versions mixed" in p for p in s["problems"])]
     if epoch["declared"]:
         sev = "RED" if red else "GREEN"
+        retained = doc.get("retained") or {}
         obs = (f"{len(red)} streams hold pre-epoch/foreign rows in analyzer-visible files: " +
                "; ".join(f"{s['stream']} {s['classes']}" for s in red[:5])) if red else \
-            f"every stream is clean-epoch {epoch['epoch_id']} only"
+            f"every analysis input is clean-epoch {epoch['epoch_id']} only" + (
+                f"; {retained['streams']} streams retain {retained['rows']} pre-epoch rows on disk, excluded at "
+                f"load (generation {retained.get('generation_id')})" if retained.get("streams") else "")
     else:
         sev = "AMBER" if mixed else "GREEN"
         seg = doc["segregated"]

@@ -1048,7 +1048,9 @@ def count_legacy_crash_rejects(decisions):
 
 
 def _file_time_span(path: str, ts_cols=(), json_ts_key="ts"):
-    """Return (min_ts, max_ts, row_count, mtime) for a CSV or JSONL research file."""
+    """Return (min_ts, max_ts, row_count, mtime) of the clean-epoch rows of a CSV or JSONL research file."""
+    from analyzer_epoch_guard import epoch_lines
+
     if not os.path.isfile(path):
         return None, None, 0, None
     mtime = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1056,27 +1058,28 @@ def _file_time_span(path: str, ts_cols=(), json_ts_key="ts"):
     min_ts = max_ts = None
     try:
         if path.endswith(".jsonl"):
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rows += 1
-                    try:
-                        obj = json.loads(line)
-                        raw = obj.get(json_ts_key)
-                        if raw:
-                            ts = pd.to_datetime(raw, utc=True, errors="coerce")
-                            if pd.notna(ts):
-                                min_ts = ts if min_ts is None or ts < min_ts else min_ts
-                                max_ts = ts if max_ts is None or ts > max_ts else max_ts
-                    except Exception:
-                        pass
+            for line in epoch_lines(path, encoding="utf-8"):
+                line = line.strip()
+                if not line:
+                    continue
+                rows += 1
+                try:
+                    obj = json.loads(line)
+                    raw = obj.get(json_ts_key)
+                    if raw:
+                        ts = pd.to_datetime(raw, utc=True, errors="coerce")
+                        if pd.notna(ts):
+                            min_ts = ts if min_ts is None or ts < min_ts else min_ts
+                            max_ts = ts if max_ts is None or ts > max_ts else max_ts
+                except Exception:
+                    pass
         else:
-            try:
-                df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip", low_memory=False)
-            except UnicodeDecodeError:
-                df = pd.read_csv(path, encoding="latin1", on_bad_lines="skip", low_memory=False)
+            with _epoch_guarded_read(path):
+                try:
+                    df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip", low_memory=False)
+                except UnicodeDecodeError:
+                    df = pd.read_csv(path, encoding="latin1", on_bad_lines="skip", low_memory=False)
+            df = _epoch_filter_frame(path, df)
             rows = len(df)
             for col in ts_cols:
                 if col in df.columns:
@@ -1149,7 +1152,7 @@ def _epoch_guard():
     """Process-wide clean-epoch guard; admits every row while no epoch is declared."""
     global _EPOCH_GUARD, _EPOCH_MANIFEST_DIR
     if _EPOCH_GUARD is None:
-        from analyzer_epoch_guard import EpochGuard
+        from analyzer_epoch_guard import EpochGuard, set_process_guard
 
         guard = EpochGuard(None)
         for root in _epoch_manifest_roots():
@@ -1158,14 +1161,36 @@ def _epoch_guard():
                 guard, _EPOCH_MANIFEST_DIR = candidate, root
                 break
         _EPOCH_GUARD = guard
+        set_process_guard(guard)
     return _EPOCH_GUARD
+
+
+def _epoch_scoped(relpath):
+    """Epoch-filterable stream file (current-cohort rows only once an epoch is declared)."""
+    import data_epoch as de
+
+    name = os.path.basename(str(relpath))
+    stem, dot, suffix = name.rpartition(".")
+    if dot and suffix.isdigit():
+        name = stem
+    return name.endswith((".jsonl", ".csv")) and not de.epoch_independent(name)
+
+
+def _epoch_guarded_read(relpath):
+    """Context for a loader that admits every row of ``relpath`` through the epoch guard."""
+    from analyzer_epoch_guard import guarded_read
+
+    return guarded_read(os.path.basename(str(relpath)))
 
 
 def _epoch_filter_frame(relpath, frame):
     guard = _epoch_guard()
     if not guard.declared or frame is None or frame.empty:
         return frame
+    if frame.attrs.get("epoch_filtered") == guard.manifest["epoch_id"]:
+        return frame
     out = guard.filter_frame(os.path.basename(relpath), frame).reset_index(drop=True)
+    out.attrs["epoch_filtered"] = guard.manifest["epoch_id"]
     dropped = len(frame) - len(out)
     if dropped:
         print(
@@ -1203,51 +1228,49 @@ def _epoch_audit_streams(data_root):
 
 
 def _epoch_purity_audit(guard, data_root, guarded=None):
-    """Pre-epoch rows any analyzer reader could still pick up from the data root.
+    """Pre-epoch rows retained on disk in the data root's epoch-scoped streams.
 
-    Row filters cover the engine's own loaders, but research modules read some
-    streams directly, so purity is proven against the files themselves. Streams in
-    ``data_epoch.READ_GUARDED_BASES`` (every analyzer reader admits rows through the
-    epoch guard) are counted into ``guarded`` (when given) instead of admitted.
+    Retained rows are kept on purpose; they are admitted only when a reader
+    opens their file outside the guard (see ``_install_stream_read_monitor``).
+    Rows in ``data_epoch.READ_GUARDED_BASES`` streams (every analyzer reader admits rows
+    through the epoch guard) are also counted into ``guarded`` when given (#420).
     """
-    import csv
-
     import data_epoch as de
-    from analyzer_epoch_guard import ADMITTED_CLASSES
+    from analyzer_epoch_guard import file_pre_epoch_rows, guarded_read
 
     if not guard.declared:
         return 0, {}
-    manifest = guard.manifest
     found = {}
-    for path, relpath in _epoch_audit_streams(data_root):
-        bad = 0
-        try:
-            if relpath.endswith(".csv"):
-                with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
-                    for row in csv.DictReader(handle):
-                        if de.classify_row(relpath, row, manifest) not in ADMITTED_CLASSES:
-                            bad += 1
-            else:
-                with open(path, "rb") as handle:
-                    for line in handle:
-                        if not line.strip():
-                            continue
-                        cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=de.line_ts(line),
-                                          manifest=manifest)
-                        if cls not in ADMITTED_CLASSES:
-                            bad += 1
-        except OSError as exc:
-            found[relpath] = found.get(relpath, 0) + 1
-            print(f"  ?? epoch purity audit could not read {path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-            continue
-        if bad:
-            bucket = guarded if guarded is not None and de.read_guarded(relpath) else found
-            bucket[relpath] = bucket.get(relpath, 0) + bad
+    with guarded_read("<purity-audit>", "inventory"):
+        for path, relpath in _epoch_audit_streams(data_root):
+            try:
+                bad = file_pre_epoch_rows(path, relpath, guard.manifest)
+            except OSError as exc:
+                found[relpath] = found.get(relpath, 0) + 1
+                print(f"  ?? epoch purity audit could not read {path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+                continue
+            if bad:
+                found[relpath] = found.get(relpath, 0) + bad
+                if guarded is not None and de.read_guarded(relpath):
+                    guarded[relpath] = guarded.get(relpath, 0) + bad
     return sum(found.values()), dict(sorted(found.items()))
 
 
+def _install_stream_read_monitor(data_root):
+    """Record every read-open of an epoch-scoped stream for the purity receipt."""
+    from analyzer_epoch_guard import StreamReadMonitor
+
+    return StreamReadMonitor([data_root, _LAPTOP_MIRROR_TREE]).install()
+
+
 def _epoch_receipt_block():
-    """Generation-receipt ``data_epoch`` block, or None while no epoch is declared."""
+    """Generation-receipt ``data_epoch`` block, or None while no epoch is declared.
+
+    Without an installed read monitor every retained pre-epoch row counts as
+    admitted, so purity fails closed.
+    """
+    from analyzer_epoch_guard import active_monitor
+
     guard = _epoch_guard()
     if not guard.declared:
         return None
@@ -1255,12 +1278,25 @@ def _epoch_receipt_block():
 
     data_root = _analyzer_data_root()
     guarded = {}
-    admitted, by_stream = _epoch_purity_audit(guard, data_root, guarded)
+    retained, retained_by_stream = _epoch_purity_audit(guard, data_root, guarded)
+    monitor = active_monitor()
+    if monitor is None:
+        reads = {"active": False}
+        # Fail closed on every retained row except read-guarded streams (#420): each of their
+        # analyzer readers admits rows only through the epoch guard.
+        by_stream = {k: v for k, v in retained_by_stream.items() if k not in guarded}
+        admitted = sum(by_stream.values())
+    else:
+        reads = monitor.report(guard.manifest)
+        admitted, by_stream = reads["pre_epoch_rows_admitted"], reads["pre_epoch_rows_admitted_by_stream"]
     block = guard.receipt_block(pre_epoch_rows_admitted=admitted)
     block.update({
         "manifest_dir": _EPOCH_MANIFEST_DIR,
         "audited_data_root": data_root,
         "pre_epoch_rows_admitted_by_stream": by_stream,
+        "pre_epoch_rows_retained": retained,
+        "pre_epoch_rows_retained_by_stream": retained_by_stream,
+        "read_monitor": reads,
         # On disk until clean-epoch-wipe, but every analyzer reader of these streams rejects them.
         "pre_epoch_rows_read_guarded": sum(guarded.values()),
         "pre_epoch_rows_read_guarded_by_stream": dict(sorted(guarded.items())),
@@ -1542,6 +1578,15 @@ def _canonical_genome_source_db_path() -> str:
 
 
 def robust_read_csv(filepath, name="file"):
+    """Read a CSV; epoch-scoped streams return clean-epoch rows only."""
+    if not _epoch_scoped(filepath) or not _epoch_guard().declared:
+        return _robust_read_csv_raw(filepath, name)
+    with _epoch_guarded_read(filepath):
+        frame = _robust_read_csv_raw(filepath, name)
+    return _epoch_filter_frame(filepath, frame)
+
+
+def _robust_read_csv_raw(filepath, name="file"):
     filepath = _agent_data_path(filepath)
     if not os.path.exists(filepath):
         print(f"⚠️ {name} not found - pipeline stage incomplete {PIPELINE_ENFORCEMENT_TAG}")
@@ -2308,7 +2353,7 @@ def _load_jsonl_replays(use_cache=True):
         if not os.path.isfile(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8-sig") as f:
+            with _epoch_guarded_read(SIGNAL_REPLAY_FILE), open(path, "r", encoding="utf-8-sig") as f:
                 for line_number, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
@@ -2376,7 +2421,7 @@ def _load_jsonl_by_trade_id(path):
     rows = {}
     if os.path.exists(path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with _epoch_guarded_read(path), open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -2565,7 +2610,7 @@ def _load_jsonl_rows_all_generations(filename, contains=None, keep=None):
     rows = []
     for path in _rotation_paths(_agent_data_path(filename)):
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            with _epoch_guarded_read(filename), open(path, "r", encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     if contains is not None and contains not in line:
                         continue
@@ -2607,7 +2652,7 @@ def _load_jsonl_rows(path):
     if not os.path.exists(path):
         return rows
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with _epoch_guarded_read(path), open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -2949,9 +2994,12 @@ def historical_trade_cohort_report():
     ]
     current_path = next((path for path in current_candidates if path.is_file()), None)
     if current_path is not None:
+        from analyzer_epoch_guard import epoch_csv_rows, guarded_open
+
         try:
-            with current_path.open(encoding="utf-8-sig", errors="replace", newline="") as handle:
-                ingest(list(csv.DictReader(handle)), "current Fresh Collection", "current_csv")
+            with guarded_open(current_path, encoding="utf-8-sig", errors="replace", newline="") as handle:
+                ingest(list(epoch_csv_rows(csv.DictReader(handle), current_path)), "current Fresh Collection",
+                       "current_csv")
         except OSError as exc:
             source_rows.append({
                 "source": "current Fresh Collection",
@@ -5011,15 +5059,19 @@ def _cohort_passes_live_stack(row, mtf_rule: str = "LIVE_BULL_ALIGNED", max_chop
 def _load_executed_trade_ids() -> set:
     if not os.path.exists(TRADES_FILE):
         return set()
-    try:
-        t = pd.read_csv(TRADES_FILE, usecols=["trade_id"], encoding="utf-8")
-    except (UnicodeDecodeError, ValueError):
+    t = None
+    for encoding in ("utf-8", "latin1"):
         try:
-            t = pd.read_csv(TRADES_FILE, usecols=["trade_id"], encoding="latin1")
+            with _epoch_guarded_read(TRADES_FILE):
+                t = pd.read_csv(TRADES_FILE, encoding=encoding)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
         except Exception:
             return set()
-    except Exception:
+    if t is None or "trade_id" not in t.columns:
         return set()
+    t = _epoch_filter_frame(TRADES_FILE, t)
     return set(t["trade_id"].dropna().astype(str))
 
 
@@ -9769,7 +9821,8 @@ def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
     Older rows missing trailing schema fields retain their identity and receive
     explicit UNKNOWN values rather than being silently skipped.
     """
-    raw = Path(path).read_bytes()
+    with _epoch_guarded_read(path):
+        raw = Path(path).read_bytes()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -9826,7 +9879,7 @@ def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
         frame.loc[:, header] = frame.loc[:, header].replace("", np.nan)
     # expired_orders_3factor.csv is READ_GUARDED: the reset keeps the head, so every read is
     # epoch-filtered here, before ``usecols`` drops the timestamp columns (#420).
-    frame = _epoch_filter_frame(EXPIRED_ORDERS_FILE, frame)
+    frame = _epoch_filter_frame(path, frame)
     if usecols is not None:
         missing_columns = [column for column in usecols if column not in frame.columns]
         if missing_columns:
@@ -10272,14 +10325,17 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         trade_df = pd.DataFrame()
         if os.path.exists(TRADES_FILE):
             try:
-                trade_df = pd.read_csv(TRADES_FILE, encoding="utf-8")
+                with _epoch_guarded_read(TRADES_FILE):
+                    trade_df = pd.read_csv(TRADES_FILE, encoding="utf-8")
             except (UnicodeDecodeError, ValueError):
                 try:
-                    trade_df = pd.read_csv(TRADES_FILE, encoding="latin1")
+                    with _epoch_guarded_read(TRADES_FILE):
+                        trade_df = pd.read_csv(TRADES_FILE, encoding="latin1")
                 except Exception:
                     trade_df = pd.DataFrame()
             except Exception:
                 trade_df = pd.DataFrame()
+            trade_df = _epoch_filter_frame(TRADES_FILE, trade_df)
             if session and _session_start_ts(session) is not None and not trade_df.empty:
                 trade_df = filter_df_since_session(
                     trade_df, session, ts_cols=("ts", "close_ts", "entry_ts", "open_ts")
@@ -20644,6 +20700,8 @@ def _mirror_reports_to_dir():
 
 def _report_source_evidence_provenance():
     """Fingerprint the exact immutable evidence inputs used by this run."""
+    from analyzer_epoch_guard import epoch_lines, guarded_read
+
     data_root = os.path.realpath(os.getenv("BTC_AGENT_DATA_DIR") or os.getcwd())
     evidence = {}
     policy_keys = set()
@@ -20652,7 +20710,9 @@ def _report_source_evidence_provenance():
         row = {"available": False, "path_label": name}
         if os.path.isfile(path):
             digest = hashlib.sha256()
-            with open(path, "rb") as handle:
+            with guarded_read(name, "inventory"):
+                handle = open(path, "rb")
+            with handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
             row.update({
@@ -20679,15 +20739,14 @@ def _report_source_evidence_provenance():
                     row["qualification_error"] = "INVALID_RELAY_EVIDENCE_PAYLOAD"
             else:
                 try:
-                    with open(path, "r", encoding="utf-8-sig") as handle:
-                        for line in handle:
-                            try:
-                                item = json.loads(line)
-                            except (ValueError, TypeError):
-                                continue
-                            key = item.get("policy_comparability_key") if isinstance(item, dict) else None
-                            if isinstance(key, str) and key.strip():
-                                policy_keys.add(key.strip())
+                    for line in epoch_lines(path, "r", encoding="utf-8-sig"):
+                        try:
+                            item = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        key = item.get("policy_comparability_key") if isinstance(item, dict) else None
+                        if isinstance(key, str) and key.strip():
+                            policy_keys.add(key.strip())
                 except OSError:
                     row["qualification_error"] = "COUNTERFACTUAL_READ_FAILED"
         evidence[name] = row
@@ -23775,6 +23834,8 @@ if __name__ == "__main__":
         )
         sys.exit(2)
     os.makedirs(_configured_report_root, exist_ok=True)
+    _install_stream_read_monitor(_canonical_data_root)
+    _epoch_guard()
     _canonical_input_bindings = _bind_existing_canonical_input_paths(_canonical_data_root)
     print(
         f"  ℹ️ Bound {len(_canonical_input_bindings)} canonical evidence path(s) "

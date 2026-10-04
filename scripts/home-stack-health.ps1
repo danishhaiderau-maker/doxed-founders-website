@@ -70,9 +70,7 @@ function Test-BotRevisionMatches([object]$Ping) {
     "services/btc-conservative-agent/bot.py",
     "services/btc-conservative-agent/btc_conservative_agent.py",
     "services/btc-conservative-agent/process_singleton.py",
-    "services/btc-conservative-agent/combo_pathway_config.py",
-    "services/btc-signal-engine/engine.py",
-    "services/btc-signal-engine/manifest.json"
+    "services/btc-conservative-agent/combo_pathway_config.py"
   )
   try {
     & git -C $repoRoot cat-file -e "$actual^{commit}" 2>$null

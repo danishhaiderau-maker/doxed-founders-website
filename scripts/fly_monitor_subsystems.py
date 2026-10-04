@@ -309,6 +309,10 @@ def relay_findings(state: dict[str, Any], relay: Mapping[str, Any] | None, now: 
     pending = _num(counts.get("stale_owner_pending")) if isinstance(counts, dict) else None
     if relay is None:
         active = None
+    elif _get(relay, "state_integrity.relay_push.relay_stack.relay_stack_mode") == "research_only":
+        # RELAY_STACK_MODE=research_only: delivery is deliberately disabled, so
+        # undeliverable history is expected (INFO on /health), never an alert.
+        active = False
     elif _get(relay, "state_integrity.relay_push.delivery_scheduler") is None:
         # The owner filter is off (not paper/disarmed): the scheduler block is
         # deliberately absent, so there is nothing stale to hold.

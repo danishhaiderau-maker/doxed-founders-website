@@ -50,3 +50,60 @@ def test_non_green_contract_or_red_in_window_rejects():
 
 def test_unstamped_collector_rejects():
     assert _cert(stamped=0)["failing"] == ["compat.stamped_rows"]
+
+
+def _declare(tmp_path, manifest, start, now, confirm=None, reason="laptop chain down during reset"):
+    return cc.declare_window(manifest, start, reason, confirm, now, windows=tmp_path / "w.jsonl",
+                             wall=tmp_path / "WALL.md")
+
+
+def test_window_plan_writes_nothing_and_confirm_records_wall(tmp_path):
+    manifest = _inputs()[0]
+    code, plan = _declare(tmp_path, manifest, "now", NOW)
+    assert code == 0 and plan["confirm_token"] == cc.window_token(EPOCH, float(int(NOW)))
+    assert not (tmp_path / "w.jsonl").exists() and not (tmp_path / "WALL.md").exists()
+    code, _ = _declare(tmp_path, manifest, "now", NOW + 5, confirm=plan["confirm_token"])
+    assert code == 2 and not (tmp_path / "w.jsonl").exists()
+    code, _ = _declare(tmp_path, manifest, plan["window_start_utc"], NOW + 5, confirm="CERT-WINDOW:x:y")
+    assert code == 2 and not (tmp_path / "w.jsonl").exists()
+    code, rec = _declare(tmp_path, manifest, plan["window_start_utc"], NOW + 5, confirm=plan["confirm_token"])
+    assert code == 0 and rec["window_start_ts"] == float(int(NOW))
+    assert cc.declared_window(tmp_path / "w.jsonl", EPOCH) == rec
+    assert cc.declared_window(tmp_path / "w.jsonl", "ce-other") is None
+    wall = (tmp_path / "WALL.md").read_text(encoding="utf-8")
+    assert "CERT-WINDOW" in wall and rec["window_start_utc"] in wall and "no required RED during the window" in wall
+
+
+def test_window_cannot_be_backdated_precede_epoch_or_lack_reason(tmp_path):
+    manifest = _inputs(age=3 * 3600)[0]
+    assert _declare(tmp_path, manifest, _iso(NOW - 600), NOW)[0] == 2
+    assert _declare(tmp_path, manifest, _iso(NOW - 4 * 3600), NOW)[0] == 2
+    assert _declare(tmp_path, manifest, _iso(NOW + 25 * 3600), NOW)[0] == 2
+    assert _declare(tmp_path, manifest, "now", NOW, reason=" ")[0] == 2
+    assert _declare(tmp_path, manifest, "yesterday", NOW)[0] == 2
+
+
+def test_declared_window_resets_red_history_and_age_but_keeps_every_gate():
+    manifest, health, _, compat = _inputs(age=6 * 3600)
+    window = {"window_start_ts": NOW - 2.5 * 3600}
+    old_red = {"id": "contract.trades", "to": "RED", "at": _iso(NOW - 4 * 3600)}
+    new_red = {"id": "contract.trades", "to": "RED", "at": _iso(NOW - 1800)}
+
+    def cert(history, win=window, h=health, now=NOW):
+        return de.certification_doc(manifest, checks=cc.evaluate(manifest, h, history, compat, now, win),
+                                    now=now, window=win)
+
+    assert cert([old_red], win=None)["failing"] == ["required.no_red_in_window"]
+    assert cert([old_red])["status"] == "CERTIFIED"
+    assert cert([new_red])["failing"] == ["required.no_red_in_window"]
+    red_at_open = {"id": "contract.trades", "from": "RED", "to": "GREEN", "at": _iso(NOW - 600)}
+    assert cert([red_at_open])["failing"] == ["required.no_red_in_window"]
+    young = {"window_start_ts": NOW - 3600}
+    assert cert([old_red], win=young)["status"] == "PENDING"
+    amber = {**health, "findings": [*health["findings"], {"id": "data.dead_fields", "severity": "AMBER"}]}
+    assert cert([], h=amber)["failing"] == ["required.green_now"]
+    red_any = {**health, "findings": [*health["findings"], {"id": "fly.relay2", "severity": "RED"}]}
+    assert cert([], h=red_any)["failing"] == ["no_red_now"]
+    flap = {"id": "fly.relay", "from": "GREEN", "to": "AMBER", "at": _iso(NOW - 60)}
+    assert cert([flap] * cc.HISTORY_LIMIT)["failing"] == ["required.window_history_complete"]
+    assert cert([flap] * 10)["status"] == "CERTIFIED"

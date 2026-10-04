@@ -400,7 +400,8 @@ STEPS = [
 def test_post_fill_evidence_is_written_exactly_once(tmp_path):
     rt = EvidenceRuntime(tmp_path)
     assert rt.enqueue() is True
-    assert rt.enqueue() is False  # same fill identity: deduplicated
+    # Same fill identity: deduplicated (already owned, so accepted and never re-applied).
+    assert rt.enqueue() is True
     assert rt.drain()
     assert rt.calls == STEPS
     assert len(rt.rows("APPLIED")) == 1

@@ -113,6 +113,60 @@ def test_declared_epoch_turns_pre_epoch_rows_red_and_purity_needs_receipt(tmp_pa
     assert fnd["data.compat_mixed"]["severity"] == "RED" and fnd["data.compat_epoch_purity"]["severity"] == "RED"
 
 
+def _declared_doc_with_receipt(tmp_path, monkeypatch, data_epoch):
+    paths = _paths(tmp_path)
+    m = _mirror(tmp_path)
+    (m / "data_epoch.json").write_text(json.dumps(dc.de.new_manifest(EPOCH, started_at_ts=START)))
+    _write(m / "fill_quality.jsonl", [{"ts": START + 5, "data_epoch_id": EPOCH, "bot_version": "v31-x-v6"}], mode="a")
+    doc = _run(paths, monkeypatch)
+    rdir = paths.analyzer_repo / "services" / "btc-conservative-agent" / "canonical-research-data" / "analyzer"
+    rdir.mkdir(parents=True)
+    (rdir / "analyzer_generation_receipt.json").write_text(json.dumps({"generation_id": "g2",
+                                                                       "data_epoch": data_epoch}))
+    purity = dc.epoch_purity(paths, doc)
+    dc.reconcile_retained(doc, purity)
+    return doc, purity
+
+
+def test_retained_pre_epoch_rows_never_opened_unguarded_are_not_mixed(tmp_path, monkeypatch):
+    block = {"epoch_id": EPOCH, "pre_epoch_rows_admitted": 0, "pre_epoch_rows_rejected": 8,
+             "pre_epoch_rows_retained": 8, "pre_epoch_rows_admitted_by_stream": {},
+             "read_monitor": {"active": True, "unguarded_stream_reads": {}}}
+    doc, purity = _declared_doc_with_receipt(tmp_path, monkeypatch, block)
+    fq = {s["stream"]: s for s in doc["streams"]}["fill_quality.jsonl"]
+    assert fq["severity"] != "RED" and fq["retained_pre_epoch_rows"] == 8
+    assert not any(p.startswith("pre-epoch/foreign rows in") for p in fq["problems"])
+    # execution_funnel.jsonl's single row is pre-epoch too
+    assert doc["retained"] == {"proven": True, "generation_id": "g2", "streams": 2, "rows": 9}
+    fnd = {f["id"]: f for f in dc.findings(doc, NOW, 7200, purity)}
+    assert fnd["data.compat_mixed"]["severity"] == "GREEN"
+    assert "2 streams retain 9 pre-epoch rows on disk" in fnd["data.compat_mixed"]["observed"]
+    assert fnd["data.compat_epoch_purity"]["severity"] == "GREEN"
+    assert "8 retained on disk" in fnd["data.compat_epoch_purity"]["observed"]
+
+
+def test_any_pre_epoch_row_in_results_stays_red_with_the_offending_reader(tmp_path, monkeypatch):
+    block = {"epoch_id": EPOCH, "pre_epoch_rows_admitted": 8, "pre_epoch_rows_rejected": 0,
+             "pre_epoch_rows_retained": 8, "pre_epoch_rows_admitted_by_stream": {"fill_quality.jsonl": 8},
+             "read_monitor": {"active": True, "unguarded_stream_reads": {
+                 "fill_quality.jsonl": {"opens": 1, "pre_epoch_rows": 8, "sites": ["x.py:load:3"]}}}}
+    doc, purity = _declared_doc_with_receipt(tmp_path, monkeypatch, block)
+    assert purity["severity"] == "RED" and "fill_quality.jsonl 8 via ['x.py:load:3']" in purity["observed"]
+    fnd = {f["id"]: f for f in dc.findings(doc, NOW, 7200, purity)}
+    assert fnd["data.compat_mixed"]["severity"] == "RED" and fnd["data.compat_epoch_purity"]["severity"] == "RED"
+
+
+def test_retention_needs_an_active_read_monitor_on_the_declared_epoch(tmp_path, monkeypatch):
+    block = {"epoch_id": EPOCH, "pre_epoch_rows_admitted": 0, "pre_epoch_rows_rejected": 8,
+             "read_monitor": {"active": False}}
+    doc, purity = _declared_doc_with_receipt(tmp_path, monkeypatch, block)
+    assert {s["stream"]: s for s in doc["streams"]}["fill_quality.jsonl"]["severity"] == "RED"
+    assert doc["retained"]["proven"] is False
+    unaccounted = {"epoch_id": EPOCH, "pre_epoch_rows_admitted": None, "error": "OSError: boom"}
+    _, purity = _declared_doc_with_receipt(tmp_path / "b", monkeypatch, unaccounted)
+    assert purity["severity"] == "RED" and "could not account" in purity["observed"]
+
+
 def test_unstampable_csv_counts_as_declared_once_every_post_epoch_row_is_epoch_dated(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
     m = tmp_path / "mirror"

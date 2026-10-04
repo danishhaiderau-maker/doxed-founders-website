@@ -172,8 +172,14 @@ GUARDED_READERS = {
         "execution_markouts.py",               # constant only; analyzer reads via adaptive_entry_funnel(admit)
         "strategy_lab/streams.py",             # stream registry, no reads
         "strategy_lab/stream_studies.py",      # taker study keeps ts >= epoch_start only
+        "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
+        "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
     },
-    "adaptive_entry_decisions.jsonl": {"bot.py", "adaptive_entry_funnel.py"},
+    "adaptive_entry_decisions.jsonl": {
+        "bot.py", "adaptive_entry_funnel.py",
+        "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
+        "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
+    },
     "expired_orders_3factor.csv": {
         "bot.py",                              # Fly writer
         "analyzer_research_engine_v62.py",     # _load_expired_orders_csv filters through the guard
@@ -182,6 +188,8 @@ GUARDED_READERS = {
         "research/research_dashboard.py",      # required-input name lists only
         "research_reset_inventory.py",         # reset planner (Fly)
         "data_retention_policy.py",            # retention planner
+        "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
+        "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
     },
 }
 

@@ -1,6 +1,6 @@
 ---
 description: Global showcase bot — edit in monorepo; no blunt sync from local lab or research repo
-globs: services/btc-conservative-agent/**,services/btc-signal-engine/**,scripts/patch-btc-bot-production.mjs,scripts/sync-*-btc*.mjs
+globs: services/btc-conservative-agent/**,scripts/patch-btc-bot-production.mjs,scripts/sync-*-btc*.mjs
 alwaysApply: false
 ---
 

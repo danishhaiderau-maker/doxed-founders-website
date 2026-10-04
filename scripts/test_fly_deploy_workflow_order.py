@@ -24,7 +24,7 @@ def test_deploy_step_has_no_transfer_bundle_configuration():
 
 def test_existing_safety_and_exact_revision_gates_remain_in_order():
     steps = [
-        "Verify canonical signal-engine parity",
+        "Verify canonical signal probe",
         "Enter durable authenticated paper maintenance boundary",
         "Prove the current Fly owner and every relay account are flat",
         "Recheck maintenance boundary immediately before deploy",

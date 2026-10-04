@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from analyzer_epoch_guard import epoch_csv_rows, guarded_open
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import (
@@ -277,8 +278,8 @@ def _recover_expired_order_resolutions(
             decision_by_call_lane.setdefault((shared_call, lane), []).append(decision)
     candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
+        with guarded_open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            for row in epoch_csv_rows(csv.DictReader(handle), path):
                 if epoch_manifest and _de.classify_row(path.name, row, epoch_manifest) not in _de.COMPATIBLE_CLASSES:
                     continue
                 shared_call = str(row.get("shared_ai_call_id") or "").strip()

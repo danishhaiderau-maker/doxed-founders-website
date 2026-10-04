@@ -19,6 +19,8 @@ import os
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
+from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
+
 SCHEMA = "adaptive_entry_funnel_v1"
 REPORT_FILE = "adaptive_entry_funnel_report.json"
 DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
@@ -47,14 +49,13 @@ def _finite(value):
 def _read_jsonl(path: str) -> list[dict[str, Any]]:
     rows = []
     try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+        for line in epoch_lines(path, encoding="utf-8"):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     except OSError:
         return []
     return rows
@@ -62,8 +63,8 @@ def _read_jsonl(path: str) -> list[dict[str, Any]]:
 
 def _read_csv(path: str) -> list[dict[str, Any]]:
     try:
-        with open(path, newline="", encoding="utf-8-sig") as handle:
-            return list(csv.DictReader(handle))
+        with guarded_open(path, newline="", encoding="utf-8-sig") as handle:
+            return epoch_csv_rows(csv.DictReader(handle), path)
     except OSError:
         return []
 

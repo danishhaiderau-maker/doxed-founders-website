@@ -199,11 +199,9 @@ def test_explicit_replay_revalidates_and_moves_after_prepared_crash(tmp_path):
     assert result[0]["status"] == "QUARANTINED_SOURCE_RETAINED" and not source.exists()
 
 
-def test_bot_and_signal_engine_expose_identical_disabled_first_contract():
+def test_bot_exposes_disabled_first_contract():
     root = Path(__file__).resolve().parents[1]
     bot = (root / "btc-conservative-agent" / "bot.py").read_text("utf-8")
-    engine = (root / "btc-signal-engine" / "engine.py").read_text("utf-8")
-    assert bot == engine
     tree = ast.parse(bot)
     names = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "RAW_GENERATION_CLEANUP_ENABLED" in names["_raw_generation_cleanup_owner"]
