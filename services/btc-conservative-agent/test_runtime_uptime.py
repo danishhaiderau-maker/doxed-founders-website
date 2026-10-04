@@ -37,7 +37,7 @@ def test_first_boot_then_running_is_green_and_counts_from_first_healthy_observat
     assert s["state"] == "RUNNING" and s["colour"] == "green"
     assert s["uninterrupted_label"] == "Running uninterrupted: 3h 12m"
     assert s["uninterrupted_sec"] == int(3 * H + 12 * 60)
-    assert s["since_aest"].endswith("AEST") and s["since_utc"].endswith("UTC")
+    assert s["since_aest"].endswith("Melbourne time") and s["since_melbourne"] == s["since_aest"] and s["since_utc"].endswith("UTC")
     assert s["last_interruption"]["kind"] == "first_boot"
     assert s["interruptions_24h"] == 1
 

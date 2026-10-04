@@ -139,7 +139,7 @@ def banner_script(endpoint: str = "/api/system-health") -> str:
         'var C={green:"#1b7f3b",amber:"#9a6700",red:"#b00020"};'
         'function uptimeHtml(u){if(!u)return "";'
         'var s="<b>"+esc(u.uninterrupted_label||"Uptime unavailable")+"</b>";'
-        'if(u.since_aest)s+=" &middot; since "+esc(u.since_aest)+" ("+esc(u.since_utc)+")";'
+        'var since=u.since_melbourne||u.since_aest;if(since)s+=" &middot; since "+esc(since)+" ("+esc(u.since_utc)+")";'
         'var li=u.last_interruption;if(li&&li.text)s+=" &middot; "+(u.running?"last interruption: ":"cause: ")+esc(li.text);'
         'if(u.interruptions_24h!=null)s+=" &middot; 24h: "+esc(u.interruptions_24h)+" interruption"+(u.interruptions_24h===1?"":"s");'
         'if(u.longest_run_7d_label&&u.available!==false)s+=" &middot; 7d longest: "+esc(u.longest_run_7d_label);'

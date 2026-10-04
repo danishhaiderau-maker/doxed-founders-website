@@ -21,7 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
+import melbourne_time as _melbourne_time
+
+MELBOURNE_TZ = ZoneInfo(_melbourne_time.ZONE_NAME)
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
 import system_health_banner as _system_health_banner
@@ -40,21 +42,11 @@ CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
 
 def format_melbourne_dt(value) -> str:
-    """24h Melbourne display for dashboard (matches Agent Hub)."""
+    """24h display in Melbourne time via the shared ``melbourne_time`` helper."""
     if value is None or value == "":
         return "—"
-    try:
-        if isinstance(value, (int, float)):
-            dt = datetime.fromtimestamp(value, tz=timezone.utc)
-        else:
-            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-        local = dt.astimezone(MELBOURNE_TZ)
-        abbrev = local.strftime("%Z")
-        return local.strftime(f"%Y-%m-%d %H:%M:%S {abbrev}")
-    except Exception:
-        return str(value)[:19] if value else "—"
+    out = _melbourne_time.format_melbourne(value, seconds=True)
+    return out if out else (str(value)[:19] if value else "—")
 
 
 def _parse_utc_dt(value):
@@ -7944,7 +7936,7 @@ function fmtMelb(iso) {
   if (!iso) return '—';
   try {
     const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z');
-    return new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false, timeZoneName:'short' }).format(d).replace(',', '');
+    return new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }).format(d).replace(',', '') + ' Melbourne time';
   } catch (e) { return iso.slice(0,19); }
 }
 
@@ -9426,7 +9418,7 @@ async function loadGenome() {
     const rows = cs.descriptive_top_100 || [];
     document.getElementById('genome-kpis').innerHTML = [
       ['Collector generation', 'V3.1'],
-      ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
+      ['Generated', d.generated_at ? fmtMelb(d.generated_at) : 'n/a'],
       ['Independent opportunities', c.independent_opportunities ?? 'NO DATA'],
       ['Decision branches', c.decision_branches ?? 'NO DATA'],
       ['Terminal lifecycles', c.terminal_lifecycles ?? 'NO DATA'],
@@ -9503,7 +9495,7 @@ async function loadGenome() {
   const tax = d.genome_taxonomy || {};
   document.getElementById('genome-kpis').innerHTML = [
     ['Genome schema (not release)', d.architecture_frozen || d.schema_version || 'n/a'],
-    ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
+    ['Generated', d.generated_at ? fmtMelb(d.generated_at) : 'n/a'],
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 'NO DATA'],
     ['EV/trade', fmtExecutionUsd(dq.ev)],

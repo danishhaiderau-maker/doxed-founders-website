@@ -49,7 +49,7 @@ def test_history_pairs_events_into_episodes_active_first_then_newest():
     api = past[1]
     assert api["severity"] == "RECOVERED" and api["level"] == "RED" and api["duration_text"] == "10m"
     assert api["title"] == "Analyzer dashboard is up" and "replaced during an analyzer run" in api["likely_cause"]
-    assert api["started"] == {"aest": "2026-10-02 11:00 AEST", "utc": "01:00 UTC", "iso": "2026-10-02T01:00:00Z"}
+    assert api["started"] == {"melbourne": "2026-10-02 11:00 Melbourne time", "aest": "2026-10-02 11:00 Melbourne time", "utc": "01:00 UTC", "iso": "2026-10-02T01:00:00Z"}
     assert api["cleared"]["utc"] == "01:10 UTC"
     assert api["runbook_url"].endswith("/docs/SYSTEM_HEALTH_RUNBOOK.md#analyzer-api")
     assert past[0]["duration_text"] == "40m"  # RECOVERED whose OPEN was before the retained window
@@ -83,7 +83,7 @@ def test_html_is_plain_english_and_escaped():
     events = sha.merge_events([], _events() + [_ev(5, "AMBER", "x.y", "<script>alert(1)</script>")], now=NOW)
     page = sha.render_alerts_html(sha.build_history(events, now=NOW), title="Alerts", nav_links=(("Home", "/"),))
     assert "<script>alert(1)" not in page and "&lt;script&gt;" in page
-    assert "Active now" in page and "RECOVERED (was RED)" in page and "AEST" in page and "UTC" in page
+    assert "Active now" in page and "RECOVERED (was RED)" in page and "Melbourne time" in page and "UTC" in page
     assert "How to fix (runbook)" in page and "Live price feed is flowing" in page
 
 
@@ -123,7 +123,7 @@ def test_insights_exposes_alert_history(monkeypatch, tmp_path):
     comp = insights.alerts_component(time.time())
     assert comp["status"] == insights.OK
     assert [a["check"] for a in comp["data"]["active"]] == ["ws.ticks", "deepseek.balance"]
-    assert comp["data"]["alerts"][0]["started"]["aest"].endswith("AEST")
+    assert comp["data"]["alerts"][0]["started"]["melbourne"].endswith("Melbourne time")
     monkeypatch.setattr(insights, "STATE_DIR", str(tmp_path / "absent"))
     assert insights.alerts_component(time.time())["status"] == insights.UNAVAILABLE
 

@@ -6,17 +6,22 @@ Computed once from the same tables the dashboards and APIs read, stored in
 """
 from __future__ import annotations
 
+import sys
 import time
-from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .facts import iso, parse_ts
 
-AEST = timezone(timedelta(hours=10), "AEST")
+_AGENT_DIR = str(Path(__file__).resolve().parents[2] / "services" / "btc-conservative-agent")
+if _AGENT_DIR not in sys.path:
+    sys.path.append(_AGENT_DIR)
+import melbourne_time  # noqa: E402  shared display-time helper (Australia/Melbourne)
 
 
 def _aest(ts: float) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).astimezone(AEST).strftime("%Y-%m-%d %H:%M AEST")
+    """Display time for the digest: ``2026-10-04 19:41 Melbourne time``."""
+    return melbourne_time.format_melbourne(ts)
 
 
 def _dur(sec: float | None) -> str:

@@ -24,7 +24,7 @@ from pathlib import Path
 
 SCHEMA = "runtime_uptime_v1"
 STATE_FILE = "runtime_uptime_v1.json"
-AEST = timezone(timedelta(hours=10), "AEST")
+import melbourne_time
 HISTORY_SEC = 7 * 24 * 3600
 MAX_HISTORY = 500
 PERSIST_EVERY_SEC = 60.0
@@ -59,14 +59,19 @@ def _parse(value) -> float | None:
 
 
 def clock(ts: float | None, now: float | None = None) -> dict:
-    """``{"aest": "17:39 AEST", "utc": "07:39 UTC"}``; the date is added when not today (AEST)."""
+    """``{"melbourne": "17:39 Melbourne time", "utc": "07:39 UTC"}``; the date is added when not today.
+
+    Display only, via the shared ``melbourne_time`` helper (Australia/Melbourne,
+    daylight-saving aware). ``aest`` is kept as a legacy alias of ``melbourne``.
+    """
     if ts is None:
-        return {"aest": None, "utc": None}
+        return {"melbourne": None, "aest": None, "utc": None}
     moment = datetime.fromtimestamp(float(ts), timezone.utc)
-    today = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc).astimezone(AEST).date()
-    local = moment.astimezone(AEST)
-    fmt = "%H:%M" if local.date() == today else "%d %b %H:%M"
-    return {"aest": local.strftime(fmt) + " AEST", "utc": moment.strftime(fmt) + " UTC"}
+    label = melbourne_time.clock_label(moment, time.time() if now is None else now)
+    local_date = melbourne_time.to_melbourne(moment).date()
+    today = melbourne_time.to_melbourne(time.time() if now is None else now).date()
+    fmt = "%H:%M" if local_date == today else "%d %b %H:%M"
+    return {"melbourne": label, "aest": label, "utc": moment.strftime(fmt) + " UTC"}
 
 
 def duration(sec: float | None) -> str:
@@ -188,10 +193,10 @@ class UptimeTracker:
             self.state.update(schema=SCHEMA, revision=revision, boot_at=now, heartbeat_at=now, run_started_at=None)
             if (open_prev and last_seen is not None and down is not None
                     and down <= CONTINUE_OPEN_INTERRUPTION_SEC):
-                started = clock(open_prev.get("at"), now)["aest"]
-                text = (f"{label} at {clock(now, now)['aest']} (guarded-deploy pause from {started})"
+                started = clock(open_prev.get("at"), now)["melbourne"]
+                text = (f"{label} at {clock(now, now)['melbourne']} (guarded-deploy pause from {started})"
                         if deploy and open_prev.get("kind") == "deploy_pause"
-                        else f"{open_prev.get('text')}, then {label} at {clock(now, now)['aest']}")
+                        else f"{open_prev.get('text')}, then {label} at {clock(now, now)['melbourne']}")
                 for entry in reversed(self.state.get("interruptions") or []):
                     if entry.get("ended_at") is None and entry.get("at") == open_prev.get("at"):
                         entry.update(kind=kind if deploy else entry.get("kind"), text=text[:240], revision=revision,
@@ -201,7 +206,7 @@ class UptimeTracker:
                 else:
                     self._open(now, {"kind": kind, "text": text[:240]})
             else:
-                text = f"{label} at {clock(now, now)['aest']}" + (
+                text = f"{label} at {clock(now, now)['melbourne']}" + (
                     f" (down {duration(down)})" if down is not None and down >= 60 else "")
                 self._open(now, {"kind": kind, "owner": None, "text": text})
                 self.state["current"]["down_sec"] = down
@@ -282,7 +287,7 @@ class UptimeTracker:
             "state": state, "colour": colour, "running": running,
             "uninterrupted_sec": None if uninterrupted is None else int(uninterrupted),
             "uninterrupted_label": label,
-            "since": _iso(since_ts), "since_aest": since["aest"], "since_utc": since["utc"],
+            "since": _iso(since_ts), "since_melbourne": since["melbourne"], "since_aest": since["melbourne"], "since_utc": since["utc"],
             "last_interruption": None if not last else {
                 "kind": last.get("kind"), "at": _iso(last.get("at")), "ended_at": _iso(last.get("ended_at")),
                 "text": cause, "down_sec": last.get("down_sec"), "revision": last.get("revision")},

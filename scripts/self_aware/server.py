@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import changes, contracts
+from . import changes, contracts, digest
 from .ai_scorecard import headline as ai_headline, json_safe
 from .config import SERVER_PORT
 from .facts import parse_ts, tail_jsonl
@@ -500,7 +500,7 @@ table{{border-collapse:collapse;width:100%;margin:8px 0 24px}}td,th{{border-bott
  · proof {_e((up.get('proof') or {}).get('hours_elapsed'))}/48 h {_e((up.get('proof') or {}).get('result'))}</p>
 <h2>AI scorecard (all-time, after cost)</h2><table><tr><th>horizon</th><th>strategy</th><th>n</th><th>hit</th><th>net bp</th><th>95% CI</th></tr>{''.join(ai_rows)}</table>
 <h2>Edges (pre-registered, walk-forward holdout)</h2><table><tr><th>status</th><th>screen</th><th>n</th><th>hit</th><th>net bp</th><th>BH q</th><th>why</th></tr>{''.join(edge_rows) or '<tr><td colspan=7>no candidate, hint or watch</td></tr>'}</table>
-<p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {time.strftime('%H:%M:%S')}.</p>
+<p class=m>Drill-down: <code>/api/selfaware/query?sql=SELECT …</code> over raw_* views and res_* tables. Refreshed {digest.melbourne_time.format_melbourne(time.time(), date=False, seconds=True)}.</p>
 </body></html>"""
 
 _PLATFORM_COLOR = {"INFO": "#7cb7ff", "NONE": "#30a46c", "UNREACHABLE": "#8b8d98"}

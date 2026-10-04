@@ -13,6 +13,7 @@ import {
   type AgentShowcaseFlash,
   type TradingAgentDashboardState,
   type TradingAgentSessionStats,
+  formatMelbourneDateTime,
 } from '@dcf/utils';
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
@@ -113,7 +114,7 @@ function PublicReasoningPanel({
       </div>
       {verdict?.updatedAt && (
         <p className="mt-2 text-[10px] uppercase tracking-widest text-zinc-500">
-          Updated {new Date(verdict.updatedAt).toLocaleString()}
+          Updated {formatMelbourneDateTime(verdict.updatedAt)}
         </p>
       )}
       {reasoning ? (

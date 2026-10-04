@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { EXCHANGE_PROVIDER_LABELS, type ExchangeProvider, type RelayTransitionAudit } from '@dcf/utils';
+import { EXCHANGE_PROVIDER_LABELS, type ExchangeProvider, type RelayTransitionAudit, formatMelbourneDateTime } from '@dcf/utils';
 
 type RelayState = 'idle' | 'active' | 'paused' | 'copy' | 'sim';
 
@@ -100,7 +100,7 @@ export function ExchangeRelayControl({
           <p className="font-semibold uppercase tracking-wide text-zinc-300">Latest relay transition</p>
           <p className="mt-1">
             {relayLastTransition.action.replaceAll('_', ' ')} by {relayLastTransition.actor.toLowerCase()} ·{' '}
-            {new Date(relayLastTransition.at).toLocaleString()} · {relayLastTransition.reason.replaceAll('_', ' ')}
+            {formatMelbourneDateTime(relayLastTransition.at)} · {relayLastTransition.reason.replaceAll('_', ' ')}
           </p>
           <p className="mt-0.5 text-zinc-500">
             Pending copy orders cancelled: {relayLastTransition.cancelledPendingOrders}.{' '}

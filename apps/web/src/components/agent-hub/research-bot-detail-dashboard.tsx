@@ -1,6 +1,6 @@
 'use client';
 
-import { formatPercent, formatUsd } from '@dcf/utils';
+import { formatPercent, formatUsd, formatMelbourneDateTime } from '@dcf/utils';
 
 type BotRaw = Record<string, unknown>;
 
@@ -94,7 +94,7 @@ export function ResearchBotDetailDashboard({
           Auto-refresh every 60s
         </label>
         <span className="text-xs text-zinc-600">
-          Last updated {new Date(updatedAt).toLocaleTimeString()}
+          Last updated {formatMelbourneDateTime(updatedAt)}
         </span>
       </div>
 
