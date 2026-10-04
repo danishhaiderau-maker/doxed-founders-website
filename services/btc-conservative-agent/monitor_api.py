@@ -12,6 +12,8 @@ serialized size at ``MAX_DIGEST_BYTES``.
 """
 from __future__ import annotations
 
+import math
+
 import hmac
 import json
 import re
@@ -194,6 +196,65 @@ def trade_bp(row: Mapping[str, Any]) -> tuple[float | None, str | None]:
     return None, None
 
 
+WL_BE_BAND_BP = 0.0
+
+
+def _finite_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def trade_net_bp(row: Mapping[str, Any]) -> float | None:
+    """Price-based net bp of one closed trade, net of fees and funding.
+
+    The W/L source of truth for every ledger (API, incremental and disk), so
+    a cent-rounded ``net_pnl_usd`` never decides a class (a +0.23 bp break-even
+    lock books $0.00).  Order of preference:
+
+    1. ``net_pnl_bp`` booked at close from unrounded components;
+    2. recomputed from entry/exit prices, qty-weighted over partial legs, minus
+       booked fees and funding over the original entry notional;
+    3. the row's booked-return fallback (``trade_bp``).
+    """
+    booked = _finite_or_none(row.get("net_pnl_bp"))
+    if booked is not None:
+        return booked
+    entry = _finite_or_none(row.get("entry")) or _finite_or_none(row.get("entry_price")) or 0.0
+    exit_price = _finite_or_none(row.get("exit")) or _finite_or_none(row.get("exit_price")) or 0.0
+    direction = str(row.get("dir") or row.get("direction") or row.get("final_direction") or "").upper()
+    if entry > 0 and exit_price > 0 and direction in ("LONG", "SHORT"):
+        sign = 1.0 if direction == "LONG" else -1.0
+        legs = [leg for leg in (row.get("partial_exit_receipts") or []) if isinstance(leg, Mapping)
+                and (leg.get("remaining_fraction") is None or _num(leg.get("remaining_fraction")) > 0)]
+        partial_qty = sum(max(0.0, _num(leg.get("closed_qty"))) for leg in legs)
+        remaining = max(0.0, _num(row.get("execution_qty")))
+        original = max(_num(row.get("policy_original_qty")), remaining + partial_qty)
+        if original <= 0:
+            return sign * (exit_price - entry) / entry * 1e4
+        gross = (exit_price - entry) * sign * remaining
+        for leg in legs:
+            recorded = _finite_or_none(leg.get("realized_gross_usd"))
+            gross += recorded if recorded is not None else (
+                (_num(leg.get("price")) - entry) * sign * max(0.0, _num(leg.get("closed_qty"))))
+        costs = _num(row.get("trading_fees_usd", row.get("fees_usd"))) + _num(row.get("funding_fees_usd"))
+        return (gross - costs) / (entry * original) * 1e4
+    return trade_bp(row)[0]
+
+
+def wl_class(bp: float | None, *, be_band_bp: float = WL_BE_BAND_BP, net_usd: float | None = None) -> str:
+    """W / L / BE from price-based net bp (``net_usd`` only when bp is unknown)."""
+    value = bp if bp is not None else net_usd
+    if value is None:
+        return "BE"
+    band = be_band_bp if bp is not None else 0.0
+    return "W" if value > band else "L" if value < -band else "BE"
+
+
 def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
     """Closed-trade stats for one lane from booked rows (net_pnl_usd as booked, never recomputed)."""
     ordered = sorted(rows, key=lambda r: _num(r.get("close_ts")))
@@ -207,8 +268,9 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
     for row in ordered:
         pnl = _num(row.get("net_pnl_usd"))
         closes += 1
-        wins += pnl > 0
-        losses += pnl < 0
+        cls = wl_class(trade_net_bp(row), net_usd=pnl)
+        wins += cls == "W"
+        losses += cls == "L"
         net += pnl
         direction = str(row.get("direction") or "").upper()
         if direction == "LONG":

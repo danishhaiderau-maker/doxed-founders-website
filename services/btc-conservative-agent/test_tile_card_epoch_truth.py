@@ -108,6 +108,7 @@ def _ledger_namespace(tmp_path, trades, boundary_ts):
         "contextlib": contextlib,
         "state": state, "state_lock": contextlib.nullcontext(), "trade_lock": contextlib.nullcontext(),
         "STATS_EXCLUDED_EXIT_REASONS": FORCED, "STARTING_BALANCE": 1000.0,
+        "LANE_LEDGER_WL_BASIS": "PRICE_BP_NET_OF_FEES", "monitor_api": __import__("monitor_api"),
         "LANE_PNL_LEDGER_FILE": str(tmp_path / "lane_pnl_ledger.json"),
         "LANE_PNL_EPOCH_RECEIPTS_FILE": str(tmp_path / "lane_pnl_ledger_epoch_receipts.jsonl"),
         "_lane_pnl_epoch_status": {},
