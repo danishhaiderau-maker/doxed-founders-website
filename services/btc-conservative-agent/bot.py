@@ -64,6 +64,7 @@ from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGener
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
+import relay_stack_mode as _relay_stack_mode
 import thread_health as _thread_health
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
@@ -9298,6 +9299,10 @@ _relay_http_session.mount("https://", _relay_http_adapter)
 _relay_http_session.mount("http://", _relay_http_adapter)
 _relay_event_outbox = None  # initialized with the canonical lifecycle lock below
 _relay_event_drain_lock = threading.Lock()
+# RELAY_STACK_MODE=research_only (fly.toml while paper-only research): no relay
+# HTTP delivery, no relay-state pusher/background refresher, stale-owner state
+# reported as INFO. Boot-time constant; see relay_stack_mode.py.
+RELAY_STACK_RESEARCH_ONLY = _relay_stack_mode.research_only()
 
 
 def _platform_relay_keepalive_url() -> str:
@@ -9315,6 +9320,13 @@ def _platform_relay_keepalive_url() -> str:
 def _platform_relay_connection_keepalive_loop():
     """Event-driven relay drain with a bounded local crash-recovery tick."""
     while not shutdown_event.is_set():
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # Local observation only: the guard still sees the pending index
+            # (and any retirement it owns); delivery is refused below, so no
+            # relay HTTP call, ACK or rewrite happens while research-only.
+            _drain_relay_event_outbox_once()
+            shutdown_event.wait(_relay_stack_mode.RESEARCH_ONLY_OUTBOX_OBSERVE_SEC)
+            continue
         _drain_relay_event_outbox_once()
         _drain_partial_reduction_outbox_once()
         # Enqueue wakes this lane immediately. The timeout is only bounded
@@ -9434,6 +9446,12 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
 
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
+    if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+        # Withheld, not failed: the durable event stays pending and unchanged.
+        _relay_push_state["research_only_withheld_total"] = int(
+            _relay_push_state.get("research_only_withheld_total") or 0
+        ) + 1
+        return False
     payload = record.get("payload") or {}
     event_id = str(record.get("event_id") or "")
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
@@ -13651,6 +13669,12 @@ _compressed_shadow_lock = threading.RLock()
 _collector_v22_merge_guard = threading.Lock()
 _collector_v22_merge_inflight = False
 _collector_v22_last_merge = 0.0
+# Set when the legacy v22 seal index is invalid (V22_SEAL_*). The bot keeps
+# running (v3 is the canonical evidence store) and raises a collection ALARM
+# instead of exiting: on 4 Oct 2026 an orphaned seal receipt left by a
+# clean-epoch reset made every boot raise V22_SEAL_RECEIPT_INVALID:2 here,
+# and the entrypoint restarted the bot 407 times (07:49-08:35 AEDT).
+_collector_v22_seal_degraded: dict = {}
 _cancellation_evidence_handoff_lock = threading.Lock()
 _cancellation_evidence_worker = None
 _cancellation_evidence_worker_lock = threading.Lock()
@@ -13948,10 +13972,15 @@ def research_collection_health(now: float = None) -> dict:
         alarms.append("TOUCH_GRID_COVERAGE_LOW")
     runtime_failures = {}
     try:
-        if _relay_delivery_guard.stale_owner_alarm(now):
+        # A deliberately disabled relay (RELAY_STACK_MODE=research_only) cannot
+        # drain its outbox; its stale-owner state is INFO on /health, not ALARM.
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False) and _relay_delivery_guard.stale_owner_alarm(now):
             alarms.append("RELAY_OUTBOX_STALE_OWNER_PENDING")
     except Exception as exc:
         runtime_failures["relay_guard_error"] = type(exc).__name__
+    if globals().get("_collector_v22_seal_degraded"):
+        alarms.append("COLLECTOR_V22_SEAL_DEGRADED")
+        runtime_failures["collector_v22_seal_degraded"] = dict(_collector_v22_seal_degraded)
     try:
         # Windowed so a single past failure does not latch the alarm until restart.
         ledger_recent = _LEDGER_WRITES.recent_failure_keys(COLLECTION_HEALTH_WINDOW_SEC, now)
@@ -14127,6 +14156,41 @@ def _merge_collector_v22_provisionals(*, reason: str) -> int:
     return restored
 
 
+def _merge_collector_v22_provisionals_guarded(*, reason: str) -> int:
+    """Merge, but degrade (never crash) on an invalid legacy v22 seal index.
+
+    Only V22_SEAL_* integrity errors are absorbed. The provisional journal and
+    the seal receipts are left untouched for the guarded offline repair
+    (workflow ``repair-v22-seals-offline-*``); a later successful merge clears
+    the degraded state. Any other error still propagates.
+    """
+    global _collector_v22_seal_degraded
+    try:
+        restored = _merge_collector_v22_provisionals(reason=reason)
+    except RuntimeError as exc:
+        if not str(exc).startswith("V22_SEAL_"):
+            raise
+        now = time.time()
+        previous = _collector_v22_seal_degraded or {}
+        _collector_v22_seal_degraded = {
+            "error": str(exc)[:200],
+            "reason": reason,
+            "since_ts": previous.get("since_ts") or now,
+            "last_ts": now,
+            "occurrences": int(previous.get("occurrences") or 0) + 1,
+            "repair": "repair-v22-seals-offline-plan, then -execute",
+        }
+        logger.critical(
+            f"[COLLECTOR_V22] seal index invalid ({exc}); provisional merge skipped, "
+            f"journal kept, bot continues degraded reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return 0
+    if _collector_v22_seal_degraded:
+        logger.info("[COLLECTOR_V22] seal index valid again; degraded state cleared [PIPELINE ENFORCEMENT]")
+        _collector_v22_seal_degraded = {}
+    return restored
+
+
 def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> bool:
     """Run periodic durable reconciliation on a low-priority daemon."""
     global _collector_v22_merge_inflight, _collector_v22_last_merge
@@ -14139,7 +14203,7 @@ def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> boo
     def worker():
         global _collector_v22_merge_inflight, _collector_v22_last_merge
         try:
-            _merge_collector_v22_provisionals(reason=reason)
+            _merge_collector_v22_provisionals_guarded(reason=reason)
         finally:
             with _collector_v22_merge_guard:
                 _collector_v22_last_merge = time.time()
@@ -14156,7 +14220,8 @@ def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> boo
 def _restore_collector_v22_provisionals() -> int:
     """Startup recovery; bounded polls repeat this merge as a safety net."""
     global _collector_v22_last_merge
-    restored = _merge_collector_v22_provisionals(reason="STARTUP")
+    restored = (globals().get("_merge_collector_v22_provisionals_guarded")
+                or (lambda reason: _merge_collector_v22_provisionals()))(reason="STARTUP")
     _collector_v22_last_merge = time.time()
     preentry_replay = globals().get("_replay_preentry_evidence_handoffs")
     if callable(preentry_replay):
@@ -40080,8 +40145,16 @@ _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     # bounded execution authority (the existing four-second stale fence still
     # fails closed) without allowing an operator override to recreate the
     # sub-second rebuild loop.
-    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "1.0")),
+    float(os.getenv(
+        "RELAY_EXECUTION_REFRESH_INTERVAL_SEC",
+        "1.0",
+    )),
 )
+if RELAY_STACK_RESEARCH_ONLY and not os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC"):
+    # research_only: no relay consumes sub-5s execution authority. 5 s refresh;
+    # the stale fence below follows (3x refresh = 15 s) and still fails closed.
+    _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
+        _RELAY_EXECUTION_REFRESH_INTERVAL_SEC, float(_relay_stack_mode.RESEARCH_ONLY_EXECUTION_REFRESH_SEC))
 _RELAY_EXECUTION_MAX_STALE_SEC = max(
     _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
     # A successful build currently takes roughly 0.4-0.7s on the 1x Fly VM.
@@ -40991,6 +41064,8 @@ def _build_relay_execution_state_snapshot() -> dict:
         ) if _relay_push_state["last_ts"] else None,
         "recent_deliveries_count": len(_relay_delivery_history_snapshot(10)),
         "delivery_scheduler": copy.deepcopy(_relay_push_state.get("delivery_scheduler")),
+        # Monitors downgrade stale-owner findings to INFO when research_only.
+        "relay_stack": _relay_stack_mode.status(),
     }
     ddollar_gate_summary = None
     try:
@@ -41087,6 +41162,10 @@ def api_relay_state(force_rebuild: bool = False):
         cached = _cached_relay_state_response("BACKGROUND")
         if cached is not None:
             return cached
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # No background refresher in research-only mode: one bounded
+            # on-demand build (the refresh lock below stays non-blocking).
+            return api_relay_state(force_rebuild=True)
         return jsonify({
             "api_state_error": "no bounded-fresh relay snapshot is available",
             "bot_version": EXECUTION_FIX_VERSION,
@@ -42570,7 +42649,9 @@ def _start_api_state_cache_refresher():
         except Exception as e:
             logger.error(f"/api/relay-execution-state initial cache build error: {e}")
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
-        threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False):
+            # Research-only: /api/relay-state builds on demand (no pusher polls it).
+            threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()
         _start_runtime_telemetry()
         logger.info(
@@ -44045,6 +44126,8 @@ def health():
             **_relay_delivery_guard.status(now),
             "ready_trade_heads": scheduler.get("ready_trade_heads"),
             "owner_filter_applied": scheduler.get("owner_filter_applied"),
+            "relay_stack": _relay_stack_mode.status(),
+            "research_only_withheld_total": _relay_push_state.get("research_only_withheld_total", 0),
         }
     except Exception as exc:
         payload["relay_outbox"] = {"status": "UNKNOWN", "error": type(exc).__name__}

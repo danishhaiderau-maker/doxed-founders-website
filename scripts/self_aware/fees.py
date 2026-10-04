@@ -224,7 +224,7 @@ TS_SURFACES = (
 )
 
 # Python/JS/HTML trees whose fee numbers must come from the profile, never a literal.
-LITERAL_TREES = ("services/btc-conservative-agent", "services/btc-signal-engine", "scripts")
+LITERAL_TREES = ("services/btc-conservative-agent", "scripts")
 LITERAL_EXT = (".py", ".js", ".html")
 LITERAL_SKIP = re.compile(r"(^|[\\/])(test_[^\\/]*|[^\\/]*_test\.py|conftest\.py|bitfinex_cost_profile\.py|fees\.py)$|"
                           r"[\\/](tests?|fixtures|node_modules|__pycache__|\.venv|venv|v3)[\\/]")

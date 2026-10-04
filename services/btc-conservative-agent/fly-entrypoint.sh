@@ -44,7 +44,11 @@ fi
 # Publish the bounded canonical relay state directly from Fly. This replaces
 # the Windows-only PowerShell pusher and keeps Agent Hub/relay execution on the
 # same bot identity even when the research PC is off.
-if [ -n "${BOT_CONTROL_SECRET:-}" ]; then
+# RELAY_STACK_MODE=research_only (fly.toml while paper-only research) keeps the
+# publisher off; relay_stack_mode.py documents everything that switch disables.
+if [ "${RELAY_STACK_MODE:-active}" = "research_only" ]; then
+  echo "[fly-entrypoint] RELAY_STACK_MODE=research_only -> relay-state publisher disabled."
+elif [ -n "${BOT_CONTROL_SECRET:-}" ]; then
   SNAPSHOT_LOG="$DATA_DIR/relay-state-pusher.log"
   echo "[fly-entrypoint] starting authenticated relay-state publisher..."
   python /app/fly_relay_state_pusher.py >> "$SNAPSHOT_LOG" 2>&1 &
@@ -128,6 +132,17 @@ BOT_LOG="$DATA_DIR/bot.log"
 # stop the Fly machine — PID 1 (this loop) keeps running and relaunches the bot within
 # seconds. Every run's stdout/stderr (incl. Python tracebacks) is tee'd to the persistent
 # volume so the crash cause is readable after the fact via `fly ssh console`.
+#
+# Crash-loop backoff: a deterministic boot crash (4 Oct 2026: 407 exits in 46
+# min, one every ~7 s) burns the single core and floods bot.log. After
+# BOT_FAST_FAIL_THRESHOLD consecutive runs shorter than BOT_FAST_FAIL_SEC the
+# delay doubles from 3 s up to BOT_RESTART_MAX_DELAY_SEC; any run that survives
+# BOT_FAST_FAIL_SEC resets it. State is written to bot-crash-loop.json.
+FAST_FAIL_SEC="${BOT_FAST_FAIL_SEC:-120}"
+FAST_FAIL_THRESHOLD="${BOT_FAST_FAIL_THRESHOLD:-5}"
+MAX_DELAY_SEC="${BOT_RESTART_MAX_DELAY_SEC:-300}"
+CRASH_STATE="$DATA_DIR/bot-crash-loop.json"
+fast_fails=0
 set +e
 while true; do
   # Cap the log so a crash loop can't fill the volume.
@@ -135,8 +150,25 @@ while true; do
     : > "$BOT_LOG"
   fi
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [fly-entrypoint] bot starting -> $BOT_LOG" | tee -a "$BOT_LOG"
+  started_at=$(date +%s)
   python /app/btc_conservative_agent.py 2>&1 | tee -a "$BOT_LOG"
   rc=${PIPESTATUS[0]}
-  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [fly-entrypoint] bot exited rc=$rc -> restarting in 3s" | tee -a "$BOT_LOG"
-  sleep 3
+  ran_sec=$(( $(date +%s) - started_at ))
+  if [ "$ran_sec" -lt "$FAST_FAIL_SEC" ]; then
+    fast_fails=$((fast_fails + 1))
+  else
+    fast_fails=0
+  fi
+  delay=3
+  if [ "$fast_fails" -ge "$FAST_FAIL_THRESHOLD" ]; then
+    steps=$((fast_fails - FAST_FAIL_THRESHOLD + 1))
+    [ "$steps" -gt 7 ] && steps=7
+    delay=$((3 << steps))
+    [ "$delay" -gt "$MAX_DELAY_SEC" ] && delay="$MAX_DELAY_SEC"
+  fi
+  printf '{"schema":"bot_crash_loop_v1","at_utc":"%s","last_rc":%s,"last_run_sec":%s,"consecutive_fast_fails":%s,"next_delay_sec":%s}\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$rc" "$ran_sec" "$fast_fails" "$delay" > "$CRASH_STATE.tmp" 2>/dev/null \
+    && mv -f "$CRASH_STATE.tmp" "$CRASH_STATE" 2>/dev/null
+  echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] [fly-entrypoint] bot exited rc=$rc after ${ran_sec}s (fast_fails=$fast_fails) -> restarting in ${delay}s" | tee -a "$BOT_LOG"
+  sleep "$delay"
 done

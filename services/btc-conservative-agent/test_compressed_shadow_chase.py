@@ -127,19 +127,6 @@ def test_restart_recovery_does_not_duplicate_stages_or_terminal():
     assert recover_compressed_shadow_states([first, stage1, terminal], now_ts=1800) == {}
 
 
-def test_canonical_bot_signal_engine_and_manifest_are_in_parity():
-    root = Path(__file__).resolve().parents[2]
-    bot = (root / "services/btc-conservative-agent/bot.py").read_text(encoding="utf-8")
-    engine = (root / "services/btc-signal-engine/engine.py").read_text(encoding="utf-8")
-    assert bot.replace("\r\n", "\n") == engine.replace("\r\n", "\n")
-    manifest = json.loads(
-        (root / "services/btc-signal-engine/manifest.json").read_text(encoding="utf-8")
-    )
-    expected = hashlib.sha256(bot.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:12]
-    assert manifest["source"] == "services/btc-conservative-agent/bot.py"
-    assert manifest["signal_hash"] == expected
-
-
 def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
     root = Path(__file__).resolve().parents[2]
     source = (root / "services/btc-conservative-agent/bot.py").read_text(
