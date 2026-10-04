@@ -203,11 +203,40 @@ def _retrying(fn, attempts: int = 6):
         except urllib.error.HTTPError as exc:
             if exc.code not in TRANSIENT_HTTP:
                 raise
+            try:
+                exc.body_json = json.loads(exc.read().decode("utf-8", "replace") or "null")
+            except (ValueError, OSError):
+                exc.body_json = None
             last = exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last = exc
         time.sleep(min(2 * attempt, 10))
-    raise RuntimeError(f"transient failure persisted: {type(last).__name__}")
+    raise RuntimeError(f"transient failure persisted: {type(last).__name__}") from last
+
+
+def _ready_sample(token: str) -> dict | None:
+    """One /ready sample that tolerates a brief readiness blip.
+
+    /ready answers 503 with its normal JSON body while readiness re-latches
+    (WS reconnect, BBO refresh). That body still carries the AI-progress
+    clocks this gate counts, so read it instead of failing the run; a
+    transport error or a non-JSON body is a skipped sample, not a failure.
+    The overall gate deadline still bounds the wait.
+    """
+    try:
+        return _retrying(lambda: _request("/ready", token))
+    except urllib.error.HTTPError as exc:
+        if exc.code not in TRANSIENT_HTTP:
+            raise
+        try:
+            return json.loads(exc.read().decode("utf-8", "replace") or "null") or None
+        except (ValueError, OSError):
+            return None
+    except RuntimeError as exc:
+        last = exc.__cause__ or exc
+        body = getattr(last, "body_json", None)
+        print(f"/ready transient: {exc}", flush=True)
+        return body
 
 
 def main(argv=None) -> int:
@@ -243,7 +272,10 @@ def main(argv=None) -> int:
         last_problems = paper_active_violations(status, expected)
         if last_problems:
             raise SystemExit("paper not active after deploy: " + ",".join(last_problems))
-        ready = _retrying(lambda: _request("/ready", token))
+        ready = _ready_sample(token)
+        if not isinstance(ready, dict):
+            time.sleep(POLL_SEC)
+            continue
         progress = ready.get("strategy_progress") or {}
         cycle = progress.get("scheduled_ai_cycle") or {}
         provider = progress.get("ai_provider") or {}

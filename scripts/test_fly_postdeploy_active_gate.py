@@ -247,3 +247,31 @@ def test_freeze_override_is_forwarded_only_when_fully_declared():
     assert gate.freeze_override_payload({"RESEARCH_FREEZE_OVERRIDE": "BREAK_21_DAY_RESEARCH_FREEZE",
                                          "RESEARCH_FREEZE_OVERRIDE_REASON": "KILL_RULE:X:K4"}) == {
         "confirmation": "BREAK_21_DAY_RESEARCH_FREEZE", "reason": "KILL_RULE:X:K4"}
+
+
+def test_transient_ready_503_does_not_fail_the_gate(monkeypatch):
+    """Reset run 37188730617 failed only because /ready blipped 503 for ~1 min."""
+    import io
+    import urllib.error
+
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "t")
+    monkeypatch.setenv("EXPECTED_REVISION", "abcdef123456")
+    monkeypatch.setenv("POSTDEPLOY_ACTIVE_DEADLINE_SEC", "500")
+    monkeypatch.setattr(gate, "POLL_SEC", 0)
+    monkeypatch.setattr(gate.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(gate, "enable_all_registry_tiles", lambda request: {})
+    clock = iter(range(1000, 10_000))
+    monkeypatch.setattr(gate.time, "time", lambda: float(next(clock)))
+    calls = {"ready": 0}
+
+    def request(path, token, payload=None, timeout=30):
+        if path == "/api/status":
+            return {**_active_status(), "pause_owner": ""}
+        calls["ready"] += 1
+        if calls["ready"] <= 9:  # longer than one _retrying budget
+            raise urllib.error.HTTPError(path, 503, "unready", {}, io.BytesIO(b"not json"))
+        return {"strategy_progress": {"ai_provider": {"last_ai_success_ts": float(1000 + calls["ready"])}}}
+
+    monkeypatch.setattr(gate, "_request", request)
+    assert gate.main([]) == 0
+    assert calls["ready"] >= 11
