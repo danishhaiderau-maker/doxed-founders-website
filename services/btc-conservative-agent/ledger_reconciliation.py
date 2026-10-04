@@ -9,6 +9,7 @@ cent-rounded CSV column is reported alongside only to show the display drift.
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -17,6 +18,9 @@ REPORT_FILE = "ledger_reconciliation.json"
 WIN_PCT_DEFINITION = "wins (exact after-cost net PnL > 0) / closed trades, breakeven in denominator"
 WIN_PCT_SOURCE = "analyzer ledger_reconciliation (exact terminal cost receipt PnL)"
 PNL_TOLERANCE_USD = 0.01
+# Same set as bot.STATS_EXCLUDED_EXIT_REASONS: forced closes (deploy flatten, admin
+# force-flat) are not strategy outcomes and never count on Fly's tiles or ledger.
+FORCED_EXIT_REASONS = frozenset({"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL"})
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
 
 
@@ -45,8 +49,9 @@ def parse_ts(value: Any) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return float(value) if math.isfinite(float(value)) else None
+    text = re.sub(r"(\.\d{6})\d+", r"\1", str(value).replace("Z", "+00:00"))  # ns -> us (py<3.11)
     try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text)
     except ValueError:
         return None
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
@@ -168,7 +173,8 @@ def _fly_rows(fly_trades: Iterable[Mapping[str, Any]], lanes: set[str]) -> dict[
             pnl = _num(row.get(key))
             if pnl is not None:
                 break
-        out[tid] = {"trade_id": tid, "research_lane": lane, "close_ts": _close_ts(row), "pnl": pnl}
+        out[tid] = {"trade_id": tid, "research_lane": lane, "close_ts": _close_ts(row), "pnl": pnl,
+                    "exit_reason": str(row.get("exit_reason") or "").strip().upper()}
     return out
 
 
@@ -185,8 +191,20 @@ def mirror_lane_rows(rows: Iterable[Mapping[str, Any]], lanes: Iterable[str], ep
         if epoch_id and row_epoch and row_epoch.lower() != "nan" and row_epoch != epoch_id:
             continue
         out[tid] = {"trade_id": tid, "research_lane": lane, "close_ts": _close_ts(row),
-                    "pnl": _num(row.get("net_pnl_usd"))}
+                    "pnl": _num(row.get("net_pnl_usd")),
+                    "exit_reason": str(row.get("exit_reason") or "").strip().upper()}
     return out
+
+
+def _in_fly_scope(row: Mapping[str, Any], cutoff_ts: Optional[float]) -> bool:
+    """Fly's tile scope: closes since its epoch cutoff, forced closes excluded."""
+    if row.get("exit_reason") in FORCED_EXIT_REASONS:
+        return False
+    if cutoff_ts is not None:
+        ts = parse_ts(row.get("close_ts"))
+        if ts is not None and ts < cutoff_ts:
+            return False
+    return True
 
 
 def _fly_lane_totals(fly_state: Mapping[str, Any], lane: str) -> dict:
@@ -224,13 +242,16 @@ def compare_with_fly(report: Mapping[str, Any], fly_state: Optional[Mapping[str,
         missing = "Fly /api/state" if not isinstance(fly_state, Mapping) else "mirror ledger"
         return {"level": RED if level == RED else AMBER, "reasons": reasons + [f"{missing} unavailable"],
                 "breakdown": breakdown, "fly_compared": False}
-    mirror = mirror_lane_rows(mirror_rows, lanes, str(report.get("epoch_id") or ""))
-    mirror_head = max((parse_ts(r["close_ts"]) or 0.0 for r in mirror.values()), default=0.0) or None
-    listed = _fly_rows(fly_state.get("trades") or [], set(lanes))
+    cutoff_ts = parse_ts(fly_state.get("fresh_epoch_cutoff_utc") or fly_state.get("trade_scope_cutoff_utc"))
+    mirror_all = mirror_lane_rows(mirror_rows, lanes, str(report.get("epoch_id") or ""))
+    mirror_head = max((parse_ts(r["close_ts"]) or 0.0 for r in mirror_all.values()), default=0.0) or None
+    mirror = {t: r for t, r in mirror_all.items() if _in_fly_scope(r, cutoff_ts)}
+    listed_all = _fly_rows(fly_state.get("trades") or [], set(lanes))
+    listed = {t: r for t, r in listed_all.items() if _in_fly_scope(r, cutoff_ts)}
     listed_ts = [parse_ts(r["close_ts"]) for r in listed.values() if parse_ts(r["close_ts"]) is not None]
     fly_oldest = min(listed_ts) if listed_ts else None
     covered = fly_oldest is not None and mirror_head is not None and fly_oldest <= mirror_head
-    newer = {t: r for t, r in listed.items() if t not in mirror}
+    newer = {t: r for t, r in listed.items() if t not in mirror_all}
     missing_in_mirror = sorted(
         t for t, r in newer.items()
         if mirror_head is not None and (parse_ts(r["close_ts"]) or 0.0) <= mirror_head - mirror_lag_grace_sec
@@ -277,5 +298,7 @@ def compare_with_fly(report: Mapping[str, Any], fly_state: Optional[Mapping[str,
     breakdown.update({
         "per_lane": per_lane, "missing_in_mirror": missing_in_mirror, "mirror_head": mirror_head,
         "fly_listed": len(listed), "fly_oldest_listed": fly_oldest, "bounded": covered,
+        "fly_scope_cutoff_ts": cutoff_ts,
+        "mirror_out_of_fly_scope": len(mirror_all) - len(mirror),
     })
     return {"level": level, "reasons": reasons, "breakdown": breakdown, "fly_compared": True}

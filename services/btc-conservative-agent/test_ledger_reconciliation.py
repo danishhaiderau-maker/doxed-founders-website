@@ -131,3 +131,23 @@ class CompareWithFlyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_forced_and_pre_cutoff_mirror_closes_are_outside_fly_scope():
+    """Fly tiles exclude deploy-flatten closes and pre-cutoff closes; the mirror side must too."""
+    import ledger_reconciliation as lr
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    report = {"lanes": [lane], "level": "GREEN", "epoch_id": "ce-x"}
+    mirror = [
+        {"trade_id": "a", "research_lane": lane, "close_ts": "2026-10-04T08:20:00Z", "net_pnl_usd": 0.1},
+        {"trade_id": "b", "research_lane": lane, "close_ts": "2026-10-04T08:57:00Z", "net_pnl_usd": -0.2,
+         "exit_reason": "ADMIN_MANUAL_CLOSE"},
+        {"trade_id": "c", "research_lane": lane, "close_ts": "2026-10-04T09:57:00Z", "net_pnl_usd": -0.1,
+         "exit_reason": "ADMIN_MANUAL_CLOSE"},
+    ]
+    fly = {"fresh_epoch_cutoff_utc": "2026-10-04T08:39:39.194216490+00:00", "trades": [],
+           "lane_pnl_ledger": {lane: {"closes": 0, "net_pnl_usd": 0.0, "wins": 0}}}
+    out = lr.compare_with_fly(report, fly, mirror)
+    assert out["level"] == "GREEN", out["reasons"]
+    assert out["breakdown"]["per_lane"][lane]["mirror_n"] == 0
+    assert out["breakdown"]["mirror_out_of_fly_scope"] == 3

@@ -140,6 +140,8 @@ THRESHOLDS: dict[str, float] = {
     "registry_mismatch_red_sec": 30 * MIN,
     "relay_snapshot_amber_sec": 15 * MIN,
     "relay_heartbeat_amber_ms": 5 * MIN * 1000,
+    # Paused executor heartbeat is 60 s; one 5-min watcher tick of STARTING is a restart window.
+    "relay_starting_grace_sec": 8 * MIN,
     "laptop_free_amber_bytes": 20 * 1024**3,
     "laptop_free_red_bytes": 5 * 1024**3,
     "fly_free_amber_bytes": 8 * 1024**3,
@@ -1891,6 +1893,20 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         if st == GREEN and (snap_age is None or snap_age > t["relay_snapshot_amber_sec"] or not executor.get("healthy")
                             or float(executor.get("heartbeatAgeMs") or 0) > t["relay_heartbeat_amber_ms"]):
             st = AMBER
+        # A disarmed executor reads STARTING (no heartbeat) for up to one paused-heartbeat interval
+        # after a Railway restart or a Showcase session reset. One such tick is a restart window,
+        # not a stall: AMBER only when it persists past relay_starting_grace_sec. Arming and
+        # reconciliation alerts above stay RED immediately.
+        disarmed_now = not relay.get("relayArmedAt") and str(
+            relay.get("relayExecutionMode") or relay.get("status") or "").upper() in RELAY_DISARMED_MODES
+        starting_blip = (st == AMBER and disarmed_now and str(executor.get("status") or "").upper() == "STARTING"
+                         and snap_age is not None and snap_age <= t["relay_snapshot_amber_sec"])
+        if starting_blip:
+            since = float(mem.setdefault("relay_executor_starting_since", now))
+            if now - since < t["relay_starting_grace_sec"]:
+                st = GREEN
+        else:
+            mem.pop("relay_executor_starting_since", None)
         # A deliberately disarmed relay (PAUSED / DISARMED / research-only, no armedAt) has no exchange
         # position to reconcile, so a null reconciliation is the expected state, not a gap. Arming stays
         # strict above: any armedAt or non-disarmed mode is RED regardless of reconciliation.
@@ -1902,7 +1918,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             "alert" if recon.get("alert") else "ok")
         obs = (f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
                f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old "
-               f"reconciliation={recon_label}")
+               f"reconciliation={recon_label}"
+               + (" (STARTING within restart/session-reset grace)" if starting_blip and st == GREEN else ""))
     add(check("railway.relay", "railway", st, obs,
               "relay PAUSED/disarmed, executor healthy, reconciliation reported without alert (null OK while disarmed)",
               "" if st == GREEN else ("relay ARMED or reconciliation mismatch - verify on Railway immediately"
