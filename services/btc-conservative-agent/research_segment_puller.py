@@ -238,6 +238,8 @@ class SegmentPuller:
         self.write_ack = write_ack
         # relpath -> epoch baseline; persisted in state with each applied seq.
         self.baselines: dict[str, dict] = {}
+        # ``relpath -> tombstone seq`` for the run in progress (set by pull_once).
+        self.tombstoned: dict[str, int] = {}
         for directory in (self.tree, self.meta, self.archive_root / "seg", self.archive_root / "man"):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -341,6 +343,13 @@ class SegmentPuller:
             raise PullerError(f"{label}: offset {remote_offset} precedes the epoch baseline")
         return remote_offset - baseline["base_offset"] + baseline["preamble_size"]
 
+    def _is_applied_seal(self, source_rel: str, target: Path, member: dict, label: str) -> bool:
+        """True when ``target`` already holds this seal's result (re-apply after a crash)."""
+        if source_rel in self.baselines:
+            return target.stat().st_size == self._to_local(source_rel, member["final_size"], label)
+        return (target.stat().st_size == member["final_size"]
+                and _sha256_file(target) == member["final_sha256"])
+
     def apply_member(self, seq: int, member: dict, payload: bytes) -> None:
         kind, relpath = member["kind"], member["path"]
         target = self._local(relpath)
@@ -362,6 +371,15 @@ class SegmentPuller:
         elif kind == fmt.KIND_SEAL:
             source_rel = member["source_path"]
             source = self._local(source_rel)
+            if relpath in self.tombstoned:
+                # Sealing onto a name Fly retired earlier: the retired custody copy
+                # (and any baseline it carried from an older epoch) belongs to a
+                # previous generation, so it must not shape this seal. Keep its
+                # bytes in quarantine; never delete custody data.
+                self.baselines.pop(relpath, None)
+                if target.exists() and not self._is_applied_seal(source_rel, target, member, label):
+                    self._quarantine_copy(seq, relpath, target)
+                    target.unlink()
             baseline = self.baselines.get(source_rel) or self.baselines.get(relpath)
             final_local = self._to_local(source_rel if source_rel in self.baselines else relpath,
                                          member["final_size"], label)
@@ -452,6 +470,7 @@ class SegmentPuller:
             if int(state.get("applied_seq") or 0):
                 self.save_state(state)
         tombstoned = state[segment_custody.STATE_KEY]
+        self.tombstoned = tombstoned
         applied = 0
         # Checked only between segments (each applied seq is already durable in
         # state.json), and never before the first one so every run makes progress.
