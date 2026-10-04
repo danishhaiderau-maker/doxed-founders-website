@@ -21680,7 +21680,15 @@ def _record_execution_settings_epoch(reason: str, force: bool = False) -> None:
         "reason": str(reason or "SETTINGS_CHANGED"),
         "signature": signature,
         **settings,
+        # Declared data version / epoch on every row (self-aware data.compat_declared).
+        # Stamped here, not only by the append helper, so maintenance/reset paths
+        # that run before the epoch manifest is active still declare the epoch.
+        "bot_version": EXECUTION_FIX_VERSION,
     }
+    manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
+    epoch_id = (manifest.get("epoch_id") if isinstance(manifest, dict) else None) or globals().get("DATA_EPOCH_ID")
+    if epoch_id:
+        row["data_epoch_id"] = epoch_id
     with _execution_settings_history_lock:
         last = None
         try:

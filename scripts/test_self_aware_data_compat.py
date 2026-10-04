@@ -261,3 +261,25 @@ def test_retired_custody_ops_and_read_guarded_streams_do_not_turn_mixed_red(tmp_
     by = {s["stream"]: s for s in doc["streams"]}
     assert by["post_exit_replay.jsonl"]["severity"] == "RED"
     assert {f["id"]: f for f in dc.findings(doc, NOW, 7200)}["data.compat_mixed"]["severity"] == "RED"
+
+
+def test_stamped_writer_legacy_rows_are_declared_not_undeclared(tmp_path, monkeypatch):
+    """execution_settings_history: rows from before the writer stamped are legacy, the stream is declared."""
+    paths = _paths(tmp_path)
+    m = tmp_path / "mirror"
+    (tmp_path / "chain").mkdir(parents=True)
+    m.mkdir(parents=True)
+    (m / "data_epoch.json").write_text(json.dumps(dc.de.new_manifest(EPOCH, started_at_ts=START)))
+    _write(m / "execution_settings_history.jsonl", [
+        {"ts": START - 900, "epoch": START - 900, "reason": "FRESH_COLLECTION_STARTED", "signature": "gap=0"},
+        {"ts": START + 60, "epoch": START + 60, "reason": "FRESH_COLLECTION_STARTED", "signature": "gap=0"},
+    ])
+    _write(m / "xvl_shadow_signals.jsonl", [{"ts": START + 5, "side": "LONG"}])
+    doc = _run(paths, monkeypatch)
+    by = {s["stream"]: s for s in doc["streams"]}
+    hist = by["execution_settings_history.jsonl"]
+    assert hist["version_declared"] is True
+    assert hist["legacy_unstamped_rows"] == 2
+    assert not any("post-epoch rows without data_epoch_id" in p for p in hist["problems"])
+    # Other unstamped writers are still reported.
+    assert doc["undeclared_streams"] == ["xvl_shadow_signals.jsonl"]

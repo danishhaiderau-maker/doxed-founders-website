@@ -380,6 +380,10 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
         # on its first post-epoch row.
         quiet_this_epoch = bool(manifest and not any(classes.get(c) for c in (
             de.CURRENT, de.CURRENT_UNSTAMPED, de.UNSTAMPED_POST_EPOCH, de.UNDATED)))
+        # A stamped writer's unstamped rows predate the stamp: legacy, not undeclared.
+        stamped_writer = base in getattr(de, "STAMPED_WRITER_BASES", ()) and not classes.get(de.UNDATED)
+        legacy_unstamped = (sum(int(v) for k, v in versions.items() if k == "UNVERSIONED")
+                            if stamped_writer else 0)
         problems = []
         sev = "GREEN"
         non_evidence, guarded = de.non_evidence(base), de.read_guarded(base)
@@ -399,7 +403,10 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
                 problems.append("pre-epoch/foreign rows in an analyzer-visible file: " +
                                 ", ".join(f"{c} {n}" for c, n in bad.items()))
         if manifest and not non_evidence:
-            if classes.get(de.UNSTAMPED_POST_EPOCH):
+            if classes.get(de.UNSTAMPED_POST_EPOCH) and stamped_writer:
+                problems.append(f"{classes[de.UNSTAMPED_POST_EPOCH]} legacy rows written before the writer stamped "
+                                "data_epoch_id (data_epoch.STAMPED_WRITER_BASES)")
+            elif classes.get(de.UNSTAMPED_POST_EPOCH):
                 sev = "AMBER" if sev == "GREEN" else sev
                 problems.append(f"{classes[de.UNSTAMPED_POST_EPOCH]} post-epoch rows without data_epoch_id")
             if classes.get(de.UNDATED):
@@ -417,7 +424,8 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
             "stream": base, "files": len(rels), "bytes": total_bytes,
             "scanned_pct": round(100.0 * scanned / total_bytes, 1) if total_bytes else 100.0,
             "rows": sum(versions.values()), "versions": dict(sorted(versions.items(), key=lambda kv: -kv[1])),
-            "version_declared": bool(real_versions) or epoch_declared or quiet_this_epoch,
+            "version_declared": bool(real_versions) or epoch_declared or quiet_this_epoch or stamped_writer,
+            "legacy_unstamped_rows": legacy_unstamped,
             "quiet_this_epoch": quiet_this_epoch, "epoch_independent": independent,
             "non_evidence": non_evidence, "read_guarded": guarded,
             "current_version": current, "classes": classes, "segregated": segregated,

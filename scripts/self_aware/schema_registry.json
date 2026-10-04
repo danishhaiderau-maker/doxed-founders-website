@@ -4449,7 +4449,34 @@
 ]
 }
 },
-"execution_settings_history.jsonl": {},
+"execution_settings_history.jsonl": {
+"*": {
+"bot_version": [
+"string"
+],
+"chase_buckets": [
+"array"
+],
+"data_epoch_id": [
+"string"
+],
+"epoch": [
+"number"
+],
+"gap_buckets": [
+"array"
+],
+"reason": [
+"string"
+],
+"signature": [
+"string"
+],
+"ts": [
+"string"
+]
+}
+},
 "expired_orders_3factor.csv": {
 "*": {
 "age_min": [
