@@ -82,14 +82,15 @@ REPO = "danishhaiderau-maker/doxed-founders-website"
 MIN = 60.0
 HOUR = 3600.0
 
-# Integrity INVALID whose only failure is these current-epoch Fly lifecycle defects is a known, owned
-# blocker: the clean epoch shipped by the post-freeze #351 deploy retires that evidence. AMBER until it
-# expires, then RED again so it cannot silently become permanent.
+# Integrity INVALID whose only failure is these lifecycle defects is a known, owned blocker. The clean
+# epoch ce-20261004-v31-final-e is live (#351/#336 shipped), but until #420 the laptop kept serving the
+# pre-epoch files Fly retired at the boundary reset as analyzer input. AMBER until it expires, then RED
+# again so it cannot silently become permanent.
 CLEAN_EPOCH_PENDING = {
     "id": "CLEAN_EPOCH_PENDING",
     "check": "v3_policy_lifecycle_integrity",
     "defects": frozenset({"CAUSAL_IDENTITY_ALIAS_EXCLUDED", "ORPHAN_EXPECTED_ORDER", "POLICY_IDENTITY_CONTAMINATION"}),
-    "fix": "post-freeze #351 deploy (clean epoch ce-20261004-v31-clean via #336) + clean_epoch_certify",
+    "fix": "#420 fix (Fly-retired custody copies leave the analyzer view) + next analyzer generation + clean_epoch_certify on ce-20261004-v31-final-e (live since 2026-10-04T01:40:18Z; #351/#336 shipped)",
     "eta": "2026-10-04T15:00Z",
     "expires": "2026-10-06T00:00:00Z",
 }

@@ -65,11 +65,24 @@ and trigger no deploy.
 
 ## 6. Will `analyzer.studies` integrity INVALID clear only at the clean epoch?
 
-Yes. The INVALID verdict comes from pre-existing lifecycle codes in the current epoch's historical
-evidence, which is immutable and is not repaired in place. It clears when the clean epoch
-`ce-20261004-v31-clean` starts through #351. Until then the watcher shows it as **AMBER with the
-declared blocker `CLEAN_EPOCH_PENDING`**, not RED. Escalate if it is still present after the clean
-epoch is certified, or if the blocker expires without the epoch starting.
+Yes, plus the #420 fix. The INVALID verdict comes from pre-existing lifecycle codes in pre-epoch
+historical evidence, which is immutable and is not repaired in place. The clean epoch
+`ce-20261004-v31-final-e` has been live since 2026-10-04T01:40:18Z (12:40 AEDT; #351/#336 shipped).
+However, the laptop's first clean-epoch analyzer generation still admitted 37,224 pre-epoch rows
+(#420). Most were files Fly retired at the boundary reset that the laptop shadow tree keeps as custody
+copies (`post_exit_replay.jsonl` and others), which the analyzer kept reading.
+
+After the #420 fix:
+- Those retired custody copies leave the promotion view.
+- They are moved (never deleted) out of the canonical store into `migration/retired/`.
+- Ops ledgers no longer count as evidence.
+- The three evidence streams the reset keeps (`taker_signal_counterfactuals.jsonl`,
+  `adaptive_entry_decisions.jsonl` and `expired_orders_3factor.csv`) are filtered by every analyzer reader.
+
+Until the next analyzer generation reports `data_epoch.pre_epoch_rows_admitted == 0` and
+`clean_epoch_certify` passes, the watcher shows **AMBER with the declared blocker
+`CLEAN_EPOCH_PENDING`**, not RED. Escalate if it is still present after the epoch is certified, or if
+the blocker expires (2026-10-06) first.
 
 ## 7. `liq_okx` stale: known or a gap?
 
@@ -84,4 +97,14 @@ age exceeds a few minutes.
 ## Known false alarms
 
 - `liq_okx` DEGRADED/flapping: see 7 (until the post-freeze deploy).
-- `analyzer.studies` AMBER `CLEAN_EPOCH_PENDING`: see 6 (until the clean epoch).
+- `analyzer.studies` AMBER `CLEAN_EPOCH_PENDING`: see 6 (until the #420 fix has run one analyzer
+  generation and `clean_epoch_certify` passes on `ce-20261004-v31-final-e`).
+- `data.compat` stream AMBER "pre-epoch/foreign rows on disk, rejected by every analyzer reader" on
+  `taker_signal_counterfactuals.jsonl`, `adaptive_entry_decisions.jsonl` or `expired_orders_3factor.csv`
+  is expected after a boundary reset (#420). Those rows stay until `clean_epoch_wipe`; every analyzer
+  reader filters them and the receipt lists them under `pre_epoch_rows_read_guarded_by_stream`. The
+  same rows in any other stream are RED and real.
+- `relay_outbox_quarantine.jsonl`, `relay_outbox_retired.jsonl`, `runtime_telemetry_1m.jsonl`,
+  `retired_tile_boundary_receipts.jsonl` and `pre_entry_evidence_handoffs.jsonl` carry the note "ops
+  stream, not analyzer evidence". Their pre-epoch or undated rows are by design and never count
+  toward purity (`data_epoch.NON_EVIDENCE_BASES`).

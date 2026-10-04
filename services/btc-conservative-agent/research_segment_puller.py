@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 import research_segment_format as fmt
+import segment_custody
 from research_segment_store import (HttpSegmentSource, ObjectStore, PreconditionFailed, StoreError,
                                     store_from_env)
 from storage_links import ensure_private
@@ -405,9 +406,52 @@ class SegmentPuller:
             raise PullerError(f"{label}: unknown kind")
 
     # ------------------------------------------------------------------- run
+    def backfill_tombstoned(self, state: dict) -> dict:
+        """``relpath -> seq`` of still-tombstoned paths for a tree applied before the map existed.
+
+        Replays the archived manifests (create-new, never overwritten) when every
+        one of them is on disk; otherwise falls back to the tombstone markers,
+        treating a path as re-created when its tree file is newer than the marker.
+        """
+        through = int(state.get("applied_seq") or 0)
+        manifests = []
+        for seq in range(1, through + 1):
+            archived = self._archived("man", fmt.manifest_key(self.prefix, seq))
+            try:
+                manifests.append((seq, json.loads(archived.read_bytes())))
+            except (OSError, ValueError):
+                manifests = None
+                break
+        if manifests is not None:
+            state["tombstoned_backfill"] = "ARCHIVED_MANIFESTS"
+            return segment_custody.rebuild_tombstoned(manifests)
+        tombstoned: dict = {}
+        marker_mtime: dict = {}
+        for marker in sorted(self.tombstones.glob("*.json")) if self.tombstones.is_dir() else []:
+            try:
+                doc = json.loads(marker.read_text(encoding="utf-8"))
+                seq, path = int(doc["seq"]), str(doc["path"])
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if seq > through or seq < tombstoned.get(path, 0):
+                continue
+            tombstoned[path], marker_mtime[path] = seq, marker.stat().st_mtime_ns
+        for path in list(tombstoned):
+            target = self.tree.joinpath(*path.split("/"))
+            if target.is_file() and target.stat().st_mtime_ns > marker_mtime[path]:
+                tombstoned.pop(path)
+        state["tombstoned_backfill"] = "MARKERS_MTIME"
+        return tombstoned
+
     def pull_once(self, max_segments: int | None = None, max_run_seconds: float | None = None) -> dict:
         state = self.load_state()
         self.baselines = {path: dict(entry) for path, entry in (state.get("baselines") or {}).items()}
+        if segment_custody.STATE_KEY not in state:
+            state[segment_custody.STATE_KEY] = (self.backfill_tombstoned(state)
+                                                if int(state.get("applied_seq") or 0) else {})
+            if int(state.get("applied_seq") or 0):
+                self.save_state(state)
+        tombstoned = state[segment_custody.STATE_KEY]
         applied = 0
         # Checked only between segments (each applied seq is already durable in
         # state.json), and never before the first one so every run makes progress.
@@ -433,6 +477,9 @@ class SegmentPuller:
             self._archive("seg", manifest["segment_key"], segment_raw)
             for member, payload in zip(manifest["members"], payloads):
                 self.apply_member(seq, member, payload)
+                # Custody copies stay on disk; the map lets promotion tell a Fly-retired file from a live one.
+                segment_custody.update_tombstoned(tombstoned, seq, member)
+            state[segment_custody.STATE_KEY] = dict(sorted(tombstoned.items()))
             state.update({"applied_seq": seq, "last_manifest_sha256": fmt.sha256_bytes(manifest_raw),
                           "last_applied_at": _utc_now(),
                           "last_source_git_rev": manifest["source_git_rev"],
