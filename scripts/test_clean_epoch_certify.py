@@ -96,9 +96,14 @@ def test_declared_window_resets_red_history_and_age_but_keeps_every_gate():
     assert cert([old_red], win=None)["failing"] == ["required.no_red_in_window"]
     assert cert([old_red])["status"] == "CERTIFIED"
     assert cert([new_red])["failing"] == ["required.no_red_in_window"]
+    red_at_open = {"id": "contract.trades", "from": "RED", "to": "GREEN", "at": _iso(NOW - 600)}
+    assert cert([red_at_open])["failing"] == ["required.no_red_in_window"]
     young = {"window_start_ts": NOW - 3600}
     assert cert([old_red], win=young)["status"] == "PENDING"
     amber = {**health, "findings": [*health["findings"], {"id": "data.dead_fields", "severity": "AMBER"}]}
     assert cert([], h=amber)["failing"] == ["required.green_now"]
     red_any = {**health, "findings": [*health["findings"], {"id": "fly.relay2", "severity": "RED"}]}
     assert cert([], h=red_any)["failing"] == ["no_red_now"]
+    flap = {"id": "fly.relay", "from": "GREEN", "to": "AMBER", "at": _iso(NOW - 60)}
+    assert cert([flap] * cc.HISTORY_LIMIT)["failing"] == ["required.window_history_complete"]
+    assert cert([flap] * 10)["status"] == "CERTIFIED"

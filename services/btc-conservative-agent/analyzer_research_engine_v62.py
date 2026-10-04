@@ -2977,9 +2977,12 @@ def historical_trade_cohort_report():
     ]
     current_path = next((path for path in current_candidates if path.is_file()), None)
     if current_path is not None:
+        from analyzer_epoch_guard import epoch_csv_rows, guarded_open
+
         try:
-            with current_path.open(encoding="utf-8-sig", errors="replace", newline="") as handle:
-                ingest(list(csv.DictReader(handle)), "current Fresh Collection", "current_csv")
+            with guarded_open(current_path, encoding="utf-8-sig", errors="replace", newline="") as handle:
+                ingest(list(epoch_csv_rows(csv.DictReader(handle), current_path)), "current Fresh Collection",
+                       "current_csv")
         except OSError as exc:
             source_rows.append({
                 "source": "current Fresh Collection",
@@ -5039,15 +5042,19 @@ def _cohort_passes_live_stack(row, mtf_rule: str = "LIVE_BULL_ALIGNED", max_chop
 def _load_executed_trade_ids() -> set:
     if not os.path.exists(TRADES_FILE):
         return set()
-    try:
-        t = pd.read_csv(TRADES_FILE, usecols=["trade_id"], encoding="utf-8")
-    except (UnicodeDecodeError, ValueError):
+    t = None
+    for encoding in ("utf-8", "latin1"):
         try:
-            t = pd.read_csv(TRADES_FILE, usecols=["trade_id"], encoding="latin1")
+            with _epoch_guarded_read(TRADES_FILE):
+                t = pd.read_csv(TRADES_FILE, encoding=encoding)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
         except Exception:
             return set()
-    except Exception:
+    if t is None or "trade_id" not in t.columns:
         return set()
+    t = _epoch_filter_frame(TRADES_FILE, t)
     return set(t["trade_id"].dropna().astype(str))
 
 
@@ -10299,14 +10306,17 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         trade_df = pd.DataFrame()
         if os.path.exists(TRADES_FILE):
             try:
-                trade_df = pd.read_csv(TRADES_FILE, encoding="utf-8")
+                with _epoch_guarded_read(TRADES_FILE):
+                    trade_df = pd.read_csv(TRADES_FILE, encoding="utf-8")
             except (UnicodeDecodeError, ValueError):
                 try:
-                    trade_df = pd.read_csv(TRADES_FILE, encoding="latin1")
+                    with _epoch_guarded_read(TRADES_FILE):
+                        trade_df = pd.read_csv(TRADES_FILE, encoding="latin1")
                 except Exception:
                     trade_df = pd.DataFrame()
             except Exception:
                 trade_df = pd.DataFrame()
+            trade_df = _epoch_filter_frame(TRADES_FILE, trade_df)
             if session and _session_start_ts(session) is not None and not trade_df.empty:
                 trade_df = filter_df_since_session(
                     trade_df, session, ts_cols=("ts", "close_ts", "entry_ts", "open_ts")
