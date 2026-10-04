@@ -1118,8 +1118,28 @@ def test_read_ledger_rows_keeps_only_reconciliation_fields(tmp_path):
     path = tmp_path / "trades_3factor.csv"
     path.write_text("trade_id,research_lane,net_pnl_usd,extra\nt1,FAMILY_X,0.01,zzz\n", encoding="utf-8")
     assert sh.read_ledger_rows(path) == [{"trade_id": "t1", "research_lane": "FAMILY_X", "epoch_id": None,
-                                          "close_ts": None, "ts": None, "net_pnl_usd": "0.01"}]
+                                          "close_ts": None, "ts": None, "net_pnl_usd": "0.01",
+                                          "exit_reason": None}]
     assert sh.read_ledger_rows(tmp_path / "missing.csv") is None
+
+
+def test_forced_mirror_closes_read_from_csv_stay_out_of_fly_scope(tmp_path):
+    # 2026-10-04 22:20: COMMITTED_FADE showed "fly 2/mirror 9" (RED) because read_ledger_rows dropped
+    # exit_reason, so the six deploy-flatten ADMIN_MANUAL_CLOSE rows counted against Fly's tile.
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = _reconciled_inputs(now)
+    lane = LANES[0]
+    path = tmp_path / "trades_3factor.csv"
+    lines = ["trade_id,research_lane,epoch_id,close_ts,net_pnl_usd,exit_reason"]
+    for row in inputs["mirror_trades"]:
+        lines.append(f"{row['trade_id']},{row['research_lane']},,{row['close_ts']},0.0,PATH_END_90M")
+    for i in range(3):
+        lines.append(f"forced-{i},{lane},,{sh.iso(now - 1700 + i)},-0.02,ADMIN_MANUAL_CLOSE")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    inputs["mirror_trades"] = sh.read_ledger_rows(path)
+    check = by_id(sh.evaluate(inputs, {}))["ledger.reconciliation"]
+    assert check["status"] == sh.GREEN, check["observed"]
+    assert "fly 1/mirror 1+0" in check["observed"]
 
 
 def test_ledger_reconciliation_red_report_and_missing_inputs():
