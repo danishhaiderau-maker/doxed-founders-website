@@ -816,11 +816,16 @@ def check_contracts(f, sig, store) -> list[Finding]:
     out = []
     for surface, title in CONTRACT_SURFACES.items():
         sev = (c.get("surfaces") or {}).get(surface, GREEN)
-        bad = [o for o in c.get("offenders") or [] if o["id"].split(".")[0] == surface]
+        # Contract ids do not always carry the surface name (exports contracts are "export.*"), so match on
+        # the offender's surface; older summaries without it fall back to the id prefix.
+        bad = [o for o in c.get("offenders") or []
+               if (o.get("surface") or {"export": "exports"}.get(o["id"].split(".")[0], o["id"].split(".")[0])) == surface]
+        sev = sev if sev in (RED, AMBER) else GREEN
         out.append(Finding(f"contract.{surface}", f"{title} honour their content contracts", "contracts",
                            sev if sev in (RED, AMBER) else GREEN,
                            "; ".join(f"{o['id']} {o['status']}: {o['why'][:160]}" for o in bad[:4]) if bad else
-                           f"every {surface} contract GREEN",
+                           f"{surface} surface {sev} but no offender listed (see /api/selfaware/contracts?surface={surface})"
+                           if sev != GREEN else f"every {surface} contract GREEN",
                            "reachable JSON, required fields populated, min rows, expected dimensions, reconciled counts",
                            evidence={"offenders": bad[:20], "api": f"/api/selfaware/contracts?surface={surface}"},
                            drill_sql=drill))

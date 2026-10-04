@@ -1,6 +1,6 @@
 {
-"announced_at": "2026-10-02T15:27:28Z",
-"release": "v31-committed-fade-premium-v6",
+"announced_at": "2026-10-04T07:30:00Z",
+"release": "v31-committed-fade-premium-v6 + data_epoch_id stamp (clean epoch writers)",
 "schema": "self_aware_schema_registry_v1",
 "streams": {
 "adaptive_entry_decisions.jsonl": {
@@ -51,6 +51,9 @@
 "number"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -126,6 +129,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "execution_tier": [
 "null"
 ],
@@ -178,6 +184,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -225,6 +234,9 @@
 "string"
 ],
 "ctx_trade_id": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "data_symbol": [
@@ -612,6 +624,9 @@
 "context_fingerprint": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "entry_stage": [
 "string"
 ],
@@ -703,6 +718,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "exit_reason": [
 "string"
 ],
@@ -737,6 +755,9 @@
 ],
 "bull_score": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "direction": [
 "string"
@@ -884,6 +905,9 @@
 "string"
 ],
 "compact_prompt_state": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision_price": [
@@ -1122,6 +1146,9 @@
 ]
 },
 "schema=ai_shadow_challenger_geometry_v1": {
+"data_epoch_id": [
+"string"
+],
 "decision_ts": [
 "number"
 ],
@@ -1151,6 +1178,9 @@
 ]
 },
 "schema=ai_shadow_challenger_markout_v1": {
+"data_epoch_id": [
+"string"
+],
 "decision_ts": [
 "number"
 ],
@@ -1195,6 +1225,9 @@
 "ai_shadow_compact_prompt.jsonl": {
 "schema=ai_shadow_compact_prompt_v1": {
 "call_state": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "epoch_id": [
@@ -1381,6 +1414,9 @@
 "call_state": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision_ts": [
 "number"
 ],
@@ -1538,6 +1574,9 @@
 "comment": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "data_symbol": [
 "string"
 ],
@@ -1683,6 +1722,9 @@
 "comment": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "data_symbol": [
 "string"
 ],
@@ -1806,6 +1848,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -1961,6 +2006,9 @@
 ],
 "controls_pullback_threshold": [
 "null",
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "data_symbol": [
@@ -2191,6 +2239,9 @@
 "ai_verdict_executes": [
 "bool"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -2261,6 +2312,9 @@
 ],
 "certain_ts": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "direction": [
 "string"
@@ -2334,6 +2388,9 @@
 "bool"
 ],
 "coverage_status": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -2503,6 +2560,9 @@
 "coverage_status": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -2664,6 +2724,9 @@
 "bid_qty": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -2732,6 +2795,9 @@
 ]
 },
 "schema=compressed_chase_arm_receipt_v1": {
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -2903,6 +2969,9 @@
 ],
 "cost_missing_legs": [
 "array"
+],
+"data_epoch_id": [
+"string"
 ],
 "edge_score": [
 "number"
@@ -3235,6 +3304,9 @@
 "bfx.symbol": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "derivatives.binance": [
 "object"
 ],
@@ -3343,6 +3415,9 @@
 "number"
 ],
 "cycle_outcome": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision": [
@@ -3634,6 +3709,9 @@
 "compact_facts.z60": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision_price": [
 "number"
 ],
@@ -3792,6 +3870,9 @@
 ]
 },
 "schema=decision_forward_label_v1": {
+"data_epoch_id": [
+"string"
+],
 "decision_ts": [
 "number"
 ],
@@ -3866,6 +3947,9 @@
 "string"
 ],
 "controls_edge": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "data_symbol": [
@@ -3956,6 +4040,9 @@
 "created_ts": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision": [
 "string"
 ],
@@ -4031,6 +4118,9 @@
 ],
 "closest_approach_pct": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "direction": [
 "string"
@@ -4146,6 +4236,9 @@
 "string"
 ],
 "created_ts": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "dir": [
@@ -4272,6 +4365,9 @@
 "bid_at_fill": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -4340,6 +4436,9 @@
 "null",
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -4383,6 +4482,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "executed": [
 "bool"
 ],
@@ -4422,6 +4524,9 @@
 "null"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -5134,6 +5239,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "details": [
 "null"
 ],
@@ -5173,6 +5281,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "details": [
@@ -5216,6 +5327,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "details": [
 "null"
 ],
@@ -5255,6 +5369,9 @@
 "null"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "details": [
@@ -5298,6 +5415,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "details": [
 "null"
 ],
@@ -5333,6 +5453,9 @@
 "string"
 ],
 "completeness": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "exch_ts": [
@@ -5378,6 +5501,9 @@
 },
 "market_context_1m.jsonl": {
 "schema=market_context_1m_v1": {
+"data_epoch_id": [
+"string"
+],
 "derivatives.binance": [
 "object"
 ],
@@ -5622,6 +5748,9 @@
 "buy_vwap": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "fresh": [
 "bool"
 ],
@@ -5676,6 +5805,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -5764,6 +5896,9 @@
 "null"
 ],
 "collector_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision_tree_snapshot.blocking_filters": [
@@ -6215,6 +6350,9 @@
 "null"
 ],
 "collector_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision_tree_snapshot.blocking_filters": [
@@ -6675,6 +6813,9 @@
 "collector_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision_tree_snapshot.blocking_filters": [
 "null"
 ],
@@ -7099,6 +7240,9 @@
 },
 "order_multiverse_entry_grid.jsonl": {
 "schema=order_multiverse_entry_grid_v1": {
+"data_epoch_id": [
+"string"
+],
 "entry_children": [
 "array"
 ],
@@ -7158,6 +7302,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "data_symbol": [
@@ -7260,6 +7407,9 @@
 "best_bid": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "kind": [
 "string"
 ],
@@ -7315,6 +7465,9 @@
 ],
 "confidence_requested": [
 "bool"
+],
+"data_epoch_id": [
+"string"
 ],
 "decision": [
 "string"
@@ -7376,6 +7529,9 @@
 ],
 "bus_seq": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "day_of_week": [
 "number"
@@ -7492,6 +7648,9 @@
 "chase_count": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision_id": [
 "string"
 ],
@@ -7552,6 +7711,9 @@
 ],
 "capture_pct": [
 "null"
+],
+"data_epoch_id": [
+"string"
 ],
 "decision_id": [
 "string"
@@ -7649,6 +7811,9 @@
 ],
 "bus_seq": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "day_of_week": [
 "number"
@@ -7765,6 +7930,9 @@
 "capture_pct": [
 "null"
 ],
+"data_epoch_id": [
+"string"
+],
 "decision_id": [
 "string"
 ],
@@ -7857,6 +8025,9 @@
 "null"
 ],
 "collector_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision_tree_snapshot.blocking_filters": [
@@ -8268,6 +8439,9 @@
 },
 "retired_tile_boundary_receipts.jsonl": {
 "schema=retired_tile_boundary_v1": {
+"data_epoch_id": [
+"string"
+],
 "finished_at": [
 "number"
 ],
@@ -8335,6 +8509,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -8371,6 +8548,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -8489,6 +8669,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "data_symbol": [
@@ -8809,6 +8992,9 @@
 "array"
 ],
 "cost_assumptions_status": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -9226,6 +9412,9 @@
 "correlated_cluster_boundary_pct": [
 "number"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -9558,6 +9747,9 @@
 "string"
 ],
 "context.sr_state": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "direction": [
@@ -10422,6 +10614,9 @@
 "bot_version": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "direction": [
 "string"
 ],
@@ -10467,6 +10662,9 @@
 ],
 "current_limit_price": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "direction": [
 "string"
@@ -10531,6 +10729,9 @@
 ],
 "book_observed_ts": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "depth_vwap": [
 "number"
@@ -10609,6 +10810,9 @@
 "number"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "dur_min": [
@@ -10727,6 +10931,9 @@
 "string"
 ],
 "bot_version": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "dir": [
@@ -11282,6 +11489,9 @@
 "conviction_spread": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "data_symbol": [
 "string"
 ],
@@ -11754,6 +11964,9 @@
 "bull_score": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "delta": [
 "string"
 ],
@@ -11801,6 +12014,9 @@
 "string"
 ],
 "config_signature": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "decision_stage": [
@@ -12065,6 +12281,9 @@
 "config_signature": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "deployed_revision": [
 "string"
 ],
@@ -12278,6 +12497,9 @@
 ],
 "current_limit_price": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "deployed_revision": [
 "string"
@@ -12674,6 +12896,9 @@
 "string"
 ],
 "config_signature": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "deployed_revision": [
@@ -13220,6 +13445,9 @@
 "coverage.two_second_or_better": [
 "bool"
 ],
+"data_epoch_id": [
+"string"
+],
 "deployed_revision": [
 "string"
 ],
@@ -13468,6 +13696,9 @@
 "string"
 ],
 "config_signature": [
+"string"
+],
+"data_epoch_id": [
 "string"
 ],
 "deployed_revision": [
@@ -13891,6 +14122,9 @@
 "config_signature": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "deployed_revision": [
 "string"
 ],
@@ -14180,6 +14414,9 @@
 "config_signature": [
 "string"
 ],
+"data_epoch_id": [
+"string"
+],
 "deployed_revision": [
 "string"
 ],
@@ -14394,6 +14631,9 @@
 "cap1_take": [
 "bool"
 ],
+"data_epoch_id": [
+"string"
+],
 "entry_ask": [
 "number"
 ],
@@ -14488,6 +14728,9 @@
 ],
 "collector_age_s": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "entry_bucket_ts": [
 "number"
@@ -14586,6 +14829,9 @@
 "cap1_take": [
 "bool"
 ],
+"data_epoch_id": [
+"string"
+],
 "entry_ask": [
 "number"
 ],
@@ -14677,6 +14923,9 @@
 ],
 "collector_age_s": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "entry_bucket_ts": [
 "number"
@@ -14793,6 +15042,9 @@
 "cap1_take": [
 "bool"
 ],
+"data_epoch_id": [
+"string"
+],
 "entry_ask": [
 "number"
 ],
@@ -14881,6 +15133,9 @@
 ],
 "collector_age_s": [
 "number"
+],
+"data_epoch_id": [
+"string"
 ],
 "entry_bucket_ts": [
 "number"
