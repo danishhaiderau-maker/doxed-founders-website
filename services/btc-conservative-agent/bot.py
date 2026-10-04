@@ -20368,7 +20368,9 @@ def _adaptive_regime_entry_decision(lane: str, direction: str, ctx: dict,
         ai_feature={
             "raw_decision": raw.get("raw_decision") or raw.get("decision"),
             "raw_direction": raw.get("raw_direction") or raw.get("direction"),
-            "win_prob": raw.get("win_prob"),
+            # null unless the model emitted one (the score-led prompt does not); never the parse placeholder 0
+            "win_prob": evidence_win_prob(raw),
+            "win_prob_status": raw.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
             "long_score": raw.get("long_score"),
             "short_score": raw.get("short_score"),
             "admission_policy_id": raw.get("effective_research_admission_policy_id"),
@@ -43481,11 +43483,46 @@ def _runtime_uptime_summary(now: float | None = None) -> dict:
 
 _SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None, "proof": None}
 _SYSTEM_HEALTH_LOCK = threading.Lock()
-# Memory-only, bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS); the
-# watcher re-sends its alarm log after a restart, so nothing is written to disk.
+# Bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS) and persisted on the
+# volume (system_health_alerts.STATE_FILE) so a restart or deploy keeps the alert
+# history and the last monitor digest; restored lazily on first use. The watcher
+# still re-sends its alarm log when it sees the history shrink.
 _SYSTEM_HEALTH_ALARMS = {"events": [], "statuses": {}, "statuses_at": None}
-# Memory-only; the next watcher tick refills it after a Fly restart.
 _MONITOR_DIGEST = {"digest": None, "received_ts": None}
+_SYSTEM_HEALTH_RESTORED = {"done": False}
+
+
+def _system_health_state_path():
+    return _data_sync_volume_root() / system_health_alerts.STATE_FILE
+
+
+def _restore_system_health_state() -> None:
+    """Load the persisted alarm history/digest once (callers hold _SYSTEM_HEALTH_LOCK)."""
+    if _SYSTEM_HEALTH_RESTORED["done"]:
+        return
+    _SYSTEM_HEALTH_RESTORED["done"] = True
+    try:
+        saved = system_health_alerts.load_state(_system_health_state_path())
+    except Exception as exc:  # noqa: BLE001 - restore is best-effort
+        logger.warning(f"[SYSTEM HEALTH] alert state not restored: {exc}")
+        return
+    if saved["events"]:
+        _SYSTEM_HEALTH_ALARMS["events"] = system_health_alerts.merge_events(saved["events"], _SYSTEM_HEALTH_ALARMS["events"])
+    if saved["statuses"] and not _SYSTEM_HEALTH_ALARMS["statuses"]:
+        _SYSTEM_HEALTH_ALARMS["statuses"] = saved["statuses"]
+        _SYSTEM_HEALTH_ALARMS["statuses_at"] = saved["statuses_at"]
+    digest = monitor_api.sanitize_digest(saved["digest"]) if saved["digest"] is not None else None
+    if digest is not None and _MONITOR_DIGEST["digest"] is None:
+        _MONITOR_DIGEST.update(digest=digest, received_ts=saved["digest_ts"])
+
+
+def _persist_system_health_state() -> None:
+    with _SYSTEM_HEALTH_LOCK:
+        snapshot = {"events": list(_SYSTEM_HEALTH_ALARMS["events"]), "statuses": dict(_SYSTEM_HEALTH_ALARMS["statuses"]),
+                    "statuses_at": _SYSTEM_HEALTH_ALARMS["statuses_at"], "digest": _MONITOR_DIGEST["digest"],
+                    "digest_ts": _MONITOR_DIGEST["received_ts"]}
+    if not system_health_alerts.save_state(_system_health_state_path(), **snapshot):
+        logger.warning("[SYSTEM HEALTH] alert state not persisted (next watcher push refills it)")
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -43543,6 +43580,7 @@ def system_health_report():
     statuses = system_health_alerts.check_statuses(raw)
     digest = monitor_api.sanitize_digest(raw.get("monitor_digest"))
     with _SYSTEM_HEALTH_LOCK:
+        _restore_system_health_state()
         if digest is not None:
             _MONITOR_DIGEST.update(digest=digest, received_ts=time.time())
         _SYSTEM_HEALTH_REPORT["report"] = report
@@ -43553,6 +43591,7 @@ def system_health_report():
         if statuses:
             _SYSTEM_HEALTH_ALARMS["statuses"] = statuses
             _SYSTEM_HEALTH_ALARMS["statuses_at"] = time.time()
+    _persist_system_health_state()
     return jsonify({"ok": True, "verdict": report["verdict"], "alarm_history": {
         "count": len(events), "through": events[-1]["at"] if events else None,
         "through_ts": events[-1]["ts"] if events else None}})
@@ -43560,6 +43599,7 @@ def system_health_report():
 
 def _system_health_alert_history() -> dict:
     with _SYSTEM_HEALTH_LOCK:
+        _restore_system_health_state()
         events = list(_SYSTEM_HEALTH_ALARMS["events"])
         statuses = dict(_SYSTEM_HEALTH_ALARMS["statuses"])
         statuses_at = _SYSTEM_HEALTH_ALARMS["statuses_at"]
@@ -43751,6 +43791,7 @@ def _monitor_summary_payload(now: float) -> dict:
     transfer = _monitor_part(lambda: _volume_health_snapshot(now).get("transfer") or {})
     epoch = _monitor_part(_data_epoch_public)
     with _SYSTEM_HEALTH_LOCK:
+        _restore_system_health_state()
         report = copy.deepcopy(_SYSTEM_HEALTH_REPORT["report"])
         statuses = dict(_SYSTEM_HEALTH_ALARMS["statuses"])
         statuses_at = _SYSTEM_HEALTH_ALARMS["statuses_at"]
@@ -43876,6 +43917,7 @@ def monitor_digest():
     if not monitor_api.bearer_matches(request.headers.get("Authorization"), _MONITOR_READ_TOKEN):
         return _monitor_response({"error": "unauthorized"}, 256, status=401)
     with _SYSTEM_HEALTH_LOCK:
+        _restore_system_health_state()
         stored = copy.deepcopy(_MONITOR_DIGEST)
     return _monitor_response(monitor_api.digest_view(stored, time.time(), BOT_INSTANCE_ID),
                              monitor_api.MAX_DIGEST_BYTES + 1024)

@@ -8,8 +8,17 @@ AUTH = {"X-Bot-Admin-Token": "health-test-token"}
 REMOTE = {"REMOTE_ADDR": "198.51.100.7"}
 
 
-def _bot(monkeypatch):
+def _bot(monkeypatch, tmp_path=None):
     import bot
+
+    if tmp_path is None:
+        import tempfile
+        from pathlib import Path
+        tmp_path = Path(tempfile.mkdtemp())
+    monkeypatch.setattr(bot, "_system_health_state_path", lambda: tmp_path / sha.STATE_FILE)
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_RESTORED, "done", False)
+    monkeypatch.setitem(bot._MONITOR_DIGEST, "digest", None)
+    monkeypatch.setitem(bot._MONITOR_DIGEST, "received_ts", None)
 
     monkeypatch.setattr(bot, "_BOT_ADMIN_TOKEN", "health-test-token")
     monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
@@ -57,3 +66,20 @@ def test_fly_dashboard_has_alerts_section(monkeypatch):
     html = bot.app.test_client().get("/", environ_base=REMOTE).get_data(as_text=True)
     assert 'id="alertsSection"' in html and html.count(sha.SECTION_MARKER) == 1
     assert '"/api/system-health/alerts"' in html
+
+
+def test_fly_alert_history_survives_a_restart_via_the_volume(monkeypatch, tmp_path):
+    bot = _bot(monkeypatch, tmp_path)
+    client = bot.app.test_client()
+    events = [dict(e, at=_iso(time.time() - (NOW - sha._parse_ts(e["at"])))) for e in _events()]
+    body = _report(alarm_events=events, check_status={"ws.ticks": "RED"})
+    assert client.post("/api/system-health/report", json=body, headers=AUTH, environ_base=REMOTE).status_code == 200
+    before = client.get("/api/system-health/alerts", headers=AUTH, environ_base=REMOTE).get_json()
+    assert (tmp_path / sha.STATE_FILE).exists()
+    # Simulated restart: memory wiped, restore pending; the first read serves the persisted history.
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_ALARMS, "events", [])
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_ALARMS, "statuses", {})
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_ALARMS, "statuses_at", None)
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_RESTORED, "done", False)
+    after = client.get("/api/system-health/alerts", headers=AUTH, environ_base=REMOTE).get_json()
+    assert after["events"] == before["events"] and len(after["active"]) == len(before["active"]) > 0

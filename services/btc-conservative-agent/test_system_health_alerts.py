@@ -126,3 +126,23 @@ def test_insights_exposes_alert_history(monkeypatch, tmp_path):
     assert comp["data"]["alerts"][0]["started"]["aest"].endswith("AEST")
     monkeypatch.setattr(insights, "STATE_DIR", str(tmp_path / "absent"))
     assert insights.alerts_component(time.time())["status"] == insights.UNAVAILABLE
+
+
+def test_state_round_trips_and_survives_corruption(tmp_path):
+    path = tmp_path / "vol" / sha.STATE_FILE
+    events = sha.merge_events([], _events(), now=NOW)
+    assert sha.save_state(path, events=events, statuses={"ws.ticks": "RED", "bad": "PURPLE"},
+                          statuses_at=NOW - 60, digest={"schema": "d"}, digest_ts=NOW - 30, now=NOW)
+    got = sha.load_state(path, now=NOW)
+    assert got["events"] == events and got["statuses"] == {"ws.ticks": "RED"}
+    assert got["statuses_at"] == NOW - 60 and got["digest"] == {"schema": "d"} and got["digest_ts"] == NOW - 30
+    history = sha.build_history(got["events"], now=NOW)
+    assert any(e["check"] == "ws.ticks" for e in history["active"])
+    # Retention still applies after a long downtime; a corrupt or foreign file restores nothing.
+    assert sha.load_state(path, now=NOW + (sha.RETAIN_DAYS + 1) * 86400)["events"] == []
+    path.write_text("{not json", encoding="utf-8")
+    assert sha.load_state(path, now=NOW)["events"] == []
+    path.write_text(json.dumps({"schema": "other", "events": events}), encoding="utf-8")
+    assert sha.load_state(path, now=NOW)["events"] == []
+    assert sha.load_state(tmp_path / "missing.json", now=NOW)["digest"] is None
+    assert not list(path.parent.glob("*.tmp-*"))

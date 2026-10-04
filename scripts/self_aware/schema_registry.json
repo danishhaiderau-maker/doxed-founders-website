@@ -33,7 +33,11 @@
 "number"
 ],
 "ai_feature.win_prob": [
+"null",
 "number"
+],
+"ai_feature.win_prob_status": [
+"string"
 ],
 "ai_feature.xvl_trigger_id": [
 "string"
