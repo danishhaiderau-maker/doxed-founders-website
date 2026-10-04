@@ -33,7 +33,8 @@ def _exit(rows, sid):
     return next(row for row in rows if row["id"] == sid)
 
 
-LANE = "FAMILY_DANISH_CF"
+# H-C carries the full catalog as card shadows (its live exit is time + stop only).
+LANE = "FAMILY_PREMIUM_REVERSION_60M"
 SET = registry.tile_shadow_exit_set(LANE)
 
 
@@ -62,9 +63,9 @@ def test_all_tiles_score_the_full_registry_catalog_under_their_own_guards():
         assert "hard_stop_bp" not in by_id["hold_to_horizon"]
         assert by_id["LATE_BE_20_5"]["hard_stop_bp"] == guard["hard_stop_bp"]
         assert "shadow_exit" not in json.dumps(tile["exit_policy"])
-    continuous = registry._shadow_exit_guard("FAMILY_CONTINUOUS_AUG_ORIGINAL")
-    assert continuous == {"hard_stop_bp": 30.0, "backstop_sec": 7200}
-    assert registry._shadow_exit_guard(LANE) == {"hard_stop_bp": 40.0, "backstop_sec": 5400}
+    fade = registry._shadow_exit_guard("FAMILY_COMMITTED_FADE_TAKER_90")
+    assert fade == {"hard_stop_bp": 40.0, "backstop_sec": 5400}
+    assert registry._shadow_exit_guard(LANE) == {"hard_stop_bp": 40.0, "backstop_sec": 3600}
     assert registry._shadow_exit_guard("NOT_A_TILE") == {
         "hard_stop_bp": registry.SHADOW_EXIT_DEFAULT_HARD_STOP_BP,
         "backstop_sec": registry.SHADOW_EXIT_DEFAULT_BACKSTOP_SEC}
@@ -97,7 +98,8 @@ def test_late_breakeven_arms_then_books_worse_of_trigger_and_post_latency_mark()
     be20 = _exit(rows, "LATE_BE_20_5")
     assert be20["triggered"] and be20["reason"] == "LATE_BREAKEVEN"
     assert be20["exit_t_sec"] == 7.0 and be20["net_bp"] == -3.0
-    assert be20["mfe_before_exit_bp"] == 21.0 and be20["label"] and be20["role"] == "CATALOG"
+    expected_role = "CARD_SHADOW" if "LATE_BE_20_5" in registry.ACTIVE_TILE_REGISTRY[LANE]["shadow_exits"] else "CATALOG"
+    assert be20["mfe_before_exit_bp"] == 21.0 and be20["label"] and be20["role"] == expected_role
     assert sxp.is_giveback(be20)
     assert not _exit(rows, "LATE_BE_25_3")["triggered"]
 
@@ -214,7 +216,7 @@ def _replay_row(direction="LONG", filled=True):
         ticks.append({"seq": i + 1, "t": float(i), "price": px, "best_bid": px, "best_ask": px + 1,
                       "observed_ts": T0 + i, "mark_source": "bbo",
                       "depth_bid_qty": 2.0, "depth_ask_qty": 1.0, "depth_best_bid": px, "depth_best_ask": px + 1})
-    return {"schema": "signal_replay_v4", "trade_id": "caug-1", "start_ts": "2026-10-04T00:00:00+00:00",
+    return {"schema": "signal_replay_v4", "trade_id": "ntt-1", "start_ts": "2026-10-04T00:00:00+00:00",
             "direction": direction, "lane": "executed", "virtual_entry": ENTRY if filled else None,
             "virtual_fill_t": 0.0 if filled else None, "entry_price": ENTRY if filled else None,
             "exit_t_rel": 5.0, "exit_reason": "PROFIT_LOCK_LADDER", "replay_complete": True, "ticks": ticks}
@@ -222,7 +224,7 @@ def _replay_row(direction="LONG", filled=True):
 
 def test_record_from_replay_matches_runtime_meta_contract():
     row = _replay_row()
-    meta = {"start_ts": T0, "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "atr14_pct_3m": 0.08,
+    meta = {"start_ts": T0, "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "atr14_pct_3m": 0.08,
             "adx_at_signal": 27.0, "limit_price": ENTRY * 0.999, "policy_signature": "sig"}
     rec = sxp.record_from_replay(row, shadow_set=SET, meta=meta)
     assert rec["filled"] and rec["source"] == sxp.SOURCE_RUNTIME
@@ -299,7 +301,7 @@ def test_public_summary_is_redacted():
     rec = sxp.ShadowExitRecorder(writer=lambda row: True, shadow_set_for=lambda meta: SET)
     rec.process({"replay": _replay_row(), "meta": {"start_ts": T0}})
     blob = json.dumps(rec.public_summary())
-    assert "caug-1" not in blob and "net_bp" not in blob and "entry_price" not in blob
+    assert "ntt-1" not in blob and "net_bp" not in blob and "entry_price" not in blob
     assert len(blob) < 1024
 
 

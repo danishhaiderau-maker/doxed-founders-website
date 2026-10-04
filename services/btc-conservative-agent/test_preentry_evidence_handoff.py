@@ -18,7 +18,7 @@ import pytest
 import ai_shadow_challengers as ai_shadow
 import bot
 import cross_venue_lead as xvl
-import paper_policy_family_xvenue_session_follow_60m as xvs_policy
+import paper_policy_family_premium_reversion_60m as xvs_policy
 
 
 class _HeldWorker:
@@ -286,7 +286,7 @@ def test_wait_returns_on_readiness_and_falls_back_at_the_deadline(monkeypatch):
 
 def test_earlier_tick_sees_the_same_policy_inputs():
     """Readiness changes when the anchor is evaluated, not the 10 s window or thresholds."""
-    rule = xvs_policy.RULE.lead
+    rule = xvl.LeadRule()  # the generic lead rule (lead_lag_report and shadow research)
     anchor = 1_790_000_000
     w = int(rule.lookback_sec)
     history = [100.0] * 40

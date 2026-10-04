@@ -18,19 +18,19 @@ def _store(tmp_path):
          "ai_decision": "APPROVE", "direction": "SHORT"},
         {"schema": "ai_reason_v2", "research_lane": "AI_SCAN", "trade_id": "scan-b",
          "ai_decision": "REJECT", "direction": "SHORT"},
-        {"schema": "ai_reason_outcome_v1", "trade_id": "caug-1"},
+        {"schema": "ai_reason_outcome_v1", "trade_id": "ntt-1"},
     ])
     _write_jsonl(tmp_path / analyzer.DUPLICATE_INTENT_AUDIT_FILE, [
-        {"schema": "duplicate_intent_audit_v1", "trade_id": "caug-1", "shared_ai_call_id": "scan-a",
-         "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "direction": "SHORT"},
-        {"schema": "duplicate_intent_audit_v1", "trade_id": "caug-2", "shared_ai_call_id": "scan-b",
-         "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "direction": "SHORT"},
-        {"schema": "duplicate_intent_audit_v1", "trade_id": "caug-3", "shared_ai_call_id": "scan-a",
-         "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "direction": "SHORT"},
+        {"schema": "duplicate_intent_audit_v1", "trade_id": "ntt-1", "shared_ai_call_id": "scan-a",
+         "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "direction": "SHORT"},
+        {"schema": "duplicate_intent_audit_v1", "trade_id": "ntt-2", "shared_ai_call_id": "scan-b",
+         "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "direction": "SHORT"},
+        {"schema": "duplicate_intent_audit_v1", "trade_id": "ntt-3", "shared_ai_call_id": "scan-a",
+         "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "direction": "SHORT"},
     ])
     _write_jsonl(tmp_path / analyzer.LANE_OPPORTUNITY_CAPTURE_FILE, [
-        {"lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "event": "ORDER_SUBMITTED", "trade_id": trade_id}
-        for trade_id in ("caug-1", "caug-2", "caug-3", "caug-9")
+        {"lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "event": "ORDER_SUBMITTED", "trade_id": trade_id}
+        for trade_id in ("ntt-1", "ntt-2", "ntt-3", "ntt-9")
     ])
 
 
@@ -39,13 +39,13 @@ def test_ai_funnel_attributes_shared_scan_calls_to_tiles(tmp_path, monkeypatch):
     monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     trades = pd.DataFrame([
-        {"trade_id": "caug-1", "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "dir": "SHORT",
+        {"trade_id": "ntt-1", "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "dir": "SHORT",
          "shared_ai_call_id": "scan-a", "net_pnl_usd": 0.05},
-        {"trade_id": "caug-2", "research_lane": "FAMILY_CONTINUOUS_AUG_ORIGINAL", "dir": "SHORT",
+        {"trade_id": "ntt-2", "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "dir": "SHORT",
          "shared_ai_call_id": "scan-b", "net_pnl_usd": -0.04},
     ])
     report = analyzer.ai_funnel_report(trades=trades, session={})
-    lane = json.loads((tmp_path / analyzer.AI_FUNNEL_REPORT_FILE).read_text(encoding="utf-8"))["lanes"]["FAMILY_CONTINUOUS_AUG_ORIGINAL"]
+    lane = json.loads((tmp_path / analyzer.AI_FUNNEL_REPORT_FILE).read_text(encoding="utf-8"))["lanes"]["FAMILY_NOTRADE_FOLLOW_TAKER_60"]
     assert lane["ai_calls"] == 2
     assert lane["ai_linked_orders"] == 3 and lane["ai_unlinked_orders"] == 1
     assert lane["ai_approve_decisions"] == 2 and lane["ai_rejected_orders"] == 1

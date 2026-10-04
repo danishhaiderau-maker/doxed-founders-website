@@ -1,5 +1,5 @@
 {
-  "description": "Frozen parity cases for the registry roster. The Continuous August baseline is the only active tile on the shared 180 s cadence (its own call); the cross-venue tiles (XVL, XVP) are skipped by the runtime fan-out and run on their own per-second clock. Trend Fade 60, Trend Fade 60 committed calls only, the Trend Fade 60 ladder, the three Dynamic Adaptive tiles, the five family tiles and the legacy Continuous lane are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the registry roster (FREEZE21, v12). Every active tile is registered for the shared 180 s cadence fan-out (H-A committed fade, H-B NO_TRADE follow, the random control) or its own per-second cross-venue clock (H-C premium reversion); lane admission then applies each tile's own rules. The three Danish tiles, the Continuous August baseline, the committed-fade maker, the NO_TRADE-follow maker, the cross-venue session follow, Trend Fade 60 (all variants), the three Dynamic Adaptive tiles, the five family tiles and the legacy Continuous lane are retired and must never match or be a benchmark.",
   "cases": [
     {
       "id": "shared-call-long-shared-direction",
@@ -11,9 +11,19 @@
       "direction": "LONG",
       "spread": 4,
       "expect_lanes": [
-        "FAMILY_CONTINUOUS_AUG_ORIGINAL"
+        "FAMILY_COMMITTED_FADE_TAKER_90",
+        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+        "FAMILY_PREMIUM_REVERSION_60M",
+        "FAMILY_RANDOM_CONTROL_TAKER_90"
       ],
       "reject_lanes": [
+        "FAMILY_DANISH_CF",
+        "FAMILY_DANISH_CF_NOES",
+        "FAMILY_DANISH_CF_ALL_SESSIONS",
+        "FAMILY_CONTINUOUS_AUG_ORIGINAL",
+        "FAMILY_COMMITTED_FADE_MAKER_90",
+        "FAMILY_NOTRADE_FOLLOW_MAKER_60",
+        "FAMILY_XVENUE_SESSION_FOLLOW_60M",
         "FAMILY_TREND_FADE_60",
         "FAMILY_TREND_FADE_60_COMMITTED",
         "FAMILY_TREND_FADE_60_LADDER",
@@ -39,9 +49,19 @@
       "direction": "SHORT",
       "spread": 5,
       "expect_lanes": [
-        "FAMILY_CONTINUOUS_AUG_ORIGINAL"
+        "FAMILY_COMMITTED_FADE_TAKER_90",
+        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+        "FAMILY_PREMIUM_REVERSION_60M",
+        "FAMILY_RANDOM_CONTROL_TAKER_90"
       ],
       "reject_lanes": [
+        "FAMILY_DANISH_CF",
+        "FAMILY_DANISH_CF_NOES",
+        "FAMILY_DANISH_CF_ALL_SESSIONS",
+        "FAMILY_CONTINUOUS_AUG_ORIGINAL",
+        "FAMILY_COMMITTED_FADE_MAKER_90",
+        "FAMILY_NOTRADE_FOLLOW_MAKER_60",
+        "FAMILY_XVENUE_SESSION_FOLLOW_60M",
         "FAMILY_TREND_FADE_60",
         "FAMILY_TREND_FADE_60_COMMITTED",
         "FAMILY_TREND_FADE_60_LADDER",

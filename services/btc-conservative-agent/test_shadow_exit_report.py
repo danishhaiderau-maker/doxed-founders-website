@@ -12,9 +12,9 @@ from research import shadow_exit_report as report
 from test_shadow_exit_paths import ENTRY, SET, T0, _replay_row, _ticks
 
 
-def _record(i, source, pnls, lane="FAMILY_CONTINUOUS_AUG_ORIGINAL"):
+def _record(i, source, pnls, lane="FAMILY_NOTRADE_FOLLOW_TAKER_60"):
     ticks = _ticks(pnls, start=T0 + 3600 * i)
-    return sxp.build_record(source=source, trade_id=f"caug-{source[:3]}-{i}", direction="LONG", ticks=ticks,
+    return sxp.build_record(source=source, trade_id=f"ntt-{source[:3]}-{i}", direction="LONG", ticks=ticks,
                             signal_ts=T0 + 3600 * i - 2, fill_ts=T0 + 3600 * i, entry_price=ENTRY,
                             shadow_set=SET, research_lane=lane, exit_ts=T0 + 3600 * i + 6, atr_pct=0.1,
                             horizon_sec=60)
@@ -62,7 +62,7 @@ def test_report_separates_live_headline_from_backfill_archive(stores):
 def test_exit_stats_have_ev_ci_win_and_giveback(stores):
     out = report.build_report(*stores)
     group = out["cohorts"][report.COHORT_LIVE]["groups"][0]
-    assert group["group"] == "FAMILY_CONTINUOUS_AUG_ORIGINAL" and group["filled"] == 6
+    assert group["group"] == "FAMILY_NOTRADE_FOLLOW_TAKER_60" and group["filled"] == 6
     exits = {row["id"]: row for row in group["exits"]}
     assert set(exits) >= {"actual", "LATE_BE_20_5", "COND_CUT_12_5M_MFE2", "COMPOSITE_LATE_BE20_5_TRAIL1.5_ARM2"}
     hold = exits["hold_to_horizon"]
@@ -88,7 +88,7 @@ def test_signal_replay_backfill_is_read_only_and_tile_attributed(tmp_path):
     mirror = tmp_path / "mirror"
     mirror.mkdir()
     closed = {**_replay_row(), "dump_reason": "BUFFER_CLOSED"}
-    opened = {**_replay_row(), "trade_id": "caug-2", "dump_reason": "SNAPSHOT"}
+    opened = {**_replay_row(), "trade_id": "ntt-2", "dump_reason": "SNAPSHOT"}
     source = mirror / "signal_replay.jsonl"
     _write(source, [closed, closed, opened])
     before = source.read_bytes()
@@ -99,7 +99,7 @@ def test_signal_replay_backfill_is_read_only_and_tile_attributed(tmp_path):
     assert stats["written"] == 1 and stats["skipped_duplicate"] == 1 and stats["skipped_open"] == 1
     row = json.loads((tmp_path / "bf" / "signal_replay_backfill.jsonl").read_text(encoding="utf-8"))
     assert row["source"] == sxp.SOURCE_BACKFILL_REPLAY
-    assert row["tile"] == registry.tile_lane_for_trade_id("caug-1")
+    assert row["tile"] == registry.tile_lane_for_trade_id("ntt-1")
 
 
 def test_backfill_refuses_onedrive_output(tmp_path):
@@ -149,7 +149,7 @@ const document = {getElementById: element};
 def test_dashboard_loader_renders_side_by_side_tables(stores, tmp_path):
     payload = {**report.build_report(*stores), "status": "OK", "age_sec": 5}
     html = json.dumps(_render_shadow_loader(payload, tmp_path))
-    assert "FAMILY_CONTINUOUS_AUG_ORIGINAL" in html and "LATE_BE_20_5" in html
+    assert "FAMILY_NOTRADE_FOLLOW_TAKER_60" in html and "LATE_BE_20_5" in html
     assert "HEADLINE" in html and "REALISTIC_V1" in html
     missing = _render_shadow_loader({"status": "MISSING", "cohorts": {}}, tmp_path)
     assert "MISSING" in json.dumps(missing) or "No shadow-exit report" in json.dumps(missing)

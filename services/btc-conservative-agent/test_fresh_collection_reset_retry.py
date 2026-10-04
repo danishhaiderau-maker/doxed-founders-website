@@ -1,4 +1,5 @@
 """Bounded reset-intent retry contract without importing the live bot app."""
+import importlib
 import ast
 from pathlib import Path
 import threading
@@ -42,6 +43,8 @@ def wrapper_env():
         "_FRESH_RESET_QUIESCE_RETRY_SEC": 0.25,
     }
     env["_perform_fresh_collection_reset_locked"] = Mock()
+    env["_research_freeze"] = importlib.import_module("research_freeze")
+    env["_research_freeze_check"] = lambda *args, **kwargs: {"allowed": True}
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), env)
     env["clock"] = clock
     return env

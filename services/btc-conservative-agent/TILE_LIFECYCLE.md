@@ -55,8 +55,7 @@ hash chain once per `RESEARCH_STACK_VERSION` (batch
 
 `SHADOW_EXIT_SET` is the one named shadow-exit catalog; a tile's `shadow_exits`
 ids are the ones its card lists. `tile_shadow_exit_set(lane)` translates the
-whole catalog into recorder specs for every tile (including the empty-card
-baseline), each guarded by that tile's own hard stop and `max_duration_sec`
+whole catalog into recorder specs for every tile, each guarded by that tile's own hard stop and `max_duration_sec`
 backstop, with `role` CARD_SHADOW / CATALOG / REFERENCE. The set is metadata
 only: it is outside `policy_signature`, places no order, and is validated by
 `validate_tile_registry()` (family translation, supported kinds, composite
@@ -72,12 +71,49 @@ Adding a new exit family requires the evaluator, `SHADOW_EXIT_FAMILY_KINDS` and
 tests in one change; retiring a tile removes nothing here because the catalog is
 generic.
 
-## Baseline benchmark
+## Control and baseline
 
-`FAMILY_CONTINUOUS_AUG_ORIGINAL` is the permanent baseline: paper-only,
-relay-blocked, default ON. It is never retired with an experiment roster
-change, never a promotion candidate, and every other tile is reported against
-it. Replacing it needs an explicit owner request and a new signed lane.
+FREEZE21 (v12, owner-approved 2026-10-04) retired the Continuous August
+baseline (`FAMILY_CONTINUOUS_AUG_ORIGINAL`) on the owner's explicit request to
+replace the eight tiles with three hypotheses plus one control. The yardstick
+is now the Random control (`FAMILY_RANDOM_CONTROL_TAKER_90`): H-A's calls,
+entry, session gate and exits with a deterministic coin side, registered with
+`pre_registration.role = "CONTROL"`. It is paper-only, relay-blocked, never a
+deflated-Sharpe trial and never promoted; its mean is the execution cost every
+hypothesis is read against, and a control CI lower bound above 0 flags
+`FILL_MODEL_SUSPECT`. The analyzer pairs H-A against it (`vs_control`).
+`baseline_role` remains supported by `tile_paired_comparison.baseline_lane`,
+but no tile declares it today.
+
+## 21-day research freeze
+
+`research_freeze.py` declares one freeze (`FREEZE21-20261004`) over one data
+epoch (`ce-20261004-v31-freeze21`): 21 days from that epoch's
+`data_epoch.json` start. During the freeze:
+
+- no tile is added, removed or reordered and no rule changes: CI
+  (`test_research_freeze.py`) compares `ACTIVE_TILE_ORDER`,
+  `active_tile_registry_signature()`, `RESEARCH_STACK_VERSION` and the
+  `fly.toml` `DATA_EPOCH_ID` to the declaration;
+- every reset path (`perform_fresh_collection_reset` behind `/api/reset`,
+  `/api/toggle_fresh_collection`, `/api/wipe_fly_only` and
+  `/api/fresh_epoch_reset`; `clean_epoch_wipe.py --pre-start execute`) refuses
+  with 409 `RESEARCH_FREEZE_ACTIVE`, except the deploy workflow's one boundary
+  reset during the first 60 minutes (status `OPENING`);
+- `/api/toggle_research_lane` may turn a frozen tile back ON; turning it OFF
+  (or toggling any other lane) needs the override.
+
+Override (documented, logged, never silent): request body
+`"freeze_override": {"confirmation": "BREAK_21_DAY_RESEARCH_FREEZE",
+"reason": "<at least 10 characters>"}`, or the env pair
+`RESEARCH_FREEZE_OVERRIDE=BREAK_21_DAY_RESEARCH_FREEZE` and
+`RESEARCH_FREEZE_OVERRIDE_REASON`. A kill-rule toggle uses the reason
+`KILL_RULE:<lane>:<rule>` (for example
+`KILL_RULE:FAMILY_NOTRADE_FOLLOW_TAKER_60:K4`). A code change to the frozen
+registry or epoch needs `research_freeze.CODE_OVERRIDE` set with the owner's
+approval (who, when, why); lifting the freeze sets `FREEZE_STATUS = "LIFTED"`.
+At day 21 each hypothesis gets its pre-registered decision (PASS -> owner
+review, never relay; FAIL or INCONCLUSIVE -> retire with the procedure below).
 
 ## Retire a tile
 

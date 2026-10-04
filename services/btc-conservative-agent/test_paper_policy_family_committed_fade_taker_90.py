@@ -1,22 +1,25 @@
-"""Dedicated contract for Tile H11: committed-call fade with a taker entry, 90-min hold."""
+"""Dedicated contract for FREEZE21 H-A: canonical committed-call fade, Asia+EU, taker entry, 90-min hold."""
 import copy
 
 import pytest
 
 import bot
-import paper_policy_family_committed_fade_maker_90 as maker
 import paper_policy_family_committed_fade_taker_90 as policy
 from adaptive_regime_entry import ACTION_STAND_ASIDE, ACTION_TAKER
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     COMBO_LANE_SPECS,
     COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID,
+    FREEZE21_ID,
+    RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RETIRED_POLICY_IDENTITIES,
     resolve_score_led_paper_admission,
     validate_tile_registry,
 )
 
 NOW = 1_790_000_000.0
+# v11 H11 identity: entry and exits are unchanged, so the signature is too.
+V11_H11_SIGNATURE_PREFIX = "874a620a51c7"
 
 
 def _admission(ai):
@@ -33,32 +36,45 @@ def _ai(long_score=70, short_score=30, raw_direction=None, **extra):
             "decision": "APPROVE", "long_score": long_score, "short_score": short_score, **extra}
 
 
-def test_registry_owns_a_paper_only_relay_ineligible_default_off_tile():
+def test_registry_owns_the_first_paper_only_relay_ineligible_freeze_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[5] == policy.LANE
+    assert ACTIVE_TILE_ORDER[0] == policy.LANE
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
-    assert spec["live_copy_eligible"] is False and spec["default_enabled"] is False
+    assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["id_prefix"] == "cft" and spec["max_active_signals"] == 3
     assert spec["entry_ttl_sec"] == 3 and spec["path_end_sec"] == 5400
     assert spec["admission_treatment"] == COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID
     assert policy.POLICY_ID == spec["raw_policy_id"] not in RETIRED_POLICY_IDENTITIES
-    assert policy.POLICY_ID != maker.POLICY_ID and policy.POLICY_SIGNATURE != maker.POLICY_SIGNATURE
+    assert policy.POLICY_SIGNATURE.startswith(V11_H11_SIGNATURE_PREFIX)
     assert spec["entry_policy"]["trades_raw_ai_no_trade"] is False
     assert spec["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
-    assert spec["pre_registration"]["kill"]["k1_after_fills"] == 80
-    assert spec["pre_registration"]["kill"]["k4_max_drawdown_usd"] == 1.0
-    assert spec["pre_registration"]["promotion"]["min_fills"] == 150
+    assert spec["entry_policy"]["allowed_sessions"] == ("ASIA", "EU")
+    assert spec["exit_policy"]["max_duration_sec"] == 5400
 
 
-@pytest.mark.parametrize("raw", [_ai(70, 30), _ai(30, 70), _ai(55, 45),
-                                 _ai(62, 38, raw_direction="NO_TRADE"), _ai(70, 30, raw_direction="SHORT"),
-                                 _ai(50, 50), _ai(70, 30, ai_error=True)])
-def test_admission_matches_the_committed_fade_maker_call_for_call(raw):
+def test_pre_registration_declares_target_kill_rule_and_day21_decision():
+    pre = COMBO_LANE_SPECS[policy.LANE]["pre_registration"]
+    assert pre["schema"] == "tile_pre_registration_freeze21_v1" and pre["role"] == "HYPOTHESIS"
+    assert pre["freeze_id"] == FREEZE21_ID
+    assert pre["control_lane"] == RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90
+    assert pre["target"]["min_distinct_hours"] == 150
+    assert pre["kill"]["k1_after_distinct_hours"] == 80 and pre["kill"]["k1_mean_bp_at_or_below"] == 0.0
+    assert pre["kill"]["k4_max_drawdown_usd"] == 3.0
+    assert pre["day21"]["decision_day"] == 21 and pre["day21"]["bonferroni_hypotheses"] == 3
+    assert pre["day21"]["per_test_alpha"] == pytest.approx(0.05 / 3)
+    assert {"pass", "fail", "inconclusive"} <= set(pre["day21"])
+
+
+@pytest.mark.parametrize("raw,accepted,direction", [
+    (_ai(70, 30), True, "SHORT"), (_ai(30, 70), True, "LONG"), (_ai(55, 45), True, "SHORT"),
+    (_ai(62, 38, raw_direction="NO_TRADE"), False, "NO_TRADE"),
+    (_ai(70, 30, raw_direction="SHORT"), False, "NO_TRADE"),
+    (_ai(50, 50), False, "NO_TRADE"), (_ai(70, 30, ai_error=True), False, "NO_TRADE"),
+])
+def test_admission_fades_only_committed_calls(raw, accepted, direction):
     ours = policy.lane_admission(raw, _admission(raw))
-    theirs = maker.lane_admission(raw, _admission(raw))
-    assert (ours["accepted"], ours["direction"], ours["reason"]) == (
-        theirs["accepted"], theirs["direction"], theirs["reason"])
+    assert (ours["accepted"], ours["direction"]) == (accepted, direction)
     if ours["accepted"]:
         assert ours["lane_ai"]["effective_research_admission_policy_id"] == COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID
 
@@ -81,12 +97,12 @@ def test_exit_and_dashboard_disclose_inverted_committed_taker():
     assert policy.EXIT["max_duration_sec"] == 5400 and policy.EXIT["hard_stop_bps"] == 40.0
     payload = policy.dashboard_policy()
     chips = " ".join(payload["filter_chips"])
-    assert "PAPER ONLY" in chips and "HINT" in chips
+    assert "PAPER ONLY" in chips and "FREEZE21 hypothesis" in chips
     assert "Side = opposite of score-led AI side" in chips
     assert "Only committed calls" in chips and "Never fades NO_TRADE" in chips
     assert "Taker cap 5bps" in chips and "90m time exit" in chips and "Max 3 open positions" in chips
     assert "opposite of the AI's committed side" in payload["entry"]["trigger"]
-    assert payload["pre_registration"]["hypothesis_id"] == "H11_COMMITTED_FADE_TAKER_90_20261004"
+    assert payload["pre_registration"]["hypothesis_id"] == "FREEZE21_HA_COMMITTED_FADE_TAKER_90"
 
 
 def test_runtime_tile_view_refuses_uncommitted_and_inverts_committed():

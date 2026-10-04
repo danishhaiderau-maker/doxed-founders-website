@@ -125,7 +125,6 @@ def run():
                 "trading_direction",
                 "trading_confirmation",
                 "trading_direction_shadow",
-                "trading_direction_continuous_aug",
             }),
         )
         analyzer_source = (

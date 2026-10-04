@@ -94,6 +94,23 @@ liveness for liquidation feeds only (new `alive_age_sec`); `age_sec` still means
 real message". Until then, treat `liq_okx` DEGRADED as expected unless the reconnect count rises or the
 age exceeds a few minutes.
 
+## 8. Which tiles run now, and what is the 21-day freeze?
+
+From PR-A (registry `v31-freeze21-3h1c-v12`, owner-approved 2026-10-04 15:02 AEDT) the paper
+roster is exactly four tiles, all paper-only and relay-ineligible:
+`FAMILY_COMMITTED_FADE_TAKER_90` (H-A, committed-AI fade, Asia+EU, taker, 90-min exit),
+`FAMILY_NOTRADE_FOLLOW_TAKER_60` (H-B, NO_TRADE-lean follow, taker),
+`FAMILY_PREMIUM_REVERSION_60M` (H-C, no AI: Binance/Bybit-vs-Bitfinex premium mean reversion) and
+`FAMILY_RANDOM_CONTROL_TAKER_90` (control: random side, H-A's calls and exits = execution cost).
+The Danish, Continuous, maker and session-follow tiles are retired. Each tile's `pre_registration`
+(target n_eff, kill rules K1/K3/K4/K6, day-21 pass/fail/inconclusive) is in `active_tiles`.
+
+The freeze runs 21 days from the start of data epoch `ce-20261004-v31-freeze21`;
+`/api/status.research_freeze` shows `status` (`OPENING`/`ACTIVE`/`COMPLETE`), `day` and
+`ends_at_utc`. While it is guarded, resets and tile-OFF toggles answer 409
+`RESEARCH_FREEZE_ACTIVE` unless sent with the documented `freeze_override`; a 409 there is the
+guard working, not an outage. Full protocol: `diagnostics/FREEZE21-PROTOCOL-20261004.md`.
+
 ## Known false alarms
 
 - `RELAY_OUTBOX_STALE_OWNER_PENDING` / monitor `relay_stale_owner_pending` with 22 events from old
@@ -113,3 +130,4 @@ age exceeds a few minutes.
   `retired_tile_boundary_receipts.jsonl` and `pre_entry_evidence_handoffs.jsonl` carry the note "ops
   stream, not analyzer evidence". Their pre-epoch or undated rows are by design and never count
   toward purity (`data_epoch.NON_EVIDENCE_BASES`).
+- `RESEARCH_FREEZE_ACTIVE` 409 on a reset or tile toggle during the freeze: expected, see 8.

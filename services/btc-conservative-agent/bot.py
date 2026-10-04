@@ -87,6 +87,7 @@ import numpy as np
 import pytz
 
 import bitfinex_cost_profile
+import research_freeze as _research_freeze
 
 from combo_pathway_config import (
     tile_card_sections as combo_tile_card_sections,
@@ -95,7 +96,6 @@ from combo_pathway_config import (
     ACTIVE_TILE_REGISTRY,
     AI_PROMPT_INPUT_REVISION,
     AI_COMMIT_MIN_SCORE_GAP,
-    CONTINUOUS_AUG_ADMISSION_POLICY_ID,
     TILE_ARCHITECTURE_VERSION,
     TILE_REGISTRY_SCHEMA,
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
@@ -8541,7 +8541,6 @@ TRADING_AI_ALLOWED_PURPOSES = frozenset({
     "trading_direction",
     "trading_confirmation",
     "trading_direction_shadow",
-    "trading_direction_continuous_aug",
 })
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
@@ -20565,7 +20564,7 @@ def _run_own_ai_tile_call(payload: dict) -> None:
         "own_ai_call": True,
         "source": "OWN_AI_CALL",
         "ai_prompt_id": policy.PROMPT_ID,
-        "effective_research_admission_policy_id": CONTINUOUS_AUG_ADMISSION_POLICY_ID,
+        "effective_research_admission_policy_id": (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment"),
         "bull_score": 0,
         "bear_score": 0,
     }
@@ -32753,8 +32752,12 @@ _FRESH_RESET_QUIESCE_TIMEOUT_SEC = 15.0
 _FRESH_RESET_QUIESCE_RETRY_SEC = 0.25
 
 
-def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
+def perform_fresh_collection_reset(send_local_signal: bool = True, freeze_override=None) -> dict:
     """Dashboard-triggered archive+wipe: never delete without verified archive first.
+
+    Refused with ``RESEARCH_FREEZE_ACTIVE`` inside the 21-day research freeze
+    (research_freeze.py) unless ``freeze_override`` (or the environment
+    override) carries the documented confirmation and a reason.
 
     ``send_local_signal=True`` (the default, used by the Fresh Collection
     toggle) bumps ``state['fresh_collection_signal_ts']`` so the local sync
@@ -32763,6 +32766,10 @@ def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
     ``/api/wipe_fly_only`` button which clears the Fly volume but retains
     the local mirror for offline analysis.
     """
+    freeze = _research_freeze_check(_research_freeze.ACTION_RESET, override=freeze_override)
+    if not freeze["allowed"]:
+        return {"ok": False, "wipe_aborted": True, "error": freeze["error"], "summary": freeze["summary"],
+                "research_freeze": freeze["freeze"]}
     if not _fresh_collection_lock.acquire(blocking=False):
         logger.warning("[FRESH COLLECTION] Reset already in progress — ignored duplicate request [PIPELINE ENFORCEMENT]")
         return {
@@ -43973,6 +43980,7 @@ def status():
         "data_epoch": _data_epoch_public(),
         "canonical_epoch": _canonical_epoch_public(),
         "runtime_hygiene": _runtime_hygiene_public(),
+        "research_freeze": _research_freeze_public(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -45340,10 +45348,19 @@ def toggle_research_lane():
         return jsonify({"error": f"Lane {lane} is RETIRED — cannot enable spawn"}), 400
     with state_lock:
         enabled = dict(research_lane_enabled_map())
-        if "enabled" in data and data["enabled"] is not None:
-            enabled[lane] = bool(data["enabled"])
-        else:
-            enabled[lane] = not bool(enabled.get(lane, True))
+        current = bool(enabled.get(lane, True))
+        target = bool(data["enabled"]) if "enabled" in data and data["enabled"] is not None else not current
+    if target != current:
+        freeze = _research_freeze_check(
+            _research_freeze.ACTION_TILE_ON if target else _research_freeze.ACTION_TILE_OFF,
+            override=data.get("freeze_override"), lane=lane,
+        )
+        if not freeze["allowed"]:
+            return jsonify({"ok": False, "lane": lane, "enabled": current, "error": freeze["error"],
+                            "summary": freeze["summary"], "research_freeze": freeze["freeze"]}), 409
+    with state_lock:
+        enabled = dict(research_lane_enabled_map())
+        enabled[lane] = target
         state["research_lane_enabled"] = enabled
     save_persistent_config()
     suspend_result = None
@@ -45385,7 +45402,8 @@ def toggle_debug():
 @app.route('/api/reset', methods=['POST'])
 def api_reset_showcase():
     """Admin/platform: wipe all research artifacts and restart session at $500."""
-    result = perform_fresh_collection_reset()
+    data = request.get_json(silent=True) or {}
+    result = perform_fresh_collection_reset(**_freeze_override_kwargs(data))
     status = 200 if result.get("ok") else 409
     return jsonify({
         "ok": bool(result.get("ok")),
@@ -45420,7 +45438,7 @@ def toggle_fresh_collection():
         with state_lock:
             if state.get("live_armed"):
                 return jsonify({"error": "Disable LIVE ARM before fresh collection reset"}), 400
-        result = perform_fresh_collection_reset()
+        result = perform_fresh_collection_reset(**_freeze_override_kwargs(data))
         if not result.get("ok"):
             return jsonify({
                 "error": result.get("summary") or result.get("error") or "reset failed",
@@ -45462,7 +45480,8 @@ def wipe_fly_only():
                 "message": "Disable LIVE ARM before wiping Fly data",
             }), 400
     wiped_at = time.time()
-    result = perform_fresh_collection_reset(send_local_signal=False)
+    data = request.get_json(silent=True) or {}
+    result = perform_fresh_collection_reset(send_local_signal=False, **_freeze_override_kwargs(data))
     if not result.get("ok"):
         return jsonify({
             "status": "error",
@@ -45687,7 +45706,7 @@ def api_fresh_epoch_reset():
     if age_s < 0 or age_s > 60:
         return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
 
-    result = perform_fresh_collection_reset(send_local_signal=True)
+    result = perform_fresh_collection_reset(send_local_signal=True, **_freeze_override_kwargs(data))
     epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
     if result.get("ok"):
         # The presentation snapshot is intentionally long-lived.  Publish the
@@ -53300,6 +53319,30 @@ def _data_epoch_boundary_status(manifest: dict) -> dict | None:
         return out
     except Exception:
         return None
+
+
+def _research_freeze_check(action: str, override=None, lane: str | None = None) -> dict:
+    """research_freeze verdict against the live epoch manifest; an override use is logged loudly."""
+    verdict = _research_freeze.check(action, globals().get("_DATA_EPOCH_MANIFEST"), time.time(),
+                                     override=override, configured_epoch=DATA_EPOCH_ID, lane=lane)
+    if verdict.get("override"):
+        logger.warning(
+            f"[RESEARCH FREEZE] {_research_freeze.FREEZE_ID} override used for {action} lane={lane} "
+            f"source={verdict['override']['source']} reason={verdict['override']['reason']!r} [PIPELINE ENFORCEMENT]"
+        )
+    elif not verdict["allowed"]:
+        logger.warning(f"[RESEARCH FREEZE] refused {action} lane={lane} [PIPELINE ENFORCEMENT]")
+    return verdict
+
+
+def _freeze_override_kwargs(data) -> dict:
+    """Forward a request-body freeze_override to perform_fresh_collection_reset only when one was sent."""
+    override = (data or {}).get("freeze_override") if isinstance(data, dict) else None
+    return {"freeze_override": override} if override is not None else {}
+
+
+def _research_freeze_public() -> dict:
+    return _research_freeze.freeze_status(globals().get("_DATA_EPOCH_MANIFEST"), time.time(), DATA_EPOCH_ID)
 
 
 def _data_epoch_public() -> dict:

@@ -6,8 +6,13 @@ Everything is read from the bound lane's registry spec:
   trades the score-led side of the one shared AI call and
   ``INVERTED_SCORE_LED_SIDE`` the opposite side (only a score tie, invalid
   scores or an AI error refuse, unless the entry declares a commit rule via
-  ``trades_raw_ai_no_trade`` / ``min_score_gap``); the cross-venue sources take
-  their side from the per-second cross-venue evaluator.
+  ``trades_raw_ai_no_trade`` / ``min_score_gap``, or
+  ``trades_only_raw_ai_no_trade`` to trade only calls where the raw AI
+  abstained); ``RANDOM_COIN_ON_COMMITTED_CALL`` admits the same calls as the
+  commit rule but takes its side from a deterministic coin (sha256 of the
+  entry's ``coin_salt`` and the shared call id), the execution-cost control;
+  the cross-venue sources take their side from the per-second cross-venue
+  evaluator.
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
@@ -21,6 +26,7 @@ Everything is read from the bound lane's registry spec:
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
 from typing import Any, Mapping
 
@@ -50,9 +56,27 @@ from family_policy_common import (
 # (cross_venue_session_follow.py: either the lead or the premium rule), never
 # from the shared AI call.
 CROSS_VENUE_LEAD_OR_PREMIUM = "CROSS_VENUE_LEAD_OR_PREMIUM"
-CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD_OR_PREMIUM})
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"}) | CROSS_VENUE_SOURCES
+# Premium-only clock (cross_venue_premium.PremiumEvaluator): side toward the
+# leaders when their premium leaves its trailing mean (Bitfinex convergence).
+CROSS_VENUE_PREMIUM = "CROSS_VENUE_PREMIUM"
+CROSS_VENUE_SOURCES = frozenset({CROSS_VENUE_LEAD_OR_PREMIUM, CROSS_VENUE_PREMIUM})
+# Execution-cost control: the commit rule's calls with a deterministic coin side.
+RANDOM_COIN_ON_COMMITTED_CALL = "RANDOM_COIN_ON_COMMITTED_CALL"
+DIRECTION_SOURCES = (
+    frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", RANDOM_COIN_ON_COMMITTED_CALL}) | CROSS_VENUE_SOURCES
+)
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
+
+
+def coin_side(salt: str, call_id: Any) -> str | None:
+    """Deterministic coin for one shared call: even first sha256 byte LONG, odd SHORT; None without an id."""
+    text = str(call_id or "").strip()
+    if not text:
+        return None
+    digest = hashlib.sha256(f"{salt}|{text}".encode("utf-8")).digest()
+    return "LONG" if digest[0] % 2 == 0 else "SHORT"
+
+
 # Dashboard evidence badge per registry hypothesis status (honest-label strength).
 EVIDENCE_BADGES = {
     "HINT_3D_WALK_FORWARD_CI_SPANS_0": "HINT — 3-day walk-forward, CI spans 0",
@@ -60,6 +84,9 @@ EVIDENCE_BADGES = {
     "HINT_SHORT_RECHECK_CI_SPANS_0": "HINT — 1.3-day re-check, CI spans 0",
     "HINT_4D_REPLAY_CI_LOWER_NEAR_0": "HINT — 4-day replay, CI lower bound near 0",
     "HINT_4D_REPLAY_CI_SPANS_0": "HINT — 4-day replay, CI spans 0",
+    "FREEZE21_HYPOTHESIS_HINT_CI_SPANS_0": "FREEZE21 hypothesis — HINT, CI spans 0",
+    "FREEZE21_HYPOTHESIS_DESCRIPTIVE_ONLY": "FREEZE21 hypothesis — descriptive only, no replay",
+    "FREEZE21_CONTROL": "FREEZE21 control — random side, measures execution cost",
 }
 
 
@@ -173,11 +200,24 @@ class TakerTimeExitBinding:
             reason = str(admission.get("reason") or "SCORE_LED_SIDE_UNAVAILABLE")
         else:
             reason = committed_call_refusal(self.entry, raw, admission, score_led)
+        source = self.entry["direction_source"]
+        if reason is None and self.entry.get("trades_only_raw_ai_no_trade"):
+            if str(raw.get("raw_direction") or "").upper() in _OPPOSITE:
+                reason = "RAW_AI_COMMITTED"
+        coin = None
+        if reason is None and source == RANDOM_COIN_ON_COMMITTED_CALL:
+            coin = coin_side(self.entry["coin_salt"], raw.get("shared_ai_call_id") or raw.get("trade_id"))
+            if coin is None:
+                reason = "NO_CALL_ID_FOR_COIN"
         accepted = reason is None
-        direction = (
-            (_OPPOSITE[score_led] if self.entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else score_led)
-            if accepted else "NO_TRADE"
-        )
+        if not accepted:
+            direction = "NO_TRADE"
+        elif source == RANDOM_COIN_ON_COMMITTED_CALL:
+            direction = coin
+        elif source == "INVERTED_SCORE_LED_SIDE":
+            direction = _OPPOSITE[score_led]
+        else:
+            direction = score_led
         lane_ai = copy.deepcopy(raw)
         lane_ai.update({
             "raw_direction": str(raw.get("raw_direction") or raw.get("direction") or "UNKNOWN").upper(),
@@ -190,6 +230,7 @@ class TakerTimeExitBinding:
             "research_soft": "APPROVE" if accepted else "REJECT",
             "direction_source": self.entry["direction_source"],
             "score_led_direction": score_led or None,
+            **({"coin_side": coin, "coin_salt": self.entry["coin_salt"]} if coin else {}),
             "effective_research_admission": copy.deepcopy(admission),
             "effective_research_admission_policy_id": self.admission_policy_id,
             "effective_research_direction": direction,
@@ -300,6 +341,8 @@ class TakerTimeExitBinding:
         max_open = int(exit_policy.get("max_open_positions") or 1)
         committed = not entry.get("trades_raw_ai_no_trade", True)
         inverted = source == "INVERTED_SCORE_LED_SIDE"
+        random_side = source == RANDOM_COIN_ON_COMMITTED_CALL
+        only_no_trade = bool(entry.get("trades_only_raw_ai_no_trade"))
         exit_chips = (
             [
                 f"Ladder {self.spec.ladder_label}",
@@ -310,8 +353,11 @@ class TakerTimeExitBinding:
         )
         payload["filter_chips"] = [
             "PAPER ONLY", *([evidence_badge(tile)] if evidence_badge(tile) else []),
-            "Side = opposite of score-led AI side" if inverted else "Side = score-led AI side",
+            ("Side = deterministic coin (execution-cost control), never the AI" if random_side
+             else "Side = opposite of score-led AI side" if inverted else "Side = score-led AI side"),
             *(["Only committed calls: explicit AI side matching the scores", "Never fades NO_TRADE"] if committed else []),
+            *(["Only AI NO_TRADE calls: score-led side when the AI abstains",
+               "Never trades an explicit AI LONG/SHORT"] if only_no_trade else []),
             *session_chips(entry),
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
@@ -321,8 +367,12 @@ class TakerTimeExitBinding:
             f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
         trigger = "Shared three-minute call; " + (
-            "opposite of the AI's committed side (explicit LONG/SHORT matching the scores; NO_TRADE, mismatches, "
+            "the AI's committed calls (explicit LONG/SHORT matching the scores) with a random side from a "
+            "deterministic coin; NO_TRADE, mismatches, ties and errors refuse" if random_side
+            else "opposite of the AI's committed side (explicit LONG/SHORT matching the scores; NO_TRADE, mismatches, "
             "ties and errors refuse)" if committed and inverted
+            else "score-led side only when the raw AI returned NO_TRADE (explicit LONG/SHORT, ties, invalid scores "
+            "and errors refuse)" if only_no_trade
             else "opposite of the score-led side" if inverted else "score-led side"
         )
         payload["entry"].update({
@@ -364,15 +414,25 @@ class TakerTimeExitBinding:
         venues = "/".join(v.capitalize() for v in entry["leader_venues"])
         hold = int(exit_policy["max_duration_sec"])
         sessions = "/".join(entry["allowed_sessions"])
-        side_chip = (
-            f"Side = {venues} lead >={entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s OR premium "
-            f"vs {int(entry['premium_mean_window_sec']) // 60}-min mean >=+{entry['premium_long_threshold_bps']:g}"
-            f" / <={entry['premium_short_threshold_bps']:g}bp; opposite triggers -> no trade"
+        premium = (
+            f"premium vs {int(entry['premium_mean_window_sec']) // 60}-min mean >=+"
+            f"{entry['premium_long_threshold_bps']:g} / <={entry['premium_short_threshold_bps']:g}bp"
         )
-        trigger = (
-            f"Per-second cross-venue evaluator (no AI), this tile's own copy of the lead and premium rules; "
-            f"trades only in the frozen UTC session map ({sessions})"
-        )
+        if entry["direction_source"] == CROSS_VENUE_PREMIUM:
+            side_chip = f"Side = toward {venues} when their {premium} (Bitfinex convergence)"
+            trigger = (
+                f"Per-second cross-venue premium evaluator (no AI); at most one entry per "
+                f"{int(entry.get('min_submit_interval_sec') or 5)}s; sessions {sessions}"
+            )
+        else:
+            side_chip = (
+                f"Side = {venues} lead >={entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s OR "
+                f"{premium}; opposite triggers -> no trade"
+            )
+            trigger = (
+                f"Per-second cross-venue evaluator (no AI), this tile's own copy of the lead and premium rules; "
+                f"trades only in the frozen UTC session map ({sessions})"
+            )
         payload["filter_chips"] = [
             "PAPER ONLY", evidence_badge(tile) or "HINT",
             side_chip,

@@ -12,7 +12,7 @@ import time
 import pytest
 
 import bot
-import paper_policy_family_xvenue_session_follow_60m as xvs_policy
+import paper_policy_family_premium_reversion_60m as xvs_policy
 import research_v3_bridge as bridge
 import tile_paired_comparison as tpc
 
