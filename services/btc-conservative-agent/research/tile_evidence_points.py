@@ -751,11 +751,19 @@ def _read_jsonl(path: str | None, keep: Callable[[dict], bool] | None = None,
     return rows
 
 
-def load_evidence_inputs(resolve: Callable[[str], str | None]) -> dict[str, Any]:
-    """Read every source ledger through the analyzer's data-path resolver."""
+def load_evidence_inputs(resolve: Callable[[str], str | None],
+                         admit: Callable[[str, dict], bool] | None = None) -> dict[str, Any]:
+    """Read every source ledger through the analyzer's data-path resolver.
+
+    ``admit`` is the analyzer's clean-epoch guard; the expiry ledger survives the
+    boundary reset with pre-epoch rows (``data_epoch.READ_GUARDED_BASES``, #420).
+    """
+    expired = _read_csv(resolve(EXPIRED_FILE))
+    if admit is not None:
+        expired = [row for row in expired if admit(EXPIRED_FILE, row)]
     return {
         "trades": _read_csv(resolve(TRADES_FILE)),
-        "expired": _read_csv(resolve(EXPIRED_FILE)),
+        "expired": expired,
         "opportunities": _read_jsonl(resolve(OPPORTUNITY_FILE),
                                      lambda r: r.get("event") in {"ORDER_SUBMITTED", "FILLED"},
                                      ("lane", "trade_id", "event", "ts")),

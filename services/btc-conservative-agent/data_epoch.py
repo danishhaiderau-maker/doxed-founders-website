@@ -48,6 +48,23 @@ EPOCH_INDEPENDENT_BASES = frozenset({
 # Content-addressed / tape directories that are not row streams of one epoch.
 EPOCH_AUDIT_SKIP_DIRS = ("v3/receipts", "v3/market_segments", "v3/lifecycle_bundle_index",
                          "research-timing-declarations", "corrupt_evidence_quarantine")
+# Operational ledgers that are never analyzer evidence (relay delivery guard archive and its retirement
+# ledger, runtime telemetry, tile-retirement and pre-entry handoff receipts). They legitimately span epochs
+# (restart recovery / audit trail), are read by no analyzer path, and are excluded from the epoch-purity
+# audit and from the compatibility RED rule (issue #420). Top-level runtime files only.
+NON_EVIDENCE_BASES = frozenset({
+    "relay_outbox_quarantine.jsonl", "relay_outbox_retired.jsonl", "runtime_telemetry_1m.jsonl",
+    "retired_tile_boundary_receipts.jsonl", "pre_entry_evidence_handoffs.jsonl",
+})
+# Evidence streams that survive the boundary reset in a live Fly head (unknown to the reset inventory or
+# kept as accounting) and may therefore hold pre-epoch rows, but whose EVERY analyzer reader admits rows
+# through the epoch guard (classify / EpochGuard) or an epoch-start bound. Their pre-epoch rows are on disk
+# (wiped only by clean-epoch-wipe after certification) yet cannot reach a current-cohort result, so the
+# purity audit reports them as guarded instead of admitted. The reader set is pinned by
+# test_analyzer_epoch_guard_wiring.py::test_read_guarded_streams_have_only_guarded_readers.
+READ_GUARDED_BASES = frozenset({
+    "taker_signal_counterfactuals.jsonl", "adaptive_entry_decisions.jsonl", "expired_orders_3factor.csv",
+})
 # Streams whose writer cannot add a column/field; classified by timestamp.
 UNSTAMPABLE_PREFIXES = ("v3/",)
 UNSTAMPABLE_SUFFIXES = (".csv",)
@@ -259,6 +276,16 @@ def base_of(relpath: str) -> str:
 
 def epoch_independent(relpath: str) -> bool:
     return base_of(relpath).rsplit("/", 1)[-1] in EPOCH_INDEPENDENT_BASES and "/" not in base_of(relpath)
+
+
+def non_evidence(relpath: str) -> bool:
+    base = base_of(relpath)
+    return "/" not in base and base in NON_EVIDENCE_BASES
+
+
+def read_guarded(relpath: str) -> bool:
+    base = base_of(relpath)
+    return "/" not in base and base in READ_GUARDED_BASES
 
 
 def unstampable(relpath: str) -> bool:

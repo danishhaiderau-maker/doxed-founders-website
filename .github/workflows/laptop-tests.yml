@@ -29,6 +29,7 @@ on:
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
       - "services/btc-conservative-agent/research_segment_promotion.py"
+      - "services/btc-conservative-agent/segment_custody.py"
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
@@ -46,6 +47,8 @@ on:
       - "services/btc-conservative-agent/test_protection_*.py"
       - "services/btc-conservative-agent/test_research_v3_policy_replay*.py"
       - "services/btc-conservative-agent/test_research_v3_candidates.py"
+      - "services/btc-conservative-agent/test_signal_research_table.py"
+      - "docs/PER_SIGNAL_RESEARCH_TABLE.md"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
   push:
@@ -70,6 +73,7 @@ on:
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
       - "services/btc-conservative-agent/research_segment_promotion.py"
+      - "services/btc-conservative-agent/segment_custody.py"
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
@@ -87,6 +91,8 @@ on:
       - "services/btc-conservative-agent/test_protection_*.py"
       - "services/btc-conservative-agent/test_research_v3_policy_replay*.py"
       - "services/btc-conservative-agent/test_research_v3_candidates.py"
+      - "services/btc-conservative-agent/test_signal_research_table.py"
+      - "docs/PER_SIGNAL_RESEARCH_TABLE.md"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
 
@@ -121,10 +127,13 @@ jobs:
         run: python -m pytest tests/test_laptop_chain_scripts.py tests/test_blindspot_closure_ledger.py -q -p no:cacheprovider
       - name: Segment puller and store
         working-directory: services/btc-conservative-agent
-        run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py -q -p no:cacheprovider
+        run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py test_research_segments_custody.py -q -p no:cacheprovider
       - name: Analyzer sections (accumulator, archive, dashboard publication)
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_research_trade_accumulator_epoch.py test_dashboard_report_publication.py test_past_analysis_archive_card.py test_genome_search_space_disclosure.py test_data_retention.py::ArchiveTests test_v31_overview_best_policy_counts.py -q -p no:cacheprovider
+      - name: Per-signal research table and walk-forward scorer (offline, PR-D)
+        working-directory: services/btc-conservative-agent
+        run: python -m pytest test_signal_research_table.py test_fill_model.py -q -p no:cacheprovider
       - name: Protection replay engine (side marks, streaming screen, engine/grid/canonical parity)
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_protection_replay_side_marks.py test_research_v3_policy_replay_arrays.py test_protection_screen_memo.py test_protection_replay_window.py test_research_v3_candidates.py test_research_v3_policy_replay.py test_research_v3_report.py test_generation_receipt.py test_input_blockers.py -q -p no:cacheprovider

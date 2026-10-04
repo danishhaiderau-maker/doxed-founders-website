@@ -134,7 +134,8 @@
 - Adding a tile requires one registry specification with a unique lane, policy
   signature, ID prefix, toggle key, default state, relay eligibility, and complete
   entry/exit/risk metadata, followed by registry validation, cross-layer tests,
-  signal-engine parity, analyzer parity, and rendered visual QA.
+  the canonical signal probe (`scripts/signal_probe.py --full`), analyzer parity,
+  and rendered visual QA.
 - Retiring a tile requires removing it from the active registry and display order,
   adding its lane token to `RETIRED_TILE_LANES` for at least one release, deleting
   its runtime/API/UI/analyzer/monitoring implementation and dedicated tests, and

@@ -1,9 +1,0 @@
-{
-  "engine_version": "v31-freeze21-3h1c-v12",
-  "combo_version": "2026-10-04",
-  "exit_version": "time-exit-catastrophic-stop-v1",
-  "benchmark_lane": "NONE",
-  "signal_hash": "6af9b37065fa",
-  "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-04T04:58:11.067Z"
-}

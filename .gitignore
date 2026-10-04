@@ -191,7 +191,6 @@ docs/exports/*.zip
 .home-*.pid
 .home-*.lock
 services/btc-conservative-agent/.btc-research-dashboard-*.lock
-services/btc-signal-engine/.btc-research-dashboard-*.lock
 .stack-health-watch.lock
 .stack-health*.lock
 .live-copy-6h-watch.lock

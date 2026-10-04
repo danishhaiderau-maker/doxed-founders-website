@@ -49,8 +49,9 @@ def _blocked_handler():
 
 def load_manifest_versions() -> dict:
     """Load signal engine manifest for sync status."""
-    local = Path(__file__).resolve().parent / "manifest.json"
-    manifest_path = local if local.is_file() else Path(__file__).resolve().parent.parent / "btc-signal-engine" / "manifest.json"
+    # The btc-signal-engine mirror (and its manifest fallback) was retired; the
+    # canonical bot directory is the only source.
+    manifest_path = Path(__file__).resolve().parent / "manifest.json"
     if not manifest_path.is_file():
         return {}
     try:
@@ -67,23 +68,9 @@ def build_sync_status(bot_module=None) -> dict:
         showcase_version = getattr(bot_module, "EXECUTION_FIX_VERSION", None)
 
     signal_hash = manifest.get("signal_hash")
+    # No mirror to compare against any more: the running bot.py is canonical.
     parity_ok = True
-    parity_status = "PASS (manifest)"
-
-    if bot_module is not None:
-        try:
-            from hashlib import sha256
-            bot_path = Path(bot_module.__file__).resolve()
-            bot_text = bot_path.read_text(encoding="utf-8")
-            live_hash = sha256(bot_text.encode("utf-8")).hexdigest()[:12]
-            engine_path = Path(__file__).resolve().parent.parent / "btc-signal-engine" / "engine.py"
-            if engine_path.is_file():
-                engine_hash = sha256(engine_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()[:12]
-                parity_ok = live_hash == engine_hash == (signal_hash or live_hash)
-                parity_status = "PASS" if parity_ok else f"DRIFT bot={live_hash} engine={engine_hash}"
-        except Exception as exc:
-            parity_status = f"UNKNOWN ({exc})"
-            parity_ok = False
+    parity_status = "CANONICAL (signal-engine mirror retired)"
 
     return {
         "research_source": manifest.get("source", "bybit-15m-research-bot/bybit_bot.py"),

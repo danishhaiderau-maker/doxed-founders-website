@@ -128,8 +128,9 @@ def test_worker_is_bounded_idempotent_and_preserves_source_timestamp():
     worker = BoundedEvidenceWorker(slow_handler, max_queue=1, max_retries=0)
     assert worker.submit("trade-1", {"value": [1]}, source_ts=123.5) is True
     assert started.wait(1)
-    # Same causal order is suppressed while active, without consuming capacity.
-    assert worker.submit("trade-1", {"value": [2]}, source_ts=999) is False
+    # Same causal order is suppressed while active, without consuming capacity;
+    # it is an accepted (already owned) outcome, not an evidence gap.
+    assert worker.submit("trade-1", {"value": [2]}, source_ts=999) is True
     assert worker.submit("trade-2", {"value": [2]}, source_ts=124.5) is True
     assert worker.submit("trade-3", {"value": [3]}, source_ts=125.5) is False
     release.set()

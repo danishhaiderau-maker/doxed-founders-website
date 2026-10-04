@@ -133,6 +133,7 @@ def load_drain(box, *, active=True, force_paper=True, live=False, enabled=False,
         "_force_paper_mode_active": lambda: force_paper,
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
         "_relay_event_outbox": box, "_relay_push_state": {},
+        "_relay_outbox_data_epoch": lambda: None,  # no declared epoch: retirement never applies here
         "_relay_delivery_guard": RelayDeliveryGuard(box.path.with_name("quarantine.jsonl")),
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
     }

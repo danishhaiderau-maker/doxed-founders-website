@@ -77,6 +77,20 @@ def _ids(rows):
     return sorted(r["trade_id"] for r in rows)
 
 
+def _engine():
+    """The service analyzer, never the fail-closed ``research/`` stub another suite may put first on sys.path."""
+    import importlib
+    import sys
+
+    here = Path(__file__).resolve().parent
+    loaded = sys.modules.get("analyzer_research_engine_v62")
+    if loaded is not None and Path(getattr(loaded, "__file__", "") or "").resolve().parent != here:
+        del sys.modules["analyzer_research_engine_v62"]
+    if sys.path[:1] != [str(here)]:
+        sys.path.insert(0, str(here))
+    return importlib.import_module("analyzer_research_engine_v62")
+
+
 @pytest.mark.parametrize("stream", RETAINED_STREAMS)
 def test_retained_stream_guarded_read_admits_only_current_epoch(tmp_path, guard, stream):
     g, monitor = guard
@@ -197,7 +211,7 @@ def test_research_completeness_shadow_rows(tmp_path, guard):
 
 
 def test_engine_loaders_and_receipt_with_monitor(tmp_path, guard, monkeypatch):
-    import analyzer_research_engine_v62 as engine
+    engine = _engine()
 
     monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BTC_DATA_EPOCH_DIR", str(tmp_path))
@@ -222,3 +236,25 @@ def test_engine_loaders_and_receipt_with_monitor(tmp_path, guard, monkeypatch):
         handle.read()
     block = engine._epoch_receipt_block()
     assert block["pre_epoch_rows_admitted_by_stream"] == {"xvp_shadow_signals.jsonl": 2}
+
+
+def test_engine_trade_readers_admit_only_current_epoch(tmp_path, guard, monkeypatch):
+    engine = _engine()
+
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("BTC_DATA_EPOCH_DIR", str(tmp_path))
+    monkeypatch.setenv("RESEARCH_HISTORICAL_BUNDLE_GLOB", str(tmp_path / "no-bundles-*.zip"))
+    monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
+    monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
+    trades = tmp_path / "trades_3factor.csv"
+    monkeypatch.setattr(engine, "TRADES_FILE", str(trades))
+    de.write_json_atomic(tmp_path / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    pd.DataFrame({"trade_id": ["old", "cur", "old2"], "net_pnl_usd": [1.0, 2.0, 3.0],
+                  "ts": [de.utc_iso(PRE), de.utc_iso(POST), de.utc_iso(PRE - 5)]}).to_csv(trades, index=False)
+
+    assert engine._load_executed_trade_ids() == {"cur"}
+    cohort = engine.historical_trade_cohort_report()
+    assert json.dumps(cohort, default=str).count('"old') == 0
+    block = engine._epoch_receipt_block()
+    assert block["pre_epoch_rows_admitted"] == 0, block["read_monitor"]["unguarded_stream_reads"]
+    assert block["pre_epoch_rows_retained_by_stream"] == {"trades_3factor.csv": 2}

@@ -57,6 +57,17 @@ def _load_module(name: str, path: Path):
 
 
 de = _load_module("_sa_data_epoch", SERVICE / "data_epoch.py")
+custody = _load_module("_sa_segment_custody", SERVICE / "segment_custody.py")
+
+
+def retired_custody(mirror: Path, puller: Path | None = None) -> set[str]:
+    """Shadow-tree files Fly retired (e.g. the clean-epoch reset) that the laptop keeps only as custody copies.
+
+    They are not current Fly data, never reach the promotion view or the analyzer, and so are not scanned
+    as analyzer-visible input (#420). The puller state defaults to ``<shadow>/.puller`` next to the tree.
+    """
+    meta = Path(puller) if puller is not None else Path(mirror).parent / ".puller"
+    return set(custody.load_retired_custody_paths(meta, Path(mirror)))
 
 
 def current_release() -> str | None:
@@ -75,7 +86,7 @@ def analyzer_cycle_running(paths) -> bool:
 
 # ------------------------------------------------------------------ discovery
 
-def discover(mirror: Path) -> dict[str, list[tuple[str, int, int]]]:
+def discover(mirror: Path, exclude: set[str] | frozenset = frozenset()) -> dict[str, list[tuple[str, int, int]]]:
     """stream base -> [(relpath, size, mtime_ns)] oldest rotation first, live head last."""
     streams: dict[str, list[tuple[int, str, int, int]]] = {}
     for directory, dirnames, filenames in os.walk(mirror):
@@ -84,7 +95,7 @@ def discover(mirror: Path) -> dict[str, list[tuple[str, int, int]]]:
         dirnames[:] = [d for d in dirnames if not f"{rel_dir}/{d}".lstrip("/").startswith(SKIP_DIRS)]
         for name in filenames:
             rel = f"{rel_dir}/{name}".lstrip("/")
-            if name.endswith(SKIP_SUFFIXES):
+            if name.endswith(SKIP_SUFFIXES) or rel in exclude:
                 continue
             m = STREAM_RE.match(rel)
             if not m:
@@ -181,13 +192,16 @@ def scan_file(mirror: Path, rel: str, entry: dict, manifest: dict | None, budget
     return consumed
 
 
-def update_index(mirror: Path, index: dict, manifest: dict | None, budget: int = BYTES_PER_RUN) -> dict:
+def update_index(mirror: Path, index: dict, manifest: dict | None, budget: int = BYTES_PER_RUN,
+                 puller: Path | None = None) -> dict:
     epoch_key = (manifest or {}).get("epoch_id") or "NO_EPOCH"
     if index.get("epoch_key") != epoch_key:
         index.clear()
         index["epoch_key"] = epoch_key
     files = index.setdefault("files", {})
-    streams = discover(mirror)
+    retired = retired_custody(mirror, puller)
+    index["retired_custody_files"] = len(retired)
+    streams = discover(mirror, retired)
     seen = set()
     remaining = budget
     # Live heads first (small appends keep the current picture fresh), then rotations oldest first.
@@ -363,19 +377,30 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
                               and not classes.get(de.UNSTAMPED_POST_EPOCH))
         problems = []
         sev = "GREEN"
-        if manifest:
+        non_evidence, guarded = de.non_evidence(base), de.read_guarded(base)
+        if manifest and non_evidence:
+            # Ops ledger (relay quarantine/retirement, runtime telemetry, receipts): spans epochs by design and
+            # is read by no analyzer path (#420); its classes stay visible but never raise severity.
+            problems.append("ops stream, not analyzer evidence (data_epoch.NON_EVIDENCE_BASES)")
+        elif manifest:
             bad = {c: n for c, n in classes.items() if c in (de.PRE_EPOCH, de.FOREIGN)}
-            if bad:
+            if bad and guarded:
+                sev = "AMBER"
+                problems.append("pre-epoch/foreign rows on disk, rejected by every analyzer reader "
+                                "(data_epoch.READ_GUARDED_BASES; wiped by clean-epoch-wipe): " +
+                                ", ".join(f"{c} {n}" for c, n in bad.items()))
+            elif bad:
                 sev = "RED"
                 problems.append("pre-epoch/foreign rows in an analyzer-visible file: " +
                                 ", ".join(f"{c} {n}" for c, n in bad.items()))
+        if manifest and not non_evidence:
             if classes.get(de.UNSTAMPED_POST_EPOCH):
                 sev = "AMBER" if sev == "GREEN" else sev
                 problems.append(f"{classes[de.UNSTAMPED_POST_EPOCH]} post-epoch rows without data_epoch_id")
             if classes.get(de.UNDATED):
                 sev = "AMBER" if sev == "GREEN" else sev
                 problems.append(f"{classes[de.UNDATED]} undated rows (epoch unknown)")
-        elif len(real_versions) > 1 and not independent:
+        elif not manifest and len(real_versions) > 1 and not independent:
             sev = "AMBER"
             problems.append(f"{len(real_versions)} data versions mixed in one input")
         if unannounced_kinds or drift_new or drift_types:
@@ -388,6 +413,7 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
             "scanned_pct": round(100.0 * scanned / total_bytes, 1) if total_bytes else 100.0,
             "rows": sum(versions.values()), "versions": dict(sorted(versions.items(), key=lambda kv: -kv[1])),
             "version_declared": bool(real_versions) or epoch_declared, "epoch_independent": independent,
+            "non_evidence": non_evidence, "read_guarded": guarded,
             "current_version": current, "classes": classes, "segregated": segregated,
             "segregated_bytes": sum(s["bytes"] for s in segregated.values()),
             "whole_files_incompatible": whole_files,
@@ -419,7 +445,9 @@ def build(paths, index: dict, manifest: dict | None, registry: dict, now: float)
                        "note": "byte-range manifests (no copies); excluded from current-cohort analysis by "
                                "analyzer_epoch_guard.py; delete with clean-epoch-wipe (manual)",
                        "delete_command": WIPE_CMD.format(epoch=epoch or "<epoch-id>")},
-        "undeclared_streams": [s["stream"] for s in streams_out if not s["version_declared"] and not s["epoch_independent"]],
+        "undeclared_streams": [s["stream"] for s in streams_out if not s["version_declared"] and not s["epoch_independent"]
+                               and not s["non_evidence"]],
+        "retired_custody_files": int(index.get("retired_custody_files") or 0),
     }
 
 
@@ -474,7 +502,7 @@ def run(paths, state: dict, now: float | None = None, budget: int = BYTES_PER_RU
     index_path = paths.home / "compat" / "index.json"
     index = read_json(index_path) or {}
     deferred = analyzer_cycle_running(paths) and bool(index.get("files"))
-    update_index(paths.mirror, index, manifest, budget=0 if deferred else budget)
+    update_index(paths.mirror, index, manifest, budget=0 if deferred else budget, puller=paths.puller)
     index_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = index_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(index, separators=(",", ":")), encoding="utf-8")
