@@ -353,7 +353,34 @@ def test_zero_orders_not_red_when_tiles_off_or_one_tile_active():
     assert by_id(sh.evaluate(inputs, {}))["trading.orders"]["status"] == sh.GREEN
     inputs = healthy(now)
     inputs["fly_state"]["trades"][0]["ts"] = sh.iso(now - 7 * 3600)
-    assert by_id(sh.evaluate(inputs, {}))["trading.orders"]["status"] == sh.AMBER
+    # One order in 48 h is a rare tile: it may stay quiet up to the 48 h cap.
+    assert by_id(sh.evaluate(inputs, {}))["trading.orders"]["status"] == sh.GREEN
+    # A busy tile (24 orders in 48 h, mean gap 2 h) quiet for 7 h is past 3x its own gap (6 h floor).
+    lane0 = inputs["fly_state"]["trades"][0]["research_lane"]
+    inputs["mirror"]["lane_orders"] = {lane0: [now - (7 + i) * 3600 for i in range(24)]}
+    check = by_id(sh.evaluate(inputs, {}))["trading.orders"]
+    assert check["status"] == sh.AMBER and lane0 in check["hint"]
+
+
+def test_tile_quiet_threshold_is_per_tile_rate():
+    t = sh.DEFAULT_THRESHOLDS if hasattr(sh, "DEFAULT_THRESHOLDS") else sh.THRESHOLDS
+    h = 3600
+    assert sh.tile_quiet_threshold_sec("FAMILY_PREMIUM_REVERSION_60M", 48, t) == 6 * h
+    assert sh.tile_quiet_threshold_sec("FAMILY_PREMIUM_REVERSION_60M", 12, t) == 12 * h
+    assert sh.tile_quiet_threshold_sec("FAMILY_GS03_CVD_DIV_TAKER", 48, t) == 12 * h
+    assert sh.tile_quiet_threshold_sec("FAMILY_GS04_NOTRADE_ATR_TP", 3, t) == 48 * h
+    assert sh.tile_quiet_threshold_sec("FAMILY_GSB2_REGIME_SWITCHER", 0, t) == 48 * h
+
+
+def test_never_ordered_tile_is_listed_not_alarmed():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    lanes = sorted(inputs["fly_state"]["research_lane_enabled"])
+    inputs["fly_state"]["research_lane_enabled"]["FAMILY_GSB2_REGIME_SWITCHER"] = True
+    check = by_id(sh.evaluate(inputs, {}))["trading.orders"]
+    assert check["status"] == sh.GREEN, check
+    assert "no rate baseline" in check["observed"] and "FAMILY_GSB2_REGIME_SWITCHER" in check["observed"]
+    assert lanes
 
 
 def test_route_counter_progress_counts_as_orders():

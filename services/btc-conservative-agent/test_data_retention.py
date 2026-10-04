@@ -607,3 +607,20 @@ class LaptopRetentionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetentionPrefixTests(unittest.TestCase):
+    def test_prefix_follows_the_puller_state_after_an_epoch_prefix_move(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            shadow = Path(tmp) / "shadow"
+            (shadow / ".puller").mkdir(parents=True)
+            args = argparse.Namespace(shadow_root=str(shadow), prefix=None)
+            cfg = bdr.load_config(args)
+            self.assertEqual((cfg["prefix"], cfg["prefix_source"]), (bdr.DEFAULTS["prefix"], "default"))
+            (shadow / ".puller" / "state.json").write_text(json.dumps({"prefix": "v3", "acked_seq": 5}),
+                                                           encoding="utf-8")
+            cfg = bdr.load_config(args)
+            self.assertEqual((cfg["prefix"], cfg["prefix_source"]), ("v3", "puller_state"))
+            cfg = bdr.load_config(argparse.Namespace(shadow_root=str(shadow), prefix="v2"))
+            self.assertEqual((cfg["prefix"], cfg["prefix_source"]), ("v2", "argument"))

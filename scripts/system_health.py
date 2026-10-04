@@ -110,6 +110,12 @@ THRESHOLDS: dict[str, float] = {
     "ai_neutral_window_sec": 6 * HOUR,
     "orders_red_sec": 3 * HOUR,
     "tile_quiet_amber_sec": 6 * HOUR,
+    # Per-tile quiet threshold: gap_mult x the tile's own mean order gap over 48 h, never below
+    # tile_quiet_amber_sec (rare-trigger tiles: tile_quiet_rare_sec) and never above tile_quiet_cap_sec.
+    # A tile with <= 1 order in 48 h waits the cap; a tile that never ordered has no baseline.
+    "tile_quiet_gap_mult": 3.0,
+    "tile_quiet_rare_sec": 12 * HOUR,
+    "tile_quiet_cap_sec": 48 * HOUR,
     "contradiction_red_window_sec": 2 * HOUR,
     "contradiction_amber_window_sec": 24 * HOUR,
     "ws_amber_sec": 60.0,
@@ -989,6 +995,21 @@ def declared_integrity_blocker(integrity: Mapping[str, Any], now: float,
             f"{sorted(found)}; fix: {b['fix']}; ETA {b['eta']}"), False
 
 
+RARE_TRIGGER_TILE_MARKERS = ("CVD", "NOTRADE", "NO_TRADE", "REGIME_SWITCHER")
+
+
+def tile_quiet_threshold_sec(lane: str, orders_48h: int, t: Mapping[str, Any]) -> float:
+    """How long ``lane`` may go without an order before trading.orders flags it (per-tile rate)."""
+    base = float(t["tile_quiet_amber_sec"])
+    if any(m in str(lane).upper() for m in RARE_TRIGGER_TILE_MARKERS):
+        base = max(base, float(t["tile_quiet_rare_sec"]))
+    cap = max(base, float(t["tile_quiet_cap_sec"]))
+    n = int(orders_48h or 0)
+    if n <= 1:
+        return cap
+    return min(cap, max(base, float(t["tile_quiet_gap_mult"]) * 48 * HOUR / n))
+
+
 def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mapping[str, float] | None = None
              ) -> list[dict[str, Any]]:
     """Pure evaluation of every check. ``state`` carries progress memory."""
@@ -1232,13 +1253,19 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         st = RED if (all_quiet and not paused) else GREEN
         per = ", ".join(f"{lane}:{fmt_age(q)}/{lane_mem.get(lane, {}).get('orders_48h', 0)}@48h"
                         for lane, q in quiet.items())
-        quiet_tiles = [l for l, q in quiet.items() if q is None or q > t["tile_quiet_amber_sec"]]
+        limits = {lane: tile_quiet_threshold_sec(lane, lane_mem.get(lane, {}).get("orders_48h", 0), t)
+                  for lane in on_lanes}
+        quiet_tiles = [l for l, q in quiet.items() if q is not None and q > limits[l]]
+        no_baseline = [l for l, q in quiet.items() if q is None]
         if st == GREEN and quiet_tiles:
             st = AMBER
-        add(check("trading.orders", "trading", st,
-                  f"newest order {fmt_age(newest)} ago across {len(on_lanes)} ON tiles; per tile last/48h: {per}",
-                  f"any ON tile ordered within {fmt_age(t['orders_red_sec'])} (RED); each tile within "
-                  f"{fmt_age(t['tile_quiet_amber_sec'])} (AMBER)",
+        obs = f"newest order {fmt_age(newest)} ago across {len(on_lanes)} ON tiles; per tile last/48h: {per}"
+        if no_baseline:
+            obs += f"; no order yet (no rate baseline, not alarmed): {no_baseline}"
+        add(check("trading.orders", "trading", st, obs,
+                  f"any ON tile ordered within {fmt_age(t['orders_red_sec'])} (RED); each tile within its own "
+                  f"expected gap ({t['tile_quiet_gap_mult']:g}x mean 48h gap, {fmt_age(t['tile_quiet_amber_sec'])}"
+                  f"..{fmt_age(t['tile_quiet_cap_sec'])}; rare-trigger tiles >= {fmt_age(t['tile_quiet_rare_sec'])}) (AMBER)",
                   "" if st == GREEN else
                   ("no tile is placing orders: AI failing, admission gates rejecting everything, or execution wedged"
                    if st == RED else f"quiet tiles {quiet_tiles}: regime gates may be legitimately closed; "
