@@ -398,7 +398,12 @@ function isMelbourneDisplayString(value: unknown): value is string {
 }
 
 function formatBotTime(ts: string | number | undefined | null): string {
-  if (isMelbourneDisplayString(ts)) return ts;
+  // Pre-formatted bot stamps (AEST/AEDT interchange) are re-labelled as "Melbourne time";
+  // the shared formatter keeps the exact instant and resolves daylight saving from the zone.
+  if (isMelbourneDisplayString(ts)) {
+    const shown = formatMelbourneDateTime(ts);
+    return shown === '—' ? ts : shown;
+  }
   return formatMelbourneDateTime(ts ?? undefined);
 }
 

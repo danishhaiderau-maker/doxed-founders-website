@@ -884,7 +884,7 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         "bot_start_time": start_ts,
         "bot_start_iso": bot_start_mel,
         "bot_start_iso_utc": bot_start_utc,
-        "display_timezone": "Australia/Melbourne",
+        "display_timezone": "Australia/Melbourne", "display_timezone_label": "Melbourne time",
         "fresh_collection_mode": fcm,
         "fresh_collection_start_time": fresh_start,
         "fresh_collection_start_iso": fresh_iso,
@@ -17514,9 +17514,10 @@ def _format_melbourne_hm(ts_str: str) -> str:
             dt = datetime.fromisoformat(ts)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-        mel = dt.astimezone(ZoneInfo("Australia/Melbourne"))
-        abbrev = mel.strftime("%Z")
-        return mel.strftime(f"%Y-%m-%d %H:%M:%S {abbrev}")
+        # Interchange form for the website (offset-carrying abbreviation derived from the zone);
+        # displays render it as "... Melbourne time" via the shared helpers.
+        import melbourne_time as _mt  # local: helpers are also exec'd standalone by tests
+        return _mt.abbrev_stamp(dt, default=s)
     except Exception:
         return s
 
@@ -36764,7 +36765,11 @@ DASHBOARD_JS = """(function () {
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
       const s = String(ts).trim();
-      if (/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}/.test(s) && (s.includes('AEST') || s.includes('AEDT') || s.includes('Melbourne'))) return s;
+      // One display label everywhere (melbourne_time.LABEL): the wall time is already Melbourne,
+      // so an interchange suffix (AEST/AEDT, derived from the zone) is shown as "Melbourne time".
+      if (/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}/.test(s) && (s.includes('AEST') || s.includes('AEDT') || s.includes('Melbourne'))) {
+        return s.replace(/\\s+(AEST|AEDT|Melbourne time|Melbourne)$/, '') + ' Melbourne time';
+      }
       try {
         const d = typeof ts === 'number'
           ? new Date(ts > 1e12 ? ts : ts * 1000)
@@ -36776,9 +36781,7 @@ DASHBOARD_JS = """(function () {
           hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
         }).formatToParts(d);
         const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
-        const abbrev = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Melbourne', timeZoneName: 'short' })
-          .formatToParts(d).find(p => p.type === 'timeZoneName')?.value || 'Melbourne';
-        return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${abbrev}`;
+        return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} Melbourne time`;
       } catch (e) { return s; }
     }
     function formatMelbourneNow() {
@@ -37844,7 +37847,7 @@ DASHBOARD_JS = """(function () {
         if (totalEl && body.volume_total_mb != null) totalEl.textContent = String(body.volume_total_mb);
         if (filesystemUsedEl) filesystemUsedEl.textContent = body.filesystem_used_mb == null ? '-' : Number(body.filesystem_used_mb).toFixed(1);
         if (pathEl) pathEl.textContent = body.runtime_path ? ('path: ' + body.runtime_path) : '';
-        if (lastEl) lastEl.textContent = new Date().toLocaleTimeString();
+        if (lastEl) lastEl.textContent = formatMelbourneNow();
         const pct = body.volume_pct == null ? null : Number(body.volume_pct);
         _setDataSizeCleanup(pct, badgeEl, barEl);
         if (barEl && body.volume_pct != null) {

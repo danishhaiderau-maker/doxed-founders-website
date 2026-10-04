@@ -80,7 +80,8 @@ def runtime(tmp_path_factory, monkeypatch):
            "uuid": uuid, "threading": threading, "_data_sync_inventory_cache": {}, "_data_sync_async_inventory": {},
            "_collection_epoch_bind_lock": threading.RLock(), "_entry_grid_written_digests": {},
            "_entry_grid_anchor_lock": threading.Lock(), "_entry_grid_anchor_by_call": {},
-           "_data_sync_inventory_snapshot_path": lambda: root / "sync_inventory_current.json"}
+           "_data_sync_inventory_snapshot_path": lambda: root / "sync_inventory_current.json",
+           "_epoch_boundary_cache": {"at": 0.0, "value": (0.0, None)}}
     path = Path(__file__).with_name("bot.py")
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     names = {"_fresh_reset_confirm_paused", "_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",

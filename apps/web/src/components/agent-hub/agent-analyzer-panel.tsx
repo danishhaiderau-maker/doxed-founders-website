@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { formatUsd } from '@dcf/utils';
+import { formatMelbourneDateTime, formatUsd, parseMelbourneTimestampMs } from '@dcf/utils';
 import {
   fetchAnalyzerSessionSummary,
   type AnalyzerSessionSummary,
@@ -20,21 +20,12 @@ function fmtHours(n: number | undefined): string {
   return `${(n / 24).toFixed(1)}d`;
 }
 
-// Analyzer session_start arrives as "YYYY-MM-DD HH:MM:SS TZ" (e.g. "2026-07-01 10:25:10 AEST"),
-// which `new Date()` cannot parse. Fall back to a manual parse that preserves the TZ label.
+// Analyzer session_start arrives as "YYYY-MM-DD HH:MM:SS TZ" (e.g. "2026-07-01 10:25:10 AEST")
+// or ISO. Display it in Melbourne time through the shared helper (never browser-local).
 function formatSessionStart(raw: string | null | undefined): string {
   if (!raw) return '—';
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) return direct.toLocaleString();
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
-  if (m) {
-    const [, y, mo, d, h, mi, s, tz] = m;
-    const dt = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
-    if (!Number.isNaN(dt.getTime())) {
-      return tz ? `${y}-${mo}-${d} ${h}:${mi} ${tz}` : dt.toLocaleString();
-    }
-  }
-  return raw;
+  const ms = parseMelbourneTimestampMs(raw);
+  return ms != null && Number.isFinite(ms) ? formatMelbourneDateTime(ms) : raw;
 }
 
 function Metric({ label, value, accent }: { label: string; value: string; accent?: string }) {

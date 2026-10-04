@@ -1,6 +1,18 @@
-/** Display timestamps in Melbourne local time (24h) for bot + Agent Hub. */
+/**
+ * Display timestamps in Melbourne time (24h) for the bot dashboards and Agent Hub.
+ *
+ * One shared helper for every displayed time (mirrors the bot's Python
+ * `melbourne_time.py`): IANA zone `Australia/Melbourne` (UTC+11 during daylight
+ * saving, UTC+10 otherwise) and one label, `Melbourne time`. Never hard-code
+ * an offset or an "AEST" string. Stored timestamps stay UTC; this only formats.
+ *
+ * Inputs may also be the bot's interchange form `2026-10-04 19:41:00 AEDT`
+ * (abbreviation derived from the zone) or an already-labelled
+ * `... Melbourne time` string; both parse back to the exact instant.
+ */
 
-const MELBOURNE_TZ = 'Australia/Melbourne';
+export const MELBOURNE_TZ = 'Australia/Melbourne';
+export const MELBOURNE_TIME_LABEL = 'Melbourne time';
 
 function toDate(input: string | number | Date | null | undefined): Date | null {
   if (input == null || input === '') return null;
@@ -15,60 +27,16 @@ function toDate(input: string | number | Date | null | undefined): Date | null {
   return null;
 }
 
-const PRE_FORMATTED_MELBOURNE =
-  /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? (AEST|AEDT|Melbourne)$/;
+const MELBOURNE_SUFFIX = '(AEST|AEDT|Melbourne time|Melbourne)';
+const PRE_FORMATTED_MELBOURNE = new RegExp(
+  `^(\\d{4})-(\\d{2})-(\\d{2}) (\\d{2}):(\\d{2})(?::(\\d{2}))? ${MELBOURNE_SUFFIX}$`,
+);
 
 function isPreFormattedMelbourne(value: string): boolean {
   return PRE_FORMATTED_MELBOURNE.test(value.trim());
 }
 
-/**
- * Parse a pre-formatted Melbourne string (`2026-08-02 24:57:21 AEST`) back to a
- * UTC Date. The bot mapper occasionally emits hour=24 around Melbourne midnight
- * (UTC+10) when it formats a UTC midnight boundary; native Date rejects hour=24,
- * so we collapse 24 → 00 next day by hand before constructing an ISO string.
- *
- * Returns null when the string cannot be parsed.
- */
-function parsePreFormattedMelbourne(value: string): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))? (AEST|AEDT|Melbourne)$/.exec(value.trim());
-  if (!m) return null;
-  let [, yyyy, mm, dd, hh, mi, ss = '00', tz] = m;
-  // Hour 24 is invalid in ISO 8601 / JS Date — roll into next day at 00.
-  // This is the Melbourne-midnight boundary case the bot mapper mishandles.
-  if (hh === '24') {
-    const rolled = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd), 0, 0, 0));
-    rolled.setUTCDate(rolled.getUTCDate() + 1);
-    yyyy = String(rolled.getUTCFullYear());
-    mm = String(rolled.getUTCMonth() + 1).padStart(2, '0');
-    dd = String(rolled.getUTCDate()).padStart(2, '0');
-    hh = '00';
-  }
-  // Melbourne fixed-offset: AEST = +10:00, AEDT = +11:00. "Melbourne" with no
-  // abbreviation falls back to +10:00 (AEST); the formatter re-derives the
-  // correct abbreviation from the resolved instant below.
-  const offset = tz === 'AEDT' ? '+11:00' : '+10:00';
-  const isoUtcGuess = `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${offset}`;
-  const parsed = new Date(isoUtcGuess);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-/** `2026-06-22 14:30:45 AEST` (24h, Melbourne). */
-export function formatMelbourneDateTime(input: string | number | Date | null | undefined): string {
-  if (typeof input === 'string') {
-    const trimmed = input.trim();
-    if (!trimmed || trimmed === '-' || trimmed === '—') return '—';
-    if (isPreFormattedMelbourne(trimmed)) {
-      // Re-normalize: the bot mapper can emit hour=24 around Melbourne midnight.
-      // Round-tripping through Date + Intl collapses 24 → 00 next day and also
-      // validates the abbreviation (AEDT during AU summer, AEST otherwise).
-      const reparsed = parsePreFormattedMelbourne(trimmed);
-      if (reparsed) return formatMelbourneDateTime(reparsed);
-      return trimmed;
-    }
-  }
-  const d = toDate(input);
-  if (!d) return '—';
+function melbourneParts(d: Date): Record<string, string> {
   const parts = new Intl.DateTimeFormat('en-AU', {
     timeZone: MELBOURNE_TZ,
     year: 'numeric',
@@ -79,16 +47,79 @@ export function formatMelbourneDateTime(input: string | number | Date | null | u
     second: '2-digit',
     hourCycle: 'h23',
   }).formatToParts(d);
-  const get = (type: Intl.DateTimeFormatPartTypes) =>
-    parts.find((p) => p.type === type)?.value ?? '';
-  const abbrev =
-    new Intl.DateTimeFormat('en-AU', { timeZone: MELBOURNE_TZ, timeZoneName: 'short' })
-      .formatToParts(d)
-      .find((p) => p.type === 'timeZoneName')?.value ?? 'Melbourne';
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${abbrev}`;
+  const out: Record<string, string> = {};
+  for (const p of parts) out[p.type] = p.value;
+  return out;
 }
 
-/** ISO UTC suffix for audit exports: `2026-06-22 14:30 AEST (2026-06-22T04:30:00.000Z)`. */
+/** Melbourne UTC offset in minutes at an instant (600 or 660), from the IANA zone. */
+export function melbourneOffsetMinutes(input: Date | number): number {
+  const d = input instanceof Date ? input : new Date(input);
+  const p = melbourneParts(d);
+  const hour = p.hour === '24' ? 0 : Number(p.hour);
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), hour, Number(p.minute), Number(p.second));
+  return Math.round((asUtc - Math.floor(d.getTime() / 1000) * 1000) / 60000);
+}
+
+/** Melbourne wall-clock fields -> UTC ms, resolving daylight saving through the zone. */
+function melbourneWallToUtcMs(y: number, mo: number, d: number, h: number, mi: number, s: number): number {
+  const wall = Date.UTC(y, mo - 1, d, h, mi, s);
+  let guess = wall - 600 * 60000;
+  for (let i = 0; i < 2; i += 1) guess = wall - melbourneOffsetMinutes(guess) * 60000;
+  return guess;
+}
+
+/**
+ * Parse a pre-formatted Melbourne string back to a UTC Date. AEST/AEDT carry
+ * their own offset; "Melbourne time" / "Melbourne" resolve it from the zone.
+ * The bot mapper occasionally emits hour=24 around Melbourne midnight; it is
+ * collapsed to 00 the next day.
+ */
+function parsePreFormattedMelbourne(value: string): Date | null {
+  const m = PRE_FORMATTED_MELBOURNE.exec(value.trim());
+  if (!m) return null;
+  const [, yyyy, mm, dd, hh, mi, ss = '00', tz] = m;
+  let y = Number(yyyy);
+  let mo = Number(mm);
+  let day = Number(dd);
+  let hour = Number(hh);
+  if (hour === 24) {
+    const rolled = new Date(Date.UTC(y, mo - 1, day + 1));
+    y = rolled.getUTCFullYear();
+    mo = rolled.getUTCMonth() + 1;
+    day = rolled.getUTCDate();
+    hour = 0;
+  }
+  let ms: number;
+  if (tz === 'AEST' || tz === 'AEDT') {
+    const offsetMin = tz === 'AEDT' ? 660 : 600;
+    ms = Date.UTC(y, mo - 1, day, hour, Number(mi), Number(ss)) - offsetMin * 60000;
+  } else {
+    ms = melbourneWallToUtcMs(y, mo, day, hour, Number(mi), Number(ss));
+  }
+  const parsed = new Date(ms);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/** `2026-10-04 19:41:05 Melbourne time` (24h). */
+export function formatMelbourneDateTime(input: string | number | Date | null | undefined): string {
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed || trimmed === '-' || trimmed === '—') return '—';
+    if (isPreFormattedMelbourne(trimmed)) {
+      const reparsed = parsePreFormattedMelbourne(trimmed);
+      if (reparsed) return formatMelbourneDateTime(reparsed);
+      return trimmed;
+    }
+  }
+  const d = toDate(input);
+  if (!d) return '—';
+  const p = melbourneParts(d);
+  const hour = p.hour === '24' ? '00' : p.hour;
+  return `${p.year}-${p.month}-${p.day} ${hour}:${p.minute}:${p.second} ${MELBOURNE_TIME_LABEL}`;
+}
+
+/** Audit exports: `2026-10-04 19:41:00 Melbourne time (2026-10-04T08:41:00.000Z)`. */
 export function formatMelbourneWithUtc(input: string | number | Date | null | undefined): string {
   const d = toDate(input);
   if (!d) return '—';
@@ -101,14 +132,9 @@ export function parseTimestampMs(input: string | number | Date | null | undefine
 }
 
 /**
- * Parse a Melbourne-formatted timestamp (`2026-07-31 16:00:00 AEST`) to
- * milliseconds-since-epoch. Used by viewers that need to compute durations
- * (e.g. expired-order age) from columns that already went through the bot's
- * Melbourne formatter — `Date.parse` rejects the `AEST` suffix, so we strip it
- * and re-apply the canonical +10:00 / +11:00 offset.
- *
- * Falls back to `parseTimestampMs` for inputs that are already ISO 8601, epoch,
- * or Date objects.
+ * Parse a Melbourne-formatted timestamp (`2026-07-31 16:00:00 AEST`,
+ * `2026-10-04 19:41:00 Melbourne time`) to ms since epoch. Falls back to
+ * `parseTimestampMs` for ISO 8601, epoch, or Date inputs.
  */
 export function parseMelbourneTimestampMs(
   input: string | number | Date | null | undefined,
@@ -117,26 +143,10 @@ export function parseMelbourneTimestampMs(
   if (typeof input !== 'string') return parseTimestampMs(input);
   const trimmed = input.trim();
   if (!trimmed || trimmed === '-' || trimmed === '—') return null;
-  // Already ISO 8601 (with offset or Z) — parse directly.
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed)) return parseTimestampMs(trimmed);
-  // Melbourne pre-formatted string.
-  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))? (AEST|AEDT|Melbourne)$/.exec(trimmed);
-  if (!m) return parseTimestampMs(trimmed);
-  let [, yyyy, mm, dd, hh, mi, ss = '00', tz] = m;
-  // Hour 24 is invalid in ISO 8601 / JS Date — roll into next day at 00.
-  // See parsePreFormattedMelbourne for the underlying regression rationale.
-  if (hh === '24') {
-    const rolled = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd), 0, 0, 0));
-    rolled.setUTCDate(rolled.getUTCDate() + 1);
-    yyyy = String(rolled.getUTCFullYear());
-    mm = String(rolled.getUTCMonth() + 1).padStart(2, '0');
-    dd = String(rolled.getUTCDate()).padStart(2, '0');
-    hh = '00';
-  }
-  const offset = tz === 'AEDT' ? '+11:00' : '+10:00';
-  const iso = `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${offset}`;
-  const parsed = Date.parse(iso);
-  return Number.isNaN(parsed) ? null : parsed;
+  if (!isPreFormattedMelbourne(trimmed)) return parseTimestampMs(trimmed);
+  const d = parsePreFormattedMelbourne(trimmed);
+  return d ? d.getTime() : null;
 }
 
 /** Format once — accepts raw ISO/epoch or pre-formatted Melbourne strings from the bot mapper. */

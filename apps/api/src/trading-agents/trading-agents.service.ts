@@ -32,6 +32,7 @@ import {
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
   formatMelbourneDateTime,
+  parseMelbourneTimestampMs,
   PARTIAL_EXIT_TILE_LANES,
   RELAY_ELIGIBLE_TILE_LANES,
 } from '@dcf/utils';
@@ -841,8 +842,9 @@ export class TradingAgentsService implements OnModuleInit {
         const sessionStart = freshStartIso ?? botStartIso ?? null;
         let sessionHours: number | undefined;
         if (sessionStart) {
-          const startMs = Date.parse(`${sessionStart.replace(' AEST', '')}+10:00`);
-          if (Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
+          // Shared helper: AEST/AEDT/"Melbourne time" stamps resolve daylight saving from the zone.
+          const startMs = parseMelbourneTimestampMs(sessionStart);
+          if (startMs != null && Number.isFinite(startMs)) sessionHours = Math.max(0, (Date.now() - startMs) / 3_600_000);
         } else if (typeof raw.executive_text === 'string') {
           const m = (raw.executive_text as string).match(/~([\d.]+)h bot session/);
           if (m) sessionHours = Number(m[1]);
@@ -2250,13 +2252,9 @@ export class TradingAgentsService implements OnModuleInit {
  */
 function formatAnalyzerSessionStartLabel(raw: string | null | undefined): string {
   if (!raw) return 'bot start';
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+(\S+))?$/);
-  if (m) {
-    const [, y, mo, d, h, mi] = m;
-    return `${y}-${mo}-${d} ${h}:${mi} AEST`;
-  }
+  // One display zone and label everywhere (Melbourne time), via the shared helper.
+  const ms = parseMelbourneTimestampMs(raw);
+  if (ms != null && Number.isFinite(ms)) return formatMelbourneDateTime(ms);
   return raw;
 }
 

@@ -3,7 +3,7 @@
 The laptop watcher (``scripts/system_health.py``) appends edge-triggered events
 to ``alarms.jsonl`` (``OPEN``/``STILL_RED``/``RECOVERED`` for RED checks,
 ``AMBER``/``AMBER_CLEAR`` for AMBER ones). This module turns those events into
-one entry per alert episode, newest first, with plain-English wording, AEST and
+one entry per alert episode, newest first, with plain-English wording, Melbourne and
 UTC times, when it cleared and how long it lasted. The analyzer reads the log
 directly; Fly receives the same events through the watcher's push to
 ``POST /api/system-health/report`` and keeps a bounded in-memory copy.
@@ -24,7 +24,7 @@ RETAIN_DAYS = 30
 RETAIN_EVENTS = 2000
 MAX_EVENTS_PER_PUSH = 400
 READ_TAIL_BYTES = 4 * 1024 * 1024
-AEST = timezone(timedelta(hours=10), "AEST")
+import melbourne_time
 RUNBOOK_BASE = "https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/"
 _EVENTS = ("OPEN", "STILL_RED", "RECOVERED", "AMBER", "AMBER_CLEAR")
 _STATUSES = ("GREEN", "AMBER", "RED", "SKIP")
@@ -160,11 +160,15 @@ def _text(value, limit: int) -> str | None:
 
 
 def times(ts: float | None) -> dict | None:
-    """The same instant in Danish's local AEST (UTC+10) and in UTC."""
+    """The same instant in Melbourne time (shared ``melbourne_time`` helper) and in UTC.
+
+    ``aest`` is a legacy alias of ``melbourne`` kept for older readers.
+    """
     if ts is None:
         return None
     moment = datetime.fromtimestamp(ts, timezone.utc)
-    return {"aest": moment.astimezone(AEST).strftime("%Y-%m-%d %H:%M AEST"),
+    local = melbourne_time.format_melbourne(moment)
+    return {"melbourne": local, "aest": local,
             "utc": moment.strftime("%H:%M UTC"), "iso": _iso(ts)}
 
 
@@ -399,7 +403,7 @@ def build_history(events: list, *, now: float | None = None, statuses: dict | No
     if limit:
         ordered = ordered[:limit]
     return {
-        "schema": SCHEMA, "generated_at": _iso(now), "timezone": "AEST (UTC+10) and UTC",
+        "schema": SCHEMA, "generated_at": _iso(now), "timezone": melbourne_time.DESCRIPTION + " and UTC",
         "retention": {"days": RETAIN_DAYS, "max_events": RETAIN_EVENTS},
         "events": len(events or []),
         "oldest_event_at": events[0]["at"] if events else None,
@@ -456,7 +460,7 @@ def _esc(value) -> str:
 
 
 def _when(t: dict | None) -> str:
-    return f"{_esc(t['aest'])} <span class='muted'>({_esc(t['utc'])})</span>" if t else "-"
+    return f"{_esc(t.get('melbourne') or t.get('aest'))} <span class='muted'>({_esc(t['utc'])})</span>" if t else "-"
 
 
 def render_entry_html(entry: dict) -> str:
@@ -501,7 +505,7 @@ def render_alerts_html(history: dict, *, title: str = "Alerts", nav_links=(), so
         "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<meta http-equiv='refresh' content='60'><title>{_esc(title)}</title><style>{_STYLE}</style></head>"
         f"<body><div class='wrap'><div class='nav'>{nav}</div><h1 id='alerts'>{_esc(title)}</h1>"
-        f"<p class='muted'>Every alert the system-health watcher raised, newest first. Times are AEST (UTC+10) with UTC in "
+        f"<p class='muted'>Every alert the system-health watcher raised, newest first. Times are {_esc(melbourne_time.LABEL)} with UTC in "
         f"brackets. RED means trading, data safety or custody is affected; AMBER means degraded, look soon; RECOVERED "
         f"means it cleared by itself. Kept for {RETAIN_DAYS} days (up to {RETAIN_EVENTS} events). {_esc(source_note)}</p>"
         f"<p class='muted'>Updated {_when(generated)} &middot; {counts.get('active', 0)} active "
@@ -520,7 +524,7 @@ def section_script(endpoint: str = "/api/system-health/alerts", page: str = "/al
         f'<script {SECTION_MARKER}="1">(function(){{var U={json.dumps(endpoint)},P={json.dumps(page)},N={int(limit)};'
         'var C={RED:"#f85149",AMBER:"#d29922",RECOVERED:"#3fb950"};'
         'function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}'
-        'function when(t){return t?esc(t.aest)+" <span style=\\"color:#8b949e\\">("+esc(t.utc)+")</span>":"-";}'
+        'function when(t){return t?esc(t.melbourne||t.aest)+" <span style=\\"color:#8b949e\\">("+esc(t.utc)+")</span>":"-";}'
         'function row(e){var s=e.severity,l=s==="RECOVERED"?"RECOVERED (was "+e.level+")":s;'
         'var cl=e.active?"<b>still active</b> ("+esc(e.duration_text)+")":when(e.cleared)+" after "+esc(e.duration_text);'
         'return "<tr><td style=\\"white-space:nowrap\\">"+when(e.started)+"</td><td><span style=\\"background:"+(C[s]||"#8b949e")'
@@ -536,7 +540,7 @@ def section_script(endpoint: str = "/api/system-health/alerts", page: str = "/al
         '+(c.active_red||0)+" RED, "+(c.active_amber||0)+" AMBER) &middot; "+(c.total||0)+" in the last 30 days &middot; '
         '<a href=\\""+P+"\\">see all alerts</a></span></div>"+(rows?"<div style=\\"overflow-x:auto\\"><table style=\\"width:100%;'
         'border-collapse:collapse;font-size:.85rem;margin-top:6px\\"><thead><tr style=\\"color:#8b949e;text-align:left\\">'
-        '<th>Started (AEST / UTC)</th><th>Severity</th><th>What happened</th><th>Likely cause</th><th>Cleared</th></tr></thead>'
+        '<th>Started (Melbourne time / UTC)</th><th>Severity</th><th>What happened</th><th>Likely cause</th><th>Cleared</th></tr></thead>'
         '<tbody>"+rows+"</tbody></table></div>":"<div style=\\"color:#8b949e\\">No alerts recorded yet.</div>");}'
         'function poll(){fetch(U,{cache:"no-store"}).then(function(x){return x.ok?x.json():null;}).then(draw)'
         '.catch(function(){draw(null);});}'

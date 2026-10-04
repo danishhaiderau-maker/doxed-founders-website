@@ -304,7 +304,7 @@ test('blocked signals (limitPrice 0 / SPREAD_BUCKET_BLOCKED) render in a separat
   // its age computed from timestamps (30 minutes between 16:40 and 17:10).
   assert.match(html, /SIGNAL_TTL_EXPIRED/);
   assert.match(html, /63,950/);
-  assert.match(html, /2026-07-31 17:10:00 AEST/);
+  assert.match(html, /2026-07-31 17:10:00 Melbourne time/);
 
   // The blocked signal appears once, under Blocked signals, with its block
   // reason — and is NOT mislabelled as an expired order. The cell text marks

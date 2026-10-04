@@ -504,7 +504,7 @@ test('measures a completed live-copy trade from exchange fill to first close', (
   });
 
   assert.equal(book.trades[0]?.durationMin, 120.2);
-  assert.equal(book.trades[0]?.time, '2026-08-11 12:22:07 AEST');
+  assert.equal(book.trades[0]?.time, '2026-08-11 12:22:07 Melbourne time');
 });
 
 test('renders Neon CLOSED live-copy rows when Bitfinex close ledger is empty', () => {
@@ -668,8 +668,8 @@ test('expired copy rows expose creation, cancellation, and terminal reason separ
     ],
   });
 
-  assert.equal(book.expiredOrders[0]?.createdTime, '2026-07-22 22:36:19 AEST');
-  assert.equal(book.expiredOrders[0]?.expiredTime, '2026-07-22 22:38:42 AEST');
+  assert.equal(book.expiredOrders[0]?.createdTime, '2026-07-22 22:36:19 Melbourne time');
+  assert.equal(book.expiredOrders[0]?.expiredTime, '2026-07-22 22:38:42 Melbourne time');
   assert.equal(book.expiredOrders[0]?.ageMin, 2);
   assert.equal(
     book.expiredOrders[0]?.reason,

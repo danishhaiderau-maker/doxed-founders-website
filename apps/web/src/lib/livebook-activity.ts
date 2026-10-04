@@ -1,35 +1,22 @@
 'use client';
 
 import type { TradingAgentDashboardState } from '@dcf/utils';
+import { parseMelbourneTimestampMs } from '@dcf/utils';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 
 function parseLiveBookTime(raw: string): string {
   if (!raw) return new Date().toISOString();
-  // F7a (2026-07-07 incident) — handle the bot/API pre-formatted Melbourne
-  // timestamp form `2026-07-07 21:37:51 AEST` (or AEDT). The previous parser
-  // appended 'Z' to this string and produced an invalid ISO date that V8
-  // rejected with NaN, causing every tile to fall through to `new Date()`
-  // (i.e. NOW). That made the "last 30 min" window meaningless — trades from
-  // hours ago appeared alongside just-closed ones, looking "random".
-  //
-  // Strategy: strip a trailing timezone word and convert to ISO-8601 with the
-  // right fixed offset (Melbourne = +10:00 AEST / +11:00 AEDT). If parsing
-  // fails for any reason, fall back to NOW (preserves legacy behavior).
+  // F7a (2026-07-07 incident): the bot/API send pre-formatted Melbourne times
+  // (`2026-07-07 21:37:51 AEST`/`AEDT`, or `... Melbourne time`). Parse them with
+  // the shared @dcf/utils helper, which resolves daylight saving from
+  // Australia/Melbourne; never fall through to NOW for a valid stamp.
   const trimmed = raw.trim();
-  const aestMatch = /^(.*?)(?:\s+(AEST|AEDT))?$/.exec(trimmed);
-  const core = aestMatch?.[1] ?? trimmed;
-  const tz = aestMatch?.[2];
-  const normalized = core.includes('T') ? core : core.replace(' ', 'T');
-  if (tz === 'AEST') {
-    const iso = `${normalized}+10:00`;
-    const ms = Date.parse(iso);
-    if (Number.isFinite(ms)) return new Date(ms).toISOString();
-  } else if (tz === 'AEDT') {
-    const iso = `${normalized}+11:00`;
-    const ms = Date.parse(iso);
-    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  const melbourne = parseMelbourneTimestampMs(trimmed);
+  if (melbourne != null && Number.isFinite(melbourne) && !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(trimmed)) {
+    return new Date(melbourne).toISOString();
   }
   // No TZ suffix — preserve legacy "assume UTC" behavior for already-ISO strings.
+  const normalized = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T');
   const ms = Date.parse(normalized.endsWith('Z') ? normalized : `${normalized}Z`);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString();
 }

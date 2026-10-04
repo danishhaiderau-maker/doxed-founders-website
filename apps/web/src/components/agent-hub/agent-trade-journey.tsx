@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { formatPercent, formatUsd, type TradingAgentDashboardState } from '@dcf/utils';
+import { formatPercent, formatUsd, type TradingAgentDashboardState, formatMelbourneDateTime } from '@dcf/utils';
 import type { TradingAgentActivityEntry } from '@/lib/api';
 import { ShareOnXButton } from '@/components/share-on-x-button';
 import { filterActivitySince, liveBookToActivity, mergeDeskActivity, filterLiveExchangeActivity } from '@/lib/livebook-activity';
@@ -334,7 +334,7 @@ export function AgentTradeJourney({
 
       {activeSelected && !isHorizontal && (
         <div className="mt-8 rounded-xl border border-zinc-700/80 bg-black/30 p-5">
-          <p className="text-[10px] text-zinc-500">{new Date(activeSelected.createdAt).toLocaleString()}</p>
+          <p className="text-[10px] text-zinc-500">{formatMelbourneDateTime(activeSelected.createdAt)}</p>
           <p className="mt-1 text-lg font-semibold text-white">{activeSelected.title}</p>
           {activeSelected.entryPrice != null && (
             <p className="mt-2 font-mono text-sm text-zinc-300">

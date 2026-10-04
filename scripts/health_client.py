@@ -9,7 +9,7 @@
     up = health_client.uptime()              # "Running uninterrupted: Xh Ym", last cause, 24h/7d, proof
     hist = health_client.alerts(limit=50)    # alert history, active first then newest first
     for a in hist["alerts"]:
-        print(a["severity"], a["started"]["aest"], a["title"], a["duration_text"])
+        print(a["severity"], (a["started"].get("melbourne") or a["started"]["aest"]), a["title"], a["duration_text"])
     diag = health_client.self_aware()        # self-diagnosis from 127.0.0.1:9021 (None if down)
 
 Order of sources: the local endpoint (127.0.0.1:9011), then the published
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         for f in failing(report):
             print(f"  {f['status']:<5} {f['id']}: {f['observed']}\n        -> {f.get('hint')}  [{f.get('runbook')}]")
         up = uptime()
-        print(f"{up.get('uninterrupted_label')} (since {up.get('since_aest')}; "
+        print(f"{up.get('uninterrupted_label')} (since {up.get('since_melbourne') or up.get('since_aest')}; "
               f"24h interruptions={up.get('interruptions_24h')}; 7d longest={up.get('longest_run_7d_label')}; "
               f"{(up.get('proof') or {}).get('label') or 'no proof window'})")
     return {"GREEN": 0, "AMBER": 1}.get(report.get("verdict"), 2)

@@ -10,6 +10,7 @@ import {
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
   type TradingAgentDashboardState,
+  formatMelbourneDateTime,
 } from '@dcf/utils';
 import { AgentTransparencyTables } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
@@ -315,7 +316,7 @@ export function AgentRelaySimPanel({
                 label="Snapshot"
                 value={
                   sim?.realWalletSnapshotAt
-                    ? new Date(sim.realWalletSnapshotAt).toLocaleTimeString()
+                    ? formatMelbourneDateTime(sim.realWalletSnapshotAt)
                     : 'pending'
                 }
               />
@@ -365,7 +366,7 @@ export function AgentRelaySimPanel({
             {reconcile.markPrice != null ? (
               <p className="mt-2 text-[10px] text-zinc-600">
                 Mark {formatUsd(reconcile.markPrice, 0)} · updated{' '}
-                {new Date(reconcile.updatedAt).toLocaleTimeString()}
+                {formatMelbourneDateTime(reconcile.updatedAt)}
               </p>
             ) : null}
           </div>
