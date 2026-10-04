@@ -436,7 +436,13 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         min_rows = int(t.get("min_rows", 1))
         if n < min_rows:
             why = _declared(obj, t.get("declared_empty_paths") or spec.get("declared_empty_paths") or [])
-            if why:
+            warm = _warming(spec, ctx) if t.get("warmup_overrides_declared") else None
+            if why and warm:
+                # Epoch-scoped tables that need terminal OOS evidence (e.g. the profitable-only top-100)
+                # are legitimately short in a fresh epoch even when they also declare why.
+                viol.append(_v("EMPTY_WARMUP", INFO,
+                               f"{name}: {n} rows < {min_rows}; fresh-epoch warmup: {warm}; declared reason {why}"))
+            elif why:
                 viol.append(_v("EMPTY_DECLARED", t.get("empty_declared_severity", AMBER),
                                f"{name}: {n} rows < {min_rows}; declared reason {why}"))
             elif _warming(spec, ctx):
@@ -451,8 +457,16 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         if missing_cols:
             viol.append(_v("MISSING_COLUMNS", RED, f"{name}: columns absent {missing_cols}"))
         allow_const = set(t.get("allow_constant") or [])
+        declared_rows = _rows_declare_insufficient(rows, t.get("declared_rows"))
         for c in t.get("live_columns") or []:
             st = (prof.get(c) or {}).get("status")
+            if declared_rows and (st in ("DEAD_NULL", "DEAD_ZERO") or (
+                    st == "CONSTANT" and c not in allow_const and n >= int(t.get("constant_min_rows", 5)))):
+                # Every row says why the statistic is undefined (insufficient sample / incomplete build):
+                # an honest, declared gap, not a silently dead export.
+                viol.append(_v("DECLARED_INSUFFICIENT", INFO, f"{name}.{c} is {st} across {n} rows; "
+                                                              f"every row declares {declared_rows}"))
+                continue
             if st in ("DEAD_NULL", "DEAD_ZERO"):
                 viol.append(_v("DEAD_COLUMN", t.get("dead_severity", AMBER), f"{name}.{c} is {st} across {n} rows"))
                 empty_or_dead.append(f"{name}.{c}")
@@ -558,6 +572,39 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         res["declared_blockers"] = active
     res.update(status=_worst(viol), violations=viol, metrics=metrics, dims=dims, tables=tables_out)
     return res
+
+
+def _rows_declare_insufficient(rows: list, spec: Any) -> str | None:
+    """Return the shared declaration when every row says its statistics are not computable, else None.
+
+    ``spec`` is a list of conditions; a row is declared when any condition matches:
+    ``{"field": f, "in": [...]}`` (e.g. corrected_verdict INSUFFICIENT_N, status BUILT_INCOMPLETE) or
+    ``{"field": f, "lt": k}`` (e.g. n < 3). An optional ``"reason_field"`` must also be non-empty.
+    """
+    conds = spec if isinstance(spec, list) else ([spec] if isinstance(spec, dict) else [])
+    if not conds or not rows:
+        return None
+    seen: set[str] = set()
+    for r in rows:
+        if not isinstance(r, dict):
+            return None
+        hit = None
+        for c in conds:
+            v = r.get(c.get("field"))
+            if "in" in c and v in c["in"]:
+                hit = f"{c['field']}={v}"
+            elif "lt" in c and _num(v) is not None and _num(v) < float(c["lt"]):
+                hit = f"{c['field']}<{c['lt']:g}"
+            if hit and c.get("reason_field") and not str(r.get(c["reason_field"]) or "").strip():
+                hit = None
+            if hit:
+                if c.get("reason_field"):
+                    hit += f" ({r.get(c['reason_field'])})"
+                break
+        if not hit:
+            return None
+        seen.add(hit)
+    return ", ".join(sorted(seen)[:4])
 
 
 def _apply_declared_blockers(spec: dict[str, Any], obj: Any, viol: list[dict[str, Any]], now: float) -> list[dict]:

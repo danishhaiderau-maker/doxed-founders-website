@@ -1690,6 +1690,13 @@ def load_config(args) -> dict:
             cfg[key] = value
     if getattr(args, "cap_gb", None):
         cfg["cap_bytes"] = int(float(args.cap_gb) * GB)
+    cfg["prefix_source"] = "argument" if getattr(args, "prefix", None) else "default"
+    if not getattr(args, "prefix", None):
+        # A clean epoch moves the segment prefix (v2 -> v3); follow the puller's live prefix so parity,
+        # the archived manifests and the custody receipt all name the same segment stream.
+        live = str(_read_json(Path(cfg["shadow_root"]) / ".puller" / "state.json").get("prefix") or "").strip()
+        if live:
+            cfg["prefix"], cfg["prefix_source"] = live, "puller_state"
     return cfg
 
 

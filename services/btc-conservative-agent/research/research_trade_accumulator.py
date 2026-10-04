@@ -619,10 +619,13 @@ def build_status(root: Path | None = None, session: dict | None = None) -> dict:
         cell["basis"][basis] = cell["basis"].get(basis, 0) + 1
         regime_key = compute_regime_tags(row)["regime_key"]
         regime_totals[regime_key] = regime_totals.get(regime_key, 0) + 1
+    # Every live-registry tile is listed, a tile with no closes yet as an explicit zero row.
+    for lane in _active_registry_lanes():
+        lane_totals.setdefault(lane, {"n": 0, "pnl": 0.0, "wins": 0, "basis": {}})
     lane_stats = {
         lane: {"n": cell["n"], "wins": cell["wins"], "net_pnl_usd": round(cell["pnl"], 6),
                "pnl": round(cell["pnl"], 6), "pnl_unit": "USD", "pnl_basis_counts": cell["basis"]}
-        for lane, cell in sorted(lane_totals.items(), key=lambda item: -item[1]["n"])
+        for lane, cell in sorted(lane_totals.items(), key=lambda item: (-item[1]["n"], item[0]))
     }
     regime_counts = [
         {"rk": key, "n": n}

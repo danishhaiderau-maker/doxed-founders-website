@@ -477,6 +477,21 @@ def check_ai_cadence(f, sig, store) -> Finding:
                              "process_startup_age_sec": up})
 
 
+RARE_TRIGGER_TILE_MARKERS = ("CVD", "NOTRADE", "NO_TRADE", "REGIME_SWITCHER")
+
+
+def tile_quiet_limit_sec(lane: str, eligible_48h: int) -> float:
+    """Per-tile quiet window from the tile's own order-eligible rate (rare tiles wait longer)."""
+    base = float(THRESHOLDS["orders_quiet_amber_sec"])
+    if any(m in str(lane).upper() for m in RARE_TRIGGER_TILE_MARKERS):
+        base = max(base, float(THRESHOLDS["orders_quiet_rare_sec"]))
+    cap = max(base, float(THRESHOLDS["orders_quiet_cap_sec"]))
+    n = int(eligible_48h or 0)
+    if n <= 1:
+        return cap
+    return min(cap, max(base, float(THRESHOLDS["orders_quiet_gap_mult"]) * 48 * 3600 / n))
+
+
 def check_orders_on_tiles(f, sig, store) -> Finding:
     now = f["now"]
     rt = f.get("runtime") or {}
@@ -484,29 +499,46 @@ def check_orders_on_tiles(f, sig, store) -> Finding:
     if not enabled:
         return Finding("prog.tile_orders", "ON tiles keep producing paper orders", "progress", SKIP,
                        "no tile is ON (or runtime snapshot missing)", "each ON tile has recent order activity")
-    rows = _q(store, """
-        SELECT research_lane AS lane, max(decision_ts) AS last_eligible
+    rows = _q(store, f"""
+        SELECT research_lane AS lane, max(decision_ts) AS last_eligible,
+               count(*) FILTER (WHERE decision_ts >= {float(now) - 48 * 3600}) AS n48
         FROM raw_decision WHERE execution_disposition = 'ORDER_ELIGIBLE' GROUP BY 1""") or []
     last = {r["lane"]: r["last_eligible"] for r in rows}
+    n48 = {r["lane"]: int(r.get("n48") or 0) for r in rows}
     fills = {r["lane"]: parse_ts(r["last_fill"]) for r in _q(store, """
         SELECT research_lane AS lane, max(coalesce(close_ts, fill_ts)) AS last_fill FROM raw_execution GROUP BY 1""") or []}
     quiet = []
+    no_baseline = []
     detail = []
+    limits = {}
     for lane in sorted(enabled):
         t = last.get(lane)
         age = now - t if t else None
-        detail.append(f"{lane}: last order-eligible {fmt_age(age)} ago, last fill/close {fmt_age(now - fills[lane]) if fills.get(lane) else 'never'} ago")
-        if age is None or age > THRESHOLDS["orders_quiet_amber_sec"]:
+        limits[lane] = tile_quiet_limit_sec(lane, n48.get(lane, 0))
+        detail.append(f"{lane}: last order-eligible {fmt_age(age)} ago (limit {fmt_age(limits[lane])}, "
+                      f"{n48.get(lane, 0)}@48h), last fill/close "
+                      f"{fmt_age(now - fills[lane]) if fills.get(lane) else 'never'} ago")
+        if age is None:
+            no_baseline.append(lane)
+        elif age > limits[lane]:
             quiet.append(lane)
     paused = sig["paper_paused"]["on"]
     sev = AMBER if quiet and not paused else GREEN
+    observed = "; ".join(detail)
+    if no_baseline:
+        observed = f"no order-eligible decision yet (no rate baseline, not alarmed): {no_baseline}; " + observed
+    if quiet:
+        observed = f"quiet past their own expected gap: {quiet}; " + observed
     return Finding("prog.tile_orders", "ON tiles keep producing paper orders", "progress", sev,
-                   "; ".join(detail), f"each ON tile order-eligible within {fmt_age(THRESHOLDS['orders_quiet_amber_sec'])}",
+                   observed,
+                   f"each ON tile order-eligible within {THRESHOLDS['orders_quiet_gap_mult']:g}x its own mean 48h gap "
+                   f"({fmt_age(THRESHOLDS['orders_quiet_amber_sec'])}..{fmt_age(THRESHOLDS['orders_quiet_cap_sec'])}; "
+                   f"rare-trigger tiles >= {fmt_age(THRESHOLDS['orders_quiet_rare_sec'])})",
                    causes=[] if sev == GREEN else attribute(["paper_paused", "deploy_maintenance", "stale_venue_feed"], sig, [
                        {"cause": "no_signal", "confidence": "possible",
                         "text": "Entry filters legitimately found no signal (rare-trigger tiles such as XVL).",
                         "evidence": quiet}]),
-                   evidence={"quiet": quiet},
+                   evidence={"quiet": quiet, "no_baseline": no_baseline, "limits_sec": limits, "eligible_48h": n48},
                    drill_sql="SELECT research_lane, execution_disposition, exact_reason, count(*), max(decision_ts) "
                              "FROM raw_decision GROUP BY ALL ORDER BY 5 DESC")
 
