@@ -75,6 +75,7 @@
     ["GET", "/api/monitor/summary", "monitor_summary"],
     ["GET", "/api/monitor/lanes", "monitor_lanes"],
     ["GET", "/api/monitor/digest", "monitor_digest"],
+    ["GET", "/api/monitor/integrity", "monitor_integrity"],
     ["GET", "/alerts", "alerts_page"]
   ],
   "main_workers": [
