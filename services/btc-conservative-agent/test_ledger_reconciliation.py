@@ -151,3 +151,33 @@ def test_forced_and_pre_cutoff_mirror_closes_are_outside_fly_scope():
     assert out["level"] == "GREEN", out["reasons"]
     assert out["breakdown"]["per_lane"][lane]["mirror_n"] == 0
     assert out["breakdown"]["mirror_out_of_fly_scope"] == 3
+
+
+def test_analyzer_cohort_uses_fly_tile_scope_forced_and_pre_epoch_excluded():
+    # 2026-10-04: COMMITTED_FADE analyzer n=8 / Win 25% vs the Fly tile 2 / 100%: six of the
+    # eight were deploy-flatten ADMIN_MANUAL_CLOSE rows the tile (rightly) leaves out.
+    cutoff = lr.parse_ts("2026-10-02T00:30:00+00:00")
+    raw = [row("s1", exact=0.01), row("s2", exact=0.02)]
+    for i in range(6):
+        forced = row(f"f{i}", exact=-0.03, close=f"2026-10-02T02:0{i}:00+00:00")
+        forced["exit_reason"] = "ADMIN_MANUAL_CLOSE"
+        raw.append(forced)
+    raw.append(row("pre", exact=0.05, close="2026-10-02T00:10:00+00:00"))
+    rep = lr.build_report(raw_rows=raw, cohort_ids=[r["trade_id"] for r in raw], quarantine_rows=[],
+                          lanes=LANES, epoch_id=EPOCH, epoch_cutoff_ts=cutoff)
+    ftf = rep["analyzer_cohort"][FTF]
+    assert (ftf["n"], ftf["wins"], ftf["losses"], ftf["win_pct"]) == (2, 2, 0, 100.0)
+    assert abs(ftf["net_pnl_usd"] - 0.03) < 1e-9
+    assert rep["mirror_ledger"][FTF]["n"] == 2
+    assert rep["analyzer_cohort_incl_forced"][FTF]["n"] == 9
+    assert rep["excluded_from_tile_scope"][FTF] == {"forced": 6, "pre_epoch": 1}
+    assert rep["level"] == "GREEN" and not rep["unexplained_drops"]
+    assert "ADMIN_MANUAL_CLOSE" in rep["cohort_scope"]["excluded_exit_reasons"]
+
+
+def test_analyzer_feeds_exit_reason_and_session_cutoff_to_the_reconciliation():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
+    start = src.index("def _record_ledger_reconciliation(")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert '"exit_reason"' in body and "epoch_cutoff_ts=cutoff" in body and "_session_start_ts(" in body

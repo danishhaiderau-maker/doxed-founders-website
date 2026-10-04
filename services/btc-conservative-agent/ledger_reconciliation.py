@@ -83,6 +83,7 @@ def build_report(
     epoch_id: str = "",
     source_data_through: Optional[str] = None,
     generated_at: Optional[str] = None,
+    epoch_cutoff_ts: Optional[float] = None,
 ) -> dict:
     """Mirror ledger rows (exact PnL applied) vs the analyzer current cohort.
 
@@ -90,6 +91,11 @@ def build_report(
     ``pnl_cents`` / ``net_pnl_basis`` keys are expected (falling back to
     ``net_pnl_usd``). Rows in registry lanes of the current epoch that are
     neither in the cohort nor quarantined are an unexplained drop (RED).
+
+    ``analyzer_cohort`` / ``mirror_ledger`` use Fly's tile scope: forced closes
+    (FORCED_EXIT_REASONS, e.g. deploy-flatten ADMIN_MANUAL_CLOSE) and closes
+    before ``epoch_cutoff_ts`` are left out, so the per-lane n / Win % / PnL
+    match the Fly tile cards. The unscoped totals stay in ``*_incl_forced``.
     """
     lanes = [str(l).upper() for l in lanes]
     lane_set = set(lanes)
@@ -119,13 +125,20 @@ def build_report(
             "net_pnl_basis": str(row.get("net_pnl_basis") or ""),
             "in_cohort": tid in cohort,
             "quarantine_reason": quarantine.get(tid) or None,
+            "exit_reason": str(row.get("exit_reason") or "").strip().upper() or None,
         })
+    for t in trades:
+        close = parse_ts(t["close_ts"])
+        t["forced_close"] = t["exit_reason"] in FORCED_EXIT_REASONS
+        t["pre_epoch"] = bool(epoch_cutoff_ts is not None and close is not None and close < float(epoch_cutoff_ts))
+        t["tile_scope"] = not t["forced_close"] and not t["pre_epoch"]
     trades.sort(key=lambda r: (r["close_ts"], r["trade_id"]))
     unexplained = [t for t in trades if not t["in_cohort"] and not t["quarantine_reason"]]
     not_exact = [t for t in trades if t["in_cohort"] and t["net_pnl_basis"] not in ("", "TERMINAL_COST_RECEIPT_EXACT")]
-    cohort_rows = [t for t in trades if t["in_cohort"]]
+    cohort_all = [t for t in trades if t["in_cohort"]]
+    cohort_rows = [t for t in cohort_all if t["tile_scope"]]
     analyzer = lane_totals(cohort_rows, lanes)
-    mirror = lane_totals(trades, lanes)
+    mirror = lane_totals([t for t in trades if t["tile_scope"]], lanes)
     cents_basis = lane_totals(cohort_rows, lanes, pnl_key="pnl_cents")
     reasons: list[str] = []
     level = GREEN
@@ -151,6 +164,16 @@ def build_report(
         "lanes": lanes,
         "analyzer_cohort": analyzer,
         "mirror_ledger": mirror,
+        "cohort_scope": {"excluded_exit_reasons": sorted(FORCED_EXIT_REASONS),
+                         "epoch_cutoff_ts": epoch_cutoff_ts,
+                         "definition": "Fly tile scope: current-epoch strategy closes, forced closes excluded"},
+        "analyzer_cohort_incl_forced": lane_totals(cohort_all, lanes),
+        "mirror_ledger_incl_forced": lane_totals(trades, lanes),
+        "excluded_from_tile_scope": {
+            lane: {"forced": sum(1 for t in trades if t["research_lane"] == lane and t["forced_close"]),
+                   "pre_epoch": sum(1 for t in trades if t["research_lane"] == lane and t["pre_epoch"]
+                                    and not t["forced_close"])}
+            for lane in lanes},
         "quarantined": {lane: sum(1 for t in trades if t["research_lane"] == lane and t["quarantine_reason"])
                         for lane in lanes},
         "unexplained_drops": unexplained,
