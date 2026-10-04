@@ -4077,9 +4077,123 @@ def get_lane_pnl_ledger(lane: str = None) -> dict:
 
 
 
-def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None):
-    """Per-lane equity curve stats — independent attribution for Pathway Lab."""
+def _lane_pnl_ledger_epoch_tag(force: bool = False) -> dict:
+    """Epoch identity stamped into lane_pnl_ledger.json (reporting only)."""
+    try:
+        ts, source = _current_epoch_boundary(force=force)
+    except Exception:
+        ts, source = 0.0, None
+    return {
+        "epoch_id": _current_epoch_id_for_display(),
+        "epoch_cutoff_ts": float(ts or 0.0),
+        "epoch_cutoff_source": source,
+    }
+
+
+def _write_lane_pnl_ledger_file(ledger: dict, tag: dict | None = None) -> None:
+    tag = tag if tag is not None else _lane_pnl_ledger_epoch_tag()
+    with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "schema": "lane_pnl_ledger_v1", "ts": utc_iso(), **tag,
+                "excluded_exit_reasons": sorted(STATS_EXCLUDED_EXIT_REASONS),
+                "lanes": ledger,
+            },
+            f,
+            indent=2,
+        )
+
+
+LANE_PNL_EPOCH_RECEIPTS_FILE = "lane_pnl_ledger_epoch_receipts.jsonl"
+_lane_pnl_epoch_status: dict = {"status": "NOT_RUN"}
+
+
+def _segregate_lane_pnl_ledger_for_epoch() -> dict:
+    """Keep the persistent lane ledger inside the current epoch; never deletes.
+
+    ``lane_pnl_ledger.json`` is restart state (``runtime_hygiene.NEVER_MOVE``),
+    so the pre-epoch archive skips it and it used to carry totals across
+    epochs onto the tile cards.  When its epoch tag differs from the current
+    epoch, the old file is copied to ``research_archive/pre_epoch/<epoch>/``
+    and the ledger is rebuilt from this epoch's closed trades (forced closes
+    excluded).  Runs after the session trades are loaded.
+    """
+    tag = _lane_pnl_ledger_epoch_tag(force=True)
+    cutoff = float(tag.get("epoch_cutoff_ts") or 0.0)
+    result = {"epoch_id": tag.get("epoch_id"), "epoch_cutoff_ts": cutoff, "ts": time.time()}
+    if not cutoff:
+        result["status"] = "NO_EPOCH_BOUNDARY"
+        _lane_pnl_epoch_status.clear()
+        _lane_pnl_epoch_status.update(result)
+        return result
+    payload = {}
+    try:
+        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+            with open(LANE_PNL_LEDGER_FILE, encoding="utf-8") as f:
+                payload = json.load(f) or {}
+    except Exception as exc:
+        result["read_error"] = f"{type(exc).__name__}: {exc}"[:200]
+    try:
+        same_epoch = (
+            payload.get("epoch_id") == tag.get("epoch_id")
+            and abs(float(payload.get("epoch_cutoff_ts") or 0.0) - cutoff) < 1.0
+        )
+    except (TypeError, ValueError):
+        same_epoch = False
+    with trade_lock:
+        epoch_ledger = _session_trade_accounting_locked(cutoff)[2]
+    if same_epoch:
+        result["status"] = "CURRENT"
+    else:
+        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+            target_dir = (
+                Path(LANE_PNL_LEDGER_FILE).resolve().parent
+                / "research_archive" / "pre_epoch" / str(tag.get("epoch_id") or "unknown_epoch")
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"lane_pnl_ledger.before_{int(cutoff)}.{int(time.time())}.json"
+            shutil.copy2(LANE_PNL_LEDGER_FILE, target)
+            result["archived_to"] = str(target)
+            result["archived_epoch_id"] = payload.get("epoch_id")
+            result["archived_closes"] = sum(
+                int((b or {}).get("closes") or 0) for b in (payload.get("lanes") or {}).values()
+            )
+        result["status"] = "SEGREGATED"
+    # The epoch trade rows are the truth either way; a CURRENT file that
+    # drifted (e.g. a forced close counted before this fix) is re-derived.
+    with state_lock:
+        state["lane_pnl_ledger"] = copy.deepcopy(epoch_ledger)
+    try:
+        _write_lane_pnl_ledger_file(epoch_ledger, tag)
+    except Exception as exc:
+        result["write_error"] = f"{type(exc).__name__}: {exc}"[:200]
+    result["epoch_closes"] = sum(int(b.get("closes") or 0) for b in epoch_ledger.values())
+    result["deletion_invoked"] = False
+    if result["status"] == "SEGREGATED":
+        _safe_append_jsonl(LANE_PNL_EPOCH_RECEIPTS_FILE, result, label="LANE_PNL_EPOCH")
+    _lane_pnl_epoch_status.clear()
+    _lane_pnl_epoch_status.update(result)
+    hygiene = globals().get("_runtime_hygiene_status")
+    if isinstance(hygiene, dict):
+        hygiene["lane_pnl_epoch"] = dict(result)
+    logger.info(
+        f"[LANE_PNL] epoch ledger {result['status']} epoch={tag.get('epoch_id')} "
+        f"closes={result['epoch_closes']} archived={result.get('archived_to')} [PIPELINE ENFORCEMENT]"
+    )
+    return result
+
+
+def update_lane_pnl_ledger(
+    lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None, exit_reason: str = None,
+):
+    """Per-lane equity curve stats — independent attribution for Pathway Lab.
+
+    Forced closes (``STATS_EXCLUDED_EXIT_REASONS``) are not strategy outcomes
+    and are left out, matching ``_derive_lane_pnl_ledger_from_trades``.
+    """
     ln = _normalize_lane_key(lane)
+    if event == "CLOSE" and str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS:
+        return
     with state_lock:
         ledger = state.setdefault("lane_pnl_ledger", {})
         bucket = ledger.setdefault(ln, {
@@ -4114,12 +4228,7 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
                 bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
                 bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + net_pnl_usd, 2)
         try:
-            with open(LANE_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"schema": "lane_pnl_ledger_v1", "ts": utc_iso(), "lanes": ledger},
-                    f,
-                    indent=2,
-                )
+            _write_lane_pnl_ledger_file(ledger)
             _LEDGER_WRITES.success("lane_pnl")
         except Exception as exc:
             _LEDGER_WRITES.failure("lane_pnl", exc)
@@ -17554,6 +17663,10 @@ def increment_pipeline_funnel(counter: str, n: int = 1):
         fc[counter] = int(fc.get(counter, 0)) + int(n)
 
 
+# Lane opportunity counters live only in memory: they start with the process.
+_LANE_OPPORTUNITY_COUNTERS_SINCE_TS = time.time()
+
+
 def log_lane_opportunity_event(
     lane: str,
     event: str,
@@ -22272,6 +22385,12 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
         best = (float(bot_start_time or 0.0), "bot_start")
     _epoch_boundary_cache.update(at=now, value=best)
     return best
+
+
+def _current_epoch_id_for_display() -> str | None:
+    manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
+    epoch_id = manifest.get("epoch_id") if isinstance(manifest, dict) else None
+    return epoch_id or globals().get("DATA_EPOCH_ID")
 
 
 def _current_epoch_cutoff_utc() -> str | None:
@@ -30500,6 +30619,7 @@ def close_position(pos: dict, exit_reason: str):
         "CLOSE",
         net_pnl,
         pos.get("dir"),
+        exit_reason=exit_reason,
     )
     log_lane_opportunity_event(
         pos.get("research_lane") or (master or {}).get("research_lane"),
@@ -34518,13 +34638,23 @@ def _load_reconciled_lab_outcome_metrics() -> dict:
 
 def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     m = metrics or {}
-    approves = int(m.get("approves") or 0)
+    # ``approvals_known`` False: no approval count covers this scope (no
+    # benchmark report, or counters younger than the epoch).  Approval-based
+    # metrics are then n/a -- never closes standing in for approvals, which
+    # used to print a fake "100% fill" and EV/appr.
+    approvals_known = m.get("approvals_known", True) is not False
     fills = int(m.get("real_fills") or 0)
     pnl = float(m.get("net_pnl_real") or 0)
-    ev = float(m.get("per_approve_ev") or 0)
-    fill_pct = _truthful_approve_to_fill_pct(
-        approves, fills, m.get("approve_to_fill_pct")
-    )
+    if approvals_known:
+        approves = int(m.get("approves") or 0)
+        ev = float(m.get("per_approve_ev") or 0)
+        fill_pct = _truthful_approve_to_fill_pct(
+            approves, fills, m.get("approve_to_fill_pct")
+        )
+    else:
+        approves = None
+        ev = None
+        fill_pct = None
     lab_closes = int(m.get("lab_closes") or 0)
     lab_pnl = float(m.get("lab_net_pnl") or 0)
     lab_wins = int(m.get("lab_wins") or 0)
@@ -34553,7 +34683,15 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     else:
         lab_line = "LAB sim · collecting…"
 
-    if shadow_sim and (checker_pass_sims or reject_sims):
+    if not approvals_known:
+        win_label = (
+            f" · {win_rate:.0f}% win" if fills and win_rate is not None else ""
+        )
+        summary_line = (
+            f"n=n/a approves · {fills} trades{win_label} · "
+            f"n/a fill · ${pnl:.2f} real · EV n/a/approve"
+        )
+    elif shadow_sim and (checker_pass_sims or reject_sims):
         summary_line = (
             f"shadow sim · n={approves} approves · {checker_pass_sims} chk pass · ${checker_pass_pnl:.2f} · "
             f"{reject_sims} reject sim · ${reject_pnl:.2f} · {paper_fills} paper fills"
@@ -34573,8 +34711,9 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         )
     return {
         "approves": approves,
+        "approvals_known": approvals_known,
         "real_fills": fills,
-        "approve_to_fill_pct": float(fill_pct or 0),
+        "approve_to_fill_pct": float(fill_pct or 0) if approvals_known else None,
         "shadow_fill_pct": float(m.get("shadow_fill_pct") or 0),
         "net_pnl_real": pnl,
         "per_approve_ev": ev,
@@ -34605,17 +34744,35 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     }
 
 
+def _lane_counters_cover_epoch(epoch_cutoff_utc: str, counters_since_ts=None) -> bool:
+    """True when the in-memory lane opportunity counters span the whole epoch.
+
+    The counters are not persisted: they restart with the process (and with a
+    hard reset).  A process that started after the epoch cutoff has only a
+    partial approval count, so approval-based metrics must read n/a.
+    """
+    if counters_since_ts is None:
+        counters_since_ts = _LANE_OPPORTUNITY_COUNTERS_SINCE_TS
+    try:
+        cutoff_ts = datetime.fromisoformat(str(epoch_cutoff_utc).replace("Z", "+00:00")).timestamp()
+        return float(counters_since_ts) <= cutoff_ts + 5.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _scope_pathway_specs_to_signed_epoch(
     payload: dict,
     session_trades: list,
     lane_opportunity_counters: dict,
     epoch_cutoff_utc: str,
     ledger: dict | None = None,
+    counters_since_ts: float | None = None,
 ) -> dict:
     """Replace cumulative tile headlines with the current signed-epoch truth.
 
-    ``ledger`` is the full-session lane ledger; ``session_trades`` may be the
-    display-limited Trades table, so it is only the fallback.
+    ``ledger`` is the full-session (epoch-scoped, forced closes excluded) lane
+    ledger; ``session_trades`` may be the display-limited Trades table
+    (``_DASHBOARD_TRADES_MAX`` rows), so it is only the fallback.
     """
     if not epoch_cutoff_utc:
         return payload
@@ -34623,15 +34780,17 @@ def _scope_pathway_specs_to_signed_epoch(
     if not isinstance(ledger, dict):
         ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
     counters = lane_opportunity_counters or {}
+    approvals_known = _lane_counters_cover_epoch(epoch_cutoff_utc, counters_since_ts)
     for row in scoped.get("lanes") or []:
         lane = str(row.get("lane") or "").upper()
         lb = ledger.get(lane) or {}
         lc = counters.get(lane) or {}
         closes = int(lb.get("closes") or 0)
         pnl = round(float(lb.get("net_pnl_usd") or 0.0), 2)
-        approves = int(lc.get("approves") or 0)
+        approves = int(lc.get("approves") or 0) if approvals_known else None
         metrics = {
             "approves": approves,
+            "approvals_known": approvals_known,
             "real_fills": closes,
             "approve_to_fill_pct": round(100.0 * closes / approves, 1) if approves else 0.0,
             "net_pnl_real": pnl,
@@ -34647,6 +34806,10 @@ def _scope_pathway_specs_to_signed_epoch(
         stats = _session_stats_from_lane_metrics(metrics)
         stats["scope"] = "SIGNED_FRESH_EPOCH"
         stats["epoch_cutoff_utc"] = epoch_cutoff_utc
+        stats["epoch_id"] = _current_epoch_id_for_display()
+        stats["closes_source"] = "epoch_trade_ledger_excl_forced_closes"
+        if not approvals_known:
+            stats["approvals_note"] = "approvals n/a: counters restarted after the epoch began"
         row["session_stats"] = stats
     scoped["session_scope"] = "SIGNED_FRESH_EPOCH"
     scoped["epoch_cutoff_utc"] = epoch_cutoff_utc
@@ -34817,14 +34980,15 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         if closes or pnl:
             prev = disk_metrics.get(lane) or {}
             approves = int(prev.get("approves") or 0)
-            # EV/appr updates as paper trades complete (prefer live ledger closes).
-            per_ev = round(pnl / approves, 2) if approves else float(prev.get("per_approve_ev") or 0)
-            if not approves and closes:
-                per_ev = round(pnl / closes, 2)
+            # Without an approval count (no benchmark report) EV/appr and fill%
+            # are unknown: report n/a instead of substituting closes.
+            approvals_known = bool(approves) or not closes
+            per_ev = round(pnl / approves, 2) if approves else None
             disk_metrics[lane] = {
-                "approves": approves or closes,
+                "approves": approves if approvals_known else None,
+                "approvals_known": approvals_known,
                 "real_fills": closes or int(prev.get("real_fills") or 0),
-                "approve_to_fill_pct": prev.get("approve_to_fill_pct"),
+                "approve_to_fill_pct": prev.get("approve_to_fill_pct") if approvals_known else None,
                 "shadow_fill_pct": float(prev.get("shadow_fill_pct") or 0),
                 "net_pnl_real": round(pnl, 2),
                 "per_approve_ev": per_ev,
@@ -37347,7 +37511,9 @@ DASHBOARD_JS = """(function () {
               ? parsedHeadlineEv
               : headlinePnl / headlineApprovals)
             : null;
-          const headlineEvLabel = headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2));
+          const headlineEvLabel = stats.approvals_known === false
+            ? 'n/a'
+            : (headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2)));
           const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
           const winPctLabel = function (wins, losses, closed) {
             const n = Number(closed || 0);
@@ -37359,10 +37525,14 @@ DASHBOARD_JS = """(function () {
           };
           const headlineWinLabel = winPctLabel(stats.wins, stats.losses, headlineClosed);
           const statsScope = stats.scope === 'SIGNED_FRESH_EPOCH'
-            ? 'current signed clean-epoch total'
-            : 'historical/analyzer total';
+            ? ('current epoch' + (stats.epoch_id ? ' ' + stats.epoch_id : '') + ' only (manual/forced closes excluded)')
+            : (stats.scope
+              ? ('scope ' + String(stats.scope))
+              : 'epoch scope unavailable (no epoch cutoff on this snapshot)');
           const statsScopeNote = '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
-            + (stats.epoch_cutoff_utc ? ' since ' + stats.epoch_cutoff_utc : '') + '</div>';
+            + (stats.epoch_cutoff_utc ? ' since ' + stats.epoch_cutoff_utc : '')
+            + (stats.approvals_known === false ? ' · EV/appr n/a (approvals not counted for the whole epoch)' : '')
+            + '</div>';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Pending', laneNow.pending || 0)
@@ -37533,7 +37703,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Clean-epoch headline: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
+            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Clean-epoch headline: n=' + (stats.approvals_known === false ? 'n/a' : headlineApprovals) + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -43020,6 +43190,7 @@ def _build_api_state_snapshot():
             trades_copy,
             snapshot.get("lane_opportunity_counters") or {},
             _epoch_cutoff,
+            ledger=snapshot.get("lane_pnl_ledger"),
         )
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
@@ -49154,8 +49325,10 @@ def reset_session_risk_state():
 
 def reset_runtime_state(*, preserve_execution_pause: bool = False):
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
+    global _LANE_OPPORTUNITY_COUNTERS_SINCE_TS
     logger.warning("[RESET] HARD RESET START - clearing all in-memory state for true clean slate")
     bot_start_time = time.time()
+    _LANE_OPPORTUNITY_COUNTERS_SINCE_TS = bot_start_time
     trades.clear()
     pending_orders.clear()
     expired_orders.clear()
@@ -54690,6 +54863,10 @@ def main():
         logger.error(f"[STARTUP] CSV fallback replay failed: {exc} [PIPELINE ENFORCEMENT]")
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
+    try:
+        _segregate_lane_pnl_ledger_for_epoch()
+    except Exception as exc:
+        logger.error(f"[LANE_PNL] epoch segregation failed: {exc} [PIPELINE ENFORCEMENT]")
     try:
         _load_post_exit_replays()
     except Exception as exc:
