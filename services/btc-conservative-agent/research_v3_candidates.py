@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from analyzer_epoch_guard import process_guard
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash, validate_policy_spec
 import concurrent.futures
 import time
@@ -723,7 +724,13 @@ def _validation_receipt_identity(receipt: dict[str, Any]) -> dict[str, Any]:
 def _cycle_atr_by_event(root: Path) -> dict[str, float]:
     """Index the immutable 3-minute receipt used by pre-normalized V3.1 rows."""
     result: dict[str, float] = {}
-    for row in _read_jsonl(root / "cycle_3m_universe.jsonl"):
+    path = root / "cycle_3m_universe.jsonl"
+    try:
+        # Through the analyzer's epoch guard: the cycle in flight at an epoch boundary is a pre-epoch row.
+        rows = process_guard().read_jsonl(path, "cycle_3m_universe.jsonl")
+    except FileNotFoundError:
+        rows = []
+    for row in rows:
         event_id = str(row.get("trade_id") or row.get("event_id") or "")
         atr = _number(row.get("atr14_pct_3m"))
         if event_id and atr is not None and atr > 0:
