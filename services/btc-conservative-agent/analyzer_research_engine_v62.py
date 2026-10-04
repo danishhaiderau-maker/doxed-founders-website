@@ -1220,17 +1220,22 @@ def _epoch_audit_streams(data_root):
             relpath = stem
         if not relpath.endswith((".jsonl", ".csv")) or relpath.endswith(_EPOCH_AUDIT_SKIP_SUFFIXES):
             continue
-        if de.epoch_independent(relpath):
+        if de.epoch_independent(relpath) or de.non_evidence(relpath):
+            # Market tape is epoch independent; ops ledgers (relay quarantine/retirement, runtime
+            # telemetry, receipts) are never analyzer evidence (#420).
             continue
         yield path, relpath
 
 
-def _epoch_purity_audit(guard, data_root):
+def _epoch_purity_audit(guard, data_root, guarded=None):
     """Pre-epoch rows retained on disk in the data root's epoch-scoped streams.
 
     Retained rows are kept on purpose; they are admitted only when a reader
     opens their file outside the guard (see ``_install_stream_read_monitor``).
+    Rows in ``data_epoch.READ_GUARDED_BASES`` streams (every analyzer reader admits rows
+    through the epoch guard) are also counted into ``guarded`` when given (#420).
     """
+    import data_epoch as de
     from analyzer_epoch_guard import file_pre_epoch_rows, guarded_read
 
     if not guard.declared:
@@ -1246,6 +1251,8 @@ def _epoch_purity_audit(guard, data_root):
                 continue
             if bad:
                 found[relpath] = found.get(relpath, 0) + bad
+                if guarded is not None and de.read_guarded(relpath):
+                    guarded[relpath] = guarded.get(relpath, 0) + bad
     return sum(found.values()), dict(sorted(found.items()))
 
 
@@ -1267,12 +1274,18 @@ def _epoch_receipt_block():
     guard = _epoch_guard()
     if not guard.declared:
         return None
+    import data_epoch as de
+
     data_root = _analyzer_data_root()
-    retained, retained_by_stream = _epoch_purity_audit(guard, data_root)
+    guarded = {}
+    retained, retained_by_stream = _epoch_purity_audit(guard, data_root, guarded)
     monitor = active_monitor()
     if monitor is None:
         reads = {"active": False}
-        admitted, by_stream = retained, retained_by_stream
+        # Fail closed on every retained row except read-guarded streams (#420): each of their
+        # analyzer readers admits rows only through the epoch guard.
+        by_stream = {k: v for k, v in retained_by_stream.items() if k not in guarded}
+        admitted = sum(by_stream.values())
     else:
         reads = monitor.report(guard.manifest)
         admitted, by_stream = reads["pre_epoch_rows_admitted"], reads["pre_epoch_rows_admitted_by_stream"]
@@ -1284,6 +1297,10 @@ def _epoch_receipt_block():
         "pre_epoch_rows_retained": retained,
         "pre_epoch_rows_retained_by_stream": retained_by_stream,
         "read_monitor": reads,
+        # On disk until clean-epoch-wipe, but every analyzer reader of these streams rejects them.
+        "pre_epoch_rows_read_guarded": sum(guarded.values()),
+        "pre_epoch_rows_read_guarded_by_stream": dict(sorted(guarded.items())),
+        "non_evidence_streams": sorted(de.NON_EVIDENCE_BASES),
         "unstamped_rule": "rows without data_epoch_id are admitted only when timestamped at or after "
                           "started_at_utc (labelled CURRENT_UNSTAMPED / UNSTAMPED_POST_EPOCH)",
     })
@@ -9860,6 +9877,8 @@ def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
     # explicit string UNKNOWN above.
     if not frame.empty:
         frame.loc[:, header] = frame.loc[:, header].replace("", np.nan)
+    # expired_orders_3factor.csv is READ_GUARDED: the reset keeps the head, so every read is
+    # epoch-filtered here, before ``usecols`` drops the timestamp columns (#420).
     frame = _epoch_filter_frame(path, frame)
     if usecols is not None:
         missing_columns = [column for column in usecols if column not in frame.columns]
@@ -12579,6 +12598,7 @@ def adaptive_entry_funnel_report() -> dict:
             trades_path=_agent_data_path(TRADES_FILE),
             expired_path=_agent_data_path(EXPIRED_ORDERS_FILE),
             current_version=EXPECTED_BOT_VERSION,
+            admit=_epoch_admit,
         )
     except Exception as exc:
         report = {"schema": "adaptive_entry_funnel_v1", "status": "UNAVAILABLE", "error": str(exc)}
@@ -12772,7 +12792,7 @@ def tile_evidence_points_report(session=None):
             v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
             relay_interference_ids=set(relay_interference_trade_ids()),
             lifecycle_contradiction_ids=set(lifecycle_contradiction_trade_ids()),
-            **load_evidence_inputs(_agent_data_path),
+            **load_evidence_inputs(_agent_data_path, admit=_epoch_admit),
         )
     except Exception as exc:  # the evidence view must never stop the analyzer
         payload = {"schema": "tile_evidence_points_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}

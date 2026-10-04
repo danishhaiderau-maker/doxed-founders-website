@@ -189,6 +189,55 @@ def _load_incremental_index(destination: Path) -> dict | None:
     return index
 
 
+RETIRED_DIR = "migration/retired"
+RETIRED_LEDGER = "migration/retired_ledger.jsonl"
+RETIRED_SCHEMA = "canonical_migration_retired_file_v1"
+
+
+def _retire_vanished(destination: Path, index: dict | None, present: set[str], now: float) -> list[dict]:
+    """Move store files this tool migrated earlier but the source no longer lists (never deletes).
+
+    The promotion view mirrors Fly; a file that left it (Fly retired it, e.g. the
+    clean-epoch boundary reset, issue #420) must not stay an analyzer input in the
+    canonical store. It moves under ``migration/retired/<UTC stamp>/`` (outside the
+    analyzer data root's top level) and is ledgered append-only.
+    """
+    recorded = (index or {}).get("files") or {}
+    vanished = sorted(key for key in recorded if key not in present)
+    if not vanished:
+        return []
+    stamp = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = destination / RETIRED_DIR / stamp
+    retired = []
+    for key in vanished:
+        src = (destination / key).resolve()
+        try:
+            src.relative_to(destination)
+        except ValueError as exc:
+            raise RuntimeError(f"Retired path escaped store: {key}") from exc
+        if not src.is_file():
+            continue
+        target = root.joinpath(*key.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise RuntimeError(f"Retirement target exists: {target}")
+        size = src.stat().st_size
+        os.replace(src, target)
+        retired.append({"schema": RETIRED_SCHEMA, "relpath": key, "size": size,
+                        "sha256": recorded[key].get("sha256"), "retired_to": target.relative_to(destination).as_posix(),
+                        "retired_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "reason": "ABSENT_FROM_PROMOTION_VIEW"})
+    if retired:
+        ledger = destination / RETIRED_LEDGER
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as handle:
+            for row in retired:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    return retired
+
+
 def _append_verified(src: Path, dst: Path, prefix_size: int, prefix_sha: str, expected_sha: str) -> bool:
     """Append src[prefix_size:] to dst when src extends the recorded prefix to exactly expected_sha.
 
@@ -353,6 +402,8 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
         copied += 1
         copied_bytes += expected_size
         normalized_state[key] = dict(record)
+    retired = _retire_vanished(destination, index if index is not None else _load_incremental_index(destination),
+                               set(normalized_state), now)
     (destination / INCREMENTAL_INDEX).parent.mkdir(parents=True, exist_ok=True)
     candidate_index = destination / (INCREMENTAL_INDEX + ".tmp")
     candidate_index.write_text(json.dumps({"schema": INCREMENTAL_SCHEMA, "files": files,
@@ -438,6 +489,8 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
         "files_copied": counts["copied"],
         "files_linked": counts["linked"],
         "bytes_written": written_bytes,
+        "files_retired": len(retired),
+        "retired_sample": [row["relpath"] for row in retired[:20]],
         "promotion_level": str(heartbeat.get("promotionLevel") or "GREEN"),
         "promotion_warnings": [str(item) for item in heartbeat.get("promotionWarnings") or []],
     }

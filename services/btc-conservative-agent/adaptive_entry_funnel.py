@@ -189,13 +189,23 @@ def build_report(*, decisions, taker_counterfactuals, trades, expired,
     }
 
 
+def _admitted(admit, path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows the analyzer epoch guard admits (``admit(relpath, row)``); all rows when no guard is given."""
+    if admit is None:
+        return rows
+    name = os.path.basename(path)
+    return [row for row in rows if admit(name, row)]
+
+
 def build_report_from_paths(*, decisions_path, counterfactual_path, trades_path,
-                            expired_path, current_version) -> dict[str, Any]:
+                            expired_path, current_version, admit=None) -> dict[str, Any]:
+    # ``admit`` is the analyzer's clean-epoch guard: these streams survive the boundary reset
+    # with pre-epoch rows (data_epoch.READ_GUARDED_BASES), so every row passes it (#420).
     report = build_report(
-        decisions=_read_jsonl(decisions_path),
-        taker_counterfactuals=_read_jsonl(counterfactual_path),
-        trades=_read_csv(trades_path),
-        expired=_read_csv(expired_path),
+        decisions=_admitted(admit, decisions_path, _read_jsonl(decisions_path)),
+        taker_counterfactuals=_admitted(admit, counterfactual_path, _read_jsonl(counterfactual_path)),
+        trades=_admitted(admit, trades_path, _read_csv(trades_path)),
+        expired=_admitted(admit, expired_path, _read_csv(expired_path)),
         current_version=current_version,
     )
     report["inputs"] = {
