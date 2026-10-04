@@ -251,6 +251,11 @@ def collection_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
             f"{runtime.get('ledger_write_failures_recent')!r} "
             f"(total since boot={runtime.get('ledger_write_failures_total')!r})"
         )
+    if "COLLECTOR_V22_SEAL_DEGRADED" in alarms:
+        findings["collector_v22_seal_degraded"] = (
+            f"legacy v22 seal index invalid; bot kept running (v3 is canonical): "
+            f"{runtime.get('collector_v22_seal_degraded')!r}"
+        )
     if "EXECUTION_FUNNEL_HOOK_FAILURES" in alarms:
         findings["execution_funnel_hook_failures"] = (
             f"execution funnel hooks failing in the last hour: "

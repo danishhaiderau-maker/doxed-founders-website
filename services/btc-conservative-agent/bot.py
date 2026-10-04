@@ -9320,7 +9320,7 @@ def _platform_relay_keepalive_url() -> str:
 def _platform_relay_connection_keepalive_loop():
     """Event-driven relay drain with a bounded local crash-recovery tick."""
     while not shutdown_event.is_set():
-        if RELAY_STACK_RESEARCH_ONLY:
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
             # Local observation only: the guard still sees the pending index
             # (and any retirement it owns); delivery is refused below, so no
             # relay HTTP call, ACK or rewrite happens while research-only.
@@ -9446,7 +9446,7 @@ def _commit_marketable_relay_payload(payload: dict) -> bool:
 
 def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     """POST one already-durable event and remove it only on an exact DB ACK."""
-    if RELAY_STACK_RESEARCH_ONLY:
+    if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
         # Withheld, not failed: the durable event stays pending and unchanged.
         _relay_push_state["research_only_withheld_total"] = int(
             _relay_push_state.get("research_only_withheld_total") or 0
@@ -13974,11 +13974,11 @@ def research_collection_health(now: float = None) -> dict:
     try:
         # A deliberately disabled relay (RELAY_STACK_MODE=research_only) cannot
         # drain its outbox; its stale-owner state is INFO on /health, not ALARM.
-        if not RELAY_STACK_RESEARCH_ONLY and _relay_delivery_guard.stale_owner_alarm(now):
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False) and _relay_delivery_guard.stale_owner_alarm(now):
             alarms.append("RELAY_OUTBOX_STALE_OWNER_PENDING")
     except Exception as exc:
         runtime_failures["relay_guard_error"] = type(exc).__name__
-    if _collector_v22_seal_degraded:
+    if globals().get("_collector_v22_seal_degraded"):
         alarms.append("COLLECTOR_V22_SEAL_DEGRADED")
         runtime_failures["collector_v22_seal_degraded"] = dict(_collector_v22_seal_degraded)
     try:
@@ -14220,7 +14220,8 @@ def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> boo
 def _restore_collector_v22_provisionals() -> int:
     """Startup recovery; bounded polls repeat this merge as a safety net."""
     global _collector_v22_last_merge
-    restored = _merge_collector_v22_provisionals_guarded(reason="STARTUP")
+    restored = (globals().get("_merge_collector_v22_provisionals_guarded")
+                or (lambda reason: _merge_collector_v22_provisionals()))(reason="STARTUP")
     _collector_v22_last_merge = time.time()
     preentry_replay = globals().get("_replay_preentry_evidence_handoffs")
     if callable(preentry_replay):
@@ -40146,19 +40147,21 @@ _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     # sub-second rebuild loop.
     float(os.getenv(
         "RELAY_EXECUTION_REFRESH_INTERVAL_SEC",
-        str(_relay_stack_mode.RESEARCH_ONLY_EXECUTION_REFRESH_SEC) if RELAY_STACK_RESEARCH_ONLY else "1.0",
+        "1.0",
     )),
 )
+if RELAY_STACK_RESEARCH_ONLY and not os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC"):
+    # research_only: no relay consumes sub-5s execution authority. 5 s refresh;
+    # the stale fence below follows (3x refresh = 15 s) and still fails closed.
+    _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
+        _RELAY_EXECUTION_REFRESH_INTERVAL_SEC, float(_relay_stack_mode.RESEARCH_ONLY_EXECUTION_REFRESH_SEC))
 _RELAY_EXECUTION_MAX_STALE_SEC = max(
     _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
     # A successful build currently takes roughly 0.4-0.7s on the 1x Fly VM.
     # Permit one bounded lock wait plus one missed refresh without declaring
     # the signed owner unavailable.  Age remains explicit and downstream
     # source-absence logic still treats snapshots beyond this bound as UNKNOWN.
-    float(os.getenv(
-        "RELAY_EXECUTION_MAX_STALE_SEC",
-        str(_relay_stack_mode.RESEARCH_ONLY_EXECUTION_MAX_STALE_SEC) if RELAY_STACK_RESEARCH_ONLY else "4.0",
-    )),
+    float(os.getenv("RELAY_EXECUTION_MAX_STALE_SEC", "4.0")),
 )
 
 
@@ -41159,7 +41162,7 @@ def api_relay_state(force_rebuild: bool = False):
         cached = _cached_relay_state_response("BACKGROUND")
         if cached is not None:
             return cached
-        if RELAY_STACK_RESEARCH_ONLY:
+        if globals().get("RELAY_STACK_RESEARCH_ONLY", False):
             # No background refresher in research-only mode: one bounded
             # on-demand build (the refresh lock below stays non-blocking).
             return api_relay_state(force_rebuild=True)
@@ -42646,7 +42649,7 @@ def _start_api_state_cache_refresher():
         except Exception as e:
             logger.error(f"/api/relay-execution-state initial cache build error: {e}")
         threading.Thread(target=_api_state_cache_refresher_loop, daemon=True).start()
-        if not RELAY_STACK_RESEARCH_ONLY:
+        if not globals().get("RELAY_STACK_RESEARCH_ONLY", False):
             # Research-only: /api/relay-state builds on demand (no pusher polls it).
             threading.Thread(target=_relay_state_cache_refresher_loop, daemon=True).start()
         threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()

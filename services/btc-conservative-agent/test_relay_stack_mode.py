@@ -84,21 +84,21 @@ def test_research_only_keepalive_observes_locally_on_slow_cadence():
 
 
 def test_stale_owner_alarm_is_info_and_background_relay_refresher_is_gated():
-    assert "if not RELAY_STACK_RESEARCH_ONLY and _relay_delivery_guard.stale_owner_alarm(now):" in BOT_SRC
+    assert 'if not globals().get("RELAY_STACK_RESEARCH_ONLY", False) and _relay_delivery_guard.stale_owner_alarm(now):' in BOT_SRC
     start = BOT_SRC.index("def _start_api_state_cache_refresher")
     body = BOT_SRC[start:BOT_SRC.index("\ndef ", start + 10)]
-    assert re.search(r"if not RELAY_STACK_RESEARCH_ONLY:\n\s+# .*\n\s+threading\.Thread\(target=_relay_state_cache_refresher_loop", body)
+    assert re.search(r"if not globals\(\)\.get\(\"RELAY_STACK_RESEARCH_ONLY\", False\):\n\s+# .*\n\s+threading\.Thread\(target=_relay_state_cache_refresher_loop", body)
     # The canonical execution snapshot stays (dashboard overlay + deploy flat checks read it).
     assert "threading.Thread(target=_relay_execution_cache_refresher_loop, daemon=True).start()" in body
     route = BOT_SRC[BOT_SRC.index("def api_relay_state("):]
     route = route[:route.index("\n@app.route")]
-    assert "if RELAY_STACK_RESEARCH_ONLY:" in route and "api_relay_state(force_rebuild=True)" in route
+    assert 'if globals().get("RELAY_STACK_RESEARCH_ONLY", False):' in route and "api_relay_state(force_rebuild=True)" in route
     assert '"relay_stack": _relay_stack_mode.status(),' in BOT_SRC
 
 
 def test_execution_refresh_is_throttled_not_removed_in_research_only():
-    assert "RESEARCH_ONLY_EXECUTION_REFRESH_SEC) if RELAY_STACK_RESEARCH_ONLY else \"1.0\"" in BOT_SRC
-    assert "RESEARCH_ONLY_EXECUTION_MAX_STALE_SEC) if RELAY_STACK_RESEARCH_ONLY else \"4.0\"" in BOT_SRC
+    assert 'if RELAY_STACK_RESEARCH_ONLY and not os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC"):' in BOT_SRC
+    assert "_RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3," in BOT_SRC  # 5 s refresh -> 15 s stale fence
     assert mode_mod.RESEARCH_ONLY_EXECUTION_MAX_STALE_SEC >= 3 * mode_mod.RESEARCH_ONLY_EXECUTION_REFRESH_SEC
 
 
