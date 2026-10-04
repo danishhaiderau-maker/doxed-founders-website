@@ -45180,7 +45180,7 @@ def toggle_debug():
 def api_reset_showcase():
     """Admin/platform: wipe all research artifacts and restart session at $500."""
     data = request.get_json(silent=True) or {}
-    result = perform_fresh_collection_reset(freeze_override=data.get("freeze_override"))
+    result = perform_fresh_collection_reset(**_freeze_override_kwargs(data))
     status = 200 if result.get("ok") else 409
     return jsonify({
         "ok": bool(result.get("ok")),
@@ -45215,7 +45215,7 @@ def toggle_fresh_collection():
         with state_lock:
             if state.get("live_armed"):
                 return jsonify({"error": "Disable LIVE ARM before fresh collection reset"}), 400
-        result = perform_fresh_collection_reset(freeze_override=data.get("freeze_override"))
+        result = perform_fresh_collection_reset(**_freeze_override_kwargs(data))
         if not result.get("ok"):
             return jsonify({
                 "error": result.get("summary") or result.get("error") or "reset failed",
@@ -45258,7 +45258,7 @@ def wipe_fly_only():
             }), 400
     wiped_at = time.time()
     data = request.get_json(silent=True) or {}
-    result = perform_fresh_collection_reset(send_local_signal=False, freeze_override=data.get("freeze_override"))
+    result = perform_fresh_collection_reset(send_local_signal=False, **_freeze_override_kwargs(data))
     if not result.get("ok"):
         return jsonify({
             "status": "error",
@@ -45483,7 +45483,7 @@ def api_fresh_epoch_reset():
     if age_s < 0 or age_s > 60:
         return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
 
-    result = perform_fresh_collection_reset(send_local_signal=True, freeze_override=data.get("freeze_override"))
+    result = perform_fresh_collection_reset(send_local_signal=True, **_freeze_override_kwargs(data))
     epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
     if result.get("ok"):
         # The presentation snapshot is intentionally long-lived.  Publish the
@@ -52955,6 +52955,12 @@ def _research_freeze_check(action: str, override=None, lane: str | None = None) 
     elif not verdict["allowed"]:
         logger.warning(f"[RESEARCH FREEZE] refused {action} lane={lane} [PIPELINE ENFORCEMENT]")
     return verdict
+
+
+def _freeze_override_kwargs(data) -> dict:
+    """Forward a request-body freeze_override to perform_fresh_collection_reset only when one was sent."""
+    override = (data or {}).get("freeze_override") if isinstance(data, dict) else None
+    return {"freeze_override": override} if override is not None else {}
 
 
 def _research_freeze_public() -> dict:

@@ -606,10 +606,10 @@ def _research_freeze_refusal(args, now: float) -> dict | None:
             manifest = data_epoch.load_manifest(args.manifest)
         elif args.scope == "fly":
             manifest = data_epoch.load_manifest(Path(args.data_root or "/app/data") / "runtime")
-        else:
+        elif (LAPTOP_ROOTS.get("mirror_tree") or {}).get("path"):
             manifest = data_epoch.load_manifest(
                 os.path.join(LAPTOP_ROOTS["mirror_tree"]["path"], data_epoch.MANIFEST_NAME))
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError, TypeError):
         manifest = None
     verdict = research_freeze.check(research_freeze.ACTION_PRE_START_WIPE, manifest, now)
     if verdict["allowed"]:
