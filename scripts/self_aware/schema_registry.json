@@ -2470,16 +2470,27 @@
 "string"
 ],
 "quantity_constraint_source_revision_match": [
+"bool",
 "null"
+],
+"quantity_constraints_status.cache": [
+"string"
+],
+"quantity_constraints_status.quantity_check": [
+"object"
 ],
 "quantity_constraints_status.reasons": [
 "array"
 ],
 "quantity_constraints_status.receipt": [
-"null"
+"null",
+"object"
 ],
 "quantity_constraints_status.supported": [
 "bool"
+],
+"quantity_constraints_status.venue_constraints": [
+"object"
 ],
 "reference_price": [
 "number"
@@ -2516,6 +2527,49 @@
 ],
 "signed_quantity_constraints": [
 "null"
+],
+"signed_quantity_constraints.captured_at": [
+"string"
+],
+"signed_quantity_constraints.integrity_binding": [
+"string"
+],
+"signed_quantity_constraints.max_lot": [
+"string"
+],
+"signed_quantity_constraints.min_lot": [
+"string"
+],
+"signed_quantity_constraints.min_notional": [
+"null",
+"string"
+],
+"signed_quantity_constraints.min_notional_status": [
+"string"
+],
+"signed_quantity_constraints.payload_sha256": [
+"string"
+],
+"signed_quantity_constraints.price_sig_digits": [
+"number"
+],
+"signed_quantity_constraints.quantity_precision": [
+"number"
+],
+"signed_quantity_constraints.quantity_step": [
+"string"
+],
+"signed_quantity_constraints.schema": [
+"string"
+],
+"signed_quantity_constraints.source": [
+"string"
+],
+"signed_quantity_constraints.source_revision": [
+"string"
+],
+"signed_quantity_constraints.symbol": [
+"string"
 ],
 "slippage_model": [
 "string"
@@ -2640,16 +2694,27 @@
 "string"
 ],
 "quantity_constraint_source_revision_match": [
+"bool",
 "null"
+],
+"quantity_constraints_status.cache": [
+"string"
+],
+"quantity_constraints_status.quantity_check": [
+"object"
 ],
 "quantity_constraints_status.reasons": [
 "array"
 ],
 "quantity_constraints_status.receipt": [
-"null"
+"null",
+"object"
 ],
 "quantity_constraints_status.supported": [
 "bool"
+],
+"quantity_constraints_status.venue_constraints": [
+"object"
 ],
 "reference_price": [
 "number"
@@ -2686,6 +2751,49 @@
 ],
 "signed_quantity_constraints": [
 "null"
+],
+"signed_quantity_constraints.captured_at": [
+"string"
+],
+"signed_quantity_constraints.integrity_binding": [
+"string"
+],
+"signed_quantity_constraints.max_lot": [
+"string"
+],
+"signed_quantity_constraints.min_lot": [
+"string"
+],
+"signed_quantity_constraints.min_notional": [
+"null",
+"string"
+],
+"signed_quantity_constraints.min_notional_status": [
+"string"
+],
+"signed_quantity_constraints.payload_sha256": [
+"string"
+],
+"signed_quantity_constraints.price_sig_digits": [
+"number"
+],
+"signed_quantity_constraints.quantity_precision": [
+"number"
+],
+"signed_quantity_constraints.quantity_step": [
+"string"
+],
+"signed_quantity_constraints.schema": [
+"string"
+],
+"signed_quantity_constraints.source": [
+"string"
+],
+"signed_quantity_constraints.source_revision": [
+"string"
+],
+"signed_quantity_constraints.symbol": [
+"string"
 ],
 "slippage_model": [
 "string"
@@ -2768,7 +2876,8 @@
 "string"
 ],
 "queue_ahead_upper_btc": [
-"null"
+"null",
+"number"
 ],
 "quote_cross": [
 "bool"
@@ -2831,6 +2940,119 @@
 ],
 "ts": [
 "string"
+]
+},
+"schema=shadow_chase_bucket_v1": {
+"bucket": [
+"string"
+],
+"chase_count": [
+"number"
+],
+"data_epoch_id": [
+"string"
+],
+"direction": [
+"string"
+],
+"epoch_id": [
+"string"
+],
+"execution_class": [
+"string"
+],
+"exit_model": [
+"string"
+],
+"fee_bp": [
+"number"
+],
+"fill_price": [
+"null",
+"number"
+],
+"fill_ts": [
+"null",
+"number"
+],
+"fill_vs_signal_bp": [
+"null",
+"number"
+],
+"filled": [
+"bool"
+],
+"gross_bp": [
+"null",
+"number"
+],
+"label": [
+"string"
+],
+"leverage": [
+"number"
+],
+"mae_bp": [
+"null",
+"number"
+],
+"max_stage_reached": [
+"number"
+],
+"mfe_bp": [
+"null",
+"number"
+],
+"net_bp": [
+"null",
+"number"
+],
+"outcome": [
+"string"
+],
+"outcome_horizon_sec": [
+"number"
+],
+"places_order": [
+"bool"
+],
+"relay_eligible": [
+"bool"
+],
+"requested_margin_usd": [
+"number"
+],
+"schema": [
+"string"
+],
+"shared_ai_call_id": [
+"string"
+],
+"signal_price": [
+"number"
+],
+"signal_ts": [
+"number"
+],
+"source_policy_signature": [
+"string"
+],
+"source_schema": [
+"string"
+],
+"time_to_fill_sec": [
+"null",
+"number"
+],
+"trade_id": [
+"string"
+],
+"ts": [
+"number"
+],
+"win": [
+"bool",
+"null"
 ]
 }
 },

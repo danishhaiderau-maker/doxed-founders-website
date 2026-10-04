@@ -189,6 +189,13 @@ def _export_table(paths: Paths, name: str) -> tuple[Any, dict[str, Any]]:
     except FileNotFoundError:
         meta["error"] = "FileNotFoundError"
         return MISSING, meta
+    except pd.errors.EmptyDataError:
+        # The analyzer writes a 0-byte CSV when a table has no rows yet (a fresh epoch). That is an empty table,
+        # judged by min_rows and the warmup rules, not an unreachable export.
+        meta["code"] = 200
+        meta["empty_file"] = True
+        meta["mtime"] = iso(p.stat().st_mtime)
+        return {"rows": [], "generated_at": meta["mtime"]}, meta
     except Exception as e:  # noqa: BLE001
         meta["error"] = f"{type(e).__name__}: {str(e)[:160]}"
         return MISSING, meta
