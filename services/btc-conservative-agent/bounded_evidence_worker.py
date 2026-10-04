@@ -14,6 +14,16 @@ from collections import deque
 from typing import Any, Callable, Dict, Optional
 
 
+SUBMIT_ENQUEUED = "ENQUEUED"
+SUBMIT_DUPLICATE_ACTIVE = "DUPLICATE_ACTIVE"
+SUBMIT_DUPLICATE_COMPLETED = "DUPLICATE_COMPLETED"
+SUBMIT_QUEUE_FULL = "QUEUE_FULL"
+SUBMIT_STOPPED = "WORKER_STOPPED"
+# A duplicate key is already owned (queued, running, or finished): the evidence
+# exists, so it is an accepted outcome and callers must not log an EVIDENCE GAP.
+SUBMIT_ACCEPTED = frozenset({SUBMIT_ENQUEUED, SUBMIT_DUPLICATE_ACTIVE, SUBMIT_DUPLICATE_COMPLETED})
+
+
 class BoundedEvidenceWorker:
     def __init__(
         self,
@@ -45,6 +55,7 @@ class BoundedEvidenceWorker:
         self._dead_letters = deque(maxlen=max_queue)
         self._timed_out_handler: Optional[threading.Thread] = None
         self._accepting = True
+        self._duplicates = 0
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
@@ -111,14 +122,34 @@ class BoundedEvidenceWorker:
         *,
         source_ts: Optional[float] = None,
     ) -> bool:
-        """Enqueue one immutable snapshot; duplicate active/completed keys are OK."""
+        """Enqueue one immutable snapshot.
+
+        True when the key is now owned by this worker: newly enqueued, or a
+        duplicate of a key that is already queued/running or completed (the
+        payload is not enqueued twice). False only for a real loss (queue
+        full or worker stopped), which is also dead-lettered.
+        """
+        return self.submit_status(key, payload, source_ts=source_ts) in SUBMIT_ACCEPTED
+
+    def submit_status(
+        self,
+        key: str,
+        payload: Dict[str, Any],
+        *,
+        source_ts: Optional[float] = None,
+    ) -> str:
+        """Like ``submit`` but returns the exact ``SUBMIT_*`` outcome."""
         now = self._clock()
         stable_key = str(key or "")
         if not stable_key:
             raise ValueError("evidence key is required")
         with self._lock:
-            if stable_key in self._active_keys or stable_key in self._completed_set:
-                return False
+            if stable_key in self._active_keys:
+                self._duplicates += 1
+                return SUBMIT_DUPLICATE_ACTIVE
+            if stable_key in self._completed_set:
+                self._duplicates += 1
+                return SUBMIT_DUPLICATE_COMPLETED
             if not self._accepting:
                 stopped_record = {
                     "key": stable_key, "reason": "worker_stopped", "failed_ts": now,
@@ -128,7 +159,7 @@ class BoundedEvidenceWorker:
                 self._active_keys.add(stable_key)
         if stopped_record is not None:
             self._dead_letter(stopped_record)
-            return False
+            return SUBMIT_STOPPED
         job = {
             "key": stable_key,
             "payload": copy.deepcopy(payload),
@@ -138,14 +169,14 @@ class BoundedEvidenceWorker:
         }
         try:
             self._queue.put_nowait(job)
-            return True
+            return SUBMIT_ENQUEUED
         except queue.Full:
             with self._lock:
                 self._active_keys.discard(stable_key)
             self._dead_letter({
                 **job, "reason": "queue_full", "failed_ts": self._clock(),
             })
-            return False
+            return SUBMIT_QUEUE_FULL
 
     def _mark_completed(self, key: str) -> None:
         with self._lock:
@@ -217,6 +248,7 @@ class BoundedEvidenceWorker:
                 "unfinished": self._queue.unfinished_tasks,
                 "active": len(self._active_keys),
                 "completed": len(self._completed_set),
+                "duplicates": self._duplicates,
                 "dead_letters": copy.deepcopy(list(self._dead_letters)),
                 "timed_out_handler_alive": bool(
                     self._timed_out_handler is not None

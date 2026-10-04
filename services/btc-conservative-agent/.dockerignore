@@ -12,6 +12,7 @@
 !thread_health.py
 !relay_delivery_guard.py
 !relay_stack_mode.py
+!runtime_hygiene.py
 !ai_call_cost.py
 !shadow_chase_buckets.py
 !monitor_api.py
