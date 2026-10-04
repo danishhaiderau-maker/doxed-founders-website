@@ -11,6 +11,7 @@
 # Imported by bot.py at startup; listed explicitly so a narrower whitelist keeps them.
 !thread_health.py
 !relay_delivery_guard.py
+!relay_stack_mode.py
 !ai_call_cost.py
 !shadow_chase_buckets.py
 !monitor_api.py

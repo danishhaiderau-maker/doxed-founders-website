@@ -103,9 +103,19 @@ POLICIES: Mapping[str, Policy] = {
     "deploy_failed": Policy(1, 0.0, 12 * HOUR, False, WARNING),
     # A field the deployed revision is known to emit disappeared.
     "contract_field_missing": Policy(2, 15 * 60.0, 12 * HOUR, True, WARNING),
+    # research_collection runtime alarms (bot raises them only after its own
+    # window). A finding key without a policy here crashed the whole monitor
+    # run with KeyError on 4 Oct 2026 (00:34Z, 01:54Z, 03:00Z).
+    "relay_outbox_stale_owner": Policy(1, 0.0, 6 * HOUR, False, WARNING),
+    "ledger_write_failures": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    "execution_funnel_hook_failures": Policy(1, 0.0, 6 * HOUR, True, WARNING),
+    "collector_v22_seal_degraded": Policy(1, 0.0, 6 * HOUR, True, WARNING),
     # Operator-requested end-to-end proof of the notification channel.
     "test_alert": Policy(1, 0.0, 0.0, False),
 }
+# Fallback for a finding key emitted by a newer rule than this table knows:
+# reported as a warning instead of crashing every later check in the run.
+UNKNOWN_KEY_POLICY = Policy(1, 0.0, 6 * HOUR, True, WARNING)
 MAINTENANCE_GRACE_SEC = 45 * 60.0
 PAUSED_ALERT_SEC = 2 * HOUR
 CLEAR_RUNS_TO_RESOLVE = 2
@@ -223,7 +233,7 @@ def evaluate(
     conditions: dict[str, dict[str, Any]] = state["conditions"]
     decisions: list[dict[str, Any]] = []
     for key, message in findings.items():
-        policy = policies[key]
+        policy = policies.get(key) or UNKNOWN_KEY_POLICY
         entry = conditions.setdefault(key, {"first_seen": now, "runs": 0, "last_alert": None})
         entry["runs"] = int(entry.get("runs") or 0) + 1
         entry["clear_runs"] = 0
