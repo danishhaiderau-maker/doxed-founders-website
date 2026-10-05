@@ -45,3 +45,9 @@ def test_both_gate_sites_keep_the_admitting_evidence():
     helper = source[start:source.index("FILL_DIRECTION_REVALIDATE_AFTER_SEC = ", start)]
     assert helper.count('order["venue_fill_gate"] = evidence') == 2
     assert helper.count('order["venue_fill_gate_admitted"] = dict(evidence)') == 2
+
+
+def test_taker_at_signal_is_not_unclassified():
+    """GS-04-style taker fills never visit the venue gate; label them explicitly."""
+    assert _receipt({"fee_type": "TAKER", "entry_type": "SIM_MARKET"})["fill_basis"] == "TAKER_AT_SIGNAL"
+    assert _receipt({"entry_mode": "TAKER_AT_SIGNAL"})["fill_basis"] == "TAKER_AT_SIGNAL"

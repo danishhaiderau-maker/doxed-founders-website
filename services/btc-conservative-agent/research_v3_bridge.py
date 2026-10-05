@@ -475,6 +475,15 @@ def _paper_fill_execution_receipt(
     fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
     fill_model = gate.get("fill_model") or "PRE_REALISTIC_V1_BBO_CROSS"
     fill_basis = gate.get("fill_basis")
+    if not fill_basis:
+        # Taker-at-signal / SIM_MARKET fills never visit the venue-executable gate;
+        # label them explicitly so GS-04 (and other takers) are not UNCLASSIFIED.
+        entry_type = str(order.get("entry_type") or "").upper()
+        fee_type = str(order.get("fee_type") or "").upper()
+        mode = str((order.get("entry_policy") or {}).get("mode")
+                   or order.get("entry_mode") or "").upper()
+        if fee_type == "TAKER" or entry_type in ("SIM_MARKET", "MARKET") or mode == "TAKER_AT_SIGNAL":
+            fill_basis = "TAKER_AT_SIGNAL"
     return {
         "execution_basis": (f"{fill_model}:{fill_basis}" if supported and fill_basis
                             else "CONSERVATIVE_BBO_DEPTH" if supported else "UNSUPPORTED"),
@@ -482,7 +491,7 @@ def _paper_fill_execution_receipt(
         "fill_model": fill_model,
         "fill_model_role": gate.get("fill_model_role"),
         # A filled row never carries a null basis: a fill admitted without
-        # venue-gate evidence (legacy SIM_MARKET paths) is labelled explicitly.
+        # venue-gate evidence is labelled TAKER_AT_SIGNAL or UNCLASSIFIED.
         "fill_basis": fill_basis or FILL_BASIS_UNCLASSIFIED,
         "fill_id": gate.get("fill_id"),
         "tape_id": gate.get("tape_id"),

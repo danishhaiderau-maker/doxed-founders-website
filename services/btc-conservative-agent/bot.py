@@ -4070,11 +4070,21 @@ def get_lane_pending_orders(lane: str) -> List[Dict]:
 
 
 def get_lane_pnl_ledger(lane: str = None) -> dict:
+    """Read the in-memory lane PnL ledger (display view).
+
+    Retired / benchmark lanes are omitted from the returned view so the
+    dashboard and API do not show them; the underlying ``lane_pnl_ledger``
+    state and on-disk file are never deleted.
+    """
     with state_lock:
         ledger = copy.deepcopy(state.get("lane_pnl_ledger") or {})
+    active = {_normalize_lane_key(l) for l in (ACTIVE_TILE_ORDER or ())}
     if lane:
-        return dict(ledger.get(_normalize_lane_key(lane), {}))
-    return ledger
+        key = _normalize_lane_key(lane)
+        if key not in active:
+            return {}
+        return dict(ledger.get(key, {}))
+    return {k: v for k, v in ledger.items() if _normalize_lane_key(k) in active}
 
 
 
@@ -37721,8 +37731,13 @@ DASHBOARD_JS = """(function () {
             + (chaseTiming.global_submit_label || 'none')
             + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
             + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
-          const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           const cardEsc = (s) => String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+          const tileShort = (function () {
+            const label = String(spec.label || '');
+            const token = (label.split(' ')[0] || spec.lane || '');
+            return String(token).toUpperCase() === 'CONTROL' ? 'CTRL' : token;
+          })();
+          const titleTip = spec.label ? (' title="' + cardEsc(spec.label) + '"') : '';
           const cardList = (rows) => '<ul style="margin:4px 0 0 0;padding-left:16px;">' + (rows || []).map(function (r) {
             return '<li style="margin:2px 0;">' + cardEsc(r) + '</li>';
           }).join('') + '</ul>';
@@ -37788,7 +37803,7 @@ DASHBOARD_JS = """(function () {
           }
           return '<div style="padding:14px 16px;background:#0d1117;border:2px solid ' + border + ';border-radius:12px;min-height:220px;display:flex;flex-direction:column;">'
             + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">'
-            + '<div><div>' + tileNum + '<strong style="color:' + border + ';font-size:1.02em;">' + (spec.label || spec.lane) + '</strong>' + badge + '</div>'
+            + '<div' + titleTip + '><div><strong style="color:' + border + ';font-size:1.02em;">Tile ' + (spec.tile_number || '') + ' · ' + cardEsc(tileShort) + '</strong>' + badge + '</div>'
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner

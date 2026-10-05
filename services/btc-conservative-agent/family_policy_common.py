@@ -327,13 +327,21 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
     # A profit lock is one more stop candidate; the effective stop is the most
     # protective of the ATR stop/trail and the armed lock floor.
     lock_floor, lock_reason = profit_lock_floor(spec, _margin_return_pct(entry, sign, peak, leverage))
-    if lock_floor is not None:
-        floor_price = lock_price(entry, sign, lock_floor, leverage)
+    # Once profit-protection (trail) or a BE/ladder lock is armed, the stop must
+    # never sit below entry + lock offset (0 = breakeven when only the trail armed).
+    floor_margin = lock_floor if lock_floor is not None else (0.0 if dynamic_stop_active else None)
+    if floor_margin is not None:
+        floor_price = lock_price(entry, sign, floor_margin, leverage)
         if stop_price is None or (floor_price >= stop_price if sign > 0 else floor_price <= stop_price):
-            stop_price, stop_reason = floor_price, lock_reason
+            stop_price = floor_price
+            if lock_reason:
+                stop_reason = lock_reason
 
     if stop_price is not None and _adverse_hit(sign, price, stop_price):
-        return ExitAction(stop_reason, remaining, stop_price, stop_price, 0.0, peak)
+        # book_price must be set so close_position books the stop level, not a
+        # later (worse) market tick — otherwise a lock can report slightly negative.
+        return ExitAction(stop_reason, remaining, stop_price, stop_price, 0.0, peak,
+                          book_price=stop_price)
     current_margin_pct = _margin_return_pct(entry, sign, price, leverage)
     if (
         spec.thesis_cut_margin_pct is not None

@@ -117,10 +117,16 @@ def evaluate_tick(profile: Mapping[str, Any], state: MutableMapping[str, Any], *
                 state["cut_closes_checked"] = due
                 if cur <= -lv["cut"]:
                     hit["THESIS_CUT"] = cur
-    if be_armed_before and cur <= float(profile.get("lock_bp", 1.0)):
-        hit["BREAKEVEN_LOCK"] = cur
+    lock_bp = float(profile.get("lock_bp", 1.0))
+    # Once BE is armed the stop floor is entry+lock_bp in the trade's favour.
+    # Book at that floor even when the tick has already gapped through it.
+    if be_armed_before and cur <= lock_bp:
+        hit["BREAKEVEN_LOCK"] = lock_bp
     if lv["trail_dist"] is not None and state.get("trail_armed") and cur <= peak - lv["trail_dist"]:
-        hit["ATR_TRAIL"] = cur
+        trail_level = peak - lv["trail_dist"]
+        if be_armed_before:
+            trail_level = max(trail_level, lock_bp)
+        hit["ATR_TRAIL"] = trail_level
     if lv["gb_arm"] is not None and state.get("gb_armed") and cur <= peak * (1.0 - float(profile["gb_frac"])):
         hit["MFE_GIVEBACK"] = cur
     if lv["shock"] is not None and shock and age >= SHOCK_MIN_AGE_SEC:
@@ -162,7 +168,9 @@ def evaluate_tick(profile: Mapping[str, Any], state: MutableMapping[str, Any], *
             return {"rule": rule, "partial": False, "close_fraction": None, "book_bp": hit[rule],
                     "maker": rule == "ATR_TAKE_PROFIT"}
     if state.get("tp1_done") and cur <= float(profile.get("lock_bp", 2.0)):
-        return {"rule": "LADDER_LOCK", "partial": False, "close_fraction": None, "book_bp": cur, "maker": False}
+        ladder_lock = float(profile.get("lock_bp", 2.0))
+        return {"rule": "LADDER_LOCK", "partial": False, "close_fraction": None,
+                "book_bp": ladder_lock, "maker": False}
     if lv["tp1"] is not None and not state.get("tp1_done") and not first_tick and favourable > lv["tp1"]:
         state["tp1_done"] = True
         return {"rule": "LADDER_TP1", "partial": True, "close_fraction": float(profile.get("tp1_frac", 0.5)),
