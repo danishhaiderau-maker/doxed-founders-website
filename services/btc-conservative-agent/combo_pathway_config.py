@@ -127,6 +127,13 @@ GS_NOTRADE_FOLLOW_ADMISSION_POLICY_ID = "GS_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_V1
 GS_CVD_DIVERGENCE_ADMISSION_POLICY_ID = "GS_CVD_DIVERGENCE_3M_EVENT_NO_AI_V1"
 GSB2_REGIME_SWITCH_ADMISSION_POLICY_ID = "GSB2_CVD_DIVERGENCE_OR_COMMITTED_FADE_BY_REGIME_V1"
 GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SIDE_REGIME_V1"
+# FREEZE21B mid-epoch additions (owner, 2026-10-05 ~20:15 AEDT; Health Monitor +
+# Grok Strategist spec GS05-GS06-TILE-SPECS-20261005): appended as tiles 12/13
+# after the eleven frozen tiles, which stay byte-identical (research_freeze.
+# MID_EPOCH_ADDITIONS; frozen_roster_registry_signature proves it in CI).
+RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED = "FAMILY_GS05_PREMIUM_REGIME_MANAGED"
+RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
+GS05_PREMIUM_REGIME_ADMISSION_POLICY_ID = "GS05_CROSS_VENUE_PREMIUM_FOLLOW_REGIME_GATED_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -173,6 +180,9 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
+    # Mid-epoch additions (tiles 12/13); never reorder the eleven above.
+    RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED,
+    RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1158,13 +1168,14 @@ GS_SHADOW_REASON = "pre-registered stack: its own thesis cut is live; the shared
 
 
 def _gs_tile(*, lane, label, raw_policy_id, id_prefix, module, entry, exit_policy, pre, hypothesis, subtitle,
-             signal_summary, admission, signal_clock=None, entry_ttl_sec=3, relay=None) -> dict:
+             signal_summary, admission, signal_clock=None, entry_ttl_sec=3, relay=None,
+             max_active_signals=1) -> dict:
     return _tile(
         lane=lane, label=label, raw_policy_id=raw_policy_id, id_prefix=id_prefix,
         module=module, test_module="test_" + module, entry=dict(entry), exit_policy=dict(exit_policy),
         relay_capability=relay or "BLOCKED_UNQUALIFIED",
         hypothesis_result=hypothesis, pre_registration=pre, admission_treatment=admission,
-        max_active_signals=1, entry_ttl_sec=entry_ttl_sec, subtitle=subtitle, policy_epoch=FREEZE21_POLICY_EPOCH,
+        max_active_signals=int(max_active_signals), entry_ttl_sec=entry_ttl_sec, subtitle=subtitle, policy_epoch=FREEZE21_POLICY_EPOCH,
         default_enabled=True, signal_clock=signal_clock, signal_summary=signal_summary,
         live_exit_order=tuple(exit_policy["exit_order"]), shadow_exits=ALL_SHADOW_EXITS,
     )
@@ -1292,6 +1303,172 @@ COMBO_LANE_SPECS.update({
         subtitle="B3 — committed-AI fade with regime entries and exits — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("fade the shared AI's committed LONG/SHORT call (H-A definition, Asia+EU, spread <= 3 bp); "
                         "entry and exits chosen by the regime of the last closed 3-minute bar"),
+    ),
+})
+
+# ---------------------------------------------------------------------------
+# FREEZE21B mid-epoch additions GS-05 / GS-06 (owner ask 2026-10-05 ~20:15 AEDT;
+# spec diagnostics/GS05-GS06-TILE-SPECS-20261005.md, Health Monitor + Grok
+# Strategist). Paper only, relay ineligible, same freeze21b data epoch; the
+# window starts at the deploy of the registering revision (research_freeze.
+# MID_EPOCH_ADDITIONS). They reuse the GS-01 / H-A building blocks above
+# without touching any frozen tile's entry or exit dict.
+# ---------------------------------------------------------------------------
+GS0506_SPEC_PATH = "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md"
+GS0506_REGISTERED_UTC = "2026-10-05T09:15:00Z"
+GS0506_DECISION_ANCHOR = ("MID_EPOCH_ADDITION_START (first boot of the registering revision); judged with the "
+                          "freeze21b epoch end, fewer than 21 days of data by construction")
+
+
+# CORRECTED 2026-10-05 20:37 AEDT (Danish-approved, Grok Strategist
+# GS05-GS06-TILE-SPECS-CORRECTED-20261005 after STRATEGY-CROSSCHECK-20261005):
+# exits must match the signal's drift speed. GS-05 TREND = H-C's exits and
+# cadence exactly, GS-05 VIOLENT = GS-01's stack exactly (no ladder, no
+# trail); GS-06 = HM F1 "patient fade". The first-draft quick-TP / ladder
+# exits were never shipped.
+# H-C (_PREMIUM_REVERSION_EXIT) expressed as a regime-stack profile: 40 bp
+# stop and a 60-minute time exit, no take-profit, break-even, trail or cut.
+_GS05_TREND_HC_PROFILE = {
+    "stack": "HC_PREMIUM_REVERSION_60M", "hard_bp": 40.0, "cut_bp": None, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 3600, "be_atr": None, "be_floor": 6.0, "lock_bp": 1.0,
+    "trail_atr": None, "trail_arm_atr": None, "trail_floor": 5.0, "trail_arm_floor": 8.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP",),
+}
+_GS05_ENTRY = dict(_GS01_ENTRY)
+_GS05_ENTRY.update({
+    "mode": "REGIME_ADAPTIVE",
+    "regime_classifier": dict(GSB_REGIME),
+    # TREND = H-C's cadence (one entry per 15 min, <= 4 per hour, counted on
+    # this tile's accepted TREND entries); VIOLENT = GS-01's 5 s / 60 per hour.
+    "regime_exec": {"QUIET": None,
+                    "TREND": {**GS_EXEC["TAKER"],
+                              "min_submit_interval_sec": _PREMIUM_REVERSION_ENTRY["min_submit_interval_sec"],
+                              "max_submissions_per_hour": _PREMIUM_REVERSION_ENTRY["max_submissions_per_hour"]},
+                    "VIOLENT": dict(GS_EXEC["TAKER"])},
+    "trigger_stream": "H-C / GS-01 premium rule (same thresholds and 3 bp spread gate), own evaluator instance",
+    "evaluator_id_prefix": "gs5xvp",
+    "regime_audit": True,
+})
+_GS05_EXIT = {
+    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 3600,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"HC_TREND": dict(_GS05_TREND_HC_PROFILE), "GS01_VIOLENT": dict(_GS01_EXIT["profiles"]["ALL"])},
+    "regime_profiles": {"QUIET": None, "TREND": "HC_TREND", "VIOLENT": "GS01_VIOLENT"},
+    "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
+    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+    "max_open_positions": 1,
+    "exit_order": ("HARD_STOP", "BREAKEVEN_LOCK", "THESIS_CUT", "ATR_TAKE_PROFIT", "TIME_BACKSTOP"),
+}
+_GS06_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
+    regime=GSB_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
+    **_COMMITTED_FADE_KEYS,
+)
+_GS06_ENTRY.update({
+    "allowed_sessions": FREEZE21_SESSIONS_ASIA_EU, "max_spread_bps": 3.0, "max_bbo_age_sec": 5.0,
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
+                  "BBO_STALE", "SPREAD_ABOVE_MAX", "SESSION_GATED"),
+    "regime_audit": True,
+    # VIOLENT is traded as its own pre-registered cell; every VIOLENT decision
+    # also carries the old meta-rule's stand-aside as a shadow tag.
+    "regime_cells": {"QUIET": "QUIET_TREND", "TREND": "QUIET_TREND", "VIOLENT": "VIOLENT"},
+    "shadow_stand_aside_regimes": ("VIOLENT",),
+})
+# HM F1 "patient fade": -12 bp / 5 min cut, 40 bp stop, break-even armed at
+# +25 bp locking +8 bp, ATR trail (2.5 ATR distance) armed at max(+25 bp,
+# 3 ATR) i.e. after break-even, 120-minute backstop; no TP, no ladder.
+_GS06_PATIENT_PROFILE = {
+    "stack": "PATIENT_FADE_HM_F1", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 7200, "be_atr": 0.0, "be_floor": 25.0, "lock_bp": 8.0,
+    "trail_atr": 2.5, "trail_arm_atr": 3.0, "trail_floor": 0.0, "trail_arm_floor": 25.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL"),
+}
+_GS06_EXIT = {
+    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 7200,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"ALL": dict(_GS06_PATIENT_PROFILE)},
+    "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
+    "take_profit_fill": "NONE - no take-profit (patient fade)",
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
+    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+    "max_open_positions": 2,
+    "exit_order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP"),
+}
+
+
+def _gs0506_pre(rule_id: str, *, benchmark_lane: str, extra_kills: dict, decisions: tuple) -> dict:
+    pre = _gs_pre_registration(
+        rule_id, prereg_path=GS0506_SPEC_PATH, registered_utc=GS0506_REGISTERED_UTC, bonferroni_k=2,
+        honest_label=("MID-EPOCH PAPER TILE BY OWNER ORDER - built from live freeze21b profit patterns "
+                      "(in-sample), no out-of-sample evidence yet"),
+        giveback_arm_bp=8.0,
+        extra_kills={"benchmark_lane": benchmark_lane, "benchmark_min_edge_bp": 1.0, "latency_p50_above_sec": 5.0,
+                     **extra_kills},
+        decisions=("mid-epoch addition: window starts at the deploy of the registering revision",) + tuple(decisions),
+    )
+    pre["mid_epoch_addition"] = True
+    pre["decision"]["anchor"] = GS0506_DECISION_ANCHOR
+    pre["kill_summary"] += f"; must beat {benchmark_lane} on the same triggers by >= 1 bp mean"
+    return pre
+
+
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED,
+        label=("GS-05 Premium regime router · H-C/GS-01 premium trigger, QUIET aside / TREND = H-C 60-min hold / "
+               "VIOLENT = GS-01 ATR exits"),
+        raw_policy_id=("GS05_XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_QUIET_ASIDE_TREND_HC_15M_SPACING_VIOLENT_GS01_TAKER_CAP5BPS|"
+                       "TREND_HC_T60M_HARD40BP_VIOLENT_GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1"),
+        id_prefix="gs5", module="paper_policy_family_gs05_premium_regime_managed.py",
+        entry=_GS05_ENTRY, exit_policy=_GS05_EXIT, signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
+        admission=GS05_PREMIUM_REGIME_ADMISSION_POLICY_ID,
+        hypothesis={"status": "GS20261005_MID_EPOCH_IN_SAMPLE_PATTERN", "hypothesis_id": "GS-20261005-05",
+                    "in_sample": "freeze21b live profit pattern (PROFIT-PATTERN-FREEZE21B-20261005); not OOS"},
+        pre=_gs0506_pre(
+            "GS-20261005-05", benchmark_lane=RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
+            extra_kills={"quiet_shadow_reopen_after_fills": 30, "benchmark_cell": "TREND",
+                         "giveback_cell": "VIOLENT", "per_arm_shadows": ("FAMILY_PREMIUM_REVERSION_60M",
+                                                                         "FAMILY_GS01_XV_PREMIUM_ATR_TP")},
+            decisions=("same premium trigger stream as H-C / GS-01 (own evaluator instance gs5xvp, no shadow file)",
+                       "QUIET stands aside with a shadow would-have decision row; a strongly positive QUIET "
+                       "shadow after 30 reopens QUIET only as an explicit v1.1 patch",
+                       "TREND arm = H-C exits and cadence (15 min, <= 4/h, 60 min, 40 bp); must beat the same-trigger "
+                       "H-C shadow by >= 1 bp on the TREND cell alone",
+                       "VIOLENT arm = GS-01 exits exactly (no ladder, no trail); give-back > 25% pauses that cell",
+                       "exits corrected per GS05-GS06-TILE-SPECS-CORRECTED-20261005 before the first deploy")),
+        subtitle="GS-05 — premium regime router (H-C TREND / GS-01 VIOLENT) — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("H-C's cross-venue premium trigger (Binance/Bybit premium vs its 60-min mean "
+                        ">=+1.75 / <=-1.88 bp); QUIET stands aside, TREND = H-C's 60-min hold, VIOLENT = GS-01's ATR exits"),
+    ),
+    RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP: _gs_tile(
+        lane=RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
+        label=("GS-06 Committed fade, patient exit · H-A invert entry, Asia+EU, taker (VIOLENT its own cell), "
+               "BE +25 -> +8, 2.5 ATR trail, 120-min"),
+        raw_policy_id=("GS06_INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_TAKER_ALL_REGIMES_VIOLENT_CELL|"
+                       "PATIENT_CUT12BP5M_HARD40BP_BE25_LOCK8_TRAIL2.5ATR_ARM3ATR_AFTER_BE_T120M_CAP2"),
+        id_prefix="gs6", module="paper_policy_family_gs06_committed_fade_atr_tp.py",
+        entry=_GS06_ENTRY, exit_policy=_GS06_EXIT, admission=COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID,
+        max_active_signals=2,
+        hypothesis={"status": "GS20261005_MID_EPOCH_IN_SAMPLE_PATTERN", "hypothesis_id": "GS-20261005-06",
+                    "in_sample": "freeze21b live profit pattern (PROFIT-PATTERN-FREEZE21B-20261005); not OOS"},
+        pre=_gs0506_pre(
+            "GS-20261005-06", benchmark_lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
+            extra_kills={"control_lane_live": RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
+                         "control_live_min_edge_bp": 2.0, "two_sided_min_fills_before_pass": 10,
+                         "report_cells": ("QUIET_TREND", "VIOLENT"),
+                         "violent_cell_harm_after_fills": 30, "violent_cell_harm_mean_bp_at_or_below": -2.0},
+            decisions=("committed fade follows H-A and the frozen scorer (explicit side == score-led side)",
+                       "VIOLENT is traded as its own pre-registered cell (same exits); every VIOLENT decision also "
+                       "carries the old meta-rule stand-aside as a shadow tag; QUIET/TREND and VIOLENT are reported "
+                       "separately and the VIOLENT cell can be gated only by an explicit owner decision",
+                       "patient-fade exits (HM F1) per GS05-GS06-TILE-SPECS-CORRECTED-20261005",
+                       "GS-01-style research-candidate rules (Bonferroni over the two mid-epoch tiles)")),
+        subtitle="GS-06 — committed-AI fade, patient exit — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("fade the shared AI's committed LONG/SHORT call (H-A definition, Asia+EU, spread <= 3 bp) "
+                        "as a taker in every regime (VIOLENT reported as its own cell); patient break-even/trail exits"),
     ),
 })
 
@@ -1631,6 +1808,23 @@ def active_tile_registry_signature() -> str:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def frozen_roster_registry_signature(lanes) -> str:
+    """``active_tile_registry_signature`` restricted to ``lanes`` (same payload shape and tile numbers).
+
+    With tiles appended after a frozen roster this reproduces the roster's
+    original signature byte-for-byte only if every frozen tile (and its tile
+    number) is unchanged - the mid-epoch-addition proof used by research_freeze.
+    """
+    wanted = set(lanes)
+    payload = {
+        "schema": TILE_REGISTRY_SCHEMA,
+        "architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tiles": tuple(tile for tile in active_tile_lifecycle_manifest() if tile["lane"] in wanted),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 COMBO_CHASE_DELAY_LANES = ()

@@ -485,7 +485,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert score_child.stdout.splitlines() == [
         "v31-freeze21b-11t-v13",
-        "3c75a34e174ab7744971c8c0a408a28eba2e9562356b6151c2a097a609ad045d",
+        "f9f9bf31c0c2de286db48337fad778f7aee28f170029d2052ca8b77f17e18f2e",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -500,7 +500,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert hypothesis_child.stdout.splitlines() == [
         "v31-freeze21b-11t-v13",
-        "758a6033e31c230aa966392263d9d4951712d57535c8d1d1f6f97082af0f0000",
+        "5ed1535827c5733b278aa6b253489ee8df871cb9029a9c290449337562e89d6a",
     ]
 
 

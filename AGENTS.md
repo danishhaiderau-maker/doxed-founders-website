@@ -58,6 +58,19 @@
   and size as "$0.25 margin @100x ~ $25 notional" (never "max loss"). The
   registry validator fails when any tile lacks `signal_summary`,
   `live_exit_order`, known `shadow_exits` or a complete card.
+- FREEZE21B mid-epoch additions (owner, 2026-10-05; corrected spec
+  `diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md`): tiles 12 GS-05
+  Premium regime router (`gs5`, H-C/GS-01 premium trigger on its own `gs5xvp`
+  evaluator; QUIET stands aside, TREND = H-C's cadence and 60-min hold,
+  VIOLENT = GS-01's exits) and 13 GS-06 Committed fade, patient exit (`gs6`,
+  H-A entry, every regime traded with VIOLENT as its own cell, BE +25 -> +8,
+  2.5 ATR trail, 120-min, cap 2) are appended after the frozen eleven
+  (`research_freeze.MID_EPOCH_ADDITIONS`). The frozen eleven stay
+  byte-identical (CI recomputes their signature over the first eleven tiles);
+  the additions' window starts at their deploy. Both tiles stamp
+  `regime_at_signal`/`regime_at_entry`, `regime_cell`, `pre60_side_bp` and
+  `atr_bp` on every decision, `shadow_would_have` on stand-asides and
+  `shadow_old_gate` on GS-06 VIOLENT entries.
 - 21-day research freeze (`research_freeze.py`): one declared data epoch
   (`DATA_EPOCH_ID = ce-20261004-v31-freeze21b` in `fly.toml`); the freeze runs
   21 days from that epoch's `data_epoch.json` start. Inside it every reset path

@@ -92,7 +92,11 @@ it replaced `FREEZE21-20261004` the same day by owner order) over one data
 epoch (`ce-20261004-v31-freeze21b`): 21 days from that epoch's
 `data_epoch.json` start. During the freeze:
 
-- no tile is added, removed or reordered and no rule changes: CI
+- the one exception is an owner-ordered mid-epoch addition
+  (`MID_EPOCH_ADDITIONS`: GS-05/GS-06, 2026-10-05) appended after the frozen
+  roster; CI proves the frozen roster's signature is unchanged
+  (`frozen_roster_registry_signature`) and pins the full registry separately;
+- no other tile is added, removed or reordered and no rule changes: CI
   (`test_research_freeze.py`) compares `ACTIVE_TILE_ORDER`,
   `active_tile_registry_signature()`, `RESEARCH_STACK_VERSION` and the
   `fly.toml` `DATA_EPOCH_ID` to the declaration;

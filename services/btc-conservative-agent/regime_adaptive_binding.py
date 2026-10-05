@@ -95,6 +95,8 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
         self.regime_profiles = dict(self.exit["regime_profiles"])
         self.flip_indicator = dict(self.entry.get("flip_indicator") or {})
         self.regime_trigger = dict(self.entry.get("regime_trigger") or {})
+        # Accepted entries per regime for regime-cell cadences (GS-05 TREND = H-C's 15 min / 4 per hour).
+        self._cadence_log: dict[str, list[float]] = {}
 
     # ------------------------------------------------------------ admission
     def lane_admission(self, raw_ai, admission):
@@ -161,7 +163,26 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             "liquidity_intent": None, "limit_price": None, "entry_ttl_sec": None,
         }
 
+        # GS-05 / GS-06 (``regime_audit``): every decision carries
+        # ``regime_at_entry``; a regime stand-aside still runs the remaining
+        # gates and records the taker order it would have sent (shadow only).
+        audit = bool(entry.get("regime_audit"))
+        shadow_reason = None
+        if audit:
+            record.update({
+                "regime_at_entry": regime, "regime_at_signal": regime,
+                "regime_cell": (entry.get("regime_cells") or {}).get(regime, regime),
+                "pre60_side_bp": self.pre60_side_bp(direction, signal_ts, mid or float(reference_price or 0)),
+            })
+            if regime in tuple(entry.get("shadow_stand_aside_regimes") or ()):
+                record["shadow_old_gate"] = {"would_stand_aside": True,
+                                             "gate": f"META_RULE_{regime}_FADE_STAND_ASIDE",
+                                             "meaning": "SHADOW_ONLY - traded as its own pre-registered cell"}
+
         def stand_aside(reason: str) -> dict[str, Any]:
+            if shadow_reason is not None:
+                record["shadow_would_have"] = {"would_submit": False, "blocked_by": reason}
+                reason = shadow_reason
             record["reason"] = reason
             return record
 
@@ -172,7 +193,10 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             return stand_aside(f"REGIME_{regime}_TRADES_{wanted}_ONLY")
         cell = self.regime_exec.get(regime)
         if not cell:
-            return stand_aside(f"REGIME_{regime}_STANDS_ASIDE")
+            if not audit:
+                return stand_aside(f"REGIME_{regime}_STANDS_ASIDE")
+            shadow_reason = f"REGIME_{regime}_STANDS_ASIDE"
+            cell = {"kind": "TAKER"}
         if bid <= 0 or ask <= 0 or ask <= bid:
             return stand_aside("BBO_UNAVAILABLE")
         if bbo_age is None or bbo_age > float(entry["max_bbo_age_sec"]):
@@ -186,6 +210,22 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
                 return stand_aside("FADE_SPREAD_ABOVE_MAX")
         tick = record["tick"]
         record["exec"] = dict(cell)
+        cadence_block = self._cadence_block(regime, cell, float(signal_ts)) if shadow_reason is None else None
+        if cadence_block:
+            record["exec"] = None
+            return stand_aside(cadence_block)
+        if shadow_reason is not None:
+            record["shadow_would_have"] = {
+                "would_submit": True, "action": ACTION_TAKER, "liquidity_intent": "TAKER",
+                "limit_price": round(taker_limit(direction, bid, ask, entry["taker_protection_bps"], tick), 8),
+                "entry_ttl_sec": int(entry["taker_ttl_sec"]), "exit_profile": next(iter(self.profiles)),
+                "meaning": "SHADOW_ONLY_NO_ORDER - the taker this tile would send outside its stand-aside regime",
+            }
+            record["exec"] = None
+            record["reason"] = shadow_reason
+            return record
+        if cell.get("min_submit_interval_sec") or cell.get("max_submissions_per_hour"):
+            self._cadence_log.setdefault(regime, []).append(float(signal_ts))
         if cell["kind"] == "TAKER":
             record.update({
                 "action": ACTION_TAKER, "reason": f"{regime}_TAKER", "liquidity_intent": "TAKER",
@@ -204,6 +244,33 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             "reprice_ages": reprice_ages(cell),
         })
         return record
+
+    def _cadence_block(self, regime: str, cell: Mapping[str, Any], now: float) -> str | None:
+        gap = cell.get("min_submit_interval_sec")
+        cap = cell.get("max_submissions_per_hour")
+        if not gap and not cap:
+            return None
+        log = [ts for ts in self._cadence_log.get(regime, []) if now - ts < 3600]
+        self._cadence_log[regime] = log
+        if gap and log and now - log[-1] < float(gap):
+            return f"{regime}_MIN_SUBMIT_INTERVAL"
+        if cap and len(log) >= int(cap):
+            return f"{regime}_HOURLY_SUBMISSION_CAP"
+        return None
+
+    def pre60_side_bp(self, direction: str, signal_ts: float, price: float) -> float | None:
+        """Side-signed move (bp) from the last 3 m bar close available 60 min before the signal to ``price``."""
+        sign = _SIGN.get(str(direction or "").upper())
+        if not sign or not price:
+            return None
+        try:
+            bar = self.engine.latest(float(signal_ts) - 3600.0)
+            ref = float((bar or {}).get("c") or 0)
+        except (TypeError, ValueError):
+            return None
+        if ref <= 0:
+            return None
+        return round(sign * (float(price) - ref) / ref * 1e4, 4)
 
     def regime_entry_action(self, *, order: Mapping[str, Any], decision: Mapping[str, Any] | None,
                             bid: float, ask: float, now: float, created_ts: float) -> dict[str, Any]:
@@ -322,7 +389,8 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
         if entry.get("regime_classifier"):
             chips.extend(regime_entry_lines(entry)[:1])
         chips.extend(regime_exit_lines(exit_policy))
-        chips.append("Max 1 open position")
+        max_open = int(tile.get("max_active_signals") or 1)
+        chips.append(f"Max {max_open} open position" + ("s" if max_open > 1 else ""))
         payload["filter_chips"] = chips
         payload["entry"].update({
             "trigger": tile["signal_summary"],
@@ -342,7 +410,7 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             "profiles": exit_policy["profiles"], "exit_order": exit_policy["exit_order"],
             "fixed_time_exit": f"{int(exit_policy['max_duration_sec']) // 60}m max",
             "hard_stop_bps": exit_policy["hard_stop_bps"], "stop_fill": exit_policy["stop_fill"],
-            "take_profit_fill": exit_policy["take_profit_fill"], "max_open_positions": 1,
+            "take_profit_fill": exit_policy["take_profit_fill"], "max_open_positions": max_open,
         })
         return self._with_pre_registration(payload, tile)
 
@@ -350,8 +418,9 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
     def make_evaluator(self):
         source = self.entry["direction_source"]
         if source == CROSS_VENUE_PREMIUM:
-            return GsPremiumEvaluator(PremiumRule.from_policy(self.entry, self.exit),
-                                      policy_id=self.policy_id, policy_signature=self.policy_signature)
+            cls = PREMIUM_EVALUATOR_CLASSES[self.entry.get("evaluator_id_prefix") or GsPremiumEvaluator.ID_PREFIX]
+            return cls(PremiumRule.from_policy(self.entry, self.exit),
+                       policy_id=self.policy_id, policy_signature=self.policy_signature)
         if source == CVD_DIVERGENCE_3M or self.entry.get("bar_clock_trigger"):
             return CvdDivergenceEvaluator(policy_id=self.policy_id, policy_signature=self.policy_signature,
                                           engine=self.engine)
@@ -364,6 +433,17 @@ class GsPremiumEvaluator(PremiumEvaluator):
     ID_PREFIX = "gsxvp"
     SHADOW_FILE = None
     TRIGGER_FEATURE_KEY = "gsxvp_trigger"
+
+
+class Gs5PremiumEvaluator(GsPremiumEvaluator):
+    """GS-05: the same premium rule in a third instance; its own trigger-id namespace keeps its
+    pre-entry receipts apart from GS-01's on the same second (cf. the B2 receipt collision)."""
+
+    ID_PREFIX = "gs5xvp"
+    TRIGGER_FEATURE_KEY = "gs5xvp_trigger"
+
+
+PREMIUM_EVALUATOR_CLASSES = {cls.ID_PREFIX: cls for cls in (GsPremiumEvaluator, Gs5PremiumEvaluator)}
 
 
 class CvdDivergenceEvaluator:

@@ -2,9 +2,9 @@
 // Source: services/btc-conservative-agent/combo_pathway_config.py
 // Regenerate: python scripts/generate-tile-registry-ts.py
 
-export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60", "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS02_NOTRADE_REGIME_ENTRY", "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GS04_NOTRADE_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME"];
+export const ACTIVE_TILE_LANES: readonly string[] = ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60", "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS02_NOTRADE_REGIME_ENTRY", "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GS04_NOTRADE_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS05_PREMIUM_REGIME_MANAGED", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"];
 
-export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["cft", "ntt", "pmr", "rnd", "gs1", "gs2", "gs3", "gs4", "gb1", "gb2", "gb3"];
+export const ACTIVE_TILE_ID_PREFIXES: readonly string[] = ["cft", "ntt", "pmr", "rnd", "gs1", "gs2", "gs3", "gs4", "gb1", "gb2", "gb3", "gs5", "gs6"];
 
 /** Lanes and trade-id prefixes of tiles the registry marks platform_relay_eligible. */
 export const RELAY_ELIGIBLE_TILE_LANES: readonly string[] = [];

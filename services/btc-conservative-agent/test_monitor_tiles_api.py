@@ -299,7 +299,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 11
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 13
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:
@@ -345,3 +345,13 @@ def test_handlers_have_no_writes_or_order_calls():
         assert forbidden not in block, forbidden
     loop = src.split("def microstructure_capture_loop():", 1)[1].split("\ndef ", 1)[0]
     assert "_TILE_TAPE_RING.append(row)" in loop
+
+
+def test_ready_entry_policy_view_states_the_b2_signal_clock_without_touching_the_registry(bot):
+    reg = bot.ACTIVE_TILE_REGISTRY
+    b2 = bot._ready_entry_policy_view(reg["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"])
+    assert b2["signal_clock"] == "SHARED_AI_CALL + BAR_CLOSE_3M_CVD_EVALUATOR" and b2["signal_clock_derived"] is True
+    assert "signal_clock" not in reg["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"]
+    gs1 = bot._ready_entry_policy_view(reg[GS1]["entry_policy"])
+    assert gs1["signal_clock"] == "PER_SECOND_CROSS_VENUE_EVALUATOR" and "signal_clock_derived" not in gs1
+    assert bot._ready_entry_policy_view(reg[HA]["entry_policy"])["signal_clock"] == "SHARED_AI_CALL"

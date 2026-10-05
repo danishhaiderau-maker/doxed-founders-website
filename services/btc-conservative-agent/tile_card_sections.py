@@ -163,6 +163,8 @@ def _regime_profile_text(name: str, prof: dict) -> str:
     if prof.get("be_atr"):
         bits.append(f"break-even at max({_num(prof['be_floor'])} bp, {_num(prof['be_atr'])} ATR) → stop "
                     f"{_bp(prof['lock_bp'])}")
+    elif prof.get("be_atr") == 0:  # fixed bp break-even (GS-06 patient fade)
+        bits.append(f"break-even at {_bp(prof['be_floor'])} → stop {_bp(prof['lock_bp'])}")
     if prof.get("trail_atr"):
         bits.append(f"ATR trail max({_num(prof['trail_floor'])} bp, {_num(prof['trail_atr'])} ATR) armed at "
                     f"max({_num(prof['trail_arm_floor'])} bp, {_num(prof['trail_arm_atr'])} ATR)")
@@ -199,7 +201,8 @@ def _regime_risk_lines(exit_policy: dict) -> list[str]:
         prof = profiles[name]
         label = "" if name == "ALL" else f" ({name})"
         how = "any tick" if int(prof.get("cut_close_sec") or 1) <= 1 else f"on {_minutes(prof['cut_close_sec'])} closes"
-        cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how})")
+        if prof.get("cut_bp") is not None:
+            cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how})")
         hard.append(f"Hard stop{label} {_bp(-float(prof['hard_bp']))}")
     return cut + hard
 
