@@ -146,6 +146,7 @@ from combo_pathway_config import (
     cross_venue_clock_lanes,
     is_evaluator_clock_lane,
     evaluator_loop_lanes,
+    BAR_CLOSE_SIGNAL_CLOCK,
     is_research_candidate_lane,
     is_shadow_only_lane,
     is_static_bracket_lane,
@@ -44992,6 +44993,22 @@ def _runtime_blindspot_status_fields(now: float) -> dict:
     return fields
 
 
+def _ready_entry_policy_view(entry_policy) -> dict:
+    """/ready copy of a registry entry policy with the effective ``signal_clock`` always stated.
+
+    Shared-AI tiles declare no tile-level clock in the registry (and adding one
+    would change frozen policy signatures), so /ready reported it null for B2
+    (shared AI call + 3 m CVD bar-close evaluator). The registry dict and the
+    tile registry signature are untouched; only this view is filled in.
+    """
+    view = dict(entry_policy or {})
+    if not view.get("signal_clock"):
+        view["signal_clock"] = "SHARED_AI_CALL" + (
+            f" + {BAR_CLOSE_SIGNAL_CLOCK}" if view.get("bar_clock_trigger") else "")
+        view["signal_clock_derived"] = True
+    return view
+
+
 def _tile_rows_with_toggles(rows) -> list:
     out = []
     for row in rows:
@@ -45404,7 +45421,8 @@ def ready():
         and runtime["rest_entry_quote_ready"]
     )
     tile_registry = [
-        {**tile, "pre_registration": tile_pre_registration_summary(tile["lane"])}
+        {**tile, "entry_policy": _ready_entry_policy_view(tile.get("entry_policy")),
+         "pre_registration": tile_pre_registration_summary(tile["lane"])}
         for tile in active_tile_lifecycle_manifest()
     ]
     try:

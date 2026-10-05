@@ -17,6 +17,17 @@ first boot with ``DATA_EPOCH_ID`` set to it). Inside the window:
 * CI (``test_research_freeze.py``) fails any registry change - roster, order,
   signature or stack version - and any ``DATA_EPOCH_ID`` change.
 
+Mid-epoch additions (:data:`MID_EPOCH_ADDITIONS`) are the one documented
+exception: owner-ordered paper tiles appended AFTER the frozen roster in the
+same data epoch. They never alter the frozen tiles - CI proves the frozen
+roster's signature is unchanged by recomputing it over the first
+``len(FREEZE_ROSTER)`` tiles (``combo_pathway_config.
+frozen_roster_registry_signature``) - and the full registry (frozen +
+additions) is pinned separately in :data:`MID_EPOCH_REGISTRY_SIGNATURES`.
+Each addition's research window starts at the deploy of the revision that
+registers it (its first boot), not at the freeze epoch start. Additions get
+the frozen tiles' toggle rules (ON always allowed, OFF needs the override).
+
 The documented override is the only way through. At runtime it is either the
 request body field ``freeze_override = {"confirmation":
 "BREAK_21_DAY_RESEARCH_FREEZE", "reason": "<why, >= 10 chars>"}`` or the
@@ -67,6 +78,23 @@ FREEZE_REGISTRY_SIGNATURES = {
     "hypothesis": "758a6033e31c230aa966392263d9d4951712d57535c8d1d1f6f97082af0f0000",
 }
 FREEZE_REGISTRY_SIGNATURE = FREEZE_REGISTRY_SIGNATURES["score_led"]  # the deployed Fly identity
+# Owner-ordered mid-epoch additions (appended tiles, same epoch; see module doc).
+MID_EPOCH_ADDITIONS = (
+    {"lane": "FAMILY_GS05_PREMIUM_REGIME_MANAGED", "tile_number": 12, "hypothesis_id": "GS-20261005-05",
+     "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
+     "spec": "diagnostics/GS05-GS06-TILE-SPECS-20261005.md",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    {"lane": "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "tile_number": 13, "hypothesis_id": "GS-20261005-06",
+     "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
+     "spec": "diagnostics/GS05-GS06-TILE-SPECS-20261005.md",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+)
+MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
+# active_tile_registry_signature() of the full registry (frozen roster + additions).
+MID_EPOCH_REGISTRY_SIGNATURES = {
+    "score_led": "1e2a24a62ed4b632aee130cde310208863c4e34b504235907faa4d785485da37",
+    "hypothesis": "e03f8bd0808dce13dd03c2ce07b914fa6b578852aa38bd0159f55a4157b49f39",
+}
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
 OVERRIDE_REASON_ENV = "RESEARCH_FREEZE_OVERRIDE_REASON"
@@ -136,6 +164,8 @@ def freeze_status(manifest: Optional[Mapping[str, Any]], now: float,
         "days": FREEZE_DAYS,
         "seconds_remaining": round(end - now) if status in (OPENING, ACTIVE) else None,
         "roster": list(FREEZE_ROSTER),
+        "mid_epoch_additions": [dict(item) for item in MID_EPOCH_ADDITIONS],
+        "mid_epoch_registry_signatures": dict(MID_EPOCH_REGISTRY_SIGNATURES),
         "registry_version": FREEZE_REGISTRY_VERSION,
         "registry_signature": FREEZE_REGISTRY_SIGNATURE,
         "registry_signatures": dict(FREEZE_REGISTRY_SIGNATURES),
@@ -168,7 +198,7 @@ def check(action: str, manifest: Optional[Mapping[str, Any]], now: float, *,
     verdict = {"allowed": True, "action": action, "lane": lane, "freeze": state, "override": None}
     if not state["guarded"]:
         return verdict
-    if action == ACTION_TILE_ON and lane in FREEZE_ROSTER:
+    if action == ACTION_TILE_ON and (lane in FREEZE_ROSTER or lane in MID_EPOCH_ADDITION_ROSTER):
         return verdict
     if state["status"] == OPENING and action in (ACTION_RESET, ACTION_PRE_START_WIPE):
         verdict["opening_boundary_reset"] = True

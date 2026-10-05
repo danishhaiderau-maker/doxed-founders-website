@@ -39,8 +39,8 @@ def test_partial_exit_tiles_can_never_be_relay_capable_while_reductions_are_unwi
     import combo_pathway_config as registry
 
     partial = [lane for lane, spec in ACTIVE_TILE_REGISTRY.items() if registry.tile_has_partial_exits(spec)]
-    # FREEZE21B: only the B regime tiles carry a TP1 ladder partial, and they stay relay-blocked.
-    assert partial == list(GS_B_ORDER)
+    # FREEZE21B: only the B regime tiles and GS-05 carry a TP1 ladder partial, and they stay relay-blocked.
+    assert partial == list(GS_B_ORDER) + ["FAMILY_GS05_PREMIUM_REGIME_MANAGED"]
     for lane in partial:
         assert ACTIVE_TILE_REGISTRY[lane]["relay_capability"] == registry.PARTIAL_EXIT_RELAY_CAPABILITY
         assert ACTIVE_TILE_REGISTRY[lane]["platform_relay_eligible"] is False
@@ -100,8 +100,10 @@ GS_ORDER = (
 GS_B_ORDER = (
     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
 )
+# FREEZE21B mid-epoch additions (owner 2026-10-05): tiles 12/13 appended after the frozen eleven.
+GS_MID_EPOCH_ORDER = ("FAMILY_GS05_PREMIUM_REGIME_MANAGED", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
-EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER
+EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
 
 
 def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles():
@@ -112,10 +114,17 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
         (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 12))
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 14))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + GS_B_ORDER]
     assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gs2", "gs3", "gs4", "gb1", "gb2", "gb3"]
-    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 11
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 13
+    mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
+    assert [t["id_prefix"] for t in mid] == ["gs5", "gs6"] and [t["max_active_signals"] for t in mid] == [1, 2]
+    for tile in mid:
+        assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
+        assert tile["default_enabled"] is True and tile["paper_only"] is True
+        assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
+        assert tile["entry_policy"]["mode"] == "REGIME_ADAPTIVE" and tile["pre_registration"]["mid_epoch_addition"]
     for tile in gs_tiles:
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         assert tile["default_enabled"] is True and tile["paper_only"] is True
@@ -235,7 +244,7 @@ def test_composite_exit_order_matches_runtime_first_trigger_order():
         spec = ACTIVE_TILE_REGISTRY[lane]
         exit_policy = spec["exit_policy"]
         assert exit_policy["family"] == (
-            "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS" if lane in GS_ORDER + GS_B_ORDER else "COMPOSITE_FIRST_TRIGGER_WINS")
+            "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS" if lane in GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER else "COMPOSITE_FIRST_TRIGGER_WINS")
         order = tuple(registry.registry_live_exit_order(exit_policy))
         assert tuple(exit_policy["exit_order"]) == order == tuple(spec["live_exit_order"])
     premium = ACTIVE_TILE_REGISTRY["FAMILY_PREMIUM_REVERSION_60M"]
@@ -265,7 +274,7 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
     assert inverted_users == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GSB2_REGIME_SWITCHER",
-                              "FAMILY_GSB3_COMMITTED_FADE_REGIME"]
+                              "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):

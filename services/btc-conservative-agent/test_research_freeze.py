@@ -29,19 +29,25 @@ frozen = pytest.mark.skipif(rf.FREEZE_STATUS != "ACTIVE" or bool(rf.CODE_OVERRID
 
 @frozen
 def test_registry_roster_order_and_signature_match_the_freeze_declaration():
-    assert tuple(cfg.ACTIVE_TILE_ORDER) == rf.FREEZE_ROSTER
+    # The frozen roster first, in order, then only the documented mid-epoch additions.
+    assert tuple(cfg.ACTIVE_TILE_ORDER) == rf.FREEZE_ROSTER + rf.MID_EPOCH_ADDITION_ROSTER
     assert cfg.RESEARCH_STACK_VERSION == rf.FREEZE_REGISTRY_VERSION
+    code = ("import json, combo_pathway_config as c, research_freeze as rf; "
+            "print(json.dumps([c.frozen_roster_registry_signature(rf.FREEZE_ROSTER), "
+            "c.active_tile_registry_signature()]))")
     for mode, flag in (("score_led", "1"), ("hypothesis", "")):
         env = {k: v for k, v in os.environ.items() if k != "SCORE_LED_PAPER_RESEARCH_ENABLED"}
         if flag:
             env["SCORE_LED_PAPER_RESEARCH_ENABLED"] = flag
-        out = subprocess.run(
-            [sys.executable, "-c", "import combo_pathway_config as c; print(c.active_tile_registry_signature())"],
+        frozen_sig, full_sig = json.loads(subprocess.run(
+            [sys.executable, "-c", code],
             cwd=Path(__file__).resolve().parent, env=env, check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        assert out == rf.FREEZE_REGISTRY_SIGNATURES[mode], (
-            f"the tile registry ({mode} mode) changed during the 21-day freeze: revert, or set "
+        ).stdout.strip())
+        assert frozen_sig == rf.FREEZE_REGISTRY_SIGNATURES[mode], (
+            f"a frozen tile ({mode} mode) changed during the 21-day freeze: revert, or set "
             "research_freeze.CODE_OVERRIDE with the owner's approval")
+        assert full_sig == rf.MID_EPOCH_REGISTRY_SIGNATURES[mode], (
+            f"the tile registry ({mode} mode) changed beyond the documented mid-epoch additions")
     assert rf.FREEZE_REGISTRY_SIGNATURE == rf.FREEZE_REGISTRY_SIGNATURES["score_led"]
 
 
@@ -75,6 +81,25 @@ def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
         roles.append(pre["role"])
     assert roles.count("HYPOTHESIS") == 10 and roles.count("CONTROL") == 1
     assert len(rf.FREEZE_ROSTER) == 11 and len(gs) == 7
+
+
+def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_ones():
+    assert rf.MID_EPOCH_ADDITION_ROSTER == ("FAMILY_GS05_PREMIUM_REGIME_MANAGED", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")
+    assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
+    for n, item in enumerate(rf.MID_EPOCH_ADDITIONS, start=len(rf.FREEZE_ROSTER) + 1):
+        lane = item["lane"]
+        spec = cfg.COMBO_LANE_SPECS[lane]
+        assert cfg.tile_number(lane) == item["tile_number"] == n
+        assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
+        assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
+        pre = spec["pre_registration"]
+        assert pre["freeze_id"] == rf.FREEZE_ID and pre["mid_epoch_addition"] is True
+        assert pre["hypothesis_id"] == item["hypothesis_id"] and "MID_EPOCH_ADDITION_START" in pre["decision"]["anchor"]
+        assert rf.check(rf.ACTION_TILE_ON, MANIFEST, START + 86400, lane=lane, env=NO_ENV)["allowed"] is True
+        assert rf.check(rf.ACTION_TILE_OFF, MANIFEST, START + 86400, lane=lane, env=NO_ENV)["allowed"] is False
+    status = rf.freeze_status(MANIFEST, START + 86400)
+    assert [i["lane"] for i in status["mid_epoch_additions"]] == list(rf.MID_EPOCH_ADDITION_ROSTER)
+    assert status["roster"] == list(rf.FREEZE_ROSTER)
 
 
 def test_status_window_opening_active_complete():
