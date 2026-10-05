@@ -4876,10 +4876,15 @@ def api_tile_cards():
     """Registry-ordered ENTRY / EXIT / RISK MANAGEMENT card sections (same generator as the Fly dashboard)."""
     if REGISTRY_IMPORT_ERROR:
         return jsonify({"status": "REGISTRY_UNAVAILABLE", "error": REGISTRY_IMPORT_ERROR, "tiles": []})
+    def _tile_short(label, lane):
+        token = str(label or "").split(" ", 1)[0] if label else str(lane or "")
+        return "CTRL" if token.upper() == "CONTROL" else token
+
     tiles = [
         {
             "lane": row["lane"],
             "tile_number": row["tile_number"],
+            "tile_short": _tile_short(row["label"], row["lane"]),
             "label": row["label"],
             "policy_epoch": row["policy_epoch"],
             "paper_only": row["paper_only"],
@@ -8228,7 +8233,9 @@ async function loadTileCards() {
     host.innerHTML = (d.tiles || []).map(t => {
       const cs = t.card_sections || {};
       const ex = cs.exit || {};
-      return '<div class="tile-card"><div class="tile-card-title">Tile ' + t.tile_number + ' · ' + tileCardEsc(t.label) + '</div>'
+      const code = t.tile_short || (String(t.label || '').split(/\s|·/)[0] || t.lane || '');
+      const tip = t.label ? ' title="' + tileCardEsc(t.label) + '"' : '';
+      return '<div class="tile-card"' + tip + '><div class="tile-card-title">Tile ' + t.tile_number + ' · ' + tileCardEsc(code) + '</div>'
         + '<div class="tile-card-sections">'
         + '<div class="tile-card-section entry"><div class="tile-card-head">ENTRY</div>' + tileCardList(cs.entry) + '</div>'
         + '<div class="tile-card-section exit"><div class="tile-card-head">EXIT</div><div class="tile-card-sub">Live, ' + tileCardEsc(ex.order || 'first trigger wins') + ':</div>' + tileCardList(ex.live)
