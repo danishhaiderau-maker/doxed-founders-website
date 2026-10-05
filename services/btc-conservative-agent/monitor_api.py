@@ -12,6 +12,7 @@ serialized size at ``MAX_DIGEST_BYTES``.
 """
 from __future__ import annotations
 
+import ast
 import math
 
 import hmac
@@ -209,6 +210,31 @@ def _finite_or_none(value: Any) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def partial_exit_legs(row: Mapping[str, Any]) -> list[dict]:
+    """``partial_exit_receipts`` as a list of dicts.
+
+    Rows closed in this process carry a list. Rows reloaded from
+    ``trades_3factor.csv`` at boot carry the CSV text: a Python repr
+    (single quotes, ``None``) or JSON. Without parsing, every ladder leg of a
+    reloaded trade was silently dropped (legs: [] and an understated bp).
+    """
+    raw = row.get("partial_exit_receipts")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() in ("nan", "none", "[]"):
+            return []
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            try:
+                raw = ast.literal_eval(text)
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                return []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [dict(leg) for leg in raw if isinstance(leg, Mapping)]
+
+
 def trade_net_bp(row: Mapping[str, Any]) -> float | None:
     """Price-based net bp of one closed trade, net of fees and funding.
 
@@ -229,13 +255,21 @@ def trade_net_bp(row: Mapping[str, Any]) -> float | None:
     direction = str(row.get("dir") or row.get("direction") or row.get("final_direction") or "").upper()
     if entry > 0 and exit_price > 0 and direction in ("LONG", "SHORT"):
         sign = 1.0 if direction == "LONG" else -1.0
-        legs = [leg for leg in (row.get("partial_exit_receipts") or []) if isinstance(leg, Mapping)
-                and (leg.get("remaining_fraction") is None or _num(leg.get("remaining_fraction")) > 0)]
+        legs = [leg for leg in partial_exit_legs(row)
+                if leg.get("remaining_fraction") is None or _num(leg.get("remaining_fraction")) > 0]
         partial_qty = sum(max(0.0, _num(leg.get("closed_qty"))) for leg in legs)
         remaining = max(0.0, _num(row.get("execution_qty")))
-        original = max(_num(row.get("policy_original_qty")), remaining + partial_qty)
+        declared = _num(row.get("policy_original_qty"))
+        original = max(declared, remaining + partial_qty)
         if original <= 0:
             return sign * (exit_price - entry) / entry * 1e4
+        if remaining > 0 and declared > (remaining + partial_qty) * (1.0 + 1e-6):
+            # Part of the original qty closed on legs this row does not list:
+            # a price recompute would book that part at 0. The booked return
+            # covers every leg, so use it instead of understating the trade.
+            booked_bp = trade_bp(row)[0]
+            if booked_bp is not None:
+                return booked_bp
         gross = (exit_price - entry) * sign * remaining
         for leg in legs:
             recorded = _finite_or_none(leg.get("realized_gross_usd"))

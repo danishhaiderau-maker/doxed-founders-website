@@ -4070,11 +4070,21 @@ def get_lane_pending_orders(lane: str) -> List[Dict]:
 
 
 def get_lane_pnl_ledger(lane: str = None) -> dict:
+    """Read the in-memory lane PnL ledger (display view).
+
+    Retired / benchmark lanes are omitted from the returned view so the
+    dashboard and API do not show them; the underlying ``lane_pnl_ledger``
+    state and on-disk file are never deleted.
+    """
     with state_lock:
         ledger = copy.deepcopy(state.get("lane_pnl_ledger") or {})
+    active = {_normalize_lane_key(l) for l in (ACTIVE_TILE_ORDER or ())}
     if lane:
-        return dict(ledger.get(_normalize_lane_key(lane), {}))
-    return ledger
+        key = _normalize_lane_key(lane)
+        if key not in active:
+            return {}
+        return dict(ledger.get(key, {}))
+    return {k: v for k, v in ledger.items() if _normalize_lane_key(k) in active}
 
 
 
@@ -4274,6 +4284,25 @@ def _trade_row_net_pnl_usd(row) -> float:
         except (TypeError, ValueError):
             return 0.0
     return 0.0
+
+
+def _empty_lane_pnl_bucket(lane: str) -> dict:
+    """A zero ``lane_pnl_ledger`` row (same shape as a derived bucket)."""
+    return {
+        "lane": lane,
+        "net_pnl_usd": 0.0,
+        "gross_wins_usd": 0.0,
+        "gross_losses_usd": 0.0,
+        "wins": 0,
+        "losses": 0,
+        "closes": 0,
+        "long_closes": 0,
+        "short_closes": 0,
+        "long_pnl_usd": 0.0,
+        "short_pnl_usd": 0.0,
+        "equity_usd": float(STARTING_BALANCE),
+        "wl_basis": LANE_LEDGER_WL_BASIS,
+    }
 
 
 def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
@@ -31291,6 +31320,24 @@ def _xvl_trigger_signal_clock(policy, evaluator) -> str:
             or _xvl.SIGNAL_CLOCK)
 
 
+def _tile_row_with_display_signal_clock(tile: dict) -> dict:
+    """/ready display copy: ``entry_policy.signal_clock`` from the evaluator when the spec omits it.
+
+    B2 declares no tile-level clock but rides the 3 m bar-close CVD evaluator
+    (see ``_xvl_trigger_signal_clock``); a null clock read as "unknown" in
+    audits.  Display only: the registry (and its signature) is untouched.
+    """
+    policy = tile.get("entry_policy") if isinstance(tile, dict) else None
+    if not isinstance(policy, dict) or policy.get("signal_clock"):
+        return tile
+    evaluator = (globals().get("_XVL_EVALUATORS") or {}).get(tile.get("lane"))
+    clock = getattr(evaluator, "SIGNAL_CLOCK", None) if evaluator is not None else None
+    if not clock:
+        return tile
+    return {**tile, "entry_policy": {**policy, "signal_clock": clock,
+                                     "signal_clock_source": "evaluator:" + type(evaluator).__name__}}
+
+
 def _xvl_direction_source(lane: str) -> str:
     return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
 
@@ -37684,8 +37731,13 @@ DASHBOARD_JS = """(function () {
             + (chaseTiming.global_submit_label || 'none')
             + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
             + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
-          const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           const cardEsc = (s) => String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
+          const tileShort = (function () {
+            const label = String(spec.label || '');
+            const token = (label.split(' ')[0] || spec.lane || '');
+            return String(token).toUpperCase() === 'CONTROL' ? 'CTRL' : token;
+          })();
+          const titleTip = spec.label ? (' title="' + cardEsc(spec.label) + '"') : '';
           const cardList = (rows) => '<ul style="margin:4px 0 0 0;padding-left:16px;">' + (rows || []).map(function (r) {
             return '<li style="margin:2px 0;">' + cardEsc(r) + '</li>';
           }).join('') + '</ul>';
@@ -37751,7 +37803,7 @@ DASHBOARD_JS = """(function () {
           }
           return '<div style="padding:14px 16px;background:#0d1117;border:2px solid ' + border + ';border-radius:12px;min-height:220px;display:flex;flex-direction:column;">'
             + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">'
-            + '<div><div>' + tileNum + '<strong style="color:' + border + ';font-size:1.02em;">' + (spec.label || spec.lane) + '</strong>' + badge + '</div>'
+            + '<div' + titleTip + '><div><strong style="color:' + border + ';font-size:1.02em;">Tile ' + (spec.tile_number || '') + ' · ' + cardEsc(tileShort) + '</strong>' + badge + '</div>'
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
@@ -42230,6 +42282,12 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
         and (not session_start or _trade_row_in_session(row, session_start))
     ]
     ledger = _derive_lane_pnl_ledger_from_trades(rows)
+    # Every active tile gets a row, so a tile with no epoch close yet (e.g. B2)
+    # shows an explicit zero instead of a missing ledger row.
+    for lane in globals().get("ACTIVE_TILE_ORDER") or ():
+        lane_key = _normalize_lane_key(lane)
+        if lane_key and lane_key not in ledger:
+            ledger[lane_key] = _empty_lane_pnl_bucket(lane_key)
     realized = sum(float(bucket.get("net_pnl_usd") or 0.0) for bucket in ledger.values())
     for row in rows:
         if _trade_row_is_forced_close(row):
@@ -42953,6 +43011,31 @@ def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
         except (TypeError, ValueError):
             counts["closed"] = 0
         counts["closed_source"] = "epoch_lane_ledger_excl_forced"
+    _floor_selected_calls(tile_route_counts)
+
+
+def _floor_selected_calls(tile_route_counts: dict) -> None:
+    """``selected_calls`` covers the whole epoch, never fewer than the epoch's orders.
+
+    ``selected_calls`` counts the distinct shared-AI calls joined from the
+    display-capped AI history / trades / expired lists, so on the live overlay
+    it fell far behind the epoch order counts (H-B 0 selected with 2 fills; the
+    funnel showed 5 selected vs 22 submitted).  Every submitted order came from
+    one selected call on that tile, so the epoch order count is a hard floor.
+    """
+    for counts in (tile_route_counts or {}).values():
+        if not isinstance(counts, dict):
+            continue
+        try:
+            linked = int(counts.get("selected_calls") or 0)
+            orders = sum(int(counts.get(key) or 0) for key in ("pending", "open", "closed", "expired"))
+        except (TypeError, ValueError):
+            continue
+        counts["selected_calls_linked"] = linked
+        counts["selected_calls"] = max(linked, orders)
+        counts["selected_calls_basis"] = (
+            "linked_shared_ai_calls" if linked >= orders else "epoch_order_floor"
+        )
 
 
 def _build_api_state_snapshot():
@@ -45420,11 +45503,14 @@ def ready():
         and runtime["system_ready"]
         and runtime["rest_entry_quote_ready"]
     )
-    tile_registry = [
-        {**tile, "entry_policy": _ready_entry_policy_view(tile.get("entry_policy")),
-         "pre_registration": tile_pre_registration_summary(tile["lane"])}
-        for tile in active_tile_lifecycle_manifest()
-    ]
+    tile_registry = []
+    for tile in active_tile_lifecycle_manifest():
+        row = _tile_row_with_display_signal_clock(tile)
+        tile_registry.append({
+            **row,
+            "entry_policy": _ready_entry_policy_view(row.get("entry_policy")),
+            "pre_registration": tile_pre_registration_summary(tile["lane"]),
+        })
     try:
         thread_summary = _THREAD_HEALTH.summary(now)
     except Exception as exc:

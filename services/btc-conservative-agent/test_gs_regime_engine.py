@@ -106,7 +106,8 @@ def test_arming_takes_effect_from_the_next_tick():
     assert stack.evaluate_tick(prof, st, cur_bp=8.5, age_sec=5, atr_bp=4.0) is None  # arms BE (8 bp)
     assert st["be_armed_age"] == 5
     hit = stack.evaluate_tick(prof, st, cur_bp=0.5, age_sec=6, atr_bp=4.0)
-    assert hit["rule"] == "BREAKEVEN_LOCK" and hit["book_bp"] == 0.5
+    # lock_bp is 1.0 on GS-04: book the floor, not the 0.5 tick that crossed it
+    assert hit["rule"] == "BREAKEVEN_LOCK" and hit["book_bp"] == float(prof.get("lock_bp", 1.0))
 
 
 def test_first_rule_in_profile_order_wins_a_tie():
@@ -174,3 +175,14 @@ def test_gs_verdict_harm_kill_and_day21_outcomes():
                             now_ts=later)
     v = good["pre_registered"][lane]["verdict"]
     assert v["status"] == "PASS_FORWARD" and v["promotion_checks"]["beats_offline_random_control"] == "OFFLINE"
+
+
+def test_breakeven_lock_never_books_below_lock_floor():
+    """Once armed, a gapped tick below the lock still books at lock_bp (never negative)."""
+    prof = _profile("FAMILY_GS01_XV_PREMIUM_ATR_TP", "ALL")
+    st = stack.new_state()
+    lock = float(prof.get("lock_bp", 1.0))
+    stack.evaluate_tick(prof, st, cur_bp=max(float(prof.get("be_floor") or 6), 8.0), age_sec=5, atr_bp=4.0)
+    assert st["be_armed_age"] is not None
+    hit = stack.evaluate_tick(prof, st, cur_bp=-0.47, age_sec=6, atr_bp=4.0)
+    assert hit["rule"] == "BREAKEVEN_LOCK" and hit["book_bp"] == lock >= 0

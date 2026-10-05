@@ -363,7 +363,14 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             reason = f"PATH_END_{int(profile['time_sec']) // 60}M"
         else:
             reason = f"GS_{rule}"
-        book = entry * (1.0 + sign * float(hit["book_bp"]) / 1e4) if hit.get("maker") else price
+        # Maker TP and armed lock/trail stops book their stop level (book_bp),
+        # never a worse gapped market print. Once BE is armed the stack already
+        # floors book_bp at lock_bp so a lock cannot close slightly negative.
+        _book_at_level = hit.get("maker") or rule in (
+            "BREAKEVEN_LOCK", "LADDER_LOCK", "ATR_TRAIL", "MFE_GIVEBACK",
+        )
+        book = (entry * (1.0 + sign * float(hit["book_bp"]) / 1e4)
+                if _book_at_level and hit.get("book_bp") is not None else price)
         state["last_rule"] = rule
         if hit["partial"]:
             close = min(float(hit["close_fraction"]), remaining)

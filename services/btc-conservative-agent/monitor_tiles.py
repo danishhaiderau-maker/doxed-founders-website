@@ -224,9 +224,7 @@ def _side(row: Mapping[str, Any]) -> str | None:
 
 def _legs(row: Mapping[str, Any]) -> list:
     out = []
-    for leg in row.get("partial_exit_receipts") or ():
-        if not isinstance(leg, Mapping):
-            continue
+    for leg in monitor_api.partial_exit_legs(row):
         out.append({
             "ts": _finite(leg.get("ts") or leg.get("observed_ts")),
             "qty": _finite(leg.get("closed_qty")),
