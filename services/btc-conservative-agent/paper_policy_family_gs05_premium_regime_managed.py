@@ -1,4 +1,4 @@
-"""GS-05 (GS-20261005-05, FREEZE21B mid-epoch addition): H-C/GS-01 cross-venue premium trigger (own evaluator gs5xvp), QUIET stands aside (shadow would-have row), TREND / VIOLENT Bitfinex taker; GS_SIMPLE_V1 + ladder TP1 50% at max(6, 1 ATR), BE max(6, 1.5 ATR) -> +2, maker TP max(10, 2.5 ATR), 1.5 ATR trail, 8 bp/5 min cut, 35 bp stop, 60 min (TREND) / 45 min (VIOLENT), one open (paper only)."""
+"""GS-05 (GS-20261005-05, FREEZE21B mid-epoch addition, corrected spec 2026-10-05 20:37): H-C/GS-01 cross-venue premium trigger (own evaluator gs5xvp) as a regime router - QUIET stands aside (shadow would-have row); TREND = H-C exactly (taker, 15-min spacing, <= 4/h, 60-min hold, 40 bp stop, no TP/BE/ladder); VIOLENT = GS-01 exits exactly (maker TP max(8, 2.5 ATR), BE max(6, 2 ATR) -> +1, 8 bp/5 min cut, 35 bp, 60 min; no ladder, no trail); one open (paper only)."""
 from __future__ import annotations
 
 from adaptive_regime_entry import ACTION_MAKER, ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA

@@ -95,6 +95,8 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
         self.regime_profiles = dict(self.exit["regime_profiles"])
         self.flip_indicator = dict(self.entry.get("flip_indicator") or {})
         self.regime_trigger = dict(self.entry.get("regime_trigger") or {})
+        # Accepted entries per regime for regime-cell cadences (GS-05 TREND = H-C's 15 min / 4 per hour).
+        self._cadence_log: dict[str, list[float]] = {}
 
     # ------------------------------------------------------------ admission
     def lane_admission(self, raw_ai, admission):
@@ -167,7 +169,15 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
         audit = bool(entry.get("regime_audit"))
         shadow_reason = None
         if audit:
-            record["regime_at_entry"] = regime
+            record.update({
+                "regime_at_entry": regime, "regime_at_signal": regime,
+                "regime_cell": (entry.get("regime_cells") or {}).get(regime, regime),
+                "pre60_side_bp": self.pre60_side_bp(direction, signal_ts, mid or float(reference_price or 0)),
+            })
+            if regime in tuple(entry.get("shadow_stand_aside_regimes") or ()):
+                record["shadow_old_gate"] = {"would_stand_aside": True,
+                                             "gate": f"META_RULE_{regime}_FADE_STAND_ASIDE",
+                                             "meaning": "SHADOW_ONLY - traded as its own pre-registered cell"}
 
         def stand_aside(reason: str) -> dict[str, Any]:
             if shadow_reason is not None:
@@ -200,6 +210,10 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
                 return stand_aside("FADE_SPREAD_ABOVE_MAX")
         tick = record["tick"]
         record["exec"] = dict(cell)
+        cadence_block = self._cadence_block(regime, cell, float(signal_ts)) if shadow_reason is None else None
+        if cadence_block:
+            record["exec"] = None
+            return stand_aside(cadence_block)
         if shadow_reason is not None:
             record["shadow_would_have"] = {
                 "would_submit": True, "action": ACTION_TAKER, "liquidity_intent": "TAKER",
@@ -210,6 +224,8 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             record["exec"] = None
             record["reason"] = shadow_reason
             return record
+        if cell.get("min_submit_interval_sec") or cell.get("max_submissions_per_hour"):
+            self._cadence_log.setdefault(regime, []).append(float(signal_ts))
         if cell["kind"] == "TAKER":
             record.update({
                 "action": ACTION_TAKER, "reason": f"{regime}_TAKER", "liquidity_intent": "TAKER",
@@ -228,6 +244,33 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
             "reprice_ages": reprice_ages(cell),
         })
         return record
+
+    def _cadence_block(self, regime: str, cell: Mapping[str, Any], now: float) -> str | None:
+        gap = cell.get("min_submit_interval_sec")
+        cap = cell.get("max_submissions_per_hour")
+        if not gap and not cap:
+            return None
+        log = [ts for ts in self._cadence_log.get(regime, []) if now - ts < 3600]
+        self._cadence_log[regime] = log
+        if gap and log and now - log[-1] < float(gap):
+            return f"{regime}_MIN_SUBMIT_INTERVAL"
+        if cap and len(log) >= int(cap):
+            return f"{regime}_HOURLY_SUBMISSION_CAP"
+        return None
+
+    def pre60_side_bp(self, direction: str, signal_ts: float, price: float) -> float | None:
+        """Side-signed move (bp) from the last 3 m bar close available 60 min before the signal to ``price``."""
+        sign = _SIGN.get(str(direction or "").upper())
+        if not sign or not price:
+            return None
+        try:
+            bar = self.engine.latest(float(signal_ts) - 3600.0)
+            ref = float((bar or {}).get("c") or 0)
+        except (TypeError, ValueError):
+            return None
+        if ref <= 0:
+            return None
+        return round(sign * (float(price) - ref) / ref * 1e4, 4)
 
     def regime_entry_action(self, *, order: Mapping[str, Any], decision: Mapping[str, Any] | None,
                             bid: float, ask: float, now: float, created_ts: float) -> dict[str, Any]:

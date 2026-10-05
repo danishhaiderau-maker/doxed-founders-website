@@ -1,4 +1,4 @@
-"""GS-06 (GS-20261005-06, FREEZE21B mid-epoch addition): H-A committed-AI fade (Asia+EU, spread <= 3 bp), taker in QUIET / TREND, VIOLENT stands aside (shadow would-have row); GS-01 exits (maker TP max(8, 2.5 ATR), BE max(6, 2 ATR) -> +1, 8 bp/5 min cut, 35 bp stop) with a 90-min backstop, no ladder, two open (paper only)."""
+"""GS-06 (GS-20261005-06, FREEZE21B mid-epoch addition, corrected spec 2026-10-05 20:37): H-A committed-AI fade (Asia+EU, spread <= 3 bp) as a taker in every regime, VIOLENT reported as its own pre-registered cell with the old stand-aside as a shadow tag; HM F1 patient-fade exits (-12 bp/5 min cut, 40 bp stop, BE +25 -> +8, 2.5 ATR trail armed at max(25 bp, 3 ATR), 120-min backstop; no TP, no ladder); two open (paper only)."""
 from __future__ import annotations
 
 from adaptive_regime_entry import ACTION_MAKER, ACTION_STAND_ASIDE, ACTION_TAKER, DECISION_SCHEMA

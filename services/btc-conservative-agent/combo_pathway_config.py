@@ -986,11 +986,10 @@ def _gs_pre_registration(rule_id: str, *, prereg_path: str, registered_utc: str,
 # HARD, BREAKEVEN_LOCK, ATR_TRAIL, MFE_GIVEBACK, EARLY_CUT, ATR_TAKE_PROFIT,
 # then the time stop. ATR = 3 m ATR14 in bp at the signal (4 bp when missing).
 def _gs_simple_exit(*, tp_atr: float | None, be_atr: float, trail_atr: float | None = None,
-                    trail_arm_atr: float | None = None, time_sec: int = 3600,
-                    max_open_positions: int = 1) -> dict:
+                    trail_arm_atr: float | None = None) -> dict:
     profile = {
         "stack": "GS_SIMPLE_V1", "hard_bp": 35.0, "cut_bp": 8.0, "cut_win_sec": 300, "cut_close_sec": 1,
-        "time_sec": int(time_sec), "be_atr": be_atr, "be_floor": 6.0, "lock_bp": 1.0,
+        "time_sec": 3600, "be_atr": be_atr, "be_floor": 6.0, "lock_bp": 1.0,
         "trail_atr": trail_atr, "trail_arm_atr": trail_arm_atr, "trail_floor": 5.0, "trail_arm_floor": 8.0,
         "tp_atr": tp_atr, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
         "order": ("HARD_STOP", "BREAKEVEN_LOCK", "ATR_TRAIL", "MFE_GIVEBACK", "THESIS_CUT", "ATR_TAKE_PROFIT"),
@@ -998,13 +997,13 @@ def _gs_simple_exit(*, tp_atr: float | None, be_atr: float, trail_atr: float | N
     order = ["HARD_STOP", "BREAKEVEN_LOCK"] + (["ATR_TRAIL"] if trail_atr else []) + ["THESIS_CUT"] \
         + (["ATR_TAKE_PROFIT"] if tp_atr else []) + ["TIME_BACKSTOP"]
     return {
-        "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": int(time_sec),
+        "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 3600,
         "hard_stop_bps": 35.0, "hard_stop_margin_pct": 35.0,
         "profiles": {"ALL": profile}, "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
         "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
         "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
         "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
-        "max_open_positions": int(max_open_positions), "exit_order": tuple(order),
+        "max_open_positions": 1, "exit_order": tuple(order),
     }
 
 
@@ -1315,53 +1314,56 @@ COMBO_LANE_SPECS.update({
 # MID_EPOCH_ADDITIONS). They reuse the GS-01 / H-A building blocks above
 # without touching any frozen tile's entry or exit dict.
 # ---------------------------------------------------------------------------
-GS0506_SPEC_PATH = "diagnostics/GS05-GS06-TILE-SPECS-20261005.md"
+GS0506_SPEC_PATH = "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md"
 GS0506_REGISTERED_UTC = "2026-10-05T09:15:00Z"
 GS0506_DECISION_ANCHOR = ("MID_EPOCH_ADDITION_START (first boot of the registering revision); judged with the "
                           "freeze21b epoch end, fewer than 21 days of data by construction")
 
 
-def _gs5_profile(time_sec: int) -> dict:
-    """GS_SIMPLE_V1 + ladder TP1 (gs_regime_exit_stack): BE max(6, 1.5 ATR) -> +2, TP1 50% at max(6, 1 ATR)
-    -> rest +2, maker TP max(10, 2.5 ATR), 1.5 ATR trail armed with break-even, 8 bp / 5 min cut, 35 bp."""
-    return {
-        "stack": "GS_SIMPLE_V1", "hard_bp": 35.0, "cut_bp": 8.0, "cut_win_sec": 300, "cut_close_sec": 1,
-        "time_sec": int(time_sec), "be_atr": 1.5, "be_floor": 6.0, "lock_bp": 2.0,
-        "tp1_atr": 1.0, "tp1_floor": 6.0, "tp1_frac": 0.5,
-        "trail_atr": 1.5, "trail_arm_atr": 1.5, "trail_floor": 0.0, "trail_arm_floor": 6.0,
-        "tp_atr": 2.5, "tp_floor": 10.0, "gb_arm": None, "gb_frac": None,
-        # Main exits; LADDER_TP1 / LADDER_LOCK are evaluated after them by the
-        # stack. TP1 can never tie HARD / BE / CUT on one tick; a tick through
-        # the final TP closes everything at TP (the more favourable booking).
-        "order": ("HARD_STOP", "BREAKEVEN_LOCK", "THESIS_CUT", "ATR_TAKE_PROFIT", "ATR_TRAIL"),
-    }
-
-
+# CORRECTED 2026-10-05 20:37 AEDT (Danish-approved, Grok Strategist
+# GS05-GS06-TILE-SPECS-CORRECTED-20261005 after STRATEGY-CROSSCHECK-20261005):
+# exits must match the signal's drift speed. GS-05 TREND = H-C's exits and
+# cadence exactly, GS-05 VIOLENT = GS-01's stack exactly (no ladder, no
+# trail); GS-06 = HM F1 "patient fade". The first-draft quick-TP / ladder
+# exits were never shipped.
+# H-C (_PREMIUM_REVERSION_EXIT) expressed as a regime-stack profile: 40 bp
+# stop and a 60-minute time exit, no take-profit, break-even, trail or cut.
+_GS05_TREND_HC_PROFILE = {
+    "stack": "HC_PREMIUM_REVERSION_60M", "hard_bp": 40.0, "cut_bp": None, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 3600, "be_atr": None, "be_floor": 6.0, "lock_bp": 1.0,
+    "trail_atr": None, "trail_arm_atr": None, "trail_floor": 5.0, "trail_arm_floor": 8.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP",),
+}
 _GS05_ENTRY = dict(_GS01_ENTRY)
 _GS05_ENTRY.update({
     "mode": "REGIME_ADAPTIVE",
     "regime_classifier": dict(GSB_REGIME),
-    "regime_exec": {"QUIET": None, "TREND": dict(GS_EXEC["TAKER"]), "VIOLENT": dict(GS_EXEC["TAKER"])},
+    # TREND = H-C's cadence (one entry per 15 min, <= 4 per hour, counted on
+    # this tile's accepted TREND entries); VIOLENT = GS-01's 5 s / 60 per hour.
+    "regime_exec": {"QUIET": None,
+                    "TREND": {**GS_EXEC["TAKER"],
+                              "min_submit_interval_sec": _PREMIUM_REVERSION_ENTRY["min_submit_interval_sec"],
+                              "max_submissions_per_hour": _PREMIUM_REVERSION_ENTRY["max_submissions_per_hour"]},
+                    "VIOLENT": dict(GS_EXEC["TAKER"])},
     "trigger_stream": "H-C / GS-01 premium rule (same thresholds and 3 bp spread gate), own evaluator instance",
     "evaluator_id_prefix": "gs5xvp",
     "regime_audit": True,
 })
 _GS05_EXIT = {
     "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 3600,
-    "hard_stop_bps": 35.0, "hard_stop_margin_pct": 35.0,
-    "profiles": {"PREMIUM_TREND": _gs5_profile(3600), "PREMIUM_VIOLENT": _gs5_profile(2700)},
-    "regime_profiles": {"QUIET": None, "TREND": "PREMIUM_TREND", "VIOLENT": "PREMIUM_VIOLENT"},
-    "partial_take_profits": (("LADDER_TP1", 0.5),),
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"HC_TREND": dict(_GS05_TREND_HC_PROFILE), "GS01_VIOLENT": dict(_GS01_EXIT["profiles"]["ALL"])},
+    "regime_profiles": {"QUIET": None, "TREND": "HC_TREND", "VIOLENT": "GS01_VIOLENT"},
     "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
     "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
     "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
     "max_open_positions": 1,
-    "exit_order": ("HARD_STOP", "LADDER_TP1", "LADDER_LOCK", "BREAKEVEN_LOCK", "THESIS_CUT", "ATR_TAKE_PROFIT",
-                   "ATR_TRAIL", "TIME_BACKSTOP"),
+    "exit_order": ("HARD_STOP", "BREAKEVEN_LOCK", "THESIS_CUT", "ATR_TAKE_PROFIT", "TIME_BACKSTOP"),
 }
 _GS06_ENTRY = _gs_entry(
     mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
-    regime=GSB_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": None},
+    regime=GSB_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
     **_COMMITTED_FADE_KEYS,
 )
 _GS06_ENTRY.update({
@@ -1369,12 +1371,32 @@ _GS06_ENTRY.update({
     "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR", "RAW_AI_NO_TRADE", "SCORE_DIRECTION_MISMATCH",
                   "BBO_STALE", "SPREAD_ABOVE_MAX", "SESSION_GATED"),
     "regime_audit": True,
+    # VIOLENT is traded as its own pre-registered cell; every VIOLENT decision
+    # also carries the old meta-rule's stand-aside as a shadow tag.
+    "regime_cells": {"QUIET": "QUIET_TREND", "TREND": "QUIET_TREND", "VIOLENT": "VIOLENT"},
+    "shadow_stand_aside_regimes": ("VIOLENT",),
 })
-# GS_SIMPLE_V1 exactly as GS-01 (TP 2.5 ATR floor 8, BE 2 ATR floor 6 -> +1,
-# 8 bp / 5 min cut, 35 bp) with H-A's 90-minute horizon and capacity 2. No
-# ladder in v1 (spec: only once lanes partial-TP booking is proven).
-_GS06_EXIT = _gs_simple_exit(tp_atr=2.5, be_atr=2.0, time_sec=5400, max_open_positions=2)
-_GS06_EXIT["regime_profiles"] = {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": None}
+# HM F1 "patient fade": -12 bp / 5 min cut, 40 bp stop, break-even armed at
+# +25 bp locking +8 bp, ATR trail (2.5 ATR distance) armed at max(+25 bp,
+# 3 ATR) i.e. after break-even, 120-minute backstop; no TP, no ladder.
+_GS06_PATIENT_PROFILE = {
+    "stack": "PATIENT_FADE_HM_F1", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 7200, "be_atr": 0.0, "be_floor": 25.0, "lock_bp": 8.0,
+    "trail_atr": 2.5, "trail_arm_atr": 3.0, "trail_floor": 0.0, "trail_arm_floor": 25.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL"),
+}
+_GS06_EXIT = {
+    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 7200,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"ALL": dict(_GS06_PATIENT_PROFILE)},
+    "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
+    "take_profit_fill": "NONE - no take-profit (patient fade)",
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
+    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+    "max_open_positions": 2,
+    "exit_order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP"),
+}
 
 
 def _gs0506_pre(rule_id: str, *, benchmark_lane: str, extra_kills: dict, decisions: tuple) -> dict:
@@ -1396,31 +1418,37 @@ def _gs0506_pre(rule_id: str, *, benchmark_lane: str, extra_kills: dict, decisio
 COMBO_LANE_SPECS.update({
     RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED: _gs_tile(
         lane=RESEARCH_LANE_FAMILY_GS05_PREMIUM_REGIME_MANAGED,
-        label=("GS-05 Premium regime-managed · H-C/GS-01 premium trigger, QUIET aside / TREND taker / "
-               "VIOLENT quick ATR, ladder+BE+cut"),
-        raw_policy_id=("GS05_XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_FOLLOW_QUIET_ASIDE_TREND_VIOLENT_TAKER_CAP5BPS|"
-                       "GS_LADDER50_TP1_1ATR_TP2.5ATR_BE1.5ATR_LOCK2_TRAIL1.5ATR_CUT8BP5M_HARD35BP_T60M_V45M_CAP1"),
+        label=("GS-05 Premium regime router · H-C/GS-01 premium trigger, QUIET aside / TREND = H-C 60-min hold / "
+               "VIOLENT = GS-01 ATR exits"),
+        raw_policy_id=("GS05_XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_QUIET_ASIDE_TREND_HC_15M_SPACING_VIOLENT_GS01_TAKER_CAP5BPS|"
+                       "TREND_HC_T60M_HARD40BP_VIOLENT_GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1"),
         id_prefix="gs5", module="paper_policy_family_gs05_premium_regime_managed.py",
         entry=_GS05_ENTRY, exit_policy=_GS05_EXIT, signal_clock=CROSS_VENUE_SIGNAL_CLOCK,
-        admission=GS05_PREMIUM_REGIME_ADMISSION_POLICY_ID, relay=PARTIAL_EXIT_RELAY_CAPABILITY,
+        admission=GS05_PREMIUM_REGIME_ADMISSION_POLICY_ID,
         hypothesis={"status": "GS20261005_MID_EPOCH_IN_SAMPLE_PATTERN", "hypothesis_id": "GS-20261005-05",
                     "in_sample": "freeze21b live profit pattern (PROFIT-PATTERN-FREEZE21B-20261005); not OOS"},
         pre=_gs0506_pre(
             "GS-20261005-05", benchmark_lane=RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
-            extra_kills={"quiet_shadow_reopen_after_fills": 30},
+            extra_kills={"quiet_shadow_reopen_after_fills": 30, "benchmark_cell": "TREND",
+                         "giveback_cell": "VIOLENT", "per_arm_shadows": ("FAMILY_PREMIUM_REVERSION_60M",
+                                                                         "FAMILY_GS01_XV_PREMIUM_ATR_TP")},
             decisions=("same premium trigger stream as H-C / GS-01 (own evaluator instance gs5xvp, no shadow file)",
                        "QUIET stands aside with a shadow would-have decision row; a strongly positive QUIET "
-                       "shadow after 30 reopens QUIET only as an explicit v1.1 patch")),
-        subtitle="GS-05 — premium follow, regime-gated, ladder exits — PAPER ONLY — RELAY INELIGIBLE",
+                       "shadow after 30 reopens QUIET only as an explicit v1.1 patch",
+                       "TREND arm = H-C exits and cadence (15 min, <= 4/h, 60 min, 40 bp); must beat the same-trigger "
+                       "H-C shadow by >= 1 bp on the TREND cell alone",
+                       "VIOLENT arm = GS-01 exits exactly (no ladder, no trail); give-back > 25% pauses that cell",
+                       "exits corrected per GS05-GS06-TILE-SPECS-CORRECTED-20261005 before the first deploy")),
+        subtitle="GS-05 — premium regime router (H-C TREND / GS-01 VIOLENT) — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("H-C's cross-venue premium trigger (Binance/Bybit premium vs its 60-min mean "
-                        ">=+1.75 / <=-1.88 bp); QUIET stands aside, TREND / VIOLENT taker; ladder TP1 + ATR exits"),
+                        ">=+1.75 / <=-1.88 bp); QUIET stands aside, TREND = H-C's 60-min hold, VIOLENT = GS-01's ATR exits"),
     ),
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP: _gs_tile(
         lane=RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
-        label=("GS-06 Committed fade + ATR TP · H-A invert entry, Asia+EU, QUIET/TREND taker, VIOLENT aside, "
-               "GS_SIMPLE exits"),
-        raw_policy_id=("GS06_INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_QUIET_TREND_TAKER_VIOLENT_ASIDE|"
-                       "GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T90M_CAP2"),
+        label=("GS-06 Committed fade, patient exit · H-A invert entry, Asia+EU, taker (VIOLENT its own cell), "
+               "BE +25 -> +8, 2.5 ATR trail, 120-min"),
+        raw_policy_id=("GS06_INVERT_COMMITTED_SCORE_LED_SIDE_ASIA_EU_SPREADLE3BP_TAKER_ALL_REGIMES_VIOLENT_CELL|"
+                       "PATIENT_CUT12BP5M_HARD40BP_BE25_LOCK8_TRAIL2.5ATR_ARM3ATR_AFTER_BE_T120M_CAP2"),
         id_prefix="gs6", module="paper_policy_family_gs06_committed_fade_atr_tp.py",
         entry=_GS06_ENTRY, exit_policy=_GS06_EXIT, admission=COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID,
         max_active_signals=2,
@@ -1429,13 +1457,18 @@ COMBO_LANE_SPECS.update({
         pre=_gs0506_pre(
             "GS-20261005-06", benchmark_lane=RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
             extra_kills={"control_lane_live": RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
-                         "control_live_min_edge_bp": 2.0, "two_sided_min_fills_before_pass": 10},
+                         "control_live_min_edge_bp": 2.0, "two_sided_min_fills_before_pass": 10,
+                         "report_cells": ("QUIET_TREND", "VIOLENT"),
+                         "violent_cell_harm_after_fills": 30, "violent_cell_harm_mean_bp_at_or_below": -2.0},
             decisions=("committed fade follows H-A and the frozen scorer (explicit side == score-led side)",
-                       "VIOLENT stands aside with a shadow would-have decision row",
+                       "VIOLENT is traded as its own pre-registered cell (same exits); every VIOLENT decision also "
+                       "carries the old meta-rule stand-aside as a shadow tag; QUIET/TREND and VIOLENT are reported "
+                       "separately and the VIOLENT cell can be gated only by an explicit owner decision",
+                       "patient-fade exits (HM F1) per GS05-GS06-TILE-SPECS-CORRECTED-20261005",
                        "GS-01-style research-candidate rules (Bonferroni over the two mid-epoch tiles)")),
-        subtitle="GS-06 — committed-AI fade, GS ATR exits — PAPER ONLY — RELAY INELIGIBLE",
+        subtitle="GS-06 — committed-AI fade, patient exit — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("fade the shared AI's committed LONG/SHORT call (H-A definition, Asia+EU, spread <= 3 bp) "
-                        "as a taker in QUIET / TREND; stand aside in VIOLENT; GS-01's ATR take-profit exits"),
+                        "as a taker in every regime (VIOLENT reported as its own cell); patient break-even/trail exits"),
     ),
 })
 

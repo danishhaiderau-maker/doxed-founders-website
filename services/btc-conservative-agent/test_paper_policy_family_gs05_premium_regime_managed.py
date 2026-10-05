@@ -38,6 +38,7 @@ def test_own_evaluator_instance_and_trigger_namespace():
 
 
 def test_quiet_stands_aside_with_a_shadow_would_have_row():
+    policy._BINDING._cadence_log.clear()
     d = decide(policy, engine_bar=QUIET, ai_feature=TRIG)
     assert d["action"] == "STAND_ASIDE" and d["reason"] == "REGIME_QUIET_STANDS_ASIDE"
     assert d["regime_at_entry"] == "QUIET" and d["limit_price"] is None
@@ -49,68 +50,82 @@ def test_quiet_stands_aside_with_a_shadow_would_have_row():
 
 
 def test_trend_and_violent_are_takers_with_their_profiles():
-    for b, regime, profile in ((TREND, "TREND", "PREMIUM_TREND"), (VIOLENT, "VIOLENT", "PREMIUM_VIOLENT")):
+    for b, regime, profile in ((TREND, "TREND", "HC_TREND"), (VIOLENT, "VIOLENT", "GS01_VIOLENT")):
+        policy._BINDING._cadence_log.clear()
         d = decide(policy, engine_bar=b, ai_feature=TRIG)
-        assert d["action"] == "TAKER" and d["regime_at_entry"] == regime and d["exit_profile"] == profile
-        assert d["trigger_kind"] == "CROSS_VENUE_PREMIUM" and "shadow_would_have" not in d
-    ex = COMBO_LANE_SPECS[policy.LANE]["exit_policy"]["profiles"]
-    assert ex["PREMIUM_TREND"]["time_sec"] == 3600 and ex["PREMIUM_VIOLENT"]["time_sec"] == 2700
+        assert d["action"] == "TAKER" and d["regime_at_entry"] == d["regime_at_signal"] == regime
+        assert d["exit_profile"] == profile and d["trigger_kind"] == "CROSS_VENUE_PREMIUM"
+        assert "shadow_would_have" not in d and d["pre60_side_bp"] is not None and d["atr_bp"] > 0
+
+
+def test_trend_arm_copies_h_c_exits_and_cadence_and_violent_copies_gs01():
+    hc_entry = COMBO_LANE_SPECS["FAMILY_PREMIUM_REVERSION_60M"]["entry_policy"]
+    hc_exit = COMBO_LANE_SPECS["FAMILY_PREMIUM_REVERSION_60M"]["exit_policy"]
+    ex = COMBO_LANE_SPECS[policy.LANE]["exit_policy"]
+    trend = ex["profiles"]["HC_TREND"]
+    assert trend["hard_bp"] == hc_exit["hard_stop_bps"] == 40.0 and trend["time_sec"] == hc_exit["max_duration_sec"]
+    assert not hc_exit["breakeven"] and not hc_exit["trail"] and not hc_exit["take_profit"] and not hc_exit["ladder"]
+    for key in ("tp_atr", "tp1_atr", "be_atr", "trail_atr", "cut_bp"):
+        assert trend.get(key) is None, key
+    cell = COMBO_LANE_SPECS[policy.LANE]["entry_policy"]["regime_exec"]["TREND"]
+    assert cell["min_submit_interval_sec"] == hc_entry["min_submit_interval_sec"] == 900
+    assert cell["max_submissions_per_hour"] == hc_entry["max_submissions_per_hour"] == 4
+    gs1 = COMBO_LANE_SPECS[gs01.LANE]["exit_policy"]["profiles"]["ALL"]
+    assert ex["profiles"]["GS01_VIOLENT"] == gs1
+    assert not ex.get("partial_take_profits") and COMBO_LANE_SPECS[policy.LANE]["relay_capability"] == "BLOCKED_UNQUALIFIED"
+
+
+def test_trend_cadence_is_one_per_15_minutes_violent_is_not_spaced():
+    policy._BINDING._cadence_log.clear()
+    t0 = 1_800_000_000.0
+    assert decide(policy, engine_bar=TREND, ai_feature=TRIG, ts=t0)["action"] == "TAKER"
+    blocked = decide(policy, engine_bar=TREND, ai_feature=TRIG, ts=t0 + 600)
+    assert blocked["action"] == "STAND_ASIDE" and blocked["reason"] == "TREND_MIN_SUBMIT_INTERVAL"
+    assert decide(policy, engine_bar=VIOLENT, ai_feature=TRIG, ts=t0 + 601)["action"] == "TAKER"
+    assert decide(policy, engine_bar=VIOLENT, ai_feature=TRIG, ts=t0 + 602)["action"] == "TAKER"
+    for k in (1, 2, 3):
+        assert decide(policy, engine_bar=TREND, ai_feature=TRIG, ts=t0 + 900 * k)["action"] == "TAKER"
+    capped = decide(policy, engine_bar=TREND, ai_feature=TRIG, ts=t0 + 3599)
+    assert capped["reason"] in ("TREND_MIN_SUBMIT_INTERVAL", "TREND_HOURLY_SUBMISSION_CAP")
+    policy._BINDING._cadence_log.clear()
 
 
 def test_spread_above_three_bp_stands_aside_in_trend():
+    policy._BINDING._cadence_log.clear()
     d = decide(policy, engine_bar=TREND, ai_feature=TRIG, bid=60000.0, ask=60030.0)
     assert d["action"] == "STAND_ASIDE" and d["reason"] == "SPREAD_ABOVE_MAX" and "shadow_would_have" not in d
 
 
-def _walk(decision, path, entry=60000.0, direction="LONG"):
-    state, out = {}, []
-    remaining, partials = 1.0, []
-    for i, bp in enumerate(path):
-        price = entry * (1 + (bp if direction == "LONG" else -bp) / 1e4)
-        a = policy.exit_action(entry=entry, direction=direction, price=price, age_sec=float(i * 10),
-                               remaining_fraction=remaining, completed_partials=tuple(partials),
-                               policy_state=state, entry_decision=decision, fill_ts=0)
-        if a:
-            out.append(a)
-            if a.partial_key:
-                partials.append(a.partial_key)
-            remaining = a.remaining_fraction
-            if remaining <= 0:
-                break
-    return out
+def _exit(decision, bp, age, state, direction="LONG", entry=60000.0):
+    price = entry * (1 + (bp if direction == "LONG" else -bp) / 1e4)
+    return policy.exit_action(entry=entry, direction=direction, price=price, age_sec=age,
+                              policy_state=state, entry_decision=decision, fill_ts=0)
 
 
-def test_ladder_tp1_books_half_then_lock_two_bp():
+def test_trend_exit_is_hold_60_minutes_with_a_40bp_stop_only():
+    policy._BINDING._cadence_log.clear()
     d = decide(policy, engine_bar=bar(atr_pct=50.0, adx=30.0, atr_bp=4.0), ai_feature=TRIG)
-    # ATR 4: TP1 = max(6, 4) = 6 bp, BE arm = max(6, 6) = 6 bp, final TP = max(10, 10) = 10 bp.
-    acts = _walk(d, [0.0, 3.0, 6.5, 4.0, 1.5])
-    assert [a.reason for a in acts] == ["GS_LADDER_TP1", "GS_BREAKEVEN_LOCK"]
-    tp1 = acts[0]
-    assert tp1.close_fraction == 0.5 and tp1.remaining_fraction == 0.5 and tp1.maker is True
-    assert abs(tp1.book_price - 60000.0 * 1.0006) < 1e-6
-    assert acts[1].remaining_fraction == 0.0
-
-
-def test_final_take_profit_and_trail():
-    d = decide(policy, engine_bar=bar(atr_pct=50.0, adx=30.0, atr_bp=4.0), ai_feature=TRIG)
-    acts = _walk(d, [0.0, 7.0, 10.5])
-    assert [a.reason for a in acts] == ["GS_LADDER_TP1", "GS_ATR_TAKE_PROFIT"]
-    assert abs(acts[1].book_price - 60000.0 * 1.001) < 1e-6
-    # Trail 1.5 ATR = 6 bp behind a 9.5 bp peak fires at <= 3.5 bp (before the +2 lock).
-    acts = _walk(d, [0.0, 7.0, 9.5, 3.4])
-    assert [a.reason for a in acts] == ["GS_LADDER_TP1", "GS_ATR_TRAIL"]
-
-
-def test_hard_stop_thesis_cut_and_time():
-    d = decide(policy, engine_bar=VIOLENT, ai_feature=TRIG)
-    assert [a.reason for a in _walk(d, [0.0, -8.5])] == ["GS_THESIS_CUT"]
     state = {}
-    a = policy.exit_action(entry=60000.0, direction="SHORT", price=60000.0 * 1.0036, age_sec=400,
-                           policy_state=state, entry_decision=d, fill_ts=0)
-    assert a.reason.startswith("PHYSICAL_HARD_STOP_35")
-    a = policy.exit_action(entry=60000.0, direction="LONG", price=60000.0, age_sec=2700,
-                           policy_state={}, entry_decision=d, fill_ts=0)
-    assert a.reason == "PATH_END_45M"
+    for i, bp in enumerate([0.0, 15.0, 30.0, 2.0, -12.0, -39.0]):
+        assert _exit(d, bp, 10.0 * i, state) is None
+    assert _exit(d, -40.5, 100.0, state).reason.startswith("PHYSICAL_HARD_STOP_40")
+    assert _exit(d, 5.0, 3600.0, {}).reason == "PATH_END_60M"
+
+
+def test_violent_exit_is_gs01_without_ladder_or_trail():
+    d = decide(policy, engine_bar=bar(atr_pct=90.0, adx=15.0, atr_bp=4.0), ai_feature=TRIG)
+    state = {}
+    assert _exit(d, 0.0, 0.0, state) is None and _exit(d, 7.0, 10.0, state) is None
+    a = _exit(d, 10.5, 20.0, state)
+    assert a.reason == "GS_ATR_TAKE_PROFIT" and a.remaining_fraction == 0.0 and a.partial_key is None
+    state = {}
+    _exit(d, 0.0, 0.0, state)
+    assert _exit(d, -8.5, 10.0, state).reason == "GS_THESIS_CUT"
+    state = {}
+    _exit(d, 0.0, 0.0, state)
+    assert _exit(d, 8.5, 10.0, state) is None  # BE armed at max(6, 2 ATR) = 8
+    assert _exit(d, 0.9, 20.0, state).reason == "GS_BREAKEVEN_LOCK"
+    assert _exit(d, 0.0, 3600.0, {}).reason == "PATH_END_60M"
 
 
 def test_dashboard_discloses_the_rule():

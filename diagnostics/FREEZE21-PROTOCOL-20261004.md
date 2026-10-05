@@ -214,7 +214,9 @@ spread).
 ## Mid-epoch additions (2026-10-05): GS-05 and GS-06
 
 Owner ask 2026-10-05 ~20:15 AEDT (design by Health Monitor + Grok Strategist,
-`diagnostics/GS05-GS06-TILE-SPECS-20261005.md`): two paper-only,
+`diagnostics/GS05-GS06-TILE-SPECS-20261005.md`; exits/gates replaced before the
+first deploy by the Danish-approved 20:37 AEDT correction
+`diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md`): two paper-only,
 relay-ineligible research tiles appended as tiles 12 and 13 in the same
 `ce-20261004-v31-freeze21b` epoch:
 
@@ -227,7 +229,9 @@ FREEZE21B signatures; the 13-tile registry is pinned in
 `research_freeze.MID_EPOCH_REGISTRY_SIGNATURES`. No epoch reset, no
 `DATA_EPOCH_ID` change. Each addition's research window starts at the deploy of
 the registering revision (its first boot); its pre-registration (Bonferroni
-k=2 over the two additions, benchmark H-C for GS-05 and H-A/CTRL for GS-06) is
+k=2 over the two additions; GS-05 must beat H-C on its TREND cell, GS-06 must
+beat H-A by 1 bp and CTRL by 2 bp, with QUIET/TREND and VIOLENT cells reported
+separately) is
 judged with the freeze21b epoch end. The deploy flattens open paper positions
 (guarded deploy boundary); analysts exclude that flatten.
 

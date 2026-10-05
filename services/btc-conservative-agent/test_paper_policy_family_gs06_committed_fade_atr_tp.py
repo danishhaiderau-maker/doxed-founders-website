@@ -1,4 +1,4 @@
-"""Dedicated contract for FREEZE21B mid-epoch GS-06: H-A committed fade entry, VIOLENT aside, GS-01 exits."""
+"""Dedicated contract for FREEZE21B mid-epoch GS-06: H-A committed fade entry, VIOLENT cell, patient-fade exits."""
 import paper_policy_family_gs06_committed_fade_atr_tp as policy
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
@@ -55,32 +55,29 @@ def test_registry_owns_a_paper_only_committed_fade_tile_13_with_capacity_two():
     assert not entry.get("flip_indicator") and not entry.get("bar_clock_trigger")
 
 
-def test_exit_is_gs01_simple_stack_with_a_90_minute_backstop_and_no_ladder():
+def test_exit_is_the_patient_fade_package_with_no_tp_or_ladder():
     ex = COMBO_LANE_SPECS[policy.LANE]["exit_policy"]
-    gs1 = COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP]["exit_policy"]["profiles"]["ALL"]
     prof = ex["profiles"]["ALL"]
-    assert {k: v for k, v in prof.items() if k != "time_sec"} == {k: v for k, v in gs1.items() if k != "time_sec"}
-    assert prof["time_sec"] == 5400 and ex["max_duration_sec"] == 5400
-    assert not ex.get("partial_take_profits") and not prof.get("tp1_atr")
-    assert ex["exit_order"] == ("HARD_STOP", "BREAKEVEN_LOCK", "THESIS_CUT", "ATR_TAKE_PROFIT", "TIME_BACKSTOP")
-    for banned in ("INDICATOR_FLIP", "VOL_SHOCK", "MFE_GIVEBACK"):
+    assert ex["regime_profiles"] == {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"}
+    assert (prof["cut_bp"], prof["cut_win_sec"], prof["hard_bp"], prof["be_floor"], prof["lock_bp"]) == (
+        12.0, 300, 40.0, 25.0, 8.0)
+    assert (prof["trail_arm_atr"], prof["trail_atr"], prof["trail_arm_floor"], prof["time_sec"]) == (3.0, 2.5, 25.0, 7200)
+    assert ex["max_duration_sec"] == 7200 and prof["tp_atr"] is None and not prof.get("tp1_atr")
+    assert not ex.get("partial_take_profits")
+    assert ex["exit_order"] == ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP")
+    for banned in ("INDICATOR_FLIP", "VOL_SHOCK", "MFE_GIVEBACK", "ATR_TAKE_PROFIT", "LADDER_TP1"):
         assert banned not in ex["exit_order"]
 
 
-def test_quiet_and_trend_are_takers_in_session():
-    for b, regime in ((QUIET, "QUIET"), (TREND, "TREND")):
+def test_every_regime_is_a_taker_in_session_and_violent_is_its_own_cell_with_a_shadow_tag():
+    for b, regime, cell in ((QUIET, "QUIET", "QUIET_TREND"), (TREND, "TREND", "QUIET_TREND"),
+                            (VIOLENT, "VIOLENT", "VIOLENT")):
         d = decide(policy, direction="SHORT", engine_bar=b, ts=asia_ts())
-        assert d["action"] == "TAKER" and d["regime_at_entry"] == regime and d["exit_profile"] == "ALL"
+        assert d["action"] == "TAKER" and d["regime_at_entry"] == d["regime_at_signal"] == regime
+        assert d["regime_cell"] == cell and d["exit_profile"] == "ALL" and d["pre60_side_bp"] is not None
         assert d["trigger_kind"] == "COMMITTED_FADE" and d["limit_price"] <= 60000.0
-
-
-def test_violent_stands_aside_with_a_shadow_would_have_row():
-    d = decide(policy, direction="SHORT", engine_bar=VIOLENT, ts=asia_ts())
-    assert d["action"] == "STAND_ASIDE" and d["reason"] == "REGIME_VIOLENT_STANDS_ASIDE"
-    assert d["regime_at_entry"] == "VIOLENT" and d["shadow_would_have"]["would_submit"] is True
-    us = decide(policy, direction="SHORT", engine_bar=VIOLENT, ts=asia_ts() + 17 * 3600)
-    assert us["reason"] == "REGIME_VIOLENT_STANDS_ASIDE"
-    assert us["shadow_would_have"] == {"would_submit": False, "blocked_by": "FADE_SESSION_GATED"}
+        assert ("shadow_old_gate" in d) == (regime == "VIOLENT")
+    assert decide(policy, direction="SHORT", engine_bar=VIOLENT, ts=asia_ts())["shadow_old_gate"]["would_stand_aside"]
 
 
 def test_us_session_and_wide_spread_refuse():
@@ -102,23 +99,30 @@ def test_admission_refuses_no_trade_and_ties_and_fades_the_committed_side():
     assert tie["accepted"] is False and tie["reason"].endswith("SCORE_TIE")
 
 
-def test_take_profit_and_break_even_lock():
+def _exit(d, bp, age, state, entry=60000.0):
+    return policy.exit_action(entry=entry, direction="LONG", price=entry * (1 + bp / 1e4), age_sec=age,
+                              policy_state=state, entry_decision=d, fill_ts=0)
+
+
+def test_patient_exits_cut_break_even_trail_and_time():
     d = decide(policy, direction="LONG", engine_bar=bar(atr_pct=50.0, adx=30.0, atr_bp=4.0), ts=asia_ts())
-    state, entry = {}, 60000.0
-    assert policy.exit_action(entry=entry, direction="LONG", price=entry * 1.0009, age_sec=5,
-                              policy_state=state, entry_decision=d, fill_ts=0) is None
-    a = policy.exit_action(entry=entry, direction="LONG", price=entry * 1.0011, age_sec=6,
-                           policy_state=state, entry_decision=d, fill_ts=0)
-    assert a.reason == "GS_ATR_TAKE_PROFIT" and abs(a.book_price - entry * 1.001) < 1e-6
     state = {}
-    assert policy.exit_action(entry=entry, direction="LONG", price=entry * 1.00085, age_sec=5,
-                              policy_state=state, entry_decision=d, fill_ts=0) is None
-    a = policy.exit_action(entry=entry, direction="LONG", price=entry * 1.00009, age_sec=60,
-                           policy_state=state, entry_decision=d, fill_ts=0)
-    assert a.reason == "GS_BREAKEVEN_LOCK"
-    a = policy.exit_action(entry=entry, direction="LONG", price=entry, age_sec=5400,
-                           policy_state={}, entry_decision=d, fill_ts=0)
-    assert a.reason == "PATH_END_90M"
+    assert _exit(d, 0.0, 0.0, state) is None
+    assert _exit(d, -11.5, 60.0, state) is None  # H-A-like room: -12 bp cut, not GS-01's -8
+    assert _exit(d, -12.5, 120.0, state).reason == "GS_THESIS_CUT"
+    state = {}
+    for i, bp in enumerate([0.0, 15.0, 24.0, 10.0]):
+        assert _exit(d, bp, 30.0 * i, state) is None  # no quick TP, BE not armed below +25
+    assert _exit(d, 26.0, 400.0, state) is None  # BE (and trail, max(25, 3 ATR)) armed
+    assert _exit(d, 8.5, 500.0, state).reason == "GS_ATR_TRAIL"  # 2.5 ATR = 10 bp behind the 26 bp peak
+    state = {}
+    for i, bp in enumerate([0.0, 25.5]):
+        _exit(d, bp, 10.0 * i, state)
+    assert _exit(d, 7.9, 600.0, state).reason in ("GS_BREAKEVEN_LOCK", "GS_ATR_TRAIL")
+    assert _exit(d, 3.0, 7199.0, {}) is None
+    assert _exit(d, 3.0, 7200.0, {}).reason == "PATH_END_120M"
+    assert _exit(d, -40.5, 900.0, {"schema": "gs_regime_exit_state_v1", "ticks": 3}).reason.startswith(
+        "PHYSICAL_HARD_STOP_40")
 
 
 def test_dashboard_discloses_capacity_two():

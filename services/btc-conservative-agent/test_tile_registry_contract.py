@@ -39,8 +39,8 @@ def test_partial_exit_tiles_can_never_be_relay_capable_while_reductions_are_unwi
     import combo_pathway_config as registry
 
     partial = [lane for lane, spec in ACTIVE_TILE_REGISTRY.items() if registry.tile_has_partial_exits(spec)]
-    # FREEZE21B: only the B regime tiles and GS-05 carry a TP1 ladder partial, and they stay relay-blocked.
-    assert partial == list(GS_B_ORDER) + ["FAMILY_GS05_PREMIUM_REGIME_MANAGED"]
+    # FREEZE21B: only the B regime tiles carry a TP1 ladder partial (GS-05/06 ship without one), relay-blocked.
+    assert partial == list(GS_B_ORDER)
     for lane in partial:
         assert ACTIVE_TILE_REGISTRY[lane]["relay_capability"] == registry.PARTIAL_EXIT_RELAY_CAPABILITY
         assert ACTIVE_TILE_REGISTRY[lane]["platform_relay_eligible"] is False

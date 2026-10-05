@@ -82,18 +82,18 @@ FREEZE_REGISTRY_SIGNATURE = FREEZE_REGISTRY_SIGNATURES["score_led"]  # the deplo
 MID_EPOCH_ADDITIONS = (
     {"lane": "FAMILY_GS05_PREMIUM_REGIME_MANAGED", "tile_number": 12, "hypothesis_id": "GS-20261005-05",
      "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
-     "spec": "diagnostics/GS05-GS06-TILE-SPECS-20261005.md",
+     "spec": "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md (supersedes the -20261005 exits)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
     {"lane": "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "tile_number": 13, "hypothesis_id": "GS-20261005-06",
      "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
-     "spec": "diagnostics/GS05-GS06-TILE-SPECS-20261005.md",
+     "spec": "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md (supersedes the -20261005 exits)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "1e2a24a62ed4b632aee130cde310208863c4e34b504235907faa4d785485da37",
-    "hypothesis": "e03f8bd0808dce13dd03c2ce07b914fa6b578852aa38bd0159f55a4157b49f39",
+    "score_led": "f9f9bf31c0c2de286db48337fad778f7aee28f170029d2052ca8b77f17e18f2e",
+    "hypothesis": "5ed1535827c5733b278aa6b253489ee8df871cb9029a9c290449337562e89d6a",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
