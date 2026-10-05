@@ -41,6 +41,11 @@ THRESHOLDS = {
     "fly_ai_stale_sec": 15 * 60,
     "deploy_pause_amber_sec": 45 * 60,
     "orders_quiet_amber_sec": 6 * 3600,
+    # Per-tile quiet window: gap_mult x the tile's own mean order-eligible gap over 48 h, floored at
+    # orders_quiet_amber_sec (rare-trigger CVD/NO_TRADE/regime tiles: orders_quiet_rare_sec) and capped.
+    "orders_quiet_gap_mult": 3.0,
+    "orders_quiet_rare_sec": 12 * 3600,
+    "orders_quiet_cap_sec": 48 * 3600,
     "fill_close_max_open_sec": 8 * 3600,
     "analyzer_success_amber_sec": 45 * 60,
     "analyzer_success_red_sec": 3 * 3600,

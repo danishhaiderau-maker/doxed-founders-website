@@ -711,3 +711,27 @@ def test_feeds_disconnected_transport_ambers(store):
     rt["ws_transport_connected"] = False
     f = _facts(runtime=rt)
     assert diagnose.check_feeds(f, diagnose.signals(f), store, {}).severity == "AMBER"
+
+
+def test_tile_orders_quiet_window_follows_each_tiles_own_rate(paths, store):
+    busy, rare, never = "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GSB2_REGIME_SWITCHER"
+    rows = [{"event_id": f"b{i}", "decision_ts": NOW - 7 * 3600 - i * 3600, "research_lane": busy,
+             "execution_disposition": "ORDER_ELIGIBLE"} for i in range(24)]
+    rows += [{"event_id": "r1", "decision_ts": NOW - 5 * 3600, "research_lane": rare,
+              "execution_disposition": "ORDER_ELIGIBLE"}]
+    _jsonl(paths.mirror / "v3" / "ledgers" / "decision.jsonl", rows)
+    store.refresh_views()
+    rt = {"observedAt": NOW - 30, "git_rev": "abc", "research_lane_enabled": {busy: True, rare: True, never: True},
+          "strategy_progress": {}}
+    f = _facts(runtime=rt)
+    fd = diagnose.check_orders_on_tiles(f, diagnose.signals(f), store)
+    # busy: 24 in 48 h (2 h gap) -> 6 h limit, quiet 7 h -> AMBER; rare CVD tile 5 h quiet -> fine;
+    # never-ordered tile -> listed without alarming.
+    assert fd.severity == "AMBER" and fd.evidence["quiet"] == [busy], fd.observed
+    assert fd.evidence["no_baseline"] == [never]
+    assert fd.evidence["limits_sec"][rare] == 48 * 3600
+    rows = [dict(r, decision_ts=r["decision_ts"] + 3 * 3600) for r in rows]
+    _jsonl(paths.mirror / "v3" / "ledgers" / "decision.jsonl", rows)
+    store.refresh_views()
+    fd = diagnose.check_orders_on_tiles(f, diagnose.signals(f), store)
+    assert fd.severity == "GREEN", fd.observed

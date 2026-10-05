@@ -86,10 +86,16 @@ class TradeAccumulatorEpochTest(unittest.TestCase):
         status = json.loads(acc._status_path(self.root).read_text(encoding="utf-8"))
         self.assertEqual(status["epoch_id"], CURRENT_EPOCH)
         self.assertIn("COLLECTOR_EPOCH", status["epoch_reason"])
-        self.assertEqual(status["by_lane"], {self.lane: {
+        self.assertEqual(status["by_lane"][self.lane], {
             "n": 1, "wins": 1, "net_pnl_usd": 0.01, "pnl": 0.01, "pnl_unit": "USD",
             "pnl_basis_counts": {"RECORDED_CSV_VALUE": 1},
-        }})
+        })
+        # Every live-registry tile is listed; tiles without closes are explicit zero rows.
+        self.assertEqual(set(status["by_lane"]), {str(l).upper() for l in ACTIVE_TILE_ORDER})
+        self.assertEqual(next(iter(status["by_lane"])), self.lane)
+        for lane, cell in status["by_lane"].items():
+            if lane != self.lane:
+                self.assertEqual((cell["n"], cell["wins"], cell["net_pnl_usd"]), (0, 0, 0.0))
 
     def test_pnl_is_exact_usd_never_the_percent_column(self):
         receipt = json.dumps({"reconciled": True, "observed_net_pnl_usd": -0.004321})

@@ -323,7 +323,9 @@ def _family_rows(fam: dict, frames: dict, null_max: np.ndarray, null_basis: str,
                      "ci_hi_bp": s.get("ci_hi_bp"), "p_cluster": s.get("p_cluster"), "sharpe": s.get("sharpe"),
                      "net_usd": s.get("net_usd"), "per_day": s.get("per_day"),
                      "null_t": t_obs if np.isfinite(t_obs) else None,
-                     "fwer_p": S.null_pvalue(t_obs, null_max) if np.isfinite(t_obs) else None})
+                     "fwer_p": S.null_pvalue(t_obs, null_max) if np.isfinite(t_obs) else None,
+                     # p_cluster is undefined below 3 trades or within a single 1h cluster: say so on the row.
+                     "sample_status": "TESTED" if s.get("p_cluster") is not None else "INSUFFICIENT_SAMPLE"})
     q = S.benjamini_hochberg([r["p_cluster"] for r in rows])
     for r, v in zip(rows, q):
         r["bh_q"] = v

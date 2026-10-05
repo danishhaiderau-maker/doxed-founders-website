@@ -466,6 +466,43 @@ def test_empty_analyzer_table_is_warmup_info_inside_a_fresh_epoch_and_red_after(
     assert "UNEXPECTED_VALUE" in _kinds(_eval(spec, {"rows": [1, 2, 3], "status": "BROKEN"}, epoch_age_sec=60))
 
 
+def test_opted_in_declared_empty_table_is_warmup_info_in_a_fresh_epoch():
+    t = {"path": "rows", "min_rows": 10, "declared_empty_paths": ["blockers"], "empty_declared_severity": "RED"}
+    doc = {"rows": [], "blockers": ["NO_SAFE_QUALIFIED_POLICY"]}
+    # Without the opt-in a declared reason keeps its declared severity even in warmup.
+    assert "EMPTY_DECLARED" in _kinds(_eval(_spec(tables=[t]), doc, epoch_age_sec=3600))
+    spec = _spec(tables=[{**t, "warmup_overrides_declared": True}])
+    warm = _eval(spec, doc, epoch_age_sec=3600, epoch_id="ce-x")
+    assert warm["status"] == "GREEN" and {v["kind"] for v in warm["violations"]} == {"EMPTY_WARMUP"}
+    assert "NO_SAFE_QUALIFIED_POLICY" in warm["violations"][0]["detail"]
+    late = _eval(spec, doc, epoch_age_sec=ct.EPOCH_WARMUP_SEC + 1)
+    assert late["status"] == "RED" and "EMPTY_DECLARED" in _kinds(late)
+    reg = json.loads((Path(ct.__file__).with_name("section_contracts.json")).read_text(encoding="utf-8"))
+    combos = next(c for c in reg["contracts"] if c["id"] == "analyzer.combos")
+    assert next(x for x in combos["tables"] if x.get("name") == "top100")["warmup_overrides_declared"] is True
+
+
+def test_dead_statistic_declared_insufficient_on_every_row_is_info_not_amber():
+    t = {"path": "rows", "min_rows": 1, "live_columns": ["n", "p_value", "win_rate"],
+         "declared_rows": [{"field": "corrected_verdict", "in": ["INSUFFICIENT_N"]}]}
+    rows = [{"n": 2, "p_value": None, "win_rate": 1.0, "corrected_verdict": "INSUFFICIENT_N"} for _ in range(6)]
+    res = _eval(_spec(surface="exports", tables=[t]), {"rows": rows})
+    assert res["status"] == "GREEN" and {v["kind"] for v in res["violations"]} == {"DECLARED_INSUFFICIENT"}
+    # One row claims a real verdict while the statistic is still dead: the export is wrong, AMBER again.
+    rows[0]["corrected_verdict"] = "PASS"
+    assert "DEAD_COLUMN" in _kinds(_eval(_spec(surface="exports", tables=[t]), {"rows": rows}))
+    # Row-level status + reason (research_design shadow tiers) also clears the CURRENT label contradiction.
+    rd = _spec(status_path="status", tables=[{"path": "tiers", "min_rows": 1, "live_columns": ["complete"],
+               "declared_rows": [{"field": "status", "in": ["BUILT_INCOMPLETE"], "reason_field": "reason"}]}])
+    tiers = [{"complete": 0, "status": "BUILT_INCOMPLETE", "reason": "RESEARCH_MODEL_MISSING"}] * 3
+    assert _eval(rd, {"status": "CURRENT", "tiers": tiers})["status"] == "GREEN"
+    bare = [{"complete": 0, "status": "BUILT_INCOMPLETE", "reason": ""}] * 3
+    assert "LABEL_CONTRADICTION" in _kinds(_eval(rd, {"status": "CURRENT", "tiers": bare}))
+    # n below the declared threshold, from CSV strings.
+    ft = {"path": "rows", "min_rows": 1, "live_columns": ["p_cluster"], "declared_rows": [{"field": "n", "lt": 3}]}
+    assert _eval(_spec(surface="exports", tables=[ft]), {"rows": [{"n": "2", "p_cluster": None}] * 4})["status"] == "GREEN"
+
+
 def test_zero_byte_export_csv_is_an_empty_table_not_unreachable(paths):
     exports = Path(paths.exports)
     exports.mkdir(parents=True, exist_ok=True)

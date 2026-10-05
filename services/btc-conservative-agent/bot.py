@@ -54438,7 +54438,18 @@ def _data_epoch_boundary_status(manifest: dict) -> dict | None:
         out["research_events_v22_head"] = rev.get("head_decision")
         out["research_events_v22_decided_at"] = rev.get("decided_at_utc")
         plain = epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], "pre_epoch_archive") or {}
-        out["plain_ledgers"] = (f"ARCHIVED_{len(plain.get('archived') or [])}" if plain else None)
+        # Archive is a one-shot epoch-boundary action: once the receipt exists the work is done.
+        # Keep ARCHIVED_N only as detail; the status label itself must read RESOLVED so digests
+        # do not stay stuck on ARCHIVED_14 after the boundary completed.
+        if plain:
+            n_arch = len(plain.get("archived") or [])
+            n_mixed = len(plain.get("mixed_left_in_place") or [])
+            detail = f"{n_arch} archived"
+            if n_mixed:
+                detail += f", {n_mixed} mixed left in place"
+            out["plain_ledgers"] = f"RESOLVED ({detail})"
+        else:
+            out["plain_ledgers"] = None
         return out
     except Exception:
         return None

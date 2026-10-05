@@ -74,7 +74,7 @@
      "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/combos"},
      "depends_on": ["safe_policy_genome_v3_report.json policy_grid", "top_combinations_report.json (legacy)", "counterfactual paths"],
      "freshness": {"path": "generated_at", "max_age_sec": 4500},
-     "tables": [{"path": "policy_grid.rows", "name": "top100", "min_rows": 10, "declared_empty_paths": ["policy_grid.blockers"],
+     "tables": [{"path": "policy_grid.rows", "name": "top100", "min_rows": 10, "warmup_overrides_declared": true, "declared_empty_paths": ["policy_grid.blockers"],
                  "empty_declared_severity": "RED",
                  "genes": {"entry_offset": ["offset"], "chase": ["chase"], "stop_pct": ["stop", "sl_"],
                            "initial_vs_trailing_stop": ["trail"], "thesis_cut_fast": ["thesis", "fast_cut"],
@@ -164,7 +164,8 @@
      "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/research-design"}, "max_bytes": 20000000,
      "depends_on": ["policy_evidence_library manifest", "entry_baseline_replay_report.json", "shadow tiers"],
      "freshness": {"path": "generated_at", "max_age_sec": 4500}, "status_path": "status",
-     "tables": [{"path": "shadow_tiers.rows", "min_rows": 1, "live_columns": ["complete"]}]},
+     "tables": [{"path": "shadow_tiers.rows", "min_rows": 1, "live_columns": ["complete"],
+                 "declared_rows": [{"field": "status", "in": ["BUILT_INCOMPLETE", "NOT_BUILT", "BLOCKED"], "reason_field": "reason"}]}]},
 
     {"id": "analyzer.policy_evidence_library", "surface": "analyzer", "title": "Policy evidence library", "tier": "heavy",
      "page": "http://127.0.0.1:9001/details#research-design", "covers": [],
@@ -611,12 +612,14 @@
      "page": "C:/DoxxedCrypto/analyzer-exports/latest/tile_stats.csv", "source": {"kind": "export_table", "name": "tile_stats"},
      "depends_on": ["analyzer cohort"],
      "tables": [{"path": "rows", "min_rows": 1, "roster_field": "research_lane", "roster": "exact", "no_retired": true,
-                 "live_columns": ["n", "net_pnl_usd", "win_rate"], "flag_all_dead": true}],
+                 "live_columns": ["n", "net_pnl_usd", "win_rate"], "flag_all_dead": true,
+                 "declared_rows": [{"field": "corrected_verdict", "in": ["INSUFFICIENT_N"]}]}],
      "reconcile": "export_tiles_vs_cohort"},
 
     {"id": "export.main_rankings", "surface": "exports", "title": "Export main_rankings", "tier": "heavy",
      "source": {"kind": "export_table", "name": "main_rankings"}, "depends_on": ["main_rankings_report.json"],
-     "tables": [{"path": "rows", "min_rows": 20, "live_columns": ["n", "mean_usd", "p_value"], "key_field": "family", "flag_all_dead": true}]},
+     "tables": [{"path": "rows", "min_rows": 20, "live_columns": ["n", "mean_usd", "p_value"], "key_field": "family", "flag_all_dead": true,
+                 "declared_rows": [{"field": "corrected_verdict", "in": ["INSUFFICIENT_N"]}]}]},
 
     {"id": "export.hypotheses", "surface": "exports", "title": "Export hypotheses + trades", "tier": "heavy",
      "source": {"kind": "export_table", "name": "hypothesis_trades"}, "depends_on": ["strategy lab", "tape 1s"],
@@ -625,7 +628,8 @@
 
     {"id": "export.family_tests", "surface": "exports", "title": "Export family_tests", "tier": "heavy",
      "source": {"kind": "export_table", "name": "family_tests"}, "depends_on": ["strategy lab"],
-     "tables": [{"path": "rows", "min_rows": 10, "live_columns": ["n", "mean_bp", "p_cluster"], "min_distinct": {"family_id": 2}}]},
+     "tables": [{"path": "rows", "min_rows": 10, "live_columns": ["n", "mean_bp", "p_cluster"], "min_distinct": {"family_id": 2},
+                 "declared_rows": [{"field": "sample_status", "in": ["INSUFFICIENT_SAMPLE"]}, {"field": "n", "lt": 3}]}]},
 
     {"id": "export.fill_markouts", "surface": "exports", "title": "Export fill_markouts", "tier": "heavy",
      "source": {"kind": "export_table", "name": "fill_markouts"}, "depends_on": ["execution markouts"],

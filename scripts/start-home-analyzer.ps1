@@ -289,6 +289,58 @@ function Get-CanonicalAnalyzerEnginePids([int]$P) {
 }
 
 $discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+
+function Get-StaleOnceIncumbentPids([int[]]$Pids, [int]$P, [string]$Revision, [int]$IdleSeconds = 10) {
+  # A stale incumbent is a leftover engine from a killed launcher: it owns this port by argv,
+  # runs a different --source-revision than this checkout, its parent process is gone, and it
+  # used no CPU across the idle window. Anything else (legacy argv, live parent, busy, same
+  # revision) stays an incumbent and the Once guard below keeps refusing.
+  $candidates = @{}
+  foreach ($procId in @($Pids)) {
+    $info = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+    if ($null -eq $info) { continue }
+    $commandLine = [string]$info.CommandLine
+    if (-not $commandLine.Contains("--owner-port=$P")) { continue }
+    if ($commandLine -notmatch '--source-revision=([0-9a-fA-F]{7,40})') { continue }
+    if ($Matches[1].ToLowerInvariant() -eq $Revision.ToLowerInvariant()) { continue }
+    if (Get-Process -Id ([int]$info.ParentProcessId) -ErrorAction SilentlyContinue) { continue }
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { continue }
+    $candidates[[int]$procId] = @{ cpu = [double]$proc.CPU; info = $info }
+  }
+  if ($candidates.Count -eq 0) { return @() }
+  Start-Sleep -Seconds $IdleSeconds
+  $stale = @()
+  foreach ($procId in @($candidates.Keys)) {
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { continue }
+    if (([double]$proc.CPU - $candidates[$procId].cpu) -lt 0.05) {
+      $stale += [pscustomobject]@{ Id = [int]$procId; CommandLine = [string]$candidates[$procId].info.CommandLine;
+        ParentProcessId = [int]$candidates[$procId].info.ParentProcessId }
+    }
+  }
+  return @($stale)
+}
+
+if ($Once -and @($discoveredEnginePids).Count -ge 1 -and $env:ANALYZER_ONCE_STALE_RECONCILE -ne '0') {
+  $staleIncumbents = @(Get-StaleOnceIncumbentPids $discoveredEnginePids $AnalyzerPort $sourceRevision)
+  if ($staleIncumbents.Count -gt 0 -and $staleIncumbents.Count -eq @($discoveredEnginePids).Count) {
+    $chainDir = if ($env:DOXXED_LAPTOP_CHAIN_STATE) { $env:DOXXED_LAPTOP_CHAIN_STATE } else { 'C:\DoxxedCrypto\laptop-chain' }
+    foreach ($stale in $staleIncumbents) {
+      $receipt = [ordered]@{
+        at = (Get-Date).ToUniversalTime().ToString('o'); action = 'STOP_STALE_ANALYZER_INCUMBENT'
+        pid = $stale.Id; parent = $stale.ParentProcessId; parent_alive = $false; command = $stale.CommandLine
+        current_revision = $sourceRevision.ToLowerInvariant(); by = 'start-home-analyzer.ps1 -Once'
+      }
+      try { Add-Content -LiteralPath (Join-Path $chainDir 'analyzer-incumbent-reconcile.receipts.jsonl') `
+              -Value ($receipt | ConvertTo-Json -Compress) -Encoding UTF8 } catch {}
+      Write-Host "RECONCILED: stopping stale analyzer incumbent PID $($stale.Id) (orphaned, idle, old revision)." -ForegroundColor Yellow
+      Stop-Process -Id $stale.Id -Force -ErrorAction SilentlyContinue
+      Wait-Process -Id $stale.Id -Timeout 10 -ErrorAction SilentlyContinue
+    }
+    $discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+  }
+}
 if ($Once -and $discoveredEnginePids.Count -gt 0) {
   Write-Host (
     "REFUSED: ONCE_ANALYZER_INCUMBENT_EXISTS for :$AnalyzerPort " +

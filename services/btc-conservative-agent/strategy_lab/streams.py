@@ -60,10 +60,13 @@ ANALYZER_USAGE = {
         "consumers": ["trade evidence index (all rotations)", "fill_time_guard executable ids"],
         "note": "fill_time_guard read the active file only (~1% of rows); now reads every rotation"},
     "order_multiverse.jsonl": {
-        "usage": HEALTH_ONLY, "continuous": False, "consumers": ["multiverse_collection_health"],
-        "note": "health read the report dir instead of the data dir (always 0 rows); fixed and epoch-scoped"},
+        "usage": FULL, "continuous": False,
+        "consumers": ["multiverse_collection_health", "analyzer multiverse_collection_health_report"],
+        "note": "epoch-scoped collection health + quarantine; empty-path defects stay quarantined"},
     "order_multiverse_entry_grid.jsonl": {
-        "usage": HEALTH_ONLY, "continuous": False, "consumers": ["multiverse_collection_health"]},
+        "usage": FULL, "continuous": False,
+        "consumers": ["multiverse_collection_health", "analyzer multiverse_collection_health_report"],
+        "note": "entry-grid digests hydrated for multiverse collection health"},
     "chase_offset_touch_grid.jsonl": {
         "usage": FULL, "continuous": False,
         "consumers": ["compressed shadow schedule rows", "multiverse health",
