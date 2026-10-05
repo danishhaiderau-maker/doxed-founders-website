@@ -49,6 +49,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import os
 import json
+import ast
 import copy
 import glob
 import shutil
@@ -8228,7 +8229,12 @@ def _partial_exit_receipts(value):
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return []
+        # The trade CSV stores the list as a Python repr (single quotes); literal_eval
+        # only accepts literals, so this stays free of arbitrary syntax.
+        try:
+            parsed = ast.literal_eval(value.strip())
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return []
     return [row for row in parsed if isinstance(row, dict)] if isinstance(parsed, list) else []
 
 
