@@ -1652,7 +1652,9 @@ def test_clean_epoch_lifecycle_defects_are_a_declared_amber_blocker_until_expiry
     inputs = healthy(ts("2026-10-06T01:00:00Z"))
     inputs["analyzer_integrity"] = {"report_status": "INVALID", "checks": [lifecycle]}
     check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
-    assert check["status"] == sh.RED and "EXPIRED" in check["observed"]
+    # An expired declaration is still a declared, known defect: AMBER (not a
+    # hard-RED on the cert expiry alone), with the expiry disclosed.
+    assert check["status"] == sh.AMBER and "EXPIRED" in check["observed"]
 
 
 def test_monitor_digest_attach_is_off_by_default_and_bounded(tmp_path, monkeypatch):
