@@ -4260,11 +4260,11 @@ LANE_LEDGER_WL_BASIS = "PRICE_BP_NET_OF_FEES"
 
 
 # Forced closes (guarded-deploy flatten, operator close, admin flatten) are
-# excluded from every tile/strategy statistic, exactly like the analyzer
-# (research/close_origin.FORCED_EXIT_REASONS).  The Trades table still shows them.
-STATS_EXCLUDED_EXIT_REASONS = frozenset({
-    "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
-})
+# excluded from every tile/strategy statistic.  The Trades table still shows them.
+# Single source of truth is paper_pnl_canon.FORCED_EXIT_REASONS (shared with the
+# analyzer close_origin and the self-aware tile stats) so the inclusion rule is
+# one definition, never a divergent copy.
+from paper_pnl_canon import FORCED_EXIT_REASONS as STATS_EXCLUDED_EXIT_REASONS
 
 
 def _trade_row_is_forced_close(row) -> bool:

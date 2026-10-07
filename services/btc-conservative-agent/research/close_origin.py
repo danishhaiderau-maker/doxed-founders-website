@@ -8,11 +8,9 @@ truthfully without changing any analyzer cohort.
 """
 from __future__ import annotations
 
-TRADE_DISPLAY_SCHEMA = "trade_display_v1"
+from paper_pnl_canon import FORCED_EXIT_REASONS  # single source of truth
 
-FORCED_EXIT_REASONS = frozenset({
-    "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
-})
+TRADE_DISPLAY_SCHEMA = "trade_display_v1"
 
 CLOSE_ORIGIN_DEPLOY_MAINTENANCE = "DEPLOY_MAINTENANCE"
 CLOSE_ORIGIN_OPERATOR = "OPERATOR"
