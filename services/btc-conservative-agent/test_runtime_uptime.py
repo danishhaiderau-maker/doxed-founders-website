@@ -287,3 +287,64 @@ def test_watcher_banner_payload_carries_proof():
     report = {"verdict": "GREEN", "generated_at": _iso(now), "failing": [], "counts": {}, "proof": proof}
     assert sh.banner_payload(report)["proof"]["label"] == "Proof: 3h / 48h"
     assert sh.proof_summary(None, now) is None
+
+def test_restart_cause_first_boot_has_no_prev_shutdown(tmp_path):
+    t = _tracker(tmp_path)
+    t.boot(T0, "abc1234")
+    rc = t.restart_cause(T0 + 5)
+    assert rc["available"] is True
+    assert rc["boot_kind"] == "first_boot"
+    assert rc["prev_shutdown"] is None
+    assert rc["restart_cause"].startswith("boot=first_boot")
+
+
+def test_restart_cause_clean_shutdown_then_restart(tmp_path):
+    t = _tracker(tmp_path)
+    t.boot(T0, "abc1234")
+    t.observe(T0 + 10, _healthy())
+    t.record_shutdown(T0 + 100, exit_code=0, reason="normal exit")
+    t2 = _tracker(tmp_path)
+    t2.boot(T0 + 200, "abc1234")
+    rc = t2.restart_cause(T0 + 205)
+    assert rc["boot_kind"] == "restart"
+    assert rc["prev_shutdown"]["kind"] == "clean_shutdown"
+    assert rc["prev_shutdown"]["exit_code"] == 0
+    assert "prev_end=clean_shutdown" in rc["restart_cause"]
+
+
+def test_restart_cause_signal_then_deploy(tmp_path):
+    t = _tracker(tmp_path)
+    t.boot(T0, "aaaaaaa00000")
+    t.observe(T0 + 10, _healthy())
+    t.record_shutdown(T0 + 100, signal_name="SIGTERM")
+    t2 = _tracker(tmp_path)
+    t2.boot(T0 + 200, "c53f2d66b3d2")
+    rc = t2.restart_cause(T0 + 205)
+    assert rc["boot_kind"] == "deploy"
+    assert rc["prev_shutdown"]["kind"] == "signal"
+    assert rc["prev_shutdown"]["signal"] == "SIGTERM"
+    assert "prev_end=signal:SIGTERM" in rc["restart_cause"]
+
+
+def test_restart_cause_unclean_end_falls_back_to_signal(tmp_path):
+    t = _tracker(tmp_path)
+    t.boot(T0, "abc1234")
+    t.observe(T0 + 10, _healthy())
+    # No record_shutdown: the process died without a clean marker (SIGKILL/OOM).
+    t2 = _tracker(tmp_path)
+    t2.boot(T0 + 200, "abc1234")
+    rc = t2.restart_cause(T0 + 205)
+    assert rc["boot_kind"] == "restart"
+    assert rc["prev_shutdown"]["kind"] == "signal"
+    assert "clean-shutdown marker" in rc["prev_shutdown"]["reason"]
+    assert "prev_end=signal" in rc["restart_cause"]
+
+
+def test_restart_cause_reports_pause_kind(tmp_path):
+    t = _tracker(tmp_path)
+    t.boot(T0, "abc1234")
+    t.observe(T0 + 10, _healthy())
+    t.observe(T0 + H, ru.problem_from(paused=True, pause_owner="OPERATOR"))
+    rc = t.restart_cause(T0 + H + 30)
+    assert rc["current_interruption"]["kind"] == "pause"
+    assert "interruption=pause" in rc["restart_cause"]

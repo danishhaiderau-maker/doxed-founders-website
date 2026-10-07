@@ -202,6 +202,31 @@ def test_overlay_key_list_has_no_duplicates() -> None:
     assert not dupes, f"overlay key list has duplicates: {dupes}"
 
 
+def test_session_trade_breakdown_emitted_and_overlaid() -> None:
+    """Session trade counts are labelled (total/closed/forced/open), not forced equal.
+
+    `_session_trade_count` reports all in-session entries while the lane ledger
+    `closes` counts terminal non-forced closes only; the breakdown must be
+    emitted by the relay snapshot and kept fresh by the overlay so the two
+    numbers are presented as distinct, clearly-labelled counts.
+    """
+    func = _function("_session_trade_count_breakdown")
+    assert func is not None
+    body = ast.get_source_segment(
+        BOT_SOURCE, _function("_build_relay_execution_state_snapshot")
+    )
+    assert body is not None
+    assert 'snapshot["session_trade_breakdown"] = _session_trade_count_breakdown()' in body, (
+        "relay snapshot must emit session_trade_breakdown so the dashboard can "
+        "show open/closed/forced counts instead of a single ambiguous total."
+    )
+    keys = _overlay_key_list_literal()
+    assert "session_trade_breakdown" in keys, (
+        "overlay key list must include session_trade_breakdown so the counts "
+        "refresh each cycle instead of freezing at the first heavy build."
+    )
+
+
 def test_overlay_key_list_contains_core_money_keys() -> None:
     """Sanity: the overlay list must still include the original core keys."""
     keys = _overlay_key_list_literal()

@@ -190,7 +190,9 @@ class UptimeTracker:
                      "first_boot": "first recorded boot"}[kind]
             down = None if last_seen is None else max(0.0, now - last_seen)
             open_prev = (prev.get("current") if prev else None) or None
-            self.state.update(schema=SCHEMA, revision=revision, boot_at=now, heartbeat_at=now, run_started_at=None)
+            prev_shutdown = self._prev_shutdown(prev, last_seen, now)
+            self.state.update(schema=SCHEMA, revision=revision, boot_at=now, heartbeat_at=now, run_started_at=None,
+                              boot_kind=kind, prev_shutdown=prev_shutdown)
             if (open_prev and last_seen is not None and down is not None
                     and down <= CONTINUE_OPEN_INTERRUPTION_SEC):
                 started = clock(open_prev.get("at"), now)["melbourne"]
@@ -247,6 +249,109 @@ class UptimeTracker:
                 self._trim(now)
             if changed or now - self._persisted_at >= PERSIST_EVERY_SEC:
                 self._persist(now)
+
+    # ------------------------------------------------------------ shutdown cause
+    @staticmethod
+    def _prev_shutdown(prev: dict, last_seen: float | None, now: float) -> dict | None:
+        """How the previous process ended: the persisted marker, else a signal/crash fallback."""
+        if not prev:
+            return None
+        recorded = prev.get("last_shutdown") if isinstance(prev.get("last_shutdown"), dict) else None
+        rec_at = _parse(recorded.get("at")) if recorded else None
+        if recorded and rec_at is not None and (last_seen is None or rec_at >= last_seen):
+            return {
+                "kind": str(recorded.get("kind") or "clean_shutdown"),
+                "signal": recorded.get("signal"),
+                "exit_code": recorded.get("exit_code"),
+                "reason": recorded.get("reason"),
+                "at": _iso(rec_at),
+                "revision": recorded.get("revision"),
+            }
+        # No clean-shutdown marker written after the last heartbeat: the process
+        # ended unclearly (SIGKILL, OOM, hard crash, or a kill before the
+        # shutdown hook could persist). Report it as a signal-class end.
+        return {
+            "kind": "signal",
+            "signal": None,
+            "exit_code": None,
+            "reason": "previous process ended without a clean-shutdown marker (signal/crash/OOM)",
+            "at": _iso(last_seen) if last_seen is not None else None,
+            "revision": prev.get("revision"),
+        }
+
+    def record_shutdown(self, now: float, *, signal_name: str | None = None,
+                        exit_code: int | None = None, reason: str | None = None) -> None:
+        """Persist how this process ended (best-effort; never raises).
+
+        Called from a signal handler or the tail of ``main`` before the process
+        exits so the next boot can attribute the restart to a clean shutdown, a
+        specific signal, or a crash exit code.
+        """
+        try:
+            with self.lock:
+                if not self.state:
+                    self.state = self._load() or {"schema": SCHEMA, "interruptions": [], "runs": []}
+                kind = "clean_shutdown"
+                if signal_name:
+                    kind = "signal"
+                elif exit_code not in (None, 0):
+                    kind = "crash"
+                self.state["last_shutdown"] = {
+                    "at": now,
+                    "kind": kind,
+                    "signal": str(signal_name) if signal_name else None,
+                    "exit_code": int(exit_code) if exit_code is not None else None,
+                    "reason": (str(reason)[:200] if reason else None),
+                    "revision": self.state.get("revision"),
+                }
+                self._persist(now)
+        except Exception:
+            pass
+
+    def restart_cause(self, now: float | None = None) -> dict:
+        """First-class restart-cause with crash-signal granularity.
+
+        Combines the current boot kind (deploy/restart/first_boot), how the
+        previous process ended (clean_shutdown/signal/crash + signal + exit
+        code), and the current interruption kind (pause-kind) into one durable
+        answer that survives a restart.
+        """
+        now = time.time() if now is None else now
+        with self.lock:
+            st = json.loads(json.dumps(self.state)) if self.state else {}
+        if not st:
+            return {"schema": SCHEMA, "available": False, "reason": "uptime tracker not started"}
+        prev = st.get("prev_shutdown")
+        current = st.get("current")
+        blocker = st.get("blocker") or {}
+        parts = []
+        boot_kind = st.get("boot_kind")
+        if boot_kind:
+            parts.append(f"boot={boot_kind}")
+        if prev:
+            if prev.get("kind") == "signal":
+                parts.append("prev_end=signal" + (f":{prev.get('signal')}" if prev.get("signal") else ""))
+            elif prev.get("kind") == "crash":
+                parts.append(f"prev_end=crash(exit={prev.get('exit_code')})")
+            else:
+                parts.append("prev_end=clean_shutdown")
+        if current:
+            parts.append(f"interruption={current.get('kind')}")
+        elif blocker.get("kind"):
+            parts.append(f"blocker={blocker.get('kind')}")
+        return {
+            "schema": SCHEMA,
+            "available": True,
+            "generated_at": _iso(now),
+            "boot_kind": boot_kind,
+            "boot_at": _iso(st.get("boot_at")),
+            "revision": st.get("revision"),
+            "prev_shutdown": prev,
+            "current_interruption": None if not current else {
+                "kind": current.get("kind"), "owner": current.get("owner"),
+                "at": _iso(current.get("at")), "text": current.get("text")},
+            "restart_cause": " | ".join(parts) if parts else "unknown",
+        }
 
     # ------------------------------------------------------------ read model
     def summary(self, now: float | None = None) -> dict:
