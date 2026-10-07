@@ -10,12 +10,18 @@ import pandas as pd
 from .facts import iso, parse_ts
 
 
-def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: float | None = None) -> pd.DataFrame:
-    """Per-lane close stats; with a declared data epoch only its closes count and every roster lane gets a row."""
+def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: float | None = None,
+               roster: list[str] | None = None) -> pd.DataFrame:
+    """Per-lane close stats; with a declared data epoch only its closes count and every roster lane gets a row.
+
+    ``roster`` is the canonical active-tile set (from the registry). When not
+    supplied, fall back to the runtime snapshot's ``active_tile_lanes`` so the
+    function still works on a bare facts payload in tests.
+    """
     now = time.time() if now is None else now
     rt = facts.get("runtime") or {}
     enabled = rt.get("research_lane_enabled") or {}
-    roster = set(rt.get("active_tile_lanes") or [])
+    roster = set(roster if roster is not None else (rt.get("active_tile_lanes") or []))
     try:
         df = store.frame("""
             SELECT research_lane AS lane, fill_id, max(close_ts) AS close_ts, sum(net_pnl_usd) AS net_usd,

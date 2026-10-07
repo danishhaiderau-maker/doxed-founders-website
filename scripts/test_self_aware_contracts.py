@@ -340,6 +340,22 @@ def test_tile_stats_count_only_epoch_closes_and_list_every_roster_lane():
     assert "FAMILY_XVENUE_LEAD_60S" in set(legacy["lane"])
 
 
+def test_active_lanes_reads_registry_not_stale_list(tmp_path):
+    reg_dir = tmp_path / "services" / "btc-conservative-agent"
+    reg_dir.mkdir(parents=True)
+    (reg_dir / "combo_pathway_config.py").write_text(
+        "COMBO_EXECUTION_LANES = (\n    'LANE_A',\n    'LANE_B',\n    'LANE_C',\n)\n", encoding="utf-8")
+    assert ct.active_lanes(tmp_path) == ["LANE_A", "LANE_B", "LANE_C"]
+
+
+def test_active_lanes_returns_empty_for_missing_or_malformed_registry(tmp_path):
+    assert ct.active_lanes(tmp_path) == []
+    reg_dir = tmp_path / "services" / "btc-conservative-agent"
+    reg_dir.mkdir(parents=True)
+    (reg_dir / "combo_pathway_config.py").write_text("COMBO_EXECUTION_LANES = (broken, tuple\n", encoding="utf-8")
+    assert ct.active_lanes(tmp_path) == []
+
+
 def test_coverage_reads_nav_groups_from_dashboard_source(paths):
     rd = paths.analyzer_repo / "services" / "btc-conservative-agent" / "research"
     rd.mkdir(parents=True)

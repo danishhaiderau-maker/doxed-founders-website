@@ -162,8 +162,10 @@ class Engine:
     def job_tiles(self) -> dict:
         self._need_facts()
         manifest = data_compat.de.load_manifest(self.paths.mirror / data_compat.de.MANIFEST_NAME)
+        roster = contracts.active_lanes(self.paths.analyzer_repo) or None
         frame = tiles.tile_stats(self.store, self.facts,
-                                 epoch_start_ts=float(manifest["started_at_ts"]) if manifest else None)
+                                 epoch_start_ts=float(manifest["started_at_ts"]) if manifest else None,
+                                 roster=roster)
         if not frame.empty:
             self.store.publish("tile_stats", frame, sources=["raw_execution", "fly_runtime_snapshot_v1.json"],
                                note="net_pnl_usd summed per fill_id from the V3 execution ledger")

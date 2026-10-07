@@ -929,6 +929,44 @@ def retired_lanes(analyzer_repo: Path) -> list[str]:
     return []
 
 
+def active_lanes(analyzer_repo: Path) -> list[str]:
+    """Canonical active-tile roster, read from the registry's COMBO_EXECUTION_LANES.
+
+    This is the single source of truth for which lanes are active. Self-aware
+    roster checks must derive their `in_roster` set from here (not from a Fly
+    snapshot that can go stale and false-flag every lane as out-of-roster).
+
+    ``COMBO_EXECUTION_LANES`` is a tuple of module-level name references (each
+    ``RESEARCH_LANE_FAMILY_* = "FAMILY_*"``), so names are resolved against the
+    module's top-level string-literal assignments.
+    """
+    src = Path(analyzer_repo) / "services" / "btc-conservative-agent" / "combo_pathway_config.py"
+    try:
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+    literals: dict[str, str] = {}
+    lane_tuple: ast.AST | None = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            literals[node.targets[0].id] = node.value.value
+        elif (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "COMBO_EXECUTION_LANES"):
+            lane_tuple = node.value
+    if lane_tuple is None:
+        return []
+    lanes: list[str] = []
+    for elt in getattr(lane_tuple, "elts", []) or []:
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+            lanes.append(elt.value)
+        elif isinstance(elt, ast.Name) and elt.id in literals:
+            lanes.append(literals[elt.id])
+        else:  # unresolvable element → do not guess a roster
+            return []
+    return lanes
+
+
 # ------------------------------------------------------------------ reconcilers
 # Each returns (violations, metrics). ``ctx`` carries the fetcher, store, facts and roster.
 
