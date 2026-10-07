@@ -42,6 +42,8 @@ def drain_ns(box, guard, *, live=False, armed_at=None, active=True, epoch=None):
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
         "_relay_event_outbox": box, "_relay_push_state": {}, "_relay_delivery_guard": guard,
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
+        # Per-tile live-orders switch is exercised separately (test_two_tier_relay_gate).
+        "_filter_relay_rows_by_live_switch": lambda rows, armed=False, now=None: list(rows),
     })
     return ns, sent
 
