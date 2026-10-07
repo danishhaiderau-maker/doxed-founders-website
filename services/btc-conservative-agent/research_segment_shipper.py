@@ -40,6 +40,7 @@ import uuid
 
 import research_segment_format as fmt
 import research_segment_prune as prune
+import research_segment_scan as scanlib
 import research_segment_selection as selection
 from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
 
@@ -297,6 +298,19 @@ class SegmentShipper:
         self.sqlite_scratch = self.state_dir / "sqlite-snapshots"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._clear_sqlite_scratch()
+        # Incremental scanning/planning state. ``_state`` caches the authoritative
+        # checkpoint so per-cycle planning does not JSON round-trip the whole
+        # 100K+-entry file map; ``_universe`` caches the last scan result and is
+        # mutated in place by the delta scan. ``_pending_clamps`` tracks append
+        # streams with clamped (deferred) bytes that must be re-planned even when
+        # unchanged. ``_watcher`` is the Linux inotify watcher (None when the
+        # incremental path is unavailable and every cycle falls back to a full scan).
+        self._state: dict | None = None
+        self._universe: dict[str, tuple[Path, os.stat_result]] | None = None
+        self._scan_changed: set | None = None
+        self._pending_clamps: set[str] = set()
+        self._watcher: scanlib.InotifyWatcher | None = None
+        self._watcher_disabled = False
 
     # ------------------------------------------------------------ backlog mode
     @property
@@ -346,14 +360,24 @@ class SegmentShipper:
 
     # ------------------------------------------------------------------ state
     def load_state(self) -> dict:
-        if not self.state_path.is_file():
-            return {"schema": STATE_SCHEMA, "prefix": self.prefix, "seq": 0,
-                    "last_manifest_sha256": fmt.GENESIS_PREV_SHA256, "files": {},
-                    "tombstones": {}, "last_segment_at": None}
-        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        if self._state is not None:
+            return self._state
+        state = self._fresh_state() if not self.state_path.is_file() else json.loads(
+            self.state_path.read_text(encoding="utf-8"))
         if state.get("schema") != STATE_SCHEMA or state.get("prefix") != self.prefix:
             raise RuntimeError("shipper checkpoint schema/prefix mismatch; refusing to continue")
+        self._state = state
         return state
+
+    def _fresh_state(self) -> dict:
+        return {"schema": STATE_SCHEMA, "prefix": self.prefix, "seq": 0,
+                "last_manifest_sha256": fmt.GENESIS_PREV_SHA256, "files": {},
+                "tombstones": {}, "last_segment_at": None}
+
+    def _commit_state(self, new_state: dict) -> None:
+        """Persist the authoritative checkpoint and refresh the in-memory cache."""
+        _atomic_write(self.state_path, json.dumps(new_state, sort_keys=True).encode())
+        self._state = new_state
 
     def write_status(self, **fields) -> None:
         previous = {}
@@ -401,7 +425,7 @@ class SegmentShipper:
         if result["segment_bytes"]:
             state = self.load_state()
             state["store_bytes"] = max(0, int(state.get("store_bytes") or 0) - result["segment_bytes"])
-            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
+            self._commit_state(state)
         previous = {}
         try:
             previous = json.loads(self.status_path.read_text(encoding="utf-8"))
@@ -445,52 +469,163 @@ class SegmentShipper:
         return Path(name).suffix.lower() in self.rules["extensions"] or rotation is not None
 
     def scan(self) -> dict[str, tuple[Path, os.stat_result]]:
-        # scandir entries carry the file type, so each file costs one stat();
-        # the universe is tens of thousands of files and is rescanned per cycle.
-        found = {}
+        """Return the current file universe, incrementally when a watcher is live.
+
+        First call (or any non-Linux / disabled-watcher environment) does a full
+        walk and, when a watcher is available, seeds recursive watches during the
+        walk so no event can be lost between scanning and watching. Later calls
+        drain the watcher and re-stat only the changed paths (O(changed)); on a
+        queue overflow they fall back to a full walk, so the result is always the
+        exact full-walk universe.
+        """
+        watcher = self._ensure_watcher()
+        if watcher is None:
+            self._scan_changed = None
+            return self._full_scan()
+        if self._universe is None:
+            self._universe = self._full_scan()  # _walk_dir seeds watches via the hook
+            self._scan_changed = None
+            return self._universe
+        changes = watcher.poll()
+        if changes == scanlib.OVERFLOW:
+            # The kernel dropped events: rebuild from scratch and re-seed watches.
+            watcher.close()
+            self._watcher = None
+            self._ensure_watcher()
+            self._universe = self._full_scan()
+            self._scan_changed = None
+            return self._universe
+        self._apply_scan_changes(changes)
+        self._scan_changed = changes
+        return self._universe
+
+    def _ensure_watcher(self):
+        if self._watcher is not None or self._watcher_disabled:
+            return self._watcher
+        if (os.getenv("RESEARCH_SEGMENTS_INCREMENTAL_SCAN") or "1").strip() != "1":
+            self._watcher_disabled = True
+            return None
+        if not scanlib.watcher_available():
+            self._watcher_disabled = True
+            return None
+        try:
+            self._watcher = scanlib.InotifyWatcher(excluded_dirs=self.rules["excluded_dir_names"])
+            self._watcher.set_roots([(str(root), prefix) for root, prefix in self._roots()])
+            return self._watcher
+        except Exception:
+            self._watcher = None
+            self._watcher_disabled = True
+            return None
+
+    def _note_dir_watched(self, directory: str, rel_dir: str) -> None:
+        watcher = self._watcher
+        if watcher is not None:
+            watcher.add_dir_watch(directory, rel_dir)
+
+    def _walk_dir(self, directory: str, rel_dir: str, found: dict) -> None:
+        # scandir entries carry the file type, so each file costs one stat().
         excluded_dirs = self.rules["excluded_dir_names"]
         state_dir = str(self.state_dir)
         path_globs = tuple(self.rules.get("excluded_path_globs", ()))
         # Windows DirEntry.stat() reports no inode/device, which checkpoints need.
         full_stat = os.name == "nt"
-        for root, prefix in self._roots():
-            pending = [(str(root), prefix)]
-            while pending:
-                directory, rel_dir = pending.pop()
+        pending = [(directory, rel_dir)]
+        while pending:
+            dirpath, rel = pending.pop()
+            self._note_dir_watched(dirpath, rel)
+            try:
+                with os.scandir(dirpath) as iterator:
+                    entries = sorted(iterator, key=lambda entry: entry.name)
+            except OSError:
+                continue
+            subdirs = []
+            for entry in entries:
+                name = entry.name
                 try:
-                    with os.scandir(directory) as iterator:
-                        entries = sorted(iterator, key=lambda entry: entry.name)
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if (name.lower() not in excluded_dirs
+                                and os.path.realpath(entry.path) != state_dir):
+                            subdirs.append((entry.path, f"{rel}/{name}" if rel else name))
+                        continue
                 except OSError:
                     continue
-                subdirs = []
-                for entry in entries:
-                    name = entry.name
-                    try:
-                        if entry.is_symlink():
-                            continue
-                        if entry.is_dir(follow_symlinks=False):
-                            if (name.lower() not in excluded_dirs
-                                    and os.path.realpath(entry.path) != state_dir):
-                                subdirs.append((entry.path, f"{rel_dir}/{name}" if rel_dir else name))
-                            continue
-                    except OSError:
-                        continue
-                    if not self._allowed_name(name):
-                        continue
-                    try:
-                        stat = os.stat(entry.path) if full_stat else entry.stat()
-                    except OSError:
-                        continue
-                    relpath = f"{rel_dir}/{name}" if rel_dir else name
-                    if any(fnmatch.fnmatchcase(relpath, pattern) for pattern in path_globs):
-                        continue
-                    try:
-                        fmt.validate_relpath(relpath)
-                    except fmt.SegmentFormatError:
-                        continue
-                    found[relpath] = (Path(entry.path), stat)
-                pending.extend(reversed(subdirs))
+                if not self._allowed_name(name):
+                    continue
+                try:
+                    stat = os.stat(entry.path) if full_stat else entry.stat()
+                except OSError:
+                    continue
+                relpath = f"{rel}/{name}" if rel else name
+                if any(fnmatch.fnmatchcase(relpath, pattern) for pattern in path_globs):
+                    continue
+                try:
+                    fmt.validate_relpath(relpath)
+                except fmt.SegmentFormatError:
+                    continue
+                found[relpath] = (Path(entry.path), stat)
+            pending.extend(reversed(subdirs))
+
+    def _full_scan(self) -> dict[str, tuple[Path, os.stat_result]]:
+        found = {}
+        for root, prefix in self._roots():
+            self._walk_dir(str(root), prefix, found)
         return found
+
+    def _roots_map(self) -> dict[str, Path]:
+        return {prefix: Path(root) for root, prefix in self._roots()}
+
+    def _resolve_relpath(self, relpath: str) -> Path:
+        roots = self._roots_map()
+        best = ""
+        for prefix in sorted(roots, key=len, reverse=True):
+            if relpath == prefix or relpath.startswith(prefix + "/"):
+                best = prefix
+                break
+        rel = relpath[len(best):].lstrip("/")
+        return roots[best] / rel
+
+    def _apply_scan_changes(self, changes) -> None:
+        for relpath in changes:
+            self._apply_one_change(relpath)
+
+    def _apply_one_change(self, relpath: str) -> None:
+        path = self._resolve_relpath(relpath)
+        try:
+            if os.path.islink(path):
+                self._remove_subtree(relpath)
+                return
+            if os.path.isdir(path):
+                self._scan_dir_into_universe(path, relpath)
+                return
+            stat = os.stat(path)
+        except OSError:
+            self._remove_subtree(relpath)
+            return
+        name = relpath.rsplit("/", 1)[-1]
+        if not self._allowed_name(name):
+            self._universe.pop(relpath, None)
+            return
+        path_globs = tuple(self.rules.get("excluded_path_globs", ()))
+        if any(fnmatch.fnmatchcase(relpath, pattern) for pattern in path_globs):
+            self._universe.pop(relpath, None)
+            return
+        try:
+            fmt.validate_relpath(relpath)
+        except fmt.SegmentFormatError:
+            self._universe.pop(relpath, None)
+            return
+        self._universe[relpath] = (path, stat)
+
+    def _scan_dir_into_universe(self, directory: Path, rel_dir: str) -> None:
+        self._walk_dir(str(directory), rel_dir, self._universe)
+
+    def _remove_subtree(self, relpath: str) -> None:
+        prefix = relpath + "/"
+        stale = [key for key in self._universe if key == relpath or key.startswith(prefix)]
+        for key in stale:
+            del self._universe[key]
 
     def _is_append_class(self, relpath: str) -> bool:
         name = relpath.rsplit("/", 1)[-1]
@@ -498,7 +633,16 @@ class SegmentShipper:
                 and rotation_parts(name, self.rules["extensions"]) is None)
 
     # --------------------------------------------------------------- planning
-    def plan(self, state: dict, universe: dict) -> list[dict]:
+    def plan(self, state: dict, universe: dict, changed=None) -> list[dict]:
+        # ``changed is None`` means "unknown delta" (full scan): plan everything.
+        # A set means the incremental scan reports exactly these paths changed, so
+        # planning only reconsiders them (plus clamped append streams still
+        # draining) instead of iterating the whole tracked-file map.
+        if changed is None:
+            return self._plan_full(state, universe)
+        return self._plan_incremental(state, universe, changed)
+
+    def _plan_full(self, state: dict, universe: dict) -> list[dict]:
         files = state["files"]
         tombstones = state.get("tombstones", {})
         ops, claimed = [], set()
@@ -542,6 +686,94 @@ class SegmentShipper:
             except PlanRace:
                 # A file rewritten between the scan and its anchor hash backs
                 # off alone; every other stream still plans and ships.
+                self._back_off(relpath)
+                continue
+            if op is not None:
+                ops.append(op)
+        ops.sort(key=lambda item: (item["stream"], _RANK.get(item["kind"], 2), item["path"]))
+        return ops
+
+    def _plan_incremental(self, state: dict, universe: dict, changed) -> list[dict]:
+        """Same ops as ``_plan_full`` but O(changed) by reusing the scan delta.
+
+        Equivalence argument (validated by test_research_segment_incremental):
+
+        * a SEAL can only fire when an append stream's active identity changed,
+          i.e. its relpath changed (renamed/recreated) or a rotated target
+          appeared — both are necessarily in ``changed``;
+        * a TOMBSTONE can only fire for a tracked file removed from the universe,
+          whose relpath is in ``changed``;
+        * ``_plan_entry`` yields an op only for a changed file (present in
+          ``changed``) or an unchanged append stream still draining clamped
+          bytes (tracked in ``self._pending_clamps``).
+
+        The final sort is identical to the full plan, so op order is preserved.
+        """
+        files = state["files"]
+        tombstones = state.get("tombstones", {})
+        ops, claimed = [], set()
+        by_inode = {
+            (int(stat.st_dev), int(stat.st_ino)): relpath
+            for relpath in changed
+            if (entry := universe.get(relpath)) is not None
+            for _path, stat in (entry,)
+        }
+        for relpath in changed:
+            tracked = files.get(relpath)
+            if not tracked or tracked.get("class") != "append":
+                continue
+            current = universe.get(relpath)
+            identity = (tracked["dev"], tracked["inode"])
+            if current is not None and (int(current[1].st_dev), int(current[1].st_ino)) == identity:
+                continue
+            rotated = by_inode.get(identity)
+            name = relpath.rsplit("/", 1)[-1]
+            if (rotated and rotated not in files and rotated.startswith(relpath + ".")
+                    and rotation_parts(rotated.rsplit("/", 1)[-1], self.rules["extensions"])
+                    and rotation_parts(rotated.rsplit("/", 1)[-1], self.rules["extensions"])[0] == name):
+                path, stat = universe[rotated]
+                if int(stat.st_size) >= tracked["offset"]:
+                    ops.append({"kind": fmt.KIND_SEAL, "stream": relpath, "path": rotated,
+                                "source_path": relpath, "abs": path, "stat": stat,
+                                "base_offset": tracked["offset"], "end_offset": int(stat.st_size),
+                                "tracked": tracked, "bytes": int(stat.st_size) - tracked["offset"]})
+                    claimed.add(rotated)
+        sealed_sources = {op["source_path"] for op in ops}
+        for relpath in changed:
+            if relpath in files and relpath not in universe and relpath not in sealed_sources:
+                ops.append({"kind": fmt.KIND_TOMBSTONE, "stream": relpath, "path": relpath,
+                            "tracked": files[relpath], "bytes": 0})
+        for relpath in changed:
+            if relpath in claimed or relpath not in universe:
+                continue
+            path, stat = universe[relpath]
+            tracked = files.get(relpath) if relpath not in sealed_sources else None
+            try:
+                op = self._plan_entry(relpath, path, stat, tracked, tombstones)
+            except FileNotFoundError:
+                continue
+            except PlanRace:
+                self._back_off(relpath)
+                continue
+            if op is not None:
+                ops.append(op)
+        for relpath in list(self._pending_clamps):
+            if relpath in changed or relpath in claimed:
+                continue
+            entry = universe.get(relpath)
+            if entry is None:
+                self._pending_clamps.discard(relpath)
+                continue
+            path, stat = entry
+            tracked = files.get(relpath)
+            if not tracked or tracked.get("class") != "append":
+                self._pending_clamps.discard(relpath)
+                continue
+            try:
+                op = self._plan_entry(relpath, path, stat, tracked, tombstones)
+            except FileNotFoundError:
+                continue
+            except PlanRace:
                 self._back_off(relpath)
                 continue
             if op is not None:
@@ -625,6 +857,7 @@ class SegmentShipper:
         if boundary > op["base_offset"]:
             op["end_offset"] = boundary
             op["bytes"] = boundary - op["base_offset"]
+            self._pending_clamps.add(op["stream"])
 
     def select(self, ops: list[dict], cursor: str = "") -> tuple[list[dict], int]:
         """Keep a dependency-safe subset of ``ops`` within the byte budget.
@@ -733,8 +966,15 @@ class SegmentShipper:
 
     # --------------------------------------------------------------- building
     def build(self, state: dict, selected: list[dict]) -> tuple[bytes, bytes, dict]:
-        new_state = json.loads(json.dumps(state))
-        files, tombstones = new_state["files"], new_state.setdefault("tombstones", {})
+        # Copy-on-write: the top-level container and the ``files``/``tombstones``
+        # maps are shallow-copied (cheap pointer copies) and only the entries the
+        # build touches are replaced, so the 100K+-entry state is never deep-copied
+        # or JSON round-tripped. The input ``state`` is never mutated.
+        new_state = dict(state)
+        files = dict(state["files"])
+        tombstones = dict(state.get("tombstones", {}))
+        new_state["files"] = files
+        new_state["tombstones"] = tombstones
         payloads, members = [], []
         seq = int(state["seq"]) + 1
         generation_of = lambda rel: int((files.get(rel) or tombstones.get(rel) or {}).get("generation", 0))
@@ -855,6 +1095,17 @@ class SegmentShipper:
                     files[relpath].update({"size": int(stat.st_size), "snapshot_size": size,
                                            "wal": op["wal"]})
                 tombstones.pop(relpath, None)
+            # Incremental-planning bookkeeping: only an append stream that still
+            # has pending (clamped) bytes must be re-planned while unchanged.
+            if kind in (fmt.KIND_TOMBSTONE, fmt.KIND_SEAL):
+                self._pending_clamps.discard(relpath)
+                if kind == fmt.KIND_SEAL:
+                    self._pending_clamps.discard(op["source_path"])
+            elif self._is_append_class(relpath):
+                if end >= int(stat.st_size):
+                    self._pending_clamps.discard(relpath)
+            else:
+                self._pending_clamps.discard(relpath)
         if not members:
             raise self.build_raced[-1]
         if snapshot_file is not None:
@@ -897,8 +1148,9 @@ class SegmentShipper:
         return "/" not in relpath
 
     def build_genesis(self, state: dict, universe: dict) -> tuple[bytes, bytes, dict]:
-        new_state = json.loads(json.dumps(state))
-        files = new_state["files"]
+        new_state = dict(state)
+        files = dict(state["files"])
+        new_state["files"] = files
         members, payloads, append_stats = [], [], []
         baselined_bytes, tracked_only = 0, 0
         for relpath, (path, stat) in sorted(universe.items()):
@@ -1001,7 +1253,7 @@ class SegmentShipper:
                                         "application/gzip")
         manifest_result = self._put_once(fmt.manifest_key(self.prefix, seq), manifest_raw,
                                          "application/json")
-        _atomic_write(self.state_path, json.dumps(intent["new_state"], sort_keys=True).encode())
+        self._commit_state(intent["new_state"])
         for name in ("intent.json", "segment.tar.gz", "manifest.json"):
             (self.intent_dir / name).unlink(missing_ok=True)
         return {"seq": seq, "segment": segment_result, "manifest": manifest_result,
@@ -1041,11 +1293,12 @@ class SegmentShipper:
         self.boosted = self.boost_due(state)
         mode = {"backlog_mode": self.boosted, "segment_budget_bytes": self.segment_budget}
         universe = self.scan()
+        changed = self._scan_changed
         # A stream that no longer exists can never ship to clear its backoff;
         # left in racing_paths it would block laptop promotion forever.
         for stream in [s for s in self.race_backoff if s not in universe]:
             del self.race_backoff[stream]
-        ops = self.plan(state, universe)
+        ops = self.plan(state, universe, changed)
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
         throttled = sorted(self.throttled)[:50]
@@ -1274,9 +1527,19 @@ def main() -> int:
 
     def escalate_starved() -> None:
         nonlocal priority_boosted, priority_error
+        # A long-but-healthy cycle (e.g. one big SQLite backup) must not park the
+        # worker at nice 10 forever: only escalate when there is a real backlog to
+        # drain, and let settle_mode() drop back to idle once it is drained.
+        try:
+            backlog = shipper.boost_due()
+        except Exception:
+            backlog = False
+        if not backlog:
+            _log(f"idle cycle exceeded {starved_after:.0f}s but no backlog -> staying idle")
+            return
         priority_error = _set_priority(True, boost_nice, tid=main_tid)
         priority_boosted = True
-        _log(f"idle cycle starved >{starved_after:.0f}s -> priority nice {boost_nice}"
+        _log(f"idle cycle starved >{starved_after:.0f}s with backlog -> priority nice {boost_nice}"
              + (f" priority_error={priority_error}" if priority_error else ""))
 
     def poll_ack() -> None:
