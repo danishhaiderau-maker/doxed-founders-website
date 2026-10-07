@@ -1,0 +1,57 @@
+# Dependabot version updates for the DoxxedCrypto BTC V3.1 monorepo.
+# `groups` consolidate every update in an ecosystem into a single PR per cadence,
+# keeping the review surface small while staying current.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "danishhaiderau-maker"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # npm: a single root package-lock.json covers every workspace (apps/api,
+  # apps/web, and packages/*). Dependabot resolves npm workspaces from the root
+  # directory entry, so no per-workspace lockfiles or directory entries are
+  # required (none exist in this repo).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "danishhaiderau-maker"
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  # pip: BTC conservative agent runtime/analyzer dependencies.
+  - package-ecosystem: "pip"
+    directory: "/services/btc-conservative-agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "danishhaiderau-maker"
+    labels:
+      - "dependencies"
+      - "pip"
+    groups:
+      pip:
+        patterns:
+          - "*"

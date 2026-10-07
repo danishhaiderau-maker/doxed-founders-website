@@ -76,7 +76,7 @@ jobs:
     steps:
       # ── 1. Checkout the monorepo (this repo) ───────────────────────────────
       - name: Checkout monorepo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -122,7 +122,7 @@ jobs:
       # native modules against the wrong ABI and the IDE will crash on launch
       # with "Could not locate the bindings file".
       - name: Setup Node ${{ steps.manifest.outputs.node_pin }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ steps.manifest.outputs.node_pin }}
 
@@ -131,7 +131,7 @@ jobs:
       # native extensions (notably @vscodium/policy-watcher, native-keymap,
       # @vscode/windows-registry) fail to compile and the IDE is unlaunchable.
       - name: Setup Python ${{ steps.manifest.outputs.python_pin }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ steps.manifest.outputs.python_pin }}
 
@@ -218,7 +218,7 @@ jobs:
       # ── 9. Cache Electron binary (~200MB, biggest download) ────────────────
       # Keyed on the pinned Electron version so a bump invalidates automatically.
       - name: Cache Electron binary
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.paths.outputs.vscode_dir }}\.build\electron
           key: electron-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-v1
@@ -229,7 +229,7 @@ jobs:
       # Keyed on package-lock hash. Falls back to any node_modules for this OS
       # so a partial restore + npm ci is still faster than a cold install.
       - name: Cache node_modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.paths.outputs.vscode_dir }}\node_modules
           key: nodemodules-${{ runner.os }}-${{ steps.manifest.outputs.electron_ver }}-${{ hashFiles('packages/founder-ide/upstream/overlay/MANIFEST.json') }}
@@ -240,7 +240,7 @@ jobs:
       # VS Code downloads prebuilt native extensions (rg, tar, @vscode/*). They
       # are keyed on the upstream commit so a Void bump picks up new versions.
       - name: Cache builtInExtensions downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.paths.outputs.vscode_dir }}\.build\extensions
           key: builtinext-${{ runner.os }}-${{ steps.manifest.outputs.void_commit }}-v1
@@ -488,7 +488,7 @@ jobs:
 
       # ── 19. Upload as a workflow artifact (always, even on non-release builds) ──
       - name: Upload installer as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Founder-Stack-Setup-${{ steps.ver.outputs.version }}
           path: ${{ steps.hash.outputs.path }}
@@ -503,7 +503,7 @@ jobs:
           "${{ steps.hash.outputs.sha256 }}  Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe" | Set-Content -Path $sidecar -NoNewline -Encoding ascii
           Write-Host "Wrote $sidecar"
       - name: Upload SHA256 sidecar
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Founder-Stack-Setup-${{ steps.ver.outputs.version }}-sha256
           path: Founder-Stack-Setup-${{ steps.ver.outputs.version }}.exe.sha256
@@ -513,7 +513,7 @@ jobs:
       # ── 21. Attach to GitHub Release (only for tag pushes or non-skipped dispatches) ──
       - name: Upload to GitHub Release
         if: ${{ (github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.skip_release) }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: founder-stack-v${{ steps.ver.outputs.version }}
           name: Founder Stack ${{ steps.ver.outputs.version }}

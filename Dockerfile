@@ -1,7 +1,7 @@
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
-# OpenSSL is required by Prisma's query engine at runtime. node:20-bookworm-slim
+# OpenSSL is required by Prisma's query engine at runtime. node:22-bookworm-slim
 # ships libssl-3 but Prisma's engine probes for openssl-1.1.x by default and
 # warns/fails. Install openssl explicitly so the probe succeeds.
 RUN apt-get update -y \
@@ -51,7 +51,7 @@ RUN npm run build --workspace=@dcf/api
 RUN node -e "console.log('build ok; dist/main exists:', require('fs').existsSync('./apps/api/dist/main.js'))"
 
 # --- runtime stage (slim) ----------------------------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
 # Prisma needs openssl in the runtime stage too (it's a fresh slim image, not

@@ -29,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -88,7 +88,7 @@ jobs:
           ls -la "${files[@]}"
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: founder-node-${{ matrix.platform }}
           path: |
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload pack debug logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: founder-node-debug-${{ matrix.platform }}
           path: apps/founder-node/release/**
@@ -112,21 +112,21 @@ jobs:
 
     steps:
       - name: Download Windows installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: founder-node-win
           path: release/win
 
       - name: Download macOS installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: founder-node-mac
           path: release/mac
 
       - name: Download Linux installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: founder-node-linux
@@ -139,7 +139,7 @@ jobs:
           echo "Linux:" && ls -la release/linux/ 2>/dev/null || echo "(none)"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: Founder Node ${{ github.ref_name }}
