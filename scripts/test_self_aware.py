@@ -287,7 +287,7 @@ def test_alarm_flush_queues_while_watcher_holds_lock(paths):
         t = threading.Thread(target=other)
         t.start()
         t.join(5)
-    assert out == {"written": 0, "pending": 2}
+    assert out == {"written": 0, "pending": 2, "webhook": {"enabled": False, "sent": 0}}
     res = alarms.flush(health, state, [], wait_sec=2)
     lines = [json.loads(x) for x in (health / "alarms.jsonl").read_text().splitlines()]
     assert res["pending"] == 0 and [x["check"] for x in lines] == ["selfaware.inv.x"]
