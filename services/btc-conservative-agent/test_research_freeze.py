@@ -84,14 +84,22 @@ def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
 
 
 def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_ones():
-    assert rf.MID_EPOCH_ADDITION_ROSTER == ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
+    assert rf.MID_EPOCH_ADDITION_ROSTER == (
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+        "FAMILY_GS07_FAST_PREMIUM_FADE",
+        "FAMILY_DANISH_REGIME_ROUTER",
+        "FAMILY_FADE_POOL",
+    )
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
+    # PHASE03 additions ship default OFF; the earlier GS-06 mid-epoch addition defaults ON.
+    default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"}
     for n, item in enumerate(rf.MID_EPOCH_ADDITIONS, start=len(rf.FREEZE_ROSTER) + 1):
         lane = item["lane"]
         spec = cfg.COMBO_LANE_SPECS[lane]
         assert cfg.tile_number(lane) == item["tile_number"] == n
         assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
-        assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
+        assert spec["live_copy_eligible"] is False and spec["relay_capability"] == "BLOCKED_UNQUALIFIED"
+        assert spec["default_enabled"] is (lane not in default_off)
         pre = spec["pre_registration"]
         assert pre["freeze_id"] == rf.FREEZE_ID and pre["mid_epoch_addition"] is True
         assert pre["hypothesis_id"] == item["hypothesis_id"] and "MID_EPOCH_ADDITION_START" in pre["decision"]["anchor"]

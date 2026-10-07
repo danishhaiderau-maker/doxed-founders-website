@@ -126,6 +126,17 @@ GSB3_COMMITTED_FADE_ADMISSION_POLICY_ID = "GSB3_INVERTED_COMMITTED_SCORE_LED_SID
 # after the eleven frozen tiles, which stay byte-identical (research_freeze.
 # MID_EPOCH_ADDITIONS; frozen_roster_registry_signature proves it in CI).
 RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
+# PHASE03 mid-epoch additions (owner, 2026-10-07): three research tiles, all
+# default OFF, paper-only, relay-ineligible (research_freeze.MID_EPOCH_ADDITIONS).
+# GS-07 = fast cross-venue premium fade (15-60s mean); the Danish regime router
+# routes QUIET/TREND -> committed fade and VIOLENT -> cross-venue premium
+# reversion; the fade pool pools the committed fade and premium reversion signals.
+RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE = "FAMILY_GS07_FAST_PREMIUM_FADE"
+RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER = "FAMILY_DANISH_REGIME_ROUTER"
+RESEARCH_LANE_FAMILY_FADE_POOL = "FAMILY_FADE_POOL"
+GS07_FAST_PREMIUM_FADE_ADMISSION_POLICY_ID = "GS07_FAST_CROSS_VENUE_PREMIUM_FADE_NO_AI_V1"
+DANISH_REGIME_ROUTER_ADMISSION_POLICY_ID = "DANISH_REGIME_ROUTER_DYNAMIC_V1"
+FADE_POOL_ADMISSION_POLICY_ID = "FADE_POOL_COMMITTED_AND_PREMIUM_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -162,7 +173,8 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 # (tile_number), never hard-coded.
 # PHASE02 roster (owner, 2026-10-07): five losing tiles retired in one atomic
 # registry transaction. The eight survivors keep their original relative order:
-# H-A, H-C, the control, GS-01, B1, B2, B3, GS-06.
+# H-A, H-C, the control, GS-01, B1, B2, B3, GS-06, GS-07, the Danish regime
+# router, and the fade pool.
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
     RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
@@ -172,6 +184,9 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
+    RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
+    RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
+    RESEARCH_LANE_FAMILY_FADE_POOL,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1265,6 +1280,202 @@ COMBO_LANE_SPECS.update({
     ),
 })
 
+# ---------------------------------------------------------------------------
+# PHASE03 mid-epoch additions (owner, 2026-10-07): three research tiles, all
+# default OFF, paper-only, relay-ineligible. Specs recovered from the operator
+# transcript (Grok Strategist) + diagnostics/DANISH-REGIME-TILE-DESIGN-20261007.md.
+#   GS-07   = fast cross-venue premium fade (60 s premium mean, 20-min scalp).
+#   Danish  = regime router: QUIET/TREND -> committed fade, VIOLENT -> premium reversion.
+#   FadePool= pooled committed fade + premium reversion (OR-gate), composite exits.
+# All three share the freeze21b data epoch (research_freeze.MID_EPOCH_ADDITIONS).
+# ---------------------------------------------------------------------------
+PHASE03_REGISTERED_UTC = "2026-10-07T11:00:00Z"
+PHASE03_DECISION_ANCHOR = ("MID_EPOCH_ADDITION_START (first boot of the registering revision); judged with the "
+                           "freeze21b epoch end, fewer than 21 days of data by construction")
+
+
+def _phase3_pre(rule_id: str, *, spec_source: str, decisions: tuple[str, ...]) -> dict:
+    pre = _gs_pre_registration(
+        rule_id, prereg_path=spec_source, registered_utc=PHASE03_REGISTERED_UTC, bonferroni_k=3,
+        honest_label=("MID-EPOCH PAPER TILE BY OWNER ORDER - design-doc / in-sample hypothesis, "
+                      "no out-of-sample evidence yet"),
+        giveback_arm_bp=8.0, extra_kills={"latency_p50_above_sec": 5.0},
+        decisions=("mid-epoch addition: window starts at the deploy of the registering revision",) + tuple(decisions),
+    )
+    pre["mid_epoch_addition"] = True
+    pre["decision"]["anchor"] = PHASE03_DECISION_ANCHOR
+    return pre
+
+
+# GS-07 = H-C's cross-venue premium rule on a fast (60 s) mean instead of the
+# 60-minute mean, held for a 20-minute scalp, up to two open (paper only).
+_GS07_ENTRY = {
+    **_PREMIUM_REVERSION_ENTRY,
+    "premium_mean_window_sec": 60, "premium_min_mean_samples": 15,
+    "evaluator_id_prefix": "gs7xvp",
+    # Fast tile: one signal per minute is plenty; the 2-open-position cap is the real bound.
+    "min_submit_interval_sec": 60, "max_submissions_per_hour": 60,
+}
+_GS07_EXIT = _composite_exit(
+    max_duration_sec=1200, max_open_positions=2,
+    breakeven=LATE_BREAKEVEN_20_5, trail=LATE_ATR_TRAIL_1_5_ARM_2,
+    volatility_scaling="ATR trail armed after +2 ATR; the ATR-scaled hard stop stays shadow-only",
+)
+
+# Danish regime router exits: QUIET/TREND route to the committed fade (90-min
+# backstop), VIOLENT routes to premium reversion (60-min backstop). Both cells
+# share the design-doc protections: 40 bp hard stop, late break-even +20 -> +5,
+# ATR trail 1.5 armed at 1.5 ATR, conditional early cut -12 bp within 5 min.
+_DNR_FADE_PROFILE = {
+    "stack": "DANISH_ROUTER_FADE", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 5400, "be_atr": 0.0, "be_floor": 20.0, "lock_bp": 5.0,
+    "trail_atr": 1.5, "trail_arm_atr": 1.5, "trail_floor": 0.0, "trail_arm_floor": 0.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL"),
+}
+_DNR_PREMIUM_PROFILE = {**_DNR_FADE_PROFILE, "stack": "DANISH_ROUTER_PREMIUM", "time_sec": 3600}
+_DANISH_ROUTER_EXIT = {
+    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 5400,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"FADE": dict(_DNR_FADE_PROFILE), "PREMIUM": dict(_DNR_PREMIUM_PROFILE)},
+    "regime_profiles": {"QUIET": "FADE", "TREND": "FADE", "VIOLENT": "PREMIUM"},
+    "take_profit_fill": "NONE - no take-profit (composite fade/premium protections only)",
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+    "max_open_positions": 3,
+    "exit_order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP"),
+}
+
+_DANISH_ROUTER_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
+    regime=GSB_REGIME, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
+    regime_trigger={"QUIET": "COMMITTED_FADE", "TREND": "COMMITTED_FADE", "VIOLENT": "CROSS_VENUE_PREMIUM"},
+    premium_clock_trigger="CROSS_VENUE_PREMIUM", min_submit_interval_sec=5, max_submissions_per_hour=60,
+    evaluator_id_prefix="dnrxvp",
+    **_COMMITTED_FADE_KEYS,
+    leader_venues=("binance", "bybit"),
+    premium_mean_window_sec=3600, premium_min_mean_samples=1200,
+    premium_long_threshold_bps=1.75, premium_short_threshold_bps=-1.88,
+    max_fill_forward_sec=5, max_venue_age_sec=2.0, shadow_entry_delay_sec=1,
+)
+_DANISH_ROUTER_ENTRY.update({"max_spread_bps": 3.0, "max_bbo_age_sec": 5.0})
+
+# Fade pool = committed fade (shared AI) OR premium reversion (evaluator), any
+# regime; H-A's composite protections (40 bp stop, BE +20 -> +5, trail 1.5 armed
+# at +2 ATR, -12 bp / 5 min cut, 90-min backstop), up to three open.
+_FADE_POOL_PROFILE = {
+    "stack": "FADE_POOL_COMPOSITE", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    "time_sec": 5400, "be_atr": 0.0, "be_floor": 20.0, "lock_bp": 5.0,
+    "trail_atr": 1.5, "trail_arm_atr": 2.0, "trail_floor": 0.0, "trail_arm_floor": 0.0,
+    "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
+    "order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL"),
+}
+_FADE_POOL_EXIT = {
+    "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 5400,
+    "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+    "profiles": {"ALL": dict(_FADE_POOL_PROFILE)},
+    "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
+    "take_profit_fill": "NONE - no take-profit (pooled composite fade/premium exits)",
+    "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+    "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
+    "max_open_positions": 3,
+    "exit_order": ("HARD_STOP", "THESIS_CUT", "BREAKEVEN_LOCK", "ATR_TRAIL", "TIME_BACKSTOP"),
+}
+_FADE_POOL_ENTRY = _gs_entry(
+    mode="REGIME_ADAPTIVE", direction_source="INVERTED_SCORE_LED_SIDE", ai_role="FEATURE_ONLY",
+    regime=None, regime_exec={"QUIET": "TAKER", "TREND": "TAKER", "VIOLENT": "TAKER"},
+    premium_clock_trigger="CROSS_VENUE_PREMIUM", min_submit_interval_sec=5, max_submissions_per_hour=60,
+    evaluator_id_prefix="fdpxvp",
+    **_COMMITTED_FADE_KEYS,
+    leader_venues=("binance", "bybit"),
+    premium_mean_window_sec=3600, premium_min_mean_samples=1200,
+    premium_long_threshold_bps=1.75, premium_short_threshold_bps=-1.88,
+    max_fill_forward_sec=5, max_venue_age_sec=2.0, shadow_entry_delay_sec=1,
+)
+_FADE_POOL_ENTRY.update({"max_spread_bps": 3.0, "max_bbo_age_sec": 5.0})
+
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE: _tile(
+        lane=RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
+        label="GS-07 Fast premium fade · 60s cross-venue premium mean, taker, 20-min scalp, late BE + ATR trail, 40 bp stop",
+        raw_policy_id=("GS07_XVENUE_PREMIUM_DEV60S_L1.75_S1.88BP_TAKER_CAP5BPS"
+                       "|TIME_1200_BE20TO5_TRAIL1.5ATR_ARM2ATR_HARD40BP_CAP2"),
+        id_prefix="gs7",
+        module="paper_policy_family_gs07_fast_premium_fade.py",
+        test_module="test_paper_policy_family_gs07_fast_premium_fade.py",
+        entry=dict(_GS07_ENTRY), exit_policy=dict(_GS07_EXIT),
+        hypothesis_result={"status": "GS20261007_MID_EPOCH_IN_SAMPLE_PATTERN", "hypothesis_id": "GS-20261007-07",
+                           "in_sample": ("Grok Strategist: ~+0.8 bp/trade expected at 110-135 trades/day "
+                                         "(fast premium fade); frequency test, not an OOS edge")},
+        pre_registration=_phase3_pre(
+            "GS-20261007-07",
+            spec_source="operator transcript (Grok Strategist Tile 14 GS-07 fast premium fade)",
+            decisions=("fast premium fade: fade premium off its 60-second mean (>+1.75 / <-1.88 bp), 20-min scalp",),
+        ),
+        admission_treatment=GS07_FAST_PREMIUM_FADE_ADMISSION_POLICY_ID,
+        max_active_signals=2, entry_ttl_sec=3, default_enabled=False,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="GS-07 — fast cross-venue premium fade — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("the Binance/Bybit premium over Bitfinex leaves its own 60-second mean by >= +1.75 / "
+                        "<= -1.88 bp; take Bitfinex toward convergence as a taker and hold 20 minutes"),
+        live_exit_order=registry_live_exit_order(_GS07_EXIT),
+        shadow_exits=ALL_SHADOW_EXITS,
+        early_cut_shadow_reason="pure fast-signal test: every protection, including the early cut, is shadow-only",
+    ),
+    RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER: _tile(
+        lane=RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
+        label="Danish regime router · QUIET/TREND committed fade, VIOLENT premium reversion, taker, late BE + ATR trail",
+        raw_policy_id=("DANISH_ROUTER_QUIET_TREND_COMMITTED_FADE_VIOLENT_PREMIUM_REVERSION_TAKER_CAP5BPS"
+                       "|DYN_FADE90M_PREMIUM60M_BE20TO5_TRAIL1.5ATR_ARM1.5ATR_CUT12BP5M_HARD40BP_CAP3"),
+        id_prefix="dnr",
+        module="paper_policy_family_danish_regime_router.py",
+        test_module="test_paper_policy_family_danish_regime_router.py",
+        entry=dict(_DANISH_ROUTER_ENTRY), exit_policy=dict(_DANISH_ROUTER_EXIT),
+        hypothesis_result={"status": "GS20261007_MID_EPOCH_DESIGN_HYPOTHESIS", "hypothesis_id": "GS-20261007-DNR",
+                           "in_sample": ("regime-conditional edge (quiet/trend fade, violent premium) from "
+                                         "DANISH-REGIME-TILE-DESIGN-20261007.md; not OOS")},
+        pre_registration=_phase3_pre(
+            "GS-20261007-DNR",
+            spec_source="diagnostics/DANISH-REGIME-TILE-DESIGN-20261007.md",
+            decisions=("QUIET/TREND route to the committed fade; VIOLENT routes to cross-venue premium reversion",
+                       "uses the frozen 3 m regime classifier (ATR percentile + ADX), not the design doc's 60 s RV classifier"),
+        ),
+        admission_treatment=DANISH_REGIME_ROUTER_ADMISSION_POLICY_ID,
+        max_active_signals=3, entry_ttl_sec=3, default_enabled=False, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="Danish regime router — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("QUIET/TRENDING: fade the shared AI's committed call (H-A definition); "
+                        "VIOLENT: fade the cross-venue premium (Binance/Bybit vs Bitfinex) off its 60-min mean"),
+        live_exit_order=tuple(_DANISH_ROUTER_EXIT["exit_order"]),
+        shadow_exits=ALL_SHADOW_EXITS,
+    ),
+    RESEARCH_LANE_FAMILY_FADE_POOL: _tile(
+        lane=RESEARCH_LANE_FAMILY_FADE_POOL,
+        label="Fade pool · committed fade OR premium reversion, taker, H-A composite protections, up to 3 open",
+        raw_policy_id=("FADE_POOL_COMMITTED_FADE_OR_PREMIUM_REVERSION_TAKER_CAP5BPS"
+                       "|DYN_ALL_BE20TO5_TRAIL1.5ATR_ARM2ATR_CUT12BP5M_HARD40BP_T90M_CAP3"),
+        id_prefix="fdp",
+        module="paper_policy_family_fade_pool.py",
+        test_module="test_paper_policy_family_fade_pool.py",
+        entry=dict(_FADE_POOL_ENTRY), exit_policy=dict(_FADE_POOL_EXIT),
+        hypothesis_result={"status": "GS20261007_MID_EPOCH_POOL_HYPOTHESIS", "hypothesis_id": "GS-20261007-FDP",
+                           "in_sample": ("Grok Strategist: pool dilutes H-A (all-winner pool +1.93 bp vs H-A +3.0); "
+                                         "built per owner order, not an OOS edge")},
+        pre_registration=_phase3_pre(
+            "GS-20261007-FDP",
+            spec_source="operator transcript (fade-pool proposal; Grok Strategist FADE-POOL-REANALYSIS-20261007)",
+            decisions=("OR-gate pool of the committed fade and premium reversion signals (any regime)",
+                       "H-A's composite protections and 90-min backstop"),
+        ),
+        admission_treatment=FADE_POOL_ADMISSION_POLICY_ID,
+        max_active_signals=3, entry_ttl_sec=3, default_enabled=False, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="Fade pool — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("pool the committed AI fade (H-A definition) and the cross-venue premium reversion "
+                        "(H-C definition) signals; either trigger fires a taker toward the fade side"),
+        live_exit_order=tuple(_FADE_POOL_EXIT["exit_order"]),
+        shadow_exits=ALL_SHADOW_EXITS,
+    ),
+})
+
 COMPARISON_BENCHMARK_LANE = None
 PRIMARY_PRODUCTION_LANE = COMBO_EXECUTION_LANES[0]
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
@@ -1697,11 +1908,13 @@ def is_evaluator_clock_lane(lane: str) -> bool:
 
 def evaluator_loop_lanes() -> tuple[str, ...]:
     """Lanes the 1 Hz evaluator loop drives: evaluator-clock tiles plus shared-AI tiles whose
-    entry also declares a ``bar_clock_trigger`` (GS-B2: CVD events in QUIET/VIOLENT)."""
+    entry also declares a ``bar_clock_trigger`` (GS-B2: CVD events in QUIET/VIOLENT) or a
+    ``premium_clock_trigger`` (PHASE03 Danish router / fade pool: cross-venue premium events)."""
     return tuple(
         lane for lane in ACTIVE_TILE_ORDER
         if is_evaluator_clock_lane(lane)
         or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("bar_clock_trigger"))
+        or ((ACTIVE_TILE_REGISTRY[lane].get("entry_policy") or {}).get("premium_clock_trigger"))
     )
 
 
