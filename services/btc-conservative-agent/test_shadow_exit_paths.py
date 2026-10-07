@@ -92,6 +92,19 @@ def test_exit_latency_matches_realistic_v1_fill_model():
     assert sxp.EXIT_LATENCY_SEC == fill_model.EXIT_LATENCY_SEC
 
 
+def test_exit_latency_and_stop_slip_telemetry_surface_only_on_triggers():
+    pnls = [0, -5, -16, -20, -31, -32]
+    rows = sxp.evaluate_shadow_exits(_series(pnls), SET, atr_bp=10.0, horizon_sec=5)
+    stop = _exit(rows, "ATR_STOP_1.5")
+    assert stop["triggered"]
+    assert stop["exit_latency_sec"] >= sxp.EXIT_LATENCY_SEC
+    assert stop["stop_slippage_bp"] >= 0.0
+    # Non-triggered (time/horizon) exits carry no exit-latency telemetry.
+    untrig = _exit(rows, "LATE_BE_25_3")
+    assert not untrig["triggered"]
+    assert "exit_latency_sec" not in untrig and "stop_slippage_bp" not in untrig
+
+
 def test_late_breakeven_arms_then_books_worse_of_trigger_and_post_latency_mark():
     pnls = [0, 10, 21, 15, 7, 6, 4, -3, -4]
     rows = sxp.evaluate_shadow_exits(_series(pnls), SET, atr_bp=None, horizon_sec=8)

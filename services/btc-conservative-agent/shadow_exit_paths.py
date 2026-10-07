@@ -323,15 +323,23 @@ class _Rule:
         return None
 
 
-def _book_exit(series, idx: int, fee_bp: float) -> tuple[float, float]:
-    """REALISTIC_V1 marketable exit: worse of trigger mark and first mark >= trigger + latency."""
+def _book_exit(series, idx: int, fee_bp: float) -> tuple[float, float, float, float]:
+    """REALISTIC_V1 marketable exit: worse of trigger mark and first mark >= trigger + latency.
+
+    Returns ``(fill_ts, net_bp, exit_latency_sec, stop_slip_bp)``. The stop fills
+    on the crossed tick (``p_trig``), never a re-queried BBO; ``stop_slip_bp`` is
+    how many bp the booked mark was worse than the stop's trigger tick (0 when the
+    trigger mark was filled), and ``exit_latency_sec`` is the actual exit tick
+    minus the stop's trigger tick (bounded by ``EXIT_LATENCY_SEC`` + tick spacing).
+    """
     t_trig, p_trig = series[idx]
     t_fill, p_fill = t_trig, p_trig
     for j in range(idx + 1, len(series)):
         if series[j][0] >= t_trig + EXIT_LATENCY_SEC:
             t_fill, p_fill = series[j]
             break
-    return t_fill, min(p_trig, p_fill) - fee_bp
+    slip = max(0.0, p_trig - p_fill)
+    return t_fill, min(p_trig, p_fill) - fee_bp, round(t_fill - t_trig, 3), round(slip, 2)
 
 
 def _prefix_max(series) -> list[float]:
@@ -377,9 +385,10 @@ def evaluate_shadow_exits(series: Sequence[tuple[float, float]], shadow_set: Seq
             unavailable = [m for m in members if rules[m].unavailable]
             if hits:
                 idx, _order, member = min(hits)
-                t_fill, net = _book_exit(window, idx, fee_bp)
+                t_fill, net, exit_lat, slip = _book_exit(window, idx, fee_bp)
                 row = {"net_bp": round(net, 2), "exit_t_sec": round(t_fill, 1),
                        "mfe_before_exit_bp": round(peak[idx], 2),
+                       "exit_latency_sec": exit_lat, "stop_slippage_bp": slip,
                        "reason": f"{first[member][1]}:{member}", "triggered": True, "trigger_member": member}
             else:
                 row = dict(time_exit)
@@ -392,9 +401,11 @@ def evaluate_shadow_exits(series: Sequence[tuple[float, float]], shadow_set: Seq
                        "reason": rule.unavailable, "triggered": False}
             elif sid in first:
                 idx, reason = first[sid]
-                t_fill, net = _book_exit(window, idx, fee_bp)
+                t_fill, net, exit_lat, slip = _book_exit(window, idx, fee_bp)
                 row = {"net_bp": round(net, 2), "exit_t_sec": round(t_fill, 1),
-                       "mfe_before_exit_bp": round(peak[idx], 2), "reason": reason, "triggered": True}
+                       "mfe_before_exit_bp": round(peak[idx], 2),
+                       "exit_latency_sec": exit_lat, "stop_slippage_bp": slip,
+                       "reason": reason, "triggered": True}
             else:
                 row = dict(time_exit)
         out.append({"id": sid, "kind": kind, **{k: spec[k] for k in ("label", "role") if k in spec}, **row})
