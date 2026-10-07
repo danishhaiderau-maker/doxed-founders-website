@@ -81,7 +81,10 @@
     ["GET", "/api/monitor/tiles/counters", "monitor_tiles_counters"],
     ["GET", "/api/monitor/tiles/totals", "monitor_tiles_totals"],
     ["GET", "/api/monitor/tape", "monitor_tape"],
-    ["GET", "/alerts", "alerts_page"]
+    ["GET", "/alerts", "alerts_page"],
+    ["GET", "/api/restart-cause", "restart_cause"],
+    ["GET", "/restart-cause", "restart_cause"],
+    ["POST", "/api/bitfinex/tiles/<lane>/live-orders", "api_bitfinex_tile_live_orders"]
   ],
   "main_workers": [
     "run_flask",
