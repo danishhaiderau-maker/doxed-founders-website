@@ -689,6 +689,26 @@ def _epoch_started_ts(paths: Paths) -> float | None:
         return None
 
 
+def _vanish_allowlist(spec: dict[str, Any]) -> set[tuple[str, str]]:
+    """Column/key names a table emits only conditionally, so their absence is not schema drift.
+
+    ``allow_vanish_columns`` names columns of the table that may legitimately appear/disappear;
+    ``allow_vanish_keys`` names ``key_field`` values that are conditionally emitted (e.g. a
+    system-health check only reported while Fly is reachable). The drift check compares
+    ``dims[name]`` (columns) and ``dims[f"{name}:keys"]`` (key values), so return those dims
+    coordinates.
+    """
+    allowed: set[tuple[str, str]] = set()
+    for t in spec.get("tables") or []:
+        name = t.get("name") or t.get("path")
+        for c in t.get("allow_vanish_columns") or []:
+            allowed.add((name, str(c)))
+        if t.get("key_field"):
+            for k in t.get("allow_vanish_keys") or []:
+                allowed.add((f"{name}:keys", str(k)))
+    return allowed
+
+
 def drift(spec: dict[str, Any], result: dict[str, Any], history: list[dict[str, Any]],
           identity: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Compare this evaluation with the last ``DRIFT_WINDOW`` stored ones (newest first) of the same baseline identity."""
@@ -700,6 +720,7 @@ def drift(spec: dict[str, Any], result: dict[str, Any], history: list[dict[str, 
     if len(base) < int(d.get("min_history", 2)):
         return []
     out = []
+    allowed_vanish = _vanish_allowlist(spec)
     ratio = float(d.get("collapse_ratio", 0.5))
     floor = float(d.get("min_baseline", 5))
     for k, v in (result.get("metrics") or {}).items():
@@ -722,7 +743,8 @@ def drift(spec: dict[str, Any], result: dict[str, Any], history: list[dict[str, 
                     seen[c] = seen.get(c, 0) + 1
         if nobs < 2 or not cols:
             continue
-        dropped = sorted(c for c, k in seen.items() if k >= max(2, nobs // 2) and c not in cols)
+        dropped = sorted(c for c, k in seen.items() if k >= max(2, nobs // 2) and c not in cols
+                         and (name, c) not in allowed_vanish)
         if dropped:
             out.append(_v("DRIFT_DIMS_DROPPED", RED, f"{name}: columns present in {nobs} prior evaluations now absent "
                                                      f"{dropped[:12]}", dropped=dropped))

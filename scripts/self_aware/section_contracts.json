@@ -438,7 +438,8 @@
      "page": "http://127.0.0.1:9001/api/conservative-fill-research", "max_bytes": 10000000,
      "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/conservative-fill-research"},
      "depends_on": ["conservative_fill_descriptive_report.json", "BBO/depth tape"],
-     "tables": [{"path": "receipts", "min_rows": 10, "live_columns": ["accumulated_qty"], "allow_constant": ["aggressor_window_sec"]}]},
+     "tables": [{"path": "receipts", "min_rows": 10, "live_columns": ["accumulated_qty"], "allow_constant": ["aggressor_window_sec"],
+                 "allow_vanish_columns": ["fill_time_semantics", "window_integrity_scope"]}]},
 
     {"id": "analyzer.cross_world", "surface": "analyzer", "title": "Cross-world evidence", "tier": "heavy",
      "page": "http://127.0.0.1:9001/cross-world-evidence", "source": {"kind": "http", "url": "http://127.0.0.1:9001/api/cross-world-evidence"},
@@ -542,7 +543,8 @@
      "depends_on": ["system_health.py tick", "laptop-chain state"],
      "freshness": {"path": "generated_at", "max_age_sec": 900},
      "expect": [{"path": "stale", "equals": false, "severity": "RED"}],
-     "tables": [{"path": "checks", "min_rows": 30, "key_field": "id", "columns": ["id", "status", "observed"]}],
+     "tables": [{"path": "checks", "min_rows": 30, "key_field": "id", "columns": ["id", "status", "observed"],
+                 "allow_vanish_keys": ["ai.failures", "fly.paused"]}],
      "counters": [{"path": "counts.GREEN", "min": 1}]},
 
     {"id": "fly.runtime_snapshot", "surface": "fly", "title": "Fly runtime snapshot (laptop-chain)", "tier": "light",
