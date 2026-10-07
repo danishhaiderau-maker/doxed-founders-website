@@ -45,6 +45,7 @@ export function ExchangeHirePanel({
   exchangeConnected,
   exchangeBalanceUsd,
   rentalExpired,
+  founderRentalEntitled,
   onStopRelay,
   onStartRelay,
   relayBusy,
@@ -64,6 +65,7 @@ export function ExchangeHirePanel({
   exchangeConnected?: boolean;
   exchangeBalanceUsd?: number | null;
   rentalExpired?: boolean;
+  founderRentalEntitled?: boolean;
   onStopRelay?: () => void;
   onStartRelay?: () => void;
   relayBusy?: boolean;
@@ -128,7 +130,12 @@ export function ExchangeHirePanel({
         {isLiveHired ? (
           <>
             <p className="font-semibold text-white">Your {selectedLabel} live copy relay</p>
-            {rentalExpired ? (
+            {founderRentalEntitled ? (
+              <p className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-100">
+                Founder access — no rental required. Derivatives balance:{' '}
+                <strong className="text-white">{formatUsd(exchangeBalanceUsd ?? 0, 2)}</strong>
+              </p>
+            ) : rentalExpired ? (
               <p className="mt-3 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs font-semibold text-red-100">
                 Rental expired — renew above before starting real trading.
               </p>
@@ -152,8 +159,16 @@ export function ExchangeHirePanel({
               test sync first without spending USDT.
             </p>
             <p className="mt-2 rounded-lg border border-violet-500/30 bg-violet-950/20 px-3 py-2 text-xs text-violet-100">
-              Hiring fee:{' '}
-              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> / week
+              {founderRentalEntitled ? (
+                <>
+                  <strong className="text-emerald-300">Founder access</strong> — no rental required
+                </>
+              ) : (
+                <>
+                  Hiring fee:{' '}
+                  <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> / week
+                </>
+              )}
             </p>
             <Link
               href={hireHref}

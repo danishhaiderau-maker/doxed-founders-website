@@ -4374,6 +4374,7 @@ export interface TradingAgentSummary {
   viewScope?: 'showcase' | 'user';
   userSessionStartedAt?: string | null;
   rentalExpiresAt?: string | null;
+  founderRentalEntitled?: boolean;
   exchangeBalanceUsd?: number | null;
   hireFeeDdollar?: number | null;
   paperDdRefunded?: number | null;
@@ -4660,6 +4661,7 @@ export interface HireAgentResult {
   hiredAt: string;
   activatedAt: string | null;
   dashboardUrl: string;
+  founderRentalEntitled?: boolean;
 }
 
 export function hireTradingAgent(
@@ -4991,7 +4993,7 @@ export function resumeMyAgentInstance(slug: string, token: string) {
 }
 
 export function renewLiveCopyRental(slug: string, token: string) {
-  return apiFetch<{ ok: boolean; rentalExpiresAt: string; ddSpent: number }>(
+  return apiFetch<{ ok: boolean; rentalExpiresAt: string; ddSpent: number; founderRentalEntitled?: boolean }>(
     `/trading-agents/${slug}/instance/renew`,
     { method: 'POST' },
     token,

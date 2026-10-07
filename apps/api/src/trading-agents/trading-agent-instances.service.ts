@@ -47,6 +47,11 @@ import {
   type RelayExecutorHealthSnapshot,
 } from './signal-subscriber-execution.service';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
+import {
+  freeRentalExpiresAt,
+  recordFounderRentalGrant,
+  resolveFounderRentalEntitlement,
+} from './founder-rental-entitlement';
 
 @Injectable()
 export class TradingAgentInstancesService {
@@ -97,10 +102,14 @@ export class TradingAgentInstancesService {
     });
 
     const cost = agent.costDdollarWeek > 0 ? agent.costDdollarWeek : agent.costDdollarDay;
+    const entitlement = await resolveFounderRentalEntitlement(this.prisma, userId);
+    const founderEntitled = entitlement.entitled;
+    // Founders/operators are never charged the weekly rental fee.
     const needsHireFee =
-      !existing ||
-      existing.exchangeProvider === 'paper' ||
-      (existing.expiresAt != null && existing.expiresAt < new Date());
+      !founderEntitled &&
+      (!existing ||
+        existing.exchangeProvider === 'paper' ||
+        (existing.expiresAt != null && existing.expiresAt < new Date()));
 
     const existingDash = (existing?.dashboardState ?? {}) as Record<string, unknown>;
     const paperDdSpent =
@@ -126,7 +135,10 @@ export class TradingAgentInstancesService {
       walletNote = funding?.message;
     }
 
-    const hireExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    // Founders get a free ~6-month rental; everyone else gets the paid 1-week hire.
+    const hireExpiresAt = founderEntitled
+      ? freeRentalExpiresAt()
+      : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const sessionState = buildFreshInstanceDashboardState('live', exchangeBalanceUsd, {
       liveSessionStartingBalanceUsd: exchangeBalanceUsd,
       paperDdRefunded: paperDdSpent > 0,
@@ -152,7 +164,7 @@ export class TradingAgentInstancesService {
         aiProvidedByPlatform: true,
         aiProvider,
         activatedAt: new Date(),
-        lastBilledAt: new Date(),
+        lastBilledAt: founderEntitled ? null : new Date(),
         expiresAt: hireExpiresAt,
         dashboardState: sessionState,
       },
@@ -164,6 +176,7 @@ export class TradingAgentInstancesService {
         aiProvider,
         activatedAt: new Date(),
         expiresAt: hireExpiresAt,
+        lastBilledAt: founderEntitled ? null : new Date(),
         lastError: null,
         dashboardState: sessionState,
       },
@@ -175,10 +188,21 @@ export class TradingAgentInstancesService {
       update: {},
     });
 
+    if (founderEntitled && entitlement.reason) {
+      await recordFounderRentalGrant(this.prisma, {
+        userId,
+        agentSlug: agent.slug,
+        agentName: agent.name,
+        reason: entitlement.reason,
+      });
+    }
+
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
-      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`,
+      body: founderEntitled
+        ? `Founder access — free rental granted through ${hireExpiresAt.toLocaleString()}. No DDollar deducted. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`
+        : `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`,
       link: `/agent-hub/${agent.slug}`,
     });
 
@@ -187,6 +211,7 @@ export class TradingAgentInstancesService {
       hireFeeDdollar: needsHireFee ? cost : 0,
       paperDdRefunded: paperDdSpent > 0 ? paperDdSpent : 0,
       rentalExpiresAt: hireExpiresAt.toISOString(),
+      founderRentalEntitled: founderEntitled,
       exchangeBalanceUsd,
       walletNote,
     };
@@ -660,9 +685,31 @@ export class TradingAgentInstancesService {
     }
 
     if (!paused && instance.expiresAt && instance.expiresAt < new Date()) {
-      throw new BadRequestException(
-        'Live copy rental expired — renew your weekly subscription before starting real trading.',
-      );
+      const entitlement = await resolveFounderRentalEntitlement(this.prisma, userId);
+      if (entitlement.entitled) {
+        // Founder/operator: auto-grant the bounded free rental instead of
+        // blocking the arm path. `expiresAt` remains the single source of
+        // truth for the execution worker, so extending it here also unblocks
+        // live-copy execution without touching the worker.
+        const freeExpiry = freeRentalExpiresAt();
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: { expiresAt: freeExpiry, lastBilledAt: null, lastError: null },
+        });
+        instance.expiresAt = freeExpiry;
+        if (entitlement.reason) {
+          await recordFounderRentalGrant(this.prisma, {
+            userId,
+            agentSlug: agent.slug,
+            agentName: agent.name,
+            reason: entitlement.reason,
+          });
+        }
+      } else {
+        throw new BadRequestException(
+          'Live copy rental expired — renew your weekly subscription before starting real trading.',
+        );
+      }
     }
 
     let executorHealthAtArm: RelayExecutorHealthSnapshot | null = null;
@@ -858,35 +905,56 @@ export class TradingAgentInstancesService {
       throw new BadRequestException('This agent has no weekly rental fee configured.');
     }
 
-    await this.points.spend(userId, cost, `AGENT_HIRE_RENEW:${agent.slug}`);
-    await this.points.creditAdminFee(cost, agent.slug);
+    const entitlement = await resolveFounderRentalEntitlement(this.prisma, userId);
+    const founderEntitled = entitlement.entitled;
 
-    const baseMs =
-      instance.expiresAt && instance.expiresAt > new Date()
-        ? instance.expiresAt.getTime()
-        : Date.now();
-    const hireExpiresAt = new Date(baseMs + 7 * 24 * 60 * 60 * 1000);
+    let hireExpiresAt: Date;
+    if (founderEntitled) {
+      // Founders/operators renew for free, extended to the bounded free window.
+      hireExpiresAt = freeRentalExpiresAt();
+    } else {
+      await this.points.spend(userId, cost, `AGENT_HIRE_RENEW:${agent.slug}`);
+      await this.points.creditAdminFee(cost, agent.slug);
+
+      const baseMs =
+        instance.expiresAt && instance.expiresAt > new Date()
+          ? instance.expiresAt.getTime()
+          : Date.now();
+      hireExpiresAt = new Date(baseMs + 7 * 24 * 60 * 60 * 1000);
+    }
 
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
         expiresAt: hireExpiresAt,
-        lastBilledAt: new Date(),
+        lastBilledAt: founderEntitled ? null : new Date(),
         lastError: null,
       },
     });
 
+    if (founderEntitled && entitlement.reason) {
+      await recordFounderRentalGrant(this.prisma, {
+        userId,
+        agentSlug: agent.slug,
+        agentName: agent.name,
+        reason: entitlement.reason,
+      });
+    }
+
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} rental renewed`,
-      body: `Live copy extended through ${hireExpiresAt.toLocaleString()} — you can start real trading again.`,
+      body: founderEntitled
+        ? `Founder access — free rental extended through ${hireExpiresAt.toLocaleString()}. No DDollar deducted.`
+        : `Live copy extended through ${hireExpiresAt.toLocaleString()} — you can start real trading again.`,
       link: `/agent-hub/${agent.slug}`,
     });
 
     return {
       ok: true,
       rentalExpiresAt: hireExpiresAt.toISOString(),
-      ddSpent: cost,
+      ddSpent: founderEntitled ? 0 : cost,
+      founderRentalEntitled: founderEntitled,
     };
   }
 

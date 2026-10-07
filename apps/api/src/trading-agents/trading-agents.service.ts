@@ -92,6 +92,7 @@ import {
   mapParticipantToExportRow,
   type LiveTradeExportPayload,
 } from './live-trade-export.mapper';
+import { resolveFounderRentalEntitlement } from './founder-rental-entitlement';
 
 function daysAgo(n: number) {
   const d = new Date();
@@ -191,6 +192,7 @@ function serializeAgent(
     viewScope?: 'showcase' | 'user';
     userSessionStartedAt?: string | null;
     rentalExpiresAt?: string | null;
+    founderRentalEntitled?: boolean;
     exchangeBalanceUsd?: number | null;
     hireFeeDdollar?: number | null;
     paperDdRefunded?: number | null;
@@ -254,6 +256,7 @@ function serializeAgent(
     viewScope: extra?.viewScope ?? 'showcase',
     userSessionStartedAt: extra?.userSessionStartedAt ?? null,
     rentalExpiresAt: extra?.rentalExpiresAt ?? null,
+    founderRentalEntitled: extra?.founderRentalEntitled ?? false,
     exchangeBalanceUsd: extra?.exchangeBalanceUsd ?? null,
     hireFeeDdollar: extra?.hireFeeDdollar ?? null,
     paperDdRefunded: extra?.paperDdRefunded ?? null,
@@ -1067,6 +1070,10 @@ export class TradingAgentsService implements OnModuleInit {
       ? await this.resolveUserInstanceOverlay(agent.id, userId)
       : null;
 
+    const founderRentalEntitled = userId
+      ? (await resolveFounderRentalEntitlement(this.prisma, userId)).entitled
+      : false;
+
     // Live stats come from /dashboard poll — avoid blocking profile paint on home-bot round-trips.
     return serializeAgent(agent, {
       following,
@@ -1075,6 +1082,7 @@ export class TradingAgentsService implements OnModuleInit {
       exchangeLabel,
       exchangeConnected,
       ...(userOverlay ?? { instanceStatus, instanceMode }),
+      founderRentalEntitled,
     });
   }
 
@@ -1508,6 +1516,7 @@ export class TradingAgentsService implements OnModuleInit {
     let agentRowId: string | null = null;
     let userHired = false;
     let userFollowing = false;
+    let founderRentalEntitled = false;
     let userExchangeConnected = false;
     let userExchangeProvider: string | null = null;
     let userExchangeLabel: string | null = null;
@@ -1516,6 +1525,7 @@ export class TradingAgentsService implements OnModuleInit {
     > = null;
 
     if (userId) {
+      founderRentalEntitled = (await resolveFounderRentalEntitlement(this.prisma, userId)).entitled;
       const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });
       agentRowId = agentRow?.id ?? null;
       if (agentRow) {
@@ -1763,6 +1773,10 @@ export class TradingAgentsService implements OnModuleInit {
           );
         }
       }
+    }
+
+    if (userId) {
+      agent = { ...agent, founderRentalEntitled };
     }
 
     return {

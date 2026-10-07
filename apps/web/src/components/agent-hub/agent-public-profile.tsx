@@ -200,6 +200,7 @@ function HireSidebar({
   copyRelaySim,
   instanceBusy,
   rentalExpiresAt,
+  founderRentalEntitled,
   accessToken,
   activeDesk,
   onRenewRental,
@@ -230,6 +231,7 @@ function HireSidebar({
   copyRelaySim?: CopyRelaySimState | null;
   instanceBusy?: boolean;
   rentalExpiresAt?: string | null;
+  founderRentalEntitled?: boolean;
   activeDesk: AgentDeskId;
   onRenewRental?: () => void;
   renewBusy?: boolean;
@@ -243,7 +245,9 @@ function HireSidebar({
 }) {
   const isLiveHired = hired && instanceMode === 'live';
   const rentalExpired =
-    rentalExpiresAt != null && new Date(rentalExpiresAt).getTime() <= Date.now();
+    !founderRentalEntitled &&
+    rentalExpiresAt != null &&
+    new Date(rentalExpiresAt).getTime() <= Date.now();
 
   if (activeDesk === 'relay-sim') {
     const simActive = Boolean(copyRelaySim?.active);
@@ -305,6 +309,7 @@ function HireSidebar({
       {isLiveHired && rentalExpiresAt && (
         <AgentRentalCountdown
           expiresAt={rentalExpiresAt}
+          founderAccess={founderRentalEntitled}
           onRenew={onRenewRental}
           renewBusy={renewBusy}
           costWeek={agent.costDdollarWeek ?? 2000}
@@ -322,6 +327,7 @@ function HireSidebar({
         exchangeLabel={exchangeLabel}
         exchangeConnected={exchangeConnected}
         exchangeBalanceUsd={agent.exchangeBalanceUsd ?? agent.balanceUsd}
+        founderRentalEntitled={founderRentalEntitled}
         rentalExpired={rentalExpired}
         onStopRelay={onPauseInstance}
         onStartRelay={onResumeInstance}
@@ -459,6 +465,7 @@ export function AgentPublicProfile({
   onAdminRefresh,
   instanceBusy,
   rentalExpiresAt,
+  founderRentalEntitled,
   onRenewRental,
   renewBusy,
   onSyncProtectionBreach,
@@ -516,6 +523,7 @@ export function AgentPublicProfile({
   onAdminRefresh?: () => void;
   instanceBusy?: boolean;
   rentalExpiresAt?: string | null;
+  founderRentalEntitled?: boolean;
   onRenewRental?: () => void;
   renewBusy?: boolean;
   onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
@@ -801,7 +809,9 @@ export function AgentPublicProfile({
                     <div>
                       <span className="text-zinc-600">Hiring fee </span>
                       <span className="text-zinc-300">
-                        {(agent.costDdollarWeek ?? 2000).toLocaleString()} DDollar / week
+                        {founderRentalEntitled
+                          ? 'Founder access — no rental required'
+                          : `${(agent.costDdollarWeek ?? 2000).toLocaleString()} DDollar / week`}
                       </span>
                     </div>
                   </dl>
@@ -857,7 +867,10 @@ export function AgentPublicProfile({
                 </button>
               ) : null}
               {isLiveSession && rentalExpiresAt && resolvedDesk === 'live' && (
-                <LiveCopyRentalBadge expiresAt={rentalExpiresAt} />
+                <LiveCopyRentalBadge
+                  expiresAt={rentalExpiresAt}
+                  founderAccess={founderRentalEntitled}
+                />
               )}
               {onFollow && (
                 <button
@@ -971,6 +984,7 @@ export function AgentPublicProfile({
           copyRelaySim={copyRelaySim}
           instanceBusy={instanceBusy}
           rentalExpiresAt={rentalExpiresAt}
+          founderRentalEntitled={founderRentalEntitled}
           accessToken={accessToken ?? adminToken}
           activeDesk={resolvedDesk}
           onRenewRental={onRenewRental}
