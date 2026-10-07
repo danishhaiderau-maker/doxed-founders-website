@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyzer_sections, data_compat, expected_blockers, fly_platform
+from . import analyzer_sections, bitfinex_readiness, data_compat, expected_blockers, fly_platform
 from .config import RUNBOOK, RUNBOOK_BASE, THRESHOLDS, Paths
 from .facts import iso, parse_ts, snapshot_age, watcher_check
 
@@ -878,6 +878,46 @@ def check_fees(f, sig, store) -> Finding:
                                                      "matches_cost_profile", "fly_rev")})
 
 
+def check_bitfinex_readiness(f, sig, store, state: dict[str, Any]) -> Finding:
+    """Bitfinex readiness + observability: relay OFF, no live switch, and no mismatch alerts from the bot."""
+    title, expected = "Bitfinex relay disarmed with no mismatch alerts", (
+        "relay/arm gate OFF, every lane live-orders switch OFF, and no paper-vs-real divergence, inconsistent "
+        "switch, lifecycle stall, or stale feed alert reported by the bot's /api/bitfinex/overview")
+    doc = bitfinex_readiness.run(state, f["now"])
+    f["bitfinex_readiness"] = doc
+    if doc.get("status") == "UNREACHABLE":
+        return Finding("bitfinex.readiness", title, "readiness", SKIP,
+                       f"bot readiness overview unreachable at {doc.get('url')}: {doc.get('error') or 'no response'}",
+                       expected + "; arm state remains visible in the Fly runtime snapshot",
+                       emit_alarm=False)
+    ga = doc.get("relay_arm_state") or {}
+    switch = doc.get("switch") or {}
+    if doc.get("verdict") == "RED":
+        obs = (f"{doc.get('critical_count')} CRITICAL mismatch alert(s): "
+               + "; ".join(f"{a.get('rule')} {a.get('observed')}" for a in doc.get("alerts") or []
+                           if a.get("severity") == "CRITICAL")[:4])
+        sev = RED
+    elif doc.get("verdict") == "AMBER":
+        obs = (f"{doc.get('alert_count')} mismatch alert(s): "
+               + "; ".join(f"{a.get('rule')}" for a in doc.get("alerts") or [])[:4])
+        sev = AMBER
+    else:
+        sev = GREEN
+        obs = (f"relay {'ARMED' if doc.get('live_armed') else 'OFF'}, "
+               f"live switch lanes armed {switch.get('armed_lane_count')}/{switch.get('tile_count')}, "
+               f"0 mismatch alerts")
+    return Finding("bitfinex.readiness", title, "readiness", sev, obs, expected,
+                   evidence={"live_armed": doc.get("live_armed"),
+                             "bitfinex_live_enabled": doc.get("bitfinex_live_enabled"),
+                             "force_paper_mode": doc.get("force_paper_mode"),
+                             "relay_delivery_block": doc.get("relay_delivery_block"),
+                             "armed_lanes": switch.get("armed_lanes"),
+                             "alert_count": doc.get("alert_count"),
+                             "critical_count": doc.get("critical_count"),
+                             "match": doc.get("match"),
+                             "url": doc.get("url")})
+
+
 # ------------------------------------------------------------- run
 
 CONTRACT_SURFACES = {"analyzer": "Analyzer :9001 sections", "fly": "Fly dashboard panels and snapshots",
@@ -967,6 +1007,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_contracts(facts, sig, store),
         lambda: check_data_compat(facts, sig, store),
         lambda: check_fees(facts, sig, store),
+        lambda: check_bitfinex_readiness(facts, sig, store, state),
     ]
     findings: list[Finding] = []
     for fn in checks:

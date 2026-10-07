@@ -370,6 +370,12 @@ class Handler(BaseHTTPRequestHandler):
             doc = {k: v for k, v in doc.items() if k not in ("surfaces", "fee_literals", "raw_fee_block")}
         self._send(200, doc)
 
+    def bitfinex(self, q):
+        doc = self.eng.docs.get("bitfinex")
+        if not doc:
+            return self._send(503, {"error": "bitfinex readiness not computed yet (job runs at start and every 5 min)"})
+        self._send(200, doc)
+
     def data_compat(self, q):
         doc = self.eng.docs.get("compat")
         if not doc:
@@ -444,6 +450,7 @@ ROUTES = {
     "/contracts": Handler.contracts_view, "/api/selfaware/contracts": Handler.contracts_summary,
     "/api/selfaware/contracts/registry": Handler.contracts_registry,
     "/api/selfaware/data/compatibility": Handler.data_compat, "/api/selfaware/fees": Handler.fees,
+    "/api/selfaware/bitfinex": Handler.bitfinex,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
