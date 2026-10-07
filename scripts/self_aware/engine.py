@@ -23,8 +23,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from . import (ai_scorecard, alarms, analyzer_sections, contracts, data_awareness, diagnose, digest, edges, fees, repair,
-               tiles, uptime)
+from . import (ai_scorecard, alarms, analyzer_sections, bitfinex_readiness, contracts, data_awareness, diagnose,
+               digest, edges, fees, repair, tiles, uptime)
 from . import data_compat
 from .ai_scorecard import json_safe
 from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, THRESHOLDS, Paths
@@ -68,6 +68,7 @@ class Engine:
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
             "data": self.job_data, "sections": self.job_sections, "contracts": self.job_contracts,
             "contracts_light": self.job_contracts_light, "compat": self.job_compat, "fees": self.job_fees,
+            "bitfinex": self.job_bitfinex,
         }
 
     # ------------------------------------------------------------ state
@@ -238,6 +239,15 @@ class Engine:
                 "derivatives_taker_bps": doc["derivatives_taker_bps"], "stale": doc["stale"],
                 "mismatches": len(doc["mismatches"]), "ms": doc["ms"]}
 
+    def job_bitfinex(self) -> dict:
+        # Reuse the diagnose pass's fetch when present so the readiness section
+        # and the health check never disagree; fall back to a fresh fetch.
+        doc = self.facts.get("bitfinex_readiness") or bitfinex_readiness.run(self.state)
+        self.docs["bitfinex"] = json_safe(doc)
+        return {"verdict": doc.get("verdict"), "status": doc.get("status"),
+                "live_armed": doc.get("live_armed"), "armed_lanes": (doc.get("switch") or {}).get("armed_lanes"),
+                "alert_count": doc.get("alert_count"), "critical_count": doc.get("critical_count")}
+
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
 
@@ -315,12 +325,12 @@ class Engine:
 
     def run_once(self) -> dict:
         return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "compat",
-                                                      "fees", "ai",
+                                                      "fees", "ai", "bitfinex",
                                                       "edges", "contracts", "diagnose", "digest")}
 
     def loop(self) -> None:
         # Views and the cheap in-memory documents are rebuilt at start so no endpoint answers 503 after a restart.
-        for name in ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "fees", "diagnose"):
+        for name in ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "fees", "bitfinex", "diagnose"):
             self.run_job(name)
         while not self._stop.is_set():
             now = time.time()
