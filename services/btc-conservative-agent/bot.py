@@ -55921,6 +55921,122 @@ def _require_fly_runtime_for_direct_start() -> None:
     raise SystemExit(78)
 
 
+# ============================================================================
+# PHASE 5 — Bitfinex readiness + full-lifecycle observability (READ-ONLY)
+# ----------------------------------------------------------------------------
+# Registers the /api/bitfinex/* endpoints and binds them to this process's live
+# state through a lazy context provider. Every endpoint is read-only and
+# fail-closed:
+#   * it never arms/disarms, toggles a tile, places/cancels an order, or copies
+#     paper state to live (arming stays on /api/live_arm and /api/bitfinex_live);
+#   * it reads only cached state (never triggers a private Bitfinex call);
+#   * it never returns a secret (only env var NAMES are referenced).
+# Until wired successfully the blueprint's own default context reports the
+# disarmed state, so a wiring failure can never fabricate "armed".
+# ============================================================================
+def _bfx_num_or_none(value):
+    try:
+        f = float(value)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _bitfinex_paper_trade_rows() -> list:
+    """Best-effort, read-only snapshot of paper trades for the twin matcher.
+
+    Maps only non-secret scalar fields. Any error yields an empty list so the
+    match view fails closed instead of fabricating twins.
+    """
+    rows: list = []
+    try:
+        with trade_lock:
+            for p in open_positions:
+                rows.append({
+                    "trade_id": p.get("trade_id"),
+                    "intent_id": p.get("intent_id") or p.get("trade_id"),
+                    "client_order_id": p.get("client_order_id"),
+                    "policy_signature": p.get("policy_signature"),
+                    "side": p.get("dir") or p.get("direction") or p.get("side"),
+                    "entry_price": p.get("entry") or p.get("entry_price"),
+                    "exit_price": p.get("exit") or p.get("exit_price"),
+                    "qty": p.get("qty") or p.get("size") or p.get("amount"),
+                    "entry_ts": p.get("entry_ts") or p.get("open_ts") or p.get("created_ts"),
+                    "exit_ts": p.get("exit_ts") or p.get("close_ts"),
+                })
+    except Exception:  # noqa: BLE001 - fail closed
+        return []
+    return rows
+
+
+def _bitfinex_readiness_context() -> dict:
+    now = time.time()
+    with state_lock:
+        live_armed = bool(state.get("live_armed"))
+        bfx_enabled = bool(state.get("bitfinex_live_enabled"))
+        manual_pause = bool(state.get("manual_admin_pause"))
+        paused = bool(state.get("execution_paused"))
+        price = state.get("price")
+        exchange_min_qty = state.get("exchange_min_qty")
+        exchange_max_qty = state.get("exchange_max_qty")
+        stop_cov = bool(state.get("stop_coverage_verified"))
+        reduce_only = bool(state.get("reduce_only_supported"))
+    audit = _exchange_exposure_audit_snapshot(now)  # cached, no private I/O
+    try:
+        relay_block = _relay_delivery_guard.arming_block_reason(now)
+    except Exception:  # noqa: BLE001 - fail closed if the guard is unavailable
+        relay_block = "RELAY_GUARD_UNAVAILABLE"
+    runtime = _runtime_readiness_components(now)
+    return {
+        "global_arm": {
+            "force_paper_mode": _force_paper_mode_active(),
+            "live_armed": live_armed,
+            "bitfinex_live_enabled": bfx_enabled,
+            "relay_delivery_block": relay_block,
+            "keys_ok": _private_api_keys_ok(),
+            "exchange_audit": {
+                "authoritative": bool(audit.get("authoritative")),
+                "fresh": bool(audit.get("fresh")),
+                "flat": bool(audit.get("flat")),
+                "orphan_order_ids": list(audit.get("orphan_order_ids") or []),
+                "orphan_position_ids": list(audit.get("orphan_position_ids") or []),
+            },
+            "market_ready": bool(runtime.get("ws_transport_ready")
+                                 and runtime.get("rest_entry_quote_ready")),
+            "system_ready": bool(runtime.get("system_ready")),
+            "manual_pause": bool(manual_pause or paused),
+        },
+        "mark_price": _bfx_num_or_none(price),
+        "exchange_min_qty": _bfx_num_or_none(exchange_min_qty),
+        "exchange_max_qty": _bfx_num_or_none(exchange_max_qty),
+        "stop_coverage_verified": stop_cov,
+        "reduce_only_supported": reduce_only,
+        "paper_trades": _bitfinex_paper_trade_rows(),
+        "live_twins": [],
+    }
+
+
+def _wire_bitfinex_readiness() -> None:
+    try:
+        import bitfinex_readiness_api as _bra
+        import order_action_audit as _oaa
+        _bra.wire(
+            context_provider=_bitfinex_readiness_context,
+            audit=_oaa.OrderActionAudit(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "bitfinex_order_action_audit.jsonl"),
+                key=_oaa.audit_key_from_env(),
+            ),
+        )
+        app.register_blueprint(_bra.blueprint)
+        logger.info("[BITFINEX READINESS] read-only /api/bitfinex/* observability wired (fail-closed)")
+    except Exception as exc:  # noqa: BLE001 - a failed wiring must never crash the bot
+        logger.warning(f"[BITFINEX READINESS] wiring failed; endpoints report disarmed: {exc}")
+
+
+_wire_bitfinex_readiness()
+
+
 if __name__ == "__main__":
     _require_fly_runtime_for_direct_start()
     main()
