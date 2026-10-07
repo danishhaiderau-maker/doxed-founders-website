@@ -15,6 +15,24 @@ export type BitfinexWsTrade = {
   cumulativeAveragePrice: number;
 };
 
+/**
+ * One recent exchange-side fill, captured additively from the private trade
+ * stream for observability. `submittedAtMs` is the exchange's own trade
+ * timestamp (`mts`); `ackedAtMs` is when Railway received the tick;
+ * `latencyMs` is the exchange→Railway receive latency. No field here affects
+ * order flow — it is a bounded, read-only ring buffer.
+ */
+export type BitfinexFillTelemetry = {
+  orderId: number;
+  tradeId: number;
+  side: 'BUY' | 'SELL';
+  qty: number;
+  fillPrice: number;
+  submittedAtMs: number;
+  ackedAtMs: number;
+  latencyMs: number;
+};
+
 type SocketLike = {
   addEventListener(type: string, listener: (event: any) => void): void;
   send(data: string): void;
@@ -57,6 +75,9 @@ export class BitfinexAuthTradeStream {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempt = 0;
+  private reconnectCount = 0;
+  private lastError: string | null = null;
+  private lastTradeLatencyMs: number | null = null;
   private lastMessageAtMs = 0;
   private authReady = false;
   private readyWaiters: Array<{ resolve: (ready: boolean) => void }> = [];
@@ -65,6 +86,9 @@ export class BitfinexAuthTradeStream {
   private readonly pendingDuplicateTrades = new Map<number, BitfinexWsTrade>();
   private readonly preparedTrades = new Map<number, BitfinexWsTrade>();
   private readonly orderAggregates = new Map<number, { qty: number; notional: number; lastAtMs: number }>();
+  /** Bounded, read-only ring buffer of the most recent fills for telemetry. */
+  private readonly recentFillTelemetry: BitfinexFillTelemetry[] = [];
+  private static readonly FILL_TELEMETRY_MAX = 50;
 
   constructor(
     private readonly creds: ExchangeCredentials,
@@ -78,6 +102,37 @@ export class BitfinexAuthTradeStream {
 
   /** Stable, redacted identity suitable only for stream de-duplication. */
   get keyId(): string { return createHash('sha256').update(this.creds.apiKey).digest('hex').slice(0, 16); }
+
+  /**
+   * Read-only transport telemetry for the observability endpoint. Exposes the
+   * same counters the stream already maintains (last message, reconnect
+   * attempts) plus a monotonic reconnect count and last socket error — no
+   * order-flow change; only additive instrumentation.
+   */
+  getTelemetry(): {
+    lastMessageAtMs: number;
+    reconnectCount: number;
+    reconnectAttempt: number;
+    lastTradeLatencyMs: number | null;
+    lastError: string | null;
+    authReady: boolean;
+    stopped: boolean;
+  } {
+    return {
+      lastMessageAtMs: this.lastMessageAtMs,
+      reconnectCount: this.reconnectCount,
+      reconnectAttempt: this.reconnectAttempt,
+      lastTradeLatencyMs: this.lastTradeLatencyMs,
+      lastError: this.lastError,
+      authReady: this.authReady,
+      stopped: this.stopped,
+    };
+  }
+
+  /** Most recent fills, newest first, for the observability endpoint. */
+  getRecentFillTelemetry(): BitfinexFillTelemetry[] {
+    return [...this.recentFillTelemetry];
+  }
 
   start(): void {
     if (this.stopped === false && this.socket) return;
@@ -135,6 +190,24 @@ export class BitfinexAuthTradeStream {
         return;
       }
       const trade = parseBitfinexAuthTradeMessage(String(event.data), this.lastMessageAtMs);
+      // Exchange→Railway receive latency (ms) for the last parsed trade; a
+      // positive, additive signal with no effect on order flow.
+      if (trade) {
+        this.lastTradeLatencyMs = Math.max(0, trade.receivedAtMs - trade.mts);
+        this.recentFillTelemetry.unshift({
+          orderId: trade.orderId,
+          tradeId: trade.tradeId,
+          side: trade.execAmount >= 0 ? 'BUY' : 'SELL',
+          qty: Math.abs(trade.execAmount),
+          fillPrice: trade.execPrice,
+          submittedAtMs: trade.mts,
+          ackedAtMs: trade.receivedAtMs,
+          latencyMs: Math.max(0, trade.receivedAtMs - trade.mts),
+        });
+        if (this.recentFillTelemetry.length > BitfinexAuthTradeStream.FILL_TELEMETRY_MAX) {
+          this.recentFillTelemetry.length = BitfinexAuthTradeStream.FILL_TELEMETRY_MAX;
+        }
+      }
       if (!trade || this.seenTradeIds.has(trade.tradeId)) return;
       let aggregate = this.preparedTrades.get(trade.tradeId);
       if (!aggregate) {
@@ -151,11 +224,17 @@ export class BitfinexAuthTradeStream {
       }
       this.dispatchTrade(aggregate);
     });
-    socket.addEventListener('error', () => socket.close());
+    socket.addEventListener('error', (event) => {
+      this.lastError = (event && typeof event === 'object' && 'message' in event)
+        ? String((event as { message?: unknown }).message ?? 'socket error')
+        : 'socket error';
+      socket.close();
+    });
     socket.addEventListener('close', () => {
       this.authReady = false;
       if (this.socket === socket) this.socket = null;
       if (this.stopped) return;
+      this.reconnectCount += 1;
       const delay = Math.min(30_000, 500 * (2 ** Math.min(this.reconnectAttempt++, 6))) + Math.floor(Math.random() * 250);
       this.reconnectTimer = setTimeout(() => this.connect(), delay);
       this.reconnectTimer.unref?.();

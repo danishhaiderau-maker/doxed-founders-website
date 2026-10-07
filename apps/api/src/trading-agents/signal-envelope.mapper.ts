@@ -82,6 +82,8 @@ export function buildIntentEnvelope(
     schema: 'dcf-signal-intent/v1',
     cycleId,
     signalId: tradeId,
+    // Deterministic join key for intent → order (cid) → fill correlation.
+    correlation_id: `entry:${cycleId}:${tradeId}`,
     version: bot.bot_version ?? 'unknown',
     action: 'ENTER',
     direction,

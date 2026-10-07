@@ -154,6 +154,10 @@ export class BitfinexSimTradingClient {
       basePrice: p.basePrice,
       pnlUsd,
       pnlPct,
+      liqPrice: null,
+      margin: null,
+      leverage: null,
+      fundingAccrued: null,
       direction: p.amount > 0 ? 'LONG' : 'SHORT',
     };
   }
