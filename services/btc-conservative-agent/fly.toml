@@ -78,15 +78,17 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   processes = ["app"]
 
 [[vm]]
-  size = "performance-1x"
-                      # One dedicated core. shared-cpu-1x throttles to 6.25% of a core
-                      # once burst credits run out, while this same process trades and
-                      # serves inventory builds and mirror downloads (hours-long
-                      # rebuilds, 503s, maintenance-boundary timeouts).
-  memory = 4096       # Trading-only (no analyzer on Fly) but the bot still imports
+  size = "performance-2x"
+                      # Two dedicated cores: the trading process keeps its own core
+                      # while the four niced segment-shipper/inventory sidecars share
+                      # the second. performance-1x's single core was starved by the
+                      # sidecars, causing repeated rc=137 SIGKILL (OOM) crash loops.
+  memory = 8192       # Trading-only (no analyzer on Fly) but the bot still imports
                       # pandas+numpy+ccxt+flask (~300MB resident) AND accumulates
                       # trade/signal state in memory. 256MB OOM-killed immediately;
-                      # 512MB died after ~17min; 2048MB OOM-looped at boot 2026-09-29.
+                      # 512MB died after ~17min; 2048MB OOM-looped at boot 2026-09-29;
+                      # 4096MB OOM-killed when the segment-shipper sidecar starved
+                      # the single core (Stage-1 fix: two cores + 8 GB).
 
 # Persistent volume for research/ + runtime JSON/JSONL/CSV.
 # Created once in the app's primary region:
