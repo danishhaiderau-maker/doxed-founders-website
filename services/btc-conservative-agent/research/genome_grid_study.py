@@ -51,6 +51,7 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 from research import fill_model as fm  # noqa: E402
+from paper_pnl_canon import is_forced_close, round_usd  # noqa: E402
 
 SCHEMA = "genome_grid_report_v1"
 ROWS_SCHEMA = "genome_grid_policy_row_v1"
@@ -1296,7 +1297,7 @@ def live_paper_by_lane(mirror: Path) -> list[dict[str, Any]]:
     seen_ts: dict[str, list[float]] = defaultdict(list)
     for row in _read_jsonl(mirror / "v3" / "ledgers" / "lifecycle.jsonl"):
         pnl = _num(row.get("net_pnl_usd"))
-        if row.get("terminal") is True and pnl is not None:
+        if row.get("terminal") is True and pnl is not None and not is_forced_close(row.get("exit_reason")):
             lane = str(row.get("research_lane") or "UNKNOWN")
             by_lane[lane].append(pnl)
             marks = [t for t in (_num(row.get("mae_ts")), _num(row.get("mfe_ts"))) if t]
@@ -1314,7 +1315,7 @@ def live_paper_by_lane(mirror: Path) -> list[dict[str, Any]]:
                                        "with the REALISTIC_V1 headline rows",
                     "terminal_closes": len(vals), "wins": int((arr > 0).sum()), "losses": int((arr < 0).sum()),
                     "win_rate_pct": round(100 * float((arr > 0).mean()), 2),
-                    "net_pnl_usd": round(float(arr.sum()), 6), "ev_per_close_usd": round(float(arr.mean()), 6),
+                    "net_pnl_usd": round_usd(arr.sum()), "ev_per_close_usd": round_usd(arr.mean()),
                     "avg_pnl_bp": _bp(float(arr.mean())),
                     "max_drawdown_usd": round(float(np.min(curve - np.maximum.accumulate(np.maximum(curve, 0.0)))), 6),
                     "max_drawdown_basis": "ledger append order (close order); peak includes the zero start",

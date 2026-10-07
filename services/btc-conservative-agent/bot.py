@@ -275,6 +275,7 @@ from collector_v22_provisional import (
     upsert_provisional_event,
 )
 from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
+from regime_tag import classify_regime, REGIME_QUIET
 from opportunity_capture_v22 import analyze_v22_events
 from research_completeness import (
     closed_lifecycle_completeness,
@@ -4259,11 +4260,11 @@ LANE_LEDGER_WL_BASIS = "PRICE_BP_NET_OF_FEES"
 
 
 # Forced closes (guarded-deploy flatten, operator close, admin flatten) are
-# excluded from every tile/strategy statistic, exactly like the analyzer
-# (research/close_origin.FORCED_EXIT_REASONS).  The Trades table still shows them.
-STATS_EXCLUDED_EXIT_REASONS = frozenset({
-    "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
-})
+# excluded from every tile/strategy statistic.  The Trades table still shows them.
+# Single source of truth is paper_pnl_canon.FORCED_EXIT_REASONS (shared with the
+# analyzer close_origin and the self-aware tile stats) so the inclusion rule is
+# one definition, never a divergent copy.
+from paper_pnl_canon import FORCED_EXIT_REASONS as STATS_EXCLUDED_EXIT_REASONS
 
 
 def _trade_row_is_forced_close(row) -> bool:
@@ -18628,6 +18629,7 @@ def _append_v3_lane_entry_resolution(
             source, lane=lane, entry_resolution=resolution, exact_reason=reason,
             epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
             lane_policy=_v3_lane_policy_material(lane),
+            regime=_current_regime_tag(),
         )
     except Exception as exc:
         logger.error(
@@ -31563,6 +31565,26 @@ def indicator_engine_health_snapshot() -> dict:
         return {"schema": _ies.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
+def _current_regime_tag() -> str:
+    """QUIET/TRENDING/VIOLENT for the latest closed ``indicator_bars_v1`` bar.
+
+    Reads the indicator-engine live file (``last_regime.vol_expected_pct`` and
+    ``last_regime.adx``) and classifies via the single canonical ``regime_tag``
+    rule. Fail-closed: any read error or missing input returns QUIET. This is
+    observation-only and never touches orders, relay, or Bitfinex.
+    """
+    try:
+        if not INDICATOR_ENGINE_ENABLED:
+            return REGIME_QUIET
+        live = _INDICATOR_ENGINE_LIVE_CACHE.get("live")
+        if not live and time.time() - _INDICATOR_ENGINE_LIVE_CACHE.get("read_ts", 0.0) >= 5.0:
+            live = _cvt.read_live(_ies.LIVE_FILE)
+        reg = (live or {}).get("last_regime") or {}
+        return classify_regime(reg.get("vol_expected_pct"), reg.get("adx"))
+    except Exception:
+        return REGIME_QUIET
+
+
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
     try:
         ts_list, rows = _AI_SHADOW_TAPE.snapshot()
@@ -32111,6 +32133,7 @@ _READ_ONLY_GET_PATHS = {
     "/api/analyzer/genome", "/api/download_debug_config",
     "/api/monitor/summary", "/api/monitor/lanes", "/static/dashboard.js",
     "/api/shadow_exits/summary",
+    "/restart-cause", "/api/restart-cause",
 }
 # Authenticated by its own handler with MONITOR_READ_TOKEN only (404 when unset);
 # that token is never accepted by _admin_authed() or any other route.
@@ -41811,6 +41834,7 @@ def _build_relay_execution_state_snapshot() -> dict:
     # afterwards.
     snapshot["trade_count_session"] = session_trade_count
     snapshot["trade_count"] = session_trade_count
+    snapshot["session_trade_breakdown"] = _session_trade_count_breakdown()
     snapshot["session_pnl_usd"] = session_realized_pnl
     snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
     snapshot["lane_pnl_ledger"] = session_lane_ledger
@@ -42240,6 +42264,30 @@ def _session_trade_count() -> int:
         if not session_start:
             return len(trades)
         return sum(1 for t in trades if _trade_row_in_session(t, session_start))
+
+
+def _session_trade_count_breakdown() -> dict:
+    """Labelled session row counts: total / closed / forced / open.
+
+    ``_session_trade_count`` reports every in-session entry (open, unclosed,
+    and force-closed rows included), while the lane ledger's ``closes`` counts
+    only terminal non-forced closes. This breakdown makes that difference
+    explicit instead of forcing the two numbers equal: ``total`` may exceed
+    ``strategy_closes`` by exactly ``forced + open``.
+
+    A row is "closed" when it carries a terminal exit marker (``exit_reason``
+    or a close timestamp); "forced" is the closed subset whose ``exit_reason``
+    is in ``STATS_EXCLUDED_EXIT_REASONS``; "open" is everything not yet closed.
+    """
+    session_start = _showcase_trade_session_start()
+    with trade_lock:
+        rows = [
+            t for t in trades
+            if isinstance(t, dict)
+            and (not session_start or _trade_row_in_session(t, session_start))
+        ]
+    from session_trade_counts import classify_session_row_counts
+    return classify_session_row_counts(rows, forced_reasons=STATS_EXCLUDED_EXIT_REASONS)
 
 
 def _session_realized_pnl_usd() -> float:
@@ -43368,6 +43416,7 @@ def _build_api_state_snapshot():
         session_trades = trades_copy
         snapshot["trade_count_session"] = session_trade_count
         snapshot["trade_count"] = snapshot["trade_count_session"]
+        snapshot["session_trade_breakdown"] = _session_trade_count_breakdown()
         snapshot["session_pnl_usd"] = session_realized_pnl
         snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
@@ -43664,6 +43713,7 @@ def _api_state_cache_refresher_loop():
                     # (regression detected 2026-08-06 after wipe + restart).
                     "trade_count_session",
                     "trade_count",
+                    "session_trade_breakdown",
                     "session_pnl_usd",
                     "trades_display_limit",
                     "lane_pnl_ledger",
@@ -44244,6 +44294,37 @@ def _runtime_uptime_summary(now: float | None = None) -> dict:
                 "uninterrupted_label": "Starting: uptime tracking begins once boot completes",
                 "definition": runtime_uptime.DEFINITION}
     return tracker.summary(now)
+
+
+def _runtime_restart_cause(now: float | None = None) -> dict:
+    """First-class restart-cause answer (deploy/restart/first_boot + signal + pause-kind)."""
+    tracker = _RUNTIME_UPTIME["tracker"]
+    if tracker is None:
+        return {"schema": runtime_uptime.SCHEMA, "available": False,
+                "reason": "uptime tracker not started yet"}
+    return tracker.restart_cause(now)
+
+
+def _record_runtime_shutdown_cause(*, signal_num: int | None = None, exit_code: int | None = None,
+                                   reason: str | None = None) -> None:
+    """Best-effort persist how this process ended so the next boot can attribute the restart.
+
+    Never raises and never touches trading state; a missed write is recovered on
+    the next boot by ``UptimeTracker._prev_shutdown`` (unclean-end fallback).
+    """
+    try:
+        tracker = _RUNTIME_UPTIME["tracker"]
+        if tracker is None:
+            return
+        signal_name = None
+        if signal_num is not None:
+            try:
+                signal_name = signal.Signals(int(signal_num)).name
+            except (ValueError, AttributeError):
+                signal_name = f"SIG_{signal_num}"
+        tracker.record_shutdown(time.time(), signal_name=signal_name, exit_code=exit_code, reason=reason)
+    except Exception:
+        pass
 
 
 _SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None, "proof": None}
@@ -45171,6 +45252,7 @@ def status():
         "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "uptime": _runtime_uptime_summary(now),
+        "restart_cause": _runtime_restart_cause(now),
         "data_epoch": _data_epoch_public(),
         "canonical_epoch": _canonical_epoch_public(),
         "runtime_hygiene": _runtime_hygiene_public(),
@@ -45454,6 +45536,19 @@ def health():
     except Exception as exc:
         payload["relay_outbox"] = {"status": "UNKNOWN", "error": type(exc).__name__}
     return jsonify(payload), (200 if process_alive else 503)
+
+
+@app.route('/restart-cause')
+@app.route('/api/restart-cause')
+def restart_cause():
+    """First-class restart-cause with crash-signal granularity.
+
+    Durable across restart: reports the boot kind (deploy/restart/first_boot),
+    how the previous process ended (clean_shutdown/signal/crash + signal + exit
+    code), and the current interruption kind (pause-kind). Read-only: nothing
+    here touches orders, relay, or Bitfinex.
+    """
+    return jsonify(_runtime_restart_cause())
 
 
 @app.route('/ready')
@@ -49706,6 +49801,7 @@ def shutdown_handler(signum, frame):
     if shutdown_event.is_set():
         return
     logger.warning(f"[SHUTDOWN] Signal received: {signum}")
+    _record_runtime_shutdown_cause(signal_num=signum)
     shutdown_event.set()
     drained = _shutdown_pending_order_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Pending-order evidence drained={drained}")
