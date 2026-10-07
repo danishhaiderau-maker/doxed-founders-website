@@ -271,6 +271,28 @@ def test_drift_collapse_and_dims_dropped():
     assert ct.drift(spec, steady, hist) == []
 
 
+def test_drift_dims_dropped_skips_declared_allow_vanish():
+    # Columns/keys a producer emits only conditionally must not read as schema drift when they
+    # legitimately vanish; an undeclared vanishing column must still be flagged.
+    spec = _spec(tables=[
+        {"path": "receipts", "allow_vanish_columns": ["fill_time_semantics", "window_integrity_scope"]},
+        {"path": "checks", "key_field": "id", "allow_vanish_keys": ["ai.failures", "fly.paused"]},
+    ])
+    hist = [{"id": spec["id"], "metrics": {"rows:receipts": 20},
+             "dims": {"receipts": ["fill_time_semantics", "window_integrity_scope", "outcome"],
+                      "checks:keys": ["ai.failures", "fly.paused", "fly.process"]}} for _ in range(4)]
+
+    res = {"status": "GREEN", "metrics": {"rows:receipts": 20},
+           "dims": {"receipts": ["outcome"], "checks:keys": ["fly.process"]}, "violations": []}
+    assert ct.drift(spec, res, hist) == []
+
+    res2 = {"status": "GREEN", "metrics": {"rows:receipts": 20},
+            "dims": {"receipts": ["fill_time_semantics", "window_integrity_scope"],
+                     "checks:keys": ["ai.failures", "fly.paused", "fly.process"]}, "violations": []}
+    dropped = [v for v in ct.drift(spec, res2, hist) if v["kind"] == "DRIFT_DIMS_DROPPED"]
+    assert len(dropped) == 1 and dropped[0]["dropped"] == ["outcome"]
+
+
 def test_archive_drift_flags_vanished_and_shrunk_reports(paths):
     gen = paths.archive / "generations" / "2026-10-02"
     for i, (n, extra) in enumerate(((50, True), (50, True), (2, False))):
