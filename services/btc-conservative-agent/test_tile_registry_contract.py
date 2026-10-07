@@ -90,20 +90,25 @@ RETIRED_FREEZE21_LANES = (
     "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M",
 )
 FREEZE21_ORDER = (
-    "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+    "FAMILY_COMMITTED_FADE_TAKER_90",
     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_RANDOM_CONTROL_TAKER_90",
 )
-GS_ORDER = (
-    "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
-    "FAMILY_GS03_CVD_DIV_TAKER", "FAMILY_GS04_NOTRADE_ATR_TP",
-)
+GS_ORDER = ("FAMILY_GS01_XV_PREMIUM_ATR_TP",)
 GS_B_ORDER = (
     "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
 )
-# FREEZE21B mid-epoch additions (owner 2026-10-05): tiles 12/13 appended after the frozen eleven.
-GS_MID_EPOCH_ORDER = ("FAMILY_GS05_PREMIUM_REGIME_MANAGED", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")
+# FREEZE21B mid-epoch addition (owner 2026-10-05): GS-06 appended; GS-05 retired PHASE02.
+GS_MID_EPOCH_ORDER = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
 EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
+# PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
+RETIRED_PHASE02_LANES = (
+    "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+    "FAMILY_GS05_PREMIUM_REGIME_MANAGED",
+    "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+    "FAMILY_GS04_NOTRADE_ATR_TP",
+    "FAMILY_GS03_CVD_DIV_TAKER",
+)
 
 
 def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles():
@@ -114,12 +119,12 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
         (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 14))
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 9))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + GS_B_ORDER]
-    assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gs2", "gs3", "gs4", "gb1", "gb2", "gb3"]
-    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 13
+    assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2", "gb3"]
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 8
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
-    assert [t["id_prefix"] for t in mid] == ["gs5", "gs6"] and [t["max_active_signals"] for t in mid] == [1, 2]
+    assert [t["id_prefix"] for t in mid] == ["gs6"] and [t["max_active_signals"] for t in mid] == [2]
     for tile in mid:
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         assert tile["default_enabled"] is True and tile["paper_only"] is True
@@ -135,11 +140,11 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
         assert tile["pre_registration"]["schema"] == "tile_pre_registration_gs20261004_v1"
         assert tile["pre_registration"]["role"] == "HYPOTHESIS"
     tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in FREEZE21_ORDER]
-    fade, notrade, premium, control = tiles
-    assert [t["id_prefix"] for t in tiles] == ["cft", "ntt", "pmr", "rnd"]
+    fade, premium, control = tiles
+    assert [t["id_prefix"] for t in tiles] == ["cft", "pmr", "rnd"]
     assert fade["policy_signature"].startswith(COMMITTED_FADE_TAKER_SIGNATURE_PREFIX)
-    assert len({t["policy_signature"] for t in tiles}) == 4
-    assert registry.RESEARCH_STACK_VERSION == "v31-freeze21b-11t-v13"
+    assert len({t["policy_signature"] for t in tiles}) == 3
+    assert registry.RESEARCH_STACK_VERSION == "v31-freeze21b-8t-v14"
     assert registry.BENCHMARK_LANE is None
     for lane, tile in zip(FREEZE21_ORDER, tiles):
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
@@ -149,14 +154,40 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
         assert tile["live_copy_eligible"] is False
         assert tile.get("ladder") in (None, ())
         assert tile["entry_policy"]["mode"] == "TAKER_AT_SIGNAL"
-        assert tile["max_active_signals"] == (10 if tile is notrade else 3)
-    assert [t["pre_registration"]["role"] for t in tiles] == ["HYPOTHESIS"] * 3 + ["CONTROL"]
+        assert tile["max_active_signals"] == 3
+    assert [t["pre_registration"]["role"] for t in tiles] == ["HYPOTHESIS"] * 2 + ["CONTROL"]
     assert fade["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
-    assert notrade["entry_policy"]["direction_source"] == "SCORE_LED_SIDE"
     assert premium["entry_policy"]["direction_source"] == "CROSS_VENUE_PREMIUM"
     assert control["entry_policy"]["direction_source"] == "RANDOM_COIN_ON_COMMITTED_CALL"
     assert control["exit_policy"] == fade["exit_policy"]
     assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == EXPECTED_ORDER[0]
+
+
+def test_phase02_retirement_is_one_atomic_retirement():
+    import json
+
+    for lane in RETIRED_PHASE02_LANES:
+        assert lane in RETIRED_TILE_LANES
+        assert lane not in ACTIVE_TILE_REGISTRY and lane not in COMBO_EXECUTION_LANES
+        assert lane not in json.dumps(ACTIVE_TILE_REGISTRY, default=list)
+    for raw in (
+        "SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_SPREADLE3BP_TAKER_CAP5BPS|TIME_3600_BE20TO5_TRAIL1.5ATR_ARM2ATR_HARD40BP_CAP10",
+        "GS02_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_QUIET_TAKER_VIOLENT_LIMIT1ATR_W23_S25_I180_TTL1800|GS_BE1.5ATR_TRAIL2ATR_ARM2ATR_CUT8BP5M_HARD35BP_T60M_CAP1",
+        "GS03_CVD_DIVERGENCE_20BAR_3M_TRANSITION_TAKER_CAP5BPS|GS_BE1.5ATR_TRAIL2ATR_ARM2ATR_CUT8BP5M_HARD35BP_T60M_CAP1",
+        "GS04_SCORE_LED_SIDE_ON_RAW_AI_NO_TRADE_TAKER_CAP5BPS|GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1",
+        "GS05_XVENUE_PREMIUM_DEV60M_L1.75_S1.88BP_QUIET_ASIDE_TREND_HC_15M_SPACING_VIOLENT_GS01_TAKER_CAP5BPS|TREND_HC_T60M_HARD40BP_VIOLENT_GS_TP2.5ATR_BE2ATR_LOCK1_CUT8BP5M_HARD35BP_T60M_CAP1",
+    ):
+        assert raw in RETIRED_POLICY_IDENTITIES
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    for name in ("notrade_follow_taker_60", "gs02_notrade_regime_entry", "gs03_cvd_div_taker",
+                 "gs04_notrade_atr_tp", "gs05_premium_regime_managed"):
+        for gone in (f"paper_policy_family_{name}.py", f"test_paper_policy_family_{name}.py"):
+            assert not (service_dir / gone).exists(), gone
+            assert not (service_dir.parent / "btc-signal-engine" / gone).exists(), gone
+    # Generic primitives stay: cross-venue evaluator, CVD/regime bars and the GS exit stack.
+    for kept in ("cross_venue_lead.py", "cross_venue_premium.py", "cross_venue_tape.py",
+                 "regime_bars_3m.py", "gs_regime_exit_stack.py", "regime_adaptive_binding.py"):
+        assert (service_dir / kept).is_file(), kept
 
 
 def test_freeze21_retirement_is_one_atomic_retirement():
@@ -217,7 +248,7 @@ def test_every_tile_publishes_entry_exit_risk_card_sections():
 
 
 def test_validator_fails_when_a_tile_lacks_card_metadata():
-    lane = "FAMILY_NOTRADE_FOLLOW_TAKER_60"
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:
@@ -335,7 +366,7 @@ def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
 
 
 def test_default_on_is_refused_for_anything_but_a_paper_only_relay_blocked_tile():
-    lane = "FAMILY_NOTRADE_FOLLOW_TAKER_60"
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:

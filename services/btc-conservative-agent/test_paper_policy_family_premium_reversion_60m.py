@@ -16,8 +16,8 @@ from cross_venue_premium import PremiumEvaluator, PremiumRule
 def test_registry_owns_a_paper_only_non_ai_clock_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[2] == policy.LANE
-    assert cross_venue_clock_lanes() == (policy.LANE, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS05_PREMIUM_REGIME_MANAGED")
+    assert ACTIVE_TILE_ORDER[1] == policy.LANE
+    assert cross_venue_clock_lanes() == (policy.LANE, "FAMILY_GS01_XV_PREMIUM_ATR_TP")
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["id_prefix"] == "pmr" and spec["max_active_signals"] == 3

@@ -237,7 +237,7 @@ def _replay_row(direction="LONG", filled=True):
 
 def test_record_from_replay_matches_runtime_meta_contract():
     row = _replay_row()
-    meta = {"start_ts": T0, "research_lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "atr14_pct_3m": 0.08,
+    meta = {"start_ts": T0, "research_lane": "FAMILY_COMMITTED_FADE_TAKER_90", "atr14_pct_3m": 0.08,
             "adx_at_signal": 27.0, "limit_price": ENTRY * 0.999, "policy_signature": "sig"}
     rec = sxp.record_from_replay(row, shadow_set=SET, meta=meta)
     assert rec["filled"] and rec["source"] == sxp.SOURCE_RUNTIME

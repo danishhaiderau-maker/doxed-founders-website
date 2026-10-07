@@ -2,6 +2,7 @@
 
 Owner-approved 2026-10-04 15:02 AEDT and re-declared 17:53/17:54 AEDT as FREEZE21B with
 eleven tiles (diagnostics/FREEZE21-PROTOCOL-20261004.md, "FREEZE21B" section).
+PHASE02 (2026-10-07, owner-ordered, CODE_OVERRIDE) retired five losers, leaving eight tiles.
 The freeze window is ``[started_at, started_at + 21 days)`` of the data-epoch
 manifest whose ``epoch_id`` is :data:`FREEZE_DATA_EPOCH_ID` (opened by the
 first boot with ``DATA_EPOCH_ID`` set to it). Inside the window:
@@ -55,18 +56,15 @@ FREEZE_SEC = FREEZE_DAYS * 86400
 FREEZE_STATUS = "ACTIVE"
 FREEZE_DECLARED_UTC = "2026-10-04T06:53:00Z"
 FREEZE_APPROVED_BY = ("Danish (owner), 2026-10-04 15:02 AEDT, SYSTEM-REVIEW-20261004; re-declared as FREEZE21B "
-                      "with the GS-20261004-01..04 and B1..B3 paper tiles, 17:53/17:54 AEDT")
+                      "with the GS-20261004-01..04 and B1..B3 paper tiles, 17:53/17:54 AEDT; PHASE02 "
+                      "retirement (2026-10-07) removed H-B, GS-02/03/04/05 with CODE_OVERRIDE")
 # The registry frozen for 21 days (combo_pathway_config); CI compares these.
-FREEZE_REGISTRY_VERSION = "v31-freeze21b-11t-v13"
+FREEZE_REGISTRY_VERSION = "v31-freeze21b-8t-v14"
 FREEZE_ROSTER = (
     "FAMILY_COMMITTED_FADE_TAKER_90",
-    "FAMILY_NOTRADE_FOLLOW_TAKER_60",
     "FAMILY_PREMIUM_REVERSION_60M",
     "FAMILY_RANDOM_CONTROL_TAKER_90",
     "FAMILY_GS01_XV_PREMIUM_ATR_TP",
-    "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
-    "FAMILY_GS03_CVD_DIV_TAKER",
-    "FAMILY_GS04_NOTRADE_ATR_TP",
     "FAMILY_GSB1_CVD_DIV_REGIME",
     "FAMILY_GSB2_REGIME_SWITCHER",
     "FAMILY_GSB3_COMMITTED_FADE_REGIME",
@@ -74,17 +72,13 @@ FREEZE_ROSTER = (
 # active_tile_registry_signature() per SCORE_LED_PAPER_RESEARCH_ENABLED mode:
 # Fly runs score-led ("1"); the hypothesis mode is the unset/laptop default.
 FREEZE_REGISTRY_SIGNATURES = {
-    "score_led": "3c75a34e174ab7744971c8c0a408a28eba2e9562356b6151c2a097a609ad045d",
-    "hypothesis": "758a6033e31c230aa966392263d9d4951712d57535c8d1d1f6f97082af0f0000",
+    "score_led": "9035474280d31626ce8365a444c9296442d8e41622c47b55a9f88c18fa77279b",
+    "hypothesis": "671354b107f2f3cfbfadc70a1c923c5ec87146b4303acc85ea3316302b1c1416",
 }
 FREEZE_REGISTRY_SIGNATURE = FREEZE_REGISTRY_SIGNATURES["score_led"]  # the deployed Fly identity
 # Owner-ordered mid-epoch additions (appended tiles, same epoch; see module doc).
 MID_EPOCH_ADDITIONS = (
-    {"lane": "FAMILY_GS05_PREMIUM_REGIME_MANAGED", "tile_number": 12, "hypothesis_id": "GS-20261005-05",
-     "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
-     "spec": "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md (supersedes the -20261005 exits)",
-     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
-    {"lane": "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "tile_number": 13, "hypothesis_id": "GS-20261005-06",
+    {"lane": "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "tile_number": 8, "hypothesis_id": "GS-20261005-06",
      "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
      "spec": "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md (supersedes the -20261005 exits)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
@@ -92,8 +86,8 @@ MID_EPOCH_ADDITIONS = (
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "f9f9bf31c0c2de286db48337fad778f7aee28f170029d2052ca8b77f17e18f2e",
-    "hypothesis": "5ed1535827c5733b278aa6b253489ee8df871cb9029a9c290449337562e89d6a",
+    "score_led": "a812d7383722b8cc0d9a1f79864bb9af425e728b2345271e113be2541358e270",
+    "hypothesis": "5948fb453c2d2f936bd22a92d123938083274bb252394970a07e8e5ce286078d",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
@@ -104,7 +98,12 @@ MIN_REASON_CHARS = 10
 FREEZE_OPENING_SEC = 3600
 # Set to {"approved_by": ..., "approved_utc": ..., "reason": ...} only with the
 # owner's explicit approval to change the frozen registry or epoch in code.
-CODE_OVERRIDE: Optional[Mapping[str, str]] = None
+CODE_OVERRIDE: Optional[Mapping[str, str]] = {
+    "approved_by": "Danish (owner), PHASE02 tile surgery, 2026-10-07",
+    "approved_utc": "2026-10-07T04:36:00Z",
+    "reason": ("Retire the five freeze21b losers (H-B, GS-05, GS-02, GS-04, GS-03) in one atomic "
+               "registry transaction; eight paper-only relay-ineligible tiles remain"),
+}
 
 ERROR = "RESEARCH_FREEZE_ACTIVE"
 NOT_STARTED, OPENING, ACTIVE, COMPLETE, LIFTED, EPOCH_MISMATCH = (

@@ -7,7 +7,7 @@ CVD = {"cvd_trigger_id": "cvd-1-long"}
 
 
 def test_registry_owns_a_shared_ai_tile_that_also_rides_the_bar_clock():
-    spec = assert_paper_only_registry_tile(policy, index=9, prefix="gb2", hypothesis_id="GS-20261004-B2",
+    spec = assert_paper_only_registry_tile(policy, index=5, prefix="gb2", hypothesis_id="GS-20261004-B2",
                                            bonferroni_k=3)
     assert spec["uses_shared_ai_direction"] is True
     assert not is_evaluator_clock_lane(policy.LANE) and policy.LANE in evaluator_loop_lanes()

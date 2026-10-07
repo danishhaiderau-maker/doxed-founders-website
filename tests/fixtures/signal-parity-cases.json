@@ -1,5 +1,5 @@
 {
-  "description": "Frozen parity cases for the registry roster (FREEZE21, v12). Every active tile is registered for the shared 180 s cadence fan-out (H-A committed fade, H-B NO_TRADE follow, the random control) or its own per-second cross-venue clock (H-C premium reversion); lane admission then applies each tile's own rules. The three Danish tiles, the Continuous August baseline, the committed-fade maker, the NO_TRADE-follow maker, the cross-venue session follow, Trend Fade 60 (all variants), the three Dynamic Adaptive tiles, the five family tiles and the legacy Continuous lane are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the registry roster (FREEZE21B, PHASE02). Every active tile is registered for the shared 180 s cadence fan-out (H-A committed fade, the random control) or its own per-second cross-venue clock (H-C premium reversion); lane admission then applies each tile's own rules. PHASE02 (2026-10-07) retired H-B (NO_TRADE follow) and GS-02/03/04/05; these plus the earlier Danish tiles, the Continuous August baseline, the committed-fade maker, the NO_TRADE-follow maker, the cross-venue session follow, Trend Fade 60 (all variants), the three Dynamic Adaptive tiles, the five family tiles and the legacy Continuous lane are retired and must never match or be a benchmark.",
   "cases": [
     {
       "id": "shared-call-long-shared-direction",
@@ -12,11 +12,15 @@
       "spread": 4,
       "expect_lanes": [
         "FAMILY_COMMITTED_FADE_TAKER_90",
-        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
         "FAMILY_PREMIUM_REVERSION_60M",
         "FAMILY_RANDOM_CONTROL_TAKER_90"
       ],
       "reject_lanes": [
+        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+        "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+        "FAMILY_GS03_CVD_DIV_TAKER",
+        "FAMILY_GS04_NOTRADE_ATR_TP",
+        "FAMILY_GS05_PREMIUM_REGIME_MANAGED",
         "FAMILY_DANISH_CF",
         "FAMILY_DANISH_CF_NOES",
         "FAMILY_DANISH_CF_ALL_SESSIONS",
@@ -50,11 +54,15 @@
       "spread": 5,
       "expect_lanes": [
         "FAMILY_COMMITTED_FADE_TAKER_90",
-        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
         "FAMILY_PREMIUM_REVERSION_60M",
         "FAMILY_RANDOM_CONTROL_TAKER_90"
       ],
       "reject_lanes": [
+        "FAMILY_NOTRADE_FOLLOW_TAKER_60",
+        "FAMILY_GS02_NOTRADE_REGIME_ENTRY",
+        "FAMILY_GS03_CVD_DIV_TAKER",
+        "FAMILY_GS04_NOTRADE_ATR_TP",
+        "FAMILY_GS05_PREMIUM_REGIME_MANAGED",
         "FAMILY_DANISH_CF",
         "FAMILY_DANISH_CF_NOES",
         "FAMILY_DANISH_CF_ALL_SESSIONS",

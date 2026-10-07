@@ -79,12 +79,12 @@ def test_every_frozen_tile_is_pre_registered_with_target_kill_and_day21():
         assert cfg.COMBO_LANE_SPECS[lane]["paper_only"] is True
         assert cfg.COMBO_LANE_SPECS[lane]["platform_relay_eligible"] is False
         roles.append(pre["role"])
-    assert roles.count("HYPOTHESIS") == 10 and roles.count("CONTROL") == 1
-    assert len(rf.FREEZE_ROSTER) == 11 and len(gs) == 7
+    assert roles.count("HYPOTHESIS") == 6 and roles.count("CONTROL") == 1
+    assert len(rf.FREEZE_ROSTER) == 7 and len(gs) == 4
 
 
 def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_ones():
-    assert rf.MID_EPOCH_ADDITION_ROSTER == ("FAMILY_GS05_PREMIUM_REGIME_MANAGED", "FAMILY_GS06_COMMITTED_FADE_ATR_TP")
+    assert rf.MID_EPOCH_ADDITION_ROSTER == ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
     for n, item in enumerate(rf.MID_EPOCH_ADDITIONS, start=len(rf.FREEZE_ROSTER) + 1):
         lane = item["lane"]
