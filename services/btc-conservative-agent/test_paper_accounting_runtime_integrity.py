@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from combo_pathway_config import ACTIVE_TILE_REGISTRY
+from paper_pnl_canon import FORCED_EXIT_REASONS
 
 BOT_PATH = Path(__file__).with_name("bot.py")
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
@@ -87,6 +88,7 @@ def _load(trades=None, session_filter=None):
         "_trade_row_in_session": session_filter or (lambda row, start: True),
         "trades": trades if trades is not None else [],
         "ACTIVE_TILE_REGISTRY": ACTIVE_TILE_REGISTRY,
+        "STATS_EXCLUDED_EXIT_REASONS": FORCED_EXIT_REASONS,
         "monitor_api": __import__("monitor_api"),
     }
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
