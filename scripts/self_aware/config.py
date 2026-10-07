@@ -8,9 +8,29 @@ from pathlib import Path
 
 SCHEMA_VERSION = "self_aware_v1"
 SERVER_PORT = 9021
+# Default stays 127.0.0.1 (operator runs AI agents on the same laptop, no
+# network round-trip). HOST is overridable so the diagnostics layer *could* be
+# reached on the LAN or remotely later, but it is NOT deployed anywhere.
+SERVER_HOST = os.environ.get("SELF_AWARE_HOST", "127.0.0.1")
 RUNBOOK = "docs/SELF_AWARE_RUNBOOK.md"
 RUNBOOK_BASE = "https://github.com/danishhaiderau-maker/doxed-founders-website/blob/master/"
 ALARM_PREFIX = "selfaware."
+
+# ---------------------------------------------------------------------------
+# Live production sources (read-only, laptop-side). The self-aware layer stays
+# on the operator's laptop, but can now observe PRODUCTION directly in addition
+# to the local custody mirror, so it has fresh exchange-side eyes rather than
+# only stale mirror data. All fetches are read-only and non-fatal: a failure is
+# evidence, never a crash. Opt-in via SELF_AWARE_LIVE_SOURCES=1.
+# ---------------------------------------------------------------------------
+LIVE_SOURCES_ENABLED = os.environ.get("SELF_AWARE_LIVE_SOURCES", "") in ("1", "true", "True", "yes", "on")
+FLY_BASE_URL = os.environ.get("SELF_AWARE_FLY_URL", "https://doxed-btc-bot.fly.dev").rstrip("/")
+RAILWAY_BASE_URL = os.environ.get("SELF_AWARE_RAILWAY_URL", "").rstrip("/")
+RAILWAY_TOKEN = os.environ.get("SELF_AWARE_RAILWAY_TOKEN", "")
+# Optional webhook sink for RED/AMBER alerts (kept local-first: alarms.jsonl
+# remains the default and fallback sink). Empty URL disables the webhook.
+WEBHOOK_URL = os.environ.get("SELF_AWARE_WEBHOOK_URL", "").strip()
+WEBHOOK_TIMEOUT_SEC = float(os.environ.get("SELF_AWARE_WEBHOOK_TIMEOUT_SEC", "5.0") or 5.0)
 
 CADENCE_SEC = {
     "views": 300,

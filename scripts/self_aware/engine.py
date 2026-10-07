@@ -27,7 +27,7 @@ from . import (ai_scorecard, alarms, analyzer_sections, bitfinex_readiness, cont
                digest, edges, fees, repair, tiles, uptime)
 from . import data_compat
 from .ai_scorecard import json_safe
-from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, THRESHOLDS, Paths
+from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_HOST, SERVER_PORT, THRESHOLDS, Paths
 from .facts import collect, iso, parse_ts
 from .store import Store
 
@@ -351,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-alarms", action="store_true", help="do not append to laptop-chain/health/alarms.jsonl")
     ap.add_argument("--no-repair", action="store_true", help="journal repair decisions without executing them")
     ap.add_argument("--port", type=int, default=SERVER_PORT)
+    ap.add_argument("--host", default=SERVER_HOST, help="bind host (default 127.0.0.1; override with SELF_AWARE_HOST)")
     args = ap.parse_args(argv)
     _below_normal()
     if args.once:
@@ -359,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     from .server import make_server  # noqa: PLC0415
     try:
-        httpd = make_server(None, args.port)
+        httpd = make_server(None, args.port, args.host)
     except OSError as exc:
         print(f"[self-aware] port {args.port} busy ({exc}); another instance is running", flush=True)
         return 0
@@ -367,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=httpd.serve_forever, name="self-aware-http", daemon=True).start()
     eng = Engine(emit_alarms=not args.no_alarms, repair_enabled=not args.no_repair)
     httpd.engine = eng
-    print(f"[self-aware] serving http://127.0.0.1:{args.port} pid={os.getpid()} rev={eng.store.revision[:12]}", flush=True)
+    print(f"[self-aware] serving http://{args.host}:{args.port} pid={os.getpid()} rev={eng.store.revision[:12]}", flush=True)
     try:
         eng.loop()
     finally:

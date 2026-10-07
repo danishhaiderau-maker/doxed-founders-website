@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import Paths
+from .config import LIVE_SOURCES_ENABLED, Paths
 
 
 def parse_ts(value: Any) -> float | None:
@@ -236,6 +236,19 @@ def collect(paths: Paths, store, now: float | None = None, *, probe_local: bool 
                                         http_json("http://127.0.0.1:9001/api/system-health", 15)))
         f["svc_9011"] = dict(zip(("body", "error", "elapsed"),
                                  http_json("http://127.0.0.1:9011/api/system-health", 10)))
+    # Live production sources (read-only, non-fatal, opt-in) — fresh exchange-side
+    # eyes in addition to the laptop mirror. Guarded so the default local path
+    # performs zero network round-trips beyond what it already did.
+    if LIVE_SOURCES_ENABLED:
+        from . import live_sources  # noqa: PLC0415 - optional, stdlib-only adapter
+
+        f["live"] = live_sources.collect_live(now)
+        f["live_summary"] = live_sources.summarize(f["live"])
+    else:
+        f["live"] = {"schema": "self_aware_live_sources_v1", "enabled": False, "fly": {}, "railway": {},
+                     "note": "live sources disabled (set SELF_AWARE_LIVE_SOURCES=1)"}
+        f["live_summary"] = {"enabled": False, "verdict": "DISABLED", "reachable": 0, "total": 0,
+                             "subsystems": []}
     return f
 
 
