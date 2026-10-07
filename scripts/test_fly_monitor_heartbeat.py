@@ -263,7 +263,7 @@ def test_collect_wires_subsystem_rules_with_live_shapes(monkeypatch):
     }
 
     class _GH:
-        def deploy_state(self, now=None):
+        def deploy_state(self, now=None, live_revision=""):
             return {"deployed": "a" * 40, "in_flight": "", "deploy_active": False, "deploy_note": "none"}
 
     monkeypatch.setattr(runner, "GitHub", _GH)

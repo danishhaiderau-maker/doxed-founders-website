@@ -184,7 +184,7 @@ class GitHub:
             time.sleep(3 * (attempt + 1))
         raise AssertionError("unreachable")
 
-    def deploy_state(self, now: float | None = None) -> dict[str, Any]:
+    def deploy_state(self, now: float | None = None, live_revision: str = "") -> dict[str, Any]:
         # The branch-filtered listing is search-backed and intermittently
         # returned months-old runs; filter the plain newest-first list instead.
         runs = [
@@ -199,7 +199,7 @@ class GitHub:
                 cache[run_id] = self.call(f"/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
             return cache[run_id]
 
-        deployed, in_flight = resolve_deployed_revision(runs, jobs)
+        deployed, in_flight = resolve_deployed_revision(runs, jobs, live_revision)
         active, why = deploy_suppression(runs, jobs, time.time() if now is None else now)
         return {"deployed": deployed, "in_flight": in_flight, "deploy_active": active, "deploy_note": why,
                 "last_finished_deploy": last_finished_deploy(runs, jobs)}
@@ -327,17 +327,23 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
             findings["revision_drift"] = f"Fly returned an unknown source revision: {reported!r}"
         else:
             try:
+                # Resolve deploy completion against the live revision so a
+                # successful resume-bootstrap continuation (fail-closed deploy +
+                # resume) counts, not only a green test-and-deploy run.
+                deploy = github.deploy_state(live_revision=actual)
                 require_deployed_revision(actual, deployed=deploy["deployed"], in_flight=deploy["in_flight"])
             except MonitorContractError:
                 # The runs API is eventually consistent right after a deploy.
                 time.sleep(20)
                 try:
-                    deploy = github.deploy_state()
+                    deploy = github.deploy_state(live_revision=actual)
                     require_deployed_revision(actual, deployed=deploy["deployed"], in_flight=deploy["in_flight"])
                 except MonitorContractError as exc:
                     findings["revision_drift"] = str(exc)
                 except (KeyError, ValueError, *TRANSPORT_ERRORS) as exc:
                     findings["monitor_error"] = f"cannot re-read Fly deploy runs: {type(exc).__name__}"
+            except (KeyError, ValueError, *TRANSPORT_ERRORS) as exc:
+                findings["monitor_error"] = f"cannot re-read Fly deploy runs: {type(exc).__name__}"
             if "revision_drift" not in findings and not on_master(actual):
                 findings["revision_drift"] = f"Fly revision is not on master history: {actual[:12]}"
 

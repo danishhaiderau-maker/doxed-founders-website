@@ -24,6 +24,9 @@ STARTUP_GRACE_SEC = 20 * 60.0
 XVL_TICK_STALE_SEC = 60.0
 CROSS_VENUE_COLLECTOR_STALE_SEC = 120.0
 CROSS_VENUE_DEGRADED_SEC = 30 * 60.0
+# A pending pre-entry receipt older than this means the queue is not draining;
+# used to separate a genuinely stuck backlog from transient barrier timeouts.
+PREENTRY_EVIDENCE_STALE_PENDING_AGE_SEC = 60.0
 CROSS_VENUE_RECONNECTS_PER_RUN = 30
 BBO_SUCCESS_STALE_SEC = 300.0
 BBO_INFLIGHT_STALE_SEC = 120.0
@@ -97,6 +100,31 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _preentry_evidence_genuinely_degraded(preentry: Mapping[str, Any]) -> bool:
+    """True only for a real, non-self-healing pre-entry evidence problem.
+
+    The bot marks ``health`` DEGRADED for a *cumulative* ``barrier_timeouts``
+    counter, but a barrier timeout is transient collector-lock contention: the
+    receipt stays pending and is retried on the next barrier (or the boot
+    replay), so a small ``dead=0`` backlog is recoverable and must not page the
+    operator.  Degradation is genuine only when a receipt was dead-lettered
+    (``dead > 0``) or the pending backlog is aging past its bound.
+    """
+    if preentry.get("health") != "DEGRADED":
+        return False
+    dead = _num(preentry.get("dead"))
+    if dead is not None and dead > 0:
+        return True
+    pending = _num(preentry.get("pending"))
+    oldest_age = _num(preentry.get("oldest_pending_age_s"))
+    return bool(
+        pending is not None
+        and pending > 0
+        and oldest_age is not None
+        and oldest_age > PREENTRY_EVIDENCE_STALE_PENDING_AGE_SEC
+    )
+
+
 def _get(payload: Any, path: str) -> Any:
     node = payload
     for part in path.split("."):
@@ -141,7 +169,7 @@ def ready_block_findings(ready: Mapping[str, Any] | None, *, paused: bool | None
             "cross-venue IMMEDIATE tiles miss the pre-registered signal->fill gate: " + "; ".join(slow)
         )
     preentry = _dict(xvl.get("preentry_evidence"))
-    if preentry.get("health") == "DEGRADED":
+    if _preentry_evidence_genuinely_degraded(preentry):
         findings["preentry_evidence_degraded"] = (
             f"submit-first pre-entry evidence queue degraded: dead={preentry.get('dead')} "
             f"barrier_timeouts={preentry.get('barrier_timeouts')} pending={preentry.get('pending')} "

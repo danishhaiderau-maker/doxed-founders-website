@@ -88,6 +88,7 @@ def test_ready_requires_both_detailed_fields_and_rejects_progress_stall():
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
+SHA_D = "d" * 40
 
 
 def _jobs(table):
@@ -128,6 +129,63 @@ def test_in_flight_deploy_revision_is_tolerated():
 def test_no_successful_deploy_fails_closed():
     with pytest.raises(MonitorContractError):
         resolve_deployed_revision([], _jobs({}))
+
+
+def test_successful_deploy_matches_fly_revision_stays_green():
+    """The pre-existing case: a green test-and-deploy run matches Fly."""
+    runs = [
+        {"id": 2, "head_sha": SHA_B, "status": "completed", "conclusion": "success"},
+        {"id": 1, "head_sha": SHA_A, "status": "completed", "conclusion": "success"},
+    ]
+    jobs = _jobs({
+        2: [{"name": "test-and-deploy", "conclusion": "success"}],
+        1: [{"name": "test-and-deploy", "conclusion": "success"}],
+    })
+    deployed, in_flight = resolve_deployed_revision(runs, jobs, live_revision=SHA_B)
+    assert (deployed, in_flight) == (SHA_B, "")
+    require_deployed_revision(SHA_B, deployed=deployed, in_flight=in_flight)
+
+
+def test_fail_closed_deploy_plus_successful_resume_bootstrap_matches_fly():
+    """A fail-closed guarded deploy followed by a successful resume-bootstrap
+    continuation on the same head SHA is deploy-completion for that revision."""
+    runs = [
+        {"id": 4, "head_sha": SHA_C, "status": "completed", "conclusion": "success"},
+        {"id": 3, "head_sha": SHA_C, "status": "completed", "conclusion": "failure"},
+        {"id": 2, "head_sha": SHA_B, "status": "completed", "conclusion": "success"},
+        {"id": 1, "head_sha": SHA_A, "status": "completed", "conclusion": "success"},
+    ]
+    jobs = _jobs({
+        4: [{"name": "resume-bootstrap", "conclusion": "success"}],
+        3: [{"name": "test-and-deploy", "conclusion": "failure"}],
+        2: [{"name": "test-and-deploy", "conclusion": "success"}],
+        1: [{"name": "test-and-deploy", "conclusion": "success"}],
+    })
+    # Without the live revision, a resume-bootstrap run is not trusted and the
+    # resolution falls back to the last green test-and-deploy run (SHA_B).
+    assert resolve_deployed_revision(runs, jobs) == (SHA_B, "")
+    # With the live revision matching the resume-bootstrap head SHA, it counts.
+    deployed, in_flight = resolve_deployed_revision(runs, jobs, live_revision=SHA_C)
+    assert (deployed, in_flight) == (SHA_C, "")
+    require_deployed_revision(SHA_C, deployed=deployed, in_flight=in_flight)
+
+
+def test_resume_bootstrap_unmatched_fly_revision_still_drifts():
+    """Fly running a revision no successful deploy/resume produced stays RED."""
+    runs = [
+        {"id": 4, "head_sha": SHA_C, "status": "completed", "conclusion": "success"},
+        {"id": 3, "head_sha": SHA_C, "status": "completed", "conclusion": "failure"},
+        {"id": 1, "head_sha": SHA_A, "status": "completed", "conclusion": "success"},
+    ]
+    jobs = _jobs({
+        4: [{"name": "resume-bootstrap", "conclusion": "success"}],
+        3: [{"name": "test-and-deploy", "conclusion": "failure"}],
+        1: [{"name": "test-and-deploy", "conclusion": "success"}],
+    })
+    deployed, in_flight = resolve_deployed_revision(runs, jobs, live_revision=SHA_D)
+    assert (deployed, in_flight) == (SHA_A, "")
+    with pytest.raises(MonitorContractError, match="revision drift"):
+        require_deployed_revision(SHA_D, deployed=deployed, in_flight=in_flight)
 
 
 def test_tile_registry_mismatch_fails_closed():

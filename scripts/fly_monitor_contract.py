@@ -54,32 +54,57 @@ def require_strategy_progress(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 DEPLOY_JOB_NAME = "test-and-deploy"
+RESUME_BOOTSTRAP_JOB_NAME = "resume-bootstrap"
+
+
+def _require_full_sha(run: Mapping[str, Any], sha: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise MonitorContractError(f"Deploy run {run.get('id')} has an invalid head SHA")
 
 
 def resolve_deployed_revision(
     runs: Sequence[Mapping[str, Any]],
     jobs_for_run: Callable[[Any], Sequence[Mapping[str, Any]]],
+    live_revision: str = "",
 ) -> tuple[str, str]:
-    """Return (latest successfully deployed SHA, in-flight deploy SHA or "").
+    """Return (latest deployed SHA, in-flight deploy SHA or "").
 
-    ``runs`` are fly-bot-deploy workflow runs, newest first. Only runs whose
-    deploy job succeeded shipped an image; inspect/restart/flatten dispatches
-    can succeed without deploying anything.
+    ``runs`` are fly-bot-deploy workflow runs, newest first. A run is a
+    deploy-completion signal when either its ``test-and-deploy`` job succeeded
+    (a normal guarded deploy), or its ``resume-bootstrap`` job succeeded and its
+    head SHA equals ``live_revision`` (a fail-closed deploy that resumed paper
+    without shipping a new image). Inspect/restart/flatten dispatches can
+    succeed without deploying anything and are ignored.
     """
     in_flight = ""
     for run in runs:
         sha = str(run.get("head_sha") or "")
-        jobs = [j for j in jobs_for_run(run.get("id")) if j.get("name") == DEPLOY_JOB_NAME]
-        if not jobs:
+        jobs = jobs_for_run(run.get("id"))
+        deploy_jobs = [j for j in jobs if j.get("name") == DEPLOY_JOB_NAME]
+        if deploy_jobs:
+            job = deploy_jobs[0]
+            if run.get("status") != "completed":
+                if not in_flight and job.get("conclusion") != "skipped":
+                    in_flight = sha
+                continue
+            if run.get("conclusion") == "success" and job.get("conclusion") == "success":
+                _require_full_sha(run, sha)
+                return sha, in_flight
             continue
-        job = jobs[0]
+        resume_jobs = [j for j in jobs if j.get("name") == RESUME_BOOTSTRAP_JOB_NAME]
+        if not resume_jobs:
+            continue
+        job = resume_jobs[0]
         if run.get("status") != "completed":
-            if not in_flight and job.get("conclusion") != "skipped":
-                in_flight = sha
             continue
         if run.get("conclusion") == "success" and job.get("conclusion") == "success":
-            if not re.fullmatch(r"[0-9a-f]{40}", sha):
-                raise MonitorContractError(f"Deploy run {run.get('id')} has an invalid head SHA")
+            # A resume-bootstrap continuation ships no image; it resumes paper on
+            # the already-deployed revision. Accept it only when its head SHA is
+            # what Fly actually reports, so a later unrelated commit cannot be
+            # mistaken for the live revision.
+            if not live_revision or sha != live_revision:
+                continue
+            _require_full_sha(run, sha)
             return sha, in_flight
     raise MonitorContractError("No successful Fly deploy run found")
 
