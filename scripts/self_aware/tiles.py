@@ -20,7 +20,10 @@ def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: flo
         df = store.frame("""
             SELECT research_lane AS lane, fill_id, max(close_ts) AS close_ts, sum(net_pnl_usd) AS net_usd,
                    any_value(exit_reason) AS exit_reason, any_value(deployed_revision) AS revision
-            FROM raw_execution WHERE fill_id IS NOT NULL AND close_ts IS NOT NULL GROUP BY 1, 2""")
+            FROM raw_execution
+            WHERE fill_id IS NOT NULL AND close_ts IS NOT NULL
+              AND COALESCE(exit_reason, '') NOT IN ('ADMIN_MANUAL_CLOSE', 'ADMIN_FORCE_FLAT', 'CIRCUIT_BREAKER_ADMIN_MANUAL')
+            GROUP BY 1, 2""")
     except Exception:  # noqa: BLE001
         return pd.DataFrame()
     if not df.empty:
@@ -43,7 +46,7 @@ def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: flo
                 continue
             pnl = w["net_usd"].fillna(0).to_numpy(float)
             rows.append({"lane": lane, "window": wname, "closes": int(len(w)), "wins": int((pnl > 0).sum()),
-                         "win_rate": float((pnl > 0).mean()), "net_usd": float(pnl.sum()), "mean_usd": float(pnl.mean()),
+                         "win_rate": float((pnl > 0).mean()), "net_usd": round(float(pnl.sum()), 2), "mean_usd": round(float(pnl.mean()), 2),
                          "worst_usd": float(pnl.min()), "best_usd": float(pnl.max()),
                          "last_close": iso(float(np.nanmax(w["close_epoch"]))) if w["close_epoch"].notna().any() else None,
                          "in_roster": lane in roster, "enabled": bool(enabled.get(lane, False)),
