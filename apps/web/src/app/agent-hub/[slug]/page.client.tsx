@@ -69,6 +69,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
   const [exchangeLabel, setExchangeLabel] = useState<string | null>(null);
   const [exchangeConnected, setExchangeConnected] = useState(false);
   const [rentalExpiresAt, setRentalExpiresAt] = useState<string | null>(null);
+  const [founderRentalEntitled, setFounderRentalEntitled] = useState(false);
   const [agent, setAgent] = useState<TradingAgentSummary | null>(null);
   const [allAgents, setAllAgents] = useState<TradingAgentSummary[]>([]);
   const [dashboard, setDashboard] = useState<TradingAgentDashboardState | null>(null);
@@ -125,6 +126,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     setExchangeLabel(meta.exchangeLabel ?? null);
     setExchangeConnected(Boolean(meta.exchangeConnected));
     setRentalExpiresAt(meta.rentalExpiresAt ?? null);
+    setFounderRentalEntitled(Boolean(meta.founderRentalEntitled));
   }, []);
 
   const loadLive = useCallback(async (opts?: { showLoading?: boolean }) => {
@@ -177,6 +179,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
         setInstanceLastError(dashR.value.userInstanceLastError ?? null);
         if (dashR.value.copyRelaySim?.active) setInstanceStatus('PAUSED');
         setRentalExpiresAt(dashR.value.agent.rentalExpiresAt ?? null);
+        setFounderRentalEntitled(Boolean(dashR.value.agent.founderRentalEntitled));
         setError(null);
       } else if (agent) {
         setError(
@@ -349,7 +352,11 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
 
   async function handleResumeInstance() {
     if (!session?.accessToken) return;
-    if (rentalExpiresAt && new Date(rentalExpiresAt).getTime() <= Date.now()) {
+    if (
+      !founderRentalEntitled &&
+      rentalExpiresAt &&
+      new Date(rentalExpiresAt).getTime() <= Date.now()
+    ) {
       setError('Live copy rental expired — renew your subscription first.');
       return;
     }
@@ -383,6 +390,9 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     try {
       const res = await renewLiveCopyRental(slug, session.accessToken);
       setRentalExpiresAt(res.rentalExpiresAt);
+      if (typeof res.founderRentalEntitled === 'boolean') {
+        setFounderRentalEntitled(res.founderRentalEntitled);
+      }
       await loadLive();
       setError(null);
     } catch (err) {
@@ -565,6 +575,7 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
           onAdminRefresh={() => void loadLive({ showLoading: true })}
           instanceBusy={instanceBusy}
           rentalExpiresAt={rentalExpiresAt ?? agent.rentalExpiresAt}
+          founderRentalEntitled={founderRentalEntitled}
           onRenewRental={handleRenewRental}
           renewBusy={renewBusy}
           onSyncProtectionBreach={handleSyncProtectionBreach}

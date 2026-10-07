@@ -18,12 +18,14 @@ function formatCountdown(ms: number) {
 export function AgentRentalCountdown({
   expiresAt,
   compact = false,
+  founderAccess = false,
   onRenew,
   renewBusy,
   costWeek,
 }: {
   expiresAt: string;
   compact?: boolean;
+  founderAccess?: boolean;
   onRenew?: () => void;
   renewBusy?: boolean;
   costWeek?: number;
@@ -38,6 +40,22 @@ export function AgentRentalCountdown({
   }, [expiresAt]);
 
   const expired = remaining <= 0;
+
+  if (founderAccess) {
+    return (
+      <div className={`rounded-xl border border-emerald-500/35 bg-emerald-950/20 ${compact ? 'px-3 py-2' : 'px-4 py-3'}`}>
+        <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Live copy rental</p>
+        <p className={`mt-1 font-bold ${compact ? 'text-sm' : 'text-lg'} text-emerald-200`}>
+          Founder access — no rental required
+        </p>
+        {!compact && (
+          <p className="mt-1 text-[11px] text-zinc-500">
+            Permanent — no expiry
+          </p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -74,7 +92,13 @@ export function AgentRentalCountdown({
   );
 }
 
-export function LiveCopyRentalBadge({ expiresAt }: { expiresAt: string }) {
+export function LiveCopyRentalBadge({
+  expiresAt,
+  founderAccess = false,
+}: {
+  expiresAt: string;
+  founderAccess?: boolean;
+}) {
   const [remaining, setRemaining] = useState(() => new Date(expiresAt).getTime() - Date.now());
 
   useEffect(() => {
@@ -83,6 +107,15 @@ export function LiveCopyRentalBadge({ expiresAt }: { expiresAt: string }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [expiresAt]);
+
+  if (founderAccess) {
+    return (
+      <span className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 px-5 py-2.5 text-sm font-semibold text-emerald-200">
+        <span aria-hidden>✓</span>
+        Founder access — no rental required
+      </span>
+    );
+  }
 
   const expired = remaining <= 0;
 

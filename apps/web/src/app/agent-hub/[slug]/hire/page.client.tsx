@@ -52,6 +52,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ddollarBalance, setDdollarBalance] = useState<number | null>(null);
+  const [founderRentalEntitled, setFounderRentalEntitled] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +66,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       setCostWeek(agent.costDdollarWeek ?? agent.costDdollarDay ?? 2000);
       setProviders(ex);
       setDdollarBalance(overview?.reputation.reputationPoints ?? null);
+      setFounderRentalEntitled(Boolean(agent.founderRentalEntitled));
       if (agent.hired && agent.instanceMode === 'live' && !refreshMode) {
         router.replace(`/agent-hub/${slug}`);
       }
@@ -138,7 +140,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const exchangeGuide = exchange ? EXCHANGE_API_GUIDES[exchange as ExchangeProvider] : null;
 
   const steps: Step[] = ['exchange', 'credentials', 'risk'];
-  const canAffordHire = ddollarBalance == null || ddollarBalance >= costWeek;
+  const canAffordHire = founderRentalEntitled || ddollarBalance == null || ddollarBalance >= costWeek;
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
@@ -177,11 +179,19 @@ export default function AgentHireClient({ slug }: { slug: string }) {
         {!refreshMode && costWeek > 0 && (
           <div className="mt-3 space-y-2 text-sm text-zinc-300">
             <p>
-              Hiring fee:{' '}
-              <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week (deducted on
-              activation).
+              {founderRentalEntitled ? (
+                <>
+                  <strong className="text-emerald-300">Founder access</strong> — no rental required
+                </>
+              ) : (
+                <>
+                  Hiring fee:{' '}
+                  <strong className="text-white">{costWeek.toLocaleString()} DDollar</strong> for 1 week (deducted on
+                  activation).
+                </>
+              )}
             </p>
-            {ddollarBalance != null && (
+            {ddollarBalance != null && !founderRentalEntitled && (
               <p className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                 Your balance:{' '}
                 <strong className={canAffordHire ? 'text-emerald-300' : 'text-amber-300'}>
@@ -414,7 +424,11 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               <p><span className="text-zinc-500">AI:</span> Admin DeepSeek (platform copy — no key needed)</p>
               <p>
                 <span className="text-zinc-500">{refreshMode ? 'Charge:' : 'Hiring fee:'}</span>{' '}
-                {refreshMode ? '0 DDollar — existing rental unchanged' : `${costWeek.toLocaleString()} DDollar for 1 week`}
+                {refreshMode
+                  ? '0 DDollar — existing rental unchanged'
+                  : founderRentalEntitled
+                    ? '0 DDollar — founder access, no rental required'
+                    : `${costWeek.toLocaleString()} DDollar for 1 week`}
               </p>
             </div>
             <label className="flex items-start gap-3 text-sm text-zinc-300">
