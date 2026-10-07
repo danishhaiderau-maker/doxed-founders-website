@@ -67,12 +67,12 @@ def _compile(*names):
 
 def test_selected_calls_never_below_the_epoch_orders():
     ns = _compile("_floor_selected_calls")
-    counts = {"FAMILY_NOTRADE_FOLLOW_TAKER_60": {"selected_calls": 0, "pending": 0, "open": 0, "closed": 2, "expired": 0},
+    counts = {"FAMILY_COMMITTED_FADE_TAKER_90": {"selected_calls": 0, "pending": 0, "open": 0, "closed": 2, "expired": 0},
               "FAMILY_GS01_XV_PREMIUM_ATR_TP": {"selected_calls": 9, "pending": 0, "open": 1, "closed": 6, "expired": 1}}
     ns["_floor_selected_calls"](counts)
-    hb, gs1 = counts["FAMILY_NOTRADE_FOLLOW_TAKER_60"], counts["FAMILY_GS01_XV_PREMIUM_ATR_TP"]
-    assert hb["selected_calls"] == 2 and hb["selected_calls_basis"] == "epoch_order_floor"
-    assert hb["selected_calls_linked"] == 0
+    ha, gs1 = counts["FAMILY_COMMITTED_FADE_TAKER_90"], counts["FAMILY_GS01_XV_PREMIUM_ATR_TP"]
+    assert ha["selected_calls"] == 2 and ha["selected_calls_basis"] == "epoch_order_floor"
+    assert ha["selected_calls_linked"] == 0
     assert gs1["selected_calls"] == 9 and gs1["selected_calls_basis"] == "linked_shared_ai_calls"
 
 
@@ -104,7 +104,7 @@ def test_ready_fills_a_missing_signal_clock_from_the_evaluator_without_touching_
     assert out["entry_policy"]["signal_clock"] == "BAR_CLOSE_3M_CVD_EVALUATOR"
     assert out["entry_policy"]["signal_clock_source"] == "evaluator:CvdEvaluator"
     assert tile["entry_policy"]["signal_clock"] is None  # registry row not mutated
-    shared = {"lane": "FAMILY_NOTRADE_FOLLOW_TAKER_60", "entry_policy": {"signal_clock": None}}
+    shared = {"lane": "FAMILY_COMMITTED_FADE_TAKER_90", "entry_policy": {"signal_clock": None}}
     assert ns["_tile_row_with_display_signal_clock"](shared) is shared
     declared = {"lane": "FAMILY_GSB2_REGIME_SWITCHER", "entry_policy": {"signal_clock": "PER_SECOND"}}
     assert ns["_tile_row_with_display_signal_clock"](declared) is declared

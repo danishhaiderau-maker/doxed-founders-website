@@ -7,7 +7,7 @@ from regime_adaptive_binding import GsPremiumEvaluator
 
 
 def test_registry_owns_a_paper_only_non_ai_premium_tile():
-    spec = assert_paper_only_registry_tile(policy, index=4, prefix="gs1", hypothesis_id="GS-20261004-01",
+    spec = assert_paper_only_registry_tile(policy, index=3, prefix="gs1", hypothesis_id="GS-20261004-01",
                                            bonferroni_k=4)
     assert spec["signal_clock"] == CROSS_VENUE_SIGNAL_CLOCK and spec["uses_shared_ai_direction"] is False
     assert policy.LANE in cross_venue_clock_lanes()

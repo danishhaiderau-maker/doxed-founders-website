@@ -89,11 +89,9 @@ def test_gs02_classifier_has_no_trend_state():
 
 def test_reprice_schedules_match_the_preregistration():
     b = cfg.COMBO_LANE_SPECS["FAMILY_GSB2_REGIME_SWITCHER"]["entry_policy"]["regime_exec"]
-    gs2 = cfg.COMBO_LANE_SPECS["FAMILY_GS02_NOTRADE_REGIME_ENTRY"]["entry_policy"]["regime_exec"]
     assert reprice_ages(b["QUIET"]) == list(range(60, 600, 60))
     assert reprice_ages(b["TREND"]) == [120, 240, 300, 420, 540, 600, 720, 840]
     assert reprice_ages(b["VIOLENT"]) == []
-    assert reprice_ages(gs2["VIOLENT"]) == [300, 480, 600, 780]
 
 
 def _profile(lane, name):
@@ -101,12 +99,12 @@ def _profile(lane, name):
 
 
 def test_arming_takes_effect_from_the_next_tick():
-    prof = _profile("FAMILY_GS04_NOTRADE_ATR_TP", "ALL")
+    prof = _profile("FAMILY_GS01_XV_PREMIUM_ATR_TP", "ALL")
     st = stack.new_state()
     assert stack.evaluate_tick(prof, st, cur_bp=8.5, age_sec=5, atr_bp=4.0) is None  # arms BE (8 bp)
     assert st["be_armed_age"] == 5
     hit = stack.evaluate_tick(prof, st, cur_bp=0.5, age_sec=6, atr_bp=4.0)
-    # lock_bp is 1.0 on GS-04: book the floor, not the 0.5 tick that crossed it
+    # lock_bp is 1.0 on the GS simple exit: book the floor, not the 0.5 tick that crossed it
     assert hit["rule"] == "BREAKEVEN_LOCK" and hit["book_bp"] == float(prof.get("lock_bp", 1.0))
 
 
@@ -160,7 +158,7 @@ def _fills(lane, n, bp, hours=1.0, now=None):
 
 
 def test_gs_verdict_harm_kill_and_day21_outcomes():
-    lane = "FAMILY_GS03_CVD_DIV_TAKER"
+    lane = "FAMILY_GSB1_CVD_DIV_REGIME"
     now = time.time()
     rep = tpc.build_report(trades=_fills(lane, 35, -5.0, now=now), registry=cfg.ACTIVE_TILE_REGISTRY,
                            tile_order=cfg.ACTIVE_TILE_ORDER, now_ts=now)

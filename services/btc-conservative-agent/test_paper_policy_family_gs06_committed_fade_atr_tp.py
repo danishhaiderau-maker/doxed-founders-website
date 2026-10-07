@@ -43,7 +43,7 @@ def assert_mid_epoch_tile(policy, *, number: int, prefix: str, hypothesis_id: st
 
 
 def test_registry_owns_a_paper_only_committed_fade_tile_13_with_capacity_two():
-    spec = assert_mid_epoch_tile(policy, number=13, prefix="gs6", hypothesis_id="GS-20261005-06", cap=2)
+    spec = assert_mid_epoch_tile(policy, number=8, prefix="gs6", hypothesis_id="GS-20261005-06", cap=2)
     assert spec["admission_treatment"] == COMMITTED_FADE_TAKER_ADMISSION_POLICY_ID
     assert "signal_clock" not in spec and spec["uses_shared_ai_direction"] is True
     assert policy.LANE not in evaluator_loop_lanes()

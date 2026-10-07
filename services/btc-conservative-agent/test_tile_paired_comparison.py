@@ -6,7 +6,9 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-CFT, NTT, XVS, RND = ACTIVE_TILE_ORDER[:4]
+CFT = "FAMILY_COMMITTED_FADE_TAKER_90"     # H-A
+XVS = "FAMILY_PREMIUM_REVERSION_60M"        # H-C (cross-venue clock tile)
+RND = "FAMILY_RANDOM_CONTROL_TAKER_90"      # control (yardstick, no orders)
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -79,12 +81,13 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
-    assert report["tile_order"][:4] == [CFT, NTT, XVS, RND]
-    # Shared-call tiles pair (H-A, H-B, control, GS-02, GS-04, B2, B3, GS-06); evaluator-clock tiles never do.
+    assert report["tile_order"][:4] == [CFT, XVS, RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
+    # Shared-call tiles pair (H-A, control, B2, B3, GS-06); evaluator-clock tiles (H-C, GS-01, B1) never do.
     assert report["all_tiles_paired"]["paired_tiles"] == [
-        CFT, NTT, RND, "FAMILY_GS02_NOTRADE_REGIME_ENTRY", "FAMILY_GS04_NOTRADE_ATR_TP",
-        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
-    assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {(CFT, NTT), (CFT, RND)}
+        CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+    assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
+        (CFT, RND), (CFT, "FAMILY_GSB2_REGIME_SWITCHER")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
     assert set(report["pre_registered"]) == set(ACTIVE_TILE_ORDER)
     json.dumps(report, allow_nan=False)
@@ -133,8 +136,8 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
         rows += [_fill(RND, f"b{i}", -1.0, ts), _fill(CFT, f"b{i}", 3.0, ts)]
     report = _report(rows)
     assert report["baseline_lane"] is None
-    # Twelve hypotheses (H-A..H-C, GS-01..04, B1..B3, mid-epoch GS-05/06); the control is not a trial.
-    assert report["deflated_sharpe_trials"] == 12
+    # Seven hypotheses (H-A, H-C, GS-01, B1..B3, GS-06); the control is not a trial.
+    assert report["deflated_sharpe_trials"] == 7
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND
     assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)
@@ -150,7 +153,7 @@ def test_cluster_ci_alpha_widens_the_interval():
     assert lo_b <= lo95 < hi95 <= hi_b
 
 
-@pytest.mark.parametrize("lane, k1, k4", [(CFT, 80, 3.0), (NTT, 80, 5.0), (XVS, 80, 3.0)])
+@pytest.mark.parametrize("lane, k1, k4", [(CFT, 80, 3.0), (XVS, 80, 3.0)])
 def test_hypothesis_kill_rules_count_distinct_hours_not_fills(lane, k1, k4):
     pre = ACTIVE_TILE_REGISTRY[lane]["pre_registration"]
     assert pre["schema"] == "tile_pre_registration_freeze21_v1" and pre["role"] == "HYPOTHESIS"

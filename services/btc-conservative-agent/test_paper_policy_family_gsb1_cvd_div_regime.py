@@ -7,7 +7,7 @@ CVD = {"cvd_trigger_id": "cvd-1-long"}
 
 
 def test_registry_owns_a_bar_clock_regime_tile():
-    spec = assert_paper_only_registry_tile(policy, index=8, prefix="gb1", hypothesis_id="GS-20261004-B1",
+    spec = assert_paper_only_registry_tile(policy, index=4, prefix="gb1", hypothesis_id="GS-20261004-B1",
                                            bonferroni_k=3)
     assert spec["relay_capability"] == PARTIAL_EXIT_RELAY_CAPABILITY
     pre = spec["pre_registration"]["kill"]

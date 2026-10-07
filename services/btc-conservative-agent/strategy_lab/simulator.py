@@ -338,6 +338,9 @@ def exit_spec_from_registry(spec: dict, leverage: float = 100.0) -> tuple:
         return ExitSpec(tcap_sec=tcap, hard_bp=hard_bp, sl_atr=ep.get("initial_stop_atr_k"),
                         arm_atr=ep.get("trail_activation_atr_k"), trail_atr=ep.get("trail_atr_k"),
                         ladder=ladder, breakeven=be), None
+    if family == "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS":
+        # Regime exits need regime bars / CVD context / indicator flips; never approximated by a tape-only spec.
+        return None, f"EXIT_NOT_TAPE_REPLAYABLE:{family}:REGIME_BARS_REQUIRED"
     return None, f"EXIT_FAMILY_UNSUPPORTED:{family or 'MISSING'}"
 
 

@@ -15,7 +15,7 @@ PROVENANCE = {
 EPOCH = "epoch-tile-no-fill"
 
 
-def _order(lane="FAMILY_NOTRADE_FOLLOW_TAKER_60", reason="SIGNAL_TTL_EXPIRED", trade_id="ntt-nofill-1"):
+def _order(lane="FAMILY_COMMITTED_FADE_TAKER_90", reason="SIGNAL_TTL_EXPIRED", trade_id="ntt-nofill-1"):
     schedule = {
         "schema": "research_chase_schedule_v1", "authoritative": True,
         "intervals": [{"bucket_id": "b0", "start_ts": 100.0, "end_ts": 1900.0, "limit_price": 100.0}],
@@ -45,7 +45,7 @@ def test_unfilled_tile_order_writes_one_tile_no_fill_terminal(tmp_path, monkeypa
     rows = [r for r in _lifecycle_rows(tmp_path) if r.get("terminal_no_fill") is True]
     assert len(rows) == 1
     row = rows[0]
-    assert row["research_lane"] == "FAMILY_NOTRADE_FOLLOW_TAKER_60" and row["outcome_state"] == "NO_FILL"
+    assert row["research_lane"] == "FAMILY_COMMITTED_FADE_TAKER_90" and row["outcome_state"] == "NO_FILL"
     assert row["policy_signature"] == receipt["policy_signature"] and row["policy_signature"].startswith("paper-policy-")
     assert row["event_id"] == "ntt-nofill-1" and row["episode_id"] == receipt["episode_id"]
     assert row["terminal_ttl_expired"] is True and row["forced_terminal"] is False
@@ -80,9 +80,9 @@ def test_completion_reconciler_proves_the_tile_no_fill_entry_outcome(tmp_path, m
     rows = []
     for path in tmp_path.rglob("*.jsonl"):
         rows += [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    key = LifecycleKey(EPOCH, receipt["episode_id"], receipt["policy_signature"], "FAMILY_NOTRADE_FOLLOW_TAKER_60")
+    key = LifecycleKey(EPOCH, receipt["episode_id"], receipt["policy_signature"], "FAMILY_COMMITTED_FADE_TAKER_90")
     result = evaluate_lifecycle_completion(
-        key, [r for r in rows if r.get("research_lane") == "FAMILY_NOTRADE_FOLLOW_TAKER_60"], now=10_000.0)
+        key, [r for r in rows if r.get("research_lane") == "FAMILY_COMMITTED_FADE_TAKER_90"], now=10_000.0)
     blockers = set(result["blockers"])
     assert not blockers & {"UNIQUE_ENTRY_OUTCOME_NOT_PROVEN", "POSITION_NOT_PROVEN_CLOSED",
                            "OPEN_QUANTITY_MISSING", "EVENT_ID_MISSING_OR_AMBIGUOUS",

@@ -102,8 +102,6 @@ def test_registry_exit_specs_map_every_active_tile():
     assert fade.breakeven == pytest.approx((20.0, 5.0)) and fade.early_cut == pytest.approx((-12.0, 300, 2.0))
     control = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_RANDOM_CONTROL_TAKER_90"])[0]
     assert control == fade
-    h9 = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_NOTRADE_FOLLOW_TAKER_60"])[0]
-    assert (h9.trail_atr, h9.arm_atr) == (1.5, 2.0) and h9.needs_atr and h9.early_cut is None
     ladder_spec = {"exit_policy": {"family": "ATR_TRAIL_PROFIT_LOCK", "initial_stop_atr_k": 1.5,
                                    "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0,
                                    "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},

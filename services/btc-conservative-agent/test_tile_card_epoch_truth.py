@@ -1,11 +1,13 @@
 """Tile cards show current-epoch truth only (Health Monitor H-B finding).
 
-H-B once read 24 closes / +$0.44 labelled 'historical/analyzer total' while
-the epoch's true figure was 2 closes / +$0.07.  These tests pin the fixes:
-the persistent lane ledger is segregated per epoch (copied aside, never
-deleted), forced closes stay out of it, the tile scope uses the full epoch
-ledger rather than the display-capped Trades list, and approval-based metrics
-read n/a when no approval count covers the epoch.
+The H-B tile (now retired in PHASE02) once read 24 closes / +$0.44 labelled
+'historical/analyzer total' while the epoch's true figure was 2 closes / +$0.07.
+The epoch-truth machinery is generic and lane-agnostic, so these tests pin the
+fixes with H-A as the representative surviving lane: the persistent lane ledger
+is segregated per epoch (copied aside, never deleted), forced closes stay out of
+it, the tile scope uses the full epoch ledger rather than the display-capped
+Trades list, and approval-based metrics read n/a when no approval count covers
+the epoch.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ BOT_PATH = Path(__file__).with_name("bot.py")
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
 BOT_TREE = ast.parse(BOT_SOURCE)
 
-HB = "FAMILY_NOTRADE_FOLLOW_TAKER_60"
+HA = "FAMILY_COMMITTED_FADE_TAKER_90"
 FORCED = frozenset({"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL"})
 CUTOFF_UTC = "2026-10-04T08:37:00+00:00"
 CUTOFF_TS = datetime.fromisoformat(CUTOFF_UTC).timestamp()
@@ -49,17 +51,17 @@ def _stats_namespace(**extra):
     )
 
 
-def _hb_ledger():
-    return {HB: {"lane": HB, "closes": 2, "net_pnl_usd": 0.07, "wins": 1, "losses": 1}}
+def _ha_ledger():
+    return {HA: {"lane": HA, "closes": 2, "net_pnl_usd": 0.07, "wins": 1, "losses": 1}}
 
 
 def test_epoch_tile_uses_full_ledger_not_capped_trades_list():
     ns = _stats_namespace(_derive_lane_pnl_ledger_from_trades=lambda rows: {})
     capped_trades = [{"research_lane": "OTHER", "net_pnl_usd": 1.0}] * 5
     out = ns["_scope_pathway_specs_to_signed_epoch"](
-        {"lanes": [{"lane": HB, "session_stats": {"real_fills": 24, "net_pnl_real": 0.44}}]},
-        capped_trades, {HB: {"approves": 4}}, CUTOFF_UTC,
-        ledger=_hb_ledger(), counters_since_ts=CUTOFF_TS - 60,
+        {"lanes": [{"lane": HA, "session_stats": {"real_fills": 24, "net_pnl_real": 0.44}}]},
+        capped_trades, {HA: {"approves": 4}}, CUTOFF_UTC,
+        ledger=_ha_ledger(), counters_since_ts=CUTOFF_TS - 60,
     )
     stats = out["lanes"][0]["session_stats"]
     assert stats["real_fills"] == 2
@@ -74,8 +76,8 @@ def test_epoch_tile_uses_full_ledger_not_capped_trades_list():
 def test_counters_younger_than_epoch_make_approval_metrics_na():
     ns = _stats_namespace(_derive_lane_pnl_ledger_from_trades=lambda rows: {})
     out = ns["_scope_pathway_specs_to_signed_epoch"](
-        {"lanes": [{"lane": HB}]}, [], {HB: {"approves": 1}}, CUTOFF_UTC,
-        ledger=_hb_ledger(), counters_since_ts=CUTOFF_TS + 3600,  # process restarted later
+        {"lanes": [{"lane": HA}]}, [], {HA: {"approves": 1}}, CUTOFF_UTC,
+        ledger=_ha_ledger(), counters_since_ts=CUTOFF_TS + 3600,  # process restarted later
     )
     stats = out["lanes"][0]["session_stats"]
     assert stats["real_fills"] == 2 and stats["net_pnl_real"] == 0.07
@@ -140,14 +142,14 @@ def _ledger_namespace(tmp_path, trades, boundary_ts):
 
 def test_pre_epoch_ledger_is_archived_not_deleted_and_rebuilt_from_epoch(tmp_path):
     trades = [
-        {"research_lane": HB, "net_pnl_usd": 0.10, "exit_ts": CUTOFF_TS - 900},  # previous epoch
-        {"research_lane": HB, "net_pnl_usd": 0.12, "exit_ts": CUTOFF_TS + 60},
-        {"research_lane": HB, "net_pnl_usd": -0.05, "exit_ts": CUTOFF_TS + 120},
-        {"research_lane": HB, "net_pnl_usd": -0.30, "exit_ts": CUTOFF_TS + 180,
+        {"research_lane": HA, "net_pnl_usd": 0.10, "exit_ts": CUTOFF_TS - 900},  # previous epoch
+        {"research_lane": HA, "net_pnl_usd": 0.12, "exit_ts": CUTOFF_TS + 60},
+        {"research_lane": HA, "net_pnl_usd": -0.05, "exit_ts": CUTOFF_TS + 120},
+        {"research_lane": HA, "net_pnl_usd": -0.30, "exit_ts": CUTOFF_TS + 180,
          "exit_reason": "ADMIN_MANUAL_CLOSE"},  # deploy flatten: excluded
     ]
     ns = _ledger_namespace(tmp_path, trades, CUTOFF_TS)
-    stale = {"schema": "lane_pnl_ledger_v1", "lanes": {HB: {"closes": 24, "net_pnl_usd": 0.44}}}
+    stale = {"schema": "lane_pnl_ledger_v1", "lanes": {HA: {"closes": 24, "net_pnl_usd": 0.44}}}
     Path(ns["LANE_PNL_LEDGER_FILE"]).write_text(json.dumps(stale), encoding="utf-8")
 
     result = ns["_segregate_lane_pnl_ledger_for_epoch"]()
@@ -157,9 +159,9 @@ def test_pre_epoch_ledger_is_archived_not_deleted_and_rebuilt_from_epoch(tmp_pat
     assert "research_archive/pre_epoch/ce-20261004-v31-freeze21b" in result["archived_to"].replace("\\", "/")
     current = json.loads(Path(ns["LANE_PNL_LEDGER_FILE"]).read_text(encoding="utf-8"))
     assert current["epoch_id"] == "ce-20261004-v31-freeze21b"
-    assert current["lanes"][HB]["closes"] == 2
-    assert current["lanes"][HB]["net_pnl_usd"] == 0.07
-    assert ns["state"]["lane_pnl_ledger"][HB]["closes"] == 2
+    assert current["lanes"][HA]["closes"] == 2
+    assert current["lanes"][HA]["net_pnl_usd"] == 0.07
+    assert ns["state"]["lane_pnl_ledger"][HA]["closes"] == 2
     assert Path(ns["LANE_PNL_EPOCH_RECEIPTS_FILE"]).is_file()
 
     again = ns["_segregate_lane_pnl_ledger_for_epoch"]()
@@ -168,13 +170,13 @@ def test_pre_epoch_ledger_is_archived_not_deleted_and_rebuilt_from_epoch(tmp_pat
 
 def test_forced_close_never_enters_the_persistent_lane_ledger(tmp_path):
     ns = _ledger_namespace(tmp_path, [], CUTOFF_TS)
-    ns["update_lane_pnl_ledger"](HB, "CLOSE", 0.12, "LONG", exit_reason="TP")
-    ns["update_lane_pnl_ledger"](HB, "CLOSE", -0.40, "LONG", exit_reason="ADMIN_MANUAL_CLOSE")
-    bucket = ns["state"]["lane_pnl_ledger"][HB]
+    ns["update_lane_pnl_ledger"](HA, "CLOSE", 0.12, "LONG", exit_reason="TP")
+    ns["update_lane_pnl_ledger"](HA, "CLOSE", -0.40, "LONG", exit_reason="ADMIN_MANUAL_CLOSE")
+    bucket = ns["state"]["lane_pnl_ledger"][HA]
     assert bucket["closes"] == 1 and bucket["net_pnl_usd"] == 0.12
     on_disk = json.loads(Path(ns["LANE_PNL_LEDGER_FILE"]).read_text(encoding="utf-8"))
     assert on_disk["epoch_id"] == "ce-20261004-v31-freeze21b"
-    assert on_disk["lanes"][HB]["closes"] == 1
+    assert on_disk["lanes"][HA]["closes"] == 1
 
 
 def test_boot_segregates_after_session_trades_load():

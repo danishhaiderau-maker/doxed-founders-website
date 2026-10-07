@@ -8732,6 +8732,11 @@ DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 # DeepSeek retired "deepseek-v4-flash" (2026-10-01, inside the 18:56-21:30Z
 # provider outage) and answers those requests as "deepseek-flash"
 # (DeepSeek-V4.1-Flash).  Request the served id explicitly.
+# PHASE02 (2026-10-07): "deepseek-flash" is the explicit version pin for the
+# shared trading_direction call that drives the committed-fade tiles (H-A,
+# GS-06). The committed-fade directional call must stay byte-comparable across
+# provider model renames, so it is pinned to this served id, not a floating
+# "latest" alias; _deepseek_model() fails closed on any other value.
 DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 DEEPSEEK_SUPPORTED_MODELS = frozenset({"deepseek-flash", "deepseek-v4-pro"})
 DEEPSEEK_RETIRED_MODEL_ALIASES = {"deepseek-v4-flash": "deepseek-flash"}
