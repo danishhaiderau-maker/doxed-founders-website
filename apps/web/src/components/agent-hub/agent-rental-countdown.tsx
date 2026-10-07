@@ -50,7 +50,7 @@ export function AgentRentalCountdown({
         </p>
         {!compact && (
           <p className="mt-1 text-[11px] text-zinc-500">
-            Complimentary through {new Date(expiresAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+            Permanent — no expiry
           </p>
         )}
       </div>

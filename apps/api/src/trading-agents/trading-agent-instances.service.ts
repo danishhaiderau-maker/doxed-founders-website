@@ -135,8 +135,8 @@ export class TradingAgentInstancesService {
       walletNote = funding?.message;
     }
 
-    // Founders get a free ~6-month rental; everyone else gets the paid 1-week hire.
-    const hireExpiresAt = founderEntitled
+    // Founders get a permanent free rental (no expiry); everyone else gets the paid 1-week hire.
+    const hireExpiresAt: Date | null = founderEntitled
       ? freeRentalExpiresAt()
       : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const sessionState = buildFreshInstanceDashboardState('live', exchangeBalanceUsd, {
@@ -201,7 +201,7 @@ export class TradingAgentInstancesService {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
       body: founderEntitled
-        ? `Founder access — free rental granted through ${hireExpiresAt.toLocaleString()}. No DDollar deducted. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`
+        ? `Founder access — free rental granted (permanent, no expiry). No DDollar deducted. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`
         : `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`,
       link: `/agent-hub/${agent.slug}`,
     });
@@ -210,7 +210,7 @@ export class TradingAgentInstancesService {
       ...this.formatInstance(instance, agent),
       hireFeeDdollar: needsHireFee ? cost : 0,
       paperDdRefunded: paperDdSpent > 0 ? paperDdSpent : 0,
-      rentalExpiresAt: hireExpiresAt.toISOString(),
+      rentalExpiresAt: hireExpiresAt ? hireExpiresAt.toISOString() : null,
       founderRentalEntitled: founderEntitled,
       exchangeBalanceUsd,
       walletNote,
@@ -687,9 +687,9 @@ export class TradingAgentInstancesService {
     if (!paused && instance.expiresAt && instance.expiresAt < new Date()) {
       const entitlement = await resolveFounderRentalEntitlement(this.prisma, userId);
       if (entitlement.entitled) {
-        // Founder/operator: auto-grant the bounded free rental instead of
+        // Founder/operator: auto-grant the permanent free rental instead of
         // blocking the arm path. `expiresAt` remains the single source of
-        // truth for the execution worker, so extending it here also unblocks
+        // truth for the execution worker, so clearing it to NULL also unblocks
         // live-copy execution without touching the worker.
         const freeExpiry = freeRentalExpiresAt();
         await this.prisma.tradingAgentInstance.update({
@@ -908,9 +908,9 @@ export class TradingAgentInstancesService {
     const entitlement = await resolveFounderRentalEntitlement(this.prisma, userId);
     const founderEntitled = entitlement.entitled;
 
-    let hireExpiresAt: Date;
+    let hireExpiresAt: Date | null;
     if (founderEntitled) {
-      // Founders/operators renew for free, extended to the bounded free window.
+      // Founders/operators renew for free, permanent (no expiry).
       hireExpiresAt = freeRentalExpiresAt();
     } else {
       await this.points.spend(userId, cost, `AGENT_HIRE_RENEW:${agent.slug}`);
@@ -945,14 +945,14 @@ export class TradingAgentInstancesService {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} rental renewed`,
       body: founderEntitled
-        ? `Founder access — free rental extended through ${hireExpiresAt.toLocaleString()}. No DDollar deducted.`
-        : `Live copy extended through ${hireExpiresAt.toLocaleString()} — you can start real trading again.`,
+        ? `Founder access — free rental permanent (no expiry). No DDollar deducted.`
+        : `Live copy extended through ${hireExpiresAt!.toLocaleString()} — you can start real trading again.`,
       link: `/agent-hub/${agent.slug}`,
     });
 
     return {
       ok: true,
-      rentalExpiresAt: hireExpiresAt.toISOString(),
+      rentalExpiresAt: hireExpiresAt ? hireExpiresAt.toISOString() : null,
       ddSpent: founderEntitled ? 0 : cost,
       founderRentalEntitled: founderEntitled,
     };

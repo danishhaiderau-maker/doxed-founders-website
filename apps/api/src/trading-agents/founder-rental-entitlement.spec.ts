@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FounderPresenceLevel, UserRole } from '@prisma/client';
 import {
-  FOUNDER_FREE_RENTAL_WINDOW_MS,
   freeRentalExpiresAt,
   recordFounderRentalGrant,
   resolveFounderRentalEntitlement,
@@ -40,11 +39,8 @@ function withOperatorId<T>(value: string | undefined, fn: () => T): T {
   }
 }
 
-test('freeRentalExpiresAt returns a bounded ~6-month window', () => {
-  const now = new Date('2026-10-07T00:00:00.000Z');
-  const expires = freeRentalExpiresAt(now);
-  assert.equal(expires.getTime() - now.getTime(), FOUNDER_FREE_RENTAL_WINDOW_MS);
-  assert.equal(FOUNDER_FREE_RENTAL_WINDOW_MS, 180 * 24 * 60 * 60 * 1000);
+test('freeRentalExpiresAt returns null (permanent, no expiry)', () => {
+  assert.equal(freeRentalExpiresAt(), null);
 });
 
 test('operator is entitled for free rental', async () => {

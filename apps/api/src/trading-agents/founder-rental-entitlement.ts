@@ -6,8 +6,8 @@ import type { PrismaService } from '../prisma/prisma.service';
  *
  * The platform owner (the account configured as `DDOLLAR_GATE_OPERATOR_USER_ID`)
  * and any verified founder are entitled to run Bitfinex live-copy on their own
- * trading agent WITHOUT the weekly DDollar rental, for a bounded ~6-month
- * window, so they can arm and test live copy. This is a first-class,
+ * trading agent WITHOUT the weekly DDollar rental, permanently (no expiry),
+ * so they can arm and test live copy. This is a first-class,
  * role-derived entitlement — not a per-account fee bypass and not a global
  * monetization toggle. Every grant writes a zero-DDollar `PointLedger` entry
  * (actionKey `FOUNDER_RENTAL_GRANT`) so the exemption is auditable.
@@ -16,8 +16,12 @@ import type { PrismaService } from '../prisma/prisma.service';
  * other account.
  */
 
-/** Bounded founder free-rental window: ~6 months. */
-export const FOUNDER_FREE_RENTAL_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
+/**
+ * Founder/operator free rental is permanent (no expiry). `freeRentalExpiresAt`
+ * returns `null` to mean "never expires": the instance `expiresAt` stays NULL
+ * and the execution worker treats NULL as non-expiring
+ * (`hireExpiryBlocksNewLiveEntries(null)` returns false).
+ */
 
 /** Presence levels that qualify a founder as "verified" for free rental. */
 const VERIFIED_FOUNDER_PRESENCE_LEVELS: readonly FounderPresenceLevel[] = [
@@ -34,8 +38,8 @@ export type FounderRentalEntitlement = {
 
 type EntitlementPrisma = Pick<PrismaService, 'user' | 'founder' | 'pointLedger'>;
 
-export function freeRentalExpiresAt(now = new Date()): Date {
-  return new Date(now.getTime() + FOUNDER_FREE_RENTAL_WINDOW_MS);
+export function freeRentalExpiresAt(): null {
+  return null;
 }
 
 /**
