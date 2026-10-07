@@ -40,7 +40,36 @@ _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
 _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
 _BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
-_BOOTSTRAP_RECORDS_PER_STEP = 64
+_BOOTSTRAP_RECORDS_PER_STEP = 512
+
+
+def _bootstrap_records_per_step() -> int:
+    """Effective cooperative record budget (env or in-process ops mutation)."""
+    raw = str(os.environ.get("V3_BOOTSTRAP_RECORDS_PER_STEP") or "").strip()
+    if raw:
+        try:
+            return max(1, min(512, int(raw)))
+        except ValueError:
+            return int(_BOOTSTRAP_RECORDS_PER_STEP)
+    # Honor force-bootstrap in-process raises when env is unset.
+    try:
+        return max(1, min(4096, int(_BOOTSTRAP_RECORDS_PER_STEP)))
+    except (TypeError, ValueError):
+        return 512
+
+
+def _bootstrap_bytes_per_step() -> int:
+    """Effective cooperative byte budget (env or in-process ops mutation)."""
+    raw = str(os.environ.get("V3_BOOTSTRAP_BYTES_PER_STEP") or "").strip()
+    if raw:
+        try:
+            return max(1, min(32 * 1024 * 1024, int(raw)))
+        except ValueError:
+            return int(_BOOTSTRAP_BYTES_PER_STEP)
+    try:
+        return max(1, min(64 * 1024 * 1024, int(_BOOTSTRAP_BYTES_PER_STEP)))
+    except (TypeError, ValueError):
+        return 8 * 1024 * 1024
 
 
 def _first_present(*values: Any) -> Any:
@@ -1114,8 +1143,16 @@ class V3EvidenceStore:
     def _lifecycle_membership_dir(self) -> Path:
         return self.receipt_dir / "lifecycle_membership_v1"
 
-    def _atomic_json_receipt(self, path: Path, payload: dict[str, Any]) -> None:
-        """Publish one small receipt without exposing a partial JSON file."""
+    def _atomic_json_receipt(
+        self, path: Path, payload: dict[str, Any], *, fsync_dir: bool = True,
+    ) -> None:
+        """Publish one small receipt without exposing a partial JSON file.
+
+        ``fsync_dir=False`` defers the directory durability barrier so a hot
+        loop can batch many renames into a single directory fsync. The file
+        content is always fsynced BEFORE its rename regardless of this flag,
+        so content durability is unchanged and receipt bytes are identical.
+        """
         path = self._assert_contained(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         candidate: str | None = None
@@ -1127,7 +1164,8 @@ class V3EvidenceStore:
                 os.fsync(handle.fileno())
             os.replace(candidate, path)
             candidate = None
-            _fsync_directory(path.parent)
+            if fsync_dir:
+                _fsync_directory(path.parent)
         finally:
             if candidate:
                 try:
@@ -1523,6 +1561,7 @@ class V3EvidenceStore:
     def _publish_record_receipt(
         self, ledger: str, record_id: str, *, offset: int | None, payload: bytes, state: str,
         row_payload_utf8: str | None = None,
+        fsync_dir: bool = True,
     ) -> dict[str, Any]:
         receipt = {
             "schema": "emergency_record_idempotency_v1", "state": state,
@@ -1538,7 +1577,11 @@ class V3EvidenceStore:
         backend = self._transactional_receipts()
         if backend is not None:
             return backend.put(receipt)
-        self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
+        path = self._record_receipt_path(ledger, record_id)
+        if fsync_dir:
+            self._atomic_json_receipt(path, receipt)
+        else:
+            self._atomic_json_receipt(path, receipt, fsync_dir=False)
         return receipt
 
     def _publish_completeness(
@@ -1660,8 +1703,8 @@ class V3EvidenceStore:
             return backend.activate(paths, generations, boundary_proof)
 
     def advance_emergency_idempotency_bootstrap(
-        self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP,
-        max_records: int = _BOOTSTRAP_RECORDS_PER_STEP,
+        self, ledger: str, *, max_bytes: int | None = None,
+        max_records: int | None = None,
     ) -> dict[str, Any]:
         """Cooperatively index a bounded ledger prefix outside pressure only.
 
@@ -1674,8 +1717,12 @@ class V3EvidenceStore:
         path = self.ledger_path(ledger)
         if storage_blocks_new_nonessential_research(str(self.root)):
             return {"complete": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
-        limit = max(1, min(int(max_bytes), _BOOTSTRAP_BYTES_PER_STEP))
-        record_limit = max(1, min(int(max_records), _BOOTSTRAP_RECORDS_PER_STEP))
+        byte_ceiling = _bootstrap_bytes_per_step()
+        record_ceiling = _bootstrap_records_per_step()
+        requested_bytes = byte_ceiling if max_bytes is None else int(max_bytes)
+        requested_records = record_ceiling if max_records is None else int(max_records)
+        limit = max(1, min(requested_bytes, byte_ceiling))
+        record_limit = max(1, min(requested_records, record_ceiling))
         with self._exclusive(path):
             signature = _path_signature(path)
             if signature is None:
@@ -1703,6 +1750,11 @@ class V3EvidenceStore:
             cursor_anchor = state.get("cursor_anchor") if same_source else None
             consumed = 0
             records_indexed = 0
+            # All per-row record receipts for one ledger share a single directory
+            # (``emergency_record_idempotency_v1/<ledger>``). Content durability
+            # remains per-file (each file is fsynced before its rename); only the
+            # directory barrier is batched to one fsync per bootstrap step.
+            record_receipt_dir = self._bootstrap_path(ledger).parent
             try:
                 fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
                 with os.fdopen(fd, "rb") as handle:
@@ -1720,7 +1772,8 @@ class V3EvidenceStore:
                         if not record_id or len(record_id.encode("utf-8")) > _MAX_RECEIPT_RECORD_ID_BYTES:
                             raise ValueError("BOOTSTRAP_INVALID_OR_OVERSIZE_RECORD_ID")
                         self._publish_record_receipt(
-                            ledger, record_id, offset=offset, payload=payload, state="COMMITTED"
+                            ledger, record_id, offset=offset, payload=payload,
+                            state="COMMITTED", fsync_dir=False,
                         )
                         cursor += len(payload)
                         consumed += len(payload)
@@ -1730,7 +1783,11 @@ class V3EvidenceStore:
                             "sha256": hashlib.sha256(payload).hexdigest(),
                         }
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                if records_indexed:
+                    _fsync_directory(record_receipt_dir)
                 return {"complete": False, "blocked": True, "reason": str(exc), "cursor": cursor}
+            if records_indexed:
+                _fsync_directory(record_receipt_dir)
             after = _path_signature(path)
             self._atomic_json_receipt(self._bootstrap_path(ledger), {
                 "schema": "emergency_record_index_bootstrap_v1", "ledger": ledger,
@@ -1777,7 +1834,7 @@ class V3EvidenceStore:
         for checked in range(len(ledgers)):
             ledger = ledgers[index]
             result = self.advance_emergency_idempotency_bootstrap(
-                ledger, max_records=_BOOTSTRAP_RECORDS_PER_STEP,
+                ledger, max_records=_bootstrap_records_per_step(),
             )
             total_records_indexed += int(result.get("records_indexed") or 0)
             total_bytes_indexed += int(result.get("bytes_indexed") or 0)
