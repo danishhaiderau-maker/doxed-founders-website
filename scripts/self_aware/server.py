@@ -48,7 +48,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import changes, contracts, digest
 from .ai_scorecard import headline as ai_headline, json_safe
-from .config import SERVER_PORT
+from .config import SERVER_HOST, SERVER_PORT
 from .facts import parse_ts, tail_jsonl
 from .store import QueryRejected
 
@@ -59,8 +59,8 @@ class SelfAwareServer(ThreadingHTTPServer):
     engine = None
 
 
-def make_server(engine, port: int = SERVER_PORT) -> SelfAwareServer:
-    srv = SelfAwareServer(("127.0.0.1", port), Handler)
+def make_server(engine, port: int = SERVER_PORT, host: str = SERVER_HOST) -> SelfAwareServer:
+    srv = SelfAwareServer((host, port), Handler)
     srv.engine = engine
     return srv
 
@@ -376,6 +376,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(503, {"error": "bitfinex readiness not computed yet (job runs at start and every 5 min)"})
         self._send(200, doc)
 
+    def live(self, q):
+        # Read-only, on-demand fetch of live production sources (Fly + Railway).
+        # Non-fatal: a failed network hop is returned as structured evidence.
+        from . import live_sources  # noqa: PLC0415
+
+        self._send(200, live_sources.collect_live())
+
+    def diagnose(self, q):
+        # Aggregate diagnose (Task 3): fan out to Fly + Railway + exchange
+        # telemetry, then fold in the local self-aware verdict.
+        from . import live_sources  # noqa: PLC0415
+
+        local = (self.eng.docs.get("health") or {}).get("verdict")
+        self._send(200, live_sources.diagnose(local_verdict=local))
+
     def data_compat(self, q):
         doc = self.eng.docs.get("compat")
         if not doc:
@@ -451,6 +466,8 @@ ROUTES = {
     "/api/selfaware/contracts/registry": Handler.contracts_registry,
     "/api/selfaware/data/compatibility": Handler.data_compat, "/api/selfaware/fees": Handler.fees,
     "/api/selfaware/bitfinex": Handler.bitfinex,
+    "/api/selfaware/live": Handler.live,
+    "/api/selfaware/diagnose": Handler.diagnose,
 }
 
 _COLOR = {"RED": "#e5484d", "AMBER": "#f5a524", "GREEN": "#30a46c", "SKIP": "#8b8d98", None: "#8b8d98"}
