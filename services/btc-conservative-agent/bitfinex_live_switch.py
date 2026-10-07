@@ -67,6 +67,7 @@ DENY_QTY_UNAVAILABLE = "EXCHANGE_QUANTITY_UNAVAILABLE"
 DENY_STOP_COVERAGE = "STOP_COVERAGE_UNVERIFIED"
 DENY_REDUCE_ONLY = "REDUCE_ONLY_UNSUPPORTED"
 DENY_SWITCH_NOT_REQUESTED = "SWITCH_NOT_REQUESTED"
+DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
 # Terminal state meaning the lane is genuinely allowed and armed.
 ALLOW_ARMED = "ARMED"
 
@@ -364,6 +365,38 @@ class BitfinexLiveSwitch:
             "last_denied_at": snap.get("last_denied_at"),
             "evaluated_at": now,
         }
+
+    # -- relay delivery gate (per-tile, fail-closed) ----------------------
+    def delivery_gate(self, lane: str, *, created_at_unix=None,
+                      now: float | None = None) -> tuple[bool, str | None]:
+        """Whether a pending relay record may be delivered to Bitfinex.
+
+        Consulted by the relay delivery gate immediately before any live order
+        is placed. A record is deliverable only when BOTH hold atomically:
+
+        1. the lane's "Bitfinex Live Orders" switch is currently ON; and
+        2. the record was created at/after the switch's last arm time
+           (``last_allow_ts``) — so flipping a tile ON can never copy a paper
+           intent that was created while the tile was OFF.
+
+        Anything else fails closed with a stable denial code. This never
+        mutates the switch: a delivery-time denial only reports the reason.
+        """
+        now = time.time() if now is None else float(now)
+        lane = str(lane or "").upper()
+        snap = self.snapshot(lane, now=now)
+        if not lane or not bool(snap.get("bitfinex_live_orders")):
+            return False, DENY_SWITCH_NOT_REQUESTED
+        allow_ts = snap.get("last_allow_ts")
+        if not allow_ts:
+            return False, DENY_SWITCH_NOT_REQUESTED
+        try:
+            created = float(created_at_unix) if created_at_unix is not None else 0.0
+        except (TypeError, ValueError):
+            created = 0.0
+        if created <= 0 or created < float(allow_ts):
+            return False, DENY_TILE_PRE_ARMING
+        return True, None
 
 
 def _registry_signature() -> str:

@@ -136,6 +136,8 @@ def load_drain(box, *, active=True, force_paper=True, live=False, enabled=False,
         "_relay_outbox_data_epoch": lambda: None,  # no declared epoch: retirement never applies here
         "_relay_delivery_guard": RelayDeliveryGuard(box.path.with_name("quarantine.jsonl")),
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
+        # Per-tile live-orders switch is exercised separately (test_two_tier_relay_gate).
+        "_filter_relay_rows_by_live_switch": lambda rows, armed=False, now=None: list(rows),
     }
     exec(compile(ast.Module(body=functions, type_ignores=[]), "bot.py", "exec"), ns)
     return ns, sent

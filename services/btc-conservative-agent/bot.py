@@ -9786,6 +9786,12 @@ def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ac
         rows = _relay_delivery_guard.filter_deliverable(
             rows, owner_id=owner_id, armed=armed, armed_at_ts=armed_at,
         )
+        # Two-tier model, tier 2: even after the master relay is armed, a paper
+        # intent may only be copied to Bitfinex when its lane's "Bitfinex Live
+        # Orders" switch is ON *and* the intent was created at/after that
+        # lane's arm time. Fail-closed: a withheld record stays pending (never
+        # POSTed or ACKed) and the denial is durably recorded.
+        rows = _filter_relay_rows_by_live_switch(rows, armed=armed)
         acked = sum(
             1 for row in rows
             if _deliver_relay_outbox_record(row, commit_before_ack=commit_before_ack)
@@ -36829,6 +36835,12 @@ __ADMIN_ACCESS_CONTROLS__
     <button onclick="window.location.href='/api/export.csv'" title="Owner-auth ZIP of CSV/JSONL collection files (same as /api/export_csv)">Download CSV Logs</button>
 </div>
 
+<div id="bitfinexLiveControl" style="margin:12px 0;padding:12px 14px;background:#1a1010;border:1px solid #f59e0b;border-radius:8px;">
+  <strong style="color:#f59e0b;font-size:1.05em;">Bitfinex Live Control — two-tier</strong>
+  <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">The master switch arms the <strong>account</strong> for live Bitfinex copy and does <strong>not</strong> place orders by itself. Each tile card below has its own "Bitfinex Live Orders" switch — a tile copies real orders only when <strong>BOTH</strong> the master is ON <strong>and</strong> that tile is ON. Default: master OFF, every tile OFF.</p>
+  <div id="bitfinexMasterPanel" style="margin-top:6px;"></div>
+</div>
+
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen - tiles change only through the atomic registry lifecycle</p>
@@ -37301,6 +37313,64 @@ DASHBOARD_JS = """(function () {
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
         '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + '</div>' +
         '<div><strong>Entry offsets (tile registry):</strong> ' + entryOffsets + '</div>';
+    }
+    function bitfinexMasterOn(d) {
+      if (d && d.bitfinex_master) return d.bitfinex_master.master_on === true;
+      return d && d.live_armed === true && d.bitfinex_live_enabled === true;
+    }
+    function bitfinexTileSwitchRow(d, lane) {
+      const sw = (d && d.bitfinex_live_switch) || {};
+      const rows = sw.rows || [];
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i] && rows[i].lane === lane) return rows[i];
+      }
+      return null;
+    }
+    function renderBitfinexMaster(d) {
+      const el = document.getElementById('bitfinexMasterPanel');
+      if (!el) return;
+      const m = (d && d.bitfinex_master) || {};
+      const on = bitfinexMasterOn(d);
+      const keysOk = m.keys_ok === true;
+      const block = m.relay_delivery_block;
+      const state = on
+        ? '<span style="color:#f59e0b;font-weight:700;">ON (armed)</span>'
+        : '<span style="color:#8b949e;font-weight:700;">OFF (default)</span>'
+          + (block ? ' · <span style="color:#f85149;">arm blocked: ' + String(block) + '</span>' : '');
+      const keys = keysOk
+        ? '<span style="color:#3fb950;">present</span>'
+        : '<span style="color:#f85149;">missing</span>';
+      const btn = on
+        ? '<button type="button" onclick="toggleBitfinexMaster(false)" style="padding:7px 16px;font-weight:bold;background:#da3633;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn master OFF</button>'
+        : '<button type="button" onclick="toggleBitfinexMaster(true)" style="padding:7px 16px;font-weight:bold;background:#238636;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn master ON</button>';
+      el.innerHTML = '<div><strong>Master "Bitfinex Live":</strong> ' + state + ' · API keys ' + keys + '</div>'
+        + '<div style="margin-top:6px;">' + btn
+        + ' <span style="color:#8b949e;font-size:0.82em;">(arms the account only — never places an order by itself)</span></div>';
+    }
+    async function toggleBitfinexMaster(armed) {
+      if (!confirm((armed ? 'ARM' : 'DISARM') + ' the master Bitfinex Live switch?'
+        + (armed ? ' This enables the account for live copy (does not place orders by itself).' : ' This disarms all live copy and turns every tile live-orders switch OFF.'))) return;
+      const res = await post('/api/live_arm', {armed: armed});
+      if (res && res.ok) {
+        let body = {};
+        try { body = await res.json(); } catch (_) {}
+        if (body.block_reason) { alert('Arm blocked: ' + body.block_reason); }
+        else if (body.error) { alert('Arm failed: ' + body.error); }
+        refresh();
+      }
+    }
+    async function toggleBitfinexTileLive(lane, enabled) {
+      if (!confirm((enabled ? 'Turn ON' : 'Turn OFF') + ' "Bitfinex Live Orders" for lane ' + lane + '?'
+        + (enabled ? ' Live copy still requires the master switch to be ON.' : ' This stops new live Bitfinex orders from this tile.'))) return;
+      const res = await post('/api/bitfinex/tiles/' + encodeURIComponent(lane) + '/live-orders', {enabled: enabled});
+      if (res && res.ok) {
+        let body = {};
+        try { body = await res.json(); } catch (_) {}
+        if (body.denials && body.denials.length && enabled) {
+          alert('Tile not eligible: ' + body.denials.join('; '));
+        }
+        refresh();
+      }
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -37816,6 +37886,34 @@ DASHBOARD_JS = """(function () {
           } else {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">LAB MODE — simulating full pipeline · no real orders · toggle ON to trade</div>';
           }
+          // Two-tier model, tier 2: per-tile "Bitfinex Live Orders" switch.
+          // A tile copies real orders only when BOTH master ON and this tile ON.
+          const liveRow = bitfinexTileSwitchRow(d, spec.lane);
+          const tileLiveOn = !!(liveRow && liveRow.bitfinex_live_orders === true);
+          const tileLiveEligible = !!(liveRow && liveRow.eligible === true);
+          const tileLiveDenials = (liveRow && liveRow.denials) || [];
+          const liveMasterOn = bitfinexMasterOn(d);
+          let liveSwitchHtml = '';
+          if (spec.planned || spec.status === 'RETIRED') {
+            liveSwitchHtml = '';
+          } else {
+            liveSwitchHtml = '<button type="button" onclick="toggleBitfinexTileLive(\\'' + cardEsc(spec.lane) + '\\', ' + (tileLiveOn ? 'false' : 'true') + ')" style="padding:5px 12px;font-weight:bold;background:' + (tileLiveOn ? '#da3633' : '#238636') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (tileLiveOn ? 'Turn live OFF' : 'Turn live ON') + '</button>';
+          }
+          let liveStatus = '<span style="font-weight:700;color:' + (tileLiveOn ? '#3fb950' : '#8b949e') + ';">' + (tileLiveOn ? 'ON' : 'OFF') + '</span>';
+          if (!tileLiveOn) {
+            const reasons = [];
+            if (!liveMasterOn) reasons.push('master OFF');
+            if (tileLiveDenials.length) reasons.push(tileLiveDenials.join('; '));
+            else if (!tileLiveEligible) reasons.push('not eligible (arm-blocked)');
+            if (reasons.length) liveStatus += ' <span style="color:#f85149;font-size:0.78em;">(' + cardEsc(reasons.join(' · ')) + ')</span>';
+          }
+          const liveSwitchBlock = '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';border-radius:6px;overflow-wrap:anywhere;margin-top:10px;">'
+            + '<div style="font-weight:700;letter-spacing:0.04em;color:' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';font-size:0.92em;">BITFINEX LIVE ORDERS</div>'
+            + '<div style="margin-top:4px;">' + liveStatus + '</div>'
+            + '<div style="margin-top:6px;">' + liveSwitchHtml + '</div>'
+            + '<div style="margin-top:4px;color:#8b949e;font-size:0.9em;">' + (tileLiveOn
+              ? 'Tile armed: copies new signed paper intents to Bitfinex (master must stay ON).'
+              : 'Tile OFF (default): no live Bitfinex orders from this tile.') + '</div></div>';
           let toggleHtml = '';
           if (spec.planned || spec.status === 'RETIRED') {
             toggleHtml = '';
@@ -37830,6 +37928,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
+            + liveSwitchBlock
             + cardSections
             + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
@@ -38685,6 +38784,7 @@ DASHBOARD_JS = """(function () {
           }
         }
         renderUltimateGatePanel(d.dashboard_execution_gates || {}, d);
+        renderBitfinexMaster(d);
         if (!executionControlsBusy()) {
           if (d.ai_execution_bands) {
             syncAiBandControls(d.ai_execution_bands);
@@ -43528,6 +43628,12 @@ def _build_api_state_snapshot():
             "headline_role": (research_fill_model.HEADLINE_ROLE
                               if PAPER_FILL_MODEL == research_fill_model.FILL_MODEL_VERSION else None),
         }
+        # Two-tier Bitfinex live-control surface: the account-level master arm
+        # plus the per-tile "Bitfinex Live Orders" switch. Published here (and
+        # via /api/bitfinex/status + /api/bitfinex/overview) so the dashboard
+        # UI and any verifying agent read one canonical state.
+        snapshot["bitfinex_master"] = _bitfinex_master_state()
+        snapshot["bitfinex_live_switch"] = _bitfinex_live_switch_snapshot()
         logger.info(
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
             f"elapsed_ms={int(phase_timings['total'])} "
@@ -47223,6 +47329,14 @@ def _disarm_live_control(reason: str) -> dict:
             state["bitfinex_live_enabled"] = False
             state.pop("live_armed_at_ts", None)
         save_persistent_config()
+    # Two-tier model: disarming the master must also force every per-tile
+    # "Bitfinex Live Orders" switch OFF, so re-arming can never silently
+    # re-enable a lane that was left latched ON. Fail-closed reset; a reset
+    # failure must never block the disarm itself.
+    try:
+        _get_bfx_live_switch().reset_all_off(reason="MASTER_DISARMED")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[LIVE CONTROL] per-tile switch reset failed on disarm: {exc}")
     # Flags are already false before cancellation begins. A concurrent submit
     # must acquire the same lock and will fail its armed gate; private I/O is
     # never performed while holding trade_lock/state_lock.
@@ -56016,22 +56130,206 @@ def _bitfinex_readiness_context() -> dict:
     }
 
 
+# Canonical per-tile live-orders switch + signed audit, shared by the relay
+# delivery gate, the read API, and the per-tile toggle endpoint. Lazy so the
+# import path never touches the sidecar before the runtime data dir exists.
+_bfx_live_switch_instance = None
+_bfx_live_switch_init_lock = threading.Lock()
+_bfx_action_audit = None
+
+
+def _get_bfx_live_switch():
+    global _bfx_live_switch_instance
+    if _bfx_live_switch_instance is None:
+        with _bfx_live_switch_init_lock:
+            if _bfx_live_switch_instance is None:
+                from bitfinex_live_switch import BitfinexLiveSwitch
+                _bfx_live_switch_instance = BitfinexLiveSwitch()
+    return _bfx_live_switch_instance
+
+
+def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None) -> dict:
+    """Build the exact-size / protection dict used to evaluate one lane."""
+    from bitfinex_live_switch import compute_size_checks
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    ctx = ctx if isinstance(ctx, dict) else {}
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    margin = float(spec.get("requested_margin_usd") or 0.25)
+    return compute_size_checks(
+        margin_usd=margin,
+        leverage=100,
+        mark_price=ctx.get("mark_price"),
+        exchange_min_qty=ctx.get("exchange_min_qty"),
+        exchange_max_qty=ctx.get("exchange_max_qty"),
+        stop_coverage_verified=bool(ctx.get("stop_coverage_verified")),
+        reduce_only_supported=bool(ctx.get("reduce_only_supported")),
+    )
+
+
+def _bitfinex_master_state() -> dict:
+    """Read-only account-level arm state for the dashboard + read APIs."""
+    ctx = _bitfinex_readiness_context()
+    ga = ctx.get("global_arm") or {}
+    with state_lock:
+        armed_at = state.get("live_armed_at_ts")
+    live_armed = bool(ga.get("live_armed"))
+    bfx_enabled = bool(ga.get("bitfinex_live_enabled"))
+    return {
+        "live_armed": live_armed,
+        "bitfinex_live_enabled": bfx_enabled,
+        "master_on": live_armed and bfx_enabled,
+        "force_paper_mode": bool(ga.get("force_paper_mode")),
+        "relay_delivery_block": ga.get("relay_delivery_block"),
+        "keys_ok": bool(ga.get("keys_ok")),
+        "armed_at_ts": armed_at,
+    }
+
+
+def _bitfinex_live_switch_snapshot() -> dict:
+    """Compact per-tile switch projection for /api/state (no secrets).
+
+    Each row also carries a fresh eligibility/denial evaluation so the
+    dashboard can render "why isn't this tile armed" without an extra fetch.
+    """
+    try:
+        sw = _get_bfx_live_switch()
+        status = sw.status()
+        ctx = _bitfinex_readiness_context()
+        ga = ctx.get("global_arm") or {}
+        rows = []
+        for row in status.get("rows") or []:
+            lane = row.get("lane")
+            size = _bitfinex_size_checks_for_lane(lane, ctx)
+            whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size)
+            rows.append({
+                **row,
+                "eligible": bool(whynot.get("eligible")),
+                "denials": whynot.get("denials") or [],
+                "explanation": whynot.get("explanation"),
+            })
+        return {**status, "rows": rows}
+    except Exception:  # noqa: BLE001 - fail closed, report nothing armed
+        return {"schema": "bitfinex_live_switch_v1", "tile_count": 0,
+                "armed_lane_count": 0, "armed_lanes": [], "rows": [],
+                "error": "switch_unavailable"}
+
+
+def _record_bitfinex_delivery_denial(lane: str, reason: str, event_id: str | None = None) -> None:
+    """Durably record a per-tile delivery refusal (fail-closed, best-effort)."""
+    try:
+        if _bfx_action_audit is not None:
+            _bfx_action_audit.record(
+                action_type="ORDER_REJECTED",
+                lane=(str(lane).upper() if lane else None),
+                intent_id=event_id,
+                detail={"reason": reason, "gate": "PER_TILE_LIVE_SWITCH"},
+            )
+    except Exception as exc:  # noqa: BLE001 - audit failure must never unblock delivery
+        logger.warning(f"[RELAY DELIVERY] audit record failed for denial: {exc}")
+
+
+def _filter_relay_rows_by_live_switch(rows, *, armed: bool, now: float | None = None):
+    """Per-tile "Bitfinex Live Orders" gate for relay delivery (fail-closed).
+
+    Applies ONLY while the master relay is armed. When armed, a record may be
+    delivered to Bitfinex only if its lane's switch is ON *and* the record was
+    created at/after the lane's arm time (so flipping a tile ON can never copy
+    an intent that was created while the tile was OFF). Denied records are
+    withheld (left pending, never POSTed/ACKed) and the reason is recorded.
+
+    When the master is disarmed this is a no-op: the paper mirror keeps
+    flowing, and no live Bitfinex order can be created because the master is
+    disarmed (the delivery guard also holds PRE_ARMING records).
+    """
+    if not armed:
+        return list(rows or [])
+    now = time.time() if now is None else float(now)
+    sw = _get_bfx_live_switch()
+    delivered: list = []
+    for record in rows or []:
+        if not isinstance(record, dict):
+            delivered.append(record)
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        lane = str(payload.get("research_lane") or "").upper()
+        created = record.get("created_at_unix")
+        allowed, reason = sw.delivery_gate(lane, created_at_unix=created, now=now)
+        if allowed:
+            delivered.append(record)
+            continue
+        event_id = str(record.get("event_id") or "")
+        _relay_push_state["live_switch_withheld_total"] = int(
+            _relay_push_state.get("live_switch_withheld_total") or 0
+        ) + 1
+        logger.warning(
+            f"[RELAY DELIVERY] withheld lane={lane or 'UNKNOWN'} reason={reason} "
+            f"event={event_id} (tile live-orders OFF/pre-arm) [PIPELINE ENFORCEMENT]"
+        )
+        _record_bitfinex_delivery_denial(lane, reason or "TILE_LIVE_SWITCH_OFF", event_id)
+    return delivered
+
+
 def _wire_bitfinex_readiness() -> None:
+    global _bfx_action_audit
     try:
         import bitfinex_readiness_api as _bra
         import order_action_audit as _oaa
+        _bfx_action_audit = _oaa.OrderActionAudit(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "bitfinex_order_action_audit.jsonl"),
+            key=_oaa.audit_key_from_env(),
+        )
         _bra.wire(
             context_provider=_bitfinex_readiness_context,
-            audit=_oaa.OrderActionAudit(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "bitfinex_order_action_audit.jsonl"),
-                key=_oaa.audit_key_from_env(),
-            ),
+            audit=_bfx_action_audit,
+            switch=_get_bfx_live_switch(),
         )
         app.register_blueprint(_bra.blueprint)
         logger.info("[BITFINEX READINESS] read-only /api/bitfinex/* observability wired (fail-closed)")
     except Exception as exc:  # noqa: BLE001 - a failed wiring must never crash the bot
         logger.warning(f"[BITFINEX READINESS] wiring failed; endpoints report disarmed: {exc}")
+
+
+@app.route('/api/bitfinex/tiles/<lane>/live-orders', methods=['POST'])
+def api_bitfinex_tile_live_orders(lane: str):
+    """Per-tile "Bitfinex Live Orders" switch (two-tier model, tier 2).
+
+    Requires authenticated admin. Turning a tile ON evaluates the full gate
+    (master armed + allowlist + exact size/leverage/protection) atomically and
+    fails closed with denial reasons. Turning a tile OFF is always allowed.
+    This endpoint never arms the account (that stays on /api/live_arm).
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    lane = str(lane or "").upper()
+    data = request.get_json(silent=True) or {}
+    enabled = _strict_json_boolean(data, "enabled")
+    if enabled is None:
+        return jsonify({"error": "'enabled' must be a JSON boolean",
+                        "example": {"enabled": True}}), 400
+    sw = _get_bfx_live_switch()
+    ctx = _bitfinex_readiness_context()
+    ga = ctx.get("global_arm") or {}
+    size = _bitfinex_size_checks_for_lane(lane, ctx)
+    if enabled:
+        sw.request_on(lane, global_arm=ga, size_checks=size)
+    else:
+        sw.request_off(lane, reason="OPERATOR_OFF")
+    whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size)
+    snap = sw.snapshot(lane)
+    logger.warning(
+        f"[BITFINEX LIVE ORDERS] tile {lane} -> {'ON' if enabled else 'OFF'} "
+        f"eligible={bool(whynot.get('eligible'))} "
+        f"denials={list(whynot.get('denials') or [])} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "lane": lane,
+        "bitfinex_live_orders": bool(snap.get("bitfinex_live_orders")),
+        "eligible": bool(whynot.get("eligible")),
+        "denials": whynot.get("denials") or [],
+        "explanation": whynot.get("explanation"),
+        "master": _bitfinex_master_state(),
+    })
 
 
 _wire_bitfinex_readiness()

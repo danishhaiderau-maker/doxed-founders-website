@@ -12,6 +12,8 @@ from bitfinex_live_switch import (
     DENY_MARGIN_OUT_OF_RANGE,
     DENY_EXCHANGE_MIN_QTY,
     DENY_STOP_COVERAGE,
+    DENY_SWITCH_NOT_REQUESTED,
+    DENY_TILE_PRE_ARMING,
     ALLOW_ARMED,
 )
 
@@ -154,3 +156,62 @@ def test_compute_size_checks_quantity(tmp_path):
 def test_compute_size_checks_missing_price_fails_closed():
     s = compute_size_checks(margin_usd=0.25, leverage=100, mark_price=None)
     assert s["quantity"] is None
+
+
+# -- relay delivery gate (two-tier model, tier 2) ---------------------------
+# delivery_gate() is consulted by the relay delivery path before any live order
+# is placed. It is a pure gate over the switch state; in this revision every
+# active tile is paper-only / relay-ineligible, so the switch can only be turned
+# ON by directly setting the state (request_on always denies LANE_NOT_ALLOWLISTED).
+
+
+def _arm_switch(sw, lane, allow_ts):
+    row = sw._row(lane)
+    row["bitfinex_live_orders"] = True
+    row["last_allow_ts"] = allow_ts
+    return sw
+
+
+def test_delivery_gate_default_off_denies(tmp_path):
+    sw = BitfinexLiveSwitch(tmp_path / "switch.json")
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    allowed, reason = sw.delivery_gate(lane, created_at_unix=999.0, now=1000.0)
+    assert allowed is False
+    assert reason == DENY_SWITCH_NOT_REQUESTED
+
+
+def test_delivery_gate_pre_arming_denies(tmp_path):
+    sw = _arm_switch(BitfinexLiveSwitch(tmp_path / "switch.json"),
+                     "FAMILY_COMMITTED_FADE_TAKER_90", 100.0)
+    allowed, reason = sw.delivery_gate(
+        "FAMILY_COMMITTED_FADE_TAKER_90", created_at_unix=50.0, now=200.0
+    )
+    assert allowed is False
+    assert reason == DENY_TILE_PRE_ARMING
+
+
+def test_delivery_gate_allows_after_arm(tmp_path):
+    sw = _arm_switch(BitfinexLiveSwitch(tmp_path / "switch.json"),
+                     "FAMILY_COMMITTED_FADE_TAKER_90", 100.0)
+    allowed, reason = sw.delivery_gate(
+        "FAMILY_COMMITTED_FADE_TAKER_90", created_at_unix=150.0, now=200.0
+    )
+    assert allowed is True
+    assert reason is None
+
+
+def test_delivery_gate_unknown_lane_fails_closed(tmp_path):
+    sw = BitfinexLiveSwitch(tmp_path / "switch.json")
+    allowed, reason = sw.delivery_gate("NOPE", created_at_unix=999.0, now=1000.0)
+    assert allowed is False
+    assert reason == DENY_SWITCH_NOT_REQUESTED
+
+
+def test_delivery_gate_missing_created_fails_closed(tmp_path):
+    sw = _arm_switch(BitfinexLiveSwitch(tmp_path / "switch.json"),
+                     "FAMILY_COMMITTED_FADE_TAKER_90", 100.0)
+    allowed, reason = sw.delivery_gate(
+        "FAMILY_COMMITTED_FADE_TAKER_90", created_at_unix=None, now=200.0
+    )
+    assert allowed is False
+    assert reason == DENY_TILE_PRE_ARMING
