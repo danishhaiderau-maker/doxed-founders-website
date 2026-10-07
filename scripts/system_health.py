@@ -1697,10 +1697,16 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         reasons = list(receipt.get("reasons") or [])
         if integrity_status != "VALID":
             st = RED
-            declared, expired = declared_integrity_blocker(
+            declared, _expired = declared_integrity_blocker(
                 integrity, now, ((receipt.get("data_epoch") or {}).get("epoch_id")))
-            if declared and not expired and not receipt.get("failed_required_studies") \
+            if declared and not receipt.get("failed_required_studies") \
                     and not any(str(r).startswith("clean epoch") for r in reasons):
+                # A declared, known lifecycle defect stays AMBER even once its
+                # self-imposed ETA lapses: the expiry is a certification-deadline
+                # miss (clean_epoch_certify), not a new hard failure. The hard-RED
+                # is reserved for undeclared defects — declared_integrity_blocker
+                # already returns (None, False) for those. Expiry is still
+                # disclosed in the appended reason ("EXPIRED").
                 st = AMBER
             if declared:
                 reasons.append(declared)
