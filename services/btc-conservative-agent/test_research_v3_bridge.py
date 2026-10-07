@@ -1805,6 +1805,35 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(retried["backfilled"], 1)
             self.assertIn(str(source), cursor["files"])
 
+    def test_entry_resolution_carries_regime_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-regime-1", "shared_ai_call_id": "scan-regime-1",
+                "shared_ai_call_ts_epoch": 1000, "symbol": "tBTCF0:USTF0",
+                "raw_direction": "LONG", "executed_direction": "LONG",
+            }
+            dual_write_lane_entry_resolution(
+                source, lane="CONTINUOUS", entry_resolution="AWAITING",
+                exact_reason="TEST", epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
+                regime="VIOLENT",
+            )
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            self.assertEqual(rows[0]["regime"], "VIOLENT")
+
+            dual_write_lane_entry_resolution(
+                source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
+                exact_reason="TEST", epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
+            )
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            terminal = next(r for r in rows if r["entry_resolution"] == "NO_ORDER")
+            self.assertEqual(terminal["regime"], "QUIET")
+
 
 if __name__ == "__main__":
     unittest.main()

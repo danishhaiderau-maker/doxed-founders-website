@@ -275,6 +275,7 @@ from collector_v22_provisional import (
     upsert_provisional_event,
 )
 from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
+from regime_tag import classify_regime, REGIME_QUIET
 from opportunity_capture_v22 import analyze_v22_events
 from research_completeness import (
     closed_lifecycle_completeness,
@@ -18628,6 +18629,7 @@ def _append_v3_lane_entry_resolution(
             source, lane=lane, entry_resolution=resolution, exact_reason=reason,
             epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
             lane_policy=_v3_lane_policy_material(lane),
+            regime=_current_regime_tag(),
         )
     except Exception as exc:
         logger.error(
@@ -31561,6 +31563,26 @@ def indicator_engine_health_snapshot() -> dict:
         return _ies.health_from_live(_INDICATOR_ENGINE_LIVE_CACHE["live"], now, enabled=INDICATOR_ENGINE_ENABLED)
     except Exception as exc:
         return {"schema": _ies.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+def _current_regime_tag() -> str:
+    """QUIET/TRENDING/VIOLENT for the latest closed ``indicator_bars_v1`` bar.
+
+    Reads the indicator-engine live file (``last_regime.vol_expected_pct`` and
+    ``last_regime.adx``) and classifies via the single canonical ``regime_tag``
+    rule. Fail-closed: any read error or missing input returns QUIET. This is
+    observation-only and never touches orders, relay, or Bitfinex.
+    """
+    try:
+        if not INDICATOR_ENGINE_ENABLED:
+            return REGIME_QUIET
+        live = _INDICATOR_ENGINE_LIVE_CACHE.get("live")
+        if not live and time.time() - _INDICATOR_ENGINE_LIVE_CACHE.get("read_ts", 0.0) >= 5.0:
+            live = _cvt.read_live(_ies.LIVE_FILE)
+        reg = (live or {}).get("last_regime") or {}
+        return classify_regime(reg.get("vol_expected_pct"), reg.get("adx"))
+    except Exception:
+        return REGIME_QUIET
 
 
 def _ai_shadow_leader_features(decision_ts: float) -> dict:

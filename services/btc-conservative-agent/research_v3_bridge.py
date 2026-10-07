@@ -28,6 +28,7 @@ from lifecycle_qualification_horizon import (
     qualification_post_observation,
 )
 from policy_search_manifest import compact_search_receipt
+from regime_tag import REGIME_QUIET, REGIMES, classify_regime
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
@@ -957,6 +958,7 @@ def dual_write_lane_entry_resolution(
     data_dir: str,
     lane_policy: Mapping[str, Any] | None = None,
     observed_ts: float | None = None,
+    regime: str | None = None,
 ) -> dict[str, Any]:
     """Append one lane-scoped entry resolution without rewriting its verdict."""
     resolution = str(entry_resolution or "").strip().upper()
@@ -999,6 +1001,11 @@ def dual_write_lane_entry_resolution(
         "event_id": identity["event_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": lane_name,
+        "regime": (
+            str(regime) if regime in REGIMES
+            else str((lane_policy or {}).get("regime")) if (lane_policy or {}).get("regime") in REGIMES
+            else REGIME_QUIET
+        ),
         "resolution_scope": "LANE_ENTRY",
         "research_fanout_plan_reference": copy.deepcopy(source.get("research_fanout_plan_reference")),
         "entry_resolution": resolution,
