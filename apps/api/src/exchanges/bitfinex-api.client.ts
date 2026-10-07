@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { btcToSats } from '@dcf/utils';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
@@ -70,6 +70,14 @@ export type BitfinexPositionDetail = {
   pnlUsd: number;
   pnlPct: number;
   direction: 'LONG' | 'SHORT';
+  /** Liquidation price (Bitfinex v2 position row `PRICE_LIQ`, index 8). */
+  liqPrice: number | null;
+  /** Position collateral (`COLLATERAL`, index 17) — the margin backing the position. */
+  margin: number | null;
+  /** Leverage used for the position (`LEVERAGE`, index 9). */
+  leverage: number | null;
+  /** Current funding cost accrued on the position (`FUNDING`, index 4). */
+  fundingAccrued: number | null;
 };
 
 export type BitfinexPositionCloseLedgerRow = {
@@ -232,6 +240,38 @@ export function allocateBitfinexAuthNonce(apiKey: string): string {
 /** @internal Test helper — clears per-process nonce lanes between spec cases. */
 export function resetBitfinexNonceLanesForTests(): void {
   nonceLanes.clear();
+}
+
+/**
+ * Read-only nonce/rate-limit telemetry for the observability endpoint. Keys are
+ * redacted (sha256 prefix) — never expose the raw API key. Exposes each lane's
+ * current nonce high-water mark and queued read/mutation depth so nonce drift
+ * and rate-limit pressure are visible without touching the allocation path.
+ */
+export function getBitfinexNonceTelemetry(): Array<{
+  apiKeyHash: string;
+  lastNonce: string;
+  queuedMutations: number;
+  queuedReads: number;
+  running: boolean;
+}> {
+  const out: Array<{
+    apiKeyHash: string;
+    lastNonce: string;
+    queuedMutations: number;
+    queuedReads: number;
+    running: boolean;
+  }> = [];
+  for (const [apiKey, lane] of nonceLanes) {
+    out.push({
+      apiKeyHash: createHash('sha256').update(apiKey).digest('hex').slice(0, 16),
+      lastNonce: lane.lastNonce.toString(),
+      queuedMutations: lane.mutations.length,
+      queuedReads: lane.reads.length,
+      running: lane.running,
+    });
+  }
+  return out;
 }
 
 async function bitfinexAuthPostOnce<T>(
@@ -579,6 +619,14 @@ export function parseOpenPositionPayload(
     const basePrice = Number(row[3]);
     const pnlUsd = Number(row[6]);
     const pnlPct = Number(row[7]);
+    // Additive observability fields (Bitfinex v2 derivatives position schema):
+    // [4] FUNDING = current funding cost accrued, [8] PRICE_LIQ = liquidation
+    // price, [9] LEVERAGE, [17] COLLATERAL = margin. Missing/absent cells are
+    // tolerated as null so legacy/margin rows still parse.
+    const fundingAccrued = Number(row[4]);
+    const liqPrice = Number(row[8]);
+    const leverage = Number(row[9]);
+    const margin = Number(row[17]);
     if (
       !Number.isFinite(amount)
       || !Number.isFinite(basePrice)
@@ -604,6 +652,10 @@ export function parseOpenPositionPayload(
       basePrice,
       pnlUsd,
       pnlPct,
+      liqPrice: Number.isFinite(liqPrice) && liqPrice > 0 ? liqPrice : null,
+      leverage: Number.isFinite(leverage) && leverage > 0 ? leverage : null,
+      margin: Number.isFinite(margin) && margin >= 0 ? margin : null,
+      fundingAccrued: Number.isFinite(fundingAccrued) ? fundingAccrued : null,
       direction: amount > 0 ? 'LONG' : 'SHORT',
     };
   }

@@ -10,6 +10,7 @@ import { SignalApiKeyGuard } from './signal-api-key.guard';
 import { SignalCyclesController } from './signal-cycles.controller';
 import { SignalCyclesService } from './signal-cycles.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
+import { ExchangeTelemetryController } from './exchange-telemetry.controller';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import { ShowcaseInferenceUsageService } from './showcase-inference-usage.service';
 import { ShowcaseRelayEventsService } from './showcase-relay-events.service';
@@ -23,7 +24,7 @@ import { TradingAgentsService } from './trading-agents.service';
 
 @Module({
   imports: [ProjectsModule, NotificationsModule, PointsModule, ExchangesModule],
-  controllers: [TradingAgentsController, SignalCyclesController, AgentRegistryController, InternalShowcaseController],
+  controllers: [TradingAgentsController, SignalCyclesController, AgentRegistryController, InternalShowcaseController, ExchangeTelemetryController],
   providers: [
     TradingAgentsService,
     TradingAgentInstancesService,

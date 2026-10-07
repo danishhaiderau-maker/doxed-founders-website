@@ -60,6 +60,7 @@ import {
   BitfinexTradingClient,
   bitfinexOrderLev,
   normalizeBitfinexOrderPrice,
+  getBitfinexNonceTelemetry,
   type BitfinexActiveOrder,
   type BitfinexFuturesPairConstraints,
 } from '../exchanges/bitfinex-api.client';
@@ -4246,6 +4247,139 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       sourceRevision:
         process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_REVISION ?? process.env.SOURCE_GIT_REV ?? null,
       executionEnabled: executionEnabled(),
+    };
+  }
+
+  /**
+   * Read-only, exchange-side observability snapshot for
+   * `GET /exchanges/bitfinex/telemetry`. Aggregates in-process WS transport
+   * counters, the per-key nonce-lane depths, the most recent fills, and a
+   * best-effort REST read of active orders + the open position for each live
+   * Bitfinex relay instance. Additive only: no order is placed, cancelled, or
+   * altered, no arm state changes, and a transient exchange read error is
+   * swallowed so the endpoint itself never fails hard.
+   */
+  async getExchangeTelemetry(): Promise<{
+    schema: string;
+    generatedAt: string;
+    ws: Array<{ keyId: string } & ReturnType<BitfinexAuthTradeStream['getTelemetry']>>;
+    recentFills: ReturnType<BitfinexAuthTradeStream['getRecentFillTelemetry']>;
+    nonce: ReturnType<typeof getBitfinexNonceTelemetry>;
+    activeOrders: Array<{
+      orderId: number;
+      side: 'BUY' | 'SELL';
+      qty: number;
+      price: number;
+      fillPrice: number | null;
+      markPrice: number | null;
+      slippageBps: number | null;
+      submittedAtMs: number | null;
+      ackedAtMs: number | null;
+      latencyMs: number | null;
+      correlationId: number | null;
+      status: string;
+      orderType: string;
+    }>;
+    position: {
+      symbol: string;
+      amount: number;
+      basePrice: number;
+      direction: 'LONG' | 'SHORT';
+      pnlUsd: number;
+      pnlPct: number;
+      liqPrice: number | null;
+      margin: number | null;
+      leverage: number | null;
+      fundingAccrued: number | null;
+    } | null;
+    health: RelayExecutorHealthSnapshot;
+  }> {
+    const ws = Array.from(this.bitfinexTradeStreams.values()).map((stream) => ({
+      keyId: stream.keyId,
+      ...stream.getTelemetry(),
+    }));
+    const recentFills = Array.from(this.bitfinexTradeStreams.values())
+      .flatMap((stream) => stream.getRecentFillTelemetry())
+      .sort((a, b) => b.ackedAtMs - a.ackedAtMs)
+      .slice(0, 50);
+    const activeOrders: Array<{
+      orderId: number;
+      side: 'BUY' | 'SELL';
+      qty: number;
+      price: number;
+      fillPrice: number | null;
+      markPrice: number | null;
+      slippageBps: number | null;
+      submittedAtMs: number | null;
+      ackedAtMs: number | null;
+      latencyMs: number | null;
+      correlationId: number | null;
+      status: string;
+      orderType: string;
+    }> = [];
+    let position: {
+      symbol: string;
+      amount: number;
+      basePrice: number;
+      direction: 'LONG' | 'SHORT';
+      pnlUsd: number;
+      pnlPct: number;
+      liqPrice: number | null;
+      margin: number | null;
+      leverage: number | null;
+      fundingAccrued: number | null;
+    } | null = null;
+    for (const instance of this.relayInstanceCache.values()) {
+      if (instance.exchangeProvider !== 'bitfinex') continue;
+      const creds = await this.exchanges.getUserCredentials(instance.userId, 'bitfinex').catch(() => null);
+      if (!creds) continue;
+      try {
+        const orders = await this.activeTrading.listActiveOrders(creds);
+        for (const order of orders) {
+          activeOrders.push({
+            orderId: order.id,
+            side: order.amount >= 0 ? 'BUY' : 'SELL',
+            qty: Math.abs(order.amount),
+            price: order.price,
+            fillPrice: null,
+            markPrice: null,
+            slippageBps: null,
+            submittedAtMs: order.createdAtMs ?? null,
+            ackedAtMs: null,
+            latencyMs: null,
+            correlationId: order.cid ?? null,
+            status: order.status,
+            orderType: order.orderType,
+          });
+        }
+        const pos = await this.activeTrading.getOpenPositionDetail(creds);
+        if (pos) {
+          position = {
+            symbol: pos.symbol,
+            amount: pos.amount,
+            basePrice: pos.basePrice,
+            direction: pos.direction,
+            pnlUsd: pos.pnlUsd,
+            pnlPct: pos.pnlPct,
+            liqPrice: pos.liqPrice,
+            margin: pos.margin,
+            leverage: pos.leverage,
+            fundingAccrued: pos.fundingAccrued,
+          };
+        }
+      } catch {
+        // Best-effort: a transient exchange read failure must not fail the endpoint.
+      }
+    }
+    return {
+      schema: 'bitfinex_exchange_telemetry_v1',
+      generatedAt: new Date().toISOString(),
+      ws,
+      recentFills,
+      nonce: getBitfinexNonceTelemetry(),
+      activeOrders,
+      position,
+      health: this.getHealthSnapshot(),
     };
   }
 
@@ -10577,6 +10711,9 @@ await this.notifications
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
       clientOrderId: meta.clientOrderId,
+      // Explicit correlation key joining the signed intent (SignalIntentEnvelope
+      // .correlation_id) to this fill via the deterministic venue cid.
+      correlation_id: meta.clientOrderId != null ? `cid:${meta.clientOrderId}` : undefined,
       stopClientOrderId: promotion.stopClientOrderId,
       partialFillQty: null,
       partialFillStopOrderId: null,

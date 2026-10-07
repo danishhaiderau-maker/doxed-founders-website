@@ -189,9 +189,50 @@ test('position proof returns a valid exact eight-decimal BTC position', () => {
       basePrice: 65_000,
       pnlUsd: 0.25,
       pnlPct: 0.01,
+      liqPrice: null,
+      leverage: null,
+      margin: null,
+      fundingAccrued: 0,
       direction: 'SHORT',
     },
   );
+});
+
+test('position proof surfaces liqPrice, leverage, margin and funding from the v2 derivatives row', () => {
+  const row = [
+    BITFINEX_BTC_PERP_SYMBOL, // 0 SYMBOL
+    'ACTIVE',                  // 1 STATUS
+    -0.00003999,               // 2 AMOUNT
+    65_000,                    // 3 BASE_PRICE
+    -0.42,                     // 4 FUNDING (current funding cost accrued)
+    0,                         // 5 FUNDING_TYPE
+    0.25,                      // 6 PL
+    0.01,                      // 7 PL_PERC
+    61_500,                    // 8 PRICE_LIQ
+    10,                        // 9 LEVERAGE
+    null,                      // 10 PLACEHOLDER
+    123_456,                   // 11 POSITION_ID
+    1_723_000_000_000,         // 12 MTS_CREATE
+    1_723_000_000_000,         // 13 MTS_UPDATE
+    null,                      // 14 PLACEHOLDER
+    1,                         // 15 TYPE (derivatives)
+    null,                      // 16 PLACEHOLDER
+    2.6,                       // 17 COLLATERAL (margin)
+    1.3,                       // 18 COLLATERAL_MIN
+    '{}',                      // 19 META
+  ];
+  assert.deepEqual(parseOpenPositionPayload([row]), {
+    symbol: BITFINEX_BTC_PERP_SYMBOL,
+    amount: -0.00003999,
+    basePrice: 65_000,
+    pnlUsd: 0.25,
+    pnlPct: 0.01,
+    liqPrice: 61_500,
+    leverage: 10,
+    margin: 2.6,
+    fundingAccrued: -0.42,
+    direction: 'SHORT',
+  });
 });
 
 test('authenticated nonce lane bounds queue wait and never sends expired queued work later', async () => {
