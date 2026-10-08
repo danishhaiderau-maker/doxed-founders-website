@@ -268,6 +268,19 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
     qty = _finite(raw.get("policy_original_qty") or raw.get("qty") or raw.get("execution_qty"))
     notional = (margin * leverage) if margin and leverage else (entry * qty if entry and qty else None)
     signal_ts = _ts(raw.get("shared_ai_call_ts"), parse_ts)
+    decision = raw.get("adaptive_entry_decision") if isinstance(raw.get("adaptive_entry_decision"), Mapping) else {}
+    # GS/B regime tiles stamp regime_at_signal / regime_cell on the decision at
+    # entry; surface them on every trade row so Health Monitor can conformance-
+    # check Tile 12/13 without reading adaptive_entry_decisions.jsonl.
+    trigger = {"shared_ai_call_id": raw.get("shared_ai_call_id"), "signal_ts": signal_ts,
+               "entry_path": raw.get("entry_path"), "entry_type": raw.get("entry_type")}
+    for key in ("regime_at_signal", "regime_at_entry", "regime", "regime_cell", "exit_profile",
+                "action", "reason", "trigger_kind"):
+        value = decision.get(key)
+        if value is None and key == "regime_at_signal":
+            value = decision.get("regime_at_entry") or decision.get("regime")
+        if value is not None and value != "":
+            trigger[key] = value
     row: dict = {
         "schema": TILE_TRADE_ROW_SCHEMA,
         "trade_id": str(raw.get("trade_id") or ""),
@@ -281,8 +294,7 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         "requested_qty": _finite(raw.get("requested_qty") or raw.get("policy_original_qty") or raw.get("qty")),
         "notional_usd": round(notional, 6) if notional else None,
         "leverage": leverage,
-        "trigger": {"shared_ai_call_id": raw.get("shared_ai_call_id"), "signal_ts": signal_ts,
-                    "entry_path": raw.get("entry_path"), "entry_type": raw.get("entry_type")},
+        "trigger": trigger,
     }
     if status == "closed":
         close_ts = _ts(raw.get("close_ts") or raw.get("ts"), parse_ts)
@@ -493,7 +505,7 @@ def totals_view(rows_by_lane: Mapping[str, list], *, include_forced: bool, be_ba
 
 def counters_view(lane: str, *, rows: list[dict], route_counts: Mapping[str, Any] | None,
                   xvl_lane: Mapping[str, Any] | None, opportunity: Mapping[str, Any] | None,
-                  boot_id: str | None) -> dict:
+                  boot_id: str | None, adaptive_lane: Mapping[str, Any] | None = None) -> dict:
     """Epoch counters for one lane from trade rows + the dashboard's route counts."""
     counts = dict(route_counts or {}) if isinstance(route_counts, Mapping) else {}
     closes_policy = sum(1 for r in rows if r.get("status") == "CLOSED"
@@ -553,6 +565,16 @@ def counters_view(lane: str, *, rows: list[dict], route_counts: Mapping[str, Any
             "rejects_and_skips": skips,
             "last_attempt_outcome": ((xvl_paper.get("last_attempt") or {}).get("outcome")
                                      if isinstance(xvl_paper.get("last_attempt"), Mapping) else None),
+            # GS-05 QUIET stand-aside / GS-06 VIOLENT cell: adaptive_entry_decisions since boot.
+            "adaptive_entry": {
+                "decisions": int((adaptive_lane or {}).get("decisions") or 0),
+                "stand_aside": int((adaptive_lane or {}).get("stand_aside") or 0),
+                "shadow_stand_aside": int((adaptive_lane or {}).get("shadow_stand_aside") or 0),
+                "submit": int((adaptive_lane or {}).get("submit") or 0),
+                "by_action": dict((adaptive_lane or {}).get("by_action") or {}),
+                "by_regime": dict((adaptive_lane or {}).get("by_regime") or {}),
+                "by_reason": dict((adaptive_lane or {}).get("by_reason") or {}),
+            },
         },
         "integrity": {
             "accepted_without_order": count("approved_no_order"),

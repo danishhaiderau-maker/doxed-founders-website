@@ -17,6 +17,8 @@ ROUTES = ("/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor
 GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
 HA = "FAMILY_COMMITTED_FADE_TAKER_90"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
+GS5 = "FAMILY_GS05_PREMIUM_REGIME_MANAGED"
+GS6 = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
 EPOCH = "ce-20261004-v31-freeze21b"
 CUTOFF = 1_791_100_000.0
 
@@ -34,7 +36,7 @@ def _closed(tid, lane, *, close_ts, bp=None, net=0.0, reason="GS_ATR_TAKE_PROFIT
 
 
 def _rows(raws, status="closed", fills=None, be=0.0):
-    short = {GS1: "GS-01", HA: "H-A", B2: "B2"}
+    short = {GS1: "GS-01", HA: "H-A", B2: "B2", GS5: "GS-05", GS6: "GS-06"}
     return [mt.tile_trade_row(r, status=status, short_names=short, epoch_id=EPOCH,
                               forced_reasons={"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT"},
                               fill_evidence=(fills or {}).get(r["trade_id"]), be_band_bp=be) for r in raws]
@@ -355,3 +357,45 @@ def test_ready_entry_policy_view_states_the_b2_signal_clock_without_touching_the
     gs1 = bot._ready_entry_policy_view(reg[GS1]["entry_policy"])
     assert gs1["signal_clock"] == "PER_SECOND_CROSS_VENUE_EVALUATOR" and "signal_clock_derived" not in gs1
     assert bot._ready_entry_policy_view(reg[HA]["entry_policy"])["signal_clock"] == "SHARED_AI_CALL"
+
+
+def test_tile_trade_row_surfaces_regime_at_signal_from_adaptive_entry_decision():
+    """GS-05/GS-06: Health Monitor reads regime gates off trades[].trigger."""
+    raw = _closed(
+        "gs5-1", GS5, close_ts=CUTOFF + 50, bp=4.0, net=0.01,
+        adaptive_entry_decision={
+            "regime_at_signal": "VIOLENT",
+            "regime_cell": "VIOLENT",
+            "exit_profile": "GS01_VIOLENT",
+            "action": "TAKER",
+            "reason": "REGIME_VIOLENT_TAKER",
+            "trigger_kind": "PREMIUM",
+        },
+    )
+    row = _rows([raw])[0]
+    trigger = row["trigger"]
+    assert trigger["regime_at_signal"] == "VIOLENT"
+    assert trigger["regime_cell"] == "VIOLENT"
+    assert trigger["exit_profile"] == "GS01_VIOLENT"
+    assert trigger["action"] == "TAKER"
+    # Fallback when only regime is present
+    raw2 = _closed("gs6-1", GS6, close_ts=CUTOFF + 60, bp=1.0, net=0.002,
+                   adaptive_entry_decision={"regime": "QUIET", "action": "TAKER"})
+    assert _rows([raw2])[0]["trigger"]["regime_at_signal"] == "QUIET"
+
+
+def test_counters_since_boot_exposes_stand_aside_shadow_counts():
+    """GS-05 QUIET stand-aside / GS-06 shadow counts live under since_boot.adaptive_entry."""
+    adaptive = {
+        "decisions": 12, "stand_aside": 5, "shadow_stand_aside": 5, "submit": 7,
+        "by_action": {"STAND_ASIDE": 5, "TAKER": 7},
+        "by_regime": {"QUIET": 5, "TREND": 4, "VIOLENT": 3},
+        "by_reason": {"REGIME_QUIET_STANDS_ASIDE": 5},
+    }
+    out = mt.counters_view(
+        GS5, rows=[], route_counts={}, xvl_lane=None, opportunity=None,
+        boot_id="boot-test", adaptive_lane=adaptive,
+    )
+    ae = out["since_boot"]["adaptive_entry"]
+    assert ae["stand_aside"] == 5 and ae["shadow_stand_aside"] == 5 and ae["submit"] == 7
+    assert ae["by_regime"]["QUIET"] == 5

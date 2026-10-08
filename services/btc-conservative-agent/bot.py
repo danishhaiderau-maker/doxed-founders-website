@@ -5981,7 +5981,7 @@ _execution_markout_counters = {
     "taker_signals_scheduled": 0, "taker_capture_failures": 0,
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
-_adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "last": None}
+_adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
 _adaptive_entry_stats_lock = threading.Lock()
 velocity_buffer = deque(maxlen=200)
 delta_buffer = deque(maxlen=200)
@@ -28106,10 +28106,26 @@ def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
         _adaptive_entry_stats["decisions"] += 1
         _adaptive_entry_stats["by_action"][action] = _adaptive_entry_stats["by_action"].get(action, 0) + 1
         _adaptive_entry_stats["by_reason"][reason] = _adaptive_entry_stats["by_reason"].get(reason, 0) + 1
+        lane_key = str(lane or "").upper()
+        cell = _adaptive_entry_stats["by_lane"].setdefault(
+            lane_key, {"decisions": 0, "by_action": {}, "by_reason": {}, "by_regime": {},
+                       "stand_aside": 0, "shadow_stand_aside": 0, "submit": 0})
+        cell["decisions"] += 1
+        cell["by_action"][action] = cell["by_action"].get(action, 0) + 1
+        cell["by_reason"][reason] = cell["by_reason"].get(reason, 0) + 1
+        regime = str(decision.get("regime_at_signal") or decision.get("regime") or "UNKNOWN")
+        cell["by_regime"][regime] = cell["by_regime"].get(regime, 0) + 1
+        if action == "STAND_ASIDE":
+            cell["stand_aside"] += 1
+            # GS-05 QUIET (and audit shadows): reason carries REGIME_<R>_STANDS_ASIDE
+            if "STANDS_ASIDE" in reason.upper() or decision.get("shadow_old_gate"):
+                cell["shadow_stand_aside"] += 1
+        elif action in ("TAKER", "MAKER", "SUBMIT", "ORDER"):
+            cell["submit"] += 1
         _adaptive_entry_stats["last"] = {
             key: decision.get(key)
-            for key in ("signal_ts", "direction", "regime", "rv15_bps", "fast_move_z",
-                        "action", "reason", "limit_price", "stop_distance_bps")
+            for key in ("signal_ts", "direction", "regime", "regime_at_signal", "regime_cell",
+                        "rv15_bps", "fast_move_z", "action", "reason", "limit_price", "stop_distance_bps")
         }
 
 
@@ -30616,6 +30632,14 @@ def close_position(pos: dict, exit_reason: str):
             "edge_score_at_entry": edge_at_entry,
             "invert_signal": _coerce_invert_on(pos, master),
             "invert_on": _coerce_invert_on(pos, master),
+            # GS-05/GS-06: keep regime gate / exit-profile decision on the closed
+            # row so /api/monitor/tiles/trades can surface regime_at_signal.
+            "adaptive_entry_decision": copy.deepcopy(
+                pos.get("adaptive_entry_decision")
+                or (master or {}).get("adaptive_entry_decision")
+                or ((master or {}).get("signal_ref") or {}).get("adaptive_entry_decision")
+                or {}
+            ),
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
@@ -45140,6 +45164,7 @@ def monitor_tiles_counters():
             xvl_lanes = _monitor_part(lambda: xvl_evaluator_snapshot().get("lanes") or {})
             with state_lock:
                 opportunity = copy.deepcopy(state.get("lane_opportunity_counters") or {})
+            adaptive = (adaptive_entry_status_snapshot().get("by_lane") or {})
             return {
                 "schema": monitor_tiles.TILE_COUNTERS_SCHEMA,
                 **_monitor_tiles_common(_now),
@@ -45149,7 +45174,8 @@ def monitor_tiles_counters():
                     monitor_tiles.counters_view(
                         lane, rows=by_lane.get(lane) or [], route_counts=route["counts"].get(lane),
                         xvl_lane=(xvl_lanes or {}).get(lane) if isinstance(xvl_lanes, dict) else None,
-                        opportunity=opportunity.get(lane), boot_id=BOT_INSTANCE_ID)
+                        opportunity=opportunity.get(lane), boot_id=BOT_INSTANCE_ID,
+                        adaptive_lane=adaptive.get(lane) or adaptive.get(str(lane or "").upper()))
                     for lane in scope["lanes"]
                 ],
             }
