@@ -13,8 +13,9 @@ they are toggled OFF instead of ON and the receipt requires them OFF.
 The roster is also proven against the checked-out registry
 (``combo_pathway_config.ACTIVE_TILE_ORDER``, the same revision the workflow
 deployed): the running bot must report exactly those tiles, in that order
-(FREEZE21B: H-A, H-C, the random control, Grok Strategist's GS-01, the B1..B3
-regime tiles and GS-06 - eight tiles), and no retired lane
+(FREEZE21B plus the PHASE03 mid-epoch additions: H-A, H-C, the random control,
+Grok Strategist's GS-01, the B1..B3 regime tiles, GS-06, GS-07, the Danish
+regime router and the fade pool - eleven tiles), and no retired lane
 (``RETIRED_TILE_LANES``) may be ON or on the roster. During the 21-day research
 freeze (``research_freeze.py``) holding a frozen tile OFF is a freeze break:
 the bot refuses it (409 ``RESEARCH_FREEZE_ACTIVE``) unless the environment
