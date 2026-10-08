@@ -85,6 +85,12 @@ export type SignalIntentEnvelope = {
   schema: 'dcf-signal-intent/v1';
   cycleId: string;
   signalId: string;
+  /**
+   * Stable end-to-end correlation key (intent → order → fill). Reproducible
+   * from cycleId + signalId so operators can join the signed intent to the
+   * venue `clientOrderId` (`cid`) and the FILLED event without a shared ledger.
+   */
+  correlation_id?: string;
   version: string;
   action: 'ENTER';
   direction: 'LONG' | 'SHORT';

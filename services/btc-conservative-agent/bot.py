@@ -45309,6 +45309,57 @@ def _status_epoch_pipeline_funnel() -> dict:
     return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "status": "STATE_SNAPSHOT_WARMING"}
 
 
+# ---------------------------------------------------------------------------
+# Typed block-reason enrichment for /api/status (additive; prose preserved).
+# The existing readiness / arm / trading block reasons are already structured
+# uppercase tokens (e.g. "NO_PRICE"). These helpers attach stable machine-
+# readable metadata — a normalized `code`, a process-local `cause_id` that
+# increments whenever a cause reappears after clearing, and `first_seen_ts`
+# for the current stint — without changing or removing the prose strings.
+# ---------------------------------------------------------------------------
+_TYPED_REASON_STATE = {}   # code -> {"cause_id": str, "first_seen_ts": float}
+_TYPED_REASON_SEQ = [0]
+
+
+def _typed_reason_code(token) -> str:
+    token = str(token or "").strip()
+    if not token:
+        return "UNSPECIFIED"
+    norm = re.sub(r"[^A-Z0-9_]+", "_", token.upper()).strip("_")
+    return norm[:64] or "UNSPECIFIED"
+
+
+def _typed_reason_detail(token, now: float) -> dict:
+    code = _typed_reason_code(token)
+    rec = _TYPED_REASON_STATE.get(code)
+    if rec is None:
+        _TYPED_REASON_SEQ[0] += 1
+        rec = {
+            "cause_id": "%s#%d" % (code, _TYPED_REASON_SEQ[0]),
+            "first_seen_ts": round(float(now), 3),
+        }
+        _TYPED_REASON_STATE[code] = rec
+    return {"code": code, "cause_id": rec["cause_id"], "first_seen_ts": rec["first_seen_ts"]}
+
+
+def _status_block_reason_details(runtime: dict, arm_block_reason, trading_block_reason, now: float) -> dict:
+    """Return typed {code, cause_id, first_seen_ts} for readiness, arm, and
+    trading block reasons. Prunes codes that have cleared so a later
+    reappearance is tracked as a fresh cause instance."""
+    readiness_tokens = list(runtime.get("readiness_reasons") or [])
+    readiness = [_typed_reason_detail(t, now) for t in readiness_tokens]
+    arm = _typed_reason_detail(arm_block_reason, now) if arm_block_reason else None
+    trading = _typed_reason_detail(trading_block_reason, now) if trading_block_reason else None
+    active_codes = {_typed_reason_code(t) for t in readiness_tokens}
+    if arm_block_reason:
+        active_codes.add(_typed_reason_code(arm_block_reason))
+    if trading_block_reason:
+        active_codes.add(_typed_reason_code(trading_block_reason))
+    for code in [c for c in _TYPED_REASON_STATE if c not in active_codes]:
+        del _TYPED_REASON_STATE[code]
+    return {"readiness_reason_details": readiness, "arm_block_reason_detail": arm, "trading_block_reason_detail": trading}
+
+
 @app.route('/api/status')
 @app.route('/status')
 def status():
@@ -45336,6 +45387,12 @@ def status():
     trading_ready, trading_block_reason, _ = can_open_live_entry(
         require_armed=True,
         now=now,
+    )
+    block_reason_details = _status_block_reason_details(
+        runtime,
+        None if armable else arm_block_reason,
+        None if trading_ready else trading_block_reason,
+        now,
     )
     force_paper_mode = _force_paper_mode_active()
     relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
@@ -45382,6 +45439,7 @@ def status():
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
         "trading_ready": trading_ready,
         "trading_block_reason": None if trading_ready else trading_block_reason,
+        **block_reason_details,
         "live_armed": live_armed,
         "bitfinex_live_enabled": bitfinex_live_enabled,
         "force_paper_mode": force_paper_mode,

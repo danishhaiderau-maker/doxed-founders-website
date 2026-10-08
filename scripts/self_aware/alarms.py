@@ -134,19 +134,38 @@ def digest_event(digest: dict[str, Any], active: bool, now: float) -> dict[str, 
 def flush(health_dir: Path, state: dict[str, Any], new_events: list[dict[str, Any]], *, wait_sec: float = 20.0) -> dict:
     pending = list(state.get("pending_alarm_events") or []) + list(new_events)
     if not pending:
-        return {"written": 0, "pending": 0}
+        return {"written": 0, "pending": 0, "webhook": {"enabled": False, "sent": 0}}
     deadline = time.time() + wait_sec
     while True:
         with TickLock(health_dir / "tick.lock") as owned:
             if owned:
+                selfaware = [e for e in pending if str(e.get("check", "")).startswith(ALARM_PREFIX)]
                 with open(health_dir / "alarms.jsonl", "a", encoding="utf-8") as handle:
-                    for e in pending:
-                        if not str(e.get("check", "")).startswith(ALARM_PREFIX):
-                            continue
+                    for e in selfaware:
                         handle.write(json.dumps(e, sort_keys=True) + "\n")
+                # Optional webhook sink: local alarms.jsonl stays the default and
+                # fallback; the webhook is an additional best-effort push.
+                webhook = _webhook_attempt(health_dir, selfaware)
                 state["pending_alarm_events"] = []
-                return {"written": len(pending), "pending": 0}
+                return {"written": len(selfaware), "pending": 0, "webhook": webhook}
         if time.time() >= deadline:
             state["pending_alarm_events"] = pending[-200:]
-            return {"written": 0, "pending": len(state["pending_alarm_events"])}
+            return {"written": 0, "pending": len(state["pending_alarm_events"]),
+                    "webhook": {"enabled": False, "sent": 0}}
         time.sleep(1.0)
+
+
+def _webhook_attempt(health_dir: Path, events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deliver ``selfaware.*`` alerts to the configured webhook (best-effort).
+
+    ``alarms.jsonl`` has already been written, so a webhook failure never loses
+    an alarm. Imported lazily so the daemon's default local path performs no
+    network I/O unless a webhook URL is configured.
+    """
+    from .config import WEBHOOK_URL  # noqa: PLC0415
+
+    if not WEBHOOK_URL or not events:
+        return {"enabled": bool(WEBHOOK_URL), "sent": 0}
+    from . import webhook_sink  # noqa: PLC0415
+
+    return webhook_sink.flush_webhook(events, outbox_path=health_dir / "selfaware-webhook-outbox.jsonl")

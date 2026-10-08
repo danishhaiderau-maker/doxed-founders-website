@@ -147,7 +147,7 @@ jobs:
   resume-bootstrap:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
 
@@ -3014,13 +3014,13 @@ jobs:
               raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
 
           # The audited current cohort has at least 21,353 legacy rows.  At the
-          # bounded 64-receipt worker batch and one-second backlog cadence,
-          # scheduling alone needs 334 cycles (>5.5 minutes).  Forty-five
-          # minutes gives that known cohort material headroom; it is not a
-          # latency guarantee because every child remains independently bounded
-          # by its wall timeout.  Expiry still fails safe in maintenance.
+          # bounded 512-receipt worker batch and one-second backlog cadence,
+          # scheduling alone needs 42 cycles (<1 minute).  Forty-five minutes
+          # gives that known cohort material headroom; it is not a latency
+          # guarantee because every child remains independently bounded by its
+          # wall timeout.  Expiry still fails safe in maintenance.
           observed_bootstrap_rows = 21_353
-          conservative_records_per_cycle = 64
+          conservative_records_per_cycle = 512
           backlog_interval_seconds = 1
           bootstrap_timeout_seconds = 45 * 60
           minimum_cycles = (

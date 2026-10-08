@@ -130,6 +130,18 @@ def _minimal_worker_environment(source_revision: str | None = None) -> dict[str,
     data_epoch_id = (os.environ.get("DATA_EPOCH_ID") or "").strip()
     if valid_data_epoch_id(data_epoch_id):
         environment["DATA_EPOCH_ID"] = data_epoch_id
+    # Bootstrap throughput knobs are release tuning, not credentials. Propagate
+    # a well-formed integer so the credential-free worker indexes the same
+    # bounded prefix as its parent; unparseable values remain absent and both
+    # sides fall back to the same module defaults.
+    for _knob in ("V3_BOOTSTRAP_RECORDS_PER_STEP", "V3_BOOTSTRAP_BYTES_PER_STEP"):
+        _raw = (os.environ.get(_knob) or "").strip()
+        if _raw:
+            try:
+                int(_raw)
+            except ValueError:
+                continue
+            environment[_knob] = _raw
     return environment
 
 
