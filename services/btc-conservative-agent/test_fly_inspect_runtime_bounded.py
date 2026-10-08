@@ -112,13 +112,13 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert "timeout-minutes: 120" in deploy_job
 
     assert "observed_bootstrap_rows = 21_353" in section
-    assert "conservative_records_per_cycle = 64" in section
+    assert "conservative_records_per_cycle = 512" in section
     assert "backlog_interval_seconds = 1" in section
     assert "bootstrap_timeout_seconds = 45 * 60" in section
     assert "minimum_cycles = (" in section
     assert "deadline = time.monotonic() + bootstrap_timeout_seconds" in section
     observed_rows = 21_353
-    records_per_cycle = 64
+    records_per_cycle = 512
     store = STORE.read_text(encoding="utf-8")
     configured = re.search(r"^_BOOTSTRAP_RECORDS_PER_STEP\s*=\s*(\d+)\s*$", store, re.MULTILINE)
     assert configured is not None

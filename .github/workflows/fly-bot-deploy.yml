@@ -1991,7 +1991,7 @@ jobs:
   test-and-deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: services/btc-conservative-agent
@@ -3015,14 +3015,14 @@ jobs:
 
           # The audited current cohort has at least 21,353 legacy rows.  At the
           # bounded 512-receipt worker batch and one-second backlog cadence,
-          # scheduling alone needs 42 cycles (<1 minute).  Ninety minutes gives
-          # that known cohort material headroom; it is not a latency guarantee
-          # because every child remains independently bounded by its wall
-          # timeout.  Expiry still fails safe in maintenance.
+          # scheduling alone needs 42 cycles (<1 minute).  Forty-five minutes
+          # gives that known cohort material headroom; it is not a latency
+          # guarantee because every child remains independently bounded by its
+          # wall timeout.  Expiry still fails safe in maintenance.
           observed_bootstrap_rows = 21_353
           conservative_records_per_cycle = 512
           backlog_interval_seconds = 1
-          bootstrap_timeout_seconds = 90 * 60
+          bootstrap_timeout_seconds = 45 * 60
           minimum_cycles = (
               observed_bootstrap_rows + conservative_records_per_cycle - 1
           ) // conservative_records_per_cycle
