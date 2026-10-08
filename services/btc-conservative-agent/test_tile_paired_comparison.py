@@ -82,10 +82,11 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     report = _report(rows)
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
     assert report["tile_order"][:4] == [CFT, XVS, RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
-    # Shared-call tiles pair (H-A, control, B2, B3, GS-06); evaluator-clock tiles (H-C, GS-01, B1) never do.
+    # Shared-call tiles pair (H-A, control, B2, B3, GS-06, Danish, Fade Pool);
+    # evaluator-clock tiles (H-C, GS-01, B1, GS-07) never do.
     assert report["all_tiles_paired"]["paired_tiles"] == [
         CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
         (CFT, RND), (CFT, "FAMILY_GSB2_REGIME_SWITCHER")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
@@ -136,8 +137,8 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
         rows += [_fill(RND, f"b{i}", -1.0, ts), _fill(CFT, f"b{i}", 3.0, ts)]
     report = _report(rows)
     assert report["baseline_lane"] is None
-    # Seven hypotheses (H-A, H-C, GS-01, B1..B3, GS-06); the control is not a trial.
-    assert report["deflated_sharpe_trials"] == 7
+    # Ten hypotheses (H-A, H-C, GS-01, B1..B3, GS-06, GS-07, Danish, Fade Pool); the control is not a trial.
+    assert report["deflated_sharpe_trials"] == 10
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND
     assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)
