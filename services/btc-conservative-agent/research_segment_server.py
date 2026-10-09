@@ -9,6 +9,7 @@ reserved worker class and only reads immutable files written by
 Routes (all require ``X-Bot-Admin-Token``; fail closed when unset):
 
     GET  /api/research-segments/<prefix>/head        shipper status + laptop ACK head
+    GET  /api/research-segments/<prefix>/files       shipper checkpoint file list (gzip when accepted)
     GET  /api/research-segments/<prefix>/man/<seq>   manifest bytes
     GET  /api/research-segments/<prefix>/seg/<seq>   segment bytes (streamed)
     GET  /api/research-segments/<prefix>/ack/<seq>   recorded laptop ACK
@@ -33,6 +34,7 @@ This module never deletes anything.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import hmac
 import json
@@ -56,6 +58,14 @@ MAX_MODE_BODY_BYTES = 256
 MANIFEST_CACHE_LIMIT = 4096
 _ROUTE_RE = re.compile(r"^/api/research-segments/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
                        r"(head|files|ack|custody|prune-mode|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
+
+
+def _accepts_gzip(environ) -> bool:
+    for item in str(environ.get("HTTP_ACCEPT_ENCODING") or "").split(","):
+        coding, _, params = item.strip().partition(";")
+        if coding.strip().lower() == "gzip":
+            return params.replace(" ", "").lower() not in ("q=0", "q=0.0", "q=0.00", "q=0.000")
+    return False
 
 
 def receipt_key(prefix: str, seq: int) -> str:
@@ -198,19 +208,31 @@ class SegmentServer:
         }
         return self._respond(start_response, "200 OK", payload)
 
-    def _files(self, start_response):
-        """The shipper checkpoint's view of every tracked file, for laptop parity."""
+    def _files(self, environ, start_response):
+        """The shipper checkpoint's view of every tracked file, for laptop parity.
+
+        The list is ~54 MB of JSON; a client that sends ``Accept-Encoding: gzip``
+        gets it gzip-compressed (``Content-Encoding: gzip``, exact Content-Length)
+        so the transfer is ~10x shorter. Clients that do not ask get plain JSON.
+        """
         state = self._read_json(self.state_dir / "state.json")
         keep = ("class", "offset", "size", "sha256", "tail_sha256", "baseline_offset", "baseline",
                 "snapshot_size")
         files = {path: {key: entry[key] for key in keep if key in entry}
                  for path, entry in sorted((state.get("files") or {}).items())}
-        return self._respond(start_response, "200 OK", {
+        payload = {
             "schema": "research_segment_checkpoint_files_v1", "prefix": self.prefix,
             "seq": int(state.get("seq") or 0),
             "last_manifest_sha256": state.get("last_manifest_sha256"),
             "baseline": state.get("baseline"), "files": files,
-            "tombstones": sorted((state.get("tombstones") or {}).keys())})
+            "tombstones": sorted((state.get("tombstones") or {}).keys())}
+        if not _accepts_gzip(environ):
+            return self._respond(start_response, "200 OK", payload)
+        body = gzip.compress(json.dumps(payload, sort_keys=True).encode("utf-8"), compresslevel=6)
+        start_response("200 OK", [("Content-Type", "application/json"), ("Content-Encoding", "gzip"),
+                                  ("Content-Length", str(len(body))), ("Vary", "Accept-Encoding"),
+                                  ("Cache-Control", "no-store")])
+        return [body]
 
     def _serve_manifest(self, environ, start_response, seq: int):
         info = self.manifest_info(seq)
@@ -431,7 +453,7 @@ class SegmentServer:
             if route == "head":
                 return self._head(start_response)
             if route == "files":
-                return self._files(start_response)
+                return self._files(environ, start_response)
             kind, _, token = route.partition("/")
             seq = int(token)
             if seq < 1:

@@ -1496,6 +1496,12 @@ EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
+# EXECUTION_FIX_VERSION / bot_version is the FREEZE21B cohort identity stamped on
+# every evidence row; its "8t" is historical (eight tiles at PHASE02) and it may
+# not change mid-freeze (test_research_freeze) without splitting the cohort.
+# The live tile count is always derived from the registry instead:
+ACTIVE_TILE_COUNT = len(ACTIVE_TILE_ORDER)
+BOT_VERSION_LABEL = f"{EXECUTION_FIX_VERSION} ({ACTIVE_TILE_COUNT} active tiles)"
 
 
 def tile_number(lane: str) -> int | None:

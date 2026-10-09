@@ -281,8 +281,8 @@ def main() -> int:
             raise RuntimeError("BOT_ADMIN_TOKEN is missing")
         result = continue_bootstrap(args.expected, _http_clients(token))
         print(json.dumps({"revision": args.expected, "resumed": True, "source_git_rev": result.get("source_git_rev")}, sort_keys=True))
-        from fly_postdeploy_active_gate import enable_all_registry_tiles
-        enable_all_registry_tiles(_http_clients(token))
+        from fly_postdeploy_active_gate import restore_registry_tiles
+        restore_registry_tiles(_http_clients(token))
     else:
         token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
         if not token:

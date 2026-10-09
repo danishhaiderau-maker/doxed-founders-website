@@ -978,3 +978,32 @@ def test_fly_config_enables_volume_sink_with_dry_run_pruning_default():
 
 
 # ------------------------------------------------------------- prune hook
+
+
+# ------------------------------------------------- checkpoint file list (gzip)
+def test_files_list_is_gzipped_only_when_the_client_accepts_it(venv):
+    import gzip
+
+    venv.write("a.jsonl", _rows(0, 3))
+    venv.ship_all()
+    status, headers, plain = venv.call("files")
+    assert status == 200 and "Content-Encoding" not in headers
+    expected = json.loads(plain)
+    assert expected["schema"] == "research_segment_checkpoint_files_v1" and expected["files"]
+    status, headers, packed = venv.call("files", headers={"Accept-Encoding": "gzip"})
+    assert status == 200 and headers["Content-Encoding"] == "gzip"
+    assert int(headers["Content-Length"]) == len(packed)
+    assert json.loads(gzip.decompress(packed)) == expected
+    status, headers, raw = venv.call("files", headers={"Accept-Encoding": "gzip;q=0, identity"})
+    assert "Content-Encoding" not in headers and json.loads(raw) == expected
+    # The existing puller asks for identity and keeps getting plain JSON.
+    assert venv.http.checkpoint_files() == expected
+
+
+def test_retention_client_reads_the_gzipped_list_end_to_end(venv):
+    import bot_data_retention as bdr
+
+    venv.write("a.jsonl", _rows(0, 3))
+    venv.ship_all()
+    _status, _headers, plain = venv.call("files")
+    assert bdr._fly_files(venv.base, "v1", TOKEN, timeout=10) == json.loads(plain)

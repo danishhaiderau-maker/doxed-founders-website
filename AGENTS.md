@@ -152,6 +152,12 @@
   it passes the OOS promotion gate.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
+- A deploy never changes a tile's paper on/off setting
+  (`scripts/fly_postdeploy_active_gate.py`): each lane is restored to the
+  operator state captured before maintenance (`PRIOR_OPERATOR_STATE`), a lane
+  new in that revision starts at its registry `default_enabled`, and
+  restart/recovery jobs keep the bot's persisted toggle state (on the
+  `/app/data` volume). `PAPER_TILES_HOLD_OFF` still forces listed lanes OFF.
 - Adding a tile requires one registry specification with a unique lane, policy
   signature, ID prefix, toggle key, default state, relay eligibility, and complete
   entry/exit/risk metadata, followed by registry validation, cross-layer tests,

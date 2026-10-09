@@ -51,7 +51,8 @@ def test_default_off_and_distinct_from_paper(tmp_path):
     assert st["armed_lane_count"] == 0
     assert all(not r["bitfinex_live_orders"] for r in st["rows"])
     # The live switch is never the paper toggle key.
-    assert st["tile_count"] == 13
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    assert st["tile_count"] == len(ACTIVE_TILE_ORDER)
 
 
 def test_denies_because_lanes_are_not_allowlisted(tmp_path):
@@ -215,3 +216,54 @@ def test_delivery_gate_missing_created_fails_closed(tmp_path):
     )
     assert allowed is False
     assert reason == DENY_TILE_PRE_ARMING
+
+
+# -- persistence on the data volume (survives deploys, fail-closed) ----------
+import json as _json
+
+import bitfinex_live_switch as _bls
+
+
+def test_default_sidecar_is_on_the_data_volume():
+    assert _bls.default_sidecar_path({"BOT_DATA_DIR": "/app/data"}) == \
+        _bls.Path("/app/data") / "bitfinex_live_switch_state.json"
+    assert _bls.default_sidecar_path({"BOT_DATA_DIR": "/app/data",
+                                      "BITFINEX_LIVE_SWITCH_STATE_FILE": "/x/s.json"}) == _bls.Path("/x/s.json")
+    assert _bls.default_sidecar_path({}) == _bls._LEGACY_SIDECAR
+
+
+def test_denial_record_survives_restart_but_every_lane_reloads_off(tmp_path):
+    path = tmp_path / "data" / "switch.json"
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    sw = BitfinexLiveSwitch(path)
+    sw.request_off(lane, reason="OPERATOR_OFF", now=10.0)
+    _arm_switch(sw, lane, 100.0)
+    sw._persist()
+    assert _json.loads(path.read_text())["rows"][lane]["bitfinex_live_orders"] is True
+    restarted = BitfinexLiveSwitch(path)
+    assert restarted.status()["armed_lane_count"] == 0
+    assert restarted.delivery_gate(lane, created_at_unix=150.0, now=200.0) == (False, DENY_SWITCH_NOT_REQUESTED)
+    row = _json.loads(path.read_text())["rows"][lane]
+    assert row["bitfinex_live_orders"] is False and row["last_allow_ts"] is None
+    assert row["last_denial"] == [_bls.RESTART_RESET_REASON]
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_legacy_image_sidecar_is_migrated_to_the_volume_off(tmp_path):
+    legacy = tmp_path / "app" / "bitfinex_live_switch_state.json"
+    legacy.parent.mkdir()
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    legacy.write_text(_json.dumps({"schema": "bitfinex_live_switch_v1", "rows": {
+        lane: {"lane": lane, "bitfinex_live_orders": True, "last_allow_ts": 5.0,
+               "last_denial": ["X"], "last_denied_at": 1.0}}}))
+    target = tmp_path / "data" / "bitfinex_live_switch_state.json"
+    sw = BitfinexLiveSwitch(target, legacy_sidecar=legacy)
+    assert target.is_file()
+    assert sw.status()["armed_lane_count"] == 0
+    assert _json.loads(target.read_text())["rows"][lane]["bitfinex_live_orders"] is False
+
+
+def test_missing_sidecar_is_all_off(tmp_path):
+    sw = BitfinexLiveSwitch(tmp_path / "nope" / "switch.json", legacy_sidecar=tmp_path / "also-missing.json")
+    assert sw.status()["armed_lane_count"] == 0
+    assert not (tmp_path / "nope" / "switch.json").exists()

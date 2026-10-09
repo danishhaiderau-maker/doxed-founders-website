@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -204,11 +206,80 @@ def pruned_index(state_dir: str | Path = DEFAULTS["state_dir"]) -> dict[str, str
 
 
 # ------------------------------------------------------------------ custody
-def _fly_files(base_url: str, prefix: str, token: str, timeout: float = 120.0) -> dict:
+FLY_FILES_ATTEMPTS = 4
+FLY_FILES_BACKOFF_SEC = 5.0
+FLY_FILES_CHUNK_BYTES = 1024 * 1024
+FLY_FILES_MAX_BYTES = 1024 * 1024 * 1024
+# A dropped/truncated body (IncompleteRead, RemoteDisconnected, BadStatusLine),
+# a socket reset or timeout, a gzip stream cut short, or JSON truncated mid-list
+# never proves anything about Fly: retry, then fail closed (zero deletions).
+FLY_FILES_TRANSIENT = (http.client.HTTPException, OSError, EOFError, ValueError, gzip.BadGzipFile)
+
+
+class FlyFilesUnavailable(RuntimeError):
+    """The Fly checkpoint file list could not be fetched completely; deletion stays disabled."""
+
+
+def _read_body(response, *, chunk_bytes: int = FLY_FILES_CHUNK_BYTES) -> bytes:
+    """Read the whole body in bounded chunks and prove it is complete."""
+    expected = response.headers.get("Content-Length")
+    expected = int(expected) if expected and str(expected).isdigit() else None
+    chunks, total = [], 0
+    while True:
+        chunk = response.read(chunk_bytes)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > FLY_FILES_MAX_BYTES:
+            raise ValueError(f"file list exceeds {FLY_FILES_MAX_BYTES} bytes")
+        chunks.append(chunk)
+    if expected is not None and total != expected:
+        raise http.client.IncompleteRead(b"".join(chunks), expected - total)
+    return b"".join(chunks)
+
+
+def _decode_files_payload(body: bytes, encoding: str) -> dict:
+    if (encoding or "").strip().lower() == "gzip":
+        body = gzip.decompress(body)
+    payload = json.loads(body)
+    if not isinstance(payload, dict) or not isinstance(payload.get("files"), dict):
+        raise ValueError("file list payload is not a complete checkpoint object")
+    int(payload.get("seq") or 0)
+    return payload
+
+
+def _fly_files_once(base_url: str, prefix: str, token: str, timeout: float) -> dict:
     request = urllib.request.Request(f"{base_url.rstrip('/')}/api/research-segments/{prefix}/files",
-                                     headers={"X-Bot-Admin-Token": token})
+                                     headers={"X-Bot-Admin-Token": token, "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read())
+        body = _read_body(response)
+        return _decode_files_payload(body, response.headers.get("Content-Encoding") or "")
+
+
+def _fly_files(base_url: str, prefix: str, token: str, timeout: float = 120.0, *,
+               attempts: int = FLY_FILES_ATTEMPTS, backoff_sec: float = FLY_FILES_BACKOFF_SEC,
+               fetch_once=None, sleep=time.sleep) -> dict:
+    """Fetch the Fly checkpoint file list with retry; raise FlyFilesUnavailable on failure.
+
+    The server gzips the list when asked (old servers ignore Accept-Encoding and
+    send plain JSON, which is still accepted). Authentication/route errors
+    (4xx) are not retried.
+    """
+    fetch_once = fetch_once or (lambda: _fly_files_once(base_url, prefix, token, timeout))
+    last = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return fetch_once()
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code < 500:
+                break
+        except FLY_FILES_TRANSIENT as exc:
+            last = exc
+        if attempt < attempts:
+            sleep(backoff_sec * (2 ** (attempt - 1)))
+    raise FlyFilesUnavailable(f"Fly file list unavailable after {attempt} attempt(s): "
+                              f"{type(last).__name__}: {last}") from last
 
 
 def gather_gates(cfg: dict, data_root: Path, *, now: float, fetch_files=None) -> dict:
@@ -262,7 +333,9 @@ def gather_gates(cfg: dict, data_root: Path, *, now: float, fetch_files=None) ->
             files = (fetch_files or (lambda: _fly_files(cfg["base_url"], cfg["prefix"], token)))()
             gates["fly_files"] = files.get("files") or {}
             gates["fly_files_seq"] = int(files.get("seq") or 0)
-        except (OSError, ValueError, urllib.error.URLError) as exc:
+        except (FlyFilesUnavailable, *FLY_FILES_TRANSIENT) as exc:
+            # Fail closed: no file list means no custody proof and zero deletions.
+            gates["fly_files"], gates["fly_files_seq"] = None, None
             gates["fly_files_error"] = f"{type(exc).__name__}: {exc}"
             reasons.append("FLY_CHECKPOINT_UNAVAILABLE")
     bounds = [gates["acked_seq"], gates["parity_seq"]]
@@ -1634,7 +1707,7 @@ class Retention:
         poster = self.post_custody or (lambda body: _http_post_custody(self.cfg, body))
         try:
             status, payload = poster(raw)
-        except (OSError, ValueError, urllib.error.URLError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
             return {"posted": False, "through_seq": through, "error": f"{type(exc).__name__}: {exc}"}
         return {"posted": status in (200, 201), "http_status": status, "through_seq": through,
                 "verified_files": len(receipt["verified_files"]), "response": payload}

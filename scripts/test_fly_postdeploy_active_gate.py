@@ -1,3 +1,4 @@
+import json
 import re
 import sys
 from pathlib import Path
@@ -15,8 +16,11 @@ RETIRED = frozenset({"FAMILY_DANISH_CF", "FAMILY_CONTINUOUS_AUG_ORIGINAL"})
 
 @pytest.fixture(autouse=True)
 def _synthetic_checkout_registry(monkeypatch, request):
+    monkeypatch.delenv("PRIOR_OPERATOR_STATE", raising=False)
+    monkeypatch.delenv("PAPER_TILES_HOLD_OFF", raising=False)
     if not request.node.name.startswith("test_checkout_registry_"):
         monkeypatch.setattr(gate, "checkout_registry", lambda: (list(LANES), RETIRED))
+        monkeypatch.setattr(gate, "checkout_registry_defaults", lambda: dict.fromkeys(LANES, True))
 
 
 def _active_status(**overrides):
@@ -32,10 +36,14 @@ def _active_status(**overrides):
     return status
 
 
-def test_every_registry_lane_not_on_is_enabled_whatever_its_prior_state():
+def test_without_a_capture_the_persisted_runtime_state_is_kept():
     current = {"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True, "RETIRED": False}
-    assert gate.tile_enable_plan(current, LANES) == ["FAMILY_CHANDELIER_3"]
-    assert gate.tile_enable_plan({}, LANES) == LANES
+    target, source = gate.tile_target_state(LANES, current, dict.fromkeys(LANES, True))
+    assert target == {"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True}
+    assert set(source.values()) == {"PERSISTED_RUNTIME_STATE"}
+    assert gate.tile_toggle_plan(current, target) == []
+    target, _ = gate.tile_target_state(LANES, {}, {"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": False})
+    assert target == {"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": False}
 
 
 class _Bot:
@@ -51,26 +59,117 @@ class _Bot:
                     "active_tiles": [{"lane": lane, "relay_eligible": self.relay_eligible} for lane in LANES]}
         if path == "/api/state":
             return {"research_lane_enabled": dict(self.enabled)}
-        assert path == "/api/toggle_research_lane" and payload["enabled"] is True
-        self.toggles.append(payload["lane"])
-        self.enabled[payload["lane"]] = True
-        return {"lane": payload["lane"], "enabled": True}
+        assert path == "/api/toggle_research_lane"
+        self.toggles.append((payload["lane"], payload["enabled"]))
+        self.enabled[payload["lane"]] = payload["enabled"]
+        return {"lane": payload["lane"], "enabled": payload["enabled"]}
 
 
-def test_enable_all_registry_tiles_turns_every_tile_on_and_returns_receipt():
-    bot = _Bot({"FAMILY_CHANDELIER_3": False})
-    receipt = gate.enable_all_registry_tiles(bot)
-    assert bot.toggles == LANES
-    assert receipt["tiles_all_on"] is True and receipt["tiles_off"] == []
+def test_restore_keeps_operator_off_tile_off_and_returns_receipt():
+    bot = _Bot({"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True})
+    receipt = gate.restore_registry_tiles(bot)
+    assert bot.toggles == []
+    assert receipt["tiles_state_ok"] is True and receipt["tiles_off"] == ["FAMILY_CHANDELIER_3"]
     assert receipt["pause_owner"] == "" and receipt["live_armed"] is False
     assert receipt["bitfinex_live_enabled"] is False
 
 
-def test_enable_all_registry_tiles_refuses_relay_eligible_or_armed_state():
+def test_restore_applies_the_pre_deploy_capture(monkeypatch):
+    monkeypatch.setenv("PRIOR_OPERATOR_STATE", json.dumps({
+        "captured": True, "operator_paused": False,
+        "research_lane_enabled": {"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True}}))
+    bot = _Bot({"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": False})
+    receipt = gate.restore_registry_tiles(bot)
+    assert bot.toggles == [("FAMILY_CHANDELIER_3", False), ("FAMILY_ATR_TRAIL", True)]
+    assert receipt["tiles_state_ok"] is True
+    assert receipt["target_source"] == dict.fromkeys(LANES, "PRIOR_OPERATOR_STATE")
+
+
+def test_brand_new_tile_starts_at_registry_default_off(monkeypatch):
+    monkeypatch.setattr(gate, "checkout_registry_defaults",
+                        lambda: {"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": False})
+    monkeypatch.setenv("PRIOR_OPERATOR_STATE", json.dumps({
+        "captured": True, "research_lane_enabled": {"FAMILY_CHANDELIER_3": True}}))
+    # The new lane reads ON at runtime (e.g. stale state); the deploy must not keep it ON.
+    bot = _Bot({"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": True})
+    receipt = gate.restore_registry_tiles(bot)
+    assert bot.toggles == [("FAMILY_ATR_TRAIL", False)]
+    assert receipt["target_source"]["FAMILY_ATR_TRAIL"] == "REGISTRY_DEFAULT_NEW_TILE"
+    assert receipt["target"] == {"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": False}
+
+
+@pytest.mark.parametrize("raw", ["", "not json", json.dumps({"captured": False}),
+                                 json.dumps({"captured": True, "research_lane_enabled": {}}),
+                                 json.dumps({"captured": True, "research_lane_enabled": []})])
+def test_unusable_capture_falls_back_to_persisted_state(raw):
+    assert gate.prior_operator_toggles({"PRIOR_OPERATOR_STATE": raw}) is None
+
+
+def test_deploy_never_turns_on_a_tile_that_is_off_everywhere():
+    """OFF in the capture, OFF at runtime and default OFF -> never toggled ON."""
+    off = dict.fromkeys(LANES, False)
+    for current in ({}, dict(off)):
+        for prior in (None, dict(off)):
+            target, _ = gate.tile_target_state(LANES, current, dict(off), prior)
+            assert target == off
+            assert [lane for lane, on in gate.tile_toggle_plan(current, target) if on] == []
+
+
+def test_phase3_tiles_stay_off_across_the_next_deploy(monkeypatch):
+    """GS-07, the Danish router and the fade pool are OFF now and must stay OFF."""
+    real_lanes = ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_PREMIUM_REVERSION_60M",
+                  "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+                  "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+                  "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+                  "FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"]
+    phase3 = ["FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"]
+    live = {lane: lane not in phase3 for lane in real_lanes}
+    monkeypatch.setattr(gate, "checkout_registry", lambda: (list(real_lanes), RETIRED))
+    monkeypatch.setattr(gate, "checkout_registry_defaults", _real_defaults)
+    for prior in (None, dict(live)):
+        if prior is not None:
+            monkeypatch.setenv("PRIOR_OPERATOR_STATE", json.dumps({"captured": True,
+                                                                   "research_lane_enabled": prior}))
+        bot = _RealRosterBot(real_lanes, dict(live))
+        receipt = gate.restore_registry_tiles(bot)
+        assert bot.toggles == []
+        assert receipt["tiles_state_ok"] is True
+        assert [lane for lane in phase3 if bot.enabled[lane]] == []
+    # Even if the capture failed and the runtime state were lost, the registry default is OFF.
+    monkeypatch.delenv("PRIOR_OPERATOR_STATE")
+    bot = _RealRosterBot(real_lanes, {})
+    receipt = gate.restore_registry_tiles(bot)
+    assert all(receipt["target"][lane] is False for lane in phase3)
+
+
+def _real_defaults():
+    import importlib
+    sys.path.insert(0, str(gate.SERVICE_DIR))
+    registry = importlib.import_module("combo_pathway_config")
+    defaults = registry.combo_toggle_defaults()
+    return {lane: defaults.get(lane) is True for lane in registry.ACTIVE_TILE_ORDER}
+
+
+class _RealRosterBot:
+    def __init__(self, lanes, enabled):
+        self.lanes, self.enabled, self.toggles = lanes, dict(enabled), []
+
+    def __call__(self, path, payload=None):
+        if path == "/api/status":
+            return {**_active_status(), "pause_owner": "",
+                    "active_tiles": [{"lane": lane, "relay_eligible": False} for lane in self.lanes]}
+        if path == "/api/state":
+            return {"research_lane_enabled": dict(self.enabled)}
+        self.toggles.append((payload["lane"], payload["enabled"]))
+        self.enabled[payload["lane"]] = payload["enabled"]
+        return {"lane": payload["lane"], "enabled": payload["enabled"]}
+
+
+def test_restore_registry_tiles_refuses_relay_eligible_or_armed_state():
     with pytest.raises(SystemExit, match="relay-ineligible"):
-        gate.enable_all_registry_tiles(_Bot({}, relay_eligible=True))
+        gate.restore_registry_tiles(_Bot({}, relay_eligible=True))
     with pytest.raises(SystemExit, match="disarmed"):
-        gate.enable_all_registry_tiles(_Bot({}, live_armed=True))
+        gate.restore_registry_tiles(_Bot({}, live_armed=True))
 
 
 def test_pause_owner_is_a_paper_active_violation():
@@ -78,10 +177,11 @@ def test_pause_owner_is_a_paper_active_violation():
         "PAUSE_OWNER:OPERATOR"]
 
 
-def test_every_resume_path_forces_all_tiles_on():
+def test_every_resume_path_restores_tile_state():
     scripts = Path(__file__).resolve().parent
     for name in ("fly_failure_paper_resume.py", "fly_resume_bootstrap.py", "fly_resume_predeploy_abort.py"):
-        assert "enable_all_registry_tiles" in (scripts / name).read_text(encoding="utf-8"), name
+        text = (scripts / name).read_text(encoding="utf-8")
+        assert "restore_registry_tiles" in text and "enable_all_registry_tiles" not in text, name
     for job in ("repair-execution-tail", "repair-lifecycle-cursor", "repair-lifecycle-tail",
                 "restart-only", "recover-startup-crash", "recover-memory"):
         block = re.search(rf"\n  {re.escape(job)}:\n(.*?)(?=\n  [a-z0-9-]+:\n|\Z)", WORKFLOW, re.S).group(1)
@@ -126,7 +226,7 @@ def test_gate_fails_when_cycles_complete_but_every_model_call_fails(monkeypatch)
     monkeypatch.setenv("EXPECTED_REVISION", "abcdef123456")
     monkeypatch.setenv("POSTDEPLOY_ACTIVE_DEADLINE_SEC", "1")
     monkeypatch.setattr(gate, "POLL_SEC", 0)
-    monkeypatch.setattr(gate, "enable_all_registry_tiles", lambda request: {})
+    monkeypatch.setattr(gate, "restore_registry_tiles", lambda request: {})
     clock = iter(range(1000, 10_000))
     monkeypatch.setattr(gate.time, "time", lambda: float(next(clock)))
 
@@ -187,18 +287,22 @@ class _HeldBot(_Bot):
 def test_held_off_lanes_are_turned_off_and_required_off(monkeypatch):
     monkeypatch.setenv("PAPER_TILES_HOLD_OFF", " FAMILY_ATR_TRAIL ,")
     bot = _HeldBot({"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True})
-    receipt = gate.enable_all_registry_tiles(bot)
-    assert bot.toggles == [("FAMILY_ATR_TRAIL", False), ("FAMILY_CHANDELIER_3", True)]
-    assert receipt["tiles_all_on"] is True and receipt["held_off"] == ["FAMILY_ATR_TRAIL"]
+    receipt = gate.restore_registry_tiles(bot)
+    # The held lane goes OFF; the operator-OFF lane is NOT forced ON any more.
+    assert bot.toggles == [("FAMILY_ATR_TRAIL", False)]
+    assert receipt["tiles_state_ok"] is True and receipt["held_off"] == ["FAMILY_ATR_TRAIL"]
     assert receipt["held_not_off"] == []
 
 
 def test_held_lane_left_on_fails_the_receipt():
     status = {"active_tiles": [{"lane": lane} for lane in LANES]}
     state = {"research_lane_enabled": dict.fromkeys(LANES, True)}
-    receipt = gate.tiles_all_on_receipt(status, state, frozenset({"FAMILY_ATR_TRAIL"}))
-    assert receipt["tiles_all_on"] is False and receipt["held_not_off"] == ["FAMILY_ATR_TRAIL"]
-    assert gate.tiles_all_on_receipt(status, state, frozenset(LANES))["tiles_all_on"] is False
+    held = frozenset({"FAMILY_ATR_TRAIL"})
+    target, _ = gate.tile_target_state(LANES, state["research_lane_enabled"], {}, None, held)
+    receipt = gate.tiles_state_receipt(status, state, target, held)
+    assert receipt["tiles_state_ok"] is False and receipt["held_not_off"] == ["FAMILY_ATR_TRAIL"]
+    target, _ = gate.tile_target_state(LANES, {}, {}, None, frozenset(LANES))
+    assert gate.tiles_state_receipt(status, state, target, frozenset(LANES))["tiles_state_ok"] is False
 
 
 def test_hold_off_list_comes_from_repository_variable():
@@ -225,23 +329,24 @@ def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
 def test_running_roster_must_equal_the_checked_out_registry(monkeypatch):
     monkeypatch.setattr(gate, "checkout_registry", lambda: (["FAMILY_ATR_TRAIL", "FAMILY_CHANDELIER_3"], RETIRED))
     with pytest.raises(SystemExit, match="does not match the checked-out registry"):
-        gate.enable_all_registry_tiles(_Bot({}))
+        gate.restore_registry_tiles(_Bot({}))
 
 
 def test_retired_lane_on_or_listed_fails_the_receipt():
     status = {"active_tiles": [{"lane": lane} for lane in LANES]}
     state = {"research_lane_enabled": {**dict.fromkeys(LANES, True), "FAMILY_DANISH_CF": True}}
-    receipt = gate.tiles_all_on_receipt(status, state, expected=LANES, retired=RETIRED)
-    assert receipt["tiles_all_on"] is False and receipt["retired_on"] == ["FAMILY_DANISH_CF"]
+    on = dict.fromkeys(LANES, True)
+    receipt = gate.tiles_state_receipt(status, state, on, expected=LANES, retired=RETIRED)
+    assert receipt["tiles_state_ok"] is False and receipt["retired_on"] == ["FAMILY_DANISH_CF"]
     listed = {"active_tiles": [{"lane": lane} for lane in [*LANES, "FAMILY_DANISH_CF"]]}
     clean = {"research_lane_enabled": dict.fromkeys(LANES, True)}
-    receipt = gate.tiles_all_on_receipt(listed, clean, expected=LANES, retired=RETIRED)
-    assert receipt["tiles_all_on"] is False and receipt["roster_matches_checkout"] is False
+    receipt = gate.tiles_state_receipt(listed, clean, on, expected=LANES, retired=RETIRED)
+    assert receipt["tiles_state_ok"] is False and receipt["roster_matches_checkout"] is False
     assert receipt["retired_on_roster"] == ["FAMILY_DANISH_CF"]
-    ok = gate.tiles_all_on_receipt(status, {"research_lane_enabled": {**clean["research_lane_enabled"],
-                                                                     "FAMILY_DANISH_CF": False}},
-                                   expected=LANES, retired=RETIRED)
-    assert ok["tiles_all_on"] is True and ok["roster_matches_checkout"] is True
+    ok = gate.tiles_state_receipt(status, {"research_lane_enabled": {**clean["research_lane_enabled"],
+                                                                    "FAMILY_DANISH_CF": False}},
+                                  on, expected=LANES, retired=RETIRED)
+    assert ok["tiles_state_ok"] is True and ok["roster_matches_checkout"] is True
 
 
 def test_freeze_override_is_forwarded_only_when_fully_declared():
@@ -262,7 +367,7 @@ def test_transient_ready_503_does_not_fail_the_gate(monkeypatch):
     monkeypatch.setenv("POSTDEPLOY_ACTIVE_DEADLINE_SEC", "500")
     monkeypatch.setattr(gate, "POLL_SEC", 0)
     monkeypatch.setattr(gate.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(gate, "enable_all_registry_tiles", lambda request: {})
+    monkeypatch.setattr(gate, "restore_registry_tiles", lambda request: {})
     clock = iter(range(1000, 10_000))
     monkeypatch.setattr(gate.time, "time", lambda: float(next(clock)))
     calls = {"ready": 0}

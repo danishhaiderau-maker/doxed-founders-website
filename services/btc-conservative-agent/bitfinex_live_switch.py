@@ -28,6 +28,7 @@ with the existing ``/api/live_arm`` / ``/api/bitfinex_live`` operator paths.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -36,9 +37,28 @@ from typing import Any, Mapping
 from combo_pathway_config import ACTIVE_TILE_REGISTRY, ACTIVE_TILE_ORDER
 
 SCHEMA = "bitfinex_live_switch_v1"
-# Default sidecar lives next to the other runtime state files; the caller may
-# override the path (tests use a temp dir). Never place this on OneDrive.
-_SIDECAR = Path(__file__).resolve().parent / "bitfinex_live_switch_state.json"
+# The sidecar lives on the persistent data volume (BOT_DATA_DIR, /app/data on
+# Fly) so the denial/audit record survives deploys; the image directory
+# (/app) is replaced on every deploy. ``BITFINEX_LIVE_SWITCH_STATE_FILE``
+# overrides it; without BOT_DATA_DIR (laptop/tests) the legacy location next
+# to this file is kept. Never place this on OneDrive.
+SIDECAR_NAME = "bitfinex_live_switch_state.json"
+_LEGACY_SIDECAR = Path(__file__).resolve().parent / SIDECAR_NAME
+RESTART_RESET_REASON = "PROCESS_RESTART_FAIL_CLOSED"
+
+
+def default_sidecar_path(environ=None) -> Path:
+    env = os.environ if environ is None else environ
+    explicit = str(env.get("BITFINEX_LIVE_SWITCH_STATE_FILE") or "").strip()
+    if explicit:
+        return Path(explicit)
+    data_dir = str(env.get("BOT_DATA_DIR") or "").strip()
+    if data_dir:
+        return Path(data_dir) / SIDECAR_NAME
+    return _LEGACY_SIDECAR
+
+
+_SIDECAR = default_sidecar_path()
 
 # Live-test safety contract: max $0.25 margin input at 100x (~$25 notional).
 # This is NOT a max-loss guarantee; realized loss can exceed posted margin.
@@ -75,17 +95,36 @@ ALLOW_ARMED = "ARMED"
 class BitfinexLiveSwitch:
     """Fail-closed per-lane live-orders switch state machine."""
 
-    def __init__(self, sidecar: Path | str | None = None):
-        self.path = Path(sidecar) if sidecar is not None else _SIDECAR
+    def __init__(self, sidecar: Path | str | None = None, *, legacy_sidecar: Path | str | None = None):
+        if sidecar is not None:
+            self.path = Path(sidecar)
+            self._legacy = Path(legacy_sidecar) if legacy_sidecar is not None else None
+        else:
+            self.path = default_sidecar_path()
+            self._legacy = (Path(legacy_sidecar) if legacy_sidecar is not None
+                            else (_LEGACY_SIDECAR if self.path != _LEGACY_SIDECAR else None))
         self._lock = threading.Lock()
         self._rows: dict[str, dict] = {}
         self._load()
 
     # -- persistence -----------------------------------------------------
     def _load(self) -> None:
+        """Load the persisted record; every lane comes back OFF (fail closed).
+
+        A new process never inherits an armed lane: the denial history and
+        timestamps survive restarts and deploys, but ``bitfinex_live_orders``
+        is reset to False and ``last_allow_ts`` cleared, so delivery requires a
+        fresh operator request and a fresh evaluation after every restart. A
+        missing or corrupt file means all lanes OFF. A sidecar left at the
+        legacy image path is migrated once onto the data volume.
+        """
+        source = self.path
+        migrated = False
+        if not self.path.exists() and self._legacy is not None and self._legacy.exists():
+            source, migrated = self._legacy, True
         try:
-            if self.path.exists():
-                raw = json.loads(self.path.read_text(encoding="utf-8") or "{}")
+            if source.exists():
+                raw = json.loads(source.read_text(encoding="utf-8") or "{}")
                 if isinstance(raw, dict):
                     rows = raw.get("rows")
                     if isinstance(rows, dict):
@@ -93,14 +132,37 @@ class BitfinexLiveSwitch:
         except (OSError, ValueError, json.JSONDecodeError):
             # Corrupt state must fail closed: keep everything OFF.
             self._rows = {}
+        reset = False
+        for row in self._rows.values():
+            if row.get("bitfinex_live_orders") or row.get("last_allow_ts"):
+                row["bitfinex_live_orders"] = False
+                row["last_allow_ts"] = None
+                row["last_denial"] = [RESTART_RESET_REASON]
+                row["last_denied_at"] = time.time()
+                reset = True
+        if migrated or reset:
+            self._persist()
 
     def _persist(self) -> None:
         try:
             payload = {"schema": SCHEMA, "updated_ts": time.time(), "rows": self._rows}
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-            tmp.replace(self.path)
+            tmp = self.path.with_name(self.path.name + f".{os.getpid()}.tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            try:
+                dir_fd = os.open(str(self.path.parent), os.O_RDONLY)
+            except OSError:
+                return
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(dir_fd)
         except OSError:
             # Persistence failure never fails the switch ON; it only loses the
             # denial record, which is re-derived on the next evaluate().

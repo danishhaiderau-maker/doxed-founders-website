@@ -479,3 +479,16 @@ def test_analyzer_dashboard_does_not_override_the_registry_roster():
     assert "{% for lane in tile_lanes %}" in source
     assert "CURRENT TWO-LANE EVIDENCE" not in source
     assert "CURRENT CANONICAL TILE EVIDENCE" in source
+
+
+def test_bot_version_label_derives_the_tile_count_from_the_registry():
+    import combo_pathway_config as registry
+
+    assert registry.ACTIVE_TILE_COUNT == len(registry.ACTIVE_TILE_ORDER)
+    assert registry.BOT_VERSION_LABEL == (
+        f"{registry.EXECUTION_FIX_VERSION} ({len(registry.ACTIVE_TILE_ORDER)} active tiles)")
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
+    assert source.count('"bot_version_label": COMBO_BOT_VERSION_LABEL') >= 3
+    assert source.count('"active_tile_count": COMBO_ACTIVE_TILE_COUNT') >= 3

@@ -113,6 +113,8 @@ from combo_pathway_config import (
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
+    ACTIVE_TILE_COUNT as COMBO_ACTIVE_TILE_COUNT,
+    BOT_VERSION_LABEL as COMBO_BOT_VERSION_LABEL,
     RESEARCH_STACK_FEATURES,
     SCORE_LED_ADMISSION_POLICY_ID,
     SCORE_LED_PAPER_RESEARCH_ENABLED,
@@ -38520,7 +38522,7 @@ DASHBOARD_JS = """(function () {
           if (cd != null && cd > 0) syncTxt += ' | AI cooldown ' + cd + 's / ' + (d.ai_cooldown_sec || 300) + 's';
           if (d.bot_cwd) syncTxt += ' | ' + d.bot_cwd;
           if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
-          if (d.bot_version) syncTxt += ' | ' + d.bot_version;
+          if (d.bot_version_label || d.bot_version) syncTxt += ' | ' + (d.bot_version_label || d.bot_version);
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           inst.innerText = syncTxt;
           const history = d.runtime_incident_history || {};
@@ -45389,6 +45391,8 @@ def status():
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "analyzer_sync_id": analyzer_sync_id,
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
@@ -45618,6 +45622,8 @@ def health():
         "source_git_rev": _runtime_git_rev(),
         "git_rev": _runtime_git_rev(),
         "bot_version": state.get("bot_version") or EXECUTION_FIX_VERSION,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "analyzer_sync_id": state.get("analyzer_sync_id") or ANALYZER_SYNC_ID,
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
@@ -45731,6 +45737,8 @@ def ready():
         ),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
@@ -56279,9 +56287,9 @@ def _wire_bitfinex_readiness() -> None:
     try:
         import bitfinex_readiness_api as _bra
         import order_action_audit as _oaa
+        # On the data volume (BOT_DATA_DIR) so the ledger survives deploys.
         _bfx_action_audit = _oaa.OrderActionAudit(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bitfinex_order_action_audit.jsonl"),
+            _oaa.resolve_audit_path(os.path.dirname(os.path.abspath(__file__))),
             key=_oaa.audit_key_from_env(),
         )
         _bra.wire(

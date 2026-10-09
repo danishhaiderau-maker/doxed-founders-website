@@ -135,8 +135,8 @@ def main() -> int:
         raise
     print("failure-resume " + json.dumps(result, sort_keys=True), flush=True)
     if result["status"] == "ACTIVE":
-        from fly_postdeploy_active_gate import enable_all_registry_tiles
-        enable_all_registry_tiles(_http_clients(token))
+        from fly_postdeploy_active_gate import restore_registry_tiles
+        restore_registry_tiles(_http_clients(token))
     return 0
 
 
