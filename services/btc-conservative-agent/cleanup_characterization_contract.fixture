@@ -84,6 +84,7 @@
     ["GET", "/api/monitor/integrity", "monitor_integrity"],
     ["GET", "/api/monitor/tiles/specs", "monitor_tiles_specs"],
     ["GET", "/api/monitor/tiles/trades", "monitor_tiles_trades"],
+    ["GET", "/api/monitor/exit-latency", "monitor_exit_latency"],
     ["GET", "/api/monitor/tiles/counters", "monitor_tiles_counters"],
     ["GET", "/api/monitor/tiles/totals", "monitor_tiles_totals"],
     ["GET", "/api/monitor/tape", "monitor_tape"],
