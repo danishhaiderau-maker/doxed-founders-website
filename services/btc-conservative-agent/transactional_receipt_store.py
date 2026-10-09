@@ -498,6 +498,28 @@ class TransactionalReceiptStore:
             raise ReceiptAuthorityError("RECEIPT_AUTHORITY_WRITE_UNPROVABLE")
         return result
 
+    def put_many(self, receipts) -> int:
+        """Publish several receipts in ONE transaction (one commit barrier).
+
+        Every receipt passes the same validation as :meth:`put`; any invalid
+        receipt rolls the whole batch back.  Each is read back afterwards so a
+        batch is never reported durable without proof.
+        """
+        receipts = list(receipts or ())
+        if not receipts:
+            return 0
+        self._validate_active_marker()
+        try:
+            with self._transaction() as connection:
+                for receipt in receipts:
+                    self._put_on(connection, receipt)
+        except sqlite3.Error as exc:
+            raise ReceiptAuthorityError("RECEIPT_AUTHORITY_WRITE_FAILED") from exc
+        for receipt in receipts:
+            if self.get(str(receipt["ledger"]), str(receipt["record_id"])) is None:
+                raise ReceiptAuthorityError("RECEIPT_AUTHORITY_WRITE_UNPROVABLE")
+        return len(receipts)
+
     def set_ledger_complete(self, ledger: str, signature: Mapping[str, Any] | None,
                             anchor: Mapping[str, Any] | None) -> None:
         self._validate_active_marker()

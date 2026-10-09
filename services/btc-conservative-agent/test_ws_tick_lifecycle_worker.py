@@ -60,7 +60,8 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             "trade_lock": threading.RLock(),
             "open_positions": [pos],
             "get_mark_price": lambda direction, fallback: fallback,
-            "_apply_position_exits": lambda p, mark, now: calls.append((p, mark)),
+            # Per-position claim + policy evaluation (see bot._evaluate_position_exit).
+            "_evaluate_position_exit": lambda p, mark, now, **_kw: calls.append((p, mark)),
         }
         compile_function("_tick_driven_position_exits", ns)
         lock.acquire()

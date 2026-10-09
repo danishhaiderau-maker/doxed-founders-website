@@ -69,6 +69,39 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+AUDIT_FILE_NAME = "bitfinex_order_action_audit.jsonl"
+
+
+def resolve_audit_path(legacy_dir: Path | str, environ=None) -> Path:
+    """Audit ledger path on the persistent data volume, migrating a legacy copy once.
+
+    ``BOT_DATA_DIR`` (``/app/data`` on Fly) holds the ledger so it survives
+    deploys; the image directory is replaced on every deploy. Without
+    ``BOT_DATA_DIR`` the legacy location (``legacy_dir``) is kept. A legacy
+    ledger is copied byte-for-byte (fsync + atomic rename) only when the volume
+    copy does not exist yet; an existing volume ledger is never overwritten.
+    """
+    env = os.environ if environ is None else environ
+    legacy = Path(legacy_dir) / AUDIT_FILE_NAME
+    data_dir = str(env.get("BOT_DATA_DIR") or "").strip()
+    if not data_dir:
+        return legacy
+    target = Path(data_dir) / AUDIT_FILE_NAME
+    if target != legacy and not target.exists() and legacy.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + f".{os.getpid()}.migrate.tmp")
+        with legacy.open("rb") as src, tmp.open("wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp, target)
+    return target
+
+
 class OrderActionAudit:
     def __init__(self, path: Path | str, key: bytes | None = None,
                  clock: Callable[[], float] = time.time):

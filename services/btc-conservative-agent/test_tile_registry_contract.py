@@ -99,8 +99,10 @@ GS_B_ORDER = (
 )
 # FREEZE21B mid-epoch addition (owner 2026-10-05): GS-06 appended; GS-05 retired PHASE02.
 GS_MID_EPOCH_ORDER = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
+# PHASE03 mid-epoch additions (owner 2026-10-07): three research tiles, all default OFF.
+PHASE03_ORDER = ("FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL")
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
-EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
+EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
@@ -119,10 +121,10 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
         (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 9))
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 12))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + GS_B_ORDER]
     assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2", "gb3"]
-    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 8
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 11
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
     assert [t["id_prefix"] for t in mid] == ["gs6"] and [t["max_active_signals"] for t in mid] == [2]
     for tile in mid:
@@ -130,6 +132,14 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
         assert tile["default_enabled"] is True and tile["paper_only"] is True
         assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
         assert tile["entry_policy"]["mode"] == "REGIME_ADAPTIVE" and tile["pre_registration"]["mid_epoch_addition"]
+    phase03 = [ACTIVE_TILE_REGISTRY[lane] for lane in PHASE03_ORDER]
+    assert [t["id_prefix"] for t in phase03] == ["gs7", "dnr", "fdp"]
+    for tile in phase03:
+        assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
+        assert tile["default_enabled"] is False and tile["paper_only"] is True
+        assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
+        assert tile["relay_capability"] == "BLOCKED_UNQUALIFIED"
+        assert tile["pre_registration"]["mid_epoch_addition"]
     for tile in gs_tiles:
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         assert tile["default_enabled"] is True and tile["paper_only"] is True
@@ -275,7 +285,8 @@ def test_composite_exit_order_matches_runtime_first_trigger_order():
         spec = ACTIVE_TILE_REGISTRY[lane]
         exit_policy = spec["exit_policy"]
         assert exit_policy["family"] == (
-            "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS" if lane in GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER else "COMPOSITE_FIRST_TRIGGER_WINS")
+            "REGIME_ADAPTIVE_FIRST_TRIGGER_WINS" if lane in GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
+            + ("FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL") else "COMPOSITE_FIRST_TRIGGER_WINS")
         order = tuple(registry.registry_live_exit_order(exit_policy))
         assert tuple(exit_policy["exit_order"]) == order == tuple(spec["live_exit_order"])
     premium = ACTIVE_TILE_REGISTRY["FAMILY_PREMIUM_REVERSION_60M"]
@@ -305,7 +316,8 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
     assert inverted_users == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GSB2_REGIME_SWITCHER",
-                              "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
+                              "FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
+                              "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
     for schema in ("tile_pre_registration_trade_count_v1", "tile_pre_registration_committed_fade_v1"):
@@ -467,3 +479,16 @@ def test_analyzer_dashboard_does_not_override_the_registry_roster():
     assert "{% for lane in tile_lanes %}" in source
     assert "CURRENT TWO-LANE EVIDENCE" not in source
     assert "CURRENT CANONICAL TILE EVIDENCE" in source
+
+
+def test_bot_version_label_derives_the_tile_count_from_the_registry():
+    import combo_pathway_config as registry
+
+    assert registry.ACTIVE_TILE_COUNT == len(registry.ACTIVE_TILE_ORDER)
+    assert registry.BOT_VERSION_LABEL == (
+        f"{registry.EXECUTION_FIX_VERSION} ({len(registry.ACTIVE_TILE_ORDER)} active tiles)")
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
+    assert source.count('"bot_version_label": COMBO_BOT_VERSION_LABEL') >= 3
+    assert source.count('"active_tile_count": COMBO_ACTIVE_TILE_COUNT') >= 3

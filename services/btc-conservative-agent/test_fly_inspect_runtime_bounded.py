@@ -95,7 +95,7 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        "e7c367ed2444310816261b4c9c820876943ce2e175fdef1d854e9d77efd48394",
+        "8e1a6bb79fd537944c6c334a1eee7503423167851ad5cece1d5eb6660ff83a03",
     ]
 
 
@@ -109,23 +109,23 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert gate_start < resume_start
     section = source[gate_start:resume_start]
     deploy_job = source.split("  test-and-deploy:", 1)[1]
-    assert "timeout-minutes: 120" in deploy_job
+    assert "timeout-minutes: 180" in deploy_job
 
     assert "observed_bootstrap_rows = 21_353" in section
-    assert "conservative_records_per_cycle = 64" in section
+    assert "conservative_records_per_cycle = 512" in section
     assert "backlog_interval_seconds = 1" in section
-    assert "bootstrap_timeout_seconds = 45 * 60" in section
+    assert "bootstrap_timeout_seconds = 90 * 60" in section
     assert "minimum_cycles = (" in section
     assert "deadline = time.monotonic() + bootstrap_timeout_seconds" in section
     observed_rows = 21_353
-    records_per_cycle = 64
+    records_per_cycle = 512
     store = STORE.read_text(encoding="utf-8")
     configured = re.search(r"^_BOOTSTRAP_RECORDS_PER_STEP\s*=\s*(\d+)\s*$", store, re.MULTILINE)
     assert configured is not None
     assert int(configured.group(1)) == records_per_cycle
     assert "_BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024" in store
     minimum_cycles = (observed_rows + records_per_cycle - 1) // records_per_cycle
-    assert 45 * 60 >= minimum_cycles
+    assert 90 * 60 >= minimum_cycles
     assert 'call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in section
     assert section.count('call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})') == 1
     assert 'call("/api/status")' in section

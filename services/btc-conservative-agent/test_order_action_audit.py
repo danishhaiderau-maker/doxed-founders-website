@@ -94,3 +94,23 @@ def test_status_reports_verify(tmp_path):
     st = a.status()
     assert st["rows"] == 1
     assert st["verify"]["ok"] is True
+
+
+# -- ledger location: persistent data volume, legacy migrated once -----------
+def test_audit_ledger_lives_on_the_data_volume_and_migrates_legacy(tmp_path):
+    import order_action_audit as oaa
+
+    legacy_dir = tmp_path / "app"
+    legacy_dir.mkdir()
+    assert oaa.resolve_audit_path(legacy_dir, {}) == legacy_dir / oaa.AUDIT_FILE_NAME
+    legacy = legacy_dir / oaa.AUDIT_FILE_NAME
+    legacy.write_bytes(b'{"seq":1}\n{"seq":2}\n')
+    data = tmp_path / "data"
+    target = oaa.resolve_audit_path(legacy_dir, {"BOT_DATA_DIR": str(data)})
+    assert target == data / oaa.AUDIT_FILE_NAME
+    assert target.read_bytes() == legacy.read_bytes()
+    # An existing volume ledger is never overwritten by a stale image copy.
+    target.write_bytes(b'{"seq":1}\n{"seq":2}\n{"seq":3}\n')
+    legacy.write_bytes(b'{"seq":9}\n')
+    assert oaa.resolve_audit_path(legacy_dir, {"BOT_DATA_DIR": str(data)}).read_bytes().count(b"\n") == 3
+    assert not list(data.glob("*.tmp"))

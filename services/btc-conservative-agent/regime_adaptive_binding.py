@@ -424,7 +424,7 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
     # ------------------------------------------------------------ evaluators
     def make_evaluator(self):
         source = self.entry["direction_source"]
-        if source == CROSS_VENUE_PREMIUM:
+        if source == CROSS_VENUE_PREMIUM or self.entry.get("premium_clock_trigger"):
             cls = PREMIUM_EVALUATOR_CLASSES[self.entry.get("evaluator_id_prefix") or GsPremiumEvaluator.ID_PREFIX]
             return cls(PremiumRule.from_policy(self.entry, self.exit),
                        policy_id=self.policy_id, policy_signature=self.policy_signature)
@@ -450,7 +450,32 @@ class Gs5PremiumEvaluator(GsPremiumEvaluator):
     TRIGGER_FEATURE_KEY = "gs5xvp_trigger"
 
 
-PREMIUM_EVALUATOR_CLASSES = {cls.ID_PREFIX: cls for cls in (GsPremiumEvaluator, Gs5PremiumEvaluator)}
+class Gs7PremiumEvaluator(GsPremiumEvaluator):
+    """GS-07 (PHASE03): the same cross-venue premium rule on a fast 60 s mean; its own trigger-id
+    namespace keeps its per-second receipts apart from GS-01 / GS-05 on the same second."""
+
+    ID_PREFIX = "gs7xvp"
+    TRIGGER_FEATURE_KEY = "gs7xvp_trigger"
+
+
+class DanishRouterPremiumEvaluator(GsPremiumEvaluator):
+    """Danish regime router (PHASE03): H-C's 60-min premium rule in its own instance (VIOLENT leg)."""
+
+    ID_PREFIX = "dnrxvp"
+    TRIGGER_FEATURE_KEY = "dnrxvp_trigger"
+
+
+class FadePoolPremiumEvaluator(GsPremiumEvaluator):
+    """Fade pool (PHASE03): H-C's 60-min premium rule in its own instance (premium leg)."""
+
+    ID_PREFIX = "fdpxvp"
+    TRIGGER_FEATURE_KEY = "fdpxvp_trigger"
+
+
+PREMIUM_EVALUATOR_CLASSES = {cls.ID_PREFIX: cls for cls in (
+    GsPremiumEvaluator, Gs5PremiumEvaluator, Gs7PremiumEvaluator,
+    DanishRouterPremiumEvaluator, FadePoolPremiumEvaluator,
+)}
 
 
 class CvdDivergenceEvaluator:

@@ -154,7 +154,7 @@ def _common_safe(status: dict, expected: str, *, paused: bool) -> tuple[dict, di
     return progress, pipeline, bootstrap, readiness_failed, diagnostic
 
 
-def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic, sleep=time.sleep, timeout=45 * 60) -> dict:
+def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic, sleep=time.sleep, timeout=90 * 60) -> dict:
     expected = _exact_revision(expected)
     deadline = monotonic() + timeout
     bootstrap_deadline = deadline - min(60, timeout / 4)
@@ -281,8 +281,8 @@ def main() -> int:
             raise RuntimeError("BOT_ADMIN_TOKEN is missing")
         result = continue_bootstrap(args.expected, _http_clients(token))
         print(json.dumps({"revision": args.expected, "resumed": True, "source_git_rev": result.get("source_git_rev")}, sort_keys=True))
-        from fly_postdeploy_active_gate import enable_all_registry_tiles
-        enable_all_registry_tiles(_http_clients(token))
+        from fly_postdeploy_active_gate import restore_registry_tiles
+        restore_registry_tiles(_http_clients(token))
     else:
         token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
         if not token:

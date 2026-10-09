@@ -30,6 +30,7 @@ import requests
 import glob
 import itertools
 import re
+import contextlib
 import copy
 import pickle
 import functools
@@ -113,6 +114,8 @@ from combo_pathway_config import (
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
+    ACTIVE_TILE_COUNT as COMBO_ACTIVE_TILE_COUNT,
+    BOT_VERSION_LABEL as COMBO_BOT_VERSION_LABEL,
     RESEARCH_STACK_FEATURES,
     SCORE_LED_ADMISSION_POLICY_ID,
     SCORE_LED_PAPER_RESEARCH_ENABLED,
@@ -1410,6 +1413,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         ),
         "leverage": _state_leverage(),
         "entry_ts": fill_ts,
+        "order_created_ts": order_created,
         # Preserve the source entity's birth watermark after a pending order
         # becomes a position. NEXT_FRESH_ONLY must compare the original signal
         # creation time, not the later fill time, or a pre-arm order that fills
@@ -5039,8 +5043,15 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
         f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
     )
 
-def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
-    """Apply the active registry-owned tile policy and persist partial receipts."""
+def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source: str = "POSITION_MANAGER",
+                            close_async: bool = False) -> bool:
+    """Apply the active registry-owned tile policy and persist partial receipts.
+
+    A terminal action stamps the trigger (time, booked price, source) on the
+    position before the close.  ``close_async`` hands the slow close
+    (persistence, research writes, relay) to its own thread so one close never
+    delays the evaluation of the other open positions.
+    """
     source_pos = pos
     pos = copy.deepcopy(source_pos)
     lane = str(pos.get("research_lane") or "").upper()
@@ -5141,10 +5152,18 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     if remaining_after <= 0:
         if _TIME_EXIT_REASON.fullmatch(reason):
             pos["path_end_mark_price"] = float(price)
+        pos["exit_trigger_ts"] = float(now)
+        pos["exit_trigger_eval_ts"] = time.time()
+        pos["exit_trigger_price"] = float(fill_px)
+        pos["exit_trigger_mark_price"] = float(price)
+        pos["exit_trigger_source"] = str(exit_source)
         with trade_lock:
             source_pos.clear()
             source_pos.update(pos)
-        close_position(source_pos, reason)
+        if close_async:
+            _dispatch_position_close(source_pos, reason)
+        else:
+            close_position(source_pos, reason)
         return True
     prior_qty = float(pos.get("qty") or 0)
     pos["qty"] = original_qty * remaining_after
@@ -5180,10 +5199,11 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
 
 
 
-def _apply_position_exits(pos: dict, price: float, now: float = None):
+def _apply_position_exits(pos: dict, price: float, now: float = None, *,
+                          exit_source: str = "POSITION_MANAGER", close_async: bool = False):
     if now is None:
         now = time.time()
-    if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+    if pos.get("status") == "CLOSED" or pos.get("_close_in_progress") or pos.get("_exit_dispatch_pending"):
         return False
     unreal_pct = unrealized_margin_pct(pos, price)
     with state_lock:
@@ -5234,7 +5254,7 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     pos["_exit_eval_price"] = float(price or 0)
 
     if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
-        return _apply_family_tile_exit(pos, price, now)
+        return _apply_family_tile_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
         return True
@@ -14909,6 +14929,7 @@ def collector_maturation_worker_loop():
                 status["last_tape_refresh"] = refresh
                 # Until the tape family is indexed every window reads as
                 # SOURCE_NOT_READY; sweeping then only rewrites the journal.
+                _retry_stale_preentry_evidence()
                 if store.initial_scan_complete:
                     _collector_worker_phase(status, "MATURATION")
                     _maybe_complete_pending_order_multiverse(from_worker=True)
@@ -16394,6 +16415,61 @@ def _enqueue_preentry_evidence(kind: str, keys, payload: dict, *, lane: str) -> 
     return True
 
 
+def _preentry_receipt_attempt_failed(receipt: dict, *, reason: str) -> bool:
+    """Count one failed apply; dead-letter at PREENTRY_EVIDENCE_MAX_ATTEMPTS.
+
+    A barrier timeout counts as a failed attempt too: previously it did not, so
+    one receipt whose drain kept timing out stayed pending forever and the
+    >30 s pending age disabled deferral for every evaluator lane (21 h live).
+    Returns True when the receipt was dead-lettered (removed from pending).
+    """
+    receipt_id = receipt["receipt_id"]
+    kind = receipt.get("kind")
+    receipt["attempts"] = int(receipt.get("attempts") or 0) + 1
+    if receipt["attempts"] < PREENTRY_EVIDENCE_MAX_ATTEMPTS:
+        return False
+    # Terminal for replay: applying it later could land after the trade's
+    # terminal rows. The payload stays in the journal (durable) and the gap is
+    # logged as an evidence gap.
+    logger.error(f"[PRE-ENTRY EVIDENCE] {kind} dead receipt={receipt_id[:12]} keys={receipt.get('keys')} "
+                 f"reason={reason} [EVIDENCE GAP]")
+    _append_durable_handoff_row(_preentry_evidence_journal_path(), {
+        "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
+        "status": "DEAD_LETTERED", "attempts": receipt["attempts"], "reason": reason,
+        "completed_at": utc_iso(),
+    }, _preentry_evidence_journal_lock, "pre-entry")
+    with _preentry_evidence_lock:
+        _preentry_evidence_pending.pop(receipt_id, None)
+        _preentry_evidence_status["dead"] += 1
+    return True
+
+
+def _preentry_targets(keys=(), through: str = None) -> list:
+    """Pending receipts up to the last one matching ``keys``/``through`` (FIFO)."""
+    with _preentry_evidence_lock:
+        ordered = list(_preentry_evidence_pending.values())
+    wanted = set(keys or ())
+    last = -1
+    for index, receipt in enumerate(ordered):
+        if receipt["receipt_id"] == through or wanted.intersection(receipt.get("keys") or ()):
+            last = index
+    return ordered[:last + 1]
+
+
+def _retry_stale_preentry_evidence(now: float = None) -> bool:
+    """Re-drive the oldest pending receipt once it outlives the deferral bound.
+
+    The worker never retries (max_retries=0); without this a receipt whose
+    drain failed stayed pending until the next restart.
+    """
+    now = time.time() if now is None else float(now)
+    with _preentry_evidence_lock:
+        oldest = next(iter(_preentry_evidence_pending.values()), None)
+    if not oldest or now - float(oldest.get("enqueued_ts") or now) <= PREENTRY_EVIDENCE_MAX_PENDING_AGE_SEC:
+        return False
+    return _drain_preentry_evidence(through=oldest["receipt_id"])
+
+
 def _apply_preentry_receipt(receipt: dict) -> bool:
     """Materialize one receipt; the caller holds the collector epoch lock."""
     receipt_id = receipt["receipt_id"]
@@ -16425,21 +16501,8 @@ def _apply_preentry_receipt(receipt: dict) -> bool:
             _preentry_evidence_tls.applying = False
         status = "APPLIED"
     if not ok:
-        receipt["attempts"] = int(receipt.get("attempts") or 0) + 1
         _preentry_evidence_failed(f"{kind} not durable")
-        if receipt["attempts"] < PREENTRY_EVIDENCE_MAX_ATTEMPTS:
-            return False
-        # Terminal for replay: applying it later could land after the trade's
-        # terminal rows. The payload stays in the journal and the V3 writer has
-        # already dead-lettered the pre-entry evidence failure.
-        logger.error(f"[PRE-ENTRY EVIDENCE] {kind} dead receipt={receipt_id[:12]} keys={receipt.get('keys')} [EVIDENCE GAP]")
-        _append_durable_handoff_row(_preentry_evidence_journal_path(), {
-            "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
-            "status": "DEAD_LETTERED", "attempts": receipt["attempts"], "completed_at": utc_iso(),
-        }, _preentry_evidence_journal_lock, "pre-entry")
-        with _preentry_evidence_lock:
-            _preentry_evidence_pending.pop(receipt_id, None)
-            _preentry_evidence_status["dead"] += 1
+        _preentry_receipt_attempt_failed(receipt, reason="NOT_DURABLE")
         return False
     if not _append_durable_handoff_row(_preentry_evidence_journal_path(), {
         "schema": PREENTRY_EVIDENCE_RESULT_SCHEMA, "receipt_id": receipt_id, "kind": kind,
@@ -16486,17 +16549,12 @@ def _drain_preentry_evidence(*, keys=(), through: str = None, timeout: float = N
         _preentry_evidence_count("barrier_timeouts")
         _preentry_evidence_failed("barrier timeout")
         logger.error(f"[PRE-ENTRY EVIDENCE] barrier timeout keys={sorted(keys)} [EVIDENCE GAP]")
+        for receipt in _preentry_targets(keys, through):
+            _preentry_receipt_attempt_failed(receipt, reason="BARRIER_TIMEOUT")
         return False
     try:
-        with _preentry_evidence_lock:
-            ordered = list(_preentry_evidence_pending.values())
-        wanted = set(keys)
-        last = -1
-        for index, receipt in enumerate(ordered):
-            if receipt["receipt_id"] == through or wanted.intersection(receipt.get("keys") or ()):
-                last = index
         ok = True
-        for receipt in ordered[:last + 1]:
+        for receipt in _preentry_targets(keys, through):
             with _preentry_evidence_lock:
                 still_pending = receipt["receipt_id"] in _preentry_evidence_pending
             if still_pending:
@@ -26140,6 +26198,189 @@ def _observable_exit_price() -> float:
     return ws_price if ws_price > 0 else 0.0
 
 
+# ---------------------------------------------------------------- fast exits
+# Protective exits (hard stop, time backstop) must not wait for the position
+# manager loop, a busy position_evaluation_lock, or another position's slow
+# close.  A dedicated worker checks every open combo position against its own
+# registry hard stop / time backstop on every pass (default 4 Hz, fresh WS BBO);
+# only when one is due does it run that position's full policy evaluation (the
+# policy still decides, first trigger wins, booking the side-correct trigger
+# tick) and the close then runs on its own thread.  Per-position claims keep
+# the worker, the WS tick worker and process_positions from evaluating one
+# position concurrently.
+PROTECTIVE_EXIT_WORKER_ENABLED = os.getenv("PROTECTIVE_EXIT_WORKER_ENABLED", "1").strip() != "0"
+PROTECTIVE_EXIT_INTERVAL_SEC = float(os.getenv("PROTECTIVE_EXIT_INTERVAL_SEC", "0.25"))
+PROTECTIVE_EXIT_RECHECK_SEC = 1.0
+PROTECTIVE_EXIT_MAX_INFLIGHT_CLOSES = 16
+_position_exit_claims: set = set()
+_position_exit_claims_lock = threading.Lock()
+_protective_exit_last_eval: dict = {}
+_exit_close_threads: dict = {}
+_protective_exit_status = {
+    "enabled": PROTECTIVE_EXIT_WORKER_ENABLED, "interval_sec": PROTECTIVE_EXIT_INTERVAL_SEC,
+    "scans": 0, "due": 0, "fired": 0, "claims_busy": 0, "async_closes": 0, "inline_closes": 0,
+    "close_errors": 0, "last_scan_ms": None, "max_scan_ms": 0.0, "last_fire": None,
+}
+
+
+@contextlib.contextmanager
+def _position_exit_claim(pos: dict):
+    """Non-blocking per-position evaluation claim (yields False when busy)."""
+    key = str((pos or {}).get("trade_id") or id(pos))
+    with _position_exit_claims_lock:
+        claimed = key not in _position_exit_claims
+        if claimed:
+            _position_exit_claims.add(key)
+    try:
+        yield claimed
+    finally:
+        if claimed:
+            with _position_exit_claims_lock:
+                _position_exit_claims.discard(key)
+
+
+def _evaluate_position_exit(pos: dict, mark: float, now: float, *, exit_source: str,
+                            close_async: bool = False) -> bool:
+    with _position_exit_claim(pos) as claimed:
+        if not claimed:
+            _protective_exit_status["claims_busy"] += 1
+            return False
+        if exit_source == "POSITION_MANAGER" and not close_async:
+            return bool(_apply_position_exits(pos, mark, now))
+        return bool(_apply_position_exits(pos, mark, now, exit_source=exit_source, close_async=close_async))
+
+
+def _run_dispatched_close(pos: dict, reason: str) -> None:
+    trade_id = str(pos.get("trade_id") or "")
+    try:
+        close_position(pos, reason)
+    except Exception as exc:
+        _protective_exit_status["close_errors"] += 1
+        logger.exception(f"[FAST EXIT] close failed trade_id={trade_id} reason={reason}: {exc} "
+                         "[PIPELINE ENFORCEMENT]")
+    finally:
+        # A close that did not complete (claim lost, fee filter, failure) makes
+        # the position evaluable again on the next pass.
+        pos.pop("_exit_dispatch_pending", None)
+        with _position_exit_claims_lock:
+            _exit_close_threads.pop(trade_id, None)
+
+
+def _dispatch_position_close(pos: dict, reason: str) -> None:
+    """Run one close on its own thread so other exits are never queued behind it."""
+    trade_id = str(pos.get("trade_id") or "")
+    with _position_exit_claims_lock:
+        alive = {k: t for k, t in _exit_close_threads.items() if t.is_alive()}
+        _exit_close_threads.clear()
+        _exit_close_threads.update(alive)
+        inline = trade_id in alive or len(alive) >= PROTECTIVE_EXIT_MAX_INFLIGHT_CLOSES
+        if not inline:
+            pos["_exit_dispatch_pending"] = True
+            thread = threading.Thread(target=_run_dispatched_close, args=(pos, reason),
+                                      daemon=True, name=f"exit-close-{trade_id[:24]}")
+            _exit_close_threads[trade_id] = thread
+    if inline:
+        _protective_exit_status["inline_closes"] += 1
+        close_position(pos, reason)
+        return
+    _protective_exit_status["async_closes"] += 1
+    thread.start()
+
+
+def _protective_exit_levels(pos: dict):
+    """(hard_stop_bp, time_backstop_sec) of the position's own registry exit, or None."""
+    lane = str(pos.get("research_lane") or "").upper()
+    if lane not in COMBO_EXECUTION_LANES:
+        return None
+    try:
+        policy = _patient_chase_policy(lane)
+    except Exception:
+        return None
+    binding = getattr(policy, "_BINDING", None)
+    if getattr(policy, "MARKET_EXIT_CONTEXT", False) and hasattr(binding, "profile_for"):
+        decision = pos.get("adaptive_entry_decision") or (
+            (trades_map.get(pos.get("trade_id"), {}).get("signal_ref") or {}).get("adaptive_entry_decision")
+        )
+        _name, profile = binding.profile_for(decision or {})
+        return float(profile["hard_bp"]), float(profile["time_sec"])
+    spec = getattr(policy, "SPEC", None)
+    if spec is None:
+        return None
+    leverage = float(pos.get("leverage") or 100) or 100.0
+    return abs(float(spec.hard_stop_margin_pct)) * 100.0 / leverage, float(spec.max_duration_sec)
+
+
+def _protective_exit_due(pos: dict, mark: float, now: float):
+    """Cheap check: 'HARD_STOP' / 'TIME_BACKSTOP' when one is due on this mark, else None."""
+    levels = _protective_exit_levels(pos)
+    entry = _buf_float(pos.get("entry"), 0.0)
+    if not levels or entry <= 0 or not mark or mark <= 0:
+        return None
+    hard_bp, time_sec = levels
+    sign = 1.0 if str(pos.get("dir") or "").upper() == "LONG" else -1.0
+    cur_bp = sign * (float(mark) - entry) / entry * 1e4
+    if cur_bp <= -hard_bp:
+        return "HARD_STOP"
+    entry_ts = _buf_float(pos.get("entry_ts"), 0.0)
+    if entry_ts > 0 and now - entry_ts >= time_sec:
+        return "TIME_BACKSTOP"
+    return None
+
+
+def protective_exit_scan(now: float = None) -> int:
+    """One pass of the fast exit path; returns the number of exits fired."""
+    started = time.perf_counter()
+    now = time.time() if now is None else float(now)
+    fired = 0
+    positions = [
+        p for p in list(open_positions)
+        if isinstance(p, dict) and p.get("status") == "OPEN"
+        and not p.get("_close_in_progress") and not p.get("_exit_dispatch_pending")
+    ]
+    for pos in positions:
+        mark = get_mark_price(pos.get("dir"))
+        due = _protective_exit_due(pos, mark, now)
+        if not due:
+            continue
+        trade_id = str(pos.get("trade_id") or "")
+        if now - float(_protective_exit_last_eval.get(trade_id) or 0.0) < PROTECTIVE_EXIT_RECHECK_SEC:
+            continue
+        _protective_exit_last_eval[trade_id] = now
+        _protective_exit_status["due"] += 1
+        if _evaluate_position_exit(pos, mark, now, exit_source="PROTECTIVE_EXIT_WORKER", close_async=True):
+            fired += 1
+            _protective_exit_status["fired"] += 1
+            _protective_exit_status["last_fire"] = {"trade_id": trade_id, "rule": due, "ts": now,
+                                                    "mark": mark}
+    for stale in [tid for tid in _protective_exit_last_eval if tid not in {str(p.get("trade_id")) for p in positions}]:
+        _protective_exit_last_eval.pop(stale, None)
+    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+    _protective_exit_status["scans"] += 1
+    _protective_exit_status["last_scan_ms"] = elapsed_ms
+    _protective_exit_status["max_scan_ms"] = max(float(_protective_exit_status["max_scan_ms"]), elapsed_ms)
+    return fired
+
+
+def protective_exit_snapshot() -> dict:
+    with _position_exit_claims_lock:
+        inflight = sum(1 for t in _exit_close_threads.values() if t.is_alive())
+    return {**copy.deepcopy(_protective_exit_status), "closes_in_flight": inflight,
+            "schema": "protective_exit_worker_v1"}
+
+
+def protective_exit_worker():
+    """Dedicated fast exit path (see PROTECTIVE_EXIT_* above)."""
+    while not shutdown_event.is_set():
+        try:
+            if _observable_exit_price() > 0:
+                protective_exit_scan()
+        except Exception as exc:
+            _THREAD_HEALTH.error("protective_exit_worker", exc)
+            logger.error(f"[FAST EXIT] scan error: {exc} [PIPELINE ENFORCEMENT]")
+        _THREAD_HEALTH.beat("protective_exit_worker")
+        shutdown_event.wait(PROTECTIVE_EXIT_INTERVAL_SEC)
+
+
 def process_positions():
     # heartbeat_loop and position_manager both provide lifecycle redundancy.
     # Let only one of them evaluate positions at a time so depth simulation,
@@ -26165,7 +26406,7 @@ def process_positions():
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _apply_position_exits(pos, mark, now)
+            _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER")
     finally:
         position_evaluation_lock.release()
 
@@ -28201,7 +28442,7 @@ def _tick_driven_position_exits(price: float):
             ]
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _apply_position_exits(pos, mark, now)
+            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK")
         return True
     finally:
         position_evaluation_lock.release()
@@ -30280,6 +30521,46 @@ def _forced_close_origin(exit_reason) -> str | None:
     return close_origin_for_pause_owner(_pause_owner_locked())
 
 
+def _ts_or_none(value):
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 and math.isfinite(out) else None
+
+
+def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: float) -> dict:
+    """Actual wall-clock stamps of every stage, recorded when each happened.
+
+    None means the stage was not observed by this process (never inferred from
+    durations).  ``fill_ts`` is the paper fill booking time (_build_open_position).
+    """
+    pos = pos or {}
+    master = master if isinstance(master, dict) else {}
+    signal_ts = _ts_or_none(pos.get("signal_created_ts")) or _ts_or_none(
+        (master.get("timing") or {}).get("signal_ts")) or _ts_or_none(master.get("created_ts_ts"))
+    order_sent_ts = (_ts_or_none(pos.get("order_created_ts"))
+                     or _ts_or_none(master.get("submitted_order_created_ts"))
+                     or _ts_or_none(master.get("order_created_ts")))
+    fill_ts = _ts_or_none(pos.get("entry_ts"))
+    trigger_ts = _ts_or_none(pos.get("exit_trigger_ts"))
+    exit_fill = _ts_or_none(exit_fill_ts)
+    return {
+        "schema": "trade_event_timestamps_v1",
+        "signal_ts": signal_ts,
+        "order_sent_ts": order_sent_ts,
+        "fill_ts": fill_ts,
+        "fill_ts_basis": "RECORDED_AT_PAPER_FILL" if fill_ts else None,
+        "exit_trigger_ts": trigger_ts,
+        "exit_trigger_eval_ts": _ts_or_none(pos.get("exit_trigger_eval_ts")),
+        "exit_trigger_source": pos.get("exit_trigger_source"),
+        "exit_trigger_price": pos.get("exit_trigger_price"),
+        "exit_fill_ts": exit_fill,
+        "exit_trigger_to_fill_sec": round(exit_fill - trigger_ts, 3) if exit_fill and trigger_ts else None,
+        "signal_to_order_sent_sec": round(order_sent_ts - signal_ts, 3) if order_sent_ts and signal_ts else None,
+    }
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -30449,6 +30730,7 @@ def close_position(pos: dict, exit_reason: str):
             "close_ts": close_iso,
             "ts_melbourne": close_mel,
             "close_ts_melbourne": close_mel,
+            "event_timestamps": _trade_event_timestamps(pos, master, exit_fill_ts=time.time()),
             "trade_id": trade_id,
             "epoch_id": pos.get("epoch_id") or _collector_v22_epoch_id(),
             "opportunity_id": pos.get("opportunity_id"),
@@ -31124,6 +31406,29 @@ def _xvl_latency_snapshot(lane: str, samples: list) -> dict:
     }
 
 
+# Stand-aside verdicts: every one is already appended (fsync) to
+# ADAPTIVE_ENTRY_DECISIONS_FILE.  The heavy V3 lane-decision write (opportunity,
+# features, market segments, decision, resolution) for a REJECTED trigger is
+# coalesced to one per (lane, reason, side) per window; an accepted trigger is
+# never coalesced.  Live: ~2,100 Danish-router stand-asides in 22 h each ran the
+# full synchronous V3 write on the attempt worker.
+XVL_REJECTED_V3_MIN_INTERVAL_SEC = float(os.getenv("XVL_REJECTED_V3_MIN_INTERVAL_SEC", "60"))
+_xvl_rejected_v3_last: dict = {}
+
+
+def _xvl_rejected_v3_due(lane: str, reason: str, side: str, now: float = None) -> bool:
+    now = time.time() if now is None else float(now)
+    key = (str(lane), str(reason), str(side))
+    with _XVL_LOCK:
+        last = _xvl_rejected_v3_last.get(key)
+        if last is not None and now - last < XVL_REJECTED_V3_MIN_INTERVAL_SEC:
+            lane_state = _xvl_lane_state(lane)
+            lane_state["rejected_v3_coalesced"] = int(lane_state.get("rejected_v3_coalesced") or 0) + 1
+            return False
+        _xvl_rejected_v3_last[key] = now
+        return True
+
+
 def _xvl_count_skip(lane: str, reason: str) -> None:
     with _XVL_LOCK:
         skips = _xvl_lane_state(lane)["skips"]
@@ -31273,8 +31578,11 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     )
     decision["shared_ai_call_id"] = call_id
     decision[f"{evaluator.ID_PREFIX}_trigger_id"] = call_id
-    _record_adaptive_entry_decision(lane, decision)
     accepted = decision.get("action") != "STAND_ASIDE"
+    write_v3_rejection = accepted or _xvl_rejected_v3_due(lane, f"ADAPTIVE_{decision.get('reason')}", side)
+    if not accepted:
+        decision["v3_lane_decision_written"] = bool(write_v3_rejection)
+    _record_adaptive_entry_decision(lane, decision)
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
         "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
@@ -31302,10 +31610,12 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
          "features": copy.deepcopy(signal_features), "decision": verdict},
         lane=lane,
     )
+    if not accepted:
+        if write_v3_rejection:
+            _write_v3_shared_lane_decision(lane, ai, ctx, signal_features, **verdict)
+        return reason
     if not evidence_ready:
         evidence_ready = _write_v3_shared_lane_decision(lane, ai, ctx, signal_features, **verdict)
-    if not accepted:
-        return reason
     if not evidence_ready:
         logger.error(f"[{lane}] order blocked: immutable pre-entry evidence unavailable [PIPELINE ENFORCEMENT]")
         return "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
@@ -31374,6 +31684,10 @@ def _xvl_tick(now: float, live=None) -> None:
     for lane, evaluator, trigger, outcomes in steps:
         if not getattr(evaluator, "SHADOW_FILE", None):
             continue  # GS/B evaluators: the paper order ledger is the only record
+        if not is_research_lane_enabled(lane):
+            # OFF tile: the evaluator stays warm (rolling means) but nothing is
+            # attempted (see _xvl_maybe_attempt_paper) or persisted.
+            continue
         for row in ([trigger] if trigger else []) + list(outcomes):
             row["research_lane"] = lane
             _xvl_append(row, evaluator.SHADOW_FILE)
@@ -31480,6 +31794,7 @@ def xvl_evaluator_snapshot() -> dict:
                 "orders_eligible": int(row["orders_eligible"]),
                 "submissions_last_hour": sum(1 for ts in row["submissions"] if now - ts < 3600),
                 "skips": dict(row["skips"]),
+                "rejected_v3_coalesced": int(row.get("rejected_v3_coalesced") or 0),
                 "last_attempt": copy.deepcopy(row["last_attempt"]),
             }
             for lane, row in _xvl_lane_runtime.items()
@@ -35882,6 +36197,7 @@ THREAD_HEALTH_MONITORED = {
     "tick_execution_engine": (FAST_MONITOR_INTERVAL_SEC, 30.0),
     "position_manager": (POSITION_MONITOR_INTERVAL_SEC, 60.0),
     "ws_tick_lifecycle_worker": (0.5, 30.0),
+    "protective_exit_worker": (PROTECTIVE_EXIT_INTERVAL_SEC, 30.0),
     "analytics_loop": (float(ANALYTICS_INTERVAL_SEC), 0.0),
     "main_supervisor_loop": (60.0, 0.0),
     "api_state_cache_refresher": (_API_STATE_REFRESH_INTERVAL_SEC, 300.0),
@@ -38520,7 +38836,7 @@ DASHBOARD_JS = """(function () {
           if (cd != null && cd > 0) syncTxt += ' | AI cooldown ' + cd + 's / ' + (d.ai_cooldown_sec || 300) + 's';
           if (d.bot_cwd) syncTxt += ' | ' + d.bot_cwd;
           if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
-          if (d.bot_version) syncTxt += ' | ' + d.bot_version;
+          if (d.bot_version_label || d.bot_version) syncTxt += ' | ' + (d.bot_version_label || d.bot_version);
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
           inst.innerText = syncTxt;
           const history = d.runtime_incident_history || {};
@@ -45389,6 +45705,8 @@ def status():
         # Section 1: explicit running source revision + policy identifiers.
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "analyzer_sync_id": analyzer_sync_id,
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
@@ -45438,6 +45756,7 @@ def status():
                 **cross_venue_health_snapshot(),
             },
             "xvl_evaluator": xvl_evaluator_snapshot(),
+            "protective_exit": protective_exit_snapshot(),
             "market_context_tape": {
                 "tape_schema": _mct.SCHEMA,
                 "file": _mct.FILE_NAME,
@@ -45618,6 +45937,8 @@ def health():
         "source_git_rev": _runtime_git_rev(),
         "git_rev": _runtime_git_rev(),
         "bot_version": state.get("bot_version") or EXECUTION_FIX_VERSION,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "analyzer_sync_id": state.get("analyzer_sync_id") or ANALYZER_SYNC_ID,
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
@@ -45731,6 +46052,8 @@ def ready():
         ),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
+        "bot_version_label": COMBO_BOT_VERSION_LABEL,
+        "active_tile_count": COMBO_ACTIVE_TILE_COUNT,
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
@@ -55937,6 +56260,9 @@ def main():
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
     threading.Thread(target=safe_thread(ws_tick_lifecycle_worker), daemon=True).start()
+    if PROTECTIVE_EXIT_WORKER_ENABLED:
+        threading.Thread(target=safe_thread(protective_exit_worker), name="protective-exit",
+                         daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
@@ -56279,9 +56605,9 @@ def _wire_bitfinex_readiness() -> None:
     try:
         import bitfinex_readiness_api as _bra
         import order_action_audit as _oaa
+        # On the data volume (BOT_DATA_DIR) so the ledger survives deploys.
         _bfx_action_audit = _oaa.OrderActionAudit(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "bitfinex_order_action_audit.jsonl"),
+            _oaa.resolve_audit_path(os.path.dirname(os.path.abspath(__file__))),
             key=_oaa.audit_key_from_env(),
         )
         _bra.wire(

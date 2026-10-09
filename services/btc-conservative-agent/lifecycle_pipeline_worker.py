@@ -409,8 +409,12 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         # or starve lifecycle/WAL work on the next invocation.
         emergency_bootstrap = None
         if request.get("_epoch_id"):
+            # Stop the bounded bootstrap step well before the hard deadline
+            # (cursor persisted); the next cycle resumes from it.
             emergency_bootstrap = (
-                evidence_store.advance_one_emergency_bootstrap_round_robin()
+                evidence_store.advance_one_emergency_bootstrap_round_robin(
+                    deadline_monotonic=deadline - max(5.0, 0.2 * float(request["_runtime"])),
+                )
             )
         # A caller must still terminate the subprocess at the same deadline to
         # cap wall time while a filesystem syscall is in flight.  Independently

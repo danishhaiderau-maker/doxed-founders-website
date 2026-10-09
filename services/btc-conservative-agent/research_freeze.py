@@ -3,6 +3,8 @@
 Owner-approved 2026-10-04 15:02 AEDT and re-declared 17:53/17:54 AEDT as FREEZE21B with
 eleven tiles (diagnostics/FREEZE21-PROTOCOL-20261004.md, "FREEZE21B" section).
 PHASE02 (2026-10-07, owner-ordered, CODE_OVERRIDE) retired five losers, leaving eight tiles.
+PHASE03 (2026-10-07, owner-ordered build) appends three research tiles (GS-07, the Danish
+regime router and the fade pool) as default-OFF mid-epoch additions.
 The freeze window is ``[started_at, started_at + 21 days)`` of the data-epoch
 manifest whose ``epoch_id`` is :data:`FREEZE_DATA_EPOCH_ID` (opened by the
 first boot with ``DATA_EPOCH_ID`` set to it). Inside the window:
@@ -82,12 +84,29 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-05 ~20:15 AEDT (design ask) and build/deploy order",
      "spec": "diagnostics/GS05-GS06-TILE-SPECS-CORRECTED-20261005.md (supersedes the -20261005 exits)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # PHASE03 (2026-10-07, owner-ordered build, default OFF, paper only, relay-ineligible).
+    {"lane": "FAMILY_GS07_FAST_PREMIUM_FADE", "tile_number": 9, "hypothesis_id": "GS-20261007-07",
+     "approved_by": "Danish (owner), 2026-10-07 PHASE03 build order (build only; no deploy/arm/relay)",
+     "spec": "operator transcript (Grok Strategist Tile 14 GS-07 fast premium fade)",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    {"lane": "FAMILY_DANISH_REGIME_ROUTER", "tile_number": 10, "hypothesis_id": "GS-20261007-DNR",
+     "approved_by": "Danish (owner), 2026-10-07 PHASE03 build order (build only; no deploy/arm/relay)",
+     "spec": "diagnostics/DANISH-REGIME-TILE-DESIGN-20261007.md",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    {"lane": "FAMILY_FADE_POOL", "tile_number": 11, "hypothesis_id": "GS-20261007-FDP",
+     "approved_by": "Danish (owner), 2026-10-07 PHASE03 build order (build only; no deploy/arm/relay)",
+     "spec": "operator transcript (fade-pool proposal; Grok Strategist FADE-POOL-REANALYSIS-20261007)",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
+# 2026-10-09 (owner step-2 order): the Danish router and Fade pool thesis cut is the
+# registered CONDITIONAL_EARLY_CUT_12_5M (fires only while MFE <= +2 bp); their
+# profiles gained cut_max_peak_bp, so both tiles' policy signatures and this pin moved.
+# The frozen roster's signature is unchanged.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "a812d7383722b8cc0d9a1f79864bb9af425e728b2345271e113be2541358e270",
-    "hypothesis": "5948fb453c2d2f936bd22a92d123938083274bb252394970a07e8e5ce286078d",
+    "score_led": "8e1a6bb79fd537944c6c334a1eee7503423167851ad5cece1d5eb6660ff83a03",
+    "hypothesis": "0c7b0970fd1c7229838ddaa034d0d0b78ec62405249944574aeaa0d58bd0c900",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"

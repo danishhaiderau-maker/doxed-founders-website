@@ -282,7 +282,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
              mock.patch.object(self.bot, "_observable_exit_price", return_value=78100.0), \
              mock.patch.object(self.bot, "process_funding_accrual"), \
              mock.patch.object(self.bot, "get_mark_price", return_value=78100.0), \
-             mock.patch.object(self.bot, "_apply_position_exits", side_effect=lambda pos, mark, now: evaluated.append(pos["trade_id"])):
+             mock.patch.object(self.bot, "_apply_position_exits", side_effect=lambda pos, mark, now, **_kw: evaluated.append(pos["trade_id"])):
             self.bot.process_positions()
         self.assertEqual(evaluated, ["family-pos-1"])
 

@@ -136,6 +136,17 @@ def _exec_text(cell: dict | None, entry: dict) -> str:
 
 def regime_entry_lines(entry: dict) -> list[str]:
     reg = entry.get("regime_classifier") or {}
+    cells = entry.get("regime_exec") or {}
+    if not reg:
+        # Any-regime tile (e.g. the fade pool): no classifier, one execution path.
+        unique = {repr(cells.get(r)) for r in ("QUIET", "TREND", "VIOLENT")}
+        lines = ["Regime: any regime (no classifier)"]
+        if len(unique) == 1:
+            lines.append(f"Order: {_exec_text(cells.get('QUIET'), entry)}")
+        else:
+            for regime in ("QUIET", "TREND", "VIOLENT"):
+                lines.append(f"Order {regime}: {_exec_text(cells.get(regime), entry)}")
+        return lines
     parts = [f"VIOLENT if 3-min ATR percentile (24 h) >= {_num(reg['violent_atr_pct_gte'])} or spread >= "
              f"{_num(reg['violent_spread_bp_gte'])} bp"]
     if reg.get("trend_adx_gte") is not None:
@@ -143,7 +154,6 @@ def regime_entry_lines(entry: dict) -> list[str]:
     parts.append("otherwise QUIET (last closed 3-minute Bitfinex bar at the signal)")
     lines = ["Regime: " + "; ".join(parts)]
     triggers = entry.get("regime_trigger") or {}
-    cells = entry.get("regime_exec") or {}
     for regime in ("QUIET", "TREND", "VIOLENT"):
         if regime == "TREND" and reg.get("trend_adx_gte") is None:
             continue
@@ -202,7 +212,9 @@ def _regime_risk_lines(exit_policy: dict) -> list[str]:
         label = "" if name == "ALL" else f" ({name})"
         how = "any tick" if int(prof.get("cut_close_sec") or 1) <= 1 else f"on {_minutes(prof['cut_close_sec'])} closes"
         if prof.get("cut_bp") is not None:
-            cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how})")
+            cond = (f", only if the trade never ran past {_bp(float(prof['cut_max_peak_bp']))}"
+                    if prof.get("cut_max_peak_bp") is not None else "")
+            cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how}{cond})")
         hard.append(f"Hard stop{label} {_bp(-float(prof['hard_bp']))}")
     return cut + hard
 

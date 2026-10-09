@@ -422,6 +422,38 @@ class LaptopRetentionTests(unittest.TestCase):
                 self.assertTrue((self.tree / "signal_replay.jsonl.7").exists())
                 self.tearDown()
 
+    def test_failed_or_partial_fly_file_list_deletes_nothing(self):
+        """IncompleteRead (9 Oct 2026) and every other mid-body drop fail closed: zero deletions."""
+        import http.client
+        failures = {
+            "incomplete_read": http.client.IncompleteRead(b'{"seq": 3366, "files": {"sig', 54_000_000),
+            "remote_disconnected": http.client.RemoteDisconnected("closed"),
+            "reset": ConnectionResetError(104, "reset"),
+            "truncated_json": ValueError("Expecting value"),
+            "unavailable": bdr.FlyFilesUnavailable("gave up after 4 attempts"),
+        }
+        for name, exc in failures.items():
+            with self.subTest(failure=name):
+                self.setUp()
+                content = b'{"a":1}\n' * 100
+                victim = self._mirror("signal_replay.jsonl.7", content)
+                self._gates()
+
+                def fetch(exc=exc):
+                    raise exc
+
+                posts = []
+                retention = bdr.Retention(self.cfg, self.canonical, now=self.now, fetch_files=fetch,
+                                          post_custody=lambda body: posts.append(body) or (200, {}))
+                status = retention.run(bdr.MODE_ENFORCE)
+                self.assertIn("FLY_CHECKPOINT_UNAVAILABLE", status["deny_reasons"])
+                for root in (self.tree, self.view, self.canonical):
+                    self.assertTrue((root / "signal_replay.jsonl.7").exists())
+                self.assertEqual(victim.read_bytes(), content)
+                self.assertEqual(bdr.Ledger(Path(self.cfg["state_dir"])).rows(), [])
+                self.assertEqual(posts, [], "no custody receipt may be posted without the file list")
+                self.tearDown()
+
     def test_young_unconsumed_or_baseline_files_are_kept(self):
         self._mirror("signal_replay.jsonl.7", b"young\n", mtime=self.now - 3600)
         self._mirror("signal_replay.jsonl.8", b"unconsumed\n", mtime=self.now - 900)
@@ -603,6 +635,115 @@ class LaptopRetentionTests(unittest.TestCase):
     def test_refuses_onedrive_paths(self):
         with self.assertRaises(RuntimeError):
             bdr.refuse_onedrive(r"C:\Users\x\OneDrive\Desktop\data")
+
+
+class FlyFilesFetchTests(unittest.TestCase):
+    """The ~54 MB checkpoint list download: retry, chunked read, gzip, fail closed."""
+
+    class _Response:
+        def __init__(self, body, *, length=None, encoding=None, chunks_before_drop=None):
+            self._body, self._pos = body, 0
+            self.headers = {"Content-Length": str(len(body) if length is None else length)}
+            if encoding:
+                self.headers["Content-Encoding"] = encoding
+            self._drop = chunks_before_drop
+
+        def read(self, size=-1):
+            if self._drop is not None:
+                if self._drop == 0:
+                    import http.client
+                    raise http.client.IncompleteRead(self._body[:self._pos], len(self._body) - self._pos)
+                self._drop -= 1
+            chunk = self._body[self._pos:self._pos + (size if size and size > 0 else len(self._body))]
+            self._pos += len(chunk)
+            return chunk
+
+    PAYLOAD = {"schema": "research_segment_checkpoint_files_v1", "seq": 3366,
+               "files": {"signal_replay.jsonl.7": {"class": "snapshot", "sha256": "a" * 64}}}
+
+    def test_reads_plain_and_gzip_bodies_in_chunks(self):
+        import gzip
+        raw = json.dumps(self.PAYLOAD).encode()
+        plain = bdr._read_body(self._Response(raw), chunk_bytes=7)
+        self.assertEqual(bdr._decode_files_payload(plain, ""), self.PAYLOAD)
+        packed = gzip.compress(raw)
+        body = bdr._read_body(self._Response(packed, encoding="gzip"), chunk_bytes=5)
+        self.assertEqual(bdr._decode_files_payload(body, "gzip"), self.PAYLOAD)
+
+    def test_short_body_is_an_incomplete_read(self):
+        import http.client
+        raw = json.dumps(self.PAYLOAD).encode()
+        with self.assertRaises(http.client.IncompleteRead):
+            bdr._read_body(self._Response(raw[:20], length=len(raw)))
+        with self.assertRaises(http.client.IncompleteRead):
+            bdr._read_body(self._Response(raw, chunks_before_drop=1), chunk_bytes=8)
+
+    def test_truncated_or_malformed_payload_is_rejected(self):
+        import gzip
+        raw = json.dumps(self.PAYLOAD).encode()
+        for body, enc in ((raw[:-5], ""), (gzip.compress(raw)[:-8], "gzip"), (b"[]", ""),
+                          (b'{"seq": 1}', ""), (b'{"seq": 1, "files": []}', "")):
+            with self.subTest(body=body[:12], enc=enc):
+                with self.assertRaises(bdr.FLY_FILES_TRANSIENT):
+                    bdr._decode_files_payload(body, enc)
+
+    def test_retries_transient_drops_then_succeeds(self):
+        import http.client
+        calls, sleeps = [], []
+        outcomes = [http.client.IncompleteRead(b"x", 10), ConnectionResetError(104, "reset"), self.PAYLOAD]
+
+        def once():
+            calls.append(1)
+            item = outcomes.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        got = bdr._fly_files("https://fly", "v3", "t", fetch_once=once, sleep=sleeps.append,
+                             attempts=4, backoff_sec=2.0)
+        self.assertEqual(got, self.PAYLOAD)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [2.0, 4.0])
+
+    def test_gives_up_with_fly_files_unavailable(self):
+        import http.client
+        sleeps = []
+
+        def once():
+            raise http.client.IncompleteRead(b"partial", 54_000_000)
+
+        with self.assertRaises(bdr.FlyFilesUnavailable) as ctx:
+            bdr._fly_files("https://fly", "v3", "t", fetch_once=once, sleep=sleeps.append, attempts=3)
+        self.assertIn("IncompleteRead", str(ctx.exception))
+        self.assertEqual(len(sleeps), 2)
+
+    def test_auth_errors_are_not_retried(self):
+        import io
+        import urllib.error
+        calls = []
+
+        def once():
+            calls.append(1)
+            raise urllib.error.HTTPError("u", 401, "unauthorized", {}, io.BytesIO(b"{}"))
+
+        with self.assertRaises(bdr.FlyFilesUnavailable):
+            bdr._fly_files("https://fly", "v3", "t", fetch_once=once, sleep=lambda _s: None, attempts=4)
+        self.assertEqual(len(calls), 1)
+
+    def test_gather_gates_turns_a_crash_into_a_deny_reason(self):
+        import http.client
+
+        def fetch():
+            raise http.client.IncompleteRead(b"partial", 10)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = dict(bdr.DEFAULTS)
+            cfg.update({"shadow_root": tmp, "archive_root": tmp, "prefix": "v3", "base_url": "https://fly"})
+            gates = bdr.gather_gates(cfg, Path(tmp), now=time.time(), fetch_files=fetch)
+        self.assertFalse(gates["allowed"])
+        self.assertIn("FLY_CHECKPOINT_UNAVAILABLE", gates["deny_reasons"])
+        self.assertIsNone(gates["fly_files"])
+        self.assertIn("IncompleteRead", gates["fly_files_error"])
 
 
 if __name__ == "__main__":

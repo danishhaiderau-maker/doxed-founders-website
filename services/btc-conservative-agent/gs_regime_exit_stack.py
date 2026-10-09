@@ -11,7 +11,9 @@ Semantics replicated per tick ``i`` (``cur`` = side-correct mark vs entry, bp):
 
 * hard stop ``cur <= -hard`` (never on the fill tick);
 * thesis cut ``cur <= -cut`` while ``age <= cut_win`` (MOM / GS: any tick;
-  REV: only the first tick at or after each ``cut_close_sec`` close);
+  REV: only the first tick at or after each ``cut_close_sec`` close); when the
+  profile sets ``cut_max_peak_bp`` the cut is conditional: it fires only while
+  the trade's MFE (peak side-correct bp) has never exceeded that value;
 * break-even: armed on a tick with ``cur >= max(be_floor, be_atr*ATR)``; fires
   on a LATER tick with ``cur <= lock``;
 * ATR trail: armed at ``cur >= max(arm_floor, arm_atr*ATR)``; fires on a later
@@ -105,17 +107,19 @@ def evaluate_tick(profile: Mapping[str, Any], state: MutableMapping[str, Any], *
 
     if not first_tick and cur <= -lv["hard"]:
         hit["HARD_STOP"] = cur
+    cut_peak_cap = profile.get("cut_max_peak_bp")
+    cut_allowed = cut_peak_cap is None or peak <= float(cut_peak_cap)
     if lv["cut"] is not None and age <= float(profile.get("cut_win_sec") or 300):
         step = int(profile.get("cut_close_sec") or 1)
         if step <= 1:
-            if not first_tick and cur <= -lv["cut"]:
+            if not first_tick and cut_allowed and cur <= -lv["cut"]:
                 hit["THESIS_CUT"] = cur
         else:
             due = int(age // step)
             checked = int(state.get("cut_closes_checked") or 0)
             if due > checked:
                 state["cut_closes_checked"] = due
-                if cur <= -lv["cut"]:
+                if cut_allowed and cur <= -lv["cut"]:
                     hit["THESIS_CUT"] = cur
     lock_bp = float(profile.get("lock_bp", 1.0))
     # Once BE is armed the stop floor is entry+lock_bp in the trade's favour.
