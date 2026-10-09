@@ -55,6 +55,11 @@ export function evaluatePreTradeLiquidationSafety(input: {
   stopLossMarginPct: number;
   venue: Pick<BitfinexFuturesPairConstraints, 'initialMarginFraction' | 'maintenanceMarginFraction'> | null;
   minMultiple?: number;
+  /**
+   * Approval-backed entries only (Boss 2026-10-09): replaces the 3x multiple
+   * with "stop <= liquidation - buffer bp". Never set for legacy paths.
+   */
+  minLiquidationBufferBp?: number;
 }): PreTradeLiquidationSafety {
   const minMultiple = Math.max(
     DEFAULT_MIN_LIQUIDATION_TO_STOP_MULTIPLE,
@@ -100,7 +105,19 @@ export function evaluatePreTradeLiquidationSafety(input: {
     };
   }
   const multiple = liquidationDistanceFraction / stopDistanceFraction;
-  if (multiple < minMultiple) {
+  if (input.minLiquidationBufferBp != null) {
+    const bufferBp = Math.max(15, input.minLiquidationBufferBp);
+    const gapBp = (liquidationDistanceFraction - stopDistanceFraction) * 1e4;
+    if (!(gapBp + 1e-9 >= bufferBp)) {
+      return {
+        ok: false,
+        reason: 'LIQUIDATION_TOO_CLOSE_TO_STOP',
+        detail:
+          `liq ${(liquidationDistanceFraction * 1e4).toFixed(2)}bp vs backup stop ${(stopDistanceFraction * 1e4).toFixed(2)}bp `
+          + `= ${gapBp.toFixed(2)}bp < ${bufferBp}bp buffer`,
+      };
+    }
+  } else if (multiple < minMultiple) {
     return {
       ok: false,
       reason: 'LIQUIDATION_TOO_CLOSE_TO_STOP',
