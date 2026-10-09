@@ -111,7 +111,7 @@ def monitored_names():
 
 def test_every_monitored_loop_beats_and_is_bound():
     names = monitored_names()
-    assert len(names) == 8
+    assert len(names) == 9
     for name in names:
         assert f'_THREAD_HEALTH.beat("{name}")' in SOURCE, name
         bound = f'_THREAD_HEALTH.bind("{name}")' in SOURCE or re.search(

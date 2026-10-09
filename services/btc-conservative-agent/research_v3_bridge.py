@@ -1429,6 +1429,23 @@ def reconcile_overdue_expected_order_decisions(
     return result
 
 
+
+def _write_set_verification(store, writes, *, segment_refs=()) -> dict[str, Any]:
+    """Verify exactly the durable objects one hot-path write touched.
+
+    ``store.verify()`` walks (locks, stats, hashes) every immutable market
+    segment in the store, so its cost grows with total history.  Run on every
+    paper order/fill/close and every reconciled V2 row it saturated the 2-vCPU
+    host and held the collector epoch lock for seconds per row.  The touched
+    ledgers and segments are still verified here (append is fsynced before its
+    ID enters the cache); full-store verification remains on startup, the
+    end of each reconciliation pass, analyzer and qualification flows.
+    """
+    ledgers = [str(w.get("ledger")) for w in writes or () if isinstance(w, Mapping) and w.get("ledger")]
+    refs = [ref for ref in segment_refs or () if isinstance(ref, Mapping) and ref.get("sha256")]
+    return store.verify_write_set(ledgers=tuple(dict.fromkeys(ledgers)), segment_refs=refs)
+
+
 def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Write an actual paper order intent immediately, before path maturity."""
     event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
@@ -1556,7 +1573,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         writes.append(resolution["write"])
     return {"schema": "v3_paper_order_intent_receipt_v1", "epoch_id": str(epoch_id), **identity,
             **causal_ids, **policy,
-            "writes": writes, "store_verification": store.verify()}
+            "writes": writes, "store_verification": _write_set_verification(store, writes)}
 
 
 def dual_write_terminal_paper_schedule(
@@ -1783,7 +1800,8 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
                 "execution_basis": execution_receipt.get("execution_basis"),
                 "queue_estimate": copy.deepcopy(execution_receipt.get("queue_estimate")),
             },
-            "writes": [execution, lifecycle], "store_verification": store.verify()}
+            "writes": [execution, lifecycle],
+            "store_verification": _write_set_verification(store, [execution, lifecycle])}
 
 
 def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any], outcome: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
@@ -1977,7 +1995,10 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
             **causal_ids, **policy,
-            "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
+            "writes": [execution, *segment_writes, lifecycle],
+            "store_verification": _write_set_verification(
+                store, [execution, *segment_writes, lifecycle], segment_refs=segment_refs,
+            )}
 
 
 def dual_write_lifecycle_qualification_horizon(
@@ -2084,7 +2105,9 @@ def dual_write_lifecycle_qualification_horizon(
         "entry_outcome": canonical_outcome,
         "post_observation": post_observation,
         "segment_ref": segment_ref, "writes": writes,
-        "store_verification": store.verify(),
+        "store_verification": _write_set_verification(
+            store, writes, segment_refs=[segment_ref] if segment_ref else (),
+        ),
     }
 
 
@@ -2383,7 +2406,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             None if not source_fill_present or complete_execution_identity
             else "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE"
         ),
-        "store_verification": store.verify(),
+        "store_verification": _write_set_verification(store, writes, segment_refs=segment_refs),
     }
 
 
