@@ -146,7 +146,10 @@ def test_run_37913888717_pending_cancel_409_is_retriable_and_bounded():
     assert "pending_cancel_deadlines.setdefault(" in retry and "PENDING_CANCEL_WAIT_SEC" in retry
     assert "raise SystemExit" in retry
     assert "time.sleep(min(2 * retries, 15))" in retry
-    assert "round_unconfirmed = True" in retry and "unconfirmed_floor" in retry and "break" in retry
+    assert "round_unconfirmed = True" in retry and "break" in retry
+    # run 37926111996: a 409 refusal mutated nothing, so it must not raise the
+    # generation floor (an expiry without a generation bump made it unreachable)
+    assert "unconfirmed_floor =" not in retry and "note_unconfirmed()" not in retry
     # the round budget extends only while a bounded wait is open
     assert "if round_no > 12 and not extended_wait_open():" in step
     assert 'raise SystemExit("maintenance boundary did not become flat")' in step
@@ -223,7 +226,7 @@ def test_run_37915233891_slow_unconfirmed_closes_wait_for_the_fence_bounded():
     assert ns["extended_wait_open"]() is False
     # every unconfirmed mutation starts the bounded wait; flat is still never
     # trusted until fresh authority passes the unconfirmed floor
-    assert step.count("note_unconfirmed()") == 4  # definition + 3 unconfirmed sites
+    assert step.count("note_unconfirmed()") == 3  # definition + 2 timed-out mutation sites (409 refusals excluded)
     assert 'exposure.get("money_state_generation") <= unconfirmed_floor' in step
 
 
