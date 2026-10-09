@@ -252,6 +252,29 @@ export function evaluateLiveCopyPlacement(input: {
   return { ok: true, approval: a, exchangeStopBp: Number(a.exchange_stop_bp), correlationId: String(a.correlation_id) };
 }
 
+/**
+ * Boss 2026-10-09: an entry that passed the Fly-approval gate uses the
+ * approval's catastrophe backup stop (min(tile hard stop + 25, liq - 15) bp),
+ * expressed as a stop-loss margin % at the order leverage. Returns null for
+ * every legacy / non-approval path (those keep the frozen -13% clamp).
+ */
+export function approvalBackedStopLossMarginPct(
+  intent: unknown,
+  secret: string | undefined | null,
+  leverage: number,
+): number | null {
+  const tradeId = (intent as { signalId?: unknown } | null)?.signalId;
+  if (typeof tradeId !== 'string' || !tradeId) return null;
+  const v = approvalPermitsRelayCopy(readEnvelopeFlyApproval(intent), tradeId, secret);
+  if (!v.ok) return null;
+  const lev = Number(v.approval.leverage);
+  const bp = Number(v.approval.exchange_stop_bp);
+  if (!(lev > 0) || lev !== leverage) return null;
+  if (!(bp > 5) || bp > exchangeStopCapBp(lev) + 1e-9) return null;
+  // distance fraction = |pct| / (100 * lev)  =>  pct = -bp * lev / 100
+  return -Math.round(bp * lev) / 100;
+}
+
 /** Signature for an executor report POSTed back to Fly (raw body bytes). */
 export function signLiveExecutionReport(rawBody: string | Buffer, secret: string | undefined | null): string | null {
   const key = deriveLiveCopyKey(secret, LIVE_EXECUTION_REPORT_DOMAIN);

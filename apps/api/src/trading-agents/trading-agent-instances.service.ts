@@ -53,6 +53,29 @@ import {
   resolveFounderRentalEntitlement,
 } from './founder-rental-entitlement';
 
+/** True for Prisma's serializable write-conflict / deadlock error (P2034). */
+export function isPrismaWriteConflict(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'P2034') return true;
+  return /\bP2034\b|write conflict or a deadlock/i.test(String((error as Error)?.message ?? ''));
+}
+
+/** Bounded retry (3 attempts, 100/300 ms backoff) on P2034 only. */
+export async function retryOnPrismaWriteConflict<T>(
+  run: () => Promise<T>,
+  attempts = 3,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (attempt >= attempts || !isPrismaWriteConflict(error)) throw error;
+      await sleep(100 * 3 ** (attempt - 1));
+    }
+  }
+}
+
 @Injectable()
 export class TradingAgentInstancesService {
   private readonly logger = new Logger(TradingAgentInstancesService.name);
@@ -446,7 +469,9 @@ export class TradingAgentInstancesService {
     const flat = exchangeStable && exchangeAmount === 0 && secondIds.length === 0
       && openLots === 0 && pendingLots === 0;
     const observedAt = new Date().toISOString();
-    await this.prisma.$transaction(async (tx) => {
+    // Serializable write conflicts (Prisma P2034) are transient: the body
+    // re-reads and re-validates everything, so a bounded retry is safe.
+    await retryOnPrismaWriteConflict(() => this.prisma.$transaction(async (tx) => {
       const fresh = await tx.tradingAgentInstance.findUnique({ where: { id: instance.id } });
       const currentParticipants = await tx.signalCycleParticipant.findMany({
         where: {
@@ -488,7 +513,7 @@ export class TradingAgentInstancesService {
           }) as Prisma.InputJsonValue,
         },
       });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
     return { accepted: true, status: 'PAUSED' as const, resumed: false, armed: false, flat, observedAt };
   }
 

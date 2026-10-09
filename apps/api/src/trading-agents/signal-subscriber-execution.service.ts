@@ -1,6 +1,8 @@
 import {
+  approvalBackedStopLossMarginPct,
   approvalPermitsRelayCopy,
   evaluateLiveCopyPlacement,
+  LIQUIDATION_SAFETY_BP,
   liveCopyAccountArmed,
   readEnvelopeFlyApproval,
 } from './live-copy-approval';
@@ -3815,9 +3817,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         replaceReduceOnlyProtection: async (targetQty) => {
           const entry = meta.fillPrice ?? meta.limitPrice;
           if (!entry || !meta.direction) return false;
-          const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-            intent.risk.stop_loss_margin_pct,
-            { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
+          const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
           );
           const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
           const replacement = await this.ensureDurableProtectiveStop({
@@ -4209,6 +4209,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     ).ok;
   }
 
+  /** Approval-backed backup stop margin % (null for legacy paths). */
+  private approvalBackedStopPct(intent: unknown, leverage?: number): number | null {
+    if (readEnvelopeFlyApproval(intent) == null) return null;
+    const getter = (this.config as { get?: unknown } | undefined)?.get;
+    // No secret (or no config) => no verifiable approval => legacy clamp (fail closed).
+    const secret = typeof getter === 'function'
+      ? (this.config.get<string>('SHOWCASE_WEBHOOK_SECRET') ?? null)
+      : null;
+    if (!secret) return null;
+    const lev = leverage ?? resolveSubscriberLeverage(intent as SignalIntentEnvelope);
+    return approvalBackedStopLossMarginPct(intent, secret, lev);
+  }
+
+  /**
+   * One stop resolver for every protective-stop site. Fly-approved entries
+   * use the approval's catastrophe backup (placed once, never moved; Boss
+   * 2026-10-09); everything else keeps the frozen -13% clamp. Simulation
+   * never submits an exchange stop and keeps its legacy behaviour.
+   */
+  private liveCopyStopLossMarginPct(
+    intent: unknown,
+    opts?: { mirrorMode?: boolean; simActive?: boolean },
+  ): number {
+    if (!opts?.simActive) {
+      const backup = this.approvalBackedStopPct(intent);
+      if (backup != null) return backup;
+    }
+    return resolveEffectiveStopLossMarginPct(
+      (intent as SignalIntentEnvelope | null)?.risk?.stop_loss_margin_pct,
+      opts,
+    );
+  }
+
   /** Gate 2 pre-trade check shared by every new-exposure entry path. */
   private async checkPreTradeLiquidationSafety(
     intent: SignalIntentEnvelope,
@@ -4218,11 +4251,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const result = evaluatePreTradeLiquidationSafety({
       leverage,
       orderLeverage: bitfinexOrderLev(leverage),
-      stopLossMarginPct: resolveEffectiveStopLossMarginPct(intent.risk?.stop_loss_margin_pct, {
+      stopLossMarginPct: this.liveCopyStopLossMarginPct(intent, {
         mirrorMode: true,
       }),
       venue: await this.loadVenueMarginEvidence(),
       minMultiple: resolveMinLiquidationToStopMultiple(),
+      ...(this.approvalBackedStopPct(intent, leverage) != null
+        ? { minLiquidationBufferBp: LIQUIDATION_SAFETY_BP }
+        : {}),
     });
     if (!result.ok) {
       this.logger.warn(`[PRE-TRADE-LIQ-GATE] entry refused ${context}: ${result.reason} (${result.detail})`);
@@ -10381,7 +10417,7 @@ await this.notifications
       orderResting: fill.orderResting,
     });
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent?.risk?.stop_loss_margin_pct, {
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, {
       mirrorMode: isShowcaseMirrorOnlyMode(),
     });
     const stopPrice = computeStopPrice(
@@ -11785,9 +11821,7 @@ await this.notifications
     if (runtime?.filledRecorded) return;
 
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-      intent.risk.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode() },
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode() },
     );
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
@@ -11946,9 +11980,7 @@ await this.notifications
               : await this.activeTrading.getMarkPrice();
         const qty = meta.qty ?? MIN_QTY_BTC;
         const leverage = resolveSubscriberLeverage(intent);
-        const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-          intent?.risk?.stop_loss_margin_pct,
-          { mirrorMode: isShowcaseMirrorOnlyMode() },
+        const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode() },
         );
         const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
         const verifiedStop = meta.stopOrderId
@@ -12030,9 +12062,7 @@ await this.notifications
       const qty = allocation.qty;
       const fillPrice = exchangeFill.price;
       const leverage = resolveSubscriberLeverage(intent);
-      const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-        intent?.risk?.stop_loss_margin_pct,
-        { mirrorMode: isShowcaseMirrorOnlyMode() },
+      const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode() },
       );
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
@@ -12875,9 +12905,7 @@ await this.notifications
     if (!entry || entry <= 0) return;
 
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-      intent.risk.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
     );
     const stopPrice =
       stopPriceOverride != null && stopPriceOverride > 0
@@ -13862,9 +13890,7 @@ await this.notifications
     const alreadyCovered = meta.partialFillQty ?? 0;
 
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-      intent?.risk?.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode() },
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode() },
     );
     const fillPrice = fillEvidence?.fillPrice && fillEvidence.fillPrice > 0
       ? fillEvidence.fillPrice
@@ -17069,7 +17095,7 @@ await this.notifications
       authenticatedQty = Math.min(qty, delta);
       fillPrice = postPosition?.basePrice ?? mark;
     }
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent.risk.stop_loss_margin_pct, {
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, {
       mirrorMode: true,
     });
     const stopPrice = computeStopPrice(fillPrice, intent.direction, stopLossMarginPct, leverage);
@@ -17769,9 +17795,7 @@ await this.notifications
     const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
     const canonicalBot = await this.fetchExecutionBotState();
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-      intent.risk.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
+    const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
     );
     const mark = await this.activeTrading.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
@@ -17861,7 +17885,11 @@ await this.notifications
       peakMarginPct: runtime.peakMarginPct,
       stopLossMarginPct,
       // Relay sim: per-lot Scenario C exits (profit lock / thesis) for realistic soak tests.
-      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode(),
+      // Fly-approved copies mirror the tile exactly: only the catastrophe
+      // backup hard stop is local; every other exit comes from the tile.
+      showcaseMirrorOnly: simActive
+        ? false
+        : (this.approvalBackedStopPct(intent) != null || isShowcaseMirrorOnlyMode()),
     });
 
     if (exitReason) {
@@ -17907,6 +17935,9 @@ await this.notifications
     // mirror exit for profitable exits, only catches adverse ones.
     if (
       realSideSafetyNetEnabled() &&
+      // Fly-approved copies: no local profit-lock / -13% net (it would exit
+      // before the tile); the exchange backup stop is the catastrophe guard.
+      this.approvalBackedStopPct(intent) == null &&
       shouldRunLocalRealSideSafetyNet({
         simActive,
         showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
