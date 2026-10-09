@@ -142,8 +142,10 @@ def test_run_37913888717_pending_cancel_409_is_retriable_and_bounded():
     handler = step[step.index('cancelled = mutate_json("/api/orders/cancel"'):]
     retry = handler[handler.index("if exc.code == 409:"):handler.index("if exc.code == 404")]
     # bounded wait with backoff, then a fresh re-observation (never a blind retry)
-    assert "time.monotonic() + 180" in retry and "raise SystemExit" in retry
-    assert "time.sleep(min(2 * pending_cancel_retries, 15))" in retry
+    # per-order window (run 37923569761: a shared window failed the 2nd order)
+    assert "pending_cancel_deadlines.setdefault(" in retry and "PENDING_CANCEL_WAIT_SEC" in retry
+    assert "raise SystemExit" in retry
+    assert "time.sleep(min(2 * retries, 15))" in retry
     assert "round_unconfirmed = True" in retry and "unconfirmed_floor" in retry and "break" in retry
     # the round budget extends only while a bounded wait is open
     assert "if round_no > 12 and not extended_wait_open():" in step
@@ -208,7 +210,7 @@ def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
 def test_run_37915233891_slow_unconfirmed_closes_wait_for_the_fence_bounded():
     step = _step_python("Enter durable authenticated paper maintenance boundary")
     ns = {"time": __import__("time")}
-    exec(compile(textwrap.dedent(step[step.index("pending_cancel_deadline = None"):step.index("for round_no in range(")]),
+    exec(compile(textwrap.dedent(step[step.index("PENDING_CANCEL_WAIT_SEC = 600"):step.index("for round_no in range(")]),
                  "<workflow>", "exec"), ns)
     assert ns["UNCONFIRMED_FENCE_WAIT_SEC"] == 20 * 60
     assert ns["extended_wait_open"]() is False
@@ -223,3 +225,15 @@ def test_run_37915233891_slow_unconfirmed_closes_wait_for_the_fence_bounded():
     # trusted until fresh authority passes the unconfirmed floor
     assert step.count("note_unconfirmed()") == 4  # definition + 3 unconfirmed sites
     assert 'exposure.get("money_state_generation") <= unconfirmed_floor' in step
+
+
+def test_run_37923569761_pending_cancel_windows_are_per_order():
+    step = _step_python("Enter durable authenticated paper maintenance boundary")
+    ns = {"time": __import__("time")}
+    exec(compile(textwrap.dedent(step[step.index("PENDING_CANCEL_WAIT_SEC = 600"):step.index("for round_no in range(")]),
+                 "<workflow>", "exec"), ns)
+    now = ns["time"].monotonic()
+    ns["pending_cancel_deadlines"]["gb1"] = now - 1  # first order's window closed
+    assert ns["extended_wait_open"]() is False
+    ns["pending_cancel_deadlines"]["gb2"] = now + 600  # a later order gets its own window
+    assert ns["extended_wait_open"]() is True
