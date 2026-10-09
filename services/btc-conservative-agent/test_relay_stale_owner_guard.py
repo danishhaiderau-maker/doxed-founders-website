@@ -14,6 +14,21 @@ from relay_event_outbox import RelayEventOutbox
 BOT = Path(__file__).with_name("bot.py")
 
 
+class _OutputView:
+    """Test stand-in for live_copy_control.LiveCopyOutput (reads scenario state)."""
+
+    def __init__(self, state):
+        self._state = state
+
+    @property
+    def enabled(self):
+        return bool(self._state.get("live_armed") and self._state.get("bitfinex_live_enabled"))
+
+    @property
+    def enabled_at_ts(self):
+        return self._state.get("live_armed_at_ts")
+
+
 def enqueue(box, trade, owner, seq=0):
     payload = {"event": "LIMIT_UPDATED", "trade_id": trade,
                "event_id": f"{trade}:{seq}", "event_seq": seq, "ts": "test"}
@@ -41,6 +56,9 @@ def drain_ns(box, guard, *, live=False, armed_at=None, active=True, epoch=None):
         "state": state, "_force_paper_mode_active": lambda: not live,
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
         "_relay_event_outbox": box, "_relay_push_state": {}, "_relay_delivery_guard": guard,
+        # Option 1: the drain's "armed" state is Fly's Live copy output switch;
+        # modelled here from the same state flags the scenarios set.
+        "_get_live_copy_output": lambda: _OutputView(state),
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
         # Per-tile live-orders switch is exercised separately (test_two_tier_relay_gate).
         "_filter_relay_rows_by_live_switch": lambda rows, armed=False, now=None: list(rows),

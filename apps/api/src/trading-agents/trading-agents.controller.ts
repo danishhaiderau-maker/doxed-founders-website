@@ -1,4 +1,4 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { TradingAgentKind } from '@prisma/client';
@@ -12,6 +12,7 @@ import { ShowcaseRelayEventsService, type ShowcaseRelayEventBody } from './showc
 import { TradingAgentInstancesService } from './trading-agent-instances.service';
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { TradingAgentsService } from './trading-agents.service';
+import { verifyFlyViewSignature } from './live-copy-approval';
 
 @Controller('trading-agents')
 export class TradingAgentsController {
@@ -110,6 +111,26 @@ export class TradingAgentsController {
     @Headers('authorization') authorization?: string,
   ) {
     return this.tradingAgents.getOpsRelayStatus(slug, userId, adminHeader, authorization);
+  }
+
+  /**
+   * Option 1: website copy state for the Fly dashboard. Auth: Fly's signed
+   * GET (X-Fly-View-Ts / X-Fly-View-Signature, key derived from
+   * SHOWCASE_WEBHOOK_SECRET, path + ts bound, 60 s window). Read-only.
+   */
+  @Public()
+  @Get(':slug/live-copy/fly-view')
+  async liveCopyFlyView(
+    @Param('slug') slug: string,
+    @Req() req: Request,
+    @Headers('x-fly-view-ts') ts?: string,
+    @Headers('x-fly-view-signature') signature?: string,
+  ) {
+    const path = String(req.originalUrl || req.url || '').split('?')[0];
+    if (!verifyFlyViewSignature(path, ts, signature, process.env.SHOWCASE_WEBHOOK_SECRET)) {
+      throw new UnauthorizedException('Invalid fly-view signature');
+    }
+    return this.tradingAgents.getLiveCopyFlyView(slug, this.showcaseRelay.liveCopyRejectStats());
   }
 
   /** Immutable, user-scoped relay evidence for the offline research mirror. */
