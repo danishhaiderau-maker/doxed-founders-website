@@ -2418,9 +2418,12 @@ jobs:
                               )
                           retries = pending_cancel_retries[trade_id] = pending_cancel_retries.get(trade_id, 0) + 1
                           print(f"Maintenance cancel pending trade_id={trade_id} retry={retries}; re-observing", flush=True)
-                          unconfirmed_trade_ids.add(trade_id)
-                          unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
-                          note_unconfirmed()
+                          # A 409 is a refusal: this request mutated nothing, so it
+                          # must not raise the generation floor.  Run 37926111996:
+                          # the pre-existing pending cancel resolved by expiry
+                          # without a generation bump and the floor was unreachable
+                          # for 20 min.  Keep the bounded wait open and resample;
+                          # a fill shows up as a position and is closed below.
                           round_unconfirmed = True
                           time.sleep(min(2 * retries, 15))
                           break
