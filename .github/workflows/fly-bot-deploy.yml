@@ -2238,6 +2238,15 @@ jobs:
               )
               with urllib.request.urlopen(request, timeout=timeout) as response:
                   return json.load(response)
+          def pending_cancel_conflict(exc):
+              """True only for the bot's retriable 409 "pending cancel unconfirmed"."""
+              if getattr(exc, "code", None) != 409:
+                  return False
+              try:
+                  body = json.loads(exc.read().decode("utf-8") or "{}")
+              except Exception:
+                  return False
+              return isinstance(body, dict) and body.get("error") == "pending cancel unconfirmed"
           def mutate_json(path, payload):
               # A mutation that outlives the client deadline may still commit.
               # None means "unconfirmed": the caller must re-observe fresh
@@ -2338,7 +2347,37 @@ jobs:
           required_generation = None
           unconfirmed_floor = None
           unconfirmed_trade_ids = set()
-          for round_no in range(1, 13):
+          # A paper cancel can answer 409 "pending cancel unconfirmed" while the
+          # bot is still finalizing it (fill/expiry race, slow evidence barrier).
+          # That is retriable: back off and re-observe fresh authority until the
+          # order is confirmed cancelled, filled or gone, bounded at 180 s.
+          pending_cancel_deadline = None
+          pending_cancel_retries = 0
+          # A mutation whose response outlived the 90 s client deadline still
+          # commits server-side; its generation fence appears only when the
+          # handler returns.  Run 37915233891: six paper closes on the slow
+          # pre-fix runtime each took minutes, the book went flat, and the
+          # fence advanced ~12 min later, after the 12-round budget (~1 min)
+          # had already failed the deploy.  Keep re-observing (never trusting
+          # flat before the fence) for a bounded 20 min after the first
+          # unconfirmed mutation.
+          UNCONFIRMED_FENCE_WAIT_SEC = 20 * 60
+          unconfirmed_deadline = None
+          def extended_wait_open():
+              now_mono = time.monotonic()
+              return any(
+                  deadline is not None and now_mono < deadline
+                  for deadline in (pending_cancel_deadline, unconfirmed_deadline)
+              )
+          def note_unconfirmed():
+              global unconfirmed_deadline
+              if unconfirmed_deadline is None:
+                  unconfirmed_deadline = time.monotonic() + UNCONFIRMED_FENCE_WAIT_SEC
+          for round_no in range(1, 13 + 150):
+              # 12 rounds as before; extra rounds only while a bounded wait
+              # (pending cancel 180 s, unconfirmed-mutation fence 20 min) is open.
+              if round_no > 12 and not extended_wait_open():
+                  raise SystemExit("maintenance round budget exhausted before the boundary was flat")
               exposure = fresh_exposure(required_generation)
               if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
                   raise SystemExit("authenticated maintenance exposure arrays are missing")
@@ -2354,7 +2393,7 @@ jobs:
                       raise SystemExit("flat relay authority predates maintenance mutations")
                   if unconfirmed_floor is not None and exposure.get("money_state_generation") <= unconfirmed_floor:
                       print(f"Flat authority predates an unconfirmed mutation round={round_no}; re-observing", flush=True)
-                      time.sleep(3)
+                      time.sleep(3 if round_no <= 12 else 10)
                       continue
                   print(f"Durable maintenance boundary is flat after round {round_no}")
                   break
@@ -2363,6 +2402,21 @@ jobs:
                   try:
                       cancelled = mutate_json("/api/orders/cancel", {"trade_id": trade_id})
                   except urllib.error.HTTPError as exc:
+                      if exc.code == 409:
+                          if not pending_cancel_conflict(exc):
+                              raise
+                          if pending_cancel_deadline is None:
+                              pending_cancel_deadline = time.monotonic() + 180
+                          if time.monotonic() >= pending_cancel_deadline:
+                              raise SystemExit(f"maintenance cancel stayed unconfirmed for 180 s trade_id={trade_id}")
+                          pending_cancel_retries += 1
+                          print(f"Maintenance cancel pending trade_id={trade_id} retry={pending_cancel_retries}; re-observing", flush=True)
+                          unconfirmed_trade_ids.add(trade_id)
+                          unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                          note_unconfirmed()
+                          round_unconfirmed = True
+                          time.sleep(min(2 * pending_cancel_retries, 15))
+                          break
                       if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:
                           # The order left the pending book (fill, TTL expiry, or an
                           # earlier unconfirmed cancel) after exposure was sampled. No
@@ -2381,6 +2435,7 @@ jobs:
                   if cancelled is None:
                       unconfirmed_trade_ids.add(trade_id)
                       unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                      note_unconfirmed()
                       round_unconfirmed = True
                       break
                   if cancelled.get("status") == "not_found":
@@ -2419,6 +2474,7 @@ jobs:
                   if reconciled is None:
                       unconfirmed_trade_ids.add(trade_id)
                       unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                      note_unconfirmed()
                       continue
                   if reconciled.get("status") != "closed":
                       raise SystemExit(f"maintenance paper close was not confirmed for {trade_id}")
