@@ -121,8 +121,34 @@ def test_pr171_already_absent_404_reaches_the_idempotent_caller():
 
 def test_maintenance_round_budget_absorbs_unconfirmed_rounds():
     step = _step_python("Enter durable authenticated paper maintenance boundary")
-    assert "for round_no in range(1, 13):" in step
+    assert "for round_no in range(1, 13 + 90):" in step
+    assert "if round_no > 12 and not (" in step
     assert "for attempt in range(1, 9):" in step
+
+
+def _conflict(body):
+    return urllib.error.HTTPError("https://x", 409, "CONFLICT", {}, io.BytesIO(json.dumps(body).encode()))
+
+
+def test_run_37913888717_pending_cancel_409_is_retriable_and_bounded():
+    ns, _ = _maintenance([])
+    _functions(_step_python("Enter durable authenticated paper maintenance boundary"),
+               {"pending_cancel_conflict"}, ns)
+    assert ns["pending_cancel_conflict"](_conflict({"error": "pending cancel unconfirmed", "trade_id": "x"}))
+    # other conflicts (ambiguous order, freeze, ...) stay fatal
+    assert not ns["pending_cancel_conflict"](_conflict({"error": "ambiguous pending showcase order"}))
+    assert not ns["pending_cancel_conflict"](urllib.error.HTTPError("https://x", 409, "c", {}, io.BytesIO(b"not json")))
+    assert not ns["pending_cancel_conflict"](_http_error(500))
+    step = _step_python("Enter durable authenticated paper maintenance boundary")
+    handler = step[step.index('cancelled = mutate_json("/api/orders/cancel"'):]
+    retry = handler[handler.index("if exc.code == 409:"):handler.index("if exc.code == 404")]
+    # bounded wait with backoff, then a fresh re-observation (never a blind retry)
+    assert "time.monotonic() + 180" in retry and "raise SystemExit" in retry
+    assert "time.sleep(min(2 * pending_cancel_retries, 15))" in retry
+    assert "round_unconfirmed = True" in retry and "unconfirmed_floor" in retry and "break" in retry
+    # the round budget extends only while that bounded wait is open
+    assert "pending_cancel_deadline is not None and time.monotonic() < pending_cancel_deadline" in step
+    assert 'raise SystemExit("maintenance boundary did not become flat")' in step
 
 
 def _postdeploy_mutation(responses):

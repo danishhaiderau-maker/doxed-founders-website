@@ -2237,6 +2237,15 @@ jobs:
               )
               with urllib.request.urlopen(request, timeout=timeout) as response:
                   return json.load(response)
+          def pending_cancel_conflict(exc):
+              """True only for the bot's retriable 409 "pending cancel unconfirmed"."""
+              if getattr(exc, "code", None) != 409:
+                  return False
+              try:
+                  body = json.loads(exc.read().decode("utf-8") or "{}")
+              except Exception:
+                  return False
+              return isinstance(body, dict) and body.get("error") == "pending cancel unconfirmed"
           def mutate_json(path, payload):
               # A mutation that outlives the client deadline may still commit.
               # None means "unconfirmed": the caller must re-observe fresh
@@ -2337,7 +2346,19 @@ jobs:
           required_generation = None
           unconfirmed_floor = None
           unconfirmed_trade_ids = set()
-          for round_no in range(1, 13):
+          # A paper cancel can answer 409 "pending cancel unconfirmed" while the
+          # bot is still finalizing it (fill/expiry race, slow evidence barrier).
+          # That is retriable: back off and re-observe fresh authority until the
+          # order is confirmed cancelled, filled or gone, bounded at 180 s.
+          pending_cancel_deadline = None
+          pending_cancel_retries = 0
+          for round_no in range(1, 13 + 90):
+              # 12 rounds as before; extra rounds only while a pending-cancel
+              # wait (bounded at 180 s) is open.
+              if round_no > 12 and not (
+                  pending_cancel_deadline is not None and time.monotonic() < pending_cancel_deadline
+              ):
+                  raise SystemExit("maintenance round budget exhausted before the boundary was flat")
               exposure = fresh_exposure(required_generation)
               if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
                   raise SystemExit("authenticated maintenance exposure arrays are missing")
@@ -2362,6 +2383,20 @@ jobs:
                   try:
                       cancelled = mutate_json("/api/orders/cancel", {"trade_id": trade_id})
                   except urllib.error.HTTPError as exc:
+                      if exc.code == 409:
+                          if not pending_cancel_conflict(exc):
+                              raise
+                          if pending_cancel_deadline is None:
+                              pending_cancel_deadline = time.monotonic() + 180
+                          if time.monotonic() >= pending_cancel_deadline:
+                              raise SystemExit(f"maintenance cancel stayed unconfirmed for 180 s trade_id={trade_id}")
+                          pending_cancel_retries += 1
+                          print(f"Maintenance cancel pending trade_id={trade_id} retry={pending_cancel_retries}; re-observing", flush=True)
+                          unconfirmed_trade_ids.add(trade_id)
+                          unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                          round_unconfirmed = True
+                          time.sleep(min(2 * pending_cancel_retries, 15))
+                          break
                       if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:
                           # The order left the pending book (fill, TTL expiry, or an
                           # earlier unconfirmed cancel) after exposure was sampled. No
