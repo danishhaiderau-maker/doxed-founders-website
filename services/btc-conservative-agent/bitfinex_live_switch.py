@@ -90,6 +90,8 @@ DENY_SWITCH_NOT_REQUESTED = "SWITCH_NOT_REQUESTED"
 DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
 # Terminal state meaning the lane is genuinely allowed and armed.
 ALLOW_ARMED = "ARMED"
+# Registry capability blocks the operator's live-eligibility switch may waive.
+OPERATOR_WAIVABLE_CAPABILITIES = frozenset({"BLOCKED_UNQUALIFIED"})
 
 
 class BitfinexLiveSwitch:
@@ -195,8 +197,15 @@ class BitfinexLiveSwitch:
         global_arm: Mapping[str, Any] | None = None,
         size_checks: Mapping[str, Any] | None = None,
         now: float | None = None,
+        operator_eligible: bool = False,
+        exchange_flat_required: bool = True,
     ) -> dict:
         """Compute eligibility + denial reasons for one lane (read-only).
+
+        ``operator_eligible`` is the operator's per-tile live-eligibility
+        switch (``live_copy_control.LiveEligibility``). It can make an active
+        tile allowlisted and waive the research-qualification capability
+        block, never a protection block (e.g. unproven partial reductions).
 
         ``global_arm`` describes the operator/relay gate::
 
@@ -249,10 +258,15 @@ class BitfinexLiveSwitch:
         audit = g.get("exchange_audit") or {}
         if not (audit.get("authoritative") and audit.get("fresh")):
             denials.append(DENY_EXCHANGE_AUDIT_NOT_FRESH)
-        if not audit.get("flat"):
-            denials.append(DENY_EXCHANGE_NOT_FLAT)
-        if audit.get("orphan_order_ids") or audit.get("orphan_position_ids"):
-            denials.append(DENY_EXCHANGE_ORPHAN)
+        # Flat/orphan are switch-ON (pre-arm) invariants of Fly's own key
+        # account. Per-intent evaluation (Option 1 live copy) passes
+        # exchange_flat_required=False: copier positions live on copier
+        # accounts and are the executor's concern; freshness still applies.
+        if exchange_flat_required:
+            if not audit.get("flat"):
+                denials.append(DENY_EXCHANGE_NOT_FLAT)
+            if audit.get("orphan_order_ids") or audit.get("orphan_position_ids"):
+                denials.append(DENY_EXCHANGE_ORPHAN)
 
         # 3. Market / system / pause.
         if not g.get("market_ready"):
@@ -262,13 +276,17 @@ class BitfinexLiveSwitch:
         if g.get("manual_pause"):
             denials.append(DENY_ADMIN_PAUSE)
 
-        # 4. Allowlist (canonical registry, never a hard-coded second list).
+        # 4. Allowlist: canonical registry OR the operator's per-tile live
+        # eligibility (active tiles only; never a hard-coded second list).
+        capability = str((spec or {}).get("relay_capability") or "")
+        registry_ok = bool((spec or {}).get("platform_relay_eligible"))
         if not spec:
             denials.append(DENY_LANE_NOT_ALLOWLISTED)
-        elif not spec.get("platform_relay_eligible"):
+        elif not (registry_ok or operator_eligible):
             denials.append(DENY_LANE_NOT_ALLOWLISTED)
-        capability = str((spec or {}).get("relay_capability") or "")
-        if capability.startswith("BLOCKED"):
+        if capability.startswith("BLOCKED") and not (
+            operator_eligible and capability in OPERATOR_WAIVABLE_CAPABILITIES
+        ):
             denials.append(DENY_RELAY_CAPABILITY_BLOCKED)
 
         # 5. Size / leverage / protection.
@@ -314,7 +332,8 @@ class BitfinexLiveSwitch:
             "label": (spec or {}).get("label"),
             "id_prefix": (spec or {}).get("id_prefix"),
             "policy_signature": (spec or {}).get("policy_signature"),
-            "relay_eligible": bool((spec or {}).get("platform_relay_eligible")),
+            "relay_eligible": bool((spec or {}).get("platform_relay_eligible")) or bool(operator_eligible),
+            "operator_eligible": bool(operator_eligible),
             "relay_capability": (spec or {}).get("relay_capability"),
             "requested_margin_usd": (spec or {}).get("requested_margin_usd"),
             "eligible": eligible,
@@ -325,12 +344,13 @@ class BitfinexLiveSwitch:
     # -- mutation --------------------------------------------------------
     def request_on(self, lane: str, *, global_arm: Mapping[str, Any] | None = None,
                    size_checks: Mapping[str, Any] | None = None,
-                   now: float | None = None) -> dict:
+                   now: float | None = None, operator_eligible: bool = False) -> dict:
         """Attempt to set a lane's live-orders switch ON. Fail closed."""
         now = time.time() if now is None else float(now)
         lane = str(lane or "").upper()
         with self._lock:
-            result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now)
+            result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now,
+                                   operator_eligible=operator_eligible)
             row = self._row(lane)
             if result["eligible"]:
                 row["bitfinex_live_orders"] = True
@@ -404,11 +424,12 @@ class BitfinexLiveSwitch:
 
     def why_not_armed(self, lane: str, *, global_arm: Mapping[str, Any] | None = None,
                       size_checks: Mapping[str, Any] | None = None,
-                      now: float | None = None) -> dict:
+                      now: float | None = None, operator_eligible: bool = False) -> dict:
         """Human-readable "why isn't this armed" explanation object."""
         now = time.time() if now is None else float(now)
         lane = str(lane or "").upper()
-        result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now)
+        result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now,
+                               operator_eligible=operator_eligible)
         snap = self.snapshot(lane, now=now)
         armed = bool(snap.get("bitfinex_live_orders"))
         if armed and result["eligible"]:

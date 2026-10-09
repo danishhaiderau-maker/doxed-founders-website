@@ -71,6 +71,7 @@ from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGener
 from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
 import relay_stack_mode as _relay_stack_mode
+import live_copy_control as _live_copy
 import thread_health as _thread_health
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
@@ -3154,9 +3155,11 @@ def execution_mode_for_lane(lane: str = None) -> str:
     if not bitfinex_on:
         return EXEC_MODE_PAPER
 
-    # Bitfinex ON -- still subject to keys + DDollar + execution gates.
-    # Those gates are evaluated at submit time; here we just say LIVE.
-    return EXEC_MODE_LIVE
+    # Option 1: Fly's direct Bitfinex entry path is retired. Fly is a paper
+    # signal source; real orders only via the website executor on copier
+    # keys. No lane is ever direct-LIVE (EXIT_ONLY above still flattens any
+    # legacy exposure).
+    return EXEC_MODE_PAPER
 
 
 def lane_can_place_new_entry(lane: str) -> bool:
@@ -9785,9 +9788,11 @@ def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ac
     if not _relay_event_drain_lock.acquire(blocking=False):
         return {"attempted": 0, "acked": 0, "busy": True}
     try:
-        with state_lock:
-            armed = bool(state.get("live_armed") or state.get("bitfinex_live_enabled"))
-            armed_at = state.get("live_armed_at_ts")
+        # Option 1 (2026-10-09): the delivery "armed" state is Fly's Live copy
+        # output switch; the retired Fly master flags can no longer arm.
+        _output = _get_live_copy_output()
+        armed = bool(_output.enabled)
+        armed_at = _output.enabled_at_ts
         # The OS singleton, not an HTTP 401 or a guessed identity, proves
         # which process may issue current-owner events. Missing proof
         # withholds delivery; it does not rewrite, ACK or discard history.
@@ -10042,7 +10047,7 @@ def _build_showcase_relay_event_payload(event: str, trade_id: str, extra: dict =
         )
     ):
         payload["schema"] = "dcf-showcase-intent-v1"
-    return payload
+    return _live_copy_stamp_payload(payload)
 
 
 def _commit_local_paper_lifecycle_transition(
@@ -10125,10 +10130,18 @@ def _commit_paper_lifecycle_transition(
     if explicit_spec.get("paper_only") is True or prefix_is_paper:
         if commit_before_ack is not None:
             raise RuntimeError("paper-local transition cannot bypass relay acknowledgement callback")
-        return _commit_local_paper_lifecycle_transition(
+        committed = _commit_local_paper_lifecycle_transition(
             event, trade_id, local_extra, target_mutator=target_mutator,
             live_mutator=live_mutator, canonical_lock=canonical_lock,
         )
+        if committed:
+            # Option 1 live copy: a paper tile the operator made live-eligible
+            # publishes signed copy intents on a separate outbox. Paper never
+            # waits on the website; any error here only means "no copy".
+            _publish = globals().get("_live_copy_publish")
+            if _publish is not None:
+                _publish(event, trade_id, local_extra)
+        return committed
     payload = _build_showcase_relay_event_payload(event, trade_id, extra)
     if payload is None:
         raise RuntimeError(f"relay lifecycle event rejected for {event}")
@@ -10269,6 +10282,7 @@ def _push_showcase_relay_event(
         )
     ):
         payload["schema"] = "dcf-showcase-intent-v1"
+    payload = _live_copy_stamp_payload(payload)
     try:
         # The committed lifecycle generation is the source of truth: resulting
         # paper state and its PENDING relay transition are one durable replace.
@@ -10495,6 +10509,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "strategy_mode": strategy_mode,
         **_dashboard_owner_metadata(),
     }
+    payload = _live_copy_stamp_payload(payload, signal_at=sig.get("created_ts") or sig.get("signal_ts"))
     try:
         with paper_lifecycle_file_lock:
             lifecycle = _build_paper_lifecycle_payload(
@@ -32751,6 +32766,12 @@ def _emergency_api_guard():
         return None
     if method == "GET" and path in _MONITOR_TILE_PATHS:
         return None
+    # Live-copy monitoring (admin or MONITOR_READ_TOKEN, checked per handler).
+    if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"):
+        return None
+    # Executor reports authenticate with their own HMAC in the handler.
+    if method == "POST" and path == "/api/live-copy/execution-report":
+        return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
             return None
@@ -37157,8 +37178,8 @@ __ADMIN_ACCESS_CONTROLS__
 </div>
 
 <div id="bitfinexLiveControl" style="margin:12px 0;padding:12px 14px;background:#1a1010;border:1px solid #f59e0b;border-radius:8px;">
-  <strong style="color:#f59e0b;font-size:1.05em;">Bitfinex Live Control — two-tier</strong>
-  <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">The master switch arms the <strong>account</strong> for live Bitfinex copy and does <strong>not</strong> place orders by itself. Each tile card below has its own "Bitfinex Live Orders" switch — a tile copies real orders only when <strong>BOTH</strong> the master is ON <strong>and</strong> that tile is ON. Default: master OFF, every tile OFF.</p>
+  <strong style="color:#f59e0b;font-size:1.05em;">Bitfinex Live Copy Control — two-tier</strong>
+  <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Fly stays <strong>paper</strong> and never trades its own key. <strong>Live copy output</strong> lets Fly emit signed copy intents; each tile card has a <strong>Live eligible</strong> switch and a <strong>Bitfinex Live Orders</strong> switch. A real LIMIT order (with a reduce-only exchange stop) is placed only by the website executor on an <strong>armed copier account</strong> (armed on the website) when output ON + tile eligible + tile ON + size/allowlist checks all pass. Default: everything OFF.</p>
   <div id="bitfinexMasterPanel" style="margin-top:6px;"></div>
 </div>
 
@@ -37637,7 +37658,7 @@ DASHBOARD_JS = """(function () {
     }
     function bitfinexMasterOn(d) {
       if (d && d.bitfinex_master) return d.bitfinex_master.master_on === true;
-      return d && d.live_armed === true && d.bitfinex_live_enabled === true;
+      return false;
     }
     function bitfinexTileSwitchRow(d, lane) {
       const sw = (d && d.bitfinex_live_switch) || {};
@@ -37662,21 +37683,56 @@ DASHBOARD_JS = """(function () {
         ? '<span style="color:#3fb950;">present</span>'
         : '<span style="color:#f85149;">missing</span>';
       const btn = on
-        ? '<button type="button" onclick="toggleBitfinexMaster(false)" style="padding:7px 16px;font-weight:bold;background:#da3633;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn master OFF</button>'
-        : '<button type="button" onclick="toggleBitfinexMaster(true)" style="padding:7px 16px;font-weight:bold;background:#238636;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn master ON</button>';
-      el.innerHTML = '<div><strong>Master "Bitfinex Live":</strong> ' + state + ' · API keys ' + keys + '</div>'
+        ? '<button type="button" onclick="toggleBitfinexMaster(false)" style="padding:7px 16px;font-weight:bold;background:#da3633;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn live copy output OFF</button>'
+        : '<button type="button" onclick="toggleBitfinexMaster(true)" style="padding:7px 16px;font-weight:bold;background:#238636;border:none;border-radius:6px;color:#fff;cursor:pointer;">Turn live copy output ON</button>';
+      const web = m.website || {};
+      const esc = function (v) { return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+      let webHtml;
+      if (!web.reachable) {
+        webHtml = '<span style="color:#8b949e;">website state unavailable' + (web.error ? ' (' + esc(web.error) + ')' : '') + '</span>';
+      } else {
+        const armed = web.armed_accounts || [];
+        webHtml = armed.length
+          ? '<span style="color:#f59e0b;font-weight:700;">' + armed.length + ' armed: ' + esc(armed.join(', ')) + '</span>'
+          : '<span style="color:#8b949e;font-weight:700;">no account armed</span>';
+      }
+      el.innerHTML = '<div><strong>Fly "Live copy output":</strong> ' + state
+        + (m.force_paper_mode ? ' · <span style="color:#8b949e;">FORCE_PAPER on (output cannot turn ON)</span>' : '') + '</div>'
+        + '<div style="margin-top:4px;"><strong>Website copier accounts:</strong> ' + webHtml + '</div>'
         + '<div style="margin-top:6px;">' + btn
-        + ' <span style="color:#8b949e;font-size:0.82em;">(arms the account only — never places an order by itself)</span></div>';
+        + ' <span style="color:#8b949e;font-size:0.82em;">(lets Fly emit signed copy intents — never places an order by itself; Fly\\'s own key never trades)</span></div>';
     }
     async function toggleBitfinexMaster(armed) {
-      if (!confirm((armed ? 'ARM' : 'DISARM') + ' the master Bitfinex Live switch?'
-        + (armed ? ' This enables the account for live copy (does not place orders by itself).' : ' This disarms all live copy and turns every tile live-orders switch OFF.'))) return;
-      const res = await post('/api/live_arm', {armed: armed});
+      if (!confirm('Turn Fly "Live copy output" ' + (armed ? 'ON' : 'OFF') + '?'
+        + (armed ? ' Fly will emit signed copy intents for live-eligible tiles whose live switch is ON; armed website accounts copy them.' : ' This stops new copy intents and turns every tile live-orders switch OFF.'))) return;
+      const res = await post('/api/live-copy/output', {enabled: armed});
       if (res && res.ok) {
         let body = {};
         try { body = await res.json(); } catch (_) {}
-        if (body.block_reason) { alert('Arm blocked: ' + body.block_reason); }
-        else if (body.error) { alert('Arm failed: ' + body.error); }
+        if (body.block_reason) { alert('Output blocked: ' + body.block_reason); }
+        else if (body.error) { alert('Output change failed: ' + body.error); }
+        refresh();
+      }
+    }
+    async function toggleLiveCopyEligibility(lane, eligible) {
+      if (!confirm((eligible ? 'Make' : 'Remove') + ' tile ' + lane + (eligible ? ' live-eligible' : ' from live eligibility') + '?'
+        + (eligible ? ' This does not turn the tile live — its Bitfinex Live Orders switch, Fly output and an armed copier account are still required.' : ' This also turns the tile live-orders switch OFF.'))) return;
+      const res = await post('/api/live-copy/tiles/' + encodeURIComponent(lane) + '/eligibility', {eligible: eligible});
+      if (res) {
+        let body = {};
+        try { body = await res.json(); } catch (_) {}
+        if (body.error) alert('Eligibility change refused: ' + body.error);
+        refresh();
+      }
+    }
+    async function toggleProtectionBootstrap(lane, enabled) {
+      if (!confirm((enabled ? 'Enable' : 'End') + ' the one-time stop-protection bootstrap for ' + lane + '?'
+        + (enabled ? ' Stands in for exchange-stop evidence for ONE trade on this tile only; ends on that fill or after 24h. The copier still places and confirms a reduce-only stop, and an unprotected fill still holds and pauses.' : ''))) return;
+      const res = await post('/api/live-copy/protection-bootstrap', {enabled: enabled, lane: lane});
+      if (res) {
+        let body = {};
+        try { body = await res.json(); } catch (_) {}
+        if (body.error) alert('Bootstrap refused: ' + body.error);
         refresh();
       }
     }
@@ -38214,7 +38270,23 @@ DASHBOARD_JS = """(function () {
           const tileLiveEligible = !!(liveRow && liveRow.eligible === true);
           const tileLiveDenials = (liveRow && liveRow.denials) || [];
           const liveMasterOn = bitfinexMasterOn(d);
+          const tileOperatorEligible = !!(liveRow && liveRow.live_eligible === true);
           let liveSwitchHtml = '';
+          let eligHtml = '';
+          if (!(spec.planned || spec.status === 'RETIRED')) {
+            eligHtml = '<div style="margin-top:4px;"><strong>Live eligible:</strong> <span style="font-weight:700;color:' + (tileOperatorEligible ? '#f59e0b' : '#8b949e') + ';">' + (tileOperatorEligible ? 'YES' : 'NO (default)') + '</span> '
+              + '<button type="button" onclick="toggleLiveCopyEligibility(\\'' + cardEsc(spec.lane) + '\\', ' + (tileOperatorEligible ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (tileOperatorEligible ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (tileOperatorEligible ? 'Make ineligible' : 'Make eligible') + '</button></div>';
+          }
+          if (tileOperatorEligible && !(spec.planned || spec.status === 'RETIRED')) {
+            const boot = ((d && d.bitfinex_live_switch) || {}).protection_bootstrap || {};
+            const bootHere = boot.active === true && boot.lane === spec.lane;
+            const bootLabel = bootHere
+              ? 'ACTIVE' + (boot.trade_id ? ' (bound to ' + cardEsc(boot.trade_id) + ')' : ' (one trade, ends on fill / 24h)')
+              : (boot.used ? 'USED' : 'OFF');
+            eligHtml += '<div style="margin-top:4px;"><strong>Stop bootstrap:</strong> <span style="font-weight:700;color:' + (bootHere ? '#f59e0b' : '#8b949e') + ';">' + bootLabel + '</span> '
+              + (boot.used && !bootHere ? '' : '<button type="button" onclick="toggleProtectionBootstrap(\\'' + cardEsc(spec.lane) + '\\', ' + (bootHere ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (bootHere ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (bootHere ? 'End bootstrap' : 'One-time bootstrap') + '</button>')
+              + '</div>';
+          }
           if (spec.planned || spec.status === 'RETIRED') {
             liveSwitchHtml = '';
           } else {
@@ -38223,17 +38295,19 @@ DASHBOARD_JS = """(function () {
           let liveStatus = '<span style="font-weight:700;color:' + (tileLiveOn ? '#3fb950' : '#8b949e') + ';">' + (tileLiveOn ? 'ON' : 'OFF') + '</span>';
           if (!tileLiveOn) {
             const reasons = [];
-            if (!liveMasterOn) reasons.push('master OFF');
+            if (!liveMasterOn) reasons.push('live copy output OFF');
+            if (!tileOperatorEligible) reasons.push('not live-eligible');
             if (tileLiveDenials.length) reasons.push(tileLiveDenials.join('; '));
             else if (!tileLiveEligible) reasons.push('not eligible (arm-blocked)');
             if (reasons.length) liveStatus += ' <span style="color:#f85149;font-size:0.78em;">(' + cardEsc(reasons.join(' · ')) + ')</span>';
           }
           const liveSwitchBlock = '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';border-radius:6px;overflow-wrap:anywhere;margin-top:10px;">'
             + '<div style="font-weight:700;letter-spacing:0.04em;color:' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';font-size:0.92em;">BITFINEX LIVE ORDERS</div>'
+            + eligHtml
             + '<div style="margin-top:4px;">' + liveStatus + '</div>'
             + '<div style="margin-top:6px;">' + liveSwitchHtml + '</div>'
             + '<div style="margin-top:4px;color:#8b949e;font-size:0.9em;">' + (tileLiveOn
-              ? 'Tile armed: copies new signed paper intents to Bitfinex (master must stay ON).'
+              ? 'Tile ON: new signed copy intents go to armed website accounts (output must stay ON).'
               : 'Tile OFF (default): no live Bitfinex orders from this tile.') + '</div></div>';
           let toggleHtml = '';
           if (spec.planned || spec.status === 'RETIRED') {
@@ -40288,6 +40362,8 @@ def _maybe_bitfinex_limit_entry(order: dict, signal: dict):
 
 
 def _maybe_bitfinex_limit_entry_locked(order: dict, signal: dict):
+    # Option 1: Fly never places entries on its own key (retired path).
+    return None
     lane = _normalize_lane_key(signal or order or {})
     if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
         # These lanes are canonical local-paper sources. Their only live-money
@@ -40339,6 +40415,8 @@ def _maybe_bitfinex_market_entry(signal: dict, qty: float):
 
 
 def _maybe_bitfinex_market_entry_locked(signal: dict, qty: float):
+    # Option 1: Fly never places entries on its own key (retired path).
+    return None
     lane = _normalize_lane_key(signal or {})
     if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
         # Never let the source bot race the platform relay with a second entry.
@@ -41006,6 +41084,10 @@ def bitfinex_live_reconcile_loop() -> None:
                 rebuilt = strict_result.pop("_rebuild_payload", None)
                 adopt_orders = {"adopted": 0, "orphaned": 0, "skipped": 0}
                 adopt_positions = {"adopted": 0, "orphaned": 0, "skipped": 0}
+                # Option 1: Fly's key account may also be a copier account.
+                # Fly must never adopt, cancel or manage exchange orders/
+                # positions it did not place: the reconcile is read-only.
+                rebuilt = None
                 if rebuilt:
                     # Use the exact successful strict-read payload. Never make
                     # a second "best effort" private read that can swallow one
@@ -41014,7 +41096,7 @@ def bitfinex_live_reconcile_loop() -> None:
                     adopt_positions = _adopt_position_from_rebuild(rebuilt)
                 cancel_result = {"cancelled": [], "failed": []}
                 exit_only = {}
-                if not _bitfinex_live_active():
+                if False and not _bitfinex_live_active():  # retired: read-only reconcile
                     cancel_result = _cancel_managed_live_pending_entries(
                         "RECONCILE_DISARMED"
                     )
@@ -42336,6 +42418,48 @@ def _build_relay_execution_state_snapshot() -> dict:
     return snapshot
 
 
+_RELAY_SCOPE_OPEN_STATUSES = {"OPEN", "PENDING", "FILLED", "PARTIAL", "ACTIVE", "WORKING"}
+
+
+def _scope_relay_execution_payload(payload: dict) -> dict:
+    """Opt-in (?scope=relay) smaller execution snapshot.
+
+    Keeps every row of lanes that can be copied (registry relay-eligible or
+    operator live-eligible), every trade with a live-copy decision (so an
+    open copied trade never looks "source absent" after a tile is made
+    ineligible) and every open/pending row. Research-only closed history of
+    other lanes is dropped. The cached full snapshot is untouched.
+    """
+    out = dict(payload or {})
+    keep_lanes = set(PLATFORM_RELAY_ELIGIBLE_LANES) | set(
+        _get_live_copy_eligibility().status().get("eligible_lanes") or [])
+    decided = _get_live_copy_decisions().approved_trade_ids()
+
+    def keep(tid, row):
+        row = row if isinstance(row, dict) else {}
+        tid = str(tid or row.get("trade_id") or "")
+        lane = str(row.get("research_lane") or row.get("lane") or "").upper() or _live_copy_lane_for_trade(tid)
+        if lane in keep_lanes or tid in decided:
+            return True
+        status = str(row.get("status") or row.get("state") or "").upper()
+        return status in _RELAY_SCOPE_OPEN_STATUSES or not status
+
+    dropped = 0
+    tm = out.get("trades_map")
+    if isinstance(tm, dict):
+        kept = {k: v for k, v in tm.items() if keep(k, v)}
+        dropped += len(tm) - len(kept)
+        out["trades_map"] = kept
+    for key in ("fidelity_trades", "expired_orders"):
+        rows = out.get(key)
+        if isinstance(rows, list):
+            kept = [r for r in rows if keep(None, r)]
+            dropped += len(rows) - len(kept)
+            out[key] = kept
+    out["scope"] = {"name": "relay", "keep_lanes": sorted(keep_lanes), "dropped_rows": dropped}
+    return out
+
+
 @app.route('/api/relay-execution-state')
 def api_relay_execution_state():
     """Canonical execution authority served without money-state lock access."""
@@ -42381,6 +42505,11 @@ def api_relay_execution_state():
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["X-Relay-State-Cache"] = "EXECUTION_STALE"
         return response
+    if str(request.args.get("scope") or "").strip().lower() == "relay":
+        try:
+            body = json.dumps(_scope_relay_execution_payload(payload), default=str, separators=(",", ":"))
+        except Exception as exc:  # noqa: BLE001 - fall back to the full snapshot
+            logger.warning(f"/api/relay-execution-state scope=relay failed, serving full: {exc}")
     response = app.response_class(body, status=200, mimetype="application/json")
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["X-Relay-State-Cache"] = "EXECUTION_BACKGROUND"
@@ -47650,7 +47779,26 @@ def _arm_live_control() -> tuple:
         return True, "READY", runtime, exchange_audit
 
 
+def _retired_direct_arm_response():
+    """Option 1: the Fly master arm (direct own-key trading) is retired."""
+    return jsonify({
+        "ok": False,
+        "error": "RETIRED",
+        "block_reason": "FLY_DIRECT_ARM_RETIRED",
+        "detail": ("Fly no longer arms its own Bitfinex key. Use the Fly 'Live copy output' "
+                   "switch (POST /api/live-copy/output) plus per-tile switches; copier "
+                   "accounts are armed on the website."),
+        "live_armed": False,
+        "bitfinex_live_enabled": False,
+    }), 409
+
+
 def _disarm_live_control(reason: str) -> dict:
+    # Disarming also turns Fly's Live copy output OFF (fail closed).
+    try:
+        _get_live_copy_output().set(False, by="disarm", reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[LIVE COPY] output OFF on disarm failed: {exc}")
     with _live_control_lock:
         with state_lock:
             state["live_armed"] = False
@@ -47722,6 +47870,8 @@ def live_arm():
             "example": {"armed": True},
         }), 400
     if armed:
+        return _retired_direct_arm_response()
+    if False:  # retired: Fly master arm (direct own-key trading)
         ok, block_reason, runtime, exchange_audit = _arm_live_control()
         if not ok:
             return jsonify({
@@ -47758,6 +47908,8 @@ def api_bitfinex_live():
             "example": {"enabled": True},
         }), 400
     if enabled:
+        return _retired_direct_arm_response()
+    if False:  # retired: Fly master arm (direct own-key trading)
         ok, block_reason, runtime, exchange_audit = _arm_live_control()
         if not ok:
             return jsonify({
@@ -56294,6 +56446,7 @@ def main():
         target=safe_thread(_platform_relay_connection_keepalive_loop),
         daemon=True,
     ).start()
+    threading.Thread(target=safe_thread(_live_copy_delivery_loop), daemon=True).start()
     update_logger_level()
     _THREAD_HEALTH.bind("main_supervisor_loop")
     while True:
@@ -56416,16 +56569,20 @@ def _bitfinex_paper_trade_rows() -> list:
 
 def _bitfinex_readiness_context() -> dict:
     now = time.time()
+    _output_on = bool(_get_live_copy_output().enabled)
     with state_lock:
-        live_armed = bool(state.get("live_armed"))
-        bfx_enabled = bool(state.get("bitfinex_live_enabled"))
+        # Option 1: the account-independent master is Fly's Live copy output.
+        live_armed = _output_on
+        bfx_enabled = _output_on
         manual_pause = bool(state.get("manual_admin_pause"))
         paused = bool(state.get("execution_paused"))
         price = state.get("price")
         exchange_min_qty = state.get("exchange_min_qty")
         exchange_max_qty = state.get("exchange_max_qty")
-        stop_cov = bool(state.get("stop_coverage_verified"))
-        reduce_only = bool(state.get("reduce_only_supported"))
+    # Set ONLY from verified executor STOP_CONFIRMED reports (never from state).
+    _prot = _get_live_copy_protection().flags()
+    stop_cov = bool(_prot.get("stop_coverage_verified"))
+    reduce_only = bool(_prot.get("reduce_only_supported"))
     audit = _exchange_exposure_audit_snapshot(now)  # cached, no private I/O
     try:
         relay_block = _relay_delivery_guard.arming_block_reason(now)
@@ -56479,11 +56636,21 @@ def _get_bfx_live_switch():
     return _bfx_live_switch_instance
 
 
-def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None) -> dict:
-    """Build the exact-size / protection dict used to evaluate one lane."""
+def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None,
+                                   trade_id: str | None = None) -> dict:
+    """Build the exact-size / protection dict used to evaluate one lane.
+
+    Protection comes ONLY from verified STOP_CONFIRMED evidence, or from the
+    one-time operator bootstrap for this lane (and, once claimed, only for its
+    one trade). Any bootstrap error means no bootstrap (fail closed).
+    """
     from bitfinex_live_switch import compute_size_checks
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
     ctx = ctx if isinstance(ctx, dict) else {}
+    try:
+        boot = bool(_get_live_copy_bootstrap().covers(lane, trade_id))
+    except Exception:  # noqa: BLE001
+        boot = False
     spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
     margin = float(spec.get("requested_margin_usd") or 0.25)
     return compute_size_checks(
@@ -56492,8 +56659,9 @@ def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None) -> dict:
         mark_price=ctx.get("mark_price"),
         exchange_min_qty=ctx.get("exchange_min_qty"),
         exchange_max_qty=ctx.get("exchange_max_qty"),
-        stop_coverage_verified=bool(ctx.get("stop_coverage_verified")),
-        reduce_only_supported=bool(ctx.get("reduce_only_supported")),
+        stop_coverage_verified=bool(_get_live_copy_protection().flags(lane).get("stop_coverage_verified"))
+        or boot,
+        reduce_only_supported=bool(ctx.get("reduce_only_supported")) or boot,
     )
 
 
@@ -56501,14 +56669,17 @@ def _bitfinex_master_state() -> dict:
     """Read-only account-level arm state for the dashboard + read APIs."""
     ctx = _bitfinex_readiness_context()
     ga = ctx.get("global_arm") or {}
-    with state_lock:
-        armed_at = state.get("live_armed_at_ts")
+    _out_snap = _get_live_copy_output().snapshot()
+    armed_at = _out_snap.get("enabled_at_ts")
     live_armed = bool(ga.get("live_armed"))
     bfx_enabled = bool(ga.get("bitfinex_live_enabled"))
     return {
         "live_armed": live_armed,
         "bitfinex_live_enabled": bfx_enabled,
         "master_on": live_armed and bfx_enabled,
+        "master_kind": "FLY_LIVE_COPY_OUTPUT",
+        "live_copy_output": _out_snap,
+        "website": _live_copy_website_cached_view(),
         "force_paper_mode": bool(ga.get("force_paper_mode")),
         "relay_delivery_block": ga.get("relay_delivery_block"),
         "keys_ok": bool(ga.get("keys_ok")),
@@ -56531,14 +56702,22 @@ def _bitfinex_live_switch_snapshot() -> dict:
         for row in status.get("rows") or []:
             lane = row.get("lane")
             size = _bitfinex_size_checks_for_lane(lane, ctx)
-            whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size)
+            op_elig = _get_live_copy_eligibility().is_eligible(lane)
+            whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
             rows.append({
                 **row,
+                "live_eligible": op_elig,
                 "eligible": bool(whynot.get("eligible")),
                 "denials": whynot.get("denials") or [],
                 "explanation": whynot.get("explanation"),
             })
-        return {**status, "rows": rows}
+        try:
+            boot = _get_live_copy_bootstrap().snapshot()
+            boot = {k: boot.get(k) for k in ("active", "lane", "expires_at_ts", "trade_id",
+                                              "used", "ended_reason")}
+        except Exception:  # noqa: BLE001
+            boot = None
+        return {**status, "rows": rows, "protection_bootstrap": boot}
     except Exception:  # noqa: BLE001 - fail closed, report nothing armed
         return {"schema": "bitfinex_live_switch_v1", "tile_count": 0,
                 "armed_lane_count": 0, "armed_lanes": [], "rows": [],
@@ -56559,32 +56738,38 @@ def _record_bitfinex_delivery_denial(lane: str, reason: str, event_id: str | Non
         logger.warning(f"[RELAY DELIVERY] audit record failed for denial: {exc}")
 
 
-def _filter_relay_rows_by_live_switch(rows, *, armed: bool, now: float | None = None):
-    """Per-tile "Bitfinex Live Orders" gate for relay delivery (fail-closed).
+def _filter_relay_rows_by_live_switch(rows, *, armed: bool = False, now: float | None = None):
+    """Per-tile live-copy gate for relay delivery — applies AT ALL TIMES.
 
-    Applies ONLY while the master relay is armed. When armed, a record may be
-    delivered to Bitfinex only if its lane's switch is ON *and* the record was
-    created at/after the lane's arm time (so flipping a tile ON can never copy
-    an intent that was created while the tile was OFF). Denied records are
-    withheld (left pending, never POSTed/ACKed) and the reason is recorded.
-
-    When the master is disarmed this is a no-op: the paper mirror keeps
-    flowing, and no live Bitfinex order can be created because the master is
-    disarmed (the delivery guard also holds PRE_ARMING records).
+    Closes the old gap where this filter was a no-op while the Fly master was
+    OFF. Every record must carry a valid signed ``live_copy_approval`` for its
+    own trade (stamped at emit only for approved trades). Entry events also
+    need Fly's Live copy output ON, the tile switch ON and the record created
+    at/after the tile's allow time *now*. Continuations (exits) of an approved
+    trade always pass so real exposure is never stranded. Withheld records
+    stay pending (never POSTed/ACKed); each denial is audited once.
+    ``armed`` is informational only (kept for call-site compatibility).
     """
-    if not armed:
-        return list(rows or [])
     now = time.time() if now is None else float(now)
-    sw = _get_bfx_live_switch()
+    try:
+        sw = _get_bfx_live_switch()
+        output = _get_live_copy_output().snapshot()
+    except Exception as exc:  # noqa: BLE001 - fail closed: deliver nothing
+        logger.warning(f"[RELAY DELIVERY] live-copy gate unavailable, withholding all: {exc}")
+        return []
+    secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
     delivered: list = []
     for record in rows or []:
         if not isinstance(record, dict):
-            delivered.append(record)
-            continue
+            continue  # malformed: fail closed
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
         lane = str(payload.get("research_lane") or "").upper()
-        created = record.get("created_at_unix")
-        allowed, reason = sw.delivery_gate(lane, created_at_unix=created, now=now)
+        event = str(payload.get("event") or "")
+        allowed, reason = _live_copy.delivery_check(
+            payload, secret=secret, now=now, tile_row=sw.snapshot(lane) if lane else {}, output=output,
+        )
+        if allowed and event in _live_copy.ENTRY_EVENTS | {"APPROVE_PENDING"}:
+            allowed, reason = sw.delivery_gate(lane, created_at_unix=record.get("created_at_unix"), now=now)
         if allowed:
             delivered.append(record)
             continue
@@ -56592,12 +56777,645 @@ def _filter_relay_rows_by_live_switch(rows, *, armed: bool, now: float | None = 
         _relay_push_state["live_switch_withheld_total"] = int(
             _relay_push_state.get("live_switch_withheld_total") or 0
         ) + 1
-        logger.warning(
-            f"[RELAY DELIVERY] withheld lane={lane or 'UNKNOWN'} reason={reason} "
-            f"event={event_id} (tile live-orders OFF/pre-arm) [PIPELINE ENFORCEMENT]"
-        )
-        _record_bitfinex_delivery_denial(lane, reason or "TILE_LIVE_SWITCH_OFF", event_id)
+        if event_id and event_id not in _live_copy_withheld_audited:
+            _live_copy_withheld_audited.add(event_id)
+            logger.warning(
+                f"[RELAY DELIVERY] withheld lane={lane or 'UNKNOWN'} event={event} reason={reason} "
+                f"id={event_id} (live-copy gate) [PIPELINE ENFORCEMENT]"
+            )
+            _record_bitfinex_delivery_denial(lane, reason or "LIVE_COPY_GATE_DENIED", event_id)
     return delivered
+
+
+# ---------------------------------------------------------------------------
+# Live copy (Option 1): Fly output switch, signed approvals, executor reports
+# ---------------------------------------------------------------------------
+_live_copy_init_lock = threading.Lock()
+_live_copy_singletons: dict = {}
+_live_copy_withheld_audited: set = set()
+_live_copy_emitted = deque(maxlen=5000)
+_live_copy_ingest_rejects = deque(maxlen=500)
+_live_copy_website_cache: dict = {"ts": 0.0, "value": None}
+_live_copy_website_lock = threading.Lock()
+
+
+def _live_copy_singleton(name: str, factory):
+    obj = _live_copy_singletons.get(name)
+    if obj is None:
+        with _live_copy_init_lock:
+            obj = _live_copy_singletons.get(name)
+            if obj is None:
+                obj = factory()
+                _live_copy_singletons[name] = obj
+    return obj
+
+
+def _get_live_copy_output():
+    return _live_copy_singleton("output", _live_copy.LiveCopyOutput)
+
+
+def _get_live_copy_protection():
+    return _live_copy_singleton("protection", _live_copy.ProtectionEvidence)
+
+
+def _get_live_copy_bootstrap():
+    return _live_copy_singleton("bootstrap", _live_copy.ProtectionBootstrap)
+
+
+def _get_live_copy_decisions():
+    return _live_copy_singleton("decisions", _live_copy.TradeDecisions)
+
+
+def _get_live_copy_journal():
+    return _live_copy_singleton("journal", _live_copy.ExecutionJournal)
+
+
+def _iso_or_ts_to_unix(value):
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+_live_copy_bootstrap_lock = threading.Lock()
+
+
+def _live_copy_stamp_payload(payload, signal_at=None):
+    """Attach a signed live-copy approval to an eligible lane's relay payload.
+
+    Only relay-eligible lanes are considered. A trade is copied only if its
+    first entry event passes the full gate (output ON, tile switch ON, tile
+    eligible, intent created after both arm times, readiness/size/protection).
+    Unstamped payloads are withheld at delivery, so nothing leaves Fly.
+    Never raises: any error leaves the payload unstamped (fail closed).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    try:
+        event = str(payload.get("event") or "")
+        trade_id = str(payload.get("trade_id") or "")
+        lane = _platform_relay_lane_for_event(trade_id, payload.get("research_lane"))
+        if not trade_id or not lane:
+            lane = _live_copy_lane_for_trade(trade_id, payload.get("research_lane"))
+        op_elig = _get_live_copy_eligibility().is_eligible(lane) if lane else False
+        if not trade_id or not lane or not (lane in PLATFORM_RELAY_ELIGIBLE_LANES or op_elig):
+            return payload
+        from combo_pathway_config import ACTIVE_TILE_REGISTRY
+        spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+        sw = _get_bfx_live_switch()
+        output = _get_live_copy_output().snapshot()
+        now = time.time()
+        if event == "APPROVE_PENDING":
+            ctx = _bitfinex_readiness_context()
+            tile_eval = sw.evaluate(lane, global_arm=ctx.get("global_arm") or {},
+                                    size_checks=_bitfinex_size_checks_for_lane(lane, ctx), now=now,
+                                    operator_eligible=op_elig, exchange_flat_required=False)
+            ok, reasons = _live_copy.entry_gate(
+                lane=lane, created_at_ts=now, spec=spec, output=output, tile_row=sw.snapshot(lane),
+                tile_eval=tile_eval, force_paper_mode=_force_paper_mode_active(),
+                operator_eligible=op_elig,
+            )
+            if not ok:
+                payload["live_copy_denied"] = reasons[:8]
+                return payload
+            approval = _live_copy.sign_approval(_live_copy.build_approval(
+                event=event, trade_id=trade_id, lane=lane, spec=spec, output=output,
+                tile_row=sw.snapshot(lane), entry_allowed=False, trade_approved_at_ts=None,
+                created_at_ts=now, signal_at_ts=_iso_or_ts_to_unix(signal_at),
+                bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
+            ), (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip())
+            approval_reasons: list = []
+        else:
+            with _live_copy_bootstrap_lock:
+                tile_eval = None
+                needs_bootstrap = False
+                if event in _live_copy.ENTRY_EVENTS:
+                    ctx = _bitfinex_readiness_context()
+                    real_cov = bool(_get_live_copy_protection().flags(lane).get("stop_coverage_verified")
+                                    and ctx.get("reduce_only_supported"))
+                    needs_bootstrap = not real_cov
+                    tile_eval = sw.evaluate(lane, global_arm=ctx.get("global_arm") or {},
+                                            size_checks=_bitfinex_size_checks_for_lane(lane, ctx, trade_id),
+                                            now=now, operator_eligible=op_elig, exchange_flat_required=False)
+                approval, approval_reasons = _live_copy.stamp_or_block(
+                    event=event, trade_id=trade_id, lane=lane, now=now,
+                    signal_at_ts=_iso_or_ts_to_unix(signal_at or payload.get("source_created_at")),
+                    spec=spec, output=output, tile_row=sw.snapshot(lane), tile_eval=tile_eval,
+                    force_paper_mode=_force_paper_mode_active(), decisions=_get_live_copy_decisions(),
+                    secret=(os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip(),
+                    bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
+                )
+                if (approval and approval.get("entry_allowed") and needs_bootstrap
+                        and not _get_live_copy_bootstrap().claim(lane, trade_id)):
+                    # Entry relied on the bootstrap but could not bind it: withhold.
+                    approval, approval_reasons = None, ["PROTECTION_BOOTSTRAP_CLAIM_FAILED"]
+        if approval:
+            payload["live_copy_approval"] = approval
+            _live_copy_emitted.append({k: approval.get(k) for k in (
+                "correlation_id", "trade_id", "event", "research_lane", "entry_allowed",
+                "created_at_ts", "signal_at_ts", "exchange_stop_bp")})
+        else:
+            payload["live_copy_denied"] = list(approval_reasons or [])[:8]
+    except Exception as exc:  # noqa: BLE001 - unstamped = withheld
+        payload.pop("live_copy_approval", None)
+        payload["live_copy_denied"] = [f"STAMP_ERROR:{type(exc).__name__}"]
+    return payload
+
+
+def _get_live_copy_eligibility():
+    return _live_copy_singleton("eligibility", _live_copy.LiveEligibility)
+
+
+def _get_live_copy_outbox():
+    return _live_copy_singleton("outbox", _live_copy.LiveCopyOutbox)
+
+
+def _live_copy_lane_for_trade(trade_id, research_lane=None) -> str:
+    """Active-tile lane from the trade-id prefix (explicit lane may only confirm)."""
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY, ACTIVE_TILE_ORDER
+    prefix, sep, _ = str(trade_id or "").strip().lower().partition("-")
+    if not sep:
+        return ""
+    derived = ""
+    for lane in ACTIVE_TILE_ORDER:
+        if str((ACTIVE_TILE_REGISTRY.get(lane) or {}).get("id_prefix") or "").lower() == prefix:
+            derived = lane
+            break
+    explicit = str(research_lane or "").strip().upper()
+    if not derived or (explicit and explicit != derived):
+        return ""
+    return derived
+
+
+def _live_copy_publish(event, trade_id, extra) -> bool:
+    """Publish one paper lifecycle event of a live-eligible tile as a copy intent.
+
+    Never raises into the paper path. Only stamped (approved) payloads are
+    enqueued; everything else is dropped here, so nothing leaves Fly.
+    """
+    try:
+        event = str(event or "")
+        if event not in _live_copy.ENTRY_EVENTS | _live_copy.CONTINUATION_EVENTS:
+            return False
+        trade_id = str(trade_id or "")
+        local = extra if isinstance(extra, dict) else {}
+        lane = _live_copy_lane_for_trade(trade_id, local.get("research_lane"))
+        if not lane:
+            return False
+        decided = _get_live_copy_decisions().get(trade_id)
+        if decided is None and not _get_live_copy_eligibility().is_eligible(lane):
+            return False  # fast path: tile not live-eligible, no decision written
+        payload = {"event": event, "trade_id": trade_id, "ts": utc_iso(), **_dashboard_owner_metadata()}
+        payload.update(copy.deepcopy(local))
+        payload["research_lane"] = lane
+        payload.setdefault("schema", "dcf-showcase-intent-v1")
+        payload["live_copy_channel"] = "fly_live_copy_outbox_v1"
+        payload = _live_copy_stamp_payload(payload, signal_at=local.get("signal_created_at") or local.get("signal_ts"))
+        if not payload.get("live_copy_approval"):
+            return False
+        record = _get_live_copy_outbox().enqueue(payload)
+        if record is None:
+            logger.warning(f"[LIVE COPY] outbox enqueue failed event={event} trade={trade_id}")
+            return False
+        _live_copy_delivery_wake.set()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[LIVE COPY] publish failed event={event} trade={trade_id}: {exc}")
+        return False
+
+
+_live_copy_delivery_wake = threading.Event()
+
+
+def _live_copy_deliver_once(now: float | None = None) -> dict:
+    now = time.time() if now is None else float(now)
+    outbox = _get_live_copy_outbox()
+    rows = outbox.due(now)
+    if not rows:
+        return {"attempted": 0, "acked": 0}
+    url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    sw = _get_bfx_live_switch()
+    output = _get_live_copy_output().snapshot()
+    acked = 0
+    for rec in rows:
+        payload = rec.get("payload") or {}
+        lane = str(payload.get("research_lane") or "").upper()
+        event = str(payload.get("event") or "")
+        ok, reason = _live_copy.delivery_check(payload, secret=secret, now=now,
+                                               tile_row=sw.snapshot(lane), output=output)
+        if ok and event in _live_copy.ENTRY_EVENTS:
+            ok, reason = sw.delivery_gate(lane, created_at_unix=rec.get("created_at_unix"), now=now)
+        if not ok:
+            # A withheld ENTRY is dropped (no exchange order can result);
+            # the denial is audited. Continuations only fail on a bad approval.
+            outbox.ack(rec["event_id"])
+            _record_bitfinex_delivery_denial(lane, reason or "LIVE_COPY_DELIVERY_DENIED", rec["event_id"])
+            continue
+        if not url or not secret:
+            outbox.fail(rec["event_id"], "relay URL or HMAC secret missing")
+            continue
+        body = RelayEventOutbox.canonical_body(payload)
+        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "X-Showcase-Signature": f"sha256={signature}"}
+        legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+        if legacy_secret:
+            headers["X-Bot-Control-Secret"] = legacy_secret
+        started = time.perf_counter()
+        try:
+            response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
+            response.raise_for_status()
+            receipt = response.json() if response.content else {}
+            if not _relay_response_has_durable_receipt(receipt, payload):
+                raise RuntimeError(f"no durable receipt: {str(receipt.get('reason') or '')[:80]}")
+            outbox.ack(rec["event_id"])
+            acked += 1
+            _record_relay_delivery(event, payload.get("trade_id"), payload.get("ts"), ok=True,
+                                   http_latency_ms=(time.perf_counter() - started) * 1000,
+                                   platform_received_at=(receipt.get("durable_ack") or {}).get("platform_received_at"))
+        except Exception as exc:  # noqa: BLE001
+            outbox.fail(rec["event_id"], exc)
+            _record_relay_delivery(event, payload.get("trade_id"), payload.get("ts"), ok=False,
+                                   http_latency_ms=(time.perf_counter() - started) * 1000, error=exc)
+    return {"attempted": len(rows), "acked": acked}
+
+
+def _live_copy_website_cached_view() -> dict:
+    """Last fetched website copy state (no network I/O; safe in /api/state)."""
+    v = _live_copy_website_cache.get("value")
+    if not isinstance(v, dict):
+        return {"reachable": False, "error": "NOT_FETCHED_YET", "armed_accounts": []}
+    return {k: v.get(k) for k in ("reachable", "armed_accounts", "accounts", "fetched_at_ts",
+                                  "executor_heartbeat_age_sec", "error")}
+
+
+def _live_copy_delivery_loop():
+    last_web = 0.0
+    while not shutdown_event.is_set():
+        try:
+            _live_copy_deliver_once()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LIVE COPY] delivery tick failed: {exc}")
+        if time.time() - last_web >= 30.0:
+            last_web = time.time()
+            try:
+                _live_copy_website_state()  # refresh the 30 s cache for the dashboard
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[LIVE COPY] website state refresh failed: {exc}")
+        pending = _get_live_copy_outbox().status().get("pending") or 0
+        _live_copy_delivery_wake.wait(0.5 if pending else 15.0)
+        _live_copy_delivery_wake.clear()
+
+
+@app.route('/api/live-copy/tiles/<lane>/eligibility', methods=['POST'])
+def api_live_copy_tile_eligibility(lane: str):
+    """Operator per-tile live eligibility (admin). Default OFF; persisted.
+
+    Making a tile eligible never arms it: its Bitfinex live switch, Fly's
+    Live copy output, the copier's own arm, signing, size and protection
+    gates still apply. Turning eligibility OFF also switches the tile OFF.
+    Retired / unknown tiles are refused.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    eligible = _strict_json_boolean(data, "eligible")
+    if eligible is None:
+        return jsonify({"error": "'eligible' must be a JSON boolean", "example": {"eligible": False}}), 400
+    ok, row = _get_live_copy_eligibility().set(str(lane or "").upper(), eligible, by="dashboard",
+                                               reason="OPERATOR_ELIGIBLE" if eligible else "OPERATOR_INELIGIBLE")
+    if not eligible or not ok:
+        try:
+            _get_bfx_live_switch().request_off(str(lane or "").upper(), reason="LIVE_ELIGIBILITY_OFF")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if _get_live_copy_bootstrap().snapshot().get("lane") == str(lane or "").upper():
+                _get_live_copy_bootstrap().disable(reason="LIVE_ELIGIBILITY_OFF")
+        except Exception:  # noqa: BLE001
+            pass
+    logger.warning(f"[LIVE COPY] tile {lane} live eligibility -> {eligible} ok={ok} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": ok, **row}), (200 if ok else 409)
+
+
+def _live_copy_paper_twins() -> dict:
+    """Paper twin rows keyed by trade id (entry price/qty/side) for drift checks."""
+    out = {}
+    for row in _bitfinex_paper_trade_rows():
+        tid = str(row.get("trade_id") or "")
+        if tid:
+            out[tid] = {"entry_price": row.get("entry_price"), "qty": row.get("qty"),
+                        "side": row.get("side"), "exit_price": row.get("exit_price"),
+                        "exit_ts": row.get("exit_ts")}
+    try:
+        with trade_lock:
+            recent = list(recent_trades)[-50:]
+        for row in recent:
+            if isinstance(row, dict) and row.get("trade_id") and str(row["trade_id"]) not in out:
+                out[str(row["trade_id"])] = {
+                    "entry_price": row.get("entry") or row.get("entry_price"),
+                    "qty": row.get("qty") or row.get("size"),
+                    "side": row.get("dir") or row.get("direction") or row.get("side"),
+                    "exit_price": row.get("exit") or row.get("exit_price"),
+                    "exit_ts": row.get("exit_ts") or row.get("close_ts"),
+                }
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _live_copy_website_state(max_age: float = 30.0) -> dict:
+    """Website/Railway copier arm state, fetched with a signed GET (cached 30 s).
+
+    Unreachable/invalid => {"reachable": False}; never treated as armed.
+    """
+    now = time.time()
+    with _live_copy_website_lock:
+        cached = _live_copy_website_cache.get("value")
+        if cached is not None and now - float(_live_copy_website_cache.get("ts") or 0) < max_age:
+            return dict(cached)
+    value = {"reachable": False, "armed_accounts": [], "accounts": [], "fetched_at_ts": now}
+    try:
+        raw = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+        secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+        parsed = urlsplit(raw)
+        if parsed.scheme in ("http", "https") and parsed.netloc and secret:
+            path = "/api/trading-agents/conservative-btc/live-copy/fly-view"
+            ts = str(int(now))
+            sig = hmac.new(_live_copy.derive_key(secret, b"fly-website-state-v1"),
+                           f"GET\n{path}\n{ts}".encode("utf-8"), hashlib.sha256).hexdigest()
+            resp = _relay_http_session.get(
+                f"{parsed.scheme}://{parsed.netloc}{path}", timeout=4.0,
+                headers={"Accept": "application/json", "X-Fly-View-Ts": ts, "X-Fly-View-Signature": sig},
+            )
+            if resp.status_code == 200:
+                data = resp.json() if resp.content else {}
+                if isinstance(data, dict) and data.get("schema") == "website_live_copy_fly_view_v1":
+                    value.update({
+                        "reachable": True,
+                        "armed_accounts": [str(a) for a in (data.get("armed_accounts") or [])][:50],
+                        "accounts": [a for a in (data.get("accounts") or []) if isinstance(a, dict)][:50],
+                        "executor_heartbeat_age_sec": data.get("executor_heartbeat_age_sec"),
+                        "server_ts": data.get("server_ts"),
+                        "ingest_rejects_1h": data.get("ingest_rejects_1h")
+                        if isinstance(data.get("ingest_rejects_1h"), dict) else None,
+                    })
+            else:
+                value["error"] = f"HTTP {resp.status_code}"
+        else:
+            value["error"] = "RELAY_URL_OR_SECRET_MISSING"
+    except Exception as exc:  # noqa: BLE001
+        value["error"] = f"{type(exc).__name__}"[:80]
+    with _live_copy_website_lock:
+        _live_copy_website_cache.update({"ts": now, "value": dict(value)})
+    return value
+
+
+@app.route('/api/live-copy/output', methods=['POST'])
+def api_live_copy_output():
+    """Fly "Live copy output" ON/OFF (admin). Never places an order.
+
+    ON is refused while FORCE_PAPER_MODE is set. OFF is always allowed and
+    turns every tile's Bitfinex live switch OFF. The state persists on the
+    data volume and is OFF after every restart.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    enabled = _strict_json_boolean(data, "enabled")
+    if enabled is None:
+        return jsonify({"error": "'enabled' must be a JSON boolean", "example": {"enabled": False}}), 400
+    output = _get_live_copy_output()
+    if enabled:
+        if _force_paper_mode_active():
+            return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
+                            "live_copy_output": output.snapshot()}), 409
+        snap = output.set(True, by="dashboard", reason="OPERATOR_ON")
+    else:
+        snap = output.set(False, by="dashboard", reason="OPERATOR_OFF")
+        try:
+            _get_bfx_live_switch().reset_all_off(reason="LIVE_COPY_OUTPUT_OFF")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LIVE COPY] tile reset on output OFF failed: {exc}")
+        try:
+            _get_live_copy_bootstrap().disable(reason="LIVE_COPY_OUTPUT_OFF")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LIVE COPY] bootstrap end on output OFF failed: {exc}")
+    logger.warning(f"[LIVE COPY] output -> {'ON' if snap.get('enabled') else 'OFF'} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": bool(snap.get("enabled")) == bool(enabled), "live_copy_output": snap})
+
+
+@app.route('/api/live-copy/protection-bootstrap', methods=['POST'])
+def api_live_copy_protection_bootstrap():
+    """One-time operator protection bootstrap (admin). Default OFF.
+
+    {"enabled": true, "lane": "GS01"} stands in for stop-coverage /
+    reduce-only readiness for that one lane and its first approved trade; it
+    ends on that trade's fill, after 24 h, or on restart, and can never be
+    re-enabled once a trade has used it. Only an operator-eligible active
+    tile qualifies. {"enabled": false} ends it.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    enabled = _strict_json_boolean(data, "enabled")
+    if enabled is None:
+        return jsonify({"error": "'enabled' must be a JSON boolean",
+                        "example": {"enabled": True, "lane": "GS01"}}), 400
+    boot = _get_live_copy_bootstrap()
+    if not enabled:
+        snap = boot.disable(reason="OPERATOR_OFF")
+        logger.warning("[LIVE COPY] protection bootstrap -> OFF [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": True, "protection_bootstrap": snap})
+    lane = str(data.get("lane") or "").strip().upper()
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    if lane not in ACTIVE_TILE_REGISTRY:
+        return jsonify({"ok": False, "error": "LANE_NOT_ACTIVE", "lane": lane}), 409
+    if not _get_live_copy_eligibility().is_eligible(lane):
+        return jsonify({"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE", "lane": lane}), 409
+    ok, snap = boot.enable(lane, by="dashboard", reason="OPERATOR_BOOTSTRAP")
+    logger.warning(f"[LIVE COPY] protection bootstrap {lane} -> ON ok={ok} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": ok, "protection_bootstrap": snap}), (200 if ok else 409)
+
+
+@app.route('/api/live-copy/status', methods=['GET'])
+def api_live_copy_status():
+    """Read-only: output switch, per-tile live switches, eligibility, website arm."""
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    sw = _bitfinex_live_switch_snapshot()
+    return jsonify({
+        "schema": "fly_live_copy_status_v1",
+        "architecture": "OPTION_1_FLY_PAPER_SIGNAL_SOURCE_RAILWAY_EXECUTES_COPIER_ACCOUNTS",
+        "fly_direct_trading_path": "RETIRED",
+        "live_copy_output": _get_live_copy_output().snapshot(),
+        "force_paper_mode": _force_paper_mode_active(),
+        "relay_stack_mode": _relay_stack_mode.mode(),
+        "relay_eligible_lanes": sorted(PLATFORM_RELAY_ELIGIBLE_LANES),
+        "tiles": [{k: r.get(k) for k in ("lane", "tile_number", "live_eligible", "bitfinex_live_orders",
+                                          "last_allow_ts", "eligible", "denials", "last_denial")}
+                  for r in sw.get("rows") or []],
+        "protection_evidence": _get_live_copy_protection().flags(),
+        "protection_bootstrap": _get_live_copy_bootstrap().snapshot(),
+        "tile_live_eligibility": _get_live_copy_eligibility().status(),
+        "live_copy_outbox": _get_live_copy_outbox().status(),
+        "website": _live_copy_website_state(),
+        "computed_at_ts": time.time(),
+    })
+
+
+@app.route('/api/live-copy/execution-report', methods=['POST'])
+def api_live_copy_execution_report():
+    """Signed executor report (fills, stops, rejects, errors) from Railway.
+
+    HMAC over the raw body with the report-domain key derived from
+    SHOWCASE_WEBHOOK_SECRET. Only verified STOP_CONFIRMED reports can set the
+    exchange-stop / reduce-only evidence flags.
+    """
+    raw = request.get_data(cache=True) or b""
+    secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    sig = request.headers.get("X-Live-Report-Signature") or ""
+    now = time.time()
+    if not _live_copy.verify_report_signature(raw, sig, secret):
+        _live_copy_ingest_rejects.append({"ts": now, "reason": "SIGNATURE_INVALID"})
+        return jsonify({"ok": False, "error": "SIGNATURE_INVALID"}), 401
+    try:
+        report = json.loads(raw.decode("utf-8") or "{}")
+    except ValueError:
+        return jsonify({"ok": False, "error": "BODY_NOT_JSON"}), 400
+    ok, reason = _live_copy.validate_report(report, now)
+    if not ok:
+        _live_copy_ingest_rejects.append({"ts": now, "reason": reason})
+        return jsonify({"ok": False, "error": reason}), 400
+    stored, why = _get_live_copy_journal().append(report)
+    if not stored:
+        return jsonify({"ok": False, "error": why}), 503
+    protection = None
+    if report.get("type") == "STOP_CONFIRMED" and why != "DUPLICATE":
+        protection = _get_live_copy_protection().record_stop_confirmation(report)
+    bootstrap_ended = False
+    if why != "DUPLICATE":
+        try:
+            bootstrap_ended = _get_live_copy_bootstrap().observe_report(report)
+        except Exception as exc:  # noqa: BLE001 - a stored report is never rejected
+            logger.warning(f"[LIVE COPY] bootstrap observe failed: {exc}")
+    try:
+        action = {"ORDER_PLACED": "ORDER_PLACED", "ORDER_AMENDED": "ORDER_CHANGED",
+                  "ORDER_CANCELLED": "ORDER_CANCELLED", "ORDER_FILLED": "ORDER_FILLED",
+                  "ORDER_REJECTED": "ORDER_REJECTED", "STOP_CONFIRMED": "STOP_LOSS",
+                  "INTENT_REJECTED": "ORDER_REJECTED"}.get(str(report.get("type")))
+        if action and _bfx_action_audit is not None and why != "DUPLICATE":
+            order = report.get("order") if isinstance(report.get("order"), dict) else {}
+            _bfx_action_audit.record(
+                action_type=action, lane=str(report.get("lane") or "").upper() or None,
+                intent_id=report.get("correlation_id"), trade_id=report.get("correlation_id"),
+                order_id=order.get("exchange_order_id"), client_order_id=order.get("client_order_id"),
+                side=order.get("side"), qty=order.get("qty"), price=order.get("price"),
+                detail={"account": report.get("account"), "report_id": report.get("report_id"),
+                        "source": "railway_executor_report"},
+            )
+    except Exception as exc:  # noqa: BLE001 - audit failure never rejects a stored report
+        logger.warning(f"[LIVE COPY] audit record for report failed: {exc}")
+    return jsonify({"ok": True, "status": why, "report_id": report.get("report_id"),
+                    "protection_evidence_recorded": bool(protection),
+                    "protection_bootstrap_ended": bool(bootstrap_ended),
+                    "fly_received_at_ts": now})
+
+
+@app.route('/api/live-copy/fly-key-identity', methods=['GET'])
+def api_live_copy_fly_key_identity():
+    """Admin: which Bitfinex account Fly's own (read-only) key belongs to.
+
+    Private READ calls only (user info + key permissions). Never returns key
+    material; the email is masked. Used to prove Fly's key is not a copier's.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    if not _private_api_keys_ok() or bitfinex_private is None:
+        return jsonify({"ok": False, "keys_present": False})
+    out = {"ok": False, "keys_present": True}
+    try:
+        info = bitfinex_private.privatePostAuthRInfoUser()
+        if isinstance(info, list) and len(info) > 2:
+            email = str(info[1] or "")
+            local, _, domain = email.partition("@")
+            out.update({
+                "account_id": info[0],
+                "username": info[2],
+                "email_masked": (local[:2] + "***@" + domain) if domain else None,
+                "ok": True,
+            })
+    except Exception as exc:  # noqa: BLE001
+        out["info_error"] = type(exc).__name__
+    try:
+        perms = bitfinex_private.privatePostAuthRPermissions()
+        scopes = {}
+        for row in perms or []:
+            if isinstance(row, list) and len(row) >= 3:
+                scopes[str(row[0])] = {"read": bool(row[1]), "write": bool(row[2])}
+        out["permissions"] = scopes
+        out["withdraw_write_enabled"] = bool((scopes.get("withdraw") or {}).get("write"))
+        out["trading_write_enabled"] = bool((scopes.get("orders") or {}).get("write"))
+    except Exception as exc:  # noqa: BLE001
+        out["permissions_error"] = type(exc).__name__
+    out["fly_direct_trading_path"] = "RETIRED"
+    return jsonify(out)
+
+
+def _live_copy_monitor_context() -> dict:
+    """Context for the read-only /api/monitor/live/* routes (no secrets)."""
+    sw = _bitfinex_live_switch_snapshot()
+    journal = _get_live_copy_journal()
+    with _relay_push_history_lock:
+        recent_push = list(_relay_push_history)[-20:]
+    return {
+        "output": _get_live_copy_output().snapshot(),
+        "force_paper_mode": _force_paper_mode_active(),
+        "relay_stack_mode": _relay_stack_mode.mode(),
+        "switch_rows": [
+            {**r, "relay_eligible": (r.get("lane") in PLATFORM_RELAY_ELIGIBLE_LANES) or bool(r.get("live_eligible"))}
+            for r in sw.get("rows") or []
+        ],
+        "protection": _get_live_copy_protection().flags(),
+        "decisions": _get_live_copy_decisions().summary(50),
+        "approvals": list(_live_copy_emitted),
+        "reports": journal.rows(),
+        "journal_write_failures": journal.write_failures,
+        "ingest_rejects": list(_live_copy_ingest_rejects),
+        "paper_twins": _live_copy_paper_twins(),
+        "relay": {
+            "pending": _relay_event_outbox.pending_count() if _relay_event_outbox else None,
+            "live_copy_outbox": _get_live_copy_outbox().status(),
+            "push_state": {k: _relay_push_state.get(k) for k in (
+                "seq", "last_ts", "last_event", "last_ok", "last_error", "last_latency_ms",
+                "live_switch_withheld_total", "research_only_withheld_total")},
+            "recent_deliveries": recent_push,
+            "guard": _relay_delivery_guard.status() if hasattr(_relay_delivery_guard, "status") else None,
+        },
+        "website": _live_copy_website_state(),
+        "process_started_ts": globals().get("process_boot_time"),
+        "bot_instance_id": BOT_INSTANCE_ID,
+        "source_git_rev": _runtime_git_rev(),
+        "runtime_telemetry": (state.get("runtime_telemetry") if isinstance(state.get("runtime_telemetry"), dict) else None),
+    }
+
+
+def _wire_live_copy_monitor() -> None:
+    try:
+        import live_copy_monitor_api as _lcm
+        _lcm.wire(_live_copy_monitor_context, authorize=monitor_integrity_authorized)
+        app.register_blueprint(_lcm.blueprint)
+        logger.info("[LIVE COPY] read-only /api/monitor/live/* routes wired")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[LIVE COPY] monitor wiring failed: {exc}")
 
 
 def _wire_bitfinex_readiness() -> None:
@@ -56639,14 +57457,21 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"error": "'enabled' must be a JSON boolean",
                         "example": {"enabled": True}}), 400
     sw = _get_bfx_live_switch()
+    if enabled:
+        try:
+            # Read-only private audit so the freshness gate reflects "now".
+            _refresh_bitfinex_exposure_audit().pop("_rebuild_payload", None)
+        except Exception as exc:  # noqa: BLE001 - a stale audit simply denies
+            logger.warning(f"[BITFINEX LIVE ORDERS] audit refresh failed: {exc}")
     ctx = _bitfinex_readiness_context()
     ga = ctx.get("global_arm") or {}
     size = _bitfinex_size_checks_for_lane(lane, ctx)
+    op_elig = _get_live_copy_eligibility().is_eligible(lane)
     if enabled:
-        sw.request_on(lane, global_arm=ga, size_checks=size)
+        sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:
         sw.request_off(lane, reason="OPERATOR_OFF")
-    whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size)
+    whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     snap = sw.snapshot(lane)
     logger.warning(
         f"[BITFINEX LIVE ORDERS] tile {lane} -> {'ON' if enabled else 'OFF'} "
@@ -56664,6 +57489,7 @@ def api_bitfinex_tile_live_orders(lane: str):
 
 
 _wire_bitfinex_readiness()
+_wire_live_copy_monitor()
 
 
 if __name__ == "__main__":

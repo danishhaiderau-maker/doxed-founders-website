@@ -258,9 +258,29 @@ def _amount(qty: float) -> float:
 # ---------------------------------------------------------------------------
 # Order placement
 # ---------------------------------------------------------------------------
+# Option 1 (2026-10-09): Fly is a PAPER signal source. Real orders are placed
+# ONLY by the website/Railway executor on each armed copier's own keys. Fly's
+# direct Bitfinex ENTRY path is retired and hard-refuses here, below every
+# caller, so no flag, env var or persisted state can revive it. Close/cancel
+# helpers stay so any legacy exposure can still be flattened.
+DIRECT_ENTRY_PATH_RETIRED = True
+DIRECT_ENTRY_RETIRED_REASON = "FLY_DIRECT_ENTRY_PATH_RETIRED"
+
+
+def _refuse_retired_entry(kind: str, trade_id: str) -> None:
+    _STATE["last_submit_ts"] = time.time()
+    _STATE["last_submit_ok"] = False
+    _STATE["last_submit_refusal"] = DIRECT_ENTRY_RETIRED_REASON
+    _persist()
+    _log("warning", f"[BITFINEX LIVE] {kind} entry REFUSED tid={trade_id}: {DIRECT_ENTRY_RETIRED_REASON}")
+
+
 def submit_market_entry(exchange, retry_fn, symbol: str, direction: str,
                         qty: float, leverage: int, trade_id: str) -> dict | None:
-    """Open a position at market. Returns the exchange order dict or None."""
+    """Retired: Fly never opens positions directly. Always returns None."""
+    if DIRECT_ENTRY_PATH_RETIRED:
+        _refuse_retired_entry("market", trade_id)
+        return None
     if exchange is None or retry_fn is None:
         return None
     allowed, reason = _ddollar_gate_ok_for_entry()
@@ -295,7 +315,10 @@ def submit_market_entry(exchange, retry_fn, symbol: str, direction: str,
 
 def submit_limit_entry(exchange, retry_fn, symbol: str, direction: str,
                        qty: float, price: float, leverage: int, trade_id: str) -> str | None:
-    """Place a leveraged limit order. Returns the exchange order id (string) or None."""
+    """Retired: Fly never places entry orders directly. Always returns None."""
+    if DIRECT_ENTRY_PATH_RETIRED:
+        _refuse_retired_entry("limit", trade_id)
+        return None
     if exchange is None or retry_fn is None:
         return None
     allowed, reason = _ddollar_gate_ok_for_entry()

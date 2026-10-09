@@ -10,6 +10,21 @@ from relay_delivery_guard import RelayDeliveryGuard
 from relay_event_outbox import RelayEventOutbox
 
 
+class _OutputView:
+    """Test stand-in for live_copy_control.LiveCopyOutput (reads scenario state)."""
+
+    def __init__(self, state):
+        self._state = state
+
+    @property
+    def enabled(self):
+        return bool(self._state.get("live_armed") and self._state.get("bitfinex_live_enabled"))
+
+    @property
+    def enabled_at_ts(self):
+        return self._state.get("live_armed_at_ts")
+
+
 def enqueue(box, trade, owner, seq=0):
     payload = {"event": "LIMIT_UPDATED", "trade_id": trade,
                "event_id": f"{trade}:{seq}", "event_seq": seq, "ts": "test"}
@@ -133,6 +148,9 @@ def load_drain(box, *, active=True, force_paper=True, live=False, enabled=False,
         "_force_paper_mode_active": lambda: force_paper,
         "BOT_INSTANCE_ID": "current-owner", "is_active_dashboard_owner": lambda: active,
         "_relay_event_outbox": box, "_relay_push_state": {},
+        # Option 1: the drain's "armed" state is Fly's Live copy output switch;
+        # modelled here from the same state flags the scenarios set.
+        "_get_live_copy_output": lambda: _OutputView(state),
         "_relay_outbox_data_epoch": lambda: None,  # no declared epoch: retirement never applies here
         "_relay_delivery_guard": RelayDeliveryGuard(box.path.with_name("quarantine.jsonl")),
         "_deliver_relay_outbox_record": lambda row, **kwargs: sent.append(row["event_id"]) or False,
