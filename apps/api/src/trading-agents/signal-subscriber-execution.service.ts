@@ -1,3 +1,9 @@
+import {
+  approvalPermitsRelayCopy,
+  evaluateLiveCopyPlacement,
+  liveCopyAccountArmed,
+  readEnvelopeFlyApproval,
+} from './live-copy-approval';
 import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
@@ -4183,7 +4189,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * Relay allowlist for every executor entry path. Partial-exit tiles are
    * refused while exchange-side position reductions are switched off.
    */
-  private relayMayCopyTradeId(tradeId: string | null | undefined): boolean {
+  private relayMayCopyTradeId(tradeId: string | null | undefined, intentEnvelope?: unknown): boolean {
     const partialReductionsEnabled =
       this.config?.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true';
     if (isPartialExitLaneTradeId(tradeId) && !partialReductionsEnabled) {
@@ -4192,7 +4198,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       );
       return false;
     }
-    return isMirrorableLaneTradeId(tradeId, { partialReductionsEnabled });
+    if (isMirrorableLaneTradeId(tradeId, { partialReductionsEnabled })) return true;
+    // Option 1: an operator-eligible tile is copyable only for a trade that
+    // carries Fly's valid signed entry approval (placement re-verifies it).
+    if (intentEnvelope === undefined) return false;
+    return approvalPermitsRelayCopy(
+      readEnvelopeFlyApproval(intentEnvelope),
+      tradeId,
+      this.config?.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+    ).ok;
   }
 
   /** Gate 2 pre-trade check shared by every new-exposure entry path. */
@@ -6185,7 +6199,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     ]);
     if (timing) timing.databasePreflightCompletedAtMs = Date.now();
     const cycle = cycles.find((candidate) => {
-      if (!this.relayMayCopyTradeId(candidate.tradeId)) return false;
+      if (!this.relayMayCopyTradeId(candidate.tradeId, candidate.intentEnvelope)) return false;
       if (isPaperLaneTradeId(candidate.tradeId)) return false;
       if (candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now()) return false;
       return readFreshSignedShowcaseExactLimit(
@@ -9220,6 +9234,29 @@ await this.notifications
       this.logger.warn(
         `Hire reject ${instance.userId} cycle=${cycleId}: exact structural envelope identity/policy missing`,
       );
+      return false;
+    }
+    // Option 1 (2026-10-09): re-verify Fly's signed approval right before any
+    // exchange write. All four must hold: Fly output ON, tile live switch ON,
+    // tile operator/registry eligible (signed, fresh) AND this account armed.
+    const liveCopyPlacement = evaluateLiveCopyPlacement({
+      envelope: envelopeJson,
+      tradeId,
+      secret: this.config?.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+      accountArmed: liveCopyAccountArmed(instance),
+    });
+    if (!liveCopyPlacement.ok) {
+      this.logger.warn(
+        `Hire reject ${instance.userId} cycle=${cycleId}: live-copy gate ${liveCopyPlacement.reason}`,
+      );
+      this.cycleAudit.stage('ENTRY_BLOCKED_LIVE_COPY_GATE', {
+        userId: instance.userId,
+        agentId,
+        cycleId,
+        tradeId,
+        detail: liveCopyPlacement.reason,
+        meta: { reason: liveCopyPlacement.reason },
+      });
       return false;
     }
     const signedExactLimit = readFreshSignedShowcaseExactLimit(tradeId, envelopeJson);
@@ -17204,7 +17241,7 @@ await this.notifications
     for (const cycle of intentCycles) {
       const tid = cycle.tradeId;
       // N6 / G4 — re-affirm the explicit showcase lane allowlist.
-      if (!this.relayMayCopyTradeId(tid)) {
+      if (!this.relayMayCopyTradeId(tid, cycle.intentEnvelope)) {
         this.logger.warn(
           `[INTENT-MIRROR] skip non-mirrorable lane trade=${tid} user=${instance.userId}`,
         );

@@ -1441,6 +1441,54 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
+  /**
+   * Option 1 live copy: the website's copy state for Fly's dashboard (served
+   * to Fly over a signed GET). Privacy-safe: opaque account labels only, no
+   * user ids, handles, emails or key material.
+   */
+  async getLiveCopyFlyView(slug: string, rejects?: unknown) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug }, select: { id: true } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    type Row = {
+      id: string; status: string; exchangeProvider: string;
+      relayArmedAt: string | null; relayExecutor: unknown; lastTickAt: string | null;
+    };
+    const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
+      SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
+             i."dashboardState" ->> 'relayArmedAt' AS "relayArmedAt",
+             i."dashboardState" -> 'relayExecutor' AS "relayExecutor",
+             i."dashboardState" ->> 'lastTickAt' AS "lastTickAt"
+      FROM "TradingAgentInstance" i
+      WHERE i."agentId" = ${agent.id}
+        AND i."dashboardState" ->> 'relayArmedAt' IS NOT NULL
+      LIMIT 200
+    `);
+    const nowMs = Date.now();
+    const accounts = rows.map((r) => {
+      const health = readPersistedRelayExecutorHealth({ relayExecutor: r.relayExecutor, lastTickAt: r.lastTickAt }, nowMs);
+      const armed = r.status === 'ACTIVE' && r.exchangeProvider !== 'paper' && Boolean(r.relayArmedAt);
+      return {
+        account: `acct-${r.id.slice(0, 8)}`,
+        armed,
+        status: r.status,
+        exchange: r.exchangeProvider,
+        armed_at: r.relayArmedAt,
+        executor_healthy: health.healthy,
+        executor_heartbeat_age_sec: health.heartbeatAgeMs == null ? null : Math.round(health.heartbeatAgeMs / 1000),
+      };
+    });
+    const armedRows = accounts.filter((a) => a.armed);
+    const ages = armedRows.map((a) => a.executor_heartbeat_age_sec).filter((v): v is number => v != null);
+    return {
+      schema: 'website_live_copy_fly_view_v1',
+      armed_accounts: armedRows.map((a) => a.account),
+      accounts,
+      executor_heartbeat_age_sec: ages.length ? Math.min(...ages) : null,
+      ingest_rejects_1h: rejects ?? null,
+      computed_at: new Date(nowMs).toISOString(),
+    };
+  }
+
   /** Public showcase dashboard — user instance overlays their own $500 session when signed in. */
   async getPublicDashboard(slug: string, userId?: string, _role?: string) {
     const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });

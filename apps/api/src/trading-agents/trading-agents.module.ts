@@ -1,3 +1,5 @@
+import { LiveCopyFlyReporterService } from './live-copy-fly-reporter';
+import { LiveCopyOpsService } from './live-copy-ops.service';
 import { Module } from '@nestjs/common';
 import { ProjectsModule } from '../projects/projects.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -38,6 +40,8 @@ import { TradingAgentsService } from './trading-agents.service';
     ShowcaseRelayEventsService,
     ShowcaseSnapshotService,
     ShowcaseInferenceUsageService,
+    LiveCopyFlyReporterService,
+    LiveCopyOpsService,
   ],
   exports: [TradingAgentsService, BotBridgeService, TradingAgentInstancesService, SignalCyclesService, AgentRegistryService, CopyRelaySimService],
 })
