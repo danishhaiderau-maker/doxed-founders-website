@@ -2350,8 +2350,13 @@ jobs:
           # bot is still finalizing it (fill/expiry race, slow evidence barrier).
           # That is retriable: back off and re-observe fresh authority until the
           # order is confirmed cancelled, filled or gone, bounded at 180 s.
-          pending_cancel_deadline = None
-          pending_cancel_retries = 0
+          # Per paper order: a stuck cancel normally ends when the order fills
+          # or its TTL expires (it then leaves the book).  Run 37923569761 shared
+          # one 180 s deadline across orders, so a second order's first 409
+          # arrived after gb1's window had closed and failed the deploy.
+          PENDING_CANCEL_WAIT_SEC = 600
+          pending_cancel_deadlines = {}
+          pending_cancel_retries = {}
           # A mutation whose response outlived the 90 s client deadline still
           # commits server-side; its generation fence appears only when the
           # handler returns.  Run 37915233891: six paper closes on the slow
@@ -2366,7 +2371,7 @@ jobs:
               now_mono = time.monotonic()
               return any(
                   deadline is not None and now_mono < deadline
-                  for deadline in (pending_cancel_deadline, unconfirmed_deadline)
+                  for deadline in (*pending_cancel_deadlines.values(), unconfirmed_deadline)
               )
           def note_unconfirmed():
               global unconfirmed_deadline
@@ -2404,17 +2409,20 @@ jobs:
                       if exc.code == 409:
                           if not pending_cancel_conflict(exc):
                               raise
-                          if pending_cancel_deadline is None:
-                              pending_cancel_deadline = time.monotonic() + 180
-                          if time.monotonic() >= pending_cancel_deadline:
-                              raise SystemExit(f"maintenance cancel stayed unconfirmed for 180 s trade_id={trade_id}")
-                          pending_cancel_retries += 1
-                          print(f"Maintenance cancel pending trade_id={trade_id} retry={pending_cancel_retries}; re-observing", flush=True)
+                          deadline = pending_cancel_deadlines.setdefault(
+                              trade_id, time.monotonic() + PENDING_CANCEL_WAIT_SEC
+                          )
+                          if time.monotonic() >= deadline:
+                              raise SystemExit(
+                                  f"maintenance cancel stayed unconfirmed for {PENDING_CANCEL_WAIT_SEC} s trade_id={trade_id}"
+                              )
+                          retries = pending_cancel_retries[trade_id] = pending_cancel_retries.get(trade_id, 0) + 1
+                          print(f"Maintenance cancel pending trade_id={trade_id} retry={retries}; re-observing", flush=True)
                           unconfirmed_trade_ids.add(trade_id)
                           unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
                           note_unconfirmed()
                           round_unconfirmed = True
-                          time.sleep(min(2 * pending_cancel_retries, 15))
+                          time.sleep(min(2 * retries, 15))
                           break
                       if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:
                           # The order left the pending book (fill, TTL expiry, or an
