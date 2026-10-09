@@ -3961,6 +3961,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (this.executorDestroyed || process.env.RELAY_EXECUTOR_WORKER !== 'true') return;
     const snapshot = this.getHealthSnapshot();
     if (snapshot.status !== 'PAUSED_HEALTHY') return;
+    // A paused executor does not tick, so re-assert the last confirmed
+    // coordination state from memory (no Neon read): a Fly restart otherwise
+    // shows UNCONFIRMED_SINCE_BOOT until the relay is next armed.
+    const cachedCoord = this.lastNotifiedLiveCopyCoord;
+    if (cachedCoord && Date.now() - this.lastNotifiedLiveCopyCoordAt >= LIVE_COPY_COORD_REASSERT_MS) {
+      const ok = await this.notifyShowcaseLiveCopyCoordination(
+        cachedCoord,
+        cachedCoord === 'RUNNING_TOGETHER'
+          ? 'CHEETAH_REARMED'
+          : 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
+      );
+      if (ok) this.lastNotifiedLiveCopyCoordAt = Date.now();
+    }
     const payload = JSON.stringify(snapshot);
     for (const instanceId of this.relayInstanceCache.keys()) {
       await this.prisma.$executeRaw`
