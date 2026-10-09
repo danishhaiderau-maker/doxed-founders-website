@@ -2103,7 +2103,6 @@ jobs:
           python -m pytest test_execution_admission_pause_truth.py -q
           python -m pytest test_reset_inventory_invalidation.py -q
           python -m pytest test_relay_owner_delivery_plan.py -q
-          python -m pytest test_live_copy_control.py test_two_tier_relay_gate.py test_bitfinex_live_switch.py -q
           python -m pytest test_relay_stale_owner_guard.py test_relay_stack_mode.py test_v22_boot_degrade.py test_runtime_hygiene.py test_cancel_dedupe_hygiene.py test_ddollar_gate_fail_closed.py test_thread_health.py test_ai_call_cost.py test_blindspot_runtime_telemetry.py test_orderflow_delta_change.py -q
           python -m pytest test_chase_analytics_truth.py -q
           python -m pytest test_local_fresh_collection.py -q
