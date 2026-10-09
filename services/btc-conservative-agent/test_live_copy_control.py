@@ -382,3 +382,84 @@ def test_website_tile_prefix_map_matches_active_registry():
     website = dict(re.findall(r"(FAMILY_[A-Z0-9_]+):\s*'([a-z0-9]+)'", block))
     fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER}
     assert website == fly
+
+
+# ------------------------------------------- one-time protection bootstrap
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_bootstrap_default_off_one_lane_one_trade(tmp_path):
+    clk = _Clock()
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=clk)
+    assert not b.covers(LANE)
+    ok, snap = b.enable(LANE)
+    assert ok and snap["active"] and snap["lane"] == LANE
+    assert b.covers(LANE) and b.covers(LANE, "t-1")
+    assert not b.covers(ACTIVE_TILE_ORDER[1])          # other tiles never covered
+    assert b.claim(LANE, "t-1")
+    assert b.covers(LANE, "t-1")
+    assert not b.covers(LANE, "t-2") and not b.covers(LANE)  # second trade refused
+    assert not b.claim(LANE, "t-2")
+    # Persisted (fsync'd sidecar) with the binding.
+    assert json.loads((tmp_path / "boot.json").read_text())["state"]["trade_id"] == "t-1"
+
+
+def test_bootstrap_ends_on_fill_and_is_never_reusable(tmp_path):
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
+    b.enable(LANE)
+    b.claim(LANE, "t-1")
+    assert not b.observe_report({"type": "ORDER_PLACED", "correlation_id": "t-1"})
+    assert not b.observe_report({"type": "ORDER_FILLED", "correlation_id": "other"})
+    assert b.observe_report({"type": "ORDER_FILLED", "correlation_id": "t-1"})
+    snap = b.snapshot()
+    assert not snap["active"] and snap["used"] and snap["ended_reason"] == "TRADE_ORDER_FILLED"
+    assert not b.covers(LANE, "t-1")
+    ok, snap = b.enable(LANE)
+    assert not ok and snap["error"] == "BOOTSTRAP_ALREADY_USED"
+
+
+def test_bootstrap_expires_after_24h_and_resets_on_restart(tmp_path):
+    clk = _Clock()
+    path = tmp_path / "boot.json"
+    b = lc.ProtectionBootstrap(path, clock=clk)
+    b.enable(LANE)
+    clk.t += lc.BOOTSTRAP_TTL_SEC - 1
+    assert b.covers(LANE)
+    clk.t += 2
+    assert not b.covers(LANE)
+    assert b.snapshot()["ended_reason"] == "EXPIRED_24H"
+    # Unused expiry may be re-enabled once; a restart never inherits ON.
+    assert b.enable(LANE)[0]
+    b.claim(LANE, "t-9")
+    b2 = lc.ProtectionBootstrap(path, clock=clk)
+    snap = b2.snapshot()
+    assert not snap["active"] and snap["used"] and snap["ended_reason"] == lc.RESTART_RESET_REASON
+    assert not b2.covers(LANE, "t-9")
+
+
+def test_bootstrap_refuses_on_when_not_persisted(tmp_path, monkeypatch):
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
+    monkeypatch.setattr(lc, "_atomic_write_json", lambda *a, **k: False)
+    ok, snap = b.enable(LANE)
+    assert not ok and not snap["active"] and snap["error"] == "BOOTSTRAP_PERSIST_FAILED"
+    assert not b.covers(LANE)
+
+
+def test_bootstrap_wired_into_readiness_route_and_kill_paths():
+    src = (HERE / "bot.py").read_text()
+    # Readiness: bootstrap only ORs into the lane's protection flags.
+    assert "_get_live_copy_bootstrap().covers(lane, trade_id)" in src
+    # Entry relying on the bootstrap must bind it or be withheld.
+    assert "PROTECTION_BOOTSTRAP_CLAIM_FAILED" in src
+    # Admin-only route, eligible active lane only.
+    route = src.split("def api_live_copy_protection_bootstrap", 1)[1].split("\n@app.route", 1)[0]
+    assert "_admin_authed_strict()" in route and "LANE_NOT_OPERATOR_ELIGIBLE" in route
+    # Output OFF and eligibility OFF end it; fills end it.
+    assert 'disable(reason="LIVE_COPY_OUTPUT_OFF")' in src
+    assert 'disable(reason="LIVE_ELIGIBILITY_OFF")' in src
+    assert "_get_live_copy_bootstrap().observe_report(report)" in src

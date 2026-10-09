@@ -37725,6 +37725,17 @@ DASHBOARD_JS = """(function () {
         refresh();
       }
     }
+    async function toggleProtectionBootstrap(lane, enabled) {
+      if (!confirm((enabled ? 'Enable' : 'End') + ' the one-time stop-protection bootstrap for ' + lane + '?'
+        + (enabled ? ' Stands in for exchange-stop evidence for ONE trade on this tile only; ends on that fill or after 24h. The copier still places and confirms a reduce-only stop, and an unprotected fill still holds and pauses.' : ''))) return;
+      const res = await post('/api/live-copy/protection-bootstrap', {enabled: enabled, lane: lane});
+      if (res) {
+        let body = {};
+        try { body = await res.json(); } catch (_) {}
+        if (body.error) alert('Bootstrap refused: ' + body.error);
+        refresh();
+      }
+    }
     async function toggleBitfinexTileLive(lane, enabled) {
       if (!confirm((enabled ? 'Turn ON' : 'Turn OFF') + ' "Bitfinex Live Orders" for lane ' + lane + '?'
         + (enabled ? ' Live copy still requires the master switch to be ON.' : ' This stops new live Bitfinex orders from this tile.'))) return;
@@ -38265,6 +38276,16 @@ DASHBOARD_JS = """(function () {
           if (!(spec.planned || spec.status === 'RETIRED')) {
             eligHtml = '<div style="margin-top:4px;"><strong>Live eligible:</strong> <span style="font-weight:700;color:' + (tileOperatorEligible ? '#f59e0b' : '#8b949e') + ';">' + (tileOperatorEligible ? 'YES' : 'NO (default)') + '</span> '
               + '<button type="button" onclick="toggleLiveCopyEligibility(\\'' + cardEsc(spec.lane) + '\\', ' + (tileOperatorEligible ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (tileOperatorEligible ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (tileOperatorEligible ? 'Make ineligible' : 'Make eligible') + '</button></div>';
+          }
+          if (tileOperatorEligible && !(spec.planned || spec.status === 'RETIRED')) {
+            const boot = ((d && d.bitfinex_live_switch) || {}).protection_bootstrap || {};
+            const bootHere = boot.active === true && boot.lane === spec.lane;
+            const bootLabel = bootHere
+              ? 'ACTIVE' + (boot.trade_id ? ' (bound to ' + cardEsc(boot.trade_id) + ')' : ' (one trade, ends on fill / 24h)')
+              : (boot.used ? 'USED' : 'OFF');
+            eligHtml += '<div style="margin-top:4px;"><strong>Stop bootstrap:</strong> <span style="font-weight:700;color:' + (bootHere ? '#f59e0b' : '#8b949e') + ';">' + bootLabel + '</span> '
+              + (boot.used && !bootHere ? '' : '<button type="button" onclick="toggleProtectionBootstrap(\\'' + cardEsc(spec.lane) + '\\', ' + (bootHere ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (bootHere ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (bootHere ? 'End bootstrap' : 'One-time bootstrap') + '</button>')
+              + '</div>';
           }
           if (spec.planned || spec.status === 'RETIRED') {
             liveSwitchHtml = '';
@@ -56615,11 +56636,21 @@ def _get_bfx_live_switch():
     return _bfx_live_switch_instance
 
 
-def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None) -> dict:
-    """Build the exact-size / protection dict used to evaluate one lane."""
+def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None,
+                                   trade_id: str | None = None) -> dict:
+    """Build the exact-size / protection dict used to evaluate one lane.
+
+    Protection comes ONLY from verified STOP_CONFIRMED evidence, or from the
+    one-time operator bootstrap for this lane (and, once claimed, only for its
+    one trade). Any bootstrap error means no bootstrap (fail closed).
+    """
     from bitfinex_live_switch import compute_size_checks
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
     ctx = ctx if isinstance(ctx, dict) else {}
+    try:
+        boot = bool(_get_live_copy_bootstrap().covers(lane, trade_id))
+    except Exception:  # noqa: BLE001
+        boot = False
     spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
     margin = float(spec.get("requested_margin_usd") or 0.25)
     return compute_size_checks(
@@ -56628,8 +56659,9 @@ def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None) -> dict:
         mark_price=ctx.get("mark_price"),
         exchange_min_qty=ctx.get("exchange_min_qty"),
         exchange_max_qty=ctx.get("exchange_max_qty"),
-        stop_coverage_verified=bool(_get_live_copy_protection().flags(lane).get("stop_coverage_verified")),
-        reduce_only_supported=bool(ctx.get("reduce_only_supported")),
+        stop_coverage_verified=bool(_get_live_copy_protection().flags(lane).get("stop_coverage_verified"))
+        or boot,
+        reduce_only_supported=bool(ctx.get("reduce_only_supported")) or boot,
     )
 
 
@@ -56679,7 +56711,13 @@ def _bitfinex_live_switch_snapshot() -> dict:
                 "denials": whynot.get("denials") or [],
                 "explanation": whynot.get("explanation"),
             })
-        return {**status, "rows": rows}
+        try:
+            boot = _get_live_copy_bootstrap().snapshot()
+            boot = {k: boot.get(k) for k in ("active", "lane", "expires_at_ts", "trade_id",
+                                              "used", "ended_reason")}
+        except Exception:  # noqa: BLE001
+            boot = None
+        return {**status, "rows": rows, "protection_bootstrap": boot}
     except Exception:  # noqa: BLE001 - fail closed, report nothing armed
         return {"schema": "bitfinex_live_switch_v1", "tile_count": 0,
                 "armed_lane_count": 0, "armed_lanes": [], "rows": [],
@@ -56780,6 +56818,10 @@ def _get_live_copy_protection():
     return _live_copy_singleton("protection", _live_copy.ProtectionEvidence)
 
 
+def _get_live_copy_bootstrap():
+    return _live_copy_singleton("bootstrap", _live_copy.ProtectionBootstrap)
+
+
 def _get_live_copy_decisions():
     return _live_copy_singleton("decisions", _live_copy.TradeDecisions)
 
@@ -56800,6 +56842,9 @@ def _iso_or_ts_to_unix(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+_live_copy_bootstrap_lock = threading.Lock()
 
 
 def _live_copy_stamp_payload(payload, signal_at=None):
@@ -56848,20 +56893,29 @@ def _live_copy_stamp_payload(payload, signal_at=None):
             ), (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip())
             approval_reasons: list = []
         else:
-            tile_eval = None
-            if event in _live_copy.ENTRY_EVENTS:
-                ctx = _bitfinex_readiness_context()
-                tile_eval = sw.evaluate(lane, global_arm=ctx.get("global_arm") or {},
-                                        size_checks=_bitfinex_size_checks_for_lane(lane, ctx), now=now,
-                                        operator_eligible=op_elig, exchange_flat_required=False)
-            approval, approval_reasons = _live_copy.stamp_or_block(
-                event=event, trade_id=trade_id, lane=lane, now=now,
-                signal_at_ts=_iso_or_ts_to_unix(signal_at or payload.get("source_created_at")),
-                spec=spec, output=output, tile_row=sw.snapshot(lane), tile_eval=tile_eval,
-                force_paper_mode=_force_paper_mode_active(), decisions=_get_live_copy_decisions(),
-                secret=(os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip(),
-                bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
-            )
+            with _live_copy_bootstrap_lock:
+                tile_eval = None
+                needs_bootstrap = False
+                if event in _live_copy.ENTRY_EVENTS:
+                    ctx = _bitfinex_readiness_context()
+                    real_cov = bool(_get_live_copy_protection().flags(lane).get("stop_coverage_verified")
+                                    and ctx.get("reduce_only_supported"))
+                    needs_bootstrap = not real_cov
+                    tile_eval = sw.evaluate(lane, global_arm=ctx.get("global_arm") or {},
+                                            size_checks=_bitfinex_size_checks_for_lane(lane, ctx, trade_id),
+                                            now=now, operator_eligible=op_elig, exchange_flat_required=False)
+                approval, approval_reasons = _live_copy.stamp_or_block(
+                    event=event, trade_id=trade_id, lane=lane, now=now,
+                    signal_at_ts=_iso_or_ts_to_unix(signal_at or payload.get("source_created_at")),
+                    spec=spec, output=output, tile_row=sw.snapshot(lane), tile_eval=tile_eval,
+                    force_paper_mode=_force_paper_mode_active(), decisions=_get_live_copy_decisions(),
+                    secret=(os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip(),
+                    bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
+                )
+                if (approval and approval.get("entry_allowed") and needs_bootstrap
+                        and not _get_live_copy_bootstrap().claim(lane, trade_id)):
+                    # Entry relied on the bootstrap but could not bind it: withhold.
+                    approval, approval_reasons = None, ["PROTECTION_BOOTSTRAP_CLAIM_FAILED"]
         if approval:
             payload["live_copy_approval"] = approval
             _live_copy_emitted.append({k: approval.get(k) for k in (
@@ -57043,6 +57097,11 @@ def api_live_copy_tile_eligibility(lane: str):
             _get_bfx_live_switch().request_off(str(lane or "").upper(), reason="LIVE_ELIGIBILITY_OFF")
         except Exception:  # noqa: BLE001
             pass
+        try:
+            if _get_live_copy_bootstrap().snapshot().get("lane") == str(lane or "").upper():
+                _get_live_copy_bootstrap().disable(reason="LIVE_ELIGIBILITY_OFF")
+        except Exception:  # noqa: BLE001
+            pass
     logger.warning(f"[LIVE COPY] tile {lane} live eligibility -> {eligible} ok={ok} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": ok, **row}), (200 if ok else 409)
 
@@ -57146,8 +57205,45 @@ def api_live_copy_output():
             _get_bfx_live_switch().reset_all_off(reason="LIVE_COPY_OUTPUT_OFF")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[LIVE COPY] tile reset on output OFF failed: {exc}")
+        try:
+            _get_live_copy_bootstrap().disable(reason="LIVE_COPY_OUTPUT_OFF")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LIVE COPY] bootstrap end on output OFF failed: {exc}")
     logger.warning(f"[LIVE COPY] output -> {'ON' if snap.get('enabled') else 'OFF'} [PIPELINE ENFORCEMENT]")
     return jsonify({"ok": bool(snap.get("enabled")) == bool(enabled), "live_copy_output": snap})
+
+
+@app.route('/api/live-copy/protection-bootstrap', methods=['POST'])
+def api_live_copy_protection_bootstrap():
+    """One-time operator protection bootstrap (admin). Default OFF.
+
+    {"enabled": true, "lane": "GS01"} stands in for stop-coverage /
+    reduce-only readiness for that one lane and its first approved trade; it
+    ends on that trade's fill, after 24 h, or on restart, and can never be
+    re-enabled once a trade has used it. Only an operator-eligible active
+    tile qualifies. {"enabled": false} ends it.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    enabled = _strict_json_boolean(data, "enabled")
+    if enabled is None:
+        return jsonify({"error": "'enabled' must be a JSON boolean",
+                        "example": {"enabled": True, "lane": "GS01"}}), 400
+    boot = _get_live_copy_bootstrap()
+    if not enabled:
+        snap = boot.disable(reason="OPERATOR_OFF")
+        logger.warning("[LIVE COPY] protection bootstrap -> OFF [PIPELINE ENFORCEMENT]")
+        return jsonify({"ok": True, "protection_bootstrap": snap})
+    lane = str(data.get("lane") or "").strip().upper()
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    if lane not in ACTIVE_TILE_REGISTRY:
+        return jsonify({"ok": False, "error": "LANE_NOT_ACTIVE", "lane": lane}), 409
+    if not _get_live_copy_eligibility().is_eligible(lane):
+        return jsonify({"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE", "lane": lane}), 409
+    ok, snap = boot.enable(lane, by="dashboard", reason="OPERATOR_BOOTSTRAP")
+    logger.warning(f"[LIVE COPY] protection bootstrap {lane} -> ON ok={ok} [PIPELINE ENFORCEMENT]")
+    return jsonify({"ok": ok, "protection_bootstrap": snap}), (200 if ok else 409)
 
 
 @app.route('/api/live-copy/status', methods=['GET'])
@@ -57168,6 +57264,7 @@ def api_live_copy_status():
                                           "last_allow_ts", "eligible", "denials", "last_denial")}
                   for r in sw.get("rows") or []],
         "protection_evidence": _get_live_copy_protection().flags(),
+        "protection_bootstrap": _get_live_copy_bootstrap().snapshot(),
         "tile_live_eligibility": _get_live_copy_eligibility().status(),
         "live_copy_outbox": _get_live_copy_outbox().status(),
         "website": _live_copy_website_state(),
@@ -57204,6 +57301,12 @@ def api_live_copy_execution_report():
     protection = None
     if report.get("type") == "STOP_CONFIRMED" and why != "DUPLICATE":
         protection = _get_live_copy_protection().record_stop_confirmation(report)
+    bootstrap_ended = False
+    if why != "DUPLICATE":
+        try:
+            bootstrap_ended = _get_live_copy_bootstrap().observe_report(report)
+        except Exception as exc:  # noqa: BLE001 - a stored report is never rejected
+            logger.warning(f"[LIVE COPY] bootstrap observe failed: {exc}")
     try:
         action = {"ORDER_PLACED": "ORDER_PLACED", "ORDER_AMENDED": "ORDER_CHANGED",
                   "ORDER_CANCELLED": "ORDER_CANCELLED", "ORDER_FILLED": "ORDER_FILLED",
@@ -57223,6 +57326,7 @@ def api_live_copy_execution_report():
         logger.warning(f"[LIVE COPY] audit record for report failed: {exc}")
     return jsonify({"ok": True, "status": why, "report_id": report.get("report_id"),
                     "protection_evidence_recorded": bool(protection),
+                    "protection_bootstrap_ended": bool(bootstrap_ended),
                     "fly_received_at_ts": now})
 
 

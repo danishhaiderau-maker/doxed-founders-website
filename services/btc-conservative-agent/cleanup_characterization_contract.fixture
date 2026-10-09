@@ -3,6 +3,7 @@
   "canonical_source": "bot.py",
   "routes": [
     ["POST", "/api/live-copy/tiles/<lane>/eligibility", "api_live_copy_tile_eligibility"],
+    ["POST", "/api/live-copy/protection-bootstrap", "api_live_copy_protection_bootstrap"],
     ["POST", "/api/live-copy/output", "api_live_copy_output"],
     ["GET", "/api/live-copy/status", "api_live_copy_status"],
     ["POST", "/api/live-copy/execution-report", "api_live_copy_execution_report"],

@@ -399,6 +399,172 @@ class ProtectionEvidence:
 
 
 # ---------------------------------------------------------------------------
+# One-time operator protection bootstrap (Boss 2026-10-09)
+# ---------------------------------------------------------------------------
+BOOTSTRAP_SIDECAR = "live_copy_protection_bootstrap.json"
+BOOTSTRAP_SCHEMA = "fly_live_copy_protection_bootstrap_v1"
+BOOTSTRAP_TTL_SEC = 24 * 3600
+
+
+class ProtectionBootstrap:
+    """Break the stop-evidence chicken-and-egg for ONE tile and ONE trade.
+
+    ``stop_coverage_verified`` needs a real STOP_CONFIRMED, which needs a live
+    trade. An operator may enable this ONCE for one lane: it stands in for
+    stop-coverage / reduce-only readiness for that lane only, binds to the
+    first trade approved under it, and ends on that trade's fill (or after
+    24 h, or on restart). It never relaxes anything else: output ON, tile ON,
+    eligibility, size, the copier's arm, Fly's signature and the executor's
+    authenticated stop + unprotected-fill hold-and-pause rule all still apply.
+    Default OFF; fsync'd; refuses ON if it cannot be persisted.
+    """
+
+    def __init__(self, path: Path | str | None = None, clock=time.time):
+        self.path = Path(path) if path is not None else data_path(BOOTSTRAP_SIDECAR)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._state: dict = {
+            "active": False, "lane": None, "enabled_at_ts": None, "expires_at_ts": None,
+            "by": None, "reason": None, "trade_id": None, "claimed_at_ts": None,
+            "used": False, "ended_reason": None, "ended_at_ts": None, "history": [],
+        }
+        self.persist_ok = True
+        raw = _read_json(self.path)
+        if raw and isinstance(raw.get("state"), dict):
+            prior = raw["state"]
+            self._state.update({k: prior.get(k) for k in self._state if k in prior})
+            if not isinstance(self._state.get("history"), list):
+                self._state["history"] = []
+        if self._state.get("active"):
+            # Like the output switch: a new process never inherits ON.
+            self._end_locked(RESTART_RESET_REASON)
+            self._persist()
+
+    def _persist(self) -> bool:
+        ok = _atomic_write_json(self.path, {"schema": BOOTSTRAP_SCHEMA, "updated_ts": self._clock(),
+                                            "state": self._state})
+        self.persist_ok = ok
+        return ok
+
+    def _log(self, what: str, **extra) -> None:
+        hist = list(self._state.get("history") or [])
+        hist.append({"ts": float(self._clock()), "event": what, **extra})
+        self._state["history"] = hist[-50:]
+
+    def _end_locked(self, reason: str) -> None:
+        if self._state.get("active") and self._state.get("trade_id"):
+            self._state["used"] = True
+        self._state["active"] = False
+        self._state["ended_reason"] = str(reason)[:80]
+        self._state["ended_at_ts"] = float(self._clock())
+        self._log("END", reason=str(reason)[:80], lane=self._state.get("lane"),
+                  trade_id=self._state.get("trade_id"))
+
+    def _expire_locked(self, now: float) -> None:
+        if self._state.get("active"):
+            try:
+                expires = float(self._state.get("expires_at_ts") or 0)
+            except (TypeError, ValueError):
+                expires = 0.0
+            if expires <= 0 or now >= expires:
+                self._end_locked("EXPIRED_24H")
+                self._persist()
+
+    def enable(self, lane: str, *, by: str = "dashboard", reason: str = "") -> tuple[bool, dict]:
+        lane = str(lane or "").strip().upper()
+        with self._lock:
+            now = float(self._clock())
+            self._expire_locked(now)
+            if not lane:
+                return False, {**self.snapshot_locked(), "error": "LANE_REQUIRED"}
+            if self._state.get("used"):
+                return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_ALREADY_USED"}
+            if self._state.get("active"):
+                return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_ALREADY_ACTIVE"}
+            self._state.update({
+                "active": True, "lane": lane, "enabled_at_ts": now,
+                "expires_at_ts": now + BOOTSTRAP_TTL_SEC, "by": str(by or "unknown")[:64],
+                "reason": str(reason or "OPERATOR_BOOTSTRAP")[:160], "trade_id": None,
+                "claimed_at_ts": None, "ended_reason": None, "ended_at_ts": None,
+            })
+            self._log("ENABLE", lane=lane, by=self._state["by"])
+            if not self._persist():
+                self._state["active"] = False
+                self._state["ended_reason"] = "BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED"
+                self._persist()
+                return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_PERSIST_FAILED"}
+            return True, self.snapshot_locked()
+
+    def disable(self, *, reason: str = "OPERATOR_OFF") -> dict:
+        with self._lock:
+            if self._state.get("active"):
+                self._end_locked(reason)
+                self._persist()
+            return self.snapshot_locked()
+
+    def covers(self, lane: str | None, trade_id: str | None = None, now: float | None = None) -> bool:
+        """True while active for ``lane`` and (unclaimed, or claimed by ``trade_id``)."""
+        lane_u = str(lane or "").strip().upper()
+        with self._lock:
+            self._expire_locked(float(self._clock() if now is None else now))
+            if not self._state.get("active") or not lane_u or lane_u != self._state.get("lane"):
+                return False
+            claimed = self._state.get("trade_id")
+            return claimed is None or (trade_id is not None and str(trade_id) == claimed)
+
+    def claim(self, lane: str, trade_id: str) -> bool:
+        """Bind the bootstrap to its one trade (fsync'd). False = not allowed."""
+        lane_u = str(lane or "").strip().upper()
+        tid = str(trade_id or "")
+        with self._lock:
+            self._expire_locked(float(self._clock()))
+            if not self._state.get("active") or lane_u != self._state.get("lane") or not tid:
+                return False
+            if self._state.get("trade_id") not in (None, tid):
+                return False
+            if self._state.get("trade_id") == tid:
+                return True
+            self._state["trade_id"] = tid
+            self._state["claimed_at_ts"] = float(self._clock())
+            self._log("CLAIM", lane=lane_u, trade_id=tid)
+            if not self._persist():
+                self._state["trade_id"] = None
+                self._state["claimed_at_ts"] = None
+                self._end_locked("BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED")
+                self._persist()
+                return False
+            return True
+
+    def observe_report(self, report: Mapping[str, Any]) -> bool:
+        """End the bootstrap once its trade fills (one fill). Returns True if ended."""
+        rtype = str(report.get("type") or "")
+        cid = str(report.get("correlation_id") or "")
+        with self._lock:
+            if not self._state.get("active") or not cid or cid != self._state.get("trade_id"):
+                return False
+            if rtype not in ("ORDER_FILLED", "STOP_PLACED", "STOP_CONFIRMED", "STOP_FAILED",
+                             "POSITION_CLOSED"):
+                return False
+            self._state["used"] = True
+            self._end_locked(f"TRADE_{rtype}")
+            self._persist()
+            return True
+
+    def snapshot_locked(self) -> dict:
+        s = dict(self._state)
+        s["history"] = list(s.get("history") or [])[-10:]
+        s["schema"] = BOOTSTRAP_SCHEMA
+        s["ttl_sec"] = BOOTSTRAP_TTL_SEC
+        s["persist_ok"] = self.persist_ok
+        return s
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            self._expire_locked(float(self._clock()))
+            return self.snapshot_locked()
+
+
+# ---------------------------------------------------------------------------
 # Per-trade copy decision (first entry event decides; persisted)
 # ---------------------------------------------------------------------------
 class TradeDecisions:
