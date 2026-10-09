@@ -355,3 +355,27 @@ def test_ready_entry_policy_view_states_the_b2_signal_clock_without_touching_the
     gs1 = bot._ready_entry_policy_view(reg[GS1]["entry_policy"])
     assert gs1["signal_clock"] == "PER_SECOND_CROSS_VENUE_EVALUATOR" and "signal_clock_derived" not in gs1
     assert bot._ready_entry_policy_view(reg[HA]["entry_policy"])["signal_clock"] == "SHARED_AI_CALL"
+
+
+def test_closed_row_exposes_recorded_stage_timestamps():
+    close = CUTOFF + 900
+    ev = {"schema": "trade_event_timestamps_v1", "signal_ts": close - 700.0, "order_sent_ts": close - 698.5,
+          "fill_ts": close - 697.0, "fill_ts_basis": "RECORDED_AT_PAPER_FILL",
+          "exit_trigger_ts": close - 0.8, "exit_trigger_source": "TICK", "exit_trigger_price": 85100.0,
+          "exit_fill_ts": close - 0.2}
+    row = _rows([_closed("t-ev", GS1, close_ts=close, event_timestamps=ev)])[0]
+    assert row["order"]["submitted_ts"] == close - 698.5
+    assert row["fill"]["fill_ts"] == close - 697.0 and row["fill"]["fill_ts_basis"] == "RECORDED_AT_PAPER_FILL"
+    assert row["exit"]["exit_trigger_ts"] == close - 0.8 and row["exit"]["exit_fill_ts"] == close - 0.2
+    t = row["timing"]
+    assert t["basis"] == "RECORDED_EVENT_TIMESTAMPS"
+    assert t["signal_to_sent_sec"] == 1.5 and t["sent_to_fill_sec"] == 1.5
+    assert t["exit_trigger_to_fill_sec"] == pytest.approx(0.6)
+
+
+def test_closed_row_without_event_timestamps_never_back_calculates_timing():
+    row = _rows([_closed("t-old", GS1, close_ts=CUTOFF + 900)])[0]
+    assert row["order"]["submitted_ts"] is None
+    assert row["fill"]["fill_ts_basis"] == "CLOSE_TS_MINUS_DURATION"
+    assert row["timing"]["basis"] == "NOT_RECORDED" and row["timing"]["fill_ts"] is None
+    assert row["exit"]["exit_trigger_ts"] is None

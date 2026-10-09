@@ -3585,6 +3585,9 @@ type VirtualLotSummary = {
 
 type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
 
+/** Re-send an unchanged live-copy coordination state to Fly at least this often. */
+export const LIVE_COPY_COORD_REASSERT_MS = 5 * 60_000;
+
 @Injectable()
 export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleDestroy {
   private emergencyPositionReadWait = (ms: number) =>
@@ -3731,6 +3734,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   private lastShowcaseWakeAt = 0;
   private lastShowcaseWakeTrigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | null = null;
   private lastNotifiedLiveCopyCoord: LiveCopyCoordinationState | null = null;
+  /** When lastNotifiedLiveCopyCoord was last accepted by Fly (ms epoch). */
+  private lastNotifiedLiveCopyCoordAt = 0;
 
   /**
    * F1/F2/F3 — per-instance showcase-unreachable tracking.
@@ -10894,14 +10899,25 @@ await this.notifications
         liveInstances,
         openOrPendingLots,
       });
-      if (this.lastNotifiedLiveCopyCoord === wanted) return;
+      // Fly keeps coordination in memory, so a Fly restart (deploy) forgets it
+      // and shows UNCONFIRMED_SINCE_BOOT. Re-assert an unchanged state
+      // periodically so Fly re-confirms within one interval after any boot.
+      if (
+        this.lastNotifiedLiveCopyCoord === wanted &&
+        Date.now() - this.lastNotifiedLiveCopyCoordAt < LIVE_COPY_COORD_REASSERT_MS
+      ) {
+        return;
+      }
       const notified = await this.notifyShowcaseLiveCopyCoordination(
         wanted,
         wanted === 'RUNNING_TOGETHER'
           ? 'CHEETAH_REARMED'
           : 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
       );
-      if (notified) this.lastNotifiedLiveCopyCoord = wanted;
+      if (notified) {
+        this.lastNotifiedLiveCopyCoord = wanted;
+        this.lastNotifiedLiveCopyCoordAt = Date.now();
+      }
     } catch (err) {
       this.logger.warn(
         `[LIVE-COPY-COORD] reconcile failed: ${err instanceof Error ? err.message : err}`,

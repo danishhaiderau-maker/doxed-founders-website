@@ -255,6 +255,31 @@ def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool) -> dic
     }
 
 
+TRADE_TIMING_SCHEMA = "tile_trade_timing_v1"
+
+
+def _gap(a, b):
+    return round(b - a, 3) if a is not None and b is not None else None
+
+
+def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, recorded: bool) -> dict:
+    """Per-trade stage stamps (signal -> sent -> fill -> exit trigger -> exit fill).
+
+    Only stamps recorded when each stage happened (``event_timestamps``) are used;
+    None means not observed, never back-calculated from durations.
+    """
+    return {
+        "schema": TRADE_TIMING_SCHEMA,
+        "basis": "RECORDED_EVENT_TIMESTAMPS" if recorded else "NOT_RECORDED",
+        "signal_ts": signal_ts, "order_sent_ts": sent_ts, "fill_ts": fill_ts,
+        "exit_trigger_ts": exit_trigger_ts, "exit_fill_ts": exit_fill_ts,
+        "signal_to_sent_sec": _gap(signal_ts, sent_ts),
+        "sent_to_fill_sec": _gap(sent_ts, fill_ts),
+        "signal_to_fill_sec": _gap(signal_ts, fill_ts),
+        "exit_trigger_to_fill_sec": _gap(exit_trigger_ts, exit_fill_ts),
+    }
+
+
 def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[str, str],
                    epoch_id: str | None, forced_reasons: Iterable[str],
                    fill_evidence: Mapping[str, Any] | None = None, parse_ts=None,
@@ -293,20 +318,41 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         reason = str(raw.get("exit_reason") or "").upper()
         mfe_pct = _finite(raw.get("max_profit"))
         mfe_bp = (mfe_pct * 100.0 / leverage) if mfe_pct is not None and leverage else None
-        row["order"] = {"submitted_ts": None, "limit_chase_count": raw.get("limit_chase_count"),
+        events = raw.get("event_timestamps") if isinstance(raw.get("event_timestamps"), Mapping) else {}
+        ev_signal = _ts(events.get("signal_ts"), parse_ts)
+        ev_sent = _ts(events.get("order_sent_ts"), parse_ts)
+        ev_fill = _ts(events.get("fill_ts"), parse_ts)
+        ev_trigger = _ts(events.get("exit_trigger_ts"), parse_ts)
+        ev_exit_fill = _ts(events.get("exit_fill_ts"), parse_ts)
+        if row["trigger"].get("signal_ts") is None and ev_signal:
+            row["trigger"]["signal_ts"] = ev_signal
+        if ev_fill and entry_ts is None:
+            entry_ts = ev_fill
+        row["order"] = {"submitted_ts": ev_sent, "limit_chase_count": raw.get("limit_chase_count"),
                         "terminal": "FILLED"}
         row["fill"] = _fill_block(fill_evidence, filled=True) or {}
         if row["fill"].get("fill_price") is None:
             row["fill"]["fill_price"] = entry
         if row["fill"].get("fill_ts") is None:
-            row["fill"]["fill_ts"] = entry_ts
-            row["fill"]["fill_ts_basis"] = "CLOSE_TS_MINUS_DURATION" if entry_ts else None
+            if ev_fill:
+                row["fill"]["fill_ts"] = ev_fill
+                row["fill"]["fill_ts_basis"] = events.get("fill_ts_basis") or "RECORDED_AT_PAPER_FILL"
+            else:
+                row["fill"]["fill_ts"] = entry_ts
+                row["fill"]["fill_ts_basis"] = "CLOSE_TS_MINUS_DURATION" if entry_ts else None
         row["exit"] = {
             "close_ts": close_ts, "exit_price": _finite(raw.get("exit") or raw.get("exit_price")),
             "exit_reason": raw.get("exit_reason"), "close_origin": raw.get("close_origin"),
             "forced_close": reason in forced, "legs": _legs(raw),
             "filled_qty_final_leg": _finite(raw.get("execution_qty")),
+            "exit_trigger_ts": ev_trigger,
+            "exit_trigger_source": events.get("exit_trigger_source"),
+            "exit_trigger_price": _finite(events.get("exit_trigger_price")),
+            "exit_fill_ts": ev_exit_fill,
         }
+        row["timing"] = trade_timing(ev_signal or row["trigger"].get("signal_ts"), ev_sent,
+                                     row["fill"].get("fill_ts") if ev_fill else None, ev_trigger, ev_exit_fill,
+                                     recorded=bool(events))
         row["path"] = {"mfe_bp": round(mfe_bp, 4) if mfe_bp is not None else None,
                        "basis": "max_pnl_pct_over_leverage" if mfe_bp is not None else None}
         row["pnl"] = trade_pnl(raw, be_band_bp)
