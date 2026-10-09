@@ -1,4 +1,4 @@
-import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, ServiceUnavailableException, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { TradingAgentKind } from '@prisma/client';
@@ -13,6 +13,7 @@ import { TradingAgentInstancesService } from './trading-agent-instances.service'
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { TradingAgentsService } from './trading-agents.service';
 import { verifyFlyViewSignature } from './live-copy-approval';
+import { LiveCopyOpsService } from './live-copy-ops.service';
 
 @Controller('trading-agents')
 export class TradingAgentsController {
@@ -22,6 +23,7 @@ export class TradingAgentsController {
     private readonly relaySim: CopyRelaySimService,
     private readonly showcaseRelay: ShowcaseRelayEventsService,
     private readonly execution: SignalSubscriberExecutionService,
+    private readonly liveCopyOps?: LiveCopyOpsService,
   ) {}
 
   @Public()
@@ -131,6 +133,38 @@ export class TradingAgentsController {
       throw new UnauthorizedException('Invalid fly-view signature');
     }
     return this.tradingAgents.getLiveCopyFlyView(slug, this.showcaseRelay.liveCopyRejectStats());
+  }
+
+  /**
+   * Option 1 operator account check (read-only): entitlement, keys present /
+   * valid, withdraw permission, derivatives balance, arm state. Never returns
+   * key material. Auth: BOT_ADMIN_TOKEN.
+   */
+  @Public()
+  @Get(':slug/ops/live-copy/account-check')
+  opsLiveCopyAccountCheck(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.requireLiveCopyOps().accountCheck(slug, userId, adminHeader, authorization);
+  }
+
+  private requireLiveCopyOps(): LiveCopyOpsService {
+    if (!this.liveCopyOps) throw new ServiceUnavailableException('live-copy ops unavailable');
+    return this.liveCopyOps;
+  }
+
+  /** Option 1 copy status: per-account hop lags (p50/p95) and gaps. Auth: BOT_ADMIN_TOKEN. */
+  @Public()
+  @Get(':slug/ops/live-copy/copy-status')
+  opsLiveCopyStatus(
+    @Param('slug') slug: string,
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.requireLiveCopyOps().copyStatus(slug, adminHeader, authorization, this.showcaseRelay.liveCopyRejectStats());
   }
 
   /** Immutable, user-scoped relay evidence for the offline research mirror. */

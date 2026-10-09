@@ -66,17 +66,33 @@ def test_partial_reduction_block_is_not_operator_waivable():
     assert OPERATOR_WAIVABLE_CAPABILITIES == lc.OPERATOR_WAIVABLE_CAPABILITIES
 
 
-def test_exchange_stop_is_catastrophe_backup_hard_stop_plus_25bp():
-    assert lc.exchange_stop_bp_for_spec(spec()) == 65.0
+def test_liquidation_distance_100x_isolated_bitfinex():
+    # 1/100 initial margin - 0.5% maintenance margin = 50 bp; cap = 50 - 15.
+    assert lc.liquidation_distance_bp(100) == 50.0
+    assert lc.exchange_stop_cap_bp(100) == 35.0
+    assert lc.liquidation_distance_bp(50) == 150.0
+
+
+def test_exchange_stop_is_catastrophe_backup_capped_inside_liquidation():
+    # hard 40 + 25 = 65 bp is beyond the 50 bp liquidation -> capped at 35.
+    plan = lc.exchange_stop_plan(spec())
+    assert plan == {"hard_stop_bp": 40.0, "requested_bp": 65.0, "liquidation_bp": 50.0,
+                    "cap_bp": 35.0, "exchange_stop_bp": 35.0, "cap_applied": True,
+                    "inside_tile_hard_stop": True}
+    assert lc.exchange_stop_bp_for_spec(spec()) == 35.0
+    # a tight tile keeps hard + 25 when that is >= 15 bp inside liquidation
+    tight = lc.exchange_stop_plan({"exit_policy": {"hard_stop_bps": 8}})
+    assert tight["exchange_stop_bp"] == 33.0 and tight["cap_applied"] is False
+    assert lc.exchange_stop_bp_for_spec({"exit_policy": {"hard_stop_bps": 10}}) == 35.0
     assert lc.exchange_stop_bp_for_spec({"exit_policy": {"hard_stop_bps": 30,
-                                         "profiles": {"a": {"hard_bp": 40}}}}) == 65.0
+                                         "profiles": {"a": {"hard_bp": 40}}}}) == 35.0
     assert lc.exchange_stop_bp_for_spec({"exit_policy": {}}) is None
-    assert lc.exchange_stop_bp_for_spec({"exit_policy": {"hard_stop_bps": 500}}) is None
-    for lane in ACTIVE_TILE_ORDER:  # every active tile has a computable stop
-        bp = lc.exchange_stop_bp_for_spec(ACTIVE_TILE_REGISTRY[lane])
-        assert bp is not None and 25 < bp <= lc.EXCHANGE_STOP_MAX_BP, lane
-        hard = bp - lc.EXCHANGE_STOP_BUFFER_BP
-        assert bp >= hard + 25, lane  # always beyond the tile's own hard stop
+    assert lc.exchange_stop_bp_for_spec({"exit_policy": {"hard_stop_bps": 0}}) is None
+    for lane in ACTIVE_TILE_ORDER:  # every active tile: computable and inside liquidation
+        plan = lc.exchange_stop_plan(ACTIVE_TILE_REGISTRY[lane])
+        assert plan is not None, lane
+        assert plan["exchange_stop_bp"] <= plan["liquidation_bp"] - lc.LIQUIDATION_SAFETY_BP, lane
+        assert plan["exchange_stop_bp"] == min(plan["hard_stop_bp"] + 25, 35.0), lane
 
 
 # ------------------------------------------------- switch + operator eligibility
@@ -209,7 +225,9 @@ def test_stamp_or_block_first_entry_decides(tmp_path):
     # Approved trade.
     a, r = lc.stamp_or_block(event="ORDER_PLACED", trade_id="d-2", now=300, output=ON_OUT, **kw)
     assert a and lc.verify_approval(a, SECRET) and a["entry_allowed"] and a["order_type"] == "LIMIT"
-    assert a["exchange_stop_bp"] == 65.0 and a["exchange_stop_role"] == "CATASTROPHE_BACKUP"
+    assert a["exchange_stop_bp"] == 35.0 and a["exchange_stop_role"] == "CATASTROPHE_BACKUP"
+    assert a["liquidation_bp"] == 50.0 and a["exchange_stop_cap_applied"] is True
+    assert a["exchange_stop_requested_bp"] == 65.0 and a["hard_stop_bp"] == 40.0
     assert a["exchange_stop_never_moved"] is True and a["eligibility_source"] == "OPERATOR"
     a2, _ = lc.stamp_or_block(event="POSITION_CLOSED", trade_id="d-2", now=400,
                               output={"enabled": False}, **kw)
@@ -349,3 +367,18 @@ def test_new_modules_never_place_orders():
         src = (HERE / name).read_text(encoding="utf-8")
         for forbidden in ("create_order", "submit_limit_entry", "submit_market_entry", "privatePostAuthWOrder"):
             assert forbidden not in src, (name, forbidden)
+
+
+def test_website_tile_prefix_map_matches_active_registry():
+    """The executor's lane->prefix map must equal Fly's active registry (no drift)."""
+    import re
+    from pathlib import Path
+    ts = Path(__file__).resolve().parents[2] / "apps/api/src/trading-agents/live-copy-approval.ts"
+    if not ts.exists():
+        pytest.skip("website source not present (image build)")
+    text = ts.read_text(encoding="utf-8")
+    block = text[text.index("LIVE_COPY_TILE_PREFIXES"):]
+    block = block[:block.index("});")]
+    website = dict(re.findall(r"(FAMILY_[A-Z0-9_]+):\s*'([a-z0-9]+)'", block))
+    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER}
+    assert website == fly

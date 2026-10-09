@@ -2,6 +2,7 @@ import {
   LIVE_COPY_ENTRY_EVENTS,
   LiveCopyRejectRing,
   verifyFlyLiveCopyApproval,
+  approvalPermitsIngest,
 } from './live-copy-approval';
 import {
   BadRequestException,
@@ -406,6 +407,11 @@ export function relayIntentEnvelope(
       : {}),
     ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
     ...(executablePolicy !== null ? { entry_limit_policy: executablePolicy } : {}),
+    // Fly's signed entry approval travels with the executable envelope so the
+    // executor re-verifies it (signature, trade, freshness) before placing.
+    ...(exactEntryLifecycle && body?.platform_received_at && body?.live_copy_approval
+      ? { fly_live_approval: body.live_copy_approval }
+      : {}),
     ...(exactEntryLifecycle
       ? {
           // Always overwrite these fields on an exact lifecycle revision so
@@ -755,7 +761,21 @@ export class ShowcaseRelayEventsService {
     const researchLane = (body.research_lane ?? '').trim().toUpperCase();
     const reductionEvidenceIdentity = body.event === 'POSITION_REDUCED'
       && isReductionEvidenceIdentity(tradeId, researchLane);
-    if (!reductionEvidenceIdentity && !this.isRelayMirrorable(tradeId, researchLane)) {
+    // Option 1: an operator-eligible tile (registry still BLOCKED_UNQUALIFIED)
+    // is routable only with Fly's valid signed approval for this exact trade
+    // and event, on an active tile whose id prefix owns the trade id.
+    const flyApprovedLane = Boolean(
+      verifiedSignedPayload
+      && researchLane
+      && String((body.live_copy_approval as Record<string, unknown> | null | undefined)?.research_lane ?? '').toUpperCase() === researchLane
+      && approvalPermitsIngest(
+        body.live_copy_approval,
+        tradeId,
+        String(body.event),
+        this.config.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+      ),
+    );
+    if (!reductionEvidenceIdentity && !flyApprovedLane && !this.isRelayMirrorable(tradeId, researchLane)) {
       this.logger.warn(
         `Rejected non-mirrorable showcase relay event=${body.event} ` +
         `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,

@@ -20,8 +20,9 @@ function withLiveCopyApproval<T extends { trade_id: string; event: string }>(bod
   const approval = {
     schema: 'fly_live_copy_approval_v1', correlation_id: body.trade_id, trade_id: body.trade_id,
     event: body.event, research_lane: 'TEST', relay_eligible: true, eligibility_source: 'OPERATOR',
-    entry_allowed: true, created_at_ts: Date.now() / 1000, max_margin_usd: 0.25, leverage: 100,
-    order_type: 'LIMIT', hard_stop_bp: 40, exchange_stop_bp: 65, ...over,
+    entry_allowed: true, output_on: true, tile_live_on: true, created_at_ts: Date.now() / 1000,
+    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 40, exchange_stop_bp: 35,
+    liquidation_bp: 50, ...over,
   };
   const signedBody = JSON.stringify(approval);
   const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();

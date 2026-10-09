@@ -65,6 +65,26 @@ EXCHANGE_STOP_NEVER_MOVED = True
 EXCHANGE_STOP_MAX_BP = 95.0
 MAX_MARGIN_USD = 0.25
 REQUIRED_LEVERAGE = 100
+# Boss 2026-10-09: the backup must sit inside liquidation. Bitfinex
+# derivatives (BTCF0:USTF0) use isolated margin; at 100x initial margin is
+# 1% and maintenance margin 0.5%, so an isolated $0.25 / $25-notional
+# position liquidates ~50 bp adverse of entry (mark; fees/funding ignored).
+# If hard stop + 25 bp is not >= 15 bp inside that, cap at liquidation - 15.
+BITFINEX_DERIV_MAINTENANCE_MARGIN = 0.005
+LIQUIDATION_SAFETY_BP = 15.0
+
+
+def liquidation_distance_bp(leverage: float = REQUIRED_LEVERAGE,
+                            maintenance_margin: float = BITFINEX_DERIV_MAINTENANCE_MARGIN) -> float:
+    """Adverse move (bp of entry) at which an isolated position is liquidated."""
+    lev = float(leverage)
+    if lev <= 0:
+        return 0.0
+    return round(max(0.0, (1.0 / lev - float(maintenance_margin)) * 1e4), 4)
+
+
+def exchange_stop_cap_bp(leverage: float = REQUIRED_LEVERAGE) -> float:
+    return round(liquidation_distance_bp(leverage) - LIQUIDATION_SAFETY_BP, 4)
 # Protection evidence (a real, exchange-verified reduce-only stop) expires.
 PROTECTION_EVIDENCE_TTL_SEC = 7 * 24 * 3600
 # Reports older/newer than this (vs Fly clock) are refused as replays.
@@ -536,8 +556,8 @@ def validate_report(report: Any, now: float) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # The gate (pure)
 # ---------------------------------------------------------------------------
-def exchange_stop_bp_for_spec(spec: Mapping[str, Any] | None) -> float | None:
-    """Catastrophe backup: tile hard stop + 25 bp (widest registry hard stop incl. regime profiles)."""
+def tile_hard_stop_bp(spec: Mapping[str, Any] | None) -> float | None:
+    """Widest registry hard stop of the tile (incl. regime profiles), in bp."""
     policy = (spec or {}).get("exit_policy") or {}
     candidates = []
     try:
@@ -553,10 +573,35 @@ def exchange_stop_bp_for_spec(spec: Mapping[str, Any] | None) -> float | None:
             continue
     if not candidates:
         return None
-    bp = max(candidates) + EXCHANGE_STOP_BUFFER_BP
-    if bp <= EXCHANGE_STOP_BUFFER_BP or bp > EXCHANGE_STOP_MAX_BP:
+    hard = max(candidates)
+    return round(hard, 4) if hard > 0 else None
+
+
+def exchange_stop_plan(spec: Mapping[str, Any] | None) -> dict | None:
+    """Catastrophe backup = min(tile hard stop + 25 bp, liquidation - 15 bp)."""
+    hard = tile_hard_stop_bp(spec)
+    if hard is None:
         return None
-    return round(bp, 4)
+    requested = round(hard + EXCHANGE_STOP_BUFFER_BP, 4)
+    liq = liquidation_distance_bp()
+    cap = exchange_stop_cap_bp()
+    bp = min(requested, cap)
+    if bp <= 0 or bp > EXCHANGE_STOP_MAX_BP or bp >= liq:
+        return None
+    return {
+        "hard_stop_bp": hard,
+        "requested_bp": requested,
+        "liquidation_bp": liq,
+        "cap_bp": cap,
+        "exchange_stop_bp": round(bp, 4),
+        "cap_applied": requested > cap,
+        "inside_tile_hard_stop": bp < hard,
+    }
+
+
+def exchange_stop_bp_for_spec(spec: Mapping[str, Any] | None) -> float | None:
+    plan = exchange_stop_plan(spec)
+    return plan["exchange_stop_bp"] if plan else None
 
 
 def effective_eligibility(spec: Mapping[str, Any] | None, operator_eligible: bool) -> tuple[bool, str | None]:
@@ -658,7 +703,8 @@ def build_approval(
     s = spec or {}
     out = output or {}
     row = tile_row or {}
-    stop_bp = exchange_stop_bp_for_spec(s)
+    plan = exchange_stop_plan(s) or {}
+    stop_bp = plan.get("exchange_stop_bp")
     return {
         "schema": APPROVAL_SCHEMA,
         "correlation_id": str(trade_id),
@@ -681,8 +727,13 @@ def build_approval(
         "max_margin_usd": MAX_MARGIN_USD,
         "leverage": REQUIRED_LEVERAGE,
         "order_type": "LIMIT",
-        "hard_stop_bp": (stop_bp - EXCHANGE_STOP_BUFFER_BP) if stop_bp is not None else None,
+        "hard_stop_bp": plan.get("hard_stop_bp"),
         "exchange_stop_bp": stop_bp,
+        "exchange_stop_requested_bp": plan.get("requested_bp"),
+        "liquidation_bp": plan.get("liquidation_bp"),
+        "exchange_stop_cap_bp": plan.get("cap_bp"),
+        "exchange_stop_cap_applied": plan.get("cap_applied"),
+        "exchange_stop_inside_tile_hard_stop": plan.get("inside_tile_hard_stop"),
         "exchange_stop_role": "CATASTROPHE_BACKUP",
         "exchange_stop_never_moved": EXCHANGE_STOP_NEVER_MOVED,
         "reasons": list(reasons or [])[:12],
