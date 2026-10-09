@@ -22644,6 +22644,16 @@ def load_session_trades_from_csv():
                 if not _trade_row_in_session(row, session_start):
                     continue
                 trade = dict(row)
+                # Nested stage stamps are written as a dict repr; restore them so
+                # per-trade timing survives restarts (trade_event_timestamps_v1).
+                raw_ev = trade.get("event_timestamps")
+                if isinstance(raw_ev, str) and raw_ev.startswith("{"):
+                    try:
+                        import ast as _ast
+                        parsed = _ast.literal_eval(raw_ev)
+                        trade["event_timestamps"] = parsed if isinstance(parsed, dict) else None
+                    except (ValueError, SyntaxError):
+                        trade["event_timestamps"] = None
                 for k in float_fields:
                     if trade.get(k) not in (None, ""):
                         try:
