@@ -121,8 +121,7 @@ def test_pr171_already_absent_404_reaches_the_idempotent_caller():
 
 def test_maintenance_round_budget_absorbs_unconfirmed_rounds():
     step = _step_python("Enter durable authenticated paper maintenance boundary")
-    assert "for round_no in range(1, 13 + 90):" in step
-    assert "if round_no > 12 and not (" in step
+    assert "for round_no in range(1, 13 + 150):" in step
     assert "for attempt in range(1, 9):" in step
 
 
@@ -146,8 +145,8 @@ def test_run_37913888717_pending_cancel_409_is_retriable_and_bounded():
     assert "time.monotonic() + 180" in retry and "raise SystemExit" in retry
     assert "time.sleep(min(2 * pending_cancel_retries, 15))" in retry
     assert "round_unconfirmed = True" in retry and "unconfirmed_floor" in retry and "break" in retry
-    # the round budget extends only while that bounded wait is open
-    assert "pending_cancel_deadline is not None and time.monotonic() < pending_cancel_deadline" in step
+    # the round budget extends only while a bounded wait is open
+    assert "if round_no > 12 and not extended_wait_open():" in step
     assert 'raise SystemExit("maintenance boundary did not become flat")' in step
 
 
@@ -204,3 +203,23 @@ def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
         "Guaranteed paper resume after failed guarded deploy")
 
 
+
+
+def test_run_37915233891_slow_unconfirmed_closes_wait_for_the_fence_bounded():
+    step = _step_python("Enter durable authenticated paper maintenance boundary")
+    ns = {"time": __import__("time")}
+    exec(compile(textwrap.dedent(step[step.index("pending_cancel_deadline = None"):step.index("for round_no in range(")]),
+                 "<workflow>", "exec"), ns)
+    assert ns["UNCONFIRMED_FENCE_WAIT_SEC"] == 20 * 60
+    assert ns["extended_wait_open"]() is False
+    ns["note_unconfirmed"]()
+    first = ns["unconfirmed_deadline"]
+    assert ns["extended_wait_open"]() is True
+    ns["note_unconfirmed"]()  # the bound starts at the FIRST unconfirmed mutation, never extends
+    assert ns["unconfirmed_deadline"] == first
+    ns["unconfirmed_deadline"] = ns["time"].monotonic() - 1
+    assert ns["extended_wait_open"]() is False
+    # every unconfirmed mutation starts the bounded wait; flat is still never
+    # trusted until fresh authority passes the unconfirmed floor
+    assert step.count("note_unconfirmed()") == 4  # definition + 3 unconfirmed sites
+    assert 'exposure.get("money_state_generation") <= unconfirmed_floor' in step
