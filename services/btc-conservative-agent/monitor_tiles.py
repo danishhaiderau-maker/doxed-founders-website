@@ -262,7 +262,8 @@ def _gap(a, b):
     return round(b - a, 3) if a is not None and b is not None else None
 
 
-def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, recorded: bool) -> dict:
+def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, recorded: bool,
+                 exit_sent_ts=None) -> dict:
     """Per-trade stage stamps (signal -> sent -> fill -> exit trigger -> exit fill).
 
     Only stamps recorded when each stage happened (``event_timestamps``) are used;
@@ -272,7 +273,8 @@ def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, 
         "schema": TRADE_TIMING_SCHEMA,
         "basis": "RECORDED_EVENT_TIMESTAMPS" if recorded else "NOT_RECORDED",
         "signal_ts": signal_ts, "order_sent_ts": sent_ts, "fill_ts": fill_ts,
-        "exit_trigger_ts": exit_trigger_ts, "exit_fill_ts": exit_fill_ts,
+        "exit_trigger_ts": exit_trigger_ts, "exit_sent_ts": exit_sent_ts, "exit_fill_ts": exit_fill_ts,
+        "exit_trigger_to_sent_sec": _gap(exit_trigger_ts, exit_sent_ts),
         "signal_to_sent_sec": _gap(signal_ts, sent_ts),
         "sent_to_fill_sec": _gap(sent_ts, fill_ts),
         "signal_to_fill_sec": _gap(signal_ts, fill_ts),
@@ -324,6 +326,7 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         ev_fill = _ts(events.get("fill_ts"), parse_ts)
         ev_trigger = _ts(events.get("exit_trigger_ts"), parse_ts)
         ev_exit_fill = _ts(events.get("exit_fill_ts"), parse_ts)
+        ev_exit_sent = _ts(events.get("exit_sent_ts"), parse_ts)
         if row["trigger"].get("signal_ts") is None and ev_signal:
             row["trigger"]["signal_ts"] = ev_signal
         if ev_fill and entry_ts is None:
@@ -348,11 +351,12 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             "exit_trigger_ts": ev_trigger,
             "exit_trigger_source": events.get("exit_trigger_source"),
             "exit_trigger_price": _finite(events.get("exit_trigger_price")),
+            "exit_sent_ts": ev_exit_sent,
             "exit_fill_ts": ev_exit_fill,
         }
         row["timing"] = trade_timing(ev_signal or row["trigger"].get("signal_ts"), ev_sent,
                                      row["fill"].get("fill_ts") if ev_fill else None, ev_trigger, ev_exit_fill,
-                                     recorded=bool(events))
+                                     recorded=bool(events), exit_sent_ts=ev_exit_sent)
         row["path"] = {"mfe_bp": round(mfe_bp, 4) if mfe_bp is not None else None,
                        "basis": "max_pnl_pct_over_leverage" if mfe_bp is not None else None}
         row["pnl"] = trade_pnl(raw, be_band_bp)

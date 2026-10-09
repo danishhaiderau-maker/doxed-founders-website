@@ -26225,7 +26225,7 @@ def _observable_exit_price() -> float:
 # position concurrently.
 PROTECTIVE_EXIT_WORKER_ENABLED = os.getenv("PROTECTIVE_EXIT_WORKER_ENABLED", "1").strip() != "0"
 PROTECTIVE_EXIT_INTERVAL_SEC = float(os.getenv("PROTECTIVE_EXIT_INTERVAL_SEC", "0.25"))
-PROTECTIVE_EXIT_RECHECK_SEC = 1.0
+PROTECTIVE_EXIT_RECHECK_SEC = PROTECTIVE_EXIT_INTERVAL_SEC  # re-evaluate every open position each 0.25 s scan
 PROTECTIVE_EXIT_MAX_INFLIGHT_CLOSES = 16
 _position_exit_claims: set = set()
 _position_exit_claims_lock = threading.Lock()
@@ -30560,7 +30560,9 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
     fill_ts = _ts_or_none(pos.get("entry_ts"))
     trigger_ts = _ts_or_none(pos.get("exit_trigger_ts"))
     exit_fill = _ts_or_none(exit_fill_ts)
-    return {
+    exit_sent = _ts_or_none(pos.get("exit_sent_ts"))
+    import exit_latency_slo as _els
+    out = {
         "schema": "trade_event_timestamps_v1",
         "signal_ts": signal_ts,
         "order_sent_ts": order_sent_ts,
@@ -30573,7 +30575,35 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_fill_ts": exit_fill,
         "exit_trigger_to_fill_sec": round(exit_fill - trigger_ts, 3) if exit_fill and trigger_ts else None,
         "signal_to_order_sent_sec": round(order_sent_ts - signal_ts, 3) if order_sent_ts and signal_ts else None,
+        "exit_sent_ts": exit_sent,
+        "exit_trigger_to_sent_sec": round(exit_sent - trigger_ts, 3) if exit_sent and trigger_ts else None,
+        "precision": "ms",
+        # Danish's full stage list (paper: venue-only stages are None, never inferred).
+        "decision_ts": _ts_or_none(pos.get("decision_ts")) or _ts_or_none(master.get("decision_ts")),
+        "order_queued_ts": _ts_or_none(master.get("order_queued_ts")) or order_sent_ts,
+        "order_sent_ts_basis": "PAPER_ORDER_CREATED" if order_sent_ts else None,
+        "relay_received_ts": _ts_or_none(pos.get("relay_received_ts")),
+        "exchange_ack_ts": _ts_or_none(pos.get("exchange_ack_ts")),
+        "first_fill_ts": fill_ts,
+        "final_fill_ts": fill_ts,
+        "bot_saw_fill_ts": fill_ts,
+        "exit_decision_ts": _ts_or_none(pos.get("exit_trigger_eval_ts")),
+        "exit_order_sent_ts": exit_sent,
+        "exit_ack_ts": _ts_or_none(pos.get("exit_ack_ts")),
+        "bot_saw_exit_ts": exit_fill,
+        "trade_lock_wait_ms": {"exit_close_claim": pos.get("exit_lock_wait_ms"),
+                               "entry": pos.get("entry_lock_wait_ms")},
+        "signal_to_fill_sec": round(fill_ts - signal_ts, 3) if fill_ts and signal_ts else None,
+        "venue": "PAPER" if not pos.get("bitfinex_live_entry") else "BITFINEX",
     }
+    for key in ("signal_ts", "decision_ts", "order_queued_ts", "order_sent_ts", "relay_received_ts",
+                "exchange_ack_ts", "first_fill_ts", "final_fill_ts", "bot_saw_fill_ts", "fill_ts",
+                "exit_trigger_ts", "exit_decision_ts", "exit_order_sent_ts", "exit_sent_ts", "exit_ack_ts",
+                "exit_fill_ts", "bot_saw_exit_ts"):
+        if out.get(key) is not None:
+            out[key] = round(float(out[key]), 3)
+        out[key.replace("_ts", "_utc")] = _els.iso_ms(out.get(key))
+    return out
 
 
 def close_position(pos: dict, exit_reason: str):
@@ -30583,6 +30613,8 @@ def close_position(pos: dict, exit_reason: str):
         return
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
         return
+    if not pos.get("exit_sent_ts"):
+        pos["exit_sent_ts"] = time.time()
     exit_is_maker = (
         pos.get("exit_fee_type") == "MAKER"
         or exit_reason in ("TAKE_PROFIT", "TP_HIT")
@@ -30617,6 +30649,7 @@ def close_position(pos: dict, exit_reason: str):
         # authoritative open position remains unchanged until WAL PREPARE.
         pos = copy.deepcopy(source_pos)
         close_claim_ts = time.time()
+        pos["exit_lock_wait_ms"] = round((close_claim_ts - close_claim_dispatch_ts) * 1000.0, 3)
         close_claim_signal = trades_map.get(trade_id, {}).get("signal_ref", {})
         if not bool(
             pos.get("bitfinex_order_id")
@@ -32486,7 +32519,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 # bearer), checked in each handler; never public, never a write.
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
-    "/api/monitor/tiles/totals", "/api/monitor/tape",
+    "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -44955,6 +44988,19 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             "threshold": "disarmed",
         },
     ]
+    try:
+        import exit_latency_slo as _els
+        slo = _els.evaluate(list(trades), since=now - 24 * 3600, forced=STATS_EXCLUDED_EXIT_REASONS)
+        checks.append({
+            "id": "fly.exit_latency",
+            "status": {"NO_DATA": "AMBER"}.get(slo["status"], slo["status"]),
+            "observed": f"24h n={slo['n']} p50={slo['p50_sec']}s p95={slo['p95_sec']}s max={slo['max_sec']}s "
+                        f">5s={slo['breach_count']}",
+            "threshold": "stop/exit hit -> close p95<=3s, none >5s",
+        })
+    except Exception as exc:  # never break the health route
+        checks.append({"id": "fly.exit_latency", "status": "AMBER", "observed": f"error {type(exc).__name__}",
+                       "threshold": "p95<=3s"})
     provider = globals().get("_ai_provider_health")
     if isinstance(provider, dict):
         last_ok = provider.get("last_success_ts")
@@ -45568,6 +45614,51 @@ def monitor_tiles_trades():
         }
 
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
+
+
+@app.route('/api/monitor/exit-latency', methods=["GET"])
+def monitor_exit_latency():
+    """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
+    import exit_latency_slo as _els
+
+    def build(now):
+        try:
+            hours = min(168.0, max(0.1, float(request.args.get("hours") or 24)))
+            nrows = min(500, max(0, int(request.args.get("rows") or 50)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        since = now - hours * 3600
+        closed = [r for r in list(trades) if isinstance(r, dict)]
+        slo = _els.evaluate(closed, since=since, forced=STATS_EXCLUDED_EXIT_REASONS)
+        recent = []
+        for r in closed:
+            ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
+            if float(ev.get("exit_fill_ts") or 0) < since:
+                continue
+            recent.append({"trade_id": r.get("trade_id"), "lane": r.get("research_lane"),
+                           "exit_reason": r.get("exit_reason"), **{k: ev.get(k) for k in ev if k != "schema"}})
+        per_tile = {}
+        for r in closed:
+            ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
+            if float(ev.get("exit_fill_ts") or 0) < since:
+                continue
+            lane = str(r.get("research_lane") or "?")
+            per_tile.setdefault(lane, []).append(r)
+        tiles = {}
+        for lane, rows in per_tile.items():
+            s2f = [float(e["signal_to_fill_sec"]) for e in (r.get("event_timestamps") or {} for r in rows)
+                   if isinstance(e.get("signal_to_fill_sec"), (int, float))]
+            tiles[lane] = {"exit": _els.evaluate(rows, since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
+                           "signal_to_fill": {"n": len(s2f), "p50_sec": _els._pct(s2f, 0.5),
+                                              "p95_sec": _els._pct(s2f, 0.95)}}
+            tiles[lane]["exit"].pop("breaches_over_5s", None)
+        unfilled = _els.unfilled_rows(list(expired_orders), since=since, limit=nrows)
+        return {"schema": "exit_latency_view_v1", **_monitor_tiles_common(now),
+                "scope": {"window_hours": hours, "rows": nrows}, "window_hours": hours, "slo": slo, "per_tile": tiles,
+                "unfilled_orders": unfilled,
+                "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
+
+    return _monitor_tiles_guard(build, 1_500_000)
 
 
 @app.route('/api/monitor/tiles/counters', methods=["GET"])

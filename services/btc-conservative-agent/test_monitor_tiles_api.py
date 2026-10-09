@@ -13,7 +13,7 @@ ADMIN = "tiles-test-admin-token"
 MONITOR = "monitor-read-token-for-tiles-0123456789"
 REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
 ROUTES = ("/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
-          "/api/monitor/tiles/totals", "/api/monitor/tape")
+          "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency")
 GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
 HA = "FAMILY_COMMITTED_FADE_TAKER_90"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
