@@ -1933,7 +1933,17 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if not relay.get("ok"):
         st, obs = AMBER, f"relay status unreadable ({relay.get('error')})"
     else:
-        st = RED if armed or relay.get("positionMismatchAlert") or recon.get("alert") else GREEN
+        mismatch = relay.get("positionMismatchAlert")
+        # A mismatch/read-failure alert left on a disarmed relay whose latest
+        # reconciliation proves flat (no delta, no lots, no alert) is a stale,
+        # unacknowledged alert, not exposure: AMBER with its own hint, never the
+        # "relay ARMED" RED. Armed, or any reconciliation alert/exposure, stays RED.
+        recon_flat = (isinstance(recon_raw, Mapping) and not recon.get("alert")
+                      and float(recon.get("deltaBtc") or 0) == 0
+                      and float(recon.get("signedExchangePositionQty") or 0) == 0
+                      and int(recon.get("openLots") or 0) == 0 and int(recon.get("pendingLots") or 0) == 0)
+        stale_mismatch = bool(mismatch) and not armed and recon_flat
+        st = RED if armed or (mismatch and not stale_mismatch) or recon.get("alert") else GREEN
         if st == GREEN and (snap_age is None or snap_age > t["relay_snapshot_amber_sec"] or not executor.get("healthy")
                             or float(executor.get("heartbeatAgeMs") or 0) > t["relay_heartbeat_amber_ms"]):
             st = AMBER
@@ -1960,9 +1970,14 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             st, relay_hint = AMBER, "Railway relay status reports reconciliation=null: exchange reconciliation unverified"
         recon_label = ("null (expected: relay disarmed)" if null_expected else "null") if recon_raw is None else (
             "alert" if recon.get("alert") else "ok")
+        if stale_mismatch and st == GREEN:
+            st = AMBER
+            relay_hint = ("stale positionMismatchAlert on a disarmed relay; latest reconciliation is flat - "
+                          "acknowledge the alert on Railway")
         obs = (f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
                f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old "
                f"reconciliation={recon_label}"
+               + (f" stale_mismatch_alert={str(mismatch)[:80]!r}" if stale_mismatch else "")
                + (" (STARTING within restart/session-reset grace)" if starting_blip and st == GREEN else ""))
     add(check("railway.relay", "railway", st, obs,
               "relay PAUSED/disarmed, executor healthy, reconciliation reported without alert (null OK while disarmed)",

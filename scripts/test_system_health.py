@@ -1792,3 +1792,28 @@ def test_pull_ack_nonzero_exit_is_amber():
     inputs = _pull_lag_inputs(now, 700, 700, now - 60)
     inputs["pull_status"]["exitCode"] = 1
     assert by_id(sh.evaluate(inputs, {}))["laptop.pull_ack"]["status"] == sh.AMBER
+
+
+def test_stale_mismatch_alert_on_disarmed_flat_relay_is_amber_not_armed_red():
+    """HM 10 Oct: PAUSED relay, reconciliation flat, old EXCHANGE_POSITION_READ_FAILED text -> AMBER, not 'ARMED' RED."""
+    now = ts("2026-10-09T18:10:00Z")
+    flat = {"signedExchangePositionQty": 0, "signedLedgerOpenQty": 0, "deltaBtc": 0, "alert": False,
+            "openLots": 0, "pendingLots": 0}
+    inputs = healthy(now)
+    inputs["relay_snapshot"].update(relayExecutionMode="PAUSED", status="PAUSED", relayArmedAt=None,
+                                    reconciliation=flat,
+                                    positionMismatchAlert="EXCHANGE_POSITION_READ_FAILED (live): <!DOCTYPE html>")
+    relay = by_id(sh.evaluate(inputs, {}))["railway.relay"]
+    assert relay["status"] == sh.AMBER
+    assert "stale_mismatch_alert" in relay["observed"] and "ARMED" not in relay["hint"]
+    # Exposure on the exchange keeps it RED.
+    exposed = healthy(now)
+    exposed["relay_snapshot"].update(relayExecutionMode="PAUSED", status="PAUSED", relayArmedAt=None,
+                                     reconciliation={**flat, "signedExchangePositionQty": 0.0003, "deltaBtc": 0.0003},
+                                     positionMismatchAlert="POSITION_MISMATCH")
+    assert by_id(sh.evaluate(exposed, {}))["railway.relay"]["status"] == sh.RED
+    # Armed with a mismatch alert stays RED.
+    armed = healthy(now)
+    armed["relay_snapshot"].update(relayArmedAt="2026-10-09T18:00:00Z", reconciliation=flat,
+                                   positionMismatchAlert="POSITION_MISMATCH")
+    assert by_id(sh.evaluate(armed, {}))["railway.relay"]["status"] == sh.RED
