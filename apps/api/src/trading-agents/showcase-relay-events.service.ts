@@ -1,4 +1,10 @@
 import {
+  LIVE_COPY_ENTRY_EVENTS,
+  LiveCopyRejectRing,
+  verifyFlyLiveCopyApproval,
+  approvalPermitsIngest,
+} from './live-copy-approval';
+import {
   BadRequestException,
   Injectable,
   Logger,
@@ -85,6 +91,10 @@ export type ShowcaseRelayEventBody = {
   source_git_rev?: string | null;
   /** Internal receipt timestamp added only after HMAC verification. */
   platform_received_at?: string | null;
+  /** Option 1: Fly's signed live-copy approval (required for entry events). */
+  live_copy_approval?: Record<string, unknown> | null;
+  /** Option 1: which Fly outbox delivered this record. */
+  live_copy_channel?: string | null;
 };
 
 export type PositionReducedEvidence = {
@@ -397,6 +407,11 @@ export function relayIntentEnvelope(
       : {}),
     ...(body?.bot_instance_id ? { bot_instance_id: body.bot_instance_id } : {}),
     ...(executablePolicy !== null ? { entry_limit_policy: executablePolicy } : {}),
+    // Fly's signed entry approval travels with the executable envelope so the
+    // executor re-verifies it (signature, trade, freshness) before placing.
+    ...(exactEntryLifecycle && body?.platform_received_at && body?.live_copy_approval
+      ? { fly_live_approval: body.live_copy_approval }
+      : {}),
     ...(exactEntryLifecycle
       ? {
           // Always overwrite these fields on an exact lifecycle revision so
@@ -708,6 +723,16 @@ export class ShowcaseRelayEventsService {
     return !researchLane || RELAY_ELIGIBLE_TILE_LANES.includes(researchLane);
   }
 
+  /** Option 1 ingest rejections (unsigned/stale/invalid Fly approvals). */
+  readonly liveCopyRejects = new LiveCopyRejectRing();
+
+  liveCopyRejectStats(windowMs = 3_600_000) {
+    const rows = this.liveCopyRejects.since(Date.now() - windowMs);
+    const byReason: Record<string, number> = {};
+    for (const r of rows) byReason[r.reason] = (byReason[r.reason] ?? 0) + 1;
+    return { window_ms: windowMs, total: rows.length, by_reason: byReason, recent: rows.slice(-20) };
+  }
+
   async ingest(
     slug: string,
     body: ShowcaseRelayEventBody,
@@ -736,7 +761,21 @@ export class ShowcaseRelayEventsService {
     const researchLane = (body.research_lane ?? '').trim().toUpperCase();
     const reductionEvidenceIdentity = body.event === 'POSITION_REDUCED'
       && isReductionEvidenceIdentity(tradeId, researchLane);
-    if (!reductionEvidenceIdentity && !this.isRelayMirrorable(tradeId, researchLane)) {
+    // Option 1: an operator-eligible tile (registry still BLOCKED_UNQUALIFIED)
+    // is routable only with Fly's valid signed approval for this exact trade
+    // and event, on an active tile whose id prefix owns the trade id.
+    const flyApprovedLane = Boolean(
+      verifiedSignedPayload
+      && researchLane
+      && String((body.live_copy_approval as Record<string, unknown> | null | undefined)?.research_lane ?? '').toUpperCase() === researchLane
+      && approvalPermitsIngest(
+        body.live_copy_approval,
+        tradeId,
+        String(body.event),
+        this.config.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+      ),
+    );
+    if (!reductionEvidenceIdentity && !flyApprovedLane && !this.isRelayMirrorable(tradeId, researchLane)) {
       this.logger.warn(
         `Rejected non-mirrorable showcase relay event=${body.event} ` +
         `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,
@@ -753,12 +792,34 @@ export class ShowcaseRelayEventsService {
       };
     }
 
+    // Option 1 (2026-10-09): a copy ENTRY must carry Fly's signed, fresh
+    // live-copy approval for this exact trade/event (tile eligible, output
+    // and tile switch ON at emit). Without it the event is kept as an
+    // audit-only (unsigned-equivalent) row: it can never create an
+    // executable intent or wake the executor. Rejections are counted.
+    let liveCopyApprovalBlocksEntry = false;
+    if (verifiedSignedPayload && LIVE_COPY_ENTRY_EVENTS.has(String(body.event))) {
+      const verdict = verifyFlyLiveCopyApproval(
+        body.live_copy_approval,
+        this.config.get<string>('SHOWCASE_WEBHOOK_SECRET'),
+        { tradeId, event: String(body.event) },
+      );
+      if (!verdict.ok) {
+        liveCopyApprovalBlocksEntry = true;
+        this.liveCopyRejects.push(verdict.reason, tradeId || null, String(body.event));
+        this.logger.warn(
+          `[LIVE-COPY] entry kept audit-only event=${body.event} trade=${tradeId || '?'} reason=${verdict.reason}`,
+        );
+      }
+    }
+    const executableSignedPayload = verifiedSignedPayload && !liveCopyApprovalBlocksEntry;
+
     this.botBridge.invalidateCache();
 
     const event = body.event;
-    const persistBody: ShowcaseRelayEventBody = verifiedSignedPayload
+    const persistBody: ShowcaseRelayEventBody = executableSignedPayload
       ? { ...body, platform_received_at: new Date().toISOString() }
-      : body;
+      : { ...body, platform_received_at: undefined };
     let intentCreated = false;
 
     // A verified v1 payload already contains authenticated direction, price,
@@ -767,7 +828,7 @@ export class ShowcaseRelayEventsService {
     // cross-region callback. Canonical state reconciliation still runs
     // immediately, but only as an asynchronous audit/backstop.
     const signedLifecycleEvent =
-      verifiedSignedPayload
+      executableSignedPayload
       && body.schema === 'dcf-showcase-intent-v1'
       && (body.direction?.toUpperCase() === 'LONG'
         || body.direction?.toUpperCase() === 'SHORT');

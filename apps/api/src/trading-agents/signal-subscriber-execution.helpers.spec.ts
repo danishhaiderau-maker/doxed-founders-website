@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -118,6 +118,20 @@ import {
   isDeterministicBitfinexSubmitRejection,
   desiredLiveCopyCoordinationState,
 } from './signal-subscriber-execution.service';
+
+/** A Fly approval as live_copy_control.sign_approval would emit it (test key). */
+function signTestFlyApproval(tradeId: string, secret: string, over: Record<string, unknown> = {}) {
+  const approval = {
+    schema: 'fly_live_copy_approval_v1', correlation_id: tradeId, trade_id: tradeId,
+    event: 'ORDER_PLACED', research_lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', relay_eligible: true,
+    eligibility_source: 'OPERATOR', entry_allowed: true, output_on: true, tile_live_on: true,
+    created_at_ts: Date.now() / 1000, max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT',
+    hard_stop_bp: 35, exchange_stop_bp: 35, liquidation_bp: 50, ...over,
+  };
+  const signedBody = JSON.stringify(approval);
+  const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();
+  return { ...approval, signed_body: signedBody, signature: createHmac('sha256', key).update(signedBody).digest('hex') };
+}
 
 test('relay executor polling keeps direct wake latency separate from Neon backstops', () => {
   assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'ACTIVE'), PERSISTED_WAKE_ACTIVE_POLL_MS);
@@ -673,7 +687,7 @@ const LIVE_VENUE_MARGIN_EVIDENCE = {
   observedAt: '2026-09-29T23:21:00.000Z', source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
 };
 
-test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
+async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const now = Date.now();
@@ -682,7 +696,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     relayExecutionMode: 'LIVE',
     relayPolicyVersion: 'two_lane_explicit_v6',
     realTradingConfirmedAt: new Date(now - 2_000).toISOString(),
-    relayArmedAt: new Date(now - 1_000).toISOString(),
+    ...(opts.armed === false ? {} : { relayArmedAt: new Date(now - 1_000).toISOString() }),
   };
   const instance = {
     id: 'instance-exact-qty',
@@ -694,8 +708,8 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
   const envelope = {
     schema: 'dcf-signal-intent/v1',
     cycleId: 'cycle-exact-qty',
-    signalId: 'cont-e0ac7001',
-    trade_id: 'cont-e0ac7001',
+    signalId: 'gs1-e0ac7001',
+    trade_id: 'gs1-e0ac7001',
     version: 'test',
     action: 'ENTER',
     direction: 'SHORT',
@@ -713,12 +727,14 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
       signed_showcase_event: true, showcase_event: 'ORDER_PLACED',
       showcase_event_at: new Date(now - 200).toISOString(),
       platform_received_at: new Date(now - 100).toISOString(),
+      ...(opts.approval === null ? {} : { fly_live_approval: opts.approval ?? signTestFlyApproval('gs1-e0ac7001', 'test-secret') }),
     },
   };
   const submitted: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
   service.logger = { log() {}, warn() {}, error() {} };
   service.cycleAudit = { stage() {} };
+  service.config = { get: (k: string) => (k === 'SHOWCASE_WEBHOOK_SECRET' ? 'test-secret' : undefined) };
   service.activeTrading = {
     getOpenPositionDetail: async () => null,
     submitLimitOrder: async (_creds: unknown, order: Record<string, unknown>) => {
@@ -733,7 +749,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
         create: async () => ({ id: 'participant-exact-qty' }),
         findMany: async () => [{
           id: 'participant-exact-qty', cycleId: 'cycle-exact-qty',
-          cycle: { tradeId: 'cont-e0ac7001', createdAt, intentEnvelope: envelope },
+          cycle: { tradeId: 'gs1-e0ac7001', createdAt, intentEnvelope: envelope },
         }],
       },
     }),
@@ -764,10 +780,15 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     envelope,
     { apiKey: 'redacted', apiSecret: 'redacted' },
     0.25,
-    'cont-e0ac7001',
+    'gs1-e0ac7001',
     'bitfinex',
     { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
   );
+  return { placed, submitted, events };
+}
+
+test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
+  const { placed, submitted, events } = await runExactQtyEntry();
   assert.equal(placed, true);
   assert.equal(submitted.length, 1);
   assert.equal(submitted[0].qty, 0.00039);
@@ -775,6 +796,44 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
   assert.equal(events.at(-1)?.source_exact_qty_btc, 25 / 63_614.55);
   assert.equal(events.at(-1)?.venue_qty_btc, 0.00039);
   assert.equal(events.at(-1)?.margin_cap_usd, 0.25);
+});
+
+test('Option 1 gate: an entry reaches Bitfinex only when output, tile switch, operator eligibility and account arm are ALL on', async () => {
+  let placedCombos = 0;
+  for (let mask = 0; mask < 16; mask += 1) {
+    const outputOn = Boolean(mask & 1);
+    const tileOn = Boolean(mask & 2);
+    const eligible = Boolean(mask & 4);
+    const armed = Boolean(mask & 8);
+    const approval = signTestFlyApproval('gs1-e0ac7001', 'test-secret', {
+      output_on: outputOn, tile_live_on: tileOn, relay_eligible: eligible,
+      eligibility_source: eligible ? 'OPERATOR' : 'NONE',
+    });
+    const { placed, submitted } = await runExactQtyEntry({ approval, armed });
+    const all = outputOn && tileOn && eligible && armed;
+    assert.equal(placed, all, `mask=${mask}`);
+    assert.equal(submitted.length, all ? 1 : 0, `mask=${mask}`);
+    if (all) placedCombos += 1;
+  }
+  assert.equal(placedCombos, 1);
+});
+
+test('Option 1 gate: missing, forged, stale or non-tile approvals never reach Bitfinex', async () => {
+  const cases: Array<[string, unknown]> = [
+    ['missing', null],
+    ['wrong key', signTestFlyApproval('gs1-e0ac7001', 'other-secret')],
+    ['stale', signTestFlyApproval('gs1-e0ac7001', 'test-secret', { created_at_ts: Date.now() / 1000 - 600 })],
+    ['other trade', signTestFlyApproval('gs1-ffffffff', 'test-secret')],
+    ['wrong tile', signTestFlyApproval('gs1-e0ac7001', 'test-secret', { research_lane: 'FAMILY_FADE_POOL' })],
+    ['entry not allowed', signTestFlyApproval('gs1-e0ac7001', 'test-secret', { entry_allowed: false })],
+    ['stop beyond liquidation cap', signTestFlyApproval('gs1-e0ac7001', 'test-secret', { exchange_stop_bp: 60 })],
+    ['oversize', signTestFlyApproval('gs1-e0ac7001', 'test-secret', { max_margin_usd: 5 })],
+  ];
+  for (const [name, approval] of cases) {
+    const { placed, submitted } = await runExactQtyEntry({ approval });
+    assert.equal(placed, false, name);
+    assert.equal(submitted.length, 0, name);
+  }
 });
 
 test('market catch-up money path also submits the exact showcase position quantity', async () => {

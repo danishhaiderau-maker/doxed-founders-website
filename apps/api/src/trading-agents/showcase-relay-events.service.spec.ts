@@ -15,6 +15,21 @@ import {
   shouldApplyExactLifecycleUpdate,
 } from './showcase-relay-events.service';
 
+/** Option 1: a valid Fly live-copy approval for an entry event (test key). */
+function withLiveCopyApproval<T extends { trade_id: string; event: string }>(body: T, secret: string, over: Record<string, unknown> = {}) {
+  const approval = {
+    schema: 'fly_live_copy_approval_v1', correlation_id: body.trade_id, trade_id: body.trade_id,
+    event: body.event, research_lane: 'TEST', relay_eligible: true, eligibility_source: 'OPERATOR',
+    entry_allowed: true, output_on: true, tile_live_on: true, created_at_ts: Date.now() / 1000,
+    max_margin_usd: 0.25, leverage: 100, order_type: 'LIMIT', hard_stop_bp: 40, exchange_stop_bp: 35,
+    liquidation_bp: 50, ...over,
+  };
+  const signedBody = JSON.stringify(approval);
+  const key = createHmac('sha256', secret).update('fly-live-copy-approval-v1').digest();
+  return { ...body, live_copy_approval: { ...approval, signed_body: signedBody,
+    signature: createHmac('sha256', key).update(signedBody).digest('hex') } };
+}
+
 test('signed source replay is exact and conflicting identity or hash fails closed', () => {
   const existing = {
     cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED',
@@ -673,7 +688,7 @@ test('rejects unknown signed chase and close events before persistence or execut
 test('rejects signed ORDER_PLACED without executable structural exact-limit contract', async () => {
   const secret = 'test-webhook-secret';
   const service = createService('dashboard-active', secret);
-  const body = {
+  const baseBody = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
     trade_id: 'cont-1aeac700',
@@ -683,6 +698,7 @@ test('rejects signed ORDER_PLACED without executable structural exact-limit cont
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
   };
+  const body = withLiveCopyApproval(baseBody, secret);
   const rawBody = Buffer.from(JSON.stringify(body));
   const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
   await assert.rejects(
@@ -697,7 +713,7 @@ test('rejects signed ORDER_PLACED without executable structural exact-limit cont
 test('rejects a signed executable order that omits exact showcase quantity', async () => {
   const secret = 'test-webhook-secret';
   const service = createService('dashboard-active', secret);
-  const body = {
+  const baseBody = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
     trade_id: 'cont-0a0c1a1b',
@@ -709,6 +725,7 @@ test('rejects a signed executable order that omits exact showcase quantity', asy
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
   };
+  const body = withLiveCopyApproval(baseBody, secret);
   const rawBody = Buffer.from(JSON.stringify(body));
   const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
   await assert.rejects(
@@ -899,7 +916,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     cycles,
     execution,
   });
-  const body = {
+  const baseBody = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
     trade_id: 'cont-eaac7111',
@@ -917,6 +934,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,
   };
+  const body = withLiveCopyApproval(baseBody, secret);
   const rawBody = Buffer.from(JSON.stringify(body));
   const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
 
@@ -1545,3 +1563,40 @@ test('ORDER_EXPIRED with a research TTL reason is acked without flatten wake', a
   assert.equal(result.exchange_mutation, false);
   assert.equal(trace.includes('wake'), false);
 });
+
+for (const [label, mutate] of [
+  ['missing', (b: Record<string, unknown>) => { const { live_copy_approval: _drop, ...rest } = b; return rest; }],
+  ['stale', (b: Record<string, unknown>, secret: string) => withLiveCopyApproval(b as { trade_id: string; event: string }, secret, { created_at_ts: Date.now() / 1000 - 600 })],
+  ['wrong key', (b: Record<string, unknown>) => withLiveCopyApproval(b as { trade_id: string; event: string }, 'attacker')],
+  ['entry not allowed', (b: Record<string, unknown>, secret: string) => withLiveCopyApproval(b as { trade_id: string; event: string }, secret, { entry_allowed: false })],
+] as const) {
+  test(`Option 1: HMAC-signed ORDER_PLACED with ${label} Fly approval stays audit-only (no wake, no intent)`, async () => {
+    const secret = 'test-webhook-secret';
+    const trace: string[] = [];
+    const prisma = {
+      tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+      signalCycle: { findUnique: async () => null, update: async () => ({}), create: async () => ({ id: 'c' }), upsert: async () => ({ id: 'c' }) },
+      signalCycleEvent: { findFirst: async () => null, create: async () => ({}) },
+    };
+    const execution = {
+      requestExecutorPreWake: () => { trace.push('prewake'); },
+      requestExecutorWake: async () => { trace.push('execution'); },
+    };
+    const service = createService('dashboard-active', secret, { prisma, execution, cycles: { wakeFromShowcase: async () => false } });
+    const base = {
+      schema: 'dcf-showcase-intent-v1', event: 'ORDER_PLACED' as const, trade_id: 'cont-lc000001',
+      direction: 'LONG', limit_price: 60_000, qty: 0.0004, event_id: 'cont-lc000001:ORDER_PLACED:1', event_seq: 1,
+      entry_limit_policy: 'micro_sr_structural_limit_v1', executable: true, margin_usdt: 0.25,
+      dashboard_owner: true, bot_instance_id: 'dashboard-active', dashboard_port: 7002,
+    };
+    const body = (mutate as (b: Record<string, unknown>, s: string) => Record<string, unknown>)(
+      withLiveCopyApproval(base, secret) as Record<string, unknown>, secret) as typeof base;
+    const rawBody = Buffer.from(JSON.stringify(body));
+    const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+    const result = await service.ingest('conservative-btc', body, { rawBody, signatureHeader: signature }).catch((e: Error) => ({ error: e.message }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(trace, []);
+    assert.notEqual((result as { intentCreated?: boolean }).intentCreated, true);
+    assert.equal(service.liveCopyRejectStats().total, 1);
+  });
+}
