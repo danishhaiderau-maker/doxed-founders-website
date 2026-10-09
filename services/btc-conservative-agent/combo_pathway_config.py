@@ -1328,6 +1328,8 @@ _GS07_EXIT = _composite_exit(
 # ATR trail 1.5 armed at 1.5 ATR, conditional early cut -12 bp within 5 min.
 _DNR_FADE_PROFILE = {
     "stack": "DANISH_ROUTER_FADE", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    # Conditional early cut (CONDITIONAL_EARLY_CUT_12_5M): only while MFE <= +2 bp.
+    "cut_max_peak_bp": CONDITIONAL_EARLY_CUT_12_5M["max_peak_margin_pct"],
     "time_sec": 5400, "be_atr": 0.0, "be_floor": 20.0, "lock_bp": 5.0,
     "trail_atr": 1.5, "trail_arm_atr": 1.5, "trail_floor": 0.0, "trail_arm_floor": 0.0,
     "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,
@@ -1365,6 +1367,8 @@ _DANISH_ROUTER_ENTRY.update({"max_spread_bps": 3.0, "max_bbo_age_sec": 5.0})
 # at +2 ATR, -12 bp / 5 min cut, 90-min backstop), up to three open.
 _FADE_POOL_PROFILE = {
     "stack": "FADE_POOL_COMPOSITE", "hard_bp": 40.0, "cut_bp": 12.0, "cut_win_sec": 300, "cut_close_sec": 1,
+    # Conditional early cut (CONDITIONAL_EARLY_CUT_12_5M): only while MFE <= +2 bp.
+    "cut_max_peak_bp": CONDITIONAL_EARLY_CUT_12_5M["max_peak_margin_pct"],
     "time_sec": 5400, "be_atr": 0.0, "be_floor": 20.0, "lock_bp": 5.0,
     "trail_atr": 1.5, "trail_arm_atr": 2.0, "trail_floor": 0.0, "trail_arm_floor": 0.0,
     "tp_atr": None, "tp_floor": 8.0, "gb_arm": None, "gb_frac": None,

@@ -248,7 +248,7 @@ bot.refresh_bbo_state = lambda: None
 bot.refresh_order_book_state = lambda: None
 bot.process_funding_accrual = lambda: None
 bot.get_mark_price = lambda direction, fallback=None: float(fallback or 64_000.0)
-bot._apply_position_exits = lambda pos, mark, now: managed.append((pos["trade_id"], mark))
+bot._apply_position_exits = lambda pos, mark, now, **_kw: managed.append((pos["trade_id"], mark))
 bot.process_positions()
 bot.refresh_bbo_state = original_refresh_bbo
 bot.refresh_order_book_state = original_refresh_book

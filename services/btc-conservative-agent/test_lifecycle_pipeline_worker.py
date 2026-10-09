@@ -95,7 +95,7 @@ def test_worker_runs_lifecycle_before_one_observable_bootstrap_step(tmp_path, mo
         def emergency_wal_runtime_status(self):
             return {"retained_count": 0}
 
-        def advance_one_emergency_bootstrap_round_robin(self):
+        def advance_one_emergency_bootstrap_round_robin(self, **_kwargs):
             order.append("bootstrap")
             return {
                 "ledger": "decision", "complete": False,

@@ -212,7 +212,9 @@ def _regime_risk_lines(exit_policy: dict) -> list[str]:
         label = "" if name == "ALL" else f" ({name})"
         how = "any tick" if int(prof.get("cut_close_sec") or 1) <= 1 else f"on {_minutes(prof['cut_close_sec'])} closes"
         if prof.get("cut_bp") is not None:
-            cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how})")
+            cond = (f", only if the trade never ran past {_bp(float(prof['cut_max_peak_bp']))}"
+                    if prof.get("cut_max_peak_bp") is not None else "")
+            cut.append(f"Thesis cut{label}: {_bp(-float(prof['cut_bp']))} within {_minutes(prof['cut_win_sec'])} ({how}{cond})")
         hard.append(f"Hard stop{label} {_bp(-float(prof['hard_bp']))}")
     return cut + hard
 

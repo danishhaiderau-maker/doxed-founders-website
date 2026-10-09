@@ -40,7 +40,11 @@ _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
 _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
 _BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
-_BOOTSTRAP_RECORDS_PER_STEP = 64
+_BOOTSTRAP_RECORDS_PER_STEP = 512
+# A bootstrap step stops early (cursor saved) once this much wall time has
+# elapsed, so a larger record budget can never push the killable worker past
+# its hard deadline on a slow volume.
+_BOOTSTRAP_STEP_WALL_BUDGET_SEC = 30.0
 
 
 def _first_present(*values: Any) -> Any:
@@ -1114,8 +1118,13 @@ class V3EvidenceStore:
     def _lifecycle_membership_dir(self) -> Path:
         return self.receipt_dir / "lifecycle_membership_v1"
 
-    def _atomic_json_receipt(self, path: Path, payload: dict[str, Any]) -> None:
-        """Publish one small receipt without exposing a partial JSON file."""
+    def _atomic_json_receipt(self, path: Path, payload: dict[str, Any], *, fsync_dir: bool = True) -> None:
+        """Publish one small receipt without exposing a partial JSON file.
+
+        ``fsync_dir=False`` defers only the directory barrier so a bootstrap
+        step can issue one directory fsync for its whole batch; the file
+        content is always fsynced before its rename, receipt bytes unchanged.
+        """
         path = self._assert_contained(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         candidate: str | None = None
@@ -1127,7 +1136,8 @@ class V3EvidenceStore:
                 os.fsync(handle.fileno())
             os.replace(candidate, path)
             candidate = None
-            _fsync_directory(path.parent)
+            if fsync_dir:
+                _fsync_directory(path.parent)
         finally:
             if candidate:
                 try:
@@ -1520,7 +1530,7 @@ class V3EvidenceStore:
             )
         )
 
-    def _publish_record_receipt(
+    def _record_receipt_material(
         self, ledger: str, record_id: str, *, offset: int | None, payload: bytes, state: str,
         row_payload_utf8: str | None = None,
     ) -> dict[str, Any]:
@@ -1535,11 +1545,49 @@ class V3EvidenceStore:
             receipt["offset"] = int(offset)
         if row_payload_utf8 is not None:
             receipt["row_payload_utf8"] = row_payload_utf8
+        return receipt
+
+    def _publish_record_receipt(
+        self, ledger: str, record_id: str, *, offset: int | None, payload: bytes, state: str,
+        row_payload_utf8: str | None = None, fsync_dir: bool = True,
+    ) -> dict[str, Any]:
+        receipt = self._record_receipt_material(
+            ledger, record_id, offset=offset, payload=payload, state=state,
+            row_payload_utf8=row_payload_utf8,
+        )
         backend = self._transactional_receipts()
         if backend is not None:
             return backend.put(receipt)
-        self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
+        path = self._record_receipt_path(ledger, record_id)
+        if fsync_dir:
+            self._atomic_json_receipt(path, receipt)
+        else:
+            self._atomic_json_receipt(path, receipt, fsync_dir=False)
         return receipt
+
+    def _publish_record_receipt_batch(self, entries: list[dict[str, Any]]) -> None:
+        """Publish one bootstrap step's receipts behind a single durability barrier.
+
+        Transactional authority: one SQLite transaction (one commit) instead of
+        one per row.  Legacy JSON receipts: every file is still fsynced before
+        its rename; the shared directory is fsynced once for the batch.  Either
+        way the caller persists its cursor only after this returns, so a crash
+        mid-batch re-indexes the batch idempotently.
+        """
+        if not entries:
+            return
+        backend = self._transactional_receipts()
+        if backend is not None:
+            backend.put_many([self._record_receipt_material(**entry) for entry in entries])
+            return
+        directories = []
+        for entry in entries:
+            self._publish_record_receipt(**entry, fsync_dir=False)
+            directory = self._record_receipt_path(entry["ledger"], entry["record_id"]).parent
+            if directory not in directories:
+                directories.append(directory)
+        for directory in directories:
+            _fsync_directory(directory)
 
     def _publish_completeness(
         self, ledger: str, signature: tuple[int, int, int, int] | None,
@@ -1662,6 +1710,7 @@ class V3EvidenceStore:
     def advance_emergency_idempotency_bootstrap(
         self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP,
         max_records: int = _BOOTSTRAP_RECORDS_PER_STEP,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
         """Cooperatively index a bounded ledger prefix outside pressure only.
 
@@ -1676,6 +1725,9 @@ class V3EvidenceStore:
             return {"complete": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
         limit = max(1, min(int(max_bytes), _BOOTSTRAP_BYTES_PER_STEP))
         record_limit = max(1, min(int(max_records), _BOOTSTRAP_RECORDS_PER_STEP))
+        step_deadline = time.monotonic() + _BOOTSTRAP_STEP_WALL_BUDGET_SEC
+        if deadline_monotonic is not None:
+            step_deadline = min(step_deadline, float(deadline_monotonic))
         with self._exclusive(path):
             signature = _path_signature(path)
             if signature is None:
@@ -1703,6 +1755,8 @@ class V3EvidenceStore:
             cursor_anchor = state.get("cursor_anchor") if same_source else None
             consumed = 0
             records_indexed = 0
+            start_cursor = cursor
+            batch: list[dict[str, Any]] = []
             try:
                 fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
                 with os.fdopen(fd, "rb") as handle:
@@ -1710,6 +1764,7 @@ class V3EvidenceStore:
                     while (
                         consumed < limit and records_indexed < record_limit
                         and cursor < signature[2]
+                        and (records_indexed == 0 or time.monotonic() < step_deadline)
                     ):
                         offset = cursor
                         payload = handle.readline(_MAX_RECEIPT_ROW_BYTES + 1)
@@ -1719,9 +1774,8 @@ class V3EvidenceStore:
                         record_id = str(row.get("record_id") or "")
                         if not record_id or len(record_id.encode("utf-8")) > _MAX_RECEIPT_RECORD_ID_BYTES:
                             raise ValueError("BOOTSTRAP_INVALID_OR_OVERSIZE_RECORD_ID")
-                        self._publish_record_receipt(
-                            ledger, record_id, offset=offset, payload=payload, state="COMMITTED"
-                        )
+                        batch.append({"ledger": ledger, "record_id": record_id, "offset": offset,
+                                      "payload": payload, "state": "COMMITTED"})
                         cursor += len(payload)
                         consumed += len(payload)
                         records_indexed += 1
@@ -1729,8 +1783,12 @@ class V3EvidenceStore:
                             "offset": offset, "length": len(payload),
                             "sha256": hashlib.sha256(payload).hexdigest(),
                         }
+                # One durability barrier for the batch, before the cursor moves.
+                self._publish_record_receipt_batch(batch)
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                return {"complete": False, "blocked": True, "reason": str(exc), "cursor": cursor}
+                # Nothing of this step is durable before the batch barrier: the
+                # persisted cursor is still where the step started.
+                return {"complete": False, "blocked": True, "reason": str(exc), "cursor": start_cursor}
             after = _path_signature(path)
             self._atomic_json_receipt(self._bootstrap_path(ledger), {
                 "schema": "emergency_record_index_bootstrap_v1", "ledger": ledger,
@@ -1745,7 +1803,9 @@ class V3EvidenceStore:
                 "records_indexed": records_indexed, "cursor": cursor,
             }
 
-    def advance_one_emergency_bootstrap_round_robin(self) -> dict[str, Any]:
+    def advance_one_emergency_bootstrap_round_robin(
+        self, *, deadline_monotonic: float | None = None,
+    ) -> dict[str, Any]:
         """Advance one bounded batch for the killable low-priority worker.
 
         The cursor advances only after the selected ledger is complete. Pressure,
@@ -1778,6 +1838,7 @@ class V3EvidenceStore:
             ledger = ledgers[index]
             result = self.advance_emergency_idempotency_bootstrap(
                 ledger, max_records=_BOOTSTRAP_RECORDS_PER_STEP,
+                deadline_monotonic=deadline_monotonic,
             )
             total_records_indexed += int(result.get("records_indexed") or 0)
             total_bytes_indexed += int(result.get("bytes_indexed") or 0)

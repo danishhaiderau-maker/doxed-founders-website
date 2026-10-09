@@ -133,7 +133,7 @@ def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt()
     assert 'bootstrap.get("blocked") is True' in block
     assert 'bootstrap.get("status") == "COMPLETE"' in block
     assert 'bootstrap.get("complete") is True' in block
-    assert "timeout=45 * 60" in block
+    assert "timeout=90 * 60" in block
     assert "bootstrap_deadline = deadline - min(60, timeout / 4)" in block
     after_resume = block[block.index('resumed = request_json("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})'):]
     assert '_common_safe(final, expected, paused=False)' in after_resume

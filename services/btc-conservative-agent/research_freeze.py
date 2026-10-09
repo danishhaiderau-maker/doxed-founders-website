@@ -100,9 +100,13 @@ MID_EPOCH_ADDITIONS = (
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
+# 2026-10-09 (owner step-2 order): the Danish router and Fade pool thesis cut is the
+# registered CONDITIONAL_EARLY_CUT_12_5M (fires only while MFE <= +2 bp); their
+# profiles gained cut_max_peak_bp, so both tiles' policy signatures and this pin moved.
+# The frozen roster's signature is unchanged.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "4582fda821a0663b6e262b92c786e42b54844395699eb574dd3e59045df015bc",
-    "hypothesis": "06af83fe3704eb611a1af764b26a45e2a504fd05f09342f8ac86aaf7f21e891a",
+    "score_led": "8e1a6bb79fd537944c6c334a1eee7503423167851ad5cece1d5eb6660ff83a03",
+    "hypothesis": "0c7b0970fd1c7229838ddaa034d0d0b78ec62405249944574aeaa0d58bd0c900",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"

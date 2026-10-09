@@ -147,7 +147,7 @@ jobs:
   resume-bootstrap:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 95
     steps:
       - uses: actions/checkout@v4
 
@@ -1991,7 +1991,7 @@ jobs:
   test-and-deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     defaults:
       run:
         working-directory: services/btc-conservative-agent
@@ -2032,6 +2032,7 @@ jobs:
           python -m pytest test_bbo_refresh_nonblocking.py -q
           python -m pytest test_xvenue_submit_latency.py -q
           python -m pytest test_preentry_evidence_handoff.py -q
+          python -m pytest test_step2_exit_latency.py test_step2_bootstrap_batch.py -q
           python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py test_shadow_chase_buckets.py test_family_global_chase_gate.py -q
           python -m pytest test_multiverse_tape_maturation.py test_collector_maturation_supervision.py test_multiverse_maturation_starvation.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
           python -m pytest test_lead_lag_report.py test_tile_paired_comparison.py test_tile_win_rate.py test_family_policy_common.py test_family_tile_runtime_peak_persistence.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
@@ -3013,16 +3014,20 @@ jobs:
                       time.sleep(delay)
               raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
 
-          # The audited current cohort has at least 21,353 legacy rows.  At the
-          # bounded 64-receipt worker batch and one-second backlog cadence,
-          # scheduling alone needs 334 cycles (>5.5 minutes).  Forty-five
-          # minutes gives that known cohort material headroom; it is not a
-          # latency guarantee because every child remains independently bounded
-          # by its wall timeout.  Expiry still fails safe in maintenance.
+          # The audited current cohort has at least 21,353 legacy rows.  Each
+          # worker cycle now indexes up to 512 receipts behind ONE durability
+          # barrier (one directory fsync / one SQLite commit per batch; every
+          # receipt file is still fsynced before its rename) and stops early,
+          # cursor saved, before its wall deadline, so the scheduling floor is
+          # 42 cycles.  The 45-minute budget at 64 rows/cycle (two fsyncs per
+          # row plus a subprocess launch per cycle) expired on every deploy.
+          # Ninety minutes is headroom, not a latency guarantee; the cursor is
+          # durable per batch, so an expiry still fails safe in maintenance and
+          # mode=resume-bootstrap continues from the saved cursor.
           observed_bootstrap_rows = 21_353
-          conservative_records_per_cycle = 64
+          conservative_records_per_cycle = 512
           backlog_interval_seconds = 1
-          bootstrap_timeout_seconds = 45 * 60
+          bootstrap_timeout_seconds = 90 * 60
           minimum_cycles = (
               observed_bootstrap_rows + conservative_records_per_cycle - 1
           ) // conservative_records_per_cycle

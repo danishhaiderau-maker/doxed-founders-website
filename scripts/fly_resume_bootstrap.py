@@ -154,7 +154,7 @@ def _common_safe(status: dict, expected: str, *, paused: bool) -> tuple[dict, di
     return progress, pipeline, bootstrap, readiness_failed, diagnostic
 
 
-def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic, sleep=time.sleep, timeout=45 * 60) -> dict:
+def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic, sleep=time.sleep, timeout=90 * 60) -> dict:
     expected = _exact_revision(expected)
     deadline = monotonic() + timeout
     bootstrap_deadline = deadline - min(60, timeout / 4)
