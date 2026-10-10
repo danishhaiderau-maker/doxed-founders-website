@@ -2,6 +2,8 @@
   "schema": "btc_bot_cleanup_characterization_v1",
   "canonical_source": "bot.py",
   "routes": [
+    ["GET", "/api/monitor/streams", "monitor_streams_catalog"],
+    ["GET", "/api/monitor/streams/<name>", "monitor_streams_page"],
     ["POST", "/api/live-copy/tiles/<lane>/eligibility", "api_live_copy_tile_eligibility"],
     ["POST", "/api/live-copy/protection-bootstrap", "api_live_copy_protection_bootstrap"],
     ["POST", "/api/live-copy/output", "api_live_copy_output"],
