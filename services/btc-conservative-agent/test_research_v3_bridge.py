@@ -387,6 +387,28 @@ class V3BridgeTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertEqual(seen[0], seen[1])
 
+    def test_restart_reconciliation_committed_receipt_survives_redeploy(self):
+        """11 Oct: after a deploy the receipt identity differs; durable bytes resolve it."""
+        import research_v3_bridge as bridge
+        import research_v3_store as store_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            first = bridge.reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000)
+            self.assertEqual(first["reconciled"], 1)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            row = json.loads(store.ledger_path("lifecycle").read_text().strip())
+            cache = dict(store_mod._collection_provenance())
+            cache["deployed_revision"] = "next-deploy"
+            with mock.patch.object(store_mod, "_provenance_cache", cache):
+                again = store.append("lifecycle", {k: v for k, v in row.items()
+                                                   if k in ("record_id", "episode_id")} | row)
+                self.assertEqual(again.get("reason"), "EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH")
+                self.assertTrue(bridge._committed_receipt_bytes_durable(
+                    store, "lifecycle", row["record_id"]))
+            self.assertFalse(bridge._committed_receipt_bytes_durable(
+                store, "lifecycle", "lifecycle:nope"))
+
     def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._lost_expected_order(tmp)
