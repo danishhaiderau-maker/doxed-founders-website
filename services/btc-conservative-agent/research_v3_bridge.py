@@ -1396,21 +1396,25 @@ def reconcile_overdue_expected_order_decisions(
             # append can leave a receipt (DEFERRED/COMMITTED) for that id with no
             # ledger row, which made every reconcile attempt a duplicate/blocked
             # no-op forever (336 V3 orphans, HM audit 10 Oct 2026).
-            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order:restart-reconciled",
+            # v2: the row must be byte-identical on every attempt. It used to
+            # carry now/runtime_revision, so a receipt PREPARED by one attempt
+            # never matched the next (EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH,
+            # 450 blocked, 11 Oct). All stamps derive from the decision.
+            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order:restart-reconciled-v2",
             "episode_id": episode_id, "event_id": str(decision.get("event_id") or ""),
             "shared_ai_call_id": str(decision.get("shared_ai_call_id") or ""),
             "research_lane": lane, "policy_signature": policy_signature,
             "resolution_scope": "LANE_ENTRY", "entry_resolution": "NO_ORDER",
             "entry_resolution_terminal": True,
             "exact_reason": "RUNTIME_RESTART_LEDGER_RECONCILIATION",
-            "observed_ts": now_ts, "resolution_deadline_ts": deadline,
+            "observed_ts": deadline, "resolution_deadline_ts": deadline,
             "observation_status": "NO_ORDER", "outcome_state": "NO_TRADE",
             "terminal": True, "ranking_eligible": False, "ranking_blocker": "NO_ORDER",
             "restart_recovery_provenance": {
                 "schema": "v3_restart_ledger_reconciliation_v1",
                 "source_decision_record_id": str(decision.get("record_id") or ""),
                 "source_epoch_id": str(epoch_id), "source_resolution_deadline_ts": deadline,
-                "reconciled_at": now_ts, "runtime_revision": str(runtime_revision or "UNKNOWN"),
+                "reconciled_at": deadline, "reconciler": "v3_restart_ledger_reconciliation_v2",
             },
         }
         for field in ("collection_epoch_id", "opportunity_id", "policy_epoch_id",

@@ -325,9 +325,10 @@ class V3BridgeTests(unittest.TestCase):
                 V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
                 .ledger_path("decision").read_text().strip()
             )["policy_signature"])
+            # Deterministic across attempts (no runtime revision / wall clock).
             self.assertEqual(
-                row["restart_recovery_provenance"]["runtime_revision"],
-                "repair-rev",
+                row["restart_recovery_provenance"]["reconciler"],
+                "v3_restart_ledger_reconciliation_v2",
             )
 
     def test_restart_reconciliation_closes_overdue_awaiting_despite_provisional_child(self):
@@ -364,6 +365,27 @@ class V3BridgeTests(unittest.TestCase):
             terminal = next(row for row in rows if row.get("entry_resolution") == "NO_ORDER")
             self.assertEqual(terminal["episode_id"], receipt["episode_id"])
             self.assertEqual(terminal["exact_reason"], "RUNTIME_RESTART_LEDGER_RECONCILIATION")
+
+    def test_restart_reconciliation_row_is_identical_across_attempts(self):
+        """11 Oct: a receipt PREPARED by one attempt must match the next attempt's row."""
+        import research_v3_bridge as bridge
+        seen = []
+        real = V3EvidenceStore.append
+
+        def capture(store, ledger, row):
+            if ledger == "lifecycle" and row.get("entry_resolution") == "NO_ORDER":
+                seen.append(json.dumps(row, sort_keys=True))
+                return {"written": False, "blocked": True, "reason": "TEST"}
+            return real(store, ledger, row)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            with mock.patch.object(V3EvidenceStore, "append", capture):
+                for ts, rev in ((5000, "rev-a"), (9000, "rev-b")):
+                    bridge.reconcile_overdue_expected_order_decisions(
+                        epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=ts, runtime_revision=rev)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0], seen[1])
 
     def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
