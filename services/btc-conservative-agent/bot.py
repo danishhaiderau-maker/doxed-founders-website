@@ -56953,11 +56953,16 @@ def _bitfinex_live_switch_snapshot() -> dict:
             size = _bitfinex_size_checks_for_lane(lane, ctx)
             op_elig = _get_live_copy_eligibility().is_eligible(lane)
             whynot = sw.why_not_armed(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
+            skip = (_live_copy_last_delivery.get("skips") or {}).get(lane) or {}
+            dn = list(whynot.get("denials") or [])
+            if skip.get("reason") and row.get("bitfinex_live_orders"):
+                dn.append("DELIVERY_SKIPPED:" + str(skip["reason"]))
             rows.append({
                 **row,
                 "live_eligible": op_elig,
                 "eligible": bool(whynot.get("eligible")),
-                "denials": whynot.get("denials") or [],
+                "delivery_skip": skip or None,
+                "denials": dn,
                 "explanation": whynot.get("explanation"),
             })
         try:
@@ -57273,6 +57278,25 @@ def _live_copy_publish(event, trade_id, extra) -> bool:
 _live_copy_delivery_wake = threading.Event()
 
 
+_live_copy_last_delivery: dict = {"skips": {}, "delivered": None}
+
+
+def _note_live_copy_delivery_skip(lane, reason, event_id, now) -> None:
+    _live_copy_last_delivery["skips"][str(lane or "?")] = {
+        "reason": str(reason or ""), "event_id": event_id, "ts": now}
+
+
+def live_copy_delivery_status() -> dict:
+    """Read-only: why the signed outbox did or didn't deliver (no secrets)."""
+    out = _get_live_copy_output().snapshot()
+    ok, reason = _relay_stack_mode.live_copy_delivery_allowed(
+        output_on=bool(out.get("enabled")), source_enabled=_live_copy_source_enabled())
+    return {"allowed": ok, "skip_reason": reason, "relay_stack_mode": _relay_stack_mode.mode(),
+            "research_only_gates_live_copy": False,
+            "last_skips": dict(_live_copy_last_delivery["skips"]),
+            "last_delivered": _live_copy_last_delivery["delivered"]}
+
+
 def _live_copy_deliver_once(now: float | None = None) -> dict:
     now = time.time() if now is None else float(now)
     outbox = _get_live_copy_outbox()
@@ -57283,11 +57307,20 @@ def _live_copy_deliver_once(now: float | None = None) -> dict:
     secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
     sw = _get_bfx_live_switch()
     output = _get_live_copy_output().snapshot()
+    # Option 1 outbox: independent of RELAY_STACK_MODE (research_only only
+    # blocks the legacy relay stack). Needs output ON + source opt-in.
+    stack_ok, stack_reason = _relay_stack_mode.live_copy_delivery_allowed(
+        output_on=bool(output.get("enabled")), source_enabled=_live_copy_source_enabled())
     acked = 0
     for rec in rows:
         payload = rec.get("payload") or {}
         lane = str(payload.get("research_lane") or "").upper()
         event = str(payload.get("event") or "")
+        if not stack_ok and event in _live_copy.ENTRY_EVENTS:
+            outbox.ack(rec["event_id"])
+            _note_live_copy_delivery_skip(lane, stack_reason, rec["event_id"], now)
+            _record_bitfinex_delivery_denial(lane, stack_reason, rec["event_id"])
+            continue
         ok, reason = _live_copy.delivery_check(payload, secret=secret, now=now,
                                                tile_row=sw.snapshot(lane), output=output)
         if ok and event in _live_copy.ENTRY_EVENTS:
@@ -57296,6 +57329,7 @@ def _live_copy_deliver_once(now: float | None = None) -> dict:
             # A withheld ENTRY is dropped (no exchange order can result);
             # the denial is audited. Continuations only fail on a bad approval.
             outbox.ack(rec["event_id"])
+            _note_live_copy_delivery_skip(lane, reason or "LIVE_COPY_DELIVERY_DENIED", rec["event_id"], now)
             _record_bitfinex_delivery_denial(lane, reason or "LIVE_COPY_DELIVERY_DENIED", rec["event_id"])
             continue
         if not url or not secret:
@@ -57317,6 +57351,7 @@ def _live_copy_deliver_once(now: float | None = None) -> dict:
                 raise RuntimeError(f"no durable receipt: {str(receipt.get('reason') or '')[:80]}")
             outbox.ack(rec["event_id"])
             acked += 1
+            _live_copy_last_delivery["delivered"] = {"lane": lane, "event_id": rec["event_id"], "ts": now}
             _record_relay_delivery(event, payload.get("trade_id"), payload.get("ts"), ok=True,
                                    http_latency_ms=(time.perf_counter() - started) * 1000,
                                    platform_received_at=(receipt.get("durable_ack") or {}).get("platform_received_at"))
@@ -57664,6 +57699,7 @@ def _live_copy_monitor_context() -> dict:
         "force_paper_mode": _live_copy_paper_lock_active(),
         "fly_direct_force_paper_mode": _force_paper_mode_active(),
         "relay_stack_mode": _relay_stack_mode.mode(),
+        "live_copy_delivery": live_copy_delivery_status(),
         "switch_rows": [
             {**r, "relay_eligible": (r.get("lane") in PLATFORM_RELAY_ELIGIBLE_LANES) or bool(r.get("live_eligible"))}
             for r in sw.get("rows") or []
