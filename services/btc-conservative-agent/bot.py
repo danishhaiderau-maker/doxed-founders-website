@@ -22772,6 +22772,41 @@ def _force_paper_mode_active() -> bool:
     )
 
 
+def _live_copy_source_enabled() -> bool:
+    """Operator opt-in for Fly as the live-copy SIGNAL SOURCE (Option 1).
+
+    FORCE_PAPER_MODE stays on (Fly's own direct Bitfinex path is retired and
+    the entrypoint refuses to boot without it). LIVE_COPY_SOURCE_ENABLED=1
+    lifts only the paper lock on the signed live-copy approvals Railway
+    executes; output, tile switch, eligibility, size, protection and the
+    copier's own arm still gate every order.
+    """
+    return (os.getenv("LIVE_COPY_SOURCE_ENABLED") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _live_copy_paper_lock_active() -> bool:
+    return _force_paper_mode_active() and not _live_copy_source_enabled()
+
+
+def _ready_tile_live_copy_rows() -> dict:
+    """Per-tile operator live eligibility + Bitfinex live switch for /ready."""
+    try:
+        elig = _get_live_copy_eligibility().status().get("rows") or {}
+        sw_rows = {str(r.get("lane")): r for r in (_bitfinex_live_switch_snapshot().get("rows") or [])}
+        out = {}
+        for lane, row in elig.items():
+            sw = sw_rows.get(lane) or {}
+            out[lane] = {"live_eligible": bool(row.get("live_eligible")),
+                         "bitfinex_live_orders": bool(sw.get("bitfinex_live_orders")),
+                         "selectable": True}
+        return {"rows": out, "output_on": bool(_get_live_copy_output().enabled),
+                "paper_lock": _live_copy_paper_lock_active()}
+    except Exception as exc:  # noqa: BLE001 - read-only display
+        return {"error": type(exc).__name__}
+
+
 def _paper_skips_entry_risk_pauses() -> bool:
     """True when DAILY_DRAWDOWN / LOSS_STREAK must not pause new entries.
 
@@ -46288,6 +46323,9 @@ def ready():
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
+        # Real per-tile live-copy setting (the registry's relay_eligible /
+        # relay_capability is the static label; the operator switch decides).
+        "tile_live_copy": _ready_tile_live_copy_rows(),
         "heartbeat_age": heartbeat_age,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
@@ -56692,7 +56730,7 @@ def _bitfinex_readiness_context() -> dict:
     runtime = _runtime_readiness_components(now)
     return {
         "global_arm": {
-            "force_paper_mode": _force_paper_mode_active(),
+            "force_paper_mode": _live_copy_paper_lock_active(),
             "live_armed": live_armed,
             "bitfinex_live_enabled": bfx_enabled,
             "relay_delivery_block": relay_block,
@@ -56980,7 +57018,7 @@ def _live_copy_stamp_payload(payload, signal_at=None):
                                     operator_eligible=op_elig, exchange_flat_required=False)
             ok, reasons = _live_copy.entry_gate(
                 lane=lane, created_at_ts=now, spec=spec, output=output, tile_row=sw.snapshot(lane),
-                tile_eval=tile_eval, force_paper_mode=_force_paper_mode_active(),
+                tile_eval=tile_eval, force_paper_mode=_live_copy_paper_lock_active(),
                 operator_eligible=op_elig,
             )
             if not ok:
@@ -57009,7 +57047,7 @@ def _live_copy_stamp_payload(payload, signal_at=None):
                     event=event, trade_id=trade_id, lane=lane, now=now,
                     signal_at_ts=_iso_or_ts_to_unix(signal_at or payload.get("source_created_at")),
                     spec=spec, output=output, tile_row=sw.snapshot(lane), tile_eval=tile_eval,
-                    force_paper_mode=_force_paper_mode_active(), decisions=_get_live_copy_decisions(),
+                    force_paper_mode=_live_copy_paper_lock_active(), decisions=_get_live_copy_decisions(),
                     secret=(os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip(),
                     bot_instance_id=BOT_INSTANCE_ID, operator_eligible=op_elig,
                 )
@@ -57296,7 +57334,7 @@ def api_live_copy_output():
         return jsonify({"error": "'enabled' must be a JSON boolean", "example": {"enabled": False}}), 400
     output = _get_live_copy_output()
     if enabled:
-        if _force_paper_mode_active():
+        if _live_copy_paper_lock_active():
             return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
                             "live_copy_output": output.snapshot()}), 409
         snap = output.set(True, by="dashboard", reason="OPERATOR_ON")
@@ -57359,6 +57397,8 @@ def api_live_copy_status():
         "fly_direct_trading_path": "RETIRED",
         "live_copy_output": _get_live_copy_output().snapshot(),
         "force_paper_mode": _force_paper_mode_active(),
+        "live_copy_source_enabled": _live_copy_source_enabled(),
+        "live_copy_paper_lock": _live_copy_paper_lock_active(),
         "relay_stack_mode": _relay_stack_mode.mode(),
         "relay_eligible_lanes": sorted(PLATFORM_RELAY_ELIGIBLE_LANES),
         "tiles": [{k: r.get(k) for k in ("lane", "tile_number", "live_eligible", "bitfinex_live_orders",
@@ -57568,6 +57608,14 @@ def api_bitfinex_tile_live_orders(lane: str):
     ga = ctx.get("global_arm") or {}
     size = _bitfinex_size_checks_for_lane(lane, ctx)
     op_elig = _get_live_copy_eligibility().is_eligible(lane)
+    if enabled and not op_elig:
+        # One click: switching an active tile live ON also makes it
+        # operator-eligible (every active tile is selectable).
+        from combo_pathway_config import ACTIVE_TILE_REGISTRY
+        if lane in ACTIVE_TILE_REGISTRY:
+            _get_live_copy_eligibility().set(lane, True, by="dashboard",
+                                             reason="OPERATOR_ELIGIBLE_VIA_TILE_SWITCH")
+            op_elig = _get_live_copy_eligibility().is_eligible(lane)
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:

@@ -147,8 +147,9 @@ export class TradingAgentsController {
     @Query('userId') userId: string | undefined,
     @Headers('x-bot-admin-token') adminHeader?: string,
     @Headers('authorization') authorization?: string,
+    @Query('handle') handle?: string,
   ) {
-    return this.requireLiveCopyOps().accountCheck(slug, userId, adminHeader, authorization);
+    return this.requireLiveCopyOps().accountCheck(slug, userId, adminHeader, authorization, handle);
   }
 
   private requireLiveCopyOps(): LiveCopyOpsService {

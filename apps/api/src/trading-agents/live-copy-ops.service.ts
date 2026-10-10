@@ -47,9 +47,29 @@ export class LiveCopyOpsService {
     private readonly reporter: LiveCopyFlyReporterService,
   ) {}
 
-  async accountCheck(slug: string, userId: string | undefined, adminHeader?: string, authorization?: string) {
+  async accountCheck(
+    slug: string,
+    userId: string | undefined,
+    adminHeader?: string,
+    authorization?: string,
+    handle?: string,
+  ) {
     assertBotAdminToken(adminHeader, authorization);
-    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (!userId?.trim() && handle?.trim()) {
+      const h = handle.trim().replace(/^@/, '');
+      const user = await this.prisma.user.findFirst({
+        where: {
+          OR: [
+            { platformHandle: { equals: h, mode: 'insensitive' } },
+            { twitterHandle: { equals: h, mode: 'insensitive' } },
+          ],
+        },
+        select: { id: true },
+      });
+      if (!user) return { schema: 'website_live_copy_account_check_v1', found: false, ready_for_live_copy: false, blockers: ['HANDLE_NOT_FOUND'] };
+      userId = user.id;
+    }
+    if (!userId?.trim()) throw new BadRequestException('userId or handle query param is required');
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug }, select: { id: true } });
     if (!agent) throw new NotFoundException('Agent not found');
     const instance = await this.prisma.tradingAgentInstance.findUnique({
@@ -66,17 +86,23 @@ export class LiveCopyOpsService {
     checks.entitlement = { status: instance.status, hire_active: hireActive, expires_at: instance.expiresAt?.toISOString() ?? null };
     if (!hireActive) blockers.push('ENTITLEMENT_INACTIVE');
     const armed = liveCopyAccountArmed(instance);
+    // A user Start clears the alert and acks it; only an open, unacked alert blocks.
+    const mismatchActive =
+      typeof dash.positionMismatchDetectedAt === 'string' &&
+      dash.positionMismatchAlert != null &&
+      dash.positionMismatchAlertAcked !== true;
     const health = readPersistedRelayExecutorHealth(dash);
     checks.arm = {
       armed,
       relay_armed_at: typeof dash.relayArmedAt === 'string' ? dash.relayArmedAt : null,
       exchange_provider: instance.exchangeProvider,
       executor_healthy: health.healthy,
-      position_mismatch: typeof dash.positionMismatchDetectedAt === 'string',
+      position_mismatch: mismatchActive,
+      position_mismatch_last_detected_at: typeof dash.positionMismatchDetectedAt === 'string' ? dash.positionMismatchDetectedAt : null,
       last_error: instance.lastError ? String(instance.lastError).slice(0, 200) : null,
     };
     if (!armed) blockers.push('ACCOUNT_NOT_ARMED');
-    if (typeof dash.positionMismatchDetectedAt === 'string') blockers.push('POSITION_MISMATCH');
+    if (mismatchActive) blockers.push('POSITION_MISMATCH');
 
     const status = await this.exchanges.getUserExchangeStatus(userId.trim(), 'bitfinex');
     const resolution = await this.exchanges.resolveUserCredentials(userId.trim(), 'bitfinex');
