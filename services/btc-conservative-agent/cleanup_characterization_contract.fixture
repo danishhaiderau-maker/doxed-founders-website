@@ -88,6 +88,8 @@
     ["GET", "/api/monitor/tiles/counters", "monitor_tiles_counters"],
     ["GET", "/api/monitor/tiles/totals", "monitor_tiles_totals"],
     ["GET", "/api/monitor/tape", "monitor_tape"],
+    ["GET", "/api/monitor/streams", "monitor_streams_catalog"],
+    ["GET", "/api/monitor/streams/<name>", "monitor_streams_page"],
     ["GET", "/alerts", "alerts_page"],
     ["GET", "/api/restart-cause", "restart_cause"],
     ["GET", "/restart-cause", "restart_cause"],
