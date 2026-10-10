@@ -32815,6 +32815,9 @@ def _emergency_api_guard():
         return None
     if method == "GET" and path in _MONITOR_TILE_PATHS:
         return None
+    # Read-only research stream pulls; monitor token checked in the handler.
+    if method == "GET" and (path == "/api/monitor/streams" or path.startswith("/api/monitor/streams/")):
+        return None
     # Live-copy monitoring (admin or MONITOR_READ_TOKEN, checked per handler).
     if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"):
         return None
@@ -45760,6 +45763,45 @@ def monitor_tape():
         }
 
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TAPE_BYTES)
+
+
+@app.route('/api/monitor/streams', methods=["GET"])
+def monitor_streams_catalog():
+    """Catalog of pullable research streams (monitor token, read-only)."""
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import monitor_streams
+    return jsonify({**monitor_streams.catalog(os.getcwd()), "server_ts": time.time()})
+
+
+@app.route('/api/monitor/streams/<name>', methods=["GET"])
+def monitor_streams_page(name):
+    """One paginated JSONL page: ?cursor=<byte offset>&limit_bytes=&inode=.
+
+    Body is gzip-compressed JSONL (Content-Encoding: gzip when accepted, else
+    application/gzip); page metadata is in X-Stream-* headers.
+    """
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import gzip as _gz
+    import monitor_streams
+    try:
+        header, body = monitor_streams.read_page(
+            os.getcwd(), name, request.args.get("cursor"), request.args.get("limit_bytes"),
+            request.args.get("inode"))
+    except monitor_streams.BadRequest as exc:
+        return jsonify({"error": "bad_request", "reason": str(exc)[:160]}), 400
+    packed = _gz.compress(body, compresslevel=5)
+    resp = app.response_class(packed, status=200)
+    if "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        resp.headers["Content-Type"] = "application/x-ndjson"
+        resp.headers["Content-Encoding"] = "gzip"
+    else:
+        resp.headers["Content-Type"] = "application/gzip"
+    for key, value in header.items():
+        resp.headers["X-Stream-" + key.replace("_", "-").title()] = str(value)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route('/api/research/shadow_exits')
