@@ -1421,6 +1421,8 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         # after Start is incorrectly reported as a fresh source-only gap.
         "created_ts": signal_ts or order_created or fill_ts,
         "signal_created_ts": signal_ts or order.get("signal_created_ts"),
+        "decision_ts": order.get("decision_ts") or signal.get("decision_ts") or order_created,
+        "entry_lock_wait_ms": order.get("entry_lock_wait_ms"),
         "order_created_ts": order_created,
         "sl": entry * (1 - sl_price_pct(_state_leverage())) if direction == "LONG" else entry * (1 + sl_price_pct(_state_leverage())),
         "tp": compute_tp(entry, direction, TP_TARGET_PCT, _state_leverage()),
@@ -24067,6 +24069,9 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         ]
 
     def live_mutator():
+        # Wait from commit start to the locked live mutation (state/trade lock
+        # acquisition + durable transition write), stamped onto the trade row.
+        order["entry_lock_wait_ms"] = round((time.time() - entry_commit_start) * 1000.0, 3)
         trade_id = str(order.get("trade_id") or "")
         if any(str(row.get("trade_id") or "") == trade_id for row in pending_orders):
             raise RuntimeError("pending-order live identity already exists")
@@ -24092,6 +24097,8 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "bot_version": EXECUTION_FIX_VERSION,
         "strategy_mode": str(state.get("strategy_mode") or "RESEARCH").upper(),
     }
+    order.setdefault("decision_ts", order_created_ts)
+    entry_commit_start = time.time()
     _commit_paper_lifecycle_transition(
         "ORDER_PLACED", signal.get("trade_id"), relay_extra,
         target_mutator=target_mutator, live_mutator=live_mutator,
@@ -28239,6 +28246,14 @@ def microstructure_capture_loop():
             regime_bars_3m.ENGINE.observe_row(row)
         except Exception as exc:
             logger.debug(f"[REGIME BARS] observe skipped: {exc}")
+        try:
+            # Tile 15 DYN-AF stage A: shadow regime minute log, never orders.
+            import dyn_regime as _dyn_regime
+            dyn_row = _dyn_regime.ENGINE.observe_row(row)
+            if dyn_row:
+                _safe_append_jsonl(_dyn_regime.FILE_NAME, dyn_row, label="DYN_REGIME_MINUTE")
+        except Exception as exc:
+            logger.debug(f"[DYN REGIME] observe skipped: {exc}")
         append_outcome = {}
         written = _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
@@ -29435,7 +29450,10 @@ def create_limit_order(signal):
             )
             return None
     order["_initial_dispatch_start_ts"] = time.time()
+    order.setdefault("decision_ts", signal.get("order_created_ts"))
+    _lock_wait_start = time.time()
     with trade_lock:
+        order["entry_lock_wait_ms"] = round((time.time() - _lock_wait_start) * 1000.0, 3)
         registered = lane_register_pending_order(order)
     if not registered:
         signal["order_placed"] = False
@@ -46113,6 +46131,7 @@ def status():
             "xvl_evaluator": xvl_evaluator_snapshot(),
             "protective_exit": protective_exit_snapshot(),
             "v3_expected_order_reconcile": dict(_v3_expected_order_reconcile_last),
+            "dyn_regime": __import__("dyn_regime").ENGINE.snapshot(),
             "market_context_tape": {
                 "tape_schema": _mct.SCHEMA,
                 "file": _mct.FILE_NAME,

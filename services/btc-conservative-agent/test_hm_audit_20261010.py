@@ -51,3 +51,12 @@ def test_balance_restore_treats_zero_net_as_zero_not_percent(monkeypatch):
     monkeypatch.setitem(bot.state, "account_balance", 0.0)
     bot._recompute_research_balance_from_trades()
     assert bot.state["account_balance"] == round(bot.STARTING_BALANCE - 0.25, 4)
+
+
+def test_open_position_carries_decision_ts_and_entry_lock_wait():
+    order = {"trade_id": "t-dec", "limit_price": 60000.0, "qty": 0.001, "created_ts": 100.0,
+             "decision_ts": 99.5, "entry_lock_wait_ms": 12.5, "signal_dir": "LONG"}
+    signal = {"trade_id": "t-dec", "final_direction": "LONG", "signal_price": 60000.0,
+              "order_created_ts": 100.0}
+    pos = bot._build_open_position(order, signal)
+    assert pos["decision_ts"] == 99.5 and pos["entry_lock_wait_ms"] == 12.5

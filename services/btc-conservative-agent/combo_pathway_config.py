@@ -137,6 +137,8 @@ RESEARCH_LANE_FAMILY_FADE_POOL = "FAMILY_FADE_POOL"
 GS07_FAST_PREMIUM_FADE_ADMISSION_POLICY_ID = "GS07_FAST_CROSS_VENUE_PREMIUM_FADE_NO_AI_V1"
 DANISH_REGIME_ROUTER_ADMISSION_POLICY_ID = "DANISH_REGIME_ROUTER_DYNAMIC_V1"
 FADE_POOL_ADMISSION_POLICY_ID = "FADE_POOL_COMMITTED_AND_PREMIUM_V1"
+RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M = "FAMILY_GS07_V07_PREMIUM_FADE_60M"
+GS07_V07_ADMISSION_POLICY_ID = "GS07_V07_CROSS_VENUE_PREMIUM_DEV60M_2P5BP_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -187,6 +189,7 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
     RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
     RESEARCH_LANE_FAMILY_FADE_POOL,
+    RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1498,6 +1501,52 @@ RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
+# Tile 14 · GS-07 V07 (owner order 10 Oct 2026; TILE14-TILE15-DESIGN-20261008 §2,
+# PHASE3-TILES-AUDIT-20261009): H-C's cross-venue premium rule on the 60-minute
+# mean with symmetric +/-2.5 bp thresholds, at most one entry per 300 s and 12/h,
+# up to six open, 60-minute hold, 40 bp hard stop; stop and time exit only.
+_GS07_V07_ENTRY = {
+    **_PREMIUM_REVERSION_ENTRY,
+    "premium_long_threshold_bps": 2.5, "premium_short_threshold_bps": -2.5,
+    "evaluator_id_prefix": "g7v",
+    "min_submit_interval_sec": 300, "max_submissions_per_hour": 12,
+}
+_GS07_V07_EXIT = _composite_exit(
+    max_duration_sec=3600, max_open_positions=6,
+    volatility_scaling="NONE - stop and time exit only (V07 spec)",
+)
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M: _tile(
+        lane=RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
+        label="Tile 14 · GS-07 V07 premium fade · Binance/Bybit premium vs 60-min mean +/-2.5 bp, taker, 60-min hold, 40 bp stop",
+        raw_policy_id=("GS07V07_XVENUE_PREMIUM_DEV60M_L2.5_S2.5BP_TAKER_CAP5BPS_GAP300S_12H"
+                       "|TIME_3600_HARD40BP_CAP6"),
+        id_prefix="g7v",
+        module="paper_policy_family_gs07_v07_premium_fade_60m.py",
+        test_module="test_paper_policy_family_gs07_v07_premium_fade_60m.py",
+        entry=dict(_GS07_V07_ENTRY), exit_policy=dict(_GS07_V07_EXIT),
+        hypothesis_result={"status": "GS20261010_MID_EPOCH_SPEC_V07", "hypothesis_id": "GS-20261010-07V07",
+                           "in_sample": ("Strategist V07 replay: ~+0.8 bp/trade at 110-135 trades/day on the "
+                                         "60-min mean +/-2.5 bp rule; in-sample, not an OOS edge")},
+        pre_registration=_phase3_pre(
+            "GS-20261010-07V07",
+            spec_source="audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07) + PHASE3-TILES-AUDIT-20261009",
+            decisions=("premium vs 60-min mean, +/-2.5 bp, 300 s spacing, 12/h, 6 open, 60-min hold, "
+                       "stop and time exit only",),
+        ),
+        admission_treatment=GS07_V07_ADMISSION_POLICY_ID,
+        max_active_signals=6, entry_ttl_sec=3, default_enabled=False,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="Tile 14 · GS-07 V07 — premium fade on the 60-min mean — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("the Binance/Bybit premium over Bitfinex leaves its own 60-minute mean by >= +2.5 / "
+                        "<= -2.5 bp; take Bitfinex toward convergence as a taker and hold 60 minutes"),
+        live_exit_order=registry_live_exit_order(_GS07_V07_EXIT),
+        shadow_exits=ALL_SHADOW_EXITS,
+        early_cut_shadow_reason="V07 spec: stop and time exit only; every other protection is shadow-only",
+    ),
+})
+
+
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
 # EXECUTION_FIX_VERSION / bot_version is the FREEZE21B cohort identity stamped on
@@ -2331,3 +2380,4 @@ def any_combo_execution_enabled(enabled_map: dict = None, continuous_enabled: bo
             if lane in merged:
                 merged[lane] = bool(val)
     return any(merged.values())
+
