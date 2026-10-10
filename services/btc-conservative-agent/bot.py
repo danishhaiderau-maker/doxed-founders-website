@@ -38406,12 +38406,13 @@ DASHBOARD_JS = """(function () {
           const tileLiveRequested = tileLiveOn || !!(liveRow && liveRow.live_requested === true);
           if (tileOperatorEligible && !(spec.planned || spec.status === 'RETIRED')) {
             const boot = ((d && d.bitfinex_live_switch) || {}).protection_bootstrap || {};
-            const bootHere = boot.active === true && boot.lane === spec.lane;
+            const bootSlot = (boot.lanes || {})[spec.lane] || {};
+            const bootHere = bootSlot.active === true;
             const bootLabel = bootHere
-              ? 'ACTIVE' + (boot.trade_id ? ' (bound to ' + cardEsc(boot.trade_id) + ')' : ' (one trade, ends on fill / 24h)')
-              : (boot.used ? 'USED' : 'OFF');
+              ? 'ACTIVE' + (bootSlot.trade_id ? ' (bound to ' + cardEsc(bootSlot.trade_id) + ')' : ' (one trade, ends on fill / 24h)')
+              : (bootSlot.spent ? 'USED (filled)' : (bootSlot.ended_reason ? 'ENDED, no fill (' + cardEsc(bootSlot.ended_reason) + ')' : 'OFF'));
             eligHtml += '<div style="margin-top:4px;"><strong>Stop bootstrap:</strong> <span style="font-weight:700;color:' + (bootHere ? '#f59e0b' : '#8b949e') + ';">' + bootLabel + '</span> '
-              + (boot.used && !bootHere ? '' : '<button type="button" onclick="toggleProtectionBootstrap(\\'' + cardEsc(spec.lane) + '\\', ' + (bootHere ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (bootHere ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (bootHere ? 'End bootstrap' : 'One-time bootstrap') + '</button>')
+              + (bootSlot.spent && !bootHere ? '' : '<button type="button" onclick="toggleProtectionBootstrap(\\'' + cardEsc(spec.lane) + '\\', ' + (bootHere ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (bootHere ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (bootHere ? 'End bootstrap' : (bootSlot.ended_reason ? 'Re-arm bootstrap' : 'One-time bootstrap')) + '</button>')
               + '</div>';
           }
           if (spec.planned || spec.status === 'RETIRED') {
@@ -57414,8 +57415,7 @@ def api_live_copy_tile_eligibility(lane: str):
         except Exception:  # noqa: BLE001
             pass
         try:
-            if _get_live_copy_bootstrap().snapshot().get("lane") == str(lane or "").upper():
-                _get_live_copy_bootstrap().disable(reason="LIVE_ELIGIBILITY_OFF")
+            _get_live_copy_bootstrap().disable(reason="LIVE_ELIGIBILITY_OFF", lane=str(lane or "").upper())
         except Exception:  # noqa: BLE001
             pass
     logger.warning(f"[LIVE COPY] tile {lane} live eligibility -> {eligible} ok={ok} [PIPELINE ENFORCEMENT]")
@@ -57531,13 +57531,15 @@ def api_live_copy_output():
 
 @app.route('/api/live-copy/protection-bootstrap', methods=['POST'])
 def api_live_copy_protection_bootstrap():
-    """One-time operator protection bootstrap (admin). Default OFF.
+    """Operator protection bootstrap (admin). Default OFF. One trade per lane.
 
-    {"enabled": true, "lane": "GS01"} stands in for stop-coverage /
-    reduce-only readiness for that one lane and its first approved trade; it
-    ends on that trade's fill, after 24 h, or on restart, and can never be
-    re-enabled once a trade has used it. Only an operator-eligible active
-    tile qualifies. {"enabled": false} ends it.
+    {"enabled": true, "lane": "GS01"} or {"enabled": true, "lanes": ["GS01", "ROUTER"]}
+    stands in for stop-coverage / reduce-only readiness for each lane and its
+    first approved trade; it ends on that trade's fill or after 24 h. A lane
+    whose bootstrap trade FILLED is spent forever; one that ended without a
+    fill (restart while claimed, expiry, output OFF, operator OFF) may be
+    re-armed here. Only operator-eligible active tiles qualify.
+    {"enabled": false} ends all (or {"enabled": false, "lane": X} one lane).
     """
     if not _admin_authed_strict():
         return jsonify({"ok": False, "error": "admin token required"}), 401
@@ -57545,21 +57547,44 @@ def api_live_copy_protection_bootstrap():
     enabled = _strict_json_boolean(data, "enabled")
     if enabled is None:
         return jsonify({"error": "'enabled' must be a JSON boolean",
-                        "example": {"enabled": True, "lane": "GS01"}}), 400
+                        "example": {"enabled": True, "lanes": ["GS01"]}}), 400
     boot = _get_live_copy_bootstrap()
+    raw_lanes = data.get("lanes") if isinstance(data.get("lanes"), list) else [data.get("lane")]
+    lanes = [str(x or "").strip().upper() for x in raw_lanes if str(x or "").strip()]
     if not enabled:
-        snap = boot.disable(reason="OPERATOR_OFF")
+        snap = boot.disable(reason="OPERATOR_OFF", lane=(lanes[0] if len(lanes) == 1 else None))
         logger.warning("[LIVE COPY] protection bootstrap -> OFF [PIPELINE ENFORCEMENT]")
         return jsonify({"ok": True, "protection_bootstrap": snap})
-    lane = str(data.get("lane") or "").strip().upper()
+    if not lanes:
+        return jsonify({"ok": False, "error": "LANE_REQUIRED"}), 400
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
-    if lane not in ACTIVE_TILE_REGISTRY:
-        return jsonify({"ok": False, "error": "LANE_NOT_ACTIVE", "lane": lane}), 409
-    if not _get_live_copy_eligibility().is_eligible(lane):
-        return jsonify({"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE", "lane": lane}), 409
-    ok, snap = boot.enable(lane, by="dashboard", reason="OPERATOR_BOOTSTRAP")
-    logger.warning(f"[LIVE COPY] protection bootstrap {lane} -> ON ok={ok} [PIPELINE ENFORCEMENT]")
-    return jsonify({"ok": ok, "protection_bootstrap": snap}), (200 if ok else 409)
+    results = {}
+    for lane in lanes[:_live_copy.BOOTSTRAP_MAX_ACTIVE_LANES]:
+        if lane not in ACTIVE_TILE_REGISTRY:
+            results[lane] = {"ok": False, "error": "LANE_NOT_ACTIVE"}
+            continue
+        if not _get_live_copy_eligibility().is_eligible(lane):
+            results[lane] = {"ok": False, "error": "LANE_NOT_OPERATOR_ELIGIBLE"}
+            continue
+        prior_tid = ((boot.snapshot().get("lanes") or {}).get(lane) or {}).get("trade_id")
+        prior_filled = False
+        if prior_tid:
+            try:
+                prior_filled = any(
+                    str(r.get("type")) in _live_copy.BOOTSTRAP_FILL_REPORT_TYPES
+                    for r in _get_live_copy_journal().by_correlation().get(str(prior_tid), [])
+                )
+            except Exception:  # noqa: BLE001 - cannot prove no fill: treat as spent
+                prior_filled = True
+        ok, snap = boot.enable(lane, by="dashboard", reason="OPERATOR_BOOTSTRAP",
+                               prior_trade_filled=prior_filled)
+        results[lane] = {"ok": ok, "error": snap.get("error")}
+        logger.warning(f"[LIVE COPY] protection bootstrap {lane} -> ON ok={ok} "
+                       f"err={snap.get('error')} [PIPELINE ENFORCEMENT]")
+    all_ok = bool(results) and all(r["ok"] for r in results.values())
+    first = next(iter(results.values()), {})
+    return jsonify({"ok": all_ok, "error": None if all_ok else first.get("error"),
+                    "results": results, "protection_bootstrap": boot.snapshot()}), (200 if all_ok else 409)
 
 
 @app.route('/api/live-copy/status', methods=['GET'])
@@ -57646,6 +57671,28 @@ def api_live_copy_execution_report():
                     "protection_evidence_recorded": bool(protection),
                     "protection_bootstrap_ended": bool(bootstrap_ended),
                     "fly_received_at_ts": now})
+
+
+@app.route('/api/live-copy/executor-capability', methods=['POST'])
+def api_live_copy_executor_capability():
+    """Signed capability report from the Railway executor (no admin token).
+
+    HMAC over the raw body with the capability-domain key derived from
+    SHOWCASE_WEBHOOK_SECRET. The executor declares how it protects a copied
+    fill (a Bitfinex STOP with the REDUCE_ONLY flag on tBTCF0:USTF0); a fresh
+    verified report is the source of ``reduce_only_supported``. It never sets
+    stop coverage (that needs a real STOP_CONFIRMED or the bootstrap).
+    """
+    raw = request.get_data(cache=True) or b""
+    secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    sig = request.headers.get("X-Executor-Capability-Signature") or ""
+    now = time.time()
+    ok, reason, rep = _live_copy.verify_capability_report(raw, sig, secret, now)
+    if not ok:
+        _live_copy_ingest_rejects.append({"ts": now, "reason": f"CAPABILITY_{reason}"})
+        return jsonify({"ok": False, "error": reason}), (401 if reason == "SIGNATURE_INVALID" else 400)
+    recorded = _get_live_copy_protection().record_executor_capability(rep)
+    return jsonify({"ok": True, "reduce_only_supported": bool(recorded), "fly_received_at_ts": now})
 
 
 @app.route('/api/live-copy/fly-key-identity', methods=['GET'])

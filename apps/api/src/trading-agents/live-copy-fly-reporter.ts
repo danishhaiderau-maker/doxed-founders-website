@@ -5,8 +5,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   approvalPermitsRelayCopy,
   readEnvelopeFlyApproval,
+  signExecutorCapability,
   signLiveExecutionReport,
 } from './live-copy-approval';
+import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
+
+/**
+ * The copier's protective stop as submitStopOrder sends it (type STOP, flags
+ * BITFINEX_REDUCE_ONLY_FLAG). The spec test pins this against the client
+ * source so the declared capability cannot drift from the real order.
+ */
+export const EXECUTOR_PROTECTIVE_STOP_SPEC = Object.freeze({ type: 'STOP' as const, flags: BITFINEX_REDUCE_ONLY_FLAG });
 
 /**
  * Option 1 report-back (2026-10-09): every fill, protective stop, close and
@@ -19,6 +28,32 @@ import {
 export const LIVE_EXECUTION_REPORT_SCHEMA = 'railway_live_execution_report_v1';
 export const LIVE_COPY_REPORT_PATH = '/api/live-copy/execution-report';
 const LOOKBACK_MS = 24 * 3_600_000;
+export const EXECUTOR_CAPABILITY_SCHEMA = 'railway_executor_capability_v1';
+export const EXECUTOR_CAPABILITY_PATH = '/api/live-copy/executor-capability';
+const CAPABILITY_EVERY_MS = 60_000;
+
+/**
+ * Pure: the executor's capability report, derived from the exact protective
+ * stop spec submitStopOrder sends (STOP + REDUCE_ONLY on tBTCF0:USTF0).
+ */
+export function buildExecutorCapabilityReport(nowMs: number): Record<string, unknown> {
+  const flags = EXECUTOR_PROTECTIVE_STOP_SPEC.flags;
+  const reduceOnly = (flags & BITFINEX_REDUCE_ONLY_FLAG) === BITFINEX_REDUCE_ONLY_FLAG;
+  return {
+    schema: EXECUTOR_CAPABILITY_SCHEMA,
+    executor: 'railway-relay-executor',
+    executor_version: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ?? null,
+    symbol: BITFINEX_BTC_PERP_SYMBOL,
+    reduce_only_supported: reduceOnly,
+    protective_stop: {
+      order_type: EXECUTOR_PROTECTIVE_STOP_SPEC.type,
+      flags,
+      reduce_only: reduceOnly,
+      placed: 'ONCE_AT_ENTRY_FILL',
+    },
+    sent_at_ts: nowMs / 1000,
+  };
+}
 
 export type ReporterCycle = { id: string; tradeId: string; intentEnvelope: unknown };
 export type ReporterEvent = {
@@ -286,6 +321,8 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   readonly acked = new Map<string, number>();
   private readonly lastAttempt = new Map<string, number>();
   readonly stats = { lastRunAt: 0, sent: 0, failed: 0, lastError: null as string | null, pending: 0 };
+  readonly capability = { lastSentAt: 0, lastOkAt: 0, lastError: null as string | null };
+  private lastCapabilityAttempt = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -351,6 +388,33 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
     return reports;
   }
 
+  /** Signed capability report to Fly, at most once a minute (best effort). */
+  async sendCapability(secret: string, nowMs = Date.now()): Promise<boolean> {
+    if (nowMs - this.lastCapabilityAttempt < CAPABILITY_EVERY_MS) return false;
+    this.lastCapabilityAttempt = nowMs;
+    const body = JSON.stringify(buildExecutorCapabilityReport(nowMs));
+    const sig = signExecutorCapability(body, secret);
+    if (!sig) return false;
+    this.capability.lastSentAt = nowMs;
+    try {
+      const res = await fetch(`${this.flyUrl()}${EXECUTOR_CAPABILITY_PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'X-Executor-Capability-Signature': sig },
+        body,
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) {
+        this.capability.lastOkAt = Date.now();
+        this.capability.lastError = null;
+        return true;
+      }
+      this.capability.lastError = `HTTP_${res.status}`;
+    } catch (err) {
+      this.capability.lastError = err instanceof Error ? err.name : 'FETCH_FAILED';
+    }
+    return false;
+  }
+
   async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -358,6 +422,7 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
       const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET');
       if (!String(secret ?? '').trim()) return;
       const nowMs = Date.now();
+      await this.sendCapability(secret as string, nowMs);
       const reports = (await this.collect(nowMs)).filter((r) => !this.acked.has(r.report_id));
       this.stats.pending = reports.length;
       for (const r of reports) {

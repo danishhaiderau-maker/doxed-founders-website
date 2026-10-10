@@ -14,6 +14,7 @@ export const FLY_LIVE_COPY_APPROVAL_SCHEMA = 'fly_live_copy_approval_v1';
 export const FLY_LIVE_COPY_APPROVAL_DOMAIN = 'fly-live-copy-approval-v1';
 export const LIVE_EXECUTION_REPORT_DOMAIN = 'railway-live-execution-report-v1';
 export const FLY_WEBSITE_STATE_DOMAIN = 'fly-website-state-v1';
+export const EXECUTOR_CAPABILITY_DOMAIN = 'railway-executor-capability-v1';
 /** An entry approval older than this is stale (intent must be fresh). */
 export const FLY_APPROVAL_MAX_AGE_SEC = 120;
 export const LIVE_COPY_ENTRY_EVENTS = new Set(['ORDER_PLACED', 'LIMIT_UPDATED']);
@@ -279,6 +280,13 @@ export function approvalBackedStopLossMarginPct(
 /** Signature for an executor report POSTed back to Fly (raw body bytes). */
 export function signLiveExecutionReport(rawBody: string | Buffer, secret: string | undefined | null): string | null {
   const key = deriveLiveCopyKey(secret, LIVE_EXECUTION_REPORT_DOMAIN);
+  if (!key) return null;
+  return `sha256=${createHmac('sha256', key).update(rawBody).digest('hex')}`;
+}
+
+/** Signs the executor capability report (own HMAC domain) for Fly. */
+export function signExecutorCapability(rawBody: string | Buffer, secret: string | undefined | null): string | null {
+  const key = deriveLiveCopyKey(secret, EXECUTOR_CAPABILITY_DOMAIN);
   if (!key) return null;
   return `sha256=${createHmac('sha256', key).update(rawBody).digest('hex')}`;
 }

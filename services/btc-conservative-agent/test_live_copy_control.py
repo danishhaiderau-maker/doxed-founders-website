@@ -406,7 +406,7 @@ def test_bootstrap_default_off_one_lane_one_trade(tmp_path):
     assert not b.covers(LANE, "t-2") and not b.covers(LANE)  # second trade refused
     assert not b.claim(LANE, "t-2")
     # Persisted (fsync'd sidecar) with the binding.
-    assert json.loads((tmp_path / "boot.json").read_text())["state"]["trade_id"] == "t-1"
+    assert json.loads((tmp_path / "boot.json").read_text())["state"]["lanes"][LANE]["trade_id"] == "t-1"
 
 
 def test_bootstrap_ends_on_fill_and_is_never_reusable(tmp_path):
@@ -417,13 +417,14 @@ def test_bootstrap_ends_on_fill_and_is_never_reusable(tmp_path):
     assert not b.observe_report({"type": "ORDER_FILLED", "correlation_id": "other"})
     assert b.observe_report({"type": "ORDER_FILLED", "correlation_id": "t-1"})
     snap = b.snapshot()
-    assert not snap["active"] and snap["used"] and snap["ended_reason"] == "TRADE_ORDER_FILLED"
+    slot = snap["lanes"][LANE]
+    assert not snap["active"] and slot["spent"] and slot["ended_reason"] == "TRADE_ORDER_FILLED"
     assert not b.covers(LANE, "t-1")
     ok, snap = b.enable(LANE)
     assert not ok and snap["error"] == "BOOTSTRAP_ALREADY_USED"
 
 
-def test_bootstrap_expires_after_24h_and_resets_on_restart(tmp_path):
+def test_bootstrap_expires_after_24h_and_claimed_restart_ends_unspent(tmp_path):
     clk = _Clock()
     path = tmp_path / "boot.json"
     b = lc.ProtectionBootstrap(path, clock=clk)
@@ -432,14 +433,100 @@ def test_bootstrap_expires_after_24h_and_resets_on_restart(tmp_path):
     assert b.covers(LANE)
     clk.t += 2
     assert not b.covers(LANE)
-    assert b.snapshot()["ended_reason"] == "EXPIRED_24H"
-    # Unused expiry may be re-enabled once; a restart never inherits ON.
+    assert b.snapshot()["lanes"][LANE]["ended_reason"] == "EXPIRED_24H"
+    # Unused expiry may be re-armed; a restart ends a CLAIMED one (fail closed)...
     assert b.enable(LANE)[0]
     b.claim(LANE, "t-9")
     b2 = lc.ProtectionBootstrap(path, clock=clk)
-    snap = b2.snapshot()
-    assert not snap["active"] and snap["used"] and snap["ended_reason"] == lc.RESTART_RESET_REASON
+    slot = b2.snapshot()["lanes"][LANE]
+    assert not slot["active"] and slot["ended_reason"] == lc.RESTART_RESET_REASON
     assert not b2.covers(LANE, "t-9")
+    # ...but without a fill it is not spent: the operator may re-arm it.
+    assert slot["rearmable"] and not slot["spent"]
+    ok, snap = b2.enable(LANE)
+    assert ok and snap["lanes"][LANE]["trade_id"] is None and snap["lanes"][LANE]["arm_count"] == 3
+    assert b2.covers(LANE, "t-new")
+
+
+def test_restart_never_consumes_unused_bootstrap(tmp_path):
+    clk = _Clock()
+    path = tmp_path / "boot.json"
+    b = lc.ProtectionBootstrap(path, clock=clk)
+    b.enable(LANE)
+    exp = b.snapshot()["lanes"][LANE]["expires_at_ts"]
+    clk.t += 600
+    b2 = lc.ProtectionBootstrap(path, clock=clk)   # deploy / restart
+    slot = b2.snapshot()["lanes"][LANE]
+    assert slot["active"] and slot["trade_id"] is None and slot["expires_at_ts"] == exp
+    assert b2.covers(LANE)
+    clk.t = exp + 1                                  # original 24 h still binds
+    assert not b2.covers(LANE)
+
+
+def test_rearm_after_restart_from_legacy_v1_state(tmp_path):
+    """Production state on 2026-10-11: claimed by gs1-d28b5cfca2d5, ended by restart, no fill."""
+    path = tmp_path / "boot.json"
+    path.write_text(json.dumps({"schema": lc.BOOTSTRAP_SCHEMA, "state": {
+        "active": False, "lane": LANE, "trade_id": "gs1-d28b5cfca2d5", "used": True,
+        "ended_reason": lc.RESTART_RESET_REASON, "ended_at_ts": 900.0, "history": []}}))
+    b = lc.ProtectionBootstrap(path, clock=_Clock())
+    assert b.snapshot()["lanes"][LANE]["rearmable"]
+    ok, snap = b.enable(LANE)
+    assert ok and snap["active"] and snap["lanes"][LANE]["reason"] == "OPERATOR_REARM"
+    # A legacy state that ended on a real fill stays spent.
+    path.write_text(json.dumps({"schema": lc.BOOTSTRAP_SCHEMA, "state": {
+        "active": False, "lane": LANE, "trade_id": "t-1", "used": True,
+        "ended_reason": "TRADE_ORDER_FILLED", "history": []}}))
+    b = lc.ProtectionBootstrap(path, clock=_Clock())
+    ok, snap = b.enable(LANE)
+    assert not ok and snap["error"] == "BOOTSTRAP_ALREADY_USED"
+
+
+def test_rearm_refused_when_journal_shows_prior_fill(tmp_path):
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
+    b.enable(LANE)
+    b.claim(LANE, "t-1")
+    b.disable(reason="LIVE_COPY_OUTPUT_OFF")
+    # Fill report arriving after the end still spends it.
+    assert not b.observe_report({"type": "ORDER_FILLED", "correlation_id": "t-1"})
+    assert b.snapshot()["lanes"][LANE]["spent"]
+    b2 = lc.ProtectionBootstrap(tmp_path / "boot2.json", clock=_Clock())
+    b2.enable(LANE)
+    b2.claim(LANE, "t-2")
+    b2.disable()
+    ok, snap = b2.enable(LANE, prior_trade_filled=True)
+    assert not ok and snap["error"] == "BOOTSTRAP_ALREADY_USED"
+
+
+def test_operator_off_and_output_off_end_without_spending(tmp_path):
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
+    b.enable(LANE)
+    b.claim(LANE, "t-1")
+    b.disable(reason="LIVE_COPY_OUTPUT_OFF")
+    assert not b.covers(LANE, "t-1")
+    ok, _ = b.enable(LANE)
+    assert ok and b.snapshot()["lanes"][LANE]["trade_id"] is None and b.covers(LANE, "t-2")
+
+
+def test_bootstrap_two_lanes_one_trade_each(tmp_path):
+    other = ACTIVE_TILE_ORDER[1]
+    third = ACTIVE_TILE_ORDER[2]
+    b = lc.ProtectionBootstrap(tmp_path / "boot.json", clock=_Clock())
+    assert b.enable(LANE)[0] and b.enable(other)[0]
+    ok, snap = b.enable(third)
+    assert not ok and snap["error"] == "BOOTSTRAP_MAX_ACTIVE_LANES"
+    assert b.claim(LANE, "a-1") and b.claim(other, "b-1")
+    assert not b.claim(LANE, "a-2") and not b.claim(other, "b-2")
+    assert not b.covers(LANE, "b-1") and not b.covers(other, "a-1")
+    # One lane filling spends only that lane.
+    assert b.observe_report({"type": "STOP_CONFIRMED", "correlation_id": "a-1"})
+    snap = b.snapshot()
+    assert snap["lanes"][LANE]["spent"] and not snap["lanes"][LANE]["active"]
+    assert snap["lanes"][other]["active"] and b.covers(other, "b-1")
+    assert snap["spent_lanes"] == [LANE]
+    # Disabling one lane leaves the other.
+    b.disable(lane=other)
+    assert not b.covers(other, "b-1")
 
 
 def test_bootstrap_refuses_on_when_not_persisted(tmp_path, monkeypatch):
@@ -461,5 +548,66 @@ def test_bootstrap_wired_into_readiness_route_and_kill_paths():
     assert "_admin_authed_strict()" in route and "LANE_NOT_OPERATOR_ELIGIBLE" in route
     # Output OFF and eligibility OFF end it; fills end it.
     assert 'disable(reason="LIVE_COPY_OUTPUT_OFF")' in src
-    assert 'disable(reason="LIVE_ELIGIBILITY_OFF")' in src
+    assert 'disable(reason="LIVE_ELIGIBILITY_OFF", lane=' in src
     assert "_get_live_copy_bootstrap().observe_report(report)" in src
+
+
+# ------------------------------------------- executor capability (reduce-only)
+def _cap(now, **over):
+    rep = {"schema": lc.CAPABILITY_SCHEMA, "executor": "railway-relay-executor",
+           "symbol": "tBTCF0:USTF0", "reduce_only_supported": True, "sent_at_ts": now,
+           "protective_stop": {"order_type": "STOP", "flags": 1024, "reduce_only": True}}
+    rep.update(over)
+    return json.dumps(rep).encode()
+
+
+def test_capability_report_signed_fresh_and_sets_reduce_only_only(tmp_path):
+    clk = _Clock(5000.0)
+    raw = _cap(clk.t)
+    sig = lc.sign_capability(raw, "s3cret")
+    ok, why, rep = lc.verify_capability_report(raw, sig, "s3cret", clk.t)
+    assert ok, why
+    # Wrong secret / report-domain signature / tampering refused.
+    assert not lc.verify_capability_report(raw, lc.sign_capability(raw, "other"), "s3cret", clk.t)[0]
+    assert not lc.verify_capability_report(raw, lc.sign_report({"x": 1}, "s3cret"), "s3cret", clk.t)[0]
+    assert not lc.verify_capability_report(raw + b" ", sig, "s3cret", clk.t)[0]
+    stale = _cap(clk.t - 3600)
+    assert lc.verify_capability_report(stale, lc.sign_capability(stale, "s3cret"), "s3cret", clk.t)[1] == "CAPABILITY_STALE_OR_FUTURE"
+    wrong = _cap(clk.t, symbol="tBTCUSD")
+    assert lc.verify_capability_report(wrong, lc.sign_capability(wrong, "s3cret"), "s3cret", clk.t)[1] == "CAPABILITY_SYMBOL_MISMATCH"
+    pe = lc.ProtectionEvidence(tmp_path / "prot.json", clock=clk)
+    assert not pe.flags(LANE)["reduce_only_supported"]
+    assert pe.record_executor_capability(rep)
+    f = pe.flags(LANE)
+    assert f["reduce_only_supported"] and f["reduce_only_source"] == "EXECUTOR_CAPABILITY"
+    assert not f["stop_coverage_verified"]          # capability never proves coverage
+    clk.t += lc.CAPABILITY_TTL_SEC + 1
+    assert not pe.flags(LANE)["reduce_only_supported"]   # stale -> unsupported
+
+
+def test_capability_without_reduce_only_flag_is_not_support(tmp_path):
+    for over in ({"protective_stop": {"order_type": "STOP", "flags": 0, "reduce_only": True}},
+                 {"protective_stop": {"order_type": "STOP", "flags": 1024, "reduce_only": False}},
+                 {"reduce_only_supported": False}):
+        rep = json.loads(_cap(1.0, **over))
+        assert not lc.capability_supports_reduce_only(rep)
+    pe = lc.ProtectionEvidence(tmp_path / "p.json", clock=_Clock())
+    pe.record_executor_capability(json.loads(_cap(1000.0)))
+    assert pe.flags()["reduce_only_supported"]
+    assert not pe.record_executor_capability(json.loads(_cap(1000.0, reduce_only_supported=False)))
+    assert not pe.flags()["reduce_only_supported"]      # a negative report revokes it
+
+
+def test_capability_route_wired():
+    src = (HERE / "bot.py").read_text()
+    route = src.split("def api_live_copy_executor_capability", 1)[1].split("\n@app.route", 1)[0]
+    assert "verify_capability_report(raw, sig, secret, now)" in route
+    assert "record_executor_capability(rep)" in route
+    assert "_admin_authed" not in route                 # HMAC-authenticated, not admin
+    fixture = (HERE / "cleanup_characterization_contract.fixture").read_text()
+    assert '"/api/live-copy/executor-capability", "api_live_copy_executor_capability"' in fixture
+
+
+def test_capability_hmac_matches_website_domain():
+    ts = (HERE.parent.parent / "apps/api/src/trading-agents/live-copy-approval.ts").read_text()
+    assert "EXECUTOR_CAPABILITY_DOMAIN = '" + lc.CAPABILITY_KEY_DOMAIN.decode() + "'" in ts
