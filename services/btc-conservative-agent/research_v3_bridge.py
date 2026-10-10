@@ -1423,6 +1423,11 @@ def reconcile_overdue_expected_order_decisions(
             result["deferred"] += 1
         elif write.get("blocked") is True:
             result["blocked"] += 1
+            reason = str(write.get("reason") or "UNSPECIFIED")[:80]
+            reasons = result.setdefault("blocked_reasons", {})
+            reasons[reason] = reasons.get(reason, 0) + 1
+            if write.get("append_head_record_id"):
+                result["blocked_append_head_record_id"] = str(write["append_head_record_id"])[:200]
         elif write.get("written") is True:
             result["reconciled"] += 1
             terminal_keys.add(identity)

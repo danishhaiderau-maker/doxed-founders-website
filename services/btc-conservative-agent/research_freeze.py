@@ -97,6 +97,11 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-07 PHASE03 build order (build only; no deploy/arm/relay)",
      "spec": "operator transcript (fade-pool proposal; Grok Strategist FADE-POOL-REANALYSIS-20261007)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # Tile 14 · GS-07 V07 (owner 2026-10-10 build order; default OFF, paper only, relay-ineligible).
+    {"lane": "FAMILY_GS07_V07_PREMIUM_FADE_60M", "tile_number": 12, "hypothesis_id": "GS-20261010-07V07",
+     "approved_by": "Danish (owner), 2026-10-10 backlog batch: build Tile 14 GS-07 V07, then paper ON",
+     "spec": "audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07)",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).

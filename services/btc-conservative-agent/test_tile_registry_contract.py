@@ -102,7 +102,8 @@ GS_MID_EPOCH_ORDER = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
 # PHASE03 mid-epoch additions (owner 2026-10-07): three research tiles, all default OFF.
 PHASE03_ORDER = ("FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL")
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
-EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER
+TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M",)
+EXPECTED_ORDER = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
@@ -121,10 +122,10 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [(row["lane"], row["display_order"], row["tile_number"]) for row in manifest] == [
         (lane, n, n) for n, lane in enumerate(EXPECTED_ORDER, start=1)
     ]
-    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 12))
+    assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, 13))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + GS_B_ORDER]
     assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2", "gb3"]
-    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 11
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 12
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
     assert [t["id_prefix"] for t in mid] == ["gs6"] and [t["max_active_signals"] for t in mid] == [2]
     for tile in mid:

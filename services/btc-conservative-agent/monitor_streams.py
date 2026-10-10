@@ -25,6 +25,7 @@ STREAMS = {
     "shadow_exit_paths": "shadow_exit_paths.jsonl",
     "ai_shadow_challengers": "ai_shadow_challengers.jsonl",
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
+    "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
 }
 
 
