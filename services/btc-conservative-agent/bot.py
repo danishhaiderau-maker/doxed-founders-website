@@ -24098,6 +24098,13 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "strategy_mode": str(state.get("strategy_mode") or "RESEARCH").upper(),
     }
     order.setdefault("decision_ts", order_created_ts)
+    # Live-copy signal->intent hop: remember when the signal fired so the
+    # signed approval carries signal_at_ts (relay payload schema unchanged).
+    _live_copy_note_signal_ts(
+        signal.get("trade_id"),
+        (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+        or order.get("decision_ts") or order_created_ts,
+    )
     entry_commit_start = time.time()
     _commit_paper_lifecycle_transition(
         "ORDER_PLACED", signal.get("trade_id"), relay_extra,
@@ -29451,6 +29458,11 @@ def create_limit_order(signal):
             return None
     order["_initial_dispatch_start_ts"] = time.time()
     order.setdefault("decision_ts", signal.get("order_created_ts"))
+    _live_copy_note_signal_ts(
+        signal.get("trade_id"),
+        (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+        or signal.get("order_created_ts"),
+    )
     _lock_wait_start = time.time()
     with trade_lock:
         order["entry_lock_wait_ms"] = round((time.time() - _lock_wait_start) * 1000.0, 3)
@@ -30905,6 +30917,9 @@ def close_position(pos: dict, exit_reason: str):
             **terminal_cost_evidence,
             "exit_reason": exit_reason,
             "close_origin": _forced_close_origin(exit_reason),
+            # Explicit tag so research/stats can split deploy-flattened paper
+            # closes from strategy outcomes without re-deriving close_origin.
+            "deploy_flatten": _forced_close_origin(exit_reason) == "DEPLOY_MAINTENANCE",
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
             "ai_win_prob": pos.get("ai_win_prob") or master.get("ai_win_prob"),
@@ -45259,6 +45274,7 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     session_start = _showcase_trade_session_start()
     rows = {lane: [] for lane in lanes}
     forced = {lane: 0 for lane in lanes}
+    deploy_flattened = {lane: 0 for lane in lanes}
     if not trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC):
         raise TimeoutError("monitor lanes timed out waiting for trade_lock")
     try:
@@ -45273,6 +45289,12 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                 # Same rule as tile_route_counts / lane_pnl_ledger: an admin or
                 # guarded-deploy flatten is never a strategy outcome.
                 forced[lane_key] += 1
+                try:
+                    from research.close_origin import is_deploy_flatten as _is_deploy_flatten
+                    if _is_deploy_flatten(row):
+                        deploy_flattened[lane_key] = deploy_flattened.get(lane_key, 0) + 1
+                except Exception:  # noqa: BLE001 - tagging only
+                    pass
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
                            row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
@@ -45296,11 +45318,15 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                                  "net_pnl_bp": net_bp})
     _MONITOR_LANE_FORCED_EXCLUDED.clear()
     _MONITOR_LANE_FORCED_EXCLUDED.update(forced)
+    _MONITOR_LANE_DEPLOY_FLATTENED.clear()
+    _MONITOR_LANE_DEPLOY_FLATTENED.update(deploy_flattened)
     return shaped, session_start
 
 
 # Per-lane count of forced closes dropped by the last _monitor_lane_rows build.
 _MONITOR_LANE_FORCED_EXCLUDED: dict = {}
+# Per-lane count of those forced closes that were guarded-deploy flattens.
+_MONITOR_LANE_DEPLOY_FLATTENED: dict = {}
 
 
 def _monitor_lanes_payload(now: float) -> dict:
@@ -45334,6 +45360,7 @@ def _monitor_lanes_payload(now: float) -> dict:
                 "on": enabled.get(tile["lane"]),
                 **monitor_api.lane_stats(rows.get(tile["lane"]) or []),
                 "forced_closes_excluded": int(_MONITOR_LANE_FORCED_EXCLUDED.get(tile["lane"]) or 0),
+                "deploy_flatten_closes_excluded": int(_MONITOR_LANE_DEPLOY_FLATTENED.get(tile["lane"]) or 0),
                 "latency": monitor_api.latency_brief(
                     ((xvl_lanes.get(tile["lane"]) or {}) if "error" not in xvl_lanes else {}).get("latency")
                 ),
@@ -57235,6 +57262,33 @@ def _live_copy_promote_requested_tiles() -> list:
     return promoted
 
 
+_live_copy_signal_ts_by_trade: dict = {}
+
+
+def _live_copy_note_signal_ts(trade_id, value) -> None:
+    """Remember a trade's signal time for the live-copy signal->intent hop."""
+    try:
+        ts = _iso_or_ts_to_unix(value)
+        if trade_id and ts:
+            if len(_live_copy_signal_ts_by_trade) > 5000:
+                _live_copy_signal_ts_by_trade.clear()
+            _live_copy_signal_ts_by_trade[str(trade_id)] = float(ts)
+    except Exception:  # noqa: BLE001 - timing only
+        pass
+
+
+def _live_copy_signal_at_for(trade_id, local):
+    """Signal time for a live-copy approval: explicit payload keys first, then
+    the time noted at paper order creation. None only if truly unknown."""
+    local = local if isinstance(local, dict) else {}
+    for key in ("signal_created_at", "signal_ts", "signal_created_ts", "decision_ts"):
+        ts = _iso_or_ts_to_unix(local.get(key))
+        if ts:
+            return ts
+    ts = _iso_or_ts_to_unix((local.get("timing") or {}).get("signal_ts")) if isinstance(local.get("timing"), dict) else None
+    return ts or _live_copy_signal_ts_by_trade.get(str(trade_id or ""))
+
+
 def _live_copy_publish(event, trade_id, extra) -> bool:
     """Publish one paper lifecycle event of a live-eligible tile as a copy intent.
 
@@ -57264,7 +57318,7 @@ def _live_copy_publish(event, trade_id, extra) -> bool:
             if payload.get("entry_limit_policy") and payload.get("entry_limit_policy") != LIVE_COPY_ENTRY_POLICY:
                 payload["tile_entry_policy"] = payload.get("entry_limit_policy")
             payload["entry_limit_policy"] = LIVE_COPY_ENTRY_POLICY
-        payload = _live_copy_stamp_payload(payload, signal_at=local.get("signal_created_at") or local.get("signal_ts"))
+        payload = _live_copy_stamp_payload(payload, signal_at=_live_copy_signal_at_for(trade_id, local))
         if not payload.get("live_copy_approval"):
             return False
         record = _get_live_copy_outbox().enqueue(payload)

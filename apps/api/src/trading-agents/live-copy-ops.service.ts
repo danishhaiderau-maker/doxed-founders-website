@@ -160,6 +160,24 @@ export class LiveCopyOpsService {
     };
   }
 
+  /** userId from an explicit id or a platform/twitter handle (operator routes). */
+  async resolveUserId(userId?: string, handle?: string): Promise<string> {
+    if (userId?.trim()) return userId.trim();
+    const h = (handle ?? '').trim().replace(/^@/, '');
+    if (!h) throw new BadRequestException('userId or handle is required');
+    const user = await this.prisma.user.findFirst({
+      where: {
+        OR: [
+          { platformHandle: { equals: h, mode: 'insensitive' } },
+          { twitterHandle: { equals: h, mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (!user) throw new NotFoundException('handle not found');
+    return user.id;
+  }
+
   async copyStatus(slug: string, adminHeader?: string, authorization?: string, rejects?: unknown) {
     assertBotReadToken(adminHeader, authorization);
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug }, select: { id: true } });

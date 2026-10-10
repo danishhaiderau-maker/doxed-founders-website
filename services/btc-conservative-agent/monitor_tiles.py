@@ -347,6 +347,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             "close_ts": close_ts, "exit_price": _finite(raw.get("exit") or raw.get("exit_price")),
             "exit_reason": raw.get("exit_reason"), "close_origin": raw.get("close_origin"),
             "forced_close": reason in forced, "legs": _legs(raw),
+            "deploy_flatten": bool(reason in forced and (
+                raw.get("deploy_flatten") is True
+                or str(raw.get("close_origin") or "").upper() == "DEPLOY_MAINTENANCE")),
             "filled_qty_final_leg": _finite(raw.get("execution_qty")),
             "exit_trigger_ts": ev_trigger,
             "exit_trigger_source": events.get("exit_trigger_source"),
@@ -499,6 +502,7 @@ def lane_totals(rows: Iterable[Mapping[str, Any]], *, include_forced: bool,
     return {
         "closes": n, "wins": wins, "losses": losses, "be": be,
         "forced_closes": len(forced), "forced_closes_counted": len(forced) if include_forced else 0,
+        "deploy_flatten_closes": sum(1 for r in forced if (r.get("exit") or {}).get("deploy_flatten")),
         "sum_bp": round(sum(bps), 4) if bps else 0.0,
         "mean_bp": round(sum(bps) / len(bps), 4) if bps else None,
         "median_bp": round(statistics.median(bps), 4) if bps else None,

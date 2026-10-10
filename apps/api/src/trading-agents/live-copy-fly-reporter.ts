@@ -85,6 +85,11 @@ const num = (v: unknown): number | null => {
   const n = typeof v === 'string' ? Number(v) : (v as number);
   return typeof n === 'number' && Number.isFinite(n) ? n : null;
 };
+/** Earliest positive finite epoch-ms among candidates (null if none). */
+export function earliestReceiveMs(...values: Array<number | null | undefined>): number | null {
+  const v = values.filter((x): x is number => x != null && Number.isFinite(x) && x > 0);
+  return v.length ? Math.min(...v) : null;
+}
 const rec = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
@@ -111,13 +116,24 @@ export function buildLiveCopyReports(input: {
   const approval = rec(ctx.fly_live_approval);
   const flySignalTs = num(approval.signal_at_ts);
   const flyIntentTs = num(approval.created_at_ts);
-  const websiteReceivedMs = isoMs(ctx.platform_received_at)
-    ?? input.events.find((e) => e.participantId == null && e.platformReceivedAt)?.platformReceivedAt?.getTime()
-    ?? null;
+  // The envelope's platform_received_at is overwritten by later lifecycle
+  // events (e.g. the EXIT an hour later), which produced a +3600 s
+  // intent->receive lag. The ENTRY receive is the earliest receive time.
+  const websiteReceivedMs = earliestReceiveMs(
+    isoMs(ctx.platform_received_at),
+    ...input.events.map((e) => e.platformReceivedAt?.getTime() ?? null),
+  );
   const out: LiveExecutionReport[] = [];
   const events = [...input.events].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   for (const p of input.participants) {
     const mine = events.filter((e) => e.participantId === p.id);
+    // The pre-submit durable fence (ENTRY_SUBMISSION_UNKNOWN, phase
+    // SUBMITTING) is written before EVERY Bitfinex write. It is only an error
+    // when the submission never resolved (no ORDER_PLACED / FILLED / EXPIRED).
+    const entryResolved = mine.some((e) => e.eventType === 'ORDER_PLACED' || e.eventType === 'FILLED' || e.eventType === 'EXPIRED');
+    // One exchange fill can be recorded by two paths (CANCEL_RACE_FILL and
+    // EXCHANGE_FILL_RECONCILE). Report each exchange fill once.
+    const seenFills = new Set<string>();
     const tl: Record<string, number | null> = {
       fly_signal_at_ts: flySignalTs,
       fly_intent_emitted_at_ts: flyIntentTs,
@@ -176,6 +192,9 @@ export function buildLiveCopyReports(input: {
           break;
         }
         case 'FILLED': {
+          const fillKeys = fillIdentities(pl);
+          if (fillKeys.some((k) => seenFills.has(k))) break;
+          fillKeys.forEach((k) => seenFills.add(k));
           const fillMs = isoMs(pl.exchange_fill_last_at) ?? isoMs(pl.fill_detected_at) ?? e.createdAt.getTime();
           tl.fill_at_ts = tl.fill_at_ts ?? sec(fillMs);
           const stopAck = isoMs(pl.stop_exchange_ack_at);
@@ -216,13 +235,26 @@ export function buildLiveCopyReports(input: {
         }
         case 'EXIT':
           push(e, 'POSITION_CLOSED', {
-            close: { price: num(pl.exit_price) ?? num(pl.fill_price), reason: pl.reason ?? pl.exit_reason ?? null },
+            // exit_exchange_fill_price is the authenticated Bitfinex close
+            // fill; exit_price can be the quote side (11 Oct: 83084 ask vs
+            // 83071 real fill), so it is only a fallback.
+            close: {
+              price: num(pl.exit_exchange_fill_price) ?? num(pl.exit_price) ?? num(pl.fill_price),
+              reason: pl.reason ?? pl.exit_reason ?? null,
+              paper_exit_price: num(pl.showcase_exit_price),
+              exchange_order_id: pl.close_exchange_order_id != null ? String(pl.close_exchange_order_id) : null,
+            },
           });
           break;
         case 'EXPIRED':
           push(e, 'ORDER_CANCELLED', { error: { code: 'ENTRY_EXPIRED', message: String(pl.reason ?? '').slice(0, 200) } });
           break;
         case 'ENTRY_SUBMISSION_UNKNOWN':
+          if (entryResolved) break;
+          push(e, 'ERROR', {
+            error: { code: e.eventType, message: String(pl.reason ?? pl.error ?? 'entry submission never resolved').slice(0, 200) },
+          });
+          break;
         case 'RECONCILE_CANCEL_FAILED':
         case 'NEGATIVE_EVIDENCE':
           push(e, 'ERROR', {
@@ -235,6 +267,18 @@ export function buildLiveCopyReports(input: {
     }
   }
   return out;
+}
+
+/** Exchange identities of one FILLED record: each exchange fill id, else the entry order. */
+export function fillIdentities(pl: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const ids = pl.exchange_fill_ids;
+  if (Array.isArray(ids)) for (const id of ids) if (id != null && String(id).trim()) out.push(`fid:${String(id).trim()}`);
+  const single = pl.exchange_fill_id ?? pl.bitfinex_trade_id ?? pl.fill_id;
+  if (single != null && String(single).trim()) out.push(`fid:${String(single).trim()}`);
+  if (out.length) return out;
+  const oid = pl.bitfinexOrderId ?? pl.bitfinex_order_id ?? pl.clientOrderId;
+  return oid == null ? [] : [`oid:${String(oid)}`];
 }
 
 export const COPY_HOPS: ReadonlyArray<[string, string, string]> = [

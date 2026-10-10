@@ -9,6 +9,7 @@ import {
   EXECUTOR_CAPABILITY_SCHEMA,
   EXECUTOR_PROTECTIVE_STOP_SPEC,
   summarizeCopyStatus,
+  type ReporterEvent,
 } from './live-copy-fly-reporter';
 import { signExecutorCapability, signLiveExecutionReport } from './live-copy-approval';
 import { BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
@@ -112,4 +113,45 @@ test('capability report is signed under its own HMAC domain (Python-compatible)'
   assert.equal(sig, `sha256=${createHmac('sha256', key).update(body).digest('hex')}`);
   assert.notEqual(sig, signLiveExecutionReport(body, 's3cret'));
   assert.equal(signExecutorCapability(body, ''), null);
+});
+
+// ---- GS-01 first live trade gaps (11 Oct 2026) ----
+const build = (evs: ReporterEvent[], env: unknown = envelope) => buildLiveCopyReports({
+  cycle: { id: 'c1', tradeId: 'gs1-a1', intentEnvelope: env }, correlationId: 'gs1-a1',
+  lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', events: evs, participants: [{ id: 'p1', userId: 'u1' }],
+  accountFor: () => 'acct-x', nowMs: T0 + 10_000,
+});
+
+test('pre-submit fence ENTRY_SUBMISSION_UNKNOWN is not an ERROR once the entry resolved', () => {
+  const fence = ev('e0', 'ENTRY_SUBMISSION_UNKNOWN', 500, { schema: 'entry_submission_fence_v1', phase: 'SUBMITTING' });
+  assert.equal(build([fence, ...events]).filter((r) => r.type === 'ERROR').length, 0);
+  // Unresolved fence stays a real error.
+  assert.equal(build([fence]).filter((r) => r.type === 'ERROR').length, 1);
+});
+
+test('one exchange fill recorded twice is reported once', () => {
+  const dup = [
+    ...events.slice(0, 2),
+    ev('f1', 'FILLED', 5_000, { fill_price: 60_000, qty: 0.0004, exchange_fill_ids: ['1991601627'], stop_loss_placed: true, stopOrderId: 222 }),
+    ev('f2', 'FILLED', 5_400, { fill_price: 60_000, qty: 0.0004, exchange_fill_ids: ['1991601627'], stop_loss_placed: true, stopOrderId: 333 }),
+  ];
+  const r = build(dup);
+  assert.equal(r.filter((x) => x.type === 'ORDER_FILLED').length, 1);
+  assert.equal(r.filter((x) => x.type === 'STOP_PLACED').length, 1);
+});
+
+test('website receive uses the earliest receive, not the envelope value overwritten at exit (+3600 s bug)', () => {
+  const late = { context: { ...envelope.context, platform_received_at: at(3_600_400).toISOString() } };
+  const evs = [{ ...ev('r0', 'INTENT', 300, {}, null), platformReceivedAt: at(400) }, ...events];
+  const s = summarizeCopyStatus(build(evs, late), T0 + 10_000);
+  const lags = (s.accounts as Record<string, { lags_sec: Record<string, { p50: number | null }> }>)['acct-x'].lags_sec;
+  assert.equal(lags['intent->website_receive'].p50, 0.2);
+  assert.ok((lags['website_receive->order_submit'].p50 ?? -1) >= 0);
+});
+
+test('POSITION_CLOSED reports the authenticated exchange close fill, not the quote side', () => {
+  const r = build([...events, ev('x1', 'EXIT', 9_000, { exit_price: 83084, exit_exchange_fill_price: 83071, showcase_exit_price: 83071, close_exchange_order_id: 246232327680 })]);
+  const close = r.find((x) => x.type === 'POSITION_CLOSED') as unknown as { close: { price: number; paper_exit_price: number } };
+  assert.equal(close.close.price, 83071);
+  assert.equal(close.close.paper_exit_price, 83071);
 });
