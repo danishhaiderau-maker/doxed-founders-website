@@ -35051,7 +35051,9 @@ def build_static_pathway_lane_specs() -> dict:
             "is_independent_ai": False,
             "is_deterministic_bracket": False,
             "badge": "PAPER_ONLY_FAMILY",
-            "tile_number": tile_number,
+            # Danish's permanent numbers for tiles added after position 11.
+            "tile_number": {"FAMILY_GS07_V07_PREMIUM_FADE_60M": 14}.get(lane_id, tile_number),
+            "registry_position": tile_number,
             "card_sections": combo_tile_card_sections(lane_id),
             "entry_mode_label": lane_spec["raw_policy_id"].split("|", 1)[0],
             "filter_chips": policy_view["filter_chips"],
@@ -38331,7 +38333,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
           const cardEsc = (s) => String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;');
           const tileShort = (function () {
-            const label = String(spec.label || '');
+            const label = String(spec.label || '').replace(/^Tile\s+\d+\s*·\s*/, '');
             const token = (label.split(' ')[0] || spec.lane || '');
             return String(token).toUpperCase() === 'CONTROL' ? 'CTRL' : token;
           })();
