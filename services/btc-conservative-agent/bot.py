@@ -37823,15 +37823,38 @@ DASHBOARD_JS = """(function () {
         refresh();
       }
     }
+    function liveDenialWords(denials) {
+      const map = {
+        STOP_COVERAGE_UNVERIFIED: 'waiting for first confirmed exchange stop',
+        REDUCE_ONLY_UNSUPPORTED: 'waiting for first confirmed exchange stop',
+        GLOBAL_RELAY_NOT_ARMED: 'live copy output off',
+        MASTER_DISARMED: 'live copy output off',
+        EXCHANGE_AUDIT_NOT_FRESH: 'Bitfinex check refreshing',
+        EXCHANGE_NOT_FLAT: 'Bitfinex account not flat',
+        ADMIN_MANUAL_PAUSE: 'bot paused',
+        MARKET_NOT_READY: 'market data not ready',
+        SYSTEM_NOT_READY: 'bot warming up',
+        KEYS_MISSING: 'API keys missing',
+      };
+      const out = [];
+      (denials || []).forEach(function (r) {
+        const key = String(r || '').split(':')[0];
+        if (key === 'LANE_NOT_ALLOWLISTED' || key === 'LANE_RELAY_CAPABILITY_BLOCKED') return; // covered by operator eligibility
+        const w = map[key] || key.toLowerCase().split('_').join(' ');
+        if (out.indexOf(w) < 0) out.push(w);
+      });
+      return out;
+    }
     async function toggleBitfinexTileLive(lane, enabled) {
-      if (!confirm((enabled ? 'Turn ON' : 'Turn OFF') + ' "Bitfinex Live Orders" for lane ' + lane + '?'
-        + (enabled ? ' Live copy still requires the master switch to be ON.' : ' This stops new live Bitfinex orders from this tile.'))) return;
+      if (!confirm('Turn Live ' + (enabled ? 'ON' : 'OFF') + ' for ' + lane + '?'
+        + (enabled ? ' Its new trades will be copied as real $0.25 Bitfinex orders to armed accounts.' : ' This stops new live Bitfinex orders from this tile (paper keeps running).'))) return;
       const res = await post('/api/bitfinex/tiles/' + encodeURIComponent(lane) + '/live-orders', {enabled: enabled});
       if (res && res.ok) {
         let body = {};
         try { body = await res.json(); } catch (_) {}
-        if (body.denials && body.denials.length && enabled) {
-          alert('Tile not eligible: ' + body.denials.join('; '));
+        if (enabled && body.denials && body.denials.length && !body.bitfinex_live_orders) {
+          const w = liveDenialWords(body.denials);
+          if (w.length) alert('Live ON saved. Held until: ' + w.join('; '));
         }
         refresh();
       }
@@ -38360,10 +38383,7 @@ DASHBOARD_JS = """(function () {
           const tileOperatorEligible = !!(liveRow && liveRow.live_eligible === true);
           let liveSwitchHtml = '';
           let eligHtml = '';
-          if (!(spec.planned || spec.status === 'RETIRED')) {
-            eligHtml = '<div style="margin-top:4px;"><strong>Live eligible:</strong> <span style="font-weight:700;color:' + (tileOperatorEligible ? '#f59e0b' : '#8b949e') + ';">' + (tileOperatorEligible ? 'YES' : 'NO (default)') + '</span> '
-              + '<button type="button" onclick="toggleLiveCopyEligibility(\\'' + cardEsc(spec.lane) + '\\', ' + (tileOperatorEligible ? 'false' : 'true') + ')" style="padding:3px 10px;font-weight:bold;background:' + (tileOperatorEligible ? '#6e7681' : '#9a6700') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (tileOperatorEligible ? 'Make ineligible' : 'Make eligible') + '</button></div>';
-          }
+          const tileLiveRequested = tileLiveOn || !!(liveRow && liveRow.live_requested === true);
           if (tileOperatorEligible && !(spec.planned || spec.status === 'RETIRED')) {
             const boot = ((d && d.bitfinex_live_switch) || {}).protection_bootstrap || {};
             const bootHere = boot.active === true && boot.lane === spec.lane;
@@ -38377,32 +38397,36 @@ DASHBOARD_JS = """(function () {
           if (spec.planned || spec.status === 'RETIRED') {
             liveSwitchHtml = '';
           } else {
-            liveSwitchHtml = '<button type="button" onclick="toggleBitfinexTileLive(\\'' + cardEsc(spec.lane) + '\\', ' + (tileLiveOn ? 'false' : 'true') + ')" style="padding:5px 12px;font-weight:bold;background:' + (tileLiveOn ? '#da3633' : '#238636') + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + (tileLiveOn ? 'Turn live OFF' : 'Turn live ON') + '</button>';
+            // ONE live button per tile; always clickable. ON also makes the tile eligible.
+            liveSwitchHtml = '<button type="button" class="tile-live-btn" data-lane="' + cardEsc(spec.lane) + '" onclick="toggleBitfinexTileLive(\\'' + cardEsc(spec.lane) + '\\', ' + (tileLiveRequested ? 'false' : 'true') + ')" style="padding:5px 12px;font-weight:bold;background:' + (tileLiveRequested ? '#238636' : '#30363d') + ';border:1px solid ' + (tileLiveRequested ? '#3fb950' : '#6e7681') + ';border-radius:6px;color:#fff;cursor:pointer;">Live: ' + (tileLiveRequested ? 'ON' : 'OFF') + '</button>';
           }
-          let liveStatus = '<span style="font-weight:700;color:' + (tileLiveOn ? '#3fb950' : '#8b949e') + ';">' + (tileLiveOn ? 'ON' : 'OFF') + '</span>';
-          if (!tileLiveOn) {
-            const reasons = [];
-            if (!liveMasterOn) reasons.push('live copy output OFF');
-            if (!tileOperatorEligible) reasons.push('not live-eligible');
-            if (tileLiveDenials.length) reasons.push(tileLiveDenials.join('; '));
-            else if (!tileLiveEligible) reasons.push('not eligible (arm-blocked)');
-            if (reasons.length) liveStatus += ' <span style="color:#f85149;font-size:0.78em;">(' + cardEsc(reasons.join(' · ')) + ')</span>';
+          const liveHold = [];
+          if (tileLiveRequested) {
+            if (!liveMasterOn) liveHold.push('live copy output off');
+            const web = (((d && d.bitfinex_master) || {}).website) || {};
+            if (web.reachable && !(web.armed_accounts || []).length) liveHold.push('account not armed');
+            if (!tileLiveOn) liveHold.push.apply(liveHold, liveDenialWords(tileLiveDenials));
           }
-          const liveSwitchBlock = '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';border-radius:6px;overflow-wrap:anywhere;margin-top:10px;">'
-            + '<div style="font-weight:700;letter-spacing:0.04em;color:' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';font-size:0.92em;">BITFINEX LIVE ORDERS</div>'
+          const liveHeld = tileLiveRequested && liveHold.length > 0;
+          let liveStatus = tileLiveRequested
+            ? '<span style="font-weight:800;color:' + (liveHeld ? '#f59e0b' : '#3fb950') + ';">' + (liveHeld ? 'LIVE ON · held' : 'LIVE ON') + '</span>'
+            : '<span style="font-weight:700;color:#8b949e;">LIVE OFF</span>';
+          if (liveHeld) liveStatus += ' <span style="color:#f0c14b;font-size:0.85em;">(' + cardEsc(liveHold.join(' · ')) + ')</span>';
+          const liveSwitchBlock = '<div class="tile-card-section" style="min-width:0;padding:7px 9px;background:#161b22;border:1px solid #30363d;border-left:3px solid ' + (tileLiveRequested ? (liveHeld ? '#f59e0b' : '#3fb950') : '#6e7681') + ';border-radius:6px;overflow-wrap:anywhere;margin-top:10px;">'
+            + '<div style="font-weight:700;letter-spacing:0.04em;color:' + (tileLiveOn ? '#3fb950' : '#f59e0b') + ';font-size:0.92em;">BITFINEX LIVE</div>'
             + eligHtml
             + '<div style="margin-top:4px;">' + liveStatus + '</div>'
             + '<div style="margin-top:6px;">' + liveSwitchHtml + '</div>'
-            + '<div style="margin-top:4px;color:#8b949e;font-size:0.9em;">' + (tileLiveOn
-              ? 'Tile ON: new signed copy intents go to armed website accounts (output must stay ON).'
-              : 'Tile OFF (default): no live Bitfinex orders from this tile.') + '</div></div>';
+            + '<div style="margin-top:4px;color:#8b949e;font-size:0.9em;">' + (tileLiveRequested
+              ? 'Live ON: new trades from this tile are copied as real $0.25 orders to armed accounts.'
+              : 'Live OFF (default): paper only, no real Bitfinex orders from this tile.') + '</div></div>';
           let toggleHtml = '';
           if (spec.planned || spec.status === 'RETIRED') {
             toggleHtml = '';
           } else if (toggleFn) {
             const bg = on ? '#238636' : '#da3633';
-            const action = on ? 'Turn OFF' : 'Turn ON';
-            toggleHtml = '<button type="button" onclick="' + toggleFn + '" style="padding:6px 14px;font-weight:bold;background:' + bg + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + action + '</button>';
+            const action = on ? 'Paper: ON' : 'Paper: OFF';
+            toggleHtml = '<button type="button" title="Paper trading for this tile (separate from Live)" onclick="' + toggleFn + '" style="padding:6px 14px;font-weight:bold;background:' + bg + ';border:none;border-radius:6px;color:#fff;cursor:pointer;">' + action + '</button>';
           }
           return '<div style="padding:14px 16px;background:#0d1117;border:2px solid ' + border + ';border-radius:12px;min-height:220px;display:flex;flex-direction:column;">'
             + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">'
@@ -41159,6 +41183,13 @@ def _adopt_position_from_rebuild(rebuilt: dict) -> dict:
     return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
 
 
+def _live_copy_output_audit_needed() -> bool:
+    try:
+        return bool(_get_live_copy_output().enabled) and not _live_copy_paper_lock_active()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Background reconciliation loop: pulls fills, detects manual closes, and reports
 # drift so the bot snapshot stays in sync with Bitfinex truth. Only acts when live
 # execution is armed + keys present; otherwise sleeps cheaply.
@@ -41166,6 +41197,12 @@ def bitfinex_live_reconcile_loop() -> None:
     interval = 30.0
     while True:
         try:
+            if (not _direct_private_exchange_owner()
+                    and _live_copy_output_audit_needed()):
+                # Live copy (Option 1): the per-intent gate requires a fresh
+                # (<= LIVE_EXPOSURE_AUDIT_MAX_AGE_SEC) read-only audit. Keep
+                # it fresh while output is ON; never mutates the exchange.
+                _refresh_bitfinex_exposure_audit().pop("_rebuild_payload", None)
             if _direct_private_exchange_owner():
                 strict_result = _refresh_bitfinex_exposure_audit()
                 rebuilt = strict_result.pop("_rebuild_payload", None)
@@ -44489,6 +44526,11 @@ def _api_state_cache_refresher_loop():
                     )
                     snap["paused_shadow_stats"] = paused_shadow_stats
                 snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
+                # Live-copy controls are cheap and must be current: the
+                # paused-built base froze them (tile showed OFF while live).
+                _live_copy_promote_requested_tiles()
+                snap["bitfinex_master"] = _bitfinex_master_state()
+                snap["bitfinex_live_switch"] = _bitfinex_live_switch_snapshot()
                 snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             _attach_dashboard_truth(snap)
             with _api_state_cache_lock:
@@ -57142,6 +57184,30 @@ def _live_copy_lane_for_trade(trade_id, research_lane=None) -> str:
     return derived
 
 
+LIVE_COPY_ENTRY_POLICY = "fly_tile_exact_limit_v1"
+
+
+def _live_copy_promote_requested_tiles() -> list:
+    """Turn ON tiles whose live switch the operator requested once gates clear."""
+    promoted = []
+    try:
+        sw = _get_bfx_live_switch()
+        lanes = sw.requested_lanes()
+        if not lanes:
+            return promoted
+        ctx = _bitfinex_readiness_context()
+        ga = ctx.get("global_arm") or {}
+        for lane in lanes:
+            op_elig = _get_live_copy_eligibility().is_eligible(lane)
+            if sw.promote_requested(lane, global_arm=ga, size_checks=_bitfinex_size_checks_for_lane(lane, ctx),
+                                    operator_eligible=op_elig):
+                promoted.append(lane)
+                logger.warning(f"[BITFINEX LIVE ORDERS] tile {lane} requested -> ON (gates cleared) [PIPELINE ENFORCEMENT]")
+    except Exception as exc:  # noqa: BLE001 - promotion failure keeps tiles OFF
+        logger.warning(f"[BITFINEX LIVE ORDERS] promote failed: {exc}")
+    return promoted
+
+
 def _live_copy_publish(event, trade_id, extra) -> bool:
     """Publish one paper lifecycle event of a live-eligible tile as a copy intent.
 
@@ -57165,6 +57231,12 @@ def _live_copy_publish(event, trade_id, extra) -> bool:
         payload["research_lane"] = lane
         payload.setdefault("schema", "dcf-showcase-intent-v1")
         payload["live_copy_channel"] = "fly_live_copy_outbox_v1"
+        if event in _live_copy.ENTRY_EVENTS:
+            # Website ingest only executes canonical exact-limit policies; the
+            # tile's own policy string travels alongside for audit.
+            if payload.get("entry_limit_policy") and payload.get("entry_limit_policy") != LIVE_COPY_ENTRY_POLICY:
+                payload["tile_entry_policy"] = payload.get("entry_limit_policy")
+            payload["entry_limit_policy"] = LIVE_COPY_ENTRY_POLICY
         payload = _live_copy_stamp_payload(payload, signal_at=local.get("signal_created_at") or local.get("signal_ts"))
         if not payload.get("live_copy_approval"):
             return False
@@ -57568,7 +57640,10 @@ def _live_copy_monitor_context() -> dict:
         recent_push = list(_relay_push_history)[-20:]
     return {
         "output": _get_live_copy_output().snapshot(),
-        "force_paper_mode": _force_paper_mode_active(),
+        # Option 1: FORCE_PAPER only governs Fly's retired direct path. It
+        # blocks live-copy output only while the live-copy source is disabled.
+        "force_paper_mode": _live_copy_paper_lock_active(),
+        "fly_direct_force_paper_mode": _force_paper_mode_active(),
         "relay_stack_mode": _relay_stack_mode.mode(),
         "switch_rows": [
             {**r, "relay_eligible": (r.get("lane") in PLATFORM_RELAY_ELIGIBLE_LANES) or bool(r.get("live_eligible"))}

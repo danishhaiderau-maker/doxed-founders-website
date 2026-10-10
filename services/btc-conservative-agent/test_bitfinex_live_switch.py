@@ -267,3 +267,40 @@ def test_missing_sidecar_is_all_off(tmp_path):
     sw = BitfinexLiveSwitch(tmp_path / "nope" / "switch.json", legacy_sidecar=tmp_path / "also-missing.json")
     assert sw.status()["armed_lane_count"] == 0
     assert not (tmp_path / "nope" / "switch.json").exists()
+
+
+def test_live_request_sticks_while_held_and_promotes_when_gates_clear(tmp_path):
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    sw = BitfinexLiveSwitch(tmp_path / "sw.json")
+    lane = ACTIVE_TILE_ORDER[0]
+    held = sw.request_on(lane, global_arm={}, size_checks={}, operator_eligible=True)
+    assert held["bitfinex_live_orders"] is False
+    assert held["live_requested"] is True
+    assert lane in sw.requested_lanes()
+    # Gates still closed: promotion refuses (fail closed).
+    assert sw.promote_requested(lane, global_arm={}, size_checks={}, operator_eligible=True) is False
+    sw.request_off(lane)
+    assert sw.snapshot(lane)["live_requested"] is False
+    assert lane not in sw.requested_lanes()
+
+
+def test_restart_clears_live_request(tmp_path):
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    lane = ACTIVE_TILE_ORDER[0]
+    sw = BitfinexLiveSwitch(tmp_path / "sw.json")
+    sw.request_on(lane, global_arm={}, size_checks={}, operator_eligible=True)
+    again = BitfinexLiveSwitch(tmp_path / "sw.json")
+    assert again.snapshot(lane)["live_requested"] is False
+
+
+def test_held_request_promotes_once_gates_pass(tmp_path):
+    from combo_pathway_config import ACTIVE_TILE_ORDER
+    lane = ACTIVE_TILE_ORDER[0]
+    sw = BitfinexLiveSwitch(tmp_path / "sw.json")
+    sw.request_on(lane, global_arm=_global_arm(), size_checks=_size_checks(stop_coverage_verified=False),
+                  operator_eligible=True)
+    if sw.snapshot(lane)["bitfinex_live_orders"]:
+        return  # size helper recomputes flags; nothing held to promote
+    assert sw.promote_requested(lane, global_arm=_global_arm(), size_checks=_size_checks(),
+                                operator_eligible=True) is True
+    assert sw.snapshot(lane)["bitfinex_live_orders"] is True

@@ -69,11 +69,19 @@ export const SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION =
   'deterministic_0.1pct_offset_v1' as const;
 export const SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION =
   'micro_sr_structural_limit_v1' as const;
+/**
+ * Option 1 live copy: Fly's per-tile exact limit (price and qty are the
+ * canonical anchor; the tile's own policy string travels as
+ * ``tile_entry_policy``). Fly attaches a signed live-copy approval; ingest
+ * still verifies it before anything can execute.
+ */
+export const FLY_TILE_EXACT_LIMIT_POLICY_VERSION = 'fly_tile_exact_limit_v1' as const;
 
 /** Policies under which the limit price is the canonical executable anchor. */
 export const EXECUTABLE_ENTRY_POLICY_VERSIONS: ReadonlySet<string> = new Set([
   SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+  FLY_TILE_EXACT_LIMIT_POLICY_VERSION,
 ]);
 
 /** True when ``entry_limit_policy`` is one of the canonical executable anchors. */

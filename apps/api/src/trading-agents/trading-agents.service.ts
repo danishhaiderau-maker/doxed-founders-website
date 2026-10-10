@@ -1,13 +1,12 @@
+import { assertBotReadToken } from './ops-read-auth';
 import {
   Injectable,
   Logger,
   NotFoundException,
   ForbiddenException,
-  UnauthorizedException,
   BadRequestException,
   OnModuleInit,
 } from '@nestjs/common';
-import { timingSafeEqual } from 'node:crypto';
 import {
   NotificationType,
   Prisma,
@@ -571,20 +570,7 @@ export class TradingAgentsService implements OnModuleInit {
     adminHeader?: string,
     authorization?: string,
   ) {
-    const expected = (process.env.BOT_ADMIN_TOKEN ?? '').trim();
-    if (!expected) {
-      throw new UnauthorizedException('BOT_ADMIN_TOKEN is not configured');
-    }
-    const bearer =
-      typeof authorization === 'string' && authorization.toLowerCase().startsWith('bearer ')
-        ? authorization.slice(7).trim()
-        : '';
-    const supplied = (adminHeader?.trim() || bearer).trim();
-    const a = Buffer.from(supplied, 'utf8');
-    const b = Buffer.from(expected, 'utf8');
-    if (a.length === 0 || a.length !== b.length || !timingSafeEqual(a, b)) {
-      throw new UnauthorizedException('Invalid BOT_ADMIN_TOKEN');
-    }
+    assertBotReadToken(adminHeader, authorization);
     if (!userId?.trim()) {
       throw new BadRequestException('userId query param is required');
     }
