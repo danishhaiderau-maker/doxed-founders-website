@@ -4,6 +4,9 @@ import { bitfinexAuthPost } from '../exchanges/bitfinex-api.client';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { liveCopyAccountArmed } from './live-copy-approval';
+import { assertBotReadToken } from './ops-read-auth';
+
+export { assertBotReadToken };
 import { LiveCopyFlyReporterService, liveCopyAccountLabel, summarizeCopyStatus } from './live-copy-fly-reporter';
 import { readPersistedRelayExecutorHealth } from './signal-subscriber-execution.service';
 
@@ -54,7 +57,7 @@ export class LiveCopyOpsService {
     authorization?: string,
     handle?: string,
   ) {
-    assertBotAdminToken(adminHeader, authorization);
+    assertBotReadToken(adminHeader, authorization);
     if (!userId?.trim() && handle?.trim()) {
       const h = handle.trim().replace(/^@/, '');
       const user = await this.prisma.user.findFirst({
@@ -158,7 +161,7 @@ export class LiveCopyOpsService {
   }
 
   async copyStatus(slug: string, adminHeader?: string, authorization?: string, rejects?: unknown) {
-    assertBotAdminToken(adminHeader, authorization);
+    assertBotReadToken(adminHeader, authorization);
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug }, select: { id: true } });
     if (!agent) throw new NotFoundException('Agent not found');
     const nowMs = Date.now();

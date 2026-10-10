@@ -136,8 +136,9 @@ class BitfinexLiveSwitch:
             self._rows = {}
         reset = False
         for row in self._rows.values():
-            if row.get("bitfinex_live_orders") or row.get("last_allow_ts"):
+            if row.get("bitfinex_live_orders") or row.get("last_allow_ts") or row.get("live_requested"):
                 row["bitfinex_live_orders"] = False
+                row["live_requested"] = False
                 row["last_allow_ts"] = None
                 row["last_denial"] = [RESTART_RESET_REASON]
                 row["last_denied_at"] = time.time()
@@ -352,6 +353,9 @@ class BitfinexLiveSwitch:
             result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now,
                                    operator_eligible=operator_eligible)
             row = self._row(lane)
+            # The operator's request sticks even while a gate holds the tile;
+            # promote_requested() turns it ON once the gate clears.
+            row["live_requested"] = True
             if result["eligible"]:
                 row["bitfinex_live_orders"] = True
                 row["last_allow_ts"] = now
@@ -365,6 +369,33 @@ class BitfinexLiveSwitch:
             self._persist()
         return self.snapshot(lane, now=now)
 
+    def requested_lanes(self) -> list[str]:
+        with self._lock:
+            return [lane for lane in ACTIVE_TILE_ORDER
+                    if self._row(lane).get("live_requested") and not self._row(lane).get("bitfinex_live_orders")]
+
+    def promote_requested(self, lane: str, *, global_arm: Mapping[str, Any] | None = None,
+                          size_checks: Mapping[str, Any] | None = None,
+                          now: float | None = None, operator_eligible: bool = False) -> bool:
+        """Turn a held (requested) tile ON once every gate passes. Fail closed."""
+        now = time.time() if now is None else float(now)
+        lane = str(lane or "").upper()
+        with self._lock:
+            row = self._row(lane)
+            if not row.get("live_requested") or row.get("bitfinex_live_orders"):
+                return False
+            result = self.evaluate(lane, global_arm=global_arm, size_checks=size_checks, now=now,
+                                   operator_eligible=operator_eligible)
+            if not result["eligible"]:
+                return False
+            row["bitfinex_live_orders"] = True
+            row["last_allow_ts"] = now
+            row["last_denial"] = []
+            row["last_denied_at"] = None
+            row["last_eval_ts"] = now
+            self._persist()
+        return True
+
     def request_off(self, lane: str, *, reason: str = "OPERATOR_OFF", now: float | None = None) -> dict:
         """Set a lane's live-orders switch OFF (always allowed; risk-reducing)."""
         now = time.time() if now is None else float(now)
@@ -372,6 +403,7 @@ class BitfinexLiveSwitch:
         with self._lock:
             row = self._row(lane)
             row["bitfinex_live_orders"] = False
+            row["live_requested"] = False
             row["last_denial"] = [reason]
             row["last_denied_at"] = now
             row["last_eval_ts"] = now
@@ -385,6 +417,7 @@ class BitfinexLiveSwitch:
             for lane in ACTIVE_TILE_ORDER:
                 row = self._row(lane)
                 row["bitfinex_live_orders"] = False
+                row["live_requested"] = False
                 row["last_denial"] = [reason]
                 row["last_denied_at"] = now
                 row["last_eval_ts"] = now
