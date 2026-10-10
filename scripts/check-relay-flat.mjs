@@ -333,14 +333,6 @@ export function isStrictExchangeOrderAuditFlat(audit, nowMs = Date.now()) {
   );
 }
 
-export function isArmedRelayQuietForDeploy(row) {
-  return (
-    row?.activeParticipants === 0
-    && isStrictRawFlatReconcileSnapshot(row.reconcile)
-    && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
-  );
-}
-
 export function isRelayPausedAndDisarmed(row) {
   return (
     row?.status === 'PAUSED'
@@ -661,12 +653,14 @@ async function main() {
     output.showcase.positions === 0 && output.showcase.pendingOrders === 0
   );
   const trackedFlat = rows.every((row) => row.activeParticipants === 0);
-  // An operator-armed copier account may stay armed across a Fly deploy when it
-  // is provably flat (no tracked lots; strict raw-flat reconcile and order audit
-  // below): Fly's Live copy output resets OFF on restart, so no entry can be
-  // approved while the deploy runs. Anything else must be paused and disarmed.
   const relayPausedAndDisarmed = rows.length > 0
-    && rows.every((row) => isRelayPausedAndDisarmed(row) || isArmedRelayQuietForDeploy(row));
+    && rows.every(isRelayPausedAndDisarmed);
+  // An operator-armed copier account may stay armed across a Fly deploy when it
+  // is provably flat (no tracked lots; strict raw-flat reconcile and order
+  // audit): Fly's Live copy output resets OFF on restart, so no entry can be
+  // approved while the deploy runs. Anything else must be paused and disarmed.
+  const relayQuietForDeploy = relayPausedAndDisarmed || (rows.length > 0
+    && rows.every((row) => isRelayPausedAndDisarmed(row) || isArmedRelayQuietForDeploy(row)));
   const reconciledFlat = rows.length > 0
     && rows.every((row) => {
       return (
@@ -682,7 +676,7 @@ async function main() {
       );
     });
   process.exitCode =
-    showcaseFlat && trackedFlat && relayPausedAndDisarmed && reconciledFlat ? 0 : 2;
+    showcaseFlat && trackedFlat && relayQuietForDeploy && reconciledFlat ? 0 : 2;
 }
 
 const isDirectRun =
@@ -698,4 +692,12 @@ if (isDirectRun) {
     .finally(async () => {
       await prisma.$disconnect();
     });
+}
+
+export function isArmedRelayQuietForDeploy(row) {
+  return (
+    row?.activeParticipants === 0
+    && isStrictRawFlatReconcileSnapshot(row.reconcile)
+    && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+  );
 }
