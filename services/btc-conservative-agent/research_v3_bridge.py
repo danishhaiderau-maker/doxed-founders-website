@@ -1422,6 +1422,17 @@ def reconcile_overdue_expected_order_decisions(
                       "relay_capability", "market_context_segment_refs", "market_context_segment_coverage"):
             if field in decision:
                 row[field] = copy.deepcopy(decision[field])
+        if _committed_receipt_bytes_durable(store, "lifecycle", row["record_id"]):
+            # A prior runtime already committed this exact reconcile row, but
+            # into a lifecycle generation this pass does not stream (sealed by
+            # rotation) or under another deployed revision.  The receipt's
+            # identity binds deployed_revision, so re-appending after any deploy
+            # was EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH forever (493, 11 Oct).
+            # Durable, hash-verified bytes resolve the orphan.
+            result["resolved_or_active"] += 1
+            result["resolved_by_prior_receipt"] = result.get("resolved_by_prior_receipt", 0) + 1
+            terminal_keys.add(identity)
+            continue
         write = store.append("lifecycle", row)
         if write.get("deferred") is True:
             result["deferred"] += 1
@@ -1441,6 +1452,27 @@ def reconcile_overdue_expected_order_decisions(
             result["unwritten"] += 1
     return result
 
+
+
+def _committed_receipt_bytes_durable(store, ledger: str, record_id: str) -> bool:
+    """True when a COMMITTED receipt's exact bytes are present in its generation.
+
+    Deliberately ignores the deploy identity binding: this is a read-only
+    existence proof used to skip a re-append, never an authority to write.
+    """
+    try:
+        receipt = store._load_record_receipt(ledger, record_id)
+        if not isinstance(receipt, Mapping) or receipt.get("state") != "COMMITTED":
+            return False
+        if receipt.get("ledger") != ledger or receipt.get("record_id") != record_id:
+            return False
+        path = store.resolve_receipt_ledger_generation(ledger, dict(receipt))
+        payload = store._bounded_slice(path, int(receipt["offset"]), int(receipt["length"]))
+        if payload is None or hashlib.sha256(payload).hexdigest() != receipt.get("row_sha256"):
+            return False
+        return json.loads(payload.decode("utf-8")).get("record_id") == record_id
+    except Exception:
+        return False
 
 
 def _write_set_verification(store, writes, *, segment_refs=()) -> dict[str, Any]:
