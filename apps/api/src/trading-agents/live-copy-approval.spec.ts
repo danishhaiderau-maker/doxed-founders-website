@@ -138,5 +138,5 @@ test('account armed means ACTIVE, real exchange and explicit relayArmedAt (no le
 
 test('tile prefix map covers the active Fly tiles', () => {
   assert.equal(LIVE_COPY_TILE_PREFIXES.FAMILY_GS01_XV_PREMIUM_ATR_TP, 'gs1');
-  assert.equal(Object.keys(LIVE_COPY_TILE_PREFIXES).length, 11);
+  assert.equal(Object.keys(LIVE_COPY_TILE_PREFIXES).length, 12);
 });

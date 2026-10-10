@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { test } from 'node:test';
-import { buildLiveCopyReports, summarizeCopyStatus } from './live-copy-fly-reporter';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  buildExecutorCapabilityReport,
+  buildLiveCopyReports,
+  EXECUTOR_CAPABILITY_SCHEMA,
+  EXECUTOR_PROTECTIVE_STOP_SPEC,
+  summarizeCopyStatus,
+} from './live-copy-fly-reporter';
+import { signExecutorCapability, signLiveExecutionReport } from './live-copy-approval';
+import { BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
 
 const T0 = 1_760_000_000_000;
 const at = (ms: number) => new Date(T0 + ms);
@@ -78,42 +88,28 @@ test('report signature domain matches Fly verify_report_signature', () => {
   assert.equal(key.length, 32);
 });
 
-describe('executor capability report (reduce-only source for Fly)', () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { buildExecutorCapabilityReport, EXECUTOR_CAPABILITY_SCHEMA } = require('./live-copy-fly-reporter');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { signExecutorCapability, signLiveExecutionReport } = require('./live-copy-approval');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { BITFINEX_REDUCE_ONLY_FLAG } = require('../exchanges/bitfinex-api.client');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { EXECUTOR_PROTECTIVE_STOP_SPEC } = require('./live-copy-fly-reporter');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const fs = require('node:fs');
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const path = require('node:path');
+test('capability report matches the stop submitStopOrder really sends', () => {
+  const src = readFileSync(join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
+  const body = src.slice(src.indexOf('async submitStopOrder'), src.indexOf('async submitMarketClose'));
+  assert.ok(body.includes("type: 'STOP'"));
+  assert.ok(body.includes('flags: BITFINEX_REDUCE_ONLY_FLAG'));
+  assert.deepEqual({ ...EXECUTOR_PROTECTIVE_STOP_SPEC }, { type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG });
+});
 
-  it('matches the stop submitStopOrder really sends', () => {
-    const src: string = fs.readFileSync(path.join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
-    const body = src.slice(src.indexOf('async submitStopOrder'), src.indexOf('async submitMarketClose'));
-    expect(body).toContain("type: 'STOP'");
-    expect(body).toContain('flags: BITFINEX_REDUCE_ONLY_FLAG');
-    expect(EXECUTOR_PROTECTIVE_STOP_SPEC).toEqual({ type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG });
-  });
+test('capability report declares reduce-only STOP on tBTCF0:USTF0', () => {
+  const r = buildExecutorCapabilityReport(1_700_000_000_000);
+  assert.equal(r.schema, EXECUTOR_CAPABILITY_SCHEMA);
+  assert.equal(r.symbol, 'tBTCF0:USTF0');
+  assert.equal(r.reduce_only_supported, true);
+  assert.deepEqual(r.protective_stop, { order_type: 'STOP', flags: 1024, reduce_only: true, placed: 'ONCE_AT_ENTRY_FILL' });
+  assert.equal(r.sent_at_ts, 1_700_000_000);
+});
 
-  it('is derived from the real protective stop spec (STOP + REDUCE_ONLY on tBTCF0:USTF0)', () => {
-    const r = buildExecutorCapabilityReport(1_700_000_000_000);
-    expect(r.schema).toBe(EXECUTOR_CAPABILITY_SCHEMA);
-    expect(r.symbol).toBe('tBTCF0:USTF0');
-    expect(r.reduce_only_supported).toBe(true);
-    expect(r.protective_stop).toMatchObject({ order_type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG, reduce_only: true });
-    expect(r.sent_at_ts).toBe(1_700_000_000);
-  });
-
-  it('is signed under its own HMAC domain (not the execution-report key)', () => {
-    const body = JSON.stringify(buildExecutorCapabilityReport(1));
-    const sig = signExecutorCapability(body, 's3cret');
-    expect(sig).toMatch(/^sha256=[0-9a-f]{64}$/);
-    expect(sig).not.toBe(signLiveExecutionReport(body, 's3cret'));
-    expect(signExecutorCapability(body, '')).toBeNull();
-  });
+test('capability report is signed under its own HMAC domain (Python-compatible)', () => {
+  const body = JSON.stringify(buildExecutorCapabilityReport(1));
+  const sig = signExecutorCapability(body, 's3cret');
+  const key = createHmac('sha256', 's3cret').update('railway-executor-capability-v1').digest();
+  assert.equal(sig, `sha256=${createHmac('sha256', key).update(body).digest('hex')}`);
+  assert.notEqual(sig, signLiveExecutionReport(body, 's3cret'));
+  assert.equal(signExecutorCapability(body, ''), null);
 });
