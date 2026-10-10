@@ -1048,6 +1048,12 @@ class SegmentShipper:
         ops = self.plan(state, universe)
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
+        # Oversized streams can never ship until they shrink, so their bytes are
+        # reported separately: unshipped_bytes alone would otherwise grow with
+        # e.g. research.db forever and look like a backlog that never drains.
+        oversized_bytes = sum(op.get("pending_bytes", op["bytes"]) for op in ops
+                              if op.get("oversized"))
+        mode_oversized = {"oversized_bytes": oversized_bytes}
         throttled = sorted(self.throttled)[:50]
         raced: list[str] = []
         new_state = None
@@ -1079,13 +1085,13 @@ class SegmentShipper:
                 self.last_deferred = deferred
                 self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
                                   last_error=f"PLAN_RACE: {failure}", racing_paths=self.racing_paths(),
-                                  **mode)
+                                  **mode, **mode_oversized)
                 return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred,
                         "race": failure.stream, **mode}
         self.last_deferred = deferred
         if new_state is None:
             self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
-                              oversized_paths=oversized[:50], throttled_snapshots=throttled,
+                              oversized_paths=oversized[:50], throttled_snapshots=throttled, **mode_oversized,
                               racing_paths=self.racing_paths(), last_error=None, last_segment_at=state.get("last_segment_at"),
                               last_manifest_sha256=state["last_manifest_sha256"],
                               store_bytes=store_bytes, **mode)
@@ -1095,7 +1101,7 @@ class SegmentShipper:
         for op in selected:
             self.race_backoff.pop(op["stream"], None)
         self.write_status(shipped_seq=new_state["seq"], unshipped_bytes=deferred,
-                          oversized_paths=oversized[:50], throttled_snapshots=throttled,
+                          oversized_paths=oversized[:50], throttled_snapshots=throttled, **mode_oversized,
                           racing_paths=self.racing_paths(),
                           last_error=None, last_segment_at=new_state["last_segment_at"],
                           last_manifest_sha256=new_state["last_manifest_sha256"],

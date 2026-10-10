@@ -12495,6 +12495,7 @@ def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED"
 _v3_expected_order_reconcile_lock = threading.Lock()
 _v3_expected_order_reconcile_last_ts = 0.0
 V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC = 30.0
+_v3_expected_order_reconcile_last: dict = {}
 
 
 def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
@@ -12535,6 +12536,9 @@ def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
         # ledger the scan itself can exceed the interval; recording its start
         # caused reconcile_stale_signals() to repeat the full scan immediately.
         _v3_expected_order_reconcile_last_ts = time.time()
+        _last_reconcile = globals().setdefault("_v3_expected_order_reconcile_last", {})
+        _last_reconcile.clear()
+        _last_reconcile.update({**result, "at": _v3_expected_order_reconcile_last_ts})
         if result.get("reconciled"):
             logger.warning(
                 f"[COLLECTOR_V3] reconciled overdue lost pre-order "
@@ -22610,11 +22614,10 @@ def _recompute_research_balance_from_trades():
     for t in rows:
         if session_start and not _trade_row_in_session(t, session_start):
             continue
-        try:
-            pnl = float(t.get("net_pnl_usd") or t.get("pnl") or 0.0)
-        except (ValueError, TypeError):
-            pnl = 0.0
-        total_pnl += pnl
+        # A booked 0.00 net is real: ``or`` used to fall through to ``pnl``,
+        # which is percent-of-margin, adding it as dollars on every restart
+        # (FP #36 balance drift).
+        total_pnl += _trade_row_net_pnl_usd(t)
         counted += 1
     restored = round(STARTING_BALANCE + total_pnl, 4)
     with state_lock:
@@ -26431,7 +26434,10 @@ def process_positions():
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER")
+            # Closes run on their own thread: one trigger closing several tiles
+            # must not queue each close behind the previous one's I/O (HM audit
+            # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
+            _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER", close_async=True)
     finally:
         position_evaluation_lock.release()
 
@@ -28467,7 +28473,7 @@ def _tick_driven_position_exits(price: float):
             ]
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK")
+            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
         return True
     finally:
         position_evaluation_lock.release()
@@ -45987,6 +45993,7 @@ def status():
             },
             "xvl_evaluator": xvl_evaluator_snapshot(),
             "protective_exit": protective_exit_snapshot(),
+            "v3_expected_order_reconcile": dict(_v3_expected_order_reconcile_last),
             "market_context_tape": {
                 "tape_schema": _mct.SCHEMA,
                 "file": _mct.FILE_NAME,

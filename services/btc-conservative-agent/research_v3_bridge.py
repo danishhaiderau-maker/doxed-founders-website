@@ -1392,7 +1392,11 @@ def reconcile_overdue_expected_order_decisions(
             continue
         episode_id, policy_signature, lane = identity
         row = {
-            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order",
+            # Distinct from the hot-path NO_ORDER id: an interrupted hot-path
+            # append can leave a receipt (DEFERRED/COMMITTED) for that id with no
+            # ledger row, which made every reconcile attempt a duplicate/blocked
+            # no-op forever (336 V3 orphans, HM audit 10 Oct 2026).
+            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order:restart-reconciled",
             "episode_id": episode_id, "event_id": str(decision.get("event_id") or ""),
             "shared_ai_call_id": str(decision.get("shared_ai_call_id") or ""),
             "research_lane": lane, "policy_signature": policy_signature,

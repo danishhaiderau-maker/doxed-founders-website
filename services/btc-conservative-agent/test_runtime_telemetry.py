@@ -189,3 +189,18 @@ def test_thread_loop_writes_rows_and_stops(tmp_path):
 def test_telemetry_file_is_shipped_by_the_segment_shipper():
     assert rt.FILE_NAME not in rss.EXCLUDED_NAMES
     assert os.path.splitext(rt.FILE_NAME)[1] in rss.EXTENSIONS
+
+
+def test_external_clock_offset_uses_rtt_midpoint(monkeypatch):
+    import io, urllib.request
+    import runtime_telemetry as rt
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    clock = iter([100.0, 100.2, 100.3])
+    monkeypatch.setattr(rt.time, "time", lambda: next(clock))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp(b"h=x\nts=100.05\n"))
+    out = rt._probe_clock_offset_once(samples=1)
+    assert out["offset_ms"] == 50.0 and out["rtt_ms"] == 200.0
