@@ -41183,6 +41183,13 @@ def _adopt_position_from_rebuild(rebuilt: dict) -> dict:
     return {"adopted": adopted, "orphaned": orphaned, "skipped": skipped}
 
 
+def _live_copy_output_audit_needed() -> bool:
+    try:
+        return bool(_get_live_copy_output().enabled) and not _live_copy_paper_lock_active()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Background reconciliation loop: pulls fills, detects manual closes, and reports
 # drift so the bot snapshot stays in sync with Bitfinex truth. Only acts when live
 # execution is armed + keys present; otherwise sleeps cheaply.
@@ -41190,6 +41197,12 @@ def bitfinex_live_reconcile_loop() -> None:
     interval = 30.0
     while True:
         try:
+            if (not _direct_private_exchange_owner()
+                    and _live_copy_output_audit_needed()):
+                # Live copy (Option 1): the per-intent gate requires a fresh
+                # (<= LIVE_EXPOSURE_AUDIT_MAX_AGE_SEC) read-only audit. Keep
+                # it fresh while output is ON; never mutates the exchange.
+                _refresh_bitfinex_exposure_audit().pop("_rebuild_payload", None)
             if _direct_private_exchange_owner():
                 strict_result = _refresh_bitfinex_exposure_audit()
                 rebuilt = strict_result.pop("_rebuild_payload", None)
