@@ -13,7 +13,7 @@ import { TradingAgentInstancesService } from './trading-agent-instances.service'
 import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
 import { TradingAgentsService } from './trading-agents.service';
 import { verifyFlyViewSignature } from './live-copy-approval';
-import { LiveCopyOpsService } from './live-copy-ops.service';
+import { assertBotAdminToken, LiveCopyOpsService } from './live-copy-ops.service';
 
 @Controller('trading-agents')
 export class TradingAgentsController {
@@ -267,6 +267,37 @@ export class TradingAgentsController {
       );
     }
     return this.instances.setInstancePaused(body.userId!.trim(), slug, true);
+  }
+
+  /**
+   * Cancel ONE leftover reduce-only protective stop when the account is
+   * strictly flat (e.g. a duplicate stop left after a live-copy close).
+   * Refuses unless the order is an active reduce-only STOP on the BTC perp
+   * that the executor durably recorded for this user and the authenticated
+   * position is 0. Never opens, closes, arms or resumes. Auth: BOT_ADMIN_TOKEN.
+   */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post(':slug/ops/live-copy/cancel-orphan-stop')
+  async opsCancelOrphanReduceOnlyStop(
+    @Param('slug') slug: string,
+    @Body() body: { userId?: string; handle?: string; orderId?: number | string; confirmation?: string; reason?: string },
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (body?.confirmation !== 'CANCEL_ORPHAN_REDUCE_ONLY_STOP_WHEN_FLAT') {
+      throw new BadRequestException('confirmation must equal CANCEL_ORPHAN_REDUCE_ONLY_STOP_WHEN_FLAT');
+    }
+    const userId = await this.requireLiveCopyOps().resolveUserId(body?.userId, body?.handle);
+    const result = await this.execution.cancelOrphanReduceOnlyStopWhenFlat(
+      userId,
+      slug,
+      Number(body?.orderId),
+      (body?.reason ?? 'OPS_ORPHAN_STOP').trim() || 'OPS_ORPHAN_STOP',
+    );
+    if (result.reason === 'ACCOUNT_NOT_FLAT') throw new ConflictException('Account is not flat; refusing to cancel a protective stop');
+    return result;
   }
 
   /** Refresh private exchange audit evidence for an already-paused relay. */

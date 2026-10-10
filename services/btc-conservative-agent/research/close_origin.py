@@ -123,6 +123,14 @@ def _analyzer_block(row, close: dict, relationship: dict) -> dict:
     return {"included": True, "code": "INCLUDED", "label": "Included"}
 
 
+def is_deploy_flatten(row) -> bool:
+    """True for a paper close forced by a guarded deploy's maintenance flatten."""
+    row = row if isinstance(row, dict) else {}
+    if row.get("deploy_flatten") is True:
+        return True
+    return resolve_close_origin(row) == CLOSE_ORIGIN_DEPLOY_MAINTENANCE
+
+
 def trade_display(row, truth=None) -> dict:
     """Public-safe, self-explanatory labels for one closed paper trade row."""
     row = row if isinstance(row, dict) else {}
@@ -150,6 +158,7 @@ def trade_display(row, truth=None) -> dict:
         "paper_fill": paper_fill,
         "bitfinex_copy": bitfinex_copy,
         "close": close,
+        "deploy_flatten": is_deploy_flatten(row),
         "analyzer": _analyzer_block(row, close, relationship),
     }
 

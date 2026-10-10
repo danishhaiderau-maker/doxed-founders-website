@@ -3560,6 +3560,38 @@ export function accountEmergencyOrderMatchesFence(
     && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0;
 }
 
+/** Every protective-stop order id durably recorded in a participant's events. */
+export function recordedStopOrderIdsFromPayloads(payloads: unknown[]): number[] {
+  const ids = new Set<number>();
+  const add = (v: unknown) => {
+    const n = Number(v);
+    if (Number.isSafeInteger(n) && n > 0) ids.add(n);
+  };
+  for (const raw of payloads) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const p = raw as Record<string, unknown>;
+    for (const key of ['stopOrderId', 'stop_order_id', 'partialFillStopOrderId', 'supersededPartialStopOrderId', 'previousStopOrderId']) add(p[key]);
+    for (const key of ['supersededStopOrderIds', 'superseded_stop_order_ids']) {
+      if (Array.isArray(p[key])) (p[key] as unknown[]).forEach(add);
+    }
+  }
+  return [...ids];
+}
+
+/** Pure: an active order may be cancelled as an orphan stop only if it is an
+ *  exact reduce-only STOP on the BTC perp and the account has no position. */
+export function orphanReduceOnlyStopCancellable(
+  order: BitfinexActiveOrder | null | undefined,
+  positionAmount: number,
+): { ok: true } | { ok: false; reason: string } {
+  if (!order) return { ok: false, reason: 'ORDER_NOT_ACTIVE' };
+  if (Math.abs(positionAmount) >= 1e-8) return { ok: false, reason: 'ACCOUNT_NOT_FLAT' };
+  if (order.symbol !== BITFINEX_BTC_PERP_SYMBOL) return { ok: false, reason: 'WRONG_SYMBOL' };
+  if (!order.orderType.toUpperCase().includes('STOP')) return { ok: false, reason: 'NOT_A_STOP' };
+  if (((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) === 0) return { ok: false, reason: 'NOT_REDUCE_ONLY' };
+  return { ok: true };
+}
+
 /** Only authenticated HTTP business rejections prove that no order was accepted. */
 export function isDeterministicBitfinexSubmitRejection(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -8048,6 +8080,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             tradeId: true,
             showcaseExitReason: true,
             closedAt: true,
+            intentEnvelope: true,
           },
         },
         events: { orderBy: { createdAt: 'asc' } },
@@ -8058,6 +8091,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const sessionParticipants = recentParticipants.filter((participant) =>
       participantTouchesSession(participant, sessionStartedAt),
     );
+    // Option 1 per-tile live copy: Fly signs an approval for each copied
+    // trade of a live-eligible tile only, so the whole paper book is never
+    // mirrored by design. Comparing it against the full book scored ~0% and
+    // auto-paused + disarmed the account 2 min after the first GS-01 copy
+    // (11 Oct 05:25 AEDT). Per-tile fidelity is enforced on Fly (signed
+    // approvals, stop watcher); keep this whole-book guard for legacy mirror.
+    if (sessionParticipants.some((p) => readEnvelopeFlyApproval(p.cycle?.intentEnvelope) != null)) {
+      const decision = advanceLiveFidelityGuard({
+        previous,
+        nowMs,
+        activeLive,
+        relayArmedAt,
+        evidenceFresh: false,
+        scorePct: null,
+        comparisonCount: 0,
+        resetReason: 'OPTION1_PER_TILE_LIVE_COPY',
+      });
+      await this.persistLiveFidelityGuardState(instance.id, decision.state);
+      return false;
+    }
     const fidelity = buildRelayFidelitySnapshot({
       bot: botState,
       participants: sessionParticipants,
@@ -8081,6 +8134,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return false;
     }
 
+    this.logger.warn(
+      `[LIVE-FIDELITY-GUARD] TRIP -> PAUSED+DISARMED ${instance.userId} instance=${instance.id} ` +
+      `score=${observation.scorePct ?? 'null'}% comparisons=${observation.comparisonCount} armedAt=${relayArmedAt}`,
+    );
     await this.pauseRelayForSustainedFidelityBreach(
       agentId,
       instance,
@@ -11967,6 +12024,21 @@ await this.notifications
     }
   }
 
+  /** True when a FILLED event for this participant already carries any of these exchange fill ids. */
+  private async exchangeFillAlreadyRecorded(participantId: string, fillIds: Array<number | string>): Promise<boolean> {
+    const wanted = new Set(fillIds.map(String));
+    const filled = await this.prisma.signalCycleEvent.findMany({
+      where: { participantId, eventType: 'FILLED' },
+      select: { payload: true },
+      take: 50,
+    });
+    if (filled.length && !wanted.size) return true;
+    return filled.some((e) => {
+      const ids = (e.payload as { exchange_fill_ids?: unknown } | null)?.exchange_fill_ids;
+      return !Array.isArray(ids) || ids.some((id) => wanted.has(String(id)));
+    });
+  }
+
   /** Prior deploys recorded FILLED events but participant stayed PENDING_ENTRY when stop failed. */
   private async reconcileUnattributedExchangeFills(
     agentId: string,
@@ -12118,12 +12190,41 @@ await this.notifications
       );
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
-      const verifiedStop = await this.submitVerifiedProtectiveStop(creds, {
-        positionDirection: meta.direction,
-        qty,
-        stopPrice,
-        leverage,
+      // Idempotent per exchange fill: the cancel-race fill path may be
+      // promoting this same fill right now (it records FILLED only after its
+      // stop is acknowledged). Recording it twice placed two stops for one
+      // 0.0003 position (gs1-5d2c1ed4721e). Share its durable claim.
+      if (this.cancelRaceFillInFlight.has(row.id)) continue;
+      if (await this.exchangeFillAlreadyRecorded(row.id, exchangeFill.fillIds)) continue;
+      if (!meta.bitfinexOrderId) continue;
+      const reconcileClaim = await this.acquireFillPromotionClaim({
+        participantId: row.id,
+        entryOrderId: meta.bitfinexOrderId,
+        lifecycleGeneration: this.fillPromotionGeneration(row.cycle, intent, meta.bitfinexOrderId),
       });
+      if (!reconcileClaim || reconcileClaim.resumeStopOrderId != null || reconcileClaim.recoverSubmitting) {
+        this.logger.warn(
+          `[FILL-IDEMPOTENCY] EXCHANGE_FILL_RECONCILE skip participant=${row.id} order=${meta.bitfinexOrderId}: fill promotion owned by another path`,
+        );
+        continue;
+      }
+      this.cancelRaceFillInFlight.add(row.id);
+      let verifiedStop: Awaited<ReturnType<typeof this.submitVerifiedProtectiveStop>>;
+      try {
+        if (!(await this.setFillPromotionPhase(row.id, reconcileClaim.token, 'CLAIMED', 'SUBMITTING'))) continue;
+        verifiedStop = await this.submitVerifiedProtectiveStop(creds, {
+          positionDirection: meta.direction,
+          qty,
+          stopPrice,
+          leverage,
+          clientOrderId: reconcileClaim.stopClientOrderId,
+        });
+        if (verifiedStop.ok) {
+          await this.setFillPromotionPhase(row.id, reconcileClaim.token, 'SUBMITTING', 'PROTECTED', verifiedStop.orderId);
+        }
+      } finally {
+        this.cancelRaceFillInFlight.delete(row.id);
+      }
       if (!verifiedStop.ok) {
         await this.holdUnprotectedFill(
           agentId,
@@ -15587,6 +15688,11 @@ await this.notifications
     if (!meta.direction) {
       throw new Error('EXIT_TARGET_MISSING_DIRECTION');
     }
+    // Cancel EVERY stop this lot ever recorded on close, not only the latest
+    // meta.stopOrderId: a duplicate fill record once left a second reduce-only
+    // stop resting after the position closed (gs1-5d2c1ed4721e, 11 Oct).
+    const recordedStops = await this.participantRecordedStopOrderIds(participantId).catch(() => [] as number[]);
+    stopOrderIds = [...new Set([...stopOrderIds, ...recordedStops])];
     const remainingLedgerAmount = prepared
       ? prepared.remainingLedgerAmount
       : await this.expectedRemainingLedgerAmount(agentId, userId, participantId);
@@ -20954,6 +21060,74 @@ await this.notifications
   }
 
   /** No-close ops recovery for explicitly named stale pending participants. */
+  /** Stop order ids this participant ever recorded (FILLED / STOP_LOSS_ARMED / UPDATE_STOPS). */
+  private async participantRecordedStopOrderIds(participantId: string): Promise<number[]> {
+    const events = await this.prisma.signalCycleEvent.findMany({
+      where: { participantId, eventType: { in: ['FILLED', 'STOP_LOSS_ARMED', 'UPDATE_STOPS'] } },
+      select: { payload: true },
+      take: 200,
+    });
+    return recordedStopOrderIdsFromPayloads(events.map((e) => e.payload));
+  }
+
+  /**
+   * Operator route: cancel ONE leftover reduce-only stop when the account is
+   * strictly flat. Refuses unless the order is an active reduce-only STOP on
+   * the BTC perp that this executor durably recorded for this user, and the
+   * authenticated position is 0. Never opens or closes exposure.
+   */
+  async cancelOrphanReduceOnlyStopWhenFlat(
+    userId: string,
+    agentSlug: string,
+    orderId: number,
+    reason: string,
+  ): Promise<Record<string, unknown>> {
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new Error('orderId must be a positive integer');
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance || !instance.exchangeProvider || instance.exchangeProvider === 'paper') {
+      throw new Error('Orphan stop cancel requires a live exchange instance');
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+    if (!creds) throw new Error('Orphan stop cancel requires exchange credentials');
+    const recordedEvents = await this.prisma.signalCycleEvent.findMany({
+      where: {
+        eventType: { in: ['FILLED', 'STOP_LOSS_ARMED', 'UPDATE_STOPS'] },
+        participant: { userId, cycle: { agentId: agent.id } },
+        createdAt: { gte: new Date(Date.now() - 14 * 24 * 3_600_000) },
+      },
+      select: { payload: true, participantId: true, cycleId: true },
+      take: 2_000,
+    });
+    const owner = recordedEvents.find((e) => recordedStopOrderIdsFromPayloads([e.payload]).includes(orderId));
+    if (!owner) return { ok: false, cancelled: false, reason: 'ORDER_NOT_RECORDED_BY_EXECUTOR', order_id: orderId };
+    const release = await this.acquireAccountFillGapLane(userId);
+    try {
+      const position = await this.bitfinex.getOpenPositionDetail(creds);
+      const active = await this.bitfinex.listActiveOrders(creds);
+      const order = active.find((o) => o.id === orderId) ?? null;
+      const verdict = orphanReduceOnlyStopCancellable(order, position?.amount ?? 0);
+      if (!verdict.ok) {
+        return { ok: verdict.reason === 'ORDER_NOT_ACTIVE', cancelled: false, reason: verdict.reason, order_id: orderId };
+      }
+      const gone = await this.cancelManagedOrderGone(
+        creds, orderId, `ops-orphan-reduce-only-stop:${reason}`, undefined, this.bitfinex,
+      );
+      await this.cycles.recordHireExecutionEvent(userId, agent.id, owner.cycleId, 'UPDATE_STOPS', {
+        venue: 'bitfinex', source: 'hire', event: 'OPS_ORPHAN_REDUCE_ONLY_STOP_CANCELLED',
+        cancelledStopOrderId: orderId, gone: gone.gone, reason: reason.slice(0, 120),
+        participant_id: owner.participantId,
+      }).catch(() => {});
+      this.logger.warn(`[OPS] orphan reduce-only stop ${orderId} cancel user=${userId} gone=${gone.gone} reason=${reason}`);
+      return { ok: gone.gone, cancelled: gone.gone, reason: gone.gone ? 'CANCELLED' : (gone.reason ?? 'CANCEL_UNCONFIRMED'), order_id: orderId };
+    } finally {
+      release();
+    }
+  }
+
   async recoverAlreadyFlatPendingEntries(
     userId: string,
     agentSlug: string,
