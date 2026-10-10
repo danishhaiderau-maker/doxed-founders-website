@@ -3813,7 +3813,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       requestToken: `reduce:${participantId}:${source.reductionId}`,
       repo,
       venue: {
-        authenticatedPositionQty: async () => Math.abs((await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0),
+        authenticatedPositionQty: async () => Math.abs((await this.readOpenPositionDetailWithRetry(creds))?.amount ?? 0),
         submitReduceOnly: async (qty, _requestToken) => ({
           orderId: String(await this.activeTrading.submitMarketClose(creds, {
             positionDirection: meta.direction!, qty, leverage,
@@ -5458,7 +5458,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
     let position: { amount: number; basePrice: number } | null;
     try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
+      position = await this.readOpenPositionDetailWithRetry(creds);
     } catch {
       return { kind: 'UNKNOWN', reason: 'POSITION_UNAVAILABLE' };
     }
@@ -6233,7 +6233,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // durable signed envelope below.
     const preflightPromise = Promise.all([
       this.activeTrading.listActiveOrders(creds),
-      this.activeTrading.getOpenPositionDetail(creds),
+      this.readOpenPositionDetailWithRetry(creds),
       this.prisma.signalCycleParticipant.findMany({
         where: {
           userId: instance.userId,
@@ -8563,7 +8563,7 @@ await this.notifications
     const summary = await this.buildVirtualLotSummary(participants);
     let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
+      position = await this.readOpenPositionDetailWithRetry(creds);
     } catch (err) {
       const message =
         `EXCHANGE_POSITION_READ_FAILED: Bitfinex position is unknown; relay paused. ` +
@@ -9678,7 +9678,7 @@ await this.notifications
     let latestCycle: { createdAt: Date } | null = null;
     try {
       [prePosition, [latestGate, latestCycle]] = await Promise.all([
-        this.activeTrading.getOpenPositionDetail(creds),
+        this.readOpenPositionDetailWithRetry(creds),
         venue === 'bitfinex'
           ? Promise.all([
               this.prisma.tradingAgentInstance.findUnique({
@@ -10112,8 +10112,8 @@ await this.notifications
     // Order gone from the active book — filled or cancelled. Discriminate via
     // the merged-position delta against the at-order baseline.
     const position = failClosedOnExchangeError
-      ? await this.activeTrading.getOpenPositionDetail(creds)
-      : await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+      ? await this.readOpenPositionDetailWithRetry(creds)
+      : await this.readOpenPositionDetailWithRetry(creds).catch(() => null);
     const expectedLong = meta.direction === 'LONG';
     const hasPosition =
       position &&
@@ -10964,6 +10964,29 @@ await this.notifications
     }
   }
 
+  /**
+   * Bitfinex private position read with bounded retry. A Cloudflare HTML page,
+   * HTTP 5xx, rate-limit or network/timeout error is transient: retry up to
+   * 3 attempts (backoff 0.5 s, 1.5 s) before surfacing the error, so one bad
+   * edge response no longer pauses and disarms a live relay.
+   */
+  private async readOpenPositionDetailWithRetry(
+    creds: Parameters<ExecutionTradingClient['getOpenPositionDetail']>[0],
+  ): Promise<Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>> {
+    const delays = [500, 1500];
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+      try {
+        return await this.activeTrading.getOpenPositionDetail(creds);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientExchangeReadError(err) || attempt === delays.length) throw err;
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+    throw lastErr;
+  }
+
   private async pauseRelayForPositionMismatch(
     instance: TradingAgentInstance,
     message: string,
@@ -11751,7 +11774,7 @@ await this.notifications
     }
 
     let positionFetchFailed = false;
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => {
+    const position = await this.readOpenPositionDetailWithRetry(creds).catch(() => {
       positionFetchFailed = true;
       return null;
     });
@@ -11954,7 +11977,7 @@ await this.notifications
   ) {
     const releaseAccountGap = await this.acquireAccountFillGapLane(userId);
     try {
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const position = await this.readOpenPositionDetailWithRetry(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
 
     const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
@@ -13469,7 +13492,7 @@ await this.notifications
       );
       let signedPosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> | undefined;
       try {
-        signedPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        signedPosition = await this.readOpenPositionDetailWithRetry(creds);
       } catch {
         signedPosition = undefined;
       }
@@ -13689,7 +13712,7 @@ await this.notifications
 
     let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
+      position = await this.readOpenPositionDetailWithRetry(creds);
     } catch (err) {
       const message = `PARTIAL_FILL_POSITION_STATUS_UNKNOWN cycle=${cycle.id}: ${
         err instanceof Error ? err.message : String(err)
@@ -13733,7 +13756,7 @@ await this.notifications
       }
     }
 
-    const flatProof = await this.activeTrading.getOpenPositionDetail(creds).catch(() => undefined);
+    const flatProof = await this.readOpenPositionDetailWithRetry(creds).catch(() => undefined);
     if (flatProof === undefined || (flatProof && btcToSats(Math.abs(flatProof.amount)) > 0)) {
       const message = `PARTIAL_STOP_TRIGGER_NOT_FLAT_PROVEN cycle=${cycle.id}`;
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
@@ -13804,7 +13827,7 @@ await this.notifications
     attributableQty: number;
     leverage: number;
   }): Promise<boolean> {
-    const current = await this.activeTrading.getOpenPositionDetail(input.creds);
+    const current = await this.readOpenPositionDetailWithRetry(input.creds);
     if (!current) return true;
     const sameDirection = (input.direction === 'LONG' && current.amount > 0)
       || (input.direction === 'SHORT' && current.amount < 0);
@@ -13998,7 +14021,7 @@ await this.notifications
       if (remainder.gone) {
         let before: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> | undefined;
         try {
-          before = await this.activeTrading.getOpenPositionDetail(creds);
+          before = await this.readOpenPositionDetailWithRetry(creds);
         } catch {
           before = undefined;
         }
@@ -15405,7 +15428,7 @@ await this.notifications
       participantId,
     );
     if (remainingLedgerAmount == null) return;
-    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const position = await this.readOpenPositionDetailWithRetry(creds);
     const target = relayLotExitTarget({
       currentAmount: position?.amount ?? 0,
       remainingLedgerAmount,
@@ -15579,7 +15602,7 @@ await this.notifications
       } | null> => this.activeTrading.getBestBidAsk()).catch(() => null),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
     ]);
-    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const position = await this.readOpenPositionDetailWithRetry(creds);
     const target = relayLotExitTarget({
       currentAmount: position?.amount ?? 0,
       remainingLedgerAmount,
@@ -15692,7 +15715,7 @@ await this.notifications
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
     }
-    const confirmedPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    const confirmedPosition = await this.readOpenPositionDetailWithRetry(creds);
     const confirmedExchangeAmount = confirmedPosition?.amount ?? 0;
     if (btcToSats(confirmedExchangeAmount) !== btcToSats(target.targetAmount)) {
       throw new Error(
@@ -16078,7 +16101,7 @@ await this.notifications
     ) return null;
     const targetAmount = finiteDecimalLikeNumber(row.terminalCloseTargetAmount);
     if (targetAmount == null) return null;
-    const position = await this.activeTrading.getOpenPositionDetail(input.creds);
+    const position = await this.readOpenPositionDetailWithRetry(input.creds);
     const currentAmount = position?.amount ?? 0;
     if (btcToSats(currentAmount) !== btcToSats(targetAmount)) return null;
 
@@ -16265,7 +16288,7 @@ await this.notifications
         // performs one final fresh position read immediately before cancelling
         // the stop and submitting the close.
         [position, remainingLedgerAmount] = await Promise.all([
-          this.activeTrading.getOpenPositionDetail(creds),
+          this.readOpenPositionDetailWithRetry(creds),
           this.expectedRemainingLedgerAmount(agentId, userId, participant.id),
         ]);
       } catch (err) {
@@ -17055,7 +17078,7 @@ await this.notifications
 
     let prePosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     try {
-      prePosition = await this.activeTrading.getOpenPositionDetail(creds);
+      prePosition = await this.readOpenPositionDetailWithRetry(creds);
     } catch {
       await releaseClaim();
       return false;
@@ -17109,7 +17132,7 @@ await this.notifications
     if (btcToSats(authenticatedQty) === 0) {
       let postPosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
       try {
-        postPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        postPosition = await this.readOpenPositionDetailWithRetry(creds);
       } catch {
         return false;
       }
@@ -17803,7 +17826,7 @@ await this.notifications
     }
 
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
-    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const position = await this.readOpenPositionDetailWithRetry(creds);
     const expectedLong = meta.direction === 'LONG';
     const hasExpected =
       position &&
@@ -18851,7 +18874,7 @@ await this.notifications
     const userId = instance.userId;
     let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
+      position = await this.readOpenPositionDetailWithRetry(creds);
     } catch (err) {
       const message =
         `EXCHANGE_POSITION_READ_FAILED (${simActive ? 'simulation' : 'live'}): ` +
@@ -18980,7 +19003,7 @@ await this.notifications
         ReturnType<ExecutionTradingClient['getOpenPositionDetail']>
       >;
       try {
-        postCancelPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        postCancelPosition = await this.readOpenPositionDetailWithRetry(creds);
       } catch (err) {
         const message =
           `IMMEDIATE_FLAT_POST_CANCEL_POSITION_READ_FAILED cycle=${row.cycleId}: ` +
@@ -19074,7 +19097,7 @@ await this.notifications
       return false;
     }
 
-    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const position = await this.readOpenPositionDetailWithRetry(creds);
     const expectedLong = meta.direction === 'LONG';
     const hasExpected =
       position &&
@@ -19431,7 +19454,7 @@ await this.notifications
     if (!meta.qty || !meta.direction) return false;
     if (await this.hasParticipantExited(participant.id)) return false;
 
-    const position = await this.activeTrading.getOpenPositionDetail(creds);
+    const position = await this.readOpenPositionDetailWithRetry(creds);
     if (!position) return false;
 
     const expectedLong = meta.direction === 'LONG';
@@ -19760,7 +19783,7 @@ await this.notifications
   ): Promise<void> {
     let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
     try {
-      position = await this.activeTrading.getOpenPositionDetail(creds);
+      position = await this.readOpenPositionDetailWithRetry(creds);
     } catch {
       return;
     }
@@ -21008,7 +21031,7 @@ await this.notifications
       });
     }
 
-    const firstPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    const firstPosition = await this.readOpenPositionDetailWithRetry(creds);
     if (btcToSats(firstPosition?.amount ?? 0) !== 0) {
       throw new Error('Already-flat recovery refused: authenticated position is not flat');
     }
@@ -21029,7 +21052,7 @@ await this.notifications
       || (ownership.foreignOrderIds?.length ?? -1) !== 0) {
       throw new Error('Already-flat recovery refused: account-wide order reconciliation is not empty and complete');
     }
-    const finalPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    const finalPosition = await this.readOpenPositionDetailWithRetry(creds);
     if (btcToSats(finalPosition?.amount ?? 0) !== 0) {
       throw new Error('Already-flat recovery refused: final authenticated position changed from flat');
     }
@@ -21232,7 +21255,7 @@ await this.notifications
     marginCap: number,
     budgetRemaining: number,
   ): Promise<number> {
-    const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
+    const position = await this.readOpenPositionDetailWithRetry(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return 0;
 
     const direction: 'LONG' | 'SHORT' = position.amount > 0 ? 'LONG' : 'SHORT';
@@ -22195,4 +22218,13 @@ await this.notifications
       },
     });
   }
+}
+
+/** Cloudflare HTML, HTTP 5xx/429, or network/timeout => transient read failure. */
+export function isTransientExchangeReadError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
+  if (!msg) return false;
+  if (msg.includes('<!doctype') || msg.includes('<html') || msg.includes('cloudflare')) return true;
+  if (/\b(5\d\d|429)\b/.test(msg)) return true;
+  return /(timeout|timed out|aborted|econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|fetch failed|network)/.test(msg);
 }
