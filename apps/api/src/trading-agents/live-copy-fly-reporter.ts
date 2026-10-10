@@ -8,11 +8,14 @@ import {
   signExecutorCapability,
   signLiveExecutionReport,
 } from './live-copy-approval';
-import {
-  BITFINEX_BTC_PERP_SYMBOL,
-  BITFINEX_PROTECTIVE_STOP_SPEC,
-  BITFINEX_REDUCE_ONLY_FLAG,
-} from '../exchanges/bitfinex-api.client';
+import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
+
+/**
+ * The copier's protective stop as submitStopOrder sends it (type STOP, flags
+ * BITFINEX_REDUCE_ONLY_FLAG). The spec test pins this against the client
+ * source so the declared capability cannot drift from the real order.
+ */
+export const EXECUTOR_PROTECTIVE_STOP_SPEC = Object.freeze({ type: 'STOP' as const, flags: BITFINEX_REDUCE_ONLY_FLAG });
 
 /**
  * Option 1 report-back (2026-10-09): every fill, protective stop, close and
@@ -34,7 +37,7 @@ const CAPABILITY_EVERY_MS = 60_000;
  * stop spec submitStopOrder sends (STOP + REDUCE_ONLY on tBTCF0:USTF0).
  */
 export function buildExecutorCapabilityReport(nowMs: number): Record<string, unknown> {
-  const flags = BITFINEX_PROTECTIVE_STOP_SPEC.flags;
+  const flags = EXECUTOR_PROTECTIVE_STOP_SPEC.flags;
   const reduceOnly = (flags & BITFINEX_REDUCE_ONLY_FLAG) === BITFINEX_REDUCE_ONLY_FLAG;
   return {
     schema: EXECUTOR_CAPABILITY_SCHEMA,
@@ -43,7 +46,7 @@ export function buildExecutorCapabilityReport(nowMs: number): Record<string, unk
     symbol: BITFINEX_BTC_PERP_SYMBOL,
     reduce_only_supported: reduceOnly,
     protective_stop: {
-      order_type: BITFINEX_PROTECTIVE_STOP_SPEC.type,
+      order_type: EXECUTOR_PROTECTIVE_STOP_SPEC.type,
       flags,
       reduce_only: reduceOnly,
       placed: 'ONCE_AT_ENTRY_FILL',

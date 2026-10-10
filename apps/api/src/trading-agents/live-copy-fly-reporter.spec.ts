@@ -84,7 +84,21 @@ describe('executor capability report (reduce-only source for Fly)', () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { signExecutorCapability, signLiveExecutionReport } = require('./live-copy-approval');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { BITFINEX_PROTECTIVE_STOP_SPEC, BITFINEX_REDUCE_ONLY_FLAG } = require('../exchanges/bitfinex-api.client');
+  const { BITFINEX_REDUCE_ONLY_FLAG } = require('../exchanges/bitfinex-api.client');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { EXECUTOR_PROTECTIVE_STOP_SPEC } = require('./live-copy-fly-reporter');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('node:fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('node:path');
+
+  it('matches the stop submitStopOrder really sends', () => {
+    const src: string = fs.readFileSync(path.join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
+    const body = src.slice(src.indexOf('async submitStopOrder'), src.indexOf('async submitMarketClose'));
+    expect(body).toContain("type: 'STOP'");
+    expect(body).toContain('flags: BITFINEX_REDUCE_ONLY_FLAG');
+    expect(EXECUTOR_PROTECTIVE_STOP_SPEC).toEqual({ type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG });
+  });
 
   it('is derived from the real protective stop spec (STOP + REDUCE_ONLY on tBTCF0:USTF0)', () => {
     const r = buildExecutorCapabilityReport(1_700_000_000_000);
@@ -92,7 +106,6 @@ describe('executor capability report (reduce-only source for Fly)', () => {
     expect(r.symbol).toBe('tBTCF0:USTF0');
     expect(r.reduce_only_supported).toBe(true);
     expect(r.protective_stop).toMatchObject({ order_type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG, reduce_only: true });
-    expect(BITFINEX_PROTECTIVE_STOP_SPEC.flags & BITFINEX_REDUCE_ONLY_FLAG).toBe(BITFINEX_REDUCE_ONLY_FLAG);
     expect(r.sent_at_ts).toBe(1_700_000_000);
   });
 
