@@ -14,6 +14,16 @@ export function bitfinexOrderLev(leverage?: number): number {
 /** Bitfinex v2 order flags. Partial lot exits must use REDUCE_ONLY only. */
 export const BITFINEX_POSITION_CLOSE_FLAG = 512;
 export const BITFINEX_REDUCE_ONLY_FLAG = 1024;
+/**
+ * The exact order shape of the copier's protective (catastrophe-backup) stop.
+ * submitStopOrder builds its request from this, and the executor's signed
+ * capability report to Fly is derived from it, so the declared capability can
+ * never drift from what is actually sent to Bitfinex.
+ */
+export const BITFINEX_PROTECTIVE_STOP_SPEC = Object.freeze({
+  type: 'STOP' as const,
+  flags: BITFINEX_REDUCE_ONLY_FLAG,
+});
 export const BITFINEX_SAFE_CLOSE_FLAGS =
   BITFINEX_POSITION_CLOSE_FLAG | BITFINEX_REDUCE_ONLY_FLAG;
 const STABLE_CURRENCIES = new Set(['USD', 'USDT', 'UST', 'USTF0']);
@@ -853,13 +863,13 @@ export class BitfinexTradingClient {
         ? -Math.abs(input.qty)
         : Math.abs(input.qty);
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', {
-      type: 'STOP',
+      type: BITFINEX_PROTECTIVE_STOP_SPEC.type,
       symbol,
       amount: amount.toFixed(8),
       price: normalizeBitfinexOrderPrice(input.stopPrice).toString(),
       lev,
       // A stale protective stop must never open the opposite position.
-      flags: BITFINEX_REDUCE_ONLY_FLAG,
+      flags: BITFINEX_PROTECTIVE_STOP_SPEC.flags,
       ...(input.clientOrderId != null ? { cid: input.clientOrderId } : {}),
       meta: { aff_code: 'doxxedcrypto' },
     });

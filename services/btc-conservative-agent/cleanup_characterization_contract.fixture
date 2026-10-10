@@ -9,6 +9,7 @@
     ["POST", "/api/live-copy/output", "api_live_copy_output"],
     ["GET", "/api/live-copy/status", "api_live_copy_status"],
     ["POST", "/api/live-copy/execution-report", "api_live_copy_execution_report"],
+    ["POST", "/api/live-copy/executor-capability", "api_live_copy_executor_capability"],
     ["GET", "/api/live-copy/fly-key-identity", "api_live_copy_fly_key_identity"],
     ["GET", "/static/dashboard.js", "dashboard_js"],
     ["GET", "/favicon.ico", "dashboard_favicon"],

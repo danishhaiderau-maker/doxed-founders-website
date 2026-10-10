@@ -42,6 +42,14 @@ DECISIONS_SCHEMA = "fly_live_copy_trade_decisions_v1"
 
 APPROVAL_KEY_DOMAIN = b"fly-live-copy-approval-v1"
 REPORT_KEY_DOMAIN = b"railway-live-execution-report-v1"
+CAPABILITY_KEY_DOMAIN = b"railway-executor-capability-v1"
+CAPABILITY_SCHEMA = "railway_executor_capability_v1"
+# The executor re-sends its capability report every minute; Fly treats it as
+# stale (reduce-only unknown -> unsupported) after this long.
+CAPABILITY_TTL_SEC = 15 * 60
+# The only instrument the executor copies onto.
+EXECUTOR_SYMBOL = "tBTCF0:USTF0"
+BITFINEX_REDUCE_ONLY_FLAG = 1024
 
 OUTPUT_SIDECAR = "live_copy_output_state.json"
 PROTECTION_SIDECAR = "live_copy_protection_evidence.json"
@@ -199,6 +207,57 @@ def verify_report_signature(raw_body: bytes, signature: str, secret: str) -> boo
     sig = signature.split("=", 1)[1] if signature.startswith("sha256=") else signature
     expected = hmac.new(key, raw_body or b"", hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, sig)
+
+
+def sign_capability(raw_body: bytes, secret: str) -> str:
+    key = derive_key(secret, CAPABILITY_KEY_DOMAIN)
+    if not key:
+        raise ValueError(DENY_SECRET_MISSING)
+    return "sha256=" + hmac.new(key, raw_body or b"", hashlib.sha256).hexdigest()
+
+
+def verify_capability_report(raw_body: bytes, signature: str, secret: str,
+                             now: float) -> tuple[bool, str, dict | None]:
+    """Verify a signed executor capability report (own HMAC domain, fresh).
+
+    Returns (ok, reason, report). Accepts only a report for the copied
+    instrument whose protective stop path uses the Bitfinex REDUCE_ONLY flag.
+    """
+    key = derive_key(secret, CAPABILITY_KEY_DOMAIN)
+    if not key or not isinstance(signature, str) or not signature:
+        return False, "SIGNATURE_INVALID", None
+    sig = signature.split("=", 1)[1] if signature.startswith("sha256=") else signature
+    expected = hmac.new(key, raw_body or b"", hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return False, "SIGNATURE_INVALID", None
+    try:
+        rep = json.loads((raw_body or b"").decode("utf-8") or "{}")
+    except (ValueError, UnicodeDecodeError):
+        return False, "BODY_NOT_JSON", None
+    if not isinstance(rep, dict) or rep.get("schema") != CAPABILITY_SCHEMA:
+        return False, "CAPABILITY_SCHEMA_INVALID", None
+    try:
+        sent = float(rep.get("sent_at_ts"))
+    except (TypeError, ValueError):
+        return False, "CAPABILITY_SENT_AT_INVALID", None
+    if abs(now - sent) > REPORT_MAX_SKEW_SEC:
+        return False, "CAPABILITY_STALE_OR_FUTURE", None
+    if rep.get("symbol") != EXECUTOR_SYMBOL:
+        return False, "CAPABILITY_SYMBOL_MISMATCH", None
+    return True, "OK", rep
+
+
+def capability_supports_reduce_only(rep: Mapping[str, Any] | None) -> bool:
+    """The executor declares a reduce-only protective stop on the copied symbol."""
+    r = rep or {}
+    stop = r.get("protective_stop") if isinstance(r.get("protective_stop"), Mapping) else {}
+    try:
+        flag = int(stop.get("flags"))
+    except (TypeError, ValueError):
+        return False
+    return (r.get("symbol") == EXECUTOR_SYMBOL and r.get("reduce_only_supported") is True
+            and stop.get("order_type") == "STOP" and stop.get("reduce_only") is True
+            and (flag & BITFINEX_REDUCE_ONLY_FLAG) == BITFINEX_REDUCE_ONLY_FLAG)
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> bool:
@@ -373,6 +432,25 @@ class ProtectionEvidence:
             _atomic_write_json(self.path, {"schema": PROTECTION_SCHEMA, "evidence": self._evidence})
         return True
 
+    def record_executor_capability(self, rep: Mapping[str, Any]) -> bool:
+        """Store a VERIFIED executor capability report (see verify_capability_report)."""
+        if not capability_supports_reduce_only(rep):
+            with self._lock:
+                self._evidence.pop("executor_capability", None)
+                _atomic_write_json(self.path, {"schema": PROTECTION_SCHEMA, "evidence": self._evidence})
+            return False
+        row = {
+            "received_at_ts": float(self._clock()),
+            "symbol": rep.get("symbol"),
+            "executor": str(rep.get("executor") or "")[:64],
+            "executor_version": str(rep.get("executor_version") or "")[:64],
+            "protective_stop": dict(rep.get("protective_stop") or {}),
+        }
+        with self._lock:
+            self._evidence["executor_capability"] = row
+            _atomic_write_json(self.path, {"schema": PROTECTION_SCHEMA, "evidence": self._evidence})
+        return True
+
     def flags(self, lane: str | None = None, now: float | None = None) -> dict:
         now = float(self._clock() if now is None else now)
         with self._lock:
@@ -385,12 +463,23 @@ class ProtectionEvidence:
             except (TypeError, ValueError):
                 return False
         account_ok = fresh(last)
+        cap = ev.get("executor_capability") if isinstance(ev.get("executor_capability"), dict) else None
+        try:
+            cap_ok = bool(cap) and 0 <= now - float(cap.get("received_at_ts") or 0) <= CAPABILITY_TTL_SEC
+        except (TypeError, ValueError):
+            cap_ok = False
         return {
             "schema": PROTECTION_SCHEMA,
             # A reduce-only stop accepted and read back on Bitfinex proves the
-            # venue/account supports reduce-only; coverage for a lane needs a
-            # confirmation for that lane (or any lane when lane is None).
-            "reduce_only_supported": account_ok,
+            # venue/account supports reduce-only; so does a fresh signed
+            # capability report from the Railway executor (the code path that
+            # places the reduce-only stop). Stop COVERAGE for a lane still
+            # needs a real confirmation for that lane (or the bootstrap).
+            "reduce_only_supported": account_ok or cap_ok,
+            "reduce_only_source": ("STOP_CONFIRMED" if account_ok else
+                                   "EXECUTOR_CAPABILITY" if cap_ok else None),
+            "executor_capability": cap,
+            "executor_capability_fresh": cap_ok,
             "stop_coverage_verified": fresh(lane_row) if lane else account_ok,
             "last_stop_confirmation": last,
             "lane_stop_confirmation": lane_row,
@@ -406,157 +495,252 @@ BOOTSTRAP_SCHEMA = "fly_live_copy_protection_bootstrap_v1"
 BOOTSTRAP_TTL_SEC = 24 * 3600
 
 
+# Report types that prove the bound trade reached the exchange (a fill). A
+# bootstrap that saw one of these is SPENT for good; anything else that ends
+# it (restart, expiry, output/eligibility OFF, operator OFF) leaves it re-armable.
+BOOTSTRAP_FILL_REPORT_TYPES = frozenset({"ORDER_FILLED", "STOP_PLACED", "STOP_CONFIRMED",
+                                         "STOP_FAILED", "POSITION_CLOSED"})
+BOOTSTRAP_MAX_ACTIVE_LANES = 2
+
+
+def _new_slot() -> dict:
+    return {"active": False, "enabled_at_ts": None, "expires_at_ts": None, "by": None,
+            "reason": None, "trade_id": None, "claimed_at_ts": None, "filled": False,
+            "ended_reason": None, "ended_at_ts": None, "arm_count": 0}
+
+
 class ProtectionBootstrap:
-    """Break the stop-evidence chicken-and-egg for ONE tile and ONE trade.
+    """Break the stop-evidence chicken-and-egg: ONE trade per lane.
 
     ``stop_coverage_verified`` needs a real STOP_CONFIRMED, which needs a live
-    trade. An operator may enable this ONCE for one lane: it stands in for
-    stop-coverage / reduce-only readiness for that lane only, binds to the
-    first trade approved under it, and ends on that trade's fill (or after
-    24 h, or on restart). It never relaxes anything else: output ON, tile ON,
-    eligibility, size, the copier's arm, Fly's signature and the executor's
-    authenticated stop + unprotected-fill hold-and-pause rule all still apply.
-    Default OFF; fsync'd; refuses ON if it cannot be persisted.
+    trade. An operator may arm a bootstrap per lane (at most
+    ``BOOTSTRAP_MAX_ACTIVE_LANES`` at once): it stands in for stop-coverage /
+    reduce-only readiness for that lane only, binds to the first trade
+    approved under it, and ends on that trade's fill (or after 24 h). It never
+    relaxes anything else: output ON, tile ON, eligibility, size, the copier's
+    arm, Fly's signature and the executor's authenticated stop +
+    unprotected-fill hold-and-pause rule all still apply.
+
+    Spent vs re-armable (Boss 2026-10-11): a lane whose bootstrap trade
+    actually FILLED is spent forever. A bootstrap that ended without any fill
+    (restart while claimed, expiry, output OFF, operator OFF) may be re-armed
+    by the operator, still single-trade / 24 h / fail-closed. A restart never
+    consumes an unclaimed (never-used) bootstrap: it stays armed with its
+    original expiry. A restart ends a CLAIMED one (trade state uncertain) but
+    does not spend it. Default OFF; fsync'd; refuses ON if it cannot persist.
     """
 
     def __init__(self, path: Path | str | None = None, clock=time.time):
         self.path = Path(path) if path is not None else data_path(BOOTSTRAP_SIDECAR)
         self._clock = clock
         self._lock = threading.Lock()
-        self._state: dict = {
-            "active": False, "lane": None, "enabled_at_ts": None, "expires_at_ts": None,
-            "by": None, "reason": None, "trade_id": None, "claimed_at_ts": None,
-            "used": False, "ended_reason": None, "ended_at_ts": None, "history": [],
-        }
+        self._lanes: dict[str, dict] = {}
+        self._history: list = []
         self.persist_ok = True
         raw = _read_json(self.path)
-        if raw and isinstance(raw.get("state"), dict):
-            prior = raw["state"]
-            self._state.update({k: prior.get(k) for k in self._state if k in prior})
-            if not isinstance(self._state.get("history"), list):
-                self._state["history"] = []
-        if self._state.get("active"):
-            # Like the output switch: a new process never inherits ON.
-            self._end_locked(RESTART_RESET_REASON)
+        prior = raw.get("state") if raw and isinstance(raw.get("state"), dict) else None
+        if prior:
+            self._history = list(prior.get("history") or []) if isinstance(prior.get("history"), list) else []
+            lanes = prior.get("lanes")
+            if isinstance(lanes, dict):
+                for lane, row in lanes.items():
+                    if isinstance(row, dict):
+                        slot = _new_slot()
+                        slot.update({k: row.get(k) for k in slot if k in row})
+                        self._lanes[str(lane).upper()] = slot
+            elif prior.get("lane"):
+                # Legacy single-lane v1 state: "used" meant "claimed", not
+                # "filled". Only a TRADE_* end (observe_report) proves a fill.
+                slot = _new_slot()
+                slot.update({k: prior.get(k) for k in slot if k in prior})
+                ended = str(prior.get("ended_reason") or "")
+                slot["filled"] = ended.startswith("TRADE_")
+                self._lanes[str(prior["lane"]).upper()] = slot
+        changed = False
+        for lane, slot in self._lanes.items():
+            if slot.get("active") and slot.get("trade_id"):
+                self._end_slot(lane, RESTART_RESET_REASON)
+                changed = True
+            elif slot.get("active"):
+                self._log("RESTART_KEPT_UNUSED", lane=lane)
+                changed = True
+        if changed:
             self._persist()
+
+    # -- internals (call with lock held or from __init__) -------------------
+    def _state_doc(self) -> dict:
+        return {"lanes": self._lanes, "history": self._history[-50:]}
 
     def _persist(self) -> bool:
         ok = _atomic_write_json(self.path, {"schema": BOOTSTRAP_SCHEMA, "updated_ts": self._clock(),
-                                            "state": self._state})
+                                            "state": self._state_doc()})
         self.persist_ok = ok
         return ok
 
     def _log(self, what: str, **extra) -> None:
-        hist = list(self._state.get("history") or [])
-        hist.append({"ts": float(self._clock()), "event": what, **extra})
-        self._state["history"] = hist[-50:]
+        self._history.append({"ts": float(self._clock()), "event": what, **extra})
+        self._history = self._history[-50:]
 
-    def _end_locked(self, reason: str) -> None:
-        if self._state.get("active") and self._state.get("trade_id"):
-            self._state["used"] = True
-        self._state["active"] = False
-        self._state["ended_reason"] = str(reason)[:80]
-        self._state["ended_at_ts"] = float(self._clock())
-        self._log("END", reason=str(reason)[:80], lane=self._state.get("lane"),
-                  trade_id=self._state.get("trade_id"))
+    def _end_slot(self, lane: str, reason: str) -> None:
+        slot = self._lanes.get(lane)
+        if not slot:
+            return
+        slot["active"] = False
+        slot["ended_reason"] = str(reason)[:80]
+        slot["ended_at_ts"] = float(self._clock())
+        self._log("END", reason=str(reason)[:80], lane=lane, trade_id=slot.get("trade_id"),
+                  filled=bool(slot.get("filled")))
 
     def _expire_locked(self, now: float) -> None:
-        if self._state.get("active"):
-            try:
-                expires = float(self._state.get("expires_at_ts") or 0)
-            except (TypeError, ValueError):
-                expires = 0.0
-            if expires <= 0 or now >= expires:
-                self._end_locked("EXPIRED_24H")
-                self._persist()
+        changed = False
+        for lane, slot in self._lanes.items():
+            if slot.get("active"):
+                try:
+                    expires = float(slot.get("expires_at_ts") or 0)
+                except (TypeError, ValueError):
+                    expires = 0.0
+                if expires <= 0 or now >= expires:
+                    self._end_slot(lane, "EXPIRED_24H")
+                    changed = True
+        if changed:
+            self._persist()
 
-    def enable(self, lane: str, *, by: str = "dashboard", reason: str = "") -> tuple[bool, dict]:
+    # -- operator ------------------------------------------------------------
+    def enable(self, lane: str, *, by: str = "dashboard", reason: str = "",
+               prior_trade_filled: bool = False) -> tuple[bool, dict]:
+        """Arm (or re-arm) the bootstrap for one lane.
+
+        ``prior_trade_filled``: the caller's independent check (execution
+        journal) that the lane's previously bound trade got a fill report.
+        Either signal marks the lane spent and refuses.
+        """
         lane = str(lane or "").strip().upper()
         with self._lock:
             now = float(self._clock())
             self._expire_locked(now)
             if not lane:
                 return False, {**self.snapshot_locked(), "error": "LANE_REQUIRED"}
-            if self._state.get("used"):
+            slot = self._lanes.get(lane) or _new_slot()
+            if prior_trade_filled and slot.get("trade_id") and not slot.get("filled"):
+                slot["filled"] = True
+                self._lanes[lane] = slot
+                self._log("MARK_SPENT_FROM_JOURNAL", lane=lane, trade_id=slot.get("trade_id"))
+                self._persist()
+            if slot.get("filled"):
                 return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_ALREADY_USED"}
-            if self._state.get("active"):
+            if slot.get("active"):
                 return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_ALREADY_ACTIVE"}
-            self._state.update({
-                "active": True, "lane": lane, "enabled_at_ts": now,
-                "expires_at_ts": now + BOOTSTRAP_TTL_SEC, "by": str(by or "unknown")[:64],
-                "reason": str(reason or "OPERATOR_BOOTSTRAP")[:160], "trade_id": None,
-                "claimed_at_ts": None, "ended_reason": None, "ended_at_ts": None,
+            if sum(1 for s in self._lanes.values() if s.get("active")) >= BOOTSTRAP_MAX_ACTIVE_LANES:
+                return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_MAX_ACTIVE_LANES"}
+            rearm = bool(slot.get("ended_reason"))
+            prior_slot = dict(slot)
+            slot.update({
+                "active": True, "enabled_at_ts": now, "expires_at_ts": now + BOOTSTRAP_TTL_SEC,
+                "by": str(by or "unknown")[:64],
+                "reason": str(reason or ("OPERATOR_REARM" if rearm else "OPERATOR_BOOTSTRAP"))[:160],
+                "trade_id": None, "claimed_at_ts": None, "filled": False,
+                "ended_reason": None, "ended_at_ts": None,
+                "arm_count": int(slot.get("arm_count") or 0) + 1,
             })
-            self._log("ENABLE", lane=lane, by=self._state["by"])
+            self._lanes[lane] = slot
+            self._log("REARM" if rearm else "ENABLE", lane=lane, by=slot["by"],
+                      prior_ended_reason=prior_slot.get("ended_reason"),
+                      prior_trade_id=prior_slot.get("trade_id"))
             if not self._persist():
-                self._state["active"] = False
-                self._state["ended_reason"] = "BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED"
+                slot["active"] = False
+                slot["ended_reason"] = "BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED"
                 self._persist()
                 return False, {**self.snapshot_locked(), "error": "BOOTSTRAP_PERSIST_FAILED"}
             return True, self.snapshot_locked()
 
-    def disable(self, *, reason: str = "OPERATOR_OFF") -> dict:
+    def disable(self, *, reason: str = "OPERATOR_OFF", lane: str | None = None) -> dict:
+        """End the bootstrap for ``lane`` (or every lane). Never spends it."""
+        lane_u = str(lane or "").strip().upper()
         with self._lock:
-            if self._state.get("active"):
-                self._end_locked(reason)
+            changed = False
+            for name, slot in self._lanes.items():
+                if slot.get("active") and (not lane_u or name == lane_u):
+                    self._end_slot(name, reason)
+                    changed = True
+            if changed:
                 self._persist()
             return self.snapshot_locked()
 
+    # -- gate ----------------------------------------------------------------
     def covers(self, lane: str | None, trade_id: str | None = None, now: float | None = None) -> bool:
         """True while active for ``lane`` and (unclaimed, or claimed by ``trade_id``)."""
         lane_u = str(lane or "").strip().upper()
         with self._lock:
             self._expire_locked(float(self._clock() if now is None else now))
-            if not self._state.get("active") or not lane_u or lane_u != self._state.get("lane"):
+            slot = self._lanes.get(lane_u) if lane_u else None
+            if not slot or not slot.get("active"):
                 return False
-            claimed = self._state.get("trade_id")
+            claimed = slot.get("trade_id")
             return claimed is None or (trade_id is not None and str(trade_id) == claimed)
 
     def claim(self, lane: str, trade_id: str) -> bool:
-        """Bind the bootstrap to its one trade (fsync'd). False = not allowed."""
+        """Bind the lane's bootstrap to its one trade (fsync'd). False = not allowed."""
         lane_u = str(lane or "").strip().upper()
         tid = str(trade_id or "")
         with self._lock:
             self._expire_locked(float(self._clock()))
-            if not self._state.get("active") or lane_u != self._state.get("lane") or not tid:
+            slot = self._lanes.get(lane_u)
+            if not slot or not slot.get("active") or not tid:
                 return False
-            if self._state.get("trade_id") not in (None, tid):
+            if slot.get("trade_id") not in (None, tid):
                 return False
-            if self._state.get("trade_id") == tid:
+            if slot.get("trade_id") == tid:
                 return True
-            self._state["trade_id"] = tid
-            self._state["claimed_at_ts"] = float(self._clock())
+            slot["trade_id"] = tid
+            slot["claimed_at_ts"] = float(self._clock())
             self._log("CLAIM", lane=lane_u, trade_id=tid)
             if not self._persist():
-                self._state["trade_id"] = None
-                self._state["claimed_at_ts"] = None
-                self._end_locked("BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED")
+                slot["trade_id"] = None
+                slot["claimed_at_ts"] = None
+                self._end_slot(lane_u, "BOOTSTRAP_PERSIST_FAILED_FAIL_CLOSED")
                 self._persist()
                 return False
             return True
 
     def observe_report(self, report: Mapping[str, Any]) -> bool:
-        """End the bootstrap once its trade fills (one fill). Returns True if ended."""
+        """End (and spend) a lane's bootstrap once its trade fills. True if ended."""
         rtype = str(report.get("type") or "")
         cid = str(report.get("correlation_id") or "")
+        if not cid or rtype not in BOOTSTRAP_FILL_REPORT_TYPES:
+            return False
         with self._lock:
-            if not self._state.get("active") or not cid or cid != self._state.get("trade_id"):
-                return False
-            if rtype not in ("ORDER_FILLED", "STOP_PLACED", "STOP_CONFIRMED", "STOP_FAILED",
-                             "POSITION_CLOSED"):
-                return False
-            self._state["used"] = True
-            self._end_locked(f"TRADE_{rtype}")
-            self._persist()
-            return True
+            for lane, slot in self._lanes.items():
+                if slot.get("trade_id") == cid and not slot.get("filled"):
+                    slot["filled"] = True
+                    was_active = bool(slot.get("active"))
+                    if was_active:
+                        self._end_slot(lane, f"TRADE_{rtype}")
+                    else:
+                        self._log("SPENT_AFTER_END", lane=lane, trade_id=cid, report=rtype)
+                    self._persist()
+                    return was_active
+            return False
 
+    # -- read ----------------------------------------------------------------
     def snapshot_locked(self) -> dict:
-        s = dict(self._state)
-        s["history"] = list(s.get("history") or [])[-10:]
-        s["schema"] = BOOTSTRAP_SCHEMA
-        s["ttl_sec"] = BOOTSTRAP_TTL_SEC
-        s["persist_ok"] = self.persist_ok
-        return s
+        lanes = {k: {**v, "spent": bool(v.get("filled")),
+                     "rearmable": (not v.get("active")) and (not v.get("filled"))}
+                 for k, v in self._lanes.items()}
+        active = [k for k, v in self._lanes.items() if v.get("active")]
+        head_lane = active[0] if active else (next(reversed(self._lanes)) if self._lanes else None)
+        head = self._lanes.get(head_lane) or _new_slot() if head_lane else _new_slot()
+        return {
+            # Legacy single-lane view (first active lane) for old readers.
+            "active": bool(active), "lane": head_lane, "active_lanes": active,
+            "trade_id": head.get("trade_id"), "enabled_at_ts": head.get("enabled_at_ts"),
+            "expires_at_ts": head.get("expires_at_ts"), "ended_reason": head.get("ended_reason"),
+            "used": bool(head.get("filled")),
+            "spent_lanes": [k for k, v in self._lanes.items() if v.get("filled")],
+            "lanes": lanes,
+            "history": list(self._history)[-10:],
+            "schema": BOOTSTRAP_SCHEMA, "ttl_sec": BOOTSTRAP_TTL_SEC,
+            "max_active_lanes": BOOTSTRAP_MAX_ACTIVE_LANES, "persist_ok": self.persist_ok,
+        }
 
     def snapshot(self) -> dict:
         with self._lock:

@@ -77,3 +77,30 @@ test('report signature domain matches Fly verify_report_signature', () => {
   const key = createHmac('sha256', 's').update('railway-live-execution-report-v1').digest();
   assert.equal(key.length, 32);
 });
+
+describe('executor capability report (reduce-only source for Fly)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { buildExecutorCapabilityReport, EXECUTOR_CAPABILITY_SCHEMA } = require('./live-copy-fly-reporter');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { signExecutorCapability, signLiveExecutionReport } = require('./live-copy-approval');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { BITFINEX_PROTECTIVE_STOP_SPEC, BITFINEX_REDUCE_ONLY_FLAG } = require('../exchanges/bitfinex-api.client');
+
+  it('is derived from the real protective stop spec (STOP + REDUCE_ONLY on tBTCF0:USTF0)', () => {
+    const r = buildExecutorCapabilityReport(1_700_000_000_000);
+    expect(r.schema).toBe(EXECUTOR_CAPABILITY_SCHEMA);
+    expect(r.symbol).toBe('tBTCF0:USTF0');
+    expect(r.reduce_only_supported).toBe(true);
+    expect(r.protective_stop).toMatchObject({ order_type: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG, reduce_only: true });
+    expect(BITFINEX_PROTECTIVE_STOP_SPEC.flags & BITFINEX_REDUCE_ONLY_FLAG).toBe(BITFINEX_REDUCE_ONLY_FLAG);
+    expect(r.sent_at_ts).toBe(1_700_000_000);
+  });
+
+  it('is signed under its own HMAC domain (not the execution-report key)', () => {
+    const body = JSON.stringify(buildExecutorCapabilityReport(1));
+    const sig = signExecutorCapability(body, 's3cret');
+    expect(sig).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(sig).not.toBe(signLiveExecutionReport(body, 's3cret'));
+    expect(signExecutorCapability(body, '')).toBeNull();
+  });
+});
