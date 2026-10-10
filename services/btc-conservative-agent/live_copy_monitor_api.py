@@ -75,6 +75,11 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
         gaps=analysis["gaps"], lags=analysis["lags"], executor_last_report_ts=last_report,
         website=ctx.get("website") or {}, rejects_1h=rejects, unsigned_rejects_1h=unsigned, now=now,
     )
+    delivery = ctx.get("live_copy_delivery") or {}
+    out["live_copy_delivery"] = delivery
+    if out.get("tiles_live_on") and delivery and not delivery.get("allowed"):
+        out["causes"] = sorted(set(out["causes"]) | {"LIVE_COPY_DELIVERY_SKIPPED:" + str(delivery.get("skip_reason"))})
+        out["verdict"] = lcm.worst(out["verdict"], lcm.AMBER)
     if ctx.get("journal_write_failures"):
         out["causes"] = sorted(set(out["causes"]) | {"REPORT_JOURNAL_WRITE_FAILED"})
         out["verdict"] = lcm.worst(out["verdict"], lcm.RED)

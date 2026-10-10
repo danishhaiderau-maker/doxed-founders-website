@@ -38,6 +38,7 @@ export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.
   FAMILY_GS07_FAST_PREMIUM_FADE: 'gs7',
   FAMILY_DANISH_REGIME_ROUTER: 'dnr',
   FAMILY_FADE_POOL: 'fdp',
+  FAMILY_GS07_V07_PREMIUM_FADE_60M: 'g7v',
 });
 
 /**

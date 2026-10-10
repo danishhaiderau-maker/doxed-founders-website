@@ -61,3 +61,19 @@ def status(env: Mapping[str, str] | None = None) -> dict:
         "stale_owner_alarm_suppressed": disabled,
         "status": DISABLED_STATUS if disabled else "ACTIVE",
     }
+
+
+# Option 1 signed live-copy outbox. It is NOT the legacy relay stack:
+# research_only never gates it. Delivery needs Fly's Live copy output ON and
+# the LIVE_COPY_SOURCE_ENABLED opt-in; the per-tile gates still apply after.
+LIVE_COPY_SKIP_OUTPUT_OFF = "LIVE_COPY_OUTPUT_OFF"
+LIVE_COPY_SKIP_SOURCE_DISABLED = "LIVE_COPY_SOURCE_DISABLED"
+
+
+def live_copy_delivery_allowed(*, output_on: bool, source_enabled: bool) -> tuple[bool, str | None]:
+    """Whether the signed live-copy outbox may POST, independent of RELAY_STACK_MODE."""
+    if not source_enabled:
+        return False, LIVE_COPY_SKIP_SOURCE_DISABLED
+    if not output_on:
+        return False, LIVE_COPY_SKIP_OUTPUT_OFF
+    return True, None
