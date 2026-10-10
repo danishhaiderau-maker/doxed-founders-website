@@ -430,3 +430,28 @@ def test_settled_files_are_hardlinked_across_layers_and_writers_copy_on_write(tm
     assert (view / "v3/ledgers/opportunity.jsonl").read_bytes() == before
     assert (store / "v3/ledgers/opportunity.jsonl").read_bytes() == before
     assert not storage_links.same_file(linked, view / "v3/ledgers/opportunity.jsonl")
+
+
+def test_reported_oversized_bytes_replace_the_fixed_allowance(tmp_path):
+    """HM 10 Oct: research.db grew past the 1 GiB allowance and blocked promotion
+    forever (MIRROR_SYNC_RECEIPT_STALE). Fly now reports its bytes separately."""
+    env, head, health = _synced(tmp_path)
+    now = 1_790_990_000.0
+    db = 1_600 * 1024 * 1024
+    receipt = promotion.stage_view(
+        shadow_root=env.shadow, view_root=tmp_path / "view", health=health, now=now,
+        head=_oversized_research_db(head, now, unshipped_bytes=db + 4096, oversized_bytes=db))
+    assert receipt["promotion_level"] == "AMBER"
+    assert f"FLY_OVERSIZED_SNAPSHOT_BYTES_EXCLUDED:{db}" in receipt["promotion_warnings"]
+
+
+def test_reported_oversized_bytes_still_refuse_a_real_backlog(tmp_path):
+    env, head, health = _synced(tmp_path)
+    now = 1_790_990_000.0
+    db = 1_600 * 1024 * 1024
+    backlog = promotion.DEFAULT_MAX_UNSHIPPED_BYTES + 1
+    with pytest.raises(promotion.PromotionRefused) as refused:
+        promotion.stage_view(
+            shadow_root=env.shadow, view_root=tmp_path / "view", health=health, now=now,
+            head=_oversized_research_db(head, now, unshipped_bytes=db + backlog, oversized_bytes=db))
+    assert any(item.startswith("FLY_UNSHIPPED_BYTES:") for item in refused.value.reasons)

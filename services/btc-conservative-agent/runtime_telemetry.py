@@ -130,6 +130,78 @@ def kernel_ntp_state() -> Optional[dict]:
         return None
 
 
+_CLOCK_PROBE_URL = os.getenv("CLOCK_OFFSET_PROBE_URL", "https://cloudflare.com/cdn-cgi/trace")
+_CLOCK_PROBE_INTERVAL_SEC = float(os.getenv("CLOCK_OFFSET_PROBE_INTERVAL_SEC", "300"))
+_clock_probe_lock = threading.Lock()
+_clock_probe_state: dict = {"started": False, "last": None}
+
+
+def _probe_clock_offset_once(url: str = _CLOCK_PROBE_URL, samples: int = 3,
+                             timeout: float = 3.0) -> Optional[dict]:
+    """Wall-clock offset against an external ms-resolution clock (RTT midpoint).
+
+    Fly VMs run no NTP daemon, so adjtimex always reports state 5 with its
+    default 16 s error bound even when kvm-clock keeps the wall clock accurate.
+    This measured offset is the trusted number for latency stamps.
+    """
+    import urllib.request
+    best = None
+    for _ in range(max(1, samples)):
+        try:
+            t0 = time.time()
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                body = resp.read(4096).decode("ascii", "replace")
+            t1 = time.time()
+        except Exception:
+            continue
+        remote = None
+        for line in body.splitlines():
+            if line.startswith("ts="):
+                try:
+                    remote = float(line[3:].strip())
+                except ValueError:
+                    remote = None
+        if remote is None:
+            continue
+        rtt = t1 - t0
+        offset = (t0 + rtt / 2.0) - remote  # positive: local clock ahead
+        if best is None or rtt < best["rtt_ms"] / 1000.0:
+            best = {"offset_ms": _finite(offset * 1000.0, 1), "rtt_ms": _finite(rtt * 1000.0, 1)}
+    if best is None:
+        return None
+    best.update({"source": url, "measured_at": time.time()})
+    return best
+
+
+def _clock_probe_loop() -> None:
+    while True:
+        result = _probe_clock_offset_once()
+        with _clock_probe_lock:
+            if result is not None:
+                _clock_probe_state["last"] = result
+            _clock_probe_state["attempted_at"] = time.time()
+        time.sleep(max(30.0, _CLOCK_PROBE_INTERVAL_SEC))
+
+
+def external_clock_offset() -> Optional[dict]:
+    """Latest external offset sample; starts the background probe on first use."""
+    if os.getenv("CLOCK_OFFSET_PROBE_ENABLED", "1").strip() == "0":
+        return None
+    with _clock_probe_lock:
+        if not _clock_probe_state["started"]:
+            _clock_probe_state["started"] = True
+            threading.Thread(target=_clock_probe_loop, name="clock-offset-probe",
+                             daemon=True).start()
+        last = _clock_probe_state.get("last")
+    if not last:
+        return None
+    out = dict(last)
+    out["age_sec"] = _finite(time.time() - float(last["measured_at"]), 1)
+    out["trusted"] = bool(out["age_sec"] is not None and out["age_sec"] <= 3 * _CLOCK_PROBE_INTERVAL_SEC
+                          and out.get("rtt_ms") is not None and out["rtt_ms"] <= 500)
+    return out
+
+
 class CrashDumpWatcher:
     """Counts new crash/incident rows by tailing only the appended bytes."""
 
@@ -382,6 +454,9 @@ class RuntimeTelemetry(threading.Thread):
                 "wall_mono_step_ms": _finite((wall_mono - self._prev_wall_mono) * 1000.0, 1),
                 "wall_mono_drift_since_boot_ms": _finite((wall_mono - self._wall_mono0) * 1000.0, 1),
                 "kernel_ntp": kernel_ntp_state(),
+                # kernel_ntp is always "unsynchronized, 16 s" on Fly (no ntpd;
+                # 16 s is adjtimex's default bound, not a measured error).
+                "external_offset": external_clock_offset(),
             },
             "disk": {"used_pct": pressure.get("disk_used_pct"),
                      "free_bytes": pressure.get("disk_free_bytes")},

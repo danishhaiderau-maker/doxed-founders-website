@@ -218,6 +218,16 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
     # A live epoch always has an in-flight tail; only a real backlog refuses.
     unshipped = int(head.get("unshipped_bytes") or 0)
     allowance = OVERSIZED_SNAPSHOT_ALLOWANCE_BYTES if tolerated else 0
+    # Newer Fly builds report the tolerated snapshot's live bytes, so the real
+    # backlog is measured exactly instead of against a fixed allowance that
+    # research.db's growth eventually exceeds (MIRROR_SYNC_RECEIPT_STALE, 10 Oct).
+    oversized_bytes = head.get("oversized_bytes")
+    if tolerated and isinstance(oversized_bytes, int) and not isinstance(oversized_bytes, bool) \
+            and 0 <= oversized_bytes <= unshipped:
+        unshipped -= oversized_bytes
+        allowance = 0
+        if oversized_bytes:
+            warnings.append(f"FLY_OVERSIZED_SNAPSHOT_BYTES_EXCLUDED:{oversized_bytes}")
     if unshipped > max_unshipped_bytes + allowance:
         reasons.append(f"FLY_UNSHIPPED_BYTES:{unshipped}>{max_unshipped_bytes + allowance}")
     elif unshipped > max_unshipped_bytes:

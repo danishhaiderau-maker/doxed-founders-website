@@ -599,7 +599,7 @@ def _remote_head_summary(store) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
     return {key: head.get(key) for key in (
         "published_seq", "laptop_acked", "store_bytes", "max_store_bytes",
-        "unshipped_bytes", "shipper_last_error", "pruning_enabled")}
+        "unshipped_bytes", "oversized_bytes", "shipper_last_error", "pruning_enabled")}
 
 
 def _record_failure(args, puller: SegmentPuller | None, exc: BaseException) -> dict:

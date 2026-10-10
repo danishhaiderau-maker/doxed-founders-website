@@ -12495,6 +12495,7 @@ def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED"
 _v3_expected_order_reconcile_lock = threading.Lock()
 _v3_expected_order_reconcile_last_ts = 0.0
 V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC = 30.0
+_v3_expected_order_reconcile_last: dict = {}
 
 
 def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
@@ -12535,6 +12536,9 @@ def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
         # ledger the scan itself can exceed the interval; recording its start
         # caused reconcile_stale_signals() to repeat the full scan immediately.
         _v3_expected_order_reconcile_last_ts = time.time()
+        _last_reconcile = globals().setdefault("_v3_expected_order_reconcile_last", {})
+        _last_reconcile.clear()
+        _last_reconcile.update({**result, "at": _v3_expected_order_reconcile_last_ts})
         if result.get("reconciled"):
             logger.warning(
                 f"[COLLECTOR_V3] reconciled overdue lost pre-order "
@@ -22610,11 +22614,10 @@ def _recompute_research_balance_from_trades():
     for t in rows:
         if session_start and not _trade_row_in_session(t, session_start):
             continue
-        try:
-            pnl = float(t.get("net_pnl_usd") or t.get("pnl") or 0.0)
-        except (ValueError, TypeError):
-            pnl = 0.0
-        total_pnl += pnl
+        # A booked 0.00 net is real: ``or`` used to fall through to ``pnl``,
+        # which is percent-of-margin, adding it as dollars on every restart
+        # (FP #36 balance drift).
+        total_pnl += _trade_row_net_pnl_usd(t)
         counted += 1
     restored = round(STARTING_BALANCE + total_pnl, 4)
     with state_lock:
@@ -26431,7 +26434,10 @@ def process_positions():
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER")
+            # Closes run on their own thread: one trigger closing several tiles
+            # must not queue each close behind the previous one's I/O (HM audit
+            # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
+            _evaluate_position_exit(pos, mark, now, exit_source="POSITION_MANAGER", close_async=True)
     finally:
         position_evaluation_lock.release()
 
@@ -28467,7 +28473,7 @@ def _tick_driven_position_exits(price: float):
             ]
         for pos in positions:
             mark = get_mark_price(pos.get("dir"), fallback=price)
-            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK")
+            _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
         return True
     finally:
         position_evaluation_lock.release()
@@ -32808,6 +32814,9 @@ def _emergency_api_guard():
     if method == "GET" and path in (_MONITOR_DIGEST_PATH, _MONITOR_INTEGRITY_PATH):
         return None
     if method == "GET" and path in _MONITOR_TILE_PATHS:
+        return None
+    # Read-only research stream pulls; monitor token checked in the handler.
+    if method == "GET" and (path == "/api/monitor/streams" or path.startswith("/api/monitor/streams/")):
         return None
     # Live-copy monitoring (admin or MONITOR_READ_TOKEN, checked per handler).
     if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"):
@@ -45756,6 +45765,45 @@ def monitor_tape():
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TAPE_BYTES)
 
 
+@app.route('/api/monitor/streams', methods=["GET"])
+def monitor_streams_catalog():
+    """Catalog of pullable research streams (monitor token, read-only)."""
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import monitor_streams
+    return jsonify({**monitor_streams.catalog(os.getcwd()), "server_ts": time.time()})
+
+
+@app.route('/api/monitor/streams/<name>', methods=["GET"])
+def monitor_streams_page(name):
+    """One paginated JSONL page: ?cursor=<byte offset>&limit_bytes=&inode=.
+
+    Body is gzip-compressed JSONL (Content-Encoding: gzip when accepted, else
+    application/gzip); page metadata is in X-Stream-* headers.
+    """
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import gzip as _gz
+    import monitor_streams
+    try:
+        header, body = monitor_streams.read_page(
+            os.getcwd(), name, request.args.get("cursor"), request.args.get("limit_bytes"),
+            request.args.get("inode"))
+    except monitor_streams.BadRequest as exc:
+        return jsonify({"error": "bad_request", "reason": str(exc)[:160]}), 400
+    packed = _gz.compress(body, compresslevel=5)
+    resp = app.response_class(packed, status=200)
+    if "gzip" in (request.headers.get("Accept-Encoding") or ""):
+        resp.headers["Content-Type"] = "application/x-ndjson"
+        resp.headers["Content-Encoding"] = "gzip"
+    else:
+        resp.headers["Content-Type"] = "application/gzip"
+    for key, value in header.items():
+        resp.headers["X-Stream-" + key.replace("_", "-").title()] = str(value)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route('/api/research/shadow_exits')
 def research_shadow_exits():
     """Admin-only (not in _READ_ONLY_GET_PATHS): recorder status, per-tile running aggregates, recent rows."""
@@ -45987,6 +46035,7 @@ def status():
             },
             "xvl_evaluator": xvl_evaluator_snapshot(),
             "protective_exit": protective_exit_snapshot(),
+            "v3_expected_order_reconcile": dict(_v3_expected_order_reconcile_last),
             "market_context_tape": {
                 "tape_schema": _mct.SCHEMA,
                 "file": _mct.FILE_NAME,

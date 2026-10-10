@@ -189,6 +189,7 @@ class SegmentServer:
             "shipper_updated_at": status.get("updated_at"),
             "shipper_last_segment_at": status.get("last_segment_at"),
             "oversized_paths": status.get("oversized_paths"),
+            "oversized_bytes": status.get("oversized_bytes"),
             "throttled_snapshots": status.get("throttled_snapshots"),
             "racing_paths": status.get("racing_paths"),
             "backlog_mode": bool(status.get("backlog_mode")),
