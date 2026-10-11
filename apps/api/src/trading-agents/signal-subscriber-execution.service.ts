@@ -3674,8 +3674,20 @@ export function exchangeMirrorMayRun(input: {
   nowMs: number;
 }): boolean {
   if (input.destroyed || input.mirrorRunning) return false;
-  if (!input.moneyTickRunning) return true;
-  return input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
+  // LIVE-FIX-0741: never during a money tick. Forcing it mid-tick (#559) put
+  // three authenticated reads ahead of the protective stop on the per-key
+  // nonce lane: fill->stop_placed regressed 0.4 s -> 5.6-6.5 s. Staleness is
+  // instead cured by exchangeMirrorDueAfterTick() right after each tick.
+  return !input.moneyTickRunning;
+}
+
+/** Pure: run the mirror immediately after a tick ends (no wake queued) when stale. */
+export function exchangeMirrorDueAfterTick(input: {
+  wakeQueued: boolean;
+  lastMirrorAtMs: number;
+  nowMs: number;
+}): boolean {
+  return !input.wakeQueued && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
 }
 /** A position mismatch must persist this long across fresh re-reads before a pause. */
 export const MISMATCH_CONFIRM_MS = 15_000;
@@ -6322,6 +6334,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.currentInstanceId = null;
       this.currentStage = null;
       this.running = false;
+      if (exchangeMirrorDueAfterTick({
+        wakeQueued: this.wakeQueued,
+        lastMirrorAtMs: this.lastExchangeMirrorAtMs,
+        nowMs: Date.now(),
+      })) {
+        void this.refreshExchangeMirror();
+      }
       if (this.wakeQueued) {
         this.wakeQueued = false;
         setImmediate(() => void this.tick());

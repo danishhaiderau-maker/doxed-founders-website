@@ -12,6 +12,7 @@ import { SignalCyclesService } from './trading-agents/signal-cycles.service';
 import { CopyRelaySimService } from './trading-agents/copy-relay-sim.service';
 import { TradeCycleAuditService } from './trading-agents/trade-cycle-audit.service';
 import { SignalSubscriberExecutionService } from './trading-agents/signal-subscriber-execution.service';
+import { LiveCopyFlyReporterService } from './trading-agents/live-copy-fly-reporter';
 
 /** Isolated real-money worker: no public controllers or unrelated schedulers. */
 @Module({
@@ -34,6 +35,9 @@ import { SignalSubscriberExecutionService } from './trading-agents/signal-subscr
     CopyRelaySimService,
     TradeCycleAuditService,
     SignalSubscriberExecutionService,
+    // LIVE-FIX-0741: the executor writes fill/stop events; reporting them from
+    // here (kick-driven) cuts report-back from the website's 5 s poll to ~1 s.
+    LiveCopyFlyReporterService,
   ],
 })
 export class RelayExecutorWorkerModule {}

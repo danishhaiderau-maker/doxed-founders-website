@@ -125,8 +125,14 @@ const build = (evs: ReporterEvent[], env: unknown = envelope) => buildLiveCopyRe
 test('pre-submit fence ENTRY_SUBMISSION_UNKNOWN is not an ERROR once the entry resolved', () => {
   const fence = ev('e0', 'ENTRY_SUBMISSION_UNKNOWN', 500, { schema: 'entry_submission_fence_v1', phase: 'SUBMITTING' });
   assert.equal(build([fence, ...events]).filter((r) => r.type === 'ERROR').length, 0);
-  // Unresolved fence stays a real error.
-  assert.equal(build([fence]).filter((r) => r.type === 'ERROR').length, 1);
+  // Unresolved fence: in-flight (no error) inside the 60 s grace, a real error after it.
+  assert.equal(build([fence]).filter((r) => r.type === 'ERROR').length, 0);
+  const late = buildLiveCopyReports({
+    cycle: { id: 'c1', tradeId: 'gs1-a1', intentEnvelope: envelope }, correlationId: 'gs1-a1',
+    lane: 'FAMILY_GS01_XV_PREMIUM_ATR_TP', events: [fence], participants: [{ id: 'p1', userId: 'u1' }],
+    accountFor: () => 'acct-x', nowMs: T0 + 120_000,
+  });
+  assert.equal(late.filter((r) => r.type === 'ERROR').length, 1);
 });
 
 test('one exchange fill recorded twice is reported once', () => {

@@ -32,6 +32,8 @@ const LOOKBACK_MS = 24 * 3_600_000;
 export const EXECUTOR_CAPABILITY_SCHEMA = 'railway_executor_capability_v1';
 export const EXECUTOR_CAPABILITY_PATH = '/api/live-copy/executor-capability';
 const CAPABILITY_EVERY_MS = 60_000;
+/** An unresolved pre-submit fence is an error only after this long. */
+export const ENTRY_SUBMISSION_UNKNOWN_GRACE_MS = 60_000;
 
 /**
  * Pure: the executor's capability report, derived from the exact protective
@@ -131,7 +133,12 @@ export function buildLiveCopyReports(input: {
     // The pre-submit durable fence (ENTRY_SUBMISSION_UNKNOWN, phase
     // SUBMITTING) is written before EVERY Bitfinex write. It is only an error
     // when the submission never resolved (no ORDER_PLACED / FILLED / EXPIRED).
-    const entryResolved = mine.some((e) => e.eventType === 'ORDER_PLACED' || e.eventType === 'FILLED' || e.eventType === 'EXPIRED');
+    // LIVE-FIX-0741: a fill healed via reconcile (STOP_LOSS_ARMED / EXIT) also
+    // resolves it, and a fence younger than the grace window is still
+    // in-flight (reporting it as ERROR was permanent: Fly dedups report_id).
+    const entryResolved = mine.some((e) => [
+      'ORDER_PLACED', 'FILLED', 'EXPIRED', 'STOP_LOSS_ARMED', 'EXIT',
+    ].includes(String(e.eventType)));
     // One exchange fill can be recorded by two paths (CANCEL_RACE_FILL and
     // EXCHANGE_FILL_RECONCILE). Report each exchange fill once.
     const seenFills = new Set<string>();
@@ -252,6 +259,7 @@ export function buildLiveCopyReports(input: {
           break;
         case 'ENTRY_SUBMISSION_UNKNOWN':
           if (entryResolved) break;
+          if ((input.nowMs ?? Date.now()) - e.createdAt.getTime() < ENTRY_SUBMISSION_UNKNOWN_GRACE_MS) break;
           push(e, 'ERROR', {
             error: { code: e.eventType, message: String(pl.reason ?? pl.error ?? 'entry submission never resolved').slice(0, 200) },
           });
@@ -425,9 +433,12 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   onModuleInit(): void {
     if (this.config.get<string>('LIVE_COPY_REPORTER_ENABLED') === 'false') return;
     if (process.env.NODE_ENV === 'test') return;
+    setLiveCopyReportKickListener(() => void this.tick());
+    // The real-money executor worker reports only on kicks (its own events);
+    // the website process keeps the 5 s sweep. Fly dedups by report_id.
+    if (process.env.RELAY_EXECUTOR_WORKER === 'true') return;
     this.timer = setInterval(() => void this.tick(), 5_000);
     this.timer.unref?.();
-    setLiveCopyReportKickListener(() => void this.tick());
   }
 
   onModuleDestroy(): void {
