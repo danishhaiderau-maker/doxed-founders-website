@@ -58895,7 +58895,41 @@ def _live_copy_monitor_context() -> dict:
         "bot_instance_id": BOT_INSTANCE_ID,
         "source_git_rev": _runtime_git_rev(),
         "runtime_telemetry": (state.get("runtime_telemetry") if isinstance(state.get("runtime_telemetry"), dict) else None),
+        # R15 markouts read the in-memory 1 s Bitfinex ring; R22 drills come from a persisted receipt file.
+        "mid_at": _live_monitor_mid_at,
+        "drills": _live_monitor_drills(),
     }
+
+
+LIVE_DRILLS_FILE = "live_drills.jsonl"
+
+
+def _live_monitor_mid_at(ts):
+    try:
+        _stamps, rows = _TILE_TAPE_RING.slice(float(ts) - 1.0, float(ts))
+        fields = list(_TILE_TAPE_RING.fields)
+        bi, ai = fields.index("bid"), fields.index("ask")
+        for row in reversed(rows or []):
+            bid, ask = row[bi], row[ai]
+            if bid and ask:
+                return (float(bid) + float(ask)) / 2.0
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _live_monitor_drills() -> list:
+    out = []
+    try:
+        with open(_live_copy.data_path(LIVE_DRILLS_FILE), "r", encoding="utf-8") as fh:
+            for line in fh.readlines()[-500:]:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
 
 
 def _wire_live_copy_monitor() -> None:

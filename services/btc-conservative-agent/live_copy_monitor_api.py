@@ -1,4 +1,4 @@
-"""GET-only Flask blueprint: /api/monitor/live/* (R1-R13, R19, copy chain).
+"""GET-only Flask blueprint: /api/monitor/live/* (R1-R16, R19, R21-R24, copy chain).
 
 Wired by bot.py with a context provider (``_live_copy_monitor_context``) and
 an authorizer (admin token or MONITOR_READ_TOKEN). Never mutates state, never
@@ -132,6 +132,12 @@ def live_summary():  # R19
         payload["force_paper_mode"] = bool(ctx.get("fly_direct_force_paper_mode"))
         payload["force_paper_mode_source"] = "_force_paper_mode_active (same as /api/status)"
         payload["executor_freshness"] = executor_freshness(ctx, now)
+        extra = extra_alerts(ctx, now)
+        if extra:
+            payload["monitor_alerts"] = extra
+            payload["causes"] = sorted(set(payload.get("causes") or []) | {a["code"] for a in extra})
+            for a in extra:
+                payload["verdict"] = lcm.worst(payload.get("verdict") or lcm.GREEN, a.get("severity") or lcm.AMBER)
     return _ok(payload)
 
 
@@ -466,6 +472,106 @@ def live_deploy_guard():  # R13
     return _ok({"route": "R13", "armed": bool(out.get("enabled")), "flat": not open_live,
                 "open_live_orders": len(resting), "all_positions_protected": not unprotected,
                 "deploy_allowed": not reasons, "blocking_reasons": reasons})
+
+
+
+# ---- R14/R15/R16/R21/R22/R23 (LIVE-READINESS-MONITORING-PLAN R14-R23) -----------------
+import live_copy_monitor_extra as lcx  # noqa: E402
+
+
+def _int_arg(name, default, lo, hi):
+    try:
+        return max(lo, min(hi, int(request.args.get(name) or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _lifecycle_alerts(ctx, now):
+    try:
+        return lcl.build(ctx, now=now)["alerts"]
+    except Exception:  # noqa: BLE001
+        return [{"code": "LIFECYCLE_BUILD_FAILED", "severity": lcm.RED, "at_ts": now}]
+
+
+@blueprint.route("/api/monitor/live/events", methods=["GET"])
+def live_events():  # R14
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    try:
+        since = float(request.args.get("since_ts") or 0)
+    except (TypeError, ValueError):
+        since = 0.0
+    return _ok(lcx.events(ctx.get("approvals") or [], ctx.get("reports") or [], _lifecycle_alerts(ctx, now),
+                          since_ts=since, limit=_int_arg("limit", 200, 1, 1000), cursor=_int_arg("cursor", 0, 0, 10**7)))
+
+
+@blueprint.route("/api/monitor/live/fill-quality", methods=["GET"])
+def live_fill_quality():  # R15
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    mid_at = ctx.get("mid_at") if callable(ctx.get("mid_at")) else (lambda ts: None)
+    return _ok(lcx.fill_quality(_analysis(ctx, now)["chains"], ctx.get("paper_twins") or {}, mid_at, now))
+
+
+@blueprint.route("/api/monitor/live/daily", methods=["GET"])
+def live_daily():  # R16
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lcx.daily(ctx.get("reports") or [], ctx.get("ledger_by_day")))
+
+
+@blueprint.route("/api/monitor/live/slo", methods=["GET"])
+def live_slo():  # R21
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    return _ok(lcx.slo(_analysis(ctx, now)["chains"], ctx.get("protection_samples") or [],
+                       ctx.get("restarts_7d"), now))
+
+
+@blueprint.route("/api/monitor/live/drills", methods=["GET"])
+def live_drills():  # R22
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lcx.drills(ctx.get("drills") or [], time.time()))
+
+
+@blueprint.route("/api/monitor/live/funding", methods=["GET"])
+def live_funding():  # R23
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lcx.funding(ctx.get("reports") or []))
+
+
+@blueprint.route("/api/monitor/live/routes", methods=["GET"])
+def live_routes():  # manifest of every live monitor route (monitor token)
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok({"routes": lcx.LIVE_ROUTE_MANIFEST, "auth": "admin token or MONITOR_READ_TOKEN"})
+
+
+def extra_alerts(ctx: dict, now: float) -> list:
+    """R14/R15/R16/R21 alerts folded into /api/monitor/live/summary."""
+    out = []
+    try:
+        chains = _analysis(ctx, now)["chains"]
+        mid_at = ctx.get("mid_at") if callable(ctx.get("mid_at")) else (lambda ts: None)
+        out += lcx.events(ctx.get("approvals") or [], [], [], limit=1)["alerts"]
+        out += lcx.fill_quality(chains, ctx.get("paper_twins") or {}, mid_at, now)["alerts"]
+        out += lcx.daily(ctx.get("reports") or [], ctx.get("ledger_by_day"))["alerts"]
+        out += lcx.slo(chains, ctx.get("protection_samples") or [], ctx.get("restarts_7d"), now)["alerts"]
+    except Exception:  # noqa: BLE001
+        out.append({"code": "LIVE_EXTRA_ALERTS_FAILED", "severity": lcm.RED})
+    return out
 
 
 _LIVE_FLAGS_CACHE: dict = {"ts": 0.0, "payload": None}
