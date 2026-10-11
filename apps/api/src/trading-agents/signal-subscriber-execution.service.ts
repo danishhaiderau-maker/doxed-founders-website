@@ -2904,6 +2904,14 @@ export function exchangeDynamicStopsEnabled(): boolean {
   return !['0', 'false', 'off', 'no'].includes(value);
 }
 
+/** Fly-approved live copies never trail/move their exchange stop (mirror-only exits). */
+export function shouldSkipExchangeStopTrailForApprovedCopy(input: {
+  simActive: boolean;
+  approvalBacked: boolean;
+}): boolean {
+  return !input.simActive && input.approvalBacked;
+}
+
 export function shouldPromoteScenarioCStop(input: {
   simActive: boolean;
   showcaseMirrorOnly: boolean;
@@ -3631,7 +3639,24 @@ export function intentDecisionSourceId(
   const r = (reason ?? '').replace(/[^A-Za-z0-9_.:=-]/g, '_').slice(0, 60);
   return `exec-decision:${instanceId}:${tradeId}:${decision}:${r}`.slice(0, 190);
 }
-export const EXCHANGE_MIRROR_EVERY_MS = 30_000;
+export const EXCHANGE_MIRROR_EVERY_MS = 15_000;
+/** Mirror older than this is refreshed even while a money tick runs (read-only;
+ * the Bitfinex client's per-key nonce lane serializes it). LIVE-FIX-0442: the
+ * mirror skipped every tick that overlapped `running` and went 446-722 s stale. */
+export const EXCHANGE_MIRROR_MAX_AGE_MS = 45_000;
+
+/** Pure: may the read-only mirror run now? */
+export function exchangeMirrorMayRun(input: {
+  destroyed: boolean;
+  mirrorRunning: boolean;
+  moneyTickRunning: boolean;
+  lastMirrorAtMs: number;
+  nowMs: number;
+}): boolean {
+  if (input.destroyed || input.mirrorRunning) return false;
+  if (!input.moneyTickRunning) return true;
+  return input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
+}
 /** A position mismatch must persist this long across fresh re-reads before a pause. */
 export const MISMATCH_CONFIRM_MS = 15_000;
 
@@ -9554,6 +9579,7 @@ await this.notifications
   }
 
   private exchangeMirrorRunning = false;
+  private lastExchangeMirrorAtMs = 0;
 
   /**
    * Read-only exchange mirror for monitoring (11 Oct lifecycle audit RED 2/5):
@@ -9565,7 +9591,13 @@ await this.notifications
    * (read_age then grows, and Fly alerts only while armed).
    */
   private async refreshExchangeMirror(): Promise<void> {
-    if (this.executorDestroyed || this.exchangeMirrorRunning || this.running) return;
+    if (!exchangeMirrorMayRun({
+      destroyed: this.executorDestroyed,
+      mirrorRunning: this.exchangeMirrorRunning,
+      moneyTickRunning: this.running,
+      lastMirrorAtMs: this.lastExchangeMirrorAtMs,
+      nowMs: Date.now(),
+    })) return;
     this.exchangeMirrorRunning = true;
     try {
       for (const instance of this.relayInstanceCache.values()) {
@@ -9573,7 +9605,6 @@ await this.notifications
         // Paused accounts are mirrored too: "flat" must be provable from
         // exchange truth while paused (orphan stops, positions left open).
         if (isCopyRelaySimActive(instance.dashboardState)) continue;
-        if (this.running) return;
         const readStartedAt = Date.now();
         let mirror: Record<string, unknown>;
         try {
@@ -9600,6 +9631,7 @@ await this.notifications
           WHERE "id" = ${instance.id}::text AND "exchangeProvider" = 'bitfinex'
         `.catch(() => undefined);
       }
+      this.lastExchangeMirrorAtMs = Date.now();
     } finally {
       this.exchangeMirrorRunning = false;
     }
@@ -18597,11 +18629,20 @@ await this.notifications
     // protective stop advances through the Scenario C ladder rungs on the
     // exchange. Showcase bot remains the EXIT decision maker; this only
     // manages the protective stop between entry and that EXIT.
-    const skipProfitLockTrail = !shouldPromoteScenarioCStop({
-      simActive,
-      showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
-      mirrorExitConvergence: mirrorExitConvergenceEnabled(),
-    });
+    // Fly-approved copies (LIVE-FIX-0442, 12 Oct): the exchange stop is the
+    // catastrophe backup only - placed once, NEVER moved. Trailing it with the
+    // Scenario C profit lock closed gs1-a7caae6457a3 27 min before paper
+    // (EXCHANGE_STOP tag, 46.8 bp exit drift). Exits come from the tile only.
+    const skipProfitLockTrail =
+      shouldSkipExchangeStopTrailForApprovedCopy({
+        simActive,
+        approvalBacked: this.approvalBackedStopPct(intent) != null,
+      }) ||
+      !shouldPromoteScenarioCStop({
+        simActive,
+        showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
+        mirrorExitConvergence: mirrorExitConvergenceEnabled(),
+      });
     if (lockFloorTrail != null && fillPrice > 0 && meta.stopOrderId && !skipProfitLockTrail) {
       const trailStop = computeProfitLockStopPrice(fillPrice, meta.direction, lockFloorTrail, leverage);
       const priorFloor = runtime.lastProfitLockFloor ?? 0;
