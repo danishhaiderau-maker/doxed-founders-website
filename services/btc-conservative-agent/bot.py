@@ -45353,7 +45353,20 @@ def api_state():
         built_at = float(_api_state_cache.get("full_built_at") or _api_state_cache.get("built_at") or 0.0)
         if cached is not None:
             cached = _api_state_live_overlay(cached, built_at)
+            monitor_authed = (not admin_authed) and monitor_integrity_authorized()
             payload = cached if admin_authed else _sanitize_public_state(cached)
+            if admin_authed or monitor_authed:
+                # Live flags always populated from the effective_live source (HM 09:12: empty to the monitor token).
+                try:
+                    import live_copy_monitor_api as _lcm_api
+                    live_flags = _lcm_api.live_flags_snapshot()
+                except Exception as exc:  # noqa: BLE001
+                    live_flags = {"effective_live": False, "error": type(exc).__name__}
+                payload = dict(payload)
+                payload["live_flags"] = live_flags
+                payload["effective_live"] = live_flags.get("effective_live")
+                payload["live_copy_output_enabled"] = live_flags.get("output_enabled")
+                payload["live_tiles_on"] = live_flags.get("tiles_live_on")
             payload["api_state_built_at"] = cached["api_state_built_at"]
             payload["api_state_age_sec"] = cached["api_state_age_sec"]
             resp = jsonify(payload)
