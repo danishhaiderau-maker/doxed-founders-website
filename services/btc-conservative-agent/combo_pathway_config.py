@@ -179,17 +179,13 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 # router, and the fade pool.
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
-    RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-    RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
     RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
     RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
-    RESEARCH_LANE_FAMILY_FADE_POOL,
-    RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1518,7 +1514,7 @@ _GS07_V07_EXIT = _composite_exit(
 COMBO_LANE_SPECS.update({
     RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M: _tile(
         lane=RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
-        label="Tile 14 · GS-07 V07 premium fade · Binance/Bybit premium vs 60-min mean +/-2.5 bp, taker, 60-min hold, 40 bp stop",
+        label="GS-07 V07 premium fade · Binance/Bybit premium vs 60-min mean +/-2.5 bp, taker, 60-min hold, 40 bp stop",
         raw_policy_id=("GS07V07_XVENUE_PREMIUM_DEV60M_L2.5_S2.5BP_TAKER_CAP5BPS_GAP300S_12H"
                        "|TIME_3600_HARD40BP_CAP6"),
         id_prefix="g7v",
@@ -1537,7 +1533,7 @@ COMBO_LANE_SPECS.update({
         admission_treatment=GS07_V07_ADMISSION_POLICY_ID,
         max_active_signals=6, entry_ttl_sec=3, default_enabled=False,
         signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
-        subtitle="Tile 14 · GS-07 V07 — premium fade on the 60-min mean — PAPER ONLY — RELAY INELIGIBLE",
+        subtitle="GS-07 V07 — premium fade on the 60-min mean — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("the Binance/Bybit premium over Bitfinex leaves its own 60-minute mean by >= +2.5 / "
                         "<= -2.5 bp; take Bitfinex toward convergence as a taker and hold 60 minutes"),
         live_exit_order=registry_live_exit_order(_GS07_V07_EXIT),
@@ -1563,6 +1559,25 @@ def tile_number(lane: str) -> int | None:
         return ACTIVE_TILE_ORDER.index(str(lane or "").upper()) + 1
     except ValueError:
         return None
+
+
+TILE_SHORT_CODES = {
+    "FAMILY_COMMITTED_FADE_TAKER_90": "H-A", "FAMILY_RANDOM_CONTROL_TAKER_90": "CTRL",
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP": "GS-01", "FAMILY_GSB1_CVD_DIV_REGIME": "B1",
+    "FAMILY_GSB2_REGIME_SWITCHER": "B2", "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "GS-06",
+    "FAMILY_GS07_FAST_PREMIUM_FADE": "GS-07", "FAMILY_DANISH_REGIME_ROUTER": "ROUTER",
+    "FAMILY_PREMIUM_REVERSION_60M": "H-C", "FAMILY_GSB3_COMMITTED_FADE_REGIME": "B3",
+    "FAMILY_FADE_POOL": "FADE-POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M": "V07",
+}
+
+
+def tile_display_name(lane: str) -> str:
+    """"Tile N · CODE" for an active tile, "Retired · CODE" for a retired one."""
+    lane = str(lane or "").upper()
+    spec = COMBO_LANE_SPECS.get(lane) or {}
+    code = TILE_SHORT_CODES.get(lane) or str(spec.get("label") or lane).split(" ")[0]
+    n = tile_number(lane)
+    return f"Tile {n} · {code}" if n else f"Retired · {code}"
 
 
 def active_tile_policy_epochs() -> tuple[str, ...]:
@@ -1613,6 +1628,20 @@ RETIRED_TILE_LANES = frozenset({
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
     "FAMILY_GS02_NOTRADE_REGIME_ENTRY", "FAMILY_GS03_CVD_DIV_TAKER",
     "FAMILY_GS04_NOTRADE_ATR_TP", "FAMILY_GS05_PREMIUM_REGIME_MANAGED",
+    # Retired 2026-10-11 21:02-21:03 AEDT (owner, Danish): H-C, B3, FADE-POOL
+    # and V07. Paper and live switched OFF first; all evidence/data is kept.
+    # Active tiles renumber 1..N from display order; retired show no number.
+    "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
+    "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M",
+})
+# Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
+# not numbered): H-C's evaluator is still the fixture for generic cross-venue
+# latency/handoff tests, and kept code lets the analyzer replay their data.
+RETIRED_KEPT_POLICY_MODULES = frozenset({
+    "paper_policy_family_premium_reversion_60m.py",
+    "paper_policy_family_gsb3_committed_fade_regime.py",
+    "paper_policy_family_fade_pool.py",
+    "paper_policy_family_gs07_v07_premium_fade_60m.py",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",

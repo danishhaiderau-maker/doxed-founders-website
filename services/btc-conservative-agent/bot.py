@@ -30298,6 +30298,19 @@ def update_orders_state():
     logger.debug("[ENGINE] update_orders_state called")
     cleanup_expired_orders()
 
+import trade_research_tags as _trade_research_tags
+
+
+def _research_tags_tick(price) -> None:
+    """Record-only 10 s price path + entry tags; never blocks or alters a trade."""
+    try:
+        fn = globals().get("_disloc_last_signal")
+        with trade_lock:  # mutate pos dicts only under the lock (serializers iterate them)
+            _trade_research_tags.tick(price, list(open_positions), fn if callable(fn) else None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def manage_open_positions():
     logger.debug("[ENGINE] manage_open_positions called")
     monitor_positions()
@@ -30326,6 +30339,7 @@ def position_manager():
             cleanup_expired_orders()
             process_pending_orders()
             process_positions()
+            _research_tags_tick(price)
             # Captures in-place chase/TTL/MFE/exit-config mutations as well as
             # registrations, so restart resumes the exact lifecycle stage.
             save_paper_lifecycle(reason="position_manager_tick")
@@ -52765,6 +52779,10 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "analyzer_sync_id": ANALYZER_SYNC_ID,
             **completeness_projection(trade_row),
         }
+        try:
+            outcome.update(_trade_research_tags.outcome_fields(pos))
+        except Exception:  # noqa: BLE001 - record-only
+            pass
         _safe_append_jsonl(TRADE_OUTCOME_FILE, outcome, label="TRADE_OUTCOME")
     except Exception as e:
         logger.error(f"[TRADE_OUTCOME] log failed: {e}")

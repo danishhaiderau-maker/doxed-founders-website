@@ -4,7 +4,11 @@ import json
 import pytest
 
 import tile_paired_comparison as tpc
-from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
+from combo_pathway_config import ACTIVE_TILE_ORDER, COMBO_LANE_SPECS
+from combo_pathway_config import ACTIVE_TILE_REGISTRY as _ACTIVE
+
+# H-C (XVS) retired 2026-10-11; its frozen spec stays the synthetic fixture.
+ACTIVE_TILE_REGISTRY = {**COMBO_LANE_SPECS, **_ACTIVE}
 
 CFT = "FAMILY_COMMITTED_FADE_TAKER_90"     # H-A
 XVS = "FAMILY_PREMIUM_REVERSION_60M"        # H-C (cross-venue clock tile)
@@ -21,8 +25,8 @@ def _fill(lane, call, bp, ts, reason="INITIAL_ATR_STOP", **extra):
     return row
 
 
-def _report(rows, now=None):
-    return tpc.build_report(trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=ACTIVE_TILE_ORDER,
+def _report(rows, now=None, extra=()):
+    return tpc.build_report(trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=tuple(ACTIVE_TILE_ORDER) + tuple(extra),
                             now_ts=T0 + 3600 if now is None else now)
 
 
@@ -81,12 +85,12 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
-    assert report["tile_order"][:4] == [CFT, XVS, RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
+    assert report["tile_order"][:3] == [CFT, RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
     # Shared-call tiles pair (H-A, control, B2, B3, GS-06, Danish, Fade Pool);
     # evaluator-clock tiles (H-C, GS-01, B1, GS-07) never do.
     assert report["all_tiles_paired"]["paired_tiles"] == [
-        CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL"]
+        CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER",
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DANISH_REGIME_ROUTER"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
         (CFT, RND), (CFT, "FAMILY_GSB2_REGIME_SWITCHER")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
@@ -138,7 +142,7 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
     report = _report(rows)
     assert report["baseline_lane"] is None
     # Ten hypotheses (H-A, H-C, GS-01, B1..B3, GS-06, GS-07, Danish, Fade Pool, GS-07 V07); the control is not a trial.
-    assert report["deflated_sharpe_trials"] == 11
+    assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER) - 1
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND
     assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)
@@ -161,12 +165,12 @@ def test_hypothesis_kill_rules_count_distinct_hours_not_fills(lane, k1, k4):
     assert pre["kill"]["k1_after_distinct_hours"] == k1 and pre["kill"]["k4_max_drawdown_usd"] == k4
     # k1 fills inside a handful of hours are not enough: n_eff counts hours.
     crowded = [_fill(lane, f"c{i}", -0.5, T0 + (i % 5) * 3600 + i, reason="PATH_END") for i in range(k1)]
-    assert _report(crowded)["pre_registered"][lane]["verdict"]["kill_reasons"] == []
+    assert _report(crowded, extra=(lane,) if lane not in ACTIVE_TILE_ORDER else ())["pre_registered"][lane]["verdict"]["kill_reasons"] == []
     spread = [_fill(lane, f"z{i}", -0.5, T0 + i * 3600, reason="PATH_END") for i in range(k1)]
-    verdict = _report(spread)["pre_registered"][lane]["verdict"]
+    verdict = _report(spread, extra=(lane,) if lane not in ACTIVE_TILE_ORDER else ())["pre_registered"][lane]["verdict"]
     assert f"K1_MEAN_NOT_POSITIVE_AFTER_{k1}_HOURS" in verdict["kill_reasons"] and verdict["status"] == "KILL"
     bad = [_fill(lane, "b0", -61.0, T0, reason="PHYSICAL_HARD_STOP_40PCT")]
-    assert "K3_STOP_OR_STALE_FEED_FAILURE" in _report(bad)["pre_registered"][lane]["verdict"]["kill_reasons"]
+    assert "K3_STOP_OR_STALE_FEED_FAILURE" in _report(bad, extra=(lane,) if lane not in ACTIVE_TILE_ORDER else ())["pre_registered"][lane]["verdict"]["kill_reasons"]
 
 
 def _day21(lane):
@@ -192,9 +196,9 @@ def test_day21_pass_needs_target_bonferroni_ci_and_beating_the_control():
 def test_day21_fail_and_inconclusive():
     start = tpc._ts(ACTIVE_TILE_REGISTRY[XVS]["pre_registration"]["registered_utc"])
     flat = [_fill(XVS, f"f{i}", 0.5 if i % 2 else -0.6, start + i * 3600, reason="PATH_END") for i in range(60)]
-    assert _report(flat, now=_day21(XVS))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_FAIL"
+    assert _report(flat, now=_day21(XVS), extra=(XVS,))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_FAIL"
     thin = [_fill(XVS, f"t{i}", 4.0 + (i % 3), start + i * 3600, reason="PATH_END") for i in range(40)]
-    assert _report(thin, now=_day21(XVS))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_INCONCLUSIVE"
+    assert _report(thin, now=_day21(XVS), extra=(XVS,))["pre_registered"][XVS]["verdict"]["status"] == "DAY21_INCONCLUSIVE"
 
 
 def test_profitable_random_control_flags_the_fill_model():
