@@ -57579,6 +57579,20 @@ def _live_copy_paper_twins() -> dict:
                 }
     except Exception:  # noqa: BLE001
         pass
+    # Durable fallback: in-memory recent_trades is reset by a deploy/epoch
+    # boundary, which left closed live copies without a paper twin (entry
+    # drift null, LIVE_POSITION_WITHOUT_PAPER_TWIN). The append-only outcome
+    # journal survives restarts, so match closed live trades by trade id there.
+    try:
+        for row in _read_jsonl_tail(TRADE_OUTCOME_FILE, 4 * 1024 * 1024):
+            tid = str((row or {}).get("trade_id") or "") if isinstance(row, dict) else ""
+            if tid and tid not in out:
+                out[tid] = {"entry_price": row.get("entry"), "qty": row.get("qty"),
+                            "side": row.get("dir"), "exit_price": row.get("exit"),
+                            "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
+                            "source": "trade_outcome_journal"}
+    except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
+        pass
     return out
 
 
