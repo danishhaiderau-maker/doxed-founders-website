@@ -263,6 +263,37 @@ def minute_path(series: Sequence[tuple[float, float]], max_minutes: int = MAX_PA
             "close": close, "high": high, "low": low}
 
 
+SECOND_PATH_MAX_SEC = 900  # 15 min of 1 s marks per trade (~4 KB) keeps storage lean
+SECOND_PATH_AFTER_EXIT_SEC = 120
+
+
+def second_path(series: Sequence[tuple[float, float]], hold_end_t: float | None = None,
+                max_sec: int = SECOND_PATH_MAX_SEC) -> dict[str, Any]:
+    """Same-trade 1 s exit replay: last executable pnl in each second since the fill (ints in
+    ``PATH_UNIT_BP``), forward-filled across quiet seconds, to the paper exit + 120 s (cap 900 s).
+    Any exit rule (TP/stop/time/trail at 1 s resolution) can be replayed on the exact trade."""
+    if not series:
+        return {"unit_bp": PATH_UNIT_BP, "step_sec": 1, "seconds": 0, "truncated": False, "close": []}
+    end = series[-1][0]
+    if hold_end_t is not None:
+        end = min(end, max(0.0, hold_end_t) + SECOND_PATH_AFTER_EXIT_SEC)
+    total = int(end) + 1
+    n = min(total, int(max_sec))
+    close: list[int | None] = [None] * n
+    for t, pnl in series:
+        idx = int(t)
+        if idx >= n:
+            break
+        close[idx] = int(round(pnl / PATH_UNIT_BP))
+    prev = None
+    for i in range(n):
+        if close[i] is None:
+            close[i] = prev
+        prev = close[i]
+    return {"unit_bp": PATH_UNIT_BP, "step_sec": 1, "seconds": n, "truncated": total > n,
+            "exit_second": None if hold_end_t is None else int(max(0.0, hold_end_t)), "close": close}
+
+
 # --------------------------------------------------------------------------
 # Shadow exits
 # --------------------------------------------------------------------------
@@ -613,6 +644,7 @@ def build_record(*, source: str, trade_id: str, direction: str, ticks, signal_ts
         record["hold_extremes"] = _peak_trough(series, hold_end_t) if hold_end_t is not None else None
         record["path"] = minute_path(series)
         record["path"]["exit_minute"] = None if hold_end_t is None else int(max(0.0, hold_end_t) // 60)
+        record["path_1s"] = second_path(series, hold_end_t)
         exits = evaluate_shadow_exits(series, shadow_set, atr_bp=atr_bp, horizon_sec=horizon_sec, fee_bp=fee_bp)
         if hold_end_t is not None and series:
             at_exit = [row for row in series if row[0] <= hold_end_t]
