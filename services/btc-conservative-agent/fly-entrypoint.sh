@@ -26,6 +26,22 @@ for source_asset in manifest.json genome_cluster_library.json; do
   fi
 done
 
+# Clock sync (11 Oct 2026: Fly wall clock measured +405 ms vs an external
+# clock; Fly VMs ship no NTP daemon). One bounded step before any trading
+# process starts, then chronyd slews only (no steps while trading). Never
+# blocks boot: failures are logged and the external-offset verdict
+# (/health clock_sync) stays the source of truth.
+if command -v chronyd >/dev/null 2>&1 && [ "${CLOCK_SYNC_ENABLED:-1}" = "1" ]; then
+  CHRONY_CONF=/tmp/chrony.conf
+  cat > "$CHRONY_CONF" <<'CONF'
+server time.cloudflare.com iburst
+server time.google.com iburst
+driftfile /tmp/chrony.drift
+CONF
+  timeout 20 chronyd -u root -q -f "$CHRONY_CONF" 2>&1 | sed 's/^/[clock-sync] /' || echo "[clock-sync] initial step failed"
+  chronyd -u root -f "$CHRONY_CONF" 2>&1 | sed 's/^/[clock-sync] /' || echo "[clock-sync] daemon failed to start"
+fi
+
 export PYTHONPATH="/app${PYTHONPATH:+:$PYTHONPATH}"
 export BOT_SINGLETON_DIR="$DATA_DIR/locks"
 cd "$RUNTIME_DIR"
