@@ -35476,6 +35476,14 @@ def _scope_pathway_specs_to_signed_epoch(
         ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
     counters = lane_opportunity_counters or {}
     approvals_known = _lane_counters_cover_epoch(epoch_cutoff_utc, counters_since_ts)
+    try:
+        disloc_metrics = _disloc_lane_metrics(_disloc_epoch_since())
+    except Exception:  # noqa: BLE001 - card stats only
+        disloc_metrics = {}
+    try:
+        forced_breakdown = _lane_forced_close_breakdown()
+    except Exception:  # noqa: BLE001 - card breakdown only
+        forced_breakdown = {}
     for row in scoped.get("lanes") or []:
         lane = str(row.get("lane") or "").upper()
         lb = ledger.get(lane) or {}
@@ -35498,11 +35506,36 @@ def _scope_pathway_specs_to_signed_epoch(
             ),
             "verdict": "current signed clean epoch",
         }
+        dsl = disloc_metrics.get(lane)
+        if dsl is not None:
+            # Tiles 9/10 book into their own paper ledger (not ``trades``).
+            closes = int(dsl.get("closes") or 0)
+            pnl = round(float(dsl.get("net_pnl_usd") or 0.0), 2)
+            metrics.update({
+                "approves": None, "approvals_known": False, "approve_to_fill_pct": None,
+                "real_fills": closes, "net_pnl_real": pnl, "per_approve_ev": None,
+                "wins": int(dsl.get("wins") or 0), "losses": int(dsl.get("losses") or 0),
+                "win_rate_pct": round(100.0 * int(dsl.get("wins") or 0) / closes, 1) if closes else 0.0,
+            })
         stats = _session_stats_from_lane_metrics(metrics)
         stats["scope"] = "SIGNED_FRESH_EPOCH"
         stats["epoch_cutoff_utc"] = epoch_cutoff_utc
         stats["epoch_id"] = _current_epoch_id_for_display()
         stats["closes_source"] = "epoch_trade_ledger_excl_forced_closes"
+        if dsl is not None:
+            stats["closes_source"] = "disloc_paper_ledger"
+            stats["disloc"] = dsl
+        fb = forced_breakdown.get(lane) or {}
+        stats["pnl_breakdown"] = {
+            "strategy_net_usd": pnl if dsl is None else round(float(dsl.get("net_pnl_usd") or 0.0), 2),
+            "strategy_closes": closes,
+            "forced_closes": int(fb.get("forced_closes") or 0),
+            "forced_net_usd": float(fb.get("forced_net_usd") or 0.0),
+            "deploy_flatten_closes": int(fb.get("deploy_flatten_closes") or 0),
+            "deploy_flatten_net_usd": float(fb.get("deploy_flatten_net_usd") or 0.0),
+            "basis": "strategy = current-epoch closes excl. forced (same window as lane_pnl_ledger and "
+                     "/api/monitor/tiles/totals); forced (admin + deploy flatten) shown separately",
+        }
         if not approvals_known:
             stats["approvals_note"] = "approvals n/a: counters restarted after the epoch began"
         row["session_stats"] = stats
@@ -35657,6 +35690,125 @@ def write_static_pathway_lane_specs(cwd: str = None) -> dict:
     except Exception as e:
         logger.debug(f"[PATHWAY_LANE_SPECS] write failed: {e}")
     return merged
+
+
+# --- DISLOC ledger folding + forced-close breakdown for tile cards (LIVE-FIX-0806) ---
+_DISLOC_ROWS_CACHE: dict = {}
+_DISLOC_ROWS_CACHE_SEC = 10.0
+_FORCED_BREAKDOWN_CACHE: dict = {}
+
+
+def _disloc_lane_raw_rows(lane: str) -> list:
+    """DISLOC paper ledger rows for one lane (read-only, cached 10 s)."""
+    import disloc_engine as _dsl
+    path = _dsl.LANE_FILES.get(lane)
+    if not path:
+        return []
+    now = time.time()
+    hit = _DISLOC_ROWS_CACHE.get(lane)
+    if hit and 0.0 <= now - hit[0] < _DISLOC_ROWS_CACHE_SEC:
+        return hit[1]
+    rows = _dsl.load_rows(path)
+    _DISLOC_ROWS_CACHE[lane] = (now, rows)
+    return rows
+
+
+def _disloc_lane_size(lane: str) -> tuple:
+    import disloc_engine as _dsl
+    spec = COMBO_LANE_SPECS.get(lane) or {}
+    try:
+        margin = float(spec.get("requested_margin_usd") or _dsl.DEFAULT_MARGIN_USD)
+    except (TypeError, ValueError):
+        margin = _dsl.DEFAULT_MARGIN_USD
+    try:
+        lev = float(spec.get("leverage") or _dsl.DEFAULT_LEVERAGE)
+    except (TypeError, ValueError):
+        lev = _dsl.DEFAULT_LEVERAGE
+    return margin, lev
+
+
+def _disloc_epoch_rows(lane: str, since_ts: float | None = None) -> list:
+    rows = _disloc_lane_raw_rows(lane)
+    if since_ts:
+        rows = [r for r in rows if float((r or {}).get("exit_ts") or (r or {}).get("ts") or 0.0) >= since_ts]
+    return rows
+
+
+def _disloc_lane_metrics(since_ts: float | None = None) -> dict:
+    """Per DISLOC lane card metrics from its own paper ledger (never the bot trades list)."""
+    import disloc_engine as _dsl
+    out = {}
+    for lane in _dsl.LANE_FILES:
+        try:
+            margin, lev = _disloc_lane_size(lane)
+            out[lane] = _dsl.lane_metrics(_disloc_epoch_rows(lane, since_ts), margin_usd=margin, leverage=lev)
+        except Exception:  # noqa: BLE001 - card stats only
+            continue
+    return out
+
+
+def _disloc_tile_trade_rows(lane: str, epoch_id=None, short_name=None, be_band_bp: float = 0.0,
+                            since_ts: float | None = None) -> list:
+    import disloc_engine as _dsl
+    if lane not in _dsl.LANE_FILES:
+        return []
+    margin, lev = _disloc_lane_size(lane)
+    return _dsl.tile_trade_rows(_disloc_epoch_rows(lane, since_ts), lane, epoch_id=epoch_id, margin_usd=margin,
+                                leverage=lev, short_name=short_name, be_band_bp=be_band_bp)
+
+
+def _lane_forced_close_breakdown() -> dict:
+    """Per lane, session-scoped forced closes (admin/deploy flatten) kept OUT of strategy P&L.
+
+    Same session + forced rule as lane_pnl_ledger / _monitor_lane_rows, read from a
+    list snapshot (no trade_lock), cached 15 s.
+    """
+    now = time.time()
+    hit = _FORCED_BREAKDOWN_CACHE.get("v")
+    if hit and 0.0 <= now - hit[0] < 15.0:
+        return hit[1]
+    try:
+        from research.close_origin import is_deploy_flatten as _is_df
+    except Exception:  # noqa: BLE001
+        _is_df = None
+    session_start = _showcase_trade_session_start()
+    out: dict = {}
+    for row in list(trades):
+        if not isinstance(row, dict) or not _trade_row_is_forced_close(row):
+            continue
+        if session_start and not _trade_row_in_session(row, session_start):
+            continue
+        lane = _normalize_lane_key(row.get("research_lane") or "")
+        if not lane:
+            continue
+        try:
+            net = float(row.get("net_pnl_usd") or 0.0)
+        except (TypeError, ValueError):
+            net = 0.0
+        b = out.setdefault(lane, {"forced_closes": 0, "forced_net_usd": 0.0,
+                                  "deploy_flatten_closes": 0, "deploy_flatten_net_usd": 0.0})
+        b["forced_closes"] += 1
+        b["forced_net_usd"] += net
+        try:
+            df = bool(_is_df(row)) if _is_df else False
+        except Exception:  # noqa: BLE001
+            df = False
+        if df:
+            b["deploy_flatten_closes"] += 1
+            b["deploy_flatten_net_usd"] += net
+    for b in out.values():
+        b["forced_net_usd"] = round(b["forced_net_usd"], 2)
+        b["deploy_flatten_net_usd"] = round(b["deploy_flatten_net_usd"], 2)
+    _FORCED_BREAKDOWN_CACHE["v"] = (now, out)
+    return out
+
+
+def _disloc_epoch_since() -> float | None:
+    try:
+        start = _showcase_trade_session_start()
+        return float(start) if start else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: dict = None) -> dict:
@@ -38348,7 +38500,22 @@ DASHBOARD_JS = """(function () {
             : (stats.scope
               ? ('scope ' + String(stats.scope))
               : 'epoch scope unavailable (no epoch cutoff on this snapshot)');
-          const statsScopeNote = '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
+          const pb = stats.pnl_breakdown || {};
+          const forcedNote = (pb.forced_closes > 0)
+            ? '<div style="margin-top:4px;color:#8b949e;font-size:0.74em;">Strategy P&amp;L $' + Number(pb.strategy_net_usd || 0).toFixed(2)
+              + ' over ' + Number(pb.strategy_closes || 0) + ' closes · forced closes (not in strategy P&amp;L): ' + Number(pb.forced_closes) + ' · $' + Number(pb.forced_net_usd || 0).toFixed(2)
+              + (pb.deploy_flatten_closes > 0 ? ' (deploy flatten ' + Number(pb.deploy_flatten_closes) + ' · $' + Number(pb.deploy_flatten_net_usd || 0).toFixed(2) + ')' : '')
+              + '</div>'
+            : '';
+          const dslStats = stats.disloc || null;
+          const dslSide = (dslStats && dslStats.by_side) || {};
+          const dslDelay = (dslStats && dslStats.by_delay_bucket) || {};
+          const dslNote = dslStats
+            ? '<div style="margin-top:4px;color:#8b949e;font-size:0.74em;">DISLOC paper ledger · mean ' + (dslStats.mean_net_bp == null ? '—' : Number(dslStats.mean_net_bp).toFixed(2) + ' bp')
+              + ' · ' + Object.keys(dslSide).map(function (k) { return k + ' ' + dslSide[k].closes; }).join(' / ')
+              + ' · delay ' + Object.keys(dslDelay).map(function (k) { return k + ' ' + dslDelay[k].closes; }).join(' / ') + '</div>'
+            : '';
+          const statsScopeNote = forcedNote + dslNote + '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
             + (stats.epoch_cutoff_utc ? ' since ' + stats.epoch_cutoff_utc : '')
             + (stats.approvals_known === false ? ' · EV/appr n/a (approvals not counted for the whole epoch)' : '')
             + '</div>';
@@ -43877,6 +44044,15 @@ def _apply_ledger_closed_counts(tile_route_counts: dict, lane_ledger) -> None:
         except (TypeError, ValueError):
             counts["closed"] = 0
         counts["closed_source"] = "epoch_lane_ledger_excl_forced"
+    try:
+        disloc_metrics = _disloc_lane_metrics(_disloc_epoch_since())
+    except Exception:  # noqa: BLE001
+        disloc_metrics = {}
+    for lane, dm in disloc_metrics.items():
+        counts = tile_route_counts.get(lane) if isinstance(tile_route_counts, dict) else None
+        if isinstance(counts, dict):
+            counts["closed"] = int(dm.get("closes") or 0)
+            counts["closed_source"] = "disloc_paper_ledger"
     _floor_selected_calls(tile_route_counts)
 
 
@@ -45438,6 +45614,19 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                                  "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
                                  # W/L source: price-based net bp (same rule as the lane ledgers).
                                  "net_pnl_bp": net_bp})
+    for lane in list(shaped):
+        try:
+            dsl_rows = _disloc_tile_trade_rows(lane, since_ts=session_start or None)
+        except Exception:  # noqa: BLE001
+            dsl_rows = []
+        for r in dsl_rows:
+            shaped[lane].append({"close_ts": (r.get("exit") or {}).get("close_ts"),
+                                 "net_pnl_usd": (r.get("pnl") or {}).get("net_usd"),
+                                 "notional_usd": r.get("notional_usd"), "direction": r.get("side"),
+                                 "book_slippage_usd": None, "pnl_margin_pct": None,
+                                 "leverage": r.get("leverage"), "net_pnl_bp": (r.get("pnl") or {}).get("bp"),
+                                 "side_tag": (r.get("disloc") or {}).get("side_tag"),
+                                 "delay_bucket": (r.get("disloc") or {}).get("delay_bucket")})
     _MONITOR_LANE_FORCED_EXCLUDED.clear()
     _MONITOR_LANE_FORCED_EXCLUDED.update(forced)
     _MONITOR_LANE_DEPLOY_FLATTENED.clear()
@@ -45784,6 +45973,15 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
             if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
                 continue
             out[lane].append(row)
+    if "closed" in statuses:
+        for lane in out:
+            try:
+                for row in _disloc_tile_trade_rows(lane, epoch_id=scope["epoch"], short_name=short.get(lane),
+                                                   be_band_bp=scope["be_band_bp"], since_ts=_disloc_epoch_since()):
+                    if monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                        out[lane].append(row)
+            except Exception:  # noqa: BLE001 - DISLOC fold is additive only
+                continue
     return out
 
 
