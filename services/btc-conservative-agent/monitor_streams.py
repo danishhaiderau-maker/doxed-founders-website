@@ -28,6 +28,10 @@ STREAMS = {
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
     "disloc_trades": "disloc_trades.jsonl",                # Tile 13 DISLOC paper orders/fills/cancels/closes
     "disloc_foi_trades": "disloc_foi_trades.jsonl",        # Tile 14 DISLOC-FOI paper ledger
+    # Strategist data streams (12 Oct, strategist_streams_collector.py)
+    "bfx_book_10l": "bfx_book_10l_1s.jsonl",               # Bitfinex 10-level book, 1 s
+    "bfx_trades": "bfx_trades.jsonl",                      # every individual Bitfinex public trade
+    "venue_bbo_lighter_paradex": "venue_bbo_1m.jsonl",     # Lighter + Paradex BTC bid/ask, 1 s in 1 m rows
 }
 
 

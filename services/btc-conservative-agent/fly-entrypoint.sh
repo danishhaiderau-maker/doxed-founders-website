@@ -121,6 +121,23 @@ else
   echo "[fly-entrypoint] MARKET_CONTEXT_COLLECTOR_ENABLED!=1 -> market-context collector disabled."
 fi
 
+# Strategist data streams (Bitfinex 10-level book + individual trades, Lighter + Paradex BBO).
+# Public keyless feeds, no orders, bounded rotation. Separate niced process with its own restart loop.
+if [ "${STRATEGIST_STREAMS_ENABLED:-1}" = "1" ]; then
+  SS_LOG="$DATA_DIR/strategist-streams-collector.log"
+  if [ -f "$SS_LOG" ] && [ "$(wc -c < "$SS_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    : > "$SS_LOG"
+  fi
+  echo "[fly-entrypoint] starting strategist streams collector (watch-only, niced)..."
+  ( while true; do
+      nice -n 10 python /app/strategist_streams_collector.py >> "$SS_LOG" 2>&1
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] strategist streams collector exited rc=$? -> restarting in 10s" >> "$SS_LOG"
+      sleep 10
+    done ) &
+else
+  echo "[fly-entrypoint] STRATEGIST_STREAMS_ENABLED!=1 -> strategist streams collector disabled."
+fi
+
 # Live Indicator Edge engine: pure observation. Reads the tape/minute files the
 # collectors write and appends one indicator_bars_v1 row per closed 3-minute
 # bar. No network, no orders, no bot import. Separate niced process with its
