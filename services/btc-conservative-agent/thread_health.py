@@ -91,6 +91,14 @@ class ThreadHealthRegistry:
         except Exception:
             pass
 
+    def unregister(self, name: str) -> None:
+        """Drop a worker that is legitimately not running (e.g. disabled by config)."""
+        try:
+            with self._lock:
+                self._rows.pop(str(name), None)
+        except Exception:
+            pass
+
     def bind(self, name: str, thread: Optional[threading.Thread] = None, now: Optional[float] = None) -> None:
         """Record the thread running ``name`` (alive evidence) and its start time."""
         try:

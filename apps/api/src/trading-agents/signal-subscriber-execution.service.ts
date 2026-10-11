@@ -517,6 +517,12 @@ export type RelayExecutorHealthSnapshot = {
   observedAt?: string;
   sourceRevision?: string | null;
   executionEnabled?: boolean;
+  swallowedErrors?: {
+    total: number;
+    safetyPauseFailures: number;
+    bySite: Record<string, number>;
+    last: { site: string; message: string; at: string } | null;
+  };
 };
 
 export type LiveCopyCoordinationState =
@@ -4482,6 +4488,57 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     return result;
   }
 
+  /**
+   * API-GAP-SWEEP (relay/executor): best-effort side effects used to be
+   * `.catch(() => {})`, so a failed safety pause or DB write vanished. Count
+   * every one per site, log it (rate-limited), surface it on the health
+   * snapshot, and log safety-pause failures as errors.
+   */
+  private readonly swallowedErrorCounts = new Map<string, number>();
+  private swallowedErrorTotal = 0;
+  private safetyPauseFailureTotal = 0;
+  private lastSwallowedError: { site: string; message: string; at: string } | null = null;
+  private readonly swallowedErrorLoggedAt = new Map<string, number>();
+
+  private swallowedError(site: string, critical = false): (err: unknown) => void {
+    return (err: unknown) => {
+      try {
+        const message = err instanceof Error ? err.message : String(err);
+        this.swallowedErrorTotal += 1;
+        this.swallowedErrorCounts.set(site, (this.swallowedErrorCounts.get(site) ?? 0) + 1);
+        this.lastSwallowedError = { site, message: message.slice(0, 240), at: new Date().toISOString() };
+        if (critical) this.safetyPauseFailureTotal += 1;
+        const now = Date.now();
+        if (critical || now - (this.swallowedErrorLoggedAt.get(site) ?? 0) > 60_000) {
+          this.swallowedErrorLoggedAt.set(site, now);
+          const line = `[EXECUTOR-SWALLOWED] ${site}${critical ? ' SAFETY PAUSE FAILED' : ''}: ${message}`;
+          if (critical) this.logger.error(line);
+          else this.logger.warn(line);
+        }
+      } catch {
+        // instrumentation must never throw into the trading path
+      }
+    };
+  }
+
+  swallowedErrorSnapshot(): {
+    total: number;
+    safetyPauseFailures: number;
+    bySite: Record<string, number>;
+    last: { site: string; message: string; at: string } | null;
+  } {
+    const bySite: Record<string, number> = {};
+    for (const [site, count] of [...this.swallowedErrorCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)) {
+      bySite[site] = count;
+    }
+    return {
+      total: this.swallowedErrorTotal,
+      safetyPauseFailures: this.safetyPauseFailureTotal,
+      bySite,
+      last: this.lastSwallowedError,
+    };
+  }
+
   getHealthSnapshot(nowMs = Date.now()): RelayExecutorHealthSnapshot {
     const timeoutMs = Math.max(
       10_000,
@@ -4512,6 +4569,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       sourceRevision:
         process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_REVISION ?? process.env.SOURCE_GIT_REV ?? null,
       executionEnabled: executionEnabled(),
+      swallowedErrors: this.swallowedErrorSnapshot(),
     };
   }
 
@@ -4731,7 +4789,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (settlement.kind === 'UNKNOWN') {
         const message = `PENDING_ENTRY_SETTLEMENT_UNKNOWN order=${orderId} participant=${participant.id} reason=${settlement.reason}`;
         this.logger.error(`${logLabel} ${message}; leaving PENDING_ENTRY`);
-        await this.setInstanceLastError(instance.userId, agentId, message).catch(() => {});
+        await this.setInstanceLastError(instance.userId, agentId, message).catch(this.swallowedError('setInstanceLastError@4734'));
         continue;
       }
       // Keep the participant-level audit truthful without closing the shared
@@ -4829,7 +4887,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       );
       await this.prisma.tradingAgentInstance
         .update({ where: { id: inst.id }, data: { dashboardState: next as object } })
-        .catch(() => {});
+        .catch(this.swallowedError('op@4832'));
     }
   }
 
@@ -5198,11 +5256,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (!wake) continue;
       const wakeMs = Date.parse(wake.at);
       if (!Number.isFinite(wakeMs) || Date.now() - wakeMs > 120_000) {
-        await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
+        await this.clearProjectedExecutorWake(inst.id, wake).catch(this.swallowedError('clearProjectedExecutorWake@5201'));
         continue;
       }
       if (!best || Date.parse(wake.at) >= Date.parse(best.at)) best = wake;
-      await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
+      await this.clearProjectedExecutorWake(inst.id, wake).catch(this.swallowedError('clearProjectedExecutorWake@5205'));
     }
     if (best) {
       this.lastShowcaseWakeAt = Date.parse(best.at) || Date.now();
@@ -7120,7 +7178,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           this.logger.warn(`[SAFE-MODE] ${instance.userId}: ${msg}`);
           await this.prisma.tradingAgentInstance
             .update({ where: { id: instance.id }, data: { lastError: msg } })
-            .catch(() => {});
+            .catch(this.swallowedError('op@7123'));
         }
       }
     } else if (botStateForCap != null || signedFastOrders.length > 0) {
@@ -7136,7 +7194,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             where: { id: instance.id, lastError: instance.lastError },
             data: { lastError: null },
           })
-          .catch(() => {});
+          .catch(this.swallowedError('op@7139'));
       }
     }
     const botMaxRaw = botStateForCap?.max_active_signals;
@@ -9812,7 +9870,7 @@ await this.notifications
         const msg = `Showcase unreachable for ${Math.round(block.elapsedMs / 1000)}s — live copy in safe mode (no new entries). Restoring the tunnel will resume copy automatically.`;
         await this.prisma.tradingAgentInstance
           .update({ where: { id: instance.id }, data: { lastError: msg } })
-          .catch(() => {});
+          .catch(this.swallowedError('op@9815'));
         this.cycleAudit.stage('ENTRY_BLOCKED_SHOWCASE_OUTAGE', {
           userId: instance.userId,
           agentId,
@@ -10178,7 +10236,7 @@ await this.notifications
       if (claimParticipantId) {
         await this.prisma.signalCycleParticipant
           .delete({ where: { id: claimParticipantId } })
-          .catch(() => {});
+          .catch(this.swallowedError('op@10181'));
         claimParticipantId = null;
       }
       this.logger.warn(
@@ -10205,7 +10263,7 @@ await this.notifications
         if (claimParticipantId) {
           await this.prisma.signalCycleParticipant
             .delete({ where: { id: claimParticipantId } })
-            .catch(() => {});
+            .catch(this.swallowedError('op@10208'));
           claimParticipantId = null;
         }
         this.logger.warn(
@@ -10891,7 +10949,7 @@ await this.notifications
             cancel_attempts: cancel.attempts,
             cancel_reason: cancel.reason ?? 'unknown',
           })
-          .catch(() => {});
+          .catch(this.swallowedError('op@10894'));
         return false;
       }
     }
@@ -11049,7 +11107,7 @@ await this.notifications
     if (meta.partialFillStopOrderId) {
       if (stopOrderId == null) {
         const message = `FULL_FILL_STOP_HANDOFF_FAILED cycle=${cycle.id}; partial stop remains active`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@11052', true));
         await this.setInstanceLastError(userId, agentId, message);
         return false;
       }
@@ -11076,7 +11134,7 @@ await this.notifications
         // its id for loud retry on the OPEN tick and pause new entries.
         supersededPartialStopOrderId = meta.partialFillStopOrderId;
         const message = `FULL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}; old=${meta.partialFillStopOrderId} new=${stopOrderId}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@11079', true));
         await this.setInstanceLastError(userId, agentId, message);
       }
     }
@@ -11098,7 +11156,7 @@ await this.notifications
           stale_exit_count: staleExitCount,
           cancel_context: cancelContext,
         })
-        .catch(() => {});
+        .catch(this.swallowedError('op@11101'));
     }
 
     const fillPersistenceCorrelationId = randomUUID();
@@ -11313,7 +11371,7 @@ await this.notifications
           userId,
           agentId,
           `PARTIAL_FILL_TERMINAL_CLOSE_FAILED cycle=${cycle.id} context=${cancelContext}`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@11316', true));
       }
       return true;
     }
@@ -12575,7 +12633,7 @@ await this.notifications
           userId,
           agentId,
           `EXCHANGE_FILL_GAP_ORDER_EVIDENCE_UNKNOWN participant=${row.id} order=${meta.bitfinexOrderId ?? 'missing'}`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@12578', true));
         await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'RECONCILE_CANCEL_FAILED', {
           venue: 'bitfinex', source: 'hire',
           event: 'EXCHANGE_FILL_GAP_ORDER_EVIDENCE_UNKNOWN',
@@ -12583,7 +12641,7 @@ await this.notifications
           bitfinex_order_id: meta.bitfinexOrderId,
           remaining_account_gap_qty: gap,
           verdict: 'UNKNOWN',
-        }).catch(() => {});
+        }).catch(this.swallowedError('op@12586'));
         continue;
       }
       const allocation = authenticatedOrderFillGapAllocation({
@@ -12595,7 +12653,7 @@ await this.notifications
           userId,
           agentId,
           `EXCHANGE_FILL_GAP_ALLOCATION_AMBIGUOUS participant=${row.id} orderFill=${exchangeFill.qty} gap=${gap}`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@12598', true));
         await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'RECONCILE_CANCEL_FAILED', {
           venue: 'bitfinex', source: 'hire',
           event: 'EXCHANGE_FILL_GAP_ALLOCATION_AMBIGUOUS',
@@ -12605,7 +12663,7 @@ await this.notifications
           authenticated_fill_ids: exchangeFill.fillIds.map(String),
           remaining_account_gap_qty: gap,
           verdict: 'UNKNOWN',
-        }).catch(() => {});
+        }).catch(this.swallowedError('op@12608'));
         continue;
       }
       const qty = allocation.qty;
@@ -13258,7 +13316,7 @@ await this.notifications
                 fill_price: fillPrice,
                 source: 'hire',
               })
-              .catch(() => {});
+              .catch(this.swallowedError('op@13261'));
             orphanPositionIds.push({
               participantId: p.id,
               cycleId,
@@ -13283,7 +13341,7 @@ await this.notifications
                 reason: 'RECONCILE_WRITE_WINDOW_DISABLED',
                 source: 'hire',
               })
-              .catch(() => {});
+              .catch(this.swallowedError('op@13286'));
             orphanPositionIds.push({
               participantId: p.id,
               cycleId,
@@ -13348,7 +13406,7 @@ await this.notifications
               fill_price: fillPrice,
               source: 'hire',
             })
-            .catch(() => {});
+            .catch(this.swallowedError('op@13351'));
           continue;
         }
 
@@ -14008,7 +14066,7 @@ await this.notifications
         : { gone: true, attempts: 0, reason: 'NO_ORDER_ID' };
       if (!remainder.gone) {
         const message = `TERMINAL_PARTIAL_REMAINDER_NOT_GONE cycle=${cycle.id}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14011', true));
         return true;
       }
 
@@ -14024,7 +14082,7 @@ await this.notifications
       }
       if (signedPosition === undefined) {
         const message = `TERMINAL_PARTIAL_POSITION_UNKNOWN cycle=${cycle.id}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14027', true));
         return true;
       }
       const knownStopIds = [
@@ -14041,7 +14099,7 @@ await this.notifications
           );
           if (!stopGone.gone) {
             const message = `TERMINAL_PARTIAL_FLAT_STOP_NOT_GONE cycle=${cycle.id} stop=${knownStopId}`;
-            await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+            await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14044', true));
             return true;
           }
         }
@@ -14084,7 +14142,7 @@ await this.notifications
         (meta.direction === 'SHORT' && signedPosition.amount < 0);
       if (!signedDirectionMatches) {
         const message = `TERMINAL_PARTIAL_OPPOSITE_EXPOSURE cycle=${cycle.id} amount=${signedPosition.amount}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14087', true));
         return true;
       }
       const sameDirectionQty =
@@ -14128,7 +14186,7 @@ await this.notifications
         const message = `TERMINAL_PARTIAL_FILL_STATUS_UNKNOWN cycle=${cycle.id}: ${
           err instanceof Error ? err.message : String(err)
         }`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14131', true));
         return true;
       }
       if (!terminalFill) return false;
@@ -14152,7 +14210,7 @@ await this.notifications
       const message = `PARTIAL_FILL_STOP_STATUS_UNKNOWN cycle=${cycle.id}: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14155', true));
       return true;
     }
     if (stop) return false;
@@ -14169,7 +14227,7 @@ await this.notifications
       const message = `PARTIAL_FILL_ENTRY_STATUS_UNKNOWN cycle=${cycle.id}: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14172', true));
       return true;
     }
     const goneOrderEvidence = entryOrder
@@ -14243,7 +14301,7 @@ await this.notifications
       const message = `PARTIAL_FILL_POSITION_STATUS_UNKNOWN cycle=${cycle.id}: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14246', true));
       return true;
     }
     const sameDirectionQty =
@@ -14277,7 +14335,7 @@ await this.notifications
       );
       if (!cancel.gone) {
         const message = `PARTIAL_STOP_TRIGGERED_REMAINDER_CANCEL_FAILED cycle=${cycle.id}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14280', true));
         return true;
       }
     }
@@ -14285,7 +14343,7 @@ await this.notifications
     const flatProof = await this.readOpenPositionDetailWithRetry(creds).catch(() => undefined);
     if (flatProof === undefined || (flatProof && btcToSats(Math.abs(flatProof.amount)) > 0)) {
       const message = `PARTIAL_STOP_TRIGGER_NOT_FLAT_PROVEN cycle=${cycle.id}`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14288', true));
       await this.cycles.recordHireExecutionEvent(
         userId,
         agentId,
@@ -14298,7 +14356,7 @@ await this.notifications
           reason: 'RESIDUAL_FLAT_NOT_PROVEN',
           observed_amount: flatProof?.amount,
         },
-      ).catch(() => {});
+      ).catch(this.swallowedError('op@14301'));
       return true;
     }
 
@@ -14336,7 +14394,7 @@ await this.notifications
       userId,
       agentId,
       `PARTIAL_FILL_STOP_TRIGGERED cycle=${cycle.id}; source/copy diverged`,
-    ).catch(() => {});
+    ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14339', true));
     return true;
   }
 
@@ -14487,7 +14545,7 @@ await this.notifications
         const message = `PARTIAL_FILL_EXISTING_STOP_STATUS_UNKNOWN cycle=${cycleId} stop=${priorStopId}: ${
           existing.reason
         }`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14490', true));
         throw new Error(message);
       }
       // Merely finding an order id is not protection evidence. A stale/wrong
@@ -14505,7 +14563,7 @@ await this.notifications
       );
       if (!oldGone.gone) {
         const message = `PARTIAL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycleId}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14508', true));
         throw new Error(message);
       }
     }
@@ -14533,7 +14591,7 @@ await this.notifications
       const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14536', true));
       // Fail closed: never leave an unprotected partial position while its
       // remaining entry can continue filling. Cancel the remainder first,
       // then flatten only the proven partial slice and confirm reduction.
@@ -14559,7 +14617,7 @@ await this.notifications
             (meta.direction === 'SHORT' && before.amount < 0);
           if (!sameDirection && btcToSats(Math.abs(before.amount)) > 0) {
             const mismatch = `PARTIAL_FILL_OPPOSITE_EXPOSURE cycle=${cycleId} amount=${before.amount}`;
-            await this.pauseUserRelayForPositionMismatch(userId, agentId, mismatch).catch(() => {});
+            await this.pauseUserRelayForPositionMismatch(userId, agentId, mismatch).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14562', true));
           } else {
             const beforeQty = Math.abs(before.amount);
             // The remainder can execute while its cancel is settling. The
@@ -14589,7 +14647,7 @@ await this.notifications
                     ? postCancel.reason
                     : 'POST_CANCEL_PROVEN_UNFILLED_CONTRADICTS_OPEN_POSITION',
                 },
-              ).catch(() => {});
+              ).catch(this.swallowedError('op@14592'));
               throw new Error(`${message}: post-cancel fill ownership is unknown`);
             }
             emergencyAttributableQty = postCancel.fill.filledQty;
@@ -14644,7 +14702,7 @@ await this.notifications
               ? 'EMERGENCY_FLAT_NOT_CONFIRMED'
               : 'ENTRY_REMAINDER_CANCEL_NOT_CONFIRMED',
           },
-        ).catch(() => {});
+        ).catch(this.swallowedError('op@14647'));
       }
       throw new Error(message);
     }
@@ -14704,7 +14762,7 @@ await this.notifications
       const message = `PARTIAL_FILL_STOP_OWNERSHIP_PERSIST_UNKNOWN cycle=${cycleId} stop=${newStopId}: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14707', true));
       throw new Error(message);
     }
 
@@ -14752,7 +14810,7 @@ await this.notifications
 
     if (supersededStopId) {
       const message = `PARTIAL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycleId}; old=${supersededStopId} new=${newStopId}`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@14755', true));
       throw new Error(message);
     }
     this.logger.warn(
@@ -15597,8 +15655,8 @@ await this.notifications
     context: string,
   ): Promise<void> {
     const message = `UNPROTECTED_FILL_HELD cycle=${cycleId} participant=${participantId} context=${context} reason=${failure.reason}`;
-    await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
-    await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@15600', true));
+    await this.setInstanceLastError(userId, agentId, message).catch(this.swallowedError('setInstanceLastError@15601'));
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_CANCEL_FAILED', {
       venue: 'bitfinex',
       source: 'hire',
@@ -15609,7 +15667,7 @@ await this.notifications
       reason: failure.reason,
       verdict: 'UNKNOWN',
       fill_promoted: false,
-    }).catch(() => {});
+    }).catch(this.swallowedError('op@15612'));
   }
 
   /**
@@ -15862,7 +15920,7 @@ await this.notifications
     });
     const alertMsg = `MIRROR EXIT HOLD: source appears flat but copy remains protected OPEN for ${Math.round(elapsed / 1000)}s (participant=${participant.id.slice(0, 8)}… stale_exit_events=${staleExitCount}) — evidence UNKNOWN; entries paused, no close`;
     this.logger.error(alertMsg);
-    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(() => {});
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(this.swallowedError('pauseUserRelayForPositionMismatch@15865', true));
     await this.cycles.recordHireExecutionEvent(
       userId,
       agentId,
@@ -16720,7 +16778,7 @@ await this.notifications
         userId,
         agentId,
         `TERMINAL_CLOSE_AUTHORITY_MISSING cycle=${cycle.id}: protected position held`,
-      ).catch(() => {});
+      ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16723', true));
       return false;
     }
     const terminalAuthority = opts.terminalAuthority;
@@ -16760,14 +16818,14 @@ await this.notifications
             userId,
             agentId,
             `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycle.id} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
-          ).catch(() => {});
+          ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16763', true));
           return true;
         }
         await this.pauseUserRelayForPositionMismatch(
           userId,
           agentId,
           `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycle.id}: identity, generation, status, or authority changed`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16770', true));
         return false;
         }
       } else {
@@ -16780,7 +16838,7 @@ await this.notifications
         `TERMINAL_CLOSE_CLAIM_PERSIST_FAILED cycle=${cycle.id}: protected position held; ${
           err instanceof Error ? err.message : String(err)
         }`,
-      ).catch(() => {});
+      ).catch(this.swallowedError('op@16783'));
       return false;
     }
 
@@ -16793,7 +16851,7 @@ await this.notifications
           `LINKED_ENTRY_REMAINDER_UNCERTAIN cycle=${cycle.id}: ${
             err instanceof Error ? err.message : String(err)
           }`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16796', true));
         this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${message}`);
         return false;
       }
@@ -16826,7 +16884,7 @@ await this.notifications
         const message =
           `EXIT_POSITION_READ_FAILED cycle=${cycle.id}: Bitfinex position is unknown; ` +
           `${err instanceof Error ? err.message : String(err)}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16829', true));
         this.logger.warn(`Market close ${userId} cycle=${cycle.id}: ${message}`);
         return false;
       }
@@ -16851,7 +16909,7 @@ await this.notifications
             `ALREADY_FLAT_RECONCILIATION_FAILED cycle=${cycle.id}: ${
               err instanceof Error ? err.message : String(err)
             }`,
-          ).catch(() => {});
+          ).catch(this.swallowedError('op@16854'));
           this.logger.warn(
             `Already-flat target verification ${userId} cycle=${cycle.id}: ${
               err instanceof Error ? err.message : String(err)
@@ -16937,7 +16995,7 @@ await this.notifications
           userId,
           agentId,
           `TERMINAL_CLOSE_CLAIM_REVALIDATION_FAILED cycle=${cycle.id}: protected position held`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16940', true));
         return false;
       }
 
@@ -16961,7 +17019,7 @@ await this.notifications
           userId,
           agentId,
           `EXIT_RECONCILIATION_FAILED cycle=${cycle.id}: ${msg}`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16964', true));
         await this.ensureProtectiveStopForVerifiedExitResidual(
           agentId,
           userId,
@@ -16972,7 +17030,7 @@ await this.notifications
           cycle.intentEnvelope as SignalIntentEnvelope,
           fillPrice || undefined,
           ownedStopOrderIds(meta),
-        ).catch(() => {});
+        ).catch(this.swallowedError('op@16975'));
         return false;
       }
       const exitPrice = await preparedExitPricePromise;
@@ -17544,11 +17602,11 @@ await this.notifications
             where: { id: claimParticipantId },
             data: { status: SignalCycleStatus.EXPIRED },
           })
-          .catch(() => {});
+          .catch(this.swallowedError('op@17547'));
       } else {
         await this.prisma.signalCycleParticipant
           .delete({ where: { id: claimParticipantId } })
-          .catch(() => {});
+          .catch(this.swallowedError('swallowedError@17551'));
       }
     };
 
@@ -17876,7 +17934,7 @@ await this.notifications
         ) {
           await this.prisma.signalCycleParticipant
             .delete({ where: { id: existing.id } })
-            .catch(() => {});
+            .catch(this.swallowedError('op@17879'));
           this.logger.log(
             `[INTENT-MIRROR] reclaimed stale INTENT claim ${instance.userId} cycle=${cycle.id}`,
           );
@@ -18159,7 +18217,7 @@ await this.notifications
       elapsedMs / 1000,
     )}s; evidence UNKNOWN, entries paused, no close.`;
     this.logger.error(alertMsg);
-    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(() => {});
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18162', true));
     await this.cycles.recordHireExecutionEvent(
       userId,
       agentId,
@@ -18343,7 +18401,7 @@ await this.notifications
       );
       if (!gone.gone) {
         const message = `SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id} kind=${stop.kind}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18346', true));
         return;
       }
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
@@ -18638,8 +18696,8 @@ await this.notifications
         this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${exchangeProtectedQty}`);
       } else {
         const message = `OPEN_STOP_REPAIR_UNKNOWN cycle=${cycle.id}: ${protectedStop.reason}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
-        await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18641', true));
+        await this.setInstanceLastError(userId, agentId, message).catch(this.swallowedError('setInstanceLastError@18642'));
       }
     } else if (meta.stopOrderId && fillPrice > 0) {
       const armed = await this.prisma.signalCycleEvent.count({
@@ -18836,8 +18894,8 @@ await this.notifications
               // stop. Keep both reduce-only orders and pause; a restart can
               // recover the request without resubmitting or losing protection.
               const message = `PROFIT_LOCK_STOP_EVENT_PERSIST_UNKNOWN cycle=${cycle.id} stop=${newStopId}`;
-              await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
-              await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+              await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18839', true));
+              await this.setInstanceLastError(userId, agentId, message).catch(this.swallowedError('setInstanceLastError@18840'));
               throw persistError;
             }
             if (supersededStopOrderId != null) {
@@ -18850,8 +18908,8 @@ await this.notifications
                 supersededStopOrderId = undefined;
               } else {
                 const message = `PROFIT_LOCK_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}; old=${supersededStopOrderId} new=${newStopId}`;
-                await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
-                await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+                await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18853', true));
+                await this.setInstanceLastError(userId, agentId, message).catch(this.swallowedError('setInstanceLastError@18854'));
               }
             }
             // Option A — update tracked state (per-account via participantId key).
@@ -18993,14 +19051,14 @@ await this.notifications
             userId,
             agentId,
             `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
-          ).catch(() => {});
+          ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18996', true));
           return true;
         }
         await this.pauseUserRelayForPositionMismatch(
           userId,
           agentId,
           `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycleId}: ${opts.reason} authority changed`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19003', true));
         return false;
         }
       } else {
@@ -19013,7 +19071,7 @@ await this.notifications
         `TERMINAL_CLOSE_CLAIM_PERSIST_FAILED cycle=${cycleId}: protected position held; ${
           err instanceof Error ? err.message : String(err)
         }`,
-      ).catch(() => {});
+      ).catch(this.swallowedError('op@19016'));
       return false;
     }
 
@@ -19070,7 +19128,7 @@ await this.notifications
         `EXIT_RECONCILIATION_FAILED cycle=${cycleId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
-      ).catch(() => {});
+      ).catch(this.swallowedError('op@19073'));
       const cycleRecord = await this.prisma.signalCycle.findUnique({
         where: { id: cycleId },
         select: { intentEnvelope: true },
@@ -19086,7 +19144,7 @@ await this.notifications
           cycleRecord.intentEnvelope as SignalIntentEnvelope,
           opts.fillPrice,
           stopIdsToCancel,
-        ).catch(() => {});
+        ).catch(this.swallowedError('op@19089'));
       }
       return false;
     }
@@ -19491,7 +19549,7 @@ await this.notifications
             `cannot prove the managed order is gone; ${
               err instanceof Error ? err.message : String(err)
             }`;
-          await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+          await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19494', true));
           this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
           break;
         }
@@ -19534,7 +19592,7 @@ await this.notifications
           userId,
           agentId,
           `IMMEDIATE_FLAT_CANCEL_FAILED cycle=${row.cycleId}; managed order remains live.`,
-        ).catch(() => {});
+        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19537', true));
         safeToContinue = false;
         continue;
       }
@@ -19548,7 +19606,7 @@ await this.notifications
         const message =
           `IMMEDIATE_FLAT_POST_CANCEL_POSITION_READ_FAILED cycle=${row.cycleId}: ` +
           `cannot reconfirm Bitfinex flat; ${err instanceof Error ? err.message : String(err)}`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19551', true));
         this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
         safeToContinue = false;
         continue;
@@ -19557,7 +19615,7 @@ await this.notifications
         const message =
           `IMMEDIATE_FLAT_CANCEL_RACE_FILL cycle=${row.cycleId}: Bitfinex position changed to ` +
           `${postCancelPosition.amount.toFixed(8)} BTC; EXIT deferred for fill reconciliation.`;
-        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19560', true));
         this.logger.warn(`[IMMEDIATE-FLAT] ${message}`);
         safeToContinue = false;
         continue;
@@ -21554,7 +21612,7 @@ await this.notifications
         venue: 'bitfinex', source: 'hire', event: 'OPS_ORPHAN_REDUCE_ONLY_STOP_CANCELLED',
         cancelledStopOrderId: orderId, gone: gone.gone, reason: reason.slice(0, 120),
         participant_id: owner.participantId,
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@21557'));
       this.logger.warn(`[OPS] orphan reduce-only stop ${orderId} cancel user=${userId} gone=${gone.gone} reason=${reason}`);
       return { ok: gone.gone, cancelled: gone.gone, reason: gone.gone ? 'CANCELLED' : (gone.reason ?? 'CANCEL_UNCONFIRMED'), order_id: orderId };
     } finally {
@@ -21903,7 +21961,7 @@ await this.notifications
         direction,
         pendingCandidates: pendingRows.length,
         at: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@21906'));
       return 0;
     }
 
@@ -21943,7 +22001,7 @@ await this.notifications
         direction,
         fillPrice: mergedBasePrice,
         at: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@21946'));
       return 0;
     }
 
@@ -21972,7 +22030,7 @@ await this.notifications
         direction,
         fillPrice: mergedBasePrice,
         at: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@21975'));
       return 0;
     }
 
@@ -22026,7 +22084,7 @@ await this.notifications
             duplicate_participant_id: duplicate.participantId,
           },
         )
-        .catch(() => {});
+        .catch(this.swallowedError('op@22029'));
       await this.persistReconcileAdoptAudit(instance.id, {
         kind: 'REFUSED_DUPLICATE',
         scenario: 'S6b',
@@ -22035,7 +22093,7 @@ await this.notifications
         duplicateParticipantId: duplicate.participantId,
         duplicateCycleId: duplicate.cycleId,
         at: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@22038'));
       return 0;
     }
 
@@ -22218,7 +22276,7 @@ await this.notifications
       stopPrice: conservativeStop,
       stopReason,
       at: new Date().toISOString(),
-    }).catch(() => {});
+    }).catch(this.swallowedError('op@22221'));
 
     // Vigilance / Cure 1 extension — S6b adopts a real Bitfinex orphan slice,
     // but synthesizeAdoptedCycle stamps the new cycle's tradeId as
@@ -22355,7 +22413,7 @@ await this.notifications
           direction,
           limitPrice,
           at: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch(this.swallowedError('op@22358'));
         continue;
       }
 
@@ -22385,7 +22443,7 @@ await this.notifications
           direction,
           limitPrice,
           at: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch(this.swallowedError('op@22388'));
         continue;
       }
 
@@ -22422,7 +22480,7 @@ await this.notifications
               duplicate_participant_id: duplicate.participantId,
             },
           )
-          .catch(() => {});
+          .catch(this.swallowedError('op@22425'));
         await this.persistReconcileAdoptAudit(instance.id, {
           kind: 'REFUSED_DUPLICATE',
           scenario: 'S6a',
@@ -22432,7 +22490,7 @@ await this.notifications
           duplicateParticipantId: duplicate.participantId,
           duplicateCycleId: duplicate.cycleId,
           at: new Date().toISOString(),
-        }).catch(() => {});
+        }).catch(this.swallowedError('op@22435'));
         continue;
       }
 
@@ -22503,7 +22561,7 @@ await this.notifications
           budget_remaining: budgetRemaining - 1,
           source: 'hire',
         })
-        .catch(() => {});
+        .catch(this.swallowedError('op@22506'));
 
       await this.persistReconcileAdoptAudit(instance.id, {
         kind: 'ADOPTED_ORDER',
@@ -22518,7 +22576,7 @@ await this.notifications
         qty,
         limitPrice,
         at: new Date().toISOString(),
-      }).catch(() => {});
+      }).catch(this.swallowedError('op@22521'));
 
       budgetRemaining -= 1;
       this.logger.warn(
