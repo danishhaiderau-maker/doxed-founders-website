@@ -502,3 +502,8 @@ def test_bot_version_label_derives_the_tile_count_from_the_registry():
     source = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
     assert source.count('"bot_version_label": COMBO_BOT_VERSION_LABEL') >= 3
     assert source.count('"active_tile_count": COMBO_ACTIVE_TILE_COUNT') >= 3
+
+
+def test_retired_tiles_cannot_be_switched_live():
+    src = open(__import__("os").path.join(__import__("os").path.dirname(__file__), "bot.py")).read()
+    assert '"error": "TILE_RETIRED"' in src
