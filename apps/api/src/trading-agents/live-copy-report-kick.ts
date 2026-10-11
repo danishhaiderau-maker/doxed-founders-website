@@ -8,7 +8,7 @@ export function setLiveCopyReportKickListener(fn: (() => void) | null): void {
 }
 
 /** Schedule reporter runs shortly after an execution event is being written. */
-export function kickLiveCopyReporter(delaysMs: number[] = [300, 1200]): number {
+export function kickLiveCopyReporter(delaysMs: number[] = [300, 1200, 3000]): number {
   if (!listener || pending.length) return 0;
   pending = delaysMs.map((d) => setTimeout(() => {
     try { listener?.(); } catch { /* best effort */ }

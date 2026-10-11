@@ -15,7 +15,8 @@ test('approved live copies never trail the exchange stop (mirror-only exits)', (
 test('exchange mirror refreshes even during a money tick once older than max age', () => {
   const base = { destroyed: false, mirrorRunning: false, moneyTickRunning: true, nowMs: 1_000_000 };
   assert.equal(exchangeMirrorMayRun({ ...base, lastMirrorAtMs: base.nowMs - 5_000 }), false);
-  assert.equal(exchangeMirrorMayRun({ ...base, lastMirrorAtMs: base.nowMs - EXCHANGE_MIRROR_MAX_AGE_MS }), true);
+  // LIVE-FIX-0741: never mid-tick, even when stale (stop placement latency).
+  assert.equal(exchangeMirrorMayRun({ ...base, lastMirrorAtMs: base.nowMs - EXCHANGE_MIRROR_MAX_AGE_MS }), false);
   assert.equal(exchangeMirrorMayRun({ ...base, moneyTickRunning: false, lastMirrorAtMs: base.nowMs }), true);
   assert.equal(exchangeMirrorMayRun({ ...base, mirrorRunning: true, lastMirrorAtMs: 0 }), false);
   assert.ok(EXCHANGE_MIRROR_MAX_AGE_MS <= 60_000);
@@ -38,4 +39,11 @@ test('reporter kick runs the listener promptly and debounces', async () => {
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(n, 2);
   setLiveCopyReportKickListener(null);
+});
+
+import { exchangeMirrorDueAfterTick } from './signal-subscriber-execution.service';
+test('stale mirror runs right after a tick, not when a wake is queued', () => {
+  assert.equal(exchangeMirrorDueAfterTick({ wakeQueued: false, lastMirrorAtMs: 0, nowMs: 100_000 }), true);
+  assert.equal(exchangeMirrorDueAfterTick({ wakeQueued: true, lastMirrorAtMs: 0, nowMs: 100_000 }), false);
+  assert.equal(exchangeMirrorDueAfterTick({ wakeQueued: false, lastMirrorAtMs: 90_000, nowMs: 100_000 }), false);
 });
