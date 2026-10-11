@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import math
 import re
+import os
+import threading
 import time
 
 from research_v3_contract import COLLECTOR_VERSION
@@ -1340,57 +1342,51 @@ def reconcile_overdue_expected_order_decisions(
     """Close durable pre-order expectations lost by a runtime interruption."""
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
 
-    def rows(name: str) -> Iterator[dict[str, Any]]:
-        """Stream one validated JSONL row at a time.
-
-        These ledgers contain rich evidence payloads and can be hundreds of
-        megabytes even when they contain relatively few identities.  Startup
-        reconciliation needs only identity keys from order/lifecycle rows, so
-        materializing every decoded object can exceed the Fly machine's RSS
-        limit before the dashboard finishes bootstrapping.
-        """
-        path = store.ledger_path(name)
-        if not path.exists():
-            return
-        with path.open("r", encoding="utf-8") as handle:
-            for line_no, line in enumerate(handle, 1):
-                if not line.endswith("\n"):
-                    raise ValueError(f"TRUNCATED_JSONL_LINE:{name}:{line_no}")
-                yield json.loads(line)
-
     def key(row: Mapping[str, Any]) -> tuple[str, str, str]:
         return (str(row.get("episode_id") or ""), str(row.get("policy_signature") or ""),
                 str(row.get("research_lane") or "").upper())
 
-    intent_keys = {key(row) for row in rows("order_intent")
-                   if str(row.get("epoch_id") or "") == str(epoch_id)}
-    terminal_keys = {key(row) for row in rows("lifecycle")
-                     if str(row.get("epoch_id") or "") == str(epoch_id)
-                     and row.get("resolution_scope") == "LANE_ENTRY"
-                     and str(row.get("entry_resolution") or "").upper()
-                     in {"ORDER_SUBMITTED", "NO_ORDER"}}
+    # CPU (11 Oct 2026): this pass ran every ~30 s on the position-manager
+    # thread and json-decoded the WHOLE order_intent (3.1 GB), lifecycle and
+    # decision ledgers each time -- py-spy: 66% of process CPU, saturating the
+    # GIL and inflating trade_lock waits.  The ledgers are append-only, so an
+    # incremental per-file index decodes each row once per process.
+    epoch = str(epoch_id)
+    index = _overdue_reconcile_index(store, epoch, key)
+    intent_keys = index["order_intent"]["keys"]
+    terminal_keys = set(index["lifecycle"]["keys"])
     active_keys = {key(row) for row in active_rows if all(key(row))}
     now_ts = float(observed_ts if observed_ts is not None else time.time())
     result = {"expected": 0, "reconciled": 0, "duplicates": 0,
               "deferred": 0, "blocked": 0, "unwritten": 0,
               "not_overdue": 0, "resolved_or_active": 0}
-    for decision in rows("decision"):
-        if (
-            str(decision.get("epoch_id") or "") != str(epoch_id)
-            or decision.get("order_intent_expected") is not True
-        ):
-            continue
-        result["expected"] += 1
+    decision_path = store.ledger_path("decision")
+    candidates = index["decision"]["candidates"]
+
+    def overdue_decisions() -> Iterator[dict[str, Any]]:
+        handle = None
+        try:
+            for identity, deadline, offset in candidates:
+                result["expected"] += 1
+                if not all(identity):
+                    continue
+                if identity in intent_keys or identity in terminal_keys or identity in active_keys:
+                    result["resolved_or_active"] += 1
+                    continue
+                if deadline > now_ts:
+                    result["not_overdue"] += 1
+                    continue
+                if handle is None:
+                    handle = decision_path.open("rb")
+                handle.seek(offset)
+                yield json.loads(handle.readline())
+        finally:
+            if handle is not None:
+                handle.close()
+
+    for decision in overdue_decisions():
         identity = key(decision)
-        if not all(identity):
-            continue
-        if identity in intent_keys or identity in terminal_keys or identity in active_keys:
-            result["resolved_or_active"] += 1
-            continue
         deadline = float(decision.get("resolution_deadline_ts") or 0)
-        if deadline > now_ts:
-            result["not_overdue"] += 1
-            continue
         episode_id, policy_signature, lane = identity
         row = {
             # Distinct from the hot-path NO_ORDER id: an interrupted hot-path
@@ -1481,6 +1477,68 @@ def _reconcile_record_id(store, episode_id: str, policy_signature: str, lane: st
         rev = re.sub(r"[^0-9A-Za-z]", "", str(identity.get("deployed_revision") or ""))[:12]
         return f"{base}:{rev or 'rev'}"
     return base
+
+
+_OVERDUE_INDEX_LOCK = threading.Lock()
+_OVERDUE_INDEX_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+
+def _overdue_reconcile_index(store, epoch: str, key) -> dict[str, dict[str, Any]]:
+    """Incrementally index the append-only ledgers the reconciler needs.
+
+    Per (ledger file, epoch) it remembers the byte offset already consumed and
+    only decodes rows appended since.  A replaced/rotated or shrunk file
+    (inode change or size < offset) is rescanned from zero.  A trailing line
+    without a newline still fails closed (TRUNCATED_JSONL_LINE) and the offset
+    is not advanced, exactly like the old full scan.
+    """
+    def lifecycle_terminal(row):
+        return (row.get("resolution_scope") == "LANE_ENTRY"
+                and str(row.get("entry_resolution") or "").upper()
+                in {"ORDER_SUBMITTED", "NO_ORDER"})
+
+    out: dict[str, dict[str, Any]] = {}
+    with _OVERDUE_INDEX_LOCK:
+        for name in ("order_intent", "lifecycle", "decision"):
+            path = store.ledger_path(name)
+            cache_key = (str(path), name, epoch)
+            try:
+                st = os.stat(path)
+            except FileNotFoundError:
+                _OVERDUE_INDEX_CACHE.pop(cache_key, None)
+                out[name] = {"keys": set(), "candidates": []}
+                continue
+            state = _OVERDUE_INDEX_CACHE.get(cache_key)
+            if (state is None or state["ino"] != (st.st_dev, st.st_ino)
+                    or st.st_size < state["offset"]):
+                state = {"ino": (st.st_dev, st.st_ino), "offset": 0, "line_no": 0,
+                         "keys": set(), "candidates": []}
+            keys = set(state["keys"])
+            candidates = list(state["candidates"])
+            offset, line_no = state["offset"], state["line_no"]
+            with open(path, "rb") as handle:
+                handle.seek(offset)
+                for raw in handle:
+                    line_no += 1
+                    if not raw.endswith(b"\n"):
+                        raise ValueError(f"TRUNCATED_JSONL_LINE:{name}:{line_no}")
+                    row = json.loads(raw)
+                    if str(row.get("epoch_id") or "") == epoch:
+                        if name == "order_intent":
+                            keys.add(key(row))
+                        elif name == "lifecycle":
+                            if lifecycle_terminal(row):
+                                keys.add(key(row))
+                        elif row.get("order_intent_expected") is True:
+                            candidates.append((key(row),
+                                               float(row.get("resolution_deadline_ts") or 0),
+                                               offset))
+                    offset += len(raw)
+            state = {"ino": state["ino"], "offset": offset, "line_no": line_no,
+                     "keys": keys, "candidates": candidates}
+            _OVERDUE_INDEX_CACHE[cache_key] = state
+            out[name] = state
+    return out
 
 
 def _committed_receipt_bytes_durable(store, ledger: str, record_id: str) -> bool:
