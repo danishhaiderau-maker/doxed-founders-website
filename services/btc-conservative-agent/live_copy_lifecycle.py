@@ -100,6 +100,8 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
             "sim_active": a.get("sim_active"),
             "executor_status": a.get("executor_status"),
             "executor_healthy": a.get("executor_healthy"),
+            # Why the Railway executor's last pass stopped (#554 heartbeat).
+            "executor_last_pass_exit_stage": a.get("executor_last_pass_exit_stage"),
             "armed": bool(a.get("armed")),
             "paused": str(a.get("status") or "").upper() == "PAUSED",
             "paused_reason": (tr.get("reason") if str(a.get("status") or "").upper() == "PAUSED" else None),
