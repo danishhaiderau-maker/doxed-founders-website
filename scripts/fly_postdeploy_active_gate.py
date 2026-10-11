@@ -271,9 +271,18 @@ def _request(path: str, token: str, payload=None, timeout: int = 30) -> dict:
         return json.load(response)
 
 
-def _retrying(fn, attempts: int = 6):
+TRANSIENT_BUDGET_SEC = 300.0
+
+
+def _retrying(fn, attempts: int = 60, budget_sec: float | None = None):
+    # LIVE-FIX-0702: Fly answers 503 for minutes while a fresh machine warms up
+    # after resume; 6 attempts (~30 s) falsely failed run 38168912805. Retry
+    # transient errors for up to TRANSIENT_BUDGET_SEC; real errors still raise.
     last = None
+    deadline = time.monotonic() + (TRANSIENT_BUDGET_SEC if budget_sec is None else budget_sec)
     for attempt in range(1, attempts + 1):
+        if attempt > 1 and time.monotonic() >= deadline:
+            break
         try:
             return fn()
         except urllib.error.HTTPError as exc:

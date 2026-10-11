@@ -460,6 +460,16 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
     exchange = exchange_view(web)
     clock = clock_view(web, now)
     al = alerts(arming=arming, intents=intents, exchange=exchange, clock=clock, now=now)
+    # LIVE-FIX-0702: executor silence (no report and no capability heartbeat
+    # for 5 min) while output is ON is RED.
+    try:
+        import live_copy_monitor_api as _lcma
+        fr = _lcma.executor_freshness(ctx, now)
+        if fr.get("stale") and (arming.get("sources") or {}).get("fly_live_copy_output"):
+            al.append({"code": "EXECUTOR_REPORT_STALE", "severity": RED,
+                       "age_s": fr.get("newest_executor_signal_age_s")})
+    except Exception:  # noqa: BLE001 - freshness is advisory
+        pass
     # LIVE-FIX-0500: operator-resolved correlation ids (root-caused + fixed)
     # drop out of the live alert set; they stay visible under resolved_alerts.
     resolved = ctx.get("resolved_alerts") or {}
