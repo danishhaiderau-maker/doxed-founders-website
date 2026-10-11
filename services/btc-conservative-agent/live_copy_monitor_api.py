@@ -466,3 +466,40 @@ def live_deploy_guard():  # R13
     return _ok({"route": "R13", "armed": bool(out.get("enabled")), "flat": not open_live,
                 "open_live_orders": len(resting), "all_positions_protected": not unprotected,
                 "deploy_allowed": not reasons, "blocking_reasons": reasons})
+
+
+_LIVE_FLAGS_CACHE: dict = {"ts": 0.0, "payload": None}
+
+
+def live_flags_snapshot(max_age_s: float = 5.0) -> dict:
+    """Live flags for /api/state from the same effective_live source as /api/monitor/live/* (never empty)."""
+    now = time.time()
+    cached = _LIVE_FLAGS_CACHE.get("payload")
+    if cached is not None and now - float(_LIVE_FLAGS_CACHE.get("ts") or 0) <= max_age_s:
+        return cached
+    out = {"schema": "api_state_live_flags_v1", "computed_at_ts": now, "effective_live": None,
+           "source": "live_copy_lifecycle.arming"}
+    try:
+        provider = _CTX.get("provider")
+        ctx = provider() if provider is not None else None
+        if not isinstance(ctx, dict):
+            out["error"] = "MONITOR_NOT_WIRED"
+        else:
+            arming = (lcl.build(ctx, now=now) or {}).get("arming") or {}
+            output = ctx.get("output") or {}
+            out.update({
+                "effective_live": bool(arming.get("effective_live")),
+                "blockers": arming.get("blockers") or [],
+                "mismatches": arming.get("mismatches") or [],
+                "verdict": arming.get("verdict"),
+                "output_enabled": bool(output.get("enabled")) if isinstance(output, dict) else None,
+                "force_paper_mode": bool(ctx.get("force_paper_mode")),
+                "tiles_live_on": sorted(str(r.get("lane")) for r in ctx.get("switch_rows") or []
+                                        if isinstance(r, dict) and (r.get("bitfinex_live_orders") or r.get("live_eligible"))),
+                "accounts": (arming.get("sources") or {}).get("website_accounts"),
+            })
+    except Exception as exc:  # noqa: BLE001 - report, never fabricate
+        out["error"] = type(exc).__name__
+        out["effective_live"] = False
+    _LIVE_FLAGS_CACHE.update({"ts": now, "payload": out})
+    return out

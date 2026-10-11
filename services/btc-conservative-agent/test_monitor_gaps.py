@@ -222,3 +222,15 @@ def test_protective_levels_never_none():
     i = src.index("def _protective_exit_levels_ex(pos: dict):")
     body = src[i:src.index("def _protective_exit_levels(pos: dict):")]
     assert "return None" not in body and "FALLBACK" in body
+
+
+def test_live_flags_snapshot_never_empty():
+    import live_copy_monitor_api as api
+    api._LIVE_FLAGS_CACHE.update({"ts": 0.0, "payload": None})
+    saved = dict(api._CTX)
+    try:
+        api._CTX.clear()
+        out = api.live_flags_snapshot()
+        assert "effective_live" in out and out.get("error") == "MONITOR_NOT_WIRED"
+    finally:
+        api._CTX.clear(); api._CTX.update(saved)
