@@ -41,7 +41,7 @@ LONG, SHORT = "LONG", "SHORT"
 # Strategist DEEP-SEARCH-TILES-20261011: reported net charges the measured 2.8 bp taker round trip.
 TAKER_COST_BP = 2.8
 DELAY_BUCKETS = (("le_2s", 0.0, 2.0), ("2_to_5s", 2.0, 5.0))
-SIDE_TAGS = {LONG: "LONG_CONFIRMED_BY_DEEP_SEARCH", SHORT: "SHORT_REFUTED_AT_REAL_LATENCY"}
+SIDE_TAGS = {LONG: "LONG_CONFIRMED_BY_DEEP_SEARCH", SHORT: "SHORT_SHADOW_ONLY_NOT_TRADED"}
 
 
 def _f(value) -> Optional[float]:
@@ -65,9 +65,9 @@ class DislocRule:
         d = entry["disloc"]
         self.venues = tuple(entry.get("leader_venues") or ("binance", "bybit"))
         self.long_prem_max = float(d["long_prem_max_bp"])
-        self.long_d5_max = float(d["long_prem_d5_max_bp"])
-        self.short_prem_min = float(d["short_prem_min_bp"])
-        self.short_d5_min = float(d["short_prem_d5_min_bp"])
+        self.long_d5_max = _num(d.get("long_prem_d5_max_bp"))
+        self.short_prem_min = float(d.get("short_prem_min_bp", 1e9))
+        self.short_d5_min = float(d.get("short_prem_d5_min_bp", 1e9))
         self.d5_lag_sec = int(d["prem_d5_lag_sec"])
         self.ttl_sec = float(d["order_ttl_sec"])
         self.hold_sec = float(exit_policy["max_duration_sec"])
@@ -75,15 +75,48 @@ class DislocRule:
         self.max_venue_age = float(entry.get("max_venue_age_sec", 2.0))
         self.max_bbo_age = float(entry.get("max_bbo_age_sec", 2.0))
         self.ffill_sec = int(entry.get("max_fill_forward_sec", 5))
+        self.long_only = bool(d.get("long_only", False))
+        # Tile 14 DISLOC-FOI (Strategist C3): derivatives conditions, (lo, hi] bounds; None = open.
+        foi = d.get("foi") or {}
+        self.fund_lo = _num(foi.get("fund_lo_bp"))
+        self.fund_hi = _num(foi.get("fund_hi_bp"))
+        self.oi_d60_max = _num(foi.get("oi_d60_max_bp"))
+        self.oi_lag_min = int(foi.get("oi_lag_min", 60)) if foi else 0
+        self.fund_venues = tuple(foi.get("fund_venues") or ())
+        self.oi_venues = tuple(foi.get("oi_venues") or ())
+        self.one_signal_per_minute = bool(d.get("one_signal_per_minute", False))
+        self.uses_derivatives = bool(foi)
+        # Strategist final spec 21:06: market (taker) entry at the real ask after the measured delay,
+        # no gap-closed exit, short side shadow-logged only.
+        self.entry_mode = str(d.get("entry_mode") or "MAKER_AT_TOUCH")
+        self.gap_closed_exit = bool(d.get("gap_closed_exit", True))
+        self.short_shadow_only = bool(d.get("short_shadow_only", False))
 
-    def side(self, prem, d5) -> Optional[str]:
-        if prem is None or d5 is None:
+    def side(self, prem, d5, fund=None, oi_d60=None) -> Optional[str]:
+        if prem is None:
             return None
-        if prem <= self.long_prem_max and d5 <= self.long_d5_max:
+        if self.uses_derivatives:
+            if fund is None or oi_d60 is None:
+                return None
+            if self.fund_lo is not None and not fund > self.fund_lo:
+                return None
+            if self.fund_hi is not None and not fund <= self.fund_hi:
+                return None
+            if self.oi_d60_max is not None and not oi_d60 <= self.oi_d60_max:
+                return None
+        if self.long_d5_max is not None and d5 is None:
+            return None
+        if prem <= self.long_prem_max and (self.long_d5_max is None or d5 <= self.long_d5_max):
             return LONG
+        if self.long_only or d5 is None:
+            return None
         if prem > self.short_prem_min and d5 > self.short_d5_min:
             return SHORT
         return None
+
+    def shadow_short(self, prem, d5) -> bool:
+        return (self.short_shadow_only and prem is not None and d5 is not None
+                and prem > self.short_prem_min and d5 > self.short_d5_min)
 
     def gap_closed(self, side: str, prem) -> bool:
         if prem is None:
@@ -122,6 +155,9 @@ def cluster_ci(rows: list, key: str = "net_bp_taker_2p8", n_boot: int = 2000, se
         flat = [x for g in pick for x in g]
         means.append(sum(flat) / len(flat))
     return [_pct(means, 0.05), _pct(means, 0.95)]
+
+
+FOI_TRADES_FILE = "disloc_foi_trades.jsonl"
 
 
 def load_rows(path: str = TRADES_FILE) -> list:
@@ -173,9 +209,30 @@ def summarize(rows: Iterable[Mapping[str, Any]], pre: Mapping[str, Any] | None =
         peak = max(peak, eq)
         dd = max(dd, peak - eq)
     pre = dict(pre or {})
+    score_cap = _num(pre.get("score_max_signal_to_fill_s"))
+    all_closed = closed
+    if score_cap is not None:
+        closed = [r for r in closed if float(r.get("signal_to_fill_s") or 0) <= score_cap]
+        n = len(closed)
+        m = mean("net_bp_taker_2p8", closed)
+        ci = cluster_ci(closed)
+        eq, peak, dd = 0.0, 0.0, 0.0
+        for r in sorted(closed, key=lambda x: float(x.get("exit_ts") or 0)):
+            eq += float(r.get("net_bp_taker_2p8") or 0)
+            peak = max(peak, eq)
+            dd = max(dd, peak - eq)
+    first = sorted(all_closed, key=lambda x: float(x.get("fill_ts") or 0))[:60]
+    first_p50 = _pct([float(r.get("signal_to_fill_s") or 0) for r in first], .5)
     kill_n, kill_mean = int(pre.get("kill_at_trades", 150)), float(pre.get("kill_mean_below_bp", 0.5))
     prom_n, prom_mean = int(pre.get("promote_min_trades", 250)), float(pre.get("promote_mean_min_bp", 2.0))
-    if n >= prom_n and m is not None and m >= prom_mean and ci and ci[0] > 0:
+    early_n, early_mean = pre.get("early_kill_at_trades"), pre.get("early_kill_mean_at_or_below_bp")
+    uncap = _num(pre.get("uncapturable_p50_delay_above_s"))
+    if uncap is not None and len(first) >= 60 and first_p50 is not None and first_p50 > uncap:
+        verdict = "RETIRE_UNCAPTURABLE"
+    elif (early_n is not None and n >= int(early_n) and m is not None and m <= float(early_mean)
+          and n < kill_n):
+        verdict = "KILL_EARLY"
+    elif n >= prom_n and m is not None and m >= prom_mean and ci and ci[0] > 0:
         verdict = "PROMOTE_CANDIDATE"
     elif n >= kill_n and m is not None and m < kill_mean:
         verdict = "KILL"
@@ -207,21 +264,27 @@ def summarize(rows: Iterable[Mapping[str, Any]], pre: Mapping[str, Any] | None =
     return {
         "orders": len(orders), "fills": n + sum(1 for r in orders if r.get("event") == "DISLOC_ABANDONED"
                                                 and r.get("fill_ts")),
-        "closed_trades": n, "cancelled": len(cancelled), "cancel_reasons": reasons,
+        "closed_trades": len(all_closed), "scored_trades": n,
+        "scoring": (f"only fills with signal->fill <= {score_cap:g} s are scored" if score_cap is not None
+                    else "all closed trades scored"),
+        "first60_signal_to_fill_p50_s": first_p50, "cancelled": len(cancelled), "cancel_reasons": reasons,
         "abandoned": sum(1 for r in orders if r.get("event") == "DISLOC_ABANDONED"),
-        "fill_rate": round(n / len(orders), 4) if orders else None,
+        "fill_rate": round(len(all_closed) / len(orders), 4) if orders else None,
         "cancel_rate": round(len(cancelled) / len(orders), 4) if orders else None,
         "exit_reasons": exits,
         "delay_sec": {"signal_to_order": delays("signal_to_order_s"),
                       "order_to_fill": delays("order_to_fill_s"),
                       "signal_to_fill": delays("signal_to_fill_s")},
         "net_basis": f"fill-mid -> exit-mid minus {TAKER_COST_BP} bp taker round trip",
-        "mean_net_bp_taker_2p8": m, "mean_bp_vs_touch": mean("pnl_bp_vs_touch"),
-        "mean_bp_vs_mid": mean("pnl_bp_vs_mid"),
-        "mean_gap_at_entry_bp": mean("prem_at_fill_bp"), "mean_gap_at_exit_bp": mean("prem_at_exit_bp"),
+        "mean_net_bp_taker_2p8": m, "mean_bp_vs_touch": mean("pnl_bp_vs_touch", closed),
+        "mean_bp_vs_mid": mean("pnl_bp_vs_mid", closed),
+        "mean_gap_at_entry_bp": mean("prem_at_fill_bp", closed), "mean_gap_at_exit_bp": mean("prem_at_exit_bp", closed),
         "ci90_1h_cluster_net": ci, "max_drawdown_bp": round(dd, 3), "cum_bp_vs_touch": round(eq, 3),
         "by_side": by_side, "by_fill_delay": by_delay,
-        "pre_registered": {"kill": f"at {kill_n} trades if mean net (2.8 bp taker cost) < +{kill_mean:g} bp",
+        "pre_registered": {"kill": (f"at {kill_n} trades if mean net (2.8 bp taker cost) < +{kill_mean:g} bp"
+                                    + (f"; at {early_n} if mean <= {early_mean:g} bp" if early_n else "")
+                                    + (f"; retire UNCAPTURABLE if first-60 p50 signal->fill > {uncap:g} s"
+                                       if uncap is not None else "")),
                            "promote": f"at >= {prom_n} trades with mean >= +{prom_mean:g} bp and 1h-cluster CI > 0",
                            "verdict": verdict},
     }
@@ -238,8 +301,12 @@ class DislocEngine:
     TRIGGER_FEATURE_FIELDS = ()
 
     def __init__(self, rule: DislocRule, *, policy_id: str = "", policy_signature: str = "",
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, lane: str = "", variant: str = "base",
+                 id_prefix: str = "dsl") -> None:
         self.rule = rule
+        self.lane = lane or LANE_REF[0]
+        self.variant = variant
+        self.ID_PREFIX = id_prefix
         self.policy_id, self.policy_signature = policy_id, policy_signature
         self.clock = clock
         self.enabled_fn: Callable[[], bool] = lambda: False
@@ -312,14 +379,36 @@ class DislocEngine:
                 del self._prem[k]
         then = self._prem.get(anchor - self.rule.d5_lag_sec)
         d5 = None if prem is None or then is None else prem - then
+        if self.rule.uses_derivatives:
+            out.update(self._derivs(now, live))
         out.update(prem_bp=None if prem is None else round(prem, 4),
                    prem_d5_bp=None if d5 is None else round(d5, 4),
                    bfx_mid=bfx, leader_mid=leader)
         return out
 
+    def _derivs(self, now, live) -> dict:
+        """fund = mean venue funding_rate * 1e4; oi_d60 = (sum OI / sum OI 60 min ago - 1) * 1e4 (build.py)."""
+        der = ((live or {}).get("derivatives") or {}) if isinstance(live, Mapping) else {}
+        funds = [_num((der.get(v) or {}).get("funding_rate")) for v in self.rule.fund_venues]
+        funds = [f for f in funds if f is not None]
+        fund = sum(funds) / len(funds) * 1e4 if funds else None
+        ois = [_num((der.get(v) or {}).get("open_interest")) for v in self.rule.oi_venues]
+        oi = sum(ois) if ois and all(o is not None and o > 0 for o in ois) else None
+        minute = int(now // 60)
+        hist = self.__dict__.setdefault("_oi_hist", {})
+        if oi is not None:
+            hist[minute] = oi
+        for k in [k for k in hist if k < minute - self.rule.oi_lag_min - 5]:
+            del hist[k]
+        then = hist.get(minute - self.rule.oi_lag_min)
+        oi_d60 = None if oi is None or then is None else (oi / then - 1.0) * 1e4
+        return {"fund_bp": None if fund is None else round(fund, 5),
+                "oi_d60_bp": None if oi_d60 is None else round(oi_d60, 4),
+                "oi_history_minutes": len(hist)}
+
     # ---- lifecycle ------------------------------------------------------
     def _emit(self, row: dict) -> None:
-        row = {"schema": SCHEMA, "research_lane": LANE_REF[0], "policy_id": self.policy_id,
+        row = {"schema": SCHEMA, "research_lane": self.lane, "variant": self.variant, "policy_id": self.policy_id,
                "policy_signature": self.policy_signature, **row}
         try:
             self.append_fn(row)
@@ -374,17 +463,24 @@ class DislocEngine:
         """XVL evaluator protocol: returns (evaluation, None, []); DISLOC never hands a trigger to the pipeline."""
         self.counters["ticks"] += 1
         feat = self._features(now, live, bfx_quotes, bfx_bbo_ts)
-        side = None if feat["stale_reasons"] else self.rule.side(feat.get("prem_bp"), feat.get("prem_d5_bp"))
+        side = None if feat["stale_reasons"] else self.rule.side(
+            feat.get("prem_bp"), feat.get("prem_d5_bp"), feat.get("fund_bp"), feat.get("oi_d60_bp"))
         rising = side is not None and side != self._prev_side
         self._prev_side = side
+        if rising and self.rule.one_signal_per_minute:
+            minute = int(now // 60)
+            if getattr(self, "_last_signal_minute", None) == minute:
+                rising = False
+            else:
+                self._last_signal_minute = minute
         feat["side"] = side
-        self.last_eval = {k: feat.get(k) for k in ("anchor_bucket_ts", "prem_bp", "prem_d5_bp", "side",
-                                                   "stale_reasons")}
+        self.last_eval = {k: feat.get(k) for k in ("anchor_bucket_ts", "prem_bp", "prem_d5_bp", "fund_bp",
+                                                   "oi_d60_bp", "oi_history_minutes", "side", "stale_reasons")}
         enabled = bool(self.enabled_fn())
         bid, ask, bbo_ts = self._touch()
         trades = list(self.trades_fn() or ()) if (self.order or self.position or rising) else []
         # 1. resting order: fill (trade-through up to now, within TTL) else cancel
-        if self.order:
+        if self.order and "limit_price" in self.order:
             o = self.order
             fill = self._fill_check(o, trades, min(now, o["order_ts"] + self.rule.ttl_sec))
             if fill:
@@ -409,7 +505,7 @@ class DislocEngine:
             stopped = (bid <= p["stop_px"]) if p["side"] == LONG else (ask >= p["stop_px"])
             if stopped:
                 self._close(now, "STOP", feat, bid, ask)
-            elif self.rule.gap_closed(p["side"], feat.get("prem_bp")):
+            elif self.rule.gap_closed_exit and self.rule.gap_closed(p["side"], feat.get("prem_bp")):
                 self._close(now, "GAP_CLOSED", feat, bid, ask)
             elif now - p["fill_ts"] >= self.rule.hold_sec:
                 self._close(now, "TIME_60S", feat, bid, ask)
@@ -428,6 +524,18 @@ class DislocEngine:
                 self._open(now, side, feat, bid, ask, bbo_ts)
         elif feat["stale_reasons"]:
             self.counters["skipped_stale"] += 1
+        # 4. short side: shadow log only (never traded)
+        sh = not feat["stale_reasons"] and self.rule.shadow_short(feat.get("prem_bp"), feat.get("prem_d5_bp"))
+        if sh and not getattr(self, "_prev_shadow_short", False):
+            minute = int(now // 60)
+            if getattr(self, "_shadow_minute", None) != minute and enabled:
+                self._shadow_minute = minute
+                self.counters["shadow_short_signals"] = self.counters.get("shadow_short_signals", 0) + 1
+                self._emit({"event": "DISLOC_SHADOW_SHORT_SIGNAL", "signal_ts": float(feat["anchor_bucket_ts"]) + 1.0,
+                            "evaluated_ts": now, "side": SHORT, "side_tag": "SHORT_SHADOW_ONLY_NOT_TRADED",
+                            "signal_bid": bid, "signal_ask": ask, "prem_at_signal_bp": feat.get("prem_bp"),
+                            "prem_d5_at_signal_bp": feat.get("prem_d5_bp")})
+        self._prev_shadow_short = bool(sh)
         return dict(self.last_eval, status=("TRIGGER" if rising else "BELOW")), None, []
 
     def _open(self, now, side, feat, bid, ask, bbo_ts) -> None:
@@ -444,10 +552,39 @@ class DislocEngine:
             "signal_bbo_age_s": round(now - bbo_ts, 3),
             "limit_price": bid if side == LONG else ask, "order_type": "POST_ONLY_LIMIT_AT_TOUCH",
             "prem_at_signal_bp": feat.get("prem_bp"), "prem_d5_at_signal_bp": feat.get("prem_d5_bp"),
+            "fund_at_signal_bp": feat.get("fund_bp"), "oi_d60_at_signal_bp": feat.get("oi_d60_bp"),
             "leader_mid": feat.get("leader_mid"), "bfx_mid_1s": feat.get("bfx_mid"),
         }
         self.counters["orders"] += 1
+        if self.rule.entry_mode == "TAKER_MARKET":
+            self.order["order_type"] = "MARKET_TAKER_AT_REAL_TOUCH_AFTER_DELAY"
+            self.order.pop("limit_price", None)
+            self._emit(dict(self.order))
+            self._taker_fill(feat)
+            return
         self._emit(dict(self.order))
+
+    def _taker_fill(self, feat) -> None:
+        """Book the market order at the real Bitfinex touch read after the measured processing delay."""
+        o = self.order
+        fbid, fask, fts = self._touch()
+        fill_ts = self.clock()
+        if not (fbid and fask) or fts is None or fill_ts - fts > self.rule.max_bbo_age:
+            self._cancel(fill_ts, "NO_FRESH_TOUCH_AT_FILL", feat)
+            return
+        px = fask if o["side"] == LONG else fbid
+        self.order = None
+        self.counters["fills"] += 1
+        stop = px * (1 - self.rule.stop_bp / 1e4) if o["side"] == LONG else px * (1 + self.rule.stop_bp / 1e4)
+        self.position = {**o, "event": "DISLOC_FILLED", "limit_price": px, "fill_price": px, "fill_ts": fill_ts,
+                         "fill_bbo_ts": fts, "order_to_fill_s": round(fill_ts - o["order_ts"], 3),
+                         "signal_to_fill_s": round(fill_ts - o["signal_ts"], 3),
+                         "fill_bid": fbid, "fill_ask": fask, "fill_mid": (fbid + fask) / 2.0,
+                         "slippage_vs_signal_touch_bp": round(
+                             ((px / (o["signal_ask"] if o["side"] == LONG else o["signal_bid"])) - 1.0) * 1e4
+                             * (1 if o["side"] == LONG else -1), 4),
+                         "prem_at_fill_bp": feat.get("prem_bp"), "stop_px": stop}
+        self._emit({k: v for k, v in self.position.items() if k != "stop_px"})
 
     def _cancel(self, now, reason, feat) -> None:
         o = self.order
@@ -464,7 +601,7 @@ class DislocEngine:
         self.order = self.position = None
 
     def snapshot(self) -> dict:
-        return {"schema": SCHEMA, "rule": self.rule.identity(), "counters": dict(self.counters),
+        return {"schema": SCHEMA, "variant": self.variant, "rule": self.rule.identity(), "counters": dict(self.counters),
                 "last_eval": dict(self.last_eval), "last_signal": self.last_signal,
                 "open_order": dict(self.order) if self.order else None,
                 "open_position": {k: v for k, v in self.position.items()} if self.position else None}

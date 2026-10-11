@@ -31883,8 +31883,9 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         enabled_fn=lambda: is_research_data_collection() and is_research_lane_enabled(lane),
         trades_fn=_disloc_recent_trades,
         touch_fn=_disloc_touch,
-        append_fn=lambda row: _safe_append_jsonl(_dsl.TRADES_FILE, row, label="DISLOC_PAPER",
-                                                 fallback_on_error=False),
+        append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
+                                  else _dsl.TRADES_FILE): _safe_append_jsonl(_f, row, label="DISLOC_PAPER",
+                                                                             fallback_on_error=False),
     )
 
 
@@ -45867,7 +45868,7 @@ def monitor_tiles_trades():
 
 @app.route('/api/monitor/tiles/disloc', methods=["GET"])
 def monitor_tiles_disloc():
-    """Tile 13 DISLOC paper readout: fill rate, unfilled-order rate, delay percentiles, mean bp, verdict. ?rows=20 (max 200)."""
+    """Tile 13 DISLOC / Tile 14 DISLOC-FOI (?variant=foi) paper readout: fill rate, unfilled-order rate, delays, mean bp, verdict. ?rows=20 (max 200)."""
     import disloc_engine as _dsl
 
     def build(now):
@@ -45875,13 +45876,16 @@ def monitor_tiles_disloc():
             nrows = min(200, max(0, int(request.args.get("rows") or 20)))
         except ValueError:
             raise monitor_tiles.BadRequest("BAD_ARGS")
-        rows = _dsl.load_rows()
-        lane = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+        variant = str(request.args.get("variant") or "base").lower()
+        if variant not in ("base", "foi"):
+            raise monitor_tiles.BadRequest("BAD_VARIANT")
+        rows = _dsl.load_rows(_dsl.FOI_TRADES_FILE if variant == "foi" else _dsl.TRADES_FILE)
+        lane = "FAMILY_DISLOC_FOI_LONG_1M" if variant == "foi" else "FAMILY_DISLOC_BFX_DISLOCATION_1M"
         spec = COMBO_LANE_SPECS.get(lane) or {}
         evaluator = _XVL_EVALUATORS.get(lane)
         terminal = [r for r in rows if r.get("event") in ("DISLOC_CLOSED", "DISLOC_CANCELLED", "DISLOC_ABANDONED")]
         return {
-            "schema": "monitor_tiles_disloc_v1", "lane": lane, "tile_number": tile_number(lane),
+            "schema": "monitor_tiles_disloc_v1", "variant": variant, "lane": lane, "tile_number": tile_number(lane),
             "enabled": bool(is_research_lane_enabled(lane)), "paper_only": True,
             "policy_id": spec.get("raw_policy_id"), "policy_signature": spec.get("policy_signature"),
             "rule": (spec.get("entry_policy") or {}).get("disloc"),

@@ -24,7 +24,8 @@ __all__ = ("ACTION_STAND_ASIDE", "ACTION_TAKER", "DECISION_SCHEMA")
 
 
 def make_evaluator() -> DislocEngine:
-    return DislocEngine(RULE, policy_id=POLICY_ID, policy_signature=POLICY_SIGNATURE)
+    return DislocEngine(RULE, policy_id=POLICY_ID, policy_signature=POLICY_SIGNATURE,
+                        lane=LANE, variant="base", id_prefix="dsl")
 
 
 lane_admission = _BINDING.lane_admission

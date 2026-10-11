@@ -30,66 +30,48 @@ def _feed(monkeypatch, eng, prems):
     return state
 
 
-def test_registry_identity_and_rule_thresholds():
-    assert pol.POLICY_ID.startswith("DISLOC_")
+def test_registry_identity_and_c1_rule():
+    assert pol.POLICY_ID.startswith("DISLOC_C1_")
     r = pol.RULE
-    assert (r.long_prem_max, r.long_d5_max, r.short_prem_min, r.short_d5_min) == (8.1769, -3.0183, 13.0163, 2.9749)
-    assert r.ttl_sec == 5.0 and r.hold_sec == 60 and r.stop_bp == 40.0
-    assert r.side(8.0, -4.0) == "LONG" and r.side(14.0, 3.5) == "SHORT" and r.side(10.0, -4.0) is None
-    assert r.gap_closed("LONG", 8.5) and not r.gap_closed("LONG", 8.0)
-    assert r.gap_closed("SHORT", 13.0) and not r.gap_closed("SHORT", 13.5)
+    assert (r.long_prem_max, r.long_d5_max) == (8.1815, -3.0159) and r.long_only and r.short_shadow_only
+    assert r.entry_mode == "TAKER_MARKET" and not r.gap_closed_exit and r.hold_sec == 60 and r.stop_bp == 40.0
+    assert r.side(8.1815, -3.0159) == "LONG" and r.side(14.0, 3.5) is None and r.side(10.0, -4.0) is None
+    assert r.shadow_short(14.0, 3.5)
 
 
-def test_ttl_cancel_when_no_trade_through(monkeypatch):
-    eng, rows, trades, touch = _engine()
-    prems = {t: 11.0 for t in range(0, 400)}
-    prems.update({t: 7.0 for t in range(350, 400)})  # 300 s ago 11 -> d5 = -4
-    _feed(monkeypatch, eng, prems)
-    eng.clock = lambda: 351.2
-    touch["q"] = (100.0, 100.02, 351.0)
-    eng.step(now=351.1, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    assert eng.order and eng.order["limit_price"] == 100.0 and eng.order["side"] == "LONG"
-    trades.append({"p": 100.0, "v": 1, "S": "Sell", "received_ts": 352.0})  # at limit: no fill
-    for t in range(352, 358):
-        eng.step(now=t + 0.3, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    assert rows[-1]["event"] == "DISLOC_CANCELLED" and rows[-1]["cancel_reason"] == "TTL_5S"
-
-
-def test_gap_closed_cancel(monkeypatch):
-    eng, rows, trades, touch = _engine()
-    prems = {t: 11.0 for t in range(0, 400)}
-    prems.update({350: 7.0, 351: 9.0})
-    _feed(monkeypatch, eng, prems)
-    eng.clock = lambda: 351.2
-    touch["q"] = (100.0, 100.02, 351.0)
-    eng.step(now=351.1, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    eng.step(now=352.3, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    assert rows[-1]["cancel_reason"] == "GAP_CLOSED_BEFORE_FILL"
-
-
-def test_trade_through_fill_then_time_exit_and_summary(monkeypatch):
+def test_taker_fill_at_real_ask_after_delay_then_time_exit(monkeypatch):
     eng, rows, trades, touch = _engine()
     prems = {t: 11.0 for t in range(0, 500)}
     prems.update({t: 7.0 for t in range(350, 500)})
     _feed(monkeypatch, eng, prems)
-    eng.clock = lambda: 351.2
     touch["q"] = (100.0, 100.02, 351.0)
+    clock = iter([351.2, 351.5])
+    eng.clock = lambda: next(clock)
+    touch_seq = iter([(100.0, 100.02, 351.0), (100.01, 100.03, 351.4)])
+    eng.touch_fn = lambda: next(touch_seq, (100.05, 100.07, 413.0))
     eng.step(now=351.1, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    trades.append({"p": 99.99, "v": 1, "S": "Sell", "received_ts": 353.0})
-    touch["q"] = (100.01, 100.03, 353.0)
-    eng.step(now=353.3, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    assert eng.position and rows[-1]["event"] == "DISLOC_FILLED"
-    assert rows[-1]["order_to_fill_s"] == 1.8 and rows[-1]["signal_to_fill_s"] == 2.0
-    touch["q"] = (100.05, 100.07, 413.0)
+    order, filled = rows[-2], rows[-1]
+    assert order["order_type"].startswith("MARKET_TAKER") and order["signal_ask"] == 100.02
+    assert filled["event"] == "DISLOC_FILLED" and filled["fill_price"] == 100.03 and filled["signal_to_fill_s"] == 0.5
+    assert filled["fill_bid"] == 100.01 and filled["fill_ask"] == 100.03
+    eng.clock = lambda: 413.3
     eng.step(now=413.3, live=None, bfx_quotes={}, bfx_bbo_ts=None)
     closed = rows[-1]
     assert closed["event"] == "DISLOC_CLOSED" and closed["exit_reason"] == "TIME_60S"
-    assert abs(closed["pnl_bp_vs_touch"] - 5.0) < 1e-6
+    assert abs(closed["pnl_bp_vs_touch"] - (100.05 / 100.03 - 1) * 1e4) < 1e-3
     assert abs(closed["net_bp_taker_2p8"] - (closed["pnl_bp_fill_mid_to_exit_mid"] - 2.8)) < 1e-9
-    s = de.summarize(rows, {"kill_at_trades": 150})
-    assert s["by_side"]["LONG"]["by_fill_delay"]["le_2s"]["closed"] == 1
-    assert s["by_fill_delay"]["2_to_5s"]["closed"] == 0 and s["by_side"]["SHORT"]["tag"].startswith("SHORT_REFUTED")
-    assert s["closed_trades"] == 1 and s["fill_rate"] == 1.0 and s["pre_registered"]["verdict"] == "COLLECTING"
+    s = de.summarize(rows, pol.SPEC and pol.EXIT and None)
+    assert s["by_side"]["LONG"]["by_fill_delay"]["le_2s"]["closed"] == 1 and s["closed_trades"] == 1
+
+
+def test_short_side_is_shadow_logged_never_traded(monkeypatch):
+    eng, rows, trades, touch = _engine()
+    prems = {t: 10.0 for t in range(0, 400)}
+    prems.update({350: 14.0})
+    _feed(monkeypatch, eng, prems)
+    touch["q"] = (100.0, 100.02, 351.0)
+    eng.step(now=351.1, live=None, bfx_quotes={}, bfx_bbo_ts=None)
+    assert [r["event"] for r in rows] == ["DISLOC_SHADOW_SHORT_SIGNAL"] and eng.order is None and eng.position is None
 
 
 def test_tile_off_never_orders(monkeypatch):
@@ -127,3 +109,35 @@ def test_real_feature_path_matches_audit_definition():
     feat = eng._features(start + 360.5, live, {start + 359: (100.06, 100.08)}, start + 360.4)
     assert abs(feat["prem_bp"] - 7.0) < 1e-6 and abs(feat["prem_d5_bp"] - (-4.0)) < 1e-6
     assert eng.rule.side(feat["prem_bp"], feat["prem_d5_bp"]) == "LONG"
+
+
+def test_foi_variant_c3_bounds_long_only_and_derivatives():
+    import paper_policy_family_disloc_foi as foi
+    r = foi.RULE
+    assert r.long_only and r.long_prem_max == 6.94 and (r.fund_lo, r.fund_hi, r.oi_d60_max) == (0.2096, 0.4705, -10.5573)
+    assert r.side(6.94, None, 0.4705, -10.5573) == "LONG"
+    assert r.side(6.95, None, 0.3, -11) is None and r.side(6.0, None, 0.2096, -11) is None
+    assert r.side(6.0, None, 0.3, -10.0) is None and r.side(20.0, 9.0, 0.3, -11) is None
+    eng = foi.make_evaluator()
+    assert eng.variant == "foi" and eng.ID_PREFIX == "dsf" and eng.lane == "FAMILY_DISLOC_FOI_LONG_1M"
+    der = lambda oi: {"derivatives": {"binance": {"funding_rate": 0.00003}, "bybit": {"funding_rate": 0.00003,
+                      "open_interest": oi}, "okx": {"funding_rate": 0.00003, "open_interest": oi}}}
+    eng._derivs(0.0, der(1000.0))
+    out = eng._derivs(3600.0, der(998.0))
+    assert abs(out["fund_bp"] - 0.3) < 1e-9 and abs(out["oi_d60_bp"] - (-20.0)) < 1e-6
+
+
+def test_foi_scoring_only_fast_fills_and_uncapturable():
+    base = {"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "side": "LONG"}
+    pre = {"score_max_signal_to_fill_s": 2.0, "uncapturable_p50_delay_above_s": 2.0,
+           "early_kill_at_trades": 60, "early_kill_mean_at_or_below_bp": -1.0, "kill_at_trades": 150}
+    rows = [{**base, "net_bp_taker_2p8": 5.0, "signal_to_fill_s": 1.0, "fill_ts": i * 3600, "exit_ts": i * 3600}
+            for i in range(10)]
+    rows += [{**base, "net_bp_taker_2p8": -9.0, "signal_to_fill_s": 4.0, "fill_ts": 1e6, "exit_ts": 1e6}]
+    s = de.summarize(rows, pre)
+    assert s["scored_trades"] == 10 and s["closed_trades"] == 11 and s["mean_net_bp_taker_2p8"] == 5.0
+    slow = [{**base, "net_bp_taker_2p8": 1.0, "signal_to_fill_s": 3.0, "fill_ts": i, "exit_ts": i} for i in range(60)]
+    assert de.summarize(slow, pre)["pre_registered"]["verdict"] == "RETIRE_UNCAPTURABLE"
+    bad = [{**base, "net_bp_taker_2p8": -2.0, "signal_to_fill_s": 1.0, "fill_ts": i * 3600, "exit_ts": i}
+           for i in range(60)]
+    assert de.summarize(bad, pre)["pre_registered"]["verdict"] == "KILL_EARLY"
