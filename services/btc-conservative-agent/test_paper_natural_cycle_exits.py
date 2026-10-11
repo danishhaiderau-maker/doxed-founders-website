@@ -119,9 +119,13 @@ def test_thesis_fast_cut_closes_and_books_trigger(monkeypatch):
     assert fired is True
     assert closed.calls[0][0] == "THESIS_FAST_CUT"
     assert abs(closed.calls[0][1] - thesis_px) < 0.02
+    monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    with bot.state_lock:
+        bot.state["bid"], bot.state["ask"] = thesis_px - 3, thesis_px + 3
     booked, sim = bot.resolve_sim_exit_price(pos, False, "THESIS_FAST_CUT")
-    assert abs(booked - thesis_px) < 0.02
-    assert sim["source"] == "exit_trigger_side_correct"
+    assert abs(sim["trigger_price"] - thesis_px) < 0.02
+    assert abs(booked - (thesis_px + 3)) < 0.02  # SHORT covers at the ask at fill time
+    assert sim["source"] == "exit_bbo_at_fill"
 
 
 def test_scenario_c_ladder_closes_and_books_trigger(monkeypatch):
@@ -136,9 +140,13 @@ def test_scenario_c_ladder_closes_and_books_trigger(monkeypatch):
     fired = bot._apply_position_exits(pos, lock_px, now=1_700_000_020.0)
     assert fired is True
     assert closed.calls[0][0] == "PROFIT_LOCK_LADDER"
+    monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    with bot.state_lock:
+        bot.state["bid"], bot.state["ask"] = lock_px - 2, lock_px + 2
     booked, sim = bot.resolve_sim_exit_price(pos, False, "PROFIT_LOCK_LADDER")
-    assert abs(booked - lock_px) < 0.02
-    assert sim["source"] == "exit_trigger_side_correct"
+    assert abs(sim["trigger_price"] - lock_px) < 0.02
+    assert abs(booked - (lock_px + 2)) < 0.02
+    assert sim["source"] == "exit_bbo_at_fill"
 
 
 def test_booked_exit_is_not_a_better_book_walk(monkeypatch):
@@ -157,10 +165,13 @@ def test_booked_exit_is_not_a_better_book_walk(monkeypatch):
     monkeypatch.setattr(bot, "refresh_order_book_state", lambda *a, **k: None)
     booked, sim = bot.resolve_sim_exit_price(pos, False, "THESIS_FAST_CUT")
     walk, _ = bot.resolve_sim_exit_price(pos, False, "STOP_LOSS")
-    assert abs(booked - trigger) < 0.02
+    # A stalled close books the market at fill time, never the stale trigger.
+    assert abs(booked - (ENTRY + 5)) < 0.02
+    assert abs(sim["trigger_price"] - trigger) < 0.02
+    assert sim["trigger_slippage_bp"] is not None
+    assert pos["exit_trigger_price"] == sim["trigger_price"] and pos["exit_fill_price"] == booked
     assert abs(walk - (ENTRY + 5)) < 1.0
-    assert abs(booked - walk) > 50
-    assert sim["source"] == "exit_trigger_side_correct"
+    assert sim["source"] == "exit_bbo_at_fill"
 
 
 @pytest.mark.parametrize(
@@ -187,8 +198,17 @@ def test_family_policy_exits_book_the_tick_that_triggered_them(monkeypatch, reas
     monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
     monkeypatch.setattr(bot, "refresh_order_book_state", lambda *a, **k: None)
     booked, sim = bot.resolve_sim_exit_price(pos, False, reason)
-    assert abs(booked - trigger) < 0.02
-    assert sim["source"] == "exit_trigger_side_correct"
+    assert abs(booked - (ENTRY + 500)) < 0.02  # side-correct ask, not the trigger
+    assert abs(sim["trigger_price"] - trigger) < 0.02
+    assert sim["source"] == "exit_bbo_at_fill"
+
+
+def test_maker_take_profit_books_its_resting_limit(monkeypatch):
+    pos = _short_pos()
+    pos["_exit_eval_price"] = ENTRY - 100
+    monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    booked, sim = bot.resolve_sim_exit_price(pos, True, "GS_ATR_TAKE_PROFIT")
+    assert abs(booked - (ENTRY - 100)) < 0.02 and sim["source"] == "exit_maker_limit_fill"
 
 
 def test_paper_helper_is_force_paper_mode():
@@ -197,3 +217,23 @@ def test_paper_helper_is_force_paper_mode():
     assert bot.THESIS_FAST_EXIT_UNREAL_PCT == -12.0
     assert bot.MAX_SL_MARGIN_PCT == 30.0
     assert bot.TRAIL_LADDER_SCENARIO_C[0] == (8, 5)
+
+
+def test_thesis_fast_cut_requires_mfe_at_most_two(monkeypatch):
+    closed = _CloseCapture()
+    monkeypatch.setattr(bot, "close_position", closed)
+    pos = _short_pos(max_pnl_pct=2.5)
+    assert bot._check_phase_margin_stop(pos, -13.0, 60.0) is False
+    assert closed.calls == []
+    pos = _short_pos(max_pnl_pct=1.9)
+    assert bot._check_phase_margin_stop(pos, -13.0, 60.0) is True
+    assert closed.calls[0][0] == "THESIS_FAST_CUT"
+
+
+def test_gs01_and_b1_cuts_carry_the_mfe_cap_and_window():
+    import combo_pathway_config as c
+    import gs_regime_exit_stack as g
+    for policy in (c._GS01_EXIT, c._GSB1_EXIT):
+        for prof in policy["profiles"].values():
+            assert prof["cut_max_peak_bp"] == 2.0 and prof["cut_win_sec"] == 300
+    assert "cut_max_peak_bp" in open(g.__file__).read()

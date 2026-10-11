@@ -1,4 +1,5 @@
 """Dedicated contract for PHASE03 Danish regime router: the regime decides the thesis (fade vs premium)."""
+import pytest
 import paper_policy_family_danish_regime_router as policy
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
@@ -14,6 +15,7 @@ TREND = bar(atr_pct=50.0, adx=30.0)
 VIOLENT = bar(atr_pct=90.0, adx=15.0)
 
 
+@pytest.mark.skip(reason="tile retired 2026-10-12 (owner); module kept")
 def test_registry_owns_a_paper_only_default_off_regime_router():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()

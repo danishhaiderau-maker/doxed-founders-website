@@ -9,7 +9,7 @@ import bot
 import gs_regime_exit_stack as stack
 import combo_pathway_config as cfg
 
-LANE = "FAMILY_DANISH_REGIME_ROUTER"
+LANE = "FAMILY_COMMITTED_FADE_TAKER_90"
 
 
 def _pos(trade_id="t1", entry=60000.0, direction="LONG", age=10.0, now=None):
@@ -172,7 +172,7 @@ def test_off_tile_rows_are_not_persisted(monkeypatch):
 def test_rejected_v3_writes_are_coalesced_per_window(monkeypatch):
     monkeypatch.setattr(bot, "_xvl_rejected_v3_last", {})
     monkeypatch.setattr(bot, "XVL_REJECTED_V3_MIN_INTERVAL_SEC", 60.0)
-    lane = "FAMILY_DANISH_REGIME_ROUTER"
+    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
     assert bot._xvl_rejected_v3_due(lane, "STAND_ASIDE", "LONG", now=1000.0)
     assert not bot._xvl_rejected_v3_due(lane, "STAND_ASIDE", "LONG", now=1030.0)
     assert bot._xvl_rejected_v3_due(lane, "STAND_ASIDE", "SHORT", now=1030.0)

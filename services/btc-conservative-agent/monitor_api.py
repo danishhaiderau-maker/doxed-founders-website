@@ -300,7 +300,9 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
     cumulative = peak = drawdown = 0.0
     last_ts = None
     for row in ordered:
-        pnl = _num(row.get("net_pnl_usd"))
+        # One unrounded net $ basis everywhere (PNL-INTEGRITY bug 3).
+        raw = row.get("net_pnl_usd_raw")
+        pnl = _num(raw if raw is not None else row.get("net_pnl_usd"))
         closes += 1
         cls = wl_class(trade_net_bp(row), net_usd=pnl)
         wins += cls == "W"

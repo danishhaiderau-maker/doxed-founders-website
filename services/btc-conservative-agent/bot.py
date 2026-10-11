@@ -2353,6 +2353,9 @@ def unrealized_margin_pct(pos: dict, price: float = None) -> float:
     return price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * 100
 
 
+THESIS_FAST_CUT_MAX_MFE_PCT = 2.0
+
+
 def _check_phase_margin_stop(pos: dict, unreal_pct: float, age_sec: float) -> bool:
     """Phase-aware margin stop: thesis -12% during window, hard -30% after.
 
@@ -2361,6 +2364,11 @@ def _check_phase_margin_stop(pos: dict, unreal_pct: float, age_sec: float) -> bo
     window expires only the final -MAX_SL_MARGIN_PCT hard stop applies.
     """
     if age_sec < THESIS_MIN_AGE_SEC:
+        # Conditional early cut (owner rule, CUT12BP5M_MFE2): only while the
+        # trade never ran past +2 (MFE <= +2). PNL-INTEGRITY-20261012 bug 4.
+        mfe = max(float(pos.get("max_pnl_pct") or 0.0), float(unreal_pct))
+        if mfe > THESIS_FAST_CUT_MAX_MFE_PCT:
+            return False
         if unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT:
             logger.info(
                 f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
@@ -6964,24 +6972,50 @@ def _is_trigger_consistent_exit_reason(reason) -> bool:
 
 
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
-    """Exit price: ladder/thesis book the trigger; maker only for explicit TP limit hits."""
+    """Paper exit fill = side-correct BBO at the moment the close executes.
+
+    PNL-INTEGRITY-20261012 bug 1: trigger-consistent exits (BE, stops, cuts,
+    time, trails) used to book the trigger level, so any dispatch stall
+    (8-10 Oct trade_lock window) booked stale, flattering prices. They now book
+    the executable top of book (LONG sells the bid, SHORT buys the ask) read at
+    fill time; the trigger is kept separately as ``trigger_price``. Only a
+    resting maker take-profit fills at its own limit.
+    """
     qty = float(pos.get("qty") or 0)
     direction = str(pos.get("dir") or "").upper()
-    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
     trigger = float(pos.get("_exit_eval_price") or 0)
+    reason_u = str(exit_reason or "").upper()
+    fill_ts = time.time()
     if _is_trigger_consistent_exit_reason(exit_reason):
-        # Do not walk the book to a far-better VWAP than the side-correct
-        # trigger that actually fired the rule (the old STOP_LOSS mismatch).
-        px = trigger if trigger > 0 else fallback
-        if px <= 0:
-            px = float(pos.get("entry") or 0)
+        try:
+            refresh_bbo_state()
+        except Exception:
+            pass
+        with state_lock:
+            bbo_ts = float(state.get("bbo_ts") or state.get("price_ts") or 0)
+        maker_tp = bool(exit_is_maker) and "TAKE_PROFIT" in reason_u
+        if maker_tp and trigger > 0:
+            px, source = trigger, "exit_maker_limit_fill"
+        else:
+            px = get_mark_price(direction, fallback=0.0)
+            source = "exit_bbo_at_fill"
+            if px <= 0:
+                px, source = (trigger, "exit_trigger_no_bbo") if trigger > 0 else (
+                    float(state.get("price") or pos.get("entry") or 0), "exit_last_no_bbo")
         sim = {
             "avg_price": round(px, 2),
             "filled_qty": qty,
             "fully_filled": True,
-            "source": "exit_trigger_side_correct",
+            "source": source,
             "trigger_price": round(trigger, 2) if trigger > 0 else None,
+            "fill_price": round(px, 2),
+            "fill_ts": fill_ts,
+            "bbo_ts": bbo_ts or None,
+            "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
+                                    if trigger > 0 and px > 0 else None),
         }
+        pos["exit_trigger_price"] = sim["trigger_price"]
+        pos["exit_fill_price"] = sim["fill_price"]
         return round(px, 2), sim
     refresh_bbo_state()
     refresh_order_book_state()
@@ -6989,11 +7023,16 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
     if exit_is_maker:
         tp_px = float(pos.get("tp") or 0)
         if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
+            pos["exit_trigger_price"] = pos["exit_fill_price"] = round(tp_px, 2)
             return tp_px, None
+        pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
+        pos["exit_fill_price"] = round(fallback, 2)
         return fallback, None
     exit_side = "sell" if direction == "LONG" else "buy"
     sim = simulate_market_fill(exit_side, qty)
     px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
+    pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
+    pos["exit_fill_price"] = round(px, 2)
     return px, sim
 
 
@@ -30907,6 +30946,12 @@ def close_position(pos: dict, exit_reason: str):
             "dir": pos.get("dir"),
             "entry": entry,
             "exit": price,
+            # PNL-INTEGRITY bug 1: the rule's trigger level and the executable
+            # fill (side-correct BBO at close time) are logged separately.
+            "exit_trigger_price": pos.get("exit_trigger_price"),
+            "exit_fill_price": pos.get("exit_fill_price", price),
+            "exit_fill_source": (pos.get("exit_fill_sim") or {}).get("source") if isinstance(pos.get("exit_fill_sim"), dict) else None,
+            "exit_trigger_slippage_bp": (pos.get("exit_fill_sim") or {}).get("trigger_slippage_bp") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "dur_min": (time.time() - pos.get("entry_ts", 0)) / 60,
             "pnl": round(net_pnl / margin_usdt * 100, 2),
             "margin_usdt": margin_usdt,
@@ -31089,6 +31134,10 @@ def close_position(pos: dict, exit_reason: str):
                     if terminal_cost_evidence["exit_slippage_cost_receipt"].get("status") == "COMPLETE"
                     else "SIDE_CORRECT_TRIGGER_ONLY"
                     if (exit_sim or {}).get("source") == "exit_trigger_side_correct"
+                    else "SIDE_CORRECT_BBO_AT_FILL"
+                    if (exit_sim or {}).get("source") == "exit_bbo_at_fill"
+                    else "MAKER_LIMIT_FILL"
+                    if (exit_sim or {}).get("source") == "exit_maker_limit_fill"
                     else "UNVERIFIED_EXECUTION_PRICE"
                     if exit_sim else "UNAVAILABLE"
                 ),
@@ -52552,7 +52601,7 @@ def simulate_replay_outcome(buf: dict) -> dict:
         # Paper still skips EARLY_FAIL / last-trade price SL. Phase-aware margin
         # stop: thesis -12% in the first 5 minutes (no MFE bypass), hard -30% after.
         if age_sec < THESIS_MIN_AGE_SEC:
-            if unreal <= fast_cut:
+            if unreal <= fast_cut and peak <= THESIS_FAST_CUT_MAX_MFE_PCT:
                 exit_reason = "THESIS_FAST_CUT"
                 exit_margin_pct = fast_cut
                 break

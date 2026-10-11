@@ -39,7 +39,7 @@ def run(mode: str) -> dict:
         t.start()
     cross = time.time() + 0.5
     positions = [{
-        "trade_id": f"{mode}-{i}", "research_lane": "FAMILY_DANISH_REGIME_ROUTER", "entry": ENTRY,
+        "trade_id": f"{mode}-{i}", "research_lane": "FAMILY_COMMITTED_FADE_TAKER_90", "entry": ENTRY,
         "dir": "LONG", "entry_ts": cross - 60, "leverage": 100, "qty": 0.01, "status": "OPEN",
         "adaptive_entry_decision": {"regime": "QUIET"},
     } for i in range(N_POS)]
