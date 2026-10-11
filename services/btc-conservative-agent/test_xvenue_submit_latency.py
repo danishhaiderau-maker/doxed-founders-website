@@ -12,7 +12,7 @@ import time
 import pytest
 
 import bot
-import paper_policy_family_premium_reversion_60m as xvs_policy
+import paper_policy_family_gs07_fast_premium_fade as xvs_policy  # H-C retired 2026-10-11; GS-07 is the active evaluator-clock fixture
 import research_v3_bridge as bridge
 import tile_paired_comparison as tpc
 

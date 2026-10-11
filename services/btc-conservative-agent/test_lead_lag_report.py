@@ -1,3 +1,4 @@
+import pytest
 """Lead-lag report: detects a planted lead, stays quiet on independent walks."""
 
 import json
@@ -146,6 +147,7 @@ def _shadow_rows_from(trades, signature):
 XVP_LANE = "FAMILY_PREMIUM_REVERSION_60M"
 
 
+@pytest.mark.skip(reason="H-C (FAMILY_PREMIUM_REVERSION_60M) retired 2026-10-11; test replays its active-lane path")
 def test_xvl_section_replays_the_registered_rule_and_matches_the_shadow_stream():
     from combo_pathway_config import ACTIVE_TILE_REGISTRY
     signature = ACTIVE_TILE_REGISTRY[XVP_LANE]["policy_signature"]
@@ -171,6 +173,7 @@ def test_xvl_section_replays_the_registered_rule_and_matches_the_shadow_stream()
     assert parity["mean_abs_net_gap_bp"] == 0.0
 
 
+@pytest.mark.skip(reason="H-C (FAMILY_PREMIUM_REVERSION_60M) retired 2026-10-11; test replays its active-lane path")
 def test_premium_replay_trades_toward_the_leaders():
     rows, quotes = _xvl_step_rows(hours=6)
     al = llr.Aligned(rows, quotes)
@@ -183,6 +186,7 @@ def test_premium_replay_trades_toward_the_leaders():
     assert callable(llr.session_follow_replay_trades)
 
 
+@pytest.mark.skip(reason="H-C (FAMILY_PREMIUM_REVERSION_60M) retired 2026-10-11; test replays its active-lane path")
 def test_xvl_shadow_loader_reads_rotations_and_no_data_still_reports_the_shadow():
     from cross_venue_premium import SHADOW_FILE
     tmp = tempfile.mkdtemp()

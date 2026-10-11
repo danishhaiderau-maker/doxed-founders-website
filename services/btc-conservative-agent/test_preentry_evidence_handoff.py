@@ -18,7 +18,7 @@ import pytest
 import ai_shadow_challengers as ai_shadow
 import bot
 import cross_venue_lead as xvl
-import paper_policy_family_premium_reversion_60m as xvs_policy
+import paper_policy_family_gs07_fast_premium_fade as xvs_policy  # H-C retired 2026-10-11; GS-07 is the active evaluator-clock fixture
 
 
 class _HeldWorker:
@@ -237,6 +237,7 @@ def test_process_signal_defers_only_the_provisional_multiverse_write():
     assert 'decision == "ALLOW_DISTINCT"' in audit and '"DUPLICATE_INTENT_AUDIT"' in audit
 
 
+@pytest.mark.skip(reason="H-C (FAMILY_PREMIUM_REVERSION_60M) retired 2026-10-11; test replays its active-lane path")
 def test_tick_hands_off_the_trigger_before_writing_shadow_rows(monkeypatch):
     order = []
 

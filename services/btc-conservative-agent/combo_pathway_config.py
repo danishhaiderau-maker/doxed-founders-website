@@ -139,6 +139,10 @@ DANISH_REGIME_ROUTER_ADMISSION_POLICY_ID = "DANISH_REGIME_ROUTER_DYNAMIC_V1"
 FADE_POOL_ADMISSION_POLICY_ID = "FADE_POOL_COMMITTED_AND_PREMIUM_V1"
 RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M = "FAMILY_GS07_V07_PREMIUM_FADE_60M"
 GS07_V07_ADMISSION_POLICY_ID = "GS07_V07_CROSS_VENUE_PREMIUM_DEV60M_2P5BP_NO_AI_V1"
+RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+DISLOC_ADMISSION_POLICY_ID = "DISLOC_C1_BFX_VS_BNBY_PREM_P10_D5_LONG_TAKER_NO_AI_V1"
+RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M = "FAMILY_DISLOC_FOI_LONG_1M"
+DISLOC_FOI_ADMISSION_POLICY_ID = "DISLOC_FOI_C3_PREM_P5_FUND_T2_OI_D60_T1_LONG_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -179,17 +183,15 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 # router, and the fade pool.
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
-    RESEARCH_LANE_FAMILY_PREMIUM_REVERSION_60M,
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
-    RESEARCH_LANE_FAMILY_GSB3_COMMITTED_FADE_REGIME,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
     RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
     RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
-    RESEARCH_LANE_FAMILY_FADE_POOL,
-    RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
+    RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
+    RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1518,7 +1520,7 @@ _GS07_V07_EXIT = _composite_exit(
 COMBO_LANE_SPECS.update({
     RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M: _tile(
         lane=RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
-        label="Tile 14 · GS-07 V07 premium fade · Binance/Bybit premium vs 60-min mean +/-2.5 bp, taker, 60-min hold, 40 bp stop",
+        label="GS-07 V07 premium fade · Binance/Bybit premium vs 60-min mean +/-2.5 bp, taker, 60-min hold, 40 bp stop",
         raw_policy_id=("GS07V07_XVENUE_PREMIUM_DEV60M_L2.5_S2.5BP_TAKER_CAP5BPS_GAP300S_12H"
                        "|TIME_3600_HARD40BP_CAP6"),
         id_prefix="g7v",
@@ -1537,7 +1539,7 @@ COMBO_LANE_SPECS.update({
         admission_treatment=GS07_V07_ADMISSION_POLICY_ID,
         max_active_signals=6, entry_ttl_sec=3, default_enabled=False,
         signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
-        subtitle="Tile 14 · GS-07 V07 — premium fade on the 60-min mean — PAPER ONLY — RELAY INELIGIBLE",
+        subtitle="GS-07 V07 — premium fade on the 60-min mean — PAPER ONLY — RELAY INELIGIBLE",
         signal_summary=("the Binance/Bybit premium over Bitfinex leaves its own 60-minute mean by >= +2.5 / "
                         "<= -2.5 bp; take Bitfinex toward convergence as a taker and hold 60 minutes"),
         live_exit_order=registry_live_exit_order(_GS07_V07_EXIT),
@@ -1545,6 +1547,168 @@ COMBO_LANE_SPECS.update({
         early_cut_shadow_reason="V07 spec: stop and time exit only; every other protection is shadow-only",
     ),
 })
+
+
+# Tile 13 · DISLOC (owner order 11 Oct 2026; Grok Strategist DEEP-SEARCH-TILES-20261011 §6 C1,
+# final spec 21:06): prem = (bfx_mid / mean(binance, bybit) - 1) * 1e4, prem_d5 = prem - prem
+# 300 s earlier. LONG only when prem <= 8.1815 and prem_d5 <= -3.0159 (exact discovery bounds,
+# never re-fitted), one signal per minute; the p90/p90 rich side is shadow-logged, never traded.
+# Market (taker) entry at the real Bitfinex ask read after the measured delay; only fills with
+# signal->fill <= 2 s are scored. Exit at 60 s or a 40 bp stop, one open. Self-simulated by
+# disloc_engine.py on the per-second evaluator tick (paper only; never reaches the order
+# pipeline or relay).
+_DISLOC_ENTRY = {
+    **_PREMIUM_REVERSION_ENTRY,
+    "mode": "TAKER_MARKET_AT_REAL_TOUCH_SELF_SIMULATED",
+    "direction_source": "CROSS_VENUE_PREMIUM",
+    "evaluator_id_prefix": "dsl",
+    "premium_mean_window_sec": 300, "premium_min_mean_samples": 1,
+    "min_submit_interval_sec": 1, "max_submissions_per_hour": 3600,
+    "disloc": {
+        "prem_definition": "(bitfinex_mid / mean(binance_mid, bybit_mid) - 1) * 1e4 at the closed anchor second",
+        "prem_d5_lag_sec": 300,
+        "long_prem_max_bp": 8.1815, "long_prem_d5_max_bp": -3.0159,
+        "short_prem_min_bp": 13.0163, "short_prem_d5_min_bp": 2.9749,
+        "long_only": True, "short_shadow_only": True, "one_signal_per_minute": True,
+        "entry_mode": "TAKER_MARKET", "gap_closed_exit": False,
+        "threshold_source": ("Grok Strategist DEEP-SEARCH-TILES-20261011 §6 C1 exact bounds "
+                             "{prem <=p10: (null, 8.1815], prem_d5 <=p10: (null, -3.0159]}; shadow short = "
+                             "STRATEGIST-AUDIT-20261011 p90/p90 (logged, never traded)"),
+        "trigger": "rising edge, at most one signal per 1-min bucket",
+        "order": "market (taker) buy at the real Bitfinex ask read after the measured processing delay",
+        "order_ttl_sec": 5.0,
+        "cancel_on": ("NO_FRESH_TOUCH_AT_FILL",),
+        "fill_rule": "taker at the real touch (ask for LONG) at fill time; scored only when signal->fill <= 2 s",
+        "gap_closed": "not an exit (Strategist final spec: 60 s time exit + 40 bp stop)",
+    },
+    "ai_decision_role": "NONE",
+    "volatility_scaling": "NONE",
+    "fill_model": "DISLOC_TRADE_THROUGH_V1",
+}
+_DISLOC_EXIT = _composite_exit(
+    max_duration_sec=60, max_open_positions=1,
+    volatility_scaling="NONE - 60 s time exit and 40 bp stop (Strategist final spec)",
+)
+_DISLOC_PRE = _phase3_pre(
+    "GS-20261011-DISLOC",
+    spec_source="audit/STRATEGIST-AUDIT-20261011.md §4c (validated rule) + Danish 11 Oct 5 s-cancel order",
+    decisions=("LONG only: prem <= 8.1815 & prem_d5 <= -3.0159; SHORT p90/p90 is shadow-logged, never traded",
+               "market (taker) entry at the real ask after the measured delay; scored only if <= 2 s",
+               "60 s time exit, 40 bp stop, max 1 open, 1 signal per minute"),
+)
+_DISLOC_PRE.update({
+    "early_kill_at_trades": 60, "early_kill_mean_at_or_below_bp": -1.0,
+    "kill_at_trades": 150, "kill_mean_below_bp": 0.5,
+    "promote_min_trades": 300, "promote_mean_min_bp": 0.0,
+    "score_max_signal_to_fill_s": 2.0, "uncapturable_p50_delay_above_s": 2.0,
+    "kill_summary": ("Strategist universal rules: kill at 60 scored trades if mean net <= -1 bp; retire at 150 if "
+                     "mean net < +0.5 bp or it doesn't beat the random-entry control (CTRL, offline); only fills "
+                     "with signal->fill <= 2 s are scored; retire TOO SLOW if p50 signal->fill > 2 s over the "
+                     "first 60 trades"),
+    "promotion_summary": "Promote only at >= 300 scored trades with a 1h-cluster CI > 0 (net of 2.8 bp)",
+})
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M: _tile(
+        lane=RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
+        label="DISLOC · C1 Bitfinex cheap vs Binance/Bybit, long only, market entry, 60 s exit, 40 bp stop",
+        raw_policy_id=("DISLOC_C1_PREM_LE_8P1815_D5_LE_M3P0159_LONG_TAKER_SHORT_SHADOW"
+                       "|TIME_60_HARD40BP_CAP1"),
+        id_prefix="dsl",
+        module="paper_policy_family_disloc.py",
+        test_module="test_disloc_engine.py",
+        entry=_DISLOC_ENTRY, exit_policy=_DISLOC_EXIT,
+        hypothesis_result={"status": "AUDIT_20261011_HOLDOUT_POSITIVE_ZERO_LATENCY", "hypothesis_id": "GS-20261011-DISLOC",
+                           "in_sample": ("Audit holdout (mid-to-mid, 2.5 bp taker): LONG +2.35 bp n=74, SHORT +1.30 bp "
+                                         "n=79; ~half gone at 2 s delay, gone by 5 s")},
+        pre_registration=_DISLOC_PRE,
+        admission_treatment=DISLOC_ADMISSION_POLICY_ID,
+        max_active_signals=1, entry_ttl_sec=5, default_enabled=False,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="DISLOC — Bitfinex dislocation reversion — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("Bitfinex mid suddenly cheap vs the Binance/Bybit composite: buy Bitfinex at market "
+                        "(real ask), exit after 60 s or at a 40 bp stop; the rich/short side is only logged"),
+        live_exit_order=registry_live_exit_order(_DISLOC_EXIT),
+        shadow_exits=(),
+        early_cut_shadow_reason="DISLOC spec: 60 s time exit and 40 bp stop only",
+    ),
+})
+# Paper orders are simulated inside disloc_engine on the evaluator tick; they never
+# enter the order pipeline, so the tile can never produce a live-copy/relay intent.
+COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M]["self_simulated_paper"] = True
+
+# Tile 14 · DISLOC-FOI (owner order 11 Oct 2026; Grok Strategist DEEP-SEARCH-TILES-20261011 §6 C3
+# DISLOC-LONG-DERIV, exact discovery bounds (lo, hi], never re-fitted): LONG only when
+# prem <= 6.94 AND fund in (0.2096, 0.4705] AND oi_d60 <= -10.5573. fund = mean Binance/
+# Bybit/OKX funding_rate * 1e4; oi_d60 = (Bybit+OKX OI / same 60 min ago - 1) * 1e4 (build.py).
+# Same DISLOC framework (Strategist final spec 21:06): market entry at the real ask after the
+# measured delay, scored only <= 2 s, 60 s exit, 40 bp stop, one open, 1 signal per minute.
+_DISLOC_FOI_ENTRY = {
+    **_DISLOC_ENTRY,
+    "evaluator_id_prefix": "dsf",
+    "disloc": {
+        "prem_definition": _DISLOC_ENTRY["disloc"]["prem_definition"],
+        "prem_d5_lag_sec": 300,
+        "long_prem_max_bp": 6.94, "long_prem_d5_max_bp": None,
+        "long_only": True, "one_signal_per_minute": True,
+        "entry_mode": "TAKER_MARKET", "gap_closed_exit": False,
+        "foi": {"fund_lo_bp": 0.2096, "fund_hi_bp": 0.4705, "oi_d60_max_bp": -10.5573, "oi_lag_min": 60,
+                "fund_venues": ("binance", "bybit", "okx"), "oi_venues": ("bybit", "okx"),
+                "fund_definition": "mean(binance, bybit, okx funding_rate) * 1e4",
+                "oi_definition": "(OI_bybit + OI_okx) / same 60 min earlier - 1, * 1e4"},
+        "threshold_source": ("Grok Strategist DEEP-SEARCH-TILES-20261011 §6 C3 exact bounds "
+                             "{prem <=p5: (null, 6.94], fund T2: (0.2096, 0.4705], oi_d60 T1: (null, -10.5573]}"),
+        "trigger": "rising edge, at most one signal per 1-min bucket",
+        "order": _DISLOC_ENTRY["disloc"]["order"],
+        "order_ttl_sec": 5.0,
+        "cancel_on": ("NO_FRESH_TOUCH_AT_FILL",),
+        "fill_rule": _DISLOC_ENTRY["disloc"]["fill_rule"],
+        "gap_closed": "not an exit",
+    },
+}
+_DISLOC_FOI_EXIT = dict(_DISLOC_EXIT)
+_DISLOC_FOI_PRE = _phase3_pre(
+    "GS-20261011-C3-DISLOC-FOI",
+    spec_source="grok-strategist/reports/DEEP-SEARCH-TILES-20261011.md §5 universal kill rules + §6 C3",
+    decisions=("LONG only: prem <= 6.94 & 0.2096 < fund <= 0.4705 & oi_d60 <= -10.5573",
+               "market (taker) entry at the real ask after the measured delay; scored only if <= 2 s",
+               "60 s time exit, 40 bp stop, max 1 open, 1 signal per minute"),
+)
+_DISLOC_FOI_PRE.update({
+    "early_kill_at_trades": 60, "early_kill_mean_at_or_below_bp": -1.0,
+    "kill_at_trades": 150, "kill_mean_below_bp": 0.5,
+    "promote_min_trades": 300, "promote_mean_min_bp": 0.0,
+    "score_max_signal_to_fill_s": 2.0, "uncapturable_p50_delay_above_s": 2.0,
+    "kill_summary": ("Strategist universal rules: kill at 60 scored trades if mean net <= -1 bp; retire at 150 if "
+                     "mean net < +0.5 bp or it doesn't beat CTRL (offline); only fills with signal->fill <= 2 s "
+                     "are scored; retire UNCAPTURABLE if p50 signal->fill > 2 s over the first 60 trades"),
+    "promotion_summary": "Promote only at >= 300 scored trades with a 1h-cluster CI > 0 (net of 2.8 bp)",
+})
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M: _tile(
+        lane=RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M,
+        label="DISLOC-FOI · C3 Bitfinex cheap + mid funding + falling OI, long only, market entry, 60 s exit, 40 bp stop",
+        raw_policy_id=("DISLOC_FOI_C3_PREM_LE_6P94_FUND_0P2096_0P4705_OID60_LE_M10P5573_LONG_TAKER"
+                       "|TIME_60_HARD40BP_CAP1"),
+        id_prefix="dsf",
+        module="paper_policy_family_disloc_foi.py",
+        test_module="test_disloc_engine.py",
+        entry=_DISLOC_FOI_ENTRY, exit_policy=_DISLOC_FOI_EXIT,
+        hypothesis_result={"status": "DEEP_SEARCH_20261011_C3_BEATS_LUCK_SMALL_N", "hypothesis_id": "GS-20261011-C3-DISLOC-FOI",
+                           "in_sample": ("Strategist C3: holdout n 29, +2.80 bp [-0.03, 6.49] at 2.8 bp taker cost; "
+                                         "+2.07 at 2 s, +0.70 at 5 s delay")},
+        pre_registration=_DISLOC_FOI_PRE,
+        admission_treatment=DISLOC_FOI_ADMISSION_POLICY_ID,
+        max_active_signals=1, entry_ttl_sec=5, default_enabled=False,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="DISLOC-FOI — dislocation long + funding + falling OI — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("Bitfinex cheap vs the Binance/Bybit composite while funding is mid-range and open interest "
+                        "fell over the last hour: buy Bitfinex at market (real ask); exit after 60 s or at a 40 bp stop"),
+        live_exit_order=registry_live_exit_order(_DISLOC_FOI_EXIT),
+        shadow_exits=(),
+        early_cut_shadow_reason="DISLOC-FOI spec: 60 s time exit and 40 bp stop only",
+    ),
+})
+COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M]["self_simulated_paper"] = True
 
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
@@ -1563,6 +1727,26 @@ def tile_number(lane: str) -> int | None:
         return ACTIVE_TILE_ORDER.index(str(lane or "").upper()) + 1
     except ValueError:
         return None
+
+
+TILE_SHORT_CODES = {
+    "FAMILY_COMMITTED_FADE_TAKER_90": "H-A", "FAMILY_RANDOM_CONTROL_TAKER_90": "CTRL",
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP": "GS-01", "FAMILY_GSB1_CVD_DIV_REGIME": "B1",
+    "FAMILY_GSB2_REGIME_SWITCHER": "B2", "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "GS-06",
+    "FAMILY_GS07_FAST_PREMIUM_FADE": "GS-07", "FAMILY_DANISH_REGIME_ROUTER": "ROUTER",
+    "FAMILY_PREMIUM_REVERSION_60M": "H-C", "FAMILY_GSB3_COMMITTED_FADE_REGIME": "B3",
+    "FAMILY_FADE_POOL": "FADE-POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M": "V07",
+    "FAMILY_DISLOC_BFX_DISLOCATION_1M": "DISLOC", "FAMILY_DISLOC_FOI_LONG_1M": "DISLOC-FOI",
+}
+
+
+def tile_display_name(lane: str) -> str:
+    """"Tile N · CODE" for an active tile, "Retired · CODE" for a retired one."""
+    lane = str(lane or "").upper()
+    spec = COMBO_LANE_SPECS.get(lane) or {}
+    code = TILE_SHORT_CODES.get(lane) or str(spec.get("label") or lane).split(" ")[0]
+    n = tile_number(lane)
+    return f"Tile {n} · {code}" if n else f"Retired · {code}"
 
 
 def active_tile_policy_epochs() -> tuple[str, ...]:
@@ -1613,6 +1797,20 @@ RETIRED_TILE_LANES = frozenset({
     "FAMILY_NOTRADE_FOLLOW_TAKER_60",
     "FAMILY_GS02_NOTRADE_REGIME_ENTRY", "FAMILY_GS03_CVD_DIV_TAKER",
     "FAMILY_GS04_NOTRADE_ATR_TP", "FAMILY_GS05_PREMIUM_REGIME_MANAGED",
+    # Retired 2026-10-11 21:02-21:03 AEDT (owner, Danish): H-C, B3, FADE-POOL
+    # and V07. Paper and live switched OFF first; all evidence/data is kept.
+    # Active tiles renumber 1..N from display order; retired show no number.
+    "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
+    "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M",
+})
+# Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
+# not numbered): H-C's evaluator is still the fixture for generic cross-venue
+# latency/handoff tests, and kept code lets the analyzer replay their data.
+RETIRED_KEPT_POLICY_MODULES = frozenset({
+    "paper_policy_family_premium_reversion_60m.py",
+    "paper_policy_family_gsb3_committed_fade_regime.py",
+    "paper_policy_family_fade_pool.py",
+    "paper_policy_family_gs07_v07_premium_fade_60m.py",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",

@@ -30298,6 +30298,19 @@ def update_orders_state():
     logger.debug("[ENGINE] update_orders_state called")
     cleanup_expired_orders()
 
+import trade_research_tags as _trade_research_tags
+
+
+def _research_tags_tick(price) -> None:
+    """Record-only 10 s price path + entry tags; never blocks or alters a trade."""
+    try:
+        fn = globals().get("_disloc_last_signal")
+        with trade_lock:  # mutate pos dicts only under the lock (serializers iterate them)
+            _trade_research_tags.tick(price, list(open_positions), fn if callable(fn) else None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def manage_open_positions():
     logger.debug("[ENGINE] manage_open_positions called")
     monitor_positions()
@@ -30326,6 +30339,7 @@ def position_manager():
             cleanup_expired_orders()
             process_pending_orders()
             process_positions()
+            _research_tags_tick(price)
             # Captures in-place chase/TTL/MFE/exit-config mutations as well as
             # registrations, so restart resumes the exact lifecycle stage.
             save_paper_lifecycle(reason="position_manager_tick")
@@ -31863,6 +31877,32 @@ def _xvl_wait_anchor_ready(deadline: float):
     return time.time(), None, False
 
 
+def _disloc_touch():
+    with state_lock:
+        return (_buf_float(state.get("bid"), 0.0), _buf_float(state.get("ask"), 0.0),
+                _buf_float(state.get("bbo_ts"), 0.0) or None)
+
+
+def _disloc_recent_trades():
+    with venue_fill_trade_tape_lock:
+        return list(venue_fill_trade_tape)[-600:]
+
+
+def _disloc_bind_runtime(lane: str, evaluator) -> None:
+    """Tile 9 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
+    if not hasattr(evaluator, "bind_runtime"):
+        return
+    import disloc_engine as _dsl
+    evaluator.bind_runtime(
+        enabled_fn=lambda: is_research_data_collection() and is_research_lane_enabled(lane),
+        trades_fn=_disloc_recent_trades,
+        touch_fn=_disloc_touch,
+        append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
+                                  else _dsl.TRADES_FILE): _safe_append_jsonl(_f, row, label="DISLOC_PAPER",
+                                                                             fallback_on_error=False),
+    )
+
+
 def xvl_evaluator_loop():
     lanes = evaluator_loop_lanes()
     if not XVL_EVALUATOR_ENABLED or not lanes:
@@ -31871,6 +31911,7 @@ def xvl_evaluator_loop():
     _xvl_lower_thread_priority()
     for lane in lanes:
         _XVL_EVALUATORS[lane] = _patient_chase_policy(lane).make_evaluator()
+        _disloc_bind_runtime(lane, _XVL_EVALUATORS[lane])
     _xvl_status["started_ts"] = time.time()
     second = math.floor(time.time()) + 1
     while not shutdown_event.is_set():
@@ -32616,6 +32657,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
+    "/api/monitor/tiles/disloc",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -45838,6 +45880,37 @@ def monitor_tiles_trades():
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
 
 
+@app.route('/api/monitor/tiles/disloc', methods=["GET"])
+def monitor_tiles_disloc():
+    """Tile 9 DISLOC / Tile 10 DISLOC-FOI (?variant=foi) paper readout: fill rate, unfilled-order rate, delays, mean bp, verdict. ?rows=20 (max 200)."""
+    import disloc_engine as _dsl
+
+    def build(now):
+        try:
+            nrows = min(200, max(0, int(request.args.get("rows") or 20)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        variant = str(request.args.get("variant") or "base").lower()
+        if variant not in ("base", "foi"):
+            raise monitor_tiles.BadRequest("BAD_VARIANT")
+        rows = _dsl.load_rows(_dsl.FOI_TRADES_FILE if variant == "foi" else _dsl.TRADES_FILE)
+        lane = "FAMILY_DISLOC_FOI_LONG_1M" if variant == "foi" else "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+        spec = COMBO_LANE_SPECS.get(lane) or {}
+        evaluator = _XVL_EVALUATORS.get(lane)
+        terminal = [r for r in rows if r.get("event") in ("DISLOC_CLOSED", "DISLOC_CANCELLED", "DISLOC_ABANDONED")]
+        return {
+            "schema": "monitor_tiles_disloc_v1", "variant": variant, "lane": lane, "tile_number": tile_number(lane),
+            "enabled": bool(is_research_lane_enabled(lane)), "paper_only": True,
+            "policy_id": spec.get("raw_policy_id"), "policy_signature": spec.get("policy_signature"),
+            "rule": (spec.get("entry_policy") or {}).get("disloc"),
+            "summary": _dsl.summarize(rows, spec.get("pre_registration")),
+            "engine": evaluator.snapshot() if hasattr(evaluator, "snapshot") else None,
+            "recent": terminal[-nrows:] if nrows else [],
+        }
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
+
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -52765,6 +52838,10 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "analyzer_sync_id": ANALYZER_SYNC_ID,
             **completeness_projection(trade_row),
         }
+        try:
+            outcome.update(_trade_research_tags.outcome_fields(pos))
+        except Exception:  # noqa: BLE001 - record-only
+            pass
         _safe_append_jsonl(TRADE_OUTCOME_FILE, outcome, label="TRADE_OUTCOME")
     except Exception as e:
         logger.error(f"[TRADE_OUTCOME] log failed: {e}")

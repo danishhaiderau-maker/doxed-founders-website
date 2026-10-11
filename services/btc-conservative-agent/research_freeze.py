@@ -102,6 +102,16 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-10 backlog batch: build Tile 14 GS-07 V07, then paper ON",
      "spec": "audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # Tile 13 · DISLOC (owner 2026-10-11; default OFF, paper only, relay-ineligible, self-simulated).
+    {"lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "tile_number": 13, "hypothesis_id": "GS-20261011-DISLOC",
+     "approved_by": "Danish (owner), 2026-10-11: build the 5 s-cancel dislocation tile as a paper tile",
+     "spec": "audit/STRATEGIST-AUDIT-20261011.md §4c",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # Tile 14 · DISLOC-FOI (owner 2026-10-11; Strategist C3; default OFF, paper only, long only).
+    {"lane": "FAMILY_DISLOC_FOI_LONG_1M", "tile_number": 14, "hypothesis_id": "GS-20261011-C3-DISLOC-FOI",
+     "approved_by": "Danish (owner), 2026-10-11: build Strategist C3 as Tile 14 DISLOC-FOI paper tile",
+     "spec": "grok-strategist/reports/DEEP-SEARCH-TILES-20261011.md §6 C3",
+     "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
 )
 MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # active_tile_registry_signature() of the full registry (frozen roster + additions).
@@ -110,8 +120,8 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # profiles gained cut_max_peak_bp, so both tiles' policy signatures and this pin moved.
 # The frozen roster's signature is unchanged.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "7968dbee2723572a7af0607031e94218523b311e2a36f5fc54d8214b3220d8d2",
-    "hypothesis": "4fe6ed2d3c5db724a03c99974bfc8ccf1ed3f7ba59378756a6a9981aa1813b7e",
+    "score_led": "405352f2497d45e1ce5d2df866cf438b3670e4f5c8edef754fbfc112ee791386",
+    "hypothesis": "5ee0b7b3469bdee8bbed344124dca77d63d8ae38167bfa6d7e68889414cd461f",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
