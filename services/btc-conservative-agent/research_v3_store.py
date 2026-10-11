@@ -1187,6 +1187,27 @@ class V3EvidenceStore:
             "tile_config_signature": provenance["tile_config_signature"],
         }
 
+    def _bootstrap_identity_carries(self, recorded: Any) -> bool:
+        """LIVE-FIX-0615: a bootstrap cursor / completeness receipt written by an
+        earlier revision of the SAME epoch and tile config stays valid.
+
+        Receipts are content-addressed (row sha256 + byte offset + tail anchor,
+        all re-validated against the ledger file), so a code revision alone does
+        not invalidate them. Binding them to source/deployed revision forced a
+        full re-index of every ledger (~50 min, paper paused) on every deploy.
+        A new epoch or tile config still resets everything.
+        """
+        if not isinstance(recorded, Mapping):
+            return False
+        current = self._identity_binding()
+        if recorded == current:
+            return True
+        return bool(
+            current.get("epoch_id")
+            and recorded.get("epoch_id") == current.get("epoch_id")
+            and recorded.get("tile_config_signature") == current.get("tile_config_signature")
+        )
+
     def _record_lifecycle_membership(
         self, episode_id: str, signature: tuple[int, int, int, int], anchor: dict[str, Any]
     ) -> None:
@@ -1518,7 +1539,7 @@ class V3EvidenceStore:
             return False
         return bool(
             receipt.get("schema") == "emergency_record_index_complete_v1"
-            and receipt.get("identity") == self._identity_binding()
+            and self._bootstrap_identity_carries(receipt.get("identity"))
             and receipt.get("ledger") == ledger
             and self._receipt_targets_active_generation(ledger, receipt)
             and receipt.get("ledger_signature") == (
@@ -1742,7 +1763,7 @@ class V3EvidenceStore:
                 pass
             same_source = (
                 state.get("schema") == "emergency_record_index_bootstrap_v1"
-                and state.get("identity") == self._identity_binding()
+                and self._bootstrap_identity_carries(state.get("identity"))
                 and (state.get("source") or {}).get("device") == signature[0]
                 and (state.get("source") or {}).get("inode") == signature[1]
                 and int(state.get("cursor", -1)) <= signature[2]
