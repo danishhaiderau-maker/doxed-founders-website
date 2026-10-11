@@ -9584,6 +9584,9 @@ await this.notifications
   ): Promise<boolean> {
     let placed = false;
     let failure: string | null = null;
+    // LIVE-FIX-0550: the decision happens before the order goes out; stamping
+    // it when placement finished put executor_decided after order_sent.
+    const decidedAtMs = Date.now();
     try {
       placed = await this.placeEntryInner(
         agentId, instance, cycleId, envelopeJson, creds, marginCap, tradeId, venue, fastPreflight, timing,
@@ -9601,6 +9604,7 @@ await this.notifications
           placed ? 'SUBMITTED' : 'SKIPPED',
           placed ? null : failure ?? 'placement-declined',
           cycleId,
+          decidedAtMs,
         );
       }
     }
@@ -9680,6 +9684,7 @@ await this.notifications
     decision: 'RECEIVED' | 'SKIPPED' | 'SUBMITTED',
     reason: string | null,
     cycleId?: string,
+    decidedAtMs?: number,
   ): Promise<void> {
     try {
       if (!tradeId) return;
@@ -9705,7 +9710,7 @@ await this.notifications
             decision,
             reason,
             account: `acct-${instanceId.slice(0, 8)}`,
-            decided_at: new Date().toISOString(),
+            decided_at: new Date(decidedAtMs ?? Date.now()).toISOString(),
           } as Prisma.InputJsonValue,
         },
       }).catch(() => undefined);
