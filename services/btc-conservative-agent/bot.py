@@ -45276,6 +45276,7 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     rows = {lane: [] for lane in lanes}
     forced = {lane: 0 for lane in lanes}
     deploy_flattened = {lane: 0 for lane in lanes}
+    deploy_flattened_net = {lane: 0.0 for lane in lanes}
     if not trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC):
         raise TimeoutError("monitor lanes timed out waiting for trade_lock")
     try:
@@ -45294,6 +45295,11 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                     from research.close_origin import is_deploy_flatten as _is_deploy_flatten
                     if _is_deploy_flatten(row):
                         deploy_flattened[lane_key] = deploy_flattened.get(lane_key, 0) + 1
+                        try:
+                            _df_net = float(row.get("net_pnl_usd") or 0.0)
+                        except (TypeError, ValueError):
+                            _df_net = 0.0
+                        deploy_flattened_net[lane_key] = deploy_flattened_net.get(lane_key, 0.0) + _df_net
                 except Exception:  # noqa: BLE001 - tagging only
                     pass
                 continue
@@ -45321,6 +45327,8 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
     _MONITOR_LANE_FORCED_EXCLUDED.update(forced)
     _MONITOR_LANE_DEPLOY_FLATTENED.clear()
     _MONITOR_LANE_DEPLOY_FLATTENED.update(deploy_flattened)
+    _MONITOR_LANE_DEPLOY_FLATTENED_NET.clear()
+    _MONITOR_LANE_DEPLOY_FLATTENED_NET.update(deploy_flattened_net)
     return shaped, session_start
 
 
@@ -45328,6 +45336,8 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
 _MONITOR_LANE_FORCED_EXCLUDED: dict = {}
 # Per-lane count of those forced closes that were guarded-deploy flattens.
 _MONITOR_LANE_DEPLOY_FLATTENED: dict = {}
+# Per-lane booked net USD of those deploy-flatten closes (shown separately, never in strategy stats).
+_MONITOR_LANE_DEPLOY_FLATTENED_NET: dict = {}
 
 
 def _monitor_lanes_payload(now: float) -> dict:
@@ -45362,6 +45372,11 @@ def _monitor_lanes_payload(now: float) -> dict:
                 **monitor_api.lane_stats(rows.get(tile["lane"]) or []),
                 "forced_closes_excluded": int(_MONITOR_LANE_FORCED_EXCLUDED.get(tile["lane"]) or 0),
                 "deploy_flatten_closes_excluded": int(_MONITOR_LANE_DEPLOY_FLATTENED.get(tile["lane"]) or 0),
+                "deploy_flatten": {
+                    "closes": int(_MONITOR_LANE_DEPLOY_FLATTENED.get(tile["lane"]) or 0),
+                    "net_usd": round(float(_MONITOR_LANE_DEPLOY_FLATTENED_NET.get(tile["lane"]) or 0.0), 2),
+                    "excluded_from_strategy_stats": True,
+                },
                 "latency": monitor_api.latency_brief(
                     ((xvl_lanes.get(tile["lane"]) or {}) if "error" not in xvl_lanes else {}).get("latency")
                 ),
