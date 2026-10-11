@@ -706,6 +706,10 @@ def _pct(values: Sequence[float], q: float) -> float | None:
     return round(ordered[min(len(ordered) - 1, int(q * (len(ordered) - 1) + 0.5))], 3)
 
 
+# A paper tile closes far more often than this; silence means the feed broke.
+LIVENESS_MAX_SILENCE_SEC = 3600.0
+
+
 class ShadowExitRecorder:
     """Drains finished replay snapshots into ``shadow_exit_paths.jsonl``.
 
@@ -735,6 +739,7 @@ class ShadowExitRecorder:
         self.last_write_ts = None
         self.last_error = None
         self.started_ts = None
+        self._boot_ts = clock()
 
     def start(self) -> None:
         if not self.enabled or (self._thread and self._thread.is_alive()):
@@ -847,7 +852,21 @@ class ShadowExitRecorder:
             "submit_us_p99": _pct(list(self._submit_us), 0.99),
             "submit_us_max": _pct(list(self._submit_us), 1.0),
             "file": FILE_NAME, "record_schema": SCHEMA,
+            **self.liveness(now, alive),
         }
+
+    def liveness(self, now: float, alive: bool) -> dict[str, Any]:
+        """LIVE-FIX-0815: RED when enabled but the worker is dead, or nothing was
+        written for LIVENESS_MAX_SILENCE_SEC since the later of boot / last write."""
+        if not self.enabled:
+            return {"liveness": "DISABLED", "liveness_alert": None}
+        ref = max(x for x in (self.last_write_ts, self.started_ts, self._boot_ts) if x is not None)
+        silent = now - ref
+        if not alive:
+            return {"liveness": "RED", "liveness_alert": "SHADOW_EXIT_WORKER_DEAD", "silent_sec": round(silent, 1)}
+        if silent > LIVENESS_MAX_SILENCE_SEC:
+            return {"liveness": "RED", "liveness_alert": "SHADOW_EXIT_RECORDER_SILENT", "silent_sec": round(silent, 1)}
+        return {"liveness": "GREEN", "liveness_alert": None, "silent_sec": round(silent, 1)}
 
     def aggregates(self) -> dict[str, Any]:
         out = {}
@@ -865,5 +884,6 @@ class ShadowExitRecorder:
         """Redacted: health counters only, no trade ids, prices or per-trade outcomes."""
         status = self.status(now)
         keys = ("enabled", "worker_alive", "queue_depth", "submitted", "written", "dropped_full",
-                "errors", "write_failures", "last_write_age_sec", "compute_ms_p95", "submit_us_p99")
+                "errors", "write_failures", "last_write_age_sec", "compute_ms_p95", "submit_us_p99",
+                "liveness", "liveness_alert")
         return {"schema": SUMMARY_SCHEMA, **{k: status.get(k) for k in keys}}
