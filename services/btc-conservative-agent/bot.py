@@ -32123,6 +32123,9 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_fn=_disloc_touch,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
+        oi_seed_fn=(evaluator.make_tape_oi_seed(_cvt.FILE_NAME)
+                    if getattr(getattr(evaluator, "rule", None), "uses_derivatives", False)
+                    and hasattr(evaluator, "make_tape_oi_seed") else None),
     )
 
 
