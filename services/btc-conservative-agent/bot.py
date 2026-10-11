@@ -28512,9 +28512,6 @@ _SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
     enabled=SHADOW_EXIT_RECORDER_ENABLED,
     max_queue=32,
 )
-# LIVE-FIX-0815: start eagerly at boot so a dead/never-started worker is
-# visible (liveness RED) instead of silently waiting for a first submit.
-_SHADOW_EXIT_RECORDER.start()
 
 
 def _submit_shadow_exit_path(payload) -> None:
@@ -57131,6 +57128,12 @@ def main():
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
     threading.Thread(target=safe_thread(ws_tick_lifecycle_worker), daemon=True).start()
+    # LIVE-FIX-0815: start the shadow-exit recorder at boot (not lazily on first
+    # submit) so a dead worker is visible as liveness RED.
+    try:
+        _SHADOW_EXIT_RECORDER.start()
+    except Exception as exc:  # noqa: BLE001 - observation only
+        logger.warning(f"[SHADOW_EXIT] start failed: {exc}")
     if PROTECTIVE_EXIT_WORKER_ENABLED:
         threading.Thread(target=safe_thread(protective_exit_worker), name="protective-exit",
                          daemon=True).start()
