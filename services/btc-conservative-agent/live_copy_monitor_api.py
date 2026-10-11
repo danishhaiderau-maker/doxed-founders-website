@@ -12,6 +12,7 @@ from typing import Callable
 
 from flask import Blueprint, jsonify, request
 
+import live_copy_lifecycle as lcl
 import live_copy_monitor as lcm
 
 blueprint = Blueprint("live_copy_monitor", __name__)
@@ -83,6 +84,22 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
     if ctx.get("journal_write_failures"):
         out["causes"] = sorted(set(out["causes"]) | {"REPORT_JOURNAL_WRITE_FAILED"})
         out["verdict"] = lcm.worst(out["verdict"], lcm.RED)
+    # Lifecycle alerts (arming truth, executor decisions, exits/drift, exchange mirror).
+    try:
+        lc = lcl.build(ctx, now=now)
+        out["arming"] = {k: lc["arming"].get(k) for k in ("effective_live", "blockers", "mismatches", "verdict")}
+        out["arming"]["accounts"] = (lc["arming"].get("sources") or {}).get("website_accounts")
+        out["lifecycle_alerts"] = lc["alerts"][:50]
+        out["causes"] = sorted(set(out["causes"]) | set(lc["alert_codes"]))
+        out["verdict"] = lcm.worst(out["verdict"], lc["verdict"])
+        out["exchange"] = {a: {k: m.get(k) for k in ("ok", "flat", "read_age_s", "error")}
+                           | {"open_orders": len(m.get("open_orders") or []), "stops": len(m.get("stops") or []),
+                              "orphans": m.get("orphans") or [], "balance": m.get("balance")}
+                           for a, m in lc["exchange"].items()}
+    except Exception as exc:  # noqa: BLE001 - never fabricate a healthy summary
+        out["causes"] = sorted(set(out["causes"]) | {"LIFECYCLE_BUILD_FAILED"})
+        out["verdict"] = lcm.worst(out["verdict"], lcm.RED)
+        out["lifecycle_error"] = type(exc).__name__
     return out
 
 
@@ -133,7 +150,49 @@ def live_arming():  # R1
         ],
         "audit_tail": out.get("history"),
         "trade_decisions": ctx.get("decisions"),
+        "arming": lcl.effective_arming(
+            output=out, force_paper_mode=bool(ctx.get("force_paper_mode")),
+            relay_stack_mode=str(ctx.get("relay_stack_mode") or ""), switch_rows=rows, website=web,
+            fly_direct_force_paper=ctx.get("fly_direct_force_paper_mode")),
     })
+
+
+@blueprint.route("/api/monitor/live/lifecycle", methods=["GET"])
+def live_lifecycle():  # R24: full live-trade lifecycle, per intent and account
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    payload = lcl.build(ctx, now=now)
+    payload["route"] = "R24"
+    cid = request.args.get("correlation_id")
+    if cid:
+        payload["intents"] = [i for i in payload["intents"] if i.get("correlation_id") == cid
+                              or i.get("trade_id") == cid]
+    acct = request.args.get("account")
+    if acct:
+        for i in payload["intents"]:
+            i["accounts"] = [a for a in i.get("accounts") or [] if a.get("account") == acct]
+    return _ok(payload)
+
+
+@blueprint.route("/api/monitor/runtime/headroom", methods=["GET"])
+def runtime_headroom_alias():  # R12 alias readable with the monitor token
+    return live_headroom()
+
+
+@blueprint.route("/api/monitor/restarts", methods=["GET"])
+def monitor_restarts():  # R10: boots/restarts as seen by this process (monitor token)
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    started = ctx.get("process_started_ts")
+    restarts = ctx.get("restarts") or {}
+    return _ok({"route": "R10", "process_started_ts": started,
+                "uptime_sec": round(now - float(started), 1) if started else None,
+                "bot_instance_id": ctx.get("bot_instance_id"), "source_git_rev": ctx.get("source_git_rev"),
+                **(restarts if isinstance(restarts, dict) else {})})
 
 
 def _orders(ctx: dict) -> list:

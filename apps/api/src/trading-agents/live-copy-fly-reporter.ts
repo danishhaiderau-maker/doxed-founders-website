@@ -269,6 +269,53 @@ export function buildLiveCopyReports(input: {
   return out;
 }
 
+export const EXECUTOR_DECISION_REPORT_TYPES: Record<string, string> = {
+  RECEIVED: 'INTENT_RECEIVED',
+  SKIPPED: 'INTENT_SKIPPED',
+  SUBMITTED: 'INTENT_SUBMITTED',
+};
+
+/**
+ * Pure: participant-less EXECUTOR_DECISION events -> one report each
+ * (INTENT_RECEIVED / INTENT_SKIPPED{reason} / INTENT_SUBMITTED). These exist
+ * even when no participant row was ever created, so Fly sees why an intent
+ * did not become an order (11 Oct: 16 intents, 0 orders, no reason visible).
+ */
+export function buildExecutorDecisionReports(input: {
+  cycle: ReporterCycle;
+  correlationId: string;
+  lane: string;
+  events: ReporterEvent[];
+  nowMs: number;
+}): LiveExecutionReport[] {
+  const out: LiveExecutionReport[] = [];
+  for (const e of input.events) {
+    if (e.eventType !== 'EXECUTOR_DECISION') continue;
+    const pl = rec(e.payload);
+    const type = EXECUTOR_DECISION_REPORT_TYPES[String(pl.decision ?? '')];
+    if (!type) continue;
+    out.push({
+      schema: LIVE_EXECUTION_REPORT_SCHEMA,
+      report_id: `rw-${e.id}-${type}`,
+      type,
+      correlation_id: input.correlationId,
+      trade_id: input.cycle.tradeId,
+      cycle_id: input.cycle.id,
+      lane: input.lane,
+      account: typeof pl.account === 'string' ? pl.account : 'acct-unknown',
+      event_at_ts: sec(e.createdAt.getTime()),
+      sent_at_ts: input.nowMs / 1000,
+      timeline: {},
+      decision: {
+        decision: String(pl.decision),
+        reason: typeof pl.reason === 'string' ? pl.reason.slice(0, 200) : null,
+        decided_at_ts: sec(isoMs(pl.decided_at) ?? e.createdAt.getTime()),
+      },
+    });
+  }
+  return out;
+}
+
 /** Exchange identities of one FILLED record: each exchange fill id, else the entry order. */
 export function fillIdentities(pl: Record<string, unknown>): string[] {
   const out: string[] = [];
@@ -307,6 +354,7 @@ function pct(values: number[], q: number): number | null {
 export function summarizeCopyStatus(reports: LiveExecutionReport[], nowMs: number, ackedAtMs?: Map<string, number>) {
   const chains = new Map<string, { account: string; correlation_id: string; lane: unknown; tl: Record<string, number | null>; types: Set<string>; unreported: number }>();
   for (const r of reports) {
+    if (Object.values(EXECUTOR_DECISION_REPORT_TYPES).includes(r.type)) continue;
     const key = `${r.account}|${r.correlation_id}`;
     const ch = chains.get(key) ?? { account: r.account, correlation_id: r.correlation_id, lane: r.lane, tl: {}, types: new Set<string>(), unreported: 0 };
     for (const [k, v] of Object.entries(r.timeline)) if (v != null && ch.tl[k] == null) ch.tl[k] = v;
@@ -413,6 +461,13 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
           take: 500,
         }),
       ]);
+      reports.push(...buildExecutorDecisionReports({
+        cycle: c,
+        correlationId: String(verdict.approval.correlation_id),
+        lane: String(verdict.approval.research_lane),
+        events,
+        nowMs,
+      }));
       if (!participants.length) continue;
       const instances = await this.prisma.tradingAgentInstance.findMany({
         where: { agentId: c.agentId, userId: { in: participants.map((p) => p.userId) } },

@@ -3617,6 +3617,65 @@ type VirtualLotSummary = {
 
 type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
 
+/** Participant-less SignalCycleEvent type carrying one executor decision. */
+export const EXECUTOR_DECISION_EVENT = 'EXECUTOR_DECISION';
+/** Fast-path rejects the full reconciliation pass would also refuse. */
+export const FINAL_SIGNED_ENTRY_REJECTS = new Set([
+  'instance-status', 'relay-sim-active', 'hire-expired', 'relay-not-armed', 'intent-mirror-disabled', 'credentials-missing',
+]);
+export function intentDecisionSourceId(
+  instanceId: string, tradeId: string, decision: string, reason: string | null,
+): string {
+  const r = (reason ?? '').replace(/[^A-Za-z0-9_.:=-]/g, '_').slice(0, 60);
+  return `exec-decision:${instanceId}:${tradeId}:${decision}:${r}`.slice(0, 190);
+}
+export const EXCHANGE_MIRROR_EVERY_MS = 30_000;
+
+/** Pure: exchange read -> monitoring mirror (no secrets, no ids beyond order ids). */
+export function buildExchangeMirror(input: {
+  orders: Array<{ id: number; symbol: string; amount: number; amountOrig: number; price: number; status: string; orderType: string; flags?: number; cid?: number }>;
+  position: { symbol: string; amount: number; basePrice: number; pnlUsd: number; direction: 'LONG' | 'SHORT' } | null;
+  balance: number | null;
+  readStartedAt: number;
+  readAt: number;
+}): Record<string, unknown> {
+  const REDUCE_ONLY = 1024;
+  const open_orders = input.orders.map((o) => ({
+    id: String(o.id),
+    symbol: o.symbol,
+    type: o.orderType,
+    amount: o.amount,
+    amount_orig: o.amountOrig,
+    price: o.price,
+    status: o.status,
+    reduce_only: typeof o.flags === 'number' ? (o.flags & REDUCE_ONLY) === REDUCE_ONLY : null,
+    cid: o.cid ?? null,
+  }));
+  const stops = open_orders.filter((o) => /STOP/i.test(String(o.type)));
+  const positions = input.position && Math.abs(input.position.amount) > 0
+    ? [{
+      symbol: input.position.symbol,
+      side: input.position.direction,
+      amount: input.position.amount,
+      base_price: input.position.basePrice,
+      pnl_usd: input.position.pnlUsd,
+      stops: stops.length,
+    }]
+    : [];
+  return {
+    schema: 'relay_exchange_mirror_v1',
+    ok: true,
+    flat: positions.length === 0,
+    positions,
+    open_orders,
+    stops,
+    orphans: positions.length === 0 ? open_orders.map((o) => o.id) : [],
+    balance: { derivatives_available_usd: input.balance },
+    read_latency_ms: Math.max(0, input.readAt - input.readStartedAt),
+    read_at: new Date(input.readAt).toISOString(),
+  };
+}
+
 /** Re-send an unchanged live-copy coordination state to Fly at least this often. */
 export const LIVE_COPY_COORD_REASSERT_MS = 5 * 60_000;
 
@@ -3980,6 +4039,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
+      setInterval(() => void this.refreshExchangeMirror(), EXCHANGE_MIRROR_EVERY_MS).unref();
     }
   }
 
@@ -6223,8 +6283,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.logger.warn(
         `[SIGNED-ENTRY] rejected trade=${preferredTradeId ?? '?'} instance=${instance.id}: ${reason}`,
       );
+      void this.recordIntentDecision(
+        agentId,
+        instance.id,
+        preferredTradeId,
+        'SKIPPED',
+        FINAL_SIGNED_ENTRY_REJECTS.has(reason.split('=')[0]) ? reason : `fast-path:${reason}`,
+      );
       return false;
     };
+    void this.recordIntentDecision(agentId, instance.id, preferredTradeId, 'RECEIVED', null);
     const armedAt = relayArmTimestampMs(instance.dashboardState);
     if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return reject(`instance-status=${instance.status}`);
     if (isCopyRelaySimActive(instance.dashboardState)) return reject('relay-sim-active');
@@ -9313,7 +9381,152 @@ await this.notifications
     return null;
   }
 
+  /**
+   * Lifecycle coverage (11 Oct): every entry placement attempt leaves one
+   * durable executor decision (SUBMITTED, or SKIPPED with the reason) that
+   * the Fly reporter forwards within ~5 s.
+   */
   private async placeEntry(
+    agentId: string,
+    instance: TradingAgentInstance,
+    cycleId: string,
+    envelopeJson: unknown,
+    creds: ExchangeCredentials,
+    marginCap: number,
+    tradeId: string,
+    venue = 'bitfinex',
+    fastPreflight?: {
+      availableUsd: number;
+      markPrice: number;
+      exchangeBookProvenEmpty?: boolean;
+    },
+    timing?: RelayExecutionTimingStages,
+  ): Promise<boolean> {
+    let placed = false;
+    let failure: string | null = null;
+    try {
+      placed = await this.placeEntryInner(
+        agentId, instance, cycleId, envelopeJson, creds, marginCap, tradeId, venue, fastPreflight, timing,
+      );
+      return placed;
+    } catch (err) {
+      failure = `placement-error:${err instanceof Error ? err.message.slice(0, 120) : 'unknown'}`;
+      throw err;
+    } finally {
+      if (venue === 'bitfinex') {
+        void this.recordIntentDecision(
+          agentId,
+          instance.id,
+          tradeId,
+          placed ? 'SUBMITTED' : 'SKIPPED',
+          placed ? null : failure ?? 'placement-declined',
+          cycleId,
+        );
+      }
+    }
+  }
+
+  private exchangeMirrorRunning = false;
+
+  /**
+   * Read-only exchange mirror for monitoring (11 Oct lifecycle audit RED 2/5):
+   * positions, open orders, reduce-only stops and Derivatives balance of each
+   * ARMED (ACTIVE, non-sim) Bitfinex account, persisted under
+   * dashboardState.relayExchangeMirror so Fly's fly-view and the monitor can
+   * prove "flat" from exchange truth. Never writes to the exchange; skipped
+   * while a money tick holds the lane, and paused accounts are not polled
+   * (read_age then grows, and Fly alerts only while armed).
+   */
+  private async refreshExchangeMirror(): Promise<void> {
+    if (this.executorDestroyed || this.exchangeMirrorRunning || this.running) return;
+    this.exchangeMirrorRunning = true;
+    try {
+      for (const instance of this.relayInstanceCache.values()) {
+        if (instance.exchangeProvider !== 'bitfinex') continue;
+        if (instance.status !== TradingAgentInstanceStatus.ACTIVE) continue;
+        if (isCopyRelaySimActive(instance.dashboardState)) continue;
+        if (this.running) return;
+        const readStartedAt = Date.now();
+        let mirror: Record<string, unknown>;
+        try {
+          const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
+          if (!creds) throw new Error('credentials-missing');
+          const [orders, position, balance] = await Promise.all([
+            this.bitfinex.listActiveOrders(creds),
+            this.bitfinex.getOpenPositionDetail(creds),
+            this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
+          ]);
+          mirror = buildExchangeMirror({ orders, position, balance, readStartedAt, readAt: Date.now() });
+        } catch (err) {
+          mirror = {
+            schema: 'relay_exchange_mirror_v1',
+            ok: false,
+            error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
+            read_at: new Date().toISOString(),
+          };
+        }
+        const payload = JSON.stringify(mirror);
+        await this.prisma.$executeRaw`
+          UPDATE "TradingAgentInstance"
+          SET "dashboardState" = jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayExchangeMirror}', ${payload}::jsonb)
+          WHERE "id" = ${instance.id}::text AND "exchangeProvider" = 'bitfinex'
+        `.catch(() => undefined);
+      }
+    } finally {
+      this.exchangeMirrorRunning = false;
+    }
+  }
+
+  private readonly intentDecisionSeen = new Map<string, number>();
+
+  /**
+   * Durable, idempotent executor decision for one (account, intent): RECEIVED,
+   * SKIPPED{reason} or SUBMITTED. Stored as a participant-less SignalCycleEvent
+   * (sourceEventId-unique, so restarts never duplicate it). Best effort: a
+   * failure here must never affect the money path.
+   */
+  private async recordIntentDecision(
+    agentId: string,
+    instanceId: string,
+    tradeId: string | null | undefined,
+    decision: 'RECEIVED' | 'SKIPPED' | 'SUBMITTED',
+    reason: string | null,
+    cycleId?: string,
+  ): Promise<void> {
+    try {
+      if (!tradeId) return;
+      const key = intentDecisionSourceId(instanceId, tradeId, decision, reason);
+      if (this.intentDecisionSeen.has(key)) return;
+      this.intentDecisionSeen.set(key, Date.now());
+      if (this.intentDecisionSeen.size > 5_000) {
+        const first = this.intentDecisionSeen.keys().next().value;
+        if (first) this.intentDecisionSeen.delete(first);
+      }
+      const resolvedCycleId = cycleId ?? (await this.prisma.signalCycle.findUnique({
+        where: { agentId_tradeId: { agentId, tradeId } },
+        select: { id: true },
+      }))?.id;
+      if (!resolvedCycleId) return;
+      await this.prisma.signalCycleEvent.create({
+        data: {
+          cycleId: resolvedCycleId,
+          participantId: null,
+          eventType: EXECUTOR_DECISION_EVENT,
+          sourceEventId: key,
+          payload: {
+            decision,
+            reason,
+            account: `acct-${instanceId.slice(0, 8)}`,
+            decided_at: new Date().toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      }).catch(() => undefined);
+    } catch {
+      /* observability only */
+    }
+  }
+
+  private async placeEntryInner(
     agentId: string,
     instance: TradingAgentInstance,
     cycleId: string,
