@@ -17,7 +17,7 @@ VIOLENT = bar(atr_pct=90.0, adx=15.0)
 def test_registry_owns_a_paper_only_default_off_regime_router():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[9] == policy.LANE
+    assert policy.LANE in ACTIVE_TILE_ORDER
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is False
     assert spec["relay_capability"] == "BLOCKED_UNQUALIFIED"

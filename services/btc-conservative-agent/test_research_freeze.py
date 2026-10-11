@@ -98,10 +98,15 @@ def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_on
     default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL",
                    "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
                    "FAMILY_DISLOC_FOI_LONG_1M"}
-    for n, item in enumerate(rf.MID_EPOCH_ADDITIONS, start=len(rf.FREEZE_ROSTER) + 1):
+    for item in rf.MID_EPOCH_ADDITIONS:
         lane = item["lane"]
         spec = cfg.COMBO_LANE_SPECS[lane]
-        assert cfg.tile_number(lane) == item["tile_number"] == n
+        # item["tile_number"] is the registration-time number; display numbers are
+        # derived (2026-10-11 retirement renumbered active tiles 1-10, retired show none).
+        assert cfg.tile_number(lane) == (None if lane in cfg.RETIRED_TILE_LANES
+                                         else cfg.ACTIVE_TILE_ORDER.index(lane) + 1)
+        if lane in cfg.RETIRED_TILE_LANES:
+            continue
         assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
         assert spec["live_copy_eligible"] is False and spec["relay_capability"] == "BLOCKED_UNQUALIFIED"
         assert spec["default_enabled"] is (lane not in default_off)

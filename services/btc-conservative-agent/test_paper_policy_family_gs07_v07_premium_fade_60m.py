@@ -1,3 +1,4 @@
+import pytest
 """Tile 14 · GS-07 V07: premium fade on the 60-min mean, +/-2.5 bp, 300 s / 12 per hour, 6 open."""
 import paper_policy_family_gs07_v07_premium_fade_60m as policy
 from combo_pathway_config import (
@@ -11,6 +12,7 @@ from combo_pathway_config import (
 from cross_venue_premium import PremiumEvaluator
 
 
+@pytest.mark.skip(reason="tile retired 2026-10-11 (owner); module kept, no longer registered")
 def test_registry_spec_matches_v07():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()

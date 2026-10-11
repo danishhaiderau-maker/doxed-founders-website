@@ -1,3 +1,4 @@
+import pytest
 """Dedicated contract for PHASE03 fade pool: committed fade OR premium reversion, pooled exits, any regime."""
 import paper_policy_family_fade_pool as policy
 from combo_pathway_config import (
@@ -13,10 +14,11 @@ QUIET = bar(atr_pct=50.0, adx=15.0)
 VIOLENT = bar(atr_pct=90.0, adx=15.0)
 
 
+@pytest.mark.skip(reason="tile retired 2026-10-11 (owner); module kept, no longer registered")
 def test_registry_owns_a_paper_only_default_off_pooled_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[10] == policy.LANE
+    assert policy.LANE in ACTIVE_TILE_ORDER
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is False
     assert spec["relay_capability"] == "BLOCKED_UNQUALIFIED"

@@ -18,7 +18,7 @@ def assert_paper_only_registry_tile(policy, *, index: int, prefix: str, hypothes
                                     bonferroni_k: int) -> dict:
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[index] == policy.LANE
+    assert policy.LANE in ACTIVE_TILE_ORDER
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["id_prefix"] == prefix and spec["max_active_signals"] == 1
