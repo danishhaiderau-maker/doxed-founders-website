@@ -608,3 +608,124 @@ class DislocEngine:
 
 
 LANE_REF = ["FAMILY_DISLOC_BFX_DISLOCATION_1M"]
+
+
+# --------------------------------------------------------------------------- tile stats folding
+# DISLOC trades live in their own paper ledger (disloc_trades*.jsonl), not in the
+# bot's ``trades`` list, so the tile cards, /api/monitor/tiles/totals and the
+# monitor lane stats used to read 0 for Tiles 9/10.  These helpers project the
+# ledger onto the same shapes those paths already consume.
+
+LANE_FILES = {
+    "FAMILY_DISLOC_BFX_DISLOCATION_1M": TRADES_FILE,
+    "FAMILY_DISLOC_FOI_LONG_1M": FOI_TRADES_FILE,
+}
+DEFAULT_MARGIN_USD = 0.25
+DEFAULT_LEVERAGE = 100.0
+
+
+def delay_bucket(signal_to_fill_s) -> Optional[str]:
+    v = _num(signal_to_fill_s)
+    if v is None:
+        return None
+    for name, lo, hi in DELAY_BUCKETS:
+        if lo <= v <= hi:
+            return name
+    return "gt_5s"
+
+
+def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
+    return sorted((dict(r) for r in rows if isinstance(r, Mapping) and r.get("schema") == SCHEMA
+                   and r.get("event") == "DISLOC_CLOSED"),
+                  key=lambda r: float(r.get("exit_ts") or 0.0))
+
+
+def row_net_usd(row: Mapping[str, Any], margin_usd: float = DEFAULT_MARGIN_USD,
+                leverage: float = DEFAULT_LEVERAGE) -> Optional[float]:
+    bp = _num(row.get("net_bp_taker_2p8"))
+    if bp is None:
+        return None
+    return bp * float(margin_usd) * float(leverage) / 1e4
+
+
+def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=None,
+                    margin_usd: float = DEFAULT_MARGIN_USD, leverage: float = DEFAULT_LEVERAGE,
+                    short_name: Optional[str] = None, be_band_bp: float = 0.0) -> list:
+    """DISLOC_CLOSED ledger rows as ``tile_trade_row_v1``-shaped CLOSED rows (paper, never forced)."""
+    out = []
+    notional = float(margin_usd) * float(leverage)
+    for r in closed_rows(rows):
+        bp = _num(r.get("net_bp_taker_2p8"))
+        net = row_net_usd(r, margin_usd, leverage)
+        if bp is None:
+            cls = None
+        elif bp > be_band_bp:
+            cls = "W"
+        elif bp < -be_band_bp:
+            cls = "L"
+        else:
+            cls = "BE"
+        fill_ts, exit_ts = _num(r.get("fill_ts")), _num(r.get("exit_ts"))
+        out.append({
+            "schema": "tile_trade_row_v1", "trade_id": str(r.get("trade_id") or ""), "lane": lane,
+            "tile_short": short_name, "status": "CLOSED", "data_epoch_id": epoch_id or r.get("data_epoch_id"),
+            "policy_signature": r.get("policy_signature"), "side": r.get("side"),
+            "notional_usd": notional, "leverage": leverage,
+            "trigger": {"signal_ts": _num(r.get("signal_ts")), "entry_path": "DISLOC_PAPER",
+                        "entry_type": r.get("order_type")},
+            "order": {"submitted_ts": _num(r.get("order_ts")), "terminal": "FILLED"},
+            "fill": {"fill_price": _num(r.get("fill_price")), "fill_ts": fill_ts,
+                     "fill_ts_basis": "DISLOC_PAPER_TAKER_AT_TOUCH"},
+            "exit": {"close_ts": exit_ts, "exit_price": _num(r.get("exit_price")),
+                     "exit_reason": r.get("exit_reason"), "close_origin": "STRATEGY",
+                     "forced_close": False, "deploy_flatten": False, "legs": []},
+            "timing": {"signal_to_order_s": _num(r.get("signal_to_order_s")),
+                       "signal_to_fill_s": _num(r.get("signal_to_fill_s")),
+                       "order_to_fill_s": _num(r.get("order_to_fill_s")), "hold_s": _num(r.get("hold_s"))},
+            "path": {"mfe_bp": None, "basis": None},
+            "pnl": {"bp": bp, "bp_basis": "net_bp_taker_2p8", "gross_usd": None, "trading_fees_usd": None,
+                    "funding_usd": None, "net_usd": round(net, 6) if net is not None else None,
+                    "net_usd_basis": "DISLOC_NET_BP_x_NOTIONAL", "class": cls, "be_band_bp": be_band_bp,
+                    "net_usd_cents_booked": round(net, 2) if net is not None else None},
+            "disloc": {"side_tag": r.get("side_tag") or SIDE_TAGS.get(str(r.get("side"))),
+                       "delay_bucket": delay_bucket(r.get("signal_to_fill_s")), "variant": r.get("variant")},
+            "sort_ts": fill_ts or exit_ts or 0.0,
+        })
+    return out
+
+
+def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAULT_MARGIN_USD,
+                 leverage: float = DEFAULT_LEVERAGE) -> dict:
+    """Card metrics (same keys as the lane ledger fold in bot.py) + side / delay-bucket breakdown."""
+    closed = closed_rows(rows)
+    wins = losses = 0
+    net_total = 0.0
+    by_side: dict = {}
+    by_delay: dict = {}
+    for r in closed:
+        bp = _num(r.get("net_bp_taker_2p8")) or 0.0
+        net = row_net_usd(r, margin_usd, leverage) or 0.0
+        net_total += net
+        wins += bp > 0
+        losses += bp < 0
+        for key, bucket in ((str(r.get("side") or "?"), by_side),
+                            (delay_bucket(r.get("signal_to_fill_s")) or "unknown", by_delay)):
+            b = bucket.setdefault(key, {"closes": 0, "wins": 0, "losses": 0, "net_usd": 0.0, "sum_bp": 0.0})
+            b["closes"] += 1
+            b["wins"] += bp > 0
+            b["losses"] += bp < 0
+            b["net_usd"] += net
+            b["sum_bp"] += bp
+    for bucket in (by_side, by_delay):
+        for key, b in bucket.items():
+            if key in SIDE_TAGS:
+                b["tag"] = SIDE_TAGS[key]
+            b["mean_net_bp"] = round(b.pop("sum_bp") / b["closes"], 4) if b["closes"] else None
+            b["net_usd"] = round(b["net_usd"], 4)
+    n = len(closed)
+    return {
+        "closes": n, "wins": wins, "losses": losses, "net_pnl_usd": round(net_total, 4),
+        "mean_net_bp": round(sum(_num(r.get("net_bp_taker_2p8")) or 0.0 for r in closed) / n, 4) if n else None,
+        "by_side": by_side, "by_delay_bucket": by_delay,
+        "usd_basis": f"net_bp_taker_2p8 x ${float(margin_usd):g} margin x {float(leverage):g}x / 1e4 (paper)",
+    }
