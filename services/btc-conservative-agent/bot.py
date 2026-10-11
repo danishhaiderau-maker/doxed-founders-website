@@ -32934,6 +32934,11 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
     "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
+    # HM-MISSING-20261012
+    "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
+    "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
+    "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
+    "/api/monitor/shadow-exits",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -45790,7 +45795,7 @@ def system_health_report():
         "through_ts": events[-1]["ts"] if events else None}})
 
 
-def _system_health_alert_history() -> dict:
+def _system_health_alert_history(full: bool = False) -> dict:
     with _SYSTEM_HEALTH_LOCK:
         _restore_system_health_state()
         events = list(_SYSTEM_HEALTH_ALARMS["events"])
@@ -45800,7 +45805,12 @@ def _system_health_alert_history() -> dict:
         statuses = {}
     history = system_health_alerts.build_history(events, statuses=statuses, statuses_at=statuses_at)
     history["source"] = "laptop watcher push (POST /api/system-health/report)"
-    return history if _admin_authed_strict() else system_health_alerts.public_view(history)
+    return history if (full or _admin_authed_strict()) else system_health_alerts.public_view(history)
+
+
+def _system_health_alert_history_full() -> dict:
+    """Unredacted history for the monitor bearer (the calling route checks auth)."""
+    return _system_health_alert_history(full=True)
 
 
 @app.route('/api/system-health/alerts')
@@ -46486,6 +46496,184 @@ def monitor_exit_latency():
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
 
     return _monitor_tiles_guard(build, 1_500_000)
+
+
+# ---------------------------------------------------------------------------
+# HM-MISSING-20261012: integrity checks with alert flags (admin or MONITOR_READ_TOKEN).
+# Pure logic in monitor_checks.py; read-only except the admin-only archive receipt POST.
+# ---------------------------------------------------------------------------
+_ARCHIVE_RECEIPT_FILE = "archive_receipt.json"
+_ARCHIVE_RECEIPT_MAX_BYTES = 16384
+
+
+def _archive_receipt_path():
+    return _data_sync_volume_root() / _ARCHIVE_RECEIPT_FILE
+
+
+def _load_archive_receipt():
+    try:
+        return json.loads(_archive_receipt_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _monitor_check_inputs(now: float, hours: float) -> dict:
+    import exit_latency_slo as _els
+    since = now - hours * 3600
+    scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(), "since": None,
+             "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": False}
+    by_lane = _monitor_tiles_rows(scope, ("closed", "open"))
+    totals = monitor_tiles.totals_view({k: [r for r in v if r.get("status") == "CLOSED"] for k, v in by_lane.items()},
+                                       include_forced=False, be_band_bp=scope["be_band_bp"])
+    closed = [r for r in list(trades) if isinstance(r, dict)]
+    per_tile = {}
+    for r in closed:
+        ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
+        if float(ev.get("exit_fill_ts") or 0) >= since:
+            per_tile.setdefault(str(r.get("research_lane") or "?"), []).append(r)
+    return {"since": since, "by_lane": by_lane, "totals": totals,
+            "slo": _els.evaluate(closed, since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
+            "per_tile": {k: {"exit": _els.evaluate(v, since=since, forced=STATS_EXCLUDED_EXIT_REASONS)}
+                         for k, v in per_tile.items()}}
+
+
+def _monitor_checks_all(now: float, hours: float) -> dict:
+    import monitor_checks as _mc
+    import bitfinex_cost_profile as _bcp
+    inp = _monitor_check_inputs(now, hours)
+    tape_ts, tape_rows = _TILE_TAPE_RING.slice(inp["since"], now)
+    closed_rows = [r for rows in inp["by_lane"].values() for r in rows if r.get("status") == "CLOSED"]
+    snap = {}
+    try:
+        with state_lock:
+            snap = copy.deepcopy(state.get("balance_reconcile") or {})
+    except Exception:
+        snap = {}
+    open_lanes = [lane for lane, rows in inp["by_lane"].items() if any(r.get("status") == "OPEN" for r in rows)]
+    archive = _load_archive_receipt()
+    archive_tape_oldest = (archive or {}).get("tape_1s_oldest_ts")
+    checks = {
+        "exit-truth": _mc.exit_truth(closed_rows, tape_ts, tape_rows, since=inp["since"]),
+        "pnl-reconcile": _mc.pnl_reconcile(inp["totals"], inp["by_lane"], None, snap),
+        "rules-conformance": _mc.rules_conformance(
+            active_tiles=ACTIVE_TILE_ORDER, retired_tiles=RETIRED_TILE_LANES, live_copy_tiles={},
+            open_lanes=open_lanes, totals_lanes=inp["totals"].get("lanes") or {},
+            fee_rates_bp={"maker": _bcp.MAKER_FEE_RATE * 1e4, "taker": _bcp.TAKER_FEE_RATE * 1e4}),
+        "data-completeness": _mc.data_completeness(_TILE_TAPE_RING.bounds(), now=now),
+        "tape-retention": _mc.tape_retention(_TILE_TAPE_RING.bounds(), _mc._f(archive_tape_oldest), now=now),
+        "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"]),
+        "archive-receipt": _mc.archive_receipt(archive, now=now),
+    }
+    return checks
+
+
+_MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
+                        "tape-retention", "exits-latency-guard", "archive-receipt")
+
+
+@app.route('/api/monitor/checks', methods=["GET"])
+def monitor_checks_all():
+    """All HM integrity checks with status + alert flag. ?hours=24 (max 168)."""
+    def build(now):
+        try:
+            hours = min(168.0, max(0.1, float(request.args.get("hours") or 24)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        checks = _monitor_checks_all(now, hours)
+        order = {"RED": 3, "AMBER": 2, "UNKNOWN": 1, "GREEN": 0}
+        worst = max((c["status"] for c in checks.values()), key=lambda x: order.get(x, 0), default="GREEN")
+        return {"schema": "monitor_checks_v1", **_monitor_tiles_common(now), "window_hours": hours,
+                "status": worst, "alert": any(c.get("alert") for c in checks.values()),
+                "alerts": sorted(k for k, c in checks.items() if c.get("alert")), "checks": checks}
+    return _monitor_tiles_guard(build, 1_500_000)
+
+
+def _monitor_single_check(name):
+    def build(now):
+        try:
+            hours = min(168.0, max(0.1, float(request.args.get("hours") or 24)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        return {**_monitor_checks_all(now, hours)[name], **_monitor_tiles_common(now), "window_hours": hours}
+    return _monitor_tiles_guard(build, 800_000)
+
+
+@app.route('/api/monitor/exit-truth', methods=["GET"])
+def monitor_check_exit_truth():
+    return _monitor_single_check("exit-truth")
+
+
+@app.route('/api/monitor/pnl/reconcile', methods=["GET"])
+def monitor_check_pnl_reconcile():
+    return _monitor_single_check("pnl-reconcile")
+
+
+@app.route('/api/monitor/rules/conformance', methods=["GET"])
+def monitor_check_rules():
+    return _monitor_single_check("rules-conformance")
+
+
+@app.route('/api/monitor/data/completeness', methods=["GET"])
+def monitor_check_data_completeness():
+    return _monitor_single_check("data-completeness")
+
+
+@app.route('/api/monitor/tape/retention', methods=["GET"])
+def monitor_check_tape_retention():
+    return _monitor_single_check("tape-retention")
+
+
+@app.route('/api/monitor/exits/latency-guard', methods=["GET"])
+def monitor_check_latency_guard():
+    return _monitor_single_check("exits-latency-guard")
+
+
+@app.route('/api/monitor/archive', methods=["GET"])
+def monitor_check_archive():
+    return _monitor_single_check("archive-receipt")
+
+
+@app.route('/api/monitor/archive/receipt', methods=["POST"])
+def monitor_archive_receipt_post():
+    """Admin-only (middleware): laptop R2 backup job pushes {bucket, files, bytes_*, errors, disk_free_pct, finished_ts}."""
+    if (request.content_length or 0) > _ARCHIVE_RECEIPT_MAX_BYTES:
+        return jsonify({"ok": False, "error": "too large"}), 413
+    raw = request.get_json(silent=True)
+    if not isinstance(raw, dict):
+        return jsonify({"ok": False, "error": "json object required"}), 400
+    keep = {k: raw.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded", "errors", "ok",
+                                    "disk_free_pct", "disk_free_gb", "finished_ts", "restore_test", "host",
+                                    "tape_1s_oldest_ts") if k in raw}
+    keep["received_ts"] = time.time()
+    try:
+        path = _archive_receipt_path()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(keep, default=str), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": type(exc).__name__}), 500
+    return jsonify({"ok": True})
+
+
+@app.route('/api/monitor/alerts', methods=["GET"])
+def monitor_alerts_full():
+    """Full alert history (same as admin /api/system-health/alerts) for the monitor token."""
+    def build(now):
+        statuses_view = _system_health_alert_history_full()
+        return {"schema": "monitor_alerts_v1", **_monitor_tiles_common(now), **statuses_view}
+    return _monitor_tiles_guard(build, 1_500_000)
+
+
+@app.route('/api/monitor/shadow-exits', methods=["GET"])
+def monitor_shadow_exits():
+    """Shadow-exit recorder status + aggregates (was admin-only /api/research/shadow_exits)."""
+    def build(now):
+        limit = max(0, min(50, request.args.get("limit", 20, type=int) or 0))
+        return {"schema": "shadow_exit_runtime_view_v1", **_monitor_tiles_common(now),
+                "status": _SHADOW_EXIT_RECORDER.status(),
+                "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
+                "recent": _SHADOW_EXIT_RECORDER.recent(limit), "observation_only": True}
+    return _monitor_tiles_guard(build, 1_000_000)
 
 
 @app.route('/api/monitor/tiles/counters', methods=["GET"])
