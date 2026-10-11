@@ -37642,6 +37642,7 @@ DASHBOARD_JS = """(function () {
         HARD_STOP: 'Safety stop',
         TIME_EXIT: 'Maximum-hold exit',
         ADMIN_MANUAL_CLOSE: 'Manual or deploy close',
+        DEPLOY_FORCE_FLAT: 'Pre-deploy force flat',
         CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
       };
       return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
@@ -47004,8 +47005,10 @@ def api_close_showcase_position():
             len(matches),
         )
         return jsonify({"error": "ambiguous showcase position", "trade_id": trade_id}), 409
-    close_origin = _forced_close_origin("ADMIN_MANUAL_CLOSE")
-    close_position(matches[0], "ADMIN_MANUAL_CLOSE")
+    # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
+    close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
+    close_origin = _forced_close_origin(close_reason)
+    close_position(matches[0], close_reason)
     with state_lock:
         still_open = any(
             str(pos.get("trade_id") or "") == trade_id
@@ -54098,7 +54101,7 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         exclusion_reasons.append("TERMINAL_PROVENANCE_MISSING")
     elif str(exit_provenance).upper() in {
         "SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED",
-        "ADMIN_MANUAL_CLOSE", "MANUAL_CLOSE", "EMERGENCY_ACTION",
+        "ADMIN_MANUAL_CLOSE", "DEPLOY_FORCE_FLAT", "MANUAL_CLOSE", "EMERGENCY_ACTION",
         "SHOWCASE_UNREACHABLE_OPEN_LOT", "SHOWCASE_FLAT_FAILSAFE",
         "SHOWCASE_BOOK_FLAT", "EXIT_ONLY_PENDING_CANCEL_PARTIAL_FILL",
         "LATE_FILL_CLEANUP",
