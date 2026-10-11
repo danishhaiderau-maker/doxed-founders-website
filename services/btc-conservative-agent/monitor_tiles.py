@@ -457,12 +457,23 @@ def _drawdown(values: Iterable[float]) -> float:
     return drawdown
 
 
+def _deploy_flatten_block(rows) -> dict:
+    """Separate stats for closes forced by a guarded deploy's flatten (excluded from strategy stats)."""
+    bps = [b for b in (_finite((r.get("pnl") or {}).get("bp")) for r in rows) if b is not None]
+    nets = [_finite((r.get("pnl") or {}).get("net_usd")) or 0.0 for r in rows]
+    return {"closes": len(rows), "net_usd": round(sum(nets), 6),
+            "sum_bp": round(sum(bps), 4) if bps else 0.0,
+            "mean_bp": round(sum(bps) / len(bps), 4) if bps else None,
+            "excluded_from_strategy_stats": True}
+
+
 def lane_totals(rows: Iterable[Mapping[str, Any]], *, include_forced: bool,
                 be_band_bp: float) -> dict:
     """Closed-trade totals for one lane from ``tile_trade_row_v1`` rows (by bp, unrounded USD)."""
     closed = sorted((r for r in rows if r.get("status") == "CLOSED"),
                     key=lambda r: float((r.get("exit") or {}).get("close_ts") or 0.0))
     forced = [r for r in closed if (r.get("exit") or {}).get("forced_close")]
+    deploy_flat = [r for r in forced if (r.get("exit") or {}).get("deploy_flatten")]
     counted = closed if include_forced else [r for r in closed if not (r.get("exit") or {}).get("forced_close")]
     bps, nets = [], []
     wins = losses = be = 0
@@ -502,7 +513,9 @@ def lane_totals(rows: Iterable[Mapping[str, Any]], *, include_forced: bool,
     return {
         "closes": n, "wins": wins, "losses": losses, "be": be,
         "forced_closes": len(forced), "forced_closes_counted": len(forced) if include_forced else 0,
-        "deploy_flatten_closes": sum(1 for r in forced if (r.get("exit") or {}).get("deploy_flatten")),
+        "deploy_flatten_closes": len(deploy_flat),
+        # Deploy force-flattens shown separately (never part of strategy stats above).
+        "deploy_flatten": _deploy_flatten_block(deploy_flat),
         "sum_bp": round(sum(bps), 4) if bps else 0.0,
         "mean_bp": round(sum(bps) / len(bps), 4) if bps else None,
         "median_bp": round(statistics.median(bps), 4) if bps else None,
