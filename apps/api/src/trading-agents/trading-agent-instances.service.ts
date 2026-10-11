@@ -859,7 +859,13 @@ export class TradingAgentInstancesService {
     // just slow to land.
     if (!paused) {
       try {
-        await this.execution.wakeNow('USER_RESUME');
+        // The public API process cannot run money ticks (executionEnabled() is
+        // false there), so wakeNow() was a silent no-op and the paused worker
+        // never re-read the instance after Start (11 Oct: STARTED 18:30 while
+        // the worker kept re-asserting SOURCE_RESEARCH_ONLY). requestExecutorWake
+        // dispatches the authenticated private wake plus the durable fallback,
+        // and calls wakeNow directly when this process IS the worker.
+        await this.execution.requestExecutorWake('USER_RESUME');
       } catch (err) {
         this.logger.warn(
           `wakeNow on resume failed (non-fatal): ${err instanceof Error ? err.message : err}`,
@@ -867,7 +873,7 @@ export class TradingAgentInstancesService {
       }
     } else {
       try {
-        await this.execution.wakeNow('USER_PAUSE');
+        await this.execution.requestExecutorWake('USER_PAUSE');
       } catch (err) {
         this.logger.warn(
           `wakeNow on pause failed (non-fatal): ${err instanceof Error ? err.message : err}`,

@@ -1438,15 +1438,25 @@ export class TradingAgentsService implements OnModuleInit {
     type Row = {
       id: string; status: string; exchangeProvider: string;
       relayArmedAt: string | null; relayExecutor: unknown; lastTickAt: string | null;
+      relayExecutionMode: string | null; relayLastTransition: unknown; lastError: string | null;
+      relayExchangeMirror: unknown; copyRelaySimActive: boolean; updatedAt: Date | null;
     };
     const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
       SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
              i."dashboardState" ->> 'relayArmedAt' AS "relayArmedAt",
              i."dashboardState" -> 'relayExecutor' AS "relayExecutor",
-             i."dashboardState" ->> 'lastTickAt' AS "lastTickAt"
+             i."dashboardState" ->> 'lastTickAt' AS "lastTickAt",
+             i."dashboardState" ->> 'relayExecutionMode' AS "relayExecutionMode",
+             i."dashboardState" -> 'relayLastTransition' AS "relayLastTransition",
+             i."dashboardState" -> 'relayExchangeMirror' AS "relayExchangeMirror",
+             COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "copyRelaySimActive",
+             i."lastError", i."updatedAt"
       FROM "TradingAgentInstance" i
       WHERE i."agentId" = ${agent.id}
-        AND i."dashboardState" ->> 'relayArmedAt' IS NOT NULL
+        AND i."exchangeProvider" = 'bitfinex'
+        AND (i."dashboardState" ->> 'relayArmedAt' IS NOT NULL
+             OR i."dashboardState" -> 'relayLastTransition' IS NOT NULL)
+        AND i."status"::text IN ('ACTIVE', 'PAUSED')
       LIMIT 200
     `);
     const nowMs = Date.now();
@@ -1461,6 +1471,15 @@ export class TradingAgentsService implements OnModuleInit {
         armed_at: r.relayArmedAt,
         executor_healthy: health.healthy,
         executor_heartbeat_age_sec: health.heartbeatAgeMs == null ? null : Math.round(health.heartbeatAgeMs / 1000),
+        executor_status: health.status,
+        // Lifecycle coverage: the exact fields the executor gates on, plus
+        // who/what last changed the arm state and when (no user ids).
+        relay_mode: r.relayExecutionMode,
+        sim_active: r.copyRelaySimActive,
+        last_transition: flyViewTransition(r.relayLastTransition),
+        last_error: r.lastError ? String(r.lastError).slice(0, 200) : null,
+        updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
+        exchange_mirror: flyViewMirror(r.relayExchangeMirror, nowMs),
       };
     });
     const armedRows = accounts.filter((a) => a.armed);
@@ -1472,6 +1491,7 @@ export class TradingAgentsService implements OnModuleInit {
       executor_heartbeat_age_sec: ages.length ? Math.min(...ages) : null,
       ingest_rejects_1h: rejects ?? null,
       computed_at: new Date(nowMs).toISOString(),
+      server_ts: nowMs / 1000,
     };
   }
 
@@ -2329,4 +2349,27 @@ function mapShowcaseExitReasonToTrigger(
   }
   if (r.includes('MANUAL') || r.includes('CLOSE')) return 'Manual';
   return 'Signal';
+}
+
+/** Pure: privacy-safe projection of dashboardState.relayLastTransition. */
+export function flyViewTransition(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const t = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === 'string' ? v.slice(0, 80) : null);
+  return {
+    at: str(t.at),
+    actor: str(t.actor),
+    action: str(t.action),
+    reason: str(t.reason),
+    cancelled_pending_orders: typeof t.cancelledPendingOrders === 'number' ? t.cancelledPendingOrders : null,
+    open_positions_left_on_exchange: typeof t.openPositionsLeftOnExchange === 'boolean' ? t.openPositionsLeftOnExchange : null,
+  };
+}
+
+/** Pure: exchange mirror with its read age (null when never read). */
+export function flyViewMirror(raw: unknown, nowMs: number): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const m = raw as Record<string, unknown>;
+  const readMs = typeof m.read_at === 'string' ? Date.parse(m.read_at) : NaN;
+  return { ...m, read_age_s: Number.isFinite(readMs) ? Math.max(0, Math.round((nowMs - readMs) / 100) / 10) : null };
 }

@@ -32887,7 +32887,8 @@ def _emergency_api_guard():
     if method == "GET" and (path == "/api/monitor/streams" or path.startswith("/api/monitor/streams/")):
         return None
     # Live-copy monitoring (admin or MONITOR_READ_TOKEN, checked per handler).
-    if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"):
+    if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"
+                            or path in ("/api/monitor/restarts", "/api/monitor/runtime/headroom")):
         return None
     # Executor reports authenticate with their own HMAC in the handler.
     if method == "POST" and path == "/api/live-copy/execution-report":
@@ -57484,7 +57485,8 @@ def _live_copy_paper_twins() -> dict:
         if tid:
             out[tid] = {"entry_price": row.get("entry_price"), "qty": row.get("qty"),
                         "side": row.get("side"), "exit_price": row.get("exit_price"),
-                        "exit_ts": row.get("exit_ts")}
+                        "exit_ts": row.get("exit_ts"),
+                        "exit_reason": row.get("exit_reason") or row.get("reason")}
     try:
         with trade_lock:
             recent = list(recent_trades)[-50:]
@@ -57496,9 +57498,26 @@ def _live_copy_paper_twins() -> dict:
                     "side": row.get("dir") or row.get("direction") or row.get("side"),
                     "exit_price": row.get("exit") or row.get("exit_price"),
                     "exit_ts": row.get("exit_ts") or row.get("close_ts"),
+                    "exit_reason": row.get("exit_reason") or row.get("reason"),
                 }
     except Exception:  # noqa: BLE001
         pass
+    return out
+
+
+def _live_copy_delivery_times() -> dict:
+    """First successful website delivery time (epoch s) per trade id, from push history."""
+    out: dict = {}
+    with _relay_push_history_lock:
+        rows = list(_relay_push_history)
+    for row in rows:
+        tid = row.get("trade_id")
+        if not tid or not row.get("ok") or tid in out:
+            continue
+        try:
+            out[tid] = datetime.fromisoformat(str(row.get("delivery_completed_at")).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            continue
     return out
 
 
@@ -57824,6 +57843,7 @@ def _live_copy_monitor_context() -> dict:
             "guard": _relay_delivery_guard.status() if hasattr(_relay_delivery_guard, "status") else None,
         },
         "website": _live_copy_website_state(),
+        "deliveries": _live_copy_delivery_times(),
         "process_started_ts": globals().get("process_boot_time"),
         "bot_instance_id": BOT_INSTANCE_ID,
         "source_git_rev": _runtime_git_rev(),

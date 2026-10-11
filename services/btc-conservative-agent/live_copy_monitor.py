@@ -20,6 +20,7 @@ SCHEMA = "fly_live_copy_monitor_v1"
 INTENT_TO_ORDER_GAP_SEC = 10.0
 FILL_TO_STOP_GAP_SEC = 10.0
 REPORT_MISSING_GAP_SEC = 30.0
+GAP_TTL_SEC = 6 * 3600.0  # intent gaps older than this expire
 LAG_AMBER_SEC = 3.0
 LAG_RED_SEC = 10.0
 PRICE_DRIFT_AMBER_BP = 5.0
@@ -100,6 +101,13 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["order_qty"] = _f(order.get("qty")) or ch.get("order_qty")
             ch["order_price"] = _f(order.get("price")) or ch.get("order_price")
             ch["order_type"] = order.get("type") or ch.get("order_type")
+        if r.get("type") in ("INTENT_RECEIVED", "INTENT_SKIPPED", "INTENT_SUBMITTED"):
+            d = r.get("decision") if isinstance(r.get("decision"), Mapping) else {}
+            ch["executor_decision"] = {"decision": d.get("decision"), "reason": d.get("reason"),
+                                       "at_ts": _f(d.get("decided_at_ts"))}
+            if r.get("type") == "INTENT_SKIPPED":
+                ch["errors"].append({"type": "INTENT_SKIPPED", "code": d.get("reason"),
+                                     "message": "executor skipped", "at_ts": _f(d.get("decided_at_ts"))})
         if r.get("type") == "STOP_CONFIRMED":
             ch["stop_confirmed"] = True
         if r.get("type") == "POSITION_CLOSED":
@@ -137,6 +145,8 @@ def detect_gaps(chains: Mapping[str, Any], paper_twins: Mapping[str, Mapping[str
             continue
         emitted = intent.get("fly_intent_emitted_at_ts")
         age = (now - emitted) if emitted else None
+        if age is not None and age > GAP_TTL_SEC:
+            continue  # expired: history, not a live alert (stops RED flapping)
         chs = by_cid.get(cid) or []
         with_order = [c for c in chs if c.get("order_sent_at_ts") or c.get("exchange_ack_at_ts")]
         if age is not None and age > INTENT_TO_ORDER_GAP_SEC and not with_order:
