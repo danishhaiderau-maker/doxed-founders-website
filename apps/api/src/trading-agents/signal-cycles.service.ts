@@ -48,6 +48,7 @@ import {
 } from './signal-envelope.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 import { normalizeBotSessionTrades } from './bot-state.mapper';
+import { kickLiveCopyReporter } from './live-copy-report-kick';
 import {
   completeCanonicalTerminalRecord,
   canonicalTerminalSnapshotComplete,
@@ -991,6 +992,7 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
     eventId?: string;
     duplicateTerminal?: boolean;
   }> {
+    kickLiveCopyReporter();
     if (event === 'EXIT') {
       const authorityKind = typeof body.terminal_authority_kind === 'string'
         ? body.terminal_authority_kind

@@ -40498,6 +40498,15 @@ def _refresh_bitfinex_exposure_audit() -> dict:
                         row["bitfinex_position_id"] = exp_id
             managed_order_ids = set(managed_identity["order_ids"])
             managed_position_ids = set(managed_identity["position_ids"])
+        relay_links = {}
+        try:  # LIVE-FIX-0500: relay-placed copies are managed, not orphans
+            from live_copy_lifecycle import relay_copy_managed_ids
+            r_orders, r_positions, relay_links = relay_copy_managed_ids(
+                _get_live_copy_journal().by_correlation(), exchange_positions, _exchange_position_size)
+            managed_order_ids |= r_orders
+            managed_position_ids |= r_positions
+        except Exception as exc:  # noqa: BLE001 - linking is advisory; orphans stay flagged
+            logger.warning(f"[EXPOSURE AUDIT] relay copy linking failed: {exc}")
         exchange_order_ids = {
             str(row.get("id"))
             for row in exchange_orders
@@ -40531,6 +40540,7 @@ def _refresh_bitfinex_exposure_audit() -> dict:
             "trades_error": trades_error,
             "orphan_order_ids": sorted(exchange_order_ids - managed_order_ids) + unidentified_orders,
             "orphan_position_ids": sorted(exchange_position_ids - managed_position_ids) + unidentified_positions,
+            "relay_copy_links": relay_links,
         })
     except Exception as exc:
         audit["error"] = str(exc)[:300]
@@ -57991,6 +58001,36 @@ def api_live_copy_fly_key_identity():
     return jsonify(out)
 
 
+_RESOLVED_ALERTS_FILE = "live_copy_resolved_alerts.json"
+
+
+def _load_resolved_alerts() -> dict:
+    try:
+        with open(_live_copy.data_path(_RESOLVED_ALERTS_FILE)) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001 - missing file = nothing resolved
+        return {}
+
+
+@app.route('/api/live-copy/alerts/resolve', methods=['POST'])
+def api_live_copy_alerts_resolve():
+    """Admin: mark lifecycle alerts for correlation ids as resolved (LIVE-FIX-0500).
+    {"correlation_ids": ["gs1-..."], "reason": "PR #560"}. Alerts move to resolved_alerts."""
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    ids = [str(x).strip()[:64] for x in (data.get("correlation_ids") or []) if str(x).strip()]
+    reason = str(data.get("reason") or "").strip()[:200]
+    if not ids or not reason:
+        return jsonify({"ok": False, "error": "correlation_ids and reason required"}), 400
+    cur = _load_resolved_alerts()
+    for cid in ids:
+        cur[cid] = {"reason": reason, "at_ts": time.time()}
+    _live_copy._atomic_write_json(_live_copy.data_path(_RESOLVED_ALERTS_FILE), cur)
+    return jsonify({"ok": True, "resolved": cur})
+
+
 def _live_copy_monitor_context() -> dict:
     """Context for the read-only /api/monitor/live/* routes (no secrets)."""
     sw = _bitfinex_live_switch_snapshot()
@@ -57998,6 +58038,7 @@ def _live_copy_monitor_context() -> dict:
     with _relay_push_history_lock:
         recent_push = list(_relay_push_history)[-20:]
     return {
+        "resolved_alerts": _load_resolved_alerts(),
         "output": _get_live_copy_output().snapshot(),
         # Option 1: FORCE_PAPER only governs Fly's retired direct path. It
         # blocks live-copy output only while the live-copy source is disabled.

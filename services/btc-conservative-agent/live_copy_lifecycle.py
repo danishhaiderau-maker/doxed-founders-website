@@ -460,13 +460,62 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
     exchange = exchange_view(web)
     clock = clock_view(web, now)
     al = alerts(arming=arming, intents=intents, exchange=exchange, clock=clock, now=now)
+    # LIVE-FIX-0500: operator-resolved correlation ids (root-caused + fixed)
+    # drop out of the live alert set; they stay visible under resolved_alerts.
+    resolved = ctx.get("resolved_alerts") or {}
+    resolved_al = [dict(a, resolution=resolved[a["correlation_id"]]) for a in al
+                   if a.get("correlation_id") and a["correlation_id"] in resolved]
+    al = [a for a in al if not (a.get("correlation_id") and a["correlation_id"] in resolved)]
     verdict = GREEN
     for a in al:
         verdict = worst(verdict, a["severity"])
     live = [i for i in intents if not i.get("expired")]
     return {
-        "schema": SCHEMA, "verdict": verdict, "arming": arming, "alerts": al,
+        "schema": SCHEMA, "verdict": verdict, "arming": arming, "alerts": al, "resolved_alerts": resolved_al,
         "alert_codes": sorted({a["code"] for a in al}), "exchange": exchange, "clock": clock,
         "intents": live[:100], "intents_expired": len(intents) - len(live), "gap_ttl_sec": GAP_TTL_SEC,
         "hops": list(ENTRY_HOPS), "computed_at_ts": now,
     }
+
+
+def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
+    """LIVE-FIX-0500: link Bitfinex exposure placed by the Railway relay to its
+    open copied trade so Fly's exposure audit stops calling it an orphan.
+
+    Open copy = journal has ORDER_FILLED and no POSITION_CLOSED. Its entry and
+    stop exchange order ids are managed. The single exchange position is
+    managed only when side and aggregate qty (5%) match the open copies.
+    Returns (order_ids:set[str], position_ids:set[str], links:dict)."""
+    order_ids, position_ids, links = set(), set(), {}
+    open_qty, sides = 0.0, set()
+    for cid, rows in (by_correlation or {}).items():
+        types = {str(r.get("type")) for r in rows or []}
+        if "ORDER_FILLED" not in types or "POSITION_CLOSED" in types:
+            continue
+        ids = []
+        for r in rows:
+            for key in ("order", "stop"):
+                o = r.get(key) if isinstance(r.get(key), Mapping) else {}
+                if o.get("exchange_order_id"):
+                    ids.append(str(o.get("exchange_order_id")))
+            if str(r.get("type")) == "ORDER_FILLED":
+                f = r.get("fill") if isinstance(r.get("fill"), Mapping) else {}
+                q = _f(f.get("qty")) or 0.0
+                o = r.get("order") if isinstance(r.get("order"), Mapping) else {}
+                side = str(f.get("side") or o.get("side") or "").upper()
+                open_qty += abs(q)
+                if side:
+                    sides.add(side)
+        order_ids.update(ids)
+        links[cid] = {"order_ids": sorted(set(ids))}
+    if len(exchange_positions or []) == 1 and open_qty > 0:
+        p = exchange_positions[0]
+        size = size_fn(p)
+        pid = str((p or {}).get("id") or "") if isinstance(p, Mapping) else ""
+        side = "LONG" if (size or 0) > 0 else "SHORT"
+        if pid and size is not None and abs(abs(size) - open_qty) <= max(1e-8, open_qty * 0.05) \
+                and (not sides or sides == {side}):
+            position_ids.add(pid)
+            for v in links.values():
+                v["position_id"] = pid
+    return order_ids, position_ids, links

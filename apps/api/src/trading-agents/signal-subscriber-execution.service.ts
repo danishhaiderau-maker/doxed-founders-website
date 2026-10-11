@@ -2538,6 +2538,26 @@ export function expiredHireShouldRunExitOnly(input: {
  * any merged exchange position must exactly match the attributable OPEN and
  * protected-partial quantities; and the configured capacity must have room.
  */
+/** Pure: honest cause for a fast-path deferral (LIVE-FIX-0500; old text said
+ * "same-direction-preflight-failed lots=0 activeOrders=0" on a non-flat account). */
+export function fastPathPreflightFailureCause(input: {
+  virtualLotCount: number;
+  virtualLotDirections: Array<'LONG' | 'SHORT' | undefined>;
+  candidateDirection: 'LONG' | 'SHORT';
+  maxConcurrent: number;
+  exchangePositionQty: number;
+  exchangeActiveOrders: number;
+}): string {
+  if (input.virtualLotCount === 0) {
+    return input.exchangePositionQty !== 0 || input.exchangeActiveOrders > 0
+      ? 'unattributed-exchange-exposure'
+      : 'not-flat-unknown';
+  }
+  if (input.virtualLotCount >= input.maxConcurrent) return 'max-concurrent-reached';
+  if (input.virtualLotDirections.some((d) => d !== input.candidateDirection)) return 'opposite-direction-lot';
+  return 'same-direction-book-unproven';
+}
+
 export function sameDirectionPendingSignedFastPathPreflight(input: {
   status: TradingAgentInstanceStatus;
   simActive: boolean;
@@ -6506,7 +6526,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           exchangeActiveOrderIds: activeOrders.map((order) => order.id),
         });
     if (!flatPreflight && !sameDirectionPendingPreflight) {
-      return reject(`same-direction-preflight-failed lots=${virtualLots.length} activeOrders=${activeOrders.length}`);
+      const why = fastPathPreflightFailureCause({
+        virtualLotCount: virtualLots.length,
+        virtualLotDirections: virtualLotMeta.map((m) => m.direction),
+        candidateDirection: intentDirection,
+        maxConcurrent,
+        exchangePositionQty: exchangePosition?.amount ?? 0,
+        exchangeActiveOrders: activeOrders.length,
+      });
+      return reject(`fast-path-deferred:${why} lots=${virtualLots.length} activeOrders=${activeOrders.length} pos=${exchangePosition?.amount ?? 0}`);
     }
 
     // The live exchange book above is authoritative and every non-flat order

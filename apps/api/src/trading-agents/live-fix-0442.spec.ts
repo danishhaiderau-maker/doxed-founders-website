@@ -20,3 +20,22 @@ test('exchange mirror refreshes even during a money tick once older than max age
   assert.equal(exchangeMirrorMayRun({ ...base, mirrorRunning: true, lastMirrorAtMs: 0 }), false);
   assert.ok(EXCHANGE_MIRROR_MAX_AGE_MS <= 60_000);
 });
+
+import { fastPathPreflightFailureCause } from './signal-subscriber-execution.service';
+test('fast-path deferral cause is honest', () => {
+  const b = { virtualLotCount: 0, virtualLotDirections: [], candidateDirection: 'SHORT' as const, maxConcurrent: 3, exchangePositionQty: -0.00029, exchangeActiveOrders: 0 };
+  assert.equal(fastPathPreflightFailureCause(b), 'unattributed-exchange-exposure');
+  assert.equal(fastPathPreflightFailureCause({ ...b, virtualLotCount: 1, virtualLotDirections: ['LONG'] }), 'opposite-direction-lot');
+  assert.equal(fastPathPreflightFailureCause({ ...b, virtualLotCount: 3, virtualLotDirections: ['SHORT','SHORT','SHORT'] }), 'max-concurrent-reached');
+});
+
+import { kickLiveCopyReporter, setLiveCopyReportKickListener } from './live-copy-report-kick';
+test('reporter kick runs the listener promptly and debounces', async () => {
+  let n = 0;
+  setLiveCopyReportKickListener(() => { n += 1; });
+  assert.equal(kickLiveCopyReporter([10, 30]), 2);
+  assert.equal(kickLiveCopyReporter([10]), 0);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(n, 2);
+  setLiveCopyReportKickListener(null);
+});
