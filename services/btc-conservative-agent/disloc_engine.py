@@ -313,6 +313,7 @@ class DislocEngine:
         self.trades_fn: Callable[[], list] = lambda: []
         self.touch_fn: Callable[[], tuple] = lambda: (None, None, None)
         self.append_fn: Callable[[dict], Any] = lambda row: None
+        self.oi_seed_fn: Callable[[int], dict] = lambda since_minute: {}
         self._prem: dict = {}
         self._last_seen: dict = {}
         self._last_bucket: Optional[int] = None
@@ -326,8 +327,35 @@ class DislocEngine:
         self.last_signal: Optional[dict] = None
         self._seq = 0
 
-    def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn) -> None:
+    def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
+        if oi_seed_fn is not None:
+            self.oi_seed_fn = oi_seed_fn
+
+    def make_tape_oi_seed(self, path: str, tail_bytes: int = 1 << 20):
+        """Return {minute: sum OI over rule.oi_venues} from the tail of cross_venue_tape_1m.jsonl."""
+        venues = self.rule.oi_venues
+
+        def _seed(since_minute: int) -> dict:
+            import json, os
+            out: dict = {}
+            if not venues or not os.path.exists(path):
+                return out
+            with open(path, "rb") as fh:
+                fh.seek(max(0, os.path.getsize(path) - tail_bytes))
+                lines = fh.read().splitlines()[1:]
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                m = int(float(row.get("minute_ts") or 0) // 60)
+                der = row.get("derivatives") or {}
+                ois = [_num((der.get(v) or {}).get("open_interest")) for v in venues]
+                if m >= since_minute and all(o is not None and o > 0 for o in ois):
+                    out[m] = sum(ois)
+            return out
+        return _seed
 
     # ---- features -------------------------------------------------------
     def _ff(self, key, bucket, value):
@@ -396,11 +424,24 @@ class DislocEngine:
         oi = sum(ois) if ois and all(o is not None and o > 0 for o in ois) else None
         minute = int(now // 60)
         hist = self.__dict__.setdefault("_oi_hist", {})
+        if not self.__dict__.get("_oi_seeded"):
+            # FOI-ONCE fix (12 Oct): the 60-min OI history lived only in memory, so every
+            # restart/deploy blanked oi_d60 for >= 60 min and the tile almost never armed.
+            # Warm-start it from the cross-venue minute tape already on disk.
+            self._oi_seeded = True
+            try:
+                for m, v in self.oi_seed_fn(minute - self.rule.oi_lag_min - 5).items():
+                    hist.setdefault(int(m), float(v))
+            except Exception:
+                self.counters["errors"] += 1
         if oi is not None:
             hist[minute] = oi
         for k in [k for k in hist if k < minute - self.rule.oi_lag_min - 5]:
             del hist[k]
-        then = hist.get(minute - self.rule.oi_lag_min)
+        target = minute - self.rule.oi_lag_min
+        # Exact-minute lookup missed whenever that one minute had no OI print; take the
+        # nearest stored minute within +/-2 (build.py tolerance on the 1m tape).
+        then = next((hist[k] for k in (target, target - 1, target + 1, target - 2, target + 2) if k in hist), None)
         oi_d60 = None if oi is None or then is None else (oi / then - 1.0) * 1e4
         return {"fund_bp": None if fund is None else round(fund, 5),
                 "oi_d60_bp": None if oi_d60 is None else round(oi_d60, 4),
