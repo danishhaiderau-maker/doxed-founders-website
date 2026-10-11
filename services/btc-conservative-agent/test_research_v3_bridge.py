@@ -409,6 +409,32 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(bridge._committed_receipt_bytes_durable(
                 store, "lifecycle", "lifecycle:nope"))
 
+    def test_restart_reconciliation_escapes_stale_deferred_receipt_from_old_deploy(self):
+        """11 Oct prod trace: a DEFERRED receipt bound to an old revision pinned the id."""
+        import research_v3_bridge as bridge
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            stale = {"schema": "emergency_record_idempotency_v1", "state": "DEFERRED",
+                     "ledger": "lifecycle",
+                     "identity": dict(store._identity_binding(), deployed_revision="old-rev")}
+            real = V3EvidenceStore._load_record_receipt
+
+            def load(self, ledger, record_id):
+                if ledger == "lifecycle" and record_id.endswith("restart-reconciled-v3"):
+                    return dict(stale, record_id=record_id)
+                return real(self, ledger, record_id)
+
+            with mock.patch.object(V3EvidenceStore, "_load_record_receipt", load):
+                rid = bridge._reconcile_record_id(store, "e", "p", "L")
+            self.assertNotEqual(rid, "lifecycle:e:p:L:lane-entry:no-order:restart-reconciled-v3")
+            self.assertTrue(rid.startswith("lifecycle:e:p:L:lane-entry:no-order:restart-reconciled-v3:"))
+            self.assertEqual(bridge._reconcile_record_id(store, "e", "p", "L"),
+                             "lifecycle:e:p:L:lane-entry:no-order:restart-reconciled-v3")
+            first = bridge.reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000)
+            self.assertEqual(first["reconciled"], 1)
+
     def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._lost_expected_order(tmp)

@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import math
+import re
 import time
 
 from research_v3_contract import COLLECTOR_VERSION
@@ -1400,7 +1401,7 @@ def reconcile_overdue_expected_order_decisions(
             # carry now/runtime_revision, so a receipt PREPARED by one attempt
             # never matched the next (EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH,
             # 450 blocked, 11 Oct). All stamps derive from the decision.
-            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order:restart-reconciled-v2",
+            "record_id": _reconcile_record_id(store, episode_id, policy_signature, lane),
             "episode_id": episode_id, "event_id": str(decision.get("event_id") or ""),
             "shared_ai_call_id": str(decision.get("shared_ai_call_id") or ""),
             "research_lane": lane, "policy_signature": policy_signature,
@@ -1452,6 +1453,34 @@ def reconcile_overdue_expected_order_decisions(
             result["unwritten"] += 1
     return result
 
+
+
+def _reconcile_record_id(store, episode_id: str, policy_signature: str, lane: str) -> str:
+    """Restart-reconcile lifecycle id that a stale spool receipt cannot pin.
+
+    Prod trace 11 Oct 2026: all 519 blocked rows had a DEFERRED receipt for
+    the v2 id, spooled while receipt bootstrap was incomplete. 511 were bound
+    to a previous deployed_revision (236a936d), so after the deploy they could
+    never replay (identity mismatch) and every later append of that id failed
+    closed as EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH. Use a fresh v3 id, and if
+    a non-committed receipt from another runtime identity already holds it,
+    suffix the current deployed revision. Lifecycle resolution is keyed on
+    (episode, policy, lane), never record_id, so this cannot double count.
+    """
+    base = f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order:restart-reconciled-v3"
+    try:
+        receipt = store._load_record_receipt("lifecycle", base)
+        identity = store._identity_binding()
+    except Exception:
+        return base
+    if (
+        isinstance(receipt, Mapping)
+        and receipt.get("state") != "COMMITTED"
+        and receipt.get("identity") != identity
+    ):
+        rev = re.sub(r"[^0-9A-Za-z]", "", str(identity.get("deployed_revision") or ""))[:12]
+        return f"{base}:{rev or 'rev'}"
+    return base
 
 
 def _committed_receipt_bytes_durable(store, ledger: str, record_id: str) -> bool:
