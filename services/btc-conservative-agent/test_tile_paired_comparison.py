@@ -90,7 +90,7 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     # evaluator-clock tiles (H-C, GS-01, B1, GS-07) never do.
     assert report["all_tiles_paired"]["paired_tiles"] == [
         CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER",
-        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DANISH_REGIME_ROUTER"]
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
         (CFT, RND), (CFT, "FAMILY_GSB2_REGIME_SWITCHER")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])

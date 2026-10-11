@@ -10,6 +10,7 @@ hiding a card.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import math
 import os
@@ -189,7 +190,6 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
     RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
-    RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
     RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
     RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M,
 )
@@ -1084,6 +1084,20 @@ _GSB3_ENTRY = _gs_entry(
 )
 _GS01_EXIT = _gs_simple_exit(tp_atr=2.5, be_atr=2.0)
 _GSB1_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": None, "VIOLENT": "MOM_VIOLENT"})
+
+
+def _with_cut_mfe_cap(exit_policy: dict, cap_bp: float = 2.0) -> dict:
+    """Conditional early cut (owner rule, PNL-INTEGRITY-20261012 bug 4): the
+    thesis cut may fire only while the trade's peak (MFE) is <= +2 bp."""
+    out = copy.deepcopy(exit_policy)
+    for prof in (out.get("profiles") or {}).values():
+        if isinstance(prof, dict) and prof.get("cut_bp") is not None:
+            prof["cut_max_peak_bp"] = float(cap_bp)
+    return out
+
+
+_GS01_EXIT = _with_cut_mfe_cap(_GS01_EXIT)
+_GSB1_EXIT = _with_cut_mfe_cap(_GSB1_EXIT)
 _GSB2_EXIT = _gsb_exit({"QUIET": "REV_QUIET", "TREND": "MOM_TREND", "VIOLENT": "REV_VIOLENT"})
 _GSB3_EXIT = _gsb_exit({"QUIET": "MOM_QUIET", "TREND": "MOM_TREND", "VIOLENT": None})
 GS_SHADOW_REASON = "pre-registered stack: its own thesis cut is live; the shared catalog is shadow-only comparison"
@@ -1802,6 +1816,11 @@ RETIRED_TILE_LANES = frozenset({
     # Active tiles renumber 1..N from display order; retired show no number.
     "FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
     "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M",
+    # Retired 2026-10-12 08:43 AEDT (owner, Danish): Tile 8 ROUTER. True P&L
+    # negative after late-window repricing (-7.4 bp, n=50); premise failed
+    # walk-forward (TILE8-ROUTER-DIAGNOSIS-20261012). Live + paper OFF first;
+    # all data kept. Active tiles renumber 1..9 (DISLOC=8, DISLOC-FOI=9).
+    "FAMILY_DANISH_REGIME_ROUTER",
 })
 # Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
 # not numbered): H-C's evaluator is still the fixture for generic cross-venue
@@ -1811,6 +1830,7 @@ RETIRED_KEPT_POLICY_MODULES = frozenset({
     "paper_policy_family_gsb3_committed_fade_regime.py",
     "paper_policy_family_fade_pool.py",
     "paper_policy_family_gs07_v07_premium_fade_60m.py",
+    "paper_policy_family_danish_regime_router.py",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",
