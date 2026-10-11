@@ -28473,6 +28473,9 @@ _SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
     enabled=SHADOW_EXIT_RECORDER_ENABLED,
     max_queue=32,
 )
+# LIVE-FIX-0815: start eagerly at boot so a dead/never-started worker is
+# visible (liveness RED) instead of silently waiting for a first submit.
+_SHADOW_EXIT_RECORDER.start()
 
 
 def _submit_shadow_exit_path(payload) -> None:
@@ -32860,6 +32863,9 @@ def _dashboard_handler_snapshot(now=None):
     }
 
 
+_SIGNED_EXECUTOR_POST_PATHS = frozenset({"/api/live-copy/execution-report", "/api/live-copy/executor-capability"})
+
+
 @app.before_request
 def _emergency_api_guard():
     _dashboard_handler_update_routed_label()
@@ -32919,10 +32925,16 @@ def _emergency_api_guard():
         and bool(_BOT_ADMIN_TOKEN)
         and _admin_authed()
     )
+    # LIVE-FIX-0815: Railway executor HMAC posts (fills/stops + capability
+    # heartbeat) share one egress IP with the website's polling; counting them
+    # against the 60/min public bucket returned 429 and delayed report-back.
+    # Each handler verifies its own HMAC, so they bypass the IP bucket.
+    is_signed_executor_post = method == "POST" and path in _SIGNED_EXECUTOR_POST_PATHS
     if (
         path.startswith("/api/")
         and not _is_local_operator(ip)
         and not is_authenticated_data_sync
+        and not is_signed_executor_post
     ):
         if not _rate_check(_API_RATE_LOG, ip, _API_RATE_WINDOW_S, _API_RATE_MAX_PER_IP):
             resp = jsonify({"error": "rate limit exceeded", "retry_after_s": _API_RATE_WINDOW_S})
@@ -32944,8 +32956,9 @@ def _emergency_api_guard():
     if method == "GET" and (path.startswith("/api/monitor/live/") or path == "/api/live-copy/status"
                             or path in ("/api/monitor/restarts", "/api/monitor/runtime/headroom")):
         return None
-    # Executor reports authenticate with their own HMAC in the handler.
-    if method == "POST" and path == "/api/live-copy/execution-report":
+    # Executor reports and the capability heartbeat authenticate with their
+    # own HMAC in the handler (capability was wrongly admin-gated: 401).
+    if is_signed_executor_post:
         return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():

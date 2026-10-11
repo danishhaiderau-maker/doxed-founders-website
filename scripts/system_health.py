@@ -1943,7 +1943,12 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                       and float(recon.get("signedExchangePositionQty") or 0) == 0
                       and int(recon.get("openLots") or 0) == 0 and int(recon.get("pendingLots") or 0) == 0)
         stale_mismatch = bool(mismatch) and not armed and recon_flat
-        st = RED if armed or (mismatch and not stale_mismatch) or recon.get("alert") else GREEN
+        # LIVE-FIX-0815: an arm the owner confirmed (realTradingConfirmedAt set,
+        # mode LIVE) is the intended state, not an alarm. Exposure stays policed:
+        # a mismatch or reconciliation alert is still RED.
+        deliberate_arm = (armed and bool(relay.get("realTradingConfirmedAt"))
+                          and str(relay.get("relayExecutionMode") or "").upper() == "LIVE")
+        st = RED if (armed and not deliberate_arm) or (mismatch and not stale_mismatch) or recon.get("alert") else GREEN
         if st == GREEN and (snap_age is None or snap_age > t["relay_snapshot_amber_sec"] or not executor.get("healthy")
                             or float(executor.get("heartbeatAgeMs") or 0) > t["relay_heartbeat_amber_ms"]):
             st = AMBER
@@ -1974,7 +1979,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             st = AMBER
             relay_hint = ("stale positionMismatchAlert on a disarmed relay; latest reconciliation is flat - "
                           "acknowledge the alert on Railway")
-        obs = (f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
+        obs = (("deliberately armed (owner-confirmed LIVE) " if deliberate_arm else "")
+               + f"mode={relay.get('relayExecutionMode')} armedAt={relay.get('relayArmedAt')} executor={executor.get('status')} "
                f"hb={fmt_age((executor.get('heartbeatAgeMs') or 0) / 1000)} snapshot {fmt_age(snap_age)} old "
                f"reconciliation={recon_label}"
                + (f" stale_mismatch_alert={str(mismatch)[:80]!r}" if stale_mismatch else "")
