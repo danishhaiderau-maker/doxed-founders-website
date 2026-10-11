@@ -104,7 +104,18 @@ export class LiveCopyOpsService {
       position_mismatch_last_detected_at: typeof dash.positionMismatchDetectedAt === 'string' ? dash.positionMismatchDetectedAt : null,
       last_error: instance.lastError ? String(instance.lastError).slice(0, 200) : null,
     };
+    const pause = liveCopyPauseState({
+      status: instance.status,
+      lastError: instance.lastError,
+      transition: dash.relayLastTransition,
+      lastPassExitStage: (dash.relayExecutor && typeof dash.relayExecutor === 'object'
+        ? (dash.relayExecutor as Record<string, unknown>).lastPassExitStage : null),
+    });
+    // Arm state and pause state are different facts: an armed account is still
+    // paused while the showcase bot is paused. Expose both explicitly.
+    checks.pause = pause;
     if (!armed) blockers.push('ACCOUNT_NOT_ARMED');
+    if (pause.paused && pause.pause_owner === 'FLY_BOT') blockers.push('SHOWCASE_BOT_PAUSED');
     if (mismatchActive) blockers.push('POSITION_MISMATCH');
 
     const status = await this.exchanges.getUserExchangeStatus(userId.trim(), 'bitfinex');
@@ -190,4 +201,56 @@ export class LiveCopyOpsService {
       ingest_rejects_1h: rejects ?? null,
     };
   }
+}
+
+const SHOWCASE_PAUSED_PREFIX = 'Showcase bot paused';
+
+/**
+ * Pure: explicit pause state for one copier account. `paused` is true when the
+ * account itself is PAUSED (owner/reason/at from the last relay transition) or
+ * when the executor's last error says the showcase bot is paused (owner
+ * FLY_BOT). `pause_source` names the evidence; nothing is inferred silently.
+ */
+export function liveCopyPauseState(input: {
+  status?: unknown;
+  lastError?: unknown;
+  transition?: unknown;
+  lastPassExitStage?: unknown;
+}): {
+  paused: boolean;
+  pause_owner: string | null;
+  pause_reason: string | null;
+  paused_at: string | null;
+  pause_source: 'ACCOUNT_STATUS' | 'EXECUTOR_LAST_ERROR' | null;
+  executor_last_pass_exit_stage: string | null;
+} {
+  const t = input.transition && typeof input.transition === 'object' && !Array.isArray(input.transition)
+    ? (input.transition as Record<string, unknown>) : {};
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v.slice(0, 200) : null);
+  const stage = str(input.lastPassExitStage);
+  const lastError = str(input.lastError);
+  if (String(input.status ?? '').toUpperCase() === 'PAUSED') {
+    return {
+      paused: true,
+      pause_owner: str(t.actor) ?? 'ACCOUNT',
+      pause_reason: str(t.reason) ?? lastError,
+      paused_at: str(t.at),
+      pause_source: 'ACCOUNT_STATUS',
+      executor_last_pass_exit_stage: stage,
+    };
+  }
+  if (lastError && lastError.startsWith(SHOWCASE_PAUSED_PREFIX)) {
+    return {
+      paused: true,
+      pause_owner: 'FLY_BOT',
+      pause_reason: lastError,
+      paused_at: null,
+      pause_source: 'EXECUTOR_LAST_ERROR',
+      executor_last_pass_exit_stage: stage,
+    };
+  }
+  return {
+    paused: false, pause_owner: null, pause_reason: null, paused_at: null, pause_source: null,
+    executor_last_pass_exit_stage: stage,
+  };
 }

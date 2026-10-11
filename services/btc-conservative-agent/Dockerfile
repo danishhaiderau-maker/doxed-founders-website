@@ -22,7 +22,7 @@ WORKDIR /app
 
 # System deps: gcc for any wheels (numpy/pandas), curl for health probes, tzdata for AEST logs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash build-essential curl ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends bash build-essential curl ca-certificates tzdata chrony \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
