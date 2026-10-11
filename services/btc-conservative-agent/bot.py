@@ -45896,6 +45896,7 @@ def monitor_tiles_disloc():
             raise monitor_tiles.BadRequest("BAD_VARIANT")
         rows = _dsl.load_rows(_dsl.FOI_TRADES_FILE if variant == "foi" else _dsl.TRADES_FILE)
         lane = "FAMILY_DISLOC_FOI_LONG_1M" if variant == "foi" else "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+        from combo_pathway_config import tile_number  # not imported at module level (NameError -> 500)
         spec = COMBO_LANE_SPECS.get(lane) or {}
         evaluator = _XVL_EVALUATORS.get(lane)
         terminal = [r for r in rows if r.get("event") in ("DISLOC_CLOSED", "DISLOC_CANCELLED", "DISLOC_ABANDONED")]

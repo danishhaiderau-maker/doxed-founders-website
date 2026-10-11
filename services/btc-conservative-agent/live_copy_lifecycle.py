@@ -312,7 +312,9 @@ def build_intents(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mapp
                 if qty and twin and _f(twin.get("qty")) else None,
                 "exit_price_bp": _bp(ex.get("fill_price"), paper_exit or ex.get("paper_exit_price"), side),
                 "exit_time_s": round(ex["fill_ts"] - paper_exit_ts, 3) if ex.get("fill_ts") and paper_exit_ts else None,
-                "exit_reason_match": (str(ex.get("reason") or "").upper() == str(twin.get("exit_reason") or "").upper())
+                # SHOWCASE_MIRROR = the live copy closed BECAUSE its paper twin
+                # closed (whatever the paper reason), so it is a match by design.
+                "exit_reason_match": (str(ex.get("reason") or "").upper() in ("SHOWCASE_MIRROR", str(twin.get("exit_reason") or "").upper()))
                 if ex.get("reason") and twin and twin.get("exit_reason") else None,
             }
             if vwap and ex.get("fill_price"):
