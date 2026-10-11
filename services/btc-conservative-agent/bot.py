@@ -6826,6 +6826,12 @@ def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
     return get_mark_price(direction, fallback=fallback)
 
 
+# A resting limit that the venue gate admitted because the tape traded
+# through it (or consumed its queue) executed as a MAKER at its own limit on
+# Bitfinex.  If the BBO has since moved through the limit, re-walking the
+# current book would book an impossible price improvement (B1/B2 prod: LONG
+# limits 82497/82507 booked at 82488 after a 499 s rest).  Only a fill admitted
+# MARKETABLE_AT_PLACEMENT is a taker that may take the better opposite quote.
 def resolve_sim_fill_with_depth(order: dict) -> dict:
     """Depth-aware market fill; every limit fill respects its hard price."""
     limit = float(order.get("limit_price") or 0)
@@ -6853,7 +6859,13 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
             filled_qty = qty
             sim = dict(sim, avg_price=round(fill_px, 2), filled_qty=qty, fully_filled=True, partial_fill=False)
         return {"fill_price": fill_px, "filled_qty": filled_qty, "is_taker": True, **sim}
-    if crossed_limit and limit > 0:
+    admitted = order.get("venue_fill_gate_admitted") or {}
+    resting_maker_fill = (
+        isinstance(admitted, dict)
+        and admitted.get("fill_basis") in ("TRADE_THROUGH", "QUEUE_CONSUMED_AT_LIMIT")
+        and float(admitted.get("limit_price") or 0) == round(limit, 2)
+    )
+    if crossed_limit and limit > 0 and not resting_maker_fill:
         # A newly marketable LIMIT can be a taker, but it can never execute at
         # a worse price than its limit.  Walking the unrestricted market book
         # here previously produced impossible fills (for example a SHORT sell

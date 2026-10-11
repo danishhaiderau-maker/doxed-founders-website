@@ -1780,3 +1780,41 @@ def test_disabled_early_window_cancels_but_post_last_window_holds():
 def test_limit_order_ttl_remains_30_minutes():
     assert "LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv(\"LIMIT_ORDER_MAX_AGE_SEC\", str(30 * 60)))" in BOT_SOURCE
     assert "cleanup_expired_orders()" in BOT_SOURCE
+
+
+def _crossed_book_namespace():
+    namespace = {
+        "copy": copy,
+        "refresh_bbo_state": lambda: None,
+        "refresh_order_book_state": lambda: None,
+        "state_lock": threading.RLock(),
+        "state": {
+            "bid": 82479.0, "ask": 82488.0, "price": 82484.0, "book_ts": 100.0,
+            "order_book": {"bids": [[82479.0, 1, 1.0]], "asks": [[82488.0, 1, 1.0]]},
+        },
+        "simulate_market_fill": lambda side, qty: {"avg_price": 0.0, "filled_qty": 0.0},
+    }
+    namespace["simulate_marketable_limit_fill"] = _compile_function("simulate_marketable_limit_fill", namespace)
+    return namespace, _compile_function("resolve_sim_fill_with_depth", namespace)
+
+
+def test_resting_trade_through_fill_books_maker_at_limit_not_crossed_book():
+    _ns, resolve = _crossed_book_namespace()
+    order = {"side": "buy", "qty": 0.0003, "limit_price": 82507.0, "entry_type": "SIM_LIMIT",
+             "venue_fill_gate_admitted": {"fill_basis": "TRADE_THROUGH", "limit_price": 82507.0}}
+    fill = resolve(order)
+    assert fill["fill_price"] == 82507.0
+    assert fill["is_taker"] is False
+    order["venue_fill_gate_admitted"]["fill_basis"] = "QUEUE_CONSUMED_AT_LIMIT"
+    assert resolve(order)["fill_price"] == 82507.0
+
+
+def test_marketable_at_placement_or_stale_generation_keeps_taker_improvement():
+    _ns, resolve = _crossed_book_namespace()
+    taker = resolve({"side": "buy", "qty": 0.0003, "limit_price": 82507.0, "entry_type": "SIM_LIMIT",
+                     "venue_fill_gate_admitted": {"fill_basis": "MARKETABLE_AT_PLACEMENT", "limit_price": 82507.0}})
+    assert taker["fill_price"] == 82488.0 and taker["is_taker"] is True
+    # Admission from an older (re-priced) generation does not bind the new limit.
+    stale = resolve({"side": "buy", "qty": 0.0003, "limit_price": 82507.0, "entry_type": "SIM_LIMIT",
+                     "venue_fill_gate_admitted": {"fill_basis": "TRADE_THROUGH", "limit_price": 82497.0}})
+    assert stale["is_taker"] is True
