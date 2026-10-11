@@ -61,6 +61,18 @@ OUTBOX_SCHEMA = "fly_live_copy_outbox_v1"
 # Registry capability blocks the operator may waive (research qualification).
 # Protection blocks (e.g. partial exits not proven on the exchange) are never waived.
 OPERATOR_WAIVABLE_CAPABILITIES = frozenset({"BLOCKED_UNQUALIFIED"})
+# Boss 12 Oct 10:06: B1/B2 partial exits are mirrored on Bitfinex as
+# reduce-only partial closes (Railway SUBSCRIBER_POSITION_REDUCTION_ENABLED).
+# Fly waives the partial-exit block only while this rollout flag is on; the
+# executor independently refuses partial-exit tiles while its flag is off.
+PARTIAL_REDUCTION_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
+
+
+def operator_waivable_capabilities(environ=None) -> frozenset:
+    env = os.environ if environ is None else environ
+    if str(env.get("LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED") or "").strip().lower() == "true":
+        return OPERATOR_WAIVABLE_CAPABILITIES | {PARTIAL_REDUCTION_CAPABILITY}
+    return OPERATOR_WAIVABLE_CAPABILITIES
 REPORTS_JOURNAL = "live_execution_reports.jsonl"
 
 RESTART_RESET_REASON = "PROCESS_RESTART_FAIL_CLOSED"
@@ -973,7 +985,7 @@ def effective_eligibility(spec: Mapping[str, Any] | None, operator_eligible: boo
         return True, None
     if not operator_eligible:
         return False, DENY_TILE_NOT_ELIGIBLE
-    if capability.startswith("BLOCKED") and capability not in OPERATOR_WAIVABLE_CAPABILITIES:
+    if capability.startswith("BLOCKED") and capability not in operator_waivable_capabilities():
         return False, f"CAPABILITY_{capability}"
     return True, None
 

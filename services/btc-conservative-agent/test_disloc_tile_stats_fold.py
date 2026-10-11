@@ -5,8 +5,8 @@ import monitor_tiles
 def _rows():
     base = {"schema": d.SCHEMA, "event": "DISLOC_CLOSED", "side": "LONG", "exit_reason": "TIME_60S"}
     return [
-        {**base, "trade_id": "a", "net_bp_taker_2p8": 4.0, "signal_to_fill_s": 0.3, "fill_ts": 10, "exit_ts": 70},
-        {**base, "trade_id": "b", "net_bp_taker_2p8": -2.0, "signal_to_fill_s": 3.0, "fill_ts": 100, "exit_ts": 160},
+        {**base, "trade_id": "a", "pnl_bp_vs_touch": 4.0, "signal_to_fill_s": 0.3, "fill_ts": 10, "exit_ts": 70},
+        {**base, "trade_id": "b", "pnl_bp_vs_touch": -2.0, "signal_to_fill_s": 3.0, "fill_ts": 100, "exit_ts": 160},
         {"schema": d.SCHEMA, "event": "DISLOC_CANCELLED", "trade_id": "c"},
     ]
 

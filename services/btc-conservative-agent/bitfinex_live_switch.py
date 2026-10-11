@@ -92,6 +92,18 @@ DENY_TILE_PRE_ARMING = "TILE_LIVE_SWITCH_PRE_ARMING"
 ALLOW_ARMED = "ARMED"
 # Registry capability blocks the operator's live-eligibility switch may waive.
 OPERATOR_WAIVABLE_CAPABILITIES = frozenset({"BLOCKED_UNQUALIFIED"})
+# Boss 12 Oct 10:06: B1/B2 partial exits are mirrored on Bitfinex as
+# reduce-only partial closes (Railway SUBSCRIBER_POSITION_REDUCTION_ENABLED).
+# Fly waives the partial-exit block only while this rollout flag is on; the
+# executor independently refuses partial-exit tiles while its flag is off.
+PARTIAL_REDUCTION_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
+
+
+def operator_waivable_capabilities(environ=None) -> frozenset:
+    env = os.environ if environ is None else environ
+    if str(env.get("LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED") or "").strip().lower() == "true":
+        return OPERATOR_WAIVABLE_CAPABILITIES | {PARTIAL_REDUCTION_CAPABILITY}
+    return OPERATOR_WAIVABLE_CAPABILITIES
 
 
 class BitfinexLiveSwitch:
@@ -286,7 +298,7 @@ class BitfinexLiveSwitch:
         elif not (registry_ok or operator_eligible):
             denials.append(DENY_LANE_NOT_ALLOWLISTED)
         if capability.startswith("BLOCKED") and not (
-            operator_eligible and capability in OPERATOR_WAIVABLE_CAPABILITIES
+            operator_eligible and capability in operator_waivable_capabilities()
         ):
             denials.append(DENY_RELAY_CAPABILITY_BLOCKED)
 
