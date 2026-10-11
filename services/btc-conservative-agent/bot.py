@@ -40506,7 +40506,7 @@ def _refresh_bitfinex_exposure_audit() -> dict:
             managed_order_ids |= r_orders
             managed_position_ids |= r_positions
         except Exception as exc:  # noqa: BLE001 - linking is advisory; orphans stay flagged
-            logger.warning(f"[EXPOSURE AUDIT] relay copy linking failed: {exc}")
+            relay_links = {"_error": str(exc)[:120]}
         exchange_order_ids = {
             str(row.get("id"))
             for row in exchange_orders
