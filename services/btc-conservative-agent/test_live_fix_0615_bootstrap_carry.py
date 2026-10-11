@@ -23,6 +23,6 @@ def test_new_epoch_or_tile_config_resets():
            "tile_config_signature": "tiles-1"}
     assert carries(_store(), old) is False
     old2 = dict(old, epoch_id="epoch-1", tile_config_signature="tiles-0")
-    assert carries(_store(), old2) is False
+    assert carries(_store(), old2) is True  # LIVE-FIX-0958: tile config change carries
     assert carries(_store(), None) is False
     assert carries(_store(epoch_id=""), dict(old, epoch_id="", source_revision="zzz")) is False
