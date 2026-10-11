@@ -26,12 +26,17 @@ done
 deadline=$(( $(date +%s) + VERIFY_S ))
 while :; do
   live="$(api "$B/api/monitor/live/lifecycle" | python3 -c '
-import json,sys; d=json.load(sys.stdin); bad=0
+import json,sys; d=json.load(sys.stdin); bad=0; stale=0
 for ex in (d.get("exchange") or {}).values():
-    if not ex.get("ok") or ex.get("flat") is not True or (ex.get("read_age_s") or 999) > 90 or ex.get("open_orders"): bad+=1
-print(bad)' 2>/dev/null || echo ERR)"
+    if not ex.get("ok") or ex.get("flat") is not True or ex.get("open_orders") or ex.get("positions") or ex.get("orphans"): bad+=1
+    elif (ex.get("read_age_s") or 999) > 90: stale+=1
+print(bad, stale)' 2>/dev/null || echo ERR ERR)"
+  read -r live stale <<<"$live"
   flat_ok=0; node scripts/check-relay-flat.mjs >/tmp/relay-flat.json 2>&1 && flat_ok=1
-  echo "verify: exchange_mirror_not_flat=${live} relay_flat_check=${flat_ok}"
+  echo "verify: exchange_mirror_not_flat=${live} mirror_stale_but_flat=${stale} relay_flat_check=${flat_ok}"
+  # A stale-but-flat mirror (idle account: mirror only refreshes on activity) is
+  # accepted only because check-relay-flat.mjs just did a fresh executor read of
+  # Bitfinex. Any position / open order / orphan in the mirror still blocks.
   if [ "$live" = 0 ] && [ "$flat_ok" = 1 ]; then echo "FLAT (paper + live): deploying now"; exit 0; fi
   if [ "$(date +%s)" -ge "$deadline" ]; then tail -c 2000 /tmp/relay-flat.json; echo "exchange not flat ${VERIFY_S}s after force-flat; refusing to deploy"; exit 1; fi
   sleep 10
