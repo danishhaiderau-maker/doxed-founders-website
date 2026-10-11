@@ -7,6 +7,7 @@
     ["POST", "/api/live-copy/tiles/<lane>/eligibility", "api_live_copy_tile_eligibility"],
     ["POST", "/api/live-copy/protection-bootstrap", "api_live_copy_protection_bootstrap"],
     ["POST", "/api/live-copy/output", "api_live_copy_output"],
+    ["POST", "/api/live-copy/alerts/resolve", "api_live_copy_alerts_resolve"],
     ["GET", "/api/live-copy/status", "api_live_copy_status"],
     ["POST", "/api/live-copy/execution-report", "api_live_copy_execution_report"],
     ["POST", "/api/live-copy/executor-capability", "api_live_copy_executor_capability"],
