@@ -1,5 +1,5 @@
 """Focused behavioral contract for WS/readiness and direct-live fail-closed safety."""
-
+import logging
 import ast
 import copy
 import json
@@ -534,6 +534,9 @@ class ExchangeAuditBehaviorTest(unittest.TestCase):
             "pending_orders": pending,
             "open_positions": positions,
             "bitfinex_private": exchange,
+            "logger": logging.getLogger("test_exchange_audit"),
+            # LIVE-FIX-0500 relay-copy linking reads the live-copy journal.
+            "_get_live_copy_journal": lambda: SimpleNamespace(by_correlation=lambda: {}),
             "SYMBOL_CCXT": "BTC/USDT:USDT",
             "_private_api_keys_ok": lambda: True,
             "_direct_private_exchange_owner": lambda: True,
