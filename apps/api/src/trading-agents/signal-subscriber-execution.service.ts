@@ -131,6 +131,8 @@ const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
  * dashboardState document).
  */
 export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
+/** Max age of a fast-preflight "exchange book proven flat" read reused at the final pre-write gate. */
+export const PROVEN_FLAT_REUSE_MAX_AGE_MS = 1_500;
 /**
  * A disarmed, exposure-free relay has no money-path work to reconcile. Direct
  * authenticated wakes remain immediate. Startup performs one durable recovery
@@ -6655,6 +6657,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         availableUsd,
         markPrice,
         exchangeBookProvenEmpty: flatPreflight,
+        provenEmptyAtMs: flatPreflight ? (timing?.databasePreflightCompletedAtMs ?? Date.now()) : undefined,
       },
       timing,
     );
@@ -9656,6 +9659,8 @@ await this.notifications
       availableUsd: number;
       markPrice: number;
       exchangeBookProvenEmpty?: boolean;
+      /** Authenticated position read from the fast preflight (boss 12 Oct: cut receive->submit). */
+      provenEmptyAtMs?: number;
     },
     timing?: RelayExecutionTimingStages,
   ): Promise<boolean> {
@@ -9809,6 +9814,8 @@ await this.notifications
       availableUsd: number;
       markPrice: number;
       exchangeBookProvenEmpty?: boolean;
+      /** Authenticated position read from the fast preflight (boss 12 Oct: cut receive->submit). */
+      provenEmptyAtMs?: number;
     },
     timing?: RelayExecutionTimingStages,
   ): Promise<boolean> {
@@ -10217,8 +10224,15 @@ await this.notifications
     let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
     let latestCycle: { createdAt: Date } | null = null;
     try {
+      // A flat book proven by the authenticated fast preflight moments ago
+      // is reused instead of a second ~0.3-0.6 s Bitfinex REST read (the
+      // participant claim above is atomic, and flat fast entries run with
+      // maxConcurrent=1). Older than the bound -> re-read as before.
+      const reuseProvenFlat = fastPreflight?.exchangeBookProvenEmpty === true
+        && typeof fastPreflight.provenEmptyAtMs === 'number'
+        && Date.now() - fastPreflight.provenEmptyAtMs <= PROVEN_FLAT_REUSE_MAX_AGE_MS;
       [prePosition, [latestGate, latestCycle]] = await Promise.all([
-        this.readOpenPositionDetailWithRetry(creds),
+        reuseProvenFlat ? Promise.resolve(null) : this.readOpenPositionDetailWithRetry(creds),
         venue === 'bitfinex'
           ? Promise.all([
               this.prisma.tradingAgentInstance.findUnique({
@@ -10304,7 +10318,16 @@ await this.notifications
         } as Prisma.InputJsonValue,
       },
     });
-    if (timing) timing.bitfinexRequestStartedAtMs = Date.now();
+    if (timing) {
+      timing.bitfinexRequestStartedAtMs = Date.now();
+      // Per-hop entry timing (boss 12 Oct: measure receive->submit p50/p95).
+      const t0 = timing.queueEnteredAtMs;
+      this.logger.log(
+        `[ENTRY-TIMING] trade=${tradeId} queue->executor=${timing.executorStartedAtMs - t0}ms`
+        + ` preflight=${(timing.databasePreflightCompletedAtMs ?? t0) - (timing.databasePreflightStartedAtMs ?? t0)}ms`
+        + ` queue->submit=${timing.bitfinexRequestStartedAtMs - t0}ms`,
+      );
+    }
     entrySubmitStarted = true;
     const orderId = await this.activeTrading.submitLimitOrder(creds, {
       direction: intent.direction,

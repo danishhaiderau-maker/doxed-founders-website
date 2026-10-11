@@ -640,9 +640,19 @@ def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
                   key=lambda r: float(r.get("exit_ts") or 0.0))
 
 
+# Danish/boss 12 Oct 10:06: DISLOC cards show the real touch P&L (LONG: ask in,
+# bid out; SHORT: bid in, ask out) with no fee deduction - Bitfinex charges this
+# account no fees. net_bp_taker_2p8 stays on every row for the research verdict.
+CARD_BP_KEY = "pnl_bp_vs_touch"
+
+
+def card_bp(row: Mapping[str, Any]) -> Optional[float]:
+    return _num(row.get(CARD_BP_KEY))
+
+
 def row_net_usd(row: Mapping[str, Any], margin_usd: float = DEFAULT_MARGIN_USD,
                 leverage: float = DEFAULT_LEVERAGE) -> Optional[float]:
-    bp = _num(row.get("net_bp_taker_2p8"))
+    bp = card_bp(row)
     if bp is None:
         return None
     return bp * float(margin_usd) * float(leverage) / 1e4
@@ -655,7 +665,7 @@ def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=No
     out = []
     notional = float(margin_usd) * float(leverage)
     for r in closed_rows(rows):
-        bp = _num(r.get("net_bp_taker_2p8"))
+        bp = card_bp(r)
         net = row_net_usd(r, margin_usd, leverage)
         if bp is None:
             cls = None
@@ -683,7 +693,7 @@ def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=No
                        "signal_to_fill_s": _num(r.get("signal_to_fill_s")),
                        "order_to_fill_s": _num(r.get("order_to_fill_s")), "hold_s": _num(r.get("hold_s"))},
             "path": {"mfe_bp": None, "basis": None},
-            "pnl": {"bp": bp, "bp_basis": "net_bp_taker_2p8", "gross_usd": None, "trading_fees_usd": None,
+            "pnl": {"bp": bp, "bp_basis": CARD_BP_KEY, "gross_usd": None, "trading_fees_usd": None,
                     "funding_usd": None, "net_usd": round(net, 6) if net is not None else None,
                     "net_usd_basis": "DISLOC_NET_BP_x_NOTIONAL", "class": cls, "be_band_bp": be_band_bp,
                     "net_usd_cents_booked": round(net, 2) if net is not None else None},
@@ -703,7 +713,7 @@ def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAU
     by_side: dict = {}
     by_delay: dict = {}
     for r in closed:
-        bp = _num(r.get("net_bp_taker_2p8")) or 0.0
+        bp = card_bp(r) or 0.0
         net = row_net_usd(r, margin_usd, leverage) or 0.0
         net_total += net
         wins += bp > 0
@@ -725,7 +735,7 @@ def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAU
     n = len(closed)
     return {
         "closes": n, "wins": wins, "losses": losses, "net_pnl_usd": round(net_total, 4),
-        "mean_net_bp": round(sum(_num(r.get("net_bp_taker_2p8")) or 0.0 for r in closed) / n, 4) if n else None,
+        "mean_net_bp": round(sum(card_bp(r) or 0.0 for r in closed) / n, 4) if n else None,
         "by_side": by_side, "by_delay_bucket": by_delay,
-        "usd_basis": f"net_bp_taker_2p8 x ${float(margin_usd):g} margin x {float(leverage):g}x / 1e4 (paper)",
+        "usd_basis": f"{CARD_BP_KEY} (real ask in, real bid out, Bitfinex fee 0) x ${float(margin_usd):g} margin x {float(leverage):g}x / 1e4 (paper)",
     }

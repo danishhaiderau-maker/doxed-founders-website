@@ -27,13 +27,6 @@ TS = ROOT / "apps/api/src/trading-agents/live-copy-approval.ts"
 GEN = ROOT / "packages/utils/src/generated/tile-registry.generated.ts"
 BOT = HERE / "bot.py"
 SELF_SIM_BRIDGES = {"disloc_engine": "_disloc_live_copy_bridge"}
-# OPEN GAP (reported to Danish 12 Oct): B1/B2 exit in parts and the executor
-# cannot yet mirror partial reductions on Bitfinex, so their live copy stays
-# protection-blocked. This set may only SHRINK; adding a tile fails CI.
-PROTECTION_BLOCKED_PENDING = {
-    "FAMILY_GSB1_CVD_DIV_REGIME": "CAPABILITY_BLOCKED_PARTIAL_REDUCTION_UNPROVEN",
-    "FAMILY_GSB2_REGIME_SWITCHER": "CAPABILITY_BLOCKED_PARTIAL_REDUCTION_UNPROVEN",
-}
 
 
 def _ts_prefixes() -> dict:
@@ -68,8 +61,9 @@ def test_every_dashboard_tile_emits_signed_intents():
             assert f"def {fn}(" in bot and "_live_copy_publish(event, tid, extra)" in bot, lane
 
 
-def test_every_dashboard_tile_has_working_live_toggle():
+def test_every_dashboard_tile_has_working_live_toggle(monkeypatch):
     elig = lc.LiveEligibility(path="/nonexistent-dir/x.json")
+    monkeypatch.setenv("LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED", "true")
     for lane in ACTIVE_TILE_ORDER:
         spec = ACTIVE_TILE_REGISTRY[lane]
         assert not spec.get("planned"), lane
@@ -77,14 +71,17 @@ def test_every_dashboard_tile_has_working_live_toggle():
         assert lane in elig._active, lane
         assert lc.exchange_stop_bp_for_spec(spec) is not None, f"{lane}: no catastrophe stop -> toggle can never arm"
         ok, why = lc.effective_eligibility(spec, operator_eligible=True)
-        if lane in PROTECTION_BLOCKED_PENDING:
-            assert not ok and why == PROTECTION_BLOCKED_PENDING[lane], (lane, why)
-        else:
-            assert ok, (lane, why)
+        assert ok, (lane, why)  # no exceptions (Danish 12 Oct; boss 10:06)
 
 
-def test_protection_blocked_set_only_shrinks():
-    assert set(PROTECTION_BLOCKED_PENDING) <= {"FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"}
+def test_partial_exit_mirroring_enabled_in_fly_and_railway_config():
+    toml = (HERE / "fly.toml").read_text(encoding="utf-8")
+    assert 'LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED = "true"' in toml
+    import bitfinex_live_switch as bls
+    for mod in (lc, bls):
+        assert mod.PARTIAL_REDUCTION_CAPABILITY in mod.operator_waivable_capabilities(
+            {"LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED": "true"})
+        assert mod.PARTIAL_REDUCTION_CAPABILITY not in mod.operator_waivable_capabilities({})
 
 
 def test_no_retired_tile_on_any_live_copy_path():

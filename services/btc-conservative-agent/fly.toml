@@ -6,6 +6,8 @@ app = "doxed-btc-bot"
 primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested syd host (mem_overcommit)
 
 [env]
+  # Boss 12 Oct 10:06: mirror B1/B2 partial exits as reduce-only partial closes (executor flag SUBSCRIBER_POSITION_REDUCTION_ENABLED must also be true).
+  LIVE_COPY_PARTIAL_REDUCTIONS_MIRRORED = "true"
   # Outside durable checkpoint fingerprint (slice/file budget are outside stable identity).
   DATA_SYNC_INVENTORY_SLICE_SECONDS = "60"
   DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"

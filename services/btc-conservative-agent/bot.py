@@ -5243,6 +5243,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
             "reduced_qty": close_qty, "remaining_qty": pos["qty"],
             "fill_price": fill_px, "reduce_only": True,
             "research_lane": pos.get("research_lane"),
+            # Executor reduction fence identity (boss 12 Oct 10:06: partial exits mirrored live).
+            "reduction_id": f"{trade_id}:reduce:{float(prior_qty):.8f}",
         },
         target_mutator=target_mutator, live_mutator=live_mutator,
         canonical_lock=position_close_lock,
