@@ -24,7 +24,7 @@
     },
     {
       "path": "apps/api/src/trading-agents/signal-subscriber-execution.service.ts",
-      "sha256": "93301baefb0202f0fd930d67d363ea910da035e9b1c39eb876676e8c8bcaece9"
+      "sha256": "364b868c633169977fdf0f06caf6b2b804c6d167c43f2432df3a8397f0cabe41"
     }
   ]
 }
