@@ -28512,9 +28512,8 @@ _SHADOW_EXIT_RECORDER = shadow_exit_paths.ShadowExitRecorder(
     enabled=SHADOW_EXIT_RECORDER_ENABLED,
     max_queue=32,
 )
-# LIVE-FIX-0815: start eagerly at boot so a dead/never-started worker is
-# visible (liveness RED) instead of silently waiting for a first submit.
-_SHADOW_EXIT_RECORDER.start()
+# LIVE-FIX-0815: started eagerly in main() (not at import, per the cleanup
+# characterization contract) so a dead worker shows liveness RED at boot.
 
 
 def _submit_shadow_exit_path(payload) -> None:
@@ -56757,6 +56756,10 @@ def main():
     # A port conflict is therefore fatal to the entire bot, never just a web thread.
     dashboard_httpd = _create_dashboard_server()
     threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
+    try:
+        _SHADOW_EXIT_RECORDER.start()
+    except Exception as exc:  # noqa: BLE001 - liveness reports a dead worker
+        logger.error(f"[SHADOW_EXIT] eager start failed: {exc}")
     # Publish liveness before synchronous restore, preload, and reconciliation.
     threading.Thread(
         target=safe_thread(heartbeat_loop), name="process-heartbeat", daemon=True
