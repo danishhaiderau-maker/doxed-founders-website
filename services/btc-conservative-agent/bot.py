@@ -42406,6 +42406,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         session_trade_count, session_realized_pnl, session_lane_ledger = (
             _session_trade_accounting_locked(session_start)
         )
+        session_forced_pnl = _session_forced_close_pnl_usd_locked(session_start)
         recent_expired, expired_orders_total = _snapshot_expired_rows_locked(
             MAX_EXPIRED_ORDERS
         )
@@ -42504,6 +42505,10 @@ def _build_relay_execution_state_snapshot() -> dict:
     snapshot["lane_pnl_ledger"] = session_lane_ledger
     _display_balance = get_display_balance()
     snapshot["account_balance"] = _display_balance
+    snapshot["forced_close_pnl_usd"] = session_forced_pnl
+    snapshot["balance_reconcile"] = _balance_reconcile_block(
+        _display_balance, session_realized_pnl, session_forced_pnl
+    )
     # Best-effort equity: account_balance + unrealized PnL of open positions.
     # The heavy path computes this with full funding/mark enrichment; for the
     # overlay we accept the already-computed position rows so the tile stays
@@ -43054,6 +43059,43 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
         if not _normalize_lane_key(row.get("research_lane") or ""):
             realized += _trade_row_net_pnl_usd(row)
     return len(rows), round(realized, 2), ledger
+
+
+def _session_forced_close_pnl_usd_locked(session_start: float) -> float:
+    """Realized USD of in-session forced closes (deploy flatten / admin close).
+
+    ``session_pnl_usd`` excludes these (strategy stats), but the paper wallet
+    (``account_balance``) books every close, forced ones included.  Caller
+    owns ``trade_lock``.
+    """
+    total = 0.0
+    for row in trades:
+        if not isinstance(row, dict):
+            continue
+        if session_start and not _trade_row_in_session(row, session_start):
+            continue
+        if _trade_row_is_forced_close(row):
+            total += _trade_row_net_pnl_usd(row)
+    return round(total, 4)
+
+
+def _balance_reconcile_block(balance, session_pnl, forced_pnl) -> dict:
+    """FP #36: explain account_balance = start + strategy net + forced net."""
+    try:
+        bal = float(balance)
+        expected = STARTING_BALANCE + float(session_pnl or 0.0) + float(forced_pnl or 0.0)
+    except (TypeError, ValueError):
+        return {}
+    return {
+        "starting_balance_usd": STARTING_BALANCE,
+        "session_strategy_pnl_usd": session_pnl,
+        "forced_close_pnl_usd": forced_pnl,
+        "expected_balance_usd": round(expected, 4),
+        "account_balance_usd": round(bal, 4),
+        # Residual is cents rounding only (session is cents-booked, wallet raw).
+        "residual_usd": round(bal - expected, 4),
+        "basis": "account_balance = start + session_pnl_usd (non-forced) + forced_close_pnl_usd",
+    }
 
 
 def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
@@ -43870,6 +43912,7 @@ def _build_api_state_snapshot():
             session_trade_count, session_realized_pnl, session_lane_ledger = (
                 _session_trade_accounting_locked(session_start)
             )
+            session_forced_pnl = _session_forced_close_pnl_usd_locked(session_start)
             expired_orders_copy, expired_orders_total = (
                 _snapshot_expired_rows_locked(_DASHBOARD_HISTORY_MAX)
             )
@@ -44124,6 +44167,10 @@ def _build_api_state_snapshot():
         snapshot["diag"]["signals_last_hour"] = 0
         snapshot["account_balance"] = get_display_balance()
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
+        snapshot["forced_close_pnl_usd"] = session_forced_pnl
+        snapshot["balance_reconcile"] = _balance_reconcile_block(
+            snapshot["account_balance"], session_realized_pnl, session_forced_pnl
+        )
         session_trades = trades_copy
         snapshot["trade_count_session"] = session_trade_count
         snapshot["trade_count"] = snapshot["trade_count_session"]
@@ -44432,6 +44479,8 @@ def _api_state_cache_refresher_loop():
                     "trade_count",
                     "session_trade_breakdown",
                     "session_pnl_usd",
+                    "forced_close_pnl_usd",
+                    "balance_reconcile",
                     "trades_display_limit",
                     "lane_pnl_ledger",
                     "lane_position_counts",
@@ -44639,6 +44688,7 @@ _PUBLIC_STATE_SAFE_TOP_KEYS = {
     "last_heartbeat", "heartbeat", "time_since_heartbeat",
     # account / PnL (marketing)
     "equity", "account_balance", "session_pnl_usd",
+    "forced_close_pnl_usd", "balance_reconcile",
     "trade_count", "trade_count_session", "trades_display_limit",
     "funding",
     # collections (each item sanitized further below)
