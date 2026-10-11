@@ -600,12 +600,40 @@ def test_oversized_member_blocks_only_its_own_stream(tmp_path):
     manifest = json.loads(env.store.get(fmt.manifest_key("v1", 1)))
     assert [m["path"] for m in manifest["members"]] == ["ok.json"]
     status = json.loads((env.state_dir / "status.json").read_text())
-    assert status["oversized_paths"] == ["huge.sqlite3"] and result["deferred_bytes"] == 100
+    # Never-shippable bytes are disclosed as oversized, not counted as lag.
+    assert status["oversized_paths"] == ["huge.sqlite3"] and status["oversized_bytes"] == 100
+    assert result["deferred_bytes"] == 0 and status["unshipped_bytes"] == 0
+    assert result["backlog_mode"] is False
+
+
+def test_derived_research_db_is_not_shipped_or_counted_as_lag(tmp_path):
+    env = Env(tmp_path)
+    env.write("research.db", b"SQLite format 3\x00" + b"x" * 100)
+    env.write("research/genome/trade_genome.jsonl", b'{"trade_id": "t1"}\n')
+    result = env.shipper().cycle()
+    manifest = json.loads(env.store.get(fmt.manifest_key("v1", 1)))
+    assert "research.db" not in [m["path"] for m in manifest["members"]]
+    status = json.loads((env.state_dir / "status.json").read_text())
+    assert status["derived_unshipped"] == {"research.db": 116}
+    assert result["deferred_bytes"] == 0 and status["unshipped_bytes"] == 0
+
+
+def test_load_state_is_cached_until_the_checkpoint_changes(tmp_path):
+    env = Env(tmp_path)
+    env.write("a.json", b"{}")
+    shipper = env.shipper()
+    shipper.cycle()
+    first = shipper.load_state()
+    first["seq"] = -1  # callers get a private copy
+    assert shipper.load_state()["seq"] == 1
+    env.write("b.json", b"{}")
+    shipper.cycle()
+    assert shipper.load_state()["seq"] == 2
 
 
 def test_large_mutating_snapshot_is_throttled_per_interval(tmp_path):
     env = Env(tmp_path, large_snapshot_bytes=100, large_snapshot_interval=600)
-    db = env.write("research.db", b"a" * 200)
+    db = env.write("lab.db", b"a" * 200)
     env.write("small.json", b"{}")
     env.ship_all()
     db.write_bytes(b"b" * 200)
@@ -615,11 +643,11 @@ def test_large_mutating_snapshot_is_throttled_per_interval(tmp_path):
     manifest = json.loads(env.store.get(fmt.manifest_key("v1", 2)))
     assert [m["path"] for m in manifest["members"]] == ["small.json"]
     status = json.loads((env.state_dir / "status.json").read_text())
-    assert status["throttled_snapshots"] == ["research.db"]
+    assert status["throttled_snapshots"] == ["lab.db"]
     env.clock[0] += 601
     env.ship_all()
     manifest = json.loads(env.store.get(fmt.manifest_key("v1", 3)))
-    assert [m["path"] for m in manifest["members"]] == ["research.db"]
+    assert [m["path"] for m in manifest["members"]] == ["lab.db"]
     env.puller().pull_once()
     env.assert_tree_matches_source()
 

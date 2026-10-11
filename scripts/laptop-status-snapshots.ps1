@@ -22,13 +22,39 @@ function New-Snapshot([string]$Schema) {
   [ordered]@{ schema = $Schema; observedAt = [DateTimeOffset]::UtcNow.ToString('o'); ok = $false }
 }
 
+# /health and /ready answer 503 with a full JSON body while the bot boots or a
+# heartbeat is late; Invoke-RestMethod throws on that status and the snapshot
+# lost git_rev/live_armed/lanes (nulls during and after every deploy). Read the
+# body of an error response too; $script:LastHttpStatus carries the code.
+function Invoke-JsonGet([string]$Uri, [hashtable]$Headers = @{}) {
+  $script:LastHttpStatus = $null
+  try {
+    $r = Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec
+    $script:LastHttpStatus = 200
+    return $r
+  } catch {
+    $resp = $_.Exception.Response
+    if ($null -eq $resp) { throw }
+    $script:LastHttpStatus = [int]$resp.StatusCode
+    $body = $null
+    try {
+      $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+      $body = $reader.ReadToEnd() | ConvertFrom-Json
+    } catch { $body = $null }
+    if ($null -eq $body) { throw }
+    return $body
+  }
+}
+
 $head = New-Snapshot 'fly_segment_head_snapshot_v1'
 $health = $null
+$healthHttp = $null
 if ($offline) {
   $head.error = 'OFFLINE'
 } else {
   try {
-    $health = Invoke-RestMethod -Method Get -Uri "$($cfg.SourceUrl)/health" -TimeoutSec $TimeoutSec
+    $health = Invoke-JsonGet "$($cfg.SourceUrl)/health"
+    $healthHttp = $script:LastHttpStatus
     $transfer = $health.volume.transfer
     if ($null -eq $transfer) {
       $head.error = 'TRANSFER_BLOCK_MISSING'
@@ -87,7 +113,8 @@ if ($offline) {
     $runtime[$name] = $health.$name
   }
   try {
-    $ready = Invoke-RestMethod -Method Get -Uri "$($cfg.SourceUrl)/ready" -TimeoutSec $TimeoutSec
+    $ready = Invoke-JsonGet "$($cfg.SourceUrl)/ready"
+    $runtime.ready_http = $script:LastHttpStatus
     $progress = $ready.strategy_progress
     $cycle = $progress.scheduled_ai_cycle
     $runtime.ready_status = $ready.status
@@ -165,7 +192,36 @@ if ($offline) {
     }
   }
 }
-Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_runtime_snapshot_v1.json') -Value $runtime -Depth 6
+# Keep the last good value of the identity fields instead of publishing nulls.
+# Carried values are labelled (carried_fields + last_good_at), never silent.
+$runtimePath = Join-Path $cfg.StateDir 'fly_runtime_snapshot_v1.json'
+$previousRuntime = Read-JsonFile $runtimePath
+$lastGood = if ($previousRuntime -and $previousRuntime.last_good) { $previousRuntime.last_good } else { $null }
+$identity = @('git_rev', 'live_armed', 'bitfinex_live_enabled', 'tile_registry_signature', 'active_tile_lanes')
+$carried = @()
+$fresh = [ordered]@{}
+foreach ($name in $identity) {
+  $value = $runtime[$name]
+  $empty = ($null -eq $value) -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value)) -or
+           ($name -eq 'active_tile_lanes' -and @($value).Count -eq 0)
+  if (-not $empty) { $fresh[$name] = $value }
+  elseif ($lastGood -and $null -ne $lastGood.$name) { $runtime[$name] = $lastGood.$name; $carried += $name }
+}
+if ($fresh.Count -eq $identity.Count) {
+  $fresh.observedAt = $runtime.observedAt
+  $runtime.last_good = $fresh
+} elseif ($lastGood) {
+  $merged = [ordered]@{}
+  foreach ($p in $lastGood.PSObject.Properties) { $merged[$p.Name] = $p.Value }
+  foreach ($k in $fresh.Keys) { $merged[$k] = $fresh[$k] }
+  $runtime.last_good = $merged
+}
+if ($carried.Count -gt 0) {
+  $runtime.carried_fields = $carried
+  $runtime.last_good_at = if ($lastGood) { $lastGood.observedAt } else { $null }
+}
+if ($healthHttp) { $runtime.health_http = $healthHttp }
+Write-JsonAtomic -Path $runtimePath -Value $runtime -Depth 6
 
 # Recent guarded deploy workflow runs (read-only `gh run list`) so the proof can
 # attribute a DEPLOY_MAINTENANCE pause to an actual guarded deploy.

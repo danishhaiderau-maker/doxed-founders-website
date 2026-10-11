@@ -157,6 +157,15 @@ $migrationExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message ("MIGRATION exit={0} {1}" -f $migrationExit, $migration)
 if ($migrationExit -ne 0) { Stop-Cycle 4 'MIGRATION_FAILED' }
 
+# research.db is no longer snapshotted on Fly (2 GB online backup timed out and
+# blocked shipping); its genome tables are rebuilt here, incrementally, from the
+# JSONL mirrors that just migrated. Best effort: never stops the cycle.
+$ErrorActionPreference = 'Continue'
+try {
+  $rebuild = & $Python (Join-Path $cfg.RepoRoot 'scripts\rebuild_research_db_from_genome_mirrors.py') --data-root $cfg.DataRoot 2>&1 | Out-String
+} finally { $ErrorActionPreference = $previous }
+Write-ChainLog -Config $cfg -Name $logName -Message ("RESEARCH_DB_REBUILD exit={0} {1}" -f $LASTEXITCODE, ($rebuild -replace '\s+', ' ').Trim())
+
 # The analyzer must run code that contains the revision Fly was running when
 # this data was promoted; an older checkout ran the 02:40Z flyMatch=False pass
 # that crashed natively. The supervisor's auto fast-forward cannot run while

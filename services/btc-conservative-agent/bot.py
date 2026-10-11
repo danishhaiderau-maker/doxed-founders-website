@@ -46509,6 +46509,11 @@ def health():
         "volume": _volume_health_snapshot(now),
     }
     try:
+        from runtime_telemetry import clock_sync_verdict
+        payload["clock_sync"] = clock_sync_verdict()
+    except Exception as exc:
+        payload["clock_sync"] = {"status": "UNKNOWN", "error": type(exc).__name__}
+    try:
         payload["research_collection"] = research_collection_health(now)
     except Exception as exc:
         payload["research_collection"] = {"status": "UNKNOWN", "error": type(exc).__name__}
@@ -49322,20 +49327,25 @@ def _prime_data_sync_identity_epoch_cache() -> None:
 def _data_sync_lifecycle_cleanup_current_identity() -> dict:
     """Bind cleanup to the exact running revision, epoch, registry and config."""
     revision = _runtime_git_rev()
-    config_material = {
-        key: state.get(key)
-        for key in sorted(_persistent_config_keys())
-        if key in state
-    }
     return {
         "source_git_rev": revision,
         "deployed_git_rev": revision,
         "collection_epoch_id": _bound_collection_epoch_id(),
         "tile_registry_signature": active_tile_registry_signature(),
-        "config_signature": hashlib.sha256(json.dumps(
-            config_material, separators=(",", ":"), sort_keys=True,
-        ).encode("utf-8")).hexdigest(),
+        "config_signature": _persistent_config_signature(),
     }
+
+
+def _persistent_config_signature() -> str:
+    """sha256 of the persisted config keys (the V3 store's config identity)."""
+    config_material = {
+        key: state.get(key)
+        for key in sorted(_persistent_config_keys())
+        if key in state
+    }
+    return hashlib.sha256(json.dumps(
+        config_material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
 
 
 def _data_sync_lifecycle_cleanup_active_references() -> dict:
@@ -56498,9 +56508,10 @@ def main():
     _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()
     load_persistent_config()
-    set_collection_config_signature_provider(
-        lambda: _data_sync_lifecycle_cleanup_current_identity()["config_signature"]
-    )
+    # Only the config signature is needed per V3 row; building the whole
+    # cleanup identity also re-hashed the tile registry on every append
+    # (py-spy 11 Oct 2026: ~10% of process CPU).
+    set_collection_config_signature_provider(_persistent_config_signature)
     _apply_env_live_gating()
     reset_transient_runtime_state()
     load_lane_pnl_ledgers_from_disk()

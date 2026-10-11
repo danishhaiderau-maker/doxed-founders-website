@@ -202,6 +202,38 @@ def external_clock_offset() -> Optional[dict]:
     return out
 
 
+CLOCK_SYNC_MAX_OFFSET_MS = float(os.getenv("CLOCK_SYNC_MAX_OFFSET_MS", "250"))
+
+
+def clock_sync_verdict() -> dict:
+    """Authoritative clock-sync state for monitors and latency maths.
+
+    Fly VMs run no NTP daemon, so the kernel's adjtimex state is permanently
+    TIME_ERROR (16 s default bound) even though kvm-clock keeps wall time
+    accurate; alerting on it was a permanent false RED. The verdict is based on
+    the measured external offset; the kernel state is reported as
+    informational (``kernel_ntp_authoritative: False``), not hidden.
+    """
+    ext = external_clock_offset()
+    kernel = kernel_ntp_state()
+    out = {"schema": "clock_sync_v1", "source": "external_offset",
+           "max_offset_ms": CLOCK_SYNC_MAX_OFFSET_MS,
+           "kernel_ntp_authoritative": False,
+           "kernel_ntp_state": (kernel or {}).get("state"),
+           "offset_ms": None, "rtt_ms": None, "age_sec": None}
+    if not ext:
+        out.update(synchronized=None, status="UNKNOWN", reason="NO_EXTERNAL_SAMPLE_YET")
+        return out
+    out.update(offset_ms=ext.get("offset_ms"), rtt_ms=ext.get("rtt_ms"), age_sec=ext.get("age_sec"))
+    if not ext.get("trusted"):
+        out.update(synchronized=None, status="UNKNOWN", reason="EXTERNAL_SAMPLE_UNTRUSTED")
+    elif abs(float(ext.get("offset_ms") or 0.0)) <= CLOCK_SYNC_MAX_OFFSET_MS:
+        out.update(synchronized=True, status="OK", reason="")
+    else:
+        out.update(synchronized=False, status="DRIFT", reason="EXTERNAL_OFFSET_ABOVE_LIMIT")
+    return out
+
+
 class CrashDumpWatcher:
     """Counts new crash/incident rows by tailing only the appended bytes."""
 
@@ -457,6 +489,7 @@ class RuntimeTelemetry(threading.Thread):
                 # kernel_ntp is always "unsynchronized, 16 s" on Fly (no ntpd;
                 # 16 s is adjtimex's default bound, not a measured error).
                 "external_offset": external_clock_offset(),
+                "sync": clock_sync_verdict(),
             },
             "disk": {"used_pct": pressure.get("disk_used_pct"),
                      "free_bytes": pressure.get("disk_free_bytes")},

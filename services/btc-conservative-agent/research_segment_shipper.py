@@ -75,6 +75,14 @@ SQLITE_BACKUP_PAGES_PER_STEP = 1024
 SQLITE_BACKUP_STEP_SLEEP_SECONDS = 0.005
 SQLITE_BACKUP_DEADLINE_SECONDS = 180.0
 SQLITE_CONSISTENCY = "sqlite_online_backup_v1"
+# Derived SQLite stores whose every write is mirrored to an append-only JSONL
+# stream that ships incrementally (research_genome/store.py: research.db ->
+# research/genome/<table>.jsonl, INSERT OR REPLACE replay). A whole-file online
+# backup of the 2 GB hot DB timed out at 600 s and was over the SQLite cap, so it
+# is rebuilt off the trading machine (scripts/rebuild_research_db_from_genome_mirrors.py).
+DERIVED_SQLITE_SNAPSHOTS = frozenset(
+    name.strip() for name in (os.getenv("RESEARCH_SEGMENTS_DERIVED_SQLITE") or "research.db").split(",")
+    if name.strip())
 
 APPEND_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
 RECORD_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
@@ -193,6 +201,15 @@ def _wal_signature(path: Path) -> list[int]:
     return [int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns)]
 
 
+def _deep_copy_json(value):
+    """Copy of a JSON-shaped value without a JSON round trip."""
+    if isinstance(value, dict):
+        return {k: _deep_copy_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy_json(v) for v in value]
+    return value
+
+
 @contextlib.contextmanager
 def _normal_cpu_class():
     """Leave SCHED_IDLE while a SQLite step holds the source's SHARED lock.
@@ -276,6 +293,8 @@ class SegmentShipper:
         self.large_snapshot_bytes = max(0, int(large_snapshot_bytes))
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
         self.throttled: list[str] = []
+        self.derived_unshipped: dict[str, int] = {}
+        self._state_cache: tuple[tuple[int, int, int], dict] | None = None
         self.next_cursor = ""
         # stream -> (consecutive races, retry-not-before); in memory only, so a
         # restart retries every stream once.
@@ -350,10 +369,19 @@ class SegmentShipper:
             return {"schema": STATE_SCHEMA, "prefix": self.prefix, "seq": 0,
                     "last_manifest_sha256": fmt.GENESIS_PREV_SHA256, "files": {},
                     "tombstones": {}, "last_segment_at": None}
+        # state.json tracks ~95k files; decoding it several times per cycle was
+        # the shipper's top CPU cost (py-spy 11 Oct 2026). Every write goes
+        # through _atomic_write (new inode), so (inode, size, mtime) identifies
+        # the content; callers get a private deep copy.
+        st = self.state_path.stat()
+        key = (int(st.st_ino), int(st.st_size), int(st.st_mtime_ns))
+        if self._state_cache is not None and self._state_cache[0] == key:
+            return _deep_copy_json(self._state_cache[1])
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         if state.get("schema") != STATE_SCHEMA or state.get("prefix") != self.prefix:
             raise RuntimeError("shipper checkpoint schema/prefix mismatch; refusing to continue")
-        return state
+        self._state_cache = (key, state)
+        return _deep_copy_json(state)
 
     def write_status(self, **fields) -> None:
         previous = {}
@@ -552,6 +580,12 @@ class SegmentShipper:
     def _plan_entry(self, relpath: str, path: Path, stat: os.stat_result, tracked: dict | None,
                     tombstones: dict) -> dict | None:
         size = int(stat.st_size)
+        if relpath in DERIVED_SQLITE_SNAPSHOTS:
+            # Rebuilt on the laptop from its append-only JSONL mirrors, which
+            # ship incrementally; never backed up or snapshotted on Fly. Still
+            # in the universe, so it is neither tombstoned nor counted as lag.
+            self.derived_unshipped[relpath] = size
+            return None
         op = None
         if self._is_append_class(relpath):
             if tracked is None:
@@ -652,15 +686,20 @@ class SegmentShipper:
                 deferred += pending
                 continue
             if op.get("oversized") or op["bytes"] > self._member_cap(op):
+                # Reported as oversized_bytes, never as backlog: an op that can
+                # never ship is not lag, and counting it kept backlog mode (5 s
+                # cycles, boosted priority) on forever (11 Oct 2026: 2.03 GB
+                # research.db held unshipped_bytes at 2 GB and cost ~40% of the
+                # VM's CPU in repeated state.json decodes).
                 op["oversized"] = True
                 blocked.add(op["stream"])
-                deferred += pending
                 continue
             # A SQLite snapshot always travels alone so its backup can be
             # streamed from disk instead of held in memory.
             if selected and (total + op["bytes"] > self.segment_budget
                              or self._sqlite_snapshot_op(op)):
-                deferred += sum(item.get("pending_bytes", item["bytes"]) for item in ops[index:])
+                deferred += sum(item.get("pending_bytes", item["bytes"]) for item in ops[index:]
+                                if not item.get("oversized"))
                 self.next_cursor = op["stream"]
                 break
             selected.append(op)
@@ -668,7 +707,8 @@ class SegmentShipper:
             deferred += pending - op["bytes"]
             if self._sqlite_snapshot_op(op):
                 later = ops[index + 1:]
-                deferred += sum(item.get("pending_bytes", item["bytes"]) for item in later)
+                deferred += sum(item.get("pending_bytes", item["bytes"]) for item in later
+                                if not item.get("oversized"))
                 if later:
                     self.next_cursor = later[0]["stream"]
                 break
@@ -1021,6 +1061,7 @@ class SegmentShipper:
             return {"shipped": None, "recovered": recovered, "deferred_bytes": 0,
                     "store_cap_reached": True}
         self.throttled = []
+        self.derived_unshipped = {}
         if self.baseline_genesis and int(state["seq"]) == 0 and not state["files"]:
             try:
                 segment_raw, manifest_raw, new_state = self.build_genesis(state, self.scan())
@@ -1053,7 +1094,9 @@ class SegmentShipper:
         # e.g. research.db forever and look like a backlog that never drains.
         oversized_bytes = sum(op.get("pending_bytes", op["bytes"]) for op in ops
                               if op.get("oversized"))
-        mode_oversized = {"oversized_bytes": oversized_bytes}
+        mode_oversized = {"oversized_bytes": oversized_bytes,
+                          # Disclosed, not hidden: derived DBs rebuilt off-Fly.
+                          "derived_unshipped": dict(sorted(self.derived_unshipped.items()))}
         throttled = sorted(self.throttled)[:50]
         raced: list[str] = []
         new_state = None
