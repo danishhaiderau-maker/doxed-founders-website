@@ -32112,9 +32112,33 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         trades_fn=_disloc_recent_trades,
         touch_fn=_disloc_touch,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
-                                  else _dsl.TRADES_FILE): _safe_append_jsonl(_f, row, label="DISLOC_PAPER",
-                                                                             fallback_on_error=False),
+                                  else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
     )
+
+
+# Danish 12 Oct 09:19: every dashboard tile is live-copyable through the same
+# signed copy path. DISLOC / DISLOC-FOI self-simulate their paper orders, so
+# their engine rows are bridged into the same _live_copy_publish lifecycle
+# GS-01 uses (ORDER_PLACED -> POSITION_OPENED -> POSITION_CLOSED / cancel).
+# Entry = marketable limit through the touch (taker, IOC-like), only while the
+# signal is < DISLOC_LIVE_MAX_SIGNAL_AGE_SEC old; exit mirrors the paper exit.
+def _disloc_append_and_copy(path, row) -> None:
+    _safe_append_jsonl(path, row, label="DISLOC_PAPER", fallback_on_error=False)
+    try:
+        _disloc_live_copy_bridge(row)
+    except Exception as exc:  # noqa: BLE001 - live copy never breaks paper
+        logger.warning(f"[DISLOC LIVE COPY] bridge failed: {exc}")
+
+
+def _disloc_live_copy_bridge(row) -> None:
+    touch = None
+    if isinstance(row, dict) and row.get("event") == "DISLOC_ABANDONED":
+        touch = _disloc_touch()
+    import disloc_live_copy as _dlc
+    for event, tid, extra in _dlc.disloc_live_copy_events(row, touch=touch, bot_version=EXECUTION_FIX_VERSION):
+        if event == "ORDER_PLACED":
+            _live_copy_note_signal_ts(tid, extra.get("signal_ts"))
+        _live_copy_publish(event, tid, extra)
 
 
 def xvl_evaluator_loop():

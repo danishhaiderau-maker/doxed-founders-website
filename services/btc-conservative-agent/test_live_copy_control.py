@@ -380,13 +380,8 @@ def test_website_tile_prefix_map_matches_active_registry():
     block = text[text.index("LIVE_COPY_TILE_PREFIXES"):]
     block = block[:block.index("});")]
     website = dict(re.findall(r"(FAMILY_[A-Z0-9_]+):\s*'([a-z0-9]+)'", block))
-    # Self-simulated paper tiles (Tile 13 DISLOC) never emit a pipeline order, so never a live-copy intent.
-    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER
-           if not ACTIVE_TILE_REGISTRY[lane].get("self_simulated_paper")}
-    # Tiles retired on Fly may keep a website prefix (their old trades still
-    # resolve); Fly never emits a live intent for a retired lane.
-    from combo_pathway_config import RETIRED_TILE_LANES
-    website = {k: v for k, v in website.items() if k not in RETIRED_TILE_LANES}
+    # Danish 12 Oct: dashboard tiles == live-copyable tiles, both directions.
+    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER}
     assert website == fly
 
 

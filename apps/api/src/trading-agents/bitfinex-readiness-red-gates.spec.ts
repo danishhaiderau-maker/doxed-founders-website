@@ -84,13 +84,13 @@ test('gate 2: every new-exposure entry path runs the pre-trade liquidation gate'
 });
 
 test('gate 4: partial-exit tiles are refused by the relay allowlist while reductions are off', () => {
-  // The registry's partial-exit tiles are the B1/B2/B3 regime tiles (gb1/gb2/gb3),
+  // The registry's partial-exit tiles are the B1/B2 regime tiles (gb1/gb2; B3 retired 11 Oct),
   // whose ladder take-profits reduce a position in parts. They stay relay-ineligible
   // until exchange-side reductions are proven, so the relay must refuse them.
-  assert.deepEqual([...PARTIAL_EXIT_TILE_ID_PREFIXES], ['gb1', 'gb2', 'gb3']);
+  assert.deepEqual([...PARTIAL_EXIT_TILE_ID_PREFIXES], ['gb1', 'gb2']);
   assert.equal(isPartialExitLaneTradeId('gb1-deadbeef1234'), true);
   assert.equal(isPartialExitLaneTradeId('gb2-deadbeef1234'), true);
-  assert.equal(isPartialExitLaneTradeId('gb3-deadbeef1234'), true);
+  assert.equal(isPartialExitLaneTradeId('gb3-deadbeef1234'), false);
   assert.equal(isPartialExitLaneTradeId('gs1-deadbeef1234'), false);
   assert.equal(isMirrorableLaneTradeId('gb1-deadbeef1234'), false);
   assert.equal(isMirrorableLaneTradeId('gb1-deadbeef1234', { partialReductionsEnabled: false }), false);
