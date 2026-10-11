@@ -35079,8 +35079,8 @@ def build_static_pathway_lane_specs() -> dict:
             "is_independent_ai": False,
             "is_deterministic_bracket": False,
             "badge": "PAPER_ONLY_FAMILY",
-            # Danish's permanent numbers for tiles added after position 11.
-            "tile_number": {"FAMILY_GS07_V07_PREMIUM_FADE_60M": 14}.get(lane_id, tile_number),
+            # Danish (11 Oct 2026): tiles numbered 1..N in registry order, no gaps.
+            "tile_number": tile_number,
             "registry_position": tile_number,
             "card_sections": combo_tile_card_sections(lane_id),
             "entry_mode_label": lane_spec["raw_policy_id"].split("|", 1)[0],
@@ -38365,7 +38365,7 @@ DASHBOARD_JS = """(function () {
             const token = (label.split(' ')[0] || spec.lane || '');
             return String(token).toUpperCase() === 'CONTROL' ? 'CTRL' : token;
           })();
-          const titleTip = spec.label ? (' title="' + cardEsc(spec.label) + '"') : '';
+          const titleTip = spec.label ? (' title="' + cardEsc(String(spec.label).replace(/^Tile\\s+\\d+\\s*·\\s*/, '')) + '"') : '';
           const cardList = (rows) => '<ul style="margin:4px 0 0 0;padding-left:16px;">' + (rows || []).map(function (r) {
             return '<li style="margin:2px 0;">' + cardEsc(r) + '</li>';
           }).join('') + '</ul>';
