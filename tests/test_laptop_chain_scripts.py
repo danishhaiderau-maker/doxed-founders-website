@@ -577,7 +577,9 @@ def test_status_snapshots_offline_are_explicit_failures_never_flat(chain):
 
 def test_status_snapshots_are_read_only_and_never_persist_secrets():
     source = _source("laptop-status-snapshots.ps1")
-    assert source.count("Invoke-RestMethod -Method Get") == 4
+    # Fly /health and /ready go through Invoke-JsonGet (reads 503 bodies), still GET-only.
+    assert source.count("Invoke-RestMethod -Method Get") == 3
+    assert source.count("Invoke-JsonGet \"") == 2
     assert "-Method Post" not in source and "-Method Put" not in source
     persisted = source[source.index("$relay.ok = $true"):source.index("} catch {\n    $relay.error")]
     assert "userId" not in persisted and "adminToken" not in persisted and "lastError" not in persisted

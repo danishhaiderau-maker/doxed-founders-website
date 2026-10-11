@@ -18,6 +18,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SIGNATURE = "524acf4949ae234e39a3902882a20872dadfe33d1235453696256348bf0c9335"
 
 
+
+@pytest.fixture(autouse=True)
+def _ship_research_db_as_a_generic_sqlite(monkeypatch):
+    # These cases use research.db as the generic oversized/racing SQLite stream;
+    # production treats it as derived (rebuilt from genome JSONL mirrors).
+    import research_segment_shipper
+    monkeypatch.setattr(research_segment_shipper, "DERIVED_SQLITE_SNAPSHOTS", frozenset())
+
 def _migration_module():
     spec = importlib.util.spec_from_file_location(
         "migrate_canonical_research_store", REPO_ROOT / "scripts" / "migrate_canonical_research_store.py")
