@@ -138,7 +138,7 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
     report = _report(rows)
     assert report["baseline_lane"] is None
     # Ten hypotheses (H-A, H-C, GS-01, B1..B3, GS-06, GS-07, Danish, Fade Pool, GS-07 V07); the control is not a trial.
-    assert report["deflated_sharpe_trials"] == 11
+    assert report["deflated_sharpe_trials"] == 12
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND
     assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)

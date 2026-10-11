@@ -139,6 +139,8 @@ DANISH_REGIME_ROUTER_ADMISSION_POLICY_ID = "DANISH_REGIME_ROUTER_DYNAMIC_V1"
 FADE_POOL_ADMISSION_POLICY_ID = "FADE_POOL_COMMITTED_AND_PREMIUM_V1"
 RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M = "FAMILY_GS07_V07_PREMIUM_FADE_60M"
 GS07_V07_ADMISSION_POLICY_ID = "GS07_V07_CROSS_VENUE_PREMIUM_DEV60M_2P5BP_NO_AI_V1"
+RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+DISLOC_ADMISSION_POLICY_ID = "DISLOC_BFX_VS_BNBY_PREM_P10P90_D5_MAKER_TOUCH_NO_AI_V1"
 # Tiles on this clock are triggered by the per-second cross-venue evaluator,
 # never by the shared three-minute AI call.
 CROSS_VENUE_SIGNAL_CLOCK = "PER_SECOND_CROSS_VENUE_EVALUATOR"
@@ -190,6 +192,7 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_DANISH_REGIME_ROUTER,
     RESEARCH_LANE_FAMILY_FADE_POOL,
     RESEARCH_LANE_FAMILY_GS07_V07_PREMIUM_FADE_60M,
+    RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -1545,6 +1548,88 @@ COMBO_LANE_SPECS.update({
         early_cut_shadow_reason="V07 spec: stop and time exit only; every other protection is shadow-only",
     ),
 })
+
+
+# Tile 13 · DISLOC (owner order 11 Oct 2026; audit/STRATEGIST-AUDIT-20261011.md §4c):
+# Bitfinex mid dislocated from the Binance/Bybit composite. prem = (bfx_mid /
+# mean(binance, bybit) - 1) * 1e4, prem_d5 = prem - prem 300 s earlier; LONG when
+# prem <= p10 and prem_d5 <= p10, SHORT when both > p90 (discovery-window quantiles,
+# never re-fitted). Post-only limit at the touch, 5 s TTL, cancel when the gap
+# closes first; fill only on a real trade-through print. Exit at 60 s, early when
+# the gap closes, 40 bp stop, one open. Self-simulated by disloc_engine.py on the
+# per-second evaluator tick (paper only; never reaches the order pipeline/relay).
+_DISLOC_ENTRY = {
+    **_PREMIUM_REVERSION_ENTRY,
+    "mode": "MAKER_POST_ONLY_AT_TOUCH_TTL5S_SELF_SIMULATED",
+    "direction_source": "CROSS_VENUE_PREMIUM",
+    "evaluator_id_prefix": "dsl",
+    "premium_mean_window_sec": 300, "premium_min_mean_samples": 1,
+    "min_submit_interval_sec": 1, "max_submissions_per_hour": 3600,
+    "disloc": {
+        "prem_definition": "(bitfinex_mid / mean(binance_mid, bybit_mid) - 1) * 1e4 at the closed anchor second",
+        "prem_d5_lag_sec": 300,
+        "long_prem_max_bp": 8.1769, "long_prem_d5_max_bp": -3.0183,
+        "short_prem_min_bp": 13.0163, "short_prem_d5_min_bp": 2.9749,
+        "threshold_source": "STRATEGIST-AUDIT-20261011 wide grid, discovery split p10/p90 (1-7 Oct), never re-fitted",
+        "trigger": "rising edge, evaluated every closed second",
+        "order": "post-only limit at touch (LONG bid / SHORT ask)",
+        "order_ttl_sec": 5.0,
+        "cancel_on": ("TTL_5S", "GAP_CLOSED_BEFORE_FILL"),
+        "fill_rule": "real Bitfinex print strictly through the limit after order time (no at-limit/queue credit)",
+        "gap_closed": "LONG: prem > long_prem_max_bp; SHORT: prem <= short_prem_min_bp",
+    },
+    "ai_decision_role": "NONE",
+    "volatility_scaling": "NONE",
+    "fill_model": "DISLOC_TRADE_THROUGH_V1",
+}
+_DISLOC_EXIT = _composite_exit(
+    max_duration_sec=60, max_open_positions=1,
+    volatility_scaling="NONE - 60 s time exit, gap-closed early exit, 40 bp stop",
+)
+_DISLOC_EXIT["gap_closed_exit"] = True
+_DISLOC_PRE = _phase3_pre(
+    "GS-20261011-DISLOC",
+    spec_source="audit/STRATEGIST-AUDIT-20261011.md §4c (validated rule) + Danish 11 Oct 5 s-cancel order",
+    decisions=("prem <= 8.1769 & prem_d5 <= -3.0183 LONG; prem > 13.0163 & prem_d5 > 2.9749 SHORT",
+               "maker at touch, 5 s TTL, gap-closed cancel, trade-through fills only",
+               "60 s time exit, gap-closed exit, 40 bp stop, max 1 open"),
+)
+_DISLOC_PRE.update({
+    "kill_at_trades": 150, "kill_mean_below_bp": 0.5,
+    "promote_min_trades": 250, "promote_mean_min_bp": 2.0,
+    "kill_summary": "Kill at 150 closed trades if mean net < +0.5 bp (fill-mid to exit-mid minus 2.8 bp taker cost); LONG and SHORT reported separately, and by fill delay <=2 s / 2-5 s",
+    "promotion_summary": ("Promote-candidate at >= 250 closed trades with mean net (2.8 bp cost) >= +2 bp and a "
+                          "90% 1h-cluster bootstrap CI lower bound > 0"),
+})
+COMBO_LANE_SPECS.update({
+    RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M: _tile(
+        lane=RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
+        label="Tile 13 · DISLOC · Bitfinex vs Binance/Bybit dislocation, maker at touch, 5 s cancel, 60 s exit, 40 bp stop",
+        raw_policy_id=("DISLOC_BFX_PREM_LE_P10_D5_LE_P10_LONG_GT_P90_SHORT_MAKER_TOUCH_TTL5S"
+                       "|TIME_60_GAPCLOSE_HARD40BP_CAP1"),
+        id_prefix="dsl",
+        module="paper_policy_family_disloc.py",
+        test_module="test_disloc_engine.py",
+        entry=_DISLOC_ENTRY, exit_policy=_DISLOC_EXIT,
+        hypothesis_result={"status": "AUDIT_20261011_HOLDOUT_POSITIVE_ZERO_LATENCY", "hypothesis_id": "GS-20261011-DISLOC",
+                           "in_sample": ("Audit holdout (mid-to-mid, 2.5 bp taker): LONG +2.35 bp n=74, SHORT +1.30 bp "
+                                         "n=79; ~half gone at 2 s delay, gone by 5 s")},
+        pre_registration=_DISLOC_PRE,
+        admission_treatment=DISLOC_ADMISSION_POLICY_ID,
+        max_active_signals=1, entry_ttl_sec=5, default_enabled=False,
+        signal_clock=CROSS_VENUE_SIGNAL_CLOCK, policy_epoch=FREEZE21_POLICY_EPOCH,
+        subtitle="Tile 13 · DISLOC — Bitfinex dislocation reversion — PAPER ONLY — RELAY INELIGIBLE",
+        signal_summary=("Bitfinex mid suddenly cheap (rich) vs the Binance/Bybit composite: post a limit at the "
+                        "Bitfinex touch to buy (sell); cancel after 5 s or when the gap closes; exit at 60 s or "
+                        "when the gap closes"),
+        live_exit_order=registry_live_exit_order(_DISLOC_EXIT),
+        shadow_exits=(),
+        early_cut_shadow_reason="DISLOC spec: 60 s time exit, gap-closed exit and 40 bp stop only",
+    ),
+})
+# Paper orders are simulated inside disloc_engine on the evaluator tick; they never
+# enter the order pipeline, so the tile can never produce a live-copy/relay intent.
+COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M]["self_simulated_paper"] = True
 
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}

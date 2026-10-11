@@ -380,7 +380,9 @@ def test_website_tile_prefix_map_matches_active_registry():
     block = text[text.index("LIVE_COPY_TILE_PREFIXES"):]
     block = block[:block.index("});")]
     website = dict(re.findall(r"(FAMILY_[A-Z0-9_]+):\s*'([a-z0-9]+)'", block))
-    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER}
+    # Self-simulated paper tiles (Tile 13 DISLOC) never emit a pipeline order, so never a live-copy intent.
+    fly = {lane: str(ACTIVE_TILE_REGISTRY[lane].get("id_prefix")) for lane in ACTIVE_TILE_ORDER
+           if not ACTIVE_TILE_REGISTRY[lane].get("self_simulated_paper")}
     assert website == fly
 
 

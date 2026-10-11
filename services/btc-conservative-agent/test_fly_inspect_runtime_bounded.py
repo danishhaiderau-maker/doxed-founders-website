@@ -95,7 +95,7 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-freeze21b-8t-v14",
-        "7968dbee2723572a7af0607031e94218523b311e2a36f5fc54d8214b3220d8d2",
+        "64aecd0cfb108f303213da372fe8af293f69555fd1b29e43c0acfc53cf30f523",
     ]
 
 
