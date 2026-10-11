@@ -34,7 +34,7 @@ def test_paused_while_output_on_is_red_with_reason():
 def test_mismatch_paused_but_started_and_stale_relay_mode():
     out = lcl.build(_ctx(website=_web(status="PAUSED", armed=False, action="STARTED")), now=NOW)
     assert any(m["code"] == "PAUSED_BUT_LAST_CHANGE_STARTED" for m in out["arming"]["mismatches"])
-    out2 = lcl.build(_ctx(relay_stack_mode="research_only"), now=NOW)
+    out2 = lcl.build(_ctx(relay_stack_mode="source_research_only"), now=NOW)
     assert any(m["code"] == "RELAY_MODE_STALE_VS_ACCOUNT" for m in out2["arming"]["mismatches"])
     assert "ARMING_SOURCES_MISMATCH" in out2["alert_codes"]
 
@@ -84,3 +84,9 @@ def test_exchange_mirror_orphans_and_stale_read_and_expiry():
     out = lcl.build(_ctx(approvals=old), now=NOW)
     assert out["intents_expired"] == 1 and "INTENT_NO_EXECUTOR_DECISION" not in out["alert_codes"]
     assert out["clock"]["fly_to_website_offset_ms"] == 200.0
+
+
+def test_research_only_stack_mode_is_not_a_mismatch():
+    out = lcl.build(_ctx(relay_stack_mode="research_only"), now=NOW)
+    codes = [m.get("code") for m in out["arming"]["mismatches"]]
+    assert "RELAY_MODE_STALE_VS_ACCOUNT" not in codes

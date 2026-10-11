@@ -1,36 +1,38 @@
 #!/usr/bin/env bash
-# Deploy gate: immediately before `fly deploy`, re-prove every live relay
-# account is flat (Bitfinex snapshot via check-relay-flat.mjs) AND no live
-# intent is in flight (Fly lifecycle: delivered/submitted but not exited).
-# Waits (polls) for flat instead of failing; fails only after the budget.
+# Deploy gate (owner 11 Oct 21:53): deploys never wait for trades to finish.
+# Immediately before `fly deploy`: force-flatten every Fly paper position and
+# pending order with exit reason DEPLOY_FORCE_FLAT (stats-excluded). Mirrored
+# live Bitfinex copies close with their paper parents (SHOWCASE_MIRROR path).
+# Then prove flat on the exchange (website exchange mirror via Fly lifecycle,
+# plus check-relay-flat.mjs) before deploying. Fails closed (no deploy) if the
+# exchange is still not flat after LIVE_FLAT_VERIFY_S.
 set -uo pipefail
-BUDGET_S="${LIVE_FLAT_WAIT_BUDGET_S:-3600}"
-INTERVAL_S="${LIVE_FLAT_POLL_S:-30}"
-deadline=$(( $(date +%s) + BUDGET_S ))
-pending_intents() {
-  curl -fsS -m 20 -H "X-Bot-Admin-Token: ${BOT_ADMIN_TOKEN}" -H 'Cache-Control: no-cache' \
-    https://doxed-btc-bot.fly.dev/api/monitor/live/lifecycle | python3 -c '
-import json, sys, time
-d = json.load(sys.stdin)
-now = time.time(); n = 0
-for ex in (d.get("exchange") or {}).values():
-    if ex.get("ok") and ex.get("flat") is False: n += 1
-for it in d.get("intents") or []:
-    if it.get("expired"): continue
-    for a in it.get("accounts") or []:
-        dec = ((a.get("decision") or {}).get("decision"))
-        if a.get("open"): n += 1
-        elif dec == "SUBMITTED" and not a.get("fills") and not a.get("errors") and not a.get("exit"):
-            at = (a.get("decision") or {}).get("at_ts") or 0
-            if now - at < 900: n += 1
-    if it.get("entry_allowed") and not it.get("accounts") and (it.get("age_sec") or 1e9) < 300: n += 1
-print(n)'
-}
+VERIFY_S="${LIVE_FLAT_VERIFY_S:-180}"
+B=https://doxed-btc-bot.fly.dev
+api() { curl -fsS -m 20 -H "X-Bot-Admin-Token: ${BOT_ADMIN_TOKEN}" -H 'Cache-Control: no-cache' -H 'Content-Type: application/json' "$@"; }
+for round in 1 2 3; do
+  st="$(api "$B/api/relay-execution-state?fresh=1")" || { sleep 3; continue; }
+  read -r POS ORD <<<"$(printf '%s' "$st" | python3 -c '
+import json,sys; d=json.load(sys.stdin)
+p=sorted({str(r.get("trade_id") or "") for r in d.get("positions") or []}-{""})
+o=sorted({str(r.get("trade_id") or "") for r in d.get("orders") or []}-{""})
+print(",".join(p) or "-", ",".join(o) or "-")')"
+  echo "force-flat round ${round}: positions=${POS} orders=${ORD}"
+  [ "$POS" = "-" ] && [ "$ORD" = "-" ] && break
+  for t in ${POS//,/ }; do [ "$t" = "-" ] || api -X POST "$B/api/positions/close" -d "{\"trade_id\":\"$t\",\"reason\":\"DEPLOY_FORCE_FLAT\"}" | head -c 200; echo; done
+  for t in ${ORD//,/ }; do [ "$t" = "-" ] || api -X POST "$B/api/orders/cancel" -d "{\"trade_id\":\"$t\",\"reason\":\"DEPLOY_FORCE_FLAT\"}" | head -c 200; echo; done
+  sleep 3
+done
+deadline=$(( $(date +%s) + VERIFY_S ))
 while :; do
+  live="$(api "$B/api/monitor/live/lifecycle" | python3 -c '
+import json,sys; d=json.load(sys.stdin); bad=0
+for ex in (d.get("exchange") or {}).values():
+    if not ex.get("ok") or ex.get("flat") is not True or (ex.get("read_age_s") or 999) > 90 or ex.get("open_orders"): bad+=1
+print(bad)' 2>/dev/null || echo ERR)"
   flat_ok=0; node scripts/check-relay-flat.mjs >/tmp/relay-flat.json 2>&1 && flat_ok=1
-  pend="$(pending_intents 2>/dev/null || echo ERR)"
-  echo "live-flat gate: exchange_flat=${flat_ok} pending_live=${pend}"
-  if [ "$flat_ok" = 1 ] && [ "$pend" = 0 ]; then echo "LIVE FLAT: deploy may proceed"; exit 0; fi
-  if [ "$(date +%s)" -ge "$deadline" ]; then tail -c 2000 /tmp/relay-flat.json; echo "live account not flat within ${BUDGET_S}s; refusing to deploy"; exit 1; fi
-  sleep "$INTERVAL_S"
+  echo "verify: exchange_mirror_not_flat=${live} relay_flat_check=${flat_ok}"
+  if [ "$live" = 0 ] && [ "$flat_ok" = 1 ]; then echo "FLAT (paper + live): deploying now"; exit 0; fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then tail -c 2000 /tmp/relay-flat.json; echo "exchange not flat ${VERIFY_S}s after force-flat; refusing to deploy"; exit 1; fi
+  sleep 10
 done

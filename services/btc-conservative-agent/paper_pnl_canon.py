@@ -28,6 +28,8 @@ FORCED_EXIT_REASONS = frozenset({
     "ADMIN_MANUAL_CLOSE",
     "ADMIN_FORCE_FLAT",
     "CIRCUIT_BREAKER_ADMIN_MANUAL",
+    # Pre-deploy force-flat (paper + mirrored live copies); never a strategy outcome.
+    "DEPLOY_FORCE_FLAT",
 })
 
 

@@ -2509,6 +2509,19 @@ jobs:
               raise SystemExit("maintenance boundary did not become flat")
           PY
 
+      - name: Force flat (paper + live) and verify on the exchange immediately before deploy
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
+        working-directory: ${{ github.workspace }}
+        timeout-minutes: 8
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: "https://doxed-founders-website-production.up.railway.app/api"
+          REQUIRE_BOT_ADMIN_TOKEN: "YES"
+          REQUIRE_CANONICAL_FLY_OWNER: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+        run: bash scripts/wait-live-flat-before-deploy.sh
+
       - name: Prove the current Fly owner and every relay account are flat
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
         working-directory: ${{ github.workspace }}
@@ -2741,19 +2754,6 @@ jobs:
               raise SystemExit("stalled-runtime exact-revision health or receipt bootstrap changed before deploy")
           print("Maintenance boundary remains paused, disarmed, and flat immediately before deploy")
           PY
-
-      - name: Wait for live-flat immediately before deploy (Bitfinex snapshot + pending intents)
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
-        working-directory: ${{ github.workspace }}
-        timeout-minutes: 65
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
-          PLATFORM_API_URL: "https://doxed-founders-website-production.up.railway.app/api"
-          REQUIRE_BOT_ADMIN_TOKEN: "YES"
-          REQUIRE_CANONICAL_FLY_OWNER: "YES"
-          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
-        run: bash scripts/wait-live-flat-before-deploy.sh
 
       - name: Deploy the exact source revision
         id: deploy_source
