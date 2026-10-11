@@ -90,11 +90,14 @@ def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_on
         "FAMILY_DANISH_REGIME_ROUTER",
         "FAMILY_FADE_POOL",
         "FAMILY_GS07_V07_PREMIUM_FADE_60M",
+        "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+        "FAMILY_DISLOC_FOI_LONG_1M",
     )
     assert not set(rf.MID_EPOCH_ADDITION_ROSTER).intersection(rf.FREEZE_ROSTER)
     # PHASE03 additions ship default OFF; the earlier GS-06 mid-epoch addition defaults ON.
     default_off = {"FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL",
-                   "FAMILY_GS07_V07_PREMIUM_FADE_60M"}
+                   "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+                   "FAMILY_DISLOC_FOI_LONG_1M"}
     for n, item in enumerate(rf.MID_EPOCH_ADDITIONS, start=len(rf.FREEZE_ROSTER) + 1):
         lane = item["lane"]
         spec = cfg.COMBO_LANE_SPECS[lane]

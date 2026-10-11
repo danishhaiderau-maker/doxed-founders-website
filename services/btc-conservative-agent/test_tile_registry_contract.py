@@ -102,12 +102,13 @@ GS_MID_EPOCH_ORDER = ("FAMILY_GS06_COMMITTED_FADE_ATR_TP",)
 # PHASE03 mid-epoch additions (owner 2026-10-07): three research tiles, all default OFF.
 PHASE03_ORDER = ("FAMILY_GS07_FAST_PREMIUM_FADE", "FAMILY_DANISH_REGIME_ROUTER", "FAMILY_FADE_POOL")
 # FREEZE21B (owner order 2026-10-04 17:53/17:54 AEDT): every strategy is a visible paper tile.
-TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M",)
+TILE14_ORDER = ("FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+                "FAMILY_DISLOC_FOI_LONG_1M")
+EXPECTED_ORDER_ALL = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER + PHASE03_ORDER + TILE14_ORDER
 # 2026-10-11 retirement (owner): H-C, B3, FADE-POOL and V07 leave the roster.
 RETIRED_20261011_LANES = ("FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
                           "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M")
-EXPECTED_ORDER = tuple(lane for lane in FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
-                       + PHASE03_ORDER + TILE14_ORDER if lane not in RETIRED_20261011_LANES)
+EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL if lane not in RETIRED_20261011_LANES)
 ACTIVE_GS_B_ORDER = tuple(lane for lane in GS_B_ORDER if lane not in RETIRED_20261011_LANES)
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
 RETIRED_PHASE02_LANES = (
@@ -130,7 +131,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     assert [registry.tile_number(lane) for lane in EXPECTED_ORDER] == list(range(1, len(EXPECTED_ORDER) + 1))
     gs_tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_ORDER + ACTIVE_GS_B_ORDER]
     assert [t["id_prefix"] for t in gs_tiles] == ["gs1", "gb1", "gb2"]
-    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == 12
+    assert len({t["policy_signature"] for t in ACTIVE_TILE_REGISTRY.values()}) == len(ACTIVE_TILE_REGISTRY)
     mid = [ACTIVE_TILE_REGISTRY[lane] for lane in GS_MID_EPOCH_ORDER]
     assert [t["id_prefix"] for t in mid] == ["gs6"] and [t["max_active_signals"] for t in mid] == [2]
     for tile in mid:
@@ -138,8 +139,8 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
         assert tile["default_enabled"] is True and tile["paper_only"] is True
         assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
         assert tile["entry_policy"]["mode"] == "REGIME_ADAPTIVE" and tile["pre_registration"]["mid_epoch_addition"]
-    phase03 = [ACTIVE_TILE_REGISTRY[lane] for lane in PHASE03_ORDER]
-    assert [t["id_prefix"] for t in phase03] == ["gs7", "dnr", "fdp"]
+    phase03 = [ACTIVE_TILE_REGISTRY[lane] for lane in PHASE03_ORDER if lane not in RETIRED_20261011_LANES]
+    assert [t["id_prefix"] for t in phase03] == ["gs7", "dnr"]
     for tile in phase03:
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         assert tile["default_enabled"] is False and tile["paper_only"] is True
@@ -155,7 +156,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
                                                 else "REGIME_ADAPTIVE")
         assert tile["pre_registration"]["schema"] == "tile_pre_registration_gs20261004_v1"
         assert tile["pre_registration"]["role"] == "HYPOTHESIS"
-    tiles = [ACTIVE_TILE_REGISTRY[lane] for lane in FREEZE21_ORDER]
+    tiles = [registry.COMBO_LANE_SPECS[lane] for lane in FREEZE21_ORDER]  # H-C retired 2026-10-11, frozen spec kept
     fade, premium, control = tiles
     assert [t["id_prefix"] for t in tiles] == ["cft", "pmr", "rnd"]
     assert fade["policy_signature"].startswith(COMMITTED_FADE_TAKER_SIGNATURE_PREFIX)
@@ -165,7 +166,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
     for lane, tile in zip(FREEZE21_ORDER, tiles):
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         # Every frozen tile defaults ON for the 21-day freeze (paper only, relay blocked).
-        assert tile["default_enabled"] is True and combo_toggle_defaults()[lane] is True
+        assert tile["default_enabled"] is True and (lane in RETIRED_20261011_LANES or combo_toggle_defaults()[lane] is True)
         assert tile["paper_only"] is True and tile["platform_relay_eligible"] is False
         assert tile["live_copy_eligible"] is False
         assert tile.get("ladder") in (None, ())

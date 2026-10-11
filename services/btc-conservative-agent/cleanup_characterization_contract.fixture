@@ -85,6 +85,7 @@
     ["GET", "/api/monitor/lanes", "monitor_lanes"],
     ["GET", "/api/monitor/digest", "monitor_digest"],
     ["GET", "/api/monitor/integrity", "monitor_integrity"],
+    ["GET", "/api/monitor/tiles/disloc", "monitor_tiles_disloc"],
     ["GET", "/api/monitor/tiles/specs", "monitor_tiles_specs"],
     ["GET", "/api/monitor/tiles/trades", "monitor_tiles_trades"],
     ["GET", "/api/monitor/exit-latency", "monitor_exit_latency"],

@@ -26,6 +26,8 @@ STREAMS = {
     "ai_shadow_challengers": "ai_shadow_challengers.jsonl",
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
+    "disloc_trades": "disloc_trades.jsonl",                # Tile 13 DISLOC paper orders/fills/cancels/closes
+    "disloc_foi_trades": "disloc_foi_trades.jsonl",        # Tile 14 DISLOC-FOI paper ledger
 }
 
 
