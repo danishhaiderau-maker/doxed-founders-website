@@ -142,6 +142,8 @@ export const PERSISTED_WAKE_IDLE_POLL_MS = null;
 export const RECONCILIATION_PAUSED_POLL_MS = null;
 export const RECONCILIATION_IDLE_POLL_MS = null;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
+/** Loop watchdog: re-establish ticking if none completed this long while ACTIVE. */
+export const LOOP_STALL_RESTART_MS = 120_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 /** A paused/idle executor persists a heartbeat on this cadence instead of ticking. */
 export const PAUSED_EXECUTOR_HEARTBEAT_MS = 60_000;
@@ -4039,6 +4041,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     setInterval(() => void this.syncBitfinexTradeStreams(), 5_000).unref();
     void this.syncBitfinexTradeStreams();
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
+    setInterval(() => this.reviveStalledLoop(), 15_000).unref();
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
       setInterval(() => void this.refreshExchangeMirror(), EXCHANGE_MIRROR_EVERY_MS).unref();
@@ -4051,6 +4054,50 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * from the boot probe). Only the relayExecutor key is replaced, atomically,
    * so this can never overwrite concurrent arm/pause state.
    */
+  /**
+   * Every completed live tick stamps relayExecutor + lastTickAt on each armed
+   * instance it processed, with the stage where that instance's pass ended,
+   * so Fly sees both liveness and WHY a pass stopped early.
+   */
+  private async persistLiveTickHeartbeats(exitStages: Map<string, string>): Promise<void> {
+    if (process.env.RELAY_EXECUTOR_WORKER !== 'true' || exitStages.size === 0) return;
+    const nowIso = new Date().toISOString();
+    for (const [instanceId, stage] of exitStages) {
+      const payload = JSON.stringify({ ...this.getHealthSnapshot(), lastPassExitStage: stage, lastPassAt: nowIso });
+      await this.prisma.$executeRaw`
+        UPDATE "TradingAgentInstance"
+        SET "dashboardState" = jsonb_set(
+          jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayExecutor}', ${payload}::jsonb),
+          '{lastTickAt}', to_jsonb(${nowIso}::text))
+        WHERE "id" = ${instanceId}::text AND "exchangeProvider" = 'bitfinex'
+      `.catch((err) => {
+        this.logger.warn(
+          `[EXECUTOR-HEARTBEAT] live heartbeat write failed ${instanceId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+    }
+  }
+
+  /**
+   * Loop watchdog: while a relay is ACTIVE, a completed tick must happen at
+   * least every LOOP_STALL_RESTART_MS. If none has (lost timer, swallowed
+   * scheduling), re-establish the reconciliation loop instead of going silent.
+   */
+  private reviveStalledLoop(nowMs = Date.now()): void {
+    if (this.executorDestroyed || !executionEnabled() || this.running) return;
+    if (this.lastRelayPollActivity !== 'ACTIVE' || this.lastTickCompletedAtMs <= 0) return;
+    if (nowMs - this.lastTickCompletedAtMs <= LOOP_STALL_RESTART_MS) return;
+    this.logger.error(
+      `[EXECUTOR-WATCHDOG] no completed tick for ${Math.round((nowMs - this.lastTickCompletedAtMs) / 1000)}s while ACTIVE; restarting reconciliation loop`,
+    );
+    if (this.reconciliationTimer) {
+      clearTimeout(this.reconciliationTimer);
+      this.reconciliationTimer = null;
+    }
+    this.lastTickCompletedAtMs = nowMs; // one revive per window
+    this.scheduleReconciliation(0);
+  }
+
   private async persistPausedExecutorHeartbeat(): Promise<void> {
     if (this.executorDestroyed || process.env.RELAY_EXECUTOR_WORKER !== 'true') return;
     const snapshot = this.getHealthSnapshot();
@@ -6112,6 +6159,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
       await this.reconcileShowcaseLiveCopyCoordination(agent.id, instances);
 
+      const tickExitStages = new Map<string, string>();
       for (const row of instances) {
         this.currentInstanceId = row.id;
         this.currentStage = 'LOAD_INSTANCE';
@@ -6196,7 +6244,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           });
           this.currentStage = 'PROCESS_LIVE_INSTANCE';
           await this.processInstance(agent.id, instance, false);
+          // processInstance has many fail-closed early returns that skip the
+          // per-tick capacity write; record where this instance's pass ended
+          // and keep its heartbeat honest (11 Oct 21:53: armed account showed
+          // a 6-min stale heartbeat with no log line after an early return).
+          tickExitStages.set(instance.id, this.currentStage ?? 'UNKNOWN');
         } catch (err) {
+          tickExitStages.set(instance.id, `THREW_AT_${this.currentStage ?? 'UNKNOWN'}`);
           const msg = err instanceof Error ? err.message : String(err);
           this.logger.error(`Instance ${instance.userId}: ${msg}`);
           await this.prisma.tradingAgentInstance.update({
@@ -6205,6 +6259,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           });
         }
       }
+      await this.persistLiveTickHeartbeats(tickExitStages);
     } catch (err) {
       // Fix F — a throw ABOVE the per-instance loops (agent/instance lookup)
       // aborts the WHOLE tick for every user. Previously this surfaced only as

@@ -1472,6 +1472,9 @@ export class TradingAgentsService implements OnModuleInit {
         executor_healthy: health.healthy,
         executor_heartbeat_age_sec: health.heartbeatAgeMs == null ? null : Math.round(health.heartbeatAgeMs / 1000),
         executor_status: health.status,
+        executor_last_pass_exit_stage: (r.relayExecutor && typeof r.relayExecutor === 'object'
+          ? ((r.relayExecutor as Record<string, unknown>).lastPassExitStage as string | undefined) ?? null
+          : null),
         // Lifecycle coverage: the exact fields the executor gates on, plus
         // who/what last changed the arm state and when (no user ids).
         relay_mode: r.relayExecutionMode,
