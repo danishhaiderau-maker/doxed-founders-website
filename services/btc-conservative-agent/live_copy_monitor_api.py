@@ -122,7 +122,38 @@ def live_summary():  # R19
     if err is not None:
         return err
     now = time.time()
-    return _ok(_summary(ctx, _analysis(ctx, now), now))
+    payload = _summary(ctx, _analysis(ctx, now), now)
+    # LIVE-FIX-0702 (HM gap): /api/status reports FORCE_PAPER_MODE from the Fly
+    # direct-path flag; this route used the live-copy paper lock under the same
+    # name, so the two "disagreed". Report the /api/status source under the
+    # shared name and the live-copy lock under its own name.
+    if isinstance(payload, dict):
+        payload["live_copy_paper_lock"] = bool(ctx.get("force_paper_mode"))
+        payload["force_paper_mode"] = bool(ctx.get("fly_direct_force_paper_mode"))
+        payload["force_paper_mode_source"] = "_force_paper_mode_active (same as /api/status)"
+        payload["executor_freshness"] = executor_freshness(ctx, now)
+    return _ok(payload)
+
+
+EXECUTOR_REPORT_MAX_AGE_SEC = 300.0
+
+
+def executor_freshness(ctx, now):
+    """Newest executor signal: an execution report or the signed capability
+    heartbeat (sent every ~60 s even when idle). Stale > 5 min = RED."""
+    last_report = max((float(r.get("fly_received_at_ts") or 0) for r in ctx.get("reports") or []), default=0.0)
+    cap = ((ctx.get("protection") or {}).get("executor_capability") or {})
+    try:
+        cap_ts = float(cap.get("received_at_ts") or 0)
+    except (TypeError, ValueError):
+        cap_ts = 0.0
+    newest = max(last_report, cap_ts)
+    age = (now - newest) if newest else None
+    stale = age is None or age > EXECUTOR_REPORT_MAX_AGE_SEC
+    return {"executor_report_age_s": (now - last_report) if last_report else None,
+            "executor_capability_age_s": (now - cap_ts) if cap_ts else None,
+            "newest_executor_signal_age_s": age, "max_age_s": EXECUTOR_REPORT_MAX_AGE_SEC,
+            "stale": stale, "alert": "EXECUTOR_REPORT_STALE" if stale else None}
 
 
 @blueprint.route("/api/monitor/live/arming", methods=["GET"])
@@ -291,8 +322,11 @@ def live_reconcile():  # R4 (Fly view: paper vs executor-reported live)
             diffs.append({"object": "position", "correlation_id": c["correlation_id"], "account": c["account"],
                           "field": "open", "values": {"paper": "CLOSED", "live": "OPEN"}})
     last_report = max((float(r.get("fly_received_at_ts") or 0) for r in ctx.get("reports") or []), default=0.0)
+    fresh = executor_freshness(ctx, time.time())
     return _ok({"route": "R4", "flat": not open_live, "open_live_positions": len(open_live),
                 "diffs": diffs, "executor_report_age_s": (time.time() - last_report) if last_report else None,
+                "executor_freshness": fresh,
+                "alerts": [{"code": fresh["alert"], "severity": "RED"}] if fresh["alert"] else [],
                 "note": "Per-account exchange truth is on the website: GET /api/trading-agents/conservative-btc/ops/copy/status"})
 
 
