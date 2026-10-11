@@ -67,3 +67,11 @@ test('fly-view projections: transition (who/why/when) and mirror read age', () =
   assert.equal(m?.read_age_s, 4);
   assert.equal(flyViewMirror(null, T0), null);
 });
+
+test('reconcile defers (does not pause) when an entry participant was created during the tick', () => {
+  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const i = src.indexOf('Stale ledger snapshot');
+  const j = src.indexOf('RECONCILE ALERT: exchange');
+  assert.ok(i > 0 && j > i, 'stale-snapshot deferral must run before the mismatch pause');
+  assert.match(src, /id: \{ notIn: knownIds \}/);
+});

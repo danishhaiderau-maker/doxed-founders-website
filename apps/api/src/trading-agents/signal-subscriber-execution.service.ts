@@ -3630,6 +3630,8 @@ export function intentDecisionSourceId(
   return `exec-decision:${instanceId}:${tradeId}:${decision}:${r}`.slice(0, 190);
 }
 export const EXCHANGE_MIRROR_EVERY_MS = 30_000;
+/** A position mismatch must persist this long across fresh re-reads before a pause. */
+export const MISMATCH_CONFIRM_MS = 15_000;
 
 /** Pure: exchange read -> monitoring mirror (no secrets, no ids beyond order ids). */
 export function buildExchangeMirror(input: {
@@ -8801,7 +8803,23 @@ await this.notifications
       return false;
     }
 
-    if (btcToSats(delta) === 0) return true;
+    if (btcToSats(delta) === 0) {
+      // Clear a stale transient-mismatch observation / saved alert once the
+      // check returns 0 (never resumes; Start stays the owner's action).
+      if (dash.positionMismatchFirstObservedAt != null || (dash.positionMismatchAlert != null && dash.positionMismatchAlertAcked !== true)) {
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
+              positionMismatchFirstObservedAt: null,
+              positionMismatchAlertAcked: true,
+              positionMismatchResolvedAt: new Date().toISOString(),
+            }) as unknown as Prisma.InputJsonValue,
+          },
+        }).catch(() => undefined);
+      }
+      return true;
+    }
 
     if (fillGrace.defer) {
       this.logger.warn(
@@ -8901,6 +8919,60 @@ await this.notifications
         );
       }
       return false;
+    }
+
+    // 11 Oct 19:00 false pause: the signed fast entry (wake path) created and
+    // filled a participant while this tick was between its ledger read and
+    // its exchange read, so the snapshot showed exchange 0.0003 vs ledger 0
+    // and paused a correctly copied trade. If an entry participant newer than
+    // this tick's snapshot exists, the snapshot is stale: defer this tick
+    // (no new entries) and let the next tick rebuild ledger + exchange state.
+    // A real mismatch still pauses on the next tick.
+    if (fillGrace.reason !== 'GRACE_EXPIRED') {
+      const knownIds = participants.map((row) => row.id);
+      const lateParticipants = await this.prisma.signalCycleParticipant.count({
+        where: {
+          userId: instance.userId,
+          venue: simActive ? 'bitfinex_sim' : 'bitfinex',
+          status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+          createdAt: { gte: new Date(Date.now() - PENDING_FILL_RECONCILE_GRACE_MS) },
+          ...(knownIds.length ? { id: { notIn: knownIds } } : {}),
+        },
+      }).catch(() => 0);
+      if (lateParticipants > 0) {
+        this.logger.warn(
+          `Stale ledger snapshot ${instance.userId}: ${lateParticipants} entry participant(s) created during this tick ` +
+            `(exchange ${signedExchangeAmount.toFixed(8)} vs snapshot ledger ${signedLedgerOpenAmount.toFixed(8)}); ` +
+            'deferring mismatch decision to the next tick without new entries',
+        );
+        return false;
+      }
+    }
+
+    // Transient-mismatch grace: a mismatch must persist across a fresh re-read
+    // at least MISMATCH_CONFIRM_MS apart before the relay is paused. Until
+    // then: alert (log + dashboard), no new entries, no pause.
+    if (fillGrace.reason !== 'GRACE_EXPIRED') {
+      const firstMs = typeof dash.positionMismatchFirstObservedAt === 'string'
+        ? Date.parse(dash.positionMismatchFirstObservedAt) : NaN;
+      if (!Number.isFinite(firstMs) || Date.now() - firstMs < MISMATCH_CONFIRM_MS) {
+        if (!Number.isFinite(firstMs)) {
+          await this.prisma.tradingAgentInstance.update({
+            where: { id: instance.id },
+            data: {
+              dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
+                positionMismatchFirstObservedAt: new Date().toISOString(),
+                positionMismatchTransient: { exchange: signedExchangeAmount, ledger: signedLedgerOpenAmount, delta },
+              }) as unknown as Prisma.InputJsonValue,
+            },
+          }).catch(() => undefined);
+        }
+        this.logger.warn(
+          `[POSITION-MISMATCH-TRANSIENT] ${instance.userId}: exchange ${signedExchangeAmount.toFixed(8)} vs ledger ` +
+            `${signedLedgerOpenAmount.toFixed(8)}; re-reading before any pause (grace ${MISMATCH_CONFIRM_MS / 1000}s)`,
+        );
+        return false;
+      }
     }
 
     const message =
@@ -9443,7 +9515,8 @@ await this.notifications
     try {
       for (const instance of this.relayInstanceCache.values()) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
-        if (instance.status !== TradingAgentInstanceStatus.ACTIVE) continue;
+        // Paused accounts are mirrored too: "flat" must be provable from
+        // exchange truth while paused (orphan stops, positions left open).
         if (isCopyRelaySimActive(instance.dashboardState)) continue;
         if (this.running) return;
         const readStartedAt = Date.now();
