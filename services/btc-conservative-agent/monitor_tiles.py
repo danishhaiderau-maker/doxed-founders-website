@@ -19,6 +19,7 @@ import statistics
 import threading
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 import monitor_api
@@ -282,6 +283,64 @@ def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, 
     }
 
 
+# --------------------------------------------------------------------------- late window
+# 8 Oct 22:19 -> 10 Oct 00:46 AEDT: closes ran minutes late (trade_lock stall) but booked the
+# stale trigger level. Rows closed in the window are flagged; stop-type exits listed in
+# late_window_reprice.json are repriced at market (HM PNL-INTEGRITY-20261012). The booked
+# value is kept under pnl.displayed_* so nothing is lost.
+LATE_WINDOW_FILE = Path(__file__).resolve().parent / "late_window_reprice.json"
+_LATE_WINDOW_CACHE: dict = {}
+
+
+def late_window_table() -> dict:
+    if "doc" not in _LATE_WINDOW_CACHE:
+        try:
+            _LATE_WINDOW_CACHE["doc"] = json.loads(LATE_WINDOW_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            _LATE_WINDOW_CACHE["doc"] = {"window_ts": [0, 0], "trades": {}}
+    return _LATE_WINDOW_CACHE["doc"]
+
+
+def apply_late_window(row: dict, close_ts: Any, notional: Any, be_band_bp: float) -> None:
+    doc = late_window_table()
+    w0, w1 = (doc.get("window_ts") or [0, 0])[:2]
+    ct = _finite(close_ts)
+    in_window = ct is not None and w0 <= ct <= w1
+    fix = (doc.get("trades") or {}).get(str(row.get("trade_id") or ""))
+    if not in_window and not fix:
+        return
+    pnl = row.setdefault("pnl", {})
+    pnl["late_window"] = True
+    pnl["repriced"] = False
+    if not fix:
+        return
+    mbp = _finite(fix.get("market_bp"))
+    if mbp is None:
+        return
+    old_bp, old_usd = _finite(pnl.get("bp")), _finite(pnl.get("net_usd"))
+    usd_per_bp = None
+    if old_bp and old_usd is not None and abs(old_bp) > 1e-9:
+        usd_per_bp = old_usd / old_bp
+    elif _finite(notional):
+        usd_per_bp = float(notional) / 1e4
+    pnl["displayed_bp"], pnl["displayed_net_usd"] = old_bp, old_usd
+    pnl["bp"] = round(mbp, 4)
+    if usd_per_bp is not None:
+        pnl["net_usd"] = round(mbp * usd_per_bp, 6)
+    pnl["class"] = monitor_api.wl_class(pnl["bp"], be_band_bp=be_band_bp, net_usd=pnl.get("net_usd"))
+    pnl["repriced"] = True
+    pnl["repriced_basis"] = "LATE_WINDOW_MARKET_1M_CLOSE"
+
+
+def _late_window_block(rows) -> dict:
+    late = [r for r in rows if (r.get("pnl") or {}).get("late_window")]
+    rep = [r for r in late if (r.get("pnl") or {}).get("repriced")]
+    over = sum((_finite(r["pnl"].get("displayed_net_usd")) or 0.0) - (_finite(r["pnl"].get("net_usd")) or 0.0)
+               for r in rep)
+    return {"closes_in_window": len(late), "repriced": len(rep), "displayed_overstatement_usd": round(over, 6),
+            "window_aedt": late_window_table().get("window_aedt"), "totals_use_repriced": True}
+
+
 def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[str, str],
                    epoch_id: str | None, forced_reasons: Iterable[str],
                    fill_evidence: Mapping[str, Any] | None = None, parse_ts=None,
@@ -363,6 +422,7 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         row["path"] = {"mfe_bp": round(mfe_bp, 4) if mfe_bp is not None else None,
                        "basis": "max_pnl_pct_over_leverage" if mfe_bp is not None else None}
         row["pnl"] = trade_pnl(raw, be_band_bp)
+        apply_late_window(row, close_ts, notional, be_band_bp)
         row["sort_ts"] = entry_ts or signal_ts or close_ts or 0.0
     elif status == "open":
         state = raw.get("policy_state") if isinstance(raw.get("policy_state"), Mapping) else {}
@@ -516,6 +576,7 @@ def lane_totals(rows: Iterable[Mapping[str, Any]], *, include_forced: bool,
         "deploy_flatten_closes": len(deploy_flat),
         # Deploy force-flattens shown separately (never part of strategy stats above).
         "deploy_flatten": _deploy_flatten_block(deploy_flat),
+        "late_window": _late_window_block(counted),
         "sum_bp": round(sum(bps), 4) if bps else 0.0,
         "mean_bp": round(sum(bps) / len(bps), 4) if bps else None,
         "median_bp": round(statistics.median(bps), 4) if bps else None,

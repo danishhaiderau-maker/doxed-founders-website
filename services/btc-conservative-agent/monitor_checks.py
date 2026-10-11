@@ -1,0 +1,221 @@
+"""HM-MISSING-20261012: integrity checks for the Health Monitor (pure; no I/O, no trading state).
+
+Each check returns ``{"check", "status": GREEN|AMBER|RED|UNKNOWN, "alert": bool, "reasons": [...], ...}``.
+``alert`` is True whenever status is RED (AMBER alerts only where noted) so the monitor can page on it.
+"""
+from __future__ import annotations
+
+import bisect
+import math
+from typing import Any, Iterable, Mapping
+
+SCHEMA = "monitor_check_v1"
+STOP_TYPE_MARKERS = ("BREAKEVEN", "STOP", "CUT", "PATH_END", "TIME", "TRAIL", "GIVEBACK", "PROTECTION")
+EXIT_TRUTH_RED_BP = 5.0
+LATENCY_RED_SEC = 5.0
+LATENCY_AMBER_SEC = 2.0
+TAPE_RETENTION_REQUIRED_SEC = 7 * 86400
+TAPE_GAP_AMBER_PCT = 1.0
+TAPE_GAP_RED_PCT = 5.0
+
+
+def _f(v: Any) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _result(check: str, reasons: list, *, amber: bool = False, red: bool = False, unknown: bool = False,
+            alert_on_amber: bool = False, **extra) -> dict:
+    status = "RED" if red else "AMBER" if amber else "UNKNOWN" if unknown else "GREEN"
+    return {"schema": SCHEMA, "check": check, "status": status,
+            "alert": status == "RED" or (alert_on_amber and status == "AMBER"),
+            "reasons": reasons[:50], **extra}
+
+
+def is_stop_type(reason: Any) -> bool:
+    r = str(reason or "").upper()
+    return "TAKE_PROFIT" not in r and any(m in r for m in STOP_TYPE_MARKERS)
+
+
+# ----------------------------------------------------------------------------- exit truth
+def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list, *, since: float) -> dict:
+    """Booked exit price vs the executable touch on the 1 s tape at close.
+
+    LONG closes sell at the bid, SHORT closes buy at the ask. A stop-type exit booked better than the
+    touch by more than 5 bp is RED (the stale-trigger booking bug of 8-10 Oct). Rows with their own
+    exit_bid/exit_ask stamps use those instead of the tape.
+    """
+    checked, bad, no_tape = 0, [], 0
+    for r in rows:
+        ex = r.get("exit") or {}
+        ct, px = _f(ex.get("close_ts")), _f(ex.get("exit_price"))
+        if ct is None or px is None or ct < since or ex.get("forced_close") or not is_stop_type(ex.get("exit_reason")):
+            continue
+        side = r.get("side")
+        bid, ask = _f(ex.get("exit_bid")), _f(ex.get("exit_ask"))
+        if bid is None or ask is None:
+            i = bisect.bisect_right(tape_ts, ct) - 1
+            if i < 0 or ct - tape_ts[i] > 2.0:
+                no_tape += 1
+                continue
+            bid, ask = _f(tape_rows[i].get("bid")), _f(tape_rows[i].get("ask"))
+        touch = bid if side == "LONG" else ask if side == "SHORT" else None
+        if not touch:
+            no_tape += 1
+            continue
+        checked += 1
+        better_bp = (px / touch - 1) * 1e4 * (1 if side == "LONG" else -1)
+        if better_bp > EXIT_TRUTH_RED_BP:
+            bad.append({"trade_id": r.get("trade_id"), "lane": r.get("lane") or r.get("research_lane"),
+                        "exit_reason": ex.get("exit_reason"), "close_ts": ct, "booked": px, "touch": touch,
+                        "booked_better_than_touch_bp": round(better_bp, 2)})
+    return _result("exit-truth", [f"{len(bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the touch"] if bad else [],
+                   red=bool(bad), unknown=checked == 0, checked=checked, without_touch=no_tape, violations=bad[:50])
+
+
+# ----------------------------------------------------------------------------- pnl reconcile
+def pnl_reconcile(totals: Mapping[str, Any], rows_by_lane: Mapping[str, list], lanes_net: Mapping[str, Any] | None,
+                  balance_reconcile: Mapping[str, Any] | None, *, tol_usd: float = 0.01) -> dict:
+    """Totals == sum of trade rows (unrounded), dashboard lanes == totals, wallet == start + P&L."""
+    reasons, per = [], {}
+    for lane, t in (totals.get("lanes") or {}).items():
+        rows = [x for x in rows_by_lane.get(lane) or [] if x.get("status") == "CLOSED"
+                and not (x.get("exit") or {}).get("forced_close")]
+        s = sum(_f((x.get("pnl") or {}).get("net_usd")) or 0.0 for x in rows)
+        tn = _f(t.get("net_usd")) or 0.0
+        entry = {"totals_net_usd": tn, "sum_rows_net_usd": round(s, 6)}
+        if abs(s - tn) > 1e-6:
+            reasons.append(f"{lane}: totals {tn:.4f} != rows {s:.4f}")
+        ln = _f((lanes_net or {}).get(lane))
+        if ln is not None:
+            entry["lanes_net_usd"] = ln
+            if abs(ln - tn) > tol_usd:
+                reasons.append(f"{lane}: lanes/card {ln:.4f} != totals {tn:.4f} (basis split)")
+        per[lane] = entry
+    resid = _f((balance_reconcile or {}).get("residual_usd"))
+    if resid is not None and abs(resid) > 0.05:
+        reasons.append(f"wallet residual {resid:+.4f} USD")
+    return _result("pnl-reconcile", reasons, red=bool(reasons), per_lane=per, balance_residual_usd=resid)
+
+
+# ----------------------------------------------------------------------------- rules conformance
+def rules_conformance(*, active_tiles: Iterable[str], retired_tiles: Iterable[str],
+                      live_copy_tiles: Mapping[str, Mapping[str, Any]], open_lanes: Iterable[str],
+                      fee_rates_bp: Mapping[str, Any], totals_lanes: Mapping[str, Any]) -> dict:
+    """Danish's standing rules: zero fees; every dashboard tile live-copyable; retired tiles never trade
+    or copy; deploy flattens never counted in strategy stats."""
+    reasons = []
+    for k, v in (fee_rates_bp or {}).items():
+        if (_f(v) or 0.0) != 0.0:
+            reasons.append(f"fee {k}={v} bp (rule: no fees)")
+    active, retired = set(active_tiles), set(retired_tiles)
+    for t in sorted(active):
+        info = live_copy_tiles.get(t)
+        if info is not None and not info.get("live_eligible", info.get("copyable", True)):
+            reasons.append(f"{t} not live-copyable")
+    for t in sorted(retired):
+        info = live_copy_tiles.get(t) or {}
+        if info.get("live_on") or info.get("bitfinex_live_orders"):
+            reasons.append(f"retired {t} has live copy ON")
+    for lane in set(open_lanes) & retired:
+        reasons.append(f"retired {lane} holds an open position")
+    for lane, t in (totals_lanes or {}).items():
+        if (t.get("forced_closes_counted") or 0) > 0:
+            reasons.append(f"{lane}: forced closes counted in strategy stats")
+    return _result("rules-conformance", reasons, red=bool(reasons))
+
+
+# ----------------------------------------------------------------------------- data completeness / tape
+def data_completeness(tape_bounds: tuple, *, now: float, window_sec: float = 3600.0,
+                      streams: Mapping[str, Any] | None = None, stale_sec: float = 120.0) -> dict:
+    first, last, n = tape_bounds
+    reasons, amber, red = [], False, False
+    if not n or last is None:
+        return _result("data-completeness", ["1 s tape empty"], red=True)
+    lag = now - float(last)
+    covered = min(window_sec, float(last) - float(first) + 1)
+    expected = max(1.0, min(window_sec, now - float(first)))
+    have = min(n, covered)
+    gap_pct = max(0.0, 100.0 * (1 - have / expected))
+    if lag > 10:
+        reasons.append(f"tape last row {lag:.0f}s old")
+        red = lag > 60
+        amber = True
+    if gap_pct > TAPE_GAP_RED_PCT:
+        red = True
+        reasons.append(f"tape missing {gap_pct:.1f}% of seconds")
+    elif gap_pct > TAPE_GAP_AMBER_PCT:
+        amber = True
+        reasons.append(f"tape missing {gap_pct:.1f}% of seconds")
+    stream_rows = {}
+    for name, age in (streams or {}).items():
+        a = _f(age)
+        stream_rows[name] = a
+        if a is None or a > stale_sec:
+            amber = True
+            reasons.append(f"stream {name} stale ({a}s)")
+    return _result("data-completeness", reasons, red=red, amber=amber, alert_on_amber=False,
+                   tape_lag_sec=round(lag, 1), tape_gap_pct=round(gap_pct, 3), streams_age_sec=stream_rows)
+
+
+def tape_retention(memory_bounds: tuple, archive_oldest_ts: float | None, *, now: float) -> dict:
+    """7-day 1 s tape retention: in-memory ring plus on-disk archive must reach back 7 days."""
+    first_mem = memory_bounds[0]
+    oldest = min(x for x in (first_mem, archive_oldest_ts) if x is not None) if (first_mem or archive_oldest_ts) else None
+    reach = (now - float(oldest)) if oldest else 0.0
+    ok = reach >= TAPE_RETENTION_REQUIRED_SEC - 3600
+    reasons = [] if ok else [f"1 s tape reaches back {reach / 3600:.1f} h; rule is 7 days"]
+    return _result("tape-retention", reasons, amber=not ok and reach > 0, red=not ok and reach <= 0,
+                   alert_on_amber=True, reach_hours=round(reach / 3600, 2), required_hours=168,
+                   memory_oldest_ts=first_mem, archive_oldest_ts=archive_oldest_ts)
+
+
+# ----------------------------------------------------------------------------- latency guard
+def latency_guard(slo: Mapping[str, Any], per_tile: Mapping[str, Any]) -> dict:
+    """Alert flag over the exit-latency SLO: RED if any tile's max trigger->fill > 5 s, AMBER > 2 s."""
+    reasons, red, amber, worst = [], False, False, {}
+    for lane, t in (per_tile or {}).items():
+        ex = t.get("exit") or {}
+        mx = _f(ex.get("max_sec") or ex.get("max_trigger_to_fill_sec") or ex.get("p100_sec"))
+        p95 = _f(ex.get("p95_sec"))
+        v = mx if mx is not None else p95
+        worst[lane] = v
+        if v is None:
+            continue
+        if v > LATENCY_RED_SEC:
+            red = True
+            reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_RED_SEC:g}s")
+        elif v > LATENCY_AMBER_SEC:
+            amber = True
+            reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_AMBER_SEC:g}s")
+    if str((slo or {}).get("status") or "").upper() == "RED":
+        red = True
+        reasons.append("exit-latency SLO RED")
+    return _result("exits-latency-guard", reasons, red=red, amber=amber, alert_on_amber=True, worst_sec=worst)
+
+
+def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_sec: float = 36 * 3600,
+                    disk_free_pct_min: float = 10.0) -> dict:
+    """Laptop disk + cold archive (R2) receipt pushed by the laptop backup job."""
+    if not receipt:
+        return _result("archive-receipt", ["no R2 backup / disk receipt received yet"], amber=True, alert_on_amber=True)
+    reasons, red, amber = [], False, False
+    ts = _f(receipt.get("finished_ts") or receipt.get("ts"))
+    age = (now - ts) if ts else None
+    if age is None or age > max_age_sec:
+        amber = True
+        reasons.append(f"last archive {None if age is None else round(age / 3600, 1)} h ago (> {max_age_sec / 3600:g} h)")
+    if (receipt.get("errors") or 0) > 0 or receipt.get("ok") is False:
+        red = True
+        reasons.append(f"archive errors={receipt.get('errors')}")
+    free = _f(receipt.get("disk_free_pct"))
+    if free is not None and free < disk_free_pct_min:
+        red = True
+        reasons.append(f"laptop disk free {free:.1f}% < {disk_free_pct_min:g}%")
+    return _result("archive-receipt", reasons, red=red, amber=amber, alert_on_amber=True, age_sec=age,
+                   receipt={k: receipt.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded",
+                                                       "errors", "disk_free_pct", "disk_free_gb", "finished_ts",
+                                                       "restore_test", "host") if k in receipt})
