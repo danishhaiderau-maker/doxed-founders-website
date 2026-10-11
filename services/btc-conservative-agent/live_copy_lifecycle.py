@@ -99,6 +99,7 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
             "armed_at": a.get("armed_at"),
             "sim_active": a.get("sim_active"),
             "executor_status": a.get("executor_status"),
+            "executor_last_pass_exit_stage": a.get("executor_last_pass_exit_stage"),
             "executor_healthy": a.get("executor_healthy"),
             "armed": bool(a.get("armed")),
             "paused": str(a.get("status") or "").upper() == "PAUSED",
