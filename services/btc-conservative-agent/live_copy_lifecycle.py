@@ -155,7 +155,10 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
     if web.get("reachable"):
         any_active = any(str(r.get("instance_status") or "").upper() == "ACTIVE" and not r.get("sim_active")
                          for r in acct_rows)
-        if any_active and mode in ("research_only", "source_research_only", "fully_paused"):
+        # "research_only" is Fly's normal RELAY_STACK_MODE (paper source; the
+        # live-copy outbox delivers independently), not a stale coordination
+        # reading, so only the coordination-pause modes count as a mismatch.
+        if any_active and mode in ("source_research_only", "fully_paused"):
             mismatches.append({"code": "RELAY_MODE_STALE_VS_ACCOUNT", "fly_relay_stack_mode": relay_stack_mode,
                                "account_active": True})
     return {
