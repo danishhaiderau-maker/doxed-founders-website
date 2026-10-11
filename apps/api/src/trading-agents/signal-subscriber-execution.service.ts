@@ -8903,6 +8903,34 @@ await this.notifications
       return false;
     }
 
+    // 11 Oct 19:00 false pause: the signed fast entry (wake path) created and
+    // filled a participant while this tick was between its ledger read and
+    // its exchange read, so the snapshot showed exchange 0.0003 vs ledger 0
+    // and paused a correctly copied trade. If an entry participant newer than
+    // this tick's snapshot exists, the snapshot is stale: defer this tick
+    // (no new entries) and let the next tick rebuild ledger + exchange state.
+    // A real mismatch still pauses on the next tick.
+    if (fillGrace.reason !== 'GRACE_EXPIRED') {
+      const knownIds = participants.map((row) => row.id);
+      const lateParticipants = await this.prisma.signalCycleParticipant.count({
+        where: {
+          userId: instance.userId,
+          venue: simActive ? 'bitfinex_sim' : 'bitfinex',
+          status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+          createdAt: { gte: new Date(Date.now() - PENDING_FILL_RECONCILE_GRACE_MS) },
+          ...(knownIds.length ? { id: { notIn: knownIds } } : {}),
+        },
+      }).catch(() => 0);
+      if (lateParticipants > 0) {
+        this.logger.warn(
+          `Stale ledger snapshot ${instance.userId}: ${lateParticipants} entry participant(s) created during this tick ` +
+            `(exchange ${signedExchangeAmount.toFixed(8)} vs snapshot ledger ${signedLedgerOpenAmount.toFixed(8)}); ` +
+            'deferring mismatch decision to the next tick without new entries',
+        );
+        return false;
+      }
+    }
+
     const message =
       fillGrace.reason === 'GRACE_EXPIRED'
         ? `PENDING_FILL_RECONCILE_GRACE_EXPIRED: exchange ${signedExchangeAmount.toFixed(8)} BTC ≠ ` +
