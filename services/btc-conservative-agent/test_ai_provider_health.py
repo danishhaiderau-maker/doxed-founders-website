@@ -25,6 +25,7 @@ FUNCTIONS = {
     "_ai_call_cost_fields",
     "call_deepseek_api",
     "call_deepseek_api_with_meta",
+    "_persisted_window_add",
 }
 ASSIGNS = {
     "AI_NO_SUCCESS_ALERT_SEC",

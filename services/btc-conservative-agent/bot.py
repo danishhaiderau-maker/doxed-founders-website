@@ -97,6 +97,14 @@ def _monitor_gap_state_path(name: str) -> str:
 
 # API-GAP-SWEEP A4/A5: rolling windows and blind time survive deploys.
 _PERSISTED_WINDOWS = _monitor_gaps.PersistedWindows(_monitor_gap_state_path("rolling_counters.json"))
+
+
+def _persisted_window_add(name, value=1.0):
+    """Observability counter; never raises into trading/AI paths (also safe in extracted-function tests)."""
+    try:
+        globals()["_PERSISTED_WINDOWS"].add(name, value) if value != 1.0 else globals()["_PERSISTED_WINDOWS"].add(name)
+    except Exception:  # noqa: BLE001
+        pass
 _BLIND_TIME = _monitor_gaps.BlindTime(_monitor_gap_state_path("blind_time.json"))
 _PREENTRY_DEGRADED = _monitor_gaps.DegradedTimer()
 _REGIME_COMPARATOR = _monitor_gaps.RegimeComparator()
@@ -19846,14 +19854,14 @@ def record_ai_provider_outcome(
                 "last_requested_model": requested_model,
             })
             health["successes_since_boot"] += 1
-            _PERSISTED_WINDOWS.add("ai_calls_ok")
-            _PERSISTED_WINDOWS.add("ai_latency_ms", float(latency_ms or 0))
+            _persisted_window_add("ai_calls_ok")
+            _persisted_window_add("ai_latency_ms", float(latency_ms or 0))
             return
         if not health["consecutive_failures"]:
             health["failing_since_ts"] = now
         health["consecutive_failures"] += 1
         health["failures_since_boot"] += 1
-        _PERSISTED_WINDOWS.add("ai_calls_failed")
+        _persisted_window_add("ai_calls_failed")
         health["last_failure_ts"] = now
         health["last_error_class"] = classify_ai_provider_error(error)
 
@@ -25962,7 +25970,7 @@ def process_pending_orders():
     except Exception as exc:
         # API-GAP-SWEEP R2: never swallow the paper maker-fill simulation failure.
         _FILL_SIM_COUNTERS.error(exc, "touch_grid")
-        _PERSISTED_WINDOWS.add("fill_sim_errors")
+        _persisted_window_add("fill_sim_errors")
         _rl_key = "_fill_sim_err_log_ts"
         if time.time() - float(globals().get(_rl_key) or 0.0) > 60.0:
             globals()[_rl_key] = time.time()
@@ -26105,7 +26113,7 @@ def process_pending_orders():
             order["limit_price"] = fill_px
             order["fill_handoff_in_progress"] = True
             _FILL_SIM_COUNTERS.maker_fill(order.get("research_lane"), fill_px, fill_bid, fill_ask, order.get("side"))
-            _PERSISTED_WINDOWS.add("paper_limit_fills")
+            _persisted_window_add("paper_limit_fills")
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal))
@@ -30009,7 +30017,7 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
-    _PERSISTED_WINDOWS.add("orders_expired_or_cancelled")
+    _persisted_window_add("orders_expired_or_cancelled")
     genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
     _emit_genome_execution_event(genome_event, {
         "trade_id": tid,
