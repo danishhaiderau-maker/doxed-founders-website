@@ -12,7 +12,7 @@ import paper_pnl_canon
 
 def test_forced_exit_reasons_are_the_canonical_three():
     assert paper_pnl_canon.FORCED_EXIT_REASONS == {
-        "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
+        "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL", "DEPLOY_FORCE_FLAT",
     }
 
 

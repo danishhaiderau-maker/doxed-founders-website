@@ -146,7 +146,7 @@ def test_close_endpoint_and_trade_row_carry_close_origin():
     assert '"exit_reason": exit_reason,' in close_src
     assert '"close_origin": _forced_close_origin(exit_reason),' in close_src
     endpoint = src[src.index("def api_close_showcase_position"):src.index("@app.route('/api/toggle_early_fail")]
-    assert 'close_position(matches[0], "ADMIN_MANUAL_CLOSE")' in endpoint
+    assert 'close_position(matches[0], close_reason)' in endpoint and '"DEPLOY_FORCE_FLAT" if' in endpoint
     assert '"close_origin": close_origin,' in endpoint
 
 
