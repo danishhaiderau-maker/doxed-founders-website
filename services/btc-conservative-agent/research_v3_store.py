@@ -1195,7 +1195,10 @@ class V3EvidenceStore:
         all re-validated against the ledger file), so a code revision alone does
         not invalidate them. Binding them to source/deployed revision forced a
         full re-index of every ledger (~50 min, paper paused) on every deploy.
-        A new epoch or tile config still resets everything.
+        A new epoch still resets everything. LIVE-FIX-0958: tile config is NOT
+        part of the carry key either -- the index maps ledger row bytes to
+        record_id and never reads tile config, so retiring a tile (#570 ROUTER)
+        forced a full re-index (>50 min in maintenance) for no safety gain.
         """
         if not isinstance(recorded, Mapping):
             return False
@@ -1205,7 +1208,6 @@ class V3EvidenceStore:
         return bool(
             current.get("epoch_id")
             and recorded.get("epoch_id") == current.get("epoch_id")
-            and recorded.get("tile_config_signature") == current.get("tile_config_signature")
         )
 
     def _record_lifecycle_membership(
