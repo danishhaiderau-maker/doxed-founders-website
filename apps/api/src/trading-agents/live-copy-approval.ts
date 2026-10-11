@@ -22,24 +22,22 @@ export const LIVE_COPY_ENTRY_EVENTS = new Set(['ORDER_PLACED', 'LIMIT_UPDATED'])
 export const FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC = 180;
 
 /**
- * Active Fly tiles (lane -> trade-id prefix). Mirrors Fly's
- * combo_pathway_config.ACTIVE_TILE_REGISTRY; a Fly test fails on drift.
+ * Active Fly tiles (lane -> trade-id prefix). EXACTLY Fly's dashboard tiles
+ * (combo_pathway_config.ACTIVE_TILE_REGISTRY): every dashboard tile is listed
+ * and no retired tile is (Danish 12 Oct 09:19/09:20). A Fly contract test fails on drift.
  * Being listed here never makes a tile copyable: a copy also needs Fly's
  * signed approval (operator/registry eligible, output ON, tile switch ON).
  */
 export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.freeze({
   FAMILY_COMMITTED_FADE_TAKER_90: 'cft',
-  FAMILY_PREMIUM_REVERSION_60M: 'pmr',
   FAMILY_RANDOM_CONTROL_TAKER_90: 'rnd',
   FAMILY_GS01_XV_PREMIUM_ATR_TP: 'gs1',
   FAMILY_GSB1_CVD_DIV_REGIME: 'gb1',
   FAMILY_GSB2_REGIME_SWITCHER: 'gb2',
-  FAMILY_GSB3_COMMITTED_FADE_REGIME: 'gb3',
   FAMILY_GS06_COMMITTED_FADE_ATR_TP: 'gs6',
   FAMILY_GS07_FAST_PREMIUM_FADE: 'gs7',
-  FAMILY_DANISH_REGIME_ROUTER: 'dnr',
-  FAMILY_FADE_POOL: 'fdp',
-  FAMILY_GS07_V07_PREMIUM_FADE_60M: 'g7v',
+  FAMILY_DISLOC_BFX_DISLOCATION_1M: 'dsl',
+  FAMILY_DISLOC_FOI_LONG_1M: 'dsf',
 });
 
 /**
@@ -250,6 +248,14 @@ export function evaluateLiveCopyPlacement(input: {
   const a = fresh.approval;
   if (a.eligibility_source !== 'REGISTRY' && a.eligibility_source !== 'OPERATOR') {
     return { ok: false, reason: 'APPROVAL_ELIGIBILITY_SOURCE_INVALID' };
+  }
+  // Tiles whose edge decays in seconds (DISLOC) carry a hard signal-age bound.
+  const maxSig = Number(a.max_signal_age_sec);
+  if (a.max_signal_age_sec != null && Number.isFinite(maxSig) && maxSig > 0) {
+    const sig = Number(a.signal_at_ts);
+    const nowSec = (input.nowMs ?? Date.now()) / 1000;
+    if (!Number.isFinite(sig) || sig <= 0) return { ok: false, reason: 'SIGNAL_TS_MISSING' };
+    if (nowSec - sig > maxSig) return { ok: false, reason: 'SIGNAL_TOO_OLD' };
   }
   return { ok: true, approval: a, exchangeStopBp: Number(a.exchange_stop_bp), correlationId: String(a.correlation_id) };
 }

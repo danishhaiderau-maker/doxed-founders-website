@@ -1723,6 +1723,12 @@ COMBO_LANE_SPECS.update({
     ),
 })
 COMBO_LANE_SPECS[RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M]["self_simulated_paper"] = True
+# Danish 12 Oct 09:19: DISLOC tiles are live-copyable via the signed copy path
+# (bot._disloc_live_copy_bridge). Their edge dies past ~2 s, so the approval
+# carries a hard signal-age bound the executor re-checks before placement.
+for _dsl_lane in (RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M, RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M):
+    COMBO_LANE_SPECS[_dsl_lane]["live_copy_max_signal_age_sec"] = 2.0
+    COMBO_LANE_SPECS[_dsl_lane]["live_copy_bridge"] = "disloc_engine"
 
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}

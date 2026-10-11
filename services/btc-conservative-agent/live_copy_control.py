@@ -1088,6 +1088,7 @@ def build_approval(
         "exchange_stop_inside_tile_hard_stop": plan.get("inside_tile_hard_stop"),
         "exchange_stop_role": "CATASTROPHE_BACKUP",
         "exchange_stop_never_moved": EXCHANGE_STOP_NEVER_MOVED,
+        "max_signal_age_sec": s.get("live_copy_max_signal_age_sec"),
         "reasons": list(reasons or [])[:12],
         "bot_instance_id": bot_instance_id,
     }
