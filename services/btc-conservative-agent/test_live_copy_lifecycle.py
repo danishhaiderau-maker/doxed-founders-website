@@ -90,3 +90,9 @@ def test_research_only_stack_mode_is_not_a_mismatch():
     out = lcl.build(_ctx(relay_stack_mode="research_only"), now=NOW)
     codes = [m.get("code") for m in out["arming"]["mismatches"]]
     assert "RELAY_MODE_STALE_VS_ACCOUNT" not in codes
+
+
+def test_showcase_mirror_exit_matches_any_paper_reason():
+    import inspect
+    src = inspect.getsource(lcl)
+    assert '"SHOWCASE_MIRROR", str(twin.get("exit_reason")' in src
