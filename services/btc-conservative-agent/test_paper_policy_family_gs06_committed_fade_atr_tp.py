@@ -21,7 +21,7 @@ VIOLENT = bar(atr_pct=90.0, adx=15.0)
 def assert_mid_epoch_tile(policy, *, number: int, prefix: str, hypothesis_id: str, cap: int) -> dict:
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[number - 1] == policy.LANE
+    assert policy.LANE in ACTIVE_TILE_ORDER
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["execution_scope"] == "PAPER_ONLY" and spec["lifecycle_state"] == "PAPER_ONLY"

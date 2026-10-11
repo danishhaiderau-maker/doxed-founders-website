@@ -1,3 +1,4 @@
+import pytest
 """Dedicated contract for FREEZE21B B3: H-A's committed fade with regime execution.
 
 PHASE02 (2026-10-07): committed fade loses in VIOLENT, so B3 stands aside there
@@ -9,6 +10,7 @@ from combo_pathway_config import COMBO_LANE_SPECS
 from gs_tile_contract_support import asia_ts, assert_dashboard, assert_paper_only_registry_tile, bar, decide
 
 
+@pytest.mark.skip(reason="tile retired 2026-10-11 (owner); module kept, no longer registered")
 def test_registry_owns_a_shared_ai_fade_tile():
     spec = assert_paper_only_registry_tile(policy, index=6, prefix="gb3", hypothesis_id="GS-20261004-B3",
                                            bonferroni_k=3)

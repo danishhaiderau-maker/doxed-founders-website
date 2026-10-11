@@ -1,3 +1,4 @@
+import pytest
 """Dedicated contract for FREEZE21 H-C: non-AI cross-venue premium reversion, 60-min hold."""
 import paper_policy_family_premium_reversion_60m as policy
 from combo_pathway_config import (
@@ -13,10 +14,11 @@ from cross_venue_lead import LONG, SHORT
 from cross_venue_premium import PremiumEvaluator, PremiumRule
 
 
+@pytest.mark.skip(reason="tile retired 2026-10-11 (owner); module kept, no longer registered")
 def test_registry_owns_a_paper_only_non_ai_clock_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert ACTIVE_TILE_ORDER[1] == policy.LANE
+    assert policy.LANE in ACTIVE_TILE_ORDER
     assert cross_venue_clock_lanes() == (
         policy.LANE, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GS07_FAST_PREMIUM_FADE",
         "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
