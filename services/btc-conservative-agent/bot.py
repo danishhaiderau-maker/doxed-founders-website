@@ -58383,6 +58383,12 @@ def api_bitfinex_tile_live_orders(lane: str):
     if enabled is None:
         return jsonify({"error": "'enabled' must be a JSON boolean",
                         "example": {"enabled": True}}), 400
+    if enabled:
+        from combo_pathway_config import RETIRED_TILE_LANES as _retired_lanes
+        if lane in _retired_lanes:
+            # Retired tiles stay OFF across deploys and restores (owner rule).
+            return jsonify({"ok": False, "error": "TILE_RETIRED", "lane": lane,
+                            "bitfinex_live_orders": False}), 409
     sw = _get_bfx_live_switch()
     if enabled:
         try:
