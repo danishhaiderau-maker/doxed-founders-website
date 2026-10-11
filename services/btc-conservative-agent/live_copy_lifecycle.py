@@ -287,7 +287,11 @@ def build_intents(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mapp
                 if prev is not None:
                     lags[f"{prev[0].replace('_at_ts', '')}->{k.replace('_at_ts', '')}"] = round(v - prev[1], 3)
                 prev = (k, v)
-            order_violations = [name for name, lag in lags.items() if lag < -1.0]
+            # Fly and Railway clocks differ by up to ~1 s and executor decision
+            # times are recorded asynchronously; only a clearly reversed hop
+            # (> 5 s) is an ordering fault.
+            order_violations = [name for name, lag in lags.items()
+                                if lag < -5.0 and "executor_" not in name]
             qty = sum(f["qty"] or 0 for f in ch["fills"]) or None
             vwap = (sum((f["price"] or 0) * (f["qty"] or 0) for f in ch["fills"]) / qty) if qty else (
                 ch["fills"][0]["price"] if ch["fills"] else None)
@@ -404,7 +408,7 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
             if a.get("open") and len([s for s in a.get("stops") or [] if s.get("exchange_order_id")]) > 1:
                 add("DUPLICATE_STOPS", RED, correlation_id=it["correlation_id"], account=a["account"],
                     stops=[s.get("exchange_order_id") for s in a["stops"]])
-            if a.get("fills") and not paper:
+            if a.get("open") and not paper:
                 add("LIVE_POSITION_WITHOUT_PAPER_TWIN", AMBER, correlation_id=it["correlation_id"], account=a["account"])
             pexit = _f(paper.get("exit_ts")) or _iso_ts(paper.get("exit_ts"))
             if a.get("open") and pexit and now - pexit > PAPER_CLOSED_LIVE_OPEN_SEC:

@@ -9515,7 +9515,8 @@ await this.notifications
     try {
       for (const instance of this.relayInstanceCache.values()) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
-        if (instance.status !== TradingAgentInstanceStatus.ACTIVE) continue;
+        // Paused accounts are mirrored too: "flat" must be provable from
+        // exchange truth while paused (orphan stops, positions left open).
         if (isCopyRelaySimActive(instance.dashboardState)) continue;
         if (this.running) return;
         const readStartedAt = Date.now();
