@@ -320,16 +320,16 @@ def test_large_snapshot_is_not_starved_by_earlier_growing_streams(tmp_path):
     env = Env(tmp_path, max_segment_bytes=300, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
     env.write("a_live.jsonl", _rows(0, 1))
-    env.write("z_research.db", b"d" * 1000)
+    env.write("z_lab.db", b"d" * 1000)
     shipped_paths = []
     for cycle in range(6):
         env.write("a_live.jsonl", _rows(cycle + 1, 1), append=True)
         result = env.shipper().cycle()
         seq = result["shipped"]["seq"]
         shipped_paths += [m["path"] for m in json.loads(env.store.get(fmt.manifest_key("v1", seq)))["members"]]
-        if "z_research.db" in shipped_paths:
+        if "z_lab.db" in shipped_paths:
             break
-    assert "z_research.db" in shipped_paths and cycle <= 2
+    assert "z_lab.db" in shipped_paths and cycle <= 2
     env.write("a_live.jsonl", _rows(50, 1), append=True)
     env.ship_all()
     env.puller().pull_once()
@@ -339,7 +339,7 @@ def test_large_snapshot_is_not_starved_by_earlier_growing_streams(tmp_path):
 def test_hot_snapshot_written_between_scan_and_read_still_ships(tmp_path):
     env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
-    db = env.write("research.db", b"a" * 4000)
+    db = env.write("lab.db", b"a" * 4000)
     shipper = env.shipper()
     real_scan = shipper.scan
 
@@ -353,7 +353,7 @@ def test_hot_snapshot_written_between_scan_and_read_still_ships(tmp_path):
     result = shipper.cycle()
     assert result["shipped"] and "race" not in result
     member = json.loads(env.store.get(fmt.manifest_key("v1", 1)))["members"][0]
-    assert member["path"] == "research.db" and member["size"] == 4100
+    assert member["path"] == "lab.db" and member["size"] == 4100
     shipper.scan = real_scan
     assert shipper.cycle()["shipped"] is None
     env.puller().pull_once()
@@ -364,7 +364,7 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
     env.write("a_live.jsonl", _rows(0, 3))
-    db = env.write("z_research.db", b"d" * 1000)
+    db = env.write("z_lab.db", b"d" * 1000)
     hot_inode = db.stat().st_ino
     real_fstat = os.fstat
     ticks = [0]
@@ -382,17 +382,17 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     shipper = env.shipper()
     # The racing stream is dropped and the rest of the same cycle still ships.
     raced = shipper.cycle()
-    assert raced["race"] == "z_research.db" and raced["shipped"]
+    assert raced["race"] == "z_lab.db" and raced["shipped"]
     members = json.loads(env.store.get(fmt.manifest_key("v1", raced["shipped"]["seq"])))["members"]
     assert [m["path"] for m in members] == ["a_live.jsonl"]
     status = json.loads(shipper.status_path.read_text())
-    assert [item["path"] for item in status["racing_paths"]] == ["z_research.db"]
+    assert [item["path"] for item in status["racing_paths"]] == ["z_lab.db"]
     assert shipper.cycle()["shipped"] is None
 
     env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
-    assert shipper.cycle()["race"] == "z_research.db"
-    assert shipper.race_backoff["z_research.db"][0] == 2
-    assert shipper.race_backoff["z_research.db"][1] == env.clock[0] + 2 * shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    assert shipper.cycle()["race"] == "z_lab.db"
+    assert shipper.race_backoff["z_lab.db"][0] == 2
+    assert shipper.race_backoff["z_lab.db"][1] == env.clock[0] + 2 * shipper_mod.RACE_BACKOFF_BASE_SECONDS
 
     monkeypatch.setattr(shipper_mod.os, "fstat", real_fstat)
     env.clock[0] += 2 * shipper_mod.RACE_BACKOFF_BASE_SECONDS
@@ -829,8 +829,8 @@ def test_sqlite_above_member_cap_ships_as_consistent_backup_alone_and_streamed(t
     env = Env(tmp_path, max_member_bytes=64 * 1024, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
     env.write("a_live.jsonl", _rows(0, 3))
-    _sqlite_db(env.runtime / "research.db", rows=2000)
-    source_size = (env.runtime / "research.db").stat().st_size
+    _sqlite_db(env.runtime / "lab.db", rows=2000)
+    source_size = (env.runtime / "lab.db").stat().st_size
     assert source_size > 64 * 1024
     real_build = fmt.build_segment
 
@@ -842,22 +842,22 @@ def test_sqlite_above_member_cap_ships_as_consistent_backup_alone_and_streamed(t
     env.ship_all()
     manifests = [json.loads(env.store.get(fmt.manifest_key("v1", seq)))
                  for seq in range(1, env.shipper().load_state()["seq"] + 1)]
-    db_manifest = next(m for m in manifests if m["members"][0]["path"] == "research.db")
+    db_manifest = next(m for m in manifests if m["members"][0]["path"] == "lab.db")
     assert len(db_manifest["members"]) == 1
     assert db_manifest["members"][0]["consistency"] == shipper_mod.SQLITE_CONSISTENCY
-    tracked = env.shipper().load_state()["files"]["research.db"]
+    tracked = env.shipper().load_state()["files"]["lab.db"]
     assert tracked["size"] == source_size and tracked["wal"] == [0, 0, 0]
     assert env.shipper().cycle()["shipped"] is None
     assert not list((env.state_dir / "sqlite-snapshots").glob("*.db"))
     env.puller().pull_once()
-    assert _sqlite_rows(env.shadow / "tree" / "research.db") == 2000
+    assert _sqlite_rows(env.shadow / "tree" / "lab.db") == 2000
 
 
 def test_sqlite_written_concurrently_is_never_shipped_torn(tmp_path):
     import sqlite3
     env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
-    db = env.runtime / "research.db"
+    db = env.runtime / "lab.db"
     _sqlite_db(db, rows=3000)
     stop = threading.Event()
 
@@ -876,26 +876,26 @@ def test_sqlite_written_concurrently_is_never_shipped_torn(tmp_path):
     finally:
         stop.set()
         thread.join()
-    assert result["shipped"] or result.get("race") == "research.db"
+    assert result["shipped"] or result.get("race") == "lab.db"
     if result["shipped"]:
         env.puller().pull_once()
-        assert _sqlite_rows(env.shadow / "tree" / "research.db") >= 3000
+        assert _sqlite_rows(env.shadow / "tree" / "lab.db") >= 3000
 
 
 def test_sqlite_backup_that_cannot_finish_backs_off_and_ships_nothing(tmp_path, monkeypatch):
     env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
     env.store = VolumeStore(env.store_root)
-    _sqlite_db(env.runtime / "research.db", rows=10)
+    _sqlite_db(env.runtime / "lab.db", rows=10)
 
     def too_hot(source, target, *, deadline_seconds):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"partial")
-        raise TimeoutError("research.db online backup exceeded 180s")
+        raise TimeoutError("lab.db online backup exceeded 180s")
 
     monkeypatch.setattr(shipper_mod, "sqlite_online_backup", too_hot)
     shipper = env.shipper()
     result = shipper.cycle()
-    assert result["shipped"] is None and result["race"] == "research.db"
+    assert result["shipped"] is None and result["race"] == "lab.db"
     assert shipper.load_state()["seq"] == 0
     assert not list((env.state_dir / "sqlite-snapshots").glob("*.db"))
     assert "online backup not completed" in json.loads(shipper.status_path.read_text())["last_error"]
@@ -917,14 +917,14 @@ def test_huge_sqlite_is_reshipped_at_most_once_per_huge_interval(tmp_path):
     env = Env(tmp_path, max_member_bytes=64 * 1024, large_snapshot_bytes=1024,
               large_snapshot_interval=60, huge_snapshot_interval=6 * 3600)
     env.store = VolumeStore(env.store_root)
-    db = env.runtime / "research.db"
+    db = env.runtime / "lab.db"
     _sqlite_db(db, rows=2000)
     env.ship_all()
     _sqlite_db(db, rows=10, start=5000)
     env.clock[0] += 3600
     shipper = env.shipper()
     assert shipper.cycle()["shipped"] is None
-    assert "research.db" in json.loads(shipper.status_path.read_text())["throttled_snapshots"]
+    assert "lab.db" in json.loads(shipper.status_path.read_text())["throttled_snapshots"]
     env.clock[0] += 6 * 3600
     assert env.shipper().cycle()["shipped"]
 

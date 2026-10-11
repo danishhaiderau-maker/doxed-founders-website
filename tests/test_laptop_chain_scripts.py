@@ -577,7 +577,9 @@ def test_status_snapshots_offline_are_explicit_failures_never_flat(chain):
 
 def test_status_snapshots_are_read_only_and_never_persist_secrets():
     source = _source("laptop-status-snapshots.ps1")
-    assert source.count("Invoke-RestMethod -Method Get") == 4
+    # Fly /health and /ready go through Invoke-JsonGet (reads 503 bodies), still GET-only.
+    assert source.count("Invoke-RestMethod -Method Get") == 3
+    assert source.count("Invoke-JsonGet \"") == 2
     assert "-Method Post" not in source and "-Method Put" not in source
     persisted = source[source.index("$relay.ok = $true"):source.index("} catch {\n    $relay.error")]
     assert "userId" not in persisted and "adminToken" not in persisted and "lastError" not in persisted
@@ -933,6 +935,26 @@ def test_auto_ff_follows_only_a_successful_deploy_and_logs_a_receipt(tmp_path, c
     receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert receipt["outcome"] == "FAST_FORWARDED" and receipt["to"] == second and receipt["from"] == first
     assert _run_auto_ff(clone, chain).returncode == 0
+
+
+@windows_only
+def test_auto_ff_follows_the_running_revision_when_newer_runs_were_cancelled(tmp_path, chain):
+    # 11 Oct 2026: deploy concurrency cancelled superseded runs and a newer run
+    # was in progress, so runs[0] was never `success` and the analyzer stayed
+    # on the previous revision for hours.
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    snap = chain["state"] / "fly_deploy_runs_snapshot_v1.json"
+    data = json.loads(snap.read_text(encoding="utf-8"))
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    data["runs"] = [{"databaseId": 9, "status": "in_progress", "conclusion": "", "headSha": "f" * 40,
+                     "createdAt": later, "updatedAt": later},
+                    {"databaseId": 8, "status": "completed", "conclusion": "cancelled", "headSha": "e" * 40,
+                     "createdAt": later, "updatedAt": later}] + data["runs"]
+    snap.write_text(json.dumps(data), encoding="utf-8")
+    result = _run_auto_ff(clone, chain)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(clone, "rev-parse", "HEAD") == second
 
 
 def _origin_commit(tmp_path, name, content, message):

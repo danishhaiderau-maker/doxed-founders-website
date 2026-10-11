@@ -44,12 +44,28 @@ if (-not (Test-Fresh $runtime) -or -not (Test-Fresh $deploys) -or -not $runtime.
 $flyRev = ([string]$runtime.git_rev).Trim().ToLowerInvariant()
 $runs = @($deploys.runs | ForEach-Object { if ($_.PSObject.Properties['value']) { $_.value } else { $_ } } |
           Sort-Object { ConvertTo-UtcDate $_.createdAt } -Descending)
-if ($runs.Count -eq 0) { exit 2 }
-$latest = $runs[0]
-# Never follow Fly mid-deploy, after a failed deploy, or to a revision no
-# successful guarded deploy produced.
-if ([string]$latest.status -ne 'completed' -or [string]$latest.conclusion -ne 'success') { exit 2 }
-$target = ([string]$latest.headSha).Trim().ToLowerInvariant()
+# Follow the revision Fly actually runs. Deploy concurrency cancels superseded
+# runs, so the newest run is routinely `cancelled` or `in_progress` while Fly
+# serves an older, successfully deployed revision; keying on runs[0] left the
+# analyzer one deploy behind (11 Oct 2026: 2 h on 183780e3 while Fly ran
+# f34925ac, every cycle AUTO_FF_INLINE_GAVE_UP exit=2). The target is the newest
+# *successful* run whose head is the running revision. A revision Fly runs that
+# no guarded run produced (manual flyctl deploy) is followed only when it is on
+# origin/master and Fly reports ready.
+$latest = @($runs | Where-Object {
+  [string]$_.status -eq 'completed' -and [string]$_.conclusion -eq 'success' -and
+  ([string]$_.headSha).Trim().ToLowerInvariant().StartsWith($flyRev) }) | Select-Object -First 1
+if ($latest) {
+  $target = ([string]$latest.headSha).Trim().ToLowerInvariant()
+} else {
+  if ([string]$runtime.ready_status -ne 'ready') { exit 2 }
+  Invoke-NativeQuiet { & git -C $cfg.RepoRoot fetch --quiet origin master } | Out-Null
+  $target = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse --verify --quiet "$flyRev^{commit}" }) | Select-Object -First 1)).Trim().ToLowerInvariant()
+  if ($target -notmatch '^[0-9a-f]{40}$') { exit 2 }
+  Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $target 'origin/master' } | Out-Null
+  if ($LASTEXITCODE -ne 0) { exit 2 }
+  $latest = [pscustomobject]@{ databaseId = 'manual-deploy'; headSha = $target }
+}
 if ($target -notmatch '^[0-9a-f]{40}$' -or -not $target.StartsWith($flyRev)) { exit 2 }
 
 $head = ((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)
