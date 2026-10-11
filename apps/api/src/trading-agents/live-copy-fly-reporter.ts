@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { setLiveCopyReportKickListener } from './live-copy-report-kick';
 import {
   approvalPermitsRelayCopy,
   readEnvelopeFlyApproval,
@@ -426,9 +427,11 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
     if (process.env.NODE_ENV === 'test') return;
     this.timer = setInterval(() => void this.tick(), 5_000);
     this.timer.unref?.();
+    setLiveCopyReportKickListener(() => void this.tick());
   }
 
   onModuleDestroy(): void {
+    setLiveCopyReportKickListener(null);
     if (this.timer) clearInterval(this.timer);
   }
 
