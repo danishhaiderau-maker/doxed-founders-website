@@ -1043,6 +1043,31 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         add(check("fly.process", "fly", st, f"alive={alive} system_ready={ready} rev={dig(status, 'git_rev')}",
                   "process_alive and /api/status + /health answer",
                   "" if alive else "Fly process reports not alive"))
+        # API-GAP-SWEEP R1: the health check reads worker status (was 0 references).
+        threads = dig(status, "threads", default=None)
+        if isinstance(threads, Mapping) and threads:
+            monitored = {n: r for n, r in threads.items() if isinstance(r, Mapping) and r.get("monitored")}
+            unmonitored = sorted(n for n, r in threads.items() if isinstance(r, Mapping) and not r.get("monitored"))
+            stale = sorted(n for n, r in monitored.items() if r.get("stale") or r.get("alive") is False)
+            restarted = sorted(n for n, r in threads.items() if isinstance(r, Mapping) and r.get("restarts")
+                               and (r.get("last_restart_age_sec") is not None and float(r["last_restart_age_sec"]) <= 900))
+            st = RED if (stale or restarted or unmonitored) else GREEN
+            add(check("fly.workers", "fly", st,
+                      f"{len(monitored)}/{len(threads)} monitored; stale={stale or 'none'} restarted15m={restarted or 'none'} "
+                      f"unmonitored={unmonitored or 'none'}",
+                      "every worker monitored, none stale (3x interval), no restart in 15 min",
+                      "" if st == GREEN else "see /api/monitor/workers for last_error and restarts",
+                      fields={"stale": stale, "restarted": restarted, "unmonitored": unmonitored}))
+        gaps = dig(status, "monitor_gaps", "items", default=None)
+        if isinstance(gaps, Mapping):
+            for item, row in sorted(gaps.items()):
+                if not isinstance(row, Mapping) or item == "workers":
+                    continue
+                lvl = str(row.get("level") or GREEN).upper()
+                st = RED if lvl == "RED" else (AMBER if lvl == "AMBER" else GREEN)
+                add(check(f"fly.gap.{item}", "fly", st, f"{lvl} alerts={list(row.get('alerts') or [])[:6] or 'none'}",
+                          "GREEN (API-GAP-SWEEP-20261012)",
+                          "" if st == GREEN else f"see /api/monitor/{item.replace('_', '-')}"))
     else:
         mem["fly_unreachable_ticks"] = int(mem.get("fly_unreachable_ticks") or 0) + 1
         add(check("fly.process", "fly", RED, f"unreachable ({errors.get('fly_status') or errors.get('fly_health')})",

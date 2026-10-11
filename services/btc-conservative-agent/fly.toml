@@ -16,7 +16,7 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   # snapshot); it starts in dry_run and is switched via the authenticated
   # /api/research-segments/<prefix>/prune-mode route, persisted on the volume.
   RESEARCH_SEGMENTS_PRUNE_ENABLED = "1"
-  RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "dry_run"
+  RESEARCH_SEGMENTS_PRUNE_DEFAULT_MODE = "enforce"
   RESEARCH_SEGMENTS_ENABLED = "1"
   RESEARCH_SEGMENTS_SINK = "volume"
   RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"

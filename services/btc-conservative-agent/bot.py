@@ -73,10 +73,51 @@ from relay_event_outbox import RelayEventOutbox
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
 import thread_health as _thread_health
+import monitor_gaps as _monitor_gaps
 import relay_delivery_guard as _relay_guard
 import ai_call_cost as _ai_call_cost
 
 _THREAD_HEALTH = _thread_health.ThreadHealthRegistry()
+_FILL_SIM_COUNTERS = _monitor_gaps.FillSimCounters()
+_EXIT_TICK_DROPS = _monitor_gaps.DropRate()
+
+
+def _note_exit_tick_drop() -> None:
+    try:
+        _EXIT_TICK_DROPS.drop(bool(open_positions))
+    except Exception:
+        pass
+
+
+def _monitor_gap_state_path(name: str) -> str:
+    root = (os.getenv("BOT_DATA_DIR") or "").strip()
+    base = os.path.join(root, "monitor_state") if root else os.path.join(os.getcwd(), "monitor_state")
+    return os.path.join(base, name)
+
+
+# API-GAP-SWEEP A4/A5: rolling windows and blind time survive deploys.
+_PERSISTED_WINDOWS = _monitor_gaps.PersistedWindows(_monitor_gap_state_path("rolling_counters.json"))
+_BLIND_TIME = _monitor_gaps.BlindTime(_monitor_gap_state_path("blind_time.json"))
+_PREENTRY_DEGRADED = _monitor_gaps.DegradedTimer()
+_REGIME_COMPARATOR = _monitor_gaps.RegimeComparator()
+_CUSTODY_LAG = _monitor_gaps.CustodyLag()
+# API-GAP-SWEEP R1: the worker bound to the current thread (set by safe_thread
+# and the self-supervised workers) heartbeats whenever it waits on the shared
+# shutdown event, so every loop reports progress without per-loop edits.
+_WORKER_TLS = threading.local()
+
+
+def _worker_beat(name: str = None) -> None:
+    name = name or getattr(_WORKER_TLS, "name", None)
+    if name:
+        _THREAD_HEALTH.beat(name)
+
+
+class _HeartbeatEvent(threading.Event):
+    def wait(self, timeout=None):
+        result = super().wait(timeout)
+        _worker_beat()
+        return result
 _LEDGER_WRITES = _thread_health.FailureCounters()
 _FUNNEL_HOOK_FAILURES = _thread_health.FailureCounters()
 _RATE_LIMITS = _thread_health.RateLimitCounters()
@@ -9534,7 +9575,7 @@ state = {
     "orphan_position_ids": [],       # exchange position ids with no recoverable fill price (stop re-arm refused)
     "reconcile_adopt_log": [],       # ring buffer (last 50) of {ts, oid, action, reason}
 }
-shutdown_event = threading.Event()
+shutdown_event = _HeartbeatEvent()
 PAUSE_PRIORITIES = {
     "STALE_DATA_HARD_STOP": 50,
     "THREAD_CRASH": 1,
@@ -19803,11 +19844,14 @@ def record_ai_provider_outcome(
                 "last_requested_model": requested_model,
             })
             health["successes_since_boot"] += 1
+            _PERSISTED_WINDOWS.add("ai_calls_ok")
+            _PERSISTED_WINDOWS.add("ai_latency_ms", float(latency_ms or 0))
             return
         if not health["consecutive_failures"]:
             health["failing_since_ts"] = now
         health["consecutive_failures"] += 1
         health["failures_since_boot"] += 1
+        _PERSISTED_WINDOWS.add("ai_calls_failed")
         health["last_failure_ts"] = now
         health["last_error_class"] = classify_ai_provider_error(error)
 
@@ -25912,8 +25956,15 @@ def process_pending_orders():
             grid_bid_qty = float(state.get("bid_qty") or 0)
             grid_ask_qty = float(state.get("ask_qty") or 0)
         _poll_chase_offset_touch_grid(price, grid_bid, grid_ask, grid_bid_qty, grid_ask_qty)
-    except Exception:
-        pass
+        _FILL_SIM_COUNTERS.poll()
+    except Exception as exc:
+        # API-GAP-SWEEP R2: never swallow the paper maker-fill simulation failure.
+        _FILL_SIM_COUNTERS.error(exc, "touch_grid")
+        _PERSISTED_WINDOWS.add("fill_sim_errors")
+        _rl_key = "_fill_sim_err_log_ts"
+        if time.time() - float(globals().get(_rl_key) or 0.0) > 60.0:
+            globals()[_rl_key] = time.time()
+            logger.error(f"[FILL SIM] touch-grid poll failed: {type(exc).__name__}: {exc} [PIPELINE ENFORCEMENT]")
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
     process_awaiting_min_age_entries()
@@ -26051,6 +26102,8 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["fill_handoff_in_progress"] = True
+            _FILL_SIM_COUNTERS.maker_fill(order.get("research_lane"), fill_px, fill_bid, fill_ask, order.get("side"))
+            _PERSISTED_WINDOWS.add("paper_limit_fills")
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal))
@@ -26415,27 +26468,46 @@ def _dispatch_position_close(pos: dict, reason: str) -> None:
     thread.start()
 
 
-def _protective_exit_levels(pos: dict):
-    """(hard_stop_bp, time_backstop_sec) of the position's own registry exit, or None."""
+PROTECTIVE_FALLBACK_HARD_BP = float(os.getenv("PROTECTIVE_FALLBACK_HARD_BP", "40"))
+PROTECTIVE_FALLBACK_TIME_SEC = float(os.getenv("PROTECTIVE_FALLBACK_TIME_SEC", str(24 * 3600)))
+_protective_policy_errors = {"count": 0, "last_error": None, "last_ts": None}
+
+
+def _protective_exit_levels_ex(pos: dict):
+    """((hard_stop_bp, time_backstop_sec), source, reason).
+
+    API-GAP-SWEEP R3: never None. A position whose lane is outside the
+    execution registry, or whose policy lookup fails, gets the fail-safe
+    fallback stop (40 bp, the live safety-stop distance) and is reported."""
     lane = str(pos.get("research_lane") or "").upper()
+    fallback = (PROTECTIVE_FALLBACK_HARD_BP, PROTECTIVE_FALLBACK_TIME_SEC)
     if lane not in COMBO_EXECUTION_LANES:
-        return None
+        return fallback, "FALLBACK", "LANE_NOT_IN_EXECUTION_REGISTRY"
     try:
         policy = _patient_chase_policy(lane)
-    except Exception:
-        return None
-    binding = getattr(policy, "_BINDING", None)
-    if getattr(policy, "MARKET_EXIT_CONTEXT", False) and hasattr(binding, "profile_for"):
-        decision = pos.get("adaptive_entry_decision") or (
-            (trades_map.get(pos.get("trade_id"), {}).get("signal_ref") or {}).get("adaptive_entry_decision")
-        )
-        _name, profile = binding.profile_for(decision or {})
-        return float(profile["hard_bp"]), float(profile["time_sec"])
-    spec = getattr(policy, "SPEC", None)
-    if spec is None:
-        return None
-    leverage = float(pos.get("leverage") or 100) or 100.0
-    return abs(float(spec.hard_stop_margin_pct)) * 100.0 / leverage, float(spec.max_duration_sec)
+        binding = getattr(policy, "_BINDING", None)
+        if getattr(policy, "MARKET_EXIT_CONTEXT", False) and hasattr(binding, "profile_for"):
+            decision = pos.get("adaptive_entry_decision") or (
+                (trades_map.get(pos.get("trade_id"), {}).get("signal_ref") or {}).get("adaptive_entry_decision")
+            )
+            _name, profile = binding.profile_for(decision or {})
+            return (float(profile["hard_bp"]), float(profile["time_sec"])), "POLICY", None
+        spec = getattr(policy, "SPEC", None)
+        if spec is None:
+            return fallback, "FALLBACK", "POLICY_HAS_NO_SPEC"
+        leverage = float(pos.get("leverage") or 100) or 100.0
+        return ((abs(float(spec.hard_stop_margin_pct)) * 100.0 / leverage, float(spec.max_duration_sec)),
+                "POLICY", None)
+    except Exception as exc:
+        _protective_policy_errors["count"] += 1
+        _protective_policy_errors["last_error"] = f"{lane}: {type(exc).__name__}: {exc}"[:240]
+        _protective_policy_errors["last_ts"] = time.time()
+        return fallback, "FALLBACK", f"POLICY_LOOKUP_FAILED:{type(exc).__name__}"
+
+
+def _protective_exit_levels(pos: dict):
+    """(hard_stop_bp, time_backstop_sec) of the position's own registry exit, or the fail-safe fallback."""
+    return _protective_exit_levels_ex(pos)[0]
 
 
 def _protective_exit_due(pos: dict, mark: float, now: float):
@@ -26455,6 +26527,9 @@ def _protective_exit_due(pos: dict, mark: float, now: float):
     return None
 
 
+_PROTECTIVE_COVERAGE = {"rows": [], "ts": None}
+
+
 def protective_exit_scan(now: float = None) -> int:
     """One pass of the fast exit path; returns the number of exits fired."""
     started = time.perf_counter()
@@ -26465,10 +26540,26 @@ def protective_exit_scan(now: float = None) -> int:
         if isinstance(p, dict) and p.get("status") == "OPEN"
         and not p.get("_close_in_progress") and not p.get("_exit_dispatch_pending")
     ]
+    coverage = []
     for pos in positions:
+        _levels, _src, _why = _protective_exit_levels_ex(pos)
+        coverage.append({"trade_id": str(pos.get("trade_id") or ""), "lane": pos.get("research_lane"),
+                         "covered": bool(_levels and _levels[0] > 0), "source": _src, "reason": _why})
         mark = get_mark_price(pos.get("dir"))
         due = _protective_exit_due(pos, mark, now)
         if not due:
+            continue
+        if _src == "FALLBACK" and due == "HARD_STOP":
+            trade_id = str(pos.get("trade_id") or "")
+            with _position_exit_claim(pos) as claimed:
+                if claimed and not pos.get("_close_in_progress"):
+                    logger.error(f"[FAST EXIT] fail-safe fallback stop trade_id={trade_id} reason={_why} "
+                                 "[PIPELINE ENFORCEMENT]")
+                    _protective_exit_status["fallback_fired"] = int(_protective_exit_status.get("fallback_fired") or 0) + 1
+                    _dispatch_position_close(pos, "PROTECTIVE_FALLBACK_STOP")
+                    fired += 1
+            continue
+        if _src == "FALLBACK":
             continue
         trade_id = str(pos.get("trade_id") or "")
         if now - float(_protective_exit_last_eval.get(trade_id) or 0.0) < PROTECTIVE_EXIT_RECHECK_SEC:
@@ -26482,6 +26573,8 @@ def protective_exit_scan(now: float = None) -> int:
                                                     "mark": mark}
     for stale in [tid for tid in _protective_exit_last_eval if tid not in {str(p.get("trade_id")) for p in positions}]:
         _protective_exit_last_eval.pop(stale, None)
+    _PROTECTIVE_COVERAGE["rows"] = coverage
+    _PROTECTIVE_COVERAGE["ts"] = now
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     _protective_exit_status["scans"] += 1
     _protective_exit_status["last_scan_ms"] = elapsed_ms
@@ -26489,11 +26582,46 @@ def protective_exit_scan(now: float = None) -> int:
     return fired
 
 
+def _disloc_protective_rows() -> list:
+    """DISLOC tiles run their own ledger; their stop lives in the engine (API-GAP-SWEEP R3)."""
+    rows = []
+    try:
+        with _XVL_LOCK:
+            last_tick = float(_xvl_status.get("last_tick_ts") or 0.0)
+        tick_fresh = bool(last_tick) and time.time() - last_tick <= max(5.0, float(XVL_STALE_AFTER_SEC))
+    except Exception:
+        tick_fresh = False
+    for lane, evaluator in list(_XVL_EVALUATORS.items()):
+        if "DISLOC" not in str(lane).upper():
+            continue
+        pos = getattr(evaluator, "position", None)
+        if not pos:
+            continue
+        has_stop = bool(pos.get("stop_px"))
+        reason = None if has_stop and tick_fresh else ("NO_STOP_PRICE" if not has_stop else "EVALUATOR_STALE")
+        rows.append({"trade_id": pos.get("trade_id") or pos.get("id"), "lane": lane,
+                     "covered": has_stop and tick_fresh, "source": "DISLOC_ENGINE", "reason": reason})
+    return rows
+
+
+def protective_coverage_snapshot() -> dict:
+    rows = list(_PROTECTIVE_COVERAGE.get("rows") or []) + _disloc_protective_rows()
+    out = _monitor_gaps.protective_coverage(rows, _protective_policy_errors["count"])
+    out["last_policy_error"] = _protective_policy_errors["last_error"]
+    out["scan_ts"] = _PROTECTIVE_COVERAGE.get("ts")
+    out["fallback_hard_bp"] = PROTECTIVE_FALLBACK_HARD_BP
+    return out
+
+
 def protective_exit_snapshot() -> dict:
     with _position_exit_claims_lock:
         inflight = sum(1 for t in _exit_close_threads.values() if t.is_alive())
+    try:
+        coverage = protective_coverage_snapshot()
+    except Exception as exc:
+        coverage = {"error": f"{type(exc).__name__}: {exc}"[:160]}
     return {**copy.deepcopy(_protective_exit_status), "closes_in_flight": inflight,
-            "schema": "protective_exit_worker_v1"}
+            "coverage": coverage, "schema": "protective_exit_worker_v1"}
 
 
 def protective_exit_worker():
@@ -28555,14 +28683,14 @@ def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
         try:
             ws_tick_lifecycle_queue.get_nowait()
             ws_tick_lifecycle_queue.task_done()
-            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue")
+            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue"); globals().get("_note_exit_tick_drop", lambda: None)()
         except Empty:
             pass
         try:
             ws_tick_lifecycle_queue.put_nowait(item)
             return True
         except Full:
-            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue")
+            _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue"); globals().get("_note_exit_tick_drop", lambda: None)()
             return False
 
 
@@ -28608,7 +28736,7 @@ def ws_tick_lifecycle_worker():
             if time.time() - float(received_ts) <= WS_TICK_LIFECYCLE_MAX_AGE_SEC:
                 _tick_driven_position_exits(float(price))
             else:
-                _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue_aged")
+                _QUEUE_COUNTERS.dropped("ws_tick_lifecycle_queue_aged"); globals().get("_note_exit_tick_drop", lambda: None)()
         except Exception as exc:
             _THREAD_HEALTH.error("ws_tick_lifecycle_worker", exc)
             logger.error(f"[WS TICK WORKER] lifecycle error: {exc}")
@@ -28696,6 +28824,7 @@ def safe_ws_handler(message):
         set_execution_paused("THREAD_CRASH")
 
 def on_message(ws, message):
+    _ws_worker_beat()
     if not _is_current_ws_app(ws):
         return
     try:
@@ -28786,6 +28915,16 @@ def _close_ws_app():
     except Exception:
         pass
 
+_WS_BEAT_LAST = [0.0]
+
+
+def _ws_worker_beat() -> None:
+    now = time.time()
+    if now - _WS_BEAT_LAST[0] >= 1.0:
+        _WS_BEAT_LAST[0] = now
+        _THREAD_HEALTH.beat("start_websocket", now)
+
+
 def start_websocket():
     global ws_app, ws_alive
     ws_url = BITFINEX_WS_URL
@@ -28847,7 +28986,7 @@ def ws_watchdog():
     last_nudge_ts = 0.0
     try:
         while not shutdown_event.is_set():
-            time.sleep(3)
+            globals().get("_worker_sleep", time.sleep)(3)
             now = time.time()
             with state_lock:
                 ws_tick = float(state.get("ws_last_tick") or 0)
@@ -28955,7 +29094,7 @@ def state_monitor_loop():
         last_stale_time = 0
         last_rest_snapshot_ts = 0.0
         while not shutdown_event.is_set():
-            time.sleep(1)
+            globals().get("_worker_sleep", time.sleep)(1)
             now = time.time()
             runtime = _recompute_system_readiness(now)
             recover_reason = ""
@@ -29868,6 +30007,7 @@ def _record_expired_order(source: dict, reason: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     _safe_append_jsonl(FILL_QUALITY_FILE, fq_row, label="FILL_QUALITY")
+    _PERSISTED_WINDOWS.add("orders_expired_or_cancelled")
     genome_event = "ORDER_EXPIRED" if "TTL" in str(reason).upper() or str(reason).upper() == "EXPIRED" else "ORDER_CANCELLED"
     _emit_genome_execution_event(genome_event, {
         "trade_id": tid,
@@ -31874,6 +32014,10 @@ def _xvl_direction_source(lane: str) -> str:
     return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
 
 
+_TILE_SWITCH_EVENTS = {"evaluations": {}, "evaluations_while_off": {}, "retired_dropped": {}}
+_XVL_TRIGGER_TS: dict = {}
+
+
 def _xvl_tick(now: float, live=None) -> None:
     if live is None:
         live = _cross_venue_live(max_age_sec=0.5)
@@ -31882,11 +32026,30 @@ def _xvl_tick(now: float, live=None) -> None:
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
     steps = []
     for lane, evaluator in list(_XVL_EVALUATORS.items()):
+        if lane in RETIRED_TILE_LANES:
+            # API-GAP-SWEEP R4: a retired tile stops being scored at once.
+            _XVL_EVALUATORS.pop(lane, None)
+            _TILE_SWITCH_EVENTS["retired_dropped"][lane] = time.time()
+            continue
+        _TILE_SWITCH_EVENTS["evaluations"][lane] = _TILE_SWITCH_EVENTS["evaluations"].get(lane, 0) + 1
+        if not is_research_lane_enabled(lane):
+            _TILE_SWITCH_EVENTS["evaluations_while_off"][lane] = (
+                _TILE_SWITCH_EVENTS["evaluations_while_off"].get(lane, 0) + 1)
         evaluation, trigger, outcomes = evaluator.step(
             now=now, live=live, bfx_quotes=quotes, bfx_bbo_ts=bbo_ts,
         )
+        try:  # API-GAP-SWEEP A5: per-tile signal-blind time (warming up / inputs missing)
+            if is_research_lane_enabled(lane):
+                _status = str((evaluation or {}).get("status") or "") if isinstance(evaluation, dict) else ""
+                _blind = (evaluation is None) or ("WARM" in _status.upper()) or bool(
+                    isinstance(evaluation, dict) and evaluation.get("reasons"))
+                _BLIND_TIME.observe(lane, _blind, (evaluation or {}).get("warmup_until_ts")
+                                    if isinstance(evaluation, dict) else None)
+        except Exception:
+            pass
         if trigger:
             trigger["research_lane"] = lane
+            _XVL_TRIGGER_TS.setdefault(lane, deque(maxlen=2000)).append(now)
             _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
         steps.append((lane, evaluator, trigger, outcomes))
     # Shadow rows are fsync'd appends; hand the attempt off first.
@@ -31985,6 +32148,7 @@ def xvl_evaluator_loop():
                 _xvl_status["last_error"] = f"{type(exc).__name__}: {exc}"[:240]
             logger.warning(f"[XVL] evaluator tick failed: {exc} [PIPELINE ENFORCEMENT]")
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        _worker_beat("xvl_evaluator_thread")
         with _XVL_LOCK:
             _xvl_status["ticks"] += 1
             _xvl_status["last_tick_ts"] = now
@@ -32007,14 +32171,32 @@ def regime_bars_boot_hydrate() -> None:
 
 
 def xvl_evaluator_thread() -> None:
-    """Research-only thread: a crash is reported as STALE health, never an execution pause."""
-    try:
-        xvl_evaluator_loop()
-    except Exception as exc:
-        with _XVL_LOCK:
-            _xvl_status["tick_errors"] += 1
-            _xvl_status["last_error"] = f"LOOP_CRASH {type(exc).__name__}: {exc}"[:240]
-        logger.exception(f"[XVL] evaluator thread stopped: {exc} [PIPELINE ENFORCEMENT]")
+    """Research-only thread: a crash is counted and the loop restarts (API-GAP-SWEEP R1),
+    never an execution pause. Previously one crash stopped GS-01/GS-07 signals for good."""
+    name = "xvl_evaluator_thread"
+    _THREAD_HEALTH.bind(name)
+    _WORKER_TLS.name = name
+    backoff = 2.0
+    while not shutdown_event.is_set():
+        try:
+            xvl_evaluator_loop()
+            if not XVL_EVALUATOR_ENABLED or not evaluator_loop_lanes():
+                _THREAD_HEALTH.unregister(name)  # disabled: not an expected worker
+                return
+            if shutdown_event.is_set():
+                return
+            _THREAD_HEALTH.restart(name, "RETURNED")
+        except Exception as exc:
+            with _XVL_LOCK:
+                _xvl_status["tick_errors"] += 1
+                _xvl_status["loop_restarts"] = int(_xvl_status.get("loop_restarts") or 0) + 1
+                _xvl_status["last_error"] = f"LOOP_CRASH {type(exc).__name__}: {exc}"[:240]
+            _THREAD_HEALTH.restart(name, exc)
+            _THREAD_HEALTH.error(name, exc)
+            logger.exception(f"[XVL] evaluator thread crashed, restarting in {backoff:.0f}s: {exc} [PIPELINE ENFORCEMENT]")
+        if shutdown_event.wait(backoff):
+            return
+        backoff = min(60.0, backoff * 2)
 
 
 def xvl_evaluator_snapshot() -> dict:
@@ -32709,6 +32891,12 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
     "/api/monitor/tiles/disloc",
+    # API-GAP-SWEEP-20261012
+    "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
+    "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
+    "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
+    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
+    "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -36582,11 +36770,19 @@ def global_exception_handler(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = global_exception_handler
 
+def _worker_sleep(seconds) -> None:
+    time.sleep(seconds)
+    _worker_beat()
+
+
 def safe_thread(fn):
     name = getattr(fn, "__name__", "thread")
 
     def wrapper(*args, **kwargs):
         _THREAD_HEALTH.bind(name)
+        _tls = globals().get("_WORKER_TLS")
+        if _tls is not None:
+            _tls.name = name
         while not shutdown_event.is_set():
             try:
                 fn(*args, **kwargs)
@@ -36615,6 +36811,13 @@ THREAD_HEALTH_MONITORED = {
     "dashboard_http_watchdog_loop": (DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC, 120.0),
     "bitfinex_live_reconcile_loop": (30.0, 300.0),
 }
+# API-GAP-SWEEP R1: every other worker (and the self-supervised GS-01/GS-07
+# evaluator) is monitored too; intervals follow each loop's real cadence.
+for _thread_name, (_interval, _min_stale) in _monitor_gaps.WORKER_EXPECTATIONS.items():
+    THREAD_HEALTH_MONITORED.setdefault(_thread_name, (_interval, _min_stale))
+THREAD_HEALTH_MONITORED["periodic_pipeline_loop"] = (HEARTBEAT_INTERVAL, 120.0)
+THREAD_HEALTH_MONITORED["heartbeat_loop"] = (PROCESS_HEARTBEAT_INTERVAL_SEC, 60.0)
+THREAD_HEALTH_MONITORED["runtime_uptime_loop"] = (_RUNTIME_UPTIME_INTERVAL_SEC if "_RUNTIME_UPTIME_INTERVAL_SEC" in globals() else 15.0, 120.0)
 for _thread_name, (_interval, _min_stale) in THREAD_HEALTH_MONITORED.items():
     _THREAD_HEALTH.register(_thread_name, _interval, min_stale_sec=_min_stale)
 
@@ -37316,7 +37519,7 @@ def watchdog_loop():
                         "not exiting 75",
                         list(incident.get("reasons") or progress.get("reasons") or []),
                     )
-        time.sleep(5)
+        globals().get("_worker_sleep", time.sleep)(5)
 
 
 def _probe_local_dashboard_control(timeout_sec: float = None) -> tuple[bool, str]:
@@ -43152,7 +43355,9 @@ def api_build():
         "dashboard_url": dashboard_public_url(),
         "agent_hub_url": AGENT_HUB_PUBLIC_URL,
         "analyzer_url": research_dashboard_public_url(),
-        "features": RESEARCH_STACK_FEATURES,
+        # R4: derived from the one tile switch source; the frozen prose is history.
+        "features": current_build_features_text(),
+        "features_history": RESEARCH_STACK_FEATURES,
         "server_ts": utc_iso(),
     }), 200
 
@@ -45357,6 +45562,11 @@ def runtime_uptime_loop():
             tracker.observe(now, _runtime_uptime_problem(now))
         except Exception as exc:
             logger.warning("[UPTIME] observation failed: %s", type(exc).__name__)
+        try:  # API-GAP-SWEEP A4/A5: persist rolling windows + blind time across deploys
+            _PERSISTED_WINDOWS.flush()
+            _BLIND_TIME.flush()
+        except Exception as exc:
+            logger.warning("[MONITOR GAPS] persist failed: %s", type(exc).__name__)
         if shutdown_event.wait(_RUNTIME_UPTIME_INTERVAL_SEC):
             break
 
@@ -46182,6 +46392,7 @@ def monitor_tiles_disloc():
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
 
 
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -46373,6 +46584,300 @@ def shadow_exits_public_summary():
     return jsonify(_SHADOW_EXIT_RECORDER.public_summary())
 
 
+
+# ---------------------------------------------------------------------------
+# API-GAP-SWEEP-20261012 monitor routes (read-only; admin or MONITOR_READ_TOKEN).
+# Pure shaping in monitor_gaps.py. Never touch trading/relay/exchange/AI state.
+# ---------------------------------------------------------------------------
+_MONITOR_GAP_CONFIG_CACHE: dict = {}
+
+
+def monitor_workers_snapshot(now: float = None) -> dict:
+    now = time.time() if now is None else float(now)
+    threads = _THREAD_HEALTH.snapshot(now)
+    oneshots = {
+        "retired_tile_boundary_worker": {**retired_tile_boundary_status_snapshot()},
+        "regime_bars_boot_hydrate": {
+            "state": ("DONE" if getattr(regime_bars_3m.ENGINE, "hydrated", False)
+                      else ("FAILED" if getattr(regime_bars_3m.ENGINE, "hydrate_error", None) else "RUNNING")),
+            "error": getattr(regime_bars_3m.ENGINE, "hydrate_error", None)},
+    }
+    if not oneshots["retired_tile_boundary_worker"].get("state"):
+        oneshots["retired_tile_boundary_worker"]["state"] = "PENDING"
+    payload = _monitor_gaps.worker_rows(threads, oneshots, expected=THREAD_HEALTH_MONITORED.keys(), now=now)
+    payload["execution_paused_reason"] = state.get("execution_reason") or None
+    if str(payload.get("execution_paused_reason") or "").upper() == "THREAD_CRASH":
+        payload["red"] = sorted(set(payload["red"]) | {"THREAD_CRASH_PAUSE"})
+        payload["level"] = _monitor_gaps.RED
+    return payload
+
+
+def monitor_tile_switch_rows() -> list:
+    try:
+        from combo_pathway_config import tile_number as _tile_number
+    except Exception:  # pragma: no cover
+        _tile_number = lambda _lane: None  # noqa: E731
+    try:
+        elig_rows = _get_live_copy_eligibility().status().get("rows") or {}
+    except Exception:
+        elig_rows = {}
+    enabled_map = research_lane_enabled_map()
+    lanes = list(dict.fromkeys(list(COMBO_EXECUTION_LANES) + sorted(RETIRED_TILE_LANES & set(
+        list(enabled_map) + list(elig_rows) + list(_XVL_EVALUATORS) + list(_TILE_SWITCH_EVENTS["evaluations"])))))
+    rows = []
+    for lane in lanes:
+        retired = bool(is_research_lane_retired(lane))
+        spec = ACTIVE_TILE_REGISTRY.get(lane) or COMBO_LANE_SPECS.get(lane) or {}
+        elig = elig_rows.get(lane) or {}
+        rows.append({
+            "lane": lane, "number": _tile_number(lane), "label": RESEARCH_LANE_LABELS.get(lane) or spec.get("label") or lane,
+            "registry_state": "RETIRED" if retired else str(get_pathway_lane_status(lane) or "ACTIVE"),
+            "retired": retired, "active_listed": lane in ACTIVE_TILE_REGISTRY,
+            "paper_on": bool(is_research_lane_enabled(lane)),
+            "live_orders_on": bool(elig.get("live_eligible")) and not retired,
+            "live_eligibility_raw": bool(elig.get("live_eligible")),
+            "relay_eligible": bool(spec.get("platform_relay_eligible")) or bool(elig.get("live_eligible")),
+            "evaluator_running": lane in _XVL_EVALUATORS,
+            "evaluations": int(_TILE_SWITCH_EVENTS["evaluations"].get(lane) or 0),
+            "evaluations_since_off": (int(_TILE_SWITCH_EVENTS["evaluations"].get(lane) or 0) if retired and lane in _XVL_EVALUATORS else 0),
+            "rows_since_off": 0,
+            "last_change_ts": elig.get("changed_at_ts"), "changed_by": elig.get("changed_by"),
+        })
+    return rows
+
+
+def current_build_features_text() -> str:
+    try:
+        return _monitor_gaps.build_features_text(monitor_tile_switch_rows())
+    except Exception as exc:
+        return f"unavailable ({type(exc).__name__})"
+
+
+def monitor_effective_config_snapshot() -> dict:
+    cached = _MONITOR_GAP_CONFIG_CACHE.get("payload")
+    if cached is not None:
+        return cached
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except OSError:
+        source = ""
+    keys = _monitor_gaps.env_keys_in_source(source)
+    expected = {}
+    exp_path = Path(__file__).resolve().parent / "monitor_expected_config.json"
+    try:
+        expected = json.loads(exp_path.read_text(encoding="utf-8")) if exp_path.is_file() else {}
+    except Exception:
+        expected = {}
+    payload = _monitor_gaps.effective_config(keys, os.environ, {}, expected)
+    rev = _runtime_git_rev()
+    payload["git_rev"] = rev
+    boot_file = _monitor_gap_state_path("config_hash_boots.json")
+    prev = None
+    try:
+        with open(boot_file, "r", encoding="utf-8") as fh:
+            prev = json.load(fh)
+    except Exception:
+        prev = None
+    payload["previous_boot"] = prev
+    payload["hash_changed_without_deploy"] = bool(
+        isinstance(prev, dict) and prev.get("git_rev") == rev and prev.get("config_hash") != payload["config_hash"])
+    if payload["hash_changed_without_deploy"]:
+        payload["level"] = _monitor_gaps.AMBER
+    try:
+        os.makedirs(os.path.dirname(boot_file), exist_ok=True)
+        with open(boot_file, "w", encoding="utf-8") as fh:
+            json.dump({"git_rev": rev, "config_hash": payload["config_hash"], "ts": time.time()}, fh)
+    except Exception:
+        pass
+    _MONITOR_GAP_CONFIG_CACHE["payload"] = payload
+    return payload
+
+
+def monitor_preentry_snapshot(now: float = None) -> dict:
+    now = time.time() if now is None else float(now)
+    pre = preentry_evidence_snapshot()
+    degraded_for = _PREENTRY_DEGRADED.observe(str(pre.get("health")).upper() == "DEGRADED")
+    triggers_5m = {lane: sum(1 for ts in list(q) if now - ts <= 300) for lane, q in _XVL_TRIGGER_TS.items()}
+    with _XVL_LOCK:
+        funnel = {lane: {"triggers_5m": triggers_5m.get(lane, 0),
+                         "triggers_total": len(_XVL_TRIGGER_TS.get(lane) or ()),
+                         "attempts": int(row.get("attempts") or 0),
+                         "orders_eligible": int(row.get("orders_eligible") or 0),
+                         "submissions_last_hour": sum(1 for ts in row.get("submissions") or () if now - ts < 3600)}
+                  for lane, row in _xvl_lane_runtime.items()}
+    level, alerts = _monitor_gaps.preentry_level(pre.get("health"), degraded_for, pre.get("oldest_pending_age_s"),
+                                                  sum(triggers_5m.values()))
+    return {"schema": _monitor_gaps.PREENTRY_SCHEMA, "preentry": pre, "degraded_for_s": degraded_for,
+            "funnel": funnel, "alerts": alerts, "level": level}
+
+
+def monitor_exit_queue_snapshot() -> dict:
+    out = {"schema": _monitor_gaps.QUEUES_SCHEMA, "open_positions": len(list(open_positions)),
+           "queues": _QUEUE_COUNTERS.snapshot({"ws_tick_lifecycle_queue": ws_tick_lifecycle_queue}),
+           **_EXIT_TICK_DROPS.snapshot()}
+    return out
+
+
+def monitor_regime_snapshot() -> dict:
+    now = time.time()
+    with state_lock:
+        st_label = state.get("regime")
+        st_ts = state.get("regime_ts") or state.get("last_ai_ts")
+    bars = (_regime_bars_snapshot() or {}).get("latest") or {}
+    adx = bars.get("adx")
+    bar_label = None if adx is None else ("RANGE" if adx < 20 else ("TREND" if adx >= 30 else None))
+    try:
+        dyn = __import__("dyn_regime").ENGINE.snapshot()
+    except Exception:
+        dyn = {}
+    close_ts = bars.get("close_ts")
+    sources = {
+        "state.regime": {"label": st_label, "age_s": round(now - float(st_ts), 1) if st_ts else None},
+        "regime_bars_3m": {"label": bar_label, "close_ts": close_ts, "bar_ok": bars.get("bar_ok"),
+                           "inputs": {"adx": adx, "atr_bp": bars.get("atr_bp"), "spread_bp": bars.get("spread_bp")},
+                           "age_s": round(now - float(close_ts), 1) if close_ts else None},
+        "dyn_regime": {"label": dyn.get("committed"), "inputs": {k: (dyn.get("last") or {}).get(k)
+                                                                for k in ("rv15_bp", "drift15_bp", "raw")},
+                       "age_s": round(now - float((dyn.get("last") or {}).get("minute_ts") or now), 1)},
+    }
+    return _REGIME_COMPARATOR.compare(sources)
+
+
+def monitor_shipper_snapshot() -> dict:
+    try:
+        transfer = _volume_transfer_snapshot(_data_sync_volume_root(), time.time())
+    except Exception as exc:
+        transfer = {"error": f"{type(exc).__name__}"}
+    out = _CUSTODY_LAG.observe(transfer)
+    out["transfer"] = {k: transfer.get(k) for k in ("enabled", "last_error", "unshipped_bytes", "updated_at")
+                       if isinstance(transfer, dict)}
+    out["custody_note"] = ("custody_through_seq = min(laptop ACK, parity, analyzer-consumed seq): a lag means the "
+                           "analyzer has not consumed the newest acked segments; pruning never passes custody.")
+    return out
+
+
+def monitor_gaps_summary() -> dict:
+    """Compact per-item level for /api/status (read by scripts/system_health.py)."""
+    out = {}
+    for key, fn in (("workers", monitor_workers_snapshot), ("fill_sim", _FILL_SIM_COUNTERS.snapshot),
+                    ("protective", protective_coverage_snapshot),
+                    ("tile_switches", lambda: _monitor_gaps.tile_switches(monitor_tile_switch_rows())),
+                    ("preentry", monitor_preentry_snapshot), ("exit_queues", monitor_exit_queue_snapshot),
+                    ("warmup", _BLIND_TIME.snapshot), ("regime", monitor_regime_snapshot),
+                    ("shipper", monitor_shipper_snapshot)):
+        try:
+            payload = fn()
+            alerts = payload.get("alerts") or payload.get("red") or []
+            out[key] = {"level": payload.get("level") or _monitor_gaps.GREEN, "alerts": list(alerts)[:12]}
+        except Exception as exc:
+            out[key] = {"level": _monitor_gaps.AMBER, "alerts": [f"SNAPSHOT_FAILED:{type(exc).__name__}"]}
+    return {"schema": "monitor_gaps_summary_v1", "items": out,
+            "level": (_monitor_gaps.RED if any(v["level"] == _monitor_gaps.RED for v in out.values())
+                      else _monitor_gaps.AMBER if any(v["level"] == _monitor_gaps.AMBER for v in out.values())
+                      else _monitor_gaps.GREEN)}
+
+
+_MONITOR_GAP_SUMMARY_CACHE = {"ts": 0.0, "payload": None}
+
+
+def _monitor_gaps_summary_cached() -> dict:
+    now = time.time()
+    if _MONITOR_GAP_SUMMARY_CACHE["payload"] is None or now - _MONITOR_GAP_SUMMARY_CACHE["ts"] > 10.0:
+        _MONITOR_GAP_SUMMARY_CACHE["payload"] = monitor_gaps_summary()
+        _MONITOR_GAP_SUMMARY_CACHE["ts"] = now
+    return _MONITOR_GAP_SUMMARY_CACHE["payload"]
+
+
+_MONITOR_GAP_MAX_BYTES = 192 * 1024
+
+
+@app.route('/api/monitor/workers', methods=["GET"])
+def monitor_workers():
+    """R1: every worker with heartbeat/progress, restarts, last error and alert level."""
+    return _monitor_tiles_guard(lambda now: monitor_workers_snapshot(now), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/fill-sim', methods=["GET"])
+def monitor_fill_sim():
+    """R2: paper maker/chase fill simulation polls, errors and fill-vs-BBO per lane."""
+    return _monitor_tiles_guard(lambda now: _FILL_SIM_COUNTERS.snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/protective-exit', methods=["GET"])
+def monitor_protective_exit():
+    """R3: open positions vs stop coverage (incl. DISLOC), uncovered list, policy errors."""
+    return _monitor_tiles_guard(lambda now: {**protective_coverage_snapshot(),
+                                             "worker": {k: v for k, v in protective_exit_snapshot().items()
+                                                        if k != "coverage"}}, _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/tiles/switches', methods=["GET"])
+def monitor_tiles_switches():
+    """R4: one per-tile on/off truth (registry, paper, live, relay, evaluator) + disagreements."""
+    def build(now):
+        rows = monitor_tile_switch_rows()
+        return _monitor_gaps.tile_switches(rows, _monitor_gaps.build_features_text(rows))
+    return _monitor_tiles_guard(build, _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/config', methods=["GET"])
+def monitor_config():
+    """A1: effective env config (secrets redacted), per-boot config hash."""
+    return _monitor_tiles_guard(lambda now: monitor_effective_config_snapshot(), 256 * 1024)
+
+
+@app.route('/api/monitor/preentry', methods=["GET"])
+def monitor_preentry():
+    """A2: pre-entry evidence queue health + triggers->attempts per lane."""
+    return _monitor_tiles_guard(lambda now: monitor_preentry_snapshot(now), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/exit-queues', methods=["GET"])
+def monitor_exit_queues():
+    """A3: exit-path tick queue drops (total, while positions open, per minute)."""
+    return _monitor_tiles_guard(lambda now: monitor_exit_queue_snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/counters', methods=["GET"])
+def monitor_counters():
+    """A4: rolling 1 h / 24 h counters persisted across deploys, with window_complete."""
+    return _monitor_tiles_guard(lambda now: _PERSISTED_WINDOWS.snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/warmup', methods=["GET"])
+def monitor_warmup():
+    """A5: per-tile warm-up/signal-blind minutes over 24 h."""
+    return _monitor_tiles_guard(lambda now: _BLIND_TIME.snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/regime', methods=["GET"])
+def monitor_regime():
+    """A6: the three regime sources side by side, disagreement timer, bar_ok streak."""
+    return _monitor_tiles_guard(lambda now: monitor_regime_snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/shipper', methods=["GET"])
+def monitor_shipper():
+    """A7: segment shipper custody lag (laptop ACK vs custody receipt) and prune mode."""
+    return _monitor_tiles_guard(lambda now: monitor_shipper_snapshot(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/gaps', methods=["GET"])
+def monitor_gaps_route():
+    """Compact level per gap item (same block as /api/status.monitor_gaps)."""
+    return _monitor_tiles_guard(lambda now: monitor_gaps_summary(), _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/runtime/headroom', methods=["GET"])
+def api_runtime_headroom_alias():
+    """A8: legacy path of /api/monitor/runtime/headroom, readable with the monitor token."""
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    import live_copy_monitor_api as _lcm
+    return _lcm.live_headroom()
+
+
+
 @app.after_request
 def _inject_system_health_banner(response):
     response = system_health_banner.inject_banner(response)
@@ -46400,6 +46905,7 @@ def _runtime_blindspot_status_fields(now: float) -> dict:
         "relay_outbox": lambda: _relay_delivery_guard.status(now),
         "replay_buffers": replay_buffer_status,
         "pipeline_errors": pipeline_error_status,
+        "monitor_gaps": _monitor_gaps_summary_cached,
     }
     for key, build in parts.items():
         try:
@@ -48350,7 +48856,7 @@ def _data_size_cached_inventory_summary() -> dict:
 @app.get("/api/data_size")
 def api_data_size():
     """Serve fixed-cost storage telemetry without traversing the Fly volume."""
-    if not _admin_authed_strict():
+    if not (_admin_authed_strict() or monitor_integrity_authorized()):
         return jsonify({"status": "error", "message": "admin token required"}), 401
 
     runtime_root = _data_sync_volume_root()
@@ -50551,6 +51057,9 @@ def api_data_sync_analyzer_report():
 
 @app.route('/api/analyzer-mirror/status')
 def api_analyzer_mirror_status():
+    # A8: admin or the read-only monitor token (was admin-gated: 401 to the monitor).
+    if not (_admin_authed() or monitor_integrity_authorized()):
+        return jsonify({"error": "unauthorized"}), 401
     active = _active_analyzer_mirror_dir()
     if active is None:
         legacy_preserved = _analyzer_mirror_dir().exists()
@@ -56352,10 +56861,10 @@ def ttl_monitor():
                 if now - _last_fresh_maintain_ts >= FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC:
                     _last_fresh_maintain_ts = now
                     maintain_fresh_collection_files()
-            time.sleep(30)
+            globals().get("_worker_sleep", time.sleep)(30)
         except Exception as e:
             logger.error(f"[TTL] ERROR: {e}")
-            time.sleep(5)
+            globals().get("_worker_sleep", time.sleep)(5)
 
 def system_health_check():
     now = time.time()
@@ -56557,19 +57066,19 @@ def engine_loop():
             try:
                 start = time.time()
                 if time.time() - process_boot_time < STARTUP_GRACE_PERIOD:
-                    time.sleep(1)
+                    globals().get("_worker_sleep", time.sleep)(1)
                     continue
                 if not should_run_pipeline():
-                    time.sleep(1)
+                    globals().get("_worker_sleep", time.sleep)(1)
                     continue
                 if not validate_market_data():
-                    time.sleep(1)
+                    globals().get("_worker_sleep", time.sleep)(1)
                     continue
                 if state.get("allow_rest_price"):
-                    time.sleep(1)
+                    globals().get("_worker_sleep", time.sleep)(1)
                     continue
                 if time.time() - last_engine_run < PIPELINE_INTERVAL:
-                    time.sleep(0.5)
+                    globals().get("_worker_sleep", time.sleep)(0.5)
                     continue
                 last_engine_run = time.time()
                 validate_state()
@@ -56603,7 +57112,7 @@ def engine_loop():
             except Exception as e:
                 logger.error(f"[ENGINE LOOP CRASH] {e}")
                 state["last_engine_error"] = str(e)
-                time.sleep(1)
+                globals().get("_worker_sleep", time.sleep)(1)
             finally:
                 with state_lock:
                     state["diag"]["engine_loop_ms"] = int((time.time() - start) * 1000)
@@ -57887,6 +58396,7 @@ def _live_copy_delivery_loop():
         pending = _get_live_copy_outbox().status().get("pending") or 0
         _live_copy_delivery_wake.wait(0.5 if pending else 15.0)
         _live_copy_delivery_wake.clear()
+        _worker_beat("_live_copy_delivery_loop")
 
 
 @app.route('/api/live-copy/tiles/<lane>/eligibility', methods=['POST'])
