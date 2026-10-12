@@ -24143,6 +24143,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     if smart_meta.get("reanchored"):
         target_signal["smart_submit_reanchored"] = True
         target_signal["smart_submit_original_planned"] = smart_meta.get("original_planned")
+    if not target_signal.get("regime_at_signal"):
+        # DATA-GAPS-20261012 (f): every trade carries the regime at its signal.
+        target_signal["regime_at_signal"] = _current_regime_tag()
+        target_signal["regime_at_signal_source"] = "indicator_engine_regime_tag_at_order"
     target_signal.update({
         "entry_mode": entry_mode, "qty": qty,
         "order_created_ts": order_created_ts, "status": "ORDERED",
@@ -31434,6 +31438,7 @@ def close_position(pos: dict, exit_reason: str):
     log_ai_confidence_calibration(trade_row, net_pnl)
     log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
     _stamp_exit_bbo(trade_row)
+    _stamp_regime_at_signal(trade_row, pos, master)
     trades.append(trade_row)
     try:
         log_trade(trade_row)
@@ -31561,6 +31566,30 @@ def _trade_side_scores(pos, master) -> dict:
         gap = (ls - ss) if direction == "LONG" else (ss - ls) if direction == "SHORT" else abs(ls - ss)
     out["score_gap"] = gap
     return out
+
+
+def _stamp_regime_at_signal(trade_row: dict, pos, master) -> None:
+    """DATA-GAPS-20261012 (f): regime_at_signal on every closed row; never raises.
+
+    Order: adaptive entry decision -> value stamped on the signal at order time ->
+    entry-context regime. Null only when none was recorded (never back-filled from close time).
+    """
+    try:
+        pos, master = pos or {}, master or {}
+        dec = trade_row.get("adaptive_entry_decision") or {}
+        sig = master.get("signal_ref") if isinstance(master.get("signal_ref"), dict) else {}
+        for value, source in (
+                (dec.get("regime_at_signal") or dec.get("regime_at_entry"), "adaptive_entry_decision"),
+                (pos.get("regime_at_signal"), pos.get("regime_at_signal_source") or "position"),
+                (master.get("regime_at_signal"), master.get("regime_at_signal_source") or "signal"),
+                (sig.get("regime_at_signal"), sig.get("regime_at_signal_source") or "signal_ref"),
+                (pos.get("context_regime") or pos.get("signal_regime"), "entry_context_regime")):
+            if value not in (None, ""):
+                trade_row["regime_at_signal"] = value
+                trade_row["regime_at_signal_source"] = source
+                return
+    except Exception:
+        pass
 
 
 def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
@@ -32206,6 +32235,7 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_fn=_disloc_touch,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
+        regime_fn=lambda: _current_regime_tag(),
         oi_seed_fn=(evaluator.make_tape_oi_seed(_cvt.FILE_NAME)
                     if getattr(getattr(evaluator, "rule", None), "uses_derivatives", False)
                     and hasattr(evaluator, "make_tape_oi_seed") else None),
@@ -32453,7 +32483,8 @@ def xvl_evaluator_snapshot() -> dict:
             lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
                    "shadow_file": getattr(_XVL_EVALUATORS.get(lane), "SHADOW_FILE", None),
                    "paper": runtime.get(lane, {}),
-                   "latency": _xvl_latency_snapshot(lane, latency_samples.get(lane, []))}
+                   "latency": {**_xvl_latency_snapshot(lane, latency_samples.get(lane, [])),
+                               "signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane)}}
             for lane in lanes
         },
         **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
@@ -32462,6 +32493,32 @@ def xvl_evaluator_snapshot() -> dict:
         "preentry_evidence": preentry,
         "regime_bars_3m": _regime_bars_snapshot(),
     }
+
+
+_S2F_TRADES_CACHE: dict = {}
+
+
+def _signal_to_fill_trades_ms(hours: float = 24.0) -> dict:
+    """DATA-GAPS-20261012 (d): per lane signal->fill (ms) from recorded trade stamps, last 24 h.
+
+    The in-memory xvl latency ring restarts at every boot (n=0 after each deploy); this
+    block comes from the persisted closed rows (event_timestamps / DISLOC ledger), cached 30 s.
+    """
+    now = time.time()
+    hit = _S2F_TRADES_CACHE.get("v")
+    if hit and 0.0 <= now - hit[0] < 30.0:
+        return hit[1]
+    out: dict = {}
+    try:
+        import data_gaps as _dg
+        scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(),
+                 "since": now - hours * 3600, "until": None, "be_band_bp": 0.0, "include_forced": True}
+        by_lane = _monitor_tiles_rows(scope, ("closed",))
+        out = _dg.signal_to_fill_ms_by_lane(by_lane, since=now - hours * 3600)
+    except Exception as exc:  # noqa: BLE001 - observation only
+        out = {"error": type(exc).__name__}
+    _S2F_TRADES_CACHE["v"] = (now, out)
+    return out
 
 
 def _regime_bars_snapshot() -> dict:
@@ -33093,7 +33150,7 @@ _MONITOR_READ_TOKEN = monitor_api.configured_monitor_token(os.getenv("MONITOR_RE
 _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
     "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency",
-    "/api/monitor/tiles/disloc",
+    "/api/monitor/tiles/disloc", "/api/monitor/tiles/field-completeness",
     # API-GAP-SWEEP-20261012
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
@@ -46630,12 +46687,18 @@ def monitor_tiles_trades():
         by_lane = _monitor_tiles_rows(scope, statuses)
         rows = [row for lane_rows in by_lane.values() for row in lane_rows
                 if scope["include_forced"] or not (row.get("exit") or {}).get("forced_close")]
+        order = str(args.get("order") or "asc").strip().lower()
+        if order not in ("asc", "desc"):
+            raise monitor_tiles.BadRequest("BAD_ORDER")
         page = monitor_tiles.trades_page(rows, cursor=args.get("cursor"), limit=limit,
-                                         max_bytes=monitor_tiles.MAX_TILE_TRADES_BYTES, epoch=scope["epoch"])
+                                         max_bytes=monitor_tiles.MAX_TILE_TRADES_BYTES, epoch=scope["epoch"],
+                                         descending=order == "desc")
         return {
             "schema": monitor_tiles.TILE_TRADES_SCHEMA,
             **_monitor_tiles_common(now),
-            "scope": {**scope, "status": status, "limit": limit,
+            "scope": {**scope, "status": status, "limit": limit, "order": order,
+                      "paging_note": "rows are cut by limit OR the byte budget; follow next_cursor until null "
+                                     "(or use order=desc / since=<epoch s> for the newest rows)",
                       "expired_rows_note": f"in-memory expired tail is capped at {MAX_EXPIRED_ORDERS} rows",
                       "fill_basis_note": "fill evidence is indexed since boot; older fills show "
                                          + monitor_tiles.FILL_BASIS_NOT_INDEXED},
@@ -46644,6 +46707,31 @@ def monitor_tiles_trades():
         }
 
     return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES + 4096)
+
+
+@app.route('/api/monitor/tiles/field-completeness', methods=["GET"])
+def monitor_tiles_field_completeness():
+    """DATA-GAPS-20261012: per lane coverage of signal_to_fill_ms, exit_bid/ask, regime_at_signal.
+
+    ?hours=24 (max 720) or ?since=<epoch s>; closed rows only (same rows as /api/monitor/tiles/trades).
+    """
+    import data_gaps as _dg
+    args = request.args
+
+    def build(now):
+        try:
+            hours = min(720.0, max(0.1, float(args.get("hours") or 24)))
+        except ValueError:
+            raise monitor_tiles.BadRequest("BAD_ARGS")
+        since = monitor_tiles.parse_ts_param(args.get("since"), "since") or now - hours * 3600
+        scope = _monitor_tiles_scope(args, include_forced_default=True)
+        scope["since"] = max(float(scope.get("since") or 0.0), since)
+        by_lane = _monitor_tiles_rows(scope, ("closed",))
+        return {"schema": _dg.COMPLETENESS_SCHEMA, **_monitor_tiles_common(now),
+                "since": scope["since"], "since_utc": monitor_api.utc_iso(scope["since"]),
+                **_dg.field_completeness(by_lane)}
+
+    return _monitor_tiles_guard(build, monitor_tiles.MAX_TILE_TRADES_BYTES)
 
 
 @app.route('/api/monitor/tiles/disloc', methods=["GET"])
@@ -47201,6 +47289,37 @@ def monitor_streams_catalog():
     return jsonify({**monitor_streams.catalog(os.getcwd()), "server_ts": time.time()})
 
 
+@app.route('/api/monitor/streams/health', methods=["GET"])
+def monitor_streams_health():
+    """DATA-GAPS-20261012: per stream first/last ts, age, rows, key-field null rate, archive location."""
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import monitor_streams
+    hit = _STREAM_HEALTH_CACHE.get("v")
+    now = time.time()
+    if not hit or now - hit[0] > 15.0:
+        hit = (now, monitor_streams.health(os.getcwd(), now))
+        _STREAM_HEALTH_CACHE["v"] = hit
+    return jsonify({**hit[1], "cached_at": hit[0], "server_ts": now})
+
+
+_STREAM_HEALTH_CACHE: dict = {}
+
+
+@app.route('/api/monitor/streams/<name>/parts', methods=["GET"])
+def monitor_streams_parts(name):
+    """DATA-GAPS-20261012 (h): rotated parts (oldest -> newest, current = part 0) with first/last ts."""
+    if not monitor_integrity_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    import monitor_streams
+    try:
+        plist = [monitor_streams.part_bounds(os.getcwd(), name, p) for p in monitor_streams.parts(os.getcwd(), name)]
+    except monitor_streams.BadRequest as exc:
+        return jsonify({"error": "bad_request", "reason": str(exc)[:160]}), 400
+    return jsonify({"schema": "monitor_stream_parts_v1", "stream": name, "parts": plist,
+                    "archive_locations": monitor_streams.ARCHIVE_NOTE, "server_ts": time.time()})
+
+
 @app.route('/api/monitor/streams/<name>', methods=["GET"])
 def monitor_streams_page(name):
     """One paginated JSONL page: ?cursor=<byte offset>&limit_bytes=&inode=.
@@ -47212,10 +47331,16 @@ def monitor_streams_page(name):
         return jsonify({"error": "unauthorized"}), 401
     import gzip as _gz
     import monitor_streams
+    args = request.args
     try:
-        header, body = monitor_streams.read_page(
-            os.getcwd(), name, request.args.get("cursor"), request.args.get("limit_bytes"),
-            request.args.get("inode"))
+        if any(args.get(k) not in (None, "") for k in ("since", "until", "part")):
+            # DATA-GAPS-20261012 (h): time-ranged read across rotated parts.
+            header, body = monitor_streams.read_range(
+                os.getcwd(), name, since=args.get("since"), until=args.get("until"), part=args.get("part"),
+                cursor=args.get("cursor"), limit_bytes=args.get("limit_bytes"))
+        else:
+            header, body = monitor_streams.read_page(
+                os.getcwd(), name, args.get("cursor"), args.get("limit_bytes"), args.get("inode"))
     except monitor_streams.BadRequest as exc:
         return jsonify({"error": "bad_request", "reason": str(exc)[:160]}), 400
     packed = _gz.compress(body, compresslevel=5)

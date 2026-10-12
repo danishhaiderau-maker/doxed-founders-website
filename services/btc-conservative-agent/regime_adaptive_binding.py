@@ -435,10 +435,15 @@ class RegimeAdaptiveBinding(TakerTimeExitBinding):
 
 
 class GsPremiumEvaluator(PremiumEvaluator):
-    """GS-01: H-C's premium rule in its own instance (no shadow file; H-C keeps xvp_shadow_signals.jsonl)."""
+    """GS-01: H-C's premium rule in its own instance.
+
+    DATA-GAPS-20261012 (g): H-C / PREMIUM_REVERSION_60M / GS-07 (the only writers of
+    xvp_shadow_signals.jsonl) were retired, so the stream went silent on 11 Oct 09:51 UTC.
+    GS-01 now keeps it alive (rows tagged research_lane=GS-01, trigger ids ``gsxvp-*``).
+    """
 
     ID_PREFIX = "gsxvp"
-    SHADOW_FILE = None
+    SHADOW_FILE = "xvp_shadow_signals.jsonl"
     TRIGGER_FEATURE_KEY = "gsxvp_trigger"
 
 
@@ -448,6 +453,7 @@ class Gs5PremiumEvaluator(GsPremiumEvaluator):
 
     ID_PREFIX = "gs5xvp"
     TRIGGER_FEATURE_KEY = "gs5xvp_trigger"
+    SHADOW_FILE = None
 
 
 class Gs7PremiumEvaluator(GsPremiumEvaluator):
@@ -456,6 +462,7 @@ class Gs7PremiumEvaluator(GsPremiumEvaluator):
 
     ID_PREFIX = "gs7xvp"
     TRIGGER_FEATURE_KEY = "gs7xvp_trigger"
+    SHADOW_FILE = None
 
 
 class DanishRouterPremiumEvaluator(GsPremiumEvaluator):
@@ -463,6 +470,7 @@ class DanishRouterPremiumEvaluator(GsPremiumEvaluator):
 
     ID_PREFIX = "dnrxvp"
     TRIGGER_FEATURE_KEY = "dnrxvp_trigger"
+    SHADOW_FILE = None
 
 
 class FadePoolPremiumEvaluator(GsPremiumEvaluator):
@@ -470,6 +478,7 @@ class FadePoolPremiumEvaluator(GsPremiumEvaluator):
 
     ID_PREFIX = "fdpxvp"
     TRIGGER_FEATURE_KEY = "fdpxvp_trigger"
+    SHADOW_FILE = None
 
 
 PREMIUM_EVALUATOR_CLASSES = {cls.ID_PREFIX: cls for cls in (
