@@ -91,7 +91,12 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
         out["arming"]["accounts"] = (lc["arming"].get("sources") or {}).get("website_accounts")
         out["lifecycle_alerts"] = lc["alerts"][:50]
         out["causes"] = sorted(set(out["causes"]) | set(lc["alert_codes"]))
-        out["verdict"] = lcm.worst(out["verdict"], lc["verdict"])
+        # LIVE-FIX-1715: lc["verdict"] is the money-risk verdict; closed-trade
+        # parity only feeds parity_verdict (alerts stay listed above).
+        out["verdict"] = lcm.worst(out["verdict"], lc.get("money_risk_verdict") or lc["verdict"])
+        out["parity_verdict"] = lcm.worst(out.get("parity_verdict") or lcm.GREEN,
+                                          lc.get("parity_verdict") or lcm.GREEN)
+        out["parity_causes"] = sorted(set(out.get("parity_causes") or []) | set(lc.get("parity_codes") or []))
         out["exchange"] = {a: {k: m.get(k) for k in ("ok", "flat", "read_age_s", "error")}
                            | {"open_orders": len(m.get("open_orders") or []), "stops": len(m.get("stops") or []),
                               "orphans": m.get("orphans") or [], "balance": m.get("balance")}
@@ -138,6 +143,10 @@ def live_summary():  # R19
             payload["causes"] = sorted(set(payload.get("causes") or []) | {a["code"] for a in extra})
             for a in extra:
                 payload["verdict"] = lcm.worst(payload.get("verdict") or lcm.GREEN, a.get("severity") or lcm.AMBER)
+        # LIVE-FIX-1715: top-level verdict == money risk; parity is separate.
+        payload["money_risk_verdict"] = payload.get("verdict")
+        payload.setdefault("parity_verdict", lcm.GREEN)
+        payload["verdict_basis"] = "money_risk (closed-trade parity -> parity_verdict)"
     return _ok(payload)
 
 
