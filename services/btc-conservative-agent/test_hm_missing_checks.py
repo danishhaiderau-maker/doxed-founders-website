@@ -142,3 +142,19 @@ def test_chase_gap_tables_and_side_scores():
     assert cg.gap_view(rows, [], set())["buckets"]["2-3"]["n"] == 4
     s = b._trade_side_scores({"dir": "SHORT"}, {"signal_ref": {"long_score": 3, "short_score": 7}})
     assert s == {"long_score": 3.0, "short_score": 7.0, "score_gap": 4.0}
+
+
+def test_checks_and_exit_bbo_with_a_populated_tape_ring(bot, monkeypatch):
+    import time
+    ring = monitor_tiles.TapeSliceRing()
+    now = time.time()
+    for i in range(5):
+        ring.append({"bucket_ts": int(now) - 4 + i, "bid": 100.0, "ask": 100.1})
+    monkeypatch.setattr(bot, "_TILE_TAPE_RING", ring)
+    row = {}
+    bot._stamp_exit_bbo(row)
+    assert row.get("exit_bid") == 100.0 and row.get("exit_ask") == 100.1
+    r = bot.app.test_client().get("/api/monitor/checks", headers={"Authorization": f"Bearer {MONITOR}"},
+                                  environ_base=REMOTE)
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["checks"]["data-completeness"]["status"] in ("GREEN", "AMBER", "RED")
