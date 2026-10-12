@@ -188,3 +188,32 @@ test('1480: executor reads the durable wake immediately on boot', () => {
   const init = src.slice(src.indexOf('  onModuleInit() {'), src.indexOf('  onModuleInit() {') + 4000);
   assert.ok(init.includes('this.schedulePersistedWakePoll(0);'));
 });
+
+test('1482: a resting stop at least as protective as requested authenticates', async () => {
+  const { protectiveStopAtLeastAsTight: t } = await import('./signal-subscriber-execution.service');
+  assert.equal(t('LONG', 83_760, 83_750), true);   // tighter long stop
+  assert.equal(t('LONG', 83_740, 83_750), false);  // looser long stop
+  assert.equal(t('SHORT', 84_400, 84_410), true);  // tighter short stop
+  assert.equal(t('SHORT', 84_420, 84_410), false);
+  assert.equal(t('LONG', 85_000, 83_750), false);  // >1% off: refuse
+  assert.equal(t('LONG', 0, 83_750), false);
+});
+
+test('1483: concurrent mirror closes for one participant have exactly one owner', async () => {
+  const { SignalSubscriberExecutionService } = await import('./signal-subscriber-execution.service');
+  const svc = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let runs = 0;
+  let release!: (v: boolean) => void;
+  svc.executeShowcaseMirrorCloseOwned = () => { runs += 1; return new Promise<boolean>((r) => { release = r; }); };
+  const args = ['a', 'u', { id: 'c' }, { id: 'p1', fillPrice: null }, {}, {}, { terminalAuthority: {} }];
+  const first = svc.executeShowcaseMirrorClose(...args);
+  const second = svc.executeShowcaseMirrorClose(...args);
+  assert.equal(runs, 1);
+  assert.equal(await second, true, 'concurrent caller reports owned close without racing the claim');
+  release(true);
+  assert.equal(await first, true);
+  const third = svc.executeShowcaseMirrorClose(...args);
+  release(false);
+  assert.equal(await third, false);
+  assert.equal(runs, 2, 'a later close runs again after the first settles');
+});
