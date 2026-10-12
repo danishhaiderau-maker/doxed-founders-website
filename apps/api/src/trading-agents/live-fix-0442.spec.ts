@@ -58,3 +58,12 @@ test('LIVE-FIX-1054: a later kick is honoured (old version dropped kicks for 3 s
   assert.equal(n, 2);
   setLiveCopyReportKickListener(null);
 });
+
+import { relinkSameTileFamily, tradeIdFamily } from './signal-subscriber-execution.service';
+test('LIVE-FIX-1200: CURE-1 never relinks a DISLOC fill onto a GS-01 position', () => {
+  assert.equal(tradeIdFamily('adopt:dsl-1791765540-7'), 'dsl');
+  assert.equal(tradeIdFamily('relink:adopt:gs1-b24027a83f15:1'), 'gs1');
+  assert.equal(relinkSameTileFamily('adopt:dsl-1791765540-7', 'gs1-b24027a83f15'), false);
+  assert.equal(relinkSameTileFamily('adopt:gs1-a', 'gs1-b'), true);
+  assert.equal(relinkSameTileFamily(null, 'gs1-b'), true);
+});
