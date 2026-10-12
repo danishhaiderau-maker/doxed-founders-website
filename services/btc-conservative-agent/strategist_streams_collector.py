@@ -7,6 +7,10 @@ change or cancel an order. Writes three lean append-only JSONL streams in the ru
   {"s": sec, "b": [[px, qty], ...], "a": [[px, qty], ...]} (qty rounded to 1e-4 BTC).
 * ``bfx_trades.jsonl``       - every individual public Bitfinex trade, batched per second
   {"s": sec, "tr": [[trade_id, ms, signed_amount, price], ...]} (amount > 0 = buyer aggressor).
+* ``bfx_deriv_status_1s.jsonl`` - Bitfinex perp derivative status (ws ``status`` channel), one row per
+  second: {"s": sec, "mts": exch_ms, "mark": px, "deriv": last, "spot": px, "fund_cur": rate,
+  "fund_accr": accrued, "fund_step": step, "next_fund_ts": ms, "oi": BTC, "age_s": sec}. Funding is the
+  raw 8 h rate (multiply by 1e4 for bp). Data-gap (c), 12 Oct.
 * ``venue_bbo_1m.jsonl``     - Lighter + Paradex BTC perp best bid/ask, 60 per-second samples per
   UTC-minute row {"m": minute_ts, "lighter": [[bid, ask] | null x60], "paradex": [...]}.
 
@@ -32,6 +36,22 @@ LIGHTER_WS = "wss://mainnet.zklighter.elliot.ai/stream"
 LIGHTER_MARKET = os.getenv("STRATEGIST_LIGHTER_MARKET", "1")  # 1 = BTC perp
 PARADEX_BBO = "https://api.prod.paradex.trade/v1/bbo/BTC-USD-PERP"  # WS needs SBE binary; REST 1/s
 BOOK_FILE, TRADES_FILE, VENUE_FILE = "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "venue_bbo_1m.jsonl"
+DERIV_FILE = "bfx_deriv_status_1s.jsonl"
+DERIV_KEY = "deriv:" + BFX_SYMBOL
+MAX_DERIV_AGE_SEC = 10.0  # Bitfinex pushes deriv status every ~1-4 s; rows carry age_s
+
+
+def parse_deriv_status(body) -> Optional[dict]:
+    """Bitfinex ws v2 ``status`` (deriv) array -> named fields; None when malformed."""
+    if not isinstance(body, list) or len(body) < 18:
+        return None
+
+    def at(i):
+        return _f(body[i]) if i < len(body) else None
+    out = {"mts": at(0), "deriv": at(2), "spot": at(3), "insurance": at(5), "next_fund_ts": at(7),
+           "fund_accr": at(8), "fund_step": at(9), "fund_cur": at(11), "mark": at(14), "oi": at(17),
+           "clamp_min": at(21), "clamp_max": at(22)}
+    return out if out["mark"] or out["fund_cur"] is not None else None
 LEVELS = 10
 ROTATE_BYTES = int(os.getenv("STRATEGIST_STREAM_ROTATE_BYTES", str(32 * 1024 * 1024)))
 KEEP_ROTATIONS = int(os.getenv("STRATEGIST_STREAM_KEEP_ROTATIONS", "6"))
@@ -127,6 +147,8 @@ class Collector:
         self.book_sink = Sink(os.path.join(runtime_dir, BOOK_FILE))
         self.trade_sink = Sink(os.path.join(runtime_dir, TRADES_FILE))
         self.venue_sink = Sink(os.path.join(runtime_dir, VENUE_FILE))
+        self.deriv_sink = Sink(os.path.join(runtime_dir, DERIV_FILE))
+        self.deriv: Optional[tuple] = None  # (fields, recv_ts)
         self.book = BfxBook()
         self.lock = threading.Lock()
         self.trades: list = []
@@ -162,6 +184,11 @@ class Collector:
                     self.book.snapshot(body, now)
                 elif body:
                     self.book.apply(body, now)
+            elif kind == "status":
+                if isinstance(msg[1], list) and msg[1] and not isinstance(msg[1][0], list):
+                    parsed = parse_deriv_status(msg[1])
+                    if parsed:
+                        self.deriv = (parsed, now)
             elif kind == "trades":
                 if msg[1] == "te" and isinstance(msg[2], list):
                     t = msg[2]
@@ -188,12 +215,16 @@ class Collector:
             fresh = self.book.ts and sec + 1 - self.book.ts <= MAX_QUOTE_AGE_SEC
             b, a = self.book.top() if fresh else ([], [])
             trades, self.trades = self.trades, []
+            deriv = self.deriv
             quotes = {v: (q[0], q[1]) if q and sec + 1 - q[2] <= MAX_QUOTE_AGE_SEC else None
                       for v, q in self.quotes.items()}
         if b and a:
             self.book_sink.write({"s": sec, "b": b, "a": a})
         if trades:
             self.trade_sink.write({"s": sec, "tr": trades})
+        if deriv and sec + 1 - deriv[1] <= MAX_DERIV_AGE_SEC:
+            self.deriv_sink.write({"s": sec, **{k: v for k, v in deriv[0].items() if v is not None},
+                                   "age_s": round(sec + 1 - deriv[1], 3)})
         minute = sec - sec % 60
         row = self.minute.setdefault(minute, {v: [None] * 60 for v in quotes})
         for v, q in quotes.items():
@@ -252,7 +283,8 @@ class Collector:
         threads = [
             threading.Thread(target=self._ws_loop, daemon=True, args=("bitfinex", BFX_WS, [
                 {"event": "subscribe", "channel": "book", "symbol": BFX_SYMBOL, "prec": "P0", "len": "25"},
-                {"event": "subscribe", "channel": "trades", "symbol": BFX_SYMBOL}], self.on_bfx)),
+                {"event": "subscribe", "channel": "trades", "symbol": BFX_SYMBOL},
+                {"event": "subscribe", "channel": "status", "key": DERIV_KEY}], self.on_bfx)),
             threading.Thread(target=self._ws_loop, daemon=True, args=("lighter", LIGHTER_WS, [
                 {"type": "subscribe", "channel": f"ticker/{LIGHTER_MARKET}"}], self.on_lighter)),
             threading.Thread(target=self._paradex_loop, daemon=True),
@@ -272,8 +304,8 @@ class Collector:
                 self.close_second(last)
             if now - last_status > 900:
                 last_status = now
-                _log(f"rows book={self.book_sink.rows} trades={self.trade_sink.rows} venue={self.venue_sink.rows} "
-                     f"failures={self.book_sink.failures + self.trade_sink.failures + self.venue_sink.failures} "
+                _log(f"rows book={self.book_sink.rows} trades={self.trade_sink.rows} venue={self.venue_sink.rows} deriv={self.deriv_sink.rows} "
+                     f"failures={self.book_sink.failures + self.trade_sink.failures + self.venue_sink.failures + self.deriv_sink.failures} "
                      f"reconnects={self.reconnects}")
             self.stop.wait(0.2)
 

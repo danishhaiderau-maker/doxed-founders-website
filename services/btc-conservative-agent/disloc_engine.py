@@ -314,6 +314,7 @@ class DislocEngine:
         self.touch_fn: Callable[[], tuple] = lambda: (None, None, None)
         self.append_fn: Callable[[dict], Any] = lambda row: None
         self.oi_seed_fn: Callable[[int], dict] = lambda since_minute: {}
+        self.regime_fn: Optional[Callable[[], Any]] = None
         self._prem: dict = {}
         self._last_seen: dict = {}
         self._last_bucket: Optional[int] = None
@@ -331,8 +332,11 @@ class DislocEngine:
         self.counters["shadow_30m_opened"] = 0
         self.counters["shadow_30m_closed"] = 0
 
-    def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None) -> None:
+    def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None,
+                     regime_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
+        if regime_fn is not None:
+            self.regime_fn = regime_fn
         if oi_seed_fn is not None:
             self.oi_seed_fn = oi_seed_fn
 
@@ -601,6 +605,11 @@ class DislocEngine:
             "fund_at_signal_bp": feat.get("fund_bp"), "oi_d60_at_signal_bp": feat.get("oi_d60_bp"),
             "leader_mid": feat.get("leader_mid"), "bfx_mid_1s": feat.get("bfx_mid"),
         }
+        if self.regime_fn is not None:  # DATA-GAPS-20261012 (f)
+            try:
+                self.order["regime_at_signal"] = self.regime_fn()
+            except Exception:  # noqa: BLE001 - observation only
+                self.order["regime_at_signal"] = None
         self.counters["orders"] += 1
         if self.rule.entry_mode == "TAKER_MARKET":
             self.order["order_type"] = "MARKET_TAKER_AT_REAL_TOUCH_AFTER_DELAY"
@@ -763,16 +772,24 @@ def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=No
             "policy_signature": r.get("policy_signature"), "side": r.get("side"),
             "notional_usd": notional, "leverage": leverage,
             "trigger": {"signal_ts": _num(r.get("signal_ts")), "entry_path": "DISLOC_PAPER",
-                        "entry_type": r.get("order_type")},
+                        "entry_type": r.get("order_type"),
+                        **({"regime_at_signal": r.get("regime_at_signal"),
+                            "regime_at_signal_source": "indicator_engine_regime_tag_at_order"}
+                           if r.get("regime_at_signal") else {})},
             "order": {"submitted_ts": _num(r.get("order_ts")), "terminal": "FILLED"},
             "fill": {"fill_price": _num(r.get("fill_price")), "fill_ts": fill_ts,
                      "fill_ts_basis": "DISLOC_PAPER_TAKER_AT_TOUCH"},
             "exit": {"close_ts": exit_ts, "exit_price": _num(r.get("exit_price")),
+                     "exit_bid": _num(r.get("exit_bid")), "exit_ask": _num(r.get("exit_ask")),
                      "exit_reason": r.get("exit_reason"), "close_origin": "STRATEGY",
                      "forced_close": False, "deploy_flatten": False, "legs": []},
             "timing": {"signal_to_order_s": _num(r.get("signal_to_order_s")),
                        "signal_to_fill_s": _num(r.get("signal_to_fill_s")),
-                       "order_to_fill_s": _num(r.get("order_to_fill_s")), "hold_s": _num(r.get("hold_s"))},
+                       "order_to_fill_s": _num(r.get("order_to_fill_s")), "hold_s": _num(r.get("hold_s")),
+                       # DATA-GAPS-20261012 (d): same keys as tile_trade_timing_v1.
+                       "signal_to_fill_sec": _num(r.get("signal_to_fill_s")),
+                       "signal_to_fill_ms": (int(round(_num(r.get("signal_to_fill_s")) * 1000))
+                                             if _num(r.get("signal_to_fill_s")) is not None else None)},
             "path": {"mfe_bp": None, "basis": None},
             "pnl": {"bp": bp, "bp_basis": CARD_BP_KEY, "gross_usd": None, "trading_fees_usd": None,
                     "funding_usd": None, "net_usd": round(net, 6) if net is not None else None,

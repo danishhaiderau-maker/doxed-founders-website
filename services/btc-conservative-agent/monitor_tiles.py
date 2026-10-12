@@ -263,6 +263,11 @@ def _gap(a, b):
     return round(b - a, 3) if a is not None and b is not None else None
 
 
+def _gap_ms(a, b):
+    g = _gap(a, b)
+    return int(round(g * 1000.0)) if g is not None else None
+
+
 def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, recorded: bool,
                  exit_sent_ts=None) -> dict:
     """Per-trade stage stamps (signal -> sent -> fill -> exit trigger -> exit fill).
@@ -279,6 +284,8 @@ def trade_timing(signal_ts, sent_ts, fill_ts, exit_trigger_ts, exit_fill_ts, *, 
         "signal_to_sent_sec": _gap(signal_ts, sent_ts),
         "sent_to_fill_sec": _gap(sent_ts, fill_ts),
         "signal_to_fill_sec": _gap(signal_ts, fill_ts),
+        "signal_to_fill_ms": _gap_ms(signal_ts, fill_ts),
+        "signal_to_sent_ms": _gap_ms(signal_ts, sent_ts),
         "exit_trigger_to_fill_sec": _gap(exit_trigger_ts, exit_fill_ts),
     }
 
@@ -364,9 +371,12 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
                 "action", "reason", "trigger_kind"):
         value = decision.get(key)
         if value is None and key == "regime_at_signal":
-            value = decision.get("regime_at_entry") or decision.get("regime")
+            value = decision.get("regime_at_entry") or decision.get("regime") or raw.get("regime_at_signal")
         if value is not None and value != "":
             trigger[key] = value
+    if "regime_at_signal" in trigger:
+        trigger.setdefault("regime_at_signal_source", raw.get("regime_at_signal_source")
+                           or ("adaptive_entry_decision" if decision else "trade_row"))
     row: dict = {
         "schema": TILE_TRADE_ROW_SCHEMA,
         "trade_id": str(raw.get("trade_id") or ""),
@@ -490,15 +500,17 @@ def row_in_window(row: Mapping[str, Any], since: float | None, until: float | No
 
 
 def trades_page(rows: list[dict], *, cursor: str | None, limit: int, max_bytes: int,
-                epoch: str | None) -> dict:
-    """Whole rows ordered by (sort_ts, trade_id), cut at ``limit`` or the byte budget."""
-    ordered = sorted(rows, key=lambda r: (float(r.get("sort_ts") or 0.0), str(r.get("trade_id") or "")))
+                epoch: str | None, descending: bool = False) -> dict:
+    """Whole rows ordered by (sort_ts, trade_id) (newest first when ``descending``), cut at ``limit`` or the byte budget."""
+    def _key(r):
+        return (float(r.get("sort_ts") or 0.0), str(r.get("trade_id") or ""))
+    ordered = sorted(rows, key=_key, reverse=descending)
     after = decode_cursor(cursor)
     if after is not None:
         if after[2] != epoch:
             raise BadRequest("CURSOR_EPOCH_MISMATCH")
         key = (after[0], after[1])
-        ordered = [r for r in ordered if (float(r.get("sort_ts") or 0.0), str(r.get("trade_id") or "")) > key]
+        ordered = [r for r in ordered if (_key(r) < key if descending else _key(r) > key)]
     page: list[dict] = []
     used = 1024  # envelope allowance
     for row in ordered:
