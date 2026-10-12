@@ -2142,6 +2142,33 @@ jobs:
           LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
         run: python scripts/fly_deploy_reset_proof.py validate
 
+      - name: Snapshot current Bitfinex live-orders tile set (restored after deploy)
+        # LIVE-FIX-1484 (Danish 12 Oct 18:22): the post-deploy restore must bring
+        # back exactly the tiles that were placing live orders before this deploy,
+        # never a hardcoded list (it re-enabled GS-01 after Danish turned it off).
+        id: live_set
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          req = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/live-copy/status", headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"})
+          lanes, ok = [], False
+          for attempt in range(4):
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      st = json.load(r)
+                  lanes = sorted(t["lane"] for t in st.get("tiles") or [] if t.get("bitfinex_live_orders") is True and t.get("lane"))
+                  ok = True
+                  break
+              except Exception as e:
+                  print("live-set snapshot retry", attempt, str(e)[:120]); time.sleep(5)
+          print(json.dumps({"snapshot_ok": ok, "live_lanes": lanes}))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as h:
+              h.write("snapshot_ok=" + ("true" if ok else "false") + "\n")
+              h.write("live_lanes=" + ",".join(lanes) + "\n")
+          PY
+
       - name: Enter durable authenticated paper maintenance boundary
         id: paper_maintenance
         if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
@@ -3225,19 +3252,31 @@ jobs:
         run: python scripts/fly_postdeploy_active_gate.py
 
 
-      - name: Restore live copy (GS-01, DISLOC, DISLOC-FOI) after exact-revision acceptance
+      - name: Restore the pre-deploy Bitfinex live-orders tile set after exact-revision acceptance
         # Danish's standing rule: every deploy force-flattens, then live comes back
         # automatically. Retired tiles are never restored. Fails the run if any
         # restored lane is not eligible + live-orders after restore.
         if: ${{ success() && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          LIVE_SNAPSHOT_OK: ${{ steps.live_set.outputs.snapshot_ok }}
+          LIVE_LANES: ${{ steps.live_set.outputs.live_lanes }}
         run: |
           python - <<'PY'
           import json, os, time, urllib.error, urllib.request
           base = "https://doxed-btc-bot.fly.dev"
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json", "Cache-Control": "no-cache"}
-          LIVE = ("FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M")
+          # LIVE-FIX-1484: restore exactly the pre-deploy live-orders set. If the
+          # snapshot could not be read, restore DISLOC only (Danish 12 Oct 18:22).
+          # An empty snapshot (operator had every tile off) restores nothing.
+          if os.environ.get("LIVE_SNAPSHOT_OK") == "true":
+              LIVE = tuple(l for l in (os.environ.get("LIVE_LANES") or "").split(",") if l)
+          else:
+              LIVE = ("FAMILY_DISLOC_BFX_DISLOCATION_1M",)
+          print(json.dumps({"restore_lanes": LIVE, "from_snapshot": os.environ.get("LIVE_SNAPSHOT_OK") == "true"}))
+          if not LIVE:
+              print("No tile was placing live orders before this deploy; nothing to restore.")
+              raise SystemExit(0)
           RETIRED = {"FAMILY_DANISH_REGIME_ROUTER", "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE"}
           assert not RETIRED & set(LIVE)
           def call(path, body=None):

@@ -38574,19 +38574,40 @@ DASHBOARD_JS = """(function () {
       });
       return out;
     }
-    async function toggleBitfinexTileLive(lane, enabled) {
-      if (!confirm('Turn Live ' + (enabled ? 'ON' : 'OFF') + ' for ' + lane + '?'
-        + (enabled ? ' Its new trades will be copied as real $0.25 Bitfinex orders to armed accounts.' : ' This stops new live Bitfinex orders from this tile (paper keeps running).'))) return;
-      const res = await post('/api/bitfinex/tiles/' + encodeURIComponent(lane) + '/live-orders', {enabled: enabled});
-      if (res && res.ok) {
+    // LIVE-FIX-1484 (Danish 12 Oct 18:22): one click switches a tile's Live
+    // on or off. No confirm() dialog (embedded/suppressed dialogs made the
+    // button look dead), immediate visual feedback, inline result.
+    const tileLiveInFlight = {};
+    async function toggleBitfinexTileLive(lane, enabled, btn) {
+      if (tileLiveInFlight[lane]) return;
+      tileLiveInFlight[lane] = true;
+      const buttons = Array.from(document.querySelectorAll('.tile-live-btn')).filter(function (b) { return b.getAttribute('data-lane') === lane; });
+      if (btn && buttons.indexOf(btn) < 0) buttons.push(btn);
+      buttons.forEach(function (b) { b.disabled = true; b.textContent = 'Live: ' + (enabled ? 'turning ON...' : 'turning OFF...'); b.style.opacity = '0.7'; });
+      let note = '';
+      try {
+        const res = await fetch('/api/bitfinex/tiles/' + encodeURIComponent(lane) + '/live-orders', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, credentials: 'same-origin',
+          body: JSON.stringify({enabled: enabled}),
+        });
         let body = {};
         try { body = await res.json(); } catch (_) {}
-        if (enabled && body.denials && body.denials.length && !body.bitfinex_live_orders) {
+        if (!res.ok) {
+          note = 'Not saved: ' + (body.error || body.msg || res.status);
+        } else if (enabled && body.denials && body.denials.length && !body.bitfinex_live_orders) {
           const w = liveDenialWords(body.denials);
-          if (w.length) alert('Live ON saved. Held until: ' + w.join('; '));
+          note = w.length ? 'Live ON saved, held until: ' + w.join('; ') : 'Live ON saved';
+        } else {
+          note = 'Live ' + (enabled ? 'ON' : 'OFF') + ' saved';
         }
-        refresh();
+      } catch (e) {
+        note = 'Not saved: ' + (e && e.message ? e.message : 'network error');
+      } finally {
+        tileLiveInFlight[lane] = false;
       }
+      window.__tileLiveNotes = window.__tileLiveNotes || {};
+      window.__tileLiveNotes[lane] = {text: note, at: Date.now()};
+      await refresh();
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -39143,7 +39164,11 @@ DASHBOARD_JS = """(function () {
             liveSwitchHtml = '';
           } else {
             // ONE live button per tile; always clickable. ON also makes the tile eligible.
-            liveSwitchHtml = '<button type="button" class="tile-live-btn" data-lane="' + cardEsc(spec.lane) + '" onclick="toggleBitfinexTileLive(\\'' + cardEsc(spec.lane) + '\\', ' + (tileLiveRequested ? 'false' : 'true') + ')" style="padding:5px 12px;font-weight:bold;background:' + (tileLiveRequested ? '#238636' : '#30363d') + ';border:1px solid ' + (tileLiveRequested ? '#3fb950' : '#6e7681') + ';border-radius:6px;color:#fff;cursor:pointer;">Live: ' + (tileLiveRequested ? 'ON' : 'OFF') + '</button>';
+            liveSwitchHtml = '<button type="button" class="tile-live-btn" data-lane="' + cardEsc(spec.lane) + '" onclick="toggleBitfinexTileLive(\\'' + cardEsc(spec.lane) + '\\', ' + (tileLiveRequested ? 'false' : 'true') + ', this)" style="position:relative;z-index:2;pointer-events:auto;padding:5px 12px;font-weight:bold;background:' + (tileLiveRequested ? '#238636' : '#30363d') + ';border:1px solid ' + (tileLiveRequested ? '#3fb950' : '#6e7681') + ';border-radius:6px;color:#fff;cursor:pointer;>Live: ' + (tileLiveRequested ? 'ON' : 'OFF') + '</button>';
+            const liveNote = (window.__tileLiveNotes || {})[spec.lane];
+            if (liveNote && Date.now() - liveNote.at < 60000) {
+              liveSwitchHtml += ' <span style="font-size:0.8em;color:' + (/^Not saved/.test(liveNote.text) ? '#f85149' : '#8b949e') + ';">' + cardEsc(liveNote.text) + '</span>';
+            }
           }
           const liveHold = [];
           if (tileLiveRequested) {
