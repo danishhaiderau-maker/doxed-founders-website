@@ -47,3 +47,14 @@ test('stale mirror runs right after a tick, not when a wake is queued', () => {
   assert.equal(exchangeMirrorDueAfterTick({ wakeQueued: true, lastMirrorAtMs: 0, nowMs: 100_000 }), false);
   assert.equal(exchangeMirrorDueAfterTick({ wakeQueued: false, lastMirrorAtMs: 90_000, nowMs: 100_000 }), false);
 });
+
+test('LIVE-FIX-1054: a later kick is honoured (old version dropped kicks for 3 s)', async () => {
+  let n = 0;
+  setLiveCopyReportKickListener(() => { n += 1; });
+  assert.equal(kickLiveCopyReporter([10]), 1);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(kickLiveCopyReporter([10]), 1);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(n, 2);
+  setLiveCopyReportKickListener(null);
+});

@@ -32194,12 +32194,60 @@ def _disloc_append_and_copy(path, row) -> None:
         logger.warning(f"[DISLOC LIVE COPY] bridge failed: {exc}")
 
 
+# LIVE-FIX-1054: DISLOC self-simulates paper, so it never appears in the
+# bitfinex paper trade rows / recent_trades / outcome journal that
+# _live_copy_paper_twins reads. Record its twin from the same bridge events
+# (before publish, so the twin exists before the live fill) -> entry drift,
+# exit trigger_ts, and no false LIVE_POSITION_WITHOUT_PAPER_TWIN.
+_DISLOC_PAPER_TWINS: dict = {}
+_DISLOC_PAPER_TWINS_LOCK = threading.Lock()
+
+
+def _disloc_note_paper_twin(event, tid, extra, row) -> None:
+    if not tid:
+        return
+    row = row if isinstance(row, dict) else {}
+    with _DISLOC_PAPER_TWINS_LOCK:
+        twin = _DISLOC_PAPER_TWINS.setdefault(str(tid), {"side": extra.get("direction"), "source": "disloc_engine"})
+        if event == "POSITION_OPENED":
+            twin["entry_price"] = extra.get("fill_price")
+            twin["qty"] = extra.get("qty")
+        elif event == "POSITION_CLOSED":
+            twin["exit_price"] = extra.get("exit_price")
+            twin["exit_reason"] = extra.get("exit_reason")
+            twin["exit_ts"] = row.get("exit_ts") or row.get("ts") or time.time()
+        elif event == "ORDER_CANCELLED":
+            twin["exit_reason"] = extra.get("reason")
+        while len(_DISLOC_PAPER_TWINS) > 500:
+            _DISLOC_PAPER_TWINS.pop(next(iter(_DISLOC_PAPER_TWINS)))
+
+
+def _disloc_paper_twins() -> dict:
+    with _DISLOC_PAPER_TWINS_LOCK:
+        out = {k: dict(v) for k, v in _DISLOC_PAPER_TWINS.items()}
+    # Durable fallback after a restart: the DISLOC paper ledgers.
+    try:
+        import disloc_engine as _dsl
+        for lane in _dsl.LANE_FILES:
+            for r in _disloc_lane_raw_rows(lane)[-300:]:
+                tid = str((r or {}).get("trade_id") or "")
+                if not tid or tid in out or not r.get("fill_price"):
+                    continue
+                out[tid] = {"side": r.get("side"), "entry_price": r.get("fill_price"),
+                            "exit_price": r.get("exit_price"), "exit_reason": r.get("exit_reason"),
+                            "exit_ts": r.get("exit_ts"), "qty": None, "source": "disloc_ledger"}
+    except Exception:  # noqa: BLE001 - best effort
+        pass
+    return out
+
+
 def _disloc_live_copy_bridge(row) -> None:
     touch = None
     if isinstance(row, dict) and row.get("event") == "DISLOC_ABANDONED":
         touch = _disloc_touch()
     import disloc_live_copy as _dlc
     for event, tid, extra in _dlc.disloc_live_copy_events(row, touch=touch, bot_version=EXECUTION_FIX_VERSION):
+        _disloc_note_paper_twin(event, tid, extra, row)
         if event == "ORDER_PLACED":
             _live_copy_note_signal_ts(tid, extra.get("signal_ts"))
         _live_copy_publish(event, tid, extra)
@@ -58769,6 +58817,11 @@ def _live_copy_paper_twins() -> dict:
                             "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
                             "source": "trade_outcome_journal"}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
+        pass
+    try:
+        for tid, twin in _disloc_paper_twins().items():
+            out.setdefault(tid, twin)
+    except Exception:  # noqa: BLE001
         pass
     return out
 
