@@ -1457,6 +1457,8 @@ const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
  * TIME_DEADLINE_PREARM_MS early, the reduce-only close is submitted at the
  * deadline. Paper's POSITION_CLOSED stays the fallback (mirror close).
  */
+/** LIVE-FIX-1493: stop-dedupe counters (exposed for monitoring + tests). */
+export const stopDedupeStats = { runs: 0, duplicatesFound: 0, cancelled: 0, cancelFailed: 0, errors: 0, lastDuplicateAtMs: 0 };
 export const RELAY_PAUSE_HISTORY_MAX = 50;
 export function relayPauseCode(message: string): string {
   const m = /^([A-Z][A-Z0-9_]{2,})/.exec(String(message ?? '').trim());
@@ -16257,7 +16259,7 @@ await this.notifications
       // Off the stop's critical path: the stop is already live.
       // Delayed so its two reads never sit on the nonce lane ahead of the
       // stop confirmation / an early exit.
-      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input).catch(() => undefined); }, 3_000);
+      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input).catch((err) => { stopDedupeStats.errors += 1; this.logger?.error(`[STOP-DEDUPE] failed keep=${orderId}: ${err instanceof Error ? err.message : err}`); }); }, 3_000);
       (t as { unref?: () => void }).unref?.();
     }
     return { ...authenticated, submitAckAtMs };
@@ -16280,12 +16282,16 @@ await this.notifications
         client.getOpenPositionDetail(creds),
       ]);
       const extras = extraProtectiveStopIds(active, keepId, input.positionDirection, input.qty, position?.amount ?? 0);
+      stopDedupeStats.runs += 1;
+      if (extras.length) { stopDedupeStats.duplicatesFound += extras.length; stopDedupeStats.lastDuplicateAtMs = Date.now(); }
       for (const id of extras) {
         const gone = await this.cancelManagedOrderGone(creds, id, 'duplicate-protective-stop');
+        if (gone.gone) stopDedupeStats.cancelled += 1; else stopDedupeStats.cancelFailed += 1;
         this.logger?.warn(`[STOP-DEDUPE] cancelled duplicate reduce-only stop ${id} keep=${keepId} gone=${gone.gone}`);
       }
     } catch (err) {
-      this.logger?.warn(`[STOP-DEDUPE] skipped keep=${keepId}: ${err instanceof Error ? err.message : err}`);
+      stopDedupeStats.errors += 1;
+      this.logger?.error(`[STOP-DEDUPE] skipped keep=${keepId}: ${err instanceof Error ? err.message : err}`);
     }
   }
 

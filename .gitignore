@@ -372,3 +372,4 @@ vault/
 # Ephemeral verified bundle transport staging; never analyzer input or source.
 /.batch-transfer/
 /scripts/.batch-transfer/
+/node_modules
