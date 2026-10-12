@@ -20,3 +20,16 @@
 - Q6: SUBSCRIBER_MAX_CONCURRENT_SIGNALS unset -> code default via resolveMaxConcurrentCopySignals; correlated-exposure boundary 0.0009 (9 bp). Q1 shows a phantom second lot can exist today.
 - Netting fields that already exist: correlated_cluster_evidence on ORDER_PLACED (same-direction count, aggregate qty), dedupe stats (#639), protection_state sweep events. Missing: exchange net vs ledger qty diff, stop qty sum vs net, exit.close_source / close_order_id, concurrent_open_lots_at_entry, per-trade deployed_rev, effective max-concurrent/flag config on checks.
 - Proposed new order: (0) fix/close stale OPEN lots and stop the stop-retry acting on unattributed positions [behaviour, needs HM/Danish]; (1) DB: measure, then cut round trips on the stop path; (2) F4 + #646; (3) stop path; (4) A2 v2 (#641) with exit marks; sweeper (#643) rewritten for netting. F1/WS/#641/#643 on hold.
+
+## 13 Oct 00:44 AEDT: #647 deployed; DISLOC held OFF (Decision A step 1 / option B)
+- What paused live: output history `by=disarm reason=ADMIN_PAUSE:DEPLOY_MAINTENANCE ua:Python-urllib/3.12` from GitHub runner IP 20.15.229.145 at 00:23:48, 00:31:15 and 00:31:23 AEDT, i.e. deploy run 38254249429 (#647). Not Danish.
+- #647 run 38254249429 succeeded; restore re-armed DISLOC at 00:43:17. I disarmed DISLOC live-orders at 00:43:41 (HM/Boss Decision A: no re-arm before the stale-lot cleanup). Exchange flat: 0 positions, 0 orders, 0 stops. No trade in the 24 s window.
+- Clock after-numbers (00:41, slew removed, source=chrony): system offset +0.029 ms, last offset -0.036 ms, rms 0.134 ms, max error 0.689 ms, stratum 2, Normal. Before: Cloudflare probe 15.7 ms (slew enabled), earlier +267..+992 ms. Railway estimate +/-100 ms (order_sent->fill_mts min 97 ms, n=11).
+
+## Stale-lot fix design (HM agreed; Decision A)
+1. Cleanup before re-arm: for each OPEN/PENDING participant on the live account, mark it CLOSED (reason STALE_LOT_CLEANUP, keep every row/event) if a terminal exit event exists for it, OR if Bitfinex shows no exposure it can own (account flat now, so every OPEN lot is stale). Log each id. Needs an executor-side admin path (no DB creds on the box), so it ships as a tiny one-shot route/flag on the relay. Live stays OFF until it's done.
+2. Stop-side guard (small PR): refuse a sell stop >= bid or a buy stop <= ask at submit; log + alert STOP_SIDE_REFUSED.
+3. Pollution tag: dsl-1791810796-2 (and any trade whose stop came from another cycle) gets `polluted: STALE_LOT_STOP`, excluded from live-vs-paper stats, data kept.
+4. Alerts: STOP_EXECUTED_FAST (stop executes < 2 s after creation); STOP_UNATTRIBUTED (exchange stop not tied to an open lot).
+5. Full fix: lot closed atomically in the same transaction as the exit completion; stop-retry and reconcile-adopt refuse positions they can't attribute to the lot's own entry order/fill (qty + order id), and alert instead of adopting; tests: stale lot + new entry, restart mid-exit; exit-path timing marks.
+- Metric: 5+ DISLOC trades with zero unattributed stops, zero STOP_EXECUTED_FAST, zero early closes vs paper.
