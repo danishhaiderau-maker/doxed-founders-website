@@ -196,6 +196,8 @@ export class BitfinexSimTradingClient {
        * the value as the v2 `cid` int32.
        */
       clientOrderId?: number;
+      /** LIVE-FIX-1510: accepted for parity; the sim fills/rests as a plain limit. */
+      timeInForce?: 'GTC' | 'IOC';
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;

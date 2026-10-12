@@ -16,7 +16,12 @@ import time
 from collections import deque
 
 DISLOC_LIVE_MAX_SIGNAL_AGE_SEC = float(os.getenv("DISLOC_LIVE_MAX_SIGNAL_AGE_SEC", "2.0"))
-DISLOC_LIVE_TAKER_CUSHION_BP = float(os.getenv("DISLOC_LIVE_TAKER_CUSHION_BP", "5.0"))
+# LIVE-FIX-1510 (Danish 09:06): the +5 bp cap is configurable. "off" = no price cap; the relay sends a
+# true IOC at market (DISLOC_ENTRY_ORDER_MODE=IOC_MARKET) and the limit below is only a sizing/sanity
+# reference (7 bp: inside the relay 10 bp limit-vs-mark sanity band).
+_CUSHION_RAW = os.getenv("DISLOC_LIVE_TAKER_CUSHION_BP", "off").strip().lower()
+DISLOC_LIVE_CAP_OFF = _CUSHION_RAW in ("off", "none", "")
+DISLOC_LIVE_TAKER_CUSHION_BP = 7.0 if DISLOC_LIVE_CAP_OFF else float(_CUSHION_RAW)
 DISLOC_LIVE_ENTRY_POLICY = "disloc_taker_marketable_limit_ioc_v1"
 disloc_live_skips: deque = deque(maxlen=200)
 
@@ -60,6 +65,10 @@ def disloc_live_copy_events(row, now=None, touch=None, bot_version=None):
         return [("ORDER_PLACED", tid, {**base, "event_seq": 0, "signal_price": touch_px,
                  "limit_price": float(limit), "qty": 25.0 / float(limit),
                  "entry_limit_policy": DISLOC_LIVE_ENTRY_POLICY, "entry_order_semantics": "TAKER_IOC",
+                 "entry_cap_mode": "OFF" if DISLOC_LIVE_CAP_OFF else "CAP_BP",
+                 "entry_cap_bp": None if DISLOC_LIVE_CAP_OFF else DISLOC_LIVE_TAKER_CUSHION_BP,
+                 "signal_touch_source": row.get("signal_touch_source"),
+                 "signal_ask_age_ms": row.get("signal_ask_age_ms"),
                  "max_signal_age_sec": DISLOC_LIVE_MAX_SIGNAL_AGE_SEC, "signal_age_at_intent_s": round(age, 3),
                  "entry_reason": "DISLOC_SIGNAL", "executable": True})]
     if ev == "DISLOC_FILLED":

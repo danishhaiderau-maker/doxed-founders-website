@@ -1147,6 +1147,21 @@ export function capRelayLimitAtShowcaseFill(
  * still owns cancellation and a later real fill still uses the normal
  * protection/terminal funnel.
  */
+export type DislocEntryOrderMode = 'LIMIT' | 'IOC_CAP' | 'IOC_MARKET';
+/**
+ * LIVE-FIX-1510: entry order mode for Tile 6 DISLOC taker entries (null = not DISLOC).
+ * Fly rewrites entry_limit_policy to the canonical copy policy, so the DISLOC trade id
+ * prefix (dsl-) is the discriminator.
+ */
+export function dislocEntryOrderMode(
+  tradeId: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): DislocEntryOrderMode | null {
+  if (typeof tradeId !== 'string' || !tradeId.startsWith('dsl-')) return null;
+  const v = String(env.DISLOC_ENTRY_ORDER_MODE ?? '').trim().toUpperCase();
+  return v === 'LIMIT' || v === 'IOC_CAP' || v === 'IOC_MARKET' ? v : 'IOC_MARKET';
+}
+
 export function aggressiveCatchupEnabled(): boolean {
   const value = (process.env.AGGRESSIVE_CATCHUP_ENABLED ?? '').trim().toLowerCase();
   if (!value) return process.env.NODE_ENV === 'production';
@@ -10883,13 +10898,33 @@ await this.notifications
       );
     }
     entrySubmitStarted = true;
-    const orderId = await this.activeTrading.submitLimitOrder(creds, {
-      direction: intent.direction,
-      qty,
-      price: limitPrice,
+    // LIVE-FIX-1510 (HM 09:05, Danish 09:06): DISLOC entry is a true IOC, never resting.
+    // DISLOC_ENTRY_ORDER_MODE: IOC_MARKET (default, no price cap) | IOC_CAP (IOC at the signed
+    // limit = signal touch + cap bp) | LIMIT (legacy GTC limit that can rest).
+    const dislocEntryMode = dislocEntryOrderMode(tradeId);
+    const entryOrderType = dislocEntryMode === 'IOC_MARKET' ? 'MARKET' : dislocEntryMode === 'IOC_CAP' ? 'IOC' : 'LIMIT';
+    const entryTif = dislocEntryMode && dislocEntryMode !== 'LIMIT' ? 'IOC' : 'GTC';
+    if (dislocEntryMode) {
+      this.logger.log(
+        `[DISLOC-ENTRY] trade=${tradeId} mode=${dislocEntryMode} type=${entryOrderType} tif=${entryTif}`
+        + ` signed_limit=${limitPrice.toFixed(2)} qty=${qty.toFixed(8)} mark=${mark.toFixed(2)}`,
+      );
+    }
+    const orderId = dislocEntryMode === 'IOC_MARKET'
+      ? await this.activeTrading.submitMarketEntry(creds, {
+        direction: intent.direction,
+        qty,
         leverage,
-      ...(clientOrderId != null ? { clientOrderId } : {}),
-    });
+        ...(clientOrderId != null ? { clientOrderId } : {}),
+      })
+      : await this.activeTrading.submitLimitOrder(creds, {
+        direction: intent.direction,
+        qty,
+        price: limitPrice,
+        leverage,
+        ...(clientOrderId != null ? { clientOrderId } : {}),
+        ...(dislocEntryMode === 'IOC_CAP' ? { timeInForce: 'IOC' as const } : {}),
+      });
     exchangeAckedOrderId = orderId;
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
@@ -10950,6 +10985,9 @@ await this.notifications
     if (timing) timing.persistenceStartedAtMs = Date.now();
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
       venue,
+      order_type: entryOrderType,
+      time_in_force: entryTif,
+      entry_order_mode: dislocEntryMode ?? 'LIMIT',
       fee_model: stableRelayFeeModel(),
       execution_profile: stableRelayExecutionProfile(),
       local_mark_at_signal: mark,
@@ -11068,7 +11106,9 @@ await this.notifications
           }
         }
       }
-      if (participant && !promotedAtAck) {
+      // LIVE-FIX-1510: an IOC/market DISLOC entry never rests, so there is nothing to chase;
+      // the tick's fill/unfilled classification owns it.
+      if (participant && !promotedAtAck && !(dislocEntryMode && dislocEntryMode !== 'LIMIT')) {
         await this.applyLimitChase(
           agentId,
           instance.userId,
