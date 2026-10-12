@@ -221,6 +221,8 @@ def drills(rows: list, now: float) -> dict:
 
 
 LIVE_ROUTE_MANIFEST = {
+    "/api/monitor/live/timeline": "LF1491", "/api/monitor/live/pause-history": "LF1491",
+    "/api/monitor/live/protection-state": "LF1491", "/api/monitor/live/clock": "LF1491", "/api/monitor/live/paths": "LF1491",
     "/api/monitor/live/summary": "R19", "/api/monitor/live/arming": "R1", "/api/monitor/live/lifecycle": "R24",
     "/api/monitor/live/orders": "R2", "/api/monitor/live/latency": "R3", "/api/monitor/live/copy-chain": "chain",
     "/api/monitor/live/gaps": "gaps", "/api/monitor/live/reconcile": "R4", "/api/monitor/live/protection": "R5",
