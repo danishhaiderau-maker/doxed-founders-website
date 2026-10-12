@@ -57,7 +57,8 @@ test('subscriber adapter is reachable only after the explicit gate and durable a
   const verify = relay.indexOf('const verifiedSignedPayload = this.verifySignature');
   const identity = relay.indexOf('const reductionEvidenceIdentity');
   const persist = relay.indexOf('const receipt = await this.persistRelayEvent(slug, persistBody');
-  const gate = relay.indexOf("SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true'", persist);
+  // Boss 12 Oct (LIVE-FIX-1445): on unless explicitly 'false'.
+  const gate = relay.indexOf("SUBSCRIBER_POSITION_REDUCTION_ENABLED') ?? '').trim().toLowerCase() !== 'false'", persist);
   const invoke = relay.indexOf('processAuditedPositionReductionEvent', gate);
   assert.ok(verify >= 0 && verify < identity && identity < persist && persist < gate && gate < invoke);
 });

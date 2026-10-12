@@ -3690,6 +3690,71 @@ export function tradeIdFamily(tradeId: string | null | undefined): string {
   return m ? m[1].toLowerCase() : '';
 }
 
+/**
+ * LIVE-FIX-1445: a fully-filled entry as reported by the order/submit
+ * response. Only an EXECUTED status with zero remaining and the full intended
+ * quantity counts; anything else (ACTIVE, PARTIALLY FILLED, odd sizes) falls
+ * back to the authenticated probe.
+ */
+export type EntryClaimResult = {
+  claimed: { id: string } | null;
+  assessment: ReturnType<typeof assessCorrelatedExposureCluster>;
+  evidence: Record<string, unknown> | null;
+};
+export type SpeculativeEntryClaim =
+  | { key: string; ok: true; result: EntryClaimResult }
+  | { key: string; ok: false; error: unknown };
+
+/** Identity of a claim's inputs; a speculative claim is used only on an exact match. */
+export function entryClaimKey(i: { cycleId: string; direction: string; limitPrice: number; qty: number; marginUsd: number }): string {
+  return `${i.cycleId}|${i.direction}|${i.limitPrice.toFixed(2)}|${i.qty.toFixed(8)}|${i.marginUsd.toFixed(6)}`;
+}
+
+/** Same sizing as placeEntryInner's signed path (exact limit sanitized vs mark, exact qty under the cap). */
+export function signedEntryClaimSizing(tradeId: string, envelopeJson: unknown, mark: number, marginCap: number): {
+  direction: 'LONG' | 'SHORT'; limitPrice: number; qty: number; marginUsd: number;
+} | null {
+  const signed = readFreshSignedShowcaseExactLimit(tradeId, envelopeJson);
+  const intent = envelopeJson as SignalIntentEnvelope & { entry: SignalIntentEnvelope['entry'] & { exact_qty_btc?: number } };
+  if (!signed || !intent?.direction || (intent.direction !== 'LONG' && intent.direction !== 'SHORT')) return null;
+  const limitPrice = sanitizeLimitPrice(mark, signed.limitPrice, intent.direction);
+  if (limitPrice == null) return null;
+  const intentCap = intent.risk?.max_margin_usd;
+  const effectiveCap = intentCap != null && Number.isFinite(intentCap) && intentCap > 0 ? Math.min(marginCap, intentCap) : marginCap;
+  const exactQty = resolveExactShowcaseEntryQty({
+    exactQtyBtc: intent.entry?.exact_qty_btc,
+    maxMarginUsd: effectiveCap,
+    leverage: resolveSubscriberLeverage(intent),
+    limitPrice,
+    minQtyBtc: MIN_QTY_BTC,
+  });
+  if (!exactQty.ok) return null;
+  return { direction: intent.direction, limitPrice, qty: exactQty.qty, marginUsd: exactQty.requiredMarginUsd };
+}
+
+/**
+ * LIVE-FIX-1445 (Boss 12 Oct): B1/B2 partial exits are mirrored as reduce-only
+ * partial closes by default. Only an explicit 'false' turns them off; an unset
+ * Railway variable no longer silently refuses the tiles.
+ */
+export function subscriberPositionReductionEnabled(raw: string | undefined | null): boolean {
+  return String(raw ?? '').trim().toLowerCase() !== 'false';
+}
+
+export function submitResponseFill(raw: unknown, intendedQty: number): {
+  filledQty: number; fillPrice: number; source: 'ORDER_PARTIAL'; orderResting: false;
+} | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as { status?: unknown; filledQty?: unknown; remainingQty?: unknown; avgPrice?: unknown };
+  const status = typeof r.status === 'string' ? r.status.toUpperCase() : '';
+  const filled = Number(r.filledQty);
+  const remaining = Number(r.remainingQty);
+  if (!status.startsWith('EXECUTED') || !(remaining <= 1e-9) || !(filled > 0)) return null;
+  if (Math.abs(filled - Math.abs(intendedQty)) > 1e-8) return null;
+  const px = Number(r.avgPrice);
+  return { filledQty: filled, fillPrice: Number.isFinite(px) && px > 0 ? px : 0, source: 'ORDER_PARTIAL', orderResting: false };
+}
+
 export function relinkSameTileFamily(from: string | null | undefined, to: string | null | undefined): boolean {
   const a = tradeIdFamily(from);
   const b = tradeIdFamily(to);
@@ -3968,7 +4033,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     participantId: string,
     source: SignedReduction,
   ) {
-    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+    if (!subscriberPositionReductionEnabled(this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED'))) {
       throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
     }
     const participant = await this.prisma.signalCycleParticipant.findUnique({
@@ -4005,9 +4070,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         replaceReduceOnlyProtection: async (targetQty) => {
           const entry = meta.fillPrice ?? meta.limitPrice;
           if (!entry || !meta.direction) return false;
+          // Boss 12 Oct: resize the stop to the remaining qty at the SAME price.
+          const owned = await this.prisma.signalCycleParticipant.findUnique({
+            where: { id: participantId },
+            select: { protectiveStopPrice: true },
+          });
+          const ownedStopPrice = Number(owned?.protectiveStopPrice ?? 0);
           const stopLossMarginPct = this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
           );
-          const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
+          const stopPrice = ownedStopPrice > 0
+            ? ownedStopPrice
+            : computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
           const replacement = await this.ensureDurableProtectiveStop({
             participantId, purpose: 'PARTIAL_REDUCTION_REPLACEMENT', creds,
             positionDirection: meta.direction, qty: targetQty, stopPrice, leverage,
@@ -4056,7 +4129,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     tradeId: string,
     source: SignedReduction,
   ): Promise<{ processed: number }> {
-    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+    if (!subscriberPositionReductionEnabled(this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED'))) {
       throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
     }
     const audit = await this.prisma.relayPositionReductionAudit.findFirst({
@@ -4438,10 +4511,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    */
   private relayMayCopyTradeId(tradeId: string | null | undefined, intentEnvelope?: unknown): boolean {
     const partialReductionsEnabled =
-      this.config?.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true';
+      subscriberPositionReductionEnabled(this.config?.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED'));
     if (isPartialExitLaneTradeId(tradeId) && !partialReductionsEnabled) {
       this.logger.warn(
-        `[RELAY-PARTIAL-EXIT-GATE] refused ${tradeId}: tile exits in parts and SUBSCRIBER_POSITION_REDUCTION_ENABLED is off`,
+        `[RELAY-PARTIAL-EXIT-GATE] refused ${tradeId}: tile exits in parts and SUBSCRIBER_POSITION_REDUCTION_ENABLED=false`,
       );
       return false;
     }
@@ -6483,7 +6556,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     preferredTradeId?: string,
     timing?: RelayExecutionTimingStages,
   ): Promise<boolean> {
+    let speculativeClaim: Promise<SpeculativeEntryClaim | null> | null = null;
     const reject = (reason: string): false => {
+      if (speculativeClaim) {
+        const pending = speculativeClaim;
+        speculativeClaim = null;
+        void pending.then((spec) => this.releaseSpeculativeClaim(spec));
+      }
       this.logger.warn(
         `[SIGNED-ENTRY] rejected trade=${preferredTradeId ?? '?'} instance=${instance.id}: ${reason}`,
       );
@@ -6537,6 +6616,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // durable signed envelope below.
     const legMark = <T,>(name: string, p: Promise<T>): Promise<T> =>
       timing ? p.finally(() => { (timing.marks ??= {})[name] = Date.now(); }) : p;
+    const markPricePromise = this.activeTrading.getMarkPrice().catch(() => null);
     const preflightPromise = Promise.all([
       legMark('pfOrders', this.activeTrading.listActiveOrders(creds)),
       legMark('pfPosition', this.readOpenPositionDetailWithRetry(creds)),
@@ -6550,8 +6630,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }),
       this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
       this.derivativesAvailableSwr(instance.userId, creds),
-      this.activeTrading.getMarkPrice().catch(() => null),
+      markPricePromise,
     ]);
+    // LIVE-FIX-1445: start the claim transaction as soon as the exact cycle,
+    // cap and mark are known, in parallel with the serialized Bitfinex reads.
+    // Placement uses it only if its inputs match exactly; otherwise (and on any
+    // reject before placement) the unused INTENT row is released.
+    speculativeClaim = (async (): Promise<SpeculativeEntryClaim | null> => {
+      const [cyc, cap, mk] = await Promise.all([cyclesPromise, marginCapPromise, markPricePromise]);
+      const c = cyc.find((candidate) =>
+        this.relayMayCopyTradeId(candidate.tradeId, candidate.intentEnvelope)
+        && !isPaperLaneTradeId(candidate.tradeId)
+        && !(candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now())
+        && readFreshSignedShowcaseExactLimit(candidate.tradeId, candidate.intentEnvelope) != null);
+      if (!c || !c.tradeId || mk == null) return null;
+      const sizing = signedEntryClaimSizing(c.tradeId, c.intentEnvelope, mk, cap);
+      if (!sizing) return null;
+      const key = entryClaimKey({ cycleId: c.id, ...sizing });
+      try {
+        const result = await this.runEntryClaimTx({
+          instance, agentId, cycleId: c.id, tradeId: c.tradeId, venue: 'bitfinex', ...sizing, timing,
+        });
+        return { key, ok: true, result };
+      } catch (error) {
+        return { key, ok: false, error };
+      }
+    })().catch(() => null);
     const [cycles, marginCap, preflight] = await Promise.all([
       legMark('pfCycle', cyclesPromise),
       marginCapPromise,
@@ -6670,23 +6774,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     );
     if (!eligibility.canEnter) return reject(`eligibility=${eligibility.reason ?? 'unknown'}`);
 
-    const placed = await this.placeEntry(
-      agentId,
-      cleanInstance,
-      cycle.id,
-      cycle.intentEnvelope,
-      creds,
-      marginCap,
-      cycle.tradeId,
-      'bitfinex',
-      {
-        availableUsd,
-        markPrice,
-        exchangeBookProvenEmpty: flatPreflight,
-        provenEmptyAtMs: flatPreflight ? (timing?.databasePreflightCompletedAtMs ?? Date.now()) : undefined,
-      },
-      timing,
-    );
+    const fastPreflight = {
+      availableUsd,
+      markPrice,
+      exchangeBookProvenEmpty: flatPreflight,
+      provenEmptyAtMs: flatPreflight ? (timing?.databasePreflightCompletedAtMs ?? Date.now()) : undefined,
+      speculativeClaim: speculativeClaim ?? undefined,
+      speculativeConsumed: false,
+    };
+    const unusedSpeculative = speculativeClaim;
+    speculativeClaim = null;
+    let placed = false;
+    try {
+      placed = await this.placeEntry(
+        agentId,
+        cleanInstance,
+        cycle.id,
+        cycle.intentEnvelope,
+        creds,
+        marginCap,
+        cycle.tradeId,
+        'bitfinex',
+        fastPreflight,
+        timing,
+      );
+    } finally {
+      if (!fastPreflight.speculativeConsumed && unusedSpeculative) {
+        void unusedSpeculative.then((spec) => this.releaseSpeculativeClaim(spec));
+      }
+    }
     if (placed) {
       this.logger.log(
         `[SIGNED-${flatPreflight ? 'FLAT' : 'SAME-DIR'}-FAST] placed trade=${cycle.tradeId} user=${instance.userId}`,
@@ -9747,6 +9863,9 @@ await this.notifications
       exchangeBookProvenEmpty?: boolean;
       /** Authenticated position read from the fast preflight (boss 12 Oct: cut receive->submit). */
       provenEmptyAtMs?: number;
+      /** LIVE-FIX-1445: claim tx started in parallel with the Bitfinex preflight. */
+      speculativeClaim?: Promise<SpeculativeEntryClaim | null>;
+      speculativeConsumed?: boolean;
     },
     timing?: RelayExecutionTimingStages,
   ): Promise<boolean> {
@@ -9888,6 +10007,134 @@ await this.notifications
     }
   }
 
+  /**
+   * C5 atomic participant claim + correlated-exposure assessment (one DB
+   * transaction). LIVE-FIX-1445: extracted so the signed fast path can run it
+   * speculatively in parallel with the authenticated Bitfinex preflight. The
+   * (cycleId, userId) unique key is the idempotency key: a second claim for the
+   * same cycle fails with P2002, and the entry CID is derived from the claimed
+   * participant, so two submits for one cycle cannot both pass the fence.
+   */
+  private runEntryClaimTx(input: {
+    instance: TradingAgentInstance; agentId: string; cycleId: string; tradeId: string; venue: string;
+    direction: 'LONG' | 'SHORT'; limitPrice: number; qty: number; marginUsd: number;
+    timing?: RelayExecutionTimingStages;
+  }): Promise<EntryClaimResult> {
+    const { instance, agentId, cycleId, tradeId, venue, limitPrice, qty, marginUsd, timing } = input;
+    const intent = { direction: input.direction };
+    return this.prisma.$transaction(async (tx) => {
+        if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
+        await tx.$executeRawUnsafe(
+          'SELECT pg_advisory_xact_lock(hashtext($1))',
+          `copy-cluster:${instance.userId}:${agentId}`,
+        );
+        if (timing) (timing.marks ??= {}).claimLock = Date.now();
+        const claimed = await tx.signalCycleParticipant.create({
+          data: {
+            cycleId,
+            userId: instance.userId,
+            venue,
+            status: SignalCycleStatus.INTENT,
+          },
+        });
+        if (timing) (timing.marks ??= {}).claimInsert = Date.now();
+        const assessment = await this.correlatedExposureSnapshot({
+          userId: instance.userId, agentId, participantId: claimed.id,
+          cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
+          createdAtMs: Date.now(),
+        }, tx);
+        if (!assessment.allowed) {
+          const evidence = {
+            schema: 'correlated_exposure_cluster_v2',
+            event: assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+              ? 'CORRELATED_CLUSTER_BLOCKED'
+              : 'CORRELATED_EXPOSURE_CLUSTER',
+            reason: assessment.reason,
+            candidate_trade_id: tradeId,
+            candidate_cycle_id: cycleId,
+            candidate_participant_id: claimed.id,
+            direction: intent.direction,
+            candidate_limit_price: limitPrice,
+            candidate_qty_btc: qty,
+            candidate_margin_usd: marginUsd,
+            same_direction_managed_or_reserved_count: assessment.sameDirectionCount,
+            reference_price_usd: limitPrice,
+            price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
+            price_boundary_pct: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 100,
+            price_boundary_bps: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 10_000,
+            price_boundary_inclusive: true,
+            aggregate_qty_btc: assessment.aggregateQty,
+            aggregate_margin_usd: assessment.aggregateMarginUsd,
+            nearest_trade_id: assessment.nearest?.tradeId ?? null,
+            nearest_cycle_id: assessment.nearest?.cycleId ?? null,
+            nearest_participant_id: assessment.nearest?.participantId ?? null,
+            nearest_price_distance_usd: assessment.nearest?.priceDistanceUsd ?? null,
+            nearest_price_distance_fraction: assessment.nearest?.priceDistanceFraction ?? null,
+            nearest_price_distance_pct:
+              assessment.nearest?.priceDistanceFraction != null
+                ? assessment.nearest.priceDistanceFraction * 100
+                : null,
+            nearest_price_distance_bps:
+              assessment.nearest?.priceDistanceFraction != null
+                ? assessment.nearest.priceDistanceFraction * 10_000
+                : null,
+            nearest_lifecycle_distance_sec: assessment.nearest?.lifecycleDistanceSec ?? null,
+            risk_state_available: assessment.reason !== 'RISK_STATE_UNAVAILABLE',
+            analysis_eligible: false,
+            analysis_exclusion_reasons: [
+              assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+                ? 'CORRELATED_CLUSTER_BLOCKED'
+                : 'CORRELATED_CLUSTER_RISK_STATE_UNAVAILABLE',
+            ],
+          };
+          if (assessment.reason === 'RISK_STATE_UNAVAILABLE') {
+            await tx.signalCycleEvent.create({
+              data: {
+                cycleId,
+                participantId: null,
+                eventType: 'CORRELATED_EXPOSURE_CLUSTER',
+                payload: evidence as Prisma.InputJsonValue,
+              },
+            });
+            await tx.signalCycleParticipant.delete({ where: { id: claimed.id } });
+            return { claimed: null, assessment, evidence };
+          }
+          await tx.signalCycleEvent.create({
+            data: {
+              cycleId,
+              participantId: claimed.id,
+              eventType: 'CORRELATED_CLUSTER_BLOCKED',
+              payload: evidence as Prisma.InputJsonValue,
+            },
+          });
+          await tx.signalCycleParticipant.update({
+            where: { id: claimed.id },
+            data: { status: SignalCycleStatus.EXPIRED },
+          });
+          // Capacity is subscriber-specific. Do not terminalize the shared
+          // canonical cycle and suppress other subscribers' independent caps.
+          await tx.signalCycleEvent.create({
+            data: {
+              cycleId,
+              participantId: claimed.id,
+              eventType: 'EXPIRED',
+              payload: { ...evidence, event: 'CORRELATED_CLUSTER_BLOCKED' } as Prisma.InputJsonValue,
+            },
+          });
+          return { claimed, assessment, evidence };
+        }
+        return { claimed, assessment, evidence: null };
+      });;
+  }
+
+  /** Release an unused speculative claim (only a still-INTENT row; blocked/EXPIRED evidence stays). */
+  private async releaseSpeculativeClaim(spec: SpeculativeEntryClaim | null): Promise<void> {
+    if (!spec || !spec.ok || !spec.result.claimed || spec.result.evidence) return;
+    await this.prisma.signalCycleParticipant
+      .deleteMany({ where: { id: spec.result.claimed.id, status: SignalCycleStatus.INTENT } })
+      .catch(this.swallowedError('op@spec-claim-release'));
+  }
+
   private async placeEntryInner(
     agentId: string,
     instance: TradingAgentInstance,
@@ -9903,6 +10150,9 @@ await this.notifications
       exchangeBookProvenEmpty?: boolean;
       /** Authenticated position read from the fast preflight (boss 12 Oct: cut receive->submit). */
       provenEmptyAtMs?: number;
+      /** LIVE-FIX-1445: claim tx started in parallel with the Bitfinex preflight. */
+      speculativeClaim?: Promise<SpeculativeEntryClaim | null>;
+      speculativeConsumed?: boolean;
     },
     timing?: RelayExecutionTimingStages,
   ): Promise<boolean> {
@@ -10142,109 +10392,24 @@ await this.notifications
     let cluster: ReturnType<typeof assessCorrelatedExposureCluster>;
     try {
       if (timing) (timing.marks ??= {}).claimTx = Date.now();
-      const claimedAndAssessed = await this.prisma.$transaction(async (tx) => {
-        if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
-        await tx.$executeRawUnsafe(
-          'SELECT pg_advisory_xact_lock(hashtext($1))',
-          `copy-cluster:${instance.userId}:${agentId}`,
-        );
-        if (timing) (timing.marks ??= {}).claimLock = Date.now();
-        const claimed = await tx.signalCycleParticipant.create({
-          data: {
-            cycleId,
-            userId: instance.userId,
-            venue,
-            status: SignalCycleStatus.INTENT,
-          },
-        });
-        if (timing) (timing.marks ??= {}).claimInsert = Date.now();
-        const assessment = await this.correlatedExposureSnapshot({
-          userId: instance.userId, agentId, participantId: claimed.id,
-          cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
-          createdAtMs: Date.now(),
-        }, tx);
-        if (!assessment.allowed) {
-          const evidence = {
-            schema: 'correlated_exposure_cluster_v2',
-            event: assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
-              ? 'CORRELATED_CLUSTER_BLOCKED'
-              : 'CORRELATED_EXPOSURE_CLUSTER',
-            reason: assessment.reason,
-            candidate_trade_id: tradeId,
-            candidate_cycle_id: cycleId,
-            candidate_participant_id: claimed.id,
-            direction: intent.direction,
-            candidate_limit_price: limitPrice,
-            candidate_qty_btc: qty,
-            candidate_margin_usd: marginUsd,
-            same_direction_managed_or_reserved_count: assessment.sameDirectionCount,
-            reference_price_usd: limitPrice,
-            price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
-            price_boundary_pct: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 100,
-            price_boundary_bps: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 10_000,
-            price_boundary_inclusive: true,
-            aggregate_qty_btc: assessment.aggregateQty,
-            aggregate_margin_usd: assessment.aggregateMarginUsd,
-            nearest_trade_id: assessment.nearest?.tradeId ?? null,
-            nearest_cycle_id: assessment.nearest?.cycleId ?? null,
-            nearest_participant_id: assessment.nearest?.participantId ?? null,
-            nearest_price_distance_usd: assessment.nearest?.priceDistanceUsd ?? null,
-            nearest_price_distance_fraction: assessment.nearest?.priceDistanceFraction ?? null,
-            nearest_price_distance_pct:
-              assessment.nearest?.priceDistanceFraction != null
-                ? assessment.nearest.priceDistanceFraction * 100
-                : null,
-            nearest_price_distance_bps:
-              assessment.nearest?.priceDistanceFraction != null
-                ? assessment.nearest.priceDistanceFraction * 10_000
-                : null,
-            nearest_lifecycle_distance_sec: assessment.nearest?.lifecycleDistanceSec ?? null,
-            risk_state_available: assessment.reason !== 'RISK_STATE_UNAVAILABLE',
-            analysis_eligible: false,
-            analysis_exclusion_reasons: [
-              assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
-                ? 'CORRELATED_CLUSTER_BLOCKED'
-                : 'CORRELATED_CLUSTER_RISK_STATE_UNAVAILABLE',
-            ],
-          };
-          if (assessment.reason === 'RISK_STATE_UNAVAILABLE') {
-            await tx.signalCycleEvent.create({
-              data: {
-                cycleId,
-                participantId: null,
-                eventType: 'CORRELATED_EXPOSURE_CLUSTER',
-                payload: evidence as Prisma.InputJsonValue,
-              },
-            });
-            await tx.signalCycleParticipant.delete({ where: { id: claimed.id } });
-            return { claimed: null, assessment, evidence };
-          }
-          await tx.signalCycleEvent.create({
-            data: {
-              cycleId,
-              participantId: claimed.id,
-              eventType: 'CORRELATED_CLUSTER_BLOCKED',
-              payload: evidence as Prisma.InputJsonValue,
-            },
-          });
-          await tx.signalCycleParticipant.update({
-            where: { id: claimed.id },
-            data: { status: SignalCycleStatus.EXPIRED },
-          });
-          // Capacity is subscriber-specific. Do not terminalize the shared
-          // canonical cycle and suppress other subscribers' independent caps.
-          await tx.signalCycleEvent.create({
-            data: {
-              cycleId,
-              participantId: claimed.id,
-              eventType: 'EXPIRED',
-              payload: { ...evidence, event: 'CORRELATED_CLUSTER_BLOCKED' } as Prisma.InputJsonValue,
-            },
-          });
-          return { claimed, assessment, evidence };
+      const specKey = entryClaimKey({ cycleId, direction: intent.direction, limitPrice, qty, marginUsd });
+      const spec = fastPreflight?.speculativeClaim ? await fastPreflight.speculativeClaim : null;
+      let claimedAndAssessed: EntryClaimResult;
+      if (spec && spec.key === specKey) {
+        if (fastPreflight) fastPreflight.speculativeConsumed = true;
+        if (timing) (timing.marks ??= {}).claimSpeculative = Date.now();
+        if (!spec.ok) throw spec.error;
+        claimedAndAssessed = spec.result;
+      } else {
+        if (spec && fastPreflight) {
+          fastPreflight.speculativeConsumed = true;
+          await this.releaseSpeculativeClaim(spec);
         }
-        return { claimed, assessment, evidence: null };
-      });
+        claimedAndAssessed = await this.runEntryClaimTx({
+          instance, agentId, cycleId, tradeId, venue,
+          direction: intent.direction, limitPrice, qty, marginUsd, timing,
+        });
+      }
       claimParticipantId = claimedAndAssessed.claimed?.id ?? null;
       cluster = claimedAndAssessed.assessment;
     if (timing) (timing.marks ??= {}).claimCluster = Date.now();
@@ -10543,7 +10708,28 @@ await this.notifications
       let promotedAtAck = false;
       if (participant && venue === 'bitfinex') {
         if (timing) (timing.marks ??= {}).fillProbe = Date.now();
-        for (const delayMs of [0, 200, 450, 800]) {
+        // LIVE-FIX-1445: the submit response already says EXECUTED for a
+        // marketable entry; protect from it without another exchange read.
+        const submitFill = submitResponseFill(
+          (this.activeTrading as { takeSubmitFill?: (id: number) => unknown }).takeSubmitFill?.(orderId),
+          qty,
+        );
+        if (submitFill) {
+          try {
+            const meta = await this.loadExecutionMeta(participant.id);
+            promotedAtAck = await this.recordCancelRaceFill(
+              agentId, instance.userId,
+              { id: participant.cycle.id, status: participant.cycle.status, tradeId: participant.cycle.tradeId ?? tradeId },
+              participant.id, meta, creds, intent,
+              { ...submitFill, fillPrice: submitFill.fillPrice > 0 ? submitFill.fillPrice : limitPrice },
+              'SUBMIT_RESPONSE_FILL',
+            );
+            if (timing) (timing.marks ??= {}).fillPromoted = Date.now();
+          } catch (err) {
+            this.logger.warn(`[POST-ACK-FILL] submit-response promotion failed trade=${tradeId}: ${err instanceof Error ? err.message : err}`);
+          }
+        }
+        for (const delayMs of promotedAtAck ? [] : [0, 200, 450, 800]) {
           if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
           try {
             const probeMeta = await this.loadExecutionMeta(participant.id);
