@@ -31,6 +31,15 @@ PAPER_CLOSED_LIVE_OPEN_SEC = 30.0
 ORPHAN_WHEN_FLAT_SEC = 60.0
 EXCHANGE_READ_MAX_AGE_SEC = 180.0
 EXIT_DRIFT_BP = 5.0
+# LIVE-FIX-1715: closed-trade paper-vs-live parity (exit reason / exit drift)
+# is history, not open money risk. Below this |bp| a closed-trade exit drift
+# is AMBER and never paints the top-level verdict RED; at/above it the drift
+# itself is large enough to count as money risk (RED).
+EXIT_DRIFT_MONEY_RISK_BP = 10.0
+# Alert codes that describe paper-vs-live parity of a trade. On a CLOSED trade
+# they are classed "historical_parity" (parity_verdict), not money risk.
+HISTORICAL_PARITY_CODES = frozenset({"EXIT_DRIFT_BP", "EXIT_REASON_MISMATCH", "PRICE_DRIFT_VS_PAPER"})
+MONEY_RISK, HISTORICAL_PARITY = "money_risk", "historical_parity"
 ENTRY_DRIFT_RED_BP = 10.0
 CLOCK_OFFSET_AMBER_MS = 1000.0
 
@@ -422,12 +431,18 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
                 add("PAPER_CLOSED_LIVE_OPEN", RED, correlation_id=it["correlation_id"], account=a["account"],
                     since_paper_close_sec=round(now - pexit, 1))
             d = a.get("drift") or {}
+            closed = not a.get("open")
             if d.get("exit_price_bp") is not None and abs(d["exit_price_bp"]) > EXIT_DRIFT_BP:
-                add("EXIT_DRIFT_BP", RED, correlation_id=it["correlation_id"], account=a["account"], bp=d["exit_price_bp"])
+                big = abs(d["exit_price_bp"]) >= EXIT_DRIFT_MONEY_RISK_BP
+                add("EXIT_DRIFT_BP", RED if (big or not closed) else AMBER, correlation_id=it["correlation_id"],
+                    account=a["account"], bp=d["exit_price_bp"], closed=closed,
+                    alert_class=HISTORICAL_PARITY if (closed and not big) else MONEY_RISK)
             if d.get("entry_price_bp") is not None and abs(d["entry_price_bp"]) > ENTRY_DRIFT_RED_BP:
                 add("ENTRY_DRIFT_BP", RED, correlation_id=it["correlation_id"], account=a["account"], bp=d["entry_price_bp"])
             if d.get("exit_reason_match") is False:
-                add("EXIT_REASON_MISMATCH", RED, correlation_id=it["correlation_id"], account=a["account"])
+                add("EXIT_REASON_MISMATCH", AMBER if closed else RED, correlation_id=it["correlation_id"],
+                    account=a["account"], closed=closed,
+                    alert_class=HISTORICAL_PARITY if closed else MONEY_RISK)
             if a.get("hop_order_violations"):
                 add("HOP_ORDER_INCONSISTENT", AMBER, correlation_id=it["correlation_id"], account=a["account"],
                     hops=a["hop_order_violations"])
@@ -447,6 +462,31 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
     if off is not None and abs(off) > CLOCK_OFFSET_AMBER_MS:
         add("CLOCK_OFFSET_HIGH", AMBER, offset_ms=off)
     return out
+
+
+def alert_class(a: Mapping[str, Any]) -> str:
+    """LIVE-FIX-1715: money_risk unless the alert is closed-trade parity history."""
+    if a.get("alert_class") in (MONEY_RISK, HISTORICAL_PARITY):
+        return a["alert_class"]
+    if a.get("code") in HISTORICAL_PARITY_CODES and a.get("closed") and a.get("severity") != RED:
+        return HISTORICAL_PARITY
+    return MONEY_RISK
+
+
+def split_verdicts(al: Iterable[Mapping[str, Any]]) -> dict:
+    """Top-level verdict = money_risk_verdict (open exposure / live capability).
+    Closed-trade parity alerts stay listed but only drive parity_verdict."""
+    money, parity = GREEN, GREEN
+    money_codes, parity_codes = set(), set()
+    for a in al or []:
+        if alert_class(a) == HISTORICAL_PARITY:
+            parity = worst(parity, a.get("severity") or AMBER)
+            parity_codes.add(a["code"])
+        else:
+            money = worst(money, a.get("severity") or AMBER)
+            money_codes.add(a["code"])
+    return {"money_risk_verdict": money, "parity_verdict": parity,
+            "money_risk_codes": sorted(money_codes), "parity_codes": sorted(parity_codes)}
 
 
 def build(ctx: Mapping[str, Any], *, now: float) -> dict:
@@ -476,12 +516,11 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
     resolved_al = [dict(a, resolution=resolved[a["correlation_id"]]) for a in al
                    if a.get("correlation_id") and a["correlation_id"] in resolved]
     al = [a for a in al if not (a.get("correlation_id") and a["correlation_id"] in resolved)]
-    verdict = GREEN
-    for a in al:
-        verdict = worst(verdict, a["severity"])
+    split = split_verdicts(al)
     live = [i for i in intents if not i.get("expired")]
     return {
-        "schema": SCHEMA, "verdict": verdict, "arming": arming, "alerts": al, "resolved_alerts": resolved_al,
+        "schema": SCHEMA, "verdict": split["money_risk_verdict"], **split,
+        "arming": arming, "alerts": al, "resolved_alerts": resolved_al,
         "alert_codes": sorted({a["code"] for a in al}), "exchange": exchange, "clock": clock,
         "intents": live[:100], "intents_expired": len(intents) - len(live), "gap_ttl_sec": GAP_TTL_SEC,
         "hops": list(ENTRY_HOPS), "computed_at_ts": now,

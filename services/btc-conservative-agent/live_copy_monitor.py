@@ -26,6 +26,7 @@ LAG_RED_SEC = 10.0
 PRICE_DRIFT_AMBER_BP = 5.0
 PRICE_DRIFT_RED_BP = 15.0
 SIZE_DRIFT_RED_FRACTION = 0.01
+PARITY_GAP_CODES = frozenset({"PRICE_DRIFT_VS_PAPER", "EXIT_DRIFT_BP", "EXIT_REASON_MISMATCH"})
 
 # Ordered chain hops: (name, from_stage, to_stage)
 STAGES = (
@@ -182,7 +183,8 @@ def detect_gaps(chains: Mapping[str, Any], paper_twins: Mapping[str, Mapping[str
             sev = RED if abs(drift_bp) >= PRICE_DRIFT_RED_BP else AMBER if abs(drift_bp) >= PRICE_DRIFT_AMBER_BP else None
             if sev:
                 gaps.append({"code": "PRICE_DRIFT_VS_PAPER", "severity": sev, "correlation_id": cid,
-                             "account": acct, "drift_bp": drift_bp, "paper": paper_px, "live": live_px})
+                             "account": acct, "drift_bp": drift_bp, "paper": paper_px, "live": live_px,
+                             "closed": bool(ch.get("closed"))})
         paper_qty = _f(twin.get("qty"))
         live_qty = ch.get("fill_qty") or ch.get("order_qty")
         if paper_qty and live_qty:
@@ -228,8 +230,18 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
     armed_tiles = [r.get("lane") for r in switch_rows or [] if r.get("bitfinex_live_orders")]
     eligible = [r.get("lane") for r in switch_rows or [] if r.get("relay_eligible")]
     live_capable = output_on and bool(armed_tiles)
+    # LIVE-FIX-1715: closed-trade parity gaps (e.g. PRICE_DRIFT_VS_PAPER under
+    # the RED bp threshold on a closed copy) stay in causes but only drive
+    # parity_verdict; the top-level verdict is open money risk / capability.
+    parity_verdict = GREEN
+    parity_causes: list[str] = []
     for g in gaps:
         causes.append(g["code"])
+        if (g.get("code") in PARITY_GAP_CODES and g.get("closed")
+                and (g.get("severity") or AMBER) != RED):
+            parity_causes.append(g["code"])
+            parity_verdict = worst(parity_verdict, g.get("severity") or AMBER)
+            continue
         verdict = worst(verdict, g.get("severity") or AMBER)
     p95 = ((lags.get("all") or {}).get("intent->exchange_ack") or {}).get("p95")
     if p95 is not None:
@@ -258,6 +270,8 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
     return {
         "schema": SCHEMA, "verdict": verdict, "state": state,
         "causes": sorted(set(causes)),
+        "money_risk_verdict": verdict, "parity_verdict": parity_verdict,
+        "parity_causes": sorted(set(parity_causes)),
         "output_on": output_on, "force_paper_mode": bool(force_paper_mode),
         "relay_stack_mode": relay_stack_mode, "tiles_live_on": armed_tiles,
         "tiles_relay_eligible": eligible, "gap_count": len(gaps),
