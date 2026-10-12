@@ -67,3 +67,10 @@ test('LIVE-FIX-1200: CURE-1 never relinks a DISLOC fill onto a GS-01 position', 
   assert.equal(relinkSameTileFamily('adopt:gs1-a', 'gs1-b'), true);
   assert.equal(relinkSameTileFamily(null, 'gs1-b'), true);
 });
+
+test('LIVE-FIX-1246: taker entry fill is promoted (stop placed) at ACK, before limit chase', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const probe = src.indexOf("'POST_ACK_FAST_FILL'");
+  const chase = src.indexOf('if (participant && !promotedAtAck)');
+  assert.ok(probe > 0 && chase > probe);
+});

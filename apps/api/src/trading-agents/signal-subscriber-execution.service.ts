@@ -10464,8 +10464,38 @@ await this.notifications
 
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { cycleId_userId: { cycleId, userId: instance.userId } },
+        include: { cycle: { select: { id: true, status: true, tradeId: true } } },
       });
-      if (participant) {
+      // LIVE-FIX-1246: marketable/taker entries fill at the ACK. Waiting for the
+      // next money tick + reconcile put the reduce-only stop 5-9 s after the
+      // fill (dsl-1791769061-3: ack 01:37:43.7, stop armed 01:37:52.4). Probe
+      // the exact order right away and promote through the normal fill funnel
+      // (claim-guarded, idempotent with the tick) so the stop goes out <1 s.
+      let promotedAtAck = false;
+      if (participant && venue === 'bitfinex') {
+        if (timing) (timing.marks ??= {}).fillProbe = Date.now();
+        for (const delayMs of [0, 200, 450, 800]) {
+          if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          try {
+            const probeMeta = await this.loadExecutionMeta(participant.id);
+            const fill = await this.detectEntryFillBeforeCancel(creds, probeMeta);
+            if (fill && fill.filledQty > 0 && !fill.orderResting) {
+              promotedAtAck = await this.recordCancelRaceFill(
+                agentId, instance.userId,
+                { id: participant.cycle.id, status: participant.cycle.status, tradeId: participant.cycle.tradeId ?? tradeId },
+                participant.id, probeMeta, creds, intent, fill, 'POST_ACK_FAST_FILL',
+              );
+              if (timing) (timing.marks ??= {}).fillPromoted = Date.now();
+              break;
+            }
+            if (fill && fill.orderResting) break; // resting/partial: tick + chase own it
+          } catch (err) {
+            this.logger.warn(`[POST-ACK-FILL] probe failed trade=${tradeId}: ${err instanceof Error ? err.message : err}`);
+            break;
+          }
+        }
+      }
+      if (participant && !promotedAtAck) {
         await this.applyLimitChase(
           agentId,
           instance.userId,
