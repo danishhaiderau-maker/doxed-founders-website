@@ -299,12 +299,50 @@ async function bitfinexAuthPostOnce<T>(
   return parsed as T;
 }
 
+/** LIVE-FIX-1505: pure side check. Sell stop must be below the bid; buy stop above the ask. */
+export function stopSideViolation(amount: number, stopPrice: number, bid: number, ask: number): string | null {
+  if (!(stopPrice > 0) || !(bid > 0) || !(ask > 0) || !Number.isFinite(amount) || amount === 0) return null;
+  if (amount < 0 && stopPrice >= bid) return `SELL_STOP_AT_OR_ABOVE_BID stop=${stopPrice} bid=${bid}`;
+  if (amount > 0 && stopPrice <= ask) return `BUY_STOP_AT_OR_BELOW_ASK stop=${stopPrice} ask=${ask}`;
+  return null;
+}
+
+export const stopSideRefusals: Array<{ at_ms: number; symbol: string; amount: number; price: number; reason: string }> = [];
+let stopSideTickerFetch: (symbol: string) => Promise<{ bid: number; ask: number } | null> = async (symbol) => {
+  const res = await fetch(`https://api-pub.bitfinex.com/v2/ticker/${encodeURIComponent(symbol)}`, { signal: AbortSignal.timeout(1500) });
+  if (!res.ok) return null;
+  const t = (await res.json()) as unknown[];
+  return Array.isArray(t) ? { bid: Number(t[0]), ask: Number(t[2]) } : null;
+};
+export function setStopSideTickerFetchForTests(fn: typeof stopSideTickerFetch): void { stopSideTickerFetch = fn; }
+
+/** Throws STOP_SIDE_REFUSED for a wrong-side protective stop. Ticker failure never blocks the stop. */
+export async function assertProtectiveStopSide(apiPath: string, body: Record<string, unknown>): Promise<void> {
+  if (!isBitfinexProtectiveStopSubmit(apiPath, body)) return;
+  const symbol = String(body.symbol ?? '');
+  const amount = Number(body.amount);
+  const price = Number(body.price);
+  let quote: { bid: number; ask: number } | null = null;
+  try { quote = await stopSideTickerFetch(symbol); } catch { quote = null; }
+  if (!quote) {
+    console.warn(`[STOP-SIDE-GUARD] ticker unavailable symbol=${symbol}; stop sent unchecked`);
+    return;
+  }
+  const reason = stopSideViolation(amount, price, quote.bid, quote.ask);
+  if (!reason) return;
+  stopSideRefusals.push({ at_ms: Date.now(), symbol, amount, price, reason });
+  if (stopSideRefusals.length > 100) stopSideRefusals.shift();
+  console.error(`[STOP-SIDE-GUARD] REFUSED ${reason} symbol=${symbol} amount=${amount} cid=${String(body.cid ?? '')}`);
+  throw new Error(`STOP_SIDE_REFUSED: ${reason}`);
+}
+
 export async function bitfinexAuthPost<T = unknown>(
   creds: ExchangeCredentials,
   apiPath: string,
   body: Record<string, unknown> = {},
   timeoutMs = 12_000,
 ): Promise<T> {
+  await assertProtectiveStopSide(apiPath, body);
   const lane = nonceLaneFor(creds.apiKey);
   const enqueuedAtMs = Date.now();
   const deadlineAtMs = enqueuedAtMs + Math.max(1, timeoutMs);

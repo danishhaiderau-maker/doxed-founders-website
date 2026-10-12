@@ -6659,8 +6659,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
       // LIVE-FIX-1503: one-time stale-lot cleanup (inside the tick mutex) and periodic diagnostics.
-      if (!this.staleLotCleanupDone) {
-        this.staleLotCleanupDone = true;
+      // LIVE-FIX-1505: periodic (every 5 min), not once per process.
+      if (Date.now() - this.lastStaleLotCheckAtMs > 5 * 60_000) {
+        this.lastStaleLotCheckAtMs = Date.now();
+        await this.logOrphanOpenCycles(agent.id).catch((err) =>
+          this.logger.warn(`[STALE-CYCLE-CHECK] failed: ${err instanceof Error ? err.message : err}`));
         await this.cleanupStaleOpenLots(agent.id, instances).catch((err) =>
           this.logger.error(`[STALE-LOT-CLEANUP] failed: ${err instanceof Error ? err.message : err}`));
       }
@@ -12224,7 +12227,7 @@ await this.notifications
     return refresh().catch(() => null);
   }
 
-  private staleLotCleanupDone = false;
+  private lastStaleLotCheckAtMs = 0;
   private lastExecutorDiagAtMs = 0;
 
   /**
@@ -12287,7 +12290,22 @@ await this.notifications
         this.logger.warn(`[STALE-LOT-CLEANUP] closed participant=${lot.id} cycle=${lot.cycleId} trade=${lot.cycle?.tradeId ?? '-'} prev=${lot.status} reason=${d.reason}`);
       }
       this.logger.log(`[STALE-LOT-CLEANUP] user=${instance.userId} open_lots=${lots.length} cleaned=${cleaned} account_flat=${acct.readOk && !acct.positionAmount && !acct.openOrders}`);
+      if (lots.length > cleaned && acct.readOk && !acct.positionAmount && !acct.openOrders) {
+        this.logger.error(`[STALE-LOT-ALERT] user=${instance.userId} ${lots.length - cleaned} non-terminal lot(s) on a flat account`);
+      }
     }
+  }
+
+  /** LIVE-FIX-1505 (read-only): cycles still OPEN/PENDING_ENTRY whose every participant is terminal. */
+  private async logOrphanOpenCycles(agentId: string): Promise<void> {
+    const cycles = await this.prisma.signalCycle.findMany({
+      where: { agentId, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] }, updatedAt: { lt: new Date(Date.now() - 5 * 60_000) } },
+      select: { id: true, tradeId: true, status: true, participants: { select: { status: true } } },
+      take: 200,
+    });
+    const terminal = new Set<string>([SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED]);
+    const orphans = cycles.filter((c) => c.participants.length > 0 && c.participants.every((p) => terminal.has(p.status)));
+    this.logger.log(`[STALE-CYCLE-CHECK] non_terminal_cycles=${cycles.length} all_participants_terminal=${orphans.length}${orphans.length ? ' ids=' + orphans.slice(0, 20).map((c) => `${c.id}:${c.tradeId ?? '-'}:${c.status}`).join(',') : ''}`);
   }
 
   /** LIVE-FIX-1503: executor-vantage DB and Bitfinex timings (logs only). */
@@ -12333,6 +12351,27 @@ await this.notifications
         out.bfx_signed_active_orders_ms = summarize(signed);
       } catch (e) { out.bfx_signed_active_orders_ms = String(e); }
     }
+    // LIVE-FIX-1504 (read-only): lot status evidence for the stale-lot cleanup audit.
+    try {
+      const users = instances.filter((i) => i.exchangeProvider === 'bitfinex').map((i) => i.userId);
+      const groups = await this.prisma.signalCycleParticipant.groupBy({
+        by: ['userId', 'status'],
+        where: { userId: { in: users }, status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] } },
+        _count: { _all: true },
+      });
+      out.lots_non_terminal = groups.map((g) => ({ user: g.userId, status: g.status, n: g._count._all }));
+      const ids = (process.env.RELAY_DIAG_CYCLE_IDS ?? 'cmv59vxr30043np01amp57b3t').split(',').map((x) => x.trim()).filter(Boolean);
+      const rows = await this.prisma.signalCycleParticipant.findMany({
+        where: { cycleId: { in: ids } },
+        select: { id: true, cycleId: true, status: true, updatedAt: true, terminalCloseConfirmedAt: true,
+          createdAt: true, cycle: { select: { status: true, tradeId: true, updatedAt: true, createdAt: true, intentEnvelope: true } },
+          events: { select: { eventType: true, createdAt: true }, orderBy: { createdAt: 'asc' } } },
+      });
+      out.lot_evidence = rows.map((r) => ({ participant: r.id, cycle: r.cycleId, status: r.status, updated_at: r.updatedAt.toISOString(),
+        terminal_confirmed_at: r.terminalCloseConfirmedAt?.toISOString() ?? null, cycle_status: r.cycle?.status, trade_id: r.cycle?.tradeId, created_at: r.createdAt.toISOString(), cycle_created_at: r.cycle?.createdAt?.toISOString(),
+        envelope_ids: (() => { const e = (r.cycle?.intentEnvelope ?? {}) as Record<string, unknown>; return { trade_id: e.trade_id ?? e.tradeId ?? null, signal_id: e.signal_id ?? e.signalId ?? null, source_event_id: e.source_event_id ?? null }; })(),
+        events: r.events.map((e) => `${e.eventType}@${e.createdAt.toISOString()}`) }));
+    } catch (e) { out.lot_evidence = String(e); }
     this.logger.log(`[EXECUTOR-DIAG] ${JSON.stringify(out)}`);
   }
 
