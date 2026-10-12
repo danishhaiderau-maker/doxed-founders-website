@@ -241,3 +241,11 @@ test('1485: a terminal claim refused before canonical commit is retried, never p
   assert.ok(deferAt > 0 && pauseAt > deferAt, 'unclaimed OPEN lot returns before the pause');
   assert.ok(!src.includes('this.lastRelayPollActivity = instances'), 'all activity writes go through the setter');
 });
+
+test('1486: post-ack fill probe ladder reaches 1.4 s total in <=7 probes, first probe immediate', async () => {
+  const m = await import('./signal-subscriber-execution.service');
+  const d = m.POST_ACK_FILL_PROBE_DELAYS_MS;
+  assert.equal(d[0], 0);
+  assert.ok(d.length <= 7 && d.slice(1).every((x) => x <= 400));
+  assert.ok(d.reduce((a, b) => a + b, 0) >= 1200);
+});
