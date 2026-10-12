@@ -39,7 +39,8 @@ def _ai(long_score=70, short_score=30, raw_direction=None, **extra):
 def test_registry_owns_the_first_paper_only_relay_ineligible_freeze_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert policy.LANE in ACTIVE_TILE_ORDER
+    import combo_pathway_config as _cpc
+    assert policy.LANE in _cpc.RETIRED_TILE_LANES and policy.LANE not in ACTIVE_TILE_ORDER  # retired 12 Oct 10:57, spec kept
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is True
     assert spec["id_prefix"] == "cft" and spec["max_active_signals"] == 3
@@ -110,6 +111,6 @@ def test_runtime_tile_view_refuses_uncommitted_and_inverts_committed():
         shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
         snapshot = copy.deepcopy(shared)
         ai, direction, spread, _ = bot._tile_view_of_shared_call(
-            policy.LANE, raw, shared, _admission(raw), "LONG", 4,
+            "FAMILY_GS06_COMMITTED_FADE_ATR_TP", raw, shared, _admission(raw), "LONG", 4,  # H-A retired; GS-06 shares the rule
         )
         assert direction == expected and shared == snapshot

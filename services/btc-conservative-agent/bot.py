@@ -32113,7 +32113,7 @@ def _disloc_recent_trades():
 
 
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
-    """Tile 9 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
+    """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
     if not hasattr(evaluator, "bind_runtime"):
         return
     import disloc_engine as _dsl
@@ -46422,7 +46422,7 @@ def monitor_tiles_trades():
 
 @app.route('/api/monitor/tiles/disloc', methods=["GET"])
 def monitor_tiles_disloc():
-    """Tile 9 DISLOC / Tile 10 DISLOC-FOI (?variant=foi) paper readout: fill rate, unfilled-order rate, delays, mean bp, verdict. ?rows=20 (max 200)."""
+    """Tile 6 DISLOC / Tile 7 DISLOC-FOI (?variant=foi) paper readout: fill rate, unfilled-order rate, delays, mean bp, verdict. ?rows=20 (max 200)."""
     import disloc_engine as _dsl
 
     def build(now):

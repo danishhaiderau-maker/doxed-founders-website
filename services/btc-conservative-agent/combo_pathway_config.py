@@ -183,13 +183,11 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 # H-A, H-C, the control, GS-01, B1, B2, B3, GS-06, GS-07, the Danish regime
 # router, and the fade pool.
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_FAMILY_COMMITTED_FADE_TAKER_90,
     RESEARCH_LANE_FAMILY_RANDOM_CONTROL_TAKER_90,
     RESEARCH_LANE_FAMILY_GS01_XV_PREMIUM_ATR_TP,
     RESEARCH_LANE_FAMILY_GSB1_CVD_DIV_REGIME,
     RESEARCH_LANE_FAMILY_GSB2_REGIME_SWITCHER,
     RESEARCH_LANE_FAMILY_GS06_COMMITTED_FADE_ATR_TP,
-    RESEARCH_LANE_FAMILY_GS07_FAST_PREMIUM_FADE,
     RESEARCH_LANE_FAMILY_DISLOC_BFX_DISLOCATION_1M,
     RESEARCH_LANE_FAMILY_DISLOC_FOI_LONG_1M,
 )
@@ -1827,6 +1825,11 @@ RETIRED_TILE_LANES = frozenset({
     # walk-forward (TILE8-ROUTER-DIAGNOSIS-20261012). Live + paper OFF first;
     # all data kept. Active tiles renumber 1..9 (DISLOC=8, DISLOC-FOI=9).
     "FAMILY_DANISH_REGIME_ROUTER",
+    # Retired 2026-10-12 10:57 AEDT (owner, Danish): Tile 1 H-A (-$0.66, n=159)
+    # and Tile 7 GS-07 (-$0.56, n=199) on real-touch prices. Paper + live OFF;
+    # all data kept. Active tiles renumber 1..7: CTRL, GS-01, B1, B2, GS-06,
+    # DISLOC, DISLOC-FOI.
+    "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE",
 })
 # Retired 2026-10-11 tiles whose policy modules stay in-tree (not spawned,
 # not numbered): H-C's evaluator is still the fixture for generic cross-venue
@@ -1837,6 +1840,8 @@ RETIRED_KEPT_POLICY_MODULES = frozenset({
     "paper_policy_family_fade_pool.py",
     "paper_policy_family_gs07_v07_premium_fade_60m.py",
     "paper_policy_family_danish_regime_router.py",
+    "paper_policy_family_committed_fade_taker_90.py",
+    "paper_policy_family_gs07_fast_premium_fade.py",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",

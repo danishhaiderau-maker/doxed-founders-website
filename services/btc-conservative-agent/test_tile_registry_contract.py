@@ -108,7 +108,9 @@ EXPECTED_ORDER_ALL = FREEZE21_ORDER + GS_ORDER + GS_B_ORDER + GS_MID_EPOCH_ORDER
 # 2026-10-11 retirement (owner): H-C, B3, FADE-POOL and V07 leave the roster.
 RETIRED_20261011_LANES = ("FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
                           "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M",
-                          "FAMILY_DANISH_REGIME_ROUTER")  # + 12 Oct ROUTER
+                          "FAMILY_DANISH_REGIME_ROUTER",  # + 12 Oct ROUTER
+                          "FAMILY_COMMITTED_FADE_TAKER_90",
+                          "FAMILY_GS07_FAST_PREMIUM_FADE")  # + 12 Oct 10:57 H-A, GS-07
 EXPECTED_ORDER = tuple(lane for lane in EXPECTED_ORDER_ALL if lane not in RETIRED_20261011_LANES)
 ACTIVE_GS_B_ORDER = tuple(lane for lane in GS_B_ORDER if lane not in RETIRED_20261011_LANES)
 # PHASE02 retirement (owner, 2026-10-07): the five freeze21b losers.
@@ -141,7 +143,7 @@ def test_active_registry_is_three_hypotheses_the_control_then_the_gs_and_b_tiles
         assert tile["platform_relay_eligible"] is False and tile["live_copy_eligible"] is False
         assert tile["entry_policy"]["mode"] == "REGIME_ADAPTIVE" and tile["pre_registration"]["mid_epoch_addition"]
     phase03 = [ACTIVE_TILE_REGISTRY[lane] for lane in PHASE03_ORDER if lane not in RETIRED_20261011_LANES]
-    assert [t["id_prefix"] for t in phase03] == ["gs7"]
+    assert [t["id_prefix"] for t in phase03] == []  # GS-07 retired 12 Oct 10:57
     for tile in phase03:
         assert tile["policy_epoch"] == tile["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
         assert tile["default_enabled"] is False and tile["paper_only"] is True
@@ -266,7 +268,7 @@ def test_every_tile_publishes_entry_exit_risk_card_sections():
 
 
 def test_validator_fails_when_a_tile_lacks_card_metadata():
-    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    lane = "FAMILY_RANDOM_CONTROL_TAKER_90"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:
@@ -323,7 +325,7 @@ def test_trend_fade_and_committed_fade_are_one_atomic_retirement():
     # active tile (H-A, the committed fade) is registered on them.
     inverted_users = [lane for lane in ACTIVE_TILE_ORDER
                       if ACTIVE_TILE_REGISTRY[lane]["entry_policy"].get("direction_source") == "INVERTED_SCORE_LED_SIDE"]
-    assert inverted_users == ["FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GSB2_REGIME_SWITCHER",
+    assert inverted_users == ["FAMILY_GSB2_REGIME_SWITCHER",
                               "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
     assert "INVERTED_SCORE_LED_SIDE" in taker_time_exit_binding.DIRECTION_SOURCES
     assert callable(taker_time_exit_binding.committed_call_refusal)
@@ -385,7 +387,7 @@ def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
 
 
 def test_default_on_is_refused_for_anything_but_a_paper_only_relay_blocked_tile():
-    lane = "FAMILY_COMMITTED_FADE_TAKER_90"
+    lane = "FAMILY_RANDOM_CONTROL_TAKER_90"
     spec = ACTIVE_TILE_REGISTRY[lane]
     original = dict(spec)
     try:
@@ -507,3 +509,17 @@ def test_bot_version_label_derives_the_tile_count_from_the_registry():
 def test_retired_tiles_cannot_be_switched_live():
     src = open(__import__("os").path.join(__import__("os").path.dirname(__file__), "bot.py")).read()
     assert '"error": "TILE_RETIRED"' in src
+
+
+def test_ha_and_gs07_retired_and_roster_renumbered_1_to_7():
+    import combo_pathway_config as registry
+
+    for lane in ("FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE"):
+        assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_REGISTRY
+        assert lane in registry.COMBO_LANE_SPECS  # spec + data kept
+    assert [registry.tile_number(l) for l in ACTIVE_TILE_ORDER] == list(range(1, 8))
+    assert ACTIVE_TILE_ORDER == (
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+        "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
+        "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+        "FAMILY_DISLOC_FOI_LONG_1M")
