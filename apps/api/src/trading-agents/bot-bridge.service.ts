@@ -257,12 +257,29 @@ export class BotBridgeService {
   }
 
   /** Cache-first relay snapshot pushed by the canonical Fly bot. */
+  private pushedCacheDeadUntilMs = 0;
+  private pushedCacheDeadWarnAtMs = 0;
+
   private async fetchCachedRelaySnapshot(maxAgeMs = 15_000): Promise<BotApiState | null> {
+    // LIVE-FIX-1330: Fly runs RELAY_STACK_MODE=research_only, so its pusher is
+    // off by design and the pushed cache went 7.8 days stale. Every execution
+    // read still paid a cache read + WARN before going to Fly. Once the cache is
+    // dead (>10 min), skip it for 30 s and warn at most every 10 min.
+    const nowMs = Date.now();
+    if (nowMs < this.pushedCacheDeadUntilMs) return null;
     try {
       const cached = await this.showcaseSnapshot.getCachedSnapshot();
       if (!cached.snapshot) return null;
       const ageMs = cached.at ? Date.now() - cached.at.getTime() : Number.MAX_SAFE_INTEGER;
       if (ageMs > maxAgeMs) {
+        if (ageMs > 600_000) {
+          this.pushedCacheDeadUntilMs = nowMs + 30_000;
+          if (nowMs - this.pushedCacheDeadWarnAtMs > 600_000) {
+            this.pushedCacheDeadWarnAtMs = nowMs;
+            this.logger.warn(`Pushed showcase snapshot dead (${Math.round(ageMs / 1000)}s; Fly publisher off in research_only) — reading Fly directly`);
+          }
+          return null;
+        }
         this.logger.warn(`Cached showcase snapshot stale (${Math.round(ageMs / 1000)}s) — falling back to live bot`);
         return null;
       }

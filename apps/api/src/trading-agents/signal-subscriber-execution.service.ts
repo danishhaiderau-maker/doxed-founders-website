@@ -120,6 +120,7 @@ const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
 const VENUE_MARGIN_EVIDENCE_TTL_MS = 10 * 60_000;
+const DERIVATIVES_AVAIL_CACHE = new Map<string, { value: number; atMs: number; refreshing: boolean }>();
 const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
@@ -6546,7 +6547,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         select: { id: true, status: true },
       }),
       this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
-      this.activeTrading.getDerivativesAvailableUsd(creds).catch(() => null),
+      this.derivativesAvailableSwr(instance.userId, creds),
       this.activeTrading.getMarkPrice().catch(() => null),
     ]);
     const [cycles, marginCap, preflight] = await Promise.all([
@@ -6649,6 +6650,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ) as TradingAgentInstance['dashboardState'],
     };
     const managedOrderIds = new Set(activeOrders.map((order) => order.id));
+    if (timing) (timing.marks ??= {}).eligibility = Date.now();
     const eligibility = await this.evaluateEntryEligibility(
       creds,
       {
@@ -9692,6 +9694,7 @@ await this.notifications
     // it when placement finished put executor_decided after order_sent.
     const decidedAtMs = Date.now();
     try {
+      if (timing) (timing.marks ??= {}).placeEntry = Date.now();
       placed = await this.placeEntryInner(
         agentId, instance, cycleId, envelopeJson, creds, marginCap, tradeId, venue, fastPreflight, timing,
       );
@@ -10076,6 +10079,7 @@ await this.notifications
     // released (deleted) if order placement fails, so a future tick can retry.
     let cluster: ReturnType<typeof assessCorrelatedExposureCluster>;
     try {
+      if (timing) (timing.marks ??= {}).claimTx = Date.now();
       const claimedAndAssessed = await this.prisma.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(
           'SELECT pg_advisory_xact_lock(hashtext($1))',
@@ -11606,6 +11610,31 @@ await this.notifications
    * 3 attempts (backoff 0.5 s, 1.5 s) before surfacing the error, so one bad
    * edge response no longer pauses and disarms a live relay.
    */
+  /**
+   * LIVE-FIX-1330: Bitfinex auth calls are serialized per API key, so the
+   * wallet read added a full round trip (~0.3 s) to every signed entry
+   * preflight. Margin sufficiency is not a flat/ownership proof (the exchange
+   * still rejects an under-margined order), so serve a <=10 min value and
+   * refresh it in the background; only a cold cache waits.
+   */
+  private async derivativesAvailableSwr(userId: string, creds: ExchangeCredentials): Promise<number | null> {
+    const nowMs = Date.now();
+    const hit = DERIVATIVES_AVAIL_CACHE.get(userId);
+    const refresh = async () => {
+      const value = await this.activeTrading.getDerivativesAvailableUsd(creds);
+      DERIVATIVES_AVAIL_CACHE.set(userId, { value, atMs: Date.now(), refreshing: false });
+      return value;
+    };
+    if (hit && nowMs - hit.atMs <= 600_000) {
+      if (nowMs - hit.atMs > 3_000 && !hit.refreshing) {
+        hit.refreshing = true;
+        setTimeout(() => { void refresh().catch(() => { hit.refreshing = false; }); }, 1_500);
+      }
+      return hit.value;
+    }
+    return refresh().catch(() => null);
+  }
+
   private async readOpenPositionDetailWithRetry(
     creds: Parameters<ExecutionTradingClient['getOpenPositionDetail']>[0],
   ): Promise<Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>> {

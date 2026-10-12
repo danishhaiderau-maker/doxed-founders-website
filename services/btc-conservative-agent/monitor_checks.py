@@ -104,7 +104,8 @@ def pnl_reconcile(totals: Mapping[str, Any], rows_by_lane: Mapping[str, list], l
 # ----------------------------------------------------------------------------- rules conformance
 def rules_conformance(*, active_tiles: Iterable[str], retired_tiles: Iterable[str],
                       live_copy_tiles: Mapping[str, Mapping[str, Any]] | None, open_lanes: Iterable[str],
-                      fee_rates_bp: Mapping[str, Any], totals_lanes: Mapping[str, Any]) -> dict:
+                      fee_rates_bp: Mapping[str, Any], totals_lanes: Mapping[str, Any],
+                      partial_exit_tiles: Iterable[str] = ()) -> dict:
     """Danish's standing rules: zero fees; every dashboard tile live-copyable; retired tiles never trade
     or copy; deploy flattens never counted in strategy stats."""
     reasons = []
@@ -120,6 +121,10 @@ def rules_conformance(*, active_tiles: Iterable[str], retired_tiles: Iterable[st
                 reasons.append(f"{t} has no live-copy switch (not live-copyable)")
             elif not info.get("live_eligible", info.get("copyable", False)):
                 reasons.append(f"{t} not live-copyable")
+            # LIVE-FIX-1330: an eligible switch is not enough when the relay
+            # refuses the tile (partial exits need exchange reductions).
+            if t in set(partial_exit_tiles):
+                reasons.append(f"{t} not live-copyable: partial exits need exchange reductions (relay refuses)")
     for t in sorted(retired):
         info = (live_copy_tiles or {}).get(t) or {}
         if info.get("live_on") or info.get("bitfinex_live_orders"):
