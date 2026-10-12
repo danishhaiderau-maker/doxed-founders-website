@@ -1473,8 +1473,22 @@ export const TIME_DEADLINE_PREARM_MS = 1_500;
 export function isTimeDeadlineExitTradeId(tradeId: string | null | undefined): boolean {
   return typeof tradeId === 'string' && /^dsl-/.test(tradeId);
 }
+/**
+ * LIVE-FIX-1495: staged rollout. Default OFF; 'on' (or 'dsl') enables the
+ * executor-owned TIME_60S exit for dsl- trades only.
+ */
 export function timeDeadlineExitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.RELAY_TIME_DEADLINE_EXIT ?? 'on').trim().toLowerCase() !== 'off';
+  const v = (env.RELAY_TIME_DEADLINE_EXIT ?? 'off').trim().toLowerCase();
+  return v === 'on' || v === 'dsl' || v === '1' || v === 'true';
+}
+/** LIVE-FIX-1495: the hold timer starts at the LIVE exchange fill (persisted FILLED event). */
+export function liveFillAtMsFromFilledPayload(payload: unknown, createdAtMs: number): number {
+  const pl = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+  for (const k of ['exchange_fill_last_at', 'exchange_fill_mts', 'fill_detected_at']) {
+    const v = typeof pl[k] === 'string' ? Date.parse(pl[k] as string) : NaN;
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return createdAtMs;
 }
 const SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS = 5 * 60_000;
 const TERMINAL_EVIDENCE_CLOCK_SKEW_MS = 5_000;
@@ -4477,9 +4491,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** LIVE-FIX-1490 (A2): executor-owned TIME_60S exit timers, keyed user:trade. */
   private readonly timeDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly timeDeadlineStats: {
-    scheduled: number; fired: number; closed: number; noOpenLot: number; failed: number;
+    scheduled: number; fired: number; closed: number; noOpenLot: number; failed: number; recovered: number; expired: number;
     last?: { tradeId: string; deadlineMs: number; firedAtMs: number; submitLagMs?: number; outcome: string };
-  } = { scheduled: 0, fired: 0, closed: 0, noOpenLot: 0, failed: 0 };
+  } = { scheduled: 0, fired: 0, closed: 0, noOpenLot: 0, failed: 0, recovered: 0, expired: 0 };
 
   private scheduleTimeDeadlineExit(
     agentId: string,
@@ -4493,7 +4507,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (this.timeDeadlineTimers.has(key)) return null;
     const deadlineMs = sourceFillAtMs + TIME_DEADLINE_HOLD_SEC * 1000;
     const delay = deadlineMs - TIME_DEADLINE_PREARM_MS - nowMs;
-    if (deadlineMs - nowMs < -SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS) return null;
+    if (deadlineMs - nowMs < -SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS) {
+      // Too old for the signed authority window: paper close / reconcile own it.
+      this.timeDeadlineStats.expired += 1;
+      this.logger.warn(`[TIME-EXIT] deadline expired >5 min trade=${tradeId}; paper close fallback owns it`);
+      return null;
+    }
     const t = setTimeout(() => {
       this.timeDeadlineTimers.delete(key);
       void this.runTimeDeadlineExit(agentId, userId, tradeId!, sourceFillAtMs, deadlineMs);
@@ -4503,6 +4522,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.timeDeadlineStats.scheduled += 1;
     this.logger.log(`[TIME-EXIT] scheduled trade=${tradeId} deadline=${new Date(deadlineMs).toISOString()} in=${Math.round(delay)}ms`);
     return delay;
+  }
+
+  /**
+   * LIVE-FIX-1495: (re)arm TIME_60S timers from the durable FILLED event of every
+   * OPEN dsl- lot. Runs from each money tick, so a restart re-arms within one
+   * pass; a deadline already passed fires immediately (delay clamps to 0).
+   */
+  private async recoverTimeDeadlineExits(agentId: string, userIds: string[]): Promise<number> {
+    if (!timeDeadlineExitEnabled() || userIds.length === 0) return 0;
+    const open = await this.prisma.signalCycleParticipant.findMany({
+      where: { userId: { in: userIds }, status: SignalCycleStatus.OPEN, cycle: { agentId, tradeId: { startsWith: 'dsl-' } } },
+      select: { id: true, userId: true, cycle: { select: { tradeId: true } } },
+    });
+    let armed = 0;
+    for (const p of open) {
+      const tradeId = p.cycle?.tradeId ?? null;
+      if (!isTimeDeadlineExitTradeId(tradeId) || this.timeDeadlineTimers.has(`${p.userId}:${tradeId}`)) continue;
+      const filled = await this.prisma.signalCycleEvent.findFirst({
+        where: { participantId: p.id, eventType: 'FILLED' },
+        orderBy: { createdAt: 'asc' },
+        select: { payload: true, createdAt: true },
+      });
+      if (!filled) continue;
+      const fillAtMs = liveFillAtMsFromFilledPayload(filled.payload, filled.createdAt.getTime());
+      if (this.scheduleTimeDeadlineExit(agentId, p.userId, tradeId, fillAtMs) != null) {
+        armed += 1;
+        this.timeDeadlineStats.recovered += 1;
+      }
+    }
+    return armed;
   }
 
   private async runTimeDeadlineExit(
@@ -5816,9 +5865,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             'LIMIT_REPRICE_SKIPPED_PAUSED',
           );
         }
-        if (wake.trigger === 'POSITION_OPENED' && wake.signedOpen) {
-          this.scheduleTimeDeadlineExit(instance.agentId, instance.userId, wake.tradeId ?? null, wake.signedOpen.sourceEventAtMs);
-        }
         if (
           wake.trigger === 'POSITION_OPENED'
           && instance.status === TradingAgentInstanceStatus.ACTIVE
@@ -6622,6 +6668,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           exchangeProvider: { not: 'paper' },
         },
       });
+      void this.recoverTimeDeadlineExits(agent.id, instances.map((i) => i.userId))
+        .catch((err) => this.logger.warn(`[TIME-EXIT] recovery failed: ${err instanceof Error ? err.message : err}`));
       const armedOrSimActive = instances.some((instance) =>
         isCopyRelaySimActive(instance.dashboardState)
         || (instance.status === TradingAgentInstanceStatus.ACTIVE
