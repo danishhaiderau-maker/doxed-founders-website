@@ -845,7 +845,7 @@ export class ShowcaseRelayEventsService {
       }
       const receipt = await this.persistRelayEvent(slug, persistBody, undefined, sourcePayloadSha256);
       let subscribersProcessed = 0;
-      if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true') {
+      if (String(this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') ?? '').trim().toLowerCase() !== 'false') {
         const processed = await this.execution.processAuditedPositionReductionEvent(
           tradeId,
           {

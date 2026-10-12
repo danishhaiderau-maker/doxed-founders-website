@@ -369,6 +369,27 @@ export async function bitfinexPublicGet<T = unknown>(apiPath: string): Promise<T
 }
 
 /** Parse order id from /auth/w/order/submit notification payload. */
+export type BitfinexSubmitFill = { status: string; filledQty: number; remainingQty: number; avgPrice: number };
+const submitFills = new Map<number, BitfinexSubmitFill>();
+
+/** Order state from a v2/auth/w/order/submit response: [.., [[ID,GID,CID,SYM,MTS_C,MTS_U,AMOUNT,AMOUNT_ORIG,TYPE,TYPE_PREV,MTS_TIF,_,FLAGS,STATUS,_,_,PRICE,PRICE_AVG,..]], ..]. */
+export function parseBitfinexSubmitFill(response: unknown): BitfinexSubmitFill | null {
+  if (!Array.isArray(response) || !Array.isArray(response[4])) return null;
+  const o = (response[4] as unknown[])[0];
+  if (!Array.isArray(o)) return null;
+  const remaining = Number(o[6]);
+  const orig = Number(o[7]);
+  const status = typeof o[13] === 'string' ? o[13] : '';
+  const avg = Number(o[17]);
+  if (!Number.isFinite(remaining) || !Number.isFinite(orig) || orig === 0) return null;
+  return {
+    status,
+    filledQty: Math.abs(orig) - Math.abs(remaining),
+    remainingQty: Math.abs(remaining),
+    avgPrice: Number.isFinite(avg) ? avg : 0,
+  };
+}
+
 export function parseBitfinexOrderId(response: unknown): number | null {
   if (!Array.isArray(response)) return null;
   // Success: [MTS, 'on-req', null, null, [order], null, 'SUCCESS', ...]
@@ -800,7 +821,24 @@ export class BitfinexTradingClient {
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', body);
     const id = parseBitfinexOrderId(res);
     if (!id) throw new Error('Bitfinex limit order submitted but no order id returned');
+    const fill = parseBitfinexSubmitFill(res);
+    if (fill) {
+      submitFills.set(id, fill);
+      if (submitFills.size > 200) submitFills.delete(submitFills.keys().next().value as number);
+    }
     return id;
+  }
+
+  /**
+   * LIVE-FIX-1445: the order/submit response already carries the order state.
+   * A marketable LIMIT that matched on arrival reports EXECUTED with zero
+   * remaining and its average price, so the caller can protect the fill
+   * without a separate authenticated order/position read. One-shot.
+   */
+  takeSubmitFill(orderId: number): BitfinexSubmitFill | null {
+    const fill = submitFills.get(orderId) ?? null;
+    submitFills.delete(orderId);
+    return fill;
   }
 
   /**

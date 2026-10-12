@@ -1,3 +1,4 @@
+import { subscriberPositionReductionEnabled } from './signal-subscriber-execution.service';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -83,29 +84,20 @@ test('gate 2: every new-exposure entry path runs the pre-trade liquidation gate'
   assert.equal(calls.length, 3);
 });
 
-test('gate 4: partial-exit tiles are refused by the relay allowlist while reductions are off', () => {
-  // The registry's partial-exit tiles are the B1/B2 regime tiles (gb1/gb2; B3 retired 11 Oct),
-  // whose ladder take-profits reduce a position in parts. They stay relay-ineligible
-  // until exchange-side reductions are proven, so the relay must refuse them.
-  assert.deepEqual([...PARTIAL_EXIT_TILE_ID_PREFIXES], ['gb1', 'gb2']);
+test('gate 4: B1/B2 partial exits are mirrored by default (reduce-only partial closes)', () => {
+  // Boss 12 Oct: B1/B2 are live-copyable; their part exits become reduce-only
+  // partial closes on Bitfinex with the stop resized to the remainder at the
+  // same price. Only an explicit SUBSCRIBER_POSITION_REDUCTION_ENABLED=false refuses them.
   assert.equal(isPartialExitLaneTradeId('gb1-deadbeef1234'), true);
   assert.equal(isPartialExitLaneTradeId('gb2-deadbeef1234'), true);
-  assert.equal(isPartialExitLaneTradeId('gb3-deadbeef1234'), false);
   assert.equal(isPartialExitLaneTradeId('gs1-deadbeef1234'), false);
-  assert.equal(isMirrorableLaneTradeId('gb1-deadbeef1234'), false);
-  assert.equal(isMirrorableLaneTradeId('gb1-deadbeef1234', { partialReductionsEnabled: false }), false);
-  assert.equal(isMirrorableLaneTradeId('gb1-deadbeef1234', { partialReductionsEnabled: true }), false);
-});
-
-test('gate 4: the executor routes every allowlist check through the partial-exit gate', () => {
+  assert.equal(subscriberPositionReductionEnabled(undefined), true);
+  assert.equal(subscriberPositionReductionEnabled('true'), true);
+  assert.equal(subscriberPositionReductionEnabled('false'), false);
   const source = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
-  const bare = source.match(/isMirrorableLaneTradeId\(/g) ?? [];
-  assert.equal(bare.length, 1, 'only relayMayCopyTradeId may call isMirrorableLaneTradeId');
-  assert.match(
-    source,
-    /isPartialExitLaneTradeId\(tradeId\) && !partialReductionsEnabled[\s\S]{0,300}return false;/,
-  );
-  assert.match(source, /SUBSCRIBER_POSITION_REDUCTION_ENABLED'\) === 'true'/);
+  assert.equal((source.match(/isMirrorableLaneTradeId\(/g) ?? []).length, 1, 'only relayMayCopyTradeId may call isMirrorableLaneTradeId');
+  assert.match(source, /flags: BITFINEX_REDUCE_ONLY_FLAG|submitMarketClose/);
+  assert.match(source, /ownedStopPrice > 0\s*\? ownedStopPrice/);
 });
 
 const baseHealth = {

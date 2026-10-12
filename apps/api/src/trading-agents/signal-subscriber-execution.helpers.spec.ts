@@ -630,15 +630,16 @@ test('aggregate copy exposure fails closed above five dollars margin and 500 dol
 
 test('entry claim and correlated boundary snapshot are serialized by one database transaction', () => {
   const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
-  const transactionAt = source.indexOf('const claimedAndAssessed = await this.prisma.$transaction');
+  // LIVE-FIX-1445: the claim tx lives in runEntryClaimTx (shared by the normal and speculative claim).
+  const transactionAt = source.indexOf('return this.prisma.$transaction(async (tx) => {', source.indexOf('private runEntryClaimTx('));
   const lockAt = source.indexOf('pg_advisory_xact_lock', transactionAt);
   const claimAt = source.indexOf('const claimed = await tx.signalCycleParticipant.create', lockAt);
   const assessAt = source.indexOf('this.correlatedExposureSnapshot', claimAt);
-  const returnAt = source.indexOf('claimParticipantId = claimedAndAssessed', assessAt);
+  const returnAt = source.indexOf('private async releaseSpeculativeClaim', assessAt);
   assert.ok(transactionAt >= 0 && lockAt > transactionAt);
   assert.ok(claimAt > lockAt && assessAt > claimAt && returnAt > assessAt);
   assert.match(source.slice(transactionAt, returnAt), /copy-cluster:\$\{instance\.userId\}:\$\{agentId\}/);
-  const clusterEnd = source.indexOf('claimParticipantId = claimedAndAssessed', returnAt);
+  const clusterEnd = returnAt;
   const clusterTxn = source.slice(transactionAt, clusterEnd);
   assert.match(clusterTxn, /participantId: null,[\s\S]*signalCycleParticipant\.delete/);
   assert.match(clusterTxn, /eventType: 'CORRELATED_CLUSTER_BLOCKED'[\s\S]*status: SignalCycleStatus\.EXPIRED[\s\S]*eventType: 'EXPIRED'/);
