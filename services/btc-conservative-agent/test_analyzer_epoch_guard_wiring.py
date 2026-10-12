@@ -174,11 +174,13 @@ GUARDED_READERS = {
         "strategy_lab/stream_studies.py",      # taker study keeps ts >= epoch_start only
         "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
         "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
+        "monitor_streams.py",                  # read-only /api/monitor/streams tail for HM/Strategist (not analyzer input)
     },
     "adaptive_entry_decisions.jsonl": {
         "bot.py", "adaptive_entry_funnel.py",
         "runtime_hygiene.py",                  # PR-B pre-epoch archiver: moves files, never reads rows
         "research/signal_research_table.py",   # PR-D offline research table (not analyzer input; --since-utc/epoch_id)
+        "monitor_tiles.py",                    # comments only (#477 GS-05/06 fields come from bot memory)
     },
     "expired_orders_3factor.csv": {
         "bot.py",                              # Fly writer

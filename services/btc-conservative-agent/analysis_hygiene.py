@@ -77,3 +77,92 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
                     "mean_net_bp": round(float(out["net_bp"].mean()), 4) if out["net_bp"].notna().any() else None,
                     "late_window_aedt": _LATE.get("window_aedt"), "basis": "net_bp (price bp, unrounded)"})
     return out
+
+
+# ---------------------------------------------------------------------------- all epochs + DISLOC (bp)
+def _clustered(vals_ts):
+    import math
+    n = len(vals_ts)
+    if not n:
+        return {"n": 0, "mean_bp": None, "ci90_lo": None, "ci90_hi": None, "wr": None}
+    vals = [v for v, _ in vals_ts]
+    mean = sum(vals) / n
+    cl: dict = {}
+    for v, t in vals_ts:
+        cl.setdefault(int((t or 0) // 3600), []).append(v - mean)
+    g = len(cl)
+    lo = hi = None
+    if n >= 2 and g >= 2:
+        se = math.sqrt(sum(sum(c) ** 2 for c in cl.values()) / (n * n) * g / (g - 1))
+        lo, hi = round(mean - 1.6449 * se, 4), round(mean + 1.6449 * se, 4)
+    return {"n": n, "mean_bp": round(mean, 4), "sum_bp": round(sum(vals), 4), "ci90_lo": lo, "ci90_hi": hi,
+            "wr": round(100.0 * sum(1 for v in vals if v > 0) / n, 2)}
+
+
+def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
+                        disloc_file: str = "disloc_trades.jsonl") -> dict:
+    """ANALYZER-REVIEW #4: every epoch (current file unfiltered + research_archive/pre_epoch/*) plus the
+    DISLOC store, hygiene applied, reported in bp with hour-clustered 90% CIs per tile and per epoch."""
+    import glob
+    import json
+    import os
+    import pandas as pd
+    frames, sources = [], []
+    paths = [os.path.join(data_root, trades_file)] + sorted(
+        glob.glob(os.path.join(data_root, "research_archive", "pre_epoch", "*", trades_file)))
+    for p in paths:
+        if not os.path.isfile(p):
+            continue
+        try:
+            f = pd.read_csv(p, low_memory=False, on_bad_lines="skip")
+        except Exception:
+            continue
+        epoch = os.path.basename(os.path.dirname(p)) if "pre_epoch" in p else "current_file"
+        f["_epoch_source"] = epoch
+        frames.append(f)
+        sources.append({"path": p, "rows": int(len(f)), "epoch_source": epoch})
+    trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not trades.empty and "trade_id" in trades.columns:
+        trades = trades.drop_duplicates(subset=["trade_id"], keep="last")
+    if not trades.empty and "net_pnl_usd" in trades.columns:
+        trades = trades[pd.to_numeric(trades["net_pnl_usd"], errors="coerce").notna()]
+    clean = apply(trades, include_forced=False, include_late=False) if not trades.empty else trades
+    summary = dict(SUMMARY)
+    rows = []
+    if not clean.empty:
+        lane_col = next((c for c in ("research_lane", "lane", "tile") if c in clean.columns), None)
+        ts_col = next((c for c in ("close_ts", "exit_ts", "ts") if c in clean.columns), None)
+        ts = pd.to_numeric(clean[ts_col], errors="coerce") if ts_col else pd.Series(0, index=clean.index)
+        if ts_col and ts.isna().all():
+            ts = pd.to_datetime(clean[ts_col], errors="coerce", utc=True).astype("int64") / 1e9
+        for lane, epoch, bp, t in zip(clean[lane_col] if lane_col else ["?"] * len(clean), clean["_epoch_source"],
+                                      clean["net_bp"], ts):
+            if pd.notna(bp):
+                rows.append((str(lane), str(epoch), float(bp), float(t) if pd.notna(t) else 0.0))
+    dpath = os.path.join(data_root, disloc_file)
+    disloc_n = 0
+    if os.path.isfile(dpath):
+        with open(dpath, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("event") != "DISLOC_CLOSED" or r.get("pnl_bp_vs_touch") is None:
+                    continue
+                ex = float(r.get("exit_ts") or 0)
+                if LATE_W0 <= ex <= LATE_W1:
+                    continue
+                lane = str(r.get("lane") or ("DISLOC-FOI" if r.get("variant") == "foi" else "DISLOC"))
+                rows.append((lane, "disloc_store", float(r["pnl_bp_vs_touch"]), ex))
+                disloc_n += 1
+    by_tile: dict = {}
+    by_epoch: dict = {}
+    for lane, epoch, bp, t in rows:
+        by_tile.setdefault(lane, []).append((bp, t))
+        by_epoch.setdefault(epoch, []).append((bp, t))
+    return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); DISLOC pnl_bp_vs_touch; fee 0",
+            "hygiene": summary, "sources": sources, "disloc_closes": disloc_n,
+            "overall": _clustered([(bp, t) for _, _, bp, t in rows]),
+            "by_tile": {k: _clustered(v) for k, v in sorted(by_tile.items())},
+            "by_epoch": {k: _clustered(v) for k, v in sorted(by_epoch.items())}}

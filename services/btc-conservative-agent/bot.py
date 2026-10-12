@@ -30015,6 +30015,11 @@ def _record_expired_order(source: dict, reason: str):
             # path an explicit retry/failure signal.
             wait_for_durable_receipt=True,
         )
+    try:
+        if isinstance(row, dict) and row.get("long_score") in (None, "", 0) and row.get("short_score") in (None, "", 0):
+            row.update(_trade_side_scores(row, trades_map.get(row.get("trade_id"), {}) if row.get("trade_id") else {}))
+    except Exception:
+        pass
     with trade_lock:
         expired_orders.append(row)
         if len(expired_orders) > MAX_EXPIRED_ORDERS:
@@ -31272,6 +31277,8 @@ def close_position(pos: dict, exit_reason: str):
             "entry_controls": master.get("controls", {}) if master else {},
             "entry_indicators": master.get("indicators", {}) if master else {},
             "setup_type": master.get("setup_type", "UNKNOWN") if master else "UNKNOWN",
+            # Strategist CHASE-GAP: long/short scores + gap on every closed row.
+            **_trade_side_scores(pos, master),
             "edge_score": edge_at_entry,
             "edge_score_at_entry": edge_at_entry,
             "invert_signal": _coerce_invert_on(pos, master),
@@ -31531,6 +31538,29 @@ _TILE_TAPE_RING = monitor_tiles.TapeSliceRing()
 import tape_archive as _tape_archive_mod
 # HM-BATCH2: 7-day 1 s tape on the Fly volume (lazy writer thread; see tape_archive.py).
 _TAPE_ARCHIVE = _tape_archive_mod.TapeArchive(lambda: _data_sync_volume_root())
+
+
+def _trade_side_scores(pos, master) -> dict:
+    """long_score / short_score / score_gap from the position, its master signal or the AI result."""
+    srcs = [pos or {}, master or {}, (master or {}).get("signal_ref") or {}, (master or {}).get("ai") or {},
+            (master or {}).get("factors") or {}, (pos or {}).get("factors") or {}]
+    out = {"long_score": None, "short_score": None}
+    for key in out:
+        for src in srcs:
+            v = src.get(key) if isinstance(src, dict) else None
+            if v not in (None, ""):
+                try:
+                    out[key] = float(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+    ls, ss = out["long_score"], out["short_score"]
+    direction = str((pos or {}).get("dir") or "").upper()
+    gap = None
+    if ls is not None and ss is not None:
+        gap = (ls - ss) if direction == "LONG" else (ss - ls) if direction == "SHORT" else abs(ls - ss)
+    out["score_gap"] = gap
+    return out
 
 
 def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
@@ -33037,7 +33067,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
-    "/api/monitor/shadow-exits",
+    "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -46784,6 +46814,34 @@ def monitor_shadow_exits():
                 "aggregates_since_boot": _SHADOW_EXIT_RECORDER.aggregates(),
                 "recent": _SHADOW_EXIT_RECORDER.recent(limit), "observation_only": True}
     return _monitor_tiles_guard(build, 1_000_000)
+
+
+@app.route('/api/monitor/chase_buckets', methods=["GET"])
+def monitor_chase_buckets():
+    """Chase-window table, recomputed on every request (Strategist CHASE-GAP). ?since=<epoch ts>."""
+    import chase_gap as _cg
+
+    def build(now):
+        since = monitor_tiles.parse_ts_param(request.args.get("since"), "since") or 0.0
+        closed = [r for r in list(trades) if isinstance(r, dict) and parse_ts(r.get("close_ts") or r.get("ts") or "") >= since]
+        expired = [r for r in list(expired_orders) if isinstance(r, dict)]
+        return {**_cg.chase_view(closed, expired, set(STATS_EXCLUDED_EXIT_REASONS)), **_monitor_tiles_common(now),
+                "epoch": _current_epoch_id_for_display(), "as_of": now}
+    return _monitor_tiles_guard(build, 400_000)
+
+
+@app.route('/api/monitor/gap_buckets', methods=["GET"])
+def monitor_gap_buckets():
+    """Score-gap table, recomputed on every request (Strategist CHASE-GAP). ?since=<epoch ts>."""
+    import chase_gap as _cg
+
+    def build(now):
+        since = monitor_tiles.parse_ts_param(request.args.get("since"), "since") or 0.0
+        closed = [r for r in list(trades) if isinstance(r, dict) and parse_ts(r.get("close_ts") or r.get("ts") or "") >= since]
+        expired = [r for r in list(expired_orders) if isinstance(r, dict)]
+        return {**_cg.gap_view(closed, expired, set(STATS_EXCLUDED_EXIT_REASONS)), **_monitor_tiles_common(now),
+                "epoch": _current_epoch_id_for_display(), "as_of": now}
+    return _monitor_tiles_guard(build, 400_000)
 
 
 @app.route('/api/monitor/tiles/counters', methods=["GET"])
