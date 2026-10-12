@@ -1440,6 +1440,7 @@ export class TradingAgentsService implements OnModuleInit {
       relayArmedAt: string | null; relayExecutor: unknown; lastTickAt: string | null;
       relayExecutionMode: string | null; relayLastTransition: unknown; lastError: string | null;
       relayExchangeMirror: unknown; copyRelaySimActive: boolean; updatedAt: Date | null;
+      expiresAt?: Date | null;
     };
     const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
       SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
@@ -1450,7 +1451,7 @@ export class TradingAgentsService implements OnModuleInit {
              i."dashboardState" -> 'relayLastTransition' AS "relayLastTransition",
              i."dashboardState" -> 'relayExchangeMirror' AS "relayExchangeMirror",
              COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "copyRelaySimActive",
-             i."lastError", i."updatedAt"
+             i."lastError", i."updatedAt", i."expiresAt"
       FROM "TradingAgentInstance" i
       WHERE i."agentId" = ${agent.id}
         AND i."exchangeProvider" = 'bitfinex'
@@ -1483,10 +1484,17 @@ export class TradingAgentsService implements OnModuleInit {
         last_error: r.lastError ? String(r.lastError).slice(0, 200) : null,
         updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
         exchange_mirror: flyViewMirror(r.relayExchangeMirror, nowMs),
+        // LIVE-FIX-1486: entitlement (hire expiry) is separate from pause.
+        hire_active: !r.expiresAt || new Date(r.expiresAt).getTime() > nowMs,
+        hire_expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
+        paused: r.status === 'PAUSED',
       };
     });
     const armedRows = accounts.filter((a) => a.armed);
-    const ages = armedRows.map((a) => a.executor_heartbeat_age_sec).filter((v): v is number => v != null);
+    // LIVE-FIX-1486: the executor heartbeat is process-level; a paused
+    // (disarmed) account still proves the executor is alive. Using armed rows
+    // only reported EXECUTOR_UNREACHABLE while the heartbeat was 4 s old.
+    const ages = accounts.map((a) => a.executor_heartbeat_age_sec).filter((v): v is number => v != null);
     return {
       schema: 'website_live_copy_fly_view_v1',
       armed_accounts: armedRows.map((a) => a.account),

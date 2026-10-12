@@ -46670,6 +46670,12 @@ def monitor_tiles_disloc():
 
 
 
+def _exit_follow_view(since):
+    """DISLOC live-vs-paper exit lag; lock-free, DISLOC paper ledger only."""
+    import exit_latency_slo as _els
+    return _els.live_follow(_get_live_copy_journal().by_correlation(), _disloc_paper_twins(), since=since)
+
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -46707,7 +46713,11 @@ def monitor_exit_latency():
                                               "p95_sec": _els._pct(s2f, 0.95)}}
             tiles[lane]["exit"].pop("breaches_over_5s", None)
         unfilled = _els.unfilled_rows(list(expired_orders), since=since, limit=nrows)
-        return {"schema": "exit_latency_view_v1", **_monitor_tiles_common(now),
+        try:
+            live_follow = _exit_follow_view(since)
+        except Exception as exc:  # noqa: BLE001 - read-only view
+            live_follow = {"schema": "live_exit_follow_v1", "status": "ERROR", "error": str(exc)[:200]}
+        return {"schema": "exit_latency_view_v1", "live_follow": live_follow, **_monitor_tiles_common(now),
                 "scope": {"window_hours": hours, "rows": nrows}, "window_hours": hours, "slo": slo, "per_tile": tiles,
                 "unfilled_orders": unfilled,
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}

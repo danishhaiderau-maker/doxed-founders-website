@@ -78,3 +78,50 @@ def unfilled_rows(orders: Iterable[Mapping], *, since: float, limit: int) -> lis
                     "cancel_or_expire_ts": round(float(end), 3), "cancel_or_expire_utc": iso_ms(end),
                     "reason": o.get("reason")})
     return out[-limit:] if limit else []
+
+
+LIVE_FOLLOW_ALERT_SEC = 3.0
+LIVE_FOLLOW_LANE_PREFIXES = ("DISLOC",)
+
+
+def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
+                prefixes: Iterable[str] = LIVE_FOLLOW_LANE_PREFIXES) -> dict:
+    """Live exit lag vs paper per lane: POSITION_CLOSED report sent_at_ts - paper exit_ts.
+
+    Alerts (status RED) when any live exit lands > LIVE_FOLLOW_ALERT_SEC after paper.
+    """
+    pref = tuple(str(p).upper() for p in prefixes)
+    lanes: dict = {}
+    for cid, rows in (by_corr or {}).items():
+        closes = [r for r in rows or [] if isinstance(r, Mapping) and r.get("type") == "POSITION_CLOSED"]
+        if not closes:
+            continue
+        lane = str(closes[0].get("lane") or "?").upper()
+        if pref and not lane.startswith(pref):
+            continue
+        twin = (twins or {}).get(str(cid)) or {}
+        try:
+            paper = float(twin.get("exit_ts"))
+            live = min(float(r.get("sent_at_ts")) for r in closes if r.get("sent_at_ts") is not None)
+        except (TypeError, ValueError):
+            lanes.setdefault(lane, {"samples": [], "breaches": [], "missing_paper": 0})["missing_paper"] += 1
+            continue
+        if live < since:
+            continue
+        lag = round(live - paper, 3)
+        L = lanes.setdefault(lane, {"samples": [], "breaches": [], "missing_paper": 0})
+        L["samples"].append(lag)
+        if lag > LIVE_FOLLOW_ALERT_SEC:
+            L["breaches"].append({"trade_id": cid, "lag_sec": lag, "paper_exit_utc": iso_ms(paper),
+                                  "live_exit_utc": iso_ms(live)})
+    out, any_red = {}, False
+    for lane, L in lanes.items():
+        s = L["samples"]
+        red = bool(L["breaches"])
+        any_red = any_red or red
+        out[lane] = {"n": len(s), "p50_sec": _pct(s, 0.5), "p95_sec": _pct(s, 0.95),
+                     "max_sec": max(s) if s else None, "missing_paper_exit": L["missing_paper"],
+                     "breach_count": len(L["breaches"]), "breaches_over_3s": L["breaches"][-20:],
+                     "status": "NO_DATA" if not s else ("RED" if red else "GREEN")}
+    return {"schema": "live_exit_follow_v1", "alert_sec": LIVE_FOLLOW_ALERT_SEC, "lanes": out,
+            "alert": any_red, "status": "RED" if any_red else ("GREEN" if out else "NO_DATA")}

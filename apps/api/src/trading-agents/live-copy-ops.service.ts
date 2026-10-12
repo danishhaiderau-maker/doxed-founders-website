@@ -85,9 +85,12 @@ export class LiveCopyOpsService {
       return { schema: 'website_live_copy_account_check_v1', found: false, ready_for_live_copy: false, blockers: ['NOT_HIRED'] };
     }
     const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
-    const hireActive = instance.status === 'ACTIVE' && (!instance.expiresAt || instance.expiresAt.getTime() > Date.now());
+    // LIVE-FIX-1486: entitlement = the hire has not expired. A PAUSED relay
+    // (safety pause) is a separate blocker, not an inactive entitlement.
+    const hireActive = !instance.expiresAt || instance.expiresAt.getTime() > Date.now();
     checks.entitlement = { status: instance.status, hire_active: hireActive, expires_at: instance.expiresAt?.toISOString() ?? null };
     if (!hireActive) blockers.push('ENTITLEMENT_INACTIVE');
+    if (instance.status === 'PAUSED') blockers.push('RELAY_PAUSED');
     const armed = liveCopyAccountArmed(instance);
     // A user Start clears the alert and acks it; only an open, unacked alert blocks.
     const mismatchActive =

@@ -217,3 +217,27 @@ test('1483: concurrent mirror closes for one participant have exactly one owner'
   assert.equal(await third, false);
   assert.equal(runs, 2, 'a later close runs again after the first settles');
 });
+
+test('1485: observing ACTIVE re-arms the stopped reconciliation and durable-wake loops', async () => {
+  const { SignalSubscriberExecutionService } = await import('./signal-subscriber-execution.service');
+  const svc = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const calls: string[] = [];
+  svc.scheduleReconciliation = (ms: number) => calls.push(`rec:${ms}`);
+  svc.schedulePersistedWakePoll = (ms: number) => calls.push(`wake:${ms}`);
+  svc.setRelayPollActivity('PAUSED');
+  assert.deepEqual(calls, []);
+  svc.setRelayPollActivity('ACTIVE');
+  assert.equal(svc.lastRelayPollActivity, 'ACTIVE');
+  assert.ok((calls as string[]).some((c) => c.startsWith('rec:')) && (calls as string[]).some((c) => c.startsWith('wake:')));
+});
+
+test('1485: a terminal claim refused before canonical commit is retried, never paused', () => {
+  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('private async executeShowcaseMirrorCloseOwned('));
+  const body = fn.slice(0, fn.indexOf('TERMINAL_CLOSE_CLAIM_PERSIST_FAILED'));
+  assert.ok(body.includes('attempt < TERMINAL_CLAIM_RETRY_ATTEMPTS'));
+  const deferAt = body.indexOf('[TERMINAL-CLAIM] deferred');
+  const pauseAt = body.lastIndexOf('TERMINAL_CLOSE_CLAIM_REFUSED cycle=');
+  assert.ok(deferAt > 0 && pauseAt > deferAt, 'unclaimed OPEN lot returns before the pause');
+  assert.ok(!src.includes('this.lastRelayPollActivity = instances'), 'all activity writes go through the setter');
+});
