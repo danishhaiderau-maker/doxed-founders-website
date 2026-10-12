@@ -18,7 +18,7 @@ import pytest
 import ai_shadow_challengers as ai_shadow
 import bot
 import cross_venue_lead as xvl
-import paper_policy_family_gs07_fast_premium_fade as xvs_policy  # H-C retired 2026-10-11; GS-07 is the active evaluator-clock fixture
+import paper_policy_family_gs01_xv_premium_atr_tp as xvs_policy  # H-C + GS-07 retired; GS-01 is the active evaluator-clock fixture
 
 
 class _HeldWorker:
