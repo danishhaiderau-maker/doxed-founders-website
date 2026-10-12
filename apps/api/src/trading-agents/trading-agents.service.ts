@@ -1442,6 +1442,7 @@ export class TradingAgentsService implements OnModuleInit {
       relayExchangeMirror: unknown; copyRelaySimActive: boolean; updatedAt: Date | null;
       expiresAt?: Date | null;
       relayPauseHistory?: unknown;
+      relayProtectionSweep?: unknown;
     };
     const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
       SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
@@ -1452,6 +1453,7 @@ export class TradingAgentsService implements OnModuleInit {
              i."dashboardState" -> 'relayLastTransition' AS "relayLastTransition",
              i."dashboardState" -> 'relayExchangeMirror' AS "relayExchangeMirror",
              i."dashboardState" -> 'relayPauseHistory' AS "relayPauseHistory",
+             i."dashboardState" -> 'relayProtectionSweep' AS "relayProtectionSweep",
              COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "copyRelaySimActive",
              i."lastError", i."updatedAt", i."expiresAt"
       FROM "TradingAgentInstance" i
@@ -1495,6 +1497,15 @@ export class TradingAgentsService implements OnModuleInit {
           ? (r.relayPauseHistory as Record<string, unknown>[]).slice(-20).map((p) => ({
               at: p?.at ?? null, actor: p?.actor ?? null, owner: p?.owner ?? null, action: p?.action ?? null,
               code: p?.code ?? null, message: typeof p?.message === 'string' ? p.message.slice(0, 200) : null,
+            }))
+          : [],
+        // LIVE-FIX-1497: protection sweeper alerts (0 or >1 stops), last 10.
+        protection_sweep: Array.isArray(r.relayProtectionSweep)
+          ? (r.relayProtectionSweep as Record<string, unknown>[]).slice(-10).map((x) => ({
+              at: x?.at ?? null, trade_id: x?.trade_id ?? null, stop_count: x?.stop_count ?? null,
+              action: x?.action ?? null, outcome: x?.outcome ?? null,
+              keep_id: x?.keep_id ?? null, cancelled_ids: x?.cancelled_ids ?? null,
+              emergency_stop_id: x?.emergency_stop_id ?? null,
             }))
           : [],
       };

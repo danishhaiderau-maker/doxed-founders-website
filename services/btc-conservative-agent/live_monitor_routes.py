@@ -175,11 +175,13 @@ def pause_history(accounts: Iterable[Mapping], *, now: float) -> dict:
 PROTECTION_GAP_SEC = 1.0
 
 
-def protection_state(accounts: Iterable[Mapping], *, mirror_max_age_s: float = 30.0) -> dict:
+def protection_state(accounts: Iterable[Mapping], *, mirror_max_age_s: float = 30.0, now_ts: float | None = None) -> dict:
+    import time as _t
+    now_ts = _t.time() if now_ts is None else now_ts
     out, status, causes = [], GREEN, []
     for a in accounts or []:
         m = a.get("exchange_mirror") or {}
-        if not m:
+        if not m and not a.get("protection_sweep"):
             continue
         orders = [o for o in m.get("open_orders") or [] if isinstance(o, Mapping)]
         ro = [o for o in orders if o.get("reduce_only")]
@@ -201,6 +203,12 @@ def protection_state(accounts: Iterable[Mapping], *, mirror_max_age_s: float = 3
                 status = RED
                 causes.append(f"{row['gap']}:{a.get('account')}")
             out.append(row)
+        # LIVE-FIX-1497: executor sweeper alerts (0 or >1 stops) in the last 10 min -> RED.
+        for ev in a.get("protection_sweep") or []:
+            at = _ts(ev.get("at"))
+            if at is not None and (now_ts or 0) - at <= 600:
+                status = RED
+                causes.append(f"SWEEP_{ev.get('action')}:{ev.get('outcome')}:{ev.get('trade_id')}")
         if m.get("orphans"):
             status = RED if status == RED else AMBER
             causes.append(f"ORPHAN_ORDERS_WHEN_FLAT:{a.get('account')}")
@@ -209,6 +217,7 @@ def protection_state(accounts: Iterable[Mapping], *, mirror_max_age_s: float = 3
             causes.append(f"MIRROR_STALE:{a.get('account')}")
     return {"schema": SCHEMA, "route": "protection", "status": status, "alert": status != GREEN,
             "causes": causes, "positions": out,
+            "sweep_events": [dict(ev, account=a.get("account")) for a in accounts or [] for ev in (a.get("protection_sweep") or [])][-20:],
             "note": "from executor exchange mirror (read-only REST snapshot; sweeper SLA 1 s lands with A1)"}
 
 

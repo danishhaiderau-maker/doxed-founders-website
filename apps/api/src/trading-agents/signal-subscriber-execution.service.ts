@@ -1420,7 +1420,8 @@ export type TerminalCloseAuthorityKind =
   | 'HARD_STOP'
   | 'LATE_FILL_CLEANUP'
   | 'AUTHENTICATED_MANUAL_OR_EMERGENCY'
-  | 'SIGNED_TIME_DEADLINE';
+  | 'SIGNED_TIME_DEADLINE'
+  | 'PROTECTION_SWEEPER_EMERGENCY';
 
 export type TerminalCloseAuthority = {
   kind: TerminalCloseAuthorityKind;
@@ -1626,6 +1627,13 @@ export function validateTerminalCloseAuthority(
         && nowMs >= deadline - TIME_DEADLINE_PREARM_MS
         && nowMs - deadline <= SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS;
     }
+    case 'PROTECTION_SWEEPER_EMERGENCY':
+      // Only after the sweeper saw 0 stops on a live position AND the emergency
+      // reduce-only stop could not be confirmed on an authenticated re-read.
+      return evidence.schema === 'protection_sweeper_v1'
+        && finite('stop_count') === 0
+        && evidence.emergency_stop_failed === true
+        && Boolean(text('position_side'));
     default: {
       const exhaustive: never = authority.kind;
       return exhaustive;
@@ -3686,6 +3694,53 @@ export function recordedStopOrderIdsFromPayloads(payloads: unknown[]): number[] 
  * position needs. Never touches the kept stop; keeps enough stop qty to cover
  * the whole net position (several lots on one net position keep their stops).
  */
+/** LIVE-FIX-1497: protection sweeper (exactly one reduce-only stop per open lot). */
+export const PROTECTION_SWEEP_GRACE_MS = 3_000;
+export const PROTECTION_SWEEP_INTERVAL_MS = 1_000;
+export function protectionSweepEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.RELAY_PROTECTION_SWEEP ?? 'on').trim().toLowerCase() !== 'off';
+}
+export function protectiveStopsFor(active: readonly BitfinexActiveOrder[], direction: 'LONG' | 'SHORT'): BitfinexActiveOrder[] {
+  const closingSign = direction === 'LONG' ? -1 : 1;
+  return active.filter((o) => o.symbol === BITFINEX_BTC_PERP_SYMBOL
+    && o.orderType.toUpperCase().includes('STOP')
+    && ((o.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0
+    && Math.sign(o.amount) === closingSign);
+}
+export type ProtectionSweepDecision = {
+  action: 'NONE' | 'GRACE' | 'OK' | 'EMERGENCY_STOP' | 'CANCEL_EXTRAS';
+  count: number;
+  keepId?: number;
+  cancelIds: number[];
+};
+export function protectionSweepDecision(input: {
+  stopIds: readonly number[];
+  positionAmount: number;
+  keepId?: number | null;
+  entryAckAtMs?: number | null;
+  nowMs: number;
+  graceMs?: number;
+}): ProtectionSweepDecision {
+  const count = input.stopIds.length;
+  if (!(Math.abs(input.positionAmount) > 1e-9)) return { action: 'NONE', count, cancelIds: [] };
+  const grace = input.graceMs ?? PROTECTION_SWEEP_GRACE_MS;
+  if (input.entryAckAtMs != null && input.nowMs - input.entryAckAtMs < grace) {
+    return { action: 'GRACE', count, cancelIds: [] };
+  }
+  if (count === 0) return { action: 'EMERGENCY_STOP', count, cancelIds: [] };
+  if (count === 1) return { action: 'OK', count, keepId: input.stopIds[0], cancelIds: [] };
+  // Keep the confirmed working stop (meta.stopOrderId); else the oldest. Cancel newer ones.
+  const keepId = input.keepId != null && input.stopIds.includes(input.keepId)
+    ? input.keepId
+    : Math.min(...input.stopIds);
+  return {
+    action: 'CANCEL_EXTRAS',
+    count,
+    keepId,
+    cancelIds: input.stopIds.filter((id) => id !== keepId).sort((a, b) => b - a),
+  };
+}
+
 export function extraProtectiveStopIds(
   active: readonly BitfinexActiveOrder[],
   keepId: number,
@@ -4503,6 +4558,143 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.timeDeadlineStats.scheduled += 1;
     this.logger.log(`[TIME-EXIT] scheduled trade=${tradeId} deadline=${new Date(deadlineMs).toISOString()} in=${Math.round(delay)}ms`);
     return delay;
+  }
+
+  private readonly lastProtectionSweepAtMs = new Map<string, number>();
+  private readonly protectionGapSince = new Map<string, { action: string; sinceMs: number }>();
+  readonly protectionSweepStats = {
+    runs: 0, ok: 0, grace: 0, gaps: 0, emergencyStops: 0, emergencyStopFailed: 0,
+    flattened: 0, extrasCancelled: 0, multiLotSkipped: 0, errors: 0,
+  };
+
+  /** LIVE-FIX-1497: alert row in dashboardState.relayProtectionSweep (last 30). */
+  private async recordProtectionSweepAlert(instanceId: string, row: Record<string, unknown>): Promise<void> {
+    this.logger.error(`[PROTECTION-SWEEP] ALERT ${JSON.stringify(row)}`);
+    const inst = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId }, select: { dashboardState: true, status: true },
+    });
+    if (!inst) return;
+    const dash = (inst.dashboardState ?? {}) as Record<string, unknown>;
+    const prev = Array.isArray(dash.relayProtectionSweep) ? dash.relayProtectionSweep as Record<string, unknown>[] : [];
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyInstanceDashboardPatch(inst.status, dash, {
+          relayProtectionSweep: [...prev, row].slice(-30),
+        }) as unknown as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  private async sweepProtection(
+    agentId: string,
+    userId: string,
+    instanceId: string,
+    creds: ExchangeCredentials,
+  ): Promise<ProtectionSweepDecision | null> {
+    if (!protectionSweepEnabled() || this.executorDestroyed) return null;
+    const startedAtMs = Date.now();
+    if (startedAtMs - (this.lastProtectionSweepAtMs.get(userId) ?? 0) < PROTECTION_SWEEP_INTERVAL_MS) return null;
+    this.lastProtectionSweepAtMs.set(userId, startedAtMs);
+    const open = await this.prisma.signalCycleParticipant.findMany({
+      where: { userId, status: SignalCycleStatus.OPEN, cycle: { agentId } },
+      include: { cycle: true },
+    });
+    if (open.length === 0) return null;
+    this.protectionSweepStats.runs += 1;
+    if (open.length > 1) {
+      // Stop counts are per account; with several lots the 1:1 rule is ambiguous.
+      this.protectionSweepStats.multiLotSkipped += 1;
+      return null;
+    }
+    const client = this.activeTrading as unknown as {
+      listActiveOrders: (c: ExchangeCredentials) => Promise<BitfinexActiveOrder[]>;
+      getOpenPositionDetail: (c: ExchangeCredentials) => Promise<{ amount: number } | null>;
+    };
+    const [active, position] = await Promise.all([
+      client.listActiveOrders(creds),
+      client.getOpenPositionDetail(creds),
+    ]);
+    const p = open[0];
+    const meta = await this.loadExecutionMeta(p.id);
+    if (!meta.direction) return null;
+    const stops = protectiveStopsFor(active, meta.direction);
+    const decision = protectionSweepDecision({
+      stopIds: stops.map((o) => o.id),
+      positionAmount: position?.amount ?? 0,
+      keepId: meta.stopOrderId ?? null,
+      entryAckAtMs: meta.entryExchangeAckAtMs ?? null,
+      nowMs: Date.now(),
+    });
+    if (decision.action === 'OK' || decision.action === 'NONE') this.protectionGapSince.delete(userId);
+    if (decision.action === 'OK') { this.protectionSweepStats.ok += 1; return decision; }
+    if (decision.action === 'GRACE') { this.protectionSweepStats.grace += 1; return decision; }
+    if (decision.action === 'NONE') return decision;
+    const tradeId = p.cycle.tradeId ?? null;
+    const base = {
+      at: new Date().toISOString(), trade_id: tradeId, participant_id: p.id,
+      stop_count: decision.count, position_amount: position?.amount ?? 0, action: decision.action,
+    };
+    // Alert on first sight; act only when the same gap persists >= 1 s (a stop
+    // replacement in flight is transiently 0 or 2) and no stop submit is fenced.
+    const seen = this.protectionGapSince.get(userId);
+    if (!seen || seen.action !== decision.action) {
+      this.protectionGapSince.set(userId, { action: decision.action, sinceMs: Date.now() });
+      this.protectionSweepStats.gaps += 1;
+      await this.recordProtectionSweepAlert(instanceId, { ...base, outcome: 'GAP_DETECTED' });
+      return decision;
+    }
+    if (Date.now() - seen.sinceMs < PROTECTION_SWEEP_INTERVAL_MS) return decision;
+    if (p.fillPromotionPhase === 'SUBMITTING') return decision;
+    this.protectionGapSince.delete(userId);
+    if (decision.action === 'CANCEL_EXTRAS') {
+      const cancelled: number[] = [];
+      for (const id of decision.cancelIds) {
+        const gone = await this.cancelManagedOrderGone(creds, id, 'protection-sweep-duplicate');
+        if (gone.gone) cancelled.push(id);
+      }
+      this.protectionSweepStats.extrasCancelled += cancelled.length;
+      await this.recordProtectionSweepAlert(instanceId, { ...base, keep_id: decision.keepId, cancelled_ids: cancelled });
+      return decision;
+    }
+    // EMERGENCY_STOP: place a reduce-only stop first; flatten only if that fails.
+    this.protectionSweepStats.emergencyStops += 1;
+    const intent = p.cycle.intentEnvelope as unknown as SignalIntentEnvelope;
+    const fillPrice = finiteDecimalLikeNumber(p.fillPrice) ?? meta.fillPrice ?? meta.limitPrice ?? undefined;
+    await this.ensureProtectiveStop(agentId, userId, p.cycle.id, p.id, { ...meta, stopOrderId: undefined }, creds, intent, fillPrice)
+      .catch((err) => this.logger.error(`[PROTECTION-SWEEP] emergency stop error trade=${tradeId}: ${err instanceof Error ? err.message : err}`));
+    const after = protectiveStopsFor(await client.listActiveOrders(creds).catch(() => []), meta.direction);
+    if (after.length > 0) {
+      await this.recordProtectionSweepAlert(instanceId, { ...base, emergency_stop_id: after[0].id, outcome: 'EMERGENCY_STOP_PLACED' });
+      return decision;
+    }
+    this.protectionSweepStats.emergencyStopFailed += 1;
+    const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+    const canonicalTradeId = this.resolveShowcaseMirrorTradeId(p.cycle, meta) ?? tradeId ?? p.cycle.id;
+    const closed = await this.closeVirtualLot(agentId, userId, p.cycle.id, p.id, meta, creds, {
+      reason: 'PROTECTION_SWEEP_FLATTEN',
+      mark: mark || fillPrice || 0,
+      fillPrice: fillPrice ?? 0,
+      leverage: meta.leverage ?? resolveSubscriberLeverage(intent),
+      peakMarginPct: meta.peakMarginPct ?? 0,
+      unrealMarginPct: 0,
+      stopLossMarginPct: meta.stopLossMarginPct ?? 0,
+      terminalAuthority: {
+        kind: 'PROTECTION_SWEEPER_EMERGENCY',
+        canonicalTradeId,
+        lifecycleGeneration: showcaseIntentRevision(p.cycle.intentEnvelope) ?? `legacy:${canonicalTradeId}`,
+        evidence: {
+          schema: 'protection_sweeper_v1',
+          stop_count: 0,
+          emergency_stop_failed: true,
+          position_side: meta.direction,
+          position_amount: position?.amount ?? 0,
+        },
+      },
+    });
+    if (closed) this.protectionSweepStats.flattened += 1;
+    await this.recordProtectionSweepAlert(instanceId, { ...base, outcome: closed ? 'FLATTENED' : 'FLATTEN_FAILED' });
+    return decision;
   }
 
   private async runTimeDeadlineExit(
@@ -7227,6 +7419,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       creds,
       participantSince,
     );
+
+    if (instance.exchangeProvider === 'bitfinex') {
+      this.currentStage = 'PROTECTION_SWEEP';
+      await this.sweepProtection(agentId, instance.userId, instance.id, creds).catch((err) => {
+        this.protectionSweepStats.errors += 1;
+        this.logger.error(`[PROTECTION-SWEEP] failed user=${instance.userId}: ${err instanceof Error ? err.message : err}`);
+      });
+    }
 
     // Phase 4+5 — autonomous orphan adoption. Reads the exchange directly and
     // re-adopts unattributed resting orders (S6a) and filled positions (S6b)
@@ -19810,7 +20010,8 @@ await this.notifications
         | NonNullable<VirtualLotExitReason>
         | 'SHOWCASE_VANISHED'
         | 'AUTHENTICATED_EMERGENCY_CLOSE'
-        | 'TIME_60S';
+        | 'TIME_60S'
+        | 'PROTECTION_SWEEP_FLATTEN';
       /** LIVE-FIX-1490: hold the exchange write until this wall-clock time. */
       submitNotBeforeMs?: number;
       mark: number;
@@ -20006,10 +20207,11 @@ await this.notifications
     });
 
     const exitReasonMap: Record<
-      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
+      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S' | 'PROTECTION_SWEEP_FLATTEN',
       string
     > = {
       TIME_60S: 'TIME_60S',
+      PROTECTION_SWEEP_FLATTEN: 'PROTECTION_SWEEP_FLATTEN',
       PROFIT_LOCK: 'PROFIT_LOCK',
       THESIS_FAST_CUT: 'THESIS_FAST_CUT',
       HARD_STOP: 'HARD_STOP',
