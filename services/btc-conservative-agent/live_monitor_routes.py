@@ -15,7 +15,8 @@ from typing import Any, Iterable, Mapping
 SCHEMA = "hm_live_routes_v1"
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
 LIVE_STAGES = ("fly_signal_at_ts", "fly_intent_emitted_at_ts", "railway_received_at_ts", "order_sent_at_ts",
-               "exchange_ack_at_ts", "fill_at_ts", "stop_placed_at_ts", "stop_confirmed_at_ts",
+               "exchange_ack_at_ts", "fill_at_ts", "stop_entry_ack_at_ts", "stop_fill_detected_at_ts",
+               "stop_claimed_at_ts", "stop_submit_started_at_ts", "stop_placed_at_ts", "stop_confirmed_at_ts",
                "exit_preflight_at_ts", "exit_sent_at_ts", "exit_ack_at_ts", "exit_confirmed_at_ts",
                "exit_recorded_at_ts")
 
@@ -117,6 +118,13 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                       "live_fill_vs_paper_fill_ms": _ms(paper["fill_ts"], L.get("fill_at_ts")),
                       "fill_to_stop_placed_ms": _ms(L.get("fill_at_ts"), L.get("stop_placed_at_ts")),
                       "fill_to_stop_confirmed_ms": _ms(L.get("fill_at_ts"), L.get("stop_confirmed_at_ts")),
+                      # LIVE-FIX-1494: stop path split (executor clock for all four marks)
+                      "stop_ack_to_confirmed_ms": _ms(L.get("stop_placed_at_ts"), L.get("stop_confirmed_at_ts")),
+                      "entry_ack_to_fill_detected_ms": _ms(L.get("stop_entry_ack_at_ts"), L.get("stop_fill_detected_at_ts")),
+                      "fill_detected_to_claimed_ms": _ms(L.get("stop_fill_detected_at_ts"), L.get("stop_claimed_at_ts")),
+                      "claimed_to_stop_submit_ms": _ms(L.get("stop_claimed_at_ts"), L.get("stop_submit_started_at_ts")),
+                      "stop_submit_to_ack_ms": _ms(L.get("stop_submit_started_at_ts"), L.get("stop_placed_at_ts")),
+                      "entry_ack_to_stop_ack_ms": _ms(L.get("stop_entry_ack_at_ts"), L.get("stop_placed_at_ts")),
                       "slippage_bp_vs_paper": _bp(row.get("live_fill_price"), paper["entry_price"], side)},
             "exit": {"paper_exit_to_fly_intent_ms": _ms(paper["exit_ts"], L.get("fly_exit_intent_at_ts")),
                      "paper_exit_to_send_ms": _ms(paper["exit_ts"], L.get("exit_sent_at_ts")),
@@ -138,6 +146,9 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                 "entry_signal_to_send_ms": ("entry", "signal_to_send_ms"),
                 "fill_to_stop_placed_ms": ("entry", "fill_to_stop_placed_ms"),
                 "fill_to_stop_confirmed_ms": ("entry", "fill_to_stop_confirmed_ms"),
+                **{k: ("entry", k) for k in ("stop_ack_to_confirmed_ms", "entry_ack_to_fill_detected_ms",
+                                             "fill_detected_to_claimed_ms", "claimed_to_stop_submit_ms",
+                                             "stop_submit_to_ack_ms", "entry_ack_to_stop_ack_ms")},
                 "entry_slippage_bp": ("entry", "slippage_bp_vs_paper"),
                 "exit_paper_to_live_ms": ("exit", "paper_exit_to_live_exit_ms"),
                 "exit_slippage_bp": ("exit", "slippage_bp_vs_paper")}.items()}}

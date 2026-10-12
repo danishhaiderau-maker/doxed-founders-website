@@ -207,6 +207,12 @@ export function buildLiveCopyReports(input: {
           tl.fill_at_ts = tl.fill_at_ts ?? sec(fillMs);
           const stopAck = isoMs(pl.stop_exchange_ack_at);
           if (stopAck != null) tl.stop_placed_at_ts = tl.stop_placed_at_ts ?? sec(stopAck);
+          // LIVE-FIX-1494: entry ACK -> fill detected -> claim -> stop submit marks.
+          for (const [k, f] of [['stop_entry_ack_at_ts', 'entry_exchange_ack_at'], ['stop_fill_detected_at_ts', 'fill_detected_at'],
+            ['stop_claimed_at_ts', 'stop_claimed_at'], ['stop_submit_started_at_ts', 'stop_submit_started_at']] as const) {
+            const v = isoMs(pl[f]);
+            if (v != null) (tl as Record<string, number | null>)[k] = (tl as Record<string, number | null>)[k] ?? sec(v);
+          }
           push(e, 'ORDER_FILLED', {
             fill: { price: num(pl.fill_price), qty: num(pl.qty), source: pl.fill_price_source ?? pl.fill_source ?? null },
           });

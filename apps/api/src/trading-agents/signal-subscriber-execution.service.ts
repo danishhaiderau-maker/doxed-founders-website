@@ -11616,6 +11616,7 @@ await this.notifications
       lifecycleGeneration: this.fillPromotionGeneration(cycle, intent, meta.bitfinexOrderId),
     });
     if (!promotion) return false;
+    const stopClaimedAtMs = Date.now();
 
     const stopSubmitStartedAtMs = Date.now();
     const stopInput = {
@@ -11811,6 +11812,11 @@ await this.notifications
         ? Math.max(0, fillDetectedAtMs - exchangeFillEvidence.lastExecutedAtMs)
         : undefined,
       stop_reference_price: stopReferencePrice,
+      // LIVE-FIX-1494: per-step marks, entry ACK -> stop ACK (5-trade measurement).
+      entry_exchange_ack_at: meta.entryExchangeAckAtMs
+        ? new Date(meta.entryExchangeAckAtMs).toISOString()
+        : undefined,
+      stop_claimed_at: new Date(stopClaimedAtMs).toISOString(),
       stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
       stop_exchange_ack_at: stopExchangeAckAtMs != null
         ? new Date(stopExchangeAckAtMs).toISOString()
