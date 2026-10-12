@@ -300,6 +300,19 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
             if p.get("actor") == "SYSTEM" and now - at <= 3600:
                 causes.append(f"RELAY_SELF_PAUSE:{p.get('code')}"); verdict = worst(verdict, RED)
                 break
+        # LIVE-FIX-1506: stop-side guard. A refusal in the last hour is RED (a
+        # wrong-side stop was attempted); a fail-open (no quote) is AMBER.
+        for g in acct.get("stop_guard_events") or []:
+            try:
+                g_at = float(g.get("at_ms") or 0) / 1000.0
+            except (TypeError, ValueError):
+                continue
+            if now - g_at > 3600:
+                continue
+            if g.get("kind") == "REFUSED" and "STOP_SIDE_REFUSED" not in causes:
+                causes.append("STOP_SIDE_REFUSED"); verdict = worst(verdict, RED)
+            elif g.get("kind") == "FAIL_OPEN" and "STOP_GUARD_FAIL_OPEN" not in causes:
+                causes.append("STOP_GUARD_FAIL_OPEN"); verdict = worst(verdict, AMBER)
         if acct.get("armed") and acct.get("key_valid") is False:
             causes.append("KEY_INVALID"); verdict = worst(verdict, RED)
         # LIVE-FIX-1486: surface expired hires and safety-paused accounts.

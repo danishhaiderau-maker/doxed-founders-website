@@ -63,6 +63,13 @@ def _bp(live, paper, side, *, exit_leg=False):
     return round(sign * (live - paper) / paper * 1e4, 2)  # + = adverse vs paper
 
 
+# LIVE-FIX-1506 (HM 13 Oct): trades corrupted by a known defect. Kept in rows
+# (flagged) but excluded from rolling live-vs-paper stats.
+POLLUTED_TRADES = {
+    "dsl-1791810796-2": "ADOPT_RACE_WRONG_SIDE_STOP",  # reconcile-adopt stop @82879.12 from dsl-1791809159-10's fill
+}
+
+
 def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Mapping[str, Mapping],
              *, trade_id: str | None = None, limit: int = 50, since: float = 0.0) -> dict:
     by: dict[str, dict] = {}
@@ -151,15 +158,17 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                      "slippage_bp_vs_paper": _bp(row.get("live_exit_price"), paper["exit_price"], side, exit_leg=True),
                      "paper_exit_reason": paper["exit_reason"]},
             "paper": paper, "live_stamps": L, "events": row["events"][-20:],
+            "polluted": POLLUTED_TRADES.get(tid),
         })
     rows.sort(key=lambda r: r["t0_signal_ts"])
     rows = rows[-max(1, int(limit)):]
 
     def roll(path):
-        vals = [r[path[0]][path[1]] for r in rows if r[path[0]].get(path[1]) is not None]
+        vals = [r[path[0]][path[1]] for r in rows if not r.get("polluted") and r[path[0]].get(path[1]) is not None]
         return {"n": len(vals), "p50": _pct(vals, 0.5), "p95": _pct(vals, 0.95), "max": max(vals) if vals else None}
 
     return {"schema": SCHEMA, "route": "timeline", "n": len(rows), "rows": rows, "units": "ms, bp (+ = adverse)",
+            "polluted_excluded": sorted(r["trade_id"] for r in rows if r.get("polluted")),
             "rolling": {k: roll(p) for k, p in {
                 "entry_signal_to_send_ms": ("entry", "signal_to_send_ms"),
                 "fill_to_stop_placed_ms": ("entry", "fill_to_stop_placed_ms"),

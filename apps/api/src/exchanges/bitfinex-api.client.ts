@@ -307,6 +307,14 @@ export function stopSideViolation(amount: number, stopPrice: number, bid: number
   return null;
 }
 
+export type StopGuardEvent = { kind: 'REFUSED' | 'FAIL_OPEN'; at_ms: number; symbol: string; amount: number; price: number; reason: string; quote_source: string | null };
+let stopGuardListener: ((e: StopGuardEvent) => void) | null = null;
+/** LIVE-FIX-1506: the executor persists these for the Fly alert. */
+export function setStopGuardListener(fn: ((e: StopGuardEvent) => void) | null): void { stopGuardListener = fn; }
+let stopGuardQuoteCache: ((symbol: string) => { bid: number; ask: number } | null) | null = null;
+export function setStopGuardQuoteCache(fn: ((symbol: string) => { bid: number; ask: number } | null) | null): void { stopGuardQuoteCache = fn; }
+function emitStopGuard(e: StopGuardEvent): void { try { stopGuardListener?.(e); } catch { /* never block a stop */ } }
+
 export const stopSideRefusals: Array<{ at_ms: number; symbol: string; amount: number; price: number; reason: string }> = [];
 let stopSideTickerFetch: (symbol: string) => Promise<{ bid: number; ask: number } | null> = async (symbol) => {
   const res = await fetch(`https://api-pub.bitfinex.com/v2/ticker/${encodeURIComponent(symbol)}`, { signal: AbortSignal.timeout(1500) });
@@ -323,16 +331,22 @@ export async function assertProtectiveStopSide(apiPath: string, body: Record<str
   const amount = Number(body.amount);
   const price = Number(body.price);
   let quote: { bid: number; ask: number } | null = null;
-  try { quote = await stopSideTickerFetch(symbol); } catch { quote = null; }
+  let quoteSource: string | null = null;
+  try { quote = stopGuardQuoteCache?.(symbol) ?? null; if (quote) quoteSource = 'WS'; } catch { quote = null; }
   if (!quote) {
-    console.warn(`[STOP-SIDE-GUARD] ticker unavailable symbol=${symbol}; stop sent unchecked`);
+    try { quote = await stopSideTickerFetch(symbol); if (quote) quoteSource = 'REST'; } catch { quote = null; }
+  }
+  if (!quote) {
+    console.error(`[STOP-SIDE-GUARD] FAIL_OPEN ticker unavailable symbol=${symbol}; stop sent unchecked`);
+    emitStopGuard({ kind: 'FAIL_OPEN', at_ms: Date.now(), symbol, amount, price, reason: 'NO_QUOTE', quote_source: null });
     return;
   }
   const reason = stopSideViolation(amount, price, quote.bid, quote.ask);
   if (!reason) return;
   stopSideRefusals.push({ at_ms: Date.now(), symbol, amount, price, reason });
   if (stopSideRefusals.length > 100) stopSideRefusals.shift();
-  console.error(`[STOP-SIDE-GUARD] REFUSED ${reason} symbol=${symbol} amount=${amount} cid=${String(body.cid ?? '')}`);
+  console.error(`[STOP-SIDE-GUARD] REFUSED ${reason} symbol=${symbol} amount=${amount} cid=${String(body.cid ?? '')} quote=${quoteSource}`);
+  emitStopGuard({ kind: 'REFUSED', at_ms: Date.now(), symbol, amount, price, reason, quote_source: quoteSource });
   throw new Error(`STOP_SIDE_REFUSED: ${reason}`);
 }
 

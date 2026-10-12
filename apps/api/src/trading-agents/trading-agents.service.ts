@@ -1442,6 +1442,7 @@ export class TradingAgentsService implements OnModuleInit {
       relayExchangeMirror: unknown; copyRelaySimActive: boolean; updatedAt: Date | null;
       expiresAt?: Date | null;
       relayPauseHistory?: unknown;
+      relayStopGuard?: unknown;
     };
     const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
       SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
@@ -1452,6 +1453,7 @@ export class TradingAgentsService implements OnModuleInit {
              i."dashboardState" -> 'relayLastTransition' AS "relayLastTransition",
              i."dashboardState" -> 'relayExchangeMirror' AS "relayExchangeMirror",
              i."dashboardState" -> 'relayPauseHistory' AS "relayPauseHistory",
+             i."dashboardState" -> 'relayStopGuard' AS "relayStopGuard",
              COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "copyRelaySimActive",
              i."lastError", i."updatedAt", i."expiresAt"
       FROM "TradingAgentInstance" i
@@ -1496,6 +1498,10 @@ export class TradingAgentsService implements OnModuleInit {
               at: p?.at ?? null, actor: p?.actor ?? null, owner: p?.owner ?? null, action: p?.action ?? null,
               code: p?.code ?? null, message: typeof p?.message === 'string' ? p.message.slice(0, 200) : null,
             }))
+          : [],
+        // LIVE-FIX-1506: stop-side guard refusals / fail-opens (last 20).
+        stop_guard_events: Array.isArray(r.relayStopGuard)
+          ? (r.relayStopGuard as Record<string, unknown>[]).slice(-20)
           : [],
       };
     });

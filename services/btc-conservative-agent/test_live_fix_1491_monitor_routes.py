@@ -117,3 +117,24 @@ def test_live_fix_1498_entry_slippage_vs_signal_touch():
     e = out["rows"][0]["entry"]
     assert abs(e["slippage_bp_vs_signal_touch"] - 3.0) < 1e-6
     assert out["rolling"]["entry_slippage_bp_vs_signal_touch"]["n"] == 1
+
+
+def test_live_fix_1506_polluted_trade_excluded_from_rolling():
+    import live_monitor_routes as lmr
+    assert lmr.POLLUTED_TRADES["dsl-1791810796-2"] == "ADOPT_RACE_WRONG_SIDE_STOP"
+
+
+def test_live_fix_1506_stop_guard_alerts():
+    import time
+    import live_copy_monitor as lcm
+    now = time.time()
+
+    def run(events):
+        web = {"reachable": True, "executor_healthy": True,
+               "accounts": [{"account": "a", "armed": True, "stop_guard_events": events}]}
+        return str(lcm.summary(output={"enabled": True}, force_paper_mode=False, relay_stack_mode="LIVE",
+                               switch_rows=[], gaps=[], lags={}, executor_last_report_ts=now, website=web,
+                               rejects_1h=0, unsigned_rejects_1h=0, now=now))
+    assert "STOP_SIDE_REFUSED" in run([{"kind": "REFUSED", "at_ms": now * 1000}])
+    assert "STOP_GUARD_FAIL_OPEN" in run([{"kind": "FAIL_OPEN", "at_ms": now * 1000}])
+    assert "STOP_SIDE_REFUSED" not in run([{"kind": "REFUSED", "at_ms": (now - 7200) * 1000}])
