@@ -120,9 +120,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # profiles gained cut_max_peak_bp, so both tiles' policy signatures and this pin moved.
 # The frozen roster's signature is unchanged.
 # 2026-10-11 (owner): H-C/B3/FADE-POOL/V07 retired and DISLOC/DISLOC-FOI added; pin moved.
+# 2026-10-12 10:57 (owner): H-A and GS-07 retired (roster 1..7); pin moved.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "4d4fd27fdb142f6a8468612edcb52d55a7982740317bd0ec8ebba97cd7800d14",
-    "hypothesis": "d5edb87105641ac49734e269db998d59ca408a89d1c24104318c8abbc38779ed",
+    "score_led": "0eaa123377fa49b149f5f96c61dd6d22b3808ce5bf8f334e3a0790b280028331",
+    "hypothesis": "4022e371fe5aeafe26b2621955286b2919d56ae6cad8e91658688768716a90cf",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
