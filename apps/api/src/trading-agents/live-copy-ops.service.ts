@@ -203,7 +203,7 @@ export class LiveCopyOpsService {
     return {
       ...summary,
       verdict: worstVerdict(summary.verdict, reporterStatus),
-      reporter: { ...this.reporter.stats, verdict: reporterStatus },
+      reporter: { ...this.reporter.stats, verdict: reporterStatus, recent_runs: this.reporter.runs.slice(-50) },
       ingest_rejects_1h: rejects ?? null,
     };
   }

@@ -440,6 +440,31 @@ export function summarizeCopyStatus(reports: LiveExecutionReport[], nowMs: numbe
   };
 }
 
+/** LIVE-FIX-1502: one row per reporter run (HM 23:42 observability; no behaviour change). */
+export interface ReporterRunRecord {
+  process: 'executor' | 'website';
+  trigger: 'kick' | 'interval' | 'rerun';
+  started_at_ms: number;
+  collect_ms: number | null;
+  duration_ms: number;
+  collected: number;
+  unacked: number;
+  attempted: number;
+  skipped_backoff: number;
+  sent: number;
+  failed: number;
+  /** ms from report event_at_ts to Fly ack, per sent report */
+  delays_ms: number[];
+  max_delay_ms: number | null;
+  error: string | null;
+}
+
+export const REPORTER_RUNS_MAX = 200;
+
+export function reporterRunLine(r: ReporterRunRecord): string {
+  return `[LIVE-COPY-REPORTER-RUN] ${JSON.stringify(r)}`;
+}
+
 @Injectable()
 export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LiveCopyFlyReporterService.name);
@@ -450,6 +475,8 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   readonly stats = { lastRunAt: 0, sent: 0, failed: 0, lastError: null as string | null, pending: 0, consecutiveFailures: 0, lastOkAt: 0, lastFailAt: 0 };
   readonly capability = { lastSentAt: 0, lastOkAt: 0, lastError: null as string | null };
   private lastCapabilityAttempt = 0;
+  readonly runs: ReporterRunRecord[] = [];
+  private nextTrigger: ReporterRunRecord['trigger'] = 'interval';
 
   constructor(
     private readonly prisma: PrismaService,
@@ -459,11 +486,11 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   onModuleInit(): void {
     if (this.config.get<string>('LIVE_COPY_REPORTER_ENABLED') === 'false') return;
     if (process.env.NODE_ENV === 'test') return;
-    setLiveCopyReportKickListener(() => void this.tick());
+    setLiveCopyReportKickListener(() => void this.tick('kick'));
     // The real-money executor worker reports only on kicks (its own events);
     // the website process keeps the 5 s sweep. Fly dedups by report_id.
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') return;
-    this.timer = setInterval(() => void this.tick(), 5_000);
+    this.timer = setInterval(() => void this.tick('interval'), 5_000);
     this.timer.unref?.();
   }
 
@@ -572,22 +599,32 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
 
   private rerun = false;
 
-  async tick(): Promise<void> {
+  async tick(trigger: ReporterRunRecord['trigger'] = 'interval'): Promise<void> {
     // LIVE-FIX-1054: a kick that lands mid-run is not dropped; one trailing
     // run follows so a fill/stop written during a sweep is reported at once.
     if (this.running) { this.rerun = true; return; }
     this.running = true;
+    const run: ReporterRunRecord = {
+      process: process.env.RELAY_EXECUTOR_WORKER === 'true' ? 'executor' : 'website',
+      trigger, started_at_ms: Date.now(), collect_ms: null, duration_ms: 0, collected: 0, unacked: 0,
+      attempted: 0, skipped_backoff: 0, sent: 0, failed: 0, delays_ms: [], max_delay_ms: null, error: null,
+    };
     try {
       const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET');
       if (!String(secret ?? '').trim()) return;
       const nowMs = Date.now();
       void this.sendCapability(secret as string, nowMs).catch(() => false); // LIVE-FIX-1450: never delay fill reports
-      const reports = (await this.collect(nowMs)).filter((r) => !this.acked.has(r.report_id));
+      const collected = await this.collect(nowMs);
+      run.collect_ms = Date.now() - nowMs;
+      run.collected = collected.length;
+      const reports = collected.filter((r) => !this.acked.has(r.report_id));
+      run.unacked = reports.length;
       this.stats.pending = reports.length;
       for (const r of reports) {
         const last = this.lastAttempt.get(r.report_id) ?? 0;
-        if (nowMs - last < 15_000) continue;
+        if (nowMs - last < 15_000) { run.skipped_backoff += 1; continue; }
         this.lastAttempt.set(r.report_id, nowMs);
+        run.attempted += 1;
         const body = JSON.stringify({ ...r, sent_at_ts: Date.now() / 1000 });
         const sig = signLiveExecutionReport(body, secret);
         if (!sig) return;
@@ -600,16 +637,21 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
           });
           if (res.ok) {
             this.acked.set(r.report_id, Date.now());
+            run.sent += 1;
+            const evAt = Number((r as { event_at_ts?: unknown }).event_at_ts);
+            if (Number.isFinite(evAt) && evAt > 0) run.delays_ms.push(Math.round(Date.now() - evAt * 1000));
             this.stats.sent += 1;
             this.stats.consecutiveFailures = 0;
             this.stats.lastOkAt = Date.now();
           } else {
+            run.failed += 1;
             this.stats.failed += 1;
             this.stats.consecutiveFailures += 1;
             this.stats.lastFailAt = Date.now();
             this.stats.lastError = `HTTP_${res.status}`;
           }
         } catch (err) {
+          run.failed += 1;
           this.stats.failed += 1;
           this.stats.consecutiveFailures += 1;
           this.stats.lastFailAt = Date.now();
@@ -620,12 +662,20 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
     } catch (err) {
       this.stats.lastError = err instanceof Error ? err.message.slice(0, 120) : 'TICK_FAILED';
       this.logger.warn(`[LIVE-COPY-REPORTER] ${this.stats.lastError}`);
+      run.error = this.stats.lastError;
     } finally {
       this.stats.lastRunAt = Date.now();
+      run.duration_ms = this.stats.lastRunAt - run.started_at_ms;
+      run.max_delay_ms = run.delays_ms.length ? Math.max(...run.delays_ms) : null;
+      if (run.attempted > 0 && !run.error && run.failed === 0 && run.sent === 0) run.error = 'NO_SIGNATURE';
+      this.runs.push(run);
+      if (this.runs.length > REPORTER_RUNS_MAX) this.runs.splice(0, this.runs.length - REPORTER_RUNS_MAX);
+      // Every run, including idle ones, so restarts and gaps are visible in Railway logs.
+      this.logger.log(reporterRunLine(run));
       this.running = false;
       if (this.rerun) {
         this.rerun = false;
-        setImmediate(() => void this.tick());
+        setImmediate(() => void this.tick('rerun'));
       }
     }
   }
