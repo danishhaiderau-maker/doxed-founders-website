@@ -6535,9 +6535,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // exact cycle. Overlap every read-only account proof with that wait; no
     // claim or exchange write can occur until cyclesPromise returns the exact
     // durable signed envelope below.
+    const legMark = <T,>(name: string, p: Promise<T>): Promise<T> =>
+      timing ? p.finally(() => { (timing.marks ??= {})[name] = Date.now(); }) : p;
     const preflightPromise = Promise.all([
-      this.activeTrading.listActiveOrders(creds),
-      this.readOpenPositionDetailWithRetry(creds),
+      legMark('pfOrders', this.activeTrading.listActiveOrders(creds)),
+      legMark('pfPosition', this.readOpenPositionDetailWithRetry(creds)),
       this.prisma.signalCycleParticipant.findMany({
         where: {
           userId: instance.userId,
@@ -6551,7 +6553,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.activeTrading.getMarkPrice().catch(() => null),
     ]);
     const [cycles, marginCap, preflight] = await Promise.all([
-      cyclesPromise,
+      legMark('pfCycle', cyclesPromise),
       marginCapPromise,
       preflightPromise,
     ]);
@@ -10141,10 +10143,12 @@ await this.notifications
     try {
       if (timing) (timing.marks ??= {}).claimTx = Date.now();
       const claimedAndAssessed = await this.prisma.$transaction(async (tx) => {
+        if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
         await tx.$executeRawUnsafe(
           'SELECT pg_advisory_xact_lock(hashtext($1))',
           `copy-cluster:${instance.userId}:${agentId}`,
         );
+        if (timing) (timing.marks ??= {}).claimLock = Date.now();
         const claimed = await tx.signalCycleParticipant.create({
           data: {
             cycleId,
@@ -10153,6 +10157,7 @@ await this.notifications
             status: SignalCycleStatus.INTENT,
           },
         });
+        if (timing) (timing.marks ??= {}).claimInsert = Date.now();
         const assessment = await this.correlatedExposureSnapshot({
           userId: instance.userId, agentId, participantId: claimed.id,
           cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
