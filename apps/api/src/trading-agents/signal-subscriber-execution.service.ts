@@ -19685,19 +19685,17 @@ await this.notifications
           existing?.status === SignalCycleStatus.OPEN &&
           existing.terminalCloseClaimToken
         ) {
-          await this.pauseUserRelayForPositionMismatch(
-            userId,
-            agentId,
-            `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
-          ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18996', true));
+          this.logger.warn(
+            `[TERMINAL-CLAIM] stand-down cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'} reason=${opts.reason}: owned by another closer`,
+          );
           return true;
         }
-        await this.pauseUserRelayForPositionMismatch(
-          userId,
-          agentId,
-          `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycleId}: ${opts.reason} authority changed`,
-        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19003', true));
-        return false;
+        // LIVE-FIX-1487: no self-pause on a refused claim; a real exchange
+        // drift is caught by the confirmed reconcile mismatch.
+        this.logger.warn(
+          `[TERMINAL-CLAIM] stand-down cycle=${cycleId} status=${existing?.status ?? 'MISSING'} reason=${opts.reason}: TERMINAL_CLOSE_CLAIM_REFUSED (not pausing)`,
+        );
+        return existing?.status !== SignalCycleStatus.OPEN;
         }
       } else {
         terminalClaim = acquired;
