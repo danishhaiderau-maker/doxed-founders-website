@@ -11003,8 +11003,10 @@ await this.notifications
             : null,
           fastPath: { used: Boolean(signedExactLimit), reason: signedExactLimit ? 'SIGNED_EXACT_LIMIT' : 'NOT_SIGNED_EXACT' },
         };
-        this.entryObservability.set(participant.id, obs);
-        if (this.entryObservability.size > 100) this.entryObservability.delete(this.entryObservability.keys().next().value as string);
+        if (this.entryObservability) {
+          this.entryObservability.set(participant.id, obs);
+          if (this.entryObservability.size > 100) this.entryObservability.delete(this.entryObservability.keys().next().value as string);
+        }
         if (submitFill) {
           try {
             const meta = await this.loadExecutionMeta(participant.id);
@@ -11751,8 +11753,8 @@ await this.notifications
       meta.bitfinexOrderId,
     );
     const fillEnrichedAtMs = Date.now();
-    const entryObs = this.entryObservability.get(participantId);
-    this.entryObservability.delete(participantId);
+    const entryObs = this.entryObservability?.get(participantId);
+    this.entryObservability?.delete(participantId);
     const exchangeFillIds = Array.from(new Set([
       ...(exchangeFillEvidence?.fillIds ?? []),
       ...(authenticatedFillIds ?? []),
