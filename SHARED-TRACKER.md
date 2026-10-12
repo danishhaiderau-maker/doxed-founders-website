@@ -33,3 +33,9 @@
 4. Alerts: STOP_EXECUTED_FAST (stop executes < 2 s after creation); STOP_UNATTRIBUTED (exchange stop not tied to an open lot).
 5. Full fix: lot closed atomically in the same transaction as the exit completion; stop-retry and reconcile-adopt refuse positions they can't attribute to the lot's own entry order/fill (qty + order id), and alert instead of adopting; tests: stale lot + new entry, restart mid-exit; exit-path timing marks.
 - Metric: 5+ DISLOC trades with zero unattributed stops, zero STOP_EXECUTED_FAST, zero early closes vs paper.
+
+## LIVE-FIX-1503 stale-lot cleanup + executor diagnostics (Decision A step 1) - includes #650
+- Cleanup: on the first executor tick after deploy, for each live Bitfinex account: authenticated position + active-orders read; if flat, every OPEN/PENDING_ENTRY lot untouched for 5 min becomes CLOSED (conditional updateMany, idempotent), with a STALE_LOT_CLEANUP event (reason, previous status, polluted=true) and a log line per id. A read failure or non-flat account closes nothing. Kill switch RELAY_STALE_LOT_CLEANUP=off|dry.
+- Diagnostics (logs only, every 30 min, `[EXECUTOR-DIAG]`): DB host (no creds) + pooler flag + server addr, SELECT 1 p50/p95 x20, no-op updateMany x10, server exec time, first-query time; Bitfinex public ticker x10, DNS/TCP/TLS to api and api-pub, signed active-orders x3.
+- Metrics: log shows `[STALE-LOT-CLEANUP] ... open_lots=N cleaned=N account_flat=true`, then 0 OPEN lots on the next boot; EXECUTOR-DIAG line present with numbers.
+- Not in this PR (next small PR): stop-side guard, fast-stop / unattributed-stop alerts, Fly-side polluted exclusion.

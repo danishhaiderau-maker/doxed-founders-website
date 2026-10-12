@@ -115,6 +115,7 @@ import {
 } from './bitfinex-pre-trade-safety';
 import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
 import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
+import { staleLotDecision, summarize, timed, tlsTimings } from './stale-lot-cleanup';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -6657,6 +6658,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           this.relayInstanceCache.set(instance.id, instance);
         }
       }
+      // LIVE-FIX-1503: one-time stale-lot cleanup (inside the tick mutex) and periodic diagnostics.
+      if (!this.staleLotCleanupDone) {
+        this.staleLotCleanupDone = true;
+        await this.cleanupStaleOpenLots(agent.id, instances).catch((err) =>
+          this.logger.error(`[STALE-LOT-CLEANUP] failed: ${err instanceof Error ? err.message : err}`));
+      }
+      if (Date.now() - this.lastExecutorDiagAtMs > 30 * 60_000) {
+        this.lastExecutorDiagAtMs = Date.now();
+        void this.runExecutorDiagnostics(instances).catch((err) =>
+          this.logger.warn(`[EXECUTOR-DIAG] failed: ${err instanceof Error ? err.message : err}`));
+      }
       await this.reconcileShowcaseLiveCopyCoordination(agent.id, instances);
 
       const tickExitStages = new Map<string, string>();
@@ -12210,6 +12222,118 @@ await this.notifications
       return hit.value;
     }
     return refresh().catch(() => null);
+  }
+
+  private staleLotCleanupDone = false;
+  private lastExecutorDiagAtMs = 0;
+
+  /**
+   * LIVE-FIX-1503: mark OPEN/PENDING_ENTRY lots CLOSED when the account is
+   * proven flat (authenticated position + orders read). Idempotent: a CLOSED
+   * lot never matches again. Keeps every row; writes a STALE_LOT_CLEANUP event
+   * per lot and logs each id. Disable with RELAY_STALE_LOT_CLEANUP=off.
+   */
+  private async cleanupStaleOpenLots(agentId: string, instances: TradingAgentInstance[]): Promise<void> {
+    const mode = (process.env.RELAY_STALE_LOT_CLEANUP ?? 'on').trim().toLowerCase();
+    if (mode === 'off') return;
+    for (const instance of instances.filter((i) => i.exchangeProvider === 'bitfinex')) {
+      const lots = await this.prisma.signalCycleParticipant.findMany({
+        where: { userId: instance.userId, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] }, cycle: { agentId } },
+        select: { id: true, status: true, updatedAt: true, cycleId: true, cycle: { select: { tradeId: true } } },
+      });
+      if (!lots.length) {
+        this.logger.log(`[STALE-LOT-CLEANUP] user=${instance.userId} open_lots=0 cleaned=0`);
+        continue;
+      }
+      let acct = { readOk: false, positionAmount: 0, openOrders: 0 };
+      try {
+        const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
+        if (!creds) throw new Error('NO_CREDENTIALS');
+        const [position, orders] = await Promise.all([
+          this.readOpenPositionDetailWithRetry(creds),
+          this.activeTrading.listActiveOrders(creds),
+        ]);
+        acct = { readOk: true, positionAmount: Number(position?.amount ?? 0), openOrders: Array.isArray(orders) ? orders.length : 0 };
+      } catch (err) {
+        this.logger.error(`[STALE-LOT-CLEANUP] user=${instance.userId} exchange read failed; nothing cleaned: ${err instanceof Error ? err.message : err}`);
+      }
+      const exits = await this.prisma.signalCycleEvent.findMany({
+        where: { participantId: { in: lots.map((l) => l.id) }, eventType: 'EXIT' },
+        select: { participantId: true },
+      });
+      const exited = new Set(exits.map((e) => e.participantId));
+      let cleaned = 0;
+      for (const lot of lots) {
+        const d = staleLotDecision({ id: lot.id, status: lot.status, updatedAtMs: lot.updatedAt.getTime(), tradeId: lot.cycle?.tradeId ?? null, hasExitEvent: exited.has(lot.id) }, acct, Date.now());
+        if (!d.stale) {
+          this.logger.warn(`[STALE-LOT-CLEANUP] keep participant=${lot.id} trade=${lot.cycle?.tradeId ?? '-'} status=${lot.status} reason=${d.reason}`);
+          continue;
+        }
+        if (mode === 'dry') {
+          this.logger.warn(`[STALE-LOT-CLEANUP] DRY would close participant=${lot.id} trade=${lot.cycle?.tradeId ?? '-'} reason=${d.reason}`);
+          continue;
+        }
+        const res = await this.prisma.signalCycleParticipant.updateMany({
+          where: { id: lot.id, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] } },
+          data: { status: SignalCycleStatus.CLOSED },
+        });
+        if (res.count !== 1) continue;
+        cleaned += 1;
+        await this.prisma.signalCycleEvent.create({
+          data: { cycleId: lot.cycleId, participantId: lot.id, eventType: 'STALE_LOT_CLEANUP',
+            payload: { schema: 'stale_lot_cleanup_v1', reason: d.reason, previous_status: lot.status, polluted: true,
+              account_position_amount: acct.positionAmount, account_open_orders: acct.openOrders, at: new Date().toISOString() } },
+        });
+        this.logger.warn(`[STALE-LOT-CLEANUP] closed participant=${lot.id} cycle=${lot.cycleId} trade=${lot.cycle?.tradeId ?? '-'} prev=${lot.status} reason=${d.reason}`);
+      }
+      this.logger.log(`[STALE-LOT-CLEANUP] user=${instance.userId} open_lots=${lots.length} cleaned=${cleaned} account_flat=${acct.readOk && !acct.positionAmount && !acct.openOrders}`);
+    }
+  }
+
+  /** LIVE-FIX-1503: executor-vantage DB and Bitfinex timings (logs only). */
+  private async runExecutorDiagnostics(instances: TradingAgentInstance[]): Promise<void> {
+    const out: Record<string, unknown> = { schema: 'executor_diag_v1', region: process.env.RAILWAY_REPLICA_REGION ?? null };
+    try {
+      const u = new URL(process.env.DATABASE_URL ?? '');
+      out.db_host = u.hostname; // host only, never credentials
+      out.db_pooler = /-pooler\./.test(u.hostname) || u.searchParams.get('pgbouncer') === 'true';
+      out.db_params = [...u.searchParams.keys()];
+    } catch { out.db_host = null; }
+    const sel: number[] = []; const upd: number[] = [];
+    for (let i = 0; i < 20; i += 1) sel.push(await timed(() => this.prisma.$queryRawUnsafe('SELECT 1')));
+    for (let i = 0; i < 10; i += 1) upd.push(await timed(() => this.prisma.signalCycleParticipant.updateMany({ where: { id: '__diag_none__' }, data: { status: SignalCycleStatus.CLOSED } })));
+    let serverMs: number | null = null;
+    try {
+      const t = await this.prisma.$queryRawUnsafe<Array<{ ms: number }>>("SELECT EXTRACT(EPOCH FROM (clock_timestamp() - statement_timestamp()))*1000 AS ms");
+      serverMs = Number(t[0]?.ms ?? null);
+      const r = await this.prisma.$queryRawUnsafe<Array<{ s: string }>>('SELECT inet_server_addr()::text AS s');
+      out.db_server_addr = r[0]?.s ?? null;
+    } catch { /* optional */ }
+    out.db_select1_ms = summarize(sel);
+    out.db_noop_update_ms = summarize(upd);
+    out.db_server_exec_ms = serverMs;
+    out.db_first_select_ms = Math.round(sel[0] * 10) / 10;
+    const tick: number[] = [];
+    for (let i = 0; i < 10; i += 1) {
+      tick.push(await timed(async () => {
+        const res = await fetch('https://api-pub.bitfinex.com/v2/ticker/tBTCF0:USTF0', { signal: AbortSignal.timeout(5000) });
+        await res.text();
+      }));
+    }
+    out.bfx_public_ticker_ms = summarize(tick);
+    try { out.bfx_api_edge = await tlsTimings('api.bitfinex.com'); } catch (e) { out.bfx_api_edge = String(e); }
+    try { out.bfx_pub_edge = await tlsTimings('api-pub.bitfinex.com'); } catch (e) { out.bfx_pub_edge = String(e); }
+    const live = instances.find((i) => i.exchangeProvider === 'bitfinex');
+    if (live) {
+      try {
+        const creds = await this.exchanges.getUserCredentials(live.userId, live.exchangeProvider);
+        if (!creds) throw new Error('NO_CREDENTIALS');
+        const signed: number[] = [];
+        for (let i = 0; i < 3; i += 1) signed.push(await timed(() => this.activeTrading.listActiveOrders(creds)));
+        out.bfx_signed_active_orders_ms = summarize(signed);
+      } catch (e) { out.bfx_signed_active_orders_ms = String(e); }
+    }
+    this.logger.log(`[EXECUTOR-DIAG] ${JSON.stringify(out)}`);
   }
 
   private async readOpenPositionDetailWithRetry(
