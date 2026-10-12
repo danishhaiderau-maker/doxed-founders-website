@@ -54,6 +54,7 @@ def _report_root(tmp_path, *, extra_reports=()):
         "analysis_provenance": {"cohort_schema": "analysis_cohorts_v1",
                                 "generation_revision": "07e607a38c8bb2627d58ed9b9da5fb76f15b13c5"},
         "report_count": len(reports), "reports": reports, "text_artifacts": text,
+        "generation_receipt": {"level": "GREEN", "complete": True, "integrity_status": "VALID"},
     }
     (root / "report_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root
@@ -180,3 +181,14 @@ def test_missing_token_fails_closed_without_uploading(tmp_path, monkeypatch):
     fly = _Fly([200])
     receipt = pub.publish(_args(root, tmp_path), opener=fly, sleep=lambda _s: None)
     assert receipt["error"] == "BOT_ADMIN_TOKEN_UNAVAILABLE" and fly.requests == []
+
+
+def test_invalid_generation_is_refused(tmp_path):
+    root = _report_root(tmp_path)
+    m = json.loads((root / "report_manifest.json").read_text())
+    m["generation_receipt"] = {"level": "RED", "complete": False, "integrity_status": "INVALID"}
+    (root / "report_manifest.json").write_text(json.dumps(m))
+    work = tmp_path / "w"
+    work.mkdir()
+    with pytest.raises(pub.PublishError, match="GENERATION_INTEGRITY_FAILED"):
+        pub.build_bundle(root, work)

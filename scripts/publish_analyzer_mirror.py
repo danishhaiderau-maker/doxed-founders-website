@@ -170,6 +170,15 @@ def build_bundle(report_root: Path, work: Path, *, source_data_revision: str | N
     if not REVISION_RE.fullmatch(data_revision):
         raise PublishError("SOURCE_DATA_REVISION_INVALID", data_revision)
     datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    # HM-BATCH3 (ANALYZER-REVIEW #1): never publish a generation that failed its own integrity check.
+    gen = manifest.get("generation_receipt") or {}
+    if os.environ.get("ANALYZER_PUBLISH_ALLOW_INVALID") != "1":
+        if not gen:
+            raise PublishError("GENERATION_RECEIPT_MISSING", "report_manifest.generation_receipt")
+        integrity = str(gen.get("integrity_status") or "").upper()
+        if gen.get("complete") is not True or str(gen.get("level") or "").upper() == "RED" or integrity == "INVALID":
+            raise PublishError("GENERATION_INTEGRITY_FAILED",
+                               f"level={gen.get('level')} complete={gen.get('complete')} integrity={integrity or None}")
 
     picked = select_members(report_root, manifest, list(supplemental or []))
     snapshot = work / "snapshot"

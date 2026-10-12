@@ -1781,6 +1781,13 @@ def load_data():
             trades[col] = trades[col].apply(safe_float)
 
     trades = trades.dropna(subset=["net_pnl_usd"]) if not trades.empty else trades
+    # HM-BATCH3: forced closes + late-exit window excluded by default; net_bp column added.
+    try:
+        import analysis_hygiene as _hyg
+        trades = _hyg.apply(trades)
+        print(f"   Hygiene: {_hyg.SUMMARY} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as _exc:
+        print(f"   Hygiene filter failed ({type(_exc).__name__}: {_exc}) {PIPELINE_ENFORCEMENT_TAG}")
 
     print(
         f"Loaded: Trades={len(trades)} | Blocked={len(blocked)} | Decisions={len(decisions)} | "
@@ -21880,6 +21887,11 @@ def _attach_generation_receipt(manifest, *, optional_errors):
     }
     if "data_epoch" in receipt:
         manifest["generation_receipt"]["data_epoch"] = receipt["data_epoch"]
+    try:
+        import analysis_hygiene as _hyg
+        manifest["analysis_hygiene"] = dict(_hyg.SUMMARY)
+    except Exception:
+        pass
     artifacts = manifest.setdefault("text_artifacts", [])
     if RECEIPT_FILE not in artifacts:
         artifacts.append(RECEIPT_FILE)
