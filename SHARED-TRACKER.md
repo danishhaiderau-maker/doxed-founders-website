@@ -39,3 +39,10 @@
 - Diagnostics (logs only, every 30 min, `[EXECUTOR-DIAG]`): DB host (no creds) + pooler flag + server addr, SELECT 1 p50/p95 x20, no-op updateMany x10, server exec time, first-query time; Bitfinex public ticker x10, DNS/TCP/TLS to api and api-pub, signed active-orders x3.
 - Metrics: log shows `[STALE-LOT-CLEANUP] ... open_lots=N cleaned=N account_flat=true`, then 0 OPEN lots on the next boot; EXECUTOR-DIAG line present with numbers.
 - Not in this PR (next small PR): stop-side guard, fast-stop / unattributed-stop alerts, Fly-side polluted exclusion.
+
+## LIVE-FIX-1505 stop-side guard + cleanup gaps + lot evidence (13 Oct ~01:10 AEDT)
+- Stop-side guard: every reduce-only STOP submit checks the public ticker first (executor p50 18 ms); sell stop >= bid or buy stop <= ask -> refused (STOP_SIDE_REFUSED thrown, `[STOP-SIDE-GUARD] REFUSED` error log, kept in stopSideRefusals). Ticker failure never blocks a stop (logged). Metric: 0 wrong-side stops reach Bitfinex; any refusal is RED.
+- Cleanup: periodic every 5 min (was once per process), plus `[STALE-LOT-ALERT]` when non-terminal lots sit on a flat account, plus `[STALE-CYCLE-CHECK]` for signalCycle OPEN/PENDING_ENTRY rows whose participants are all terminal.
+- Evidence: `[EXECUTOR-DIAG]` logs lot_evidence for cycle cmv59vxr30043np01amp57b3t (participant + cycle status, createdAt, envelope trade/signal id, event list with times) and non-terminal lot counts by status (INTENT included).
+- CAUSE UNDER REVIEW: the 00:40 "stale lot from dsl-1791809159-10" attribution is challenged by HM (cmv59 prefix matches the 00:13 trade's own records). Corrected once the lot_evidence line is in.
+- Outbox note: the website reporter re-sent 432 already-delivered reports in one 151 s run after restart; delivered state is in memory only. The outbox must persist delivered/acked state.
