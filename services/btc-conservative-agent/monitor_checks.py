@@ -14,6 +14,9 @@ STOP_TYPE_MARKERS = ("BREAKEVEN", "STOP", "CUT", "PATH_END", "TIME", "TRAIL", "G
 EXIT_TRUTH_RED_BP = 5.0
 LATENCY_RED_SEC = 5.0
 LATENCY_AMBER_SEC = 2.0
+# Live exit paper_trigger->fill (DISLOC showcase-mirror): audit §7 thresholds.
+LIVE_EXIT_AMBER_SEC = 3.0
+LIVE_EXIT_RED_SEC = 8.0
 TAPE_RETENTION_REQUIRED_SEC = 7 * 86400
 TAPE_GAP_AMBER_PCT = 1.0
 TAPE_GAP_RED_PCT = 5.0
@@ -183,23 +186,52 @@ def tape_retention(memory_bounds: tuple, archive_oldest_ts: float | None, *, now
 
 
 # ----------------------------------------------------------------------------- latency guard
-def latency_guard(slo: Mapping[str, Any], per_tile: Mapping[str, Any]) -> dict:
-    """Alert flag over the exit-latency SLO: RED if any tile's max trigger->fill > 5 s, AMBER > 2 s."""
+def latency_guard(slo: Mapping[str, Any], per_tile: Mapping[str, Any],
+                  live_on_lanes: Iterable[str] | None = None) -> dict:
+    """Alert flag over the exit-latency SLO.
+
+    Paper/local exit: RED if any tile's max trigger->fill > 5 s, AMBER > 2 s.
+    Live exit (paper_trigger->live fill on ``live_exit``): AMBER > 3 s, RED > 8 s.
+    A lane that is live-ON but missing from ``per_tile`` is RED (no SLO coverage).
+    """
     reasons, red, amber, worst = [], False, False, {}
+    tile_keys = {str(k).upper() for k in (per_tile or {})}
+    for lane in sorted({str(x).upper() for x in (live_on_lanes or ()) if x}):
+        if lane not in tile_keys:
+            red = True
+            reasons.append(f"{lane}: live-ON but missing from exit-latency")
     for lane, t in (per_tile or {}).items():
+        t = t or {}
         ex = t.get("exit") or {}
         mx = _f(ex.get("max_sec") or ex.get("max_trigger_to_fill_sec") or ex.get("p100_sec"))
         p95 = _f(ex.get("p95_sec"))
         v = mx if mx is not None else p95
         worst[lane] = v
-        if v is None:
-            continue
-        if v > LATENCY_RED_SEC:
-            red = True
-            reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_RED_SEC:g}s")
-        elif v > LATENCY_AMBER_SEC:
-            amber = True
-            reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_AMBER_SEC:g}s")
+        if v is not None:
+            if v > LATENCY_RED_SEC:
+                red = True
+                reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_RED_SEC:g}s")
+            elif v > LATENCY_AMBER_SEC:
+                amber = True
+                reasons.append(f"{lane}: exit {v:.1f}s > {LATENCY_AMBER_SEC:g}s")
+        live_ex = t.get("live_exit") if isinstance(t.get("live_exit"), Mapping) else None
+        if live_ex:
+            lv = _f(live_ex.get("max_sec") or live_ex.get("p95_sec"))
+            worst[f"{lane}.live_exit"] = lv
+            if lv is None:
+                continue
+            top = None
+            for bucket in (live_ex.get("breaches_over_8s") or live_ex.get("breaches_over_3s") or []):
+                if isinstance(bucket, Mapping) and bucket.get("top_hop"):
+                    top = bucket.get("top_hop")
+                    break
+            hop = f" (top hop {top})" if top else ""
+            if lv > LIVE_EXIT_RED_SEC:
+                red = True
+                reasons.append(f"{lane}: live exit {lv:.1f}s > {LIVE_EXIT_RED_SEC:g}s{hop}")
+            elif lv > LIVE_EXIT_AMBER_SEC:
+                amber = True
+                reasons.append(f"{lane}: live exit {lv:.1f}s > {LIVE_EXIT_AMBER_SEC:g}s{hop}")
     if str((slo or {}).get("status") or "").upper() == "RED":
         red = True
         reasons.append("exit-latency SLO RED")
