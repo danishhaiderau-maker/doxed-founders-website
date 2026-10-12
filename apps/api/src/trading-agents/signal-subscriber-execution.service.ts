@@ -116,6 +116,8 @@ import {
 import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
 import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 import { staleLotDecision, summarize, timed, tlsTimings } from './stale-lot-cleanup';
+import { BitfinexPublicTickerCache } from '../exchanges/bitfinex-public-ticker-ws';
+import { setStopGuardListener, setStopGuardQuoteCache, type StopGuardEvent } from '../exchanges/bitfinex-api.client';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -4341,6 +4343,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (${describeSignedCopyMarginCap(cap)})`,
       );
     });
+    // LIVE-FIX-1506: WS-cached quote for the stop-side guard + durable guard events.
+    if (process.env.NODE_ENV !== 'test') {
+      this.stopGuardTicker = new BitfinexPublicTickerCache(['tBTCF0:USTF0']);
+      this.stopGuardTicker.start();
+      setStopGuardQuoteCache((symbol) => this.stopGuardTicker?.get(symbol) ?? null);
+      setStopGuardListener((e) => void this.persistStopGuardEvent(e));
+    }
     this.scheduleReconciliation(POLL_MS);
     // Signed showcase lifecycle events must not wait for the full reconciliation
     // pass. A healthy full pass can take several seconds because Bitfinex auth
@@ -12228,6 +12237,20 @@ await this.notifications
   }
 
   private lastStaleLotCheckAtMs = 0;
+  private stopGuardTicker: BitfinexPublicTickerCache | null = null;
+
+  /** LIVE-FIX-1506: append a guard event to every cached Bitfinex instance (atomic jsonb append, capped at 50). */
+  private async persistStopGuardEvent(e: StopGuardEvent): Promise<void> {
+    const row = JSON.stringify([{ ...e, at: new Date(e.at_ms).toISOString() }]);
+    for (const instance of this.relayInstanceCache.values()) {
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE "TradingAgentInstance" SET "dashboardState" = jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayStopGuard}',
+           CASE WHEN jsonb_array_length(COALESCE("dashboardState"->'relayStopGuard', '[]'::jsonb)) >= 50 THEN $1::jsonb
+                ELSE COALESCE("dashboardState"->'relayStopGuard', '[]'::jsonb) || $1::jsonb END) WHERE id = $2`,
+        row, instance.id,
+      ).catch((err) => this.logger.error(`[STOP-SIDE-GUARD] persist failed: ${err instanceof Error ? err.message : err}`));
+    }
+  }
   private lastExecutorDiagAtMs = 0;
 
   /**
@@ -12306,6 +12329,21 @@ await this.notifications
     const terminal = new Set<string>([SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED]);
     const orphans = cycles.filter((c) => c.participants.length > 0 && c.participants.every((p) => terminal.has(p.status)));
     this.logger.log(`[STALE-CYCLE-CHECK] non_terminal_cycles=${cycles.length} all_participants_terminal=${orphans.length}${orphans.length ? ' ids=' + orphans.slice(0, 20).map((c) => `${c.id}:${c.tradeId ?? '-'}:${c.status}`).join(',') : ''}`);
+    // LIVE-FIX-1506: close such cycles (idempotent; rows and events kept). Off with RELAY_STALE_LOT_CLEANUP=off|dry.
+    const mode = (process.env.RELAY_STALE_LOT_CLEANUP ?? 'on').trim().toLowerCase();
+    if (mode !== 'on') return;
+    for (const c of orphans) {
+      const res = await this.prisma.signalCycle.updateMany({
+        where: { id: c.id, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] } },
+        data: { status: SignalCycleStatus.CLOSED },
+      });
+      if (res.count !== 1) continue;
+      await this.prisma.signalCycleEvent.create({
+        data: { cycleId: c.id, eventType: 'STALE_CYCLE_CLEANUP',
+          payload: { schema: 'stale_cycle_cleanup_v1', previous_status: c.status, reason: 'ALL_PARTICIPANTS_TERMINAL', at: new Date().toISOString() } },
+      });
+      this.logger.warn(`[STALE-CYCLE-CLEANUP] closed cycle=${c.id} trade=${c.tradeId ?? '-'} prev=${c.status}`);
+    }
   }
 
   /** LIVE-FIX-1503: executor-vantage DB and Bitfinex timings (logs only). */

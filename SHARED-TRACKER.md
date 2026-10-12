@@ -46,3 +46,11 @@
 - Evidence: `[EXECUTOR-DIAG]` logs lot_evidence for cycle cmv59vxr30043np01amp57b3t (participant + cycle status, createdAt, envelope trade/signal id, event list with times) and non-terminal lot counts by status (INTENT included).
 - CAUSE UNDER REVIEW: the 00:40 "stale lot from dsl-1791809159-10" attribution is challenged by HM (cmv59 prefix matches the 00:13 trade's own records). Corrected once the lot_evidence line is in.
 - Outbox note: the website reporter re-sent 432 already-delivered reports in one 151 s run after restart; delivered state is in memory only. The outbox must persist delivered/acked state.
+
+## LIVE-FIX-1506 guard observability + cleanup (13 Oct ~02:40 AEDT) - PR open, shipped-unverified
+- WS-cached bid/ask (public ticker channel, 3 s max age) feeds the stop-side guard; REST ticker fallback; no quote -> FAIL_OPEN.
+- Each REFUSED / FAIL_OPEN is persisted (dashboardState.relayStopGuard, atomic jsonb append, cap 50) -> website `stop_guard_events` -> Fly summary: REFUSED in last 1 h = RED `STOP_SIDE_REFUSED`; FAIL_OPEN = AMBER `STOP_GUARD_FAIL_OPEN`.
+- STALE-CYCLE cleanup now closes signalCycle rows OPEN/PENDING_ENTRY whose participants are all terminal (cyc_adafa685518e2624 first), event STALE_CYCLE_CLEANUP + log line.
+- dsl-1791810796-2 tagged polluted (ADOPT_RACE_WRONG_SIDE_STOP) on /live/timeline: row kept, excluded from rolling stats, listed in polluted_excluded.
+- Effective max-concurrent (resolved): executor cap = Fly state max_active_signals = 20 (SUBSCRIBER_MAX_CONCURRENT_SIGNALS unset; code default 3 is overridden by the bot value; hard cap 20). Fly DISLOC tile registry cap = 1 paper signal at a time. So DISLOC sends at most 1 concurrent signal, but the executor would accept up to 20 lots; the 00:13 second lot came from reconcile-adopt, not a second signal.
+- Metrics: STALE-CYCLE-CLEANUP log shows cyc_adafa685518e2624 closed; Fly summary shows guard causes when injected; quote_source=WS on guard events.
