@@ -103,7 +103,7 @@ def pnl_reconcile(totals: Mapping[str, Any], rows_by_lane: Mapping[str, list], l
 
 # ----------------------------------------------------------------------------- rules conformance
 def rules_conformance(*, active_tiles: Iterable[str], retired_tiles: Iterable[str],
-                      live_copy_tiles: Mapping[str, Mapping[str, Any]], open_lanes: Iterable[str],
+                      live_copy_tiles: Mapping[str, Mapping[str, Any]] | None, open_lanes: Iterable[str],
                       fee_rates_bp: Mapping[str, Any], totals_lanes: Mapping[str, Any]) -> dict:
     """Danish's standing rules: zero fees; every dashboard tile live-copyable; retired tiles never trade
     or copy; deploy flattens never counted in strategy stats."""
@@ -112,12 +112,16 @@ def rules_conformance(*, active_tiles: Iterable[str], retired_tiles: Iterable[st
         if (_f(v) or 0.0) != 0.0:
             reasons.append(f"fee {k}={v} bp (rule: no fees)")
     active, retired = set(active_tiles), set(retired_tiles)
-    for t in sorted(active):
-        info = live_copy_tiles.get(t)
-        if info is not None and not info.get("live_eligible", info.get("copyable", True)):
-            reasons.append(f"{t} not live-copyable")
+    # Danish's rule: every dashboard tile must be live-copyable (switch row present + operator-eligible).
+    if live_copy_tiles is not None:
+        for t in sorted(active):
+            info = live_copy_tiles.get(t)
+            if info is None:
+                reasons.append(f"{t} has no live-copy switch (not live-copyable)")
+            elif not info.get("live_eligible", info.get("copyable", False)):
+                reasons.append(f"{t} not live-copyable")
     for t in sorted(retired):
-        info = live_copy_tiles.get(t) or {}
+        info = (live_copy_tiles or {}).get(t) or {}
         if info.get("live_on") or info.get("bitfinex_live_orders"):
             reasons.append(f"retired {t} has live copy ON")
     for lane in set(open_lanes) & retired:

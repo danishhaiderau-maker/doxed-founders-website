@@ -4392,7 +4392,13 @@ def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
         lane = _normalize_lane_key(row.get("research_lane") or "")
         if not lane or _trade_row_is_forced_close(row):
             continue
-        pnl = _trade_row_net_pnl_usd(row)
+        # One unrounded $ basis (same as /monitor/lanes and /tiles/totals, incl. late-window reprice).
+        _raw = row.get("net_pnl_usd_raw")
+        try:
+            pnl = float(_raw) if _raw not in (None, "") else _trade_row_net_pnl_usd(row)
+        except (TypeError, ValueError):
+            pnl = _trade_row_net_pnl_usd(row)
+        pnl = monitor_api._late_window_usd(row, pnl)
         bucket = ledger.setdefault(lane, {
             "lane": lane,
             "net_pnl_usd": 0.0,
@@ -4408,23 +4414,23 @@ def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
             "equity_usd": float(STARTING_BALANCE),
         })
         bucket["closes"] = int(bucket.get("closes", 0)) + 1
-        bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + pnl, 2)
-        bucket["equity_usd"] = round(float(STARTING_BALANCE) + bucket["net_pnl_usd"], 2)
+        bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + pnl, 6)
+        bucket["equity_usd"] = round(float(STARTING_BALANCE) + bucket["net_pnl_usd"], 6)
         bucket["wl_basis"] = LANE_LEDGER_WL_BASIS
         wl = monitor_api.wl_class(monitor_api.trade_net_bp(row), net_usd=pnl)
         if wl == "W":
             bucket["wins"] = int(bucket.get("wins", 0)) + 1
-            bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + pnl, 2)
+            bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + pnl, 6)
         elif wl == "L":
             bucket["losses"] = int(bucket.get("losses", 0)) + 1
-            bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + pnl, 2)
+            bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + pnl, 6)
         d = str(row.get("final_direction") or row.get("dir") or "").upper()
         if d == "LONG":
             bucket["long_closes"] = int(bucket.get("long_closes", 0)) + 1
-            bucket["long_pnl_usd"] = round(float(bucket.get("long_pnl_usd", 0)) + pnl, 2)
+            bucket["long_pnl_usd"] = round(float(bucket.get("long_pnl_usd", 0)) + pnl, 6)
         elif d == "SHORT":
             bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
-            bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + pnl, 2)
+            bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + pnl, 6)
     return ledger
 
 
@@ -6065,7 +6071,7 @@ _execution_markout_counters = {
     "taker_signals_scheduled": 0, "taker_capture_failures": 0,
 }
 ADAPTIVE_ENTRY_DECISIONS_FILE = "adaptive_entry_decisions.jsonl"
-_adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "last": None}
+_adaptive_entry_stats = {"decisions": 0, "by_action": {}, "by_reason": {}, "by_lane": {}, "last": None}
 _adaptive_entry_stats_lock = threading.Lock()
 velocity_buffer = deque(maxlen=200)
 delta_buffer = deque(maxlen=200)
@@ -28435,6 +28441,7 @@ def microstructure_capture_loop():
         try:
             # Read-only replay slice for /api/monitor/tape (own lock, bounded).
             _TILE_TAPE_RING.append(row)
+            _TAPE_ARCHIVE.append(row, monitor_tiles.TAPE_FIELDS)
         except Exception as exc:
             logger.debug(f"[MONITOR TAPE] ring append skipped: {exc}")
         try:
@@ -28624,10 +28631,26 @@ def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
         _adaptive_entry_stats["decisions"] += 1
         _adaptive_entry_stats["by_action"][action] = _adaptive_entry_stats["by_action"].get(action, 0) + 1
         _adaptive_entry_stats["by_reason"][reason] = _adaptive_entry_stats["by_reason"].get(reason, 0) + 1
+        lane_key = str(lane or "").upper()
+        cell = _adaptive_entry_stats["by_lane"].setdefault(
+            lane_key, {"decisions": 0, "by_action": {}, "by_reason": {}, "by_regime": {},
+                       "stand_aside": 0, "shadow_stand_aside": 0, "submit": 0})
+        cell["decisions"] += 1
+        cell["by_action"][action] = cell["by_action"].get(action, 0) + 1
+        cell["by_reason"][reason] = cell["by_reason"].get(reason, 0) + 1
+        regime = str(decision.get("regime_at_signal") or decision.get("regime") or "UNKNOWN")
+        cell["by_regime"][regime] = cell["by_regime"].get(regime, 0) + 1
+        if action == "STAND_ASIDE":
+            cell["stand_aside"] += 1
+            # GS-05 QUIET (and audit shadows): reason carries REGIME_<R>_STANDS_ASIDE
+            if "STANDS_ASIDE" in reason.upper() or decision.get("shadow_old_gate"):
+                cell["shadow_stand_aside"] += 1
+        elif action in ("TAKER", "MAKER", "SUBMIT", "ORDER"):
+            cell["submit"] += 1
         _adaptive_entry_stats["last"] = {
             key: decision.get(key)
-            for key in ("signal_ts", "direction", "regime", "rv15_bps", "fast_move_z",
-                        "action", "reason", "limit_price", "stop_distance_bps")
+            for key in ("signal_ts", "direction", "regime", "regime_at_signal", "regime_cell",
+                        "rv15_bps", "fast_move_z", "action", "reason", "limit_price", "stop_distance_bps")
         }
 
 
@@ -31253,6 +31276,14 @@ def close_position(pos: dict, exit_reason: str):
             "edge_score_at_entry": edge_at_entry,
             "invert_signal": _coerce_invert_on(pos, master),
             "invert_on": _coerce_invert_on(pos, master),
+            # GS-05/GS-06: keep regime gate / exit-profile decision on the closed
+            # row so /api/monitor/tiles/trades can surface regime_at_signal.
+            "adaptive_entry_decision": copy.deepcopy(
+                pos.get("adaptive_entry_decision")
+                or (master or {}).get("adaptive_entry_decision")
+                or ((master or {}).get("signal_ref") or {}).get("adaptive_entry_decision")
+                or {}
+            ),
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
@@ -31395,6 +31426,7 @@ def close_position(pos: dict, exit_reason: str):
     log_trade_lifecycle(trade_row, pos, master)
     log_ai_confidence_calibration(trade_row, net_pnl)
     log_ai_reason_outcome(trade_id, net_pnl, exit_reason)
+    _stamp_exit_bbo(trade_row)
     trades.append(trade_row)
     try:
         log_trade(trade_row)
@@ -31496,6 +31528,25 @@ AI_SHADOW_COMPACT_TIMEOUT_SEC = max(5.0, float(os.getenv("AI_SHADOW_COMPACT_TIME
 AI_INPUT_DEAD_FIELD_CALLS = max(2, int(os.getenv("AI_INPUT_DEAD_FIELD_CALLS", "20")))
 _AI_SHADOW_TAPE = _ai_shadow.TapeRing()
 _TILE_TAPE_RING = monitor_tiles.TapeSliceRing()
+import tape_archive as _tape_archive_mod
+# HM-BATCH2: 7-day 1 s tape on the Fly volume (lazy writer thread; see tape_archive.py).
+_TAPE_ARCHIVE = _tape_archive_mod.TapeArchive(lambda: _data_sync_volume_root())
+
+
+def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
+    """HM-BATCH2: record the touch (bid/ask) at close on every closed row; never raises."""
+    try:
+        now = time.time()
+        ts, rows = _TILE_TAPE_RING.slice(now - max_age_sec, now + 1)
+        if not rows:
+            trade_row.setdefault("exit_bbo_missing", True)
+            return
+        last = rows[-1]
+        trade_row["exit_bid"] = last.get("bid")
+        trade_row["exit_ask"] = last.get("ask")
+        trade_row["exit_bbo_ts"] = ts[-1]
+    except Exception:
+        trade_row.setdefault("exit_bbo_missing", True)
 _AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
 _AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
 _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
@@ -46551,20 +46602,31 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
         snap = {}
     open_lanes = [lane for lane, rows in inp["by_lane"].items() if any(r.get("status") == "OPEN" for r in rows)]
     archive = _load_archive_receipt()
-    archive_tape_oldest = (archive or {}).get("tape_1s_oldest_ts")
     checks = {
         "exit-truth": _mc.exit_truth(closed_rows, tape_ts, tape_rows, since=inp["since"]),
         "pnl-reconcile": _mc.pnl_reconcile(inp["totals"], inp["by_lane"], None, snap),
         "rules-conformance": _mc.rules_conformance(
-            active_tiles=ACTIVE_TILE_ORDER, retired_tiles=RETIRED_TILE_LANES, live_copy_tiles={},
+            active_tiles=ACTIVE_TILE_ORDER, retired_tiles=RETIRED_TILE_LANES,
+            live_copy_tiles=_monitor_live_copy_tiles(),
             open_lanes=open_lanes, totals_lanes=inp["totals"].get("lanes") or {},
             fee_rates_bp={"maker": _bcp.MAKER_FEE_RATE * 1e4, "taker": _bcp.TAKER_FEE_RATE * 1e4}),
         "data-completeness": _mc.data_completeness(_TILE_TAPE_RING.bounds(), now=now),
-        "tape-retention": _mc.tape_retention(_TILE_TAPE_RING.bounds(), _mc._f(archive_tape_oldest), now=now),
+        "tape-retention": {**_mc.tape_retention(_TILE_TAPE_RING.bounds(), _TAPE_ARCHIVE.oldest_ts(), now=now),
+                           "archive": _TAPE_ARCHIVE.snapshot()},
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"]),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
     }
     return checks
+
+
+def _monitor_live_copy_tiles():
+    try:
+        rows = (_bitfinex_live_switch_snapshot() or {}).get("rows")
+    except Exception:
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    return {_normalize_lane_key(r.get("lane") or ""): r for r in rows if isinstance(r, dict)}
 
 
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
@@ -46691,6 +46753,7 @@ def monitor_tiles_counters():
             xvl_lanes = _monitor_part(lambda: xvl_evaluator_snapshot().get("lanes") or {})
             with state_lock:
                 opportunity = copy.deepcopy(state.get("lane_opportunity_counters") or {})
+            adaptive = (adaptive_entry_status_snapshot().get("by_lane") or {})
             return {
                 "schema": monitor_tiles.TILE_COUNTERS_SCHEMA,
                 **_monitor_tiles_common(_now),
@@ -46700,7 +46763,8 @@ def monitor_tiles_counters():
                     monitor_tiles.counters_view(
                         lane, rows=by_lane.get(lane) or [], route_counts=route["counts"].get(lane),
                         xvl_lane=(xvl_lanes or {}).get(lane) if isinstance(xvl_lanes, dict) else None,
-                        opportunity=opportunity.get(lane), boot_id=BOT_INSTANCE_ID)
+                        opportunity=opportunity.get(lane), boot_id=BOT_INSTANCE_ID,
+                        adaptive_lane=adaptive.get(lane) or adaptive.get(str(lane or "").upper()))
                     for lane in scope["lanes"]
                 ],
             }

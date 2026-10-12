@@ -280,6 +280,23 @@ def trade_net_bp(row: Mapping[str, Any]) -> float | None:
     return trade_bp(row)[0]
 
 
+def _late_window_usd(row, pnl: float) -> float:
+    """HM-BATCH2: same late-window repricing as /tiles/totals so lanes == totals (one $ basis)."""
+    try:
+        import monitor_tiles as _mt
+        fix = (_mt.late_window_table().get("trades") or {}).get(str(row.get("trade_id") or ""))
+        if not fix:
+            return pnl
+        bp = trade_net_bp(row)
+        mbp = float(fix["market_bp"])
+        if bp and abs(bp) > 1e-9 and pnl:
+            return mbp * (pnl / bp)
+        notional = _num(row.get("notional_usd"))
+        return mbp * notional / 1e4 if notional else pnl
+    except Exception:
+        return pnl
+
+
 def wl_class(bp: float | None, *, be_band_bp: float = WL_BE_BAND_BP, net_usd: float | None = None) -> str:
     """W / L / BE from price-based net bp (``net_usd`` only when bp is unknown)."""
     value = bp if bp is not None else net_usd
@@ -303,6 +320,7 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
         # One unrounded net $ basis everywhere (PNL-INTEGRITY bug 3).
         raw = row.get("net_pnl_usd_raw")
         pnl = _num(raw if raw is not None else row.get("net_pnl_usd"))
+        pnl = _late_window_usd(row, pnl)
         closes += 1
         cls = wl_class(trade_net_bp(row), net_usd=pnl)
         wins += cls == "W"
@@ -331,9 +349,9 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
         "closes": closes,
         "wins": wins,
         "losses": losses,
-        "net_usd": round(net, 4),
-        "long_net_usd": round(long_net, 4),
-        "short_net_usd": round(short_net, 4),
+        "net_usd": round(net, 6),
+        "long_net_usd": round(long_net, 6),
+        "short_net_usd": round(short_net, 6),
         "mean_usd": round(net / closes, 4) if closes else None,
         # Notional-weighted per-trade bp (== net / notional when every row is exact).
         "mean_bp": round(bp_weighted / bp_notional, 2) if bp_notional > 0 else None,
