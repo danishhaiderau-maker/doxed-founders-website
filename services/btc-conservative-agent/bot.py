@@ -32253,13 +32253,23 @@ def _disloc_recent_trades():
         return list(venue_fill_trade_tape)[-600:]
 
 
+def _disloc_paper_paused() -> bool:
+    """DISLOC / DISLOC-FOI self-simulate outside the order pipeline, so they must
+    read the same pause flags as the pipeline: any /api/pause (OPERATOR, SAFETY or
+    the guarded deploy's DEPLOY_MAINTENANCE boundary) blocks NEW dsl-/dsf- paper
+    entries. Open paper positions are still managed and closed. The lane toggle and
+    research freeze are untouched (no RESEARCH_FREEZE_ACTIVE path)."""
+    return bool(state.get("manual_admin_pause") or state.get("execution_paused"))
+
+
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
     """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
     if not hasattr(evaluator, "bind_runtime"):
         return
     import disloc_engine as _dsl
     evaluator.bind_runtime(
-        enabled_fn=lambda: is_research_data_collection() and is_research_lane_enabled(lane),
+        enabled_fn=lambda: (is_research_data_collection() and is_research_lane_enabled(lane)
+                            and not _disloc_paper_paused()),
         trades_fn=_disloc_recent_trades,
         touch_fn=_disloc_touch,
         touch_meta_fn=_disloc_touch_meta,
