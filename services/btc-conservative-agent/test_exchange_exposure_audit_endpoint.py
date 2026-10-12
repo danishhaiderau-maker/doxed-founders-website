@@ -35,6 +35,7 @@ def test_exchange_exposure_audit_is_read_only_and_sanitized():
     }
     bot.state["live_armed"] = False
     bot.state["bitfinex_live_enabled"] = False
+    bot._live_copy_website_cache["value"] = {"reachable": True, "armed_accounts": []}
 
     with bot.app.test_request_context("/api/exchange_exposure_audit"), mock.patch.object(
         bot, "_admin_authed_strict", return_value=True
