@@ -6,7 +6,9 @@ the paper twins, the Fly arm switches and the website's fly-view (instance
 status, last arm transition with actor/reason/time, exchange mirror) into:
 
 * ``arming``: one ``effective_live`` answer plus every source it came from;
-  any disagreement is a RED ``ARMING_SOURCES_MISMATCH``.
+  real disagreements are RED ``ARMING_SOURCES_MISMATCH``; expected pause/deploy
+  races (e.g. PAUSED_BUT_LAST_CHANGE_STARTED during USER_REQUEST_START / deploy)
+  are INFO under ``expected_mismatches`` / expected_skips and do not paint money_risk.
 * ``intents``: per intent and account, every hop exactly once (first value
   wins, so a later lifecycle event can never overwrite an earlier hop), the
   executor decision, the exit record and paper-vs-live drift.
@@ -56,6 +58,20 @@ MISSED_COPY_CODES = frozenset({"NO_ORDER_FOR_INTENT", "INTENT_NO_EXECUTOR_DECISI
 ARMED_ACTIONS = frozenset({"STARTED", "ARMED", "RESUMED", "OBSERVED_ARMED"})
 UNARMED_ACTIONS = frozenset({"STOPPED", "SAFETY_PAUSED", "PAUSED", "DISARMED", "EXPIRED", "HIRE_EXPIRED",
                              "OBSERVED_UNARMED"})
+# LIVE-FIX-1928: PAUSED + last_change=STARTED is a normal race during deploy
+# force-flat / re-arm (website records STARTED while status is still PAUSED, or
+# ops pause right after an arm attempt). Those reasons are expected_mismatches
+# (INFO / expected_skips), not money-risk RED. Unexplained cases stay RED.
+EXPECTED_PAUSED_STARTED_REASON_TOKENS = (
+    "USER_REQUEST", "DEPLOY", "MAINTENANCE", "ADMIN", "FORCE_FLAT", "REARM",
+    "OPERATOR", "BOSS_",
+)
+
+
+def _expected_paused_but_started(row: Mapping[str, Any], last: Mapping[str, Any]) -> bool:
+    reason = str(last.get("reason") or row.get("paused_reason") or "").upper()
+    return any(tok in reason for tok in EXPECTED_PAUSED_STARTED_REASON_TOKENS)
+
 PAPER_TERMINAL_EVENTS = frozenset({"POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED"})
 ENTRY_DRIFT_RED_BP = 10.0
 CLOCK_OFFSET_AMBER_MS = 1000.0
@@ -162,6 +178,7 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
         blockers.append("EXECUTOR_UNHEALTHY")
     effective = not blockers
     mismatches = []
+    expected_mismatches = []
     # The account's own row must agree with itself (status vs armed flag vs mode).
     for r in acct_rows:
         st = str(r.get("instance_status") or "").upper()
@@ -176,8 +193,13 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
             mismatches.append({"code": "ACTIVE_BUT_LAST_CHANGE_PAUSED", "account": r["account"],
                                "last_action": last.get("action")})
         if st == "PAUSED" and str(last.get("action") or "").upper() == "STARTED":
-            mismatches.append({"code": "PAUSED_BUT_LAST_CHANGE_STARTED", "account": r["account"],
-                               "last_error": r.get("last_error")})
+            row = {"code": "PAUSED_BUT_LAST_CHANGE_STARTED", "account": r["account"],
+                   "last_error": r.get("last_error"), "paused_reason": r.get("paused_reason"),
+                   "last_change": last}
+            if _expected_paused_but_started(r, last):
+                expected_mismatches.append({**row, "expected": True})
+            else:
+                mismatches.append(row)
     # The relay coordination Fly last heard must agree with the website rows.
     mode = str(relay_stack_mode or "").lower()
     if web.get("reachable"):
@@ -194,6 +216,7 @@ def effective_arming(*, output: Mapping[str, Any], force_paper_mode: bool, relay
         "blockers": blockers,
         "sources": sources,
         "mismatches": mismatches,
+        "expected_mismatches": expected_mismatches,  # arming_info; not money risk
         "verdict": RED if mismatches else GREEN,
     }
 
@@ -524,6 +547,9 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
     tiles_on = bool(src.get("fly_tiles_live_on"))
     for m in arming.get("mismatches") or []:
         add("ARMING_SOURCES_MISMATCH", RED, detail=m)
+    # LIVE-FIX-1928: deploy/re-arm races stay visible as INFO expected skips.
+    for m in arming.get("expected_mismatches") or []:
+        add("ARMING_EXPECTED_MISMATCH", INFO, detail=m, alert_class=PAUSED_WINDOW)
     for r in src.get("website_accounts") or []:
         st = str(r.get("instance_status") or "").upper()
         if output_on and tiles_on and st == "PAUSED":

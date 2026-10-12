@@ -32,11 +32,40 @@ def test_paused_while_output_on_is_red_with_reason():
 
 
 def test_mismatch_paused_but_started_and_stale_relay_mode():
+    # Unexplained PAUSED+STARTED (reason=POSITION_MISMATCH) stays a real RED mismatch.
     out = lcl.build(_ctx(website=_web(status="PAUSED", armed=False, action="STARTED")), now=NOW)
     assert any(m["code"] == "PAUSED_BUT_LAST_CHANGE_STARTED" for m in out["arming"]["mismatches"])
+    assert out["arming"]["verdict"] == "RED"
+    assert "ARMING_SOURCES_MISMATCH" in out["alert_codes"]
     out2 = lcl.build(_ctx(relay_stack_mode="source_research_only"), now=NOW)
     assert any(m["code"] == "RELAY_MODE_STALE_VS_ACCOUNT" for m in out2["arming"]["mismatches"])
     assert "ARMING_SOURCES_MISMATCH" in out2["alert_codes"]
+
+
+def test_paused_but_started_during_deploy_is_expected_not_money_risk():
+    # LIVE-FIX-1928: intentional pause/deploy race (USER_REQUEST_START) must not
+    # paint ARMING_SOURCES_MISMATCH / money_risk RED. ACCOUNT_PAUSED_WHILE_OUTPUT_ON
+    # still fires when output+tiles are ON (capability truth).
+    web = _web(status="PAUSED", armed=False, action="STARTED")
+    web["accounts"][0]["last_transition"]["reason"] = "USER_REQUEST_START"
+    web["accounts"][0]["last_transition"]["actor"] = "USER"
+    out = lcl.build(_ctx(website=web), now=NOW)
+    assert not any(m["code"] == "PAUSED_BUT_LAST_CHANGE_STARTED" for m in out["arming"]["mismatches"])
+    assert any(m["code"] == "PAUSED_BUT_LAST_CHANGE_STARTED" for m in out["arming"]["expected_mismatches"])
+    assert out["arming"]["verdict"] == "GREEN"
+    assert "ARMING_SOURCES_MISMATCH" not in out["alert_codes"]
+    assert "ARMING_EXPECTED_MISMATCH" in out["alert_codes"]
+    exp = next(a for a in out["alerts"] if a["code"] == "ARMING_EXPECTED_MISMATCH")
+    assert exp["severity"] == "INFO" and exp["alert_class"] == "paused_window"
+    assert "ARMING_EXPECTED_MISMATCH" in out["expected_skip_codes"]
+    assert "ARMING_SOURCES_MISMATCH" not in out["money_risk_codes"]
+    # Deploy maintenance: output OFF -> no ACCOUNT_PAUSED_WHILE_OUTPUT_ON either;
+    # money_risk stays GREEN from arming race alone.
+    out_off = lcl.build(_ctx(website=web, output={"enabled": False},
+                             switch_rows=[{"lane": "DISLOC", "bitfinex_live_orders": False}]), now=NOW)
+    assert out_off["arming"]["verdict"] == "GREEN"
+    assert out_off["money_risk_verdict"] == "GREEN"
+    assert "ARMING_SOURCES_MISMATCH" not in out_off["money_risk_codes"]
 
 
 def test_intent_without_decision_then_skipped_and_full_trade_drift():
