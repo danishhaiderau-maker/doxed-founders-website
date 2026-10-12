@@ -241,7 +241,14 @@ export function buildLiveCopyReports(input: {
           });
           break;
         }
-        case 'EXIT':
+        case 'EXIT': {
+          // LIVE-FIX-1491: exit-side hops for the per-trade timeline route.
+          const t = (k: string) => { const ms = isoMs(pl[k]); return ms != null ? sec(ms) : null; };
+          tl.exit_preflight_at_ts = t('close_preflight_started_at');
+          tl.exit_sent_at_ts = t('close_submit_started_at');
+          tl.exit_ack_at_ts = t('close_exchange_ack_at');
+          tl.exit_confirmed_at_ts = t('close_confirmed_at');
+          tl.exit_recorded_at_ts = sec(e.createdAt.getTime());
           push(e, 'POSITION_CLOSED', {
             // exit_exchange_fill_price is the authenticated Bitfinex close
             // fill; exit_price can be the quote side (11 Oct: 83084 ask vs
@@ -254,6 +261,7 @@ export function buildLiveCopyReports(input: {
             },
           });
           break;
+        }
         case 'EXPIRED':
           push(e, 'ORDER_CANCELLED', { error: { code: 'ENTRY_EXPIRED', message: String(pl.reason ?? '').slice(0, 200) } });
           break;

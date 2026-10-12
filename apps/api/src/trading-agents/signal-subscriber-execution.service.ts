@@ -1419,7 +1419,8 @@ export type TerminalCloseAuthorityKind =
   | 'THESIS_FAST_CUT'
   | 'HARD_STOP'
   | 'LATE_FILL_CLEANUP'
-  | 'AUTHENTICATED_MANUAL_OR_EMERGENCY';
+  | 'AUTHENTICATED_MANUAL_OR_EMERGENCY'
+  | 'SIGNED_TIME_DEADLINE';
 
 export type TerminalCloseAuthority = {
   kind: TerminalCloseAuthorityKind;
@@ -1450,6 +1451,29 @@ type AccountEmergencyCloseFence = {
 };
 
 const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
+/**
+ * LIVE-FIX-1490 (A2): DISLOC (dsl-) closes on TIME_60S measured from the paper
+ * fill. The executor owns that exit on its own clock: claim + reads start
+ * TIME_DEADLINE_PREARM_MS early, the reduce-only close is submitted at the
+ * deadline. Paper's POSITION_CLOSED stays the fallback (mirror close).
+ */
+export const RELAY_PAUSE_HISTORY_MAX = 50;
+export function relayPauseCode(message: string): string {
+  const m = /^([A-Z][A-Z0-9_]{2,})/.exec(String(message ?? '').trim());
+  return m ? m[1] : 'UNCLASSIFIED';
+}
+export function appendRelayPauseHistory(prev: unknown, row: Record<string, unknown>): Record<string, unknown>[] {
+  const list = Array.isArray(prev) ? prev.filter((r) => r && typeof r === 'object') as Record<string, unknown>[] : [];
+  return [...list, row].slice(-RELAY_PAUSE_HISTORY_MAX);
+}
+export const TIME_DEADLINE_HOLD_SEC = 60;
+export const TIME_DEADLINE_PREARM_MS = 1_500;
+export function isTimeDeadlineExitTradeId(tradeId: string | null | undefined): boolean {
+  return typeof tradeId === 'string' && /^dsl-/.test(tradeId);
+}
+export function timeDeadlineExitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.RELAY_TIME_DEADLINE_EXIT ?? 'on').trim().toLowerCase() !== 'off';
+}
 const SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS = 5 * 60_000;
 const TERMINAL_EVIDENCE_CLOCK_SKEW_MS = 5_000;
 
@@ -1589,6 +1613,17 @@ export function validateTerminalCloseAuthority(
       return text('policy') === 'EXCHANGE_ONLY_PARTIAL_FILL_TERMINAL_CLEANUP' && Boolean(text('cancel_context')) && Boolean(text('fill_source')) && positive('filled_qty');
     case 'AUTHENTICATED_MANUAL_OR_EMERGENCY':
       return Boolean(text('actor_user_id')) && text('actor_type') === 'AUTHENTICATED_ACCOUNT_OWNER' && Boolean(text('action'));
+    case 'SIGNED_TIME_DEADLINE': {
+      const fillAt = finite('sourceFillAtMs');
+      const hold = finite('holdSec');
+      const deadline = finite('deadlineMs');
+      return evidence.schema === 'signed_time_deadline_v1'
+        && isTimeDeadlineExitTradeId(authority.canonicalTradeId)
+        && fillAt != null && hold === TIME_DEADLINE_HOLD_SEC && deadline === fillAt + hold * 1000
+        && fillAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS
+        && nowMs >= deadline - TIME_DEADLINE_PREARM_MS
+        && nowMs - deadline <= SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS;
+    }
     default: {
       const exhaustive: never = authority.kind;
       return exhaustive;
@@ -3920,6 +3955,7 @@ export function buildExchangeMirror(input: {
     price: o.price,
     status: o.status,
     reduce_only: typeof o.flags === 'number' ? (o.flags & REDUCE_ONLY) === REDUCE_ONLY : null,
+    oco: typeof o.flags === 'number' ? (o.flags & 16384) === 16384 : null,
     cid: o.cid ?? null,
   }));
   const stops = open_orders.filter((o) => /STOP/i.test(String(o.type)));
@@ -4436,6 +4472,111 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * reconciliation stops. Explicit authenticated wakes re-arm this timer, and
    * process startup always performs a recovery pass.
    */
+  /** LIVE-FIX-1490 (A2): executor-owned TIME_60S exit timers, keyed user:trade. */
+  private readonly timeDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly timeDeadlineStats: {
+    scheduled: number; fired: number; closed: number; noOpenLot: number; failed: number;
+    last?: { tradeId: string; deadlineMs: number; firedAtMs: number; submitLagMs?: number; outcome: string };
+  } = { scheduled: 0, fired: 0, closed: 0, noOpenLot: 0, failed: 0 };
+
+  private scheduleTimeDeadlineExit(
+    agentId: string,
+    userId: string,
+    tradeId: string | null,
+    sourceFillAtMs: number,
+    nowMs = Date.now(),
+  ): number | null {
+    if (!timeDeadlineExitEnabled() || !isTimeDeadlineExitTradeId(tradeId) || !Number.isFinite(sourceFillAtMs)) return null;
+    const key = `${userId}:${tradeId}`;
+    if (this.timeDeadlineTimers.has(key)) return null;
+    const deadlineMs = sourceFillAtMs + TIME_DEADLINE_HOLD_SEC * 1000;
+    const delay = deadlineMs - TIME_DEADLINE_PREARM_MS - nowMs;
+    if (deadlineMs - nowMs < -SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS) return null;
+    const t = setTimeout(() => {
+      this.timeDeadlineTimers.delete(key);
+      void this.runTimeDeadlineExit(agentId, userId, tradeId!, sourceFillAtMs, deadlineMs);
+    }, Math.max(0, delay));
+    (t as { unref?: () => void }).unref?.();
+    this.timeDeadlineTimers.set(key, t);
+    this.timeDeadlineStats.scheduled += 1;
+    this.logger.log(`[TIME-EXIT] scheduled trade=${tradeId} deadline=${new Date(deadlineMs).toISOString()} in=${Math.round(delay)}ms`);
+    return delay;
+  }
+
+  private async runTimeDeadlineExit(
+    agentId: string,
+    userId: string,
+    tradeId: string,
+    sourceFillAtMs: number,
+    deadlineMs: number,
+  ): Promise<void> {
+    const firedAtMs = Date.now();
+    this.timeDeadlineStats.fired += 1;
+    const done = (outcome: string, submitLagMs?: number) => {
+      this.timeDeadlineStats.last = { tradeId, deadlineMs, firedAtMs, submitLagMs, outcome };
+    };
+    try {
+      const participant = await this.prisma.signalCycleParticipant.findFirst({
+        where: { userId, status: SignalCycleStatus.OPEN, cycle: { agentId, tradeId } },
+        include: { cycle: true },
+      });
+      if (!participant) {
+        this.timeDeadlineStats.noOpenLot += 1;
+        done('NO_OPEN_LOT');
+        return;
+      }
+      const instance = await this.prisma.tradingAgentInstance.findUnique({
+        where: { agentId_userId: { agentId, userId } },
+      });
+      if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') { done('NOT_LIVE'); return; }
+      const [creds, meta, mark] = await Promise.all([
+        this.exchanges.getUserCredentials(userId, instance.exchangeProvider),
+        this.loadExecutionMeta(participant.id),
+        this.activeTrading.getMarkPrice().catch(() => null),
+      ]);
+      if (!creds || !meta.direction || !meta.qty) { done('META_INCOMPLETE'); return; }
+      const intent = participant.cycle.intentEnvelope as unknown as SignalIntentEnvelope;
+      const leverage = resolveSubscriberLeverage(intent);
+      const fillPrice = finiteDecimalLikeNumber(participant.fillPrice) ?? meta.fillPrice ?? meta.limitPrice ?? 0;
+      const exitMarkPx = mark ?? fillPrice;
+      const unrealMarginPct = fillPrice > 0 && exitMarkPx > 0
+        ? computeUnrealizedMarginPct(fillPrice, exitMarkPx, meta.direction, leverage) : 0;
+      const canonicalTradeId = this.resolveShowcaseMirrorTradeId(participant.cycle, meta) ?? tradeId;
+      const closed = await this.closeVirtualLot(agentId, userId, participant.cycle.id, participant.id, meta, creds, {
+        reason: 'TIME_60S',
+        submitNotBeforeMs: deadlineMs,
+        mark: exitMarkPx,
+        fillPrice,
+        leverage,
+        peakMarginPct: Math.max(0, meta.peakMarginPct ?? 0, unrealMarginPct),
+        unrealMarginPct,
+        stopLossMarginPct: this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false }),
+        terminalAuthority: {
+          kind: 'SIGNED_TIME_DEADLINE',
+          canonicalTradeId,
+          lifecycleGeneration: showcaseIntentRevision(participant.cycle.intentEnvelope) ?? `legacy:${canonicalTradeId}`,
+          evidence: {
+            schema: 'signed_time_deadline_v1',
+            sourceFillAtMs,
+            holdSec: TIME_DEADLINE_HOLD_SEC,
+            deadlineMs,
+          },
+        },
+      });
+      const lag = Date.now() - deadlineMs;
+      if (closed) {
+        this.timeDeadlineStats.closed += 1;
+        this.positionRuntime.delete(participant.id);
+      }
+      done(closed ? 'CLOSED' : 'NOT_CLOSED', lag);
+      this.logger.log(`[TIME-EXIT] trade=${tradeId} outcome=${closed ? 'CLOSED' : 'NOT_CLOSED'} done_after_deadline_ms=${lag} prearm_ms=${deadlineMs - firedAtMs}`);
+    } catch (err) {
+      this.timeDeadlineStats.failed += 1;
+      done('FAILED');
+      this.logger.warn(`[TIME-EXIT] trade=${tradeId} failed (paper close fallback stays armed): ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   private scheduleReconciliation(delayMs: number | null): void {
     if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
     this.reconciliationTimer = setTimeout(async () => {
@@ -5672,7 +5813,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             startedAtMs,
             'LIMIT_REPRICE_SKIPPED_PAUSED',
           );
-        } else if (
+        }
+        if (wake.trigger === 'POSITION_OPENED' && wake.signedOpen) {
+          this.scheduleTimeDeadlineExit(instance.agentId, instance.userId, wake.tradeId ?? null, wake.signedOpen.sourceEventAtMs);
+        }
+        if (
           wake.trigger === 'POSITION_OPENED'
           && instance.status === TradingAgentInstanceStatus.ACTIVE
         ) {
@@ -12056,6 +12201,17 @@ await this.notifications
           positionMismatchDetectedAt: new Date().toISOString(),
           positionMismatchAlert: truncated,
           positionMismatchAlertAcked: false,
+          // LIVE-FIX-1491: durable bounded pause history (cause + owner) for
+          // the monitor pause-history route and the self-pause alert.
+          relayPauseHistory: appendRelayPauseHistory(dash.relayPauseHistory, {
+            at: new Date().toISOString(),
+            actor: 'SYSTEM',
+            owner: 'relay-executor',
+            action: 'SAFETY_PAUSED',
+            code: relayPauseCode(truncated),
+            message: truncated.slice(0, 240),
+            already_paused: alreadyPaused,
+          }),
           relayLastTransition: {
             at: new Date().toISOString(),
             actor: 'SYSTEM',
@@ -16717,7 +16873,7 @@ await this.notifications
     prepared?: {
       remainingLedgerAmount: number | null;
     },
-    terminalFence?: { cycleId: string; claim: TerminalCloseClaim },
+    terminalFence?: { cycleId: string; claim: TerminalCloseClaim; submitNotBeforeMs?: number },
   ): Promise<RelayLotExitTarget> {
     if (!meta.direction) {
       throw new Error('EXIT_TARGET_MISSING_DIRECTION');
@@ -16810,6 +16966,8 @@ await this.notifications
     // otherwise a crash during telemetry could create an unrecoverable
     // no-submit SUBMITTING fence.
     const closeBbo = await closeBboPromise;
+    const holdMs = (terminalFence.submitNotBeforeMs ?? 0) - Date.now();
+    if (holdMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, Math.min(holdMs, TIME_DEADLINE_PREARM_MS)));
     terminalFence.claim = await this.advanceTerminalCloseFence({
       cycleId: terminalFence.cycleId,
       participantId,
@@ -19639,7 +19797,10 @@ await this.notifications
       reason:
         | NonNullable<VirtualLotExitReason>
         | 'SHOWCASE_VANISHED'
-        | 'AUTHENTICATED_EMERGENCY_CLOSE';
+        | 'AUTHENTICATED_EMERGENCY_CLOSE'
+        | 'TIME_60S';
+      /** LIVE-FIX-1490: hold the exchange write until this wall-clock time. */
+      submitNotBeforeMs?: number;
       mark: number;
       fillPrice: number;
       leverage: number;
@@ -19751,7 +19912,7 @@ await this.notifications
         opts.leverage,
         stopIdsToCancel,
         undefined,
-        { cycleId, claim: terminalClaim },
+        { cycleId, claim: terminalClaim, submitNotBeforeMs: opts.submitNotBeforeMs },
       );
       closeQty = closeTarget.closeQty;
     } catch (err) {
@@ -19833,9 +19994,10 @@ await this.notifications
     });
 
     const exitReasonMap: Record<
-      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE',
+      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
       string
     > = {
+      TIME_60S: 'TIME_60S',
       PROFIT_LOCK: 'PROFIT_LOCK',
       THESIS_FAST_CUT: 'THESIS_FAST_CUT',
       HARD_STOP: 'HARD_STOP',

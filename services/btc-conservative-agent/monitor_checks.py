@@ -260,3 +260,29 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
                    receipt={k: receipt.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded",
                                                        "errors", "disk_free_pct", "disk_free_gb", "finished_ts",
                                                        "restore_test", "host") if k in receipt})
+
+
+CLOCK_AMBER_MS = 50.0
+CLOCK_RED_MS = 250.0
+
+
+def clock_skew(sync: Mapping[str, Any] | None, *, live_on: bool) -> dict:
+    """HM 20:33: alert on Fly wall-clock offset (992 ms went unalerted).
+
+    AMBER > 50 ms (A2 budget), RED > 250 ms while live copy is on (AMBER otherwise).
+    """
+    s = sync or {}
+    off = _f(s.get("offset_ms"))
+    extra = {"offset_ms": off, "rtt_ms": _f(s.get("rtt_ms")), "age_sec": _f(s.get("age_sec")),
+             "slew": s.get("slew"), "live_on": live_on}
+    if off is None or s.get("synchronized") is None:
+        return _result("clock-skew", [f"no trusted external sample ({s.get('reason') or 'unknown'})"],
+                       unknown=True, **extra)
+    a = abs(off)
+    if a > CLOCK_RED_MS:
+        return _result("clock-skew", [f"Fly clock offset {off:.0f} ms > {CLOCK_RED_MS:.0f} ms"],
+                       red=live_on, amber=not live_on, alert_on_amber=True, **extra)
+    if a > CLOCK_AMBER_MS:
+        return _result("clock-skew", [f"Fly clock offset {off:.0f} ms > {CLOCK_AMBER_MS:.0f} ms"],
+                       amber=True, alert_on_amber=live_on, **extra)
+    return _result("clock-skew", [], **extra)

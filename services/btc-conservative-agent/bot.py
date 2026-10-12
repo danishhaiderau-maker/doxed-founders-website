@@ -32275,6 +32275,9 @@ def _disloc_note_paper_twin(event, tid, extra, row) -> None:
         if event == "POSITION_OPENED":
             twin["entry_price"] = extra.get("fill_price")
             twin["qty"] = extra.get("qty")
+            twin["entry_ts"] = row.get("fill_ts") or row.get("ts")
+            twin["signal_ts"] = row.get("signal_ts") or extra.get("signal_ts")
+            twin["signal_price"] = row.get("signal_ask") if extra.get("direction") == "LONG" else row.get("signal_bid")
         elif event == "POSITION_CLOSED":
             twin["exit_price"] = extra.get("exit_price")
             twin["exit_reason"] = extra.get("exit_reason")
@@ -32327,6 +32330,8 @@ def _disloc_paper_twins() -> dict:
                 # LIVE-FIX-1200: merge FILLED + CLOSED rows (first-row-wins left exit null).
                 if r.get("fill_price") and not t.get("entry_price"):
                     t["entry_price"] = r.get("fill_price")
+                    t["entry_ts"] = r.get("fill_ts")
+                    t["signal_ts"] = r.get("signal_ts")
                 if r.get("exit_price") is not None:
                     t.update(exit_price=r.get("exit_price"), exit_reason=r.get("exit_reason"),
                              exit_ts=r.get("exit_ts"))
@@ -46965,6 +46970,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
                            "archive": _TAPE_ARCHIVE.snapshot()},
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
+        "clock-skew": _mc.clock_skew(__import__("runtime_telemetry").clock_sync_verdict(), live_on=bool(inp.get("live_on_lanes"))),
     }
     return checks
 
@@ -46980,7 +46986,7 @@ def _monitor_live_copy_tiles():
 
 
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
-                        "tape-retention", "exits-latency-guard", "archive-receipt")
+                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew")
 
 
 @app.route('/api/monitor/checks', methods=["GET"])
@@ -59817,6 +59823,7 @@ def _live_copy_monitor_context() -> dict:
             "guard": _relay_delivery_guard.status() if hasattr(_relay_delivery_guard, "status") else None,
         },
         "website": _live_copy_website_state(),
+        "clock_sync": __import__("runtime_telemetry").clock_sync_verdict(),
         "account_transitions": _live_copy_account_transitions_rows(),
         "deliveries": _live_copy_delivery_times(),
         "process_started_ts": globals().get("process_boot_time"),
