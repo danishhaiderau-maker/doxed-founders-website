@@ -97,3 +97,16 @@ def test_live_fix_1494_stop_path_split():
     assert e["entry_ack_to_fill_detected_ms"] == 800
     assert e["entry_ack_to_stop_ack_ms"] == 1500
     assert out["rolling"]["stop_ack_to_confirmed_ms"]["n"] == 1
+
+
+def test_live_fix_1499_entry_obs_on_timeline():
+    import live_monitor_routes as m
+    rep = {"correlation_id": "dsl-7", "type": "ORDER_FILLED", "fill": {"price": 1.0},
+           "entry_obs": {"fill_detect_source": "POST_ACK_FAST_FILL", "fill_probe_index": 3,
+                         "fill_probe_marks": [{"i": 0}], "marks": {"pfOrders": 250}, "fast_path": {"used": True}},
+           "timeline": {"fly_signal_at_ts": 100.0, "stop_claim_started_at_ts": 101.0, "stop_claimed_at_ts": 101.05,
+                        "stop_phase_submitting_at_ts": 101.1, "stop_placed_at_ts": 101.4, "stop_protected_at_ts": 101.5}}
+    e = m.timeline([rep], [], {})["rows"][0]["entry"]
+    assert e["fill_probe_index"] == 3 and e["fill_detect_source"] == "POST_ACK_FAST_FILL"
+    assert e["marks"]["pfOrders"] == 250
+    assert e["claim_ms"] == 50 and e["phase_submitting_write_ms"] == 50 and e["stop_ack_to_protected_ms"] == 100

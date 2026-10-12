@@ -209,11 +209,23 @@ export function buildLiveCopyReports(input: {
           if (stopAck != null) tl.stop_placed_at_ts = tl.stop_placed_at_ts ?? sec(stopAck);
           // LIVE-FIX-1494: entry ACK -> fill detected -> claim -> stop submit marks.
           for (const [k, f] of [['stop_entry_ack_at_ts', 'entry_exchange_ack_at'], ['stop_fill_detected_at_ts', 'fill_detected_at'],
-            ['stop_claimed_at_ts', 'stop_claimed_at'], ['stop_submit_started_at_ts', 'stop_submit_started_at']] as const) {
+            ['stop_claimed_at_ts', 'stop_claimed_at'], ['stop_submit_started_at_ts', 'stop_submit_started_at'],
+            // LIVE-FIX-1499
+            ['stop_claim_started_at_ts', 'stop_claim_started_at'], ['stop_phase_submitting_at_ts', 'stop_phase_submitting_at'],
+            ['stop_protected_at_ts', 'stop_protected_at'], ['fill_enriched_at_ts', 'fill_enriched_at']] as const) {
             const v = isoMs(pl[f]);
             if (v != null) (tl as Record<string, number | null>)[k] = (tl as Record<string, number | null>)[k] ?? sec(v);
           }
           push(e, 'ORDER_FILLED', {
+            // LIVE-FIX-1499: observability only (which detector fired, probe ladder, entry marks).
+            entry_obs: {
+              fill_detect_source: pl.fill_detect_source ?? pl.fill_detection_context ?? null,
+              fill_probe_index: pl.fill_probe_index ?? null,
+              fill_probe_marks: Array.isArray(pl.fill_probe_marks) ? pl.fill_probe_marks.slice(0, 10) : [],
+              take_submit_fill_status: pl.take_submit_fill_status ?? null,
+              marks: pl.entry_marks && typeof pl.entry_marks === 'object' ? pl.entry_marks : null,
+              fast_path: pl.entry_fast_path ?? null,
+            },
             fill: { price: num(pl.fill_price), qty: num(pl.qty), source: pl.fill_price_source ?? pl.fill_source ?? null },
           });
           if (pl.stop_loss_placed === true && pl.stopOrderId != null) {
