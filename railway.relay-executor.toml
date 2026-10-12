@@ -15,6 +15,10 @@ watchPatterns = [
 # This service is the sole real-money executor. The public API deliberately
 # uses a different start command and keeps subscriber execution disabled.
 startCommand = "node apps/api/dist/relay-executor-worker.js"
+# LIVE-FIX-1481: never swap the single money executor mid-trade. Waits for no
+# OPEN/PENDING_ENTRY Bitfinex copy participant; fails the deploy (old container
+# stays up) if exposure persists. See apps/api/scripts/relay-executor-predeploy-gate.cjs.
+preDeployCommand = ["node apps/api/scripts/relay-executor-predeploy-gate.cjs"]
 healthcheckPath = "/api/health/live"
 healthcheckTimeout = 180
 restartPolicyType = "ON_FAILURE"
