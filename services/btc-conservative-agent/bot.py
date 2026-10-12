@@ -32238,7 +32238,8 @@ def _disloc_note_paper_twin(event, tid, extra, row) -> None:
         return
     row = row if isinstance(row, dict) else {}
     with _DISLOC_PAPER_TWINS_LOCK:
-        twin = _DISLOC_PAPER_TWINS.setdefault(str(tid), {"side": extra.get("direction"), "source": "disloc_engine"})
+        twin = _DISLOC_PAPER_TWINS.setdefault(str(tid), {"side": extra.get("direction"), "source": "disloc_engine",
+                                                         "lane": extra.get("research_lane")})
         if event == "POSITION_OPENED":
             twin["entry_price"] = extra.get("fill_price")
             twin["qty"] = extra.get("qty")
@@ -32250,6 +32251,32 @@ def _disloc_note_paper_twin(event, tid, extra, row) -> None:
             twin["exit_reason"] = extra.get("reason")
         while len(_DISLOC_PAPER_TWINS) > 500:
             _DISLOC_PAPER_TWINS.pop(next(iter(_DISLOC_PAPER_TWINS)))
+
+
+def _disloc_execution_rows(now_ts: float) -> tuple:
+    """Open DISLOC paper positions + closes from the last 30 min, executor shape."""
+    with _DISLOC_PAPER_TWINS_LOCK:
+        twins = {k: dict(v) for k, v in _DISLOC_PAPER_TWINS.items()}
+    positions, closed = [], []
+    for tid, t in twins.items():
+        entry = t.get("entry_price")
+        side = str(t.get("side") or "").upper()
+        if not entry or side not in ("LONG", "SHORT"):
+            continue
+        if t.get("exit_price") is None:
+            positions.append({"trade_id": tid, "status": "OPEN", "dir": side, "side": side,
+                              "entry": entry, "qty": t.get("qty"), "research_lane": t.get("lane"),
+                              "source": "disloc_engine"})
+        else:
+            try:
+                ts = float(t.get("exit_ts") or 0.0)
+            except (TypeError, ValueError):
+                ts = 0.0
+            if now_ts - ts <= 1800:
+                closed.append({"ts": ts, "trade_id": tid, "dir": side, "final_direction": side,
+                               "entry": entry, "exit": t.get("exit_price"),
+                               "exit_reason": t.get("exit_reason"), "research_lane": t.get("lane")})
+    return positions, closed
 
 
 def _disloc_paper_twins() -> dict:
@@ -43123,6 +43150,17 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in recent_trades
         if isinstance(row, dict)
     ]
+    # LIVE-FIX-1144: DISLOC/DISLOC-FOI self-simulate paper, so their open
+    # positions and closes never reached the executor's snapshot. The executor
+    # then logged "Showcase position absent", re-adopted the closed lot as an
+    # orphan, double-counted it (ledger 0.00058 vs exchange 0.00029) and
+    # SAFETY_PAUSED the account on POSITION_MISMATCH (12 Oct 11:42).
+    try:
+        _dsl_pos, _dsl_closed = _disloc_execution_rows(now_ts)
+        snapshot["positions"].extend(_dsl_pos)
+        snapshot["trades"].extend(_dsl_closed)
+    except Exception as exc:  # noqa: BLE001 - never break the money snapshot
+        logger.warning(f"[DISLOC LIVE COPY] execution snapshot rows failed: {exc}")
     snapshot["fidelity_trades"] = fidelity_trades
     snapshot["expired_orders"] = _dashboard_expired_order_rows(recent_expired)
     snapshot["expired_orders_total"] = expired_orders_total
