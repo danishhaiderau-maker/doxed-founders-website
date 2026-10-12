@@ -20,6 +20,11 @@ import bot
 import cross_venue_lead as xvl
 import paper_policy_family_gs07_fast_premium_fade as xvs_policy  # H-C retired 2026-10-11; GS-07 is the active evaluator-clock fixture
 
+import pytest as _pytest
+from combo_pathway_config import RETIRED_TILE_LANES as _RETIRED
+# GS-07 (xvs_policy.LANE) retired 12 Oct (#589).
+_RETIRED_SKIP = _pytest.mark.skipif(xvs_policy.LANE in _RETIRED, reason="xvs lane GS-07 retired (#589)")
+
 
 class _HeldWorker:
     """Stands in for the background worker so tests control when receipts apply."""
@@ -159,6 +164,7 @@ def test_failed_materialization_turns_deferral_off(queue, monkeypatch):
     assert bot._replay_preentry_evidence_handoffs() == 0
 
 
+@_RETIRED_SKIP
 def test_backlog_or_journal_failure_uses_the_synchronous_path(queue, monkeypatch):
     monkeypatch.setattr(bot, "PREENTRY_EVIDENCE_MAX_PENDING", 2)
     _enqueue_trade("xvl-1", "xvl-aaa")
@@ -191,6 +197,7 @@ def _attempt_env(monkeypatch, order):
             "anchor_bucket_ts": int(now) - 1}
 
 
+@_RETIRED_SKIP
 def test_attempt_submits_before_the_lane_decision_is_written(queue, monkeypatch):
     order = []
     trigger = _attempt_env(monkeypatch, order)
@@ -209,6 +216,7 @@ def test_attempt_submits_before_the_lane_decision_is_written(queue, monkeypatch)
     assert order == ["SUBMIT", "V3"]
 
 
+@_RETIRED_SKIP
 def test_attempt_keeps_the_synchronous_fail_closed_path_when_not_deferrable(queue, monkeypatch):
     order = []
     trigger = _attempt_env(monkeypatch, order)
