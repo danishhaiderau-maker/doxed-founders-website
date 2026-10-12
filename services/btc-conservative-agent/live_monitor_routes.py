@@ -106,7 +106,8 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
         L = row["live"]
         paper = {"signal_ts": _ts(tw.get("signal_ts")), "fill_ts": _ts(tw.get("entry_ts")),
                  "exit_ts": _ts(tw.get("exit_ts")), "entry_price": _f(tw.get("entry_price")),
-                 "exit_price": _f(tw.get("exit_price")), "exit_reason": tw.get("exit_reason")}
+                 "exit_price": _f(tw.get("exit_price")), "exit_reason": tw.get("exit_reason"),
+                 "signal_touch_price": _f(tw.get("signal_price"))}
         t0 = L.get("fly_signal_at_ts") or paper["signal_ts"]
         if t0 is None or t0 < since:
             continue
@@ -139,7 +140,10 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                       "marks": (row.get("entry_obs") or {}).get("marks"),
                       "stop_submit_to_ack_ms": _ms(L.get("stop_submit_started_at_ts"), L.get("stop_placed_at_ts")),
                       "entry_ack_to_stop_ack_ms": _ms(L.get("stop_entry_ack_at_ts"), L.get("stop_placed_at_ts")),
-                      "slippage_bp_vs_paper": _bp(row.get("live_fill_price"), paper["entry_price"], side)},
+                      "slippage_bp_vs_paper": _bp(row.get("live_fill_price"), paper["entry_price"], side),
+                      # LIVE-FIX-1498 (Strategist): live fill vs signal touch (ask LONG / bid SHORT), + = adverse
+                      "slippage_bp_vs_signal_touch": _bp(row.get("live_fill_price"), paper["signal_touch_price"], side),
+                      "paper_slippage_bp_vs_signal_touch": _bp(paper["entry_price"], paper["signal_touch_price"], side)},
             "exit": {"paper_exit_to_fly_intent_ms": _ms(paper["exit_ts"], L.get("fly_exit_intent_at_ts")),
                      "paper_exit_to_send_ms": _ms(paper["exit_ts"], L.get("exit_sent_at_ts")),
                      "send_to_ack_ms": _ms(L.get("exit_sent_at_ts"), L.get("exit_ack_at_ts")),
@@ -164,6 +168,8 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                                              "fill_detected_to_claimed_ms", "claimed_to_stop_submit_ms",
                                              "stop_submit_to_ack_ms", "entry_ack_to_stop_ack_ms")},
                 "entry_slippage_bp": ("entry", "slippage_bp_vs_paper"),
+                "entry_slippage_bp_vs_signal_touch": ("entry", "slippage_bp_vs_signal_touch"),
+                "paper_entry_slippage_bp_vs_signal_touch": ("entry", "paper_slippage_bp_vs_signal_touch"),
                 "exit_paper_to_live_ms": ("exit", "paper_exit_to_live_exit_ms"),
                 "exit_slippage_bp": ("exit", "slippage_bp_vs_paper")}.items()}}
 

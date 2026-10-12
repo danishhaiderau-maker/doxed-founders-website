@@ -110,3 +110,13 @@ def test_live_fix_1499_entry_obs_on_timeline():
     assert e["fill_probe_index"] == 3 and e["fill_detect_source"] == "POST_ACK_FAST_FILL"
     assert e["marks"]["pfOrders"] == 250
     assert e["claim_ms"] == 50 and e["phase_submitting_write_ms"] == 50 and e["stop_ack_to_protected_ms"] == 100
+
+def test_live_fix_1498_entry_slippage_vs_signal_touch():
+    import live_monitor_routes as m
+    rep = {"correlation_id": "dsl-9", "type": "ORDER_FILLED", "fill": {"price": 100030.0},
+           "order": {"side": "LONG"}, "timeline": {"fly_signal_at_ts": 100.0}}
+    twins = {"dsl-9": {"side": "LONG", "signal_price": 100000.0, "entry_price": 100000.0, "signal_ts": 100.0}}
+    out = m.timeline([rep], [], twins)
+    e = out["rows"][0]["entry"]
+    assert abs(e["slippage_bp_vs_signal_touch"] - 3.0) < 1e-6
+    assert out["rolling"]["entry_slippage_bp_vs_signal_touch"]["n"] == 1

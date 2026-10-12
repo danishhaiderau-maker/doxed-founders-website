@@ -32332,6 +32332,7 @@ def _disloc_paper_twins() -> dict:
                     t["entry_price"] = r.get("fill_price")
                     t["entry_ts"] = r.get("fill_ts")
                     t["signal_ts"] = r.get("signal_ts")
+                    t["signal_price"] = r.get("signal_ask") if str(r.get("side") or "").upper() == "LONG" else r.get("signal_bid")
                 if r.get("exit_price") is not None:
                     t.update(exit_price=r.get("exit_price"), exit_reason=r.get("exit_reason"),
                              exit_ts=r.get("exit_ts"))
