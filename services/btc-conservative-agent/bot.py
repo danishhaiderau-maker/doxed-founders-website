@@ -48068,10 +48068,29 @@ _pause_finalization_lock = threading.Lock()
 _pause_finalization_current: dict = {"thread": None, "result": None}
 
 
+def _pause_caller_tag(body=None) -> str:
+    """LIVE-FIX-1415: who asked for this pause (was a generic ADMIN_MANUAL)."""
+    try:
+        body = body if isinstance(body, dict) else (request.get_json(silent=True) or {})
+        parts = [
+            str(body.get("owner") or "OPERATOR").upper(),
+            str(body.get("caller") or request.headers.get("X-Caller") or "").strip(),
+            str(body.get("reason") or "").strip(),
+            ("gha:" + request.headers.get("X-GitHub-Run-Id")) if request.headers.get("X-GitHub-Run-Id") else "",
+            "ua:" + str(request.headers.get("User-Agent") or "?")[:40],
+            "ip:" + str(request.headers.get("Fly-Client-IP") or request.remote_addr or "?"),
+        ]
+        return "|".join(p for p in parts if p)[:240]
+    except Exception:  # noqa: BLE001
+        return "UNKNOWN_CALLER"
+
+
 def _finalize_admin_pause(result: dict) -> None:
     """Cancel and disarm after the durable pause intent is already committed."""
     try:
-        disarm = _disarm_live_control("ADMIN_MANUAL")
+        caller = str(result.get("caller") or "UNKNOWN_CALLER")
+        logger.warning(f"[LIVE COPY] output OFF by /api/pause caller={caller}")
+        disarm = _disarm_live_control("ADMIN_PAUSE:" + caller)
         set_execution_paused("ADMIN_MANUAL")
         with trade_lock:
             paper_orders = _fast_state_copy(pending_orders)
@@ -48092,7 +48111,7 @@ def _start_pause_finalization() -> tuple:
         current = _pause_finalization_current.get("thread")
         if current is not None and current.is_alive():
             return current, _pause_finalization_current["result"]
-        result = {"done": False, "started_at": time.time()}
+        result = {"done": False, "started_at": time.time(), "caller": _pause_caller_tag()}
         worker = threading.Thread(
             target=_finalize_admin_pause,
             args=(result,),
