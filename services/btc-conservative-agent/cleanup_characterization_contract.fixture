@@ -2,6 +2,8 @@
   "schema": "btc_bot_cleanup_characterization_v1",
   "canonical_source": "bot.py",
   "routes": [
+    ["GET", "/api/monitor/chase_buckets", "monitor_chase_buckets"],
+    ["GET", "/api/monitor/gap_buckets", "monitor_gap_buckets"],
     ["GET", "/api/monitor/checks", "monitor_checks_all"],
     ["GET", "/api/monitor/exit-truth", "monitor_check_exit_truth"],
     ["GET", "/api/monitor/pnl/reconcile", "monitor_check_pnl_reconcile"],

@@ -13,7 +13,7 @@ REMOTE = {"REMOTE_ADDR": "203.0.113.9"}
 ROUTES = ("/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
           "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
           "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
-          "/api/monitor/shadow-exits")
+          "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets")
 
 
 def test_late_window_table_matches_hm_audit():
@@ -129,3 +129,16 @@ def test_lanes_use_late_window_basis():
            "close_ts": 1, "direction": "LONG"}
     out = monitor_api.lane_stats([row])
     assert abs(out["net_usd"] - round(fix["market_bp"] * 25e-4, 6)) < 1e-6
+
+
+def test_chase_gap_tables_and_side_scores():
+    import chase_gap as cg
+    import bot as b
+    rows = [{"limit_chase_count": 0, "net_pnl_bp": 4.0, "close_ts": 3600 * i, "score_gap": 2.5, "exit_reason": "X"}
+            for i in range(4)] + [{"limit_chase_count": 1, "net_pnl_bp": -2.0, "close_ts": 10, "exit_reason": "ADMIN_MANUAL_CLOSE"}]
+    v = cg.chase_view(rows, [{"limit_chase_count": 0}], {"ADMIN_MANUAL_CLOSE"})
+    assert v["buckets"]["0"]["fills"] == 4 and v["buckets"]["0"]["reached"] == 5 and v["buckets"]["0"]["mean_bp"] == 4.0
+    assert "1" not in v["buckets"]
+    assert cg.gap_view(rows, [], set())["buckets"]["2-3"]["n"] == 4
+    s = b._trade_side_scores({"dir": "SHORT"}, {"signal_ref": {"long_score": 3, "short_score": 7}})
+    assert s == {"long_score": 3.0, "short_score": 7.0, "score_gap": 4.0}
