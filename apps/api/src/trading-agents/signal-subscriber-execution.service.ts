@@ -17220,7 +17220,52 @@ await this.notifications
    * Phase 2c — market-close copy lot on showcase closure with observability fields.
    * Idempotent via exitingLots + hasParticipantExited (unless forceMirrorExit).
    */
-  private async executeShowcaseMirrorClose(
+  /**
+   * LIVE-FIX-1483: the direct wake, the durable wake and the reconciliation
+   * tick can all reach the same showcase close within milliseconds (now that
+   * direct wakes are no longer rejected). The in-memory exitingLots check ran
+   * before any await reserved the lot, so the loser lost the serializable
+   * terminal claim and paused the relay (TERMINAL_CLOSE_CLAIM_REFUSED /
+   * _PERSIST_FAILED). Reserve the participant synchronously; one owner.
+   */
+  private mirrorCloseInFlight?: Map<string, Promise<boolean>>;
+
+  private executeShowcaseMirrorClose(
+    agentId: string,
+    userId: string,
+    cycle: {
+      id: string;
+      showcasePnlUsd?: { toNumber?: () => number } | null;
+      intentEnvelope?: unknown;
+    },
+    participant: { id: string; fillPrice: { toNumber?: () => number } | null },
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    opts?: {
+      showcaseExitPrice?: number;
+      showcaseExitReason?: string;
+      sourceEventAtMs?: number;
+      platformReceivedAtMs?: number;
+      mirrorRelinked?: boolean;
+      trigger?: string;
+      terminalAuthority: TerminalCloseAuthority;
+      /** Bypass hasParticipantExited (stale RECONCILE_CANCEL EXIT events). */
+      forceMirrorExit?: boolean;
+    },
+  ): Promise<boolean> {
+    const flights = (this.mirrorCloseInFlight ??= new Map<string, Promise<boolean>>());
+    // Same contract as the exitingLots guard: a concurrent caller reports
+    // the close as owned (true) instead of racing the terminal claim.
+    if (flights.has(participant.id)) return Promise.resolve(true);
+    const run = this.executeShowcaseMirrorCloseOwned(agentId, userId, cycle, participant, meta, creds, opts)
+      .finally(() => {
+        if (flights.get(participant.id) === run) flights.delete(participant.id);
+      });
+    flights.set(participant.id, run);
+    return run;
+  }
+
+  private async executeShowcaseMirrorCloseOwned(
     agentId: string,
     userId: string,
     cycle: {

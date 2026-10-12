@@ -1677,7 +1677,7 @@ test('all full-fill promotion paths authenticate protection before recording FIL
 
 test('live close does not await public mark enrichment before reduce-only close submission', () => {
   const source = String(
-    (SignalSubscriberExecutionService.prototype as any).executeShowcaseMirrorClose,
+    (SignalSubscriberExecutionService.prototype as any).executeShowcaseMirrorCloseOwned,
   );
   const markPromiseAt = source.indexOf('preparedExitPricePromise');
   const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget', markPromiseAt);

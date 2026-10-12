@@ -198,3 +198,22 @@ test('1482: a resting stop at least as protective as requested authenticates', a
   assert.equal(t('LONG', 85_000, 83_750), false);  // >1% off: refuse
   assert.equal(t('LONG', 0, 83_750), false);
 });
+
+test('1483: concurrent mirror closes for one participant have exactly one owner', async () => {
+  const { SignalSubscriberExecutionService } = await import('./signal-subscriber-execution.service');
+  const svc = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let runs = 0;
+  let release!: (v: boolean) => void;
+  svc.executeShowcaseMirrorCloseOwned = () => { runs += 1; return new Promise<boolean>((r) => { release = r; }); };
+  const args = ['a', 'u', { id: 'c' }, { id: 'p1', fillPrice: null }, {}, {}, { terminalAuthority: {} }];
+  const first = svc.executeShowcaseMirrorClose(...args);
+  const second = svc.executeShowcaseMirrorClose(...args);
+  assert.equal(runs, 1);
+  assert.equal(await second, true, 'concurrent caller reports owned close without racing the claim');
+  release(true);
+  assert.equal(await first, true);
+  const third = svc.executeShowcaseMirrorClose(...args);
+  release(false);
+  assert.equal(await third, false);
+  assert.equal(runs, 2, 'a later close runs again after the first settles');
+});
