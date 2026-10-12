@@ -33400,6 +33400,8 @@ def _emergency_api_guard():
     if method == "GET" and path in _MONITOR_TILE_PATHS:
         return None
     # Read-only research stream pulls; monitor token checked in the handler.
+    if method == "GET" and path == "/api/monitor/platforms":
+        return None
     if method == "GET" and (path == "/api/monitor/streams" or path.startswith("/api/monitor/streams/")):
         return None
     # Live-copy monitoring (admin or MONITOR_READ_TOKEN, checked per handler).
@@ -46337,6 +46339,7 @@ def _monitor_summary_payload(now: float) -> dict:
             {"id": alarm.get("id"), "first_seen": alarm.get("since")}
             for alarm in (watcher.get("open_alarms") or [])
         ],
+        "platforms": _monitor_part(lambda: _platform_monitor().compact(now)),
         "detail": {"lanes": "/api/monitor/lanes", "readiness": "/api/ready", "health": "/health"},
     }
 
@@ -46855,12 +46858,87 @@ def monitor_archive_receipt_post():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# PLATFORM-HEALTH-20261012: Cloudflare/Fly/Neon/Vercel/GitHub Actions/Railway probes every
+# platform_health.INTERVAL_SEC; read-only, never touches trading state (platform_health.py).
+# ---------------------------------------------------------------------------
+import platform_health as _platform_health
+_PLATFORM_MONITOR = None
+
+
+def _platform_monitor():
+    global _PLATFORM_MONITOR
+    if _PLATFORM_MONITOR is None:
+        try:
+            path = _data_sync_volume_root() / "platform_health_state.json"
+        except Exception:
+            path = None
+        _PLATFORM_MONITOR = _platform_health.PlatformMonitor(state_path=path)
+    return _PLATFORM_MONITOR
+
+
+def _platform_health_ctx() -> dict:
+    vols = []
+    for p in ("/data", str(_data_sync_volume_root())):
+        if os.path.isdir(p) and p not in vols:
+            vols.append(p)
+    restarts = None
+    try:
+        restarts = {"boot_id": BOT_INSTANCE_ID, "process_started_ts": globals().get("process_boot_time")}
+    except Exception:
+        pass
+    boot = globals().get("process_boot_time")
+    return {"git_rev": _runtime_git_rev(), "boot_id": BOT_INSTANCE_ID, "restarts": restarts,
+            "uptime_sec": round(time.time() - float(boot)) if boot else None,
+            "volume_paths": vols, "archive_receipt": _load_archive_receipt(),
+            "website_view": _live_copy_website_cached_view()}
+
+
+def _platform_health_loop():
+    import requests as _rq
+    session = _rq.Session()
+    session.headers["User-Agent"] = "doxed-btc-bot-platform-monitor/1"
+    time.sleep(20)
+    while True:
+        try:
+            _platform_monitor().run_check(session, _platform_health_ctx())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[PLATFORM HEALTH] check failed: {type(exc).__name__}: {exc}")
+        time.sleep(_platform_health.INTERVAL_SEC)
+
+
+
+
+@app.route('/api/monitor/platforms', methods=["GET"])
+def monitor_platforms():
+    """Platform health snapshot + alerts (admin or MONITOR_READ_TOKEN)."""
+    def build(now):
+        n = max(1, min(120, request.args.get("snapshots", 20, type=int) or 20))
+        return {**_platform_monitor().view(now, snapshots=n), **_monitor_tiles_common(now)}
+    return _monitor_tiles_guard(build, 600_000)
+
+
+@app.route('/api/monitor/platforms/receipt', methods=["POST"])
+def monitor_platforms_receipt():
+    """Box collector pushes credentialed observations (Fly machines API, Railway, R2). Admin only."""
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or len(json.dumps(body, default=str)) > 65536:
+        return jsonify({"ok": False, "error": "bad_request"}), 400
+    _platform_monitor().accept_receipt(body)
+    return jsonify({"ok": True})
+
+
 @app.route('/api/monitor/alerts', methods=["GET"])
 def monitor_alerts_full():
     """Full alert history (same as admin /api/system-health/alerts) for the monitor token."""
     def build(now):
         statuses_view = _system_health_alert_history_full()
-        return {"schema": "monitor_alerts_v1", **_monitor_tiles_common(now), **statuses_view}
+        pm = _platform_monitor()
+        return {"schema": "monitor_alerts_v1", **_monitor_tiles_common(now), **statuses_view,
+                "platform_alerts": {"open_1h": pm.open_alerts(now), "recent": list(pm.alerts)[-50:],
+                                    "detail": "/api/monitor/platforms"}}
     return _monitor_tiles_guard(build, 1_500_000)
 
 
@@ -58146,6 +58224,7 @@ def main():
         daemon=True,
     ).start()
     threading.Thread(target=safe_thread(_live_copy_delivery_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(_platform_health_loop), name="platform_health", daemon=True).start()
     update_logger_level()
     _THREAD_HEALTH.bind("main_supervisor_loop")
     while True:
