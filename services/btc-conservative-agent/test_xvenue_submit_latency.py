@@ -18,6 +18,11 @@ import tile_paired_comparison as tpc
 
 TAPE_ROWS = 30_000
 
+import pytest as _pytest
+from combo_pathway_config import RETIRED_TILE_LANES as _RETIRED
+# GS-07 (xvs_policy.LANE) retired 12 Oct (#589): no active cross-venue lane runs the attempt workers.
+_RETIRED_SKIP = _pytest.mark.skipif(xvs_policy.LANE in _RETIRED, reason="xvs lane GS-07 retired (#589)")
+
 
 def _write_tape(directory, end_ts, rows=TAPE_ROWS):
     start = int(end_ts) - rows + 1
@@ -73,6 +78,7 @@ def test_pre_signal_lane_decision_never_full_scans_the_tape(tmp_path, monkeypatc
     assert receipt["store_verification"]["passed"] is True
 
 
+@_RETIRED_SKIP
 def test_attempt_workers_start_before_the_evaluator_nices_itself(monkeypatch):
     order = []
     monkeypatch.setattr(bot, "_XVL_ATTEMPT_QUEUES", {})
@@ -87,6 +93,7 @@ def test_attempt_workers_start_before_the_evaluator_nices_itself(monkeypatch):
     assert set(bot._XVL_ATTEMPT_QUEUES) == {xvs_policy.LANE}
 
 
+@_RETIRED_SKIP
 def test_gate_hands_the_trigger_to_the_lane_worker_without_spawning(monkeypatch):
     from queue import Queue
     queue = Queue(maxsize=1)
@@ -109,6 +116,7 @@ def _sample(lane, trigger_id, signal_ts, submit_after, fill_after):
     bot._xvl_latency_mark_order(lane, {"shared_ai_call_id": trigger_id}, "fill_ts", signal_ts + fill_after)
 
 
+@_RETIRED_SKIP
 @pytest.mark.parametrize("fill_after,expected", [(1.4, "OK"), (9.3, "SLOW")])
 def test_latency_gate_uses_the_pre_registered_two_second_median(monkeypatch, fill_after, expected):
     monkeypatch.setattr(bot, "_xvl_lane_runtime", {})
@@ -123,6 +131,7 @@ def test_latency_gate_uses_the_pre_registered_two_second_median(monkeypatch, fil
     assert bot._xvl_lane_runtime[xvs_policy.LANE]["latency_open"] == {}
 
 
+@_RETIRED_SKIP
 def test_latency_gate_waits_for_enough_fills_and_ignores_non_xvenue_lanes(monkeypatch):
     monkeypatch.setattr(bot, "_xvl_lane_runtime", {})
     _sample(xvs_policy.LANE, "xvs-1", time.time() - 60, 0.8, 9.0)
@@ -132,6 +141,7 @@ def test_latency_gate_waits_for_enough_fills_and_ignores_non_xvenue_lanes(monkey
     assert latency["status"] == "INSUFFICIENT_FILLS"
 
 
+@_RETIRED_SKIP
 def test_end_to_end_attempt_stamps_every_stage_on_a_large_tape(tmp_path, monkeypatch):
     now = time.time()
     _write_tape(str(tmp_path), now)
