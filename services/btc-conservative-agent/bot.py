@@ -46685,6 +46685,92 @@ def _exit_follow_view(since):
     return _els.live_follow(_get_live_copy_journal().by_correlation(), _disloc_paper_twins(), since=since)
 
 
+def _exit_latency_live_on_lanes() -> list:
+    """Research lanes with Bitfinex live-orders ON (empty on any read error)."""
+    try:
+        rows = (_bitfinex_live_switch_snapshot() or {}).get("rows") or []
+    except Exception:  # noqa: BLE001 - read-only monitor
+        return []
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if not (r.get("bitfinex_live_orders") or r.get("live_on")):
+            continue
+        lane = _normalize_lane_key(r.get("lane") or "")
+        if lane:
+            out.append(lane)
+    return out
+
+
+def _exit_latency_closed_trade_rows(since: float) -> list:
+    """Active-tile closed trades for exit-latency, including DISLOC paper ledgers.
+
+    Main ``trades`` never holds DISLOC/DISLOC-FOI (self-simulated). Retired lanes
+    (ROUTER, FADE_POOL, GS07, H-A, …) are excluded so the SLO view matches the
+    dashboard roster.
+    """
+    import exit_latency_slo as _els
+    active = {str(x).upper() for x in ACTIVE_TILE_ORDER}
+    closed = []
+    for r in list(trades):
+        if not isinstance(r, dict):
+            continue
+        lane = _normalize_lane_key(r.get("research_lane") or "")
+        if lane not in active:
+            continue
+        closed.append(r)
+    try:
+        import disloc_engine as _dsl
+        for lane in _dsl.LANE_FILES:
+            if lane not in active:
+                continue
+            closed.extend(_els.paper_rows_from_disloc_ledger(
+                _disloc_lane_raw_rows(lane), lane=lane, since=since))
+    except Exception:  # noqa: BLE001 - DISLOC fold is additive only
+        pass
+    return closed
+
+
+def _exit_latency_per_tile(closed: list, since: float, live_follow: dict | None = None) -> dict:
+    """Build per_tile exit + signal_to_fill (+ live_exit when available), active lanes only."""
+    import exit_latency_slo as _els
+    active = {str(x).upper() for x in ACTIVE_TILE_ORDER}
+    buckets: dict = {}
+    for r in closed:
+        ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
+        if float(ev.get("exit_fill_ts") or 0) < since:
+            continue
+        lane = _normalize_lane_key(r.get("research_lane") or "") or "?"
+        if lane not in active:
+            continue
+        buckets.setdefault(lane, []).append(r)
+    # Ensure every active DISLOC lane appears even with zero samples in-window
+    # when it is (or recently was) on the roster — empty evaluate -> NO_DATA.
+    for lane in _els.DISLOC_EXIT_LANES:
+        if lane in active:
+            buckets.setdefault(lane, [])
+    tiles = {}
+    for lane, rows in buckets.items():
+        s2f = [float(e["signal_to_fill_sec"]) for e in (r.get("event_timestamps") or {} for r in rows)
+               if isinstance(e.get("signal_to_fill_sec"), (int, float))]
+        tiles[lane] = {"exit": _els.evaluate(rows, since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
+                       "signal_to_fill": {"n": len(s2f), "p50_sec": _els._pct(s2f, 0.5),
+                                          "p95_sec": _els._pct(s2f, 0.95)}}
+        tiles[lane]["exit"].pop("breaches_over_5s", None)
+    for lane, live in ((live_follow or {}).get("lanes") or {}).items():
+        key = _normalize_lane_key(lane) or str(lane).upper()
+        if key not in active and key not in _els.DISLOC_EXIT_LANES:
+            # live_follow already normalises DISLOC short codes; keep unknown out.
+            key = _els._normalize_disloc_lane(key)
+        if key not in active:
+            continue
+        slot = tiles.setdefault(key, {"exit": _els.evaluate([], since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
+                                      "signal_to_fill": {"n": 0, "p50_sec": None, "p95_sec": None}})
+        slot["live_exit"] = live
+    return tiles
+
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -46697,7 +46783,7 @@ def monitor_exit_latency():
         except ValueError:
             raise monitor_tiles.BadRequest("BAD_ARGS")
         since = now - hours * 3600
-        closed = [r for r in list(trades) if isinstance(r, dict)]
+        closed = _exit_latency_closed_trade_rows(since)
         slo = _els.evaluate(closed, since=since, forced=STATS_EXCLUDED_EXIT_REASONS)
         recent = []
         for r in closed:
@@ -46706,28 +46792,15 @@ def monitor_exit_latency():
                 continue
             recent.append({"trade_id": r.get("trade_id"), "lane": r.get("research_lane"),
                            "exit_reason": r.get("exit_reason"), **{k: ev.get(k) for k in ev if k != "schema"}})
-        per_tile = {}
-        for r in closed:
-            ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
-            if float(ev.get("exit_fill_ts") or 0) < since:
-                continue
-            lane = str(r.get("research_lane") or "?")
-            per_tile.setdefault(lane, []).append(r)
-        tiles = {}
-        for lane, rows in per_tile.items():
-            s2f = [float(e["signal_to_fill_sec"]) for e in (r.get("event_timestamps") or {} for r in rows)
-                   if isinstance(e.get("signal_to_fill_sec"), (int, float))]
-            tiles[lane] = {"exit": _els.evaluate(rows, since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
-                           "signal_to_fill": {"n": len(s2f), "p50_sec": _els._pct(s2f, 0.5),
-                                              "p95_sec": _els._pct(s2f, 0.95)}}
-            tiles[lane]["exit"].pop("breaches_over_5s", None)
-        unfilled = _els.unfilled_rows(list(expired_orders), since=since, limit=nrows)
         try:
             live_follow = _exit_follow_view(since)
         except Exception as exc:  # noqa: BLE001 - read-only view
             live_follow = {"schema": "live_exit_follow_v1", "status": "ERROR", "error": str(exc)[:200]}
+        tiles = _exit_latency_per_tile(closed, since, live_follow if isinstance(live_follow, dict) else None)
+        unfilled = _els.unfilled_rows(list(expired_orders), since=since, limit=nrows)
         return {"schema": "exit_latency_view_v1", "live_follow": live_follow, **_monitor_tiles_common(now),
-                "scope": {"window_hours": hours, "rows": nrows}, "window_hours": hours, "slo": slo, "per_tile": tiles,
+                "scope": {"window_hours": hours, "rows": nrows, "lanes": list(ACTIVE_TILE_ORDER)},
+                "window_hours": hours, "slo": slo, "per_tile": tiles,
                 "unfilled_orders": unfilled,
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
 
@@ -46761,16 +46834,16 @@ def _monitor_check_inputs(now: float, hours: float) -> dict:
     by_lane = _monitor_tiles_rows(scope, ("closed", "open"))
     totals = monitor_tiles.totals_view({k: [r for r in v if r.get("status") == "CLOSED"] for k, v in by_lane.items()},
                                        include_forced=False, be_band_bp=scope["be_band_bp"])
-    closed = [r for r in list(trades) if isinstance(r, dict)]
-    per_tile = {}
-    for r in closed:
-        ev = r.get("event_timestamps") if isinstance(r.get("event_timestamps"), dict) else {}
-        if float(ev.get("exit_fill_ts") or 0) >= since:
-            per_tile.setdefault(str(r.get("research_lane") or "?"), []).append(r)
+    closed = _exit_latency_closed_trade_rows(since)
+    try:
+        live_follow = _exit_follow_view(since)
+    except Exception:  # noqa: BLE001 - guard still works without live_follow
+        live_follow = {}
+    tiles = _exit_latency_per_tile(closed, since, live_follow if isinstance(live_follow, dict) else None)
     return {"since": since, "by_lane": by_lane, "totals": totals,
             "slo": _els.evaluate(closed, since=since, forced=STATS_EXCLUDED_EXIT_REASONS),
-            "per_tile": {k: {"exit": _els.evaluate(v, since=since, forced=STATS_EXCLUDED_EXIT_REASONS)}
-                         for k, v in per_tile.items()}}
+            "per_tile": tiles,
+            "live_on_lanes": _exit_latency_live_on_lanes()}
 
 
 def _monitor_checks_all(now: float, hours: float) -> dict:
@@ -46802,7 +46875,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
         "data-completeness": _mc.data_completeness(_TILE_TAPE_RING.bounds(), now=now),
         "tape-retention": {**_mc.tape_retention(_TILE_TAPE_RING.bounds(), _TAPE_ARCHIVE.oldest_ts(), now=now),
                            "archive": _TAPE_ARCHIVE.snapshot()},
-        "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"]),
+        "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
     }
     return checks
