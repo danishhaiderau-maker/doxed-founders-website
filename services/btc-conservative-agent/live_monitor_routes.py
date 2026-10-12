@@ -251,8 +251,13 @@ def clock(fly_sync: Mapping | None, reports: Iterable[Mapping], *, since: float)
     if off is None:
         st = AMBER
     return {"schema": SCHEMA, "route": "clock", "status": st, "alert": st == RED,
-            "fly": {"offset_ms_vs_external": off, "rtt_ms": _f(fs.get("rtt_ms")), "status": fs.get("status"),
-                    "slew": fs.get("slew"), "age_sec": fs.get("age_sec")},
+            "fly": {"offset_ms_vs_external": off, "source": fs.get("source"), "chrony": fs.get("chrony"),
+                    "status": fs.get("status"), "age_sec": fs.get("age_sec")},
+            # LIVE-FIX-1501: Railway isn't directly measurable; estimate from fill timestamps:
+            # Bitfinex fill MTS lands before Railway sees the ack, and order_sent -> fill MTS min > 0
+            # => Railway within about +/-100 ms of Bitfinex.
+            "railway": {"offset_ms_estimate": "+/-100", "method": "bounded by order_sent->fill_mts and fill_mts->ack",
+                        "bound_ms": 100, "order_sent_to_fill_mts_min_ms": bound(rw_to_bfx)["min_ms"]},
             "one_way_bounds": {"fly_intent_to_railway_received": bound(fly_to_rw),
                                "railway_order_sent_to_bitfinex_fill_mts": bound(rw_to_bfx),
                                "railway_event_to_fly_received": bound(rw_to_fly)},

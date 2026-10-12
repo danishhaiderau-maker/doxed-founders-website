@@ -173,57 +173,9 @@ def _probe_clock_offset_once(url: str = _CLOCK_PROBE_URL, samples: int = 3,
     return best
 
 
-CLOCK_SLEW_MIN_MS = float(os.getenv("CLOCK_SLEW_MIN_MS", "20"))
-CLOCK_SLEW_MAX_MS = float(os.getenv("CLOCK_SLEW_MAX_MS", "5000"))
-
-
-def slew_clock(offset_ms: float, rtt_ms: float | None, *, enabled: bool | None = None, _libc=None) -> dict:
-    """Software NTP: gradually slew the kernel clock by -offset via adjtime(2).
-
-    Fly VMs run no NTP daemon (HM 20:33: +992 ms). adjtime never steps the
-    clock (no backwards jumps, monotonic users unaffected); the kernel slews
-    ~0.5 ms/s, so 1 s converges in ~33 min. Each probe replaces the pending
-    adjustment with a fresh measurement. Needs CAP_SYS_TIME (root in the VM);
-    a refusal is reported, never raised.
-    """
-    if enabled is None:
-        enabled = os.getenv("CLOCK_SLEW_ENABLED", "1").strip() != "0"
-    out = {"enabled": bool(enabled), "applied_ms": None, "error": None}
-    try:
-        off = float(offset_ms)
-    except (TypeError, ValueError):
-        out["error"] = "BAD_OFFSET"
-        return out
-    if not enabled or abs(off) < CLOCK_SLEW_MIN_MS:
-        return out
-    if rtt_ms is None or float(rtt_ms) > 500 or abs(off) > CLOCK_SLEW_MAX_MS:
-        out["error"] = "SAMPLE_NOT_TRUSTED_FOR_SLEW"
-        return out
-    try:
-        import ctypes
-        import ctypes.util
-
-        class _Timeval(ctypes.Structure):
-            _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_long)]
-
-        libc = _libc or ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
-        delta_us = int(round(-off * 1000.0))
-        sec, usec = divmod(delta_us, 1_000_000)
-        tv = _Timeval(sec, usec)
-        if int(libc.adjtime(ctypes.byref(tv), None)) != 0:
-            out["error"] = f"ADJTIME_ERRNO_{ctypes.get_errno()}"
-            return out
-        out["applied_ms"] = round(-off, 1)
-    except Exception as exc:  # noqa: BLE001 - telemetry must never crash the bot
-        out["error"] = f"{type(exc).__name__}"
-    return out
-
-
 def _clock_probe_loop() -> None:
     while True:
         result = _probe_clock_offset_once()
-        if result is not None:
-            result["slew"] = slew_clock(result.get("offset_ms"), result.get("rtt_ms"))
         with _clock_probe_lock:
             if result is not None:
                 _clock_probe_state["last"] = result
@@ -233,7 +185,9 @@ def _clock_probe_loop() -> None:
 
 def external_clock_offset() -> Optional[dict]:
     """Latest external offset sample; starts the background probe on first use."""
-    if os.getenv("CLOCK_OFFSET_PROBE_ENABLED", "1").strip() == "0":
+    # LIVE-FIX-1501: retired by default (HM 12 Oct). The cdn-cgi/trace ts read
+    # +267..+302 ms while chrony said 13 us; it's no longer authoritative.
+    if os.getenv("CLOCK_OFFSET_PROBE_ENABLED", "0").strip() == "0":
         return None
     with _clock_probe_lock:
         if not _clock_probe_state["started"]:
@@ -253,34 +207,70 @@ def external_clock_offset() -> Optional[dict]:
 CLOCK_SYNC_MAX_OFFSET_MS = float(os.getenv("CLOCK_SYNC_MAX_OFFSET_MS", "250"))
 
 
-def clock_sync_verdict() -> dict:
+def parse_chrony_tracking_csv(line: str) -> Optional[dict]:
+    """``chronyc -n -c tracking`` CSV -> dict (seconds -> ms). None if unparsable."""
+    parts = [p.strip() for p in str(line or "").strip().split(",")]
+    if len(parts) < 14:
+        return None
+    try:
+        sys_ms = float(parts[4]) * 1000.0
+        root_delay_ms = float(parts[10]) * 1000.0
+        root_disp_ms = float(parts[11]) * 1000.0
+        return {"ref_id": parts[0], "ref_name": parts[1], "stratum": int(parts[2]),
+                "system_time_offset_ms": _finite(sys_ms, 3),
+                "last_offset_ms": _finite(float(parts[5]) * 1000.0, 3),
+                "rms_offset_ms": _finite(float(parts[6]) * 1000.0, 3),
+                "frequency_ppm": _finite(float(parts[7]), 3),
+                "root_delay_ms": _finite(root_delay_ms, 3),
+                "root_dispersion_ms": _finite(root_disp_ms, 3),
+                # chrony's max error vs true time: |offset| + root_delay/2 + root_dispersion
+                "max_error_ms": _finite(abs(sys_ms) + root_delay_ms / 2.0 + root_disp_ms, 3),
+                "update_interval_s": _finite(float(parts[12]), 1),
+                "leap_status": parts[13]}
+    except (TypeError, ValueError):
+        return None
+
+
+def chrony_tracking(timeout: float = 2.0) -> Optional[dict]:
+    """Read-only: chrony's own view of the VM clock (Fly VMs run chronyd)."""
+    import subprocess
+    try:
+        out = subprocess.run(["chronyc", "-n", "-c", "tracking"], capture_output=True, text=True,
+                             timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    parsed = parse_chrony_tracking_csv(out.stdout.splitlines()[0] if out.stdout else "")
+    if parsed:
+        parsed["measured_at"] = time.time()
+    return parsed
+
+
+def clock_sync_verdict(_chrony=None) -> dict:
     """Authoritative clock-sync state for monitors and latency maths.
 
-    Fly VMs run no NTP daemon, so the kernel's adjtimex state is permanently
-    TIME_ERROR (16 s default bound) even though kvm-clock keeps wall time
-    accurate; alerting on it was a permanent false RED. The verdict is based on
-    the measured external offset; the kernel state is reported as
-    informational (``kernel_ntp_authoritative: False``), not hidden.
+    LIVE-FIX-1501: source is chronyd (running on the Fly VM, synced to stratum-1
+    NTP). The adjtime slew is removed (it fought chrony) and the Cloudflare probe
+    is retired. ``offset_ms`` = chrony max error bound vs true time.
     """
-    ext = external_clock_offset()
-    kernel = kernel_ntp_state()
-    out = {"schema": "clock_sync_v1", "source": "external_offset",
-           "max_offset_ms": CLOCK_SYNC_MAX_OFFSET_MS,
-           "kernel_ntp_authoritative": False,
-           "kernel_ntp_state": (kernel or {}).get("state"),
-           "offset_ms": None, "rtt_ms": None, "age_sec": None}
-    if not ext:
-        out.update(synchronized=None, status="UNKNOWN", reason="NO_EXTERNAL_SAMPLE_YET")
+    ch = (_chrony or chrony_tracking)()
+    out = {"schema": "clock_sync_v2", "source": "chrony", "max_offset_ms": CLOCK_SYNC_MAX_OFFSET_MS,
+           "offset_ms": None, "rtt_ms": None, "age_sec": 0.0, "chrony": ch, "slew": None}
+    if not ch:
+        kernel = kernel_ntp_state() or {}
+        out.update(source="kernel_adjtimex", synchronized=None, status="UNKNOWN", reason="CHRONY_UNAVAILABLE",
+                   kernel_ntp_state=kernel.get("state"))
         return out
-    out.update(offset_ms=ext.get("offset_ms"), rtt_ms=ext.get("rtt_ms"), age_sec=ext.get("age_sec"),
-               slew=ext.get("slew"))
-    if not ext.get("trusted"):
-        out.update(synchronized=None, status="UNKNOWN", reason="EXTERNAL_SAMPLE_UNTRUSTED")
-    elif abs(float(ext.get("offset_ms") or 0.0)) <= CLOCK_SYNC_MAX_OFFSET_MS:
+    out["offset_ms"] = ch.get("max_error_ms")
+    if ch.get("leap_status") not in ("Normal", "Insert second", "Delete second"):
+        out.update(synchronized=False, status="DRIFT", reason=f"CHRONY_{ch.get('leap_status')}")
+    elif abs(float(out["offset_ms"] or 0.0)) <= CLOCK_SYNC_MAX_OFFSET_MS:
         out.update(synchronized=True, status="OK", reason="")
     else:
-        out.update(synchronized=False, status="DRIFT", reason="EXTERNAL_OFFSET_ABOVE_LIMIT")
+        out.update(synchronized=False, status="DRIFT", reason="CHRONY_ERROR_ABOVE_LIMIT")
     return out
+
 
 
 class CrashDumpWatcher:

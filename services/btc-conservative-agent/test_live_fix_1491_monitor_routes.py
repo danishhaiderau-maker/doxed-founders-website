@@ -59,18 +59,15 @@ def test_clock_route_and_check():
     assert mc.clock_skew({"offset_ms": 20, "synchronized": True}, live_on=True)["status"] == "GREEN"
 
 
-def test_slew_uses_adjtime_and_never_raises():
-    calls = []
-
-    class Libc:
-        def adjtime(self, tv, old):
-            calls.append(tv)
-            return 0
-    out = rt.slew_clock(992.0, 40.0, enabled=True, _libc=Libc())
-    assert out["applied_ms"] == -992.0 and calls
-    assert rt.slew_clock(5.0, 40.0, enabled=True, _libc=Libc())["applied_ms"] is None
-    assert rt.slew_clock(992.0, 900.0, enabled=True, _libc=Libc())["error"] == "SAMPLE_NOT_TRUSTED_FOR_SLEW"
-
+def test_live_fix_1501_slew_removed_and_chrony_verdict():
+    import runtime_telemetry as rt
+    assert not hasattr(rt, "slew_clock")
+    line = "D8EF2308,216.239.35.8,2,1791808832.0,-0.000013090,-0.000021444,0.000080069,28.284,-0.007,0.375,0.000961022,0.000361957,64.8,Normal"
+    ch = rt.parse_chrony_tracking_csv(line)
+    assert ch["stratum"] == 2 and abs(ch["system_time_offset_ms"] + 0.013) < 1e-3
+    v = rt.clock_sync_verdict(_chrony=lambda: ch)
+    assert v["source"] == "chrony" and v["status"] == "OK" and v["offset_ms"] < 1.0
+    assert rt.clock_sync_verdict(_chrony=lambda: None)["status"] == "UNKNOWN"
 
 def _summary(website, last):
     return lcm.summary(output={"enabled": True}, force_paper_mode=False, relay_stack_mode="",
