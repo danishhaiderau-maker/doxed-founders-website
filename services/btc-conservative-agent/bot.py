@@ -59173,6 +59173,81 @@ def _live_copy_delivery_times() -> dict:
     return out
 
 
+# LIVE-FIX-1816: the website fly-view only carries each account's LAST arm
+# transition, so Fly keeps its own small persisted log of every transition it
+# observed (plus observed armed/unarmed flips). /api/monitor/live/* uses it to
+# tell intents emitted while the account was paused (expected skips) from
+# real missed copies. Read-only for the monitor; never gates trading.
+LIVE_COPY_ACCOUNT_TRANSITIONS_FILE = "live_copy_account_transitions.json"
+LIVE_COPY_ACCOUNT_TRANSITIONS_MAX = 400
+_live_copy_account_transitions: list = []
+_live_copy_account_transitions_state = {"loaded": False}
+_live_copy_account_transitions_lock = threading.Lock()
+
+
+def _live_copy_account_transitions_rows() -> list:
+    with _live_copy_account_transitions_lock:
+        if not _live_copy_account_transitions_state["loaded"]:
+            _live_copy_account_transitions_state["loaded"] = True
+            try:
+                with open(_live_copy.data_path(LIVE_COPY_ACCOUNT_TRANSITIONS_FILE), "r", encoding="utf-8") as fh:
+                    rows = json.load(fh)
+                if isinstance(rows, list):
+                    _live_copy_account_transitions[:] = [r for r in rows if isinstance(r, dict)][
+                        -LIVE_COPY_ACCOUNT_TRANSITIONS_MAX:]
+            except (OSError, ValueError):
+                pass
+        return list(_live_copy_account_transitions)
+
+
+def _record_live_copy_account_transitions(accounts, now: float) -> None:
+    try:
+        _live_copy_account_transitions_rows()  # load once
+        with _live_copy_account_transitions_lock:
+            rows = _live_copy_account_transitions
+            seen = {(r.get("account"), r.get("action"), r.get("at")) for r in rows}
+            last_obs = {}
+            for r in rows:
+                if str(r.get("action") or "").startswith("OBSERVED_"):
+                    last_obs[r.get("account")] = r.get("action")
+            added = False
+            for a in accounts or []:
+                if not isinstance(a, dict) or not a.get("account"):
+                    continue
+                acct = str(a.get("account"))
+                tr = a.get("last_transition") if isinstance(a.get("last_transition"), dict) else {}
+                cands = []
+                if tr.get("action") and tr.get("at"):
+                    cands.append({"account": acct, "action": str(tr.get("action")).upper(), "at": str(tr.get("at")),
+                                  "actor": tr.get("actor"), "reason": tr.get("reason"), "source": "last_transition"})
+                if a.get("armed") and a.get("armed_at"):
+                    cands.append({"account": acct, "action": "ARMED", "at": str(a.get("armed_at")),
+                                  "source": "armed_at"})
+                armed_now = bool(a.get("armed")) and str(a.get("status") or "").upper() == "ACTIVE"
+                obs = "OBSERVED_ARMED" if armed_now else "OBSERVED_UNARMED"
+                if last_obs.get(acct) != obs:
+                    cands.append({"account": acct, "action": obs, "at": None, "at_ts": round(now, 3),
+                                  "status": a.get("status"), "source": "fly_observed"})
+                    last_obs[acct] = obs
+                for c in cands:
+                    key = (c["account"], c["action"], c.get("at"))
+                    if c.get("at") is not None and key in seen:
+                        continue
+                    seen.add(key)
+                    c["recorded_at_ts"] = round(now, 3)
+                    rows.append(c)
+                    added = True
+            if added:
+                del rows[:-LIVE_COPY_ACCOUNT_TRANSITIONS_MAX]
+                path = _live_copy.data_path(LIVE_COPY_ACCOUNT_TRANSITIONS_FILE)
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(rows, fh)
+                os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001 - monitor-only bookkeeping
+        logger.debug(f"[LIVE COPY] account transition log failed: {exc}")
+
+
 def _live_copy_website_state(max_age: float = 30.0) -> dict:
     """Website/Railway copier arm state, fetched with a signed GET (cached 30 s).
 
@@ -59209,6 +59284,7 @@ def _live_copy_website_state(max_age: float = 30.0) -> dict:
                         "ingest_rejects_1h": data.get("ingest_rejects_1h")
                         if isinstance(data.get("ingest_rejects_1h"), dict) else None,
                     })
+                    _record_live_copy_account_transitions(value["accounts"], now)
             else:
                 value["error"] = f"HTTP {resp.status_code}"
         else:
@@ -59526,6 +59602,7 @@ def _live_copy_monitor_context() -> dict:
             "guard": _relay_delivery_guard.status() if hasattr(_relay_delivery_guard, "status") else None,
         },
         "website": _live_copy_website_state(),
+        "account_transitions": _live_copy_account_transitions_rows(),
         "deliveries": _live_copy_delivery_times(),
         "process_started_ts": globals().get("process_boot_time"),
         "bot_instance_id": BOT_INSTANCE_ID,

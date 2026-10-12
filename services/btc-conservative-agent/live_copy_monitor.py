@@ -37,7 +37,10 @@ STAGES = (
 HOPS = tuple(zip(STAGES[:-1], STAGES[1:]))
 
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
-_RANK = {GREEN: 0, AMBER: 1, RED: 2}
+INFO = "INFO"
+_RANK = {INFO: 0, GREEN: 0, AMBER: 1, RED: 2}
+# LIVE-FIX-1816: classes set by live_copy_lifecycle.MissedCopyClassifier.
+HISTORICAL_MISSED_COPY, PAUSED_WINDOW = "historical_missed_copy", "paused_window"
 
 
 def _f(v) -> float | None:
@@ -235,8 +238,22 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
     # parity_verdict; the top-level verdict is open money risk / capability.
     parity_verdict = GREEN
     parity_causes: list[str] = []
+    # LIVE-FIX-1816: missed copies with no money left at risk (paper closed +
+    # exchange flat/accounted) feed missed_copy_verdict; paused-window skips
+    # are expected (INFO). Both stay listed in causes. A RED gap always counts.
+    missed_copy_verdict = GREEN
+    missed_copy_causes: list[str] = []
+    expected_skip_causes: list[str] = []
     for g in gaps:
         causes.append(g["code"])
+        cls = g.get("alert_class")
+        if cls in (HISTORICAL_MISSED_COPY, PAUSED_WINDOW) and (g.get("severity") or AMBER) != RED:
+            if cls == HISTORICAL_MISSED_COPY:
+                missed_copy_causes.append(g["code"])
+                missed_copy_verdict = worst(missed_copy_verdict, g.get("severity") or AMBER)
+            else:
+                expected_skip_causes.append(g["code"])
+            continue
         if (g.get("code") in PARITY_GAP_CODES and g.get("closed")
                 and (g.get("severity") or AMBER) != RED):
             parity_causes.append(g["code"])
@@ -272,6 +289,8 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
         "causes": sorted(set(causes)),
         "money_risk_verdict": verdict, "parity_verdict": parity_verdict,
         "parity_causes": sorted(set(parity_causes)),
+        "missed_copy_verdict": missed_copy_verdict, "missed_copy_causes": sorted(set(missed_copy_causes)),
+        "expected_skip_causes": sorted(set(expected_skip_causes)),
         "output_on": output_on, "force_paper_mode": bool(force_paper_mode),
         "relay_stack_mode": relay_stack_mode, "tiles_live_on": armed_tiles,
         "tiles_relay_eligible": eligible, "gap_count": len(gaps),
