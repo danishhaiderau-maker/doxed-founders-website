@@ -12260,6 +12260,10 @@ def _lane_closed_trade_stats(lane_trades):
         "forced_exits_excluded": int(len(all_pnl) - n),
         "forced_exits_by_origin": _forced_exit_origin_counts(lane_trades.loc[forced]),
         "mean_net_pnl_usd": round(float(pnl.mean()), 6) if n else None,
+        # ANALYZER-REVIEW #5: bp alongside USD (1 cent = 4 bp on $25 notional).
+        "mean_net_bp": (round(float(pd.to_numeric(lane_trades.loc[~forced, "net_bp"], errors="coerce").mean()), 4)
+                        if n and "net_bp" in lane_trades.columns
+                        and pd.to_numeric(lane_trades.loc[~forced, "net_bp"], errors="coerce").notna().any() else None),
         "stdev_net_pnl_usd": round(float(pnl.std(ddof=1)), 6) if n >= 2 else None,
         "mae_mfe_rows": int(len(extremes)),
         "median_mae_margin_pct": round(float(extremes["mae"].median()), 3) if len(extremes) else None,
