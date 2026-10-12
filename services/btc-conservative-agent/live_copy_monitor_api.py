@@ -58,6 +58,15 @@ def _analysis(ctx: dict, now: float) -> dict:
 
 def _summary(ctx: dict, analysis: dict, now: float) -> dict:
     reports = ctx.get("reports") or []
+    # LIVE-FIX-1816: build the lifecycle first so the gap detector's missed
+    # copies (INTENT_NO_ACCOUNT_ORDER / ACCOUNT_DID_NOT_COPY) get the same
+    # paused-window / historical_missed_copy classification as lifecycle alerts.
+    lc, lc_exc = None, None
+    try:
+        lc, classifier = lcl.build_with_classifier(ctx, now=now)
+        analysis = dict(analysis, gaps=[classifier.apply(dict(g)) for g in analysis.get("gaps") or []])
+    except Exception as exc:  # noqa: BLE001 - handled below (fail closed)
+        lc_exc = exc
     hour = now - 3600
     recent = [r for r in reports if float(r.get("fly_received_at_ts") or 0) >= hour]
     rejects = sum(1 for r in recent if r.get("type") in ("ORDER_REJECTED", "INTENT_REJECTED"))
@@ -86,7 +95,8 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
         out["verdict"] = lcm.worst(out["verdict"], lcm.RED)
     # Lifecycle alerts (arming truth, executor decisions, exits/drift, exchange mirror).
     try:
-        lc = lcl.build(ctx, now=now)
+        if lc is None:
+            raise lc_exc or RuntimeError("lifecycle unavailable")
         out["arming"] = {k: lc["arming"].get(k) for k in ("effective_live", "blockers", "mismatches", "verdict")}
         out["arming"]["accounts"] = (lc["arming"].get("sources") or {}).get("website_accounts")
         out["lifecycle_alerts"] = lc["alerts"][:50]
@@ -97,6 +107,17 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
         out["parity_verdict"] = lcm.worst(out.get("parity_verdict") or lcm.GREEN,
                                           lc.get("parity_verdict") or lcm.GREEN)
         out["parity_causes"] = sorted(set(out.get("parity_causes") or []) | set(lc.get("parity_codes") or []))
+        # LIVE-FIX-1816: historical missed copies (no money at risk) -> own bucket.
+        out["missed_copy_verdict"] = lcm.worst(out.get("missed_copy_verdict") or lcm.GREEN,
+                                               lc.get("missed_copy_verdict") or lcm.GREEN)
+        out["missed_copy_causes"] = sorted(set(out.get("missed_copy_causes") or [])
+                                           | set(lc.get("missed_copy_codes") or []))
+        out["missed_copy_count"] = lc.get("missed_copy_count") or 0
+        out["missed_copies"] = lc.get("missed_copies") or []
+        out["expected_skip_causes"] = sorted(set(out.get("expected_skip_causes") or [])
+                                             | set(lc.get("expected_skip_codes") or []))
+        out["expected_skip_count"] = lc.get("expected_skip_count") or 0
+        out["expected_skips"] = lc.get("expected_skips") or []
         out["exchange"] = {a: {k: m.get(k) for k in ("ok", "flat", "read_age_s", "error")}
                            | {"open_orders": len(m.get("open_orders") or []), "stops": len(m.get("stops") or []),
                               "orphans": m.get("orphans") or [], "balance": m.get("balance")}
@@ -146,7 +167,10 @@ def live_summary():  # R19
         # LIVE-FIX-1715: top-level verdict == money risk; parity is separate.
         payload["money_risk_verdict"] = payload.get("verdict")
         payload.setdefault("parity_verdict", lcm.GREEN)
-        payload["verdict_basis"] = "money_risk (closed-trade parity -> parity_verdict)"
+        payload.setdefault("missed_copy_verdict", lcm.GREEN)
+        payload["verdict_basis"] = ("money_risk (closed-trade parity -> parity_verdict; missed copies with "
+                                    "paper closed + exchange flat -> missed_copy_verdict; paused-window "
+                                    "skips -> expected_skips)")
     return _ok(payload)
 
 

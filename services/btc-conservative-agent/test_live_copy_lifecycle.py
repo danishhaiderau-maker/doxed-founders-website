@@ -187,3 +187,130 @@ def test_api_summary_verdict_follows_money_risk():
     assert any(a["code"] == "EXIT_REASON_MISMATCH" for a in out["lifecycle_alerts"])
     assert out["verdict"] != "RED" and out["parity_verdict"] == "AMBER"
     assert "EXIT_REASON_MISMATCH" in out["parity_causes"]
+
+
+# LIVE-FIX-1816: missed copies that carry no money risk must not paint RED.
+def _iso(ts):
+    import datetime as dt
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_MISSED = {"NO_ORDER_FOR_INTENT", "INTENT_NO_EXECUTOR_DECISION"}
+
+
+def _missed_intent(cid="dsl-9", paper_closed=True, events=("ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED")):
+    appr = [{"correlation_id": cid, "trade_id": cid, "event": ev, "entry_allowed": ev == "ORDER_PLACED",
+             "signal_at_ts": NOW - 100, "created_at_ts": NOW - 99 + i, "research_lane": "DISLOC"}
+            for i, ev in enumerate(events)]
+    twin = {"side": "LONG", "entry_price": 100.0, "qty": 0.0003,
+            "exit_price": 100.1 if paper_closed else None, "exit_ts": NOW - 39 if paper_closed else None,
+            "exit_reason": "TIME_60S" if paper_closed else None}
+    return {"approvals": appr, "paper_twins": {cid: twin}, "deliveries": {cid: NOW - 98.9},
+            "protection": {"executor_capability": {"received_at_ts": NOW - 5}}}  # executor heartbeat fresh
+
+
+def _web_rearmed(mirror, armed_at=NOW - 50):
+    w = _web(mirror=mirror)
+    w["accounts"][0]["armed_at"] = _iso(armed_at)
+    w["accounts"][0]["last_transition"] = {"action": "STARTED", "actor": "USER", "reason": "USER_REQUEST_START",
+                                           "at": _iso(armed_at)}
+    w["executor_heartbeat_age_sec"] = 1
+    return w
+
+
+def test_intent_emitted_while_paused_is_expected_skip_not_money_risk():
+    trans = [{"account": "acct-a", "action": "SAFETY_PAUSED", "at": _iso(NOW - 200)}]
+    for closed in (True, False):  # paused at emit: an expected skip whether the paper is open or closed
+        out = lcl.build(_ctx(website=_web_rearmed(dict(_FLAT)), account_transitions=trans,
+                             **_missed_intent(paper_closed=closed, events=("ORDER_PLACED",) if not closed else
+                                              ("ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"))), now=NOW)
+        missed = [a for a in out["alerts"] if a["code"] in _MISSED]
+        assert {a["code"] for a in missed} == _MISSED  # still visible
+        assert all(a["alert_class"] == "paused_window" and a["severity"] == "INFO" and a["armed_at_emit"] is False
+                   for a in missed)
+        assert out["money_risk_verdict"] == "GREEN" and out["verdict"] == "GREEN"
+        assert out["expected_skip_count"] == 1 and out["expected_skips"][0]["correlation_id"] == "dsl-9"
+        assert out["missed_copy_count"] == 0
+
+
+def test_missed_intent_paper_closed_exchange_flat_is_historical_missed_copy():
+    out = lcl.build(_ctx(website=_web(mirror=dict(_FLAT)), **_missed_intent()), now=NOW)
+    missed = [a for a in out["alerts"] if a["code"] in _MISSED]
+    assert {a["code"] for a in missed} == _MISSED
+    assert all(a["alert_class"] == "historical_missed_copy" and a["severity"] == "AMBER"
+               and a["armed_at_emit"] is True and a["paper_closed"] and a["exchange_flat"] for a in missed)
+    assert out["money_risk_verdict"] == "GREEN" and out["verdict"] == "GREEN"
+    assert out["missed_copy_verdict"] == "AMBER" and out["missed_copy_count"] == 1
+    assert set(out["missed_copies"][0]["codes"]) == _MISSED
+    assert set(out["missed_copy_codes"]) == _MISSED and not (set(out["money_risk_codes"]) & _MISSED)
+    # an exchange position owned by another OPEN tracked live copy is accounted for
+    other = _closed_trade()
+    other["reports"] = [r for r in other["reports"] if r["type"] != "POSITION_CLOSED"]
+    other["paper_twins"]["dsl-1"].update(exit_price=None, exit_ts=None, exit_reason=None)
+    m = dict(_FLAT, flat=False, positions=[{"amount": 0.0003, "stops": 1}])
+    ctx = _missed_intent()
+    ctx["approvals"] += other["approvals"]
+    ctx["paper_twins"].update(other["paper_twins"])
+    out = lcl.build(_ctx(website=_web(mirror=m), reports=other["reports"], **ctx), now=NOW)
+    assert all(a["alert_class"] == "historical_missed_copy" for a in out["alerts"] if a["code"] in _MISSED
+               and a["correlation_id"] == "dsl-9")
+    assert out["money_risk_verdict"] == "GREEN"
+
+
+def test_missed_intent_while_armed_with_open_paper_or_unexplained_exposure_stays_red():
+    # armed + paper still open
+    out = lcl.build(_ctx(website=_web(mirror=dict(_FLAT)),
+                         **_missed_intent(paper_closed=False, events=("ORDER_PLACED", "POSITION_OPENED"))), now=NOW)
+    missed = [a for a in out["alerts"] if a["code"] in _MISSED]
+    assert missed and all(a["severity"] == "RED" and a["alert_class"] == "money_risk" for a in missed)
+    assert out["money_risk_verdict"] == "RED" and out["verdict"] == "RED" and out["missed_copy_count"] == 0
+    # armed + paper closed but the exchange holds exposure no open copy explains
+    m = dict(_FLAT, flat=False, positions=[{"amount": 0.0003, "stops": 1}])
+    out = lcl.build(_ctx(website=_web(mirror=m), **_missed_intent()), now=NOW)
+    assert all(a["severity"] == "RED" and a["exchange_accounted"] is False
+               for a in out["alerts"] if a["code"] in _MISSED)
+    assert out["verdict"] == "RED"
+    # armed + paper closed but the exchange read is stale/unknown
+    out = lcl.build(_ctx(website=_web(mirror=dict(_FLAT, read_age_s=400)), **_missed_intent()), now=NOW)
+    assert out["verdict"] == "RED"
+    # no paper twin and no terminal event: unknown paper state stays RED
+    ctx = _missed_intent(events=("ORDER_PLACED",))
+    ctx["paper_twins"] = {}
+    out = lcl.build(_ctx(website=_web(mirror=dict(_FLAT)), **ctx), now=NOW)
+    assert out["verdict"] == "RED"
+
+
+def test_api_summary_moves_historical_missed_copies_to_own_bucket():
+    import live_copy_monitor_api as api
+    ctx = _ctx(website=dict(_web(mirror=dict(_FLAT)), executor_heartbeat_age_sec=1), **_missed_intent())
+    from flask import Flask
+    with Flask(__name__).test_request_context("/api/monitor/live/summary"):
+        out = api._summary(ctx, api._analysis(ctx, NOW), NOW)
+    assert {"NO_ORDER_FOR_INTENT", "INTENT_NO_ACCOUNT_ORDER"} <= set(out["causes"])  # still listed
+    assert out["verdict"] != "RED"
+    assert out["missed_copy_verdict"] == "AMBER" and out["missed_copy_count"] == 1
+    assert {"NO_ORDER_FOR_INTENT", "INTENT_NO_ACCOUNT_ORDER"} <= set(out["missed_copy_causes"])
+    assert out["missed_copies"][0]["correlation_id"] == "dsl-9"
+    for k in ("parity_verdict", "parity_causes", "expected_skips", "expected_skip_count", "lifecycle_alerts"):
+        assert k in out
+    # same intent with the paper still open: real money risk
+    ctx = _ctx(website=dict(_web(mirror=dict(_FLAT)), executor_heartbeat_age_sec=1),
+               **_missed_intent(paper_closed=False, events=("ORDER_PLACED", "POSITION_OPENED")))
+    with Flask(__name__).test_request_context("/api/monitor/live/summary"):
+        out = api._summary(ctx, api._analysis(ctx, NOW), NOW)
+    assert out["verdict"] == "RED" and out["missed_copy_count"] == 0
+
+
+def test_monitor_summary_missed_copy_classes_do_not_move_verdict_unless_red():
+    import live_copy_monitor as lcm
+    kw = dict(output={"enabled": True}, force_paper_mode=False, relay_stack_mode="",
+              switch_rows=[{"lane": "DISLOC", "bitfinex_live_orders": True}], lags={},
+              executor_last_report_ts=NOW, rejects_1h=0, unsigned_rejects_1h=0, now=NOW,
+              website={"reachable": True, "armed_accounts": ["acct-a"], "executor_heartbeat_age_sec": 1})
+    g = {"code": "INTENT_NO_ACCOUNT_ORDER", "severity": "AMBER", "alert_class": "historical_missed_copy"}
+    s = lcm.summary(gaps=[g, {"code": "ACCOUNT_DID_NOT_COPY", "severity": "INFO", "alert_class": "paused_window"}],
+                    **kw)
+    assert s["verdict"] == "GREEN" and s["missed_copy_verdict"] == "AMBER"
+    assert s["missed_copy_causes"] == ["INTENT_NO_ACCOUNT_ORDER"] and s["expected_skip_causes"] == ["ACCOUNT_DID_NOT_COPY"]
+    s = lcm.summary(gaps=[dict(g, severity="RED")], **kw)
+    assert s["verdict"] == "RED"

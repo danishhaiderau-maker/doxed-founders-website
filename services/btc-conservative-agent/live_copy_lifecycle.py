@@ -21,7 +21,8 @@ from typing import Any, Iterable, Mapping
 
 SCHEMA = "fly_live_lifecycle_v1"
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
-_RANK = {GREEN: 0, AMBER: 1, RED: 2}
+INFO = "INFO"  # expected / informational: never moves any verdict
+_RANK = {INFO: 0, GREEN: 0, AMBER: 1, RED: 2}
 
 GAP_TTL_SEC = 6 * 3600.0
 INTENT_UNDECIDED_SEC = 30.0
@@ -40,6 +41,22 @@ EXIT_DRIFT_MONEY_RISK_BP = 10.0
 # they are classed "historical_parity" (parity_verdict), not money risk.
 HISTORICAL_PARITY_CODES = frozenset({"EXIT_DRIFT_BP", "EXIT_REASON_MISMATCH", "PRICE_DRIFT_VS_PAPER"})
 MONEY_RISK, HISTORICAL_PARITY = "money_risk", "historical_parity"
+# LIVE-FIX-1816: a missed copy (no order / no executor decision / undelivered)
+# is money risk only while it can still matter: the account was armed when
+# the intent was emitted AND (the paper twin is still open/working OR the
+# exchange holds exposure no tracked live copy explains). Otherwise:
+# * emitted while the account was paused/disarmed -> "paused_window" (INFO,
+#   expected skip, listed under expected_skips; moves no verdict);
+# * paper twin closed/terminal and exchange flat or fully accounted for ->
+#   "historical_missed_copy" (AMBER, missed_copy_verdict / missed_copies).
+HISTORICAL_MISSED_COPY, PAUSED_WINDOW = "historical_missed_copy", "paused_window"
+ALERT_CLASSES = frozenset({MONEY_RISK, HISTORICAL_PARITY, HISTORICAL_MISSED_COPY, PAUSED_WINDOW})
+MISSED_COPY_CODES = frozenset({"NO_ORDER_FOR_INTENT", "INTENT_NO_EXECUTOR_DECISION", "INTENT_UNDELIVERED",
+                               "INTENT_NO_ACCOUNT_ORDER", "ACCOUNT_DID_NOT_COPY"})
+ARMED_ACTIONS = frozenset({"STARTED", "ARMED", "RESUMED", "OBSERVED_ARMED"})
+UNARMED_ACTIONS = frozenset({"STOPPED", "SAFETY_PAUSED", "PAUSED", "DISARMED", "EXPIRED", "HIRE_EXPIRED",
+                             "OBSERVED_UNARMED"})
+PAPER_TERMINAL_EVENTS = frozenset({"POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED"})
 ENTRY_DRIFT_RED_BP = 10.0
 CLOCK_OFFSET_AMBER_MS = 1000.0
 
@@ -370,12 +387,137 @@ def clock_view(website: Mapping[str, Any], now: float) -> dict:
             "note": "offset includes one-way request latency (<= a few hundred ms)"}
 
 
+def _ts(v) -> float | None:
+    return _f(v) if not isinstance(v, str) else (_iso_ts(v) or _f(v))
+
+
+def arming_timeline(website: Mapping[str, Any] | None,
+                    transitions: Iterable[Mapping[str, Any]] | None) -> dict[str, list[tuple[float, bool, str]]]:
+    """Per account, time-sorted (ts, armed, action) arm/pause events.
+
+    Sources: Fly's persisted log of transitions it observed on the website
+    (``account_transitions``) plus the current website row (last_transition
+    and armed_at). Unknown actions are ignored, so an unknown state is never
+    read as "paused"."""
+    ev: dict[str, set] = {}
+
+    def put(acct, at, action):
+        act = str(action or "").upper()
+        t = _ts(at)
+        if not acct or t is None or act not in ARMED_ACTIONS | UNARMED_ACTIONS:
+            return
+        ev.setdefault(str(acct), set()).add((t, act in ARMED_ACTIONS, act))
+
+    for r in transitions or []:
+        if isinstance(r, Mapping):
+            put(r.get("account"), r.get("at_ts") or r.get("at"), r.get("action"))
+    for a in (website or {}).get("accounts") or []:
+        if not isinstance(a, Mapping):
+            continue
+        tr = a.get("last_transition") if isinstance(a.get("last_transition"), Mapping) else {}
+        put(a.get("account"), tr.get("at"), tr.get("action"))
+        if a.get("armed") and a.get("armed_at"):
+            put(a.get("account"), a.get("armed_at"), "ARMED")
+    return {k: sorted(v) for k, v in ev.items()}
+
+
+def armed_at_time(timeline: Mapping[str, list], account: str, ts: float | None) -> bool | None:
+    """Was ``account`` armed at ``ts``? None = no evidence either way."""
+    if ts is None:
+        return None
+    state = None
+    for t, armed, _act in timeline.get(str(account)) or []:
+        if t > ts:
+            break
+        state = armed
+    return state
+
+
+def paper_terminal(it: Mapping[str, Any]) -> bool:
+    """The intent's paper side is finished: twin closed, or Fly emitted a
+    terminal event (closed / limit expired / cancelled)."""
+    paper = it.get("paper") or {}
+    if paper and (_f(paper.get("exit_ts")) or _iso_ts(paper.get("exit_ts"))):
+        return True
+    return bool(PAPER_TERMINAL_EVENTS & set(it.get("fly_events") or []))
+
+
+def open_copies_by_account(intents: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for it in intents or []:
+        if it.get("expired"):
+            continue
+        for a in it.get("accounts") or []:
+            if a.get("open"):
+                out[a["account"]] = out.get(a["account"], 0) + 1
+    return out
+
+
+def exchange_accounted(m: Mapping[str, Any] | None, open_copies: int) -> bool:
+    """Fresh exchange read with no orphans, and flat or every position matched
+    by an open tracked live copy (so a missed intent owns no exposure)."""
+    if not m or not m.get("ok") or m.get("orphans"):
+        return False
+    age = m.get("read_age_s")
+    if age is None or age > EXCHANGE_READ_MAX_AGE_SEC:
+        return False
+    if m.get("flat") is True:
+        return True
+    pos = m.get("positions")
+    return isinstance(pos, list) and len(pos) <= int(open_copies or 0)
+
+
+class MissedCopyClassifier:
+    """LIVE-FIX-1816: classify a missed-copy alert for (intent, account)."""
+
+    def __init__(self, *, intents: Iterable[Mapping[str, Any]], exchange: Mapping[str, Mapping[str, Any]],
+                 timeline: Mapping[str, list], armed_accounts: Iterable[str]):
+        self.by_cid = {str(i.get("correlation_id")): i for i in intents or []}
+        for i in intents or []:
+            self.by_cid.setdefault(str(i.get("trade_id")), i)
+        self.exchange = exchange or {}
+        self.timeline = timeline or {}
+        self.armed_accounts = sorted(set(armed_accounts or []))
+        self.open_copies = open_copies_by_account(intents)
+
+    def classify(self, code: str, correlation_id: str | None, account: str | None) -> dict:
+        if code not in MISSED_COPY_CODES:
+            return {}
+        it = self.by_cid.get(str(correlation_id or ""))
+        if it is None:
+            return {"alert_class": MONEY_RISK}
+        emitted = it.get("fly_intent_emitted_at_ts")
+        accts = [account] if account else (self.armed_accounts or sorted(self.timeline))
+        states = [armed_at_time(self.timeline, a, emitted) for a in accts]
+        info = {"armed_at_emit": (states[0] if account else (None if not states else
+                                  (False if all(s is False for s in states) else
+                                   (True if any(s for s in states) else None))))}
+        if states and all(s is False for s in states):
+            return {"alert_class": PAUSED_WINDOW, "severity": INFO, **info}
+        closed = paper_terminal(it)
+        ex_accts = accts or sorted(self.exchange)
+        accounted = bool(ex_accts) and all(
+            exchange_accounted(self.exchange.get(a), self.open_copies.get(a, 0)) for a in ex_accts)
+        flat = bool(ex_accts) and all((self.exchange.get(a) or {}).get("flat") is True for a in ex_accts)
+        info.update(paper_closed=closed, exchange_flat=flat, exchange_accounted=accounted)
+        if closed and accounted:
+            return {"alert_class": HISTORICAL_MISSED_COPY, "severity": AMBER, **info}
+        return {"alert_class": MONEY_RISK, **info}
+
+    def apply(self, alert: dict) -> dict:
+        c = self.classify(alert.get("code"), alert.get("correlation_id"), alert.get("account"))
+        if c:
+            alert.update(c)
+        return alert
+
+
 def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[str, Mapping[str, Any]],
-           clock: Mapping[str, Any], now: float) -> list[dict]:
+           clock: Mapping[str, Any], now: float, classifier: MissedCopyClassifier | None = None) -> list[dict]:
     out: list[dict] = []
 
     def add(code, sev, **kw):
-        out.append({"code": code, "severity": sev, **kw})
+        a = {"code": code, "severity": sev, **kw}
+        out.append(classifier.apply(a) if classifier is not None else a)
 
     src = arming.get("sources") or {}
     output_on = bool(src.get("fly_live_copy_output"))
@@ -465,8 +607,11 @@ def alerts(*, arming: Mapping[str, Any], intents: list[dict], exchange: Mapping[
 
 
 def alert_class(a: Mapping[str, Any]) -> str:
-    """LIVE-FIX-1715: money_risk unless the alert is closed-trade parity history."""
-    if a.get("alert_class") in (MONEY_RISK, HISTORICAL_PARITY):
+    """LIVE-FIX-1715: money_risk unless the alert is closed-trade parity history.
+    LIVE-FIX-1816: or a historical missed copy / paused-window expected skip."""
+    if a.get("alert_class") in ALERT_CLASSES:
+        if a["alert_class"] != MONEY_RISK and a.get("severity") == RED:
+            return MONEY_RISK  # a RED alert is never demoted by its tag
         return a["alert_class"]
     if a.get("code") in HISTORICAL_PARITY_CODES and a.get("closed") and a.get("severity") != RED:
         return HISTORICAL_PARITY
@@ -476,20 +621,61 @@ def alert_class(a: Mapping[str, Any]) -> str:
 def split_verdicts(al: Iterable[Mapping[str, Any]]) -> dict:
     """Top-level verdict = money_risk_verdict (open exposure / live capability).
     Closed-trade parity alerts stay listed but only drive parity_verdict."""
-    money, parity = GREEN, GREEN
-    money_codes, parity_codes = set(), set()
+    money, parity, missed = GREEN, GREEN, GREEN
+    money_codes, parity_codes, missed_codes, skip_codes = set(), set(), set(), set()
+    missed_keys, skip_keys = set(), set()
     for a in al or []:
-        if alert_class(a) == HISTORICAL_PARITY:
+        cls = alert_class(a)
+        if cls == HISTORICAL_PARITY:
             parity = worst(parity, a.get("severity") or AMBER)
             parity_codes.add(a["code"])
+        elif cls == HISTORICAL_MISSED_COPY:
+            missed = worst(missed, a.get("severity") or AMBER)
+            missed_codes.add(a["code"])
+            missed_keys.add((a.get("correlation_id"), a.get("account")))
+        elif cls == PAUSED_WINDOW:
+            skip_codes.add(a["code"])
+            skip_keys.add((a.get("correlation_id"), a.get("account")))
         else:
             money = worst(money, a.get("severity") or AMBER)
             money_codes.add(a["code"])
     return {"money_risk_verdict": money, "parity_verdict": parity,
-            "money_risk_codes": sorted(money_codes), "parity_codes": sorted(parity_codes)}
+            "money_risk_codes": sorted(money_codes), "parity_codes": sorted(parity_codes),
+            "missed_copy_verdict": missed, "missed_copy_codes": sorted(missed_codes),
+            "missed_copy_count": len({k[0] for k in missed_keys}),
+            "expected_skip_codes": sorted(skip_codes), "expected_skip_count": len({k[0] for k in skip_keys})}
+
+
+def missed_copy_buckets(al: Iterable[Mapping[str, Any]]) -> dict:
+    """Group historical missed copies / paused-window skips per intent+account."""
+    out: dict[str, dict] = {HISTORICAL_MISSED_COPY: {}, PAUSED_WINDOW: {}}
+    for a in al or []:
+        cls = alert_class(a)
+        if cls not in out:
+            continue
+        key = f"{a.get('correlation_id')}|{a.get('account') or ''}"
+        row = out[cls].setdefault(key, {"correlation_id": a.get("correlation_id"), "account": a.get("account"),
+                                        "codes": [], "age_sec": a.get("age_sec"),
+                                        "executor_reason": a.get("executor_reason"),
+                                        "armed_at_emit": a.get("armed_at_emit"),
+                                        "paper_closed": a.get("paper_closed"),
+                                        "exchange_flat": a.get("exchange_flat"),
+                                        "exchange_accounted": a.get("exchange_accounted")})
+        if a["code"] not in row["codes"]:
+            row["codes"].append(a["code"])
+        if row.get("executor_reason") is None and a.get("executor_reason"):
+            row["executor_reason"] = a.get("executor_reason")
+        if row.get("account") is None and a.get("account"):
+            row["account"] = a.get("account")
+    return {"missed_copies": list(out[HISTORICAL_MISSED_COPY].values())[:50],
+            "expected_skips": list(out[PAUSED_WINDOW].values())[:50]}
 
 
 def build(ctx: Mapping[str, Any], *, now: float) -> dict:
+    return build_with_classifier(ctx, now=now)[0]
+
+
+def build_with_classifier(ctx: Mapping[str, Any], *, now: float) -> tuple[dict, MissedCopyClassifier]:
     web = ctx.get("website") or {}
     arming = effective_arming(output=ctx.get("output") or {}, force_paper_mode=bool(ctx.get("force_paper_mode")),
                               relay_stack_mode=str(ctx.get("relay_stack_mode") or ""),
@@ -499,7 +685,11 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
                             ctx.get("paper_twins") or {}, now=now)
     exchange = exchange_view(web)
     clock = clock_view(web, now)
-    al = alerts(arming=arming, intents=intents, exchange=exchange, clock=clock, now=now)
+    classifier = MissedCopyClassifier(
+        intents=intents, exchange=exchange,
+        timeline=arming_timeline(web, ctx.get("account_transitions") or []),
+        armed_accounts=(arming.get("sources") or {}).get("website_armed_accounts") or [])
+    al = alerts(arming=arming, intents=intents, exchange=exchange, clock=clock, now=now, classifier=classifier)
     # LIVE-FIX-0702: executor silence (no report and no capability heartbeat
     # for 5 min) while output is ON is RED.
     try:
@@ -519,12 +709,12 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
     split = split_verdicts(al)
     live = [i for i in intents if not i.get("expired")]
     return {
-        "schema": SCHEMA, "verdict": split["money_risk_verdict"], **split,
+        "schema": SCHEMA, "verdict": split["money_risk_verdict"], **split, **missed_copy_buckets(al),
         "arming": arming, "alerts": al, "resolved_alerts": resolved_al,
         "alert_codes": sorted({a["code"] for a in al}), "exchange": exchange, "clock": clock,
         "intents": live[:100], "intents_expired": len(intents) - len(live), "gap_ttl_sec": GAP_TTL_SEC,
         "hops": list(ENTRY_HOPS), "computed_at_ts": now,
-    }
+    }, classifier
 
 
 _RELAY_LIVE_TYPES = frozenset({"ORDER_PLACED", "ORDER_FILLED", "STOP_PLACED", "STOP_CONFIRMED"})
