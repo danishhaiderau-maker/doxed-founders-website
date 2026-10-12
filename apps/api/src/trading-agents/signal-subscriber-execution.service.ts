@@ -4474,6 +4474,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * reconciliation stops. Explicit authenticated wakes re-arm this timer, and
    * process startup always performs a recovery pass.
    */
+  /** LIVE-FIX-1499: per-participant entry observability handed from placeEntry to the fill funnel. */
+  private readonly entryObservability = new Map<string, {
+    probeIndex: number | null;
+    probeMarks: Array<{ i: number; start_ms: number; end_ms: number; result: string }>;
+    takeSubmitFillStatus: string | null;
+    entryMarks: Record<string, number> | null;
+    fastPath: { used: boolean; reason: string | null } | null;
+  }>();
   /** LIVE-FIX-1490 (A2): executor-owned TIME_60S exit timers, keyed user:trade. */
   private readonly timeDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly timeDeadlineStats: {
@@ -10981,10 +10989,24 @@ await this.notifications
         if (timing) (timing.marks ??= {}).fillProbe = Date.now();
         // LIVE-FIX-1445: the submit response already says EXECUTED for a
         // marketable entry; protect from it without another exchange read.
-        const submitFill = submitResponseFill(
-          (this.activeTrading as { takeSubmitFill?: (id: number) => unknown }).takeSubmitFill?.(orderId),
-          qty,
-        );
+        const rawSubmitFill = (this.activeTrading as { takeSubmitFill?: (id: number) => unknown }).takeSubmitFill?.(orderId);
+        const submitFill = submitResponseFill(rawSubmitFill, qty);
+        const obsT0 = exchangeAckAtMs;
+        const obs = {
+          probeIndex: null as number | null,
+          probeMarks: [] as Array<{ i: number; start_ms: number; end_ms: number; result: string }>,
+          takeSubmitFillStatus: rawSubmitFill && typeof rawSubmitFill === 'object'
+            ? String((rawSubmitFill as { status?: unknown }).status ?? 'UNKNOWN')
+            : 'NONE',
+          entryMarks: timing
+            ? Object.fromEntries(Object.entries(timing.marks ?? {}).map(([k, v]) => [k, Number(v) - timing.queueEnteredAtMs]))
+            : null,
+          fastPath: { used: Boolean(signedExactLimit), reason: signedExactLimit ? 'SIGNED_EXACT_LIMIT' : 'NOT_SIGNED_EXACT' },
+        };
+        if (this.entryObservability) {
+          this.entryObservability.set(participant.id, obs);
+          if (this.entryObservability.size > 100) this.entryObservability.delete(this.entryObservability.keys().next().value as string);
+        }
         if (submitFill) {
           try {
             const meta = await this.loadExecutionMeta(participant.id);
@@ -11002,12 +11024,20 @@ await this.notifications
         }
         // LIVE-FIX-1486: post-ack fills were found on the 3rd/4th probe (stop armed
         // 2.2-2.4 s after submit). Probe on a tighter, longer ladder.
+        let probeIndex = -1;
         for (const delayMs of promotedAtAck ? [] : POST_ACK_FILL_PROBE_DELAYS_MS) {
+          probeIndex += 1;
           if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          const probeStart = Date.now();
           try {
             const probeMeta = await this.loadExecutionMeta(participant.id);
             const fill = await this.detectEntryFillBeforeCancel(creds, probeMeta);
+            obs.probeMarks.push({
+              i: probeIndex, start_ms: probeStart - obsT0, end_ms: Date.now() - obsT0,
+              result: !fill ? 'NO_FILL_SEEN' : fill.orderResting ? 'RESTING' : fill.source,
+            });
             if (fill && fill.filledQty > 0 && !fill.orderResting) {
+              obs.probeIndex = probeIndex;
               promotedAtAck = await this.recordCancelRaceFill(
                 agentId, instance.userId,
                 { id: participant.cycle.id, status: participant.cycle.status, tradeId: participant.cycle.tradeId ?? tradeId },
@@ -11610,6 +11640,7 @@ await this.notifications
     );
 
     if (!meta.bitfinexOrderId) return false;
+    const stopClaimStartedAtMs = Date.now();
     const promotion = await this.acquireFillPromotionClaim({
       participantId,
       entryOrderId: meta.bitfinexOrderId,
@@ -11617,8 +11648,7 @@ await this.notifications
     });
     if (!promotion) return false;
     const stopClaimedAtMs = Date.now();
-
-    const stopSubmitStartedAtMs = Date.now();
+    let stopPhaseSubmittingAtMs: number | null = null;
     const stopInput = {
       positionDirection: meta.direction,
       qty,
@@ -11666,6 +11696,9 @@ await this.notifications
         'SUBMITTING',
       ))
     ) return false;
+    // LIVE-FIX-1499: stamp AFTER the SUBMITTING write so claimed->submit is real.
+    stopPhaseSubmittingAtMs = Date.now();
+    const stopSubmitStartedAtMs = Date.now();
     const verifiedStop = resumingProtectedStop || recoveredSubmittingStopId != null
       ? await this.authenticateExactProtectiveStop(
           creds,
@@ -11713,11 +11746,15 @@ await this.notifications
         return false;
       }
     }
+    const stopProtectedAtMs = Date.now();
 
     const exchangeFillEvidence = await this.resolveExchangeTradesFillEvidence(
       creds,
       meta.bitfinexOrderId,
     );
+    const fillEnrichedAtMs = Date.now();
+    const entryObs = this.entryObservability?.get(participantId);
+    this.entryObservability?.delete(participantId);
     const exchangeFillIds = Array.from(new Set([
       ...(exchangeFillEvidence?.fillIds ?? []),
       ...(authenticatedFillIds ?? []),
@@ -11817,6 +11854,16 @@ await this.notifications
         ? new Date(meta.entryExchangeAckAtMs).toISOString()
         : undefined,
       stop_claimed_at: new Date(stopClaimedAtMs).toISOString(),
+      stop_claim_started_at: new Date(stopClaimStartedAtMs).toISOString(),
+      stop_phase_submitting_at: stopPhaseSubmittingAtMs != null ? new Date(stopPhaseSubmittingAtMs).toISOString() : undefined,
+      stop_protected_at: new Date(stopProtectedAtMs).toISOString(),
+      fill_enriched_at: new Date(fillEnrichedAtMs).toISOString(),
+      fill_detect_source: cancelContext,
+      fill_probe_index: entryObs?.probeIndex ?? null,
+      fill_probe_marks: entryObs?.probeMarks ?? [],
+      take_submit_fill_status: entryObs?.takeSubmitFillStatus ?? null,
+      entry_marks: entryObs?.entryMarks ?? null,
+      entry_fast_path: entryObs?.fastPath ?? null,
       stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
       stop_exchange_ack_at: stopExchangeAckAtMs != null
         ? new Date(stopExchangeAckAtMs).toISOString()

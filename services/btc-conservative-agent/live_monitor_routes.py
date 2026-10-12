@@ -16,7 +16,8 @@ SCHEMA = "hm_live_routes_v1"
 GREEN, AMBER, RED = "GREEN", "AMBER", "RED"
 LIVE_STAGES = ("fly_signal_at_ts", "fly_intent_emitted_at_ts", "railway_received_at_ts", "order_sent_at_ts",
                "exchange_ack_at_ts", "fill_at_ts", "stop_entry_ack_at_ts", "stop_fill_detected_at_ts",
-               "stop_claimed_at_ts", "stop_submit_started_at_ts", "stop_placed_at_ts", "stop_confirmed_at_ts",
+               "stop_claim_started_at_ts", "stop_claimed_at_ts", "stop_phase_submitting_at_ts",
+               "stop_submit_started_at_ts", "stop_placed_at_ts", "stop_protected_at_ts", "fill_enriched_at_ts", "stop_confirmed_at_ts",
                "exit_preflight_at_ts", "exit_sent_at_ts", "exit_ack_at_ts", "exit_confirmed_at_ts",
                "exit_recorded_at_ts")
 
@@ -88,6 +89,8 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
             v = _f(tl.get(k))
             if v is not None and row["live"].get(k) is None:
                 row["live"][k] = v
+        if r.get("type") == "ORDER_FILLED" and isinstance(r.get("entry_obs"), Mapping):
+            row["entry_obs"] = dict(r["entry_obs"])
         if r.get("type") == "ORDER_FILLED":
             row["live_fill_price"] = _f((r.get("fill") or {}).get("price"))
             row["side"] = row.get("side") or (r.get("order") or {}).get("side")
@@ -123,6 +126,17 @@ def timeline(reports: Iterable[Mapping], approvals: Iterable[Mapping], twins: Ma
                       "entry_ack_to_fill_detected_ms": _ms(L.get("stop_entry_ack_at_ts"), L.get("stop_fill_detected_at_ts")),
                       "fill_detected_to_claimed_ms": _ms(L.get("stop_fill_detected_at_ts"), L.get("stop_claimed_at_ts")),
                       "claimed_to_stop_submit_ms": _ms(L.get("stop_claimed_at_ts"), L.get("stop_submit_started_at_ts")),
+                      # LIVE-FIX-1499 (HM two-second audit): observability only
+                      "claim_ms": _ms(L.get("stop_claim_started_at_ts"), L.get("stop_claimed_at_ts")),
+                      "phase_submitting_write_ms": _ms(L.get("stop_claimed_at_ts"), L.get("stop_phase_submitting_at_ts")),
+                      "stop_ack_to_protected_ms": _ms(L.get("stop_placed_at_ts"), L.get("stop_protected_at_ts")),
+                      "protected_to_fill_enriched_ms": _ms(L.get("stop_protected_at_ts"), L.get("fill_enriched_at_ts")),
+                      "fill_detect_source": (row.get("entry_obs") or {}).get("fill_detect_source"),
+                      "fill_probe_index": (row.get("entry_obs") or {}).get("fill_probe_index"),
+                      "fill_probe_marks": (row.get("entry_obs") or {}).get("fill_probe_marks"),
+                      "take_submit_fill_status": (row.get("entry_obs") or {}).get("take_submit_fill_status"),
+                      "fast_path": (row.get("entry_obs") or {}).get("fast_path"),
+                      "marks": (row.get("entry_obs") or {}).get("marks"),
                       "stop_submit_to_ack_ms": _ms(L.get("stop_submit_started_at_ts"), L.get("stop_placed_at_ts")),
                       "entry_ack_to_stop_ack_ms": _ms(L.get("stop_entry_ack_at_ts"), L.get("stop_placed_at_ts")),
                       "slippage_bp_vs_paper": _bp(row.get("live_fill_price"), paper["entry_price"], side)},
