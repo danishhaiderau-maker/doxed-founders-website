@@ -60,7 +60,7 @@ WORKER_EXPECTATIONS: dict[str, tuple] = {
     "_live_copy_delivery_loop": (15.0, 120.0),
     "heartbeat_loop": (30.0, 300.0),
     "runtime_uptime_loop": (60.0, 600.0),
-    "api_state_cache_refresher": (5.0, 300.0),
+    "api_state_cache_refresher": (5.0, 900.0),
     "main_supervisor_loop": (60.0, 0.0),
 }
 ONESHOT_WORKERS = ("retired_tile_boundary_worker", "regime_bars_boot_hydrate")
