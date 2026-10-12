@@ -3788,6 +3788,23 @@ export async function lockedEntryClaimInsert(
   }
 }
 
+/** LIVE-FIX-1470: per-lot exit stage marks (ms since start), logged with the mirror exit. */
+const exitMarks = new Map<string, { t0: number; marks: Array<[string, number]> }>();
+export function exitMark(participantId: string, name: string, reset = false): void {
+  const now = Date.now();
+  let m = exitMarks.get(participantId);
+  if (!m || reset) {
+    m = { t0: now, marks: [] };
+    exitMarks.set(participantId, m);
+    if (exitMarks.size > 200) exitMarks.delete(exitMarks.keys().next().value as string);
+  }
+  m.marks.push([name, now - m.t0]);
+}
+export function exitMarksSummary(participantId: string): string {
+  const m = exitMarks.get(participantId);
+  return m ? m.marks.map(([n, t]) => `${n}:${t}`).join(',') : 'none';
+}
+
 export function submitResponseFill(raw: unknown, intendedQty: number): {
   filledQty: number; fillPrice: number; source: 'ORDER_PARTIAL'; orderResting: false;
 } | null {
@@ -16599,8 +16616,8 @@ await this.notifications
     // Cancel EVERY stop this lot ever recorded on close, not only the latest
     // meta.stopOrderId: a duplicate fill record once left a second reduce-only
     // stop resting after the position closed (gs1-5d2c1ed4721e, 11 Oct).
-    const recordedStops = await this.participantRecordedStopOrderIds(participantId).catch(() => [] as number[]);
-    stopOrderIds = [...new Set([...stopOrderIds, ...recordedStops])];
+    // LIVE-FIX-1470: the stop-id DB read overlaps the fresh position read below.
+    const recordedStopsPromise = this.participantRecordedStopOrderIds(participantId).catch(() => [] as number[]);
     const remainingLedgerAmount = prepared
       ? prepared.remainingLedgerAmount
       : await this.expectedRemainingLedgerAmount(agentId, userId, participantId);
@@ -16616,7 +16633,12 @@ await this.notifications
       } | null> => this.activeTrading.getBestBidAsk()).catch(() => null),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
     ]);
-    const position = await this.readOpenPositionDetailWithRetry(creds);
+    const [position, recordedStops] = await Promise.all([
+      this.readOpenPositionDetailWithRetry(creds),
+      recordedStopsPromise,
+    ]);
+    stopOrderIds = [...new Set([...stopOrderIds, ...recordedStops])];
+    exitMark(participantId, 'targetPositionRead');
     const target = relayLotExitTarget({
       currentAmount: position?.amount ?? 0,
       remainingLedgerAmount,
@@ -16692,12 +16714,14 @@ await this.notifications
     const closeSubmitStartedAtMs = Date.now();
     let closeExchangeOrderId: number;
     if (target.finalAccountFlatten) {
+      exitMark(participantId, 'closeSubmit');
       closeExchangeOrderId = await this.activeTrading.submitPositionFlatten(creds, {
         positionDirection: meta.direction,
         qty: target.closeQty,
         leverage,
       });
     } else {
+      exitMark(participantId, 'closeSubmit');
       closeExchangeOrderId = await this.activeTrading.submitMarketClose(creds, {
         positionDirection: meta.direction,
         qty: target.closeQty,
@@ -17196,6 +17220,7 @@ await this.notifications
     },
   ): Promise<boolean> {
     const closePreflightStartedAtMs = Date.now();
+    exitMark(participant.id, 'start', true);
     if (!opts?.forceMirrorExit && (await this.hasParticipantExited(participant.id))) return true;
     if (this.exitingLots.has(participant.id)) return true;
     if (!opts?.terminalAuthority) {
@@ -17269,8 +17294,19 @@ await this.notifications
 
     this.exitingLots.add(participant.id);
     try {
+      exitMark(participant.id, 'claimed');
+      // LIVE-FIX-1470: overlap the linked-entry check with the position and
+      // ledger reads. Safe: the close is still submitted only after the
+      // remainder is confirmed gone, and the close target re-reads the
+      // position immediately before submission.
+      const earlyReads = Promise.all([
+        this.readOpenPositionDetailWithRetry(creds),
+        this.expectedRemainingLedgerAmount(agentId, userId, participant.id),
+      ]);
+      earlyReads.catch(() => undefined);
       try {
         await this.cancelLinkedPendingLimits(creds, meta);
+        exitMark(participant.id, 'linkedChecked');
       } catch (err) {
         const message =
           `LINKED_ENTRY_REMAINDER_UNCERTAIN cycle=${cycle.id}: ${
@@ -17301,10 +17337,8 @@ await this.notifications
         // independent ledger and position reads. The target path deliberately
         // performs one final fresh position read immediately before cancelling
         // the stop and submitting the close.
-        [position, remainingLedgerAmount] = await Promise.all([
-          this.readOpenPositionDetailWithRetry(creds),
-          this.expectedRemainingLedgerAmount(agentId, userId, participant.id),
-        ]);
+        [position, remainingLedgerAmount] = await earlyReads;
+        exitMark(participant.id, 'positionRead');
       } catch (err) {
         const message =
           `EXIT_POSITION_READ_FAILED cycle=${cycle.id}: Bitfinex position is unknown; ` +
@@ -17557,7 +17591,7 @@ await this.notifications
       }).catch((err) => this.logger.warn(`EXIT persistence receipt failed: ${err instanceof Error ? err.message : err}`));
 
       this.logger.log(
-        `Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
+        `[EXIT-TIMING] ${exitMarksSummary(participant.id)} | Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
       );
       this.showcaseVanishedMisses.delete(participant.id);
       this.showcasePositionAbsentMisses.delete(participant.id);
