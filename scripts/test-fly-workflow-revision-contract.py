@@ -416,6 +416,7 @@ def test_failed_deploy_preserves_pause_and_never_resumes_unaccepted_revision():
 def test_admin_pause_is_persisted_before_guarded_deploy_can_continue():
     bot = (ROOT / "services/btc-conservative-agent/bot.py").read_text(encoding="utf-8")
     pause_body = bot[bot.index("def api_pause():"):bot.index("_RESUMABLE_PAUSE_REASONS")]
-    assert pause_body.index('state["manual_admin_pause"] = True') < pause_body.index('_disarm_live_control("ADMIN_MANUAL")')
+    # LIVE-FIX-1430 tags the disarm with the real caller (ADMIN_PAUSE:<caller>).
+    assert pause_body.index('state["manual_admin_pause"] = True') < pause_body.index('_disarm_live_control("ADMIN_PAUSE:" + caller)')
     disarm = bot[bot.index("def _disarm_live_control"):bot.index("@app.route('/api/exchange_exposure_audit'")]
     assert "save_persistent_config()" in disarm
