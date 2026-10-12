@@ -46911,7 +46911,7 @@ def _platform_health_loop():
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PLATFORM HEALTH] check failed: {type(exc).__name__}: {exc}")
         finally:
-            _worker_beat("_platform_health_loop")
+            _THREAD_HEALTH.beat("_platform_health_loop")
         shutdown_event.wait(_platform_health.INTERVAL_SEC)
 
 
