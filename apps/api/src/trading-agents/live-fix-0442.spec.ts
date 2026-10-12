@@ -237,8 +237,7 @@ test('1485: a terminal claim refused before canonical commit is retried, never p
   const body = fn.slice(0, fn.indexOf('TERMINAL_CLOSE_CLAIM_PERSIST_FAILED'));
   assert.ok(body.includes('attempt < TERMINAL_CLAIM_RETRY_ATTEMPTS'));
   const deferAt = body.indexOf('[TERMINAL-CLAIM] deferred');
-  const pauseAt = body.lastIndexOf('TERMINAL_CLOSE_CLAIM_REFUSED cycle=');
-  assert.ok(deferAt > 0 && pauseAt > deferAt, 'unclaimed OPEN lot returns before the pause');
+  assert.ok(deferAt > 0, 'unclaimed OPEN lot defers');
   assert.ok(!src.includes('this.lastRelayPollActivity = instances'), 'all activity writes go through the setter');
 });
 
@@ -248,4 +247,41 @@ test('1486: post-ack fill probe ladder reaches 1.4 s total in <=7 probes, first 
   assert.equal(d[0], 0);
   assert.ok(d.length <= 7 && d.slice(1).every((x) => x <= 400));
   assert.ok(d.reduce((a, b) => a + b, 0) >= 1200);
+});
+
+test('1487: refused terminal claim never self-pauses the relay (stand-down)', () => {
+  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('private async executeShowcaseMirrorCloseOwned('));
+  const body = fn.slice(0, fn.indexOf('TERMINAL_CLOSE_CLAIM_PERSIST_FAILED'));
+  const claimPart = body.slice(body.indexOf('let acquired ='), body.indexOf('} catch (err) {', body.indexOf('let acquired =')));
+  assert.ok(!claimPart.includes('pauseUserRelayForPositionMismatch'), 'no pause between claim and persist-failed');
+  assert.equal((claimPart.match(/\[TERMINAL-CLAIM\] stand-down/g) ?? []).length, 2);
+});
+
+test('1487: duplicate stop dedupe keeps one stop per lot and never the kept one', async () => {
+  const { extraProtectiveStopIds } = await import('./signal-subscriber-execution.service');
+  const st = (id: number, amount: number) => ({ id, symbol: 'tBTCF0:USTF0', amount, amountOrig: amount, price: 83414, status: 'ACTIVE', orderType: 'STOP', flags: 1024 }) as never;
+  // one lot 0.00029 long, two identical stops -> cancel the older extra
+  assert.deepEqual(extraProtectiveStopIds([st(1, -0.00029), st(2, -0.00029)], 2, 'LONG', 0.00029, 0.00029), [1]);
+  // two lots on one net position -> both stops stay
+  assert.deepEqual(extraProtectiveStopIds([st(1, -0.00029), st(2, -0.00029)], 2, 'LONG', 0.00029, 0.00058), []);
+  // kept stop not visible yet -> do nothing
+  assert.deepEqual(extraProtectiveStopIds([st(1, -0.00029)], 2, 'LONG', 0.00029, 0.00029), []);
+});
+
+test('1487: reduce-only STOP submit rides the priority stop lane', async () => {
+  const { isBitfinexProtectiveStopSubmit } = await import('../exchanges/bitfinex-api.client');
+  assert.equal(isBitfinexProtectiveStopSubmit('v2/auth/w/order/submit', { type: 'STOP', flags: 1024 }), true);
+  assert.equal(isBitfinexProtectiveStopSubmit('v2/auth/w/order/submit', { type: 'LIMIT', flags: 0 }), false);
+  assert.equal(isBitfinexProtectiveStopSubmit('v2/auth/w/order/submit', { type: 'STOP', flags: 0 }), false);
+  const src = readFileSync(join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
+  assert.ok(src.includes('lane.stops?.shift() ?? lane.mutations.shift() ?? lane.reads.shift()'));
+});
+
+test('1487: TIME_60S deadline wake ladder fires at fill+60 s', async () => {
+  const { timeExitDeadlineWakeDelays } = await import('./signal-subscriber-execution.service');
+  assert.deepEqual(timeExitDeadlineWakeDelays(1_000_000, 1_000_000), [60_000, 60_150, 60_350, 60_700, 61_200, 62_000]);
+  assert.deepEqual(timeExitDeadlineWakeDelays(1_000_000, 1_061_000), [200, 1000]);
+  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  assert.ok(src.includes('this.installTimeExitDeadlineWake();'));
 });
