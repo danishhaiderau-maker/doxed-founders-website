@@ -31572,6 +31572,8 @@ def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
             trade_row.setdefault("exit_bbo_missing", True)
             return
         last = rows[-1]
+        if not isinstance(last, dict):  # TapeSliceRing stores value tuples in fields() order
+            last = dict(zip(_TILE_TAPE_RING.fields, last))
         trade_row["exit_bid"] = last.get("bid")
         trade_row["exit_ask"] = last.get("ask")
         trade_row["exit_bbo_ts"] = ts[-1]
@@ -46717,6 +46719,8 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
     import bitfinex_cost_profile as _bcp
     inp = _monitor_check_inputs(now, hours)
     tape_ts, tape_rows = _TILE_TAPE_RING.slice(inp["since"], now)
+    _fields = _TILE_TAPE_RING.fields
+    tape_rows = [r if isinstance(r, dict) else dict(zip(_fields, r)) for r in tape_rows]
     closed_rows = [r for rows in inp["by_lane"].values() for r in rows if r.get("status") == "CLOSED"]
     snap = {}
     try:
