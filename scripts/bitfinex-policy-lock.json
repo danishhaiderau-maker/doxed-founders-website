@@ -1,6 +1,6 @@
 {
   "policyVersion": 5,
-  "updatedAt": "2026-10-12T01:20:28.805Z",
+  "updatedAt": "2026-10-12T01:47:40.863Z",
   "files": [
     {
       "path": "packages/utils/src/bitfinex-copy-policy.ts",

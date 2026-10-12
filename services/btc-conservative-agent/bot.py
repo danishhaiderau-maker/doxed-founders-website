@@ -33337,6 +33337,12 @@ def _emergency_api_guard():
             ), 200
         if path in ("/api/ping", "/api/build"):
             return None
+        # LIVE-FIX-1246: signed executor reports (fills/stops) are journal
+        # appends that never touch state_lock; 503ing them during the
+        # multi-minute restore made Railway report-back fail (sent 70/failed 70)
+        # and lag every fill report until the restore ended.
+        if method == "POST" and path in _SIGNED_EXECUTOR_POST_PATHS:
+            return None
         response = jsonify(
             {
                 "ok": False,
