@@ -85,14 +85,15 @@ def test_active_roster_pairs_every_shared_call_tile_but_not_the_clock_tile():
     rows += [_fill(CFT, f"b{i}", 2.0, T0 + i * 600, reason="PATH_END_90M") for i in range(4)]
     report = _report(rows)
     assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
-    assert report["tile_order"][:3] == [CFT, RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP"]
+    assert report["tile_order"][:3] == [RND, "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME"]
     # Shared-call tiles pair (H-A, control, B2, B3, GS-06, Danish, Fade Pool);
     # evaluator-clock tiles (H-C, GS-01, B1, GS-07) never do.
+    # H-A retired 2026-10-12 10:57 (spec kept); the control now leads the shared-call pairs.
     assert report["all_tiles_paired"]["paired_tiles"] == [
-        CFT, RND, "FAMILY_GSB2_REGIME_SWITCHER",
+        RND, "FAMILY_GSB2_REGIME_SWITCHER",
         "FAMILY_GS06_COMMITTED_FADE_ATR_TP"]
     assert {(p["control"], p["challenger"]) for p in report["paired"]} >= {
-        (CFT, RND), (CFT, "FAMILY_GSB2_REGIME_SWITCHER")}
+        (RND, "FAMILY_GSB2_REGIME_SWITCHER"), (RND, "FAMILY_GS06_COMMITTED_FADE_ATR_TP")}
     assert not any(XVS in (p["control"], p["challenger"]) for p in report["paired"])
     assert set(report["pre_registered"]) == set(ACTIVE_TILE_ORDER)
     json.dumps(report, allow_nan=False)
@@ -139,10 +140,10 @@ def test_random_control_is_a_yardstick_not_a_trial_and_pairs_with_h_a():
     for i in range(6):
         ts = T0 + i * 3600
         rows += [_fill(RND, f"b{i}", -1.0, ts), _fill(CFT, f"b{i}", 3.0, ts)]
-    report = _report(rows)
+    report = _report(rows, extra=(CFT,))  # H-A retired 12 Oct; frozen spec is the fixture
     assert report["baseline_lane"] is None
     # Ten hypotheses (H-A, H-C, GS-01, B1..B3, GS-06, GS-07, Danish, Fade Pool, GS-07 V07); the control is not a trial.
-    assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER) - 1
+    assert report["deflated_sharpe_trials"] == len(ACTIVE_TILE_ORDER)
     verdict = report["pre_registered"][CFT]["verdict"]
     assert report["pre_registered"][CFT]["control_lane"] == RND
     assert verdict["vs_control_mean_difference_bp"] == pytest.approx(4.0)
@@ -184,11 +185,11 @@ def test_day21_pass_needs_target_bonferroni_ci_and_beating_the_control():
         ts = start + i * 3600 + 60
         rows += [_fill(CFT, f"w{i}", 6.0 + (i % 4) * 0.5, ts, reason="PATH_END", dir="LONG" if i % 2 else "SHORT"),
                  _fill(RND, f"w{i}", -1.0 + (i % 3), ts, reason="PATH_END")]
-    verdict = _report(rows, now=_day21(CFT))["pre_registered"][CFT]["verdict"]
+    verdict = _report(rows, now=_day21(CFT), extra=(CFT,))["pre_registered"][CFT]["verdict"]
     assert verdict["n_eff_distinct_hours"] == 320
     assert verdict["promotion_checks"]["n_eff_target"] and verdict["promotion_checks"]["beats_control"]
     assert verdict["status"] == "DAY21_PASS" and verdict["day21_status"] == "DAY21_PASS"
-    early = _report(rows, now=_day21(CFT) - 5 * 86400)["pre_registered"][CFT]["verdict"]
+    early = _report(rows, now=_day21(CFT) - 5 * 86400, extra=(CFT,))["pre_registered"][CFT]["verdict"]
     assert early["status"] == "COLLECTING" and early["day21_status"] == "PENDING"
     assert early["day21_status_if_decided_now"] == "DAY21_PASS"
 
@@ -208,6 +209,6 @@ def test_profitable_random_control_flags_the_fill_model():
 
 
 def test_hypothesis_tile_sessions_use_the_registered_session_map():
-    stats = _report([_fill(CFT, "w0", 6.0, T0, reason="PATH_END")])["tiles"][CFT]
+    stats = _report([_fill(CFT, "w0", 6.0, T0, reason="PATH_END")], extra=(CFT,))["tiles"][CFT]
     assert stats["session_hours_utc"] == {"ASIA": [0, 8], "EU": [8, 16]}
     assert stats["bonferroni_alpha"] == pytest.approx(0.05 / 3)

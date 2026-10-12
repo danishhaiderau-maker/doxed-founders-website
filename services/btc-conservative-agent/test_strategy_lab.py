@@ -97,7 +97,7 @@ def test_registry_exit_specs_map_every_active_tile():
     premium = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_PREMIUM_REVERSION_60M"])[0]
     assert premium.tcap_sec == 3600 and premium.hard_bp == pytest.approx(40.0) and not premium.needs_atr
     assert premium.breakeven is None and premium.early_cut is None and premium.trail_atr is None
-    fade = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_COMMITTED_FADE_TAKER_90"])[0]
+    fade = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_RANDOM_CONTROL_TAKER_90"])[0]
     assert fade.tcap_sec == 5400 and fade.hard_bp == pytest.approx(40.0)
     assert fade.breakeven == pytest.approx((20.0, 5.0)) and fade.early_cut == pytest.approx((-12.0, 300, 2.0))
     control = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_RANDOM_CONTROL_TAKER_90"])[0]
@@ -255,7 +255,7 @@ def _export(tmp_path, manifest_gen="gen-1"):
         {"trade_id": "x", "research_lane": "CONTINUOUS", "reason": "NON_REGISTRY_LANE"}]}), encoding="utf-8")
     stage_strategy_lab({"status": "OK", "hypotheses": [{"id": "H", "verdict": "INSUFFICIENT"}]},
                        {"hypotheses": pd.DataFrame([{"id": "H", "verdict": "INSUFFICIENT", "full_n": 3}])})
-    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_COMMITTED_FADE_TAKER_90", "net_pnl_usd": 0.05,
+    trades = pd.DataFrame([{"trade_id": "t1", "research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "net_pnl_usd": 0.05,
                             "close_ts": "2026-10-01T10:00:00+00:00", "exit_reason": "PATH_END_90M"}])
     root = tmp_path / "exports"
     summary = write_export(report_dir=str(report_dir), data_dir=str(tmp_path), trades=trades,
@@ -271,7 +271,7 @@ def test_export_is_versioned_and_loads_from_the_bundled_client(tmp_path):
     assert (root / "history" / summary["export_id"] / "hypotheses.csv").is_file()
     exp = load_latest(str(root), check_live=False, retries=0)
     assert exp["hypotheses"].iloc[0]["id"] == "H"
-    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_COMMITTED_FADE_TAKER_90", "n"] == 1
+    assert exp["tile_stats"].set_index("research_lane").loc["FAMILY_RANDOM_CONTROL_TAKER_90", "n"] == 1
     assert len(exp["quarantine"]) == 1 and exp.checks["manifest_parity"] == "MATCH"
     assert exp.summary["generation"]["generation_id"] == "gen-1"
     view = lab_api.export_latest(root=str(root), report_root=str(report_dir), table="tile_stats")

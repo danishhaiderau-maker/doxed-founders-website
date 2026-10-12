@@ -312,15 +312,14 @@ def test_hold_off_list_comes_from_repository_variable():
 
 def test_checkout_registry_is_the_freeze21b_roster_with_the_old_tiles_retired():
     lanes, retired = gate.checkout_registry()
-    assert lanes == ["FAMILY_COMMITTED_FADE_TAKER_90",
-                     "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+    assert lanes == ["FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP",
                      "FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER",
                      "FAMILY_GS06_COMMITTED_FADE_ATR_TP",
-                     "FAMILY_GS07_FAST_PREMIUM_FADE",
                      "FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"]
     # Retired 2026-10-11 (owner): H-C, B3, FADE-POOL, V07.
     assert {"FAMILY_PREMIUM_REVERSION_60M", "FAMILY_GSB3_COMMITTED_FADE_REGIME",
-            "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DANISH_REGIME_ROUTER"} <= retired
+            "FAMILY_FADE_POOL", "FAMILY_GS07_V07_PREMIUM_FADE_60M", "FAMILY_DANISH_REGIME_ROUTER",
+            "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE"} <= retired
     assert {"FAMILY_DANISH_CF", "FAMILY_DANISH_CF_NOES", "FAMILY_DANISH_CF_ALL_SESSIONS",
             "FAMILY_CONTINUOUS_AUG_ORIGINAL", "FAMILY_COMMITTED_FADE_MAKER_90",
             "FAMILY_NOTRADE_FOLLOW_MAKER_60", "FAMILY_XVENUE_SESSION_FOLLOW_60M",

@@ -29,13 +29,11 @@ export const FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC = 180;
  * signed approval (operator/registry eligible, output ON, tile switch ON).
  */
 export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.freeze({
-  FAMILY_COMMITTED_FADE_TAKER_90: 'cft',
   FAMILY_RANDOM_CONTROL_TAKER_90: 'rnd',
   FAMILY_GS01_XV_PREMIUM_ATR_TP: 'gs1',
   FAMILY_GSB1_CVD_DIV_REGIME: 'gb1',
   FAMILY_GSB2_REGIME_SWITCHER: 'gb2',
   FAMILY_GS06_COMMITTED_FADE_ATR_TP: 'gs6',
-  FAMILY_GS07_FAST_PREMIUM_FADE: 'gs7',
   FAMILY_DISLOC_BFX_DISLOCATION_1M: 'dsl',
   FAMILY_DISLOC_FOI_LONG_1M: 'dsf',
 });

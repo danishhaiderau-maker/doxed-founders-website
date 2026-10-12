@@ -18,8 +18,8 @@ TS = 1_791_100_000.0
 def test_registry_owns_a_paper_only_default_off_fast_premium_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
     assert validate_tile_registry() == ()
-    assert policy.LANE in ACTIVE_TILE_ORDER
-    assert policy.LANE in cross_venue_clock_lanes()
+    import combo_pathway_config as _cpc
+    assert policy.LANE in _cpc.RETIRED_TILE_LANES and policy.LANE not in ACTIVE_TILE_ORDER  # retired 12 Oct 10:57, spec kept
     assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
     assert spec["live_copy_eligible"] is False and spec["default_enabled"] is False
     assert spec["relay_capability"] == "BLOCKED_UNQUALIFIED"

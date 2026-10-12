@@ -15,7 +15,7 @@ REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
 ROUTES = ("/api/monitor/tiles/specs", "/api/monitor/tiles/trades", "/api/monitor/tiles/counters",
           "/api/monitor/tiles/totals", "/api/monitor/tape", "/api/monitor/exit-latency")
 GS1 = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
-HA = "FAMILY_COMMITTED_FADE_TAKER_90"
+HA = "FAMILY_RANDOM_CONTROL_TAKER_90"
 B2 = "FAMILY_GSB2_REGIME_SWITCHER"
 GS5 = "FAMILY_GS05_PREMIUM_REGIME_MANAGED"
 GS6 = "FAMILY_GS06_COMMITTED_FADE_ATR_TP"
@@ -36,7 +36,7 @@ def _closed(tid, lane, *, close_ts, bp=None, net=0.0, reason="GS_ATR_TAKE_PROFIT
 
 
 def _rows(raws, status="closed", fills=None, be=0.0):
-    short = {GS1: "GS-01", HA: "H-A", B2: "B2", GS5: "GS-05", GS6: "GS-06"}
+    short = {GS1: "GS-01", HA: "CTRL", B2: "B2", GS5: "GS-05", GS6: "GS-06"}
     return [mt.tile_trade_row(r, status=status, short_names=short, epoch_id=EPOCH,
                               forced_reasons={"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT"},
                               fill_evidence=(fills or {}).get(r["trade_id"]), be_band_bp=be) for r in raws]
@@ -301,7 +301,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 9
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 7
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:
