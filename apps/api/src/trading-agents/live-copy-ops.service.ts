@@ -7,7 +7,7 @@ import { liveCopyAccountArmed } from './live-copy-approval';
 import { assertBotReadToken } from './ops-read-auth';
 
 export { assertBotReadToken };
-import { LiveCopyFlyReporterService, liveCopyAccountLabel, summarizeCopyStatus } from './live-copy-fly-reporter';
+import { LiveCopyFlyReporterService, liveCopyAccountLabel, summarizeCopyStatus, reporterVerdict, worstVerdict } from './live-copy-fly-reporter';
 import { readPersistedRelayExecutorHealth } from './signal-subscriber-execution.service';
 
 /** BOT_ADMIN_TOKEN (X-Bot-Admin-Token or Bearer), constant-time. */
@@ -195,9 +195,12 @@ export class LiveCopyOpsService {
     if (!agent) throw new NotFoundException('Agent not found');
     const nowMs = Date.now();
     const reports = await this.reporter.collect(nowMs);
+    const summary = summarizeCopyStatus(reports, nowMs, this.reporter.acked);
+    const reporterStatus = reporterVerdict(this.reporter.stats, nowMs);
     return {
-      ...summarizeCopyStatus(reports, nowMs, this.reporter.acked),
-      reporter: { ...this.reporter.stats },
+      ...summary,
+      verdict: worstVerdict(summary.verdict, reporterStatus),
+      reporter: { ...this.reporter.stats, verdict: reporterStatus },
       ingest_rejects_1h: rejects ?? null,
     };
   }

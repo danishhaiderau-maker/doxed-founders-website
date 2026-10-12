@@ -161,3 +161,12 @@ test('POSITION_CLOSED reports the authenticated exchange close fill, not the quo
   assert.equal(close.close.price, 83071);
   assert.equal(close.close.paper_exit_price, 83071);
 });
+
+test('LIVE-FIX-1246: reporter failures turn copy-status AMBER/RED', async () => {
+  const { reporterVerdict, worstVerdict } = await import('./live-copy-fly-reporter');
+  const now = 1_000_000_000;
+  assert.equal(reporterVerdict({ consecutiveFailures: 0, lastFailAt: 0, lastOkAt: now, pending: 0 }, now), 'GREEN');
+  assert.equal(reporterVerdict({ consecutiveFailures: 1, lastFailAt: now, lastOkAt: now - 1, pending: 0 }, now), 'AMBER');
+  assert.equal(reporterVerdict({ consecutiveFailures: 70, lastFailAt: now, lastOkAt: 0, pending: 3 }, now), 'RED');
+  assert.equal(worstVerdict('GREEN', 'RED'), 'RED');
+});

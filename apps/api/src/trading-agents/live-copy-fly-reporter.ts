@@ -421,7 +421,7 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
   private running = false;
   readonly acked = new Map<string, number>();
   private readonly lastAttempt = new Map<string, number>();
-  readonly stats = { lastRunAt: 0, sent: 0, failed: 0, lastError: null as string | null, pending: 0 };
+  readonly stats = { lastRunAt: 0, sent: 0, failed: 0, lastError: null as string | null, pending: 0, consecutiveFailures: 0, lastOkAt: 0, lastFailAt: 0 };
   readonly capability = { lastSentAt: 0, lastOkAt: 0, lastError: null as string | null };
   private lastCapabilityAttempt = 0;
 
@@ -559,12 +559,18 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
           if (res.ok) {
             this.acked.set(r.report_id, Date.now());
             this.stats.sent += 1;
+            this.stats.consecutiveFailures = 0;
+            this.stats.lastOkAt = Date.now();
           } else {
             this.stats.failed += 1;
+            this.stats.consecutiveFailures += 1;
+            this.stats.lastFailAt = Date.now();
             this.stats.lastError = `HTTP_${res.status}`;
           }
         } catch (err) {
           this.stats.failed += 1;
+          this.stats.consecutiveFailures += 1;
+          this.stats.lastFailAt = Date.now();
           this.stats.lastError = err instanceof Error ? err.name : 'FETCH_FAILED';
         }
       }
@@ -581,4 +587,24 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
       }
     }
   }
+}
+
+/**
+ * LIVE-FIX-1246: report-back failures must not hide behind GREEN. Any failure
+ * in the last 5 min or an unacked backlog => AMBER; >=10 consecutive failures
+ * or nothing acked for 2 min while reports are pending => RED.
+ */
+export function reporterVerdict(
+  stats: { consecutiveFailures: number; lastFailAt: number; lastOkAt: number; pending: number },
+  nowMs: number,
+): 'GREEN' | 'AMBER' | 'RED' {
+  const stuck = stats.pending > 0 && nowMs - (stats.lastOkAt || 0) > 120_000 && stats.lastFailAt > stats.lastOkAt;
+  if (stats.consecutiveFailures >= 10 || stuck) return 'RED';
+  if (stats.consecutiveFailures > 0 || (stats.lastFailAt && nowMs - stats.lastFailAt < 300_000)) return 'AMBER';
+  return 'GREEN';
+}
+
+export function worstVerdict(a: string, b: string): string {
+  const rank: Record<string, number> = { GREEN: 0, AMBER: 1, RED: 2 };
+  return (rank[b] ?? 0) > (rank[a] ?? 0) ? b : a;
 }
