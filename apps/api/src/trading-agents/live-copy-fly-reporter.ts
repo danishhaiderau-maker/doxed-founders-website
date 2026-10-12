@@ -187,7 +187,10 @@ export function buildLiveCopyReports(input: {
           side = typeof pl.direction === 'string' ? pl.direction : side;
           push(e, 'ORDER_PLACED', {
             order: {
-              type: 'LIMIT',
+              // LIVE-FIX-1510: DISLOC entries may be IOC / MARKET (true IOC, never resting).
+              type: typeof pl.order_type === 'string' ? pl.order_type : 'LIMIT',
+              tif: typeof pl.time_in_force === 'string' ? pl.time_in_force : 'GTC',
+              entry_order_mode: typeof pl.entry_order_mode === 'string' ? pl.entry_order_mode : 'LIMIT',
               side,
               qty: num(pl.qty),
               price: entryPrice,

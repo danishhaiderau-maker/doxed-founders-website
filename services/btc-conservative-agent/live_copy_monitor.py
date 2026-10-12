@@ -108,6 +108,8 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["order_qty"] = _f(order.get("qty")) or ch.get("order_qty")
             ch["order_price"] = _f(order.get("price")) or ch.get("order_price")
             ch["order_type"] = order.get("type") or ch.get("order_type")
+            ch["order_tif"] = order.get("tif") or ch.get("order_tif")
+            ch["entry_order_mode"] = order.get("entry_order_mode") or ch.get("entry_order_mode")
         if r.get("type") in ("INTENT_RECEIVED", "INTENT_SKIPPED", "INTENT_SUBMITTED"):
             d = r.get("decision") if isinstance(r.get("decision"), Mapping) else {}
             ch["executor_decision"] = {"decision": d.get("decision"), "reason": d.get("reason"),
@@ -175,7 +177,9 @@ def detect_gaps(chains: Mapping[str, Any], paper_twins: Mapping[str, Mapping[str
         if fill_ts and not ch.get("fill_reported_to_fly_at_ts") and now - fill_ts > REPORT_MISSING_GAP_SEC:
             gaps.append({"code": "FILL_NOT_REPORTED", "severity": AMBER, "correlation_id": cid,
                          "account": acct, "age_sec": round(now - fill_ts, 1)})
-        if ch.get("order_type") and str(ch.get("order_type")).upper() != "LIMIT":
+        # LIVE-FIX-1510: DISLOC entries may be a true IOC / IOC-at-market by design.
+        allowed = ("LIMIT", "IOC", "MARKET") if str(cid).startswith("dsl-") else ("LIMIT",)
+        if ch.get("order_type") and str(ch.get("order_type")).upper() not in allowed:
             gaps.append({"code": "ENTRY_NOT_LIMIT", "severity": RED, "correlation_id": cid,
                          "account": acct, "order_type": ch.get("order_type")})
         twin = (paper_twins or {}).get(cid) or {}
@@ -327,3 +331,34 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
 
 def now_ts() -> float:
     return time.time()
+
+
+def enrich_entry_fidelity(accounts, paper_twins) -> dict:
+    """LIVE-FIX-1510: per-chain fill model / ask age / order type / rested_s / slippage, plus the
+    DISLOC fill rate and a paper shadow of signals that did not fill live. Mutates chains."""
+    twins = paper_twins or {}
+    attempted = filled = 0
+    unfilled = []
+    for ch in accounts:
+        cid = str(ch.get("correlation_id") or "")
+        twin = twins.get(cid) or {}
+        for k in ("fill_model", "signal_touch_source", "signal_ask_age_ms", "fill_ask_age_ms"):
+            ch[k] = twin.get(k)
+        ack, fill = ch.get("exchange_ack_at_ts"), ch.get("fill_at_ts")
+        ch["rested_s"] = round(fill - ack, 3) if ack and fill else None
+        sig, px, paper = _f(twin.get("signal_price")), ch.get("fill_price"), _f(twin.get("entry_price"))
+        sgn = 1.0 if str(twin.get("side") or "").upper() != "SHORT" else -1.0
+        ch["slippage_vs_signal_bp"] = round(sgn * (px / sig - 1) * 1e4, 2) if sig and px else None
+        ch["slippage_vs_paper_bp"] = round(sgn * (px / paper - 1) * 1e4, 2) if paper and px else None
+        if not cid.startswith("dsl-") or not (ch.get("order_sent_at_ts") or ch.get("exchange_ack_at_ts")):
+            continue
+        attempted += 1
+        if px:
+            filled += 1
+        elif ch.get("closed") or twin.get("exit_price") is not None:
+            ep, xp = paper, _f(twin.get("exit_price"))
+            unfilled.append({"correlation_id": cid, "order_type": ch.get("order_type"),
+                             "paper_bp": round(sgn * (xp / ep - 1) * 1e4, 2) if ep and xp else None})
+    return {"lane": "DISLOC", "attempted": attempted, "filled": filled,
+            "fill_rate": round(filled / attempted, 3) if attempted else None,
+            "unfilled_paper_shadow": unfilled[-50:]}

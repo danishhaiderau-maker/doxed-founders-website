@@ -312,6 +312,8 @@ class DislocEngine:
         self.enabled_fn: Callable[[], bool] = lambda: False
         self.trades_fn: Callable[[], list] = lambda: []
         self.touch_fn: Callable[[], tuple] = lambda: (None, None, None)
+        # LIVE-FIX-1510: {"source": "BOOK"|"TICKER", "ask_age_ms": int} for the touch just read.
+        self.touch_meta_fn: Callable[[], dict] = lambda: {}
         self.append_fn: Callable[[dict], Any] = lambda row: None
         self.oi_seed_fn: Callable[[int], dict] = lambda since_minute: {}
         self.regime_fn: Optional[Callable[[], Any]] = None
@@ -333,8 +335,10 @@ class DislocEngine:
         self.counters["shadow_30m_closed"] = 0
 
     def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None,
-                     regime_fn=None) -> None:
+                     regime_fn=None, touch_meta_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
+        if touch_meta_fn is not None:
+            self.touch_meta_fn = touch_meta_fn
         if regime_fn is not None:
             self.regime_fn = regime_fn
         if oi_seed_fn is not None:
@@ -468,6 +472,13 @@ class DislocEngine:
         bid, ask, ts = self.touch_fn()
         return _f(bid), _f(ask), _num(ts)
 
+    def _touch_meta(self) -> dict:
+        try:
+            m = self.touch_meta_fn() or {}
+            return {"source": m.get("source"), "ask_age_ms": m.get("ask_age_ms")}
+        except Exception:  # noqa: BLE001 - observation only
+            return {"source": None, "ask_age_ms": None}
+
     def _fill_check(self, order: dict, trades: list, until: float) -> Optional[dict]:
         limit, side = order["limit_price"], order["side"]
         want = "Sell" if side == LONG else "Buy"
@@ -600,6 +611,8 @@ class DislocEngine:
             "signal_bid": bid, "signal_ask": ask, "signal_mid": (bid + ask) / 2.0,
             "signal_spread_bp": round((ask - bid) / ((ask + bid) / 2.0) * 1e4, 4),
             "signal_bbo_age_s": round(now - bbo_ts, 3),
+            "signal_touch_source": (_m := self._touch_meta())["source"],
+            "signal_ask_age_ms": _m["ask_age_ms"],
             "limit_price": bid if side == LONG else ask, "order_type": "POST_ONLY_LIMIT_AT_TOUCH",
             "prem_at_signal_bp": feat.get("prem_bp"), "prem_d5_at_signal_bp": feat.get("prem_d5_bp"),
             "fund_at_signal_bp": feat.get("fund_bp"), "oi_d60_at_signal_bp": feat.get("oi_d60_bp"),
@@ -628,6 +641,7 @@ class DislocEngine:
             self._cancel(fill_ts, "NO_FRESH_TOUCH_AT_FILL", feat)
             return
         px = fask if o["side"] == LONG else fbid
+        fmeta = self._touch_meta()
         self.order = None
         self.counters["fills"] += 1
         stop = px * (1 - self.rule.stop_bp / 1e4) if o["side"] == LONG else px * (1 + self.rule.stop_bp / 1e4)
@@ -635,6 +649,8 @@ class DislocEngine:
                          "fill_bbo_ts": fts, "order_to_fill_s": round(fill_ts - o["order_ts"], 3),
                          "signal_to_fill_s": round(fill_ts - o["signal_ts"], 3),
                          "fill_bid": fbid, "fill_ask": fask, "fill_mid": (fbid + fask) / 2.0,
+                         "fill_touch_source": fmeta["source"], "fill_ask_age_ms": fmeta["ask_age_ms"],
+                         "fill_model": f"TAKER_AT_{fmeta['source'] or 'UNKNOWN'}_TOUCH",
                          "slippage_vs_signal_touch_bp": round(
                              ((px / (o["signal_ask"] if o["side"] == LONG else o["signal_bid"])) - 1.0) * 1e4
                              * (1 if o["side"] == LONG else -1), 4),

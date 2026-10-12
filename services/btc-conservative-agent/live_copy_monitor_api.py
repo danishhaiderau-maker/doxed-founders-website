@@ -331,8 +331,12 @@ def live_copy_chain():
         limit = max(1, min(500, int(request.args.get("limit") or 100)))
     except (TypeError, ValueError):
         limit = 100
+    try:  # LIVE-FIX-1510: fill model / ask age / order type / rested_s / slippage + DISLOC fill rate
+        fidelity = lcm.enrich_entry_fidelity(accts, ctx.get("paper_twins") or {})
+    except Exception as exc:  # noqa: BLE001 - observation only
+        fidelity = {"error": str(exc)[:200]}
     return _ok({"stages": list(lcm.STAGES), "intents": list(a["chains"]["intents"].values())[-limit:],
-                "accounts": accts[-limit:], "lag_stats": a["lags"]})
+                "accounts": accts[-limit:], "lag_stats": a["lags"], "entry_fidelity": fidelity})
 
 
 @blueprint.route("/api/monitor/live/gaps", methods=["GET"])

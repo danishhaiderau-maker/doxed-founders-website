@@ -848,6 +848,8 @@ export class BitfinexTradingClient {
        * was not persisted.
        */
       clientOrderId?: number;
+      /** LIVE-FIX-1510: 'IOC' submits a Bitfinex IOC (never rests). Default GTC LIMIT. */
+      timeInForce?: 'GTC' | 'IOC';
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
@@ -857,7 +859,7 @@ export class BitfinexTradingClient {
         ? Math.abs(input.qty)
         : -Math.abs(input.qty);
     const body: Record<string, unknown> = {
-      type: 'LIMIT',
+      type: input.timeInForce === 'IOC' ? 'IOC' : 'LIMIT',
       symbol,
       amount: amount.toFixed(5),
       price: input.price.toFixed(2),
@@ -1053,6 +1055,12 @@ export class BitfinexTradingClient {
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/submit', body);
     const id = parseBitfinexOrderId(res);
     if (!id) throw new Error('Bitfinex market entry submitted but no order id returned');
+    // LIVE-FIX-1510: a market (IOC-at-market) entry can report EXECUTED in the submit response.
+    const fill = parseBitfinexSubmitFill(res);
+    if (fill) {
+      submitFills.set(id, fill);
+      if (submitFills.size > 200) submitFills.delete(submitFills.keys().next().value as number);
+    }
     return id;
   }
 

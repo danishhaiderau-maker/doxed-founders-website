@@ -32213,10 +32213,39 @@ def _xvl_wait_anchor_ready(deadline: float):
     return time.time(), None, False
 
 
-def _disloc_touch():
+DISLOC_TOUCH_SOURCE = os.getenv("DISLOC_TOUCH_SOURCE", "book").strip().lower()  # LIVE-FIX-1510: book|ticker
+DISLOC_BOOK_MAX_AGE_SEC = float(os.getenv("DISLOC_BOOK_MAX_AGE_SEC", "2.0"))
+_disloc_touch_last_meta = {"source": None, "ask_age_ms": None}
+
+
+def _disloc_ticker_touch():
     with state_lock:
         return (_buf_float(state.get("bid"), 0.0), _buf_float(state.get("ask"), 0.0),
                 _buf_float(state.get("bbo_ts"), 0.0) or None)
+
+
+def _disloc_touch():
+    """LIVE-FIX-1510 (HM 09:05): DISLOC prices from the WS order-book top (P0/F0), not the
+    throttled ticker. Falls back to the ticker when the book is not ready or older than
+    DISLOC_BOOK_MAX_AGE_SEC. _disloc_touch_meta() reports which source was used."""
+    now = time.time()
+    if DISLOC_TOUCH_SOURCE == "book":
+        try:
+            import bfx_book_top as _bbt
+            _bbt.ensure_started()
+            bid, ask, ts = _bbt.top()
+            if bid and ask and ts and now - ts <= DISLOC_BOOK_MAX_AGE_SEC:
+                _disloc_touch_last_meta.update(source="BOOK", ask_age_ms=int((now - ts) * 1000))
+                return bid, ask, ts
+        except Exception as exc:  # noqa: BLE001 - fall back to ticker
+            logger.debug(f"[DISLOC] book top unavailable: {exc}")
+    bid, ask, ts = _disloc_ticker_touch()
+    _disloc_touch_last_meta.update(source="TICKER", ask_age_ms=int((now - ts) * 1000) if ts else None)
+    return bid, ask, ts
+
+
+def _disloc_touch_meta():
+    return dict(_disloc_touch_last_meta)
 
 
 def _disloc_recent_trades():
@@ -32233,6 +32262,7 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         enabled_fn=lambda: is_research_data_collection() and is_research_lane_enabled(lane),
         trades_fn=_disloc_recent_trades,
         touch_fn=_disloc_touch,
+        touch_meta_fn=_disloc_touch_meta,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
         regime_fn=lambda: _current_regime_tag(),
@@ -32278,6 +32308,10 @@ def _disloc_note_paper_twin(event, tid, extra, row) -> None:
             twin["entry_ts"] = row.get("fill_ts") or row.get("ts")
             twin["signal_ts"] = row.get("signal_ts") or extra.get("signal_ts")
             twin["signal_price"] = row.get("signal_ask") if extra.get("direction") == "LONG" else row.get("signal_bid")
+            twin["fill_model"] = row.get("fill_model")
+            twin["signal_touch_source"] = row.get("signal_touch_source")
+            twin["signal_ask_age_ms"] = row.get("signal_ask_age_ms")
+            twin["fill_ask_age_ms"] = row.get("fill_ask_age_ms")
         elif event == "POSITION_CLOSED":
             twin["exit_price"] = extra.get("exit_price")
             twin["exit_reason"] = extra.get("exit_reason")
