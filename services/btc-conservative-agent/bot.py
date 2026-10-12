@@ -49614,10 +49614,33 @@ def api_exchange_exposure_audit():
         "positions_synced": bool(audit.get("positions_synced")),
         "trades_synced": bool(audit.get("trades_synced")),
         "error": audit.get("error"),
-        "live_armed": bool(state.get("live_armed", False)),
-        "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+        # LIVE-FIX-1415: armed state is the Railway relay account's (the
+        # copier that owns Bitfinex execution); Fly's direct path is retired.
+        **_relay_armed_view(),
+        "fly_direct_live_armed": bool(state.get("live_armed", False)),
+        "fly_direct_bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+        "paper_closed_live_open": list(_live_copy_stale_exit.get("alerts") or []),
         "mutating": False,
     }), (200 if authoritative and fresh else 503)
+
+
+def _relay_armed_view() -> dict:
+    web = _live_copy_website_cached_view()
+    armed = [str(a) for a in (web.get("armed_accounts") or [])]
+    try:
+        output_on = bool(_get_live_copy_output().snapshot().get("enabled"))
+    except Exception:  # noqa: BLE001
+        output_on = False
+    return {
+        "live_armed": bool(armed),
+        "bitfinex_live_enabled": bool(armed) and output_on,
+        "relay_armed_accounts": armed,
+        "relay_reachable": bool(web.get("reachable")),
+        "relay_state_age_s": (round(time.time() - float(web["fetched_at_ts"]), 1)
+                              if web.get("fetched_at_ts") else None),
+        "live_copy_output_enabled": output_on,
+        "armed_source": "railway_relay_account",
+    }
 
 
 @app.route('/api/live_arm', methods=['POST'])
@@ -58824,6 +58847,8 @@ def _live_copy_publish(event, trade_id, extra) -> bool:
         if record is None:
             logger.warning(f"[LIVE COPY] outbox enqueue failed event={event} trade={trade_id}")
             return False
+        if event == "POSITION_CLOSED":
+            _live_copy_paper_closed_ts[trade_id] = time.time()
         _live_copy_delivery_wake.set()
         return True
     except Exception as exc:  # noqa: BLE001
@@ -58927,6 +58952,58 @@ def _live_copy_website_cached_view() -> dict:
                                   "executor_heartbeat_age_sec", "error")}
 
 
+_live_copy_paper_closed_ts: dict = {}
+_live_copy_stale_exit: dict = {"alerts": [], "autoclose": [], "checked_ts": None}
+LIVE_COPY_STALE_EXIT_AUTOCLOSE = os.getenv("LIVE_COPY_STALE_EXIT_AUTOCLOSE", "1") == "1"
+LIVE_COPY_OPS_USER_ID = os.getenv("LIVE_COPY_OPS_USER_ID", "cmpqruryl000an03cvl640wzb")
+LIVE_COPY_OPS_BASE = os.getenv("LIVE_COPY_OPS_BASE",
+                               "https://doxxedcrypto.digital/api/trading-agents/conservative-btc/ops")
+
+
+def _live_copy_stale_exit_check(now=None) -> list:
+    """LIVE-FIX-1415: paper closed, live still open > 5 s -> alert; > 15 s ->
+    force-flat the relay account via the sanctioned ops re-arm path
+    (FORCE_FLAT_THEN_REARM, Danish 12 Oct standing order). Once per trade."""
+    import live_copy_lifecycle as _lcl
+    now = time.time() if now is None else now
+    for tid, ts in list(_live_copy_paper_closed_ts.items()):
+        if now - ts > _lcl.PAPER_CLOSED_LIVE_OPEN_LOOKBACK_SEC:
+            _live_copy_paper_closed_ts.pop(tid, None)
+    if not any(now - ts > _lcl.PAPER_CLOSED_LIVE_OPEN_ALERT_SEC for ts in _live_copy_paper_closed_ts.values()):
+        _live_copy_stale_exit.update(alerts=[], checked_ts=now)
+        return []
+    by_corr = _get_live_copy_journal().by_correlation()
+    def _open_copy(t):
+        types = {str(r.get("type")) for r in by_corr.get(t) or []}
+        return bool(types & _lcl._RELAY_LIVE_TYPES) and "POSITION_CLOSED" not in types
+    for t in [t for t in _live_copy_paper_closed_ts if not _open_copy(t)]:
+        _live_copy_paper_closed_ts.pop(t, None)  # relay closed it, or never went live
+    if not _live_copy_paper_closed_ts:
+        _live_copy_stale_exit.update(alerts=[], checked_ts=now)
+        return []
+    audit = _refresh_bitfinex_exposure_audit()
+    exchange_open = bool(audit.get("authoritative") and audit.get("fresh") and not audit.get("flat"))
+    rows = _lcl.paper_closed_live_open(_live_copy_paper_closed_ts, by_corr, exchange_open, now)
+    _live_copy_stale_exit.update(alerts=rows, checked_ts=now)
+    for row in rows:
+        logger.warning(f"[LIVE COPY] PAPER_CLOSED_LIVE_OPEN trade={row['trade_id']} age={row['age_s']}s")
+        done = {a.get("trade_id") for a in _live_copy_stale_exit["autoclose"]}
+        if row["autoclose"] and LIVE_COPY_STALE_EXIT_AUTOCLOSE and row["trade_id"] not in done and _BOT_ADMIN_TOKEN:
+            rec = {"trade_id": row["trade_id"], "ts": now}
+            try:
+                r = requests.post(
+                    f"{LIVE_COPY_OPS_BASE}/rearm", params={"userId": LIVE_COPY_OPS_USER_ID},
+                    json={"confirmation": "FORCE_FLAT_THEN_REARM",
+                          "reason": f"PAPER_CLOSED_LIVE_OPEN {row['trade_id']} {row['age_s']}s"},
+                    headers={"X-Bot-Admin-Token": _BOT_ADMIN_TOKEN}, timeout=30)
+                rec.update(status=r.status_code, body=r.text[:200])
+            except Exception as exc:  # noqa: BLE001
+                rec.update(error=str(exc)[:200])
+            _live_copy_stale_exit["autoclose"] = (_live_copy_stale_exit["autoclose"] + [rec])[-50:]
+            logger.warning(f"[LIVE COPY] PAPER_CLOSED_LIVE_OPEN auto-close {rec}")
+    return rows
+
+
 def _live_copy_delivery_loop():
     last_web = 0.0
     while not shutdown_event.is_set():
@@ -58934,6 +59011,11 @@ def _live_copy_delivery_loop():
             _live_copy_deliver_once()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[LIVE COPY] delivery tick failed: {exc}")
+        try:
+            if _live_copy_paper_closed_ts:
+                _live_copy_stale_exit_check()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[LIVE COPY] stale-exit check failed: {exc}")
         if time.time() - last_web >= 30.0:
             last_web = time.time()
             try:
@@ -58941,7 +59023,7 @@ def _live_copy_delivery_loop():
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"[LIVE COPY] website state refresh failed: {exc}")
         pending = _get_live_copy_outbox().status().get("pending") or 0
-        _live_copy_delivery_wake.wait(0.5 if pending else 15.0)
+        _live_copy_delivery_wake.wait(0.5 if pending else (1.0 if _live_copy_paper_closed_ts else 15.0))
         _live_copy_delivery_wake.clear()
         _worker_beat("_live_copy_delivery_loop")
 

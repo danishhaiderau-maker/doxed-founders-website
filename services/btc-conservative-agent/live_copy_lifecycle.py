@@ -488,36 +488,48 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
     }
 
 
+_RELAY_LIVE_TYPES = frozenset({"ORDER_PLACED", "ORDER_FILLED", "STOP_PLACED", "STOP_CONFIRMED"})
+
+
 def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
     """LIVE-FIX-0500: link Bitfinex exposure placed by the Railway relay to its
     open copied trade so Fly's exposure audit stops calling it an orphan.
 
-    Open copy = journal has ORDER_FILLED and no POSITION_CLOSED. Its entry and
-    stop exchange order ids are managed. The single exchange position is
-    managed only when side and aggregate qty (5%) match the open copies.
+    LIVE-FIX-1415: a copy stays managed from the relay's first live report
+    (ORDER_PLACED / ORDER_FILLED / STOP_*) until the relay reports
+    POSITION_CLOSED, which it only sends after Bitfinex confirmed the close
+    (TERMINAL_CLOSE_CONFIRMED -> EXIT). Previously a copy whose ORDER_FILLED
+    report lagged (reporter 503s) was dropped and the live position was
+    flagged an orphan (dsl-1791772232-3, 12 Oct 13:31). Qty falls back to the
+    order / stop qty when the fill report has not arrived yet.
     Returns (order_ids:set[str], position_ids:set[str], links:dict)."""
     order_ids, position_ids, links = set(), set(), {}
     open_qty, sides = 0.0, set()
     for cid, rows in (by_correlation or {}).items():
         types = {str(r.get("type")) for r in rows or []}
-        if "ORDER_FILLED" not in types or "POSITION_CLOSED" in types:
+        if not (types & _RELAY_LIVE_TYPES) or "POSITION_CLOSED" in types:
             continue
-        ids = []
+        ids, fill_qty, fallback_qty = [], 0.0, 0.0
         for r in rows:
             for key in ("order", "stop"):
                 o = r.get(key) if isinstance(r.get(key), Mapping) else {}
                 if o.get("exchange_order_id"):
                     ids.append(str(o.get("exchange_order_id")))
+                q = _f(o.get("qty")) or 0.0
+                if q and not fallback_qty:
+                    fallback_qty = abs(q)
+                side = str(o.get("side") or "").upper()
+                if key == "order" and side in ("LONG", "SHORT"):
+                    sides.add(side)
             if str(r.get("type")) == "ORDER_FILLED":
                 f = r.get("fill") if isinstance(r.get("fill"), Mapping) else {}
-                q = _f(f.get("qty")) or 0.0
-                o = r.get("order") if isinstance(r.get("order"), Mapping) else {}
-                side = str(f.get("side") or o.get("side") or "").upper()
-                open_qty += abs(q)
-                if side:
+                fill_qty += abs(_f(f.get("qty")) or 0.0)
+                side = str(f.get("side") or "").upper()
+                if side in ("LONG", "SHORT"):
                     sides.add(side)
+        open_qty += fill_qty or fallback_qty
         order_ids.update(ids)
-        links[cid] = {"order_ids": sorted(set(ids))}
+        links[cid] = {"order_ids": sorted(set(ids)), "filled_reported": bool(fill_qty)}
     if len(exchange_positions or []) == 1 and open_qty > 0:
         p = exchange_positions[0]
         size = size_fn(p)
@@ -529,3 +541,32 @@ def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
             for v in links.values():
                 v["position_id"] = pid
     return order_ids, position_ids, links
+
+
+PAPER_CLOSED_LIVE_OPEN_ALERT_SEC = 5.0
+PAPER_CLOSED_LIVE_OPEN_AUTOCLOSE_SEC = 15.0
+PAPER_CLOSED_LIVE_OPEN_LOOKBACK_SEC = 900.0
+
+
+def paper_closed_live_open(paper_closed_ts, by_correlation, exchange_open, now,
+                           alert_sec=PAPER_CLOSED_LIVE_OPEN_ALERT_SEC,
+                           autoclose_sec=PAPER_CLOSED_LIVE_OPEN_AUTOCLOSE_SEC):
+    """LIVE-FIX-1415: live copies whose paper trade closed > alert_sec ago but
+    the relay has not reported POSITION_CLOSED while Bitfinex still shows
+    exposure. Pure. Returns a list of {trade_id, age_s, autoclose} rows."""
+    if not exchange_open:
+        return []
+    out = []
+    for tid, ts in (paper_closed_ts or {}).items():
+        try:
+            age = float(now) - float(ts)
+        except (TypeError, ValueError):
+            continue
+        if age <= alert_sec or age > PAPER_CLOSED_LIVE_OPEN_LOOKBACK_SEC:
+            continue
+        types = {str(r.get("type")) for r in (by_correlation or {}).get(tid) or []}
+        if not (types & _RELAY_LIVE_TYPES) or "POSITION_CLOSED" in types:
+            continue
+        out.append({"trade_id": tid, "age_s": round(age, 1), "autoclose": age > autoclose_sec,
+                    "alert": "PAPER_CLOSED_LIVE_OPEN"})
+    return sorted(out, key=lambda r: -r["age_s"])

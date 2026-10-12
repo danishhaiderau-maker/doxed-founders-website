@@ -7287,7 +7287,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return false;
     });
     if (fidelityGuardTripped) {
+      this.currentStage = 'PERSIST_FIDELITY_GUARD_CAPACITY';
       await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
+      this.currentStage = 'EXIT_FIDELITY_GUARD_TRIPPED';
       return;
     }
 
@@ -7303,11 +7305,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           },
         });
       }
+      this.currentStage = 'EXIT_ONLY_NO_NEW_ENTRIES';
       return;
     }
 
     this.currentStage = 'PERSIST_ACTIVE_CAPACITY';
     await this.persistCapacityState(instance, lotSummary, maxConcurrent, botMax);
+
+    // LIVE-FIX-1415: PERSIST_ACTIVE_CAPACITY used to be the last stage ever set,
+    // so every pass (healthy or not) reported it as lastPassExitStage.
+    this.currentStage = 'MIRROR_CATCHUP_ENTRIES';
 
     await this.attemptMirrorCatchupEntries(
       agentId,
@@ -7336,9 +7343,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             'Showcase bot paused on dashboard — no new copy entries until admin resumes trading.',
         },
       });
+      this.currentStage = 'EXIT_SHOWCASE_BOT_PAUSED';
       return;
     }
 
+    this.currentStage = 'PROCESS_SIGNED_ENTRY_INTENTS';
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
     const canonicalEntryBook = canonicalSignedBook;
     // The polling backstop must not recreate the legacy unsigned entry path.
@@ -7607,6 +7616,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
       }
     }
+    this.currentStage = 'PASS_COMPLETE';
   }
 
   /**
@@ -9165,8 +9175,35 @@ await this.notifications
     // at least MISMATCH_CONFIRM_MS apart before the relay is paused. Until
     // then: alert (log + dashboard), no new entries, no pause.
     if (fillGrace.reason !== 'GRACE_EXPIRED') {
-      const firstMs = typeof dash.positionMismatchFirstObservedAt === 'string'
+      // LIVE-FIX-1415: a terminal close (or entry) in flight is a transient by
+      // definition (13:54:59 pause landed 0.4 s after dsl-1791773634-9's
+      // TERMINAL_CLOSE_CLAIM, before its close order was even submitted).
+      const inFlight = await this.prisma.signalCycleParticipant.count({
+        where: {
+          userId: instance.userId,
+          venue: simActive ? 'bitfinex_sim' : 'bitfinex',
+          OR: [
+            { status: SignalCycleStatus.OPEN, terminalCloseClaimedAt: { gte: new Date(Date.now() - 60_000) } },
+            { status: SignalCycleStatus.PENDING_ENTRY, createdAt: { gte: new Date(Date.now() - PENDING_FILL_RECONCILE_GRACE_MS) } },
+            { status: SignalCycleStatus.CLOSED, updatedAt: { gte: new Date(Date.now() - MISMATCH_CONFIRM_MS) } },
+          ],
+        },
+      }).catch(() => 0);
+      if (inFlight > 0) {
+        this.logger.warn(
+          `[POSITION-MISMATCH-TRANSIENT] ${instance.userId}: exchange ${signedExchangeAmount.toFixed(8)} vs ledger ` +
+            `${signedLedgerOpenAmount.toFixed(8)} with ${inFlight} entry/close in flight; deferring (no pause)`,
+        );
+        return false;
+      }
+      // LIVE-FIX-1415: a first-observed stamp left over from an older
+      // transient (never cleared because later ticks returned before the
+      // delta==0 branch) made the next transient pause instantly (11:42,
+      // 13:28, 13:54 on 12 Oct). Only a recent observation counts.
+      const firstMsRaw = typeof dash.positionMismatchFirstObservedAt === 'string'
         ? Date.parse(dash.positionMismatchFirstObservedAt) : NaN;
+      const firstMs = Number.isFinite(firstMsRaw) && Date.now() - firstMsRaw <= MISMATCH_CONFIRM_MS * 4
+        ? firstMsRaw : NaN;
       if (!Number.isFinite(firstMs) || Date.now() - firstMs < MISMATCH_CONFIRM_MS) {
         if (!Number.isFinite(firstMs)) {
           await this.prisma.tradingAgentInstance.update({
@@ -9185,6 +9222,29 @@ await this.notifications
         );
         return false;
       }
+    }
+
+    // LIVE-FIX-1415: reconcile against Bitfinex once more right before pausing.
+    try {
+      const reread = await this.readOpenPositionDetailWithRetry(creds);
+      const rereadAmount = satsToBtc(btcToSats(reread?.amount ?? 0));
+      if (btcToSats(relayPositionDeltaSats(rereadAmount, signedLedgerOpenAmount)) === 0) {
+        this.logger.warn(
+          `[POSITION-MISMATCH-TRANSIENT] ${instance.userId}: fresh Bitfinex re-read ${rereadAmount.toFixed(8)} ` +
+            `matches ledger ${signedLedgerOpenAmount.toFixed(8)}; no pause`,
+        );
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
+              positionMismatchFirstObservedAt: null,
+            }) as unknown as Prisma.InputJsonValue,
+          },
+        }).catch(() => undefined);
+        return false;
+      }
+    } catch {
+      // Read failure keeps the existing fail-closed behaviour below.
     }
 
     const message =
