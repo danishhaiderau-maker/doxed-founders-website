@@ -83,3 +83,17 @@ def test_heartbeat_lag_with_fresh_report_is_not_unreachable():
     out = _summary(web, 950.0)
     assert "EXECUTOR_UNREACHABLE" not in out["causes"] and "EXECUTOR_HEARTBEAT_LAGGING" in out["causes"]
     assert "EXECUTOR_UNREACHABLE" in _summary(web, 500.0)["causes"]
+
+
+def test_live_fix_1494_stop_path_split():
+    import live_monitor_routes as m
+    rep = {"correlation_id": "dsl-1", "type": "ORDER_FILLED", "timeline": {
+        "fly_signal_at_ts": 100.0, "fill_at_ts": 101.0, "stop_entry_ack_at_ts": 101.1,
+        "stop_fill_detected_at_ts": 101.9, "stop_claimed_at_ts": 102.2, "stop_submit_started_at_ts": 102.25,
+        "stop_placed_at_ts": 102.6, "stop_confirmed_at_ts": 104.6}}
+    out = m.timeline([rep], [], {})
+    e = out["rows"][0]["entry"]
+    assert e["stop_ack_to_confirmed_ms"] == 2000
+    assert e["entry_ack_to_fill_detected_ms"] == 800
+    assert e["entry_ack_to_stop_ack_ms"] == 1500
+    assert out["rolling"]["stop_ack_to_confirmed_ms"]["n"] == 1
