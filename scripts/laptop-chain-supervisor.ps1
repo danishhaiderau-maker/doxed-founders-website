@@ -42,10 +42,15 @@ try {
   # promotion and the analyzer run the code Fly runs. Opt out with
   # <StateDir>\v2c-auto-ff.disabled. Never fails the tick.
   $autoFf = 'autoFf=off'
+  $followedDeploy = $false
   if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled'))) {
     try {
+      $revBefore = (& git -C $cfg.RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
       & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'v2c-auto-ff.ps1') @roots | Out-Null
       $autoFf = "autoFf=$LASTEXITCODE"
+      $revAfter = (& git -C $cfg.RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+      # HM-BATCH3: rerun the analyzer right after each deploy the laptop follows.
+      if ($revBefore -and $revAfter -and $revBefore -ne $revAfter) { $followedDeploy = $true; $autoFf += ' followed' }
     } catch { $autoFf = 'autoFf=error' }
   }
 
@@ -69,7 +74,7 @@ try {
     $analyzer = Read-JsonFile $cfg.AnalyzerStatus
     $lastStart = if ($cycle) { ConvertTo-UtcDate $cycle.startedAt } elseif ($analyzer) { ConvertTo-UtcDate $analyzer.startedAt } else { $null }
     $cycleFailed = $cycle -and $null -ne $cycle.exitCode -and [int]$cycle.exitCode -ne 0
-    $due = ($null -eq $lastStart) -or $cycleFailed -or (([datetime]::UtcNow - $lastStart).TotalMinutes -ge $AnalyzerIntervalMin)
+    $due = $followedDeploy -or ($null -eq $lastStart) -or $cycleFailed -or (([datetime]::UtcNow - $lastStart).TotalMinutes -ge $AnalyzerIntervalMin)
     if ($due -or -not $dashboardUp) {
       $runner = if ($due) { 'run-segment-analyzer-cycle.ps1' } else { 'run-analyzer-once.ps1' }
       $runnerArgs = @('-Port', "$Port", '-Reason', $(if ($due) { 'schedule' } else { 'dashboard-down' }))
