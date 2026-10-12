@@ -632,12 +632,13 @@ test('entry claim and correlated boundary snapshot are serialized by one databas
   const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
   // LIVE-FIX-1445: the claim tx lives in runEntryClaimTx (shared by the normal and speculative claim).
   const transactionAt = source.indexOf('return this.prisma.$transaction(async (tx) => {', source.indexOf('private runEntryClaimTx('));
-  const lockAt = source.indexOf('pg_advisory_xact_lock', transactionAt);
-  const claimAt = source.indexOf('const claimed = await tx.signalCycleParticipant.create', lockAt);
+  const lockAt = source.indexOf('pg_advisory_xact_lock'); // LIVE-FIX-1460: lock lives in LOCKED_ENTRY_CLAIM_SQL
+  const claimAt = source.indexOf('const claimed = await lockedEntryClaimInsert(tx,', transactionAt);
   const assessAt = source.indexOf('this.correlatedExposureSnapshot', claimAt);
   const returnAt = source.indexOf('private async releaseSpeculativeClaim', assessAt);
-  assert.ok(transactionAt >= 0 && lockAt > transactionAt);
-  assert.ok(claimAt > lockAt && assessAt > claimAt && returnAt > assessAt);
+  assert.ok(transactionAt >= 0 && lockAt >= 0 && claimAt > transactionAt);
+  assert.match(source, /WITH l AS \(SELECT pg_advisory_xact_lock\(hashtext\(\$1\)\)/);
+  assert.ok(assessAt > claimAt && returnAt > assessAt);
   assert.match(source.slice(transactionAt, returnAt), /copy-cluster:\$\{instance\.userId\}:\$\{agentId\}/);
   const clusterEnd = returnAt;
   const clusterTxn = source.slice(transactionAt, clusterEnd);

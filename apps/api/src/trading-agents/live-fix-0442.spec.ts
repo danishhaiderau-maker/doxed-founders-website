@@ -96,8 +96,8 @@ test('LIVE-FIX-1445: speculative claim is used only on an exact input match and 
   assert.notEqual(a, entryClaimKey({ cycleId: 'c1', direction: 'LONG', limitPrice: 83912, qty: 0.00029, marginUsd: 0.24 }));
   assert.notEqual(a, entryClaimKey({ cycleId: 'c2', direction: 'LONG', limitPrice: 83911, qty: 0.00029, marginUsd: 0.24 }));
   const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
-  // one claim path for both: the (cycleId,userId) unique create inside runEntryClaimTx
-  assert.equal((src.match(/tx\.signalCycleParticipant\.create\(\{\n\s+data: \{\n\s+cycleId,\n\s+userId: instance\.userId,\n\s+venue,\n\s+status: SignalCycleStatus\.INTENT/g) ?? []).length, 1);
+  // one claim path for both: the (cycleId,userId) unique claim inside runEntryClaimTx
+  assert.equal((src.match(/lockedEntryClaimInsert\(tx,/g) ?? []).length, 1);
   assert.ok(src.includes('if (spec && spec.key === specKey)'));
   assert.ok(src.includes('if (!spec.ok) throw spec.error;')); // P2002 from the speculative claim -> claim-lost, no submit
   assert.ok(src.includes("void unusedSpeculative.then((spec) => this.releaseSpeculativeClaim(spec))"));
@@ -105,4 +105,39 @@ test('LIVE-FIX-1445: speculative claim is used only on an exact input match and 
   const fence = src.indexOf("eventType: 'ENTRY_SUBMISSION_UNKNOWN'");
   const submit = src.indexOf('const orderId = await this.activeTrading.submitLimitOrder(creds, {');
   assert.ok(fence > 0 && submit > fence);
+});
+
+test('LIVE-FIX-1460: one-statement lock+claim; duplicate claim -> P2002 (no second order)', async () => {
+  const svc = await import('./signal-subscriber-execution.service');
+  const seen: unknown[][] = [];
+  const claims = new Set<string>();
+  const tx = {
+    $executeRawUnsafe: async () => { throw new Error('two-statement path must not run'); },
+    signalCycleParticipant: { create: async () => { throw new Error('no'); } },
+    $queryRawUnsafe: async (q: string, ...v: unknown[]) => {
+      seen.push([q, ...v]);
+      const key = `${v[2]}|${v[3]}`;
+      if (claims.has(key)) throw Object.assign(new Error('duplicate key value violates unique constraint'), { meta: { code: '23505' } });
+      claims.add(key);
+      return [{ id: v[1] }];
+    },
+  };
+  const first = await svc.lockedEntryClaimInsert(tx as never, { lockKey: 'copy-cluster:u:a', cycleId: 'cyc', userId: 'u', venue: 'bitfinex' });
+  assert.match(first.id, /^c[0-9a-f]{24}$/);
+  assert.match(String(seen[0][0]), /WITH l AS \(SELECT pg_advisory_xact_lock\(hashtext\(\$1\)\)[\s\S]*INSERT INTO "SignalCycleParticipant"[\s\S]*FROM l RETURNING "id"/);
+  // Concurrent/duplicate claim for the same cycle+user loses with P2002 -> caller returns claim-lost, never submits.
+  await assert.rejects(
+    svc.lockedEntryClaimInsert(tx as never, { lockKey: 'copy-cluster:u:a', cycleId: 'cyc', userId: 'u', venue: 'bitfinex' }),
+    (e: unknown) => (e as { code?: string }).code === 'P2002' && (e as Error).name === 'PrismaClientKnownRequestError',
+  );
+  // Unexpected raw failure fails closed and switches to the two-statement path.
+  const bad = { ...tx, $queryRawUnsafe: async () => { throw new Error('type "SignalCycleStatus" does not exist'); } };
+  await assert.rejects(svc.lockedEntryClaimInsert(bad as never, { lockKey: 'k', cycleId: 'c2', userId: 'u', venue: 'bitfinex' }));
+  assert.equal(svc.lockedClaimSingleStatement.enabled, false);
+  svc.lockedClaimSingleStatement.enabled = true;
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const tx0 = src.indexOf('private runEntryClaimTx(');
+  const ins = src.indexOf('lockedEntryClaimInsert(tx,', tx0);
+  const snap = src.indexOf('this.correlatedExposureSnapshot(', ins);
+  assert.ok(tx0 > 0 && ins > tx0 && snap > ins, 'cluster snapshot runs after the lock+insert statement');
 });

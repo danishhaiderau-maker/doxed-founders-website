@@ -3741,6 +3741,53 @@ export function subscriberPositionReductionEnabled(raw: string | undefined | nul
   return String(raw ?? '').trim().toLowerCase() !== 'false';
 }
 
+/**
+ * LIVE-FIX-1460: take the per-account cluster lock and insert the INTENT claim
+ * in ONE statement (one DB round trip instead of two). The CTE's lock row is
+ * the INSERT's source, so the advisory lock is held before the row exists;
+ * the correlated-exposure snapshot still runs as a later statement, after the
+ * lock, so it sees every committed competing claim. A duplicate (cycleId,
+ * userId) claim is re-thrown as P2002 so callers keep their claim-lost path.
+ */
+export const LOCKED_ENTRY_CLAIM_SQL =
+  'WITH l AS (SELECT pg_advisory_xact_lock(hashtext($1)) AS locked) '
+  + 'INSERT INTO "SignalCycleParticipant" ("id", "cycleId", "userId", "venue", "status", "createdAt", "updatedAt") '
+  + `SELECT $2, $3, $4, $5, 'INTENT'::"SignalCycleStatus", now(), now() FROM l RETURNING "id"`;
+
+export const lockedClaimSingleStatement = { enabled: true, lastError: null as string | null };
+
+export async function lockedEntryClaimInsert(
+  tx: { $queryRawUnsafe?: (q: string, ...v: unknown[]) => Promise<unknown>; $executeRawUnsafe: (q: string, ...v: unknown[]) => Promise<unknown>; signalCycleParticipant: { create: (a: any) => Promise<{ id: string }> } },
+  input: { lockKey: string; cycleId: string; userId: string; venue: string },
+): Promise<{ id: string }> {
+  if (typeof tx.$queryRawUnsafe !== 'function' || !lockedClaimSingleStatement.enabled
+      || process.env.ENTRY_CLAIM_SINGLE_STATEMENT === 'false') {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', input.lockKey);
+    return tx.signalCycleParticipant.create({
+      data: { cycleId: input.cycleId, userId: input.userId, venue: input.venue, status: SignalCycleStatus.INTENT },
+    });
+  }
+  const id = `c${randomUUID().replace(/-/g, '').slice(0, 24)}`;
+  try {
+    const rows = await tx.$queryRawUnsafe(LOCKED_ENTRY_CLAIM_SQL, input.lockKey, id, input.cycleId, input.userId, input.venue) as Array<{ id: string }>;
+    if (!Array.isArray(rows) || rows[0]?.id !== id) throw new Error('ENTRY_CLAIM_INSERT_NO_ROW');
+    return { id };
+  } catch (err) {
+    const meta = (err as { meta?: { code?: string } })?.meta;
+    const msg = err instanceof Error ? err.message : String(err);
+    if (meta?.code === '23505' || /23505|unique constraint/i.test(msg)) {
+      throw new PrismaClientKnownRequestError(`Unique constraint failed on (cycleId, userId): ${msg.slice(0, 200)}`, {
+        code: 'P2002', clientVersion: 'raw', meta: { target: ['cycleId', 'userId'] },
+      });
+    }
+    // Any other raw failure (schema drift): fail this claim closed and use the
+    // two-statement Prisma path from now on.
+    lockedClaimSingleStatement.enabled = false;
+    lockedClaimSingleStatement.lastError = msg.slice(0, 200);
+    throw err;
+  }
+}
+
 export function submitResponseFill(raw: unknown, intendedQty: number): {
   filledQty: number; fillPrice: number; source: 'ORDER_PARTIAL'; orderResting: false;
 } | null {
@@ -10024,19 +10071,11 @@ await this.notifications
     const intent = { direction: input.direction };
     return this.prisma.$transaction(async (tx) => {
         if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
-        await tx.$executeRawUnsafe(
-          'SELECT pg_advisory_xact_lock(hashtext($1))',
-          `copy-cluster:${instance.userId}:${agentId}`,
-        );
-        if (timing) (timing.marks ??= {}).claimLock = Date.now();
-        const claimed = await tx.signalCycleParticipant.create({
-          data: {
-            cycleId,
-            userId: instance.userId,
-            venue,
-            status: SignalCycleStatus.INTENT,
-          },
+        const claimed = await lockedEntryClaimInsert(tx, {
+          lockKey: `copy-cluster:${instance.userId}:${agentId}`,
+          cycleId, userId: instance.userId, venue,
         });
+        if (timing) (timing.marks ??= {}).claimLock = Date.now();
         if (timing) (timing.marks ??= {}).claimInsert = Date.now();
         const assessment = await this.correlatedExposureSnapshot({
           userId: instance.userId, agentId, participantId: claimed.id,
