@@ -145,7 +145,7 @@ test('gate 5: persisted PAUSED_HEALTHY is visible for display but arming keeps s
       healthy: true,
       status: 'PAUSED_HEALTHY',
       running: false,
-      observedAt: '2026-09-30T00:08:30.000Z',
+      observedAt: '2026-09-30T00:09:40.000Z',
       serviceRole: 'executor-worker',
       executionEnabled: true,
     },
@@ -153,7 +153,7 @@ test('gate 5: persisted PAUSED_HEALTHY is visible for display but arming keeps s
   const display = readPersistedRelayExecutorHealth(dash, now);
   assert.equal(display.status, 'PAUSED_HEALTHY');
   assert.equal(display.healthy, true);
-  assert.equal(display.heartbeatAgeMs, 90_000);
+  assert.equal(display.heartbeatAgeMs, 20_000);
 
   const arm = readPersistedRelayExecutorHealth(dash, now, undefined, 0);
   assert.equal(arm.healthy, false);
