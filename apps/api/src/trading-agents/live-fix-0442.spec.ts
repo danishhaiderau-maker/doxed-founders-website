@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   EXCHANGE_MIRROR_MAX_AGE_MS,
   exchangeMirrorMayRun,
@@ -140,4 +142,49 @@ test('LIVE-FIX-1460: one-statement lock+claim; duplicate claim -> P2002 (no seco
   const ins = src.indexOf('lockedEntryClaimInsert(tx,', tx0);
   const snap = src.indexOf('this.correlatedExposureSnapshot(', ins);
   assert.ok(tx0 > 0 && ins > tx0 && snap > ins, 'cluster snapshot runs after the lock+insert statement');
+});
+
+// LIVE-FIX-1480: every authenticated POSITION_CLOSED direct wake was rejected
+// HTTP 400 because the generated platform_relay_eligible allowlist is empty.
+test('1480: direct close/open wakes for active dashboard tiles are accepted', async () => {
+  const { parseExecutorWakeRequest, relayWakeTradeIdRoutable } = await import('../relay-executor-wake-http');
+  const now = Date.now();
+  for (const tid of ['dsl-1791785201-4', 'dsf-1791785201-2', 'gs1-446291153ae7', 'gs6-0123456789ab']) {
+    assert.equal(relayWakeTradeIdRoutable(tid), true, tid);
+    const close = parseExecutorWakeRequest({
+      trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: tid,
+      signedClose: {
+        tradeId: tid, eventId: `close-${tid}`, eventSeq: 3, exitPrice: 83_900,
+        exitReason: 'TIME_EXIT_60S', sourceEventAtMs: now - 400, platformReceivedAtMs: now,
+      },
+    });
+    assert.equal(close?.trigger, 'POSITION_CLOSED', tid);
+    assert.equal(close?.signedClose?.exitPrice, 83_900);
+    const open = parseExecutorWakeRequest({
+      trigger: 'POSITION_OPENED', at: new Date(now).toISOString(), tradeId: tid,
+      signedOpen: { fillPrice: 83_900, sourceEventAtMs: now - 300, platformReceivedAtMs: now },
+    });
+    assert.equal(open?.trigger, 'POSITION_OPENED', tid);
+  }
+});
+
+test('1480: retired, continuous, unknown and bare ids stay unroutable', async () => {
+  const { relayWakeTradeIdRoutable, parseExecutorWakeRequest } = await import('../relay-executor-wake-http');
+  for (const tid of ['cont-c105efa5', 'o29atr-deadbeef1234', 'gs7-deadbeef1234', 'unknown-1', 'deadbeef1234', 'dsl-', 'dsl', '']) {
+    assert.equal(relayWakeTradeIdRoutable(tid), false, tid);
+  }
+  const now = Date.now();
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
+    signedClose: {
+      tradeId: 'cont-c105efa5', eventId: 'e', eventSeq: 1, exitPrice: 1,
+      exitReason: 'X', sourceEventAtMs: now - 1, platformReceivedAtMs: now,
+    },
+  }), null);
+});
+
+test('1480: executor reads the durable wake immediately on boot', () => {
+  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const init = src.slice(src.indexOf('  onModuleInit() {'), src.indexOf('  onModuleInit() {') + 4000);
+  assert.ok(init.includes('this.schedulePersistedWakePoll(0);'));
 });

@@ -4259,7 +4259,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // cross-process wake independently and run only the idempotent atomic-claim
     // entry / exitingLots-guarded close path. The normal tick remains the crash
     // recovery and reconciliation backstop.
-    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
+    // LIVE-FIX-1480: read the durable wake immediately on boot. A close
+    // wake persisted while the previous container was swapping out must not
+    // wait an extra poll interval (it expires after 120 s).
+    this.schedulePersistedWakePoll(0);
     // Authenticated account-info trades are the latency path for exchange fills.
     // They consume no REST nonce/read budget; the ordinary reconciliation tick
     // remains the fail-closed reconnect/outage backstop.

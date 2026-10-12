@@ -183,7 +183,8 @@ test('persisted wake backstop projects JSON in Postgres and never reinstates a 2
     source.indexOf('onModuleDestroy()', source.indexOf('onModuleInit()')),
   );
   assert.match(moduleInitSource, /this\.scheduleReconciliation\(POLL_MS\)/);
-  assert.match(moduleInitSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
+  // LIVE-FIX-1480: boot reads the durable wake immediately.
+  assert.match(moduleInitSource, /this\.schedulePersistedWakePoll\(0\)/);
   const wakeNowSource = source.slice(
     source.indexOf('async wakeNow('),
     source.indexOf('/**\n   * F7', source.indexOf('async wakeNow(')),
