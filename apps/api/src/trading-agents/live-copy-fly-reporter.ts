@@ -460,21 +460,41 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
       take: 300,
     });
     const reports: LiveExecutionReport[] = [];
-    for (const c of cycles) {
-      const verdict = approvalPermitsRelayCopy(readEnvelopeFlyApproval(c.intentEnvelope), c.tradeId, secret);
-      if (!verdict.ok) continue;
-      const [participants, events] = await Promise.all([
-        this.prisma.signalCycleParticipant.findMany({
-          where: { cycleId: c.id },
-          select: { id: true, userId: true, stopLossConfirmedAt: true },
-        }),
-        this.prisma.signalCycleEvent.findMany({
-          where: { cycleId: c.id },
-          select: { id: true, participantId: true, eventType: true, payload: true, createdAt: true, platformReceivedAt: true },
-          orderBy: { createdAt: 'asc' },
-          take: 500,
-        }),
-      ]);
+    // LIVE-FIX-1450: batch the per-cycle reads. The old loop did 3 sequential
+    // DB round trips per approved cycle (up to 300 cycles), so a fresh fill
+    // reached Fly 9-13 s late. Now: 3 queries total, newest cycles first.
+    const approved = cycles
+      .map((c) => ({ c, verdict: approvalPermitsRelayCopy(readEnvelopeFlyApproval(c.intentEnvelope), c.tradeId, secret) }))
+      .filter((x): x is { c: typeof cycles[number]; verdict: Extract<typeof x.verdict, { ok: true }> } => x.verdict.ok);
+    if (!approved.length) return reports;
+    const cycleIds = approved.map((x) => x.c.id);
+    const [allParticipants, allEvents] = await Promise.all([
+      this.prisma.signalCycleParticipant.findMany({
+        where: { cycleId: { in: cycleIds } },
+        select: { id: true, userId: true, stopLossConfirmedAt: true, cycleId: true },
+      }),
+      this.prisma.signalCycleEvent.findMany({
+        where: { cycleId: { in: cycleIds } },
+        select: { id: true, participantId: true, eventType: true, payload: true, createdAt: true, platformReceivedAt: true, cycleId: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+    const pairs = [...new Set(approved.flatMap((x) => allParticipants.filter((p) => p.cycleId === x.c.id).map((p) => `${x.c.agentId}|${p.userId}`)))];
+    const instances = pairs.length
+      ? await this.prisma.tradingAgentInstance.findMany({
+          where: { OR: pairs.map((k) => ({ agentId: k.split('|')[0], userId: k.split('|')[1] })) },
+          select: { id: true, userId: true, agentId: true },
+        })
+      : [];
+    const eventsBy = new Map<string, typeof allEvents>();
+    for (const e of allEvents) {
+      const list = eventsBy.get(e.cycleId) ?? [];
+      if (list.length < 500) list.push(e);
+      eventsBy.set(e.cycleId, list);
+    }
+    for (const { c, verdict } of approved) {
+      const events = eventsBy.get(c.id) ?? [];
+      const participants = allParticipants.filter((p) => p.cycleId === c.id);
       reports.push(...buildExecutorDecisionReports({
         cycle: c,
         correlationId: String(verdict.approval.correlation_id),
@@ -483,11 +503,7 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
         nowMs,
       }));
       if (!participants.length) continue;
-      const instances = await this.prisma.tradingAgentInstance.findMany({
-        where: { agentId: c.agentId, userId: { in: participants.map((p) => p.userId) } },
-        select: { id: true, userId: true },
-      });
-      const byUser = new Map(instances.map((i) => [i.userId, liveCopyAccountLabel(i.id)]));
+      const byUser = new Map(instances.filter((i) => i.agentId === c.agentId).map((i) => [i.userId, liveCopyAccountLabel(i.id)]));
       reports.push(...buildLiveCopyReports({
         cycle: c,
         correlationId: String(verdict.approval.correlation_id),
@@ -539,7 +555,7 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
       const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET');
       if (!String(secret ?? '').trim()) return;
       const nowMs = Date.now();
-      await this.sendCapability(secret as string, nowMs);
+      void this.sendCapability(secret as string, nowMs).catch(() => false); // LIVE-FIX-1450: never delay fill reports
       const reports = (await this.collect(nowMs)).filter((r) => !this.acked.has(r.report_id));
       this.stats.pending = reports.length;
       for (const r of reports) {
