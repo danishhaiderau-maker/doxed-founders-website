@@ -189,6 +189,21 @@ const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
 export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
 
 /** Pure cadence resolver kept deterministic for the cost/correctness contract. */
+/**
+ * LIVE-FIX-1482: true when a resting venue stop is at least as protective as
+ * the requested one (LONG: not lower; SHORT: not higher), within 1% so a
+ * wildly wrong order is still refused.
+ */
+export function protectiveStopAtLeastAsTight(
+  direction: 'LONG' | 'SHORT',
+  venuePrice: number,
+  requestedPrice: number,
+): boolean {
+  if (!(venuePrice > 0) || !(requestedPrice > 0)) return false;
+  if (Math.abs(venuePrice - requestedPrice) / requestedPrice > 0.01) return false;
+  return direction === 'LONG' ? venuePrice >= requestedPrice - 1e-8 : venuePrice <= requestedPrice + 1e-8;
+}
+
 export function relayExecutorPollDelayMs(
   channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
   activity: RelayExecutorPollActivity,
@@ -16069,7 +16084,13 @@ await this.notifications
         const exactSymbol = order.symbol === BITFINEX_BTC_PERP_SYMBOL;
         const venueStopPrice = normalizeBitfinexOrderPrice(input.stopPrice);
         const exactPrice = Math.abs(order.price - venueStopPrice) < 1e-8
-          || Math.abs(order.price - input.stopPrice) < 0.011;
+          || Math.abs(order.price - input.stopPrice) < 0.011
+          // LIVE-FIX-1482: two fill funnels (WS/position-delta vs submit-ACK)
+          // can race to protect the same fill with the same idempotent
+          // clientOrderId but stop prices derived from fill vs limit. The
+          // venue keeps the first. A resting stop that is at least as
+          // protective as requested is real protection, not a mismatch.
+          || protectiveStopAtLeastAsTight(input.positionDirection, order.price, venueStopPrice);
         const active = order.status.toUpperCase().includes('ACTIVE');
         if (exactQty && exactSide && stopType && reduceOnly && exactSymbol && exactPrice && active) {
           return { ok: true, orderId, order };
@@ -16080,7 +16101,7 @@ await this.notifications
           !stopType ? 'TYPE' : null,
           !reduceOnly ? 'REDUCE_ONLY' : null,
           !exactSymbol ? 'SYMBOL' : null,
-          !exactPrice ? 'PRICE' : null,
+          !exactPrice ? `PRICE(venue=${order.price},want=${venueStopPrice})` : null,
           !active ? 'STATUS' : null,
         ].filter(Boolean).join(',');
       }

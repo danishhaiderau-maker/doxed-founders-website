@@ -188,3 +188,13 @@ test('1480: executor reads the durable wake immediately on boot', () => {
   const init = src.slice(src.indexOf('  onModuleInit() {'), src.indexOf('  onModuleInit() {') + 4000);
   assert.ok(init.includes('this.schedulePersistedWakePoll(0);'));
 });
+
+test('1482: a resting stop at least as protective as requested authenticates', async () => {
+  const { protectiveStopAtLeastAsTight: t } = await import('./signal-subscriber-execution.service');
+  assert.equal(t('LONG', 83_760, 83_750), true);   // tighter long stop
+  assert.equal(t('LONG', 83_740, 83_750), false);  // looser long stop
+  assert.equal(t('SHORT', 84_400, 84_410), true);  // tighter short stop
+  assert.equal(t('SHORT', 84_420, 84_410), false);
+  assert.equal(t('LONG', 85_000, 83_750), false);  // >1% off: refuse
+  assert.equal(t('LONG', 0, 83_750), false);
+});
