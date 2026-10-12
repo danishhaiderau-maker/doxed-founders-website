@@ -37021,7 +37021,9 @@ THREAD_HEALTH_MONITORED = {
     "protective_exit_worker": (PROTECTIVE_EXIT_INTERVAL_SEC, 30.0),
     "analytics_loop": (float(ANALYTICS_INTERVAL_SEC), 0.0),
     "main_supervisor_loop": (60.0, 0.0),
-    "api_state_cache_refresher": (_API_STATE_REFRESH_INTERVAL_SEC, 300.0),
+    # LIVE-FIX-1300: first full presentation build after a restore runs >5 min
+    # under load; 300 s flagged fly.workers RED on every deploy.
+    "api_state_cache_refresher": (_API_STATE_REFRESH_INTERVAL_SEC, 900.0),
     "dashboard_http_watchdog_loop": (DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC, 120.0),
     "bitfinex_live_reconcile_loop": (30.0, 300.0),
 }
