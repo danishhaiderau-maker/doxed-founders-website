@@ -55,3 +55,19 @@ def test_entry_fidelity_enrichment():
     c = chains[0]
     assert c["fill_model"] == "TAKER_AT_BOOK_TOUCH" and c["signal_ask_age_ms"] == 40
     assert c["rested_s"] == 0.05 and c["slippage_vs_signal_bp"] == 3.0 and c["slippage_vs_paper_bp"] == 2.0
+
+
+def test_declined_signal_shadow_ledger():
+    import live_copy_monitor as lcm
+    chains = [{"correlation_id": "dsl-9", "executor_decision": {"decision": "SKIPPED", "reason": "placement-declined"},
+               "errors": [{"type": "INTENT_SKIPPED", "code": "placement-declined"}]},
+              {"correlation_id": "dsl-8", "order_sent_at_ts": 1.0, "exchange_ack_at_ts": 1.1, "fill_at_ts": 1.1,
+               "fill_price": 100.0}]
+    twins = {"dsl-9": {"side": "LONG", "limit_price": 100120.0, "signal_mid": 100000.0, "entry_price": 100010.0,
+                       "exit_price": 100030.0, "fill_model": "TAKER_AT_BOOK_TOUCH"}}
+    out = lcm.enrich_entry_fidelity(chains, twins)
+    assert out["signals"] == 2 and out["declined"] == 1 and out["decline_rate"] == 0.5
+    d = out["declined_shadow"][0]
+    assert d["declined_reason"] == "placement-declined" and d["band_bp"] == 10.0
+    assert d["mark_vs_limit_bp"] == 12.0 and d["shadow_bp"] == 2.0
+    assert chains[0]["mark_vs_limit_bp"] == 12.0

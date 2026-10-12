@@ -333,12 +333,16 @@ def now_ts() -> float:
     return time.time()
 
 
+# Relay keeps its limit-vs-mark sanity band (HM 09:58): SUBSCRIBER_MAX limit <= mark x 1.001.
+RELAY_MARK_BAND_BP = 10.0
+
+
 def enrich_entry_fidelity(accounts, paper_twins) -> dict:
     """LIVE-FIX-1510: per-chain fill model / ask age / order type / rested_s / slippage, plus the
     DISLOC fill rate and a paper shadow of signals that did not fill live. Mutates chains."""
     twins = paper_twins or {}
-    attempted = filled = 0
-    unfilled = []
+    attempted = filled = signals = 0
+    unfilled, declined = [], []
     for ch in accounts:
         cid = str(ch.get("correlation_id") or "")
         twin = twins.get(cid) or {}
@@ -350,7 +354,25 @@ def enrich_entry_fidelity(accounts, paper_twins) -> dict:
         sgn = 1.0 if str(twin.get("side") or "").upper() != "SHORT" else -1.0
         ch["slippage_vs_signal_bp"] = round(sgn * (px / sig - 1) * 1e4, 2) if sig and px else None
         ch["slippage_vs_paper_bp"] = round(sgn * (px / paper - 1) * 1e4, 2) if paper and px else None
-        if not cid.startswith("dsl-") or not (ch.get("order_sent_at_ts") or ch.get("exchange_ack_at_ts")):
+        if not cid.startswith("dsl-"):
+            continue
+        signals += 1
+        if not (ch.get("order_sent_at_ts") or ch.get("exchange_ack_at_ts")):
+            # LIVE-FIX-1511 (HM 09:58): a declined signal (relay skipped it, e.g. the mark sanity band)
+            # goes to the shadow ledger with the paper twin's book-based fill.
+            dec = ch.get("executor_decision") or {}
+            errs = [e for e in ch.get("errors") or [] if e.get("type") == "INTENT_SKIPPED"]
+            if dec.get("decision") in ("SKIPPED", "REJECTED") or errs:
+                lim, mid = _f(twin.get("limit_price")), _f(twin.get("signal_mid"))
+                ep, xp = paper, _f(twin.get("exit_price"))
+                ch["declined_reason"] = dec.get("reason") or (errs[0].get("code") if errs else None)
+                ch["band_bp"] = RELAY_MARK_BAND_BP
+                ch["mark_vs_limit_bp"] = round(sgn * (lim / mid - 1) * 1e4, 2) if lim and mid else None
+                declined.append({"correlation_id": cid, "declined_reason": ch["declined_reason"],
+                                 "band_bp": RELAY_MARK_BAND_BP, "mark_vs_limit_bp": ch["mark_vs_limit_bp"],
+                                 "shadow_fill_price": ep, "shadow_fill_model": twin.get("fill_model"),
+                                 "shadow_exit_price": xp,
+                                 "shadow_bp": round(sgn * (xp / ep - 1) * 1e4, 2) if ep and xp else None})
             continue
         attempted += 1
         if px:
@@ -361,4 +383,9 @@ def enrich_entry_fidelity(accounts, paper_twins) -> dict:
                              "paper_bp": round(sgn * (xp / ep - 1) * 1e4, 2) if ep and xp else None})
     return {"lane": "DISLOC", "attempted": attempted, "filled": filled,
             "fill_rate": round(filled / attempted, 3) if attempted else None,
-            "unfilled_paper_shadow": unfilled[-50:]}
+            "unfilled_paper_shadow": unfilled[-50:],
+            "signals": signals, "declined": len(declined),
+            "decline_rate": round(len(declined) / signals, 3) if signals else None,
+            "band_bp": RELAY_MARK_BAND_BP,
+            "mark_vs_limit_basis": "Fly signal book mid vs signed limit (proxy for the relay mark)",
+            "declined_shadow": declined[-50:]}

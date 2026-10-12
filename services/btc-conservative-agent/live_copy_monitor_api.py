@@ -241,6 +241,17 @@ def live_lifecycle():  # R24: full live-trade lifecycle, per intent and account
     now = time.time()
     payload = lcl.build(ctx, now=now)
     payload["route"] = "R24"
+    try:  # LIVE-FIX-1511: per-chain declined_reason / band_bp / mark_vs_limit_bp + decline rate
+        a = _analysis(ctx, now)
+        accts = list(a["chains"]["accounts"].values())
+        payload["entry_fidelity"] = lcm.enrich_entry_fidelity(accts, ctx.get("paper_twins") or {})
+        keep = ("correlation_id", "account", "order_type", "order_tif", "entry_order_mode", "rested_s",
+                "fill_model", "signal_ask_age_ms", "slippage_vs_signal_bp", "slippage_vs_paper_bp",
+                "declined_reason", "band_bp", "mark_vs_limit_bp")
+        payload["entry_fidelity_chains"] = [{k: c.get(k) for k in keep} for c in accts
+                                            if str(c.get("correlation_id") or "").startswith("dsl-")][-100:]
+    except Exception as exc:  # noqa: BLE001 - observation only
+        payload["entry_fidelity"] = {"error": str(exc)[:200]}
     cid = request.args.get("correlation_id")
     if cid:
         payload["intents"] = [i for i in payload["intents"] if i.get("correlation_id") == cid

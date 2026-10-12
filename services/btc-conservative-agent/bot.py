@@ -32302,6 +32302,10 @@ def _disloc_note_paper_twin(event, tid, extra, row) -> None:
     with _DISLOC_PAPER_TWINS_LOCK:
         twin = _DISLOC_PAPER_TWINS.setdefault(str(tid), {"side": extra.get("direction"), "source": "disloc_engine",
                                                          "lane": extra.get("research_lane")})
+        if event == "ORDER_PLACED":  # LIVE-FIX-1511: decline diagnostics
+            twin["limit_price"] = extra.get("limit_price")
+            twin["signal_mid"] = row.get("signal_mid")
+            twin["signal_ts"] = row.get("signal_ts") or extra.get("signal_ts")
         if event == "POSITION_OPENED":
             twin["entry_price"] = extra.get("fill_price")
             twin["qty"] = extra.get("qty")
