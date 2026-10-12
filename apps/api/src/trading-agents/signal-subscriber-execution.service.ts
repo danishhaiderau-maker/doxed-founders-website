@@ -70,6 +70,7 @@ import {
   normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
   type BitfinexFuturesPairConstraints,
+  verifyBitfinexReadOnlyKey,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -4335,6 +4336,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `MULTIPLE RELAY EXECUTOR REPLICAS DETECTED (count=${replicaCount}); refusing to start the money path`,
       );
     }
+    if (process.env.BFX_READ_API_KEY?.trim() && process.env.BFX_READ_API_SECRET?.trim()) {
+      void this.verifyReadOnlyKeyOnStart();
+    }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
         `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (${describeSignedCopyMarginCap(cap)})`,
@@ -4475,6 +4479,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * process startup always performs a recovery pass.
    */
   /** LIVE-FIX-1499: per-participant entry observability handed from placeEntry to the fill funnel. */
+  /**
+   * LIVE-FIX-1500 (F5): prove BFX_READ_API_KEY is read-only and the same
+   * Bitfinex user as the live trading key. Any write scope => refuse to run.
+   * Unprovable identity => key unused (current behaviour). Never logs values.
+   */
+  private async verifyReadOnlyKeyOnStart(): Promise<void> {
+    try {
+      const inst = await this.prisma.tradingAgentInstance.findFirst({
+        where: { exchangeProvider: 'bitfinex', status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] } },
+        select: { userId: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      const creds = inst ? await this.exchanges.getUserCredentials(inst.userId, 'bitfinex') : null;
+      const active = await verifyBitfinexReadOnlyKey(creds ?? null);
+      this.logger.log(`[READ-KEY] read-only Bitfinex key ${active ? 'ACTIVE on its own nonce lane' : 'not used (identity unproven or no trading key)'}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/not read-only/.test(msg)) {
+        this.logger.error(`[READ-KEY] ${msg}`);
+        this.executorDestroyed = true;
+        process.exit(1);
+      }
+      this.logger.warn(`[READ-KEY] verification failed, key unused: ${msg.slice(0, 160)}`);
+    }
+  }
+
   private readonly entryObservability = new Map<string, {
     probeIndex: number | null;
     probeMarks: Array<{ i: number; start_ms: number; end_ms: number; result: string }>;
