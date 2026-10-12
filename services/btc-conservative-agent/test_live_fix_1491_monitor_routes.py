@@ -97,3 +97,14 @@ def test_live_fix_1494_stop_path_split():
     assert e["entry_ack_to_fill_detected_ms"] == 800
     assert e["entry_ack_to_stop_ack_ms"] == 1500
     assert out["rolling"]["stop_ack_to_confirmed_ms"]["n"] == 1
+
+
+def test_live_fix_1497_sweep_alert_goes_red():
+    import live_monitor_routes as m
+    acc = [{"account": "a1", "exchange_mirror": {}, "protection_sweep": [
+        {"at": "2026-10-12T11:00:00Z", "trade_id": "dsl-1", "action": "CANCEL_EXTRAS", "outcome": None}]}]
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 12, 11, 1, tzinfo=timezone.utc).timestamp()
+    out = m.protection_state(acc, now_ts=now)
+    assert out["status"] == "RED" and out["causes"][0].startswith("SWEEP_CANCEL_EXTRAS")
+    assert m.protection_state(acc, now_ts=now + 3600)["status"] == "GREEN"
