@@ -299,17 +299,117 @@ async function bitfinexAuthPostOnce<T>(
   return parsed as T;
 }
 
+/**
+ * LIVE-FIX-1500 (F5): optional read-only key (BFX_READ_API_KEY/SECRET) with its
+ * own nonce lane for authenticated READS (v2/auth/r/*). Writes always use the
+ * trading key. Active only after verifyBitfinexReadOnlyKey() proved the key has
+ * no write permission AND belongs to the same Bitfinex user as the trading key.
+ * Absent vars => current behaviour. Values are never logged.
+ */
+type ReadKeyState = { creds: ExchangeCredentials; tradingApiKey: string } | null;
+let readKeyState: ReadKeyState = null;
+export type BitfinexRestCallStat = {
+  at_ms: number; path: string; key: 'trade' | 'read'; lane: 'stop' | 'mutation' | 'read';
+  queue_wait_ms: number; rtt_ms: number | null; ok: boolean;
+};
+const restCallStats: BitfinexRestCallStat[] = [];
+const REST_CALL_STATS_MAX = 300;
+export function bitfinexRestCallStats(): BitfinexRestCallStat[] { return restCallStats.slice(); }
+export function bitfinexReadKeyActive(): boolean { return readKeyState != null; }
+/** @internal tests */
+export function setBitfinexReadKeyForTests(state: ReadKeyState): void { readKeyState = state; }
+
+export function isBitfinexAuthRead(apiPath: string): boolean {
+  return /^v2\/auth\/r\//.test(apiPath);
+}
+
+/** Pure: any write permission (orders, withdraw, wallets/transfer, funding, ...) => not read-only. */
+export function bitfinexPermissionsReadOnly(perms: unknown): { readOnly: boolean; writeScopes: string[] } {
+  if (!Array.isArray(perms) || perms.length === 0) return { readOnly: false, writeScopes: ['UNREADABLE'] };
+  const writeScopes = perms
+    .filter((row) => Array.isArray(row) && Number(row[2]) !== 0)
+    .map((row) => String((row as unknown[])[0]));
+  return { readOnly: writeScopes.length === 0, writeScopes };
+}
+
+/**
+ * Startup check. Throws (refuse to start) when the read key carries ANY write
+ * permission. Returns false (key unused, current behaviour) when vars are
+ * absent or identity can't be proven.
+ */
+export async function verifyBitfinexReadOnlyKey(
+  tradingCreds: ExchangeCredentials | null,
+  env: NodeJS.ProcessEnv = process.env,
+  post: typeof bitfinexAuthPostRaw = bitfinexAuthPostRaw,
+): Promise<boolean> {
+  const apiKey = env.BFX_READ_API_KEY?.trim();
+  const apiSecret = env.BFX_READ_API_SECRET?.trim();
+  readKeyState = null;
+  if (!apiKey || !apiSecret || !tradingCreds) return false;
+  const readCreds: ExchangeCredentials = { ...tradingCreds, apiKey, apiSecret };
+  const perms = await post(readCreds, 'v2/auth/r/permissions', {});
+  const verdict = bitfinexPermissionsReadOnly(perms);
+  if (!verdict.readOnly) {
+    throw new Error(`BFX_READ_API_KEY is not read-only (write scopes: ${verdict.writeScopes.join(',')}); refusing to start`);
+  }
+  const [mine, theirs] = await Promise.all([
+    post<unknown[]>(readCreds, 'v2/auth/r/info/user', {}),
+    post<unknown[]>(tradingCreds, 'v2/auth/r/info/user', {}),
+  ]);
+  const idA = Array.isArray(mine) ? mine[0] : null;
+  const idB = Array.isArray(theirs) ? theirs[0] : null;
+  if (idA == null || idA !== idB) return false; // different account: never route reads to it
+  readKeyState = { creds: readCreds, tradingApiKey: tradingCreds.apiKey };
+  return true;
+}
+
+/** Raw authenticated POST on the given key's lane (no read-key routing). */
+export async function bitfinexAuthPostRaw<T = unknown>(
+  creds: ExchangeCredentials,
+  apiPath: string,
+  body: Record<string, unknown> = {},
+  timeoutMs = 12_000,
+): Promise<T> {
+  return bitfinexAuthPostOnLane<T>(creds, apiPath, body, timeoutMs, 'trade');
+}
+
 export async function bitfinexAuthPost<T = unknown>(
   creds: ExchangeCredentials,
   apiPath: string,
   body: Record<string, unknown> = {},
   timeoutMs = 12_000,
 ): Promise<T> {
+  const rk = readKeyState;
+  if (rk && isBitfinexAuthRead(apiPath) && creds.apiKey === rk.tradingApiKey) {
+    return bitfinexAuthPostOnLane<T>(rk.creds, apiPath, body, timeoutMs, 'read');
+  }
+  return bitfinexAuthPostOnLane<T>(creds, apiPath, body, timeoutMs, 'trade');
+}
+
+async function bitfinexAuthPostOnLane<T = unknown>(
+  creds: ExchangeCredentials,
+  apiPath: string,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+  keyKind: 'trade' | 'read',
+): Promise<T> {
   const lane = nonceLaneFor(creds.apiKey);
   const enqueuedAtMs = Date.now();
+  const laneKind: BitfinexRestCallStat['lane'] = isBitfinexProtectiveStopSubmit(apiPath, body)
+    ? 'stop' : isBitfinexOrderMutation(apiPath) ? 'mutation' : 'read';
+  let startedAtMs: number | null = null;
+  const record = (ok: boolean) => {
+    const now = Date.now();
+    restCallStats.push({
+      at_ms: enqueuedAtMs, path: apiPath.replace(/\d{6,}/g, ':id'), key: keyKind, lane: laneKind,
+      queue_wait_ms: (startedAtMs ?? now) - enqueuedAtMs, rtt_ms: startedAtMs != null ? now - startedAtMs : null, ok,
+    });
+    if (restCallStats.length > REST_CALL_STATS_MAX) restCallStats.splice(0, restCallStats.length - REST_CALL_STATS_MAX);
+  };
   const deadlineAtMs = enqueuedAtMs + Math.max(1, timeoutMs);
   let expiredBeforeStart = false;
   const run = async (): Promise<T> => {
+    startedAtMs = Date.now();
     // The authenticated API is serialized per key because Bitfinex requires a
     // strictly increasing nonce.  A network timeout only bounded the request
     // *after* it reached the head of this lane; during exchange degradation a
@@ -370,7 +470,12 @@ export async function bitfinexAuthPost<T = unknown>(
     expiryTimer.unref?.();
   });
   try {
-    return await Promise.race([result, deadline]);
+    const out = await Promise.race([result, deadline]);
+    record(true);
+    return out;
+  } catch (err) {
+    record(false);
+    throw err;
   } finally {
     if (expiryTimer) clearTimeout(expiryTimer);
   }
