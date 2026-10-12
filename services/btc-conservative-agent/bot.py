@@ -32286,13 +32286,21 @@ def _disloc_paper_twins() -> dict:
     try:
         import disloc_engine as _dsl
         for lane in _dsl.LANE_FILES:
+            ledger_twins: dict = {}
             for r in _disloc_lane_raw_rows(lane)[-300:]:
                 tid = str((r or {}).get("trade_id") or "")
-                if not tid or tid in out or not r.get("fill_price"):
+                if not tid or tid in out:
                     continue
-                out[tid] = {"side": r.get("side"), "entry_price": r.get("fill_price"),
-                            "exit_price": r.get("exit_price"), "exit_reason": r.get("exit_reason"),
-                            "exit_ts": r.get("exit_ts"), "qty": None, "source": "disloc_ledger"}
+                t = ledger_twins.setdefault(tid, {"side": r.get("side"), "qty": None, "source": "disloc_ledger"})
+                # LIVE-FIX-1200: merge FILLED + CLOSED rows (first-row-wins left exit null).
+                if r.get("fill_price") and not t.get("entry_price"):
+                    t["entry_price"] = r.get("fill_price")
+                if r.get("exit_price") is not None:
+                    t.update(exit_price=r.get("exit_price"), exit_reason=r.get("exit_reason"),
+                             exit_ts=r.get("exit_ts"))
+            for tid, t in ledger_twins.items():
+                if t.get("entry_price"):
+                    out[tid] = t
     except Exception:  # noqa: BLE001 - best effort
         pass
     return out

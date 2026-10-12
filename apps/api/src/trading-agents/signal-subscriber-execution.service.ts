@@ -3675,6 +3675,24 @@ export const EXCHANGE_MIRROR_EVERY_MS = 15_000;
  * mirror skipped every tick that overlapped `running` and went 446-722 s stale. */
 export const EXCHANGE_MIRROR_MAX_AGE_MS = 45_000;
 
+/** LIVE-FIX-1200: tile family prefix of a showcase trade id (dsl-, gs1-, …), ignoring adopt:/relink: wrappers. */
+export function tradeIdFamily(tradeId: string | null | undefined): string {
+  let t = String(tradeId ?? '');
+  for (;;) {
+    if (t.startsWith('adopt:')) t = t.slice(6);
+    else if (t.startsWith('relink:')) t = t.slice(7);
+    else break;
+  }
+  const m = /^([a-z0-9]+)-/i.exec(t);
+  return m ? m[1].toLowerCase() : '';
+}
+
+export function relinkSameTileFamily(from: string | null | undefined, to: string | null | undefined): boolean {
+  const a = tradeIdFamily(from);
+  const b = tradeIdFamily(to);
+  return !a || !b || a === b;
+}
+
 /** Pure: may the read-only mirror run now? */
 export function exchangeMirrorMayRun(input: {
   destroyed: boolean;
@@ -15103,6 +15121,16 @@ await this.notifications
       alreadyRelinkedTo: claimedByOthers,
     });
     if (!candidate) return null;
+    // LIVE-FIX-1200: never relink a real fill across tile families. On 12 Oct
+    // 11:41 a phantom adopt:dsl-… lot (a DISLOC lot that had already closed)
+    // was relinked to GS-01's gs1-… position, doubling the ledger (0.00058 vs
+    // exchange 0.00029) and SAFETY_PAUSING the account on POSITION_MISMATCH.
+    if (!relinkSameTileFamily(currentTradeId, candidate.tradeId)) {
+      this.logger.warn(
+        `[CURE-1] refused cross-family relink ${input.userId} cycle=${input.cycle.id} from=${currentTradeId} to=${candidate.tradeId}`,
+      );
+      return null;
+    }
 
     // Already re-linked to this exact signal — nothing to do.
     const existingMeta = await this.loadExecutionMeta(input.participantId);
