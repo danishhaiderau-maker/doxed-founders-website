@@ -37028,6 +37028,10 @@ THREAD_HEALTH_MONITORED = {
     "api_state_cache_refresher": (_API_STATE_REFRESH_INTERVAL_SEC, 900.0),
     "dashboard_http_watchdog_loop": (DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC, 120.0),
     "bitfinex_live_reconcile_loop": (30.0, 300.0),
+    # PLATFORM-HEALTH (#606): probe every 180s; sleep-based loop needs explicit beat
+    # (API-GAP R1 only auto-beats on shutdown_event.wait).
+    # Matches platform_health.INTERVAL_SEC (module imported later in bot.py).
+    "_platform_health_loop": (180.0, 600.0),
 }
 # API-GAP-SWEEP R1: every other worker (and the self-supervised GS-01/GS-07
 # evaluator) is monitored too; intervals follow each loop's real cadence.
@@ -46900,13 +46904,15 @@ def _platform_health_loop():
     import requests as _rq
     session = _rq.Session()
     session.headers["User-Agent"] = "doxed-btc-bot-platform-monitor/1"
-    time.sleep(20)
-    while True:
+    shutdown_event.wait(20)
+    while not shutdown_event.is_set():
         try:
             _platform_monitor().run_check(session, _platform_health_ctx())
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[PLATFORM HEALTH] check failed: {type(exc).__name__}: {exc}")
-        time.sleep(_platform_health.INTERVAL_SEC)
+        finally:
+            _worker_beat("_platform_health_loop")
+        shutdown_event.wait(_platform_health.INTERVAL_SEC)
 
 
 
