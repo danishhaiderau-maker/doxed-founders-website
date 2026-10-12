@@ -197,6 +197,8 @@ export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
  * the requested one (LONG: not lower; SHORT: not higher), within 1% so a
  * wildly wrong order is still refused.
  */
+export const POST_ACK_FILL_PROBE_DELAYS_MS: readonly number[] = [0, 100, 150, 200, 250, 300, 400];
+
 export function protectiveStopAtLeastAsTight(
   direction: 'LONG' | 'SHORT',
   venuePrice: number,
@@ -10821,7 +10823,9 @@ await this.notifications
             this.logger.warn(`[POST-ACK-FILL] submit-response promotion failed trade=${tradeId}: ${err instanceof Error ? err.message : err}`);
           }
         }
-        for (const delayMs of promotedAtAck ? [] : [0, 200, 450, 800]) {
+        // LIVE-FIX-1486: post-ack fills were found on the 3rd/4th probe (stop armed
+        // 2.2-2.4 s after submit). Probe on a tighter, longer ladder.
+        for (const delayMs of promotedAtAck ? [] : POST_ACK_FILL_PROBE_DELAYS_MS) {
           if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
           try {
             const probeMeta = await this.loadExecutionMeta(participant.id);

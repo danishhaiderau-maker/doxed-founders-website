@@ -46435,6 +46435,15 @@ def monitor_integrity_authorized() -> bool:
         monitor_token=_MONITOR_READ_TOKEN, bearer_matches=monitor_api.bearer_matches)
 
 
+
+def _partial_exit_blocked_tiles():
+    """LIVE-FIX-1445: B1/B2 are refused only when partial reductions are off (kept outside the read-only block)."""
+    if 'BLOCKED_PARTIAL_REDUCTION_UNPROVEN' in __import__('bitfinex_live_switch').operator_waivable_capabilities():
+        return []
+    return [l for l, sp in ACTIVE_TILE_REGISTRY.items()
+            if (sp or {}).get('relay_capability') == 'BLOCKED_PARTIAL_REDUCTION_UNPROVEN']
+
+
 # ---------------------------------------------------------------------------
 # Read-only tile audit data API (/api/monitor/tiles/*, /api/monitor/tape).
 # Pure shaping in monitor_tiles.py.  Handlers read shallow copies of the
@@ -46788,9 +46797,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
             live_copy_tiles=_monitor_live_copy_tiles(),
             open_lanes=open_lanes, totals_lanes=inp["totals"].get("lanes") or {},
             # LIVE-FIX-1445: B1/B2 are refused only when partial reductions are off.
-            partial_exit_tiles=[] if 'BLOCKED_PARTIAL_REDUCTION_UNPROVEN' in __import__('bitfinex_live_switch').operator_waivable_capabilities()
-            else [l for l, sp in ACTIVE_TILE_REGISTRY.items()
-                  if (sp or {}).get('relay_capability') == 'BLOCKED_PARTIAL_REDUCTION_UNPROVEN'],
+            partial_exit_tiles=_partial_exit_blocked_tiles(),
             fee_rates_bp={"maker": _bcp.MAKER_FEE_RATE * 1e4, "taker": _bcp.TAKER_FEE_RATE * 1e4}),
         "data-completeness": _mc.data_completeness(_TILE_TAPE_RING.bounds(), now=now),
         "tape-retention": {**_mc.tape_retention(_TILE_TAPE_RING.bounds(), _TAPE_ARCHIVE.oldest_ts(), now=now),
