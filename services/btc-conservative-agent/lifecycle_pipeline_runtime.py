@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 RUNTIME_SCHEMA = "lifecycle_pipeline_runtime_status_v1"
 MIN_BACKOFF_SEC = 180.0
 MAX_BACKOFF_SEC = 1800.0
+TIMEOUT_MIN_BACKOFF_SEC = 10.0
+TIMEOUT_MAX_BACKOFF_SEC = 60.0
 DEFAULT_INTERVAL_SEC = 180.0
 BACKLOG_INTERVAL_SEC = 1.0
 DEFAULT_WALL_TIMEOUT_SEC = 75.0
@@ -350,7 +352,15 @@ class LifecyclePipelineRuntime:
                 retained_worker_failure["byte_offset"] = offset
         with self._lock:
             failures = int(self._status["failure_count"]) + 1
-            backoff = min(MAX_BACKOFF_SEC, MIN_BACKOFF_SEC * (2 ** (failures - 1)))
+            if outcome == "TIMEOUT":
+                # LIVE-FIX-1111: a wall-clock TIMEOUT is transient (the child
+                # waited on a ledger flock held by the bot during deploy
+                # maintenance). Exponential 180 s -> 1800 s backoff left the
+                # receipt bootstrap idle for 50+ min per deploy; the cursor is
+                # durable, so retry soon with a small bounded backoff.
+                backoff = min(TIMEOUT_MAX_BACKOFF_SEC, TIMEOUT_MIN_BACKOFF_SEC * (2 ** min(failures - 1, 4)))
+            else:
+                backoff = min(MAX_BACKOFF_SEC, MIN_BACKOFF_SEC * (2 ** (failures - 1)))
             self._status.update({
                 "active": False, "failure_count": failures,
                 "backoff_sec": backoff, "next_run_unix": self.clock() + backoff,

@@ -382,7 +382,15 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         request = _load(request_path, result_path, nonce)
         activate_from_env(request["_data_root"])
         started = time.time()
-        deadline = time.monotonic() + request["_runtime"]
+        # LIVE-FIX-1111: the parent's wall clock starts at launch, not after
+        # this child's imports/request load; charge that startup to the
+        # budget so the child finishes (and saves its cursor) before the kill.
+        try:
+            startup = max(0.0, started - float(request.get("launched_unix") or started))
+        except (TypeError, ValueError):
+            startup = 0.0
+        runtime = max(1.0, float(request["_runtime"]) - min(startup, 0.5 * float(request["_runtime"])))
+        deadline = time.monotonic() + runtime
         emergency_wal = None
         if request.get("_epoch_id"):
             evidence_store = V3EvidenceStore(
@@ -400,7 +408,10 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             max_scan_rows=request["_max_scan_rows"],
             max_lifecycle_rows=request["_max_lifecycle_rows"],
             max_lifecycle_bytes=request["_max_lifecycle_bytes"],
-            max_runtime_sec=request["_runtime"], pressure_mode=request["_pressure"],
+            # LIVE-FIX-1111: after a deploy the lifecycle backlog consumed the
+            # whole budget every cycle, so the (last) receipt bootstrap never
+            # ran and deploys sat 50+ min in maintenance. Reserve ~45% for it.
+            max_runtime_sec=max(1.0, 0.55 * runtime), pressure_mode=request["_pressure"],
             emergency_closure_mode=request["_emergency_closure"],
         )
         # Historical receipt preparation is deliberately last and advances at
@@ -413,7 +424,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             # (cursor persisted); the next cycle resumes from it.
             emergency_bootstrap = (
                 evidence_store.advance_one_emergency_bootstrap_round_robin(
-                    deadline_monotonic=deadline - max(5.0, 0.2 * float(request["_runtime"])),
+                    deadline_monotonic=deadline - max(5.0, 0.2 * runtime),
                 )
             )
         # A caller must still terminate the subprocess at the same deadline to
