@@ -1457,6 +1457,15 @@ const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
  * TIME_DEADLINE_PREARM_MS early, the reduce-only close is submitted at the
  * deadline. Paper's POSITION_CLOSED stays the fallback (mirror close).
  */
+export const RELAY_PAUSE_HISTORY_MAX = 50;
+export function relayPauseCode(message: string): string {
+  const m = /^([A-Z][A-Z0-9_]{2,})/.exec(String(message ?? '').trim());
+  return m ? m[1] : 'UNCLASSIFIED';
+}
+export function appendRelayPauseHistory(prev: unknown, row: Record<string, unknown>): Record<string, unknown>[] {
+  const list = Array.isArray(prev) ? prev.filter((r) => r && typeof r === 'object') as Record<string, unknown>[] : [];
+  return [...list, row].slice(-RELAY_PAUSE_HISTORY_MAX);
+}
 export const TIME_DEADLINE_HOLD_SEC = 60;
 export const TIME_DEADLINE_PREARM_MS = 1_500;
 export function isTimeDeadlineExitTradeId(tradeId: string | null | undefined): boolean {
@@ -3946,6 +3955,7 @@ export function buildExchangeMirror(input: {
     price: o.price,
     status: o.status,
     reduce_only: typeof o.flags === 'number' ? (o.flags & REDUCE_ONLY) === REDUCE_ONLY : null,
+    oco: typeof o.flags === 'number' ? (o.flags & 16384) === 16384 : null,
     cid: o.cid ?? null,
   }));
   const stops = open_orders.filter((o) => /STOP/i.test(String(o.type)));
@@ -12191,6 +12201,17 @@ await this.notifications
           positionMismatchDetectedAt: new Date().toISOString(),
           positionMismatchAlert: truncated,
           positionMismatchAlertAcked: false,
+          // LIVE-FIX-1491: durable bounded pause history (cause + owner) for
+          // the monitor pause-history route and the self-pause alert.
+          relayPauseHistory: appendRelayPauseHistory(dash.relayPauseHistory, {
+            at: new Date().toISOString(),
+            actor: 'SYSTEM',
+            owner: 'relay-executor',
+            action: 'SAFETY_PAUSED',
+            code: relayPauseCode(truncated),
+            message: truncated.slice(0, 240),
+            already_paused: alreadyPaused,
+          }),
           relayLastTransition: {
             at: new Date().toISOString(),
             actor: 'SYSTEM',

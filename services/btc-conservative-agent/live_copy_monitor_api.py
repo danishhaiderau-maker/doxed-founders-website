@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request
 
 import live_copy_lifecycle as lcl
 import live_copy_monitor as lcm
+import live_monitor_routes as lmr
 
 blueprint = Blueprint("live_copy_monitor", __name__)
 _CTX: dict = {"provider": None, "authorize": None}
@@ -79,6 +80,11 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
     except (TypeError, ValueError, AttributeError):
         pass
     last_report = max((float(r.get("fly_received_at_ts") or 0) for r in reports), default=0.0) or None
+    try:
+        cap_ts = float(((ctx.get("protection") or {}).get("executor_capability") or {}).get("received_at_ts") or 0)
+    except (TypeError, ValueError):
+        cap_ts = 0.0
+    last_report = max(last_report or 0.0, cap_ts) or None
     out = lcm.summary(
         output=ctx.get("output") or {}, force_paper_mode=bool(ctx.get("force_paper_mode")),
         relay_stack_mode=str(ctx.get("relay_stack_mode") or ""), switch_rows=ctx.get("switch_rows") or [],
@@ -642,3 +648,52 @@ def live_flags_snapshot(max_age_s: float = 5.0) -> dict:
         out["effective_live"] = False
     _LIVE_FLAGS_CACHE.update({"ts": now, "payload": out})
     return out
+
+
+# --- LIVE-FIX-1491: HM per-phase routes (read-only, monitor token) -----------
+@blueprint.route("/api/monitor/live/timeline", methods=["GET"])
+def live_timeline():
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    try:
+        limit = max(1, min(500, int(request.args.get("limit") or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+    return _ok(lmr.timeline(ctx.get("reports") or [], ctx.get("approvals") or [], ctx.get("paper_twins") or {},
+                            trade_id=(request.args.get("trade_id") or None), limit=limit,
+                            since=now - _window_sec() * (24 if not request.args.get("window_sec") else 1)))
+
+
+@blueprint.route("/api/monitor/live/pause-history", methods=["GET"])
+def live_pause_history():
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lmr.pause_history((ctx.get("website") or {}).get("accounts") or [], now=time.time()))
+
+
+@blueprint.route("/api/monitor/live/protection-state", methods=["GET"])
+def live_protection_state():
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lmr.protection_state((ctx.get("website") or {}).get("accounts") or []))
+
+
+@blueprint.route("/api/monitor/live/clock", methods=["GET"])
+def live_clock():
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    now = time.time()
+    return _ok(lmr.clock(ctx.get("clock_sync") or {}, ctx.get("reports") or [], since=now - _window_sec()))
+
+
+@blueprint.route("/api/monitor/live/paths", methods=["GET"])
+def live_paths():
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    return _ok(lmr.paths(ctx.get("relay") or {}, ctx.get("deliveries")))

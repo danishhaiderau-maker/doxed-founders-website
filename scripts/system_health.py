@@ -321,6 +321,29 @@ _PARITY_OK = {"MATCH", "MATCHED", "OK", "TRUE", "GREEN", "PASS", "YES"}
 _PARITY_UNKNOWN = {"", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "PENDING"}
 
 
+
+def authorized_live_copy(audit: Any) -> str | None:
+    """HM 20:33: exposure during an authorized relay live copy is expected.
+
+    Authorized = Fly exposure audit fresh+ok, live-copy output ON, the Railway
+    relay account is the armed source, Fly direct live is OFF, no orphan
+    exchange orders, no paper-closed/live-open lot, orders <= 2 per position.
+    """
+    if not isinstance(audit, Mapping) or not audit.get("ok") or not audit.get("fresh"):
+        return None
+    if audit.get("armed_source") != "railway_relay_account" or not audit.get("relay_armed_accounts"):
+        return None
+    if not audit.get("live_copy_output_enabled") or audit.get("fly_direct_live_armed"):
+        return None
+    if audit.get("orphan_order_ids") or audit.get("paper_closed_live_open"):
+        return None
+    pos = int(audit.get("open_position_count") or 0)
+    orders = int(audit.get("open_order_count") or 0)
+    if orders > 2 * max(pos, 0) and orders > 0:
+        return None
+    return ",".join(str(a) for a in audit.get("relay_armed_accounts") or [])
+
+
 def parity_state(value: Any) -> bool | None:
     """True/False/None (unknown) for parity fields that may be bool, string ("MATCH") or a mapping."""
     if isinstance(value, Mapping):
@@ -571,6 +594,8 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     fetch("fly_health", f"{opts.fly_url}/health", timeout=30)
     if admin:
         fetch("fly_state", f"{opts.fly_url}/api/state", headers={"X-Bot-Admin-Token": admin}, timeout=60)
+        fetch("fly_exposure_audit", f"{opts.fly_url}/api/exchange_exposure_audit",
+              headers={"X-Bot-Admin-Token": admin}, timeout=20)
     else:
         inputs["fly_state"], errors["fly_state"] = None, "ADMIN_TOKEN_MISSING"
     fetch("analyzer_api", f"{opts.analyzer_url}/api/health", timeout=10)
@@ -2086,7 +2111,12 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     relay_disarmed = relay.get("ok") and not armed and str(relay.get("relayExecutionMode") or relay.get("status")
                                                           or "").upper() in ("PAUSED", "DISARMED")
     explicit_disarm = live_armed is False and bfx_enabled is False and force_paper is True and relay_disarmed
-    if not reachable and not relay.get("ok"):
+    authorized = authorized_live_copy(inputs.get("fly_exposure_audit"))
+    if problems and authorized:
+        add(check("bitfinex.exposure", "bitfinex", GREEN,
+                  f"authorized live copy ({authorized}): {'; '.join(problems)}",
+                  "disarmed, or authorized relay live copy with every position protected"))
+    elif not reachable and not relay.get("ok"):
         add(check("bitfinex.exposure", "bitfinex", AMBER, "cannot observe (Fly and relay unreadable)",
                   "disarmed, 0 exchange position, 0 exchange orders"))
     elif problems:

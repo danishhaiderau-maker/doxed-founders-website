@@ -10,6 +10,8 @@ never a fabricated "OK" while ON.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import statistics
 import time
 from typing import Any, Iterable, Mapping
@@ -22,6 +24,7 @@ FILL_TO_STOP_GAP_SEC = 10.0
 REPORT_MISSING_GAP_SEC = 30.0
 GAP_TTL_SEC = 6 * 3600.0  # intent gaps older than this expire
 LAG_AMBER_SEC = 3.0
+EXECUTOR_SIGNAL_FRESH_SEC = 120.0
 LAG_RED_SEC = 10.0
 PRICE_DRIFT_AMBER_BP = 5.0
 PRICE_DRIFT_RED_BP = 15.0
@@ -272,8 +275,15 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
             causes.append("WEBSITE_STATE_UNREACHABLE"); verdict = worst(verdict, AMBER)
         elif not web.get("armed_accounts"):
             causes.append("ACCOUNT_NOT_ARMED"); verdict = worst(verdict, AMBER)
-        if web.get("executor_heartbeat_age_sec") is None or float(web.get("executor_heartbeat_age_sec") or 1e9) > 60:
-            causes.append("EXECUTOR_UNREACHABLE"); verdict = worst(verdict, RED)
+        hb = web.get("executor_heartbeat_age_sec")
+        if hb is None or float(hb if hb is not None else 1e9) > 60:
+            # HM 20:33: the cached website heartbeat lags a busy close tick;
+            # a fresh executor report/capability heartbeat proves it alive.
+            sig = executor_last_report_ts
+            if sig and now - float(sig) <= EXECUTOR_SIGNAL_FRESH_SEC:
+                causes.append("EXECUTOR_HEARTBEAT_LAGGING"); verdict = worst(verdict, AMBER)
+            else:
+                causes.append("EXECUTOR_UNREACHABLE"); verdict = worst(verdict, RED)
         if force_paper_mode:
             causes.append("FORCE_PAPER_BLOCKS_OUTPUT"); verdict = worst(verdict, AMBER)
     if unsigned_rejects_1h:
@@ -281,6 +291,15 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
     if rejects_1h:
         causes.append("ORDER_REJECTED"); verdict = worst(verdict, AMBER)
     for acct in (web.get("accounts") or []):
+        # LIVE-FIX-1491: any relay self-pause (actor SYSTEM) in the last hour alerts.
+        for p in acct.get("pause_history") or []:
+            try:
+                at = datetime.fromisoformat(str(p.get("at")).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                continue
+            if p.get("actor") == "SYSTEM" and now - at <= 3600:
+                causes.append(f"RELAY_SELF_PAUSE:{p.get('code')}"); verdict = worst(verdict, RED)
+                break
         if acct.get("armed") and acct.get("key_valid") is False:
             causes.append("KEY_INVALID"); verdict = worst(verdict, RED)
         # LIVE-FIX-1486: surface expired hires and safety-paused accounts.

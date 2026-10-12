@@ -41,3 +41,14 @@ test('1490: close submit is gated to the deadline and paper close stays fallback
   assert.ok(src.includes("this.scheduleTimeDeadlineExit(instance.agentId, instance.userId, wake.tradeId ?? null, wake.signedOpen.sourceEventAtMs)"));
   assert.ok(src.includes('submitNotBeforeMs: deadlineMs'));
 });
+
+import { appendRelayPauseHistory as _aph, relayPauseCode as _rpc, RELAY_PAUSE_HISTORY_MAX as _max } from './signal-subscriber-execution.service';
+test('LIVE-FIX-1491 pause history: code parse + bounded append', () => {
+  assert.equal(_rpc('TERMINAL_CLOSE_CLAIM_REFUSED: x'), 'TERMINAL_CLOSE_CLAIM_REFUSED');
+  assert.equal(_rpc('oops'), 'UNCLASSIFIED');
+  let h: Record<string, unknown>[] = _aph(null, { code: 'A' });
+  assert.equal(h.length, 1);
+  for (let i = 0; i < 80; i++) h = _aph(h, { i });
+  assert.equal(h.length, _max);
+  assert.deepEqual(h[h.length - 1], { i: 79 });
+});

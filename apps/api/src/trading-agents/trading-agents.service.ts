@@ -1441,6 +1441,7 @@ export class TradingAgentsService implements OnModuleInit {
       relayExecutionMode: string | null; relayLastTransition: unknown; lastError: string | null;
       relayExchangeMirror: unknown; copyRelaySimActive: boolean; updatedAt: Date | null;
       expiresAt?: Date | null;
+      relayPauseHistory?: unknown;
     };
     const rows = await this.prisma.$queryRaw<Row[]>(Prisma.sql`
       SELECT i."id", i."status"::text AS "status", i."exchangeProvider",
@@ -1450,6 +1451,7 @@ export class TradingAgentsService implements OnModuleInit {
              i."dashboardState" ->> 'relayExecutionMode' AS "relayExecutionMode",
              i."dashboardState" -> 'relayLastTransition' AS "relayLastTransition",
              i."dashboardState" -> 'relayExchangeMirror' AS "relayExchangeMirror",
+             i."dashboardState" -> 'relayPauseHistory' AS "relayPauseHistory",
              COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "copyRelaySimActive",
              i."lastError", i."updatedAt", i."expiresAt"
       FROM "TradingAgentInstance" i
@@ -1488,6 +1490,13 @@ export class TradingAgentsService implements OnModuleInit {
         hire_active: !r.expiresAt || new Date(r.expiresAt).getTime() > nowMs,
         hire_expires_at: r.expiresAt ? new Date(r.expiresAt).toISOString() : null,
         paused: r.status === 'PAUSED',
+        // LIVE-FIX-1491: last 20 pauses with cause + owner (no user ids).
+        pause_history: Array.isArray(r.relayPauseHistory)
+          ? (r.relayPauseHistory as Record<string, unknown>[]).slice(-20).map((p) => ({
+              at: p?.at ?? null, actor: p?.actor ?? null, owner: p?.owner ?? null, action: p?.action ?? null,
+              code: p?.code ?? null, message: typeof p?.message === 'string' ? p.message.slice(0, 200) : null,
+            }))
+          : [],
       };
     });
     const armedRows = accounts.filter((a) => a.armed);

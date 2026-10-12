@@ -173,9 +173,57 @@ def _probe_clock_offset_once(url: str = _CLOCK_PROBE_URL, samples: int = 3,
     return best
 
 
+CLOCK_SLEW_MIN_MS = float(os.getenv("CLOCK_SLEW_MIN_MS", "20"))
+CLOCK_SLEW_MAX_MS = float(os.getenv("CLOCK_SLEW_MAX_MS", "5000"))
+
+
+def slew_clock(offset_ms: float, rtt_ms: float | None, *, enabled: bool | None = None, _libc=None) -> dict:
+    """Software NTP: gradually slew the kernel clock by -offset via adjtime(2).
+
+    Fly VMs run no NTP daemon (HM 20:33: +992 ms). adjtime never steps the
+    clock (no backwards jumps, monotonic users unaffected); the kernel slews
+    ~0.5 ms/s, so 1 s converges in ~33 min. Each probe replaces the pending
+    adjustment with a fresh measurement. Needs CAP_SYS_TIME (root in the VM);
+    a refusal is reported, never raised.
+    """
+    if enabled is None:
+        enabled = os.getenv("CLOCK_SLEW_ENABLED", "1").strip() != "0"
+    out = {"enabled": bool(enabled), "applied_ms": None, "error": None}
+    try:
+        off = float(offset_ms)
+    except (TypeError, ValueError):
+        out["error"] = "BAD_OFFSET"
+        return out
+    if not enabled or abs(off) < CLOCK_SLEW_MIN_MS:
+        return out
+    if rtt_ms is None or float(rtt_ms) > 500 or abs(off) > CLOCK_SLEW_MAX_MS:
+        out["error"] = "SAMPLE_NOT_TRUSTED_FOR_SLEW"
+        return out
+    try:
+        import ctypes
+        import ctypes.util
+
+        class _Timeval(ctypes.Structure):
+            _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_long)]
+
+        libc = _libc or ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        delta_us = int(round(-off * 1000.0))
+        sec, usec = divmod(delta_us, 1_000_000)
+        tv = _Timeval(sec, usec)
+        if int(libc.adjtime(ctypes.byref(tv), None)) != 0:
+            out["error"] = f"ADJTIME_ERRNO_{ctypes.get_errno()}"
+            return out
+        out["applied_ms"] = round(-off, 1)
+    except Exception as exc:  # noqa: BLE001 - telemetry must never crash the bot
+        out["error"] = f"{type(exc).__name__}"
+    return out
+
+
 def _clock_probe_loop() -> None:
     while True:
         result = _probe_clock_offset_once()
+        if result is not None:
+            result["slew"] = slew_clock(result.get("offset_ms"), result.get("rtt_ms"))
         with _clock_probe_lock:
             if result is not None:
                 _clock_probe_state["last"] = result
@@ -224,7 +272,8 @@ def clock_sync_verdict() -> dict:
     if not ext:
         out.update(synchronized=None, status="UNKNOWN", reason="NO_EXTERNAL_SAMPLE_YET")
         return out
-    out.update(offset_ms=ext.get("offset_ms"), rtt_ms=ext.get("rtt_ms"), age_sec=ext.get("age_sec"))
+    out.update(offset_ms=ext.get("offset_ms"), rtt_ms=ext.get("rtt_ms"), age_sec=ext.get("age_sec"),
+               slew=ext.get("slew"))
     if not ext.get("trusted"):
         out.update(synchronized=None, status="UNKNOWN", reason="EXTERNAL_SAMPLE_UNTRUSTED")
     elif abs(float(ext.get("offset_ms") or 0.0)) <= CLOCK_SYNC_MAX_OFFSET_MS:

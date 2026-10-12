@@ -215,7 +215,8 @@ def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
                 live = None
         if live is None:
             try:
-                live = min(float(r.get("sent_at_ts")) for r in closes if r.get("sent_at_ts") is not None)
+                live = min(float(r.get("event_at_ts") if r.get("event_at_ts") is not None else r.get("sent_at_ts"))
+                           for r in closes if (r.get("event_at_ts") or r.get("sent_at_ts")) is not None)
             except (TypeError, ValueError):
                 lanes.setdefault(lane, {"samples": [], "breaches": [], "ambers": [], "missing_paper": 0})["missing_paper"] += 1
                 continue
