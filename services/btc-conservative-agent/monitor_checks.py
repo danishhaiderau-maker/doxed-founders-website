@@ -228,10 +228,10 @@ def latency_guard(slo: Mapping[str, Any], per_tile: Mapping[str, Any],
             hop = f" (top hop {top})" if top else ""
             if lv > LIVE_EXIT_RED_SEC:
                 red = True
-                reasons.append(f"{lane}: live exit {lv:.1f}s > {LIVE_EXIT_RED_SEC:g}s{hop}")
+                reasons.append(f"{lane}: live exit lag vs paper {lv:.1f}s > {LIVE_EXIT_RED_SEC:g}s{hop}")
             elif lv > LIVE_EXIT_AMBER_SEC:
                 amber = True
-                reasons.append(f"{lane}: live exit {lv:.1f}s > {LIVE_EXIT_AMBER_SEC:g}s{hop}")
+                reasons.append(f"{lane}: live exit lag vs paper {lv:.1f}s > {LIVE_EXIT_AMBER_SEC:g}s{hop}")
     if str((slo or {}).get("status") or "").upper() == "RED":
         red = True
         reasons.append("exit-latency SLO RED")

@@ -225,9 +225,20 @@ def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
         lag = round(live - paper, 3)
         L = lanes.setdefault(lane, {"samples": [], "breaches": [], "ambers": [], "missing_paper": 0})
         L["samples"].append(lag)
+        # LIVE-FIX-1495: second metric, live entry fill -> live exit (hold), kept
+        # apart from lag-behind-paper so a long hold never reads as exit lag.
+        fills = [r for r in rows or [] if isinstance(r, Mapping) and r.get("type") == "ORDER_FILLED"]
+        hold = None
+        try:
+            entry_fill = min(float(r.get("event_at_ts") if r.get("event_at_ts") is not None else r.get("sent_at_ts"))
+                             for r in fills if (r.get("event_at_ts") or r.get("sent_at_ts")) is not None)
+            hold = round(live - entry_fill, 3)
+            L.setdefault("hold", []).append(hold)
+        except (TypeError, ValueError):
+            pass
         top = _top_hop((hop_lags_by_corr or {}).get(str(cid)))
         item = {"trade_id": cid, "lag_sec": lag, "paper_exit_utc": iso_ms(paper),
-                "live_exit_utc": iso_ms(live), "top_hop": top}
+                "live_exit_utc": iso_ms(live), "top_hop": top, "fill_to_exit_sec": hold}
         if lag > LIVE_FOLLOW_RED_SEC:
             L["breaches"].append(item)
         elif lag > LIVE_FOLLOW_AMBER_SEC:
@@ -240,7 +251,11 @@ def live_follow(by_corr: Mapping, twins: Mapping, *, since: float,
         any_red = any_red or red
         any_amber = any_amber or amber
         status = "NO_DATA" if not s else ("RED" if red else ("AMBER" if amber else "GREEN"))
-        out[lane] = {"n": len(s), "p50_sec": _pct(s, 0.5), "p95_sec": _pct(s, 0.95),
+        h = L.get("hold") or []
+        out[lane] = {"metric": "lag_vs_paper_sec", "n": len(s), "p50_sec": _pct(s, 0.5), "p95_sec": _pct(s, 0.95),
+                     "fill_to_exit": {"metric": "live_fill_to_live_exit_sec", "n": len(h),
+                                      "p50_sec": _pct(h, 0.5), "p95_sec": _pct(h, 0.95),
+                                      "max_sec": max(h) if h else None},
                      "max_sec": max(s) if s else None, "missing_paper_exit": L["missing_paper"],
                      "breach_count": len(L["breaches"]), "amber_count": len(L["ambers"]),
                      "breaches_over_8s": L["breaches"][-20:],
