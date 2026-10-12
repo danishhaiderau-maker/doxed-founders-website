@@ -262,7 +262,7 @@ def test_timeout_terminates_child_and_backs_off(tmp_path, monkeypatch):
     assert runtime._run_once() is False
     assert process.terminated is True
     assert runtime.status()["last_outcome"] == "TIMEOUT"
-    assert runtime.status()["backoff_sec"] == 180
+    assert runtime.status()["backoff_sec"] == 10  # LIVE-FIX-1111: transient TIMEOUT retries fast
 
 
 def test_cleanup_lease_excludes_worker_cycle_without_calling_overlap_probe(tmp_path, monkeypatch):

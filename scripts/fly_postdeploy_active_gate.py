@@ -271,10 +271,10 @@ def _request(path: str, token: str, payload=None, timeout: int = 30) -> dict:
         return json.load(response)
 
 
-TRANSIENT_BUDGET_SEC = 300.0
+TRANSIENT_BUDGET_SEC = 900.0  # LIVE-FIX-1111: 300 s still hit by dashboard-restore 503s (run 38184190754)
 
 
-def _retrying(fn, attempts: int = 60, budget_sec: float | None = None):
+def _retrying(fn, attempts: int = 200, budget_sec: float | None = None):
     # LIVE-FIX-0702: Fly answers 503 for minutes while a fresh machine warms up
     # after resume; 6 attempts (~30 s) falsely failed run 38168912805. Retry
     # transient errors for up to TRANSIENT_BUDGET_SEC; real errors still raise.
