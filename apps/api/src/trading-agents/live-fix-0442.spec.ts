@@ -277,11 +277,3 @@ test('1487: reduce-only STOP submit rides the priority stop lane', async () => {
   const src = readFileSync(join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
   assert.ok(src.includes('lane.stops?.shift() ?? lane.mutations.shift() ?? lane.reads.shift()'));
 });
-
-test('1487: TIME_60S deadline wake ladder fires at fill+60 s', async () => {
-  const { timeExitDeadlineWakeDelays } = await import('./signal-subscriber-execution.service');
-  assert.deepEqual(timeExitDeadlineWakeDelays(1_000_000, 1_000_000), [60_000, 60_150, 60_350, 60_700, 61_200, 62_000]);
-  assert.deepEqual(timeExitDeadlineWakeDelays(1_000_000, 1_061_000), [200, 1000]);
-  const src = readFileSync(join(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
-  assert.ok(src.includes('this.installTimeExitDeadlineWake();'));
-});

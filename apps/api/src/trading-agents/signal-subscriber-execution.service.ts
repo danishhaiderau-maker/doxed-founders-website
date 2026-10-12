@@ -197,13 +197,6 @@ export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
  * the requested one (LONG: not lower; SHORT: not higher), within 1% so a
  * wildly wrong order is still refused.
  */
-export const TIME_EXIT_DEADLINE_SEC = 60;
-export const TIME_EXIT_WAKE_OFFSETS_MS: readonly number[] = [0, 150, 350, 700, 1200, 2000];
-export function timeExitDeadlineWakeDelays(fillMs: number, nowMs: number): number[] {
-  const at = fillMs + TIME_EXIT_DEADLINE_SEC * 1000;
-  return TIME_EXIT_WAKE_OFFSETS_MS.map((o) => at + o - nowMs).filter((d) => d > 0 && d < 5 * 60_000);
-}
-
 export const POST_ACK_FILL_PROBE_DELAYS_MS: readonly number[] = [0, 100, 150, 200, 250, 300, 400];
 
 export function protectiveStopAtLeastAsTight(
@@ -4320,7 +4313,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // wake persisted while the previous container was swapping out must not
     // wait an extra poll interval (it expires after 120 s).
     this.schedulePersistedWakePoll(0);
-    this.installTimeExitDeadlineWake();
     // Authenticated account-info trades are the latency path for exchange fills.
     // They consume no REST nonce/read budget; the ordinary reconciliation tick
     // remains the fail-closed reconnect/outage backstop.
@@ -4444,45 +4436,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * reconciliation stops. Explicit authenticated wakes re-arm this timer, and
    * process startup always performs a recovery pass.
    */
-  /**
-   * LIVE-FIX-1487 (#2): DISLOC exits are TIME_60S. Instead of waiting for the
-   * next tick / 2 s durable-wake poll after paper closes, the executor arms its
-   * own deadline at fill + 60 s and polls the durable close wake + runs a pass
-   * on a short ladder around it, so the signed close is picked up within
-   * ~100-300 ms of paper committing it. Paper stays the close authority.
-   */
-  private deadlineWakeInFlight = false;
-
-  private installTimeExitDeadlineWake(): void {
-    const cycles = this.cycles as unknown as { recordHireExecutionEvent: (...a: unknown[]) => Promise<unknown> };
-    if ((cycles as { __deadlineWake?: boolean }).__deadlineWake) return;
-    const orig = cycles.recordHireExecutionEvent.bind(this.cycles);
-    cycles.recordHireExecutionEvent = (...a: unknown[]) => {
-      if (a[3] === 'FILLED') {
-        const p = (a[4] ?? {}) as Record<string, unknown>;
-        const fillMs = Date.parse(String(p.exchange_fill_last_at ?? p.exchange_fill_detected_at ?? '')) || Date.now();
-        this.armTimeExitDeadlineWake(fillMs);
-      }
-      return orig(...a);
-    };
-    (cycles as { __deadlineWake?: boolean }).__deadlineWake = true;
-  }
-
-  private armTimeExitDeadlineWake(fillMs: number, nowMs = Date.now()): number[] {
-    const delays = timeExitDeadlineWakeDelays(fillMs, nowMs);
-    for (const d of delays) {
-      const t = setTimeout(() => {
-        if (this.executorDestroyed || this.deadlineWakeInFlight) return;
-        this.deadlineWakeInFlight = true;
-        void this.pollPersistedFastWake()
-          .catch(this.swallowedError('deadlineWake', true))
-          .finally(() => { this.deadlineWakeInFlight = false; });
-      }, d);
-      (t as { unref?: () => void }).unref?.();
-    }
-    return delays;
-  }
-
   private scheduleReconciliation(delayMs: number | null): void {
     if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
     this.reconciliationTimer = setTimeout(async () => {
