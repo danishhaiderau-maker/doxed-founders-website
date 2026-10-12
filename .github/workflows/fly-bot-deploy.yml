@@ -3253,12 +3253,18 @@ jobs:
               call("/api/toggle_research_lane", {"lane": lane, "enabled": True})
               call(f"/api/live-copy/tiles/{lane}/eligibility", {"eligible": True})
           call("/api/live-copy/output", {"enabled": True})
-          for lane in LIVE:
-              call(f"/api/bitfinex/tiles/{lane}/live-orders", {"enabled": True})
-          time.sleep(3)
-          st = call("/api/live-copy/status")
-          tiles = {t["lane"]: t for t in st.get("tiles") or []}
-          bad = [l for l in LIVE if not (tiles.get(l, {}).get("eligible") and tiles.get(l, {}).get("bitfinex_live_orders"))]
+          # LIVE-FIX-1455: DISLOC live-orders can refuse for a few seconds after
+          # boot (38205556737 left DISLOC/FOI off); retry instead of failing.
+          for attempt in range(8):
+              for lane in LIVE:
+                  call(f"/api/bitfinex/tiles/{lane}/live-orders", {"enabled": True})
+              time.sleep(3 + 5 * attempt)
+              st = call("/api/live-copy/status")
+              tiles = {t["lane"]: t for t in st.get("tiles") or []}
+              bad = [l for l in LIVE if not (tiles.get(l, {}).get("eligible") and tiles.get(l, {}).get("bitfinex_live_orders"))]
+              if not bad:
+                  break
+              print("retry live-orders", attempt, {l: tiles.get(l, {}).get("denials") for l in bad})
           print(json.dumps({"output": (st.get("live_copy_output") or {}).get("enabled"), "tiles": {l: {k: tiles.get(l, {}).get(k) for k in ("tile_number", "eligible", "bitfinex_live_orders", "denials")} for l in LIVE}}, sort_keys=True))
           if bad or not (st.get("live_copy_output") or {}).get("enabled"):
               raise SystemExit("live restore incomplete: " + ",".join(bad))
