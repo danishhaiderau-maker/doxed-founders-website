@@ -283,6 +283,11 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
     for acct in (web.get("accounts") or []):
         if acct.get("armed") and acct.get("key_valid") is False:
             causes.append("KEY_INVALID"); verdict = worst(verdict, RED)
+        # LIVE-FIX-1486: surface expired hires and safety-paused accounts.
+        if live_capable and acct.get("armed") and acct.get("hire_active") is False:
+            causes.append("ENTITLEMENT_INACTIVE"); verdict = worst(verdict, AMBER)
+        if live_capable and acct.get("paused") is True and acct.get("armed_at"):
+            causes.append("ACCOUNT_PAUSED"); verdict = worst(verdict, AMBER)
     state = "LIVE_CAPABLE" if live_capable else "IDLE_DISARMED"
     return {
         "schema": SCHEMA, "verdict": verdict, "state": state,

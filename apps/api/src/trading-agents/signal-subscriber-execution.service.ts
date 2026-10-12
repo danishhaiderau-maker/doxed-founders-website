@@ -132,6 +132,9 @@ const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
  * dashboardState document).
  */
 export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
+/** LIVE-FIX-1485: bounded retry for a terminal claim refused before canonical commit. */
+export const TERMINAL_CLAIM_RETRY_ATTEMPTS = 10;
+export const TERMINAL_CLAIM_RETRY_MS = 150;
 /** Max age of a fast-preflight "exchange book proven flat" read reused at the final pre-write gate. */
 export const PROVEN_FLAT_REUSE_MAX_AGE_MS = 1_500;
 /**
@@ -4326,6 +4329,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * least every LOOP_STALL_RESTART_MS. If none has (lost timer, swallowed
    * scheduling), re-establish the reconciliation loop instead of going silent.
    */
+  /**
+   * LIVE-FIX-1485 loop-stall root cause: the recurring reconciliation and
+   * durable-wake timers stop when a pass sees PAUSED/IDLE, but ticks started
+   * by wakes (setImmediate) never re-armed them. After a pause -> re-arm the
+   * relay ran without its loop until the 120 s watchdog revived it (stalls
+   * of 120-133 s at 01:19, 02:33, 03:03, 06:09, 06:52, 07:06, 07:17Z).
+   * Any observation of ACTIVE now re-arms both timers (no-ops when armed).
+   */
+  private setRelayPollActivity(activity: RelayExecutorPollActivity): void {
+    this.lastRelayPollActivity = activity;
+    if (activity !== 'ACTIVE' || this.executorDestroyed) return;
+    this.scheduleReconciliation(POLL_MS);
+    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
+  }
+
   private reviveStalledLoop(nowMs = Date.now()): void {
     if (this.executorDestroyed || !executionEnabled() || this.running) return;
     if (this.lastRelayPollActivity !== 'ACTIVE' || this.lastTickCompletedAtMs <= 0) return;
@@ -5424,12 +5442,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ORDER BY i."updatedAt" DESC
       LIMIT 50
     `);
-    this.lastRelayPollActivity = instances.some((row) =>
+    this.setRelayPollActivity(instances.some((row) =>
       row.hasExposure
       || row.simActive
       || (row.status === TradingAgentInstanceStatus.ACTIVE
         && (!!row.relayArmedAt || row.relayExecutionMode === 'LIVE'))
-    ) ? 'ACTIVE' : instances.length > 0 ? 'PAUSED' : 'IDLE';
+    ) ? 'ACTIVE' : instances.length > 0 ? 'PAUSED' : 'IDLE');
     let best: RelayExecutorWakeRequest | null = null;
     for (const inst of instances) {
       const wake = readRelayExecutorWakeRequest({ [RELAY_EXECUTOR_WAKE_KEY]: inst.wake });
@@ -6440,9 +6458,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             select: { id: true },
           })
         : null;
-      this.lastRelayPollActivity = armedOrSimActive || exposure
+      this.setRelayPollActivity(armedOrSimActive || exposure
         ? 'ACTIVE'
-        : instances.length > 0 ? 'PAUSED' : 'IDLE';
+        : instances.length > 0 ? 'PAUSED' : 'IDLE');
       const discoveredIds = new Set(instances.map((instance) => instance.id));
       for (const cachedId of this.relayInstanceCache.keys()) {
         if (!discoveredIds.has(cachedId)) this.relayInstanceCache.delete(cachedId);
@@ -17304,14 +17322,28 @@ await this.notifications
 
     let terminalClaim: TerminalCloseClaim;
     try {
-      const acquired = await this.acquireTerminalCloseClaim({
+      const claimInput = {
         agentId,
         userId,
         cycleId: cycle.id,
         participantId: participant.id,
         meta,
         authority: terminalAuthority,
-      });
+      };
+      let acquired = await this.acquireTerminalCloseClaim(claimInput);
+      // LIVE-FIX-1485: the direct pre-wake can arrive before the API commits
+      // the canonical close (cycle revision / lifecycle generation), so the
+      // first claim is refused. Nothing was submitted; retry briefly instead
+      // of pausing the relay (07:08:49Z / 07:23:27Z TERMINAL_CLOSE_CLAIM_REFUSED).
+      for (let attempt = 0; !acquired && attempt < TERMINAL_CLAIM_RETRY_ATTEMPTS; attempt += 1) {
+        const row = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participant.id },
+          select: { status: true, terminalCloseClaimToken: true },
+        });
+        if (row?.status !== SignalCycleStatus.OPEN || row.terminalCloseClaimToken) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, TERMINAL_CLAIM_RETRY_MS));
+        acquired = await this.acquireTerminalCloseClaim(claimInput);
+      }
       if (!acquired) {
         const recovered = await this.recoverSettledTerminalCloseFence({
           agentId,
@@ -17339,6 +17371,14 @@ await this.notifications
             `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycle.id} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
           ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16763', true));
           return true;
+        }
+        if (existing?.status === SignalCycleStatus.OPEN && !existing.terminalCloseClaimToken) {
+          // LIVE-FIX-1485: still unclaimed and nothing submitted — the durable
+          // post-commit wake / tick retries with committed authority. Do not pause.
+          this.logger.warn(
+            `[TERMINAL-CLAIM] deferred cycle=${cycle.id} participant=${participant.id}: authority not yet committed; retry via durable wake`,
+          );
+          return false;
         }
         await this.pauseUserRelayForPositionMismatch(
           userId,
