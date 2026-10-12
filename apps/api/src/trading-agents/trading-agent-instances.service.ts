@@ -739,16 +739,24 @@ export class TradingAgentInstancesService {
 
     let executorHealthAtArm: RelayExecutorHealthSnapshot | null = null;
     if (!paused && instance.exchangeProvider !== 'paper') {
-      const freshInstance = await this.prisma.tradingAgentInstance.findUnique({
-        where: { id: instance.id },
-        select: { dashboardState: true },
-      });
-      const executorHealth = readPersistedRelayExecutorHealth(
-        freshInstance?.dashboardState,
-        Date.now(),
-        undefined,
-        0,
-      );
+      // LIVE-FIX-1218: a paused executor beats every 10 s; wait up to 12 s for
+      // a fresh beat instead of failing the click (Arm needed ~3 clicks).
+      let executorHealth: RelayExecutorHealthSnapshot | null = null;
+      const healthDeadline = Date.now() + 12_000;
+      for (;;) {
+        const freshInstance = await this.prisma.tradingAgentInstance.findUnique({
+          where: { id: instance.id },
+          select: { dashboardState: true },
+        });
+        executorHealth = readPersistedRelayExecutorHealth(
+          freshInstance?.dashboardState,
+          Date.now(),
+          undefined,
+          0,
+        );
+        if (executorHealth.healthy || Date.now() >= healthDeadline) break;
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
       if (!executorHealth.healthy) {
         throw new ServiceUnavailableException(
           `Bitfinex relay executor is ${executorHealth.status.toLowerCase()} ` +

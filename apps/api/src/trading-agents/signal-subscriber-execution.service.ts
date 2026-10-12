@@ -148,7 +148,9 @@ const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 export const LOOP_STALL_RESTART_MS = 120_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 /** A paused/idle executor persists a heartbeat on this cadence instead of ticking. */
-export const PAUSED_EXECUTOR_HEARTBEAT_MS = 60_000;
+// LIVE-FIX-1218: arming requires a <=15 s heartbeat; at 60 s the website Arm
+// button 503'd until a click happened to land within 15 s of a beat (~3 clicks).
+export const PAUSED_EXECUTOR_HEARTBEAT_MS = 10_000;
 export const PAUSED_EXECUTOR_HEARTBEAT_MAX_AGE_MS = PAUSED_EXECUTOR_HEARTBEAT_MS * 3;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;

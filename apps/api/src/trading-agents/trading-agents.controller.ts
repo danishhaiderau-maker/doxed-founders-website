@@ -186,6 +186,39 @@ export class TradingAgentsController {
    * refuses BOT_ADMIN recovery when any promoted OPEN lot exists, so this
    * route can only reconcile an unattributed pending-entry residual.
    */
+  /**
+   * Danish 12 Oct 12:17-12:18: Boss may re-arm the live copy after any pause
+   * without the browser. Never waits for flat: force-flattens every open live
+   * copy lot first (owner-equivalent close path), then arms immediately.
+   * Admin-token only, throttled, and logged as an audit line. Paper positions
+   * are flattened on Fly by the caller (grokbot live/rearm.py) before this.
+   */
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  @Post(':slug/ops/rearm')
+  async opsRearm(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (body?.confirmation !== 'FORCE_FLAT_THEN_REARM') {
+      throw new BadRequestException('confirmation must equal FORCE_FLAT_THEN_REARM');
+    }
+    const uid = userId.trim();
+    const reason = (body.reason?.trim() || 'OPS_REARM').slice(0, 200);
+    const startedAt = new Date().toISOString();
+    const flat = await this.execution.emergencyFlattenOpenCopyLots(uid, slug);
+    const armed = await this.instances.setInstancePaused(uid, slug, false);
+    // Audit line (Railway logs are retained; grep OPS-REARM).
+    // eslint-disable-next-line no-console
+    console.log(`[OPS-REARM] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} flattened=${flat.flattened} at=${startedAt}`);
+    return { ok: true, flattened: flat.flattened, armed, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
+  }
+
   @Public()
   @Throttle({ default: { limit: 2, ttl: 60000 } })
   @Post(':slug/ops/emergency-reconcile')
