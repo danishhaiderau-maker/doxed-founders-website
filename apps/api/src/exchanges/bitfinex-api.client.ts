@@ -153,6 +153,8 @@ function signBitfinex(secret: string, payload: string): string {
 type NonceLane = {
   lastNonce: bigint;
   running: boolean;
+  /** LIVE-FIX-1487: protective stop submits jump ahead of every other call. */
+  stops?: Array<QueuedAuthRequest<unknown>>;
   mutations: Array<QueuedAuthRequest<unknown>>;
   reads: Array<QueuedAuthRequest<unknown>>;
 };
@@ -191,7 +193,7 @@ function isBitfinexOrderMutation(apiPath: string): boolean {
 
 function drainNonceLane(lane: NonceLane): void {
   if (lane.running) return;
-  const next = lane.mutations.shift() ?? lane.reads.shift();
+  const next = lane.stops?.shift() ?? lane.mutations.shift() ?? lane.reads.shift();
   if (!next) return;
   lane.running = true;
   void Promise.resolve()
@@ -203,14 +205,22 @@ function drainNonceLane(lane: NonceLane): void {
     });
 }
 
+/** Protective (reduce-only STOP) submit: highest priority on the nonce lane. */
+export function isBitfinexProtectiveStopSubmit(apiPath: string, body: Record<string, unknown>): boolean {
+  return apiPath === 'v2/auth/w/order/submit'
+    && /STOP/i.test(String(body?.type ?? ''))
+    && ((Number(body?.flags ?? 0) & 1024) !== 0);
+}
+
 function enqueueNonceLane<T>(
   lane: NonceLane,
-  mutation: boolean,
+  mutation: boolean | 'stop',
   run: () => Promise<T>,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const queued: QueuedAuthRequest<T> = { run, resolve, reject };
-    if (mutation) lane.mutations.push(queued as QueuedAuthRequest<unknown>);
+    if (mutation === 'stop') (lane.stops ??= []).push(queued as QueuedAuthRequest<unknown>);
+    else if (mutation) lane.mutations.push(queued as QueuedAuthRequest<unknown>);
     else lane.reads.push(queued as QueuedAuthRequest<unknown>);
     drainNonceLane(lane);
   });
@@ -342,7 +352,11 @@ export async function bitfinexAuthPost<T = unknown>(
     throw new Error(`Bitfinex ${apiPath}: nonce retry exhausted`);
   };
 
-  const result = enqueueNonceLane(lane, isBitfinexOrderMutation(apiPath), run);
+  const result = enqueueNonceLane(
+    lane,
+    isBitfinexProtectiveStopSubmit(apiPath, body) ? 'stop' : isBitfinexOrderMutation(apiPath),
+    run,
+  );
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     expiryTimer = setTimeout(() => {

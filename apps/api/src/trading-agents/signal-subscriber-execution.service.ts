@@ -3643,6 +3643,36 @@ export function recordedStopOrderIdsFromPayloads(payloads: unknown[]): number[] 
 
 /** Pure: an active order may be cancelled as an orphan stop only if it is an
  *  exact reduce-only STOP on the BTC perp and the account has no position. */
+/**
+ * LIVE-FIX-1487 (#6 one stop per position): reduce-only BTC-perp STOPs on the
+ * closing side, same qty as the just-authenticated stop, beyond what the net
+ * position needs. Never touches the kept stop; keeps enough stop qty to cover
+ * the whole net position (several lots on one net position keep their stops).
+ */
+export function extraProtectiveStopIds(
+  active: readonly BitfinexActiveOrder[],
+  keepId: number,
+  direction: 'LONG' | 'SHORT',
+  qty: number,
+  positionAmount: number,
+): number[] {
+  const closingSign = direction === 'LONG' ? -1 : 1;
+  const stops = active.filter((o) => o.symbol === BITFINEX_BTC_PERP_SYMBOL
+    && o.orderType.toUpperCase().includes('STOP')
+    && ((o.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0
+    && Math.sign(o.amount) === closingSign);
+  if (!stops.some((o) => o.id === keepId)) return [];
+  const pos = Math.abs(positionAmount);
+  let covered = stops.reduce((a, o) => a + Math.abs(o.amount), 0);
+  const out: number[] = [];
+  for (const o of stops.filter((x) => x.id !== keepId && Math.abs(Math.abs(x.amount) - qty) < 1e-8).sort((a, b) => a.id - b.id)) {
+    if (covered - Math.abs(o.amount) < pos - 1e-8) break;
+    covered -= Math.abs(o.amount);
+    out.push(o.id);
+  }
+  return out;
+}
+
 export function orphanReduceOnlyStopCancellable(
   order: BitfinexActiveOrder | null | undefined,
   positionAmount: number,
@@ -16067,7 +16097,40 @@ await this.notifications
     }
     const submitAckAtMs = Date.now();
     const authenticated = await this.authenticateExactProtectiveStop(creds, orderId, input);
+    if (authenticated.ok) {
+      // Off the stop's critical path: the stop is already live.
+      // Delayed so its two reads never sit on the nonce lane ahead of the
+      // stop confirmation / an early exit.
+      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input).catch(() => undefined); }, 3_000);
+      (t as { unref?: () => void }).unref?.();
+    }
     return { ...authenticated, submitAckAtMs };
+  }
+
+  private async cancelDuplicateProtectiveStops(
+    creds: ExchangeCredentials,
+    keepId: number,
+    input: { positionDirection: 'LONG' | 'SHORT'; qty: number },
+  ): Promise<void> {
+    if (this.executorDestroyed) return;
+    const client = this.activeTrading as unknown as {
+      listActiveOrders?: (c: ExchangeCredentials) => Promise<BitfinexActiveOrder[]>;
+      getOpenPositionDetail?: (c: ExchangeCredentials) => Promise<{ amount: number } | null>;
+    };
+    if (typeof client.listActiveOrders !== 'function' || typeof client.getOpenPositionDetail !== 'function') return;
+    try {
+      const [active, position] = await Promise.all([
+        client.listActiveOrders(creds),
+        client.getOpenPositionDetail(creds),
+      ]);
+      const extras = extraProtectiveStopIds(active, keepId, input.positionDirection, input.qty, position?.amount ?? 0);
+      for (const id of extras) {
+        const gone = await this.cancelManagedOrderGone(creds, id, 'duplicate-protective-stop');
+        this.logger?.warn(`[STOP-DEDUPE] cancelled duplicate reduce-only stop ${id} keep=${keepId} gone=${gone.gone}`);
+      }
+    } catch (err) {
+      this.logger?.warn(`[STOP-DEDUPE] skipped keep=${keepId}: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   private async authenticateExactProtectiveStop(
@@ -17369,11 +17432,12 @@ await this.notifications
           existing?.status === SignalCycleStatus.OPEN &&
           existing.terminalCloseClaimToken
         ) {
-          await this.pauseUserRelayForPositionMismatch(
-            userId,
-            agentId,
-            `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycle.id} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
-          ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16763', true));
+          // LIVE-FIX-1487: another owner holds the fence and is closing. Stand
+          // down (no resubmit, no pause); the reconciler's confirmed-mismatch
+          // check (MISMATCH_CONFIRM_MS) still pauses on real exchange drift.
+          this.logger.warn(
+            `[TERMINAL-CLAIM] stand-down cycle=${cycle.id} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: owned by another closer`,
+          );
           return true;
         }
         if (existing?.status === SignalCycleStatus.OPEN && !existing.terminalCloseClaimToken) {
@@ -17384,12 +17448,14 @@ await this.notifications
           );
           return false;
         }
-        await this.pauseUserRelayForPositionMismatch(
-          userId,
-          agentId,
-          `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycle.id}: identity, generation, status, or authority changed`,
-        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@16770', true));
-        return false;
+        // LIVE-FIX-1487: participant already left OPEN (closed/closing by the
+        // winning claimant, or rewritten by a heal). Nothing was submitted here;
+        // stand down instead of self-pausing (19:02:47 / 19:29:24 pauses).
+        // Real exposure drift is caught by the confirmed reconcile mismatch.
+        this.logger.warn(
+          `[TERMINAL-CLAIM] stand-down cycle=${cycle.id} status=${existing?.status ?? 'MISSING'}: TERMINAL_CLOSE_CLAIM_REFUSED (not pausing)`,
+        );
+        return existing?.status !== SignalCycleStatus.OPEN;
         }
       } else {
         terminalClaim = acquired;
@@ -19619,19 +19685,17 @@ await this.notifications
           existing?.status === SignalCycleStatus.OPEN &&
           existing.terminalCloseClaimToken
         ) {
-          await this.pauseUserRelayForPositionMismatch(
-            userId,
-            agentId,
-            `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
-          ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@18996', true));
+          this.logger.warn(
+            `[TERMINAL-CLAIM] stand-down cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'} reason=${opts.reason}: owned by another closer`,
+          );
           return true;
         }
-        await this.pauseUserRelayForPositionMismatch(
-          userId,
-          agentId,
-          `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycleId}: ${opts.reason} authority changed`,
-        ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@19003', true));
-        return false;
+        // LIVE-FIX-1487: no self-pause on a refused claim; a real exchange
+        // drift is caught by the confirmed reconcile mismatch.
+        this.logger.warn(
+          `[TERMINAL-CLAIM] stand-down cycle=${cycleId} status=${existing?.status ?? 'MISSING'} reason=${opts.reason}: TERMINAL_CLOSE_CLAIM_REFUSED (not pausing)`,
+        );
+        return existing?.status !== SignalCycleStatus.OPEN;
         }
       } else {
         terminalClaim = acquired;
