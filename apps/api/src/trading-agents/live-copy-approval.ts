@@ -39,6 +39,19 @@ export const LIVE_COPY_TILE_PREFIXES: Readonly<Record<string, string>> = Object.
 });
 
 /**
+ * LIVE-FIX-1480: true when the trade id belongs to an active dashboard tile
+ * (prefix in LIVE_COPY_TILE_PREFIXES). This is a routing predicate only: it
+ * never authorizes a copy. Entries still need Fly's signed approval at
+ * placement, and terminal wakes act only on an already-open owned lot.
+ */
+export function isActiveLiveCopyTileTradeId(tradeId: string | null | undefined): boolean {
+  const tid = String(tradeId ?? '').trim().toLowerCase();
+  const [head, ...rest] = tid.split('-');
+  if (!head || rest.length === 0 || !rest.join('-')) return false;
+  return Object.values(LIVE_COPY_TILE_PREFIXES).includes(head);
+}
+
+/**
  * Bitfinex derivatives (BTCF0:USTF0) are isolated-margin: initial margin
  * 1/leverage, minimum maintenance margin 0.5%. A $0.25 / 100x ($25 notional)
  * position liquidates ~50 bp adverse (mark price; fees/funding ignored).

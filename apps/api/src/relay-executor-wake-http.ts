@@ -1,6 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { RelayExecutorWakeRequest } from './trading-agents/signal-subscriber-execution.service';
 import { isMirrorableLaneTradeId } from '@dcf/utils';
+import { isActiveLiveCopyTileTradeId } from './trading-agents/live-copy-approval';
+
+/**
+ * LIVE-FIX-1480 root cause: since Option 1 (approval-backed copy) the
+ * generated platform_relay_eligible allowlist is empty, so requiring it here
+ * rejected EVERY authenticated POSITION_OPENED / POSITION_CLOSED /
+ * ORDER_EXPIRED direct wake with HTTP 400. Live exits then waited for the 2 s
+ * durable poll plus the reconciliation tick (8-27 s), and were missed outright
+ * whenever that loop stalled. A wake is a hint for an already-authorized
+ * money path: the executor re-gates entries on the signed Fly approval and
+ * closes only an owned open lot, so active-tile routing is sufficient here.
+ */
+export function relayWakeTradeIdRoutable(tradeId: string | null): boolean {
+  return isMirrorableLaneTradeId(tradeId) || isActiveLiveCopyTileTradeId(tradeId);
+}
 
 const WAKE_TRIGGERS = new Set<RelayExecutorWakeRequest['trigger']>([
   'POSITION_CLOSED',
@@ -22,7 +37,7 @@ export function executorWakeAuthorized(supplied: string | undefined, expected: s
 
 export function parseExecutorWakeRequest(
   value: unknown,
-  isMirrorableTradeId: (tradeId: string | null) => boolean = isMirrorableLaneTradeId,
+  isMirrorableTradeId: (tradeId: string | null) => boolean = relayWakeTradeIdRoutable,
 ): RelayExecutorWakeRequest | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
