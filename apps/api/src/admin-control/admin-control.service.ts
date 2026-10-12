@@ -205,7 +205,7 @@ export class AdminControlService {
     // Pause new entries inside the canonical Fly process. The process itself
     // remains alive so exposure reconciliation, exits, and state publishing
     // continue while trading is disarmed.
-    const res = await this.botBridge.proxyBotPost('/api/pause', {});
+    const res = await this.botBridge.proxyBotPost('/api/pause', { caller: 'website:admin-control.pauseAgentTrading' });
     const data = (res.data ?? {}) as Record<string, unknown>;
     const paused =
       data.execution_paused === true ||
@@ -227,7 +227,7 @@ export class AdminControlService {
   async forceFlatShowcasePaper() {
     // Paper flattening is deliberately separate from the Bitfinex relay
     // emergency path. Pause first so no fresh paper entry can race the close.
-    const pause = await this.botBridge.proxyBotPost('/api/pause', {});
+    const pause = await this.botBridge.proxyBotPost('/api/pause', { caller: 'website:admin-control.forceFlatShowcasePaper' });
     const pauseData = (pause.data ?? {}) as Record<string, unknown>;
     const paused =
       pause.ok === true &&
