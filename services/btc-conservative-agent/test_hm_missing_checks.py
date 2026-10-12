@@ -51,7 +51,7 @@ def test_exit_truth_flags_stale_trigger_booking():
 def test_rules_conformance_fee_and_forced():
     out = mc.rules_conformance(active_tiles=["A"], retired_tiles=["R"], live_copy_tiles={}, open_lanes=["R"],
                                fee_rates_bp={"taker": 4.0}, totals_lanes={"A": {"forced_closes_counted": 1}})
-    assert out["status"] == "RED" and len(out["reasons"]) == 3
+    assert out["status"] == "RED" and len(out["reasons"]) == 4  # incl. A not live-copyable
 
 
 def test_latency_guard_and_retention():
@@ -100,3 +100,32 @@ def test_archive_receipt_post_admin_only(bot):
     got = client.get("/api/monitor/archive", headers={"Authorization": f"Bearer {MONITOR}"},
                      environ_base=REMOTE).get_json()
     assert got["receipt"]["bucket"] == "doxed-btc-archive"
+
+
+def test_disloc_shadow_30m_and_tape_archive(tmp_path):
+    import disloc_engine as d
+    import tape_archive
+    eng = d.DislocEngine.__new__(d.DislocEngine)
+    out = []
+    eng._shadows, eng.counters, eng.variant, eng.lane = [], {"shadow_30m_opened": 0, "shadow_30m_closed": 0, "errors": 0}, "base", "L"
+    eng._emit = out.append
+    eng._shadow_step(0.0, d.LONG, 100.0, 100.1, True)
+    eng._shadow_step(1799.0, None, 101.0, 101.1, True)
+    assert out == []
+    eng._shadow_step(1800.0, None, 101.0, 101.1, True)
+    assert out[0]["event"] == "DISLOC_SHADOW_30M" and abs(out[0]["pnl_bp_vs_touch"] - (101.0 / 100.1 - 1) * 1e4) < 1e-3
+    a = tape_archive.TapeArchive(lambda: tmp_path, clock=lambda: 1_760_000_000.0)
+    a._thread = object()  # no background thread in tests
+    a.append({"bucket_ts": 1_760_000_000, "bid": 1.0, "ask": 2.0, "x": 9}, ("bid", "ask"))
+    assert a.flush() == 1 and a.oldest_ts() is not None
+    import gzip
+    f = next((tmp_path / "tape_1s").glob("*.jsonl.gz"))
+    assert '"x"' not in gzip.decompress(f.read_bytes()).decode()
+
+
+def test_lanes_use_late_window_basis():
+    tid, fix = next(iter(monitor_tiles.late_window_table()["trades"].items()))
+    row = {"trade_id": tid, "net_pnl_usd_raw": fix["booked_bp"] * 25e-4, "net_pnl_bp": fix["booked_bp"],
+           "close_ts": 1, "direction": "LONG"}
+    out = monitor_api.lane_stats([row])
+    assert abs(out["net_usd"] - round(fix["market_bp"] * 25e-4, 6)) < 1e-6

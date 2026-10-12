@@ -13,9 +13,10 @@ def _rows():
 
 def test_lane_metrics_side_and_delay_buckets():
     m = d.lane_metrics(_rows(), margin_usd=0.25, leverage=100)
-    assert m["closes"] == 2 and m["wins"] == 1 and m["losses"] == 1
-    assert abs(m["net_pnl_usd"] - 0.005) < 1e-9
-    assert m["by_side"]["LONG"]["closes"] == 2
+    # Scored only on fills <= 2 s (Strategist 12 Oct); the 3 s fill stays in the delay buckets.
+    assert m["closes"] == 1 and m["wins"] == 1 and m["losses"] == 0 and m["unscored_late_fills"] == 1
+    assert abs(m["net_pnl_usd"] - 0.01) < 1e-9
+    assert m["by_side"]["LONG"]["closes"] == 1
     assert m["by_side"]["LONG"]["tag"] == "LONG_CONFIRMED_BY_DEEP_SEARCH"
     assert m["by_delay_bucket"]["le_2s"]["closes"] == 1
     assert m["by_delay_bucket"]["2_to_5s"]["closes"] == 1

@@ -528,8 +528,12 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
     return false;
   }
 
+  private rerun = false;
+
   async tick(): Promise<void> {
-    if (this.running) return;
+    // LIVE-FIX-1054: a kick that lands mid-run is not dropped; one trailing
+    // run follows so a fill/stop written during a sweep is reported at once.
+    if (this.running) { this.rerun = true; return; }
     this.running = true;
     try {
       const secret = this.config.get<string>('SHOWCASE_WEBHOOK_SECRET');
@@ -571,6 +575,10 @@ export class LiveCopyFlyReporterService implements OnModuleInit, OnModuleDestroy
     } finally {
       this.stats.lastRunAt = Date.now();
       this.running = false;
+      if (this.rerun) {
+        this.rerun = false;
+        setImmediate(() => void this.tick());
+      }
     }
   }
 }

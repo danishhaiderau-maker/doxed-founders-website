@@ -2448,6 +2448,8 @@ type RelayExecutionTimingStages = {
   exchangeAckAtMs?: number;
   persistenceStartedAtMs?: number;
   persistenceCompletedAtMs?: number;
+  /** LIVE-FIX-1054: per-stage marks between preflight and submit (ms epoch). */
+  marks?: Record<string, number>;
 };
 
 export function stableRelayFeeModel(): string {
@@ -10156,6 +10158,7 @@ await this.notifications
       });
       claimParticipantId = claimedAndAssessed.claimed?.id ?? null;
       cluster = claimedAndAssessed.assessment;
+    if (timing) (timing.marks ??= {}).claimCluster = Date.now();
     } catch (err) {
       if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
         this.logger.log(
@@ -10262,6 +10265,7 @@ await this.notifications
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
     const entryBbo = await entryBboPromise;
+    if (timing) (timing.marks ??= {}).finalGate = Date.now();
 
     // Re-read the account-holder gate immediately before the exchange write.
     // A Stop click racing an already-running executor tick must win; the
@@ -10318,6 +10322,7 @@ await this.notifications
         } as Prisma.InputJsonValue,
       },
     });
+    if (timing) (timing.marks ??= {}).fence = Date.now();
     if (timing) {
       timing.bitfinexRequestStartedAtMs = Date.now();
       // Per-hop entry timing (boss 12 Oct: measure receive->submit p50/p95).
@@ -10325,7 +10330,8 @@ await this.notifications
       this.logger.log(
         `[ENTRY-TIMING] trade=${tradeId} queue->executor=${timing.executorStartedAtMs - t0}ms`
         + ` preflight=${(timing.databasePreflightCompletedAtMs ?? t0) - (timing.databasePreflightStartedAtMs ?? t0)}ms`
-        + ` queue->submit=${timing.bitfinexRequestStartedAtMs - t0}ms`,
+        + ` queue->submit=${timing.bitfinexRequestStartedAtMs - t0}ms`
+        + ` marks=${Object.entries(timing.marks ?? {}).map(([k, v]) => `${k}:${v - t0}`).join(',')}`,
       );
     }
     entrySubmitStarted = true;
@@ -10339,6 +10345,134 @@ await this.notifications
     exchangeAckedOrderId = orderId;
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
+    // LIVE-FIX-1054: re-run the money tick the moment this one ends so a
+    // marketable/taker entry's fill is promoted and its reduce-only stop armed
+    // without waiting for the next poll.
+    if (this.running) this.wakeQueued = true;
+
+    // LIVE-FIX-1054: sizing-readiness evidence (4 authenticated reads + a
+    // dashboard write) used to run HERE, between exchange ack and the fill
+    // check / protective stop in applyLimitChase. On the per-key nonce lane
+    // that put ~3.5 s ahead of the stop (fill->stop_placed 5.2 s). It is
+    // display-only evidence, so it now runs after the chase has armed the stop.
+    const bitfinexSizingReadinessPending = missingBitfinexVenueEvidenceReadiness();
+    const payload: ExecutionPayload = {
+      bitfinexOrderId: orderId,
+      limitPrice,
+        originalLimitPrice: limitPrice,
+      localMark: mark,
+      entryBbo: entryBbo ?? undefined,
+      qty,
+      direction: intent.direction,
+      exchangeQtyAtOrder,
+      margin_usd: marginUsd,
+      source: 'hire',
+        lastChaseAtMs: 0,
+      entryExchangeAckAtMs: exchangeAckAtMs,
+      limitChaseCount: 0,
+      ...(signedExactLimit
+        ? {
+            platformReceivedAt: new Date(signedExactLimit.receivedAtMs).toISOString(),
+            platformToExchangeAckMs: Math.max(
+              0,
+              exchangeAckAtMs - signedExactLimit.receivedAtMs,
+            ),
+            ...(signedExactLimit.sourceEventAtMs != null
+              ? {
+                  sourceEventAt: new Date(
+                    signedExactLimit.sourceEventAtMs,
+                  ).toISOString(),
+                  sourceToPlatformMs: Math.max(
+                    0,
+                    signedExactLimit.receivedAtMs - signedExactLimit.sourceEventAtMs,
+                  ),
+                  sourceToExchangeAckMs: Math.max(
+                    0,
+                    exchangeAckAtMs - signedExactLimit.sourceEventAtMs,
+                  ),
+                }
+              : {}),
+            ...(signedExactLimit.eventId ? { sourceEventId: signedExactLimit.eventId } : {}),
+            ...(signedExactLimit.eventSeq != null ? { sourceEventSeq: signedExactLimit.eventSeq } : {}),
+          }
+        : {}),
+      ...(clientOrderId != null ? { clientOrderId } : {}),
+    };
+
+    if (timing) timing.persistenceStartedAtMs = Date.now();
+    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
+      venue,
+      fee_model: stableRelayFeeModel(),
+      execution_profile: stableRelayExecutionProfile(),
+      local_mark_at_signal: mark,
+      entry_bbo: entryBbo ?? undefined,
+      limit_price: limitPrice,
+        original_limit_price: limitPrice,
+      qty,
+        source_exact_qty_btc: intent.entry.exact_qty_btc,
+        venue_qty_btc: qty,
+        margin_usd: marginUsd,
+        margin_cap_usd: effectiveCap,
+        leverage,
+        bitfinex_sizing_readiness: bitfinexSizingReadinessPending,
+        correlated_cluster_evidence: {
+          schema: 'correlated_exposure_cluster_v2',
+          allowed: cluster.allowed,
+          reason: cluster.reason,
+          same_direction_managed_or_reserved_count: cluster.sameDirectionCount,
+          aggregate_qty_btc: cluster.aggregateQty,
+          aggregate_margin_usd: cluster.aggregateMarginUsd,
+          price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
+          nearest_trade_id: cluster.nearest?.tradeId ?? null,
+          nearest_participant_id: cluster.nearest?.participantId ?? null,
+          nearest_price_distance_usd: cluster.nearest?.priceDistanceUsd ?? null,
+          nearest_price_distance_fraction: cluster.nearest?.priceDistanceFraction ?? null,
+          nearest_lifecycle_distance_sec: cluster.nearest?.lifecycleDistanceSec ?? null,
+        },
+      ...payload,
+    });
+    if (timing) timing.persistenceCompletedAtMs = Date.now();
+
+    this.cycleAudit.stage('ORDER_PLACED', {
+      userId: instance.userId,
+      agentId,
+      cycleId,
+      tradeId,
+      venue,
+      meta: { qty, limitPrice, orderId },
+    });
+
+      const participant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { cycleId_userId: { cycleId, userId: instance.userId } },
+      });
+      if (participant) {
+        await this.applyLimitChase(
+          agentId,
+          instance.userId,
+          cycleId,
+          participant.id,
+          payload,
+          creds,
+          intent,
+          tradeId,
+          true,
+        );
+      }
+
+    // Deferred evidence (post-stop): execution timing + sizing readiness.
+    try {
+    if (timing) {
+      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'EXECUTION_TIMING', {
+        schema: 'relay_execution_timing_v1',
+        venue,
+        source: 'hire',
+        operation: 'ORDER_PLACED',
+        trade_id: tradeId,
+        participant_id: claimParticipantId,
+        bitfinex_order_id: orderId,
+        stages: timing,
+      });
+    }
 
     let bitfinexSizingReadiness = missingBitfinexVenueEvidenceReadiness();
     if (venue === 'bitfinex') {
@@ -10398,120 +10532,9 @@ await this.notifications
         },
       });
     }
-    const payload: ExecutionPayload = {
-      bitfinexOrderId: orderId,
-      limitPrice,
-        originalLimitPrice: limitPrice,
-      localMark: mark,
-      entryBbo: entryBbo ?? undefined,
-      qty,
-      direction: intent.direction,
-      exchangeQtyAtOrder,
-      margin_usd: marginUsd,
-      source: 'hire',
-        lastChaseAtMs: 0,
-      entryExchangeAckAtMs: exchangeAckAtMs,
-      limitChaseCount: 0,
-      ...(signedExactLimit
-        ? {
-            platformReceivedAt: new Date(signedExactLimit.receivedAtMs).toISOString(),
-            platformToExchangeAckMs: Math.max(
-              0,
-              exchangeAckAtMs - signedExactLimit.receivedAtMs,
-            ),
-            ...(signedExactLimit.sourceEventAtMs != null
-              ? {
-                  sourceEventAt: new Date(
-                    signedExactLimit.sourceEventAtMs,
-                  ).toISOString(),
-                  sourceToPlatformMs: Math.max(
-                    0,
-                    signedExactLimit.receivedAtMs - signedExactLimit.sourceEventAtMs,
-                  ),
-                  sourceToExchangeAckMs: Math.max(
-                    0,
-                    exchangeAckAtMs - signedExactLimit.sourceEventAtMs,
-                  ),
-                }
-              : {}),
-            ...(signedExactLimit.eventId ? { sourceEventId: signedExactLimit.eventId } : {}),
-            ...(signedExactLimit.eventSeq != null ? { sourceEventSeq: signedExactLimit.eventSeq } : {}),
-          }
-        : {}),
-      ...(clientOrderId != null ? { clientOrderId } : {}),
-    };
-
-    if (timing) timing.persistenceStartedAtMs = Date.now();
-    await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
-      venue,
-      fee_model: stableRelayFeeModel(),
-      execution_profile: stableRelayExecutionProfile(),
-      local_mark_at_signal: mark,
-      entry_bbo: entryBbo ?? undefined,
-      limit_price: limitPrice,
-        original_limit_price: limitPrice,
-      qty,
-        source_exact_qty_btc: intent.entry.exact_qty_btc,
-        venue_qty_btc: qty,
-        margin_usd: marginUsd,
-        margin_cap_usd: effectiveCap,
-        leverage,
-        bitfinex_sizing_readiness: bitfinexSizingReadiness,
-        correlated_cluster_evidence: {
-          schema: 'correlated_exposure_cluster_v2',
-          allowed: cluster.allowed,
-          reason: cluster.reason,
-          same_direction_managed_or_reserved_count: cluster.sameDirectionCount,
-          aggregate_qty_btc: cluster.aggregateQty,
-          aggregate_margin_usd: cluster.aggregateMarginUsd,
-          price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
-          nearest_trade_id: cluster.nearest?.tradeId ?? null,
-          nearest_participant_id: cluster.nearest?.participantId ?? null,
-          nearest_price_distance_usd: cluster.nearest?.priceDistanceUsd ?? null,
-          nearest_price_distance_fraction: cluster.nearest?.priceDistanceFraction ?? null,
-          nearest_lifecycle_distance_sec: cluster.nearest?.lifecycleDistanceSec ?? null,
-        },
-      ...payload,
-    });
-    if (timing) {
-      timing.persistenceCompletedAtMs = Date.now();
-      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'EXECUTION_TIMING', {
-        schema: 'relay_execution_timing_v1',
-        venue,
-        source: 'hire',
-        operation: 'ORDER_PLACED',
-        trade_id: tradeId,
-        participant_id: claimParticipantId,
-        bitfinex_order_id: orderId,
-        stages: timing,
-      });
+    } catch (err) {
+      this.logger.warn(`deferred entry evidence failed order=${orderId}: ${err instanceof Error ? err.message : err}`);
     }
-
-    this.cycleAudit.stage('ORDER_PLACED', {
-      userId: instance.userId,
-      agentId,
-      cycleId,
-      tradeId,
-      venue,
-      meta: { qty, limitPrice, orderId },
-    });
-
-      const participant = await this.prisma.signalCycleParticipant.findUnique({
-        where: { cycleId_userId: { cycleId, userId: instance.userId } },
-      });
-      if (participant) {
-        await this.applyLimitChase(
-          agentId,
-          instance.userId,
-          cycleId,
-          participant.id,
-          payload,
-          creds,
-          intent,
-          tradeId,
-          true,
-        );
-      }
 
     this.logger.log(
         `Hire entry ${instance.userId} cycle=${cycleId} ${intent.direction} limit=${limitPrice.toFixed(2)} qty=${qty} margin=$${marginUsd.toFixed(2)} lev=${leverage}x`,

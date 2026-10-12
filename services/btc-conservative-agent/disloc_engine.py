@@ -326,6 +326,10 @@ class DislocEngine:
                          "errors": 0}
         self.last_signal: Optional[dict] = None
         self._seq = 0
+        # HM-BATCH2 (Strategist): 30-min-hold shadow on every DISLOC signal, entered at the signal touch.
+        self._shadows: list = []
+        self.counters["shadow_30m_opened"] = 0
+        self.counters["shadow_30m_closed"] = 0
 
     def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
@@ -519,6 +523,7 @@ class DislocEngine:
                                                    "oi_d60_bp", "oi_history_minutes", "side", "stale_reasons")}
         enabled = bool(self.enabled_fn())
         bid, ask, bbo_ts = self._touch()
+        self._shadow_step(now, side if rising else None, bid, ask, enabled)
         trades = list(self.trades_fn() or ()) if (self.order or self.position or rising) else []
         # 1. resting order: fill (trade-through up to now, within TTL) else cancel
         if self.order and "limit_price" in self.order:
@@ -627,6 +632,32 @@ class DislocEngine:
                          "prem_at_fill_bp": feat.get("prem_bp"), "stop_px": stop}
         self._emit({k: v for k, v in self.position.items() if k != "stop_px"})
 
+    def _shadow_step(self, now, rising_side, bid, ask, enabled) -> None:
+        """Open a 30 min shadow on each rising signal; close due shadows at the side-correct touch."""
+        try:
+            if bid and ask and self._shadows:
+                keep = []
+                for sh in self._shadows:
+                    if now - sh["signal_ts"] < SHADOW_HOLD_SEC:
+                        keep.append(sh)
+                        continue
+                    exit_px = bid if sh["side"] == LONG else ask
+                    sgn = 1.0 if sh["side"] == LONG else -1.0
+                    self._emit({"event": "DISLOC_SHADOW_30M", "variant": self.variant, "lane": self.lane,
+                                "side": sh["side"], "signal_ts": sh["signal_ts"], "entry_price": sh["entry_price"],
+                                "exit_ts": now, "exit_price": exit_px, "exit_bid": bid, "exit_ask": ask,
+                                "hold_s": round(now - sh["signal_ts"], 3),
+                                "pnl_bp_vs_touch": round(sgn * (exit_px / sh["entry_price"] - 1.0) * 1e4, 4),
+                                "shadow_only": True, "cost_model": "taker in/out at side-correct touch, fee 0"})
+                    self.counters["shadow_30m_closed"] += 1
+                self._shadows = keep
+            if rising_side and enabled and bid and ask and len(self._shadows) < 200:
+                self._shadows.append({"side": rising_side, "signal_ts": now,
+                                      "entry_price": ask if rising_side == LONG else bid})
+                self.counters["shadow_30m_opened"] += 1
+        except Exception:
+            self.counters["errors"] += 1
+
     def _cancel(self, now, reason, feat) -> None:
         o = self.order
         self.order = None
@@ -685,6 +716,15 @@ def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
 # bid out; SHORT: bid in, ask out) with no fee deduction - Bitfinex charges this
 # account no fees. net_bp_taker_2p8 stays on every row for the research verdict.
 CARD_BP_KEY = "pnl_bp_vs_touch"
+# Strategist 12 Oct: DISLOC is scored only on fills within 2 s of the signal (later fills are
+# uncapturable live); they stay visible as ``unscored_late_fills``.
+SCORE_MAX_SIGNAL_TO_FILL_S = 2.0
+SHADOW_HOLD_SEC = 30 * 60
+
+
+def is_scored(row: Mapping[str, Any]) -> bool:
+    v = _num(row.get("signal_to_fill_s"))
+    return v is not None and v <= SCORE_MAX_SIGNAL_TO_FILL_S
 
 
 def card_bp(row: Mapping[str, Any]) -> Optional[float]:
@@ -748,19 +788,25 @@ def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=No
 def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAULT_MARGIN_USD,
                  leverage: float = DEFAULT_LEVERAGE) -> dict:
     """Card metrics (same keys as the lane ledger fold in bot.py) + side / delay-bucket breakdown."""
-    closed = closed_rows(rows)
+    all_closed = closed_rows(rows)
+    closed = [r for r in all_closed if is_scored(r)]
+    unscored = len(all_closed) - len(closed)
     wins = losses = 0
     net_total = 0.0
     by_side: dict = {}
     by_delay: dict = {}
-    for r in closed:
+    for r in all_closed:
         bp = card_bp(r) or 0.0
         net = row_net_usd(r, margin_usd, leverage) or 0.0
-        net_total += net
-        wins += bp > 0
-        losses += bp < 0
-        for key, bucket in ((str(r.get("side") or "?"), by_side),
-                            (delay_bucket(r.get("signal_to_fill_s")) or "unknown", by_delay)):
+        scored = is_scored(r)
+        if scored:
+            net_total += net
+            wins += bp > 0
+            losses += bp < 0
+        groups = [(delay_bucket(r.get("signal_to_fill_s")) or "unknown", by_delay)]
+        if scored:
+            groups.append((str(r.get("side") or "?"), by_side))
+        for key, bucket in groups:
             b = bucket.setdefault(key, {"closes": 0, "wins": 0, "losses": 0, "net_usd": 0.0, "sum_bp": 0.0})
             b["closes"] += 1
             b["wins"] += bp > 0
@@ -778,5 +824,7 @@ def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAU
         "closes": n, "wins": wins, "losses": losses, "net_pnl_usd": round(net_total, 4),
         "mean_net_bp": round(sum(card_bp(r) or 0.0 for r in closed) / n, 4) if n else None,
         "by_side": by_side, "by_delay_bucket": by_delay,
+        "unscored_late_fills": unscored, "scoring_rule": f"signal_to_fill_s <= {SCORE_MAX_SIGNAL_TO_FILL_S:g}",
+        "net_pnl_usd_unrounded": round(net_total, 6),
         "usd_basis": f"{CARD_BP_KEY} (real ask in, real bid out, Bitfinex fee 0) x ${float(margin_usd):g} margin x {float(leverage):g}x / 1e4 (paper)",
     }
