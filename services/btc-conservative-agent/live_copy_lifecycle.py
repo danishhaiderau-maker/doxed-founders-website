@@ -505,11 +505,13 @@ def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
     Returns (order_ids:set[str], position_ids:set[str], links:dict)."""
     order_ids, position_ids, links = set(), set(), {}
     open_qty, sides = 0.0, set()
+    per_cid = []
     for cid, rows in (by_correlation or {}).items():
         types = {str(r.get("type")) for r in rows or []}
         if not (types & _RELAY_LIVE_TYPES) or "POSITION_CLOSED" in types:
             continue
         ids, fill_qty, fallback_qty = [], 0.0, 0.0
+        cid_sides = set()
         for r in rows:
             for key in ("order", "stop"):
                 o = r.get(key) if isinstance(r.get(key), Mapping) else {}
@@ -521,15 +523,18 @@ def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
                 side = str(o.get("side") or "").upper()
                 if key == "order" and side in ("LONG", "SHORT"):
                     sides.add(side)
+                    cid_sides.add(side)
             if str(r.get("type")) == "ORDER_FILLED":
                 f = r.get("fill") if isinstance(r.get("fill"), Mapping) else {}
                 fill_qty += abs(_f(f.get("qty")) or 0.0)
                 side = str(f.get("side") or "").upper()
                 if side in ("LONG", "SHORT"):
                     sides.add(side)
+                    cid_sides.add(side)
         open_qty += fill_qty or fallback_qty
         order_ids.update(ids)
         links[cid] = {"order_ids": sorted(set(ids)), "filled_reported": bool(fill_qty)}
+        per_cid.append((cid, fill_qty or fallback_qty, set(cid_sides)))
     if len(exchange_positions or []) == 1 and open_qty > 0:
         p = exchange_positions[0]
         size = size_fn(p)
@@ -540,6 +545,16 @@ def relay_copy_managed_ids(by_correlation, exchange_positions, size_fn):
             position_ids.add(pid)
             for v in links.values():
                 v["position_id"] = pid
+        elif pid and size is not None:
+            # LIVE-FIX-1450: a stale unclosed copy (e.g. flattened by a deploy
+            # before its POSITION_CLOSED report) inflated the sum and made
+            # GS-01's own live position an orphan (194465029, 12 Oct 15:30).
+            # Link to the single open copy whose qty and side match exactly.
+            hits = [c for c, q, sd in per_cid
+                    if q > 0 and abs(abs(size) - q) <= max(1e-8, q * 0.05) and (not sd or sd == {side})]
+            if len(hits) == 1:
+                position_ids.add(pid)
+                links[hits[0]]["position_id"] = pid
     return order_ids, position_ids, links
 
 
