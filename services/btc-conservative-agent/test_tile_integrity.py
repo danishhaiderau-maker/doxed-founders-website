@@ -191,3 +191,33 @@ def test_paper_fill_output_reprices_within_0p1bp_entry_and_exit():
     assert out["checked"] == 12 and all(w["status"] == "OK" for w in legs)
     assert all(w["diff_bp"] <= 0.1 and not w["qty_mismatch"] for w in legs)
     assert {w["leg"] for w in legs} >= {"entry"} and out["status"] == "GREEN"
+
+
+def _bs_row(**kw):
+    book = {"s": 100, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}
+    r = {"trade_id": "b1", "side": "LONG", "qty": 1.0, "fill_model_version": 1,
+         "signal_ts": 99.5, "delay_s": 1.5, "fill_ts": 101.0, "book_s": 100, "fill_price": 100.0,
+         "filled_qty": 1.0, "fill_book": book}
+    r.update(kw)
+    return r
+
+
+def test_runtime_backstop_clean_row_passes():
+    import tile_integrity as ti
+    assert ti.runtime_backstop(_bs_row()) == []
+
+
+def test_runtime_backstop_catches_early_fill_look_ahead_and_off_book_price():
+    import tile_integrity as ti
+    assert any("EARLY_FILL" in x for x in ti.runtime_backstop(_bs_row(fill_ts=100.5, book_s=99)))
+    assert any("LOOK_AHEAD_BOOK" in x for x in ti.runtime_backstop(_bs_row(book_s=100, fill_ts=100.6, signal_ts=99.0)))
+    assert any("PRICE_NOT_FROM_BOOK" in x for x in ti.runtime_backstop(_bs_row(fill_price=99.99)))
+    ex = _bs_row(exit_status="FORCED_NO_BOOK")
+    assert any("FORCED_NO_BOOK" in x for x in ti.runtime_backstop(ex))
+
+
+def test_backstop_turns_check_red():
+    import tile_integrity as ti
+    books = {100: {"s": 100, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}}
+    out = ti.fill_recompute_check([_bs_row(fill_price=99.99)], books)
+    assert out["status"] == "RED"

@@ -99,14 +99,55 @@ def _verdict(reasons_red, reasons_amber, **extra) -> dict:
     return {"status": status, "reasons": (reasons_red + reasons_amber)[:50], **extra}
 
 
+BACKSTOP_LEGS = {
+    "entry": {"ts": "fill_ts", "start": "signal_ts", "delay": "delay_s", "book_s": "book_s",
+              "price": "fill_price", "qty": "filled_qty", "book": "fill_book"},
+    "exit": {"ts": "exit_ts", "start": "exit_trigger_ts", "delay": "exit_delay_s", "book_s": "exit_book_s",
+             "price": "exit_price", "qty": "exit_filled_qty", "book": "exit_fill_book"},
+}
+
+
+def runtime_backstop(row: Mapping[str, Any]) -> list:
+    """HM 13:27: per-row invariants that need no external book. Returns RED reasons.
+
+    fill_ts >= start + delay_s (no early fill); book_s + 1 <= fill_ts (book second complete before
+    the fill); the stored price equals a re-walk of the stored fill book. FORCED_NO_BOOK is RED.
+    """
+    out = []
+    tid = row.get("trade_id")
+    if row.get("exit_status") == "FORCED_NO_BOOK":
+        out.append(f"FORCED_NO_BOOK {tid}")
+    for leg, k in BACKSTOP_LEGS.items():
+        ts, start, delay = _f(row.get(k["ts"])), _f(row.get(k["start"])), _f(row.get(k["delay"]))
+        if row.get(k["price"]) is None:
+            continue
+        if ts is not None and start is not None and delay is not None and ts + 1e-6 < start + delay:
+            out.append(f"EARLY_FILL {tid}/{leg} {ts} < {start}+{delay}")
+        bs = _f(row.get(k["book_s"]))
+        if ts is not None and bs is not None and bs + 1 > ts + 1e-6:
+            out.append(f"LOOK_AHEAD_BOOK {tid}/{leg} book_s={int(bs)} fill_ts={ts}")
+        book = row.get(k["book"])
+        if leg == "exit" and (row.get("exit_pieces") or 1) > 1:
+            continue  # VWAP over several books; each piece is checked on its DISLOC_PARTIAL_EXIT row
+        if isinstance(book, Mapping):
+            levels = book.get("a") if _buys(row.get("side"), leg) else book.get("b")
+            px, filled = walk_vwap(levels, row.get(k["qty"]) or row.get("qty"))
+            stored = _f(row.get(k["price"]))
+            if px is None or stored is None or abs(stored - px) > 1e-9 * max(1.0, abs(px)):
+                out.append(f"PRICE_NOT_FROM_BOOK {tid}/{leg} stored={stored} rewalk={px}")
+    return out
+
+
 def fill_recompute_check(rows: Iterable[Mapping[str, Any]], book_by_sec) -> dict:
     red, amber, results = [], [], []
     if book_by_sec is None:  # the stored-book read itself failed: cannot verify
         return _verdict([], ["BOOK_READ_FAILED"], checked=0, rolling10_bp=None, rolling10_signed_bp=None,
                         code_bugs=0, worst=[])
+    rows = list(rows)
     for r in rows:
         if (r.get("fill_model_version") or 0) < 1:
             continue
+        red.extend(runtime_backstop(r))
         for leg in ("entry", "exit"):
             if leg == "exit" and r.get("exit_price") is None and r.get("exit_book_s") is None:
                 continue
