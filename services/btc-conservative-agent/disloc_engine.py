@@ -317,7 +317,6 @@ class DislocEngine:
         # Exits, shadows and evaluation never read it, so a pause cannot freeze open positions.
         self.entries_allowed_fn: Callable[[], Optional[str]] = lambda: None
         # Step B (HM 13:16): fills come from the 10-level book at signal_ts + measured delay.
-        self.book_at_fn: Optional[Callable[[float], Optional[dict]]] = None
         self.delay_fn: Callable[[str, str], tuple] = lambda lane, leg: (None, "default_until_n10")
         self.paused_skips: deque = deque(maxlen=200)
         self.trades_fn: Callable[[], list] = lambda: []
@@ -346,10 +345,8 @@ class DislocEngine:
 
     def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None,
                      regime_fn=None, touch_meta_fn=None, entries_allowed_fn=None,
-                     book_at_fn=None, delay_fn=None) -> None:
+                     delay_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
-        if book_at_fn is not None:
-            self.book_at_fn = book_at_fn
         if delay_fn is not None:
             self.delay_fn = delay_fn
         if touch_meta_fn is not None:
@@ -525,8 +522,7 @@ class DislocEngine:
         p = self.position
         ex = p["exit_pending"]
         side = p["side"]
-        res = paper_fill.paper_fill(side, p.get("qty"), ex["trigger_ts"], ex["delay_s"], self._book,
-                                    leg="exit", delay_source=ex["delay_source"])
+        res = self._price_exit(p, ex)
         if res.get("price") is None:
             ex["attempts"] = ex.get("attempts", 0) + 1
             ex["last_status"] = res.get("status")
@@ -556,9 +552,16 @@ class DislocEngine:
         self.counters["closes"] += 1
         self._emit(row)
 
-    def _book(self, t):
-        fn = self.book_at_fn
-        return fn(t) if fn is not None else None
+    # ---- fill sites (CI: last statement is `return paper_fill.paper_fill(...)`, book = book10l_at)
+    @staticmethod
+    def _price_entry(o):
+        return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                     leg="entry", delay_source=o["delay_source"], cap_px=o["ioc_cap_px"])
+
+    @staticmethod
+    def _price_exit(p, ex):
+        return paper_fill.paper_fill(p["side"], p["qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
+                                     leg="exit", delay_source=ex["delay_source"])
 
     def step(self, *, now, live, bfx_quotes, bfx_bbo_ts):
         """XVL evaluator protocol: returns (evaluation, None, []); DISLOC never hands a trigger to the pipeline."""
@@ -703,17 +706,7 @@ class DislocEngine:
         o = self.order
         cap, side = o["ioc_cap_px"], o["side"]
         sig_ts = o["signal_ts"]
-
-        def capped(t, _cap=cap, _side=side, _sig=sig_ts):
-            b = self._book(t)
-            if not b or t <= _sig:
-                return b
-            if _side == LONG:
-                return {**b, "a": [lv for lv in b.get("a") or [] if float(lv[0]) <= _cap + 1e-9]}
-            return {**b, "b": [lv for lv in b.get("b") or [] if float(lv[0]) >= _cap - 1e-9]}
-
-        res = paper_fill.paper_fill(side, o["qty"], sig_ts, o["delay_s"], capped, leg="entry",
-                                    delay_source=o["delay_source"])
+        res = self._price_entry(o)
         stamp = {"signal_book": res.get("depth_snapshot_signal"), "fill_book": res.get("depth_snapshot_fill"),
                  "depth_snapshot_signal": res.get("depth_snapshot_signal"),
                  "depth_snapshot_fill": res.get("depth_snapshot_fill"),
@@ -722,18 +715,17 @@ class DislocEngine:
                  "fill_status": res.get("status"), "book_s": res.get("book_s"),
                  "book_age_ms": res.get("book_age_ms"), "ask_age_ms": res.get("ask_age_ms")}
         if res.get("price") is None:
-            if res.get("status") == "NO_FILL_NO_DEPTH":
-                raw = paper_fill.paper_fill(side, o["qty"], sig_ts, o["delay_s"], self._book, leg="entry",
-                                            delay_source=o["delay_source"])
+            if res.get("status") == "NO_FILL_IOC_CAP":
+                fb = res.get("depth_snapshot_fill") or {}
+                lv = paper_fill.taker_side_levels(side, "entry", fb)
+                upx, ufilled = paper_fill._walk(lv, o["qty"])
                 self.order = {**o, **stamp}
                 self._cancel(res["fill_ts"], "NO_FILL_IOC_CAP", feat)
                 self.counters["no_fill_ioc_cap"] = self.counters.get("no_fill_ioc_cap", 0) + 1
                 self._emit({"event": "DISLOC_SHADOW_NO_FILL", "shadow_only": True, "trade_id": o["trade_id"],
                             "side": side, "signal_ts": sig_ts, "signal_ask": o["signal_ask"],
                             "signal_bid": o["signal_bid"], "ioc_cap_px": cap, "ioc_cap_bp": IOC_CAP_BP,
-                            "uncapped_fill_price": raw.get("price"), "uncapped_filled_qty": raw.get("filled_qty"),
-                            "uncapped_status": raw.get("status"), **stamp,
-                            "fill_book": raw.get("depth_snapshot_fill")})
+                            "uncapped_fill_price": upx, "uncapped_filled_qty": round(ufilled, 8), **stamp})
             else:
                 self.order = {**o, **stamp}
                 self._cancel(res["fill_ts"], "NO_BOOK_AT_FILL", feat)
@@ -843,8 +835,9 @@ def delay_bucket(signal_to_fill_s) -> Optional[str]:
 
 
 def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
+    import paper_fill as _pf
     return sorted((dict(r) for r in rows if isinstance(r, Mapping) and r.get("schema") == SCHEMA
-                   and r.get("event") == "DISLOC_CLOSED"),
+                   and r.get("event") == "DISLOC_CLOSED" and _pf.row_fresh_eligible(r)),
                   key=lambda r: float(r.get("exit_ts") or 0.0))
 
 

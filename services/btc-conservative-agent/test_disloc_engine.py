@@ -63,8 +63,10 @@ def _book_engine(monkeypatch, book_rows, prem_flip=350, delay=(1.5, "default_unt
     touch["q"] = (100.0, 100.02, 351.0)
     now = [0.0]
     book = Book(book_rows, now)
+    import paper_fill
+    monkeypatch.setattr(paper_fill, "book10l_at", book)
     eng.bind_runtime(enabled_fn=lambda: True, trades_fn=lambda: [], touch_fn=lambda: touch["q"],
-                     append_fn=rows.append, book_at_fn=book, delay_fn=lambda lane, leg: delay)
+                     append_fn=rows.append, delay_fn=lambda lane, leg: delay)
 
     def step(t):
         now[0] = t

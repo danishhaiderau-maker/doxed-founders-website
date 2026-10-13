@@ -65,33 +65,12 @@ BANNED = ("market_microstructure_1s", "book_tape_1s")
 LEGACY_V0_ALLOWED = {"research/fill_model.py", "fill_pricing_source.py", "research/conservative_limit_fill.py"}
 
 
-def test_book_tape_and_ticker_banned_in_fill_pricing_modules():
-    root = pathlib.Path(__file__).parent
-    offenders = []
-    for p in root.rglob("*.py"):
-        rel = p.relative_to(root).as_posix()
-        if rel.startswith("test_") or "/test_" in rel or rel in LEGACY_V0_ALLOWED or rel == "paper_fill.py":
-            continue
-        if not any(k in rel for k in ("fill", "paper_policy", "binding")):
-            continue
-        src = p.read_text(encoding="utf-8", errors="ignore")
-        if any(b in src for b in BANNED):
-            offenders.append(rel)
-    assert not offenders, f"book_tape_1s / microstructure tape used for fill pricing: {offenders}"
-
-
 def test_paper_fill_has_no_banned_source():
     src = pathlib.Path(pf.__file__).read_text(encoding="utf-8")
     names = ("paper_fill", "_walk", "taker_side_levels", "_safe", "_snap")
     code = "".join(ast.get_source_segment(src, n) or "" for n in ast.parse(src).body
                    if isinstance(n, ast.FunctionDef) and n.name in names)
     assert not any(b in code for b in BANNED) and "state[" not in code and "ticker" not in code.lower()
-
-
-def test_meta_guard_catches_synthetic_offender(tmp_path):
-    bad = tmp_path / "my_new_tile_fill.py"
-    bad.write_text("px = read('market_microstructure_1s')\n")
-    assert any(b in bad.read_text() for b in BANNED)
 
 
 # ------------------------------------------------ new-tile rule (HM 12:20)
@@ -149,12 +128,7 @@ def test_pending_lanes_excluded_from_fresh_data():
 def test_pending_sites_are_detected_today():
     # proves the checker sees the current non-compliant code (so it is not vacuous)
     v = pf.fill_site_violations((ROOT / "bot.py").read_text(encoding="utf-8"), "simulate_marketable_limit_fill")
-    assert any("does not call paper_fill" in x for x in v)
-
-
-def test_disloc_migrated():
-    assert "FAMILY_DISLOC_BFX_DISLOCATION_1M" not in pf.PENDING_MIGRATION
-    assert "FAMILY_DISLOC_FOI_LONG_1M" not in pf.PENDING_MIGRATION
+    assert any("last statement must be" in x for x in v)
 
 
 def test_planted_offender_in_non_fill_file_fails():
@@ -166,28 +140,31 @@ def place_tile_order(self, side):
 """
     v = pf.fill_site_violations(planted, "place_tile_order")
     assert any("state['ask']" in x for x in v) and any("state.get('bid')" in x for x in v)
-    assert any("book_tape_1s" in x for x in v) and any("does not call paper_fill" in x for x in v)
+    assert any("book_tape_1s" in x for x in v) and any("last statement must be" in x for x in v)
+
+
+GOOD = """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                 leg="entry", delay_source=o["delay_source"], cap_px=o["cap"])
+"""
 
 
 def test_compliant_site_passes():
-    good = """
-import paper_fill
-def fill(self, side, qty, ts):
-    return paper_fill.paper_fill(side, qty, ts, self.delay(), self.book_at)
-"""
-    assert pf.fill_site_violations(good, "fill") == []
+    assert pf.fill_site_violations(GOOD, "fill") == []
 
 
 def test_aliased_imports_resolve():
     mod_alias = """
 import paper_fill as pfx
-def fill(self, side, qty, ts):
-    return pfx.paper_fill(side, qty, ts, 1.5, self.book_at)
+def fill(self, o):
+    return pfx.paper_fill(o["side"], o["qty"], o["ts"], 1.5, pfx.book10l_at)
 """
     fn_alias = """
-from paper_fill import paper_fill as f
-def fill(self, side, qty, ts):
-    return f(side, qty, ts, 1.5, self.book_at)
+from paper_fill import paper_fill as f, book10l_at as bk
+def fill(self, o):
+    return f(o["side"], o["qty"], o["ts"], 1.5, book_at=bk)
 """
     assert pf.fill_site_violations(mod_alias, "fill") == []
     assert pf.fill_site_violations(fn_alias, "fill") == []
@@ -195,40 +172,127 @@ def fill(self, side, qty, ts):
 
 def test_unimported_lookalike_does_not_count():
     fake = """
-def fill(self, side, qty, ts):
-    return helpers.paper_fill(side, qty, ts, 1.5, self.book_at)
+def fill(self, o):
+    return helpers.paper_fill(o["side"], o["qty"], o["ts"], 1.5, helpers.book10l_at)
 """
-    assert any("does not call paper_fill" in x for x in pf.fill_site_violations(fake, "fill"))
+    assert pf.fill_site_violations(fake, "fill")
 
 
 def test_dynamic_and_indirect_routes_fail():
-    via_getattr = """
+    for src in ("""
 import paper_fill
-def fill(self, side, qty, ts):
-    return getattr(paper_fill, "paper_fill")(side, qty, ts, 1.5, self.book_at)
-"""
-    via_importlib = """
-import importlib
-def fill(self, side, qty, ts):
-    return importlib.import_module("paper_fill").paper_fill(side, qty, ts, 1.5, self.book_at)
-"""
-    via_helper = """
-from paper_fill import paper_fill
-def fill(self, side, qty, ts):
-    return run_with(paper_fill, side, qty, ts)
-"""
-    for src in (via_getattr, via_importlib, via_helper):
-        v = pf.fill_site_violations(src, "fill")
-        assert v, src
+def fill(self, o):
+    return getattr(paper_fill, "paper_fill")(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""", """
+import importlib, paper_fill
+def fill(self, o):
+    return importlib.import_module("paper_fill").paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""", """
+from paper_fill import paper_fill, book10l_at
+def fill(self, o):
+    return run_with(paper_fill, o, book10l_at)
+"""):
+        assert pf.fill_site_violations(src, "fill"), src
+
+
+# HM 13:20: the seven planted offenders that the 12:35 checker missed
+OFFENDERS = {
+    "returns_last_px_after_call": """
+import paper_fill
+def fill(self, o):
+    paper_fill.paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+    return self.last_px
+""",
+    "state_alias": """
+import paper_fill
+def fill(self, o):
+    s = state
+    o["px"] = s['ask']
+    return paper_fill.paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""",
+    "state_non_literal_key": """
+import paper_fill
+K = "ask"
+def fill(self, o):
+    o["px"] = state[K]
+    return paper_fill.paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""",
+    "split_banned_string": """
+import paper_fill
+def fill(self, o):
+    o["src"] = load('book_tape' + '_1s')
+    return paper_fill.paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""",
+    "sys_modules": """
+import sys, paper_fill
+def fill(self, o):
+    return sys.modules['paper_fill'].paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+""",
+    "fake_book_lambda": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], 1, 1, 1.5,
+        lambda t: {"s": t, "a": [[self.last_ask, 9]], "b": [[self.last_bid, 9]]})
+""",
+    "update_price_ticker": """
+import paper_fill
+def fill(self, o):
+    r = paper_fill.paper_fill(o["side"], 1, 1, 1.5, paper_fill.book10l_at)
+    r.update(price=ticker)
+    return r
+""",
+}
+
+
+def test_each_planted_offender_is_caught():
+    missed = [k for k, src in OFFENDERS.items() if not pf.fill_site_violations(src, "fill")]
+    assert not missed, missed
+
+
+def test_tile_module_scan_catches_aliases_and_folds():
+    src = "import sys\nK='bid'\ndef a():\n    s = state\n    return state[K], sys.modules['x'], 'book_tape' + '_1s'\n"
+    v = pf.tile_module_violations(src, "m.py")
+    assert any("aliases state" in x for x in v) and any("non-literal" in x for x in v)
+    assert any("sys.modules" in x for x in v) and any("book_tape_1s" in x for x in v)
 
 
 def test_tile_modules_never_read_state_prices():
-    planted = "def anywhere():\n    return state['bid'] + state.get('price')\n"
-    v = pf.tile_module_violations(planted, "x.py")
-    assert len(v) == 2
     mods = {m for sites in pf.TILE_FILL_SITES.values() for m, _ in sites if m != "bot.py"}
     bad = [x for m in mods for x in pf.tile_module_violations((ROOT / m).read_text(encoding="utf-8"), m)]
     assert not bad, bad
+
+
+def _bot_fn(name, **ns):
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name)
+    g = {"_paper_fill": pf, **ns}
+    exec(compile(ast.Module([node], []), "bot.py", "exec"), g)
+    return g[name]
+
+
+def test_fresh_data_wired_into_epoch_rows():
+    import datetime as _dt
+    pending = sorted(pf.PENDING_MIGRATION)[0]
+    in_epoch = {"ts": "2026-10-13T03:00:00+00:00", "entry_ts": 2e9}
+    row_session = _bot_fn("_trade_row_in_session", parse_ts=lambda v: 2e9)
+    assert row_session({**in_epoch, "research_lane": "MIGRATED_LANE"}, 1e9) is True
+    assert row_session({**in_epoch, "research_lane": pending}, 1e9) is False
+    only = _bot_fn("_session_trades_only", _showcase_trade_session_start=lambda: 1e9, datetime=_dt.datetime)
+    kept = only([{**in_epoch, "research_lane": pending}, {**in_epoch, "research_lane": "MIGRATED_LANE"}])
+    assert [r["research_lane"] for r in kept] == ["MIGRATED_LANE"]
+
+
+def test_fresh_data_wired_into_disloc_ledger():
+    import disloc_engine as de
+    pending = sorted(pf.PENDING_MIGRATION)[0]
+    rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": pending},
+            {"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 2, "lane": "MIGRATED_LANE"}]
+    assert [r["lane"] for r in de.closed_rows(rows)] == ["MIGRATED_LANE"]
+
+
+def test_disloc_migrated():
+    assert "FAMILY_DISLOC_BFX_DISLOCATION_1M" not in pf.PENDING_MIGRATION
+    assert "FAMILY_DISLOC_FOI_LONG_1M" not in pf.PENDING_MIGRATION
 
 
 def test_book_tail_no_look_ahead(tmp_path):
@@ -239,3 +303,11 @@ def test_book_tail_no_look_ahead(tmp_path):
     assert bt.at(105.5)["s"] == 104      # second 105 is not complete until 106
     assert bt.at(106.0)["s"] == 105
     assert bt.at(100.9) is None
+
+
+def test_ioc_cap_filters_levels():
+    book = lambda t: {"s": int(t) - 1, "b": [[99.0, 1]], "a": [[100.05, 0.1], [100.5, 5]]}
+    r = pf.paper_fill("LONG", 1.0, 100.0, 1.5, book, cap_px=100.07)
+    assert r["status"] == "PARTIAL" and r["price"] == 100.05 and r["filled_qty"] == 0.1
+    r = pf.paper_fill("LONG", 1.0, 100.0, 1.5, book, cap_px=100.0)
+    assert r["status"] == "NO_FILL_IOC_CAP" and r["price"] is None

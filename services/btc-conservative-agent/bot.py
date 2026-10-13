@@ -72,6 +72,7 @@ from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
+import paper_fill as _paper_fill
 import thread_health as _thread_health
 import monitor_gaps as _monitor_gaps
 import relay_delivery_guard as _relay_guard
@@ -22576,6 +22577,9 @@ def log_expired_order(row):
 def _trade_row_in_session(trade: dict, session_start: float) -> bool:
     if not session_start:
         return True
+    # HM 13:16/13:20: lanes still pending paper_fill migration never count as fresh-epoch data.
+    if not _paper_fill.row_fresh_eligible(trade):
+        return False
     ts = parse_ts(trade.get("ts") or "")
     if ts >= session_start - 1.0:
         return True
@@ -32263,17 +32267,7 @@ def _disloc_entry_pause_owner():
     return owner if owner in (PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_OPERATOR) else None
 
 
-_DISLOC_BOOK_TAIL = None
 _DISLOC_DELAYS = None
-
-
-def _disloc_book_at(t: float):
-    """Step B: 10-level Bitfinex book (strategist collector, same data dir) for paper_fill."""
-    global _DISLOC_BOOK_TAIL
-    import paper_fill as _pf
-    if _DISLOC_BOOK_TAIL is None:
-        _DISLOC_BOOK_TAIL = _pf.BookTail(os.path.join(os.getcwd(), "bfx_book_10l_1s.jsonl"))
-    return _DISLOC_BOOK_TAIL.at(t)
 
 
 def _disloc_delay(lane: str, leg: str):
@@ -32297,7 +32291,6 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_fn=_disloc_touch,
         touch_meta_fn=_disloc_touch_meta,
         entries_allowed_fn=_disloc_entry_pause_owner,
-        book_at_fn=_disloc_book_at,
         delay_fn=_disloc_delay,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
@@ -56462,6 +56455,8 @@ def _session_trades_only(trades_list):
     kept = []
     for t in trades_list or []:
         if not isinstance(t, dict):
+            continue
+        if not _paper_fill.row_fresh_eligible(t):  # pending paper_fill migration: not fresh data
             continue
         ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
         if not ts:
