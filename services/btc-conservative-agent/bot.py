@@ -47788,6 +47788,11 @@ def _integrity_gap_facts(now: float) -> dict:
                 root = os.getcwd()
             scan = _ig.scan_local_oldest(root)
             offenders = sorted(n for n, ts in scan["files"].items() if ts < float(epoch) - 60)
+            import keep_manifest as _km
+            out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
+                           "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
+                           "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
+                           "box": list(_km.BOX)}
             out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
                         "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")

@@ -48,28 +48,48 @@ def oldest_row_ts(path: str) -> Optional[float]:
     return None
 
 
-def scan_local_oldest(root: str, budget_s: float = 8.0) -> dict:
-    """G16 Fly side: first-row ts of every *.jsonl / *.jsonl.N under root (recursive, no file cap).
+_DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", ".sqlite3", ".db", ".npz", ".pkl")
 
-    Returns {"files": {relpath: ts}, "scanned": n, "complete": bool}; stops only on the time budget.
+
+def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
+    """G16 Fly side: oldest-data ts of every data file under root (recursive, no file cap).
+
+    jsonl (and .jsonl.N) -> first row ts; every other data file incl. .tgz -> mtime. Files and whole
+    directories on the pinned KEEP manifest are counted under ``kept`` and never become offenders.
+    Returns {"files": {rel: ts}, "kept": {rel: ts}, "kept_dirs": [...], "scanned", "complete"}.
     """
     import time as _t
+    import keep_manifest as km
+    keep = km.FLY if keep is None else keep
     t0 = _t.monotonic()
-    files, scanned, complete = {}, 0, True
-    for d, _dirs, names in os.walk(root):
+    files, kept, kept_dirs, scanned, complete = {}, {}, [], 0, True
+    for d, dirs, names in os.walk(root):
+        rel_d = os.path.relpath(d, root).replace(os.sep, "/")
+        rel_d = "" if rel_d == "." else rel_d
+        for sub in list(dirs):
+            rd = f"{rel_d}/{sub}" if rel_d else sub
+            if km.kept_dir(rd, keep):
+                kept_dirs.append(rd)
+                dirs.remove(sub)
         for n in names:
-            if not (n.endswith(".jsonl") or ".jsonl." in n):
+            if not (n.endswith(_DATA_SUFFIXES) or ".jsonl." in n):
                 continue
             if _t.monotonic() - t0 > budget_s:
                 complete = False
                 break
             scanned += 1
-            ts = oldest_row_ts(os.path.join(d, n))
-            if ts is not None:
-                files[os.path.relpath(os.path.join(d, n), root)] = ts
+            path = os.path.join(d, n)
+            rel = f"{rel_d}/{n}" if rel_d else n
+            ts = oldest_row_ts(path) if (n.endswith(".jsonl") or ".jsonl." in n) else None
+            if ts is None:
+                try:
+                    ts = os.path.getmtime(path)
+                except OSError:
+                    continue
+            (kept if km.is_kept(rel, keep) else files)[rel] = ts
         if not complete:
             break
-    return {"files": files, "scanned": scanned, "complete": complete}
+    return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}
 
 
 VERIFY_AFTER_SEC = 24 * 3600
@@ -245,11 +265,12 @@ def evaluate(f: dict) -> dict:
         st = "GREEN"
     rows.append(_row("G16", "rows older than epoch (R2 / Fly / box) + bfx_book_10l archive",
                      {"epoch_ts": epoch, "r2_receipt": r2_old, "r2_independent": r2_ind,
+                      "keep": w.get("keep"),
                       "r2_independent_at": w.get("r2_independent_at"), "fly": fly_old, "box": box_old,
                       "fly_scanned": w.get("fly_scanned"), "fly_scan_complete": w.get("fly_scan_complete"),
                       "fly_offenders": w.get("fly_offenders"), "archive_gaps": w.get("archive_gaps")},
                      "0 everywhere; receipt == independent R2 listing; daily archive, 0 gaps", st,
-                     "Fly /app/data scan + fresh_start_wipe_receipt.json + box R2 listing"))
+                     "Fly /app/data scan + fresh_start_wipe_receipt.json + box R2 listing; KEEP per pinned manifest"))
 
     rt = f.get("runtime") or {}
     p95 = rt.get("trade_lock_wait_p95_ms")
