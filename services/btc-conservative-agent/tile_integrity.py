@@ -176,8 +176,24 @@ def pnl_check(pnl_reconcile: Optional[Mapping[str, Any]]) -> dict:
     return {"status": "RED" if st in ("RED", "AMBER") else st, "reasons": list(pnl_reconcile.get("reasons") or [])[:10]}
 
 
-def evaluate(*, now, rows, book_by_sec, chains, v1_since_ts, feed: dict, pnl_reconcile) -> dict:
+def regime_coverage_check(tile_rows: Iterable[Mapping[str, Any]], since_ts: Optional[float]) -> dict:
+    """Strategist 10:37: every tile row after the epoch must carry regime_at_signal. AMBER if any miss."""
+    n, miss = 0, []
+    for r in tile_rows:
+        ts = _f(r.get("entry_ts") or r.get("opened_at_ts") or r.get("signal_ts") or r.get("fill_ts"))
+        if since_ts and (not ts or ts < since_ts):
+            continue
+        n += 1
+        if r.get("regime_at_signal") in (None, ""):
+            miss.append(str(r.get("trade_id")))
+    return _verdict([], [f"REGIME_MISSING {len(miss)}/{n} e.g. {miss[:5]}"] if miss else [],
+                    checked=n, missing=len(miss))
+
+
+def evaluate(*, now, rows, book_by_sec, chains, v1_since_ts, feed: dict, pnl_reconcile,
+             tile_rows=(), regime_since_ts=None) -> dict:
     parts = {
+        "regime-coverage": regime_coverage_check(tile_rows, regime_since_ts),
         "fill-recompute": fill_recompute_check(rows, book_by_sec),
         "presence": presence_check(rows, v1_since_ts),
         "live-vs-shadow": live_vs_shadow_check(chains),
@@ -201,3 +217,16 @@ def heartbeat_check(last: Optional[Mapping[str, Any]], now: float) -> dict:
     return {"check": "tile-integrity", "status": last.get("status", "UNKNOWN"),
             "alert": last.get("status") == "RED", "reasons": reasons[:50], "last_run_ts": last["run_ts"],
             "age_s": round(age, 1)}
+
+
+def append_jsonl(path: str, res: Mapping[str, Any]) -> None:
+    """Persist a compact run record (archived with the other runtime jsonl streams)."""
+    import json
+    try:
+        rec = {"run_ts": res.get("run_ts"), "status": res.get("status"),
+               "parts": {k: v.get("status") for k, v in (res.get("parts") or {}).items()},
+               "reasons": [r for p in (res.get("parts") or {}).values() for r in (p.get("reasons") or [])][:20]}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+    except Exception:  # noqa: BLE001
+        pass

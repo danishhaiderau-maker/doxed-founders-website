@@ -47098,26 +47098,21 @@ def _tile_integrity_run_once(now=None):
         feed = _TILE_INTEGRITY_FEED.observe(st.get("msgs"), st.get("ts"), now)
     except Exception as exc:  # noqa: BLE001
         feed = {"status": "UNKNOWN", "reasons": [f"FEED_STATUS_ERROR {type(exc).__name__}"]}
+    rows = _tile_integrity_rows(now)
     try:
         inp = _monitor_check_inputs(now, 24.0)
         pnl = _mc.pnl_reconcile(inp["totals"], inp["by_lane"], None, {})
+        tile_rows = [r for rows_ in inp["by_lane"].values() for r in rows_] + rows
     except Exception:  # noqa: BLE001
-        pnl = None
-    rows = _tile_integrity_rows(now)
+        pnl, tile_rows = None, []
     res = _ti.evaluate(now=now, rows=rows, book_by_sec=_tile_integrity_book(now, rows),
                        chains=_tile_integrity_chains(now), v1_since_ts=_TILE_INTEGRITY_V1_SINCE,
-                       feed=feed, pnl_reconcile=pnl)
+                       feed=feed, pnl_reconcile=pnl, tile_rows=tile_rows,
+                       regime_since_ts=float(os.getenv("REGIME_COVERAGE_SINCE_TS") or 0) or now - 86400)
     with _TILE_INTEGRITY_LOCK:
         _TILE_INTEGRITY["last"] = res
         _TILE_INTEGRITY["runs"] += 1
-    try:
-        with open(_TILE_INTEGRITY_FILE, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({k: res[k] for k in ("run_ts", "status")} |
-                                {"parts": {k: v.get("status") for k, v in res["parts"].items()},
-                                 "reasons": [r for p in res["parts"].values() for r in (p.get("reasons") or [])][:20]},
-                                default=str) + "\n")
-    except Exception:  # noqa: BLE001
-        pass
+    _ti.append_jsonl(_TILE_INTEGRITY_FILE, res)
     if res["status"] == "RED":
         logger.warning(f"[TILE INTEGRITY] RED {[(k, v.get('reasons')) for k, v in res['parts'].items() if v.get('status') == 'RED']}")
     return res

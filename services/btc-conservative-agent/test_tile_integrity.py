@@ -82,3 +82,9 @@ def test_independent_of_shared_fill_function():
              for a in n.names} | {getattr(n, "module", None) for n in ast.walk(ast.parse(src))
                                   if isinstance(n, ast.ImportFrom)}
     assert not any(x and ("paper_fill" in x or "book_fill" in x or "disloc" in x) for x in names)
+
+
+def test_regime_coverage_gap_check():
+    rows = [{"trade_id": "a", "entry_ts": 10, "regime_at_signal": "TREND"}, {"trade_id": "b", "entry_ts": 11}]
+    assert ti.regime_coverage_check(rows, 5)["status"] == "AMBER"
+    assert ti.regime_coverage_check(rows[:1], 5)["status"] == "GREEN"
