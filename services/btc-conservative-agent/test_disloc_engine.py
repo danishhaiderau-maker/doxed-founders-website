@@ -336,3 +336,29 @@ def test_stepb_pnl_sized_on_filled_qty():
     row = {"pnl_bp_vs_touch": 10.0, "requested_qty": 0.0002, "qty": 0.0001, "exit_filled_qty": 0.0001}
     full = {"pnl_bp_vs_touch": 10.0, "requested_qty": 0.0002, "qty": 0.0002, "exit_filled_qty": 0.0002}
     assert abs(de.row_net_usd(row) - de.row_net_usd(full) / 2) < 1e-12
+
+
+def test_stepb_total_exit_time_capped_30s_across_partials(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02, sz=5.0) for s in range(340, 520)}
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    qty = eng.position["qty"]
+    for s in range(412, 520):       # bid refills only 2% each time (50 pieces > 30 s)
+        rows_[s] = {"b": [[100.0, qty * 0.02]], "a": [[100.02, 5.0]]}
+    t = 412.5
+    step(t)
+    while eng.position is not None and t < 460:
+        t += 1.3
+        step(t)
+    c = rows[-1]
+    assert c["event"] == "DISLOC_CLOSED" and c["exit_status"] == "FORCED_NO_BOOK"
+    assert c["exit_ts"] - 412.5 <= de.EXIT_TOTAL_MAX_SEC + 2.0 and t - 412.5 <= de.EXIT_TOTAL_MAX_SEC + 1.3
+    assert 0 < c["exit_unpriced_qty"] < qty
+
+
+def test_lane_metrics_report_forced_and_never_score_them():
+    base = {"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "side": "LONG", "signal_to_fill_s": 1.5}
+    rows = [{**base, "exit_ts": 1, "pnl_bp_vs_touch": 4.0, "qty": 1, "requested_qty": 1, "exit_filled_qty": 1},
+            {**base, "exit_ts": 2, "exit_status": "FORCED_NO_BOOK", "pnl_bp_vs_touch": None,
+             "exit_unpriced_qty": 0.25}]
+    m = de.lane_metrics(rows)
+    assert m["closes"] == 1 and m["n_forced"] == 1 and m["unpriced_qty"] == 0.25

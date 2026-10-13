@@ -42,6 +42,7 @@ TRADES_FILE = "disloc_trades.jsonl"
 LONG, SHORT = "LONG", "SHORT"
 # Strategist DEEP-SEARCH-TILES-20261011: reported net charges the measured 2.8 bp taker round trip.
 TAKER_COST_BP = 2.8
+EXIT_TOTAL_MAX_SEC = 30.0      # HM 14:00: whole exit (all partial pieces) bounded from the FIRST trigger
 EXIT_NO_BOOK_FORCE_SEC = 10.0  # HM 13:27: unpriceable exit retries bounded, then FORCED_NO_BOOK
 IOC_CAP_BP = 5.0   # live DISLOC IOC limit = signal ask + 5 bp (LONG) / signal bid - 5 bp (SHORT)
 DELAY_BUCKETS = (("le_2s", 0.0, 2.0), ("2_to_5s", 2.0, 5.0))
@@ -512,7 +513,7 @@ class DislocEngine:
         """Exit trigger at ``now`` (signal-time data only); priced later at now + exit delay."""
         d, src = self.delay_fn(self.lane, "exit")
         d = max(paper_fill.MIN_DELAY_S, d or paper_fill.DEFAULT_DELAY_S)
-        self.position["exit_pending"] = {"reason": reason, "trigger_ts": now, "due_ts": now + d,
+        self.position["exit_pending"] = {"reason": reason, "trigger_ts": now, "first_trigger_ts": now, "due_ts": now + d,
                                          "delay_s": d, "delay_source": src or "default_until_n10",
                                          "trigger_bid": bid, "trigger_ask": ask,
                                          "prem_at_exit_bp": feat.get("prem_bp"),
@@ -527,7 +528,8 @@ class DislocEngine:
         if res.get("price") is None or not res.get("filled_qty"):
             ex["attempts"] = ex.get("attempts", 0) + 1
             ex["last_status"] = res.get("status")
-            if now - ex["due_ts"] >= EXIT_NO_BOOK_FORCE_SEC:
+            if now - ex["due_ts"] >= EXIT_NO_BOOK_FORCE_SEC or \
+                    now - ex.get("first_trigger_ts", ex["trigger_ts"]) >= EXIT_TOTAL_MAX_SEC:
                 self._finish_close(now, ex, forced=True)
             return
         piece = {"price": res["price"], "qty": float(res["filled_qty"]), "fill_ts": res["fill_ts"],
@@ -537,6 +539,9 @@ class DislocEngine:
                  "trigger_ts": ex["trigger_ts"]}
         p.setdefault("exit_pieces", []).append(piece)
         p["open_qty"] = round(float(p["open_qty"]) - piece["qty"], 10)
+        if p["open_qty"] > 1e-10 and now - ex.get("first_trigger_ts", ex["trigger_ts"]) >= EXIT_TOTAL_MAX_SEC:
+            self._finish_close(now, ex, forced=True)
+            return
         if p["open_qty"] > 1e-10:
             self.counters["partial_exits"] = self.counters.get("partial_exits", 0) + 1
             self._emit({"event": "DISLOC_PARTIAL_EXIT", "trade_id": p["trade_id"], "side": p["side"],
@@ -873,9 +878,8 @@ def delay_bucket(signal_to_fill_s) -> Optional[str]:
 
 
 def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
-    import paper_fill as _pf
     return sorted((dict(r) for r in rows if isinstance(r, Mapping) and r.get("schema") == SCHEMA
-                   and r.get("event") == "DISLOC_CLOSED" and _pf.row_fresh_eligible(r)),
+                   and r.get("event") == "DISLOC_CLOSED"),
                   key=lambda r: float(r.get("exit_ts") or 0.0))
 
 
@@ -970,6 +974,9 @@ def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAU
                  leverage: float = DEFAULT_LEVERAGE) -> dict:
     """Card metrics (same keys as the lane ledger fold in bot.py) + side / delay-bucket breakdown."""
     all_closed = closed_rows(rows)
+    # HM 14:00: FORCED_NO_BOOK closes have no real exit price: counted, never scored
+    forced = [r for r in all_closed if r.get("exit_status") == "FORCED_NO_BOOK"]
+    all_closed = [r for r in all_closed if r.get("exit_status") != "FORCED_NO_BOOK"]
     closed = [r for r in all_closed if is_scored(r)]
     unscored = len(all_closed) - len(closed)
     wins = losses = 0
@@ -1005,7 +1012,9 @@ def lane_metrics(rows: Iterable[Mapping[str, Any]], *, margin_usd: float = DEFAU
         "closes": n, "wins": wins, "losses": losses, "net_pnl_usd": round(net_total, 4),
         "mean_net_bp": round(sum(card_bp(r) or 0.0 for r in closed) / n, 4) if n else None,
         "by_side": by_side, "by_delay_bucket": by_delay,
-        "unscored_late_fills": unscored, "scoring_rule": f"signal_to_fill_s <= {SCORE_MAX_SIGNAL_TO_FILL_S:g}",
+        "unscored_late_fills": unscored,
+        "n_forced": len(forced),
+        "unpriced_qty": round(sum(_num(r.get("exit_unpriced_qty")) or 0.0 for r in forced), 10), "scoring_rule": f"signal_to_fill_s <= {SCORE_MAX_SIGNAL_TO_FILL_S:g}",
         "net_pnl_usd_unrounded": round(net_total, 6),
         "usd_basis": f"{CARD_BP_KEY} (real ask in, real bid out, Bitfinex fee 0) x ${float(margin_usd):g} margin x {float(leverage):g}x / 1e4 (paper)",
     }
