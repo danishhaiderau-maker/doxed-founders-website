@@ -32603,8 +32603,9 @@ _PROCESS_START_TS_FOR_PAUSED = time.time()
 
 
 def _disloc_paused_path() -> str:
-    """HM 12:35: under the bot data dir (/app/data on Fly), so the wipe and R2 archive cover it."""
-    return str(_live_copy.data_path(_dsl.PAUSED_SKIPS_FILE))
+    """HM 13:20: the working directory (/app/data/runtime on Fly), like the other DISLOC ledgers,
+    so the streams catalog (os.getcwd()), the wipe and the R2 archive all see it."""
+    return os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)
 
 
 def _disloc_entry_pause_owner():

@@ -118,4 +118,5 @@ def test_paused_ledger_caps_rotates_and_honours_epoch(tmp_path):
 def test_paused_ledger_in_data_dir_and_streams():
     import monitor_streams
     assert monitor_streams.STREAMS["disloc_paused_skips"] == dsl.PAUSED_SKIPS_FILE
-    assert "_live_copy.data_path(_dsl.PAUSED_SKIPS_FILE)" in SRC
+    assert monitor_streams.STREAMS["disloc_paused_skips_rot1"] == dsl.PAUSED_SKIPS_FILE + ".1"
+    assert "os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)" in SRC
