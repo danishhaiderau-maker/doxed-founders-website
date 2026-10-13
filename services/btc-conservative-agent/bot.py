@@ -58925,7 +58925,16 @@ def _filter_relay_rows_by_live_switch(rows, *, armed: bool = False, now: float |
 _live_copy_init_lock = threading.Lock()
 _live_copy_singletons: dict = {}
 _live_copy_withheld_audited: set = set()
-_live_copy_emitted = deque(maxlen=5000)
+_live_copy_emitted = None  # G6: ApprovalLedger, created lazily (survives restarts)
+
+
+def _get_live_copy_approvals():
+    global _live_copy_emitted
+    if _live_copy_emitted is None:
+        with _live_copy_init_lock:
+            if _live_copy_emitted is None:
+                _live_copy_emitted = _live_copy.ApprovalLedger()
+    return _live_copy_emitted
 _live_copy_ingest_rejects = deque(maxlen=500)
 _live_copy_website_cache: dict = {"ts": 0.0, "value": None}
 _live_copy_website_lock = threading.Lock()
@@ -59050,7 +59059,7 @@ def _live_copy_stamp_payload(payload, signal_at=None):
                     approval, approval_reasons = None, ["PROTECTION_BOOTSTRAP_CLAIM_FAILED"]
         if approval:
             payload["live_copy_approval"] = approval
-            _live_copy_emitted.append({k: approval.get(k) for k in (
+            _get_live_copy_approvals().append({k: approval.get(k) for k in (
                 "correlation_id", "trade_id", "event", "research_lane", "entry_allowed",
                 "created_at_ts", "signal_at_ts", "exchange_stop_bp")})
         else:
@@ -59859,6 +59868,21 @@ def api_live_copy_alerts_resolve():
     return jsonify({"ok": True, "resolved": cur})
 
 
+def _live_copy_gap_ctx() -> dict:
+    """Minimal context for integrity-gaps G6/G8 (no website / exchange calls)."""
+    return {"approvals": _get_live_copy_approvals().rows(),
+            "reports": _get_live_copy_journal().rows(),
+            "process_started_ts": globals().get("process_boot_time"),
+            "epoch_ts": state.get("fresh_collection_start_time")}
+
+
+try:
+    import live_copy_monitor as _lcm_gap
+    _lcm_gap.set_gap_ctx_fn(_live_copy_gap_ctx)
+except Exception as _e:  # noqa: BLE001
+    logger.warning(f"[INTEGRITY GAPS] lifecycle gap ctx not registered: {_e}")
+
+
 def _live_copy_monitor_context() -> dict:
     """Context for the read-only /api/monitor/live/* routes (no secrets)."""
     sw = _bitfinex_live_switch_snapshot()
@@ -59880,7 +59904,7 @@ def _live_copy_monitor_context() -> dict:
         ],
         "protection": _get_live_copy_protection().flags(),
         "decisions": _get_live_copy_decisions().summary(50),
-        "approvals": list(_live_copy_emitted),
+        "approvals": _get_live_copy_approvals().rows(),
         "reports": journal.rows(),
         "journal_write_failures": journal.write_failures,
         "ingest_rejects": list(_live_copy_ingest_rejects),

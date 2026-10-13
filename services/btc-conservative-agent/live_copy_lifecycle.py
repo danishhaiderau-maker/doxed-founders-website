@@ -734,7 +734,14 @@ def build_with_classifier(ctx: Mapping[str, Any], *, now: float) -> tuple[dict, 
     al = [a for a in al if not (a.get("correlation_id") and a["correlation_id"] in resolved)]
     split = split_verdicts(al)
     live = [i for i in intents if not i.get("expired")]
+    try:
+        retention = retention_facts(ctx.get("approvals") or [], ctx.get("reports") or [],
+                                    boot_ts=ctx.get("process_started_ts"), now=now)
+    except Exception:  # noqa: BLE001
+        retention = {}
+    unl = unlinked(intents, now=now)
     return {
+        **retention, **unl,
         "schema": SCHEMA, "verdict": split["money_risk_verdict"], **split, **missed_copy_buckets(al),
         "arming": arming, "alerts": al, "resolved_alerts": resolved_al,
         "alert_codes": sorted({a["code"] for a in al}), "exchange": exchange, "clock": clock,
@@ -840,3 +847,34 @@ def paper_closed_live_open(paper_closed_ts, by_correlation, exchange_open, now,
         out.append({"trade_id": tid, "age_s": round(age, 1), "autoclose": age > autoclose_sec,
                     "alert": "PAPER_CLOSED_LIVE_OPEN"})
     return sorted(out, key=lambda r: -r["age_s"])
+
+
+def retention_facts(approvals, reports, *, boot_ts: float | None, now: float) -> dict:
+    """G6: how far back the lifecycle can see, and what survived the last restart."""
+    ats = [_f(a.get("created_at_ts")) for a in approvals or []]
+    rts = [_f(r.get("fly_received_at_ts")) for r in reports or []]
+    ats = [t for t in ats if t]
+    rts = [t for t in rts if t]
+    since = min(ats) if ats else None
+    pre = sorted({str(a.get("correlation_id") or a.get("trade_id") or "") for a in approvals or []
+                  if boot_ts and (_f(a.get("created_at_ts")) or 0) < boot_ts} - {""})
+    return {"retained_since_ts": since,
+            "retained_days": round((now - since) / 86400.0, 2) if since else None,
+            "reports_since_ts": min(rts) if rts else None,
+            "process_boot_ts": boot_ts, "pre_restart_intents": len(pre)}
+
+
+def unlinked(intents, *, now: float, window_sec: float = 86400.0) -> dict:
+    """G8: intents built only from executor reports (no Fly approval)."""
+    rows = []
+    for it in intents or []:
+        if not it.get("approval_missing_on_fly"):
+            continue
+        ts = [a.get("hops", {}).get(k) for a in it.get("accounts") or []
+              for k in ("railway_received_at_ts", "executor_received_at_ts", "fill_at_ts")]
+        ts = [t for t in ts if t]
+        rows.append({"correlation_id": it.get("correlation_id"), "lane": it.get("lane"),
+                     "first_seen_ts": min(ts) if ts else None})
+    new = [r for r in rows if r["first_seen_ts"] and r["first_seen_ts"] >= now - window_sec]
+    return {"unlinked_count": len(rows), "unlinked_new_24h": len(new),
+            "unlinked_ids": [r["correlation_id"] for r in rows][:50]}
