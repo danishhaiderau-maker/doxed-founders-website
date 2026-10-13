@@ -351,6 +351,10 @@ def fill_site_violations(source: str, func_name: str) -> list:
         return [f"{func_name}: not found"]
     mods, funcs, books = _aliases(tree)
     out = []
+    body = [b for b in fn.body if not (isinstance(b, ast.Expr) and isinstance(getattr(b, "value", None), ast.Constant)
+                                       and isinstance(b.value.value, str))]
+    if len(body) != 1:
+        out.append(f"{func_name}: fill site must be a single `return paper_fill.paper_fill(...)` (no other statements)")
     last = fn.body[-1] if fn.body else None
     if not (isinstance(last, ast.Return) and _is_pf_call(last.value, mods, funcs)):
         out.append(f"{func_name}: last statement must be `return paper_fill.paper_fill(...)`")

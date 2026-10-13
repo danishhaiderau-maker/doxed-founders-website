@@ -754,9 +754,8 @@ def delay_bucket(signal_to_fill_s) -> Optional[str]:
 
 
 def closed_rows(rows: Iterable[Mapping[str, Any]]) -> list:
-    import paper_fill as _pf
     return sorted((dict(r) for r in rows if isinstance(r, Mapping) and r.get("schema") == SCHEMA
-                   and r.get("event") == "DISLOC_CLOSED" and _pf.row_fresh_eligible(r)),
+                   and r.get("event") == "DISLOC_CLOSED"),
                   key=lambda r: float(r.get("exit_ts") or 0.0))
 
 

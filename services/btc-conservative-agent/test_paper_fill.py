@@ -296,19 +296,12 @@ def test_fresh_data_wired_into_research_study(tmp_path):
     assert set(out["by_tile"]) == {"MIGRATED_LANE"}
 
 
-def test_fresh_data_wired_into_disloc_ledger():
+def test_disloc_tile_rows_not_zeroed_by_fresh_filter():
+    # HM 14:00: closed_rows feeds _disloc_lane_metrics / _monitor_lane_rows (operational cards)
     import disloc_engine as de
-    pending = sorted(pf.PENDING_MIGRATION)[0]
-    rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": pending},
-            {"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 2, "lane": "MIGRATED_LANE"}]
-    assert [r["lane"] for r in de.closed_rows(rows)] == ["MIGRATED_LANE"]
+    rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M"}]
+    assert len(de.closed_rows(rows)) == 1
 
-
-# HM 13:27: six more offenders
-OFFENDERS_2 = {
-    "decorator_rewrites_price": """
-import paper_fill
-@reprice_with_ticker
 def fill(self, o):
     return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at)
 """,
@@ -359,3 +352,28 @@ def test_allowed_staticmethod_site_and_reads_pass():
     src = MODULE_OFFENDERS["caller_overrides_price"].replace('        res["price"] = self.best_ask\n', "")
     assert pf.tile_module_violations(src, "m.py", fill_sites=("_price_entry",)) == []
     assert pf.fill_site_violations(src, "_price_entry") == []
+
+
+# HM 14:00: no statement at all before the return
+OFFENDERS_3 = {
+    "mutate_signal_ts_first": """
+import paper_fill
+def fill(self, o):
+    o['signal_ts'] -= 5
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at)
+""",
+    "update_cap_first": """
+import paper_fill
+def fill(self, o):
+    o.update(ioc_cap_px=self.cached_ask)
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                 cap_px=o["ioc_cap_px"])
+""",
+}
+
+
+def test_no_statement_before_return():
+    for k, src in OFFENDERS_3.items():
+        assert any("single `return" in x for x in pf.fill_site_violations(src, "fill")), k
+    doc = GOOD.replace("def fill(self, o):\n", 'def fill(self, o):\n    """docstring ok"""\n')
+    assert pf.fill_site_violations(doc, "fill") == []
