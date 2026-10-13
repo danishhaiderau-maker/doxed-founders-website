@@ -157,41 +157,104 @@ TILE_FILL_SITES = {
     "FAMILY_DISLOC_BFX_DISLOCATION_1M": (("disloc_engine.py", "_taker_fill"), ("disloc_engine.py", "_close")),
     "FAMILY_DISLOC_FOI_LONG_1M": (("disloc_engine.py", "_taker_fill"), ("disloc_engine.py", "_close")),
 }
-# Step B migrates these and empties the set; CI forbids adding to it (test pins the size).
+# Step B migrates these and empties the set. HM 12:35: the list may only shrink (CI pins the
+# baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
+# non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
 PENDING_MIGRATION = frozenset(TILE_FILL_SITES)
+PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
+PENDING_MIGRATION_EXPIRES = "2026-10-27"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
 FORBIDDEN_STATE_KEYS = ("price", "ask", "bid", "last_price", "mark")
+_DYNAMIC_CALLS = ("getattr", "__import__", "eval", "exec", "globals", "locals", "vars")
+
+
+def fresh_data_eligible(lane: str) -> bool:
+    """Paper rows count as fresh data only once the lane prices fills through paper_fill."""
+    return str(lane) not in PENDING_MIGRATION
+
+
+def _aliases(tree) -> tuple:
+    """Names bound to the paper_fill module and to the paper_fill function (any alias)."""
+    import ast
+    mods, funcs = set(), set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name == "paper_fill":
+                    mods.add(a.asname or a.name)
+        elif isinstance(n, ast.ImportFrom) and n.module == "paper_fill":
+            for a in n.names:
+                if a.name == "paper_fill":
+                    funcs.add(a.asname or a.name)
+    return mods, funcs
+
+
+def _state_reads(node, where: str) -> list:
+    import ast
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Subscript):
+            base = getattr(n.value, "id", "") or getattr(n.value, "attr", "")
+            key = n.slice.value if isinstance(n.slice, ast.Constant) else None
+            if base == "state" and isinstance(key, str) and key in FORBIDDEN_STATE_KEYS:
+                out.append(f"{where}: reads state[{key!r}]")
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get":
+            base = getattr(n.func.value, "id", "") or getattr(n.func.value, "attr", "")
+            if base == "state" and n.args and isinstance(n.args[0], ast.Constant) \
+                    and n.args[0].value in FORBIDDEN_STATE_KEYS:
+                out.append(f"{where}: reads state.get({n.args[0].value!r})")
+    return out
 
 
 def fill_site_violations(source: str, func_name: str) -> list:
-    """AST check of one fill-pricing function. Returns a list of violation strings."""
+    """AST check of one fill-pricing function. Returns a list of violation strings.
+
+    Passes only if the function itself calls paper_fill directly (module alias
+    ``X.paper_fill(...)`` or imported-function alias ``f(...)``), never reaches it
+    dynamically (getattr / importlib / __import__ / eval) or through an indirect
+    reference, and never reads state price/ask/bid or tape streams.
+    """
     import ast
     tree = ast.parse(source)
     fn = next((n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                and n.name == func_name), None)
     if fn is None:
         return [f"{func_name}: not found"]
+    mods, funcs = _aliases(tree)
     out, calls_pf = [], False
+    call_funcs = set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Call):
+            call_funcs.add(id(n.func))
             f = n.func
-            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-            owner = getattr(getattr(f, "value", None), "id", "") if isinstance(f, ast.Attribute) else ""
-            if name == "paper_fill" and owner in ("paper_fill", "pf", ""):
+            if isinstance(f, ast.Attribute) and f.attr == "paper_fill" and getattr(f.value, "id", None) in mods:
                 calls_pf = True
-        if isinstance(n, ast.Subscript):
-            base = getattr(n.value, "id", "") or getattr(n.value, "attr", "")
-            key = n.slice.value if isinstance(n.slice, ast.Constant) else None
-            if base == "state" and isinstance(key, str) and key in FORBIDDEN_STATE_KEYS:
-                out.append(f"{func_name}: reads state[{key!r}]")
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get":
-            base = getattr(n.func.value, "id", "")
-            if base == "state" and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value in FORBIDDEN_STATE_KEYS:
-                out.append(f"{func_name}: reads state.get({n.args[0].value!r})")
+            elif isinstance(f, ast.Name) and f.id in funcs:
+                calls_pf = True
+            fname = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+            owner = getattr(getattr(f, "value", None), "id", "")
+            if fname in _DYNAMIC_CALLS or owner == "importlib" or fname == "import_module":
+                out.append(f"{func_name}: dynamic call {fname}() (paper_fill must be called directly)")
+    for n in ast.walk(fn):
+        # paper_fill referenced but not called directly = indirect helper route
+        if isinstance(n, ast.Name) and n.id in (funcs | mods) and id(n) not in call_funcs:
+            parent_ok = any(isinstance(p, ast.Attribute) and p.value is n and id(p) in call_funcs
+                            for p in ast.walk(fn))
+            if not parent_ok:
+                out.append(f"{func_name}: indirect reference to {n.id} (pass-through/helper route)")
+        if isinstance(n, ast.Attribute) and n.attr == "paper_fill" and id(n) not in call_funcs:
+            out.append(f"{func_name}: indirect reference to .paper_fill")
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and any(b in n.value for b in FORBIDDEN_NAMES):
             out.append(f"{func_name}: references {n.value!r}")
         if isinstance(n, ast.Attribute) and n.attr in ("touch_fn", "_touch"):
             out.append(f"{func_name}: prices from {n.attr} (WS top/ticker), not paper_fill")
+    out += _state_reads(fn, func_name)
     if not calls_pf:
         out.append(f"{func_name}: does not call paper_fill.paper_fill")
     return out
+
+
+def tile_module_violations(source: str, module: str) -> list:
+    """Whole-module scan of a tile module: no state['bid'/'ask'/'price'] reads anywhere."""
+    import ast
+    return _state_reads(ast.parse(source), module)

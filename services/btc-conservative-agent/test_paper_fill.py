@@ -115,13 +115,35 @@ def test_migrated_tiles_call_paper_fill_and_never_read_state_or_tape():
     assert not bad, bad
 
 
-def test_pending_migration_cannot_grow():
-    # Step B empties this; nothing may be added (a new tile must be migrated from day one).
-    assert len(pf.PENDING_MIGRATION) <= 7
-    assert pf.PENDING_MIGRATION <= set(_cpc.ACTIVE_TILE_REGISTRY) | {
-        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
-        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
-        "FAMILY_DISLOC_FOI_LONG_1M"}
+BASELINE_13OCT = frozenset({
+    "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
+    "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+    "FAMILY_DISLOC_FOI_LONG_1M"})
+
+
+def test_pending_migration_only_shrinks():
+    # Pinned here, not imported: editing paper_fill alone cannot widen it.
+    assert pf.PENDING_MIGRATION <= BASELINE_13OCT
+    assert pf.PENDING_MIGRATION_BASELINE <= BASELINE_13OCT
+
+
+def test_new_registry_lanes_cannot_be_pending():
+    new_lanes = set(_cpc.ACTIVE_TILE_REGISTRY) - BASELINE_13OCT
+    assert not (new_lanes & pf.PENDING_MIGRATION), "new tiles must use paper_fill from day one"
+
+
+def test_pending_migration_expires():
+    import datetime
+    expiry = datetime.date.fromisoformat(pf.PENDING_MIGRATION_EXPIRES)
+    assert expiry <= datetime.date(2026, 10, 27), "expiry may not be pushed out"
+    if datetime.date.today() > expiry:
+        assert not pf.PENDING_MIGRATION, f"pending migration expired {expiry}: {sorted(pf.PENDING_MIGRATION)}"
+
+
+def test_pending_lanes_excluded_from_fresh_data():
+    for lane in pf.PENDING_MIGRATION:
+        assert pf.fresh_data_eligible(lane) is False
+    assert pf.fresh_data_eligible("SOME_MIGRATED_LANE") is True
 
 
 def test_pending_sites_are_detected_today():
@@ -144,7 +166,61 @@ def place_tile_order(self, side):
 
 def test_compliant_site_passes():
     good = """
+import paper_fill
 def fill(self, side, qty, ts):
     return paper_fill.paper_fill(side, qty, ts, self.delay(), self.book_at)
 """
     assert pf.fill_site_violations(good, "fill") == []
+
+
+def test_aliased_imports_resolve():
+    mod_alias = """
+import paper_fill as pfx
+def fill(self, side, qty, ts):
+    return pfx.paper_fill(side, qty, ts, 1.5, self.book_at)
+"""
+    fn_alias = """
+from paper_fill import paper_fill as f
+def fill(self, side, qty, ts):
+    return f(side, qty, ts, 1.5, self.book_at)
+"""
+    assert pf.fill_site_violations(mod_alias, "fill") == []
+    assert pf.fill_site_violations(fn_alias, "fill") == []
+
+
+def test_unimported_lookalike_does_not_count():
+    fake = """
+def fill(self, side, qty, ts):
+    return helpers.paper_fill(side, qty, ts, 1.5, self.book_at)
+"""
+    assert any("does not call paper_fill" in x for x in pf.fill_site_violations(fake, "fill"))
+
+
+def test_dynamic_and_indirect_routes_fail():
+    via_getattr = """
+import paper_fill
+def fill(self, side, qty, ts):
+    return getattr(paper_fill, "paper_fill")(side, qty, ts, 1.5, self.book_at)
+"""
+    via_importlib = """
+import importlib
+def fill(self, side, qty, ts):
+    return importlib.import_module("paper_fill").paper_fill(side, qty, ts, 1.5, self.book_at)
+"""
+    via_helper = """
+from paper_fill import paper_fill
+def fill(self, side, qty, ts):
+    return run_with(paper_fill, side, qty, ts)
+"""
+    for src in (via_getattr, via_importlib, via_helper):
+        v = pf.fill_site_violations(src, "fill")
+        assert v, src
+
+
+def test_tile_modules_never_read_state_prices():
+    planted = "def anywhere():\n    return state['bid'] + state.get('price')\n"
+    v = pf.tile_module_violations(planted, "x.py")
+    assert len(v) == 2
+    mods = {m for sites in pf.TILE_FILL_SITES.values() for m, _ in sites if m != "bot.py"}
+    bad = [x for m in mods for x in pf.tile_module_violations((ROOT / m).read_text(encoding="utf-8"), m)]
+    assert not bad, bad
