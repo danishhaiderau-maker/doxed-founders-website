@@ -42205,6 +42205,7 @@ def _snapshot_bounded_trades_map_locked(
     pending_orders_list,
     positions_list,
     max_entries: int = _RELAY_TRADES_MAP_MAX,
+    map_src=None,
 ) -> dict:
     """Bound work under ``trade_lock`` while always retaining active trade IDs."""
     selected = {}
@@ -42222,12 +42223,13 @@ def _snapshot_bounded_trades_map_locked(
             return
         selected[str(tid)] = {"signal_ref": _dashboard_signal_ref_lite(sig)}
 
+    tmap = trades_map if map_src is None else map_src
     for tid in active_ids:
-        _add(tid, trades_map.get(tid))
+        _add(tid, tmap.get(tid))
 
     remaining = max(0, int(max_entries) - len(selected))
     if remaining:
-        for tid, entry in itertools.islice(reversed(trades_map.items()), remaining):
+        for tid, entry in itertools.islice(reversed(tmap.items()), remaining):
             _add(tid, entry)
     return selected
 
@@ -42990,7 +42992,7 @@ def _relay_trade_enrichment_row_lite(row: dict) -> dict:
     return lite
 
 
-def _snapshot_relay_trade_projections_locked(session_start: float) -> tuple[list, list, list]:
+def _snapshot_relay_trade_projections_locked(session_start: float, trades_src=None) -> tuple[list, list, list]:
     """Project bounded relay rows while holding ``trade_lock``.
 
     Closed trade rows retain rich research dictionaries such as
@@ -42999,13 +43001,14 @@ def _snapshot_relay_trade_projections_locked(session_start: float) -> tuple[list
     dictionaries held the money-state lock for minutes even though relay
     presentation consumes only scalar identity/execution fields.
     """
+    src = trades if trades_src is None else trades_src
     if session_start:
-        recent_source = [row for row in trades if _trade_row_in_session(row, session_start)]
+        recent_source = [row for row in src if _trade_row_in_session(row, session_start)]
     else:
-        recent_source = trades
+        recent_source = src
     recent_source = recent_source[-_DASHBOARD_TRADES_MAX:]
-    relay_source = trades[-_RELAY_TRADES_MAP_MAX:]
-    fidelity_source = trades[-_RELAY_FIDELITY_TRADES_MAX:]
+    relay_source = src[-_RELAY_TRADES_MAP_MAX:]
+    fidelity_source = src[-_RELAY_FIDELITY_TRADES_MAX:]
     return (
         [_relay_trade_enrichment_row_lite(row) for row in recent_source if isinstance(row, dict)],
         [_relay_trade_row_lite(row) for row in relay_source if isinstance(row, dict)],
@@ -43248,30 +43251,31 @@ def _build_relay_execution_state_snapshot() -> dict:
         raise TimeoutError("relay execution snapshot timed out waiting for trade_lock")
     phase_started = time.perf_counter()
     try:
+        # HM 12:20 (G17): copy ONLY the raw containers under trade_lock; projections and
+        # accounting run after release. Rows in ``trades``/``expired_orders`` are append-only
+        # closed records; open/pending rows are copied by _fast_state_copy as before.
         pending_copy = _fast_state_copy(pending_orders)
         positions_copy = _fast_state_copy(open_positions)
         money_state_generation = _RELAY_EXECUTION_MONEY_STATE_GENERATION
-        (
-            raw_recent_trades,
-            relay_trades_copy,
-            raw_fidelity_trades,
-        ) = _snapshot_relay_trade_projections_locked(
-            session_start
-        )
-        session_trade_count, session_realized_pnl, session_lane_ledger = (
-            _session_trade_accounting_locked(session_start)
-        )
-        session_forced_pnl = _session_forced_close_pnl_usd_locked(session_start)
-        recent_expired, expired_orders_total = _snapshot_expired_rows_locked(
-            MAX_EXPIRED_ORDERS
-        )
-        bounded_trades_map = _snapshot_bounded_trades_map_locked(
-            pending_copy,
-            positions_copy,
-        )
+        trades_ref = list(trades)
+        expired_ref = list(expired_orders)
+        trades_map_ref = dict(trades_map)
     finally:
         trade_lock.release()
         phase_timings["trade_lock_hold"] = (time.perf_counter() - phase_started) * 1000
+    phase_started = time.perf_counter()
+    (
+        raw_recent_trades,
+        relay_trades_copy,
+        raw_fidelity_trades,
+    ) = _snapshot_relay_trade_projections_locked(session_start, trades_src=trades_ref)
+    session_trade_count, session_realized_pnl, session_lane_ledger = (
+        _session_trade_accounting_locked(session_start, trades_src=trades_ref)
+    )
+    session_forced_pnl = _session_forced_close_pnl_usd_locked(session_start, trades_src=trades_ref)
+    recent_expired, expired_orders_total = _snapshot_expired_rows_locked(MAX_EXPIRED_ORDERS, expired_src=expired_ref)
+    bounded_trades_map = _snapshot_bounded_trades_map_locked(pending_copy, positions_copy, map_src=trades_map_ref)
+    phase_timings["post_lock_projection"] = (time.perf_counter() - phase_started) * 1000
     phase_started = time.perf_counter()
     recent_trades = _enrich_dashboard_trade_rows(
         raw_recent_trades,
@@ -43901,7 +43905,7 @@ def _snapshot_trade_rows_locked(session_start: float):
     return copy.deepcopy(src)
 
 
-def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, dict]:
+def _session_trade_accounting_locked(session_start: float, trades_src=None) -> tuple[int, float, dict]:
     """Session trade count, realized PnL, and per-lane ledger from one row set.
 
     The headline equals the lane-ledger sum plus lane-less rows, so the
@@ -43909,7 +43913,7 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
     ``trade_lock``; rows are referenced, never copied.
     """
     rows = [
-        row for row in trades
+        row for row in (trades if trades_src is None else trades_src)
         if isinstance(row, dict)
         and (not session_start or _trade_row_in_session(row, session_start))
     ]
@@ -43929,7 +43933,7 @@ def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, 
     return len(rows), round(realized, 2), ledger
 
 
-def _session_forced_close_pnl_usd_locked(session_start: float) -> float:
+def _session_forced_close_pnl_usd_locked(session_start: float, trades_src=None) -> float:
     """Realized USD of in-session forced closes (deploy flatten / admin close).
 
     ``session_pnl_usd`` excludes these (strategy stats), but the paper wallet
@@ -43937,7 +43941,7 @@ def _session_forced_close_pnl_usd_locked(session_start: float) -> float:
     owns ``trade_lock``.
     """
     total = 0.0
-    for row in trades:
+    for row in (trades if trades_src is None else trades_src):
         if not isinstance(row, dict):
             continue
         if session_start and not _trade_row_in_session(row, session_start):
@@ -43966,12 +43970,12 @@ def _balance_reconcile_block(balance, session_pnl, forced_pnl) -> dict:
     }
 
 
-def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
+def _snapshot_expired_rows_locked(limit: int, expired_src=None) -> tuple[list, int]:
     """Copy a bounded tail while returning the exact visible-row count."""
     selected = []
     total = 0
     bounded_limit = max(0, int(limit))
-    for row in expired_orders:
+    for row in (expired_orders if expired_src is None else expired_src):
         if (
             not isinstance(row, dict)
             or str(row.get("research_lane") or "").upper() == "AI_SCAN"

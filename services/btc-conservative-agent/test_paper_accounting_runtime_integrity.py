@@ -253,7 +253,7 @@ def test_forced_closes_are_excluded_from_tile_and_strategy_stats() -> None:
 def test_dashboard_snapshots_use_the_single_session_aggregate() -> None:
     for builder in ("_build_relay_execution_state_snapshot", "_build_api_state_snapshot"):
         body = _function_source(builder)
-        assert "_session_trade_accounting_locked(session_start)" in body
+        assert "_session_trade_accounting_locked(session_start" in body
         assert 'snapshot["lane_pnl_ledger"] = session_lane_ledger' in body
         assert "_derive_lane_pnl_ledger_from_trades(recent_trades)" not in body
         assert "_derive_lane_pnl_ledger_from_trades(trades_copy)" not in body

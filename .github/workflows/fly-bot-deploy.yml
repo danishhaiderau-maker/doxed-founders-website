@@ -1689,7 +1689,7 @@ jobs:
                       return state
                   except Exception as exc:
                       last = exc
-                      time.sleep(min(2 * attempt, 8))
+                      time.sleep(min(2 * attempt, 12))  # HM 12:20: wider 503 backoff
               raise RuntimeError(f"execution state unavailable: {type(last).__name__}")
 
           health = request_json("/health", timeout=20)
@@ -2254,7 +2254,7 @@ jobs:
                       break
               except Exception as exc:
                   print(f"pause state attempt={attempt} response={type(exc).__name__}", flush=True)
-              time.sleep(min(2 * attempt, 8))
+              time.sleep(min(2 * attempt, 12))  # HM 12:20: wider 503 backoff
           else:
               raise SystemExit("durable paper maintenance boundary was not confirmed")
           def request_json(path, payload=None, timeout=45):
@@ -2888,7 +2888,8 @@ jobs:
                       last_state = exc
                   except Exception as exc:
                       last_state = exc
-                  time.sleep(min(attempt, 5))
+                  # HM 12:20 (G17): back off harder on 503 so proof polling cannot pin the trade_lock.
+                  time.sleep(min(2 ** min(attempt, 4), 12) if isinstance(last_state, urllib.error.HTTPError) else min(attempt, 5))
               raise RuntimeError(f"postdeploy generation-current relay state unavailable: {type(last_state).__name__}")
 
           required_generation = None

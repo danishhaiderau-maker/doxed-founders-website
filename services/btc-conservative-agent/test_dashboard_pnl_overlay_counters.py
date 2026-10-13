@@ -92,7 +92,7 @@ def test_relay_snapshot_emits_pnl_and_counter_keys() -> None:
     # The lane ledger must be derived fresh from the same full-session rows
     # as the headline, never from the bounded display slice or a stale
     # incremental counter.
-    assert "_session_trade_accounting_locked(session_start)" in body
+    assert "_session_trade_accounting_locked(session_start" in body
     assert 'snapshot["lane_pnl_ledger"] = session_lane_ledger' in body, (
         "lane_pnl_ledger in the relay snapshot must come from "
         "_session_trade_accounting_locked so tile sums equal session_pnl_usd."
