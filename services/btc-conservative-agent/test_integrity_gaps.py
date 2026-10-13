@@ -38,19 +38,50 @@ def test_g14_needs_deploy_survival_and_paused_positive():
     assert ids(ig.evaluate({"paused": {**base, "opens_while_paused": 1}}))["G14"]["status"] == "RED"
 
 
-def test_g16_red_on_rows_older_than_epoch():
-    w = {"fly_files_older_than_epoch": 0, "r2_objects_older_than_epoch": 2, "box_files_older_than_epoch": 0}
+def test_g16_red_on_rows_older_than_epoch_and_on_receipt_disagreement():
+    w = {"fly_files_older_than_epoch": 0, "r2_objects_older_than_epoch": 2,
+         "r2_independent_older_than_epoch": 2, "box_files_older_than_epoch": 0, "fly_scan_complete": True}
     assert ids(ig.evaluate({"epoch_ts": 1.0, "wipe": w}))["G16"]["status"] == "RED"
-    w["r2_objects_older_than_epoch"] = 0
+    w.update(r2_objects_older_than_epoch=0, r2_independent_older_than_epoch=0)
     assert ids(ig.evaluate({"epoch_ts": 1.0, "wipe": w}))["G16"]["status"] == "GREEN"
+    # the wipe job says 0 but the independent R2 listing does not agree -> RED
+    w.update(r2_independent_older_than_epoch=None)
+    assert ids(ig.evaluate({"epoch_ts": 1.0, "wipe": w}))["G16"]["status"] == "PENDING"
+    w.update(r2_independent_older_than_epoch=0, fly_scan_complete=False)
+    assert ids(ig.evaluate({"epoch_ts": 1.0, "wipe": w}))["G16"]["status"] == "PENDING"
 
 
-def test_g16_local_scan(tmp_path):
+def test_g16_scan_is_recursive_and_uncapped(tmp_path):
+    (tmp_path / "runtime").mkdir()
     (tmp_path / "old.jsonl").write_text(json.dumps({"ts": 100}) + "\n")
-    (tmp_path / "new.jsonl").write_text(json.dumps({"ts": 5000}) + "\n")
-    (tmp_path / "ms.jsonl").write_text(json.dumps({"ts": 6_000_000_000_000}) + "\n")
+    (tmp_path / "runtime" / "new.jsonl").write_text(json.dumps({"ts": 5000}) + "\n")
+    (tmp_path / "runtime" / "rot.jsonl.1").write_text(json.dumps({"ts": 6_000_000_000_000}) + "\n")
+    for i in range(400):
+        (tmp_path / "runtime" / f"f{i}.jsonl").write_text(json.dumps({"ts": 7000}) + "\n")
     got = ig.scan_local_oldest(str(tmp_path))
-    assert got["old.jsonl"] == 100 and got["ms.jsonl"] == 6_000_000_000
+    assert got["complete"] and got["scanned"] == 403
+    assert got["files"]["old.jsonl"] == 100 and got["files"]["runtime/rot.jsonl.1"] == 6_000_000_000
+
+
+def test_g20_is_computed():
+    assert ids(ig.evaluate({}))["G20"]["status"] == "PENDING"
+    ok = {"ok": True, "canceled_recent": 3, "errors_recent": []}
+    assert ids(ig.evaluate({"vercel": ok}))["G20"]["status"] == "GREEN"
+    assert ids(ig.evaluate({"vercel": {**ok, "errors_recent": [{"uid": "x"}]}}))["G20"]["status"] == "RED"
+    assert ids(ig.evaluate({"vercel": {**ok, "canceled_recent": 0}}))["G20"]["status"] == "AMBER"
+
+
+def test_lifecycle_open_fixed_verified(tmp_path):
+    p = str(tmp_path / "lc.json")
+    green = {"live_armed": False, "force_paper": True}
+    r = lambda out: {x["id"]: x for x in out["rows"]}["LIVE_OFF"]["lifecycle"]
+    assert r(ig.apply_lifecycle(ig.evaluate(green), p, 0.0)) == "fixed"
+    assert r(ig.apply_lifecycle(ig.evaluate(green), p, 23 * 3600.0)) == "fixed"
+    assert r(ig.apply_lifecycle(ig.evaluate(green), p, 24 * 3600.0)) == "verified"
+    assert r(ig.apply_lifecycle(ig.evaluate({"live_armed": True, "force_paper": True}), p, 25 * 3600.0)) == "open"
+    assert r(ig.apply_lifecycle(ig.evaluate(green), p, 26 * 3600.0)) == "fixed"  # clock restarts
+    out = ig.apply_lifecycle(ig.evaluate(green), p, 26 * 3600.0)
+    assert {x["id"]: x for x in out["rows"]}["G9"]["lifecycle"] == "n/a"
 
 
 def test_g17_thresholds():

@@ -48,17 +48,68 @@ def oldest_row_ts(path: str) -> Optional[float]:
     return None
 
 
-def scan_local_oldest(root: str, limit: int = 300) -> dict:
-    """G16 Fly side: files whose first row predates the epoch are counted by the caller."""
-    out = {}
+def scan_local_oldest(root: str, budget_s: float = 8.0) -> dict:
+    """G16 Fly side: first-row ts of every *.jsonl / *.jsonl.N under root (recursive, no file cap).
+
+    Returns {"files": {relpath: ts}, "scanned": n, "complete": bool}; stops only on the time budget.
+    """
+    import time as _t
+    t0 = _t.monotonic()
+    files, scanned, complete = {}, 0, True
+    for d, _dirs, names in os.walk(root):
+        for n in names:
+            if not (n.endswith(".jsonl") or ".jsonl." in n):
+                continue
+            if _t.monotonic() - t0 > budget_s:
+                complete = False
+                break
+            scanned += 1
+            ts = oldest_row_ts(os.path.join(d, n))
+            if ts is not None:
+                files[os.path.relpath(os.path.join(d, n), root)] = ts
+        if not complete:
+            break
+    return {"files": files, "scanned": scanned, "complete": complete}
+
+
+VERIFY_AFTER_SEC = 24 * 3600
+
+
+def apply_lifecycle(out: dict, path: str, now: float) -> dict:
+    """open -> fixed -> verified per gap: fixed once GREEN, verified after 24 h continuously GREEN.
+
+    Any non-GREEN reading resets the gap to open. NA rows are marked n/a. State persists in ``path``.
+    """
     try:
-        names = sorted(n for n in os.listdir(root) if n.endswith(".jsonl"))[:limit]
+        with open(path, "r", encoding="utf-8") as fh:
+            st = json.load(fh)
     except Exception:
-        return out
-    for n in names:
-        ts = oldest_row_ts(os.path.join(root, n))
-        if ts is not None:
-            out[n] = ts
+        st = {}
+    for r in out.get("rows") or []:
+        g = st.setdefault(r["id"], {})
+        if r["status"] == "NA":
+            r["lifecycle"] = "n/a"
+            continue
+        if r["status"] == "GREEN":
+            g.setdefault("green_since", now)
+            age = now - float(g["green_since"])
+            r["lifecycle"] = "verified" if age >= VERIFY_AFTER_SEC else "fixed"
+            r["green_for_s"] = round(age)
+            if r["lifecycle"] == "verified":
+                g.setdefault("verified_at", now)
+        else:
+            g.pop("green_since", None)
+            g.pop("verified_at", None)
+            r["lifecycle"] = "open"
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(st, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    out["lifecycle_counts"] = {k: sum(1 for r in out.get("rows") or [] if r.get("lifecycle") == k)
+                               for k in ("open", "fixed", "verified", "n/a")}
     return out
 
 
@@ -181,19 +232,24 @@ def evaluate(f: dict) -> dict:
 
     w = f.get("wipe") or {}
     fly_old = w.get("fly_files_older_than_epoch")
-    r2_old = w.get("r2_objects_older_than_epoch")
+    r2_old = w.get("r2_objects_older_than_epoch")          # wipe job's own receipt
+    r2_ind = w.get("r2_independent_older_than_epoch")      # box deep check's own R2 listing
     box_old = w.get("box_files_older_than_epoch")
-    vals = [fly_old, r2_old, box_old]
-    if epoch is None or any(v is None for v in vals):
-        st = "PENDING" if not any(vals) else "RED"
+    vals = [fly_old, r2_old, r2_ind, box_old]
+    disagree = r2_old is not None and r2_ind is not None and r2_old != r2_ind
+    if any(v for v in vals) or disagree:
+        st = "RED"
+    elif epoch is None or any(v is None for v in vals) or w.get("fly_scan_complete") is False:
+        st = "PENDING"
     else:
-        st = "GREEN" if not any(vals) else "RED"
+        st = "GREEN"
     rows.append(_row("G16", "rows older than epoch (R2 / Fly / box) + bfx_book_10l archive",
-                     {"epoch_ts": epoch, "r2": r2_old, "fly": fly_old, "box": box_old,
-                      "fly_offenders": w.get("fly_offenders"),
-                      "archive_gaps": w.get("archive_gaps")},
-                     "0 everywhere; daily archive, 0 gaps", st,
-                     "Fly scan + fresh_start_wipe_receipt.json"))
+                     {"epoch_ts": epoch, "r2_receipt": r2_old, "r2_independent": r2_ind,
+                      "r2_independent_at": w.get("r2_independent_at"), "fly": fly_old, "box": box_old,
+                      "fly_scanned": w.get("fly_scanned"), "fly_scan_complete": w.get("fly_scan_complete"),
+                      "fly_offenders": w.get("fly_offenders"), "archive_gaps": w.get("archive_gaps")},
+                     "0 everywhere; receipt == independent R2 listing; daily archive, 0 gaps", st,
+                     "Fly /app/data scan + fresh_start_wipe_receipt.json + box R2 listing"))
 
     rt = f.get("runtime") or {}
     p95 = rt.get("trade_lock_wait_p95_ms")
@@ -222,13 +278,23 @@ def evaluate(f: dict) -> dict:
                      "PENDING" if rec is None else ("GREEN" if rec == 0 else "AMBER"),
                      "/api/monitor/checks ledger"))
 
-    rows.append(_row("G20", "Vercel skips API-only builds", "PR #662 merged", "skipped",
-                     "GREEN", "vercel ignore step"))
+    v = f.get("vercel") or {}
+    if not v or v.get("status") == "no credential":
+        st = "PENDING"
+    elif v.get("errors_recent"):
+        st = "RED"
+    elif v.get("ok") and (v.get("canceled_recent") or 0) >= 1:
+        st = "GREEN"
+    else:
+        st = "AMBER"
+    rows.append(_row("G20", "Vercel skips API-only builds (ignored = CANCELED), no ERROR builds",
+                     {k: v.get(k) for k in ("ok", "canceled_recent", "errors_recent", "latest", "latest_ready")},
+                     ">= 1 skipped, 0 errors, latest READY", st, "box platform receipt (Vercel API)"))
 
     worst = max((_RANK[r["status"]] for r in rows), default=0)
     status = {0: "GREEN", 1: "AMBER", 2: "RED"}[worst]
     counts = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
-    return {"schema": SCHEMA, "status": status, "counts": counts,
+    return {"schema": SCHEMA, "status": status, "counts": counts, "epoch_ts": epoch,
             "alerts": [r["id"] for r in rows if r["status"] == "RED"], "rows": rows}

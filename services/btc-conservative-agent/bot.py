@@ -47783,10 +47783,13 @@ def _integrity_gap_facts(now: float) -> dict:
         epoch = facts.get("epoch_ts")
         out = {}
         if epoch:
-            oldest = _ig.scan_local_oldest(os.getcwd())
-            offenders = sorted(n for n, ts in oldest.items() if ts < float(epoch) - 60)
-            out["fly_files_older_than_epoch"] = len(offenders)
-            out["fly_offenders"] = offenders[:20]
+            root = os.getenv("BOT_DATA_DIR") or "/app/data"
+            if not os.path.isdir(root):
+                root = os.getcwd()
+            scan = _ig.scan_local_oldest(root)
+            offenders = sorted(n for n, ts in scan["files"].items() if ts < float(epoch) - 60)
+            out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
+                        "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
         if os.path.exists(receipt):
             with open(receipt, "r", encoding="utf-8") as fh:
@@ -47794,8 +47797,14 @@ def _integrity_gap_facts(now: float) -> dict:
             out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch")
             out["box_files_older_than_epoch"] = r.get("box_files_older_than_epoch")
             out["archive_gaps"] = r.get("bfx_book_10l_archive_gaps")
+        r2 = (_platform_monitor().receipt or {}).get("r2") or {}
+        ind = r2.get("older_than_epoch")
+        if isinstance(ind, dict) and epoch and abs(float(ind.get("epoch_ts") or 0) - float(epoch)) < 1:
+            out["r2_independent_older_than_epoch"] = ind.get("count")
+            out["r2_independent_at"] = ind.get("listed_at")
         return out
     part("wipe", wipe)
+    part("vercel", lambda: (_platform_monitor().receipt or {}).get("vercel"))
     return facts
 
 
@@ -47803,8 +47812,10 @@ def _integrity_gap_facts(now: float) -> dict:
 def monitor_integrity_gaps_route():
     """G1-G20 integrity gaps with HM 12:20 changes (one row each + LIVE_OFF)."""
     import integrity_gaps as _ig
-    return _monitor_tiles_guard(lambda now: _ig.evaluate(_integrity_gap_facts(now)),
-                                _MONITOR_GAP_MAX_BYTES)
+    return _monitor_tiles_guard(
+        lambda now: _ig.apply_lifecycle(_ig.evaluate(_integrity_gap_facts(now)),
+                                        os.path.join(os.getcwd(), "integrity_gaps_lifecycle.json"), now),
+        _MONITOR_GAP_MAX_BYTES)
 
 
 @app.route('/api/runtime/headroom', methods=["GET"])
