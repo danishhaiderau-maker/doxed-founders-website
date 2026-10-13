@@ -59,7 +59,7 @@ COUNTERS = {"top_only": 0, "top_only_rejected": 0, "reject_no_book": 0}
 def _safe(fn, t):
     try:
         return fn(t) if fn else None
-    except Exception:  # noqa: BLE001 - a failed book read is a no-book outcome, never a ticker price
+    except Exception:  # noqa: BLE001 - a failed book read is a no-book outcome (no fallback price)
         return None
 
 
