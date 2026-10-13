@@ -310,6 +310,10 @@ class DislocEngine:
         self.policy_id, self.policy_signature = policy_id, policy_signature
         self.clock = clock
         self.enabled_fn: Callable[[], bool] = lambda: False
+        # LIVE-FIX-1512: gates NEW entries only (deploy maintenance / operator pause).
+        # Exits, shadows and evaluation never read it, so a pause cannot freeze open positions.
+        self.entries_allowed_fn: Callable[[], Optional[str]] = lambda: None
+        self.paused_skips: deque = deque(maxlen=200)
         self.trades_fn: Callable[[], list] = lambda: []
         self.touch_fn: Callable[[], tuple] = lambda: (None, None, None)
         # LIVE-FIX-1510: {"source": "BOOK"|"TICKER", "ask_age_ms": int} for the touch just read.
@@ -325,7 +329,7 @@ class DislocEngine:
         self.position: Optional[dict] = None
         self.last_eval: dict = {}
         self.counters = {"ticks": 0, "triggers": 0, "orders": 0, "fills": 0, "cancels": 0, "closes": 0,
-                         "skipped_tile_off": 0, "skipped_busy": 0, "skipped_stale": 0, "skipped_no_touch": 0,
+                         "skipped_tile_off": 0, "skipped_busy": 0, "skipped_stale": 0, "skipped_no_touch": 0, "skipped_paused": 0,
                          "errors": 0}
         self.last_signal: Optional[dict] = None
         self._seq = 0
@@ -335,10 +339,12 @@ class DislocEngine:
         self.counters["shadow_30m_closed"] = 0
 
     def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None,
-                     regime_fn=None, touch_meta_fn=None) -> None:
+                     regime_fn=None, touch_meta_fn=None, entries_allowed_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
         if touch_meta_fn is not None:
             self.touch_meta_fn = touch_meta_fn
+        if entries_allowed_fn is not None:
+            self.entries_allowed_fn = entries_allowed_fn
         if regime_fn is not None:
             self.regime_fn = regime_fn
         if oi_seed_fn is not None:
@@ -579,6 +585,12 @@ class DislocEngine:
                 self.counters["skipped_tile_off"] += 1
             elif self.order or self.position:
                 self.counters["skipped_busy"] += 1
+            elif (blocked := self._entry_block_reason()):
+                self.counters["skipped_paused"] += 1
+                self.paused_skips.append({"correlation_id": f"{self.ID_PREFIX}-paused-{int(now)}",
+                                          "signal_ts": now, "side": side, "reason": "PAUSED",
+                                          "pause_owner": blocked, "signal_bid": bid, "signal_ask": ask,
+                                          "prem_at_signal_bp": feat.get("prem_bp")})
             elif not (bid and ask) or bbo_ts is None or now - bbo_ts > self.rule.max_bbo_age:
                 self.counters["skipped_no_touch"] += 1
             else:
@@ -696,6 +708,16 @@ class DislocEngine:
                 self._emit({**{k: v for k, v in item.items() if k != "stop_px"},
                             "event": "DISLOC_ABANDONED", "abandon_reason": reason})
         self.order = self.position = None
+
+    def _entry_block_reason(self) -> Optional[str]:
+        try:
+            return self.entries_allowed_fn() or None
+        except Exception:  # noqa: BLE001 - never block entries on a gate error
+            return None
+
+    def paused_skip_summary(self) -> dict:
+        return {"lane": self.lane, "variant": self.variant, "skipped_paused": self.counters["skipped_paused"],
+                "recent": list(self.paused_skips)[-50:]}
 
     def snapshot(self) -> dict:
         return {"schema": SCHEMA, "variant": self.variant, "rule": self.rule.identity(), "counters": dict(self.counters),

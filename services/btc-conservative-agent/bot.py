@@ -32253,6 +32253,16 @@ def _disloc_recent_trades():
         return list(venue_fill_trade_tape)[-600:]
 
 
+def _disloc_entry_pause_owner():
+    """LIVE-FIX-1512 (HM 11:16): NEW DISLOC/DISLOC-FOI paper entries are blocked only by the
+    guarded deploy's DEPLOY_MAINTENANCE pause or a deliberate OPERATOR pause. SAFETY/relay pauses
+    do not block paper collection. Returns the blocking owner or None. Exits are never gated."""
+    if not state.get("manual_admin_pause"):
+        return None
+    owner = state.get("pause_intent")
+    return owner if owner in (PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_OPERATOR) else None
+
+
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
     """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
     if not hasattr(evaluator, "bind_runtime"):
@@ -32263,6 +32273,7 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         trades_fn=_disloc_recent_trades,
         touch_fn=_disloc_touch,
         touch_meta_fn=_disloc_touch_meta,
+        entries_allowed_fn=_disloc_entry_pause_owner,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
         regime_fn=lambda: _current_regime_tag(),
@@ -46804,6 +46815,9 @@ def monitor_tiles_disloc():
             "rule": (spec.get("entry_policy") or {}).get("disloc"),
             "summary": _dsl.summarize(rows, spec.get("pre_registration")),
             "engine": evaluator.snapshot() if hasattr(evaluator, "snapshot") else None,
+            # LIVE-FIX-1512: signals skipped because a deploy/operator pause blocked new entries.
+            "paused_skips": (evaluator.paused_skip_summary() if hasattr(evaluator, "paused_skip_summary") else None),
+            "entry_pause_owner": _disloc_entry_pause_owner(),
             "recent": terminal[-nrows:] if nrows else [],
         }
 
