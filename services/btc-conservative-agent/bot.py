@@ -47010,6 +47010,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
         "clock-skew": _mc.clock_skew(__import__("runtime_telemetry").clock_sync_verdict(), live_on=bool(inp.get("live_on_lanes"))),
+        "tile-integrity": _tile_integrity_check(now),
     }
     return checks
 
@@ -47024,8 +47025,146 @@ def _monitor_live_copy_tiles():
     return {_normalize_lane_key(r.get("lane") or ""): r for r in rows if isinstance(r, dict)}
 
 
+# --------------------------------------------------------------------------- tile integrity (Danish 10:28, HM 10:33)
+_TILE_INTEGRITY = {"last": None, "started": False, "runs": 0, "errors": 0, "last_error": None}
+_TILE_INTEGRITY_LOCK = threading.Lock()
+_TILE_INTEGRITY_FILE = "tile_integrity.jsonl"
+_TILE_INTEGRITY_V1_SINCE = float(os.getenv("FILL_MODEL_V1_SINCE_TS") or 0) or None
+
+
+def _tile_integrity_rows(now):
+    import disloc_engine as _dsl
+    rows = []
+    for path in (_dsl.TRADES_FILE, _dsl.FOI_TRADES_FILE):
+        try:
+            rows.extend(r for r in _dsl.load_rows(path)[-2000:] if r.get("event") in ("DISLOC_FILLED", "DISLOC_CLOSED"))
+        except Exception:  # noqa: BLE001
+            pass
+    return rows
+
+
+def _tile_integrity_book(now, rows):
+    secs = {int(r["book_s"]) for r in rows if r.get("book_s") is not None}
+    if not secs:
+        return {}
+    import monitor_streams
+    out = {}
+    try:
+        _hdr, body = monitor_streams.read_range(os.getcwd(), "bfx_book_10l", since=min(secs) - 1,
+                                                until=max(secs) + 1, limit_bytes=8_000_000)
+        for line in (body or b"").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if int(row.get("s") or -1) in secs:
+                out[int(row["s"])] = row
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[TILE INTEGRITY] book read failed: {exc}")
+    return out
+
+
+def _tile_integrity_chains(now):
+    try:
+        import live_copy_monitor as _lcm
+        import live_copy_monitor_api as _lcma
+        provider = _lcma._CTX.get("provider")
+        ctx = provider() if provider else None
+        if not isinstance(ctx, dict):
+            return []
+        chains = _lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+        accts = list(chains["accounts"].values())
+        _lcm.enrich_entry_fidelity(accts, ctx.get("paper_twins") or {})
+        return sorted(accts, key=lambda c: c.get("fill_at_ts") or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[TILE INTEGRITY] chains unavailable: {exc}")
+        return []
+
+
+_TILE_INTEGRITY_FEED = None
+
+
+def _tile_integrity_run_once(now=None):
+    """One read-only integrity pass; never touches trading state."""
+    global _TILE_INTEGRITY_FEED
+    import tile_integrity as _ti
+    import monitor_checks as _mc
+    now = now or time.time()
+    if _TILE_INTEGRITY_FEED is None:
+        _TILE_INTEGRITY_FEED = _ti.FeedWatch()
+    try:
+        import bfx_book_top as _bbt
+        st = _bbt.status()
+        feed = _TILE_INTEGRITY_FEED.observe(st.get("msgs"), st.get("ts"), now)
+    except Exception as exc:  # noqa: BLE001
+        feed = {"status": "UNKNOWN", "reasons": [f"FEED_STATUS_ERROR {type(exc).__name__}"]}
+    try:
+        inp = _monitor_check_inputs(now, 24.0)
+        pnl = _mc.pnl_reconcile(inp["totals"], inp["by_lane"], None, {})
+    except Exception:  # noqa: BLE001
+        pnl = None
+    rows = _tile_integrity_rows(now)
+    res = _ti.evaluate(now=now, rows=rows, book_by_sec=_tile_integrity_book(now, rows),
+                       chains=_tile_integrity_chains(now), v1_since_ts=_TILE_INTEGRITY_V1_SINCE,
+                       feed=feed, pnl_reconcile=pnl)
+    with _TILE_INTEGRITY_LOCK:
+        _TILE_INTEGRITY["last"] = res
+        _TILE_INTEGRITY["runs"] += 1
+    try:
+        with open(_TILE_INTEGRITY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({k: res[k] for k in ("run_ts", "status")} |
+                                {"parts": {k: v.get("status") for k, v in res["parts"].items()},
+                                 "reasons": [r for p in res["parts"].values() for r in (p.get("reasons") or [])][:20]},
+                                default=str) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    if res["status"] == "RED":
+        logger.warning(f"[TILE INTEGRITY] RED {[(k, v.get('reasons')) for k, v in res['parts'].items() if v.get('status') == 'RED']}")
+    return res
+
+
+def _tile_integrity_loop():
+    import tile_integrity as _ti
+    while True:
+        try:
+            _tile_integrity_run_once()
+        except Exception as exc:  # noqa: BLE001
+            with _TILE_INTEGRITY_LOCK:
+                _TILE_INTEGRITY["errors"] += 1
+                _TILE_INTEGRITY["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        time.sleep(_ti.RUN_EVERY_S)
+
+
+def _tile_integrity_ensure_started():
+    with _TILE_INTEGRITY_LOCK:
+        if _TILE_INTEGRITY["started"]:
+            return
+        _TILE_INTEGRITY["started"] = True
+    threading.Thread(target=_tile_integrity_loop, name="tile-integrity", daemon=True).start()
+
+
+def _tile_integrity_check(now):
+    import tile_integrity as _ti
+    _tile_integrity_ensure_started()
+    with _TILE_INTEGRITY_LOCK:
+        last = _TILE_INTEGRITY["last"]
+    return _ti.heartbeat_check(last, now)
+
+
+@app.route('/api/monitor/tile-integrity', methods=["GET"])
+def monitor_tile_integrity():
+    """Read-only: last tile data-integrity run (AMBER/RED + reasons), heartbeat, fill_detect_lag_ms."""
+    def build(now):
+        with _TILE_INTEGRITY_LOCK:
+            last = _TILE_INTEGRITY["last"]
+            meta = {k: _TILE_INTEGRITY[k] for k in ("runs", "errors", "last_error")}
+        return {"schema": "monitor_tile_integrity_v1", **_monitor_tiles_common(now),
+                "heartbeat": _tile_integrity_check(now), "last": last, **meta}
+    return _monitor_tiles_guard(build, 600_000)
+
+
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
-                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew")
+                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity")
 
 
 @app.route('/api/monitor/checks', methods=["GET"])
@@ -58523,6 +58662,7 @@ def main():
     )
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
+    _tile_integrity_ensure_started()  # Danish 10:28: 5-min tile data-integrity monitor (read-only)
     threading.Thread(target=safe_thread(ws_tick_lifecycle_worker), daemon=True).start()
     if PROTECTIVE_EXIT_WORKER_ENABLED:
         threading.Thread(target=safe_thread(protective_exit_worker), name="protective-exit",
