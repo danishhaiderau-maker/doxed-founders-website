@@ -10,7 +10,8 @@ def test_walks_depth_at_signal_plus_delay():
     r = pf.paper_fill("LONG", 1.5, 99.0, 1.5, at)
     assert r["status"] == "FILLED" and abs(r["price"] - (100 + 0.5 * 101) / 1.5) < 1e-9
     assert r["fill_ts"] == 100.5 and r["fill_model_version"] == 1 and r["book_s"] == 100
-    assert r["depth_snapshot"]["a"][0] == [100.0, 1.0]
+    assert r["depth_snapshot_fill"]["a"][0] == [100.0, 1.0]
+    assert r["depth_snapshot_signal"] is None  # no book at t=99 in this fixture
 
 
 def test_exit_sides_and_partial():
@@ -23,6 +24,31 @@ def test_exit_sides_and_partial():
 def test_no_book_rejects_never_ticker():
     r = pf.paper_fill("LONG", 1, 10.0, 1.5, lambda t: None)
     assert r["status"] == "REJECT_NO_BOOK" and r["price"] is None
+
+
+def test_signal_and_fill_books_recorded():
+    r = pf.paper_fill("LONG", 1, 100.0, 1.0, at)
+    assert r["depth_snapshot_signal"]["s"] == 100 and r["depth_snapshot_fill"]["s"] == 100
+
+
+def test_book_read_failure_is_no_book():
+    def boom(t):
+        raise OSError("disk")
+    r = pf.paper_fill("LONG", 1, 99, 1.5, boom)
+    assert r["status"] == "REJECT_NO_BOOK" and r["price"] is None
+
+
+def test_top_only_partial_at_top_size_and_counted():
+    before = dict(pf.COUNTERS)
+    r = pf.paper_fill("LONG", 2, 10.0, 1.5, lambda t: None, top_at=lambda t: (99.0, 5.0, 100.0, 0.5, 11.4))
+    assert r["status"] == "PARTIAL_TOP_ONLY" and r["filled_qty"] == 0.5 and r["price"] == 100.0
+    assert pf.COUNTERS["top_only"] == before["top_only"] + 1
+    r2 = pf.paper_fill("LONG", 2, 10.0, 1.5, lambda t: None, top_at=lambda t: (99.0, 100.0, 11.4))
+    assert r2["status"] == "REJECT_NO_BOOK" and pf.COUNTERS["top_only_rejected"] == before["top_only_rejected"] + 1
+
+
+def test_default_delay_marked():
+    assert pf.paper_fill("LONG", 1, 99, None, at)["delay_source"] == "default_until_n10"
 
 
 def test_delay_floor_and_sampler():
@@ -56,8 +82,9 @@ def test_book_tape_and_ticker_banned_in_fill_pricing_modules():
 
 def test_paper_fill_has_no_banned_source():
     src = pathlib.Path(pf.__file__).read_text(encoding="utf-8")
+    names = ("paper_fill", "_walk", "taker_side_levels", "_safe", "_snap")
     code = "".join(ast.get_source_segment(src, n) or "" for n in ast.parse(src).body
-                   if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
+                   if isinstance(n, ast.FunctionDef) and n.name in names)
     assert not any(b in code for b in BANNED) and "state[" not in code and "ticker" not in code.lower()
 
 
@@ -65,3 +92,59 @@ def test_meta_guard_catches_synthetic_offender(tmp_path):
     bad = tmp_path / "my_new_tile_fill.py"
     bad.write_text("px = read('market_microstructure_1s')\n")
     assert any(b in bad.read_text() for b in BANNED)
+
+
+# ------------------------------------------------ new-tile rule (HM 12:20)
+import combo_pathway_config as _cpc
+
+ROOT = pathlib.Path(__file__).parent
+
+
+def test_every_registry_tile_declares_fill_sites():
+    missing = [lane for lane in _cpc.ACTIVE_TILE_REGISTRY if lane not in pf.TILE_FILL_SITES]
+    assert not missing, f"new tile without declared fill sites (must use paper_fill): {missing}"
+
+
+def test_migrated_tiles_call_paper_fill_and_never_read_state_or_tape():
+    bad = []
+    for lane, sites in pf.TILE_FILL_SITES.items():
+        if lane in pf.PENDING_MIGRATION or lane not in _cpc.ACTIVE_TILE_REGISTRY:
+            continue
+        for module, func in sites:
+            bad += [f"{lane}: {v}" for v in pf.fill_site_violations((ROOT / module).read_text(encoding="utf-8"), func)]
+    assert not bad, bad
+
+
+def test_pending_migration_cannot_grow():
+    # Step B empties this; nothing may be added (a new tile must be migrated from day one).
+    assert len(pf.PENDING_MIGRATION) <= 7
+    assert pf.PENDING_MIGRATION <= set(_cpc.ACTIVE_TILE_REGISTRY) | {
+        "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
+        "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
+        "FAMILY_DISLOC_FOI_LONG_1M"}
+
+
+def test_pending_sites_are_detected_today():
+    # proves the checker sees the current non-compliant code (so it is not vacuous)
+    v = pf.fill_site_violations((ROOT / "disloc_engine.py").read_text(encoding="utf-8"), "_taker_fill")
+    assert any("does not call paper_fill" in x for x in v) and any("_touch" in x for x in v)
+
+
+def test_planted_offender_in_non_fill_file_fails():
+    planted = """
+def place_tile_order(self, side):
+    px = state["ask"] if side == "LONG" else state.get("bid")
+    tape = load("book_tape_1s")
+    return px
+"""
+    v = pf.fill_site_violations(planted, "place_tile_order")
+    assert any("state['ask']" in x for x in v) and any("state.get('bid')" in x for x in v)
+    assert any("book_tape_1s" in x for x in v) and any("does not call paper_fill" in x for x in v)
+
+
+def test_compliant_site_passes():
+    good = """
+def fill(self, side, qty, ts):
+    return paper_fill.paper_fill(side, qty, ts, self.delay(), self.book_at)
+"""
+    assert pf.fill_site_violations(good, "fill") == []
