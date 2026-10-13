@@ -302,6 +302,12 @@ def test_disloc_tile_rows_not_zeroed_by_fresh_filter():
     rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M"}]
     assert len(de.closed_rows(rows)) == 1
 
+
+# HM 13:27: six more offenders
+OFFENDERS_2 = {
+    "decorator_rewrites_price": """
+import paper_fill
+@reprice_with_ticker
 def fill(self, o):
     return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at)
 """,
