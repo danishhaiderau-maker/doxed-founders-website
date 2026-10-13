@@ -58,3 +58,36 @@ def test_lifecycle_payload_has_g6_g8_fields():
                      "process_started_ts": 200.0}, now=300.0)
     for k in ("retained_since_ts", "pre_restart_intents", "unlinked_count", "unlinked_ids", "unlinked_new_24h"):
         assert k in out
+
+
+def test_ledger_size_cap_rotates_and_reloads_both(tmp_path):
+    p = tmp_path / "ap.jsonl"
+    led = lcc.ApprovalLedger(p, clock=lambda: 1000.0, max_bytes=400)
+    for i in range(20):
+        led.append(_a(f"dsl-{i}", 900.0 + i))
+    import os
+    assert led.rotations >= 1 and os.path.getsize(p) < 800 and (tmp_path / "ap.jsonl.1").exists()
+    again = lcc.ApprovalLedger(p, clock=lambda: 1001.0, max_bytes=400)
+    ids = [r["correlation_id"] for r in again.rows()]
+    assert ids[-1] == "dsl-19" and len(ids) < 20  # older rotations beyond .1 are dropped
+
+
+def test_placement_and_stamping_never_read_the_ledger():
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).parent / "bot.py").read_text(encoding="utf-8")
+    readers = set()
+    for fn in ast.walk(ast.parse(src)):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("rows", "_load")
+                    and isinstance(n.func.value, ast.Call)
+                    and getattr(n.func.value.func, "id", "") == "_get_live_copy_approvals"):
+                readers.add(fn.name)
+    # only the read-only monitor contexts may read it; the stamp/placement path only appends
+    assert readers == {"_live_copy_gap_ctx", "_live_copy_monitor_context"}, readers
+    stamp = next(fn for fn in ast.walk(ast.parse(src)) if isinstance(fn, ast.FunctionDef)
+                 and "_get_live_copy_approvals().append" in (ast.get_source_segment(src, fn) or ""))
+    seg = ast.get_source_segment(src, stamp)
+    assert "_get_live_copy_approvals().rows" not in seg and "_live_copy_emitted" not in seg

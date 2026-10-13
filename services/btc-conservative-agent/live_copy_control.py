@@ -76,6 +76,7 @@ def operator_waivable_capabilities(environ=None) -> frozenset:
 REPORTS_JOURNAL = "live_execution_reports.jsonl"
 APPROVALS_LEDGER = "live_copy_approvals.jsonl"  # G6: approvals survive restarts
 APPROVAL_RETENTION_SEC = 7 * 86400
+APPROVALS_MAX_BYTES = 4 * 1024 * 1024  # HM 13:20: size cap; one rotation (.1) kept and reloaded
 
 RESTART_RESET_REASON = "PROCESS_RESTART_FAIL_CLOSED"
 # Danish 2026-10-09: the exchange stop is a CATASTROPHE BACKUP only - placed
@@ -911,10 +912,12 @@ class ApprovalLedger:
     RING = 5000
 
     def __init__(self, path: Path | str | None = None, clock=time.time,
-                 retention_sec: float = APPROVAL_RETENTION_SEC):
+                 retention_sec: float = APPROVAL_RETENTION_SEC, max_bytes: int = APPROVALS_MAX_BYTES):
         self.path = Path(path) if path is not None else data_path(APPROVALS_LEDGER)
         self._clock = clock
         self.retention_sec = float(retention_sec)
+        self.max_bytes = int(max_bytes)
+        self.rotations = 0
         self._lock = threading.Lock()
         self._rows: collections.deque = collections.deque(maxlen=self.RING)
         self.write_failures = 0
@@ -924,19 +927,20 @@ class ApprovalLedger:
 
     def _load(self) -> None:
         cutoff = self.boot_ts - self.retention_sec
-        try:
-            if not self.path.exists():
-                return
-            with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(row, dict) and float(row.get("created_at_ts") or 0) >= cutoff:
-                        self._rows.append(row)
-        except (OSError, TypeError, ValueError):
-            return
+        for path in (Path(str(self.path) + ".1"), self.path):
+            try:
+                if not path.exists():
+                    continue
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(row, dict) and float(row.get("created_at_ts") or 0) >= cutoff:
+                            self._rows.append(row)
+            except (OSError, TypeError, ValueError):
+                continue
         self.loaded_rows = len(self._rows)
 
     def append(self, row: Mapping[str, Any]) -> bool:
@@ -945,6 +949,9 @@ class ApprovalLedger:
             self._rows.append(row)
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
+                if self.path.exists() and self.path.stat().st_size >= self.max_bytes:
+                    os.replace(self.path, str(self.path) + ".1")
+                    self.rotations += 1
                 with self.path.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) + "\n")
             except OSError:
