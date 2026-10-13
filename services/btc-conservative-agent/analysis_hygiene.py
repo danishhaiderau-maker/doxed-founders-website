@@ -129,14 +129,20 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
     clean = apply(trades, include_forced=False, include_late=False) if not trades.empty else trades
     summary = dict(SUMMARY)
     rows = []
+    excluded_pending = 0
     if not clean.empty:
         lane_col = next((c for c in ("research_lane", "lane", "tile") if c in clean.columns), None)
         ts_col = next((c for c in ("close_ts", "exit_ts", "ts") if c in clean.columns), None)
         ts = pd.to_numeric(clean[ts_col], errors="coerce") if ts_col else pd.Series(0, index=clean.index)
         if ts_col and ts.isna().all():
             ts = pd.to_datetime(clean[ts_col], errors="coerce", utc=True).astype("int64") / 1e9
+        import paper_fill as _pf
         for lane, epoch, bp, t in zip(clean[lane_col] if lane_col else ["?"] * len(clean), clean["_epoch_source"],
                                       clean["net_bp"], ts):
+            # fresh data only from lanes priced through paper_fill (research output, not P&L)
+            if epoch == "current_file" and not _pf.fresh_data_eligible(str(lane)):
+                excluded_pending += 1
+                continue
             if pd.notna(bp):
                 rows.append((str(lane), str(epoch), float(bp), float(t) if pd.notna(t) else 0.0))
     dpath = os.path.join(data_root, disloc_file)
@@ -154,6 +160,10 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
                 if LATE_W0 <= ex <= LATE_W1:
                     continue
                 lane = str(r.get("lane") or ("DISLOC-FOI" if r.get("variant") == "foi" else "DISLOC"))
+                import paper_fill as _pf
+                if not _pf.row_fresh_eligible(r):
+                    excluded_pending += 1
+                    continue
                 rows.append((lane, "disloc_store", float(r["pnl_bp_vs_touch"]), ex))
                 disloc_n += 1
     by_tile: dict = {}
@@ -163,6 +173,7 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
         by_epoch.setdefault(epoch, []).append((bp, t))
     return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); DISLOC pnl_bp_vs_touch; fee 0",
             "hygiene": summary, "sources": sources, "disloc_closes": disloc_n,
+            "excluded_pending_paper_fill_migration": excluded_pending,
             "overall": _clustered([(bp, t) for _, _, bp, t in rows]),
             "by_tile": {k: _clustered(v) for k, v in sorted(by_tile.items())},
             "by_epoch": {k: _clustered(v) for k, v in sorted(by_epoch.items())}}

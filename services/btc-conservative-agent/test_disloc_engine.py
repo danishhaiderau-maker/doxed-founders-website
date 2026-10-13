@@ -238,3 +238,101 @@ def test_foi_scoring_only_fast_fills_and_uncapturable():
     bad = [{**base, "net_bp_taker_2p8": -2.0, "signal_to_fill_s": 1.0, "fill_ts": i * 3600, "exit_ts": i}
            for i in range(60)]
     assert de.summarize(bad, pre)["pre_registered"]["verdict"] == "KILL_EARLY"
+
+
+# ---- HM 13:27 step-B block items -------------------------------------------------------------
+def _opened(monkeypatch, rows_, delay=(1.2, "lane_p50_n12")):
+    eng, rows, book, step, touch = _book_engine(monkeypatch, rows_, delay=delay)
+    step(351.1)            # signal: no book read at all
+    assert not book.reads
+    step(352.4)            # entry priced at 351 + 1.2
+    assert eng.position is not None
+    return eng, rows, book, step, touch
+
+
+def _no_future_reads(book):
+    assert book.reads and all(t <= now + 1e-9 for t, now in book.reads)
+
+
+def test_stepb_signal_evaluation_never_reads_the_book(monkeypatch):
+    eng, rows, book, step, _ = _book_engine(monkeypatch, {s: _row(100.0, 100.02) for s in range(300, 420)})
+    for t in (349.1, 350.1, 351.1):
+        step(t)
+    assert rows[-1]["event"] == "DISLOC_ORDER" and not book.reads
+
+
+def test_stepb_stop_exit_priced_after_delay_no_look_ahead(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    rows_.update({s: _row(99.40, 99.42) for s in range(361, 420)})
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    stop = eng.position["stop_px"]
+    touch["q"] = (stop - 0.01, stop + 0.01, 361.0)
+    step(361.5)
+    ex = eng.position["exit_pending"]
+    assert ex["reason"] == "STOP" and ex["due_ts"] == 361.5 + 1.2
+    step(362.0)
+    assert eng.position is not None
+    step(362.8)
+    c = rows[-1]
+    assert c["event"] == "DISLOC_CLOSED" and c["exit_reason"] == "STOP" and c["exit_price"] == 99.40
+    assert c["exit_book_s"] == 361 and "stop_px" not in c   # real book, no clamp to the stop price
+    _no_future_reads(book)
+
+
+def test_stepb_gap_closed_exit_no_look_ahead(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    monkeypatch.setattr(eng.rule, "gap_closed_exit", True, raising=False)
+    monkeypatch.setattr(eng.rule, "gap_closed", lambda side, prem: True)
+    step(355.0)
+    assert eng.position["exit_pending"]["reason"] == "GAP_CLOSED"
+    step(356.3)
+    assert rows[-1]["event"] == "DISLOC_CLOSED" and rows[-1]["exit_reason"] == "GAP_CLOSED"
+    _no_future_reads(book)
+
+
+def test_stepb_time_exit_no_look_ahead(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 430)}
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    step(412.5)
+    assert eng.position["exit_pending"]["reason"] == "TIME_60S"
+    step(413.8)
+    assert rows[-1]["exit_reason"] == "TIME_60S"
+    _no_future_reads(book)
+
+
+def test_stepb_partial_exit_closes_only_filled_qty(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02, sz=5.0) for s in range(340, 430)}
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    qty = eng.position["qty"]
+    for s in range(412, 414):   # thin bid: only 40% of the position can exit
+        rows_[s] = {"b": [[100.0, qty * 0.4]], "a": [[100.02, 5.0]]}
+    step(412.5)
+    step(413.8)
+    assert rows[-1]["event"] == "DISLOC_PARTIAL_EXIT" and eng.position is not None
+    assert abs(eng.position["open_qty"] - qty * 0.6) < 1e-9
+    step(415.1)               # remainder priced at 413.8 + 1.2 on the restored book
+    c = rows[-1]
+    assert c["event"] == "DISLOC_CLOSED" and c["exit_pieces"] == 2 and abs(c["exit_filled_qty"] - qty) < 1e-9
+    assert c["exit_status"] == "FILLED_IN_PARTS"
+    _no_future_reads(book)
+
+
+def test_stepb_unpriceable_exit_forced_after_10s(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 400)}  # book stops at 399
+    eng, rows, book, step, touch = _opened(monkeypatch, rows_)
+    step(412.5)
+    step(413.8)
+    assert eng.position is not None
+    step(413.7 + de.EXIT_NO_BOOK_FORCE_SEC + 0.2)
+    c = rows[-1]
+    assert c["event"] == "DISLOC_CLOSED" and c["exit_status"] == "FORCED_NO_BOOK"
+    assert c["pnl_bp_vs_touch"] is None and c["fresh_data_excluded"] == "FORCED_NO_BOOK"
+    import paper_fill
+    assert paper_fill.row_fresh_eligible(c) is False and de.row_net_usd(c) is None
+
+
+def test_stepb_pnl_sized_on_filled_qty():
+    row = {"pnl_bp_vs_touch": 10.0, "requested_qty": 0.0002, "qty": 0.0001, "exit_filled_qty": 0.0001}
+    full = {"pnl_bp_vs_touch": 10.0, "requested_qty": 0.0002, "qty": 0.0002, "exit_filled_qty": 0.0002}
+    assert abs(de.row_net_usd(row) - de.row_net_usd(full) / 2) < 1e-12

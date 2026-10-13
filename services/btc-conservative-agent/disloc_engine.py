@@ -42,6 +42,7 @@ TRADES_FILE = "disloc_trades.jsonl"
 LONG, SHORT = "LONG", "SHORT"
 # Strategist DEEP-SEARCH-TILES-20261011: reported net charges the measured 2.8 bp taker round trip.
 TAKER_COST_BP = 2.8
+EXIT_NO_BOOK_FORCE_SEC = 10.0  # HM 13:27: unpriceable exit retries bounded, then FORCED_NO_BOOK
 IOC_CAP_BP = 5.0   # live DISLOC IOC limit = signal ask + 5 bp (LONG) / signal bid - 5 bp (SHORT)
 DELAY_BUCKETS = (("le_2s", 0.0, 2.0), ("2_to_5s", 2.0, 5.0))
 SIDE_TAGS = {LONG: "LONG_CONFIRMED_BY_DEEP_SEARCH", SHORT: "SHORT_SHADOW_ONLY_NOT_TRADED"}
@@ -518,35 +519,70 @@ class DislocEngine:
                                          "prem_d5_at_exit_bp": feat.get("prem_d5_bp")}
 
     def _close(self, now, reason, feat, bid, ask) -> None:
-        """Book-priced exit: paper_fill on the exit leg at trigger_ts + exit delay (no cap; exits must close)."""
+        """Book-priced exit at trigger_ts + exit delay (no cap). A PARTIAL exit closes only the filled qty
+        and re-arms the rest; an exit unpriceable for EXIT_NO_BOOK_FORCE_SEC is force-closed unpriced."""
         p = self.position
         ex = p["exit_pending"]
-        side = p["side"]
         res = self._price_exit(p, ex)
-        if res.get("price") is None:
+        if res.get("price") is None or not res.get("filled_qty"):
             ex["attempts"] = ex.get("attempts", 0) + 1
             ex["last_status"] = res.get("status")
-            return  # stay open; retried next tick on real data only
-        exit_px = res["price"]
+            if now - ex["due_ts"] >= EXIT_NO_BOOK_FORCE_SEC:
+                self._finish_close(now, ex, forced=True)
+            return
+        piece = {"price": res["price"], "qty": float(res["filled_qty"]), "fill_ts": res["fill_ts"],
+                 "book_s": res.get("book_s"), "status": res.get("status"),
+                 "signal_book": res.get("depth_snapshot_signal"), "fill_book": res.get("depth_snapshot_fill"),
+                 "delay_s": res.get("delay_s"), "delay_source": res.get("delay_source"),
+                 "trigger_ts": ex["trigger_ts"]}
+        p.setdefault("exit_pieces", []).append(piece)
+        p["open_qty"] = round(float(p["open_qty"]) - piece["qty"], 10)
+        if p["open_qty"] > 1e-10:
+            self.counters["partial_exits"] = self.counters.get("partial_exits", 0) + 1
+            self._emit({"event": "DISLOC_PARTIAL_EXIT", "trade_id": p["trade_id"], "side": p["side"],
+                        "exit_reason": ex["reason"], **{f"exit_{k}": v for k, v in piece.items()},
+                        "remaining_qty": p["open_qty"]})
+            # the remainder is a new exit order: re-triggered now, priced at now + exit delay
+            d = ex["delay_s"]
+            p["exit_pending"] = {**ex, "trigger_ts": now, "due_ts": now + d, "attempts": 0}
+            return
+        self._finish_close(now, ex, forced=False)
+
+    def _finish_close(self, now, ex, *, forced: bool) -> None:
+        p = self.position
+        side = p["side"]
         sgn = 1.0 if side == LONG else -1.0
+        pieces = p.get("exit_pieces") or []
+        closed_qty = sum(x["qty"] for x in pieces)
+        exit_px = (sum(x["price"] * x["qty"] for x in pieces) / closed_qty) if closed_qty > 0 else None
+        last = pieces[-1] if pieces else {}
         tb, ta = ex.get("trigger_bid"), ex.get("trigger_ask")
         mid_exit = (tb + ta) / 2.0 if tb and ta else None
         entry = p["fill_price"]
-        row = {**{k: v for k, v in p.items() if k != "exit_pending"}, "event": "DISLOC_CLOSED",
-               "exit_ts": res["fill_ts"], "exit_trigger_ts": ex["trigger_ts"], "exit_reason": ex["reason"],
-               "exit_price": exit_px, "exit_filled_qty": res.get("filled_qty"), "exit_status": res.get("status"),
+        held = float(p["qty"])
+        row = {**{k: v for k, v in p.items() if k not in ("exit_pending", "exit_pieces", "open_qty")},
+               "event": "DISLOC_CLOSED", "exit_ts": last.get("fill_ts", now),
+               "exit_trigger_ts": ex["trigger_ts"], "exit_reason": ex["reason"],
+               "exit_status": "FORCED_NO_BOOK" if forced else ("FILLED" if len(pieces) == 1 else "FILLED_IN_PARTS"),
+               "exit_price": exit_px, "exit_filled_qty": round(closed_qty, 10), "exit_pieces": len(pieces),
+               "exit_unpriced_qty": round(held - closed_qty, 10) if forced else 0.0,
                "exit_bid": tb, "exit_ask": ta, "exit_mid": mid_exit,
-               "exit_signal_book": res.get("depth_snapshot_signal"), "exit_fill_book": res.get("depth_snapshot_fill"),
-               "exit_book_s": res.get("book_s"), "exit_delay_s": res.get("delay_s"),
-               "exit_delay_source": res.get("delay_source"), "exit_book_age_ms": res.get("book_age_ms"),
+               "exit_signal_book": last.get("signal_book"), "exit_fill_book": last.get("fill_book"),
+               "exit_book_s": last.get("book_s"), "exit_delay_s": last.get("delay_s", ex.get("delay_s")),
+               "exit_delay_source": last.get("delay_source", ex.get("delay_source")),
                "prem_at_exit_bp": ex.get("prem_at_exit_bp"), "prem_d5_at_exit_bp": ex.get("prem_d5_at_exit_bp"),
-               "hold_s": round(res["fill_ts"] - p["fill_ts"], 3),
-               "pnl_bp_vs_touch": round(sgn * (exit_px / entry - 1.0) * 1e4, 4),
+               "hold_s": round(last.get("fill_ts", now) - p["fill_ts"], 3),
+               "pnl_bp_vs_touch": round(sgn * (exit_px / entry - 1.0) * 1e4, 4) if exit_px and not forced else None,
                "pnl_bp_vs_mid": round(sgn * (mid_exit / p["signal_mid"] - 1.0) * 1e4, 4) if mid_exit else None,
                "pnl_bp_fill_mid_to_exit_mid": round(sgn * (mid_exit / p["fill_mid"] - 1.0) * 1e4, 4)
                if mid_exit and p.get("fill_mid") else None,
                "cost_model": "10-level book walk in and out at signal/trigger + measured delay, Bitfinex fee 0"}
-        row["net_bp_taker_2p8"] = round(row["pnl_bp_vs_touch"] - TAKER_COST_BP, 4)
+        if forced:
+            # no real exit price: never fresh data, RED in tile-integrity
+            row["fresh_data_excluded"] = "FORCED_NO_BOOK"
+            self.counters["forced_no_book"] = self.counters.get("forced_no_book", 0) + 1
+        row["net_bp_taker_2p8"] = round(row["pnl_bp_vs_touch"] - TAKER_COST_BP, 4) \
+            if row["pnl_bp_vs_touch"] is not None else None
         row.pop("stop_px", None)
         self.position = None
         self.counters["closes"] += 1
@@ -560,7 +596,7 @@ class DislocEngine:
 
     @staticmethod
     def _price_exit(p, ex):
-        return paper_fill.paper_fill(p["side"], p["qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
+        return paper_fill.paper_fill(p["side"], p["open_qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
                                      leg="exit", delay_source=ex["delay_source"])
 
     def step(self, *, now, live, bfx_quotes, bfx_bbo_ts):
@@ -739,6 +775,8 @@ class DislocEngine:
         self.counters["fills"] += 1
         stop = px * (1 - self.rule.stop_bp / 1e4) if side == LONG else px * (1 + self.rule.stop_bp / 1e4)
         self.position = {**o, **stamp, "event": "DISLOC_FILLED", "limit_price": px, "fill_price": px,
+                         "requested_qty": o["qty"], "qty": float(res.get("filled_qty")),
+                         "open_qty": float(res.get("filled_qty")),
                          "filled_qty": res.get("filled_qty"), "fill_ts": fill_ts,
                          "order_to_fill_s": round(fill_ts - o["order_ts"], 3),
                          "signal_to_fill_s": round(fill_ts - sig_ts, 3),
@@ -865,7 +903,13 @@ def row_net_usd(row: Mapping[str, Any], margin_usd: float = DEFAULT_MARGIN_USD,
     bp = card_bp(row)
     if bp is None:
         return None
-    return bp * float(margin_usd) * float(leverage) / 1e4
+    # HM 13:27: size on what actually traded (partial entry and partial/forced exit)
+    frac = 1.0
+    req = _num(row.get("requested_qty"))
+    held = _num(row.get("exit_filled_qty")) if row.get("exit_filled_qty") is not None else _num(row.get("qty"))
+    if req and held is not None:
+        frac = max(0.0, min(1.0, held / req))
+    return bp * float(margin_usd) * float(leverage) * frac / 1e4
 
 
 def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=None,

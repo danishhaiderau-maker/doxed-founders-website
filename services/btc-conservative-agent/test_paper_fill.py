@@ -147,7 +147,7 @@ GOOD = """
 import paper_fill
 def fill(self, o):
     return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
-                                 leg="entry", delay_source=o["delay_source"], cap_px=o["cap"])
+                                 leg="entry", delay_source=o["delay_source"], cap_px=o["ioc_cap_px"])
 """
 
 
@@ -159,12 +159,12 @@ def test_aliased_imports_resolve():
     mod_alias = """
 import paper_fill as pfx
 def fill(self, o):
-    return pfx.paper_fill(o["side"], o["qty"], o["ts"], 1.5, pfx.book10l_at)
+    return pfx.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], pfx.book10l_at)
 """
     fn_alias = """
 from paper_fill import paper_fill as f, book10l_at as bk
 def fill(self, o):
-    return f(o["side"], o["qty"], o["ts"], 1.5, book_at=bk)
+    return f(o["side"], o["qty"], o["signal_ts"], o["delay_s"], book_at=bk)
 """
     assert pf.fill_site_violations(mod_alias, "fill") == []
     assert pf.fill_site_violations(fn_alias, "fill") == []
@@ -258,7 +258,9 @@ def test_tile_module_scan_catches_aliases_and_folds():
 
 def test_tile_modules_never_read_state_prices():
     mods = {m for sites in pf.TILE_FILL_SITES.values() for m, _ in sites if m != "bot.py"}
-    bad = [x for m in mods for x in pf.tile_module_violations((ROOT / m).read_text(encoding="utf-8"), m)]
+    sites = {m: tuple(f for ss in pf.TILE_FILL_SITES.values() for mm, f in ss if mm == m) for m in mods}
+    bad = [x for m in mods for x in pf.tile_module_violations((ROOT / m).read_text(encoding="utf-8"), m,
+                                                              fill_sites=sites[m])]
     assert not bad, bad
 
 
@@ -270,16 +272,28 @@ def _bot_fn(name, **ns):
     return g[name]
 
 
-def test_fresh_data_wired_into_epoch_rows():
-    import datetime as _dt
+def test_session_pnl_and_wallet_filters_ignore_fresh_eligibility():
+    # HM 13:27: row_fresh_eligible must never touch session P&L / wallet reconciliation
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    for name in ("_trade_row_in_session", "_session_trades_only", "_recompute_research_balance_from_trades"):
+        node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name)
+        seg = ast.get_source_segment(src, node)
+        assert "fresh_eligible" not in seg and "paper_fill" not in seg, name
     pending = sorted(pf.PENDING_MIGRATION)[0]
-    in_epoch = {"ts": "2026-10-13T03:00:00+00:00", "entry_ts": 2e9}
     row_session = _bot_fn("_trade_row_in_session", parse_ts=lambda v: 2e9)
-    assert row_session({**in_epoch, "research_lane": "MIGRATED_LANE"}, 1e9) is True
-    assert row_session({**in_epoch, "research_lane": pending}, 1e9) is False
-    only = _bot_fn("_session_trades_only", _showcase_trade_session_start=lambda: 1e9, datetime=_dt.datetime)
-    kept = only([{**in_epoch, "research_lane": pending}, {**in_epoch, "research_lane": "MIGRATED_LANE"}])
-    assert [r["research_lane"] for r in kept] == ["MIGRATED_LANE"]
+    assert row_session({"ts": "x", "entry_ts": 2e9, "research_lane": pending}, 1e9) is True
+
+
+def test_fresh_data_wired_into_research_study(tmp_path):
+    import json
+    import analysis_hygiene as ah
+    pending = sorted(pf.PENDING_MIGRATION)[0]
+    (tmp_path / "disloc_trades.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
+        {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 1.0, "exit_ts": 5, "lane": pending},
+        {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 2.0, "exit_ts": 6, "lane": "MIGRATED_LANE"})))
+    out = ah.all_epochs_bp_study(str(tmp_path))
+    assert out["excluded_pending_paper_fill_migration"] == 1 and out["disloc_closes"] == 1
+    assert set(out["by_tile"]) == {"MIGRATED_LANE"}
 
 
 def test_fresh_data_wired_into_disloc_ledger():
@@ -288,6 +302,63 @@ def test_fresh_data_wired_into_disloc_ledger():
     rows = [{"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 1, "lane": pending},
             {"schema": de.SCHEMA, "event": "DISLOC_CLOSED", "exit_ts": 2, "lane": "MIGRATED_LANE"}]
     assert [r["lane"] for r in de.closed_rows(rows)] == ["MIGRATED_LANE"]
+
+
+# HM 13:27: six more offenders
+OFFENDERS_2 = {
+    "decorator_rewrites_price": """
+import paper_fill
+@reprice_with_ticker
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at)
+""",
+    "look_ahead_args": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"] - 5, 0, paper_fill.book10l_at)
+""",
+    "cap_from_cached_quote": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                 cap_px=self._quote_cache["ask"] * 1.0005)
+""",
+    "delay_from_helper_module": """
+import paper_fill, lane_delays
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], lane_delays.get(o["side"]), paper_fill.book10l_at)
+""",
+}
+MODULE_OFFENDERS = {
+    "caller_overrides_price": """
+import paper_fill
+class E:
+    @staticmethod
+    def _price_entry(o):
+        return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at)
+    def _taker_fill(self, o):
+        res = self._price_entry(o)
+        res["price"] = self.best_ask
+        return res
+""",
+    "monkeypatch_book10l_at": """
+import paper_fill
+paper_fill.book10l_at = lambda t: {"s": t, "a": [[1, 9]], "b": [[1, 9]]}
+""",
+}
+
+
+def test_each_second_round_offender_is_caught():
+    missed = [k for k, src in OFFENDERS_2.items() if not pf.fill_site_violations(src, "fill")]
+    missed += [k for k, src in MODULE_OFFENDERS.items()
+               if not pf.tile_module_violations(src, "m.py", fill_sites=("_price_entry",))]
+    assert not missed, missed
+
+
+def test_allowed_staticmethod_site_and_reads_pass():
+    src = MODULE_OFFENDERS["caller_overrides_price"].replace('        res["price"] = self.best_ask\n', "")
+    assert pf.tile_module_violations(src, "m.py", fill_sites=("_price_entry",)) == []
+    assert pf.fill_site_violations(src, "_price_entry") == []
 
 
 def test_disloc_migrated():
