@@ -335,6 +335,9 @@ def _is_book10l(n, mods, books) -> bool:
     return isinstance(n, ast.Name) and n.id in books
 
 
+ALLOWED_FILL_KWARGS = frozenset({"leg", "delay_source", "cap_px"})  # HM 14:10
+
+
 def fill_site_violations(source: str, func_name: str) -> list:
     """AST check of one fill site (HM 13:20).
 
@@ -404,6 +407,11 @@ def fill_site_violations(source: str, func_name: str) -> list:
         book = c.args[4] if len(c.args) >= 5 else next((k.value for k in c.keywords if k.arg == "book_at"), None)
         if book is None or not _is_book10l(book, mods, books):
             out.append(f"{func_name}: book_at must be paper_fill.book10l_at")
+        if any(k.arg is None for k in c.keywords) or any(isinstance(x, ast.Starred) for x in c.args):
+            out.append(f"{func_name}: ** / * unpacking not allowed in a paper_fill call")
+        bad_kw = sorted(k.arg for k in c.keywords if k.arg is not None and k.arg not in ALLOWED_FILL_KWARGS)
+        if bad_kw:
+            out.append(f"{func_name}: keyword(s) {bad_kw} not allowed (only leg, delay_source, cap_px)")
         if any(k.arg == "top_at" for k in c.keywords) or len(c.args) > 5:
             out.append(f"{func_name}: top_at fallback not allowed at a fill site")
     out += _state_reads(fn, func_name)
