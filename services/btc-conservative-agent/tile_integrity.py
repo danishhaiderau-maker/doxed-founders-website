@@ -25,6 +25,7 @@ RUN_EVERY_S = 300
 HEARTBEAT_RED_S = 600
 CODE_BUG_BP = 0.1
 FILL_AMBER_BP, FILL_RED_BP, FILL_ROLL_RED_BP = 0.5, 2.0, 0.5
+FILL_ROLL_SIGNED_RED_BP = 0.5  # |signed rolling-10 mean| (n >= 10)
 LIVE_AMBER_BP, LIVE_RED_BP, LIVE_ROLL_RED_BP = 1.0, 3.0, 1.0
 FROZEN_NO_MSG_S, FROZEN_AGE_S = 5.0, 1.0
 REQUIRED_V1_FIELDS = ("fill_model_version", "ask_age_ms", "delay_s", "book_age_ms",
@@ -128,6 +129,9 @@ def fill_recompute_check(rows: Iterable[Mapping[str, Any]], book_by_sec) -> dict
     roll_signed = round(statistics.fmean([x["signed_bp"] for x in ok[-10:]]), 4) if ok else None
     if roll is not None and len(ok) >= 10 and roll > FILL_ROLL_RED_BP:
         red.append(f"FILL_ROLLING10 {roll}bp")
+    # HM 13:20: a one-directional bias is RED even when each fill is individually small.
+    if roll_signed is not None and len(ok) >= 10 and abs(roll_signed) > FILL_ROLL_SIGNED_RED_BP:
+        red.append(f"FILL_BIAS_ROLLING10 {roll_signed}bp")
     return _verdict(red, amber, checked=len(results), rolling10_bp=roll, rolling10_signed_bp=roll_signed,
                     code_bugs=sum(1 for x in results if x.get("code_bug")),
                     worst=sorted(results, key=lambda x: -(x.get("diff_bp") or 0))[:5])

@@ -148,3 +148,46 @@ def test_tile_integrity_is_a_monitor_check():
     k = src.find("def monitor_checks_all(")
     route = src[k:src.find("\ndef ", k + 10)]
     assert 'max((c["status"] for c in checks.values())' in route and '"alerts": sorted(' in route
+
+
+def _bias_rows(n, bias_bp):
+    rows, books = [], {}
+    for i in range(n):
+        books[100 + i] = {"s": 100 + i, "a": [[100.0, 5]], "b": [[99.0, 5]]}
+        rows.append({"trade_id": f"t{i}", "side": "LONG", "qty": 1.0, "fill_model_version": 1,
+                     "book_s": 100 + i, "fill_price": 100.0 * (1 + bias_bp / 1e4), "filled_qty": 1.0})
+    return rows, books
+
+
+def test_signed_rolling10_bias_is_red():
+    import tile_integrity as ti
+    rows, books = _bias_rows(10, 0.45)  # each fill < 0.5 bp (AMBER-free) but always the same way
+    out = ti.fill_recompute_check(rows, books)
+    assert out["rolling10_signed_bp"] > 0.4
+    rows, books = _bias_rows(10, 0.6)
+    assert any("FILL_BIAS_ROLLING10" in r for r in ti.fill_recompute_check(rows, books)["reasons"])
+    rows, books = _bias_rows(9, 0.6)  # n < 10: no bias verdict yet
+    assert not any("FILL_BIAS_ROLLING10" in r for r in ti.fill_recompute_check(rows, books)["reasons"])
+
+
+def test_paper_fill_output_reprices_within_0p1bp_entry_and_exit():
+    import pytest
+    pf = pytest.importorskip("paper_fill")  # lands with #664
+    import tile_integrity as ti
+    books = {s: {"s": s, "a": [[100.0 + 0.01 * (s - 100), 0.3], [100.5, 2.0]],
+                 "b": [[99.9 - 0.01 * (s - 100), 0.4], [99.4, 2.0]]} for s in range(100, 200)}
+    book_at = lambda t: (lambda ok: dict(books[max(ok)]) if ok else None)([s for s in books if s + 1 <= t])
+    rows = []
+    for i, side in enumerate(["LONG", "SHORT"] * 3):
+        sig = 110.0 + 10 * i
+        e = pf.paper_fill(side, 1.0, sig, 1.5, book_at, leg="entry")
+        x = pf.paper_fill(side, 1.0, sig + 5, 1.2, book_at, leg="exit")
+        rows.append({"trade_id": f"rt{i}", "side": side, "qty": 1.0, "fill_model_version": e["fill_model_version"],
+                     # map paper_fill output -> ledger row fields
+                     "fill_price": e["price"], "book_s": e["book_s"], "filled_qty": e["filled_qty"],
+                     "exit_price": x["price"], "exit_book_s": x["book_s"], "exit_filled_qty": x["filled_qty"]})
+    out = ti.fill_recompute_check(rows, books)
+    legs = [w for w in out["worst"]]
+    assert out["checked"] == 12 and all(w["status"] == "OK" for w in legs)
+    assert all(w["diff_bp"] <= 0.1 and not w["qty_mismatch"] for w in legs)
+    assert {w["leg"] for w in legs} >= {"entry"} and out["status"] == "GREEN"
