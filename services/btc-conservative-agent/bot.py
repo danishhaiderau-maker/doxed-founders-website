@@ -59556,6 +59556,25 @@ def _live_copy_website_state(max_age: float = 30.0) -> dict:
     return value
 
 
+def _onoff_actor(body) -> str:
+    """HM 10:34 (b): who flipped live-copy output. body.actor or X-Caller (e.g. DEPLOY, BOSS, DANISH,
+    EXECUTOR); a GitHub Actions run is DEPLOY; else 'dashboard' (unchanged default)."""
+    actor = str((body or {}).get("actor") or request.headers.get("X-Caller") or "").strip()[:40]
+    if not actor and request.headers.get("X-GitHub-Run-Id"):
+        actor = "DEPLOY"
+    return actor or "dashboard"
+
+
+def _onoff_reason(base: str, body) -> str:
+    """base|<caller reason>|gha:<run>|ua:<agent>|ip:<client> (same tag format as /api/pause)."""
+    body = body or {}
+    parts = [base, str(body.get("reason") or "").strip()[:80],
+             ("gha:" + request.headers.get("X-GitHub-Run-Id")) if request.headers.get("X-GitHub-Run-Id") else "",
+             "ua:" + str(request.headers.get("User-Agent") or "?")[:40],
+             "ip:" + str(request.headers.get("Fly-Client-IP") or request.remote_addr or "?")]
+    return "|".join(p for p in parts if p)[:160]
+
+
 @app.route('/api/live-copy/output', methods=['POST'])
 def api_live_copy_output():
     """Fly "Live copy output" ON/OFF (admin). Never places an order.
@@ -59575,9 +59594,9 @@ def api_live_copy_output():
         if _live_copy_paper_lock_active():
             return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
                             "live_copy_output": output.snapshot()}), 409
-        snap = output.set(True, by="dashboard", reason="OPERATOR_ON")
+        snap = output.set(True, by=_onoff_actor(data), reason=_onoff_reason("OPERATOR_ON", data))
     else:
-        snap = output.set(False, by="dashboard", reason="OPERATOR_OFF")
+        snap = output.set(False, by=_onoff_actor(data), reason=_onoff_reason("OPERATOR_OFF", data))
         try:
             _get_bfx_live_switch().reset_all_off(reason="LIVE_COPY_OUTPUT_OFF")
         except Exception as exc:  # noqa: BLE001
