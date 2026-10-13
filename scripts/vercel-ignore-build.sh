@@ -10,6 +10,15 @@ if [ -z "${VERCEL_GIT_COMMIT_SHA:-}" ]; then
 fi
 
 sha="$VERCEL_GIT_COMMIT_SHA"
+
+# Vercel clones shallow, so the parent is often missing and every API-only
+# commit used to build (and fail). Fetch a little history first; any failure
+# here still falls through to the fail-open checks below.
+if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+  git fetch --quiet --deepen=2 origin "$sha" 2>/dev/null \
+    || git fetch --quiet --deepen=2 2>/dev/null \
+    || echo "[vercel-ignore] Could not deepen shallow clone."
+fi
 if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
   echo "[vercel-ignore] Commit is unavailable locally; building safely."
   exit 1
