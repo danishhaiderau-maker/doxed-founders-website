@@ -47792,20 +47792,26 @@ def _integrity_gap_facts(now: float) -> dict:
             out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
                            "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
                            "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
-                           "box": list(_km.BOX)}
+                           "box": list(_km.BOX), "r2_mirror_prefixes": list(_km.R2_MIRROR_PREFIXES),
+                           "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
             out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
                         "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
         if os.path.exists(receipt):
             with open(receipt, "r", encoding="utf-8") as fh:
                 r = json.load(fh)
-            out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch")
+            # KEEP applies to the receipt too: prefer the job's un-kept count, and carry its manifest hash
+            out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch_unkept",
+                                                       r.get("r2_objects_older_than_epoch"))
+            out["receipt_keep_manifest_sha256"] = r.get("keep_manifest_sha256")
             out["box_files_older_than_epoch"] = r.get("box_files_older_than_epoch")
             out["archive_gaps"] = r.get("bfx_book_10l_archive_gaps")
         r2 = (_platform_monitor().receipt or {}).get("r2") or {}
         ind = r2.get("older_than_epoch")
         if isinstance(ind, dict) and epoch and abs(float(ind.get("epoch_ts") or 0) - float(epoch)) < 1:
             out["r2_independent_older_than_epoch"] = ind.get("count")
+            out["r2_independent_kept"] = ind.get("kept")
+            out["r2_independent_keep_manifest_sha256"] = ind.get("keep_manifest_sha256")
             out["r2_independent_at"] = ind.get("listed_at")
         return out
     part("wipe", wipe)

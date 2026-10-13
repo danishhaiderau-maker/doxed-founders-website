@@ -86,7 +86,15 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
                     ts = os.path.getmtime(path)
                 except OSError:
                     continue
-            (kept if km.is_kept(rel, keep) else files)[rel] = ts
+            content = None
+            if n in km._LIVE_STATE_CANDIDATES:
+                try:
+                    if os.path.getsize(path) < 5_000_000:
+                        with open(path, "r", encoding="utf-8") as fh:
+                            content = json.load(fh)
+                except (OSError, ValueError):
+                    content = None
+            (kept if km.is_kept(rel, keep, content=content) else files)[rel] = ts
         if not complete:
             break
     return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}
@@ -257,6 +265,14 @@ def evaluate(f: dict) -> dict:
     box_old = w.get("box_files_older_than_epoch")
     vals = [fly_old, r2_old, r2_ind, box_old]
     disagree = r2_old is not None and r2_ind is not None and r2_old != r2_ind
+    try:
+        import keep_manifest as _km
+        _sha = _km.MANIFEST_SHA256
+    except Exception:
+        _sha = None
+    keep_mismatch = [k for k in ("receipt_keep_manifest_sha256", "r2_independent_keep_manifest_sha256")
+                     if w.get(k) is not None and w.get(k) != _sha]
+    disagree = disagree or bool(keep_mismatch)
     if any(v for v in vals) or disagree:
         st = "RED"
     elif epoch is None or any(v is None for v in vals) or w.get("fly_scan_complete") is False:
@@ -265,7 +281,8 @@ def evaluate(f: dict) -> dict:
         st = "GREEN"
     rows.append(_row("G16", "rows older than epoch (R2 / Fly / box) + bfx_book_10l archive",
                      {"epoch_ts": epoch, "r2_receipt": r2_old, "r2_independent": r2_ind,
-                      "keep": w.get("keep"),
+                      "keep": w.get("keep"), "keep_manifest_mismatch": keep_mismatch,
+                      "r2_independent_kept": w.get("r2_independent_kept"),
                       "r2_independent_at": w.get("r2_independent_at"), "fly": fly_old, "box": box_old,
                       "fly_scanned": w.get("fly_scanned"), "fly_scan_complete": w.get("fly_scan_complete"),
                       "fly_offenders": w.get("fly_offenders"), "archive_gaps": w.get("archive_gaps")},
