@@ -85,3 +85,19 @@ def test_bot_binds_entry_gate_not_enabled_fn():
     seg = ast.get_source_segment(SRC, _func("_disloc_bind_runtime"))
     assert "entries_allowed_fn=_disloc_entry_pause_owner" in seg
     assert "pause" not in seg.split("enabled_fn=")[1].split(",")[0]
+
+
+def test_paused_skips_persist_across_restart(tmp_path):
+    import json
+    path = tmp_path / "p.jsonl"
+    owner = ["DEPLOY_MAINTENANCE"]
+    e, rule, rows = _make(owner)
+    e.paused_append_fn = lambda r: path.open("a").write(json.dumps(r) + "\n")
+    rule._side = dsl.LONG
+    e.step(now=3000.0, live={}, bfx_quotes={}, bfx_bbo_ts=3000.0)
+    # "restart": a fresh engine has an empty in-memory ring, the durable ledger still counts it
+    e2, _, _ = _make(owner)
+    assert e2.counters["skipped_paused"] == 0
+    h = dsl.paused_skip_history(str(path), boot_ts=2999.0)
+    assert h["total"] == 1 and h["since_boot"] == 1 and h["by_pause_owner"] == {"DEPLOY_MAINTENANCE": 1}
+    assert dsl.paused_skip_history(str(tmp_path / "none.jsonl"))["total"] == 0
