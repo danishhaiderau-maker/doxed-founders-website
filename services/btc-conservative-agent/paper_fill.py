@@ -77,7 +77,8 @@ def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
 
 def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
-               delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None) -> dict:
+               delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
+               cap_px: Optional[float] = None) -> dict:
     """book_at(t) -> {"s": sec, "b": [[px, sz]...], "a": [...]} for the latest snapshot at or before t."""
     d = max(MIN_DELAY_S, _f(delay_s) or DEFAULT_DELAY_S)
     t = float(signal_ts) + d
@@ -90,9 +91,15 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
     book = _safe(book_at, t)
     if book and _f(book.get("s")) is not None and t - float(book["s"]) <= MAX_BOOK_AGE_S:
         levels = taker_side_levels(side, leg, book)
+        if cap_px is not None:
+            # IOC limit: only levels at or inside the cap can fill (buy <= cap, sell >= cap).
+            buy = (str(side).upper() == "LONG") == (leg == "entry")
+            levels = [lv for lv in levels or () if _f(lv[0]) is not None
+                      and ((_f(lv[0]) <= cap_px + 1e-9) if buy else (_f(lv[0]) >= cap_px - 1e-9))]
         px, filled = _walk(levels, q)
         if px is None:
-            return {**base, "status": "NO_FILL_NO_DEPTH", "price": None, "filled_qty": 0.0,
+            st = "NO_FILL_IOC_CAP" if cap_px is not None and taker_side_levels(side, leg, book) else "NO_FILL_NO_DEPTH"
+            return {**base, "status": st, "cap_px": cap_px, "depth_snapshot_fill": _snap(book), "price": None, "filled_qty": 0.0,
                     "book_s": int(book["s"]), "book_age_ms": round((t - float(book["s"])) * 1000)}
         return {**base, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
                 "filled_qty": round(filled, 8), "book_s": int(book["s"]),
@@ -115,6 +122,67 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
         COUNTERS["top_only_rejected"] += 1
     COUNTERS["reject_no_book"] += 1
     return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None}
+
+
+class BookTail:
+    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a"}).
+
+    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t
+    (no look-ahead). Reads only the file tail, and only when cached rows are older than t.
+    """
+
+    def __init__(self, path: str, keep: int = 600, tail_bytes: int = 512 * 1024) -> None:
+        self.path, self.keep, self.tail_bytes = path, keep, tail_bytes
+        self._lock = threading.Lock()
+        self._rows: dict = {}
+        self._max_s = None
+
+    def _refresh(self) -> None:
+        import json
+        import os
+        try:
+            size = os.path.getsize(self.path)
+            with open(self.path, "rb") as fh:
+                fh.seek(max(0, size - self.tail_bytes))
+                chunk = fh.read()
+        except OSError:
+            return
+        lines = chunk.splitlines()
+        for line in (lines[1:] if size > self.tail_bytes else lines):
+            try:
+                r = json.loads(line)
+                sec = int(r["s"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or []}
+        if self._rows:
+            for sec in sorted(self._rows)[:-self.keep]:
+                del self._rows[sec]
+            self._max_s = max(self._rows)
+
+    def at(self, t: float):
+        with self._lock:
+            if self._max_s is None or self._max_s + 1 < t - 0.5:
+                self._refresh()
+            ok = [sec for sec in self._rows if sec + 1 <= t]
+            return dict(self._rows[max(ok)]) if ok else None
+
+
+BOOK_FILE = "bfx_book_10l_1s.jsonl"
+_BOOK_TAIL: Optional[BookTail] = None
+
+
+def book10l_at(t: float):
+    """THE book source for every fill site (HM 13:20): the collector's 10-level book in the
+    working directory (/app/data/runtime on Fly), latest complete second at or before t."""
+    global _BOOK_TAIL
+    if _BOOK_TAIL is None:
+        import os
+        _BOOK_TAIL = BookTail(os.path.join(os.getcwd(), BOOK_FILE))
+    return _BOOK_TAIL.at(t)
+
+
+DELAYS = None  # set by the bot: DelaySampler of measured live delays (empty while live is OFF)
 
 
 class DelaySampler:
@@ -164,8 +232,9 @@ PENDING_MIGRATION = frozenset(TILE_FILL_SITES)
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
 PENDING_MIGRATION_EXPIRES = "2026-10-27"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
+FORBIDDEN_IDENTIFIERS = ("ticker", "last_px", "last_price", "last_ask", "last_bid", "touch", "mark_price")
 FORBIDDEN_STATE_KEYS = ("price", "ask", "bid", "last_price", "mark")
-_DYNAMIC_CALLS = ("getattr", "__import__", "eval", "exec", "globals", "locals", "vars")
+_DYNAMIC_CALLS = ("getattr", "__import__", "eval", "exec", "globals", "locals", "vars", "import_module")
 
 
 def fresh_data_eligible(lane: str) -> bool:
@@ -173,10 +242,18 @@ def fresh_data_eligible(lane: str) -> bool:
     return str(lane) not in PENDING_MIGRATION
 
 
+def row_fresh_eligible(row) -> bool:
+    """Epoch-row predicate: rows of lanes still pending migration are never fresh data."""
+    if not isinstance(row, dict):
+        return True
+    lane = row.get("research_lane") or row.get("lane") or row.get("pathway")
+    return True if not lane else fresh_data_eligible(lane)
+
+
 def _aliases(tree) -> tuple:
-    """Names bound to the paper_fill module and to the paper_fill function (any alias)."""
+    """Names bound to the paper_fill module, the paper_fill function and book10l_at (any alias)."""
     import ast
-    mods, funcs = set(), set()
+    mods, funcs, books = set(), set(), set()
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
@@ -186,33 +263,85 @@ def _aliases(tree) -> tuple:
             for a in n.names:
                 if a.name == "paper_fill":
                     funcs.add(a.asname or a.name)
-    return mods, funcs
+                elif a.name == "book10l_at":
+                    books.add(a.asname or a.name)
+    return mods, funcs, books
 
 
-def _state_reads(node, where: str) -> list:
+def _folded_strings(node) -> list:
+    """Every string constant plus every constant-folded concatenation / f-string / join."""
     import ast
     out = []
+
+    def fold(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Mod)):
+            a, b = fold(n.left), fold(n.right)
+            return a + b if a is not None and b is not None else (a or "") + (b or "") or None
+        if isinstance(n, ast.JoinedStr):
+            return "".join(v.value for v in n.values if isinstance(v, ast.Constant) and isinstance(v.value, str))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "join" and n.args \
+                and isinstance(n.args[0], (ast.List, ast.Tuple)):
+            parts = [fold(e) for e in n.args[0].elts]
+            return "".join(x for x in parts if x)
+        return None
     for n in ast.walk(node):
-        if isinstance(n, ast.Subscript):
-            base = getattr(n.value, "id", "") or getattr(n.value, "attr", "")
-            key = n.slice.value if isinstance(n.slice, ast.Constant) else None
-            if base == "state" and isinstance(key, str) and key in FORBIDDEN_STATE_KEYS:
-                out.append(f"{where}: reads state[{key!r}]")
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get":
-            base = getattr(n.func.value, "id", "") or getattr(n.func.value, "attr", "")
-            if base == "state" and n.args and isinstance(n.args[0], ast.Constant) \
-                    and n.args[0].value in FORBIDDEN_STATE_KEYS:
-                out.append(f"{where}: reads state.get({n.args[0].value!r})")
+        v = fold(n)
+        if v:
+            out.append(v)
     return out
 
 
-def fill_site_violations(source: str, func_name: str) -> list:
-    """AST check of one fill-pricing function. Returns a list of violation strings.
+def _state_reads(node, where: str) -> list:
+    """state[...] with a forbidden or non-literal key, state.get(...) likewise, and aliasing x = state."""
+    import ast
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Subscript) and (getattr(n.value, "id", "") == "state" or getattr(n.value, "attr", "") == "state"):
+            key = n.slice.value if isinstance(n.slice, ast.Constant) else None
+            if not isinstance(key, str):
+                out.append(f"{where}: state[<non-literal key>]")
+            elif key in FORBIDDEN_STATE_KEYS:
+                out.append(f"{where}: reads state[{key!r}]")
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" \
+                and (getattr(n.func.value, "id", "") == "state" or getattr(n.func.value, "attr", "") == "state"):
+            k = n.args[0] if n.args else None
+            if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                out.append(f"{where}: state.get(<non-literal key>)")
+            elif k.value in FORBIDDEN_STATE_KEYS:
+                out.append(f"{where}: reads state.get({k.value!r})")
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            v = n.value
+            if isinstance(v, ast.Name) and v.id == "state":
+                out.append(f"{where}: aliases state")
+    return out
 
-    Passes only if the function itself calls paper_fill directly (module alias
-    ``X.paper_fill(...)`` or imported-function alias ``f(...)``), never reaches it
-    dynamically (getattr / importlib / __import__ / eval) or through an indirect
-    reference, and never reads state price/ask/bid or tape streams.
+
+def _is_pf_call(n, mods, funcs) -> bool:
+    import ast
+    if not isinstance(n, ast.Call):
+        return False
+    f = n.func
+    if isinstance(f, ast.Attribute) and f.attr == "paper_fill" and isinstance(f.value, ast.Name) and f.value.id in mods:
+        return True
+    return isinstance(f, ast.Name) and f.id in funcs
+
+
+def _is_book10l(n, mods, books) -> bool:
+    import ast
+    if isinstance(n, ast.Attribute) and n.attr == "book10l_at" and isinstance(n.value, ast.Name) and n.value.id in mods:
+        return True
+    return isinstance(n, ast.Name) and n.id in books
+
+
+def fill_site_violations(source: str, func_name: str) -> list:
+    """AST check of one fill site (HM 13:20).
+
+    A fill site is a pricing function whose LAST statement is ``return paper_fill.paper_fill(...)``
+    (any import alias) and every return returns that call directly; its book argument is
+    paper_fill.book10l_at; it has no top_at; it never touches ``state`` / ``sys.modules`` / dynamic
+    lookups, never names ticker/touch/last_* identifiers, and no folded string names a banned stream.
     """
     import ast
     tree = ast.parse(source)
@@ -220,41 +349,56 @@ def fill_site_violations(source: str, func_name: str) -> list:
                and n.name == func_name), None)
     if fn is None:
         return [f"{func_name}: not found"]
-    mods, funcs = _aliases(tree)
-    out, calls_pf = [], False
-    call_funcs = set()
+    mods, funcs, books = _aliases(tree)
+    out = []
+    last = fn.body[-1] if fn.body else None
+    if not (isinstance(last, ast.Return) and _is_pf_call(last.value, mods, funcs)):
+        out.append(f"{func_name}: last statement must be `return paper_fill.paper_fill(...)`")
+    pf_calls = []
     for n in ast.walk(fn):
+        if isinstance(n, ast.Return) and not _is_pf_call(n.value, mods, funcs):
+            out.append(f"{func_name}: returns something other than paper_fill(...)")
+        if _is_pf_call(n, mods, funcs):
+            pf_calls.append(n)
         if isinstance(n, ast.Call):
-            call_funcs.add(id(n.func))
             f = n.func
-            if isinstance(f, ast.Attribute) and f.attr == "paper_fill" and getattr(f.value, "id", None) in mods:
-                calls_pf = True
-            elif isinstance(f, ast.Name) and f.id in funcs:
-                calls_pf = True
             fname = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
             owner = getattr(getattr(f, "value", None), "id", "")
-            if fname in _DYNAMIC_CALLS or owner == "importlib" or fname == "import_module":
-                out.append(f"{func_name}: dynamic call {fname}() (paper_fill must be called directly)")
-    for n in ast.walk(fn):
-        # paper_fill referenced but not called directly = indirect helper route
-        if isinstance(n, ast.Name) and n.id in (funcs | mods) and id(n) not in call_funcs:
-            parent_ok = any(isinstance(p, ast.Attribute) and p.value is n and id(p) in call_funcs
-                            for p in ast.walk(fn))
-            if not parent_ok:
-                out.append(f"{func_name}: indirect reference to {n.id} (pass-through/helper route)")
-        if isinstance(n, ast.Attribute) and n.attr == "paper_fill" and id(n) not in call_funcs:
-            out.append(f"{func_name}: indirect reference to .paper_fill")
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and any(b in n.value for b in FORBIDDEN_NAMES):
-            out.append(f"{func_name}: references {n.value!r}")
-        if isinstance(n, ast.Attribute) and n.attr in ("touch_fn", "_touch"):
-            out.append(f"{func_name}: prices from {n.attr} (WS top/ticker), not paper_fill")
+            if fname in _DYNAMIC_CALLS or owner == "importlib":
+                out.append(f"{func_name}: dynamic call {fname}()")
+        if isinstance(n, ast.Attribute) and n.attr == "modules" and getattr(n.value, "id", "") == "sys":
+            out.append(f"{func_name}: sys.modules lookup")
+        if isinstance(n, ast.Name) and n.id in ("state", "sys", "importlib"):
+            out.append(f"{func_name}: references {n.id}")
+        ident = n.id if isinstance(n, ast.Name) else (n.attr if isinstance(n, ast.Attribute) else (
+            n.arg if isinstance(n, ast.keyword) and n.arg else ""))
+        if ident and any(b in ident.lower() for b in FORBIDDEN_IDENTIFIERS) and ident not in ("paper_fill",):
+            out.append(f"{func_name}: references {ident} (prices only from paper_fill.book10l_at)")
+        if isinstance(n, ast.Lambda):
+            out.append(f"{func_name}: lambda (book/top must be paper_fill.book10l_at)")
+    for st in _folded_strings(fn):
+        if any(b in st for b in FORBIDDEN_NAMES):
+            out.append(f"{func_name}: references {st!r}")
+    for c in pf_calls:
+        book = c.args[4] if len(c.args) >= 5 else next((k.value for k in c.keywords if k.arg == "book_at"), None)
+        if book is None or not _is_book10l(book, mods, books):
+            out.append(f"{func_name}: book_at must be paper_fill.book10l_at")
+        if any(k.arg == "top_at" for k in c.keywords) or len(c.args) > 5:
+            out.append(f"{func_name}: top_at fallback not allowed at a fill site")
     out += _state_reads(fn, func_name)
-    if not calls_pf:
-        out.append(f"{func_name}: does not call paper_fill.paper_fill")
-    return out
+    return sorted(set(out))
 
 
 def tile_module_violations(source: str, module: str) -> list:
-    """Whole-module scan of a tile module: no state['bid'/'ask'/'price'] reads anywhere."""
+    """Whole-module scan of a tile module: no forbidden/non-literal state reads, no state aliasing,
+    no sys.modules lookups, no folded string naming a banned stream."""
     import ast
-    return _state_reads(ast.parse(source), module)
+    tree = ast.parse(source)
+    out = _state_reads(tree, module)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr == "modules" and getattr(n.value, "id", "") == "sys":
+            out.append(f"{module}: sys.modules lookup")
+    for st in _folded_strings(tree):
+        if any(b in st for b in ("book_tape_1s", "market_microstructure_1s")):
+            out.append(f"{module}: references {st!r}")
+    return sorted(set(out))

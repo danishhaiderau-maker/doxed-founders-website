@@ -72,6 +72,7 @@ from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
 import relay_stack_mode as _relay_stack_mode
 import live_copy_control as _live_copy
+import paper_fill as _paper_fill
 import thread_health as _thread_health
 import monitor_gaps as _monitor_gaps
 import relay_delivery_guard as _relay_guard
@@ -22576,6 +22577,9 @@ def log_expired_order(row):
 def _trade_row_in_session(trade: dict, session_start: float) -> bool:
     if not session_start:
         return True
+    # HM 13:16/13:20: lanes still pending paper_fill migration never count as fresh-epoch data.
+    if not _paper_fill.row_fresh_eligible(trade):
+        return False
     ts = parse_ts(trade.get("ts") or "")
     if ts >= session_start - 1.0:
         return True
@@ -56423,6 +56427,8 @@ def _session_trades_only(trades_list):
     kept = []
     for t in trades_list or []:
         if not isinstance(t, dict):
+            continue
+        if not _paper_fill.row_fresh_eligible(t):  # pending paper_fill migration: not fresh data
             continue
         ts = t.get("created_ts_ts") or t.get("entry_ts") or 0.0
         if not ts:
