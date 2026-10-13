@@ -55,7 +55,7 @@ def _analysis(ctx: dict, now: float) -> dict:
     chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
     known = list((ctx.get("website") or {}).get("armed_accounts") or [])
     gaps = lcm.detect_gaps(chains, ctx.get("paper_twins") or {}, now=now, known_accounts=known)
-    lags = lcm.lag_stats(chains, since_ts=now - _window_sec(), since_revision_ts=ctx.get("boot_ts") or _PROCESS_BOOT_TS)
+    lags = lcm.lag_stats(chains, since_ts=now - _window_sec(), since_process_boot_ts=ctx.get("boot_ts") or _PROCESS_BOOT_TS)
     return {"chains": chains, "gaps": gaps, "lags": lags}
 
 
