@@ -27,7 +27,8 @@ STREAMS = {
     "runtime_telemetry": "runtime_telemetry_1m.jsonl",
     "dyn_regime_minutes": "dyn_regime_minutes.jsonl",      # Tile 15 DYN-AF shadow classifier
     "disloc_trades": "disloc_trades.jsonl",                # Tile 13 DISLOC paper orders/fills/cancels/closes
-    "disloc_foi_trades": "disloc_foi_trades.jsonl",        # Tile 14 DISLOC-FOI paper ledger
+    "disloc_foi_trades": "disloc_foi_trades.jsonl",
+    "disloc_paused_skips": "disloc_paused_skips.jsonl",    # G14 durable PAUSED ledger (archived to R2)        # Tile 14 DISLOC-FOI paper ledger
     # Strategist data streams (12 Oct, strategist_streams_collector.py)
     "bfx_book_10l": "bfx_book_10l_1s.jsonl",               # Bitfinex 10-level book, 1 s
     "bfx_trades": "bfx_trades.jsonl",                      # every individual Bitfinex public trade

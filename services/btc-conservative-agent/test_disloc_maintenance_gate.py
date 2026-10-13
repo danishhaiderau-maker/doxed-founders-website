@@ -101,3 +101,21 @@ def test_paused_skips_persist_across_restart(tmp_path):
     h = dsl.paused_skip_history(str(path), boot_ts=2999.0)
     assert h["total"] == 1 and h["since_boot"] == 1 and h["by_pause_owner"] == {"DEPLOY_MAINTENANCE": 1}
     assert dsl.paused_skip_history(str(tmp_path / "none.jsonl"))["total"] == 0
+
+
+def test_paused_ledger_caps_rotates_and_honours_epoch(tmp_path):
+    p = str(tmp_path / "data" / "disloc_paused_skips.jsonl")
+    for i in range(50):
+        assert dsl.append_paused_skip(p, {"lane": "L", "signal_ts": 100.0 + i, "pause_owner": "DEPLOY_MAINTENANCE"},
+                                      max_bytes=500)
+    import os
+    assert os.path.exists(p + ".1") and os.path.getsize(p) < 600
+    h = dsl.paused_skip_history(p, lane="L", epoch_ts=140.0)
+    assert h["total"] == len([r for r in h["recent"]]) and all(r["signal_ts"] >= 140.0 for r in h["recent"])
+    assert h["by_pause_owner"] == {"DEPLOY_MAINTENANCE": h["total"]}
+
+
+def test_paused_ledger_in_data_dir_and_streams():
+    import monitor_streams
+    assert monitor_streams.STREAMS["disloc_paused_skips"] == dsl.PAUSED_SKIPS_FILE
+    assert "_live_copy.data_path(_dsl.PAUSED_SKIPS_FILE)" in SRC

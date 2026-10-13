@@ -862,27 +862,58 @@ LANE_REF = ["FAMILY_DISLOC_BFX_DISLOCATION_1M"]
 PAUSED_SKIPS_FILE = "disloc_paused_skips.jsonl"
 
 
-def paused_skip_history(path: str = PAUSED_SKIPS_FILE, *, boot_ts: float | None = None, lane: str | None = None) -> dict:
-    """Durable PAUSED-skip ledger (survives restarts): totals, since boot, by pause owner, last 50."""
+PAUSED_SKIPS_MAX_BYTES = 2 * 1024 * 1024  # HM 12:35: capped; one rotation (.1) kept
+_PAUSED_CACHE: dict = {}
+
+
+def append_paused_skip(path: str, row: dict, *, max_bytes: int = PAUSED_SKIPS_MAX_BYTES) -> bool:
+    """Append one PAUSED skip; rotate to ``path.1`` once the file passes max_bytes."""
     import json as _json
-    rows = []
+    import os as _os
     try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    r = _json.loads(line)
-                except ValueError:
-                    continue
-                if lane is None or r.get("lane") == lane:
-                    rows.append(r)
-    except FileNotFoundError:
-        pass
+        _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+        if _os.path.exists(path) and _os.path.getsize(path) >= max_bytes:
+            _os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(row, separators=(",", ":"), default=str) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def paused_skip_history(path: str = PAUSED_SKIPS_FILE, *, boot_ts: float | None = None, lane: str | None = None,
+                        epoch_ts: float | None = None) -> dict:
+    """Durable PAUSED-skip ledger (survives restarts): totals, since boot, by pause owner, last 50.
+
+    Reads the capped current file (+ its one rotation) only when its size/mtime changed;
+    rows before the fresh-start epoch are ignored.
+    """
+    import json as _json
+    import os as _os
+    files = [p for p in (path + ".1", path) if _os.path.exists(p)]
+    key = tuple((p, _os.path.getsize(p), _os.path.getmtime(p)) for p in files)
+    hit = _PAUSED_CACHE.get(path)
+    if hit is None or hit[0] != key:
+        rows = []
+        for p in files:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            rows.append(_json.loads(line))
+                        except ValueError:
+                            continue
+            except OSError:
+                continue
+        _PAUSED_CACHE[path] = hit = (key, rows)
+    rows = [r for r in hit[1] if (lane is None or r.get("lane") == lane)
+            and (not epoch_ts or float(r.get("signal_ts") or 0) >= float(epoch_ts))]
     by_owner: dict = {}
     for r in rows:
         by_owner[r.get("pause_owner")] = by_owner.get(r.get("pause_owner"), 0) + 1
     since = [r for r in rows if boot_ts and float(r.get("signal_ts") or 0) >= boot_ts]
     return {"file": path, "total": len(rows), "since_boot": len(since), "by_pause_owner": by_owner,
-            "recent": rows[-50:]}
+            "epoch_ts": epoch_ts, "max_bytes": PAUSED_SKIPS_MAX_BYTES, "recent": rows[-50:]}
 
 
 # --------------------------------------------------------------------------- tile stats folding
