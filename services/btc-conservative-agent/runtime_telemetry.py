@@ -420,7 +420,48 @@ def compact(row: dict) -> dict:
         "wait_max": lock.get("wait_max_ms"),
         "wait_over": lock.get("wait_over_budget"),
         "crash_new": (row.get("crash_dump") or {}).get("new_rows"),
+        "tlw_p95": ((row.get("phase_timings") or {}).get("trade_lock_wait") or {}).get("p95_ms"),
+        "tlw_max": ((row.get("phase_timings") or {}).get("trade_lock_wait") or {}).get("max_ms"),
+        "tlh_max": ((row.get("phase_timings") or {}).get("trade_lock_hold") or {}).get("max_ms"),
     }
+
+
+class PhaseRecorder:
+    """G17: per-interval percentiles of named phase timings (ms).
+
+    The relay execution snapshot builder records trade_lock_wait /
+    trade_lock_hold here; the 1-minute sampler drains it into
+    runtime_telemetry_1m ``phase_timings``.
+    """
+
+    def __init__(self, keys, cap: int = 4096) -> None:
+        self.keys = tuple(keys)
+        self.cap = int(cap)
+        self._lock = threading.Lock()
+        self._vals = {k: [] for k in self.keys}
+
+    def record(self, timings: dict) -> None:
+        if not isinstance(timings, dict):
+            return
+        with self._lock:
+            for k in self.keys:
+                v = timings.get(k)
+                if isinstance(v, (int, float)) and v == v and len(self._vals[k]) < self.cap:
+                    self._vals[k].append(float(v))
+
+    def drain(self) -> dict:
+        with self._lock:
+            vals, self._vals = self._vals, {k: [] for k in self.keys}
+        out = {}
+        for k, xs in vals.items():
+            if not xs:
+                out[k] = {"n": 0, "p50_ms": None, "p95_ms": None, "max_ms": None}
+                continue
+            xs.sort()
+            pick = lambda q: xs[min(len(xs) - 1, int(q * (len(xs) - 1) + 0.5))]
+            out[k] = {"n": len(xs), "p50_ms": round(pick(0.5), 2),
+                      "p95_ms": round(pick(0.95), 2), "max_ms": round(xs[-1], 2)}
+        return out
 
 
 class RuntimeTelemetry(threading.Thread):
@@ -429,6 +470,7 @@ class RuntimeTelemetry(threading.Thread):
                  pressure_fn: Optional[Callable[[], dict]] = None,
                  handlers_fn: Optional[Callable[[], dict]] = None,
                  lock_fn: Optional[Callable[[], dict]] = None,
+                 phase_fn: Optional[Callable[[], dict]] = None,
                  revision_fn: Optional[Callable[[], Optional[str]]] = None,
                  crash_dump_path: Optional[str] = None,
                  stop_event: Optional[threading.Event] = None,
@@ -443,6 +485,7 @@ class RuntimeTelemetry(threading.Thread):
         self.pressure_fn = pressure_fn
         self.handlers_fn = handlers_fn
         self.lock_fn = lock_fn
+        self.phase_fn = phase_fn
         self.revision_fn = revision_fn
         self.stop_event = stop_event or threading.Event()
         self.clock = clock
@@ -465,6 +508,14 @@ class RuntimeTelemetry(threading.Thread):
         self._prev_rss = None
         self._wall_mono0 = clock() - self._prev_mono
         self._prev_wall_mono = self._wall_mono0
+
+    def _phases(self) -> Optional[dict]:
+        if self.phase_fn is None:
+            return None
+        try:
+            return self.phase_fn()
+        except Exception:
+            return None
 
     # -- sampling -----------------------------------------------------------
     def sample(self) -> dict:
@@ -521,6 +572,7 @@ class RuntimeTelemetry(threading.Thread):
             "scheduler_lag": self.lag.drain(),
             "http_handlers": handlers,
             "trade_lock": lock_interval(lock_now, self._prev_lock),
+            "phase_timings": self._phases(),
             "clock": {
                 "wall_mono_step_ms": _finite((wall_mono - self._prev_wall_mono) * 1000.0, 1),
                 "wall_mono_drift_since_boot_ms": _finite((wall_mono - self._wall_mono0) * 1000.0, 1),
@@ -623,6 +675,9 @@ class RuntimeTelemetry(threading.Thread):
                 "trade_lock_wait_max_ms": _max("wait_max"),
                 "trade_lock_wait_over_budget": _sum("wait_over"),
                 "crash_dump_new_rows": _sum("crash_new"),
+                "phase_trade_lock_wait_p95_max_ms": _max("tlw_p95"),
+                "phase_trade_lock_wait_max_ms": _max("tlw_max"),
+                "phase_trade_lock_hold_max_ms": _max("tlh_max"),
             },
             "health": evaluate(ring, now),
         }

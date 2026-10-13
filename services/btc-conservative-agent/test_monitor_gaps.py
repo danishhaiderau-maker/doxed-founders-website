@@ -204,7 +204,7 @@ def test_new_routes_are_monitor_token_readable():
     for path in ("/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
                  "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
                  "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
-                 "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
+                 "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
                  "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status"):
         assert f'"{path}"' in block, path
 

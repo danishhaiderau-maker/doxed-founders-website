@@ -33210,7 +33210,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
-    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
+    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -43447,6 +43447,10 @@ def _build_relay_execution_state_snapshot() -> dict:
         key: round(value, 3) for key, value in phase_timings.items()
     }
     snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
+    try:
+        _RELAY_PHASES.record(phase_timings)
+    except Exception:
+        pass
     return snapshot
 
 
@@ -45200,6 +45204,7 @@ def _start_runtime_telemetry():
             pressure_fn=_bounded_process_pressure_snapshot,
             handlers_fn=_dashboard_handler_snapshot,
             lock_fn=lambda: trade_lock.telemetry_counters(top=3, reset_interval=True),
+            phase_fn=_RELAY_PHASES.drain,
             revision_fn=_runtime_git_rev,
             crash_dump_path=os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
             stop_event=shutdown_event,
@@ -45208,6 +45213,10 @@ def _start_runtime_telemetry():
         _RUNTIME_TELEMETRY = sampler
     except Exception as e:
         logger.error(f"[RUNTIME TELEMETRY] start failed: {type(e).__name__}: {e}")
+
+
+_RELAY_PHASES = _rtel.PhaseRecorder(
+    ("trade_lock_wait", "trade_lock_hold", "post_lock_projection", "total"))
 
 
 def _runtime_telemetry_status(now: float | None = None) -> dict:
@@ -47719,6 +47728,83 @@ def monitor_shipper():
 def monitor_gaps_route():
     """Compact level per gap item (same block as /api/status.monitor_gaps)."""
     return _monitor_tiles_guard(lambda now: monitor_gaps_summary(), _MONITOR_GAP_MAX_BYTES)
+
+
+def _integrity_gap_facts(now: float) -> dict:
+    """Facts for integrity_gaps.evaluate; every part fails soft to None."""
+    import integrity_gaps as _ig
+    facts = {}
+
+    def part(key, fn):
+        try:
+            facts[key] = fn()
+        except Exception:
+            facts[key] = None
+
+    part("live_armed", lambda: bool(state.get("live_armed", False)))
+    part("force_paper", _force_paper_mode_active)
+    part("epoch_ts", lambda: state.get("fresh_collection_start_time"))
+
+    def runtime():
+        lh = (_runtime_telemetry_status(now) or {}).get("last_hour") or {}
+        return {"trade_lock_wait_p95_ms": lh.get("phase_trade_lock_wait_p95_max_ms"),
+                "trade_lock_wait_max_ms": lh.get("phase_trade_lock_wait_max_ms"),
+                "trade_lock_hold_max_ms": lh.get("phase_trade_lock_hold_max_ms"),
+                "scheduler_lag_max_ms": lh.get("scheduler_lag_max_ms"),
+                "cpu_pct_max": lh.get("process_cpu_pct_max")}
+    part("runtime", runtime)
+
+    def tile_integrity():
+        import tile_integrity as _ti
+        return _ti.gap_facts(now) if hasattr(_ti, "gap_facts") else None
+    part("tile_integrity", tile_integrity)
+
+    def paper_fill_facts():
+        import paper_fill as _pf
+        return _pf.gap_facts() if hasattr(_pf, "gap_facts") else None
+    part("paper_fill", paper_fill_facts)
+
+    def paused():
+        import disloc_engine as _de
+        return _de.paused_gap_facts() if hasattr(_de, "paused_gap_facts") else None
+    part("paused", paused)
+
+    def lifecycle_retention():
+        import live_copy_monitor as _lcm
+        return _lcm.lifecycle_retention_facts(now) if hasattr(_lcm, "lifecycle_retention_facts") else None
+    part("lifecycle_retention", lifecycle_retention)
+
+    def unlinked():
+        import live_copy_monitor as _lcm
+        return _lcm.unlinked_facts(now) if hasattr(_lcm, "unlinked_facts") else None
+    part("unlinked", unlinked)
+
+    def wipe():
+        epoch = facts.get("epoch_ts")
+        out = {}
+        if epoch:
+            oldest = _ig.scan_local_oldest(os.getcwd())
+            offenders = sorted(n for n, ts in oldest.items() if ts < float(epoch) - 60)
+            out["fly_files_older_than_epoch"] = len(offenders)
+            out["fly_offenders"] = offenders[:20]
+        receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
+        if os.path.exists(receipt):
+            with open(receipt, "r", encoding="utf-8") as fh:
+                r = json.load(fh)
+            out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch")
+            out["box_files_older_than_epoch"] = r.get("box_files_older_than_epoch")
+            out["archive_gaps"] = r.get("bfx_book_10l_archive_gaps")
+        return out
+    part("wipe", wipe)
+    return facts
+
+
+@app.route('/api/monitor/integrity-gaps', methods=["GET"])
+def monitor_integrity_gaps_route():
+    """G1-G20 integrity gaps with HM 12:20 changes (one row each + LIVE_OFF)."""
+    import integrity_gaps as _ig
+    return _monitor_tiles_guard(lambda now: _ig.evaluate(_integrity_gap_facts(now)),
+                                _MONITOR_GAP_MAX_BYTES)
 
 
 @app.route('/api/runtime/headroom', methods=["GET"])
