@@ -40,39 +40,57 @@ def _f(v) -> Optional[float]:
     return x if x == x else None
 
 
-def walk_vwap(levels, qty) -> Optional[float]:
-    """Minimal independent depth walk: levels [[px, size], ...] best first. None if not enough depth."""
+def walk_vwap(levels, qty):
+    """Minimal independent depth walk: levels [[px, size], ...] best first.
+    Returns (vwap over the filled part, filled_qty); (None, 0.0) when nothing fills."""
     q = _f(qty)
     if not q or q <= 0 or not levels:
-        return None
-    left, cost = q, 0.0
+        return None, 0.0
+    left, cost, filled = q, 0.0, 0.0
     for lv in levels:
         px, sz = _f(lv[0]), _f(lv[1])
         if not px or not sz or sz <= 0:
             continue
         take = min(left, sz)
         cost += take * px
+        filled += take
         left -= take
         if left <= 1e-12:
-            return cost / q
-    return None
+            break
+    return (cost / filled if filled > 0 else None), filled
 
 
-def recompute_fill(row: Mapping[str, Any], book_by_sec: Mapping[int, Mapping[str, Any]]) -> dict:
-    """Re-price one v1 paper fill from the stored 10-level book second it claims to have used."""
-    sec = row.get("book_s")
+def _buys(side: str, leg: str) -> bool:
+    """Entry LONG / exit SHORT buy (ask); entry SHORT / exit LONG sell (bid)."""
+    return (str(side or "").upper() == "LONG") == (leg == "entry")
+
+
+LEG_FIELDS = {"entry": ("book_s", "fill_price", "filled_qty"),
+              "exit": ("exit_book_s", "exit_price", "exit_filled_qty")}
+
+
+def recompute_fill(row: Mapping[str, Any], book_by_sec: Mapping[int, Mapping[str, Any]], leg: str = "entry") -> dict:
+    """Re-price one v1 paper fill leg from the stored 10-level book second it claims to have used."""
+    sec_key, px_key, qty_key = LEG_FIELDS[leg]
+    tid = row.get("trade_id")
+    sec = row.get(sec_key)
     book = book_by_sec.get(int(sec)) if sec is not None else None
     if not book:
-        return {"trade_id": row.get("trade_id"), "status": "MISSING_SNAPSHOT"}
-    side = str(row.get("side") or "").upper()
-    levels = book.get("a") if side == "LONG" else book.get("b")
-    px = walk_vwap(levels, row.get("qty"))
-    stored = _f(row.get("fill_price"))
-    if px is None or not stored:
-        return {"trade_id": row.get("trade_id"), "status": "NO_DEPTH" if px is None else "NO_PRICE"}
-    diff = abs(stored / px - 1.0) * 1e4
-    return {"trade_id": row.get("trade_id"), "status": "OK", "recomputed": px, "stored": stored,
-            "diff_bp": round(diff, 4), "code_bug": diff > CODE_BUG_BP}
+        return {"trade_id": tid, "leg": leg, "status": "MISSING_SNAPSHOT"}
+    levels = book.get("a") if _buys(row.get("side"), leg) else book.get("b")
+    px, filled = walk_vwap(levels, row.get("qty"))
+    stored = _f(row.get(px_key))
+    if px is None:
+        return {"trade_id": tid, "leg": leg, "status": "NO_DEPTH"}
+    if not stored:
+        return {"trade_id": tid, "leg": leg, "status": "NO_PRICE"}
+    diff = (stored / px - 1.0) * 1e4
+    sgn = 1.0 if _buys(row.get("side"), leg) else -1.0  # + = stored worse (paid more / received less)
+    stored_qty = _f(row.get(qty_key))
+    qty_mismatch = stored_qty is not None and abs(stored_qty - filled) > 1e-8
+    return {"trade_id": tid, "leg": leg, "status": "OK", "recomputed": px, "stored": stored,
+            "recomputed_qty": round(filled, 8), "stored_qty": stored_qty, "qty_mismatch": qty_mismatch,
+            "diff_bp": round(abs(diff), 4), "signed_bp": round(sgn * diff, 4), "code_bug": abs(diff) > CODE_BUG_BP}
 
 
 def _verdict(reasons_red, reasons_amber, **extra) -> dict:
@@ -82,25 +100,44 @@ def _verdict(reasons_red, reasons_amber, **extra) -> dict:
 
 def fill_recompute_check(rows: Iterable[Mapping[str, Any]], book_by_sec) -> dict:
     red, amber, results = [], [], []
+    if book_by_sec is None:  # the stored-book read itself failed: cannot verify
+        return _verdict([], ["BOOK_READ_FAILED"], checked=0, rolling10_bp=None, rolling10_signed_bp=None,
+                        code_bugs=0, worst=[])
     for r in rows:
         if (r.get("fill_model_version") or 0) < 1:
             continue
-        res = recompute_fill(r, book_by_sec)
-        results.append(res)
-        if res["status"] == "MISSING_SNAPSHOT":
-            red.append(f"MISSING_SNAPSHOT {res['trade_id']}")
-        elif res["status"] == "OK":
-            if res["diff_bp"] > FILL_RED_BP:
-                red.append(f"FILL_OFF {res['trade_id']} {res['diff_bp']}bp")
-            elif res["diff_bp"] > FILL_AMBER_BP:
-                amber.append(f"FILL_OFF {res['trade_id']} {res['diff_bp']}bp")
-    diffs = [x["diff_bp"] for x in results if x["status"] == "OK"]
-    roll = round(statistics.fmean(diffs[-10:]), 4) if diffs else None
-    if roll is not None and len(diffs) >= 10 and roll > FILL_ROLL_RED_BP:
+        for leg in ("entry", "exit"):
+            if leg == "exit" and r.get("exit_price") is None and r.get("exit_book_s") is None:
+                continue
+            res = recompute_fill(r, book_by_sec, leg)
+            results.append(res)
+            tag = f"{res['trade_id']}/{leg}"
+            if res["status"] == "MISSING_SNAPSHOT":
+                red.append(f"MISSING_SNAPSHOT {tag}")
+            elif res["status"] in ("NO_DEPTH", "NO_PRICE"):
+                amber.append(f"{res['status']} {tag}")
+            else:
+                if res["diff_bp"] > FILL_RED_BP:
+                    red.append(f"FILL_OFF {tag} {res['diff_bp']}bp")
+                elif res["diff_bp"] > FILL_AMBER_BP:
+                    amber.append(f"FILL_OFF {tag} {res['diff_bp']}bp")
+                if res["qty_mismatch"]:
+                    amber.append(f"QTY_MISMATCH {tag} {res['stored_qty']} vs {res['recomputed_qty']}")
+    ok = [x for x in results if x["status"] == "OK"]
+    roll = round(statistics.fmean([x["diff_bp"] for x in ok[-10:]]), 4) if ok else None
+    roll_signed = round(statistics.fmean([x["signed_bp"] for x in ok[-10:]]), 4) if ok else None
+    if roll is not None and len(ok) >= 10 and roll > FILL_ROLL_RED_BP:
         red.append(f"FILL_ROLLING10 {roll}bp")
-    return _verdict(red, amber, checked=len(results), rolling10_bp=roll,
-                    code_bugs=sum(1 for x in results if x.get("code_bug")), worst=sorted(
-                        results, key=lambda x: -(x.get("diff_bp") or 0))[:5])
+    return _verdict(red, amber, checked=len(results), rolling10_bp=roll, rolling10_signed_bp=roll_signed,
+                    code_bugs=sum(1 for x in results if x.get("code_bug")),
+                    worst=sorted(results, key=lambda x: -(x.get("diff_bp") or 0))[:5])
+
+
+def delay_default_share(rows: Iterable[Mapping[str, Any]]) -> dict:
+    """HM 12:20: share of v1 rows priced with the default delay (delay_source=default_until_n10)."""
+    v1 = [r for r in rows if (r.get("fill_model_version") or 0) >= 1]
+    d = sum(1 for r in v1 if str(r.get("delay_source") or "").startswith("default"))
+    return {"n": len(v1), "defaulted": d, "share": round(d / len(v1), 3) if v1 else None}
 
 
 def presence_check(rows: Iterable[Mapping[str, Any]], v1_since_ts: Optional[float]) -> dict:
@@ -202,7 +239,7 @@ def evaluate(*, now, rows, book_by_sec, chains, v1_since_ts, feed: dict, pnl_rec
     }
     worst = max((p["status"] for p in parts.values()), key=lambda s: _ORDER.get(s, 0), default="GREEN")
     return {"schema": SCHEMA, "run_ts": now, "status": worst, "alert": worst == "RED",
-            "parts": parts, "fill_detect_lag": fill_detect_lag(chains)}
+            "parts": parts, "fill_detect_lag": fill_detect_lag(chains), "delay_default": delay_default_share(rows)}
 
 
 def heartbeat_check(last: Optional[Mapping[str, Any]], now: float) -> dict:

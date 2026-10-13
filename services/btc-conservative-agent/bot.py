@@ -47044,7 +47044,7 @@ def _tile_integrity_rows(now):
 
 
 def _tile_integrity_book(now, rows):
-    secs = {int(r["book_s"]) for r in rows if r.get("book_s") is not None}
+    secs = {int(r[k]) for r in rows for k in ("book_s", "exit_book_s") if r.get(k) is not None}
     if not secs:
         return {}
     import monitor_streams
@@ -47060,7 +47060,8 @@ def _tile_integrity_book(now, rows):
             if int(row.get("s") or -1) in secs:
                 out[int(row["s"])] = row
     except Exception as exc:  # noqa: BLE001
-        logger.debug(f"[TILE INTEGRITY] book read failed: {exc}")
+        logger.warning(f"[TILE INTEGRITY] book read failed: {exc}")
+        return None  # HM 12:20: a failed read is AMBER BOOK_READ_FAILED, never "all snapshots missing"
     return out
 
 

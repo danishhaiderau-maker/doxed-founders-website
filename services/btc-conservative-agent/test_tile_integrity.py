@@ -41,7 +41,7 @@ def test_rolling10_red():
 
 def test_missing_snapshot_detected():
     r = _eval([_row(_good_px(), book_s=999)])
-    assert r["status"] == "RED" and "MISSING_SNAPSHOT dsl-t" in r["parts"]["fill-recompute"]["reasons"]
+    assert r["status"] == "RED" and "MISSING_SNAPSHOT dsl-t/entry" in r["parts"]["fill-recompute"]["reasons"]
     p = _eval([{"trade_id": "x", "fill_ts": 2000.0, "fill_model_version": 1}], v1=1500.0)
     assert p["parts"]["presence"]["status"] == "RED"
 
@@ -88,3 +88,63 @@ def test_regime_coverage_gap_check():
     rows = [{"trade_id": "a", "entry_ts": 10, "regime_at_signal": "TREND"}, {"trade_id": "b", "entry_ts": 11}]
     assert ti.regime_coverage_check(rows, 5)["status"] == "AMBER"
     assert ti.regime_coverage_check(rows[:1], 5)["status"] == "GREEN"
+
+
+def test_exit_leg_long_reprices_on_bid():
+    row = _row(_good_px(), exit_book_s=100, exit_price=49999.0, exit_filled_qty=0.0003)
+    r = ti.fill_recompute_check([row], BOOK)
+    legs = {x["leg"]: x for x in r["worst"]}
+    assert legs["exit"]["recomputed"] == 49999.0 and legs["exit"]["diff_bp"] == 0
+    bad = ti.fill_recompute_check([_row(_good_px(), exit_book_s=100, exit_price=50010.0)], BOOK)
+    assert bad["status"] == "AMBER" or bad["status"] == "RED"  # exit priced on the ask = wrong side
+
+
+def test_partial_fill_uses_filled_qty():
+    book = {100: {"s": 100, "a": [[50000.0, 0.0001]], "b": []}}
+    r = ti.recompute_fill({"trade_id": "p", "side": "LONG", "qty": 0.0003, "book_s": 100,
+                           "fill_price": 50000.0, "filled_qty": 0.0001}, book)
+    assert r["recomputed"] == 50000.0 and r["recomputed_qty"] == 0.0001 and not r["qty_mismatch"]
+    r2 = ti.recompute_fill({"trade_id": "p", "side": "LONG", "qty": 0.0003, "book_s": 100,
+                            "fill_price": 50000.0, "filled_qty": 0.0003}, book)
+    assert r2["qty_mismatch"]
+
+
+def test_no_depth_is_amber():
+    book = {100: {"s": 100, "a": [], "b": []}}
+    r = ti.fill_recompute_check([_row(1.0)], book)
+    assert r["status"] == "AMBER" and any("NO_DEPTH" in x for x in r["reasons"])
+
+
+def test_book_read_failure_path():
+    r = _eval_none = ti.fill_recompute_check([_row(_good_px())], None)
+    assert r["status"] == "AMBER" and r["reasons"] == ["BOOK_READ_FAILED"]
+
+
+def test_signed_rolling10_bias():
+    rows = [_row(_good_px() * (1 + 0.3e-4), trade_id=f"t{i}") for i in range(10)]
+    r = ti.fill_recompute_check(rows, BOOK)
+    assert r["rolling10_signed_bp"] > 0.29  # paper paid more than the book: positive bias
+
+
+def test_red_propagates_to_checks_entry():
+    hb = ti.heartbeat_check({"run_ts": 100.0, "status": "RED", "parts": {"fill-recompute": {"reasons": ["FILL_OFF x"]}}}, 200.0)
+    assert hb["status"] == "RED" and hb["alert"] is True and "fill-recompute: FILL_OFF x" in hb["reasons"]
+
+
+def test_delay_default_share():
+    d = ti.delay_default_share([{"fill_model_version": 1, "delay_source": "default_until_n10"},
+                                {"fill_model_version": 1, "delay_source": "lane_p50_n12"}])
+    assert d == {"n": 2, "defaulted": 1, "share": 0.5}
+
+
+def test_tile_integrity_is_a_monitor_check():
+    src = (pathlib.Path(__file__).parent / "bot.py").read_text(encoding="utf-8")
+    i = src.find("def _monitor_checks_all(")
+    body = src[i:src.find("\ndef ", i + 10)]
+    assert '"tile-integrity": _tile_integrity_check(now)' in body
+    j = src.find("_MONITOR_CHECK_NAMES = (")
+    assert '"tile-integrity"' in src[j:src.find(")", j)]
+    # /api/monitor/checks: status = worst of all checks, alert = any check alert, alerts lists names
+    k = src.find("def monitor_checks_all(")
+    route = src[k:src.find("\ndef ", k + 10)]
+    assert 'max((c["status"] for c in checks.values())' in route and '"alerts": sorted(' in route
