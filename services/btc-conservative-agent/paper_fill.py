@@ -379,7 +379,24 @@ def fill_site_violations(source: str, func_name: str) -> list:
     for st in _folded_strings(fn):
         if any(b in st for b in FORBIDDEN_NAMES):
             out.append(f"{func_name}: references {st!r}")
+    allowed_deco = {"staticmethod", "classmethod"}
+    for d in fn.decorator_list:
+        if not (isinstance(d, ast.Name) and d.id in allowed_deco):
+            out.append(f"{func_name}: decorator not allowed on a fill site")
+    params = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
     for c in pf_calls:
+        for label, idx, kw, keys in (("signal_ts", 2, "signal_ts", ("signal_ts", "trigger_ts")),
+                                     ("delay_s", 3, "delay_s", ("delay_s",)),
+                                     ("cap_px", None, "cap_px", ("ioc_cap_px", "cap_px"))):
+            a = c.args[idx] if idx is not None and len(c.args) > idx else next(
+                (k.value for k in c.keywords if k.arg == kw), None)
+            if a is None:
+                continue
+            ok = (isinstance(a, ast.Name) and a.id in params and a.id in keys) or (
+                isinstance(a, ast.Subscript) and isinstance(a.value, ast.Name) and a.value.id in params
+                and isinstance(a.slice, ast.Constant) and a.slice.value in keys)
+            if not ok:
+                out.append(f"{func_name}: {label} must be a plain parameter or order field {keys}")
         book = c.args[4] if len(c.args) >= 5 else next((k.value for k in c.keywords if k.arg == "book_at"), None)
         if book is None or not _is_book10l(book, mods, books):
             out.append(f"{func_name}: book_at must be paper_fill.book10l_at")
@@ -389,7 +406,7 @@ def fill_site_violations(source: str, func_name: str) -> list:
     return sorted(set(out))
 
 
-def tile_module_violations(source: str, module: str) -> list:
+def tile_module_violations(source: str, module: str, fill_sites=()) -> list:
     """Whole-module scan of a tile module: no forbidden/non-literal state reads, no state aliasing,
     no sys.modules lookups, no folded string naming a banned stream."""
     import ast
@@ -401,4 +418,52 @@ def tile_module_violations(source: str, module: str) -> list:
     for st in _folded_strings(tree):
         if any(b in st for b in ("book_tape_1s", "market_microstructure_1s")):
             out.append(f"{module}: references {st!r}")
+    mods, funcs, books = _aliases(tree)
+    pf_names = mods | {"paper_fill"}
+    for n in ast.walk(tree):
+        # no monkeypatching paper_fill.* from a tile module
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign)) else []
+        for t in targets:
+            if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id in pf_names:
+                out.append(f"{module}: assigns paper_fill.{t.attr}")
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "setattr" and n.args \
+                and isinstance(n.args[0], ast.Name) and n.args[0].id in pf_names:
+            out.append(f"{module}: setattr on paper_fill")
+    out += _post_fill_overrides(tree, module, fill_sites or ())
     return sorted(set(out))
+
+
+_PRICE_KEYS = ("price", "filled_qty", "fill_ts", "book_s", "status")
+
+
+def _post_fill_overrides(tree, module: str, fill_sites) -> list:
+    """The caller may read a fill result but never rewrite its price/qty/time/book/status."""
+    import ast
+    out = []
+    sites = set(fill_sites) | {"paper_fill"}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bound = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+                f = n.value.func
+                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+                if name in sites:
+                    bound |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        if not bound:
+            continue
+        for n in ast.walk(fn):
+            tgts = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AugAssign) else []
+            for t in tgts:
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id in bound:
+                    out.append(f"{module}:{fn.name}: overrides fill result field")
+                if isinstance(t, ast.Name) and t.id in bound and isinstance(n, ast.Assign) \
+                        and not (isinstance(n.value, ast.Call) and (getattr(n.value.func, "attr", "") in sites
+                                                                    or getattr(n.value.func, "id", "") in sites)):
+                    out.append(f"{module}:{fn.name}: rebinds fill result")
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in (
+                    "update", "__setitem__", "setdefault", "pop") \
+                    and isinstance(n.func.value, ast.Name) and n.func.value.id in bound:
+                out.append(f"{module}:{fn.name}: mutates fill result via .{n.func.attr}()")
+    return out
