@@ -164,7 +164,7 @@ def fill(self, o):
     fn_alias = """
 from paper_fill import paper_fill as f, book10l_at as bk
 def fill(self, o):
-    return f(o["side"], o["qty"], o["signal_ts"], o["delay_s"], book_at=bk)
+    return f(o["side"], o["qty"], o["signal_ts"], o["delay_s"], bk)
 """
     assert pf.fill_site_violations(mod_alias, "fill") == []
     assert pf.fill_site_violations(fn_alias, "fill") == []
@@ -406,3 +406,42 @@ def test_ioc_cap_filters_levels():
     assert r["status"] == "PARTIAL" and r["price"] == 100.05 and r["filled_qty"] == 0.1
     r = pf.paper_fill("LONG", 1.0, 100.0, 1.5, book, cap_px=100.0)
     assert r["status"] == "NO_FILL_IOC_CAP" and r["price"] is None
+
+
+# HM 14:10: no ** / * unpacking, keywords limited to leg / delay_source / cap_px
+OFFENDERS_4 = {
+    "kwargs_unpack": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at, **o)
+""",
+    "star_unpack": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(*o["args"])
+""",
+    "top_at_kw": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                 top_at=paper_fill.book10l_at)
+""",
+    "other_kw": """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], book_at=paper_fill.book10l_at)
+""",
+}
+
+
+def test_no_unpacking_and_only_allowed_keywords():
+    for k, src in OFFENDERS_4.items():
+        v = pf.fill_site_violations(src, "fill")
+        assert any("unpacking" in x or "not allowed" in x for x in v), (k, v)
+    ok = """
+import paper_fill
+def fill(self, o):
+    return paper_fill.paper_fill(o["side"], o["qty"], o["signal_ts"], o["delay_s"], paper_fill.book10l_at,
+                                 leg="entry", delay_source="sampled", cap_px=o["ioc_cap_px"])
+"""
+    assert pf.fill_site_violations(ok, "fill") == []
