@@ -32263,6 +32263,29 @@ def _disloc_entry_pause_owner():
     return owner if owner in (PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_OPERATOR) else None
 
 
+_DISLOC_BOOK_TAIL = None
+_DISLOC_DELAYS = None
+
+
+def _disloc_book_at(t: float):
+    """Step B: 10-level Bitfinex book (strategist collector, same data dir) for paper_fill."""
+    global _DISLOC_BOOK_TAIL
+    import paper_fill as _pf
+    if _DISLOC_BOOK_TAIL is None:
+        _DISLOC_BOOK_TAIL = _pf.BookTail(os.path.join(os.getcwd(), "bfx_book_10l_1s.jsonl"))
+    return _DISLOC_BOOK_TAIL.at(t)
+
+
+def _disloc_delay(lane: str, leg: str):
+    """Measured live delay per lane/leg (DelaySampler); default_until_n10 while live is OFF."""
+    global _DISLOC_DELAYS
+    import paper_fill as _pf
+    if _DISLOC_DELAYS is None:
+        _DISLOC_DELAYS = _pf.DELAYS or _pf.DelaySampler()
+        _pf.DELAYS = _DISLOC_DELAYS
+    return _DISLOC_DELAYS.delay(lane, leg)
+
+
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
     """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
     if not hasattr(evaluator, "bind_runtime"):
@@ -32274,6 +32297,8 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_fn=_disloc_touch,
         touch_meta_fn=_disloc_touch_meta,
         entries_allowed_fn=_disloc_entry_pause_owner,
+        book_at_fn=_disloc_book_at,
+        delay_fn=_disloc_delay,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
         regime_fn=lambda: _current_regime_tag(),

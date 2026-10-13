@@ -39,29 +39,124 @@ def test_registry_identity_and_c1_rule():
     assert r.shadow_short(14.0, 3.5)
 
 
-def test_taker_fill_at_real_ask_after_delay_then_time_exit(monkeypatch):
+class Book:
+    """book_at(t): latest 1 s row whose second has closed by t (s + 1 <= t); records every read."""
+
+    def __init__(self, rows, now_ref):
+        self.rows, self.now_ref, self.reads = rows, now_ref, []
+
+    def __call__(self, t):
+        self.reads.append((t, self.now_ref[0]))
+        ok = [s for s in self.rows if s + 1 <= t]
+        return {"s": max(ok), **self.rows[max(ok)]} if ok else None
+
+
+def _row(bid, ask, sz=1.0):
+    return {"b": [[bid, sz], [bid - 0.5, sz]], "a": [[ask, sz], [ask + 0.5, sz]]}
+
+
+def _book_engine(monkeypatch, book_rows, prem_flip=350, delay=(1.5, "default_until_n10")):
     eng, rows, trades, touch = _engine()
-    prems = {t: 11.0 for t in range(0, 500)}
-    prems.update({t: 7.0 for t in range(350, 500)})
+    prems = {t: 11.0 for t in range(0, 600)}
+    prems.update({t: 7.0 for t in range(prem_flip, 600)})
     _feed(monkeypatch, eng, prems)
     touch["q"] = (100.0, 100.02, 351.0)
-    clock = iter([351.2, 351.5])
-    eng.clock = lambda: next(clock)
-    touch_seq = iter([(100.0, 100.02, 351.0), (100.01, 100.03, 351.4)])
-    eng.touch_fn = lambda: next(touch_seq, (100.05, 100.07, 413.0))
-    eng.step(now=351.1, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    order, filled = rows[-2], rows[-1]
-    assert order["order_type"].startswith("MARKET_TAKER") and order["signal_ask"] == 100.02
-    assert filled["event"] == "DISLOC_FILLED" and filled["fill_price"] == 100.03 and filled["signal_to_fill_s"] == 0.5
-    assert filled["fill_bid"] == 100.01 and filled["fill_ask"] == 100.03
-    eng.clock = lambda: 413.3
-    eng.step(now=413.3, live=None, bfx_quotes={}, bfx_bbo_ts=None)
-    closed = rows[-1]
-    assert closed["event"] == "DISLOC_CLOSED" and closed["exit_reason"] == "TIME_60S"
-    assert abs(closed["pnl_bp_vs_touch"] - (100.05 / 100.03 - 1) * 1e4) < 1e-3
-    assert abs(closed["net_bp_taker_2p8"] - (closed["pnl_bp_fill_mid_to_exit_mid"] - 2.8)) < 1e-9
-    s = de.summarize(rows, pol.SPEC and pol.EXIT and None)
-    assert s["by_side"]["LONG"]["by_fill_delay"]["le_2s"]["closed"] == 1 and s["closed_trades"] == 1
+    now = [0.0]
+    book = Book(book_rows, now)
+    eng.bind_runtime(enabled_fn=lambda: True, trades_fn=lambda: [], touch_fn=lambda: touch["q"],
+                     append_fn=rows.append, book_at_fn=book, delay_fn=lambda lane, leg: delay)
+
+    def step(t):
+        now[0] = t
+        eng.clock = lambda: t
+        eng.step(now=t, live=None, bfx_quotes={}, bfx_bbo_ts=t)
+    return eng, rows, book, step, touch
+
+
+def test_stepb_entry_waits_for_delay_and_never_reads_future_book(monkeypatch):
+    # (1) no look-ahead: nothing is priced at signal time; every book read is <= the engine clock
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    rows_[351] = _row(100.01, 100.03)
+    eng, rows, book, step, _ = _book_engine(monkeypatch, rows_)
+    step(351.1)
+    assert rows[-1]["event"] == "DISLOC_ORDER" and eng.position is None
+    assert rows[-1]["fill_due_ts"] == 352.5 and not book.reads
+    step(352.0)
+    assert eng.position is None
+    step(352.6)
+    filled = rows[-1]
+    assert filled["event"] == "DISLOC_FILLED" and filled["fill_price"] == 100.03
+    assert filled["signal_to_fill_s"] == 1.5 and filled["book_s"] == 351
+    assert all(t <= now + 1e-9 for t, now in book.reads)
+
+
+def test_stepb_ioc_cap_no_fill_goes_to_shadow_ledger(monkeypatch):
+    # (2) delayed ask 100.02 * (1 + 5 bp) = 100.07 cap; book jumped to 100.20 -> NO_FILL + shadow row
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 352)}
+    rows_.update({s: _row(100.18, 100.20) for s in range(352, 420)})
+    rows_[351] = _row(100.18, 100.20)
+    eng, rows, book, step, _ = _book_engine(monkeypatch, rows_)
+    step(351.1)
+    step(352.6)
+    ev = [r["event"] for r in rows]
+    assert ev[-2:] == ["DISLOC_CANCELLED", "DISLOC_SHADOW_NO_FILL"]
+    assert rows[-2]["cancel_reason"] == "NO_FILL_IOC_CAP" and eng.position is None
+    sh = rows[-1]
+    assert sh["shadow_only"] and sh["uncapped_fill_price"] == 100.20 and abs(sh["ioc_cap_px"] - 100.02 * 1.0005) < 1e-9
+
+
+def test_stepb_ioc_cap_partial_inside_cap(monkeypatch):
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    rows_[351] = {"b": [[100.0, 1.0]], "a": [[100.05, 0.0001], [100.5, 5.0]]}
+    eng, rows, book, step, _ = _book_engine(monkeypatch, rows_)
+    step(351.1)
+    step(352.6)
+    f = rows[-1]
+    assert f["event"] == "DISLOC_FILLED" and f["fill_price"] == 100.05 and f["fill_status"] == "PARTIAL"
+    assert f["filled_qty"] == 0.0001
+
+
+def test_stepb_exit_uses_same_delay_rule(monkeypatch):
+    # (3) TIME_60S triggers at 412.6 on signal-time data; priced from the book at trigger + exit delay
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    rows_[351] = _row(100.01, 100.03)
+    rows_.update({s: _row(100.10, 100.12) for s in range(413, 420)})
+    eng, rows, book, step, touch = _book_engine(monkeypatch, rows_, delay=(1.2, "lane_p50_n12"))
+    step(351.1)
+    step(352.4)
+    assert eng.position is not None
+    touch["q"] = (100.04, 100.06, 412.4)
+    step(412.5)
+    assert eng.position["exit_pending"]["due_ts"] == 412.5 + 1.2 and rows[-1]["event"] == "DISLOC_FILLED"
+    step(413.0)
+    assert eng.position is not None  # not due yet
+    step(413.8)
+    c = rows[-1]
+    assert c["event"] == "DISLOC_CLOSED" and c["exit_reason"] == "TIME_60S"
+    assert c["exit_price"] == 100.0 and c["exit_book_s"] == 412
+    assert c["exit_delay_s"] == 1.2 and c["exit_delay_source"] == "lane_p50_n12"
+    assert c["exit_trigger_ts"] == 412.5 and abs(c["exit_ts"] - 413.7) < 1e-9
+    assert all(t <= now + 1e-9 for t, now in book.reads)
+
+
+def test_stepb_rows_carry_books_and_delay(monkeypatch):
+    # (4) signal_book, fill_book, delay_s, delay_source on every fill row
+    rows_ = {s: _row(100.0, 100.02) for s in range(340, 420)}
+    eng, rows, book, step, _ = _book_engine(monkeypatch, rows_, delay=(None, None))
+    step(351.1)
+    step(352.6)
+    f = rows[-1]
+    for k in ("signal_book", "fill_book", "delay_s", "delay_source", "depth_snapshot_signal", "depth_snapshot_fill"):
+        assert f.get(k) is not None, k
+    assert f["delay_source"] == "default_until_n10" and f["delay_s"] == 1.5
+    assert f["signal_book"]["s"] == 350 and f["fill_book"]["s"] == 351
+
+
+def test_stepb_no_book_cancels_and_never_uses_touch(monkeypatch):
+    eng, rows, book, step, _ = _book_engine(monkeypatch, {})
+    step(351.1)
+    step(352.6)
+    assert rows[-1]["event"] == "DISLOC_CANCELLED" and rows[-1]["cancel_reason"] == "NO_BOOK_AT_FILL"
 
 
 def test_short_side_is_shadow_logged_never_traded(monkeypatch):

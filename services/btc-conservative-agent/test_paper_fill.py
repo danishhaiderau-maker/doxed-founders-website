@@ -148,8 +148,13 @@ def test_pending_lanes_excluded_from_fresh_data():
 
 def test_pending_sites_are_detected_today():
     # proves the checker sees the current non-compliant code (so it is not vacuous)
-    v = pf.fill_site_violations((ROOT / "disloc_engine.py").read_text(encoding="utf-8"), "_taker_fill")
-    assert any("does not call paper_fill" in x for x in v) and any("_touch" in x for x in v)
+    v = pf.fill_site_violations((ROOT / "bot.py").read_text(encoding="utf-8"), "simulate_marketable_limit_fill")
+    assert any("does not call paper_fill" in x for x in v)
+
+
+def test_disloc_migrated():
+    assert "FAMILY_DISLOC_BFX_DISLOCATION_1M" not in pf.PENDING_MIGRATION
+    assert "FAMILY_DISLOC_FOI_LONG_1M" not in pf.PENDING_MIGRATION
 
 
 def test_planted_offender_in_non_fill_file_fails():
@@ -224,3 +229,13 @@ def test_tile_modules_never_read_state_prices():
     mods = {m for sites in pf.TILE_FILL_SITES.values() for m, _ in sites if m != "bot.py"}
     bad = [x for m in mods for x in pf.tile_module_violations((ROOT / m).read_text(encoding="utf-8"), m)]
     assert not bad, bad
+
+
+def test_book_tail_no_look_ahead(tmp_path):
+    import json
+    p = tmp_path / "bfx_book_10l_1s.jsonl"
+    p.write_text("".join(json.dumps({"s": s, "b": [[1.0, 1]], "a": [[2.0, 1]]}) + "\n" for s in range(100, 110)))
+    bt = pf.BookTail(str(p))
+    assert bt.at(105.5)["s"] == 104      # second 105 is not complete until 106
+    assert bt.at(106.0)["s"] == 105
+    assert bt.at(100.9) is None

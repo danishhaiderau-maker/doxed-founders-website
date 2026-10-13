@@ -34,7 +34,7 @@ def test_pause_blocks_entry_but_exit_still_fires():
     # an open paper position
     e.position = {"side": dsl.LONG, "fill_ts": 1000.0, "stop_px": 50.0, "trade_id": "dsl-x"}
     closed = []
-    e._close = lambda now, reason, *a: (closed.append(reason), setattr(e, "position", None))
+    e._arm_exit = lambda now, reason, *a: (closed.append(reason), setattr(e, "position", None))
     owner[0] = "DEPLOY_MAINTENANCE"
     e._open = lambda *a, **k: (_ for _ in ()).throw(AssertionError("entry opened while paused"))
     e.step(now=1000.0 + rule.hold_sec + 1, live={}, bfx_quotes={}, bfx_bbo_ts=1000.0)

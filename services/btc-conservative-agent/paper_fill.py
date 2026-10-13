@@ -117,6 +117,52 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
     return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None}
 
 
+class BookTail:
+    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a"}).
+
+    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t
+    (no look-ahead). Reads only the file tail and only when the cached rows are older than t.
+    """
+
+    def __init__(self, path: str, keep: int = 600, tail_bytes: int = 512 * 1024) -> None:
+        self.path, self.keep, self.tail_bytes = path, keep, tail_bytes
+        self._lock = threading.Lock()
+        self._rows: dict = {}
+        self._max_s = None
+
+    def _refresh(self) -> None:
+        import json
+        import os
+        try:
+            size = os.path.getsize(self.path)
+            with open(self.path, "rb") as fh:
+                fh.seek(max(0, size - self.tail_bytes))
+                chunk = fh.read()
+        except OSError:
+            return
+        for line in chunk.splitlines()[1:] if len(chunk) >= self.tail_bytes else chunk.splitlines():
+            try:
+                r = json.loads(line)
+                s = int(r["s"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            self._rows[s] = {"s": s, "b": r.get("b") or [], "a": r.get("a") or []}
+        if self._rows:
+            for s in sorted(self._rows)[:-self.keep]:
+                del self._rows[s]
+            self._max_s = max(self._rows)
+
+    def at(self, t: float):
+        with self._lock:
+            if self._max_s is None or self._max_s + 1 < t - 0.5:
+                self._refresh()
+            ok = [s for s in self._rows if s + 1 <= t]
+            return dict(self._rows[max(ok)]) if ok else None
+
+
+DELAYS = None  # bot sets a DelaySampler fed by measured live delays (empty while live is OFF)
+
+
 class DelaySampler:
     """Rolling measured live delay per lane and leg (entry: signal->exchange_ack; exit: trigger->exit ack)."""
 
@@ -160,7 +206,8 @@ TILE_FILL_SITES = {
 # Step B migrates these and empties the set. HM 12:35: the list may only shrink (CI pins the
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
-PENDING_MIGRATION = frozenset(TILE_FILL_SITES)
+# Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (disloc_engine._taker_fill / _close).
+PENDING_MIGRATION = frozenset(TILE_FILL_SITES) - {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"}
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
 PENDING_MIGRATION_EXPIRES = "2026-10-27"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
