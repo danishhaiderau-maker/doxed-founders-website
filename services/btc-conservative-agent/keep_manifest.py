@@ -1,6 +1,8 @@
-"""Pinned KEEP manifest (Danish 13 Oct 13:22 AEDT: KEEP the live Bitfinex order, fill and
-reconciliation records). The fresh-start wipe never deletes these; integrity-gaps G16 reports
-them separately as KEEP, and anything older than the epoch that is NOT listed is RED.
+"""Pinned KEEP manifest: MINIMAL CONFIG ONLY (Danish 13 Oct 13:42 AEDT, superseding 13:22).
+
+Danish: delete everything old, live order/fill/reconciliation history included. The fresh-start
+wipe keeps only the files below; integrity-gaps G16 reports them as KEEP and anything else older
+than the epoch (Fly, box, R2) is RED. No v3 ledgers, no Neon tables, no R2 keep prefixes.
 
 Changing this list changes MANIFEST_SHA256; test_keep_manifest pins the hash, so an edit needs
 an explicit test update (reviewed).
@@ -11,95 +13,77 @@ import fnmatch
 import hashlib
 import json
 
-DECISION = "Danish 2026-10-13 13:22 AEDT: KEEP live Bitfinex order/fill/reconciliation records"
+DECISION = "Danish 2026-10-13 13:42 AEDT: delete everything incl. live history; KEEP minimal config only"
 
-_V3_KEEP = (  # runtime/v3: live / execution / lifecycle only (paper research ledgers excluded:
-               # opportunity, decision, market_segment, pre_entry_features, deep, tile,
-               # baseline_execution_context, qualification_horizon_index, market_segments, signal_snapshots)
-    "runtime/v3/ledgers/execution.jsonl*",
-    "runtime/v3/ledgers/lifecycle.jsonl*",
-    "runtime/v3/ledgers/lifecycle/**",
-    "runtime/v3/ledgers/order_intent.jsonl*",
-    "runtime/v3/lifecycle_bundle_index/**",
-    "runtime/v3/lifecycle_worker/**",
-    "runtime/v3/lifecycle_owner/**",
-    "runtime/v3/lifecycle_purge_transactions/**",
-    "runtime/v3/lifecycle_cleanup_transactions/**",
-    "runtime/v3/receipts/lifecycle_membership_v1/**",
+FLY = (  # relative to /app/data; matched by file name anywhere
+    "**/bitfinex_live_state.json",
+    "**/bitfinex_live_switch_state.json",
+    "**/config-*.json",          # dashboard config: arming state + settings (config-7002.json)
+    "**/config.json",            # legacy config (migrated to config-<port>.json)
+    "**/policy.json",            # settings
+    "**/spread-gate.json",       # spread-gate config
 )
-_LIVE_FILES = (
-    "live_execution_reports.jsonl*", "live_copy_approvals.jsonl*", "live_copy_output_state.json",
-    "live_copy_protection_evidence.json", "live_copy_trade_decisions.json", "live_copy_tile_eligibility.json",
-    "live_copy_outbox.json", "live_copy_protection_bootstrap.json",
-    "live_copy_account_transitions.json", "live_copy_resolved_alerts.json",
-    "bitfinex_order_action_audit.jsonl*", "bitfinex_live_state.json", "bitfinex_live_switch_state.json",
-    "relay_lifecycle_evidence_v1.json", "relay_status_snapshot_v1.json",
-    "relay_outbox_quarantine.jsonl*", "relay_outbox_retired.jsonl*",
-    "ledger_reconciliation.json", "shadow_vs_live_entry.jsonl*", "live_drills.jsonl*",
-    "mandatory-reserve.alarm-journal.json",
-    "copy_only_exchange_fills_report.json", "bitfinex_copy_fidelity_lifecycles_report.json",
-    "order_intent.jsonl*",
-    "lane_pnl_ledger.json", "lane_lab_pnl_ledger.json", "lane_pnl_ledger_epoch_receipts.jsonl*",
-    "execution_settings_history.jsonl*", "spread-gate.json",
-)
-# orders/positions/open_positions/pending_orders .json: KEPT only when they hold live state
-# (see is_kept(..., content=...)); PaperPortfolio state is deliberately NOT kept.
-_LIVE_STATE_CANDIDATES = ("orders.json", "positions.json", "open_positions.json", "pending_orders.json")
-
-FLY = _V3_KEEP + tuple("**/" + f for f in _LIVE_FILES) + ("keep-*.tgz",)  # relative to /app/data
-BOX = ("backups/keep-*/keep.tgz",)
-# Railway relay-executor (apps/api relay-executor-worker) Neon order / fill / reconciliation tables
-NEON_TABLES = ("SignalCycle", "SignalCycleEvent", "SignalCycleParticipant",
-               "SignalCycleParticipantReduction", "RelayPositionReductionAudit")
-# R2 bucket doxed-btc-archive: per-file mirror keys are matched against FLY after stripping the
-# prefix and ".zst"; keep/ holds the keep snapshot. fly-segments/v3/seg tars are mixed (not keepable).
-R2_MIRROR_PREFIXES = ("fly-mirror-segments/tree/", "pre-clean-epoch/fly-mirror-segments/tree/")
-R2_KEEP_PREFIXES = ("keep/",)
+BOX = ()
+NEON_TABLES = ()
+R2_KEEP_PREFIXES = ()
 
 MANIFEST = {"decision": DECISION, "fly": list(FLY), "box": list(BOX), "neon_tables": list(NEON_TABLES),
-            "live_state_candidates": list(_LIVE_STATE_CANDIDATES),
-            "r2_mirror_prefixes": list(R2_MIRROR_PREFIXES), "r2_keep_prefixes": list(R2_KEEP_PREFIXES)}
+            "r2_keep_prefixes": list(R2_KEEP_PREFIXES)}
 MANIFEST_SHA256 = hashlib.sha256(json.dumps(MANIFEST, sort_keys=True).encode()).hexdigest()
 
 
 def _match(rel: str, pattern: str) -> bool:
-    rel = rel.replace("\\\\", "/")
+    rel = rel.replace("\\", "/")
     if pattern.endswith("/**"):
         return rel == pattern[:-3] or rel.startswith(pattern[:-2])
     if pattern.startswith("**/"):
-        base = pattern[3:]
-        return fnmatch.fnmatch(rel.rsplit("/", 1)[-1], base)
+        return fnmatch.fnmatch(rel.rsplit("/", 1)[-1], pattern[3:])
     return fnmatch.fnmatch(rel, pattern)
 
 
-def _live_state(content) -> bool:
-    if not isinstance(content, (dict, list)):
-        return False
-    txt = json.dumps(content)[:200000].lower()
-    if "paperportfolio" in txt or '"paper": true' in txt:
-        return False
-    return any(k in txt for k in ('"live"', "bitfinex", "exchange_order_id", '"mode": "live"'))
-
-
-def is_kept(rel: str, patterns=FLY, content=None) -> bool:
-    if any(_match(rel, p) for p in patterns):
-        return True
-    base = rel.replace("\\\\", "/").rsplit("/", 1)[-1]
-    return base in _LIVE_STATE_CANDIDATES and content is not None and _live_state(content)
-
-
-def is_r2_kept(key: str) -> bool:
-    """Same KEEP rule for the wipe receipt and the independent box R2 listing."""
-    if any(key.startswith(p) for p in R2_KEEP_PREFIXES):
-        return True
-    for p in R2_MIRROR_PREFIXES:
-        if key.startswith(p):
-            rel = key[len(p):]
-            rel = rel[:-4] if rel.endswith(".zst") else rel
-            return is_kept(rel) or is_kept("runtime/" + rel)
-    return False
+def is_kept(rel: str, patterns=FLY, content=None) -> bool:  # content kept for call compatibility
+    return any(_match(rel, p) for p in patterns)
 
 
 def kept_dir(rel_dir: str, patterns=FLY) -> bool:
-    """Whole directory kept (lets the scan count it without walking 300k files)."""
     return any(p.endswith("/**") and (rel_dir == p[:-3] or rel_dir.startswith(p[:-2])) for p in patterns)
+
+
+def is_r2_kept(key: str) -> bool:
+    """Same rule for the wipe receipt and the independent box R2 listing: nothing in R2 is kept."""
+    return any(key.startswith(p) for p in R2_KEEP_PREFIXES)
+
+
+def stamp_receipt(receipt: dict, r2_objects, epoch_ts: float) -> dict:
+    """HM 14:10: the wipe receipt carries the manifest hash and the un-kept R2 count.
+
+    ``r2_objects`` is an iterable of (key, last_modified_epoch_s). Returns the receipt (mutated)."""
+    old = kept = 0
+    for key, ts in r2_objects:
+        if ts < float(epoch_ts):
+            if is_r2_kept(key):
+                kept += 1
+            else:
+                old += 1
+    receipt["keep_manifest_sha256"] = MANIFEST_SHA256
+    receipt["r2_objects_older_than_epoch_unkept"] = old
+    receipt["r2_objects_older_than_epoch_kept"] = kept
+    return receipt
+
+
+if __name__ == "__main__":  # python keep_manifest.py stamp <receipt.json> <listing.jsonl> <epoch_ts>
+    import sys
+    if len(sys.argv) == 5 and sys.argv[1] == "stamp":
+        with open(sys.argv[2], "r", encoding="utf-8") as fh:
+            rec = json.load(fh)
+        with open(sys.argv[3], "r", encoding="utf-8") as fh:
+            objs = [(r["key"], float(r["ts"])) for r in (json.loads(l) for l in fh if l.strip())]
+        stamp_receipt(rec, objs, float(sys.argv[4]))
+        with open(sys.argv[2] + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, sort_keys=True)
+        import os
+        os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+        print(json.dumps({k: rec[k] for k in ("keep_manifest_sha256", "r2_objects_older_than_epoch_unkept",
+                                                 "r2_objects_older_than_epoch_kept")}))
+    else:
+        print(json.dumps({"manifest_sha256": MANIFEST_SHA256}))

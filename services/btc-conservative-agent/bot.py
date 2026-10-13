@@ -22654,6 +22654,9 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
     except (TypeError, ValueError):
         pass
     candidates.append((_latest_reset_receipt_anchor(), "reset_receipt"))
+    fse = _fresh_start_epoch()
+    if fse:
+        candidates.append((float(fse["epoch_ts"]), "fresh_start"))
     manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
     started = manifest.get("started_at_utc") if isinstance(manifest, dict) else None
     if started:
@@ -22672,6 +22675,23 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
         best = (float(bot_start_time or 0.0), "bot_start")
     _epoch_boundary_cache.update(at=now, value=best)
     return best
+
+
+_FRESH_START_EPOCH_FILE = "fresh_start_epoch.json"
+
+
+def _fresh_start_epoch_path() -> str:
+    return os.path.join(os.getenv("BOT_DATA_DIR") or os.getcwd(), _FRESH_START_EPOCH_FILE)
+
+
+def _fresh_start_epoch() -> dict | None:
+    """HM 14:10 fresh-start epoch (set once after the guarded deploy is verified). Never deletes data."""
+    try:
+        with open(_fresh_start_epoch_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) and float(d.get("epoch_ts") or 0) > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _current_epoch_id_for_display() -> str | None:
@@ -33211,6 +33231,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
     "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
+    "/api/monitor/fresh-start",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -47743,7 +47764,7 @@ def _integrity_gap_facts(now: float) -> dict:
 
     part("live_armed", lambda: bool(state.get("live_armed", False)))
     part("force_paper", _force_paper_mode_active)
-    part("epoch_ts", lambda: state.get("fresh_collection_start_time"))
+    part("epoch_ts", lambda: (_fresh_start_epoch() or {}).get("epoch_ts") or state.get("fresh_collection_start_time"))
 
     def runtime():
         lh = (_runtime_telemetry_status(now) or {}).get("last_hour") or {}
@@ -47792,8 +47813,7 @@ def _integrity_gap_facts(now: float) -> dict:
             out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
                            "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
                            "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
-                           "box": list(_km.BOX), "r2_mirror_prefixes": list(_km.R2_MIRROR_PREFIXES),
-                           "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
+                           "box": list(_km.BOX), "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
             out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
                         "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
@@ -47811,6 +47831,7 @@ def _integrity_gap_facts(now: float) -> dict:
         if isinstance(ind, dict) and epoch and abs(float(ind.get("epoch_ts") or 0) - float(epoch)) < 1:
             out["r2_independent_older_than_epoch"] = ind.get("count")
             out["r2_independent_kept"] = ind.get("kept")
+            out["r2_independent_error"] = ind.get("error")
             out["r2_independent_keep_manifest_sha256"] = ind.get("keep_manifest_sha256")
             out["r2_independent_at"] = ind.get("listed_at")
         return out
@@ -47827,6 +47848,72 @@ def monitor_integrity_gaps_route():
         lambda now: _ig.apply_lifecycle(_ig.evaluate(_integrity_gap_facts(now)),
                                         os.path.join(os.getcwd(), "integrity_gaps_lifecycle.json"), now),
         _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/fresh-start', methods=["GET"])
+def monitor_fresh_start_route():
+    """Fresh-start epoch (HM 14:10): every epoch-facing / fresh-data path cuts at the newest boundary."""
+    def build(now):
+        fse = _fresh_start_epoch()
+        cutoff, source = _current_epoch_boundary(force=True)
+        closed = [t for t in list(trades) if isinstance(t, dict)]
+        def _ts(t):
+            for k in ("close_ts", "exit_ts", "entry_ts", "open_ts", "ts"):
+                try:
+                    v = parse_ts(t.get(k)) if t.get(k) is not None else None
+                except Exception:  # noqa: BLE001
+                    v = None
+                if v:
+                    return float(v)
+            return None
+        tss = [x for x in (_ts(t) for t in closed) if x is not None]
+        return {"schema": "fresh_start_epoch_v1", "set": bool(fse), "fresh_start": fse,
+                "epoch_ts": (fse or {}).get("epoch_ts"),
+                "epoch_utc": monitor_api.utc_iso(fse["epoch_ts"]) if fse else None,
+                "effective_cutoff_ts": cutoff, "effective_cutoff_utc": monitor_api.utc_iso(cutoff) if cutoff else None,
+                "effective_cutoff_source": source,
+                "closed_rows_in_memory": len(closed),
+                "closed_rows_post_epoch": sum(1 for x in tss if cutoff and x >= cutoff),
+                "closed_rows_pre_epoch": sum(1 for x in tss if cutoff and x < cutoff),
+                "untouched": ["order_intent.jsonl", "runtime/v3/**", "keep manifest"],
+                "file": _FRESH_START_EPOCH_FILE}
+    return _monitor_tiles_guard(build, 64 * 1024)
+
+
+@app.route('/api/monitor/fresh-start', methods=["POST"])
+def monitor_fresh_start_set_route():
+    """Set the fresh-start epoch (admin token, explicit confirm, never while live is armed, forward only)."""
+    if not _admin_authed_strict():
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    if body.get("confirm") != "SET_FRESH_START_EPOCH":
+        return jsonify({"error": "CONFIRM_REQUIRED", "confirm": "SET_FRESH_START_EPOCH"}), 400
+    with state_lock:
+        armed = bool(state.get("live_armed"))
+    if armed:
+        return jsonify({"error": "LIVE_ARMED"}), 409
+    now = time.time()
+    try:
+        ts = float(body.get("epoch_ts") or now)
+    except (TypeError, ValueError):
+        return jsonify({"error": "BAD_EPOCH_TS"}), 400
+    if ts > now + 5:
+        return jsonify({"error": "EPOCH_IN_FUTURE"}), 400
+    prev = _fresh_start_epoch()
+    if prev and ts <= float(prev["epoch_ts"]):
+        return jsonify({"error": "EPOCH_NOT_FORWARD", "current": prev}), 409
+    rec = {"epoch_ts": ts, "epoch_utc": monitor_api.utc_iso(ts), "set_at_utc": monitor_api.utc_iso(now),
+           "deployed_sha": os.getenv("BOT_GIT_SHA") or os.getenv("GIT_SHA") or os.getenv("SOURCE_COMMIT"),
+           "note": str(body.get("note") or "")[:200], "previous": prev}
+    path = _fresh_start_epoch_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    _current_epoch_boundary(force=True)
+    return jsonify({"ok": True, "fresh_start": rec})
 
 
 @app.route('/api/runtime/headroom', methods=["GET"])
