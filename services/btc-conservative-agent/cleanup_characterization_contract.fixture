@@ -19,6 +19,7 @@
     ["GET", "/api/monitor/shadow-exits", "monitor_shadow_exits"],
     ["GET", "/api/monitor/workers", "monitor_workers"],
     ["GET", "/api/monitor/fill-sim", "monitor_fill_sim"],
+    ["GET", "/api/monitor/reconcile", "monitor_reconcile"],
     ["GET", "/api/monitor/protective-exit", "monitor_protective_exit"],
     ["GET", "/api/monitor/tiles/switches", "monitor_tiles_switches"],
     ["GET", "/api/monitor/config", "monitor_config"],

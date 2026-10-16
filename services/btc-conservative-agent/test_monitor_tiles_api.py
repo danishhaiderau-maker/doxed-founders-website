@@ -422,3 +422,53 @@ def test_counters_since_boot_exposes_stand_aside_shadow_counts():
     ae = out["since_boot"]["adaptive_entry"]
     assert ae["stand_aside"] == 5 and ae["shadow_stand_aside"] == 5 and ae["submit"] == 7
     assert ae["by_regime"]["QUIET"] == 5
+
+
+# ---- Strategist read paths (17 Oct): reconcile route, public fill provenance, fresh_only on tile 6/7 ----------
+def test_reconcile_route_is_monitor_read_only_and_fly_side_only(bot, monkeypatch):
+    monkeypatch.setattr(bot, "_load_archive_receipt",
+                        lambda: {"restore_test": {"checked": 23, "ok": 2, "bad": 21, "ts": "2026-10-17T03:32:09+1100"}})
+    path = "/api/monitor/reconcile"
+    client = bot.app.test_client()
+    assert client.get(path, environ_base=REMOTE).status_code == 401
+    assert client.get(path, headers={"Authorization": f"Bearer {ADMIN}"}, environ_base=REMOTE).status_code == 401
+    assert client.post(path, headers={"X-Bot-Admin-Token": ADMIN}, environ_base=REMOTE).status_code == 405
+    for headers in ({"X-Bot-Admin-Token": ADMIN}, {"Authorization": f"Bearer {MONITOR}"}):
+        r = client.get(path, headers=headers, environ_base=REMOTE)
+        assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+        body = r.get_json()
+        assert body["schema"] == "monitor_reconcile_v1" and body["read_only"] is True and body["epoch_id"] == EPOCH
+        assert body["sources"] == {"fly": "OK", "mirror": "NOT_REPORTED_TO_FLY", "analyzer": "NOT_REPORTED_TO_FLY"}
+        assert body["archive_restore"]["tests_total"] == 23 and body["archive_restore"]["tests_failed"] == 21
+        tiles = {t["lane"]: t for t in body["per_tile"]}
+        assert tiles[GS1]["fly_n"] == 1 and tiles[HA]["fly_n"] >= 1
+        assert all(t["mirror_n"] is None and t["analyzer_n"] is None and t["ok"] is None for t in tiles.values())
+    assert path not in bot._READ_ONLY_GET_PATHS
+
+
+def test_public_state_exposes_fill_provenance_but_still_strips_strategy_fields(bot):
+    row = {"ts": "t", "trade_id": "gs1-x", "dir": "LONG", "entry": 1.0, "exit": 2.0, "net_pnl_usd": 0.1,
+           "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
+           "exit_reason": "GS_ATR_TAKE_PROFIT", "research_lane": GS1, "ai_band": "60-70"}
+    out = bot._sanitize_public_state({"trades": [row]})["trades"][0]
+    assert out["fill_model"] == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY" and out["fill_model_version"] == 1
+    assert out["delay_s"] == 1.5
+    assert "exit_reason" not in out and "research_lane" not in out and "ai_band" not in out
+
+
+def test_fresh_only_also_filters_tile_6_7_rows_that_are_not_fresh(bot, monkeypatch):
+    def disloc_row(tid, fresh):
+        raw = {"trade_id": tid, "research_lane": GS1, "ts": CUTOFF + 600, "dir": "LONG", "entry": 1.0, "exit": 2.0,
+               "fresh_eligible": fresh, "exit_status": "PAPER_FILL", "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY",
+               "fill_model_version": 1}
+        return mt.tile_trade_row(raw, status="closed", short_names={}, epoch_id=EPOCH, forced_reasons=[])
+
+    rows = [disloc_row("d-fresh", True), disloc_row("d-stale", False)]
+    monkeypatch.setattr(bot, "_disloc_tile_trade_rows", lambda lane, **kw: list(rows) if lane == GS1 else [])
+    monkeypatch.setattr(bot, "_disloc_epoch_since", lambda: 0.0)
+    def ids(**q):
+        body = _get(bot, "/api/monitor/tiles/trades", {"X-Bot-Admin-Token": ADMIN}, status="closed", lane=GS1, **q).get_json()
+        return {r["trade_id"] for r in body["rows"]}
+    assert {"d-fresh", "d-stale"} <= ids()
+    only = ids(fresh_only="1")
+    assert "d-stale" not in only and "d-fresh" in only
