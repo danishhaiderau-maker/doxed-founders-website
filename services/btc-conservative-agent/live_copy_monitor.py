@@ -210,7 +210,7 @@ def detect_gaps(chains: Mapping[str, Any], paper_twins: Mapping[str, Mapping[str
     return gaps
 
 
-def lag_stats(chains: Mapping[str, Any], *, since_ts: float) -> dict:
+def lag_stats(chains: Mapping[str, Any], *, since_ts: float, since_process_boot_ts: float | None = None) -> dict:
     """p50/p95/max per hop over chains whose intent/ack falls in the window."""
     buckets: dict[str, list[float]] = {}
     per_account: dict[str, dict[str, list[float]]] = {}
@@ -227,7 +227,32 @@ def lag_stats(chains: Mapping[str, Any], *, since_ts: float) -> dict:
     def summarize(b):
         return {hop: {"n": len(v), "p50": _pct(v, 0.5), "p95": _pct(v, 0.95), "max": round(max(v), 3)}
                 for hop, v in b.items() if v}
-    return {"all": summarize(buckets), "by_account": {a: summarize(b) for a, b in per_account.items()}}
+    return {"all": summarize(buckets), "by_account": {a: summarize(b) for a, b in per_account.items()},
+            "windows": hop_windows(chains, since_process_boot_ts=since_process_boot_ts)}
+
+
+def hop_windows(chains: Mapping[str, Any], *, since_process_boot_ts: float | None = None, last_n: int = 20) -> dict:
+    """HM gap (c): hop lags over the last N chains and since this process booted.
+    Empty windows while live is OFF are expected (status EMPTY_LIVE_OFF), never RED."""
+    rows = []
+    for ch in (chains.get("accounts") or {}).values():
+        anchor = ch.get("fly_intent_emitted_at_ts") or ch.get("railway_received_at_ts") or ch.get("exchange_ack_at_ts")
+        if anchor and (ch.get("lags_sec") or ch.get("intent_to_ack_sec") is not None):
+            rows.append((anchor, ch))
+    rows.sort(key=lambda x: x[0])
+
+    def agg(sel):
+        b: dict[str, list[float]] = {}
+        for _, ch in sel:
+            for hop, v in (ch.get("lags_sec") or {}).items():
+                b.setdefault(hop, []).append(v)
+            if ch.get("intent_to_ack_sec") is not None:
+                b.setdefault("intent->exchange_ack", []).append(ch["intent_to_ack_sec"])
+        return {hop: {"n": len(v), "p50": _pct(v, 0.5), "p95": _pct(v, 0.95), "max": round(max(v), 3)}
+                for hop, v in b.items() if v}
+    since = [r for r in rows if since_process_boot_ts and r[0] >= since_process_boot_ts]
+    return {"status": "OK" if rows else "EMPTY_LIVE_OFF", "last_n": last_n, f"last{last_n}": agg(rows[-last_n:]), "last_n_chains": len(rows[-last_n:]),
+            "since_process_boot_ts": since_process_boot_ts, "since_process_boot": agg(since), "since_process_boot_chains": len(since)}
 
 
 def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mode: str,

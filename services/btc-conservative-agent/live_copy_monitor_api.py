@@ -18,6 +18,8 @@ import live_monitor_routes as lmr
 
 blueprint = Blueprint("live_copy_monitor", __name__)
 _CTX: dict = {"provider": None, "authorize": None}
+# Process boot (module import at bot startup) = start of the running revision for hop windows.
+_PROCESS_BOOT_TS = time.time()
 
 ENTRY_TYPES = ("ORDER_SENT", "ORDER_PLACED", "ORDER_AMENDED", "ORDER_CANCELLED",
                "ORDER_FILLED", "ORDER_REJECTED", "INTENT_REJECTED")
@@ -53,7 +55,7 @@ def _analysis(ctx: dict, now: float) -> dict:
     chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
     known = list((ctx.get("website") or {}).get("armed_accounts") or [])
     gaps = lcm.detect_gaps(chains, ctx.get("paper_twins") or {}, now=now, known_accounts=known)
-    lags = lcm.lag_stats(chains, since_ts=now - _window_sec())
+    lags = lcm.lag_stats(chains, since_ts=now - _window_sec(), since_process_boot_ts=ctx.get("boot_ts") or _PROCESS_BOOT_TS)
     return {"chains": chains, "gaps": gaps, "lags": lags}
 
 
