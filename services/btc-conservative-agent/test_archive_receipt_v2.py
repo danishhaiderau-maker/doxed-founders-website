@@ -194,3 +194,57 @@ def test_restore_test_receipt_never_overwrites_the_sync_receipts_amber_state(tmp
     failing = r.receipt(kind="restore_test", finished_ts=r.now - 5, restore_test={"checked": 20, "ok": 0, "bad": 20, "missing": 0, "passed": False})
     assert r.post(failing).status_code == 200
     assert mc.archive_receipt(r.stored(), now=r.now)["status"] == "RED"          # a failed restore test is RED
+
+
+def test_failure_receipts_are_accepted_and_red_empty_epoch_archive_and_total_bucket_loss(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    empty = r.receipt(ok=False, state_keys=0, r2_objects=0, finished_ts=r.now - 100,
+                      restore_test={"checked": 0, "ok": 0, "bad": 0, "missing": 0, "passed": False})
+    resp = r.post(empty)
+    assert resp.status_code == 200, resp.get_json()
+    out = mc.archive_receipt(r.stored(), now=r.now)
+    assert out["status"] == "RED" and out["alert"] is True
+    assert any("0 objects" in x for x in out["reasons"]) and any("ok=false" in x for x in out["reasons"])
+    loss = r.receipt(ok=False, state_keys=426780, r2_objects=0, missing=426780, finished_ts=r.now - 50,
+                     restore_test={"checked": 23, "ok": 0, "bad": 0, "missing": 23, "passed": False})
+    assert r.post(loss).status_code == 200
+    out = mc.archive_receipt(r.stored(), now=r.now)
+    assert out["status"] == "RED" and any("restore test failed" in x for x in out["reasons"])
+    assert not any("errors=0" in x for x in out["reasons"])               # misleading text is gone
+
+
+def test_plausibility_rules_still_apply_when_ok_is_true_and_types_always(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    assert r.post(r.receipt(ok=True, r2_objects=0, state_keys=0)).status_code == 422
+    assert r.post(r.receipt(ok=True, restore_test={"checked": 0, "bad": 0, "missing": 0})).status_code == 422
+    # even a failure receipt must have valid types, schema, host, pin, finished_ts and checked <= 1000
+    for patch in (dict(ok=False, r2_objects=-1), dict(ok=False, r2_objects="0"), dict(ok="no"),
+                  dict(ok=False, schema="x"), dict(ok=False, host=""), dict(ok=False, keep_manifest_sha256="0" * 64),
+                  dict(ok=False, finished_ts=r.now - 9 * 3600),
+                  dict(ok=False, restore_test={"checked": 5000, "bad": 0, "missing": 0})):
+        assert r.post(r.receipt(**patch)).status_code == 422, patch
+
+
+def test_receipt_older_than_72h_is_red_and_36_to_72h_is_amber():
+    base = _r(finished_ts=NOW - 40 * 3600)
+    assert mc.archive_receipt(base, now=NOW)["status"] == "AMBER"
+    old = mc.archive_receipt(_r(finished_ts=NOW - 73 * 3600), now=NOW)
+    assert old["status"] == "RED" and any("2+ nights" in x for x in old["reasons"])
+
+
+def test_401_503_attempts_are_logged_without_the_token_and_the_log_is_capped(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    r.post(r.receipt(), token="SECRET-WRONG-TOKEN", headers={"X-Bot-Admin-Token": "ADMIN-SECRET"})
+    monkeypatch.delenv("R2_RECEIPT_TOKEN")
+    r.post(r.receipt(), token="SECRET-2")
+    log = r.log()
+    assert [e["status"] for e in log] == [401, 503] and not any(e["accepted"] for e in log)
+    text = (tmp_path / "archive_receipts.jsonl").read_text()
+    for secret in ("SECRET-WRONG-TOKEN", "ADMIN-SECRET", "SECRET-2", "r2tok"):
+        assert secret not in text
+    assert log[0]["had_token_header"] is True and log[0]["had_admin_header"] is True
+    monkeypatch.setattr(r.bot, "_ARCHIVE_RECEIPT_LOG_MAX_BYTES", 500)
+    for _ in range(20):
+        r.bot._archive_receipt_log({"received_ts": 1, "accepted": False, "status": 401, "problems": ["unauthorized"]})
+    assert (tmp_path / "archive_receipts.jsonl.1").exists()
+    assert (tmp_path / "archive_receipts.jsonl").stat().st_size < 2000

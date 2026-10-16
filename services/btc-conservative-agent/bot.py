@@ -47727,9 +47727,19 @@ def _r2_keep_pin_sha256() -> str:
                                      sort_keys=True).encode()).hexdigest()
 
 
+_ARCHIVE_RECEIPT_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _archive_receipt_log(entry: dict) -> None:
+    """Append-only trail; rotated to ``archive_receipts.jsonl.1`` (one generation) past 2 MiB so a flood of
+    unauthenticated attempts cannot fill the volume. Never records a token."""
     try:
         path = _data_sync_volume_root() / _ARCHIVE_RECEIPT_LOG
+        try:
+            if path.stat().st_size > _ARCHIVE_RECEIPT_LOG_MAX_BYTES:
+                path.replace(path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
             fh.flush()
@@ -47743,13 +47753,23 @@ def _int_field(v):
 
 
 def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tuple[list, str]:
-    """Return (problems, kind). kind is "sync" or "restore_test"."""
+    """Return (problems, kind). kind is "sync" or "restore_test".
+
+    Plausibility rules (r2_objects > 0, 0 < restore_test.checked <= min(1000, r2_objects), state_keys >= r2_objects)
+    apply ONLY to ok:true receipts. A failure receipt (ok:false: empty epoch-archive/, total bucket loss) is accepted
+    with r2_objects >= 0 and checked >= 0 as long as schema, host, pin, finished_ts and types are valid, and the
+    monitor shows it RED. Never make the monitor unable to hear about a failure.
+    """
     problems: list = []
     kind = raw.get("kind") or "sync"
     if kind not in ("sync", "restore_test"):
         problems.append("kind must be sync or restore_test")
     if raw.get("schema") != _ARCHIVE_RECEIPT_SCHEMA:
         problems.append(f"schema must be {_ARCHIVE_RECEIPT_SCHEMA}")
+    ok = raw.get("ok")
+    if not isinstance(ok, bool):
+        problems.append("ok must be a boolean")
+    healthy = ok is True
     host = raw.get("host")
     if not isinstance(host, str) or not host.strip() or len(host) > 64:
         problems.append("host required")
@@ -47765,26 +47785,34 @@ def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tup
         if isinstance(prev, (int, float)) and ts <= prev:
             problems.append("finished_ts not newer than the stored receipt")
     rt = raw.get("restore_test")
+    checked = None
     if not isinstance(rt, dict):
         problems.append("restore_test required")
     else:
         checked = _int_field(rt.get("checked"))
-        if checked is None or not (0 < checked <= 1000):
+        if checked is None:
+            problems.append("restore_test.checked must be a non-negative int")
+        elif healthy and not (0 < checked <= 1000):
             problems.append("restore_test.checked must be 1..1000")
+        elif checked > 1000:
+            problems.append("restore_test.checked must be <= 1000")
         for k in ("bad", "missing"):
             if _int_field(rt.get(k)) is None:
                 problems.append(f"restore_test.{k} must be a non-negative int")
     if kind == "sync":
         state_keys, r2_objects = _int_field(raw.get("state_keys")), _int_field(raw.get("r2_objects"))
-        if r2_objects is None or r2_objects <= 0:
+        if r2_objects is None:
+            problems.append("r2_objects must be a non-negative int")
+        elif healthy and r2_objects <= 0:
             problems.append("r2_objects must be > 0")
-        if state_keys is None or (r2_objects is not None and state_keys < r2_objects):
+        if state_keys is None:
+            problems.append("state_keys must be a non-negative int")
+        elif healthy and r2_objects is not None and state_keys < r2_objects:
             problems.append("state_keys must be >= r2_objects")
         for k in ("missing", "quarantined", "quarantine_pending", "outside_keep", "errors"):
             if _int_field(raw.get(k)) is None:
                 problems.append(f"{k} must be a non-negative int")
-        checked = _int_field((rt or {}).get("checked")) if isinstance(rt, dict) else None
-        if checked is not None and r2_objects is not None and checked > r2_objects:
+        if healthy and checked is not None and r2_objects is not None and checked > r2_objects:
             problems.append("restore_test.checked exceeds r2_objects")
     return problems, kind
 
@@ -47796,8 +47824,15 @@ def monitor_archive_receipt_post():
     the stored sync receipt's ``restore_test`` (never its counts / quarantine / AMBER state)."""
     token = os.environ.get("R2_RECEIPT_TOKEN", "")
     if not token:
+        _archive_receipt_log({"received_ts": time.time(), "accepted": False, "status": 503,
+                              "problems": ["R2_RECEIPT_TOKEN not configured"], "remote": _client_ip()})
         return jsonify({"ok": False, "error": "R2_RECEIPT_TOKEN not configured"}), 503
     if not hmac.compare_digest(str(request.headers.get("X-R2-Receipt-Token", "")).encode(), token.encode()):
+        # never record the presented token; only that the route was hit without the right one
+        _archive_receipt_log({"received_ts": time.time(), "accepted": False, "status": 401,
+                              "problems": ["unauthorized"], "remote": _client_ip(),
+                              "had_token_header": bool(request.headers.get("X-R2-Receipt-Token")),
+                              "had_admin_header": bool(request.headers.get("X-Bot-Admin-Token"))})
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     if (request.content_length or 0) > _ARCHIVE_RECEIPT_MAX_BYTES:
         return jsonify({"ok": False, "error": "too large"}), 413
@@ -47809,7 +47844,7 @@ def monitor_archive_receipt_post():
         stored = _load_archive_receipt() or {}
         problems, kind = _validate_archive_receipt(raw, now, stored)
         if problems:
-            _archive_receipt_log({"received_ts": now, "accepted": False, "problems": problems,
+            _archive_receipt_log({"received_ts": now, "accepted": False, "status": 422, "problems": problems,
                                   "receipt": {k: raw.get(k) for k in ("schema", "kind", "host", "finished_ts")}})
             return jsonify({"ok": False, "error": "invalid receipt", "problems": problems}), 422
         if kind == "restore_test":
