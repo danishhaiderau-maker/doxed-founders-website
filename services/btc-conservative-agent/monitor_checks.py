@@ -252,6 +252,29 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
     if (receipt.get("errors") or 0) > 0 or receipt.get("ok") is False:
         red = True
         reasons.append(f"archive errors={receipt.get('errors')}")
+    # HM (c): the 13 Oct wipe left state.json listing 426,780 keys vs 5,935 objects and the receipt still said ok.
+    # Receipt v2 reports object / missing / quarantined counts; judge them (the restore_test used to be only echoed).
+    missing = _f(receipt.get("missing"))
+    if missing is not None and missing > 0:
+        red = True
+        reasons.append(f"{int(missing)} state key(s) have no R2 object (state_keys={receipt.get('state_keys')}, "
+                       f"r2_objects={receipt.get('r2_objects')})")
+    pending = _f(receipt.get("quarantine_pending"))
+    if pending is not None and pending > 0:
+        amber = True
+        reasons.append(f"{int(pending)} pre-wipe object(s) awaiting quarantine in R2")
+    rt = receipt.get("restore_test")
+    if isinstance(rt, Mapping):
+        bad, miss, checked = _f(rt.get("bad")) or 0, _f(rt.get("missing")) or 0, _f(rt.get("checked"))
+        if bad > 0 or miss > 0:
+            red = True
+            reasons.append(f"restore test failed: bad={int(bad)} missing={int(miss)} of {int(checked or 0)} sampled")
+        elif checked == 0 and not rt.get("passed"):
+            red = True
+            reasons.append("restore test sampled 0 objects (empty pinned set is not proof of a restorable archive)")
+    elif receipt.get("schema") == "r2_backup_receipt_v2":
+        red = True
+        reasons.append("receipt v2 carries no restore_test")
     free = _f(receipt.get("disk_free_pct"))
     if free is not None and free < disk_free_pct_min:
         red = True
@@ -259,7 +282,9 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
     return _result("archive-receipt", reasons, red=red, amber=amber, alert_on_amber=True, age_sec=age,
                    receipt={k: receipt.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded",
                                                        "errors", "disk_free_pct", "disk_free_gb", "finished_ts",
-                                                       "restore_test", "host") if k in receipt})
+                                                       "restore_test", "host", "schema", "state_keys", "r2_objects", "missing",
+                                                       "quarantined", "quarantine_pending", "outside_keep",
+                                                       "keep_manifest_sha256") if k in receipt})
 
 
 CLOCK_AMBER_MS = 50.0
