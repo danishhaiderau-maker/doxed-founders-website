@@ -574,3 +574,4 @@ test_http_emergency_admission.py
 test_lifecycle_retention.py
 test_relay_snapshot_lock_scope.py
 test_tile_integrity.py
+test_archive_receipt_v2.py

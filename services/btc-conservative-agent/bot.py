@@ -33964,6 +33964,10 @@ def _emergency_api_guard():
     # own HMAC in the handler (capability was wrongly admin-gated: 401).
     if is_signed_executor_post:
         return None
+    # HM #678 B2: the laptop R2 receipt authenticates with its OWN token (R2_RECEIPT_TOKEN, checked in the
+    # handler); the admin token is deliberately not accepted for this route.
+    if method == "POST" and path == _ARCHIVE_RECEIPT_ROUTE:
+        return None
     if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
         if _admin_authed_strict():
             return None
@@ -47433,6 +47437,12 @@ def monitor_exit_latency():
 # ---------------------------------------------------------------------------
 _ARCHIVE_RECEIPT_FILE = "archive_receipt.json"
 _ARCHIVE_RECEIPT_MAX_BYTES = 16384
+_ARCHIVE_RECEIPT_ROUTE = "/api/monitor/archive/receipt"
+_ARCHIVE_RECEIPT_LOG = "archive_receipts.jsonl"      # append-only: every accepted/rejected POST
+_ARCHIVE_RECEIPT_MAX_AGE_SEC = 6 * 3600
+_ARCHIVE_RECEIPT_MAX_FUTURE_SEC = 300
+_ARCHIVE_RECEIPT_SCHEMA = "r2_backup_receipt_v2"
+_archive_receipt_lock = threading.Lock()
 
 
 def _archive_receipt_path():
@@ -47730,26 +47740,157 @@ def monitor_check_archive():
     return _monitor_single_check("archive-receipt")
 
 
-@app.route('/api/monitor/archive/receipt', methods=["POST"])
+def _r2_keep_pin_sha256() -> str:
+    """Fly's pin of the R2 keep set: sha256 of {"r2_keep_prefixes": sorted(...)} from keep_manifest, the same
+    digest scripts/r2_backup/r2_backup.load_keep computes from the prefixes the laptop pinned."""
+    import keep_manifest as _km
+    return hashlib.sha256(json.dumps({"r2_keep_prefixes": sorted(set(_km.R2_KEEP_PREFIXES))},
+                                     sort_keys=True).encode()).hexdigest()
+
+
+_ARCHIVE_RECEIPT_LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _archive_receipt_log(entry: dict) -> None:
+    """Append-only trail; rotated to ``archive_receipts.jsonl.1`` (one generation) past 2 MiB so a flood of
+    unauthenticated attempts cannot fill the volume. Never records a token."""
+    try:
+        path = _data_sync_volume_root() / _ARCHIVE_RECEIPT_LOG
+        try:
+            if path.stat().st_size > _ARCHIVE_RECEIPT_LOG_MAX_BYTES:
+                path.replace(path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:  # noqa: BLE001 - the audit trail must not break the route
+        logger.warning("[ARCHIVE RECEIPT] append-only log write failed")
+
+
+def _int_field(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tuple[list, str]:
+    """Return (problems, kind). kind is "sync" or "restore_test".
+
+    Plausibility rules (r2_objects > 0, 0 < restore_test.checked <= min(1000, r2_objects), state_keys >= r2_objects)
+    apply ONLY to ok:true receipts. A failure receipt (ok:false: empty epoch-archive/, total bucket loss) is accepted
+    with r2_objects >= 0 and checked >= 0 as long as schema, host, pin, finished_ts and types are valid, and the
+    monitor shows it RED. Never make the monitor unable to hear about a failure.
+    """
+    problems: list = []
+    kind = raw.get("kind") or "sync"
+    if kind not in ("sync", "restore_test"):
+        problems.append("kind must be sync or restore_test")
+    if raw.get("schema") != _ARCHIVE_RECEIPT_SCHEMA:
+        problems.append(f"schema must be {_ARCHIVE_RECEIPT_SCHEMA}")
+    ok = raw.get("ok")
+    if not isinstance(ok, bool):
+        problems.append("ok must be a boolean")
+    healthy = ok is True
+    host = raw.get("host")
+    if not isinstance(host, str) or not host.strip() or len(host) > 64:
+        problems.append("host required")
+    if raw.get("keep_manifest_sha256") != _r2_keep_pin_sha256():
+        problems.append("keep_manifest_sha256 does not equal Fly's pinned R2 keep set")
+    ts = raw.get("finished_ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        problems.append("finished_ts required")
+    else:
+        if now - ts > _ARCHIVE_RECEIPT_MAX_AGE_SEC or ts - now > _ARCHIVE_RECEIPT_MAX_FUTURE_SEC:
+            problems.append("finished_ts not recent")
+        prev = (stored or {}).get("finished_ts" if kind == "sync" else "restore_test_finished_ts")
+        if isinstance(prev, (int, float)) and ts <= prev:
+            problems.append("finished_ts not newer than the stored receipt")
+    rt = raw.get("restore_test")
+    checked = None
+    if not isinstance(rt, dict):
+        problems.append("restore_test required")
+    else:
+        checked = _int_field(rt.get("checked"))
+        if checked is None:
+            problems.append("restore_test.checked must be a non-negative int")
+        elif healthy and not (0 < checked <= 1000):
+            problems.append("restore_test.checked must be 1..1000")
+        elif checked > 1000:
+            problems.append("restore_test.checked must be <= 1000")
+        for k in ("bad", "missing"):
+            if _int_field(rt.get(k)) is None:
+                problems.append(f"restore_test.{k} must be a non-negative int")
+    if kind == "sync":
+        state_keys, r2_objects = _int_field(raw.get("state_keys")), _int_field(raw.get("r2_objects"))
+        if r2_objects is None:
+            problems.append("r2_objects must be a non-negative int")
+        elif healthy and r2_objects <= 0:
+            problems.append("r2_objects must be > 0")
+        if state_keys is None:
+            problems.append("state_keys must be a non-negative int")
+        elif healthy and r2_objects is not None and state_keys < r2_objects:
+            problems.append("state_keys must be >= r2_objects")
+        for k in ("missing", "quarantined", "quarantine_pending", "outside_keep", "errors"):
+            if _int_field(raw.get(k)) is None:
+                problems.append(f"{k} must be a non-negative int")
+        if healthy and checked is not None and r2_objects is not None and checked > r2_objects:
+            problems.append("restore_test.checked exceeds r2_objects")
+    return problems, kind
+
+
+@app.route('/api/monitor/archive/receipt', methods=["POST"])  # literal: the route-manifest test parses decorators; == _ARCHIVE_RECEIPT_ROUTE
 def monitor_archive_receipt_post():
-    """Admin-only (middleware): laptop R2 backup job pushes {bucket, files, bytes_*, errors, disk_free_pct, finished_ts}."""
+    """Laptop R2 backup job pushes a receipt. Auth: dedicated R2_RECEIPT_TOKEN (X-R2-Receipt-Token), NOT the admin
+    token. Validated (HM #678 B2), appended to archive_receipts.jsonl, and a restore-test receipt only updates
+    the stored sync receipt's ``restore_test`` (never its counts / quarantine / AMBER state)."""
+    token = os.environ.get("R2_RECEIPT_TOKEN", "")
+    if not token:
+        _archive_receipt_log({"received_ts": time.time(), "accepted": False, "status": 503,
+                              "problems": ["R2_RECEIPT_TOKEN not configured"], "remote": _client_ip()})
+        return jsonify({"ok": False, "error": "R2_RECEIPT_TOKEN not configured"}), 503
+    if not hmac.compare_digest(str(request.headers.get("X-R2-Receipt-Token", "")).encode(), token.encode()):
+        # never record the presented token; only that the route was hit without the right one
+        _archive_receipt_log({"received_ts": time.time(), "accepted": False, "status": 401,
+                              "problems": ["unauthorized"], "remote": _client_ip(),
+                              "had_token_header": bool(request.headers.get("X-R2-Receipt-Token")),
+                              "had_admin_header": bool(request.headers.get("X-Bot-Admin-Token"))})
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     if (request.content_length or 0) > _ARCHIVE_RECEIPT_MAX_BYTES:
         return jsonify({"ok": False, "error": "too large"}), 413
     raw = request.get_json(silent=True)
     if not isinstance(raw, dict):
         return jsonify({"ok": False, "error": "json object required"}), 400
-    keep = {k: raw.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded", "errors", "ok",
-                                    "disk_free_pct", "disk_free_gb", "finished_ts", "restore_test", "host",
-                                    "tape_1s_oldest_ts") if k in raw}
-    keep["received_ts"] = time.time()
-    try:
-        path = _archive_receipt_path()
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(keep, default=str), encoding="utf-8")
-        tmp.replace(path)
-    except Exception as exc:
-        return jsonify({"ok": False, "error": type(exc).__name__}), 500
-    return jsonify({"ok": True})
+    now = time.time()
+    with _archive_receipt_lock:
+        stored = _load_archive_receipt() or {}
+        problems, kind = _validate_archive_receipt(raw, now, stored)
+        if problems:
+            _archive_receipt_log({"received_ts": now, "accepted": False, "status": 422, "problems": problems,
+                                  "receipt": {k: raw.get(k) for k in ("schema", "kind", "host", "finished_ts")}})
+            return jsonify({"ok": False, "error": "invalid receipt", "problems": problems}), 422
+        if kind == "restore_test":
+            merged = dict(stored)
+            merged["restore_test"] = raw["restore_test"]
+            merged["restore_test_finished_ts"] = raw["finished_ts"]
+            merged["restore_test_host"] = raw["host"]
+            merged["received_ts"] = now
+            keep = merged
+        else:
+            fields = ("bucket", "files", "bytes_source", "bytes_uploaded", "errors", "ok", "disk_free_pct",
+                      "disk_free_gb", "finished_ts", "restore_test", "host", "tape_1s_oldest_ts", "schema", "kind",
+                      "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending", "outside_keep",
+                      "keep_manifest_sha256")
+            keep = {k: raw.get(k) for k in fields if k in raw}
+            keep["received_ts"] = now
+        _archive_receipt_log({"received_ts": now, "accepted": True, "kind": kind, "receipt": raw})
+        try:
+            path = _archive_receipt_path()
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(keep, default=str), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": type(exc).__name__}), 500
+    return jsonify({"ok": True, "kind": kind})
 
 
 # ---------------------------------------------------------------------------

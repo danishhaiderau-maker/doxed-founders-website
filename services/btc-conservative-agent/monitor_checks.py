@@ -239,7 +239,7 @@ def latency_guard(slo: Mapping[str, Any], per_tile: Mapping[str, Any],
 
 
 def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_sec: float = 36 * 3600,
-                    disk_free_pct_min: float = 10.0) -> dict:
+                    red_age_sec: float = 72 * 3600, disk_free_pct_min: float = 10.0) -> dict:
     """Laptop disk + cold archive (R2) receipt pushed by the laptop backup job."""
     if not receipt:
         return _result("archive-receipt", ["no R2 backup / disk receipt received yet"], amber=True, alert_on_amber=True)
@@ -247,11 +247,55 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
     ts = _f(receipt.get("finished_ts") or receipt.get("ts"))
     age = (now - ts) if ts else None
     if age is None or age > max_age_sec:
-        amber = True
-        reasons.append(f"last archive {None if age is None else round(age / 3600, 1)} h ago (> {max_age_sec / 3600:g} h)")
-    if (receipt.get("errors") or 0) > 0 or receipt.get("ok") is False:
+        shown = None if age is None else round(age / 3600, 1)
+        if age is not None and age > red_age_sec:
+            red = True          # two missed nights: the backup is not running
+            reasons.append(f"last archive {shown} h ago (> {red_age_sec / 3600:g} h): no sync receipt for 2+ nights")
+        else:
+            amber = True
+            reasons.append(f"last archive {shown} h ago (> {max_age_sec / 3600:g} h)")
+    errors = _f(receipt.get("errors")) or 0
+    if errors > 0:
         red = True
-        reasons.append(f"archive errors={receipt.get('errors')}")
+        reasons.append(f"archive errors={int(errors)}")
+    explicit_fail = receipt.get("ok") is False
+    # HM (c): the 13 Oct wipe left state.json listing 426,780 keys vs 5,935 objects and the receipt still said ok.
+    # Receipt v2 reports object / missing / quarantined counts; judge them (the restore_test used to be only echoed).
+    missing = _f(receipt.get("missing"))
+    if missing is not None and missing > 0:
+        red = True
+        reasons.append(f"{int(missing)} state key(s) have no R2 object (state_keys={receipt.get('state_keys')}, "
+                       f"r2_objects={receipt.get('r2_objects')})")
+    pending = _f(receipt.get("quarantine_pending"))
+    if pending is not None and pending > 0:
+        amber = True
+        reasons.append(f"{int(pending)} pre-wipe object(s) awaiting quarantine in R2")
+    r2_objects = _f(receipt.get("r2_objects"))
+    if receipt.get("schema") == "r2_backup_receipt_v2" and r2_objects is not None and r2_objects <= 0:
+        red = True
+        reasons.append("R2 holds 0 objects under the pinned keep prefixes (empty archive or total bucket loss)")
+    outside = _f(receipt.get("outside_keep"))
+    if outside is not None and outside > 0:
+        amber = True
+        reasons.append(f"{int(outside)} R2 object(s) outside the keep manifest (not pinned, not quarantined)")
+    rt = receipt.get("restore_test")
+    if isinstance(rt, Mapping):
+        bad, miss, checked = _f(rt.get("bad")) or 0, _f(rt.get("missing")) or 0, _f(rt.get("checked"))
+        if bad > 0 or miss > 0:
+            red = True
+            reasons.append(f"restore test failed: bad={int(bad)} missing={int(miss)} of {int(checked or 0)} sampled")
+        elif checked == 0 and not rt.get("passed"):
+            red = True
+            reasons.append("restore test sampled 0 objects (empty pinned set is not proof of a restorable archive)")
+    elif receipt.get("schema") == "r2_backup_receipt_v2":
+        red = True
+        reasons.append("receipt v2 carries no restore_test")
+    if explicit_fail:
+        red = True
+        if not reasons or all(r.startswith("last archive") for r in reasons):
+            reasons.append("backup job reported ok=false (no further detail in the receipt)")
+        else:
+            reasons.append("backup job reported ok=false")
     free = _f(receipt.get("disk_free_pct"))
     if free is not None and free < disk_free_pct_min:
         red = True
@@ -259,7 +303,9 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
     return _result("archive-receipt", reasons, red=red, amber=amber, alert_on_amber=True, age_sec=age,
                    receipt={k: receipt.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded",
                                                        "errors", "disk_free_pct", "disk_free_gb", "finished_ts",
-                                                       "restore_test", "host") if k in receipt})
+                                                       "restore_test", "host", "schema", "state_keys", "r2_objects", "missing",
+                                                       "quarantined", "quarantine_pending", "outside_keep",
+                                                       "keep_manifest_sha256") if k in receipt})
 
 
 def emergency_admission(http_handlers: Mapping[str, Any] | None, *, now: float,
