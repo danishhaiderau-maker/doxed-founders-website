@@ -445,7 +445,7 @@ def _unlink(path: str) -> None:
 
 
 def execute(plan_doc: dict, *, receipts_dir: Path, scope: str, cert_sha8: str,
-            unlink: Callable[[str], None] = _unlink) -> dict:
+            unlink: Callable[[str], None] = _unlink, laptop_reset_marker: bool | None = None) -> dict:
     started = time.time()
     deleted, freed, skipped = [], 0, []
     for row in plan_doc["candidates"]:
@@ -478,6 +478,14 @@ def execute(plan_doc: dict, *, receipts_dir: Path, scope: str, cert_sha8: str,
                "skipped": skipped[:200], "skipped_count": len(skipped), "by_root": plan_doc["by_root"],
                "kept_by_reason": plan_doc["kept_by_reason"], "deleted_listing": str(listing)}
     (out_dir / f"receipt-{scope}-{stamp}.json").write_text(json.dumps(receipt, indent=1, sort_keys=True), "utf-8")
+    # HM (b): a Fly-side wipe restarts/archives the segment numbering. Leave a "laptop reset required"
+    # marker next to the receipts; the shipper's sync verdict stays RED until the laptop reports the new
+    # fresh-start epoch (research_segment_epoch.sync_verdict).
+    if laptop_reset_marker if laptop_reset_marker is not None else scope == "fly":
+        import research_segment_epoch as _rse
+        receipt["laptop_reset_marker"] = str(_rse.write_reset_marker(
+            receipts_dir, epoch_id=plan_doc["epoch_id"], plan_sha256=plan_doc["plan_sha256"], scope=scope))
+        (out_dir / f"receipt-{scope}-{stamp}.json").write_text(json.dumps(receipt, indent=1, sort_keys=True), "utf-8")
     with open(receipts_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps({k: v for k, v in receipt.items() if k not in ("skipped", "by_root", "kept_by_reason")},
                                 sort_keys=True) + "\n")

@@ -173,7 +173,7 @@ def read_segment(raw: bytes, expected_members: int) -> list[bytes]:
 def build_manifest(
     *, prefix: str, seq: int, prev_manifest_sha256: str, segment_raw: bytes,
     members: list[dict], source_git_rev: str, collection_epoch_id: str,
-    window_start: float, window_end: float,
+    window_start: float, window_end: float, fresh_start_epoch_id: str = "",
 ) -> dict:
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -191,6 +191,10 @@ def build_manifest(
         "window_start": round(float(window_start), 3),
         "window_end": round(float(window_end), 3),
     }
+    if fresh_start_epoch_id:
+        # HM (b): a wipe must be visible in the manifest. Omitted when no fresh-start epoch is stamped,
+        # so every manifest written before the first stamp is byte-identical to the old format.
+        manifest["fresh_start_epoch_id"] = str(fresh_start_epoch_id)
     validate_manifest(manifest, prefix=prefix, expected_seq=seq)
     return manifest
 
