@@ -282,6 +282,14 @@ def as_bool(value, default=None):
     return default
 
 
+def is_excluded(value) -> bool:
+    """fresh_data_excluded is a flag or a reason string ("FORCED_NO_BOOK"): any non-empty value except an
+    explicit false/0 excludes the row."""
+    if value is None or value == "":
+        return False
+    return as_bool(value, True) is not False
+
+
 def as_number(value):
     """Number or None (CSV reload gives "1" / "1.5" / ""); bools are not numbers here."""
     if value is None or isinstance(value, bool):
@@ -293,6 +301,11 @@ def as_number(value):
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
+# Terminal exit statuses of a fully book-priced close: bot rows say PAPER_FILL, DISLOC ledger rows say FILLED or
+# FILLED_IN_PARTS (multi-leg / TP1-style). FORCED_NO_BOOK and PAPER_FILL_FORCED are never fresh.
+FRESH_EXIT_STATUSES = frozenset({"PAPER_FILL", "FILLED", "FILLED_IN_PARTS"})
+
+
 def row_fresh_strict(row) -> bool:
     """A closed paper row is fresh only if every pricing fact says so, whatever a stored flag claims:
     exit_status PAPER_FILL (not FORCED_NO_BOOK / PAPER_FILL_FORCED), a v1 fill_model_version, an allowed
@@ -300,11 +313,11 @@ def row_fresh_strict(row) -> bool:
     if not isinstance(row, dict):
         return False
     version = as_number(row.get("fill_model_version"))
-    if str(row.get("exit_status") or "") != "PAPER_FILL" or version is None or version < 1:
+    if str(row.get("exit_status") or "") not in FRESH_EXIT_STATUSES or version is None or version < 1:
         return False
     if str(row.get("fill_model") or "") not in ALLOWED_FILL_MODELS:
         return False
-    if as_bool(row.get("fresh_data_excluded"), False) or as_bool(row.get("legacy_pricing"), False):
+    if is_excluded(row.get("fresh_data_excluded")) or as_bool(row.get("legacy_pricing"), False):
         return False
     if row.get("fill_model_tag") == LEGACY_TAG:
         return False
@@ -318,7 +331,7 @@ def row_fresh_eligible(row) -> bool:
     if row_before_epoch(row):
         return False
     row = tag_legacy(row)
-    if as_bool(row.get("fresh_data_excluded"), False) or row.get("exit_status") == "FORCED_NO_BOOK" \
+    if is_excluded(row.get("fresh_data_excluded")) or row.get("exit_status") == "FORCED_NO_BOOK" \
             or row.get("fill_model_tag") == LEGACY_TAG or as_bool(row.get("fresh_eligible")) is False:
         return False
     lane = row.get("research_lane") or row.get("lane") or row.get("pathway")

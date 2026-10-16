@@ -1,6 +1,7 @@
 """Read-only /api/monitor/reconcile payload (Strategist dashboard spec S1), Fly side only.
 
-Fly can count its own closed rows per tile and read the archive restore-test receipt. The mirror and the
+Fly counts only its in-memory closed rows (the bot's trades list for the epoch, never the on-disk ledgers or DISLOC
+tiles 6/7); that is what fly_n means. Fly can count its own closed rows per tile and read the archive restore-test receipt. The mirror and the
 analyzer live on other machines, so their counts are reported as null with an explicit reason: this route
 never invents parity and never reaches out to another host. ok is None (unknown) until a source reports.
 """
@@ -47,4 +48,5 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             "sources": {"fly": "OK", "mirror": unavailable, "analyzer": unavailable},
             "per_tile": per_tile, "tolerance": dict(TOLERANCE),
             "archive_restore": archive_restore(receipt), "stream_gaps": None,
+            "fly_n_basis": "FLY_IN_MEMORY_CLOSED_ROWS_ONLY (bot trades list for the epoch; not the on-disk ledgers, not DISLOC tiles 6/7)",
             "note": "Fly-side counts only; mirror/analyzer parity needs those hosts to report (ok stays null, never assumed)."}

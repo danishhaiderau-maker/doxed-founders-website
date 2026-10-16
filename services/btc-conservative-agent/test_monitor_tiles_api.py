@@ -456,19 +456,41 @@ def test_public_state_exposes_fill_provenance_but_still_strips_strategy_fields(b
     assert "exit_reason" not in out and "research_lane" not in out and "ai_band" not in out
 
 
-def test_fresh_only_also_filters_tile_6_7_rows_that_are_not_fresh(bot, monkeypatch):
-    def disloc_row(tid, fresh):
-        raw = {"trade_id": tid, "research_lane": GS1, "ts": CUTOFF + 600, "dir": "LONG", "entry": 1.0, "exit": 2.0,
-               "fresh_eligible": fresh, "exit_status": "PAPER_FILL", "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY",
-               "fill_model_version": 1}
-        return mt.tile_trade_row(raw, status="closed", short_names={}, epoch_id=EPOCH, forced_reasons=[])
+def _ledger(tid, **over):
+    """A real DISLOC ledger row shape (disloc_paper_v1, DISLOC_CLOSED) as disloc_engine writes it."""
+    row = {"schema": "disloc_paper_v1", "event": "DISLOC_CLOSED", "trade_id": tid, "research_lane": DISLOC_BASE,
+           "side": "LONG", "fill_price": 82263.0, "fill_ts": CUTOFF + 600, "exit_ts": CUTOFF + 660,
+           "exit_price": 82247.0, "exit_reason": "TIME_60S", "exit_status": "FILLED", "pnl_bp_vs_touch": -1.945,
+           "net_bp_taker_2p8": -4.0156, "signal_ts": CUTOFF + 598, "order_ts": CUTOFF + 599,
+           "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
+           "delay_source": "default_until_n10", "depth_snapshot_signal": {"s": 1}, "depth_snapshot_fill": {"s": 2}}
+    row.update(over)
+    return row
 
-    rows = [disloc_row("d-fresh", True), disloc_row("d-stale", False)]
-    monkeypatch.setattr(bot, "_disloc_tile_trade_rows", lambda lane, **kw: list(rows) if lane == GS1 else [])
+
+DISLOC_BASE = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+
+
+def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot, monkeypatch):
+    import disloc_engine as dsl
+    ledger = [
+        _ledger("d-fresh"),
+        _ledger("d-parts", exit_status="FILLED_IN_PARTS", exit_pieces=2),          # multi-leg close stays fresh
+        _ledger("d-forced", exit_status="FORCED_NO_BOOK", fresh_data_excluded="FORCED_NO_BOOK", exit_price=None),
+        _ledger("d-legacy", fill_model="TAKER_AT_BOOK_TOUCH", fill_model_version=None, delay_s=None),
+        _ledger("d-flagged", fresh_data_excluded="MANUAL"),
+    ]
+    real = dsl.tile_trade_rows(ledger, DISLOC_BASE, epoch_id=EPOCH)  # the REAL row shape, not mt.tile_trade_row
+    assert len(real) == 5 and all("pricing" in r for r in real)
+    fresh = {r["trade_id"]: r["pricing"]["fresh_eligible"] for r in real}
+    assert fresh == {"d-fresh": True, "d-parts": True, "d-forced": False, "d-legacy": False, "d-flagged": False}
+    assert real[3]["pricing"]["legacy_pricing"] is True and real[2]["pricing"]["legacy_pricing"] is False
+    monkeypatch.setattr(bot, "_disloc_tile_trade_rows", lambda lane, **kw: list(real) if lane == DISLOC_BASE else [])
     monkeypatch.setattr(bot, "_disloc_epoch_since", lambda: 0.0)
+
     def ids(**q):
-        body = _get(bot, "/api/monitor/tiles/trades", {"X-Bot-Admin-Token": ADMIN}, status="closed", lane=GS1, **q).get_json()
+        body = _get(bot, "/api/monitor/tiles/trades", {"X-Bot-Admin-Token": ADMIN}, status="closed",
+                    lane=DISLOC_BASE, **q).get_json()
         return {r["trade_id"] for r in body["rows"]}
-    assert {"d-fresh", "d-stale"} <= ids()
-    only = ids(fresh_only="1")
-    assert "d-stale" not in only and "d-fresh" in only
+    assert ids() == set(fresh)                       # all rows stay visible without the filter
+    assert ids(fresh_only="1") == {"d-fresh", "d-parts"}  # DISLOC no longer collapses to 0
