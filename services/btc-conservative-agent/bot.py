@@ -48510,6 +48510,9 @@ _probe_generation = [0]
 # One lock guards the generation counter, every cache slot, and the fresh-rebuild timestamps, so
 # "generation unchanged -> write cache" is atomic against _probe_cache_clear_all (HM #676).
 _PROBE_LOCK = threading.Lock()
+# DOC: ?fresh=1 is NOT zero-staleness. It may reuse a payload up to this old (250 ms), so the deploy
+# workflow's strict flat proof can observe state up to 250 ms stale. Emergency POSTs / arm / disarm clear the cache
+# first, so a pre-change state is never served after those complete; any other state change is visible within 250 ms.
 # ?fresh=1 is rate-limited: a rebuild younger than this is reused, so a polling gate (or an abusive
 # client) cannot force a rebuild per request. Emergency/arm/disarm clears the cache, so this never
 # serves a pre-change state.
