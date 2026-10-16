@@ -22,6 +22,12 @@ plan_sha256 with applied_seq <= published). The ``ce-...`` clean-epoch id is nev
 A marker also stays RED while Fly's own ``fresh_start_epoch_id`` still equals ``epoch_before`` (the wipe has not
 re-stamped the epoch yet).
 
+RUNBOOK (#677): the Fly wipe MUST re-stamp ``fresh_start_epoch.json`` (the bot does this on the first start after the
+wipe, via the fresh-start epoch route) or the reset marker stays RED forever, whatever the laptop reports. Order for the
+wipe change: (1) set RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1 in fly.toml, (2) run the Fly wipe, (3) restart so the epoch is
+re-stamped and the shipper rotates to the new prefix, (4) reset the laptop mirror/puller, (5) confirm a beacon received
+after the wipe shows the new prefix/epoch and sync_verdict leaves RED. If step (3) is skipped the marker stays RED.
+
 ``reset_ack_plan_sha256`` (beacon field): the laptop operator sets it AFTER completing the laptop reset (mirror/state
 moved aside, puller re-pointed) by passing the wipe receipt's ``plan_sha256`` to the puller
 (``--reset-ack-plan-sha256`` or ``RESEARCH_SEGMENTS_RESET_ACK_PLAN_SHA256``); the puller echoes it in every beacon.
