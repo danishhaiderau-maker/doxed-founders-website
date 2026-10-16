@@ -5188,12 +5188,19 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
     _leg_trigger_ts = time.time()
     _leg_fill = None
     if float(action.remaining_fraction) > 0 and _is_paper_book_lane(pos):
-        # Partial (TP1) legs are priced by the same shared pricer as every other fill.
-        _leg_fill = _paper_lane_partial_leg(pos, float(action.close_fraction), _leg_trigger_ts)
-        if _leg_fill is not None and _leg_fill.get("status") == "FILLED":
+        # Partial (TP1) legs: same shared pricer, no sleep under position_evaluation_lock (HM B2).
+        _gate, _leg = _tp1_gate(source_pos, action.partial_key, _leg_trigger_ts, direction, float(action.close_fraction))
+        if _gate == "WAIT":
+            return False
+        _leg_trigger_ts = float(_leg.pop("_trigger_ts"))
+        _leg_fill = _leg
+        if _leg_fill.get("status") == "FILLED" and float(_leg_fill.get("price") or 0) > 0:
             fill_px = float(_leg_fill["price"])
         else:
-            pos["fresh_data_excluded"] = True  # unpriced leg: kept for P&L continuity, never fresh data
+            pos["fresh_data_excluded"] = True  # unpriced leg: trigger-price fallback, never fresh data
+        with trade_lock:
+            source_pos.pop("_tp1_pending", None)
+        pos.pop("_tp1_pending", None)
     if action.partial_key is not None:
         pos.setdefault("policy_completed_partials", []).append(action.partial_key)
     close_fraction = float(action.close_fraction)
@@ -5226,6 +5233,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         "leg_trigger_ts": _leg_trigger_ts,
         "leg_fill_ts": (_leg_fill or {}).get("fill_ts"),
         "leg_priced_by": "paper_fill_book10l" if (_leg_fill or {}).get("status") == "FILLED" else None,
+        "leg_fresh_eligible": bool(_leg_fill is None or (_leg_fill or {}).get("status") == "FILLED"),
+        "leg_fallback": ("TRIGGER_PRICE_UNPRICED_LEG" if _leg_fill is not None and _leg_fill.get("status") != "FILLED" else None),
         "leg_provenance": __import__("tile_fill").provenance(_leg_fill) if _leg_fill is not None else None,
     }
     pos.setdefault("partial_exit_receipts", []).append(receipt)
@@ -6944,6 +6953,8 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
     order.setdefault("requested_qty", order.get("qty"))
     res = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
                          signal_ts, delay_s, delay_source)
+    if force and res.get("status") == "REJECT_NO_BOOK":
+        return res  # a forced (immediate) look is not cached: the gate path may still price it from a later book
     order["paper_fill_result"] = res
     return res
 
@@ -6961,25 +6972,48 @@ def _paper_result_as_sim(res: dict) -> dict:
             "evidence_status": "COMPLETE" if ok else "UNKNOWN", "unknown_reason": None if ok else status}
 
 
-def _paper_lane_partial_leg(pos: dict, close_fraction: float, trigger_ts: float):
-    """TP1 / partial leg priced by paper_fill at trigger_ts + delay (bounded wait, same rules as exits)."""
+PAPER_IOC_NO_FILL_SHADOW_FILE = "paper_ioc_no_fill_shadow.jsonl"
+
+
+def _paper_no_fill_shadow_row(order: dict, reason: str) -> dict:
+    """B5: an IOC entry that did not fill leaves a shadow row (never a trade): signal_ts, cap_px, delay and the
+    book snapshots at signal and at the would-be fill second."""
+    res = order.get("paper_fill_result") if isinstance(order.get("paper_fill_result"), dict) else {}
+    return {"event": "PAPER_SHADOW_NO_FILL", "shadow_only": True, "trade_id": order.get("trade_id"),
+            "research_lane": order.get("research_lane"), "reason": reason, "status": res.get("status"),
+            "side": res.get("side") or order.get("signal_dir") or order.get("side"),
+            "signal_ts": res.get("signal_ts"), "cap_px": res.get("cap_px"), "ioc_cap_bp": res.get("ioc_cap_bp"),
+            "delay_s": res.get("delay_s"), "delay_source": res.get("delay_source"),
+            "fill_ts": res.get("fill_ts"), "fill_model": res.get("fill_model"),
+            "fill_model_version": res.get("fill_model_version"),
+            "depth_snapshot_signal": res.get("depth_snapshot_signal"),
+            "depth_snapshot_fill": res.get("depth_snapshot_fill"), "ts": time.time()}
+
+
+def _paper_forced_reasons() -> frozenset:
+    from paper_pnl_canon import FORCED_EXIT_REASONS
+    return frozenset(FORCED_EXIT_REASONS) | {"TILE_RETIRED", "MANUAL_CLOSE", "EMERGENCY_ACTION"}
+
+
+def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction: float):
+    """TP1 / partial leg without any sleep (B2). The first firing only stamps a pending marker
+    (trigger_ts, due_ts = trigger + measured delay). A later evaluation at or after due_ts prices the leg
+    from the book second at trigger_ts + delay. Returns (state, leg): "WAIT" or "DUE" (+ the paper_fill result)."""
     import tile_fill as _tf
-    lane = str(pos.get("research_lane") or "").upper()
-    direction = str(pos.get("dir") or "").upper()
-    original = float(pos.get("policy_original_qty") or pos.get("qty") or 0)
-    qty = max(0.0, original * float(close_fraction))
-    if qty <= 0:
-        return None
+    lane = str(source_pos.get("research_lane") or "").upper()
     delay_s, delay_source = _disloc_delay(lane, "exit")
-    res = None
-    while True:
-        wait = trigger_ts + float(delay_s) - time.time()
-        if wait > 0:
-            time.sleep(min(wait, 3.0))
-        res = _tf.exit_fill(direction, qty, trigger_ts, delay_s, delay_source)
-        if res.get("status") == "FILLED" or time.time() - trigger_ts >= 5.0:
-            return res
-        time.sleep(0.5)
+    pend = source_pos.get("_tp1_pending")
+    if not isinstance(pend, dict) or pend.get("key") != key or now - float(pend.get("trigger_ts") or 0) > _tf.TP1_PENDING_MAX_S:
+        with trade_lock:
+            source_pos["_tp1_pending"] = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s),
+                                          "delay_s": float(delay_s), "delay_source": delay_source}
+        return "WAIT", None
+    if now < float(pend["due_ts"]):
+        return "WAIT", None
+    original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
+    qty = max(0.0, original * float(close_fraction))
+    res = _tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]) if qty > 0 else None
+    return "DUE", {**(res or {}), "_trigger_ts": float(pend["trigger_ts"])}
 
 
 def _exit_price_vwap(pos: dict, final_price: float, final_qty: float) -> float:
@@ -6995,20 +7029,50 @@ def _exit_price_vwap(pos: dict, final_price: float, final_qty: float) -> float:
     return round(p / q, 2) if q > 0 else float(final_price)
 
 
+def _paper_exit_sim(res: dict, pos: dict, direction: str, qty: float) -> tuple:
+    px = float(res["price"])
+    trigger = float(pos.get("_exit_eval_price") or 0)
+    sim = {**{k: v for k, v in res.items() if k not in ("price", "filled_qty")},
+           "avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": "paper_fill_book10l",
+           "trigger_price": round(trigger, 2) if trigger > 0 else None, "fill_price": round(px, 2),
+           "fill_ts": res.get("fill_ts"),
+           "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
+                                   if trigger > 0 else None)}
+    pos["exit_trigger_price"] = sim["trigger_price"]
+    pos["exit_fill_price"] = sim["fill_price"]
+    return round(px, 2), sim
+
+
+def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
+    """Forced / admin / retired-tile / overdue closes never wait (HM B3): price from the latest complete book
+    second at or before now (no look-ahead), delay_source FORCED_NO_DELAY, never fresh data."""
+    import tile_fill as _tf
+    d = _tf.FORCED_LOOKBACK_S
+    res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY")
+    if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
+        pos["exit_status"] = "FORCED_NO_BOOK"
+        pos["fresh_data_excluded"] = True
+        return None
+    res = {**res, "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY"}
+    pos["exit_status"] = "PAPER_FILL_FORCED"
+    pos["fresh_data_excluded"] = True
+    pos.pop("_paper_exit_trigger_ts", None)
+    return _paper_exit_sim(res, pos, direction, qty)
+
+
 def _paper_lane_exit(pos: dict, exit_reason: str):
-    """Exit priced by paper_fill at trigger_ts + delay. Waits (bounded) for that book second; an exit
-    still unpriced after EXIT_FORCE_AFTER_S is force-closed (FORCED_NO_BOOK, excluded from fresh data)."""
+    """Exit priced by paper_fill at exit_trigger_ts + delay (bounded wait). Forced closes and exits older than
+    EXIT_FORCE_CAP_S use the no-wait path; an exit still unpriced after EXIT_FORCE_AFTER_S is FORCED_NO_BOOK."""
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     now = time.time()
-    t0 = float(pos.get("_paper_exit_trigger_ts") or 0)
-    if t0 <= 0 or now - t0 > _tf.EXIT_FORCE_CAP_S:
-        t0 = now
-        pos["_paper_exit_trigger_ts"] = t0
     direction = str(pos.get("dir") or "").upper()
     qty = float(pos.get("qty") or 0)
+    t0 = float(pos.get("exit_trigger_ts") or 0) or float(pos.get("_paper_exit_trigger_ts") or 0) or now
+    pos["_paper_exit_trigger_ts"] = t0
+    if str(exit_reason or "").upper() in _paper_forced_reasons() or now - t0 >= _tf.EXIT_FORCE_CAP_S:
+        return _paper_forced_exit(pos, now, direction, qty)
     delay_s, delay_source = _disloc_delay(lane, "exit")
-    trigger = float(pos.get("_exit_eval_price") or 0)
     res = None
     while True:
         wait = t0 + float(delay_s) - time.time()
@@ -7025,17 +7089,9 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         pos["exit_status"] = "FORCED_NO_BOOK"
         pos["fresh_data_excluded"] = True
         return None
-    px = float(res["price"])
-    sim = {**{k: v for k, v in res.items() if k not in ("price", "filled_qty")},
-           "avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": "paper_fill_book10l",
-           "trigger_price": round(trigger, 2) if trigger > 0 else None, "fill_price": round(px, 2),
-           "fill_ts": res.get("fill_ts"),
-           "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
-                                   if trigger > 0 else None)}
-    pos["exit_trigger_price"] = sim["trigger_price"]
-    pos["exit_fill_price"] = sim["fill_price"]
     pos["exit_status"] = "PAPER_FILL"
-    return round(px, 2), sim
+    pos.pop("_paper_exit_trigger_ts", None)
+    return _paper_exit_sim(res, pos, direction, qty)
 
 
 def resolve_sim_fill_with_depth(order: dict) -> dict:
@@ -7123,6 +7179,8 @@ def resolve_sim_fill_price(order: dict) -> float:
     order.setdefault("requested_qty", order.get("qty"))
     result = resolve_sim_fill_with_depth(order)
     order["fill_sim"] = {k: v for k, v in result.items() if k not in ("fill_price", "filled_qty")}
+    if str(result.get("fill_model") or "") == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY" and result.get("filled_qty"):
+        order.pop("paper_fill_result", None)  # consumed: fill_sim carries it; keep persisted rows small
     order["filled_qty"] = result.get("filled_qty")
     order["remaining_qty"] = result.get("unfilled_qty")
     if result.get("partial_fill"):
@@ -7440,6 +7498,12 @@ def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = Tru
     if dt_hours <= 0:
         return
     payment = funding_cost_for_position(pos, rate, dt_hours)
+    try:
+        import tile_fill as _tf_f
+        for _b in _tf_f.funding_fields(last, now, rate)["funding_ts_crossed"]:
+            pos.setdefault("funding_settlements", []).append({"ts": _b, "rate": rate})
+    except Exception:  # noqa: BLE001 - evidence only; never blocks accrual
+        pass
     pos["funding_fees"] = pos.get("funding_fees", 0.0) + payment
     pos["last_funding_accrual_ts"] = now
 
@@ -22845,6 +22909,9 @@ def _fresh_start_epoch() -> dict | None:
         return None
 
 
+_fresh_start_epoch()  # boot: initialise paper_fill.FRESH_EPOCH_TS from a stamped epoch (None until stamped)
+
+
 def _current_epoch_id_for_display() -> str | None:
     manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
     epoch_id = manifest.get("epoch_id") if isinstance(manifest, dict) else None
@@ -26237,7 +26304,10 @@ def process_pending_orders():
             if is_terminal_signal(fill_signal):
                 continue
             if order.get("paper_ioc_no_fill"):
-                cancelled_at_fill.append((order, fill_signal, "PAPER_IOC_" + str(order["paper_ioc_no_fill"])))
+                _no_fill_reason = "PAPER_IOC_" + str(order["paper_ioc_no_fill"])
+                _safe_append_jsonl(PAPER_IOC_NO_FILL_SHADOW_FILE, _paper_no_fill_shadow_row(order, _no_fill_reason),
+                                   label="PAPER NO FILL SHADOW")
+                cancelled_at_fill.append((order, fill_signal, _no_fill_reason))
                 continue
             fill_age_sec = _order_signal_age_sec(order, fill_signal, time.time())
             if chase_age_window_should_cancel(fill_age_sec):
@@ -26320,6 +26390,7 @@ def process_pending_orders():
                 lifecycle_final=True,
             )
         _record_expired_order(order, reason)
+        order.pop("paper_fill_result", None)  # evidence is now in the expired row / shadow row
         expire_signal_for_order(order, reason)
         logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
@@ -30074,6 +30145,8 @@ def _record_expired_order(source: dict, reason: str):
         "reason": reason,
         "research_lane": source.get("research_lane") or master.get("research_lane"),
         "research_model": source.get("research_model") or master.get("research_model"),
+        "paper_no_fill": (_paper_no_fill_shadow_row(source, reason)
+                          if isinstance(source.get("paper_fill_result"), dict) else None),
         "closest_price": fill_metrics.get("closest_price"),
         "missed_by_usd": fill_metrics.get("missed_by_usd"),
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
@@ -31085,7 +31158,13 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_trigger_source": pos.get("exit_trigger_source"),
         "exit_trigger_price": pos.get("exit_trigger_price"),
         "exit_fill_ts": exit_fill,
-        "exit_trigger_to_fill_sec": round(exit_fill - trigger_ts, 3) if exit_fill and trigger_ts else None,
+        # Paper-book exits wait the measured delay by design: latency is measured from trigger + delay.
+        "exit_delay_s": ((pos.get("exit_fill_sim") or {}).get("delay_s")
+                         if isinstance(pos.get("exit_fill_sim"), dict) else None),
+        "exit_trigger_to_fill_sec": (
+            round(max(0.0, exit_fill - trigger_ts - float(((pos.get("exit_fill_sim") or {}).get("delay_s") or 0)
+                                                           if isinstance(pos.get("exit_fill_sim"), dict) else 0)), 3)
+            if exit_fill and trigger_ts else None),
         "signal_to_order_sent_sec": round(order_sent_ts - signal_ts, 3) if order_sent_ts and signal_ts else None,
         "exit_sent_ts": exit_sent,
         "exit_trigger_to_sent_sec": round(exit_sent - trigger_ts, 3) if exit_sent and trigger_ts else None,
@@ -31315,7 +31394,7 @@ def close_position(pos: dict, exit_reason: str):
             "exit_fill_price": pos.get("exit_fill_price", price),
             "exit_price": _exit_price_vwap(pos, price, qty) if _is_paper_book_lane(pos) else price,
             "exit_price_basis": "VWAP_ALL_LEGS" if _is_paper_book_lane(pos) else "FINAL_LEG",
-            "legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") == "PAPER_FILL"),
+            "legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED")),
             "fill_model": (pos.get("fill_sim") or {}).get("fill_model"),
             "fill_model_version": (pos.get("fill_sim") or {}).get("fill_model_version"),
             "delay_s": (pos.get("fill_sim") or {}).get("delay_s"),
@@ -31327,12 +31406,13 @@ def close_position(pos: dict, exit_reason: str):
             "exit_depth_snapshot_fill": (pos.get("exit_fill_sim") or {}).get("depth_snapshot_fill") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "entry_provenance": __import__("tile_fill").provenance(pos.get("fill_sim")) if _is_paper_book_lane(pos) else None,
             "exit_provenance": __import__("tile_fill").provenance(pos.get("exit_fill_sim")) if _is_paper_book_lane(pos) else None,
-            "fill_model_tag": (None if (_is_paper_book_lane(pos) and pos.get("exit_status") == "PAPER_FILL")
+            "fill_model_tag": (None if (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED"))
                                else "LEGACY_PRICING_INVALID"),
             "fresh_eligible": bool(_is_paper_book_lane(pos) and pos.get("exit_status") == "PAPER_FILL"
                                    and not pos.get("fresh_data_excluded")),
             "fee_model": __import__("tile_fill").FEE_MODEL,
-            **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now()),
+            **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now(),
+                                                      settlements=pos.get("funding_settlements")),
             "exit_status": pos.get("exit_status"),
             "exit_fill_source": (pos.get("exit_fill_sim") or {}).get("source") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "exit_trigger_slippage_bp": (pos.get("exit_fill_sim") or {}).get("trigger_slippage_bp") if isinstance(pos.get("exit_fill_sim"), dict) else None,
@@ -46835,6 +46915,7 @@ def _monitor_tiles_scope(args, *, include_forced_default: bool) -> dict:
         "epoch_cutoff_utc": _current_epoch_cutoff_utc(), "epoch_cutoff_source": cutoff_source,
         "lanes": lanes,
         "include_forced": monitor_tiles.parse_bool(args.get("include_forced"), include_forced_default),
+        "fresh_only": monitor_tiles.parse_bool(args.get("fresh_only"), False),
         "be_band_bp": monitor_tiles.parse_be_band(args.get("be_band_bp")),
         "forced_exit_reasons": sorted(STATS_EXCLUDED_EXIT_REASONS),
         "source": _MONITOR_TILES_SOURCE,
@@ -46867,6 +46948,8 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
                 fill_evidence=fills.get(str(raw.get("trade_id") or "")),
                 parse_ts=parse_ts, be_band_bp=scope["be_band_bp"])
             if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                continue
+            if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
                 continue
             out[lane].append(row)
     if "closed" in statuses:

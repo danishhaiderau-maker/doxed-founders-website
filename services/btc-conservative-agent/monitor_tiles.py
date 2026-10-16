@@ -348,6 +348,28 @@ def _late_window_block(rows) -> dict:
             "window_aedt": late_window_table().get("window_aedt"), "totals_use_repriced": True}
 
 
+PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms", "exit_ask_age_ms",
+                "depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill", "exit_price_basis",
+                "fee_model", "funding_rate", "funding_source", "hold_seconds", "funding_ts_crossed",
+                "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status")
+
+
+def pricing_block(raw: Mapping[str, Any]) -> dict:
+    """Pricing provenance read from the row itself (never the old fill-evidence index)."""
+    import paper_fill as _pf
+    block = {k: raw.get(k) for k in PRICING_KEYS}
+    fe = raw.get("fresh_eligible")
+    block["fresh_eligible"] = bool(fe) if fe is not None else bool(_pf.row_fresh_eligible(raw))
+    return block
+
+
+def row_is_fresh(row: Mapping[str, Any]) -> bool:
+    """fresh_only=1 filter: closed rows must be fresh_eligible (open/pending/expired rows are not trades)."""
+    if row.get("status") != "CLOSED":
+        return True
+    return bool((row.get("pricing") or {}).get("fresh_eligible"))
+
+
 def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[str, str],
                    epoch_id: str | None, forced_reasons: Iterable[str],
                    fill_evidence: Mapping[str, Any] | None = None, parse_ts=None,
@@ -415,6 +437,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         row["order"] = {"submitted_ts": ev_sent, "limit_chase_count": raw.get("limit_chase_count"),
                         "terminal": "FILLED"}
         row["fill"] = _fill_block(fill_evidence, filled=True) or {}
+        row["pricing"] = pricing_block(raw)
+        if raw.get("fill_model"):
+            row["fill"]["fill_model"] = raw.get("fill_model")  # the row's own model beats the evidence index
         if row["fill"].get("fill_price") is None:
             row["fill"]["fill_price"] = entry
         if row["fill"].get("fill_ts") is None:
@@ -425,7 +450,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
                 row["fill"]["fill_ts"] = entry_ts
                 row["fill"]["fill_ts_basis"] = "CLOSE_TS_MINUS_DURATION" if entry_ts else None
         row["exit"] = {
-            "close_ts": close_ts, "exit_price": _finite(raw.get("exit") or raw.get("exit_price")),
+            "close_ts": close_ts, "exit_price": _finite(raw.get("exit_price") if raw.get("exit_price_basis") == "VWAP_ALL_LEGS"
+                                                      else (raw.get("exit") or raw.get("exit_price"))),
+            "exit_price_basis": raw.get("exit_price_basis"),
             "exit_bid": _finite(raw.get("exit_bid")), "exit_ask": _finite(raw.get("exit_ask")),
             "exit_reason": raw.get("exit_reason"), "close_origin": raw.get("close_origin"),
             "forced_close": reason in forced, "legs": _legs(raw),

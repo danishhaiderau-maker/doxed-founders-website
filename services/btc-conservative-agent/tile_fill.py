@@ -17,8 +17,11 @@ MIGRATED_LANES = frozenset({
 IOC_CAP_BP = 5.0          # signal ask +5 bp (long) / signal bid -5 bp (short), same as DISLOC step B
 EXIT_FORCE_AFTER_S = 10.0  # unpriced exit is force-closed (FORCED_NO_BOOK) after this
 EXIT_FORCE_CAP_S = 30.0
+TP1_PENDING_MAX_S = 5.0     # a pending TP1 marker older than this is restarted (its book second is too old)
+FORCED_LOOKBACK_S = paper_fill.MIN_DELAY_S  # forced closes: fill second = now, book = latest complete second <= now
 FEE_MODEL = "NO_TRADING_FEE, funding only"  # Danish 16 Oct: Bitfinex has no trading fees, only funding
 FUNDING_INTERVAL_S = 8 * 3600
+FUNDING_SOURCE = "bot state funding rate (Bitfinex deriv status), 8h settlement grid 00/08/16 UTC"
 
 
 def price_entry(o):
@@ -49,8 +52,9 @@ def entry_fill(direction: str, qty: float, signal_ts: float, delay_s, delay_sour
         return {"fill_model": paper_fill.FILL_MODEL, "fill_model_version": paper_fill.FILL_MODEL_VERSION,
                 "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "leg": "entry",
                 "delay_s": delay_s, "delay_source": delay_source, "signal_ts": float(signal_ts)}
-    return price_entry({"side": str(direction).upper(), "qty": qty, "signal_ts": float(signal_ts),
-                        "delay_s": delay_s, "delay_source": delay_source, "ioc_cap_px": cap})
+    res = price_entry({"side": str(direction).upper(), "qty": qty, "signal_ts": float(signal_ts),
+                       "delay_s": delay_s, "delay_source": delay_source, "ioc_cap_px": cap})
+    return {**res, "cap_px": cap, "ioc_cap_bp": IOC_CAP_BP}
 
 
 def exit_fill(direction: str, qty: float, trigger_ts: float, delay_s, delay_source: str) -> dict:
@@ -76,16 +80,18 @@ def row_provenance_complete(row) -> bool:
                and p.get("delay_source") and p.get("depth_snapshot_fill") for p in (e, x))
 
 
-def funding_fields(entry_ts, exit_ts, rate) -> dict:
-    """Funding kept separate from the fill price: rate, hold time and the 8h settlement times crossed."""
+def funding_fields(entry_ts, exit_ts, rate, settlements=None) -> dict:
+    """Funding kept separate from the fill price: rate, hold time, the 8h settlement times crossed, the
+    rate recorded at each settlement (when the position's accrual ticks saw it) and where the rate came from."""
+    base = {"funding_rate": rate, "funding_source": FUNDING_SOURCE, "funding_interval_s": FUNDING_INTERVAL_S}
     try:
         a, b = float(entry_ts), float(exit_ts)
     except (TypeError, ValueError):
-        return {"funding_rate": rate, "hold_seconds": None, "funding_ts_crossed": []}
-    first = (int(a // FUNDING_INTERVAL_S) + 1) * FUNDING_INTERVAL_S
+        return {**base, "hold_seconds": None, "funding_ts_crossed": [], "funding_settlement_rates": []}
+    t = (int(a // FUNDING_INTERVAL_S) + 1) * FUNDING_INTERVAL_S
     crossed = []
-    t = first
     while t <= b and len(crossed) < 100:
         crossed.append(t)
         t += FUNDING_INTERVAL_S
-    return {"funding_rate": rate, "hold_seconds": round(max(0.0, b - a), 3), "funding_ts_crossed": crossed}
+    return {**base, "hold_seconds": round(max(0.0, b - a), 3), "funding_ts_crossed": crossed,
+            "funding_settlement_rates": [dict(x) for x in (settlements or []) if isinstance(x, dict)]}
