@@ -235,34 +235,71 @@ def test_verify_plan_relists_and_rechecks_hash_size_and_last_modified_per_key():
     assert not v["ok"] and any("PINNED" in p for p in v["problems"])
 
 
-def test_post_receipt_sends_the_whole_v2_receipt_with_the_admin_token_and_never_raises(monkeypatch):
-    monkeypatch.delenv("BOT_ADMIN_TOKEN", raising=False)   # never let a test reach the real Fly route
-    seen = {}
+class _Resp:
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
 
-    class Resp:
-        status = 200
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
+
+def _rcpt(**kw):
+    return rb.build_receipt(state={"a": 1}, report={"missing": 0, "r2_objects": 1, "outside_keep": 2, "quarantined": 3},
+                            restore={"passed": True, "missing": 0, "bad": 0, "checked": 1},
+                            keep={"prefixes": ["epoch-archive/"], "sha256": "k"}, quarantine_pending=4, **kw)
+
+
+def test_post_receipt_is_opt_in_uses_only_the_dedicated_token_and_sends_the_whole_v2_receipt(monkeypatch):
+    seen = {}
 
     def fake_urlopen(req, timeout=0):
         seen["url"], seen["headers"], seen["body"] = req.full_url, dict(req.header_items()), json.loads(req.data)
-        return Resp()
-    r = rb.build_receipt(state={"a": 1}, report={"missing": 0, "r2_objects": 1, "outside_keep": 2, "quarantined": 3},
-                         restore={"passed": True, "missing": 0, "bad": 0, "checked": 1},
-                         keep={"prefixes": ["epoch-archive/"], "sha256": "k"}, quarantine_pending=4)
-    assert rb.post_receipt(r, token="t", urlopen=fake_urlopen) is True
-    assert seen["headers"]["X-bot-admin-token"] == "t" and seen["url"].endswith("/api/monitor/archive/receipt")
-    for field in ("schema", "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending",
+        return _Resp()
+    monkeypatch.delenv("R2_POST_RECEIPT", raising=False)
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "ADMIN-MUST-NEVER-BE-USED")
+    monkeypatch.setenv("R2_RECEIPT_TOKEN", "r2tok")
+    r = _rcpt()
+    assert rb.post_receipt(r, urlopen=fake_urlopen) is False and not seen          # not opted in
+    assert rb.post_receipt(r, enabled=True, urlopen=fake_urlopen) is True          # --post-receipt
+    assert seen["headers"]["X-r2-receipt-token"] == "r2tok" and seen["url"] == rb.RECEIPT_URL
+    assert "ADMIN-MUST-NEVER-BE-USED" not in json.dumps(seen["headers"]) + json.dumps(seen["body"])
+    assert "X-bot-admin-token" not in seen["headers"]
+    for field in ("schema", "kind", "host", "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending",
                   "outside_keep", "keep_manifest_sha256", "restore_test", "ok"):
         assert field in seen["body"], field
-    assert seen["body"]["quarantine_pending"] == 4 and seen["body"]["outside_keep"] == 2
+    assert seen["body"]["quarantine_pending"] == 4 and seen["body"]["kind"] == "sync" and seen["body"]["host"]
+    seen.clear()
+    monkeypatch.setenv("R2_POST_RECEIPT", "1")                                      # env opt-in
+    assert rb.post_receipt(r, urlopen=fake_urlopen) is True
+
+
+def test_post_receipt_never_reads_the_admin_token_and_needs_its_own_token(monkeypatch):
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "admin")
+    monkeypatch.delenv("R2_RECEIPT_TOKEN", raising=False)
+
+    def must_not_be_called(req, timeout=0):
+        raise AssertionError("no R2_RECEIPT_TOKEN -> no request")
+    assert rb.post_receipt(_rcpt(), enabled=True, urlopen=must_not_be_called) is False
+    assert "BOT_ADMIN_TOKEN" not in Path(rb.__file__).read_text()
+
+
+def test_post_receipt_refuses_under_pytest_and_other_urls_and_never_raises(monkeypatch):
+    monkeypatch.setenv("R2_RECEIPT_TOKEN", "t")
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("network!")))
+    assert "PYTEST_CURRENT_TEST" in __import__("os").environ
+    assert rb.post_receipt(_rcpt(), enabled=True) is False                          # real network refused under pytest
+    assert rb.post_receipt(_rcpt(), enabled=True, url="http://doxed-btc-bot.fly.dev/api/monitor/archive/receipt",
+                           urlopen=lambda r, timeout=0: _Resp()) is False
+    assert rb.post_receipt(_rcpt(), enabled=True, url="https://example.com/x", urlopen=lambda r, timeout=0: _Resp()) is False
 
     def boom(req, timeout=0):
         raise OSError("down")
-    assert rb.post_receipt(r, token="t", urlopen=boom) is False
-    def must_not_be_called(req, timeout=0):
-        raise AssertionError("no token -> no request")
-    assert rb.post_receipt(r, token="", urlopen=must_not_be_called) is False
+    assert rb.post_receipt(_rcpt(), enabled=True, urlopen=boom) is False
+
+
+def test_restore_test_receipt_has_its_own_kind():
+    r = rb.build_receipt(state={}, report=None, restore={"passed": True, "missing": 0, "bad": 0, "checked": 1},
+                         keep={"prefixes": ["a/"], "sha256": "k"}, kind="restore_test")
+    assert r["kind"] == "restore_test"
 
 
 def quarantine_in_backup_has_no_mutations():

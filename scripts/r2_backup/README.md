@@ -31,3 +31,18 @@ Order on the laptop (machine approval): `reconcile` (dry) -> `reconcile --apply`
   whitelist is verified against that list by `test_archive_receipt_v2.py`. NOT verified: whether the CURRENT laptop script
   forwards v2 fields (it is the old script and is not in the repo; no laptop access). Installing this drop-in is what
   makes it forward them.
+
+## Receipt POST hardening (HM #678 round 2)
+* `post_receipt` is opt-in: `--post-receipt` or `R2_POST_RECEIPT=1`. Token = `R2_RECEIPT_TOKEN` only (header
+  `X-R2-Receipt-Token`); the Fly admin token is never read. Refuses under `PYTEST_CURRENT_TEST` (real network), and only
+  `https://doxed-btc-bot.fly.dev/api/monitor/archive/receipt` is accepted (not overridable).
+* Receipts carry `kind` (`sync` | `restore_test`) and `host`.
+* Fly route (`monitor_archive_receipt_post`): auth is `R2_RECEIPT_TOKEN` (a Fly secret that must be SET before the
+  laptop can post; unset -> 503; the admin and monitor tokens get 401). Validates schema `r2_backup_receipt_v2`, host,
+  `keep_manifest_sha256` == Fly's pin (sha256 of `{"r2_keep_prefixes": sorted(keep_manifest.R2_KEEP_PREFIXES)}`),
+  `state_keys >= r2_objects > 0`, `0 < restore_test.checked <= min(1000, r2_objects)`, `finished_ts` within 6 h and newer
+  than the stored one. Every POST (accepted or rejected) is appended to `archive_receipts.jsonl`. A `restore_test`
+  receipt only replaces the stored `restore_test` (+ `restore_test_finished_ts`); counts, `quarantine_pending`,
+  `outside_keep` and the sync receipt's AMBER state are untouched.
+* DEPLOY NOTE: legacy-shaped receipts (no schema) are now rejected with 422, so the old laptop poster stops until this
+  script is installed and `R2_RECEIPT_TOKEN` is set on both sides. The monitor then goes stale-AMBER (36 h), not GREEN.

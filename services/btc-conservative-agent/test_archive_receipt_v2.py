@@ -73,15 +73,124 @@ def test_outside_keep_objects_are_amber():
     assert mc.archive_receipt(_laptop_receipt(report={"outside_keep": 12, "missing": 3}), now=NOW)["status"] == "RED"
 
 
-def test_post_route_keeps_every_v2_field_the_laptop_sends(tmp_path, monkeypatch):
-    import bot
-    monkeypatch.setattr(bot, "_archive_receipt_path", lambda: tmp_path / "archive-receipt.json")
-    sent = {k: v for k, v in _laptop_receipt(quarantine_pending=7, report={"outside_keep": 2, "quarantined": 3}).items()
-            if k in __import__("sys").modules["r2_backup"].RECEIPT_V2_FIELDS}
-    with bot.app.test_request_context("/api/monitor/archive/receipt", method="POST", json=sent):
-        resp = bot.monitor_archive_receipt_post()
-    assert resp.get_json() == {"ok": True}
-    stored = __import__("json").loads((tmp_path / "archive-receipt.json").read_text())
+class _Route:
+    """The real Flask app + real before_request guard, volume redirected to tmp, R2_RECEIPT_TOKEN set."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        import bot
+        import sys
+        from pathlib import Path
+        monkeypatch.delenv("BOT_ADMIN_TOKEN", raising=False)
+        monkeypatch.setenv("R2_RECEIPT_TOKEN", "r2tok")
+        monkeypatch.setattr(bot, "_data_sync_volume_root", lambda: tmp_path)
+        monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "r2_backup"))
+        import r2_backup as rb
+        self.bot, self.rb, self.tmp = bot, rb, tmp_path
+        self.client = bot.app.test_client()
+        self.now = __import__("time").time()
+
+    def receipt(self, **kw):
+        rb = self.rb
+        keep = rb.load_keep(keep_prefixes="epoch-archive/")
+        rest = {"checked": 100, "ok": 100, "bad": 0, "missing": 0, "passed": True}
+        rep = {"missing": 0, "r2_objects": 150, "quarantined": 3, "outside_keep": 2}
+        rec = rb.build_receipt(state={f"k{i}": {} for i in range(160)}, report=rep, restore=rest, keep=keep,
+                               quarantine_pending=7, kind=kw.pop("kind", "sync"))
+        rec["finished_ts"] = self.now - 30
+        rec.update(kw)
+        return {k: v for k, v in rec.items() if k in rb.RECEIPT_V2_FIELDS}
+
+    def post(self, body, token="r2tok", headers=None):
+        h = dict(headers or {})
+        if token is not None:
+            h["X-R2-Receipt-Token"] = token
+        return self.client.post("/api/monitor/archive/receipt", json=body, headers=h)
+
+    def stored(self):
+        import json
+        return json.loads((self.tmp / "archive_receipt.json").read_text())
+
+    def log(self):
+        import json
+        p = self.tmp / "archive_receipts.jsonl"
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_route_keeps_every_v2_field_the_laptop_sends_and_pin_matches_the_laptops_hash(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    assert r.bot._r2_keep_pin_sha256() == r.rb.load_keep(keep_prefixes="epoch-archive/")["sha256"]
+    sent = r.receipt()
+    resp = r.post(sent)
+    assert resp.status_code == 200 and resp.get_json()["kind"] == "sync"
+    stored = r.stored()
     missing = [k for k in sent if k not in stored]
     assert not missing, f"Fly route drops laptop receipt field(s): {missing}"
     assert stored["quarantine_pending"] == 7 and stored["outside_keep"] == 2 and stored["quarantined"] == 3
+    assert mc.archive_receipt(stored, now=NOW if False else r.now)["status"] == "AMBER"
+
+
+def test_dedicated_token_only_admin_token_and_missing_config_are_refused(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    assert r.post(r.receipt(), token=None).status_code == 401
+    assert r.post(r.receipt(), token="wrong").status_code == 401
+    assert r.post(r.receipt(), token=None, headers={"X-Bot-Admin-Token": "anything"}).status_code == 401
+    assert not (tmp_path / "archive_receipt.json").exists()
+    monkeypatch.delenv("R2_RECEIPT_TOKEN")
+    assert r.post(r.receipt(), token="x").status_code == 503
+
+
+def test_validation_rejects_bad_receipts_and_logs_the_rejection(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    bad = [
+        (dict(schema="r2_backup_receipt_v1"), "schema"),
+        (dict(host=""), "host"),
+        (dict(keep_manifest_sha256="00" * 32), "keep_manifest_sha256"),
+        (dict(state_keys=10, r2_objects=150), "state_keys"),
+        (dict(r2_objects=0), "r2_objects"),
+        (dict(restore_test={"checked": 0, "bad": 0, "missing": 0}), "checked"),
+        (dict(restore_test={"checked": 5000, "bad": 0, "missing": 0}), "checked"),
+        (dict(restore_test={"checked": 200, "bad": 0, "missing": 0}), "exceeds"),
+        (dict(finished_ts=r.now - 7 * 3600), "recent"),
+        (dict(finished_ts=r.now + 3600), "recent"),
+    ]
+    for patch, needle in bad:
+        resp = r.post(r.receipt(**patch))
+        assert resp.status_code == 422, patch
+        assert any(needle in p for p in resp.get_json()["problems"]), (patch, resp.get_json())
+    assert not (tmp_path / "archive_receipt.json").exists()
+    assert len(r.log()) == len(bad) and not any(e["accepted"] for e in r.log())
+
+
+def test_stale_replay_is_rejected_and_every_accept_is_appended(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    first = r.receipt(finished_ts=r.now - 100)
+    assert r.post(first).status_code == 200
+    assert r.post(first).status_code == 422                                      # same ts: not newer
+    older = r.receipt(finished_ts=r.now - 200)
+    assert r.post(older).status_code == 422
+    assert r.post(r.receipt(finished_ts=r.now - 10)).status_code == 200
+    log = r.log()
+    assert [e["accepted"] for e in log] == [True, False, False, True]            # append-only trail
+    assert log[0]["receipt"]["finished_ts"] == first["finished_ts"]
+
+
+def test_restore_test_receipt_never_overwrites_the_sync_receipts_amber_state(tmp_path, monkeypatch):
+    r = _Route(tmp_path, monkeypatch)
+    assert r.post(r.receipt(finished_ts=r.now - 100)).status_code == 200
+    before = r.stored()
+    assert mc.archive_receipt(before, now=r.now)["status"] == "AMBER"
+    rt = r.receipt(kind="restore_test", finished_ts=r.now - 10)
+    for k in ("state_keys", "r2_objects", "quarantine_pending", "outside_keep", "missing"):
+        rt.pop(k, None)                                  # restore-test-only receipts carry no sync counts
+    resp = r.post(rt)
+    assert resp.status_code == 200 and resp.get_json()["kind"] == "restore_test"
+    after = r.stored()
+    for k in ("state_keys", "r2_objects", "quarantine_pending", "outside_keep", "missing", "quarantined",
+              "finished_ts", "ok"):
+        assert after[k] == before[k], k
+    assert after["restore_test_finished_ts"] == rt["finished_ts"]
+    assert mc.archive_receipt(after, now=r.now)["status"] == "AMBER"             # still AMBER, not GREEN/overwritten
+    failing = r.receipt(kind="restore_test", finished_ts=r.now - 5, restore_test={"checked": 20, "ok": 0, "bad": 20, "missing": 0, "passed": False})
+    assert r.post(failing).status_code == 200
+    assert mc.archive_receipt(r.stored(), now=r.now)["status"] == "RED"          # a failed restore test is RED

@@ -223,11 +223,12 @@ def restore_test(state: dict, s3, prefixes, *, sample: int = DEFAULT_SAMPLE, buc
 
 # ------------------------------------------------------------------ receipt
 def build_receipt(*, state: dict, report: dict | None, restore: dict | None, keep: dict, errors: int = 0,
-                  quarantine_pending: int = 0, extra: dict | None = None) -> dict:
+                  quarantine_pending: int = 0, extra: dict | None = None, kind: str = "sync") -> dict:
     """Receipt pushed to Fly /api/monitor/archive/receipt. ``files`` is kept for older readers."""
     report = report or {}
     missing = int(report.get("missing") or 0) + int((restore or {}).get("missing") or 0)
-    r = {"schema": RECEIPT_SCHEMA, "bucket": BUCKET, "finished_ts": time.time(),
+    import socket
+    r = {"schema": RECEIPT_SCHEMA, "kind": kind, "host": socket.gethostname()[:64], "bucket": BUCKET, "finished_ts": time.time(),
          "state_keys": len(state), "files": len(state),
          "r2_objects": report.get("r2_objects"), "missing": missing,
          "quarantined": report.get("quarantined", 0), "quarantine_pending": int(quarantine_pending),
@@ -243,29 +244,45 @@ def build_receipt(*, state: dict, report: dict | None, restore: dict | None, kee
 
 
 # ------------------------------------------------------------------ receipt -> Fly
-RECEIPT_URL = os.environ.get("R2_RECEIPT_URL", "https://doxed-btc-bot.fly.dev/api/monitor/archive/receipt")
-# Fields Fly's POST /api/monitor/archive/receipt whitelists (bot.monitor_archive_receipt_post). The WHOLE v2
+# The ONLY place a receipt may be sent. Not overridable (no env/CLI), https only.
+RECEIPT_URL = "https://doxed-btc-bot.fly.dev/api/monitor/archive/receipt"
+# Fields Fly's POST /api/monitor/archive/receipt reads (bot.monitor_archive_receipt_post). The WHOLE v2
 # receipt is posted; test_archive_receipt_v2 asserts every v2 field below survives the route.
-RECEIPT_V2_FIELDS = ("schema", "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending",
-                     "outside_keep", "keep_manifest_sha256", "restore_test", "errors", "ok", "finished_ts",
-                     "files", "bucket")
+RECEIPT_V2_FIELDS = ("schema", "kind", "host", "state_keys", "r2_objects", "missing", "quarantined",
+                     "quarantine_pending", "outside_keep", "keep_manifest_sha256", "restore_test", "errors", "ok",
+                     "finished_ts", "files", "bucket")
 
 
-def post_receipt(receipt: dict, *, token: str = "", url: str = "", urlopen=None) -> bool:
-    """Best-effort POST of the v2 receipt to Fly (admin token from BOT_ADMIN_TOKEN). Never raises."""
-    token = token or os.environ.get("BOT_ADMIN_TOKEN", "")
+def post_receipt(receipt: dict, *, enabled: bool = False, token: str = "", url: str = "", urlopen=None) -> bool:
+    """POST the v2 receipt to Fly. Opt-in and fail-closed; never raises.
+
+    * runs only with ``--post-receipt`` (enabled=True) or ``R2_POST_RECEIPT=1``;
+    * the token comes from ``R2_RECEIPT_TOKEN`` (a dedicated token; the Fly admin token is never read);
+    * refuses under pytest (``PYTEST_CURRENT_TEST``) unless a fake ``urlopen`` is injected;
+    * only ``RECEIPT_URL`` (https, the Fly receipt route) is accepted.
+    """
+    if not (enabled or os.environ.get("R2_POST_RECEIPT") == "1"):
+        return False
+    if urlopen is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        log("receipt not posted: refusing a real network POST under pytest")
+        return False
+    token = token or os.environ.get("R2_RECEIPT_TOKEN", "")
     if not token:
-        log("receipt not posted: BOT_ADMIN_TOKEN is not set")
+        log("receipt not posted: R2_RECEIPT_TOKEN is not set")
+        return False
+    target = url or RECEIPT_URL
+    if target != RECEIPT_URL or not target.startswith("https://"):
+        log("receipt not posted: only the Fly receipt URL over https is allowed")
         return False
     import urllib.request
     body = json.dumps({k: receipt[k] for k in RECEIPT_V2_FIELDS if k in receipt}, default=str).encode()
-    req = urllib.request.Request(url or RECEIPT_URL, data=body, method="POST",
-                                 headers={"Content-Type": "application/json", "X-Bot-Admin-Token": token})
+    req = urllib.request.Request(target, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "X-R2-Receipt-Token": token})
     try:
         with (urlopen or urllib.request.urlopen)(req, timeout=20) as resp:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception as exc:  # noqa: BLE001 - the backup result stands even if Fly is unreachable
-        log(f"receipt post failed: {exc!r}")
+        log(f"receipt post failed: {type(exc).__name__}")
         return False
 
 
@@ -434,7 +451,7 @@ def cmd_sync(args, keep) -> int:
     receipt = build_receipt(state=state, report=after, restore=restore, keep=keep, errors=errs, quarantine_pending=pending,
                             extra={"uploaded": len(todo) - errs, "reconciled_dropped": dropped})
     json.dump(receipt, open(os.path.join(STATE_DIR, "last-sync.json"), "w"), indent=1)
-    post_receipt(receipt)
+    post_receipt(receipt, enabled=args.post_receipt)
     log("sync done " + json.dumps({k: receipt[k] for k in ("state_keys", "r2_objects", "missing", "quarantined",
                                                           "quarantine_pending", "errors", "ok")}))
     return 0 if receipt["ok"] else 1
@@ -444,10 +461,10 @@ def cmd_restore_test(args, keep) -> int:
     s3 = client()
     state = _load_state()
     result = restore_test(state, s3, keep["prefixes"], sample=args.sample, allow_empty=args.allow_empty)
-    receipt = build_receipt(state=state, report=None, restore=result, keep=keep)
+    receipt = build_receipt(state=state, report=None, restore=result, keep=keep, kind="restore_test")
     log("restore-test " + json.dumps(result))
     json.dump(receipt, open(os.path.join(STATE_DIR, "last-restore-test.json"), "w"))
-    post_receipt(receipt)
+    post_receipt(receipt, enabled=args.post_receipt)
     return 0 if result["passed"] else 1
 
 
@@ -460,6 +477,8 @@ def main(argv=None) -> int:
     ap.add_argument("--keep-manifest", default=os.environ.get("R2_KEEP_MANIFEST", ""))
     ap.add_argument("--sample", type=int, default=DEFAULT_SAMPLE)
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--post-receipt", action="store_true",
+                    help="POST the receipt to Fly (also R2_POST_RECEIPT=1); token from R2_RECEIPT_TOKEN only")
     ap.add_argument("--allow-empty", action="store_true",
                     help="an empty pinned set passes (only when the keep manifest intends R2 to be empty)")
     args = ap.parse_args(argv)
