@@ -20,6 +20,7 @@ import system_health_banner
 import system_health_alerts
 import runtime_uptime
 import monitor_api
+import http_emergency_routes as _her
 import monitor_tiles
 try:
     import monitor_integrity as _monitor_integrity
@@ -33723,7 +33724,7 @@ _dashboard_overload_rejections = {}
 
 def _record_overload_rejection(cap_name, reason, now=None):
     cap = str(cap_name or "unclassified")[:24]
-    why = str(reason or "unknown")[:32]
+    why = str(reason or "unknown")[:40]
     ts = time.time() if now is None else float(now)
     with _dashboard_handler_lock:
         bucket = _dashboard_overload_rejections.setdefault(cap, {"total": 0, "by_reason": {}, "last_ts": None})
@@ -48502,35 +48503,92 @@ def _status_epoch_pipeline_funnel() -> dict:
     return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "status": "STATE_SNAPSHOT_WARMING"}
 
 
-_PROBE_CACHE_TTL_SEC = max(0.0, float(os.getenv("PROBE_CACHE_TTL_SEC", "1.0")))
+# HM #676 B1: never above 1.0 s, whatever the env says.
+_PROBE_CACHE_TTL_SEC = min(1.0, max(0.0, float(os.getenv("PROBE_CACHE_TTL_SEC", "1.0"))))
+_PROBE_CACHES: list = []
+_probe_generation = [0]
+
+
+def _probe_cache_clear_all():
+    """Drop every probe cache. Called after any emergency POST completes and whenever the
+    live arm/disarm control changes state, so /api/status and /health can never serve a
+    pre-change live_armed/flat state. The generation bump also stops an in-flight rebuild
+    that started before the change from re-populating the cache with the stale payload."""
+    _probe_generation[0] += 1
+    for c in list(_PROBE_CACHES):
+        c["resp"] = None
+        c["at"] = 0.0
+
+
+def _clears_probe_cache(fn):
+    """Clear the status/health probe caches before and after a live arm/disarm mutation."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        _probe_cache_clear_all()
+        try:
+            return fn(*a, **k)
+        finally:
+            _probe_cache_clear_all()
+    return wrapper
 
 
 def _probe_cached(fn):
-    """HM D-B: serve GET /api/status and /health from a 1 s cache so concurrent polls
-    cannot each rebuild the payload, hold control slots or push CPU. Caches status code and
-    body only; the heartbeat staleness 503 of /health is cached for at most the same second."""
+    """HM D-B: serve GET /api/status and /health from a <=1 s cache so concurrent polls
+    cannot each rebuild the payload. ``?fresh=1`` bypasses (and refreshes) the cache; gate
+    scripts use it. Single-flight: one thread rebuilds on a miss, the rest wait for it."""
     cache = {"at": 0.0, "resp": None}
-    lock = threading.Lock()
+    _PROBE_CACHES.append(cache)
+    lock = threading.Lock()          # guards cache fields (short)
+    flight = threading.Lock()        # single-flight rebuild
+
+    def _hit(now):
+        with lock:
+            hit = cache["resp"]
+            if hit is not None and 0.0 <= now - cache["at"] < _PROBE_CACHE_TTL_SEC:
+                return hit
+        return None
+
+    def _replay(hit):
+        body, code, mimetype = hit
+        return app.response_class(body, status=code, mimetype=mimetype)
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         if _PROBE_CACHE_TTL_SEC <= 0 or request.method != "GET":
             return fn(*args, **kwargs)
-        now = time.monotonic()
-        with lock:
-            hit = cache["resp"]
-            if hit is not None and 0.0 <= now - cache["at"] < _PROBE_CACHE_TTL_SEC:
-                body, code, mimetype = hit
-                return app.response_class(body, status=code, mimetype=mimetype)
-        resp = app.make_response(fn(*args, **kwargs))
-        if resp.direct_passthrough or resp.is_streamed:
+        fresh = request.args.get("fresh") == "1"
+        if not fresh:
+            hit = _hit(time.monotonic())
+            if hit is not None:
+                return _replay(hit)
+        with flight:
+            if not fresh:
+                hit = _hit(time.monotonic())   # a concurrent rebuild may have filled it
+                if hit is not None:
+                    return _replay(hit)
+            gen = _probe_generation[0]
+            started = time.monotonic()
+            resp = app.make_response(fn(*args, **kwargs))
+            if resp.direct_passthrough or resp.is_streamed:
+                return resp
+            if gen == _probe_generation[0]:
+                with lock:
+                    cache["at"] = started
+                    cache["resp"] = (resp.get_data(), resp.status_code, resp.mimetype)
             return resp
-        with lock:
-            cache["at"] = now
-            cache["resp"] = (resp.get_data(), resp.status_code, resp.mimetype)
-        return resp
 
     return wrapper
+
+
+@app.after_request
+def _probe_cache_after_emergency_post(response):
+    try:
+        if request.method == "POST" and _her.emergency_label(
+                b"POST", (request.path or "").encode("utf-8", "ignore")) is not None:
+            _probe_cache_clear_all()
+    except Exception:  # noqa: BLE001 - never break a control response
+        _probe_cache_clear_all()
+    return response
 
 
 @app.route('/api/status')
@@ -50571,6 +50629,7 @@ def api_data_size():
         "capacity_projection": capacity_payload,
     })
 
+@_clears_probe_cache
 def _arm_live_control() -> tuple:
     exchange_audit = _refresh_bitfinex_exposure_audit()
     # Private exchange rows are caller-internal recovery material, never an API
@@ -50605,6 +50664,7 @@ def _retired_direct_arm_response():
     }), 409
 
 
+@_clears_probe_cache
 def _disarm_live_control(reason: str) -> dict:
     # Disarming also turns Fly's Live copy output OFF (fail closed).
     try:
@@ -58268,6 +58328,7 @@ def _create_dashboard_server():
         )
         _client_io_timeout_sec = 15.0
         _priority_client_io_timeout_sec = 2.0
+        _emergency_client_io_timeout_sec = 8.0   # HM #676: 5-10 s for pause/disarm/flatten
         _overload_io_timeout_sec = 0.1
         _slow_request_log_sec = 2.0
         _telemetry_log_interval_sec = 10.0
@@ -58316,7 +58377,6 @@ def _create_dashboard_server():
                 request.settimeout(0.05)
                 head = request.recv(1024, socket.MSG_PEEK)
                 request_path = _dashboard_request_path_from_head(head)
-                import http_emergency_routes as _her
                 _method, _path = _her.parse_request_line(head)
                 _emergency = _her.emergency_label(_method, _path)
                 if _emergency is not None:
@@ -58388,7 +58448,12 @@ def _create_dashboard_server():
                 # (a <=50ms peek) happens in the worker thread, never here;
                 # a non-emergency request is rejected there as dispatch_cap_full.
                 if not self._emergency_dispatch_reserve.acquire(blocking=False):
-                    self._reject_overload(request, reason="dispatch_cap_full")
+                    # HM #676 B2: dispatch AND reserve full, counted before any
+                    # classification under its own cap; emergency-admission is RED on it.
+                    self._reject_overload(
+                        request, reason="dispatch_cap_full_reserve_exhausted",
+                        cap_name="dispatch_reserve",
+                    )
                     return
                 reserved = True
             try:
@@ -58439,8 +58504,8 @@ def _create_dashboard_server():
                     self._general_thread_cap, self._research_segment_thread_cap
                 )
                 request.settimeout(
-                    self._priority_client_io_timeout_sec
-                    if is_priority
+                    self._emergency_client_io_timeout_sec if cap_name == "emergency"
+                    else self._priority_client_io_timeout_sec if is_priority
                     else self._client_io_timeout_sec
                 )
                 handler_started = time.monotonic()

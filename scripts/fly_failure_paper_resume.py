@@ -66,7 +66,7 @@ def _observe(request_json, *, until, monotonic, sleep) -> dict:
     while monotonic() < until:
         attempt += 1
         try:
-            status = request_json("/api/status", None)
+            status = request_json("/api/status?fresh=1", None)
             if isinstance(status, dict):
                 return status
             last = TypeError("status is not an object")

@@ -54,7 +54,7 @@ class _Bot:
         self.toggles = []
 
     def __call__(self, path, payload=None):
-        if path == "/api/status":
+        if path == "/api/status?fresh=1":
             return {**_active_status(live_armed=self.live_armed), "pause_owner": "",
                     "active_tiles": [{"lane": lane, "relay_eligible": self.relay_eligible} for lane in LANES]}
         if path == "/api/state":
@@ -155,7 +155,7 @@ class _RealRosterBot:
         self.lanes, self.enabled, self.toggles = lanes, dict(enabled), []
 
     def __call__(self, path, payload=None):
-        if path == "/api/status":
+        if path == "/api/status?fresh=1":
             return {**_active_status(), "pause_owner": "",
                     "active_tiles": [{"lane": lane, "relay_eligible": False} for lane in self.lanes]}
         if path == "/api/state":
@@ -231,7 +231,7 @@ def test_gate_fails_when_cycles_complete_but_every_model_call_fails(monkeypatch)
     monkeypatch.setattr(gate.time, "time", lambda: float(next(clock)))
 
     def request(path, token, payload=None, timeout=30):
-        if path == "/api/status":
+        if path == "/api/status?fresh=1":
             return {**_active_status(), "pause_owner": ""}
         return {"strategy_progress": {
             "scheduled_ai_cycle": {"completed_ts": float(next(clock))},
@@ -375,7 +375,7 @@ def test_transient_ready_503_does_not_fail_the_gate(monkeypatch):
     calls = {"ready": 0}
 
     def request(path, token, payload=None, timeout=30):
-        if path == "/api/status":
+        if path == "/api/status?fresh=1":
             return {**_active_status(), "pause_owner": ""}
         calls["ready"] += 1
         if calls["ready"] <= 9:  # longer than one _retrying budget

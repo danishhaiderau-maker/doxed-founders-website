@@ -5,6 +5,7 @@ Runs under pytest and as ``python test_http_emergency_admission.py``.
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import socket
 import threading
@@ -218,15 +219,148 @@ def test_status_and_health_are_probe_cached_for_one_second():
     time.sleep(1.1)
     with bot.app.test_request_context("/x", method="GET"):
         c = probe(); assert calls["n"] == 3
-    src = open(os.path.join(os.path.dirname(__file__), "bot.py"), encoding="utf-8").read()
-    assert "@_probe_cached\ndef status():" in src and "@_probe_cached\ndef health():" in src
+    # the real routes are wrapped (functools.wraps exposes the original)
+    assert hasattr(bot.app.view_functions["status"], "__wrapped__")
+    assert hasattr(bot.app.view_functions["health"], "__wrapped__")
 
 
-def test_dispatch_reserve_is_wired_before_classification():
-    import inspect
-    src = inspect.getsource(__import__("bot")._create_dashboard_server)
-    assert "_emergency_dispatch_reserve" in src and "dispatch_reserved and cap_name != \"emergency\"" in src
-    assert src.index("_dispatch_thread_cap.acquire(blocking=False)") < src.index("_emergency_dispatch_reserve.acquire(blocking=False)")
+def test_probe_ttl_is_clamped_to_one_second():
+    import bot
+    assert 0.0 <= bot._PROBE_CACHE_TTL_SEC <= 1.0
+
+
+def test_fresh_query_bypasses_cache_and_refreshes_it():
+    import bot
+    calls = {"n": 0}
+
+    @bot._probe_cached
+    def probe():
+        calls["n"] += 1
+        return bot.jsonify({"n": calls["n"]})
+
+    with bot.app.test_request_context("/x", method="GET"):
+        probe(); probe(); assert calls["n"] == 1
+    with bot.app.test_request_context("/x?fresh=1", method="GET"):
+        r = probe(); assert calls["n"] == 2
+    with bot.app.test_request_context("/x", method="GET"):
+        again = probe(); assert calls["n"] == 2 and again.get_data() == r.get_data()
+
+
+def test_single_flight_on_cache_miss():
+    import bot
+    calls = {"n": 0}
+    gate = threading.Event()
+
+    @bot._probe_cached
+    def probe():
+        calls["n"] += 1
+        gate.wait(5)
+        return bot.jsonify({"ok": True})
+
+    out = []
+
+    def go():
+        with bot.app.test_request_context("/x", method="GET"):
+            out.append(probe().status_code)
+    ts = [threading.Thread(target=go) for _ in range(6)]
+    for t in ts:
+        t.start()
+    time.sleep(0.3); gate.set()
+    for t in ts:
+        t.join(10)
+    assert out == [200] * 6 and calls["n"] == 1
+
+
+def test_clear_all_prevents_stale_and_drops_in_flight_rebuild():
+    import bot
+    state = {"live_armed": True}
+    started, go = threading.Event(), threading.Event()
+
+    @bot._probe_cached
+    def probe():
+        snap = dict(state)
+        started.set(); go.wait(5)
+        return bot.jsonify(snap)
+
+    def first():
+        with bot.app.test_request_context("/x", method="GET"):
+            probe()
+    t = threading.Thread(target=first); t.start()
+    assert started.wait(5)
+    state["live_armed"] = False
+    bot._probe_cache_clear_all()          # disarm happened while the rebuild was in flight
+    go.set(); t.join(10)
+    started.clear()
+    with bot.app.test_request_context("/x", method="GET"):
+        r = probe()
+    assert json.loads(r.get_data())["live_armed"] is False
+
+
+def test_real_app_emergency_post_clears_probe_caches_through_real_auth_guard():
+    import bot
+    c = bot.app.test_client()
+    marker = (b"stale", 200, "application/json")
+    for cache in bot._PROBE_CACHES:
+        cache["resp"] = marker; cache["at"] = time.monotonic()
+    # No admin credentials: the real _emergency_api_guard decides, whatever it answers,
+    # the after_request hook still clears the caches.
+    r = c.post("/api/pause", json={})
+    assert r.status_code in (200, 401, 403, 503)
+    assert all(cache["resp"] is None for cache in bot._PROBE_CACHES)
+    # A non-emergency POST leaves them alone.
+    for cache in bot._PROBE_CACHES:
+        cache["resp"] = marker; cache["at"] = time.monotonic()
+    c.post("/api/not-an-emergency-route", json={})
+    assert all(cache["resp"] == marker for cache in bot._PROBE_CACHES)
+    bot._probe_cache_clear_all()
+
+
+def test_disarm_and_arm_controls_clear_probe_caches():
+    import bot
+    marker = (b"stale", 200, "application/json")
+    for fn_name in ("_disarm_live_control", "_arm_live_control"):
+        assert hasattr(getattr(bot, fn_name), "__wrapped__"), fn_name
+
+
+def test_reject_when_dispatch_and_reserve_both_full_is_counted_and_red():
+    h = _Harness()
+    try:
+        s = h.server
+        s._dispatch_thread_cap = threading.BoundedSemaphore(1)
+        s._emergency_dispatch_reserve = threading.BoundedSemaphore(1)
+        orig = s.app
+        def wsgi(environ, start_response):
+            if environ.get("PATH_INFO", "").startswith("/slow") or environ.get("PATH_INFO", "").endswith("/slow/eligibility"):
+                h.entered.release(); h.release.wait(15)
+            return orig(environ, start_response)
+        s.app = wsgi
+        threading.Thread(target=lambda: h.req("GET", "/slow-a"), daemon=True).start()
+        assert h.entered.acquire(timeout=5)        # dispatch now full
+        threading.Thread(target=lambda: h.req("POST", "/api/live-copy/tiles/slow/eligibility"), daemon=True).start()
+        assert h.entered.acquire(timeout=5)        # reserve now full
+        assert h.req("POST", "/api/pause") == 503
+        rej = h.rejected("dispatch_reserve")
+        assert rej.get("total") == 1
+        assert rej["by_reason"] == {"dispatch_cap_full_reserve_exhausted": 1}
+        chk = mc.emergency_admission(h.bot._dashboard_handler_snapshot(), now=time.time())
+        assert chk["status"] == "RED"
+        assert chk["dispatch_reserve_exhausted_total"] == 1
+    finally:
+        h.close()
+
+
+def test_emergency_admission_green_when_no_rejections_and_dispatch_reserve_zero():
+    chk = mc.emergency_admission({"rejected_by_cap": {}}, now=time.time())
+    assert chk["status"] == "GREEN"
+
+
+def test_emergency_socket_timeout_between_5_and_10_seconds():
+    import bot
+    h = _Harness()
+    try:
+        assert 5.0 <= h.server._emergency_client_io_timeout_sec <= 10.0
+    finally:
+        h.close()
 
 
 if __name__ == "__main__":

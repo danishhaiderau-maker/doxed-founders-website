@@ -179,7 +179,7 @@ def restore_registry_tiles(request, prior: dict | None = None) -> dict:
     defaults = checkout_registry_defaults()
     if prior is None:
         prior = prior_operator_toggles()
-    status = request("/api/status", None)
+    status = request("/api/status?fresh=1", None)
     eligible = relay_eligible_tiles(status.get("active_tiles") or [])
     if eligible:
         raise SystemExit("registry tiles must remain relay-ineligible: " + ",".join(eligible))
@@ -210,7 +210,7 @@ def restore_registry_tiles(request, prior: dict | None = None) -> dict:
         if result.get("enabled") is not on:
             raise SystemExit(f"tile toggle {'ON' if on else 'OFF'} failed for {lane}")
         print(json.dumps({"restored_tile": lane, "enabled": on, "source": source[lane]}), flush=True)
-    receipt = tiles_state_receipt(request("/api/status", None), request("/api/state", None), target, held,
+    receipt = tiles_state_receipt(request("/api/status?fresh=1", None), request("/api/state", None), target, held,
                                   expected=expected, retired=retired)
     receipt["target_source"] = source
     print("tiles receipt " + json.dumps(receipt, sort_keys=True), flush=True)
@@ -353,7 +353,7 @@ def main(argv=None) -> int:
     completions: list[float] = []
     last_problems: list[str] = []
     while time.time() - started < deadline_sec:
-        status = _retrying(lambda: _request("/api/status", token))
+        status = _retrying(lambda: _request("/api/status?fresh=1", token))
         last_problems = paper_active_violations(status, expected)
         if last_problems:
             raise SystemExit("paper not active after deploy: " + ",".join(last_problems))
