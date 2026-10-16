@@ -5171,6 +5171,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         peak_price=current_peak, **exit_kwargs,
     )
     if not action:
+        if source_pos.get("_tp1_pending"):
+            _tp1_cancel_pending(source_pos, "policy no longer returns the TP1 action")
         with trade_lock:
             source_pos["policy_peak_price"] = current_peak
             if "policy_state" in pos:
@@ -5185,6 +5187,27 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
     if getattr(action, "maker", False) and float(action.remaining_fraction) <= 0:
         pos["exit_fee_type"] = "MAKER"
     fill_px = float(book_price) if book_price else float(price)
+    _leg_trigger_ts = time.time()
+    _leg_fill = None
+    if source_pos.get("_tp1_pending") and not (float(action.remaining_fraction) > 0
+                                               and (source_pos["_tp1_pending"] or {}).get("key") == action.partial_key):
+        _tp1_cancel_pending(source_pos, f"policy now returns a different action ({action.reason})")
+    if float(action.remaining_fraction) > 0 and _is_paper_book_lane(pos):
+        # Partial (TP1) legs: same shared pricer, no sleep under position_evaluation_lock (HM B2).
+        _gate, _leg = _tp1_gate(source_pos, action.partial_key, _leg_trigger_ts, direction, float(action.close_fraction))
+        if _gate == "WAIT":
+            return False
+        _leg_trigger_ts = float(_leg.pop("_trigger_ts"))
+        _leg_fill = _leg
+        if _leg_fill.get("status") == "FILLED" and float(_leg_fill.get("price") or 0) > 0:
+            fill_px = float(_leg_fill["price"])
+            if _leg_fill.get("delay_source") == "FORCED_NO_DELAY":
+                pos["fresh_data_excluded"] = True  # livelock-guard leg: priced without delay, never fresh
+        else:
+            pos["fresh_data_excluded"] = True  # unpriced leg: trigger-price fallback, never fresh data
+        with trade_lock:
+            source_pos.pop("_tp1_pending", None)
+        pos.pop("_tp1_pending", None)
     if action.partial_key is not None:
         pos.setdefault("policy_completed_partials", []).append(action.partial_key)
     close_fraction = float(action.close_fraction)
@@ -5214,6 +5237,12 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         "cumulative_realized_net_usd": _buf_float(
             pos.get("policy_partial_realized_net_usd"), 0.0
         ),
+        "leg_trigger_ts": _leg_trigger_ts,
+        "leg_fill_ts": (_leg_fill or {}).get("fill_ts"),
+        "leg_priced_by": "paper_fill_book10l" if (_leg_fill or {}).get("status") == "FILLED" else None,
+        "leg_fresh_eligible": bool(_leg_fill is None or (_leg_fill or {}).get("status") == "FILLED"),
+        "leg_fallback": ("TRIGGER_PRICE_UNPRICED_LEG" if _leg_fill is not None and _leg_fill.get("status") != "FILLED" else None),
+        "leg_provenance": __import__("tile_fill").provenance(_leg_fill) if _leg_fill is not None else None,
     }
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
@@ -6897,8 +6926,224 @@ def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
 # current book would book an impossible price improvement (B1/B2 prod: LONG
 # limits 82497/82507 booked at 82488 after a 499 s rest).  Only a fill admitted
 # MARKETABLE_AT_PLACEMENT is a taker that may take the better opposite quote.
+def _funding_rate_now():
+    try:
+        with state_lock:
+            return (state.get("funding") or {}).get("rate")
+    except Exception:
+        return None
+
+
+def _is_paper_book_lane(rec) -> bool:
+    """Tiles 1-5 price every paper fill through tile_fill -> paper_fill (HARD RULE 16 Oct 17:01)."""
+    import tile_fill as _tf
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("bitfinex_order_id") or rec.get("bitfinex_live_entry") or rec.get("bitfinex_position_id"):
+        return False
+    return str(rec.get("research_lane") or "").upper() in _tf.MIGRATED_LANES
+
+
+def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
+    """IOC entry at signal_ts + measured delay from the 10-level book; cached on the order.
+    Returns None while the fill time has not arrived (unless force)."""
+    import tile_fill as _tf
+    cached = order.get("paper_fill_result")
+    if isinstance(cached, dict):
+        return cached
+    lane = str(order.get("research_lane") or "").upper()
+    signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
+    delay_s, delay_source = _disloc_delay(lane, "entry")
+    if not force and now < signal_ts + float(delay_s):
+        return None
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
+    order.setdefault("requested_qty", order.get("qty"))
+    res = _tf.entry_fill(direction, float(order.get("requested_qty") or order.get("qty") or 0),
+                         signal_ts, delay_s, delay_source)
+    if force and res.get("status") == "REJECT_NO_BOOK":
+        return res  # a forced (immediate) look is not cached: the gate path may still price it from a later book
+    order["paper_fill_result"] = res
+    return res
+
+
+def _paper_result_as_sim(res: dict) -> dict:
+    status = str((res or {}).get("status") or "")
+    px = float((res or {}).get("price") or 0)
+    filled = float((res or {}).get("filled_qty") or 0)
+    ok = status in ("FILLED", "PARTIAL") and px > 0 and filled > 0
+    meta = {k: v for k, v in (res or {}).items() if k not in ("price", "filled_qty")}
+    return {**meta, "fill_price": px if ok else 0.0, "filled_qty": filled if ok else 0.0, "is_taker": True,
+            "avg_price": px if ok else 0.0, "best_price": px, "slippage_usd": 0.0,
+            "fully_filled": ok and status == "FILLED", "partial_fill": ok and status == "PARTIAL",
+            "levels_consumed": 0, "unfilled_qty": 0.0,
+            "evidence_status": "COMPLETE" if ok else "UNKNOWN", "unknown_reason": None if ok else status}
+
+
+PAPER_IOC_NO_FILL_SHADOW_FILE = "paper_ioc_no_fill_shadow.jsonl"
+
+
+def _paper_no_fill_shadow_row(order: dict, reason: str) -> dict:
+    """B5: an IOC entry that did not fill leaves a shadow row (never a trade): signal_ts, cap_px, delay and the
+    book snapshots at signal and at the would-be fill second."""
+    res = order.get("paper_fill_result") if isinstance(order.get("paper_fill_result"), dict) else {}
+    return {"event": "PAPER_SHADOW_NO_FILL", "shadow_only": True, "trade_id": order.get("trade_id"),
+            "research_lane": order.get("research_lane"), "reason": reason, "status": res.get("status"),
+            "side": res.get("side") or order.get("signal_dir") or order.get("side"),
+            "signal_ts": res.get("signal_ts"), "cap_px": res.get("cap_px"), "ioc_cap_bp": res.get("ioc_cap_bp"),
+            "delay_s": res.get("delay_s"), "delay_source": res.get("delay_source"),
+            "fill_ts": res.get("fill_ts"), "fill_model": res.get("fill_model"),
+            "fill_model_version": res.get("fill_model_version"),
+            "depth_snapshot_signal": res.get("depth_snapshot_signal"),
+            "depth_snapshot_fill": res.get("depth_snapshot_fill"), "ts": time.time()}
+
+
+def _paper_forced_reasons() -> frozenset:
+    from paper_pnl_canon import FORCED_EXIT_REASONS
+    return frozenset(FORCED_EXIT_REASONS) | {"TILE_RETIRED", "MANUAL_CLOSE", "EMERGENCY_ACTION"}
+
+
+def _tp1_cancel_pending(source_pos: dict, why: str) -> None:
+    """Resolve a pending TP1 marker explicitly (never leave it dangling) and log why."""
+    with trade_lock:
+        pend = source_pos.pop("_tp1_pending", None)
+    if pend:
+        logger.warning(f"[TP1 PENDING] cancelled trade_id={source_pos.get('trade_id')} key={pend.get('key')} "
+                       f"after {time.time() - float(pend.get('trigger_ts') or 0):.2f}s: {why} [PIPELINE ENFORCEMENT]")
+
+
+def _tp1_gate(source_pos: dict, key, now: float, direction: str, close_fraction: float):
+    """TP1 / partial leg without any sleep (B2). The first firing only stamps a pending marker
+    (trigger_ts, due_ts = trigger + measured delay). A later evaluation at or after due_ts prices the leg
+    from the book second at trigger_ts + delay. Returns (state, leg): "WAIT" or "DUE" (+ the paper_fill result).
+    Livelock guard (HM c): a marker older than TP1_PENDING_MAX_S is restarted with a log; after
+    TP1_MAX_RESTARTS restarts of the same key the leg is priced with the no-wait forced pricer
+    (FORCED_NO_DELAY, never fresh) instead of restarting forever."""
+    import tile_fill as _tf
+    lane = str(source_pos.get("research_lane") or "").upper()
+    delay_s, delay_source = _disloc_delay(lane, "exit")
+    original = float(source_pos.get("policy_original_qty") or source_pos.get("qty") or 0)
+    qty = max(0.0, original * float(close_fraction))
+    pend = source_pos.get("_tp1_pending")
+    restarts = 0
+    if isinstance(pend, dict) and pend.get("key") == key:
+        if now - float(pend.get("trigger_ts") or 0) > _tf.TP1_PENDING_MAX_S:
+            restarts = int(pend.get("restarts") or 0) + 1
+            logger.warning(f"[TP1 PENDING] stale marker restarted trade_id={source_pos.get('trade_id')} key={key} "
+                           f"restarts={restarts} [PIPELINE ENFORCEMENT]")
+            pend = None
+    elif pend is not None:
+        pend = None
+    if pend is None:
+        if restarts >= _tf.TP1_MAX_RESTARTS:
+            logger.error(f"[TP1 PENDING] livelock guard: pricing leg without delay trade_id={source_pos.get('trade_id')} "
+                         f"key={key} restarts={restarts} [PIPELINE ENFORCEMENT]")
+            d = _tf.FORCED_LOOKBACK_S
+            res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY") if qty > 0 else None
+            return "DUE", {**(res or {}), "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY", "_trigger_ts": float(now)}
+        with trade_lock:
+            source_pos["_tp1_pending"] = {"key": key, "trigger_ts": now, "due_ts": now + float(delay_s),
+                                          "delay_s": float(delay_s), "delay_source": delay_source,
+                                          "restarts": restarts}
+        return "WAIT", None
+    if now < float(pend["due_ts"]):
+        return "WAIT", None
+    res = _tf.exit_fill(direction, qty, float(pend["trigger_ts"]), pend["delay_s"], pend["delay_source"]) if qty > 0 else None
+    return "DUE", {**(res or {}), "_trigger_ts": float(pend["trigger_ts"])}
+
+
+def _exit_price_vwap(pos: dict, final_price: float, final_qty: float) -> float:
+    """VWAP over every closed leg (partial receipts + final leg), for the row's exit_price."""
+    q = p = 0.0
+    for r in pos.get("partial_exit_receipts") or []:
+        cq, cp = r.get("closed_qty"), r.get("price")
+        if r.get("realized_gross_usd") is not None and cq and cp:  # genuine partial legs only
+            q += float(cq)
+            p += float(cq) * float(cp)
+    q += float(final_qty)
+    p += float(final_qty) * float(final_price)
+    return round(p / q, 2) if q > 0 else float(final_price)
+
+
+_PAPER_EXIT_TLS = threading.local()  # inline (no-thread) closes must never wait: see _dispatch_position_close
+
+
+def _paper_exit_sim(res: dict, pos: dict, direction: str, qty: float, marks: dict) -> tuple:
+    px = float(res["price"])
+    trigger = float(pos.get("_exit_eval_price") or 0)
+    sim = {**{k: v for k, v in res.items() if k not in ("price", "filled_qty")},
+           "avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": "paper_fill_book10l",
+           "trigger_price": round(trigger, 2) if trigger > 0 else None, "fill_price": round(px, 2),
+           "fill_ts": res.get("fill_ts"),
+           "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
+                                   if trigger > 0 else None)}
+    marks["exit_trigger_price"] = sim["trigger_price"]
+    marks["exit_fill_price"] = sim["fill_price"]
+    return round(px, 2), sim
+
+
+def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
+    """Forced / admin / retired-tile / overdue / inline closes never wait (HM B3): price from the latest complete
+    book second at or before now (no look-ahead), delay_source FORCED_NO_DELAY, never fresh data.
+    Returns (result_or_None, marks); the caller applies marks to the position only after it holds the close claim."""
+    import tile_fill as _tf
+    d = _tf.FORCED_LOOKBACK_S
+    marks = {"fresh_data_excluded": True, "_paper_exit_trigger_ts": None}
+    res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY")
+    if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
+        marks.update(exit_status="FORCED_NO_BOOK", exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK")
+        return None, marks
+    res = {**res, "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY"}
+    marks["exit_status"] = "PAPER_FILL_FORCED"
+    return _paper_exit_sim(res, pos, direction, qty, marks), marks
+
+
+def _paper_lane_exit(pos: dict, exit_reason: str):
+    """Exit priced by paper_fill at exit_trigger_ts + delay (bounded wait). Forced closes, exits older than
+    EXIT_FORCE_CAP_S and inline closes use the no-wait path; an exit still unpriced after EXIT_FORCE_AFTER_S is
+    FORCED_NO_BOOK. Never writes to pos: returns (result_or_None, marks) and the caller applies the marks
+    after taking the close claim (a sleeping thread that loses the claim leaves no trace)."""
+    import tile_fill as _tf
+    lane = str(pos.get("research_lane") or "").upper()
+    now = time.time()
+    direction = str(pos.get("dir") or "").upper()
+    qty = float(pos.get("qty") or 0)
+    t0 = float(pos.get("exit_trigger_ts") or 0) or float(pos.get("_paper_exit_trigger_ts") or 0) or now
+    if (str(exit_reason or "").upper() in _paper_forced_reasons() or now - t0 >= _tf.EXIT_FORCE_CAP_S
+            or getattr(_PAPER_EXIT_TLS, "no_wait", False)):
+        out, marks = _paper_forced_exit(pos, now, direction, qty)
+        return out, {**marks, "_paper_exit_trigger_ts": None}
+    delay_s, delay_source = _disloc_delay(lane, "exit")
+    res = None
+    while True:
+        wait = t0 + float(delay_s) - time.time()
+        if wait > 0:
+            time.sleep(min(wait, 3.0))
+        res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
+        if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
+            break
+        if time.time() - t0 >= _tf.EXIT_FORCE_AFTER_S:
+            res = None
+            break
+        time.sleep(0.5)
+    if res is None:
+        return None, {"exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
+                      "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0}
+    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None}
+    return _paper_exit_sim(res, pos, direction, qty, marks), marks
+
+
+def _apply_paper_exit_marks(pos: dict, marks: dict) -> None:
+    for k, v in (marks or {}).items():
+        if v is None:
+            pos.pop(k, None)
+        else:
+            pos[k] = v
+
+
 def resolve_sim_fill_with_depth(order: dict) -> dict:
     """Depth-aware market fill; every limit fill respects its hard price."""
+    if _is_paper_book_lane(order):
+        return _paper_result_as_sim(_paper_lane_entry_result(order, time.time(), force=True))
     limit = float(order.get("limit_price") or 0)
     side = str(order.get("side") or "").lower()
     qty = float(order.get("qty") or 0)
@@ -6980,6 +7225,8 @@ def resolve_sim_fill_price(order: dict) -> float:
     order.setdefault("requested_qty", order.get("qty"))
     result = resolve_sim_fill_with_depth(order)
     order["fill_sim"] = {k: v for k, v in result.items() if k not in ("fill_price", "filled_qty")}
+    if str(result.get("fill_model") or "") == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY" and result.get("filled_qty"):
+        order.pop("paper_fill_result", None)  # consumed: fill_sim carries it; keep persisted rows small
     order["filled_qty"] = result.get("filled_qty")
     order["remaining_qty"] = result.get("unfilled_qty")
     if result.get("partial_fill"):
@@ -7293,6 +7540,12 @@ def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = Tru
     if dt_hours <= 0:
         return
     payment = funding_cost_for_position(pos, rate, dt_hours)
+    try:
+        import tile_fill as _tf_f
+        for _b in _tf_f.funding_fields(last, now, rate)["funding_ts_crossed"]:
+            pos.setdefault("funding_settlements", []).append({"ts": _b, "rate": rate})
+    except Exception:  # noqa: BLE001 - evidence only; never blocks accrual
+        pass
     pos["funding_fees"] = pos.get("funding_fees", 0.0) + payment
     pos["last_funding_accrual_ts"] = now
 
@@ -22654,6 +22907,9 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
     except (TypeError, ValueError):
         pass
     candidates.append((_latest_reset_receipt_anchor(), "reset_receipt"))
+    fse = _fresh_start_epoch()
+    if fse:
+        candidates.append((float(fse["epoch_ts"]), "fresh_start"))
     manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
     started = manifest.get("started_at_utc") if isinstance(manifest, dict) else None
     if started:
@@ -22672,6 +22928,30 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
         best = (float(bot_start_time or 0.0), "bot_start")
     _epoch_boundary_cache.update(at=now, value=best)
     return best
+
+
+_FRESH_START_EPOCH_FILE = "fresh_start_epoch.json"
+
+
+def _fresh_start_epoch_path() -> str:
+    return os.path.join(os.getenv("BOT_DATA_DIR") or os.getcwd(), _FRESH_START_EPOCH_FILE)
+
+
+def _fresh_start_epoch() -> dict | None:
+    """HM 14:10 fresh-start epoch (set once after the guarded deploy is verified). Never deletes data."""
+    try:
+        with open(_fresh_start_epoch_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        if isinstance(d, dict) and float(d.get("epoch_ts") or 0) > 0:
+            import paper_fill as _pf_epoch
+            _pf_epoch.FRESH_EPOCH_TS = float(d["epoch_ts"])  # epoch filter: pre-epoch rows are never fresh
+            return d
+        return None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+_fresh_start_epoch()  # boot: initialise paper_fill.FRESH_EPOCH_TS from a stamped epoch (None until stamped)
 
 
 def _current_epoch_id_for_display() -> str | None:
@@ -25777,6 +26057,14 @@ def _pending_limit_ready_for_fill(
 ) -> bool:
     """Honor relay settlement before a terminal marketable source fill."""
     now = time.time() if now is None else float(now)
+    if _is_paper_book_lane(order):
+        # Tiles 1-5: no touch / trade-through / queue admission. IOC at signal + delay from the book.
+        _res = _paper_lane_entry_result(order, now)
+        if _res is None:
+            return False
+        if _res.get("status") not in ("FILLED", "PARTIAL"):
+            order["paper_ioc_no_fill"] = str(_res.get("status") or "NO_FILL")
+        return True
 
     def persist_market_evidence(evidence: dict, executable: bool = False):
         append_observation = globals().get("_append_source_market_observation")
@@ -26057,6 +26345,12 @@ def process_pending_orders():
             fill_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref") or {}
             if is_terminal_signal(fill_signal):
                 continue
+            if order.get("paper_ioc_no_fill"):
+                _no_fill_reason = "PAPER_IOC_" + str(order["paper_ioc_no_fill"])
+                _safe_append_jsonl(PAPER_IOC_NO_FILL_SHADOW_FILE, _paper_no_fill_shadow_row(order, _no_fill_reason),
+                                   label="PAPER NO FILL SHADOW")
+                cancelled_at_fill.append((order, fill_signal, _no_fill_reason))
+                continue
             fill_age_sec = _order_signal_age_sec(order, fill_signal, time.time())
             if chase_age_window_should_cancel(fill_age_sec):
                 logger.debug(
@@ -26138,6 +26432,7 @@ def process_pending_orders():
                 lifecycle_final=True,
             )
         _record_expired_order(order, reason)
+        order.pop("paper_fill_result", None)  # evidence is now in the expired row / shadow row
         expire_signal_for_order(order, reason)
         logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
@@ -26482,7 +26777,12 @@ def _dispatch_position_close(pos: dict, reason: str) -> None:
             _exit_close_threads[trade_id] = thread
     if inline:
         _protective_exit_status["inline_closes"] += 1
-        close_position(pos, reason)
+        # Inline closes run on the caller's thread: they must never sleep for the paper-fill delay (HM a).
+        _PAPER_EXIT_TLS.no_wait = True
+        try:
+            close_position(pos, reason)
+        finally:
+            _PAPER_EXIT_TLS.no_wait = False
         return
     _protective_exit_status["async_closes"] += 1
     thread.start()
@@ -29892,6 +30192,8 @@ def _record_expired_order(source: dict, reason: str):
         "reason": reason,
         "research_lane": source.get("research_lane") or master.get("research_lane"),
         "research_model": source.get("research_model") or master.get("research_model"),
+        "paper_no_fill": (_paper_no_fill_shadow_row(source, reason)
+                          if isinstance(source.get("paper_fill_result"), dict) else None),
         "closest_price": fill_metrics.get("closest_price"),
         "missed_by_usd": fill_metrics.get("missed_by_usd"),
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
@@ -30903,7 +31205,13 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_trigger_source": pos.get("exit_trigger_source"),
         "exit_trigger_price": pos.get("exit_trigger_price"),
         "exit_fill_ts": exit_fill,
-        "exit_trigger_to_fill_sec": round(exit_fill - trigger_ts, 3) if exit_fill and trigger_ts else None,
+        # Paper-book exits wait the measured delay by design: latency is measured from trigger + delay.
+        "exit_delay_s": ((pos.get("exit_fill_sim") or {}).get("delay_s")
+                         if isinstance(pos.get("exit_fill_sim"), dict) else None),
+        "exit_trigger_to_fill_sec": (
+            round(max(0.0, exit_fill - trigger_ts - float(((pos.get("exit_fill_sim") or {}).get("delay_s") or 0)
+                                                           if isinstance(pos.get("exit_fill_sim"), dict) else 0)), 3)
+            if exit_fill and trigger_ts else None),
         "signal_to_order_sent_sec": round(order_sent_ts - signal_ts, 3) if order_sent_ts and signal_ts else None,
         "exit_sent_ts": exit_sent,
         "exit_trigger_to_sent_sec": round(exit_sent - trigger_ts, 3) if exit_sent and trigger_ts else None,
@@ -30955,7 +31263,15 @@ def close_position(pos: dict, exit_reason: str):
     # uninitialised name here used to crash the position manager exactly when a
     # natural ATR/path exit attempted to close a position.
     entry_is_maker = pos.get("entry_fee_type") == "MAKER"
-    price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
+    paper_marks = None
+    _paper_exit = None
+    if _is_paper_book_lane(pos):
+        # Tiles 1-5: shared pricer. None (no book) falls back to the legacy BBO pricer, tagged and never fresh.
+        _paper_exit, paper_marks = _paper_lane_exit(pos, exit_reason)
+    if _paper_exit is not None:
+        price, exit_sim = _paper_exit
+    else:
+        price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
         pos["exit_fill_sim"] = exit_sim
     # Closing performs persistence, research logging, relay publication and
@@ -30977,7 +31293,14 @@ def close_position(pos: dict, exit_reason: str):
             return
         # All pricing/accounting preparation operates on a private copy. The
         # authoritative open position remains unchanged until WAL PREPARE.
+        if paper_marks:
+            # (HM b) exit_status / trigger-ts bookkeeping only after the close claim is held
+            with trade_lock:
+                _apply_paper_exit_marks(source_pos, {k: v for k, v in paper_marks.items()
+                                                      if k in ("_paper_exit_trigger_ts", "exit_status")})
         pos = copy.deepcopy(source_pos)
+        if paper_marks:
+            _apply_paper_exit_marks(pos, paper_marks)
         close_claim_ts = time.time()
         pos["exit_lock_wait_ms"] = round((close_claim_ts - close_claim_dispatch_ts) * 1000.0, 3)
         close_claim_signal = trades_map.get(trade_id, {}).get("signal_ref", {})
@@ -31131,6 +31454,29 @@ def close_position(pos: dict, exit_reason: str):
             # fill (side-correct BBO at close time) are logged separately.
             "exit_trigger_price": pos.get("exit_trigger_price"),
             "exit_fill_price": pos.get("exit_fill_price", price),
+            "exit_price": _exit_price_vwap(pos, price, qty) if _is_paper_book_lane(pos) else price,
+            "exit_price_basis": "VWAP_ALL_LEGS" if _is_paper_book_lane(pos) else "FINAL_LEG",
+            "legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED")),
+            "fill_model": (pos.get("fill_sim") or {}).get("fill_model"),
+            "fill_model_version": (pos.get("fill_sim") or {}).get("fill_model_version"),
+            "delay_s": (pos.get("fill_sim") or {}).get("delay_s"),
+            "delay_source": (pos.get("fill_sim") or {}).get("delay_source"),
+            "ask_age_ms": (pos.get("fill_sim") or {}).get("ask_age_ms"),
+            "exit_ask_age_ms": (pos.get("exit_fill_sim") or {}).get("ask_age_ms") if isinstance(pos.get("exit_fill_sim"), dict) else None,
+            "depth_snapshot_signal": (pos.get("fill_sim") or {}).get("depth_snapshot_signal"),
+            "depth_snapshot_fill": (pos.get("fill_sim") or {}).get("depth_snapshot_fill"),
+            "exit_depth_snapshot_fill": (pos.get("exit_fill_sim") or {}).get("depth_snapshot_fill") if isinstance(pos.get("exit_fill_sim"), dict) else None,
+            "entry_provenance": __import__("tile_fill").provenance(pos.get("fill_sim")) if _is_paper_book_lane(pos) else None,
+            "exit_provenance": __import__("tile_fill").provenance(pos.get("exit_fill_sim")) if _is_paper_book_lane(pos) else None,
+            "fill_model_tag": (None if (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED"))
+                               else "LEGACY_PRICING_INVALID"),
+            "fresh_eligible": bool(_is_paper_book_lane(pos) and pos.get("exit_status") == "PAPER_FILL"
+                                   and not pos.get("fresh_data_excluded")),
+            "fee_model": __import__("tile_fill").FEE_MODEL,
+            **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now(),
+                                                      settlements=pos.get("funding_settlements")),
+            "exit_status": pos.get("exit_status"),
+            "exit_fallback": pos.get("exit_fallback"),
             "exit_fill_source": (pos.get("exit_fill_sim") or {}).get("source") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "exit_trigger_slippage_bp": (pos.get("exit_fill_sim") or {}).get("trigger_slippage_bp") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "dur_min": (time.time() - pos.get("entry_ts", 0)) / 60,
@@ -32263,6 +32609,19 @@ def _disloc_entry_pause_owner():
     return owner if owner in (PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_OPERATOR) else None
 
 
+_DISLOC_DELAYS = None
+
+
+def _disloc_delay(lane: str, leg: str):
+    """Measured live delay per lane/leg (DelaySampler); default_until_n10 while live is OFF."""
+    global _DISLOC_DELAYS
+    import paper_fill as _pf
+    if _DISLOC_DELAYS is None:
+        _DISLOC_DELAYS = _pf.DELAYS or _pf.DelaySampler()
+        _pf.DELAYS = _DISLOC_DELAYS
+    return _DISLOC_DELAYS.delay(lane, leg)
+
+
 def _disloc_bind_runtime(lane: str, evaluator) -> None:
     """Tile 6 DISLOC self-simulates its paper orders on the evaluator tick (never the order pipeline)."""
     if not hasattr(evaluator, "bind_runtime"):
@@ -32274,6 +32633,7 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_fn=_disloc_touch,
         touch_meta_fn=_disloc_touch_meta,
         entries_allowed_fn=_disloc_entry_pause_owner,
+        delay_fn=_disloc_delay,
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
         regime_fn=lambda: _current_regime_tag(),
@@ -33210,7 +33570,8 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
-    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
+    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
+    "/api/monitor/fresh-start",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -43451,6 +43812,10 @@ def _build_relay_execution_state_snapshot() -> dict:
         key: round(value, 3) for key, value in phase_timings.items()
     }
     snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
+    try:
+        _RELAY_PHASES.record(phase_timings)
+    except Exception:
+        pass
     return snapshot
 
 
@@ -45204,6 +45569,7 @@ def _start_runtime_telemetry():
             pressure_fn=_bounded_process_pressure_snapshot,
             handlers_fn=_dashboard_handler_snapshot,
             lock_fn=lambda: trade_lock.telemetry_counters(top=3, reset_interval=True),
+            phase_fn=_RELAY_PHASES.drain,
             revision_fn=_runtime_git_rev,
             crash_dump_path=os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
             stop_event=shutdown_event,
@@ -45212,6 +45578,10 @@ def _start_runtime_telemetry():
         _RUNTIME_TELEMETRY = sampler
     except Exception as e:
         logger.error(f"[RUNTIME TELEMETRY] start failed: {type(e).__name__}: {e}")
+
+
+_RELAY_PHASES = _rtel.PhaseRecorder(
+    ("trade_lock_wait", "trade_lock_hold", "post_lock_projection", "total"))
 
 
 def _runtime_telemetry_status(now: float | None = None) -> dict:
@@ -46612,6 +46982,7 @@ def _monitor_tiles_scope(args, *, include_forced_default: bool) -> dict:
         "epoch_cutoff_utc": _current_epoch_cutoff_utc(), "epoch_cutoff_source": cutoff_source,
         "lanes": lanes,
         "include_forced": monitor_tiles.parse_bool(args.get("include_forced"), include_forced_default),
+        "fresh_only": monitor_tiles.parse_bool(args.get("fresh_only"), False),
         "be_band_bp": monitor_tiles.parse_be_band(args.get("be_band_bp")),
         "forced_exit_reasons": sorted(STATS_EXCLUDED_EXIT_REASONS),
         "source": _MONITOR_TILES_SOURCE,
@@ -46644,6 +47015,8 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
                 fill_evidence=fills.get(str(raw.get("trade_id") or "")),
                 parse_ts=parse_ts, be_band_bp=scope["be_band_bp"])
             if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                continue
+            if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
                 continue
             out[lane].append(row)
     if "closed" in statuses:
@@ -47858,6 +48231,171 @@ def monitor_shipper():
 def monitor_gaps_route():
     """Compact level per gap item (same block as /api/status.monitor_gaps)."""
     return _monitor_tiles_guard(lambda now: monitor_gaps_summary(), _MONITOR_GAP_MAX_BYTES)
+
+
+def _integrity_gap_facts(now: float) -> dict:
+    """Facts for integrity_gaps.evaluate; every part fails soft to None."""
+    import integrity_gaps as _ig
+    facts = {}
+
+    def part(key, fn):
+        try:
+            facts[key] = fn()
+        except Exception:
+            facts[key] = None
+
+    part("live_armed", lambda: bool(state.get("live_armed", False)))
+    part("force_paper", _force_paper_mode_active)
+    part("epoch_ts", lambda: (_fresh_start_epoch() or {}).get("epoch_ts") or state.get("fresh_collection_start_time"))
+
+    def runtime():
+        lh = (_runtime_telemetry_status(now) or {}).get("last_hour") or {}
+        return {"trade_lock_wait_p95_ms": lh.get("phase_trade_lock_wait_p95_max_ms"),
+                "trade_lock_wait_max_ms": lh.get("phase_trade_lock_wait_max_ms"),
+                "trade_lock_hold_max_ms": lh.get("phase_trade_lock_hold_max_ms"),
+                "scheduler_lag_max_ms": lh.get("scheduler_lag_max_ms"),
+                "cpu_pct_max": lh.get("process_cpu_pct_max")}
+    part("runtime", runtime)
+
+    def tile_integrity():
+        import tile_integrity as _ti
+        return _ti.gap_facts(now) if hasattr(_ti, "gap_facts") else None
+    part("tile_integrity", tile_integrity)
+
+    def paper_fill_facts():
+        import paper_fill as _pf
+        return _pf.gap_facts() if hasattr(_pf, "gap_facts") else None
+    part("paper_fill", paper_fill_facts)
+
+    def paused():
+        import disloc_engine as _de
+        return _de.paused_gap_facts() if hasattr(_de, "paused_gap_facts") else None
+    part("paused", paused)
+
+    def lifecycle_retention():
+        import live_copy_monitor as _lcm
+        return _lcm.lifecycle_retention_facts(now) if hasattr(_lcm, "lifecycle_retention_facts") else None
+    part("lifecycle_retention", lifecycle_retention)
+
+    def unlinked():
+        import live_copy_monitor as _lcm
+        return _lcm.unlinked_facts(now) if hasattr(_lcm, "unlinked_facts") else None
+    part("unlinked", unlinked)
+
+    def wipe():
+        epoch = facts.get("epoch_ts")
+        out = {}
+        if epoch:
+            root = os.getenv("BOT_DATA_DIR") or "/app/data"
+            if not os.path.isdir(root):
+                root = os.getcwd()
+            scan = _ig.scan_local_oldest(root)
+            offenders = sorted(n for n, ts in scan["files"].items() if ts < float(epoch) - 60)
+            import keep_manifest as _km
+            out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
+                           "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
+                           "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
+                           "box": list(_km.BOX), "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
+            out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
+                        "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
+        receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
+        if os.path.exists(receipt):
+            with open(receipt, "r", encoding="utf-8") as fh:
+                r = json.load(fh)
+            # KEEP applies to the receipt too: prefer the job's un-kept count, and carry its manifest hash
+            out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch_unkept",
+                                                       r.get("r2_objects_older_than_epoch"))
+            out["receipt_keep_manifest_sha256"] = r.get("keep_manifest_sha256")
+            out["box_files_older_than_epoch"] = r.get("box_files_older_than_epoch")
+            out["archive_gaps"] = r.get("bfx_book_10l_archive_gaps")
+        r2 = (_platform_monitor().receipt or {}).get("r2") or {}
+        ind = r2.get("older_than_epoch")
+        if isinstance(ind, dict) and epoch and abs(float(ind.get("epoch_ts") or 0) - float(epoch)) < 1:
+            out["r2_independent_older_than_epoch"] = ind.get("count")
+            out["r2_independent_kept"] = ind.get("kept")
+            out["r2_independent_error"] = ind.get("error")
+            out["r2_independent_keep_manifest_sha256"] = ind.get("keep_manifest_sha256")
+            out["r2_independent_at"] = ind.get("listed_at")
+        return out
+    part("wipe", wipe)
+    part("vercel", lambda: (_platform_monitor().receipt or {}).get("vercel"))
+    return facts
+
+
+@app.route('/api/monitor/integrity-gaps', methods=["GET"])
+def monitor_integrity_gaps_route():
+    """G1-G20 integrity gaps with HM 12:20 changes (one row each + LIVE_OFF)."""
+    import integrity_gaps as _ig
+    return _monitor_tiles_guard(
+        lambda now: _ig.apply_lifecycle(_ig.evaluate(_integrity_gap_facts(now)),
+                                        os.path.join(os.getcwd(), "integrity_gaps_lifecycle.json"), now),
+        _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/fresh-start', methods=["GET"])
+def monitor_fresh_start_route():
+    """Fresh-start epoch (HM 14:10): every epoch-facing / fresh-data path cuts at the newest boundary."""
+    def build(now):
+        fse = _fresh_start_epoch()
+        cutoff, source = _current_epoch_boundary(force=True)
+        closed = [t for t in list(trades) if isinstance(t, dict)]
+        def _ts(t):
+            for k in ("close_ts", "exit_ts", "entry_ts", "open_ts", "ts"):
+                try:
+                    v = parse_ts(t.get(k)) if t.get(k) is not None else None
+                except Exception:  # noqa: BLE001
+                    v = None
+                if v:
+                    return float(v)
+            return None
+        tss = [x for x in (_ts(t) for t in closed) if x is not None]
+        return {"schema": "fresh_start_epoch_v1", "set": bool(fse), "fresh_start": fse,
+                "epoch_ts": (fse or {}).get("epoch_ts"),
+                "epoch_utc": monitor_api.utc_iso(fse["epoch_ts"]) if fse else None,
+                "effective_cutoff_ts": cutoff, "effective_cutoff_utc": monitor_api.utc_iso(cutoff) if cutoff else None,
+                "effective_cutoff_source": source,
+                "closed_rows_in_memory": len(closed),
+                "closed_rows_post_epoch": sum(1 for x in tss if cutoff and x >= cutoff),
+                "closed_rows_pre_epoch": sum(1 for x in tss if cutoff and x < cutoff),
+                "untouched": ["order_intent.jsonl", "runtime/v3/**", "keep manifest"],
+                "file": _FRESH_START_EPOCH_FILE}
+    return _monitor_tiles_guard(build, 64 * 1024)
+
+
+@app.route('/api/monitor/fresh-start', methods=["POST"])
+def monitor_fresh_start_set_route():
+    """Set the fresh-start epoch (admin token, explicit confirm, never while live is armed, forward only)."""
+    if not _admin_authed_strict():
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    if body.get("confirm") != "SET_FRESH_START_EPOCH":
+        return jsonify({"error": "CONFIRM_REQUIRED", "confirm": "SET_FRESH_START_EPOCH"}), 400
+    with state_lock:
+        armed = bool(state.get("live_armed"))
+    if armed:
+        return jsonify({"error": "LIVE_ARMED"}), 409
+    now = time.time()
+    try:
+        ts = float(body.get("epoch_ts") or now)
+    except (TypeError, ValueError):
+        return jsonify({"error": "BAD_EPOCH_TS"}), 400
+    if ts > now + 5:
+        return jsonify({"error": "EPOCH_IN_FUTURE"}), 400
+    prev = _fresh_start_epoch()
+    if prev and ts <= float(prev["epoch_ts"]):
+        return jsonify({"error": "EPOCH_NOT_FORWARD", "current": prev}), 409
+    rec = {"epoch_ts": ts, "epoch_utc": monitor_api.utc_iso(ts), "set_at_utc": monitor_api.utc_iso(now),
+           "deployed_sha": os.getenv("BOT_GIT_SHA") or os.getenv("GIT_SHA") or os.getenv("SOURCE_COMMIT"),
+           "note": str(body.get("note") or "")[:200], "previous": prev}
+    path = _fresh_start_epoch_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    _current_epoch_boundary(force=True)
+    return jsonify({"ok": True, "fresh_start": rec})
 
 
 @app.route('/api/runtime/headroom', methods=["GET"])
@@ -56705,6 +57243,8 @@ _jsonl_append_locks = {}
 _jsonl_validated_targets = {}
 _JSONL_VALIDATION_TAIL_BYTES = 64 * 1024
 _JSONL_SERIALIZED_APPEND_CONSTANTS = (
+    "LANE_PNL_EPOCH_RECEIPTS_FILE",
+    "PAPER_IOC_NO_FILL_SHADOW_FILE",
     "AI_INPUT_LOG_FILE",
     "AI_SHADOW_CHALLENGER_FILE",
     "AI_SHADOW_COMPACT_PROMPT_FILE",

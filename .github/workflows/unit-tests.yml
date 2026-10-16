@@ -1,0 +1,52 @@
+name: unit-tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: services/btc-conservative-agent
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python runtime requirements
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir pytest
+      - name: Run the allowlisted test files (ci/unit_test_allowlist.txt)
+        # Allowlist of files that pass under pytest; KNOWN_RED files are listed with owner and date in
+        # ci/known_red.txt, and test_ci_test_inventory.py fails when a test file is in neither list.
+        run: |
+          deselect=""
+          while IFS='|' read -r node _; do
+            node="$(echo "$node" | xargs)"
+            case "$node" in ""|\#*) continue;; esac
+            deselect="$deselect --deselect $node"
+          done < ci/known_red_tests.txt
+          files="$(grep -v '^#' ci/unit_test_allowlist.txt | grep -v '^$' | tr '\n' ' ')"
+          python -m pytest $files $deselect -q -p no:cacheprovider
+      - name: Run script-style safety and contract files as `python file` (ci/script_style_tests.txt)
+        # These files have no pytest collection (module-level checks / __main__), so pytest never runs them.
+        # Each must exit 0; a failure here is a real red. The deploy job runs some of them the same way.
+        run: |
+          rc=0
+          while read -r f; do
+            case "$f" in ""|\#*) continue;; esac
+            echo "::group::python $f"
+            python "$f" || { echo "::error::$f failed"; rc=1; }
+            echo "::endgroup::"
+          done < ci/script_style_tests.txt
+          exit $rc

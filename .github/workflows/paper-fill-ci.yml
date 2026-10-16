@@ -1,0 +1,29 @@
+name: Paper-fill contract
+
+on:
+  pull_request:
+    paths:
+      - "services/btc-conservative-agent/**"
+      - ".github/workflows/paper-fill-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  paper-fill-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: services/btc-conservative-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python runtime requirements
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir pytest
+      - name: Paper-fill and fresh-start contract
+        run: python -m pytest test_paper_fill.py test_tile_fill_migration.py test_keep_manifest.py test_fresh_start_epoch.py test_integrity_gaps.py -q
