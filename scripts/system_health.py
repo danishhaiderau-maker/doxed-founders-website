@@ -1478,12 +1478,21 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     if applied is not None and published is not None and int(applied) > int(published):
         reasons.append(f"SEQ_REGRESSION: laptop applied {applied} > Fly published {published} "
                        "(wipe restarted Fly numbering; reset the laptop mirror/puller)")
+    # HM #677: ACK_ZERO is AMBER first (a pull applies before its ACK lands); RED only if Fly's ack is
+    # still 0 more than 5 min (ACK_LAG_AMBER_SEC) after we first saw applied > 0 with acked == 0.
+    ack_zero_msg = None
     if applied is not None and fly_acked is not None and int(applied) > 0 and int(fly_acked) == 0:
-        reasons.append(f"ACK_ZERO_WHILE_APPLIED: Fly laptop_acked 0 while laptop applied {applied}")
+        since = float(mem.setdefault("ack_zero_since", now))
+        ack_zero_msg = (f"ACK_ZERO_WHILE_APPLIED: Fly laptop_acked 0 while laptop applied {applied} "
+                        f"for {fmt_age(now - since)}", now - since > 5 * 60)
+    else:
+        mem.pop("ack_zero_since", None)
     fly_verdict = dig(transfer, "sync_verdict") if transfer else None
     if fly_verdict == "RED":
         reasons.append("Fly sync verdict RED: " + "; ".join(str(r) for r in (dig(transfer, "sync_verdict_reasons") or [])[:3]))
     ambers = []
+    if ack_zero_msg:
+        (reasons if ack_zero_msg[1] else ambers).append(ack_zero_msg[0])
     if applied is None:
         none_for = now - float(mem.setdefault("applied_none_since", now))
         (reasons if none_for > t["pull_applied_none_red_sec"] else ambers).append(

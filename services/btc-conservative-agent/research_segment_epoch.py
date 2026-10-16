@@ -12,6 +12,13 @@ the manifest or keys said "a wipe happened", and nothing compared the counters. 
   epoch/prefix mismatch and on a pending "laptop reset required" marker; AMBER on ack lag > 5 min.
 * ``validate_beacon``: the small laptop status document POSTed to ``.../laptop-status`` each pull.
 * the "laptop reset required" marker written by the wipe (see ``clean_epoch_wipe.execute``).
+
+Rollout (nothing here changes fly.toml): ``RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1`` is flipped in fly.toml in the SAME
+change that runs the Fly wipe and the laptop reset. ``clean_epoch_wipe.execute(scope="fly")`` refuses (WipeRefused,
+exit 8, nothing deleted) while the flag is off, because a wipe without per-wipe prefixes would reuse the old prefix
+and sequence numbers. The reset marker records prefix_before / epoch_before / published_at_wipe and clears only on a
+beacon received after the wipe that reports a different prefix or fresh_start_epoch_id (or echoes the wipe's
+plan_sha256 with applied_seq <= published). The ``ce-...`` clean-epoch id is never compared with laptop data.
 """
 from __future__ import annotations
 
@@ -19,6 +26,7 @@ import calendar
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -38,7 +46,7 @@ _BEACON_INT_FIELDS = ("applied_seq", "pull_exit", "cycle_exit")
 _BEACON_STR_FIELDS = {  # field -> max length
     "applied_prefix": 64, "collection_epoch_id": 128, "fresh_start_epoch_id": 64,
     "pull_error": 200, "cycle_stop_reason": 120, "cycle_finished_at": 40, "applied_at": 40,
-    "puller_version": 64,
+    "puller_version": 64, "reset_ack_plan_sha256": 64,
 }
 
 
@@ -108,29 +116,51 @@ def validate_beacon(raw: bytes) -> tuple[dict | None, str | None]:
     return clean, None
 
 
+def _atomic_write_json(path: Path, doc: dict) -> None:
+    """Unique temp name per writer (two concurrent POSTs must not share one ``.tmp``), then replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(doc, sort_keys=True))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_beacon_doc(path, doc: dict) -> None:
     """Atomic write of the stored beacon (the segment server itself never replaces/renames files)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, sort_keys=True), "utf-8")
-    os.replace(tmp, path)
+    _atomic_write_json(Path(path), doc)
 
 
 # --------------------------------------------------------------------------- marker
-def write_reset_marker(directory, *, epoch_id: str, plan_sha256: str, scope: str, now: float | None = None) -> Path:
+def write_reset_marker(directory, *, epoch_id: str, plan_sha256: str, scope: str, now: float | None = None,
+                       prefix_before: str = "", epoch_before: str = "", published_at_wipe: int = 0) -> Path:
+    """Leave the "laptop reset required" marker.
+
+    ``prefix_before`` / ``epoch_before`` / ``published_at_wipe`` are the Fly segment prefix, the
+    ``fse-...`` fresh-start epoch id and the published seq as they were BEFORE the wipe. The marker
+    clears only when a beacon received after ``created_at`` reports a different prefix or epoch (or
+    echoes ``reset_ack_plan_sha256`` with applied_seq <= published). ``wipe_epoch_id`` is the ``ce-...``
+    clean-epoch id: it is informational and is never compared with anything the laptop reports.
+    """
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     now = time.time() if now is None else now
     doc = {"schema": RESET_MARKER_SCHEMA, "status": "REQUIRED", "scope": scope, "wipe_epoch_id": epoch_id,
            "plan_sha256": plan_sha256, "created_at": now,
+           "prefix_before": prefix_before or "", "epoch_before": epoch_before or "",
+           "published_at_wipe": int(published_at_wipe or 0),
            "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-           "instruction": "Laptop puller/mirror/acks must be reset to the new prefix before pulling again; "
-                          "sync_verdict stays RED until the beacon reports the new fresh_start_epoch_id."}
+           "instruction": "Laptop puller/mirror/acks must be reset to the new prefix/epoch before pulling again; "
+                          "sync_verdict stays RED until a beacon received after created_at reports a different "
+                          "prefix or fresh_start_epoch_id than prefix_before/epoch_before (or echoes "
+                          "reset_ack_plan_sha256 with applied_seq <= published)."}
     path = directory / RESET_MARKER_NAME
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, sort_keys=True), "utf-8")
-    os.replace(tmp, path)
+    _atomic_write_json(path, doc)
     return path
 
 
@@ -152,6 +182,32 @@ def _iso_to_ts(value) -> float | None:
         return None
 
 
+def _marker_cleared(marker: dict, beacon: dict | None, beacon_received_at, published: int) -> bool:
+    """True when a beacon received after the marker was written proves the laptop was reset.
+
+    Only ``prefix_before`` / ``epoch_before`` (the pre-wipe values) are compared; never the ``ce-...``
+    clean-epoch id. A marker without them (legacy) can only clear through the explicit reset ack.
+    """
+    if not beacon or beacon_received_at is None:
+        return False
+    try:
+        if float(beacon_received_at) <= float(marker.get("created_at") or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    applied = int(beacon.get("applied_seq") or 0)
+    before_prefix = str(marker.get("prefix_before") or "")
+    before_epoch = str(marker.get("epoch_before") or "")
+    bp = str(beacon.get("applied_prefix") or "")
+    be = str(beacon.get("fresh_start_epoch_id") or "")
+    if before_prefix and bp and bp != before_prefix:
+        return True
+    if before_epoch and be and be != before_epoch:
+        return True
+    ack = str(beacon.get("reset_ack_plan_sha256") or "")
+    return bool(ack and ack == str(marker.get("plan_sha256") or "") and applied <= published)
+
+
 def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | None, beacon_received_at,
                  prefix: str, fresh_start_epoch_id: str, prefix_epoch_id: str = "", reset_marker: dict | None = None,
                  now: float) -> dict:
@@ -169,7 +225,16 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
         if applied > published:
             red.append(f"SEQ_REGRESSION: laptop applied {applied} > Fly published {published}")
         if acked == 0 and applied > 0:
-            red.append(f"ACK_ZERO_WHILE_APPLIED: Fly acked 0, laptop applied {applied}")
+            # AMBER first (a fresh pull applies before its ack lands); RED only once the ack is
+            # still missing more than ACK_LAG_AMBER_SEC after the laptop applied.
+            applied_ts = _iso_to_ts(beacon.get("applied_at"))
+            since = None if applied_ts is None else now - applied_ts
+            if since is not None and since > ACK_LAG_AMBER_SEC:
+                red.append(f"ACK_ZERO_WHILE_APPLIED: Fly acked 0, laptop applied {applied} "
+                           f"{int(since / 60)} min ago")
+            else:
+                amber.append(f"ACK_ZERO_WHILE_APPLIED: Fly acked 0, laptop applied {applied}"
+                             + ("" if since is not None else " (applied_at unknown)"))
         elif 0 < acked < applied:
             ack_ts = _iso_to_ts(ack_received_at)
             lag = None if ack_ts is None else now - ack_ts
@@ -180,21 +245,24 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
         ap = beacon.get("applied_prefix")
         if ap and ap != prefix:
             red.append(f"PREFIX_MISMATCH: laptop applied prefix {ap!r} != Fly prefix {prefix!r}")
-        le = beacon.get("fresh_start_epoch_id")
-        if fresh_start_epoch_id and le != fresh_start_epoch_id:
-            red.append(f"EPOCH_MISMATCH: laptop epoch {le or 'none'} != Fly {fresh_start_epoch_id}")
+        le = str(beacon.get("fresh_start_epoch_id") or "")
+        if fresh_start_epoch_id and le:
+            if le != fresh_start_epoch_id:
+                red.append(f"EPOCH_MISMATCH: laptop epoch {le} != Fly {fresh_start_epoch_id}")
+        elif fresh_start_epoch_id and not le and applied:
+            amber.append(f"EPOCH_UNREPORTED: laptop tree has no fresh-start epoch stamp (Fly {fresh_start_epoch_id})")
         if beacon.get("pull_exit") not in (None, 0):
             amber.append(f"PULL_EXIT_{beacon.get('pull_exit')}: {beacon.get('pull_error') or 'no detail'}")
         if beacon.get("cycle_exit") not in (None, 0):
             amber.append(f"CYCLE_STOPPED:{beacon.get('cycle_stop_reason') or 'UNKNOWN'} exit={beacon.get('cycle_exit')}")
-    if prefix_epoch_id != fresh_start_epoch_id and (fresh_start_epoch_id or prefix_epoch_id):
-        amber.append(f"EPOCH_ROTATION_PENDING: prefix derived from {prefix_epoch_id or 'none'}, "
-                     f"disk epoch {fresh_start_epoch_id or 'none'}; restart the shipper to rotate")
+    # Only meaningful when per-wipe prefixing is on (prefix_epoch_id non-empty) AND the epoch file exists.
+    if prefix_epoch_id and fresh_start_epoch_id and prefix_epoch_id != fresh_start_epoch_id:
+        amber.append(f"EPOCH_ROTATION_PENDING: prefix derived from {prefix_epoch_id}, "
+                     f"disk epoch {fresh_start_epoch_id}; restart the shipper to rotate")
     if reset_marker and reset_marker.get("status") == "REQUIRED":
-        marker_epoch = fresh_start_epoch_id or None
-        if not (beacon and marker_epoch and beacon.get("fresh_start_epoch_id") == marker_epoch
-                and applied is not None and applied <= published):
-            red.append("LAPTOP_RESET_REQUIRED: wipe marker set and the laptop has not reported the new epoch")
+        if not _marker_cleared(reset_marker, beacon, beacon_received_at, published):
+            red.append("LAPTOP_RESET_REQUIRED: wipe marker set and no beacon since the wipe reports a "
+                       "different prefix/epoch than before it")
     if beacon is None and not red:
         status = "UNKNOWN"
         amber.append("NO_LAPTOP_BEACON: laptop has not reported its applied seq")

@@ -444,8 +444,45 @@ def _unlink(path: str) -> None:
         os.unlink(path)
 
 
+class WipeRefused(RuntimeError):
+    """The wipe must not run (nothing was deleted)."""
+
+
+def _pre_wipe_segment_identity(receipts_dir: Path, env) -> dict:
+    """Prefix / ``fse-`` epoch / published seq as they are BEFORE the wipe (for the reset marker)."""
+    import research_segment_epoch as _rse
+    data_root = receipts_dir.parent.parent if receipts_dir.name == "clean-epoch-receipts" else None
+    per_wipe = _rse.per_wipe_enabled(env)
+    epoch_before = _rse.fresh_start_epoch_id(data_root) if data_root else ""
+    base = env.get("RESEARCH_SEGMENTS_PREFIX") or "v1"
+    prefix_before = _rse.resolve_prefix(base, epoch_before if per_wipe else "", per_wipe=per_wipe)
+    published = 0
+    if data_root:
+        state_dir = _rse.resolve_state_dir(env.get("RESEARCH_SEGMENTS_STATE_DIR") or data_root / "segment-shipper",
+                                           epoch_before if per_wipe else "", per_wipe=per_wipe)
+        try:
+            published = int(json.loads((Path(state_dir) / "status.json").read_text("utf-8")).get("shipped_seq") or 0)
+        except (OSError, ValueError, TypeError):
+            published = 0
+    return {"prefix_before": prefix_before, "epoch_before": epoch_before, "published_at_wipe": published}
+
+
 def execute(plan_doc: dict, *, receipts_dir: Path, scope: str, cert_sha8: str,
-            unlink: Callable[[str], None] = _unlink, laptop_reset_marker: bool | None = None) -> dict:
+            unlink: Callable[[str], None] = _unlink, laptop_reset_marker: bool | None = None,
+            env=None) -> dict:
+    env = os.environ if env is None else env
+    want_marker = laptop_reset_marker if laptop_reset_marker is not None else scope == "fly"
+    identity = {}
+    if want_marker:
+        import research_segment_epoch as _rse
+        # HM #677: a Fly-scope wipe restarts the segment numbering. Without per-wipe prefixes the new
+        # epoch would reuse the old prefix and sequence numbers, which is exactly the 13 Oct failure.
+        # Refuse BEFORE deleting anything. fly.toml is NOT changed by this code: flip
+        # RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1 in the same change that runs the wipe + laptop reset.
+        if scope == "fly" and not _rse.per_wipe_enabled(env):
+            raise WipeRefused("PER_WIPE_PREFIX_REQUIRED: set RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1 (fly.toml) in the "
+                              "same change that runs the wipe and the laptop reset; nothing was deleted")
+        identity = _pre_wipe_segment_identity(Path(receipts_dir), env)
     started = time.time()
     deleted, freed, skipped = [], 0, []
     for row in plan_doc["candidates"]:
@@ -481,10 +518,10 @@ def execute(plan_doc: dict, *, receipts_dir: Path, scope: str, cert_sha8: str,
     # HM (b): a Fly-side wipe restarts/archives the segment numbering. Leave a "laptop reset required"
     # marker next to the receipts; the shipper's sync verdict stays RED until the laptop reports the new
     # fresh-start epoch (research_segment_epoch.sync_verdict).
-    if laptop_reset_marker if laptop_reset_marker is not None else scope == "fly":
-        import research_segment_epoch as _rse
+    if want_marker:
         receipt["laptop_reset_marker"] = str(_rse.write_reset_marker(
-            receipts_dir, epoch_id=plan_doc["epoch_id"], plan_sha256=plan_doc["plan_sha256"], scope=scope))
+            receipts_dir, epoch_id=plan_doc["epoch_id"], plan_sha256=plan_doc["plan_sha256"], scope=scope,
+            **identity))
         (out_dir / f"receipt-{scope}-{stamp}.json").write_text(json.dumps(receipt, indent=1, sort_keys=True), "utf-8")
     with open(receipts_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps({k: v for k, v in receipt.items() if k not in ("skipped", "by_root", "kept_by_reason")},
@@ -600,7 +637,11 @@ def main(argv=None) -> int:
     if args.expect_plan_sha256 != doc["plan_sha256"]:
         print(json.dumps({"error": "PLAN_SHA256_MISMATCH", "plan_sha256": doc["plan_sha256"]}))
         return 6
-    receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=cert_sha8)
+    try:
+        receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=cert_sha8)
+    except WipeRefused as exc:
+        print(json.dumps({"error": "WIPE_REFUSED", "detail": str(exc)}))
+        return 8
     print(json.dumps({"executed": True, **receipt}, indent=1, sort_keys=True, default=str))
     return 0
 
@@ -646,7 +687,11 @@ def _execute_pre_start(args, doc: dict, fetch: Callable[[str], dict] | None = No
     receipts = Path(args.receipts_dir or (LAPTOP_RECEIPTS if args.scope == "laptop"
                                           else os.path.join(args.data_root or "/app/data", "runtime",
                                                             "clean-epoch-receipts")))
-    receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=PRE_START_LABEL)
+    try:
+        receipt = execute(doc, receipts_dir=receipts, scope=args.scope, cert_sha8=PRE_START_LABEL)
+    except WipeRefused as exc:
+        print(json.dumps({"error": "WIPE_REFUSED", "detail": str(exc)}))
+        return 8
     print(json.dumps({"executed": True, **receipt}, indent=1, sort_keys=True, default=str))
     return 0
 

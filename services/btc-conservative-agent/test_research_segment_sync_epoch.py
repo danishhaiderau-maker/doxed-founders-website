@@ -60,8 +60,22 @@ def _v(**kw):
     return ep.sync_verdict(**base)
 
 
+def _iso(ts):
+    return ep.time.strftime("%Y-%m-%dT%H:%M:%SZ", ep.time.gmtime(ts))
+
+
+def test_ack_zero_while_applied_is_amber_first_then_red_after_the_amber_window():
+    fresh = _v(published_seq=100, acked_seq=0, beacon={"applied_seq": 100, "applied_at": _iso(NOW - 60)})
+    assert fresh["status"] == "AMBER" and any("ACK_ZERO_WHILE_APPLIED" in r for r in fresh["reasons"])
+    old = _v(published_seq=100, acked_seq=0,
+             beacon={"applied_seq": 100, "applied_at": _iso(NOW - ep.ACK_LAG_AMBER_SEC - 5)})
+    assert old["status"] == "RED"
+    unknown_age = _v(published_seq=100, acked_seq=0, beacon={"applied_seq": 100})
+    assert unknown_age["status"] == "AMBER"
+
+
 def test_13_oct_state_is_red_with_both_reasons():
-    v = _v(beacon={"schema": ep.BEACON_SCHEMA, "applied_seq": 7073, "pull_exit": 0})
+    v = _v(beacon={"schema": ep.BEACON_SCHEMA, "applied_seq": 7073, "pull_exit": 0, "applied_at": _iso(NOW - 3 * 86400)})
     assert v["status"] == "RED" and v["alert"] is True
     joined = " ".join(v["reasons"])
     assert "SEQ_REGRESSION" in joined and "ACK_ZERO_WHILE_APPLIED" in joined
@@ -97,22 +111,76 @@ def test_cycle_stop_reason_is_surfaced():
     assert any("CYCLE_STOPPED:PROMOTION_HEAD_KEPT_MOVING" in r for r in v["reasons"])
 
 
-def test_reset_marker_keeps_red_until_laptop_reports_the_new_epoch():
-    marker = {"schema": ep.RESET_MARKER_SCHEMA, "status": "REQUIRED"}
-    pending = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-1"},
-                 fresh_start_epoch_id="fse-2", prefix_epoch_id="fse-2", reset_marker=marker)
-    assert pending["status"] == "RED" and any("LAPTOP_RESET_REQUIRED" in r for r in pending["reasons"])
-    done = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-2"},
-              fresh_start_epoch_id="fse-2", prefix_epoch_id="fse-2", reset_marker=marker)
-    assert done["status"] == "GREEN"
-    no_stamp = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5}, reset_marker=marker)
-    assert no_stamp["status"] == "RED"
+def _marker(**kw):
+    m = {"schema": ep.RESET_MARKER_SCHEMA, "status": "REQUIRED", "created_at": NOW - 600, "plan_sha256": "ab" * 32,
+         "wipe_epoch_id": "ce-2026", "prefix_before": "v3", "epoch_before": "fse-1", "published_at_wipe": 2456}
+    m.update(kw)
+    return m
 
 
-def test_rotation_pending_when_epoch_stamped_after_boot():
-    v = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-9"},
-           fresh_start_epoch_id="fse-9", prefix_epoch_id="")
-    assert v["status"] == "AMBER" and "EPOCH_ROTATION_PENDING" in v["reasons"][0]
+def test_reset_marker_clears_only_on_a_post_wipe_beacon_with_different_prefix_or_epoch():
+    kw = dict(published_seq=5, acked_seq=5, fresh_start_epoch_id="fse-2", prefix="v3-w2", prefix_epoch_id="fse-2")
+    still = _v(beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-1", "applied_prefix": "v3"},
+               beacon_received_at=NOW - 10, reset_marker=_marker(), **kw)
+    assert still["status"] == "RED" and any("LAPTOP_RESET_REQUIRED" in r for r in still["reasons"])
+    # a beacon from BEFORE the wipe can never clear it, even when it looks different
+    old = _v(beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-2", "applied_prefix": "v3-w2"},
+             beacon_received_at=NOW - 3600, reset_marker=_marker(), **kw)
+    assert old["status"] == "RED"
+    by_epoch = _v(beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-2", "applied_prefix": "v3-w2"},
+                  beacon_received_at=NOW - 10, reset_marker=_marker(), **kw)
+    assert by_epoch["status"] == "GREEN"
+    by_prefix = _v(beacon={"applied_seq": 5, "applied_prefix": "v3-w2"}, beacon_received_at=NOW - 10,
+                   reset_marker=_marker(epoch_before=""), **dict(kw, fresh_start_epoch_id=""))
+    assert by_prefix["status"] == "GREEN"
+
+
+def test_reset_marker_clears_by_reset_ack_and_never_compares_a_ce_id():
+    kw = dict(published_seq=5, acked_seq=5, prefix="v3", fresh_start_epoch_id="", prefix_epoch_id="")
+    marker = _marker(prefix_before="v3", epoch_before="")
+    same = _v(beacon={"applied_seq": 5, "applied_prefix": "v3", "fresh_start_epoch_id": "ce-2026"},
+              beacon_received_at=NOW - 10, reset_marker=marker, **kw)
+    assert same["status"] == "RED"         # reporting the ce-... id proves nothing
+    acked = _v(beacon={"applied_seq": 5, "applied_prefix": "v3", "reset_ack_plan_sha256": "ab" * 32},
+               beacon_received_at=NOW - 10, reset_marker=marker, **kw)
+    assert acked["status"] == "GREEN"
+    ahead = _v(beacon={"applied_seq": 9, "applied_prefix": "v3", "reset_ack_plan_sha256": "ab" * 32},
+               beacon_received_at=NOW - 10, reset_marker=marker, **kw)
+    assert ahead["status"] == "RED"
+    legacy = _v(beacon={"applied_seq": 5, "applied_prefix": "v4"}, beacon_received_at=NOW - 10,
+                reset_marker={"schema": ep.RESET_MARKER_SCHEMA, "status": "REQUIRED", "created_at": NOW - 600}, **kw)
+    assert any("LAPTOP_RESET_REQUIRED" in r for r in legacy["reasons"])
+
+
+def test_rotation_pending_only_when_per_wipe_is_on_and_epoch_file_exists():
+    on = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-9"},
+            fresh_start_epoch_id="fse-9", prefix_epoch_id="fse-8")
+    assert on["status"] == "AMBER" and any("EPOCH_ROTATION_PENDING" in r for r in on["reasons"])
+    off = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5, "fresh_start_epoch_id": "fse-9"},
+             fresh_start_epoch_id="fse-9", prefix_epoch_id="")
+    assert off["status"] == "GREEN"                      # per-wipe disabled: silent
+    absent = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5}, fresh_start_epoch_id="",
+                prefix_epoch_id="fse-8")
+    assert absent["status"] == "GREEN"                   # epoch file absent: silent
+
+
+def test_unstamped_laptop_is_amber_not_red():
+    v = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5}, fresh_start_epoch_id="fse-9")
+    assert v["status"] == "AMBER" and any("EPOCH_UNREPORTED" in r for r in v["reasons"])
+
+
+def test_beacon_and_marker_writers_use_unique_temp_names(tmp_path):
+    names = []
+    real = ep.os.replace
+    ep.os.replace = lambda a, b: (names.append(Path(a).name), real(a, b))[1]
+    try:
+        for _ in range(3):
+            ep.write_beacon_doc(tmp_path / "laptop-status.json", {"x": 1})
+        ep.write_reset_marker(tmp_path, epoch_id="ce-1", plan_sha256="a", scope="fly")
+    finally:
+        ep.os.replace = real
+    assert len(set(names)) == 4 and not any(n == "laptop-status.tmp" for n in names)
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 # ----------------------------------------------------------------- prefix / manifest
@@ -232,9 +300,38 @@ def _plan(tmp_path):
 
 def test_wipe_execute_writes_laptop_reset_marker_for_fly_only(tmp_path):
     import clean_epoch_wipe as cew
-    fly = cew.execute(_plan(tmp_path), receipts_dir=tmp_path / "r-fly", scope="fly", cert_sha8="t")
-    marker = ep.read_reset_marker(tmp_path / "r-fly")
+    vol = tmp_path / "vol"
+    (vol / "segment-shipper-w1").mkdir(parents=True)     # per-wipe state dir of the pre-wipe epoch
+    (vol / "segment-shipper-w1" / "status.json").write_text(json.dumps({"shipped_seq": 2456}))
+    (vol / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": 1}))
+    receipts = vol / "runtime" / "clean-epoch-receipts"
+    env = {"RESEARCH_SEGMENTS_PREFIX_PER_WIPE": "1", "RESEARCH_SEGMENTS_PREFIX": "v3"}
+    fly = cew.execute(_plan(tmp_path), receipts_dir=receipts, scope="fly", cert_sha8="t", env=env)
+    marker = ep.read_reset_marker(receipts)
     assert marker and marker["status"] == "REQUIRED" and marker["wipe_epoch_id"] == "ce-test"
+    assert (marker["prefix_before"], marker["epoch_before"], marker["published_at_wipe"]) == ("v3-w1", "fse-1", 2456)
     assert fly["laptop_reset_marker"].endswith(ep.RESET_MARKER_NAME)
-    lap = cew.execute(_plan(tmp_path), receipts_dir=tmp_path / "r-lap", scope="laptop", cert_sha8="t")
+    lap = cew.execute(_plan(tmp_path), receipts_dir=tmp_path / "r-lap", scope="laptop", cert_sha8="t", env=env)
     assert ep.read_reset_marker(tmp_path / "r-lap") is None and "laptop_reset_marker" not in lap
+
+
+def test_fly_wipe_refuses_before_deleting_unless_per_wipe_is_on(tmp_path):
+    import clean_epoch_wipe as cew
+    plan = _plan(tmp_path)
+    victim = Path(plan["candidates"][0]["path"])
+    with pytest.raises(cew.WipeRefused, match="PER_WIPE_PREFIX_REQUIRED"):
+        cew.execute(plan, receipts_dir=tmp_path / "r", scope="fly", cert_sha8="t", env={})
+    assert victim.exists() and not (tmp_path / "r").exists()
+    # laptop scope never needed the Fly flag
+    cew.execute(plan, receipts_dir=tmp_path / "r-lap", scope="laptop", cert_sha8="t", env={})
+    assert not victim.exists()
+
+
+def test_promotion_denies_seq_regression_alone_and_cycle_does_not_retry_it():
+    import research_segment_promotion as promo
+    reasons = promo.deny_reasons({"schema": promo.STATE_SCHEMA, "applied_seq": 7073, "last_manifest_sha256": "x"},
+                                 {"published_seq": 2456, "last_manifest_sha256": "y"}, {}, Path("/nonexistent"))
+    assert len(reasons) == 1 and reasons[0].startswith("SEQ_REGRESSION")
+    ps1 = (Path(__file__).resolve().parents[2] / "scripts" / "run-segment-analyzer-cycle.ps1").read_text("utf-8")
+    assert "SEQ_" in ps1 and "SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH" in ps1
+    assert not any(tok in reasons[0] for tok in ("SHADOW_BEHIND_PUBLISHED", "HEAD_MANIFEST_MISMATCH"))

@@ -207,6 +207,11 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
         return reasons
     applied = int(state.get("applied_seq") or 0)
     published = int(head.get("published_seq") or 0)
+    if applied > published:
+        # HM #677: Fly's numbering restarted (wipe). This is final, not a "moving head": return it alone so
+        # the analyzer cycle (run-segment-analyzer-cycle.ps1) stops with PROMOTION_DENIED:SEQ_REGRESSION
+        # instead of retrying SHADOW_BEHIND_PUBLISHED / HEAD_MANIFEST_MISMATCH.
+        return [f"SEQ_REGRESSION:applied {applied}>published {published}: LAPTOP RESET REQUIRED"]
     if applied < 1 or applied != published:
         reasons.append(f"SHADOW_BEHIND_PUBLISHED:{applied}<{published}")
     if head.get("last_manifest_sha256") != state.get("last_manifest_sha256"):
