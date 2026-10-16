@@ -47719,7 +47719,10 @@ def monitor_archive_receipt_post():
         return jsonify({"ok": False, "error": "json object required"}), 400
     keep = {k: raw.get(k) for k in ("bucket", "files", "bytes_source", "bytes_uploaded", "errors", "ok",
                                     "disk_free_pct", "disk_free_gb", "finished_ts", "restore_test", "host",
-                                    "tape_1s_oldest_ts") if k in raw}
+                                    "tape_1s_oldest_ts",
+                                    # HM (c): receipt v2 counts (object / missing / quarantined), pinned manifest hash
+                                    "schema", "state_keys", "r2_objects", "missing", "quarantined",
+                                    "quarantine_pending", "outside_keep", "keep_manifest_sha256") if k in raw}
     keep["received_ts"] = time.time()
     try:
         path = _archive_receipt_path()
