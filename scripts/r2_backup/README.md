@@ -46,3 +46,17 @@ Order on the laptop (machine approval): `reconcile` (dry) -> `reconcile --apply`
   `outside_keep` and the sync receipt's AMBER state are untouched.
 * DEPLOY NOTE: legacy-shaped receipts (no schema) are now rejected with 422, so the old laptop poster stops until this
   script is installed and `R2_RECEIPT_TOKEN` is set on both sides. The monitor then goes stale-AMBER (36 h), not GREEN.
+
+## Round 3 (HM #678 B1 + follow-ups)
+* Plausibility rules (`r2_objects > 0`, `0 < restore_test.checked <= min(1000, r2_objects)`, `state_keys >= r2_objects`)
+  apply ONLY to `ok:true` receipts. An `ok:false` receipt (empty `epoch-archive/`, total bucket loss) is accepted with
+  `r2_objects >= 0` / `checked >= 0` if schema, host, pin, `finished_ts` (<= 6 h old, newer than stored) and types are
+  valid, and shows RED (`R2 holds 0 objects...`, `restore test failed...`, `backup job reported ok=false`). `ok` must be a bool.
+* A receipt older than 72 h is RED ("no sync receipt for 2+ nights"); 36-72 h stays AMBER.
+* 401 and 503 attempts are logged to `archive_receipts.jsonl` (status, remote ip, whether a token/admin header was
+  present; never the token). The file rotates to `archive_receipts.jsonl.1` past 2 MiB (one generation).
+* The generic "archive errors=0" reason is gone: it prints only when `errors > 0`; a bare `ok:false` says
+  "backup job reported ok=false".
+* `keep_manifest.py` / `test_keep_manifest.py` commit `bfc1f4f6` ([#670-BASED, ADDITIVE]) stays: #670 is not merged. Drop
+  it, and apply `/workspace/grokbot/audit/678-keep-manifest-delta-on-670-d1518674.patch`'s one-line delta on top of #670,
+  only after #670 merges.
