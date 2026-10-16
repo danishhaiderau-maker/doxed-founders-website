@@ -85,3 +85,38 @@ def test_bot_binds_entry_gate_not_enabled_fn():
     seg = ast.get_source_segment(SRC, _func("_disloc_bind_runtime"))
     assert "entries_allowed_fn=_disloc_entry_pause_owner" in seg
     assert "pause" not in seg.split("enabled_fn=")[1].split(",")[0]
+
+
+def test_paused_skips_persist_across_restart(tmp_path):
+    import json
+    path = tmp_path / "p.jsonl"
+    owner = ["DEPLOY_MAINTENANCE"]
+    e, rule, rows = _make(owner)
+    e.paused_append_fn = lambda r: path.open("a").write(json.dumps(r) + "\n")
+    rule._side = dsl.LONG
+    e.step(now=3000.0, live={}, bfx_quotes={}, bfx_bbo_ts=3000.0)
+    # "restart": a fresh engine has an empty in-memory ring, the durable ledger still counts it
+    e2, _, _ = _make(owner)
+    assert e2.counters["skipped_paused"] == 0
+    h = dsl.paused_skip_history(str(path), boot_ts=2999.0)
+    assert h["total"] == 1 and h["since_boot"] == 1 and h["by_pause_owner"] == {"DEPLOY_MAINTENANCE": 1}
+    assert dsl.paused_skip_history(str(tmp_path / "none.jsonl"))["total"] == 0
+
+
+def test_paused_ledger_caps_rotates_and_honours_epoch(tmp_path):
+    p = str(tmp_path / "data" / "disloc_paused_skips.jsonl")
+    for i in range(50):
+        assert dsl.append_paused_skip(p, {"lane": "L", "signal_ts": 100.0 + i, "pause_owner": "DEPLOY_MAINTENANCE"},
+                                      max_bytes=500)
+    import os
+    assert os.path.exists(p + ".1") and os.path.getsize(p) < 600
+    h = dsl.paused_skip_history(p, lane="L", epoch_ts=140.0)
+    assert h["total"] == len([r for r in h["recent"]]) and all(r["signal_ts"] >= 140.0 for r in h["recent"])
+    assert h["by_pause_owner"] == {"DEPLOY_MAINTENANCE": h["total"]}
+
+
+def test_paused_ledger_in_data_dir_and_streams():
+    import monitor_streams
+    assert monitor_streams.STREAMS["disloc_paused_skips"] == dsl.PAUSED_SKIPS_FILE
+    assert monitor_streams.STREAMS["disloc_paused_skips_rot1"] == dsl.PAUSED_SKIPS_FILE + ".1"
+    assert "os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)" in SRC

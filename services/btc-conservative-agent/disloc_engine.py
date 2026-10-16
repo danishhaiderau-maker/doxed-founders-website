@@ -321,6 +321,8 @@ class DislocEngine:
         # Step B (HM 13:16): fills come from the 10-level book at signal_ts + measured delay.
         self.delay_fn: Callable[[str, str], tuple] = lambda lane, leg: (None, "default_until_n10")
         self.paused_skips: deque = deque(maxlen=200)
+        # G14 (HM 12:20): persist every PAUSED skip so the count survives a deploy restart.
+        self.paused_append_fn: Callable[[dict], Any] = lambda row: None
         self.trades_fn: Callable[[], list] = lambda: []
         self.touch_fn: Callable[[], tuple] = lambda: (None, None, None)
         # LIVE-FIX-1510: {"source": "BOOK"|"TICKER", "ask_age_ms": int} for the touch just read.
@@ -347,7 +349,7 @@ class DislocEngine:
 
     def bind_runtime(self, *, enabled_fn, trades_fn, touch_fn, append_fn, oi_seed_fn=None,
                      regime_fn=None, touch_meta_fn=None, entries_allowed_fn=None,
-                     delay_fn=None) -> None:
+                     delay_fn=None, paused_append_fn=None) -> None:
         self.enabled_fn, self.trades_fn, self.touch_fn, self.append_fn = enabled_fn, trades_fn, touch_fn, append_fn
         if delay_fn is not None:
             self.delay_fn = delay_fn
@@ -355,6 +357,8 @@ class DislocEngine:
             self.touch_meta_fn = touch_meta_fn
         if entries_allowed_fn is not None:
             self.entries_allowed_fn = entries_allowed_fn
+        if paused_append_fn is not None:
+            self.paused_append_fn = paused_append_fn
         if regime_fn is not None:
             self.regime_fn = regime_fn
         if oi_seed_fn is not None:
@@ -677,6 +681,10 @@ class DislocEngine:
                                           "signal_ts": now, "side": side, "reason": "PAUSED",
                                           "pause_owner": blocked, "signal_bid": bid, "signal_ask": ask,
                                           "prem_at_signal_bp": feat.get("prem_bp")})
+                try:
+                    self.paused_append_fn({**self.paused_skips[-1], "lane": self.lane, "variant": self.variant})
+                except Exception:  # noqa: BLE001 - observation only
+                    pass
             elif not (bid and ask) or bbo_ts is None or now - bbo_ts > self.rule.max_bbo_age:
                 self.counters["skipped_no_touch"] += 1
             else:
@@ -851,6 +859,61 @@ class DislocEngine:
 
 
 LANE_REF = ["FAMILY_DISLOC_BFX_DISLOCATION_1M"]
+PAUSED_SKIPS_FILE = "disloc_paused_skips.jsonl"
+
+
+PAUSED_SKIPS_MAX_BYTES = 2 * 1024 * 1024  # HM 12:35: capped; one rotation (.1) kept
+_PAUSED_CACHE: dict = {}
+
+
+def append_paused_skip(path: str, row: dict, *, max_bytes: int = PAUSED_SKIPS_MAX_BYTES) -> bool:
+    """Append one PAUSED skip; rotate to ``path.1`` once the file passes max_bytes."""
+    import json as _json
+    import os as _os
+    try:
+        _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+        if _os.path.exists(path) and _os.path.getsize(path) >= max_bytes:
+            _os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(row, separators=(",", ":"), default=str) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def paused_skip_history(path: str = PAUSED_SKIPS_FILE, *, boot_ts: float | None = None, lane: str | None = None,
+                        epoch_ts: float | None = None) -> dict:
+    """Durable PAUSED-skip ledger (survives restarts): totals, since boot, by pause owner, last 50.
+
+    Reads the capped current file (+ its one rotation) only when its size/mtime changed;
+    rows before the fresh-start epoch are ignored.
+    """
+    import json as _json
+    import os as _os
+    files = [p for p in (path + ".1", path) if _os.path.exists(p)]
+    key = tuple((p, _os.path.getsize(p), _os.path.getmtime(p)) for p in files)
+    hit = _PAUSED_CACHE.get(path)
+    if hit is None or hit[0] != key:
+        rows = []
+        for p in files:
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            rows.append(_json.loads(line))
+                        except ValueError:
+                            continue
+            except OSError:
+                continue
+        _PAUSED_CACHE[path] = hit = (key, rows)
+    rows = [r for r in hit[1] if (lane is None or r.get("lane") == lane)
+            and (not epoch_ts or float(r.get("signal_ts") or 0) >= float(epoch_ts))]
+    by_owner: dict = {}
+    for r in rows:
+        by_owner[r.get("pause_owner")] = by_owner.get(r.get("pause_owner"), 0) + 1
+    since = [r for r in rows if boot_ts and float(r.get("signal_ts") or 0) >= boot_ts]
+    return {"file": path, "total": len(rows), "since_boot": len(since), "by_pause_owner": by_owner,
+            "epoch_ts": epoch_ts, "max_bytes": PAUSED_SKIPS_MAX_BYTES, "recent": rows[-50:]}
 
 
 # --------------------------------------------------------------------------- tile stats folding

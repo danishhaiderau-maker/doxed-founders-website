@@ -32599,6 +32599,15 @@ def _disloc_recent_trades():
         return list(venue_fill_trade_tape)[-600:]
 
 
+_PROCESS_START_TS_FOR_PAUSED = time.time()
+
+
+def _disloc_paused_path() -> str:
+    """HM 13:20: the working directory (/app/data/runtime on Fly), like the other DISLOC ledgers,
+    so the streams catalog (os.getcwd()), the wipe and the R2 archive all see it."""
+    return os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)
+
+
 def _disloc_entry_pause_owner():
     """LIVE-FIX-1512 (HM 11:16): NEW DISLOC/DISLOC-FOI paper entries are blocked only by the
     guarded deploy's DEPLOY_MAINTENANCE pause or a deliberate OPERATOR pause. SAFETY/relay pauses
@@ -32634,6 +32643,8 @@ def _disloc_bind_runtime(lane: str, evaluator) -> None:
         touch_meta_fn=_disloc_touch_meta,
         entries_allowed_fn=_disloc_entry_pause_owner,
         delay_fn=_disloc_delay,
+        paused_append_fn=lambda row: _dsl.append_paused_skip(
+            _disloc_paused_path(), {**row, "fresh_start_ts": state.get("fresh_collection_start_time")}),
         append_fn=lambda row, _f=(_dsl.FOI_TRADES_FILE if getattr(evaluator, "variant", "") == "foi"
                                   else _dsl.TRADES_FILE): _disloc_append_and_copy(_f, row),
         regime_fn=lambda: _current_regime_tag(),
@@ -47194,6 +47205,9 @@ def monitor_tiles_disloc():
             "engine": evaluator.snapshot() if hasattr(evaluator, "snapshot") else None,
             # LIVE-FIX-1512: signals skipped because a deploy/operator pause blocked new entries.
             "paused_skips": (evaluator.paused_skip_summary() if hasattr(evaluator, "paused_skip_summary") else None),
+            "paused_skips_durable": _dsl.paused_skip_history(
+                _disloc_paused_path(), lane=lane, boot_ts=_PROCESS_START_TS_FOR_PAUSED,
+                epoch_ts=state.get("fresh_collection_start_time")),
             "entry_pause_owner": _disloc_entry_pause_owner(),
             "recent": terminal[-nrows:] if nrows else [],
         }
