@@ -22654,6 +22654,9 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
     except (TypeError, ValueError):
         pass
     candidates.append((_latest_reset_receipt_anchor(), "reset_receipt"))
+    fse = _fresh_start_epoch()
+    if fse:
+        candidates.append((float(fse["epoch_ts"]), "fresh_start"))
     manifest = globals().get("_DATA_EPOCH_MANIFEST") or {}
     started = manifest.get("started_at_utc") if isinstance(manifest, dict) else None
     if started:
@@ -22672,6 +22675,23 @@ def _current_epoch_boundary(force: bool = False) -> tuple:
         best = (float(bot_start_time or 0.0), "bot_start")
     _epoch_boundary_cache.update(at=now, value=best)
     return best
+
+
+_FRESH_START_EPOCH_FILE = "fresh_start_epoch.json"
+
+
+def _fresh_start_epoch_path() -> str:
+    return os.path.join(os.getenv("BOT_DATA_DIR") or os.getcwd(), _FRESH_START_EPOCH_FILE)
+
+
+def _fresh_start_epoch() -> dict | None:
+    """HM 14:10 fresh-start epoch (set once after the guarded deploy is verified). Never deletes data."""
+    try:
+        with open(_fresh_start_epoch_path(), "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) and float(d.get("epoch_ts") or 0) > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _current_epoch_id_for_display() -> str | None:
@@ -33224,7 +33244,8 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/workers", "/api/monitor/fill-sim", "/api/monitor/protective-exit",
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
-    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps",
+    "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
+    "/api/monitor/fresh-start",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -43461,6 +43482,10 @@ def _build_relay_execution_state_snapshot() -> dict:
         key: round(value, 3) for key, value in phase_timings.items()
     }
     snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
+    try:
+        _RELAY_PHASES.record(phase_timings)
+    except Exception:
+        pass
     return snapshot
 
 
@@ -45214,6 +45239,7 @@ def _start_runtime_telemetry():
             pressure_fn=_bounded_process_pressure_snapshot,
             handlers_fn=_dashboard_handler_snapshot,
             lock_fn=lambda: trade_lock.telemetry_counters(top=3, reset_interval=True),
+            phase_fn=_RELAY_PHASES.drain,
             revision_fn=_runtime_git_rev,
             crash_dump_path=os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
             stop_event=shutdown_event,
@@ -45222,6 +45248,10 @@ def _start_runtime_telemetry():
         _RUNTIME_TELEMETRY = sampler
     except Exception as e:
         logger.error(f"[RUNTIME TELEMETRY] start failed: {type(e).__name__}: {e}")
+
+
+_RELAY_PHASES = _rtel.PhaseRecorder(
+    ("trade_lock_wait", "trade_lock_hold", "post_lock_projection", "total"))
 
 
 def _runtime_telemetry_status(now: float | None = None) -> dict:
@@ -47733,6 +47763,171 @@ def monitor_shipper():
 def monitor_gaps_route():
     """Compact level per gap item (same block as /api/status.monitor_gaps)."""
     return _monitor_tiles_guard(lambda now: monitor_gaps_summary(), _MONITOR_GAP_MAX_BYTES)
+
+
+def _integrity_gap_facts(now: float) -> dict:
+    """Facts for integrity_gaps.evaluate; every part fails soft to None."""
+    import integrity_gaps as _ig
+    facts = {}
+
+    def part(key, fn):
+        try:
+            facts[key] = fn()
+        except Exception:
+            facts[key] = None
+
+    part("live_armed", lambda: bool(state.get("live_armed", False)))
+    part("force_paper", _force_paper_mode_active)
+    part("epoch_ts", lambda: (_fresh_start_epoch() or {}).get("epoch_ts") or state.get("fresh_collection_start_time"))
+
+    def runtime():
+        lh = (_runtime_telemetry_status(now) or {}).get("last_hour") or {}
+        return {"trade_lock_wait_p95_ms": lh.get("phase_trade_lock_wait_p95_max_ms"),
+                "trade_lock_wait_max_ms": lh.get("phase_trade_lock_wait_max_ms"),
+                "trade_lock_hold_max_ms": lh.get("phase_trade_lock_hold_max_ms"),
+                "scheduler_lag_max_ms": lh.get("scheduler_lag_max_ms"),
+                "cpu_pct_max": lh.get("process_cpu_pct_max")}
+    part("runtime", runtime)
+
+    def tile_integrity():
+        import tile_integrity as _ti
+        return _ti.gap_facts(now) if hasattr(_ti, "gap_facts") else None
+    part("tile_integrity", tile_integrity)
+
+    def paper_fill_facts():
+        import paper_fill as _pf
+        return _pf.gap_facts() if hasattr(_pf, "gap_facts") else None
+    part("paper_fill", paper_fill_facts)
+
+    def paused():
+        import disloc_engine as _de
+        return _de.paused_gap_facts() if hasattr(_de, "paused_gap_facts") else None
+    part("paused", paused)
+
+    def lifecycle_retention():
+        import live_copy_monitor as _lcm
+        return _lcm.lifecycle_retention_facts(now) if hasattr(_lcm, "lifecycle_retention_facts") else None
+    part("lifecycle_retention", lifecycle_retention)
+
+    def unlinked():
+        import live_copy_monitor as _lcm
+        return _lcm.unlinked_facts(now) if hasattr(_lcm, "unlinked_facts") else None
+    part("unlinked", unlinked)
+
+    def wipe():
+        epoch = facts.get("epoch_ts")
+        out = {}
+        if epoch:
+            root = os.getenv("BOT_DATA_DIR") or "/app/data"
+            if not os.path.isdir(root):
+                root = os.getcwd()
+            scan = _ig.scan_local_oldest(root)
+            offenders = sorted(n for n, ts in scan["files"].items() if ts < float(epoch) - 60)
+            import keep_manifest as _km
+            out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
+                           "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
+                           "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
+                           "box": list(_km.BOX), "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
+            out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
+                        "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
+        receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
+        if os.path.exists(receipt):
+            with open(receipt, "r", encoding="utf-8") as fh:
+                r = json.load(fh)
+            # KEEP applies to the receipt too: prefer the job's un-kept count, and carry its manifest hash
+            out["r2_objects_older_than_epoch"] = r.get("r2_objects_older_than_epoch_unkept",
+                                                       r.get("r2_objects_older_than_epoch"))
+            out["receipt_keep_manifest_sha256"] = r.get("keep_manifest_sha256")
+            out["box_files_older_than_epoch"] = r.get("box_files_older_than_epoch")
+            out["archive_gaps"] = r.get("bfx_book_10l_archive_gaps")
+        r2 = (_platform_monitor().receipt or {}).get("r2") or {}
+        ind = r2.get("older_than_epoch")
+        if isinstance(ind, dict) and epoch and abs(float(ind.get("epoch_ts") or 0) - float(epoch)) < 1:
+            out["r2_independent_older_than_epoch"] = ind.get("count")
+            out["r2_independent_kept"] = ind.get("kept")
+            out["r2_independent_error"] = ind.get("error")
+            out["r2_independent_keep_manifest_sha256"] = ind.get("keep_manifest_sha256")
+            out["r2_independent_at"] = ind.get("listed_at")
+        return out
+    part("wipe", wipe)
+    part("vercel", lambda: (_platform_monitor().receipt or {}).get("vercel"))
+    return facts
+
+
+@app.route('/api/monitor/integrity-gaps', methods=["GET"])
+def monitor_integrity_gaps_route():
+    """G1-G20 integrity gaps with HM 12:20 changes (one row each + LIVE_OFF)."""
+    import integrity_gaps as _ig
+    return _monitor_tiles_guard(
+        lambda now: _ig.apply_lifecycle(_ig.evaluate(_integrity_gap_facts(now)),
+                                        os.path.join(os.getcwd(), "integrity_gaps_lifecycle.json"), now),
+        _MONITOR_GAP_MAX_BYTES)
+
+
+@app.route('/api/monitor/fresh-start', methods=["GET"])
+def monitor_fresh_start_route():
+    """Fresh-start epoch (HM 14:10): every epoch-facing / fresh-data path cuts at the newest boundary."""
+    def build(now):
+        fse = _fresh_start_epoch()
+        cutoff, source = _current_epoch_boundary(force=True)
+        closed = [t for t in list(trades) if isinstance(t, dict)]
+        def _ts(t):
+            for k in ("close_ts", "exit_ts", "entry_ts", "open_ts", "ts"):
+                try:
+                    v = parse_ts(t.get(k)) if t.get(k) is not None else None
+                except Exception:  # noqa: BLE001
+                    v = None
+                if v:
+                    return float(v)
+            return None
+        tss = [x for x in (_ts(t) for t in closed) if x is not None]
+        return {"schema": "fresh_start_epoch_v1", "set": bool(fse), "fresh_start": fse,
+                "epoch_ts": (fse or {}).get("epoch_ts"),
+                "epoch_utc": monitor_api.utc_iso(fse["epoch_ts"]) if fse else None,
+                "effective_cutoff_ts": cutoff, "effective_cutoff_utc": monitor_api.utc_iso(cutoff) if cutoff else None,
+                "effective_cutoff_source": source,
+                "closed_rows_in_memory": len(closed),
+                "closed_rows_post_epoch": sum(1 for x in tss if cutoff and x >= cutoff),
+                "closed_rows_pre_epoch": sum(1 for x in tss if cutoff and x < cutoff),
+                "untouched": ["order_intent.jsonl", "runtime/v3/**", "keep manifest"],
+                "file": _FRESH_START_EPOCH_FILE}
+    return _monitor_tiles_guard(build, 64 * 1024)
+
+
+@app.route('/api/monitor/fresh-start', methods=["POST"])
+def monitor_fresh_start_set_route():
+    """Set the fresh-start epoch (admin token, explicit confirm, never while live is armed, forward only)."""
+    if not _admin_authed_strict():
+        return jsonify({"error": "unauthorized"}), 401
+    body = request.get_json(silent=True) or {}
+    if body.get("confirm") != "SET_FRESH_START_EPOCH":
+        return jsonify({"error": "CONFIRM_REQUIRED", "confirm": "SET_FRESH_START_EPOCH"}), 400
+    with state_lock:
+        armed = bool(state.get("live_armed"))
+    if armed:
+        return jsonify({"error": "LIVE_ARMED"}), 409
+    now = time.time()
+    try:
+        ts = float(body.get("epoch_ts") or now)
+    except (TypeError, ValueError):
+        return jsonify({"error": "BAD_EPOCH_TS"}), 400
+    if ts > now + 5:
+        return jsonify({"error": "EPOCH_IN_FUTURE"}), 400
+    prev = _fresh_start_epoch()
+    if prev and ts <= float(prev["epoch_ts"]):
+        return jsonify({"error": "EPOCH_NOT_FORWARD", "current": prev}), 409
+    rec = {"epoch_ts": ts, "epoch_utc": monitor_api.utc_iso(ts), "set_at_utc": monitor_api.utc_iso(now),
+           "deployed_sha": os.getenv("BOT_GIT_SHA") or os.getenv("GIT_SHA") or os.getenv("SOURCE_COMMIT"),
+           "note": str(body.get("note") or "")[:200], "previous": prev}
+    path = _fresh_start_epoch_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    _current_epoch_boundary(force=True)
+    return jsonify({"ok": True, "fresh_start": rec})
 
 
 @app.route('/api/runtime/headroom', methods=["GET"])
