@@ -497,3 +497,16 @@ def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot
         return {r["trade_id"] for r in body["rows"]}
     assert ids() == set(fresh)                       # all rows stay visible without the filter
     assert ids(fresh_only="1") == {"d-fresh", "d-parts"}  # DISLOC no longer collapses to 0
+
+
+def test_state_trade_projections_carry_the_entry_pricing_receipt(bot):
+    row = {"trade_id": "gs1-p", "research_lane": GS1, "ts": "2026-10-17T00:00:00+00:00", "entry": 1.0, "exit": 2.0,
+           "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
+           "delay_source": "default_until_n10", "net_pnl_usd": 0.1}
+    recent, relay, _ = bot._snapshot_relay_trade_projections_locked(0.0, trades_src=[row])
+    for projected in (recent[0], relay[0], bot._slim_trade_for_dashboard(row)):
+        assert projected["fill_model"] == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"
+        assert projected["fill_model_version"] == 1 and projected["delay_s"] == 1.5
+        assert projected["delay_source"] == "default_until_n10"
+    pub = bot._sanitize_public_state({"trades": [bot._slim_trade_for_dashboard(row)]})["trades"][0]
+    assert pub["fill_model_version"] == 1 and pub["delay_s"] == 1.5 and "research_lane" not in pub
