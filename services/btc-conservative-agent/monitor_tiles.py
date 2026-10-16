@@ -377,6 +377,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
     if "regime_at_signal" in trigger:
         trigger.setdefault("regime_at_signal_source", raw.get("regime_at_signal_source")
                            or ("adaptive_entry_decision" if decision else "trade_row"))
+    else:  # Strategist 10:37: make the gap explicit instead of silently absent
+        trigger["regime_at_signal"] = None
+        trigger["regime_at_signal_source"] = "MISSING"
     row: dict = {
         "schema": TILE_TRADE_ROW_SCHEMA,
         "trade_id": str(raw.get("trade_id") or ""),
