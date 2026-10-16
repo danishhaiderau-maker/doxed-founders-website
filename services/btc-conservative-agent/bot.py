@@ -7141,7 +7141,9 @@ def _entry_fill_sim(pos: dict) -> dict:
 
 def _entry_priced_by_paper_fill(pos: dict) -> bool:
     import paper_fill as _pf
-    return str(_entry_fill_sim(pos).get("fill_model") or "") in _pf.ALLOWED_FILL_MODELS
+    efs = _entry_fill_sim(pos)
+    version = _pf.as_number(efs.get("fill_model_version"))
+    return str(efs.get("fill_model") or "") in _pf.ALLOWED_FILL_MODELS and version is not None and version >= 1
 
 
 def _entry_pricing_fields(pos: dict, master: dict) -> dict:
@@ -23054,6 +23056,36 @@ def _recompute_research_balance_from_trades():
         f"fresh_collection={bool(state.get('fresh_collection_mode', False))} [PIPELINE ENFORCEMENT]"
     )
 
+_RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms")
+_RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
+                          "entry_provenance", "exit_provenance", "funding_settlement_rates")
+
+
+def _restore_reloaded_row_types(trade: dict) -> None:
+    """The CSV writer stores Python values with str(): True -> "True", dict -> repr. Restore them on reload
+    so a restart cannot turn "False" into a truthy string (fresh_eligible / legacy_pricing / ...)."""
+    import ast as _ast
+    import paper_fill as _pf
+    for k, v in list(trade.items()):
+        if isinstance(v, str) and v in ("True", "False"):
+            trade[k] = (v == "True")
+    for k in _RELOAD_NUMERIC_FIELDS:
+        if isinstance(trade.get(k), str):
+            n = _pf.as_number(trade[k])
+            trade[k] = (int(n) if n is not None and k == "fill_model_version" and n == int(n) else n)
+    for k in _RELOAD_LITERAL_FIELDS:
+        v = trade.get(k)
+        if isinstance(v, str):
+            text = v.strip()
+            if text[:1] in ("{", "["):
+                try:
+                    trade[k] = _ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    trade[k] = None
+            elif text == "":
+                trade[k] = None
+
+
 def load_session_trades_from_csv():
     """Load closed trades from CSV for the current analysis window into in-memory trades list."""
     session_start = _research_data_start_ts()
@@ -23090,6 +23122,7 @@ def load_session_trades_from_csv():
                             trade[k] = float(trade[k])
                         except (ValueError, TypeError):
                             pass
+                _restore_reloaded_row_types(trade)
                 trades.append(trade)
                 existing_ids.add(tid)
                 loaded += 1

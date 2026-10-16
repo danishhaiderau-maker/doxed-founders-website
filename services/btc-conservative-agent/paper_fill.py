@@ -265,6 +265,52 @@ def tag_legacy(row):
     return row
 
 
+def as_bool(value, default=None):
+    """Parse a bool that may have been reloaded from CSV as a string ("True"/"False"/"1"/"0").
+    bool("False") is True, so a stored flag must never be tested with bool()/truthiness."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "t", "y"):
+        return True
+    if text in ("false", "0", "no", "f", "n"):
+        return False
+    return default
+
+
+def as_number(value):
+    """Number or None (CSV reload gives "1" / "1.5" / ""); bools are not numbers here."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+def row_fresh_strict(row) -> bool:
+    """A closed paper row is fresh only if every pricing fact says so, whatever a stored flag claims:
+    exit_status PAPER_FILL (not FORCED_NO_BOOK / PAPER_FILL_FORCED), a v1 fill_model_version, an allowed
+    fill_model, not legacy-tagged and not excluded. Tolerates CSV-reloaded strings."""
+    if not isinstance(row, dict):
+        return False
+    version = as_number(row.get("fill_model_version"))
+    if str(row.get("exit_status") or "") != "PAPER_FILL" or version is None or version < 1:
+        return False
+    if str(row.get("fill_model") or "") not in ALLOWED_FILL_MODELS:
+        return False
+    if as_bool(row.get("fresh_data_excluded"), False) or as_bool(row.get("legacy_pricing"), False):
+        return False
+    if row.get("fill_model_tag") == LEGACY_TAG:
+        return False
+    return as_bool(row.get("fresh_eligible"), True) is not False and row_fresh_eligible(row)
+
+
 def row_fresh_eligible(row) -> bool:
     """Epoch-row predicate: rows of lanes still pending migration are never fresh data."""
     if not isinstance(row, dict):
@@ -272,8 +318,8 @@ def row_fresh_eligible(row) -> bool:
     if row_before_epoch(row):
         return False
     row = tag_legacy(row)
-    if row.get("fresh_data_excluded") or row.get("exit_status") == "FORCED_NO_BOOK" \
-            or row.get("fill_model_tag") == LEGACY_TAG or row.get("fresh_eligible") is False:
+    if as_bool(row.get("fresh_data_excluded"), False) or row.get("exit_status") == "FORCED_NO_BOOK" \
+            or row.get("fill_model_tag") == LEGACY_TAG or as_bool(row.get("fresh_eligible")) is False:
         return False
     lane = row.get("research_lane") or row.get("lane") or row.get("pathway")
     return True if not lane else fresh_data_eligible(lane)
