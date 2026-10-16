@@ -47817,7 +47817,7 @@ def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tup
     return problems, kind
 
 
-@app.route(_ARCHIVE_RECEIPT_ROUTE, methods=["POST"])
+@app.route('/api/monitor/archive/receipt', methods=["POST"])  # literal: the route-manifest test parses decorators; == _ARCHIVE_RECEIPT_ROUTE
 def monitor_archive_receipt_post():
     """Laptop R2 backup job pushes a receipt. Auth: dedicated R2_RECEIPT_TOKEN (X-R2-Receipt-Token), NOT the admin
     token. Validated (HM #678 B2), appended to archive_receipts.jsonl, and a restore-test receipt only updates
