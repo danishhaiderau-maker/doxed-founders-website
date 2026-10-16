@@ -72,6 +72,7 @@ test_chase_exact_bucket_controls.py
 test_chase_offset_touch_grid.py
 test_chase_window_status_copy.py
 test_clean_epoch_wipe.py
+test_cleanup_characterization_contract.py
 test_collection_epoch_binding.py
 test_collector_bilateral_supported_replay.py
 test_collector_candle_snapshot.py
@@ -443,6 +444,7 @@ test_research_reset_restart_bound_abort.py
 test_research_reset_target_stability.py
 test_research_reset_writer_fence.py
 test_research_retention.py
+test_research_segment_sync_epoch.py
 test_research_segments.py
 test_research_segments_custody.py
 test_research_segments_epoch.py

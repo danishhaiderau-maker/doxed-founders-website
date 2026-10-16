@@ -4,7 +4,6 @@ test_analyzer_dashboard_only.py | Boss | 2026-10-16 | subprocess imports researc
 test_analyzer_replay_rotation.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
 test_analyzer_runtime_status.py | Boss | 2026-10-16 | script-style; fails its own check 'one-click startup hot path avoids CIM' (Windows startup script drift, unrelated to paper_fill)
 test_api_resume_deadlock.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
-test_cleanup_characterization_contract.py | Boss | 2026-10-16 | route inventory snapshot is stale: new /api/monitor/fresh-start route (and others) not in the characterised list; needs snapshot refresh by the owner
 test_daily_pnl_utc_rollover.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
 test_dashboard_live_market_overlay.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
 test_dashboard_research_status_clarity.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
