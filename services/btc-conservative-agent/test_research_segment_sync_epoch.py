@@ -164,6 +164,42 @@ def test_rotation_pending_only_when_per_wipe_is_on_and_epoch_file_exists():
     assert absent["status"] == "GREEN"                   # epoch file absent: silent
 
 
+def test_marker_not_cleared_while_fly_epoch_still_equals_epoch_before():
+    kw = dict(published_seq=5, acked_seq=5, prefix="v3-w1", prefix_epoch_id="fse-1")
+    beacon = {"applied_seq": 5, "applied_prefix": "v3-w1", "fresh_start_epoch_id": "fse-2"}
+    stuck = _v(beacon=beacon, beacon_received_at=NOW - 10, reset_marker=_marker(prefix_before="v3-w0"),
+               fresh_start_epoch_id="fse-1", **kw)          # Fly never re-stamped: still epoch_before
+    assert any("LAPTOP_RESET_REQUIRED" in r for r in stuck["reasons"])
+    rotated = _v(beacon=dict(beacon, fresh_start_epoch_id="fse-2"), beacon_received_at=NOW - 10,
+                 reset_marker=_marker(prefix_before="v3-w0"), fresh_start_epoch_id="fse-2",
+                 **dict(kw, prefix_epoch_id="fse-2"))
+    assert not any("LAPTOP_RESET_REQUIRED" in r for r in rotated["reasons"])
+
+
+def test_order_dependent_wipe_then_beacon_flow_is_self_contained(tmp_path):
+    """wipe -> pre-wipe beacon (still RED) -> post-wipe beacon w/ new prefix+epoch (cleared); no shared state."""
+    import clean_epoch_wipe as cew
+    vol = tmp_path / "vol"
+    (vol / "segment-shipper-w1").mkdir(parents=True)
+    (vol / "segment-shipper-w1" / "status.json").write_text(json.dumps({"shipped_seq": 2456}))
+    (vol / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": 1}))
+    receipts = vol / "runtime" / "clean-epoch-receipts"
+    env = {"RESEARCH_SEGMENTS_PREFIX_PER_WIPE": "1", "RESEARCH_SEGMENTS_PREFIX": "v3"}
+    t_wipe = ep.time.time()
+    cew.execute(_plan(tmp_path), receipts_dir=receipts, scope="fly", cert_sha8="t", env=env)
+    marker = ep.read_reset_marker(receipts)
+    (vol / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": 2}))        # bot re-stamps after the wipe
+    kw = dict(published_seq=3, acked_seq=3, prefix="v3-w2", fresh_start_epoch_id=ep.fresh_start_epoch_id(vol),
+              prefix_epoch_id="fse-2", reset_marker=marker, now=t_wipe + 600)
+    old = ep.sync_verdict(ack_received_at=None, beacon={"applied_seq": 2456, "applied_prefix": "v3-w1",
+                          "fresh_start_epoch_id": "fse-1"}, beacon_received_at=t_wipe - 60, **kw)
+    assert any("LAPTOP_RESET_REQUIRED" in r for r in old["reasons"]) and old["status"] == "RED"
+    new = ep.sync_verdict(ack_received_at=None, beacon={"applied_seq": 3, "applied_prefix": "v3-w2",
+                          "fresh_start_epoch_id": "fse-2", "applied_at": ep.time.strftime("%Y-%m-%dT%H:%M:%SZ", ep.time.gmtime(t_wipe + 590))},
+                          beacon_received_at=t_wipe + 595, **kw)
+    assert not any("LAPTOP_RESET_REQUIRED" in r for r in new["reasons"])
+
+
 def test_unstamped_laptop_is_amber_not_red():
     v = _v(published_seq=5, acked_seq=5, beacon={"applied_seq": 5}, fresh_start_epoch_id="fse-9")
     assert v["status"] == "AMBER" and any("EPOCH_UNREPORTED" in r for r in v["reasons"])

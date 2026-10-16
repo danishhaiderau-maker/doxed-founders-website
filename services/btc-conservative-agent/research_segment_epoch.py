@@ -19,6 +19,15 @@ exit 8, nothing deleted) while the flag is off, because a wipe without per-wipe 
 and sequence numbers. The reset marker records prefix_before / epoch_before / published_at_wipe and clears only on a
 beacon received after the wipe that reports a different prefix or fresh_start_epoch_id (or echoes the wipe's
 plan_sha256 with applied_seq <= published). The ``ce-...`` clean-epoch id is never compared with laptop data.
+A marker also stays RED while Fly's own ``fresh_start_epoch_id`` still equals ``epoch_before`` (the wipe has not
+re-stamped the epoch yet).
+
+``reset_ack_plan_sha256`` (beacon field): the laptop operator sets it AFTER completing the laptop reset (mirror/state
+moved aside, puller re-pointed) by passing the wipe receipt's ``plan_sha256`` to the puller
+(``--reset-ack-plan-sha256`` or ``RESEARCH_SEGMENTS_RESET_ACK_PLAN_SHA256``); the puller echoes it in every beacon.
+It is the explicit-ack fallback for when neither the prefix nor the epoch visibly changes (per-wipe off). It only
+counts if it equals the marker's ``plan_sha256`` and ``applied_seq <= published`` and the beacon is newer than the
+marker. It is an operator assertion, not proof; the prefix/epoch change path is the verifiable one.
 """
 from __future__ import annotations
 
@@ -182,7 +191,8 @@ def _iso_to_ts(value) -> float | None:
         return None
 
 
-def _marker_cleared(marker: dict, beacon: dict | None, beacon_received_at, published: int) -> bool:
+def _marker_cleared(marker: dict, beacon: dict | None, beacon_received_at, published: int,
+                    current_epoch: str = "") -> bool:
     """True when a beacon received after the marker was written proves the laptop was reset.
 
     Only ``prefix_before`` / ``epoch_before`` (the pre-wipe values) are compared; never the ``ce-...``
@@ -198,6 +208,10 @@ def _marker_cleared(marker: dict, beacon: dict | None, beacon_received_at, publi
     applied = int(beacon.get("applied_seq") or 0)
     before_prefix = str(marker.get("prefix_before") or "")
     before_epoch = str(marker.get("epoch_before") or "")
+    # The wipe must actually have rotated Fly's own epoch: if Fly still reports the pre-wipe epoch
+    # (it has not re-stamped fresh_start_epoch.json), no laptop report can prove a reset to the new one.
+    if before_epoch and current_epoch and current_epoch == before_epoch:
+        return False
     bp = str(beacon.get("applied_prefix") or "")
     be = str(beacon.get("fresh_start_epoch_id") or "")
     if before_prefix and bp and bp != before_prefix:
@@ -260,7 +274,7 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
         amber.append(f"EPOCH_ROTATION_PENDING: prefix derived from {prefix_epoch_id}, "
                      f"disk epoch {fresh_start_epoch_id}; restart the shipper to rotate")
     if reset_marker and reset_marker.get("status") == "REQUIRED":
-        if not _marker_cleared(reset_marker, beacon, beacon_received_at, published):
+        if not _marker_cleared(reset_marker, beacon, beacon_received_at, published, fresh_start_epoch_id):
             red.append("LAPTOP_RESET_REQUIRED: wipe marker set and no beacon since the wipe reports a "
                        "different prefix/epoch than before it")
     if beacon is None and not red:
