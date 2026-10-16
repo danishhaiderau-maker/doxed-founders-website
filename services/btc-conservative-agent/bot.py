@@ -7133,6 +7133,39 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
+def _entry_fill_sim(pos: dict) -> dict:
+    """The entry pricing receipt of a position: positions store it as entry_fill_sim (create_position)."""
+    efs = pos.get("entry_fill_sim") or pos.get("fill_sim")
+    return efs if isinstance(efs, dict) else {}
+
+
+def _entry_priced_by_paper_fill(pos: dict) -> bool:
+    import paper_fill as _pf
+    return str(_entry_fill_sim(pos).get("fill_model") or "") in _pf.ALLOWED_FILL_MODELS
+
+
+def _entry_pricing_fields(pos: dict, master: dict) -> dict:
+    """Closed-row entry pricing fields, read from entry_fill_sim (single source of fill_model: the pricer's
+    own value; non-paper lanes keep the legacy label)."""
+    efs = _entry_fill_sim(pos)
+    paper = _is_paper_book_lane(pos)
+    return {
+        "fill_model": efs.get("fill_model") or pos.get("fill_model") or (master or {}).get("fill_model"),
+        "fill_model_version": efs.get("fill_model_version"),
+        "delay_s": efs.get("delay_s"),
+        "delay_source": efs.get("delay_source"),
+        "ask_age_ms": efs.get("ask_age_ms"),
+        "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
+        "depth_snapshot_fill": efs.get("depth_snapshot_fill"),
+        "entry_provenance": __import__("tile_fill").provenance(efs) if paper else None,
+    }
+
+
+def _row_priced_by_paper_fill(pos: dict) -> bool:
+    return bool(_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED")
+                and _entry_priced_by_paper_fill(pos))
+
+
 def _apply_paper_exit_marks(pos: dict, marks: dict) -> None:
     for k, v in (marks or {}).items():
         if v is None:
@@ -29803,6 +29836,9 @@ def execute_order(signal, ai=None):
         exit_pipeline(signal, ai, "EXECUTION_EXCEPTION")
         return False
 
+LEGACY_MARKET_ENTRY_ENABLED = False  # keep False: all tiles use paper_fill (see execute_market_order)
+
+
 def execute_market_order(signal):
     if _manual_pause_block_entry(signal, "MARKET_EXECUTE"):
         return False
@@ -29815,6 +29851,11 @@ def execute_market_order(signal):
     if not guard_retired_lane_execution(signal.get("research_lane"), "execute_market_order", signal.get("trade_id")):
         return
     if refuse_non_registry_order(signal, "MARKET_EXECUTE"):
+        return False
+    if not LEGACY_MARKET_ENTRY_ENABLED:
+        # Danish's hard rule: every tile prices paper fills through paper_fill. This legacy path used
+        # simulate_market_fill and is unreachable at pullback_threshold 0.001; it is refused for any tile.
+        logger.error(f"[ORDER] LEGACY MARKET ENTRY REFUSED (paper_fill is the only pricer) trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
         return False
     logger.info(f"[ORDER] MARKET EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("[ORDER]", "MARKET_EXEC_START", signal.get("trade_id"))
@@ -31395,7 +31436,7 @@ def close_position(pos: dict, exit_reason: str):
         slippage = pos.get("entry_slippage")
         if slippage is None:
             slippage = abs(float(entry) - float(pos.get("signal_price", entry)))
-        book_slip = float(pos.get("book_slippage_usd") or (pos.get("fill_sim") or {}).get("slippage_usd") or 0)
+        book_slip = float(pos.get("book_slippage_usd") or _entry_fill_sim(pos).get("slippage_usd") or 0)
         exit_book_slip = float((exit_sim or {}).get("slippage_usd") or 0)
         momentum_val = _compute_momentum_metric(features)
         volatility_val = _compute_volatility_metric(features)
@@ -31457,21 +31498,13 @@ def close_position(pos: dict, exit_reason: str):
             "exit_fill_price": pos.get("exit_fill_price", price),
             "exit_price": _exit_price_vwap(pos, price, qty) if _is_paper_book_lane(pos) else price,
             "exit_price_basis": "VWAP_ALL_LEGS" if _is_paper_book_lane(pos) else "FINAL_LEG",
-            "legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED")),
-            "fill_model": (pos.get("fill_sim") or {}).get("fill_model"),
-            "fill_model_version": (pos.get("fill_sim") or {}).get("fill_model_version"),
-            "delay_s": (pos.get("fill_sim") or {}).get("delay_s"),
-            "delay_source": (pos.get("fill_sim") or {}).get("delay_source"),
-            "ask_age_ms": (pos.get("fill_sim") or {}).get("ask_age_ms"),
+            "legacy_pricing": not _row_priced_by_paper_fill(pos),
+            **_entry_pricing_fields(pos, master),
             "exit_ask_age_ms": (pos.get("exit_fill_sim") or {}).get("ask_age_ms") if isinstance(pos.get("exit_fill_sim"), dict) else None,
-            "depth_snapshot_signal": (pos.get("fill_sim") or {}).get("depth_snapshot_signal"),
-            "depth_snapshot_fill": (pos.get("fill_sim") or {}).get("depth_snapshot_fill"),
             "exit_depth_snapshot_fill": (pos.get("exit_fill_sim") or {}).get("depth_snapshot_fill") if isinstance(pos.get("exit_fill_sim"), dict) else None,
-            "entry_provenance": __import__("tile_fill").provenance(pos.get("fill_sim")) if _is_paper_book_lane(pos) else None,
             "exit_provenance": __import__("tile_fill").provenance(pos.get("exit_fill_sim")) if _is_paper_book_lane(pos) else None,
-            "fill_model_tag": (None if (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED"))
-                               else "LEGACY_PRICING_INVALID"),
-            "fresh_eligible": bool(_is_paper_book_lane(pos) and pos.get("exit_status") == "PAPER_FILL"
+            "fill_model_tag": (None if _row_priced_by_paper_fill(pos) else "LEGACY_PRICING_INVALID"),
+            "fresh_eligible": bool(_row_priced_by_paper_fill(pos) and pos.get("exit_status") == "PAPER_FILL"
                                    and not pos.get("fresh_data_excluded")),
             "fee_model": __import__("tile_fill").FEE_MODEL,
             **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now(),
@@ -31564,7 +31597,6 @@ def close_position(pos: dict, exit_reason: str):
             "signal_age_sec": pos.get("signal_age_sec", entry_delay),
             "signal_age_bucket": pos.get("signal_age_bucket"),
             "entry_path": master.get("entry_path") or pos.get("entry_path"),
-            "fill_model": pos.get("fill_model") or master.get("fill_model"),
             "limit_chase_count": int(pos.get("limit_chase_count") or master.get("limit_chase_count") or 0),
             "urgent_chase_tier": pos.get("urgent_chase_tier") or master.get("urgent_chase_tier"),
             "slippage": round(float(slippage), 6),
@@ -32606,6 +32638,7 @@ _PROCESS_START_TS_FOR_PAUSED = time.time()
 def _disloc_paused_path() -> str:
     """HM 13:20: the working directory (/app/data/runtime on Fly), like the other DISLOC ledgers,
     so the streams catalog (os.getcwd()), the wipe and the R2 archive all see it."""
+    import disloc_engine as _dsl  # not imported at module level: a bare _dsl here was a NameError (500 on /api/monitor/tiles/disloc)
     return os.path.join(os.getcwd(), _dsl.PAUSED_SKIPS_FILE)
 
 
