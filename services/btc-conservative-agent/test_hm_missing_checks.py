@@ -90,12 +90,19 @@ def test_routes_monitor_token_readable_and_401_without(bot):
     assert set(body["checks"]) == set(bot._MONITOR_CHECK_NAMES) and "alert" in body
 
 
-def test_archive_receipt_post_admin_only(bot):
+def test_archive_receipt_post_needs_the_dedicated_r2_token_not_admin_or_monitor(bot, monkeypatch):
+    import time as _t
+    monkeypatch.setenv("R2_RECEIPT_TOKEN", "r2-only-token")
     client = bot.app.test_client()
-    payload = {"bucket": "doxed-btc-archive", "errors": 0, "disk_free_pct": 50, "finished_ts": 1.0}
-    assert client.post("/api/monitor/archive/receipt", json=payload, headers={"Authorization": f"Bearer {MONITOR}"},
-                       environ_base=REMOTE).status_code == 401
-    assert client.post("/api/monitor/archive/receipt", json=payload, headers={"X-Bot-Admin-Token": ADMIN},
+    payload = {"schema": "r2_backup_receipt_v2", "kind": "sync", "host": "laptop", "bucket": "doxed-btc-archive",
+               "errors": 0, "ok": True, "finished_ts": _t.time() - 5, "state_keys": 20, "r2_objects": 10,
+               "missing": 0, "quarantined": 0, "quarantine_pending": 0, "outside_keep": 0,
+               "keep_manifest_sha256": bot._r2_keep_pin_sha256(),
+               "restore_test": {"checked": 10, "ok": 10, "bad": 0, "missing": 0, "passed": True}}
+    for headers in ({"Authorization": f"Bearer {MONITOR}"}, {"X-Bot-Admin-Token": ADMIN}, {}):
+        assert client.post("/api/monitor/archive/receipt", json=payload, headers=headers,
+                           environ_base=REMOTE).status_code == 401
+    assert client.post("/api/monitor/archive/receipt", json=payload, headers={"X-R2-Receipt-Token": "r2-only-token"},
                        environ_base=REMOTE).status_code == 200
     got = client.get("/api/monitor/archive", headers={"Authorization": f"Bearer {MONITOR}"},
                      environ_base=REMOTE).get_json()
