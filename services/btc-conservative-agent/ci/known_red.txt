@@ -1,52 +1,43 @@
 # KNOWN_RED: test files that do not pass under pytest. Format: path | owner | date | reason
 # Fix or delete the entry; do not add a new red file here without an owner.
-test_analyzer_dashboard_only.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_analyzer_replay_rotation.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_analyzer_runtime_status.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_api_resume_deadlock.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_canonical_data_store.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_clean_epoch_reset_plan.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_cleanup_characterization_contract.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_daily_pnl_utc_rollover.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_dashboard_live_market_overlay.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_dashboard_research_status_clarity.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_dashboard_timestamps.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_dashboard_v31_truthfulness.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_data_retention.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_deepseek_v4_migration.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_direction_only_confidence.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_execution_funnel_corruption_repair.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_experimental_tile_contract.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_fly_data_paths_canonical_authority.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_fly_single_owner_contract.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_genome_integrity_repair.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_home_stack_control_auth.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_home_stack_startup_guards.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_home_stack_stop_bridge_recovery.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_manual_pause_entry_gate.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_normalized_market_indicators.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_paper_mode_private_api_isolation.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_paper_skips_risk_pauses.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_pause_owner_resume_default.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_phantom_cancel_endpoint.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_platform_relay_evidence_sync_contract.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_policy_evidence_bindings.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_research_completeness.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_research_dashboard_genome_sections.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_research_dashboard_no_onedrive_paths.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_research_dashboard_upstream_identity.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_research_deletion_preflight_contract.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_shadow_exit_paths.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_shared_cvd_trigger_lane_receipts.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_showcase_manual_close_generation.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_singleton_startup.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_step2_exit_latency_bench.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_strategy_lab.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_strategy_lab_multiday.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_tier_a_timestamp_fields.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_toggle_matrix.py | Boss | 2026-10-16 | no pytest tests collected (script-style; deploy job runs some via `python file`)
-test_watchdog_crash_receipt.py | Boss | 2026-10-16 | fails on master baseline (#672) and/or this branch; not caused by PR #675
-test_indicator_engine.py | Boss | 2026-10-16 | passes alone but fails/errors in the single-process allowlist run (order-dependent state; research_session.json / engine boot-id leakage)
-test_fresh_collection_signals.py | Boss | 2026-10-16 | passes alone but fails/errors in the single-process allowlist run (order-dependent state; research_session.json / engine boot-id leakage)
-test_legacy_archive_verifier.py | Boss | 2026-10-16 | passes alone, flaky/order-dependent in the single-process allowlist run (multiprocess / hash state)
-test_research_v3_store.py | Boss | 2026-10-16 | passes alone, flaky/order-dependent in the single-process allowlist run (multiprocess / hash state)
+test_analyzer_dashboard_only.py | Boss | 2026-10-16 | subprocess imports research.research_dashboard which needs pyarrow; pyarrow is not in requirements.txt (CalledProcessError)
+test_analyzer_replay_rotation.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_analyzer_runtime_status.py | Boss | 2026-10-16 | script-style; fails its own check 'one-click startup hot path avoids CIM' (Windows startup script drift, unrelated to paper_fill)
+test_api_resume_deadlock.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_cleanup_characterization_contract.py | Boss | 2026-10-16 | route inventory snapshot is stale: new /api/monitor/fresh-start route (and others) not in the characterised list; needs snapshot refresh by the owner
+test_daily_pnl_utc_rollover.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_dashboard_live_market_overlay.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_dashboard_research_status_clarity.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_dashboard_timestamps.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_dashboard_v31_truthfulness.py | Boss | 2026-10-16 | _showcase_trade_session_start() returns 0.0 instead of 1000.0 under a clean env (session-start fixture drift)
+test_data_retention.py | Boss | 2026-10-16 | 21 of 48 tests error: ModuleNotFoundError pyarrow (not in requirements.txt); the other tests pass
+test_deepseek_v4_migration.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_direction_only_confidence.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_fly_data_paths_canonical_authority.py | Boss | 2026-10-16 | both tests fail: subprocess chdir to the Fly runtime path (/app/data) that does not exist on a CI runner (FileNotFoundError)
+test_fly_single_owner_contract.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_genome_integrity_repair.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_home_stack_control_auth.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_home_stack_startup_guards.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_home_stack_stop_bridge_recovery.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_manual_pause_entry_gate.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_normalized_market_indicators.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_paper_mode_private_api_isolation.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_paper_skips_risk_pauses.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_pause_owner_resume_default.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_phantom_cancel_endpoint.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_platform_relay_evidence_sync_contract.py | Boss | 2026-10-16 | subprocess spawn fails (illegal environment variable name / Fly-only cwd) in a clean env; not reproducible on a CI runner without the Fly layout
+test_research_completeness.py | Boss | 2026-10-16 | asserts lane order/roster against a stale list (starts FAMILY_COMMITTED_FADE_TAKER_90, registry now starts FAMILY_RANDOM_CONTROL_TAKER_90)
+test_research_dashboard_genome_sections.py | Boss | 2026-10-16 | dashboard JS section order assertion stale (loadMixMatch now precedes loadCombos)
+test_research_dashboard_no_onedrive_paths.py | Boss | 2026-10-16 | subprocess imports research.research_dashboard which needs pyarrow (not in requirements.txt)
+test_research_dashboard_upstream_identity.py | Boss | 2026-10-16 | dashboard JS source assertion stale: 16 unexpected template rows still contain the old identity markup
+test_shared_cvd_trigger_lane_receipts.py | Boss | 2026-10-16 | asserts the lane roster equals a stale set; the registry now carries extra FAMILY_* lanes
+test_singleton_startup.py | Boss | 2026-10-16 | script-style; fails 'fresh canonical cache is returned as immutable pre-serialized JSON' (relay execution cache header/body), fails before and after #675
+test_step2_exit_latency_bench.py | Boss | 2026-10-16 | script-style; TypeError at line 80 (results contain a None booked price), bench harness drift
+test_strategy_lab.py | Boss | 2026-10-16 | 1 of 5 tests: KeyError FAMILY_PREMIUM_REVERSION_60M (lane removed from registry; test fixture stale)
+test_strategy_lab_multiday.py | Boss | 2026-10-16 | ImportError: parquet needs pyarrow or fastparquet, neither is in requirements.txt
+test_tier_a_timestamp_fields.py | Boss | 2026-10-16 | 1 of 7 tests: ModuleNotFoundError pyarrow (not in requirements.txt)
+test_toggle_matrix.py | Boss | 2026-10-16 | script-style file (no pytest collection); passes as `python file`, gated by the second CI step (ci/script_style_tests.txt)
+test_indicator_engine.py | Boss | 2026-10-16 | passes alone (9) but order-dependent in the full run (shared module state); quarantined until isolated
+test_fresh_collection_signals.py | Boss | 2026-10-16 | passes alone (13) but order-dependent in the full run; quarantined until isolated
+test_legacy_archive_verifier.py | Boss | 2026-10-16 | passes alone (5) but order-dependent in the full run; quarantined until isolated
+test_research_v3_store.py | Boss | 2026-10-16 | passes alone (22) but flaky in the full run (shared store state); quarantined until isolated

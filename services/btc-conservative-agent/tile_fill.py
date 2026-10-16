@@ -17,6 +17,7 @@ MIGRATED_LANES = frozenset({
 IOC_CAP_BP = 5.0          # signal ask +5 bp (long) / signal bid -5 bp (short), same as DISLOC step B
 EXIT_FORCE_AFTER_S = 10.0  # unpriced exit is force-closed (FORCED_NO_BOOK) after this
 EXIT_FORCE_CAP_S = 30.0
+TP1_MAX_RESTARTS = 3        # then the TP1 leg is priced with the no-wait forced pricer (livelock guard)
 TP1_PENDING_MAX_S = 5.0     # a pending TP1 marker older than this is restarted (its book second is too old)
 FORCED_LOOKBACK_S = paper_fill.MIN_DELAY_S  # forced closes: fill second = now, book = latest complete second <= now
 FEE_MODEL = "NO_TRADING_FEE, funding only"  # Danish 16 Oct: Bitfinex has no trading fees, only funding

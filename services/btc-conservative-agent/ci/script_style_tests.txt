@@ -1,0 +1,21 @@
+# Script-style safety/contract files run as `python file` (no pytest collection). Each must exit 0. One per line.
+test_analyzer_replay_rotation.py
+test_api_resume_deadlock.py
+test_daily_pnl_utc_rollover.py
+test_dashboard_live_market_overlay.py
+test_dashboard_research_status_clarity.py
+test_dashboard_timestamps.py
+test_deepseek_v4_migration.py
+test_direction_only_confidence.py
+test_fly_single_owner_contract.py
+test_genome_integrity_repair.py
+test_home_stack_control_auth.py
+test_home_stack_startup_guards.py
+test_home_stack_stop_bridge_recovery.py
+test_manual_pause_entry_gate.py
+test_normalized_market_indicators.py
+test_paper_mode_private_api_isolation.py
+test_paper_skips_risk_pauses.py
+test_pause_owner_resume_default.py
+test_phantom_cancel_endpoint.py
+test_toggle_matrix.py

@@ -557,3 +557,12 @@ test_xvenue_submit_latency.py
 tests/test_crash_journal_writer.py
 tests/test_v3_ledger_index.py
 test_ci_test_inventory.py
+test_showcase_manual_close_generation.py
+test_execution_funnel_corruption_repair.py
+test_shadow_exit_paths.py
+test_experimental_tile_contract.py
+test_clean_epoch_reset_plan.py
+test_research_deletion_preflight_contract.py
+test_canonical_data_store.py
+test_policy_evidence_bindings.py
+test_watchdog_crash_receipt.py

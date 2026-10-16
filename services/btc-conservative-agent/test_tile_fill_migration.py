@@ -100,7 +100,7 @@ def test_bot_hooks_route_lanes_1_to_5_only():
     def seg(name):
         return ast.get_source_segment(src, next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name))
     assert "_paper_lane_entry_result" in seg("resolve_sim_fill_with_depth")
-    assert "_paper_lane_exit" in seg("resolve_sim_exit_price")
+    assert "_paper_lane_exit" in seg("close_position") and "_paper_lane_exit" not in seg("resolve_sim_exit_price")
     assert "_paper_lane_entry_result" in seg("_pending_limit_ready_for_fill")
     assert "paper_ioc_no_fill" in seg("process_pending_orders")
     assert "tile_fill" in seg("_is_paper_book_lane") and "MIGRATED_LANES" in seg("_is_paper_book_lane")
@@ -162,6 +162,17 @@ def _bot_ns(names, **extra):
     return ns
 
 
+class _Log:
+    def __init__(self):
+        self.lines = []
+
+    def warning(self, m, *a, **k):
+        self.lines.append(("warning", m))
+
+    def error(self, m, *a, **k):
+        self.lines.append(("error", m))
+
+
 class _Clock:
     def __init__(self, now):
         self.now, self.slept = float(now), []
@@ -176,9 +187,9 @@ class _Clock:
 
 def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10")):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
-    return _bot_ns(["_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit",
+    return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit",
                     "_paper_lane_entry_result", "_paper_no_fill_shadow_row", *extra_names],
-                   time=t, _disloc_delay=lambda lane, leg: delay,
+                   time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
                    _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT")
 
 
@@ -218,11 +229,12 @@ def test_b3_forced_close_never_waits_and_is_not_fresh(monkeypatch):
         clk = _Clock(5000.0)
         ns = _lane_ns(clk)
         pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "_exit_eval_price": 100.0}
-        out = ns["_paper_lane_exit"](pos, reason)
+        out, marks = ns["_paper_lane_exit"](pos, reason)
         px, sim = out
         assert px == 99.0 and sim["delay_source"] == "FORCED_NO_DELAY" and sim["delay_s"] == 0.0
         assert sim["fill_ts"] <= 5000.0 + 1e-9  # latest complete second at or before now: no look-ahead
-        assert pos["exit_status"] == "PAPER_FILL_FORCED" and pos["fresh_data_excluded"] is True
+        assert marks["exit_status"] == "PAPER_FILL_FORCED" and marks["fresh_data_excluded"] is True
+        assert "exit_status" not in pos and "fresh_data_excluded" not in pos  # nothing written before the claim
         assert clk.slept == []
 
 
@@ -231,8 +243,10 @@ def test_b3_forced_without_book_is_forced_no_book(monkeypatch):
     clk = _Clock(5000.0)
     ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5}
-    assert ns["_paper_lane_exit"](pos, "DEPLOY_FORCE_FLAT") is None
-    assert pos["exit_status"] == "FORCED_NO_BOOK" and clk.slept == []
+    out, marks = ns["_paper_lane_exit"](pos, "DEPLOY_FORCE_FLAT")
+    assert out is None and clk.slept == []
+    assert marks["exit_status"] == "FORCED_NO_BOOK" and marks["exit_fallback"] == "LEGACY_BBO_FALLBACK_NO_BOOK"
+    assert marks["fresh_data_excluded"] is True and "exit_status" not in pos
 
 
 def test_b3_overdue_exit_goes_no_wait(monkeypatch):
@@ -240,7 +254,7 @@ def test_b3_overdue_exit_goes_no_wait(monkeypatch):
     clk = _Clock(5000.0)
     ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 4960.0}
-    _, sim = ns["_paper_lane_exit"](pos, "TIME_EXIT")
+    (_, sim), _marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")
     assert sim["delay_source"] == "FORCED_NO_DELAY" and clk.slept == []
 
 
@@ -249,10 +263,11 @@ def test_nit_exit_uses_exit_trigger_ts_and_waits_only_remaining_delay(monkeypatc
     clk = _Clock(5000.0)
     ns = _lane_ns(clk)
     pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 4999.0}
-    px, sim = ns["_paper_lane_exit"](pos, "TIME_EXIT")
+    (px, sim), marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")
     assert sim["delay_source"] == "default_until_n10" and sim["fill_ts"] == 5000.5
     assert abs(sum(clk.slept) - 0.5) < 1e-9  # trigger was 1.0 s ago, delay 1.5 s -> waits 0.5 s, not 1.5 s
-    assert pos["exit_status"] == "PAPER_FILL" and "_paper_exit_trigger_ts" not in pos
+    assert marks["exit_status"] == "PAPER_FILL" and marks["_paper_exit_trigger_ts"] is None
+    assert "exit_status" not in pos and "_paper_exit_trigger_ts" not in pos  # (HM b) applied only after the claim
 
 
 def test_nit_entry_waits_for_signal_plus_delay_and_force_does_not_cache_no_book(monkeypatch):
@@ -377,3 +392,70 @@ def test_b1_ci_runs_paper_fill_contract_before_deploy_and_on_prs():
     job = deploy[deploy.index("  test-and-deploy:"):]
     assert job.index(cmd) < job.index("Verify Fly and dashboard safety contracts")
     assert "pull_request:" in pr
+
+
+def _func_src(src, name):
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name)
+    return ast.get_source_segment(src, node)
+
+
+def test_resid_a_inline_close_never_waits(monkeypatch):
+    _use_book(monkeypatch)
+    clk = _Clock(5000.0)
+    ns = _lane_ns(clk)
+    ns["_PAPER_EXIT_TLS"].no_wait = True
+    pos = {"research_lane": "FAMILY_RANDOM_CONTROL_TAKER_90", "dir": "LONG", "qty": 0.5, "exit_trigger_ts": 5000.0}
+    (_, sim), marks = ns["_paper_lane_exit"](pos, "TIME_EXIT")  # not a forced reason, trigger just now
+    assert sim["delay_source"] == "FORCED_NO_DELAY" and marks["fresh_data_excluded"] is True and clk.slept == []
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = src[src.index("def _dispatch_position_close"):src.index("PROTECTIVE_FALLBACK_HARD_BP =")]
+    assert "_PAPER_EXIT_TLS.no_wait = True" in seg and seg.index("no_wait = True") < seg.index("close_position(pos, reason)")
+
+
+def test_resid_b_close_position_applies_marks_after_claim_only():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = _func_src(src, "close_position")
+    assert seg.index("_paper_lane_exit(pos, exit_reason)") < seg.index("PositionCloseClaimScope(")
+    assert seg.index("PositionCloseClaimScope(") < seg.index("_apply_paper_exit_marks(source_pos")
+    assert seg.index("if not close_claimed:") < seg.index("_apply_paper_exit_marks(source_pos")
+
+
+def test_resid_c_tp1_restart_log_and_livelock_guard(monkeypatch):
+    _use_book(monkeypatch)
+    ns = _lane_ns(_Clock(0))
+    log = ns["logger"]
+    pos = {"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0, "trade_id": "x"}
+    t = 1000.0
+    states = []
+    for _ in range(5):
+        states.append(ns["_tp1_gate"](pos, "TP1", t, "LONG", 0.5)[0])
+        t += 6.0  # every look is past TP1_PENDING_MAX_S: the marker is stale each time
+    assert states[:3] == ["WAIT", "WAIT", "WAIT"] and "DUE" in states[3:]
+    assert any("stale marker restarted" in m for _, m in log.lines)
+    state, leg = ns["_tp1_gate"]({"research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "policy_original_qty": 1.0,
+                                   "_tp1_pending": {"key": "TP1", "trigger_ts": 0.0, "restarts": 3}}, "TP1", 100.0, "LONG", 0.5)
+    assert state == "DUE" and leg["delay_source"] == "FORCED_NO_DELAY" and leg["delay_s"] == 0.0
+    assert any(level == "error" and "livelock guard" in m for level, m in log.lines)
+
+
+def test_resid_c_pending_marker_cancelled_when_policy_stops_returning_tp1():
+    ns = _lane_ns(_Clock(0))
+    pos = {"trade_id": "x", "_tp1_pending": {"key": "TP1", "trigger_ts": time_now()}}
+    ns["_tp1_cancel_pending"](pos, "policy no longer returns the TP1 action")
+    assert "_tp1_pending" not in pos
+    assert any("cancelled" in m for _, m in ns["logger"].lines)
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = src[src.index("def _apply_family_tile_exit"):src.index("def _apply_position_exits")]
+    assert seg.count("_tp1_cancel_pending(source_pos") == 2
+
+
+def time_now():
+    import time as _t
+    return _t.time()
+
+
+def test_resid_d_legacy_fallback_tag_stays_visible():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    seg = _func_src(src, "close_position")
+    assert '"exit_fallback": pos.get("exit_fallback")' in seg
+    assert '"legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED"))' in seg

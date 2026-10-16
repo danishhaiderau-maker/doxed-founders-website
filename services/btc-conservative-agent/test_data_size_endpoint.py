@@ -21,8 +21,17 @@ class DataSizeEndpointTests(unittest.TestCase):
         self.original_async = bot._data_sync_async_inventory
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
         bot._data_sync_inventory_cache_condition = threading.Condition()
+        # Deterministic fake tokens, so the result never depends on the runner's environment: with no
+        # BOT_ADMIN_TOKEN, _admin_authed() trusts direct loopback and monitor_integrity_authorized() let the
+        # unauthenticated request through (green on a box that has the secret, red in CI).
+        self.original_admin_token = bot._BOT_ADMIN_TOKEN
+        self.original_monitor_token = bot._MONITOR_READ_TOKEN
+        bot._BOT_ADMIN_TOKEN = "unit-test-admin-token-not-a-secret"
+        bot._MONITOR_READ_TOKEN = "unit-test-monitor-token-not-a-secret"
 
     def tearDown(self):
+        bot._BOT_ADMIN_TOKEN = self.original_admin_token
+        bot._MONITOR_READ_TOKEN = self.original_monitor_token
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = self.original_bootstrap
         bot._data_sync_inventory_cache_condition = self.original_condition
         bot._data_sync_async_inventory = self.original_async
@@ -67,6 +76,16 @@ class DataSizeEndpointTests(unittest.TestCase):
             with bot.app.test_client() as client:
                 response = client.get("/api/data_size")
         self.assertEqual(response.status_code, 401)
+
+    def test_wrong_monitor_token_is_rejected_and_right_one_is_accepted(self):
+        self._state()
+        with mock.patch.object(bot, "_admin_authed_strict", return_value=False), \
+             mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage()):
+            with bot.app.test_client() as client:
+                bad = client.get("/api/data_size", headers={"Authorization": "Bearer wrong"})
+                good = client.get("/api/data_size", headers={"Authorization": "Bearer " + bot._MONITOR_READ_TOKEN})
+        self.assertEqual(bad.status_code, 401)
+        self.assertEqual(good.status_code, 200)
 
     def test_current_inventory_and_filesystem_usage_are_distinct(self):
         self._state()

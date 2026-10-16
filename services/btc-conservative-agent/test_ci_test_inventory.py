@@ -52,3 +52,15 @@ def test_phase_one_files_are_green_and_allowlisted():
     for f in ("test_paper_fill.py", "test_tile_fill_migration.py", "test_keep_manifest.py", "test_fresh_start_epoch.py",
               "test_integrity_gaps.py", "test_showcase_manual_close.py", "test_ci_test_inventory.py"):
         assert f in allow, f
+
+
+def test_script_style_list_is_real_and_stays_in_known_red():
+    red = {line.split("|")[0].strip() for line in _entries("known_red.txt")}
+    files = set(_all_test_files())
+    for f in _entries("script_style_tests.txt"):
+        assert f in files and f in red, f  # run as `python file`; never also pytest-allowlisted
+
+
+def test_workflow_runs_script_style_step():
+    wf = (ROOT.parent.parent / ".github" / "workflows" / "unit-tests.yml").read_text(encoding="utf-8")
+    assert "ci/script_style_tests.txt" in wf and 'python "$f"' in wf
