@@ -1,0 +1,2 @@
+# Individual red tests inside allowlisted files, deselected in CI. Format: node id | owner | date | reason
+test_fly_data_sync_contract.py::test_legacy_html_publication_is_rejected_and_status_discloses_quarantine | Boss | 2026-10-16 | fails on master baseline: analyzer-mirror status returns 500 instead of 404
