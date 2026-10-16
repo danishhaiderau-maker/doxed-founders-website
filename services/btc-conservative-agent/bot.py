@@ -33656,6 +33656,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
+    "/api/monitor/reconcile",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -46051,6 +46052,8 @@ _PUBLIC_TRADE_SAFE_KEYS = {
     "entry", "exit", "dur_min", "pnl", "net_pnl_usd",
     "gross_pnl_usd", "trading_fees_usd", "fees_usd",
     "funding_fees_usd", "close_ts_melbourne", "trade_display",
+    # pricing provenance (entry_fill_sim receipt, flattened on the closed row): the model is a label, not a strategy input
+    "fill_model", "fill_model_version", "delay_s",
 }
 
 
@@ -47112,8 +47115,11 @@ def _monitor_tiles_rows(scope: dict, statuses=("closed", "open", "pending", "exp
             try:
                 for row in _disloc_tile_trade_rows(lane, epoch_id=scope["epoch"], short_name=short.get(lane),
                                                    be_band_bp=scope["be_band_bp"], since_ts=_disloc_epoch_since()):
-                    if monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
-                        out[lane].append(row)
+                    if not monitor_tiles.row_in_window(row, scope["since"], scope["until"]):
+                        continue
+                    if scope.get("fresh_only") and not monitor_tiles.row_is_fresh(row):
+                        continue  # tile 6/7 rows with fresh_eligible false are not fresh data
+                    out[lane].append(row)
             except Exception:  # noqa: BLE001 - DISLOC fold is additive only
                 continue
     return out
@@ -47702,6 +47708,21 @@ def monitor_check_tape_retention():
 @app.route('/api/monitor/exits/latency-guard', methods=["GET"])
 def monitor_check_latency_guard():
     return _monitor_single_check("exits-latency-guard")
+
+
+@app.route('/api/monitor/reconcile', methods=["GET"])
+def monitor_reconcile():
+    """Strategist S1: per-tile Fly counts + archive restore-test result (read-only, monitor-read auth; no writes,
+    no calls to other hosts: mirror/analyzer counts are null until those hosts report)."""
+    import monitor_reconcile as _mr
+
+    def build(now):
+        scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(), "since": None,
+                 "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": False}
+        by_lane = _monitor_tiles_rows(scope, ("closed",))
+        short = _monitor_tile_short_names()
+        return _mr.build(by_lane, short, _load_archive_receipt(), _monitor_tiles_common(now))
+    return _monitor_tiles_guard(build, 800_000)
 
 
 @app.route('/api/monitor/archive', methods=["GET"])

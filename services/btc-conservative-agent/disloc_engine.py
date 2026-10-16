@@ -979,6 +979,21 @@ def row_net_usd(row: Mapping[str, Any], margin_usd: float = DEFAULT_MARGIN_USD,
     return bp * float(margin_usd) * float(leverage) * frac / 1e4
 
 
+_LEDGER_PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms",
+                        "depth_snapshot_signal", "depth_snapshot_fill", "exit_status", "exit_delay_s",
+                        "exit_delay_source", "fee_model", "fresh_data_excluded")
+
+
+def ledger_pricing_block(r: Mapping[str, Any]) -> dict:
+    """Pricing provenance of one DISLOC ledger row; fresh_eligible comes from the row's own facts
+    (paper_fill.row_fresh_strict): book-priced model v1, a filled exit, not FORCED_NO_BOOK/excluded. Older rows
+    (TAKER_AT_BOOK_TOUCH, no version) stay visible but fresh_eligible=false."""
+    block = {k: r.get(k) for k in _LEDGER_PRICING_KEYS}
+    block["fresh_eligible"] = bool(paper_fill.row_fresh_strict(dict(r)))
+    block["legacy_pricing"] = not block["fresh_eligible"] and not r.get("fresh_data_excluded")
+    return block
+
+
 def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=None,
                     margin_usd: float = DEFAULT_MARGIN_USD, leverage: float = DEFAULT_LEVERAGE,
                     short_name: Optional[str] = None, be_band_bp: float = 0.0) -> list:
@@ -1026,6 +1041,7 @@ def tile_trade_rows(rows: Iterable[Mapping[str, Any]], lane: str, *, epoch_id=No
                     "funding_usd": None, "net_usd": round(net, 6) if net is not None else None,
                     "net_usd_basis": "DISLOC_NET_BP_x_NOTIONAL", "class": cls, "be_band_bp": be_band_bp,
                     "net_usd_cents_booked": round(net, 2) if net is not None else None},
+            "pricing": ledger_pricing_block(r),
             "disloc": {"side_tag": r.get("side_tag") or SIDE_TAGS.get(str(r.get("side"))),
                        "delay_bucket": delay_bucket(r.get("signal_to_fill_s")), "variant": r.get("variant")},
             "sort_ts": fill_ts or exit_ts or 0.0,
