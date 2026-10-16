@@ -48507,17 +48507,25 @@ def _status_epoch_pipeline_funnel() -> dict:
 _PROBE_CACHE_TTL_SEC = min(1.0, max(0.0, float(os.getenv("PROBE_CACHE_TTL_SEC", "1.0"))))
 _PROBE_CACHES: list = []
 _probe_generation = [0]
+# One lock guards the generation counter, every cache slot, and the fresh-rebuild timestamps, so
+# "generation unchanged -> write cache" is atomic against _probe_cache_clear_all (HM #676).
+_PROBE_LOCK = threading.Lock()
+# ?fresh=1 is rate-limited: a rebuild younger than this is reused, so a polling gate (or an abusive
+# client) cannot force a rebuild per request. Emergency/arm/disarm clears the cache, so this never
+# serves a pre-change state.
+_PROBE_FRESH_MIN_INTERVAL_SEC = 0.25
 
 
 def _probe_cache_clear_all():
     """Drop every probe cache. Called after any emergency POST completes and whenever the
     live arm/disarm control changes state, so /api/status and /health can never serve a
-    pre-change live_armed/flat state. The generation bump also stops an in-flight rebuild
-    that started before the change from re-populating the cache with the stale payload."""
-    _probe_generation[0] += 1
-    for c in list(_PROBE_CACHES):
-        c["resp"] = None
-        c["at"] = 0.0
+    pre-change live_armed/flat state. The generation bump (same lock as the cache write) also
+    stops an in-flight rebuild that started before the change from re-populating the cache."""
+    with _PROBE_LOCK:
+        _probe_generation[0] += 1
+        for c in list(_PROBE_CACHES):
+            c["resp"] = None
+            c["at"] = 0.0
 
 
 def _clears_probe_cache(fn):
@@ -48534,17 +48542,16 @@ def _clears_probe_cache(fn):
 
 def _probe_cached(fn):
     """HM D-B: serve GET /api/status and /health from a <=1 s cache so concurrent polls
-    cannot each rebuild the payload. ``?fresh=1`` bypasses (and refreshes) the cache; gate
-    scripts use it. Single-flight: one thread rebuilds on a miss, the rest wait for it."""
+    cannot each rebuild the payload. ``?fresh=1`` bypasses the cache (rate-limited to one rebuild per
+    ``_PROBE_FRESH_MIN_INTERVAL_SEC``); gate scripts use it. Single-flight: one thread rebuilds on a miss."""
     cache = {"at": 0.0, "resp": None}
     _PROBE_CACHES.append(cache)
-    lock = threading.Lock()          # guards cache fields (short)
     flight = threading.Lock()        # single-flight rebuild
 
-    def _hit(now):
-        with lock:
+    def _hit(now, max_age):
+        with _PROBE_LOCK:
             hit = cache["resp"]
-            if hit is not None and 0.0 <= now - cache["at"] < _PROBE_CACHE_TTL_SEC:
+            if hit is not None and 0.0 <= now - cache["at"] < max_age:
                 return hit
         return None
 
@@ -48556,23 +48563,23 @@ def _probe_cached(fn):
     def wrapper(*args, **kwargs):
         if _PROBE_CACHE_TTL_SEC <= 0 or request.method != "GET":
             return fn(*args, **kwargs)
-        fresh = request.args.get("fresh") == "1"
-        if not fresh:
-            hit = _hit(time.monotonic())
+        max_age = (min(_PROBE_FRESH_MIN_INTERVAL_SEC, _PROBE_CACHE_TTL_SEC)
+                   if request.args.get("fresh") == "1" else _PROBE_CACHE_TTL_SEC)
+        hit = _hit(time.monotonic(), max_age)
+        if hit is not None:
+            return _replay(hit)
+        with flight:
+            hit = _hit(time.monotonic(), max_age)   # a concurrent rebuild may have filled it
             if hit is not None:
                 return _replay(hit)
-        with flight:
-            if not fresh:
-                hit = _hit(time.monotonic())   # a concurrent rebuild may have filled it
-                if hit is not None:
-                    return _replay(hit)
-            gen = _probe_generation[0]
+            with _PROBE_LOCK:
+                gen = _probe_generation[0]
             started = time.monotonic()
             resp = app.make_response(fn(*args, **kwargs))
             if resp.direct_passthrough or resp.is_streamed:
                 return resp
-            if gen == _probe_generation[0]:
-                with lock:
+            with _PROBE_LOCK:
+                if gen == _probe_generation[0]:
                     cache["at"] = started
                     cache["resp"] = (resp.get_data(), resp.status_code, resp.mimetype)
             return resp

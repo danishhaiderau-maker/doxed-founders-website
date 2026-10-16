@@ -245,7 +245,7 @@ jobs:
           expected = str(os.environ.get("EXPECTED_BOOTSTRAP_REVISION") or "").strip().lower()
           if not re.fullmatch(r"[0-9a-f]{12}", expected):
               raise SystemExit("resume-paper requires expected_bootstrap_revision = exact 12-character live revision")
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=20) as response:
               health = json.load(response)
           if str(health.get("source_git_rev") or "").lower() != expected:
               raise SystemExit("live Fly revision does not match expected_bootstrap_revision")
@@ -293,12 +293,12 @@ jobs:
           def call(path,payload=None):
             data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
-          status=call("/api/status")
+          status=call("/api/status?fresh=1")
           if str(status.get("source_git_rev") or "").lower()!=expected: raise SystemExit("unexpected deployed revision")
           if not(status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False): raise SystemExit("paper safety not proven")
           call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"})
           for _ in range(8):
-            status=call("/api/status"); progress=status.get("strategy_progress") or {}
+            status=call("/api/status?fresh=1"); progress=status.get("strategy_progress") or {}
             if status.get("execution_paused") is True and status.get("manual_admin_pause") is True and int(progress.get("pending_orders") or 0)==0 and int(progress.get("open_positions") or 0)==0: break
             time.sleep(2)
           else: raise SystemExit("flat maintenance boundary not proven")
@@ -323,7 +323,7 @@ jobs:
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
           seen=[]; last=None; proof_started=time.time(); deadline=proof_started+1000
           while time.time()<deadline:
-            call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
+            call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"}); last=call("/api/status?fresh=1"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
             safe=str(last.get("source_git_rev") or "").lower()==expected and last.get("execution_paused") is True and last.get("manual_admin_pause") is True and last.get("force_paper_mode") is True and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
             age=pipeline.get("last_success_age_sec")
             productive=(int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0) or int(progress.get("promoted_qualification_retries") or 0)>0
@@ -347,7 +347,7 @@ jobs:
           def call(path,payload=None):
             data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
-          resumed=call("/api/resume",{"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
+          resumed=call("/api/resume",{"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status?fresh=1")
           if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
           PY
 
@@ -389,14 +389,14 @@ jobs:
               data = None if payload is None else json.dumps(payload).encode()
               req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
               with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
-          status = call("/api/status")
+          status = call("/api/status?fresh=1")
           if str(status.get("source_git_rev") or "").lower() != expected:
               raise SystemExit("refusing cursor repair on an unexpected deployed revision")
           if not (status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False):
               raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
           call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(8):
-              status = call("/api/status"); progress = status.get("strategy_progress") or {}
+              status = call("/api/status?fresh=1"); progress = status.get("strategy_progress") or {}
               if (status.get("execution_paused") is True and status.get("manual_admin_pause") is True
                   and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
                   break
@@ -429,7 +429,7 @@ jobs:
               with urllib.request.urlopen(req,timeout=timeout) as response:return json.load(response)
           successes=[]; last=None; deadline=time.time()+1000
           while time.time()<deadline:
-              call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}); last=call("/api/status")
+              call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}); last=call("/api/status?fresh=1")
               pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
               safe=(str(last.get("source_git_rev") or "").lower()==expected and last.get("force_paper_mode") is True
                     and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
@@ -445,7 +445,7 @@ jobs:
                   raise SystemExit("worker reached a new classified blocker: "+json.dumps(pipeline,sort_keys=True))
               time.sleep(10)
           if len(successes)<2: raise SystemExit("two advancing worker successes not proven: "+json.dumps(last or {},sort_keys=True))
-          resumed=call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
+          resumed=call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status?fresh=1")
           if not (resumed.get("status")=="resumed" and final.get("execution_paused") is False
                   and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True
                   and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False
@@ -508,7 +508,7 @@ jobs:
               with urllib.request.urlopen(req, timeout=timeout) as response:
                   return json.load(response)
 
-          status = request_json("/api/status")
+          status = request_json("/api/status?fresh=1")
           if str(status.get("source_git_rev") or "").lower() != expected:
               raise SystemExit("refusing lifecycle repair on an unexpected deployed revision")
           if not (
@@ -519,7 +519,7 @@ jobs:
               raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
           request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(6):
-              status = request_json("/api/status")
+              status = request_json("/api/status?fresh=1")
               progress = status.get("strategy_progress") or {}
               if (
                   status.get("execution_paused") is True
@@ -564,7 +564,7 @@ jobs:
           while time.time() < deadline:
               try:
                   call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
-                  last = call("/api/status")
+                  last = call("/api/status?fresh=1")
                   pipeline = last.get("lifecycle_pipeline") or {}
                   progress = pipeline.get("progress") or {}
                   safe = (
@@ -598,7 +598,7 @@ jobs:
           resumed = call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
           if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
               raise SystemExit("paper resume was not acknowledged")
-          final = call("/api/status")
+          final = call("/api/status?fresh=1")
           if not (
               str(final.get("source_git_rev") or "").lower() == expected
               and final.get("execution_paused") is False
@@ -658,8 +658,8 @@ jobs:
               with urllib.request.urlopen(req, timeout=30) as response:
                   return json.load(response)
 
-          status = get_json("/api/status")
-          health = get_json("/health")
+          status = get_json("/api/status?fresh=1")
+          health = get_json("/health?fresh=1")
           deployed = str(status.get("source_git_rev") or "").strip().lower()
           if deployed != expected_revision:
               raise SystemExit(f"refusing repair on unexpected deployed revision {deployed[:12]}")
@@ -816,7 +816,7 @@ jobs:
                   return json.load(response)
           call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(40):
-              status = call("/api/status")
+              status = call("/api/status?fresh=1")
               if (status.get("execution_paused") is True and status.get("live_armed") is False
                       and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True):
                   print("paper maintenance boundary established rev=" + str(status.get("source_git_rev")))
@@ -932,7 +932,7 @@ jobs:
                   return json.load(response)
           call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(40):
-              status = call("/api/status")
+              status = call("/api/status?fresh=1")
               if (status.get("execution_paused") is True and status.get("live_armed") is False
                       and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True):
                   print("paper maintenance boundary established rev=" + str(status.get("source_git_rev")))
@@ -973,7 +973,7 @@ jobs:
         run: |
           python - <<'PY'
           import json, urllib.request
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=30) as response:
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=30) as response:
               health = json.load(response)
           expected = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
                       "bitfinex_live_enabled": False, "force_paper_mode": True}
@@ -1024,7 +1024,7 @@ jobs:
           import json, os, urllib.request
           if os.environ["CONFIRM"] != os.environ["TOKEN"]:
               raise SystemExit("clean_epoch_confirm must be " + os.environ["TOKEN"])
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=30) as response:
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=30) as response:
               health = json.load(response)
           expected = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
                       "bitfinex_live_enabled": False, "force_paper_mode": True}
@@ -1204,7 +1204,7 @@ jobs:
           last = None
           for attempt in range(1, 121):
               try:
-                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=20) as response:
                       health = json.load(response)
                   if str(health.get("source_git_rev") or "")[:12] == expected and all(health.get(k) == v for k, v in want.items()):
                       print(json.dumps({"schema": "v22_seal_offline_boot_v1", "revision": expected, "attempt": attempt,
@@ -1373,7 +1373,7 @@ jobs:
           last = None
           for attempt in range(1, 121):
               try:
-                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=20) as response:
+                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=20) as response:
                       health = json.load(response)
                   if str(health.get("source_git_rev") or "")[:12] == expected and all(health.get(k) == v for k, v in want.items()):
                       print(json.dumps({"schema": "v3_marker_offline_boot_v1", "revision": expected, "attempt": attempt,
@@ -1479,7 +1479,7 @@ jobs:
                                                headers={**headers, **({"Content-Type": "application/json"} if data else {})})
               with urllib.request.urlopen(request, timeout=45) as response:
                   return json.load(response)
-          status = call("/api/status")
+          status = call("/api/status?fresh=1")
           epoch = status.get("data_epoch") or {}
           if str(status.get("source_git_rev") or "")[:12].lower() != expected_rev:
               raise SystemExit("deployed revision does not match the confirm token")
@@ -1490,7 +1490,7 @@ jobs:
               raise SystemExit("epoch opened > 60 min ago: boundary reset would delete current-epoch evidence")
           call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(60):
-              status = call("/api/status"); progress = status.get("strategy_progress") or {}
+              status = call("/api/status?fresh=1"); progress = status.get("strategy_progress") or {}
               if (status.get("execution_paused") is True and status.get("live_armed") is False
                       and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True
                       and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
@@ -1626,7 +1626,7 @@ jobs:
           token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
           if not token:
               raise SystemExit("BOT_ADMIN_TOKEN is missing")
-          with urllib.request.urlopen(base + "/health", timeout=10) as response:
+          with urllib.request.urlopen(base + "/health?fresh=1", timeout=10) as response:
               health = json.load(response)
           if not (
               health.get("force_paper_mode") is True
@@ -1692,7 +1692,7 @@ jobs:
                       time.sleep(min(2 * attempt, 12))  # HM 12:20: wider 503 backoff
               raise RuntimeError(f"execution state unavailable: {type(last).__name__}")
 
-          health = request_json("/health", timeout=20)
+          health = request_json("/health?fresh=1", timeout=20)
           if not (
               health.get("force_paper_mode") is True
               and health.get("live_armed") is False
@@ -2202,7 +2202,7 @@ jobs:
           # gate can prove the exact state was restored.
           prior = {"captured": False}
           try:
-              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20) as response:
                   prior_status = json.load(response)
               with urllib.request.urlopen(urllib.request.Request(base + "/api/state", headers=headers), timeout=30) as response:
                   prior_state = json.load(response)
@@ -2226,7 +2226,7 @@ jobs:
               # /api/pause in that state can wait behind the lifecycle worker
               # and turn a safe idempotent boundary into a false failure.
               try:
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=45) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=45) as response:
                       status = json.load(response)
                   if (
                       status.get("execution_paused") is True
@@ -2246,7 +2246,7 @@ jobs:
               except Exception as exc:
                   print(f"pause mutation attempt={attempt} response={type(exc).__name__}; checking durable state", flush=True)
               try:
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=45) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=45) as response:
                       status = json.load(response)
                   if (
                       status.get("execution_paused") is True
@@ -2291,7 +2291,7 @@ jobs:
                   print(f"Maintenance mutation unconfirmed path={path} trade_id={payload.get('trade_id')} response={type(exc).__name__}", flush=True)
                   return None
           def require_legacy_bootstrap_status(*, require_flat):
-              legacy_status = request_json("/api/status")
+              legacy_status = request_json("/api/status?fresh=1")
               progress = legacy_status.get("strategy_progress") or {}
               try:
                   open_positions = int(progress.get("open_positions") or 0)
@@ -2751,7 +2751,7 @@ jobs:
           python - <<'PY'
           import json, os, urllib.request
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
-          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/status", headers=headers)
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/status?fresh=1", headers=headers)
           with urllib.request.urlopen(request, timeout=20) as response:
               status = json.load(response)
           progress = status.get("strategy_progress") or {}
@@ -2825,7 +2825,7 @@ jobs:
                   return json.load(response)
 
           def exact_safe_status(*, require_paused=False, require_flat=False):
-              status = request_json("/api/status", timeout=20)
+              status = request_json("/api/status?fresh=1", timeout=20)
               progress = status.get("strategy_progress") or {}
               safe = (
                   str(status.get("source_git_rev") or "") == expected
@@ -2995,7 +2995,7 @@ jobs:
               attempt += 1
               try:
                   stage_started = time.monotonic()
-                  with urllib.request.urlopen(base + "/health", timeout=8) as response:
+                  with urllib.request.urlopen(base + "/health?fresh=1", timeout=8) as response:
                       liveness = json.load(response)
                   print(
                       f"postdeploy attempt={attempt} stage=health status={response.status} "
@@ -3019,7 +3019,7 @@ jobs:
                       time.sleep(3)
                       continue
                   stage_started = time.monotonic()
-                  with urllib.request.urlopen(base + "/api/status", timeout=8) as status_response:
+                  with urllib.request.urlopen(base + "/api/status?fresh=1", timeout=8) as status_response:
                       payload = json.load(status_response)
                   print(
                       f"postdeploy attempt={attempt} stage=status status={status_response.status} "
@@ -3115,7 +3115,7 @@ jobs:
               while time.monotonic() < deadline:
                   attempt += 1
                   try:
-                      return call("/api/status")
+                      return call("/api/status?fresh=1")
                   except urllib.error.HTTPError as exc:
                       if exc.code not in {502, 503, 504}:
                           raise
@@ -3231,7 +3231,7 @@ jobs:
               raise SystemExit("paper resume was not acknowledged")
           last = None
           for _ in range(20):
-              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20) as response:
                   status = json.load(response)
               last = status
               if (
@@ -3327,7 +3327,7 @@ jobs:
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
           last = None
           for _ in range(20):
-              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20) as response:
                   status = json.load(response)
               last = status
               if (
@@ -3386,7 +3386,7 @@ jobs:
                   request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
                   with urllib.request.urlopen(request, timeout=30) as response:
                       json.load(response)
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status?fresh=1", headers=headers), timeout=20) as response:
                       status = json.load(response)
                   if (
                       status.get("force_paper_mode") is True

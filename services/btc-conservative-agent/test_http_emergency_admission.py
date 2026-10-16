@@ -240,10 +240,50 @@ def test_fresh_query_bypasses_cache_and_refreshes_it():
 
     with bot.app.test_request_context("/x", method="GET"):
         probe(); probe(); assert calls["n"] == 1
+    time.sleep(bot._PROBE_FRESH_MIN_INTERVAL_SEC + 0.05)   # ?fresh=1 is rate-limited
     with bot.app.test_request_context("/x?fresh=1", method="GET"):
         r = probe(); assert calls["n"] == 2
     with bot.app.test_request_context("/x", method="GET"):
         again = probe(); assert calls["n"] == 2 and again.get_data() == r.get_data()
+
+
+def test_fresh_query_is_rate_limited_but_never_serves_across_an_emergency_clear():
+    import bot
+    calls = {"n": 0}
+
+    @bot._probe_cached
+    def probe():
+        calls["n"] += 1
+        return bot.jsonify({"n": calls["n"]})
+
+    with bot.app.test_request_context("/x?fresh=1", method="GET"):
+        probe()
+        for _ in range(20):
+            probe()
+        assert calls["n"] == 1                       # 21 fresh polls -> one rebuild
+        bot._probe_cache_clear_all()                 # emergency POST / arm / disarm
+        probe()
+        assert calls["n"] == 2                       # never served the pre-clear payload
+
+
+def test_clear_all_takes_the_same_lock_as_the_cache_write():
+    import bot
+    done = threading.Event()
+    with bot._PROBE_LOCK:
+        t = threading.Thread(target=lambda: (bot._probe_cache_clear_all(), done.set()))
+        t.start()
+        assert not done.wait(0.3), "clear_all must block while the probe lock is held"
+    assert done.wait(5)
+    t.join(5)
+
+
+def test_every_deploy_workflow_status_and_health_read_is_fresh():
+    import re
+    wf = (__import__("pathlib").Path(__file__).resolve().parents[2] / ".github" / "workflows" /
+          "fly-bot-deploy.yml").read_text("utf-8")
+    bad = [m.group(0) for m in re.finditer(r'"[^"\n]*?(?:/api/status|/health)(?:\?[^"\n]*)?"', wf)
+           if "fresh=1" not in m.group(0) and "live-copy" not in m.group(0) and m.group(0).count("/") <= 4]
+    assert not bad, bad[:5]
 
 
 def test_single_flight_on_cache_miss():
