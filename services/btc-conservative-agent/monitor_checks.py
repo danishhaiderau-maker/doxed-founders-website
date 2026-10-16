@@ -262,6 +262,31 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
                                                        "restore_test", "host") if k in receipt})
 
 
+def emergency_admission(http_handlers: Mapping[str, Any] | None, *, now: float,
+                        window_sec: float = 24 * 3600.0) -> dict:
+    """HM D-B: ANY rejection of the reserved emergency class (pause/disarm/flatten POSTs) is RED.
+
+    ``http_handlers`` is ``_dashboard_handler_snapshot()``. Probe-class (control) rejections are
+    reported as context only; they are not safety-relevant. Counters reset on restart, so a RED
+    clears 24 h after the last emergency rejection or at the next process start.
+    """
+    h = http_handlers or {}
+    rej = h.get("rejected_by_cap") or {}
+    em = rej.get("emergency") or {}
+    total = int(_f(em.get("total")) or 0)
+    last = _f(em.get("last_ts"))
+    ctl = rej.get("control") or {}
+    extra = {"emergency_rejected_total": total, "emergency_last_ts": last,
+             "emergency_by_reason": dict(em.get("by_reason") or {}),
+             "control_probe_rejected_total": int(_f(ctl.get("total")) or 0),
+             "window_sec": window_sec}
+    if total > 0 and (last is None or now - last <= window_sec):
+        return _result("emergency-admission",
+                       [f"{total} emergency-class request(s) rejected (pause/disarm/flatten may have been refused)"],
+                       red=True, **extra)
+    return _result("emergency-admission", [], **extra)
+
+
 CLOCK_AMBER_MS = 50.0
 CLOCK_RED_MS = 250.0
 

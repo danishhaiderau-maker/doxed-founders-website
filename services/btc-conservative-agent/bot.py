@@ -47414,6 +47414,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
                            "archive": _TAPE_ARCHIVE.snapshot()},
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
+        "emergency-admission": _mc.emergency_admission(_dashboard_handler_snapshot(), now=now),
         "clock-skew": _mc.clock_skew(__import__("runtime_telemetry").clock_sync_verdict(), live_on=bool(inp.get("live_on_lanes"))),
         "tile-integrity": _tile_integrity_check(now),
     }
@@ -47565,7 +47566,8 @@ def monitor_tile_integrity():
 
 
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
-                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity")
+                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity",
+                        "emergency-admission")
 
 
 @app.route('/api/monitor/checks', methods=["GET"])
@@ -48500,8 +48502,40 @@ def _status_epoch_pipeline_funnel() -> dict:
     return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "status": "STATE_SNAPSHOT_WARMING"}
 
 
+_PROBE_CACHE_TTL_SEC = max(0.0, float(os.getenv("PROBE_CACHE_TTL_SEC", "1.0")))
+
+
+def _probe_cached(fn):
+    """HM D-B: serve GET /api/status and /health from a 1 s cache so concurrent polls
+    cannot each rebuild the payload, hold control slots or push CPU. Caches status code and
+    body only; the heartbeat staleness 503 of /health is cached for at most the same second."""
+    cache = {"at": 0.0, "resp": None}
+    lock = threading.Lock()
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _PROBE_CACHE_TTL_SEC <= 0 or request.method != "GET":
+            return fn(*args, **kwargs)
+        now = time.monotonic()
+        with lock:
+            hit = cache["resp"]
+            if hit is not None and 0.0 <= now - cache["at"] < _PROBE_CACHE_TTL_SEC:
+                body, code, mimetype = hit
+                return app.response_class(body, status=code, mimetype=mimetype)
+        resp = app.make_response(fn(*args, **kwargs))
+        if resp.direct_passthrough or resp.is_streamed:
+            return resp
+        with lock:
+            cache["at"] = now
+            cache["resp"] = (resp.get_data(), resp.status_code, resp.mimetype)
+        return resp
+
+    return wrapper
+
+
 @app.route('/api/status')
 @app.route('/status')
+@_probe_cached
 def status():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
@@ -48782,6 +48816,7 @@ def _volume_health_snapshot(now: float) -> dict:
 
 
 @app.route('/health')
+@_probe_cached
 def health():
     """Fast process-liveness probe used by Fly.
 
@@ -58194,6 +58229,11 @@ def _create_dashboard_server():
         _data_sync_thread_cap = threading.BoundedSemaphore(4)
         _data_sync_identity_thread_cap = threading.BoundedSemaphore(2)
         _control_thread_cap = threading.BoundedSemaphore(2)
+        # HM D-B: operator safety POSTs (pause/disarm/flatten, see http_emergency_routes)
+        # own 4 reserved workers plus a 4-slot dispatch reserve, so they are never
+        # refused by dispatch_cap_full or by probe/presentation traffic.
+        _emergency_thread_cap = threading.BoundedSemaphore(4)
+        _emergency_dispatch_reserve = threading.BoundedSemaphore(4)
         # Immutable research-segment files are streamed by a WSGI dispatcher
         # mounted in front of Flask; they never borrow presentation workers.
         _research_segment_thread_cap = threading.BoundedSemaphore(2)
@@ -58276,6 +58316,11 @@ def _create_dashboard_server():
                 request.settimeout(0.05)
                 head = request.recv(1024, socket.MSG_PEEK)
                 request_path = _dashboard_request_path_from_head(head)
+                import http_emergency_routes as _her
+                _method, _path = _her.parse_request_line(head)
+                _emergency = _her.emergency_label(_method, _path)
+                if _emergency is not None:
+                    return self._emergency_thread_cap, "emergency", _emergency
                 if request_path in self._control_paths:
                     return self._control_thread_cap, "control", request_path.decode("ascii")
                 if request_path in self._canonical_paths:
@@ -58303,6 +58348,11 @@ def _create_dashboard_server():
                 _record_overload_rejection(cap_name, reason)
             except Exception:
                 pass
+            if cap_name == "emergency":
+                logger.error(
+                    "[HTTP ADMISSION] EMERGENCY control rejected path=%s reason=%s (RED)",
+                    path_label, reason,
+                )
             self._bounded_request_log(
                 event="rejected",
                 path_label=path_label,
@@ -58331,22 +58381,29 @@ def _create_dashboard_server():
             # Never inspect client bytes or wait for a destination worker in
             # the single accept loop. Slow tunnel clients previously consumed
             # 50ms here apiece, so a burst delayed even local Pause/relay calls.
+            reserved = False
             if not self._dispatch_thread_cap.acquire(blocking=False):
-                self._reject_overload(request, reason="dispatch_cap_full")
-                return
+                # Dispatch is full. Do not reject yet: the emergency class may
+                # still be admitted from its own 4-slot reserve. Classification
+                # (a <=50ms peek) happens in the worker thread, never here;
+                # a non-emergency request is rejected there as dispatch_cap_full.
+                if not self._emergency_dispatch_reserve.acquire(blocking=False):
+                    self._reject_overload(request, reason="dispatch_cap_full")
+                    return
+                reserved = True
             try:
                 t = threading.Thread(
                     target=self._classify_and_process,
-                    args=(request, client_address),
+                    args=(request, client_address, reserved),
                 )
                 if self.daemon_threads:
                     t.daemon = True
                 t.start()
             except Exception:
-                self._dispatch_thread_cap.release()
+                (self._emergency_dispatch_reserve if reserved else self._dispatch_thread_cap).release()
                 raise
 
-        def _classify_and_process(self, request, client_address):
+        def _classify_and_process(self, request, client_address, dispatch_reserved=False):
             request_cap = None
             request_cap_acquired = False
             cap_name = "unclassified"
@@ -58355,6 +58412,15 @@ def _create_dashboard_server():
             handler_started = None
             try:
                 request_cap, cap_name, path_label = self._request_cap(request)
+                if dispatch_reserved and cap_name != "emergency":
+                    self._reject_overload(
+                        request,
+                        reason="dispatch_cap_full",
+                        path_label=path_label,
+                        cap_name=cap_name,
+                        admission_sec=time.monotonic() - admission_started,
+                    )
+                    return
                 if not request_cap.acquire(blocking=False):
                     self._reject_overload(
                         request,
@@ -58401,7 +58467,7 @@ def _create_dashboard_server():
                     )
                 if request_cap_acquired:
                     request_cap.release()
-                self._dispatch_thread_cap.release()
+                (self._emergency_dispatch_reserve if dispatch_reserved else self._dispatch_thread_cap).release()
 
     try:
         httpd = _BoundedThreadedWSGIServer(
@@ -58418,7 +58484,7 @@ def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
         f"(bounded werkzeug server, general_threads=8, canonical_threads=8, "
-        f"relay_state_threads=4, data_sync_threads=4, control_threads=2, backlog=64) "
+        f"relay_state_threads=4, data_sync_threads=4, control_threads=2, emergency_threads=4, backlog=64) "
         "[PIPELINE ENFORCEMENT]"
     )
     try:
