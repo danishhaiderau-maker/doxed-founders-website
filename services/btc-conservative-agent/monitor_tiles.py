@@ -354,13 +354,55 @@ PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "
                 "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status")
 
 
-def pricing_block(raw: Mapping[str, Any]) -> dict:
-    """Pricing provenance read from the row itself (never the old fill-evidence index)."""
+_PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms")
+_PRICING_STRUCT = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
+                   "entry_provenance", "exit_provenance", "funding_settlement_rates")
+_PRICING_BOOL = ("legacy_pricing",)
+
+
+def _restore_pricing_value(key: str, value: Any) -> Any:
+    """CSV-reloaded rows carry strings: give numbers, bools and dict/list reprs their types back."""
+    import ast as _ast
     import paper_fill as _pf
-    block = {k: raw.get(k) for k in PRICING_KEYS}
-    fe = raw.get("fresh_eligible")
-    block["fresh_eligible"] = bool(fe) if fe is not None else bool(_pf.row_fresh_eligible(raw))
+    if key in _PRICING_NUMERIC:
+        n = _pf.as_number(value)
+        return int(n) if n is not None and n == int(n) and key in ("fill_model_version",) else n
+    if key in _PRICING_BOOL:
+        return _pf.as_bool(value)
+    if key in _PRICING_STRUCT and isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "["):
+            try:
+                return _ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return None
+        return None if text == "" else value
+    return None if value == "" else value
+
+
+def pricing_block(raw: Mapping[str, Any]) -> dict:
+    """Pricing provenance read from the row itself (never the old fill-evidence index).
+    fresh_eligible is recomputed from the pricing facts (row_fresh_strict) and a stored flag may only
+    lower it; stored strings from a CSV reload ("False") are parsed, never bool()-ed."""
+    import paper_fill as _pf
+    block = {k: _restore_pricing_value(k, raw.get(k)) for k in PRICING_KEYS}
+    typed = {**dict(raw), **{k: block[k] for k in block}}
+    stored = _pf.as_bool(raw.get("fresh_eligible"))
+    block["fresh_eligible"] = bool(_pf.row_fresh_strict(typed) and stored is not False)
     return block
+
+
+def open_pricing_block(raw: Mapping[str, Any]) -> dict | None:
+    """Open rows have only the entry receipt (exit is priced at close): show it, never as fresh data."""
+    efs = raw.get("entry_fill_sim")
+    if not isinstance(efs, Mapping) or not efs:
+        return None
+    out = {k: _restore_pricing_value(k, efs.get(k)) for k in
+           ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms",
+            "depth_snapshot_signal", "depth_snapshot_fill")}
+    out["state"] = "OPEN: entry priced, exit priced at close"
+    out["fresh_eligible"] = None
+    return out
 
 
 def row_is_fresh(row: Mapping[str, Any]) -> bool:
@@ -492,6 +534,11 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             "remaining_fraction": _finite(raw.get("policy_remaining_fraction")),
         }
         row["exit"] = {"legs": _legs(raw)}
+        _open_pricing = open_pricing_block(raw)
+        if _open_pricing:
+            row["pricing"] = _open_pricing
+            if _open_pricing.get("fill_model"):
+                row["fill"]["fill_model"] = _open_pricing["fill_model"]  # the receipt's own model, not the evidence index
         row["sort_ts"] = row["order"]["submitted_ts"] or entry_ts or signal_ts or 0.0
     elif status == "pending":
         submitted = _ts(raw.get("order_created_ts") or raw.get("created_ts"), parse_ts)

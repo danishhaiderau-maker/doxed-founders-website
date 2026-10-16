@@ -547,3 +547,87 @@ def test_blocker1_legacy_market_entry_is_refused():
     assert seg.index("LEGACY_MARKET_ENTRY_ENABLED") < seg.index("simulate_market_fill(")
     ns = _bot_ns(["LEGACY_MARKET_ENTRY_ENABLED"])
     assert ns["LEGACY_MARKET_ENTRY_ENABLED"] is False
+
+
+# ---- BLOCKER (17 Oct): fresh_eligible must survive a CSV reload (bool("False") was True) -------------------
+def _csv_ns(tmp_path, monkeypatch):
+    import csv as _csv
+    import re as _re
+    names = ["_ascii_fold_csv_text", "safe_csv_row", "_atomic_write_csv_rows", "_dynamic_csv_writer_once",
+             "_trade_row_in_session", "_restore_reloaded_row_types", "load_session_trades_from_csv",
+             "_RELOAD_NUMERIC_FIELDS", "_RELOAD_LITERAL_FIELDS"]
+    path = str(tmp_path / "trades_3factor.csv")
+    loaded = []
+    ns = _bot_ns(names, csv=_csv, re=_re, unicodedata=__import__("unicodedata"), CSV_TRADES=path, trades=loaded,
+                 parse_ts=lambda s: 0.0, _research_data_start_ts=lambda: 1.0, logger=__import__("logging").getLogger("t"),
+                 _CSV_ASCII_REPLACEMENTS={}, ast=ast)
+    return ns, path, loaded
+
+
+def _closed_row(monkeypatch, tid, **over):
+    pos = _entry_pos(monkeypatch)
+    ns = _row_ns()
+    fresh = ns["_row_priced_by_paper_fill"](pos)
+    row = {"trade_id": tid, "ts": "2026-10-17T02:00:00", "entry_ts": 1.0, "research_lane": pos["research_lane"],
+           **ns["_entry_pricing_fields"](pos, {}), "exit_status": "PAPER_FILL", "fill_model_tag": None,
+           "legacy_pricing": not fresh, "fresh_eligible": fresh, "fresh_data_excluded": False}
+    row.update(over)
+    return row
+
+
+def test_reload_roundtrip_keeps_fresh_eligible_and_fresh_only_identical(tmp_path, monkeypatch):
+    import monitor_tiles as mt
+    ns, path, loaded = _csv_ns(tmp_path, monkeypatch)
+    rows = [
+        _closed_row(monkeypatch, "ok-1"),
+        _closed_row(monkeypatch, "nobook-1", exit_status="FORCED_NO_BOOK", fresh_eligible=False),
+        _closed_row(monkeypatch, "legacy-1", fill_model="AI_DIRECT", fill_model_version=None, delay_s=None,
+                    fill_model_tag="LEGACY_BBO_FALLBACK_NO_BOOK", legacy_pricing=True, fresh_eligible=False,
+                    depth_snapshot_signal=None, depth_snapshot_fill=None, entry_provenance=None),
+        _closed_row(monkeypatch, "flagfalse-1", fresh_eligible=False),
+    ]
+    for r in rows:
+        ns["_dynamic_csv_writer_once"](path, r)
+    assert "False" in open(path).read()  # the writer really stores the string "False"
+    assert ns["load_session_trades_from_csv"]() == 4
+    back = {t["trade_id"]: t for t in loaded}
+    for r in rows:
+        before = mt.pricing_block(r)
+        after = mt.pricing_block(back[r["trade_id"]])
+        assert before["fresh_eligible"] == after["fresh_eligible"], r["trade_id"]
+        assert before == after, r["trade_id"]  # incl. typed version, delay, depth snapshots
+        tr = {"status": "CLOSED", "pricing": after}
+        assert mt.row_is_fresh(tr) == before["fresh_eligible"]
+    fresh = {k: mt.pricing_block(v)["fresh_eligible"] for k, v in back.items()}
+    assert fresh == {"ok-1": True, "nobook-1": False, "legacy-1": False, "flagfalse-1": False}
+    assert back["ok-1"]["fresh_eligible"] is True and back["nobook-1"]["fresh_eligible"] is False
+    assert back["legacy-1"]["legacy_pricing"] is True and back["ok-1"]["legacy_pricing"] is False
+    assert back["ok-1"]["fill_model_version"] == 1 and isinstance(back["ok-1"]["depth_snapshot_fill"], dict)
+
+
+def test_pricing_block_never_trusts_a_stale_true_or_a_string_false(monkeypatch):
+    import monitor_tiles as mt
+    good = _closed_row(monkeypatch, "g")
+    assert mt.pricing_block({**good, "fresh_eligible": "True"})["fresh_eligible"] is True
+    assert mt.pricing_block({**good, "fresh_eligible": "False"})["fresh_eligible"] is False
+    # a stored True is not enough: the pricing facts must agree
+    assert mt.pricing_block({**good, "fresh_eligible": True, "fill_model_version": None})["fresh_eligible"] is False
+    assert mt.pricing_block({**good, "fresh_eligible": "True", "fill_model_version": ""})["fresh_eligible"] is False
+    assert mt.pricing_block({**good, "fresh_eligible": True, "exit_status": "FORCED_NO_BOOK"})["fresh_eligible"] is False
+    assert mt.pricing_block({**good, "fresh_eligible": True, "exit_status": "PAPER_FILL_FORCED"})["fresh_eligible"] is False
+    assert mt.pricing_block({**good, "fresh_eligible": True, "fill_model": "AI_DIRECT"})["fresh_eligible"] is False
+    assert mt.pricing_block({**good, "fresh_eligible": True, "legacy_pricing": "True"})["fresh_eligible"] is False
+    assert mt.pricing_block({k: v for k, v in good.items() if k != "fresh_eligible"})["fresh_eligible"] is True
+    assert pf.as_bool("False") is False and pf.as_bool("0") is False and pf.as_bool("1") is True and pf.as_bool("") is None
+
+
+def test_open_row_shows_entry_pricing_not_pre_realistic(monkeypatch):
+    import monitor_tiles as mt
+    pos = _entry_pos(monkeypatch)
+    pos.update({"trade_id": "o-1", "entry_ts": 1.0, "entry": 100.0})
+    row = mt.tile_trade_row(pos, status="open", short_names={}, epoch_id=None, forced_reasons=[],
+                            fill_evidence={"fill_model": "PRE_REALISTIC_V1_BBO_CROSS"})
+    assert row["pricing"]["fill_model"] == pf.FILL_MODEL and row["pricing"]["fill_model_version"] == 1
+    assert row["pricing"]["state"].startswith("OPEN") and row["pricing"]["fresh_eligible"] is None
+    assert row["fill"]["fill_model"] == pf.FILL_MODEL
+    assert mt.row_is_fresh(row) is True  # open rows are not trades; fresh_only keeps showing them as before
