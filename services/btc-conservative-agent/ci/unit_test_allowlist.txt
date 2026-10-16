@@ -156,6 +156,7 @@ test_discovery_scorecard_publication.py
 test_disloc_engine.py
 test_disloc_foi_oi_warmstart.py
 test_disloc_maintenance_gate.py
+test_disloc_paused_path.py
 test_disloc_tile_stats_fold.py
 test_dual_execution_truth_closed_rows.py
 test_dyn_regime.py

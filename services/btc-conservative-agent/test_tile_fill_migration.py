@@ -458,4 +458,92 @@ def test_resid_d_legacy_fallback_tag_stays_visible():
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     seg = _func_src(src, "close_position")
     assert '"exit_fallback": pos.get("exit_fallback")' in seg
-    assert '"legacy_pricing": not (_is_paper_book_lane(pos) and pos.get("exit_status") in ("PAPER_FILL", "PAPER_FILL_FORCED"))' in seg
+    assert '"legacy_pricing": not _row_priced_by_paper_fill(pos)' in seg
+
+
+# ---- BLOCKER 1 (HM, 17 Oct): closed rows read entry pricing from entry_fill_sim --------------------------
+def _entry_pos(monkeypatch, lane="FAMILY_GSB2_REGIME_SWITCHER", exit_status="PAPER_FILL"):
+    _use_book(monkeypatch)
+    ns = _bot_ns(["_paper_result_as_sim"])
+    res = tf.entry_fill("LONG", 0.5, 99.0, 1.5, "default_until_n10")
+    # the same shape _build_open_position stores: pos["entry_fill_sim"] = order["fill_sim"] (no "fill_sim" key)
+    sim = {k: v for k, v in ns["_paper_result_as_sim"](res).items() if k not in ("fill_price", "filled_qty")}
+    return {"research_lane": lane, "entry_fill_sim": sim, "exit_status": exit_status,
+            "fill_model": "AI_DIRECT"}  # the legacy label _resolve_fill_model puts on the position
+
+
+def _row_ns():
+    return _bot_ns(["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields",
+                    "_row_priced_by_paper_fill"], _is_paper_book_lane=lambda pos: pos.get("research_lane") in tf.MIGRATED_LANES)
+
+
+def test_blocker1_closed_row_entry_fields_come_from_entry_fill_sim(monkeypatch):
+    pos = _entry_pos(monkeypatch)
+    assert "fill_sim" not in pos  # positions never carry fill_sim: the old reads were all None
+    ns = _row_ns()
+    f = ns["_entry_pricing_fields"](pos, {"fill_model": "AI_DIRECT"})
+    assert f["fill_model"] == pf.FILL_MODEL == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"  # paper_fill wins over AI_DIRECT
+    assert f["fill_model_version"] == 1 and f["delay_s"] == 1.5 and f["delay_source"] == "default_until_n10"
+    assert f["depth_snapshot_signal"] and f["depth_snapshot_fill"] and f["ask_age_ms"] is not None
+    assert f["entry_provenance"] and f["entry_provenance"]["depth_snapshot_fill"]
+    assert ns["_row_priced_by_paper_fill"](pos) is True
+    assert tf.row_provenance_complete({**f, "fill_model": f["fill_model"]}) in (True, False)
+
+
+def test_blocker1_fixed_row_is_consumed_by_fresh_and_tile_integrity_checks(monkeypatch):
+    import tile_integrity
+    pos = _entry_pos(monkeypatch)
+    f = _row_ns()["_entry_pricing_fields"](pos, {})
+    row = {**f, "exit_status": "PAPER_FILL", "fill_model_tag": None, "legacy_pricing": False, "fresh_eligible": True}
+    assert (row["fill_model_version"] or 0) >= 1  # tile_integrity.py v1 filter (>= 1)
+    assert row["fill_model"] in pf.ALLOWED_FILL_MODELS
+    assert pf.row_fresh_eligible(row) is True
+    for k in tile_integrity.REQUIRED_V1_FIELDS:
+        if k in f:
+            assert f[k] is not None, k
+
+
+def test_blocker1_old_pricer_or_missing_entry_is_never_fresh(monkeypatch):
+    ns = _row_ns()
+    legacy = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT",
+              "entry_fill_sim": {"fill_model": "PRE_REALISTIC_V1_BBO_CROSS"}}
+    assert ns["_row_priced_by_paper_fill"](legacy) is False
+    assert ns["_entry_pricing_fields"](legacy, {})["fill_model"] == "PRE_REALISTIC_V1_BBO_CROSS"
+    empty = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "exit_status": "PAPER_FILL", "fill_model": "AI_DIRECT"}
+    assert ns["_row_priced_by_paper_fill"](empty) is False
+    assert ns["_entry_pricing_fields"](empty, {"fill_model": "X"})["fill_model"] == "AI_DIRECT"  # legacy label kept
+    other = {"research_lane": "FAMILY_X_NOT_MIGRATED", "entry_fill_sim": {}, "fill_model": "AI_DIRECT"}
+    assert ns["_entry_pricing_fields"](other, {})["entry_provenance"] is None
+
+
+def test_blocker1_close_position_literal_has_single_fill_model_and_reads_entry_fill_sim():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "close_position")
+    dicts = [d for d in ast.walk(fn) if isinstance(d, ast.Dict) and any(
+        isinstance(k, ast.Constant) and k.value == "exit_price_basis" for k in d.keys)]
+    assert len(dicts) == 1
+    keys = [k.value for k in dicts[0].keys if isinstance(k, ast.Constant)]
+    assert keys.count("fill_model") == 0  # supplied once by **_entry_pricing_fields (no later duplicate overwrite)
+    assert len(keys) == len(set(keys)), sorted({k for k in keys if keys.count(k) > 1})
+    seg = ast.get_source_segment(src, fn)
+    assert "_entry_pricing_fields(pos, master)" in seg and 'pos.get("fill_sim")' not in seg
+
+
+def test_blocker1_position_builder_stores_entry_fill_sim_and_no_pos_fill_sim():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "_build_open_position")
+    seg = ast.get_source_segment(src, fn)
+    assert '"entry_fill_sim": copy.deepcopy(order.get("fill_sim") or {})' in seg
+    assert '"fill_sim":' not in seg.replace('"entry_fill_sim":', "")
+
+
+def test_blocker1_legacy_market_entry_is_refused():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    flag = next(n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "LEGACY_MARKET_ENTRY_ENABLED")
+    assert flag.value.value is False
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "execute_market_order")
+    seg = ast.get_source_segment(src, fn)
+    assert seg.index("LEGACY_MARKET_ENTRY_ENABLED") < seg.index("simulate_market_fill(")
+    ns = _bot_ns(["LEGACY_MARKET_ENTRY_ENABLED"])
+    assert ns["LEGACY_MARKET_ENTRY_ENABLED"] is False
