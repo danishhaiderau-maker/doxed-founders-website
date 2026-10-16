@@ -44,7 +44,11 @@ ROOTS = {  # remote prefix -> local dir
     "bot-data-retention": BASE + r"\bot-data-retention",
     "bot-data-compact": BASE + r"\bot-data-compact",
     "analysis-archive": BASE + r"\analysis-archive",
+    # HM #678 B2: dedicated TOP-LEVEL prefix for the new trusted archive (not under analysis-archive/,
+    # bot-data-* or fly-mirror-segments/). It is the one prefix in keep_manifest.R2_KEEP_PREFIXES.
+    "epoch-archive": BASE + r"\epoch-archive",
 }
+ARCHIVE_PREFIX = "epoch-archive/"
 SKIP_SUFFIX = (".download", ".lease", ".lock", ".tmp", "-journal", "-wal", "-shm")
 SQLITE_SUFFIX = (".db", ".sqlite", ".sqlite3")
 STATE_DIR = BASE + r"\r2-backup"
@@ -230,11 +234,39 @@ def build_receipt(*, state: dict, report: dict | None, restore: dict | None, kee
          "outside_keep": report.get("outside_keep", 0), "errors": int(errors),
          "keep_manifest_sha256": keep.get("sha256"), "keep_prefixes": keep.get("prefixes"),
          "restore_test": restore}
-    r["ok"] = bool(errors == 0 and missing == 0 and int(quarantine_pending) == 0
-                   and restore is not None and restore.get("passed"))
+    # HM #678 B1: quarantine_pending is its OWN field. A clean bucket with objects still waiting to be
+    # quarantined is AMBER on Fly (monitor_checks.archive_receipt), never a failed (RED) backup.
+    r["ok"] = bool(errors == 0 and missing == 0 and restore is not None and restore.get("passed"))
     if extra:
         r.update(extra)
     return r
+
+
+# ------------------------------------------------------------------ receipt -> Fly
+RECEIPT_URL = os.environ.get("R2_RECEIPT_URL", "https://doxed-btc-bot.fly.dev/api/monitor/archive/receipt")
+# Fields Fly's POST /api/monitor/archive/receipt whitelists (bot.monitor_archive_receipt_post). The WHOLE v2
+# receipt is posted; test_archive_receipt_v2 asserts every v2 field below survives the route.
+RECEIPT_V2_FIELDS = ("schema", "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending",
+                     "outside_keep", "keep_manifest_sha256", "restore_test", "errors", "ok", "finished_ts",
+                     "files", "bucket")
+
+
+def post_receipt(receipt: dict, *, token: str = "", url: str = "", urlopen=None) -> bool:
+    """Best-effort POST of the v2 receipt to Fly (admin token from BOT_ADMIN_TOKEN). Never raises."""
+    token = token or os.environ.get("BOT_ADMIN_TOKEN", "")
+    if not token:
+        log("receipt not posted: BOT_ADMIN_TOKEN is not set")
+        return False
+    import urllib.request
+    body = json.dumps({k: receipt[k] for k in RECEIPT_V2_FIELDS if k in receipt}, default=str).encode()
+    req = urllib.request.Request(url or RECEIPT_URL, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "X-Bot-Admin-Token": token})
+    try:
+        with (urlopen or urllib.request.urlopen)(req, timeout=20) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception as exc:  # noqa: BLE001 - the backup result stands even if Fly is unreachable
+        log(f"receipt post failed: {exc!r}")
+        return False
 
 
 # ------------------------------------------------------------------ quarantine (PLAN ONLY: nothing moves here)
@@ -250,18 +282,30 @@ def _iso_ts(value: str) -> float:
     return float(calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")))
 
 
+class QuarantinePlanError(RuntimeError):
+    """A quarantine candidate is pinned (or the plan no longer matches the bucket). Never proceed."""
+
+
 def quarantine_candidates(listing: dict, prefixes, since: str = QUARANTINE_SINCE, until: str = QUARANTINE_UNTIL) -> list:
-    """Object keys last modified in [since, until) that are not pinned/meta/already quarantined."""
+    """Object keys last modified in [since, until) that are not meta/already quarantined.
+
+    HM #678 B2: FAILS (QuarantinePlanError) if ANY candidate is pinned by the keep manifest. A pinned
+    object in the window means the window or the manifest is wrong; silently skipping it would hide that.
+    """
     lo, hi = _iso_ts(since), _iso_ts(until)
-    out = []
+    out, pinned = [], []
     for obj_key, info in listing.items():
         if obj_key.startswith(("_meta/", QUARANTINE_PREFIX)):
             continue
         key = obj_to_key(obj_key)
-        if key is None or is_pinned(key, prefixes):
+        if key is None:
             continue
         if lo <= info["ts"] < hi:
-            out.append(obj_key)
+            (pinned if is_pinned(key, prefixes) else out).append(obj_key)
+    if pinned:
+        raise QuarantinePlanError(
+            f"{len(pinned)} quarantine candidate(s) are pinned by the keep manifest, e.g. {sorted(pinned)[:3]}; "
+            "refusing to build a plan")
     return sorted(out)
 
 
@@ -390,6 +434,7 @@ def cmd_sync(args, keep) -> int:
     receipt = build_receipt(state=state, report=after, restore=restore, keep=keep, errors=errs, quarantine_pending=pending,
                             extra={"uploaded": len(todo) - errs, "reconciled_dropped": dropped})
     json.dump(receipt, open(os.path.join(STATE_DIR, "last-sync.json"), "w"), indent=1)
+    post_receipt(receipt)
     log("sync done " + json.dumps({k: receipt[k] for k in ("state_keys", "r2_objects", "missing", "quarantined",
                                                           "quarantine_pending", "errors", "ok")}))
     return 0 if receipt["ok"] else 1
@@ -402,6 +447,7 @@ def cmd_restore_test(args, keep) -> int:
     receipt = build_receipt(state=state, report=None, restore=result, keep=keep)
     log("restore-test " + json.dumps(result))
     json.dump(receipt, open(os.path.join(STATE_DIR, "last-restore-test.json"), "w"))
+    post_receipt(receipt)
     return 0 if result["passed"] else 1
 
 
