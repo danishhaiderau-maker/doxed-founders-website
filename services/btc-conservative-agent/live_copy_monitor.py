@@ -414,3 +414,34 @@ def enrich_entry_fidelity(accounts, paper_twins) -> dict:
             "band_bp": RELAY_MARK_BAND_BP,
             "mark_vs_limit_basis": "Fly signal book mid vs signed limit (proxy for the relay mark)",
             "declined_shadow": declined[-50:]}
+
+
+# G6 / G8 facts for /api/monitor/integrity-gaps (bot registers the ctx provider).
+_GAP_CTX_FN = None
+
+
+def set_gap_ctx_fn(fn) -> None:
+    global _GAP_CTX_FN
+    _GAP_CTX_FN = fn
+
+
+def lifecycle_retention_facts(now: float):
+    if _GAP_CTX_FN is None:
+        return None
+    import live_copy_lifecycle as _lcl
+    ctx = _GAP_CTX_FN()
+    f = _lcl.retention_facts(ctx.get("approvals") or [], ctx.get("reports") or [],
+                             boot_ts=ctx.get("process_started_ts"), now=now)
+    epoch = ctx.get("epoch_ts")
+    f["covers_epoch"] = bool(epoch and f.get("retained_since_ts") and f["retained_since_ts"] <= epoch)
+    return f
+
+
+def unlinked_facts(now: float):
+    if _GAP_CTX_FN is None:
+        return None
+    import live_copy_lifecycle as _lcl
+    ctx = _GAP_CTX_FN()
+    intents = _lcl.build_intents(ctx.get("approvals") or [], ctx.get("reports") or [], {}, {}, now=now)
+    u = _lcl.unlinked(intents, now=now)
+    return {"new_24h": u["unlinked_new_24h"], "total": u["unlinked_count"], "ids": u["unlinked_ids"][:20]}
