@@ -2,7 +2,12 @@
 
 Danish: delete everything old, live order/fill/reconciliation history included. The fresh-start
 wipe keeps only the files below; integrity-gaps G16 reports them as KEEP and anything else older
-than the epoch (Fly, box, R2) is RED. No v3 ledgers, no Neon tables, no R2 keep prefixes.
+than the epoch (Fly, box, R2) is RED. No v3 ledgers, no Neon tables.
+
+R2 (HM #678 B2, 16 Oct 2026): exactly ONE R2 prefix is kept: ``epoch-archive/``, the dedicated top-level
+home of the NEW trusted archive (never under analysis-archive/, bot-data-* or fly-mirror-segments/). It starts
+empty; the laptop r2_backup.py pins, restore-tests and reports on this prefix only. Every other R2 object
+older than the epoch is still un-kept.
 
 Changing this list changes MANIFEST_SHA256; test_keep_manifest pins the hash, so an edit needs
 an explicit test update (reviewed).
@@ -25,7 +30,7 @@ FLY = (  # relative to /app/data; matched by file name anywhere
 )
 BOX = ()
 NEON_TABLES = ()
-R2_KEEP_PREFIXES = ()
+R2_KEEP_PREFIXES = ("epoch-archive/",)   # HM #678 B2: dedicated top-level prefix for the new archive
 
 MANIFEST = {"decision": DECISION, "fly": list(FLY), "box": list(BOX), "neon_tables": list(NEON_TABLES),
             "r2_keep_prefixes": list(R2_KEEP_PREFIXES)}
