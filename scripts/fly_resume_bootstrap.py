@@ -81,7 +81,7 @@ def observe_status(request_json, *, until, monotonic, sleep):
     while monotonic() < until:
         attempt += 1
         try:
-            return request_json("/api/status", None)
+            return request_json("/api/status?fresh=1", None)
         except Exception as exc:
             if not _transient(exc):
                 raise

@@ -62,7 +62,7 @@ def _run(responses, prior=None, timeout=600):
 
 def test_deploy_maintenance_pause_left_by_failed_deploy_is_resumed_once():
     result, posts = _run({
-        "/api/status": [_ready(), _ready(**ACTIVE)],
+        "/api/status?fresh=1": [_ready(), _ready(**ACTIVE)],
         "/api/resume": [{"status": "resumed", "execution_paused": False}],
     })
     assert result["status"] == "ACTIVE" and result["revision"] == "4e24c650abcd"
@@ -71,31 +71,31 @@ def test_deploy_maintenance_pause_left_by_failed_deploy_is_resumed_once():
 
 def test_starved_runtime_status_and_ambiguous_resume_are_reobserved_then_retried():
     result, posts = _run({
-        "/api/status": [TimeoutError(), http.client.IncompleteRead(b"x", 10), _ready(), _ready(), _ready(**ACTIVE)],
+        "/api/status?fresh=1": [TimeoutError(), http.client.IncompleteRead(b"x", 10), _ready(), _ready(), _ready(**ACTIVE)],
         "/api/resume": [http.client.RemoteDisconnected("closed"), {"status": "resumed", "execution_paused": False}],
     })
     assert result["status"] == "ACTIVE" and len(posts) == 2
 
 
 def test_already_active_runtime_is_not_mutated():
-    result, posts = _run({"/api/status": [_ready(**ACTIVE)]})
+    result, posts = _run({"/api/status?fresh=1": [_ready(**ACTIVE)]})
     assert result["status"] == "ACTIVE" and posts == []
 
 
 @pytest.mark.parametrize("owner", ["OPERATOR", "SAFETY"])
 def test_operator_and_safety_pauses_are_retained(owner):
-    result, posts = _run({"/api/status": [_ready(pause_owner=owner)]})
+    result, posts = _run({"/api/status?fresh=1": [_ready(pause_owner=owner)]})
     assert result["status"] == "OPERATOR_PAUSE_RETAINED" and posts == []
 
 
 def test_prior_operator_pause_is_retained_even_if_owner_was_rewritten():
-    result, posts = _run({"/api/status": [_ready()]}, prior={"captured": True, "operator_paused": True})
+    result, posts = _run({"/api/status?fresh=1": [_ready()]}, prior={"captured": True, "operator_paused": True})
     assert result["status"] == "OPERATOR_PAUSE_RETAINED" and posts == []
 
 
 def test_server_side_operator_retention_is_accepted():
     result, posts = _run({
-        "/api/status": [_ready()],
+        "/api/status?fresh=1": [_ready()],
         "/api/resume": [{"status": "operator_pause_retained", "pause_owner": "OPERATOR"}],
     })
     assert result["status"] == "OPERATOR_PAUSE_RETAINED" and len(posts) == 1
@@ -107,12 +107,12 @@ def test_server_side_operator_retention_is_accepted():
 ])
 def test_non_paper_identity_is_never_resumed(unsafe):
     with pytest.raises(RuntimeError, match="non-paper identity"):
-        _run({"/api/status": [_ready(**unsafe)]})
+        _run({"/api/status?fresh=1": [_ready(**unsafe)]})
 
 
 def test_unready_revision_waits_then_fails_closed_without_mutation():
     unready = _ready(system_ready=False)
-    request_json, posts = _client({"/api/status": [unready] * 200})
+    request_json, posts = _client({"/api/status?fresh=1": [unready] * 200})
     clock = Clock()
     with pytest.raises(RuntimeError, match="deadline expired"):
         resume.guaranteed_resume(request_json, {"captured": False},
@@ -132,13 +132,13 @@ def test_blocked_or_incomplete_lifecycle_is_not_resumed(pipeline):
 def test_resume_attempts_are_bounded():
     status = [_ready()] * 20
     with pytest.raises(RuntimeError, match="exhausted"):
-        _run({"/api/status": status, "/api/resume": [{"status": "resumed"}] * 5})
+        _run({"/api/status?fresh=1": status, "/api/resume": [{"status": "resumed"}] * 5})
 
 
 def test_non_transient_error_propagates():
     error = urllib.error.HTTPError("https://x", 401, "unauthorized", {}, io.BytesIO(b"{}"))
     with pytest.raises(urllib.error.HTTPError):
-        _run({"/api/status": [error]})
+        _run({"/api/status?fresh=1": [error]})
 
 
 def test_parse_prior_tolerates_missing_or_invalid_state():

@@ -20,6 +20,7 @@ import system_health_banner
 import system_health_alerts
 import runtime_uptime
 import monitor_api
+import http_emergency_routes as _her
 import monitor_tiles
 try:
     import monitor_integrity as _monitor_integrity
@@ -33723,7 +33724,7 @@ _dashboard_overload_rejections = {}
 
 def _record_overload_rejection(cap_name, reason, now=None):
     cap = str(cap_name or "unclassified")[:24]
-    why = str(reason or "unknown")[:32]
+    why = str(reason or "unknown")[:40]
     ts = time.time() if now is None else float(now)
     with _dashboard_handler_lock:
         bucket = _dashboard_overload_rejections.setdefault(cap, {"total": 0, "by_reason": {}, "last_ts": None})
@@ -47414,6 +47415,7 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
                            "archive": _TAPE_ARCHIVE.snapshot()},
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
         "archive-receipt": _mc.archive_receipt(archive, now=now),
+        "emergency-admission": _mc.emergency_admission(_dashboard_handler_snapshot(), now=now),
         "clock-skew": _mc.clock_skew(__import__("runtime_telemetry").clock_sync_verdict(), live_on=bool(inp.get("live_on_lanes"))),
         "tile-integrity": _tile_integrity_check(now),
     }
@@ -47565,7 +47567,8 @@ def monitor_tile_integrity():
 
 
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
-                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity")
+                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity",
+                        "emergency-admission")
 
 
 @app.route('/api/monitor/checks', methods=["GET"])
@@ -48500,8 +48503,107 @@ def _status_epoch_pipeline_funnel() -> dict:
     return {"schema": EPOCH_PIPELINE_FUNNEL_SCHEMA, "status": "STATE_SNAPSHOT_WARMING"}
 
 
+# HM #676 B1: never above 1.0 s, whatever the env says.
+_PROBE_CACHE_TTL_SEC = min(1.0, max(0.0, float(os.getenv("PROBE_CACHE_TTL_SEC", "1.0"))))
+_PROBE_CACHES: list = []
+_probe_generation = [0]
+# One lock guards the generation counter, every cache slot, and the fresh-rebuild timestamps, so
+# "generation unchanged -> write cache" is atomic against _probe_cache_clear_all (HM #676).
+_PROBE_LOCK = threading.Lock()
+# DOC: ?fresh=1 is NOT zero-staleness. It may reuse a payload up to this old (250 ms), so the deploy
+# workflow's strict flat proof can observe state up to 250 ms stale. Emergency POSTs / arm / disarm clear the cache
+# first, so a pre-change state is never served after those complete; any other state change is visible within 250 ms.
+# ?fresh=1 is rate-limited: a rebuild younger than this is reused, so a polling gate (or an abusive
+# client) cannot force a rebuild per request. Emergency/arm/disarm clears the cache, so this never
+# serves a pre-change state.
+_PROBE_FRESH_MIN_INTERVAL_SEC = 0.25
+
+
+def _probe_cache_clear_all():
+    """Drop every probe cache. Called after any emergency POST completes and whenever the
+    live arm/disarm control changes state, so /api/status and /health can never serve a
+    pre-change live_armed/flat state. The generation bump (same lock as the cache write) also
+    stops an in-flight rebuild that started before the change from re-populating the cache."""
+    with _PROBE_LOCK:
+        _probe_generation[0] += 1
+        for c in list(_PROBE_CACHES):
+            c["resp"] = None
+            c["at"] = 0.0
+
+
+def _clears_probe_cache(fn):
+    """Clear the status/health probe caches before and after a live arm/disarm mutation."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        _probe_cache_clear_all()
+        try:
+            return fn(*a, **k)
+        finally:
+            _probe_cache_clear_all()
+    return wrapper
+
+
+def _probe_cached(fn):
+    """HM D-B: serve GET /api/status and /health from a <=1 s cache so concurrent polls
+    cannot each rebuild the payload. ``?fresh=1`` bypasses the cache (rate-limited to one rebuild per
+    ``_PROBE_FRESH_MIN_INTERVAL_SEC``); gate scripts use it. Single-flight: one thread rebuilds on a miss."""
+    cache = {"at": 0.0, "resp": None}
+    _PROBE_CACHES.append(cache)
+    flight = threading.Lock()        # single-flight rebuild
+
+    def _hit(now, max_age):
+        with _PROBE_LOCK:
+            hit = cache["resp"]
+            if hit is not None and 0.0 <= now - cache["at"] < max_age:
+                return hit
+        return None
+
+    def _replay(hit):
+        body, code, mimetype = hit
+        return app.response_class(body, status=code, mimetype=mimetype)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _PROBE_CACHE_TTL_SEC <= 0 or request.method != "GET":
+            return fn(*args, **kwargs)
+        max_age = (min(_PROBE_FRESH_MIN_INTERVAL_SEC, _PROBE_CACHE_TTL_SEC)
+                   if request.args.get("fresh") == "1" else _PROBE_CACHE_TTL_SEC)
+        hit = _hit(time.monotonic(), max_age)
+        if hit is not None:
+            return _replay(hit)
+        with flight:
+            hit = _hit(time.monotonic(), max_age)   # a concurrent rebuild may have filled it
+            if hit is not None:
+                return _replay(hit)
+            with _PROBE_LOCK:
+                gen = _probe_generation[0]
+            started = time.monotonic()
+            resp = app.make_response(fn(*args, **kwargs))
+            if resp.direct_passthrough or resp.is_streamed:
+                return resp
+            with _PROBE_LOCK:
+                if gen == _probe_generation[0]:
+                    cache["at"] = started
+                    cache["resp"] = (resp.get_data(), resp.status_code, resp.mimetype)
+            return resp
+
+    return wrapper
+
+
+@app.after_request
+def _probe_cache_after_emergency_post(response):
+    try:
+        if request.method == "POST" and _her.emergency_label(
+                b"POST", (request.path or "").encode("utf-8", "ignore")) is not None:
+            _probe_cache_clear_all()
+    except Exception:  # noqa: BLE001 - never break a control response
+        _probe_cache_clear_all()
+    return response
+
+
 @app.route('/api/status')
 @app.route('/status')
+@_probe_cached
 def status():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
@@ -48782,6 +48884,7 @@ def _volume_health_snapshot(now: float) -> dict:
 
 
 @app.route('/health')
+@_probe_cached
 def health():
     """Fast process-liveness probe used by Fly.
 
@@ -50536,6 +50639,7 @@ def api_data_size():
         "capacity_projection": capacity_payload,
     })
 
+@_clears_probe_cache
 def _arm_live_control() -> tuple:
     exchange_audit = _refresh_bitfinex_exposure_audit()
     # Private exchange rows are caller-internal recovery material, never an API
@@ -50570,6 +50674,7 @@ def _retired_direct_arm_response():
     }), 409
 
 
+@_clears_probe_cache
 def _disarm_live_control(reason: str) -> dict:
     # Disarming also turns Fly's Live copy output OFF (fail closed).
     try:
@@ -58194,6 +58299,11 @@ def _create_dashboard_server():
         _data_sync_thread_cap = threading.BoundedSemaphore(4)
         _data_sync_identity_thread_cap = threading.BoundedSemaphore(2)
         _control_thread_cap = threading.BoundedSemaphore(2)
+        # HM D-B: operator safety POSTs (pause/disarm/flatten, see http_emergency_routes)
+        # own 4 reserved workers plus a 4-slot dispatch reserve, so they are never
+        # refused by dispatch_cap_full or by probe/presentation traffic.
+        _emergency_thread_cap = threading.BoundedSemaphore(4)
+        _emergency_dispatch_reserve = threading.BoundedSemaphore(4)
         # Immutable research-segment files are streamed by a WSGI dispatcher
         # mounted in front of Flask; they never borrow presentation workers.
         _research_segment_thread_cap = threading.BoundedSemaphore(2)
@@ -58228,6 +58338,7 @@ def _create_dashboard_server():
         )
         _client_io_timeout_sec = 15.0
         _priority_client_io_timeout_sec = 2.0
+        _emergency_client_io_timeout_sec = 8.0   # HM #676: 5-10 s for pause/disarm/flatten
         _overload_io_timeout_sec = 0.1
         _slow_request_log_sec = 2.0
         _telemetry_log_interval_sec = 10.0
@@ -58276,6 +58387,10 @@ def _create_dashboard_server():
                 request.settimeout(0.05)
                 head = request.recv(1024, socket.MSG_PEEK)
                 request_path = _dashboard_request_path_from_head(head)
+                _method, _path = _her.parse_request_line(head)
+                _emergency = _her.emergency_label(_method, _path)
+                if _emergency is not None:
+                    return self._emergency_thread_cap, "emergency", _emergency
                 if request_path in self._control_paths:
                     return self._control_thread_cap, "control", request_path.decode("ascii")
                 if request_path in self._canonical_paths:
@@ -58303,6 +58418,11 @@ def _create_dashboard_server():
                 _record_overload_rejection(cap_name, reason)
             except Exception:
                 pass
+            if cap_name == "emergency":
+                logger.error(
+                    "[HTTP ADMISSION] EMERGENCY control rejected path=%s reason=%s (RED)",
+                    path_label, reason,
+                )
             self._bounded_request_log(
                 event="rejected",
                 path_label=path_label,
@@ -58331,22 +58451,34 @@ def _create_dashboard_server():
             # Never inspect client bytes or wait for a destination worker in
             # the single accept loop. Slow tunnel clients previously consumed
             # 50ms here apiece, so a burst delayed even local Pause/relay calls.
+            reserved = False
             if not self._dispatch_thread_cap.acquire(blocking=False):
-                self._reject_overload(request, reason="dispatch_cap_full")
-                return
+                # Dispatch is full. Do not reject yet: the emergency class may
+                # still be admitted from its own 4-slot reserve. Classification
+                # (a <=50ms peek) happens in the worker thread, never here;
+                # a non-emergency request is rejected there as dispatch_cap_full.
+                if not self._emergency_dispatch_reserve.acquire(blocking=False):
+                    # HM #676 B2: dispatch AND reserve full, counted before any
+                    # classification under its own cap; emergency-admission is RED on it.
+                    self._reject_overload(
+                        request, reason="dispatch_cap_full_reserve_exhausted",
+                        cap_name="dispatch_reserve",
+                    )
+                    return
+                reserved = True
             try:
                 t = threading.Thread(
                     target=self._classify_and_process,
-                    args=(request, client_address),
+                    args=(request, client_address, reserved),
                 )
                 if self.daemon_threads:
                     t.daemon = True
                 t.start()
             except Exception:
-                self._dispatch_thread_cap.release()
+                (self._emergency_dispatch_reserve if reserved else self._dispatch_thread_cap).release()
                 raise
 
-        def _classify_and_process(self, request, client_address):
+        def _classify_and_process(self, request, client_address, dispatch_reserved=False):
             request_cap = None
             request_cap_acquired = False
             cap_name = "unclassified"
@@ -58355,6 +58487,15 @@ def _create_dashboard_server():
             handler_started = None
             try:
                 request_cap, cap_name, path_label = self._request_cap(request)
+                if dispatch_reserved and cap_name != "emergency":
+                    self._reject_overload(
+                        request,
+                        reason="dispatch_cap_full",
+                        path_label=path_label,
+                        cap_name=cap_name,
+                        admission_sec=time.monotonic() - admission_started,
+                    )
+                    return
                 if not request_cap.acquire(blocking=False):
                     self._reject_overload(
                         request,
@@ -58373,8 +58514,8 @@ def _create_dashboard_server():
                     self._general_thread_cap, self._research_segment_thread_cap
                 )
                 request.settimeout(
-                    self._priority_client_io_timeout_sec
-                    if is_priority
+                    self._emergency_client_io_timeout_sec if cap_name == "emergency"
+                    else self._priority_client_io_timeout_sec if is_priority
                     else self._client_io_timeout_sec
                 )
                 handler_started = time.monotonic()
@@ -58401,7 +58542,7 @@ def _create_dashboard_server():
                     )
                 if request_cap_acquired:
                     request_cap.release()
-                self._dispatch_thread_cap.release()
+                (self._emergency_dispatch_reserve if dispatch_reserved else self._dispatch_thread_cap).release()
 
     try:
         httpd = _BoundedThreadedWSGIServer(
@@ -58418,7 +58559,7 @@ def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
         f"(bounded werkzeug server, general_threads=8, canonical_threads=8, "
-        f"relay_state_threads=4, data_sync_threads=4, control_threads=2, backlog=64) "
+        f"relay_state_threads=4, data_sync_threads=4, control_threads=2, emergency_threads=4, backlog=64) "
         "[PIPELINE ENFORCEMENT]"
     )
     try:

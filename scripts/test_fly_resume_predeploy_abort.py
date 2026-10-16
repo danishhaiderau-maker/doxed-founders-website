@@ -86,7 +86,7 @@ def test_resume_proves_fresh_flat_incumbent_and_posts_once():
     clock = Clock(); calls = []; statuses = [status(), status(paused=False)]
     def request(path, payload):
         calls.append((path, payload))
-        if path == "/api/status": return statuses.pop(0)
+        if path == "/api/status?fresh=1": return statuses.pop(0)
         if path == "/api/relay-execution-state?fresh=1": return {"money_state_generation": 7, "orders": [], "positions": []}
         if path == "/api/resume": return {"status": "resumed", "execution_paused": False}
         raise AssertionError(path)
@@ -122,7 +122,7 @@ def test_unproven_fresh_flat_relay_state_never_resumes(relay):
     calls = []
     def request(path, payload):
         calls.append(path)
-        return status() if path == "/api/status" else relay
+        return status() if path == "/api/status?fresh=1" else relay
     with pytest.raises(RuntimeError, match="not generation-current and flat"):
         resume_incumbent(INCUMBENT, CANDIDATE, request, monotonic=Clock().monotonic, sleep=lambda _: None)
     assert "/api/resume" not in calls
@@ -132,7 +132,7 @@ def test_ambiguous_resume_is_never_retried():
     calls = []
     def request(path, payload):
         calls.append(path)
-        if path == "/api/status": return status()
+        if path == "/api/status?fresh=1": return status()
         if path == "/api/relay-execution-state?fresh=1": return {"money_state_generation": 1, "orders": [], "positions": []}
         raise urllib.error.URLError("ambiguous")
     with pytest.raises(urllib.error.URLError):
@@ -146,7 +146,7 @@ def test_transient_fresh_relay_failure_retries_observation_only():
     def request(path, payload):
         nonlocal relay_attempts
         calls.append(path)
-        if path == "/api/status": return statuses.pop(0)
+        if path == "/api/status?fresh=1": return statuses.pop(0)
         if path == "/api/relay-execution-state?fresh=1":
             relay_attempts += 1
             if relay_attempts == 1:
@@ -165,7 +165,7 @@ def test_nontransient_fresh_relay_failure_is_not_retried():
     calls = []
     def request(path, payload):
         calls.append(path)
-        if path == "/api/status": return status()
+        if path == "/api/status?fresh=1": return status()
         raise urllib.error.HTTPError(path, 401, "unauthorized", {}, None)
     with pytest.raises(urllib.error.HTTPError):
         resume_incumbent(
@@ -179,7 +179,7 @@ def test_post_resume_revision_or_safety_drift_fails_without_second_resume():
     calls = []; statuses = [status(), status(paused=False, revision="2" * 12)]
     def request(path, payload):
         calls.append(path)
-        if path == "/api/status": return statuses.pop(0)
+        if path == "/api/status?fresh=1": return statuses.pop(0)
         if path == "/api/relay-execution-state?fresh=1": return {"money_state_generation": 1, "orders": [], "positions": []}
         return {"status": "resumed", "execution_paused": False}
     with pytest.raises(RuntimeError, match="unsafe predeploy-abort status"):

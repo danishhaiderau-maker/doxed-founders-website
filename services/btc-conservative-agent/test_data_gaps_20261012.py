@@ -132,7 +132,9 @@ def test_main_row_has_ms_timing_exit_bbo_and_regime():
     assert row["exit"]["exit_bid"] == 100.9 and row["exit"]["exit_ask"] == 101.1
     assert row["trigger"]["regime_at_signal"] == "VIOLENT"
     assert row["trigger"]["regime_at_signal_source"] == "indicator_engine_regime_tag_at_order"
-    assert "regime_at_signal" not in _main_row()["trigger"]
+    # #663 (HM-approved): an unstamped row carries an explicit None / MISSING, never a silent absence.
+    unset = _main_row()["trigger"]
+    assert unset["regime_at_signal"] is None and unset["regime_at_signal_source"] == "MISSING"
 
 
 def test_bot_stamps_regime_at_order_and_close():

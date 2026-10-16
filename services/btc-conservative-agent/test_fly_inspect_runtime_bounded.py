@@ -128,7 +128,7 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert 90 * 60 >= minimum_cycles
     assert 'call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in section
     assert section.count('call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})') == 1
-    assert 'call("/api/status")' in section
+    assert 'call("/api/status?fresh=1")' in section  # #676: gate reads bypass the 1 s probe cache
     assert 'str(status.get("source_git_rev") or "").lower() == expected' in section
     assert 'status.get("execution_paused") is True' in section
     assert 'status.get("manual_admin_pause") is True' in section

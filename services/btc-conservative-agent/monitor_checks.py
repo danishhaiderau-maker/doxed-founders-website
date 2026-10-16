@@ -262,6 +262,41 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
                                                        "restore_test", "host") if k in receipt})
 
 
+def emergency_admission(http_handlers: Mapping[str, Any] | None, *, now: float,
+                        window_sec: float = 24 * 3600.0) -> dict:
+    """HM D-B: ANY rejection of the reserved emergency class (pause/disarm/flatten POSTs) is RED.
+
+    ``http_handlers`` is ``_dashboard_handler_snapshot()``. Probe-class (control) rejections are
+    reported as context only; they are not safety-relevant. Counters reset on restart, so a RED
+    clears 24 h after the last emergency rejection or at the next process start.
+    """
+    h = http_handlers or {}
+    rej = h.get("rejected_by_cap") or {}
+    em = rej.get("emergency") or {}
+    total = int(_f(em.get("total")) or 0)
+    last = _f(em.get("last_ts"))
+    ctl = rej.get("control") or {}
+    # HM #676 B2: dispatch AND the emergency reserve both full -> RED (any count > 0).
+    dr = rej.get("dispatch_reserve") or {}
+    dr_total = int(_f(dr.get("total")) or 0)
+    dr_last = _f(dr.get("last_ts"))
+    extra = {"dispatch_reserve_exhausted_total": dr_total, "dispatch_reserve_last_ts": dr_last,
+             "emergency_rejected_total": total, "emergency_last_ts": last,
+             "emergency_by_reason": dict(em.get("by_reason") or {}),
+             "control_probe_rejected_total": int(_f(ctl.get("total")) or 0),
+             "window_sec": window_sec}
+    if dr_total > 0 and (dr_last is None or now - dr_last <= window_sec):
+        return _result("emergency-admission",
+                       [f"{dr_total} request(s) rejected with dispatch AND emergency reserve exhausted "
+                        "(dispatch_cap_full_reserve_exhausted): a pause/disarm/flatten may have been refused"],
+                       red=True, **extra)
+    if total > 0 and (last is None or now - last <= window_sec):
+        return _result("emergency-admission",
+                       [f"{total} emergency-class request(s) rejected (pause/disarm/flatten may have been refused)"],
+                       red=True, **extra)
+    return _result("emergency-admission", [], **extra)
+
+
 CLOCK_AMBER_MS = 50.0
 CLOCK_RED_MS = 250.0
 
