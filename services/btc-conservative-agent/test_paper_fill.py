@@ -94,6 +94,7 @@ def test_migrated_tiles_call_paper_fill_and_never_read_state_or_tape():
     assert not bad, bad
 
 
+LEGACY_LANE = "FAMILY_RANDOM_CONTROL_TAKER_90"
 BASELINE_13OCT = frozenset({
     "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
     "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP", "FAMILY_DISLOC_BFX_DISLOCATION_1M",
@@ -111,15 +112,13 @@ def test_new_registry_lanes_cannot_be_pending():
     assert not (new_lanes & pf.PENDING_MIGRATION), "new tiles must use paper_fill from day one"
 
 
-def test_pending_migration_expires():
-    import datetime
-    expiry = datetime.date.fromisoformat(pf.PENDING_MIGRATION_EXPIRES)
-    assert expiry <= datetime.date(2026, 10, 27), "expiry may not be pushed out"
-    if datetime.date.today() > expiry:
-        assert not pf.PENDING_MIGRATION, f"pending migration expired {expiry}: {sorted(pf.PENDING_MIGRATION)}"
+def test_pending_migration_is_empty_and_has_no_expiry():
+    assert not pf.PENDING_MIGRATION
+    assert not hasattr(pf, "PENDING_MIGRATION_EXPIRES")
 
 
-def test_pending_lanes_excluded_from_fresh_data():
+def test_pending_lanes_excluded_from_fresh_data(monkeypatch):
+    monkeypatch.setattr(pf, "PENDING_MIGRATION", frozenset({LEGACY_LANE}))
     for lane in pf.PENDING_MIGRATION:
         assert pf.fresh_data_eligible(lane) is False
     assert pf.fresh_data_eligible("SOME_MIGRATED_LANE") is True
@@ -272,22 +271,24 @@ def _bot_fn(name, **ns):
     return g[name]
 
 
-def test_session_pnl_and_wallet_filters_ignore_fresh_eligibility():
+def test_session_pnl_and_wallet_filters_ignore_fresh_eligibility(monkeypatch):
+    monkeypatch.setattr(pf, "PENDING_MIGRATION", frozenset({LEGACY_LANE}))
     # HM 13:27: row_fresh_eligible must never touch session P&L / wallet reconciliation
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
     for name in ("_trade_row_in_session", "_session_trades_only", "_recompute_research_balance_from_trades"):
         node = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == name)
         seg = ast.get_source_segment(src, node)
         assert "fresh_eligible" not in seg and "paper_fill" not in seg, name
-    pending = sorted(pf.PENDING_MIGRATION)[0]
+    pending = LEGACY_LANE
     row_session = _bot_fn("_trade_row_in_session", parse_ts=lambda v: 2e9)
     assert row_session({"ts": "x", "entry_ts": 2e9, "research_lane": pending}, 1e9) is True
 
 
-def test_fresh_data_wired_into_research_study(tmp_path):
+def test_fresh_data_wired_into_research_study(tmp_path, monkeypatch):
     import json
+    monkeypatch.setattr(pf, "PENDING_MIGRATION", frozenset({LEGACY_LANE}))
     import analysis_hygiene as ah
-    pending = sorted(pf.PENDING_MIGRATION)[0]
+    pending = LEGACY_LANE
     (tmp_path / "disloc_trades.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
         {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 1.0, "exit_ts": 5, "lane": pending},
         {"event": "DISLOC_CLOSED", "pnl_bp_vs_touch": 2.0, "exit_ts": 6, "lane": "MIGRATED_LANE"})))

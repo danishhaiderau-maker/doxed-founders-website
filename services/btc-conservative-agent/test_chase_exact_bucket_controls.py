@@ -641,6 +641,8 @@ def _compile_function(name, namespace):
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == name
     )
+    # lanes 1-5 are routed to paper_fill (tile_fill); these isolated legacy-walker tests model other lanes
+    namespace.setdefault("_is_paper_book_lane", lambda rec: False)
     exec(compile(ast.Module(body=[fn], type_ignores=[]), f"<{name}-test>", "exec"), namespace)
     return namespace[name]
 

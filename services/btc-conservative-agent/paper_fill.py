@@ -217,11 +217,11 @@ class DelaySampler:
 # Every ACTIVE_TILE_REGISTRY lane must name the functions that price its paper fills. A migrated
 # site must call paper_fill.paper_fill and must not read state price/ask/bid or tape streams.
 TILE_FILL_SITES = {
-    "FAMILY_RANDOM_CONTROL_TAKER_90": (("bot.py", "simulate_marketable_limit_fill"),),
-    "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("bot.py", "simulate_marketable_limit_fill"),),
-    "FAMILY_GSB1_CVD_DIV_REGIME": (("bot.py", "simulate_marketable_limit_fill"),),
-    "FAMILY_GSB2_REGIME_SWITCHER": (("bot.py", "simulate_marketable_limit_fill"),),
-    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("bot.py", "simulate_marketable_limit_fill"),),
+    "FAMILY_RANDOM_CONTROL_TAKER_90": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
+    "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
+    "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
+    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
     "FAMILY_DISLOC_BFX_DISLOCATION_1M": (("disloc_engine.py", "_price_entry"), ("disloc_engine.py", "_price_exit")),
     "FAMILY_DISLOC_FOI_LONG_1M": (("disloc_engine.py", "_price_entry"), ("disloc_engine.py", "_price_exit")),
 }
@@ -229,9 +229,10 @@ TILE_FILL_SITES = {
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
 # Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (disloc_engine._price_entry / _price_exit).
-PENDING_MIGRATION = frozenset(TILE_FILL_SITES) - {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"}
+PENDING_MIGRATION = frozenset()  # 16 Oct 2026: tiles 1-5 migrated (tile_fill.py); must stay empty
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
-PENDING_MIGRATION_EXPIRES = "2026-10-27"
+ALLOWED_FILL_MODELS = frozenset({FILL_MODEL})
+LEGACY_TAG = "LEGACY_PRICING_INVALID"
 FORBIDDEN_NAMES = ("book_tape_1s", "market_microstructure_1s", "ticker")
 FORBIDDEN_IDENTIFIERS = ("ticker", "last_px", "last_price", "last_ask", "last_bid", "touch", "mark_price")
 FORBIDDEN_STATE_KEYS = ("price", "ask", "bid", "last_price", "mark")
@@ -243,11 +244,36 @@ def fresh_data_eligible(lane: str) -> bool:
     return str(lane) not in PENDING_MIGRATION
 
 
+FRESH_EPOCH_TS = None  # set by the bot from the stamped fresh-start epoch (None = not stamped yet)
+
+
+def row_before_epoch(row) -> bool:
+    """True when the row's entry/exit time precedes the stamped fresh-start epoch."""
+    if FRESH_EPOCH_TS is None or not isinstance(row, dict):
+        return False
+    for k in ("entry_ts", "exit_ts", "ts_epoch", "entry_time_ts"):
+        v = _f(row.get(k))
+        if v is not None:
+            return v < float(FRESH_EPOCH_TS)
+    return False
+
+
+def tag_legacy(row):
+    """Read-time tag for rows written before the shared pricer: legacy_pricing + LEGACY_PRICING_INVALID."""
+    if isinstance(row, dict) and row.get("exit_reason") and not row.get("fill_model_version"):
+        return {**row, "legacy_pricing": True, "fill_model_tag": LEGACY_TAG, "fresh_eligible": False}
+    return row
+
+
 def row_fresh_eligible(row) -> bool:
     """Epoch-row predicate: rows of lanes still pending migration are never fresh data."""
     if not isinstance(row, dict):
         return True
-    if row.get("fresh_data_excluded") or row.get("exit_status") == "FORCED_NO_BOOK":
+    if row_before_epoch(row):
+        return False
+    row = tag_legacy(row)
+    if row.get("fresh_data_excluded") or row.get("exit_status") == "FORCED_NO_BOOK" \
+            or row.get("fill_model_tag") == LEGACY_TAG or row.get("fresh_eligible") is False:
         return False
     lane = row.get("research_lane") or row.get("lane") or row.get("pathway")
     return True if not lane else fresh_data_eligible(lane)
