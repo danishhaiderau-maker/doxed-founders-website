@@ -149,7 +149,7 @@ test('Fly deploy proves a disarmed paper-signal owner, never a direct live execu
   );
   assert.match(
     workflow,
-    /bootstrap is still starting[\s\S]*time\.sleep\(3\)[\s\S]*continue[\s\S]*base \+ "\/api\/status"/,
+    /bootstrap is still starting[\s\S]*time\.sleep\(3\)[\s\S]*continue[\s\S]*base \+ "\/api\/status\?fresh=1"/,
   );
   assert.ok(
     workflow.indexOf('liveness.get("boot") == "starting"')
