@@ -190,7 +190,7 @@ def test_real_requests_timeout_message_classifies_as_timeout():
 
 def test_status_and_dashboard_expose_success_truth():
     source = BOT_PATH.read_text(encoding="utf-8")
-    status = source[source.index("@app.route('/api/status')\n@app.route('/status')\ndef status():"):]
+    status = source[source.index("@app.route('/api/status')\n@app.route('/status')\n@_probe_cached\ndef status():"):]
     status = status[: status.index("\n@app.route", 60)]
     for key in ('"last_ai_success_at"', '"ai_consecutive_failures"', '"ai_alert"', '"ai_provider_health"'):
         assert key in status, key

@@ -1,5 +1,6 @@
 """Stale-owner and pre-arming relay events can never be delivered."""
 import ast
+import functools
 import json
 import threading
 import time
@@ -201,7 +202,12 @@ def test_stale_owner_alarm_and_health_fields(tmp_path):
 
 def arm_ns(guard, armable=True):
     saved = []
-    return load_functions(["_arm_live_control"], {
+    cleared = []
+    # The real _clears_probe_cache decorator (not an identity stub) with a recording cache clear.
+    deco = load_functions(["_clears_probe_cache"], {"functools": functools,
+                                                    "_probe_cache_clear_all": lambda: cleared.append(1)})
+    ns = load_functions(["_arm_live_control"], {
+        "_clears_probe_cache": deco["_clears_probe_cache"], "_cleared": cleared,
         "_refresh_bitfinex_exposure_audit": lambda: {},
         "_live_control_lock": threading.Lock(), "state_lock": threading.RLock(),
         "state": {"live_armed": False, "bitfinex_live_enabled": False},
@@ -209,6 +215,8 @@ def arm_ns(guard, armable=True):
         "_relay_delivery_guard": guard, "save_persistent_config": lambda: saved.append(1),
         "time": time,
     })
+    ns["_cleared_calls"] = cleared
+    return ns
 
 
 def test_arm_live_control_refuses_while_guard_blocks(tmp_path):
@@ -228,6 +236,7 @@ def test_arm_live_control_stamps_arming_time_when_clear(tmp_path):
     assert ok is True and reason == "READY"
     assert ns["state"]["live_armed"] is True
     assert ns["state"]["live_armed_at_ts"] >= before
+    assert len(ns["_cleared_calls"]) == 2  # probe caches cleared before and after the arm mutation (#676)
 
 
 def test_existing_entry_gate_still_runs_first(tmp_path):
