@@ -263,6 +263,10 @@ def archive_receipt(receipt: Mapping[str, Any] | None, *, now: float, max_age_se
     if pending is not None and pending > 0:
         amber = True
         reasons.append(f"{int(pending)} pre-wipe object(s) awaiting quarantine in R2")
+    outside = _f(receipt.get("outside_keep"))
+    if outside is not None and outside > 0:
+        amber = True
+        reasons.append(f"{int(outside)} R2 object(s) outside the keep manifest (not pinned, not quarantined)")
     rt = receipt.get("restore_test")
     if isinstance(rt, Mapping):
         bad, miss, checked = _f(rt.get("bad")) or 0, _f(rt.get("missing")) or 0, _f(rt.get("checked"))

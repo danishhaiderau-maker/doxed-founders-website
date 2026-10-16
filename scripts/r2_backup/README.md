@@ -11,3 +11,23 @@
 * Fly side: `monitor_checks.archive_receipt` is RED on missing > 0 or a failed/empty restore test and AMBER while
   quarantine objects remain.
 Order on the laptop (machine approval): `reconcile` (dry) -> `reconcile --apply` -> `sync` -> `restore-test --sample 100`.
+
+
+## Review fixes (HM, #678)
+* `quarantine_pending` is its own receipt field and is NOT part of `ok`; Fly shows AMBER while it is > 0 and a clean
+  bucket is GREEN. `outside_keep > 0` is AMBER too. Missing / failed restore test / errors stay RED.
+* New dedicated top-level R2 prefix `epoch-archive/` (ROOTS entry `epoch-archive` -> `C:\DoxxedCrypto\epoch-archive`),
+  the only entry of `R2_KEEP_PREFIXES` in the keep manifest (see the **#670-based additive commit** on this PR:
+  `keep_manifest.py` = #670 head d1518674 + one-line delta, `MANIFEST_SHA256` re-pinned in `test_keep_manifest.py`).
+  Never under analysis-archive/, bot-data-* or fly-mirror-segments/.
+* `quarantine_candidates` raises `QuarantinePlanError` if ANY candidate in the window is pinned; `build_plan` therefore
+  fails instead of silently skipping it.
+* `r2_quarantine_plan.py verify --plan ... --expect-plan-sha256 ...` (read-only) re-lists the bucket and re-verifies
+  plan_sha256, size and last-modified per key, pinned keys and late arrivals. The (still unwritten) move step must run it
+  immediately before moving.
+* The receipt POST: the repo has no copy of the laptop job. Per WAITING-ON (#587/#588) the laptop `r2_backup.py`
+  posts the receipt itself (task `run-r2-backup.ps1`, vault BOT_ADMIN_TOKEN). This rewrite now does the same:
+  `post_receipt()` sends the whole v2 receipt (`RECEIPT_V2_FIELDS`) after `sync` / `restore-test`; the Fly route's
+  whitelist is verified against that list by `test_archive_receipt_v2.py`. NOT verified: whether the CURRENT laptop script
+  forwards v2 fields (it is the old script and is not in the repo; no laptop access). Installing this drop-in is what
+  makes it forward them.

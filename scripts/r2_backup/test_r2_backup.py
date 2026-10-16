@@ -7,6 +7,8 @@ import io
 import json
 import random
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -138,11 +140,12 @@ def test_reconcile_then_restore_hits_zero_missing_in_a_100_sample():
     assert rec["ok"] is True and rec["reconciled_dropped"] == 2000 and rec["missing"] == 0 and rec["r2_objects"] == 150 and rec["state_keys"] == 150
 
 
-def test_receipt_not_ok_while_quarantine_pending_or_errors():
+def test_quarantine_pending_is_its_own_field_and_never_makes_a_clean_receipt_not_ok():
     r = {"passed": True, "missing": 0, "bad": 0, "checked": 5}
     k = {"prefixes": ["a/"], "sha256": "k"}
     assert rb.build_receipt(state={}, report={"missing": 0}, restore=r, keep=k)["ok"] is True
-    assert rb.build_receipt(state={}, report={"missing": 0}, restore=r, keep=k, quarantine_pending=3)["ok"] is False
+    pending = rb.build_receipt(state={}, report={"missing": 0}, restore=r, keep=k, quarantine_pending=3)
+    assert pending["ok"] is True and pending["quarantine_pending"] == 3     # HM #678 B1
     assert rb.build_receipt(state={}, report={"missing": 0}, restore=r, keep=k, errors=1)["ok"] is False
     assert rb.build_receipt(state={}, report={"missing": 0}, restore=None, keep=k)["ok"] is False
 
@@ -162,7 +165,7 @@ def test_quarantine_plan_lists_only_the_window_and_has_no_move_code():
         s3.put(f"fly-mirror-segments/p{i}.zst", b"x", when="2026-10-13T16:30:00Z")
     s3.put("fly-mirror-segments/early.zst", b"x", when="2026-10-13T15:59:59Z")
     s3.put("fly-mirror-segments/late.zst", b"x", when="2026-10-13T17:00:00Z")
-    s3.put("keep/pinned.zst", b"x", when="2026-10-13T16:30:00Z")
+    s3.put("keep/outside-window.zst", b"x", when="2026-10-13T12:00:00Z")
     s3.put("_meta/state.json.zst", b"x", when="2026-10-13T16:30:00Z")
     s3.put("_quarantine/20261013/a.zst", b"x", when="2026-10-13T16:30:00Z")
     summary, rows = plan.build_plan(rb.list_bucket(s3), ["keep/"], rb.QUARANTINE_SINCE, rb.QUARANTINE_UNTIL, 5)
@@ -176,6 +179,90 @@ def test_quarantine_plan_lists_only_the_window_and_has_no_move_code():
                       "shutil"):
         assert forbidden not in src, forbidden
     assert quarantine_in_backup_has_no_mutations()
+
+
+def test_quarantine_candidates_fail_when_a_candidate_is_pinned():
+    s3 = FakeS3()
+    s3.put("fly-mirror-segments/p.zst", b"x", when="2026-10-13T16:30:00Z")
+    s3.put("epoch-archive/new/receipt.json.zst", b"x", when="2026-10-13T16:30:00Z")
+    with pytest.raises(rb.QuarantinePlanError, match="pinned"):
+        rb.quarantine_candidates(rb.list_bucket(s3), ["epoch-archive/"])
+    with pytest.raises(rb.QuarantinePlanError):
+        plan.build_plan(rb.list_bucket(s3), ["epoch-archive/"], rb.QUARANTINE_SINCE, rb.QUARANTINE_UNTIL, 1)
+    # outside the keep set the same window is fine
+    assert rb.quarantine_candidates(rb.list_bucket(s3), ["other/"]) == [
+        "epoch-archive/new/receipt.json.zst", "fly-mirror-segments/p.zst"]
+
+
+def test_archive_prefix_is_a_top_level_root_with_a_local_dir():
+    assert rb.ARCHIVE_PREFIX == "epoch-archive/" and "epoch-archive" in rb.ROOTS
+    assert rb.ROOTS["epoch-archive"].endswith("epoch-archive")
+    for other in rb.ROOTS:
+        if other != "epoch-archive":
+            assert not rb.ARCHIVE_PREFIX.startswith(other + "/") and not other.startswith("epoch-archive")
+
+
+def _plan_fixture():
+    s3 = FakeS3()
+    for i in range(4):
+        s3.put(f"fly-mirror-segments/p{i}.zst", b"x" * (i + 1), when="2026-10-13T16:30:00Z")
+    summary, rows = plan.build_plan(rb.list_bucket(s3), ["epoch-archive/"], rb.QUARANTINE_SINCE, rb.QUARANTINE_UNTIL, 4)
+    return s3, summary, rows
+
+
+def test_verify_plan_relists_and_rechecks_hash_size_and_last_modified_per_key():
+    s3, summary, rows = _plan_fixture()
+    args = (rows, summary["plan_sha256"])
+    kw = dict(prefixes=["epoch-archive/"], since=rb.QUARANTINE_SINCE, until=rb.QUARANTINE_UNTIL)
+    assert plan.verify_plan(*args, rb.list_bucket(s3), **kw)["ok"] is True
+    assert plan.verify_plan(rows, "00" * 32, rb.list_bucket(s3), **kw)["problems"][0] == "PLAN_SHA256_MISMATCH"
+    s3.put("fly-mirror-segments/p0.zst", b"changed-size!!", when="2026-10-13T16:30:00Z")
+    v = plan.verify_plan(*args, rb.list_bucket(s3), **kw)
+    assert not v["ok"] and "SIZE_CHANGED:1" in v["problems"]
+    s3, summary, rows = _plan_fixture()
+    s3.put("fly-mirror-segments/p1.zst", b"xx", when="2026-10-13T16:45:00Z")        # same size, new last-modified
+    v = plan.verify_plan(rows, summary["plan_sha256"], rb.list_bucket(s3), **kw)
+    assert not v["ok"] and "LAST_MODIFIED_CHANGED:1" in v["problems"]
+    s3, summary, rows = _plan_fixture()
+    del s3.objs["fly-mirror-segments/p2.zst"]
+    assert "KEY_MISSING:1" in plan.verify_plan(rows, summary["plan_sha256"], rb.list_bucket(s3), **kw)["problems"]
+    s3, summary, rows = _plan_fixture()
+    s3.put("fly-mirror-segments/late-arrival.zst", b"x", when="2026-10-13T16:40:00Z")
+    assert "NEW_CANDIDATES_NOT_IN_PLAN:1" in plan.verify_plan(rows, summary["plan_sha256"], rb.list_bucket(s3), **kw)["problems"]
+    s3, summary, rows = _plan_fixture()
+    v = plan.verify_plan(rows, summary["plan_sha256"], rb.list_bucket(s3), prefixes=["fly-mirror-segments/"],
+                         since=rb.QUARANTINE_SINCE, until=rb.QUARANTINE_UNTIL)
+    assert not v["ok"] and any("PINNED" in p for p in v["problems"])
+
+
+def test_post_receipt_sends_the_whole_v2_receipt_with_the_admin_token_and_never_raises(monkeypatch):
+    monkeypatch.delenv("BOT_ADMIN_TOKEN", raising=False)   # never let a test reach the real Fly route
+    seen = {}
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"], seen["headers"], seen["body"] = req.full_url, dict(req.header_items()), json.loads(req.data)
+        return Resp()
+    r = rb.build_receipt(state={"a": 1}, report={"missing": 0, "r2_objects": 1, "outside_keep": 2, "quarantined": 3},
+                         restore={"passed": True, "missing": 0, "bad": 0, "checked": 1},
+                         keep={"prefixes": ["epoch-archive/"], "sha256": "k"}, quarantine_pending=4)
+    assert rb.post_receipt(r, token="t", urlopen=fake_urlopen) is True
+    assert seen["headers"]["X-bot-admin-token"] == "t" and seen["url"].endswith("/api/monitor/archive/receipt")
+    for field in ("schema", "state_keys", "r2_objects", "missing", "quarantined", "quarantine_pending",
+                  "outside_keep", "keep_manifest_sha256", "restore_test", "ok"):
+        assert field in seen["body"], field
+    assert seen["body"]["quarantine_pending"] == 4 and seen["body"]["outside_keep"] == 2
+
+    def boom(req, timeout=0):
+        raise OSError("down")
+    assert rb.post_receipt(r, token="t", urlopen=boom) is False
+    def must_not_be_called(req, timeout=0):
+        raise AssertionError("no token -> no request")
+    assert rb.post_receipt(r, token="", urlopen=must_not_be_called) is False
 
 
 def quarantine_in_backup_has_no_mutations():
