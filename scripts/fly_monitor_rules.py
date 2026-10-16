@@ -184,7 +184,11 @@ def transfer_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
         shipped, acked = _num(transfer.get("shipped_seq")), _num(transfer.get("laptop_acked_seq"))
         if shipped is not None and shipped - (acked or 0) > SEGMENT_SEQ_LAG:
             problems.append(f"laptop ACK {int(acked or 0)} is {int(shipped - (acked or 0))} segments behind {int(shipped)}")
-        return {"transfer_lag": "segment transfer lagging: " + "; ".join(problems)} if problems else {}
+        findings = {"transfer_lag": "segment transfer lagging: " + "; ".join(problems)} if problems else {}
+        if transfer.get("sync_verdict") == "RED":
+            reasons = transfer.get("sync_verdict_reasons") or []
+            findings["sync_inconsistent"] = "laptop/Fly sync RED: " + "; ".join(str(r) for r in reasons[:4])
+        return findings
     return {"transfer_lag": "segment shipping is disabled and the whole-generation transfer is retired"}
 
 

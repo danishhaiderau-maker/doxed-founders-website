@@ -1473,7 +1473,26 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         reasons.append(f"Fly laptop_acked behind applied by {ack_lag} segments")
     elif ack_lag and ack_lag > 0 and ack_behind_for > t["ack_lag_red_sec"]:
         reasons.append(f"Fly laptop_acked behind applied and not advancing for {fmt_age(ack_behind_for)}")
+    # HM (b): the 13 Oct wipe restarted Fly's numbering; applied 7073 > published 2456 with Fly acked 0
+    # produced exit 0 and no alert. Both are RED immediately (they can never be a normal catch-up state).
+    if applied is not None and published is not None and int(applied) > int(published):
+        reasons.append(f"SEQ_REGRESSION: laptop applied {applied} > Fly published {published} "
+                       "(wipe restarted Fly numbering; reset the laptop mirror/puller)")
+    # HM #677: ACK_ZERO is AMBER first (a pull applies before its ACK lands); RED only if Fly's ack is
+    # still 0 more than 5 min (ACK_LAG_AMBER_SEC) after we first saw applied > 0 with acked == 0.
+    ack_zero_msg = None
+    if applied is not None and fly_acked is not None and int(applied) > 0 and int(fly_acked) == 0:
+        since = float(mem.setdefault("ack_zero_since", now))
+        ack_zero_msg = (f"ACK_ZERO_WHILE_APPLIED: Fly laptop_acked 0 while laptop applied {applied} "
+                        f"for {fmt_age(now - since)}", now - since > 5 * 60)
+    else:
+        mem.pop("ack_zero_since", None)
+    fly_verdict = dig(transfer, "sync_verdict") if transfer else None
+    if fly_verdict == "RED":
+        reasons.append("Fly sync verdict RED: " + "; ".join(str(r) for r in (dig(transfer, "sync_verdict_reasons") or [])[:3]))
     ambers = []
+    if ack_zero_msg:
+        (reasons if ack_zero_msg[1] else ambers).append(ack_zero_msg[0])
     if applied is None:
         none_for = now - float(mem.setdefault("applied_none_since", now))
         (reasons if none_for > t["pull_applied_none_red_sec"] else ambers).append(

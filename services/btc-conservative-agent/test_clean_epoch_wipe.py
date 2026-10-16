@@ -150,7 +150,8 @@ def test_plan_is_dry_run_and_deletes_nothing(tmp_path, capsys):
     assert sorted(p for p in root.rglob("*") if p.is_file()) == before
 
 
-def test_execute_gates_fail_closed_and_receipt_on_success(tmp_path, capsys):
+def test_execute_gates_fail_closed_and_receipt_on_success(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("RESEARCH_SEGMENTS_PREFIX_PER_WIPE", "1")   # HM #677: fly wipe requires per-wipe prefixes
     root = _fly_volume(tmp_path)
     _manifest(root, time.time() - 3 * 3600)
     base = ["--scope", "fly", "--data-root", str(root), "--epoch", EPOCH]
@@ -195,7 +196,8 @@ def test_execute_refuses_a_file_changed_after_planning(tmp_path):
         wipe.execute(doc, receipts_dir=tmp_path / "r", scope="fly", cert_sha8="deadbeef")
 
 
-def test_execute_rechecks_keep_guard_even_for_a_tampered_plan(tmp_path):
+def test_execute_rechecks_keep_guard_even_for_a_tampered_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESEARCH_SEGMENTS_PREFIX_PER_WIPE", "1")
     root = _fly_volume(tmp_path)
     tape = root / "runtime" / "market_microstructure_1s.jsonl.3"
     st = tape.stat()

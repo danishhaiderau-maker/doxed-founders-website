@@ -44,6 +44,7 @@ import threading
 import time
 from pathlib import Path
 
+import research_segment_epoch as epoch_mod
 import research_segment_format as fmt
 import research_segment_prune as prune
 from research_segment_store import PreconditionFailed, VolumeStore, volume_store_root
@@ -57,7 +58,7 @@ MAX_CUSTODY_BODY_BYTES = 4 * 1024 * 1024
 MAX_MODE_BODY_BYTES = 256
 MANIFEST_CACHE_LIMIT = 4096
 _ROUTE_RE = re.compile(r"^/api/research-segments/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
-                       r"(head|files|ack|custody|prune-mode|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
+                       r"(head|files|ack|custody|prune-mode|laptop-status|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
 
 
 def _accepts_gzip(environ) -> bool:
@@ -97,12 +98,15 @@ class _FileStream:
 
 class SegmentServer:
     def __init__(self, *, store_root: Path, state_dir: Path, admin_token: str,
-                 prefix: str = "v1", enabled: bool = True, clock=time.time):
+                 prefix: str = "v1", enabled: bool = True, clock=time.time,
+                 prefix_epoch_id: str = "", volume_root=None):
         self.store_root = Path(store_root)
         self.state_dir = Path(state_dir)
         self.prefix = fmt.validate_prefix(prefix)
         self.enabled = bool(enabled)
         self.clock = clock
+        self.prefix_epoch_id = str(prefix_epoch_id or "")
+        self.volume_root = Path(volume_root) if volume_root else self.store_root.parent
         self._token = (admin_token or "").strip().encode("utf-8")
         self._manifest_cache: dict[int, dict] = {}
         self._cache_lock = threading.Lock()
@@ -207,7 +211,52 @@ class SegmentServer:
             "prune_deleted_bytes_total": status.get("prune_deleted_bytes_total"),
             "prune_last_plan": status.get("prune_last_plan"),
         }
+        payload.update(self._sync_view(payload))
         return self._respond(start_response, "200 OK", payload)
+
+    def _beacon_doc(self) -> dict:
+        return self._read_json(self.state_dir / "laptop-status.json")
+
+    def _sync_view(self, head: dict) -> dict:
+        """Epoch identity, the laptop beacon and the live sync verdict (HM b)."""
+        doc = self._beacon_doc()
+        beacon = doc.get("beacon") if isinstance(doc.get("beacon"), dict) else None
+        epoch_id = epoch_mod.fresh_start_epoch_id(self.volume_root)
+        marker = epoch_mod.read_reset_marker(self.volume_root / "runtime" / "clean-epoch-receipts")
+        acked = head.get("laptop_acked") or {}
+        verdict = epoch_mod.sync_verdict(
+            published_seq=head.get("published_seq"), acked_seq=acked.get("through_seq"),
+            ack_received_at=acked.get("received_at"), beacon=beacon, beacon_received_at=doc.get("received_ts"),
+            prefix=self.prefix, fresh_start_epoch_id=epoch_id, prefix_epoch_id=self.prefix_epoch_id,
+            reset_marker=marker, now=self.clock())
+        return {"fresh_start_epoch_id": epoch_id or None, "prefix_epoch_id": self.prefix_epoch_id or None,
+                "laptop_status": beacon, "laptop_status_received_at": doc.get("received_at"),
+                "laptop_reset_required": bool(marker and marker.get("status") == "REQUIRED"),
+                "sync_verdict": verdict}
+
+    def _laptop_status(self, environ, start_response, method: str):
+        """GET the last beacon / POST a new one (HM b: cycle stopReason + applied seq reach Fly)."""
+        if method == "GET":
+            doc = self._beacon_doc()
+            return self._respond(start_response, "200 OK", {"schema": epoch_mod.BEACON_SCHEMA, **doc})
+        try:
+            length = int(environ.get("CONTENT_LENGTH") or 0)
+        except ValueError:
+            length = -1
+        if length < 1 or length > epoch_mod.MAX_BEACON_BYTES:
+            return self._respond(start_response, "413 Payload Too Large", {"error": "BAD_BEACON_SIZE"})
+        raw = environ["wsgi.input"].read(length)
+        beacon, error = epoch_mod.validate_beacon(raw)
+        if beacon is None:
+            return self._respond(start_response, "400 Bad Request", {"error": error})
+        now = self.clock()
+        doc = {"beacon": beacon, "received_ts": now,
+               "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+        epoch_mod.write_beacon_doc(self.state_dir / "laptop-status.json", doc)
+        head = {"published_seq": int(self._read_json(self.state_dir / "status.json").get("shipped_seq") or 0),
+                "laptop_acked": self.acked_head()}
+        return self._respond(start_response, "200 OK", {"ok": True, "received_at": doc["received_at"],
+                                                        "sync_verdict": self._sync_view(head)["sync_verdict"]})
 
     def _files(self, environ, start_response):
         """The shipper checkpoint's view of every tracked file, for laptop parity.
@@ -441,6 +490,10 @@ class SegmentServer:
                 if method not in ("GET", "POST"):
                     return self._respond(start_response, "405 Method Not Allowed", {"error": "GET/POST"})
                 return self._custody(environ, start_response, method)
+            if route == "laptop-status":
+                if method not in ("GET", "POST"):
+                    return self._respond(start_response, "405 Method Not Allowed", {"error": "GET/POST"})
+                return self._laptop_status(environ, start_response, method)
             if route == "prune-mode":
                 if method not in ("GET", "POST"):
                     return self._respond(start_response, "405 Method Not Allowed", {"error": "GET/POST"})
@@ -472,11 +525,15 @@ class SegmentServer:
 def server_from_env(environ=None) -> SegmentServer:
     env = os.environ if environ is None else environ
     volume = Path(env.get("BOT_DATA_DIR") or "/app/data")
+    per_wipe = epoch_mod.per_wipe_enabled(env)
+    epoch_id = epoch_mod.fresh_start_epoch_id(volume) if per_wipe else ""
     return SegmentServer(
         store_root=volume_store_root(env),
-        state_dir=Path(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper"),
+        state_dir=epoch_mod.resolve_state_dir(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper",
+                                              epoch_id, per_wipe=per_wipe),
         admin_token=env.get("BOT_ADMIN_TOKEN") or "",
-        prefix=(env.get("RESEARCH_SEGMENTS_PREFIX") or "v1").strip(),
+        prefix=epoch_mod.resolve_prefix(env.get("RESEARCH_SEGMENTS_PREFIX") or "v1", epoch_id, per_wipe=per_wipe),
+        prefix_epoch_id=epoch_id, volume_root=volume,
         enabled=(env.get("RESEARCH_SEGMENTS_SINK") or "").strip().lower() == "volume",
     )
 
@@ -496,6 +553,7 @@ def archive_servers_from_env(environ=None) -> dict[str, SegmentServer]:
         servers[prefix] = SegmentServer(
             store_root=volume_store_root(env), state_dir=Path(state_dir),
             admin_token=env.get("BOT_ADMIN_TOKEN") or "", prefix=prefix,
+            volume_root=Path(env.get("BOT_DATA_DIR") or "/app/data"),
             enabled=(env.get("RESEARCH_SEGMENTS_SINK") or "").strip().lower() == "volume")
     return servers
 

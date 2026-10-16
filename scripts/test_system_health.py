@@ -1817,3 +1817,18 @@ def test_stale_mismatch_alert_on_disarmed_flat_relay_is_amber_not_armed_red():
     armed["relay_snapshot"].update(relayArmedAt="2026-10-09T18:00:00Z", reconciliation=flat,
                                    positionMismatchAlert="POSITION_MISMATCH")
     assert by_id(sh.evaluate(armed, {}))["railway.relay"]["status"] == sh.RED
+
+
+def test_pull_ack_ack_zero_while_applied_is_amber_first_then_red_after_5_minutes():
+    # HM #677 B2: a pull applies before its ACK lands; only a persistent 0 is RED.
+    now = ts("2026-10-16T10:00:00Z")
+    state: dict = {}
+    inputs = _pull_lag_inputs(now, 3, 3, now - 100)
+    inputs["fly_health"]["volume"]["transfer"]["laptop_acked_seq"] = 0
+    check = by_id(sh.evaluate(inputs, state))["laptop.pull_ack"]
+    assert check["status"] == sh.AMBER and "ACK_ZERO_WHILE_APPLIED" in str(check)
+    later = _pull_lag_inputs(now + 6 * 60, 3, 3, now + 6 * 60 - 100)
+    later["fly_health"]["volume"]["transfer"]["laptop_acked_seq"] = 0
+    assert by_id(sh.evaluate(later, state))["laptop.pull_ack"]["status"] == sh.RED
+    ok = _pull_lag_inputs(now + 7 * 60, 3, 3, now + 7 * 60 - 100)
+    assert by_id(sh.evaluate(ok, state))["laptop.pull_ack"]["status"] == sh.GREEN

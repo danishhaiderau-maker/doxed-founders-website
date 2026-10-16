@@ -38,6 +38,7 @@ import fnmatch
 import sqlite3
 import uuid
 
+import research_segment_epoch as epoch_mod
 import research_segment_format as fmt
 import research_segment_prune as prune
 import research_segment_selection as selection
@@ -274,8 +275,11 @@ class SegmentShipper:
         sqlite_backup_deadline: float = SQLITE_BACKUP_DEADLINE_SECONDS,
         baseline_genesis: bool = False,
         backlog_boost_bytes: int = 0, boost_segment_bytes: int = 0,
+        prefix_epoch_id: str = "",
     ):
         self.sink = sink
+        # fresh-start epoch the key prefix was derived from at boot ("" = not per-wipe)
+        self.prefix_epoch_id = str(prefix_epoch_id or "")
         # 0 disables backlog mode; the regular budget then always applies.
         self.backlog_boost_bytes = max(0, int(backlog_boost_bytes))
         self.boost_segment_bytes = max(0, int(boost_segment_bytes))
@@ -909,7 +913,8 @@ class SegmentShipper:
         manifest = fmt.build_manifest(
             prefix=self.prefix, seq=seq, prev_manifest_sha256=state["last_manifest_sha256"],
             segment_raw=segment_raw, members=members, source_git_rev=self.source_git_rev,
-            collection_epoch_id=self._epoch_id(), window_start=previous_end,
+            collection_epoch_id=self._epoch_id(), fresh_start_epoch_id=self._fresh_start_epoch_id(),
+            window_start=previous_end,
             window_end=window_end,
         )
         manifest_raw = fmt.canonical_json(manifest)
@@ -978,7 +983,8 @@ class SegmentShipper:
         manifest = fmt.build_manifest(
             prefix=self.prefix, seq=1, prev_manifest_sha256=state["last_manifest_sha256"],
             segment_raw=segment_raw, members=members, source_git_rev=self.source_git_rev,
-            collection_epoch_id=self._epoch_id(), window_start=0.0, window_end=window_end,
+            collection_epoch_id=self._epoch_id(), fresh_start_epoch_id=self._fresh_start_epoch_id(),
+            window_start=0.0, window_end=window_end,
         )
         manifest_raw = fmt.canonical_json(manifest)
         new_state.update({"seq": 1, "last_manifest_sha256": fmt.sha256_bytes(manifest_raw),
@@ -991,6 +997,9 @@ class SegmentShipper:
                                        "tracked_only_files": tracked_only,
                                        "baselined_bytes": baselined_bytes}})
         return segment_raw, manifest_raw, new_state
+
+    def _fresh_start_epoch_id(self) -> str:
+        return epoch_mod.fresh_start_epoch_id(self.volume_root)
 
     def _epoch_id(self) -> str:
         try:
@@ -1180,8 +1189,43 @@ class SegmentShipper:
                 ack = fmt.parse_ack(raw)
                 if ack["through_seq"] == int(token) and ack["through_seq"] <= int(state["seq"]):
                     best = ack["through_seq"]
-        self.write_status(laptop_acked_seq=best)
+        self.write_status(laptop_acked_seq=best, **self.sync_status_fields(best))
         return best
+
+    def sync_status_fields(self, acked: int) -> dict:
+        """HM (b): Fly-side verdict from the laptop beacon, so RED shows in /health volume.transfer.
+
+        Never raises: a verdict bug must not stop ACK polling.
+        """
+        try:
+            try:
+                beacon_doc = json.loads((self.state_dir / "laptop-status.json").read_text("utf-8"))
+            except (OSError, ValueError):
+                beacon_doc = {}
+            beacon = beacon_doc.get("beacon") if isinstance(beacon_doc, dict) else None
+            ack_at = None
+            if acked:
+                try:
+                    receipt = json.loads((self.store.get(
+                        f"{self.prefix}/acks/laptop-receipts/{fmt.seq_token(int(acked))}.json") or b"{}").decode("utf-8"))
+                    ack_at = receipt.get("received_at")
+                except Exception:  # noqa: BLE001 - receipt is advisory
+                    ack_at = None
+            verdict = epoch_mod.sync_verdict(
+                published_seq=int(self.load_state().get("seq") or 0), acked_seq=acked, ack_received_at=ack_at,
+                beacon=beacon if isinstance(beacon, dict) else None,
+                beacon_received_at=beacon_doc.get("received_ts") if isinstance(beacon_doc, dict) else None,
+                prefix=self.prefix, fresh_start_epoch_id=self._fresh_start_epoch_id(),
+                prefix_epoch_id=self.prefix_epoch_id,
+                reset_marker=epoch_mod.read_reset_marker(self.volume_root / "runtime" / "clean-epoch-receipts"),
+                now=self.clock())
+        except Exception as exc:  # noqa: BLE001
+            return {"sync_verdict": "UNKNOWN", "sync_verdict_reasons": [f"VERDICT_ERROR:{type(exc).__name__}"]}
+        return {"sync_verdict": verdict["status"], "sync_verdict_reasons": verdict["reasons"][:8],
+                "laptop_applied_seq": verdict["laptop_applied_seq"],
+                "fresh_start_epoch_id": verdict["fresh_start_epoch_id"],
+                "laptop_cycle_stop_reason": verdict["laptop_cycle_stop_reason"],
+                "laptop_cycle_exit": verdict["laptop_cycle_exit"]}
 
 
 def _set_priority(boosted: bool, boost_nice: int = DEFAULT_BOOST_NICE, tid: int = 0) -> str | None:
@@ -1239,13 +1283,19 @@ def shipper_from_env(environ=None) -> SegmentShipper:
     volume = Path(env.get("BOT_DATA_DIR") or "/app/data")
     sink = sink_from_env(env)
     default_cap = VOLUME_DEFAULT_MAX_STORE_BYTES if sink == "volume" else 0
+    per_wipe = epoch_mod.per_wipe_enabled(env)
+    epoch_id = epoch_mod.fresh_start_epoch_id(volume) if per_wipe else ""
+    prefix = epoch_mod.resolve_prefix(env.get("RESEARCH_SEGMENTS_PREFIX") or "v1", epoch_id, per_wipe=per_wipe)
+    state_dir = epoch_mod.resolve_state_dir(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper",
+                                            epoch_id, per_wipe=per_wipe)
     return SegmentShipper(
+        prefix_epoch_id=epoch_id,
         sink=sink,
         max_store_bytes=int(env.get("RESEARCH_SEGMENTS_VOLUME_MAX_BYTES") or default_cap),
         store=store_from_env(env), volume_root=volume, runtime_root=volume / "runtime",
-        state_dir=Path(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper"),
+        state_dir=state_dir,
         rules=load_selection_rules(),
-        prefix=(env.get("RESEARCH_SEGMENTS_PREFIX") or "v1").strip(),
+        prefix=prefix,
         max_segment_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_SEGMENT_BYTES") or 8 * 1024 * 1024),
         max_member_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_MEMBER_BYTES") or 64 * 1024 * 1024),
         source_git_rev=(env.get("SOURCE_GIT_REV") or "unknown").strip(),

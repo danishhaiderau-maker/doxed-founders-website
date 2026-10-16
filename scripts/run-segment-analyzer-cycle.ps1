@@ -73,7 +73,7 @@ if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP
 $cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $PID; reason = $Reason
                            startedAt = (Get-UtcNowIso); phase = 'PROMOTION'; updatedAt = $null
                            finishedAt = $null; exitCode = $null; stopReason = $null; detail = $null
-                           promotionLevel = $null; promotionWarnings = @() }
+                           promotionLevel = $null; promotionWarnings = @(); pullExit = $null; pullDetail = $null }
 Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -98,11 +98,22 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   }
   $ErrorActionPreference = 'Continue'
   try {
-    $null = & $Python @pullArgs 2>&1 | Out-String
+    $pullOut = & $Python @pullArgs 2>&1 | Out-String
+    $pullExit = $LASTEXITCODE
     $promotion = & $Python (Join-Path $service 'research_segment_promotion.py') --shadow-root $ShadowRoot --view $ViewRoot `
       --prefix $Prefix --base-url $cfg.SourceUrl 2>&1 | Out-String
   } finally { $ErrorActionPreference = $previous }
   $promotionExit = $LASTEXITCODE
+  # HM #677: the pull exit code used to be dropped (`$null =`). A non-zero pull (SEQ_REGRESSION,
+  # EPOCH_MISMATCH, MANIFEST_MISSING) is logged and carried in the cycle status, which the puller beacon
+  # reports to Fly (--cycle-status). It never overrides the promotion result: promotion re-checks the head.
+  $cycleStatus.pullExit = $pullExit
+  if ($pullExit -ne 0) {
+    $pullDetail = ([string]$pullOut -replace '\s+', ' ').Trim()
+    if ($pullDetail.Length -gt 300) { $pullDetail = $pullDetail.Substring(0, 300) }
+    $cycleStatus.pullDetail = $pullDetail
+    Write-ChainLog -Config $cfg -Name $logName -Message ("PULL_NONZERO attempt={0} exit={1} {2}" -f $attempt, $pullExit, $pullDetail)
+  }
   Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION attempt={0} exit={1} {2}" -f $attempt, $promotionExit, $promotion)
   if ($promotionExit -eq 0) { break }
   # The pull loop holds the shadow-root lock for a whole parity pass (~7 min
@@ -118,7 +129,7 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
     Stop-Cycle 3 'SHADOW_LOCK_WAIT_TIMEOUT' ("lock held > {0}s" -f $LockWaitMaxSec)
   }
   $denied = @([regex]::Matches([string]$promotion, '"([A-Z_]+)(:[^"]*)?"') | ForEach-Object { $_.Groups[1].Value } |
-              Where-Object { $_ -match '^(SHADOW_|HEAD_|FLY_|REVISION_|TILE_|RESEARCH_|PULLER_|VIEW_)' } | Select-Object -Unique)
+              Where-Object { $_ -match '^(SEQ_|EPOCH_|SHADOW_|HEAD_|FLY_|REVISION_|TILE_|RESEARCH_|PULLER_|VIEW_)' } | Select-Object -Unique)
   $denyDetail = ([string]$promotion -replace '\s+', ' ').Trim()
   if ($denyDetail.Length -gt 400) { $denyDetail = $denyDetail.Substring(0, 400) }
   # A Fly shipper backlog after a restart drains on its own (48 -> 36 MB -> OK in
@@ -134,7 +145,8 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
     }
     Stop-Cycle 3 'FLY_BACKLOG_NOT_DRAINED' $denyDetail
   }
-  # Only a moving head is worth retrying; any other refusal is final.
+  # Only a moving head is worth retrying; any other refusal is final. SEQ_REGRESSION (laptop ahead of a
+  # restarted Fly) is deliberately NOT retried: it needs the laptop reset, not another pull.
   if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 ('PROMOTION_DENIED:' + ($denied -join ',')) $denyDetail }
 }
 if ($promotionExit -ne 0) { Stop-Cycle 3 'PROMOTION_HEAD_KEPT_MOVING' $denyDetail }

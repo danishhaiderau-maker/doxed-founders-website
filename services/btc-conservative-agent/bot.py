@@ -44620,6 +44620,16 @@ def _dashboard_transfer_truth(snapshot: dict, now: float) -> tuple[dict, list]:
         if problems:
             alarms.append({"code": "TRANSFER_SEGMENTS_LAGGING", "severity": "critical",
                            "detail": "; ".join(problems)})
+        # HM (b): RED on published<applied, Fly ack 0 while laptop applied>0, epoch/prefix mismatch,
+        # or a pending "laptop reset required" marker (shipper-computed from the laptop beacon).
+        verdict = snapshot.get("sync_verdict")
+        segment.update({"sync_verdict": verdict, "laptop_applied_seq": snapshot.get("laptop_applied_seq"),
+                        "laptop_cycle_stop_reason": snapshot.get("laptop_cycle_stop_reason"),
+                        "fresh_start_epoch_id": snapshot.get("fresh_start_epoch_id")})
+        if verdict == "RED":
+            alarms.append({"code": "TRANSFER_SYNC_INCONSISTENT", "severity": "critical",
+                           "detail": "; ".join(str(r) for r in (snapshot.get("sync_verdict_reasons") or [])[:4])
+                           or "laptop/Fly sync RED"})
     parts.append("laptop-side failures: see analyzer")
     transfer = {"available": segment["status_present"], "segments": segment,
                 "laptop_side": "see analyzer", "label": " \u00b7 ".join(parts)}
@@ -48798,6 +48808,9 @@ _SEGMENT_STATUS_FIELDS = (
     "shipped_seq", "laptop_acked_seq", "unshipped_bytes", "last_segment_at",
     "updated_at", "last_error", "pruning_enabled", "sink", "store_bytes", "max_store_bytes",
     "prune_mode", "pruned_through_seq", "custody_through_seq", "prune_deleted_bytes_total",
+    # HM (b): laptop/Fly sync verdict computed by the shipper from the laptop beacon.
+    "sync_verdict", "sync_verdict_reasons", "laptop_applied_seq", "fresh_start_epoch_id",
+    "laptop_cycle_stop_reason", "laptop_cycle_exit",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1
@@ -48813,7 +48826,12 @@ def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
         "segment_status_present": False,
     }
     status_dir = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
-    status_path = (Path(status_dir) if status_dir else volume_root / "segment-shipper") / "status.json"
+    import research_segment_epoch as _rse
+    _per_wipe = _rse.per_wipe_enabled(os.environ)
+    status_path = _rse.resolve_state_dir(
+        Path(status_dir) if status_dir else volume_root / "segment-shipper",
+        _rse.fresh_start_epoch_id(volume_root) if _per_wipe else "", per_wipe=_per_wipe,
+    ) / "status.json"
     try:
         if status_path.stat().st_size <= _SEGMENT_STATUS_MAX_BYTES:
             raw = json.loads(status_path.read_text(encoding="utf-8"))
