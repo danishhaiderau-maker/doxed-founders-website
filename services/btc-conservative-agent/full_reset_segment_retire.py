@@ -11,7 +11,8 @@ Fail-closed gates (every one refuses BEFORE deleting anything):
 * per-wipe prefixes on, and a stamped fresh-start epoch (the live prefix must differ from the retired ones);
 * only ``segment-store/<name>`` with ``name`` = ``v3`` or ``v3-w<digits>`` and only ``segment-shipper-v3`` / ``segment-shipper-v3-w<digits>``;
   never the live prefix/state dir, never ``v1``/``v2`` (archive prefixes) or any other name, never a symlink;
-* the live prefix must already be serving from the new epoch: its state dir exists (the shipper rotated).
+* the live prefix must already be serving from the new epoch: its state dir has a status.json younger than 15 min (naming the live prefix if it names one);
+* the plan is refused over 10 GB or if any target is not a direct child of segment-store/ (or the data root for state dirs).
 Runs by hand / by the dispatch-only workflow step; nothing imports it at boot.
 """
 from __future__ import annotations
@@ -27,8 +28,10 @@ from pathlib import Path
 import research_segment_epoch as epoch_mod
 
 SCHEMA = "full_reset_segment_retire_v1"
-_PREFIX_RE = re.compile(r"^v3(?:-w[0-9]+)?$")
-_STATE_RE = re.compile(r"^segment-shipper-v3(?:-w[0-9]+)?$")
+_PREFIX_RE = re.compile(r"v3(?:-w[0-9]+)?")
+_STATE_RE = re.compile(r"segment-shipper-v3(?:-w[0-9]+)?")
+MAX_PLAN_BYTES = 10 * 1000**3
+STATUS_MAX_AGE_SEC = 15 * 60
 
 
 class SegmentRetireRefused(RuntimeError):
@@ -43,7 +46,7 @@ def _live_identity(data_root: Path, env) -> dict:
         raise SegmentRetireRefused("fresh-start epoch not stamped: the live prefix has not rotated")
     base = env.get("RESEARCH_SEGMENTS_PREFIX") or "v1"
     prefix = epoch_mod.resolve_prefix(base, epoch_id, per_wipe=True)
-    if not _PREFIX_RE.match(prefix) or prefix == base:
+    if not _PREFIX_RE.fullmatch(prefix) or prefix == base:
         raise SegmentRetireRefused(f"live prefix {prefix!r} is not a per-wipe v3 prefix")
     state_dir = epoch_mod.resolve_state_dir(env.get("RESEARCH_SEGMENTS_STATE_DIR") or data_root / "segment-shipper",
                                             epoch_id, per_wipe=True)
@@ -68,35 +71,53 @@ def _tree(path: Path) -> tuple[list[str], list[str], int]:
     return files, dirs, size
 
 
-def plan(data_root, env=None) -> dict:
+def _require_live_status(live: dict, now: float) -> None:
+    """The live shipper must have written its own status recently (a bare directory is not proof of rotation)."""
+    status = live["state_dir"] / "status.json"
+    try:
+        st = os.stat(status)
+        doc = json.loads(status.read_text("utf-8"))
+    except (OSError, ValueError):
+        raise SegmentRetireRefused(f"live shipper status {status} missing or unreadable: restart the bot first") from None
+    if now - st.st_mtime > STATUS_MAX_AGE_SEC:
+        raise SegmentRetireRefused(f"live shipper status {status} is stale ({int(now - st.st_mtime)}s old)")
+    named = doc.get("prefix") if isinstance(doc, dict) else None
+    if named is not None and named != live["prefix"]:
+        raise SegmentRetireRefused(f"live shipper status names prefix {named!r}, expected {live['prefix']!r}")
+
+
+def plan(data_root, env=None, *, now: float | None = None) -> dict:
     env = os.environ if env is None else env
     data_root = Path(data_root)
     live = _live_identity(data_root, env)
-    if not live["state_dir"].is_dir():
-        raise SegmentRetireRefused(f"live shipper state dir {live['state_dir']} absent: restart the bot first")
+    _require_live_status(live, time.time() if now is None else now)
     targets = []
     candidates = []
     store = data_root / "segment-store"
     if store.is_dir():
-        candidates += [(store / p.name, "segment-store") for p in store.iterdir() if _PREFIX_RE.match(p.name)]
-    candidates += [(p, "shipper-state") for p in data_root.iterdir() if _STATE_RE.match(p.name)]
+        candidates += [(store / p.name, "segment-store") for p in store.iterdir() if _PREFIX_RE.fullmatch(p.name)]
+    candidates += [(p, "shipper-state") for p in data_root.iterdir() if _STATE_RE.fullmatch(p.name)]
     for path, kind in sorted(candidates):
         if path.name == live["prefix"] and kind == "segment-store":
             continue
         if path == live["state_dir"]:
             continue
-        if os.path.islink(path) or not path.is_dir():
-            raise SegmentRetireRefused(f"{path} is a symlink or not a directory")
+        expected_parent = data_root / "segment-store" if kind == "segment-store" else data_root
+        if os.path.islink(path) or not path.is_dir() or path.parent != expected_parent:
+            raise SegmentRetireRefused(f"{path} is a symlink, not a directory, or outside the expected set")
         files, dirs, size = _tree(path)
         targets.append({"path": str(path), "kind": kind, "files": len(files), "bytes": size})
+    total_bytes = sum(t["bytes"] for t in targets)
+    if total_bytes > MAX_PLAN_BYTES:
+        raise SegmentRetireRefused(f"plan is {total_bytes} bytes, over the {MAX_PLAN_BYTES} cap: refusing")
     return {"schema": SCHEMA, "live_prefix": live["prefix"], "live_state_dir": str(live["state_dir"]),
             "fresh_start_epoch_id": live["epoch_id"], "targets": targets,
-            "total_files": sum(t["files"] for t in targets), "total_bytes": sum(t["bytes"] for t in targets)}
+            "total_files": sum(t["files"] for t in targets), "total_bytes": total_bytes}
 
 
 def execute(data_root, env=None, *, receipts_dir=None, now=None) -> dict:
     env = os.environ if env is None else env
-    doc = plan(data_root, env)
+    doc = plan(data_root, env, now=now)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
     receipts = Path(receipts_dir or Path(data_root) / "runtime" / "full-reset-receipts")
     receipts.mkdir(parents=True, exist_ok=True)

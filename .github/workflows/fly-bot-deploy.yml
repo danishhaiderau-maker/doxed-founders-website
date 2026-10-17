@@ -1223,6 +1223,8 @@ jobs:
         # The file wipe only scans /app/data/runtime; the pre-reset segment store (/app/data/segment-store/v3, seq 1..N since 13 Oct)
         # lives outside it. After the stamp + restart the server no longer answers for it, but the bytes would stay on the volume.
         # Fail-closed (full_reset_segment_retire.py): needs PER_WIPE=1, a stamped epoch and the shipper already rotated to the new prefix.
+        # No continue-on-error: if this step fails the job goes red, the later steps are skipped, nothing resumes paper, and the
+        # failure() safety-net step below keeps/forces the DEPLOY_MAINTENANCE pause (machine stop if it cannot be proven paused).
         if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
