@@ -111,6 +111,9 @@ DELETE_EXACT_NAMES = frozenset({
     "benchmark_vs_lanes_report.json", "analyzer_integrity_report.json",
 })
 DELETE_TAPE_DATASETS = cew.TAPE_DATASETS | cew.MARKET_DATASETS
+# The ONLY names allowed to override the deny-list (top level, plus that stream's own rotations). Owner decision
+# 2026-10-17 21:15 AEDT: tile_integrity.jsonl is an append-only data stream (tile integrity rows), not a switch.
+DENY_OVERRIDE_DELETE_NAMES = frozenset({"tile_integrity.jsonl"})
 DENY_NAME_TOKENS = ("live", "arm", "flag", "switch", "tile", "settings")
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
@@ -156,6 +159,8 @@ def classify(relpath: str) -> tuple[str, str]:
         return KEEP, "PRESERVED_RESEARCH"
     # 4b. DENY-LIST: anything that smells like a live / arming / flag / switch / tile / settings file is NEVER deleted by
     # any rule below (explicit, dataset or catch-all). Not on KEEP means UNCLASSIFIED, so execute aborts for data files.
+    if top_level and base in DENY_OVERRIDE_DELETE_NAMES:  # owner decision 17 Oct 21:15: a data stream, not a switch
+        return DELETE, "DENY_OVERRIDE_DATA_STREAM" + ("_ROTATED_COPY" if base != name else "")
     if any(t in name for t in DENY_NAME_TOKENS):
         return UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"
     # 5. explicit DELETE classes
@@ -231,7 +236,7 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
-RULES_VERSION = "full-reset-rules-v3-denylist"
+RULES_VERSION = "full-reset-rules-v4-denylist-tile-integrity"
 
 
 def rules_identity() -> bytes:
@@ -240,7 +245,7 @@ def rules_identity() -> bytes:
     doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
            "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
            "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
-           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 

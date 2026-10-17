@@ -1,8 +1,9 @@
 """Guarded-workflow helpers for the full reset, no archive (read-only except the epoch stamp).
 
     snapshot   record the live-off facts BEFORE the wipe (/api/build features + /health) to a JSON file
-    verify     after the wipe: live facts identical to the snapshot, /api/build still reads live-eligible switch
-               ON 0 + DISARMED, force_paper true, and tiles/trades, reconcile, fill-provenance, lanes show 0 rows
+    verify     after the wipe: live facts identical to the snapshot (the "live-eligible switch ON: N" count is an
+               eligibility number, not arming: it is recorded before and must be UNCHANGED after, it is NOT required to
+               be 0), /api/build still reads DISARMED, live_armed false, bitfinex_live_enabled false, force_paper true, and tiles/trades, reconcile, fill-provenance, lanes show 0 rows
     stamp      POST /api/monitor/fresh-start (epoch only moves forward; the bot refuses while live is armed)
     exchange-proof  GET the private exchange-exposure audit and print the counts-only proof the file wipe requires
                (/health carries no exchange facts). Fails closed unless authoritative, fresh, flat and all counts are 0
@@ -42,14 +43,25 @@ def build_facts(build: dict, health: dict) -> dict:
 
 def live_failures(facts: dict) -> list[str]:
     bad = []
-    if facts.get("live_eligible_switch_on") != 0:
-        bad.append(f"live-eligible switch ON = {facts.get('live_eligible_switch_on')!r} (want 0)")
+    # the eligibility count is only recorded here (it is 7 at baseline); cmd_verify requires it UNCHANGED vs the snapshot
+    count = facts.get("live_eligible_switch_on")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        bad.append(f"live-eligible switch count unreadable ({count!r}); cannot prove it is unchanged")
     if facts.get("disarmed") is not True:
         bad.append("/api/build does not read DISARMED")
     if facts.get("force_paper_mode") is not True:
         bad.append(f"force_paper_mode={facts.get('force_paper_mode')!r}")
     if facts.get("live_armed") is not False or facts.get("bitfinex_live_enabled") is not False:
         bad.append("live_armed / bitfinex_live_enabled not both false")
+    return bad
+
+
+def verify_live_failures(before: dict, after: dict) -> list[str]:
+    """After the wipe: the live facts must still prove disarmed / paper-only AND equal the snapshot taken before."""
+    bad = live_failures(after)
+    if after != before:
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        bad.append(f"live facts changed across the wipe: {changed}")
     return bad
 
 
@@ -182,9 +194,7 @@ def cmd_verify(args) -> int:
     before = json.load(open(args.before, encoding="utf-8"))
     after = _facts()
     print(json.dumps({"before": before, "after": after}, sort_keys=True))
-    bad = live_failures(after)
-    if after != before:
-        bad.append("live facts changed across the wipe")
+    bad = verify_live_failures(before, after)
     bad += zero_row_failures(_get("/api/monitor/tiles/trades"), _get("/api/monitor/reconcile"),
                              _get("/api/monitor/fill-provenance"), _get("/api/monitor/lanes", admin=False))
     if bad:
