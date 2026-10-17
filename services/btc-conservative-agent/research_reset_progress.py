@@ -30,7 +30,7 @@ def make_reset_progress_callback(runtime_root, *, attempt_id, reset_id, scope_na
         if any(type(v) is not int or v<0 for v in values):
             return False
         completed,total,byte_count=values
-        if completed>total or total>200000 or byte_count>64*1024**3:
+        if completed>total or total>600000 or byte_count>64*1024**3:
             return False
         now=time.monotonic()
         phase=event['phase']

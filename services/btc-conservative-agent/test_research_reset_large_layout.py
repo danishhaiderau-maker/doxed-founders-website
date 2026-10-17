@@ -79,3 +79,9 @@ def test_mid_run_abort_leaves_retained_and_rerun_finishes(tmp_path, monkeypatch)
     assert result["status"] == "COMPLETE"
     assert not any(t.exists() for t in targets)
     assert sum(1 for _ in os.scandir(base / "007")) == RETAINED // 200
+
+
+def test_max_files_is_a_hard_cap_above_old_limit():
+    import research_exact_deletion as deletion
+    assert deletion.MAX_RESET_FILES == 600_000 > 100_000
+    assert execution.MAX_RESET_FILES == deletion.MAX_RESET_FILES

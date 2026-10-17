@@ -111,10 +111,7 @@ Fix (hard caps, not unlimited):
   (2.5x the observed count; equals the validation ceiling).
 - `MAX_RETAINED_ROWS = 1_000_000` (`research_exact_deletion.py`) matches it (retained rows
   stream to the `.retained.jsonl` sidecar). A second, hidden 200k cap was found by the test.
-- `max_files` (targets) stays 100,000: a replay of the live file listing through the real
-  inventory gives 27,064 targets (17,507 derived indexes, 9,012 segments, 486 rotated + 46
-  research payloads, 7 ledgers, 6 mirrors) and 323,129 retained, i.e. ~3.7x headroom.
-  Exceeding it still refuses (`RESET_TARGET_BUDGET_EXCEEDED`) before any delete.
+- `max_files` (targets) raised 100,000 -> `MAX_RESET_FILES = 600_000` (hard cap in the deleter, executor admission and progress). Live replay of the file listing gives 27,064 targets and 323,129 retained, so the cap has >20x headroom. Exceeding it still refuses (`RESET_TARGET_BUDGET_EXCEEDED`) before any delete.
 - Timing: ~16 s per scan at live size; the whole in-process reset is well inside the
   workflow request timeout, which is raised 900 s -> 1800 s. The reset stays a blocking call
   (not a background job); fail-closed semantics unchanged.
