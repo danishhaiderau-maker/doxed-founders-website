@@ -485,7 +485,7 @@ def _paper_fill_execution_receipt(
         # these lanes, so reading it would label a correct BOOK10L fill UNCLASSIFIED / UNSUPPORTED.
         fill_model = str(fill_sim["fill_model"])
         fill_basis = _paper_fill.FILL_BASIS_TAKER_WALK
-        supported = str(fill_sim.get("evidence_status") or "COMPLETE").upper() == "COMPLETE" and filled is not None and filled > 0
+        supported = fill_sim.get("evidence_status") == _paper_fill.EVIDENCE_COMPLETE and filled is not None and filled > 0
     if not fill_basis:
         # Taker-at-signal / SIM_MARKET fills never visit the venue-executable gate;
         # label them explicitly so GS-04 (and other takers) are not UNCLASSIFIED.

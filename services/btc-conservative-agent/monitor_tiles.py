@@ -224,12 +224,27 @@ def _side(row: Mapping[str, Any]) -> str | None:
 
 
 def _legs(row: Mapping[str, Any]) -> list:
+    """Exit legs with the FILLED price. A partial leg's receipt price is already its book fill; the terminal leg's
+    receipt price is the rule's trigger price, so it is replaced by the terminal fill (``exit_fill_sim.price``, or the
+    row's ``exit_price`` when the row has a single leg) and the trigger kept as ``trigger_price``."""
     out = []
-    for leg in monitor_api.partial_exit_legs(row):
+    receipts = monitor_api.partial_exit_legs(row)
+    sim = row.get("exit_fill_sim") if isinstance(row.get("exit_fill_sim"), Mapping) else {}
+    terminal_fill = _finite(sim.get("price")) if sim.get("status") == "FILLED" else None
+    if terminal_fill is None and len(receipts) == 1:
+        terminal_fill = _finite(row.get("exit_price"))
+    for leg in receipts:
+        price = _finite(leg.get("price"))
+        trigger = _finite(leg.get("leg_trigger_price"))
+        if (_finite(leg.get("remaining_fraction")) or 0.0) <= 0.0:  # terminal leg: receipt price is the trigger level
+            trigger = price if trigger is None else trigger
+            if terminal_fill is not None:
+                price = terminal_fill
         out.append({
             "ts": _finite(leg.get("ts") or leg.get("observed_ts")),
             "qty": _finite(leg.get("closed_qty")),
-            "price": _finite(leg.get("price")),
+            "price": price,
+            "trigger_price": trigger,
             "reason": leg.get("reason") or leg.get("exit_reason"),
             "maker": leg.get("maker"),
         })
@@ -243,8 +258,10 @@ def paper_pricer_evidence(raw: Mapping[str, Any]) -> dict:
     if not isinstance(sim, Mapping) or str(sim.get("fill_model") or "") not in paper_fill.ALLOWED_FILL_MODELS:
         return {}
     model = str(sim["fill_model"])
+    complete = sim.get("evidence_status") == paper_fill.EVIDENCE_COMPLETE  # explicit: missing/UNKNOWN is not COMPLETE
     return {"fill_model": model, "fill_basis": paper_fill.FILL_BASIS_TAKER_WALK,
-            "execution_basis": f"{model}:{paper_fill.FILL_BASIS_TAKER_WALK}", "liquidity": "TAKER"}
+            "execution_basis": (f"{model}:{paper_fill.FILL_BASIS_TAKER_WALK}" if complete else "UNSUPPORTED"),
+            "liquidity": "TAKER", "evidence_status": sim.get("evidence_status")}
 
 
 def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool,

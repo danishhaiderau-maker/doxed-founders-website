@@ -23,7 +23,8 @@ from typing import Any, Callable, Mapping, Optional
 
 FILL_MODEL = "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"
 FILL_MODEL_VERSION = 1
-FILL_BASIS_TAKER_WALK = "BOOK10L_TAKER_WALK"  # the only fill_basis a paper_fill result can carry
+FILL_BASIS_TAKER_WALK = "BOOK10L_TAKER_WALK"
+EVIDENCE_COMPLETE = "COMPLETE"  # the only fill_basis a paper_fill result can carry
 DEFAULT_DELAY_S = 1.5
 MIN_DELAY_S = 0.3
 MIN_SAMPLES = 10
@@ -76,7 +77,7 @@ def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
     return book.get("a") if buy else book.get("b")
 
 
-def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
+def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
                delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
                cap_px: Optional[float] = None) -> dict:
@@ -123,6 +124,23 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
         COUNTERS["top_only_rejected"] += 1
     COUNTERS["reject_no_book"] += 1
     return {**base, "status": "REJECT_NO_BOOK", "price": None, "filled_qty": 0.0, "price_source": None}
+
+
+def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
+               book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
+               delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
+               cap_px: Optional[float] = None) -> dict:
+    """Shared pricer; every result carries an explicit ``evidence_status``: COMPLETE only for a fully filled
+    book-walk (status FILLED, price from the 10-level book). Anything else is never COMPLETE."""
+    out = _paper_fill_core(side, qty, signal_ts, delay_s, book_at, leg=leg, delay_source=delay_source,
+                           top_at=top_at, cap_px=cap_px)
+    if out.get("status") == "FILLED" and out.get("price_source") == "BFX_BOOK_10L" and out.get("price") is not None:
+        out["evidence_status"] = EVIDENCE_COMPLETE
+    elif out.get("status") in ("PARTIAL", "PARTIAL_TOP_ONLY") or out.get("filled_qty"):
+        out["evidence_status"] = "INCOMPLETE"
+    else:
+        out["evidence_status"] = "NO_FILL"
+    return out
 
 
 class BookTail:

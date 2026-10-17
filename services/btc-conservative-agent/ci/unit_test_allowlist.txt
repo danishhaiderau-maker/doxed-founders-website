@@ -176,6 +176,7 @@ test_empty_paper_trade_index.py
 test_entry_baseline_replay.py
 test_entry_baseline_replay_sidecar.py
 test_epoch_boundary_rotation.py
+test_epoch_guard_fresh_floor.py
 test_epoch_quarantine.py
 test_evaluator_pre_entry_join_integration.py
 test_event_study_and_data_health.py

@@ -1245,7 +1245,7 @@ def _epoch_purity_audit(guard, data_root, guarded=None):
     with guarded_read("<purity-audit>", "inventory"):
         for path, relpath in _epoch_audit_streams(data_root):
             try:
-                bad = file_pre_epoch_rows(path, relpath, guard.manifest)
+                bad = file_pre_epoch_rows(path, relpath, guard.manifest, guard.floor_ts)
             except OSError as exc:
                 found[relpath] = found.get(relpath, 0) + 1
                 print(f"  ?? epoch purity audit could not read {path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -1288,7 +1288,7 @@ def _epoch_receipt_block():
         by_stream = {k: v for k, v in retained_by_stream.items() if k not in guarded}
         admitted = sum(by_stream.values())
     else:
-        reads = monitor.report(guard.manifest)
+        reads = monitor.report(guard.manifest, guard.floor_ts)
         admitted, by_stream = reads["pre_epoch_rows_admitted"], reads["pre_epoch_rows_admitted_by_stream"]
     block = guard.receipt_block(pre_epoch_rows_admitted=admitted)
     block.update({

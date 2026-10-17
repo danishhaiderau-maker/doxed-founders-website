@@ -42,14 +42,15 @@ class PreEpochRowError(RuntimeError):
 
 
 class EpochGuard:
-    def __init__(self, manifest: dict | None) -> None:
+    def __init__(self, manifest: dict | None, floor_ts: float | None = None) -> None:
         self.manifest = manifest
+        self.floor_ts = float(floor_ts) if floor_ts else None  # fresh_start_epoch.json epoch_ts (see data_epoch.classify)
         self.admitted: dict[str, int] = {}
         self.rejected: dict[str, dict[str, int]] = {}
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike) -> "EpochGuard":
-        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME))
+        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME), floor_ts=fresh_floor_ts(data_dir))
 
     @property
     def declared(self) -> bool:
@@ -58,7 +59,7 @@ class EpochGuard:
     def admit(self, relpath: str, row: dict, ts_fields: Iterable[str] = de.TS_KEYS) -> bool:
         if not self.manifest:
             return True
-        cls = de.classify_row(relpath, row, self.manifest, ts_fields)
+        cls = de.classify_row(relpath, row, self.manifest, ts_fields, floor_ts=self.floor_ts)
         if cls in ADMITTED_CLASSES:
             self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
             return True
@@ -73,7 +74,8 @@ class EpochGuard:
         raw = line.encode("utf-8", "replace") if isinstance(line, str) else line
         if not raw.strip():
             return True
-        cls = de.classify(relpath, stamp_value=de.line_stamp(raw), ts=de.line_ts(raw), manifest=self.manifest)
+        cls = de.classify(relpath, stamp_value=de.line_stamp(raw), ts=de.line_ts(raw), manifest=self.manifest,
+                          floor_ts=self.floor_ts)
         if cls in ADMITTED_CLASSES:
             self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
             return True
@@ -99,7 +101,7 @@ class EpochGuard:
             return
         fields = tuple(ts_fields)
         for row in rows:
-            cls = de.classify_row(relpath, row, self.manifest, fields)
+            cls = de.classify_row(relpath, row, self.manifest, fields, floor_ts=self.floor_ts)
             if cls not in ADMITTED_CLASSES:
                 raise PreEpochRowError(f"{relpath}: {cls} row in a {self.manifest['epoch_id']} result")
 
@@ -161,7 +163,22 @@ def stream_relpath(root: str | os.PathLike, path: str | os.PathLike) -> str | No
     return base
 
 
-def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | None) -> int:
+def fresh_floor_ts(data_dir: str | os.PathLike) -> float | None:
+    """epoch_ts of fresh_start_epoch.json beside the manifest (volume root) or one level up; None if not stamped."""
+    import json
+    base = Path(data_dir)
+    for directory in (base, base.parent):
+        try:
+            ts = float(json.loads((directory / "fresh_start_epoch.json").read_text(encoding="utf-8")).get("epoch_ts") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if ts > 0:
+            return ts
+    return None
+
+
+def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
+                        floor_ts: float | None = None) -> int:
     """Rows of one stream file that the guard would not admit."""
     if not manifest:
         return 0
@@ -171,7 +188,7 @@ def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | 
             handle = open(path, "r", encoding="utf-8", errors="replace", newline="")
         with handle:
             for row in csv.DictReader(handle):
-                if de.classify_row(relpath, row, manifest) not in ADMITTED_CLASSES:
+                if de.classify_row(relpath, row, manifest, floor_ts=floor_ts) not in ADMITTED_CLASSES:
                     bad += 1
         return bad
     with guarded_read(relpath, "inventory"):
@@ -180,7 +197,8 @@ def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | 
         for line in handle:
             if not line.strip():
                 continue
-            cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=de.line_ts(line), manifest=manifest)
+            cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=de.line_ts(line), manifest=manifest,
+                              floor_ts=floor_ts)
             if cls not in ADMITTED_CLASSES:
                 bad += 1
     return bad
@@ -329,7 +347,7 @@ class StreamReadMonitor:
                 if site not in entry["raw_sites"]:
                     entry["raw_sites"].append(site)
 
-    def report(self, manifest: dict | None) -> dict:
+    def report(self, manifest: dict | None, floor_ts: float | None = None) -> dict:
         """Pre-epoch rows reachable through unguarded opens (all of a raw-opened file's bad rows)."""
         with self._lock:
             files = {k: dict(v, raw_sites=list(v["raw_sites"])) for k, v in self.files.items()}
@@ -347,7 +365,7 @@ class StreamReadMonitor:
                 if not entry.get("raw"):
                     continue
                 try:
-                    bad = file_pre_epoch_rows(path, stream, manifest)
+                    bad = file_pre_epoch_rows(path, stream, manifest, floor_ts)
                 except OSError:
                     bad = 0
                 item = unguarded.setdefault(stream, {"opens": 0, "pre_epoch_rows": 0, "files": 0, "sites": []})

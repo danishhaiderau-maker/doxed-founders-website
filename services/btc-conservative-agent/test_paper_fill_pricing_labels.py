@@ -55,7 +55,7 @@ def test_receipt_uses_pricer_evidence_not_the_venue_gate():
 
 
 def test_tile_fill_block_prefers_pricer_evidence():
-    raw = {"entry_fill_sim": {"fill_model": MODEL}}
+    raw = {"entry_fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}}
     block = monitor_tiles._fill_block({"fill_basis": None, "execution_basis": "UNSUPPORTED"}, filled=True, raw=raw)
     assert block["fill_basis"] == "BOOK10L_TAKER_WALK" and block["execution_basis"].endswith(":BOOK10L_TAKER_WALK")
     assert block["fill_model"] == MODEL and block["liquidity"] == "TAKER"
@@ -136,8 +136,11 @@ def test_non_paper_orders_are_refused_and_tagged_invalid():
     refused, order, counter = _exec_refuse("SOME_LEGACY_LANE")
     assert refused is True and order["fill_model_invalid"] is True and counter["count"] == 1
     assert order["fill_invalid_reason"].startswith("NON_PAPER_BOOK_LANE_LEGACY_PRICER_REFUSED")
-    assert _exec_refuse("SOME_LEGACY_LANE", enabled=False)[0] is False
-    assert 'REFUSE_NON_PAPER_BOOK_FILLS = os.getenv("REFUSE_NON_PAPER_BOOK_FILLS", "1")' in BOT
+    assert _exec_refuse("SOME_LEGACY_LANE", enabled=False)[0] is False  # helper contract only
+    # pinned: the module constant is a literal True, not env-switchable
+    tree = ast.parse(BOT)
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "REFUSE_NON_PAPER_BOOK_FILLS")
+    assert isinstance(node.value, ast.Constant) and node.value.value is True
 
 
 def test_no_book_exit_marks_and_unpriced_leg_are_non_fills():
@@ -162,3 +165,47 @@ def test_analyzer_uses_the_same_strict_rule_as_the_monitors():
 def test_by_model_route_is_registered_and_read_only():
     assert '@app.route(\'/api/monitor/fills/by-model\', methods=["GET"])' in BOT
     assert '"/api/monitor/fills/by-model"' in BOT.split("_MONITOR_TILE_PATHS")[1][:2000]
+
+
+def _book(px_a=100.0, px_b=99.0):
+    return lambda t: {"s": int(t) - 1, "a": [[px_a, 10.0]], "b": [[px_b, 10.0]]}
+
+
+def test_pricer_emits_explicit_evidence_status():
+    full = paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, _book())
+    assert full["status"] == "FILLED" and full["evidence_status"] == "COMPLETE"
+    part = paper_fill.paper_fill("LONG", 50.0, 1000.0, 1.0, _book())
+    assert part["status"] == "PARTIAL" and part["evidence_status"] == "INCOMPLETE"
+    none = paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, lambda t: None)
+    assert none["evidence_status"] == "NO_FILL"
+
+
+def test_receipt_requires_explicit_complete_evidence():
+    for sim in ({"fill_model": MODEL}, {"fill_model": MODEL, "evidence_status": "UNKNOWN"},
+                {"fill_model": MODEL, "evidence_status": "INCOMPLETE"}, {"fill_model": MODEL, "evidence_status": None}):
+        rec = research_v3_bridge._paper_fill_execution_receipt(
+            {"fill_sim": sim, "filled_qty": 0.0003, "qty": 0.0003}, {"qty": 0.0003}, {})
+        assert rec["conservative_fill_supported"] is False and rec["execution_basis"] == "UNSUPPORTED", sim
+
+
+def test_tile_pricer_evidence_requires_explicit_complete():
+    for sim in ({"fill_model": MODEL}, {"fill_model": MODEL, "evidence_status": "UNKNOWN"}):
+        ev = monitor_tiles.paper_pricer_evidence({"entry_fill_sim": sim})
+        assert ev["execution_basis"] == "UNSUPPORTED"
+        block = monitor_tiles._fill_block({}, filled=True, raw={"entry_fill_sim": sim})
+        assert block["execution_basis"] == "UNSUPPORTED"
+    ok = monitor_tiles.paper_pricer_evidence({"entry_fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}})
+    assert ok["execution_basis"] == f"{MODEL}:BOOK10L_TAKER_WALK"
+
+
+def test_exit_leg_price_is_the_filled_price_not_the_trigger():
+    # shape of row gs1-5c965fbbe077: single terminal leg, receipt price = trigger 81691, filled 81697
+    raw = {"partial_exit_receipts": [{"closed_qty": 0.0003, "price": 81691.0, "remaining_fraction": 0.0,
+                                      "realized_gross_usd": None, "reason": "PATH_END_60M"}],
+           "exit_price": 81697.0, "exit_fill_sim": {"status": "FILLED", "price": 81697.0}}
+    leg = monitor_tiles._legs(raw)[0]
+    assert leg["price"] == 81697.0 and leg["trigger_price"] == 81691.0
+    partial = {"partial_exit_receipts": [{"closed_qty": 0.0001, "price": 81600.0, "leg_trigger_price": 81595.0,
+                                          "remaining_fraction": 0.5, "realized_gross_usd": 0.01}]}
+    leg = monitor_tiles._legs(partial)[0]
+    assert leg["price"] == 81600.0 and leg["trigger_price"] == 81595.0

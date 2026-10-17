@@ -6274,7 +6274,10 @@ VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 PAPER_FILL_MODEL = os.getenv("PAPER_FILL_MODEL", "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY").strip().upper()
 # Danish's hard rule: every paper fill goes through paper_fill. A fill reaching the legacy REALISTIC_V1 / BBO
 # walk (a lane outside tile_fill.MIGRATED_LANES) is refused and tagged fill_model_invalid, never booked.
-REFUSE_NON_PAPER_BOOK_FILLS = os.getenv("REFUSE_NON_PAPER_BOOK_FILLS", "1").strip() != "0"
+# Pinned ON (not env-switchable): realist_on below is therefore also never True for a paper fill.
+# BEFORE ANY LIVE RE-ARM: _is_paper_book_lane() does not look at bitfinex_order_id, so a non-migrated lane order that
+# carries a real exchange order id would be refused here too. Safe while live is OFF; revisit before re-arming.
+REFUSE_NON_PAPER_BOOK_FILLS = True
 _NON_PAPER_FILL_REFUSED = {"count": 0, "last_lane": None}
 
 
