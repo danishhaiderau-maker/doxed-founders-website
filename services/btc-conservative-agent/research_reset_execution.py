@@ -15,14 +15,14 @@ from research_exact_deletion import (
     ResearchDeletionRejected, _checked_path, _fingerprint, delete_exact_research_files,
     validate_exact_research_deletion, _notify_reset_progress,
 )
-from research_reset_inventory import plan_research_reset, _managed_fly_alias
+from research_reset_inventory import RESET_MAX_ENTRIES, plan_research_reset, _managed_fly_alias
 from research_reset_paths import io_path
 
 
 def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                            recovery_states: Mapping[str, str], receipt_path,
                            protected_paths=(), expected_plan_sha256=None, expected_target_sha256_by_path=None,
-                           max_entries=200000, max_depth=12, max_metadata_bytes=4 * 1024**2,
+                           max_entries=RESET_MAX_ENTRIES, max_depth=12, max_metadata_bytes=4 * 1024**2,
                            max_files=100000, max_total_bytes=64 * 1024**3,
                            allow_fly_runtime_aliases=False, scope_name=None, validate_only=False,
                            progress_callback=None) -> dict:

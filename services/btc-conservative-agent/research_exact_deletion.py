@@ -15,12 +15,13 @@ class ResearchDeletionRejected(ValueError):
     pass
 
 
-# The retained-file list is bounded by rows (the inventory scans at most 200000
-# entries), never by encoded bytes: rows carry up to three paths, so 200000 rows
-# can encode to gigabytes. Receipts and operation records must stay below the
+# The retained-file list is bounded by rows (the inventory scans at most
+# RESET_MAX_ENTRIES = 1,000,000 entries; the live volume has ~394k, mostly
+# retained), never by encoded bytes: rows carry up to three paths, so this many
+# rows can encode to gigabytes. Receipts and operation records must stay below the
 # 16/64 MiB resume and reconciliation read limits, so the list lives in a
 # ``<receipt>.retained.jsonl`` sidecar bound into the receipt by sha256/count.
-MAX_RETAINED_ROWS = 200000
+MAX_RETAINED_ROWS = 1_000_000  # == inventory scan budget; hard cap
 MAX_RECEIPT_CONTEXT_BYTES = 64 * 1024
 RETAINED_SIDECAR_SUFFIX = ".retained.jsonl"
 
