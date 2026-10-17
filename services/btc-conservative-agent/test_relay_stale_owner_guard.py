@@ -243,7 +243,7 @@ def test_arm_live_control_refuses_while_the_mirror_blocks(tmp_path):
     guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE)
     guard.observe([], owner_id="me", armed=False, armed_at_ts=None)
     ns = arm_ns(guard)
-    ns["_arm_live_control"].__globals__["_mirror_arm_block"] = lambda audit=None: "MIRROR_ZERO_ACCOUNTS"
+    ns["_mirror_arm_block"] = lambda audit=None: "MIRROR_ZERO_ACCOUNTS"
     ok, reason, _, _ = ns["_arm_live_control"]()
     assert ok is False and reason == "MIRROR_ZERO_ACCOUNTS" and ns["state"]["live_armed"] is False
 
