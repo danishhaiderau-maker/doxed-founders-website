@@ -748,17 +748,49 @@ def test_legacy_non_paper_and_unpriced_exit_rows_are_all_null_not_zero(monkeypat
     assert forced["exit_legs_unmeasured"] == 1 and forced["book_slippage_usd_entry"] is not None
 
 
-def test_lane_stats_averages_only_version_1_rows_and_publishes_the_denominator():
+def test_lane_stats_averages_only_measured_rows_and_publishes_the_denominator():
     import monitor_api as ma
-    rows = [{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.2, "fill_model_version": 1},
-            {"close_ts": 2, "net_pnl_usd": 1.0, "book_slippage_usd": 0.4, "fill_model_version": 1},
+    rows = [{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.2, "fill_model_version": 1, "exit_legs": 1},
+            {"close_ts": 2, "net_pnl_usd": 1.0, "book_slippage_usd": 0.4, "fill_model_version": 1, "exit_legs": 2},
             {"close_ts": 3, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": None},  # legacy
-            {"close_ts": 4, "net_pnl_usd": 1.0, "book_slippage_usd": None, "fill_model_version": 1},  # unmeasured
-            {"close_ts": 5, "net_pnl_usd": 1.0, "book_slippage_usd": None}]  # DISLOC shape
+            {"close_ts": 4, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": 1},  # old v1 constant 0.0
+            {"close_ts": 5, "net_pnl_usd": 1.0, "book_slippage_usd": None, "fill_model_version": 1, "exit_legs": 1},
+            {"close_ts": 6, "net_pnl_usd": 1.0, "book_slippage_usd": None}]  # DISLOC shape
     st = ma.lane_stats(rows)
-    assert st["mean_book_slippage_usd"] == pytest.approx(0.3) and st["n_slippage_rows"] == 2 and st["closes"] == 5
-    none = ma.lane_stats([{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": None}])
-    assert none["mean_book_slippage_usd"] is None and none["n_slippage_rows"] == 0
+    assert st["mean_book_slippage_usd"] == pytest.approx(0.3) and st["n_slippage_rows"] == 2 and st["closes"] == 6
+    old_only = ma.lane_stats([{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": 1}])
+    assert old_only["mean_book_slippage_usd"] is None and old_only["n_slippage_rows"] == 0  # not a fake 0.0
+    assert ma.lane_stats([])["mean_book_slippage_usd"] is None
+
+
+def test_negative_zero_is_clamped_to_zero_in_walk_drift_and_aggregates():
+    import math
+    snap = {"s": 1, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}
+    # a fill 1e-9 better than the touch rounds to -0.0 before the clamp
+    r = pf.leg_slippage("LONG", "exit", 1.0, 99.0 + 1e-9, fill_snapshot=snap, signal_snapshot=snap, trigger_price=99.0 + 1e-9)
+    for k in ("walk_usd", "walk_bp", "touch_drift_usd", "touch_drift_bp", "trigger_drift_usd", "trigger_drift_bp"):
+        assert r[k] == 0.0 and math.copysign(1.0, r[k]) == 1.0, (k, r[k])
+    agg = pf.aggregate_legs([{**r, "qty": 1.0}, {**r, "qty": 2.0}])
+    for k in ("walk_usd", "walk_bp", "touch_drift_usd", "trigger_drift_bp"):
+        assert math.copysign(1.0, agg[k]) == 1.0, (k, agg[k])
+
+
+def test_no_fill_paths_produce_no_price_and_no_slippage_numbers(monkeypatch):
+    # IOC cap too tight for the book -> NO_FILL_IOC_CAP; empty side -> NO_FILL_NO_DEPTH; never a price or a 0.0 cost
+    _use_book(monkeypatch)
+    capped = pf.paper_fill("LONG", 0.5, 99.0, 1.5, pf.book10l_at, leg="entry", cap_px=99.5)
+    assert capped["status"] == "NO_FILL_IOC_CAP" and capped["price"] is None and capped["filled_qty"] == 0.0
+    _use_book(monkeypatch, {"s": 100, "a": [], "b": [[99.0, 1.0]]})
+    empty = pf.paper_fill("LONG", 0.5, 99.0, 1.5, pf.book10l_at, leg="entry", cap_px=100.0)
+    assert empty["status"] == "NO_FILL_NO_DEPTH" and empty["price"] is None
+    ns = _bot_ns(["_paper_result_as_sim"])
+    for res in (capped, empty):
+        sim = ns["_paper_result_as_sim"](res)
+        assert sim["fill_price"] == 0.0 and sim["filled_qty"] == 0.0 and sim["evidence_status"] == "UNKNOWN"
+        assert sim["slippage_usd"] is None and sim["walk_bp"] is None and sim["entry_delay_drift_bp"] is None
+        leg = pf.leg_slippage("LONG", "entry", res["filled_qty"], res["price"], fill_snapshot=res["depth_snapshot_fill"],
+                              signal_snapshot=res["depth_snapshot_signal"])
+        assert all(v is None for v in leg.values())
 
 
 def test_slippage_fields_round_trip_through_the_csv_writer_and_loader(tmp_path, monkeypatch):
@@ -770,12 +802,22 @@ def test_slippage_fields_round_trip_through_the_csv_writer_and_loader(tmp_path, 
     measured = sns["_slippage_row_fields"](pos, sim, 0.5)
     unmeasured = sns["_slippage_row_fields"](pos, None, 0.5)  # exit/total/legs-null row, entry measured
     legacy = sns["_slippage_row_fields"]({"research_lane": "X"}, None, 0.5)
+    # a row closed before #689: version 1, the old constant 0.0 slippage columns, none of the measured fields
+    old_const = {"book_slippage_usd_entry": 0.0, "book_slippage_usd_exit": 0.0, "book_slippage_usd_total": 0.0}
     rows = [_closed_row(monkeypatch, "m-1", **measured), _closed_row(monkeypatch, "u-1", **unmeasured),
-            _closed_row(monkeypatch, "l-1", **legacy)]
+            _closed_row(monkeypatch, "l-1", **legacy), _closed_row(monkeypatch, "o-1", **old_const)]
     for r in rows:
         ns["_dynamic_csv_writer_once"](path, r)
-    assert ns["load_session_trades_from_csv"]() == 3
+    assert ns["load_session_trades_from_csv"]() == 4
     back = {t["trade_id"]: t for t in loaded}
+    # the old-constant row keeps its 0.0 but has no exit_legs after reload -> excluded from the slippage mean
+    assert back["o-1"]["book_slippage_usd_total"] == 0.0 and back["o-1"].get("exit_legs") is None
+    import monitor_api as _ma
+    shaped = [{"close_ts": i, "net_pnl_usd": 1.0, "book_slippage_usd": back[t]["book_slippage_usd_total"],
+               "fill_model_version": back[t]["fill_model_version"], "exit_legs": back[t].get("exit_legs")}
+              for i, t in enumerate(("m-1", "u-1", "l-1", "o-1"))]
+    st = _ma.lane_stats(shaped)
+    assert st["n_slippage_rows"] == 1 and st["mean_book_slippage_usd"] == pytest.approx(measured["book_slippage_usd_total"], abs=1e-4)
     for key in ("book_slippage_usd_total", "book_slippage_usd_exit", "exit_walk_bp", "exit_delay_drift_bp",
                 "exit_depth_snapshot_signal", "exit_depth_snapshot_legs", "exit_legs", "exit_legs_unmeasured",
                 "pricer_signal_ts", "exit_model_fill_ts", "entry_delay_drift_bp"):
@@ -784,7 +826,7 @@ def test_slippage_fields_round_trip_through_the_csv_writer_and_loader(tmp_path, 
             assert (back[tid][key] is None) == (src[key] is None), (tid, key)  # '' must not become 0.0
     assert back["u-1"]["book_slippage_usd_total"] is None and back["l-1"]["book_slippage_usd_entry"] is None
     assert isinstance(back["m-1"]["exit_legs"], int) and isinstance(back["m-1"]["exit_depth_snapshot_legs"], list)
-    for tid in ("m-1", "u-1", "l-1"):
+    for tid in ("m-1", "u-1", "l-1", "o-1"):
         assert mt.pricing_block(back[tid]) == mt.pricing_block(next(r for r in rows if r["trade_id"] == tid))
     mb = mt.pricing_block(back["m-1"])
     assert mb["exit_legs"] == 1 and mb["book_slippage_usd_total"] == measured["book_slippage_usd_total"]

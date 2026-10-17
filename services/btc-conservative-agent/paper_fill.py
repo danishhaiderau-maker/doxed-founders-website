@@ -241,7 +241,7 @@ def best_touch(side: str, leg: str, snapshot) -> Optional[float]:
 
 
 def _bp(diff: float, ref: float) -> float:
-    return round(diff / ref * 1e4, 4)
+    return round(diff / ref * 1e4, 4) + 0.0  # + 0.0 turns -0.0 into 0.0
 
 
 def leg_slippage(side: str, leg: str, qty, fill_price, *, fill_snapshot=None, signal_snapshot=None,
@@ -266,15 +266,15 @@ def leg_slippage(side: str, leg: str, qty, fill_price, *, fill_snapshot=None, si
     if touch:
         out["touch_px"] = touch
         cost = -fav * (fill - touch)
-        out["walk_usd"], out["walk_bp"] = round(cost * q, 6), _bp(cost, touch)
+        out["walk_usd"], out["walk_bp"] = round(cost * q, 6) + 0.0, _bp(cost, touch)
         out["walk_within_cap"] = out["walk_bp"] <= cap_bp + 1e-6
     sig = best_touch(side, leg, signal_snapshot)
     if sig:
-        out["touch_drift_usd"] = round(fav * (fill - sig) * q, 6)
+        out["touch_drift_usd"] = round(fav * (fill - sig) * q, 6) + 0.0
         out["touch_drift_bp"] = _bp(fav * (fill - sig), sig)
     trig = _f(trigger_price)
     if leg == "exit" and trig and trig > 0:
-        out["trigger_drift_usd"] = round(fav * (fill - trig) * q, 6)
+        out["trigger_drift_usd"] = round(fav * (fill - trig) * q, 6) + 0.0
         out["trigger_drift_bp"] = _bp(fav * (fill - trig), trig)
         if sig:
             out["trigger_overshoot_bp"] = _bp(fav * (trig - sig), sig)
@@ -294,9 +294,9 @@ def aggregate_legs(legs) -> dict:
             out[key] = None
         elif weighted:
             tot = sum(qty)
-            out[key] = round(sum(v * q for v, q in zip(vals, qty)) / tot, 4) if tot > 0 else None
+            out[key] = round(sum(v * q for v, q in zip(vals, qty)) / tot, 4) + 0.0 if tot > 0 else None
         else:
-            out[key] = round(sum(vals), 6)
+            out[key] = round(sum(vals), 6) + 0.0
     out["legs_unmeasured"] = sum(1 for x in legs if _f(x.get("walk_usd")) is None)
     return out
 
