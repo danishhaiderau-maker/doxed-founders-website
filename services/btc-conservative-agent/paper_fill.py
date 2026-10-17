@@ -131,7 +131,8 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
                delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
                cap_px: Optional[float] = None) -> dict:
     """Shared pricer; every result carries an explicit ``evidence_status``: COMPLETE only for a fully filled
-    book-walk (status FILLED, price from the 10-level book). Anything else is never COMPLETE."""
+    book-walk (status FILLED, price from the 10-level book). Anything else is never COMPLETE. NOTE: bot.py
+    ``_paper_result_as_sim`` deliberately re-labels a PARTIAL *entry* COMPLETE (position sized to filled_qty)."""
     out = _paper_fill_core(side, qty, signal_ts, delay_s, book_at, leg=leg, delay_source=delay_source,
                            top_at=top_at, cap_px=cap_px)
     if out.get("status") == "FILLED" and out.get("price_source") == "BFX_BOOK_10L" and out.get("price") is not None:

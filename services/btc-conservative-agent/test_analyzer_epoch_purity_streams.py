@@ -219,6 +219,7 @@ def test_engine_loaders_and_receipt_with_monitor(tmp_path, guard, monkeypatch):
     monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
     monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
     de.write_json_atomic(tmp_path / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    de.write_json_atomic(tmp_path / "fresh_start_epoch.json", {"epoch_ts": START})  # floor == epoch start (missing floor fails closed)
     pd.DataFrame({"trade_id": ["b"], "ts": [de.utc_iso(POST)]}).to_csv(tmp_path / engine.TRADES_FILE, index=False)
     _mixed(tmp_path / "counterfactual.jsonl")
     _mixed(tmp_path / "expired_orders_3factor.csv")
@@ -250,6 +251,7 @@ def test_engine_trade_readers_admit_only_current_epoch(tmp_path, guard, monkeypa
     trades = tmp_path / "trades_3factor.csv"
     monkeypatch.setattr(engine, "TRADES_FILE", str(trades))
     de.write_json_atomic(tmp_path / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    de.write_json_atomic(tmp_path / "fresh_start_epoch.json", {"epoch_ts": START})  # floor == epoch start (missing floor fails closed)
     pd.DataFrame({"trade_id": ["old", "cur", "old2"], "net_pnl_usd": [1.0, 2.0, 3.0],
                   "ts": [de.utc_iso(PRE), de.utc_iso(POST), de.utc_iso(PRE - 5)]}).to_csv(trades, index=False)
 

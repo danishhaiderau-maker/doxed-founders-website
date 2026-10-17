@@ -190,3 +190,36 @@ def test_fly_view_lists_every_known_bitfinex_instance_including_disarmed():
     assert "relayArmedAt' IS NOT NULL\n             OR" not in block
     assert re.search(r"i\.\"exchangeProvider\" = 'bitfinex'\s+AND i\.\"status\"::text IN \('ACTIVE', 'PAUSED'\)", block)
     assert "listed_reason: flyViewListedReason(r)" in block
+
+
+# ---- ever_armed is derived from transitions/history, not relayArmedAt (pause clears it) -------------------------
+
+def test_pause_clears_relay_armed_at_so_it_cannot_be_the_ever_armed_signal():
+    mapper = (ROOT / "apps/api/src/trading-agents/instance-view.mapper.ts").read_text(encoding="utf-8")
+    body = mapper[mapper.index("export function applyInstanceDashboardPatch"):]
+    assert "next.relayArmedAt = null" in body[:600]
+
+
+def test_ever_armed_from_last_transition_pause_history_or_fly_log():
+    k = ["acct-cmq6cfwv"]
+    base = {"account": "acct-cmq6cfwv", "armed": False, "paused": True, "armed_at": None}
+    never = mh.evaluate(k, _web([base], hb=None), T0, {})
+    assert never["ever_armed"] is False
+    # a USER STOPPED/PAUSED record (what the signed PAUSE re-record writes) is not evidence of past arming
+    stopped = dict(base, last_transition={"action": "STOPPED", "actor": "USER"})
+    assert mh.evaluate(k, _web([stopped], hb=None), T0, {})["ever_armed"] is False
+    started = dict(base, last_transition={"action": "STARTED", "actor": "USER"})
+    safety = dict(base, last_transition={"action": "SAFETY_PAUSED", "actor": "SYSTEM"})
+    sys_pause = dict(base, pause_history=[{"actor": "SYSTEM", "code": "EXECUTOR_WATCHDOG_STUCK"}])
+    for acct in (started, safety, sys_pause):
+        assert mh.evaluate(k, _web([acct], hb=None), T0, {})["ever_armed"] is True
+    logged = mh.evaluate(k, _web([base], hb=None), T0, {}, history_armed=mh.ever_armed_from_rows(
+        [{"account": "acct-cmq6cfwv", "action": "OBSERVED_ARMED"}]))
+    assert logged["ever_armed"] is True
+
+
+def test_signed_fetch_runs_before_the_live_control_lock():
+    bot = (HERE / "bot.py").read_text(encoding="utf-8")
+    body = bot[bot.index("def _arm_live_control"):bot.index("def _retired_direct_arm_response")]
+    assert body.index("_mirror_arm_block(") < body.index("with _live_control_lock:")
+    assert body.count("_mirror_arm_block(") == 1

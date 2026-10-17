@@ -26,7 +26,30 @@ def known_accounts_from_rows(rows: Iterable[dict] | None, extra: str = "") -> li
     return sorted(out)
 
 
-def evaluate(known: Iterable[str], web: dict | None, now: float, state: dict) -> dict:
+# Pausing CLEARS relayArmedAt on the website (applyInstanceDashboardPatch), so armed_at alone can never prove an
+# account was armed once. Evidence of a past arming: the website's last_transition (STARTED / SAFETY_PAUSED) or a
+# SYSTEM pause in pause_history, or Fly's own transition log having observed the account ARMED. A plain USER STOPPED /
+# PAUSED transition is NOT evidence (the signed PAUSE re-record of a never-armed account writes exactly that).
+ARMED_EVIDENCE_ACTIONS = frozenset({"ARMED", "OBSERVED_ARMED", "STARTED", "SAFETY_PAUSED"})
+
+
+def ever_armed_from_rows(rows: Iterable[dict] | None) -> list[str]:
+    return sorted({str(r.get("account")) for r in (rows or []) if isinstance(r, dict) and r.get("account")
+                   and str(r.get("action") or "").upper() in ARMED_EVIDENCE_ACTIONS})
+
+
+def _account_ever_armed(a: dict, history_armed: set) -> bool:
+    if a.get("armed") or a.get("armed_at") or str(a.get("account")) in history_armed:
+        return True
+    tr = a.get("last_transition")
+    if isinstance(tr, dict) and str(tr.get("action") or "").upper() in ARMED_EVIDENCE_ACTIONS:
+        return True
+    return any(isinstance(p, dict) and str(p.get("actor") or "").upper() == "SYSTEM"
+               for p in (a.get("pause_history") or []))
+
+
+def evaluate(known: Iterable[str], web: dict | None, now: float, state: dict,
+             history_armed: Iterable[str] = ()) -> dict:
     """``state`` is a caller-owned dict that remembers when the heartbeat first went null."""
     web = web or {}
     known = sorted({str(k) for k in (known or []) if k})
@@ -43,7 +66,8 @@ def evaluate(known: Iterable[str], web: dict | None, now: float, state: dict) ->
     any_armed = any(bool(a.get("armed")) for a in listed_rows)
     # A PAUSED account that was NEVER armed has no executor loop, so a null heartbeat is its normal state: only an
     # account that was armed at some point (armed_at set) is expected to heartbeat while paused.
-    ever_armed = any(bool(a.get("armed")) or bool(a.get("armed_at")) for a in listed_rows)
+    hist = {str(x) for x in (history_armed or ())}
+    ever_armed = any(_account_ever_armed(a, hist) for a in listed_rows)
     if reachable:
         if known and not listed:
             causes.append(ZERO_ACCOUNTS)
