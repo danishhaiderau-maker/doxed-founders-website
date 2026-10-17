@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Optional
 
 SCHEMA = "integrity_gaps.v1"
@@ -51,6 +52,32 @@ def oldest_row_ts(path: str) -> Optional[float]:
 _DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", ".sqlite3", ".db", ".npz", ".pkl")
 
 
+_RETAINED_RE = tuple(re.compile(x) for x in (
+    r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*/.*",
+    r"runtime/live_copy_[^/]+\.json",
+    r"quarantine/v3_completeness_markers/.*",
+))
+_RETAINED_DIR_RE = tuple(re.compile(x) for x in (
+    r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*",
+    r"quarantine/v3_completeness_markers",
+))
+
+
+def retained_by_design(rel: str) -> bool:
+    """HM post-wipe 18 Oct: runtime state kept by design, never an old-data offender in G16.
+
+    Anchored fullmatch on the path relative to the scan root: v3 emergency/owner/recovery receipts, runtime
+    live_copy_*.json and quarantine/v3_completeness_markers/. A parent directory name or a basename elsewhere
+    never exempts a path. The pinned keep_manifest (and its hash) is deliberately NOT changed."""
+    rel = rel.replace("\\", "/").lstrip("/")
+    return any(r.fullmatch(rel) for r in _RETAINED_RE)
+
+
+def retained_dir_by_design(rel_dir: str) -> bool:
+    rel_dir = rel_dir.replace("\\", "/").strip("/")
+    return any(r.fullmatch(rel_dir) for r in _RETAINED_DIR_RE)
+
+
 def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
     """G16 Fly side: oldest-data ts of every data file under root (recursive, no file cap).
 
@@ -68,7 +95,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
         rel_d = "" if rel_d == "." else rel_d
         for sub in list(dirs):
             rd = f"{rel_d}/{sub}" if rel_d else sub
-            if km.kept_dir(rd, keep):
+            if km.kept_dir(rd, keep) or retained_dir_by_design(rd):
                 kept_dirs.append(rd)
                 dirs.remove(sub)
         for n in names:
@@ -86,7 +113,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
                     ts = os.path.getmtime(path)
                 except OSError:
                     continue
-            (kept if km.is_kept(rel, keep) else files)[rel] = ts
+            (kept if (km.is_kept(rel, keep) or retained_by_design(rel)) else files)[rel] = ts
         if not complete:
             break
     return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}

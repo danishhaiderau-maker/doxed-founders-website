@@ -408,3 +408,32 @@ def test_workflow_failure_text_distinguishes_started_from_not_started():
 def test_worker_dies_with_parent_hook_is_installed():
     assert job._die_with_parent.__doc__ and "PR_SET_PDEATHSIG" in job._die_with_parent.__doc__
     assert "preexec_fn=_die_with_parent" in Path(job.__file__).read_text()
+
+
+def test_receipt_summary_is_read_only_and_bounded(tmp_path):
+    import json as _json
+    d = tmp_path / "research_reset_receipts" / "abc"
+    d.mkdir(parents=True)
+    (d / "r.json").write_text(_json.dumps({"mode": "x", "files": [1, 2, 3], "n": 5}))
+    (tmp_path / "full-reset-receipts" / "tok").mkdir(parents=True)
+    (tmp_path / "full-reset-receipts" / "tok" / "i.txt").write_text("hi")
+    out = job.read_receipt_summary(tmp_path)
+    dirs = {x["dir"]: x for x in out["directories"]}
+    assert dirs["research_reset_receipts/abc"]["files"][0]["shape"] == {"mode": "x", "files": "list[3]", "n": 5}
+    assert dirs["full-reset-receipts/tok"]["bytes_listed"] == 2
+    assert job.read_receipt_summary(tmp_path / "missing")["directories"] == []
+
+
+def test_receipt_summary_masks_truncates_and_is_lazy(tmp_path):
+    import json as _json
+    d = tmp_path / "research_reset_receipts" / "abc"
+    d.mkdir(parents=True)
+    (d / "r.json").write_text(_json.dumps({"confirm_token": "DELETE-X", "api_key": "k", "note": "x" * 500, "n": 1}))
+    for i in range(210):
+        (d / f"f{i}.txt").write_text("x")
+    out = job.read_receipt_summary(tmp_path)
+    entry = out["directories"][0]
+    assert entry["files_listed"] == 200 and entry["truncated"] is True
+    shape = next(f["shape"] for f in entry["files"] if f["file"].endswith("r.json"))
+    assert shape["confirm_token"] == "<masked>" and shape["api_key"] == "<masked>"
+    assert len(shape["note"]) == 200 and shape["n"] == 1

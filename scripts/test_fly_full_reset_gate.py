@@ -48,15 +48,19 @@ def test_leftover_gate_allows_only_small_delete_class_leftovers():
     assert gate.leftover_failures({}, 200, 64 << 20)  # an empty or foreign document is not proof
 
 
+OK = {"canonical_epoch": {"aliases": {"collector_v22_epoch_id": "epoch-x", "fresh_epoch_id": None}}}
+
+
 def test_dv_gate_needs_a_stamped_row_matching_the_epoch_and_a_fresh_epoch_id():
     fs = {"set": True, "epoch_ts": 1792000000.4}
     row = json.dumps({"s": 1, "b": [], "a": [], "dv": "fse-1792000000"})
-    assert gate.dv_failures(row, {"fresh_epoch_id": "epoch-x"}, fs) == []
-    assert gate.dv_failures(json.dumps({"s": 1}), {"fresh_epoch_id": "epoch-x"}, fs)  # no dv
-    assert gate.dv_failures(row.replace("0000", "9999"), {"fresh_epoch_id": "epoch-x"}, fs)  # wrong epoch
-    assert gate.dv_failures(row, {}, fs)  # fresh_epoch_id not set
-    assert gate.dv_failures(row, {"fresh_epoch_id": "e"}, {"set": False})  # epoch not stamped
-    assert gate.dv_failures("", {"fresh_epoch_id": "e"}, fs) and gate.dv_failures("not json", {"fresh_epoch_id": "e"}, fs)
+    assert gate.dv_failures(row, OK, fs) == []
+    assert gate.dv_failures(json.dumps({"s": 1}), OK, fs)  # no dv
+    assert gate.dv_failures(row.replace("0000", "9999"), OK, fs)  # wrong epoch
+    assert gate.dv_failures(row, {}, fs)  # no bound epoch alias
+    assert gate.dv_failures(row, {"canonical_epoch": {"aliases": {"collector_v22_epoch_id": None, "fresh_epoch_id": None}}}, fs)
+    assert gate.dv_failures(row, OK, {"set": False})  # epoch not stamped
+    assert gate.dv_failures("", OK, fs) and gate.dv_failures("not json", OK, fs)
 
 
 def _audit(**kw):

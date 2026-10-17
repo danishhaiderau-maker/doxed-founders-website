@@ -141,7 +141,7 @@ def leftover_failures(plan: dict, max_files: int, max_bytes: int) -> list[str]:
     return bad
 
 
-def dv_failures(row_text: str, health: dict, fresh_start: dict) -> list[str]:
+def dv_failures(row_text: str, status: dict, fresh_start: dict) -> list[str]:
     bad = []
     try:
         row = json.loads((row_text or "").strip().splitlines()[-1])
@@ -158,8 +158,16 @@ def dv_failures(row_text: str, health: dict, fresh_start: dict) -> list[str]:
         bad.append("book row has no dv stamp")
     elif want and row.get("dv") != want:
         bad.append(f"book row dv={row.get('dv')!r} != {want!r}")
-    if not (health or {}).get("fresh_epoch_id"):
-        bad.append("/health fresh_epoch_id is not set")
+    # LIMITATION: the bound collection epoch id is minted by the reset publish, not derived from the stamped
+    # fresh-start epoch_ts, so the two cannot be cross-checked arithmetically. Presence of a bound id plus the
+    # dv == fse-<epoch_ts> match on a post-restart book row is the proof; the dv check is what ties rows to the stamp.
+    # /health never carries fresh_epoch_id; the bound collection epoch is published on /api/status
+    # (canonical_epoch.aliases.collector_v22_epoch_id). fresh_epoch_id stays None unless Fresh Collection
+    # mode is on, and canonical_epoch_id is the DATA_EPOCH_ID env value, so neither can gate the verify.
+    aliases = (((status or {}).get("canonical_epoch") or {}).get("aliases") or {})
+    if not ((status or {}).get("collection_epoch_id") or aliases.get("collector_v22_epoch_id")
+            or aliases.get("fresh_epoch_id")):
+        bad.append("/api/status canonical_epoch.aliases has no bound collection epoch id")
     return bad
 
 
@@ -244,11 +252,11 @@ def cmd_check_leftovers(args) -> int:
 
 
 def cmd_assert_dv(args) -> int:
-    bad = dv_failures(sys.stdin.read(), _get("/health?fresh=1", admin=False), _get("/api/monitor/fresh-start"))
+    bad = dv_failures(sys.stdin.read(), _get("/api/status?fresh=1"), _get("/api/monitor/fresh-start"))
     if bad:
         print("dv check not satisfied: " + "; ".join(bad), file=sys.stderr)
         return 1
-    print("post-restart book row carries dv and fresh_epoch_id is set")
+    print("post-restart book row carries dv and a bound collection epoch id is published")
     return 0
 
 
