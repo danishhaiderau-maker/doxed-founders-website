@@ -579,3 +579,4 @@ test_relay_snapshot_lock_scope.py
 test_tile_integrity.py
 test_archive_receipt_v2.py
 test_research_reset_large_layout.py
+test_full_reset_job.py

@@ -117,3 +117,16 @@ Fix (hard caps, not unlimited):
   (not a background job); fail-closed semantics unchanged.
 - Tests: `test_research_reset_large_layout.py` (410k-entry layout: old budget refuses,
   new default plans/executes, mid-run abort + resume, re-run idempotency).
+
+## Background reset job (replaces the single blocking `/api/wipe_fly_only` call)
+
+Why: the 18 Oct 02:38 AEDT execute held one HTTP request for 7.5 min (hashing 18.7 GB of 27,230 targets in ALL_SCOPES_PREFLIGHT), then returned 502 and the bot froze. Nothing was deleted (no ACTIVE_RESET, no operation.json).
+
+How it works now:
+- `POST /api/wipe_fly_only {"background": true, "freeze_override": {...}}` refuses if LIVE is armed or a job is running, otherwise starts a job thread and returns `202 {operation_id}` immediately. The existing guards still apply inside the job (paused, flat, disarmed, paper-only, exclusive barriers, freeze override).
+- The heavy bot-independent calls (`execute_research_reset` preflight/payload/physical-scope stages and target sampling) run in a SEPARATE process (`full_reset_job.py worker`, nice 19, ionice idle). The job thread only waits on it. Nothing in the pinned deleter changed and no pass was removed: each is a safety gate or the deleter's own pre-unlink revalidation.
+- Heartbeat guard: the bot publishes `runtime/full-reset-receipts/_job/heartbeat.json` every second; the worker reads it every 2048 scanned entries and every target. If the bot heartbeat age exceeds 5 s the worker sleeps (throttles); if it stays high for 30 s the worker aborts fail-closed (`HeartbeatAbort`, resumable: rerun the workflow). The reset holds the exclusive research/epoch barriers for its whole duration, so a persistently stalled bot loop will abort the job rather than delay it indefinitely.
+- Status: `GET /api/monitor/full-reset` (admin/monitor auth, file-backed, never blocks on the job) returns state, stage, outcome, blockers, started/updated, `progress` (phase, completed/total targets, fingerprinted bytes, scanned entries, throttled seconds, heartbeat age) and `alert` (RED on failed/interrupted job or when running while LIVE ARMED). A RUNNING status not updated for 10 min is reported as `INTERRUPTED`.
+- Resume/idempotent: a killed worker or bot restart leaves the intent/operation receipts and no completion; re-running the workflow resumes via `ACTIVE_RESET.json`/`operation.json` (existing `_fresh_research_reset_resume`) or starts clean. The job never resumes the DEPLOY_MAINTENANCE pause.
+- Workflow: the in-process step starts the job and polls every 30 s (hard cap 130 min, step cap 140 min); retryable pre-mutation codes restart the job up to 7 times; any failure ends the job red ("the file wipe was NOT started"), the always-run restart + safety net keep the bot paused.
+- Tests: `test_full_reset_job.py` (410k-entry isolated scan keeps the in-process ticker unstarved, guard throttle/abort, mid-run kill + rerun, isolated results equal direct, status view, wiring, workflow poll step).

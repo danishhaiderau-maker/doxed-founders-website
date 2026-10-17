@@ -1109,41 +1109,77 @@ jobs:
       - name: In-process guarded reset (V3 ledgers, v22 seals, research payloads) with the freeze override
         id: inproc
         if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        # Background job: POST starts a separate low-priority worker process and returns an operation id; this step
+        # polls GET /api/monitor/full-reset (file-backed, never blocks on the job) with a hard overall timeout.
+        # Failure or timeout leaves the bot PAUSED (the always-run restart and safety-net steps keep it so).
+        timeout-minutes: 140
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           REASON: ${{ inputs.full_reset_reason }}
         run: |
           python - <<'PY'
           import json, os, time, urllib.error, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          token = os.environ["BOT_ADMIN_TOKEN"]
           retryable = {"fresh_collection_state_lock_timeout", "fresh_collection_trade_lock_timeout",
                        "fresh_collection_sync_scheduler_busy", "fresh_collection_sync_builder_active",
                        "fresh_collection_cleanup_lease_busy", "fresh_collection_epoch_writer_busy",
                        "fresh_collection_research_writer_busy"}
-          body = json.dumps({"freeze_override": {"confirmation": "BREAK_21_DAY_RESEARCH_FREEZE",
+          body = json.dumps({"background": True,
+                             "freeze_override": {"confirmation": "BREAK_21_DAY_RESEARCH_FREEZE",
                                                  "reason": os.environ["REASON"].strip()}}).encode()
-          def attempt():
-              request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=body, method="POST",
-                                               headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
+          def call(path, data=None, timeout=60):
+              request = urllib.request.Request(base + path, data=data, method="POST" if data is not None else "GET",
+                                               headers={"X-Bot-Admin-Token": token, "Content-Type": "application/json"})
               try:
-                  with urllib.request.urlopen(request, timeout=1800) as response:
-                      return json.load(response)
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      return json.load(response) | {"http_status": response.status}
               except urllib.error.HTTPError as exc:
                   try:
                       return json.loads(exc.read() or b"{}") | {"http_status": exc.code}
                   except ValueError:
                       return {"status": "error", "http_status": exc.code}
-          for number in range(1, 9):
-              result = attempt()
-              reset = result.get("reset") or {}
-              print(json.dumps({"attempt": number, "http_status": result.get("http_status", 200), "status": result.get("status"),
-                                "reset_ok": reset.get("ok"), "error": reset.get("error"), "failed_stage": reset.get("failed_stage"),
-                                "wipe_aborted": reset.get("wipe_aborted"), "operation_receipt": reset.get("operation_receipt")}, sort_keys=True), flush=True)
-              if result.get("status") == "ok":
-                  raise SystemExit(0)
-              if not (reset.get("wipe_aborted") is True and reset.get("error") in retryable and not reset.get("operation_receipt")):
-                  raise SystemExit("in-process guarded reset refused or failed: the file wipe was NOT started")
+          deadline = time.time() + 130 * 60
+          started = call("/api/wipe_fly_only", body)
+          print(json.dumps({"start": {k: started.get(k) for k in ("status", "http_status", "operation_id", "message")}}, sort_keys=True), flush=True)
+          if started.get("http_status") not in (202, 409) or not started.get("operation_id"):
+              raise SystemExit("in-process guarded reset refused or failed to start: the file wipe was NOT started")
+          operation_id = started["operation_id"]
+          errors = 0
+          last = None
+          restarts = 0
+          while time.time() < deadline:
               time.sleep(30)
-          raise SystemExit("in-process guarded reset still refused after bounded retries: the file wipe was NOT started")
+              try:
+                  view = call("/api/monitor/full-reset", timeout=45)
+              except Exception as exc:
+                  view = {"http_status": 0, "error": type(exc).__name__}
+              if view.get("http_status") != 200 or view.get("operation_id") != operation_id:
+                  errors += 1
+                  print(json.dumps({"poll_error": errors, "http_status": view.get("http_status")}), flush=True)
+                  if errors >= 60:
+                      raise SystemExit("reset job status unavailable for too long: the file wipe was NOT started")
+                  continue
+              errors = 0
+              progress = view.get("progress") or {}
+              line = {"state": view.get("state"), "stage": view.get("stage"), "outcome": view.get("outcome"),
+                      "phase": progress.get("phase"), "done": progress.get("completed_targets"),
+                      "total": progress.get("total_targets"), "bytes": progress.get("fingerprinted_bytes"),
+                      "throttled": progress.get("throttled"), "alert": view.get("alert")}
+              if line != last:
+                  print(json.dumps(line, sort_keys=True), flush=True)
+                  last = line
+              if view.get("state") == "DONE" and view.get("outcome") == "COMPLETE":
+                  raise SystemExit(0)
+              if view.get("state") == "FAILED":
+                  if view.get("outcome") in retryable and restarts < 7:
+                      restarts += 1
+                      again = call("/api/wipe_fly_only", body)
+                      if again.get("http_status") == 202 and again.get("operation_id"):
+                          operation_id = again["operation_id"]
+                          continue
+                  raise SystemExit("in-process guarded reset failed (" + str(view.get("outcome")) + "): the file wipe was NOT started")
+          raise SystemExit("in-process guarded reset exceeded the hard timeout: the file wipe was NOT started")
           PY
 
       - name: Stamp the fresh-start epoch (rows written from now on carry the data version)

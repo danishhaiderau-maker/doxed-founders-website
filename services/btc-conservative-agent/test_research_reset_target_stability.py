@@ -65,7 +65,7 @@ def test_reset_samples_before_and_after_preflight_and_before_reset_pointer():
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "_perform_fresh_collection_reset_quiesced")
     source = ast.get_source_segment(Path(__file__).with_name("bot.py").read_text(encoding="utf-8-sig"), fn)
-    first = source.index("stability_sample = sample_targets(")
+    first = source.index("stability_sample = full_reset_job.heavy_sample(")
     preflight = source.index("validate_only=True")
     second = source.index("assert_targets_stable(")
     pointer = source.index('"ACTIVE_RESET.json"')
