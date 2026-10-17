@@ -209,3 +209,44 @@ def test_exit_leg_price_is_the_filled_price_not_the_trigger():
                                           "remaining_fraction": 0.5, "realized_gross_usd": 0.01}]}
     leg = monitor_tiles._legs(partial)[0]
     assert leg["price"] == 81600.0 and leg["trigger_price"] == 81595.0
+
+
+def _result_as_sim():
+    tree = ast.parse(BOT)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_paper_result_as_sim")
+    ns = {}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
+    return ns["_paper_result_as_sim"]
+
+
+def test_partial_entry_is_deliberately_complete_and_no_fill_is_unknown():
+    fn = _result_as_sim()
+    book = _book()
+    partial = fn(paper_fill.paper_fill("LONG", 50.0, 1000.0, 1.0, book))
+    assert partial["partial_fill"] is True and partial["evidence_status"] == "COMPLETE"  # position sized to filled_qty
+    full = fn(paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, book))
+    assert full["fully_filled"] is True and full["evidence_status"] == "COMPLETE"
+    nofill = fn(paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, lambda t: None))
+    assert nofill["evidence_status"] == "UNKNOWN"
+    rec = research_v3_bridge._paper_fill_execution_receipt(
+        {"fill_sim": nofill, "filled_qty": 0.0, "qty": 0.5}, {"qty": 0.5}, {})
+    assert rec["conservative_fill_supported"] is False
+
+
+def test_multi_leg_row_tp1_plus_terminal_is_strict_fresh_with_filled_leg_prices():
+    row = good_row(
+        partial_exit_receipts=[
+            {"closed_qty": 0.0001, "price": 81600.0, "leg_trigger_price": 81595.0, "remaining_fraction": 0.5,
+             "realized_gross_usd": 0.01, "leg_priced_by": "paper_fill_book10l", "leg_fresh_eligible": True,
+             "leg_fallback": None, "reason": "TP1"},
+            {"closed_qty": 0.0001, "price": 81691.0, "remaining_fraction": 0.0, "realized_gross_usd": None,
+             "reason": "PATH_END_60M"}],
+        exit_price=81650.0, exit_fill_sim={"status": "FILLED", "price": 81697.0, "fill_model": MODEL,
+                                           "evidence_status": "COMPLETE"})
+    assert paper_fill.row_fresh_strict(row) is True
+    legs = monitor_tiles._legs(row)
+    assert [leg["price"] for leg in legs] == [81600.0, 81697.0]  # partial: its fill; terminal: filled, not trigger
+    assert [leg["trigger_price"] for leg in legs] == [81595.0, 81691.0]
+    bad = dict(row, partial_exit_receipts=[dict(row["partial_exit_receipts"][0], leg_priced_by=None),
+                                           row["partial_exit_receipts"][1]])
+    assert paper_fill.row_fresh_strict(bad) is False  # one unpriced TP1 leg poisons the whole row
