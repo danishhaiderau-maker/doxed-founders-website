@@ -33656,7 +33656,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
-    "/api/monitor/reconcile",
+    "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -47739,6 +47739,20 @@ def monitor_reconcile():
         by_lane = _monitor_tiles_rows(scope, ("closed",))
         short = _monitor_tile_short_names()
         return _mr.build(by_lane, short, _load_archive_receipt(), _monitor_tiles_common(now))
+    return _monitor_tiles_guard(build, 800_000)
+
+
+@app.route('/api/monitor/fill-provenance', methods=["GET"])
+def monitor_fill_provenance():
+    """How closed rows were priced, per tile (pricing blocks + paper IOC shadow file). Read-only, monitor-read auth."""
+    import monitor_fill_provenance as _mfp
+
+    def build(now):
+        scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(), "since": None,
+                 "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": True}
+        by_lane = _monitor_tiles_rows(scope, ("closed",))
+        shadow = _read_jsonl_tail(PAPER_IOC_NO_FILL_SHADOW_FILE, 2 * 1024 * 1024)
+        return _mfp.build(by_lane, _monitor_tile_short_names(), shadow, _fresh_start_epoch(), _monitor_tiles_common(now))
     return _monitor_tiles_guard(build, 800_000)
 
 

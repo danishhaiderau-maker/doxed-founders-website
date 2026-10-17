@@ -989,6 +989,7 @@ def ledger_pricing_block(r: Mapping[str, Any]) -> dict:
     (paper_fill.row_fresh_strict): book-priced model v1, a filled exit, not FORCED_NO_BOOK/excluded. Older rows
     (TAKER_AT_BOOK_TOUCH, no version) stay visible but fresh_eligible=false."""
     block = {k: r.get(k) for k in _LEDGER_PRICING_KEYS}
+    block["exit_depth_snapshot_fill"] = r.get("exit_depth_snapshot_fill") or r.get("exit_fill_book")
     block["fresh_eligible"] = bool(paper_fill.row_fresh_strict(dict(r)))
     block["legacy_pricing"] = not block["fresh_eligible"] and not r.get("fresh_data_excluded")
     return block

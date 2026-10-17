@@ -521,3 +521,55 @@ def test_state_trade_projections_carry_the_entry_pricing_receipt(bot):
         assert projected["delay_source"] == "default_until_n10"
     pub = bot._sanitize_public_state({"trades": [bot._slim_trade_for_dashboard(row)]})["trades"][0]
     assert pub["fill_model_version"] == 1 and pub["delay_s"] == 1.5 and "research_lane" not in pub
+
+
+# ---- tile-integrity in the monitor allowlist; /api/monitor/fill-provenance --------------------------------------
+def test_tile_integrity_is_readable_with_the_monitor_bearer(bot):
+    client = bot.app.test_client()
+    path = "/api/monitor/tile-integrity"
+    assert client.get(path, environ_base=REMOTE).status_code == 401
+    assert client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE).status_code == 200
+    assert client.get(path, headers={"X-Bot-Admin-Token": ADMIN}, environ_base=REMOTE).status_code == 200
+    assert client.post(path, headers={"X-Bot-Admin-Token": ADMIN}, environ_base=REMOTE).status_code == 405
+    assert path in bot._MONITOR_TILE_PATHS and path not in bot._READ_ONLY_GET_PATHS
+
+
+def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_coverage(bot, monkeypatch):
+    book = {"s": 1, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}
+    v1 = {"fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
+          "delay_source": "default_until_n10", "exit_status": "PAPER_FILL", "fresh_eligible": True,
+          "depth_snapshot_signal": book, "depth_snapshot_fill": book, "exit_depth_snapshot_fill": book}
+    rows = [
+        _closed("p-ok", GS1, close_ts=CUTOFF + 100, bp=1.0, net=0.01, **v1),
+        _closed("p-nosnap", GS1, close_ts=CUTOFF + 110, bp=1.0, net=0.01, **{**v1, "exit_depth_snapshot_fill": None}),
+        _closed("p-forced", GS1, close_ts=CUTOFF + 120, bp=-1.0, net=-0.01,
+                **{**v1, "exit_status": "FORCED_NO_BOOK", "fresh_eligible": False, "fresh_data_excluded": True,
+                   "exit_depth_snapshot_fill": None}),
+        _closed("p-legacy", GS1, close_ts=CUTOFF + 130, bp=1.0, net=0.01, fill_model="AI_DIRECT"),
+    ]
+    monkeypatch.setattr(bot, "trades", rows)
+    monkeypatch.setattr(bot, "_fresh_start_epoch", lambda: {"epoch_ts": CUTOFF})
+    shadow = [{"event": "PAPER_SHADOW_NO_FILL", "research_lane": GS1, "status": "NO_FILL_IOC_CAP", "ts": CUTOFF + 5},
+              {"event": "PAPER_SHADOW_NO_FILL", "research_lane": GS1, "status": "REJECT_NO_BOOK", "ts": CUTOFF + 6},
+              {"event": "PAPER_SHADOW_NO_FILL", "research_lane": GS1, "status": "REJECT_NO_BOOK", "ts": CUTOFF - 99}]
+    monkeypatch.setattr(bot, "_read_jsonl_tail", lambda path, n: list(shadow))
+    path = "/api/monitor/fill-provenance"
+    client = bot.app.test_client()
+    assert client.get(path, environ_base=REMOTE).status_code == 401
+    assert client.post(path, headers={"X-Bot-Admin-Token": ADMIN}, environ_base=REMOTE).status_code == 405
+    r = client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE)
+    assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+    body = r.get_json()
+    assert body["schema"] == "monitor_fill_provenance_v1" and body["read_only"] is True
+    assert body["epoch"]["fresh_epoch_ts"] == CUTOFF and body["epoch"]["fresh_epoch_stamped"] is True
+    t = {x["lane"]: x for x in body["per_tile"]}[GS1]
+    assert t["closed"] == 4 and t["fresh_eligible"] == 2 and t["not_fresh"] == 2
+    assert t["legacy_rows"] == 1 and t["v1_rows"] == 3
+    assert t["fill_model_counts"]["BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"] == 3 and t["fill_model_counts"]["AI_DIRECT"] == 1
+    assert t["fill_model_version_counts"] == {"1": 3, "none": 1} and t["delay_source_counts"]["default_until_n10"] == 3
+    assert t["forced_counts"] == {"FORCED_NO_BOOK": 1}
+    assert t["shadow"]["no_fill"] == 1 and t["shadow"]["reject"] == 1  # the pre-epoch reject is not counted
+    assert t["snapshot_coverage"] == {"entry_signal": 3, "entry_fill": 3, "exit_fill": 1, "of_v1_rows": 3,
+                                      "legs_without_snapshot": 2}
+    assert {m["trade_id"] for m in t["rows_with_missing_snapshots"]} == {"p-nosnap", "p-forced"}
+    assert "depth_snapshot_signal" not in json.dumps(body)  # no raw books on this route
