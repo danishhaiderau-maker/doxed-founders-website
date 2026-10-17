@@ -43,3 +43,12 @@ def test_missing_exchange_map_raises_so_the_cli_prints_err(tmp_path, capsys):
     a.write_text("{}"); b.write_text(json.dumps(health()))
     assert v.main(["x", str(a), str(b)]) == 0
     assert capsys.readouterr().out.strip() == "ERR ERR"
+
+
+def test_missing_or_null_hire_active_paused_armed_each_block():
+    for key in ("hire_active", "paused", "armed"):
+        row_missing = {"account": "acct-b", "hire_active": False, "paused": True, "armed": False}
+        del row_missing[key]
+        h_missing = {"website": {"accounts": [row_missing]}}
+        assert v.verdict(life(EXPIRED), h_missing) == (1, 0), key
+        assert v.verdict(life(EXPIRED), health(**{key: None})) == (1, 0), key
