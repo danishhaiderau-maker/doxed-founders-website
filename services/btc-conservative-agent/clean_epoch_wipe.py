@@ -583,7 +583,19 @@ def main(argv=None) -> int:
     ap.add_argument("--pre-start", action="store_true",
                     help="plan/execute everything existing now while the bot is held down (no certification)")
     ap.add_argument("--health-url", help="pre-start hold check (default per scope)")
+    ap.add_argument("--full-reset-no-archive", action="store_true",
+                    help="delete everything collected since the fresh start, NO archive (full_reset_no_archive.py); fly scope")
+    ap.add_argument("--expect-git-rev", default="", help="full reset: the one guarded deploy's git rev (12+ hex)")
+    ap.add_argument("--reason", default="", help="full reset: written reason (>= 10 chars), recorded in the receipt")
+    ap.add_argument("--freeze-override-confirmation", default="",
+                    help="full reset: BREAK_21_DAY_RESEARCH_FREEZE (this reset only)")
+    ap.add_argument("--freeze-override-reason", default="", help="full reset: freeze override reason (>= 10 chars)")
     args = ap.parse_args(argv)
+    if args.full_reset_no_archive:
+        if args.pre_start or args.simulate_now or args.fly_files_json or args.epoch:
+            ap.error("--full-reset-no-archive cannot be combined with --pre-start/--simulate-now/--fly-files-json/--epoch")
+        import full_reset_no_archive as _frna  # noqa: PLC0415 - lazy: no import-time side effects anywhere
+        return _frna.run_cli(args)
     if args.pre_start and (args.simulate_now or args.fly_files_json):
         ap.error("--pre-start plans the live tree; it cannot be combined with previews")
     if args.scope == "laptop" and not args.manifest and not args.simulate_now and not args.pre_start:

@@ -22945,6 +22945,12 @@ def log_trade(trade):
                 return
         if "conf" in trade:
             trade.pop("conf", None)
+        if not trade.get("data_version"):
+            # D8: which fresh-start epoch this closed row belongs to (None until an epoch is stamped).
+            import data_version as _data_version
+            _dv = _data_version.id_from_epoch(_fresh_start_epoch())
+            if _dv:
+                trade["data_version"] = _dv
         dynamic_csv_writer(CSV_TRADES, trade)
         logger.info(f"[CSV] Trade logged trade_id={trade.get('trade_id')} exit={trade.get('exit_reason')} ai_source={trade.get('ai_source')} final_direction={trade.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:

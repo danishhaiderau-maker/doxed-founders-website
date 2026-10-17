@@ -45,7 +45,8 @@ def test_read_only_fly_inspection_cannot_hang_the_entire_job():
 
 def test_inspection_mode_remains_read_only():
     source = WORKFLOW.read_text(encoding="utf-8")
-    section = source.split("jobs:", 1)[1].split("  restart-only:", 1)[0]
+    # The full-reset job is an explicit mutation job (guarded, owner-approved) and is not inspection.
+    section = source.split("jobs:", 1)[1].split("  restart-only:", 1)[0].split("  full-reset-no-archive:", 1)[0]
 
     for mutation in (
         "flyctl deploy", "machines restart", "machine restart",

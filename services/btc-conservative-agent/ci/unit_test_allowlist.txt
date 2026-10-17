@@ -218,6 +218,8 @@ test_fresh_collection_quiescence.py
 test_fresh_collection_reset_retry.py
 test_fresh_collection_toggle.py
 test_fresh_start_epoch.py
+test_full_reset_empty_state.py
+test_full_reset_no_archive.py
 test_future_path_attempt_integration.py
 test_future_path_attempt_receipt.py
 test_future_path_blocked_append_observation.py
