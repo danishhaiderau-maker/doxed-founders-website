@@ -317,6 +317,14 @@ LAZY_LOG_FILES = (
 
 
 def file_mtimes(data_dir, now: float) -> dict:
+    """Never raises: an observability add-on must not take /streams/health down ({} on any failure)."""
+    try:
+        return _file_mtimes(data_dir, now)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _file_mtimes(data_dir, now: float) -> dict:
     out = {}
     base = Path(data_dir)
     for rel in LAZY_LOG_FILES:
