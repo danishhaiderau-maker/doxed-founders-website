@@ -271,16 +271,27 @@ def tile_switches(tiles: Iterable[Mapping], build_text: str = "") -> dict:
             "build_features": build_text, "alerts": alerts, "level": RED if alerts else GREEN}
 
 
-def build_features_text(tiles: Iterable[Mapping]) -> str:
-    """Current-state build text derived from the one switch source (replaces the stale prose)."""
+def build_features_text(tiles: Iterable[Mapping], live_state: Optional[Mapping] = None) -> str:
+    """Current-state build text derived from the one switch source (replaces the stale prose).
+
+    ``live_orders_on`` on a tile row means live-ELIGIBLE (the switch), not that live is armed, so the text says
+    "live-eligible" and states the real arming separately (live_state = live_flags_snapshot()):
+    effective_live false -> DISARMED, true -> ARMED, missing -> state unknown. Never "live copy ON" for a switch."""
     tiles = [t for t in tiles or () if not t.get("retired")]
     paper = [t for t in tiles if t.get("paper_on")]
     live = [t for t in tiles if t.get("live_orders_on")]
     def names(rows):
         return ", ".join(f"T{t.get('number')} {t.get('label')}" for t in rows) or "none"
+    eff = (live_state or {}).get("effective_live") if isinstance(live_state, Mapping) else None
+    if eff is True:
+        arming = "live copy ARMED"
+    elif eff is False:
+        arming = "live copy DISARMED" + (" (force_paper)" if (live_state or {}).get("force_paper_mode") else "")
+    else:
+        arming = "live arming state unknown"
     return (f"{len(tiles)} registered tiles; paper ON: {len(paper)} ({names(paper)}); "
-            f"live copy ON: {len(live)} ({names(live)}). Derived at request time from the tile switch "
-            f"source (/api/monitor/tiles/switches); retired tiles are excluded.")
+            f"live-eligible switch ON: {len(live)} ({names(live)}); {arming}. Derived at request time from the "
+            f"tile switch source (/api/monitor/tiles/switches); retired tiles are excluded.")
 
 
 # ----------------------------------------------------------------------------

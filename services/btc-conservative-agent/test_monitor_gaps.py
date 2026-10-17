@@ -98,7 +98,15 @@ def test_tile_switch_disagreements_and_build_text():
     out = mg.tile_switches(tiles)
     assert out["level"] == "RED" and "R:RETIRED_STILL_EVALUATED" in out["alerts"]
     text = mg.build_features_text(tiles)
-    assert "live copy ON: 1 (T3 GS-01)" in text and "ROUTER" not in text and "eight" not in text
+    assert "live-eligible switch ON: 1 (T3 GS-01)" in text and "ROUTER" not in text and "eight" not in text
+    assert "live arming state unknown" in text and "live copy ON" not in text
+    off = mg.build_features_text(tiles, {"effective_live": False, "force_paper_mode": True})
+    assert "live copy DISARMED (force_paper)" in off and "live copy ON" not in off
+    assert "live copy ARMED" in mg.build_features_text(tiles, {"effective_live": True})
+    # T6/T7 style rows: paper OFF but live-eligible switch ON must read as eligibility, never as live ON
+    t67 = [{"lane": "D", "number": 6, "label": "DISLOC", "retired": False, "paper_on": False, "live_orders_on": True}]
+    msg = mg.build_features_text(t67, {"effective_live": False})
+    assert "paper ON: 0 (none)" in msg and "live-eligible switch ON: 1 (T6 DISLOC)" in msg and "DISARMED" in msg
 
 
 def test_config_redacts_secrets_and_url_credentials():

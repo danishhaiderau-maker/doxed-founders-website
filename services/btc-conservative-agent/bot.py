@@ -48268,7 +48268,12 @@ def monitor_tile_switch_rows() -> list:
 
 def current_build_features_text() -> str:
     try:
-        return _monitor_gaps.build_features_text(monitor_tile_switch_rows())
+        try:
+            import live_copy_monitor_api as _lcm_api
+            live_state = _lcm_api.live_flags_snapshot()
+        except Exception:  # noqa: BLE001 - arming unknown is reported as unknown, never guessed
+            live_state = None
+        return _monitor_gaps.build_features_text(monitor_tile_switch_rows(), live_state)
     except Exception as exc:
         return f"unavailable ({type(exc).__name__})"
 
