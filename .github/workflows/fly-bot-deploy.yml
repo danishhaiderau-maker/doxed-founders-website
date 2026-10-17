@@ -2424,7 +2424,7 @@ jobs:
           python test_api_resume_deadlock.py
           python -m pytest test_collection_epoch_binding.py -q
           python -m pytest test_score_led_fill_revalidation.py -q
-          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py ../../scripts/test_fly_full_reset_gate.py -q
+          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py ../../scripts/test_fly_full_reset_gate.py ../../scripts/test_live_flat_verify.py -q
           python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py test_ai_call_deadline.py test_analyzer_ai_served_model_cohort.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
           python -m pytest test_research_segment_sync_epoch.py test_clean_epoch_wipe.py test_full_reset_no_archive.py test_full_reset_empty_state.py -q

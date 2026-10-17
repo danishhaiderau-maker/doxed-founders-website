@@ -25,12 +25,10 @@ print(",".join(p) or "-", ",".join(o) or "-")')"
 done
 deadline=$(( $(date +%s) + VERIFY_S ))
 while :; do
-  live="$(api "$B/api/monitor/live/lifecycle" | python3 -c '
-import json,sys; d=json.load(sys.stdin); bad=0; stale=0
-for ex in (d.get("exchange") or {}).values():
-    if not ex.get("ok") or ex.get("flat") is not True or ex.get("open_orders") or ex.get("positions") or ex.get("orphans"): bad+=1
-    elif (ex.get("read_age_s") or 999) > 90: stale+=1
-print(bad, stale)' 2>/dev/null || echo ERR ERR)"
+  api "$B/api/monitor/live/lifecycle" >/tmp/live-lifecycle.json 2>/dev/null || echo '{}' >/tmp/live-lifecycle.json
+  api "$B/api/monitor/live/exchange-health" >/tmp/live-exchange-health.json 2>/dev/null || echo '{}' >/tmp/live-exchange-health.json
+  # A failed/unreadable fetch (no exchange map) prints ERR ERR, which never equals 0: not flat.
+  live="$(python3 "$(dirname "$0")/live_flat_verify.py" /tmp/live-lifecycle.json /tmp/live-exchange-health.json)"
   read -r live stale <<<"$live"
   flat_ok=0; node scripts/check-relay-flat.mjs >/tmp/relay-flat.json 2>&1 && flat_ok=1
   echo "verify: exchange_mirror_not_flat=${live} mirror_stale_but_flat=${stale} relay_flat_check=${flat_ok}"
