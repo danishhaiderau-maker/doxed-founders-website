@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Optional
 
 SCHEMA = "integrity_gaps.v1"
@@ -51,21 +52,30 @@ def oldest_row_ts(path: str) -> Optional[float]:
 _DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", ".sqlite3", ".db", ".npz", ".pkl")
 
 
+_RETAINED_RE = tuple(re.compile(x) for x in (
+    r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*/.*",
+    r"runtime/live_copy_[^/]+\.json",
+    r"quarantine/v3_completeness_markers/.*",
+))
+_RETAINED_DIR_RE = tuple(re.compile(x) for x in (
+    r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*",
+    r"quarantine/v3_completeness_markers",
+))
+
+
 def retained_by_design(rel: str) -> bool:
     """HM post-wipe 18 Oct: runtime state kept by design, never an old-data offender in G16.
 
-    v3 emergency/owner/recovery receipts (the reset retains them on purpose), live_copy_*.json runtime
-    config, and quarantine/v3_completeness_markers/ (moved aside, never deleted). The pinned
-    keep_manifest (and its hash) is deliberately NOT changed."""
-    rel = rel.replace("\\", "/")
-    name = rel.rsplit("/", 1)[-1]
-    if name.startswith("live_copy_") and name.endswith(".json"):
-        return True
-    if "quarantine/v3_completeness_markers" in rel:
-        return True
-    if "/v3/receipts/" in f"/{rel}":
-        return any(w in rel for w in ("owner", "recovery", "emergency"))
-    return False
+    Anchored fullmatch on the path relative to the scan root: v3 emergency/owner/recovery receipts, runtime
+    live_copy_*.json and quarantine/v3_completeness_markers/. A parent directory name or a basename elsewhere
+    never exempts a path. The pinned keep_manifest (and its hash) is deliberately NOT changed."""
+    rel = rel.replace("\\", "/").lstrip("/")
+    return any(r.fullmatch(rel) for r in _RETAINED_RE)
+
+
+def retained_dir_by_design(rel_dir: str) -> bool:
+    rel_dir = rel_dir.replace("\\", "/").strip("/")
+    return any(r.fullmatch(rel_dir) for r in _RETAINED_DIR_RE)
 
 
 def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
@@ -85,7 +95,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
         rel_d = "" if rel_d == "." else rel_d
         for sub in list(dirs):
             rd = f"{rel_d}/{sub}" if rel_d else sub
-            if km.kept_dir(rd, keep) or retained_by_design(rd + "/"):
+            if km.kept_dir(rd, keep) or retained_dir_by_design(rd):
                 kept_dirs.append(rd)
                 dirs.remove(sub)
         for n in names:

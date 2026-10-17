@@ -158,6 +158,9 @@ def dv_failures(row_text: str, status: dict, fresh_start: dict) -> list[str]:
         bad.append("book row has no dv stamp")
     elif want and row.get("dv") != want:
         bad.append(f"book row dv={row.get('dv')!r} != {want!r}")
+    # LIMITATION: the bound collection epoch id is minted by the reset publish, not derived from the stamped
+    # fresh-start epoch_ts, so the two cannot be cross-checked arithmetically. Presence of a bound id plus the
+    # dv == fse-<epoch_ts> match on a post-restart book row is the proof; the dv check is what ties rows to the stamp.
     # /health never carries fresh_epoch_id; the bound collection epoch is published on /api/status
     # (canonical_epoch.aliases.collector_v22_epoch_id). fresh_epoch_id stays None unless Fresh Collection
     # mode is on, and canonical_epoch_id is the DATA_EPOCH_ID env value, so neither can gate the verify.
