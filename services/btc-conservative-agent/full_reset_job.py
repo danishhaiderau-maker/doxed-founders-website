@@ -132,7 +132,7 @@ def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
 
 
 _RECEIPT_DIRS = ("full-reset-receipts", "research_reset_receipts")
-_RECEIPT_JSON_MAX = 2 * 1024 * 1024
+_RECEIPT_JSON_MAX = 256 * 1024
 _RECEIPT_MAX_FILES = 200
 _RECEIPT_MAX_DIRS = 50
 _RECEIPT_STR_MAX = 200
@@ -164,7 +164,7 @@ def _walk_files(base):
 def read_receipt_summary(runtime_root) -> dict:
     """Read-only summary of the reset receipt directories (names, sizes, shape of small JSON receipts).
 
-    Bounded: at most 50 receipt directories and 200 files each (lazy walk, islice), JSON only under 2 MiB,
+    Bounded: at most 50 receipt directories and 200 files each (lazy walk, islice), JSON only under 256 KiB,
     string values cut to 200 chars, keys matching token|secret|key|confirm masked. No writes, no deletion."""
     root = Path(runtime_root)
     out = {"schema": "full_reset_receipt_summary_v1", "directories": [],
@@ -174,7 +174,7 @@ def read_receipt_summary(runtime_root) -> dict:
         if not base.is_dir():
             continue
         try:
-            subs = [Path(e.path) for e in itertools.islice((e for e in os.scandir(base) if e.is_dir()), _RECEIPT_MAX_DIRS)]
+            subs = [Path(e.path) for e in itertools.islice((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)), _RECEIPT_MAX_DIRS)]
         except OSError:
             continue
         for sub in sorted(subs):
