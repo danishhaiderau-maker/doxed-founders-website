@@ -307,6 +307,31 @@ def read_range(data_dir, name: str, *, since=None, until=None, part=None, cursor
             "parts": order}, body
 
 
+# Decision-log / 3factor files that are created lazily on the first qualifying event (so "missing" after a wipe is not
+# by itself a fault). Exposed with mtimes so an operator can tell "never written since reset" from "stopped writing".
+LAZY_LOG_FILES = (
+    "decisions_3factor.csv", "blocked_signals_3factor.csv", "ai_errors_3factor.csv", "pipeline_events_3factor.csv",
+    "ai_tranche_log.csv", "setup_log_3factor.csv", "trades_3factor.csv", "approved_but_rejected.jsonl",
+    "near_miss.jsonl", "soft_reject_shadow.jsonl",
+)
+
+
+def file_mtimes(data_dir, now: float) -> dict:
+    out = {}
+    base = Path(data_dir)
+    for rel in LAZY_LOG_FILES:
+        for cand in (base / rel, base / "runtime" / rel):
+            try:
+                st = cand.stat()
+            except OSError:
+                continue
+            out[rel] = {"exists": True, "mtime": st.st_mtime, "age_sec": round(now - st.st_mtime, 1), "bytes": st.st_size}
+            break
+        else:
+            out[rel] = {"exists": False, "mtime": None, "age_sec": None, "bytes": 0}
+    return out
+
+
 def health(data_dir, now: float, sample_rows: int = 200) -> dict:
     """Per stream: first/last ts across parts, age, approx rows, key-field null rate, archive."""
     import json
@@ -356,4 +381,4 @@ def health(data_dir, now: float, sample_rows: int = 200) -> dict:
                         "segment_store": ARCHIVE_NOTE["segment_store"]},
         }
     return {"schema": "monitor_stream_health_v1", "streams": out, "archive_locations": ARCHIVE_NOTE,
-            "server_ts": now}
+            "log_files": file_mtimes(data_dir, now), "server_ts": now}
