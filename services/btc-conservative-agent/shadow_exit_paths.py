@@ -52,6 +52,9 @@ PATH_UNIT_BP = 0.1
 # REALISTIC_V1 (research/fill_model.py): stops, floors and time exits are
 # marketable at the executable-side quote one observed tick after the trigger,
 # booked at the worse of the trigger mark and the post-latency mark.
+# Shadow exit studies price counterfactual paths on the 1 s tape. They are research shadows, never paper fills,
+# and never count toward any per-tile fill count (the paper fill model is paper_fill.FILL_MODEL).
+SHADOW_PRICING_MODEL = "SHADOW_TAPE_COUNTERFACTUAL_NOT_A_PAPER_FILL"
 EXIT_LATENCY_SEC = 1.0
 TAKER_LATENCY_SEC = 1.0
 MEANINGFUL_PROFIT_BP = 20.0
@@ -490,7 +493,7 @@ def counterfactual_entries(ticks, *, sign: int, signal_ts: float, limit_price: A
         if entry:
             series, _fb = _pnl_series(ticks, sign, entry, quote[0], quote[0] + horizon_sec)
             out["taker_at_signal"] = {
-                "fill_model": "REALISTIC_V1_TAKER", "entry_price": entry, "entry_ts": round(quote[0], 3),
+                "fill_model": "REALISTIC_V1_TAKER", "shadow_pricing_model": SHADOW_PRICING_MODEL, "entry_price": entry, "entry_ts": round(quote[0], 3),
                 "entry_side_fallback": fell_back, "horizons": horizon_extremes(series),
                 "extremes": _peak_trough(series),
                 "path": minute_path(series, COUNTERFACTUAL_PATH_MINUTES),
@@ -612,6 +615,7 @@ def build_record(*, source: str, trade_id: str, direction: str, ticks, signal_ts
         "horizon_sec": int(horizon_sec),
         "fee_bp": fee_bp,
         "fill_model": "REALISTIC_V1",
+        "shadow_pricing_model": SHADOW_PRICING_MODEL,
         "exit_latency_sec": EXIT_LATENCY_SEC,
         "meaningful_profit_bp": MEANINGFUL_PROFIT_BP,
         "shadow_exit_set_id": shadow_exit_set_id(shadow_set),

@@ -11,8 +11,10 @@ Nothing here deletes anything itself, resumes the pause, or edits pinned deleter
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -182,6 +184,74 @@ def read_status(runtime_root, *, live_armed=False, now=None, fresh_epoch=None) -
         alert, level = "reset running while LIVE ARMED", "RED"
     view["alert"] = {"level": level, "reason": alert} if alert else None
     return view
+
+
+_RECEIPT_DIRS = ("full-reset-receipts", "research_reset_receipts")
+_RECEIPT_JSON_MAX = 256 * 1024
+_RECEIPT_MAX_FILES = 200
+_RECEIPT_MAX_DIRS = 50
+_RECEIPT_STR_MAX = 200
+_RECEIPT_MASK = re.compile(r"token|secret|key|confirm", re.IGNORECASE)
+
+
+def _shape_value(key, value):
+    if _RECEIPT_MASK.search(str(key)):
+        return "<masked>"
+    if isinstance(value, str):
+        return value[:_RECEIPT_STR_MAX]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return f"{type(value).__name__}[{len(value)}]"
+
+
+def _walk_files(base):
+    """Lazy depth-first file walk; never materialises or sorts the whole tree."""
+    for entry in os.scandir(base):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                yield from _walk_files(entry.path)
+            elif entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
+        except OSError:
+            continue
+
+
+def read_receipt_summary(runtime_root) -> dict:
+    """Read-only summary of the reset receipt directories (names, sizes, shape of small JSON receipts).
+
+    Bounded: at most 50 receipt directories and 200 files each (lazy walk, islice), JSON only under 256 KiB,
+    string values cut to 200 chars, keys matching token|secret|key|confirm masked. No writes, no deletion."""
+    root = Path(runtime_root)
+    out = {"schema": "full_reset_receipt_summary_v1", "directories": [],
+           "note": "progress targets/bytes count every scope's fingerprinted payload; receipt files describe each pass"}
+    for name in _RECEIPT_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        try:
+            subs = [Path(e.path) for e in itertools.islice((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)), _RECEIPT_MAX_DIRS)]
+        except OSError:
+            continue
+        for sub in sorted(subs):
+            files, total = [], 0
+            walker = _walk_files(sub)
+            batch = list(itertools.islice(walker, _RECEIPT_MAX_FILES + 1))
+            truncated = len(batch) > _RECEIPT_MAX_FILES
+            for path in batch[:_RECEIPT_MAX_FILES]:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                total += size
+                entry = {"file": str(path.relative_to(root)), "bytes": size}
+                if path.suffix == ".json" and size <= _RECEIPT_JSON_MAX:
+                    doc = _read_json(path)
+                    if isinstance(doc, dict):
+                        entry["shape"] = {str(k): _shape_value(k, v) for k, v in itertools.islice(doc.items(), 40)}
+                files.append(entry)
+            out["directories"].append({"dir": f"{name}/{sub.name}", "files_listed": len(files),
+                                       "bytes_listed": total, "truncated": truncated, "files": files})
+    return out
 
 
 class HeartbeatPublisher(threading.Thread):

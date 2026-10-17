@@ -1,0 +1,211 @@
+"""Pricing labels, fail-closed counting and the by-model route (HM 18 Oct 2026 amendments 1-5)."""
+import ast
+import json
+from pathlib import Path
+
+import pytest
+
+import fills_by_model
+import monitor_gaps
+import monitor_tiles
+import paper_fill
+from research import fill_model as research_fill_model
+import research_v3_bridge
+
+ROOT = Path(__file__).resolve().parent
+BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
+EPOCH = 1792263671.26
+MODEL = paper_fill.FILL_MODEL
+
+
+@pytest.fixture(autouse=True)
+def _epoch():
+    old = paper_fill.FRESH_EPOCH_TS
+    paper_fill.FRESH_EPOCH_TS = EPOCH
+    yield
+    paper_fill.FRESH_EPOCH_TS = old
+
+
+def good_row(**extra):
+    row = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "exit_status": "PAPER_FILL", "fill_model": MODEL,
+           "fill_model_version": 1, "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True,
+           "all_legs_book10l": True}
+    row.update(extra)
+    return row
+
+
+def test_default_paper_fill_model_is_book10l_and_realistic_on_flips_off():
+    tree = ast.parse(BOT)
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "PAPER_FILL_MODEL")
+    getenv = next(n for n in ast.walk(node.value) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "getenv")
+    default = ast.literal_eval(getenv.args[1])
+    assert default == MODEL
+    assert (default.strip().upper() == research_fill_model.FILL_MODEL_VERSION) is False  # realistic_on (:25350)
+    assert "REALISTIC_V1" not in default
+    assert research_fill_model.FILL_MODEL_VERSION == "REALISTIC_V1"  # the flag only turns on when explicitly set
+
+
+def test_receipt_uses_pricer_evidence_not_the_venue_gate():
+    order = {"fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}, "filled_qty": 0.0003, "qty": 0.0003}
+    rec = research_v3_bridge._paper_fill_execution_receipt(order, {"qty": 0.0003}, {})
+    assert rec["fill_model"] == MODEL and rec["fill_basis"] == "BOOK10L_TAKER_WALK"
+    assert rec["execution_basis"] == f"{MODEL}:BOOK10L_TAKER_WALK" and rec["conservative_fill_supported"] is True
+    legacy = research_v3_bridge._paper_fill_execution_receipt({"qty": 1.0}, {"qty": 1.0}, {})
+    assert legacy["execution_basis"] == "UNSUPPORTED"  # untouched for non-paper orders
+
+
+def test_tile_fill_block_prefers_pricer_evidence():
+    raw = {"entry_fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}}
+    block = monitor_tiles._fill_block({"fill_basis": None, "execution_basis": "UNSUPPORTED"}, filled=True, raw=raw)
+    assert block["fill_basis"] == "BOOK10L_TAKER_WALK" and block["execution_basis"].endswith(":BOOK10L_TAKER_WALK")
+    assert block["fill_model"] == MODEL and block["liquidity"] == "TAKER"
+    plain = monitor_tiles._fill_block({}, filled=True, raw={})
+    assert plain["fill_basis"] == monitor_tiles.FILL_BASIS_NOT_INDEXED
+
+
+def test_row_fresh_strict_requires_every_leg_and_validity():
+    assert paper_fill.row_fresh_strict(good_row())
+    assert not paper_fill.row_fresh_strict(good_row(fill_valid=False))
+    assert not paper_fill.row_fresh_strict(good_row(non_fill_category="NO_BOOK_EXIT"))
+    assert not paper_fill.row_fresh_strict(good_row(exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK"))
+    assert not paper_fill.row_fresh_strict(good_row(all_legs_book10l=False))
+    assert not paper_fill.row_fresh_strict(good_row(all_legs_book10l="False"))  # CSV reload string
+    leg = {"realized_gross_usd": 0.1, "leg_priced_by": "paper_fill_book10l", "leg_fresh_eligible": True}
+    assert paper_fill.row_fresh_strict(good_row(partial_exit_receipts=[leg]))
+    assert not paper_fill.row_fresh_strict(good_row(partial_exit_receipts=[{**leg, "leg_priced_by": None}]))
+    assert not paper_fill.row_fresh_strict(good_row(partial_exit_receipts=[{**leg, "leg_fallback": "TRIGGER_PRICE_UNPRICED_LEG"}]))
+    assert not paper_fill.row_fresh_strict(good_row(partial_exit_receipts=json.dumps([{**leg, "leg_fresh_eligible": False}])))
+    assert not paper_fill.row_fresh_strict(good_row(exit_fill_sim={"fill_model": "REALISTIC_V1"}))
+
+
+def test_rows_without_a_timestamp_fail_closed_as_pre_epoch():
+    row = good_row()
+    for k in ("entry_ts", "exit_ts"):
+        row.pop(k)
+    assert paper_fill.row_before_epoch(row) is True
+    assert not paper_fill.row_fresh_strict(row)
+    assert paper_fill.row_before_epoch({"entry_ts": EPOCH - 1}) is True
+    assert paper_fill.row_before_epoch({"entry_ts": EPOCH + 1}) is False
+    paper_fill.FRESH_EPOCH_TS = None
+    assert paper_fill.row_before_epoch({}) is False  # no stamped epoch: nothing to compare against
+
+
+def test_by_model_categories_never_mix_with_countable():
+    lane = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
+    rows = [good_row(), good_row(non_fill_category="NO_BOOK_EXIT", exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK"),
+            good_row(non_fill_category="TP1_UNPRICED_LEG", fill_valid=False), good_row(fill_model="REALISTIC_V1"),
+            good_row(fill_model_invalid=True), good_row(entry_ts=EPOCH - 5, exit_ts=EPOCH - 1),
+            good_row(all_legs_book10l=False), {"research_lane": lane, "exit_reason": "X"}]
+    out = fills_by_model.summarise(rows, [lane], refused={"count": 2})
+    cat = out["tiles"][lane]["by_category"]
+    assert cat["countable"] == 1 and cat["no_book_exit"] == 1 and cat["tp1_unpriced_leg"] == 1
+    assert cat["other_fill_model"] == 1 and cat["fill_model_invalid"] == 1 and cat["pre_epoch"] == 1
+    assert cat["not_fresh_book10l"] == 1 and cat["legacy_pricing"] == 1
+    assert out["tiles"][lane]["countable"] == 1 and out["non_paper_fills_refused"] == {"count": 2}
+
+
+def test_taker_book_walk_fills_never_raise_fill_outside_bbo():
+    counters = monitor_gaps.FillSimCounters()
+    counters.taker_fill("FAMILY_GS01_XV_PREMIUM_ATR_TP", 81558.0, 81600.0, 81601.0, "SHORT")  # 3 bp away, a depth walk
+    snap = counters.snapshot()
+    assert snap["alerts"] == [] and snap["level"] == monitor_gaps.GREEN
+    assert snap["lanes"]["FAMILY_GS01_XV_PREMIUM_ATR_TP"]["taker_book_walk_fills"] == 1
+    assert snap["lanes"]["FAMILY_GS01_XV_PREMIUM_ATR_TP"]["maker_fills"] == 0
+    counters.maker_fill("MAKER_LANE", 81558.0, 81600.0, 81601.0, "SHORT")
+    assert "FILL_OUTSIDE_BBO_GT_1BP" in counters.snapshot()["alerts"]
+    assert "_FILL_SIM_COUNTERS.taker_fill(" in BOT and "if _is_paper_book_lane(order):" in BOT
+
+
+def test_tile_integrity_presence_check_registers_rows_since_the_epoch():
+    import tile_integrity
+    assert tile_integrity.presence_check([], None)["note"] == "V1_FILL_MODEL_NOT_YET_EMITTED"
+    assert "v1_since_ts=_tile_integrity_v1_since()" in BOT
+    assert "_pf.FRESH_EPOCH_TS" in BOT.split("def _tile_integrity_v1_since")[1][:700]
+
+
+def _exec_refuse(order_lane, enabled=True):
+    tree = ast.parse(BOT)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_refuse_non_paper_fill")
+    ns = {"REFUSE_NON_PAPER_BOOK_FILLS": enabled, "_NON_PAPER_FILL_REFUSED": {"count": 0, "last_lane": None}}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
+    order = {"research_lane": order_lane}
+    return ns["_refuse_non_paper_fill"](order, "t"), order, ns["_NON_PAPER_FILL_REFUSED"]
+
+
+def test_non_paper_orders_are_refused_and_tagged_invalid():
+    refused, order, counter = _exec_refuse("SOME_LEGACY_LANE")
+    assert refused is True and order["fill_model_invalid"] is True and counter["count"] == 1
+    assert order["fill_invalid_reason"].startswith("NON_PAPER_BOOK_LANE_LEGACY_PRICER_REFUSED")
+    assert _exec_refuse("SOME_LEGACY_LANE", enabled=False)[0] is False  # helper contract only
+    # pinned: the module constant is a literal True, not env-switchable
+    tree = ast.parse(BOT)
+    node = next(n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "REFUSE_NON_PAPER_BOOK_FILLS")
+    assert isinstance(node.value, ast.Constant) and node.value.value is True
+
+
+def test_no_book_exit_marks_and_unpriced_leg_are_non_fills():
+    assert BOT.count('fill_valid=False, non_fill_category="NO_BOOK_EXIT"') == 1
+    assert BOT.count('"fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"') == 1
+    assert 'pos["non_fill_category"] = "TP1_UNPRICED_LEG"' in BOT
+    assert '"fresh_epoch_id": _fresh_epoch_dv()' in BOT and '"all_legs_book10l": _all_legs_book10l(pos)' in BOT
+
+
+def test_shadow_exits_are_tagged_not_paper_fills():
+    import shadow_exit_paths
+    assert shadow_exit_paths.SHADOW_PRICING_MODEL.endswith("NOT_A_PAPER_FILL")
+    src = (ROOT / "shadow_exit_paths.py").read_text(encoding="utf-8")
+    assert src.count('"shadow_pricing_model": SHADOW_PRICING_MODEL') + src.count("shadow_pricing_model\": SHADOW_PRICING_MODEL") >= 2
+
+
+def test_analyzer_uses_the_same_strict_rule_as_the_monitors():
+    src = (ROOT / "analysis_hygiene.py").read_text(encoding="utf-8")
+    assert "_pf.row_fresh_strict(rec)" in src
+
+
+def test_by_model_route_is_registered_and_read_only():
+    assert '@app.route(\'/api/monitor/fills/by-model\', methods=["GET"])' in BOT
+    assert '"/api/monitor/fills/by-model"' in BOT.split("_MONITOR_TILE_PATHS")[1][:2000]
+
+
+def _book(px_a=100.0, px_b=99.0):
+    return lambda t: {"s": int(t) - 1, "a": [[px_a, 10.0]], "b": [[px_b, 10.0]]}
+
+
+def test_pricer_emits_explicit_evidence_status():
+    full = paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, _book())
+    assert full["status"] == "FILLED" and full["evidence_status"] == "COMPLETE"
+    part = paper_fill.paper_fill("LONG", 50.0, 1000.0, 1.0, _book())
+    assert part["status"] == "PARTIAL" and part["evidence_status"] == "INCOMPLETE"
+    none = paper_fill.paper_fill("LONG", 0.5, 1000.0, 1.0, lambda t: None)
+    assert none["evidence_status"] == "NO_FILL"
+
+
+def test_receipt_requires_explicit_complete_evidence():
+    for sim in ({"fill_model": MODEL}, {"fill_model": MODEL, "evidence_status": "UNKNOWN"},
+                {"fill_model": MODEL, "evidence_status": "INCOMPLETE"}, {"fill_model": MODEL, "evidence_status": None}):
+        rec = research_v3_bridge._paper_fill_execution_receipt(
+            {"fill_sim": sim, "filled_qty": 0.0003, "qty": 0.0003}, {"qty": 0.0003}, {})
+        assert rec["conservative_fill_supported"] is False and rec["execution_basis"] == "UNSUPPORTED", sim
+
+
+def test_tile_pricer_evidence_requires_explicit_complete():
+    for sim in ({"fill_model": MODEL}, {"fill_model": MODEL, "evidence_status": "UNKNOWN"}):
+        ev = monitor_tiles.paper_pricer_evidence({"entry_fill_sim": sim})
+        assert ev["execution_basis"] == "UNSUPPORTED"
+        block = monitor_tiles._fill_block({}, filled=True, raw={"entry_fill_sim": sim})
+        assert block["execution_basis"] == "UNSUPPORTED"
+    ok = monitor_tiles.paper_pricer_evidence({"entry_fill_sim": {"fill_model": MODEL, "evidence_status": "COMPLETE"}})
+    assert ok["execution_basis"] == f"{MODEL}:BOOK10L_TAKER_WALK"
+
+
+def test_exit_leg_price_is_the_filled_price_not_the_trigger():
+    # shape of row gs1-5c965fbbe077: single terminal leg, receipt price = trigger 81691, filled 81697
+    raw = {"partial_exit_receipts": [{"closed_qty": 0.0003, "price": 81691.0, "remaining_fraction": 0.0,
+                                      "realized_gross_usd": None, "reason": "PATH_END_60M"}],
+           "exit_price": 81697.0, "exit_fill_sim": {"status": "FILLED", "price": 81697.0}}
+    leg = monitor_tiles._legs(raw)[0]
+    assert leg["price"] == 81697.0 and leg["trigger_price"] == 81691.0
+    partial = {"partial_exit_receipts": [{"closed_qty": 0.0001, "price": 81600.0, "leg_trigger_price": 81595.0,
+                                          "remaining_fraction": 0.5, "realized_gross_usd": 0.01}]}
+    leg = monitor_tiles._legs(partial)[0]
+    assert leg["price"] == 81600.0 and leg["trigger_price"] == 81595.0
