@@ -43390,6 +43390,11 @@ def _relay_trade_row_lite(row: dict) -> dict:
         "pnl_accounting_schema": row.get("pnl_accounting_schema"),
         "margin_usdt": row.get("margin_usdt"),
         "leverage": row.get("leverage"),
+        # entry pricing receipt, so /api/state closed rows show how they were priced
+        "fill_model": row.get("fill_model"),
+        "fill_model_version": row.get("fill_model_version"),
+        "delay_s": row.get("delay_s"),
+        "delay_source": row.get("delay_source"),
     }
 
 
@@ -44282,6 +44287,8 @@ _DASHBOARD_TRADE_API_KEYS = (
     # tradeStopEvidence flags every FAMILY_* row lacking the schema as
     # double-counted, and derives margin/notional from these columns.
     "pnl_accounting_schema", "margin_usdt", "leverage",
+    # entry pricing receipt (entry_fill_sim flattened on the closed row)
+    "fill_model", "fill_model_version", "delay_s", "delay_source",
 )
 
 
@@ -46057,7 +46064,7 @@ _PUBLIC_TRADE_SAFE_KEYS = {
     "gross_pnl_usd", "trading_fees_usd", "fees_usd",
     "funding_fees_usd", "close_ts_melbourne", "trade_display",
     # pricing provenance (entry_fill_sim receipt, flattened on the closed row): the model is a label, not a strategy input
-    "fill_model", "fill_model_version", "delay_s",
+    "fill_model", "fill_model_version", "delay_s", "delay_source",
 }
 
 
