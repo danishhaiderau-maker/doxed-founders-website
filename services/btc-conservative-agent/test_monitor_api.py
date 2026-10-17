@@ -79,8 +79,8 @@ def test_monitor_token_configuration_and_bearer_match():
 def test_lane_stats_drawdown_is_true_peak_to_trough():
     rows = [
         {"close_ts": 3, "net_pnl_usd": -3.0, "notional_usd": 25.0, "direction": "SHORT"},
-        {"close_ts": 1, "net_pnl_usd": 1.0, "notional_usd": 25.0, "direction": "LONG", "book_slippage_usd": 0.02, "fill_model_version": 1},
-        {"close_ts": 4, "net_pnl_usd": 1.0, "notional_usd": 25.0, "direction": "LONG", "book_slippage_usd": 0.04, "fill_model_version": 1},
+        {"close_ts": 1, "net_pnl_usd": 1.0, "notional_usd": 25.0, "direction": "LONG", "book_slippage_usd": 0.02, "fill_model_version": 1, "exit_legs": 1},
+        {"close_ts": 4, "net_pnl_usd": 1.0, "notional_usd": 25.0, "direction": "LONG", "book_slippage_usd": 0.04, "fill_model_version": 1, "exit_legs": 1},
         {"close_ts": 2, "net_pnl_usd": 0.0, "notional_usd": 25.0, "direction": "SHORT"},
     ]
     out = monitor_api.lane_stats(rows)

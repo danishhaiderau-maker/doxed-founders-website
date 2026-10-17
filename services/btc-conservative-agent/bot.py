@@ -46830,20 +46830,21 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
                            row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
-                           row.get("pnl"), monitor_api.trade_net_bp(row), row.get("fill_model_version")))
+                           row.get("pnl"), monitor_api.trade_net_bp(row), row.get("fill_model_version"),
+                           row.get("exit_legs")))
     finally:
         trade_lock.release()
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
-        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct, net_bp, fill_version in raw:
+        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct, net_bp, fill_version, exit_legs in raw:
             try:
                 notional = float(margin or 0.0) * float(leverage or 0.0)
             except (TypeError, ValueError):
                 notional = 0.0
             shaped[lane].append({"close_ts": parse_ts(ts or "") or None, "net_pnl_usd": net,
                                  "notional_usd": notional, "direction": direction,
-                                 "book_slippage_usd": slippage, "fill_model_version": fill_version,
+                                 "book_slippage_usd": slippage, "fill_model_version": fill_version, "exit_legs": exit_legs,
                                  # Precise per-trade bp source (net_pnl_usd is cent-rounded).
                                  "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
                                  # W/L source: price-based net bp (same rule as the lane ledgers).
