@@ -50664,13 +50664,12 @@ def _start_full_reset_job(data) -> tuple[dict, int]:
         operation_id = uuid4().hex
         status = full_reset_job.JobStatus(root, operation_id)
         full_reset_job.ACTIVE = {"status": status, "root": root, "operation_id": operation_id}
-    override = _freeze_override_kwargs(data)
 
     def _run():
         publisher = full_reset_job.HeartbeatPublisher(root, lambda: state.get("last_heartbeat") or last_heartbeat)
         publisher.start()
         try:
-            result = perform_fresh_collection_reset(send_local_signal=False, **override)
+            result = perform_fresh_collection_reset(send_local_signal=False, **_freeze_override_kwargs(data))
             if result.get("ok"):
                 with state_lock:
                     state["fresh_collection_mode"] = False
