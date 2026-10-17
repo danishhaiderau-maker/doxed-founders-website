@@ -238,7 +238,14 @@ def _proof_valid(root, proof):
                ("pending_paper_orders", "open_paper_positions", "pending_wal_records", "pending_recovery_records"))
 
 
-def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_depth=12,
+# Hard scan-budget cap for one reset inventory. The live Fly volume holds ~394k
+# entries (~323k are retained emergency_record_idempotency_v1 receipts that are
+# scanned but never targeted; real targets ~27k). 200k was too small; 1M is 2.5x
+# the observed count and equals the validation ceiling below, so it stays a hard cap.
+RESET_MAX_ENTRIES = 1_000_000
+
+
+def plan_research_reset(runtime_root, *, proof=None, max_entries=RESET_MAX_ENTRIES, max_depth=12,
                         max_metadata_bytes=4 * 1024 * 1024, allow_fly_runtime_aliases=False,
                         scope_name=None):
     """Inventory only; no side effects. Unsafe/incomplete scans return no targets.

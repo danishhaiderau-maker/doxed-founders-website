@@ -1125,7 +1125,7 @@ jobs:
               request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=body, method="POST",
                                                headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
               try:
-                  with urllib.request.urlopen(request, timeout=900) as response:
+                  with urllib.request.urlopen(request, timeout=1800) as response:
                       return json.load(response)
               except urllib.error.HTTPError as exc:
                   try:

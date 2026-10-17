@@ -96,3 +96,24 @@ delete-class leftovers (default max 200 files and 64 MiB; a collector or replay 
 * **Failure safety net.** The last job step runs on `failure()`: it POSTs `/api/pause` (owner DEPLOY_MAINTENANCE) and, if
   `/health` still does not show paused by DEPLOY_MAINTENANCE with live off, runs `flyctl machine stop`. It never resumes
   paper. After a safety-net stop the machine is started by hand only after HM clears it.
+
+## Inventory limits (RESET_INVENTORY_INCOMPLETE fix)
+
+The first execute stopped at the in-process reset with `RESET_INVENTORY_INCOMPLETE`
+(`ENTRY_BUDGET_EXCEEDED`): the read-only inventory scans every entry under the
+runtime root, and the live volume has ~394k entries (~323k are retained
+`v3/receipts/emergency_record_idempotency_v1` receipts that are scanned but never
+deleted). Nothing was deleted; the bot stayed paused.
+
+Fix (hard caps, not unlimited):
+- `RESET_MAX_ENTRIES = 1_000_000` (`research_reset_inventory.py`) is the default scan
+  budget for `plan_research_reset`, `execute_research_reset` and target-stability sampling
+  (2.5x the observed count; equals the validation ceiling).
+- `MAX_RETAINED_ROWS = 1_000_000` (`research_exact_deletion.py`) matches it (retained rows
+  stream to the `.retained.jsonl` sidecar). A second, hidden 200k cap was found by the test.
+- `max_files` (targets) raised 100,000 -> `MAX_RESET_FILES = 600_000` (hard cap in the deleter, executor admission and progress). Live replay of the file listing gives 27,064 targets and 323,129 retained, so the cap has >20x headroom. Exceeding it still refuses (`RESET_TARGET_BUDGET_EXCEEDED`) before any delete.
+- Timing: ~16 s per scan at live size; the whole in-process reset is well inside the
+  workflow request timeout, which is raised 900 s -> 1800 s. The reset stays a blocking call
+  (not a background job); fail-closed semantics unchanged.
+- Tests: `test_research_reset_large_layout.py` (410k-entry layout: old budget refuses,
+  new default plans/executes, mid-run abort + resume, re-run idempotency).

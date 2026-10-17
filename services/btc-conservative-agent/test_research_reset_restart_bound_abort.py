@@ -93,11 +93,31 @@ def shipped_deleter(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(research_exact_deletion, "__file__", str(path))
 
 
-def test_reviewed_deleter_is_the_one_shipped_and_still_current():
-    shipped = hashlib.sha256(deleter_blob(REVISION)).hexdigest()
-    current = Path(module.__file__).with_name("research_exact_deletion.py").read_bytes().replace(b"\r\n", b"\n")
-    assert shipped == module.REVIEWED_FAILED_DELETERS[REVISION]
-    assert hashlib.sha256(current).hexdigest() == shipped
+def test_reviewed_deleter_blobs_are_pinned():
+    # Hard-coded, not computed: any edit to the deployed deleter must update these reviewed pins.
+    here = Path(module.__file__).parent
+    deployed = (here / "research_exact_deletion.py").read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(deployed).hexdigest() == "db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b"
+    assert module.CURRENT_REVIEWED_DELETER_SHA256 == "db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b"
+    vendored = (here / module.VENDORED_REVIEWED_DELETERS[REVISION]).read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(vendored).hexdigest() == "3a64a7c7f21f238b712df4f4765f1f57d737fb046503635dfa517f48d10538e6"
+    assert module.REVIEWED_FAILED_DELETERS[REVISION] == module.OLD_REVIEWED_DELETER_SHA256 == hashlib.sha256(vendored).hexdigest()
+    assert vendored == deleter_blob(REVISION)
+
+
+def test_vendored_blob_is_data_only_and_deployed_hash_fails_closed(tmp_path, monkeypatch):
+    here = Path(module.__file__).parent
+    assert not (here / "reviewed_deleter_f187f493.py").exists()  # not importable
+    import research_exact_deletion
+    fake = tmp_path / "research_exact_deletion.py"
+    fake.write_bytes(b"# tampered deleter\n")
+    monkeypatch.setattr(research_exact_deletion, "__file__", str(fake))
+    with pytest.raises(ResearchDeletionRejected, match="ABORT_DELETER_SOURCE_NOT_REVIEWED"):
+        module.abort_predeletion_reset(root=tmp_path / "v" / "runtime", volume_root=tmp_path / "v", reset_id=INCIDENT,
+                                       expected_sha256={}, old_epoch="e", failed_revision=REVISION,
+                                       held_lease=None, quiescence_probe=lambda: {},
+                                       reviewed_deleter_sha256=module.OLD_REVIEWED_DELETER_SHA256,
+                                       expected_new_epoch="n")
 
 
 def test_restart_bound_incident_retires_pointer_and_preserves_evidence(tmp_path, monkeypatch, shipped_deleter):

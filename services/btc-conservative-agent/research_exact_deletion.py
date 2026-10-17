@@ -20,7 +20,8 @@ class ResearchDeletionRejected(ValueError):
 # can encode to gigabytes. Receipts and operation records must stay below the
 # 16/64 MiB resume and reconciliation read limits, so the list lives in a
 # ``<receipt>.retained.jsonl`` sidecar bound into the receipt by sha256/count.
-MAX_RETAINED_ROWS = 200000
+MAX_RETAINED_ROWS = 1_000_000
+MAX_RESET_FILES = 600_000
 MAX_RECEIPT_CONTEXT_BYTES = 64 * 1024
 RETAINED_SIDECAR_SUFFIX = ".retained.jsonl"
 
@@ -197,7 +198,7 @@ def reconcile_research_deletion(receipt_path) -> dict:
 
 def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_path,
                                 quiescent: bool, recovery_states: Mapping[str, str],
-                                protected_paths=(), max_files: int = 100000,
+                                protected_paths=(), max_files: int = MAX_RESET_FILES,
                                 max_total_bytes: int = 64 * 1024**3,
                                 expected_sha256_by_path: Mapping[str, str] | None = None,
                                 receipt_context: Mapping | None = None,
@@ -263,7 +264,7 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
         info = io_path(part).lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise ResearchDeletionRejected("ROOT_SYMLINK_OR_REPARSE_POINT")
-    if not isinstance(max_files, int) or isinstance(max_files, bool) or not 0 < max_files <= 100000:
+    if not isinstance(max_files, int) or isinstance(max_files, bool) or not 0 < max_files <= MAX_RESET_FILES:
         raise ResearchDeletionRejected("INVALID_FILE_LIMIT")
     if not isinstance(max_total_bytes, int) or isinstance(max_total_bytes, bool) or not 0 < max_total_bytes <= 1024**4:
         raise ResearchDeletionRejected("INVALID_BYTE_LIMIT")
@@ -356,7 +357,7 @@ def _notify_reset_progress(callback, phase, completed, total, fingerprinted_byte
 
 def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                                 quiescent: bool, recovery_states: Mapping[str, str],
-                                protected_paths=(), max_files: int = 100000,
+                                protected_paths=(), max_files: int = MAX_RESET_FILES,
                                 max_total_bytes: int = 64 * 1024**3,
                                 expected_sha256_by_path: Mapping[str, str] | None = None,
                                 receipt_context: Mapping | None = None, progress_callback=None) -> dict:
