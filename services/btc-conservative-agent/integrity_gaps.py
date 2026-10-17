@@ -55,6 +55,7 @@ _DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", "
 _RETAINED_RE = tuple(re.compile(x) for x in (
     r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*/.*",
     r"runtime/live_copy_[^/]+\.json",
+    r"live_copy_tile_eligibility\.json",  # live-switch eligibility sidecar: lives at the volume root (BOT_DATA_DIR), retained
     r"quarantine/v3_completeness_markers/.*",
 ))
 _RETAINED_DIR_RE = tuple(re.compile(x) for x in (

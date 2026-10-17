@@ -137,3 +137,16 @@ def test_retained_by_design_is_anchored():
           "runtime/v3/receipts/emergency")
     assert all(ig.retained_by_design(x) for x in yes)
     assert not any(ig.retained_by_design(x) for x in no)
+
+
+def test_live_copy_tile_eligibility_sidecar_retained_only_at_volume_root(tmp_path):
+    assert ig.retained_by_design("live_copy_tile_eligibility.json")
+    for bad in ("x/live_copy_tile_eligibility.json",
+                "live_copy_tile_eligibility.json.old", "live_copy_tile_eligibility.jsonx"):
+        assert not ig.retained_by_design(bad), bad
+    f = tmp_path / "live_copy_tile_eligibility.json"
+    f.write_text("{}")
+    import os
+    os.utime(f, (1000, 1000))
+    scan = ig.scan_local_oldest(str(tmp_path))
+    assert "live_copy_tile_eligibility.json" in scan["kept"] and "live_copy_tile_eligibility.json" not in scan["files"]
