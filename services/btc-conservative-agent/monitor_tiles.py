@@ -351,11 +351,22 @@ def _late_window_block(rows) -> dict:
 PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms", "exit_ask_age_ms",
                 "depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill", "exit_price_basis",
                 "fee_model", "funding_rate", "funding_source", "hold_seconds", "funding_ts_crossed",
-                "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status")
+                "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status",
+                "exit_depth_snapshot_signal", "exit_depth_snapshot_legs", "pricer_signal_ts", "model_fill_ts",
+                "exit_pricer_signal_ts", "exit_model_fill_ts", "book_slippage_usd_entry", "book_slippage_usd_exit",
+                "book_slippage_usd_total", "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd",
+                "entry_delay_drift_bp", "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
+                "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured")
 
 
-_PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms")
+_PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
+                    "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
+                    "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total", "entry_walk_bp",
+                    "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp", "exit_delay_drift_usd",
+                    "exit_delay_drift_bp", "exit_touch_drift_usd", "exit_touch_drift_bp",
+                    "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured")
 _PRICING_STRUCT = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
+                   "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
                    "entry_provenance", "exit_provenance", "funding_settlement_rates")
 _PRICING_BOOL = ("legacy_pricing",)
 
@@ -366,7 +377,7 @@ def _restore_pricing_value(key: str, value: Any) -> Any:
     import paper_fill as _pf
     if key in _PRICING_NUMERIC:
         n = _pf.as_number(value)
-        return int(n) if n is not None and n == int(n) and key in ("fill_model_version",) else n
+        return int(n) if n is not None and n == int(n) and key in ("fill_model_version", "exit_legs", "exit_legs_unmeasured") else n
     if key in _PRICING_BOOL:
         return _pf.as_bool(value)
     if key in _PRICING_STRUCT and isinstance(value, str):

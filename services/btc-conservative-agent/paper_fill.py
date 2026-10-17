@@ -85,7 +85,7 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
     q = _f(qty) or 0.0
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "delay_s": round(d, 3),
             "delay_source": delay_source if delay_s else "default_until_n10", "fill_ts": t, "leg": leg, "qty": q,
-            "signal_ts": float(signal_ts)}
+            "signal_ts": float(signal_ts), "side": str(side).upper()}
     sig_book = _safe(book_at, float(signal_ts))
     base["depth_snapshot_signal"] = _snap(sig_book)
     book = _safe(book_at, t)
@@ -211,6 +211,94 @@ class DelaySampler:
         with self._lock:
             return {f"{k[0]}|{k[1]}": {"n": len(v), "p50": statistics.median(v) if v else None}
                     for k, v in self._d.items()}
+
+
+# ---------------------------------------------------------------- measured slippage (HM 17 Oct)
+# Pure measurement over RECORDED values (the fill price the row booked and the depth snapshots stored with it).
+# Nothing here prices, re-walks or writes a fill. Sign conventions:
+#   walk_*  : COST of walking the book vs the UNCAPPED best touch of the same snapshot, >= 0, positive = worse.
+#   drift_* : signed, positive = favourable to the position (negative = adverse), the same sign as the
+#             existing trigger_slippage_bp. Buys (entry LONG / exit SHORT) are hurt by a higher price.
+IOC_CAP_BP = 5.0  # same as tile_fill.IOC_CAP_BP: only the levels the capped IOC could walk count as walked
+
+
+def _is_buy(side: str, leg: str) -> bool:
+    return (str(side).upper() == "LONG") == (leg == "entry")
+
+
+def best_touch(side: str, leg: str, snapshot) -> Optional[float]:
+    """Best taker-side level of a depth snapshot (uncapped), or None without a usable snapshot."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    for lv in (taker_side_levels(side, leg, snapshot) or ()):
+        try:
+            px, sz = _f(lv[0]), _f(lv[1])
+        except (TypeError, IndexError):
+            continue
+        if px and px > 0 and sz and sz > 0:
+            return px
+    return None
+
+
+def _bp(diff: float, ref: float) -> float:
+    return round(diff / ref * 1e4, 4)
+
+
+def leg_slippage(side: str, leg: str, qty, fill_price, *, fill_snapshot=None, signal_snapshot=None,
+                 trigger_price=None, cap_bp: float = IOC_CAP_BP) -> dict:
+    """Slippage of one leg from its recorded fill price. Every number is None when its inputs are missing
+    (never 0.0): a leg without a snapshot is unmeasured, not free.
+      walk_usd/walk_bp           recorded fill vs uncapped best touch of the fill snapshot (cost, >= 0)
+      touch_drift_usd/bp         recorded fill vs best touch of the signal snapshot (delay drift, signed)
+      trigger_drift_usd/bp       recorded fill vs trigger price (exits only, signed, the exit headline)
+      trigger_overshoot_bp       trigger price vs best touch of the signal snapshot (rule level vs book, signed)
+      touch_px                   the uncapped best touch the walk is measured against
+      walk_within_cap            walk_bp <= cap_bp (the cap only ever limits the levels walked)"""
+    out = {"walk_usd": None, "walk_bp": None, "touch_drift_usd": None, "touch_drift_bp": None,
+           "trigger_drift_usd": None, "trigger_drift_bp": None, "trigger_overshoot_bp": None,
+           "walk_within_cap": None, "touch_px": None}
+    fill, q = _f(fill_price), _f(qty)
+    if not fill or fill <= 0 or not q or q <= 0:
+        return out
+    buy = _is_buy(side, leg)
+    fav = -1.0 if buy else 1.0  # +1: a higher price helps (sell), -1: a higher price hurts (buy)
+    touch = best_touch(side, leg, fill_snapshot)
+    if touch:
+        out["touch_px"] = touch
+        cost = -fav * (fill - touch)
+        out["walk_usd"], out["walk_bp"] = round(cost * q, 6), _bp(cost, touch)
+        out["walk_within_cap"] = out["walk_bp"] <= cap_bp + 1e-6
+    sig = best_touch(side, leg, signal_snapshot)
+    if sig:
+        out["touch_drift_usd"] = round(fav * (fill - sig) * q, 6)
+        out["touch_drift_bp"] = _bp(fav * (fill - sig), sig)
+    trig = _f(trigger_price)
+    if leg == "exit" and trig and trig > 0:
+        out["trigger_drift_usd"] = round(fav * (fill - trig) * q, 6)
+        out["trigger_drift_bp"] = _bp(fav * (fill - trig), trig)
+        if sig:
+            out["trigger_overshoot_bp"] = _bp(fav * (trig - sig), sig)
+    return out
+
+
+def aggregate_legs(legs) -> dict:
+    """Sum / quantity-weight per-leg slippage over a close. One unmeasured leg makes that figure None."""
+    legs = [x for x in (legs or ()) if isinstance(x, Mapping)]
+    out = {"legs": len(legs), "legs_unmeasured": 0}
+    qty = [_f(x.get("qty")) or 0.0 for x in legs]
+    for key, weighted in (("walk_usd", False), ("walk_bp", True), ("touch_drift_usd", False),
+                          ("touch_drift_bp", True), ("trigger_drift_usd", False), ("trigger_drift_bp", True),
+                          ("trigger_overshoot_bp", True)):
+        vals = [_f(x.get(key)) for x in legs]
+        if not legs or any(v is None for v in vals):
+            out[key] = None
+        elif weighted:
+            tot = sum(qty)
+            out[key] = round(sum(v * q for v, q in zip(vals, qty)) / tot, 4) if tot > 0 else None
+        else:
+            out[key] = round(sum(vals), 6)
+    out["legs_unmeasured"] = sum(1 for x in legs if _f(x.get("walk_usd")) is None)
+    return out
 
 
 # ---------------------------------------------------------------- new-tile rule (CI, HM 12:20)

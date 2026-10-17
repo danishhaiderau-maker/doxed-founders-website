@@ -1530,7 +1530,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
             else "BENCHMARK_PAPER"
         ),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
-        "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
+        "book_slippage_usd": _measured_usd((order.get("fill_sim") or {}).get("slippage_usd"), order.get("book_slippage_usd")),
         # Preserve the immutable fill-time depth receipt for terminal economics.
         # ``book_slippage_usd`` alone cannot distinguish a measured zero from a
         # missing/empty book, so terminal qualification must inspect this
@@ -5188,6 +5188,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
     if getattr(action, "maker", False) and float(action.remaining_fraction) <= 0:
         pos["exit_fee_type"] = "MAKER"
     fill_px = float(book_price) if book_price else float(price)
+    _leg_trigger_px = fill_px  # the rule's trigger level; fill_px is replaced by the leg's book fill below
     _leg_trigger_ts = time.time()
     _leg_fill = None
     if source_pos.get("_tp1_pending") and not (float(action.remaining_fraction) > 0
@@ -5244,6 +5245,12 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         "leg_fresh_eligible": bool(_leg_fill is None or (_leg_fill or {}).get("status") == "FILLED"),
         "leg_fallback": ("TRIGGER_PRICE_UNPRICED_LEG" if _leg_fill is not None and _leg_fill.get("status") != "FILLED" else None),
         "leg_provenance": __import__("tile_fill").provenance(_leg_fill) if _leg_fill is not None else None,
+        "leg_trigger_price": _leg_trigger_px if _leg_fill is not None else None,
+        "leg_pricer_signal_ts": (_leg_fill or {}).get("signal_ts"),
+        "leg_slippage": (__import__("paper_fill").leg_slippage(
+            direction, "exit", close_qty, fill_px, fill_snapshot=_leg_fill.get("depth_snapshot_fill"),
+            signal_snapshot=_leg_fill.get("depth_snapshot_signal"), trigger_price=_leg_trigger_px)
+            if _leg_fill is not None and _leg_fill.get("status") == "FILLED" and remaining_after > 0 else None),
     }
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
@@ -6967,14 +6974,32 @@ def _paper_lane_entry_result(order: dict, now: float, *, force: bool = False):
     return res
 
 
+def _measured_usd(*candidates):
+    """First candidate that is a real number, rounded; None when none is (an unmeasured slippage is null, not 0.0)."""
+    for v in candidates:
+        if v is not None and not isinstance(v, bool):
+            try:
+                return round(float(v), 4)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _paper_result_as_sim(res: dict) -> dict:
     status = str((res or {}).get("status") or "")
     px = float((res or {}).get("price") or 0)
     filled = float((res or {}).get("filled_qty") or 0)
     ok = status in ("FILLED", "PARTIAL") and px > 0 and filled > 0
     meta = {k: v for k, v in (res or {}).items() if k not in ("price", "filled_qty")}
+    import paper_fill as _pf
+    # Measured, never a constant: walk vs the uncapped best touch of the fill snapshot, and drift vs the signal
+    # snapshot's touch. None (not 0.0) when a snapshot is missing. Pure measurement over the recorded price.
+    ls = (_pf.leg_slippage((res or {}).get("side"), "entry", filled, px, fill_snapshot=(res or {}).get("depth_snapshot_fill"),
+                           signal_snapshot=(res or {}).get("depth_snapshot_signal")) if ok else {})
     return {**meta, "fill_price": px if ok else 0.0, "filled_qty": filled if ok else 0.0, "is_taker": True,
-            "avg_price": px if ok else 0.0, "best_price": px, "slippage_usd": 0.0,
+            "avg_price": px if ok else 0.0, "best_price": ls.get("touch_px") or px, "slippage_usd": ls.get("walk_usd"),
+            "walk_bp": ls.get("walk_bp"), "entry_delay_drift_usd": ls.get("touch_drift_usd"),
+            "entry_delay_drift_bp": ls.get("touch_drift_bp"),
             "fully_filled": ok and status == "FILLED", "partial_fill": ok and status == "PARTIAL",
             "levels_consumed": 0, "unfilled_qty": 0.0,
             "evidence_status": "COMPLETE" if ok else "UNKNOWN", "unknown_reason": None if ok else status}
@@ -7077,6 +7102,13 @@ def _paper_exit_sim(res: dict, pos: dict, direction: str, qty: float, marks: dic
            "fill_ts": res.get("fill_ts"),
            "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
                                    if trigger > 0 else None)}
+    import paper_fill as _pf
+    ls = _pf.leg_slippage(direction, "exit", qty, px, fill_snapshot=res.get("depth_snapshot_fill"),
+                          signal_snapshot=res.get("depth_snapshot_signal"), trigger_price=trigger)
+    sim.update({"slippage_usd": ls["walk_usd"], "walk_bp": ls["walk_bp"],
+                "exit_delay_drift_usd": ls["trigger_drift_usd"], "exit_delay_drift_bp": ls["trigger_drift_bp"],
+                "exit_touch_drift_usd": ls["touch_drift_usd"], "exit_touch_drift_bp": ls["touch_drift_bp"],
+                "exit_trigger_overshoot_bp": ls["trigger_overshoot_bp"]})
     marks["exit_trigger_price"] = sim["trigger_price"]
     marks["exit_fill_price"] = sim["fill_price"]
     return round(px, 2), sim
@@ -7161,6 +7193,68 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         "depth_snapshot_fill": efs.get("depth_snapshot_fill"),
         "entry_provenance": __import__("tile_fill").provenance(efs) if paper else None,
     }
+
+
+_SLIPPAGE_ROW_KEYS = (
+    "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total", "entry_walk_bp", "exit_walk_bp",
+    "entry_delay_drift_usd", "entry_delay_drift_bp", "exit_delay_drift_usd", "exit_delay_drift_bp",
+    "exit_touch_drift_usd", "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
+    "exit_depth_snapshot_signal", "exit_depth_snapshot_legs", "pricer_signal_ts", "model_fill_ts",
+    "exit_pricer_signal_ts", "exit_model_fill_ts")
+
+
+def _slippage_row_fields(pos: dict, exit_sim, final_qty: float) -> dict:
+    """Closed-row slippage and drift, measured from the recorded fills and their depth snapshots
+    (paper_fill.leg_slippage). Every field is None, never 0.0, for legacy rows (not priced by paper_fill,
+    version < 1), for DISLOC/non-paper lanes and for any leg without a snapshot; a multi-leg close is
+    measured per leg and one unmeasured leg makes the exit aggregate None."""
+    import paper_fill as _pf
+    out = {k: None for k in _SLIPPAGE_ROW_KEYS}
+    if not (_is_paper_book_lane(pos) and _entry_priced_by_paper_fill(pos)):
+        return out
+    side = str(pos.get("dir") or "").upper()
+    efs = _entry_fill_sim(pos)
+    e = _pf.leg_slippage(side, "entry", pos.get("entry_filled_qty") or efs.get("filled_qty"),
+                         efs.get("fill_price") or efs.get("avg_price"),
+                         fill_snapshot=efs.get("depth_snapshot_fill"), signal_snapshot=efs.get("depth_snapshot_signal"))
+    out.update({"book_slippage_usd_entry": e["walk_usd"], "entry_walk_bp": e["walk_bp"],
+                "entry_delay_drift_usd": e["touch_drift_usd"], "entry_delay_drift_bp": e["touch_drift_bp"],
+                "pricer_signal_ts": efs.get("signal_ts"), "model_fill_ts": efs.get("fill_ts")})
+    legs, snaps = [], []
+    for r in pos.get("partial_exit_receipts") or []:
+        if r.get("realized_gross_usd") is None:  # the terminal action is priced as the final leg, not a partial
+            continue
+        prov = r.get("leg_provenance") if isinstance(r.get("leg_provenance"), dict) else {}
+        leg = r.get("leg_slippage")
+        if not isinstance(leg, dict):
+            leg = _pf.leg_slippage(side, "exit", r.get("closed_qty"), r.get("price"),
+                                   fill_snapshot=prov.get("depth_snapshot_fill"),
+                                   signal_snapshot=prov.get("depth_snapshot_signal"),
+                                   trigger_price=r.get("leg_trigger_price"))
+        legs.append({**leg, "qty": r.get("closed_qty")})
+        snaps.append({"qty": r.get("closed_qty"), "price": r.get("price"),
+                      "signal": prov.get("depth_snapshot_signal"), "fill": prov.get("depth_snapshot_fill")})
+    x = exit_sim if isinstance(exit_sim, dict) and exit_sim.get("source") == "paper_fill_book10l" else None
+    if x is not None and (_pf.as_number(x.get("fill_model_version")) or 0) >= 1:
+        leg = _pf.leg_slippage(side, "exit", final_qty, x.get("fill_price"), fill_snapshot=x.get("depth_snapshot_fill"),
+                               signal_snapshot=x.get("depth_snapshot_signal"), trigger_price=x.get("trigger_price"))
+        legs.append({**leg, "qty": final_qty})
+        snaps.append({"qty": final_qty, "price": x.get("fill_price"), "signal": x.get("depth_snapshot_signal"),
+                      "fill": x.get("depth_snapshot_fill")})
+        out.update({"exit_depth_snapshot_signal": x.get("depth_snapshot_signal"),
+                    "exit_pricer_signal_ts": x.get("signal_ts"), "exit_model_fill_ts": x.get("fill_ts")})
+    else:  # no pricer receipt for the final leg: unmeasured, not free
+        legs.append({"qty": final_qty})
+        snaps.append({"qty": final_qty, "price": None, "signal": None, "fill": None})
+    agg = _pf.aggregate_legs(legs)
+    out.update({"book_slippage_usd_exit": agg["walk_usd"], "exit_walk_bp": agg["walk_bp"],
+                "exit_delay_drift_usd": agg["trigger_drift_usd"], "exit_delay_drift_bp": agg["trigger_drift_bp"],
+                "exit_touch_drift_usd": agg["touch_drift_usd"], "exit_touch_drift_bp": agg["touch_drift_bp"],
+                "exit_trigger_overshoot_bp": agg["trigger_overshoot_bp"], "exit_legs": agg["legs"],
+                "exit_legs_unmeasured": agg["legs_unmeasured"], "exit_depth_snapshot_legs": snaps})
+    if out["book_slippage_usd_entry"] is not None and out["book_slippage_usd_exit"] is not None:
+        out["book_slippage_usd_total"] = round(out["book_slippage_usd_entry"] + out["book_slippage_usd_exit"], 6)
+    return out
 
 
 def _row_priced_by_paper_fill(pos: dict) -> bool:
@@ -23056,8 +23150,16 @@ def _recompute_research_balance_from_trades():
         f"fresh_collection={bool(state.get('fresh_collection_mode', False))} [PIPELINE ENFORCEMENT]"
     )
 
-_RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms")
+_RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
+                          # nullable measured slippage: a null written as '' must reload as None, never 0.0
+                          "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total",
+                          "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp",
+                          "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
+                          "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
+                          "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts")
+_RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
+                          "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
                           "entry_provenance", "exit_provenance", "funding_settlement_rates")
 
 
@@ -23072,7 +23174,7 @@ def _restore_reloaded_row_types(trade: dict) -> None:
     for k in _RELOAD_NUMERIC_FIELDS:
         if isinstance(trade.get(k), str):
             n = _pf.as_number(trade[k])
-            trade[k] = (int(n) if n is not None and k == "fill_model_version" and n == int(n) else n)
+            trade[k] = (int(n) if n is not None and k in _RELOAD_INT_FIELDS and n == int(n) else n)
     for k in _RELOAD_LITERAL_FIELDS:
         v = trade.get(k)
         if isinstance(v, str):
@@ -29928,7 +30030,7 @@ def execute_market_order(signal):
         "created_ts": signal.get("order_created_ts") or time.time(),
         "fee_type": "TAKER",
         "fill_sim": {k: v for k, v in sim.items() if k not in ("avg_price", "filled_qty")},
-        "book_slippage_usd": sim.get("slippage_usd", 0),
+        "book_slippage_usd": sim.get("slippage_usd"),
     }
     if execution_mode_for_lane(signal.get("research_lane")) == EXEC_MODE_LIVE:
         submitted_id = _maybe_bitfinex_market_entry(signal, qty)
@@ -31469,8 +31571,7 @@ def close_position(pos: dict, exit_reason: str):
         slippage = pos.get("entry_slippage")
         if slippage is None:
             slippage = abs(float(entry) - float(pos.get("signal_price", entry)))
-        book_slip = float(pos.get("book_slippage_usd") or _entry_fill_sim(pos).get("slippage_usd") or 0)
-        exit_book_slip = float((exit_sim or {}).get("slippage_usd") or 0)
+        slip_fields = _slippage_row_fields(pos, exit_sim, float(qty))
         momentum_val = _compute_momentum_metric(features)
         volatility_val = _compute_volatility_metric(features)
         entry_sr_state = pos.get("entry_sr_state") or context.get("sr_state", "UNKNOWN")
@@ -31633,9 +31734,7 @@ def close_position(pos: dict, exit_reason: str):
             "limit_chase_count": int(pos.get("limit_chase_count") or master.get("limit_chase_count") or 0),
             "urgent_chase_tier": pos.get("urgent_chase_tier") or master.get("urgent_chase_tier"),
             "slippage": round(float(slippage), 6),
-            "book_slippage_usd_entry": round(book_slip, 4),
-            "book_slippage_usd_exit": round(exit_book_slip, 4),
-            "book_slippage_usd_total": round(book_slip + exit_book_slip, 4),
+            **slip_fields,
             "entry_partial_fill": bool(pos.get("partial_fill")),
             "maker_fees": pos.get("maker_fees", 0.0),
             "taker_fees": pos.get("taker_fees", 0.0),
@@ -46731,20 +46830,20 @@ def _monitor_lane_rows(lanes) -> tuple[dict, float]:
                 continue
             bucket.append((row.get("ts"), row.get("net_pnl_usd"), row.get("margin_usdt"), row.get("leverage"),
                            row.get("dir") or row.get("final_direction"), row.get("book_slippage_usd_total"),
-                           row.get("pnl"), monitor_api.trade_net_bp(row)))
+                           row.get("pnl"), monitor_api.trade_net_bp(row), row.get("fill_model_version")))
     finally:
         trade_lock.release()
     shaped = {}
     for lane, raw in rows.items():
         shaped[lane] = []
-        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct, net_bp in raw:
+        for ts, net, margin, leverage, direction, slippage, pnl_margin_pct, net_bp, fill_version in raw:
             try:
                 notional = float(margin or 0.0) * float(leverage or 0.0)
             except (TypeError, ValueError):
                 notional = 0.0
             shaped[lane].append({"close_ts": parse_ts(ts or "") or None, "net_pnl_usd": net,
                                  "notional_usd": notional, "direction": direction,
-                                 "book_slippage_usd": slippage,
+                                 "book_slippage_usd": slippage, "fill_model_version": fill_version,
                                  # Precise per-trade bp source (net_pnl_usd is cent-rounded).
                                  "pnl_margin_pct": pnl_margin_pct, "leverage": leverage,
                                  # W/L source: price-based net bp (same rule as the lane ledgers).

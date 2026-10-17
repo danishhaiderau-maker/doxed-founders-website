@@ -338,7 +338,9 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
             bp_weighted += bp * row_notional
             bp_notional += row_notional
             bp_bases.add(basis)
-        if row.get("book_slippage_usd") is not None:
+        # Average only measured rows priced by the shared pricer (fill_model_version >= 1): legacy and DISLOC rows
+        # are null, never 0.0, and the denominator is published as n_slippage_rows.
+        if row.get("book_slippage_usd") is not None and _num(row.get("fill_model_version")) >= 1:
             slip_sum += _num(row.get("book_slippage_usd"))
             slip_n += 1
         cumulative += pnl
@@ -359,6 +361,7 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
         "max_drawdown_usd": round(drawdown, 4),
         "last_trade_at": utc_iso(last_ts) if last_ts else None,
         "mean_book_slippage_usd": round(slip_sum / slip_n, 4) if slip_n else None,
+        "n_slippage_rows": slip_n,
     }
 
 
