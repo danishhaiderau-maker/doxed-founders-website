@@ -129,6 +129,47 @@ def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
     return view
 
 
+_RECEIPT_DIRS = ("full-reset-receipts", "research_reset_receipts")
+_RECEIPT_JSON_MAX = 2 * 1024 * 1024
+_RECEIPT_MAX_FILES = 200
+
+
+def read_receipt_summary(runtime_root) -> dict:
+    """Read-only summary of the reset receipt directories (names, sizes, shape of small JSON receipts).
+
+    Bounded: at most 200 files per receipt directory, JSON only under 2 MiB, no deletion or writes. It lets
+    a reviewer reconcile the progress counters (targets / fingerprinted bytes over every scope) with the
+    receipt files without shell access."""
+    root = Path(runtime_root)
+    out = {"schema": "full_reset_receipt_summary_v1", "directories": [],
+           "note": "progress targets/bytes count every scope's fingerprinted payload; receipt files describe each pass"}
+    for name in _RECEIPT_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        for sub in sorted(p for p in base.iterdir() if p.is_dir()):
+            files, total, truncated = [], 0, False
+            for index, path in enumerate(sorted(p for p in sub.rglob("*") if p.is_file())):
+                if index >= _RECEIPT_MAX_FILES:
+                    truncated = True
+                    break
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                total += size
+                entry = {"file": str(path.relative_to(root)), "bytes": size}
+                if path.suffix == ".json" and size <= _RECEIPT_JSON_MAX:
+                    doc = _read_json(path)
+                    if isinstance(doc, dict):
+                        entry["shape"] = {k: (v if isinstance(v, (str, int, float, bool)) or v is None
+                                              else f"{type(v).__name__}[{len(v)}]") for k, v in list(doc.items())[:40]}
+                files.append(entry)
+            out["directories"].append({"dir": f"{name}/{sub.name}", "files_listed": len(files),
+                                       "bytes_listed": total, "truncated": truncated, "files": files})
+    return out
+
+
 class HeartbeatPublisher(threading.Thread):
     """Runs in the bot while a job is active. Its own liveness measures starvation."""
 

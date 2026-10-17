@@ -162,7 +162,8 @@ def dv_failures(row_text: str, status: dict, fresh_start: dict) -> list[str]:
     # (canonical_epoch.aliases.collector_v22_epoch_id). fresh_epoch_id stays None unless Fresh Collection
     # mode is on, and canonical_epoch_id is the DATA_EPOCH_ID env value, so neither can gate the verify.
     aliases = (((status or {}).get("canonical_epoch") or {}).get("aliases") or {})
-    if not (aliases.get("collector_v22_epoch_id") or aliases.get("fresh_epoch_id")):
+    if not ((status or {}).get("collection_epoch_id") or aliases.get("collector_v22_epoch_id")
+            or aliases.get("fresh_epoch_id")):
         bad.append("/api/status canonical_epoch.aliases has no bound collection epoch id")
     return bad
 

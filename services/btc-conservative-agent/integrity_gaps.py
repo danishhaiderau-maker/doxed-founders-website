@@ -51,6 +51,23 @@ def oldest_row_ts(path: str) -> Optional[float]:
 _DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", ".sqlite3", ".db", ".npz", ".pkl")
 
 
+def retained_by_design(rel: str) -> bool:
+    """HM post-wipe 18 Oct: runtime state kept by design, never an old-data offender in G16.
+
+    v3 emergency/owner/recovery receipts (the reset retains them on purpose), live_copy_*.json runtime
+    config, and quarantine/v3_completeness_markers/ (moved aside, never deleted). The pinned
+    keep_manifest (and its hash) is deliberately NOT changed."""
+    rel = rel.replace("\\", "/")
+    name = rel.rsplit("/", 1)[-1]
+    if name.startswith("live_copy_") and name.endswith(".json"):
+        return True
+    if "quarantine/v3_completeness_markers" in rel:
+        return True
+    if "/v3/receipts/" in f"/{rel}":
+        return any(w in rel for w in ("owner", "recovery", "emergency"))
+    return False
+
+
 def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
     """G16 Fly side: oldest-data ts of every data file under root (recursive, no file cap).
 
@@ -68,7 +85,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
         rel_d = "" if rel_d == "." else rel_d
         for sub in list(dirs):
             rd = f"{rel_d}/{sub}" if rel_d else sub
-            if km.kept_dir(rd, keep):
+            if km.kept_dir(rd, keep) or retained_by_design(rd + "/"):
                 kept_dirs.append(rd)
                 dirs.remove(sub)
         for n in names:
@@ -86,7 +103,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
                     ts = os.path.getmtime(path)
                 except OSError:
                     continue
-            (kept if km.is_kept(rel, keep) else files)[rel] = ts
+            (kept if (km.is_kept(rel, keep) or retained_by_design(rel)) else files)[rel] = ts
         if not complete:
             break
     return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}

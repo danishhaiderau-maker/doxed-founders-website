@@ -33755,7 +33755,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
     "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
-    "/api/monitor/fresh-start", "/api/monitor/full-reset",
+    "/api/monitor/fresh-start", "/api/monitor/full-reset", "/api/monitor/full-reset/receipt",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -45643,6 +45643,7 @@ def _build_api_state_snapshot():
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         _epoch_id, _epoch_cutoff, _epoch_kind = _fresh_epoch_identity_from_session()
         snapshot["fresh_epoch_id"] = _epoch_id
+        snapshot["collection_epoch_id"] = _bound_collection_epoch_id() or None
         snapshot["fresh_epoch_kind"] = _epoch_kind
         snapshot.update(_epoch_trade_scope_fields())
         # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
@@ -49321,6 +49322,7 @@ def health():
         "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
+        "collection_epoch_id": _bound_collection_epoch_id() or None,
         "execution_paused": bool(state.get("execution_paused", False)),
         "execution_reason": state.get("execution_reason", ""),
         "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
@@ -50701,6 +50703,15 @@ def monitor_full_reset_route():
         armed = bool(state.get("live_armed"))  # plain dict read: no lock, route must not block
         return full_reset_job.read_status(_data_sync_runtime_root(), live_armed=armed, now=now)
     return _monitor_tiles_guard(build, 64 * 1024)
+
+
+@app.route('/api/monitor/full-reset/receipt', methods=["GET"])
+def monitor_full_reset_receipt_route():
+    """Read-only, bounded summary of the reset receipt directories (no writes, no deletion)."""
+    def build(now):
+        import full_reset_job
+        return full_reset_job.read_receipt_summary(_data_sync_runtime_root())
+    return _monitor_tiles_guard(build, 256 * 1024)
 
 
 _FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"

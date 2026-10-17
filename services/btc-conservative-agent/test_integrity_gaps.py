@@ -107,3 +107,20 @@ def test_route_registered():
     src = open("bot.py").read()
     assert "@app.route('/api/monitor/integrity-gaps'" in src
     assert "phase_fn=_RELAY_PHASES.drain" in src
+
+
+def test_g16_scan_retains_by_design_runtime_state(tmp_path):
+    import os
+    for rel in ("runtime/v3/receipts/emergency_record_idempotency_v1/a/x.json",
+                "runtime/v3/receipts/owner_x/y.json", "runtime/v3/receipts/recovery_z/z.json",
+                "quarantine/v3_completeness_markers/m.json", "runtime/live_copy_1.json", "runtime/old.jsonl"):
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{}")
+    other = tmp_path / "runtime/v3/receipts/ledger_generations_v1/g.json"
+    other.parent.mkdir(parents=True)
+    other.write_text("{}")
+    got = ig.scan_local_oldest(str(tmp_path))
+    assert set(got["files"]) == {"runtime/old.jsonl", "runtime/v3/receipts/ledger_generations_v1/g.json"}
+    assert "runtime/live_copy_1.json" in got["kept"]
+    assert not ig.retained_by_design("runtime/v3/receipts/ledger_generations_v1/g.json")
