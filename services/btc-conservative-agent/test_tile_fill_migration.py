@@ -1,6 +1,7 @@
 """Lanes 1-5 migration (Danish 16 Oct 17:01): every tile prices through paper_fill; CI guards."""
 import ast
 import pathlib
+import pytest
 
 import combo_pathway_config as cpc
 import paper_fill as pf
@@ -467,8 +468,8 @@ def _entry_pos(monkeypatch, lane="FAMILY_GSB2_REGIME_SWITCHER", exit_status="PAP
     ns = _bot_ns(["_paper_result_as_sim"])
     res = tf.entry_fill("LONG", 0.5, 99.0, 1.5, "default_until_n10")
     # the same shape _build_open_position stores: pos["entry_fill_sim"] = order["fill_sim"] (no "fill_sim" key)
-    sim = {k: v for k, v in ns["_paper_result_as_sim"](res).items() if k not in ("fill_price", "filled_qty")}
-    return {"research_lane": lane, "entry_fill_sim": sim, "exit_status": exit_status,
+    sim = {k: v for k, v in ns["_paper_result_as_sim"](res).items() if k not in ("avg_price", "filled_qty")}
+    return {"research_lane": lane, "entry_fill_sim": sim, "exit_status": exit_status, "entry_filled_qty": 0.5,
             "fill_model": "AI_DIRECT"}  # the legacy label _resolve_fill_model puts on the position
 
 
@@ -555,7 +556,7 @@ def _csv_ns(tmp_path, monkeypatch):
     import re as _re
     names = ["_ascii_fold_csv_text", "safe_csv_row", "_atomic_write_csv_rows", "_dynamic_csv_writer_once",
              "_trade_row_in_session", "_restore_reloaded_row_types", "load_session_trades_from_csv",
-             "_RELOAD_NUMERIC_FIELDS", "_RELOAD_LITERAL_FIELDS"]
+             "_RELOAD_NUMERIC_FIELDS", "_RELOAD_INT_FIELDS", "_RELOAD_LITERAL_FIELDS"]
     path = str(tmp_path / "trades_3factor.csv")
     loaded = []
     ns = _bot_ns(names, csv=_csv, re=_re, unicodedata=__import__("unicodedata"), CSV_TRADES=path, trades=loaded,
@@ -631,3 +632,173 @@ def test_open_row_shows_entry_pricing_not_pre_realistic(monkeypatch):
     assert row["pricing"]["state"].startswith("OPEN") and row["pricing"]["fresh_eligible"] is None
     assert row["fill"]["fill_model"] == pf.FILL_MODEL
     assert mt.row_is_fresh(row) is True  # open rows are not trades; fresh_only keeps showing them as before
+
+
+# ---- measured slippage / drift (17 Oct): pure measurement over recorded fills, null not 0.0 -------------------
+SNAP = {"s": 1, "a": [[100.0, 1.0], [100.05, 1.0]], "b": [[99.9, 1.0], [99.85, 1.0]]}
+
+
+def test_leg_slippage_walk_is_measured_against_the_uncapped_best_touch_of_the_same_snapshot():
+    # entry LONG buys the ask: recorded 100.0 == touch -> 0; recorded 100.025 (walked into level 2) -> cost
+    flat = pf.leg_slippage("LONG", "entry", 0.5, 100.0, fill_snapshot=SNAP, signal_snapshot=SNAP)
+    assert flat["walk_usd"] == 0.0 and flat["walk_bp"] == 0.0 and flat["touch_px"] == 100.0
+    walked = pf.leg_slippage("LONG", "entry", 2.0, 100.025, fill_snapshot=SNAP)
+    assert walked["walk_usd"] == pytest.approx(0.05) and walked["walk_bp"] == pytest.approx(2.5, abs=1e-3)
+    assert walked["walk_within_cap"] is True
+    assert pf.leg_slippage("LONG", "entry", 1.0, 100.2, fill_snapshot=SNAP)["walk_within_cap"] is False  # 20 bp
+    # entry SHORT sells the bid; exit LONG sells the bid; exit SHORT buys the ask
+    assert pf.leg_slippage("SHORT", "entry", 1.0, 99.85, fill_snapshot=SNAP)["walk_usd"] == pytest.approx(0.05)
+    assert pf.leg_slippage("LONG", "exit", 1.0, 99.85, fill_snapshot=SNAP)["walk_usd"] == pytest.approx(0.05)
+    assert pf.leg_slippage("SHORT", "exit", 1.0, 100.05, fill_snapshot=SNAP)["walk_usd"] == pytest.approx(0.05)
+
+
+def test_leg_slippage_drift_signs_entry_vs_signal_touch_and_exit_trigger_to_fill():
+    sig = {"s": 0, "a": [[100.0, 5.0]], "b": [[99.9, 5.0]]}
+    fill = {"s": 1, "a": [[100.1, 5.0]], "b": [[99.8, 5.0]]}
+    # entry LONG: filled 100.1 vs signal touch 100.0 -> adverse, negative drift, ~ -10 bp
+    e = pf.leg_slippage("LONG", "entry", 1.0, 100.1, fill_snapshot=fill, signal_snapshot=sig)
+    assert e["touch_drift_bp"] == pytest.approx(-10.0, abs=1e-3) and e["touch_drift_usd"] == pytest.approx(-0.1)
+    assert e["trigger_drift_bp"] is None  # trigger-to-fill applies only to exits
+    # exit LONG sells: trigger 100.0, filled 99.8 -> adverse (negative); overshoot = trigger vs signal bid
+    x = pf.leg_slippage("LONG", "exit", 2.0, 99.8, fill_snapshot=fill, signal_snapshot=sig, trigger_price=100.0)
+    assert x["trigger_drift_bp"] == pytest.approx(-20.0, abs=1e-3) and x["trigger_drift_usd"] == pytest.approx(-0.4)
+    assert x["touch_drift_bp"] == pytest.approx(-10.0, abs=1e-2)
+    assert x["trigger_overshoot_bp"] == pytest.approx(10.0, abs=1e-2)  # trigger above the signal-second bid
+    # favourable fill is positive
+    assert pf.leg_slippage("LONG", "exit", 1.0, 100.2, fill_snapshot=fill, trigger_price=100.0)["trigger_drift_bp"] > 0
+
+
+def test_leg_slippage_is_null_not_zero_without_inputs_and_aggregate_goes_null_on_an_unmeasured_leg():
+    miss = pf.leg_slippage("LONG", "exit", 1.0, 100.0, fill_snapshot=None, signal_snapshot=None, trigger_price=100.0)
+    assert miss["walk_usd"] is None and miss["walk_bp"] is None and miss["touch_drift_bp"] is None
+    assert miss["trigger_drift_bp"] == 0.0  # the trigger itself is known; only the book legs are null
+    assert pf.leg_slippage("LONG", "entry", 1.0, None, fill_snapshot=SNAP)["walk_usd"] is None
+    assert pf.leg_slippage("LONG", "entry", 1.0, 100.0, fill_snapshot={"a": [], "b": []})["walk_usd"] is None
+    good = {**pf.leg_slippage("LONG", "exit", 1.0, 99.85, fill_snapshot=SNAP), "qty": 1.0}
+    both = pf.aggregate_legs([good, {**good, "qty": 3.0}])
+    assert both["walk_usd"] == pytest.approx(0.1) and both["walk_bp"] == pytest.approx(5.0, abs=1e-2) and both["legs_unmeasured"] == 0
+    one_null = pf.aggregate_legs([good, {"qty": 1.0, **miss}])
+    assert one_null["walk_usd"] is None and one_null["walk_bp"] is None and one_null["legs_unmeasured"] == 1
+    assert pf.aggregate_legs([])["walk_usd"] is None
+
+
+def _slip_ns():
+    return _bot_ns(["_entry_fill_sim", "_entry_priced_by_paper_fill", "_SLIPPAGE_ROW_KEYS", "_slippage_row_fields", "_paper_exit_sim"],
+                   _is_paper_book_lane=lambda pos: pos.get("research_lane") in tf.MIGRATED_LANES)
+
+
+def _exit_sim(monkeypatch, direction="LONG", qty=0.5, trigger=100.5):
+    _use_book(monkeypatch)
+    ns = _slip_ns()
+    res = tf.exit_fill(direction, qty, 120.0, 1.5, "default_until_n10")
+    _px, sim = ns["_paper_exit_sim"](res, {"_exit_eval_price": trigger}, direction, qty, {})
+    return sim
+
+
+def test_entry_and_exit_sims_carry_measured_slippage_and_the_row_fields_are_consistent(monkeypatch):
+    pos = _entry_pos(monkeypatch)
+    pos["dir"] = "LONG"
+    efs = pos["entry_fill_sim"]
+    assert efs["slippage_usd"] is not None and efs["walk_bp"] is not None  # no longer a constant 0.0 placeholder
+    assert efs["best_price"] == pf.best_touch("LONG", "entry", efs["depth_snapshot_fill"])
+    assert "entry_delay_drift_bp" in efs and efs["signal_ts"] == 99.0 and efs["fill_ts"] == 100.5
+    sim = _exit_sim(monkeypatch)
+    assert sim["slippage_usd"] is not None and sim["exit_delay_drift_bp"] is not None
+    assert sim["exit_trigger_overshoot_bp"] is not None
+    ns = _slip_ns()
+    out = ns["_slippage_row_fields"](pos, sim, 0.5)
+    assert out["book_slippage_usd_total"] == pytest.approx(out["book_slippage_usd_entry"] + out["book_slippage_usd_exit"], abs=1e-6)
+    assert out["exit_legs"] == 1 and out["exit_legs_unmeasured"] == 0 and len(out["exit_depth_snapshot_legs"]) == 1
+    assert out["exit_depth_snapshot_signal"] == sim["depth_snapshot_signal"]
+    assert out["pricer_signal_ts"] == 99.0 and out["model_fill_ts"] == 100.5
+    assert out["exit_pricer_signal_ts"] == 120.0 and out["exit_model_fill_ts"] == 121.5
+    assert out["exit_delay_drift_bp"] == sim["exit_delay_drift_bp"]  # headline exit drift = trigger to fill
+
+
+def test_multi_leg_close_measures_each_leg_and_a_leg_without_a_snapshot_is_null(monkeypatch):
+    pos = _entry_pos(monkeypatch)
+    pos["dir"] = "LONG"
+    sim = _exit_sim(monkeypatch)
+    prov = {"depth_snapshot_signal": SNAP, "depth_snapshot_fill": SNAP}
+    leg_ok = {"realized_gross_usd": 1.0, "closed_qty": 0.25, "price": 99.9, "leg_trigger_price": 100.0,
+              "leg_provenance": prov}
+    pos["partial_exit_receipts"] = [leg_ok]
+    ns = _slip_ns()
+    ok = ns["_slippage_row_fields"](pos, sim, 0.5)
+    assert ok["exit_legs"] == 2 and ok["exit_legs_unmeasured"] == 0 and ok["book_slippage_usd_exit"] is not None
+    assert ok["exit_depth_snapshot_legs"][0]["fill"] == SNAP
+    pos["partial_exit_receipts"] = [{**leg_ok, "leg_provenance": {"depth_snapshot_signal": None, "depth_snapshot_fill": None}}]
+    bad = ns["_slippage_row_fields"](pos, sim, 0.5)
+    assert bad["exit_legs_unmeasured"] == 1 and bad["book_slippage_usd_exit"] is None and bad["book_slippage_usd_total"] is None
+    assert bad["book_slippage_usd_entry"] is not None  # the entry leg is still measured
+    pos["partial_exit_receipts"] = [{**leg_ok, "realized_gross_usd": None}]  # the terminal action is not a partial leg
+    assert ns["_slippage_row_fields"](pos, sim, 0.5)["exit_legs"] == 1
+
+
+def test_legacy_non_paper_and_unpriced_exit_rows_are_all_null_not_zero(monkeypatch):
+    ns = _slip_ns()
+    legacy = {"research_lane": "FAMILY_GSB2_REGIME_SWITCHER", "dir": "LONG",
+              "entry_fill_sim": {"fill_model": "AI_DIRECT", "slippage_usd": 0.0}}
+    assert all(v is None for v in ns["_slippage_row_fields"](legacy, None, 1.0).values())
+    other = {**_entry_pos(monkeypatch), "research_lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "dir": "LONG"}
+    assert all(v is None for v in ns["_slippage_row_fields"](other, None, 1.0).values())
+    pos = {**_entry_pos(monkeypatch), "dir": "LONG"}
+    forced = ns["_slippage_row_fields"](pos, None, 0.5)  # exit never priced by the book (FORCED_NO_BOOK)
+    assert forced["book_slippage_usd_exit"] is None and forced["book_slippage_usd_total"] is None
+    assert forced["exit_legs_unmeasured"] == 1 and forced["book_slippage_usd_entry"] is not None
+
+
+def test_lane_stats_averages_only_version_1_rows_and_publishes_the_denominator():
+    import monitor_api as ma
+    rows = [{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.2, "fill_model_version": 1},
+            {"close_ts": 2, "net_pnl_usd": 1.0, "book_slippage_usd": 0.4, "fill_model_version": 1},
+            {"close_ts": 3, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": None},  # legacy
+            {"close_ts": 4, "net_pnl_usd": 1.0, "book_slippage_usd": None, "fill_model_version": 1},  # unmeasured
+            {"close_ts": 5, "net_pnl_usd": 1.0, "book_slippage_usd": None}]  # DISLOC shape
+    st = ma.lane_stats(rows)
+    assert st["mean_book_slippage_usd"] == pytest.approx(0.3) and st["n_slippage_rows"] == 2 and st["closes"] == 5
+    none = ma.lane_stats([{"close_ts": 1, "net_pnl_usd": 1.0, "book_slippage_usd": 0.0, "fill_model_version": None}])
+    assert none["mean_book_slippage_usd"] is None and none["n_slippage_rows"] == 0
+
+
+def test_slippage_fields_round_trip_through_the_csv_writer_and_loader(tmp_path, monkeypatch):
+    import monitor_tiles as mt
+    ns, path, loaded = _csv_ns(tmp_path, monkeypatch)
+    pos = {**_entry_pos(monkeypatch), "dir": "LONG"}
+    sim = _exit_sim(monkeypatch)
+    sns = _slip_ns()
+    measured = sns["_slippage_row_fields"](pos, sim, 0.5)
+    unmeasured = sns["_slippage_row_fields"](pos, None, 0.5)  # exit/total/legs-null row, entry measured
+    legacy = sns["_slippage_row_fields"]({"research_lane": "X"}, None, 0.5)
+    rows = [_closed_row(monkeypatch, "m-1", **measured), _closed_row(monkeypatch, "u-1", **unmeasured),
+            _closed_row(monkeypatch, "l-1", **legacy)]
+    for r in rows:
+        ns["_dynamic_csv_writer_once"](path, r)
+    assert ns["load_session_trades_from_csv"]() == 3
+    back = {t["trade_id"]: t for t in loaded}
+    for key in ("book_slippage_usd_total", "book_slippage_usd_exit", "exit_walk_bp", "exit_delay_drift_bp",
+                "exit_depth_snapshot_signal", "exit_depth_snapshot_legs", "exit_legs", "exit_legs_unmeasured",
+                "pricer_signal_ts", "exit_model_fill_ts", "entry_delay_drift_bp"):
+        for tid, src in (("m-1", measured), ("u-1", unmeasured), ("l-1", legacy)):
+            assert back[tid][key] == src[key], (tid, key, back[tid][key], src[key])
+            assert (back[tid][key] is None) == (src[key] is None), (tid, key)  # '' must not become 0.0
+    assert back["u-1"]["book_slippage_usd_total"] is None and back["l-1"]["book_slippage_usd_entry"] is None
+    assert isinstance(back["m-1"]["exit_legs"], int) and isinstance(back["m-1"]["exit_depth_snapshot_legs"], list)
+    for tid in ("m-1", "u-1", "l-1"):
+        assert mt.pricing_block(back[tid]) == mt.pricing_block(next(r for r in rows if r["trade_id"] == tid))
+    mb = mt.pricing_block(back["m-1"])
+    assert mb["exit_legs"] == 1 and mb["book_slippage_usd_total"] == measured["book_slippage_usd_total"]
+
+
+def test_slippage_helpers_are_pure_measurement_and_never_touch_fill_sites():
+    import ast as _ast
+    src = pathlib.Path(pf.__file__).read_text()
+    tree = _ast.parse(src)
+    for name in ("best_touch", "leg_slippage", "aggregate_legs"):
+        fn = next(n for n in tree.body if isinstance(n, _ast.FunctionDef) and n.name == name)
+        calls = {c.func.id for c in _ast.walk(fn) if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)}
+        assert not (calls & {"paper_fill", "_walk", "book10l_at"}), (name, calls)  # never re-walk or re-price
+    for lane, sites in pf.TILE_FILL_SITES.items():
+        for module, func in sites:
+            assert not pf.fill_site_violations((ROOT / module).read_text(), func), (lane, func)
+    assert not pf.tile_module_violations((ROOT / "tile_fill.py").read_text(), "tile_fill.py", (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")))
