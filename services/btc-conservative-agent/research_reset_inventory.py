@@ -244,6 +244,11 @@ def _proof_valid(root, proof):
 # the observed count and equals the validation ceiling below, so it stays a hard cap.
 RESET_MAX_ENTRIES = 1_000_000
 
+# Optional cooperative-yield hook, called every SCAN_YIELD_EVERY scanned entries. The
+# background reset worker installs a heartbeat guard here; default None changes nothing.
+SCAN_YIELD_HOOK = None
+SCAN_YIELD_EVERY = 2048
+
 
 def plan_research_reset(runtime_root, *, proof=None, max_entries=RESET_MAX_ENTRIES, max_depth=12,
                         max_metadata_bytes=4 * 1024 * 1024, allow_fly_runtime_aliases=False,
@@ -298,6 +303,8 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=RESET_MAX_ENTRI
             with os.scandir(io_path(directory)) as items:
                 for item in items:
                     scanned += 1
+                    if SCAN_YIELD_HOOK is not None and scanned % SCAN_YIELD_EVERY == 0:
+                        SCAN_YIELD_HOOK()
                     if scanned > max_entries:
                         errors.append("ENTRY_BUDGET_EXCEEDED")
                         break

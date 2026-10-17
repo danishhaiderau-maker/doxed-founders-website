@@ -49,19 +49,20 @@ def test_runtime_attempt_shape_and_all_executor_wiring(tmp_path):
     tree=ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
     function=next(n for n in tree.body if isinstance(n,ast.FunctionDef)
                   and n.name=='_perform_fresh_collection_reset_quiesced')
+    # Every executor call goes through full_reset_job.heavy_execute, which builds the
+    # advisory progress callback (direct) or runs the isolated worker (background job).
     calls=[n for n in ast.walk(function) if isinstance(n,ast.Call)
-           and isinstance(n.func,ast.Name) and n.func.id=='execute_research_reset']
+           and isinstance(n.func,ast.Attribute) and n.func.attr=='heavy_execute']
     assert len(calls)==3
+    assert not [n for n in ast.walk(function) if isinstance(n,ast.Call)
+                and isinstance(n.func,ast.Name) and n.func.id=='execute_research_reset']
     for call in calls:
+        assert ast.unparse(call.args[0])=='execute_research_reset'
+        assert [ast.unparse(a) for a in call.args[1:3]]==['root','diagnostic_attempt_id']
+        assert ast.unparse(call.args[3])=='reset_id'
         kwargs={k.arg:k.value for k in call.keywords}
-        callback=kwargs['progress_callback']
-        assert isinstance(callback,ast.Call) and callback.func.id=='make_reset_progress_callback'
-        assert ast.unparse(callback.args[0])=='root'
-        identity={k.arg:ast.unparse(k.value) for k in callback.keywords}
-        assert identity['attempt_id']=='diagnostic_attempt_id'
-        assert identity['reset_id']=='reset_id'
-        if 'scope_name' in kwargs:
-            assert identity['scope_name']==ast.unparse(kwargs['scope_name'])
+        assert 'progress_callback' not in kwargs
+        assert ast.unparse(call.args[4])==(ast.unparse(kwargs['scope_name']) if 'scope_name' in kwargs else 'None')
 
 
 def test_storage_failure_nonfatal(tmp_path,monkeypatch):

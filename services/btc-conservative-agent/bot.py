@@ -33755,7 +33755,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
     "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
-    "/api/monitor/fresh-start",
+    "/api/monitor/fresh-start", "/api/monitor/full-reset",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -35653,10 +35653,12 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
     from research_reset_progress import make_reset_progress_callback
     from uuid import uuid4
+    import full_reset_job
 
     global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
     reset_anchor = time.time()
     stage = "BOUNDARY"
+    full_reset_job.note(stage)
     boundary = None
     result = None
     operation_path = None
@@ -35691,20 +35693,20 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         target_stability = None
         if not resume:
             stage = "ALL_SCOPES_PREFLIGHT"
+            full_reset_job.note(stage)
             write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
                                             stage=stage, status="STARTED")
             from research_reset_target_stability import assert_targets_stable, sample_targets
-            stability_sample = sample_targets(root, proof, [None, *physical_scopes])
+            stability_sample = full_reset_job.heavy_sample(root, proof, [None, *physical_scopes], sample_targets)
             for name in [None, *physical_scopes]:
                 scope_root = root if name is None else _managed_fly_alias(root, root / name)
                 if scope_root is None:
                     raise RuntimeError("RESET_SCOPE_ALIAS_CHANGED")
-                preflight = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
+                preflight = full_reset_job.heavy_execute(execute_research_reset, root, diagnostic_attempt_id, reset_id, name,
+                    runtime_root=root, proof=proof, quiescent=True,
                     recovery_states=boundary["recovery_states"],
                     receipt_path=scope_root / "research_reset_receipts" / reset_id / "deletion.json",
-                    allow_fly_runtime_aliases=True, scope_name=name, validate_only=True,
-                    progress_callback=make_reset_progress_callback(root,
-                        attempt_id=diagnostic_attempt_id, reset_id=reset_id, scope_name=name))
+                    allow_fly_runtime_aliases=True, scope_name=name, validate_only=True)
                 if preflight.get("status") != "VALIDATED":
                     raise RuntimeError("RESET_SCOPE_PREFLIGHT_FAILED")
                 preflights.append({key: preflight[key] for key in
@@ -35712,7 +35714,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                      "plan_sha256", "proof_sha256", "target_count", "target_bytes")})
             try:
                 target_stability = assert_targets_stable(
-                    stability_sample, sample_targets(root, proof, [None, *physical_scopes]))
+                    stability_sample, full_reset_job.heavy_sample(root, proof, [None, *physical_scopes], sample_targets))
             except Exception as exc:
                 unstable = getattr(exc, "unstable_targets", None) or []
                 if unstable:
@@ -35744,26 +35746,28 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         # a later partial reset/failed epoch publisher cannot retain old ACK
         # authority. Resume may already have published the planned new epoch.
         stage = "INVALIDATE_OLD_INVENTORY"
+        full_reset_job.note(stage)
         invalidation = _data_sync_invalidate_reset_inventory(
             boundary["new_epoch"],
             expected_current_epoch=boundary["evidence"]["old_identity"]["epoch_id"])
         operation.update(inventory_invalidation=invalidation)
         store._atomic_json_receipt(operation_path, operation)
         stage = "PAYLOAD_DELETION"
+        full_reset_job.note(stage)
         operation.update(stage=stage)
         store._atomic_json_receipt(operation_path, operation)
-        result = resume["result"] if resume else execute_research_reset(
+        result = resume["result"] if resume else full_reset_job.heavy_execute(
+            execute_research_reset, root, diagnostic_attempt_id, reset_id, None,
             runtime_root=root, proof=proof, quiescent=True,
             recovery_states=boundary["recovery_states"], receipt_path=receipt_dir / "deletion.json",
             allow_fly_runtime_aliases=True,
-            progress_callback=make_reset_progress_callback(root,
-                attempt_id=diagnostic_attempt_id, reset_id=reset_id),
         )
         if result.get("status") != "COMPLETE":
             raise RuntimeError("RESET_DELETION_INCOMPLETE")
         operation.update(stage="PAYLOAD_DELETION_COMPLETE", deletion=result)
         store._atomic_json_receipt(operation_path, operation)
         stage = "PHYSICAL_SCOPE_DELETION"
+        full_reset_job.note(stage)
         scope_deletions = operation.get("scope_deletions", {})
         if not resume:
             for name in physical_scopes:
@@ -35772,11 +35776,10 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                     raise RuntimeError("RESET_SCOPE_ALIAS_CHANGED")
                 scope_receipt_dir = _checked_path(physical / "research_reset_receipts" / reset_id, physical)
                 scope_receipt_dir.mkdir(parents=True, exist_ok=False)
-                scoped = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
+                scoped = full_reset_job.heavy_execute(execute_research_reset, root, diagnostic_attempt_id, reset_id, name,
+                    runtime_root=root, proof=proof, quiescent=True,
                     recovery_states=boundary["recovery_states"], receipt_path=scope_receipt_dir / "deletion.json",
-                    scope_name=name,
-                    progress_callback=make_reset_progress_callback(root,
-                        attempt_id=diagnostic_attempt_id, reset_id=reset_id, scope_name=name))
+                    scope_name=name)
                 if scoped.get("status") != "COMPLETE":
                     raise RuntimeError("RESET_SCOPE_DELETION_INCOMPLETE")
                 scope_deletions[name] = scoped
@@ -35793,6 +35796,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                                               ("status", "plan_sha256", "moved", "quarantine_dir")})
         store._atomic_json_receipt(operation_path, operation)
         stage = "GENOME_RESET"
+        full_reset_job.note(stage)
         genome_reset = operation.get("genome_reset", {})
         if bridge is not None and not resume:
             genome_root = Path(bridge.store.base_dir).absolute()
@@ -35806,6 +35810,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         operation.update(genome_reset_completed=True, genome_reset=genome_reset)
         store._atomic_json_receipt(operation_path, operation)
         stage = "AUTHORITY_RETIREMENT"
+        full_reset_job.note(stage)
         retirements = []
         for pointer in boundary["evidence"]["active_pointers"]:
             retired = store.retire_empty_epoch_authority(
@@ -35827,6 +35832,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 or any(row.get("safe") is not True for row in final_auxiliary)):
             raise RuntimeError("RESET_RECOVERY_CHANGED_BEFORE_NEW_EPOCH")
         stage = "EMPTY_WAL_REBIND"
+        full_reset_job.note(stage)
         if boundary["wal_exists"]:
             new_identity = {**boundary["evidence"]["old_identity"], "epoch_id": boundary["new_epoch"],
                             "source_revision": boundary["deployed_revision"],
@@ -35846,6 +35852,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             if wal_status.get("records") != [] or wal_status.get("alarms") != []:
                 raise RuntimeError("RESET_NEW_WAL_NOT_EMPTY")
         stage = "PUBLISH_NEW_EPOCH"
+        full_reset_job.note(stage)
         _reset_collector_epoch_state(reset_anchor)
         if _collector_v22_epoch_id() != boundary["new_epoch"]:
             raise RuntimeError("RESET_NEW_EPOCH_IDENTITY_MISMATCH")
@@ -50612,6 +50619,9 @@ def wipe_fly_only():
             }), 400
     wiped_at = time.time()
     data = request.get_json(silent=True) or {}
+    if data.get("background") is True:
+        body, code = _start_full_reset_job(data)
+        return jsonify(body), code
     result = perform_fresh_collection_reset(send_local_signal=False, **_freeze_override_kwargs(data))
     if not result.get("ok"):
         return jsonify({
@@ -50636,6 +50646,62 @@ def wipe_fly_only():
         "reset": result,
         "fresh_collection_signal_ts": float(state.get("fresh_collection_signal_ts") or 0.0),
     })
+
+
+def _start_full_reset_job(data) -> tuple[dict, int]:
+    """Start the guarded reset as a background job. Returns (body, http_status) immediately."""
+    import full_reset_job
+    from uuid import uuid4
+    with state_lock:
+        armed = bool(state.get("live_armed"))
+    if armed:
+        return {"status": "error", "message": "Disable LIVE ARM before wiping Fly data"}, 400
+    root = _data_sync_runtime_root()
+    with full_reset_job.ACTIVE_LOCK:
+        if full_reset_job.ACTIVE is not None:
+            return {"status": "error", "message": "full reset job already running",
+                    "operation_id": full_reset_job.ACTIVE["operation_id"]}, 409
+        operation_id = uuid4().hex
+        status = full_reset_job.JobStatus(root, operation_id)
+        full_reset_job.ACTIVE = {"status": status, "root": root, "operation_id": operation_id}
+
+    def _run():
+        publisher = full_reset_job.HeartbeatPublisher(root, lambda: state.get("last_heartbeat") or last_heartbeat)
+        publisher.start()
+        try:
+            result = perform_fresh_collection_reset(send_local_signal=False, **_freeze_override_kwargs(data))
+            if result.get("ok"):
+                with state_lock:
+                    state["fresh_collection_mode"] = False
+                    save_persistent_config()
+                status.finish("COMPLETE", epoch_stamped=False)
+            else:
+                code = str(result.get("error") or "RESET_FAILED")
+                status.finish(code, blockers=[code, str(result.get("failed_stage") or "")],
+                              error=str(result.get("summary") or "")[:300])
+                logger.error("[FULL RESET JOB] %s failed: %s [RED]", operation_id, code)
+        except BaseException as exc:  # noqa: BLE001 - fail closed; pause is never resumed here
+            status.finish("JOB_EXCEPTION", blockers=[type(exc).__name__], error=str(exc)[:300])
+            logger.error("[FULL RESET JOB] %s crashed: %s: %s [RED]", operation_id, type(exc).__name__, exc)
+        finally:
+            publisher.stop()
+            with full_reset_job.ACTIVE_LOCK:
+                full_reset_job.ACTIVE = None
+
+    threading.Thread(target=_run, name="full-reset-job", daemon=True).start()
+    return {"status": "accepted", "operation_id": operation_id,
+            "status_url": "/api/monitor/full-reset"}, 202
+
+
+@app.route('/api/monitor/full-reset', methods=["GET"])
+def monitor_full_reset_route():
+    """Read-only, file-backed status of the background full-reset job; never blocks on the job."""
+    def build(now):
+        import full_reset_job
+        armed = bool(state.get("live_armed"))  # plain dict read: no lock, route must not block
+        return full_reset_job.read_status(_data_sync_runtime_root(), live_armed=armed, now=now)
+    return _monitor_tiles_guard(build, 64 * 1024)
+
 
 _FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
 _FRESH_EPOCH_ZERO_FIELDS = (
@@ -59089,6 +59155,11 @@ def recover_from_crash():
         else:
             logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
+def _heartbeat_research_write_blocked() -> bool:
+    import full_reset_job
+    return _fresh_collection_lock.locked() or full_reset_job.ACTIVE is not None
+
+
 def heartbeat_loop():
     """Publish process liveness independently of AI or strategy latency."""
     global last_heartbeat
@@ -59099,7 +59170,11 @@ def heartbeat_loop():
         state["heartbeat"] = now
         state["last_heartbeat"] = now
         try:
-            _maybe_record_heartbeat_cycle_3m()
+            # The cycle-3m heartbeat row blocks on _research_write_gate, which the guarded reset
+            # holds exclusively for its whole duration. Liveness must never wait behind it, so
+            # skip the research write while a reset (direct or background job) owns the barriers.
+            if not _heartbeat_research_write_blocked():
+                _maybe_record_heartbeat_cycle_3m()
         except Exception:
             pass
         if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):
