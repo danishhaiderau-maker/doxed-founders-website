@@ -573,3 +573,8 @@ def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_covera
                                       "legs_without_snapshot": 2}
     assert {m["trade_id"] for m in t["rows_with_missing_snapshots"]} == {"p-nosnap", "p-forced"}
     assert "depth_snapshot_signal" not in json.dumps(body)  # no raw books on this route
+    assert body["shadow_truncated"] is False  # the fake tail is tiny and the file is absent
+    import os as _os
+    monkeypatch.setattr(_os.path, "getsize", lambda p: 3 * 1024 * 1024 if str(p).endswith("paper_ioc_no_fill_shadow.jsonl") else 0)
+    r2 = client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE)
+    assert r2.get_json()["shadow_truncated"] is True

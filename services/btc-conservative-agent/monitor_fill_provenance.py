@@ -38,7 +38,7 @@ def _shadow_counts(shadow_rows: Iterable[Mapping[str, Any]], since_ts: float | N
 
 def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mapping[str, str],
           shadow_rows: Iterable[Mapping[str, Any]], epoch: Mapping[str, Any] | None,
-          common: Mapping[str, Any]) -> dict:
+          common: Mapping[str, Any], shadow_truncated: bool | None = None) -> dict:
     since_ts = paper_fill.as_number((epoch or {}).get("epoch_ts"))
     shadow = _shadow_counts(shadow_rows, since_ts)
     per_tile = []
@@ -89,6 +89,9 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
     return {"schema": SCHEMA, **common, "epoch": {
                 "data_epoch_id": common.get("data_epoch_id"), "fresh_epoch_ts": (epoch or {}).get("epoch_ts"),
                 "fresh_epoch_stamped": bool(since_ts), "shadow_rows_counted_since": since_ts},
+            # True when the shadow file is larger than the tail that was read: NO_FILL/REJECT counts are then a
+            # lower bound for the window. None = not known (caller did not say).
+            "shadow_truncated": shadow_truncated,
             "per_tile": per_tile,
             "notes": ["NO_FILL and REJECT entries are shadow rows, never trades and never in closed counts.",
                       "legs_without_snapshot counts v1 rows only; legacy rows are listed under legacy_rows."]}
