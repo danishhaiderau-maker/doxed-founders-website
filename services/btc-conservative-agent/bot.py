@@ -48273,9 +48273,17 @@ def monitor_tile_switch_rows() -> list:
     return rows
 
 
+def _build_features_live_state():
+    try:
+        import live_copy_monitor_api as _lcm_api
+        return _lcm_api.live_flags_snapshot()
+    except Exception:  # noqa: BLE001 - arming unknown is reported as unknown, never guessed
+        return None
+
+
 def current_build_features_text() -> str:
     try:
-        return _monitor_gaps.build_features_text(monitor_tile_switch_rows())
+        return _monitor_gaps.build_features_text(monitor_tile_switch_rows(), _build_features_live_state())
     except Exception as exc:
         return f"unavailable ({type(exc).__name__})"
 
@@ -48443,7 +48451,7 @@ def monitor_tiles_switches():
     """R4: one per-tile on/off truth (registry, paper, live, relay, evaluator) + disagreements."""
     def build(now):
         rows = monitor_tile_switch_rows()
-        return _monitor_gaps.tile_switches(rows, _monitor_gaps.build_features_text(rows))
+        return _monitor_gaps.tile_switches(rows, _monitor_gaps.build_features_text(rows, _build_features_live_state()))
     return _monitor_tiles_guard(build, _MONITOR_GAP_MAX_BYTES)
 
 

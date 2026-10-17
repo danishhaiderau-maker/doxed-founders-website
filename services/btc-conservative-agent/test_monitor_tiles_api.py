@@ -499,6 +499,17 @@ def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot
     assert ids(fresh_only="1") == {"d-fresh", "d-parts"}  # DISLOC no longer collapses to 0
 
 
+def test_switches_route_and_api_build_use_the_same_live_state(bot, monkeypatch):
+    monkeypatch.setattr(bot, "_build_features_live_state", lambda: {"effective_live": False, "force_paper_mode": True})
+    monkeypatch.setattr(bot, "monitor_tile_switch_rows", lambda: [
+        {"lane": "G", "number": 3, "label": "GS-01", "retired": False, "paper_on": True, "live_orders_on": True}])
+    sw = _get(bot, "/api/monitor/tiles/switches", {"X-Bot-Admin-Token": ADMIN}).get_json()
+    assert "live copy DISARMED (force_paper)" in sw["build_features"]
+    assert bot.current_build_features_text() == sw["build_features"]
+    monkeypatch.setattr(bot, "_build_features_live_state", lambda: {"effective_live": False, "error": "X"})
+    assert "live arming state unknown" in bot.current_build_features_text()
+
+
 def test_state_trade_projections_carry_the_entry_pricing_receipt(bot):
     row = {"trade_id": "gs1-p", "research_lane": GS1, "ts": "2026-10-17T00:00:00+00:00", "entry": 1.0, "exit": 2.0,
            "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,

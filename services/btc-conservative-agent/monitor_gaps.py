@@ -271,16 +271,39 @@ def tile_switches(tiles: Iterable[Mapping], build_text: str = "") -> dict:
             "build_features": build_text, "alerts": alerts, "level": RED if alerts else GREEN}
 
 
-def build_features_text(tiles: Iterable[Mapping]) -> str:
-    """Current-state build text derived from the one switch source (replaces the stale prose)."""
+def live_arming_word(live_state: Optional[Mapping]) -> str:
+    """ARMED / DISARMED only from a clean boolean effective_live; anything doubtful reads 'unknown'.
+
+    Unknown = no state, an ``error`` key, WEBSITE_UNREACHABLE (or MONITOR_NOT_WIRED) among the blockers, or a
+    non-boolean effective_live. Never DISARMED just because the state could not be read."""
+    if not isinstance(live_state, Mapping) or live_state.get("error"):
+        return "live arming state unknown"
+    blockers = {str(b).upper() for b in (live_state.get("blockers") or ())}
+    if blockers & {"WEBSITE_UNREACHABLE", "MONITOR_NOT_WIRED"}:
+        return "live arming state unknown"
+    eff = live_state.get("effective_live")
+    if eff is True:
+        return "live copy ARMED"
+    if eff is False:
+        return "live copy DISARMED" + (" (force_paper)" if live_state.get("force_paper_mode") else "")
+    return "live arming state unknown"
+
+
+def build_features_text(tiles: Iterable[Mapping], live_state: Optional[Mapping] = None) -> str:
+    """Current-state build text derived from the one switch source (replaces the stale prose).
+
+    ``live_orders_on`` on a tile row means live-ELIGIBLE (the switch), not that live is armed, so the text says
+    "live-eligible" and states the real arming separately (live_state = live_flags_snapshot()):
+    effective_live false -> DISARMED, true -> ARMED, missing -> state unknown. Never "live copy ON" for a switch."""
     tiles = [t for t in tiles or () if not t.get("retired")]
     paper = [t for t in tiles if t.get("paper_on")]
     live = [t for t in tiles if t.get("live_orders_on")]
     def names(rows):
         return ", ".join(f"T{t.get('number')} {t.get('label')}" for t in rows) or "none"
+    arming = live_arming_word(live_state)
     return (f"{len(tiles)} registered tiles; paper ON: {len(paper)} ({names(paper)}); "
-            f"live copy ON: {len(live)} ({names(live)}). Derived at request time from the tile switch "
-            f"source (/api/monitor/tiles/switches); retired tiles are excluded.")
+            f"live-eligible switch ON: {len(live)} ({names(live)}); {arming}. Derived at request time from the "
+            f"tile switch source (/api/monitor/tiles/switches); retired tiles are excluded.")
 
 
 # ----------------------------------------------------------------------------
