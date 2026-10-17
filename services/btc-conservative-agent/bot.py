@@ -47850,8 +47850,17 @@ def monitor_fill_provenance():
         scope = {"lanes": list(ACTIVE_TILE_ORDER), "epoch": _current_epoch_id_for_display(), "since": None,
                  "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": True}
         by_lane = _monitor_tiles_rows(scope, ("closed",))
-        shadow = _read_jsonl_tail(PAPER_IOC_NO_FILL_SHADOW_FILE, 2 * 1024 * 1024)
-        return _mfp.build(by_lane, _monitor_tile_short_names(), shadow, _fresh_start_epoch(), _monitor_tiles_common(now))
+        tail_bytes = 2 * 1024 * 1024
+        shadow = _read_jsonl_tail(PAPER_IOC_NO_FILL_SHADOW_FILE, tail_bytes)
+        try:
+            truncated = os.path.getsize(PAPER_IOC_NO_FILL_SHADOW_FILE) > tail_bytes
+        except OSError:
+            truncated = False  # no file: nothing was cut off
+        # NOTE: _fresh_start_epoch() has a side effect: once an epoch is stamped it also sets
+        # paper_fill.FRESH_EPOCH_TS (the "pre-epoch rows are never fresh" filter). Read-only otherwise; it never
+        # stamps or writes the epoch file.
+        return _mfp.build(by_lane, _monitor_tile_short_names(), shadow, _fresh_start_epoch(), _monitor_tiles_common(now),
+                          shadow_truncated=truncated)
     return _monitor_tiles_guard(build, 800_000)
 
 
