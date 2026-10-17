@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping, Optional
 
 FILL_MODEL = "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"
 FILL_MODEL_VERSION = 1
+FILL_BASIS_TAKER_WALK = "BOOK10L_TAKER_WALK"  # the only fill_basis a paper_fill result can carry
 DEFAULT_DELAY_S = 1.5
 MIN_DELAY_S = 0.3
 MIN_SAMPLES = 10
@@ -343,7 +344,7 @@ def row_before_epoch(row) -> bool:
         v = _f(row.get(k))
         if v is not None:
             return v < float(FRESH_EPOCH_TS)
-    return False
+    return True  # fail closed: a row with no usable timestamp cannot be proven post-epoch
 
 
 def tag_legacy(row):
@@ -409,7 +410,34 @@ def row_fresh_strict(row) -> bool:
         return False
     if row.get("fill_model_tag") == LEGACY_TAG:
         return False
+    if as_bool(row.get("fill_valid"), True) is False or row.get("non_fill_category") or row.get("exit_fallback"):
+        return False  # no-book exit / unpriced TP1 leg: not a paper fill, never countable
+    if as_bool(row.get("all_legs_book10l"), True) is False or not _legs_book10l(row):
+        return False
     return as_bool(row.get("fresh_eligible"), True) is not False and row_fresh_eligible(row)
+
+
+def _legs_book10l(row) -> bool:
+    """Every priced exit leg carried by the row (partial TP1 legs, the terminal exit sim) is a BOOK10L fill whose
+    own flags say it is fresh-eligible. Absent leg detail (older / CSV rows) is not evidence against the row; the
+    explicit all_legs_book10l / fill_valid / exit_fallback fields stamped at close time carry that."""
+    import json as _json
+    receipts = row.get("partial_exit_receipts")
+    if isinstance(receipts, str):
+        try:
+            receipts = _json.loads(receipts)
+        except ValueError:
+            receipts = None
+    for r in receipts if isinstance(receipts, list) else ():
+        if not isinstance(r, dict) or r.get("realized_gross_usd") is None:
+            continue
+        if r.get("leg_priced_by") != "paper_fill_book10l" or as_bool(r.get("leg_fresh_eligible"), True) is False \
+                or r.get("leg_fallback"):
+            return False
+    sim = row.get("exit_fill_sim")
+    if isinstance(sim, dict) and sim.get("fill_model") and str(sim.get("fill_model")) not in ALLOWED_FILL_MODELS:
+        return False
+    return True
 
 
 def row_fresh_eligible(row) -> bool:

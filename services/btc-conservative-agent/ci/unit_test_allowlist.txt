@@ -334,6 +334,7 @@ test_paper_atr_provenance.py
 test_paper_bitfinex_match.py
 test_paper_family_chase_durability.py
 test_paper_fill.py
+test_paper_fill_pricing_labels.py
 test_paper_lifecycle_restart.py
 test_paper_natural_cycle_exits.py
 test_paper_pnl_canon.py

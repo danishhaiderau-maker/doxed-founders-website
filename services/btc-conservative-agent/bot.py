@@ -5207,6 +5207,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
                 pos["fresh_data_excluded"] = True  # livelock-guard leg: priced without delay, never fresh
         else:
             pos["fresh_data_excluded"] = True  # unpriced leg: trigger-price fallback, never fresh data
+            pos["fill_valid"] = False  # not a paper fill: the trigger price is booked, the row is counted nowhere
+            pos["non_fill_category"] = "TP1_UNPRICED_LEG"
         with trade_lock:
             source_pos.pop("_tp1_pending", None)
         pos.pop("_tp1_pending", None)
@@ -6269,7 +6271,24 @@ VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 # Paper fills follow the shared research fill model; the legacy BBO-cross verdict
 # is kept on every gate receipt as the labelled optimistic shadow.
-PAPER_FILL_MODEL = os.getenv("PAPER_FILL_MODEL", "REALISTIC_V1").strip().upper()
+PAPER_FILL_MODEL = os.getenv("PAPER_FILL_MODEL", "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY").strip().upper()
+# Danish's hard rule: every paper fill goes through paper_fill. A fill reaching the legacy REALISTIC_V1 / BBO
+# walk (a lane outside tile_fill.MIGRATED_LANES) is refused and tagged fill_model_invalid, never booked.
+REFUSE_NON_PAPER_BOOK_FILLS = os.getenv("REFUSE_NON_PAPER_BOOK_FILLS", "1").strip() != "0"
+_NON_PAPER_FILL_REFUSED = {"count": 0, "last_lane": None}
+
+
+def _refuse_non_paper_fill(order: dict, where: str) -> bool:
+    """True when ``order`` must not be priced by a legacy path (flagged on the order, counted)."""
+    if not globals().get("REFUSE_NON_PAPER_BOOK_FILLS", False):
+        return False
+    counter = globals().get("_NON_PAPER_FILL_REFUSED")
+    if isinstance(counter, dict):
+        counter["count"] = int(counter.get("count") or 0) + 1
+        counter["last_lane"] = str(order.get("research_lane") or "")
+    order["fill_model_invalid"] = True
+    order["fill_invalid_reason"] = f"NON_PAPER_BOOK_LANE_LEGACY_PRICER_REFUSED:{where}"
+    return True
 FUNDING_RATE_CAP_PER_8H = bitfinex_cost_profile.FUNDING_RATE_BAND_PER_8H
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
@@ -7123,7 +7142,8 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     marks = {"fresh_data_excluded": True, "_paper_exit_trigger_ts": None}
     res = _tf.exit_fill(direction, qty, now - d, d, "FORCED_NO_DELAY")
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
-        marks.update(exit_status="FORCED_NO_BOOK", exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK")
+        marks.update(exit_status="FORCED_NO_BOOK", exit_fallback="LEGACY_BBO_FALLBACK_NO_BOOK",
+                     fill_valid=False, non_fill_category="NO_BOOK_EXIT")
         return None, marks
     res = {**res, "delay_s": 0.0, "delay_source": "FORCED_NO_DELAY"}
     marks["exit_status"] = "PAPER_FILL_FORCED"
@@ -7160,7 +7180,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         time.sleep(0.5)
     if res is None:
         return None, {"exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
-                      "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0}
+                      "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0,
+                      "fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"}
     marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None}
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
@@ -7169,6 +7190,33 @@ def _entry_fill_sim(pos: dict) -> dict:
     """The entry pricing receipt of a position: positions store it as entry_fill_sim (create_position)."""
     efs = pos.get("entry_fill_sim") or pos.get("fill_sim")
     return efs if isinstance(efs, dict) else {}
+
+
+def _fresh_epoch_dv():
+    """The stamped fresh-start epoch id carried on every trade row (fse-<epoch_ts>), None until stamped."""
+    try:
+        import data_version as _dv
+        return _dv.id_from_epoch(_fresh_start_epoch())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _all_legs_book10l(pos: dict) -> bool:
+    """Entry and every exit leg priced by the shared pricer and valid (no no-book / unpriced-leg fallback)."""
+    import paper_fill as _pf
+    if pos.get("fill_valid") is False or pos.get("exit_fallback"):
+        return False
+    if not _entry_priced_by_paper_fill(pos):
+        return False
+    for r in pos.get("partial_exit_receipts") or []:
+        if r.get("realized_gross_usd") is None:
+            continue
+        if r.get("leg_priced_by") != "paper_fill_book10l" or r.get("leg_fresh_eligible") is False or r.get("leg_fallback"):
+            return False
+    sim = pos.get("exit_fill_sim")
+    if isinstance(sim, dict) and sim.get("fill_model") and str(sim["fill_model"]) not in _pf.ALLOWED_FILL_MODELS:
+        return False
+    return True
 
 
 def _entry_priced_by_paper_fill(pos: dict) -> bool:
@@ -7274,6 +7322,11 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
     """Depth-aware market fill; every limit fill respects its hard price."""
     if _is_paper_book_lane(order):
         return _paper_result_as_sim(_paper_lane_entry_result(order, time.time(), force=True))
+    if globals().get("_refuse_non_paper_fill") and _refuse_non_paper_fill(order, "resolve_sim_fill"):
+        return {"fill_price": 0.0, "filled_qty": 0.0, "is_taker": False, "avg_price": 0.0, "best_price": 0.0,
+                "fully_filled": False, "partial_fill": False, "levels_consumed": 0, "unfilled_qty": float(order.get("qty") or 0),
+                "evidence_status": "UNKNOWN", "unknown_reason": "FILL_MODEL_INVALID_NON_PAPER_LANE",
+                "fill_model_invalid": True}
     limit = float(order.get("limit_price") or 0)
     side = str(order.get("side") or "").lower()
     qty = float(order.get("qty") or 0)
@@ -26241,6 +26294,8 @@ def _pending_limit_ready_for_fill(
         if _res.get("status") not in ("FILLED", "PARTIAL"):
             order["paper_ioc_no_fill"] = str(_res.get("status") or "NO_FILL")
         return True
+    if globals().get("_refuse_non_paper_fill") and _refuse_non_paper_fill(order, "pending_limit_ready"):
+        return False
 
     def persist_market_evidence(evidence: dict, executable: bool = False):
         append_observation = globals().get("_append_source_market_observation")
@@ -26592,7 +26647,10 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["fill_handoff_in_progress"] = True
-            _FILL_SIM_COUNTERS.maker_fill(order.get("research_lane"), fill_px, fill_bid, fill_ask, order.get("side"))
+            if _is_paper_book_lane(order):
+                _FILL_SIM_COUNTERS.taker_fill(order.get("research_lane"), fill_px, fill_bid, fill_ask, order.get("side"))
+            else:
+                _FILL_SIM_COUNTERS.maker_fill(order.get("research_lane"), fill_px, fill_bid, fill_ask, order.get("side"))
             _persisted_window_add("paper_limit_fills")
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
@@ -31652,6 +31710,10 @@ def close_position(pos: dict, exit_reason: str):
                                                       settlements=pos.get("funding_settlements")),
             "exit_status": pos.get("exit_status"),
             "exit_fallback": pos.get("exit_fallback"),
+            "fill_valid": False if pos.get("fill_valid") is False else True,
+            "non_fill_category": pos.get("non_fill_category"),
+            "all_legs_book10l": _all_legs_book10l(pos),
+            "fresh_epoch_id": _fresh_epoch_dv(),
             "exit_fill_source": (pos.get("exit_fill_sim") or {}).get("source") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "exit_trigger_slippage_bp": (pos.get("exit_fill_sim") or {}).get("trigger_slippage_bp") if isinstance(pos.get("exit_fill_sim"), dict) else None,
             "dur_min": (time.time() - pos.get("entry_ts", 0)) / 60,
@@ -33755,7 +33817,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/tiles/switches", "/api/monitor/config", "/api/monitor/preentry",
     "/api/monitor/exit-queues", "/api/monitor/counters", "/api/monitor/warmup",
     "/api/monitor/regime", "/api/monitor/shipper", "/api/monitor/gaps", "/api/monitor/integrity-gaps",
-    "/api/monitor/fresh-start", "/api/monitor/full-reset",
+    "/api/monitor/fresh-start", "/api/monitor/full-reset", "/api/monitor/fills/by-model",
     "/api/runtime/headroom", "/api/data_size", "/api/analyzer-mirror/status",
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
@@ -47652,6 +47714,18 @@ _TILE_INTEGRITY_FILE = "tile_integrity.jsonl"
 _TILE_INTEGRITY_V1_SINCE = float(os.getenv("FILL_MODEL_V1_SINCE_TS") or 0) or None
 
 
+def _tile_integrity_v1_since():
+    """FILL_MODEL_V1_SINCE_TS when set, else the stamped fresh-start epoch (every paper row is v1 since then), so
+    the presence check registers the first fresh rows instead of reporting V1_FILL_MODEL_NOT_YET_EMITTED."""
+    if _TILE_INTEGRITY_V1_SINCE:
+        return _TILE_INTEGRITY_V1_SINCE
+    try:
+        import paper_fill as _pf
+        return float(_pf.FRESH_EPOCH_TS) if _pf.FRESH_EPOCH_TS else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _tile_integrity_rows(now):
     import disloc_engine as _dsl
     rows = []
@@ -47727,7 +47801,7 @@ def _tile_integrity_run_once(now=None):
     except Exception:  # noqa: BLE001
         pnl, tile_rows = None, []
     res = _ti.evaluate(now=now, rows=rows, book_by_sec=_tile_integrity_book(now, rows),
-                       chains=_tile_integrity_chains(now), v1_since_ts=_TILE_INTEGRITY_V1_SINCE,
+                       chains=_tile_integrity_chains(now), v1_since_ts=_tile_integrity_v1_since(),
                        feed=feed, pnl_reconcile=pnl, tile_rows=tile_rows,
                        regime_since_ts=float(os.getenv("REGIME_COVERAGE_SINCE_TS") or 0) or now - 86400)
     with _TILE_INTEGRITY_LOCK:
@@ -50691,6 +50765,16 @@ def _start_full_reset_job(data) -> tuple[dict, int]:
     threading.Thread(target=_run, name="full-reset-job", daemon=True).start()
     return {"status": "accepted", "operation_id": operation_id,
             "status_url": "/api/monitor/full-reset"}, 202
+
+
+@app.route('/api/monitor/fills/by-model', methods=["GET"])
+def monitor_fills_by_model_route():
+    """Read-only per-tile closed-row counts by fill model and category (countable vs everything else)."""
+    def build(now):
+        import fills_by_model
+        return fills_by_model.summarise([r for r in list(trades) if isinstance(r, dict)], list(ACTIVE_TILE_ORDER),
+                                        refused=_NON_PAPER_FILL_REFUSED, now=now)
+    return _monitor_tiles_guard(build, 64 * 1024)
 
 
 @app.route('/api/monitor/full-reset', methods=["GET"])

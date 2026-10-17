@@ -137,10 +137,13 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
         if ts_col and ts.isna().all():
             ts = pd.to_datetime(clean[ts_col], errors="coerce", utc=True).astype("int64") / 1e9
         import paper_fill as _pf
-        for lane, epoch, bp, t in zip(clean[lane_col] if lane_col else ["?"] * len(clean), clean["_epoch_source"],
-                                      clean["net_bp"], ts):
-            # fresh data only from lanes priced through paper_fill (research output, not P&L)
-            if epoch == "current_file" and not _pf.fresh_data_eligible(str(lane)):
+        records = clean.to_dict("records")
+        for rec, lane, epoch, bp, t in zip(records, clean[lane_col] if lane_col else ["?"] * len(clean),
+                                           clean["_epoch_source"], clean["net_bp"], ts):
+            # fresh data only from lanes priced through paper_fill (research output, not P&L), and only rows whose
+            # every entry/exit leg passes the SAME strict rule the monitors use (paper_fill.row_fresh_strict);
+            # the lane check alone let FORCED_NO_BOOK / unpriced-leg / pre-epoch rows into the analyzer count.
+            if epoch == "current_file" and not (_pf.fresh_data_eligible(str(lane)) and _pf.row_fresh_strict(rec)):
                 excluded_pending += 1
                 continue
             if pd.notna(bp):

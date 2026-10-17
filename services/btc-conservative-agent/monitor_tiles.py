@@ -236,10 +236,25 @@ def _legs(row: Mapping[str, Any]) -> list:
     return out
 
 
-def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool) -> dict | None:
+def paper_pricer_evidence(raw: Mapping[str, Any]) -> dict:
+    """Pricer-own evidence of a book-walked paper fill (entry_fill_sim / fill_sim), else {}."""
+    import paper_fill
+    sim = raw.get("entry_fill_sim") if isinstance(raw.get("entry_fill_sim"), Mapping) else raw.get("fill_sim")
+    if not isinstance(sim, Mapping) or str(sim.get("fill_model") or "") not in paper_fill.ALLOWED_FILL_MODELS:
+        return {}
+    model = str(sim["fill_model"])
+    return {"fill_model": model, "fill_basis": paper_fill.FILL_BASIS_TAKER_WALK,
+            "execution_basis": f"{model}:{paper_fill.FILL_BASIS_TAKER_WALK}", "liquidity": "TAKER"}
+
+
+def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool,
+                raw: Mapping[str, Any] | None = None) -> dict | None:
     if not filled:
         return None
     evidence = dict(fill_evidence or {})
+    paper = paper_pricer_evidence(raw) if isinstance(raw, Mapping) else {}
+    if paper:  # the pricer's own evidence wins over venue-gate labels that never ran for these lanes
+        evidence.update(paper)
     basis = evidence.get("fill_basis")
     if not evidence:
         basis = FILL_BASIS_NOT_INDEXED
@@ -492,8 +507,11 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             entry_ts = ev_fill
         row["order"] = {"submitted_ts": ev_sent, "limit_chase_count": raw.get("limit_chase_count"),
                         "terminal": "FILLED"}
-        row["fill"] = _fill_block(fill_evidence, filled=True) or {}
+        row["fill"] = _fill_block(fill_evidence, filled=True, raw=raw) or {}
         row["pricing"] = pricing_block(raw)
+        row["pricing"].update({"fresh_epoch_id": raw.get("fresh_epoch_id"), "fill_valid": raw.get("fill_valid"),
+                               "non_fill_category": raw.get("non_fill_category"),
+                               "all_legs_book10l": raw.get("all_legs_book10l")})
         if raw.get("fill_model"):
             row["fill"]["fill_model"] = raw.get("fill_model")  # the row's own model beats the evidence index
         if row["fill"].get("fill_price") is None:
@@ -534,7 +552,7 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         state = raw.get("policy_state") if isinstance(raw.get("policy_state"), Mapping) else {}
         entry_ts = _ts(raw.get("entry_ts"), parse_ts)
         row["order"] = {"submitted_ts": _ts(raw.get("order_created_ts"), parse_ts), "terminal": "FILLED"}
-        row["fill"] = _fill_block(fill_evidence, filled=True) or {}
+        row["fill"] = _fill_block(fill_evidence, filled=True, raw=raw) or {}
         if row["fill"].get("fill_price") is None:
             row["fill"]["fill_price"] = entry
         if row["fill"].get("fill_ts") is None:
