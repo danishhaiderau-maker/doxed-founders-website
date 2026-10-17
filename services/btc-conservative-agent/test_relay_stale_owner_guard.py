@@ -213,7 +213,7 @@ def arm_ns(guard, armable=True):
         "state": {"live_armed": False, "bitfinex_live_enabled": False},
         "can_open_live_entry": lambda require_armed: (armable, "READY" if armable else "FORCE_PAPER_MODE", {}),
         "_relay_delivery_guard": guard, "save_persistent_config": lambda: saved.append(1),
-        "time": time,
+        "time": time, "_mirror_arm_block": lambda audit=None: None,  # mirror gate has its own tests
     })
     ns["_cleared_calls"] = cleared
     return ns
@@ -237,6 +237,15 @@ def test_arm_live_control_stamps_arming_time_when_clear(tmp_path):
     assert ns["state"]["live_armed"] is True
     assert ns["state"]["live_armed_at_ts"] >= before
     assert len(ns["_cleared_calls"]) == 2  # probe caches cleared before and after the arm mutation (#676)
+
+
+def test_arm_live_control_refuses_while_the_mirror_blocks(tmp_path):
+    guard = RelayDeliveryGuard(tmp_path / guard_mod.QUARANTINE_FILE)
+    guard.observe([], owner_id="me", armed=False, armed_at_ts=None)
+    ns = arm_ns(guard)
+    ns["_arm_live_control"].__globals__["_mirror_arm_block"] = lambda audit=None: "MIRROR_ZERO_ACCOUNTS"
+    ok, reason, _, _ = ns["_arm_live_control"]()
+    assert ok is False and reason == "MIRROR_ZERO_ACCOUNTS" and ns["state"]["live_armed"] is False
 
 
 def test_existing_entry_gate_still_runs_first(tmp_path):
