@@ -319,6 +319,8 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
         causes.append("INTENT_REJECTED_UNSIGNED"); verdict = worst(verdict, RED)
     if rejects_1h:
         causes.append("ORDER_REJECTED"); verdict = worst(verdict, AMBER)
+    for c in ((web.get("mirror_health") or {}).get("causes") or []):
+        causes.append(c); verdict = worst(verdict, RED)
     for acct in (web.get("accounts") or []):
         # LIVE-FIX-1491: any relay self-pause (actor SYSTEM) in the last hour alerts.
         for p in acct.get("pause_history") or []:
@@ -350,6 +352,7 @@ def summary(*, output: Mapping[str, Any], force_paper_mode: bool, relay_stack_mo
         "copy_lag_p95_sec": p95, "executor_last_report_ts": executor_last_report_ts,
         "website": {k: web.get(k) for k in ("reachable", "armed_accounts", "fetched_at_ts",
                                              "executor_heartbeat_age_sec", "error")},
+        "mirror_health": web.get("mirror_health"),
         "computed_at_ts": now,
     }
 

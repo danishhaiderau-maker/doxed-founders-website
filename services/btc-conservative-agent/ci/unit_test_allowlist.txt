@@ -478,6 +478,7 @@ test_reset_hash_mismatch_detail.py
 test_reset_inventory_invalidation.py
 test_reset_payload_stage.py
 test_reset_recovery_audit_boundary.py
+test_reset_status_and_mirror_health.py
 test_reset_writer_barrier.py
 test_restart_reconciliation_disposition.py
 test_retired_research_routes.py

@@ -120,6 +120,7 @@
     ["GET", "/api/monitor/tile-integrity", "monitor_tile_integrity"],
     ["GET", "/api/monitor/fresh-start", "monitor_fresh_start_route"],
     ["GET", "/api/monitor/full-reset", "monitor_full_reset_route"],
+    ["POST", "/api/monitor/full-reset/verify", "monitor_full_reset_verify_route"],
     ["POST", "/api/monitor/fresh-start", "monitor_fresh_start_set_route"],
     ["GET", "/api/monitor/tiles/disloc", "monitor_tiles_disloc"],
     ["GET", "/api/monitor/tiles/field-completeness", "monitor_tiles_field_completeness"],

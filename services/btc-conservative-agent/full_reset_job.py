@@ -94,12 +94,45 @@ class JobStatus:
         self.flush()
 
     def finish(self, outcome, *, blockers=(), epoch_stamped=False, error=None):
-        self.body.update(state="DONE" if outcome == "COMPLETE" else "FAILED", outcome=outcome,
+        # The in-process reset finishing is NOT the end of the full reset: the epoch stamp and the verify receipt
+        # still have to land. RESET_COMPLETE parks in DONE_PENDING_VERIFY; COMPLETE is derived in read_status.
+        state = ("DONE_PENDING_VERIFY" if outcome == RESET_COMPLETE else "FAILED")
+        self.body.update(state=state, outcome=outcome,
                          blockers=list(blockers), epoch_stamped=bool(epoch_stamped), error=error)
         self.flush()
 
 
-def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
+RESET_COMPLETE = "RESET_COMPLETE"
+VERIFY_FILE = "verify_receipt.json"
+PENDING_VERIFY_ALERT_S = 1800.0
+
+
+def record_verify(runtime_root, *, passed, source="workflow", detail=None, now=None) -> dict:
+    """Idempotent verify receipt for the CURRENT job (a repeat overwrites with the latest verdict)."""
+    directory = job_dir(runtime_root)
+    status = _read_json(directory / STATUS_FILE)
+    if not isinstance(status, dict) or not status.get("operation_id"):
+        return {"ok": False, "error": "NO_JOB_STATUS"}
+    if status.get("outcome") != RESET_COMPLETE:
+        return {"ok": False, "error": "RESET_NOT_COMPLETE", "outcome": status.get("outcome")}
+    receipt = {"schema": "full_reset_verify_receipt_v1", "operation_id": status["operation_id"],
+               "passed": bool(passed), "source": str(source)[:40],
+               "detail": (str(detail)[:200] if detail else None),
+               "recorded_at": time.time() if now is None else now}
+    _atomic_write(directory / VERIFY_FILE, receipt)
+    return {"ok": True, "receipt": receipt}
+
+
+def _stamped_for(status, fresh_epoch) -> bool:
+    """epoch_stamped is read from fresh_start_epoch.json, never from the job's in-memory flag."""
+    try:
+        ts = float((fresh_epoch or {}).get("epoch_ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    return ts > 0 and ts >= float(status.get("started_at") or 0) - 5.0
+
+
+def read_status(runtime_root, *, live_armed=False, now=None, fresh_epoch=None) -> dict:
     """Read-only view for GET /api/monitor/full-reset; only reads small files."""
     now = time.time() if now is None else now
     directory = job_dir(runtime_root)
@@ -123,9 +156,31 @@ def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
         alert = "partial reset: job status stale while RUNNING (interrupted)"
     elif status.get("state") == "FAILED":
         alert = f"reset failed: {status.get('outcome')}"
+    level = "RED"
+    if status.get("outcome") == RESET_COMPLETE:
+        stamped = _stamped_for(status, fresh_epoch)
+        receipt = _read_json(directory / VERIFY_FILE)
+        if not (isinstance(receipt, dict) and receipt.get("operation_id") == status.get("operation_id")):
+            receipt = None
+        view["epoch_stamped"] = stamped
+        view["verify"] = ({k: receipt.get(k) for k in ("passed", "source", "recorded_at", "detail")}
+                          if receipt else None)
+        if receipt and receipt.get("passed") is False:
+            view["state"], view["outcome"] = "VERIFY_FAILED", "VERIFY_FAILED"
+            alert = "reset done but the verify step FAILED"
+        elif stamped and receipt and receipt.get("passed") is True:
+            view["state"], view["outcome"] = "DONE", "COMPLETE"
+        else:
+            view["state"] = "DONE_PENDING_VERIFY"
+            missing = [n for n, ok in (("epoch_stamp", stamped), ("verify_receipt", receipt is not None)) if not ok]
+            view["pending"] = missing
+            if age > PENDING_VERIFY_ALERT_S:
+                alert, level = "reset done, still pending: " + ",".join(missing), "AMBER"
+    else:
+        view["epoch_stamped"] = False
     if live_armed and view.get("state") == "RUNNING":
-        alert = "reset running while LIVE ARMED"
-    view["alert"] = {"level": "RED", "reason": alert} if alert else None
+        alert, level = "reset running while LIVE ARMED", "RED"
+    view["alert"] = {"level": level, "reason": alert} if alert else None
     return view
 
 

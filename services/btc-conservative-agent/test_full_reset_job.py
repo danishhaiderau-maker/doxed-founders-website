@@ -49,9 +49,9 @@ def test_status_view_idle_running_failed_stale_and_armed(tmp_path):
     failed = job.read_status(root)
     assert failed["state"] == "FAILED" and failed["alert"]["level"] == "RED"
     done = job.JobStatus(root, "op2")
-    done.finish("COMPLETE")
+    done.finish(job.RESET_COMPLETE)
     ok = job.read_status(root)
-    assert ok["state"] == "DONE" and ok["alert"] is None
+    assert ok["state"] == "DONE_PENDING_VERIFY" and ok["alert"] is None
 
 
 def test_guard_throttles_then_resumes_and_aborts_when_sustained(tmp_path):
@@ -356,7 +356,7 @@ def test_concurrent_start_is_refused_409_then_status_completes(tmp_path):
         if job.read_status(tmp_path / "runtime")["state"] != "RUNNING":
             break
         time.sleep(0.05)
-    assert job.read_status(tmp_path / "runtime")["state"] == "DONE" and job.ACTIVE is None
+    assert job.read_status(tmp_path / "runtime")["outcome"] == "RESET_COMPLETE" and job.ACTIVE is None
     armed_env, armed_state = _start_env(tmp_path, perform)
     armed_state["live_armed"] = True
     refused, code3 = armed_env["_start_full_reset_job"]({"background": True})

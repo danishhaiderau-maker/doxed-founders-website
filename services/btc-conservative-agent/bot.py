@@ -364,6 +364,7 @@ from research.counterfactual_normalization import (
 )
 from research.venue_quantity_constraints import capture_public_pair_constraints
 from research import fill_model as research_fill_model
+import mirror_health
 from scenario_c_config import (
     SCENARIO_C_LADDER_LABEL,
     SCENARIO_C_PROFILE_ID,
@@ -50674,7 +50675,7 @@ def _start_full_reset_job(data) -> tuple[dict, int]:
                 with state_lock:
                     state["fresh_collection_mode"] = False
                     save_persistent_config()
-                status.finish("COMPLETE", epoch_stamped=False)
+                status.finish(full_reset_job.RESET_COMPLETE, epoch_stamped=False)
             else:
                 code = str(result.get("error") or "RESET_FAILED")
                 status.finish(code, blockers=[code, str(result.get("failed_stage") or "")],
@@ -50699,8 +50700,24 @@ def monitor_full_reset_route():
     def build(now):
         import full_reset_job
         armed = bool(state.get("live_armed"))  # plain dict read: no lock, route must not block
-        return full_reset_job.read_status(_data_sync_runtime_root(), live_armed=armed, now=now)
+        return full_reset_job.read_status(_data_sync_runtime_root(), live_armed=armed, now=now,
+                                          fresh_epoch=_fresh_start_epoch())
     return _monitor_tiles_guard(build, 64 * 1024)
+
+
+@app.route('/api/monitor/full-reset/verify', methods=["POST"])
+def monitor_full_reset_verify_route():
+    """Workflow posts the verify verdict here. Admin-only, idempotent, mutates only the job receipt file."""
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    import full_reset_job
+    data = request.get_json(silent=True) or {}
+    passed = data.get("passed")
+    if not isinstance(passed, bool):
+        return jsonify({"ok": False, "error": "'passed' must be a JSON boolean"}), 400
+    out = full_reset_job.record_verify(_data_sync_runtime_root(), passed=passed,
+                                       source=str(data.get("source") or "workflow"), detail=data.get("detail"))
+    return jsonify(out), (200 if out.get("ok") else 409)
 
 
 _FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
@@ -51109,6 +51126,9 @@ def _arm_live_control() -> tuple:
         relay_block = _relay_delivery_guard.arming_block_reason()
         if relay_block:
             return False, relay_block, runtime, exchange_audit
+        mirror_block = _mirror_arm_block(exchange_audit)
+        if mirror_block:
+            return False, mirror_block, runtime, exchange_audit
         with state_lock:
             state["live_armed_at_ts"] = time.time()
             state["live_armed"] = True
@@ -60579,13 +60599,39 @@ def _live_copy_deliver_once(now: float | None = None) -> dict:
     return {"attempted": len(rows), "acked": acked}
 
 
+_mirror_health_state: dict = {}
+
+
+def _mirror_health_view(web: dict) -> dict:
+    try:
+        known = mirror_health.known_accounts_from_rows(
+            _live_copy_account_transitions_rows(), os.getenv("LIVE_COPY_KNOWN_ACCOUNTS", ""))
+        return mirror_health.evaluate(known, web, time.time(), _mirror_health_state)
+    except Exception as exc:  # noqa: BLE001
+        return {"schema": mirror_health.SCHEMA, "error": f"{type(exc).__name__}"[:80], "causes": [], "alert": False}
+
+
+def _mirror_arm_block(audit: dict | None = None) -> str | None:
+    """Reason re-arm must be refused, or None. Never raises into the caller as 'allowed' on error."""
+    try:
+        h = _live_copy_website_cached_view().get("mirror_health") or {}
+        if audit is None and h.get("known_accounts"):
+            audit = _refresh_bitfinex_exposure_audit()
+            audit.pop("_rebuild_payload", None)
+        return mirror_health.arm_block_reason(h, audit)
+    except Exception as exc:  # noqa: BLE001
+        return f"MIRROR_CHECK_ERROR:{type(exc).__name__}"
+
+
 def _live_copy_website_cached_view() -> dict:
     """Last fetched website copy state (no network I/O; safe in /api/state)."""
     v = _live_copy_website_cache.get("value")
     if not isinstance(v, dict):
         return {"reachable": False, "error": "NOT_FETCHED_YET", "armed_accounts": []}
-    return {k: v.get(k) for k in ("reachable", "armed_accounts", "accounts", "fetched_at_ts",
+    view = {k: v.get(k) for k in ("reachable", "armed_accounts", "accounts", "fetched_at_ts",
                                   "executor_heartbeat_age_sec", "error")}
+    view["mirror_health"] = _mirror_health_view(view)
+    return view
 
 
 _live_copy_paper_closed_ts: dict = {}
@@ -60917,6 +60963,10 @@ def api_live_copy_output():
     if enabled:
         if _live_copy_paper_lock_active():
             return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
+                            "live_copy_output": output.snapshot()}), 409
+        mirror_block = _mirror_arm_block()
+        if mirror_block:
+            return jsonify({"ok": False, "error": "MIRROR_ARM_BLOCKED", "reason": mirror_block,
                             "live_copy_output": output.snapshot()}), 409
         snap = output.set(True, by=_onoff_actor(data), reason=_onoff_reason("OPERATOR_ON", data))
     else:
