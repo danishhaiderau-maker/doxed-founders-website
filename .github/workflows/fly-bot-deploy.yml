@@ -1139,6 +1139,12 @@ jobs:
                       return json.loads(exc.read() or b"{}") | {"http_status": exc.code}
                   except ValueError:
                       return {"status": "error", "http_status": exc.code}
+          def where(view):
+              # Honest state report: research-reset deletion may already have begun from PAYLOAD_DELETION on.
+              started = view.get("deletion_started")
+              word = {True: "research-reset deletion MAY HAVE STARTED (stage " + str(view.get("stage")) + "): the reset is PARTIAL, re-run the workflow to continue",
+                      False: "no research-reset deletion had started (stage " + str(view.get("stage")) + ")"}.get(started, "deletion state UNKNOWN: inspect before any retry")
+              return word + "; the later file wipe was NOT started"
           deadline = time.time() + 130 * 60
           started = call("/api/wipe_fly_only", body)
           print(json.dumps({"start": {k: started.get(k) for k in ("status", "http_status", "operation_id", "message")}}, sort_keys=True), flush=True)
@@ -1147,6 +1153,7 @@ jobs:
           operation_id = started["operation_id"]
           errors = 0
           last = None
+          last_view = None
           restarts = 0
           while time.time() < deadline:
               time.sleep(30)
@@ -1158,9 +1165,10 @@ jobs:
                   errors += 1
                   print(json.dumps({"poll_error": errors, "http_status": view.get("http_status")}), flush=True)
                   if errors >= 60:
-                      raise SystemExit("reset job status unavailable for too long: the file wipe was NOT started")
+                      raise SystemExit("reset job status unavailable for too long: " + where(last_view or {}))
                   continue
               errors = 0
+              last_view = view
               progress = view.get("progress") or {}
               line = {"state": view.get("state"), "stage": view.get("stage"), "outcome": view.get("outcome"),
                       "phase": progress.get("phase"), "done": progress.get("completed_targets"),
@@ -1178,8 +1186,8 @@ jobs:
                       if again.get("http_status") == 202 and again.get("operation_id"):
                           operation_id = again["operation_id"]
                           continue
-                  raise SystemExit("in-process guarded reset failed (" + str(view.get("outcome")) + "): the file wipe was NOT started")
-          raise SystemExit("in-process guarded reset exceeded the hard timeout: the file wipe was NOT started")
+                  raise SystemExit("in-process guarded reset failed (" + str(view.get("outcome")) + "): " + where(view))
+          raise SystemExit("in-process guarded reset exceeded the hard timeout: " + where(last_view or {}))
           PY
 
       - name: Stamp the fresh-start epoch (rows written from now on carry the data version)

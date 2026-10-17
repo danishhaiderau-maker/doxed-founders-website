@@ -229,3 +229,182 @@ def test_workflow_polls_background_job_with_hard_timeout_and_never_resumes():
     assert "the file wipe was NOT started" in step
     assert "resume" not in step.lower().replace("resumes the pause", "")  # poll step never resumes paper
     assert "continue-on-error" not in step
+
+
+# ---- HM review: heartbeat must not wait behind the reset barriers; start/abort semantics ----
+
+def _bot_functions(names, env):
+    import ast
+    path = Path(__file__).with_name("bot.py")
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    assert len(nodes) == len(names)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), env)
+    return env
+
+
+def _heartbeat_env(gate, collection_lock):
+    def maybe_record():  # stands in for _maybe_record_heartbeat_cycle_3m -> _safe_append_jsonl
+        with gate:
+            pass
+
+    shutdown = threading.Event()
+    env = {"time": time, "state": {}, "last_heartbeat": 0.0, "shutdown_event": shutdown,
+           "PROCESS_HEARTBEAT_INTERVAL_SEC": 0.05, "_maybe_record_heartbeat_cycle_3m": maybe_record,
+           "_fresh_collection_lock": collection_lock}
+    return _bot_functions({"heartbeat_loop", "_heartbeat_research_write_blocked"}, env), shutdown
+
+
+def _advances(env, seconds=0.6):
+    first = env["state"].get("last_heartbeat", 0.0)
+    time.sleep(seconds)
+    return env["state"].get("last_heartbeat", 0.0) > first + 0.2
+
+
+def test_heartbeat_keeps_advancing_while_reset_holds_research_write_gate():
+    gate, collection = threading.Lock(), threading.Lock()
+    env, shutdown = _heartbeat_env(gate, collection)
+    gate.acquire()
+    collection.acquire()  # the reset owns both for its whole duration
+    thread = threading.Thread(target=env["heartbeat_loop"], daemon=True)
+    thread.start()
+    try:
+        assert _advances(env)
+    finally:
+        shutdown.set()
+        gate.release()
+        thread.join(5)
+
+
+def test_barrier_stall_control_heartbeat_would_block_without_the_skip():
+    gate, collection = threading.Lock(), threading.Lock()  # collection lock NOT held, no job: old behaviour
+    env, shutdown = _heartbeat_env(gate, collection)
+    gate.acquire()
+    thread = threading.Thread(target=env["heartbeat_loop"], daemon=True)
+    thread.start()
+    try:
+        time.sleep(0.3)
+        frozen = env["state"]["last_heartbeat"]
+        time.sleep(0.5)
+        assert env["state"]["last_heartbeat"] == frozen  # proves the test detects a barrier-induced stall
+    finally:
+        gate.release()
+        shutdown.set()
+        thread.join(5)
+
+
+def test_heartbeat_skip_also_covers_an_active_background_job():
+    gate, collection = threading.Lock(), threading.Lock()
+    env, shutdown = _heartbeat_env(gate, collection)
+    job.ACTIVE = {"operation_id": "x"}
+    gate.acquire()
+    thread = threading.Thread(target=env["heartbeat_loop"], daemon=True)
+    thread.start()
+    try:
+        assert _advances(env)
+    finally:
+        job.ACTIVE = None
+        shutdown.set()
+        gate.release()
+        thread.join(5)
+
+
+def test_health_heartbeat_has_a_dedicated_thread_that_never_touches_the_gates():
+    import ast
+    src = (Path(__file__).with_name("bot.py")).read_text(encoding="utf-8-sig")
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    guarded = {"_research_write_gate", "_collector_epoch_lock", "_safe_append_jsonl", "_record_cycle_3m_universe"}
+    body = funcs["heartbeat_loop"]
+    names = {n.id for n in ast.walk(body) if isinstance(n, ast.Name)}
+    assert not (names & guarded)  # only reaches the cycle-3m row via the guarded helper call
+    assert "_heartbeat_research_write_blocked" in names and "_maybe_record_heartbeat_cycle_3m" in names
+    gate = ast.unparse(funcs["_heartbeat_research_write_blocked"])
+    assert "_fresh_collection_lock.locked()" in gate and "full_reset_job.ACTIVE" in gate
+    health_names = {n.id for n in ast.walk(funcs["health"]) if isinstance(n, ast.Name)}
+    assert not (health_names & {"state_lock", "_research_write_gate", "_collector_epoch_lock"})
+
+
+def _start_env(tmp_path, perform):
+    state = {"live_armed": False, "execution_paused": True, "last_heartbeat": time.time()}
+    env = {"state": state, "state_lock": threading.RLock(), "threading": threading, "logger": __import__("logging").getLogger("t"),
+           "_data_sync_runtime_root": lambda: tmp_path / "runtime", "perform_fresh_collection_reset": perform,
+           "save_persistent_config": lambda: None, "last_heartbeat": time.time(),
+           "_freeze_override_kwargs": lambda data: {}}
+    return _bot_functions({"_start_full_reset_job"}, env), state
+
+
+def test_concurrent_start_is_refused_409_then_status_completes(tmp_path):
+    (tmp_path / "runtime").mkdir()
+    release = threading.Event()
+
+    def perform(**kw):
+        job.note("ALL_SCOPES_PREFLIGHT")
+        release.wait(10)
+        return {"ok": True}
+
+    env, state = _start_env(tmp_path, perform)
+    body, code = env["_start_full_reset_job"]({"background": True})
+    assert code == 202 and body["operation_id"]
+    again, code2 = env["_start_full_reset_job"]({"background": True})
+    assert code2 == 409 and again["operation_id"] == body["operation_id"]
+    view = job.read_status(tmp_path / "runtime")
+    assert view["state"] == "RUNNING" and view["operation_id"] == body["operation_id"]
+    assert view["deletion_started"] is False
+    release.set()
+    for _ in range(100):
+        if job.read_status(tmp_path / "runtime")["state"] != "RUNNING":
+            break
+        time.sleep(0.05)
+    assert job.read_status(tmp_path / "runtime")["state"] == "DONE" and job.ACTIVE is None
+    armed_env, armed_state = _start_env(tmp_path, perform)
+    armed_state["live_armed"] = True
+    refused, code3 = armed_env["_start_full_reset_job"]({"background": True})
+    assert code3 == 400 and "LIVE ARM" in refused["message"]
+
+
+def test_guard_abort_in_job_ends_failed_paused_with_nothing_deleted(tmp_path, monkeypatch):
+    monkeypatch.setenv("FULL_RESET_JOB_ABORT_AFTER_S", "2")
+    args = settings(tmp_path)
+    root = args["runtime_root"]
+    target = put(root, "v3/market_segments/04/04" + "0" * 62 + ".json")
+    base = root / "v3" / "receipts" / "emergency_record_idempotency_v1" / "000"
+    base.mkdir(parents=True)
+    for index in range(5000):
+        (base / f"{index}.json").touch()
+
+    def perform(**kw):
+        job.note("ALL_SCOPES_PREFLIGHT")
+        # the bot heartbeat the publisher reports is ancient, so the worker throttles then aborts
+        job.heavy_execute(execution.execute_research_reset, root, "a" * 32, "b" * 24, None,
+                          **_kwargs(args), validate_only=True)
+        return {"ok": True}
+
+    env, state = _start_env(tmp_path, perform)
+    env["_data_sync_runtime_root"] = lambda: root
+    state["last_heartbeat"] = time.time() - 3600
+    env["last_heartbeat"] = time.time() - 3600
+    body, code = env["_start_full_reset_job"]({"background": True})
+    assert code == 202
+    for _ in range(400):
+        if job.read_status(root)["state"] != "RUNNING":
+            break
+        time.sleep(0.1)
+    view = job.read_status(root)
+    assert view["state"] == "FAILED" and view["outcome"] == "JOB_EXCEPTION"
+    assert view["alert"]["level"] == "RED" and view["deletion_started"] is False
+    assert target.exists() and state["execution_paused"] is True  # nothing deleted, pause untouched
+
+
+def test_workflow_failure_text_distinguishes_started_from_not_started():
+    text = (Path(__file__).resolve().parents[2] / ".github" / "workflows" / "fly-bot-deploy.yml").read_text()
+    block = text[text.index("  full-reset-no-archive:"):]
+    step = block[block.index("In-process guarded reset"):block.index("Stamp the fresh-start epoch")]
+    assert "MAY HAVE STARTED" in step and "no research-reset deletion had started" in step
+    assert "deletion state UNKNOWN" in step and "deletion_started" in step
+    assert 'where(view)' in step and 'where(last_view or {})' in step
+
+
+def test_worker_dies_with_parent_hook_is_installed():
+    assert job._die_with_parent.__doc__ and "PR_SET_PDEATHSIG" in job._die_with_parent.__doc__
+    assert "preexec_fn=_die_with_parent" in Path(job.__file__).read_text()

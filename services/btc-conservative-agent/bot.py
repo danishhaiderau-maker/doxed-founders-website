@@ -59155,6 +59155,11 @@ def recover_from_crash():
         else:
             logger.debug(f"[RECOVERY] Pause kept ({reason}) - health not ready yet")
 
+def _heartbeat_research_write_blocked() -> bool:
+    import full_reset_job
+    return _fresh_collection_lock.locked() or full_reset_job.ACTIVE is not None
+
+
 def heartbeat_loop():
     """Publish process liveness independently of AI or strategy latency."""
     global last_heartbeat
@@ -59165,7 +59170,11 @@ def heartbeat_loop():
         state["heartbeat"] = now
         state["last_heartbeat"] = now
         try:
-            _maybe_record_heartbeat_cycle_3m()
+            # The cycle-3m heartbeat row blocks on _research_write_gate, which the guarded reset
+            # holds exclusively for its whole duration. Liveness must never wait behind it, so
+            # skip the research write while a reset (direct or background job) owns the barriers.
+            if not _heartbeat_research_write_blocked():
+                _maybe_record_heartbeat_cycle_3m()
         except Exception:
             pass
         if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):

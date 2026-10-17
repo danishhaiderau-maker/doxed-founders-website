@@ -27,6 +27,9 @@ HEARTBEAT_FILE = "heartbeat.json"
 THROTTLE_AGE_S = 5.0
 ABORT_AFTER_S = 30.0
 STALE_STATUS_S = 600.0
+# Stages from which files/inventory may already have been mutated (HM: reports must say so).
+DELETION_STAGES = frozenset({"PAYLOAD_DELETION", "PHYSICAL_SCOPE_DELETION", "V22_SEAL_RETIREMENT",
+                             "GENOME_RESET", "AUTHORITY_RETIREMENT", "EMPTY_WAL_REBIND", "PUBLISH_NEW_EPOCH"})
 HEARTBEAT_PERIOD_S = 1.0
 TASKS = ("execute", "sample")
 
@@ -77,7 +80,7 @@ class JobStatus:
         self.body = {"schema": "full_reset_job_status_v1", "operation_id": operation_id, "mode": mode,
                      "state": "RUNNING", "stage": "STARTING", "outcome": None, "blockers": [],
                      "started_at": time.time(), "updated_at": time.time(), "pid": os.getpid(),
-                     "epoch_stamped": False}
+                     "epoch_stamped": False, "deletion_started": False}
         self.flush()
 
     def flush(self):
@@ -86,6 +89,8 @@ class JobStatus:
 
     def stage(self, name):
         self.body["stage"] = name
+        if name in DELETION_STAGES:
+            self.body["deletion_started"] = True
         self.flush()
 
     def finish(self, outcome, *, blockers=(), epoch_stamped=False, error=None):
@@ -195,7 +200,8 @@ def run_isolated(runtime_root, task, payload, *, status=None, poll_s=1.0, timeou
     task_path, result_path = directory / f"task-{stamp}.json", directory / f"result-{stamp}.json"
     _atomic_write(task_path, {"task": task, "payload": _jsonable(payload), "runtime_root": str(runtime_root)})
     command = [python or sys.executable, str(Path(__file__).resolve()), "worker", str(task_path), str(result_path)]
-    proc = subprocess.Popen(command, cwd=str(Path(__file__).resolve().parent), stdin=subprocess.DEVNULL)
+    proc = subprocess.Popen(command, cwd=str(Path(__file__).resolve().parent), stdin=subprocess.DEVNULL,
+                            preexec_fn=_die_with_parent)
     began = time.time()
     try:
         while proc.poll() is None:
@@ -219,6 +225,16 @@ def run_isolated(runtime_root, task, payload, *, status=None, poll_s=1.0, timeou
                 path.unlink()
             except OSError:
                 pass
+
+
+def _die_with_parent():
+    """Linux PR_SET_PDEATHSIG: if the bot dies the worker dies too (fail closed, resumable)."""
+    try:
+        import ctypes
+        import signal
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)
+    except Exception:  # noqa: BLE001 - best effort, non-Linux dev machines
+        pass
 
 
 def _lower_priority():
