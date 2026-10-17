@@ -25,7 +25,7 @@ ENV = {"RESEARCH_SEGMENTS_PREFIX_PER_WIPE": "1"}
 def _proof(**kw):
     """The workflow's fresh private exposure-audit proof (/health carries NO exchange facts)."""
     base = {"exchange_positions": 0, "exchange_active_orders": 0, "exchange_delta_btc": 0.0,
-            "authoritative": True, "fresh": True, "flat": True, "proof_ts": time.time()}
+            "authoritative": True, "fresh": True, "flat": True, "error": None, "proof_ts": time.time()}
     base.update(kw)
     return {k: v for k, v in base.items() if v is not _GONE}
 
@@ -679,3 +679,73 @@ def test_the_workflow_step_names_are_plain_scalars_and_in_the_guarded_order():
              "Re-prove the exchange is flat", "File wipe", "Restart the machine", "Post-restart read-only plan", "Verify"]
     idx = [next(i for i, n in enumerate(names) if n.startswith(frag)) for frag in order]
     assert idx == sorted(idx), (order, idx)
+
+
+@pytest.mark.parametrize("err", ["boom", "", 0, _GONE])
+def test_exchange_proof_error_must_be_present_and_null(vol, err):
+    assert _run(_good(vol, exchange_proof_json=json.dumps(_proof(error=err)))) == 7
+    assert _nothing_deleted(vol)
+
+
+# ---------------------------------------------------------------- deny-list (HM 20:16)
+
+DENIED = ["live_flag.csv", "tile_switch.jsonl", "settings.json", "settings.csv", "armed_state.jsonl", "my_flags.jsonl.1",
+          "tile_7_ledger.csv", "live_orders.jsonl.gz", "switch_history.csv", "ui_settings.jsonl", "sub/live_rows.jsonl"]
+
+
+@pytest.mark.parametrize("rel", DENIED)
+def test_denylisted_names_are_never_delete(rel):
+    action, why = frna.classify(rel)
+    assert action != frna.DELETE, (rel, action, why)
+
+
+def test_denylisted_top_level_data_file_blocks_execute_and_is_listed(vol, capsys):
+    for name in ("live_flag.csv", "tile_switch.jsonl", "settings.json"):
+        (vol / "runtime" / name).write_text("x\n")
+    plan = _plan(vol)
+    cands = {c["rel"] for c in plan["candidates"]}
+    assert not cands & {"live_flag.csv", "tile_switch.jsonl", "settings.json"}
+    assert {"live_flag.csv", "tile_switch.jsonl"} <= {u["rel"] for u in plan["unclassified_data_files"]}
+    assert {"live_flag.csv", "tile_switch.jsonl", "settings.json"} <= {u["name"] for u in plan["top_level_denied_or_unclassified"]}
+    assert _run(_good(vol)) == 9 and "UNCLASSIFIED_DATA_FILES" in capsys.readouterr().out
+    assert _nothing_deleted(vol)
+    for name in ("live_flag.csv", "tile_switch.jsonl", "settings.json"):
+        assert (vol / "runtime" / name).exists()
+
+
+def test_denylist_does_not_swallow_the_real_delete_classes():
+    for rel in frna.DELETE_EXACT_NAMES:
+        assert not any(t in rel for t in frna.DENY_NAME_TOKENS), rel  # no explicit DELETE name is denied
+        assert frna.classify(rel)[0] == frna.DELETE, rel
+
+
+def test_rules_version_is_bumped_and_changes_the_plan_sha(vol, monkeypatch):
+    assert frna.RULES_VERSION == "full-reset-rules-v3-denylist"
+    before = _plan(vol)["plan_sha256"]
+    monkeypatch.setattr(frna, "DENY_NAME_TOKENS", ("live", "arm"))
+    assert _plan(vol)["plan_sha256"] != before
+
+
+def test_plan_file_lists_top_level_names_counts_and_bytes(vol):
+    plan = _plan(vol)
+    rows = {r["name"]: r for r in plan["top_level_delete"]}
+    assert rows["trades_3factor.csv"]["files"] == 2  # the file and its .1 rotation folded together
+    assert rows["trades_3factor.csv"]["bytes"] > 0 and all(set(r) == {"name", "files", "bytes"} for r in rows.values())
+    assert "sub/unknown.dat" not in rows and "research.db" not in rows
+    s = frna.summary(plan)
+    assert s["top_level_delete"] == plan["top_level_delete"] and "candidates" not in s
+
+
+def test_safety_net_is_the_last_step_pauses_then_stops_the_machine_if_not_proven():
+    import re
+    names = re.findall(r"^      - name: (.+)$", JOB, flags=re.M)
+    assert names[-1].startswith("Safety net on failure")
+    step = _step("Safety net on failure")
+    assert "failure()" in step and "full-reset-no-archive-execute" in step
+    assert '"/api/pause"' in step and "DEPLOY_MAINTENANCE" in step
+    assert 'pause_owner") == "DEPLOY_MAINTENANCE"' in step
+    assert '"flyctl", "machine", "stop"' in step
+    assert step.index("/api/pause") < step.index('"machine", "stop"')
+    assert "/api/resume" not in step and "continue-on-error" not in step
+    assert "FLY_API_TOKEN" in step and "BOT_ADMIN_TOKEN" in step  # secrets only via env, never echoed
+    assert "echo $BOT_ADMIN_TOKEN" not in step and "print(os.environ" not in step

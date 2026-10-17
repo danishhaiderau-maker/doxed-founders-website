@@ -84,7 +84,7 @@ def _real_zero(value) -> bool:
     return isinstance(value, (int, float)) and abs(float(value)) < 1e-12
 
 
-def exchange_proof(audit: dict, now: float) -> tuple[dict, list[str]]:
+def exchange_proof(audit: dict) -> tuple[dict, list[str]]:
     """(proof, failures) from GET /api/exchange_exposure_audit. A missing key, a stale or non-authoritative audit and
     any non-zero count all fail. exchange_delta_btc is derived: the net exposure is 0.0 exactly when there is no open
     exchange position (the audit endpoint returns counts, not a delta)."""
@@ -93,6 +93,12 @@ def exchange_proof(audit: dict, now: float) -> tuple[dict, list[str]]:
     for key in ("authoritative", "fresh", "flat"):
         if audit.get(key) is not True:
             bad.append(f"audit {key}={audit.get(key)!r} (want True)")
+    # freshness comes from the AUDIT'S OWN checked_ts (the bot's clock), never the workflow runner's clock
+    checked = audit.get("checked_ts")
+    if isinstance(checked, bool) or not isinstance(checked, (int, float)) or checked <= 0:
+        bad.append(f"audit checked_ts={checked!r} (a numeric timestamp is required)")
+    if "error" not in audit or audit.get("error") is not None:
+        bad.append(f"audit error={audit.get('error')!r} (must be present and null)")
     for key in ("open_position_count", "open_order_count"):
         if key not in audit:
             bad.append(f"audit {key} absent")
@@ -105,7 +111,7 @@ def exchange_proof(audit: dict, now: float) -> tuple[dict, list[str]]:
              "exchange_active_orders": audit.get("open_order_count"),
              "exchange_delta_btc": 0.0 if _real_zero(audit.get("open_position_count")) else None,
              "authoritative": audit.get("authoritative"), "fresh": audit.get("fresh"), "flat": audit.get("flat"),
-             "proof_ts": now}
+             "proof_ts": checked, "error": audit.get("error")}
     return proof, bad
 
 
@@ -202,7 +208,7 @@ def cmd_stamp(args) -> int:
 
 
 def cmd_exchange_proof(args) -> int:
-    proof, bad = exchange_proof(_get("/api/exchange_exposure_audit", timeout=90), time.time())
+    proof, bad = exchange_proof(_get("/api/exchange_exposure_audit", timeout=90))
     print(json.dumps({"exchange_proof": proof, "failures": bad}, sort_keys=True))
     if bad:
         raise SystemExit("exchange not proven flat: " + "; ".join(bad))

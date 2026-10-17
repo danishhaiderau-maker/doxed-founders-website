@@ -78,3 +78,21 @@ paper run, and the restart step fails the job if the bot does not come back paus
 bot writes only `open_positions.json`, `paper_lifecycle_v1.json`, the config and replay dumps; it never rewrites
 `lane_pnl_ledger.json` or the trade CSV from memory (pinned by an AST test). The post-restart plan allows only small
 delete-class leftovers (default max 200 files and 64 MiB; a collector or replay dump may recreate tiny files).
+
+## Notes added after HM review (17 Oct 20:16 AEDT)
+* **`plan_sha256` binds to RULES, not files.** It is a hash of the delete classes, the KEEP allowlist, the deny-list and
+  `RULES_VERSION` (`full-reset-rules-v3-denylist`). Rotation, collectors appending or the in-process reset between plan and
+  execute never change it; a new file only changes what the execute deletes (and the plan file lists it). Changing any
+  rule or the deny-list changes the sha, so a stale confirm token cannot be used against different rules.
+* **`exchange_delta_btc` is just 0.0 when there are no exchange positions.** The private exposure audit returns counts
+  (`open_position_count`, `open_order_count`), not a delta, so the proof sets the delta to 0.0 only when the position count
+  is a real 0 (otherwise null, which fails). It is not an independent measurement. Freshness uses the audit's own
+  `checked_ts` (never the runner clock) and requires `error` to be present and null.
+* **Deny-list.** A file whose NAME contains `live`, `arm`, `flag`, `switch`, `tile` or `settings` is never deleted by any
+  rule (explicit, dataset or the top-level catch-all). If it is not on the KEEP allowlist it is UNCLASSIFIED, and a
+  `.csv/.jsonl/.gz` of that kind makes execute abort with `UNCLASSIFIED_DATA_FILES` until HM classifies it. The plan file
+  (`plan --out`, and the plan printed by the job) lists `top_level_delete` (name, files, bytes with rotations folded in)
+  and `top_level_denied_or_unclassified`, so it can be sent to HM as is.
+* **Failure safety net.** The last job step runs on `failure()`: it POSTs `/api/pause` (owner DEPLOY_MAINTENANCE) and, if
+  `/health` still does not show paused by DEPLOY_MAINTENANCE with live off, runs `flyctl machine stop`. It never resumes
+  paper. After a safety-net stop the machine is started by hand only after HM clears it.

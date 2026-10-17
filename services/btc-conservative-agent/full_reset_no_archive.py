@@ -111,6 +111,7 @@ DELETE_EXACT_NAMES = frozenset({
     "benchmark_vs_lanes_report.json", "analyzer_integrity_report.json",
 })
 DELETE_TAPE_DATASETS = cew.TAPE_DATASETS | cew.MARKET_DATASETS
+DENY_NAME_TOKENS = ("live", "arm", "flag", "switch", "tile", "settings")
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
 _ANY_ROTATION_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv))\.(?P<n>[1-9][0-9]*)(?:\.gz)?$")
@@ -153,6 +154,10 @@ def classify(relpath: str) -> tuple[str, str]:
     # 4. pre-fresh-start irreplaceable research and signed receipts
     if any(t in lower for t in PRESERVED_RESEARCH_TOKENS):
         return KEEP, "PRESERVED_RESEARCH"
+    # 4b. DENY-LIST: anything that smells like a live / arming / flag / switch / tile / settings file is NEVER deleted by
+    # any rule below (explicit, dataset or catch-all). Not on KEEP means UNCLASSIFIED, so execute aborts for data files.
+    if any(t in name for t in DENY_NAME_TOKENS):
+        return UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"
     # 5. explicit DELETE classes
     if base in DELETE_EXACT_NAMES and (top_level or base == name or _ANY_ROTATION_RE.match(name)):
         return DELETE, "DATA_STREAM_EXACT" + ("_ROTATED_COPY" if base != name else "")
@@ -226,7 +231,7 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
-RULES_VERSION = "full-reset-rules-v2"
+RULES_VERSION = "full-reset-rules-v3-denylist"
 
 
 def rules_identity() -> bytes:
@@ -235,13 +240,29 @@ def rules_identity() -> bytes:
     doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
            "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
            "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
-           "preserved": list(PRESERVED_RESEARCH_TOKENS), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 
 def is_data_file(rel: str) -> bool:
     low = rel.lower()
     return low.endswith((".csv", ".jsonl", ".gz")) or bool(_ANY_ROTATION_RE.match(low.rsplit("/", 1)[-1]))
+
+
+def top_level_rows(candidates: list) -> list:
+    """Top-level files to delete with rotated copies folded in: [{name, files, bytes}] (what HM reads in the plan file)."""
+    agg: dict[str, dict] = {}
+    for c in candidates:
+        if "/" in c["rel"]:
+            continue
+        row = agg.setdefault(_base_name(c["rel"]), {"name": _base_name(c["rel"]), "files": 0, "bytes": 0})
+        row["files"] += 1
+        row["bytes"] += int(c["bytes"])
+    return sorted(agg.values(), key=lambda r: -r["bytes"])
+
+
+def top_level_unclassified(unclassified: list) -> list:
+    return [{"name": u["rel"], "bytes": u["bytes"]} for u in unclassified if "/" not in u["rel"]][:200]
 
 
 def build_plan(data_root: Path | str) -> dict:
@@ -279,6 +300,7 @@ def build_plan(data_root: Path | str) -> dict:
             "notes": ["unclassified files are retained and listed, never deleted",
                       "V3 store, WAL, SQLite, collector v22 and research alias dirs are reset by the in-process "
                       "guarded reset (POST /api/wipe_fly_only), not by this tool"],
+            "top_level_delete": top_level_rows(candidates), "top_level_denied_or_unclassified": top_level_unclassified(unclassified),
             "candidates": candidates}
 
 
@@ -288,6 +310,7 @@ def confirm_token(plan_sha256: str) -> str:
 
 def summary(plan: dict, examples: int = 15) -> dict:
     out = {k: v for k, v in plan.items() if k not in ("candidates", "keep_digests", "keep_flag_views")}
+    out["top_level_delete_count"] = len(plan.get("top_level_delete") or [])
     out["keep_digest_count"] = len(plan.get("keep_digests") or {})
     out["largest_candidates"] = sorted(plan["candidates"], key=lambda c: -c["bytes"])[:examples]
     return out
@@ -387,6 +410,8 @@ def preflight_violations(health: Mapping[str, Any], *, lifecycle: Mapping[str, A
         for key in ("authoritative", "fresh", "flat"):
             if facts.get(key) is not True:
                 bad.append(f"exchange proof {key}={facts.get(key)!r} (want True)")
+        if "error" not in facts or facts.get("error") is not None:
+            bad.append(f"exchange proof error={facts.get('error')!r} (must be present and null)")
         try:
             age = float(now if now is not None else time.time()) - float(facts.get("proof_ts"))
         except (TypeError, ValueError):

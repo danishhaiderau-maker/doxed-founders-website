@@ -60,21 +60,29 @@ def test_dv_gate_needs_a_stamped_row_matching_the_epoch_and_a_fresh_epoch_id():
 
 
 def _audit(**kw):
-    base = {"authoritative": True, "fresh": True, "flat": True, "open_position_count": 0, "open_order_count": 0,
+    base = {"authoritative": True, "fresh": True, "flat": True, "checked_ts": 1000.0, "error": None, "open_position_count": 0, "open_order_count": 0,
             "orphan_order_ids": [], "orphan_position_ids": []}
     base.update(kw)
     return {k: v for k, v in base.items() if v != "GONE"}
 
 
 def test_exchange_proof_requires_every_field_present_and_zero():
-    proof, bad = gate.exchange_proof(_audit(), 1000.0)
+    proof, bad = gate.exchange_proof(_audit())
     assert bad == [] and proof["exchange_positions"] == 0 and proof["exchange_delta_btc"] == 0.0 and proof["proof_ts"] == 1000.0
     for key in ("open_position_count", "open_order_count", "orphan_order_ids", "orphan_position_ids",
-                "authoritative", "fresh", "flat"):
-        assert gate.exchange_proof(_audit(**{key: "GONE"}), 1.0)[1], key  # a missing key is NOT zero
-    assert gate.exchange_proof(_audit(open_position_count=1), 1.0)[1]
-    assert gate.exchange_proof(_audit(open_order_count=2), 1.0)[1]
-    assert gate.exchange_proof(_audit(orphan_order_ids=["x"]), 1.0)[1]
-    assert gate.exchange_proof(_audit(fresh=False), 1.0)[1]
-    assert gate.exchange_proof(_audit(open_position_count=None), 1.0)[1]
-    assert gate.exchange_proof({}, 1.0)[1] and gate.exchange_proof(None, 1.0)[1]
+                "authoritative", "fresh", "flat", "checked_ts", "error"):
+        assert gate.exchange_proof(_audit(**{key: "GONE"}))[1], key  # a missing key is NOT zero
+    assert gate.exchange_proof(_audit(open_position_count=1))[1]
+    assert gate.exchange_proof(_audit(open_order_count=2))[1]
+    assert gate.exchange_proof(_audit(orphan_order_ids=["x"]))[1]
+    assert gate.exchange_proof(_audit(fresh=False))[1]
+    assert gate.exchange_proof(_audit(open_position_count=None))[1]
+    assert gate.exchange_proof({})[1] and gate.exchange_proof(None)[1]
+
+
+def test_exchange_proof_uses_the_audits_own_clock_and_requires_a_null_error():
+    proof, bad = gate.exchange_proof(_audit(checked_ts=1234.5))
+    assert bad == [] and proof["proof_ts"] == 1234.5  # NOT the runner clock
+    assert gate.exchange_proof(_audit(error="boom"))[1] and gate.exchange_proof(_audit(error=""))[1]
+    assert gate.exchange_proof(_audit(checked_ts="1000"))[1] and gate.exchange_proof(_audit(checked_ts=0))[1]
+    assert gate.exchange_proof(_audit(checked_ts=True))[1]

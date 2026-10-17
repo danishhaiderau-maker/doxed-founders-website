@@ -1235,6 +1235,46 @@ jobs:
           test "${ok:-0}" = 1 || { echo "post-restart book row does not carry the dv stamp matching fresh_epoch_id"; exit 1; }
           echo "Paper stays PAUSED (DEPLOY_MAINTENANCE). Health Monitor checks, then Boss resumes."
 
+      - name: Safety net on failure, force the DEPLOY_MAINTENANCE pause and stop the machine if it cannot be proven paused
+        id: safetynet
+        # LAST step. Whatever failed (even the restart wait), the bot must not be left running unpaused or with collectors
+        # writing to deleted handles. Never resumes paper and never arms anything.
+        if: ${{ failure() && inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          def paused():
+              try:
+                  with urllib.request.urlopen(base + "/health?fresh=1", timeout=20) as response:
+                      health = json.load(response)
+                  return (health.get("execution_paused") is True and health.get("pause_owner") == "DEPLOY_MAINTENANCE"
+                          and health.get("live_armed") is False and health.get("bitfinex_live_enabled") is False)
+              except Exception:  # noqa: BLE001 - unreachable counts as not proven
+                  return False
+          try:
+              request = urllib.request.Request(base + "/api/pause", data=json.dumps({"owner": "DEPLOY_MAINTENANCE"}).encode(),
+                                               method="POST", headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"],
+                                                                       "Content-Type": "application/json"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  print("pause POST status=" + str(response.status))
+          except Exception as exc:  # noqa: BLE001
+              print("pause POST failed: " + type(exc).__name__)
+          for _ in range(12):
+              if paused():
+                  print("safety net: bot is paused by DEPLOY_MAINTENANCE (job stays red, nothing resumed)")
+                  raise SystemExit(0)
+              time.sleep(5)
+          print("safety net: pause NOT proven, stopping the machine")
+          rc = subprocess.call(["flyctl", "machine", "stop", "--app", "doxed-btc-bot", os.environ["MACHINE_ID"]])
+          raise SystemExit(f"bot could not be proven paused; machine stop rc={rc}. Investigate before any start.")
+          PY
+
+
   repair-v22-seals:
     # Moves research_events_v22 seal receipts whose sealed generation file was
     # deleted into research_events_v22.seals/quarantine/<stamp>/ (never deletes)
