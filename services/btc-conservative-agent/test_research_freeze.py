@@ -207,3 +207,10 @@ def test_bot_reset_and_toggle_paths_route_through_the_freeze_guard():
 
 def test_status_payload_is_json_serialisable():
     json.dumps(rf.freeze_status(MANIFEST, START + 86400, rf.FREEZE_DATA_EPOCH_ID))
+
+
+def test_status_lists_the_current_roster_next_to_the_pinned_original():
+    cur = rf.freeze_status(MANIFEST, START + 600)["current_roster"]
+    assert len(cur["on_by_default"]) == 5 and len(cur["default_off_tiles_6_7"]) == 2
+    assert all("DISLOC" in lane for lane in cur["default_off_tiles_6_7"])
+    assert {"FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_PREMIUM_REVERSION_60M"} <= set(cur["retired_not_listed"])

@@ -668,12 +668,14 @@ def test_sigterm_shutdown_never_rewrites_the_lane_ledger_or_the_trade_csv_from_m
     assert not (calls(funcs["save_positions"]) & forbidden) and not (calls(funcs["save_paper_lifecycle"]) & forbidden)
 
 
-def test_the_workflow_is_valid_yaml_and_the_job_steps_are_in_the_guarded_order():
-    import yaml
-    doc = yaml.safe_load(WORKFLOW_TEXT)
-    steps = [s.get("name", "") for s in doc["jobs"]["full-reset-no-archive"]["steps"]]
+def test_the_workflow_step_names_are_plain_scalars_and_in_the_guarded_order():
+    """No PyYAML in CI: a ': ' inside an unquoted step name breaks the whole workflow file, so pin that textually."""
+    import re
+    names = re.findall(r"^      - name: (.+)$", JOB, flags=re.M)
+    assert names and all(": " not in n and not n.startswith(("'", '"', "[", "{", "&", "*", "!", "|", ">", "%", "@", "`")) or
+                         (n[0] in "'\"" and n[-1] == n[0]) for n in names), [n for n in names if ": " in n]
     order = ["Plan (read-only)", "Require confirm token", "Enter paper maintenance boundary", "Prove the exchange is flat",
              "Prove every relay", "Snapshot the live-off facts", "In-process guarded reset", "Stamp the fresh-start epoch",
              "Re-prove the exchange is flat", "File wipe", "Restart the machine", "Post-restart read-only plan", "Verify"]
-    idx = [next(i for i, n in enumerate(steps) if n.startswith(frag)) for frag in order]
+    idx = [next(i for i, n in enumerate(names) if n.startswith(frag)) for frag in order]
     assert idx == sorted(idx), (order, idx)
