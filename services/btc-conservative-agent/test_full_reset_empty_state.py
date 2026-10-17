@@ -165,3 +165,17 @@ def test_data_version_stamp_reads_the_epoch_file_and_follows_changes(tmp_path):
     (tmp_path / data_version.FILE).write_text("not json")
     assert stamp.current() is None
     assert data_version.id_from_epoch({"epoch_ts": 0}) is None and data_version.id_from_epoch(None) is None
+
+
+def test_absent_lane_pnl_ledger_is_read_as_zero_and_recreated_at_zero_on_boot(bot, monkeypatch):
+    """HM confirmation #3: the full reset deletes lane_pnl_ledger.json (DATA_STREAM_EXACT). Absent means zero everywhere,
+    and the boot-time epoch segregation re-creates it with 0 closes (nothing archived: there is no old file to copy)."""
+    import os
+    assert not os.path.exists(bot.LANE_PNL_LEDGER_FILE)
+    monkeypatch.setattr(bot, "_showcase_trade_session_start", lambda: 0.0)
+    r = _get(bot, "/api/monitor/lanes")  # reader with the file absent
+    assert r.status_code == 200 and all(row["closes"] == 0 for row in r.get_json()["lanes"])
+    result = bot._segregate_lane_pnl_ledger_for_epoch()
+    assert result["status"] == "SEGREGATED" and result["epoch_closes"] == 0 and "archived_to" not in result
+    doc = json.loads(open(bot.LANE_PNL_LEDGER_FILE, encoding="utf-8").read())
+    assert doc["schema"] == "lane_pnl_ledger_v1" and sum(int((b or {}).get("closes") or 0) for b in doc["lanes"].values()) == 0

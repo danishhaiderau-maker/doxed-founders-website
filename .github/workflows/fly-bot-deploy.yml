@@ -1218,6 +1218,27 @@ jobs:
           plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label full-reset-postplan --deadline-sec 1800 -- python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data --full-reset-no-archive)"
           printf '%s' "$plan" | python scripts/fly_full_reset_gate.py check-leftovers --max-files 200 --max-bytes 67108864
 
+      - name: Retire the superseded segment prefix (v3 and its shipper state; the live v3-w<epoch> prefix, v1/v2 and runtime are never touched)
+        id: segretire
+        # The file wipe only scans /app/data/runtime; the pre-reset segment store (/app/data/segment-store/v3, seq 1..N since 13 Oct)
+        # lives outside it. After the stamp + restart the server no longer answers for it, but the bytes would stay on the volume.
+        # Fail-closed (full_reset_segment_retire.py): needs PER_WIPE=1, a stamped epoch and the shipper already rotated to the new prefix.
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine="${{ steps.plan.outputs.machine_id }}"
+          prefix=""
+          for attempt in $(seq 1 40); do
+            out="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine" --label full-reset-segplan --deadline-sec 600 -- python /app/full_reset_segment_retire.py plan --data-root /app/data || true)"
+            prefix="$(printf '%s' "$out" | python -c 'import json,sys; t=sys.stdin.read(); i=t.find("{"); print(json.loads(t[i:]).get("live_prefix","") if i>=0 else "")' 2>/dev/null || true)"
+            if [ -n "$prefix" ]; then printf '%s\n' "$out"; break; fi
+            sleep 15
+          done
+          test -n "$prefix" || { echo "segment retire plan never became valid (shipper has not rotated to the new prefix)"; exit 1; }
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine" --label full-reset-segretire --deadline-sec 1800 -- python /app/full_reset_segment_retire.py execute --data-root /app/data --expect-live-prefix "$prefix"
+
       - name: Verify (live off unchanged, 0 rows everywhere, dv stamp, epoch id) and wait for the book stream
         if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
         env:
