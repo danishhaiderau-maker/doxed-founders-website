@@ -11,8 +11,10 @@ Nothing here deletes anything itself, resumes the pause, or edits pinned deleter
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -94,12 +96,45 @@ class JobStatus:
         self.flush()
 
     def finish(self, outcome, *, blockers=(), epoch_stamped=False, error=None):
-        self.body.update(state="DONE" if outcome == "COMPLETE" else "FAILED", outcome=outcome,
+        # The in-process reset finishing is NOT the end of the full reset: the epoch stamp and the verify receipt
+        # still have to land. RESET_COMPLETE parks in DONE_PENDING_VERIFY; COMPLETE is derived in read_status.
+        state = ("DONE_PENDING_VERIFY" if outcome == RESET_COMPLETE else "FAILED")
+        self.body.update(state=state, outcome=outcome,
                          blockers=list(blockers), epoch_stamped=bool(epoch_stamped), error=error)
         self.flush()
 
 
-def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
+RESET_COMPLETE = "RESET_COMPLETE"
+VERIFY_FILE = "verify_receipt.json"
+PENDING_VERIFY_ALERT_S = 1800.0
+
+
+def record_verify(runtime_root, *, passed, source="workflow", detail=None, now=None) -> dict:
+    """Idempotent verify receipt for the CURRENT job (a repeat overwrites with the latest verdict)."""
+    directory = job_dir(runtime_root)
+    status = _read_json(directory / STATUS_FILE)
+    if not isinstance(status, dict) or not status.get("operation_id"):
+        return {"ok": False, "error": "NO_JOB_STATUS"}
+    if status.get("outcome") != RESET_COMPLETE:
+        return {"ok": False, "error": "RESET_NOT_COMPLETE", "outcome": status.get("outcome")}
+    receipt = {"schema": "full_reset_verify_receipt_v1", "operation_id": status["operation_id"],
+               "passed": bool(passed), "source": str(source)[:40],
+               "detail": (str(detail)[:200] if detail else None),
+               "recorded_at": time.time() if now is None else now}
+    _atomic_write(directory / VERIFY_FILE, receipt)
+    return {"ok": True, "receipt": receipt}
+
+
+def _stamped_for(status, fresh_epoch) -> bool:
+    """epoch_stamped is read from fresh_start_epoch.json, never from the job's in-memory flag."""
+    try:
+        ts = float((fresh_epoch or {}).get("epoch_ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    return ts > 0 and ts >= float(status.get("started_at") or 0) - 5.0
+
+
+def read_status(runtime_root, *, live_armed=False, now=None, fresh_epoch=None) -> dict:
     """Read-only view for GET /api/monitor/full-reset; only reads small files."""
     now = time.time() if now is None else now
     directory = job_dir(runtime_root)
@@ -123,10 +158,100 @@ def read_status(runtime_root, *, live_armed=False, now=None) -> dict:
         alert = "partial reset: job status stale while RUNNING (interrupted)"
     elif status.get("state") == "FAILED":
         alert = f"reset failed: {status.get('outcome')}"
+    level = "RED"
+    if status.get("outcome") == RESET_COMPLETE:
+        stamped = _stamped_for(status, fresh_epoch)
+        receipt = _read_json(directory / VERIFY_FILE)
+        if not (isinstance(receipt, dict) and receipt.get("operation_id") == status.get("operation_id")):
+            receipt = None
+        view["epoch_stamped"] = stamped
+        view["verify"] = ({k: receipt.get(k) for k in ("passed", "source", "recorded_at", "detail")}
+                          if receipt else None)
+        if receipt and receipt.get("passed") is False:
+            view["state"], view["outcome"] = "VERIFY_FAILED", "VERIFY_FAILED"
+            alert = "reset done but the verify step FAILED"
+        elif stamped and receipt and receipt.get("passed") is True:
+            view["state"], view["outcome"] = "DONE", "COMPLETE"
+        else:
+            view["state"] = "DONE_PENDING_VERIFY"
+            missing = [n for n, ok in (("epoch_stamp", stamped), ("verify_receipt", receipt is not None)) if not ok]
+            view["pending"] = missing
+            if age > PENDING_VERIFY_ALERT_S:
+                alert, level = "reset done, still pending: " + ",".join(missing), "AMBER"
+    else:
+        view["epoch_stamped"] = False
     if live_armed and view.get("state") == "RUNNING":
-        alert = "reset running while LIVE ARMED"
-    view["alert"] = {"level": "RED", "reason": alert} if alert else None
+        alert, level = "reset running while LIVE ARMED", "RED"
+    view["alert"] = {"level": level, "reason": alert} if alert else None
     return view
+
+
+_RECEIPT_DIRS = ("full-reset-receipts", "research_reset_receipts")
+_RECEIPT_JSON_MAX = 256 * 1024
+_RECEIPT_MAX_FILES = 200
+_RECEIPT_MAX_DIRS = 50
+_RECEIPT_STR_MAX = 200
+_RECEIPT_MASK = re.compile(r"token|secret|key|confirm", re.IGNORECASE)
+
+
+def _shape_value(key, value):
+    if _RECEIPT_MASK.search(str(key)):
+        return "<masked>"
+    if isinstance(value, str):
+        return value[:_RECEIPT_STR_MAX]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return f"{type(value).__name__}[{len(value)}]"
+
+
+def _walk_files(base):
+    """Lazy depth-first file walk; never materialises or sorts the whole tree."""
+    for entry in os.scandir(base):
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                yield from _walk_files(entry.path)
+            elif entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
+        except OSError:
+            continue
+
+
+def read_receipt_summary(runtime_root) -> dict:
+    """Read-only summary of the reset receipt directories (names, sizes, shape of small JSON receipts).
+
+    Bounded: at most 50 receipt directories and 200 files each (lazy walk, islice), JSON only under 256 KiB,
+    string values cut to 200 chars, keys matching token|secret|key|confirm masked. No writes, no deletion."""
+    root = Path(runtime_root)
+    out = {"schema": "full_reset_receipt_summary_v1", "directories": [],
+           "note": "progress targets/bytes count every scope's fingerprinted payload; receipt files describe each pass"}
+    for name in _RECEIPT_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        try:
+            subs = [Path(e.path) for e in itertools.islice((e for e in os.scandir(base) if e.is_dir(follow_symlinks=False)), _RECEIPT_MAX_DIRS)]
+        except OSError:
+            continue
+        for sub in sorted(subs):
+            files, total = [], 0
+            walker = _walk_files(sub)
+            batch = list(itertools.islice(walker, _RECEIPT_MAX_FILES + 1))
+            truncated = len(batch) > _RECEIPT_MAX_FILES
+            for path in batch[:_RECEIPT_MAX_FILES]:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                total += size
+                entry = {"file": str(path.relative_to(root)), "bytes": size}
+                if path.suffix == ".json" and size <= _RECEIPT_JSON_MAX:
+                    doc = _read_json(path)
+                    if isinstance(doc, dict):
+                        entry["shape"] = {str(k): _shape_value(k, v) for k, v in itertools.islice(doc.items(), 40)}
+                files.append(entry)
+            out["directories"].append({"dir": f"{name}/{sub.name}", "files_listed": len(files),
+                                       "bytes_listed": total, "truncated": truncated, "files": files})
+    return out
 
 
 class HeartbeatPublisher(threading.Thread):

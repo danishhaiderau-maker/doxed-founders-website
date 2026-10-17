@@ -131,3 +131,27 @@ def test_zero_wait_lock_classifier_allows_only_bounded_known_owner_contention():
     assert classify(False, {"owner_ident": 7, "owner_active": True}, 0.0) == (False, False)
     assert classify(False, {**active, "held_seconds": float("nan")}, 0.0) == (False, False)
     assert classify(False, {**active, "held_seconds": -0.01}, 0.0) == (False, False)
+
+
+def test_health_publishes_collection_epoch_id_with_stat_cache(tmp_path):
+    tree = ast.parse(BOT)
+    node = next(i for i in tree.body if isinstance(i, ast.FunctionDef) and i.name == "_collection_epoch_id_cached")
+    session = tmp_path / "research_session.json"
+    reads = []
+
+    def bound():
+        reads.append(1)
+        return json.loads(session.read_text()).get("collector_v22_epoch_id", "")
+
+    import os
+    ns = {"os": os, "RESEARCH_SESSION_FILE": str(session), "_bound_collection_epoch_id": bound,
+          "_COLLECTION_EPOCH_CACHE": {"sig": None, "value": None}}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
+    fn = ns[node.name]
+    assert fn() is None and not reads  # no file: no read
+    session.write_text(json.dumps({"collector_v22_epoch_id": "epoch-a"}))
+    assert fn() == "epoch-a" and fn() == "epoch-a" and len(reads) == 1  # cached
+    session.write_text(json.dumps({"collector_v22_epoch_id": "epoch-bb"}))
+    assert fn() == "epoch-bb" and len(reads) == 2
+    assert '"collection_epoch_id": _collection_epoch_id_cached(),' in BOT.split("def health()")[1][:6000]
+    assert 'snapshot["collection_epoch_id"] = _collection_epoch_id_cached()' in BOT

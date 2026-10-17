@@ -479,6 +479,13 @@ def _paper_fill_execution_receipt(
     fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
     fill_model = gate.get("fill_model") or "PRE_REALISTIC_V1_BBO_CROSS"
     fill_basis = gate.get("fill_basis")
+    import paper_fill as _paper_fill
+    if str(fill_sim.get("fill_model") or "") in _paper_fill.ALLOWED_FILL_MODELS:
+        # Book-walked paper fill (every tile): the pricer's own evidence is the basis. The venue gate never runs for
+        # these lanes, so reading it would label a correct BOOK10L fill UNCLASSIFIED / UNSUPPORTED.
+        fill_model = str(fill_sim["fill_model"])
+        fill_basis = _paper_fill.FILL_BASIS_TAKER_WALK
+        supported = fill_sim.get("evidence_status") == _paper_fill.EVIDENCE_COMPLETE and filled is not None and filled > 0
     if not fill_basis:
         # Taker-at-signal / SIM_MARKET fills never visit the venue-executable gate;
         # label them explicitly so GS-04 (and other takers) are not UNCLASSIFIED.

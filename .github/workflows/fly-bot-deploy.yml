@@ -1177,7 +1177,7 @@ jobs:
               if line != last:
                   print(json.dumps(line, sort_keys=True), flush=True)
                   last = line
-              if view.get("state") == "DONE" and view.get("outcome") == "COMPLETE":
+              if view.get("outcome") in ("RESET_COMPLETE", "COMPLETE"):
                   raise SystemExit(0)
               if view.get("state") == "FAILED":
                   if view.get("outcome") in retryable and restarts < 7:
@@ -1286,6 +1286,7 @@ jobs:
           python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine" --label full-reset-segretire --deadline-sec 1800 -- python /app/full_reset_segment_retire.py execute --data-root /app/data --expect-live-prefix "$prefix"
 
       - name: Verify (live off unchanged, 0 rows everywhere, dv stamp, epoch id) and wait for the book stream
+        id: verify
         if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
@@ -1301,6 +1302,22 @@ jobs:
           done
           test "${ok:-0}" = 1 || { echo "post-restart book row does not carry the dv stamp matching fresh_epoch_id"; exit 1; }
           echo "Paper stays PAUSED (DEPLOY_MAINTENANCE). Health Monitor checks, then Boss resumes."
+
+      - name: Post the verify receipt (the status route reports COMPLETE only after reset + stamp + this receipt)
+        if: ${{ always() && inputs.mode == 'full-reset-no-archive-execute' && steps.verify.conclusion != 'skipped' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          VERIFY_CONCLUSION: ${{ steps.verify.conclusion }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          body = json.dumps({"passed": os.environ["VERIFY_CONCLUSION"] == "success", "source": "workflow",
+                             "detail": "run " + os.environ.get("GITHUB_RUN_ID", "")}).encode()
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/monitor/full-reset/verify", data=body, method="POST",
+                                           headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              print(response.status, response.read().decode()[:300])
+          PY
 
       - name: Safety net on failure, force the DEPLOY_MAINTENANCE pause and stop the machine if it cannot be proven paused
         id: safetynet

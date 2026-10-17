@@ -1457,9 +1457,8 @@ export class TradingAgentsService implements OnModuleInit {
       FROM "TradingAgentInstance" i
       WHERE i."agentId" = ${agent.id}
         AND i."exchangeProvider" = 'bitfinex'
-        AND (i."dashboardState" ->> 'relayArmedAt' IS NOT NULL
-             OR i."dashboardState" -> 'relayLastTransition' IS NOT NULL)
         AND i."status"::text IN ('ACTIVE', 'PAUSED')
+      ORDER BY (i."dashboardState" ->> 'relayArmedAt' IS NOT NULL) DESC, i."updatedAt" DESC
       LIMIT 200
     `);
     const nowMs = Date.now();
@@ -1472,6 +1471,9 @@ export class TradingAgentsService implements OnModuleInit {
         status: r.status,
         exchange: r.exchangeProvider,
         armed_at: r.relayArmedAt,
+        // Every known Bitfinex instance is listed, including disarmed ones that
+        // never recorded a transition (armed false, last_transition null).
+        listed_reason: flyViewListedReason(r),
         executor_healthy: health.healthy,
         executor_heartbeat_age_sec: health.heartbeatAgeMs == null ? null : Math.round(health.heartbeatAgeMs / 1000),
         executor_status: health.status,
@@ -2369,6 +2371,13 @@ function mapShowcaseExitReasonToTrigger(
   }
   if (r.includes('MANUAL') || r.includes('CLOSE')) return 'Manual';
   return 'Signal';
+}
+
+/** Pure: why a Bitfinex instance appears in the fly-view (never a reason to hide it). */
+export function flyViewListedReason(r: { relayArmedAt?: unknown; relayLastTransition?: unknown }): string {
+  if (r.relayArmedAt) return 'armed_at';
+  if (r.relayLastTransition) return 'last_transition';
+  return 'known_disarmed';
 }
 
 /** Pure: privacy-safe projection of dashboardState.relayLastTransition. */

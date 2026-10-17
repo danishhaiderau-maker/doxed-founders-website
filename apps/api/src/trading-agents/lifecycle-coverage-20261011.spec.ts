@@ -75,3 +75,10 @@ test('reconcile defers (does not pause) when an entry participant was created du
   assert.ok(i > 0 && j > i, 'stale-snapshot deferral must run before the mismatch pause');
   assert.match(src, /id: \{ notIn: knownIds \}/);
 });
+
+import { flyViewListedReason } from './trading-agents.service';
+test('fly-view lists disarmed instances with no transition (known_disarmed)', () => {
+  assert.equal(flyViewListedReason({ relayArmedAt: null, relayLastTransition: null }), 'known_disarmed');
+  assert.equal(flyViewListedReason({ relayArmedAt: '2026-10-11T00:00:00Z' }), 'armed_at');
+  assert.equal(flyViewListedReason({ relayLastTransition: { action: 'PAUSED' } }), 'last_transition');
+});

@@ -367,12 +367,22 @@ def line_ts(line: bytes) -> float | None:
     return None
 
 
-def classify(relpath: str, *, stamp_value: str | None, ts: float | None, manifest: dict | None) -> str:
-    """Epoch class of one row of ``relpath`` (runtime-relative path)."""
+def classify(relpath: str, *, stamp_value: str | None, ts: float | None, manifest: dict | None,
+             floor_ts: float | None = None) -> str:
+    """Epoch class of one row of ``relpath`` (runtime-relative path).
+
+    ``floor_ts`` is the fresh-start epoch_ts (fresh_start_epoch.json). DATA_EPOCH_ID is pinned by the research freeze, so
+    rows stamped with the current id but written before the fresh start must still be rejected: with a floor, any row
+    older than it is PRE_EPOCH and a row with no timestamp fails closed (UNDATED), stamped or not."""
     if epoch_independent(relpath):
         return INDEPENDENT
     if not manifest:
         return LEGACY
+    if floor_ts:
+        if ts is None:
+            return UNDATED
+        if ts < float(floor_ts):
+            return PRE_EPOCH
     if stamp_value:
         return CURRENT if stamp_value == manifest["epoch_id"] else FOREIGN
     if ts is None:
@@ -382,7 +392,8 @@ def classify(relpath: str, *, stamp_value: str | None, ts: float | None, manifes
     return CURRENT_UNSTAMPED if unstampable(relpath) else UNSTAMPED_POST_EPOCH
 
 
-def classify_row(relpath: str, row: dict, manifest: dict | None, ts_fields: Iterable[str] = TS_KEYS) -> str:
+def classify_row(relpath: str, row: dict, manifest: dict | None, ts_fields: Iterable[str] = TS_KEYS,
+                 floor_ts: float | None = None) -> str:
     """Same as :func:`classify` for an already-parsed row."""
     ts = None
     for key in ts_fields:
@@ -390,7 +401,8 @@ def classify_row(relpath: str, row: dict, manifest: dict | None, ts_fields: Iter
         if ts is not None:
             break
     stamp_value = row.get(STAMP_FIELD) if isinstance(row, dict) else None
-    return classify(relpath, stamp_value=stamp_value if isinstance(stamp_value, str) else None, ts=ts, manifest=manifest)
+    return classify(relpath, stamp_value=stamp_value if isinstance(stamp_value, str) else None, ts=ts, manifest=manifest,
+                    floor_ts=floor_ts)
 
 
 # ------------------------------------------------------------------ schema fingerprints

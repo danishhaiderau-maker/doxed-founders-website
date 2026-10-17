@@ -176,6 +176,7 @@ test_empty_paper_trade_index.py
 test_entry_baseline_replay.py
 test_entry_baseline_replay_sidecar.py
 test_epoch_boundary_rotation.py
+test_epoch_guard_fresh_floor.py
 test_epoch_quarantine.py
 test_evaluator_pre_entry_join_integration.py
 test_event_study_and_data_health.py
@@ -334,6 +335,7 @@ test_paper_atr_provenance.py
 test_paper_bitfinex_match.py
 test_paper_family_chase_durability.py
 test_paper_fill.py
+test_paper_fill_pricing_labels.py
 test_paper_lifecycle_restart.py
 test_paper_natural_cycle_exits.py
 test_paper_pnl_canon.py
@@ -478,6 +480,7 @@ test_reset_hash_mismatch_detail.py
 test_reset_inventory_invalidation.py
 test_reset_payload_stage.py
 test_reset_recovery_audit_boundary.py
+test_reset_status_and_mirror_health.py
 test_reset_writer_barrier.py
 test_restart_reconciliation_disposition.py
 test_retired_research_routes.py

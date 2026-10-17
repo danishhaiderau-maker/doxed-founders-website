@@ -191,6 +191,17 @@ class FillSimCounters:
         except Exception:
             pass
 
+    def taker_fill(self, lane: str, fill_price, bid, ask, side: str = "") -> None:
+        """Book-walked taker fills (every paper tile) are counted apart from resting maker fills: a depth walk at
+        signal+delay legitimately prints outside the CURRENT best bid/ask, so it must never feed FILL_OUTSIDE_BBO."""
+        try:
+            with self._lock:
+                row = self._lanes.setdefault(str(lane or "UNKNOWN"), {"maker_fills": 0, "outside_bp": deque(maxlen=500),
+                                                                     "outside_gt_1bp": 0, "no_bbo": 0})
+                row["taker_book_walk_fills"] = row.get("taker_book_walk_fills", 0) + 1
+        except Exception:
+            pass
+
     def snapshot(self) -> dict:
         now = float(self._clock())
         with self._lock:
@@ -199,6 +210,7 @@ class FillSimCounters:
             for lane, row in self._lanes.items():
                 vals = sorted(row["outside_bp"])
                 lanes[lane] = {"maker_fills": row["maker_fills"], "no_bbo": row["no_bbo"],
+                               "taker_book_walk_fills": row.get("taker_book_walk_fills", 0),
                                "outside_bbo_gt_1bp": row["outside_gt_1bp"],
                                "fill_vs_bbo_bp_p50": _q(vals, 0.5), "fill_vs_bbo_bp_p95": _q(vals, 0.95)}
             payload = {"schema": FILL_SIM_SCHEMA, "touch_grid_polls": self.polls, "errors": self.errors,
