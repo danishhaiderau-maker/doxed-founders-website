@@ -720,7 +720,7 @@ def test_denylist_does_not_swallow_the_real_delete_classes():
 
 
 def test_rules_version_is_bumped_and_changes_the_plan_sha(vol, monkeypatch):
-    assert frna.RULES_VERSION == "full-reset-rules-v3-denylist"
+    assert frna.RULES_VERSION == "full-reset-rules-v4-denylist-tile-integrity"
     before = _plan(vol)["plan_sha256"]
     monkeypatch.setattr(frna, "DENY_NAME_TOKENS", ("live", "arm"))
     assert _plan(vol)["plan_sha256"] != before
@@ -749,3 +749,23 @@ def test_safety_net_is_the_last_step_pauses_then_stops_the_machine_if_not_proven
     assert "/api/resume" not in step and "continue-on-error" not in step
     assert "FLY_API_TOKEN" in step and "BOT_ADMIN_TOKEN" in step  # secrets only via env, never echoed
     assert "echo $BOT_ADMIN_TOKEN" not in step and "print(os.environ" not in step
+
+
+def test_tile_integrity_jsonl_is_the_one_deny_list_override():
+    assert frna.DENY_OVERRIDE_DELETE_NAMES == frozenset({"tile_integrity.jsonl"})
+    assert frna.classify("tile_integrity.jsonl")[0] == frna.DELETE
+    assert frna.classify("tile_integrity.jsonl.1")[0] == frna.DELETE
+    assert frna.classify("tile_integrity.jsonl.3.gz")[0] == frna.DELETE
+    # nothing else benefits: other tile / switch names, nested copies and near-misses stay denied
+    for rel in ("tile_integrity.csv", "tile_integrity_report.jsonl", "my_tile_integrity.jsonl", "sub/tile_integrity.jsonl",
+                "tile_switch.jsonl", "live_flag.csv", "tile_independence_report.json", "settings.json"):
+        assert frna.classify(rel)[0] != frna.DELETE, rel
+
+
+def test_tile_integrity_jsonl_no_longer_blocks_execute(vol):
+    (vol / "runtime" / "tile_integrity.jsonl").write_text('{"x":1}\n')
+    plan = _plan(vol)
+    assert "tile_integrity.jsonl" in {c["rel"] for c in plan["candidates"]}
+    assert plan["unclassified_data_files_count"] == 0
+    assert _run(_good(vol)) == 0
+    assert not (vol / "runtime" / "tile_integrity.jsonl").exists()

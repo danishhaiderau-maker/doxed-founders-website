@@ -16,8 +16,8 @@ def test_live_facts_pass_when_disarmed_paper_only_and_no_live_eligible_tile():
 def test_live_facts_fail_closed():
     armed = gate.build_facts({"features": "x; live-eligible switch ON: 0 (none); ARMED."}, OK_HEALTH)
     assert any("DISARMED" in m for m in gate.live_failures(armed))
-    eligible = gate.build_facts({"features": "x; live-eligible switch ON: 2 (T1, T2); DISARMED."}, OK_HEALTH)
-    assert any("live-eligible" in m for m in gate.live_failures(eligible))
+    unreadable = gate.build_facts({"features": "x; DISARMED."}, OK_HEALTH)
+    assert any("live-eligible" in m for m in gate.live_failures(unreadable))
     assert gate.live_failures(gate.build_facts({}, {}))  # unknown is a failure, never a pass
     assert gate.live_failures(gate.build_facts(OK_BUILD, {**OK_HEALTH, "force_paper_mode": False}))
 
@@ -86,3 +86,28 @@ def test_exchange_proof_uses_the_audits_own_clock_and_requires_a_null_error():
     assert gate.exchange_proof(_audit(error="boom"))[1] and gate.exchange_proof(_audit(error=""))[1]
     assert gate.exchange_proof(_audit(checked_ts="1000"))[1] and gate.exchange_proof(_audit(checked_ts=0))[1]
     assert gate.exchange_proof(_audit(checked_ts=True))[1]
+
+
+BASELINE_BUILD = {"features": "7 registered tiles; paper ON: 5 (T1 a); live-eligible switch ON: 7 (T1, T2, T3, T4, T5, T6, T7); live copy DISARMED (force_paper)."}
+
+
+def test_a_nonzero_live_eligible_count_is_the_normal_baseline_and_passes_when_unchanged():
+    before = gate.build_facts(BASELINE_BUILD, OK_HEALTH)
+    assert before["live_eligible_switch_on"] == 7 and before["disarmed"] is True
+    assert gate.live_failures(before) == []  # NOT required to be 0
+    after = gate.build_facts(BASELINE_BUILD, OK_HEALTH)
+    assert gate.verify_live_failures(before, after) == []
+
+
+def test_verify_fails_when_the_count_changes_or_anything_arms():
+    before = gate.build_facts(BASELINE_BUILD, OK_HEALTH)
+    fewer = gate.build_facts({"features": BASELINE_BUILD["features"].replace("ON: 7", "ON: 6")}, OK_HEALTH)
+    more = gate.build_facts({"features": BASELINE_BUILD["features"].replace("ON: 7", "ON: 8")}, OK_HEALTH)
+    for after in (fewer, more):
+        assert any("live_eligible_switch_on" in m for m in gate.verify_live_failures(before, after))
+    armed = gate.build_facts({"features": BASELINE_BUILD["features"].replace("DISARMED", "ARMED")}, OK_HEALTH)
+    assert gate.verify_live_failures(before, armed)
+    for bad_health in ({"live_armed": True}, {"bitfinex_live_enabled": True}, {"force_paper_mode": False}):
+        assert gate.verify_live_failures(before, gate.build_facts(BASELINE_BUILD, {**OK_HEALTH, **bad_health}))
+    assert gate.verify_live_failures(before, gate.build_facts({}, {}))  # unknown after the wipe is a failure
+    assert gate.verify_live_failures(gate.build_facts({}, {}), gate.build_facts({}, {}))  # unreadable before AND after still fails
