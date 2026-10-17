@@ -578,3 +578,29 @@ def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_covera
     monkeypatch.setattr(_os.path, "getsize", lambda p: 3 * 1024 * 1024 if str(p).endswith("paper_ioc_no_fill_shadow.jsonl") else 0)
     r2 = client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE)
     assert r2.get_json()["shadow_truncated"] is True
+
+
+# ---- /api/monitor/archive-scan (archive design v2 step 1) --------------------------------------------------
+def test_archive_scan_route_auth_get_only_and_refresh_runs_one_background_scan(bot, monkeypatch, tmp_path):
+    import monitor_archive_scan as mas
+    mas.reset_for_tests()
+    (tmp_path / "bfx_trades.jsonl").write_text(json.dumps({"s": 1792000000}) + "\n")
+    monkeypatch.chdir(tmp_path)
+    path = "/api/monitor/archive-scan"
+    client = bot.app.test_client()
+    assert client.get(path, environ_base=REMOTE).status_code == 401
+    assert client.post(path, headers={"X-Bot-Admin-Token": ADMIN}, environ_base=REMOTE).status_code == 405
+    assert path in bot._MONITOR_TILE_PATHS and path not in bot._READ_ONLY_GET_PATHS
+    hdr = {"Authorization": f"Bearer {MONITOR}"}
+    idle = client.get(path, headers=hdr, environ_base=REMOTE)
+    assert idle.status_code == 200 and idle.get_json()["status"] == "idle" and idle.get_json()["read_only"] is True
+    jobs = []
+    monkeypatch.setattr(mas.threading, "Thread", lambda target, **k: type("T", (), {"start": lambda s: jobs.append(target)})())
+    started = client.get(path + "?refresh=1", headers=hdr, environ_base=REMOTE).get_json()
+    again = client.get(path + "?refresh=1", headers=hdr, environ_base=REMOTE).get_json()
+    assert started["refresh_started"] is True and again["refresh_started"] is False and len(jobs) == 1
+    jobs[0]()
+    done = client.get(path, headers=hdr, environ_base=REMOTE).get_json()
+    assert done["status"] == "done" and done["scan"]["files"][0]["file"] == "bfx_trades.jsonl"
+    assert "/api/monitor/reconcile" in done["scan"]["captured_at_export"]
+    mas.reset_for_tests()

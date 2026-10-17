@@ -21,6 +21,7 @@
     ["GET", "/api/monitor/fill-sim", "monitor_fill_sim"],
     ["GET", "/api/monitor/reconcile", "monitor_reconcile"],
     ["GET", "/api/monitor/fill-provenance", "monitor_fill_provenance"],
+    ["GET", "/api/monitor/archive-scan", "monitor_archive_scan"],
     ["GET", "/api/monitor/protective-exit", "monitor_protective_exit"],
     ["GET", "/api/monitor/tiles/switches", "monitor_tiles_switches"],
     ["GET", "/api/monitor/config", "monitor_config"],

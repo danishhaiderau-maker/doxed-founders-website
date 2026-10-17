@@ -33756,6 +33756,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
+    "/api/monitor/archive-scan",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -47863,6 +47864,21 @@ def monitor_fill_provenance():
         return _mfp.build(by_lane, _monitor_tile_short_names(), shadow, _fresh_start_epoch(), _monitor_tiles_common(now),
                           shadow_truncated=truncated)
     return _monitor_tiles_guard(build, 800_000)
+
+
+@app.route('/api/monitor/archive-scan', methods=["GET"])
+def monitor_archive_scan():
+    """Archive design v2 step 1: read-only whole-file scan of what is on the data dir (bytes, rows, min/max ts,
+    fresh/legacy/forced counts). GET returns the last result/progress; ?refresh=1 starts ONE background scan
+    (throttled 2 MB/s, aborts on CPU or git_rev change). Never writes, takes no bot locks, reads no secrets."""
+    import monitor_archive_scan as _mas
+
+    def build(now):
+        started = False
+        if request.args.get("refresh") == "1":
+            started = _mas.start(os.getcwd(), _runtime_git_rev)
+        return {"schema": _mas.SCHEMA, **_monitor_tiles_common(now), "refresh_started": started, **_mas.state()}
+    return _monitor_tiles_guard(build, 1_500_000)
 
 
 @app.route('/api/monitor/archive', methods=["GET"])
