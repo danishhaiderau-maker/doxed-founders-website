@@ -99,11 +99,18 @@ DELETE_EXACT_NAMES = frozenset({
     "market_microstructure_1s.jsonl", "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "bfx_deriv_status_1s.jsonl",
     "venue_bbo_1m.jsonl", "cross_venue_tape_1m.jsonl", "market_context_1m.jsonl", "liquidations.jsonl",
     "runtime_telemetry_1m.jsonl",
+    # the other *_3factor.csv ledgers (named so the plan table documents them; the guarded expired-orders CSV is covered by
+    # the top-level row-stream rule because the epoch guard test pins who may name it)
+    "decisions_3factor.csv", "blocked_signals_3factor.csv", "pipeline_events_3factor.csv", "setup_log_3factor.csv",
+    "candles_3factor.csv", "ai_errors_3factor.csv", "blocked_3factor.csv", "trades_3factor.csv.validation.json",
+    # Tile 6/7 and lane evidence (they write through the lane ledgers and the shadow lane streams)
+    "shadow_lane_outcome.jsonl", "lane_opportunity_capture.jsonl", "lane_opportunity_capture.json",
+    "ledger_reconciliation.json",
     # analysis outputs
     "pathway_scorecard.json", "fill_quality_report.json", "shadow_fill_outcome_report.json",
     "benchmark_vs_lanes_report.json", "analyzer_integrity_report.json",
 })
-DELETE_TAPE_DATASETS = frozenset({"bitfinex_l1_tape_1s"})
+DELETE_TAPE_DATASETS = cew.TAPE_DATASETS | cew.MARKET_DATASETS
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
 _ANY_ROTATION_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv))\.(?P<n>[1-9][0-9]*)(?:\.gz)?$")
@@ -219,6 +226,24 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
+RULES_VERSION = "full-reset-rules-v2"
+
+
+def rules_identity() -> bytes:
+    """The plan sha binds the delete CLASSES and RULES (never exact paths), so log rotation, collectors appending and
+    the in-process reset between plan and execute cannot cause a PLAN_SHA256_MISMATCH."""
+    doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
+           "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
+           "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
+
+
+def is_data_file(rel: str) -> bool:
+    low = rel.lower()
+    return low.endswith((".csv", ".jsonl", ".gz")) or bool(_ANY_ROTATION_RE.match(low.rsplit("/", 1)[-1]))
+
+
 def build_plan(data_root: Path | str) -> dict:
     """Read-only plan over ``<data_root>/runtime``. Only the runtime directory itself is scanned, never alias roots."""
     runtime = Path(data_root) / "runtime"
@@ -242,12 +267,14 @@ def build_plan(data_root: Path | str) -> dict:
         else:
             unclassified.append({"rel": rel, "bytes": int(st.st_size)})
     candidates.sort(key=lambda c: c["path"])
-    identity = json.dumps([[c["path"], c["reason"]] for c in candidates], separators=(",", ":")).encode()
+    identity = rules_identity()
+    blocking = [u for u in unclassified if is_data_file(u["rel"])]
     total = sum(c["bytes"] for c in candidates)
     return {"schema": PLAN_SCHEMA, "mode": MODE, "data_root": str(data_root), "runtime": str(runtime),
             "total_delete_files": len(candidates), "total_delete_bytes": total, "total_delete_gb": round(total / 1e9, 3),
             "delete_by_class": by_class, "kept_by_reason": kept,
             "unclassified_retained_count": len(unclassified), "unclassified_retained": unclassified[:500],
+            "unclassified_data_files_count": len(blocking), "unclassified_data_files": blocking[:200],
             "keep_digests": keep_digests, "keep_flag_views": flag_views(runtime), "plan_sha256": hashlib.sha256(identity).hexdigest(),
             "notes": ["unclassified files are retained and listed, never deleted",
                       "V3 store, WAL, SQLite, collector v22 and research alias dirs are reset by the in-process "
@@ -285,9 +312,34 @@ def _truthy_count(value: Any) -> int | None:
     return 0 if abs(number) < 1e-12 else max(1, int(abs(number)))
 
 
+_ABSENT = object()
+EXCHANGE_PROOF_MAX_AGE_SEC = 900
+
+
+def _is_real_zero(value: Any) -> bool:
+    """FAIL CLOSED: True only for an empty list/dict or a numeric zero. None (key absent / file unreadable), strings,
+    booleans and any non-zero number are NOT zero."""
+    if value is None or value is _ABSENT or isinstance(value, (bool, str, bytes)):
+        return False
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) == 0
+    if isinstance(value, (int, float)):
+        return abs(float(value)) < 1e-12
+    return False
+
+
+def _describe(value: Any) -> str:
+    if value is None:
+        return "missing"
+    if isinstance(value, (list, tuple, dict, set)):
+        return f"{len(value)} rows"
+    return repr(value)[:40]
+
+
 def preflight_violations(health: Mapping[str, Any], *, lifecycle: Mapping[str, Any] | None,
                          config: Mapping[str, Any] | None, open_positions: Any, expect_git_rev: str,
-                         env: Mapping[str, str]) -> list[str]:
+                         env: Mapping[str, str], legacy_state: Mapping[str, Any] | None = None,
+                         exchange: Mapping[str, Any] | None = None, now: float | None = None) -> list[str]:
     """Every reason the reset must not start (empty list = all pre-checks pass)."""
     bad: list[str] = []
     for key, want in _TRUE_SAFE.items():
@@ -313,15 +365,37 @@ def preflight_violations(health: Mapping[str, Any], *, lifecycle: Mapping[str, A
         for key in ("positions", "pending_orders"):
             if _truthy_count(lifecycle.get(key)) != 0:
                 bad.append(f"paper_lifecycle_v1.json {key} not empty")
-    if config is not None:
+    if config is None:
+        bad.append("config-7002.json unreadable or missing (cannot prove live is off)")
+    else:
         for key in ("live_armed", "bitfinex_live_enabled"):
             if config.get(key) is True:
                 bad.append(f"config-7002.json {key} is true")
-    if open_positions is not None and _truthy_count(open_positions) not in (0, None):
-        bad.append("open_positions.json is not empty")
+    if not _is_real_zero(open_positions):
+        bad.append(f"open_positions.json missing/unreadable or not empty ({_describe(open_positions)})")
+    # /health is a liveness probe and carries NO exchange facts: the exchange proof (workflow GET of the private
+    # exposure audit) is merged over it. Every key must be PRESENT and a real zero; a missing key is a violation.
+    facts = {**health, **dict(exchange or {})}
     for key in ("exchange_positions", "exchange_active_orders", "exchange_delta_btc"):
-        if key in health and _truthy_count(health.get(key)) not in (0, None):
-            bad.append(f"{key}={health.get(key)!r} (exchange not flat)")
+        if key not in facts:
+            bad.append(f"{key} absent (cannot prove the exchange is flat)")
+        elif not _is_real_zero(facts.get(key)):
+            bad.append(f"{key}={facts.get(key)!r} (exchange not flat)")
+        if key in health and not _is_real_zero(health.get(key)):  # a non-zero in EITHER source is a violation
+            bad.append(f"/health {key}={health.get(key)!r} (exchange not flat)")
+    if exchange is not None:
+        for key in ("authoritative", "fresh", "flat"):
+            if facts.get(key) is not True:
+                bad.append(f"exchange proof {key}={facts.get(key)!r} (want True)")
+        try:
+            age = float(now if now is not None else time.time()) - float(facts.get("proof_ts"))
+        except (TypeError, ValueError):
+            age = None
+        if age is None or age < -60 or age > EXCHANGE_PROOF_MAX_AGE_SEC:
+            bad.append(f"exchange proof is missing a recent proof_ts (age {age!r}s, max {EXCHANGE_PROOF_MAX_AGE_SEC}s)")
+    for name, doc in (legacy_state or {}).items():
+        if doc is not _ABSENT and not _is_real_zero(doc):
+            bad.append(f"{name} is present and not empty (could hold paper rows)")
     if str(env.get("RESEARCH_SEGMENTS_PREFIX_PER_WIPE", "")).strip() != "1":  # same strictness as research_segment_epoch
         bad.append("RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1 required (fly.toml) so numbering cannot reuse an old prefix")
     return bad
@@ -334,9 +408,17 @@ def _read_json(path: Path) -> Any:
         return None
 
 
+LEGACY_STATE_FILES = ("orders.json", "positions.json", "pending_orders.json", "paper_state.json")
+
+
 def local_state_for_preflight(runtime: Path) -> dict:
+    legacy = {}
+    for name in LEGACY_STATE_FILES:
+        legacy[name] = _read_json(runtime / name) if (runtime / name).exists() else _ABSENT
+        if legacy[name] is None:  # exists but unreadable
+            legacy[name] = "UNREADABLE"
     return {"lifecycle": _read_json(runtime / "paper_lifecycle_v1.json"), "config": _read_json(runtime / "config-7002.json"),
-            "open_positions": _read_json(runtime / "open_positions.json") if (runtime / "open_positions.json").exists() else None}
+            "open_positions": _read_json(runtime / "open_positions.json"), "legacy_state": legacy}
 
 
 def freeze_refusal(data_root: Path, now: float, override: Mapping[str, str] | None) -> dict | None:
@@ -389,6 +471,10 @@ def execute(plan: dict, *, receipts_dir: Path | str, git_rev: str, reason: str, 
         return {**done, "already_done": True}
     if len(str(reason or "").strip()) < 10:
         raise FullResetRefused("REASON_REQUIRED: a written reason of at least 10 characters")
+    if int(plan.get("unclassified_data_files_count") or 0) > 0:
+        names = [u["rel"] for u in plan.get("unclassified_data_files", [])][:20]
+        raise FullResetRefused(f"UNCLASSIFIED_DATA_FILES: {plan['unclassified_data_files_count']} .csv/.jsonl/.gz files are neither "
+                               f"KEEP nor DELETE (classify them, then re-plan): {names}")
     runtime = Path(plan["runtime"])
     rdir = receipts_dir / sha[:12]
     started = now()
@@ -471,6 +557,17 @@ def _fetch_health(url: str) -> dict:
         return json.load(response)
 
 
+def _exchange_arg(args) -> dict | None:
+    raw = getattr(args, "exchange_proof_json", None)
+    if not raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return {"unparseable": True}
+    return doc if isinstance(doc, dict) else {"unparseable": True}
+
+
 def run_cli(args, *, fetch: Callable[[str], dict] | None = None, env: Mapping[str, str] | None = None,
             clock: Callable[[], float] = time.time, unlink: Callable[[str], None] = os.unlink) -> int:
     """plan (dry run, default) or execute. Every gate fails closed BEFORE the first deletion. Exit codes:
@@ -515,7 +612,8 @@ def run_cli(args, *, fetch: Callable[[str], dict] | None = None, env: Mapping[st
         return 7
     local = local_state_for_preflight(data_root / "runtime")
     bad = preflight_violations(health, lifecycle=local["lifecycle"], config=local["config"],
-                               open_positions=local["open_positions"], expect_git_rev=args.expect_git_rev or "", env=env)
+                               open_positions=local["open_positions"], expect_git_rev=args.expect_git_rev or "", env=env,
+                               legacy_state=local["legacy_state"], exchange=_exchange_arg(args), now=clock())
     if bad:
         print(json.dumps({"error": "PRECHECK_FAILED", "violations": bad, "nothing_deleted": True}))
         return 7

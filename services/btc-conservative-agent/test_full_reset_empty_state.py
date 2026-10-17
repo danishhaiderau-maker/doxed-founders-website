@@ -113,15 +113,24 @@ def test_log_trade_stamps_data_version_only_once_an_epoch_exists(bot, monkeypatc
     assert written[2]["data_version"] == "fse-1"  # an explicit stamp is never overwritten
 
 
-def test_collector_rows_carry_dv_after_the_epoch_is_stamped(tmp_path):
+def test_collector_rows_carry_dv_after_the_epoch_is_stamped(tmp_path, monkeypatch):
+    """REAL LAYOUT: the bot writes $BOT_DATA_DIR/fresh_start_epoch.json (/app/data) while the collector's cwd and
+    runtime_dir is $BOT_DATA_DIR/runtime. Both must resolve the same file."""
     import strategist_streams_collector as ssc
-    c = ssc.Collector(str(tmp_path))
+    data = tmp_path / "data"
+    runtime = data / "runtime"
+    runtime.mkdir(parents=True)
+    monkeypatch.setenv("BOT_DATA_DIR", str(data))
+    monkeypatch.chdir(runtime)
+    c = ssc.Collector(str(runtime))
+    tmp_path = runtime  # book rows land in runtime
     chans = {}
     c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 1}, chans, 100.0)
     snap = [[100 + i, 1, 0.5] for i in range(12)] + [[200 + i, 1, -0.25] for i in range(12)]
     c.on_bfx([1, snap], chans, 100.1)
     c.close_second(100)  # no epoch yet: legacy shape, no key
-    (tmp_path / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": 1792000000.5}))
+    (data / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": 1792000000.5}))
+    assert not (runtime / "fresh_start_epoch.json").exists()  # the epoch is NOT in the collector's own dir
     c.on_bfx([1, snap], chans, 101.1)
     c.close_second(101)
     rows = [json.loads(x) for x in (tmp_path / ssc.BOOK_FILE).read_text().splitlines()]
@@ -137,8 +146,17 @@ def test_stamped_book_rows_still_price_through_the_book_tail(tmp_path):
     assert row == {"s": 100, "b": [[99.0, 1.0]], "a": [[100.0, 1.0]]}
 
 
+def test_bot_and_collector_share_one_epoch_path_resolver(bot, monkeypatch, tmp_path):
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path / "vol"))
+    assert bot._fresh_start_epoch_path() == data_version.epoch_path() == str(tmp_path / "vol" / "fresh_start_epoch.json")
+    assert data_version.Stamp().path == bot._fresh_start_epoch_path()
+    monkeypatch.delenv("BOT_DATA_DIR")
+    monkeypatch.chdir(tmp_path)
+    assert bot._fresh_start_epoch_path() == data_version.epoch_path() == str(tmp_path / "fresh_start_epoch.json")
+
+
 def test_data_version_stamp_reads_the_epoch_file_and_follows_changes(tmp_path):
-    stamp = data_version.Stamp(str(tmp_path))
+    stamp = data_version.Stamp(str(tmp_path / data_version.FILE))
     assert stamp.current() is None
     (tmp_path / data_version.FILE).write_text(json.dumps({"epoch_ts": 1792000000}))
     assert stamp.current() == "fse-1792000000"

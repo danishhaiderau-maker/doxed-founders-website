@@ -24,10 +24,10 @@ none is applied or shown anywhere.
   accounting and the tape, which is why this mode exists.
 
 ## Safety gates (each aborts BEFORE any deletion)
-confirm token `DELETE-FULL-RESET:<plan sha256[:12]>`; plan sha; written reason (>= 10 chars); volume snapshot within
+confirm token `DELETE-FULL-RESET:<plan sha256[:12]>`; plan sha (a hash of the delete CLASSES and RULES, not of exact paths, so rotation, collectors appending or the in-process reset between plan and execute cannot cause `PLAN_SHA256_MISMATCH`); written reason (>= 10 chars); volume snapshot within
 6 h (recoverability only, NOT an archive); freeze override `BREAK_21_DAY_RESEARCH_FREEZE` + reason (this reset only);
 bot paused by DEPLOY_MAINTENANCE, force_paper, live off, disarmed; no open or pending paper position (close them first
-through the existing path); exchange flat; relay PAUSED, disarmed and flat from durable state; `source_git_rev` equals
+through the existing path); exchange flat (fresh private exposure audit, authoritative + flat + all counts a real 0, proven at the boundary and again right before the file wipe; /health carries no exchange facts and a missing key counts as NOT flat); `config-7002.json` readable; `open_positions.json` a real empty list; `orders.json` / `positions.json` / `pending_orders.json` / `paper_state.json` (kept, never written by the bot) empty if present; no unclassified `.csv/.jsonl/.gz` file (the execute aborts, classify then re-plan); relay PAUSED, disarmed and flat from durable state; `source_git_rev` equals
 the one guarded deploy; `RESEARCH_SEGMENTS_PREFIX_PER_WIPE=1`.
 
 Receipts: `runtime/full-reset-receipts/<plan sha12>/receipt-intent.json` is fsynced BEFORE the first unlink, then
@@ -54,3 +54,27 @@ no-op. The tool is never imported by the bot or the entrypoint, so it cannot run
 ## Heads-up for the first 10 minutes
 Empty-file edge cases (covered by tests), a segment publisher seq reset, AMBER/RED states from the deploy
 (exit-queue / fill-outside-BBO warnings reset, not fixed), and `REJECT_NO_BOOK` until the book stream has rows.
+
+## Failure and rollback path
+There is NO archive and no undo of a completed delete: the only recovery source is the pre-wipe volume snapshot
+(recoverability only), restored by hand with Danish's approval. Before any delete everything aborts cleanly, so a red
+job at a gate means nothing was deleted.
+
+| Where it failed | State | What to do |
+|---|---|---|
+| a gate before the in-process reset (snapshot, boundary, exchange proof, relay flat, live facts) | nothing deleted, bot PAUSED | fix the cause (close a paper position through the existing path, wait for the exchange to be flat), re-dispatch execute. If you stop here, resume paper with the normal guarded resume. |
+| the in-process reset (`/api/wipe_fly_only`) refused or failed | file wipe NOT started; the in-process reset may be partly applied, its own operation receipt says how far | the job's restart step still runs (clean file handles) and keeps the bot paused. Re-dispatch execute: the plan sha is rules-based so it is unchanged. |
+| the file wipe failed or was partial | intent receipt exists under `runtime/full-reset-receipts/<sha12>/`, some files deleted, bot PAUSED | the restart step runs anyway (`if: always()`), then the post-restart read-only plan lists what is left. Re-dispatching execute finishes the job (already-absent files are skipped). A `LIVE_FLAGS_CHANGED` receipt (`completed=false`) means a live flag differs: STOP, do not resume, tell HM. |
+| verify, dv or leftovers check red | wipe done, bot PAUSED | read the failing line. Do NOT resume paper. HM decides: fix forward (re-dispatch verify after repair) or restore the snapshot. |
+
+Rollback to the pre-wipe state (only on Danish's explicit order): keep the bot paused, restore the pre-wipe volume
+snapshot with a fresh volume (the volume id is pinned in the workflow), redeploy the same revision, verify live off and
+DISARMED, then re-point the laptop puller at the OLD prefix. The new per-wipe prefix `v3-w<epoch_ts>` is then abandoned
+(never re-used). Paper stays paused through every branch above; the job never resumes it.
+
+The DEPLOY_MAINTENANCE pause is durable: `/api/pause` calls `save_persistent_config()` (`manual_admin_pause`,
+`pause_intent`) and the boot loader restores `execution_paused` from it (pinned by a test), so the restart cannot let
+paper run, and the restart step fails the job if the bot does not come back paused by DEPLOY_MAINTENANCE. On SIGTERM the
+bot writes only `open_positions.json`, `paper_lifecycle_v1.json`, the config and replay dumps; it never rewrites
+`lane_pnl_ledger.json` or the trade CSV from memory (pinned by an AST test). The post-restart plan allows only small
+delete-class leftovers (default max 200 files and 64 MiB; a collector or replay dump may recreate tiny files).

@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -18,8 +19,18 @@ REV = "5164548a1234"
 FLAGS = {"live_armed": False, "bitfinex_live_enabled": False, "force_paper_mode": True, "live_eligible_switch": 0,
          "tile_enabled": {"FAMILY_DISLOC_BFX_DISLOCATION_1M": False, "FAMILY_DISLOC_FOI_LONG_1M": False}}
 HEALTH = {"execution_paused": True, "pause_owner": "DEPLOY_MAINTENANCE", "live_armed": False,
-          "bitfinex_live_enabled": False, "force_paper_mode": True, "source_git_rev": REV}
+          "bitfinex_live_enabled": False, "force_paper_mode": True, "source_git_rev": REV,
+          }
 ENV = {"RESEARCH_SEGMENTS_PREFIX_PER_WIPE": "1"}
+def _proof(**kw):
+    """The workflow's fresh private exposure-audit proof (/health carries NO exchange facts)."""
+    base = {"exchange_positions": 0, "exchange_active_orders": 0, "exchange_delta_btc": 0.0,
+            "authoritative": True, "fresh": True, "flat": True, "proof_ts": time.time()}
+    base.update(kw)
+    return {k: v for k, v in base.items() if v is not _GONE}
+
+
+_GONE = object()
 OVERRIDE = {"confirmation": "BREAK_21_DAY_RESEARCH_FREEZE", "reason": "Danish 17 Oct 18:09 full reset, no archive"}
 
 
@@ -77,7 +88,7 @@ def vol(tmp_path):
     _w(rt / "vault" / "x.env")
     _w(rt / "forward-tracker" / "chain.jsonl")
     _w(rt / "mystery_blob.bin")  # unclassified: retained and reported
-    _w(rt / "sub" / "unknown.jsonl")  # unclassified (not top level)
+    _w(rt / "sub" / "unknown.dat")  # unclassified (not top level, not a data stream)
     return tmp_path
 
 
@@ -99,7 +110,7 @@ def test_classification_table_is_pinned():
         "venue_bbo_1m.jsonl": d, "disloc_trades.jsonl": d, "disloc_foi_trades.jsonl.4.gz": d,
         "lane_pnl_ledger.json": d, "xvp_shadow_signals.jsonl": d, "tierA/bitfinex_l1_tape_1s/v1/p.parquet": d,
         "never_heard_of_it.jsonl": d, "never_heard_of_it.jsonl.1": d,
-        "mystery_blob.bin": u, "sub/unknown.jsonl": u,
+        "mystery_blob.bin": u, "sub/unknown.dat": u,
     }
     for rel, want in table.items():
         assert frna.classify(rel)[0] == want, (rel, frna.classify(rel))
@@ -124,7 +135,7 @@ def test_plan_is_read_only_lists_unclassified_and_pins_digests(vol):
     for kept in ("config-7002.json", "state.json", "v3/ledgers/order_intent.jsonl", "research.db",
                  "research_events_v22.jsonl", "relay_outbox_quarantine.jsonl", "bot.py", "vault/x.env"):
         assert kept not in rels
-    assert {u["rel"] for u in plan["unclassified_retained"]} == {"mystery_blob.bin", "sub/unknown.jsonl"}
+    assert {u["rel"] for u in plan["unclassified_retained"]} == {"mystery_blob.bin", "sub/unknown.dat"}
     assert "config-7002.json" in plan["keep_digests"] and plan["keep_digests"]["config-7002.json"] == _sha(vol / "runtime/config-7002.json")
     assert frna.confirm_token(plan["plan_sha256"]) == "DELETE-FULL-RESET:" + plan["plan_sha256"][:12]
 
@@ -151,7 +162,7 @@ def test_execute_deletes_all_data_and_live_flags_are_byte_identical(vol):
                 "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl", "lane_pnl_ledger.json"):
         assert not (rt / rel).exists(), rel
     for rel in ("v3/ledgers/order_intent.jsonl", "research.db", "research_events_v22.jsonl", "bot.py",
-                "mystery_blob.bin", "sub/unknown.jsonl", "forward-tracker/chain.jsonl"):
+                "mystery_blob.bin", "sub/unknown.dat", "forward-tracker/chain.jsonl"):
         assert (rt / rel).exists(), rel
     assert frna.verify_after(plan)["ok"] is True
     # receipts survive the wipe
@@ -240,7 +251,7 @@ def test_unlink_is_only_ever_called_on_delete_class_paths(vol):
     assert calls and all(frna.classify(rel)[0] == frna.DELETE for rel in calls), calls
 
 
-def test_a_file_still_being_appended_is_deleted_and_plan_identity_ignores_sizes(vol):
+def test_a_file_still_being_appended_is_deleted_and_plan_identity_ignores_sizes_and_new_files(vol):
     rt = vol / "runtime"
     plan = _plan(vol)
     with open(rt / "bfx_trades.jsonl", "a") as fh:  # a collector appends after planning
@@ -249,8 +260,8 @@ def test_a_file_still_being_appended_is_deleted_and_plan_identity_ignores_sizes(
     done = frna.execute(plan, receipts_dir=rt / frna.RECEIPTS_DIRNAME, git_rev=REV, reason="full reset no archive",
                         freeze_override=OVERRIDE)
     assert done["completed"] is True and not (rt / "bfx_trades.jsonl").exists()
-    (rt / "brand_new_rotation.jsonl.9").write_text("x")  # a NEW file changes the identity: operator must re-plan
-    assert _plan(vol)["plan_sha256"] != plan["plan_sha256"]
+    (rt / "brand_new_rotation.jsonl.9").write_text("x")  # rotation / new copies must NOT change the sha (rules identity)
+    assert _plan(vol)["plan_sha256"] == plan["plan_sha256"]
 
 
 def test_reason_is_required_before_any_receipt_or_deletion(vol):
@@ -268,7 +279,7 @@ def _args(vol, **kw):
     base = dict(command="execute", scope="fly", data_root=str(vol), receipts_dir=None, out=None, epoch=None,
                 confirm="", expect_plan_sha256="", health_url=None, expect_git_rev=REV,
                 reason="full reset no archive", freeze_override_confirmation=OVERRIDE["confirmation"],
-                freeze_override_reason=OVERRIDE["reason"])
+                freeze_override_reason=OVERRIDE["reason"], exchange_proof_json=json.dumps(_proof()))
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -434,3 +445,235 @@ def test_workflow_job_order_is_guarded_and_never_resumes_paper():
     assert "DELETE-FULL-RESET:" in job and "BREAK_21_DAY_RESEARCH_FREEZE" in job and "full_reset_reason" in job
     assert "--full-reset-no-archive" in job and "--expect-git-rev" in job
     assert "aws " not in job and "rclone" not in job and "s3" not in job.lower()
+
+
+# ---------------------------------------------------------------- HM review changes (17 Oct)
+
+ABSENT_KEYS = ("exchange_positions", "exchange_active_orders", "exchange_delta_btc")
+
+
+def test_health_carries_no_exchange_facts_so_no_proof_means_abort(vol):
+    assert _run(_good(vol, exchange_proof_json="")) == 7
+    assert _nothing_deleted(vol)
+    assert not (vol / "runtime" / frna.RECEIPTS_DIRNAME).exists()
+
+
+@pytest.mark.parametrize("key", ABSENT_KEYS)
+def test_missing_exchange_key_in_the_proof_aborts_without_deleting(vol, key):
+    assert _run(_good(vol, exchange_proof_json=json.dumps(_proof(**{key: _GONE})))) == 7
+    assert _nothing_deleted(vol)
+    assert not (vol / "runtime" / frna.RECEIPTS_DIRNAME).exists()
+
+
+@pytest.mark.parametrize("key", ABSENT_KEYS)
+@pytest.mark.parametrize("bad", [None, "0", True, 2, [1]])
+def test_exchange_key_must_be_a_real_zero(vol, key, bad):
+    assert _run(_good(vol, exchange_proof_json=json.dumps(_proof(**{key: bad})))) == 7
+    assert _nothing_deleted(vol)
+
+
+@pytest.mark.parametrize("field", ["authoritative", "fresh", "flat"])
+def test_exchange_proof_must_be_authoritative_fresh_and_flat(vol, field):
+    assert _run(_good(vol, exchange_proof_json=json.dumps(_proof(**{field: False})))) == 7
+    assert _nothing_deleted(vol)
+
+
+@pytest.mark.parametrize("proof_ts", [None, time.time() - 3600, "x"])
+def test_stale_or_undated_exchange_proof_aborts(vol, proof_ts):
+    assert _run(_good(vol, exchange_proof_json=json.dumps(_proof(proof_ts=proof_ts)))) == 7
+    assert _nothing_deleted(vol)
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[]", "null"])
+def test_unparseable_exchange_proof_aborts(vol, raw):
+    assert _run(_good(vol, exchange_proof_json=raw)) == 7
+    assert _nothing_deleted(vol)
+
+
+def test_all_keys_removed_lists_each_violation():
+    health = dict(HEALTH)
+    bad = frna.preflight_violations(health, lifecycle={"paper_only": True, "live_armed": False, "positions": [], "pending_orders": []},
+                                    config={}, open_positions=[], expect_git_rev=REV, env=ENV)
+    assert len([b for b in bad if "absent (cannot prove" in b]) == 3
+
+
+def test_zero_forms_that_are_accepted():
+    assert frna._is_real_zero(0) and frna._is_real_zero(0.0) and frna._is_real_zero([]) and frna._is_real_zero({})
+    assert not any(frna._is_real_zero(v) for v in (None, "", "0", False, True, 1, 0.0003, [0], {"a": 1}))
+
+
+def test_unreadable_config_aborts_without_deleting(vol):
+    (vol / "runtime" / "config-7002.json").write_text("{not json")
+    # the plan must be built AFTER corrupting so the sha matches; flag views simply skip the unreadable file
+    assert _run(_good(vol)) == 7 and _nothing_deleted(vol)
+
+
+def test_missing_config_aborts_without_deleting(vol):
+    (vol / "runtime" / "config-7002.json").unlink()
+    assert _run(_good(vol)) == 7 and _nothing_deleted(vol)
+
+
+@pytest.mark.parametrize("content", ["not json", "null", '[{"id": 1}]', '{"T1": {}}'])
+def test_open_positions_must_be_a_real_empty_collection(vol, content):
+    (vol / "runtime" / "open_positions.json").write_text(content)
+    assert _run(_good(vol)) == 7 and _nothing_deleted(vol)
+
+
+def test_missing_open_positions_file_aborts(vol):
+    (vol / "runtime" / "open_positions.json").unlink()
+    assert _run(_good(vol)) == 7 and _nothing_deleted(vol)
+
+
+@pytest.mark.parametrize("name", ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"])
+def test_legacy_state_files_must_hold_no_rows(vol, name):
+    (vol / "runtime" / name).write_text('[{"trade_id": "T9", "status": "CLOSED"}]')
+    assert _run(_good(vol)) == 7 and _nothing_deleted(vol)
+    (vol / "runtime" / name).write_text("[]")
+    assert _run(_good(vol)) == 0  # empty is fine and is kept
+
+
+def test_legacy_state_files_are_kept_and_never_written_by_the_bot():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    for name in ("orders.json", "positions.json", "pending_orders.json", "paper_state.json"):
+        assert frna.classify(name)[0] == frna.KEEP
+        writers = [p.name for p in root.glob("*.py") if not p.name.startswith("test_")
+                   and p.name not in ("full_reset_no_archive.py", "research_reset_inventory.py")
+                   and f'"{name}"' in p.read_text("utf-8", errors="replace")]
+        assert writers == [], (name, writers)
+
+
+def test_nested_market_datasets_and_named_ledgers_are_delete_class():
+    for rel in ("cross_venue_tape_1m/2026-10-16/part-0.jsonl", "market_context_1m/p.parquet", "liquidations/x.jsonl.gz",
+                "bitfinex_l1_tape_1s/v1/p.parquet", "sub/disloc_trades.jsonl", "lanes/L1/disloc_foi_trades.jsonl.2",
+                "decisions_3factor.csv", "blocked_signals_3factor.csv", "pipeline_events_3factor.csv",
+                "setup_log_3factor.csv", "candles_3factor.csv", "ai_errors_3factor.csv", "blocked_3factor.csv",
+                "expired_orders_3factor.csv", "lane_lab_pnl_ledger.json", "lane_opportunity_capture.json",
+                "trades_3factor.csv.validation.json"):
+        assert frna.classify(rel)[0] == frna.DELETE, (rel, frna.classify(rel))
+    assert frna.DELETE_TAPE_DATASETS == wipe.TAPE_DATASETS | wipe.MARKET_DATASETS
+
+
+def test_execute_aborts_when_an_unclassified_data_file_exists(vol, capsys):
+    (vol / "runtime" / "sub" / "unknown.jsonl").write_text("row\n")
+    assert _run(_good(vol)) == 9
+    assert "UNCLASSIFIED_DATA_FILES" in capsys.readouterr().out
+    assert _nothing_deleted(vol)
+    assert not (vol / "runtime" / frna.RECEIPTS_DIRNAME).exists()
+    plan = _plan(vol)
+    assert plan["unclassified_data_files_count"] == 1 and plan["unclassified_data_files"][0]["rel"] == "sub/unknown.jsonl"
+
+
+def test_plan_sha_is_a_rules_hash_stable_across_rotation_and_in_process_reset(vol):
+    rt = vol / "runtime"
+    before = _plan(vol)["plan_sha256"]
+    (rt / "trades_3factor.csv").unlink()  # the in-process reset removed some files
+    (rt / "bfx_trades.jsonl").rename(rt / "bfx_trades.jsonl.7")  # rotation
+    (rt / "new_stream_1.jsonl").write_text("x")
+    assert _plan(vol)["plan_sha256"] == before
+    assert _run(_good(vol, expect_plan_sha256=before, confirm=frna.confirm_token(before))) == 0
+
+
+# ---------------------------------------------------------------- workflow order and restart/pause/shutdown contracts
+
+WORKFLOW_TEXT = (Path(__file__).resolve().parents[2] / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
+JOB = WORKFLOW_TEXT[WORKFLOW_TEXT.index("\n  full-reset-no-archive:"):WORKFLOW_TEXT.index("\n  repair-v22-seals:")]
+
+
+def _step(name_fragment: str) -> str:
+    start = JOB.index("- name: " + name_fragment)
+    nxt = JOB.find("\n      - name:", start + 1)
+    return JOB[start:nxt if nxt != -1 else len(JOB)]
+
+
+def test_workflow_boundary_fails_closed_on_missing_keys():
+    step = _step("Enter paper maintenance boundary")
+    assert "def real_zero" in step and "not status.get(" not in step and "progress.get(\"open_positions\") ==" not in step
+    assert 'real_zero(progress.get("open_positions"))' in step and 'real_zero(progress.get("pending_orders"))' in step
+    # the exchange is proven by the private exposure audit, twice: at the boundary and right before the file wipe
+    assert JOB.count("fly_full_reset_gate.py exchange-proof") == 2
+    assert JOB.index("exchange-proof") < JOB.index("check-relay-flat.mjs")
+    assert JOB.index("id: exchproof") < JOB.index("id: filewipe")
+    assert "--exchange-proof-json" in _step("File wipe, intent receipt first") and "EXCHANGE_PROOF" in _step("File wipe, intent receipt first")
+
+
+def test_workflow_restart_always_runs_after_the_first_delete_step_and_stays_paused():
+    step = _step("Restart the machine")
+    assert "always()" in step and "steps.inproc.conclusion != 'skipped'" in step
+    assert "continue-on-error" not in JOB  # a failed wipe still fails the job
+    assert "pause_owner" in step and "DEPLOY_MAINTENANCE" in step and "execution_paused" in step
+    assert "/api/resume" not in JOB and "api/resume" not in step
+    assert JOB.index("id: inproc") < JOB.index("id: restart") and JOB.index("id: filewipe") < JOB.index("id: restart")
+
+
+def test_workflow_post_restart_plan_and_dv_assertions_precede_the_end():
+    post = _step("Post-restart read-only plan")
+    assert "always()" in post and "steps.restart.conclusion == 'success'" in post
+    assert "clean_epoch_wipe.py plan" in post and "clean_epoch_wipe.py execute" not in post and "check-leftovers" in post
+    verify = _step("Verify (live off unchanged")
+    assert "assert-dv" in verify and "bfx_book_10l_1s.jsonl" in verify and "wait-book" in verify
+    assert JOB.index("Post-restart read-only plan") < JOB.index("Verify (live off unchanged")
+
+
+def test_the_pause_owner_is_persisted_and_restored_so_paper_cannot_resume_after_restart(tmp_path, monkeypatch):
+    import bot
+    monkeypatch.chdir(tmp_path)
+    assert "manual_admin_pause" in bot._persistent_config_keys() and "pause_intent" in bot._persistent_config_keys()
+    saved = {k: bot.state.get(k) for k in ("manual_admin_pause", "pause_intent", "execution_paused", "execution_reason", "_pause_priority")}
+    try:
+        with bot.state_lock:
+            bot.state["manual_admin_pause"] = True
+            bot.state["pause_intent"] = bot.PAUSE_OWNER_DEPLOY_MAINTENANCE
+        bot.save_persistent_config()
+        with bot.state_lock:  # a fresh process: nothing in memory
+            for k in ("manual_admin_pause", "pause_intent", "execution_paused"):
+                bot.state[k] = None if k == "pause_intent" else False
+        bot.load_persistent_config()
+        assert bot.state["execution_paused"] is True and bot.state["pause_intent"] == "DEPLOY_MAINTENANCE"
+        with bot.state_lock:
+            assert bot._pause_owner_locked() == "DEPLOY_MAINTENANCE"
+    finally:
+        with bot.state_lock:
+            bot.state.update(saved)
+
+
+def test_sigterm_shutdown_never_rewrites_the_lane_ledger_or_the_trade_csv_from_memory():
+    """After the in-process reset the in-memory books are empty; a SIGTERM rewrite of lane_pnl_ledger.json or the trade
+    CSV from memory would put back wiped state. The shutdown handler and the supervisor's shutdown branch may only write
+    open_positions.json, paper_lifecycle_v1.json, the config and replay dumps (no ledger / trade-row writers)."""
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8", errors="replace")
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    forbidden = {"_write_lane_pnl_ledger_file", "log_trade", "dynamic_csv_writer", "update_lane_pnl_ledger", "to_csv",
+                 "_record_lane_ledger", "append_trade_row"}
+
+    def calls(node):
+        out = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                out.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+        return out
+
+    assert not (calls(funcs["shutdown_handler"]) & forbidden)
+    main = funcs["main"]
+    branch = [n for n in ast.walk(main) if isinstance(n, ast.If) and "shutdown_event.wait" in ast.unparse(n.test)]
+    assert branch, "supervisor shutdown branch not found"
+    shutdown_calls = set().union(*(calls(b) for b in branch))
+    assert not (shutdown_calls & forbidden), shutdown_calls & forbidden
+    assert {"save_positions", "save_persistent_config"} <= shutdown_calls
+    # the only writers reachable from save_positions are the positions file and the paper lifecycle snapshot
+    assert not (calls(funcs["save_positions"]) & forbidden) and not (calls(funcs["save_paper_lifecycle"]) & forbidden)
+
+
+def test_the_workflow_is_valid_yaml_and_the_job_steps_are_in_the_guarded_order():
+    import yaml
+    doc = yaml.safe_load(WORKFLOW_TEXT)
+    steps = [s.get("name", "") for s in doc["jobs"]["full-reset-no-archive"]["steps"]]
+    order = ["Plan (read-only)", "Require confirm token", "Enter paper maintenance boundary", "Prove the exchange is flat",
+             "Prove every relay", "Snapshot the live-off facts", "In-process guarded reset", "Stamp the fresh-start epoch",
+             "Re-prove the exchange is flat", "File wipe", "Restart the machine", "Post-restart read-only plan", "Verify"]
+    idx = [next(i for i, n in enumerate(steps) if n.startswith(frag)) for frag in order]
+    assert idx == sorted(idx), (order, idx)

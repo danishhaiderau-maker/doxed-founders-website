@@ -150,7 +150,7 @@ class Collector:
         self.trade_sink = Sink(os.path.join(runtime_dir, TRADES_FILE))
         self.venue_sink = Sink(os.path.join(runtime_dir, VENUE_FILE))
         self.deriv_sink = Sink(os.path.join(runtime_dir, DERIV_FILE))
-        self._dv = _data_version.Stamp(runtime_dir)  # D8: rows carry the fresh-start epoch they belong to
+        self._dv = _data_version.Stamp()  # D8: rows carry the fresh-start epoch they belong to
         self.deriv: Optional[tuple] = None  # (fields, recv_ts)
         self.book = BfxBook()
         self.lock = threading.Lock()

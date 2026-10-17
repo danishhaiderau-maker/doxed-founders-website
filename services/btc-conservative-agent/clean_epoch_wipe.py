@@ -590,6 +590,8 @@ def main(argv=None) -> int:
     ap.add_argument("--freeze-override-confirmation", default="",
                     help="full reset: BREAK_21_DAY_RESEARCH_FREEZE (this reset only)")
     ap.add_argument("--freeze-override-reason", default="", help="full reset: freeze override reason (>= 10 chars)")
+    ap.add_argument("--exchange-proof-json", default="",
+                    help="full reset: the workflow's fresh private exchange-exposure proof (counts and flags only, no secrets)")
     args = ap.parse_args(argv)
     if args.full_reset_no_archive:
         if args.pre_start or args.simulate_now or args.fly_files_json or args.epoch:

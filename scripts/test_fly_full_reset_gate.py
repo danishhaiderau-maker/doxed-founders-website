@@ -1,3 +1,5 @@
+import json
+
 import fly_full_reset_gate as gate
 
 OK_BUILD = {"features": "13 registered tiles; paper ON: 5 (T1 a); live-eligible switch ON: 0 (none); DISARMED. Derived"}
@@ -35,3 +37,44 @@ def test_zero_rows_pass_and_every_leftover_fails():
     assert gate.zero_row_failures(t, r, p, {"lanes": [{"lane": "A", "closes": 1}]})
     assert gate.zero_row_failures(t, r, p, {"lanes": [{"lane": "A", "closes": 0, "mean_book_slippage_usd": 0.0}]})
     assert gate.zero_row_failures(t, r, {"per_tile": []}, l)  # an empty answer is not proof
+
+
+def test_leftover_gate_allows_only_small_delete_class_leftovers():
+    plan = {"mode": "full-reset-no-archive", "total_delete_files": 3, "total_delete_bytes": 4096, "unclassified_data_files_count": 0}
+    assert gate.leftover_failures(plan, 200, 64 << 20) == []
+    assert gate.leftover_failures({**plan, "total_delete_files": 201}, 200, 64 << 20)
+    assert gate.leftover_failures({**plan, "total_delete_bytes": 65 << 20}, 200, 64 << 20)
+    assert gate.leftover_failures({**plan, "unclassified_data_files_count": 1}, 200, 64 << 20)
+    assert gate.leftover_failures({}, 200, 64 << 20)  # an empty or foreign document is not proof
+
+
+def test_dv_gate_needs_a_stamped_row_matching_the_epoch_and_a_fresh_epoch_id():
+    fs = {"set": True, "epoch_ts": 1792000000.4}
+    row = json.dumps({"s": 1, "b": [], "a": [], "dv": "fse-1792000000"})
+    assert gate.dv_failures(row, {"fresh_epoch_id": "epoch-x"}, fs) == []
+    assert gate.dv_failures(json.dumps({"s": 1}), {"fresh_epoch_id": "epoch-x"}, fs)  # no dv
+    assert gate.dv_failures(row.replace("0000", "9999"), {"fresh_epoch_id": "epoch-x"}, fs)  # wrong epoch
+    assert gate.dv_failures(row, {}, fs)  # fresh_epoch_id not set
+    assert gate.dv_failures(row, {"fresh_epoch_id": "e"}, {"set": False})  # epoch not stamped
+    assert gate.dv_failures("", {"fresh_epoch_id": "e"}, fs) and gate.dv_failures("not json", {"fresh_epoch_id": "e"}, fs)
+
+
+def _audit(**kw):
+    base = {"authoritative": True, "fresh": True, "flat": True, "open_position_count": 0, "open_order_count": 0,
+            "orphan_order_ids": [], "orphan_position_ids": []}
+    base.update(kw)
+    return {k: v for k, v in base.items() if v != "GONE"}
+
+
+def test_exchange_proof_requires_every_field_present_and_zero():
+    proof, bad = gate.exchange_proof(_audit(), 1000.0)
+    assert bad == [] and proof["exchange_positions"] == 0 and proof["exchange_delta_btc"] == 0.0 and proof["proof_ts"] == 1000.0
+    for key in ("open_position_count", "open_order_count", "orphan_order_ids", "orphan_position_ids",
+                "authoritative", "fresh", "flat"):
+        assert gate.exchange_proof(_audit(**{key: "GONE"}), 1.0)[1], key  # a missing key is NOT zero
+    assert gate.exchange_proof(_audit(open_position_count=1), 1.0)[1]
+    assert gate.exchange_proof(_audit(open_order_count=2), 1.0)[1]
+    assert gate.exchange_proof(_audit(orphan_order_ids=["x"]), 1.0)[1]
+    assert gate.exchange_proof(_audit(fresh=False), 1.0)[1]
+    assert gate.exchange_proof(_audit(open_position_count=None), 1.0)[1]
+    assert gate.exchange_proof({}, 1.0)[1] and gate.exchange_proof(None, 1.0)[1]

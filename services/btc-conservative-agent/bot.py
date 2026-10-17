@@ -23070,7 +23070,8 @@ _FRESH_START_EPOCH_FILE = "fresh_start_epoch.json"
 
 
 def _fresh_start_epoch_path() -> str:
-    return os.path.join(os.getenv("BOT_DATA_DIR") or os.getcwd(), _FRESH_START_EPOCH_FILE)
+    import data_version as _dv_path  # one shared resolver with the stamping collector
+    return _dv_path.epoch_path()
 
 
 def _fresh_start_epoch() -> dict | None:

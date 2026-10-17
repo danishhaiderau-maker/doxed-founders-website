@@ -4,6 +4,12 @@
     verify     after the wipe: live facts identical to the snapshot, /api/build still reads live-eligible switch
                ON 0 + DISARMED, force_paper true, and tiles/trades, reconcile, fill-provenance, lanes show 0 rows
     stamp      POST /api/monitor/fresh-start (epoch only moves forward; the bot refuses while live is armed)
+    exchange-proof  GET the private exchange-exposure audit and print the counts-only proof the file wipe requires
+               (/health carries no exchange facts). Fails closed unless authoritative, fresh, flat and all counts are 0
+    check-leftovers  stdin = the post-restart read-only plan JSON; only small delete-class leftovers may remain and no
+               unclassified .csv/.jsonl/.gz file
+    assert-dv  stdin = the last bfx_book_10l_1s.jsonl row written after the restart; it must carry dv equal to the
+               stamped fresh-start epoch and /health must report a fresh_epoch_id
     wait-book  wait until the bfx_book_10l stream is writing again (paper is NOT resumed here)
 
 Reads BOT_ADMIN_TOKEN from the environment and never prints it.
@@ -70,6 +76,75 @@ def zero_row_failures(tiles_trades: dict, reconcile: dict, provenance: dict, lan
     return bad
 
 
+def _real_zero(value) -> bool:
+    if value is None or isinstance(value, (bool, str, bytes)):
+        return False
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) == 0
+    return isinstance(value, (int, float)) and abs(float(value)) < 1e-12
+
+
+def exchange_proof(audit: dict, now: float) -> tuple[dict, list[str]]:
+    """(proof, failures) from GET /api/exchange_exposure_audit. A missing key, a stale or non-authoritative audit and
+    any non-zero count all fail. exchange_delta_btc is derived: the net exposure is 0.0 exactly when there is no open
+    exchange position (the audit endpoint returns counts, not a delta)."""
+    audit = audit or {}
+    bad = []
+    for key in ("authoritative", "fresh", "flat"):
+        if audit.get(key) is not True:
+            bad.append(f"audit {key}={audit.get(key)!r} (want True)")
+    for key in ("open_position_count", "open_order_count"):
+        if key not in audit:
+            bad.append(f"audit {key} absent")
+        elif not _real_zero(audit.get(key)):
+            bad.append(f"audit {key}={audit.get(key)!r} (not flat)")
+    for key in ("orphan_order_ids", "orphan_position_ids"):
+        if not isinstance(audit.get(key), list) or audit.get(key):
+            bad.append(f"audit {key} missing or not empty")
+    proof = {"exchange_positions": audit.get("open_position_count"),
+             "exchange_active_orders": audit.get("open_order_count"),
+             "exchange_delta_btc": 0.0 if _real_zero(audit.get("open_position_count")) else None,
+             "authoritative": audit.get("authoritative"), "fresh": audit.get("fresh"), "flat": audit.get("flat"),
+             "proof_ts": now}
+    return proof, bad
+
+
+def leftover_failures(plan: dict, max_files: int, max_bytes: int) -> list[str]:
+    """The post-restart read-only plan: collectors may have re-created tiny files, nothing large may remain."""
+    bad = []
+    if not isinstance(plan, dict) or plan.get("mode") != "full-reset-no-archive" or "total_delete_files" not in plan:
+        return ["not a full-reset plan document"]
+    if int(plan["total_delete_files"]) > max_files:
+        bad.append(f"{plan['total_delete_files']} delete-class files remain (max {max_files})")
+    if int(plan.get("total_delete_bytes") or 0) > max_bytes:
+        bad.append(f"{plan.get('total_delete_bytes')} delete-class bytes remain (max {max_bytes})")
+    if int(plan.get("unclassified_data_files_count") or 0) > 0:
+        bad.append(f"{plan.get('unclassified_data_files_count')} unclassified .csv/.jsonl/.gz files")
+    return bad
+
+
+def dv_failures(row_text: str, health: dict, fresh_start: dict) -> list[str]:
+    bad = []
+    try:
+        row = json.loads((row_text or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return ["no parseable book row"]
+    try:
+        epoch_ts = float((fresh_start or {}).get("epoch_ts"))
+    except (TypeError, ValueError):
+        epoch_ts = 0.0
+    if not (fresh_start or {}).get("set") or epoch_ts <= 0:
+        bad.append("fresh-start epoch is not set")
+    want = f"fse-{int(epoch_ts)}" if epoch_ts > 0 else None
+    if not row.get("dv"):
+        bad.append("book row has no dv stamp")
+    elif want and row.get("dv") != want:
+        bad.append(f"book row dv={row.get('dv')!r} != {want!r}")
+    if not (health or {}).get("fresh_epoch_id"):
+        bad.append("/health fresh_epoch_id is not set")
+    return bad
+
+
 def _get(path: str, *, admin: bool = True, timeout: float = 60.0) -> dict:
     headers = {"Cache-Control": "no-cache"}
     if admin:
@@ -126,6 +201,41 @@ def cmd_stamp(args) -> int:
     return 0
 
 
+def cmd_exchange_proof(args) -> int:
+    proof, bad = exchange_proof(_get("/api/exchange_exposure_audit", timeout=90), time.time())
+    print(json.dumps({"exchange_proof": proof, "failures": bad}, sort_keys=True))
+    if bad:
+        raise SystemExit("exchange not proven flat: " + "; ".join(bad))
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write("proof=" + json.dumps(proof, sort_keys=True) + "\n")
+    return 0
+
+
+def cmd_check_leftovers(args) -> int:
+    text = sys.stdin.read()
+    try:
+        plan = json.loads(text[text.index("{"):])
+    except ValueError:
+        raise SystemExit("post-restart plan output is not JSON")
+    print(json.dumps({"post_restart_plan": {k: plan.get(k) for k in (
+        "total_delete_files", "total_delete_bytes", "unclassified_data_files_count", "delete_by_class")}}, sort_keys=True))
+    bad = leftover_failures(plan, args.max_files, args.max_bytes)
+    if bad:
+        raise SystemExit("post-restart leftovers too large: " + "; ".join(bad))
+    return 0
+
+
+def cmd_assert_dv(args) -> int:
+    bad = dv_failures(sys.stdin.read(), _get("/health?fresh=1", admin=False), _get("/api/monitor/fresh-start"))
+    if bad:
+        print("dv check not satisfied: " + "; ".join(bad), file=sys.stderr)
+        return 1
+    print("post-restart book row carries dv and fresh_epoch_id is set")
+    return 0
+
+
 def cmd_wait_book(args) -> int:
     deadline = time.time() + args.timeout
     while time.time() < deadline:
@@ -147,6 +257,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("snapshot"); p.add_argument("--out", required=True); p.set_defaults(fn=cmd_snapshot)
     p = sub.add_parser("verify"); p.add_argument("--before", required=True); p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("stamp"); p.add_argument("--note", default="full reset, no archive"); p.set_defaults(fn=cmd_stamp)
+    p = sub.add_parser("exchange-proof"); p.set_defaults(fn=cmd_exchange_proof)
+    p = sub.add_parser("check-leftovers"); p.add_argument("--max-files", type=int, default=200)
+    p.add_argument("--max-bytes", type=int, default=64 * 1024 * 1024); p.set_defaults(fn=cmd_check_leftovers)
+    p = sub.add_parser("assert-dv"); p.set_defaults(fn=cmd_assert_dv)
     p = sub.add_parser("wait-book"); p.add_argument("--timeout", type=float, default=600.0); p.set_defaults(fn=cmd_wait_book)
     args = ap.parse_args(argv)
     return args.fn(args)
