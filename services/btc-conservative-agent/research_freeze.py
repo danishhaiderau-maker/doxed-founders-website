@@ -169,6 +169,19 @@ def window(manifest: Optional[Mapping[str, Any]]) -> tuple[Optional[float], Opti
     return start, start + FREEZE_SEC
 
 
+def _current_roster() -> dict:
+    """Live tile roster from combo_pathway_config: ON by default (5) and the Tiles 6/7 DISLOC paper lanes (default OFF)."""
+    try:
+        import combo_pathway_config as cfg
+        order = list(cfg.ACTIVE_TILE_ORDER)
+    except Exception:  # noqa: BLE001 - status must never raise
+        return {"error": "ROSTER_UNAVAILABLE"}
+    off = [lane for lane in order if "DISLOC" in lane]
+    on = [lane for lane in order if lane not in off]
+    return {"on_by_default": on, "default_off_tiles_6_7": off, "count": len(order),
+            "retired_not_listed": sorted(set(FREEZE_ROSTER) - set(order))}
+
+
 def freeze_status(manifest: Optional[Mapping[str, Any]], now: float,
                   configured_epoch: Optional[str] = None) -> dict:
     """Public freeze state; ``configured_epoch`` is the running DATA_EPOCH_ID (None = unknown)."""
@@ -199,6 +212,9 @@ def freeze_status(manifest: Optional[Mapping[str, Any]], now: float,
         "days": FREEZE_DAYS,
         "seconds_remaining": round(end - now) if status in (OPENING, ACTIVE) else None,
         "roster": list(FREEZE_ROSTER),
+        # The pinned FREEZE_ROSTER above is the ORIGINAL registry the signatures bind to (it still names the retired
+        # H-A/H-C/GSB3 tiles). What is live now, from the registry itself:
+        "current_roster": _current_roster(),
         "mid_epoch_additions": [dict(item) for item in MID_EPOCH_ADDITIONS],
         "mid_epoch_registry_signatures": dict(MID_EPOCH_REGISTRY_SIGNATURES),
         "registry_version": FREEZE_REGISTRY_VERSION,

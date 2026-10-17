@@ -39,6 +39,8 @@ on:
           - fresh-start-wipe-execute
           - clean-epoch-wipe-plan
           - clean-epoch-wipe-execute
+          - full-reset-no-archive-plan
+          - full-reset-no-archive-execute
           - clean-epoch-reset-plan
           - clean-epoch-reset-execute
           - repair-v22-seals-plan
@@ -57,6 +59,10 @@ on:
         type: boolean
       clean_epoch_confirm:
         description: clean-epoch-wipe-execute - DELETE-PRE-EPOCH:<epoch>:<cert8> from scripts/clean_epoch_certify.py; clean-epoch-reset-execute - RESET-AT-BOUNDARY:<epoch>:<deployed rev12>
+        required: false
+        type: string
+      full_reset_reason:
+        description: full-reset-no-archive-execute - written reason (>= 10 chars), recorded in the wipe receipt and used as the freeze override reason
         required: false
         type: string
       lifecycle_reset_proof:
@@ -982,6 +988,292 @@ jobs:
               raise SystemExit("pre-start hold lost: " + json.dumps(bad))
           print("held down rev=" + str(health.get("source_git_rev")))
           PY
+
+  full-reset-no-archive:
+    # FULL RESET, NO ARCHIVE (Danish 17 Oct 2026 18:09): deletes everything collected since the 13 Oct fresh start on
+    # Fly and starts clean. Dispatch-only. Order: plan (read-only) -> confirm + reason + volume snapshot (recoverability
+    # only, NOT an archive) -> pause (DEPLOY_MAINTENANCE) and prove flat/disarmed/paper-only, relay flat from durable
+    # state -> snapshot the live-off facts -> in-process guarded reset (POST /api/wipe_fly_only, freeze override with the
+    # written reason; resets V3 ledgers, v22 seals, research payloads) -> stamp the fresh-start epoch -> file wipe
+    # (clean_epoch_wipe.py --full-reset-no-archive: intent receipt first, then delete) -> machine restart so memory and
+    # collector file handles are clean -> verify (live off unchanged, 0 rows on every monitor route) -> wait for the
+    # book stream. Paper is NEVER resumed here (Boss resumes after the Health Monitor check). Never arms relay/Bitfinex.
+    # Confirm: DELETE-FULL-RESET:<plan sha256[:12]> printed by the plan; reason in full_reset_reason (>= 10 chars).
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'full-reset-no-archive-plan' || inputs.mode == 'full-reset-no-archive-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Plan (read-only)
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "$machine_id" --label full-reset-plan --deadline-sec 1800 -- python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data --full-reset-no-archive)"
+          printf '%s\n' "$plan"
+          sha="$(printf '%s' "$plan" | python -c 'import json,sys; text=sys.stdin.read(); start=text.index("{"); print(json.loads(text[start:])["plan_sha256"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "plan_sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require confirm token, written reason and a fresh volume snapshot
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          REASON: ${{ inputs.full_reset_reason }}
+          PLAN_SHA: ${{ steps.plan.outputs.plan_sha }}
+        run: |
+          set -euo pipefail
+          python -c 'import os,sys; t=os.environ["CONFIRM"]; want="DELETE-FULL-RESET:"+os.environ["PLAN_SHA"][:12]; sys.exit(0 if t==want else "clean_epoch_confirm must be "+want)'
+          python -c 'import os,sys; sys.exit(0 if len(os.environ["REASON"].strip())>=10 else "full_reset_reason must be at least 10 characters")'
+          flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys,datetime as d
+          rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("status") or "").lower()=="created"]
+          now=d.datetime.now(d.timezone.utc)
+          fresh=[s for s in rows if (now-d.datetime.fromisoformat(str(s["created_at"]).replace("Z","+00:00"))).total_seconds()<6*3600]
+          if not fresh: sys.exit("no volume snapshot created within 6 h: run mode=snapshot-volume first (recoverability only, not an archive)")
+          print(json.dumps({"snapshot_id":fresh[0].get("id"),"created_at":fresh[0].get("created_at")}))'
+
+      - name: Enter paper maintenance boundary (pause, disarmed, paper-only)
+        id: boundary
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          def call(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(base + path, data=data, method="POST" if data else "GET",
+                                               headers={**headers, **({"Content-Type": "application/json"} if data else {})})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          def real_zero(value):
+              if value is None or isinstance(value, (bool, str, bytes)):
+                  return False
+              if isinstance(value, (list, tuple, dict, set)):
+                  return len(value) == 0
+              return isinstance(value, (int, float)) and abs(float(value)) < 1e-12
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(40):
+              status = call("/api/status?fresh=1")
+              progress = status.get("strategy_progress") or {}
+              # FAIL CLOSED: a missing key is NOT zero. /api/status carries no exchange facts, so the exchange is proven
+              # separately by the private exposure audit (next step and again right before the file wipe).
+              if (status.get("execution_paused") is True and status.get("pause_owner") == "DEPLOY_MAINTENANCE"
+                      and status.get("live_armed") is False and status.get("bitfinex_live_enabled") is False
+                      and status.get("force_paper_mode") is True
+                      and real_zero(progress.get("open_positions")) and real_zero(progress.get("pending_orders"))):
+                  print("paused, flat, disarmed, paper-only boundary established rev=" + str(status.get("source_git_rev")))
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                      handle.write("revision=" + str(status.get("source_git_rev") or "")[:12] + "\n")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("flat paused boundary not proven (an open paper position must be closed through the existing path first): nothing deleted")
+          PY
+
+      - name: Prove the exchange is flat (private exposure audit, authoritative and fresh and flat, zero counts)
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_full_reset_gate.py exchange-proof
+
+      - name: Prove every relay is PAUSED, disarmed and flat from durable Railway state
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+        run: |
+          npm ci
+          npx prisma generate
+          node scripts/check-relay-flat.mjs
+
+      - name: Snapshot the live-off facts before the wipe
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        run: python scripts/fly_full_reset_gate.py snapshot --out "$RUNNER_TEMP/live-before.json"
+
+      - name: In-process guarded reset (V3 ledgers, v22 seals, research payloads) with the freeze override
+        id: inproc
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          REASON: ${{ inputs.full_reset_reason }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          retryable = {"fresh_collection_state_lock_timeout", "fresh_collection_trade_lock_timeout",
+                       "fresh_collection_sync_scheduler_busy", "fresh_collection_sync_builder_active",
+                       "fresh_collection_cleanup_lease_busy", "fresh_collection_epoch_writer_busy",
+                       "fresh_collection_research_writer_busy"}
+          body = json.dumps({"freeze_override": {"confirmation": "BREAK_21_DAY_RESEARCH_FREEZE",
+                                                 "reason": os.environ["REASON"].strip()}}).encode()
+          def attempt():
+              request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/wipe_fly_only", data=body, method="POST",
+                                               headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=900) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  try:
+                      return json.loads(exc.read() or b"{}") | {"http_status": exc.code}
+                  except ValueError:
+                      return {"status": "error", "http_status": exc.code}
+          for number in range(1, 9):
+              result = attempt()
+              reset = result.get("reset") or {}
+              print(json.dumps({"attempt": number, "http_status": result.get("http_status", 200), "status": result.get("status"),
+                                "reset_ok": reset.get("ok"), "error": reset.get("error"), "failed_stage": reset.get("failed_stage"),
+                                "wipe_aborted": reset.get("wipe_aborted"), "operation_receipt": reset.get("operation_receipt")}, sort_keys=True), flush=True)
+              if result.get("status") == "ok":
+                  raise SystemExit(0)
+              if not (reset.get("wipe_aborted") is True and reset.get("error") in retryable and not reset.get("operation_receipt")):
+                  raise SystemExit("in-process guarded reset refused or failed: the file wipe was NOT started")
+              time.sleep(30)
+          raise SystemExit("in-process guarded reset still refused after bounded retries: the file wipe was NOT started")
+          PY
+
+      - name: Stamp the fresh-start epoch (rows written from now on carry the data version)
+        id: stamp
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_full_reset_gate.py stamp --note "full reset, no archive (Danish 17 Oct 2026 18:09)"
+
+      - name: Re-prove the exchange is flat immediately before the file wipe
+        id: exchproof
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_full_reset_gate.py exchange-proof
+
+      - name: File wipe, intent receipt first (clean_epoch_wipe.py --full-reset-no-archive)
+        id: filewipe
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CONFIRM: ${{ inputs.clean_epoch_confirm }}
+          REASON: ${{ inputs.full_reset_reason }}
+          REVISION: ${{ steps.boundary.outputs.revision }}
+          EXCHANGE_PROOF: ${{ steps.exchproof.outputs.proof }}
+        run: |
+          set -euo pipefail
+          proof_b64="$(printf '%s' "$EXCHANGE_PROOF" | base64 -w0)"
+          reason_b64="$(printf '%s' "$REASON" | base64 -w0)"
+          python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label full-reset-execute --deadline-sec 3600 -- \
+            sh -c "python /app/clean_epoch_wipe.py execute --scope fly --data-root /app/data --full-reset-no-archive --confirm '$CONFIRM' --expect-plan-sha256 '${{ steps.plan.outputs.plan_sha }}' --expect-git-rev '$REVISION' --reason \"\$(printf '%s' '$reason_b64' | base64 -d)\" --freeze-override-confirmation BREAK_21_DAY_RESEARCH_FREEZE --freeze-override-reason \"\$(printf '%s' '$reason_b64' | base64 -d)\" --exchange-proof-json \"\$(printf '%s' '$proof_b64' | base64 -d)\""
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "${{ steps.plan.outputs.machine_id }}" "sh -lc 'df -h /app/data'"
+
+      - name: Restart the machine so memory and collector file handles are clean (always runs after the first delete step; stays paused)
+        id: restart
+        # A failed or partial wipe must NOT leave the collectors appending to deleted file handles. Runs even when an
+        # earlier step failed (the job still ends red); it only keeps the bot PAUSED by DEPLOY_MAINTENANCE and never resumes.
+        if: ${{ always() && inputs.mode == 'full-reset-no-archive-execute' && steps.inproc.conclusion != 'skipped' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl machines restart --app doxed-btc-bot "${{ steps.plan.outputs.machine_id }}"
+          python - <<'PY'
+          import json, time, urllib.request
+          last = None
+          for _ in range(90):
+              try:
+                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health?fresh=1", timeout=20) as response:
+                      health = json.load(response)
+                  last = {k: health.get(k) for k in ("execution_paused", "pause_owner", "live_armed", "bitfinex_live_enabled", "force_paper_mode", "source_git_rev")}
+                  if (health.get("execution_paused") is True and health.get("pause_owner") == "DEPLOY_MAINTENANCE"
+                          and health.get("live_armed") is False
+                          and health.get("bitfinex_live_enabled") is False and health.get("force_paper_mode") is True):
+                      print("restarted and held down: " + json.dumps(last, sort_keys=True))
+                      raise SystemExit(0)
+              except SystemExit:
+                  raise
+              except Exception as exc:  # noqa: BLE001 - boot window
+                  last = type(exc).__name__
+              time.sleep(10)
+          raise SystemExit(f"bot did not come back paused by DEPLOY_MAINTENANCE and disarmed (paper must not resume): {last}")
+          PY
+
+      - name: Post-restart read-only plan (only small delete-class leftovers may remain)
+        id: leftovers
+        if: ${{ always() && inputs.mode == 'full-reset-no-archive-execute' && steps.restart.conclusion == 'success' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          plan="$(python scripts/fly_detached_exec.py --app doxed-btc-bot --machine "${{ steps.plan.outputs.machine_id }}" --label full-reset-postplan --deadline-sec 1800 -- python /app/clean_epoch_wipe.py plan --scope fly --data-root /app/data --full-reset-no-archive)"
+          printf '%s' "$plan" | python scripts/fly_full_reset_gate.py check-leftovers --max-files 200 --max-bytes 67108864
+
+      - name: Verify (live off unchanged, 0 rows everywhere, dv stamp, epoch id) and wait for the book stream
+        if: ${{ inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          python scripts/fly_full_reset_gate.py verify --before "$RUNNER_TEMP/live-before.json"
+          python scripts/fly_full_reset_gate.py wait-book --timeout 600
+          # a book row written AFTER the restart must carry dv, equal to the stamped fresh-start epoch
+          for attempt in 1 2 3 4 5 6; do
+            row="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "${{ steps.plan.outputs.machine_id }}" "sh -c 'tail -n 1 /app/data/runtime/bfx_book_10l_1s.jsonl'" || true)"
+            if printf '%s' "$row" | python scripts/fly_full_reset_gate.py assert-dv; then ok=1; break; fi
+            sleep 10
+          done
+          test "${ok:-0}" = 1 || { echo "post-restart book row does not carry the dv stamp matching fresh_epoch_id"; exit 1; }
+          echo "Paper stays PAUSED (DEPLOY_MAINTENANCE). Health Monitor checks, then Boss resumes."
+
+      - name: Safety net on failure, force the DEPLOY_MAINTENANCE pause and stop the machine if it cannot be proven paused
+        id: safetynet
+        # LAST step. Whatever failed (even the restart wait), the bot must not be left running unpaused or with collectors
+        # writing to deleted handles. Never resumes paper and never arms anything.
+        if: ${{ failure() && inputs.mode == 'full-reset-no-archive-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          MACHINE_ID: ${{ steps.plan.outputs.machine_id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          def paused():
+              try:
+                  with urllib.request.urlopen(base + "/health?fresh=1", timeout=20) as response:
+                      health = json.load(response)
+                  return (health.get("execution_paused") is True and health.get("pause_owner") == "DEPLOY_MAINTENANCE"
+                          and health.get("live_armed") is False and health.get("bitfinex_live_enabled") is False)
+              except Exception:  # noqa: BLE001 - unreachable counts as not proven
+                  return False
+          try:
+              request = urllib.request.Request(base + "/api/pause", data=json.dumps({"owner": "DEPLOY_MAINTENANCE"}).encode(),
+                                               method="POST", headers={"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"],
+                                                                       "Content-Type": "application/json"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  print("pause POST status=" + str(response.status))
+          except Exception as exc:  # noqa: BLE001
+              print("pause POST failed: " + type(exc).__name__)
+          for _ in range(12):
+              if paused():
+                  print("safety net: bot is paused by DEPLOY_MAINTENANCE (job stays red, nothing resumed)")
+                  raise SystemExit(0)
+              time.sleep(5)
+          print("safety net: pause NOT proven, stopping the machine")
+          rc = subprocess.call(["flyctl", "machine", "stop", "--app", "doxed-btc-bot", os.environ["MACHINE_ID"]])
+          raise SystemExit(f"bot could not be proven paused; machine stop rc={rc}. Investigate before any start.")
+          PY
+
 
   repair-v22-seals:
     # Moves research_events_v22 seal receipts whose sealed generation file was
@@ -2048,10 +2340,10 @@ jobs:
           python test_api_resume_deadlock.py
           python -m pytest test_collection_epoch_binding.py -q
           python -m pytest test_score_led_fill_revalidation.py -q
-          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
+          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py ../../scripts/test_fly_full_reset_gate.py -q
           python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py test_ai_call_deadline.py test_analyzer_ai_served_model_cohort.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
-          python -m pytest test_research_segment_sync_epoch.py test_clean_epoch_wipe.py -q
+          python -m pytest test_research_segment_sync_epoch.py test_clean_epoch_wipe.py test_full_reset_no_archive.py test_full_reset_empty_state.py -q
           python -m pytest test_fill_guard_v2_atomic_claim.py test_async_cancellation_evidence.py test_paper_action_timing_integration.py test_position_registry_concurrency.py test_collector_v22_registered_order_bridge.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py

@@ -30,6 +30,8 @@ import time
 import urllib.request
 from typing import Optional
 
+import data_version as _data_version
+
 BFX_WS = "wss://api-pub.bitfinex.com/ws/2"
 BFX_SYMBOL = os.getenv("STRATEGIST_BFX_SYMBOL", "tBTCF0:USTF0")
 LIGHTER_WS = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -148,6 +150,7 @@ class Collector:
         self.trade_sink = Sink(os.path.join(runtime_dir, TRADES_FILE))
         self.venue_sink = Sink(os.path.join(runtime_dir, VENUE_FILE))
         self.deriv_sink = Sink(os.path.join(runtime_dir, DERIV_FILE))
+        self._dv = _data_version.Stamp()  # D8: rows carry the fresh-start epoch they belong to
         self.deriv: Optional[tuple] = None  # (fields, recv_ts)
         self.book = BfxBook()
         self.lock = threading.Lock()
@@ -218,13 +221,15 @@ class Collector:
             deriv = self.deriv
             quotes = {v: (q[0], q[1]) if q and sec + 1 - q[2] <= MAX_QUOTE_AGE_SEC else None
                       for v, q in self.quotes.items()}
+        dv = self._dv.current()
+        stamp = {"dv": dv} if dv else {}
         if b and a:
-            self.book_sink.write({"s": sec, "b": b, "a": a})
+            self.book_sink.write({"s": sec, "b": b, "a": a, **stamp})
         if trades:
-            self.trade_sink.write({"s": sec, "tr": trades})
+            self.trade_sink.write({"s": sec, "tr": trades, **stamp})
         if deriv and sec + 1 - deriv[1] <= MAX_DERIV_AGE_SEC:
             self.deriv_sink.write({"s": sec, **{k: v for k, v in deriv[0].items() if v is not None},
-                                   "age_s": round(sec + 1 - deriv[1], 3)})
+                                   "age_s": round(sec + 1 - deriv[1], 3), **stamp})
         minute = sec - sec % 60
         row = self.minute.setdefault(minute, {v: [None] * 60 for v in quotes})
         for v, q in quotes.items():
@@ -232,7 +237,7 @@ class Collector:
         for m in [m for m in self.minute if m < minute]:
             data = self.minute.pop(m)
             if any(x is not None for seq in data.values() for x in seq):
-                self.venue_sink.write({"m": m, **data})
+                self.venue_sink.write({"m": m, **data, **stamp})
 
     # ---- workers --------------------------------------------------------------
     def _ws_loop(self, name, url, subs, handler) -> None:

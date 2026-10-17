@@ -36,6 +36,10 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   DATA_EPOCH_ID = "ce-20261004-v31-freeze21b"
   # v3 begins at a genesis BASELINE segment, so only clean-epoch bytes ship.
   RESEARCH_SEGMENTS_PREFIX = "v3"
+  # Full reset, no archive (Danish 17 Oct 2026 18:09): a wipe restarts the segment numbering, so every wipe gets
+  # its own key prefix (v3-w<fresh-start epoch_ts>) and can never reuse an old prefix or sequence number.
+  # Required by clean_epoch_wipe.py (WipeRefused / PRECHECK_FAILED without it); see research_segment_epoch.py.
+  RESEARCH_SEGMENTS_PREFIX_PER_WIPE = "1"
   RESEARCH_SEGMENTS_STATE_DIR = "/app/data/segment-shipper-v3"
   # research.db grows ~90 MB/day (424.6 MB on 2026-10-02) and would cross the
   # 512 MiB default, turning into a permanent FLY_OVERSIZED_PATHS promotion deny.
