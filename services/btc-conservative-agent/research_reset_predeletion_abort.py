@@ -10,6 +10,19 @@ from research_exact_deletion import _checked_path, ResearchDeletionRejected
 from research.mirror_generation_lease import MirrorGenerationLease, LEASE_FILE_NAME
 from research_v3_contract import canonical_json
 
+# DATA ONLY, never imported or executed: byte-for-byte copy of research_exact_deletion.py at
+# revision f187f493 (the deleter that failed incident 82c947633a5aca8f44bccd9d). It exists so
+# the incident-retirement hash comparison still has the reviewed source after the live deleter
+# changed (cap constants only, #696). Its sha256 is pinned in REVIEWED_FAILED_DELETERS.
+VENDORED_REVIEWED_DELETERS = {
+    'f187f4937ec7a1a0ce2fadddfed4181ea24521b2': 'reviewed_deleter_f187f493.py.blob',
+}
+
+# sha256 of the deployed research_exact_deletion.py this module accepts (new reviewed blob,
+# #696 caps) or, for incident retirement only, the old reviewed blob. Anything else fails closed.
+CURRENT_REVIEWED_DELETER_SHA256 = 'db4c865bd6745b1b8d957eb09e06d34cc70313dda3706c693a707b3d5134912b'
+OLD_REVIEWED_DELETER_SHA256 = '3a64a7c7f21f238b712df4f4765f1f57d737fb046503635dfa517f48d10538e6'
+
 REVIEWED_FAILED_DELETERS = {
     "6d977a6d38d19a68efc7650625e830133ba33a8d":
         "47a23875125a393d77d48b14f0885e151dd508a113e1fc7b7bc680e9b031a916",
@@ -117,7 +130,14 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
     if root != volume_root / "runtime" or volume_root == Path(volume_root.anchor):
         raise ResearchDeletionRejected("ABORT_VOLUME_LAYOUT_INVALID")
     _checked_path(root / "research_reset_receipts", volume_root)
-    source = Path(reviewed_source_artifact or research_exact_deletion.__file__)
+    # The deployed deleter may have moved on (cap constants); the reviewed blob of
+    # the failed revision is vendored byte-for-byte and is what the hash check binds.
+    deployed = hashlib.sha256(Path(research_exact_deletion.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    if deployed not in (CURRENT_REVIEWED_DELETER_SHA256, OLD_REVIEWED_DELETER_SHA256):
+        raise ResearchDeletionRejected("ABORT_DELETER_SOURCE_NOT_REVIEWED")
+    vendored = VENDORED_REVIEWED_DELETERS.get(failed_revision)
+    source = Path(reviewed_source_artifact or (Path(__file__).with_name(vendored) if vendored
+                                               else research_exact_deletion.__file__))
     if (REVIEWED_FAILED_DELETERS.get(failed_revision) != reviewed_deleter_sha256
             or not re.fullmatch(r"[0-9a-f]{64}", str(reviewed_deleter_sha256))
             or hashlib.sha256(source.read_bytes()).hexdigest() != reviewed_deleter_sha256):

@@ -8,6 +8,8 @@
 
 # 2. Re-include Python source at the repo root (bot, analyzer, pathways, executors).
 !*.py
+# Data-only reviewed deleter blob for incident-retirement hash comparison (never imported).
+!reviewed_deleter_f187f493.py.blob
 # Imported by bot.py at startup; listed explicitly so a narrower whitelist keeps them.
 !thread_health.py
 !relay_delivery_guard.py
