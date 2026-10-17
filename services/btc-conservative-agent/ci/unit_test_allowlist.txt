@@ -220,6 +220,7 @@ test_fresh_collection_toggle.py
 test_fresh_start_epoch.py
 test_full_reset_empty_state.py
 test_full_reset_no_archive.py
+test_full_reset_segment_retire.py
 test_future_path_attempt_integration.py
 test_future_path_attempt_receipt.py
 test_future_path_blocked_append_observation.py
