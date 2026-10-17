@@ -497,3 +497,14 @@ def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot
         return {r["trade_id"] for r in body["rows"]}
     assert ids() == set(fresh)                       # all rows stay visible without the filter
     assert ids(fresh_only="1") == {"d-fresh", "d-parts"}  # DISLOC no longer collapses to 0
+
+
+def test_switches_route_and_api_build_use_the_same_live_state(bot, monkeypatch):
+    monkeypatch.setattr(bot, "_build_features_live_state", lambda: {"effective_live": False, "force_paper_mode": True})
+    monkeypatch.setattr(bot, "monitor_tile_switch_rows", lambda: [
+        {"lane": "G", "number": 3, "label": "GS-01", "retired": False, "paper_on": True, "live_orders_on": True}])
+    sw = _get(bot, "/api/monitor/tiles/switches", {"X-Bot-Admin-Token": ADMIN}).get_json()
+    assert "live copy DISARMED (force_paper)" in sw["build_features"]
+    assert bot.current_build_features_text() == sw["build_features"]
+    monkeypatch.setattr(bot, "_build_features_live_state", lambda: {"effective_live": False, "error": "X"})
+    assert "live arming state unknown" in bot.current_build_features_text()

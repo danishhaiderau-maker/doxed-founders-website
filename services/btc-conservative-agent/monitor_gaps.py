@@ -271,6 +271,24 @@ def tile_switches(tiles: Iterable[Mapping], build_text: str = "") -> dict:
             "build_features": build_text, "alerts": alerts, "level": RED if alerts else GREEN}
 
 
+def live_arming_word(live_state: Optional[Mapping]) -> str:
+    """ARMED / DISARMED only from a clean boolean effective_live; anything doubtful reads 'unknown'.
+
+    Unknown = no state, an ``error`` key, WEBSITE_UNREACHABLE (or MONITOR_NOT_WIRED) among the blockers, or a
+    non-boolean effective_live. Never DISARMED just because the state could not be read."""
+    if not isinstance(live_state, Mapping) or live_state.get("error"):
+        return "live arming state unknown"
+    blockers = {str(b).upper() for b in (live_state.get("blockers") or ())}
+    if blockers & {"WEBSITE_UNREACHABLE", "MONITOR_NOT_WIRED"}:
+        return "live arming state unknown"
+    eff = live_state.get("effective_live")
+    if eff is True:
+        return "live copy ARMED"
+    if eff is False:
+        return "live copy DISARMED" + (" (force_paper)" if live_state.get("force_paper_mode") else "")
+    return "live arming state unknown"
+
+
 def build_features_text(tiles: Iterable[Mapping], live_state: Optional[Mapping] = None) -> str:
     """Current-state build text derived from the one switch source (replaces the stale prose).
 
@@ -282,13 +300,7 @@ def build_features_text(tiles: Iterable[Mapping], live_state: Optional[Mapping] 
     live = [t for t in tiles if t.get("live_orders_on")]
     def names(rows):
         return ", ".join(f"T{t.get('number')} {t.get('label')}" for t in rows) or "none"
-    eff = (live_state or {}).get("effective_live") if isinstance(live_state, Mapping) else None
-    if eff is True:
-        arming = "live copy ARMED"
-    elif eff is False:
-        arming = "live copy DISARMED" + (" (force_paper)" if (live_state or {}).get("force_paper_mode") else "")
-    else:
-        arming = "live arming state unknown"
+    arming = live_arming_word(live_state)
     return (f"{len(tiles)} registered tiles; paper ON: {len(paper)} ({names(paper)}); "
             f"live-eligible switch ON: {len(live)} ({names(live)}); {arming}. Derived at request time from the "
             f"tile switch source (/api/monitor/tiles/switches); retired tiles are excluded.")

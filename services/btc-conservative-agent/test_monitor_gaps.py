@@ -242,3 +242,18 @@ def test_live_flags_snapshot_never_empty():
         assert "effective_live" in out and out.get("error") == "MONITOR_NOT_WIRED"
     finally:
         api._CTX.clear(); api._CTX.update(saved)
+
+
+def test_arming_word_is_unknown_unless_state_is_clean_boolean():
+    tiles = [{"lane": "G", "number": 3, "label": "GS-01", "retired": False, "paper_on": True, "live_orders_on": True}]
+    word = lambda st: mg.build_features_text(tiles, st)
+    assert "live copy DISARMED" in word({"effective_live": False})
+    assert "live copy ARMED" in word({"effective_live": True})
+    # website unreachable / error key / not wired / non-boolean / missing: unknown, never DISARMED
+    for bad in ({"effective_live": False, "blockers": ["WEBSITE_UNREACHABLE"]},
+                {"effective_live": False, "blockers": ["website_unreachable", "X"]},
+                {"effective_live": False, "error": "TimeoutError"},
+                {"effective_live": False, "error": "MONITOR_NOT_WIRED"},
+                {"effective_live": None}, {"effective_live": "False"}, {}, None):
+        text = word(bad)
+        assert "live arming state unknown" in text and "DISARMED" not in text and "ARMED" not in text.replace("DISARMED", ""), bad
