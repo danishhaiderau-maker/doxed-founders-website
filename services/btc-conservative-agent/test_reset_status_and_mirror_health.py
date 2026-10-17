@@ -100,12 +100,24 @@ def test_missing_known_account_alerts_even_if_another_is_listed():
     assert h["causes"] == [mh.ACCOUNT_MISSING] and h["missing_accounts"] == ["acct-cmq6cfwv"]
 
 
-def test_null_heartbeat_while_paused_alerts_only_after_ten_minutes():
+PAUSED_EVER_ARMED = {"account": "acct-cmq6cfwv", "armed": False, "paused": True, "armed_at": "2026-10-11T00:00:00Z"}
+
+
+def test_null_heartbeat_alerts_only_for_an_account_that_was_ever_armed_and_after_ten_minutes():
     state = {}
-    assert mh.evaluate(["acct-cmq6cfwv"], _web([ACCT], hb=None), T0, state)["causes"] == []
-    assert mh.evaluate(["acct-cmq6cfwv"], _web([ACCT], hb=None), T0 + 601, state)["causes"] == [mh.HEARTBEAT_NULL]
-    assert mh.evaluate(["acct-cmq6cfwv"], _web([ACCT], hb=4), T0 + 700, state)["causes"] == []
+    k = ["acct-cmq6cfwv"]
+    assert mh.evaluate(k, _web([PAUSED_EVER_ARMED], hb=None), T0, state)["causes"] == []
+    assert mh.evaluate(k, _web([PAUSED_EVER_ARMED], hb=None), T0 + 601, state)["causes"] == [mh.HEARTBEAT_NULL]
+    assert mh.evaluate(k, _web([PAUSED_EVER_ARMED], hb=4), T0 + 700, state)["causes"] == []
     assert "hb_null_since" not in state
+
+
+def test_never_armed_paused_account_with_null_heartbeat_is_not_an_alert():
+    state = {}
+    k = ["acct-cmq6cfwv"]
+    for t in (T0, T0 + 601, T0 + 5000):
+        h = mh.evaluate(k, _web([ACCT], hb=None), t, state)
+        assert h["causes"] == [] and h["alert"] is False and h["ever_armed"] is False
 
 
 def test_healthy_mirror_has_no_alert_and_unknown_accounts_never_alert():
@@ -113,16 +125,51 @@ def test_healthy_mirror_has_no_alert_and_unknown_accounts_never_alert():
     assert not mh.evaluate([], _web([]), T0, {})["alert"]
 
 
-def test_arm_block_until_listed_with_heartbeat_and_flat_check():
+def _fresh(web, now=T0):
+    web = dict(web)
+    web["fetched_at_ts"] = now - 5
+    return web
+
+
+def test_arm_block_until_listed_and_flat_check_but_never_armed_needs_no_heartbeat():
     flat = {"authoritative": True, "fresh": True, "flat": True}
     known = ["acct-cmq6cfwv"]
-    assert mh.arm_block_reason(mh.evaluate(known, _web([]), T0, {}), flat) == mh.ZERO_ACCOUNTS
-    assert mh.arm_block_reason(mh.evaluate(known, _web([], reachable=False), T0, {}), flat) == "MIRROR_UNREACHABLE"
-    assert mh.arm_block_reason(mh.evaluate(known, _web([ACCT], hb=None), T0, {}), flat) == "MIRROR_HEARTBEAT_NULL"
-    ok = mh.evaluate(known, _web([ACCT], hb=2), T0, {})
-    assert mh.arm_block_reason(ok, None) == "LIVE_FLAT_CHECK_UNCONFIRMED"
-    assert mh.arm_block_reason(ok, {"authoritative": True, "fresh": True, "flat": False}) == "LIVE_FLAT_CHECK_UNCONFIRMED"
-    assert mh.arm_block_reason(ok, flat) is None
+    assert mh.arm_block_reason(mh.evaluate(known, _fresh(_web([])), T0, {}), flat, T0) == mh.ZERO_ACCOUNTS
+    assert mh.arm_block_reason(mh.evaluate(known, _fresh(_web([], reachable=False)), T0, {}), flat, T0) == "MIRROR_UNREACHABLE"
+    # never armed + null heartbeat: arming is possible (listed + flat check is what is required)
+    never = mh.evaluate(known, _fresh(_web([ACCT], hb=None)), T0, {})
+    assert mh.arm_block_reason(never, flat, T0) is None
+    assert mh.arm_block_reason(never, None, T0) == "LIVE_FLAT_CHECK_UNCONFIRMED"
+    assert mh.arm_block_reason(never, {"authoritative": True, "fresh": True, "flat": False}, T0) == "LIVE_FLAT_CHECK_UNCONFIRMED"
+    # previously armed account still needs a heartbeat
+    was = mh.evaluate(known, _fresh(_web([PAUSED_EVER_ARMED], hb=None)), T0, {})
+    assert mh.arm_block_reason(was, flat, T0) == "MIRROR_HEARTBEAT_NULL"
+    live = mh.evaluate(known, _fresh(_web([PAUSED_EVER_ARMED], hb=2)), T0, {})
+    assert mh.arm_block_reason(live, flat, T0) is None
+
+
+def test_arm_block_refuses_a_stale_or_unfetched_view():
+    flat = {"authoritative": True, "fresh": True, "flat": True}
+    known = ["acct-cmq6cfwv"]
+    stale = mh.evaluate(known, dict(_web([ACCT], hb=2), fetched_at_ts=T0 - 300), T0, {})
+    assert mh.arm_block_reason(stale, flat, T0) == "MIRROR_VIEW_STALE"
+    unfetched = mh.evaluate(known, _web([ACCT], hb=2), T0, {})
+    assert mh.arm_block_reason(unfetched, flat, T0) == "MIRROR_VIEW_STALE"
+
+
+def test_known_account_from_env_alerts_and_blocks_with_an_empty_transition_log():
+    known = mh.known_accounts_from_rows([], "acct-cmq6cfwv")  # fly.toml LIVE_COPY_KNOWN_ACCOUNTS, no history at all
+    assert known == ["acct-cmq6cfwv"]
+    h = mh.evaluate(known, _fresh(_web([])), T0, {})
+    assert h["alert"] and h["causes"] == [mh.ZERO_ACCOUNTS]
+    assert mh.arm_block_reason(h, {"authoritative": True, "fresh": True, "flat": True}, T0) == mh.ZERO_ACCOUNTS
+    h2 = mh.evaluate(known, _fresh(_web([{"account": "acct-zzz"}], hb=2)), T0, {})
+    assert h2["causes"] == [mh.ACCOUNT_MISSING]
+
+
+def test_fly_toml_sets_the_known_account():
+    toml = (HERE / "fly.toml").read_text(encoding="utf-8")
+    assert 'LIVE_COPY_KNOWN_ACCOUNTS = "acct-cmq6cfwv"' in toml
 
 
 def test_known_accounts_come_from_the_transition_log_and_env():

@@ -60614,11 +60614,15 @@ def _mirror_health_view(web: dict) -> dict:
 def _mirror_arm_block(audit: dict | None = None) -> str | None:
     """Reason re-arm must be refused, or None. Never raises into the caller as 'allowed' on error."""
     try:
+        try:
+            _live_copy_website_state(max_age=15.0)  # fresh signed fetch: an arm decision never rides a stale cache
+        except Exception:  # noqa: BLE001
+            pass
         h = _live_copy_website_cached_view().get("mirror_health") or {}
         if audit is None and h.get("known_accounts"):
             audit = _refresh_bitfinex_exposure_audit()
             audit.pop("_rebuild_payload", None)
-        return mirror_health.arm_block_reason(h, audit)
+        return mirror_health.arm_block_reason(h, audit, now=time.time())
     except Exception as exc:  # noqa: BLE001
         return f"MIRROR_CHECK_ERROR:{type(exc).__name__}"
 
