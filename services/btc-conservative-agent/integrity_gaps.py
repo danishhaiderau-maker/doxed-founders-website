@@ -75,13 +75,28 @@ _RETAINED_DIR_RE = tuple(re.compile(x) for x in (
 ))
 
 
-def retained_by_design(rel: str) -> bool:
+_ACTIVE_RESET_FILE = "runtime/research_reset_receipts/ACTIVE_RESET.json"
+
+
+def active_reset_id(root: str) -> str | None:
+    """The reset id bot.py currently reads from ACTIVE_RESET.json (24 lowercase hex), else None. Read-only."""
+    try:
+        with open(os.path.join(root, *_ACTIVE_RESET_FILE.split("/")), "r", encoding="utf-8") as fh:
+            rid = json.load(fh).get("reset_id")
+    except Exception:  # noqa: BLE001
+        return None
+    return rid if isinstance(rid, str) and re.fullmatch(r"[0-9a-f]{24}", rid) else None
+
+
+def retained_by_design(rel: str, active_reset: str | None = None) -> bool:
     """HM post-wipe 18 Oct: runtime state kept by design, never an old-data offender in G16.
 
     Anchored fullmatch on the path relative to the scan root: v3 emergency/owner/recovery receipts, runtime
     live_copy_*.json and quarantine/v3_completeness_markers/. A parent directory name or a basename elsewhere
     never exempts a path. The pinned keep_manifest (and its hash) is deliberately NOT changed."""
     rel = rel.replace("\\", "/").lstrip("/")
+    if active_reset and rel == f"runtime/research_reset_receipts/{active_reset}/binding.json":
+        return True  # the ACTIVE reset anchor only (bot.py reads it to resume/verify); an old reset dir is still flagged
     return any(r.fullmatch(rel) for r in _RETAINED_RE)
 
 
@@ -101,6 +116,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
     import keep_manifest as km
     keep = km.FLY if keep is None else keep
     t0 = _t.monotonic()
+    active_reset = active_reset_id(root)
     files, kept, kept_dirs, scanned, complete = {}, {}, [], 0, True
     for d, dirs, names in os.walk(root):
         rel_d = os.path.relpath(d, root).replace(os.sep, "/")
@@ -125,7 +141,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
                     ts = os.path.getmtime(path)
                 except OSError:
                     continue
-            (kept if (km.is_kept(rel, keep) or retained_by_design(rel)) else files)[rel] = ts
+            (kept if (km.is_kept(rel, keep) or retained_by_design(rel, active_reset)) else files)[rel] = ts
         if not complete:
             break
     return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}
@@ -319,7 +335,7 @@ def evaluate(f: dict) -> dict:
                       "r2_independent_kept": w.get("r2_independent_kept"),
                       "r2_independent_at": w.get("r2_independent_at"), "fly": fly_old, "box": box_old,
                       "fly_scanned": w.get("fly_scanned"), "fly_scan_complete": w.get("fly_scan_complete"),
-                      "fly_offenders": w.get("fly_offenders"), "archive_gaps": w.get("archive_gaps")},
+                      "fly_offenders": w.get("fly_offenders"), "retire_plan": w.get("retire_plan"), "archive_gaps": w.get("archive_gaps")},
                      "0 everywhere; receipt == independent R2 listing; daily archive, 0 gaps", st,
                      "Fly /app/data scan + fresh_start_wipe_receipt.json + box R2 listing; KEEP per pinned manifest"))
 
