@@ -140,7 +140,24 @@ def _ledger_namespace(tmp_path, trades, boundary_ts):
     return ns
 
 
-def test_pre_epoch_ledger_is_archived_not_deleted_and_rebuilt_from_epoch(tmp_path):
+def test_default_pre_epoch_ledger_is_rebuilt_from_epoch_and_not_archived(tmp_path):
+    trades = [
+        {"research_lane": HA, "net_pnl_usd": 0.10, "exit_ts": CUTOFF_TS - 900},  # previous epoch
+        {"research_lane": HA, "net_pnl_usd": 0.12, "exit_ts": CUTOFF_TS + 60},
+    ]
+    ns = _ledger_namespace(tmp_path, trades, CUTOFF_TS)
+    Path(ns["LANE_PNL_LEDGER_FILE"]).write_text(json.dumps(
+        {"schema": "lane_pnl_ledger_v1", "lanes": {HA: {"closes": 24, "net_pnl_usd": 0.44}}}), encoding="utf-8")
+    result = ns["_segregate_lane_pnl_ledger_for_epoch"]()
+    assert result["status"] == "SEGREGATED" and "archived_to" not in result  # no permanent archive (19 Oct)
+    assert not (tmp_path / "research_archive").exists()
+    current = json.loads(Path(ns["LANE_PNL_LEDGER_FILE"]).read_text(encoding="utf-8"))
+    assert current["lanes"][HA]["closes"] == 1 and current["lanes"][HA]["net_pnl_usd"] == 0.12
+
+
+def test_pre_epoch_ledger_is_archived_not_deleted_and_rebuilt_from_epoch(tmp_path, monkeypatch):
+    import runtime_hygiene
+    monkeypatch.setattr(runtime_hygiene, "RETAIN_ARCHIVES", True)
     trades = [
         {"research_lane": HA, "net_pnl_usd": 0.10, "exit_ts": CUTOFF_TS - 900},  # previous epoch
         {"research_lane": HA, "net_pnl_usd": 0.12, "exit_ts": CUTOFF_TS + 60},
