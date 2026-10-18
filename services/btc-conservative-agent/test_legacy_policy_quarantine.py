@@ -1,0 +1,85 @@
+"""HM-approved explicit episode-id quarantine of legacy POLICY_IDENTITY_CONTAMINATION."""
+import tempfile
+import unittest
+from unittest import mock
+
+from research import legacy_policy_quarantine as lpq
+from research.research_v3_report import build_safe_policy_genome_v3_report
+from research_v3_store import V3EvidenceStore
+
+B = 1.8e9
+EP = "episode-legacy-1"
+LISTED = {EP: {"policy_ids": ["PATIENT"], "identity_rows_max_ts": B + 1000.0, "lanes": ["L"], "reason": "test"}}
+
+
+def _seed(store, *, episode=EP, order_ts=B + 500.0, decision_ts=B + 500.0, order_extra=None):
+    store.append("opportunity", {"record_id": f"o-{episode}", "episode_id": episode, "signal_ts": B})
+    store.append("decision", {
+        "record_id": f"d-{episode}", "episode_id": episode, "decision_stage": "LANE_POLICY_VERDICT",
+        "policy_id": "PATIENT", "policy_signature": "sig-decision", "policy_epoch_id": "pe-1",
+        "event_id": f"ev-{episode}", "decision_ts": decision_ts})
+    store.append("order_intent", {
+        "record_id": f"i-{episode}", "episode_id": episode, "event_id": f"ev-{episode}", "policy_id": "PATIENT",
+        "policy_signature": "sig-order", "policy_epoch_id": "pe-2", "submitted_ts": order_ts, **(order_extra or {})})
+
+
+def _report(listed=LISTED, **kw):
+    with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+        store = V3EvidenceStore(data, epoch_id="epoch-v3")
+        _seed(store, **kw)
+        with mock.patch.object(lpq, "LEGACY_POLICY_IDENTITY_EPISODES", listed):
+            return build_safe_policy_genome_v3_report(data, reports)
+
+
+class LegacyQuarantineTests(unittest.TestCase):
+    def test_listed_episode_with_all_rows_before_bound_is_quarantined_and_excluded_everywhere(self):
+        report = _report()
+        scope = report["epoch_scope"]
+        self.assertNotIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+        self.assertFalse(scope["policy_signature_divergence"])
+        q = scope["quarantined_legacy_episodes"]
+        self.assertEqual(q["count"], 1)
+        self.assertEqual(q["episodes"][0]["episode_id"], EP)
+        self.assertEqual(scope["included_fresh_rows"], 0)
+        self.assertEqual(scope["active_opportunity_rows"], 0)
+        self.assertEqual(report["collection"]["independent_opportunities"], 0)
+
+    def test_divergent_listed_episode_with_a_post_bound_row_is_still_invalid(self):
+        report = _report(order_ts=B + 1500.0)
+        self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+        q = report["epoch_scope"]["quarantined_legacy_episodes"]
+        self.assertEqual(q["count"], 0)
+        self.assertEqual(q["rejected_not_quarantined"][0]["reason"], "IDENTITY_ROWS_NEWER_THAN_EVIDENCE_BOUND")
+        self.assertEqual(report["epoch_scope"]["included_fresh_rows"], 1)
+
+    def test_episode_not_on_the_list_is_still_invalid(self):
+        report = _report(episode="episode-other")
+        self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+        self.assertEqual(report["epoch_scope"]["quarantined_legacy_episodes"]["count"], 0)
+
+    def test_undated_identity_row_fails_closed_unless_a_dated_sibling_shares_its_event_id(self):
+        rows = [{"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1"}]
+        out = lpq.evaluate([EP], rows, LISTED)
+        self.assertEqual(out["accepted"], [])
+        self.assertEqual(out["rejected"][0]["reason"], "IDENTITY_ROWS_NEWER_THAN_EVIDENCE_BOUND")
+        rows.append({"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1",
+                     "observed_ts": B + 500.0})
+        self.assertEqual(lpq.evaluate([EP], rows, LISTED)["accepted"], [EP])
+
+    def test_deadlines_and_tape_windows_are_not_creation_times(self):
+        row = {"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "decision_ts": B + 500.0,
+               "resolution_deadline_ts": B + 9999.0, "market_segment_refs": {"end_ts": B + 9999.0}}
+        self.assertEqual(lpq.identity_row_ts(row), B + 500.0)
+        sparse = {"x": {"requested_end_ts": B + 9999.0, "fill_ts": B + 600.0, "chase_schedule_policy_end_ts": B + 9999.0}}
+        self.assertEqual(lpq.identity_row_ts(sparse), B + 600.0)
+
+    def test_the_real_list_is_a_fixed_list_of_concrete_ids(self):
+        ids = sorted(lpq.LEGACY_POLICY_IDENTITY_EPISODES)
+        self.assertEqual(ids, ["episode-1ff6cd183c4b011958be"])
+        spec = lpq.LEGACY_POLICY_IDENTITY_EPISODES[ids[0]]
+        self.assertEqual(spec["identity_rows_max_ts"], 1792281301.0)
+        self.assertEqual(len(spec["policy_ids"]), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
