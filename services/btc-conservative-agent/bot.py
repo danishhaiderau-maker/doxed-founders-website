@@ -4245,7 +4245,8 @@ def _segregate_lane_pnl_ledger_for_epoch() -> dict:
     if same_epoch:
         result["status"] = "CURRENT"
     else:
-        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+        import runtime_hygiene as _rh_keep
+        if os.path.isfile(LANE_PNL_LEDGER_FILE) and _rh_keep.RETAIN_ARCHIVES:  # no permanent archive (19 Oct)
             target_dir = (
                 Path(LANE_PNL_LEDGER_FILE).resolve().parent
                 / "research_archive" / "pre_epoch" / str(tag.get("epoch_id") or "unknown_epoch")
