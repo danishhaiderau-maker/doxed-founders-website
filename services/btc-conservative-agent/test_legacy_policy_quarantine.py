@@ -106,5 +106,22 @@ class LegacyQuarantineTests(unittest.TestCase):
         self.assertEqual(lpq.evaluate(["episode-b"], [late], {"episode-b": LISTED[EP]})["accepted"], [])
 
 
+    def test_real_ledger_rows_of_both_listed_ids_are_accepted_with_their_own_bounds_and_counts(self):
+        """Real rows (identity keys only) copied from the laptop v3 ledgers on 18 Oct, 48 rows incl. other policies' rows."""
+        import json
+        import pathlib
+        path = pathlib.Path(__file__).parent / "fixtures" / "legacy_policy_quarantine_real_rows.jsonl"
+        rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+        out = lpq.evaluate(list(lpq.LEGACY_POLICY_IDENTITY_EPISODES), rows)
+        self.assertEqual(out["rejected"], [])
+        self.assertEqual({e["episode_id"]: e["identity_rows"] for e in out["episodes"]},
+                         {"episode-1ff6cd183c4b011958be": 20, "episode-cfacc140c836a55a140c": 18})
+        for e in out["episodes"]:
+            self.assertLessEqual(e["newest_identity_row_ts"], e["evidence_bound_ts"])
+        # the same real rows with the new id's bound removed from the list reject nothing else: unlisted id is ignored
+        only_first = {k: v for k, v in lpq.LEGACY_POLICY_IDENTITY_EPISODES.items() if k.endswith("11958be")}
+        self.assertEqual(lpq.evaluate(["episode-cfacc140c836a55a140c"], rows, only_first)["accepted"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
