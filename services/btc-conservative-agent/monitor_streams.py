@@ -317,7 +317,10 @@ LAZY_LOG_FILES = (
 
 
 def file_mtimes(data_dir, now: float) -> dict:
-    """Never raises: an observability add-on must not take /streams/health down ({} on any failure)."""
+    """Never raises: an observability add-on must not take /streams/health down ({} on any failure).
+
+    ``age_sec`` is relative to ``now`` = the moment the response was computed; /api/monitor/streams/health caches that
+    response for 15 s, so a served age_sec can lag real age by up to 15 s (use cached_at/server_ts to correct)."""
     try:
         return _file_mtimes(data_dir, now)
     except Exception:  # noqa: BLE001
