@@ -851,6 +851,17 @@ def _explicit_causal_ids(
     return ids
 
 
+def _registry_declared_entry_ttl(lane: Any) -> float | None:
+    """Registry-owned declared entry TTL for an active tile lane; None outside the registry (fail open to sources)."""
+    try:
+        from combo_pathway_config import ACTIVE_TILE_REGISTRY
+        spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper())
+        value = spec.get("entry_ttl_sec") if spec else None
+        return float(value) if value not in (None, "") else None
+    except Exception:
+        return None
+
+
 def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
     """Derive a lane-scoped identity instead of reusing the live CONTROL tag."""
     for source in sources:
@@ -900,7 +911,10 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
     base_epoch = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "").strip()
     relay_default = research_lane.upper() == "CONTINUOUS"
     chase_schedule = _first(*(source.get("research_chase_schedule") for source in sources)) or {}
-    declared_entry_ttl_sec = _first(*(
+    # The lane's registry-declared entry TTL is the ONE canonical source. Order/execution dictionaries carry the
+    # per-cell order TTL (e.g. 660 s for a regime-managed touch cell), which must never enter the identity: it
+    # minted a second policy signature for one episode (B1/B2: decision 1200 vs execution 660).
+    declared_entry_ttl_sec = _first(_registry_declared_entry_ttl(research_lane), *(
         source.get("entry_ttl_sec") or source.get("signal_ttl_sec")
         for source in sources
     ), chase_schedule.get("entry_ttl_sec"), chase_schedule.get("ttl_sec"),
