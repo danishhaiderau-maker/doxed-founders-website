@@ -268,3 +268,32 @@ def test_multi_leg_row_tp1_plus_terminal_is_strict_fresh_with_filled_leg_prices(
     bad = dict(row, partial_exit_receipts=[dict(row["partial_exit_receipts"][0], leg_priced_by=None),
                                            row["partial_exit_receipts"][1]])
     assert paper_fill.row_fresh_strict(bad) is False  # one unpriced TP1 leg poisons the whole row
+
+
+def test_closed_row_flat_evidence_status_reaches_the_tile_fill_block():
+    blk = monitor_tiles._fill_block({}, filled=True, raw={"evidence_status": "COMPLETE"})
+    assert blk["evidence_status"] == "COMPLETE"
+    assert monitor_tiles._fill_block({}, filled=True, raw={})["evidence_status"] is None
+
+
+def test_tile_trade_row_exposes_numeric_stamps_fresh_id_and_flat_evidence():
+    raw = {"trade_id": "t1", "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "entry_ts": 1500.0, "exit_ts": 1600.0,
+           "fresh_epoch_id": "fse-1000", "evidence_status": "COMPLETE", "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY",
+           "close_ts": "2026-10-18T00:00:00Z", "exit_price": 100.0, "entry": 99.0, "dir": "LONG"}
+    row = _closed_tile_row_for(raw)
+    assert row["entry_ts"] == 1500.0 and row["exit_ts"] == 1600.0 and row["exit_ts"] >= row["entry_ts"]
+    assert row["fresh_epoch_id"] == "fse-1000" and row["fill"]["evidence_status"] == "COMPLETE"
+    none_row = _closed_tile_row_for(dict(raw, entry_ts=None, exit_ts=None))
+    assert none_row["entry_ts"] is None and none_row["exit_ts"] is None
+
+
+def _closed_tile_row_for(raw):
+    return monitor_tiles.tile_trade_row(raw, status="closed", short_names={}, epoch_id="e", forced_reasons=(),
+                                        parse_ts=paper_fill_parse_ts)
+
+
+def paper_fill_parse_ts(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

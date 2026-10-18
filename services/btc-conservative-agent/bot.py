@@ -7263,6 +7263,7 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         "fill_model_version": efs.get("fill_model_version"),
         "delay_s": efs.get("delay_s"),
         "delay_source": efs.get("delay_source"),
+        "evidence_status": efs.get("evidence_status"),  # the pricer's own COMPLETE/INCOMPLETE/NO_FILL on the closed row
         "ask_age_ms": efs.get("ask_age_ms"),
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
         "depth_snapshot_fill": efs.get("depth_snapshot_fill"),
