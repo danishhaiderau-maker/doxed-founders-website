@@ -28,7 +28,26 @@ def _write(path: Path, text: str, mtime: float) -> Path:
 
 # ------------------------------------------------------------------ pre-epoch archive
 
-def test_pre_epoch_ledgers_move_and_mixed_or_protected_files_stay(tmp_path):
+@pytest.fixture
+def retain(monkeypatch):
+    monkeypatch.setattr(rh, "RETAIN_ARCHIVES", True)
+
+
+def test_default_discards_pre_epoch_ledgers_and_creates_no_archive_dir(tmp_path):
+    assert rh.RETAIN_ARCHIVES is False
+    _write(tmp_path / "trades_3factor.csv", "a,b\n1,2\n", EPOCH_START - 3600)
+    _write(tmp_path / "trades_3factor.csv.validation.json", "{}", EPOCH_START - 3600)
+    _write(tmp_path / "post_exit_replay.jsonl", '{"ts": 1}\n', EPOCH_START + 60)
+    _write(tmp_path / "paper_lifecycle_v1.json", "{}", EPOCH_START - 3600)
+    doc = rh.archive_pre_epoch_ledgers(tmp_path, _manifest(), names=rh.PRE_EPOCH_LEDGERS + ("paper_lifecycle_v1.json",))
+    assert doc["archived"] == [] and doc["discarded"] == ["trades_3factor.csv"] and doc["deletion_invoked"] is True
+    assert not (tmp_path / "trades_3factor.csv").exists() and not (tmp_path / "trades_3factor.csv.validation.json").exists()
+    assert (tmp_path / "post_exit_replay.jsonl").exists() and (tmp_path / "paper_lifecycle_v1.json").exists()
+    assert not (tmp_path / rh.ARCHIVE_DIR).exists()
+    assert rh.pre_epoch_receipt_path(tmp_path, "ce-test-epoch").is_file()  # the idempotency receipt stays
+
+
+def test_pre_epoch_ledgers_move_and_mixed_or_protected_files_stay(tmp_path, retain):
     _write(tmp_path / "trades_3factor.csv", "a,b\n1,2\n", EPOCH_START - 3600)
     _write(tmp_path / "trades_3factor.csv.validation.json", "{}", EPOCH_START - 3600)
     _write(tmp_path / "post_exit_replay.jsonl", '{"ts": 1}\n', EPOCH_START + 60)  # written after start
@@ -89,7 +108,7 @@ def _compact(path, root, **kw):
         terminal_statuses=("APPLIED", "EPOCH_MISMATCH_PRESERVED"), runtime_root=root, **kw)
 
 
-def test_handoff_compaction_keeps_only_unresolved_pending_and_archives_everything(tmp_path):
+def test_handoff_compaction_keeps_only_unresolved_pending_and_archives_everything(tmp_path, retain):
     journal = tmp_path / "fill_evidence_handoffs.jsonl"
     raw = "".join(json.dumps(r) + "\n" for r in _handoff_rows()) + '{"torn'
     journal.write_text(raw, encoding="utf-8")
@@ -102,6 +121,17 @@ def test_handoff_compaction_keeps_only_unresolved_pending_and_archives_everythin
     assert oct(journal.stat().st_mode & 0o777) == oct(0o600)
 
 
+def test_default_handoff_compaction_keeps_only_pending_rows_and_archives_nothing(tmp_path):
+    journal = tmp_path / "fill_evidence_handoffs.jsonl"
+    raw = "".join(json.dumps(r) + "\n" for r in _handoff_rows())
+    journal.write_text(raw, encoding="utf-8")
+    out = _compact(journal, tmp_path, force=True)
+    assert out["status"] == "COMPACTED" and out["archived_to"] is None and out["archived_bytes"] == 0
+    assert out["discarded_bytes"] == len(raw) and out["deletion_invoked"] is True
+    assert [json.loads(x)["receipt_id"] for x in journal.read_text().splitlines()] == ["b" * 64]
+    assert not (tmp_path / rh.ARCHIVE_DIR).exists()
+
+
 def test_handoff_compaction_not_due_below_threshold(tmp_path):
     journal = tmp_path / "fill_evidence_handoffs.jsonl"
     journal.write_text(json.dumps(_handoff_rows()[0]) + "\n", encoding="utf-8")
@@ -112,7 +142,7 @@ def test_handoff_compaction_not_due_below_threshold(tmp_path):
 
 # ------------------------------------------------------------------ orphan tmp sweep
 
-def test_orphan_tmp_sweep_moves_dead_old_and_skips_live_young_or_locked(tmp_path):
+def test_orphan_tmp_sweep_moves_dead_old_and_skips_live_young_or_locked(tmp_path, retain):
     old = time.time() - 7200
     dead = _write(tmp_path / ".research_events_v22.provisional.json.999991.tmp", "x", old)
     live = _write(tmp_path / "paper_lifecycle_v1.json.4242.7.tmp", "y", old)
@@ -127,6 +157,20 @@ def test_orphan_tmp_sweep_moves_dead_old_and_skips_live_young_or_locked(tmp_path
     holder = threading.Thread(target=lock.acquire)
     holder.start(); holder.join()
     assert rh.sweep_orphan_tmp(tmp_path, writer_lock=lock)["status"] == "WRITER_LOCK_HELD"
+
+
+def test_default_orphan_sweep_deletes_and_writes_no_receipt(tmp_path):
+    old = time.time() - 7200
+    dead = _write(tmp_path / ".research_events_v22.provisional.json.999991.tmp", "x", old)
+    out = rh.sweep_orphan_tmp(tmp_path, pid_alive=lambda pid: False, current_pid=1)
+    assert out["moved_count"] == 1 and out["deletion_invoked"] is True and out["archive_dir"] is None
+    assert not dead.exists() and not (tmp_path / rh.ARCHIVE_DIR).exists()
+    assert not list((tmp_path / rh.RECEIPT_DIR).glob("orphan_tmp_sweep.*")) if (tmp_path / rh.RECEIPT_DIR).exists() else True
+
+
+def test_lane_pnl_epoch_archive_copy_is_gated_by_retain_flag():
+    src = BOT.read_text(encoding="utf-8")
+    assert "_rh_keep.RETAIN_ARCHIVES" in src
 
 
 # ------------------------------------------------------------------ precise per-trade bp
@@ -200,3 +244,20 @@ def test_canonical_epoch_prefers_data_epoch_and_binds_aliases(tmp_path):
     assert len(stored["bindings"]) == 1  # unchanged aliases are not re-appended
     ns["_DATA_EPOCH_MANIFEST"] = None
     assert ns["_canonical_epoch_public"]()["canonical_epoch_id"] == "epoch-abc"
+
+
+def test_nothing_to_archive_never_fails_reset_or_rotation(tmp_path):
+    # empty runtime root, no ledgers, no journal, no orphans: every step is a clean no-op in the default (no-archive) mode
+    assert rh.RETAIN_ARCHIVES is False
+    doc = rh.archive_pre_epoch_ledgers(tmp_path, _manifest())
+    assert doc["archived"] == [] and doc["discarded"] == [] and doc["deletion_invoked"] is False
+    assert rh.pre_epoch_receipt_path(tmp_path, "ce-test-epoch").is_file()
+    assert rh.archive_pre_epoch_ledgers(tmp_path, _manifest()) == doc  # idempotent
+    assert _compact(tmp_path / "missing.jsonl", tmp_path, force=True)["status"] == "ABSENT"
+    empty = tmp_path / "fill_evidence_handoffs.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert _compact(empty, tmp_path, force=True)["status"] in ("COMPACTED", "NOT_DUE")
+    assert empty.exists()
+    out = rh.sweep_orphan_tmp(tmp_path, pid_alive=lambda pid: False, current_pid=1)
+    assert out["status"] == "OK" and out["moved_count"] == 0 and out["deletion_invoked"] is False
+    assert not (tmp_path / rh.ARCHIVE_DIR).exists()
