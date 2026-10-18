@@ -13,13 +13,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.request
 
 MAX_PAGES = 200
 OPEN_STATUSES_EXCLUDED = {"CLOSED"}
 
 
-def walk_pages(fetch, path_base: str) -> list:
+def walk_pages(fetch, path_base: str, page_log: list | None = None) -> list:
     rows, cursor, seen = [], None, set()
     for _ in range(MAX_PAGES):
         path = f"{path_base}{'&cursor=' + cursor if cursor else ''}"
@@ -27,6 +28,10 @@ def walk_pages(fetch, path_base: str) -> list:
         if not isinstance(page, dict) or not isinstance(page.get("rows"), list):
             raise ValueError(f"BAD_PAGE {path}")
         rows.extend(page["rows"])
+        if page_log is not None:
+            n_open = sum(1 for r in page["rows"] if str(r.get("status")).upper() not in OPEN_STATUSES_EXCLUDED)
+            page_log.append({"feed": path_base.split("?")[0].rsplit("/", 1)[-1] + ("?open" if "status=open" in path_base else ""),
+                             "page": len(page_log) + 1, "rows": len(page["rows"]), "non_closed": n_open})
         cursor = page.get("next_cursor")
         if not cursor:
             if page.get("remaining_after_page") not in (0, None):
@@ -64,8 +69,10 @@ def evaluate(fetch) -> dict:
     except Exception as exc:  # noqa: BLE001
         reasons.append(f"STATUS_READ_FAILED:{type(exc).__name__}")
     try:
-        open_rows = walk_pages(fetch, "/api/monitor/tiles/trades?status=open&limit=500")
-        all_rows = walk_pages(fetch, "/api/monitor/tiles/trades?limit=500")
+        page_log: list = []
+        out["pages"] = page_log
+        open_rows = walk_pages(fetch, "/api/monitor/tiles/trades?status=open&limit=500", page_log)
+        all_rows = walk_pages(fetch, "/api/monitor/tiles/trades?limit=500", page_log)
         non_closed = [r for r in all_rows if str(r.get("status")).upper() not in OPEN_STATUSES_EXCLUDED]
         out.update(pages_open=len(open_rows), rows_total=len(all_rows), non_closed_all_pages=len(non_closed))
         if open_rows or non_closed:
@@ -98,9 +105,23 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     base = argv[argv.index("--base") + 1] if "--base" in argv else "https://doxed-btc-bot.fly.dev"
     token = os.environ.get("BOT_ADMIN_TOKEN", "")
-    result = evaluate(_http_fetch(base, token)) if token else {"ok": False, "reasons": ["NO_TOKEN"]}
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result["ok"] else 1
+    wait = int(argv[argv.index("--wait-seconds") + 1]) if "--wait-seconds" in argv else 0
+    deadline = time.monotonic() + wait
+    while True:
+        result = evaluate(_http_fetch(base, token)) if token else {"ok": False, "reasons": ["NO_TOKEN"]}
+        for pg in result.get("pages", []):
+            print(f"page feed={pg['feed']} n={pg['page']} rows={pg['rows']} non_closed={pg['non_closed']}", file=sys.stderr)
+        print(f"TOTAL non_closed_all_pages={result.get('non_closed_all_pages')} status_open={result.get('pages_open')} "
+              f"monitor_open={result.get('monitor_open_count')} ok={result['ok']}", file=sys.stderr)
+        print(json.dumps(result, sort_keys=True))
+        if result["ok"]:
+            return 0
+        # Only a plain "positions still open" verdict may be waited out; every other reason (read error, mismatch,
+        # live armed, ...) fails closed immediately.
+        if wait and all(r.startswith("OPEN_TRADES:") for r in result["reasons"]) and time.monotonic() < deadline:
+            time.sleep(30)
+            continue
+        return 1
 
 
 if __name__ == "__main__":

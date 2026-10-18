@@ -84,3 +84,17 @@ def test_missing_monitor_count_or_live_armed_or_paging_loop_fail_closed():
         return {"rows": [], "next_cursor": "same", "remaining_after_page": 1}
     out = gate.evaluate(looping)
     assert not out["ok"] and any("CURSOR_LOOP" in r for r in out["reasons"])
+
+
+def test_per_page_open_counts_are_reported():
+    rows = _rows(5, 0); rows[4]["status"] = "OPEN"
+    out = gate.evaluate(_fetcher(rows, page_size=2))
+    full = [p for p in out["pages"] if p["feed"] == "trades"]
+    assert len(full) == 3 and [p["non_closed"] for p in full] == [0, 0, 1]
+    assert out["non_closed_all_pages"] == 1 and out["ok"] is False
+
+
+def test_timeout_on_any_page_blocks():
+    for n in (1, 2, 3):
+        out = gate.evaluate(_fetcher(_rows(9, 0), page_size=3, fail_page=n))
+        assert out["ok"] is False and any(r.startswith("TRADES_READ_FAILED") for r in out["reasons"]), n
