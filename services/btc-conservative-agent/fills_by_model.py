@@ -8,8 +8,15 @@ from __future__ import annotations
 import paper_fill
 
 SCHEMA = "fills_by_model_v1"
-CATEGORIES = ("countable", "not_fresh_book10l", "pre_epoch", "no_book_exit", "tp1_unpriced_leg",
+CATEGORIES = ("countable", "not_fresh_book10l", "pre_epoch", "unstamped", "no_book_exit", "tp1_unpriced_leg",
               "fill_model_invalid", "other_fill_model", "legacy_pricing")
+
+
+_TS_KEYS = ("entry_ts", "exit_ts", "ts_epoch", "entry_time_ts")  # same keys paper_fill.row_before_epoch reads
+
+
+def _has_timestamp(row: dict) -> bool:
+    return any(paper_fill._f(row.get(k)) is not None for k in _TS_KEYS)
 
 
 def classify(row: dict) -> str:
@@ -27,7 +34,9 @@ def classify(row: dict) -> str:
     if model not in paper_fill.ALLOWED_FILL_MODELS:
         return "other_fill_model"
     if paper_fill.row_before_epoch(row):
-        return "pre_epoch"
+        # row_before_epoch fails closed for a row with no usable timestamp; that is "unstamped", not "pre-epoch"
+        # (the row may well be post-epoch). It is still never countable.
+        return "pre_epoch" if _has_timestamp(row) else "unstamped"
     return "countable" if paper_fill.row_fresh_strict(row) else "not_fresh_book10l"
 
 
