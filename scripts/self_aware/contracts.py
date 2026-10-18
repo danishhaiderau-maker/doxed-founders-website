@@ -327,14 +327,13 @@ def _warming(spec: dict[str, Any], ctx: dict[str, Any]) -> str | None:
 
 
 def _pending_samples(obj: Any, spec: dict[str, Any] | None) -> str | None:
-    """PENDING_SAMPLES (not a defect): the sample count is below the pre-registered minimum, so an empty table is expected."""
+    """PENDING_SAMPLES (not a defect, never a verdict/edge/ranking): below the PRE-REGISTERED minimum (self_aware.min_samples)."""
     if not spec:
         return None
-    n = _num(get_path(obj, spec["count_path"]))
-    if n is None or n >= float(spec["min"]):
-        return None
-    return (f"{spec['count_path']}={n:g} < pre-registered minimum sample {spec['min']:g}"
-            + (" (provisional minimum, HM to confirm)" if spec.get("provisional") else ""))
+    if spec.get("rule") == "combos_sealed_holdout":
+        from . import min_samples
+        return min_samples.combos_pending_text(obj)
+    return None
 
 
 def _v(kind: str, sev: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -366,6 +365,8 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
     res = {"id": spec["id"], "surface": spec["surface"], "title": spec["title"], "tier": spec["tier"],
            "page": spec.get("page"), "api": meta.get("url"), "http": meta.get("code"), "bytes": meta.get("bytes"),
            "ms": meta.get("ms"), "evaluated_at": iso(now), "depends_on": spec["depends_on"]}
+    if spec.get("prereg"):
+        res["prereg"] = spec["prereg"]  # full shas of the frozen pre-registration files this contract's minimums come from
     if meta.get("skip"):
         res.update(status=SKIP, violations=[_v("SKIPPED", SKIP, meta["skip"])], metrics={}, dims={}, tables=[])
         return res
