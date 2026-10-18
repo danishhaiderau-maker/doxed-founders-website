@@ -57488,6 +57488,15 @@ _OFFLINE_SIM_LOAD_STATS: dict = {}
 def _offline_sim_epoch_floor():
     """Fresh-epoch floor for shard rejection; None if it cannot be read (the loader then FAILS CLOSED: no rotated shard parsed)."""
     try:
+        # Authoritative floor: fresh_start_epoch.json epoch_ts (volume root, same source as analyzer_epoch_guard / G16).
+        # research_session.json fresh_collection_start_time is null on Fly after the full reset, so it is only a fallback.
+        try:
+            import analyzer_epoch_guard as _aeg
+            _fl = _aeg.fresh_floor_ts(os.getcwd())
+        except Exception:  # noqa: BLE001
+            _fl = None
+        if _fl:
+            return float(_fl)
         cutoff = _fresh_epoch_identity_from_session()[1]
         return float(cutoff) if cutoff else None
     except Exception as exc:  # noqa: BLE001
