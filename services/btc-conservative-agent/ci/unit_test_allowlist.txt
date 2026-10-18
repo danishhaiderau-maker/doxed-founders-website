@@ -586,3 +586,4 @@ test_epoch_purity_nested_ts.py
 test_trade_row_numeric_timestamps.py
 test_streams_health_log_files.py
 test_retire_obsolete_artifacts.py
+test_regime_coverage_trigger_nesting.py

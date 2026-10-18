@@ -99,7 +99,7 @@ def test_archive_receipt_post_needs_the_dedicated_r2_token_not_admin_or_monitor(
                        environ_base=REMOTE).status_code == 200
     # The archive-receipt check and its GET route are retired (18 Oct, no permanent archive).
     assert client.get("/api/monitor/archive", headers={"Authorization": f"Bearer {MONITOR}"},
-                      environ_base=REMOTE).status_code in (401, 404)
+                      environ_base=REMOTE).status_code == 410
 
 
 def test_disloc_shadow_30m_and_tape_archive(tmp_path):

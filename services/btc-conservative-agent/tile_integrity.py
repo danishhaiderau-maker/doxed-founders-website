@@ -266,7 +266,9 @@ def regime_coverage_check(tile_rows: Iterable[Mapping[str, Any]], since_ts: Opti
         if since_ts and (not ts or ts < since_ts):
             continue
         n += 1
-        if r.get("regime_at_signal") in (None, ""):
+        # tile_trade_row nests the stamp under row["trigger"]; older/flat rows carry it at the top level.
+        trig = r.get("trigger") if isinstance(r.get("trigger"), Mapping) else {}
+        if (r.get("regime_at_signal") in (None, "")) and (trig.get("regime_at_signal") in (None, "")):
             miss.append(str(r.get("trade_id")))
     return _verdict([], [f"REGIME_MISSING {len(miss)}/{n} e.g. {miss[:5]}"] if miss else [],
                     checked=n, missing=len(miss))

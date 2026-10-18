@@ -33855,7 +33855,7 @@ _MONITOR_TILE_PATHS = frozenset({
     # HM-MISSING-20261012
     "/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
     "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
-    "/api/monitor/exits/latency-guard", "/api/monitor/alerts",
+    "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
 })
@@ -48081,6 +48081,12 @@ def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tup
         if healthy and checked is not None and r2_objects is not None and checked > r2_objects:
             problems.append("restore_test.checked exceeds r2_objects")
     return problems, kind
+
+
+@app.route('/api/monitor/archive', methods=["GET"])
+def monitor_check_archive():
+    """Retired 18 Oct (no permanent archive): kept as a 410 stub so the frozen route manifest is unchanged."""
+    return jsonify({"retired": True, "check": "archive-receipt", "reason": "no permanent archive (Danish 18 Oct)"}), 410
 
 
 @app.route('/api/monitor/archive/receipt', methods=["POST"])  # literal: the route-manifest test parses decorators; == _ARCHIVE_RECEIPT_ROUTE
