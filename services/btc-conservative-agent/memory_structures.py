@@ -120,6 +120,7 @@ STALE_SEC = 600.0           # runtime_telemetry samples every ~60 s; older than 
 STALE_AMBER_SEC = 1800.0    # UNKNOWN that persists this long becomes AMBER
 PENDING_RED_FRAC = 0.60
 ANY_RED_FRAC = 0.80
+DEFAULT_LIMIT_KB = 8192 * 1024
 SERIES_KEEP = 400           # ~66 h at the 10-minute tracker interval
 
 
@@ -153,6 +154,16 @@ def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: f
             "limit_mb": limit_mb, "uptime_sec": None, "leak": False, "leak_structure": None, "reason": None,
             "prev_boot": prev_boot}
     age = None if sample_ts is None else now - float(sample_ts)
+    if rss_kb_now is not None and age is not None and age <= STALE_SEC:
+        # absolute ceilings apply even when the VM limit or boot time is unreadable (default: the 8 GB Fly VM)
+        _lim = limit_kb or DEFAULT_LIMIT_KB
+        if rss_kb_now >= ANY_RED_FRAC * _lim:
+            base.update(status="RED", rss_mb=rss_kb_now // 1024, reason="RSS_OVER_80PCT_OF_LIMIT", sample_age_sec=round(age))
+            return base
+        if boot_ts is not None and now - float(boot_ts) < WARMUP_SEC and rss_kb_now >= PENDING_RED_FRAC * _lim:
+            base.update(status="RED", rss_mb=rss_kb_now // 1024, reason="RSS_OVER_60PCT_DURING_WARMUP", sample_age_sec=round(age),
+                        uptime_sec=round(now - float(boot_ts)))
+            return base
     if sample_ts is None or rss_kb_now is None or age > STALE_SEC or not limit_kb or boot_ts is None:
         base["reason"] = "NO_SAMPLE" if sample_ts is None or rss_kb_now is None else (
             "STALE_SAMPLE" if age > STALE_SEC else "NO_LIMIT_OR_BOOT")

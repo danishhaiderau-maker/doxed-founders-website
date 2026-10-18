@@ -180,3 +180,51 @@ def test_pending_state_still_reports_rss_and_limit():
     out = ms.oom_eta(hist, limit_kb=8192 * 1024)
     assert out["status"] == "PENDING" and out["rss_mb"] == 600 and out["limit_mb"] == 8192
     assert ms.oom_eta([], 100)["rss_mb"] is None
+
+
+def _health(monkeypatch, tmp_path, nowt, rss_frac, sample_age=0.0, boot_age=100.0, have_sample=True):
+    import bot
+    monkeypatch.setenv("FLY_VM_MEMORY_MB", "8192")
+    monkeypatch.setattr(bot, "_data_sync_volume_root", lambda: tmp_path)
+    monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    (tmp_path / "memory_structures.json").write_text(json.dumps({"boot_ts": nowt - boot_age, "rss_series_full": [], "oom_eta": {}}))
+    latest = {"ts": nowt - sample_age, "boot_ts": nowt - boot_age, "memory": {"rss_bytes": int(rss_frac * 8192) * 1024 * 1024}} if have_sample else None
+    monkeypatch.setattr(bot, "_runtime_telemetry_status", lambda n=None: {"latest": latest})
+    return bot
+
+
+def test_unknown_is_rank0_for_30_min_then_amber_colours_the_verdict(tmp_path, monkeypatch):
+    import time as _t
+    nowt = _t.time()
+    bot = _health(monkeypatch, tmp_path, nowt, 0.1, have_sample=False)
+    bot._MEMORY_UNKNOWN_SINCE["t"] = None
+    assert bot._memory_oom_check(nowt)["status"] == "UNKNOWN"
+    assert bot._memory_oom_check(nowt + 1700)["status"] == "UNKNOWN"
+    assert bot._memory_oom_check(nowt + 1900)["status"] == "AMBER"
+    bot._MEMORY_UNKNOWN_SINCE["t"] = nowt - 2000   # UNKNOWN has now persisted > 30 min
+    out = bot.app.test_client().get("/api/system-health").get_json()
+    assert out["verdict"] in ("AMBER", "RED") and any(c["id"] == "fly.memory_oom_eta" for c in out["failing"])
+
+
+def test_pending_is_rank0_only_below_the_absolute_ceilings(tmp_path, monkeypatch):
+    import time as _t
+    nowt = _t.time()
+    bot = _health(monkeypatch, tmp_path, nowt, 0.2)
+    c = bot._memory_oom_check(nowt)
+    assert c["status"] == "PENDING"
+    out = bot.app.test_client().get("/api/system-health").get_json()
+    mem = [c for c in out["fly_self_checks"] if c["id"] == "fly.memory_oom_eta"][0]
+    assert mem["status"] == "PENDING"           # visible, but contributes nothing to the RED/AMBER counts
+    bot = _health(monkeypatch, tmp_path, nowt, 0.65)      # PENDING window, over 60%
+    assert bot._memory_oom_check(nowt)["status"] == "RED"
+    out = bot.app.test_client().get("/api/system-health").get_json()
+    assert out["verdict"] == "RED"
+    assert [c for c in out["fly_self_checks"] if c["id"] == "fly.memory_oom_eta"][0]["status"] == "RED"
+    bot = _health(monkeypatch, tmp_path, nowt, 0.85, boot_age=10 * 3600)   # any time, over 80%
+    assert bot._memory_oom_check(nowt)["status"] == "RED"
+
+
+def test_absolute_ceiling_applies_even_if_limit_unreadable():
+    boot, now = 1_000_000.0, 1_000_000.0 + 1800
+    r = ms.oom_status([], None, boot, now, now, int(0.7 * 8192 * 1024))
+    assert r["status"] == "RED" and r["reason"] == "RSS_OVER_60PCT_DURING_WARMUP"

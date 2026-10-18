@@ -46767,6 +46767,19 @@ def _persist_system_health_state() -> None:
         logger.warning("[SYSTEM HEALTH] alert state not persisted (next watcher push refills it)")
 
 
+_MEMORY_UNKNOWN_SINCE: dict = {"t": None}
+
+
+def _memory_unknown_persistence(status: str, now: float) -> str:
+    """UNKNOWN is rank 0 (no verdict colour) for the first 30 min only; persisting longer it becomes AMBER."""
+    if status != "UNKNOWN":
+        _MEMORY_UNKNOWN_SINCE["t"] = None
+        return status
+    if _MEMORY_UNKNOWN_SINCE["t"] is None:
+        _MEMORY_UNKNOWN_SINCE["t"] = now
+    return "AMBER" if now - _MEMORY_UNKNOWN_SINCE["t"] > 1800 else "UNKNOWN"
+
+
 def _memory_oom_check(now: float) -> dict:
     """fly.memory_oom_eta (HM 19 Oct): RSS comes from the same runtime_telemetry sample /api/status reports.
     UNKNOWN on a stale/missing sample (AMBER after 30 min); PENDING with no projection for 2 h after boot (RED at 60% of
@@ -46783,6 +46796,7 @@ def _memory_oom_check(now: float) -> dict:
         eta = _ms.oom_status(series, _ms.memory_limit_kb(), boot, now, rts, (int(rb) // 1024) if rb else None,
                              leak_structure=eta.get("leak_structure"), prev_boot=doc.get("prev_boot"))
         st = eta.get("status") or "UNKNOWN"
+        st = _memory_unknown_persistence(st, now)
         obs = (f"rss={eta.get('rss_mb')}MB growth={eta.get('rss_growth_mb_per_h')}MB/h limit={eta.get('limit_mb')}MB "
                f"oom_in={eta.get('hours_to_oom')}h uptime={eta.get('uptime_sec')}s reason={eta.get('reason')}"
                + (f" LEAK={eta.get('leak_structure')}" if eta.get("leak") else ""))
@@ -46790,7 +46804,8 @@ def _memory_oom_check(now: float) -> dict:
                 "threshold": "RSS from runtime_telemetry; PENDING 2h after boot (RED >=60% of limit); RED >=80% any time; "
                              "after warm-up >=6 samples, RED <6h / AMBER <24h to the limit; >50 MB/h at 3h uptime = leak"}
     except Exception as exc:  # noqa: BLE001 - never break the health route
-        return {"id": "fly.memory_oom_eta", "status": "UNKNOWN", "observed": f"no sample ({type(exc).__name__})",
+        return {"id": "fly.memory_oom_eta", "status": _memory_unknown_persistence("UNKNOWN", now),
+                "observed": f"no sample ({type(exc).__name__})",
                 "threshold": "tracker sample present"}
 
 
