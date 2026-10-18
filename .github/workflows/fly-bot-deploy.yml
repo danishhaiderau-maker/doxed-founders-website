@@ -2552,6 +2552,15 @@ jobs:
               h.write("live_lanes=" + ",".join(lanes) + "\n")
           PY
 
+      - name: Pre-deploy gate - live OFF, force_paper, no open trade on ANY /tiles/trades page (fails closed)
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        # Walks every page of status=open and the full feed; any read error/timeout, cursor loop or
+        # disagreement with the monitor open count blocks. Only a plain "positions open" verdict is waited out (<=20 min).
+        run: python scripts/deploy_gate_open_trades.py --wait-seconds 1200
+
       - name: Enter durable authenticated paper maintenance boundary
         id: paper_maintenance
         if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
