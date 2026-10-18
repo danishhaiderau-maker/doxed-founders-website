@@ -26,6 +26,7 @@ CADENCE_SEC = {
     "contracts_light": 300,
     "compat": 1800,
     "fees": 1800,
+    "bitfinex": 300,
 }
 
 THRESHOLDS = {
