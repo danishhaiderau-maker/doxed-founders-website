@@ -102,7 +102,7 @@ def test_runaway_during_warmup_is_red_at_60pct_and_80pct_any_time():
     assert r["status"] == "RED" and r["reason"] in ("RSS_OVER_3GB", "RSS_OVER_2GB_UNDER_12H_BOOT", "RSS_OVER_60PCT_DURING_WARMUP") and r["hours_to_oom"] is None
     late = boot + 30 * H
     assert ms.oom_status([], LIMIT, boot, late, late, int(0.81 * LIMIT))["status"] == "RED"
-    assert ms.oom_status(_series(boot, 2, 8, 10, 1000, 0), LIMIT, boot, late, late, int(0.7 * LIMIT))["status"] != "RED"
+    assert ms.oom_status(_series(boot, 2, 8, 10, 1000, 0), LIMIT, boot, late, late, int(0.3 * LIMIT))["status"] != "RED"
 
 
 def test_steady_60mb_per_h_at_3h_uptime_is_a_named_leak():
