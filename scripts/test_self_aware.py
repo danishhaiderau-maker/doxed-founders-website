@@ -854,6 +854,12 @@ def test_laptop_disk_free_thresholds_and_probe_failure(store):
     assert fx.laptop_disk("/")["free_gb"] > 0
 
 
+def test_laptop_smoke_passes_at_this_revision_and_catches_a_missing_cadence(monkeypatch):
+    import self_aware_smoke as smoke
+    from self_aware import config
+    assert smoke.smoke(cycle=False) == []
+    monkeypatch.delitem(config.CADENCE_SEC, "bitfinex")
+    assert "NO_CADENCE bitfinex" in smoke.smoke(cycle=False)
 def test_every_engine_job_has_a_cadence_so_the_loop_cannot_keyerror():
     # master 4bdac452 shipped a "bitfinex" job with no CADENCE_SEC entry: engine.loop() died with KeyError on start
     import inspect
