@@ -59,6 +59,9 @@ ROTATE_BYTES = int(os.getenv("STRATEGIST_STREAM_ROTATE_BYTES", str(32 * 1024 * 1
 KEEP_ROTATIONS = int(os.getenv("STRATEGIST_STREAM_KEEP_ROTATIONS", "6"))
 SILENT_RECONNECT_SEC = 30.0
 MAX_QUOTE_AGE_SEC = 2.0
+# A quiet book sends no delta; Bitfinex guarantees a heartbeat at least every 15 s on a live connection. While ANY message
+# (delta, trade, status, heartbeat) arrived on the book connection within this window the last book is still the book.
+BOOK_LIVENESS_SEC = 20.0
 
 
 def _log(msg: str) -> None:
@@ -177,6 +180,9 @@ class Collector:
             if msg.get("event") == "subscribed":
                 chans[msg.get("chanId")] = msg.get("channel")
             return
+        if isinstance(msg, list) and msg:
+            with self.lock:
+                self.book_alive_ts = now  # any frame on the connection proves it is alive (heartbeat included)
         if not isinstance(msg, list) or len(msg) < 2 or msg[1] == "hb":
             return
         kind = chans.get(msg[0])
@@ -216,7 +222,11 @@ class Collector:
     def close_second(self, sec: int) -> None:
         with self.lock:
             fresh = self.book.ts and sec + 1 - self.book.ts <= MAX_QUOTE_AGE_SEC
-            b, a = self.book.top() if fresh else ([], [])
+            # Quiet book, live connection: carry the unchanged book forward instead of writing no row (18 Oct 17:38:08-13:
+            # a 6 s gap forced an exit to FORCED_NO_BOOK although the book had not changed).
+            carried = bool(not fresh and self.book.ts and self.book.bids and self.book.asks
+                           and sec + 1 - getattr(self, "book_alive_ts", 0.0) <= BOOK_LIVENESS_SEC)
+            b, a = self.book.top() if (fresh or carried) else ([], [])
             trades, self.trades = self.trades, []
             deriv = self.deriv
             quotes = {v: (q[0], q[1]) if q and sec + 1 - q[2] <= MAX_QUOTE_AGE_SEC else None
@@ -224,7 +234,7 @@ class Collector:
         dv = self._dv.current()
         stamp = {"dv": dv} if dv else {}
         if b and a:
-            self.book_sink.write({"s": sec, "b": b, "a": a, **stamp})
+            self.book_sink.write({"s": sec, "b": b, "a": a, **({"carried": True} if carried else {}), **stamp})
         if trades:
             self.trade_sink.write({"s": sec, "tr": trades, **stamp})
         if deriv and sec + 1 - deriv[1] <= MAX_DERIV_AGE_SEC:

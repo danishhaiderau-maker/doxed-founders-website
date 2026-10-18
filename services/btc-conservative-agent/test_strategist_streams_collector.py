@@ -39,6 +39,36 @@ def test_stale_book_not_written(tmp_path):
     assert not (tmp_path / ssc.BOOK_FILE).exists()
 
 
+def _quiet_book_collector(tmp_path):
+    c = ssc.Collector(str(tmp_path))
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 1}, chans, 100.0)
+    c.on_bfx([1, [[100, 1, 0.5], [200, 1, -0.5]]], chans, 100.1)
+    return c, chans
+
+
+def test_quiet_book_on_a_live_connection_is_carried_forward_and_flagged(tmp_path):
+    c, chans = _quiet_book_collector(tmp_path)
+    c.on_bfx([1, "hb"], chans, 112.0)  # heartbeat: connection alive, book unchanged for 12 s
+    for sec in (105, 108, 111):  # book.ts is older than MAX_QUOTE_AGE_SEC for all of them
+        c.close_second(sec)
+    rows = _rows(tmp_path / ssc.BOOK_FILE)
+    assert [r["s"] for r in rows] == [105, 108, 111]
+    assert all(r["carried"] is True and r["b"] == [[100, 0.5]] and r["a"] == [[200, 0.5]] for r in rows)
+
+
+def test_dead_connection_is_not_carried_forward(tmp_path):
+    c, chans = _quiet_book_collector(tmp_path)
+    c.close_second(100 + int(ssc.BOOK_LIVENESS_SEC) + 5)  # nothing at all arrived for > liveness window
+    assert not (tmp_path / ssc.BOOK_FILE).exists()
+
+
+def test_fresh_second_is_not_flagged_carried(tmp_path):
+    c, chans = _quiet_book_collector(tmp_path)
+    c.close_second(100)
+    assert "carried" not in _rows(tmp_path / ssc.BOOK_FILE)[0]
+
+
 def test_rotation_is_bounded(tmp_path):
     s = ssc.Sink(str(tmp_path / "x.jsonl"), rotate_bytes=50, keep=2)
     for i in range(40):
