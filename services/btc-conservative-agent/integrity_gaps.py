@@ -95,6 +95,8 @@ def retained_by_design(rel: str, active_reset: str | None = None) -> bool:
     live_copy_*.json and quarantine/v3_completeness_markers/. A parent directory name or a basename elsewhere
     never exempts a path. The pinned keep_manifest (and its hash) is deliberately NOT changed."""
     rel = rel.replace("\\", "/").lstrip("/")
+    if active_reset and rel == _ACTIVE_RESET_FILE:
+        return True  # the pointer to the active reset; rewritten by the next reset (id-validated: only exists when active_reset is valid)
     if active_reset and rel == f"runtime/research_reset_receipts/{active_reset}/binding.json":
         return True  # the ACTIVE reset anchor only (bot.py reads it to resume/verify); an old reset dir is still flagged
     return any(r.fullmatch(rel) for r in _RETAINED_RE)
@@ -118,6 +120,7 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
     t0 = _t.monotonic()
     active_reset = active_reset_id(root)
     files, kept, kept_dirs, scanned, complete = {}, {}, [], 0, True
+    sizes: dict = {}
     for d, dirs, names in os.walk(root):
         rel_d = os.path.relpath(d, root).replace(os.sep, "/")
         rel_d = "" if rel_d == "." else rel_d
@@ -142,9 +145,73 @@ def scan_local_oldest(root: str, budget_s: float = 8.0, keep=None) -> dict:
                 except OSError:
                     continue
             (kept if (km.is_kept(rel, keep) or retained_by_design(rel, active_reset)) else files)[rel] = ts
+            try:
+                sizes[rel] = os.path.getsize(path)
+            except OSError:
+                pass
         if not complete:
             break
-    return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete}
+    return {"files": files, "kept": kept, "kept_dirs": sorted(kept_dirs), "scanned": scanned, "complete": complete,
+            "sizes": sizes}
+
+
+def prefix_of(rel: str, depth: int = 3) -> str:
+    """runtime/<dir>/<dir> style prefix used for by-prefix G16 counts (shallower for short paths)."""
+    parts = rel.replace("\\", "/").strip("/").split("/")
+    return "/".join(parts[:depth]) if len(parts) > depth else "/".join(parts[:-1]) or "."
+
+
+def by_prefix(files: dict, sizes: dict, epoch: float | None = None, slack: float = 60.0, depth: int = 3) -> dict:
+    """{prefix: {"files": n, "bytes": b}} over ALL files (or only those older than epoch). Uncapped: the true total."""
+    out: dict = {}
+    for rel, ts in files.items():
+        if epoch is not None and not ts < float(epoch) - slack:
+            continue
+        row = out.setdefault(prefix_of(rel, depth), {"files": 0, "bytes": 0})
+        row["files"] += 1
+        row["bytes"] += int(sizes.get(rel) or 0)
+    return dict(sorted(out.items(), key=lambda kv: kv[1]["files"], reverse=True))
+
+
+_V3_GROWTH_CACHE: dict = {"at": 0.0, "doc": None}
+
+
+def v3_growth(root: str, now: float | None = None, budget_s: float = 4.0, ttl: float = 1800.0) -> dict:
+    """Files-per-day growth check for runtime/v3 (+ disk used/free): per top-level v3 dir total files, bytes and files
+    written in the last 24 h. Cached for ttl seconds; a budget-limited walk marks the result incomplete."""
+    import shutil
+    import time as _t
+    now = _t.time() if now is None else now
+    if _V3_GROWTH_CACHE["doc"] is not None and now - _V3_GROWTH_CACHE["at"] < ttl:
+        return _V3_GROWTH_CACHE["doc"]
+    t0, complete, dirs = _t.monotonic(), True, {}
+    base = os.path.join(root, "runtime", "v3")
+    for d, _subs, names in os.walk(base):
+        top = os.path.relpath(d, base).split(os.sep)[0]
+        top = "." if top == "." else top
+        row = dirs.setdefault(top, {"files": 0, "bytes": 0, "files_24h": 0})
+        for n in names:
+            try:
+                st = os.stat(os.path.join(d, n))
+            except OSError:
+                continue
+            row["files"] += 1
+            row["bytes"] += st.st_size
+            if now - st.st_mtime < 86400:
+                row["files_24h"] += 1
+        if _t.monotonic() - t0 > budget_s:
+            complete = False
+            break
+    try:
+        du = shutil.disk_usage(root)
+        disk = {"used_bytes": du.used, "free_bytes": du.free, "total_bytes": du.total,
+                "used_pct": round(100.0 * du.used / du.total, 1) if du.total else None}
+    except OSError:
+        disk = None
+    doc = {"complete": complete, "dirs": dict(sorted(dirs.items(), key=lambda kv: kv[1]["files_24h"], reverse=True)),
+           "files_24h_total": sum(v["files_24h"] for v in dirs.values()), "disk": disk, "at": now}
+    _V3_GROWTH_CACHE.update(at=now, doc=doc)
+    return doc
 
 
 VERIFY_AFTER_SEC = 24 * 3600
@@ -335,7 +402,8 @@ def evaluate(f: dict) -> dict:
                       "r2_independent_kept": w.get("r2_independent_kept"),
                       "r2_independent_at": w.get("r2_independent_at"), "fly": fly_old, "box": box_old,
                       "fly_scanned": w.get("fly_scanned"), "fly_scan_complete": w.get("fly_scan_complete"),
-                      "fly_offenders": w.get("fly_offenders"), "retire_plan": w.get("retire_plan"), "archive_gaps": w.get("archive_gaps")},
+                      "fly_offenders": w.get("fly_offenders"), "retire_plan": w.get("retire_plan"), "by_prefix": w.get("by_prefix"),
+                      "kept_by_prefix": w.get("kept_by_prefix"), "v3_growth": w.get("v3_growth"), "archive_gaps": w.get("archive_gaps")},
                      "0 everywhere; receipt == independent R2 listing; daily archive, 0 gaps", st,
                      "Fly /app/data scan + fresh_start_wipe_receipt.json + box R2 listing; KEEP per pinned manifest"))
 

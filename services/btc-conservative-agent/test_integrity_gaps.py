@@ -213,3 +213,37 @@ def test_active_reset_id_fails_closed_on_missing_or_malformed_pointer(tmp_path):
     for bad in ('{"reset_id": "../../etc"}', '{"reset_id": "ABC"}', "not json", '{"reset_id": 5}'):
         (rr / "ACTIVE_RESET.json").write_text(bad)
         assert ig.active_reset_id(str(tmp_path)) is None
+
+
+def test_by_prefix_is_uncapped_and_counts_bytes_only_for_pre_epoch(tmp_path):
+    files = {f"runtime/v3/lifecycle_transfer_bundles/aa/t{i}/events.jsonl": 100.0 for i in range(50)}
+    files["runtime/v3/lifecycle_transfer_bundles/aa/new/events.jsonl"] = 5000.0
+    files["runtime/relay_outbox_retired.jsonl"] = 100.0
+    sizes = {k: 10 for k in files}
+    out = ig.by_prefix(files, sizes, epoch=1000.0)
+    assert out["runtime/v3/lifecycle_transfer_bundles"] == {"files": 50, "bytes": 500}  # 50 > the old cap of 20
+    assert out["runtime"]["files"] == 1  # a file directly under runtime/ is grouped under its directory
+    assert ig.by_prefix(files, sizes)["runtime/v3/lifecycle_transfer_bundles"]["files"] == 51
+
+
+def test_active_reset_pointer_is_exempt_only_when_an_active_id_is_valid():
+    p = "runtime/research_reset_receipts/ACTIVE_RESET.json"
+    assert ig.retained_by_design(p, "29f7a1efd216798db9309125")
+    assert not ig.retained_by_design(p, None)
+    assert not ig.retained_by_design("runtime/research_reset_receipts/_progress/x.json", "29f7a1efd216798db9309125")
+
+
+def test_v3_growth_counts_files_per_top_dir_and_reports_disk(tmp_path):
+    import os
+    import time
+    v3 = tmp_path / "runtime" / "v3"
+    for sub, n in (("receipts", 3), ("signal_snapshots_v1", 2)):
+        (v3 / sub).mkdir(parents=True)
+        for i in range(n):
+            (v3 / sub / f"{i}.json").write_text("x")
+    old = v3 / "receipts" / "0.json"
+    os.utime(old, (time.time() - 3 * 86400,) * 2)
+    ig._V3_GROWTH_CACHE.update(at=0.0, doc=None)
+    doc = ig.v3_growth(str(tmp_path), ttl=0)
+    assert doc["dirs"]["receipts"] == {"files": 3, "bytes": 3, "files_24h": 2}
+    assert doc["files_24h_total"] == 4 and doc["complete"] is True and doc["disk"]["free_bytes"] > 0

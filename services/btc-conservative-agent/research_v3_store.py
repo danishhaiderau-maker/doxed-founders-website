@@ -269,30 +269,59 @@ def _advisory_file_lock(path: Path):
     released by the operating system if a writer crashes.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        yield from _posix_lock_and_unlink(path)
+        return
     with path.open("a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
+        import msvcrt
 
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-                os.fsync(handle.fileno())
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
+
+def _posix_lock_and_unlink(path: Path):
+    """flock one lock file and unlink it on release so lock files never accumulate (40k were left under v3/.locks).
+
+    Unlink-while-holding is only safe with the inode re-check: a waiter that locked the now-unlinked inode sees that the
+    path no longer names its inode (or is gone) and retries on the fresh file, so two holders can never overlap.
+    """
+    import fcntl
+
+    while True:
+        handle = path.open("a+b")
+        try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                same = os.fstat(handle.fileno()).st_ino == os.stat(path).st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                break
+        except BaseException:
+            handle.close()
+            raise
+        handle.close()  # raced with the previous holder's unlink: retry on the new file
+    try:
+        yield
+    finally:
+        try:
+            os.unlink(path)  # still holding the lock: waiters re-check the inode after acquiring
+        except OSError:
+            pass
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class V3EvidenceStore:
