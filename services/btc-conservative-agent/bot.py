@@ -48889,6 +48889,10 @@ def _integrity_gap_facts(now: float) -> dict:
             out["by_prefix"] = _ig.by_prefix(scan["files"], scan.get("sizes") or {}, float(epoch))  # true total, uncapped
             out["kept_by_prefix"] = _ig.by_prefix(scan["kept"], scan.get("sizes") or {}, float(epoch))
             try:
+                out["sidecar"] = _ig.sidecar_size(root)
+            except Exception as exc:  # noqa: BLE001
+                out["sidecar"] = {"status": "PENDING", "error": type(exc).__name__}
+            try:
                 out["v3_growth"] = _ig.v3_growth(root)
             except Exception as exc:  # noqa: BLE001
                 out["v3_growth"] = {"error": type(exc).__name__}

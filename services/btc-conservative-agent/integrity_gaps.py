@@ -76,6 +76,22 @@ _RETAINED_DIR_RE = tuple(re.compile(x) for x in (
 
 
 _ACTIVE_RESET_FILE = "runtime/research_reset_receipts/ACTIVE_RESET.json"
+SIDECAR_NAME = "deletion.json.retained.jsonl"
+SIDECAR_AMBER_BYTES = 200 * 1024 * 1024
+
+
+def sidecar_size(root: str, active_reset: str | None = None) -> dict:
+    """Size of the active reset's deletion sidecar (read-only). AMBER above 200 MB; it never blocks a wipe and the next
+    reset clears it (a compact sidecar format is a later, non-urgent PR)."""
+    rid = active_reset or active_reset_id(root)
+    if not rid:
+        return {"active_reset": None, "bytes": None, "status": "PENDING"}
+    try:
+        size = os.stat(os.path.join(root, "runtime", "research_reset_receipts", rid, SIDECAR_NAME)).st_size
+    except OSError:
+        return {"active_reset": rid, "bytes": 0, "status": "GREEN"}
+    return {"active_reset": rid, "bytes": size, "mb": round(size / 1048576, 1), "amber_above_mb": 200,
+            "status": "AMBER" if size > SIDECAR_AMBER_BYTES else "GREEN"}
 
 
 def active_reset_id(root: str) -> str | None:
@@ -99,6 +115,8 @@ def retained_by_design(rel: str, active_reset: str | None = None) -> bool:
         return True  # the pointer to the active reset; rewritten by the next reset (id-validated: only exists when active_reset is valid)
     if active_reset and rel == f"runtime/research_reset_receipts/{active_reset}/binding.json":
         return True  # the ACTIVE reset anchor only (bot.py reads it to resume/verify); an old reset dir is still flagged
+    if active_reset and rel == f"runtime/research_reset_receipts/{active_reset}/{SIDECAR_NAME}":
+        return True  # HM 19 Oct: the deletion sidecar of the ACTIVE reset only (id-matched like binding.json); next reset clears it
     return any(r.fullmatch(rel) for r in _RETAINED_RE)
 
 
@@ -446,6 +464,11 @@ def evaluate(f: dict) -> dict:
     rows.append(_row("G20", "Vercel skips API-only builds (ignored = CANCELED), no ERROR builds",
                      {k: v.get(k) for k in ("ok", "canceled_recent", "errors_recent", "latest", "latest_ready")},
                      ">= 1 skipped, 0 errors, latest READY", st, "box platform receipt (Vercel API)"))
+
+    sc = w.get("sidecar")
+    rows.append(_row("G21", "deletion.json.retained.jsonl size (active reset sidecar; exempt from G16, never blocks a wipe)",
+                     sc, "<= 200 MB (AMBER above)", "PENDING" if not isinstance(sc, dict) else sc.get("status", "PENDING"),
+                     "Fly /app/data runtime/research_reset_receipts/<active>/"))
 
     worst = max((_RANK[r["status"]] for r in rows), default=0)
     status = {0: "GREEN", 1: "AMBER", 2: "RED"}[worst]
