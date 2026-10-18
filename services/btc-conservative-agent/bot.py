@@ -31544,6 +31544,16 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
     return out
 
 
+def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool:
+    """P3 (HM 19 Oct): an admin/deploy flatten close had no exit_trigger_ts, so exit latency could not be measured. Stamp the
+    close-request time as the trigger (source = the close reason). Never overwrites a trigger already recorded."""
+    if not isinstance(pos, dict) or pos.get("exit_trigger_ts") not in (None, "", 0):
+        return False
+    pos["exit_trigger_ts"] = float(now)
+    pos["exit_trigger_source"] = str(close_reason)
+    return True
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -46667,7 +46677,7 @@ def runtime_uptime_loop():
         now = time.time()
         if _mem_tracker is not None and _mem_tracker.due(now):
             try:
-                _mem_tracker.run(now)
+                _mem_tracker.run(now, sample=(_runtime_telemetry_status(now) or {}).get("latest"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[MEMORY] snapshot failed: %s", type(exc).__name__)
         try:
@@ -46767,22 +46777,57 @@ def _persist_system_health_state() -> None:
         logger.warning("[SYSTEM HEALTH] alert state not persisted (next watcher push refills it)")
 
 
+_MEMORY_UNKNOWN_SINCE: dict = {"t": None}
+
+
+def _memory_unknown_persistence(status: str, now: float) -> str:
+    """UNKNOWN is rank 0 (no verdict colour) for the first 30 min only; persisting longer it becomes AMBER."""
+    if status != "UNKNOWN":
+        _MEMORY_UNKNOWN_SINCE["t"] = None
+        return status
+    if _MEMORY_UNKNOWN_SINCE["t"] is None:
+        _MEMORY_UNKNOWN_SINCE["t"] = now
+    return "AMBER" if now - _MEMORY_UNKNOWN_SINCE["t"] > 1800 else "UNKNOWN"
+
+
 def _memory_oom_check(now: float) -> dict:
-    """fly.memory_oom_eta from the tracker's own samples (no new sampling here): RED when the container limit is <6 h away."""
+    """fly.memory_oom_eta (HM 19 Oct): RSS comes from the same runtime_telemetry sample /api/status reports.
+    UNKNOWN on a stale/missing sample (AMBER after 30 min); PENDING with no projection for 2 h after boot (RED at 60% of
+    the VM limit); RED at 80% any time; then a post-warm-up slope (>= 6 samples); >50 MB/h at 3 h uptime names the leak."""
     try:
         doc = json.loads((_data_sync_volume_root() / "memory_structures.json").read_text(encoding="utf-8"))
-        eta = doc.get("oom_eta") or {}
-        age = now - float((doc.get("latest") or {}).get("ts") or 0)
-        st = eta.get("status") or "PENDING"
-        if age > 3600:
-            st = "AMBER"
+        eta = dict(doc.get("oom_eta") or {})
+        # Re-judge staleness at read time: the tracker file is only rewritten every 10 minutes.
+        latest = (_runtime_telemetry_status(now) or {}).get("latest") or {}
+        rts, rb = latest.get("ts"), (latest.get("memory") or {}).get("rss_bytes")
+        import memory_structures as _ms
+        series = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or [])]
+        boot = doc.get("boot_ts") or latest.get("boot_ts")
+        eta = _ms.oom_status(series, _ms.memory_limit_kb(), boot, now, rts, (int(rb) // 1024) if rb else None,
+                             leak_structure=eta.get("leak_structure"), prev_boot=doc.get("prev_boot"))
+        st = eta.get("status") or "UNKNOWN"
+        st = _memory_unknown_persistence(st, now)
         obs = (f"rss={eta.get('rss_mb')}MB growth={eta.get('rss_growth_mb_per_h')}MB/h limit={eta.get('limit_mb')}MB "
-               f"oom_in={eta.get('hours_to_oom')}h sample_age={int(age)}s")
-        return {"id": "fly.memory_oom_eta", "status": {"PENDING": "AMBER"}.get(st, st), "observed": obs,
-                "threshold": "RSS trend reaches the container limit in >24h (AMBER <24h, RED <6h)"}
+               f"oom_in={eta.get('hours_to_oom')}h uptime={eta.get('uptime_sec')}s reason={eta.get('reason')}"
+               + (f" LEAK={eta.get('leak_structure')}" if eta.get("leak") else ""))
+        return {"id": "fly.memory_oom_eta", "status": st, "observed": obs, "detail": eta,
+                "threshold": "RSS from runtime_telemetry; PENDING 2h after boot (RED >=60% of limit); RED >=80% any time; "
+                             "after warm-up >=6 samples, RED <6h / AMBER <24h to the limit; >50 MB/h at 3h uptime = leak"}
     except Exception as exc:  # noqa: BLE001 - never break the health route
-        return {"id": "fly.memory_oom_eta", "status": "AMBER", "observed": f"no sample ({type(exc).__name__})",
+        return {"id": "fly.memory_oom_eta", "status": _memory_unknown_persistence("UNKNOWN", now),
+                "observed": f"no sample ({type(exc).__name__})",
                 "threshold": "tracker sample present"}
+
+
+def _offline_sim_epoch_check() -> dict:
+    """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
+    shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
+    st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
+    if st.get("floor_unreadable"):
+        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
+                "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if st else "AMBER",
+            "observed": f"stats={st}" if st else "no loader call yet", "threshold": "fresh-epoch floor readable"}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -46840,6 +46885,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             "threshold": "<12m, <3 failures",
         })
     checks.append(_memory_oom_check(now))
+    checks.append(_offline_sim_epoch_check())
     return checks
 
 
@@ -46929,7 +46975,7 @@ def system_health_view():
     out["counts"] = counts
     if bad:
         out["failing"] = list(out.get("failing") or []) + bad
-        rank = {"GREEN": 0, "SKIP": 0, "AMBER": 1, "RED": 2}
+        rank = {"GREEN": 0, "SKIP": 0, "PENDING": 0, "UNKNOWN": 0, "AMBER": 1, "RED": 2}
         worst = max(bad, key=lambda c: rank[c["status"]])["status"]
         if rank[worst] > rank.get(out.get("verdict"), 0):
             out["verdict"] = worst
@@ -48889,6 +48935,10 @@ def _integrity_gap_facts(now: float) -> dict:
             out["by_prefix"] = _ig.by_prefix(scan["files"], scan.get("sizes") or {}, float(epoch))  # true total, uncapped
             out["kept_by_prefix"] = _ig.by_prefix(scan["kept"], scan.get("sizes") or {}, float(epoch))
             try:
+                out["sidecar"] = _ig.sidecar_size(root)
+            except Exception as exc:  # noqa: BLE001
+                out["sidecar"] = {"status": "PENDING", "error": type(exc).__name__}
+            try:
                 out["v3_growth"] = _ig.v3_growth(root)
             except Exception as exc:  # noqa: BLE001
                 out["v3_growth"] = {"error": type(exc).__name__}
@@ -50056,6 +50106,8 @@ def api_close_showcase_position():
     # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
     close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
     close_origin = _forced_close_origin(close_reason)
+    with trade_lock:
+        _stamp_admin_close_trigger(matches[0], close_reason, time.time())
     close_position(matches[0], close_reason)
     with state_lock:
         still_open = any(
@@ -56779,8 +56831,13 @@ def analytics_loop():
     try:
         while not shutdown_event.is_set():
             try:
+                _loop_t0 = time.time()
                 compute_analytics()
                 run_offline_research_sim()
+                try:
+                    _mem_tracker.record_loop("analytics_loop", _loop_t0, time.time())   # start/end for stair attribution
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
                 # Change 5: periodic catch-up for APPROVE signals whose replay
                 # rotated into a .N shard before the active-file pass saw them.
                 # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
@@ -57424,15 +57481,40 @@ def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIO
     return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
 
 
+_OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-tick catch-up scans all shards itself
+_OFFLINE_SIM_LOAD_STATS: dict = {}
+
+
+def _offline_sim_epoch_floor():
+    """Fresh-epoch floor for shard rejection; None if it cannot be read (the loader then FAILS CLOSED: no rotated shard parsed)."""
+    try:
+        cutoff = _fresh_epoch_identity_from_session()[1]
+        return float(cutoff) if cutoff else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[RESEARCH_SIM] fresh floor unavailable, ALL rotated shards skipped (fail closed): {exc}")
+        return None
+
+
 def _load_offline_sim_jsonl_revisions(
     active_path,
-    max_rotations=_OFFLINE_SIM_MAX_ROTATIONS,
+    max_rotations=None,
     target_trade_ids=None,
 ):
+    if max_rotations is None:
+        max_rotations = globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128)
+    floor_fn = globals().get("_offline_sim_epoch_floor")
+    _floor = floor_fn() if callable(floor_fn) else None
+    _stats = globals().get("_OFFLINE_SIM_LOAD_STATS")
+    if isinstance(_stats, dict):
+        _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
+        _stats["floor_checked_ts"] = time.time()
     return _pure_load_offline_sim_jsonl_revisions(
         active_path,
         max_rotations=max_rotations,
         target_trade_ids=target_trade_ids,
+        min_ts=_floor,
+        stats=globals().get("_OFFLINE_SIM_LOAD_STATS"),
+        floor_unreadable=_floor is None and callable(floor_fn),   # fail closed: skip ALL rotated shards
         on_read_error=lambda path, exc: logger.debug(
             f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
         ),
@@ -57451,7 +57533,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
     source_market_index = market_loader(
         globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
         target_trade_ids=set(snapshots),
-        max_rotations=globals().get("_OFFLINE_SIM_MAX_ROTATIONS", 128),
+        max_rotations=globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128),
     ) if callable(market_loader) else {}
     replays = _load_offline_sim_jsonl_revisions(
         signal_replay_file,
