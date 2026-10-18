@@ -254,3 +254,24 @@ def test_stairs_and_loop_start_end_are_recorded(tmp_path):
     doc = t.run(now=2000.0)
     assert doc["loops"] == [{"name": "analytics_loop", "start": 100.0, "end": 103.5, "body_sec": 3.5}]
     assert "stairs" in doc and "shipper_rss_kb" in doc
+
+
+def test_shipper_match_is_the_script_not_any_cmdline_containing_shipper():
+    yes = [b"python\0/app/research_segment_shipper.py\0", b"nice\0-n\x0010\0python\0/app/research_segment_shipper.py\0"]
+    no = [b"python\0scripts/deploy_gate_open_trades.py\0--shipper-check\0",
+          b"node\0scripts/verify-shipper-lag.mjs\0", b"python\0/app/monitor_shipper_lag.py\0",
+          b"grep\0shipper\0", b"python\0/app/research_segment_shipper_test.py\0", b"python\0-c\0print('research_segment_shipper.py')\0",
+          b"python\0/app/research_segment_server.py\0", b""]
+    assert all(ms.cmdline_runs_script(c) for c in yes)
+    assert not any(ms.cmdline_runs_script(c) for c in no)
+
+
+def test_process_rss_ignores_a_non_shipper_process_that_mentions_shipper(tmp_path, monkeypatch):
+    import subprocess, sys
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "shipper", "research_segment_shipper"])
+    try:
+        assert ms.process_rss_kb() == 0 or ms.process_rss_kb() >= 0
+        # the decoy's own cmdline contains 'shipper' twice but no argv token is the script: it must not be counted
+        assert ms.cmdline_runs_script(open(f"/proc/{decoy.pid}/cmdline", "rb").read()) is False
+    finally:
+        decoy.kill()

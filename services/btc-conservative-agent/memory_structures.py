@@ -139,22 +139,33 @@ def detect_stairs(series, min_mb: float = STAIR_MB) -> list:
     return out[-STAIRS_KEEP:]
 
 
-def process_rss_kb(pattern: str = "shipper") -> int:
-    """Summed RSS (kB) of OTHER processes whose cmdline contains ``pattern`` (the shipper); 0 if none/unreadable."""
+SHIPPER_SCRIPT = "research_segment_shipper.py"
+
+
+def cmdline_runs_script(cmdline: bytes | str, script: str = SHIPPER_SCRIPT) -> bool:
+    """True only when an argv token IS the script (basename match): `python /app/research_segment_shipper.py`. A process that merely
+    mentions 'shipper' in a path or an argument (CI/gate scripts, the monitor, `grep shipper`) does not match."""
+    raw = cmdline.encode() if isinstance(cmdline, str) else cmdline
+    toks = [t.decode("utf-8", "replace") for t in raw.split(b"\0") if t]
+    return any(os.path.basename(t) == script for t in toks)
+
+
+def process_rss_kb(script: str = SHIPPER_SCRIPT) -> int:
+    """Summed RSS (kB) of OTHER processes that run ``script`` (the research segment shipper); 0 if none/unreadable."""
     total, me = 0, os.getpid()
     try:
         for ent in os.listdir("/proc"):
             if not ent.isdigit() or int(ent) == me:
                 continue
             try:
-                cmd = Path(f"/proc/{ent}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
-                if pattern in cmd:
+                if cmdline_runs_script(Path(f"/proc/{ent}/cmdline").read_bytes(), script):
                     total += int(Path(f"/proc/{ent}/statm").read_text().split()[1]) * 4
             except (OSError, ValueError):
                 continue
     except OSError:
         return 0
     return total
+
 SERIES_KEEP = 400           # ~66 h at the 10-minute tracker interval
 
 
@@ -363,7 +374,7 @@ class Tracker:
             leak_name = "container:" + growth_c[0]["name"]
         elif growth_t and growth_t[0]["growth"] > 0:
             leak_name = "type:" + growth_t[0]["type"]
-        shipper_kb = process_rss_kb("shipper")
+        shipper_kb = process_rss_kb()
         doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
                "oom_eta": oom_status(self.series, memory_limit_kb(), self.boot_ts, now, sample_ts, rss_now,
                                      leak_structure=leak_name, prev_boot=self.prev_boot, extra_rss_kb=shipper_kb),
