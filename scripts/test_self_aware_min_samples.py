@@ -211,7 +211,8 @@ def test_study_minimums_days_early_flags_only_and_static_states(monkeypatch):
             r["pnl"].update(bp=net, bp_basis="net_pnl_bp"); out.append(r)
         return out
     ids = (ms.hypothesis_of(base),)
-    assert ms.study_state("H1", rows(300))["state"] == "PENDING_SAMPLES"          # no tile registered for H1: nothing counts
+    r0 = ms.study_state("H1", rows(300))                                          # H1 is an offline replay: no live tile counts
+    assert r0["state"] == "PENDING_SAMPLES" and "offline replay, no live tile by design" in r0["why"]
     r = ms.study_state("H1", rows(300), ids)                                      # 300 trades spread over 75 h: >= 3 days
     assert r["state"] == "COUNTABLE" and r["min_days"] == 3 and r["edge_claim"] is False
     assert ms.study_state("H3", rows(300), ids)["min_days"] == 5 and ms.study_state("H3", rows(300), ids)["state"] == "PENDING_SAMPLES"

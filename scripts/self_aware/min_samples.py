@@ -57,10 +57,10 @@ def _num(v: Any) -> float | None:
     return f if f == f and abs(f) != float("inf") else None
 
 
-# Explicit lane -> hypothesis table (fail closed: an unknown lane is INVALID). The pre-registered H1-H8 studies are signal
-# studies with no live tile registered for them yet, so today every live tile row maps to its own tile label ("TILE:..."),
-# which keys the one-per-entry / non-overlap rule. Strategist must register lane -> H-id entries here before any H1-H8
-# study can count a tile row.
+# Explicit lane -> hypothesis table (fail closed: an unknown lane is INVALID). H1-H8 are OFFLINE replays on the fresh-epoch
+# streams, no live tile by design (Strategist 19 Oct): tiles 1-5 map to no H-id, so each live tile row maps to its own tile
+# label ("TILE:..."), which only keys the one-per-entry / non-overlap rule. If an H is ever promoted to a tile, Strategist
+# registers the lane -> H-id entry here first.
 HYPOTHESIS_BY_LANE: dict[str, str] = {
     "FAMILY_GS01_XV_PREMIUM_ATR_TP": "TILE:GS-01",
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "TILE:GS-06",
@@ -195,7 +195,7 @@ def study_state(study: str, rows: Iterable[dict] | None = None, hypothesis_ids: 
     mn, md = STUDIES[study]
     if not hypothesis_ids:
         return {**base, "state": "PENDING_SAMPLES", "n_valid": 0, "min_n": mn, "min_days": md,
-                "why": "no live tile lane is registered for this study in HYPOTHESIS_BY_LANE: nothing can count"}
+                "why": "offline replay, no live tile by design: H1-H8 are replays on the fresh-epoch streams and no live tile maps to an H-id"}
     vt = valid_trades([r for r in (rows or []) if isinstance(r, dict) and hypothesis_of(r) in hypothesis_ids])
     days = len({_day(t["exit_ts"]) for t in vt["trades"]})
     nets = [x for x in (net_bp_of(t) for t in vt["trades"]) if x is not None]
