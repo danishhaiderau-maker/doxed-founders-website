@@ -50,8 +50,29 @@ def classify(row: dict) -> str:
     return "countable" if paper_fill.row_fresh_strict(row) else "not_fresh_book10l"
 
 
+def uses_carried_book(row: dict) -> bool:
+    """True when any entry/exit pricing snapshot of the row came from a collector-carried book second."""
+    if not isinstance(row, dict):
+        return False
+    for key in ("entry_provenance", "exit_provenance", "entry_fill_sim", "exit_fill_sim"):
+        d = row.get(key)
+        if not isinstance(d, dict):
+            continue
+        for sk in ("depth_snapshot_fill", "depth_snapshot_signal"):
+            snap = d.get(sk)
+            if isinstance(snap, dict) and snap.get("carried"):
+                return True
+    for sk in ("exit_depth_snapshot_fill",):
+        snap = row.get(sk)
+        if isinstance(snap, dict) and snap.get("carried"):
+            return True
+    return False
+
+
 def summarise(rows, lanes, *, refused: dict | None = None, now: float | None = None) -> dict:
-    tiles = {lane: {"by_category": {c: 0 for c in CATEGORIES}, "by_fill_model": {}} for lane in lanes}
+    tiles = {lane: {"by_category": {c: 0 for c in CATEGORIES}, "by_fill_model": {},
+                         "carried_book_rows": 0, "carried_by_fill_model": {},
+                         "repriced_exit_rows": 0, "repriced_exit_countable": 0} for lane in lanes}
     for row in rows or ():
         lane = str((row or {}).get("research_lane") or "").upper()
         if lane not in tiles:
@@ -61,9 +82,17 @@ def summarise(rows, lanes, *, refused: dict | None = None, now: float | None = N
         t["by_category"][cat] += 1
         model = str(row.get("fill_model") or "NONE")
         t["by_fill_model"][model] = t["by_fill_model"].get(model, 0) + 1
+        if row.get("exit_pricing_basis") == "REPRICED_CURRENT_TIME":
+            t["repriced_exit_rows"] += 1
+            t["repriced_exit_countable"] += 1 if cat == "countable" else 0
+        if uses_carried_book(row):
+            t["carried_book_rows"] += 1
+            t["carried_by_fill_model"][model] = t["carried_by_fill_model"].get(model, 0) + 1
     for t in tiles.values():
         t["countable"] = t["by_category"]["countable"]
         t["rows"] = sum(t["by_category"].values())
+        t["repriced_exit_share"] = round(t["repriced_exit_rows"] / t["rows"], 4) if t["rows"] else None
+        t["carried_book_share"] = round(t["carried_book_rows"] / t["rows"], 4) if t["rows"] else None
     return {"schema": SCHEMA, "generated_at": now, "fresh_epoch_ts": paper_fill.FRESH_EPOCH_TS,
             "rule": "countable = paper_fill.row_fresh_strict (same rule as monitors and analyzers)",
             "non_paper_fills_refused": dict(refused or {}), "tiles": tiles}

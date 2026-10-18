@@ -29,6 +29,8 @@ CADENCE_SEC = {
 }
 
 THRESHOLDS = {
+    "decision_rows_stuck_amber_sec": 30 * 60,
+    "decision_rows_stuck_red_sec": 60 * 60,
     "mirror_ai_lag_amber_sec": 30 * 60,
     "mirror_ai_lag_red_sec": 3 * 3600,
     "tape_lag_amber_sec": 30 * 60,

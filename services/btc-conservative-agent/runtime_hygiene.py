@@ -47,6 +47,10 @@ RECEIPT_DIR = "data_epoch_boundary"  # kept by the wipe's chain-state guard
 PRE_EPOCH_RECEIPT_SCHEMA = "pre_epoch_ledger_archive_v1"
 HANDOFF_RECEIPT_SCHEMA = "handoff_journal_compaction_v1"
 ORPHAN_RECEIPT_SCHEMA = "orphan_tmp_sweep_v1"
+# HM / Danish 19 Oct: no permanent archive and no accumulating old data (a reset clears everything). With this False
+# (the default) pre-epoch ledgers, compacted handoff journals and orphan temp files are DISCARDED, not moved into
+# research_archive. Set True only to restore the old keep-everything behaviour.
+RETAIN_ARCHIVES = False
 
 # Plain append-only, epoch-scoped, bot-owned ledgers (no hash chain, no seal
 # receipt, not read back for restart recovery). Keep this list explicit.
@@ -144,6 +148,23 @@ def archive_pre_epoch_ledgers(runtime_root: str | os.PathLike, manifest: dict | 
             # Rows after the epoch start may be current: never split a file here.
             files[name] = {**entry, "status": "MIXED_LEFT_IN_PLACE"}
             continue
+        if not RETAIN_ARCHIVES:
+            try:
+                os.remove(src)  # whole pre-epoch ledger (no write since the epoch start): discarded, not archived
+            except OSError as exc:
+                files[name] = {**entry, "status": "DISCARD_FAILED", "error": str(exc)[:200]}
+                continue
+            gone = []
+            for suffix in LEDGER_SIDECAR_SUFFIXES:
+                side = root / (name + suffix)
+                if side.is_file():
+                    try:
+                        os.remove(side)
+                        gone.append(side.name)
+                    except OSError:
+                        pass
+            files[name] = {**entry, "status": "DISCARDED", "sidecars": gone}
+            continue
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             target = _unique_target(target_dir, name)
@@ -164,11 +185,13 @@ def archive_pre_epoch_ledgers(runtime_root: str | os.PathLike, manifest: dict | 
         files[name] = {**entry, "status": "ARCHIVED", "archived_to": str(target.relative_to(root)),
                        "sidecars": sidecars}
     archived = [n for n, f in files.items() if f["status"] == "ARCHIVED"]
+    discarded = [n for n, f in files.items() if f["status"] == "DISCARDED"]
     doc = {
         "schema": PRE_EPOCH_RECEIPT_SCHEMA, "epoch_id": epoch_id,
         "epoch_started_at_ts": started, "decided_at_utc": utc_stamp(now),
-        "archive_dir": str(target_dir.relative_to(root)), "deletion_invoked": False,
+        "archive_dir": str(target_dir.relative_to(root)) if archived else None, "deletion_invoked": bool(discarded),
         "archived": archived, "archived_bytes": sum(files[n]["bytes"] for n in archived),
+        "discarded": discarded, "discarded_bytes": sum(files[n]["bytes"] for n in discarded),
         "mixed_left_in_place": [n for n, f in files.items() if f["status"] == "MIXED_LEFT_IN_PLACE"],
         "files": files,
     }
@@ -223,9 +246,11 @@ def compact_handoff_journal(path: str | os.PathLike, *, lock: Any, pending_schem
                 elif row.get("schema") == result_schema and str(row.get("status") or "") in terminal_statuses:
                     terminal.add(rid)
         keep = [line for rid, line in pending.items() if rid not in terminal]
-        archive_dir = root / ARCHIVE_DIR / HANDOFF_SUBDIR
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        target = _unique_target(archive_dir, f"{src.name}.{utc_stamp(now)}")
+        target = None
+        if RETAIN_ARCHIVES:
+            archive_dir = root / ARCHIVE_DIR / HANDOFF_SUBDIR
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            target = _unique_target(archive_dir, f"{src.name}.{utc_stamp(now)}")
         tmp = src.with_name(f".{src.name}.compact-{os.getpid()}")
         with open(tmp, "wb") as out:
             try:
@@ -235,13 +260,15 @@ def compact_handoff_journal(path: str | os.PathLike, *, lock: Any, pending_schem
             out.writelines(keep)
             out.flush()
             os.fsync(out.fileno())
-        os.rename(src, target)
-        os.replace(tmp, src)
+        if target is not None:
+            os.rename(src, target)
+        os.replace(tmp, src)  # atomic: the live journal now holds only the unresolved pending rows
     doc = {
         "schema": HANDOFF_RECEIPT_SCHEMA, "journal": src.name, "compacted_at_ts": now,
-        "compacted_at_utc": utc_stamp(now), "archived_to": str(target.relative_to(root)),
-        "archived_bytes": size, "rows_read": rows, "pending_ids": len(pending),
-        "terminal_ids": len(terminal), "unresolved_kept": len(keep), "deletion_invoked": False,
+        "compacted_at_utc": utc_stamp(now),
+        "archived_to": str(target.relative_to(root)) if target is not None else None,
+        "archived_bytes": size if target is not None else 0, "discarded_bytes": 0 if target is not None else size, "rows_read": rows, "pending_ids": len(pending),
+        "terminal_ids": len(terminal), "unresolved_kept": len(keep), "deletion_invoked": target is None,
     }
     _write_json_atomic(state_path, doc)
     return {"status": "COMPACTED", **doc}
@@ -313,18 +340,21 @@ def sweep_orphan_tmp(runtime_root: str | os.PathLike, *, writer_lock: Any = None
                 skipped.append({"name": name, "reason": reason})
                 continue
             try:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                os.rename(src, _unique_target(target_dir, name))
+                if RETAIN_ARCHIVES:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    os.rename(src, _unique_target(target_dir, name))
+                else:
+                    os.remove(src)
             except OSError as exc:
                 skipped.append({"name": name, "reason": f"MOVE_FAILED:{exc}"[:200]})
                 continue
             moved.append({"name": name, "bytes": st.st_size})
     doc = {
         "schema": ORPHAN_RECEIPT_SCHEMA, "status": "OK", "swept_at_utc": utc_stamp(now),
-        "archive_dir": str(target_dir.relative_to(root)) if moved else None,
+        "archive_dir": str(target_dir.relative_to(root)) if moved and RETAIN_ARCHIVES else None,
         "moved": moved, "moved_count": len(moved), "moved_bytes": sum(m["bytes"] for m in moved), "skipped": skipped,
-        "deletion_invoked": False,
+        "deletion_invoked": bool(moved) and not RETAIN_ARCHIVES,
     }
-    if moved:
+    if moved and RETAIN_ARCHIVES:  # no receipt file when discarding: a receipt would itself be old data to keep
         _write_json_atomic(root / RECEIPT_DIR / f"orphan_tmp_sweep.{utc_stamp(now)}.json", doc)
     return doc

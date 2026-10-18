@@ -68,7 +68,10 @@ def _safe(fn, t):
 def _snap(book):
     if not book:
         return None
-    return {"s": book.get("s"), "b": list(book.get("b") or [])[:10], "a": list(book.get("a") or [])[:10]}
+    out = {"s": book.get("s"), "b": list(book.get("b") or [])[:10], "a": list(book.get("a") or [])[:10]}
+    if book.get("carried"):
+        out["carried"] = True  # the collector carried an unchanged book into this second (visible in fill provenance)
+    return out
 
 
 def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
@@ -174,7 +177,8 @@ class BookTail:
                 sec = int(r["s"])
             except (ValueError, KeyError, TypeError):
                 continue
-            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or []}
+            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
+                               **({"carried": True} if r.get("carried") else {})}
         if self._rows:
             for sec in sorted(self._rows)[:-self.keep]:
                 del self._rows[sec]
@@ -186,6 +190,17 @@ class BookTail:
                 self._refresh()
             ok = [sec for sec in self._rows if sec + 1 <= t]
             return dict(self._rows[max(ok)]) if ok else None
+
+
+    def missing_seconds(self, start: float, end: float) -> int:
+        """Whole seconds in [floor(start), floor(end)] with no book row (read-only; refreshes the tail first)."""
+        a, b = int(start), int(end)
+        if b < a:
+            return 0
+        with self._lock:
+            if self._max_s is None or self._max_s < b:
+                self._refresh()
+            return sum(1 for sec in range(a, b + 1) if sec not in self._rows)
 
 
 BOOK_FILE = "bfx_book_10l_1s.jsonl"
@@ -200,6 +215,15 @@ def book10l_at(t: float):
         import os
         _BOOK_TAIL = BookTail(os.path.join(os.getcwd(), BOOK_FILE))
     return _BOOK_TAIL.at(t)
+
+
+def book10l_missing_seconds(start: float, end: float):
+    """Seconds without a book row in [start, end] (None if the book source is unavailable). Diagnostic only."""
+    try:
+        book10l_at(float(end))  # makes sure the tail exists
+        return _BOOK_TAIL.missing_seconds(float(start), float(end)) if _BOOK_TAIL is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 DELAYS = None  # set by the bot: DelaySampler of measured live delays (empty while live is OFF)

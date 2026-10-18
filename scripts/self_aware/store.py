@@ -169,6 +169,14 @@ class Store:
         self._init_meta()
 
     # ------------------------------------------------------------------ meta
+    def _view_exists(self, name: str) -> bool:
+        try:
+            with self._write_lock:
+                return bool(self.con.execute(
+                    "SELECT count(*) FROM duckdb_views() WHERE view_name = ? AND NOT internal", [name]).fetchone()[0])
+        except duckdb.Error:
+            return False
+
     def _init_meta(self) -> None:
         with self._write_lock:
             self.con.execute("""
@@ -202,7 +210,7 @@ class Store:
             newest = max((Path(f).stat().st_mtime for f in files), default=None)
             status = "OK" if files else "MISSING"
             signature = "|".join(files)
-            if files and self._view_sigs.get(src.name) == signature:
+            if files and self._view_sigs.get(src.name) == signature and self._view_exists(src.name):
                 with self._write_lock:
                     self.con.execute("UPDATE raw_catalog SET bytes = ?, newest_mtime = ?, refreshed_at = ? WHERE view_name = ?",
                                      [size, _iso(newest) if newest else None, now, src.name])
@@ -219,6 +227,9 @@ class Store:
                         status = f"ERROR: {str(exc)[:200]}"
                 else:
                     self.con.execute(f"DROP VIEW IF EXISTS {src.name}")
+                    # The view is gone: forget its signature, otherwise the same path reappearing after an epoch reset
+                    # matches the cached signature and the view is never recreated (18 Oct: decision_rows 0 for 11.6 h).
+                    self._view_sigs.pop(src.name, None)
                 self.con.execute("INSERT OR REPLACE INTO raw_catalog VALUES (?,?,?,?,?,?,?,?,?)",
                                  [src.name, src.kind, (Path(root) / src.pattern).as_posix(), len(files), size,
                                   _iso(newest) if newest else None, status, src.description, now])

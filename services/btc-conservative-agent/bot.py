@@ -4245,7 +4245,8 @@ def _segregate_lane_pnl_ledger_for_epoch() -> dict:
     if same_epoch:
         result["status"] = "CURRENT"
     else:
-        if os.path.isfile(LANE_PNL_LEDGER_FILE):
+        import runtime_hygiene as _rh_keep
+        if os.path.isfile(LANE_PNL_LEDGER_FILE) and _rh_keep.RETAIN_ARCHIVES:  # no permanent archive (19 Oct)
             target_dir = (
                 Path(LANE_PNL_LEDGER_FILE).resolve().parent
                 / "research_archive" / "pre_epoch" / str(tag.get("epoch_id") or "unknown_epoch")
@@ -7177,6 +7178,23 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
+def _paper_exit_missing_book_seconds(trigger_ts: float):
+    """Seconds with no book row between the exit trigger and now (diagnostic: why an exit could not be priced)."""
+    try:
+        import paper_fill as _pf
+        return _pf.book10l_missing_seconds(float(trigger_ts), time.time())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _paper_exit_attempt_trigger(t0: float, delay_s, attempt: int, now: float) -> float:
+    """Trigger time handed to the pricer: t0 on the first attempt; on a retry the time whose fill time (trigger +
+    delay) is NOW, never earlier than t0."""
+    if attempt <= 0:
+        return float(t0)
+    return max(float(t0), float(now) - float(delay_s))
+
+
 def _paper_lane_exit(pos: dict, exit_reason: str):
     """Exit priced by paper_fill at exit_trigger_ts + delay (bounded wait). Forced closes, exits older than
     EXIT_FORCE_CAP_S and inline closes use the no-wait path; an exit still unpriced after EXIT_FORCE_AFTER_S is
@@ -7194,22 +7212,34 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         return out, {**marks, "_paper_exit_trigger_ts": None}
     delay_s, delay_source = _disloc_delay(lane, "exit")
     res = None
+    attempt = 0
+    price_trigger = t0
     while True:
         wait = t0 + float(delay_s) - time.time()
         if wait > 0:
             time.sleep(min(wait, 3.0))
-        res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
+        # HM 18 Oct: the first attempt prices at the model time t0+delay (unchanged). A retry used to re-read that SAME
+        # time, so a missing book second made every poll fail until FORCED_NO_BOOK (gs1-087476bba3ff, 10.479 s). Each
+        # retry now prices at the CURRENT time (latest book row; paper_fill still rejects a row older than 2 s) and
+        # the lag against the model time is recorded on the row as exit_repriced_lag_s.
+        price_trigger = _paper_exit_attempt_trigger(t0, delay_s, attempt, time.time())
+        res = _tf.exit_fill(direction, qty, price_trigger, delay_s, delay_source)
+        attempt += 1
         if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
             break
         if time.time() - t0 >= _tf.EXIT_FORCE_AFTER_S:
             res = None
             break
         time.sleep(0.5)
+    missing = _paper_exit_missing_book_seconds(t0)
     if res is None:
-        return None, {"exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
+        return None, {"missing_book_seconds": missing, "exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
                       "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0,
                       "fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"}
-    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None}
+    lag = round(max(0.0, price_trigger - t0), 3)
+    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
+             "exit_repriced_lag_s": lag if lag > 0 else None,
+             "exit_pricing_basis": "REPRICED_CURRENT_TIME" if lag > 0 else "MODEL_TIME"}
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -31741,6 +31771,9 @@ def close_position(pos: dict, exit_reason: str):
             **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now(),
                                                       settlements=pos.get("funding_settlements")),
             "exit_status": pos.get("exit_status"),
+            "missing_book_seconds": pos.get("missing_book_seconds"),
+            "exit_repriced_lag_s": pos.get("exit_repriced_lag_s"),
+            "exit_pricing_basis": pos.get("exit_pricing_basis"),
             "exit_fallback": pos.get("exit_fallback"),
             "fill_valid": False if pos.get("fill_valid") is False else True,
             "non_fill_category": pos.get("non_fill_category"),
@@ -47649,6 +47682,17 @@ def _exit_latency_per_tile(closed: list, since: float, live_follow: dict | None 
     return tiles
 
 
+def _exit_latency_book_gaps(hours: float) -> dict:
+    """Book-file gap statistics (missing_book_seconds target < 0.2 %) over the window and since this boot."""
+    try:
+        import book_gap_stats as _bgs
+        path = os.path.join(str(_data_sync_runtime_root()), "bfx_book_10l_1s.jsonl")
+        boot = float(process_boot_time or 0) or None
+        return {"window": _bgs.book_gap_stats(path, hours=hours), "since_boot": _bgs.book_gap_stats(path, hours=24.0, since=boot)}
+    except Exception as exc:  # noqa: BLE001 - read-only view
+        return {"status": "ERROR", "error": type(exc).__name__}
+
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -47679,7 +47723,7 @@ def monitor_exit_latency():
         return {"schema": "exit_latency_view_v1", "live_follow": live_follow, **_monitor_tiles_common(now),
                 "scope": {"window_hours": hours, "rows": nrows, "lanes": list(ACTIVE_TILE_ORDER)},
                 "window_hours": hours, "slo": slo, "per_tile": tiles,
-                "unfilled_orders": unfilled,
+                "unfilled_orders": unfilled, "book_gaps": _exit_latency_book_gaps(hours),
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
 
     return _monitor_tiles_guard(build, 1_500_000)
@@ -48847,6 +48891,12 @@ def _integrity_gap_facts(now: float) -> dict:
                            "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
                            "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
                            "box": list(_km.BOX), "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
+            try:  # read-only retire dry run (HM: no ssh reads): count + plan sha + files the guarded delete would remove
+                import retire_obsolete_artifacts as _ro
+                _paths = _ro.plan(root)
+                out["retire_plan"] = {"count": len(_paths), "plan_sha256": _ro.plan_sha256(_paths), "files": _paths[:40]}
+            except Exception as exc:  # noqa: BLE001
+                out["retire_plan"] = {"error": type(exc).__name__}
             out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
                         "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
