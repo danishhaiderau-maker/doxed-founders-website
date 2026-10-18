@@ -7186,6 +7186,14 @@ def _paper_exit_missing_book_seconds(trigger_ts: float):
         return None
 
 
+def _paper_exit_attempt_trigger(t0: float, delay_s, attempt: int, now: float) -> float:
+    """Trigger time handed to the pricer: t0 on the first attempt; on a retry the time whose fill time (trigger +
+    delay) is NOW, never earlier than t0."""
+    if attempt <= 0:
+        return float(t0)
+    return max(float(t0), float(now) - float(delay_s))
+
+
 def _paper_lane_exit(pos: dict, exit_reason: str):
     """Exit priced by paper_fill at exit_trigger_ts + delay (bounded wait). Forced closes, exits older than
     EXIT_FORCE_CAP_S and inline closes use the no-wait path; an exit still unpriced after EXIT_FORCE_AFTER_S is
@@ -7203,11 +7211,19 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         return out, {**marks, "_paper_exit_trigger_ts": None}
     delay_s, delay_source = _disloc_delay(lane, "exit")
     res = None
+    attempt = 0
+    price_trigger = t0
     while True:
         wait = t0 + float(delay_s) - time.time()
         if wait > 0:
             time.sleep(min(wait, 3.0))
-        res = _tf.exit_fill(direction, qty, t0, delay_s, delay_source)
+        # HM 18 Oct: the first attempt prices at the model time t0+delay (unchanged). A retry used to re-read that SAME
+        # time, so a missing book second made every poll fail until FORCED_NO_BOOK (gs1-087476bba3ff, 10.479 s). Each
+        # retry now prices at the CURRENT time (latest book row; paper_fill still rejects a row older than 2 s) and
+        # the lag against the model time is recorded on the row as exit_repriced_lag_s.
+        price_trigger = _paper_exit_attempt_trigger(t0, delay_s, attempt, time.time())
+        res = _tf.exit_fill(direction, qty, price_trigger, delay_s, delay_source)
+        attempt += 1
         if res.get("status") == "FILLED" and float(res.get("price") or 0) > 0:
             break
         if time.time() - t0 >= _tf.EXIT_FORCE_AFTER_S:
@@ -7219,7 +7235,9 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         return None, {"missing_book_seconds": missing, "exit_status": "FORCED_NO_BOOK", "fresh_data_excluded": True,
                       "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK", "_paper_exit_trigger_ts": t0,
                       "fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"}
-    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing}
+    lag = round(max(0.0, price_trigger - t0), 3)
+    marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
+             "exit_repriced_lag_s": lag if lag > 0 else None}
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -31752,6 +31770,7 @@ def close_position(pos: dict, exit_reason: str):
                                                       settlements=pos.get("funding_settlements")),
             "exit_status": pos.get("exit_status"),
             "missing_book_seconds": pos.get("missing_book_seconds"),
+            "exit_repriced_lag_s": pos.get("exit_repriced_lag_s"),
             "exit_fallback": pos.get("exit_fallback"),
             "fill_valid": False if pos.get("fill_valid") is False else True,
             "non_fill_category": pos.get("non_fill_category"),

@@ -163,6 +163,7 @@ class Collector:
         self._ws_factory = ws_factory or self._default_ws
         self._http_get = http_get or self._default_get
         self.reconnects = {"bitfinex": 0, "lighter": 0}
+        self.book_alive_ts = 0.0  # last frame on the subscribed book channel (delta/snapshot/heartbeat)
 
     @staticmethod
     def _default_ws(url):
@@ -180,9 +181,11 @@ class Collector:
             if msg.get("event") == "subscribed":
                 chans[msg.get("chanId")] = msg.get("channel")
             return
-        if isinstance(msg, list) and msg:
+        if isinstance(msg, list) and msg and chans.get(msg[0]) == "book":
             with self.lock:
-                self.book_alive_ts = now  # any frame on the connection proves it is alive (heartbeat included)
+                # Bitfinex heartbeats are per channel: only a frame (delta, snapshot or "hb") on the subscribed BOOK
+                # channel proves the book is still being delivered. Frames on trades/status do not.
+                self.book_alive_ts = now
         if not isinstance(msg, list) or len(msg) < 2 or msg[1] == "hb":
             return
         kind = chans.get(msg[0])
@@ -203,6 +206,11 @@ class Collector:
                     t = msg[2]
                     self.trades.append([int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))])
                 # "tu" duplicates "te"; the initial snapshot is history, not new prints.
+
+    def on_bfx_disconnect(self) -> None:
+        """The book channel is gone with the socket: nothing may be carried forward until a new book frame arrives."""
+        with self.lock:
+            self.book_alive_ts = 0.0
 
     def on_lighter(self, msg: dict, now: float) -> None:
         tk = msg.get("ticker") if isinstance(msg, dict) else None
@@ -225,7 +233,8 @@ class Collector:
             # Quiet book, live connection: carry the unchanged book forward instead of writing no row (18 Oct 17:38:08-13:
             # a 6 s gap forced an exit to FORCED_NO_BOOK although the book had not changed).
             carried = bool(not fresh and self.book.ts and self.book.bids and self.book.asks
-                           and sec + 1 - getattr(self, "book_alive_ts", 0.0) <= BOOK_LIVENESS_SEC)
+                           and max(self.book.bids) < min(self.book.asks)  # a crossed book is never carried
+                           and self.book_alive_ts > 0.0 and sec + 1 - self.book_alive_ts <= BOOK_LIVENESS_SEC)
             b, a = self.book.top() if (fresh or carried) else ([], [])
             trades, self.trades = self.trades, []
             deriv = self.deriv
@@ -276,6 +285,8 @@ class Collector:
                         handler(msg, self.clock())
             except Exception as exc:  # noqa: BLE001
                 self.reconnects[name] += 1
+                if name == "bitfinex":
+                    self.on_bfx_disconnect()
                 _log(f"{name} reconnect ({type(exc).__name__})")
             finally:
                 try:

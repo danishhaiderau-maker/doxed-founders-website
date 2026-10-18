@@ -68,7 +68,10 @@ def _safe(fn, t):
 def _snap(book):
     if not book:
         return None
-    return {"s": book.get("s"), "b": list(book.get("b") or [])[:10], "a": list(book.get("a") or [])[:10]}
+    out = {"s": book.get("s"), "b": list(book.get("b") or [])[:10], "a": list(book.get("a") or [])[:10]}
+    if book.get("carried"):
+        out["carried"] = True  # the collector carried an unchanged book into this second (visible in fill provenance)
+    return out
 
 
 def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
@@ -174,7 +177,8 @@ class BookTail:
                 sec = int(r["s"])
             except (ValueError, KeyError, TypeError):
                 continue
-            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or []}
+            self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
+                               **({"carried": True} if r.get("carried") else {})}
         if self._rows:
             for sec in sorted(self._rows)[:-self.keep]:
                 del self._rows[sec]
