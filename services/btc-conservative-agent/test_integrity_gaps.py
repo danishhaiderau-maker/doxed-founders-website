@@ -184,3 +184,32 @@ def test_pinned_pre_epoch_archive_is_retained_but_not_other_ids():
     assert not ig.retained_by_design(b + "ce-20261004-v31-clean.pre_epoch_archive.json")
     assert not ig.retained_by_design(b + "sub/ce-20261004-v31-freeze21b.pre_epoch_archive.json")
     assert not ig.retained_by_design("ce-20261004-v31-freeze21b.pre_epoch_archive.json")
+
+
+def test_only_the_active_reset_anchor_is_retained_not_old_reset_dirs(tmp_path):
+    import json as _j
+    active, old = "29f7a1efd216798db9309125", "aaaaaaaaaaaaaaaaaaaaaaaa"
+    rr = tmp_path / "runtime" / "research_reset_receipts"
+    for rid in (active, old):
+        (rr / rid).mkdir(parents=True)
+        (rr / rid / "binding.json").write_text("{}")
+        (rr / rid / "operation.json").write_text("{}")
+    (rr / "ACTIVE_RESET.json").write_text(_j.dumps({"reset_id": active, "binding_sha256": "x"}))
+    assert ig.active_reset_id(str(tmp_path)) == active
+    assert ig.retained_by_design(f"runtime/research_reset_receipts/{active}/binding.json", active)
+    assert not ig.retained_by_design(f"runtime/research_reset_receipts/{old}/binding.json", active)
+    assert not ig.retained_by_design(f"runtime/research_reset_receipts/{active}/binding.json", None)
+    assert not ig.retained_by_design(f"runtime/research_reset_receipts/{active}/operation.json", active)
+    assert not ig.retained_by_design(f"x/runtime/research_reset_receipts/{active}/binding.json", active)
+    res = ig.scan_local_oldest(str(tmp_path), keep=())
+    assert f"runtime/research_reset_receipts/{active}/binding.json" in res["kept"]
+    assert f"runtime/research_reset_receipts/{old}/binding.json" in res["files"]
+
+
+def test_active_reset_id_fails_closed_on_missing_or_malformed_pointer(tmp_path):
+    assert ig.active_reset_id(str(tmp_path)) is None
+    rr = tmp_path / "runtime" / "research_reset_receipts"
+    rr.mkdir(parents=True)
+    for bad in ('{"reset_id": "../../etc"}', '{"reset_id": "ABC"}', "not json", '{"reset_id": 5}'):
+        (rr / "ACTIVE_RESET.json").write_text(bad)
+        assert ig.active_reset_id(str(tmp_path)) is None

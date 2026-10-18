@@ -47644,6 +47644,17 @@ def _exit_latency_per_tile(closed: list, since: float, live_follow: dict | None 
     return tiles
 
 
+def _exit_latency_book_gaps(hours: float) -> dict:
+    """Book-file gap statistics (missing_book_seconds target < 0.2 %) over the window and since this boot."""
+    try:
+        import book_gap_stats as _bgs
+        path = os.path.join(str(_data_sync_runtime_root()), "bfx_book_10l_1s.jsonl")
+        boot = float(process_boot_time or 0) or None
+        return {"window": _bgs.book_gap_stats(path, hours=hours), "since_boot": _bgs.book_gap_stats(path, hours=24.0, since=boot)}
+    except Exception as exc:  # noqa: BLE001 - read-only view
+        return {"status": "ERROR", "error": type(exc).__name__}
+
+
 @app.route('/api/monitor/exit-latency', methods=["GET"])
 def monitor_exit_latency():
     """Exit-latency SLO + per-trade stage stamps (UTC, ms). ?hours=24 (max 168), ?rows=50 (max 500)."""
@@ -47674,7 +47685,7 @@ def monitor_exit_latency():
         return {"schema": "exit_latency_view_v1", "live_follow": live_follow, **_monitor_tiles_common(now),
                 "scope": {"window_hours": hours, "rows": nrows, "lanes": list(ACTIVE_TILE_ORDER)},
                 "window_hours": hours, "slo": slo, "per_tile": tiles,
-                "unfilled_orders": unfilled,
+                "unfilled_orders": unfilled, "book_gaps": _exit_latency_book_gaps(hours),
                 "protective_exit_worker": protective_exit_snapshot(), "rows": recent[-nrows:] if nrows else []}
 
     return _monitor_tiles_guard(build, 1_500_000)
@@ -48842,6 +48853,12 @@ def _integrity_gap_facts(now: float) -> dict:
                            "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),
                            "fly_kept_dirs": scan["kept_dirs"], "neon_tables": list(_km.NEON_TABLES),
                            "box": list(_km.BOX), "r2_keep_prefixes": list(_km.R2_KEEP_PREFIXES)}
+            try:  # read-only retire dry run (HM: no ssh reads): count + plan sha + files the guarded delete would remove
+                import retire_obsolete_artifacts as _ro
+                _paths = _ro.plan(root)
+                out["retire_plan"] = {"count": len(_paths), "plan_sha256": _ro.plan_sha256(_paths), "files": _paths[:40]}
+            except Exception as exc:  # noqa: BLE001
+                out["retire_plan"] = {"error": type(exc).__name__}
             out.update({"fly_files_older_than_epoch": len(offenders), "fly_offenders": offenders[:20],
                         "fly_scanned": scan["scanned"], "fly_scan_complete": scan["complete"]})
         receipt = os.getenv("FRESH_START_WIPE_RECEIPT", "fresh_start_wipe_receipt.json")
