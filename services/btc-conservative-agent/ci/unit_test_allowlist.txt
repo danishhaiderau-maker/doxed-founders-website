@@ -592,4 +592,5 @@ test_policy_identity_canonical_ttl.py
 test_book_missing_seconds.py
 test_fills_by_model_identity_quarantine.py
 test_memory_structures.py
+test_tiles_trades_identity_quarantined.py
 test_book_gap_stats.py

@@ -58,7 +58,7 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             status = str(p.get("exit_status") or "")
             if status in FORCED_STATUSES or paper_fill.is_excluded(p.get("fresh_data_excluded")):
                 forced[status or "EXCLUDED"] += 1
-            if p.get("fresh_eligible") is True:
+            if p.get("fresh_eligible") is True and not r.get("identity_quarantined"):
                 fresh += 1
             else:
                 not_fresh += 1

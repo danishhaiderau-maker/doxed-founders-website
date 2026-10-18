@@ -30,7 +30,8 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
         net = sum(_num((r.get("pnl") or {}).get("net_usd")) or 0.0 for r in closed)
         per_tile.append({
             "lane": lane, "tile": short_names.get(lane), "fly_n": len(closed),
-            "fly_fresh_n": sum(1 for r in closed if (r.get("pricing") or {}).get("fresh_eligible") is True),
+            "fly_fresh_n": sum(1 for r in closed if (r.get("pricing") or {}).get("fresh_eligible") is True
+                                and not r.get("identity_quarantined")),
             "fly_net_pnl_usd": round(net, 6), "mirror_n": None, "analyzer_n": None,
             "missing_ids": None, "pnl_diff_usd": None, "ok": None,
         })
