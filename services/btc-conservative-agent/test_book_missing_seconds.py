@@ -111,3 +111,26 @@ def test_no_retry_can_price_later_than_the_force_window():
     import bot
     # every retry runs before time - t0 >= EXIT_FORCE_AFTER_S, so lag = now - delay - t0 < EXIT_FORCE_AFTER_S
     assert bot._paper_exit_attempt_trigger(0.0, 1.5, 5, tile_fill.EXIT_FORCE_AFTER_S - 0.01) - 0.0 < tile_fill.EXIT_FORCE_AFTER_S
+
+
+def _run_exit_with_book_back_at(monkeypatch, back_at):
+    import bot
+    import tile_fill
+    clock = {"t": 3000.0}
+    monkeypatch.setattr(bot.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(bot.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(bot, "_disloc_delay", lambda lane, leg: (1.5, "lane_p50"))
+    monkeypatch.setattr(bot, "_paper_exit_missing_book_seconds", lambda t0: 0)
+    monkeypatch.setattr(bot, "_paper_exit_sim", lambda res, pos, d, q, marks: {"price": res["price"]})
+    monkeypatch.setattr(tile_fill, "exit_fill",
+                        lambda d, q, trig, delay, src: {"status": "FILLED", "price": 1.0}
+                        if trig + delay >= back_at else {"status": "REJECT_NO_BOOK", "price": None})
+    return bot._paper_lane_exit({"research_lane": "GS1", "dir": "LONG", "qty": 1.0, "exit_trigger_ts": 3000.0}, "PATH_END_60M")
+
+
+def test_ten_second_retry_cap_boundary(monkeypatch):
+    out, marks = _run_exit_with_book_back_at(monkeypatch, 3000.0 + 8.0)  # book back inside the window
+    assert out == {"price": 1.0} and marks["exit_status"] == "PAPER_FILL" and 0 < marks["exit_repriced_lag_s"] < 10.0
+    out, marks = _run_exit_with_book_back_at(monkeypatch, 3000.0 + 10.5)  # only after the 10 s cap
+    assert out is None and marks["exit_status"] == "FORCED_NO_BOOK" and marks["non_fill_category"] == "NO_BOOK_EXIT"
+    assert marks.get("exit_pricing_basis") is None and marks["fill_valid"] is False
