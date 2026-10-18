@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import math
 import os
 from datetime import datetime
@@ -1010,6 +1011,9 @@ def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, eviden
     return _attach_dual_execution_truth(enriched)
 
 
+_TRADE_ID_RE = re.compile(r'"trade_id"\s*:\s*"([^"\\]{1,255})"')
+
+
 def _offline_sim_jsonl_paths(active_path, max_rotations=128):
     """Return bounded immutable generations oldest-to-newest, then active.
 
@@ -1041,8 +1045,16 @@ def _load_offline_sim_jsonl_revisions(
     max_rotations=128,
     target_trade_ids=None,
     on_read_error=None,
+    min_ts=None,
+    stats=None,
+    floor_unreadable=False,
 ):
     """Load newest valid immutable row per canonical trade ID.
+
+    ``min_ts`` (the fresh-epoch floor): a ROTATED shard whose mtime (= its newest row) is older than the floor holds only
+    pre-epoch rows and is skipped without being opened, so its lines are never json.loads-ed. Rotated shards also pre-filter
+    each line on a ``"trade_id": "<target>"`` substring before json.loads. ``stats`` (optional dict) receives
+    shards_seen / shards_skipped_pre_epoch / lines_skipped_prefilter / lines_parsed.
 
     Files and lines are consumed in append chronology, so a later immutable
     revision deterministically replaces an older revision for the same ID.
@@ -1063,17 +1075,49 @@ def _load_offline_sim_jsonl_revisions(
     # set exists, preventing 400MB+ replay archives from accumulating in RAM.
     if not targets:
         paths = [str(active_path)]
+    st = stats if stats is not None else {}
+    for k in ("shards_seen", "shards_skipped_pre_epoch", "shards_skipped_floor_unreadable", "lines_skipped_prefilter",
+              "lines_rejected_pre_epoch", "lines_parsed"):
+        st.setdefault(k, 0)
     for path in paths:
         if not os.path.isfile(path):
             continue
+        is_rotated = os.path.abspath(path) != active_resolved
+        if is_rotated:
+            st["shards_seen"] += 1
+            if floor_unreadable:
+                st["shards_skipped_floor_unreadable"] += 1
+                continue
+            if min_ts is not None:
+                try:
+                    if os.path.getmtime(path) < float(min_ts):
+                        st["shards_skipped_pre_epoch"] += 1
+                        continue
+                except OSError:
+                    continue
         try:
             with open(path, "r", encoding="utf-8-sig") as handle:
                 for line in handle:
-                    if len(line.encode("utf-8", errors="ignore")) > 8 * 1024 * 1024:
+                    if len(line) > 8 * 1024 * 1024:
                         continue
+                    if is_rotated:
+                        m = _TRADE_ID_RE.search(line)
+                        if m is None or m.group(1).strip() not in targets:
+                            st["lines_skipped_prefilter"] += 1
+                            continue
+                    if is_rotated and min_ts is not None:
+                        try:
+                            import data_epoch as _de
+                            _ts = _de.line_ts(line.encode("utf-8", errors="ignore"))
+                        except Exception:  # noqa: BLE001
+                            _ts = None
+                        if _ts is not None and _ts < float(min_ts):
+                            st["lines_rejected_pre_epoch"] += 1
+                            continue
                     stripped = line.strip()
                     if not stripped:
                         continue
+                    st["lines_parsed"] += 1
                     try:
                         row = json.loads(stripped)
                     except (TypeError, ValueError):

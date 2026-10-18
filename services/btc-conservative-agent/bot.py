@@ -46819,6 +46819,17 @@ def _memory_oom_check(now: float) -> dict:
                 "threshold": "tracker sample present"}
 
 
+def _offline_sim_epoch_check() -> dict:
+    """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
+    shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
+    st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
+    if st.get("floor_unreadable"):
+        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
+                "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if st else "AMBER",
+            "observed": f"stats={st}" if st else "no loader call yet", "threshold": "fresh-epoch floor readable"}
+
+
 def _system_health_fly_self_checks(now: float | None = None) -> list:
     """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
     now = float(now or time.time())
@@ -46874,6 +46885,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             "threshold": "<12m, <3 failures",
         })
     checks.append(_memory_oom_check(now))
+    checks.append(_offline_sim_epoch_check())
     return checks
 
 
@@ -57469,15 +57481,40 @@ def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIO
     return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
 
 
+_OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-tick catch-up scans all shards itself
+_OFFLINE_SIM_LOAD_STATS: dict = {}
+
+
+def _offline_sim_epoch_floor():
+    """Fresh-epoch floor for shard rejection; None if it cannot be read (the loader then FAILS CLOSED: no rotated shard parsed)."""
+    try:
+        cutoff = _fresh_epoch_identity_from_session()[1]
+        return float(cutoff) if cutoff else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[RESEARCH_SIM] fresh floor unavailable, ALL rotated shards skipped (fail closed): {exc}")
+        return None
+
+
 def _load_offline_sim_jsonl_revisions(
     active_path,
-    max_rotations=_OFFLINE_SIM_MAX_ROTATIONS,
+    max_rotations=None,
     target_trade_ids=None,
 ):
+    if max_rotations is None:
+        max_rotations = globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128)
+    floor_fn = globals().get("_offline_sim_epoch_floor")
+    _floor = floor_fn() if callable(floor_fn) else None
+    _stats = globals().get("_OFFLINE_SIM_LOAD_STATS")
+    if isinstance(_stats, dict):
+        _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
+        _stats["floor_checked_ts"] = time.time()
     return _pure_load_offline_sim_jsonl_revisions(
         active_path,
         max_rotations=max_rotations,
         target_trade_ids=target_trade_ids,
+        min_ts=_floor,
+        stats=globals().get("_OFFLINE_SIM_LOAD_STATS"),
+        floor_unreadable=_floor is None and callable(floor_fn),   # fail closed: skip ALL rotated shards
         on_read_error=lambda path, exc: logger.debug(
             f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
         ),
@@ -57496,7 +57533,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
     source_market_index = market_loader(
         globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
         target_trade_ids=set(snapshots),
-        max_rotations=globals().get("_OFFLINE_SIM_MAX_ROTATIONS", 128),
+        max_rotations=globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128),
     ) if callable(market_loader) else {}
     replays = _load_offline_sim_jsonl_revisions(
         signal_replay_file,
