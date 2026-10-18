@@ -114,7 +114,7 @@ def _gate_fetch(all_rows, monitor_open):
             return GOOD_STATUS
         if path == "/api/state":
             return {"lane_position_counts": {"L": {"open": monitor_open, "pending": 0}}}
-        rows = [r for r in all_rows if str(r["status"]).upper() == "OPEN"] if "status=open" in path else all_rows
+        rows = [r for r in all_rows if gate.counts_as_open(r)] if "status=open" in path else all_rows
         return {"rows": rows, "next_cursor": None, "remaining_after_page": 0}
     return fetch
 
@@ -163,3 +163,24 @@ def test_other_terminal_non_position_statuses_are_non_open_only_when_unfilled():
 def test_monitor_count_stays_open_plus_pending_and_mismatch_still_fails():
     out = gate.evaluate(_gate_fetch([_REAL["gs1-f31e676ca020"], _REAL["gb2-eaec6129ced8"]], monitor_open=2))
     assert any(r.startswith("COUNT_MISMATCH") for r in out["reasons"])
+
+
+def test_pending_unfilled_order_blocks_and_is_covered_by_the_wait():
+    pend = {"trade_id": "p", "status": "PENDING", "entry_ts": None, "fill": None}
+    assert gate.counts_as_open(pend) is True
+    out = gate.evaluate(_gate_fetch([pend], monitor_open=1))
+    assert out["reasons"] == ["OPEN_TRADES:1"]   # only OPEN_TRADES: main() waits on exactly this verdict
+
+
+def test_partial_fill_or_exchange_id_or_filled_qty_on_an_expired_row_fails_closed():
+    assert gate.counts_as_open(_expired(fill={"filled_qty": 0.0001})) is True
+    assert gate.counts_as_open(_expired(filled_qty=0.0001)) is True
+    assert gate.counts_as_open(_expired(order={"terminal": "EXPIRED", "exchange_order_id": "abc"})) is True
+    assert gate.counts_as_open(_expired(order={"terminal": "PARTIALLY_FILLED"})) is True
+    assert gate.counts_as_open(_expired(order={"terminal": "EXPIRED", "filled_qty": 0.5})) is True
+    assert gate.counts_as_open(_expired(order={"terminal": "EXPIRED", "terminal_reason": "x"})) is False
+
+
+def test_status_must_be_on_the_allowlist():
+    for st in ("WORKING", "NEW", "ACTIVE", "SOMETHING_ELSE", "", None):
+        assert gate.counts_as_open(_expired(status=st)) is True

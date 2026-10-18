@@ -24,28 +24,41 @@ OPEN_STATUSES_EXCLUDED = {"CLOSED"}
 TERMINAL_NO_POSITION = {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "NO_FILL"}
 
 
+_FILLED_QTY_KEYS = ("filled_qty", "executed_qty", "fill_qty", "cum_qty")
+_EXCHANGE_ID_KEYS = ("exchange_order_id", "order_id", "exchange_id", "venue_order_id", "orderId")
+
+
+def _present(v) -> bool:
+    return v not in (None, "", 0, 0.0, {}, [])
+
+
 def _has_entry_fill(row: dict) -> bool:
-    fill = row.get("fill")
-    if isinstance(fill, dict) and any(fill.get(k) not in (None, "") for k in ("fill_price", "fill_ts", "filled_qty")):
+    """Any sign of an entry: entry_ts, any fill snapshot content, filled qty, or an exchange order id."""
+    if _present(row.get("entry_ts")) or _present(row.get("fill")):
         return True
-    return row.get("entry_ts") not in (None, "")
+    if any(_present(row.get(k)) for k in _FILLED_QTY_KEYS + _EXCHANGE_ID_KEYS):
+        return True
+    order = row.get("order")
+    if isinstance(order, dict) and (any(_present(order.get(k)) for k in _FILLED_QTY_KEYS + _EXCHANGE_ID_KEYS)
+                                    or str(order.get("terminal") or "").upper() in ("FILLED", "PARTIAL", "PARTIALLY_FILLED")):
+        return True
+    return False
 
 
 def counts_as_open(row: dict) -> bool:
+    """CLOSED does not count. A status on the TERMINAL_NO_POSITION allowlist does not count ONLY if entry_ts is present
+    and null AND no fill snapshot AND no filled qty AND no exchange order id. Everything else counts (working, PENDING,
+    OPEN, unknown status, missing field, partial fill, EXPIRED with any fill): fail closed."""
     status = str(row.get("status")).upper()
     if status in OPEN_STATUSES_EXCLUDED:
         return False
     if status in TERMINAL_NO_POSITION:
         if "entry_ts" not in row:
-            return True                       # missing entry field: fail closed
-        fill = row.get("fill")
-        if fill not in (None, {}) and not isinstance(fill, dict):
-            return True                       # unreadable fill snapshot: fail closed
-        order = row.get("order")
-        if isinstance(order, dict) and str(order.get("terminal") or "").upper() == "FILLED":
-            return True                       # order says filled: fail closed
-        return _has_entry_fill(row)           # (real EXPIRED rows carry no 'fill' key at all)
-    return True                               # OPEN, PENDING, anything unknown
+            return True                       # missing entry field
+        if isinstance(row.get("fill"), (str, int, float, list)) and row.get("fill") not in (None, "", 0, []):
+            return True                       # unreadable fill snapshot (real EXPIRED rows carry no 'fill' key at all)
+        return _has_entry_fill(row)
+    return True
 
 
 def walk_pages(fetch, path_base: str, page_log: list | None = None) -> list:
@@ -138,7 +151,8 @@ def main(argv=None) -> int:
     while True:
         result = evaluate(_http_fetch(base, token)) if token else {"ok": False, "reasons": ["NO_TOKEN"]}
         for pg in result.get("pages", []):
-            print(f"page feed={pg['feed']} n={pg['page']} rows={pg['rows']} non_closed={pg['non_closed']}", file=sys.stderr)
+            print(f"page feed={pg['feed']} n={pg['page']} rows={pg['rows']} non_closed={pg['non_closed']} "
+                  f"monitor_open_plus_pending={result.get('monitor_open_count')}", file=sys.stderr)
         print(f"TOTAL non_closed_all_pages={result.get('non_closed_all_pages')} status_open={result.get('pages_open')} "
               f"monitor_open={result.get('monitor_open_count')} ok={result['ok']}", file=sys.stderr)
         print(json.dumps(result, sort_keys=True))
