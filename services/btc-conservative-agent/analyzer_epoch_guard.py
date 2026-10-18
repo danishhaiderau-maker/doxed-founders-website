@@ -203,31 +203,88 @@ def fresh_floor_ts(data_dir: str | os.PathLike) -> float | None:
     return None
 
 
-def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
-                        floor_ts: float | None = None) -> int:
-    """Rows of one stream file that the guard would not admit."""
+NESTED_PRE_EPOCH = "PRE_EPOCH"
+NESTED_STRADDLE = "STRADDLE"
+NESTED_UNSTAMPED = "UNSTAMPED"
+NESTED_OK = "OK"
+
+
+def _nested_ts(value: Any, out: list, depth: int = 0, key: str = "") -> None:
+    """Every plausible ``*_ts`` number nested anywhere in a row (segment_ref.start_ts, requested_start_ts, coverage.*)."""
+    if depth > 8:
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _nested_ts(v, out, depth + 1, str(k))
+    elif isinstance(value, list):
+        for v in value[:200]:
+            _nested_ts(v, out, depth + 1, key)
+    elif key.endswith("_ts") and not isinstance(value, bool):
+        ts = de.parse_ts(value)
+        if ts is not None:
+            out.append(ts)
+
+
+def nested_ts_class(row: Any, floor: float) -> str:
+    """Epoch class of a row that carries no top-level timestamp, from its nested timestamps only (V3 ledger rows
+    carry segment windows, not a row time). Entirely before the floor = PRE_EPOCH; entirely at/after = OK; a window
+    crossing the floor = STRADDLE; none at all = UNSTAMPED. Never used to ADMIT a row: guard.admit / classify stay
+    fail-closed (UNDATED); this only decides how the purity audit counts rows it cannot place."""
+    stamps: list = []
+    _nested_ts(row, stamps)
+    if not stamps:
+        return NESTED_UNSTAMPED
+    if max(stamps) < floor:
+        return NESTED_PRE_EPOCH
+    return NESTED_OK if min(stamps) >= floor else NESTED_STRADDLE
+
+
+def file_epoch_row_counts(path: str | os.PathLike, relpath: str, manifest: dict | None,
+                          floor_ts: float | None = None) -> dict:
+    """Rows of one stream file the guard would not admit, split into ``pre_epoch`` (provably before the epoch: RED),
+    ``straddle`` and ``unstamped`` (cannot be placed: never countable, reported separately, not RED)."""
+    counts = {"pre_epoch": 0, "straddle": 0, "unstamped": 0}
     if not manifest:
-        return 0
-    bad = 0
+        return counts
     if relpath.endswith(".csv"):
         with guarded_read(relpath, "inventory"):
             handle = open(path, "r", encoding="utf-8", errors="replace", newline="")
         with handle:
             for row in csv.DictReader(handle):
                 if de.classify_row(relpath, row, manifest, floor_ts=floor_ts) not in ADMITTED_CLASSES:
-                    bad += 1
-        return bad
+                    counts["pre_epoch"] += 1
+        return counts
+    import json
+    floor = float(floor_ts or manifest.get("started_at_ts") or 0)
     with guarded_read(relpath, "inventory"):
         handle = open(path, "rb")
     with handle:
         for line in handle:
             if not line.strip():
                 continue
-            cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=de.line_ts(line), manifest=manifest,
-                              floor_ts=floor_ts)
-            if cls not in ADMITTED_CLASSES:
-                bad += 1
-    return bad
+            ts = de.line_ts(line)
+            cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=ts, manifest=manifest, floor_ts=floor_ts)
+            if cls in ADMITTED_CLASSES:
+                continue
+            if cls == de.UNDATED and ts is None and floor:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    row = None
+                kind = nested_ts_class(row, floor) if isinstance(row, dict) else NESTED_UNSTAMPED
+                if kind == NESTED_OK:
+                    continue  # every nested window is at/after the floor: placed post-epoch (not admitted by classify)
+                counts[{NESTED_PRE_EPOCH: "pre_epoch", NESTED_STRADDLE: "straddle"}.get(kind, "unstamped")] += 1
+                continue
+            counts["pre_epoch"] += 1
+    return counts
+
+
+def file_pre_epoch_rows(path: str | os.PathLike, relpath: str, manifest: dict | None,
+                        floor_ts: float | None = None) -> int:
+    """Rows of one stream file that are provably pre-epoch (straddle/unstamped rows are counted separately by
+    :func:`file_epoch_row_counts`)."""
+    return file_epoch_row_counts(path, relpath, manifest, floor_ts)["pre_epoch"]
 
 
 _LOCAL = threading.local()
@@ -378,6 +435,8 @@ class StreamReadMonitor:
         with self._lock:
             files = {k: dict(v, raw_sites=list(v["raw_sites"])) for k, v in self.files.items()}
         admitted_by_stream: dict[str, int] = {}
+        straddle_by_stream: dict[str, int] = {}
+        unstamped_by_stream: dict[str, int] = {}
         unguarded: dict[str, dict] = {}
         inventory: dict[str, int] = {}
         filtered: dict[str, int] = {}
@@ -391,9 +450,14 @@ class StreamReadMonitor:
                 if not entry.get("raw"):
                     continue
                 try:
-                    bad = file_pre_epoch_rows(path, stream, manifest, floor_ts)
+                    counts = file_epoch_row_counts(path, stream, manifest, floor_ts)
                 except OSError:
-                    bad = 0
+                    counts = {"pre_epoch": 0, "straddle": 0, "unstamped": 0}
+                bad = counts["pre_epoch"]
+                if counts["straddle"]:
+                    straddle_by_stream[stream] = straddle_by_stream.get(stream, 0) + counts["straddle"]
+                if counts["unstamped"]:
+                    unstamped_by_stream[stream] = unstamped_by_stream.get(stream, 0) + counts["unstamped"]
                 item = unguarded.setdefault(stream, {"opens": 0, "pre_epoch_rows": 0, "files": 0, "sites": []})
                 item["opens"] += entry["raw"]
                 item["files"] += 1
@@ -406,6 +470,10 @@ class StreamReadMonitor:
         return {"active": True, "roots": self.roots,
                 "pre_epoch_rows_admitted": sum(admitted_by_stream.values()),
                 "pre_epoch_rows_admitted_by_stream": dict(sorted(admitted_by_stream.items())),
+                "straddle_rows_unguarded": sum(straddle_by_stream.values()),
+                "straddle_rows_unguarded_by_stream": dict(sorted(straddle_by_stream.items())),
+                "unstamped_rows_unguarded": sum(unstamped_by_stream.values()),
+                "unstamped_rows_unguarded_by_stream": dict(sorted(unstamped_by_stream.items())),
                 "unguarded_stream_reads": dict(sorted(unguarded.items())),
                 "epoch_filtered_stream_opens": dict(sorted(filtered.items())),
                 "inventory_stream_opens": dict(sorted(inventory.items()))}
