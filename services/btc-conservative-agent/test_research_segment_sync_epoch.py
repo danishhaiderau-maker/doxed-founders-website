@@ -371,3 +371,28 @@ def test_promotion_denies_seq_regression_alone_and_cycle_does_not_retry_it():
     ps1 = (Path(__file__).resolve().parents[2] / "scripts" / "run-segment-analyzer-cycle.ps1").read_text("utf-8")
     assert "SEQ_" in ps1 and "SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH" in ps1
     assert not any(tok in reasons[0] for tok in ("SHADOW_BEHIND_PUBLISHED", "HEAD_MANIFEST_MISMATCH"))
+
+
+def _iso(ts):
+    import datetime as _d
+    return _d.datetime.fromtimestamp(ts, _d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_no_beacon_but_fresh_ack_receipt_gives_applied_seq_and_a_coded_amber_not_unknown():
+    v = _v(published_seq=622, acked_seq=622, ack_received_at=_iso(NOW - 90))
+    assert v["status"] == "AMBER" and v["laptop_applied_seq"] == 622 and v["laptop_applied_source"] == "ACK_RECEIPT"
+    assert v["reason_codes"] == ["NO_LAPTOP_BEACON"] and v["ack_age_sec"] == 90 and v["ack_lag_seq"] == 0
+
+
+def test_no_beacon_stale_ack_receipt_while_behind_is_red_with_a_reason_and_ages():
+    v = _v(published_seq=700, acked_seq=622, ack_received_at=_iso(NOW - 40 * 60))
+    assert v["status"] == "RED" and v["reason_codes"][0] == "ACK_STALE" and v["ack_lag_seq"] == 78
+    assert "78 behind" in v["reasons"][0]
+
+
+def test_no_beacon_and_no_ack_is_unknown_with_its_own_code_and_red_always_has_a_reason():
+    v = _v(published_seq=5, acked_seq=0)
+    assert v["status"] == "UNKNOWN" and v["reason_codes"] == ["NO_LAPTOP_BEACON_NO_ACK"]
+    for kw in ({"published_seq": 1, "acked_seq": 0, "beacon": {"applied_seq": 9}}, ):
+        r = _v(**kw)
+        assert r["status"] != "RED" or r["reasons"]

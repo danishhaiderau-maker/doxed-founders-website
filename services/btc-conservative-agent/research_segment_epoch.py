@@ -283,13 +283,37 @@ def sync_verdict(*, published_seq, acked_seq, ack_received_at, beacon: dict | No
         if not _marker_cleared(reset_marker, beacon, beacon_received_at, published, fresh_start_epoch_id):
             red.append("LAPTOP_RESET_REQUIRED: wipe marker set and no beacon since the wipe reports a "
                        "different prefix/epoch than before it")
+    applied_source = "BEACON" if beacon else None
+    ack_ts = _iso_to_ts(ack_received_at)
+    ack_age = None if ack_ts is None else max(0.0, now - ack_ts)
+    beacon_age = None if (not beacon or beacon_received_at is None) else max(0.0, now - float(beacon_received_at))
     if beacon is None and not red:
-        status = "UNKNOWN"
-        amber.append("NO_LAPTOP_BEACON: laptop has not reported its applied seq")
+        if acked > 0:
+            # No client posts a laptop beacon today; the laptop's ack receipt IS the applied-seq evidence (same
+            # numbering as published_seq, one source). Say so explicitly instead of an unexplained UNKNOWN/RED.
+            applied, applied_source = acked, "ACK_RECEIPT"
+            lag = published - acked
+            if lag > 0 and ack_age is not None and ack_age > ACK_LAG_RED_SEC:
+                red.append(f"ACK_STALE: laptop ack receipt through {acked} is {int(ack_age / 60)} min old, "
+                           f"Fly published {published} ({lag} behind)")
+            elif lag > 0 and ack_age is not None and ack_age > ACK_LAG_AMBER_SEC:
+                amber.append(f"ACK_LAG: laptop ack through {acked} for {int(ack_age / 60)} min, Fly published {published}")
+            amber.append(f"NO_LAPTOP_BEACON: no beacon posted; applied seq taken from the ack receipt ({acked}, "
+                         f"{'age unknown' if ack_age is None else f'{int(ack_age)} s old'})")
+            status = "RED" if red else "AMBER"
+        else:
+            status = "UNKNOWN"
+            amber.append("NO_LAPTOP_BEACON_NO_ACK: no beacon and no ack receipt (acked_seq 0): laptop applied seq unknown")
     else:
         status = "RED" if red else "AMBER" if amber else "GREEN"
+    reasons_all = red + amber
+    if status == "RED" and not red:  # a RED verdict always carries its reason
+        reasons_all = ["RED_UNSPECIFIED: verdict RED without a recorded reason"] + reasons_all
     return {"schema": VERDICT_SCHEMA, "status": status, "alert": status == "RED",
-            "reasons": red + amber, "published_seq": published, "acked_seq": acked, "laptop_applied_seq": applied,
+            "reasons": reasons_all, "reason_codes": [r.split(":", 1)[0] for r in reasons_all],
+            "laptop_applied_source": applied_source, "ack_age_sec": ack_age, "beacon_age_sec": beacon_age,
+            "ack_lag_seq": (published - acked) if published and acked is not None else None,
+            "published_seq": published, "acked_seq": acked, "laptop_applied_seq": applied,
             "prefix": prefix, "fresh_start_epoch_id": fresh_start_epoch_id or None,
             "laptop_cycle_stop_reason": (beacon or {}).get("cycle_stop_reason"),
             "laptop_cycle_exit": (beacon or {}).get("cycle_exit"), "checked_at": now}

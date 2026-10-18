@@ -585,6 +585,8 @@ test_full_reset_job.py
 test_epoch_purity_nested_ts.py
 test_trade_row_numeric_timestamps.py
 test_streams_health_log_files.py
+test_legacy_policy_quarantine.py
 test_retire_obsolete_artifacts.py
 test_regime_coverage_trigger_nesting.py
 test_policy_identity_canonical_ttl.py
+test_fills_by_model_identity_quarantine.py

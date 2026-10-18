@@ -841,3 +841,14 @@ def test_raw_view_integrity_red_when_catalog_missing_while_disk_bytes_advance(tm
     assert r.severity == "RED" and "raw_decision" in r.observed
     st.refresh_views()
     assert diagnose.check_raw_view_integrity(_facts(), {}, st, state).severity == "GREEN"
+
+def test_laptop_disk_free_thresholds_and_probe_failure(store):
+    from self_aware import diagnose as dg
+    sev = lambda d: dg.check_laptop_disk_free(_facts(laptop_disk=d), {}, store).severity
+    assert sev({"free_gb": 80.0, "total_gb": 500.0, "path": "C:"}) == "GREEN"
+    assert sev({"free_gb": 14.9, "total_gb": 500.0, "path": "C:"}) == "AMBER"
+    assert sev({"free_gb": 4.9, "total_gb": 500.0, "path": "C:"}) == "RED"
+    assert sev({"error": "OSError: x"}) == "AMBER" and sev(None) == "AMBER"
+    assert "probe failed" in dg.check_laptop_disk_free(_facts(laptop_disk={"error": "OSError: x"}), {}, store).observed
+    from self_aware import facts as fx
+    assert fx.laptop_disk("/")["free_gb"] > 0
