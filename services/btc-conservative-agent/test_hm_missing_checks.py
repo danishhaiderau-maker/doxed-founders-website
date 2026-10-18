@@ -12,7 +12,7 @@ MONITOR = "monitor-read-token-for-tests-0123456789"
 REMOTE = {"REMOTE_ADDR": "203.0.113.9"}
 ROUTES = ("/api/monitor/checks", "/api/monitor/exit-truth", "/api/monitor/pnl/reconcile",
           "/api/monitor/rules/conformance", "/api/monitor/data/completeness", "/api/monitor/tape/retention",
-          "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
+          "/api/monitor/exits/latency-guard", "/api/monitor/alerts",
           "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets")
 
 
@@ -61,13 +61,6 @@ def test_latency_guard_and_retention():
     assert out["status"] == "AMBER" and out["alert"]
 
 
-def test_archive_receipt():
-    assert mc.archive_receipt(None, now=0)["alert"]
-    ok = mc.archive_receipt({"finished_ts": 100.0, "errors": 0, "disk_free_pct": 40}, now=200.0)
-    assert ok["status"] == "GREEN"
-    assert mc.archive_receipt({"finished_ts": 100.0, "disk_free_pct": 4}, now=200.0)["status"] == "RED"
-
-
 @pytest.fixture
 def bot(monkeypatch, tmp_path):
     import bot as bot_module
@@ -104,9 +97,9 @@ def test_archive_receipt_post_needs_the_dedicated_r2_token_not_admin_or_monitor(
                            environ_base=REMOTE).status_code == 401
     assert client.post("/api/monitor/archive/receipt", json=payload, headers={"X-R2-Receipt-Token": "r2-only-token"},
                        environ_base=REMOTE).status_code == 200
-    got = client.get("/api/monitor/archive", headers={"Authorization": f"Bearer {MONITOR}"},
-                     environ_base=REMOTE).get_json()
-    assert got["receipt"]["bucket"] == "doxed-btc-archive"
+    # The archive-receipt check and its GET route are retired (18 Oct, no permanent archive).
+    assert client.get("/api/monitor/archive", headers={"Authorization": f"Bearer {MONITOR}"},
+                      environ_base=REMOTE).status_code == 410
 
 
 def test_disloc_shadow_30m_and_tape_archive(tmp_path):
