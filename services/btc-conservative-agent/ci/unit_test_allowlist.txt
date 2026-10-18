@@ -595,3 +595,4 @@ test_memory_structures.py
 test_tiles_trades_identity_quarantined.py
 test_book_gap_stats.py
 test_v3_lock_cleanup.py
+test_nonaccum_plans.py
