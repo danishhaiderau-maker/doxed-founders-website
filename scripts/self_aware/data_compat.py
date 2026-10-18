@@ -556,6 +556,15 @@ def epoch_purity(paths, doc: dict) -> dict:
                 "observed": f"{admitted} pre-epoch rows entered analyzer results: " +
                             "; ".join(f"{k} {n} via {sites.get(k) or 'unmonitored read'}"
                                       for k, n in sorted(by_stream.items(), key=lambda kv: -kv[1])[:6])}
+    straddle = int(block.get("straddle_rows_unguarded") or 0)
+    unstamped = int(block.get("unstamped_rows_unguarded") or 0)
+    if straddle or unstamped:
+        # Rows the audit cannot place (window crosses the floor / no timestamp) are never countable and never dropped;
+        # they must not vanish from view just because they are not provably pre-epoch.
+        return {**base, "severity": "AMBER",
+                "observed": f"{straddle} straddle and {unstamped} unstamped ledger rows read unguarded (never countable; "
+                            f"0 provably pre-epoch): straddle {block.get('straddle_rows_unguarded_by_stream') or {}}, "
+                            f"unstamped {block.get('unstamped_rows_unguarded_by_stream') or {}}"}
     retained = int(block.get("pre_epoch_rows_retained") or 0)
     return {**base, "severity": "GREEN",
             "observed": f"generation {receipt.get('generation_id')} read epoch {block.get('epoch_id')} only; "

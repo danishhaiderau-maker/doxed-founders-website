@@ -285,6 +285,7 @@ def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool,
         "execution_basis": evidence.get("execution_basis"),
         "liquidity": evidence.get("liquidity"),
         "queue_estimate": evidence.get("queue_estimate"),
+        "evidence_status": evidence.get("evidence_status"),  # fill_sim.evidence_status (COMPLETE/INCOMPLETE/NO_FILL)
     }
 
 

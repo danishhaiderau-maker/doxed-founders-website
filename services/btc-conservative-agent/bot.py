@@ -31697,6 +31697,10 @@ def close_position(pos: dict, exit_reason: str):
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,
+            # Numeric epoch stamps: paper_fill.row_before_epoch / row_fresh_strict read entry_ts/exit_ts (the ISO
+            # "ts"/"close_ts" above are strings it cannot use), and a row with none fails closed as never-fresh.
+            "entry_ts": _ts_or_none(pos.get("entry_ts")),
+            "exit_ts": time.time() if _ts_or_none(pos.get("entry_ts")) else None,  # no entry stamp -> row fails closed
             "ts_melbourne": close_mel,
             "close_ts_melbourne": close_mel,
             "event_timestamps": _trade_event_timestamps(pos, master, exit_fill_ts=time.time()),

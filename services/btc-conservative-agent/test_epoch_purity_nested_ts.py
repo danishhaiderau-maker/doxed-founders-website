@@ -55,3 +55,15 @@ def test_report_exposes_separate_counters_and_only_pre_epoch_is_admitted(tmp_pat
     assert rep["pre_epoch_rows_admitted"] == 0
     assert rep["straddle_rows_unguarded"] == 1 and rep["unstamped_rows_unguarded"] == 1
     assert rep["straddle_rows_unguarded_by_stream"] == {REL: 1}
+
+
+def test_xvp_shadow_rows_keyed_by_anchor_bucket_and_evaluated_ts_are_placed_not_flagged(tmp_path):
+    """Live case: xvp_shadow_signals rows carry anchor_bucket_ts/evaluated_ts (not in data_epoch.TS_KEYS), so every new
+    row was UNDATED and counted as 'pre-epoch admitted' (grew with each row). They are placed by nested *_ts."""
+    rows = [{"schema": "xvp_shadow_trigger_v1", "anchor_bucket_ts": FLOOR + 60 * i, "evaluated_ts": FLOOR + 60 * i + 1,
+             "side": "LONG"} for i in range(1, 6)]
+    p = write(tmp_path, rows)
+    assert eg.file_epoch_row_counts(p, "xvp_shadow_signals.jsonl", MANIFEST, FLOOR) == {
+        "pre_epoch": 0, "straddle": 0, "unstamped": 0}
+    old = write(tmp_path, [{"schema": "xvp_shadow_trigger_v1", "anchor_bucket_ts": FLOOR - 900, "evaluated_ts": FLOOR - 899}])
+    assert eg.file_epoch_row_counts(old, "xvp_shadow_signals.jsonl", MANIFEST, FLOOR)["pre_epoch"] == 1
