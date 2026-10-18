@@ -133,6 +133,11 @@ def build_generation_receipt(
             + (f"{epoch_admitted} pre-epoch rows can enter results" if epoch_admitted is not None
                else f"purity unproven ({data_epoch.get('error') or 'no audit'})")
         )
+    unplaced = int((data_epoch or {}).get("straddle_rows_unguarded") or 0) + int(
+        (data_epoch or {}).get("unstamped_rows_unguarded") or 0)
+    if unplaced:
+        level = _worst(level, AMBER)
+        reasons.append(f"{unplaced} straddle/unstamped rows read unguarded (never countable, not pre-epoch)")
     receipt = {
         "schema": SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),

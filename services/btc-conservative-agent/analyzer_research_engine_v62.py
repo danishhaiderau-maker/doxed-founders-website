@@ -1298,6 +1298,12 @@ def _epoch_receipt_block():
         "pre_epoch_rows_retained": retained,
         "pre_epoch_rows_retained_by_stream": retained_by_stream,
         "read_monitor": reads,
+        # Ledger rows the audit cannot place (window crosses the floor / no timestamp): never countable, never
+        # dropped, counted explicitly and NOT part of pre_epoch_rows_admitted (only provably pre-epoch rows are).
+        "straddle_rows_unguarded": int(reads.get("straddle_rows_unguarded") or 0),
+        "straddle_rows_unguarded_by_stream": reads.get("straddle_rows_unguarded_by_stream") or {},
+        "unstamped_rows_unguarded": int(reads.get("unstamped_rows_unguarded") or 0),
+        "unstamped_rows_unguarded_by_stream": reads.get("unstamped_rows_unguarded_by_stream") or {},
         # On disk until clean-epoch-wipe, but every analyzer reader of these streams rejects them.
         "pre_epoch_rows_read_guarded": sum(guarded.values()),
         "pre_epoch_rows_read_guarded_by_stream": dict(sorted(guarded.items())),

@@ -283,3 +283,14 @@ def test_stamped_writer_legacy_rows_are_declared_not_undeclared(tmp_path, monkey
     assert not any("post-epoch rows without data_epoch_id" in p for p in hist["problems"])
     # Other unstamped writers are still reported.
     assert doc["undeclared_streams"] == ["xvl_shadow_signals.jsonl"]
+
+
+def test_straddle_and_unstamped_rows_turn_purity_amber_not_red_not_green(tmp_path, monkeypatch):
+    block = {"epoch_id": EPOCH, "pre_epoch_rows_admitted": 0, "pre_epoch_rows_rejected": 0,
+             "straddle_rows_unguarded": 289, "straddle_rows_unguarded_by_stream": {"v3/ledgers/market_segment.jsonl": 289},
+             "unstamped_rows_unguarded": 12, "unstamped_rows_unguarded_by_stream": {"v3/ledgers/decision.jsonl": 12}}
+    doc, purity = _declared_doc_with_receipt(tmp_path, monkeypatch, block)
+    assert purity["severity"] == "AMBER" and "289 straddle and 12 unstamped" in purity["observed"]
+    block.update(straddle_rows_unguarded=0, unstamped_rows_unguarded=0)
+    doc2, purity2 = _declared_doc_with_receipt(tmp_path / "b", monkeypatch, block)
+    assert purity2["severity"] == "GREEN"
