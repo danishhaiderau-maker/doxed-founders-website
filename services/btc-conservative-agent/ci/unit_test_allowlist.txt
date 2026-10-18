@@ -583,4 +583,5 @@ test_tile_integrity.py
 test_archive_receipt_v2.py
 test_research_reset_large_layout.py
 test_full_reset_job.py
+test_trade_row_numeric_timestamps.py
 test_streams_health_log_files.py
