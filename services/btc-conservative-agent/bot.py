@@ -56807,8 +56807,13 @@ def analytics_loop():
     try:
         while not shutdown_event.is_set():
             try:
+                _loop_t0 = time.time()
                 compute_analytics()
                 run_offline_research_sim()
+                try:
+                    _mem_tracker.record_loop("analytics_loop", _loop_t0, time.time())   # start/end for stair attribution
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
                 # Change 5: periodic catch-up for APPROVE signals whose replay
                 # rotated into a .N shard before the active-file pass saw them.
                 # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
