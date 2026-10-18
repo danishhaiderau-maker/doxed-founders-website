@@ -1222,6 +1222,8 @@ class SegmentShipper:
         except Exception as exc:  # noqa: BLE001
             return {"sync_verdict": "UNKNOWN", "sync_verdict_reasons": [f"VERDICT_ERROR:{type(exc).__name__}"]}
         return {"sync_verdict": verdict["status"], "sync_verdict_reasons": verdict["reasons"][:8],
+                "sync_reason_codes": verdict["reason_codes"][:8], "laptop_applied_source": verdict["laptop_applied_source"],
+                "ack_age_sec": verdict["ack_age_sec"], "beacon_age_sec": verdict["beacon_age_sec"],
                 "laptop_applied_seq": verdict["laptop_applied_seq"],
                 "fresh_start_epoch_id": verdict["fresh_start_epoch_id"],
                 "laptop_cycle_stop_reason": verdict["laptop_cycle_stop_reason"],
