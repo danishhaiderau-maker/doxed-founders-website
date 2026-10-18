@@ -2557,10 +2557,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
-        # Walks every page of status=open and the full feed; any read error/timeout, cursor loop or
-        # disagreement with the monitor open count blocks. Only a plain "positions open" verdict is waited out (<=20 min);
-        # on timeout the step exits non-zero, so no later step runs (nothing is paused or flattened). NOTE: the live re-arm path must require zero open positions with NO wait (run the gate without --wait-seconds).
-        run: python scripts/deploy_gate_open_trades.py --wait-seconds 1200
+        # Danish/HM rule: deploy fast, do NOT wait for flat. --allow-open: open PAPER trades never block (the deploy
+        # force-closes them as non-countable DEPLOY_MAINTENANCE rows). Blocks only on live armed, force_paper not true,
+        # or an unreadable /api/status. The live re-arm path keeps the strict gate (no --allow-open).
+        run: python scripts/deploy_gate_open_trades.py --allow-open
 
       - name: Enter durable authenticated paper maintenance boundary
         id: paper_maintenance

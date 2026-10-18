@@ -27,11 +27,9 @@ def test_normal_deploy_cannot_skip_the_gate():
     assert "continue-on-error" not in blk
 
 
-def test_gate_waits_only_on_open_trades_and_is_bounded_by_the_job_timeout():
+def test_deploy_mode_does_not_wait_for_flat_and_allows_open_paper_trades():
     blk = _step_block()
-    assert "--wait-seconds 1200" in blk
-    m = re.search(r"timeout-minutes: (\d+)", JOB[:400])
-    assert m and int(m.group(1)) >= 120  # 20 min wait + ~26 min build/test/deploy fits
+    assert "--allow-open" in blk and "--wait-seconds 1200" not in blk
 
 
 def test_failed_gate_leaves_paper_maintenance_cleanup_skipped():
@@ -41,4 +39,4 @@ def test_failed_gate_leaves_paper_maintenance_cleanup_skipped():
 
 
 def test_live_rearm_note_present():
-    assert "live re-arm path must require zero open positions with NO wait" in WF
+    assert "live re-arm path keeps the strict gate" in WF
