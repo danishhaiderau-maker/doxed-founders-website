@@ -7237,7 +7237,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
                       "fill_valid": False, "non_fill_category": "NO_BOOK_EXIT"}
     lag = round(max(0.0, price_trigger - t0), 3)
     marks = {"exit_status": "PAPER_FILL", "_paper_exit_trigger_ts": None, "missing_book_seconds": missing,
-             "exit_repriced_lag_s": lag if lag > 0 else None}
+             "exit_repriced_lag_s": lag if lag > 0 else None,
+             "exit_pricing_basis": "REPRICED_CURRENT_TIME" if lag > 0 else "MODEL_TIME"}
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
 
 
@@ -31771,6 +31772,7 @@ def close_position(pos: dict, exit_reason: str):
             "exit_status": pos.get("exit_status"),
             "missing_book_seconds": pos.get("missing_book_seconds"),
             "exit_repriced_lag_s": pos.get("exit_repriced_lag_s"),
+            "exit_pricing_basis": pos.get("exit_pricing_basis"),
             "exit_fallback": pos.get("exit_fallback"),
             "fill_valid": False if pos.get("fill_valid") is False else True,
             "non_fill_category": pos.get("non_fill_category"),
