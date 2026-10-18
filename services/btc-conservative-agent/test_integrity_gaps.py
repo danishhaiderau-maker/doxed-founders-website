@@ -245,7 +245,7 @@ def test_v3_growth_counts_files_per_top_dir_and_reports_disk(tmp_path):
     os.utime(old, (time.time() - 3 * 86400,) * 2)
     ig._V3_GROWTH_CACHE.update(at=0.0, doc=None)
     doc = ig.v3_growth(str(tmp_path), ttl=0)
-    assert doc["dirs"]["receipts"] == {"files": 3, "bytes": 3, "files_24h": 2}
+    assert doc["dirs"]["receipts"] == {"files": 3, "bytes": 3, "files_24h": 2, "daily_5d": [2, 0, 0, 1, 0]}
     assert doc["files_24h_total"] == 4 and doc["complete"] is True and doc["disk"]["free_bytes"] > 0
 
 
@@ -276,16 +276,42 @@ def test_deletion_sidecar_is_exempt_for_the_active_reset_only_and_alerts_amber_a
     assert ig.sidecar_size(str(tmp_path / "nowhere"))["status"] == "PENDING"
 
 
-def test_growth_budget_goes_red_above_files_per_day_budget_per_prefix():
-    ok = {"complete": True, "dirs": {"receipts": {"files": 10, "bytes": 1, "files_24h": 4000}, "ledgers": {"files": 7, "bytes": 1, "files_24h": 7}}}
-    g = ig.growth_budget(ok)
-    assert g["status"] == "GREEN" and g["over"] == []
+def test_growth_budget_exception_is_amber_until_expiry_then_red_and_shows_measured_rates():
+    import datetime as dt
     bad = {"complete": True, "dirs": {"receipts": {"files": 341048, "bytes": 275305432, "files_24h": 16588}}}
-    g = ig.growth_budget(bad)
-    assert g["status"] == "RED" and g["over"] == ["receipts"] and g["prefixes"]["receipts"]["over"] is True
-    assert ig.growth_budget({"complete": False, "dirs": {"receipts": {"files_24h": 1}}})["status"] == "PENDING"
-    assert ig.growth_budget(None)["status"] == "PENDING"
+    before = dt.datetime(2026, 10, 28, tzinfo=dt.timezone.utc).timestamp()
+    after = dt.datetime(2026, 10, 29, 0, 0, 1, tzinfo=dt.timezone.utc).timestamp()
+    g = ig.growth_budget(bad, now=before)
+    assert g["status"] == "AMBER" and g["excepted_amber"] == ["receipts"] and g["red"] == []
+    r = g["prefixes"]["receipts"]
+    assert r["exception"]["owner"] == "Boss" and r["exception"]["expired"] is False
+    assert r["measured_5d"] == ig.MEASURED_5D["receipts"] and r["measured_steady"] == 12241
+    assert ig.growth_budget(bad, now=after)["status"] == "RED"
     unknown = {"complete": True, "dirs": {"newthing": {"files_24h": ig.FILES_PER_DAY_DEFAULT + 1}}}
-    assert ig.growth_budget(unknown)["status"] == "RED"                  # a new prefix gets the default budget, never unlimited
+    assert ig.growth_budget(unknown, now=before)["status"] == "RED"      # new prefix: default budget, no exception
+    ok = {"complete": True, "dirs": {"ledgers": {"files_24h": 7}}}
+    assert ig.growth_budget(ok, now=before)["status"] == "GREEN"
+    assert ig.growth_budget({"complete": False, "dirs": {"ledgers": {"files_24h": 1}}})["status"] == "PENDING"
+    assert ig.growth_budget(None)["status"] == "PENDING"
     row = {r["id"]: r for r in ig.evaluate({"wipe": {"v3_growth": bad}})["rows"]}["G22"]
-    assert row["status"] == "RED"
+    assert row["status"] in ("AMBER", "RED")
+
+
+def test_no_non_excepted_budget_sits_below_its_measured_steady_rate():
+    for name, daily in ig.MEASURED_5D.items():
+        if name in ig.BUDGET_EXCEPTIONS:
+            continue
+        assert ig.FILES_PER_DAY_BUDGET[name] >= ig.steady_rate(daily), name
+
+
+def test_v3_growth_buckets_the_last_five_days(tmp_path):
+    import os, time
+    d = tmp_path / "runtime" / "v3" / "receipts"
+    d.mkdir(parents=True)
+    now = time.time()
+    for i, age_days in enumerate((0.5, 1.5, 1.6, 4.5, 9)):
+        f = d / f"f{i}"
+        f.write_text("x")
+        os.utime(f, (now - age_days * 86400, now - age_days * 86400))
+    g = ig.v3_growth(str(tmp_path), now=now, ttl=0)
+    assert g["dirs"]["receipts"]["daily_5d"] == [1, 2, 0, 0, 1] and g["dirs"]["receipts"]["files_24h"] == 1
