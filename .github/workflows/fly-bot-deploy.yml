@@ -2558,7 +2558,8 @@ jobs:
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
         # Walks every page of status=open and the full feed; any read error/timeout, cursor loop or
-        # disagreement with the monitor open count blocks. Only a plain "positions open" verdict is waited out (<=20 min).
+        # disagreement with the monitor open count blocks. Only a plain "positions open" verdict is waited out (<=20 min);
+        # on timeout the step exits non-zero, so no later step runs (nothing is paused or flattened). NOTE: the live re-arm path must require zero open positions with NO wait (run the gate without --wait-seconds).
         run: python scripts/deploy_gate_open_trades.py --wait-seconds 1200
 
       - name: Enter durable authenticated paper maintenance boundary
