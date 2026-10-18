@@ -9,7 +9,7 @@ def ids(out):
 
 def test_all_gaps_and_live_off_row_present():
     out = ig.evaluate({})
-    assert set(ids(out)) == {"LIVE_OFF"} | {f"G{i}" for i in range(1, 22)}
+    assert set(ids(out)) == {"LIVE_OFF"} | {f"G{i}" for i in range(1, 23)}
 
 
 def test_live_off_row_red_unless_disarmed_and_forced_paper():
@@ -274,3 +274,18 @@ def test_deletion_sidecar_is_exempt_for_the_active_reset_only_and_alerts_amber_a
     row = {r["id"]: r for r in ig.evaluate({"wipe": {"sidecar": s}})["rows"]}["G21"]
     assert row["status"] == "AMBER"                                              # visible, but never RED: it cannot block a wipe
     assert ig.sidecar_size(str(tmp_path / "nowhere"))["status"] == "PENDING"
+
+
+def test_growth_budget_goes_red_above_files_per_day_budget_per_prefix():
+    ok = {"complete": True, "dirs": {"receipts": {"files": 10, "bytes": 1, "files_24h": 4000}, "ledgers": {"files": 7, "bytes": 1, "files_24h": 7}}}
+    g = ig.growth_budget(ok)
+    assert g["status"] == "GREEN" and g["over"] == []
+    bad = {"complete": True, "dirs": {"receipts": {"files": 341048, "bytes": 275305432, "files_24h": 16588}}}
+    g = ig.growth_budget(bad)
+    assert g["status"] == "RED" and g["over"] == ["receipts"] and g["prefixes"]["receipts"]["over"] is True
+    assert ig.growth_budget({"complete": False, "dirs": {"receipts": {"files_24h": 1}}})["status"] == "PENDING"
+    assert ig.growth_budget(None)["status"] == "PENDING"
+    unknown = {"complete": True, "dirs": {"newthing": {"files_24h": ig.FILES_PER_DAY_DEFAULT + 1}}}
+    assert ig.growth_budget(unknown)["status"] == "RED"                  # a new prefix gets the default budget, never unlimited
+    row = {r["id"]: r for r in ig.evaluate({"wipe": {"v3_growth": bad}})["rows"]}["G22"]
+    assert row["status"] == "RED"

@@ -80,6 +80,29 @@ SIDECAR_NAME = "deletion.json.retained.jsonl"
 SIDECAR_AMBER_BYTES = 200 * 1024 * 1024
 
 
+# Files written per 24 h per runtime/v3 top-level prefix: a RED budget (HM 19 Oct: "files/day per prefix, RED above a budget").
+# PROPOSED values, HM to confirm. Prefixes not listed use DEFAULT. receipts is deliberately below its current ~16.6k/day:
+# one receipt file per ledger row is the accumulation HM wants bounded (see the retention design note in the PR).
+FILES_PER_DAY_BUDGET = {"receipts": 5000, "market_segments": 3500, "signal_snapshots_v1": 1000,
+                        "lifecycle_transfer_bundles": 400, "ledgers": 20, ".locks": 100}
+FILES_PER_DAY_DEFAULT = 100
+
+
+def growth_budget(v3g: dict | None) -> dict:
+    """Per-prefix files/day vs budget from v3_growth(). status RED when any prefix exceeds its budget; PENDING if unread."""
+    if not isinstance(v3g, dict) or not isinstance(v3g.get("dirs"), dict):
+        return {"status": "PENDING", "prefixes": {}}
+    out, over = {}, []
+    for name, d in v3g["dirs"].items():
+        budget = FILES_PER_DAY_BUDGET.get(name, FILES_PER_DAY_DEFAULT)
+        n = int(d.get("files_24h") or 0)
+        out[name] = {"files_24h": n, "budget": budget, "over": n > budget, "files": d.get("files"), "bytes": d.get("bytes")}
+        if n > budget:
+            over.append(name)
+    return {"status": "RED" if over else ("GREEN" if v3g.get("complete") else "PENDING"), "over": over, "prefixes": out,
+            "complete": bool(v3g.get("complete")), "budgets_proposed_pending_hm": True}
+
+
 def sidecar_size(root: str, active_reset: str | None = None) -> dict:
     """Size of the active reset's deletion sidecar (read-only). AMBER above 200 MB; it never blocks a wipe and the next
     reset clears it (a compact sidecar format is a later, non-urgent PR)."""
@@ -469,6 +492,12 @@ def evaluate(f: dict) -> dict:
     rows.append(_row("G21", "deletion.json.retained.jsonl size (active reset sidecar; exempt from G16, never blocks a wipe)",
                      sc, "<= 200 MB (AMBER above)", "PENDING" if not isinstance(sc, dict) else sc.get("status", "PENDING"),
                      "Fly /app/data runtime/research_reset_receipts/<active>/"))
+
+    gb = growth_budget(w.get("v3_growth"))
+    rows.append(_row("G22", "files written per day per runtime/v3 prefix vs budget",
+                     {"over": gb.get("over"), "prefixes": gb["prefixes"], "complete": gb.get("complete"),
+                      "budgets_proposed_pending_hm": True},
+                     "every prefix <= its files/day budget", gb["status"], "Fly /app/data/runtime/v3 walk (v3_growth, cached 30 min)"))
 
     worst = max((_RANK[r["status"]] for r in rows), default=0)
     status = {0: "GREEN", 1: "AMBER", 2: "RED"}[worst]
