@@ -188,6 +188,16 @@ def _mirror_max(store, sql: str) -> tuple[Any, str | None]:
         return {}, text
 
 
+def laptop_disk(root) -> dict[str, Any]:
+    """Absolute free space of the laptop drive holding the bot data (HM: replaces the retired archive-receipt disk alert)."""
+    import shutil
+    try:
+        u = shutil.disk_usage(str(root))
+        return {"path": str(root), "free_gb": round(u.free / 1e9, 2), "total_gb": round(u.total / 1e9, 2)}
+    except OSError as exc:
+        return {"path": str(root), "error": f"{type(exc).__name__}: {exc}"}
+
+
 def collect(paths: Paths, store, now: float | None = None, *, probe_local: bool = True) -> dict[str, Any]:
     now = time.time() if now is None else now
     chain = paths.chain
@@ -231,6 +241,7 @@ def collect(paths: Paths, store, now: float | None = None, *, probe_local: bool 
 
     if probe_local:
         f["laptop_cpu_pct"], f["laptop_mem_pct"] = laptop_load()
+        f["laptop_disk"] = laptop_disk(paths.laptop_root)
         f["svc_9001"] = dict(zip(("body", "error", "elapsed"), http_json("http://127.0.0.1:9001/api/health", 15)))
         f["svc_9001_health"] = dict(zip(("body", "error", "elapsed"),
                                         http_json("http://127.0.0.1:9001/api/system-health", 15)))
