@@ -110,7 +110,7 @@ class LegacyQuarantineTests(unittest.TestCase):
         """Real rows (identity keys only) copied from the laptop v3 ledgers on 18 Oct, 48 rows incl. other policies' rows."""
         import json
         import pathlib
-        path = pathlib.Path(__file__).parent / "fixtures" / "legacy_policy_quarantine_real_rows.jsonl"
+        path = pathlib.Path(__file__).parent / "fixtures" / "legacy_policy_quarantine_real_rows.ndjson"
         rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
         out = lpq.evaluate(list(lpq.LEGACY_POLICY_IDENTITY_EPISODES), rows)
         self.assertEqual(out["rejected"], [])
