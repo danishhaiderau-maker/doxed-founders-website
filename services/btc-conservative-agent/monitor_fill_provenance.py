@@ -15,6 +15,21 @@ MISSING_LIST_CAP = 20
 FORCED_STATUSES = ("FORCED_NO_BOOK", "PAPER_FILL_FORCED")
 
 
+def not_fresh_reason(r: dict, p: dict, status: str) -> str:
+    """One primary reason per not-fresh closed row (priority order); writer_flags counts the secondary defects."""
+    if r.get("identity_quarantined"):
+        return "IDENTITY_QUARANTINED"
+    if status in FORCED_STATUSES or paper_fill.is_excluded(p.get("fresh_data_excluded")):
+        return f"FORCED_EXIT:{status or 'EXCLUDED'}"
+    if not p.get("fresh_epoch_id"):
+        return "BLANK_FRESH_EPOCH_ID"
+    if not _present(p.get("exit_depth_snapshot_fill")):
+        return "MISSING_EXIT_FILL_SNAPSHOT"
+    if p.get("all_legs_book10l") is False:
+        return "LEG_NOT_BOOK10L"
+    return "FRESH_ELIGIBLE_FALSE_UNEXPLAINED"
+
+
 def _present(snapshot: Any) -> bool:
     return isinstance(snapshot, Mapping) and bool(snapshot.get("a") or snapshot.get("b"))
 
@@ -46,7 +61,9 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
         closed = [r for r in rows if r.get("status") == "CLOSED"]
         models, versions, delay_sources = Counter(), Counter(), Counter()
         forced = Counter()
-        fresh = not_fresh = legacy = 0
+        fresh = not_fresh = legacy = quarantined = 0
+        reasons: Counter = Counter()
+        flags: Counter = Counter()
         cov = {"entry_signal": 0, "entry_fill": 0, "exit_fill": 0}
         missing: list = []
         v1_rows = 0
@@ -58,10 +75,17 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             status = str(p.get("exit_status") or "")
             if status in FORCED_STATUSES or paper_fill.is_excluded(p.get("fresh_data_excluded")):
                 forced[status or "EXCLUDED"] += 1
+            if r.get("identity_quarantined"):
+                quarantined += 1
+            if not p.get("fresh_epoch_id"):
+                flags["blank_fresh_epoch_id"] += 1
+            if not _present(p.get("exit_depth_snapshot_fill")):
+                flags["missing_exit_fill_snapshot"] += 1
             if p.get("fresh_eligible") is True and not r.get("identity_quarantined"):
                 fresh += 1
             else:
                 not_fresh += 1
+                reasons[not_fresh_reason(r, p, status)] += 1
             version = paper_fill.as_number(p.get("fill_model_version"))
             if version is None or version < 1:
                 legacy += 1
@@ -78,7 +102,9 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
         sh = shadow.get(lane) or {"no_fill": 0, "reject": 0, "by_status": {}}
         per_tile.append({
             "lane": lane, "tile": short_names.get(lane), "closed": len(closed),
-            "fresh_eligible": fresh, "not_fresh": not_fresh, "legacy_rows": legacy, "v1_rows": v1_rows,
+            "fresh_eligible": fresh, "not_fresh": not_fresh, "identity_quarantined": quarantined,
+            "not_fresh_reasons": dict(reasons), "writer_flags": dict(flags),
+            "legacy_rows": legacy, "v1_rows": v1_rows,
             "fill_model_counts": dict(models), "fill_model_version_counts": dict(versions),
             "delay_source_counts": dict(delay_sources), "forced_counts": dict(forced),
             "shadow": sh,
