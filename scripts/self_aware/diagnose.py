@@ -846,6 +846,21 @@ def check_data_compat(f, sig, store) -> list[Finding]:
             for r in rows]
 
 
+def check_laptop_disk_free(f, sig, store) -> Finding:
+    """laptop.disk_free: absolute free GB on the laptop drive (AMBER < 15 GB or probe failure, RED < 5 GB)."""
+    d = f.get("laptop_disk")
+    amber, red = THRESHOLDS["laptop_disk_free_amber_gb"], THRESHOLDS["laptop_disk_free_red_gb"]
+    expected = f"laptop drive has >= {amber:.0f} GB free (AMBER below {amber:.0f}, RED below {red:.0f})"
+    free = (d or {}).get("free_gb")
+    if free is None:
+        # A failed probe means we cannot see the disk at all: AMBER, never a silent SKIP.
+        return Finding("laptop.disk_free", "Laptop disk free space", "data", AMBER,
+                       "disk probe failed: " + str((d or {}).get("error") or "laptop disk not probed"), expected, evidence={"laptop_disk": d})
+    sev = RED if free < red else AMBER if free < amber else GREEN
+    return Finding("laptop.disk_free", "Laptop disk free space", "data", sev,
+                   f"{free} GB free of {d.get('total_gb')} GB on {d.get('path')}", expected, evidence={"laptop_disk": d})
+
+
 def check_fees(f, sig, store) -> Finding:
     """Fee truth (30-min job): Bitfinex account fees == bitfinex_cost_profile == every other fee surface."""
     title, expected = "Fees match the Bitfinex account everywhere", (
@@ -1007,6 +1022,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_contracts(facts, sig, store),
         lambda: check_data_compat(facts, sig, store),
         lambda: check_fees(facts, sig, store),
+        lambda: check_laptop_disk_free(facts, sig, store),
         lambda: check_bitfinex_readiness(facts, sig, store, state),
     ]
     findings: list[Finding] = []

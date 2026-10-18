@@ -744,3 +744,15 @@ def test_tile_orders_quiet_window_follows_each_tiles_own_rate(paths, store):
     store.refresh_views()
     fd = diagnose.check_orders_on_tiles(f, diagnose.signals(f), store)
     assert fd.severity == "GREEN", fd.observed
+
+
+def test_laptop_disk_free_thresholds_and_probe_failure(store):
+    from self_aware import diagnose as dg
+    sev = lambda d: dg.check_laptop_disk_free(_facts(laptop_disk=d), {}, store).severity
+    assert sev({"free_gb": 80.0, "total_gb": 500.0, "path": "C:"}) == "GREEN"
+    assert sev({"free_gb": 14.9, "total_gb": 500.0, "path": "C:"}) == "AMBER"
+    assert sev({"free_gb": 4.9, "total_gb": 500.0, "path": "C:"}) == "RED"
+    assert sev({"error": "OSError: x"}) == "AMBER" and sev(None) == "AMBER"
+    assert "probe failed" in dg.check_laptop_disk_free(_facts(laptop_disk={"error": "OSError: x"}), {}, store).observed
+    from self_aware import facts as fx
+    assert fx.laptop_disk("/")["free_gb"] > 0
