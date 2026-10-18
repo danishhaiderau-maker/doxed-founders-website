@@ -112,6 +112,84 @@ def oom_eta(history: list, limit_kb: int | None, min_window_sec: float = 1800.0)
             "limit_mb": limit_kb // 1024}
 
 
+WARMUP_SEC = 2 * 3600.0
+LEAK_CHECK_UPTIME_SEC = 3 * 3600.0
+LEAK_MB_PER_H = 50.0
+MIN_POST_WARMUP_SAMPLES = 6
+STALE_SEC = 600.0           # runtime_telemetry samples every ~60 s; older than this the sample is not trusted
+STALE_AMBER_SEC = 1800.0    # UNKNOWN that persists this long becomes AMBER
+PENDING_RED_FRAC = 0.60
+ANY_RED_FRAC = 0.80
+SERIES_KEEP = 400           # ~66 h at the 10-minute tracker interval
+
+
+def _slope_kb_per_h(pts: list) -> float | None:
+    """Least-squares RSS slope (kB/h) over (ts, rss_kb) points; None if the span is empty."""
+    n = len(pts)
+    if n < 2:
+        return None
+    t0 = pts[0][0]
+    xs = [(t - t0) / 3600.0 for t, _ in pts]
+    ys = [float(v) for _, v in pts]
+    mx, my = sum(xs) / n, sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    if den <= 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
+
+
+def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: float,
+               sample_ts: float | None, rss_kb_now: int | None, leak_structure: str | None = None,
+               prev_boot: dict | None = None) -> dict:
+    """fly.memory_oom_eta state. ``series`` = [(ts, rss_kb)] of runtime_telemetry samples (the same RSS /api/status shows).
+
+    - missing/stale sample -> UNKNOWN, AMBER once it has persisted > 30 min;
+    - first 2 h after boot -> PENDING (current RSS, NO OOM projection), RED at 60% of the VM limit;
+    - RED at 80% of the limit at any time;
+    - after warm-up: slope from post-warm-up samples only, >= 6 of them; > 50 MB/h at >= 3 h uptime is a leak (named).
+    """
+    limit_mb = (limit_kb // 1024) if limit_kb else None
+    base = {"status": "UNKNOWN", "hours_to_oom": None, "rss_growth_mb_per_h": None, "rss_mb": None,
+            "limit_mb": limit_mb, "uptime_sec": None, "leak": False, "leak_structure": None, "reason": None,
+            "prev_boot": prev_boot}
+    age = None if sample_ts is None else now - float(sample_ts)
+    if sample_ts is None or rss_kb_now is None or age > STALE_SEC or not limit_kb or boot_ts is None:
+        base["reason"] = "NO_SAMPLE" if sample_ts is None or rss_kb_now is None else (
+            "STALE_SAMPLE" if age > STALE_SEC else "NO_LIMIT_OR_BOOT")
+        base["sample_age_sec"] = None if age is None else round(age)
+        if age is not None and age > STALE_AMBER_SEC:
+            base["status"] = "AMBER"
+        return base
+    uptime = max(0.0, now - float(boot_ts))
+    base.update(uptime_sec=round(uptime), rss_mb=rss_kb_now // 1024, sample_age_sec=round(age))
+    frac = rss_kb_now / float(limit_kb)
+    if frac >= ANY_RED_FRAC:
+        base.update(status="RED", reason="RSS_OVER_80PCT_OF_LIMIT")
+        return base
+    if uptime < WARMUP_SEC:
+        base.update(status="RED" if frac >= PENDING_RED_FRAC else "PENDING",
+                    reason="RSS_OVER_60PCT_DURING_WARMUP" if frac >= PENDING_RED_FRAC else "WARMUP_NO_PROJECTION")
+        return base
+    post = [(t, v) for t, v in series if t >= float(boot_ts) + WARMUP_SEC and v]
+    if len(post) < MIN_POST_WARMUP_SAMPLES:
+        base.update(status="PENDING", reason=f"POST_WARMUP_SAMPLES_{len(post)}_OF_{MIN_POST_WARMUP_SAMPLES}")
+        return base
+    slope = _slope_kb_per_h(post)
+    if slope is None:
+        base.update(status="PENDING", reason="NO_SPAN")
+        return base
+    mbh = slope / 1024.0
+    hours = None if slope <= 0 else round(max(0, limit_kb - rss_kb_now) / slope, 2)
+    st = "GREEN" if hours is None else ("RED" if hours < 6 else "AMBER" if hours < 24 else "GREEN")
+    leak = uptime >= LEAK_CHECK_UPTIME_SEC and mbh > LEAK_MB_PER_H
+    if leak and st == "GREEN":
+        st = "AMBER"
+    base.update(status=st, hours_to_oom=hours, rss_growth_mb_per_h=round(mbh, 1), leak=leak,
+                leak_structure=(leak_structure or "UNATTRIBUTED_ANON_OR_NATIVE") if leak else None,
+                reason="LEAK_OVER_50MB_PER_H" if leak else "SLOPE")
+    return base
+
+
 def module_containers(modules=None, top: int = TOP_N) -> list[dict]:
     rows = []
     for mname, mod in list((modules if modules is not None else sys.modules).items()):
@@ -150,12 +228,61 @@ class Tracker:
     def __init__(self, path, interval_sec: float = 600.0) -> None:
         self.path, self.interval, self._last, self.history = Path(path), float(interval_sec), 0.0, []
         self._runs = 0
+        self.series: list = []
+        self.boot_ts: float | None = None
+        self.prev_boot: dict | None = None
+        self._load_previous()
+
+    def _load_previous(self) -> None:
+        """Keep the previous boot's final RSS/slope when this process is a restart (new boot_ts resets the series)."""
+        try:
+            doc = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        self._prev_doc = doc if isinstance(doc, dict) else None
+
+    def _roll_boot(self, boot_ts: float | None) -> None:
+        if boot_ts is None:
+            return
+        doc = getattr(self, "_prev_doc", None)
+        self._prev_doc = None
+        if doc is not None:
+            old_boot = doc.get("boot_ts")
+            eta = doc.get("oom_eta") or {}
+            if old_boot is not None and abs(float(old_boot) - float(boot_ts)) > 1.0:
+                ser = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or []) if b]
+                post = [(t, v) for t, v in ser if t >= float(old_boot) + WARMUP_SEC]
+                sl = _slope_kb_per_h(post) if len(post) >= 2 else None
+                self.prev_boot = {"boot_ts": old_boot, "ended_ts": ser[-1][0] if ser else None,
+                                  "final_rss_mb": (ser[-1][1] // 1024) if ser else None,
+                                  "slope_mb_per_h": round(sl / 1024.0, 1) if sl is not None else None,
+                                  "samples": len(ser), "status": eta.get("status")}
+            elif old_boot is not None:  # same boot (tracker re-created in-process): continue the series
+                self.series = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or []) if b]
+                self.prev_boot = doc.get("prev_boot")
+        self.boot_ts = boot_ts
 
     def due(self, now: float) -> bool:
         return now - self._last >= self.interval
 
-    def run(self, now: float | None = None) -> dict:
+    def run(self, now: float | None = None, sample: dict | None = None) -> dict:
+        """``sample`` = the runtime_telemetry row ({ts, boot_ts, memory:{rss_bytes}}): the same RSS /api/status reports."""
         now = time.time() if now is None else now
+        sample_ts = rss_now = boot_ts = None
+        if isinstance(sample, dict):
+            try:
+                sample_ts = float(sample.get("ts"))
+                boot_ts = float(sample.get("boot_ts")) if sample.get("boot_ts") is not None else None
+                b = (sample.get("memory") or {}).get("rss_bytes")
+                rss_now = int(b) // 1024 if b else None
+            except (TypeError, ValueError):
+                sample_ts = rss_now = None
+        if self.boot_ts is None or (boot_ts is not None and abs(boot_ts - self.boot_ts) > 1.0):
+            self._roll_boot(boot_ts)
+            if boot_ts is not None and self.boot_ts != boot_ts:
+                self.boot_ts = boot_ts
+        if rss_now is not None and sample_ts is not None and (not self.series or self.series[-1][0] < sample_ts):
+            self.series = (self.series + [(sample_ts, rss_now)])[-SERIES_KEEP:]
         self._last = now
         # The gc histogram walks every object (a GIL pause of seconds on a big heap): only every HISTOGRAM_EVERY-th run.
         full = self._runs % HISTOGRAM_EVERY == 0
@@ -167,8 +294,20 @@ class Tracker:
         first = self.history[0]
         base = {r["name"]: r["len"] for r in first["containers"]}
         tbase = {r["type"]: r["shallow_bytes"] for r in first["types"]}
-        doc = {"schema": "memory_structures_v1", "latest": snap,
-               "oom_eta": oom_eta(self.history, memory_limit_kb()),
+        growth_c = sorted(({"name": r["name"], "len_growth": r["len"] - base.get(r["name"], 0)} for r in snap["containers"]),
+                          key=lambda r: r["len_growth"], reverse=True)
+        growth_t = sorted(({"type": r["type"], "growth": r["shallow_bytes"] - tbase.get(r["type"], 0)} for r in snap["types"]),
+                          key=lambda r: r["growth"], reverse=True)
+        leak_name = None
+        if growth_c and growth_c[0]["len_growth"] > 0:
+            leak_name = "container:" + growth_c[0]["name"]
+        elif growth_t and growth_t[0]["growth"] > 0:
+            leak_name = "type:" + growth_t[0]["type"]
+        doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
+               "oom_eta": oom_status(self.series, memory_limit_kb(), self.boot_ts, now, sample_ts, rss_now,
+                                     leak_structure=leak_name, prev_boot=self.prev_boot),
+               "prev_boot": self.prev_boot,
+               "rss_series_full": [[round(t, 1), v] for t, v in self.series],
                "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),
                "window_sec": round(now - first["ts"], 1), "rss_growth_kb": (snap["rss_kb"] or 0) - (first["rss_kb"] or 0),
                "container_growth": sorted(

@@ -46667,7 +46667,7 @@ def runtime_uptime_loop():
         now = time.time()
         if _mem_tracker is not None and _mem_tracker.due(now):
             try:
-                _mem_tracker.run(now)
+                _mem_tracker.run(now, sample=(_runtime_telemetry_status(now) or {}).get("latest"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[MEMORY] snapshot failed: %s", type(exc).__name__)
         try:
@@ -46768,20 +46768,29 @@ def _persist_system_health_state() -> None:
 
 
 def _memory_oom_check(now: float) -> dict:
-    """fly.memory_oom_eta from the tracker's own samples (no new sampling here): RED when the container limit is <6 h away."""
+    """fly.memory_oom_eta (HM 19 Oct): RSS comes from the same runtime_telemetry sample /api/status reports.
+    UNKNOWN on a stale/missing sample (AMBER after 30 min); PENDING with no projection for 2 h after boot (RED at 60% of
+    the VM limit); RED at 80% any time; then a post-warm-up slope (>= 6 samples); >50 MB/h at 3 h uptime names the leak."""
     try:
         doc = json.loads((_data_sync_volume_root() / "memory_structures.json").read_text(encoding="utf-8"))
-        eta = doc.get("oom_eta") or {}
-        age = now - float((doc.get("latest") or {}).get("ts") or 0)
-        st = eta.get("status") or "PENDING"
-        if age > 3600:
-            st = "AMBER"
+        eta = dict(doc.get("oom_eta") or {})
+        # Re-judge staleness at read time: the tracker file is only rewritten every 10 minutes.
+        latest = (_runtime_telemetry_status(now) or {}).get("latest") or {}
+        rts, rb = latest.get("ts"), (latest.get("memory") or {}).get("rss_bytes")
+        import memory_structures as _ms
+        series = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or [])]
+        boot = doc.get("boot_ts") or latest.get("boot_ts")
+        eta = _ms.oom_status(series, _ms.memory_limit_kb(), boot, now, rts, (int(rb) // 1024) if rb else None,
+                             leak_structure=eta.get("leak_structure"), prev_boot=doc.get("prev_boot"))
+        st = eta.get("status") or "UNKNOWN"
         obs = (f"rss={eta.get('rss_mb')}MB growth={eta.get('rss_growth_mb_per_h')}MB/h limit={eta.get('limit_mb')}MB "
-               f"oom_in={eta.get('hours_to_oom')}h sample_age={int(age)}s")
-        return {"id": "fly.memory_oom_eta", "status": {"PENDING": "AMBER"}.get(st, st), "observed": obs,
-                "threshold": "RSS trend reaches the container limit in >24h (AMBER <24h, RED <6h)"}
+               f"oom_in={eta.get('hours_to_oom')}h uptime={eta.get('uptime_sec')}s reason={eta.get('reason')}"
+               + (f" LEAK={eta.get('leak_structure')}" if eta.get("leak") else ""))
+        return {"id": "fly.memory_oom_eta", "status": st, "observed": obs, "detail": eta,
+                "threshold": "RSS from runtime_telemetry; PENDING 2h after boot (RED >=60% of limit); RED >=80% any time; "
+                             "after warm-up >=6 samples, RED <6h / AMBER <24h to the limit; >50 MB/h at 3h uptime = leak"}
     except Exception as exc:  # noqa: BLE001 - never break the health route
-        return {"id": "fly.memory_oom_eta", "status": "AMBER", "observed": f"no sample ({type(exc).__name__})",
+        return {"id": "fly.memory_oom_eta", "status": "UNKNOWN", "observed": f"no sample ({type(exc).__name__})",
                 "threshold": "tracker sample present"}
 
 
@@ -46929,7 +46938,7 @@ def system_health_view():
     out["counts"] = counts
     if bad:
         out["failing"] = list(out.get("failing") or []) + bad
-        rank = {"GREEN": 0, "SKIP": 0, "AMBER": 1, "RED": 2}
+        rank = {"GREEN": 0, "SKIP": 0, "PENDING": 0, "UNKNOWN": 0, "AMBER": 1, "RED": 2}
         worst = max(bad, key=lambda c: rank[c["status"]])["status"]
         if rank[worst] > rank.get(out.get("verdict"), 0):
             out["verdict"] = worst
