@@ -150,3 +150,15 @@ def test_live_copy_tile_eligibility_sidecar_retained_only_at_volume_root(tmp_pat
     os.utime(f, (1000, 1000))
     scan = ig.scan_local_oldest(str(tmp_path))
     assert "live_copy_tile_eligibility.json" in scan["kept"] and "live_copy_tile_eligibility.json" not in scan["files"]
+
+
+def test_runtime_state_files_retained_only_at_their_anchored_paths():
+    yes = ("runtime/data_epoch.json", "runtime/crash_dump.json", "runtime/clean-epoch-receipts/receipts.jsonl",
+           "runtime/clean-epoch-receipts/pre-start/receipt-fly-1.json",
+           "runtime/data_epoch_boundary/cancellation_evidence_handoffs.jsonl.compaction.json")
+    no = ("data_epoch.json", "x/runtime/data_epoch.json", "runtime/data_epoch.json.bak", "x/runtime/crash_dump.json",
+          "runtime/data_epoch_boundary/sub/a.compaction.json", "runtime/data_epoch_boundary/a.json",
+          "archive_receipt.json", "research_archive/handoffs/cancellation_evidence_handoffs.jsonl.20261013T021532Z",
+          "research_archive/handoffs/fill_evidence_handoffs.jsonl.20261013T212706Z")
+    assert all(ig.retained_by_design(x) for x in yes)
+    assert not any(ig.retained_by_design(x) for x in no), [x for x in no if ig.retained_by_design(x)]

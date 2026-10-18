@@ -209,3 +209,22 @@ def test_exit_leg_price_is_the_filled_price_not_the_trigger():
                                           "remaining_fraction": 0.5, "realized_gross_usd": 0.01}]}
     leg = monitor_tiles._legs(partial)[0]
     assert leg["price"] == 81600.0 and leg["trigger_price"] == 81595.0
+
+
+def test_by_model_labels_timestampless_rows_unstamped_not_pre_epoch():
+    lane = "FAMILY_GS01_XV_PREMIUM_ATR_TP"
+    nots = good_row()
+    for k in ("entry_ts", "exit_ts"):
+        nots.pop(k)
+    rows = [nots, good_row(entry_ts=EPOCH - 5, exit_ts=EPOCH - 1), good_row()]
+    cat = fills_by_model.summarise(rows, [lane])["tiles"][lane]["by_category"]
+    assert cat["unstamped"] == 1 and cat["pre_epoch"] == 1 and cat["countable"] == 1
+    assert fills_by_model.classify(nots) == "unstamped"
+
+
+def test_tile_fill_block_exposes_pricer_evidence_status():
+    sim = {"fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "evidence_status": "COMPLETE"}
+    assert monitor_tiles._fill_block({}, filled=True, raw={"entry_fill_sim": sim})["evidence_status"] == "COMPLETE"
+    inc = dict(sim, evidence_status="INCOMPLETE")
+    assert monitor_tiles._fill_block({}, filled=True, raw={"entry_fill_sim": inc})["evidence_status"] == "INCOMPLETE"
+    assert monitor_tiles._fill_block({}, filled=True, raw={})["evidence_status"] is None
