@@ -162,3 +162,16 @@ def test_runtime_state_files_retained_only_at_their_anchored_paths():
           "research_archive/handoffs/fill_evidence_handoffs.jsonl.20261013T212706Z")
     assert all(ig.retained_by_design(x) for x in yes)
     assert not any(ig.retained_by_design(x) for x in no), [x for x in no if ig.retained_by_design(x)]
+
+
+def test_pinned_epoch_boundary_receipts_retained_only_for_the_pinned_id_at_the_anchored_path():
+    e = ig.PINNED_EPOCH_ID
+    assert e == "ce-20261004-v31-freeze21b"
+    for ok in (f"runtime/data_epoch_boundary/{e}.v3.json", f"runtime/data_epoch_boundary/{e}.research_events_v22.json"):
+        assert ig.retained_by_design(ok), ok
+    for bad in ("runtime/data_epoch_boundary/ce-20261004-v31-clean.v3.json",
+                "runtime/data_epoch_boundary/ce-20261004-v30-freeze21b.research_events_v22.json",
+                f"x/runtime/data_epoch_boundary/{e}.v3.json", f"data_epoch_boundary/{e}.v3.json",
+                f"runtime/data_epoch_boundary/sub/{e}.v3.json", f"runtime/data_epoch_boundary/{e}.v3.json.bak",
+                f"runtime/data_epoch_boundary/{e}.pre_epoch_archive.json", f"runtime/data_epoch_boundary/{e}x.v3.json"):
+        assert not ig.retained_by_design(bad), bad

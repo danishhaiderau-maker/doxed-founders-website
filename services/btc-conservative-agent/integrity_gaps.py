@@ -52,6 +52,10 @@ def oldest_row_ts(path: str) -> Optional[float]:
 _DATA_SUFFIXES = (".jsonl", ".json", ".csv", ".tgz", ".gz", ".tar", ".sqlite", ".sqlite3", ".db", ".npz", ".pkl")
 
 
+# The pinned data epoch id (fly.toml DATA_EPOCH_ID; frozen by test_research_freeze). Its boundary receipts are read at
+# boot (bot._data_epoch_boundary_status, epoch_boundary_rotation.run_boundary), so they are current-epoch state.
+PINNED_EPOCH_ID = "ce-20261004-v31-freeze21b"
+
 _RETAINED_RE = tuple(re.compile(x) for x in (
     r"runtime/v3/receipts/(?:emergency|owner|recovery)[^/]*/.*",
     r"runtime/live_copy_[^/]+\.json",
@@ -60,6 +64,7 @@ _RETAINED_RE = tuple(re.compile(x) for x in (
     r"runtime/crash_dump\.json",
     r"runtime/clean-epoch-receipts/.*",
     r"runtime/data_epoch_boundary/[^/]+\.compaction\.json",
+    r"runtime/data_epoch_boundary/" + re.escape(PINNED_EPOCH_ID) + r"\.(?:v3|research_events_v22)\.json",
     r"quarantine/v3_completeness_markers/.*",
 ))
 _RETAINED_DIR_RE = tuple(re.compile(x) for x in (
