@@ -1,0 +1,277 @@
+[
+ {
+  "collector_epoch_id": null,
+  "data_epoch_id": "ce-20261004-v31-freeze21b",
+  "entry_ts": null,
+  "exit_ts": null,
+  "fresh_epoch_id": null,
+  "identity_quarantined": false,
+  "lane": "FAMILY_GSB2_REGIME_SWITCHER",
+  "leverage": null,
+  "notional_usd": null,
+  "order": {
+   "expired_ts": 1792352343.339135,
+   "limit_price": 80973.0,
+   "missed_by_usd": 0.0,
+   "submitted_ts": 1792352341.8085454,
+   "terminal": "EXPIRED",
+   "terminal_reason": "PAPER_IOC_REJECT_NO_BOOK",
+   "touched_limit": true
+  },
+  "policy_signature": null,
+  "requested_qty": null,
+  "schema": "tile_trade_row_v1",
+  "side": "LONG",
+  "sort_ts": 1792352341.8085454,
+  "status": "EXPIRED",
+  "tile_short": "B2",
+  "trade_id": "gb2-eaec6129ced8",
+  "trigger": {
+   "entry_path": null,
+   "entry_type": null,
+   "regime_at_signal": null,
+   "regime_at_signal_source": "MISSING",
+   "shared_ai_call_id": "cvd-1792352340-long",
+   "signal_ts": 1792352341.321
+  }
+ },
+ {
+  "collector_epoch_id": "epoch-e13a634e93d8d9a87305476c",
+  "data_epoch_id": "ce-20261004-v31-freeze21b",
+  "entry_ts": 1792352347.978039,
+  "exit": {
+   "legs": []
+  },
+  "exit_ts": null,
+  "fill": {
+   "evidence_status": "COMPLETE",
+   "execution_basis": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY:BOOK10L_TAKER_WALK",
+   "fill_basis": "BOOK10L_TAKER_WALK",
+   "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY",
+   "fill_price": 80949.0,
+   "fill_ts": 1792352347.978039,
+   "liquidity": "TAKER",
+   "queue_estimate": null
+  },
+  "fresh_epoch_id": null,
+  "identity_quarantined": false,
+  "lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+  "leverage": 100.0,
+  "notional_usd": 25.0,
+  "order": {
+   "submitted_ts": 1792352346.3755708,
+   "terminal": "FILLED"
+  },
+  "policy_signature": "paper-policy-6fc651b2f100a2457798",
+  "pricing": {
+   "ask_age_ms": 1838.0,
+   "delay_s": 1.5,
+   "delay_source": "default_until_n10",
+   "depth_snapshot_fill": {
+    "a": [
+     [
+      80964,
+      0.0001
+     ],
+     [
+      80965,
+      0.0371
+     ],
+     [
+      80966,
+      0.0268
+     ],
+     [
+      80994,
+      0.0371
+     ],
+     [
+      80998,
+      0.1062
+     ],
+     [
+      80999,
+      0.0268
+     ],
+     [
+      81000,
+      0.0445
+     ],
+     [
+      81002,
+      0.1102
+     ],
+     [
+      81003,
+      0.0001
+     ],
+     [
+      81004,
+      0.445
+     ]
+    ],
+    "b": [
+     [
+      80949,
+      0.01
+     ],
+     [
+      80947,
+      0.0371
+     ],
+     [
+      80933,
+      0.1605
+     ],
+     [
+      80926,
+      0.0379
+     ],
+     [
+      80924,
+      0.5258
+     ],
+     [
+      80922,
+      0.0737
+     ],
+     [
+      80921,
+      0.0001
+     ],
+     [
+      80920,
+      0.0087
+     ],
+     [
+      80916,
+      0.1109
+     ],
+     [
+      80915,
+      0.0619
+     ]
+    ],
+    "s": 1792352346
+   },
+   "depth_snapshot_signal": {
+    "a": [
+     [
+      80962,
+      0.0371
+     ],
+     [
+      80964,
+      0.0001
+     ],
+     [
+      80966,
+      0.0268
+     ],
+     [
+      80994,
+      0.0371
+     ],
+     [
+      80998,
+      0.01
+     ],
+     [
+      80999,
+      0.0268
+     ],
+     [
+      81000,
+      0.0653
+     ],
+     [
+      81003,
+      0.0001
+     ],
+     [
+      81004,
+      0.5552
+     ],
+     [
+      81005,
+      0.0618
+     ]
+    ],
+    "b": [
+     [
+      80949,
+      0.0147
+     ],
+     [
+      80943,
+      0.0371
+     ],
+     [
+      80926,
+      0.0379
+     ],
+     [
+      80924,
+      0.5118
+     ],
+     [
+      80921,
+      0.0001
+     ],
+     [
+      80920,
+      0.0823
+     ],
+     [
+      80915,
+      0.0619
+     ],
+     [
+      80914,
+      0.0002
+     ],
+     [
+      80913,
+      0.1109
+     ],
+     [
+      80912,
+      0.6313
+     ]
+    ],
+    "s": 1792352345
+   },
+   "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY",
+   "fill_model_version": 1,
+   "fresh_eligible": null,
+   "state": "OPEN: entry priced, exit priced at close"
+  },
+  "protection": {
+   "be_armed": null,
+   "peak_bp": 10.500438547727581,
+   "remaining_fraction": null,
+   "tp1_done": false,
+   "trail_armed": false
+  },
+  "requested_qty": 0.00030889748310330766,
+  "schema": "tile_trade_row_v1",
+  "side": "SHORT",
+  "sort_ts": 1792352346.3755708,
+  "status": "OPEN",
+  "tile_short": "GS-01",
+  "trade_id": "gs1-f31e676ca020",
+  "trigger": {
+   "action": "TAKER",
+   "entry_path": "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+   "entry_type": "SIM_LIMIT",
+   "exit_profile": "ALL",
+   "reason": "QUIET_TAKER",
+   "regime": "QUIET",
+   "regime_at_signal": "QUIET",
+   "regime_at_signal_source": "adaptive_entry_decision",
+   "shared_ai_call_id": "gsxvp-1792352345",
+   "signal_ts": 1792352346.321,
+   "trigger_kind": "CROSS_VENUE_PREMIUM"
+  }
+ }
+]
