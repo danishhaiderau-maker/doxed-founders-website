@@ -86,3 +86,33 @@ def test_plan_sha_changes_when_the_selection_changes_and_tape_inside_168h_is_kep
     assert a["plan_sha256"] != b["plan_sha256"] and b["plans"]["C2"]["count"] == a["plans"]["C2"]["count"] + 1
     early = np_.build_all(root, EPOCH, EPOCH + 3 * 86400)   # 3 days after the epoch: nothing is outside the 168h window
     assert early["plans"]["C3b"]["count"] == 1              # only the 10-day-old pre-epoch file
+
+
+def test_c5_selects_only_pre_epoch_rotated_shards_is_read_only_and_leaves_c1_c4_sha_alone(tmp_path):
+    import os, time
+    import nonaccum_plans as np_
+    epoch = 1_792_263_671.26
+    rt = tmp_path / "runtime"
+    rt.mkdir()
+    def w(name, mtime, data=b"x" * 10):
+        p = rt / name
+        p.write_bytes(data)
+        os.utime(p, (mtime, mtime))
+    w("signal_replay.jsonl", epoch + 5)               # active file: never a rotated shard
+    w("signal_replay.jsonl.1", epoch - 100)           # pre-epoch -> selected
+    w("signal_replay.jsonl.2", epoch + 100)           # fresh -> kept
+    w("signal_replay.jsonl.tmp", epoch - 100)         # non-numeric sibling -> ignored
+    w("post_exit_replay.jsonl.7", epoch - 1, b"y" * 30)
+    (rt / "v3").mkdir()
+    (rt / "v3" / "a.jsonl.1").write_bytes(b"z")
+    os.utime(rt / "v3" / "a.jsonl.1", (epoch - 10, epoch - 10))
+    before = sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*"))
+    plan = np_.build_c5(str(tmp_path), epoch)
+    assert sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*")) == before          # read-only
+    assert plan["plan"]["count"] == 2 and plan["plan"]["bytes"] == 40
+    assert plan["plan"]["per_prefix"] == {"runtime/post_exit_replay.jsonl": {"count": 1, "bytes": 30},
+                                          "runtime/signal_replay.jsonl": {"count": 1, "bytes": 10}}
+    assert plan["plan"]["fresh_rotated_not_selected"] == {"runtime/signal_replay.jsonl": {"files": 1, "bytes": 10}}
+    assert plan["plan_sha256"] == np_.build_c5(str(tmp_path), epoch)["plan_sha256"]                # deterministic
+    w("signal_replay.jsonl.3", epoch - 5)
+    assert np_.build_c5(str(tmp_path), epoch)["plan_sha256"] != plan["plan_sha256"]

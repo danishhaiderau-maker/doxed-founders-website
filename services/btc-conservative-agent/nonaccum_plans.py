@@ -222,6 +222,48 @@ def plan_c4(root: str, epoch_ts: float) -> dict:
                                                          "unacked_check": "NOT EVALUATED here: executor must verify no unacked/pending event for current-epoch intents"})
 
 
+_ROTATED = re.compile(r"^(.+\.jsonl)\.(\d+)$")
+
+
+def plan_c5(root: str, epoch_ts: float) -> dict:
+    """C5 (read-only): rotated research shards ``<name>.jsonl.<N>`` outside runtime/v3 whose mtime (= newest row) is before the
+    epoch. Fresh shards are NOT selected (reported only, per base file). Separate from build_all so the approved C1-C4
+    plan_sha256 is unchanged. Pre-epoch rows are also never read by #758's loader, so deleting these is pure disk."""
+    items, fresh = [], {}
+    for r, dirs, names in os.walk(root):
+        if os.path.join(root, "runtime", "v3") in r:
+            dirs[:] = []
+            continue
+        for n in names:
+            m = _ROTATED.match(n)
+            if not m:
+                continue
+            p = os.path.join(r, n)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            rel = os.path.relpath(p, root)
+            if st.st_mtime < epoch_ts:
+                items.append((rel, st.st_size, st.st_mtime_ns))
+            else:
+                base = os.path.relpath(os.path.join(r, m.group(1)), root)
+                f = fresh.setdefault(base, {"files": 0, "bytes": 0})
+                f["files"] += 1
+                f["bytes"] += st.st_size
+    return _plan("C5", "<name>.jsonl.<N> rotated shards outside runtime/v3 with mtime<epoch", items,
+                 lambda it: re.sub(r"\.jsonl\.\d+$", ".jsonl", it[0]),
+                 {"fresh_rotated_not_selected": fresh})
+
+
+def build_c5(root: str = "/app/data", epoch_ts: float | None = None) -> dict:
+    if epoch_ts is None:
+        raise SystemExit("epoch_ts required")
+    plan = plan_c5(root, epoch_ts)
+    return {"schema": "nonaccum_plan_c5_v1", "read_only": True, "epoch_ts": epoch_ts, "plan": plan,
+            "plan_sha256": plan["items_sha256"]}
+
+
 def build_all(root: str = "/app/data", epoch_ts: float | None = None, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     v3 = os.path.join(root, "runtime", "v3")
