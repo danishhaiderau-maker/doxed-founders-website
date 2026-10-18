@@ -2552,6 +2552,16 @@ jobs:
               h.write("live_lanes=" + ",".join(lanes) + "\n")
           PY
 
+      - name: Pre-deploy gate - live OFF, force_paper, no open trade on ANY /tiles/trades page (fails closed)
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        # Danish/HM rule: deploy fast, do NOT wait for flat. --allow-open: open PAPER trades never block (the deploy
+        # force-closes them as non-countable DEPLOY_MAINTENANCE rows). Blocks only on live armed, force_paper not true,
+        # or an unreadable /api/status. The live re-arm path keeps the strict gate (no --allow-open).
+        run: python scripts/deploy_gate_open_trades.py --allow-open
+
       - name: Enter durable authenticated paper maintenance boundary
         id: paper_maintenance
         if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'

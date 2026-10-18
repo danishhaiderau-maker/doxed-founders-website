@@ -121,6 +121,51 @@ STALE_AMBER_SEC = 1800.0    # UNKNOWN that persists this long becomes AMBER
 PENDING_RED_FRAC = 0.60
 ANY_RED_FRAC = 0.80
 DEFAULT_LIMIT_KB = 8192 * 1024
+ABS_RED_KB = 3 * 1024 * 1024        # HM 19 Oct interim alert: RSS (bot + shipper) > 3 GB is RED at any uptime
+ABS_RED_YOUNG_KB = 2 * 1024 * 1024  # ... and > 2 GB in a boot younger than 12 h
+YOUNG_BOOT_SEC = 12 * 3600.0
+STAIR_MB = 50.0                     # a rise this large between two consecutive samples is recorded as a stair
+STAIRS_KEEP = 50
+LOOPS_KEEP = 40
+
+
+def detect_stairs(series, min_mb: float = STAIR_MB) -> list:
+    """[(ts, delta_mb)] for every consecutive-sample RSS rise >= min_mb (the ~110 MB/cycle stair signature)."""
+    out, prev = [], None
+    for t, v in series or []:
+        if prev is not None and v and prev[1] and (v - prev[1]) / 1024.0 >= min_mb:
+            out.append({"ts": round(float(t), 1), "delta_mb": round((v - prev[1]) / 1024.0, 1), "rss_mb": v // 1024})
+        prev = (t, v)
+    return out[-STAIRS_KEEP:]
+
+
+SHIPPER_SCRIPT = "research_segment_shipper.py"
+
+
+def cmdline_runs_script(cmdline: bytes | str, script: str = SHIPPER_SCRIPT) -> bool:
+    """True only when an argv token IS the script (basename match): `python /app/research_segment_shipper.py`. A process that merely
+    mentions 'shipper' in a path or an argument (CI/gate scripts, the monitor, `grep shipper`) does not match."""
+    raw = cmdline.encode() if isinstance(cmdline, str) else cmdline
+    toks = [t.decode("utf-8", "replace") for t in raw.split(b"\0") if t]
+    return any(os.path.basename(t) == script for t in toks)
+
+
+def process_rss_kb(script: str = SHIPPER_SCRIPT) -> int:
+    """Summed RSS (kB) of OTHER processes that run ``script`` (the research segment shipper); 0 if none/unreadable."""
+    total, me = 0, os.getpid()
+    try:
+        for ent in os.listdir("/proc"):
+            if not ent.isdigit() or int(ent) == me:
+                continue
+            try:
+                if cmdline_runs_script(Path(f"/proc/{ent}/cmdline").read_bytes(), script):
+                    total += int(Path(f"/proc/{ent}/statm").read_text().split()[1]) * 4
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        return 0
+    return total
+
 SERIES_KEEP = 400           # ~66 h at the 10-minute tracker interval
 
 
@@ -141,7 +186,7 @@ def _slope_kb_per_h(pts: list) -> float | None:
 
 def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: float,
                sample_ts: float | None, rss_kb_now: int | None, leak_structure: str | None = None,
-               prev_boot: dict | None = None) -> dict:
+               prev_boot: dict | None = None, extra_rss_kb: int = 0) -> dict:
     """fly.memory_oom_eta state. ``series`` = [(ts, rss_kb)] of runtime_telemetry samples (the same RSS /api/status shows).
 
     - missing/stale sample -> UNKNOWN, AMBER once it has persisted > 30 min;
@@ -155,6 +200,15 @@ def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: f
             "prev_boot": prev_boot}
     age = None if sample_ts is None else now - float(sample_ts)
     if rss_kb_now is not None and age is not None and age <= STALE_SEC:
+        total_kb = rss_kb_now + max(0, int(extra_rss_kb or 0))     # bot + shipper
+        base["shipper_rss_mb"] = int(extra_rss_kb or 0) // 1024
+        if total_kb >= ABS_RED_KB:
+            base.update(status="RED", rss_mb=rss_kb_now // 1024, reason="RSS_OVER_3GB", sample_age_sec=round(age))
+            return base
+        if boot_ts is not None and now - float(boot_ts) < YOUNG_BOOT_SEC and total_kb >= ABS_RED_YOUNG_KB:
+            base.update(status="RED", rss_mb=rss_kb_now // 1024, reason="RSS_OVER_2GB_UNDER_12H_BOOT", sample_age_sec=round(age),
+                        uptime_sec=round(now - float(boot_ts)))
+            return base
         # absolute ceilings apply even when the VM limit or boot time is unreadable (default: the 8 GB Fly VM)
         _lim = limit_kb or DEFAULT_LIMIT_KB
         if rss_kb_now >= ANY_RED_FRAC * _lim:
@@ -242,6 +296,7 @@ class Tracker:
         self.series: list = []
         self.boot_ts: float | None = None
         self.prev_boot: dict | None = None
+        self.loops: list = []
         self._load_previous()
 
     def _load_previous(self) -> None:
@@ -272,6 +327,11 @@ class Tracker:
                 self.series = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or []) if b]
                 self.prev_boot = doc.get("prev_boot")
         self.boot_ts = boot_ts
+
+    def record_loop(self, name: str, start_ts: float, end_ts: float) -> None:
+        """Start/end of one loop body (analytics_loop) so a stair can be matched to the cycle that caused it."""
+        self.loops = (self.loops + [{"name": name, "start": round(float(start_ts), 1), "end": round(float(end_ts), 1),
+                                     "body_sec": round(float(end_ts) - float(start_ts), 2)}])[-LOOPS_KEEP:]
 
     def due(self, now: float) -> bool:
         return now - self._last >= self.interval
@@ -314,9 +374,11 @@ class Tracker:
             leak_name = "container:" + growth_c[0]["name"]
         elif growth_t and growth_t[0]["growth"] > 0:
             leak_name = "type:" + growth_t[0]["type"]
+        shipper_kb = process_rss_kb()
         doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
                "oom_eta": oom_status(self.series, memory_limit_kb(), self.boot_ts, now, sample_ts, rss_now,
-                                     leak_structure=leak_name, prev_boot=self.prev_boot),
+                                     leak_structure=leak_name, prev_boot=self.prev_boot, extra_rss_kb=shipper_kb),
+               "shipper_rss_kb": shipper_kb, "stairs": detect_stairs(self.series), "loops": list(self.loops),
                "prev_boot": self.prev_boot,
                "rss_series_full": [[round(t, 1), v] for t, v in self.series],
                "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),

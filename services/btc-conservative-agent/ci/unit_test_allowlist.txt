@@ -596,4 +596,5 @@ test_tiles_trades_identity_quarantined.py
 test_book_gap_stats.py
 test_v3_lock_cleanup.py
 test_offline_sim_epoch_reject.py
+test_admin_close_trigger_ts.py
 test_tiles_trades_repriced_fields.py
