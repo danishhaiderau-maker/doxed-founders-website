@@ -17,7 +17,29 @@ import time
 import urllib.request
 
 MAX_PAGES = 200
+# HM 19 Oct: a terminal NON-POSITION status never counts as open, but only when the row provably has no entry fill
+# (entry_ts present and null AND fill snapshot present and empty). Any fill, any unknown status or any missing field
+# counts as open (fail closed). CLOSED rows are handled as before.
 OPEN_STATUSES_EXCLUDED = {"CLOSED"}
+TERMINAL_NO_POSITION = {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "NO_FILL"}
+
+
+def _has_entry_fill(row: dict) -> bool:
+    fill = row.get("fill")
+    if isinstance(fill, dict) and any(fill.get(k) not in (None, "") for k in ("fill_price", "fill_ts", "filled_qty")):
+        return True
+    return row.get("entry_ts") not in (None, "")
+
+
+def counts_as_open(row: dict) -> bool:
+    status = str(row.get("status")).upper()
+    if status in OPEN_STATUSES_EXCLUDED:
+        return False
+    if status in TERMINAL_NO_POSITION:
+        if "entry_ts" not in row or "fill" not in row:
+            return True                       # missing entry field: fail closed
+        return _has_entry_fill(row)
+    return True                               # OPEN, PENDING, anything unknown
 
 
 def walk_pages(fetch, path_base: str, page_log: list | None = None) -> list:
@@ -29,7 +51,7 @@ def walk_pages(fetch, path_base: str, page_log: list | None = None) -> list:
             raise ValueError(f"BAD_PAGE {path}")
         rows.extend(page["rows"])
         if page_log is not None:
-            n_open = sum(1 for r in page["rows"] if str(r.get("status")).upper() not in OPEN_STATUSES_EXCLUDED)
+            n_open = sum(1 for r in page["rows"] if counts_as_open(r))
             page_log.append({"feed": path_base.split("?")[0].rsplit("/", 1)[-1] + ("?open" if "status=open" in path_base else ""),
                              "page": len(page_log) + 1, "rows": len(page["rows"]), "non_closed": n_open})
         cursor = page.get("next_cursor")
@@ -73,7 +95,7 @@ def evaluate(fetch) -> dict:
         out["pages"] = page_log
         open_rows = walk_pages(fetch, "/api/monitor/tiles/trades?status=open&limit=500", page_log)
         all_rows = walk_pages(fetch, "/api/monitor/tiles/trades?limit=500", page_log)
-        non_closed = [r for r in all_rows if str(r.get("status")).upper() not in OPEN_STATUSES_EXCLUDED]
+        non_closed = [r for r in all_rows if counts_as_open(r)]
         out.update(pages_open=len(open_rows), rows_total=len(all_rows), non_closed_all_pages=len(non_closed))
         if open_rows or non_closed:
             reasons.append(f"OPEN_TRADES:{max(len(open_rows), len(non_closed))}")

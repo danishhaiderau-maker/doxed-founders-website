@@ -98,3 +98,66 @@ def test_timeout_on_any_page_blocks():
     for n in (1, 2, 3):
         out = gate.evaluate(_fetcher(_rows(9, 0), page_size=3, fail_page=n))
         assert out["ok"] is False and any(r.startswith("TRADES_READ_FAILED") for r in out["reasons"]), n
+
+
+# ---- 19 Oct: terminal non-position statuses (HM ruling) ------------------------------------------------------------
+import json
+from pathlib import Path
+
+_REAL = {r["trade_id"]: r for r in json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "gate_open_and_expired_rows_20261019.json").read_text())}
+
+
+def _gate_fetch(all_rows, monitor_open):
+    def fetch(path):
+        if path == "/api/status":
+            return GOOD_STATUS
+        if path == "/api/state":
+            return {"lane_position_counts": {"L": {"open": monitor_open, "pending": 0}}}
+        rows = [r for r in all_rows if str(r["status"]).upper() == "OPEN"] if "status=open" in path else all_rows
+        return {"rows": rows, "next_cursor": None, "remaining_after_page": 0}
+    return fetch
+
+
+def _expired(**kw):
+    row = {"trade_id": "e", "status": "EXPIRED", "entry_ts": None, "fill": None}
+    row.update(kw)
+    return row
+
+
+def test_real_open_row_counts_and_real_expired_unfilled_row_does_not():
+    o, e = _REAL["gs1-f31e676ca020"], _REAL["gb2-eaec6129ced8"]
+    assert gate.counts_as_open(o) is True and gate.counts_as_open(e) is False
+    out = gate.evaluate(_gate_fetch([e, o], monitor_open=1))
+    assert out["non_closed_all_pages"] == 1 and out["pages_open"] == 1
+    assert "OPEN_TRADES:1" in out["reasons"] and not any(r.startswith(("OPEN_VIEWS", "COUNT_MISMATCH")) for r in out["reasons"])
+
+
+def test_flat_with_only_an_expired_unfilled_row_passes():
+    out = gate.evaluate(_gate_fetch([_REAL["gb2-eaec6129ced8"]] + _rows(3, 0), monitor_open=0))
+    assert out["ok"] is True
+
+
+def test_expired_with_an_entry_ts_or_a_fill_snapshot_fails_closed():
+    assert gate.counts_as_open(_expired(entry_ts=1792352347.0)) is True
+    assert gate.counts_as_open(_expired(fill={"fill_price": 80949.0, "fill_ts": 1.0})) is True
+    out = gate.evaluate(_gate_fetch([_expired(entry_ts=1.0)], monitor_open=0))
+    assert out["ok"] is False and any(r.startswith("OPEN_TRADES") for r in out["reasons"])
+
+
+def test_unknown_status_or_missing_entry_field_fails_closed():
+    assert gate.counts_as_open({"status": "WEIRD", "entry_ts": None, "fill": None}) is True
+    assert gate.counts_as_open({"status": "EXPIRED", "fill": None}) is True            # entry_ts missing
+    assert gate.counts_as_open({"status": "EXPIRED", "entry_ts": None}) is True        # fill missing
+    assert gate.counts_as_open({"status": None}) is True
+
+
+def test_other_terminal_non_position_statuses_are_non_open_only_when_unfilled():
+    for st in ("CANCELLED", "CANCELED", "REJECTED", "NO_FILL", "expired"):
+        assert gate.counts_as_open(_expired(status=st)) is False
+        assert gate.counts_as_open(_expired(status=st, entry_ts=5.0)) is True
+
+
+def test_monitor_count_stays_open_plus_pending_and_mismatch_still_fails():
+    out = gate.evaluate(_gate_fetch([_REAL["gs1-f31e676ca020"], _REAL["gb2-eaec6129ced8"]], monitor_open=2))
+    assert any(r.startswith("COUNT_MISMATCH") for r in out["reasons"])
