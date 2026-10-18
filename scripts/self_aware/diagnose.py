@@ -629,12 +629,51 @@ def check_advancing(f, sig, store, state: dict[str, Any]) -> Finding:
     stuck = {k: now - t for k, t in last_change.items() if now - t > 20 * 60}
     paused = sig["paper_paused"]["on"]
     sev = GREEN if not stuck or paused else (RED if any(v > 2 * 3600 for v in stuck.values()) else AMBER)
+    # decision_rows watchdog: the tape moves but the decision stream does not (HM 18 Oct: it sat at 0 for 11.6 h
+    # behind a stale cached view signature while the generic 20 min / 2 h rule never reached RED in time).
+    dec_age = now - last_change["decision_rows"] if "decision_rows" in last_change else None
+    tape_age = now - last_change["tape_rows"] if "tape_rows" in last_change else None
+    if not paused and dec_age is not None and tape_age is not None and tape_age <= 20 * 60:
+        if dec_age > THRESHOLDS["decision_rows_stuck_red_sec"]:
+            sev = RED
+        elif dec_age > THRESHOLDS["decision_rows_stuck_amber_sec"] and sev != RED:
+            sev = AMBER
+        stuck.setdefault("decision_rows", dec_age) if dec_age > THRESHOLDS["decision_rows_stuck_amber_sec"] else None
     return Finding("prog.counts_advancing", "Counters keep advancing", "progress", sev,
                    ", ".join(f"{k}={values.get(k)} (changed {fmt_age(now - last_change[k])} ago)" for k in sorted(last_change)),
                    "shipped/acked segment seq, decision rows and tape rows change within 20 min while paper runs",
                    causes=[] if sev == GREEN else attribute(["shipper_stalled", "lock_holder", "deploy_maintenance",
                                                               "cpu_saturation"], sig),
                    evidence={"stuck": stuck})
+
+
+def check_raw_view_integrity(f, sig, store, state: dict[str, Any]) -> Finding:
+    """RED when raw_catalog says a view is MISSING (files=0) while its files exist on disk and keep advancing."""
+    try:
+        cat = {r["view_name"]: r for r in store.catalog().get("raw_views") or []}
+    except Exception as exc:  # noqa: BLE001
+        return Finding("data.raw_view_integrity", "Raw views match the files on disk", "data", AMBER,
+                       f"raw_catalog unreadable: {str(exc)[:120]}", "raw_catalog readable", emit_alarm=False)
+    from .facts import _source_disk_stat
+    prev = (state.get("raw_view_disk") or {})
+    cur, bad, quiet = {}, [], []
+    for view, row in cat.items():
+        if row.get("status") != "MISSING" and (row.get("files") or 0) > 0:
+            continue
+        st = _source_disk_stat(store, view)
+        if not st or st[0] == 0:
+            continue  # genuinely no files (warmup after a reset): not this failure
+        cur[view] = [st[1], st[2]]
+        p = prev.get(view)
+        (bad if p and (st[1] != p[0] or st[2] != p[1]) else quiet).append(f"{view} (disk {st[0]} files, {st[1]} B, catalog {row.get('status')}/{row.get('files')})")
+    state["raw_view_disk"] = cur
+    sev = RED if bad else (AMBER if quiet else GREEN)
+    return Finding("data.raw_view_integrity", "Raw views match the files on disk", "data", sev,
+                   ("catalog MISSING while bytes/mtime advance: " + ", ".join(bad)) if bad else
+                   ("catalog MISSING but files exist (not yet advancing): " + ", ".join(quiet)) if quiet else
+                   "every raw view with files on disk is present in raw_catalog",
+                   "raw_catalog status MISSING only when no file matches the view glob",
+                   evidence={"advancing": bad, "present_not_advancing": quiet})
 
 
 def check_analyzer(f, sig, store) -> Finding:
@@ -1000,6 +1039,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_feeds(facts, sig, store, state),
         lambda: check_advancing(facts, sig, store, state),
         lambda: check_analyzer(facts, sig, store),
+        lambda: check_raw_view_integrity(facts, sig, store, state),
         lambda: check_fly_reachability(facts, sig, store, state),
         lambda: check_engine(facts, sig, store, state),
         lambda: check_data(facts, sig, store),

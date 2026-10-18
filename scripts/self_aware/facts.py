@@ -169,6 +169,23 @@ def _source_has_files(store, view: str) -> bool | None:
         return None
 
 
+def _source_disk_stat(store, view: str) -> tuple[int, int, float] | None:
+    """(files, bytes, newest mtime) of the files the raw view's glob matches right now; None if unknown."""
+    try:
+        import glob as _glob
+
+        from .store import RAW_SOURCES
+        src = next((s for s in RAW_SOURCES if s.name == view), None)
+        if src is None:
+            return None
+        root = getattr(store.paths, src.root)
+        sts = [Path(f).stat() for f in _glob.glob(str(Path(root) / src.pattern), recursive=True)
+               if Path(f).is_file() and not f.endswith((".validation.json", ".json", ".tmp", ".partial"))]
+        return len(sts), sum(x.st_size for x in sts), max((x.st_mtime for x in sts), default=0.0)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 _LINE_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}  # path -> (size, mtime_ns, lines)
 
 

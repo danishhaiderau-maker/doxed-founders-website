@@ -767,3 +767,77 @@ def test_view_is_recreated_when_the_same_file_reappears_after_a_reset(tmp_path):
     out = {r["view"]: r for r in st.refresh_views()}
     assert out["raw_decision"]["status"] == "OK" and out["raw_decision"]["files"] == 1
     assert st.read("SELECT count(*) AS n FROM raw_decision")[0]["n"] == 2
+
+
+def test_every_plain_mirror_view_recreates_when_its_file_reappears(tmp_path):
+    """HM 18 Oct: tape and execution (and every other plain-path view) must not hit the cached-signature branch."""
+    import dataclasses
+    from self_aware.store import RAW_SOURCES, Store
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    paths = dataclasses.replace(Paths(), mirror=mirror, home=tmp_path / "home")
+    paths.home.mkdir()
+    st = Store(paths)
+    plain = [s for s in RAW_SOURCES if s.root == "mirror" and s.kind == "json" and not any(c in s.pattern for c in "*?[")]
+    assert len(plain) >= 3 and {"raw_decision", "raw_execution"} <= {s.name for s in RAW_SOURCES}
+    for s in plain:
+        p = mirror / s.pattern
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"a":1}\n')
+    st.refresh_views()
+    for s in plain:
+        (mirror / s.pattern).unlink()
+    st.refresh_views()
+    for s in plain:
+        (mirror / s.pattern).write_text('{"a":1}\n{"a":2}\n')
+    out = {r["view"]: r for r in st.refresh_views()}
+    for s in plain:
+        assert out[s.name]["status"] == "OK" and out[s.name]["files"] == 1, s.name
+        assert st.read(f"SELECT count(*) AS n FROM {s.name}")[0]["n"] == 2, s.name
+
+
+def _adv(state, now, dec, tape, paused=False):
+    f = _facts(now=now, mirror={"decision": {"rows": dec}, "tape": {"rows": tape}})
+    return diagnose.check_advancing(f, {"paper_paused": {"on": paused}}, None, state)
+
+
+def test_decision_rows_watchdog_amber_at_30_min_red_at_60_while_tape_advances():
+    st = {}
+    t = 1_000_000.0
+    assert _adv(st, t, 5, 100).severity == "GREEN"
+    for i, minute in enumerate((10, 20, 29)):
+        assert _adv(st, t + minute * 60, 5, 100 + i + 1).severity in ("GREEN", "AMBER")
+    assert _adv(st, t + 31 * 60, 5, 500).severity == "AMBER"
+    assert _adv(st, t + 45 * 60, 5, 900).severity == "AMBER"
+    assert _adv(st, t + 61 * 60, 5, 1300).severity == "RED"
+    assert _adv(st, t + 62 * 60, 6, 1400).severity == "GREEN"  # decision rows moved again
+    assert _adv(st, t + 63 * 60, 6, 1500, paused=True).severity == "GREEN"
+
+
+def test_decision_rows_watchdog_does_not_fire_when_the_tape_is_also_stuck():
+    st = {}
+    t = 2_000_000.0
+    _adv(st, t, 5, 100)
+    r = _adv(st, t + 50 * 60, 5, 100)  # everything stuck: generic rule (AMBER), not the decision watchdog's RED
+    assert r.severity == "AMBER"
+
+
+def test_raw_view_integrity_red_when_catalog_missing_while_disk_bytes_advance(tmp_path):
+    import dataclasses
+    from self_aware.store import Store
+    mirror = tmp_path / "mirror"
+    (mirror / "v3" / "ledgers").mkdir(parents=True)
+    paths = dataclasses.replace(Paths(), mirror=mirror, home=tmp_path / "home")
+    paths.home.mkdir()
+    st = Store(paths)
+    st.refresh_views()  # no file: catalog MISSING, files=0 (warmup): GREEN
+    state = {}
+    assert diagnose.check_raw_view_integrity(_facts(), {}, st, state).severity == "GREEN"
+    f = mirror / "v3" / "ledgers" / "decision.jsonl"
+    f.write_text('{"a":1}\n')  # file exists on disk but the catalog has not been refreshed: MISSING with a file
+    assert diagnose.check_raw_view_integrity(_facts(), {}, st, state).severity == "AMBER"
+    f.write_text('{"a":1}\n{"a":2}\n')  # bytes advance while catalog still MISSING
+    r = diagnose.check_raw_view_integrity(_facts(), {}, st, state)
+    assert r.severity == "RED" and "raw_decision" in r.observed
+    st.refresh_views()
+    assert diagnose.check_raw_view_integrity(_facts(), {}, st, state).severity == "GREEN"
