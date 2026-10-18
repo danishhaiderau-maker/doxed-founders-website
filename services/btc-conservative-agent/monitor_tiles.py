@@ -391,12 +391,12 @@ PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "
                 "exit_pricer_signal_ts", "exit_model_fill_ts", "book_slippage_usd_entry", "book_slippage_usd_exit",
                 "book_slippage_usd_total", "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd",
                 "entry_delay_drift_bp", "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
-                "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
+                "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured", "missing_book_seconds",
                 # #731: repriced exits are distinct and carry their lag (the pre-registered valid-trade filter needs both)
                 "exit_pricing_basis", "exit_repriced_lag_s")
 
 
-_PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
+_PRICING_NUMERIC = ("missing_book_seconds", "fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
                     "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
                     "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total", "entry_walk_bp",
                     "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp", "exit_delay_drift_usd",

@@ -14,3 +14,8 @@ def test_model_time_rows_and_old_rows_report_none_not_a_repriced_claim():
     assert b["exit_pricing_basis"] == "MODEL_TIME" and b["exit_repriced_lag_s"] is None
     old = mt.pricing_block({"fill_model": "x"})
     assert old["exit_pricing_basis"] is None and old["exit_repriced_lag_s"] is None
+
+
+def test_missing_book_seconds_reaches_tiles_trades_rows_as_a_number_or_none():
+    assert mt.pricing_block({"fill_model": "x", "missing_book_seconds": "1.25"})["missing_book_seconds"] == 1.25
+    assert mt.pricing_block({"fill_model": "x"})["missing_book_seconds"] is None
