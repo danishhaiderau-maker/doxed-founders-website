@@ -31544,6 +31544,16 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
     return out
 
 
+def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool:
+    """P3 (HM 19 Oct): an admin/deploy flatten close had no exit_trigger_ts, so exit latency could not be measured. Stamp the
+    close-request time as the trigger (source = the close reason). Never overwrites a trigger already recorded."""
+    if not isinstance(pos, dict) or pos.get("exit_trigger_ts") not in (None, "", 0):
+        return False
+    pos["exit_trigger_ts"] = float(now)
+    pos["exit_trigger_source"] = str(close_reason)
+    return True
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -50084,6 +50094,8 @@ def api_close_showcase_position():
     # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
     close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
     close_origin = _forced_close_origin(close_reason)
+    with trade_lock:
+        _stamp_admin_close_trigger(matches[0], close_reason, time.time())
     close_position(matches[0], close_reason)
     with state_lock:
         still_open = any(
