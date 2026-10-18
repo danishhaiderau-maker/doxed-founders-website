@@ -62,6 +62,7 @@ VIOLATION_HELP = {
     "DRIFT_DIMS_DROPPED": "dimension present in the baseline vanished", "CONTRACT_ERROR": "the evaluator crashed on this contract",
     "FILL_MODEL_UNDECLARED": "headline result does not declare fill_model=REALISTIC_V1",
     "FILL_MODEL_OPTIMISTIC_HEADLINE": "an optimistic (touch/ideal/mid) fill number is shown as headline instead of a labelled shadow",
+    "PENDING_SAMPLES": "below the pre-registered minimum sample: an empty/short table is expected, not a defect",
     "DECLARED_BLOCKER_EXPIRED": "a declared blocker passed its expiry without the section recovering; re-triage it",
 }
 DECLARED_BLOCKER_FIELDS = ("id", "kinds", "severity", "reason", "fix", "eta", "expires")
@@ -325,6 +326,17 @@ def _warming(spec: dict[str, Any], ctx: dict[str, Any]) -> str | None:
             f"(warmup {window / 3600:.0f}h)")
 
 
+def _pending_samples(obj: Any, spec: dict[str, Any] | None) -> str | None:
+    """PENDING_SAMPLES (not a defect): the sample count is below the pre-registered minimum, so an empty table is expected."""
+    if not spec:
+        return None
+    n = _num(get_path(obj, spec["count_path"]))
+    if n is None or n >= float(spec["min"]):
+        return None
+    return (f"{spec['count_path']}={n:g} < pre-registered minimum sample {spec['min']:g}"
+            + (" (provisional minimum, HM to confirm)" if spec.get("provisional") else ""))
+
+
 def _v(kind: str, sev: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"kind": kind, "severity": sev, "detail": detail[:400], **extra}
 
@@ -436,6 +448,11 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         min_rows = int(t.get("min_rows", 1))
         if n < min_rows:
             why = _declared(obj, t.get("declared_empty_paths") or spec.get("declared_empty_paths") or [])
+            pend = _pending_samples(obj, t.get("pending_samples"))
+            if pend:
+                viol.append(_v("PENDING_SAMPLES", INFO, f"{name}: {n} rows < {min_rows}; {pend}"))
+                empty_or_dead.append(name)
+                continue
             warm = _warming(spec, ctx) if t.get("warmup_overrides_declared") else None
             if why and warm:
                 # Epoch-scoped tables that need terminal OOS evidence (e.g. the profitable-only top-100)
@@ -515,6 +532,11 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
         a = _num(get_path(obj, inv["if_positive"]))
         b = _num(get_path(obj, inv["then_min"]))
         if a and a > 0 and (b is None or b < inv.get("min", 1)):
+            pend = _pending_samples(obj, inv.get("pending_samples"))
+            if pend:
+                viol.append(_v("PENDING_SAMPLES", INFO, f"{inv['if_positive']}={a:g}, {inv['then_min']}="
+                                                         f"{b if b is not None else 'absent'}; {pend}"))
+                continue
             viol.append(_v(inv.get("kind", "INVARIANT"), inv.get("severity", RED),
                            f"{inv['if_positive']}={a:g} but {inv['then_min']}={b if b is not None else 'absent'}: "
                            f"{inv.get('why', '')}"))
