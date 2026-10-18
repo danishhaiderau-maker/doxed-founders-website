@@ -852,3 +852,11 @@ def test_laptop_disk_free_thresholds_and_probe_failure(store):
     assert "probe failed" in dg.check_laptop_disk_free(_facts(laptop_disk={"error": "OSError: x"}), {}, store).observed
     from self_aware import facts as fx
     assert fx.laptop_disk("/")["free_gb"] > 0
+
+
+def test_laptop_smoke_passes_at_this_revision_and_catches_a_missing_cadence(monkeypatch):
+    import self_aware_smoke as smoke
+    from self_aware import config
+    assert smoke.smoke(cycle=False) == []
+    monkeypatch.delitem(config.CADENCE_SEC, "bitfinex")
+    assert "NO_CADENCE bitfinex" in smoke.smoke(cycle=False)

@@ -182,7 +182,7 @@ THRESHOLDS: dict[str, float] = {
     "source_down_amber_sec": 15 * MIN,
     "streams_content_lag_amber_sec": 60 * MIN,
     "selfaware_down_red_sec": 15 * MIN,
-    "selfaware_stale_red_sec": 20 * MIN,
+    "selfaware_stale_red_sec": 15 * MIN,
     "selfaware_job_late_factor": 3,
     "supervisor_probe_cache_sec": 60.0,
     "legacy_ack_stale_sec": HOUR,
