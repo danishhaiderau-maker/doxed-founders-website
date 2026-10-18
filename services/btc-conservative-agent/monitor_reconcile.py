@@ -22,16 +22,6 @@ def _num(value: Any):
     return out if out == out else None
 
 
-def archive_restore(receipt: Mapping[str, Any] | None) -> dict:
-    rt = (receipt or {}).get("restore_test") if isinstance(receipt, Mapping) else None
-    if not isinstance(rt, Mapping):
-        return {"tests_total": None, "tests_failed": None, "receipt_present": bool(receipt)}
-    checked, bad = _num(rt.get("checked")), _num(rt.get("bad"))
-    return {"tests_total": int(checked) if checked is not None else None,
-            "tests_failed": int(bad) if bad is not None else None,
-            "receipt_present": True, "restore_test_ts": rt.get("ts")}
-
-
 def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mapping[str, str],
           receipt: Mapping[str, Any] | None, common: Mapping[str, Any]) -> dict:
     per_tile = []
@@ -48,6 +38,6 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
     return {"schema": SCHEMA, **common, "epoch_id": common.get("data_epoch_id"),
             "sources": {"fly": "OK", "mirror": unavailable, "analyzer": unavailable},
             "per_tile": per_tile, "tolerance": dict(TOLERANCE),
-            "archive_restore": archive_restore(receipt), "stream_gaps": None,
+            "stream_gaps": None,
             "fly_n_basis": "FLY_PROCESS_CLOSED_ROWS (tiles 1-5: in-memory trades list; tiles 6/7: on-disk DISLOC ledgers via the 10 s cache; fly_fresh_n is 0 for 6/7 by design)",
             "note": "Fly-side counts only; mirror/analyzer parity needs those hosts to report (ok stays null, never assumed)."}

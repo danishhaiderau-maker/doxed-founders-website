@@ -169,6 +169,48 @@ def _source_has_files(store, view: str) -> bool | None:
         return None
 
 
+_LINE_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}  # path -> (size, mtime_ns, lines)
+
+
+def _count_lines_cached(path: str, csv_header: bool) -> int:
+    """Newline count plus a final unterminated line; cached by (size, mtime) so repeated polls re-read only changed files."""
+    st = os.stat(path)
+    hit = _LINE_COUNT_CACHE.get(path)
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        n = hit[2]
+    else:
+        n = 0
+        last = b"\n"
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                n += chunk.count(b"\n")
+                last = chunk[-1:]
+        if last != b"\n":
+            n += 1
+        _LINE_COUNT_CACHE[path] = (st.st_size, st.st_mtime_ns, n)
+    return max(n - 1, 0) if csv_header and n else n
+
+
+def _file_line_count(store, view: str) -> int | None:
+    """Line count of the raw view's mirror files (fallback when the DuckDB view is missing); None if unknown."""
+    try:
+        import glob as _glob
+
+        from .store import RAW_SOURCES
+        src = next((s for s in RAW_SOURCES if s.name == view), None)
+        if src is None:
+            return None
+        root = getattr(store.paths, src.root)
+        total = 0
+        for f in _glob.glob(str(Path(root) / src.pattern), recursive=True):
+            if not Path(f).is_file():
+                continue
+            total += _count_lines_cached(f, src.kind == "csv")
+        return total
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _mirror_max(store, sql: str) -> tuple[Any, str | None]:
     """One mirror max/count probe.
 
@@ -185,6 +227,11 @@ def _mirror_max(store, sql: str) -> tuple[Any, str | None]:
         view = next((tok for tok in sql.replace("(", " ").replace(")", " ").split() if tok.startswith("raw_")), None)
         if view and _source_has_files(store, view) is False:
             return {"status": "EMPTY_WARMUP", "rows": 0, "detail": text}, None
+        # Files exist but the view is missing/stale: report the error explicitly AND keep the counter honest from the
+        # files, so prog.counts_advancing is not frozen on a stale 0 (18 Oct: decision_rows 0 for 8.8 h).
+        n = _file_line_count(store, view) if view else None
+        if n is not None:
+            return {"status": "FILE_COUNT_FALLBACK", "rows": n, "detail": text}, text
         return {}, text
 
 

@@ -47708,7 +47708,6 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
     except Exception:
         snap = {}
     open_lanes = [lane for lane, rows in inp["by_lane"].items() if any(r.get("status") == "OPEN" for r in rows)]
-    archive = _load_archive_receipt()
     checks = {
         "exit-truth": _mc.exit_truth(closed_rows, tape_ts, tape_rows, since=inp["since"]),
         "pnl-reconcile": _mc.pnl_reconcile(inp["totals"], inp["by_lane"], None, snap),
@@ -47723,7 +47722,6 @@ def _monitor_checks_all(now: float, hours: float) -> dict:
         "tape-retention": {**_mc.tape_retention(_TILE_TAPE_RING.bounds(), _TAPE_ARCHIVE.oldest_ts(), now=now),
                            "archive": _TAPE_ARCHIVE.snapshot()},
         "exits-latency-guard": _mc.latency_guard(inp["slo"], inp["per_tile"], live_on_lanes=inp.get("live_on_lanes")),
-        "archive-receipt": _mc.archive_receipt(archive, now=now),
         "emergency-admission": _mc.emergency_admission(_dashboard_handler_snapshot(), now=now),
         "clock-skew": _mc.clock_skew(__import__("runtime_telemetry").clock_sync_verdict(), live_on=bool(inp.get("live_on_lanes"))),
         "tile-integrity": _tile_integrity_check(now),
@@ -47888,7 +47886,7 @@ def monitor_tile_integrity():
 
 
 _MONITOR_CHECK_NAMES = ("exit-truth", "pnl-reconcile", "rules-conformance", "data-completeness",
-                        "tape-retention", "exits-latency-guard", "archive-receipt", "clock-skew", "tile-integrity",
+                        "tape-retention", "exits-latency-guard", "clock-skew", "tile-integrity",
                         "emergency-admission")
 
 
@@ -47960,7 +47958,7 @@ def monitor_reconcile():
                  "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": False}
         by_lane = _monitor_tiles_rows(scope, ("closed",))
         short = _monitor_tile_short_names()
-        return _mr.build(by_lane, short, _load_archive_receipt(), _monitor_tiles_common(now))
+        return _mr.build(by_lane, short, None, _monitor_tiles_common(now))
     return _monitor_tiles_guard(build, 800_000)
 
 
@@ -47985,11 +47983,6 @@ def monitor_fill_provenance():
         return _mfp.build(by_lane, _monitor_tile_short_names(), shadow, _fresh_start_epoch(), _monitor_tiles_common(now),
                           shadow_truncated=truncated)
     return _monitor_tiles_guard(build, 800_000)
-
-
-@app.route('/api/monitor/archive', methods=["GET"])
-def monitor_check_archive():
-    return _monitor_single_check("archive-receipt")
 
 
 def _r2_keep_pin_sha256() -> str:
@@ -48088,6 +48081,12 @@ def _validate_archive_receipt(raw: dict, now: float, stored: dict | None) -> tup
         if healthy and checked is not None and r2_objects is not None and checked > r2_objects:
             problems.append("restore_test.checked exceeds r2_objects")
     return problems, kind
+
+
+@app.route('/api/monitor/archive', methods=["GET"])
+def monitor_check_archive():
+    """Retired 18 Oct (no permanent archive): kept as a 410 stub so the frozen route manifest is unchanged."""
+    return jsonify({"retired": True, "check": "archive-receipt", "reason": "no permanent archive (Danish 18 Oct)"}), 410
 
 
 @app.route('/api/monitor/archive/receipt', methods=["POST"])  # literal: the route-manifest test parses decorators; == _ARCHIVE_RECEIPT_ROUTE
