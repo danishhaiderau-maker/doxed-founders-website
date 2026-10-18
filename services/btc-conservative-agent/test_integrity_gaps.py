@@ -9,7 +9,7 @@ def ids(out):
 
 def test_all_gaps_and_live_off_row_present():
     out = ig.evaluate({})
-    assert set(ids(out)) == {"LIVE_OFF"} | {f"G{i}" for i in range(1, 21)}
+    assert set(ids(out)) == {"LIVE_OFF"} | {f"G{i}" for i in range(1, 22)}
 
 
 def test_live_off_row_red_unless_disarmed_and_forced_paper():
@@ -247,3 +247,30 @@ def test_v3_growth_counts_files_per_top_dir_and_reports_disk(tmp_path):
     doc = ig.v3_growth(str(tmp_path), ttl=0)
     assert doc["dirs"]["receipts"] == {"files": 3, "bytes": 3, "files_24h": 2}
     assert doc["files_24h_total"] == 4 and doc["complete"] is True and doc["disk"]["free_bytes"] > 0
+
+
+def test_deletion_sidecar_is_exempt_for_the_active_reset_only_and_alerts_amber_above_200mb(tmp_path):
+    import json as _j
+    active, old = "29f7a1efd216798db9309125", "aaaaaaaaaaaaaaaaaaaaaaaa"
+    rr = tmp_path / "runtime" / "research_reset_receipts"
+    for rid in (active, old):
+        (rr / rid).mkdir(parents=True)
+        (rr / rid / "deletion.json.retained.jsonl").write_text("x" * 10)
+    (rr / "ACTIVE_RESET.json").write_text(_j.dumps({"reset_id": active, "binding_sha256": "x"}))
+    n = "deletion.json.retained.jsonl"
+    assert ig.retained_by_design(f"runtime/research_reset_receipts/{active}/{n}", active)
+    assert not ig.retained_by_design(f"runtime/research_reset_receipts/{old}/{n}", active)
+    assert not ig.retained_by_design(f"runtime/research_reset_receipts/{active}/{n}", None)
+    assert not ig.retained_by_design(f"x/runtime/research_reset_receipts/{active}/{n}", active)
+    res = ig.scan_local_oldest(str(tmp_path), keep=())
+    assert f"runtime/research_reset_receipts/{active}/{n}" in res["kept"]       # exempt (not an offender)
+    assert f"runtime/research_reset_receipts/{old}/{n}" in res["files"]         # an old reset's sidecar is still flagged
+    s = ig.sidecar_size(str(tmp_path))
+    assert s["status"] == "GREEN" and s["bytes"] == 10
+    with open(rr / active / n, "r+b") as fh:                                    # sparse 201 MB file
+        fh.truncate(201 * 1024 * 1024)
+    s = ig.sidecar_size(str(tmp_path))
+    assert s["status"] == "AMBER" and s["mb"] == 201.0
+    row = {r["id"]: r for r in ig.evaluate({"wipe": {"sidecar": s}})["rows"]}["G21"]
+    assert row["status"] == "AMBER"                                              # visible, but never RED: it cannot block a wipe
+    assert ig.sidecar_size(str(tmp_path / "nowhere"))["status"] == "PENDING"
