@@ -169,6 +169,28 @@ def _source_has_files(store, view: str) -> bool | None:
         return None
 
 
+_LINE_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}  # path -> (size, mtime_ns, lines)
+
+
+def _count_lines_cached(path: str, csv_header: bool) -> int:
+    """Newline count plus a final unterminated line; cached by (size, mtime) so repeated polls re-read only changed files."""
+    st = os.stat(path)
+    hit = _LINE_COUNT_CACHE.get(path)
+    if hit and hit[0] == st.st_size and hit[1] == st.st_mtime_ns:
+        n = hit[2]
+    else:
+        n = 0
+        last = b"\n"
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                n += chunk.count(b"\n")
+                last = chunk[-1:]
+        if last != b"\n":
+            n += 1
+        _LINE_COUNT_CACHE[path] = (st.st_size, st.st_mtime_ns, n)
+    return max(n - 1, 0) if csv_header and n else n
+
+
 def _file_line_count(store, view: str) -> int | None:
     """Line count of the raw view's mirror files (fallback when the DuckDB view is missing); None if unknown."""
     try:
@@ -183,10 +205,7 @@ def _file_line_count(store, view: str) -> int | None:
         for f in _glob.glob(str(Path(root) / src.pattern), recursive=True):
             if not Path(f).is_file():
                 continue
-            with open(f, "rb") as fh:
-                total += sum(chunk.count(b"\n") for chunk in iter(lambda: fh.read(1 << 20), b""))
-            if src.kind == "csv" and total:
-                total -= 1  # header
+            total += _count_lines_cached(f, src.kind == "csv")
         return total
     except Exception:  # noqa: BLE001
         return None

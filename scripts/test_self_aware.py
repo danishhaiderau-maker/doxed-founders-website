@@ -650,6 +650,13 @@ def test_still_red_refreshes_observed_text_and_mirror_empty_is_warmup(tmp_path):
     assert err and "IO Error" in err
     # The view is missing but files exist: the error stays explicit and the row count comes from the files.
     assert row["status"] == "FILE_COUNT_FALLBACK" and row["rows"] == 1
+    # A final line without a trailing newline still counts, and the count follows file growth (cache keyed on size/mtime).
+    (tmp_path / "ai_tranche_log.csv").write_text("ts\n1\n2")
+    row, _ = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
+    assert row["rows"] == 2
+    (tmp_path / "ai_tranche_log.csv").write_text("ts\n1\n2\n3\n")
+    row, _ = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
+    assert row["rows"] == 3
 
 
 def _feeds_rt(observed_at: float = NOW - 30, **sp) -> dict:

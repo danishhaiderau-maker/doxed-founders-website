@@ -29,6 +29,13 @@ PROTECTED = tuple(re.compile(x) for x in (
     r".*live_copy_[^/]*\.json",
     r".*(?:^|/)data_epoch\.json",
     r".*(?:^|/)crash_dump\.json",
+    # keep manifest / live switch files (HM: protect explicitly, never by omission)
+    r".*(?:^|/)bitfinex_live_state\.json",
+    r".*(?:^|/)bitfinex_live_switch_state\.json",
+    r".*(?:^|/)config(?:-[^/]*)?\.json",
+    r".*(?:^|/)policy\.json",
+    r".*(?:^|/)spread-gate\.json",
+    r".*(?:^|/)keep_manifest[^/]*",
 ))
 
 
@@ -61,7 +68,10 @@ def execute(root: str, expect_sha256: str) -> dict:
     for rel in paths:
         if not removable(rel):  # defence in depth
             continue
-        os.remove(os.path.join(root, rel))
+        full = os.path.join(root, rel)
+        if os.path.islink(full) or not os.path.isfile(full):  # re-check right before removal (swap race)
+            continue
+        os.remove(full)
         deleted.append(rel)
     return {"ok": True, "deleted": deleted, "plan_sha256": plan_sha256(paths)}
 

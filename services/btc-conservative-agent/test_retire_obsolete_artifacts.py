@@ -10,6 +10,8 @@ KEEP = [
     "x/archive_receipt.json", "research_archive/handoffs/other.jsonl.20261013T021532Z",
     "runtime/data_epoch_boundary/sub/ce-20261004-v31-clean.v3.json",
     "runtime/data_epoch_boundary/ce-20261004-v31-clean.v3.json.bak",
+    "bitfinex_live_state.json", "runtime/bitfinex_live_switch_state.json", "config-7002.json", "config.json",
+    "policy.json", "spread-gate.json", "keep_manifest.json",
 ]
 GO = [
     "runtime/data_epoch_boundary/ce-20261004-v31-clean.v3.json",
@@ -48,3 +50,28 @@ def test_symlinks_are_skipped(tmp_path):
     (tmp_path / "real.json").write_text("{}")
     os.symlink(tmp_path / "real.json", tmp_path / "archive_receipt.json")
     assert ro.plan(str(tmp_path)) == []
+
+
+def test_twelve_handoffs_are_planned_exactly(tmp_path):
+    handoffs = [f"research_archive/handoffs/{k}_evidence_handoffs.jsonl.2026101{d}T0{n}1500Z"
+                for k in ("cancellation", "fill") for d in (3, 4) for n in (1, 2, 3)]
+    assert len(handoffs) == 12
+    _mk(tmp_path, handoffs + KEEP)
+    planned = [p for p in ro.plan(str(tmp_path)) if p.startswith("research_archive/handoffs/")]
+    assert sorted(planned) == sorted(handoffs)
+
+
+def test_execute_skips_a_path_swapped_for_a_symlink_after_planning(tmp_path, monkeypatch):
+    (tmp_path / "real.json").write_text("{}")
+    (tmp_path / "archive_receipt.json").write_text("{}")
+    paths = ro.plan(str(tmp_path))
+    sha = ro.plan_sha256(paths)
+    real_plan = ro.plan
+    def swap(root):
+        out = real_plan(root)
+        (tmp_path / "archive_receipt.json").unlink()
+        os.symlink(tmp_path / "real.json", tmp_path / "archive_receipt.json")
+        return out
+    monkeypatch.setattr(ro, "plan", swap)
+    res = ro.execute(str(tmp_path), sha)
+    assert res["deleted"] == [] and (tmp_path / "real.json").exists()
