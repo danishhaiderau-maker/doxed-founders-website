@@ -31,7 +31,11 @@ def rss_kb() -> int | None:
 
 
 def memory_limit_kb() -> int | None:
-    """Container memory limit: cgroup v2/v1 file, else FLY_VM_MEMORY_MB, else MemTotal. None when unknown."""
+    """Actual VM memory limit: FLY_VM_MEMORY_MB (set by Fly), else a finite cgroup limit, else MemTotal. Never an alert line."""
+    try:
+        return int(os.environ["FLY_VM_MEMORY_MB"]) * 1024
+    except (KeyError, ValueError):
+        pass
     for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
             v = Path(f).read_text().strip()

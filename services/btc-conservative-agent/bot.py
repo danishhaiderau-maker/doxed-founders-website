@@ -46887,6 +46887,13 @@ def system_health_view():
     self_checks = _system_health_fly_self_checks()
     out["fly_self_checks"] = self_checks
     bad = [c for c in self_checks if c["status"] != "GREEN"]
+    # summary counts include the Fly self-checks (a RED here must show in counts, not only in the checks list)
+    counts = dict(out.get("counts") or {})
+    for c in self_checks:
+        k = c["status"] if c["status"] in ("GREEN", "AMBER", "RED") else None
+        if k:
+            counts[k] = int(counts.get(k) or 0) + 1
+    out["counts"] = counts
     if bad:
         out["failing"] = list(out.get("failing") or []) + bad
         rank = {"GREEN": 0, "SKIP": 0, "AMBER": 1, "RED": 2}

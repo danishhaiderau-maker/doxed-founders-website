@@ -83,3 +83,16 @@ def test_health_check_surfaces_red_when_oom_is_near(tmp_path, monkeypatch):
     c = bot._memory_oom_check(100.0)
     assert c["id"] == "fly.memory_oom_eta" and c["status"] == "RED" and "oom_in=3.1h" in c["observed"]
     assert bot._memory_oom_check(100.0 + 7200)["status"] == "AMBER"  # stale sampler
+
+
+def test_limit_prefers_fly_vm_memory_and_counts_include_self_checks(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLY_VM_MEMORY_MB", "2048")
+    assert ms.memory_limit_kb() == 2048 * 1024
+    import bot
+    monkeypatch.setattr(bot, "_data_sync_volume_root", lambda: tmp_path)
+    (tmp_path / "memory_structures.json").write_text(json.dumps(
+        {"latest": {"ts": __import__("time").time()}, "oom_eta": {"status": "RED", "hours_to_oom": 2.0}}))
+    monkeypatch.setattr(bot, "_DASHBOARD_BOOTSTRAP_COMPLETE", True)
+    out = bot.app.test_client().get("/api/system-health").get_json()
+    assert out["counts"].get("RED", 0) >= 1 and out["verdict"] == "RED"
+    assert any(c["id"] == "fly.memory_oom_eta" for c in out["failing"])
