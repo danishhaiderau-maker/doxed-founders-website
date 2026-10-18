@@ -901,6 +901,22 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     if cutoff is not None:
         opportunities = [row for row in opportunities if float(row.get("signal_ts") or 0) >= cutoff]
     opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
+    # HM-approved explicit episode-id quarantine of legacy policy-identity contamination (fixed list, fail closed).
+    from research import legacy_policy_quarantine as _lpq
+    _listed_present = [str(row.get("episode_id") or "") for row in opportunities
+                       if str(row.get("episode_id") or "") in _lpq.LEGACY_POLICY_IDENTITY_EPISODES]
+    quarantine = {"schema": _lpq.SCHEMA, "accepted": [], "rejected": [], "episodes": []}
+    if _listed_present:
+        def _identity_rows():
+            for _name in ("decision", "order_intent", "execution", "lifecycle"):
+                for _row in _iter_ledger(store.ledger_path(_name)):
+                    if str(_row.get("episode_id") or "") in _listed_present and _row.get("policy_signature"):
+                        yield {k: v for k, v in _row.items() if k != "entry_children"}
+        quarantine = _lpq.evaluate(_listed_present, _identity_rows())
+    if quarantine["accepted"]:
+        _q = set(quarantine["accepted"])
+        opportunities = [row for row in opportunities if str(row.get("episode_id") or "") not in _q]
+        all_opportunities = [row for row in all_opportunities if str(row.get("episode_id") or "") not in _q]
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
     pre_entry_feature_receipts = [
         row for row in scoped(_read_ledger(store.ledger_path("pre_entry_features")))
@@ -1332,6 +1348,11 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "excluded_stale_or_foreign_rows": excluded_opportunities,
             "excluded_identity_alias_rows": len(identity_aliases),
             "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
+            "quarantined_legacy_episodes": {
+                "schema": quarantine["schema"], "count": len(quarantine["accepted"]),
+                "episodes": quarantine["episodes"], "rejected_not_quarantined": quarantine["rejected"],
+                "excluded_from_all_results_and_counts": True,
+            },
             "missing_policy_identity_rows": missing_policy_identity_rows,
             "pending_policy_identity_rows": pending_policy_identity_rows,
             "policy_signature_collisions": policy_signature_collisions,

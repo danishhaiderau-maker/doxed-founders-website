@@ -65,6 +65,8 @@ _RETAINED_RE = tuple(re.compile(x) for x in (
     r"runtime/clean-epoch-receipts/.*",
     r"runtime/data_epoch_boundary/[^/]+\.compaction\.json",
     r"runtime/data_epoch_boundary/" + re.escape(PINNED_EPOCH_ID) + r"\.(?:v3|research_events_v22)\.json",
+    # read at boot (bot.py) and the idempotency gate for archive_pre_epoch_ledgers: pinned id only (HM 18 Oct)
+    r"runtime/data_epoch_boundary/" + re.escape(PINNED_EPOCH_ID) + r"\.pre_epoch_archive\.json",
     r"quarantine/v3_completeness_markers/.*",
 ))
 _RETAINED_DIR_RE = tuple(re.compile(x) for x in (

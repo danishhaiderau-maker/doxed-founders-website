@@ -173,5 +173,14 @@ def test_pinned_epoch_boundary_receipts_retained_only_for_the_pinned_id_at_the_a
                 "runtime/data_epoch_boundary/ce-20261004-v30-freeze21b.research_events_v22.json",
                 f"x/runtime/data_epoch_boundary/{e}.v3.json", f"data_epoch_boundary/{e}.v3.json",
                 f"runtime/data_epoch_boundary/sub/{e}.v3.json", f"runtime/data_epoch_boundary/{e}.v3.json.bak",
-                f"runtime/data_epoch_boundary/{e}.pre_epoch_archive.json", f"runtime/data_epoch_boundary/{e}x.v3.json"):
+                f"runtime/data_epoch_boundary/{e}x.v3.json"):
         assert not ig.retained_by_design(bad), bad
+
+
+def test_pinned_pre_epoch_archive_is_retained_but_not_other_ids():
+    b = "runtime/data_epoch_boundary/"
+    assert ig.retained_by_design(b + "ce-20261004-v31-freeze21b.pre_epoch_archive.json")
+    assert not ig.retained_by_design(b + "ce-20261004-v31-freeze21.pre_epoch_archive.json")
+    assert not ig.retained_by_design(b + "ce-20261004-v31-clean.pre_epoch_archive.json")
+    assert not ig.retained_by_design(b + "sub/ce-20261004-v31-freeze21b.pre_epoch_archive.json")
+    assert not ig.retained_by_design("ce-20261004-v31-freeze21b.pre_epoch_archive.json")

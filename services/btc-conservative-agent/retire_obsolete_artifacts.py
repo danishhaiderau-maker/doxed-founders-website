@@ -21,6 +21,15 @@ import sys
 PINNED_EPOCH_ID = "ce-20261004-v31-freeze21b"
 REMOVABLE = tuple(re.compile(x) for x in (
     r"runtime/data_epoch_boundary/ce-20261004-v31-(?:clean|final-b|final-c|final-d)\.(?:v3|research_events_v22)\.json",
+    # HM 18 Oct (G16 list). Old-boot ids only: "final-e", "final", "freeze21" (NOT freeze21b, protected below).
+    r"runtime/data_epoch_boundary/ce-20261004-v31-(?:final-e|final|freeze21)\.(?:v3|research_events_v22)\.json",
+    r"runtime/data_epoch_boundary/ce-20261004-v31-freeze21\.(?:epoch_aliases|pre_epoch_archive)\.json",
+    r"runtime/data_epoch_boundary/orphan_tmp_sweep\.\d{8}T\d{6}Z\.json",
+    r"runtime/(?:disloc_trades|disloc_foi_trades)\.jsonl\.validation\.json",
+    r"runtime/(?:lane_pnl_ledger_epoch_receipts\.jsonl|pre_entry_evidence_handoffs\.jsonl\.1"
+    r"|relay_outbox_quarantine\.jsonl|relay_outbox_retired\.jsonl)",
+    # the one old pre-restart recovery receipt (its crash_dump.json is the single exact-path exception below)
+    r"runtime/recovery_receipts/pre-restart-34276394781/(?:crash_dump|paper_lifecycle_v1)\.json",
     r"archive_receipt\.json",
     r"research_archive/handoffs/(?:cancellation|fill)_evidence_handoffs\.jsonl\.\d{8}T\d{6}Z",
 ))
@@ -37,11 +46,14 @@ PROTECTED = tuple(re.compile(x) for x in (
     r".*(?:^|/)spread-gate\.json",
     r".*(?:^|/)keep_manifest[^/]*",
 ))
+# Exact relative paths exempt from PROTECTED (the generic crash_dump.json rule stays in force everywhere else,
+# including runtime/crash_dump.json and any other recovery_receipts directory).
+PROTECTED_EXCEPTIONS = frozenset({"runtime/recovery_receipts/pre-restart-34276394781/crash_dump.json"})
 
 
 def removable(rel: str) -> bool:
     rel = rel.replace("\\", "/").lstrip("/")
-    if any(p.fullmatch(rel) for p in PROTECTED):
+    if rel not in PROTECTED_EXCEPTIONS and any(p.fullmatch(rel) for p in PROTECTED):
         return False
     return any(r.fullmatch(rel) for r in REMOVABLE)
 
