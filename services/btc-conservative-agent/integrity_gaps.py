@@ -80,6 +80,53 @@ SIDECAR_NAME = "deletion.json.retained.jsonl"
 SIDECAR_AMBER_BYTES = 200 * 1024 * 1024
 
 
+# Files written per 24 h per runtime/v3 top-level prefix vs a budget (HM 19 Oct). Budgets are PROVISIONAL.
+# MEASURED_5D = surviving files per rolling 24 h bucket, newest first, from a Fly walk at 06:58 AEDT 19 Oct (mtime based,
+# so pre-wipe days undercount market_segments). No non-excepted budget may sit below its measured steady rate.
+MEASURED_5D = {"receipts": [16782, 9057, 11810, 12241, 13976], ".locks": [0, 1030, 1773, 1857, 2413],
+               "lifecycle_transfer_bundles": [248, 57, 417, 439, 292], "market_segments": [2780, 18, 0, 0, 0],
+               "signal_snapshots_v1": [689, 326, 984, 882, 992], "ledgers": [7, 0, 0, 0, 0]}
+FILES_PER_DAY_BUDGET = {"receipts": 5000, "market_segments": 3500, "signal_snapshots_v1": 1500,
+                        "lifecycle_transfer_bundles": 600, "ledgers": 20, ".locks": 3000}
+FILES_PER_DAY_DEFAULT = 100
+# Expiring exceptions, same rule as analyzer blockers: AMBER while declared and unexpired, RED once expired.
+BUDGET_EXCEPTIONS = {"receipts": {"expires": "2026-10-29", "owner": "Boss",
+                                  "reason": "one receipt file per ledger row (~12-17k/day); purge retired generations + C1 now, "
+                                            "append-only segment per ledger+generation (design 22 Oct, build following week)"}}
+
+
+def steady_rate(daily) -> int:
+    """Median of the measured daily counts (the steady rate a budget must not sit below)."""
+    v = sorted(int(x) for x in (daily or []))
+    return v[len(v) // 2] if v else 0
+
+
+def growth_budget(v3g: dict | None, now: float | None = None) -> dict:
+    """Per-prefix files/day vs budget from v3_growth(), with the measured 5-day rate beside each budget."""
+    import time as _t
+    from datetime import datetime, timezone
+    now = _t.time() if now is None else now
+    if not isinstance(v3g, dict) or not isinstance(v3g.get("dirs"), dict):
+        return {"status": "PENDING", "prefixes": {}}
+    out, red, amber = {}, [], []
+    for name, d in v3g["dirs"].items():
+        budget = FILES_PER_DAY_BUDGET.get(name, FILES_PER_DAY_DEFAULT)
+        n = int(d.get("files_24h") or 0)
+        daily = d.get("daily_5d") or MEASURED_5D.get(name)
+        exc = BUDGET_EXCEPTIONS.get(name)
+        expired = bool(exc) and now >= datetime.fromisoformat(exc["expires"]).replace(tzinfo=timezone.utc).timestamp()
+        row = {"files_24h": n, "budget": budget, "over": n > budget, "measured_5d": daily, "measured_steady": steady_rate(daily),
+               "files": d.get("files"), "bytes": d.get("bytes")}
+        if exc:
+            row["exception"] = dict(exc, expired=expired)
+        out[name] = row
+        if n > budget:
+            (red if (not exc or expired) else amber).append(name)
+    status = "RED" if red else "AMBER" if amber else ("GREEN" if v3g.get("complete") else "PENDING")
+    return {"status": status, "over": red + amber, "red": red, "excepted_amber": amber, "prefixes": out,
+            "complete": bool(v3g.get("complete")), "budgets_provisional": True}
+
+
 def sidecar_size(root: str, active_reset: str | None = None) -> dict:
     """Size of the active reset's deletion sidecar (read-only). AMBER above 200 MB; it never blocks a wipe and the next
     reset clears it (a compact sidecar format is a later, non-urgent PR)."""
@@ -207,7 +254,7 @@ def v3_growth(root: str, now: float | None = None, budget_s: float = 4.0, ttl: f
     for d, _subs, names in os.walk(base):
         top = os.path.relpath(d, base).split(os.sep)[0]
         top = "." if top == "." else top
-        row = dirs.setdefault(top, {"files": 0, "bytes": 0, "files_24h": 0})
+        row = dirs.setdefault(top, {"files": 0, "bytes": 0, "files_24h": 0, "daily_5d": [0] * 5})
         for n in names:
             try:
                 st = os.stat(os.path.join(d, n))
@@ -215,8 +262,11 @@ def v3_growth(root: str, now: float | None = None, budget_s: float = 4.0, ttl: f
                 continue
             row["files"] += 1
             row["bytes"] += st.st_size
-            if now - st.st_mtime < 86400:
+            age = now - st.st_mtime
+            if age < 86400:
                 row["files_24h"] += 1
+            if 0 <= age < 5 * 86400:
+                row["daily_5d"][int(age // 86400)] += 1
         if _t.monotonic() - t0 > budget_s:
             complete = False
             break
@@ -469,6 +519,15 @@ def evaluate(f: dict) -> dict:
     rows.append(_row("G21", "deletion.json.retained.jsonl size (active reset sidecar; exempt from G16, never blocks a wipe)",
                      sc, "<= 200 MB (AMBER above)", "PENDING" if not isinstance(sc, dict) else sc.get("status", "PENDING"),
                      "Fly /app/data runtime/research_reset_receipts/<active>/"))
+
+    gb = growth_budget(w.get("v3_growth"))
+    rows.append(_row("G22", "files written per day per runtime/v3 prefix vs budget",
+                     {"over": gb.get("over"), "red": gb.get("red"), "excepted_amber": gb.get("excepted_amber"),
+                      "prefixes": gb["prefixes"], "complete": gb.get("complete"), "budgets_provisional": True,
+                      # daily-report headline (HM 19 Oct): receipts written in the last 24 h and the measured 5-day series
+                      "receipts_per_day": (gb["prefixes"].get("receipts") or {}).get("files_24h"),
+                      "receipts_per_day_5d": (gb["prefixes"].get("receipts") or {}).get("measured_5d")},
+                     "every prefix <= its files/day budget", gb["status"], "Fly /app/data/runtime/v3 walk (v3_growth, cached 30 min)"))
 
     worst = max((_RANK[r["status"]] for r in rows), default=0)
     status = {0: "GREEN", 1: "AMBER", 2: "RED"}[worst]
