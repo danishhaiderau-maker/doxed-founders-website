@@ -57,63 +57,115 @@ def _num(v: Any) -> float | None:
     return f if f == f and abs(f) != float("inf") else None
 
 
+# Explicit lane -> hypothesis table (fail closed: an unknown lane is INVALID). The pre-registered H1-H8 studies are signal
+# studies with no live tile registered for them yet, so today every live tile row maps to its own tile label ("TILE:..."),
+# which keys the one-per-entry / non-overlap rule. Strategist must register lane -> H-id entries here before any H1-H8
+# study can count a tile row.
+HYPOTHESIS_BY_LANE: dict[str, str] = {
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP": "TILE:GS-01",
+    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": "TILE:GS-06",
+    "FAMILY_GSB1_CVD_DIV_REGIME": "TILE:B1",
+    "FAMILY_GSB2_REGIME_SWITCHER": "TILE:B2",
+    "FAMILY_RANDOM_CONTROL_TAKER_90": "TILE:CTRL",
+}
+# fill.fill_basis is NOT_INDEXED_SINCE_BOOT on most live rows (the fill-evidence index is empty after a boot; 38 of 41 closed rows on the
+# 19 Oct newest page): the book pricing is then proven by fill_model + pricing.* facts + fill.evidence_status == COMPLETE.
+BOOK_FILL_BASES = ("BOOK10L_TAKER_WALK", "NOT_INDEXED_SINCE_BOOT")
+BOOK_EXIT_BASIS = "VWAP_ALL_LEGS"
+# Every field the filter reads. A MISSING field makes the row INVALID (None where the route emits null is "present").
+REQUIRED_TOP = ("status", "lane", "entry_ts", "exit_ts", "fresh_epoch_id", "identity_quarantined", "policy_signature", "trade_id")
+REQUIRED_PRICING = ("fresh_eligible", "fill_valid", "legacy_pricing", "all_legs_book10l", "exit_status", "exit_price_basis",
+                    "hold_seconds", "exit_pricing_basis", "exit_repriced_lag_s")  # last two: #731 fields, exposed by PR feat/tiles-repriced-fields
+REQUIRED_EXIT = ("close_ts", "deploy_flatten", "forced_close")
+REQUIRED_FILL = ("fill_basis", "fill_model", "evidence_status")
+
+
+def hypothesis_of(row: dict) -> str | None:
+    return HYPOTHESIS_BY_LANE.get(str(row.get("lane") or ""))
+
+
+def net_bp_of(row: dict) -> float | None:
+    p = row.get("pnl")
+    return _num(p.get("bp")) if isinstance(p, dict) and p.get("bp_basis") == "net_pnl_bp" else None
+
+
 def invalid_reason(row: dict) -> str | None:
-    """Why a closed tile row is NOT a valid countable trade (None = valid). Definition of 'valid' (HM 19 Oct):
-    fresh epoch, book-priced (not FORCED_*/NO_BOOK or legacy BBO), not identity_quarantined, not deploy-flatten,
-    not unstamped/straddle. REPRICED_CURRENT_TIME exits are valid only within the 10 s cap (counted separately)."""
-    if not isinstance(row, dict) or str(row.get("status") or "").upper() != "CLOSED":
+    """Why a /api/monitor/tiles/trades row is NOT a valid countable trade (None = valid). 'valid' (HM 19 Oct): fresh epoch,
+    book-priced (BOOK10L taker walk, VWAP exit; not FORCED_NO_BOOK / legacy BBO), not identity_quarantined, not deploy-flatten
+    or forced close, not unstamped/straddle (entry_ts and exit_ts numeric). A missing field => INVALID. REPRICED_CURRENT_TIME
+    exits are valid only within the 10 s cap (lag present) and are reported separately."""
+    if not isinstance(row, dict):
+        return "NOT_A_ROW"
+    if str(row.get("status") or "").upper() != "CLOSED":
         return "NOT_CLOSED"
-    pr = row.get("pricing") or {}
-    ex = row.get("exit") or {}
-    if row.get("identity_quarantined"):
+    pr, ex, fl = row.get("pricing"), row.get("exit"), row.get("fill")
+    if not isinstance(pr, dict) or not isinstance(ex, dict) or not isinstance(fl, dict):
+        return "MISSING_BLOCK"
+    for blk, req, name in ((row, REQUIRED_TOP, "row"), (pr, REQUIRED_PRICING, "pricing"), (ex, REQUIRED_EXIT, "exit"),
+                           (fl, REQUIRED_FILL, "fill")):
+        miss = [k for k in req if k not in blk]
+        if miss:
+            return f"MISSING_FIELD:{name}.{miss[0]}"
+    if hypothesis_of(row) is None:
+        return "UNKNOWN_LANE"
+    if row["identity_quarantined"] is not False:
         return "IDENTITY_QUARANTINED"
-    if ex.get("deploy_flatten") or str(ex.get("close_origin") or "") == "DEPLOY_MAINTENANCE":
+    if ex["deploy_flatten"] is not False or str(ex.get("close_origin") or "") == "DEPLOY_MAINTENANCE":
         return "DEPLOY_FLATTEN"
-    if pr.get("fresh_eligible") is not True:
-        return "NOT_FRESH_ELIGIBLE"
-    if not str(pr.get("fresh_epoch_id") or "").strip():
-        return "UNSTAMPED_FRESH_EPOCH_ID"
-    if _num(row.get("entry_ts")) is None or _num(ex.get("close_ts")) is None:
+    if ex["forced_close"] is not False:
+        return "FORCED_CLOSE"
+    if _num(row["entry_ts"]) is None or _num(row["exit_ts"]) is None or _num(ex["close_ts"]) is None:
         return "UNSTAMPED_OR_STRADDLE_TS"
-    st = str(pr.get("exit_status") or "")
-    if st == "REPRICED_CURRENT_TIME":
-        age = _num(pr.get("exit_reprice_age_sec"))
-        if age is None or age > REPRICE_CAP_SEC:
-            return "REPRICED_BEYOND_10S_CAP"
-        return None
-    if st not in ("PAPER_FILL", "BOOK10L_FILL"):
-        return "FORCED_OR_UNPRICED_EXIT"
-    if str(pr.get("fill_model") or "").upper() in ("BBO", "LEGACY_BBO", "IDEAL_TOUCH"):
-        return "LEGACY_BBO_PRICING"
-    if pr.get("fill_valid") is False or pr.get("all_legs_book10l") is False:
+    if not str(row["fresh_epoch_id"] or "").strip():
+        return "UNSTAMPED_FRESH_EPOCH_ID"
+    if pr["fresh_eligible"] is not True:
+        return "NOT_FRESH_ELIGIBLE"
+    if pr["legacy_pricing"] is not False:
+        return "LEGACY_PRICING"
+    if pr["fill_valid"] is not True or pr["all_legs_book10l"] is not True:
         return "NOT_BOOK_PRICED"
-    return None
+    if fl["fill_basis"] not in BOOK_FILL_BASES or not str(fl["fill_model"] or "").startswith("BOOK10L"):
+        return "LEGACY_BBO_PRICING"
+    if fl["evidence_status"] != "COMPLETE":
+        return "FILL_EVIDENCE_INCOMPLETE"
+    if pr["exit_price_basis"] != BOOK_EXIT_BASIS or _num(pr["hold_seconds"]) is None:
+        return "NOT_BOOK_PRICED_EXIT"
+    st = str(pr["exit_status"] or "")
+    if st == "PAPER_FILL":
+        if pr["exit_pricing_basis"] == "REPRICED_CURRENT_TIME":
+            lag = _num(pr["exit_repriced_lag_s"])
+            if lag is None or lag > REPRICE_CAP_SEC:
+                return "REPRICED_BEYOND_10S_CAP"
+        return None
+    return "FORCED_OR_UNPRICED_EXIT"   # PAPER_FILL_FORCED, FORCED_NO_BOOK, anything else
 
 
 def valid_trades(rows: Iterable[dict]) -> dict:
-    """Valid trades, one per entry, non-overlapping holds per hypothesis; REPRICED_CURRENT_TIME reported separately."""
-    seen_entry: set = set()
-    cand, rejected, reprice = [], {}, 0
+    """Valid trades, one per entry (trade_id), non-overlapping holds per hypothesis; repriced exits reported separately."""
+    seen: set = set()
+    cand, rejected = [], {}
     for r in rows:
         why = invalid_reason(r)
         if why:
-            rejected[why] = rejected.get(why, 0) + 1
+            key = why.split(":")[0] if why.startswith("MISSING_FIELD") else why
+            rejected[key] = rejected.get(key, 0) + 1
+            if why.startswith("MISSING_FIELD"):
+                rejected.setdefault("_first_missing", why)
             continue
-        key = (str(r.get("hypothesis") or r.get("tile") or ""), str(r.get("entry_id") or r.get("trade_id")))
-        if key in seen_entry:
+        if r["trade_id"] in seen:
             rejected["DUPLICATE_ENTRY"] = rejected.get("DUPLICATE_ENTRY", 0) + 1
             continue
-        seen_entry.add(key)
+        seen.add(r["trade_id"])
         cand.append(r)
-    out, last_exit = [], {}
+    out, last_exit, reprice = [], {}, 0
     for r in sorted(cand, key=lambda x: float(x["entry_ts"])):
-        h = str(r.get("hypothesis") or r.get("tile") or "")
+        h = hypothesis_of(r)
         if float(r["entry_ts"]) < last_exit.get(h, float("-inf")):
             rejected["OVERLAPPING_HOLD"] = rejected.get("OVERLAPPING_HOLD", 0) + 1
             continue
-        last_exit[h] = float(r["exit"]["close_ts"])
+        last_exit[h] = float(r["exit_ts"])
         out.append(r)
-        if (r.get("pricing") or {}).get("exit_status") == "REPRICED_CURRENT_TIME":
+        if r["pricing"]["exit_pricing_basis"] == "REPRICED_CURRENT_TIME":
             reprice += 1
     return {"trades": out, "n": len(out), "repriced_current_time_n": reprice, "rejected_by_reason": rejected}
 
@@ -136,13 +188,16 @@ def early_flags(net_bp: list) -> list:
     return out
 
 
-def study_state(study: str, rows: Iterable[dict] | None = None, net_bp_of=lambda r: _num(r.get("net_bp"))) -> dict:
+def study_state(study: str, rows: Iterable[dict] | None = None, hypothesis_ids: tuple = ()) -> dict:
     base = {"study": study, "prereg": PREREG, "edge_claim": False, "ranking_allowed": False, "auto_tile_change": False}
     if study in STATIC_STATES:
         return {**base, "state": STATIC_STATES[study], "why": STATIC_WHY[study]}
     mn, md = STUDIES[study]
-    vt = valid_trades(rows or [])
-    days = len({_day(t["exit"]["close_ts"]) for t in vt["trades"]})
+    if not hypothesis_ids:
+        return {**base, "state": "PENDING_SAMPLES", "n_valid": 0, "min_n": mn, "min_days": md,
+                "why": "no live tile lane is registered for this study in HYPOTHESIS_BY_LANE: nothing can count"}
+    vt = valid_trades([r for r in (rows or []) if isinstance(r, dict) and hypothesis_of(r) in hypothesis_ids])
+    days = len({_day(t["exit_ts"]) for t in vt["trades"]})
     nets = [x for x in (net_bp_of(t) for t in vt["trades"]) if x is not None]
     ok = vt["n"] >= mn and days >= md
     return {**base, "state": "COUNTABLE" if ok else "PENDING_SAMPLES", "n_valid": vt["n"], "min_n": mn, "distinct_days": days,
@@ -174,8 +229,8 @@ def _cluster_bootstrap_lower(values: list, clusters: list, draws: int = BOOTSTRA
 def combos_holdout(h: dict | None) -> dict:
     """analyzer.combos sealed holdout (Addendum 1 + 2): ONE frozen policy, ONE look, frozen BEFORE any holdout row exists.
 
-    h = {policy_id, frozen_at, sealed_at, looks, trades:[{ts, net_bp, control_net_bp, entry_ts, exit{close_ts}, ...}],
-         training:{bh_fdr_q010_passed, policies_tested}}. Training-cut results are never evidence: they only gate PASS (gate 5).
+    h = {policy_id (= the frozen policy_signature), frozen_at, sealed_at, looks, trades: [real /tiles/trades rows, each with
+         control_net_bp joined by the analyzer], training:{bh_fdr_q010_passed, policies_tested}}. Training-cut results are never evidence: they only gate PASS (gate 5).
     """
     base = {"study": "analyzer.combos", "prereg": PREREG, "edge_claim": False, "ranking_allowed": False,
             "training_cut_is_evidence": False, "auto_tile_change": False}
@@ -191,15 +246,19 @@ def combos_holdout(h: dict | None) -> dict:
     if pre:
         return {**base, "state": "REFUSED_NOT_SEALED", "rows_before_freeze": len(pre),
                 "why": "a holdout row predates the policy freeze: not countable"}
-    vt = valid_trades([{**t, "status": t.get("status", "CLOSED")} for t in h["trades"]])
-    trades = vt["trades"]
-    days = len({_day(t["exit"]["close_ts"]) for t in trades})
-    info = {"policy_id": h.get("policy_id"), "n_valid": vt["n"], "min_n": MIN_TRADES, "distinct_days": days, "min_days": 5,
+    other = [t for t in h["trades"] if isinstance(t, dict) and t.get("policy_signature") != h.get("policy_id")]
+    if other:
+        return {**base, "state": "REFUSED_NOT_SEALED", "rows_other_policy": len(other),
+                "why": "the holdout is for ONE frozen policy; rows of another policy_signature are present"}
+    vt = valid_trades(h["trades"])
+    trades = [t for t in vt["trades"] if net_bp_of(t) is not None]
+    days = len({_day(t["exit_ts"]) for t in trades})
+    info = {"policy_id": h.get("policy_id"), "n_valid": len(trades), "min_n": MIN_TRADES, "distinct_days": days, "min_days": 5,
             "repriced_current_time_n": vt["repriced_current_time_n"], "rejected_by_reason": vt["rejected_by_reason"]}
-    if vt["n"] < MIN_TRADES or days < 5:
+    if len(trades) < MIN_TRADES or days < 5:
         return {**base, **info, "state": "PENDING_SAMPLES"}
-    nets = [float(t["net_bp"]) for t in trades]
-    hours = [int(float(t["exit"]["close_ts"]) // 3600) for t in trades]
+    nets = [net_bp_of(t) for t in trades]
+    hours = [int(float(t["exit_ts"]) // 3600) for t in trades]
     mean = _mean(nets)
     gates = {"g1_n_days": True, "g2_mean_ge_0p5bp": mean >= COMBOS_MIN_MEAN_BP,
              "g3_ci_lower_gt0": _cluster_bootstrap_lower(nets, hours) > 0}
