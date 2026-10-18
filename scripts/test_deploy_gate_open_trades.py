@@ -184,3 +184,18 @@ def test_partial_fill_or_exchange_id_or_filled_qty_on_an_expired_row_fails_close
 def test_status_must_be_on_the_allowlist():
     for st in ("WORKING", "NEW", "ACTIVE", "SOMETHING_ELSE", "", None):
         assert gate.counts_as_open(_expired(status=st)) is True
+
+
+def test_missing_fill_key_accepted_only_for_allowlisted_null_entry_zero_qty_no_exchange_id():
+    base = {"trade_id": "e", "status": "EXPIRED", "entry_ts": None}            # no 'fill' key, like the real row
+    assert gate.counts_as_open(base) is False
+    assert gate.counts_as_open(dict(base, qty=0)) is False and gate.counts_as_open(dict(base, qty=0.0)) is False
+    assert gate.counts_as_open(dict(base, qty=0.001)) is True
+    assert gate.counts_as_open(dict(base, order_id="x1")) is True
+    assert gate.counts_as_open(dict(base, status="WEIRD")) is True
+    assert gate.counts_as_open(dict(base, entry_ts=1.0)) is True
+    # any fill-like key present and non-empty fails closed, even a differently named one
+    for k, v in (("fill_price", 80000.0), ("fill_ts", 1.0), ("fill_basis", "BOOK10L_TAKER_WALK"), ("filled_qty", 0.1),
+                 ("fill_snapshot", {"a": 1}), ("partial_fill", True)):
+        assert gate.counts_as_open(dict(base, **{k: v})) is True, k
+    assert gate.counts_as_open(dict(base, fill_price=None, fill_basis="")) is False   # empty fill-like keys are fine

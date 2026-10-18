@@ -36,7 +36,10 @@ def _has_entry_fill(row: dict) -> bool:
     """Any sign of an entry: entry_ts, any fill snapshot content, filled qty, or an exchange order id."""
     if _present(row.get("entry_ts")) or _present(row.get("fill")):
         return True
-    if any(_present(row.get(k)) for k in _FILLED_QTY_KEYS + _EXCHANGE_ID_KEYS):
+    if any(_present(row.get(k)) for k in _FILLED_QTY_KEYS + _EXCHANGE_ID_KEYS + ("qty",)):
+        return True
+    # any fill-like top-level key (fill, fill_price, fill_ts, fill_basis, filled_*...) that is present and non-empty
+    if any("fill" in str(k).lower() and _present(v) for k, v in row.items()):
         return True
     order = row.get("order")
     if isinstance(order, dict) and (any(_present(order.get(k)) for k in _FILLED_QTY_KEYS + _EXCHANGE_ID_KEYS)
