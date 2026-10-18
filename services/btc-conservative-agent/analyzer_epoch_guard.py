@@ -82,6 +82,23 @@ class EpochGuard:
         bucket[cls] = bucket.get(cls, 0) + 1
         return False
 
+    def admit_v3_ledger_row(self, relpath: str, row: dict) -> bool:
+        """HM 19 Oct (queue item 3): V3 ledger rows carry segment windows, not a row time. Under a declared epoch a row is
+        admitted ONLY if its nested timestamps place it entirely at/after the fresh-start floor (class OK). PRE_EPOCH,
+        STRADDLE (window crosses the floor) and UNSTAMPED rows are hard-rejected (counted per class in ``rejected``), and a
+        declared epoch with no loadable floor admits nothing. No manifest (tests, tools outside an analyzer run): admit."""
+        if not self.manifest:
+            return True
+        if self.floor_missing or self.floor_ts is None:
+            return self._reject_no_floor(relpath)
+        cls = nested_ts_class(row, self.floor_ts)
+        if cls == NESTED_OK:
+            self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
+            return True
+        bucket = self.rejected.setdefault(relpath, {})
+        bucket[cls] = bucket.get(cls, 0) + 1
+        return False
+
     def _reject_no_floor(self, relpath: str) -> bool:
         bucket = self.rejected.setdefault(relpath, {})
         bucket[NO_FRESH_FLOOR] = bucket.get(NO_FRESH_FLOOR, 0) + 1
