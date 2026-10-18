@@ -602,7 +602,7 @@ def _combos_spec():
 
 
 def test_pending_samples_is_info_not_red_and_a_large_sample_goes_red_again():
-    import test_min_samples as tm
+    import test_self_aware_min_samples as tm
     spec = _combos_spec()
     grid = {"rows": [], "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
             "search_counts": {"independent_episodes": 754, "unique_policies_evaluated": 21210, "materialized_policy_rows": 0}}
