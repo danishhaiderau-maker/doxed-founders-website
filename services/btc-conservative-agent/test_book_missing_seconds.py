@@ -87,8 +87,27 @@ def test_exit_retry_loop_rereads_the_current_time_not_the_fixed_exit_time(monkey
     assert out == {"price": 81805.0} and marks["exit_status"] == "PAPER_FILL"
     assert len(seen) >= 2 and seen[0] == 1000.0 and seen[-1] > seen[0]
     assert marks["exit_repriced_lag_s"] and marks["exit_repriced_lag_s"] > 0 and marks["missing_book_seconds"] == 6
+    assert marks["exit_pricing_basis"] == "REPRICED_CURRENT_TIME"
+    assert marks["exit_repriced_lag_s"] < bot._tf.EXIT_FORCE_AFTER_S if hasattr(bot, "_tf") else True
     # a book that never returns still ends in FORCED_NO_BOOK at EXIT_FORCE_AFTER_S
     clock["t"] = 2000.0
     monkeypatch.setattr(tile_fill, "exit_fill", lambda *a, **k: {"status": "REJECT_NO_BOOK", "price": None})
     out2, marks2 = bot._paper_lane_exit({**pos, "exit_trigger_ts": 2000.0}, "PATH_END_60M")
     assert out2 is None and marks2["exit_status"] == "FORCED_NO_BOOK"
+
+
+def test_repriced_exit_is_labelled_counted_separately_and_stays_countable_only_when_book_priced():
+    import fills_by_model as fm
+    row = {"research_lane": "GSB1", "fill_model": paper_fill.FILL_MODEL, "entry_ts": 1e12,
+           "exit_pricing_basis": "REPRICED_CURRENT_TIME", "exit_repriced_lag_s": 4.2}
+    forced = {**row, "non_fill_category": "NO_BOOK_EXIT", "exit_fallback": "LEGACY_BBO_FALLBACK_NO_BOOK"}
+    out = fm.summarise([row, forced, {**row, "exit_pricing_basis": "MODEL_TIME"}], ["GSB1"])["tiles"]["GSB1"]
+    assert out["repriced_exit_rows"] == 2 and out["repriced_exit_countable"] == 0  # forced is never countable
+    assert out["by_category"]["no_book_exit"] == 1 and out["repriced_exit_share"] == round(2 / 3, 4)
+
+
+def test_no_retry_can_price_later_than_the_force_window():
+    import tile_fill
+    import bot
+    # every retry runs before time - t0 >= EXIT_FORCE_AFTER_S, so lag = now - delay - t0 < EXIT_FORCE_AFTER_S
+    assert bot._paper_exit_attempt_trigger(0.0, 1.5, 5, tile_fill.EXIT_FORCE_AFTER_S - 0.01) - 0.0 < tile_fill.EXIT_FORCE_AFTER_S
