@@ -34,6 +34,23 @@ LEGACY_POLICY_IDENTITY_EPISODES: dict[str, dict[str, Any]] = {
         "identity_rows_max_ts": 1792281301.0,
         "identity_row_count": 20,
     },
+    "episode-cfacc140c836a55a140c": {
+        "lanes": ["FAMILY_GSB1_CVD_DIV_REGIME", "FAMILY_GSB2_REGIME_SWITCHER"],
+        "reason": "declared_entry_ttl_sec decision 1200 vs order/execution 660 minted two policy signatures per policy",
+        # The identity-bearing rows that carry the evidence are the ones of these two divergent policy ids.
+        "policy_ids": [
+            "GSB1_CVD_DIVERGENCE_3M_QUIET_TOUCH_TREND_ASIDE_VIOLENT_DEEP0.75ATR|DYN_MOM_QUIET_VIOLENT_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
+            "SCORE_LED_NON_TIE_PAPER_V2::GSB2_QUIET_VIOLENT_CVD_DIVERGENCE_REV_TREND_COMMITTED_FADE_MOM_OFFSET0.25ATR|DYN_REV_QUIET_VIOLENT_MOM_TREND_LADDER_BE_TRAIL_GB_SHOCK_FLIP_CAP1",
+        ],
+        "divergent_signatures": [
+            "paper-policy-0f1ae7d625a29109ef1d", "paper-policy-d03dbfffa635dad86214",
+            "paper-policy-36dfd83e3c64539966ce", "paper-policy-67401bcf07b28d29c062",
+        ],
+        # Own per-id bound: newest of its 18 identity rows is 1792297804.03 (15:30:04 AEDT, 18 Oct); bound = that +1 s.
+        # Created before the #713 deploy boot (17:42:03 AEDT = 1792305723); no global bound is shared with other ids.
+        "identity_rows_max_ts": 1792297805.0,
+        "identity_row_count": 18,
+    },
 }
 
 # Only these keys say when an identity row was CREATED. signal_ts, deadlines, tape windows etc. are never used as a date.

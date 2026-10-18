@@ -90,11 +90,20 @@ class LegacyQuarantineTests(unittest.TestCase):
 
     def test_the_real_list_is_a_fixed_list_of_concrete_ids(self):
         ids = sorted(lpq.LEGACY_POLICY_IDENTITY_EPISODES)
-        self.assertEqual(ids, ["episode-1ff6cd183c4b011958be"])
-        spec = lpq.LEGACY_POLICY_IDENTITY_EPISODES[ids[0]]
-        self.assertEqual(spec["identity_rows_max_ts"], 1792281301.0)
-        self.assertEqual(len(spec["policy_ids"]), 2)
-        self.assertEqual(spec["identity_row_count"], 20)
+        self.assertEqual(ids, ["episode-1ff6cd183c4b011958be", "episode-cfacc140c836a55a140c"])
+        expect = {"episode-1ff6cd183c4b011958be": (1792281301.0, 20), "episode-cfacc140c836a55a140c": (1792297805.0, 18)}
+        for ep, (bound, count) in expect.items():  # each id carries its OWN bound; both pre-date the deploy boot
+            spec = lpq.LEGACY_POLICY_IDENTITY_EPISODES[ep]
+            self.assertEqual(spec["identity_rows_max_ts"], bound)
+            self.assertEqual(spec["identity_row_count"], count)
+            self.assertLess(bound, 1792305723.0)  # #713 deploy boot 17:42:03 AEDT
+            self.assertEqual(len(spec["policy_ids"]), 2)
+
+    def test_bounds_are_per_id_a_later_episode_is_not_covered_by_an_earlier_bound(self):
+        two = {**LISTED, "episode-b": {**LISTED[EP], "identity_rows_max_ts": B + 5000.0}}
+        late = {"episode_id": "episode-b", "policy_id": "PATIENT", "policy_signature": "s", "observed_ts": B + 4000.0}
+        self.assertEqual(lpq.evaluate(["episode-b"], [late], two)["accepted"], ["episode-b"])
+        self.assertEqual(lpq.evaluate(["episode-b"], [late], {"episode-b": LISTED[EP]})["accepted"], [])
 
 
 if __name__ == "__main__":
