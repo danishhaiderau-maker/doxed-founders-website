@@ -46624,8 +46624,19 @@ def runtime_uptime_loop():
     opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
     _RUNTIME_UPTIME["tracker"] = tracker
     logger.info("[UPTIME] boot recorded: %s", opened.get("text"))
+    try:
+        import memory_structures as _memstruct
+        _mem_tracker = _memstruct.Tracker(_data_sync_volume_root() / "memory_structures.json")
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        _mem_tracker = None
+        logger.warning("[MEMORY] diagnostics unavailable: %s", type(exc).__name__)
     while not shutdown_event.is_set():
         now = time.time()
+        if _mem_tracker is not None and _mem_tracker.due(now):
+            try:
+                _mem_tracker.run(now)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[MEMORY] snapshot failed: %s", type(exc).__name__)
         try:
             tracker.observe(now, _runtime_uptime_problem(now))
         except Exception as exc:
