@@ -36,9 +36,15 @@ def counts_as_open(row: dict) -> bool:
     if status in OPEN_STATUSES_EXCLUDED:
         return False
     if status in TERMINAL_NO_POSITION:
-        if "entry_ts" not in row or "fill" not in row:
+        if "entry_ts" not in row:
             return True                       # missing entry field: fail closed
-        return _has_entry_fill(row)
+        fill = row.get("fill")
+        if fill not in (None, {}) and not isinstance(fill, dict):
+            return True                       # unreadable fill snapshot: fail closed
+        order = row.get("order")
+        if isinstance(order, dict) and str(order.get("terminal") or "").upper() == "FILLED":
+            return True                       # order says filled: fail closed
+        return _has_entry_fill(row)           # (real EXPIRED rows carry no 'fill' key at all)
     return True                               # OPEN, PENDING, anything unknown
 
 

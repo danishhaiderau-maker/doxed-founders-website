@@ -148,7 +148,9 @@ def test_expired_with_an_entry_ts_or_a_fill_snapshot_fails_closed():
 def test_unknown_status_or_missing_entry_field_fails_closed():
     assert gate.counts_as_open({"status": "WEIRD", "entry_ts": None, "fill": None}) is True
     assert gate.counts_as_open({"status": "EXPIRED", "fill": None}) is True            # entry_ts missing
-    assert gate.counts_as_open({"status": "EXPIRED", "entry_ts": None}) is True        # fill missing
+    assert gate.counts_as_open({"status": "EXPIRED", "entry_ts": None, "fill": "garbage"}) is True   # unreadable fill
+    assert gate.counts_as_open({"status": "EXPIRED", "entry_ts": None, "order": {"terminal": "FILLED"}}) is True
+    assert gate.counts_as_open({"status": "EXPIRED", "entry_ts": None}) is False       # real shape: no fill key, never filled
     assert gate.counts_as_open({"status": None}) is True
 
 
