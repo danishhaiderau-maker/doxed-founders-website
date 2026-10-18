@@ -744,3 +744,26 @@ def test_tile_orders_quiet_window_follows_each_tiles_own_rate(paths, store):
     store.refresh_views()
     fd = diagnose.check_orders_on_tiles(f, diagnose.signals(f), store)
     assert fd.severity == "GREEN", fd.observed
+
+
+def test_view_is_recreated_when_the_same_file_reappears_after_a_reset(tmp_path):
+    """18 Oct: epoch reset deleted decision.jsonl, view dropped but its signature stayed cached, so the view never came back."""
+    from self_aware.store import Store
+    from self_aware.config import Paths
+    import dataclasses
+    mirror = tmp_path / "mirror"
+    (mirror / "v3" / "ledgers").mkdir(parents=True)
+    paths = dataclasses.replace(Paths(), mirror=mirror, home=tmp_path / "home")
+    paths.home.mkdir()
+    st = Store(paths)
+    f = mirror / "v3" / "ledgers" / "decision.jsonl"
+    f.write_text('{"event_id":"a","decision_ts":1.0}\n')
+    st.refresh_views()
+    assert st.read("SELECT count(*) AS n FROM raw_decision")[0]["n"] == 1
+    f.unlink()
+    st.refresh_views()
+    assert not st.table_exists("raw_decision")
+    f.write_text('{"event_id":"a","decision_ts":1.0}\n{"event_id":"b","decision_ts":2.0}\n')
+    out = {r["view"]: r for r in st.refresh_views()}
+    assert out["raw_decision"]["status"] == "OK" and out["raw_decision"]["files"] == 1
+    assert st.read("SELECT count(*) AS n FROM raw_decision")[0]["n"] == 2
