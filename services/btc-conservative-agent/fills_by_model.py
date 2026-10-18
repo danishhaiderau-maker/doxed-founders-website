@@ -9,7 +9,15 @@ import paper_fill
 
 SCHEMA = "fills_by_model_v1"
 CATEGORIES = ("countable", "not_fresh_book10l", "pre_epoch", "unstamped", "no_book_exit", "tp1_unpriced_leg",
-              "fill_model_invalid", "other_fill_model", "legacy_pricing")
+              "fill_model_invalid", "other_fill_model", "legacy_pricing", "identity_quarantined")
+
+# HM 18 Oct: trades of episodes whose decision and execution minted different policy signatures (B1/B2 TTL 1200 vs 660,
+# fixed by #713). FIXED list of concrete trade ids (no pattern, no time cutoff); mirrors the analyzer-side episode
+# quarantine (research/legacy_policy_quarantine.py). They are shown here, never counted. Cleared with the next reset.
+IDENTITY_QUARANTINED_TRADE_IDS = frozenset({
+    "gb1-c50a30ac77d9", "gb2-b5f0bc54af36",   # episode-1ff6cd183c4b011958be (10:54 AEDT)
+    "gb1-746896eb658e", "gb2-c78f44f6c178",   # episode-cfacc140c836a55a140c (15:30 AEDT)
+})
 
 
 _TS_KEYS = ("entry_ts", "exit_ts", "ts_epoch", "entry_time_ts")  # same keys paper_fill.row_before_epoch reads
@@ -22,6 +30,8 @@ def _has_timestamp(row: dict) -> bool:
 def classify(row: dict) -> str:
     if not isinstance(row, dict):
         return "legacy_pricing"
+    if str(row.get("trade_id") or "") in IDENTITY_QUARANTINED_TRADE_IDS:
+        return "identity_quarantined"
     if row.get("non_fill_category") == "NO_BOOK_EXIT" or row.get("exit_fallback") == "LEGACY_BBO_FALLBACK_NO_BOOK":
         return "no_book_exit"
     if row.get("non_fill_category") == "TP1_UNPRICED_LEG":

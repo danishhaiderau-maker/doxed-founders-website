@@ -70,6 +70,8 @@ THRESHOLDS = {
     "fly_hours_to_full_red": 24.0,
     "laptop_disk_days_amber": 14.0,
     "laptop_disk_days_red": 5.0,
+    "laptop_disk_free_amber_gb": 15.0,
+    "laptop_disk_free_red_gb": 5.0,
     "duplicate_copies_amber_gb": 1.0,
     "data_doc_max_age_sec": 2 * 3600,
     "sections_doc_max_age_sec": 3 * 3600,
