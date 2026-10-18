@@ -97,9 +97,9 @@ def test_stale_or_missing_sample_is_unknown_then_amber_after_30_min():
 
 def test_runaway_during_warmup_is_red_at_60pct_and_80pct_any_time():
     boot, now = 1_000_000.0, 1_000_000.0 + 1800
-    assert ms.oom_status([], LIMIT, boot, now, now, int(0.59 * LIMIT))["status"] == "PENDING"
+    assert ms.oom_status([], LIMIT, boot, now, now, int(0.18 * LIMIT))["status"] == "PENDING"   # 1.4 GB; >2 GB in a young boot is RED since the interim alert
     r = ms.oom_status([], LIMIT, boot, now, now, int(0.61 * LIMIT))
-    assert r["status"] == "RED" and r["reason"] == "RSS_OVER_60PCT_DURING_WARMUP" and r["hours_to_oom"] is None
+    assert r["status"] == "RED" and r["reason"] in ("RSS_OVER_3GB", "RSS_OVER_2GB_UNDER_12H_BOOT", "RSS_OVER_60PCT_DURING_WARMUP") and r["hours_to_oom"] is None
     late = boot + 30 * H
     assert ms.oom_status([], LIMIT, boot, late, late, int(0.81 * LIMIT))["status"] == "RED"
     assert ms.oom_status(_series(boot, 2, 8, 10, 1000, 0), LIMIT, boot, late, late, int(0.7 * LIMIT))["status"] != "RED"
@@ -154,7 +154,7 @@ def test_health_check_reads_same_telemetry_sample_and_surfaces_states(tmp_path, 
     sample = {"ts": now - 5, "boot_ts": 1_000_000.0, "memory": {"rss_bytes": int(0.65 * 8192) * 1024 * 1024}}
     monkeypatch.setattr(bot, "_runtime_telemetry_status", lambda n=None: {"latest": sample})
     c = bot._memory_oom_check(now)
-    assert c["id"] == "fly.memory_oom_eta" and c["status"] == "RED" and "RSS_OVER_60PCT" in c["observed"]
+    assert c["id"] == "fly.memory_oom_eta" and c["status"] == "RED" and ("RSS_OVER_60PCT" in c["observed"] or "RSS_OVER_2GB" in c["observed"] or "RSS_OVER_3GB" in c["observed"])
     sample["ts"] = now - 4000
     assert bot._memory_oom_check(now)["status"] == "AMBER"  # stale > 30 min
 
@@ -227,4 +227,30 @@ def test_pending_is_rank0_only_below_the_absolute_ceilings(tmp_path, monkeypatch
 def test_absolute_ceiling_applies_even_if_limit_unreadable():
     boot, now = 1_000_000.0, 1_000_000.0 + 1800
     r = ms.oom_status([], None, boot, now, now, int(0.7 * 8192 * 1024))
-    assert r["status"] == "RED" and r["reason"] == "RSS_OVER_60PCT_DURING_WARMUP"
+    assert r["status"] == "RED" and r["reason"] in ("RSS_OVER_3GB", "RSS_OVER_2GB_UNDER_12H_BOOT", "RSS_OVER_60PCT_DURING_WARMUP")
+
+
+def test_interim_alert_3gb_or_2gb_in_young_boot_is_red_and_sums_the_shipper():
+    now, boot = 1_000_000.0, 1_000_000.0 - 3 * 3600
+    kb = lambda mb: mb * 1024
+    ok = ms.oom_status([], kb(8192), boot, now, now, kb(1500))
+    assert ok["status"] != "RED"
+    young = ms.oom_status([], kb(16384), boot, now, now, kb(2100))
+    assert young["status"] == "RED" and young["reason"] == "RSS_OVER_2GB_UNDER_12H_BOOT"
+    old_boot = now - 20 * 3600
+    assert ms.oom_status([], kb(16384), old_boot, now, now, kb(2100))["status"] != "RED"      # >12 h: 2 GB alone is fine
+    big = ms.oom_status([], kb(16384), old_boot, now, now, kb(3100))
+    assert big["status"] == "RED" and big["reason"] == "RSS_OVER_3GB"
+    summed = ms.oom_status([], kb(16384), old_boot, now, now, kb(2000), extra_rss_kb=kb(1100))   # 2000 + shipper 1100
+    assert summed["status"] == "RED" and summed["shipper_rss_mb"] == 1100
+
+
+def test_stairs_and_loop_start_end_are_recorded(tmp_path):
+    series = [(1000.0 + 60 * i, kb) for i, kb in enumerate([900_000, 905_000, 1_020_000, 1_025_000, 1_140_000])]
+    st = ms.detect_stairs(series)
+    assert [s["delta_mb"] for s in st] == [112.3, 112.3]
+    t = ms.Tracker(tmp_path / "m.json", interval_sec=0)
+    t.record_loop("analytics_loop", 100.0, 103.5)
+    doc = t.run(now=2000.0)
+    assert doc["loops"] == [{"name": "analytics_loop", "start": 100.0, "end": 103.5, "body_sec": 3.5}]
+    assert "stairs" in doc and "shipper_rss_kb" in doc
