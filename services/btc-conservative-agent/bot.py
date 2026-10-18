@@ -48886,6 +48886,12 @@ def _integrity_gap_facts(now: float) -> dict:
                 root = os.getcwd()
             scan = _ig.scan_local_oldest(root)
             offenders = sorted(n for n, ts in scan["files"].items() if ts < float(epoch) - 60)
+            out["by_prefix"] = _ig.by_prefix(scan["files"], scan.get("sizes") or {}, float(epoch))  # true total, uncapped
+            out["kept_by_prefix"] = _ig.by_prefix(scan["kept"], scan.get("sizes") or {}, float(epoch))
+            try:
+                out["v3_growth"] = _ig.v3_growth(root)
+            except Exception as exc:  # noqa: BLE001
+                out["v3_growth"] = {"error": type(exc).__name__}
             import keep_manifest as _km
             out["keep"] = {"manifest_sha256": _km.MANIFEST_SHA256, "decision": _km.DECISION,
                            "fly_files_older_than_epoch": sum(1 for ts in scan["kept"].values() if ts < float(epoch) - 60),

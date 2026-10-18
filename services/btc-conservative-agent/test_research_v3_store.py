@@ -378,7 +378,11 @@ class ResearchV3StoreTests(unittest.TestCase):
             self.assertTrue(store.verify()["passed"])
             path = store.root / ref["relative_path"]
             original = path.read_bytes()
+            before_ns = path.stat().st_mtime_ns
             path.write_bytes(b"X" + original[1:])
+            # explicit mtime: a same-size external write inside one coarse filesystem timestamp tick would otherwise keep the
+            # cached (dev, inode, size, mtime_ns) signature and make this test timing-dependent
+            os.utime(path, ns=(before_ns + 5_000_000_000, before_ns + 5_000_000_000))
             report = store.verify()
             self.assertFalse(report["passed"])
             self.assertEqual(report["market_segment_count"], 0)
