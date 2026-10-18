@@ -268,3 +268,16 @@ def test_multi_leg_row_tp1_plus_terminal_is_strict_fresh_with_filled_leg_prices(
     bad = dict(row, partial_exit_receipts=[dict(row["partial_exit_receipts"][0], leg_priced_by=None),
                                            row["partial_exit_receipts"][1]])
     assert paper_fill.row_fresh_strict(bad) is False  # one unpriced TP1 leg poisons the whole row
+
+
+def test_closed_row_flat_evidence_status_reaches_the_tile_fill_block():
+    blk = monitor_tiles._fill_block({}, filled=True, raw={"evidence_status": "COMPLETE"})
+    assert blk["evidence_status"] == "COMPLETE"
+    assert monitor_tiles._fill_block({}, filled=True, raw={})["evidence_status"] is None
+
+
+def test_closed_row_entry_pricing_fields_copy_evidence_status_and_tile_row_exposes_fresh_id():
+    import pathlib
+    src = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert '"evidence_status": efs.get("evidence_status")' in src
+    assert '"fresh_epoch_id": raw.get("fresh_epoch_id")' in pathlib.Path(monitor_tiles.__file__).read_text(encoding="utf-8")

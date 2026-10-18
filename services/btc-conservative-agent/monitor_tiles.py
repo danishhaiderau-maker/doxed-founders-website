@@ -285,7 +285,8 @@ def _fill_block(fill_evidence: Mapping[str, Any] | None, *, filled: bool,
         "execution_basis": evidence.get("execution_basis"),
         "liquidity": evidence.get("liquidity"),
         "queue_estimate": evidence.get("queue_estimate"),
-        "evidence_status": evidence.get("evidence_status"),  # fill_sim.evidence_status (COMPLETE/INCOMPLETE/NO_FILL)
+        # fill_sim.evidence_status (COMPLETE/INCOMPLETE/NO_FILL); closed rows carry it flat (no sim object)
+        "evidence_status": evidence.get("evidence_status") or ((raw or {}).get("evidence_status") if isinstance(raw, Mapping) else None),
     }
 
 
@@ -495,6 +496,7 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         "tile_short": short_names.get(lane or "") if lane else None,
         "status": status.upper(),
         "data_epoch_id": epoch_id,
+        "fresh_epoch_id": raw.get("fresh_epoch_id"),  # canonical fresh id (fse-<epoch_ts>), beside the pinned data_epoch_id
         "collector_epoch_id": raw.get("epoch_id"),
         "policy_signature": raw.get("policy_signature"),
         "side": _side(raw),
