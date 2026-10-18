@@ -61,17 +61,32 @@ class LegacyQuarantineTests(unittest.TestCase):
         rows = [{"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1"}]
         out = lpq.evaluate([EP], rows, LISTED)
         self.assertEqual(out["accepted"], [])
-        self.assertEqual(out["rejected"][0]["reason"], "IDENTITY_ROWS_NEWER_THAN_EVIDENCE_BOUND")
+        self.assertEqual(out["rejected"][0]["reason"], "UNDATED_IDENTITY_ROW")
         rows.append({"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1",
                      "observed_ts": B + 500.0})
         self.assertEqual(lpq.evaluate([EP], rows, LISTED)["accepted"], [EP])
 
-    def test_deadlines_and_tape_windows_are_not_creation_times(self):
-        row = {"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "decision_ts": B + 500.0,
-               "resolution_deadline_ts": B + 9999.0, "market_segment_refs": {"end_ts": B + 9999.0}}
-        self.assertEqual(lpq.identity_row_ts(row), B + 500.0)
-        sparse = {"x": {"requested_end_ts": B + 9999.0, "fill_ts": B + 600.0, "chase_schedule_policy_end_ts": B + 9999.0}}
-        self.assertEqual(lpq.identity_row_ts(sparse), B + 600.0)
+    def test_undated_row_with_a_post_bound_dated_sibling_is_rejected(self):
+        rows = [{"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1"},
+                {"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "event_id": "e1",
+                 "observed_ts": B + 1500.0}]
+        out = lpq.evaluate([EP], rows, LISTED)
+        self.assertEqual(out["accepted"], [])
+        self.assertEqual(out["rejected"][0]["reason"], "IDENTITY_ROWS_NEWER_THAN_EVIDENCE_BOUND")
+
+    def test_only_creation_time_keys_date_a_row(self):
+        row = {"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "signal_ts": B + 1.0,
+               "resolution_deadline_ts": B + 9999.0, "mae_ts": B + 5.0, "market_segment_refs": {"end_ts": B + 9999.0}}
+        self.assertIsNone(lpq.identity_row_ts(row))  # signal_ts alone is not a creation time
+        self.assertEqual(lpq.evaluate([EP], [row], LISTED)["rejected"][0]["reason"], "UNDATED_IDENTITY_ROW")
+        row.update({"decision_ts": B + 500.0, "fill_ts": B + 600.0})
+        self.assertEqual(lpq.identity_row_ts(row), B + 600.0)
+
+    def test_row_count_must_match_the_recorded_count(self):
+        listed = {EP: {**LISTED[EP], "identity_row_count": 2}}
+        one = [{"episode_id": EP, "policy_id": "PATIENT", "policy_signature": "s", "observed_ts": B + 1.0}]
+        self.assertEqual(lpq.evaluate([EP], one, listed)["rejected"][0]["reason"], "IDENTITY_ROW_COUNT_MISMATCH")
+        self.assertEqual(lpq.evaluate([EP], one * 2, listed)["accepted"], [EP])
 
     def test_the_real_list_is_a_fixed_list_of_concrete_ids(self):
         ids = sorted(lpq.LEGACY_POLICY_IDENTITY_EPISODES)
@@ -79,6 +94,7 @@ class LegacyQuarantineTests(unittest.TestCase):
         spec = lpq.LEGACY_POLICY_IDENTITY_EPISODES[ids[0]]
         self.assertEqual(spec["identity_rows_max_ts"], 1792281301.0)
         self.assertEqual(len(spec["policy_ids"]), 2)
+        self.assertEqual(spec["identity_row_count"], 20)
 
 
 if __name__ == "__main__":

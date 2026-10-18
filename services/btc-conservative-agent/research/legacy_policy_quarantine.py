@@ -32,46 +32,23 @@ LEGACY_POLICY_IDENTITY_EPISODES: dict[str, dict[str, Any]] = {
         # Latest creation timestamp over the 20 identity rows of the two divergent policy ids is 1792281300.80 (10:55:00 AEDT); bound = that +0.2 s,
         # on 18 Oct 2026, before the 12:42 AEDT deploy and before the canonical-TTL fix (#713).
         "identity_rows_max_ts": 1792281301.0,
+        "identity_row_count": 20,
     },
 }
 
-_TS_EXCLUDE = ("deadline", "expires", "expiry")
-
-
-_NESTED_EXCLUDE = _TS_EXCLUDE + ("end_ts", "until_ts", "requested", "policy_end", "required")
-
-
-def _nested_creation_ts(value: Any, found: list[float]) -> None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if isinstance(item, (Mapping, list)):
-                _nested_creation_ts(item, found)
-            elif (isinstance(key, str) and key.endswith("_ts") and not any(x in key for x in _NESTED_EXCLUDE)
-                  and isinstance(item, (int, float)) and not isinstance(item, bool) and 1.0e9 < float(item) < 4.0e9):
-                found.append(float(item))
-    elif isinstance(value, list):
-        for item in value[:200]:
-            _nested_creation_ts(item, found)
+# Only these keys say when an identity row was CREATED. signal_ts, deadlines, tape windows etc. are never used as a date.
+CREATION_TS_KEYS = ("decision_ts", "submitted_ts", "fill_ts", "observed_ts", "created_ts")
 
 
 def identity_row_ts(row: Mapping[str, Any]) -> float | None:
-    """Latest creation-type timestamp of a policy-identity row.
-
-    Top-level *_ts first (deadlines/expiries excluded). A row with none (sparse execution/lifecycle rows) falls back to its
-    nested *_ts values minus deadline/window-end keys. No usable timestamp -> None, which the caller treats as fail closed.
-    """
+    """Latest creation-time stamp of a policy-identity row, from CREATION_TS_KEYS only; None if the row carries none."""
     best = None
-    for key, value in row.items():
-        if not key.endswith("_ts") or any(x in key for x in _TS_EXCLUDE):
-            continue
+    for key in CREATION_TS_KEYS:
+        value = row.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not (1.0e9 < float(value) < 4.0e9):
             continue
         best = float(value) if best is None or float(value) > best else best
-    if best is not None:
-        return best
-    found: list[float] = []
-    _nested_creation_ts(row, found)
-    return max(found) if found else None
+    return best
 
 
 def evaluate(present_ids: Iterable[str], identity_rows: Iterable[Mapping[str, Any]],
@@ -80,9 +57,10 @@ def evaluate(present_ids: Iterable[str], identity_rows: Iterable[Mapping[str, An
     listed = LEGACY_POLICY_IDENTITY_EPISODES if listed is None else listed
     present = {str(i) for i in present_ids if str(i) in listed}
     newest: dict[str, float | None] = {i: None for i in present}
+    undated: set[str] = set()
     rows_seen: dict[str, int] = {i: 0 for i in present}
     # Sparse rows (some execution/lifecycle rows carry no timestamp at all) inherit the newest dated timestamp of the rows
-    # that share their event_id; a row with no date and no dated sibling fails closed.
+    # that share their event_id (siblings dated by CREATION_TS_KEYS only); a row with no date and no dated sibling fails closed.
     relevant: list[tuple[str, Mapping[str, Any], float | None]] = []
     by_event: dict[tuple[str, str], float] = {}
     for row in identity_rows:
@@ -101,14 +79,20 @@ def evaluate(present_ids: Iterable[str], identity_rows: Iterable[Mapping[str, An
         if ts is None:
             ts = by_event.get((ep, str(row.get("event_id") or "")))
         if ts is None:
-            newest[ep] = float("inf")  # an identity row we cannot date: fail closed
+            undated.add(ep)  # an identity row we cannot date: fail closed
         elif newest[ep] is None or ts > newest[ep]:
             newest[ep] = ts
     accepted, rejected, episodes = [], [], []
     for ep in sorted(present):
         bound = float(listed[ep]["identity_rows_max_ts"])
         got = newest[ep]
-        if got is None:
+        expected = listed[ep].get("identity_row_count")
+        if ep in undated:
+            rejected.append({"episode_id": ep, "reason": "UNDATED_IDENTITY_ROW"})
+        elif expected is not None and rows_seen[ep] != int(expected):
+            rejected.append({"episode_id": ep, "reason": "IDENTITY_ROW_COUNT_MISMATCH",
+                             "identity_rows": rows_seen[ep], "expected_identity_rows": int(expected)})
+        elif got is None:
             rejected.append({"episode_id": ep, "reason": "NO_DATED_IDENTITY_ROWS_FOUND"})
         elif got > bound:
             rejected.append({"episode_id": ep, "reason": "IDENTITY_ROWS_NEWER_THAN_EVIDENCE_BOUND",
