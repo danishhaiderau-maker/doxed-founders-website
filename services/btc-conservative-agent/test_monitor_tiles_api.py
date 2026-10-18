@@ -442,7 +442,7 @@ def test_reconcile_route_is_monitor_read_only_and_fly_side_only(bot, monkeypatch
         body = r.get_json()
         assert body["schema"] == "monitor_reconcile_v1" and body["read_only"] is True and body["epoch_id"] == EPOCH
         assert body["sources"] == {"fly": "OK", "mirror": "NOT_REPORTED_TO_FLY", "analyzer": "NOT_REPORTED_TO_FLY"}
-        assert body["archive_restore"]["tests_total"] == 23 and body["archive_restore"]["tests_failed"] == 21
+        assert "archive_restore" not in body  # retired 18 Oct (no permanent archive)
         tiles = {t["lane"]: t for t in body["per_tile"]}
         assert tiles[GS1]["fly_n"] == 1 and tiles[HA]["fly_n"] >= 1
         assert all(t["mirror_n"] is None and t["analyzer_n"] is None and t["ok"] is None for t in tiles.values())
