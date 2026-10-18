@@ -53,3 +53,66 @@ def test_report_and_adapter_readers_drop_non_fresh_rows(tmp_path):
     assert list(ad._iter_jsonl(p)) == [OK]
     set_process_guard(_guard(floor=None))
     assert rep._read_ledger(p) == [] and list(ad._iter_jsonl(p)) == []
+
+
+# ---- real floor and real saved ledger rows (Fly runtime/v3/ledgers, captured 19 Oct) --------------------------------
+REAL_FLOOR = 1792263671.26
+_FIX = json.loads((Path(__file__).resolve().parent / "fixtures" / "v3_ledger_rows_fresh_20261019.json").read_text())["rows"]
+
+
+def _real_guard(floor=REAL_FLOOR):
+    return EpochGuard(de.new_manifest("ce-20261018-fresh", started_at_ts=REAL_FLOOR), floor_ts=floor, require_floor=True)
+
+
+def _bump_first_ts(row, to):
+    import copy
+    row = copy.deepcopy(row)
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                if k.endswith("_ts") and isinstance(x, (int, float)) and not isinstance(x, bool):
+                    v[k] = to
+                    return True
+                if walk(x):
+                    return True
+        elif isinstance(v, list):
+            return any(walk(x) for x in v)
+        return False
+    assert walk(row)
+    return row
+
+
+def test_real_fresh_rows_are_admitted_and_real_straddle_row_is_rejected():
+    g = _real_guard()
+    for name in ("decision", "lifecycle"):
+        for r in _FIX[name]:
+            assert g.admit_v3_ledger_row(f"v3/ledgers/{name}.jsonl", r) is True, name
+    seg = [g.admit_v3_ledger_row("v3/ledgers/market_segment.jsonl", r) for r in _FIX["market_segment"]]
+    assert seg == [True, False, True]                      # the middle real row's window crosses the floor (-165 s)
+    blk = g.receipt_block()
+    assert blk["rows_admitted"] == 8 > 0
+    assert blk["rejected_by_stream"]["v3/ledgers/market_segment.jsonl"] == {"STRADDLE": 1}
+    fr = blk["fresh_rule"]
+    assert fr["status"] == "GREEN" and fr["v3_readers"]["v3/ledgers/decision.jsonl"]["admitted"] == 3
+
+
+def test_any_nested_ts_before_the_real_floor_rejects_a_real_row():
+    g = _real_guard()
+    for name in ("decision", "lifecycle", "market_segment"):
+        good = _FIX[name][0]
+        assert g.admit_v3_ledger_row(f"v3/ledgers/{name}.jsonl", good) is True
+        assert g.admit_v3_ledger_row(f"v3/ledgers/{name}.jsonl", _bump_first_ts(good, REAL_FLOOR - 1)) is False
+
+
+def test_declared_epoch_with_no_floor_admits_nothing_and_is_red():
+    g = _real_guard(floor=None)
+    assert all(g.admit_v3_ledger_row("v3/ledgers/decision.jsonl", r) is False for r in _FIX["decision"])
+    fr = g.receipt_block()["fresh_rule"]
+    assert fr["status"] == "RED" and fr["reason"] == "FRESH_FLOOR_MISSING"
+    assert EpochGuard(de.new_manifest("ce-20261018-fresh", started_at_ts=REAL_FLOOR), floor_ts=None).fresh_rule_status()["status"] == "RED"
+
+
+def test_load_ids_stays_unfiltered():
+    src = (Path(__file__).resolve().parent / "research_v3_store.py").read_text()
+    assert "admit_v3_ledger_row" not in src and "process_guard" not in src
