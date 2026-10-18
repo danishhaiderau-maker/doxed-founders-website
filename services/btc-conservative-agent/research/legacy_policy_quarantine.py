@@ -58,6 +58,7 @@ def evaluate(present_ids: Iterable[str], identity_rows: Iterable[Mapping[str, An
     present = {str(i) for i in present_ids if str(i) in listed}
     newest: dict[str, float | None] = {i: None for i in present}
     undated: set[str] = set()
+    policy_ids = {i: set(listed[i].get("policy_ids") or ()) for i in present}  # hoisted out of the row loop
     rows_seen: dict[str, int] = {i: 0 for i in present}
     # Sparse rows (some execution/lifecycle rows carry no timestamp at all) inherit the newest dated timestamp of the rows
     # that share their event_id (siblings dated by CREATION_TS_KEYS only); a row with no date and no dated sibling fails closed.
@@ -67,7 +68,7 @@ def evaluate(present_ids: Iterable[str], identity_rows: Iterable[Mapping[str, An
         ep = str(row.get("episode_id") or "")
         if ep not in present or not row.get("policy_signature"):
             continue
-        if str(row.get("policy_id") or "") not in set(listed[ep].get("policy_ids") or ()):
+        if str(row.get("policy_id") or "") not in policy_ids[ep]:
             continue
         ts = identity_row_ts(row)
         relevant.append((ep, row, ts))
