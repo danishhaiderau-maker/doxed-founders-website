@@ -30,6 +30,83 @@ def rss_kb() -> int | None:
     return None
 
 
+def memory_limit_kb() -> int | None:
+    """Container memory limit: cgroup v2/v1 file, else FLY_VM_MEMORY_MB, else MemTotal. None when unknown."""
+    for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = Path(f).read_text().strip()
+            if v.isdigit() and int(v) < (1 << 50):
+                return int(v) // 1024
+        except OSError:
+            pass
+    try:
+        return int(os.environ["FLY_VM_MEMORY_MB"]) * 1024
+    except (KeyError, ValueError):
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def process_detail(top: int = 8, smaps_path: str = "/proc/self/smaps") -> dict:
+    """Native-memory view: anon vs file RSS, biggest mappings, threads, open fds, DuckDB usage (if loaded). Read-only."""
+    out: dict = {"anon_kb": None, "file_kb": None, "shmem_kb": None, "top_mappings": [], "threads": None, "open_fds": None,
+                 "duckdb_memory_bytes": None}
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith(("RssAnon:", "RssFile:", "RssShmem:")):
+                k = {"RssAnon:": "anon_kb", "RssFile:": "file_kb", "RssShmem:": "shmem_kb"}[line.split()[0]]
+                out[k] = int(line.split()[1])
+            elif line.startswith("Threads:"):
+                out["threads"] = int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        out["open_fds"] = len(os.listdir("/proc/self/fd"))
+    except OSError:
+        pass
+    try:
+        maps, cur = [], None
+        for line in Path(smaps_path).read_text().splitlines():
+            head = line.split()
+            if head and "-" in head[0] and not head[0].endswith(":") and len(head) >= 5:
+                cur = {"range": head[0], "perm": head[1], "name": head[5] if len(head) > 5 else "[anon]", "rss_kb": 0, "anon_kb": 0}
+                maps.append(cur)
+            elif cur is not None and line.startswith("Rss:"):
+                cur["rss_kb"] = int(head[1])
+            elif cur is not None and line.startswith("Anonymous:"):
+                cur["anon_kb"] = int(head[1])
+        maps.sort(key=lambda m: m["rss_kb"], reverse=True)
+        out["top_mappings"] = maps[:top]
+        out["mapping_count"] = len(maps)
+    except (OSError, ValueError, IndexError):
+        pass
+    if "duckdb" in sys.modules:
+        try:
+            rows = sys.modules["duckdb"].sql("select coalesce(sum(memory_usage_bytes),0) from duckdb_memory()").fetchall()
+            out["duckdb_memory_bytes"] = int(rows[0][0])
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def oom_eta(history: list, limit_kb: int | None, min_window_sec: float = 1800.0) -> dict:
+    """Linear RSS growth over the retained window -> hours until the container limit. status RED <6 h, AMBER <24 h."""
+    pts = [(h["ts"], h["rss_kb"]) for h in history if h.get("rss_kb")]
+    if not limit_kb or len(pts) < 2 or pts[-1][0] - pts[0][0] < min_window_sec:
+        return {"status": "PENDING", "hours_to_oom": None, "rss_growth_mb_per_h": None, "limit_mb": (limit_kb or 0) // 1024 or None}
+    slope = (pts[-1][1] - pts[0][1]) / ((pts[-1][0] - pts[0][0]) / 3600.0)  # kB per hour
+    rss = pts[-1][1]
+    hours = None if slope <= 0 else round(max(0, limit_kb - rss) / slope, 2)
+    st = "GREEN" if hours is None else ("RED" if hours < 6 else "AMBER" if hours < 24 else "GREEN")
+    return {"status": st, "hours_to_oom": hours, "rss_growth_mb_per_h": round(slope / 1024, 1), "rss_mb": rss // 1024,
+            "limit_mb": limit_kb // 1024}
+
+
 def module_containers(modules=None, top: int = TOP_N) -> list[dict]:
     rows = []
     for mname, mod in list((modules if modules is not None else sys.modules).items()):
@@ -79,13 +156,15 @@ class Tracker:
         full = self._runs % HISTOGRAM_EVERY == 0
         self._runs += 1
         types_ = type_histogram() if full else (self.history[-1]["types"] if self.history else [])
-        snap = {"ts": now, "pid": os.getpid(), "rss_kb": rss_kb(), "containers": module_containers(),
+        snap = {"ts": now, "pid": os.getpid(), "rss_kb": rss_kb(), "containers": module_containers(), "proc": process_detail(),
                 "types": types_, "types_refreshed": full}
         self.history = (self.history + [snap])[-KEEP:]
         first = self.history[0]
         base = {r["name"]: r["len"] for r in first["containers"]}
         tbase = {r["type"]: r["shallow_bytes"] for r in first["types"]}
-        doc = {"schema": "memory_structures_v1", "latest": snap, "samples": len(self.history),
+        doc = {"schema": "memory_structures_v1", "latest": snap,
+               "oom_eta": oom_eta(self.history, memory_limit_kb()),
+               "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),
                "window_sec": round(now - first["ts"], 1), "rss_growth_kb": (snap["rss_kb"] or 0) - (first["rss_kb"] or 0),
                "container_growth": sorted(
                    ({"name": r["name"], "len_now": r["len"], "len_growth": r["len"] - base.get(r["name"], 0),

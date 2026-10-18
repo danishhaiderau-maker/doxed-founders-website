@@ -46734,6 +46734,24 @@ def _persist_system_health_state() -> None:
         logger.warning("[SYSTEM HEALTH] alert state not persisted (next watcher push refills it)")
 
 
+def _memory_oom_check(now: float) -> dict:
+    """fly.memory_oom_eta from the tracker's own samples (no new sampling here): RED when the container limit is <6 h away."""
+    try:
+        doc = json.loads((_data_sync_volume_root() / "memory_structures.json").read_text(encoding="utf-8"))
+        eta = doc.get("oom_eta") or {}
+        age = now - float((doc.get("latest") or {}).get("ts") or 0)
+        st = eta.get("status") or "PENDING"
+        if age > 3600:
+            st = "AMBER"
+        obs = (f"rss={eta.get('rss_mb')}MB growth={eta.get('rss_growth_mb_per_h')}MB/h limit={eta.get('limit_mb')}MB "
+               f"oom_in={eta.get('hours_to_oom')}h sample_age={int(age)}s")
+        return {"id": "fly.memory_oom_eta", "status": {"PENDING": "AMBER"}.get(st, st), "observed": obs,
+                "threshold": "RSS trend reaches the container limit in >24h (AMBER <24h, RED <6h)"}
+    except Exception as exc:  # noqa: BLE001 - never break the health route
+        return {"id": "fly.memory_oom_eta", "status": "AMBER", "observed": f"no sample ({type(exc).__name__})",
+                "threshold": "tracker sample present"}
+
+
 def _system_health_fly_self_checks(now: float | None = None) -> list:
     """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
     now = float(now or time.time())
@@ -46788,6 +46806,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             + f", {failures} consecutive failures",
             "threshold": "<12m, <3 failures",
         })
+    checks.append(_memory_oom_check(now))
     return checks
 
 
