@@ -102,7 +102,8 @@ def oom_eta(history: list, limit_kb: int | None, min_window_sec: float = 1800.0)
     """Linear RSS growth over the retained window -> hours until the container limit. status RED <6 h, AMBER <24 h."""
     pts = [(h["ts"], h["rss_kb"]) for h in history if h.get("rss_kb")]
     if not limit_kb or len(pts) < 2 or pts[-1][0] - pts[0][0] < min_window_sec:
-        return {"status": "PENDING", "hours_to_oom": None, "rss_growth_mb_per_h": None, "limit_mb": (limit_kb or 0) // 1024 or None}
+        return {"status": "PENDING", "hours_to_oom": None, "rss_growth_mb_per_h": None,
+                "rss_mb": (pts[-1][1] // 1024) if pts else None, "limit_mb": (limit_kb or 0) // 1024 or None}
     slope = (pts[-1][1] - pts[0][1]) / ((pts[-1][0] - pts[0][0]) / 3600.0)  # kB per hour
     rss = pts[-1][1]
     hours = None if slope <= 0 else round(max(0, limit_kb - rss) / slope, 2)
