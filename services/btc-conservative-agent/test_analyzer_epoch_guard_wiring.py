@@ -26,6 +26,7 @@ def data_root(tmp_path, monkeypatch):
 
 def _declare(root):
     de.write_json_atomic(root / de.MANIFEST_NAME, de.new_manifest(EPOCH, started_at_ts=START))
+    de.write_json_atomic(root / "fresh_start_epoch.json", {"epoch_ts": START})  # floor == epoch start (missing floor fails closed)
 
 
 def _jsonl(path, rows):

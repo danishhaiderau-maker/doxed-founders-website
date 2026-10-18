@@ -7028,6 +7028,10 @@ def _measured_usd(*candidates):
 
 
 def _paper_result_as_sim(res: dict) -> dict:
+    # evidence_status here is DELIBERATE: an entry that fills only PARTIALLY (status PARTIAL, filled_qty > 0) is still
+    # evidence COMPLETE, because the position is sized to filled_qty and ``partial_fill`` / ``fully_filled`` say how
+    # much. The raw pricer reports INCOMPLETE for the same walk (paper_fill.paper_fill); this wrapper overrides it for
+    # entries only. A reject / no-fill stays UNKNOWN and is never supported.
     status = str((res or {}).get("status") or "")
     px = float((res or {}).get("price") or 0)
     filled = float((res or {}).get("filled_qty") or 0)
@@ -51239,6 +51243,9 @@ def _arm_live_control() -> tuple:
     # Private exchange rows are caller-internal recovery material, never an API
     # response. The central gate reads the sanitized state audit.
     exchange_audit.pop("_rebuild_payload", None)
+    # The signed website fetch (network, up to its timeout) runs BEFORE taking _live_control_lock so the lock is never
+    # held across I/O; the decision below only reads this result.
+    mirror_block = _mirror_arm_block(exchange_audit)
     with _live_control_lock:
         armable, block_reason, runtime = can_open_live_entry(require_armed=False)
         if not armable:
@@ -51246,7 +51253,6 @@ def _arm_live_control() -> tuple:
         relay_block = _relay_delivery_guard.arming_block_reason()
         if relay_block:
             return False, relay_block, runtime, exchange_audit
-        mirror_block = _mirror_arm_block(exchange_audit)
         if mirror_block:
             return False, mirror_block, runtime, exchange_audit
         with state_lock:
@@ -60724,9 +60730,10 @@ _mirror_health_state: dict = {}
 
 def _mirror_health_view(web: dict) -> dict:
     try:
-        known = mirror_health.known_accounts_from_rows(
-            _live_copy_account_transitions_rows(), os.getenv("LIVE_COPY_KNOWN_ACCOUNTS", ""))
-        return mirror_health.evaluate(known, web, time.time(), _mirror_health_state)
+        rows = _live_copy_account_transitions_rows()
+        known = mirror_health.known_accounts_from_rows(rows, os.getenv("LIVE_COPY_KNOWN_ACCOUNTS", ""))
+        return mirror_health.evaluate(known, web, time.time(), _mirror_health_state,
+                                      history_armed=mirror_health.ever_armed_from_rows(rows))
     except Exception as exc:  # noqa: BLE001
         return {"schema": mirror_health.SCHEMA, "error": f"{type(exc).__name__}"[:80], "causes": [], "alert": False}
 

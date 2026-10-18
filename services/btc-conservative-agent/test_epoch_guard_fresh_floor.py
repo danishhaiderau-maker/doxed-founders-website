@@ -78,3 +78,34 @@ def test_file_pre_epoch_rows_counts_stamped_pre_floor_rows(tmp_path):
     path.write_text("\n".join(json.dumps(row(t)) for t in (FLOOR - 5, FLOOR + 5, FLOOR - 1)) + "\n")
     assert eg.file_pre_epoch_rows(path, REL, MANIFEST, FLOOR) == 2
     assert eg.file_pre_epoch_rows(path, REL, MANIFEST) == 0
+
+
+def test_declared_epoch_without_fresh_start_file_fails_closed(tmp_path):
+    (tmp_path / de.MANIFEST_NAME).write_text(json.dumps({**MANIFEST, "schema": de.MANIFEST_SCHEMA}))
+    g = eg.EpochGuard.from_data_dir(tmp_path)
+    assert g.declared and g.floor_missing and not g.floor_loaded
+    assert g.admit(REL, row(FLOOR + 10)) is False
+    assert g.admit_line(REL, json.dumps(row(FLOOR + 10))) is False
+    assert g.rejected[REL] == {eg.NO_FRESH_FLOOR: 2}
+    try:
+        g.assert_pure(REL, [row(FLOOR + 10)])
+    except eg.PreEpochRowError:
+        pass
+    else:
+        raise AssertionError("assert_pure passed without a floor")
+    block = g.receipt_block()
+    assert block["floor_loaded"] is False and block["floor_ts"] is None and block["floor_missing_fail_closed"] is True
+
+
+def test_receipt_block_publishes_floor_ts_and_loaded(tmp_path):
+    (tmp_path / de.MANIFEST_NAME).write_text(json.dumps({**MANIFEST, "schema": de.MANIFEST_SCHEMA}))
+    (tmp_path / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR}))
+    g = eg.EpochGuard.from_data_dir(tmp_path)
+    block = g.receipt_block()
+    assert block["floor_ts"] == FLOOR and block["floor_loaded"] is True and block["floor_missing_fail_closed"] is False
+    assert g.admit(REL, row(FLOOR + 1)) is True
+
+
+def test_no_manifest_declared_still_admits_everything_even_without_a_floor(tmp_path):
+    g = eg.EpochGuard.from_data_dir(tmp_path)
+    assert not g.declared and not g.floor_missing and g.admit(REL, {"x": 1}) is True

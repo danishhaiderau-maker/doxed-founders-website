@@ -37,20 +37,33 @@ _STREAM_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv))(?:\.\d+)?$")
 _SKIP_SUFFIXES = (".malformed_rows.jsonl",)
 
 
+NO_FRESH_FLOOR = "FRESH_FLOOR_MISSING"
+
+
 class PreEpochRowError(RuntimeError):
     """A pre-epoch or foreign-epoch row reached a current-cohort result."""
 
 
 class EpochGuard:
-    def __init__(self, manifest: dict | None, floor_ts: float | None = None) -> None:
+    def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False) -> None:
         self.manifest = manifest
         self.floor_ts = float(floor_ts) if floor_ts else None  # fresh_start_epoch.json epoch_ts (see data_epoch.classify)
+        self.require_floor = bool(require_floor)
+        # Fail closed: a declared epoch whose fresh-start floor could not be loaded admits NOTHING (a missing or
+        # unreadable fresh_start_epoch.json must never silently turn the floor off).
+        self.floor_missing = bool(manifest) and self.require_floor and self.floor_ts is None
+
         self.admitted: dict[str, int] = {}
         self.rejected: dict[str, dict[str, int]] = {}
 
+    @property
+    def floor_loaded(self) -> bool:
+        return self.floor_ts is not None
+
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike) -> "EpochGuard":
-        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME), floor_ts=fresh_floor_ts(data_dir))
+        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME), floor_ts=fresh_floor_ts(data_dir),
+                   require_floor=True)
 
     @property
     def declared(self) -> bool:
@@ -59,12 +72,19 @@ class EpochGuard:
     def admit(self, relpath: str, row: dict, ts_fields: Iterable[str] = de.TS_KEYS) -> bool:
         if not self.manifest:
             return True
+        if self.floor_missing:
+            return self._reject_no_floor(relpath)
         cls = de.classify_row(relpath, row, self.manifest, ts_fields, floor_ts=self.floor_ts)
         if cls in ADMITTED_CLASSES:
             self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
             return True
         bucket = self.rejected.setdefault(relpath, {})
         bucket[cls] = bucket.get(cls, 0) + 1
+        return False
+
+    def _reject_no_floor(self, relpath: str) -> bool:
+        bucket = self.rejected.setdefault(relpath, {})
+        bucket[NO_FRESH_FLOOR] = bucket.get(NO_FRESH_FLOOR, 0) + 1
         return False
 
     def admit_line(self, relpath: str, line: str | bytes) -> bool:
@@ -74,6 +94,8 @@ class EpochGuard:
         raw = line.encode("utf-8", "replace") if isinstance(line, str) else line
         if not raw.strip():
             return True
+        if self.floor_missing:
+            return self._reject_no_floor(relpath)
         cls = de.classify(relpath, stamp_value=de.line_stamp(raw), ts=de.line_ts(raw), manifest=self.manifest,
                           floor_ts=self.floor_ts)
         if cls in ADMITTED_CLASSES:
@@ -101,6 +123,8 @@ class EpochGuard:
             return
         fields = tuple(ts_fields)
         for row in rows:
+            if self.floor_missing:
+                raise PreEpochRowError(f"{relpath}: {NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
             cls = de.classify_row(relpath, row, self.manifest, fields, floor_ts=self.floor_ts)
             if cls not in ADMITTED_CLASSES:
                 raise PreEpochRowError(f"{relpath}: {cls} row in a {self.manifest['epoch_id']} result")
@@ -109,6 +133,8 @@ class EpochGuard:
         rejected = sum(n for bucket in self.rejected.values() for n in bucket.values())
         manifest = self.manifest or {}
         return {"declared": self.declared, "epoch_id": manifest.get("epoch_id"),
+                "floor_ts": self.floor_ts, "floor_loaded": self.floor_loaded,
+                "floor_required": self.require_floor, "floor_missing_fail_closed": self.floor_missing,
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
