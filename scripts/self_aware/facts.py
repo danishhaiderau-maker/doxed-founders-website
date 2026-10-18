@@ -169,6 +169,29 @@ def _source_has_files(store, view: str) -> bool | None:
         return None
 
 
+def _file_line_count(store, view: str) -> int | None:
+    """Line count of the raw view's mirror files (fallback when the DuckDB view is missing); None if unknown."""
+    try:
+        import glob as _glob
+
+        from .store import RAW_SOURCES
+        src = next((s for s in RAW_SOURCES if s.name == view), None)
+        if src is None:
+            return None
+        root = getattr(store.paths, src.root)
+        total = 0
+        for f in _glob.glob(str(Path(root) / src.pattern), recursive=True):
+            if not Path(f).is_file():
+                continue
+            with open(f, "rb") as fh:
+                total += sum(chunk.count(b"\n") for chunk in iter(lambda: fh.read(1 << 20), b""))
+            if src.kind == "csv" and total:
+                total -= 1  # header
+        return total
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _mirror_max(store, sql: str) -> tuple[Any, str | None]:
     """One mirror max/count probe.
 
@@ -185,6 +208,11 @@ def _mirror_max(store, sql: str) -> tuple[Any, str | None]:
         view = next((tok for tok in sql.replace("(", " ").replace(")", " ").split() if tok.startswith("raw_")), None)
         if view and _source_has_files(store, view) is False:
             return {"status": "EMPTY_WARMUP", "rows": 0, "detail": text}, None
+        # Files exist but the view is missing/stale: report the error explicitly AND keep the counter honest from the
+        # files, so prog.counts_advancing is not frozen on a stale 0 (18 Oct: decision_rows 0 for 8.8 h).
+        n = _file_line_count(store, view) if view else None
+        if n is not None:
+            return {"status": "FILE_COUNT_FALLBACK", "rows": n, "detail": text}, text
         return {}, text
 
 

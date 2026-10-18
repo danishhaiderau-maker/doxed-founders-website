@@ -648,6 +648,8 @@ def test_still_red_refreshes_observed_text_and_mirror_empty_is_warmup(tmp_path):
     (tmp_path / "ai_tranche_log.csv").write_text("ts\n1\n")
     row, err = facts._mirror_max(_Store(), "SELECT max(ts) AS max_ts FROM raw_ai_tranche")
     assert err and "IO Error" in err
+    # The view is missing but files exist: the error stays explicit and the row count comes from the files.
+    assert row["status"] == "FILE_COUNT_FALLBACK" and row["rows"] == 1
 
 
 def _feeds_rt(observed_at: float = NOW - 30, **sp) -> dict:
