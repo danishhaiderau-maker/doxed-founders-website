@@ -32,3 +32,17 @@ def test_row_with_numeric_stamps_is_classified_by_time_not_failed_closed():
         assert paper_fill.row_before_epoch({"entry_ts": 900.0, "exit_ts": 1600.0}) is True
     finally:
         paper_fill.FRESH_EPOCH_TS = old
+
+
+def test_exit_ts_is_omitted_when_entry_ts_is_missing_so_the_row_fails_closed():
+    src = SRC.read_text(encoding="utf-8")
+    assert '"exit_ts": time.time() if _ts_or_none(pos.get("entry_ts")) else None' in src
+    old = paper_fill.FRESH_EPOCH_TS
+    try:
+        paper_fill.FRESH_EPOCH_TS = 1000.0
+        # entry_ts=None, exit_ts=None (what the writer now emits): no usable stamp -> fail closed, never fresh
+        row = {"entry_ts": None, "exit_ts": None, "ts": "2026-10-18T00:00:00Z"}
+        assert paper_fill.row_before_epoch(row) is True
+        assert not paper_fill.row_fresh_strict(row)
+    finally:
+        paper_fill.FRESH_EPOCH_TS = old
