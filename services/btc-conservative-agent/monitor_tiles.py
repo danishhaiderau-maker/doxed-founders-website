@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import fills_by_model as _fm
 import monitor_api
 
 TILE_SPECS_SCHEMA = "tile_specs_v1"
@@ -454,7 +455,7 @@ def row_is_fresh(row: Mapping[str, Any]) -> bool:
     """fresh_only=1 filter: closed rows must be fresh_eligible (open/pending/expired rows are not trades)."""
     if row.get("status") != "CLOSED":
         return True
-    return bool((row.get("pricing") or {}).get("fresh_eligible"))
+    return bool((row.get("pricing") or {}).get("fresh_eligible")) and not row.get("identity_quarantined")
 
 
 def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[str, str],
@@ -503,6 +504,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
         "entry_ts": _finite(raw.get("entry_ts")),
         "exit_ts": _finite(raw.get("exit_ts")),
         "collector_epoch_id": raw.get("epoch_id"),
+        # Separate from pricing.fresh_eligible (row_fresh_strict stays pinned): a trade of an episode whose decision and
+        # execution minted different policy signatures is shown but must never be counted (cleared at the next reset).
+        "identity_quarantined": str(raw.get("trade_id") or "") in _fm.IDENTITY_QUARANTINED_TRADE_IDS,
         "policy_signature": raw.get("policy_signature"),
         "side": _side(raw),
         "requested_qty": _finite(raw.get("requested_qty") or raw.get("policy_original_qty") or raw.get("qty")),
