@@ -46823,6 +46823,13 @@ def _offline_sim_epoch_check() -> dict:
     """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
     shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
     st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
+    try:  # live re-read every health cycle, independent of the loader cadence
+        _fl, _src, _err = _offline_sim_epoch_floor_detail()
+        st.update(live_floor_value=_fl, live_floor_source=_src, live_floor_error=_err)
+        if _fl is None:
+            st["floor_unreadable"] = True
+    except Exception:  # noqa: BLE001
+        pass
     if st.get("floor_unreadable"):
         return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
                 "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
@@ -57485,23 +57492,33 @@ _OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-
 _OFFLINE_SIM_LOAD_STATS: dict = {}
 
 
+def _offline_sim_epoch_floor_detail():
+    """(floor_ts|None, source, error). Authoritative: fresh_start_epoch.json epoch_ts (volume root /app/data, same source as
+    analyzer_epoch_guard / G16); research_session.json is only a fallback (its fresh_collection_start_time is null on Fly)."""
+    err = None
+    try:
+        import analyzer_epoch_guard as _aeg
+        for src, d in (("fresh_start_epoch.json:cwd", os.getcwd()), ("fresh_start_epoch.json:/app/data", "/app/data")):
+            _fl = _aeg.fresh_floor_ts(d)
+            if _fl:
+                return float(_fl), src, None
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+    try:
+        cutoff = _fresh_epoch_identity_from_session()[1]
+        if cutoff:
+            return float(cutoff), "research_session.json", err
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+    return None, None, err or "no floor in fresh_start_epoch.json or research_session.json"
+
+
 def _offline_sim_epoch_floor():
     """Fresh-epoch floor for shard rejection; None if it cannot be read (the loader then FAILS CLOSED: no rotated shard parsed)."""
-    try:
-        # Authoritative floor: fresh_start_epoch.json epoch_ts (volume root, same source as analyzer_epoch_guard / G16).
-        # research_session.json fresh_collection_start_time is null on Fly after the full reset, so it is only a fallback.
-        try:
-            import analyzer_epoch_guard as _aeg
-            _fl = _aeg.fresh_floor_ts(os.getcwd())
-        except Exception:  # noqa: BLE001
-            _fl = None
-        if _fl:
-            return float(_fl)
-        cutoff = _fresh_epoch_identity_from_session()[1]
-        return float(cutoff) if cutoff else None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"[RESEARCH_SIM] fresh floor unavailable, ALL rotated shards skipped (fail closed): {exc}")
-        return None
+    fl, _src, err = _offline_sim_epoch_floor_detail()
+    if fl is None:
+        logger.warning(f"[RESEARCH_SIM] fresh floor unavailable, ALL rotated shards skipped (fail closed): {err}")
+    return fl
 
 
 def _load_offline_sim_jsonl_revisions(
@@ -57517,6 +57534,10 @@ def _load_offline_sim_jsonl_revisions(
     if isinstance(_stats, dict):
         _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
         _stats["floor_checked_ts"] = time.time()
+        _fd = _offline_sim_epoch_floor_detail() if _floor is not None else (None, None, "floor unreadable")
+        _stats["floor_source"], _stats["floor_error"] = _fd[1], _fd[2]
+        _stats["floor_value_utc"] = datetime.fromtimestamp(_floor, timezone.utc).isoformat() if _floor else None
+        _stats["next_check_ts"] = time.time() + 600  # rechecked on every loader call (each analytics cycle)
     return _pure_load_offline_sim_jsonl_revisions(
         active_path,
         max_rotations=max_rotations,
