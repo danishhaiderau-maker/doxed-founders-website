@@ -860,3 +860,15 @@ def test_laptop_smoke_passes_at_this_revision_and_catches_a_missing_cadence(monk
     assert smoke.smoke(cycle=False) == []
     monkeypatch.delitem(config.CADENCE_SEC, "bitfinex")
     assert "NO_CADENCE bitfinex" in smoke.smoke(cycle=False)
+def test_every_engine_job_has_a_cadence_so_the_loop_cannot_keyerror():
+    # master 4bdac452 shipped a "bitfinex" job with no CADENCE_SEC entry: engine.loop() died with KeyError on start
+    import inspect
+    from self_aware import config, engine
+    src = inspect.getsource(engine.Engine.__init__)
+    import re
+    jobs = set(re.findall(r'"(\w+)":\s*self\.job_', src))
+    assert "bitfinex" in jobs
+    assert jobs <= set(config.CADENCE_SEC), jobs - set(config.CADENCE_SEC)
+    assert set(config.CADENCE_SEC) <= jobs | {"contracts_light"}
+    names = ("views", "diagnose", "uptime", "tiles", "data", "contracts_light", "fees", "bitfinex")
+    assert all(n in config.CADENCE_SEC for n in names)
