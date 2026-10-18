@@ -46823,6 +46823,7 @@ def _offline_sim_epoch_check() -> dict:
     """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
     shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
     st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
+    _loaded = bool(st)
     try:  # live re-read every health cycle, independent of the loader cadence
         _fl, _src, _err = _offline_sim_epoch_floor_detail()
         st.update(live_floor_value=_fl, live_floor_source=_src, live_floor_error=_err)
@@ -46833,8 +46834,8 @@ def _offline_sim_epoch_check() -> dict:
     if st.get("floor_unreadable"):
         return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
                 "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
-    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if st else "AMBER",
-            "observed": f"stats={st}" if st else "no loader call yet", "threshold": "fresh-epoch floor readable"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if _loaded else "AMBER",
+            "observed": f"stats={st}" if _loaded else f"no loader call yet; live floor={st.get('live_floor_value')} src={st.get('live_floor_source')}", "threshold": "fresh-epoch floor readable"}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
