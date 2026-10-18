@@ -96,3 +96,10 @@ def test_limit_prefers_fly_vm_memory_and_counts_include_self_checks(monkeypatch,
     out = bot.app.test_client().get("/api/system-health").get_json()
     assert out["counts"].get("RED", 0) >= 1 and out["verdict"] == "RED"
     assert any(c["id"] == "fly.memory_oom_eta" for c in out["failing"])
+
+
+def test_pending_state_still_reports_rss_and_limit():
+    hist = [{"ts": 0, "rss_kb": 512 * 1024}, {"ts": 60, "rss_kb": 600 * 1024}]
+    out = ms.oom_eta(hist, limit_kb=8192 * 1024)
+    assert out["status"] == "PENDING" and out["rss_mb"] == 600 and out["limit_mb"] == 8192
+    assert ms.oom_eta([], 100)["rss_mb"] is None
