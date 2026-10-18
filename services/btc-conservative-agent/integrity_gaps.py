@@ -523,7 +523,10 @@ def evaluate(f: dict) -> dict:
     gb = growth_budget(w.get("v3_growth"))
     rows.append(_row("G22", "files written per day per runtime/v3 prefix vs budget",
                      {"over": gb.get("over"), "red": gb.get("red"), "excepted_amber": gb.get("excepted_amber"),
-                      "prefixes": gb["prefixes"], "complete": gb.get("complete"), "budgets_provisional": True},
+                      "prefixes": gb["prefixes"], "complete": gb.get("complete"), "budgets_provisional": True,
+                      # daily-report headline (HM 19 Oct): receipts written in the last 24 h and the measured 5-day series
+                      "receipts_per_day": (gb["prefixes"].get("receipts") or {}).get("files_24h"),
+                      "receipts_per_day_5d": (gb["prefixes"].get("receipts") or {}).get("measured_5d")},
                      "every prefix <= its files/day budget", gb["status"], "Fly /app/data/runtime/v3 walk (v3_growth, cached 30 min)"))
 
     worst = max((_RANK[r["status"]] for r in rows), default=0)

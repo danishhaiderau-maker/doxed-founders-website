@@ -295,6 +295,7 @@ def test_growth_budget_exception_is_amber_until_expiry_then_red_and_shows_measur
     assert ig.growth_budget(None)["status"] == "PENDING"
     row = {r["id"]: r for r in ig.evaluate({"wipe": {"v3_growth": bad}})["rows"]}["G22"]
     assert row["status"] in ("AMBER", "RED")
+    assert row["value"]["receipts_per_day"] == 16588 and row["value"]["receipts_per_day_5d"] == ig.MEASURED_5D["receipts"]
 
 
 def test_no_non_excepted_budget_sits_below_its_measured_steady_rate():
