@@ -73,3 +73,34 @@ def test_three_execution_reports_share_one_funnel_read_with_identical_output(tmp
     assert len(calls) == 3
     for k in one:
         assert strip(one[k]) == strip(separate[k]), k
+
+
+def test_straddling_shard_rows_are_rejected_per_row_by_their_own_ts(tmp_path):
+    active = tmp_path / "s.jsonl"
+    _shard(active, [], time.time())
+    _shard(tmp_path / "s.jsonl.1",
+           [{"trade_id": "t1", "signal_ts": FLOOR - 30, "v": "pre"}, {"trade_id": "t2", "signal_ts": FLOOR + 30, "v": "fresh"},
+            {"trade_id": "t3", "v": "unstamped"}], FLOOR + 600)        # newest row is post-floor, so the shard is opened
+    st = {}
+    rows = pre._load_offline_sim_jsonl_revisions(str(active), target_trade_ids={"t1", "t2", "t3"}, min_ts=FLOOR, stats=st)
+    assert set(rows) == {"t2", "t3"} and st["lines_rejected_pre_epoch"] == 1 and st["lines_parsed"] == 2
+
+
+def test_unreadable_floor_skips_every_rotated_shard_and_parses_none(tmp_path, monkeypatch):
+    active = tmp_path / "u.jsonl"
+    _shard(active, [{"trade_id": "a1"}], time.time())
+    _shard(tmp_path / "u.jsonl.1", [{"trade_id": "t1", "signal_ts": FLOOR + 5}], FLOOR + 60)
+    st = {}
+    rows = pre._load_offline_sim_jsonl_revisions(str(active), target_trade_ids={"t1"}, min_ts=None, stats=st, floor_unreadable=True)
+    assert set(rows) == {"a1"} and st["shards_skipped_floor_unreadable"] == 1 and st["lines_parsed"] == 1   # only the active line
+
+
+def test_system_health_check_is_red_when_the_floor_was_unreadable():
+    import bot
+    bot._OFFLINE_SIM_LOAD_STATS.clear()
+    assert bot._offline_sim_epoch_check()["status"] == "AMBER"
+    bot._OFFLINE_SIM_LOAD_STATS.update(floor_unreadable=True)
+    assert bot._offline_sim_epoch_check()["status"] == "RED"
+    bot._OFFLINE_SIM_LOAD_STATS.update(floor_unreadable=False, shards_seen=2)
+    assert bot._offline_sim_epoch_check()["status"] == "GREEN"
+    bot._OFFLINE_SIM_LOAD_STATS.clear()

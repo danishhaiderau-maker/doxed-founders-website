@@ -1047,6 +1047,7 @@ def _load_offline_sim_jsonl_revisions(
     on_read_error=None,
     min_ts=None,
     stats=None,
+    floor_unreadable=False,
 ):
     """Load newest valid immutable row per canonical trade ID.
 
@@ -1075,7 +1076,8 @@ def _load_offline_sim_jsonl_revisions(
     if not targets:
         paths = [str(active_path)]
     st = stats if stats is not None else {}
-    for k in ("shards_seen", "shards_skipped_pre_epoch", "lines_skipped_prefilter", "lines_parsed"):
+    for k in ("shards_seen", "shards_skipped_pre_epoch", "shards_skipped_floor_unreadable", "lines_skipped_prefilter",
+              "lines_rejected_pre_epoch", "lines_parsed"):
         st.setdefault(k, 0)
     for path in paths:
         if not os.path.isfile(path):
@@ -1083,6 +1085,9 @@ def _load_offline_sim_jsonl_revisions(
         is_rotated = os.path.abspath(path) != active_resolved
         if is_rotated:
             st["shards_seen"] += 1
+            if floor_unreadable:
+                st["shards_skipped_floor_unreadable"] += 1
+                continue
             if min_ts is not None:
                 try:
                     if os.path.getmtime(path) < float(min_ts):
@@ -1099,6 +1104,15 @@ def _load_offline_sim_jsonl_revisions(
                         m = _TRADE_ID_RE.search(line)
                         if m is None or m.group(1).strip() not in targets:
                             st["lines_skipped_prefilter"] += 1
+                            continue
+                    if is_rotated and min_ts is not None:
+                        try:
+                            import data_epoch as _de
+                            _ts = _de.line_ts(line.encode("utf-8", errors="ignore"))
+                        except Exception:  # noqa: BLE001
+                            _ts = None
+                        if _ts is not None and _ts < float(min_ts):
+                            st["lines_rejected_pre_epoch"] += 1
                             continue
                     stripped = line.strip()
                     if not stripped:
