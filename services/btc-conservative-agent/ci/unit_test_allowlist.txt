@@ -291,6 +291,7 @@ test_live_fix_1484_restore_and_toggle.py
 test_live_fix_1485_exit_follow.py
 test_live_fix_1491_monitor_routes.py
 test_live_fix_1510_disloc_fill.py
+test_live_guardian.py
 test_live_monitor_extra_routes.py
 test_live_policy_provenance.py
 test_live_test_gaps_20261011.py
@@ -607,4 +608,3 @@ test_offline_sim_floor_source.py
 test_funding_raw_fields.py
 test_nonaccum_execute.py
 test_live_vs_paper.py
-test_live_guardian.py
