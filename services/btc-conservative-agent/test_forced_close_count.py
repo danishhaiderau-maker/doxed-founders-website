@@ -28,3 +28,13 @@ def test_all_stamped_is_green_and_none_is_no_data_and_window_applies():
     assert e.evaluate([], since=0, forced=FORCED)["forced"]["status"] == "NO_DATA"
     old = e.evaluate([row("a", "ADMIN_MANUAL_CLOSE", 10.0)], since=500, forced=FORCED)["forced"]
     assert old["forced_closes"] == 0
+
+
+def test_forced_rows_with_missing_or_pre_window_fill_ts_are_counted_and_amber():
+    rows = [row("ok", "ADMIN_MANUAL_CLOSE", 1000.0, trig=999.9), {"trade_id": "nofill", "exit_reason": "ADMIN_MANUAL_CLOSE"},
+            row("old", "ADMIN_MANUAL_CLOSE", 10.0, trig=9.9)]
+    f = e.evaluate(rows, since=500, forced=FORCED)["forced"]
+    assert f["forced_missing_fill_ts"] == 2 and set(f["forced_missing_fill_ts_trade_ids"]) == {"nofill", "old"}
+    assert f["forced_closes"] == 1 and f["status"] == "AMBER"
+    only = e.evaluate([{"trade_id": "x", "exit_reason": "ADMIN_MANUAL_CLOSE"}], since=0, forced=FORCED)["forced"]
+    assert only["status"] == "AMBER"

@@ -37,7 +37,7 @@ def _pct(values: list, q: float):
 DEPLOY_CLUSTER_GAP_SEC = 600.0
 
 
-def forced_summary(forced_rows: list) -> dict:
+def forced_summary(forced_rows: list, nofill_ids: list | None = None) -> dict:
     """Forced closes (deploy flatten / admin): total, how many lack exit_trigger_ts, and one entry per deploy (closes within
     10 min of each other). AMBER when any forced close in the window has no trigger stamp (visible, never silent).
     These rows stay OUT of n / percentiles / missing_trigger_ts."""
@@ -55,14 +55,17 @@ def forced_summary(forced_rows: list) -> dict:
     for d in deploys:
         d.pop("_last", None)
     miss = sum(d["n_missing_trigger_ts"] for d in deploys)
+    nofill = list(nofill_ids or [])
     return {"forced_closes": len(rows), "forced_missing_trigger_ts": miss, "per_deploy": deploys[-20:],
-            "status": "NO_DATA" if not rows else ("AMBER" if miss else "GREEN"),
+            "forced_missing_fill_ts": len(nofill), "forced_missing_fill_ts_trade_ids": nofill[-50:],
+            "status": "NO_DATA" if not rows and not nofill else ("AMBER" if miss or nofill else "GREEN"),
             "note": "forced/deploy closes are excluded from the SLO percentiles and from missing_trigger_ts"}
 
 
 def evaluate(rows: Iterable[Mapping], *, since: float = 0.0, forced: Iterable[str] = ()) -> dict:
     forced_set = {str(r).upper() for r in forced}
     samples, breaches, missing = [], [], 0
+    forced_nofill: list = []
     forced_rows: list = []  # (exit_fill_ts, has_trigger_ts, trade_id) of forced/admin/deploy closes: counted, never in percentiles
     for row in rows:
         if not isinstance(row, Mapping):
@@ -72,6 +75,8 @@ def evaluate(rows: Iterable[Mapping], *, since: float = 0.0, forced: Iterable[st
             ffill, ftrig = fev.get("exit_fill_ts"), fev.get("exit_trigger_ts")
             if isinstance(ffill, (int, float)) and ffill >= since:
                 forced_rows.append((float(ffill), isinstance(ftrig, (int, float)) and ftrig > 0, row.get("trade_id")))
+            else:  # fill stamp missing or before the window: never silently dropped (HM)
+                forced_nofill.append(row.get("trade_id"))
             continue
         ev = row.get("event_timestamps") if isinstance(row.get("event_timestamps"), Mapping) else {}
         trig, fill = ev.get("exit_trigger_ts"), ev.get("exit_fill_ts")
@@ -93,7 +98,7 @@ def evaluate(rows: Iterable[Mapping], *, since: float = 0.0, forced: Iterable[st
             "n": len(samples), "missing_trigger_ts": missing, "p50_sec": _pct(samples, 0.5), "p95_sec": p95,
             "max_sec": max(samples) if samples else None, "slo_met": bool(samples) and p95 <= SLO_P95_SEC,
             "breaches_over_5s": breaches[-50:], "breach_count": len(breaches), "status": status,
-            "forced": forced_summary(forced_rows)}
+            "forced": forced_summary(forced_rows, forced_nofill)}
 
 
 def unfilled_rows(orders: Iterable[Mapping], *, since: float, limit: int) -> list:
