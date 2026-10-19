@@ -275,3 +275,24 @@ def test_process_rss_ignores_a_non_shipper_process_that_mentions_shipper(tmp_pat
         assert ms.cmdline_runs_script(open(f"/proc/{decoy.pid}/cmdline", "rb").read()) is False
     finally:
         decoy.kill()
+
+
+def test_shipper_term_is_a_30_min_rolling_median_but_3gib_ceiling_stays_unsmoothed():
+    t = ms.Tracker("/tmp/_unused_ms2.json")
+    # six samples 10 min apart: a steady ~400 MB shipper with one 1326 MB spike -> median ignores the spike
+    vals = [400, 410, 1326, 405, 400, 395]
+    out = [t.smooth_shipper(i * 600.0, v * 1024) for i, v in enumerate(vals)]
+    assert out[2] <= 410 * 1024 and out[-1] <= 405 * 1024
+    # samples older than 30 min fall out of the window
+    assert len(t.shipper_hist) <= 4
+    boot, now = 0.0, 3600.0
+    series = [(now, 600 * 1024)]
+    # young boot, bot 600 MB + smoothed shipper 400 MB = 1.0 GB < 2 GB: not RED even though the raw spike is 1326 MB
+    ok = ms.oom_status(series, 8 * 1024 * 1024, boot, now, now, 600 * 1024, extra_rss_kb=400 * 1024, extra_rss_raw_kb=1326 * 1024)
+    assert ok["status"] != "RED" and ok["shipper_rss_raw_mb"] == 1326 and ok["shipper_rss_mb"] == 400
+    # but an UNSMOOTHED total >= 3 GiB is RED regardless of the median
+    red = ms.oom_status(series, 8 * 1024 * 1024, boot, now, now, 1800 * 1024, extra_rss_kb=400 * 1024, extra_rss_raw_kb=1300 * 1024)
+    assert red["status"] == "RED" and red["reason"] == "RSS_OVER_3GB"
+    # the bot's own RSS is never smoothed: bot alone over 2 GB in a young boot is RED
+    bot_only = ms.oom_status(series, 8 * 1024 * 1024, boot, now, now, 2100 * 1024, extra_rss_kb=0)
+    assert bot_only["status"] == "RED"
