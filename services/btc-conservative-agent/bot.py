@@ -33940,6 +33940,7 @@ _MONITOR_TILE_PATHS = frozenset({
     "/api/monitor/exits/latency-guard", "/api/monitor/archive", "/api/monitor/alerts",
     "/api/monitor/shadow-exits", "/api/monitor/chase_buckets", "/api/monitor/gap_buckets",
     "/api/monitor/reconcile", "/api/monitor/tile-integrity", "/api/monitor/fill-provenance",
+    "/api/monitor/nonaccum-plans",
 })
 
 # Owner warehouse dumps: public internet needs the admin cookie/header.
@@ -49029,6 +49030,57 @@ def _integrity_gap_facts(now: float) -> dict:
     part("wipe", wipe)
     part("vercel", lambda: (_platform_monitor().receipt or {}).get("vercel"))
     return facts
+
+
+_NONACCUM_PLANS_CACHE: dict = {"state": "NOT_BUILT"}
+_NONACCUM_PLANS_LOCK = threading.Lock()
+_NONACCUM_PLANS_TTL_SEC = 1800.0
+
+
+def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
+    """Runs nonaccum_plans.py (pure read-only scan) as a low-priority child so the bot's heap/GIL are untouched."""
+    import subprocess as _sp
+    t0 = time.time()
+    try:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nonaccum_plans.py")
+        proc = _sp.run(["nice", "-n", "19", sys.executable, script, root, repr(float(epoch_ts))],
+                       capture_output=True, text=True, timeout=1500)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "")[-300:] or f"rc={proc.returncode}")
+        doc = json.loads(proc.stdout)
+        res = {"state": "READY", "plan_sha256": doc.get("plan_sha256"), "epoch_ts": doc.get("epoch_ts"),
+               "plans": doc.get("plans"), "reference_scan": doc.get("reference_scan"), "elapsed_s": doc.get("elapsed_s")}
+    except Exception as exc:  # noqa: BLE001
+        res = {"state": "ERROR", "error": f"{type(exc).__name__}: {exc}"[:400]}
+    res.update(started_ts=t0, finished_ts=time.time(), read_only=True, deletes_nothing=True)
+    with _NONACCUM_PLANS_LOCK:
+        _NONACCUM_PLANS_CACHE.clear()
+        _NONACCUM_PLANS_CACHE.update(res)
+
+
+@app.route('/api/monitor/nonaccum-plans', methods=["GET"])
+def monitor_nonaccum_plans_route():
+    """C1-C4 non-accumulation plans + plan_sha256 (read-only; admin/monitor auth; never deletes or writes state).
+    GET returns the cached result; ?build=1 starts one nice'd background scan (kept in memory only, TTL 30 min)."""
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    now = time.time()
+    with _NONACCUM_PLANS_LOCK:
+        cur = dict(_NONACCUM_PLANS_CACHE)
+    stale = cur.get("state") in ("READY", "ERROR") and now - float(cur.get("finished_ts") or 0) > _NONACCUM_PLANS_TTL_SEC
+    if request.args.get("build") == "1" and cur.get("state") != "BUILDING" and (stale or cur.get("state") in ("NOT_BUILT", "ERROR") or request.args.get("force") == "1"):
+        epoch_ts = _offline_sim_epoch_floor()
+        if not epoch_ts:
+            return _monitor_response({"state": "ERROR", "error": "fresh epoch floor unreadable"}, 512, status=503)
+        with _NONACCUM_PLANS_LOCK:
+            _NONACCUM_PLANS_CACHE.clear()
+            _NONACCUM_PLANS_CACHE.update(state="BUILDING", started_ts=now, read_only=True, deletes_nothing=True)
+        threading.Thread(target=_nonaccum_plans_worker, args=(str(_data_sync_volume_root()), float(epoch_ts)),
+                         daemon=True, name="nonaccum-plans").start()
+        cur = {"state": "BUILDING", "started_ts": now, "read_only": True, "deletes_nothing": True}
+    cur["epoch_floor_now"] = _offline_sim_epoch_floor()
+    cur["unacked_check"] = "NOT EVALUATED by this route (executor must check no unacked/pending current-epoch relay intents before C4)"
+    return _monitor_response(cur, _MONITOR_GAP_MAX_BYTES)
 
 
 @app.route('/api/monitor/integrity-gaps', methods=["GET"])
