@@ -49076,7 +49076,10 @@ def monitor_exchange_stops_route():
         fly_cap = int(get_effective_max_active_signals())
     except Exception:  # noqa: BLE001
         fly_cap = None
-    relay_cap = {"fly_max_active_signals": fly_cap, "railway_expected_env_SUBSCRIBER_MAX_CONCURRENT_SIGNALS": 1,
+    relay_cap = {"fly_max_active_signals": fly_cap,
+                 "HARDCODED_EXPECTATION_NOT_A_READING": {"railway_env_SUBSCRIBER_MAX_CONCURRENT_SIGNALS": 1,
+                                                         "note": "constant in this route; it does NOT prove the relay's effective setting"},
+                 "effective_value": None, "effective_value_known": False,
                  "railway_env_observable_from_fly": False,
                  "effective_cap_rule": "relay uses SUBSCRIBER_MAX_CONCURRENT_SIGNALS when set, else Fly's max_active_signals, else 3",
                  "how_to_prove": "relay logs no boot line; a second signal while one lot is open is refused with the reason 'Max 1 open copy lots' on the relay account"}

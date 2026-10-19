@@ -19,6 +19,11 @@ def _f(v):
         return None
 
 
+def _active_status(status) -> bool:
+    st = str(status or "").strip().upper()
+    return st.startswith("ACTIVE") or st.startswith("PARTIALLY FILLED")
+
+
 def build(mirror: Mapping[str, Any] | None, account: str | None = None, fly_audit: Mapping[str, Any] | None = None,
           relay_cap: Mapping[str, Any] | None = None) -> dict:
     m = mirror if isinstance(mirror, Mapping) else {}
@@ -35,7 +40,11 @@ def build(mirror: Mapping[str, Any] | None, account: str | None = None, fly_audi
         out["verdict"] = "UNKNOWN_MIRROR_NOT_OK"
         return out
     stale = not out["fresh"]
-    stops = [o for o in (m.get("stops") or []) if isinstance(o, Mapping)]
+    # Only ACTIVE STOP orders count. The relay mirror filters by order TYPE only, so the status is enforced here: a stop whose
+    # status is missing or not ACTIVE / PARTIALLY FILLED (cancelled, executed, rejected...) is listed as inactive and never covers.
+    all_stops = [o for o in (m.get("stops") or []) if isinstance(o, Mapping)]
+    stops = [o for o in all_stops if _active_status(o.get("status"))]
+    out["inactive_stops"] = [{k: o.get(k) for k in ("id", "type", "amount", "price", "status")} for o in all_stops if o not in stops]
     out["stops"] = [{k: o.get(k) for k in ("id", "symbol", "type", "amount", "amount_orig", "price", "status", "reduce_only", "oco", "cid")}
                     for o in stops]
     all_protected = True

@@ -42,3 +42,14 @@ def test_stale_read_never_gives_protected_and_shows_covered_vs_position_and_age(
     part = v.build(mirror(positions=[pos], stops=[dict(STOP, amount=-0.0004)]))
     assert part["positions"][0]["covered_vs_position"] == "0.0004 / 0.001" and part["verdict"] == "UNPROTECTED_POSITION"
     assert v.build(mirror(), relay_cap={"fly_max_active_signals": 20})["relay_cap"]["fly_max_active_signals"] == 20
+
+
+def test_only_active_stop_orders_count_cancelled_executed_or_status_less_stops_do_not():
+    pos = {"symbol": "tBTCF0:USTF0", "side": "LONG", "amount": 0.001}
+    for st in ("CANCELED", "EXECUTED @ 80000(-0.001)", "INSUFFICIENT MARGIN", None, "POSTONLY CANCELED"):
+        r = v.build(mirror(positions=[pos], stops=[dict(STOP, status=st)]))
+        assert r["verdict"] == "UNPROTECTED_POSITION" and r["inactive_stops"] and r["positions"][0]["stop_amount_covered"] == 0, st
+    for st in ("ACTIVE", "PARTIALLY FILLED @ 80000(-0.0005)"):
+        assert v.build(mirror(positions=[pos], stops=[dict(STOP, status=st)]))["verdict"] == "PROTECTED", st
+    r = v.build(mirror(), relay_cap={"HARDCODED_EXPECTATION_NOT_A_READING": {"x": 1}, "effective_value": None})
+    assert r["relay_cap"]["effective_value"] is None
