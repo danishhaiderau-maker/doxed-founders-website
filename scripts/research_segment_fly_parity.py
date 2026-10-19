@@ -56,11 +56,60 @@ class ParityTimeout(Exception):
         self.checked = checked
 
 
-def _get(base_url: str, prefix: str, route: str, token: str) -> dict:
-    request = urllib.request.Request(f"{base_url.rstrip('/')}/api/research-segments/{prefix}/{route}",
-                                     headers={"X-Bot-Admin-Token": token})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return json.loads(response.read())
+FETCH_ATTEMPTS = 5
+FETCH_BACKOFF_SEC = (2.0, 5.0, 15.0, 30.0)
+FETCH_CHUNK = 1024 * 1024
+
+
+def _fetch_bytes(url: str, token: str, *, urlopen=urllib.request.urlopen, sleep=time.sleep,
+                 attempts: int = FETCH_ATTEMPTS, log=None) -> bytes:
+    """GET ``url`` fully, surviving a cut-off body (http.client.IncompleteRead, reset, timeout).
+
+    After a partial read the next attempt asks for the rest with ``Range: bytes=<got>-``. A 206 whose Content-Range starts
+    at that offset is appended; anything else (a plain 200: the server ignored Range, or the body changed) restarts from
+    zero. The final length must equal the advertised total, else the attempt counts as cut off. Backoff 2/5/15/30 s."""
+    import http.client
+    import socket
+    import urllib.error
+    buf = bytearray()
+    total = None
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        headers = {"X-Bot-Admin-Token": token}
+        if buf:
+            headers["Range"] = f"bytes={len(buf)}-"
+        try:
+            with urlopen(urllib.request.Request(url, headers=headers), timeout=120) as response:
+                status = getattr(response, "status", 200)
+                crange = (response.headers.get("Content-Range") or "") if getattr(response, "headers", None) else ""
+                if buf and status == 206 and crange.startswith(f"bytes {len(buf)}-"):
+                    total = int(crange.rsplit("/", 1)[1]) if "/" in crange and crange.rsplit("/", 1)[1].isdigit() else total
+                else:
+                    buf = bytearray()
+                    clen = response.headers.get("Content-Length") if getattr(response, "headers", None) else None
+                    total = int(clen) if clen and str(clen).isdigit() else None
+                while True:
+                    chunk = response.read(FETCH_CHUNK)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+            if total is not None and len(buf) != total:
+                raise http.client.IncompleteRead(bytes(), total - len(buf))
+            return bytes(buf)
+        except (http.client.IncompleteRead, ConnectionError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.HTTPError) and exc.code < 500:
+                raise                                   # 401/403/404: not transient
+            last_exc = exc
+            if log:
+                log(f"fetch attempt {attempt}/{attempts} cut off after {len(buf)} bytes: {type(exc).__name__}")
+            if attempt < attempts:
+                sleep(FETCH_BACKOFF_SEC[min(attempt - 1, len(FETCH_BACKOFF_SEC) - 1)])
+    raise last_exc
+
+
+def _get(base_url: str, prefix: str, route: str, token: str, **kw) -> dict:
+    url = f"{base_url.rstrip('/')}/api/research-segments/{prefix}/{route}"
+    return json.loads(_fetch_bytes(url, token, log=lambda m: print(m, file=sys.stderr), **kw))
 
 
 def _sha256(path: Path, start: int = 0) -> str:
