@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from analyzer_epoch_guard import epoch_csv_rows, guarded_open
+from analyzer_epoch_guard import epoch_csv_rows, guarded_open, process_guard
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import (
@@ -241,11 +241,16 @@ def _deployed_policy_collection() -> dict[str, Any]:
 
 
 def _iter_ledger(path: Path):
+    guard = process_guard()
+    rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
     try:
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 row = json.loads(line)
                 if isinstance(row, dict):
+                    # fail closed: pre-epoch / straddle / unstamped ledger rows never reach a genome or study result
+                    if rel is not None and not guard.admit_v3_ledger_row(rel, row):
+                        continue
                     yield row
     except FileNotFoundError:
         return

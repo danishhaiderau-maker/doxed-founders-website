@@ -82,6 +82,23 @@ class EpochGuard:
         bucket[cls] = bucket.get(cls, 0) + 1
         return False
 
+    def admit_v3_ledger_row(self, relpath: str, row: dict) -> bool:
+        """HM 19 Oct (queue item 3): V3 ledger rows carry segment windows, not a row time. Under a declared epoch a row is
+        admitted ONLY if its nested timestamps place it entirely at/after the fresh-start floor (class OK). PRE_EPOCH,
+        STRADDLE (window crosses the floor) and UNSTAMPED rows are hard-rejected (counted per class in ``rejected``), and a
+        declared epoch with no loadable floor admits nothing. No manifest (tests, tools outside an analyzer run): admit."""
+        if not self.manifest:
+            return True
+        if self.floor_missing or self.floor_ts is None:
+            return self._reject_no_floor(relpath)
+        cls = nested_ts_class(row, self.floor_ts)
+        if cls == NESTED_OK:
+            self.admitted[relpath] = self.admitted.get(relpath, 0) + 1
+            return True
+        bucket = self.rejected.setdefault(relpath, {})
+        bucket[cls] = bucket.get(cls, 0) + 1
+        return False
+
     def _reject_no_floor(self, relpath: str) -> bool:
         bucket = self.rejected.setdefault(relpath, {})
         bucket[NO_FRESH_FLOOR] = bucket.get(NO_FRESH_FLOOR, 0) + 1
@@ -138,7 +155,19 @@ class EpochGuard:
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
-                "rejected_by_stream": {k: dict(v) for k, v in sorted(self.rejected.items())}}
+                "rejected_by_stream": {k: dict(v) for k, v in sorted(self.rejected.items())},
+                "admitted_by_stream": dict(sorted(self.admitted.items())),
+                "fresh_rule": self.fresh_rule_status()}
+
+    def fresh_rule_status(self) -> dict:
+        """RED when a declared epoch has no loadable floor (the fresh rule then admits NOTHING, which must be loud, not
+        a quiet empty report). Otherwise GREEN, with per-stream admitted/rejected-by-reason counts for the V3 readers."""
+        v3 = [k for k in set(self.admitted) | set(self.rejected) if k.startswith("v3/ledgers/")]
+        per = {k: {"admitted": int(self.admitted.get(k, 0)), "rejected_by_reason": dict(self.rejected.get(k, {}))}
+               for k in sorted(v3)}
+        if self.declared and (self.floor_missing or self.floor_ts is None):
+            return {"status": "RED", "reason": NO_FRESH_FLOOR, "v3_readers": per}
+        return {"status": "GREEN", "reason": None, "v3_readers": per}
 
     # ------------------------------------------------------------ guarded loaders
 
