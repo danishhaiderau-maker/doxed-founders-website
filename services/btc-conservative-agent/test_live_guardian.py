@@ -190,3 +190,22 @@ def test_disarm_reach_and_relay_gate_and_guardian_has_no_order_calls():
     guard_src = _pl.Path(__file__).with_name("live_guardian.py").read_text(encoding="utf-8") + _SRC[_SRC.index("# ---- Live guardian"):_SRC.index("def monitor_live_guardian_route")]
     for tok in ("place_order", "submit_order", "cancel_order", "close_position", "bitfinex_private", "requests.post", "_relay_http_session.post", "api_close_showcase_position", "market_close"):
         assert tok not in guard_src, tok
+
+
+def test_with_output_off_exit_events_still_flow_to_the_relay_and_only_entries_are_withheld():
+    """HM condition (a). The protective stop is placed by the relay executor itself at entry fill (executor-capability:
+    ONCE_AT_ENTRY_FILL), so it never depends on a Fly event; Fly-delivered exit/continuation events must pass with output OFF."""
+    import live_copy_control as lc
+    SECRET = "s3cret"
+    OFF, TILE_OFF = {"enabled": False}, {"bitfinex_live_orders": False}
+    for ev in sorted(lc.CONTINUATION_EVENTS):          # POSITION_OPENED / REDUCED / CLOSED, ORDER_EXPIRED / CANCELLED
+        a = lc.sign_approval({"event": ev, "trade_id": "t-1", "entry_allowed": False}, SECRET)
+        ok, why = lc.delivery_check({"event": ev, "trade_id": "t-1", "live_copy_approval": a}, secret=SECRET, now=1.0, tile_row=TILE_OFF, output=OFF)
+        assert ok is True and why is None, ev
+    for ev in sorted(lc.ENTRY_EVENTS):                  # entries ARE withheld with output OFF
+        a = lc.sign_approval({"event": ev, "trade_id": "t-1", "entry_allowed": True}, SECRET)
+        ok, why = lc.delivery_check({"event": ev, "trade_id": "t-1", "live_copy_approval": a}, secret=SECRET, now=1.0, tile_row={"bitfinex_live_orders": True}, output=OFF)
+        assert ok is False and why == lc.DENY_OUTPUT_OFF, ev
+    # the bot's per-record filter only applies the tile delivery gate to entry events
+    seg = _SRC[_SRC.index("allowed, reason = _live_copy.delivery_check("):][:700]
+    assert "if allowed and event in _live_copy.ENTRY_EVENTS" in seg
