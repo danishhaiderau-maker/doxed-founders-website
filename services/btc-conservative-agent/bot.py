@@ -6452,6 +6452,22 @@ def synthetic_funding_rate_8h():
     rate = (premium * 0.15) + (imbalance * 0.00005) + (0.00002 if delta > 0 else -0.00002 if delta < 0 else 0)
     return max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, rate))
 
+def _funding_rate_detail(current_funding, next_accrued) -> dict:
+    """Evidence for the funding rate actually used: raw feed value, the value after the +-band cap, whether the cap bit,
+    and which feed field supplied it. Pure; never changes the rate (see _effective_funding_rate_8h)."""
+    cur = float(current_funding or 0.0)
+    acc = float(next_accrued or 0.0)
+    if abs(cur) >= 1e-12:
+        raw, src = cur, "CURRENT_FUNDING"
+    elif abs(acc) >= 1e-12:
+        raw, src = acc, "NEXT_FUNDING_ACCRUED"
+    else:
+        raw, src = 0.0, "ZERO"
+    used = max(-FUNDING_RATE_CAP_PER_8H, min(FUNDING_RATE_CAP_PER_8H, raw))
+    return {"rate_raw": raw, "rate_used": used, "rate_capped": used != raw, "rate_source": src,
+            "raw_current_funding": cur, "raw_next_funding_accrued": acc}
+
+
 def _effective_funding_rate_8h(current_funding: float, next_accrued: float) -> float:
     """Bitfinex: CURRENT_FUNDING is the live 8h rate; if zero, use next-period accrual."""
     cur = float(current_funding or 0.0)
@@ -6977,6 +6993,15 @@ def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
 # current book would book an impossible price improvement (B1/B2 prod: LONG
 # limits 82497/82507 booked at 82488 after a 499 s rest).  Only a fill admitted
 # MARKETABLE_AT_PLACEMENT is a taker that may take the better opposite quote.
+def _funding_raw_fields(pos: dict, entry: float, qty: float) -> dict:
+    """Unrounded funding (USD and bp of entry notional) plus the rate source; evidence only, funding_fees_usd unchanged."""
+    raw = float(pos.get("funding_fees", 0.0) or 0.0)
+    notional = float(entry) * float(qty)
+    srcs = sorted({str(x.get("source")) for x in (pos.get("funding_settlements") or []) if isinstance(x, dict)})
+    return {"funding_usd_raw": raw, "funding_bp_raw": (raw / notional * 1e4) if notional > 0 else None,
+            "funding_rate_source_detail": srcs or None}
+
+
 def _funding_rate_now():
     try:
         with state_lock:
@@ -7652,6 +7677,7 @@ def fetch_bitfinex_deriv_funding_rest(symbol: str = BITFINEX_WS_SYMBOL) -> dict:
         "clamp_min": float(row[_DERIV_STATUS_CLAMP_MIN]) if len(row) > _DERIV_STATUS_CLAMP_MIN and row[_DERIV_STATUS_CLAMP_MIN] is not None else None,
         "clamp_max": float(row[_DERIV_STATUS_CLAMP_MAX]) if len(row) > _DERIV_STATUS_CLAMP_MAX and row[_DERIV_STATUS_CLAMP_MAX] is not None else None,
         "source": "BITFINEX_DERIV_STATUS",
+        "rate_detail": _funding_rate_detail(current, next_accrued),
     }
 
 def refresh_funding_state(force: bool = False):
@@ -7716,6 +7742,8 @@ def refresh_funding_state(force: bool = False):
             "open_interest": meta.get("open_interest"),
             "clamp_min": meta.get("clamp_min"),
             "clamp_max": meta.get("clamp_max"),
+            "rate_detail": meta.get("rate_detail") or {"rate_raw": rate, "rate_used": rate, "rate_capped": False,
+                                                       "rate_source": source},
             "symbol": BITFINEX_WS_SYMBOL,
         }
     _last_funding_refresh_ts = now
@@ -7776,6 +7804,7 @@ def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = Tru
         refresh_funding_state()
     with state_lock:
         rate = state.get("funding", {}).get("rate", 0.0)
+        _fd = dict((state.get("funding", {}) or {}).get("rate_detail") or {})
     last = pos.get("last_funding_accrual_ts") or pos.get("entry_ts") or now
     dt_hours = max(0.0, (now - last) / 3600.0)
     if dt_hours <= 0:
@@ -7784,7 +7813,9 @@ def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = Tru
     try:
         import tile_fill as _tf_f
         for _b in _tf_f.funding_fields(last, now, rate)["funding_ts_crossed"]:
-            pos.setdefault("funding_settlements", []).append({"ts": _b, "rate": rate})
+            pos.setdefault("funding_settlements", []).append({
+                "ts": _b, "rate": rate, "rate_used": rate, "rate_raw": _fd.get("rate_raw"),
+                "capped": _fd.get("rate_capped"), "source": _fd.get("rate_source")})
     except Exception:  # noqa: BLE001 - evidence only; never blocks accrual
         pass
     pos["funding_fees"] = pos.get("funding_fees", 0.0) + payment
@@ -31826,6 +31857,7 @@ def close_position(pos: dict, exit_reason: str):
             "trading_fees_usd": round(trading_fees, 2),
             "fees_usd": round(trading_fees, 2),
             "funding_fees_usd": round(funding_total, 2),
+            **_funding_raw_fields(pos, float(entry), float(qty)),
             "total_cost_usd": round(trading_fees + funding_total, 2),
             **terminal_cost_evidence,
             "exit_reason": exit_reason,

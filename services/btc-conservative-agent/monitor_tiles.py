@@ -193,6 +193,8 @@ def trade_pnl(row: Mapping[str, Any], be_band_bp: float = monitor_api.WL_BE_BAND
         "gross_usd": _finite(row.get("gross_pnl_usd")),
         "trading_fees_usd": _finite(row.get("trading_fees_usd", row.get("fees_usd"))),
         "funding_usd": _finite(row.get("funding_fees_usd")),
+        "funding_usd_raw": _finite(row.get("funding_usd_raw")),
+        "funding_bp_raw": _finite(row.get("funding_bp_raw")),
         "net_usd": round(net, 6) if net is not None else None,
         "net_usd_basis": "net_pnl_usd_raw" if raw is not None else "net_pnl_usd_cents_booked",
         "class": monitor_api.wl_class(bp, be_band_bp=be_band_bp, net_usd=net),
@@ -385,7 +387,7 @@ def _late_window_block(rows) -> dict:
 
 PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms", "exit_ask_age_ms",
                 "depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill", "exit_price_basis",
-                "fee_model", "funding_rate", "funding_source", "hold_seconds", "funding_ts_crossed",
+                "fee_model", "funding_rate", "funding_source", "funding_rate_source_detail", "hold_seconds", "funding_ts_crossed",
                 "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status",
                 "exit_depth_snapshot_signal", "exit_depth_snapshot_legs", "pricer_signal_ts", "model_fill_ts",
                 "exit_pricer_signal_ts", "exit_model_fill_ts", "book_slippage_usd_entry", "book_slippage_usd_exit",
