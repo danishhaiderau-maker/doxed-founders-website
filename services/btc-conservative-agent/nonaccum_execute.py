@@ -12,7 +12,7 @@ Rules (all enforced in code, covered by tests):
   * C1 touches only <64hex>.json under the 7 ledger dirs with mtime < epoch; protected names can never be unlinked;
     every file is re-stat'ed right before unlink (same size + mtime_ns as planned, mtime < epoch, inside ROOT), else skipped;
   * C3a never touches a transfer dir that has any file newer than the epoch (the current dirs are counted before/after and
-    must not shrink); only empty dirs are rmdir'ed (no recursive delete); C3b (tape) only with --include-tape (Strategist sign-off);
+    must not shrink); only empty dirs are rmdir'ed (no recursive delete); C3b (tape) is never executed (HM 19 Oct; no --include-tape flag);
   * C4 rewrites the two relay-outbox JSONL files atomically, dropping ONLY planned pre-epoch lines (matched by content sha),
     refusing if the relay outbox shows any pending event or the file changed between read and replace;
   * rate limited batches (--batch files, --sleep seconds); abort on the first failed gate; no archive/copy of anything;
@@ -228,9 +228,11 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
                 fh.write(json.dumps(rec, sort_keys=True) + "\n")
 
     classes = [c for c in CLASS_ORDER if c in classes]
-    if "C3b" in classes and not include_tape:
+    if include_tape:
+        raise Abort("tape deletion is NOT permitted (HM 19 Oct): tape stays out of C1-C4")
+    if "C3b" in classes:
         classes.remove("C3b")
-        log({"event": "c3b_skipped", "reason": "tape_1s needs --include-tape (Strategist sign-off)"})
+        log({"event": "c3b_skipped", "reason": "tape_1s is never deleted by this executor (HM 19 Oct)"})
     if execute and confirm_sha != expected_sha:
         raise Abort("--execute needs --confirm-sha equal to --expected-sha")
     accepted = set(accepted_red)
@@ -276,14 +278,14 @@ def main(argv=None):
     ap.add_argument("--classes", default="C1,C2,C3a,C4"); ap.add_argument("--execute", action="store_true")
     ap.add_argument("--confirm-sha"); ap.add_argument("--batch", type=int, default=2000); ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--accept-baseline-red", default=""); ap.add_argument("--expected-counts-json")
-    ap.add_argument("--include-tape", action="store_true"); ap.add_argument("--log")
+    ap.add_argument("--log")
     ap.add_argument("--bot-url", default=os.environ.get("BOT_LOCAL_URL", "http://127.0.0.1:7002"))
     a = ap.parse_args(argv)
     os.nice(15)
     get = http_json(a.bot_url, os.environ["BOT_ADMIN_TOKEN"])
     res = run(a.root, a.epoch_ts, a.expected_sha, get, tuple(x for x in a.classes.split(",") if x), a.execute, a.confirm_sha, a.batch, a.sleep,
               tuple(x for x in a.accept_baseline_red.split(",") if x), json.loads(a.expected_counts_json) if a.expected_counts_json else None,
-              a.include_tape, a.log)
+              False, a.log)
     return 0 if res["status"] == "DONE" else 2
 
 

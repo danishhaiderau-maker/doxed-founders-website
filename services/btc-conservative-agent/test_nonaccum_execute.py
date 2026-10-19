@@ -68,11 +68,13 @@ def test_execute_removes_only_planned_pre_epoch_items_and_keeps_current_and_prot
     assert [x["created_at_unix"] for x in lines] == [EPOCH + 5]                          # only the current-epoch line survives
 
 
-def test_tape_only_with_explicit_flag(tmp_path):
+def test_tape_is_never_deleted(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
-    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C3b",), execute=True, confirm_sha=sha, sleep_s=0, include_tape=True, now=now)
-    assert res["totals"]["C3b"]["removed"] == 1 and not os.path.exists(f"{root}/tape_1s/old.jsonl.gz")
-    assert os.path.exists(f"{root}/tape_1s/new.jsonl.gz")
+    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C3b",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+    assert "C3b" not in res["totals"] and os.path.exists(f"{root}/tape_1s/old.jsonl.gz")
+    with pytest.raises(ex.Abort):
+        ex.run(root, EPOCH, sha, fake_get(), classes=("C3b",), execute=True, confirm_sha=sha, sleep_s=0, include_tape=True, now=now)
+    assert os.path.exists(f"{root}/tape_1s/old.jsonl.gz")
 
 
 def test_gates_live_on_force_paper_off_and_red_abort_before_and_during(tmp_path):
