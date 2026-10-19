@@ -61,6 +61,7 @@ WORKER_EXPECTATIONS: dict[str, tuple] = {
     "_live_copy_delivery_loop": (15.0, 120.0),
     "heartbeat_loop": (30.0, 300.0),
     "runtime_uptime_loop": (60.0, 600.0),
+    "live_guardian_loop": (1.0, 30.0),   # #784: beats via shutdown_event.wait(1 s)
     "api_state_cache_refresher": (5.0, 900.0),
     "main_supervisor_loop": (60.0, 0.0),
 }
