@@ -311,3 +311,29 @@ def test_missing_epoch_floor_fails_loudly_and_payload_trims_flat_hist():
         assert "epoch floor" in str(exc)
     assert "flat_hist_n" in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]
     assert '"flat_hist"' in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]   # excluded, only the count is emitted
+
+
+def test_long_off_gap_drops_stale_baseline_no_false_loss_cap():
+    st = {"flat_hist": [], "day_baseline": 210.0, "day_baseline_ts": NOW - 30 * 3600}
+    v = g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 205.0}), st, NOW)
+    assert "DAILY_LOSS_CAP" not in codes(v) and st["day_baseline"] == 205.0 and st["day_baseline_ts"] == NOW
+    # a fresh (<24 h) baseline still counts
+    st2 = {"flat_hist": [], "day_baseline": 210.0, "day_baseline_ts": NOW - 3600}
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 205.0}), st2, NOW))
+
+
+def test_baseline_ts_written_with_peak_time():
+    st = {}
+    g.evaluate([], MIR, st, NOW)
+    assert st["day_baseline_ts"] == NOW
+    g.evaluate([], dict(MIR, balance={"derivatives_available_usd": 206.5}), st, NOW + 60)
+    assert st["day_baseline"] == 206.79 and st["day_baseline_ts"] == NOW
+
+
+def test_closed_row_without_close_time_does_not_create_false_drift():
+    c = ch(fill_at_ts=NOW - 500, stop_confirmed=True, closed=True, pnl_usd=-0.3)   # no close time
+    st = {"last_flat_balance": 206.79, "last_flat_ts": NOW - 30}
+    for i in range(3):
+        v = g.evaluate([c], dict(MIR, balance={"derivatives_available_usd": 206.79}), st, NOW + i * 30)
+        assert "BALANCE_DRIFT" not in codes(v), i
+    assert st["ledger_loss_usd"] == 0.3        # still counted in the loss cap

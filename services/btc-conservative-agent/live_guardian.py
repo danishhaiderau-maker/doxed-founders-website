@@ -114,12 +114,17 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         # rolling 24 h baseline = the highest flat balance seen in the last 24 h (a legacy seeded day_baseline joins the history)
         hist = state.setdefault("flat_hist", [])
         if not hist and state.get("day_baseline") is not None:
-            hist.append([float(state.get("day_baseline_ts") or now - 60.0), float(state["day_baseline"])])
+            seed_ts = _f(state.get("day_baseline_ts"))
+            if seed_ts is None:
+                seed_ts = now - 60.0          # legacy in-process seed without a timestamp
+            if now - ROLLING_WINDOW_SEC <= seed_ts <= now + 60:   # a baseline older than 24 h (e.g. after a long OFF gap) is dropped
+                hist.append([seed_ts, float(state["day_baseline"])])
         hist[:] = [h for h in hist if now - ROLLING_WINDOW_SEC <= h[0] <= now + 60]
         if not hist or now - hist[-1][0] >= FLAT_HIST_STEP_SEC:
             hist.append([now, bal])
         del hist[:-3000]
-        state["day_baseline"] = max([h[1] for h in hist] + [bal])
+        peak_ts, peak = max([(h[0], h[1]) for h in hist] + [(now, bal)], key=lambda x: (x[1], x[0]))
+        state["day_baseline"], state["day_baseline_ts"] = peak, peak_ts   # ts = when the peak was seen, so a later seed ages correctly
         state["sydney_day"] = day_key(now)
         loss = float(state["day_baseline"]) - bal   # balance already includes funding: a funding debit is a real loss
         state["day_loss_usd"] = round(loss, 4)
@@ -127,8 +132,10 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
             out.append({"code": "DAILY_LOSS_CAP", "detail": f"balance loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})
         # 5. balance drift while flat vs the last flat reading, explained only by reported realised pnl + funding
         last = state.get("last_flat_balance")
-        explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in live if c.get("closed") and close_ts(c, now) > state.get("last_flat_ts", now))
-        all_reported = all(_f(c.get("pnl_usd")) is not None for c in live if c.get("closed") and close_ts(c, now) > state.get("last_flat_ts", now))
+        # drift check: ONLY rows with a real close time (a time-less row would be 'newer' on every tick; it stays in the loss cap via close_ts)
+        since = [c for c in live if c.get("closed") and (_f(c.get("closed_at_ts") or c.get("exit_at_ts")) or 0) > state.get("last_flat_ts", now)]
+        explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in since)
+        all_reported = all(_f(c.get("pnl_usd")) is not None for c in since)
         if last is not None and all_reported:
             drift = bal - float(last) - explained
             if abs(drift) > BALANCE_DRIFT_USD + abs(float(funding_usd_today or 0.0)):
