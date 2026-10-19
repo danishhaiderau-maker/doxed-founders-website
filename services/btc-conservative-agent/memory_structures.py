@@ -129,6 +129,36 @@ STAIRS_KEEP = 50
 LOOPS_KEEP = 40
 
 
+ATTRIBUTION_MIN_CYCLES = 5     # HM 19 Oct: a step is named only if it grew RSS on >= 5 consecutive cycles
+ATTRIBUTION_MIN_KB = 1024      # growth below 1 MB in a cycle is noise
+
+
+def step_attribution(loops, min_cycles: int = ATTRIBUTION_MIN_CYCLES, min_kb: int = ATTRIBUTION_MIN_KB) -> dict:
+    """Per analytics_loop step: longest run of consecutive cycles with rss_delta_kb >= min_kb, and the growth over that run.
+    ``attributed`` lists only steps whose run reached ``min_cycles`` (one big cycle is never enough to name a leak)."""
+    runs: dict = {}
+    cur: dict = {}
+    for rec in loops or []:
+        seen = {}
+        for st in (rec or {}).get("steps") or []:
+            try:
+                seen[str(st.get("step"))] = int(st.get("rss_delta_kb") or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        for name in set(cur) | set(seen):
+            d = seen.get(name)
+            if d is not None and d >= min_kb:
+                c = cur.get(name, (0, 0))
+                cur[name] = (c[0] + 1, c[1] + d)
+                if cur[name][0] > runs.get(name, (0, 0))[0]:
+                    runs[name] = cur[name]
+            else:
+                cur.pop(name, None)
+    steps = {n: {"max_consecutive_growth_cycles": r[0], "growth_kb_over_run": r[1]} for n, r in runs.items()}
+    return {"min_cycles": min_cycles, "min_kb": min_kb, "cycles_seen": len(loops or []), "steps": steps,
+            "attributed": sorted(n for n, r in runs.items() if r[0] >= min_cycles)}
+
+
 def detect_stairs(series, min_mb: float = STAIR_MB) -> list:
     """[(ts, delta_mb)] for every consecutive-sample RSS rise >= min_mb (the ~110 MB/cycle stair signature)."""
     out, prev = [], None
@@ -382,7 +412,7 @@ class Tracker:
         doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
                "oom_eta": oom_status(self.series, memory_limit_kb(), self.boot_ts, now, sample_ts, rss_now,
                                      leak_structure=leak_name, prev_boot=self.prev_boot, extra_rss_kb=shipper_kb),
-               "shipper_rss_kb": shipper_kb, "stairs": detect_stairs(self.series), "loops": list(self.loops),
+               "shipper_rss_kb": shipper_kb, "stairs": detect_stairs(self.series), "loops": list(self.loops), "step_attribution": step_attribution(self.loops),
                "prev_boot": self.prev_boot,
                "rss_series_full": [[round(t, 1), v] for t, v in self.series],
                "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),
