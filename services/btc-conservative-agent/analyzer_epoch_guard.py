@@ -42,6 +42,14 @@ MANIFEST_MISSING = "DATA_EPOCH_MANIFEST_MISSING"
 # Placeholder epoch id of a fail-closed guard whose data_epoch.json is missing or invalid while a fresh-start floor
 # exists: it never matches a real epoch, so every receipt and purity check that compares epoch ids goes RED.
 MANIFEST_MISSING_EPOCH_ID = "ce-19700101-manifest-missing"
+# HM 19 Oct (fe334474 #5): an epoch can be REQUIRED. Then "nothing declared" (no data_epoch.json and no readable
+# fresh_start_epoch.json anywhere) fails closed instead of admitting every row under a GREEN status.
+EPOCH_REQUIRED_UNDECLARED = "FRESH_EPOCH_REQUIRED_NOT_DECLARED"
+REQUIRE_EPOCH_ENV = "BTC_REQUIRE_FRESH_EPOCH"
+REQUIRE_EPOCH_MARKER = "fresh_epoch_required.json"
+FRESH_FLOOR_FILE = "fresh_start_epoch.json"
+LAPTOP_MIRROR_TREE = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
+AGENT_DIR = Path(__file__).resolve().parent
 
 
 class PreEpochRowError(RuntimeError):
@@ -50,11 +58,15 @@ class PreEpochRowError(RuntimeError):
 
 class EpochGuard:
     def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False,
-                 manifest_missing: bool = False) -> None:
+                 manifest_missing: bool = False, fail_closed_reason: str | None = None) -> None:
         self.floor_ts = float(floor_ts) if floor_ts else None  # fresh_start_epoch.json epoch_ts (see data_epoch.classify)
         # HM 19 Oct: a fresh-start floor with a missing/corrupt data_epoch.json is a post-reset deploy whose manifest
-        # vanished. It must FAIL CLOSED (admit nothing, RED), never fall back to "no epoch declared" (admit all).
-        self.manifest_missing = bool(manifest_missing) and manifest is None
+        # vanished, and a REQUIRED epoch that is declared nowhere is the same failure. Both FAIL CLOSED (admit
+        # nothing, RED), never fall back to "no epoch declared" (admit all).
+        reason = fail_closed_reason or (MANIFEST_MISSING if manifest_missing else None)
+        self.fail_closed_reason = reason if manifest is None else None
+        self.manifest_missing = self.fail_closed_reason is not None
+        self.required_by: str | None = None  # set by resolve_epoch_guard when an undeclared epoch is required
         if self.manifest_missing:
             manifest = de.new_manifest(MANIFEST_MISSING_EPOCH_ID, started_at_ts=self.floor_ts or 1.0)
         self.manifest = manifest
@@ -72,9 +84,7 @@ class EpochGuard:
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike) -> "EpochGuard":
-        manifest = de.load_manifest(Path(data_dir) / de.MANIFEST_NAME)
-        floor = fresh_floor_ts(data_dir)
-        return cls(manifest, floor_ts=floor, require_floor=True, manifest_missing=manifest is None and floor is not None)
+        return resolve_epoch_guard([data_dir])[0]
 
     @property
     def declared(self) -> bool:
@@ -111,7 +121,7 @@ class EpochGuard:
         return False
 
     def _reject_no_floor(self, relpath: str) -> bool:
-        reason = MANIFEST_MISSING if self.manifest_missing else NO_FRESH_FLOOR
+        reason = self.fail_closed_reason or NO_FRESH_FLOOR
         bucket = self.rejected.setdefault(relpath, {})
         bucket[reason] = bucket.get(reason, 0) + 1
         return False
@@ -153,7 +163,7 @@ class EpochGuard:
         fields = tuple(ts_fields)
         for row in rows:
             if self.floor_missing:
-                reason = (f"{MANIFEST_MISSING}: fresh_start_epoch.json without a valid data_epoch.json"
+                reason = (f"{self.fail_closed_reason}: no valid data_epoch.json (floor file present or epoch required)"
                           if self.manifest_missing else f"{NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
                 raise PreEpochRowError(f"{relpath}: {reason}")
             cls = de.classify_row(relpath, row, self.manifest, fields, floor_ts=self.floor_ts)
@@ -167,6 +177,7 @@ class EpochGuard:
                 "floor_ts": self.floor_ts, "floor_loaded": self.floor_loaded,
                 "floor_required": self.require_floor, "floor_missing_fail_closed": self.floor_missing,
                 "manifest_missing_fail_closed": self.manifest_missing,
+                "fail_closed_reason": self.fail_closed_reason, "epoch_required_by": self.required_by,
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
@@ -191,8 +202,8 @@ class EpochGuard:
         v3 = [k for k in set(self.admitted) | set(self.rejected) if k.startswith("v3/ledgers/")]
         per = {k: {"admitted": int(self.admitted.get(k, 0)), "rejected_by_reason": dict(self.rejected.get(k, {}))}
                for k in sorted(v3)}
-        if self.manifest_missing:
-            return {"status": "RED", "reason": MANIFEST_MISSING, "v3_readers": per}
+        if self.fail_closed_reason:
+            return {"status": "RED", "reason": self.fail_closed_reason, "v3_readers": per}
         if self.declared and (self.floor_missing or self.floor_ts is None):
             return {"status": "RED", "reason": NO_FRESH_FLOOR, "v3_readers": per}
         return {"status": "GREEN", "reason": None, "v3_readers": per}
@@ -440,40 +451,123 @@ def admit_stream_row(path: str | os.PathLike, row: Any, *, relpath: str | None =
     return guard.admit(rel, row)
 
 
-def guard_from_roots(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
-    """Declared-epoch guard for a process outside the analyzer (genome grid): the manifest from the first root that
-    declares one, the fresh-start floor from the first root holding fresh_start_epoch.json. A declared epoch with no
-    floor anywhere fails closed (admits nothing); no manifest anywhere admits everything (no epoch declared)."""
-    manifest = None
-    floor = None
+def floor_file_present(root: str | os.PathLike) -> bool:
+    """A fresh_start_epoch.json exists where :func:`fresh_floor_ts` looks (beside the root or one level up), readable
+    or not: the deploy is post-reset, so an epoch must be declared."""
+    base = Path(root)
+    return any((d / FRESH_FLOOR_FILE).is_file() for d in (base, base.parent))
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "required")
+
+
+def epoch_required(roots: Iterable[str | os.PathLike | None]) -> str | None:
+    """Why a fresh epoch is REQUIRED here, or None. Sources, any of:
+    ``BTC_REQUIRE_FRESH_EPOCH=1`` (laptop analyzer / scheduled jobs), a ``fresh_epoch_required.json`` marker in any
+    root (laptop canonical-research-data / mirror tree), or a post-reset deploy (a fresh_start_epoch.json exists,
+    even unreadable)."""
+    if _truthy(os.environ.get(REQUIRE_EPOCH_ENV)):
+        return f"env:{REQUIRE_EPOCH_ENV}"
     for root in roots:
-        if not root:
+        if root and (Path(root) / REQUIRE_EPOCH_MARKER).is_file():
+            return f"marker:{Path(root) / REQUIRE_EPOCH_MARKER}"
+    for root in roots:
+        if root and floor_file_present(root):
+            return f"post_reset:{FRESH_FLOOR_FILE}"
+    return None
+
+
+def epoch_roots(data_dirs: Iterable[str | os.PathLike | None] = ()) -> list[Path]:
+    """THE epoch roots, shared by the analyzer (``_epoch_manifest_roots``) and every standalone entry point, so both
+    resolve the same manifest and the same floor: ``BTC_DATA_EPOCH_DIR`` alone when set; otherwise
+    ``BTC_AGENT_DATA_DIR``, this service's canonical-research-data (the laptop floor), each given data dir and the
+    laptop mirror tree, each with its ``v3/``."""
+    override = os.environ.get("BTC_DATA_EPOCH_DIR")
+    if override:
+        return [Path(override)]
+    out: list[Path] = []
+    seen: set[str] = set()
+    # Fixed priority, whoever calls: the agent data dir and canonical-research-data (the laptop's floor) come before
+    # any caller data dir (the genome grid's mirror tree), so the analyzer and every job resolve the same floor.
+    for base in (os.environ.get("BTC_AGENT_DATA_DIR"), AGENT_DIR / "canonical-research-data", *data_dirs,
+                 LAPTOP_MIRROR_TREE):
+        if not base:
             continue
-        if manifest is None:
-            manifest = de.load_manifest(Path(root) / de.MANIFEST_NAME)
-        if floor is None:
-            floor = fresh_floor_ts(root)
-    return EpochGuard(manifest, floor_ts=floor, require_floor=True,
-                      manifest_missing=manifest is None and floor is not None)
+        for root in (Path(base), Path(base) / "v3"):
+            key = os.path.normcase(os.path.abspath(str(root)))
+            if key not in seen:
+                seen.add(key)
+                out.append(root)
+    return out
+
+
+def resolve_epoch_guard(roots: Iterable[str | os.PathLike | None]) -> "tuple[EpochGuard, Path | None]":
+    """The one manifest+floor resolution (analyzer and standalone alike):
+
+    1. the first root holding BOTH a valid data_epoch.json and a fresh-start floor;
+    2. else the manifest from the first root declaring one and the floor from the first root holding one (a
+       declared epoch with no floor anywhere fails closed: FRESH_FLOOR_MISSING);
+    3. else, with a fresh_start_epoch.json present anywhere (readable or corrupt): fail closed MANIFEST_MISSING;
+    4. else, when an epoch is required (:func:`epoch_required`): fail closed FRESH_EPOCH_REQUIRED_NOT_DECLARED;
+    5. else nothing is declared (admit all; :func:`ensure_process_guard` logs it loudly)."""
+    roots = [Path(r) for r in roots if r]
+    manifests = {str(r): de.load_manifest(r / de.MANIFEST_NAME) for r in roots}
+    floors = {str(r): fresh_floor_ts(r) for r in roots}
+    for r in roots:
+        if manifests[str(r)] and floors[str(r)] is not None:
+            return EpochGuard(manifests[str(r)], floor_ts=floors[str(r)], require_floor=True), r
+    floor = next((floors[str(r)] for r in roots if floors[str(r)] is not None), None)
+    for r in roots:
+        if manifests[str(r)]:
+            return EpochGuard(manifests[str(r)], floor_ts=floor, require_floor=True), r
+    floor_root = next((r for r in roots if floor_file_present(r)), None)
+    if floor_root is not None:
+        return EpochGuard(None, floor_ts=floor, require_floor=True, fail_closed_reason=MANIFEST_MISSING), floor_root
+    required = epoch_required(roots)
+    if required:
+        guard = EpochGuard(None, require_floor=True, fail_closed_reason=EPOCH_REQUIRED_UNDECLARED)
+        guard.required_by = required
+        return guard, None
+    return EpochGuard(None), None
+
+
+def guard_from_roots(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
+    """Declared-epoch guard for a process outside the analyzer (genome grid etc.); see :func:`resolve_epoch_guard`."""
+    return resolve_epoch_guard(roots)[0]
 
 
 def standalone_guard_roots(data_dir: str | os.PathLike | None) -> list[Path]:
-    """Epoch roots for a standalone entry point: BTC_DATA_EPOCH_DIR, the data dir and its v3/, then this service's
-    canonical-research-data (the laptop's fresh_start_epoch.json lives there; the mirror tree carries no floor)."""
-    override = os.environ.get("BTC_DATA_EPOCH_DIR")
-    roots = [Path(override)] if override else []
-    if data_dir:
-        roots += [Path(data_dir), Path(data_dir) / "v3"]
-    return roots + [Path(__file__).resolve().parent / "canonical-research-data"]
+    """Epoch roots for a standalone entry point: :func:`epoch_roots` with its data dir first."""
+    return epoch_roots([data_dir])
+
+
+def _log_guard_state(guard: "EpochGuard", roots: Iterable[str | os.PathLike | None], where: str) -> None:
+    """Loud stderr line for every state that is not a normal declared epoch (HM #7)."""
+    import logging
+    roots = [str(r) for r in roots if r]
+    if guard.fail_closed_reason or guard.floor_missing:
+        msg = (f"EPOCH GUARD FAIL-CLOSED ({where}): {guard.fail_closed_reason or NO_FRESH_FLOOR}; every "
+               f"epoch-scoped row is rejected. roots={roots}")
+    elif not guard.declared:
+        msg = (f"EPOCH GUARD NOT DECLARED ({where}): neither data_epoch.json nor fresh_start_epoch.json found under "
+               f"roots={roots}; rows are NOT fresh-epoch filtered. Set {REQUIRE_EPOCH_ENV}=1 or place "
+               f"{REQUIRE_EPOCH_MARKER} in the data dir to make this fail closed.")
+    else:
+        return
+    print(msg, file=sys.stderr, flush=True)
+    logging.getLogger("analyzer_epoch_guard").warning(msg)
 
 
 def ensure_process_guard(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
     """Standalone entry points (genome grid, walk-forward scorer, latency measurement run outside the analyzer)
     install the same hard guard the analyzer does. An already-installed guard (the analyzer's) is kept. A guard
-    that declares nothing (no manifest and no floor anywhere) is returned but not installed."""
+    that declares nothing (no manifest, no floor, not required) is returned but not installed, and logged loudly."""
     if _PROCESS_GUARD is not None:
         return _PROCESS_GUARD
+    roots = list(roots)
     guard = guard_from_roots(roots)
+    _log_guard_state(guard, roots, "ensure_process_guard")
     if guard.declared:
         set_process_guard(guard)
     return guard
@@ -506,7 +600,9 @@ def scoped_process_guard(roots: Iterable[str | os.PathLike | None]) -> Iterator[
     if _PROCESS_GUARD is not None:
         yield _PROCESS_GUARD
         return
+    roots = list(roots)
     guard = guard_from_roots(roots)
+    _log_guard_state(guard, roots, "scoped_process_guard")
     if not guard.declared:
         yield guard
         return
@@ -514,7 +610,8 @@ def scoped_process_guard(roots: Iterable[str | os.PathLike | None]) -> Iterator[
     try:
         yield guard
     finally:
-        set_process_guard(None)
+        if _PROCESS_GUARD is guard:  # clear only our own guard; one installed meanwhile stays
+            set_process_guard(None)
 
 
 def process_guard() -> "EpochGuard":
