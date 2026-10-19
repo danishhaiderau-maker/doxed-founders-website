@@ -578,3 +578,59 @@ def test_archive_drift_treats_a_defect_list_going_to_zero_as_recovery(paths):
                                                     "fills": [{"f": j} for j in range(n)]}}}, fh)
     paths_hit = {f["path"] for f in ct.archive_drift(paths, {})["findings"] if f["kind"] == "REPORT_LIST_COLLAPSE"}
     assert paths_hit == {"collection.integrity.fills"}
+
+
+def test_exporters_always_emit_full_column_set_so_contract_does_not_flip():
+    """19 Oct: auto_ff `dirty` and watcher checks `flapping` were optional keys; when no row carried them the contract
+    saw DRIFT_DIMS_DROPPED (RED). Both exporters now always emit the column."""
+    import system_health_meta as meta
+    from self_aware import tiles
+    rows = tiles._full_columns([{"outcome": "FAST_FORWARDED", "at": "x"}], tiles.AUTO_FF_COLUMNS)
+    assert set(tiles.AUTO_FF_COLUMNS) <= set(rows[0]) and rows[0]["dirty"] is None and rows[0]["outcome"] == "FAST_FORWARDED"
+    checks = [{"id": "a", "status": "GREEN"}, {"id": "b", "status": "GREEN"}]
+    meta.flapping(checks, {}, lambda *a, **k: {"id": "watcher.flapping"})
+    assert all(c["flapping"] is False for c in checks)
+
+
+def _combos_spec():
+    return {"id": "x", "surface": "analyzer", "tier": "light", "depends_on": [], "title": "t",
+            "tables": [{"path": "policy_grid.rows", "name": "top100", "min_rows": 10, "declared_empty_paths": ["policy_grid.blockers"],
+                        "empty_declared_severity": "RED", "pending_samples": {"rule": "combos_sealed_holdout"}}],
+            "invariants": [{"if_positive": "policy_grid.search_counts.unique_policies_evaluated",
+                            "then_min": "policy_grid.search_counts.materialized_policy_rows", "min": 1, "severity": "RED",
+                            "kind": "DIMENSION_COLLAPSE", "pending_samples": {"rule": "combos_sealed_holdout"}}]}
+
+
+def test_pending_samples_is_info_not_red_and_a_large_sample_goes_red_again():
+    import test_self_aware_min_samples as tm
+    spec = _combos_spec()
+    grid = {"rows": [], "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+            "search_counts": {"independent_episodes": 754, "unique_policies_evaluated": 21210, "materialized_policy_rows": 0}}
+    res = _eval(spec, {"policy_grid": grid})
+    kinds = {v["kind"]: v for v in res["violations"]}
+    assert kinds["PENDING_SAMPLES"]["severity"] == "INFO" and "EMPTY_DECLARED" not in kinds and "DIMENSION_COLLAPSE" not in kinds
+    assert "PENDING_SAMPLES" in kinds["PENDING_SAMPLES"]["detail"] and "300" in kinds["PENDING_SAMPLES"]["detail"]
+    assert res["status"] == "GREEN"
+    grid["sealed_holdout"] = tm.holdout(n=300, hours_step=0.42)   # registered minimum met: the defect is real again
+    res = _eval(spec, {"policy_grid": grid})
+    kinds = {v["kind"] for v in res["violations"]}
+    assert "EMPTY_DECLARED" in kinds and "DIMENSION_COLLAPSE" in kinds and res["status"] == "RED"
+
+
+def test_analyzer_combos_no_longer_declares_the_obsolete_clean_epoch_pending_blocker():
+    import json
+    from pathlib import Path
+    doc = json.loads((Path(__file__).parent / "self_aware" / "section_contracts.json").read_text(encoding="utf-8"))
+    spec = [c for c in doc["contracts"] if c["id"] == "analyzer.combos"][0]
+    assert not spec.get("declared_blockers")
+
+
+def test_combos_contract_carries_the_full_prereg_shas_and_no_provisional_minimum():
+    import json
+    from pathlib import Path
+    raw = (Path(__file__).parent / "self_aware" / "section_contracts.json").read_text(encoding="utf-8")
+    assert "provisional" not in raw and '"min": 1000' not in raw
+    spec = [c for c in json.loads(raw)["contracts"] if c["id"] == "analyzer.combos"][0]
+    assert {k: len(v) for k, v in spec["prereg"].items()} == {"frozen_h1_h8_sha256": 64, "addendum1_sha256": 64, "addendum2_sha256": 64}
+    spec2 = {**_combos_spec(), "prereg": spec["prereg"]}
+    assert _eval(spec2, {"policy_grid": {"rows": []}})["prereg"]["addendum2_sha256"].startswith("2a047c5e")

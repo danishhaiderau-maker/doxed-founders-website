@@ -410,9 +410,9 @@ def _load_jsonl(path: str) -> list:
     return rows
 
 
-def build_funnel_summary(cwd: str = None) -> dict:
+def build_funnel_summary(cwd: str = None, rows: list = None) -> dict:
     cwd = cwd or os.getcwd()
-    rows = _load_funnel_rows(cwd)
+    rows = _load_funnel_rows(cwd) if rows is None else rows
     by_tid: dict[str, dict] = {}
     for r in rows:
         tid = str(r.get("trade_id") or "")
@@ -454,9 +454,9 @@ def build_funnel_summary(cwd: str = None) -> dict:
     return summary
 
 
-def build_fill_quality_report(cwd: str = None) -> dict:
+def build_fill_quality_report(cwd: str = None, rows: list = None) -> dict:
     cwd = cwd or os.getcwd()
-    rows = _load_funnel_rows(cwd)
+    rows = _load_funnel_rows(cwd) if rows is None else rows
     buckets = Counter()
     distances = []
     missed = []
@@ -499,11 +499,11 @@ def build_fill_quality_report(cwd: str = None) -> dict:
     return report
 
 
-def build_approval_ev_report(cwd: str = None) -> dict:
+def build_approval_ev_report(cwd: str = None, rows: list = None) -> dict:
     cwd = cwd or os.getcwd()
     shadows = {str(s.get("trade_id")): s for s in _load_jsonl(os.path.join(cwd, "shadow_outcome.jsonl"))}
     trades = {str(t.get("trade_id")): t for t in _load_csv_trades(os.path.join(cwd, "trades_3factor.csv"))}
-    funnel = _load_funnel_rows(cwd)
+    funnel = _load_funnel_rows(cwd) if rows is None else rows
     approve_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "APPROVE"}
     order_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "ORDER_SUBMITTED"}
     fill_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "FILLED"}
@@ -549,10 +549,11 @@ def _load_csv_trades(path: str) -> list:
 
 def refresh_all_execution_reports(cwd: str = None) -> dict:
     cwd = cwd or os.getcwd()
+    rows = _load_funnel_rows(cwd)   # ONE read of execution_funnel.jsonl for all three reports (was three)
     return {
-        "funnel_summary": build_funnel_summary(cwd),
-        "fill_quality": build_fill_quality_report(cwd),
-        "approval_ev": build_approval_ev_report(cwd),
+        "funnel_summary": build_funnel_summary(cwd, rows=rows),
+        "fill_quality": build_fill_quality_report(cwd, rows=rows),
+        "approval_ev": build_approval_ev_report(cwd, rows=rows),
     }
 
 
