@@ -270,3 +270,14 @@ def test_bundle_dirs_walked_once_per_class_not_per_batch(tmp_path):
     finally:
         ex.current_bundle_dirs = orig
     assert res["status"] == "DONE" and n["c"] == 1 + 4 + 1     # before + one per class (C1,C2,C3a,C4) + final
+
+
+def test_cli_exits_nonzero_on_aborted_and_zero_on_done(tmp_path, monkeypatch):
+    root, now, sha, _ = _setup(tmp_path)
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "x")
+    monkeypatch.setattr(ex.os, "nice", lambda n: 0)
+    monkeypatch.setattr(ex, "http_json", lambda base, token: fake_get(status={"live_armed": True}))
+    assert ex.main([root, str(EPOCH), "--expected-sha", sha]) == 2           # gate abort
+    monkeypatch.setattr(ex, "http_json", lambda base, token: fake_get())
+    assert ex.main([root, str(EPOCH), "--expected-sha", "0" * 64]) == 2      # sha mismatch
+    assert ex.main([root, str(EPOCH), "--expected-sha", sha, "--sleep", "0"]) == 0   # dry run DONE
