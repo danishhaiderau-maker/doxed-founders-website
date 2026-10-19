@@ -268,7 +268,14 @@ def rewrite_c4(root, epoch_ts, items, execute, log, totals, pending_fn):
             if (st1.st_size, st1.st_mtime_ns) != (st0.st_size, st0.st_mtime_ns):
                 os.unlink(tmp)
                 raise Abort(f"{name} changed between read and replace; refusing")
-            os.replace(tmp, path)
+            try:
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         totals["C4"]["removed"] += drop
         totals["C4"]["bytes"] += dbytes
         log({"event": "c4_file", "file": name, "execute": execute, "lines_removed": drop, "bytes": dbytes, "lines_kept": len(keep)})
@@ -295,44 +302,52 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
     if execute and confirm_sha != expected_sha:
         raise Abort("--execute needs --confirm-sha equal to --expected-sha")
     accepted = set(accepted_red)
-    base = gate(get, None, accepted)
-    log({"event": "gate_baseline", **base})
-    doc = P.build_all(root, epoch_ts, now)
-    sha = doc["plan_sha256"]
-    counts = {k: v["count"] for k, v in doc["plans"].items()}
-    if sha != expected_sha:
-        ok = bool(expected_counts) and all(counts.get(k, 0) <= int(v) for k, v in expected_counts.items())
-        log({"event": "SHA_MISMATCH", "expected": expected_sha, "actual": sha, "counts": counts, "accepted_as_smaller": ok})
-        if not ok:
-            res = {"status": "ABORTED", "reason": f"plan sha {sha} != expected {expected_sha}", "execute": execute, "plan_sha256": sha, "totals": {}}
-            log({"event": "summary", **res})
-            return res
-    log({"event": "plan_verified", "plan_sha256": sha, "counts": counts,
-         "bytes": {k: v["bytes"] for k, v in doc["plans"].items()}, "classes": classes, "execute": execute})
-    totals = {c: {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0} for c in classes}
-    items = {k: list(P.ITEMS.get(k, [])) for k in classes}
-    cur_before = current_bundle_dirs(root, epoch_ts)
-    def check():
-        log({"event": "gate", **gate(get, base, accepted)})
-        now_cur = current_bundle_dirs(root, epoch_ts)          # per batch: the current-epoch bundle dirs must never shrink
-        if now_cur < cur_before:
-            raise Abort(f"current-epoch bundle dirs shrank {cur_before} -> {now_cur}")
+    sha = None
     try:
+        base = gate(get, None, accepted)
+        log({"event": "gate_baseline", **base})
+        doc = P.build_all(root, epoch_ts, now)
+        sha = doc["plan_sha256"]
+        counts = {k: v["count"] for k, v in doc["plans"].items()}
+        if sha != expected_sha:
+            ok = bool(expected_counts) and all(counts.get(k, 0) <= int(v) for k, v in expected_counts.items())
+            log({"event": "SHA_MISMATCH", "expected": expected_sha, "actual": sha, "counts": counts, "accepted_as_smaller": ok})
+            if not ok:
+                res = {"status": "ABORTED", "reason": f"plan sha {sha} != expected {expected_sha}", "execute": execute, "plan_sha256": sha, "totals": {}}
+                log({"event": "summary", **res})
+                return res
+        log({"event": "plan_verified", "plan_sha256": sha, "counts": counts,
+             "bytes": {k: v["bytes"] for k, v in doc["plans"].items()}, "classes": classes, "execute": execute})
+        totals = {c: {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0} for c in classes}
+        items = {k: list(P.ITEMS.get(k, [])) for k in classes}
+        cur_before = current_bundle_dirs(root, epoch_ts)
+
+        def check():
+            # per batch: gate only. The bundle-dir walk is expensive, so it runs once per class (and once at the end), see below.
+            log({"event": "gate", **gate(get, base, accepted)})
+
+        def bundles_check(when):
+            now_cur = current_bundle_dirs(root, epoch_ts)      # the current-epoch bundle dirs must never shrink
+            if now_cur < cur_before:
+                raise Abort(f"current-epoch bundle dirs shrank {cur_before} -> {now_cur} ({when})")
+            return now_cur
+
         for cls in classes:
             if cls == "C4":
                 rewrite_c4(root, epoch_ts, items[cls], execute, log, totals, lambda: (get("/api/status").get("relay_outbox") or {}).get("pending_total"))
                 check()
             else:
                 delete_files(cls, root, epoch_ts, items[cls], execute, batch, sleep_s, check, log, totals)
-        cur_after = current_bundle_dirs(root, epoch_ts)
-        if cur_after < cur_before:
-            raise Abort(f"current-epoch bundle dirs shrank {cur_before} -> {cur_after}")
+            bundles_check(f"after {cls}")
+        cur_after = bundles_check("final")
         result = {"status": "DONE", "execute": execute, "plan_sha256": sha, "totals": totals,
                   "current_bundle_dirs_before": cur_before, "current_bundle_dirs_after": cur_after}
     except Abort as exc:
-        result = {"status": "ABORTED", "reason": str(exc), "execute": execute, "plan_sha256": sha, "totals": totals}
+        result = {"status": "ABORTED", "reason": str(exc), "execute": execute, "plan_sha256": sha, "totals": locals().get("totals", {})}
+    except ValueError as exc:   # bad JSON from the bot API (json.JSONDecodeError is a ValueError)
+        result = {"status": "ABORTED", "reason": f"bad API response: {exc}", "execute": execute, "plan_sha256": sha, "totals": locals().get("totals", {})}
     except OSError as exc:   # a missing C4 file, a failing stat/replace: end with a summary event, never a bare traceback
-        result = {"status": "ABORTED", "reason": f"OSError: {exc}", "execute": execute, "plan_sha256": sha, "totals": totals}
+        result = {"status": "ABORTED", "reason": f"OSError: {exc}", "execute": execute, "plan_sha256": sha, "totals": locals().get("totals", {})}
     log({"event": "summary", **result})
     return result
 

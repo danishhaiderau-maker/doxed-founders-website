@@ -83,10 +83,8 @@ def test_gates_live_on_force_paper_off_and_red_abort_before_and_during(tmp_path)
     root, now, sha, _ = _setup(tmp_path)
     before = _snapshot(root)
     for bad in ({"live_armed": True}, {"force_paper_mode": False}):
-        with pytest.raises(ex.Abort):
-            ex.run(root, EPOCH, sha, fake_get(status=bad), execute=True, confirm_sha=sha, now=now)
-    with pytest.raises(ex.Abort):
-        ex.run(root, EPOCH, sha, fake_get(checks={"exits-latency-guard": "RED"}), execute=True, confirm_sha=sha, now=now)   # not accepted
+        assert ex.run(root, EPOCH, sha, fake_get(status=bad), execute=True, confirm_sha=sha, now=now)["status"] == "ABORTED"
+    assert ex.run(root, EPOCH, sha, fake_get(checks={"exits-latency-guard": "RED"}), execute=True, confirm_sha=sha, now=now)["status"] == "ABORTED"   # not accepted
     assert _snapshot(root) == before
     # accepted baseline RED is fine; a NEW RED mid-run aborts after the batch and stops further deletion
     g = fake_get(checks={"exits-latency-guard": "RED", "tape-retention": "GREEN"})
@@ -107,8 +105,8 @@ def test_rss_growth_and_pending_outbox_abort(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
     res = ex.run(root, EPOCH, sha, fake_get(pending=2), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
     assert res["status"] == "ABORTED" and "pending_total" in res["reason"]
-    with pytest.raises(ex.Abort):
-        ex.run(root, EPOCH, sha, fake_get(rss=3 * 1024 ** 3), execute=False, now=now)
+    r2 = ex.run(root, EPOCH, sha, fake_get(rss=3 * 1024 ** 3), execute=False, now=now)
+    assert r2["status"] == "ABORTED" and "RSS" in r2["reason"]
 
 
 def test_changed_since_plan_files_are_skipped_and_smaller_sha_needs_counts(tmp_path):
@@ -200,7 +198,7 @@ def test_c4_pending_rechecked_right_before_the_replace(tmp_path):
     assert _snapshot(root) == before and not any(f.endswith(".nonaccum.tmp") for f in os.listdir(f"{root}/runtime"))
 
 
-def test_current_dirs_shrink_is_checked_per_batch(tmp_path):
+def test_current_dirs_shrink_is_checked_per_class(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
     cur = f"{root}/runtime/v3/lifecycle_transfer_bundles/cc"
     orig = ex.current_bundle_dirs
@@ -215,3 +213,60 @@ def test_current_dirs_shrink_is_checked_per_batch(tmp_path):
     finally:
         ex.current_bundle_dirs = orig
     assert res["status"] == "ABORTED" and "shrank" in res["reason"]
+
+
+def test_first_gate_failure_and_bad_json_still_end_with_summary(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    res = ex.run(root, EPOCH, sha, fake_get(status={"live_armed": True}), sleep_s=0, now=now)
+    assert res["status"] == "ABORTED" and "live_armed" in res["reason"] and res["totals"] == {}
+
+    def bad(path):
+        return json.loads("{not json")
+    res = ex.run(root, EPOCH, sha, bad, sleep_s=0, now=now)
+    assert res["status"] == "ABORTED" and "bad API response" in res["reason"]
+
+    def timeout(path):
+        raise TimeoutError("timed out")
+    res = ex.run(root, EPOCH, sha, timeout, sleep_s=0, now=now)
+    assert res["status"] == "ABORTED" and "OSError" in res["reason"]
+
+
+def test_build_all_failure_ends_with_summary(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    orig = ex.P.build_all
+    ex.P.build_all = lambda *a, **k: (_ for _ in ()).throw(OSError("scan failed"))
+    try:
+        res = ex.run(root, EPOCH, sha, fake_get(), sleep_s=0, now=now)
+    finally:
+        ex.P.build_all = orig
+    assert res["status"] == "ABORTED" and "scan failed" in res["reason"]
+
+
+def test_tmp_file_removed_when_replace_raises(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    items = list(np_.ITEMS["C4"])
+    totals = {"C4": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
+    real = os.replace
+    def boom(a, b): raise OSError("replace failed")
+    ex.os.replace = boom
+    try:
+        with pytest.raises(OSError, match="replace failed"):
+            ex.rewrite_c4(root, EPOCH, items, True, lambda r: None, totals, lambda: 0)
+    finally:
+        ex.os.replace = real
+    assert not any(f.endswith(".nonaccum.tmp") for f in os.listdir(f"{root}/runtime"))
+
+
+def test_bundle_dirs_walked_once_per_class_not_per_batch(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    orig = ex.current_bundle_dirs
+    n = {"c": 0}
+    def counting(r, e):
+        n["c"] += 1
+        return orig(r, e)
+    ex.current_bundle_dirs = counting
+    try:
+        res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
+    finally:
+        ex.current_bundle_dirs = orig
+    assert res["status"] == "DONE" and n["c"] == 1 + 4 + 1     # before + one per class (C1,C2,C3a,C4) + final
