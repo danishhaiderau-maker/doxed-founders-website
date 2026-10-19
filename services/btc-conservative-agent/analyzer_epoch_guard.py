@@ -48,6 +48,7 @@ EPOCH_REQUIRED_UNDECLARED = "FRESH_EPOCH_REQUIRED_NOT_DECLARED"
 REQUIRE_EPOCH_ENV = "BTC_REQUIRE_FRESH_EPOCH"
 REQUIRE_EPOCH_MARKER = "fresh_epoch_required.json"
 FRESH_FLOOR_FILE = "fresh_start_epoch.json"
+FLOOR_CONFLICT_TOL_SEC = 60.0  # roots whose floors differ by more than this disagree (#802)
 LAPTOP_MIRROR_TREE = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
 AGENT_DIR = Path(__file__).resolve().parent
 
@@ -67,6 +68,7 @@ class EpochGuard:
         self.fail_closed_reason = reason if manifest is None else None
         self.manifest_missing = self.fail_closed_reason is not None
         self.required_by: str | None = None  # set by resolve_epoch_guard when an undeclared epoch is required
+        self.floor_conflict: dict | None = None  # set by resolve_epoch_guard when roots disagree (#802)
         if self.manifest_missing:
             manifest = de.new_manifest(MANIFEST_MISSING_EPOCH_ID, started_at_ts=self.floor_ts or 1.0)
         self.manifest = manifest
@@ -178,6 +180,7 @@ class EpochGuard:
                 "floor_required": self.require_floor, "floor_missing_fail_closed": self.floor_missing,
                 "manifest_missing_fail_closed": self.manifest_missing,
                 "fail_closed_reason": self.fail_closed_reason, "epoch_required_by": self.required_by,
+                "floor_conflict": self.floor_conflict,
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
@@ -505,25 +508,48 @@ def epoch_roots(data_dirs: Iterable[str | os.PathLike | None] = ()) -> list[Path
 def resolve_epoch_guard(roots: Iterable[str | os.PathLike | None]) -> "tuple[EpochGuard, Path | None]":
     """The one manifest+floor resolution (analyzer and standalone alike):
 
-    1. the first root holding BOTH a valid data_epoch.json and a fresh-start floor;
-    2. else the manifest from the first root declaring one and the floor from the first root holding one (a
-       declared epoch with no floor anywhere fails closed: FRESH_FLOOR_MISSING);
+    1./2. the floor is the NEWEST fresh-start floor among all roots (#802: a stale, unrefreshed root can never lower
+       it and fail open after a reset), raised to the newest manifest's started_at_ts when that is later by more than
+       FLOOR_CONFLICT_TOL_SEC (a fresh manifest beside a stale floor). The manifest is the newest-starting one (the one
+       beside the newest floor on a tie). Disagreeing roots are recorded (``floor_conflict``) and logged.
+       A declared epoch with no floor anywhere fails closed: FRESH_FLOOR_MISSING;
     3. else, with a fresh_start_epoch.json present anywhere (readable or corrupt): fail closed MANIFEST_MISSING;
     4. else, when an epoch is required (:func:`epoch_required`): fail closed FRESH_EPOCH_REQUIRED_NOT_DECLARED;
     5. else nothing is declared (admit all; :func:`ensure_process_guard` logs it loudly)."""
     roots = [Path(r) for r in roots if r]
     manifests = {str(r): de.load_manifest(r / de.MANIFEST_NAME) for r in roots}
     floors = {str(r): fresh_floor_ts(r) for r in roots}
-    for r in roots:
-        if manifests[str(r)] and floors[str(r)] is not None:
-            return EpochGuard(manifests[str(r)], floor_ts=floors[str(r)], require_floor=True), r
-    floor = next((floors[str(r)] for r in roots if floors[str(r)] is not None), None)
-    for r in roots:
-        if manifests[str(r)]:
-            return EpochGuard(manifests[str(r)], floor_ts=floor, require_floor=True), r
-    floor_root = next((r for r in roots if floor_file_present(r)), None)
-    if floor_root is not None:
-        return EpochGuard(None, floor_ts=floor, require_floor=True, fail_closed_reason=MANIFEST_MISSING), floor_root
+    floor_roots = [r for r in roots if floors[str(r)] is not None]
+    floor = max((floors[str(r)] for r in floor_roots), default=None)
+    floor_root = next((r for r in floor_roots if floors[str(r)] == floor), None)
+    manifest_roots = [r for r in roots if manifests[str(r)]]
+    if manifest_roots:
+        def start(r):
+            try:
+                return float(manifests[str(r)].get("started_at_ts") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        newest = max(start(r) for r in manifest_roots)
+        m_root = (floor_root if floor_root is not None and manifests[str(floor_root)] and start(floor_root) == newest
+                  else next(r for r in manifest_roots if start(r) == newest))
+        conflict = {}
+        if len({round(floors[str(r)], 3) for r in floor_roots}) > 1 and (
+                max(floors[str(r)] for r in floor_roots) - min(floors[str(r)] for r in floor_roots)
+                > FLOOR_CONFLICT_TOL_SEC):
+            conflict["floors"] = {str(r): floors[str(r)] for r in floor_roots}
+        epochs = {str(manifests[str(r)].get("epoch_id")) for r in manifest_roots}
+        if len(epochs) > 1:
+            conflict["epoch_ids"] = {str(r): manifests[str(r)].get("epoch_id") for r in manifest_roots}
+        newest_start = max(start(r) for r in manifest_roots)
+        if floor is not None and newest_start > floor + FLOOR_CONFLICT_TOL_SEC:
+            conflict["raised_to_manifest_start"] = {"floor_ts": floor, "started_at_ts": newest_start}
+            floor = newest_start  # a fresher manifest than any floor: never admit rows before it
+        guard = EpochGuard(manifests[str(m_root)], floor_ts=floor, require_floor=True)
+        guard.floor_conflict = conflict or None
+        return guard, m_root
+    present_root = next((r for r in roots if floor_file_present(r)), None)
+    if present_root is not None:
+        return EpochGuard(None, floor_ts=floor, require_floor=True, fail_closed_reason=MANIFEST_MISSING), present_root
     required = epoch_required(roots)
     if required:
         guard = EpochGuard(None, require_floor=True, fail_closed_reason=EPOCH_REQUIRED_UNDECLARED)
@@ -553,6 +579,9 @@ def _log_guard_state(guard: "EpochGuard", roots: Iterable[str | os.PathLike | No
         msg = (f"EPOCH GUARD NOT DECLARED ({where}): neither data_epoch.json nor fresh_start_epoch.json found under "
                f"roots={roots}; rows are NOT fresh-epoch filtered. Set {REQUIRE_EPOCH_ENV}=1 or place "
                f"{REQUIRE_EPOCH_MARKER} in the data dir to make this fail closed.")
+    elif guard.floor_conflict:
+        msg = (f"EPOCH GUARD FLOOR CONFLICT ({where}): epoch roots disagree; using the NEWEST floor "
+               f"{guard.floor_ts} (never a stale one). conflict={guard.floor_conflict}")
     else:
         return
     print(msg, file=sys.stderr, flush=True)

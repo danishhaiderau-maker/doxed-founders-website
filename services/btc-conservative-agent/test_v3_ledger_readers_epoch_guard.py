@@ -662,3 +662,46 @@ def test_analyzer_and_standalone_roots_pick_the_same_floor(tmp_path, monkeypatch
     assert a_root == canon and a_guard.floor_ts == s_guard.floor_ts == FLOOR
     monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
     assert engine._epoch_guard().floor_ts == FLOOR
+
+
+def _stale_canon_fresh_mirror(tmp_path, monkeypatch, *, mirror_floor=True):
+    """#802: after a reset the canonical root still carries the PREVIOUS epoch (outranks the mirror in epoch_roots)."""
+    monkeypatch.delenv("BTC_DATA_EPOCH_DIR", raising=False)
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    monkeypatch.delenv(eg.REQUIRE_EPOCH_ENV, raising=False)
+    old = FLOOR - 86400 * 5
+    canon = tmp_path / "agent" / "canonical-research-data"
+    canon.mkdir(parents=True)
+    (canon / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261013-old", started_at_ts=old)))
+    (canon / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": old}))
+    mirror = tmp_path / "tree"
+    mirror.mkdir()
+    (mirror / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR)))
+    if mirror_floor:
+        (mirror / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR}))
+    monkeypatch.setattr(eg, "AGENT_DIR", tmp_path / "agent")
+    monkeypatch.setattr(eg, "LAPTOP_MIRROR_TREE", str(mirror))
+    roots = eg.epoch_roots()
+    assert roots.index(canon) < roots.index(mirror)  # the stale root outranks the fresh one
+    return roots, canon, mirror, old
+
+
+@pytest.mark.parametrize("mirror_floor", [True, False])
+def test_stale_canonical_root_cannot_lower_the_floor(tmp_path, monkeypatch, capsys, mirror_floor):
+    roots, canon, mirror, old = _stale_canon_fresh_mirror(tmp_path, monkeypatch, mirror_floor=mirror_floor)
+    guard, root = eg.resolve_epoch_guard(roots)
+    assert guard.floor_ts == pytest.approx(FLOOR)  # newest floor (or the fresh manifest start), never the stale one
+    assert root == mirror and guard.manifest["epoch_id"] == "ce-20261018-fresh"
+    assert guard.floor_conflict and guard.floor_conflict["epoch_ids"][str(canon)] == "ce-20261013-old"
+    assert guard.receipt_block()["floor_conflict"] == guard.floor_conflict
+    stale_row = {"signal_ts": old + 3600, "data_epoch": "ce-20261013-old"}
+    fresh_row = {"signal_ts": FLOOR + 60, "data_epoch": "ce-20261018-fresh"}
+    assert not guard.admit_v3_ledger_row("v3/ledger.jsonl", stale_row) and guard.admit_v3_ledger_row("v3/ledger.jsonl", fresh_row)
+    eg._log_guard_state(guard, roots, "test")
+    assert "EPOCH GUARD FLOOR CONFLICT" in capsys.readouterr().err
+
+
+def test_agreeing_roots_record_no_floor_conflict(tmp_path, monkeypatch):
+    a, b = _declare(tmp_path / "a"), _declare(tmp_path / "b")
+    guard, root = eg.resolve_epoch_guard([a, b])
+    assert root == a and guard.floor_ts == FLOOR and guard.floor_conflict is None
