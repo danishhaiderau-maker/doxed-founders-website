@@ -214,6 +214,7 @@ test_fly_inspect_runtime_bounded.py
 test_fly_relay_state_pusher_contract.py
 test_fly_runtime_baseline_packaging.py
 test_fly_startup_contract.py
+test_forced_close_count.py
 test_forward_trial_freeze.py
 test_fresh_collection_quiescence.py
 test_fresh_collection_reset_retry.py
