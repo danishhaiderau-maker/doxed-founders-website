@@ -43,6 +43,9 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
         handle = path.open("rb")
     except OSError:
         return
+    from analyzer_epoch_guard import process_guard
+    guard = process_guard()
+    rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
     with handle:
         remaining = limit
         while remaining > 0:
@@ -59,6 +62,8 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(value, dict):
+                if rel is not None and not guard.admit_v3_ledger_row(rel, value):
+                    continue  # fail closed on pre-epoch / straddle / unstamped ledger rows (HM 19 Oct)
                 yield value
 
 
