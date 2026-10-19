@@ -296,3 +296,29 @@ def test_shipper_term_is_a_30_min_rolling_median_but_3gib_ceiling_stays_unsmooth
     # the bot's own RSS is never smoothed: bot alone over 2 GB in a young boot is RED
     bot_only = ms.oom_status(series, 8 * 1024 * 1024, boot, now, now, 2100 * 1024, extra_rss_kb=0)
     assert bot_only["status"] == "RED"
+
+
+def test_record_loop_keeps_per_step_rss_delta_and_timed_step_records_it():
+    import bot
+    t = ms.Tracker("/tmp/_unused_ms.json")
+    steps = []
+    bot._timed_step(steps, "a", lambda: [0] * 1000)
+    assert steps and steps[0]["step"] == "a" and set(steps[0]) == {"step", "sec", "rss_delta_kb"}
+    t.record_loop("analytics_loop", 1.0, 2.0, steps=steps)
+    assert t.loops[-1]["steps"][0]["step"] == "a"
+    t.record_loop("analytics_loop", 3.0, 4.0)
+    assert "steps" not in t.loops[-1]
+    try:
+        bot._timed_step([], "boom", lambda: (_ for _ in ()).throw(ValueError("x")))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("step exceptions must propagate")
+
+
+def test_mem_tracker_is_a_module_global_so_analytics_loop_can_record_loops():
+    import re
+    src = open(__file__.replace("test_memory_structures.py", "bot.py"), encoding="utf-8").read()
+    assert re.search(r"^_mem_tracker = None", src, re.M)
+    body = src[src.index("def runtime_uptime_loop():"):][:400]
+    assert "global _mem_tracker" in body

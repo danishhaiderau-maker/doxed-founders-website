@@ -46661,8 +46661,13 @@ def _runtime_uptime_problem(now: float) -> dict | None:
     )
 
 
+_mem_tracker = None  # module-level so analytics_loop can record per-step loops (#761 bug: it was local to runtime_uptime_loop,
+#                      record_loop raised NameError, swallowed, and memory_structures loops stayed empty)
+
+
 def runtime_uptime_loop():
     """Observe interruptions for the uptime strip; started once boot has restored state."""
+    global _mem_tracker
     tracker = runtime_uptime.UptimeTracker(_data_sync_volume_root() / runtime_uptime.STATE_FILE)
     opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
     _RUNTIME_UPTIME["tracker"] = tracker
@@ -56834,18 +56839,35 @@ def run_offline_research_sim():
         logger.error(f"[RESEARCH_SIM] {e}")
 
 
+def _timed_step(steps: list, name: str, fn):
+    """Run one analytics_loop step and record its wall time and process-RSS delta (stair attribution; diagnostics only,
+    never raises from the bookkeeping). RSS delta of a step that grows the heap permanently = the retained structure's owner."""
+    import memory_structures as _memstruct
+    t0 = time.time()
+    try:
+        r0 = _memstruct.rss_kb()
+    except Exception:  # noqa: BLE001
+        r0 = None
+    try:
+        return fn()
+    finally:
+        try:
+            r1 = _memstruct.rss_kb()
+            steps.append({"step": name, "sec": round(time.time() - t0, 2),
+                          "rss_delta_kb": (r1 - r0) if (r0 is not None and r1 is not None) else None})
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def analytics_loop():
     global _cf_catchup_tick_counter
     try:
         while not shutdown_event.is_set():
             try:
                 _loop_t0 = time.time()
-                compute_analytics()
-                run_offline_research_sim()
-                try:
-                    _mem_tracker.record_loop("analytics_loop", _loop_t0, time.time())   # start/end for stair attribution
-                except Exception:  # noqa: BLE001 - diagnostics only
-                    pass
+                _loop_steps: list = []
+                _timed_step(_loop_steps, "compute_analytics", compute_analytics)
+                _timed_step(_loop_steps, "run_offline_research_sim", run_offline_research_sim)
                 # Change 5: periodic catch-up for APPROVE signals whose replay
                 # rotated into a .N shard before the active-file pass saw them.
                 # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
@@ -56857,11 +56879,11 @@ def analytics_loop():
                     if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
                         _cf_catchup_tick_counter = 0
                     try:
-                        _run_counterfactual_catchup()
+                        _timed_step(_loop_steps, "counterfactual_catchup", _run_counterfactual_catchup)
                     except Exception as ce:
                         logger.error(f"[CF_CATCHUP] analytics loop error: {ce}")
                 try:
-                    rep = _refresh_execution_reports_guarded(os.getcwd())
+                    rep = _timed_step(_loop_steps, "execution_reports", lambda: _refresh_execution_reports_guarded(os.getcwd()))
                     fs = rep.get("funnel_summary") or {}
                     logger.info(
                         f"[FUNNEL] approves={fs.get('approve_count')} orders={fs.get('order_submitted_count')} "
@@ -56872,12 +56894,12 @@ def analytics_loop():
                     _THREAD_HEALTH.error("analytics_loop", fe)
                     logger.debug(f"[FUNNEL] report refresh failed: {fe}")
                 try:
-                    refresh_pathway_scorecard_live()
+                    _timed_step(_loop_steps, "pathway_scorecard", refresh_pathway_scorecard_live)
                 except Exception as pe:
                     _THREAD_HEALTH.error("analytics_loop", pe)
                     logger.debug(f"[PATHWAY_SCORECARD] analytics refresh failed: {pe}")
                 try:
-                    rep = refresh_shadow_vs_live_entry_report(os.getcwd())
+                    rep = _timed_step(_loop_steps, "shadow_vs_live", lambda: refresh_shadow_vs_live_entry_report(os.getcwd()))
                     if rep.get("sample_count"):
                         logger.info(
                             f"[SHADOW_VS_LIVE] n={rep['sample_count']} "
@@ -56886,6 +56908,10 @@ def analytics_loop():
                 except Exception as se:
                     _THREAD_HEALTH.error("analytics_loop", se)
                     logger.debug(f"[SHADOW_VS_LIVE] report refresh failed: {se}")
+                try:  # one record per cycle with per-step wall time and RSS delta
+                    _mem_tracker.record_loop("analytics_loop", _loop_t0, time.time(), steps=_loop_steps)
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
             except Exception as e:
                 _THREAD_HEALTH.error("analytics_loop", e)
                 logger.error(f"Analytics error: {e}")
