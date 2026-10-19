@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GUARDED executor for the C1-C4 non-accumulation clean-up (HM 19 Oct). DRY-RUN BY DEFAULT.
 
-    python3 nonaccum_execute.py ROOT EPOCH_TS --expected-sha <sha> [--classes C1,C2,C3a,C4] [--execute --confirm-sha <sha>]
+    python3 nonaccum_execute.py ROOT EPOCH_TS --expected-sha <sha> [--classes C1,C2,C3a]  (C3b and C4 are always skipped) [--execute --confirm-sha <sha>]
 
 Rules (all enforced in code, covered by tests):
   * re-builds the plans (nonaccum_plans.build_all) and REQUIRES plan_sha256 == --expected-sha. A different sha is accepted only
@@ -281,7 +281,7 @@ def rewrite_c4(root, epoch_ts, items, execute, log, totals, pending_fn):
         log({"event": "c4_file", "file": name, "execute": execute, "lines_removed": drop, "bytes": dbytes, "lines_kept": len(keep)})
 
 
-def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2", "C3a", "C4"), execute=False, confirm_sha=None,
+def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2", "C3a"), execute=False, confirm_sha=None,
         batch=2000, sleep_s=1.0, accepted_red=(), expected_counts: dict | None = None, include_tape=False, log_path=None, now=None) -> dict:
     lines = []
 
@@ -299,6 +299,9 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
     if "C3b" in classes:
         classes.remove("C3b")
         log({"event": "c3b_skipped", "reason": "tape_1s is never deleted by this executor (HM 19 Oct)"})
+    if "C4" in classes:
+        classes.remove("C4")
+        log({"event": "c4_skipped", "reason": P.C4_EXCLUDED_REASON})
     if execute and confirm_sha != expected_sha:
         raise Abort("--execute needs --confirm-sha equal to --expected-sha")
     accepted = set(accepted_red)
@@ -355,7 +358,7 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("root"); ap.add_argument("epoch_ts", type=float); ap.add_argument("--expected-sha", required=True)
-    ap.add_argument("--classes", default="C1,C2,C3a,C4"); ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--classes", default="C1,C2,C3a"); ap.add_argument("--execute", action="store_true")
     ap.add_argument("--confirm-sha"); ap.add_argument("--batch", type=int, default=2000); ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--accept-baseline-red", default=""); ap.add_argument("--expected-counts-json")
     ap.add_argument("--log")

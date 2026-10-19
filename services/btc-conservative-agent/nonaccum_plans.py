@@ -12,8 +12,9 @@ C2 signal_snapshots  v3/signal_snapshots_v1/<64-hex>.json, mtime < epoch, hash n
                   the bundle index, lifecycle_membership_v1 receipts or the current ledgers.
 C3 bundles/tape   v3/lifecycle_transfer_bundles/transfer-<hash>/ (all files mtime < epoch and hash unreferenced by the index,
                   membership receipts and worker state = not in flight); tape_1s/*.jsonl.gz mtime < epoch AND older than 168 h.
-C4 relay outbox   runtime/relay_outbox_{quarantine,retired}.jsonl LINES created before the epoch (28 Sep events); the files
-                  themselves, switch and arming files are never in the plan.
+C4 relay outbox   EXCLUDED by default (19 Oct, Boss/HM): the ledgers rebuild themselves from the durable outbox on boot, so
+                  the plan is empty and only reports what it observed (see C4_EXCLUDED_REASON, issue #800). include_c4=True
+                  restores the old line selection (runtime/relay_outbox_{quarantine,retired}.jsonl lines created before the epoch).
 """
 from __future__ import annotations
 
@@ -226,7 +227,21 @@ def plan_c4(root: str, epoch_ts: float) -> dict:
                                                          "unacked_check": "NOT EVALUATED here: executor must verify no unacked/pending event for current-epoch intents"})
 
 
-def build_all(root: str = "/app/data", epoch_ts: float | None = None, now: float | None = None) -> dict:
+C4_EXCLUDED_REASON = ("SELF_REBUILDING: the two relay outbox ledgers are re-derived on every boot from the durable relay outbox, "
+                      "which keeps the 22 pre-epoch stale-owner events as written (a C4 delete on 19 Oct was rebuilt at the next "
+                      "boot). Known exception to the non-accumulation rule; pruning the main outbox is issue #800 (after the first "
+                      "10 live pairs, fresh HM GO only).")
+
+
+def plan_c4_excluded(root: str, epoch_ts: float) -> dict:
+    """C4 is not a deletable class any more: the plan is empty (count 0); what would have matched is reported for visibility."""
+    seen = plan_c4(root, epoch_ts)
+    return _plan("C4", "EXCLUDED (self-rebuilding derived ledgers); nothing is planned", [], lambda it: it[0],
+                 {"excluded": True, "reason": C4_EXCLUDED_REASON, "observed_pre_epoch_lines": seen["count"],
+                  "observed_pre_epoch_bytes": seen["bytes"], "issue": 800})
+
+
+def build_all(root: str = "/app/data", epoch_ts: float | None = None, now: float | None = None, include_c4: bool = False) -> dict:
     now = time.time() if now is None else now
     v3 = os.path.join(root, "runtime", "v3")
     if epoch_ts is None:
@@ -234,7 +249,7 @@ def build_all(root: str = "/app/data", epoch_ts: float | None = None, now: float
     t0 = time.time()
     refs, refn = current_references(v3, epoch_ts)
     plans = {"C1": plan_c1(v3, epoch_ts), "C2": plan_c2(v3, epoch_ts, refs), **plan_c3(root, v3, epoch_ts, refs, now),
-             "C4": plan_c4(root, epoch_ts)}
+             "C4": plan_c4(root, epoch_ts) if include_c4 else plan_c4_excluded(root, epoch_ts)}
     doc = {"schema": "nonaccum_plans_v1", "read_only": True, "epoch_ts": epoch_ts, "built_at": now,
            "reference_scan": {"tokens": len(refs), **refn}, "plans": plans, "elapsed_s": round(time.time() - t0, 1)}
     doc["plan_sha256"] = hashlib.sha256(json.dumps({k: v["items_sha256"] for k, v in plans.items()}, sort_keys=True).encode()).hexdigest()
