@@ -383,7 +383,7 @@ def _late_window_block(rows) -> dict:
             "window_aedt": late_window_table().get("window_aedt"), "totals_use_repriced": True}
 
 
-PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "ask_age_ms", "exit_ask_age_ms",
+PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "priced_delay_s", "priced_delay_model", "ask_age_ms", "exit_ask_age_ms",
                 "depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill", "exit_price_basis",
                 "fee_model", "funding_rate", "funding_source", "hold_seconds", "funding_ts_crossed",
                 "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status",

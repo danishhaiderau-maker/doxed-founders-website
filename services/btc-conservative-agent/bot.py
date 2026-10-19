@@ -7283,6 +7283,18 @@ def _entry_priced_by_paper_fill(pos: dict) -> bool:
     return str(efs.get("fill_model") or "") in _pf.ALLOWED_FILL_MODELS and version is not None and version >= 1
 
 
+def _delay_model_label(source) -> str | None:
+    """Delay model that priced a fill: 'default_until_n10' -> DEFAULT_1_5S; measured sampler outputs -> PAPER_MEASURED."""
+    if not source:
+        return None
+    src = str(source)
+    if src == "default_until_n10":
+        return "DEFAULT_1_5S"
+    if src.startswith(("lane_p50", "paper_measured", "PAPER_MEASURED")):
+        return "PAPER_MEASURED"
+    return "OTHER:" + src
+
+
 def _entry_pricing_fields(pos: dict, master: dict) -> dict:
     """Closed-row entry pricing fields, read from entry_fill_sim (single source of fill_model: the pricer's
     own value; non-paper lanes keep the legacy label)."""
@@ -7293,6 +7305,10 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         "fill_model_version": efs.get("fill_model_version"),
         "delay_s": efs.get("delay_s"),
         "delay_source": efs.get("delay_source"),
+        # HM 19 Oct delay step A: which delay MODEL priced this row, stamped at write time so it stays truthful after any
+        # later change of the delay model (analyzers must never pool rows across models). Stamp only; no pricing change.
+        "priced_delay_s": efs.get("delay_s"),
+        "priced_delay_model": _delay_model_label(efs.get("delay_source")),
         "evidence_status": efs.get("evidence_status"),  # the pricer's own COMPLETE/INCOMPLETE/NO_FILL on the closed row
         "ask_age_ms": efs.get("ask_age_ms"),
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
