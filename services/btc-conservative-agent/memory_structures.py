@@ -328,10 +328,14 @@ class Tracker:
                 self.prev_boot = doc.get("prev_boot")
         self.boot_ts = boot_ts
 
-    def record_loop(self, name: str, start_ts: float, end_ts: float) -> None:
-        """Start/end of one loop body (analytics_loop) so a stair can be matched to the cycle that caused it."""
-        self.loops = (self.loops + [{"name": name, "start": round(float(start_ts), 1), "end": round(float(end_ts), 1),
-                                     "body_sec": round(float(end_ts) - float(start_ts), 2)}])[-LOOPS_KEEP:]
+    def record_loop(self, name: str, start_ts: float, end_ts: float, steps: list | None = None) -> None:
+        """Start/end of one loop body (analytics_loop) so a stair can be matched to the cycle that caused it; ``steps`` =
+        per-step {step, sec, rss_delta_kb} so the step that grows RSS permanently is named."""
+        rec = {"name": name, "start": round(float(start_ts), 1), "end": round(float(end_ts), 1),
+               "body_sec": round(float(end_ts) - float(start_ts), 2)}
+        if steps:
+            rec["steps"] = [dict(x) for x in steps][:12]
+        self.loops = (self.loops + [rec])[-LOOPS_KEEP:]
 
     def due(self, now: float) -> bool:
         return now - self._last >= self.interval
