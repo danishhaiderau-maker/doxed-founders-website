@@ -184,6 +184,7 @@ test_evidence_collected_receipts.py
 test_evidence_coverage_triage.py
 test_exact_size_fail_closed.py
 test_exchange_exposure_audit_endpoint.py
+test_exchange_stops_view.py
 test_execution_admission_pause_truth.py
 test_execution_cost_receipt_adapter.py
 test_execution_funnel_ttl.py

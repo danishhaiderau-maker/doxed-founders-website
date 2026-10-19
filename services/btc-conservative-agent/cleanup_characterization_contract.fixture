@@ -6,6 +6,7 @@
     ["GET", "/api/monitor/gap_buckets", "monitor_gap_buckets"],
     ["GET", "/api/monitor/checks", "monitor_checks_all"],
     ["GET", "/api/monitor/live-guardian", "monitor_live_guardian_route"],
+    ["GET", "/api/monitor/live/exchange-stops", "monitor_exchange_stops_route"],
     ["GET", "/api/monitor/nonaccum-plans", "monitor_nonaccum_plans_route"],
     ["GET", "/api/monitor/exit-truth", "monitor_check_exit_truth"],
     ["GET", "/api/monitor/pnl/reconcile", "monitor_check_pnl_reconcile"],
