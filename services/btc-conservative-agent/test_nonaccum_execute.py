@@ -65,9 +65,9 @@ def test_execute_removes_only_planned_pre_epoch_items_and_keeps_current_and_prot
     assert not os.path.exists(f"{v3}/lifecycle_transfer_bundles/bb")                    # emptied dir removed (rmdir only)
     assert res["current_bundle_dirs_before"] == res["current_bundle_dirs_after"] == 1
     t = res["totals"]
-    assert (t["C1"]["removed"], t["C2"]["removed"], t["C3a"]["removed"], t["C4"]["removed"]) == (1, 1, 1, 3)
+    assert (t["C1"]["removed"], t["C2"]["removed"], t["C3a"]["removed"]) == (1, 1, 1) and "C4" not in t
     lines = [json.loads(x) for f in ("relay_outbox_retired.jsonl", "relay_outbox_quarantine.jsonl") for x in open(f"{root}/runtime/{f}")]
-    assert [x["created_at_unix"] for x in lines] == [EPOCH + 5]                          # only the current-epoch line survives
+    assert len(lines) == 4                                                               # C4 excluded: relay ledgers untouched
 
 
 def test_tape_is_never_deleted(tmp_path):
@@ -103,8 +103,15 @@ def test_gates_live_on_force_paper_off_and_red_abort_before_and_during(tmp_path)
 
 def test_rss_growth_and_pending_outbox_abort(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
-    res = ex.run(root, EPOCH, sha, fake_get(pending=2), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
-    assert res["status"] == "ABORTED" and "pending_total" in res["reason"]
+    before = _snapshot(root)
+    logp = str(tmp_path / "exec.jsonl")
+    res = ex.run(root, EPOCH, sha, fake_get(pending=2), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now, log_path=logp)
+    assert res["status"] == "DONE" and res["totals"] == {}                               # C4 is always skipped now
+    assert any(json.loads(x).get("event") == "c4_skipped" for x in open(logp))
+    items = list(np_.build_all(root, EPOCH, now, include_c4=True) and np_.ITEMS["C4"])
+    totals = {"C4": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
+    with pytest.raises(ex.Abort, match="pending_total"):
+        ex.rewrite_c4(root, EPOCH, items, True, lambda r: None, totals, lambda: 2)
     r2 = ex.run(root, EPOCH, sha, fake_get(rss=3 * 1024 ** 3), execute=False, now=now)
     assert r2["status"] == "ABORTED" and "RSS" in r2["reason"]
 
@@ -164,13 +171,13 @@ def test_oserror_ends_with_summary_not_traceback(tmp_path):
     root, now, sha, doc = _setup(tmp_path)
     counts = {k: v["count"] for k, v in doc["plans"].items()}
     orig, orig_build = ex.P.ITEMS, ex.P.build_all
-    os.unlink(f"{root}/runtime/relay_outbox_quarantine.jsonl")          # a C4 file gone after planning
-    ex.P.ITEMS = {"C4": [("relay_outbox_quarantine.jsonl#0", 1, "0" * 64)]}
-    ex.P.build_all = (lambda real: (lambda *a, **k: (real(*a, **k) if False else {"plan_sha256": sha, "plans": doc["plans"]})))(ex.P.build_all)
+    orig_cur = ex.current_bundle_dirs
+    def boom(r, e): raise OSError("bundle walk failed")
+    ex.current_bundle_dirs = boom
     try:
-        res = ex.run(root, EPOCH, sha, fake_get(), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+        res = ex.run(root, EPOCH, sha, fake_get(), classes=("C1",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
     finally:
-        ex.P.ITEMS, ex.P.build_all = orig, orig_build
+        ex.P.ITEMS, ex.P.build_all, ex.current_bundle_dirs = orig, orig_build, orig_cur
     assert res["status"] == "ABORTED" and "OSError" in res["reason"]
 
 
@@ -189,7 +196,8 @@ def test_api_latency_over_limit_aborts_and_is_reported(tmp_path):
 
 def test_c4_pending_rechecked_right_before_the_replace(tmp_path):
     root, now, sha, doc = _setup(tmp_path)
-    items = list(np_.ITEMS["C4"]) if hasattr(np_, "ITEMS") else None
+    np_.build_all(root, EPOCH, now, include_c4=True)
+    items = list(np_.ITEMS["C4"])
     before = _snapshot(root)
     seq = iter([0, 3])                                                    # clean at the start, an event arrives before the replace
     totals = {"C4": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
@@ -244,6 +252,7 @@ def test_build_all_failure_ends_with_summary(tmp_path):
 
 def test_tmp_file_removed_when_replace_raises(tmp_path):
     root, now, sha, _ = _setup(tmp_path)
+    np_.build_all(root, EPOCH, now, include_c4=True)
     items = list(np_.ITEMS["C4"])
     totals = {"C4": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
     real = os.replace
@@ -269,7 +278,7 @@ def test_bundle_dirs_walked_once_per_class_not_per_batch(tmp_path):
         res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
     finally:
         ex.current_bundle_dirs = orig
-    assert res["status"] == "DONE" and n["c"] == 1 + 4 + 1     # before + one per class (C1,C2,C3a,C4) + final
+    assert res["status"] == "DONE" and n["c"] == 1 + 3 + 1     # before + one per class (C1,C2,C3a; C4 excluded) + final
 
 
 def test_cli_exits_nonzero_on_aborted_and_zero_on_done(tmp_path, monkeypatch):
