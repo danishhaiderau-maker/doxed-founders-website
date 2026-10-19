@@ -7313,11 +7313,18 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
     own value; non-paper lanes keep the legacy label)."""
     efs = _entry_fill_sim(pos)
     paper = _is_paper_book_lane(pos)
+    _dsrc = str(efs.get("delay_source") or "")  # delay model label (self-contained: tests exec this function alone)
+    _dmodel = (None if not _dsrc else "DEFAULT_1_5S" if _dsrc == "default_until_n10"
+               else "PAPER_MEASURED" if _dsrc.startswith(("lane_p50", "paper_measured", "PAPER_MEASURED")) else "OTHER:" + _dsrc)
     return {
         "fill_model": efs.get("fill_model") or pos.get("fill_model") or (master or {}).get("fill_model"),
         "fill_model_version": efs.get("fill_model_version"),
         "delay_s": efs.get("delay_s"),
         "delay_source": efs.get("delay_source"),
+        # HM 19 Oct delay step A: which delay MODEL priced this row, stamped at write time so it stays truthful after any
+        # later change of the delay model (analyzers must never pool rows across models). Stamp only; no pricing change.
+        "priced_delay_s": efs.get("delay_s"),
+        "priced_delay_model": _dmodel,
         "evidence_status": efs.get("evidence_status"),  # the pricer's own COMPLETE/INCOMPLETE/NO_FILL on the closed row
         "ask_age_ms": efs.get("ask_age_ms"),
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
@@ -23299,7 +23306,7 @@ def _recompute_research_balance_from_trades():
         f"fresh_collection={bool(state.get('fresh_collection_mode', False))} [PIPELINE ENFORCEMENT]"
     )
 
-_RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
+_RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "ask_age_ms", "exit_ask_age_ms",
                           # nullable measured slippage: a null written as '' must reload as None, never 0.0
                           "book_slippage_usd_entry", "book_slippage_usd_exit", "book_slippage_usd_total",
                           "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp",

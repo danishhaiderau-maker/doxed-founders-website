@@ -382,6 +382,7 @@ test_position_registry_concurrency.py
 test_post_ai_evidence_isolation.py
 test_post_exit_replay_120m_contract.py
 test_post_exit_replay_boot_memory.py
+test_priced_delay_stamp.py
 test_pre_ai_unavailable_assessment_contract.py
 test_pre_entry_capture_stamp.py
 test_pre_signal_candle_causality.py
