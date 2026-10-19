@@ -13,7 +13,7 @@ from typing import Any, Iterable, Mapping
 STOP_MISSING_SEC = 5.0          # HM: stop must be confirmed within 5 s of the fill
 DAILY_LOSS_CAP_USD = 1.00       # HM: daily realised live loss cap
 LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position-count mismatch counts
-BALANCE_DRIFT_USD = 0.50        # unexplained balance change (beyond reported pnl + funding) when flat
+BALANCE_DRIFT_USD = 0.50        # unexplained balance change when flat beyond reported pnl; this $0.50 tolerance is the allowance for funding (the bot passes funding_usd_today=0)
 ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two reads) to count
 LANE_NEEDLE = "GS01"
 
@@ -26,8 +26,18 @@ def _f(v):
         return None
 
 
+ROLLING_WINDOW_SEC = 24 * 3600.0   # the loss cap and balance baseline use a rolling 24 h window (never a calendar-day reset mid-session)
+FLAT_HIST_STEP_SEC = 30.0
+
+
 def day_key(now: float) -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime(now))
+    """Australia/Sydney calendar day (display/diagnostics only; the cap itself is a rolling 24 h window)."""
+    try:
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(float(now), ZoneInfo("Australia/Sydney")).strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
 HEARTBEAT_STALE_SEC = 10.0      # guardian loop must beat at least this often while live output is ON
@@ -58,13 +68,23 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         age = now - float(c["fill_at_ts"])
         if not c.get("stop_confirmed") and age > STOP_MISSING_SEC:
             out.append({"code": "STOP_MISSING_GT_5S", "detail": f"{c.get('correlation_id')} unprotected {age:.1f}s"})
+    # 4a. realised loss cap from the fresh-epoch ledger: needs no exchange read, so it is evaluated BEFORE the blind-mirror return
+    ledger_today = [c for c in live if c.get("closed") and _f(c.get("pnl_usd")) is not None
+                    and now - ROLLING_WINDOW_SEC <= float(c.get("closed_at_ts") or c.get("exit_at_ts") or 0) <= now + 60]
+    ledger_loss = -sum(float(c["pnl_usd"]) for c in ledger_today)
+    state["ledger_loss_usd"] = round(ledger_loss, 4)
+    if ledger_loss >= DAILY_LOSS_CAP_USD:
+        out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})
     m = mirror if isinstance(mirror, Mapping) else None
     if m is None or m.get("ok") is not True:
         # a blind exchange read while live is open is itself unsafe, but a single failed read must not flap: require 30 s
-        state.setdefault("blind_since", now)
         state["read_state"] = "BLIND"   # a failed/stale read is never a clean state
-        if exposed and now - state["blind_since"] > 30.0:
-            out.append({"code": "EXCHANGE_MIRROR_BLIND", "detail": str((m or {}).get("error") or "no mirror")})
+        if exposed:
+            state.setdefault("blind_since", now)
+            if now - state["blind_since"] > 30.0:
+                out.append({"code": "EXCHANGE_MIRROR_BLIND", "detail": str((m or {}).get("error") or "no mirror")})
+        else:
+            state.pop("blind_since", None)   # nothing exposed: blindness is not accumulating towards a disarm
         return out
     state.pop("blind_since", None)
     state["read_state"] = "OK"
@@ -81,20 +101,20 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     recent = [c for c in live if any(c.get(k) and now - float(c[k]) < LEDGER_GRACE_SEC for k in ("fill_at_ts",))]
     if not recent and len(positions) != len(open_filled):
         out.append({"code": "LEDGER_MISMATCH", "detail": f"exchange positions={len(positions)} open chains={len(open_filled)}"})
-    # 4. daily realised loss cap (balance based; only evaluated when flat so unrealised pnl is zero)
-    day = day_key(now)
-    ledger_today = [c for c in live if c.get("closed") and _f(c.get("pnl_usd")) is not None
-                    and day_key(float(c.get("closed_at_ts") or c.get("exit_at_ts") or 0)) == day]
-    ledger_loss = -sum(float(c["pnl_usd"]) for c in ledger_today)
-    state["ledger_loss_usd"] = round(ledger_loss, 4)
-    if ledger_loss >= DAILY_LOSS_CAP_USD:
-        out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} ({len(ledger_today)} fresh-epoch rows today)"})
     bal = _f((m.get("balance") or {}).get("derivatives_available_usd"))
     flat = not positions and not orders and not open_filled
     if bal is not None and flat:
-        if state.get("day") != day:
-            state.update(day=day, day_baseline=bal)
-        loss = float(state["day_baseline"]) - bal - float(funding_usd_today or 0.0) * 0.0
+        # rolling 24 h baseline = the highest flat balance seen in the last 24 h (a legacy seeded day_baseline joins the history)
+        hist = state.setdefault("flat_hist", [])
+        if not hist and state.get("day_baseline") is not None:
+            hist.append([float(state.get("day_baseline_ts") or now - 60.0), float(state["day_baseline"])])
+        hist[:] = [h for h in hist if now - ROLLING_WINDOW_SEC <= h[0] <= now + 60]
+        if not hist or now - hist[-1][0] >= FLAT_HIST_STEP_SEC:
+            hist.append([now, bal])
+        del hist[:-3000]
+        state["day_baseline"] = max([h[1] for h in hist] + [bal])
+        state["sydney_day"] = day_key(now)
+        loss = float(state["day_baseline"]) - bal   # balance already includes funding: a funding debit is a real loss
         state["day_loss_usd"] = round(loss, 4)
         if loss >= DAILY_LOSS_CAP_USD and not any(v["code"] == "DAILY_LOSS_CAP" for v in out):
             out.append({"code": "DAILY_LOSS_CAP", "detail": f"balance loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})

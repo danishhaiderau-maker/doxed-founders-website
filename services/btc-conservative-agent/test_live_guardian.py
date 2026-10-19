@@ -42,7 +42,7 @@ def test_daily_realised_loss_cap_one_dollar_and_new_day_resets_baseline():
     assert "DAILY_LOSS_CAP" in codes(g.evaluate([], low, st, NOW + 60))
     ok = dict(MIR, balance={"derivatives_available_usd": 206.20})
     assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], ok, {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.20, "last_flat_ts": NOW}, NOW + 60))
-    st2 = {"day": "1999-01-01", "day_baseline": 300.0}
+    st2 = {"day_baseline": 300.0, "day_baseline_ts": NOW - 90000}      # a baseline older than 24 h has aged out
     assert "DAILY_LOSS_CAP" not in codes(g.evaluate([], low, st2, NOW)) and st2["day_baseline"] == 205.70
 
 
@@ -104,7 +104,7 @@ def _tick_ns(on=True, chains=None, mirror=None, epoch=None):
     class Out:
         def snapshot(self): return {"enabled": on}
 
-    ns = {"time": _t, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"enabled": True, "calc": {}, "disarms": [], "last_violations": [], "heartbeat_ts": None},
+    ns = {"time": _t, "_LIVE_GUARDIAN_ERROR_LIMIT": 3, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"enabled": True, "calc": {}, "disarms": [], "last_violations": [], "heartbeat_ts": None},
           "_get_live_copy_output": lambda: Out(), "_tile_integrity_chains": lambda now: chains(now) if callable(chains) else (chains or []),
           "_live_guardian_mirror": lambda: mirror, "_offline_sim_epoch_floor": lambda: epoch,
           "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}}}
@@ -168,7 +168,7 @@ def test_heartbeat_stale_dead_guardian_disarms_and_arming_refuses_while_stale():
         def snapshot(self): return {"enabled": True}
 
     import live_guardian as lg
-    ns = {"time": _t, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"heartbeat_ts": _t.time() - 60, "disarms": []},
+    ns = {"time": _t, "_LIVE_GUARDIAN_ERROR_LIMIT": 3, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"heartbeat_ts": _t.time() - 60, "disarms": []},
           "_get_live_copy_output": lambda: Out(), "_disarm_live_control": lambda r: calls.append(r)}
     exec("import live_guardian as _lg\n" + _SRC[s:e], ns)
     assert ns["_live_guardian_watchdog"]() is True and calls == ["AUTO_DISARM:GUARDIAN_STALE"]
@@ -209,3 +209,63 @@ def test_with_output_off_exit_events_still_flow_to_the_relay_and_only_entries_ar
     # the bot's per-record filter only applies the tile delivery gate to entry events
     seg = _SRC[_SRC.index("allowed, reason = _live_copy.delivery_check("):][:700]
     assert "if allowed and event in _live_copy.ENTRY_EVENTS" in seg
+
+
+import datetime as _dtm
+
+
+def test_rolling_window_does_not_reset_at_the_utc_or_sydney_day_boundary():
+    """HM: day_key used the UTC day (rolls at 11:00 AEDT). Loss cap and baseline now use a rolling 24 h window."""
+    ts = _dtm.datetime(2026, 10, 19, 23, 59, 0, tzinfo=_dtm.timezone.utc).timestamp()      # one minute before the UTC rollover
+    st = {}
+    assert g.evaluate([], MIR, st, ts) == []
+    low = dict(MIR, balance={"derivatives_available_usd": 205.70})
+    after = ts + 120                                                                       # two minutes later, new UTC day
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate([], low, st, after)), "baseline must survive the UTC midnight"
+    loss = [ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 900, closed_at_ts=ts - 30)]
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate(loss, MIR, {}, after)), "ledger loss must survive the UTC midnight"
+    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 1000, closed_at_ts=ts - 90000)], MIR, {}, after)), "older than 24 h ages out"
+    assert g.day_key(_dtm.datetime(2026, 10, 19, 13, 0, tzinfo=_dtm.timezone.utc).timestamp()) == "2026-10-20"   # Sydney day, AEDT
+
+
+def test_ledger_loss_cap_fires_even_when_the_exchange_read_is_blind_and_blind_since_resets_when_flat():
+    loss = [ch(closed=True, pnl_usd=-1.5, fill_at_ts=NOW - 900, closed_at_ts=NOW - 60)]
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate(loss, {"ok": False, "error": "x"}, {}, NOW))
+    st = {}
+    g.evaluate([], {"ok": False}, st, NOW)
+    assert "blind_since" not in st and st["read_state"] == "BLIND"            # nothing exposed: no accumulation
+    g.evaluate([ch(fill_at_ts=NOW - 1, stop_confirmed=True)], {"ok": False}, st, NOW + 1)
+    assert st["blind_since"] == NOW + 1
+    g.evaluate([], {"ok": False}, st, NOW + 100)
+    assert "blind_since" not in st                                               # exposure ended, blind clock cleared
+
+
+def _loop_ns(on, tick_raises):
+    start, end = _SRC.index("def _live_guardian_tick"), _SRC.index("def _live_guardian_heartbeat_stale")
+    ns, calls = _tick_ns(on, lambda n: (_ for _ in ()).throw(RuntimeError("boom")) if tick_raises else [], _mir())
+    return ns, calls
+
+
+def test_guardian_evaluation_error_does_not_stamp_heartbeat_and_disarms_after_three_consecutive_failures():
+    ns, calls = _loop_ns(True, True)
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    ok_ns, _ = _loop_ns(True, False)
+    ok_ns["_live_guardian_tick"](NOW)
+    assert ok_ns["_LIVE_GUARDIAN_STATE"]["heartbeat_ts"] == NOW and ok_ns["_LIVE_GUARDIAN_STATE"]["error_streak"] == 0
+    for i in range(2):
+        try:
+            ns["_live_guardian_tick"](NOW + i)
+            raise AssertionError("tick must raise")
+        except RuntimeError as exc:
+            assert ns["_live_guardian_on_error"](exc, NOW + i) is False
+    assert st["heartbeat_ts"] is None and st["error_streak"] == 2 and not calls     # never stamped, no disarm yet
+    try:
+        ns["_live_guardian_tick"](NOW + 3)
+    except RuntimeError as exc:
+        assert ns["_live_guardian_on_error"](exc, NOW + 3) is True
+    assert calls == ["AUTO_DISARM:GUARDIAN_ERROR"] and st["disarms"][-1]["reason"] == "AUTO_DISARM:GUARDIAN_ERROR"
+    off_ns, off_calls = _loop_ns(False, True)
+    for i in range(5):
+        off_ns["_live_guardian_on_error"](RuntimeError("x"), NOW + i)
+    assert off_calls == []                                                          # output OFF: nothing to disarm
+    assert "_live_guardian_on_error(exc)" in _SRC[_SRC.index("def live_guardian_loop"):][:600]

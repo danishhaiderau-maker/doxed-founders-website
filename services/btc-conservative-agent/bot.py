@@ -49062,7 +49062,7 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
 
 # ---- Live guardian (HM 19 Oct): automatic stop-or-disarm for the GS-01 live test --------------------------------
 _LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "heartbeat_ts": None, "last_violations": [], "disarms": [], "calc": {}}
-_LIVE_GUARDIAN_STARTED_TS = time.time()
+_LIVE_GUARDIAN_ERROR_LIMIT = 3   # consecutive failed evaluations (output ON) before AUTO_DISARM:GUARDIAN_ERROR
 _LIVE_GUARDIAN_INTERVAL_SEC = 1.0
 
 
@@ -49081,9 +49081,10 @@ def _live_guardian_tick(now=None) -> list:
     import live_guardian as _lg
     now = now or time.time()
     _LIVE_GUARDIAN_STATE["last_check_ts"] = now
-    _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now
     if not bool(_get_live_copy_output().snapshot().get("enabled")):
         _LIVE_GUARDIAN_STATE["calc"] = {}
+        _LIVE_GUARDIAN_STATE["error_streak"] = 0
+        _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now   # a clean pass: nothing to evaluate while output is OFF
         return []
     chains = _tile_integrity_chains(now)
     viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now,
@@ -49098,7 +49099,27 @@ def _live_guardian_tick(now=None) -> list:
         except Exception as exc:  # noqa: BLE001
             res = {"error": str(exc)[:200]}
         _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res}])[-20:]
+    # heartbeat only AFTER a successful evaluation: a guardian that keeps raising goes stale instead of looking alive
+    _LIVE_GUARDIAN_STATE["error_streak"] = 0
+    _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now
     return viol
+
+
+def _live_guardian_on_error(exc, now=None) -> bool:
+    """A failed evaluation. After _LIVE_GUARDIAN_ERROR_LIMIT consecutive failures while output is ON: disarm (fail safe)."""
+    now = now or time.time()
+    st = _LIVE_GUARDIAN_STATE
+    st["error_streak"] = int(st.get("error_streak") or 0) + 1
+    st["last_error"] = {"ts": now, "error": str(exc)[:200]}
+    try:
+        if st["error_streak"] >= _LIVE_GUARDIAN_ERROR_LIMIT and bool(_get_live_copy_output().snapshot().get("enabled")):
+            logger.error(f"[LIVE GUARDIAN] {st['error_streak']} consecutive evaluation errors while live output ON -> AUTO_DISARM:GUARDIAN_ERROR [PIPELINE ENFORCEMENT]")
+            _disarm_live_control("AUTO_DISARM:GUARDIAN_ERROR")
+            st["disarms"] = (st["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_ERROR", "violations": [{"code": "GUARDIAN_ERROR", "detail": str(exc)[:200]}]}])[-20:]
+            return True
+    except Exception as exc2:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] error-disarm failed: {exc2}")
+    return False
 
 
 def _live_guardian_heartbeat_stale(now=None) -> bool:
@@ -49126,6 +49147,7 @@ def live_guardian_loop():
             _live_guardian_tick()
         except Exception as exc:  # noqa: BLE001 - the guardian must never die silently
             logger.error(f"[LIVE GUARDIAN] tick error: {exc}")
+            _live_guardian_on_error(exc)
         shutdown_event.wait(_LIVE_GUARDIAN_INTERVAL_SEC)
 
 
