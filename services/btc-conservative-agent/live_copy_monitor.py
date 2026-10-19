@@ -121,6 +121,12 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["stop_confirmed"] = True
         if r.get("type") == "POSITION_CLOSED":
             ch["closed"] = True
+            # live-vs-paper (HM 19 Oct): keep whatever the executor reports about the live exit; null if it reports none
+            cl = next((r.get(k) for k in ("close", "exit", "fill") if isinstance(r.get(k), Mapping)), {})
+            ch["exit_price"] = _f(cl.get("price")) or _f(r.get("exit_price")) or ch.get("exit_price")
+            ch["exit_at_ts"] = _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
+            ch["exit_reason"] = cl.get("reason") or r.get("exit_reason") or r.get("reason") or ch.get("exit_reason")
+            ch["funding_usd"] = r.get("funding_usd") if r.get("funding_usd") is not None else ch.get("funding_usd")
         if r.get("type") in ("ORDER_REJECTED", "INTENT_REJECTED", "STOP_FAILED", "ERROR"):
             err = r.get("error") if isinstance(r.get("error"), Mapping) else {}
             ch["errors"].append({"type": r.get("type"), "code": err.get("code"),
