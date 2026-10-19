@@ -163,9 +163,16 @@ def test_symlinked_component_and_bad_names_are_rejected(tmp_path):
 
 
 def test_oserror_ends_with_summary_not_traceback(tmp_path):
-    root, now, sha, _ = _setup(tmp_path)
-    os.unlink(f"{root}/runtime/relay_outbox_quarantine.jsonl")          # a missing C4 file
-    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+    root, now, sha, doc = _setup(tmp_path)
+    counts = {k: v["count"] for k, v in doc["plans"].items()}
+    orig, orig_build = ex.P.ITEMS, ex.P.build_all
+    os.unlink(f"{root}/runtime/relay_outbox_quarantine.jsonl")          # a C4 file gone after planning
+    ex.P.ITEMS = {"C4": [("relay_outbox_quarantine.jsonl#0", 1, "0" * 64)]}
+    ex.P.build_all = (lambda real: (lambda *a, **k: (real(*a, **k) if False else {"plan_sha256": sha, "plans": doc["plans"]})))(ex.P.build_all)
+    try:
+        res = ex.run(root, EPOCH, sha, fake_get(), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+    finally:
+        ex.P.ITEMS, ex.P.build_all = orig, orig_build
     assert res["status"] == "ABORTED" and "OSError" in res["reason"]
 
 
