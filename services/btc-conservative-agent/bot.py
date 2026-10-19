@@ -48686,7 +48686,10 @@ def monitor_tile_switch_rows() -> list:
             "registry_state": "RETIRED" if retired else str(get_pathway_lane_status(lane) or "ACTIVE"),
             "retired": retired, "active_listed": lane in ACTIVE_TILE_REGISTRY,
             "paper_on": bool(is_research_lane_enabled(lane)),
+            # live_orders_on is OPERATOR ELIGIBILITY (the tile may copy live once live output is armed), NOT arming and NOT
+            # Bitfinex order output: that is bitfinex_live_orders on /api/live-copy/status. Kept for backward compatibility.
             "live_orders_on": bool(elig.get("live_eligible")) and not retired,
+            "live_eligible": bool(elig.get("live_eligible")) and not retired,
             "live_eligibility_raw": bool(elig.get("live_eligible")),
             "relay_eligible": bool(spec.get("platform_relay_eligible")) or bool(elig.get("live_eligible")),
             "evaluator_running": lane in _XVL_EVALUATORS,
