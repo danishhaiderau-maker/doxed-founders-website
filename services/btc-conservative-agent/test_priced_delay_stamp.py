@@ -2,11 +2,17 @@
 import bot
 
 
-def test_labels():
-    assert bot._delay_model_label("default_until_n10") == "DEFAULT_1_5S"
-    assert bot._delay_model_label("lane_p50_n12") == "PAPER_MEASURED"
-    assert bot._delay_model_label(None) is None
-    assert bot._delay_model_label("weird").startswith("OTHER:")
+def _label(src, monkeypatch):
+    monkeypatch.setattr(bot, "_entry_fill_sim", lambda pos: {"delay_s": 1.5, "delay_source": src})
+    monkeypatch.setattr(bot, "_is_paper_book_lane", lambda pos: False)
+    return bot._entry_pricing_fields({}, {})["priced_delay_model"]
+
+
+def test_labels(monkeypatch):
+    assert _label("default_until_n10", monkeypatch) == "DEFAULT_1_5S"
+    assert _label("lane_p50_n12", monkeypatch) == "PAPER_MEASURED"
+    assert _label(None, monkeypatch) is None
+    assert _label("weird", monkeypatch).startswith("OTHER:")
 
 
 def test_entry_pricing_fields_stamp_without_changing_delay(monkeypatch):
