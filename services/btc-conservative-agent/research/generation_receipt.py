@@ -133,11 +133,22 @@ def build_generation_receipt(
             + (f"{epoch_admitted} pre-epoch rows can enter results" if epoch_admitted is not None
                else f"purity unproven ({data_epoch.get('error') or 'no audit'})")
         )
+    fresh_rule = (data_epoch or {}).get("fresh_rule") or {}
+    if data_epoch and (data_epoch.get("manifest_missing_fail_closed") or str(fresh_rule.get("status")).upper() == "RED"):
+        # Fail-closed guard (floor without a valid manifest, or a declared epoch without a floor): the analyzer
+        # admitted NOTHING. That must alarm, never read as a quiet empty generation.
+        level = RED
+        reasons.append(f"fresh rule FAIL-CLOSED: {fresh_rule.get('reason') or 'DATA_EPOCH_MANIFEST_MISSING'} "
+                       "(no epoch-scoped row admitted)")
     unplaced = int((data_epoch or {}).get("straddle_rows_unguarded") or 0) + int(
         (data_epoch or {}).get("unstamped_rows_unguarded") or 0)
     if unplaced:
         level = _worst(level, AMBER)
         reasons.append(f"{unplaced} straddle/unstamped rows read unguarded (never countable, not pre-epoch)")
+    # Hard-rejected rows are reported as their own numbers (HM 19 Oct), separate from any unguarded read; they never
+    # change the level (rejection is the rule working), they only keep the count visible.
+    hard_rejected = {key: int((data_epoch or {}).get(key) or 0)
+                     for key in ("straddle_rows_rejected", "unstamped_rows_rejected")}
     receipt = {
         "schema": SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -146,6 +157,7 @@ def build_generation_receipt(
         "level": level,
         "complete": not failed_required and integrity_status == "VALID",
         "reasons": reasons,
+        "hard_rejected_rows": hard_rejected,
         "failed_required_studies": failed_required,
         "failed_optional_studies": failed_optional,
         "integrity_status": integrity_status,

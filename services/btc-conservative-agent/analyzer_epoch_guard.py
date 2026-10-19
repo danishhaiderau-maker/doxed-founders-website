@@ -38,6 +38,10 @@ _SKIP_SUFFIXES = (".malformed_rows.jsonl",)
 
 
 NO_FRESH_FLOOR = "FRESH_FLOOR_MISSING"
+MANIFEST_MISSING = "DATA_EPOCH_MANIFEST_MISSING"
+# Placeholder epoch id of a fail-closed guard whose data_epoch.json is missing or invalid while a fresh-start floor
+# exists: it never matches a real epoch, so every receipt and purity check that compares epoch ids goes RED.
+MANIFEST_MISSING_EPOCH_ID = "ce-19700101-manifest-missing"
 
 
 class PreEpochRowError(RuntimeError):
@@ -45,13 +49,19 @@ class PreEpochRowError(RuntimeError):
 
 
 class EpochGuard:
-    def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False) -> None:
-        self.manifest = manifest
+    def __init__(self, manifest: dict | None, floor_ts: float | None = None, require_floor: bool = False,
+                 manifest_missing: bool = False) -> None:
         self.floor_ts = float(floor_ts) if floor_ts else None  # fresh_start_epoch.json epoch_ts (see data_epoch.classify)
+        # HM 19 Oct: a fresh-start floor with a missing/corrupt data_epoch.json is a post-reset deploy whose manifest
+        # vanished. It must FAIL CLOSED (admit nothing, RED), never fall back to "no epoch declared" (admit all).
+        self.manifest_missing = bool(manifest_missing) and manifest is None
+        if self.manifest_missing:
+            manifest = de.new_manifest(MANIFEST_MISSING_EPOCH_ID, started_at_ts=self.floor_ts or 1.0)
+        self.manifest = manifest
         self.require_floor = bool(require_floor)
         # Fail closed: a declared epoch whose fresh-start floor could not be loaded admits NOTHING (a missing or
         # unreadable fresh_start_epoch.json must never silently turn the floor off).
-        self.floor_missing = bool(manifest) and self.require_floor and self.floor_ts is None
+        self.floor_missing = (bool(manifest) and self.require_floor and self.floor_ts is None) or self.manifest_missing
 
         self.admitted: dict[str, int] = {}
         self.rejected: dict[str, dict[str, int]] = {}
@@ -62,8 +72,9 @@ class EpochGuard:
 
     @classmethod
     def from_data_dir(cls, data_dir: str | os.PathLike) -> "EpochGuard":
-        return cls(de.load_manifest(Path(data_dir) / de.MANIFEST_NAME), floor_ts=fresh_floor_ts(data_dir),
-                   require_floor=True)
+        manifest = de.load_manifest(Path(data_dir) / de.MANIFEST_NAME)
+        floor = fresh_floor_ts(data_dir)
+        return cls(manifest, floor_ts=floor, require_floor=True, manifest_missing=manifest is None and floor is not None)
 
     @property
     def declared(self) -> bool:
@@ -100,8 +111,9 @@ class EpochGuard:
         return False
 
     def _reject_no_floor(self, relpath: str) -> bool:
+        reason = MANIFEST_MISSING if self.manifest_missing else NO_FRESH_FLOOR
         bucket = self.rejected.setdefault(relpath, {})
-        bucket[NO_FRESH_FLOOR] = bucket.get(NO_FRESH_FLOOR, 0) + 1
+        bucket[reason] = bucket.get(reason, 0) + 1
         return False
 
     def admit_line(self, relpath: str, line: str | bytes) -> bool:
@@ -141,7 +153,9 @@ class EpochGuard:
         fields = tuple(ts_fields)
         for row in rows:
             if self.floor_missing:
-                raise PreEpochRowError(f"{relpath}: {NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
+                reason = (f"{MANIFEST_MISSING}: fresh_start_epoch.json without a valid data_epoch.json"
+                          if self.manifest_missing else f"{NO_FRESH_FLOOR}: declared epoch without fresh_start_epoch.json")
+                raise PreEpochRowError(f"{relpath}: {reason}")
             cls = de.classify_row(relpath, row, self.manifest, fields, floor_ts=self.floor_ts)
             if cls not in ADMITTED_CLASSES:
                 raise PreEpochRowError(f"{relpath}: {cls} row in a {self.manifest['epoch_id']} result")
@@ -152,12 +166,24 @@ class EpochGuard:
         return {"declared": self.declared, "epoch_id": manifest.get("epoch_id"),
                 "floor_ts": self.floor_ts, "floor_loaded": self.floor_loaded,
                 "floor_required": self.require_floor, "floor_missing_fail_closed": self.floor_missing,
+                "manifest_missing_fail_closed": self.manifest_missing,
                 "started_at_utc": manifest.get("started_at_utc"),
                 "rows_admitted": sum(self.admitted.values()), "pre_epoch_rows_rejected": rejected,
                 "pre_epoch_rows_admitted": int(pre_epoch_rows_admitted),
                 "rejected_by_stream": {k: dict(v) for k, v in sorted(self.rejected.items())},
                 "admitted_by_stream": dict(sorted(self.admitted.items())),
+                **self.hard_rejected_counts(),
                 "fresh_rule": self.fresh_rule_status()}
+
+    def hard_rejected_counts(self) -> dict:
+        """HM 19 Oct: straddle (window crosses the floor) and unstamped rows the readers hard-REJECTED, reported as their
+        own numbers, never inside the ``*_unguarded`` read-monitor counts (those mean a reader skipped the guard)."""
+        out: dict = {}
+        for cls, key in ((NESTED_STRADDLE, "straddle"), (NESTED_UNSTAMPED, "unstamped")):
+            by = {k: int(v.get(cls, 0)) for k, v in sorted(self.rejected.items()) if v.get(cls)}
+            out[f"{key}_rows_rejected"] = sum(by.values())
+            out[f"{key}_rows_rejected_by_stream"] = by
+        return out
 
     def fresh_rule_status(self) -> dict:
         """RED when a declared epoch has no loadable floor (the fresh rule then admits NOTHING, which must be loud, not
@@ -165,6 +191,8 @@ class EpochGuard:
         v3 = [k for k in set(self.admitted) | set(self.rejected) if k.startswith("v3/ledgers/")]
         per = {k: {"admitted": int(self.admitted.get(k, 0)), "rejected_by_reason": dict(self.rejected.get(k, {}))}
                for k in sorted(v3)}
+        if self.manifest_missing:
+            return {"status": "RED", "reason": MANIFEST_MISSING, "v3_readers": per}
         if self.declared and (self.floor_missing or self.floor_ts is None):
             return {"status": "RED", "reason": NO_FRESH_FLOOR, "v3_readers": per}
         return {"status": "GREEN", "reason": None, "v3_readers": per}
@@ -394,6 +422,63 @@ def admit_v3_row(path_or_rel: str | os.PathLike, row: Any) -> bool:
     return process_guard().admit_v3_ledger_row(rel, row)
 
 
+def admit_stream_row(path: str | os.PathLike, row: Any, *, relpath: str | None = None) -> bool:
+    """Hard fresh-epoch gate for one row of any epoch-scoped stream file (V3 ledgers via :func:`admit_v3_row`, other
+    streams via :meth:`EpochGuard.admit`); epoch-independent tape streams are admitted. ``relpath`` skips the per-row
+    path parse when the caller already has it (``stream_name`` of the file)."""
+    if not isinstance(row, dict):
+        return False
+    guard = process_guard()
+    if not guard.manifest:
+        return True
+    v3 = v3_ledger_relpath(path) if relpath is None or not relpath.startswith("v3/") else relpath
+    if v3 is not None:
+        return guard.admit_v3_ledger_row(v3, row)
+    rel = relpath or stream_name(path)
+    if de.epoch_independent(rel):
+        return True
+    return guard.admit(rel, row)
+
+
+def guard_from_roots(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
+    """Declared-epoch guard for a process outside the analyzer (genome grid): the manifest from the first root that
+    declares one, the fresh-start floor from the first root holding fresh_start_epoch.json. A declared epoch with no
+    floor anywhere fails closed (admits nothing); no manifest anywhere admits everything (no epoch declared)."""
+    manifest = None
+    floor = None
+    for root in roots:
+        if not root:
+            continue
+        if manifest is None:
+            manifest = de.load_manifest(Path(root) / de.MANIFEST_NAME)
+        if floor is None:
+            floor = fresh_floor_ts(root)
+    return EpochGuard(manifest, floor_ts=floor, require_floor=True,
+                      manifest_missing=manifest is None and floor is not None)
+
+
+def standalone_guard_roots(data_dir: str | os.PathLike | None) -> list[Path]:
+    """Epoch roots for a standalone entry point: BTC_DATA_EPOCH_DIR, the data dir and its v3/, then this service's
+    canonical-research-data (the laptop's fresh_start_epoch.json lives there; the mirror tree carries no floor)."""
+    override = os.environ.get("BTC_DATA_EPOCH_DIR")
+    roots = [Path(override)] if override else []
+    if data_dir:
+        roots += [Path(data_dir), Path(data_dir) / "v3"]
+    return roots + [Path(__file__).resolve().parent / "canonical-research-data"]
+
+
+def ensure_process_guard(roots: Iterable[str | os.PathLike | None]) -> "EpochGuard":
+    """Standalone entry points (genome grid, walk-forward scorer, latency measurement run outside the analyzer)
+    install the same hard guard the analyzer does. An already-installed guard (the analyzer's) is kept. A guard
+    that declares nothing (no manifest and no floor anywhere) is returned but not installed."""
+    if _PROCESS_GUARD is not None:
+        return _PROCESS_GUARD
+    guard = guard_from_roots(roots)
+    if guard.declared:
+        set_process_guard(guard)
+    return guard
+
+
 def admit_v3_line(path_or_rel: str | os.PathLike, raw: str | bytes) -> bool:
     """:func:`admit_v3_row` for one raw JSONL line (parsed here; unparseable lines are rejected)."""
     guard = process_guard()
@@ -413,6 +498,23 @@ _PROCESS_GUARD: "EpochGuard | None" = None
 def set_process_guard(guard: "EpochGuard | None") -> None:
     global _PROCESS_GUARD
     _PROCESS_GUARD = guard
+
+
+@contextlib.contextmanager
+def scoped_process_guard(roots: Iterable[str | os.PathLike | None]) -> Iterator["EpochGuard"]:
+    """Library-level entry (fill_model latency): use the installed guard, else install one for this call only."""
+    if _PROCESS_GUARD is not None:
+        yield _PROCESS_GUARD
+        return
+    guard = guard_from_roots(roots)
+    if not guard.declared:
+        yield guard
+        return
+    set_process_guard(guard)
+    try:
+        yield guard
+    finally:
+        set_process_guard(None)
 
 
 def process_guard() -> "EpochGuard":

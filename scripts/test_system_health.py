@@ -1846,3 +1846,14 @@ def test_pull_ack_ack_zero_while_applied_is_amber_first_then_red_after_5_minutes
     assert by_id(sh.evaluate(later, state))["laptop.pull_ack"]["status"] == sh.RED
     ok = _pull_lag_inputs(now + 7 * 60, 3, 3, now + 7 * 60 - 100)
     assert by_id(sh.evaluate(ok, state))["laptop.pull_ack"]["status"] == sh.GREEN
+
+
+def test_hard_rejected_straddle_rows_are_a_separate_number_not_unguarded_and_never_change_status():
+    """HM 19 Oct: straddle rows stay hard-rejected; their count is shown on its own, never as 'read unguarded'."""
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_receipt"]["hard_rejected_rows"] = {"straddle_rows_rejected": 2529, "unstamped_rows_rejected": 1381}
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
+    assert check["status"] == sh.GREEN
+    assert "hard-rejected (fresh rule): straddle 2529, unstamped 1381" in check["observed"]
+    assert "unguarded" not in check["observed"]

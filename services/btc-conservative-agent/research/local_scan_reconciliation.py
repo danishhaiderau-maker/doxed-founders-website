@@ -199,6 +199,8 @@ def main(argv=None):
     parser.add_argument('--reference-after',default='')
     parser.add_argument('--dispatch-after',default='')
     args=vars(parser.parse_args(argv))
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots
+    ensure_process_guard(standalone_guard_roots(args['data_root']))  # standalone: same hard fresh-epoch guard
     try:
         report=reconcile_scans(**args)
         print(json.dumps({'status':'OBSERVED_ONLY' if report['index_caught_up'] else 'INDEX_CATCHUP',

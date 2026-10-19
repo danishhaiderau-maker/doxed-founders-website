@@ -243,13 +243,282 @@ def test_every_known_reader_module_uses_the_guarded_opener():
                "research/policy_evidence_evaluator.py", "research/policy_evidence_bindings.py",
                "research/evidence_coverage_triage.py", "research/fill_model.py", "strategy_lab/simulator.py",
                "research/shared_context_coverage.py", "research/baseline_execution_context.py",
-               "research/v3_ledger_index.py")
+               "research/v3_ledger_index.py", "research/genome_grid_study.py", "research/genome_mix_match.py")
     for rel in modules:
         text = (HERE / rel).read_text(encoding="utf-8")
         assert "open_v3_ledger(" in text, rel
-        if rel != "research/v3_ledger_index.py":
+        if rel.startswith("research/genome_"):
+            assert "admit_stream_row(" in text and "open(path" not in text, rel  # raw open at L126 / L98 is gone
+        elif rel != "research/v3_ledger_index.py":
             assert "admit_v3_row(" in text, rel
     replay = (HERE / "research/entry_baseline_replay.py").read_text(encoding="utf-8")
     assert replay.count("open_v3_ledger(") >= 3 and replay.count("admit_v3_row(") >= 3
     lsr = (HERE / "research/local_scan_reconciliation.py").read_text(encoding="utf-8")
     assert lsr.count("open_v3_ledger(") == 2 and lsr.count("admit_v3_row(") == 2
+
+
+# ---- HM 19 Oct (a): hard-rejected straddle rows are their own number, separate from "unguarded" --------------------
+def test_receipt_block_reports_hard_rejected_straddle_and_unstamped_separately(env):
+    root, guard, monitor = env
+    import research_v3_report as rep
+    from research.generation_receipt import build_generation_receipt
+    rep._read_ledger(_ledger(root, "market_segment"))
+    block = guard.receipt_block()
+    assert block["straddle_rows_rejected"] == 1 and block["unstamped_rows_rejected"] == 1
+    assert block["straddle_rows_rejected_by_stream"] == {"v3/ledgers/market_segment.jsonl": 1}
+    reads = _assert_no_unguarded_v3(monitor, guard)  # guarded: 0 unguarded while the rejections are counted
+    block.update(straddle_rows_unguarded=reads["straddle_rows_unguarded"],
+                 unstamped_rows_unguarded=reads["unstamped_rows_unguarded"])
+    receipt = build_generation_receipt({"required_report_status": {}}, integrity={"report_status": "VALID"},
+                                       data_epoch=block)
+    assert receipt["hard_rejected_rows"] == {"straddle_rows_rejected": 1, "unstamped_rows_rejected": 1}
+    assert not any("unguarded" in r for r in receipt["reasons"])
+
+
+# ---- HM 19 Oct (b): the genome-grid scheduled job (separate process) installs the guard itself --------------------
+def test_guard_from_roots_takes_manifest_and_floor_from_their_own_roots(tmp_path):
+    mirror, canon = tmp_path / "tree", tmp_path / "canonical-research-data"
+    mirror.mkdir()
+    canon.mkdir()
+    (mirror / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR)))
+    no_floor = eg.guard_from_roots([mirror])
+    assert no_floor.declared and no_floor.floor_ts is None and not no_floor.admit_v3_ledger_row("v3/ledgers/d.jsonl", OK)
+    (canon / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR}))
+    g = eg.guard_from_roots([mirror, canon])
+    assert g.floor_ts == FLOOR and [g.admit_v3_ledger_row("v3/ledgers/d.jsonl", r) for r in ROWS] == [False, False, True, False]
+    assert not eg.guard_from_roots([tmp_path / "missing"]).declared
+
+
+def test_genome_grid_and_mix_match_readers_hard_reject(env):
+    root, guard, monitor = env
+    from research import genome_grid_study as gg
+    from research import genome_mix_match as mm
+    for name in ("decision", "opportunity", "lifecycle"):
+        _ledger(root, name)
+    for reader in (gg._read_jsonl, mm._read_jsonl):
+        for name in ("decision", "opportunity", "lifecycle"):
+            assert _ids(reader(root / "v3" / "ledgers" / f"{name}.jsonl")) == ["ok"], (reader.__module__, name)
+    # non-ledger stream rows go through EpochGuard.admit (pre-epoch ts rejected); tape is epoch-independent
+    sr = root / "signal_replay.jsonl"
+    sr.write_text(json.dumps({"trade_id": "old", "ts": FLOOR - 600}) + "\n" + json.dumps({"trade_id": "new", "ts": FLOOR + 600}) + "\n")
+    assert [r["trade_id"] for r in gg._read_jsonl(sr)] == ["new"]
+    tape = root / "market_microstructure_1s.jsonl"
+    tape.write_text(json.dumps({"ts": FLOOR - 600, "bid": 1}) + "\n")
+    assert len(list(gg._read_jsonl(tape))) == 1
+    _assert_no_unguarded_v3(monitor, guard)
+
+
+def test_genome_grid_run_installs_the_guard_before_reading(monkeypatch, tmp_path):
+    from research import genome_grid_study as gg
+    (tmp_path / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR)))
+    canon = tmp_path / "canon"
+    canon.mkdir()
+    (canon / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR}))
+    monkeypatch.setattr(gg, "epoch_guard_roots", lambda mirror: [mirror, canon])
+    seen = {}
+
+    def stop(mirror, tier_a):
+        seen["guard"] = eg.process_guard()
+        raise RuntimeError("stop after guard install")
+
+    monkeypatch.setattr(gg, "load_tape", stop)
+    try:
+        with pytest.raises(RuntimeError):
+            gg.run(tmp_path, tmp_path / "tierA", tmp_path / "out")
+        assert seen["guard"].declared and seen["guard"].floor_ts == FLOOR
+    finally:
+        eg.set_process_guard(None)
+    src = (HERE / "research/genome_grid_study.py").read_text(encoding="utf-8")
+    assert 'report["data_epoch"] = guard.receipt_block()' in src
+
+
+# ---- HM 19 Oct CHANGES on 27778ae7 --------------------------------------------------------------------------------
+def _declare(root: Path, *, manifest=True, floor=True):
+    root.mkdir(parents=True, exist_ok=True)
+    if manifest:
+        (root / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR)))
+    if floor:
+        (root / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR}))
+    return root
+
+
+@pytest.mark.parametrize("manifest_text", [None, "{not json", json.dumps({"epoch_id": "bad id"})])
+def test_missing_or_invalid_manifest_with_a_floor_fails_closed_and_alarms(tmp_path, manifest_text):
+    """Item 3: fresh_start_epoch.json present + data_epoch.json missing/corrupt must NOT become EpochGuard(None)."""
+    from research.generation_receipt import build_generation_receipt
+    root = _declare(tmp_path / "data", manifest=False)
+    if manifest_text is not None:
+        (root / "data_epoch.json").write_text(manifest_text)
+    for guard in (eg.EpochGuard.from_data_dir(root), eg.guard_from_roots([tmp_path / "nothing", root])):
+        assert guard.manifest_missing and guard.declared and guard.floor_missing
+        assert [guard.admit_v3_ledger_row("v3/ledgers/decision.jsonl", r) for r in ROWS] == [False] * 4
+        assert guard.admit("signal_replay.jsonl", {"ts": FLOOR + 600}) is False
+        assert guard.rejected["v3/ledgers/decision.jsonl"] == {eg.MANIFEST_MISSING: 4}
+        block = guard.receipt_block()
+        assert block["manifest_missing_fail_closed"] is True
+        assert block["fresh_rule"]["status"] == "RED" and block["fresh_rule"]["reason"] == eg.MANIFEST_MISSING
+        receipt = build_generation_receipt({"required_report_status": {}}, integrity={"report_status": "VALID"},
+                                           data_epoch=block)
+        assert receipt["level"] == "RED" and any("FAIL-CLOSED" in r for r in receipt["reasons"])
+    # no floor and no manifest anywhere: still "nothing declared" (pre-reset deploys unchanged)
+    assert not eg.EpochGuard.from_data_dir(tmp_path / "nothing").declared
+
+
+def test_missing_manifest_with_floor_makes_every_reader_return_nothing(env, tmp_path):
+    root, _, _ = env
+    import research_v3_report as rep
+    from research import genome_grid_study as gg
+    eg.set_process_guard(eg.EpochGuard.from_data_dir(_declare(tmp_path / "d", manifest=False)))
+    assert rep._read_ledger(_ledger(root, "decision")) == []
+    assert list(gg._read_jsonl(_ledger(root, "opportunity"))) == []
+
+
+def test_analyzer_prefers_a_declaring_root_and_otherwise_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(HERE))  # research/ carries a fail-closed stub of the same name
+    import analyzer_research_engine_v62 as engine
+    bad, good = _declare(tmp_path / "bad", manifest=False), _declare(tmp_path / "good")
+    monkeypatch.setattr(engine, "_EPOCH_MANIFEST_DIR", None)
+    for roots, missing in (([bad, good], False), ([bad], True)):
+        monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
+        monkeypatch.setattr(engine, "_epoch_manifest_roots", lambda roots=roots: roots)
+        guard = engine._epoch_guard()
+        assert guard.declared and guard.manifest_missing is missing and eg.process_guard() is guard
+        assert guard.admit_v3_ledger_row("v3/ledgers/decision.jsonl", OK) is (not missing)
+
+
+def test_declared_epoch_with_missing_floor_via_new_helpers_admits_nothing(tmp_path):
+    """Item 4: a declared manifest whose floor is nowhere (mirror tree only) fails closed through every helper."""
+    mirror = _declare(tmp_path / "tree", floor=False)
+    for guard in (eg.guard_from_roots([mirror]), eg.ensure_process_guard([mirror])):
+        assert guard.declared and guard.floor_missing and not guard.manifest_missing
+        assert [guard.admit_v3_ledger_row("v3/ledgers/decision.jsonl", r) for r in ROWS] == [False] * 4
+        assert eg.admit_stream_row(mirror / "v3/ledgers/decision.jsonl", OK) is False
+        assert guard.fresh_rule_status() == {"status": "RED", "reason": eg.NO_FRESH_FLOOR,
+                                             "v3_readers": guard.fresh_rule_status()["v3_readers"]}
+    assert eg.process_guard().floor_missing  # ensure_process_guard installed it
+
+
+def test_ensure_process_guard_keeps_an_installed_guard_and_skips_undeclared(tmp_path):
+    assert not eg.ensure_process_guard([tmp_path / "none"]).declared
+    assert eg._PROCESS_GUARD is None  # nothing declared: nothing installed
+    analyzer = eg.EpochGuard(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR), floor_ts=FLOOR)
+    eg.set_process_guard(analyzer)
+    assert eg.ensure_process_guard([_declare(tmp_path / "other", manifest=False)]) is analyzer
+
+
+def test_scoped_process_guard_is_restored_after_a_library_call(tmp_path):
+    with eg.scoped_process_guard([_declare(tmp_path / "d")]) as guard:
+        assert eg.process_guard() is guard and guard.declared
+    assert eg._PROCESS_GUARD is None
+
+
+def test_fill_model_latency_installs_the_guard_when_run_standalone(tmp_path):
+    """Item 2: measure_decision_latency outside the analyzer (genome grid / walk-forward) still hard-rejects."""
+    from research import fill_model as fm
+    root = _declare(tmp_path / "data")
+    pre = dict(PRE, signal_ts=FLOOR - 400)
+    _ledger(root, "opportunity", [dict(pre, episode_id=f"p{i}") for i in range(30)])
+    intent = {"chase_schedule": {"action_timing_receipts": [{"action_type": "INITIAL_SUBMIT",
+                                                            "eligibility_ts": FLOOR - 399}]}}
+    _ledger(root, "order_intent", [dict(pre, episode_id=f"p{i}", **intent) for i in range(30)])
+    assert eg._PROCESS_GUARD is None
+    out = fm.measure_decision_latency(root / "v3" / "ledgers")
+    assert out["source"] == "DEFAULT_NO_MEASUREMENT" and out["n"] == 0  # pre-epoch rows never measured
+    assert eg._PROCESS_GUARD is None  # scoped: the library call leaves no process guard behind
+
+
+@pytest.mark.parametrize("module,argv_fn", [
+    ("research.walk_forward_scorer", lambda d: ["--table", str(d / "t.csv"), "--data-dir", str(d), "--out-dir", str(d)]),
+    ("research.shadow_exit_report", lambda d: ["--mirror", str(d), "--out-dir", str(d / "out")]),
+    ("research.local_scan_reconciliation", lambda d: ["--repo-root", str(d), "--data-root", str(d),
+                                                      "--source-revision", "x", "--config-signature", "y"]),
+])
+def test_standalone_entry_points_install_the_guard_before_reading(tmp_path, monkeypatch, module, argv_fn):
+    import importlib
+    mod = importlib.import_module(module)
+    root = _declare(tmp_path / "data")
+    seen = {}
+
+    def stop(*a, **k):
+        seen["guard"] = eg.process_guard()
+        raise KeyboardInterrupt
+
+    target = {"research.walk_forward_scorer": "run", "research.shadow_exit_report": "build_report",
+              "research.local_scan_reconciliation": "reconcile_scans"}[module]
+    monkeypatch.setattr(mod, target, stop)
+    with pytest.raises(KeyboardInterrupt):
+        mod.main(argv_fn(root))
+    assert seen["guard"].declared and seen["guard"].floor_ts == FLOOR
+
+
+def test_evidence_coverage_triage_main_installs_the_guard(tmp_path, monkeypatch):
+    from research import evidence_coverage_triage as ect
+    root = _declare(tmp_path / "data")
+    (root / "v3").mkdir()
+    seen = {}
+
+    def stop(*a, **k):
+        seen["guard"] = eg.process_guard()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ect, "build_evidence_coverage_triage_report", stop)
+    monkeypatch.setattr(ect, "verify_archive_receipts", lambda root: None)
+    monkeypatch.setattr(ect, "ledger_source_counts", lambda root: None)
+    (tmp_path / "b.json").write_text("{}")
+    with pytest.raises(KeyboardInterrupt):
+        ect.main([str(tmp_path / "b.json"), "--v3-root", str(root / "v3"), "--output", str(tmp_path / "o.json")])
+    assert seen["guard"].declared and seen["guard"].floor_ts == FLOOR
+
+
+# ---- item 4: behavioural tests through the real report builders ---------------------------------------------------
+def test_entry_baseline_replay_materializer_admits_only_fresh_opportunities(env):
+    root, guard, monitor = env
+    from research.entry_baseline_replay import materialize_v3_opportunity_replay
+    _ledger(root, "opportunity")
+    _ledger(root, "market_segment")
+    report = materialize_v3_opportunity_replay(root)
+    assert [e["episode_id"] for e in report["episode_receipts"]] == ["e-ok"]
+    assert report["same_opportunity_count"] == 1
+    assert guard.rejected["v3/ledgers/opportunity.jsonl"] == {"PRE_EPOCH": 1, "STRADDLE": 1, "UNSTAMPED": 1}
+    assert guard.hard_rejected_counts()["straddle_rows_rejected_by_stream"]["v3/ledgers/market_segment.jsonl"] == 1
+    _assert_no_unguarded_v3(monitor, guard)
+
+
+def test_local_scan_reconciliation_cached_reference_rejects_a_pre_epoch_row(env):
+    root, guard, monitor = env
+    from research import local_scan_reconciliation as lsr
+    path = _ledger(root, "decision", (PRE, OK))
+    lines = [json.dumps(r, sort_keys=True, separators=(",", ":")).encode() + b"\n" for r in (PRE, OK)]
+
+    class Store:
+        def ledger_path(self, name):
+            return root / "v3" / "ledgers" / f"{name}.jsonl"
+
+    def ref(i):
+        return {"ledger": "decision", "byte_offset": sum(map(len, lines[:i])), "row_length": len(lines[i])}
+
+    with pytest.raises(ValueError, match="CENSUS_CACHED_REFERENCE_PRE_EPOCH"):
+        lsr._verify_page_ref(Store(), ref(0), {"epoch": EPOCH, "revision": "r"}, "cfg")
+    with pytest.raises(ValueError, match="CENSUS_CACHED_REFERENCE_INVALID"):  # fresh row passes the gate
+        lsr._verify_page_ref(Store(), ref(1), {"epoch": EPOCH, "revision": "r"}, "cfg")
+    _assert_no_unguarded_v3(monitor, guard)
+
+
+def test_research_v3_report_builder_counts_only_fresh_opportunities(env):
+    root, guard, _ = env
+    from research_v3_store import V3EvidenceStore
+    from research.research_v3_report import build_safe_policy_genome_v3_report
+    data, reports = root / "data", root / "reports"
+    reports.mkdir()
+    store = V3EvidenceStore(data, epoch_id="epoch-v3")
+    for rid, ts in (("pre", FLOOR - 500), ("ok", FLOOR + 10)):
+        store.append("opportunity", {"record_id": f"opportunity:{rid}", "opportunity_id": f"opportunity:{rid}",
+                                     "episode_id": rid, "signal_ts": ts})
+    eg.set_process_guard(None)
+    unguarded = build_safe_policy_genome_v3_report(data, reports, candidates=[])
+    eg.set_process_guard(guard)
+    guarded = build_safe_policy_genome_v3_report(data, reports, candidates=[])
+    assert unguarded["epoch_scope"]["included_fresh_rows"] == 2  # control: the pre-epoch row is otherwise counted
+    assert guarded["epoch_scope"]["included_fresh_rows"] == 1
+    assert guarded["collection"]["independent_opportunities"] == 1
+    assert guard.rejected["v3/ledgers/opportunity.jsonl"] == {"PRE_EPOCH": 1}

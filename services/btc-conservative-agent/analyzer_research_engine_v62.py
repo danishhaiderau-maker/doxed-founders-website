@@ -1156,11 +1156,21 @@ def _epoch_guard():
         from analyzer_epoch_guard import EpochGuard, set_process_guard
 
         guard = EpochGuard(None)
+        fail_closed = None
         for root in _epoch_manifest_roots():
             candidate = EpochGuard.from_data_dir(root)
+            if candidate.manifest_missing:
+                # fresh_start_epoch.json without a valid data_epoch.json: fail closed unless another root declares.
+                fail_closed = fail_closed or (candidate, root)
+                continue
             if candidate.declared:
                 guard, _EPOCH_MANIFEST_DIR = candidate, root
                 break
+        else:
+            if fail_closed is not None:
+                guard, _EPOCH_MANIFEST_DIR = fail_closed
+                print(f"   EPOCH GUARD FAIL-CLOSED: {fail_closed[1]} has fresh_start_epoch.json but no valid "
+                      f"data_epoch.json; every epoch-scoped row is rejected {PIPELINE_ENFORCEMENT_TAG}")
         _EPOCH_GUARD = guard
         set_process_guard(guard)
     return _EPOCH_GUARD

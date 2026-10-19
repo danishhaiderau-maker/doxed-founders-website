@@ -94,8 +94,11 @@ def _num(v: Any) -> float | None:
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    """Rows behind the hard fresh-epoch gate (the genome grid installs the process guard; none = admit all)."""
+    from analyzer_epoch_guard import admit_stream_row, open_v3_ledger, stream_name, v3_ledger_relpath  # noqa: PLC0415
+    rel = v3_ledger_relpath(path) or stream_name(path)
     try:
-        fh = open(path, encoding="utf-8")
+        fh = open_v3_ledger(path, encoding="utf-8")
     except OSError:
         return
     with fh:
@@ -107,7 +110,7 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict):
+            if isinstance(row, dict) and admit_stream_row(path, row, relpath=rel):
                 yield row
 
 

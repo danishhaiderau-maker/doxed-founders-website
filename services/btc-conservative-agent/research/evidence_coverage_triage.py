@@ -342,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--v3-root", type=Path, help="Canonical v3 root for authoritative ledger counts")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots  # noqa: PLC0415
+    ensure_process_guard(standalone_guard_roots(args.v3_root.parent if args.v3_root else None))
     if args.binding_index.suffix == ".gz":
         binding_report = {"bindings": _read_jsonl(args.binding_index)}
     else:
