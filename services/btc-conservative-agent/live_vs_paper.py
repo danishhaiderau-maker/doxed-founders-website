@@ -89,10 +89,16 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
             continue
         seen.add(cid)
         rows.append(pair_row(cid, ch, twins.get(cid), intents.get(cid), skip_reasons.get(cid)))
+    live_spans = [(_f(c.get("fill_at_ts")), _f(c.get("exit_at_ts")) or (None if not c.get("closed") else _f(c.get("closed_at_ts"))), str(c.get("correlation_id")))
+                  for c in chains if _f(c.get("fill_at_ts"))]
     for cid in paper_signal_ids:
         cid = str(cid)
         if cid in seen:
             continue
+        if cid not in skip_reasons:   # a paper signal that arrived while another live GS-01 position was open => LIVE_BUSY_SKIPPED
+            sig = _f((intents.get(cid) or {}).get("fly_signal_at_ts"))
+            if sig is not None and any(a <= sig and (b is None or sig < b) and o != cid for a, b, o in live_spans):
+                skip_reasons = {**skip_reasons, cid: "LIVE_BUSY_SKIPPED"}
         if lane_filter and not lane_filter({}, twins.get(cid)):
             continue
         seen.add(cid)

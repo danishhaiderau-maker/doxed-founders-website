@@ -48,3 +48,11 @@ def test_route_returns_pairs_including_paper_only_signal_with_lane_filter():
     d = body.get("data", body)
     ids = {x["trade_id"]: x for x in d["rows"]}
     assert set(ids) == {"g1", "g2"} and ids["g1"]["live_traded"] and ids["g2"]["live_not_traded_reason"] == "LIVE_BUSY_SKIPPED"
+
+
+def test_paper_signal_during_an_open_live_position_is_derived_as_live_busy_skipped():
+    chains = [{"correlation_id": "a", "fill_price": 100.0, "fill_at_ts": 100.0, "closed": False}]
+    intents = {"b": {"fly_signal_at_ts": 150.0}, "c": {"fly_signal_at_ts": 50.0}}
+    out = lv.build(chains, {"a": {"side": "LONG"}}, intents, paper_signal_ids=["a", "b", "c"])
+    by = {r["trade_id"]: r for r in out["rows"]}
+    assert by["b"]["live_not_traded_reason"] == "LIVE_BUSY_SKIPPED" and by["c"]["live_not_traded_reason"] == "NO_LIVE_CHAIN"

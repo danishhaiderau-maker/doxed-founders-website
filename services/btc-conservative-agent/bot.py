@@ -46725,6 +46725,7 @@ def runtime_uptime_loop():
                 _mem_tracker.run(now, sample=(_runtime_telemetry_status(now) or {}).get("latest"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[MEMORY] snapshot failed: %s", type(exc).__name__)
+        _live_guardian_watchdog(now)   # separate thread from the guardian: disarms if the guardian heartbeat is stale while armed
         try:
             tracker.observe(now, _runtime_uptime_problem(now))
         except Exception as exc:
@@ -49059,6 +49060,126 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
 
 
 
+# ---- Live guardian (HM 19 Oct): automatic stop-or-disarm for the GS-01 live test --------------------------------
+_LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "heartbeat_ts": None, "last_violations": [], "disarms": [], "calc": {}}
+_LIVE_GUARDIAN_ERROR_LIMIT = 3   # consecutive failed evaluations (output ON) before AUTO_DISARM:GUARDIAN_ERROR
+_LIVE_GUARDIAN_INTERVAL_SEC = 1.0
+
+
+def _live_guardian_mirror():
+    view = _live_copy_website_cached_view()
+    accts = [a for a in (view.get("accounts") or []) if isinstance(a, dict)]
+    armed = [a for a in accts if a.get("armed")] or accts
+    m = (armed[0].get("exchange_mirror") if armed else None) or None
+    if isinstance(m, dict) and m.get("ok") and float(m.get("read_age_s") or 0) <= 20.0:
+        return m
+    return {"ok": False, "error": (m or {}).get("error") or "stale-or-missing mirror"}
+
+
+def _live_guardian_tick(now=None) -> list:
+    """One pass. Does nothing while Fly's live output is OFF. On a violation: disarm via the documented control."""
+    import live_guardian as _lg
+    now = now or time.time()
+    _LIVE_GUARDIAN_STATE["last_check_ts"] = now
+    if not bool(_get_live_copy_output().snapshot().get("enabled")):
+        # keep the rolling balance history (flat_hist) across OFF ticks so the 24 h peak survives a disarm/re-arm; drop only the
+        # transient per-session markers (a balance change while OFF, e.g. a deposit, must not look like drift on re-arm)
+        _calc = _LIVE_GUARDIAN_STATE.get("calc") or {}
+        _LIVE_GUARDIAN_STATE["calc"] = {k: v for k, v in _calc.items() if k in ("flat_hist", "day_baseline", "day_baseline_ts")}
+        _LIVE_GUARDIAN_STATE["error_streak"] = 0
+        _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now   # a clean pass: nothing to evaluate while output is OFF
+        return []
+    chains = _tile_integrity_chains(now)
+    _floor_fn = globals().get("_offline_sim_epoch_floor")
+    if _floor_fn is None:
+        raise RuntimeError("live guardian: epoch floor function missing (refusing to evaluate without the fresh-epoch filter)")
+    _epoch = _floor_fn()
+    if not _epoch and now - float(_LIVE_GUARDIAN_STATE.get("epoch_warn_ts") or 0) >= 60.0:
+        _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
+        logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, epoch_ts=_epoch or None)
+    _LIVE_GUARDIAN_STATE["last_violations"] = viol
+    if viol:
+        reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
+        logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
+        disarm_exc = None
+        try:
+            ctl = _disarm_live_control(reason)
+            res = {"cancel_failed": len((ctl.get("cancel") or {}).get("failed") or [])}
+        except Exception as exc:  # noqa: BLE001
+            disarm_exc = exc
+            res = {"error": str(exc)[:200]}
+        _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res}])[-20:]
+        if disarm_exc is not None:
+            # a failed disarm is an evaluation ERROR: count it, do NOT stamp the heartbeat (so the watchdog sees a stale guardian)
+            logger.error(f"[LIVE GUARDIAN] disarm FAILED: {disarm_exc} [PIPELINE ENFORCEMENT]")
+            _live_guardian_on_error(disarm_exc, now)
+            return viol
+    # heartbeat only AFTER a successful evaluation: a guardian that keeps raising goes stale instead of looking alive
+    _LIVE_GUARDIAN_STATE["error_streak"] = 0
+    _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now
+    return viol
+
+
+def _live_guardian_on_error(exc, now=None) -> bool:
+    """A failed evaluation. After _LIVE_GUARDIAN_ERROR_LIMIT consecutive failures while output is ON: disarm (fail safe)."""
+    now = now or time.time()
+    st = _LIVE_GUARDIAN_STATE
+    st["error_streak"] = int(st.get("error_streak") or 0) + 1
+    st["last_error"] = {"ts": now, "error": str(exc)[:200]}
+    try:
+        if st["error_streak"] >= _LIVE_GUARDIAN_ERROR_LIMIT and bool(_get_live_copy_output().snapshot().get("enabled")):
+            logger.error(f"[LIVE GUARDIAN] {st['error_streak']} consecutive evaluation errors while live output ON -> AUTO_DISARM:GUARDIAN_ERROR [PIPELINE ENFORCEMENT]")
+            _disarm_live_control("AUTO_DISARM:GUARDIAN_ERROR")
+            st["disarms"] = (st["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_ERROR", "violations": [{"code": "GUARDIAN_ERROR", "detail": str(exc)[:200]}]}])[-20:]
+            return True
+    except Exception as exc2:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] error-disarm failed: {exc2}")
+    return False
+
+
+def _live_guardian_heartbeat_stale(now=None) -> bool:
+    import live_guardian as _lg
+    return _lg.heartbeat_stale(_LIVE_GUARDIAN_STATE.get("heartbeat_ts"), now or time.time())
+
+
+def _live_guardian_watchdog(now=None) -> bool:
+    """Called from a DIFFERENT thread (runtime_uptime_loop): if the guardian thread is dead/stale while live output is ON, disarm."""
+    now = now or time.time()
+    try:
+        if bool(_get_live_copy_output().snapshot().get("enabled")) and _live_guardian_heartbeat_stale(now):
+            logger.error("[LIVE GUARDIAN] heartbeat stale while live output ON -> AUTO_DISARM:GUARDIAN_STALE [PIPELINE ENFORCEMENT]")
+            _disarm_live_control("AUTO_DISARM:GUARDIAN_STALE")
+            _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_STALE", "violations": [{"code": "GUARDIAN_STALE"}]}])[-20:]
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] watchdog error: {exc}")
+    return False
+
+
+def live_guardian_loop():
+    while not shutdown_event.is_set():
+        try:
+            _live_guardian_tick()
+        except Exception as exc:  # noqa: BLE001 - the guardian must never die silently
+            logger.error(f"[LIVE GUARDIAN] tick error: {exc}")
+            _live_guardian_on_error(exc)
+        shutdown_event.wait(_LIVE_GUARDIAN_INTERVAL_SEC)
+
+
+@app.route('/api/monitor/live-guardian', methods=["GET"])
+def monitor_live_guardian_route():
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    import live_guardian as _lg
+    body = {"schema": "live_guardian_v1", "limits": {"stop_missing_sec": _lg.STOP_MISSING_SEC, "daily_loss_cap_usd": _lg.DAILY_LOSS_CAP_USD,
+            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD},
+            "active": bool(_get_live_copy_output().snapshot().get("enabled")),
+            "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
+            "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
+            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
+            "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
+                     "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
 @app.route('/api/monitor/live/exchange-stops', methods=["GET"])
 def monitor_exchange_stops_route():
     """Read-only: the protective stop(s) on the exchange for the open position (relay executor's private read, no I/O here)."""
@@ -60291,6 +60412,7 @@ def main():
     threading.Thread(
         target=safe_thread(runtime_uptime_loop), name="runtime-uptime", daemon=True
     ).start()
+    threading.Thread(target=safe_thread(live_guardian_loop), name="live-guardian", daemon=True).start()
     # Evidence processing is optional and may launch a bounded worker
     # immediately.  Start it only after the safety restore and dashboard boot
     # handoff are complete so it cannot contend with startup readiness.
@@ -61454,6 +61576,9 @@ def api_live_copy_output():
         if _live_copy_paper_lock_active():
             return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
                             "live_copy_output": output.snapshot()}), 409
+        if _live_guardian_heartbeat_stale():
+            return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE",
+                            "live_copy_output": output.snapshot()}), 409
         mirror_block = _mirror_arm_block()
         if mirror_block:
             return jsonify({"ok": False, "error": "MIRROR_ARM_BLOCKED", "reason": mirror_block,
@@ -61877,6 +62002,8 @@ def api_bitfinex_tile_live_orders(lane: str):
             _get_live_copy_eligibility().set(lane, True, by="dashboard",
                                              reason="OPERATOR_ELIGIBLE_VIA_TILE_SWITCH")
             op_elig = _get_live_copy_eligibility().is_eligible(lane)
+    if enabled and _live_guardian_heartbeat_stale():
+        return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE", "lane": lane, "bitfinex_live_orders": False}), 409
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:
