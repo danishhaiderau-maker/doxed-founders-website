@@ -95,3 +95,17 @@ def test_skip_when_not_run_recently_and_diagnose_wiring(tmp_path, monkeypatch):
     assert all(f.category == "analyzer" for f in found)
     old = dict(doc, generated_at=iso(NOW - 4 * 3600))
     assert {f.severity for f in diagnose.check_analyzer_sections({"analyzer_sections": old, "now": NOW}, {}, None)} == {"SKIP"}
+
+
+def test_fail_closed_grid_on_disk_is_red(tmp_path, monkeypatch):
+    """#803: a fresh FAIL_CLOSED report on disk makes analyzer.consistency RED with the reason."""
+    _setup(tmp_path, monkeypatch)
+    an.GENOME_GRID_REPORT.write_text(json.dumps({
+        "schema": "genome_grid_report_v1", "status": "FAIL_CLOSED", "reason": "FRESH_EPOCH_REQUIRED_NOT_DECLARED",
+        "generated_at": iso(NOW - 60), "data_epoch": {"fresh_rule": {"status": "RED"}}}), encoding="utf-8")
+    body = _health(_section("summary"), _section("combos"), _section("genome"))
+    doc = an.run(_paths(tmp_path), {}, NOW, fetch=lambda url, timeout: (body, None, 1.0))
+    assert doc["genome_grid"]["fail_closed_reason"] == "FRESH_EPOCH_REQUIRED_NOT_DECLARED"
+    finding = next(f for f in an.findings(doc, NOW, THRESHOLDS["sections_doc_max_age_sec"])
+                   if f["id"] == "analyzer.consistency")
+    assert finding["severity"] == "RED" and "FAIL_CLOSED (FRESH_EPOCH_REQUIRED_NOT_DECLARED)" in finding["observed"]

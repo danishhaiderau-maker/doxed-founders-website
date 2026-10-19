@@ -127,3 +127,20 @@ def test_endpoint_derivation_handles_url_variables_dynamic_prefixes_and_json_twi
     live = {s["id"]: s for s in dashboard._section_index()}
     assert "/api/streams/data-health" in live["page-data-health"]["apis"]
     assert not any(api.endswith("/") for s in live.values() for api in s["apis"])
+
+
+
+def test_fail_closed_genome_grid_is_red_not_present_green():
+    """#803: a FAIL_CLOSED report (or a RED fresh_rule) must never score genome_grid_present GREEN."""
+    now = time.time()
+    legacy = {"dimensions": ["entry", "exit", "direction"]}
+    payload = {"schema": "genome_grid_dashboard_v1", "status": "FAIL_CLOSED", "level": "RED",
+               "reason": "DATA_EPOCH_MANIFEST_MISSING", "generated_at": _grid()["generated_at"]}
+    checks = ds.genome_grid_checks(payload, legacy, now)
+    assert [(c["id"], c["severity"]) for c in checks] == [("genome_grid_present", "RED")]
+    assert "FAIL_CLOSED (DATA_EPOCH_MANIFEST_MISSING)" in checks[0]["observed"]
+    red_rule = dict(_grid(), data_epoch={"fresh_rule": {"status": "RED", "reason": "FRESH_FLOOR_MISSING"}})
+    checks = ds.genome_grid_checks(red_rule, legacy, now, collected_opportunities=1200)
+    assert checks[0]["severity"] == "RED" and "FRESH_FLOOR_MISSING" in checks[0]["observed"]
+    ok = dict(_grid(), data_epoch={"fresh_rule": {"status": "GREEN", "reason": None}})
+    assert ds.genome_grid_checks(ok, legacy, now, collected_opportunities=1200)[0]["severity"] == "GREEN"
