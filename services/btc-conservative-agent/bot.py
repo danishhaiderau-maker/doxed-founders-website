@@ -49545,6 +49545,8 @@ _SEGMENT_STATUS_FIELDS = (
     # HM (b): laptop/Fly sync verdict computed by the shipper from the laptop beacon.
     "sync_verdict", "sync_verdict_reasons", "laptop_applied_seq", "fresh_start_epoch_id",
     "laptop_cycle_stop_reason", "laptop_cycle_exit",
+    # CUSTODY_STALLED (HM 19 Oct 16:34): received_at of the newest custody receipt + the last prune plan (deny reasons)
+    "custody_received_at", "prune_last_plan",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1
@@ -49579,6 +49581,13 @@ def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
                     transfer["segment_status_age_sec"] = round(max(0.0, now - raw["updated_at"]), 1)
     except (OSError, ValueError):
         pass
+    if transfer.get("segment_status_present"):
+        try:
+            import monitor_gaps as _mg_custody
+            transfer.update(_mg_custody.custody_stall(transfer, now))
+        except Exception as exc:  # noqa: BLE001 - status must never fail on this
+            transfer["custody_stall_reason"] = f"CUSTODY_STALL_UNREADABLE: {type(exc).__name__}"
+    transfer.pop("prune_last_plan", None)   # only its deny reasons are surfaced (custody_last_error)
     return transfer
 
 
