@@ -614,7 +614,7 @@ def test_reconcile_route_uses_the_laptop_per_lane_push_only_for_the_same_epoch(b
         body = {"schema": shb.SCHEMA, "generated_at": now, "verdict": "GREEN", "counts": {"GREEN": 1},
                 "failing": [], "open_alarms": [],
                 "ledger_reconcile": {"schema": "ledger_reconcile_push_v1", "epoch_id": epoch, "generated_at": now,
-                                     "compared": True,
+                                     "compared": True, "bounded": True,
                                      "per_lane": {GS1: {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0,
                                                         "pnl_diff_usd": 0.0}}}}
         r = client.post("/api/system-health/report", json=body, headers={"X-Bot-Admin-Token": ADMIN},

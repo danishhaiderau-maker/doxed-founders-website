@@ -1874,7 +1874,9 @@ def test_reconcile_per_lane_block_rides_the_banner_push_with_the_receipt_epoch()
     assert block["schema"] == "ledger_reconcile_push_v1" and block["epoch_id"] == "ce-20261018-fresh"
     assert block["generated_at"] == sh.iso(now - 300) and block["compared"] is True
     assert set(block["per_lane"]) == set(LANES)
-    assert block["per_lane"][LANES[0]] == {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0, "pnl_diff_usd": 0.0}
+    assert block["per_lane"][LANES[0]] == {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0, "pnl_diff_usd": 0.0,
+                                           "bounded": True}
+    assert block["bounded"] is True  # Fly's listed closes reach the mirror head in this fixture
     clean = monitor_reconcile.sanitize_push(block)
     assert clean["per_lane"][LANES[0]]["mirror_n"] == 1
     assert len(json.dumps(payload)) < 16000

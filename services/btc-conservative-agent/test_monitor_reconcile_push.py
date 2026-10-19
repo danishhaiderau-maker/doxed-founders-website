@@ -24,6 +24,7 @@ def _closed(tid, lane, net):
 
 def _block(**over):
     block = {"schema": mr.PUSH_SCHEMA, "epoch_id": EPOCH, "generated_at": _iso(NOW - 600), "compared": True,
+             "bounded": True,
              "per_lane": {GS1: {"mirror_n": 2, "analyzer_n": 2, "missing_ids_n": 0, "pnl_diff_usd": 0.004},
                           HA: {"mirror_n": 3, "analyzer_n": 2, "missing_ids_n": 1, "pnl_diff_usd": -0.5}}}
     block.update(over)
@@ -74,7 +75,8 @@ def test_sanitize_push_bounds_and_types_untrusted_values():
     raw = _block(per_lane={GS1: {"mirror_n": "2", "analyzer_n": -1, "missing_ids_n": 1.5, "pnl_diff_usd": "nan"},
                            **{f"L{i}": {} for i in range(100)}, 7: {"mirror_n": 1}}, epoch_id="x" * 500)
     clean = mr.sanitize_push(raw)
-    assert clean["per_lane"][GS1] == {"mirror_n": None, "analyzer_n": None, "missing_ids_n": None, "pnl_diff_usd": None}
+    assert clean["per_lane"][GS1] == {"mirror_n": None, "analyzer_n": None, "missing_ids_n": None, "pnl_diff_usd": None,
+                                      "bounded": None}
     assert len(clean["per_lane"]) <= mr.MAX_PUSH_LANES and len(clean["epoch_id"]) == 64
     assert mr.sanitize_push(None) is None and mr.sanitize_push({"per_lane": {}}) is None
 
@@ -105,7 +107,28 @@ def test_compare_with_fly_reports_missing_ids_and_pnl_diff_per_lane_and_the_push
     assert block["schema"] == mr.PUSH_SCHEMA and block["epoch_id"] == EPOCH and block["compared"] is True
     assert block["generated_at"] == report["generated_at"]
     assert block["per_lane"][GS1] == {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 1,
-                                      "pnl_diff_usd": per[GS1]["pnl_diff_usd"]}
+                                      "pnl_diff_usd": per[GS1]["pnl_diff_usd"], "bounded": per[GS1]["bounded"]}
+    assert block["bounded"] is out["breakdown"]["bounded"]
     assert mr.sanitize_push(block)["per_lane"][GS1]["missing_ids_n"] == 1  # round-trips through the Fly sanitizer
     no_fly = lr.reconcile_push_block(report, lr.compare_with_fly(report, None, mirror), EPOCH)
-    assert no_fly["compared"] is False and no_fly["per_lane"] == {}
+    assert no_fly["compared"] is False and no_fly["per_lane"] == {} and no_fly["bounded"] is None
+
+
+@pytest.mark.parametrize("bounded", [False, None, "yes"])
+def test_unbounded_or_unknown_bounded_fills_numbers_but_leaves_ok_null(bounded):
+    """HM nit: while the mirror lags (bounded false) the laptop counts are a lower bound; ok must stay null, never
+    read false. A missing or non-bool flag is treated the same."""
+    lanes = {GS1: {"mirror_n": 3, "analyzer_n": 2, "missing_ids_n": 1, "pnl_diff_usd": -0.5}}
+    out = _build(_block(bounded=bounded, per_lane=lanes))
+    tile = next(t for t in out["per_tile"] if t["lane"] == GS1)
+    assert out["sources"]["mirror"] == "LAPTOP_PUSH"
+    assert tile["mirror_n"] == 3 and tile["missing_ids_n"] == 1 and tile["pnl_diff_usd"] == -0.5
+    assert tile["bounded"] is (False if bounded is False else None) and tile["ok"] is None
+    assert out["laptop_push"]["bounded"] is (False if bounded is False else None)
+
+
+def test_per_lane_bounded_overrides_the_block_flag():
+    lanes = {GS1: {"mirror_n": 2, "analyzer_n": 2, "missing_ids_n": 0, "pnl_diff_usd": 0.0, "bounded": False},
+             HA: {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0, "pnl_diff_usd": 0.0}}
+    tiles = {t["lane"]: t for t in _build(_block(bounded=True, per_lane=lanes))["per_tile"]}
+    assert tiles[GS1]["ok"] is None and tiles[HA]["ok"] is True

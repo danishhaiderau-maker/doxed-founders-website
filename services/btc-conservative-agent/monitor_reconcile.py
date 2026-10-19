@@ -63,12 +63,14 @@ def sanitize_push(raw: Any) -> dict | None:
         diff = _num(v.get("pnl_diff_usd"))
         per_lane[lane[:64]] = {"mirror_n": _count(v.get("mirror_n")), "analyzer_n": _count(v.get("analyzer_n")),
                                "missing_ids_n": _count(v.get("missing_ids_n")),
-                               "pnl_diff_usd": round(diff, 6) if diff is not None and math.isfinite(diff) else None}
+                               "pnl_diff_usd": round(diff, 6) if diff is not None and math.isfinite(diff) else None,
+                               "bounded": v.get("bounded") if isinstance(v.get("bounded"), bool) else None}
     epoch = raw.get("epoch_id")
     generated = raw.get("generated_at")
     return {"schema": PUSH_SCHEMA, "epoch_id": epoch[:64] if isinstance(epoch, str) and epoch else None,
             "generated_at": generated[:40] if isinstance(generated, str) else None,
-            "compared": raw.get("compared") is True, "per_lane": per_lane}
+            "compared": raw.get("compared") is True,
+            "bounded": raw.get("bounded") if isinstance(raw.get("bounded"), bool) else None, "per_lane": per_lane}
 
 
 def push_status(pushed: Mapping[str, Any] | None, epoch_id: Any, now: float) -> tuple[bool, str]:
@@ -103,7 +105,7 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             "fly_fresh_n": sum(1 for r in closed if (r.get("pricing") or {}).get("fresh_eligible") is True
                                 and not r.get("identity_quarantined")),
             "fly_net_pnl_usd": round(net, 6), "mirror_n": None, "analyzer_n": None,
-            "missing_ids": None, "missing_ids_n": None, "pnl_diff_usd": None, "ok": None,
+            "missing_ids": None, "missing_ids_n": None, "pnl_diff_usd": None, "bounded": None, "ok": None,
         })
     epoch_id = common.get("data_epoch_id")
     usable, reason = push_status(pushed, epoch_id, datetime.now(timezone.utc).timestamp() if now is None else now)
@@ -115,9 +117,12 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             if not v:
                 continue
             missing, diff = v.get("missing_ids_n"), v.get("pnl_diff_usd")
+            bounded = v.get("bounded") if v.get("bounded") is not None else block.get("bounded")
             tile.update(mirror_n=v.get("mirror_n"), analyzer_n=v.get("analyzer_n"), missing_ids=missing,
-                        missing_ids_n=missing, pnl_diff_usd=diff)
-            if None not in (missing, diff, v.get("mirror_n"), v.get("analyzer_n")):
+                        missing_ids_n=missing, pnl_diff_usd=diff, bounded=bounded)
+            # ok only when the laptop's comparison was bounded (Fly's listed closes reach the mirror head); while
+            # the mirror lags the counts are a lower bound, so ok stays null instead of reading false
+            if bounded is True and None not in (missing, diff, v.get("mirror_n"), v.get("analyzer_n")):
                 tile["ok"] = (missing == 0 and abs(diff) <= TOLERANCE["pnl_usd"]
                               and v.get("mirror_n") == v.get("analyzer_n"))
     source = "LAPTOP_PUSH" if usable else UNAVAILABLE
@@ -125,10 +130,11 @@ def build(by_lane: Mapping[str, Iterable[Mapping[str, Any]]], short_names: Mappi
             "sources": {"fly": "OK", "mirror": source, "analyzer": source},
             "sources_reason": None if usable else reason,
             "laptop_push": {"epoch_id": block.get("epoch_id"), "generated_at": block.get("generated_at"),
+                            "bounded": block.get("bounded"),
                             "received_ts": (pushed or {}).get("received_ts")} if block else None,
             "per_tile": per_tile, "tolerance": dict(TOLERANCE),
             "stream_gaps": None,
             "fly_n_basis": "FLY_PROCESS_CLOSED_ROWS (tiles 1-5: in-memory trades list; tiles 6/7: on-disk DISLOC ledgers via the 10 s cache; fly_fresh_n is 0 for 6/7 by design)",
             "note": ("mirror/analyzer per-lane numbers from the laptop watcher push (same epoch, fresh); ok = no missing "
-                     "ids, PnL diff <= $0.01 and mirror_n == analyzer_n" if usable else
+                     "ids, PnL diff <= $0.01 and mirror_n == analyzer_n, only when bounded (else null)" if usable else
                      "Fly-side counts only; mirror/analyzer parity needs those hosts to report (ok stays null, never assumed).")}

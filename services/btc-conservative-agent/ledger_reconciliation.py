@@ -197,8 +197,11 @@ def reconcile_push_block(report: Mapping[str, Any], compared: Mapping[str, Any],
         "source_data_through": report.get("source_data_through"),
         "compared": bool(compared.get("fly_compared")),
         "level": compared.get("level"),
+        # bounded: Fly's listed closes reach back to the mirror head, so the counts are exact (not a lagging bound)
+        "bounded": bool((compared.get("breakdown") or {}).get("bounded")) if compared.get("fly_compared") else None,
         "per_lane": {lane: {"mirror_n": v.get("mirror_n"), "analyzer_n": v.get("analyzer_n"),
-                            "missing_ids_n": v.get("missing_ids_n"), "pnl_diff_usd": v.get("pnl_diff_usd")}
+                            "missing_ids_n": v.get("missing_ids_n"), "pnl_diff_usd": v.get("pnl_diff_usd"),
+                            "bounded": v.get("bounded")}
                      for lane, v in per.items()},
     }
 
