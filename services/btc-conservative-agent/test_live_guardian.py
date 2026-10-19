@@ -89,3 +89,104 @@ def test_bot_wiring_tick_disarms_on_violation_and_is_inert_when_output_off():
     assert run(False) == [] and calls == []
     v = run(True)
     assert any(x["code"] == "STOP_MISSING_GT_5S" for x in v) and calls and calls[0].startswith("AUTO_DISARM:STOP_MISSING_GT_5S")
+
+
+# ---- drill: every trigger disarms through the bot tick, plus heartbeat, arm refusal, relay reach, no order calls --------------
+import pathlib as _pl, time as _t, logging as _lg2
+
+_SRC = _pl.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+
+
+def _tick_ns(on=True, chains=None, mirror=None, epoch=None):
+    start, end = _SRC.index("def _live_guardian_tick"), _SRC.index("def _live_guardian_heartbeat_stale")
+    calls = []
+
+    class Out:
+        def snapshot(self): return {"enabled": on}
+
+    ns = {"time": _t, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"enabled": True, "calc": {}, "disarms": [], "last_violations": [], "heartbeat_ts": None},
+          "_get_live_copy_output": lambda: Out(), "_tile_integrity_chains": lambda now: chains(now) if callable(chains) else (chains or []),
+          "_live_guardian_mirror": lambda: mirror, "_offline_sim_epoch_floor": lambda: epoch,
+          "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}}}
+    exec(src_cut(start, end), ns)
+    return ns, calls
+
+
+def src_cut(a, b):
+    return _SRC[a:b]
+
+
+def _mir(**k):
+    d = {"ok": True, "positions": [], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.79}}
+    d.update(k)
+    return d
+
+
+def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_code():
+    now = _t.time()
+    P = [{"symbol": "x", "side": "LONG", "amount": 0.001}]
+    cases = {
+        "STOP_MISSING_GT_5S": (lambda n: [ch(fill_at_ts=n - 9)], _mir(positions=P), None),
+        "ORPHAN": (lambda n: [], _mir(orphans=["1"]), None),
+        "LEDGER_MISMATCH": (lambda n: [], _mir(positions=P), None),
+        "DAILY_LOSS_CAP": (lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_at_ts=n - 100)], _mir(), None),
+        "BALANCE_DRIFT": (lambda n: [], _mir(balance={"derivatives_available_usd": 205.9}), None),
+    }
+    for code, (chains, mirror, epoch) in cases.items():
+        ns, calls = _tick_ns(True, chains, mirror, epoch)
+        if code == "ORPHAN":
+            ns["_LIVE_GUARDIAN_STATE"]["calc"]["orphan_since"] = now - 10
+        if code == "BALANCE_DRIFT":
+            ns["_LIVE_GUARDIAN_STATE"]["calc"].update(day=g.day_key(now), day_baseline=206.79, last_flat_balance=206.79, last_flat_ts=now - 100)
+        v = ns["_live_guardian_tick"](now)
+        assert code in {x["code"] for x in v} and calls and code in calls[0], code
+    ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 99, stop_confirmed=True)], {"ok": False, "error": "stale"})
+    ns["_LIVE_GUARDIAN_STATE"]["calc"]["blind_since"] = now - 40
+    v = ns["_live_guardian_tick"](now)
+    assert "EXCHANGE_MIRROR_BLIND" in {x["code"] for x in v} and calls   # a failed read with a position open, 30 s
+
+
+def test_single_failed_read_is_blind_not_clean_and_does_not_disarm_alone():
+    st = {}
+    assert g.evaluate([ch(fill_at_ts=NOW - 99, stop_confirmed=True)], {"ok": False}, st, NOW) == [] and st["read_state"] == "BLIND"
+    g.evaluate([], MIR, st, NOW + 1)
+    assert st["read_state"] == "OK" and "blind_since" not in st
+
+
+def test_pre_epoch_rows_never_trip_loss_cap_or_drift():
+    old = ch(fill_at_ts=NOW - 5000, closed=True, pnl_usd=-5.0, closed_at_ts=NOW - 10, exit_at_ts=NOW - 10, stop_confirmed=True)
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate([old], MIR, {}, NOW))
+    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([old], MIR, {}, NOW, epoch_ts=NOW - 100))
+
+
+def test_heartbeat_stale_dead_guardian_disarms_and_arming_refuses_while_stale():
+    assert g.heartbeat_stale(None, NOW) and g.heartbeat_stale(NOW - 11, NOW) and not g.heartbeat_stale(NOW - 3, NOW)
+    s, e = _SRC.index("def _live_guardian_heartbeat_stale"), _SRC.index("def live_guardian_loop")
+    calls = []
+
+    class Out:
+        def snapshot(self): return {"enabled": True}
+
+    import live_guardian as lg
+    ns = {"time": _t, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"heartbeat_ts": _t.time() - 60, "disarms": []},
+          "_get_live_copy_output": lambda: Out(), "_disarm_live_control": lambda r: calls.append(r)}
+    exec("import live_guardian as _lg\n" + _SRC[s:e], ns)
+    assert ns["_live_guardian_watchdog"]() is True and calls == ["AUTO_DISARM:GUARDIAN_STALE"]
+    ns["_LIVE_GUARDIAN_STATE"]["heartbeat_ts"] = _t.time()
+    assert ns["_live_guardian_watchdog"]() is False
+    # arming refuses while stale (live output ON route and per-tile ON route) and the watchdog runs from the uptime thread
+    assert _SRC.count('"LIVE_GUARDIAN_HEARTBEAT_STALE"') == 2 and "_live_guardian_watchdog(now)" in _SRC
+    assert "heartbeat_age_sec" in _SRC
+
+
+def test_disarm_reach_and_relay_gate_and_guardian_has_no_order_calls():
+    dis = _SRC[_SRC.index("def _disarm_live_control"):_SRC.index("@app.route('/api/exchange_exposure_audit'")]
+    assert "_get_live_copy_output().set(False" in dis and "reset_all_off" in dis and "_cancel_managed_live_pending_entries" in dis
+    # the relay only receives intents Fly delivers: with output OFF every ENTRY event is withheld by the delivery check
+    import live_copy_control as lcc
+    ok, reason = lcc.delivery_check({"event": sorted(lcc.ENTRY_EVENTS)[0], "entry_allowed": True}, secret="", now=_t.time(), tile_row={}, output={"enabled": False})
+    assert ok is False
+    # no order calls anywhere in the guardian code (HM will grep): the cancel/flag reset happens only inside the existing _disarm_live_control
+    guard_src = _pl.Path(__file__).with_name("live_guardian.py").read_text(encoding="utf-8") + _SRC[_SRC.index("# ---- Live guardian"):_SRC.index("def monitor_live_guardian_route")]
+    for tok in ("place_order", "submit_order", "cancel_order", "close_position", "bitfinex_private", "requests.post", "_relay_http_session.post", "api_close_showcase_position", "market_close"):
+        assert tok not in guard_src, tok

@@ -46725,6 +46725,7 @@ def runtime_uptime_loop():
                 _mem_tracker.run(now, sample=(_runtime_telemetry_status(now) or {}).get("latest"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[MEMORY] snapshot failed: %s", type(exc).__name__)
+        _live_guardian_watchdog(now)   # separate thread from the guardian: disarms if the guardian heartbeat is stale while armed
         try:
             tracker.observe(now, _runtime_uptime_problem(now))
         except Exception as exc:
@@ -49060,7 +49061,8 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
 
 
 # ---- Live guardian (HM 19 Oct): automatic stop-or-disarm for the GS-01 live test --------------------------------
-_LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "last_violations": [], "disarms": [], "calc": {}}
+_LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "heartbeat_ts": None, "last_violations": [], "disarms": [], "calc": {}}
+_LIVE_GUARDIAN_STARTED_TS = time.time()
 _LIVE_GUARDIAN_INTERVAL_SEC = 1.0
 
 
@@ -49079,11 +49081,13 @@ def _live_guardian_tick(now=None) -> list:
     import live_guardian as _lg
     now = now or time.time()
     _LIVE_GUARDIAN_STATE["last_check_ts"] = now
+    _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now
     if not bool(_get_live_copy_output().snapshot().get("enabled")):
         _LIVE_GUARDIAN_STATE["calc"] = {}
         return []
     chains = _tile_integrity_chains(now)
-    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now)
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now,
+                        epoch_ts=globals().get("_offline_sim_epoch_floor", lambda: None)())
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
@@ -49095,6 +49099,25 @@ def _live_guardian_tick(now=None) -> list:
             res = {"error": str(exc)[:200]}
         _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res}])[-20:]
     return viol
+
+
+def _live_guardian_heartbeat_stale(now=None) -> bool:
+    import live_guardian as _lg
+    return _lg.heartbeat_stale(_LIVE_GUARDIAN_STATE.get("heartbeat_ts"), now or time.time())
+
+
+def _live_guardian_watchdog(now=None) -> bool:
+    """Called from a DIFFERENT thread (runtime_uptime_loop): if the guardian thread is dead/stale while live output is ON, disarm."""
+    now = now or time.time()
+    try:
+        if bool(_get_live_copy_output().snapshot().get("enabled")) and _live_guardian_heartbeat_stale(now):
+            logger.error("[LIVE GUARDIAN] heartbeat stale while live output ON -> AUTO_DISARM:GUARDIAN_STALE [PIPELINE ENFORCEMENT]")
+            _disarm_live_control("AUTO_DISARM:GUARDIAN_STALE")
+            _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_STALE", "violations": [{"code": "GUARDIAN_STALE"}]}])[-20:]
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] watchdog error: {exc}")
+    return False
 
 
 def live_guardian_loop():
@@ -49113,7 +49136,10 @@ def monitor_live_guardian_route():
     import live_guardian as _lg
     body = {"schema": "live_guardian_v1", "limits": {"stop_missing_sec": _lg.STOP_MISSING_SEC, "daily_loss_cap_usd": _lg.DAILY_LOSS_CAP_USD,
             "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD},
-            "active": bool(_get_live_copy_output().snapshot().get("enabled")), **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k != "enabled"}}
+            "active": bool(_get_live_copy_output().snapshot().get("enabled")),
+            "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
+            "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
+            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k != "enabled"}}
     return _monitor_response(body, 16384)
 
 @app.route('/api/monitor/nonaccum-plans', methods=["GET"])
@@ -61483,6 +61509,9 @@ def api_live_copy_output():
         if _live_copy_paper_lock_active():
             return jsonify({"ok": False, "error": "FORCE_PAPER_MODE_ACTIVE",
                             "live_copy_output": output.snapshot()}), 409
+        if _live_guardian_heartbeat_stale():
+            return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE",
+                            "live_copy_output": output.snapshot()}), 409
         mirror_block = _mirror_arm_block()
         if mirror_block:
             return jsonify({"ok": False, "error": "MIRROR_ARM_BLOCKED", "reason": mirror_block,
@@ -61906,6 +61935,8 @@ def api_bitfinex_tile_live_orders(lane: str):
             _get_live_copy_eligibility().set(lane, True, by="dashboard",
                                              reason="OPERATOR_ELIGIBLE_VIA_TILE_SWITCH")
             op_elig = _get_live_copy_eligibility().is_eligible(lane)
+    if enabled and _live_guardian_heartbeat_stale():
+        return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE", "lane": lane, "bitfinex_live_orders": False}), 409
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:

@@ -30,12 +30,29 @@ def day_key(now: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(now))
 
 
+HEARTBEAT_STALE_SEC = 10.0      # guardian loop must beat at least this often while live output is ON
+PENDING_EXPOSURE_SEC = 300.0    # an order sent and not yet filled/closed counts as exposure for this long
+
+
+def heartbeat_stale(last_beat_ts, now: float, limit: float = HEARTBEAT_STALE_SEC) -> bool:
+    """True when the guardian loop is dead/stale (never beat counts as stale)."""
+    b = _f(last_beat_ts)
+    return b is None or now - b > limit
+
+
 def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, state: dict, now: float,
-             lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0) -> list:
-    """Return [{code, detail}] violations; ``state`` is mutated (day baseline, orphan first-seen)."""
+             lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0, epoch_ts: float | None = None) -> list:
+    """Return [{code, detail}] violations; ``state`` is mutated (day baseline, orphan first-seen).
+
+    Only FRESH-EPOCH live ledger rows count (``epoch_ts``: chains whose first stage is before it are ignored), so a pre-epoch
+    row can never trip the loss cap or the drift check."""
     out: list = []
-    live = [c for c in chains if lane_needle in str(c.get("lane") or c.get("correlation_id") or "").upper() or not lane_needle]
+    live = [c for c in chains if (lane_needle in str(c.get("lane") or c.get("correlation_id") or "").upper() or not lane_needle)
+            and (epoch_ts is None or (_f(c.get("fill_at_ts") or c.get("order_sent_at_ts") or c.get("fly_signal_at_ts")) or 0.0) >= float(epoch_ts))]
     open_filled = [c for c in live if c.get("fill_at_ts") and not c.get("closed")]
+    pending = [c for c in live if c.get("order_sent_at_ts") and not c.get("fill_at_ts") and not c.get("closed")
+               and now - float(c["order_sent_at_ts"]) < PENDING_EXPOSURE_SEC]
+    exposed = bool(open_filled or pending)
     # 1. stop missing > 5 s after fill
     for c in open_filled:
         age = now - float(c["fill_at_ts"])
@@ -45,10 +62,12 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     if m is None or m.get("ok") is not True:
         # a blind exchange read while live is open is itself unsafe, but a single failed read must not flap: require 30 s
         state.setdefault("blind_since", now)
-        if open_filled and now - state["blind_since"] > 30.0:
+        state["read_state"] = "BLIND"   # a failed/stale read is never a clean state
+        if exposed and now - state["blind_since"] > 30.0:
             out.append({"code": "EXCHANGE_MIRROR_BLIND", "detail": str((m or {}).get("error") or "no mirror")})
         return out
     state.pop("blind_since", None)
+    state["read_state"] = "OK"
     positions, orders = list(m.get("positions") or []), list(m.get("open_orders") or [])
     orphans = list(m.get("orphans") or [])
     # 2. orphan (persisting)
@@ -63,16 +82,22 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     if not recent and len(positions) != len(open_filled):
         out.append({"code": "LEDGER_MISMATCH", "detail": f"exchange positions={len(positions)} open chains={len(open_filled)}"})
     # 4. daily realised loss cap (balance based; only evaluated when flat so unrealised pnl is zero)
-    bal = _f((m.get("balance") or {}).get("derivatives_available_usd"))
     day = day_key(now)
+    ledger_today = [c for c in live if c.get("closed") and _f(c.get("pnl_usd")) is not None
+                    and day_key(float(c.get("closed_at_ts") or c.get("exit_at_ts") or 0)) == day]
+    ledger_loss = -sum(float(c["pnl_usd"]) for c in ledger_today)
+    state["ledger_loss_usd"] = round(ledger_loss, 4)
+    if ledger_loss >= DAILY_LOSS_CAP_USD:
+        out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} ({len(ledger_today)} fresh-epoch rows today)"})
+    bal = _f((m.get("balance") or {}).get("derivatives_available_usd"))
     flat = not positions and not orders and not open_filled
     if bal is not None and flat:
         if state.get("day") != day:
             state.update(day=day, day_baseline=bal)
         loss = float(state["day_baseline"]) - bal - float(funding_usd_today or 0.0) * 0.0
         state["day_loss_usd"] = round(loss, 4)
-        if loss >= DAILY_LOSS_CAP_USD:
-            out.append({"code": "DAILY_LOSS_CAP", "detail": f"loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})
+        if loss >= DAILY_LOSS_CAP_USD and not any(v["code"] == "DAILY_LOSS_CAP" for v in out):
+            out.append({"code": "DAILY_LOSS_CAP", "detail": f"balance loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})
         # 5. balance drift while flat vs the last flat reading, explained only by reported realised pnl + funding
         last = state.get("last_flat_balance")
         explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in live if c.get("closed") and (c.get("closed_at_ts") or c.get("exit_at_ts") or 0) > state.get("last_flat_ts", now))
