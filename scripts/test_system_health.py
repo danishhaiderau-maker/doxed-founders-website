@@ -1195,6 +1195,20 @@ def test_tier_a_health_drives_storage_tier_a():
     assert "INVALID_DAY_ROWS" in check["observed"]
 
 
+def test_tier_a_amber_says_why_with_undated_count_and_last_promoted():
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = healthy(now)
+    inputs["tier_a_health"] = {"level": "AMBER", "backfilled": True, "datasets": [
+        {"dataset": "ai_calls", "level": "AMBER", "reasons": [], "reason_text": "UNDATED_ROWS_IN_STAGING_AWAITING_PROMOTION",
+         "staging_undated_count": 42, "last_promoted_partition": "2026-10-01", "last_error": None}]}
+    check = by_id(sh.evaluate(inputs, {}))["storage.tier_a"]
+    assert check["status"] == sh.AMBER
+    assert "UNDATED_ROWS_IN_STAGING_AWAITING_PROMOTION" in check["observed"]
+    assert "undated=42" in check["observed"] and "last_promoted=2026-10-01" in check["observed"]
+    inputs["tier_a_health"]["datasets"][0] = {"dataset": "ai_calls", "level": "AMBER", "reasons": []}
+    assert "no reason reported" in by_id(sh.evaluate(inputs, {}))["storage.tier_a"]["observed"]
+
+
 # ------------------------------------------------- BLINDSPOT-AUDIT-3 closures
 
 COLLISION = "ValueError: POLICY_ID_SPEC_COLLISION:SCORE_LED_NON_TIE_PAPER_V2::X"
