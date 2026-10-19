@@ -49072,7 +49072,15 @@ def monitor_exchange_stops_route():
         next((a for a in accts if a.get("armed")), None) or next((a for a in accts if isinstance(a.get("exchange_mirror"), dict) and a["exchange_mirror"].get("ok")), None))
     with state_lock:
         audit = dict(state.get("exchange_sync_audit") or {})
-    body = _esv.build((pick or {}).get("exchange_mirror"), (pick or {}).get("account"), audit)
+    try:
+        fly_cap = int(get_effective_max_active_signals())
+    except Exception:  # noqa: BLE001
+        fly_cap = None
+    relay_cap = {"fly_max_active_signals": fly_cap, "railway_expected_env_SUBSCRIBER_MAX_CONCURRENT_SIGNALS": 1,
+                 "railway_env_observable_from_fly": False,
+                 "effective_cap_rule": "relay uses SUBSCRIBER_MAX_CONCURRENT_SIGNALS when set, else Fly's max_active_signals, else 3",
+                 "how_to_prove": "relay logs no boot line; a second signal while one lot is open is refused with the reason 'Max 1 open copy lots' on the relay account"}
+    body = _esv.build((pick or {}).get("exchange_mirror"), (pick or {}).get("account"), audit, relay_cap)
     body["website_reachable"] = bool(view.get("reachable"))
     body["accounts_seen"] = [a.get("account") for a in accts]
     return _monitor_response(body, 16384)

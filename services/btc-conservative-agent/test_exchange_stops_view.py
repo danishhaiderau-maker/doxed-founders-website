@@ -30,3 +30,15 @@ def test_short_needs_a_buy_stop_and_flat_states_and_unknown_mirror():
     assert v.build(mirror(stops=[STOP], orphans=["11"]))["verdict"] == "FLAT_WITH_STOP_ORPHANS"
     assert v.build({"ok": False, "error": "credentials-missing"})["verdict"] == "UNKNOWN_MIRROR_NOT_OK"
     assert v.build(mirror(read_age_s=99.0))["fresh"] is False
+
+
+def test_stale_read_never_gives_protected_and_shows_covered_vs_position_and_age():
+    pos = {"symbol": "tBTCF0:USTF0", "side": "LONG", "amount": 0.001}
+    r = v.build(mirror(positions=[pos], stops=[STOP], read_age_s=45.0))
+    assert r["verdict"] == "STALE_READ_NOT_PROTECTED" and r["fresh"] is False and r["read_age_s"] == 45.0
+    assert r["positions"][0]["protected"] is True and r["positions"][0]["covered_vs_position"] == "0.001 / 0.001"
+    assert v.build(mirror(positions=[pos], stops=[STOP]))["verdict"] == "PROTECTED"
+    assert v.build(mirror(read_age_s=45.0))["verdict"] == "STALE_READ"
+    part = v.build(mirror(positions=[pos], stops=[dict(STOP, amount=-0.0004)]))
+    assert part["positions"][0]["covered_vs_position"] == "0.0004 / 0.001" and part["verdict"] == "UNPROTECTED_POSITION"
+    assert v.build(mirror(), relay_cap={"fly_max_active_signals": 20})["relay_cap"]["fly_max_active_signals"] == 20
