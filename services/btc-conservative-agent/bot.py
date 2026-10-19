@@ -61234,6 +61234,8 @@ def _live_copy_paper_twins() -> dict:
                 out[tid] = {"entry_price": row.get("entry"), "qty": row.get("qty"),
                             "side": row.get("dir"), "exit_price": row.get("exit"),
                             "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
+                            "entry_ts": row.get("entry_ts"), "signal_ts": row.get("signal_ts"),
+                            "funding_usd_raw": row.get("funding_usd_raw"), "funding_fees_usd": row.get("funding_fees_usd"),
                             "source": "trade_outcome_journal"}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
         pass

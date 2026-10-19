@@ -1,0 +1,108 @@
+"""Read-only live-vs-paper pairs per signal (HM 19 Oct, GS-01 live test).
+
+One row per Fly signal/trade id. Pure functions over the live-copy chains (executor reports) and the paper twins; no I/O,
+nothing here touches trading state. Fields the executor or the paper ledger does not report stay null and are listed in
+``missing`` so a gap is visible instead of silently averaged away. No trading fees: only funding is modelled.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable, Mapping
+
+SCHEMA = "live_vs_paper_v1"
+_NOT_TRADED_REASONS = ("LIVE_BUSY_SKIPPED",)
+
+
+def _f(v):
+    try:
+        x = float(v)
+        return x if x == x else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _pos(v):
+    x = _f(v)
+    return x if x and x > 0 else None
+
+
+def _ms(a, b):
+    return round((b - a) * 1000.0, 1) if a is not None and b is not None else None
+
+
+def _bp(side_sign: float, exit_px, entry_px):
+    return round(side_sign * (exit_px / entry_px - 1.0) * 1e4, 2) if exit_px and entry_px else None
+
+
+def _sign(side) -> float:
+    return -1.0 if str(side or "").upper() in ("SHORT", "SELL") else 1.0
+
+
+def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] | None, intent: Mapping[str, Any] | None = None,
+             skip_reason: str | None = None) -> dict:
+    chain, twin, intent = chain or {}, twin or {}, intent or {}
+    sg = _sign(twin.get("side"))
+    p_in, p_out = _pos(twin.get("entry_price")), _pos(twin.get("exit_price"))
+    l_in, l_out = _pos(chain.get("fill_price")), _pos(chain.get("exit_price"))
+    sig_ts = _f(chain.get("fly_signal_at_ts")) or _f(intent.get("fly_signal_at_ts")) or _f(twin.get("signal_ts"))
+    sent, fill, stop = _f(chain.get("order_sent_at_ts")), _f(chain.get("fill_at_ts")), _f(chain.get("stop_confirmed_at_ts"))
+    stop_ts = _f(chain.get("stop_placed_at_ts")) or stop
+    traded = bool(l_in or fill)
+    reason = None
+    if not traded:
+        dec = chain.get("executor_decision") or {}
+        reason = (skip_reason or chain.get("declined_reason") or dec.get("reason")
+                  or next((e.get("code") for e in chain.get("errors") or [] if e.get("code")), None)
+                  or ("NO_LIVE_CHAIN" if not chain else "NO_FILL"))
+    live_bp, paper_bp = _bp(sg, l_out, l_in), _bp(sg, p_out, p_in)
+    row = {
+        "trade_id": cid, "lane": chain.get("lane") or intent.get("lane"), "side": twin.get("side"),
+        "live_traded": traded, "live_not_traded_reason": reason,
+        "paper_fill_price": p_in, "paper_fill_ts": _f(twin.get("entry_fill_ts") or twin.get("entry_ts")),
+        "live_fill_price": l_in, "live_fill_ts": fill,
+        "entry_slippage_bp": round(sg * (l_in / p_in - 1.0) * 1e4, 2) if l_in and p_in else None,   # live minus paper, adverse > 0
+        "paper_exit_price": p_out, "paper_exit_ts": _f(twin.get("exit_ts")),
+        "live_exit_price": l_out, "live_exit_ts": _f(chain.get("exit_at_ts")),
+        "exit_slippage_bp": round(-sg * (l_out / p_out - 1.0) * 1e4, 2) if l_out and p_out else None,  # adverse > 0
+        "signal_to_send_ms": _ms(sig_ts, sent), "send_to_fill_ms": _ms(sent, fill), "fill_to_stop_ms": _ms(fill, stop_ts),
+        "outcome_bp_paper": paper_bp, "outcome_bp_live": live_bp,
+        "outcome_delta_bp": round(live_bp - paper_bp, 2) if live_bp is not None and paper_bp is not None else None,
+        "funding_usd_paper": _f(twin.get("funding_usd_raw") if twin.get("funding_usd_raw") is not None else twin.get("funding_fees_usd")),
+        "funding_usd_live": _f(chain.get("funding_usd")),
+        "paper_exit_reason": twin.get("exit_reason"), "live_exit_reason": chain.get("exit_reason"),
+        "closed": bool(chain.get("closed")),
+    }
+    row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",
+                                         "fill_to_stop_ms") if traded and row.get(k) is None)
+    return row
+
+
+def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, Any]], intents: Mapping[str, Mapping[str, Any]] | None = None,
+          paper_signal_ids: Iterable[str] = (), skip_reasons: Mapping[str, str] | None = None, lane_filter=None, limit: int = 200) -> dict:
+    """Rows for every live chain plus every paper signal live never traded (with a reason code)."""
+    intents, skip_reasons = intents or {}, skip_reasons or {}
+    rows, seen = [], set()
+    for ch in chains:
+        cid = str(ch.get("correlation_id") or "")
+        if not cid or cid in seen:
+            continue
+        if lane_filter and not lane_filter(ch, twins.get(cid)):
+            continue
+        seen.add(cid)
+        rows.append(pair_row(cid, ch, twins.get(cid), intents.get(cid), skip_reasons.get(cid)))
+    for cid in paper_signal_ids:
+        cid = str(cid)
+        if cid in seen:
+            continue
+        if lane_filter and not lane_filter({}, twins.get(cid)):
+            continue
+        seen.add(cid)
+        rows.append(pair_row(cid, None, twins.get(cid), intents.get(cid), skip_reasons.get(cid)))
+    rows = rows[-limit:]
+    traded = [r for r in rows if r["live_traded"]]
+    by_reason: dict = {}
+    for r in rows:
+        if not r["live_traded"]:
+            by_reason[r["live_not_traded_reason"]] = by_reason.get(r["live_not_traded_reason"], 0) + 1
+    return {"schema": SCHEMA, "n_signals": len(rows), "n_live_traded": len(traded), "n_paper_only": len(rows) - len(traded),
+            "paper_only_by_reason": by_reason, "n_missing_fields": sum(1 for r in traded if r["missing"]), "rows": rows,
+            "note": "read-only; no summary computed here (HM). Null = not reported by the executor/paper ledger (see missing). Funding only, no fees."}
