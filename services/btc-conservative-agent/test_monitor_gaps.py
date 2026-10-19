@@ -259,6 +259,16 @@ def test_arming_word_is_unknown_unless_state_is_clean_boolean():
         assert "live arming state unknown" in text and "DISARMED" not in text and "ARMED" not in text.replace("DISARMED", ""), bad
 
 
+def test_tile_switches_live_eligible_alias_and_notes():
+    rows = [{"lane": "a", "paper_on": True, "live_orders_on": True, "live_eligible": True, "relay_eligible": True},
+            {"lane": "b", "paper_on": True, "live_orders_on": False, "live_eligible": False, "relay_eligible": True}]
+    out = mg.tile_switches(rows)
+    assert out["live_eligible_count"] == out["live_on_count"] == 1
+    assert "NOT arming" in out["field_notes"]["live_eligible"] or "NOT arming" in out["field_notes"]["live_orders_on"]
+    assert "bitfinex_live_orders" in out["field_notes"]["arming"]
+    assert [t["live_eligible"] for t in out["tiles"]] == [t["live_orders_on"] for t in out["tiles"]]
+
+
 def test_custody_stalled_amber_after_2h_red_after_6h_with_since_time_and_reason():
     import time as _t
     now = 2_000_000_000.0

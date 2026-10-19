@@ -258,6 +258,14 @@ def protective_coverage(rows: Iterable[Mapping], policy_errors: int = 0) -> dict
 # ----------------------------------------------------------------------------
 # R4 tile switches
 # ----------------------------------------------------------------------------
+SWITCHES_FIELD_NOTES = {
+    "live_orders_on": "DEPRECATED NAME, same value as live_eligible. Operator live eligibility only, NOT arming.",
+    "live_eligible": "Operator eligibility: the tile may copy live once live output is armed. Does not place orders by itself.",
+    "live_on_count": "DEPRECATED NAME, same value as live_eligible_count.",
+    "arming": "Whether real Bitfinex orders can go out is bitfinex_live_orders / effective_live on /api/live-copy/status.",
+}
+
+
 def tile_switches(tiles: Iterable[Mapping], build_text: str = "") -> dict:
     """tiles rows: lane, number, label, registry_state, retired, paper_on, live_orders_on,
     relay_eligible, evaluator_running, evaluations_since_off, rows_since_off, active_listed."""
@@ -281,6 +289,7 @@ def tile_switches(tiles: Iterable[Mapping], build_text: str = "") -> dict:
     on = [t for t in out if t.get("paper_on") and not t.get("retired")]
     live = [t for t in out if t.get("live_orders_on") and not t.get("retired")]
     return {"schema": SWITCHES_SCHEMA, "tiles": out, "paper_on_count": len(on), "live_on_count": len(live),
+            "live_eligible_count": len(live), "field_notes": SWITCHES_FIELD_NOTES,
             "build_features": build_text, "alerts": alerts, "level": RED if alerts else GREEN}
 
 
