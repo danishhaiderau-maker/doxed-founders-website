@@ -522,3 +522,143 @@ def test_research_v3_report_builder_counts_only_fresh_opportunities(env):
     assert guarded["epoch_scope"]["included_fresh_rows"] == 1
     assert guarded["collection"]["independent_opportunities"] == 1
     assert guard.rejected["v3/ledgers/opportunity.jsonl"] == {"PRE_EPOCH": 1}
+
+
+# ---- HM 19 Oct CHANGES on fe334474 --------------------------------------------------------------------------------
+def test_shadow_exit_report_reader_drops_pre_epoch_rows(env):
+    """#1: shadow_exit_paths.jsonl is epoch-scoped; the analyzer calls _read_jsonl in-process (engine L18842)."""
+    root, guard, monitor = env
+    from research import shadow_exit_report as ser
+    path = root / "shadow_exit_paths.jsonl"
+    path.write_text(json.dumps({"record_id": "old", "ts": FLOOR - 600}) + "\n"
+                    + json.dumps({"record_id": "new", "ts": FLOOR + 600}) + "\n")
+    assert [r["record_id"] for r in ser._read_jsonl(path)] == ["new"]
+    assert guard.rejected["shadow_exit_paths.jsonl"]
+    report = monitor.report(guard.manifest, FLOOR)
+    assert "shadow_exit_paths.jsonl" not in report["unguarded_stream_reads"]
+    eg.set_process_guard(None)
+    assert len(list(ser._read_jsonl(path))) == 2  # no declared epoch: unchanged
+
+
+def test_fail_closed_genome_run_exits_non_zero_and_dashboard_shows_red(tmp_path, monkeypatch, capsys):
+    """#2: a fail-closed genome run must not print OK / exit 0, and /api/genome-grid must show RED."""
+    from research import genome_grid_study as gg
+    from research import research_dashboard as dash
+    root = _declare(tmp_path / "data", manifest=False)  # floor present, manifest missing -> fail closed
+    out = tmp_path / "out"
+    monkeypatch.setattr(gg, "epoch_guard_roots", lambda mirror: [root])
+    monkeypatch.setattr(gg, "load_tape", lambda *a, **k: pytest.fail("must not read tape when fail-closed"))
+    monkeypatch.setattr(gg, "analyzer_cycle_busy", lambda path: False)
+    monkeypatch.setattr(gg, "_below_normal", lambda: None)
+    code = gg.main(["--mirror", str(root), "--tier-a", str(tmp_path / "tierA"), "--out-dir", str(out)])
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert code != 0 and printed["status"] == "FAIL_CLOSED" and printed["reason"] == eg.MANIFEST_MISSING
+    report = json.loads((out / "genome_grid_report.json").read_text())
+    assert report["status"] == "FAIL_CLOSED" and report["data_epoch"]["fresh_rule"]["status"] == "RED"
+    monkeypatch.setattr(dash, "GENOME_GRID_REPORT_PATH", out / "genome_grid_report.json")
+    payload = dash._genome_grid_payload()
+    assert payload["status"] == "FAIL_CLOSED" and payload["level"] == "RED" and payload["reason"] == eg.MANIFEST_MISSING
+    # an older OK-looking report whose epoch block is RED is also served as FAIL_CLOSED
+    (out / "genome_grid_report.json").write_text(json.dumps({"schema": "genome_grid_report_v1", "generated_at": None,
+                                                              "data_epoch": {"fresh_rule": {"status": "RED", "reason": "X"}}}))
+    assert dash._genome_grid_payload()["status"] == "FAIL_CLOSED"
+
+
+def test_engine_v3_ledger_rows_use_the_nested_straddle_rule(tmp_path, monkeypatch):
+    """#3: _v3_ledger_rows (missed-opportunity proof, fill_time_guard_counterfactual) applies admit_v3_row, so a row
+    straddling the floor (top-level ts after it, nested window before it) and an unstamped row are rejected."""
+    monkeypatch.syspath_prepend(str(HERE))
+    import analyzer_research_engine_v62 as engine
+    from research_v3_store import V3EvidenceStore
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-v3")
+    straddle = {"record_id": "execution:str", "episode_id": "str", "ts": FLOOR + 100, "signal_ts": FLOOR + 100,
+                "segment_ref": {"start_ts": FLOOR - 50, "end_ts": FLOOR + 50}}
+    rows = [{"record_id": "execution:pre", "episode_id": "pre", "ts": FLOOR - 500, "signal_ts": FLOOR - 500}, straddle,
+            {"record_id": "execution:ok", "episode_id": "ok", "ts": FLOOR + 100, "signal_ts": FLOOR + 100},
+            {"record_id": "execution:uns", "episode_id": "uns", "ts": FLOOR + 100}]  # only a bare ts: UNSTAMPED
+    for row in rows:
+        store.append("execution", row)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    guard = eg.EpochGuard(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR), floor_ts=FLOOR, require_floor=True)
+    monkeypatch.setattr(engine, "_EPOCH_GUARD", guard)
+    eg.set_process_guard(guard)
+    assert guard.admit("execution.jsonl", straddle) is True  # control: the old single-ts check admitted it
+    got = [r["episode_id"] for r in engine._v3_ledger_rows("execution")]
+    assert got == ["ok"]
+    assert guard.rejected["v3/ledgers/execution.jsonl"] == {"PRE_EPOCH": 1, "STRADDLE": 1, "UNSTAMPED": 1}
+    src = (HERE / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
+    body = src[src.index("def _v3_ledger_generation_rows"):src.index("def _compressed_shadow_rows")]
+    assert "admit_v3_row(" in body and "_epoch_admit(" not in body and "_load_jsonl_rows(" not in body
+
+
+def test_scoped_process_guard_never_clears_a_guard_installed_meanwhile(tmp_path):
+    """#4: the scoped guard clears only itself."""
+    other = eg.EpochGuard(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR), floor_ts=FLOOR)
+    with eg.scoped_process_guard([_declare(tmp_path / "d")]) as mine:
+        assert eg.process_guard() is mine
+        eg.set_process_guard(other)  # e.g. the analyzer installed its own guard during the call
+    assert eg._PROCESS_GUARD is other
+
+
+@pytest.mark.parametrize("setup", ["env", "marker", "corrupt_floor"])
+def test_undeclared_epoch_fails_closed_when_required(tmp_path, monkeypatch, setup):
+    """#5: both files missing (env/marker required) or a corrupt floor with no manifest -> RED, admits nothing."""
+    from research.generation_receipt import build_generation_receipt
+    root = tmp_path / "data"
+    root.mkdir()
+    monkeypatch.delenv(eg.REQUIRE_EPOCH_ENV, raising=False)
+    if setup == "env":
+        monkeypatch.setenv(eg.REQUIRE_EPOCH_ENV, "1")
+    elif setup == "marker":
+        (root / eg.REQUIRE_EPOCH_MARKER).write_text("{}")
+    else:
+        (root / "fresh_start_epoch.json").write_text("{corrupt")
+    guard = eg.guard_from_roots([root])
+    assert guard.declared and guard.manifest_missing and guard.floor_missing
+    expect = eg.MANIFEST_MISSING if setup == "corrupt_floor" else eg.EPOCH_REQUIRED_UNDECLARED
+    assert guard.fail_closed_reason == expect
+    assert [guard.admit_v3_ledger_row("v3/ledgers/decision.jsonl", r) for r in ROWS] == [False] * 4
+    assert guard.admit("signal_replay.jsonl", {"ts": FLOOR + 600}) is False
+    block = guard.receipt_block()
+    assert block["fresh_rule"] == {"status": "RED", "reason": expect, "v3_readers": block["fresh_rule"]["v3_readers"]}
+    receipt = build_generation_receipt({"required_report_status": {}}, integrity={"report_status": "VALID"},
+                                       data_epoch=block)
+    assert receipt["level"] == "RED"
+
+
+def test_undeclared_epoch_not_required_still_admits_and_is_logged_loudly(tmp_path, monkeypatch, capsys):
+    """#5/#7: without a requirement nothing changes for pre-reset tools, but ensure_process_guard says so on stderr."""
+    monkeypatch.delenv(eg.REQUIRE_EPOCH_ENV, raising=False)
+    guard = eg.ensure_process_guard([tmp_path / "nothing"])
+    assert not guard.declared and eg._PROCESS_GUARD is None
+    err = capsys.readouterr().err
+    assert "EPOCH GUARD NOT DECLARED" in err and "data_epoch.json" in err and eg.REQUIRE_EPOCH_ENV in err
+    monkeypatch.setenv(eg.REQUIRE_EPOCH_ENV, "1")
+    required = eg.ensure_process_guard([tmp_path / "nothing"])
+    assert required.declared and eg._PROCESS_GUARD is required
+    assert "EPOCH GUARD FAIL-CLOSED" in capsys.readouterr().err
+
+
+def test_analyzer_and_standalone_roots_pick_the_same_floor(tmp_path, monkeypatch):
+    """#6: one root list (epoch_roots) and one resolver for the analyzer and every standalone job, including
+    canonical-research-data, so the floor is the same."""
+    monkeypatch.syspath_prepend(str(HERE))
+    import analyzer_research_engine_v62 as engine
+    monkeypatch.delenv("BTC_DATA_EPOCH_DIR", raising=False)
+    monkeypatch.delenv(eg.REQUIRE_EPOCH_ENV, raising=False)
+    canon = _declare(tmp_path / "agent" / "canonical-research-data")  # manifest + the real floor
+    mirror = tmp_path / "tree"
+    mirror.mkdir()
+    (mirror / "data_epoch.json").write_text(json.dumps(de.new_manifest("ce-20261018-fresh", started_at_ts=FLOOR)))
+    (tmp_path / "fresh_start_epoch.json").write_text(json.dumps({"epoch_ts": FLOOR - 9999}))  # a stale floor above
+    monkeypatch.setattr(eg, "AGENT_DIR", tmp_path / "agent")
+    monkeypatch.setattr(eg, "LAPTOP_MIRROR_TREE", str(mirror))
+    monkeypatch.setattr(engine, "_analyzer_data_root", lambda: str(tmp_path / "agent" / "missing"))
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    analyzer_roots = [Path(r) for r in engine._epoch_manifest_roots()]
+    assert canon in analyzer_roots and mirror in analyzer_roots
+    a_guard, a_root = eg.resolve_epoch_guard(analyzer_roots)
+    s_guard = eg.guard_from_roots(eg.standalone_guard_roots(mirror))  # the genome grid passes the mirror tree
+    assert a_root == canon and a_guard.floor_ts == s_guard.floor_ts == FLOOR
+    monkeypatch.setattr(engine, "_EPOCH_GUARD", None)
+    assert engine._epoch_guard().floor_ts == FLOOR
