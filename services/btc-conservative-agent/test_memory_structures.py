@@ -301,3 +301,19 @@ def test_mem_tracker_is_a_module_global_so_analytics_loop_can_record_loops():
     assert re.search(r"^_mem_tracker = None", src, re.M)
     body = src[src.index("def runtime_uptime_loop():"):][:400]
     assert "global _mem_tracker" in body
+
+
+def _lp(**d):
+    return {"name": "analytics_loop", "steps": [{"step": k, "sec": 1.0, "rss_delta_kb": v} for k, v in d.items()]}
+
+
+def test_step_attribution_needs_five_consecutive_growth_cycles():
+    big_once = [_lp(a=90000, b=0)] + [_lp(a=0, b=0)] * 6          # one +90 MB cycle: NOT attributed
+    assert ms.step_attribution(big_once)["attributed"] == []
+    four = [_lp(a=5000)] * 4 + [_lp(a=0)] + [_lp(a=5000)] * 4      # run broken: max 4
+    assert ms.step_attribution(four)["attributed"] == [] and ms.step_attribution(four)["steps"]["a"]["max_consecutive_growth_cycles"] == 4
+    five = [_lp(a=0, b=3000)] + [_lp(a=2000, b=3000)] * 5
+    r = ms.step_attribution(five)
+    assert r["attributed"] == ["a", "b"] or r["attributed"] == ["b", "a"] or sorted(r["attributed"]) == ["a", "b"]
+    assert r["steps"]["a"]["growth_kb_over_run"] == 10000
+    assert ms.step_attribution([])["attributed"] == []
