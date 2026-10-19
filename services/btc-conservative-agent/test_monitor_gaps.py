@@ -267,3 +267,57 @@ def test_tile_switches_live_eligible_alias_and_notes():
     assert "NOT arming" in out["field_notes"]["live_eligible"] or "NOT arming" in out["field_notes"]["live_orders_on"]
     assert "bitfinex_live_orders" in out["field_notes"]["arming"]
     assert [t["live_eligible"] for t in out["tiles"]] == [t["live_orders_on"] for t in out["tiles"]]
+
+
+def test_custody_stalled_amber_after_2h_red_after_6h_with_since_time_and_reason():
+    import time as _t
+    now = 2_000_000_000.0
+    iso = lambda ts: _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(ts))
+    c = mg.CustodyLag(clock=lambda: now)
+    base = {"laptop_acked_seq": 1150, "custody_through_seq": 1036, "shipped_seq": 1153}
+    out = c.observe({**base, "custody_received_at": iso(now - 30 * 60)})
+    assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stalled_s"] == 1800.0
+    for minutes in (65, 70, 75, 119):     # normal hourly parity cadence must stay GREEN
+        out = c.observe({**base, "custody_received_at": iso(now - minutes * 60)})
+        assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stall_reason"] is None, minutes
+    out = c.observe({**base, "custody_received_at": iso(now - 2 * 3600 - 60)})
+    assert "CUSTODY_STALLED" in out["alerts"] and out["level"] == "AMBER"
+    assert out["custody_last_advanced_utc"] == iso(now - 2 * 3600 - 60)
+    assert out["custody_stall_reason"] == "LAPTOP_PARITY_OR_ANALYZER_BEHIND_ACK"
+    out = c.observe({**base, "custody_received_at": iso(now - 7 * 3600)})
+    assert out["level"] == "RED" and "CUSTODY_STALLED" in out["alerts"]
+    # shipped not ahead of custody (nothing new to custody): never stalled
+    out = c.observe({"laptop_acked_seq": 1036, "custody_through_seq": 1036, "shipped_seq": 1036, "custody_received_at": iso(now - 7 * 3600)})
+    assert "CUSTODY_STALLED" not in out["alerts"] and out["level"] == "GREEN"
+    # ack itself stuck at custody
+    s = mg.custody_stall({"laptop_acked_seq": 1036, "custody_through_seq": 1036, "shipped_seq": 1153,
+                          "custody_received_at": iso(now - 3 * 3600)}, now)
+    assert s["custody_stall_reason"] == "LAPTOP_ACK_NOT_ADVANCING"
+
+
+def test_custody_stall_fields_without_receipt_and_last_error():
+    s = mg.custody_stall({"shipped_seq": 5, "prune_last_plan": {"deny_reasons": ["PARITY_STALE"]}}, 1000.0)
+    assert s["custody_stall_reason"] == "NO_CUSTODY_RECEIPT" and s["custody_stalled_s"] is None
+    assert s["custody_last_error"] == "PARITY_STALE" and s["custody_last_advanced_utc"] is None
+    assert mg.custody_stall({"custody_through_seq": 3, "last_error": "boom"}, 1000.0)["custody_last_error"] == "SHIPPER: boom"
+    # custody blockers win over the shipper's general last_error
+    assert mg.custody_stall({"custody_through_seq": 3, "last_error": "boom", "prune_last_plan": {"deny_reasons": ["PARITY_SEQ_NOT_ACKED"]}},
+                            1000.0)["custody_last_error"] == "PARITY_SEQ_NOT_ACKED"
+
+
+def test_custody_stall_skipped_when_prune_mode_off():
+    now = 2_000_000_000.0
+    c = mg.CustodyLag(clock=lambda: now)
+    out = c.observe({"laptop_acked_seq": 1150, "custody_through_seq": 1036, "shipped_seq": 1153, "prune_mode": "off",
+                     "custody_received_at": "2026-01-01T00:00:00Z"})
+    assert "CUSTODY_STALLED" not in out["alerts"] and out["custody_stalled_s"] is None
+    assert out["custody_last_advanced_utc"] is None and out["custody_stall_reason"] == "PRUNE_MODE_OFF"
+
+
+def test_status_shipper_carries_custody_stall_fields():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    body = src[src.index("def _volume_transfer_snapshot"):src.index("def _volume_health_snapshot")]
+    assert "_mg_custody.custody_stall(transfer, now)" in body
+    assert '"custody_received_at"' in src[src.index("_SEGMENT_STATUS_FIELDS = ("):][:1200]
+    ship = (ROOT / "research_segment_shipper.py").read_text(encoding="utf-8")
+    assert '"custody_received_at": (custody or {}).get("received_at")' in ship

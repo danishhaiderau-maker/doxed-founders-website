@@ -337,3 +337,15 @@ def test_closed_row_without_close_time_does_not_create_false_drift():
         v = g.evaluate([c], dict(MIR, balance={"derivatives_available_usd": 206.79}), st, NOW + i * 30)
         assert "BALANCE_DRIFT" not in codes(v), i
     assert st["ledger_loss_usd"] == 0.3        # still counted in the loss cap
+
+
+def test_live_guardian_route_returns_a_response():
+    """Regression (19 Oct): the #784/#786 union merge dropped the route's return line -> HTTP 500."""
+    import ast
+    tree = ast.parse(_SRC)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "monitor_live_guardian_route")
+    assert isinstance(fn.body[-1], ast.Return) and "_monitor_response" in ast.unparse(fn.body[-1])
+    for n in tree.body:   # every monitor route in bot.py ends with a return
+        if isinstance(n, ast.FunctionDef) and n.name.startswith("monitor_") and n.name.endswith("_route") and any(
+                isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "route" for d in n.decorator_list):
+            assert isinstance(n.body[-1], (ast.Return, ast.If, ast.Try, ast.With)), n.name
