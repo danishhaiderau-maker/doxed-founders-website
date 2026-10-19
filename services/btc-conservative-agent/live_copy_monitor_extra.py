@@ -231,6 +231,6 @@ LIVE_ROUTE_MANIFEST = {
     "/api/monitor/live/headroom": "R12", "/api/monitor/live/deploy-guard": "R13",
     "/api/monitor/live/events": "R14", "/api/monitor/live/fill-quality": "R15", "/api/monitor/live/daily": "R16",
     "/api/monitor/live/slo": "R21", "/api/monitor/live/drills": "R22", "/api/monitor/live/funding": "R23",
-    "/api/monitor/live/routes": "manifest",
+    "/api/monitor/live/routes": "manifest", "/api/monitor/live-vs-paper": "live-vs-paper",
     "/api/monitor/runtime/headroom": "R12-alias", "/api/monitor/restarts": "R10-alias",
 }
