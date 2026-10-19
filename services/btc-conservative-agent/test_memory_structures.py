@@ -275,3 +275,29 @@ def test_process_rss_ignores_a_non_shipper_process_that_mentions_shipper(tmp_pat
         assert ms.cmdline_runs_script(open(f"/proc/{decoy.pid}/cmdline", "rb").read()) is False
     finally:
         decoy.kill()
+
+
+def test_record_loop_keeps_per_step_rss_delta_and_timed_step_records_it():
+    import bot
+    t = ms.Tracker("/tmp/_unused_ms.json")
+    steps = []
+    bot._timed_step(steps, "a", lambda: [0] * 1000)
+    assert steps and steps[0]["step"] == "a" and set(steps[0]) == {"step", "sec", "rss_delta_kb"}
+    t.record_loop("analytics_loop", 1.0, 2.0, steps=steps)
+    assert t.loops[-1]["steps"][0]["step"] == "a"
+    t.record_loop("analytics_loop", 3.0, 4.0)
+    assert "steps" not in t.loops[-1]
+    try:
+        bot._timed_step([], "boom", lambda: (_ for _ in ()).throw(ValueError("x")))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("step exceptions must propagate")
+
+
+def test_mem_tracker_is_a_module_global_so_analytics_loop_can_record_loops():
+    import re
+    src = open(__file__.replace("test_memory_structures.py", "bot.py"), encoding="utf-8").read()
+    assert re.search(r"^_mem_tracker = None", src, re.M)
+    body = src[src.index("def runtime_uptime_loop():"):][:400]
+    assert "global _mem_tracker" in body
