@@ -44,6 +44,13 @@ HEARTBEAT_STALE_SEC = 10.0      # guardian loop must beat at least this often wh
 PENDING_EXPOSURE_SEC = 300.0    # an order sent and not yet filled/closed counts as exposure for this long
 
 
+def close_ts(c, now: float) -> float:
+    """Close time of a closed row. A closed row with pnl but NO close time is counted as closed 'now' (conservative: it stays in
+    the rolling loss cap instead of silently becoming timestamp 0)."""
+    t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
+    return now if t is None or t <= 0 else t
+
+
 def heartbeat_stale(last_beat_ts, now: float, limit: float = HEARTBEAT_STALE_SEC) -> bool:
     """True when the guardian loop is dead/stale (never beat counts as stale)."""
     b = _f(last_beat_ts)
@@ -70,7 +77,7 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
             out.append({"code": "STOP_MISSING_GT_5S", "detail": f"{c.get('correlation_id')} unprotected {age:.1f}s"})
     # 4a. realised loss cap from the fresh-epoch ledger: needs no exchange read, so it is evaluated BEFORE the blind-mirror return
     ledger_today = [c for c in live if c.get("closed") and _f(c.get("pnl_usd")) is not None
-                    and now - ROLLING_WINDOW_SEC <= float(c.get("closed_at_ts") or c.get("exit_at_ts") or 0) <= now + 60]
+                    and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
     ledger_loss = -sum(float(c["pnl_usd"]) for c in ledger_today)
     state["ledger_loss_usd"] = round(ledger_loss, 4)
     if ledger_loss >= DAILY_LOSS_CAP_USD:
@@ -120,8 +127,8 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
             out.append({"code": "DAILY_LOSS_CAP", "detail": f"balance loss ${loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} (baseline ${state['day_baseline']:.2f}, now ${bal:.2f})"})
         # 5. balance drift while flat vs the last flat reading, explained only by reported realised pnl + funding
         last = state.get("last_flat_balance")
-        explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in live if c.get("closed") and (c.get("closed_at_ts") or c.get("exit_at_ts") or 0) > state.get("last_flat_ts", now))
-        all_reported = all(_f(c.get("pnl_usd")) is not None for c in live if c.get("closed") and (c.get("closed_at_ts") or c.get("exit_at_ts") or 0) > state.get("last_flat_ts", now))
+        explained = sum(_f(c.get("pnl_usd")) or 0.0 for c in live if c.get("closed") and close_ts(c, now) > state.get("last_flat_ts", now))
+        all_reported = all(_f(c.get("pnl_usd")) is not None for c in live if c.get("closed") and close_ts(c, now) > state.get("last_flat_ts", now))
         if last is not None and all_reported:
             drift = bal - float(last) - explained
             if abs(drift) > BALANCE_DRIFT_USD + abs(float(funding_usd_today or 0.0)):

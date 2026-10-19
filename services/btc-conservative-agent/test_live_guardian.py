@@ -80,7 +80,7 @@ def test_bot_wiring_tick_disarms_on_violation_and_is_inert_when_output_off():
     def run(on):
         calls.clear()
         g_ = {"time": _t, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"enabled": True, "calc": {}, "disarms": [], "last_violations": []},
-              "_get_live_copy_output": lambda: Out(on),
+              "_get_live_copy_output": lambda: Out(on), "_offline_sim_epoch_floor": lambda: None,
               "_tile_integrity_chains": lambda now: [{"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", "fill_at_ts": now - 9}],
               "_live_guardian_mirror": lambda: {"ok": True, "positions": [{}], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.0}},
               "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}}}
@@ -269,3 +269,45 @@ def test_guardian_evaluation_error_does_not_stamp_heartbeat_and_disarms_after_th
         off_ns["_live_guardian_on_error"](RuntimeError("x"), NOW + i)
     assert off_calls == []                                                          # output OFF: nothing to disarm
     assert "_live_guardian_on_error(exc)" in _SRC[_SRC.index("def live_guardian_loop"):][:600]
+
+
+# ---- HM re-read fixes (#784) -------------------------------------------------------------------------------------------
+def test_closed_row_without_close_time_still_counts_in_loss_cap():
+    c = ch(fill_at_ts=NOW - 500, stop_confirmed=True, closed=True, pnl_usd=-1.5)   # no closed_at_ts / exit_at_ts
+    assert "DAILY_LOSS_CAP" in codes(g.evaluate([c], MIR, {}, NOW))
+    assert g.close_ts(c, NOW) == NOW
+
+
+def test_failed_disarm_counts_as_error_and_skips_heartbeat():
+    now = _t.time()
+    ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 9)], _mir(positions=[{"id": 1}]))
+    def boom(reason): raise RuntimeError("disarm down")
+    ns["_disarm_live_control"] = boom
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    st["heartbeat_ts"] = None
+    v = ns["_live_guardian_tick"](now)
+    assert v and st["heartbeat_ts"] is None and st["error_streak"] == 1 and "disarm down" in st["last_error"]["error"]
+    assert st["disarms"][-1]["error"]
+    ns["_live_guardian_tick"](now + 1); ns["_live_guardian_tick"](now + 2)
+    assert st["error_streak"] == 3 and st["heartbeat_ts"] is None
+
+
+def test_off_tick_keeps_flat_hist_and_drops_transient_markers():
+    now = _t.time()
+    ns, _ = _tick_ns(False, [], _mir())
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    st["calc"] = {"flat_hist": [[now - 60, 210.0]], "day_baseline": 210.0, "orphan_since": now - 5, "last_flat_balance": 210.0, "last_flat_ts": now - 5, "blind_since": now - 9}
+    ns["_live_guardian_tick"](now)
+    assert st["calc"] == {"flat_hist": [[now - 60, 210.0]], "day_baseline": 210.0}
+
+
+def test_missing_epoch_floor_fails_loudly_and_payload_trims_flat_hist():
+    ns, _ = _tick_ns(True, [], _mir())
+    del ns["_offline_sim_epoch_floor"]
+    try:
+        ns["_live_guardian_tick"](_t.time())
+        raise AssertionError("must raise")
+    except RuntimeError as exc:
+        assert "epoch floor" in str(exc)
+    assert "flat_hist_n" in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]
+    assert '"flat_hist"' in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]   # excluded, only the count is emitted

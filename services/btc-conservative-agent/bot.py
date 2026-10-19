@@ -49082,23 +49082,39 @@ def _live_guardian_tick(now=None) -> list:
     now = now or time.time()
     _LIVE_GUARDIAN_STATE["last_check_ts"] = now
     if not bool(_get_live_copy_output().snapshot().get("enabled")):
-        _LIVE_GUARDIAN_STATE["calc"] = {}
+        # keep the rolling balance history (flat_hist) across OFF ticks so the 24 h peak survives a disarm/re-arm; drop only the
+        # transient per-session markers (a balance change while OFF, e.g. a deposit, must not look like drift on re-arm)
+        _calc = _LIVE_GUARDIAN_STATE.get("calc") or {}
+        _LIVE_GUARDIAN_STATE["calc"] = {k: v for k, v in _calc.items() if k in ("flat_hist", "day_baseline", "day_baseline_ts")}
         _LIVE_GUARDIAN_STATE["error_streak"] = 0
         _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now   # a clean pass: nothing to evaluate while output is OFF
         return []
     chains = _tile_integrity_chains(now)
-    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now,
-                        epoch_ts=globals().get("_offline_sim_epoch_floor", lambda: None)())
+    _floor_fn = globals().get("_offline_sim_epoch_floor")
+    if _floor_fn is None:
+        raise RuntimeError("live guardian: epoch floor function missing (refusing to evaluate without the fresh-epoch filter)")
+    _epoch = _floor_fn()
+    if not _epoch and now - float(_LIVE_GUARDIAN_STATE.get("epoch_warn_ts") or 0) >= 60.0:
+        _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
+        logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, epoch_ts=_epoch or None)
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
         logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
+        disarm_exc = None
         try:
             ctl = _disarm_live_control(reason)
             res = {"cancel_failed": len((ctl.get("cancel") or {}).get("failed") or [])}
         except Exception as exc:  # noqa: BLE001
+            disarm_exc = exc
             res = {"error": str(exc)[:200]}
         _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res}])[-20:]
+        if disarm_exc is not None:
+            # a failed disarm is an evaluation ERROR: count it, do NOT stamp the heartbeat (so the watchdog sees a stale guardian)
+            logger.error(f"[LIVE GUARDIAN] disarm FAILED: {disarm_exc} [PIPELINE ENFORCEMENT]")
+            _live_guardian_on_error(disarm_exc, now)
+            return viol
     # heartbeat only AFTER a successful evaluation: a guardian that keeps raising goes stale instead of looking alive
     _LIVE_GUARDIAN_STATE["error_streak"] = 0
     _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now
@@ -49161,7 +49177,9 @@ def monitor_live_guardian_route():
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
             "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
-            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k != "enabled"}}
+            **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
+            "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
+                     "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
     return _monitor_response(body, 16384)
 
 @app.route('/api/monitor/nonaccum-plans', methods=["GET"])
