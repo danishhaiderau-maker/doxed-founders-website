@@ -73,10 +73,11 @@ def evaluate(rows: Iterable[Mapping], *, since: float = 0.0, forced: Iterable[st
         if str(row.get("exit_reason") or "").upper() in forced_set:
             fev = row.get("event_timestamps") if isinstance(row.get("event_timestamps"), Mapping) else {}
             ffill, ftrig = fev.get("exit_fill_ts"), fev.get("exit_trigger_ts")
-            if isinstance(ffill, (int, float)) and ffill >= since:
+            if not isinstance(ffill, (int, float)) or isinstance(ffill, bool) or not math.isfinite(float(ffill)):
+                forced_nofill.append(row.get("trade_id"))  # missing / non-numeric fill stamp: counted + AMBER (HM)
+            elif ffill >= since:
                 forced_rows.append((float(ffill), isinstance(ftrig, (int, float)) and ftrig > 0, row.get("trade_id")))
-            else:  # fill stamp missing or before the window: never silently dropped (HM)
-                forced_nofill.append(row.get("trade_id"))
+            # a valid fill before `since` is simply outside the window: NOT counted, never AMBER
             continue
         ev = row.get("event_timestamps") if isinstance(row.get("event_timestamps"), Mapping) else {}
         trig, fill = ev.get("exit_trigger_ts"), ev.get("exit_fill_ts")

@@ -30,11 +30,21 @@ def test_all_stamped_is_green_and_none_is_no_data_and_window_applies():
     assert old["forced_closes"] == 0
 
 
-def test_forced_rows_with_missing_or_pre_window_fill_ts_are_counted_and_amber():
+def test_missing_or_non_numeric_fill_ts_is_counted_amber_but_old_valid_rows_stay_green():
     rows = [row("ok", "ADMIN_MANUAL_CLOSE", 1000.0, trig=999.9), {"trade_id": "nofill", "exit_reason": "ADMIN_MANUAL_CLOSE"},
-            row("old", "ADMIN_MANUAL_CLOSE", 10.0, trig=9.9)]
+            {"trade_id": "str", "exit_reason": "ADMIN_MANUAL_CLOSE", "event_timestamps": {"exit_fill_ts": "n/a"}},
+            {"trade_id": "nan", "exit_reason": "ADMIN_MANUAL_CLOSE", "event_timestamps": {"exit_fill_ts": float("nan")}}]
     f = e.evaluate(rows, since=500, forced=FORCED)["forced"]
-    assert f["forced_missing_fill_ts"] == 2 and set(f["forced_missing_fill_ts_trade_ids"]) == {"nofill", "old"}
+    assert f["forced_missing_fill_ts"] == 3 and set(f["forced_missing_fill_ts_trade_ids"]) == {"nofill", "str", "nan"}
     assert f["forced_closes"] == 1 and f["status"] == "AMBER"
     only = e.evaluate([{"trade_id": "x", "exit_reason": "ADMIN_MANUAL_CLOSE"}], since=0, forced=FORCED)["forced"]
     assert only["status"] == "AMBER"
+
+
+def test_old_but_valid_forced_rows_are_outside_the_window_and_stay_green():
+    rows = [row("old", "ADMIN_MANUAL_CLOSE", 10.0, trig=9.9), row("old2", "ADMIN_MANUAL_CLOSE", 20.0),  # even un-stamped
+            row("new", "ADMIN_MANUAL_CLOSE", 1000.0, trig=999.9)]
+    f = e.evaluate(rows, since=500, forced=FORCED)["forced"]
+    assert f["forced_closes"] == 1 and f["forced_missing_fill_ts"] == 0 and f["forced_missing_trigger_ts"] == 0
+    assert f["status"] == "GREEN"
+    assert e.evaluate([row("old", "ADMIN_MANUAL_CLOSE", 10.0)], since=500, forced=FORCED)["forced"]["status"] == "NO_DATA"
