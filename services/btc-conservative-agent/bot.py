@@ -5285,6 +5285,9 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_price"] = float(fill_px)
         pos["exit_trigger_mark_price"] = float(price)
         pos["exit_trigger_source"] = str(exit_source)
+        # #807 measurement: age of the ticker BBO this trigger was evaluated on. Lock-free read (a float; callers may
+        # hold trade_lock, and state_lock must never be taken inside it).
+        pos["exit_trigger_bbo_ts"] = state.get("bbo_ts")
         with trade_lock:
             source_pos.clear()
             source_pos.update(pos)
@@ -31519,6 +31522,7 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_trigger_eval_ts": _ts_or_none(pos.get("exit_trigger_eval_ts")),
         "exit_trigger_source": pos.get("exit_trigger_source"),
         "exit_trigger_price": pos.get("exit_trigger_price"),
+        "exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts")),
         "exit_fill_ts": exit_fill,
         # Paper-book exits wait the measured delay by design: latency is measured from trigger + delay.
         "exit_delay_s": ((pos.get("exit_fill_sim") or {}).get("delay_s")
@@ -60975,6 +60979,16 @@ def api_live_copy_tile_eligibility(lane: str):
     return jsonify({"ok": ok, **row}), (200 if ok else 409)
 
 
+def _twin_trigger_fields(row: dict) -> dict:
+    """#807 measurement on a closed paper row: trigger vs the 1 s book at the trigger second + ticker BBO age."""
+    ev = row.get("event_timestamps") if isinstance(row.get("event_timestamps"), dict) else {}
+    return __import__("trigger_measure").fields(
+        side=row.get("dir") or row.get("direction") or row.get("side"),
+        trigger_price=row.get("exit_trigger_price") or ev.get("exit_trigger_price"),
+        trigger_ts=ev.get("exit_trigger_ts"), bbo_ts=ev.get("exit_trigger_bbo_ts"),
+        book_signal=row.get("exit_depth_snapshot_signal"))
+
+
 def _live_copy_paper_twins() -> dict:
     """Paper twin rows keyed by trade id (entry price/qty/side) for drift checks."""
     out = {}
@@ -60997,6 +61011,7 @@ def _live_copy_paper_twins() -> dict:
                     "exit_price": row.get("exit") or row.get("exit_price"),
                     "exit_ts": row.get("exit_ts") or row.get("close_ts"),
                     "exit_reason": row.get("exit_reason") or row.get("reason"),
+                    **_twin_trigger_fields(row),
                 }
     except Exception:  # noqa: BLE001
         pass
@@ -61013,7 +61028,7 @@ def _live_copy_paper_twins() -> dict:
                             "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
                             "entry_ts": row.get("entry_ts"), "signal_ts": row.get("signal_ts"),
                             "funding_usd_raw": row.get("funding_usd_raw"), "funding_fees_usd": row.get("funding_fees_usd"),
-                            "source": "trade_outcome_journal"}
+                            "source": "trade_outcome_journal", **_twin_trigger_fields(row)}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
         pass
     return out

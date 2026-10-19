@@ -13,6 +13,7 @@ with an explicit break-even band (never by cent-rounded USD).
 from __future__ import annotations
 
 import base64
+import trigger_measure as _trigger_measure
 import json
 import math
 import statistics
@@ -580,6 +581,11 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             "exit_sent_ts": ev_exit_sent,
             "exit_fill_ts": ev_exit_fill,
         }
+        # #807 measurement: trigger price vs the 1 s book at the trigger second, and the ticker BBO age at the trigger.
+        row["exit"].update(_trigger_measure.fields(
+            side=row.get("side"), trigger_price=row["exit"].get("exit_trigger_price"), trigger_ts=ev_trigger,
+            bbo_ts=_ts(events.get("exit_trigger_bbo_ts"), parse_ts),
+            book_signal=(row.get("pricing") or {}).get("exit_depth_snapshot_signal")))
         row["timing"] = trade_timing(ev_signal or row["trigger"].get("signal_ts"), ev_sent,
                                      row["fill"].get("fill_ts") if ev_fill else None, ev_trigger, ev_exit_fill,
                                      recorded=bool(events), exit_sent_ts=ev_exit_sent)

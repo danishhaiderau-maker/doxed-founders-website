@@ -69,6 +69,9 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         "funding_usd_paper": _f(twin.get("funding_usd_raw") if twin.get("funding_usd_raw") is not None else twin.get("funding_fees_usd")),
         "funding_usd_live": _f(chain.get("funding_usd")),
         "paper_exit_reason": twin.get("exit_reason"), "live_exit_reason": chain.get("exit_reason"),
+        # #807: the paper exit's trigger vs the 1 s book at the trigger second (+ = book better than the trigger) and the
+        # ticker BBO age it fired on. Measurement only.
+        "paper_trigger_vs_book_bp": _f(twin.get("trigger_vs_book_bp")), "paper_trigger_tape_age_s": _f(twin.get("trigger_tape_age_s")),
         "closed": bool(chain.get("closed")),
     }
     row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",

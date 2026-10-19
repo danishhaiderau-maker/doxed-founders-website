@@ -559,3 +559,17 @@ def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_covera
     monkeypatch.setattr(_os.path, "getsize", lambda p: 3 * 1024 * 1024 if str(p).endswith("paper_ioc_no_fill_shadow.jsonl") else 0)
     r2 = client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE)
     assert r2.get_json()["shadow_truncated"] is True
+
+
+def test_closed_row_carries_trigger_vs_book_and_tape_age():
+    # #807: the exit fired on a stale ticker bid 85000 while the 1 s book bid at the trigger second was 85085
+    close = CUTOFF + 900
+    ev = {"schema": "trade_event_timestamps_v1", "signal_ts": close - 700.0, "exit_trigger_ts": close - 2.0,
+          "exit_trigger_source": "POSITION_MANAGER", "exit_trigger_price": 85000.0, "exit_trigger_bbo_ts": close - 3.8,
+          "exit_fill_ts": close - 0.2}
+    book = {"s": int(close - 2.0), "b": [[85085, 0.03], [85080, 0.1]], "a": [[85095, 0.05]]}
+    row = _rows([_closed("t-trig", GS1, close_ts=close, event_timestamps=ev, exit_depth_snapshot_signal=book)])[0]
+    assert row["exit"]["trigger_vs_book_bp"] == round((85085 / 85000 - 1) * 1e4, 3)
+    assert row["exit"]["trigger_tape_age_s"] == 1.8
+    bare = _rows([_closed("t-bare", GS1, close_ts=close)])[0]
+    assert bare["exit"]["trigger_vs_book_bp"] is None and bare["exit"]["trigger_tape_age_s"] is None
