@@ -48,6 +48,22 @@ def test_exit_truth_flags_stale_trigger_booking():
     assert mc.exit_truth(rows, [99.5], [{"bid": 100.0, "ask": 100.01}], since=0)["status"] == "GREEN"
 
 
+def test_exit_truth_fill_book_statistic_sits_beside_trigger_check():
+    """HM 19 Oct: the trigger-time comparison stays; a second stat compares the booked leg with the fill-time book."""
+    snap = {"b": [[100.0, 1.0], [99.0, 1.0]], "a": [[100.5, 1.0]], "s": 1}
+    row = {"trade_id": "a", "side": "LONG", "status": "CLOSED",
+           "exit": {"close_ts": 100.0, "exit_price": 100.0, "exit_reason": "GS_THESIS_CUT", "exit_bid": 99.0, "exit_ask": 99.2},
+           "pricing": {"exit_depth_snapshot_legs": [{"price": 100.0, "qty": 0.1, "fill": snap, "signal": snap}]}}
+    out = mc.exit_truth([row], [], [], since=0)
+    assert out["status"] == "RED" and out["violations"]            # trigger-time view still reported (reference 99.0 is low)
+    assert out["fill_book"]["checked"] == 1 and out["fill_book"]["max_better_bp"] == 0.0 and not out["fill_book"]["violations"]
+    row["pricing"]["exit_depth_snapshot_legs"][0]["price"] = 100.2          # better than any level in the walked book
+    out = mc.exit_truth([row], [], [], since=0)
+    assert out["fill_book"]["violations"][0]["trade_id"] == "a" and out["fill_book"]["max_better_bp"] > 5
+    del row["pricing"]
+    assert mc.exit_truth([row], [], [], since=0)["fill_book"]["without_snapshot"] == 1
+
+
 def test_rules_conformance_fee_and_forced():
     out = mc.rules_conformance(active_tiles=["A"], retired_tiles=["R"], live_copy_tiles={}, open_lanes=["R"],
                                fee_rates_bp={"taker": 4.0}, totals_lanes={"A": {"forced_closes_counted": 1}})

@@ -52,12 +52,25 @@ def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list
     exit_bid/exit_ask stamps use those instead of the tape.
     """
     checked, bad, no_tape = 0, [], 0
+    fb_n, fb_missing, fb_all, fb_bad = 0, 0, [], []
     for r in rows:
         ex = r.get("exit") or {}
         ct, px = _f(ex.get("close_ts")), _f(ex.get("exit_price"))
         if ct is None or px is None or ct < since or ex.get("forced_close") or not is_stop_type(ex.get("exit_reason")):
             continue
         side = r.get("side")
+        # Second statistic (HM 19 Oct), beside the trigger-time check and hiding nothing: each booked leg vs the touch of
+        # the book the pricer actually walked at fill time (exit_depth_snapshot_legs[].fill). A leg booked better than that
+        # touch is impossible for a book walk, so it is counted as a violation too.
+        fb_better = _fill_book_better_bp(r, side)
+        if fb_better is None:
+            fb_missing += 1
+        else:
+            fb_n += 1
+            fb_all.append(fb_better)
+            if fb_better > EXIT_TRUTH_RED_BP:
+                fb_bad.append({"trade_id": r.get("trade_id"), "lane": r.get("lane") or r.get("research_lane"),
+                               "exit_reason": ex.get("exit_reason"), "booked_better_than_fill_touch_bp": round(fb_better, 2)})
         bid, ask = _f(ex.get("exit_bid")), _f(ex.get("exit_ask"))
         if bid is None or ask is None:
             i = bisect.bisect_right(tape_ts, ct) - 1
@@ -75,8 +88,34 @@ def exit_truth(rows: Iterable[Mapping[str, Any]], tape_ts: list, tape_rows: list
             bad.append({"trade_id": r.get("trade_id"), "lane": r.get("lane") or r.get("research_lane"),
                         "exit_reason": ex.get("exit_reason"), "close_ts": ct, "booked": px, "touch": touch,
                         "booked_better_than_touch_bp": round(better_bp, 2)})
-    return _result("exit-truth", [f"{len(bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the touch"] if bad else [],
-                   red=bool(bad), unknown=checked == 0, checked=checked, without_touch=no_tape, violations=bad[:50])
+    reasons = [f"{len(bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the touch"] if bad else []
+    if fb_bad:
+        reasons.append(f"{len(fb_bad)} stop-type exits booked >{EXIT_TRUTH_RED_BP:g} bp better than the fill-time book touch")
+    fill_book = {"checked": fb_n, "without_snapshot": fb_missing, "violations": fb_bad[:50],
+                 "max_better_bp": round(max(fb_all), 3) if fb_all else None,
+                 "mean_better_bp": round(sum(fb_all) / len(fb_all), 3) if fb_all else None,
+                 "basis": "booked leg price vs best level of exit_depth_snapshot_legs[].fill (taker side); positive = better than the touch"}
+    return _result("exit-truth", reasons, red=bool(bad or fb_bad), unknown=checked == 0, checked=checked, without_touch=no_tape,
+                   violations=bad[:50], fill_book=fill_book)
+
+
+def _fill_book_better_bp(row: Mapping[str, Any], side: Any) -> float | None:
+    """Worst (largest) booked-better-than-fill-touch bp over the row's exit legs, None when no leg has a fill snapshot."""
+    legs = (row.get("pricing") or {}).get("exit_depth_snapshot_legs") or []
+    key = "b" if side == "LONG" else "a" if side == "SHORT" else None
+    worst = None
+    for leg in legs if key else ():
+        fill = (leg or {}).get("fill") or {}
+        px = _f((leg or {}).get("price"))
+        try:
+            touch = _f((fill.get(key) or [[None]])[0][0])
+        except (IndexError, TypeError):
+            touch = None
+        if px is None or not touch:
+            continue
+        bp = (px / touch - 1) * 1e4 * (1 if side == "LONG" else -1)
+        worst = bp if worst is None else max(worst, bp)
+    return worst
 
 
 # ----------------------------------------------------------------------------- pnl reconcile

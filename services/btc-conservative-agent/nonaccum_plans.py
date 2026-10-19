@@ -38,7 +38,11 @@ def _sha(items: list) -> str:
     return h.hexdigest()
 
 
+ITEMS: dict = {}   # plan id -> item list of the LAST build (read by the guarded executor; never serialised)
+
+
 def _plan(pid: str, criteria: str, items: list, prefix_of, extra=None) -> dict:
+    ITEMS[pid] = list(items)
     per: dict = {}
     for it in items:
         p = per.setdefault(prefix_of(it), {"count": 0, "bytes": 0})
