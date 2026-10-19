@@ -31544,6 +31544,16 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
     return out
 
 
+def _stamp_admin_close_trigger(pos: dict, close_reason: str, now: float) -> bool:
+    """P3 (HM 19 Oct): an admin/deploy flatten close had no exit_trigger_ts, so exit latency could not be measured. Stamp the
+    close-request time as the trigger (source = the close reason). Never overwrites a trigger already recorded."""
+    if not isinstance(pos, dict) or pos.get("exit_trigger_ts") not in (None, "", 0):
+        return False
+    pos["exit_trigger_ts"] = float(now)
+    pos["exit_trigger_source"] = str(close_reason)
+    return True
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     source_pos = pos
@@ -46809,6 +46819,25 @@ def _memory_oom_check(now: float) -> dict:
                 "threshold": "tracker sample present"}
 
 
+def _offline_sim_epoch_check() -> dict:
+    """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
+    shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
+    st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
+    _loaded = bool(st)
+    try:  # live re-read every health cycle, independent of the loader cadence
+        _fl, _src, _err = _offline_sim_epoch_floor_detail()
+        st.update(live_floor_value=_fl, live_floor_source=_src, live_floor_error=_err)
+        if _fl is None:
+            st["floor_unreadable"] = True
+    except Exception:  # noqa: BLE001
+        pass
+    if st.get("floor_unreadable"):
+        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
+                "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if _loaded else "AMBER",
+            "observed": f"stats={st}" if _loaded else f"no loader call yet; live floor={st.get('live_floor_value')} src={st.get('live_floor_source')}", "threshold": "fresh-epoch floor readable"}
+
+
 def _system_health_fly_self_checks(now: float | None = None) -> list:
     """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
     now = float(now or time.time())
@@ -46864,6 +46893,7 @@ def _system_health_fly_self_checks(now: float | None = None) -> list:
             "threshold": "<12m, <3 failures",
         })
     checks.append(_memory_oom_check(now))
+    checks.append(_offline_sim_epoch_check())
     return checks
 
 
@@ -50084,6 +50114,8 @@ def api_close_showcase_position():
     # DEPLOY_FORCE_FLAT tags the pre-deploy flatten (stats-excluded like every forced close).
     close_reason = "DEPLOY_FORCE_FLAT" if str(body.get("reason") or "").upper() == "DEPLOY_FORCE_FLAT" else "ADMIN_MANUAL_CLOSE"
     close_origin = _forced_close_origin(close_reason)
+    with trade_lock:
+        _stamp_admin_close_trigger(matches[0], close_reason, time.time())
     close_position(matches[0], close_reason)
     with state_lock:
         still_open = any(
@@ -56807,8 +56839,13 @@ def analytics_loop():
     try:
         while not shutdown_event.is_set():
             try:
+                _loop_t0 = time.time()
                 compute_analytics()
                 run_offline_research_sim()
+                try:
+                    _mem_tracker.record_loop("analytics_loop", _loop_t0, time.time())   # start/end for stair attribution
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
                 # Change 5: periodic catch-up for APPROVE signals whose replay
                 # rotated into a .N shard before the active-file pass saw them.
                 # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
@@ -57452,15 +57489,63 @@ def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIO
     return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
 
 
+_OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-tick catch-up scans all shards itself
+_OFFLINE_SIM_LOAD_STATS: dict = {}
+
+
+def _offline_sim_epoch_floor_detail():
+    """(floor_ts|None, source, error). Authoritative: fresh_start_epoch.json epoch_ts (volume root /app/data, same source as
+    analyzer_epoch_guard / G16); research_session.json is only a fallback (its fresh_collection_start_time is null on Fly)."""
+    err = None
+    try:
+        import analyzer_epoch_guard as _aeg
+        for src, d in (("fresh_start_epoch.json:cwd", os.getcwd()), ("fresh_start_epoch.json:/app/data", "/app/data")):
+            _fl = _aeg.fresh_floor_ts(d)
+            if _fl:
+                return float(_fl), src, None
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+    try:
+        cutoff = _fresh_epoch_identity_from_session()[1]
+        if cutoff:
+            return float(cutoff), "research_session.json", err
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+    return None, None, err or "no floor in fresh_start_epoch.json or research_session.json"
+
+
+def _offline_sim_epoch_floor():
+    """Fresh-epoch floor for shard rejection; None if it cannot be read (the loader then FAILS CLOSED: no rotated shard parsed)."""
+    fl, _src, err = _offline_sim_epoch_floor_detail()
+    if fl is None:
+        logger.warning(f"[RESEARCH_SIM] fresh floor unavailable, ALL rotated shards skipped (fail closed): {err}")
+    return fl
+
+
 def _load_offline_sim_jsonl_revisions(
     active_path,
-    max_rotations=_OFFLINE_SIM_MAX_ROTATIONS,
+    max_rotations=None,
     target_trade_ids=None,
 ):
+    if max_rotations is None:
+        max_rotations = globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128)
+    floor_fn = globals().get("_offline_sim_epoch_floor")
+    _floor = floor_fn() if callable(floor_fn) else None
+    _stats = globals().get("_OFFLINE_SIM_LOAD_STATS")
+    if isinstance(_stats, dict):
+        _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
+        _stats["floor_checked_ts"] = time.time()
+        _fd = _offline_sim_epoch_floor_detail() if _floor is not None else (None, None, "floor unreadable")
+        _stats["floor_source"], _stats["floor_error"] = _fd[1], _fd[2]
+        _stats["floor_value_utc"] = datetime.fromtimestamp(_floor, timezone.utc).isoformat() if _floor else None
+        _stats["next_check_ts"] = time.time() + 600  # rechecked on every loader call (each analytics cycle)
     return _pure_load_offline_sim_jsonl_revisions(
         active_path,
         max_rotations=max_rotations,
         target_trade_ids=target_trade_ids,
+        min_ts=_floor,
+        stats=globals().get("_OFFLINE_SIM_LOAD_STATS"),
+        floor_unreadable=_floor is None and callable(floor_fn),   # fail closed: skip ALL rotated shards
         on_read_error=lambda path, exc: logger.debug(
             f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
         ),
@@ -57479,7 +57564,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
     source_market_index = market_loader(
         globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
         target_trade_ids=set(snapshots),
-        max_rotations=globals().get("_OFFLINE_SIM_MAX_ROTATIONS", 128),
+        max_rotations=globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128),
     ) if callable(market_loader) else {}
     replays = _load_offline_sim_jsonl_revisions(
         signal_replay_file,

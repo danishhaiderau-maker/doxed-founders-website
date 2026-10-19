@@ -137,6 +137,18 @@ def evaluate(fetch) -> dict:
     return out
 
 
+ALLOW_OPEN_INFO_PREFIXES = ("OPEN_TRADES:", "OPEN_VIEWS_DISAGREE:", "COUNT_MISMATCH:", "TRADES_READ_FAILED:",
+                            "MONITOR_COUNT_FAILED:")
+
+
+def apply_allow_open(result: dict) -> dict:
+    """Paper deploy mode (--allow-open): open paper trades do NOT block (the deploy force-closes them as
+    non-countable DEPLOY_MAINTENANCE rows). Only live-not-off, force_paper-not-true and an unreadable /api/status block."""
+    blocking = [r for r in result["reasons"] if not r.startswith(ALLOW_OPEN_INFO_PREFIXES)]
+    info = [r for r in result["reasons"] if r.startswith(ALLOW_OPEN_INFO_PREFIXES)]
+    return {**result, "reasons": blocking, "info_open_trades_will_be_flattened": info, "ok": not blocking}
+
+
 def _http_fetch(base: str, token: str):
     def fetch(path: str):
         req = urllib.request.Request(base + path, headers={"X-Bot-Admin-Token": token})
@@ -150,6 +162,7 @@ def main(argv=None) -> int:
     base = argv[argv.index("--base") + 1] if "--base" in argv else "https://doxed-btc-bot.fly.dev"
     token = os.environ.get("BOT_ADMIN_TOKEN", "")
     wait = int(argv[argv.index("--wait-seconds") + 1]) if "--wait-seconds" in argv else 0
+    allow_open = "--allow-open" in argv
     deadline = time.monotonic() + wait
     while True:
         result = evaluate(_http_fetch(base, token)) if token else {"ok": False, "reasons": ["NO_TOKEN"]}
@@ -158,6 +171,8 @@ def main(argv=None) -> int:
                   f"monitor_open_plus_pending={result.get('monitor_open_count')}", file=sys.stderr)
         print(f"TOTAL non_closed_all_pages={result.get('non_closed_all_pages')} status_open={result.get('pages_open')} "
               f"monitor_open={result.get('monitor_open_count')} ok={result['ok']}", file=sys.stderr)
+        if allow_open:
+            result = apply_allow_open(result)
         print(json.dumps(result, sort_keys=True))
         if result["ok"]:
             return 0

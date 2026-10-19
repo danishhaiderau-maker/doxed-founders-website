@@ -10,6 +10,22 @@ import pandas as pd
 from .facts import iso, parse_ts
 
 
+# Every key the auto-ff receipt writer can emit (scripts/v2c-auto-ff.ps1). Optional ones (dirty, after, mode, ...) are only
+# written on some outcomes; the contract engine derives columns from row content, so an absent optional key looked like a
+# DRIFT_DIMS_DROPPED RED. Always export the full set (null when not applicable).
+AUTO_FF_COLUMNS = ("schema", "at", "outcome", "repoRoot", "from", "to", "flyRev", "mode", "commits", "dirty", "after")
+
+
+def _full_columns(rows, columns):
+    out = []
+    for r in rows:
+        if isinstance(r, dict):
+            out.append({**{c: None for c in columns}, **r})
+        else:
+            out.append(r)
+    return out
+
+
 def tile_stats(store, facts: dict, now: float | None = None, epoch_start_ts: float | None = None,
                roster: list[str] | None = None) -> pd.DataFrame:
     """Per-lane close stats; with a declared data epoch only its closes count and every roster lane gets a row.
@@ -81,7 +97,7 @@ def receipts(store, facts: dict, now: float | None = None) -> dict:
         "proof": {"window_t0": proof.get("t0"), "ends_at": proof.get("ends_at"), "receipt": receipt,
                   "status": proof.get("status"), "latest_row": latest_row,
                   "baseline_git_rev": (proof.get("baseline") or {}).get("git_rev")},
-        "auto_ff": (facts.get("autoff") or [])[-8:],
+        "auto_ff": _full_columns((facts.get("autoff") or [])[-8:], AUTO_FF_COLUMNS),
         "manual_interventions": (facts.get("manual") or [])[-8:],
         "tests": {"note": "CI deploy-gate results are the guarded deploy runs above (fly-bot-deploy.yml); "
                           "self-aware unit tests: scripts/test_self_aware.py"},

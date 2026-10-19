@@ -466,6 +466,8 @@ def flapping(checks: list[dict[str, Any]], state: dict[str, Any], check: CheckFn
         if flips >= t["flap_transitions"]:
             c["flapping"] = True
             flappers.append(f"{c['id']}({flips})")
+        else:
+            c["flapping"] = False  # always emit the column (contract drift keys off row content: no flapping => no column)
     for cid in [k for k in hist if k not in present]:
         hist.pop(cid, None)
     return check("watcher.flapping", "watcher", AMBER if flappers else GREEN,
