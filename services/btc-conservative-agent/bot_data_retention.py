@@ -1115,6 +1115,11 @@ class Compactor:
             if backfilled and fields and undated_bytes and dataset not in policy.TIER_A_JOIN_RESOLVED:
                 reasons.append("UNDATED_AFTER_BACKFILL")
             level = "RED" if reasons else ("AMBER" if undated_rows or unpromoted else "GREEN")
+            notes = []  # why a dataset is AMBER (never turns it RED); HM 19 Oct: an AMBER row must say why
+            if undated_rows:
+                notes.append("UNDATED_ROWS_IN_STAGING_AWAITING_PROMOTION")
+            if unpromoted:
+                notes.append("CLOSED_DAY_AWAITING_PROMOTION")
             overall = level if rank[level] > rank[overall] else overall
             datasets.append({
                 "dataset": dataset, "timestamp_field": fields[0] if fields else None,
@@ -1125,6 +1130,10 @@ class Compactor:
                 "oldest_staging_day": min(staging_days) if staging_days else None,
                 "unpromoted_closed_days": sorted(set(unpromoted + overdue)), "rows_1970": rows_1970,
                 "unverified_partitions": unverified[:20], "level": level, "reasons": reasons,
+                "reason_text": "; ".join(reasons or notes) or None,
+                "last_promoted_partition": max(promoted) if promoted else None,
+                "staging_undated_count": undated_rows,
+                "last_error": (str(unverified[0])[:200] if unverified else None),
             })
         return {"schema": HEALTH_SCHEMA, "generated_at": _iso(now), "level": overall, "backfilled": backfilled,
                 "settle_hours": self.settle_hours, "datasets": datasets}

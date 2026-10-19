@@ -2252,7 +2252,11 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     else:
         level = str(tier_a.get("level") or AMBER).upper()
         st = level if level in (GREEN, AMBER, RED) else AMBER
-        bad = [f"{d.get('dataset')}={d.get('level')}: {'; '.join(map(str, d.get('reasons') or []))[:80]}"
+        bad = [f"{d.get('dataset')}={d.get('level')}: "
+               f"{str(d.get('reason_text') or '; '.join(map(str, d.get('reasons') or [])) or 'no reason reported')[:80]}"
+               f" (undated={d.get('staging_undated_count', d.get('undated_rows'))}, "
+               f"last_promoted={d.get('last_promoted_partition') or d.get('last_promoted_day')}"
+               f"{', last_error=' + str(d.get('last_error'))[:40] if d.get('last_error') else ''})"
                for d in tier_a.get("datasets") or [] if isinstance(d, Mapping) and d.get("level") != GREEN]
         add(check("storage.tier_a", "storage", st,
                   f"{len(tier_a.get('datasets') or [])} datasets, backfilled={tier_a.get('backfilled')}"
