@@ -127,6 +127,11 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["exit_at_ts"] = _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
             ch["exit_reason"] = cl.get("reason") or r.get("exit_reason") or r.get("reason") or ch.get("exit_reason")
             ch["funding_usd"] = r.get("funding_usd") if r.get("funding_usd") is not None else ch.get("funding_usd")
+            try:  # signed (a loss is negative): do not use _f(), which drops non-positive values
+                ch["pnl_usd"] = float(r["pnl_usd"]) if r.get("pnl_usd") is not None else ch.get("pnl_usd")
+            except (TypeError, ValueError):
+                pass
+            ch["closed_at_ts"] = ch.get("exit_at_ts")
         if r.get("type") in ("ORDER_REJECTED", "INTENT_REJECTED", "STOP_FAILED", "ERROR"):
             err = r.get("error") if isinstance(r.get("error"), Mapping) else {}
             ch["errors"].append({"type": r.get("type"), "code": err.get("code"),

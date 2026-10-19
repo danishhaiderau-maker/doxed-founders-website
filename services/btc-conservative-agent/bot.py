@@ -49058,6 +49058,64 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
         _NONACCUM_PLANS_CACHE.update(res)
 
 
+
+# ---- Live guardian (HM 19 Oct): automatic stop-or-disarm for the GS-01 live test --------------------------------
+_LIVE_GUARDIAN_STATE: dict = {"enabled": True, "last_check_ts": None, "last_violations": [], "disarms": [], "calc": {}}
+_LIVE_GUARDIAN_INTERVAL_SEC = 1.0
+
+
+def _live_guardian_mirror():
+    view = _live_copy_website_cached_view()
+    accts = [a for a in (view.get("accounts") or []) if isinstance(a, dict)]
+    armed = [a for a in accts if a.get("armed")] or accts
+    m = (armed[0].get("exchange_mirror") if armed else None) or None
+    if isinstance(m, dict) and m.get("ok") and float(m.get("read_age_s") or 0) <= 20.0:
+        return m
+    return {"ok": False, "error": (m or {}).get("error") or "stale-or-missing mirror"}
+
+
+def _live_guardian_tick(now=None) -> list:
+    """One pass. Does nothing while Fly's live output is OFF. On a violation: disarm via the documented control."""
+    import live_guardian as _lg
+    now = now or time.time()
+    _LIVE_GUARDIAN_STATE["last_check_ts"] = now
+    if not bool(_get_live_copy_output().snapshot().get("enabled")):
+        _LIVE_GUARDIAN_STATE["calc"] = {}
+        return []
+    chains = _tile_integrity_chains(now)
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now)
+    _LIVE_GUARDIAN_STATE["last_violations"] = viol
+    if viol:
+        reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
+        logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
+        try:
+            ctl = _disarm_live_control(reason)
+            res = {"cancel_failed": len((ctl.get("cancel") or {}).get("failed") or [])}
+        except Exception as exc:  # noqa: BLE001
+            res = {"error": str(exc)[:200]}
+        _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res}])[-20:]
+    return viol
+
+
+def live_guardian_loop():
+    while not shutdown_event.is_set():
+        try:
+            _live_guardian_tick()
+        except Exception as exc:  # noqa: BLE001 - the guardian must never die silently
+            logger.error(f"[LIVE GUARDIAN] tick error: {exc}")
+        shutdown_event.wait(_LIVE_GUARDIAN_INTERVAL_SEC)
+
+
+@app.route('/api/monitor/live-guardian', methods=["GET"])
+def monitor_live_guardian_route():
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    import live_guardian as _lg
+    body = {"schema": "live_guardian_v1", "limits": {"stop_missing_sec": _lg.STOP_MISSING_SEC, "daily_loss_cap_usd": _lg.DAILY_LOSS_CAP_USD,
+            "ledger_grace_sec": _lg.LEDGER_GRACE_SEC, "balance_drift_usd": _lg.BALANCE_DRIFT_USD},
+            "active": bool(_get_live_copy_output().snapshot().get("enabled")), **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k != "enabled"}}
+    return _monitor_response(body, 16384)
+
 @app.route('/api/monitor/nonaccum-plans', methods=["GET"])
 def monitor_nonaccum_plans_route():
     """C1-C4 non-accumulation plans + plan_sha256 (read-only; admin/monitor auth; never deletes or writes state).
@@ -60261,6 +60319,7 @@ def main():
     threading.Thread(
         target=safe_thread(runtime_uptime_loop), name="runtime-uptime", daemon=True
     ).start()
+    threading.Thread(target=safe_thread(live_guardian_loop), name="live-guardian", daemon=True).start()
     # Evidence processing is optional and may launch a bounded worker
     # immediately.  Start it only after the safety restore and dashboard boot
     # handoff are complete so it cannot contend with startup readiness.

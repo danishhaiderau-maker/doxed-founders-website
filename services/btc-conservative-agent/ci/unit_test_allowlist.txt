@@ -606,3 +606,4 @@ test_tiles_trades_repriced_fields.py
 test_offline_sim_floor_source.py
 test_funding_raw_fields.py
 test_live_vs_paper.py
+test_live_guardian.py
