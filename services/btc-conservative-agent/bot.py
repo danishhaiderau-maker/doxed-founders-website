@@ -46807,6 +46807,9 @@ def _record_runtime_shutdown_cause(*, signal_num: int | None = None, exit_code: 
 
 
 _SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None, "proof": None}
+# Laptop per-lane reconciliation block (ledger_reconcile_push_v1) from the same push; /api/monitor/reconcile uses it
+# only for the same epoch and while fresh (monitor_reconcile.push_status).
+_LEDGER_RECONCILE_PUSH = {"block": None, "received_ts": None}
 _SYSTEM_HEALTH_LOCK = threading.Lock()
 # Bounded (system_health_alerts.RETAIN_DAYS / RETAIN_EVENTS) and persisted on the
 # volume (system_health_alerts.STATE_FILE) so a restart or deploy keeps the alert
@@ -46980,7 +46983,11 @@ def system_health_report():
         return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
     statuses = system_health_alerts.check_statuses(raw)
     digest = monitor_api.sanitize_digest(raw.get("monitor_digest"))
+    import monitor_reconcile as _mr
+    recon_push = _mr.sanitize_push(raw.get("ledger_reconcile"))
     with _SYSTEM_HEALTH_LOCK:
+        if recon_push is not None:
+            _LEDGER_RECONCILE_PUSH.update(block=recon_push, received_ts=time.time())
         _restore_system_health_state()
         if digest is not None:
             _MONITOR_DIGEST.update(digest=digest, received_ts=time.time())
@@ -48166,7 +48173,9 @@ def monitor_reconcile():
                  "until": None, "be_band_bp": monitor_api.WL_BE_BAND_BP, "include_forced": False}
         by_lane = _monitor_tiles_rows(scope, ("closed",))
         short = _monitor_tile_short_names()
-        return _mr.build(by_lane, short, None, _monitor_tiles_common(now))
+        with _SYSTEM_HEALTH_LOCK:
+            pushed = dict(_LEDGER_RECONCILE_PUSH)
+        return _mr.build(by_lane, short, None, _monitor_tiles_common(now), pushed=pushed, now=time.time())
     return _monitor_tiles_guard(build, 800_000)
 
 
