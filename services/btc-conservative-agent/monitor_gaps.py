@@ -642,6 +642,59 @@ class RegimeComparator:
 # ----------------------------------------------------------------------------
 # A7 shipper custody
 # ----------------------------------------------------------------------------
+CUSTODY_STALL_AMBER_SEC = 2 * 3600.0   # custody unchanged > 2 h while shipped_seq is ahead of it -> AMBER (hourly parity cadence: 60-75 min is normal)
+CUSTODY_STALL_RED_SEC = 6 * 3600.0     # > 6 h -> RED
+
+
+def _iso_ts(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return None
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def custody_stall(transfer: Mapping | None, now: float) -> dict:
+    """Since-time and reason for the custody bound.
+
+    ``custody_received_at`` is the ``received_at`` of the newest custody receipt on the Fly volume (written once per
+    through_seq, put_if_absent), so it is the real time custody last advanced and survives restarts. Fly can see the laptop
+    ACK but not the laptop parity/analyzer seqs, so the reason names which side holds custody back."""
+    t = dict(transfer or {})
+    if str(t.get("prune_mode") or "").lower() == "off":
+        # pruning off: custody gates nothing, so no stall check and no custody fields
+        return {"custody_last_advanced_utc": None, "custody_stalled_s": None, "custody_stall_reason": "PRUNE_MODE_OFF",
+                "custody_last_error": None}
+    ts = _iso_ts(t.get("custody_received_at"))
+    custody, shipped, acked = t.get("custody_through_seq"), t.get("shipped_seq"), t.get("laptop_acked_seq")
+    try:
+        behind = shipped is not None and int(shipped) > int(custody or 0)
+    except (TypeError, ValueError):
+        behind = False
+    stalled_s = round(max(0.0, now - ts), 1) if ts is not None else None
+    reason = None
+    if not custody:
+        reason = "NO_CUSTODY_RECEIPT"
+    elif stalled_s is not None and stalled_s > CUSTODY_STALL_AMBER_SEC and behind:
+        try:
+            ack_ahead = acked is not None and int(acked) > int(custody)
+        except (TypeError, ValueError):
+            ack_ahead = False
+        reason = ("LAPTOP_PARITY_OR_ANALYZER_BEHIND_ACK" if ack_ahead else "LAPTOP_ACK_NOT_ADVANCING")
+    plan = t.get("prune_last_plan") if isinstance(t.get("prune_last_plan"), Mapping) else {}
+    deny = plan.get("deny_reasons") or plan.get("reasons")
+    return {"custody_last_advanced_utc": (None if ts is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))),
+            "custody_stalled_s": stalled_s,
+            "custody_stall_reason": reason,
+            # custody blockers first (the last prune plan's deny reasons); the shipper's general last_error only as a fallback
+            "custody_last_error": ((", ".join(map(str, deny))[:200]) if isinstance(deny, (list, tuple)) and deny else
+                                   (("SHIPPER: " + str(t.get("last_error")))[:200] if t.get("last_error") else None))}
+
+
 class CustodyLag:
     def __init__(self, clock=time.time):
         self._clock = clock
@@ -666,10 +719,20 @@ class CustodyLag:
             alerts.append("CUSTODY_LAG_GT_30")
         if rising:
             alerts.append("CUSTODY_LAG_RISING_1H")
+        stall = custody_stall(transfer, now)
+        level = AMBER if alerts else GREEN
+        try:
+            shipped_ahead = shipped is not None and custody is not None and int(shipped) > int(custody)
+        except (TypeError, ValueError):
+            shipped_ahead = False
+        st_s = stall["custody_stalled_s"]
+        if st_s is not None and shipped_ahead and st_s > CUSTODY_STALL_AMBER_SEC:
+            alerts.append("CUSTODY_STALLED")
+            level = RED if st_s > CUSTODY_STALL_RED_SEC else AMBER
         mode = transfer.get("prune_mode")
-        return {"schema": SHIPPER_SCHEMA, "shipped_seq": shipped, "laptop_acked_seq": acked,
+        return {"schema": SHIPPER_SCHEMA, **stall, "shipped_seq": shipped, "laptop_acked_seq": acked,
                 "custody_through_seq": custody, "custody_lag_segments": lag,
                 "pruned_through_seq": transfer.get("pruned_through_seq"), "prune_mode": mode,
                 "prune_safe": (transfer.get("pruned_through_seq") is None or custody is None
                                or int(transfer.get("pruned_through_seq") or 0) <= int(custody or 0)),
-                "alerts": alerts, "level": AMBER if alerts else GREEN}
+                "alerts": alerts, "level": level}

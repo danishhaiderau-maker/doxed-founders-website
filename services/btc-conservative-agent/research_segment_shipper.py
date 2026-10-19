@@ -423,7 +423,9 @@ class SegmentShipper:
                                 prefix=self.prefix, custody=custody, now=self.clock())
         summary = prune.summarize(plan)
         fields = {"prune_mode": mode, "prune_last_at": self.clock(), "prune_last_plan": summary,
-                  "custody_through_seq": plan.get("custody_through_seq")}
+                  "custody_through_seq": plan.get("custody_through_seq"),
+                  # when custody last advanced: received_at of the newest receipt (one per through_seq, never rewritten)
+                  "custody_received_at": (custody or {}).get("received_at")}
         _atomic_write(self.state_dir / "prune-plan-latest.json",
                       json.dumps({**plan, "mode": mode}, sort_keys=True, default=str).encode())
         if mode != "enforce" or not plan["allowed"]:
