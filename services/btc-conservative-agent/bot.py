@@ -49180,6 +49180,9 @@ def monitor_live_guardian_route():
             **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
             "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
                      "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
+    return _monitor_response(body, 16384)
+
+
 @app.route('/api/monitor/live/exchange-stops', methods=["GET"])
 def monitor_exchange_stops_route():
     """Read-only: the protective stop(s) on the exchange for the open position (relay executor's private read, no I/O here)."""
