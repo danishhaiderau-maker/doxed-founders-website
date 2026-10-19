@@ -49058,6 +49058,25 @@ def _nonaccum_plans_worker(root: str, epoch_ts: float) -> None:
         _NONACCUM_PLANS_CACHE.update(res)
 
 
+
+@app.route('/api/monitor/live/exchange-stops', methods=["GET"])
+def monitor_exchange_stops_route():
+    """Read-only: the protective stop(s) on the exchange for the open position (relay executor's private read, no I/O here)."""
+    if not monitor_integrity_authorized():
+        return _monitor_response({"error": "unauthorized"}, monitor_tiles.UNAUTHORIZED_BYTES, status=401)
+    import exchange_stops_view as _esv
+    view = _live_copy_website_cached_view()
+    accts = [a for a in (view.get("accounts") or []) if isinstance(a, dict)]
+    want = (request.args.get("account") or "").strip()
+    pick = next((a for a in accts if a.get("account") == want), None) if want else (
+        next((a for a in accts if a.get("armed")), None) or next((a for a in accts if isinstance(a.get("exchange_mirror"), dict) and a["exchange_mirror"].get("ok")), None))
+    with state_lock:
+        audit = dict(state.get("exchange_sync_audit") or {})
+    body = _esv.build((pick or {}).get("exchange_mirror"), (pick or {}).get("account"), audit)
+    body["website_reachable"] = bool(view.get("reachable"))
+    body["accounts_seen"] = [a.get("account") for a in accts]
+    return _monitor_response(body, 16384)
+
 @app.route('/api/monitor/nonaccum-plans', methods=["GET"])
 def monitor_nonaccum_plans_route():
     """C1-C4 non-accumulation plans + plan_sha256 (read-only; admin/monitor auth; never deletes or writes state).
