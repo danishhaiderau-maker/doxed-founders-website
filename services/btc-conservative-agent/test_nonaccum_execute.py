@@ -57,6 +57,8 @@ def test_execute_removes_only_planned_pre_epoch_items_and_keeps_current_and_prot
             f"{root}/tape_1s/new.jsonl.gz", f"{root}/tape_1s/old.jsonl.gz", f"{root}/runtime/relay_switch.json"]
     gone = [f"{rec}/decision/{'1'*64}.json", f"{v3}/signal_snapshots_v1/{'6'*64}.json",
             f"{v3}/lifecycle_transfer_bundles/bb/transfer-{'b'*64}/b.json"]
+    for d in (f"{v3}/lifecycle_transfer_bundles/bb/transfer-{'b'*64}", f"{v3}/lifecycle_transfer_bundles/bb"):
+        os.utime(d, (EPOCH - 500, EPOCH - 500))          # an old bundle dir untouched since before the epoch
     res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
     assert res["status"] == "DONE", res
     assert all(os.path.exists(p) for p in keep) and not any(os.path.exists(p) for p in gone)
@@ -124,3 +126,85 @@ def test_executor_source_has_no_archive_or_rmtree_and_no_order_calls():
     src = open(os.path.join(os.path.dirname(__file__), "nonaccum_execute.py"), encoding="utf-8").read()
     for tok in ("rmtree", "shutil.copy", "shutil.move", "tarfile", "zipfile", "gzip.open", "place_order", "cancel_order"):
         assert tok not in src, tok
+
+
+def test_c3a_rmdir_skips_dirs_touched_at_or_after_the_epoch_and_never_dirs_outside_planned_items(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    b = f"{root}/runtime/v3/lifecycle_transfer_bundles"
+    # dir mtimes are fresh (>= epoch) in this fixture: the planned file goes, the (touched) dirs stay
+    unrelated = f"{b}/zz/empty-unplanned-dir"
+    os.makedirs(unrelated)
+    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C3a",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+    assert res["status"] == "DONE" and os.path.isdir(f"{b}/bb/transfer-{'b'*64}") and os.path.isdir(unrelated)
+
+
+def test_symlinked_component_and_bad_names_are_rejected(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    v3 = f"{root}/runtime/v3"
+    assert ex._path_ok(f"{v3}/signal_snapshots_v1", f"{v3}/signal_snapshots_v1/{'6'*64}.json")
+    outside = tmp_path / "outside"; outside.mkdir(); (outside / "x.json").write_text("x")
+    link = f"{v3}/lifecycle_transfer_bundles/ln"
+    os.symlink(str(outside), link)
+    assert not ex._path_ok(f"{v3}/lifecycle_transfer_bundles", f"{link}/x.json")
+    assert not ex._path_ok(f"{v3}/lifecycle_transfer_bundles", f"{v3}/lifecycle_transfer_bundles/../x.json")
+    with pytest.raises(ex.Abort):
+        ex._file_targets("C3a", root, [("aa/not-a-transfer/b.json", 1, 1)])
+    with pytest.raises(ex.Abort):
+        ex._file_targets("C3a", root, [(f"aa/transfer-{'9'*64}/../../x.json", 1, 1)])
+    assert ex._file_targets("C3a", root, [(f"aa/transfer-{'9'*64}/b.json", 1, 1)])
+    # a symlink swapped in at the planned file path is skipped, never followed
+    p = f"{v3}/signal_snapshots_v1/{'6'*64}.json"
+    keep = tmp_path / "victim.json"; keep.write_text("v")
+    os.unlink(p); os.symlink(str(keep), p)
+    with pytest.raises(ex.Abort):
+        totals = {"C2": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
+        ex.delete_files("C2", root, EPOCH, [(f"{'6'*64}.json", 1, 1)], True, 10, 0, lambda: None, lambda r: None, totals)
+    assert keep.exists()
+
+
+def test_oserror_ends_with_summary_not_traceback(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    os.unlink(f"{root}/runtime/relay_outbox_quarantine.jsonl")          # a missing C4 file
+    res = ex.run(root, EPOCH, sha, fake_get(), classes=("C4",), execute=True, confirm_sha=sha, sleep_s=0, now=now)
+    assert res["status"] == "ABORTED" and "OSError" in res["reason"]
+
+
+def test_api_latency_over_limit_aborts_and_is_reported(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    clock = {"t": 0.0}
+    real = ex.time.monotonic
+    ex.time.monotonic = lambda: clock.__setitem__("t", clock["t"] + 6.0) or clock["t"]     # every call advances 6 s
+    try:
+        with pytest.raises(ex.Abort, match="API latency"):
+            ex.gate(fake_get(), None, set())
+    finally:
+        ex.time.monotonic = real
+    assert "api_latency_s" in ex.gate(fake_get(), None, set())
+
+
+def test_c4_pending_rechecked_right_before_the_replace(tmp_path):
+    root, now, sha, doc = _setup(tmp_path)
+    items = list(np_.ITEMS["C4"]) if hasattr(np_, "ITEMS") else None
+    before = _snapshot(root)
+    seq = iter([0, 3])                                                    # clean at the start, an event arrives before the replace
+    totals = {"C4": {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0}}
+    with pytest.raises(ex.Abort, match="right before the replace"):
+        ex.rewrite_c4(root, EPOCH, items, True, lambda r: None, totals, lambda: next(seq, 3))
+    assert _snapshot(root) == before and not any(f.endswith(".nonaccum.tmp") for f in os.listdir(f"{root}/runtime"))
+
+
+def test_current_dirs_shrink_is_checked_per_batch(tmp_path):
+    root, now, sha, _ = _setup(tmp_path)
+    cur = f"{root}/runtime/v3/lifecycle_transfer_bundles/cc"
+    orig = ex.current_bundle_dirs
+    n = {"c": 0}
+
+    def shrinking(r, e):
+        n["c"] += 1
+        return orig(r, e) - (1 if n["c"] >= 3 else 0)      # drops after the first batches
+    ex.current_bundle_dirs = shrinking
+    try:
+        res = ex.run(root, EPOCH, sha, fake_get(), execute=True, confirm_sha=sha, sleep_s=0, batch=1, now=now)
+    finally:
+        ex.current_bundle_dirs = orig
+    assert res["status"] == "ABORTED" and "shrank" in res["reason"]

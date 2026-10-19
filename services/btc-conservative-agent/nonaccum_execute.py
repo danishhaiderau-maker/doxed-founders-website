@@ -6,7 +6,7 @@
 Rules (all enforced in code, covered by tests):
   * re-builds the plans (nonaccum_plans.build_all) and REQUIRES plan_sha256 == --expected-sha. A different sha is accepted only
     with --expected-counts-json and only if every class has the same count or fewer; the new sha is logged loudly (tell HM);
-  * gate before the first batch and after every batch: live_armed false, force_paper_mode true, bot RSS under a ceiling,
+  * gate (incl. API latency <= 5 s on /api/status) before the first batch and after every batch: live_armed false, force_paper_mode true, bot RSS under a ceiling,
     and no watched monitor check worse than its baseline (a RED that already existed at the start must be accepted explicitly
     with --accept-baseline-red NAME; any NEW or worsened check aborts);
   * C1 touches only <64hex>.json under the 7 ledger dirs with mtime < epoch; protected names can never be unlinked;
@@ -24,6 +24,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import stat
 import sys
 import time
 import urllib.request
@@ -34,6 +36,8 @@ WATCHED_CHECKS = ("exits-latency-guard", "exit-truth", "tape-retention", "data-c
 _RANK = {"GREEN": 0, "INFO": 0, "AMBER": 1, "UNKNOWN": 1, "RED": 2}
 RSS_CEILING_BYTES = 2 * 1024 ** 3
 RSS_GROWTH_ABORT_BYTES = 400 * 1024 ** 2
+API_LATENCY_ABORT_S = 5.0   # /api/status must answer within this at every gate, else abort
+C3A_RE = re.compile(r"^[0-9A-Za-z_-]{1,16}/transfer-[0-9a-f]{64}(/[0-9A-Za-z._-]{1,128}){1,4}$")
 CLASS_ORDER = ("C1", "C2", "C3a", "C3b", "C4")
 
 
@@ -53,7 +57,11 @@ def http_json(base: str, token: str):
 
 def gate(get, baseline: dict | None, accepted_red: set) -> dict:
     """Return the snapshot or raise Abort. baseline=None records the first snapshot."""
+    t0 = time.monotonic()
     st = get("/api/status")
+    latency = round(time.monotonic() - t0, 3)
+    if latency > API_LATENCY_ABORT_S:
+        raise Abort(f"API latency {latency}s over {API_LATENCY_ABORT_S}s")
     if st.get("live_armed") is not False:
         raise Abort(f"live_armed is {st.get('live_armed')!r} (must be false)")
     if st.get("force_paper_mode") is not True:
@@ -63,7 +71,7 @@ def gate(get, baseline: dict | None, accepted_red: set) -> dict:
         raise Abort("no RSS sample")
     ro = st.get("relay_outbox") or {}
     checks = (get("/api/monitor/checks").get("checks") or {})
-    snap = {"rss": rss, "relay_pending": ro.get("pending_total"),
+    snap = {"rss": rss, "relay_pending": ro.get("pending_total"), "api_latency_s": latency,
             "checks": {n: str((checks.get(n) or {}).get("status") or "UNKNOWN").upper() for n in WATCHED_CHECKS}}
     if rss > RSS_CEILING_BYTES:
         raise Abort(f"RSS {rss} over ceiling")
@@ -101,6 +109,8 @@ def _file_targets(cls: str, root: str, items: list) -> list:
                 raise Abort(f"C2 item outside the allowed set: {rel}")
         elif cls == "C3a":
             path = os.path.join(v3, "lifecycle_transfer_bundles", rel)
+            if not C3A_RE.match(rel) or ".." in rel.split("/"):
+                raise Abort(f"C3a item outside the allowed set: {rel}")
         elif cls == "C3b":
             path = os.path.join(root, rel)
             if not rel.startswith("tape_1s/") or not rel.endswith(".jsonl.gz"):
@@ -109,6 +119,31 @@ def _file_targets(cls: str, root: str, items: list) -> list:
             raise Abort(f"not a file class: {cls}")
         out.append((path, int(size), int(mtime_ns)))
     return out
+
+
+def _class_dir(cls: str, root: str) -> str:
+    v3 = os.path.join(root, "runtime", "v3")
+    return {"C1": os.path.join(v3, "receipts", "emergency_record_idempotency_v1"), "C2": os.path.join(v3, "signal_snapshots_v1"),
+            "C3a": os.path.join(v3, "lifecycle_transfer_bundles"), "C3b": os.path.join(root, "tape_1s")}[cls]
+
+
+def _path_ok(class_dir: str, path: str) -> bool:
+    """realpath must equal the plain path and stay under the class directory; no path component below ROOT may be a symlink."""
+    cd = os.path.abspath(class_dir)
+    ap = os.path.abspath(path)
+    if not ap.startswith(cd + os.sep) or os.path.realpath(ap) != ap and os.path.realpath(cd) + ap[len(cd):] != os.path.realpath(ap):
+        return False
+    cur = cd
+    if os.path.islink(cd):
+        return False
+    for part in ap[len(cd) + 1:].split(os.sep):
+        cur = os.path.join(cur, part)
+        try:
+            if stat.S_ISLNK(os.lstat(cur).st_mode):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def current_bundle_dirs(root: str, epoch_ts: float) -> int:
@@ -131,12 +166,29 @@ def current_bundle_dirs(root: str, epoch_ts: float) -> int:
 def delete_files(cls, root, epoch_ts, items, execute, batch, sleep_s, check, log, totals):
     targets = _file_targets(cls, root, items)
     rr = os.path.realpath(root)
+    cdir = _class_dir(cls, root)
+    # C3a: the ONLY directories that may be rmdir'ed are those derived from planned items (file parent chain up to the shard),
+    # and only if their own mtime was before the epoch when the class started (a dir touched since is skipped).
+    derived: dict = {}
+    if cls == "C3a":
+        for path, _sz, _mt in targets:
+            d = os.path.dirname(path)
+            while len(d) > len(cdir) and d.startswith(cdir + os.sep):
+                derived.setdefault(d, None)
+                d = os.path.dirname(d)
+        for d in list(derived):
+            try:
+                derived[d] = os.lstat(d).st_mtime
+            except OSError:
+                derived.pop(d)
     for i in range(0, len(targets), batch):
         removed = skipped = nbytes = 0
         for path, size, mtime_ns in targets[i:i + batch]:
             rp = os.path.realpath(path)
             if not rp.startswith(rr + os.sep):
                 raise Abort(f"path escapes root: {path}")
+            if not _path_ok(cdir, path):
+                raise Abort(f"path outside class dir or has a symlinked component: {path}")
             try:
                 st = os.lstat(path)
             except OSError:
@@ -146,7 +198,13 @@ def delete_files(cls, root, epoch_ts, items, execute, batch, sleep_s, check, log
                 skipped += 1      # changed since planning: never delete
                 continue
             if execute:
-                os.unlink(path)
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    skipped += 1
+                    continue
+                except OSError as exc:
+                    raise Abort(f"unlink failed for {path}: {exc}")
             removed += 1
             nbytes += size
         totals[cls]["removed"] += removed
@@ -157,26 +215,22 @@ def delete_files(cls, root, epoch_ts, items, execute, batch, sleep_s, check, log
         check()
         if execute and sleep_s:
             time.sleep(sleep_s)
-    if cls == "C3a" and execute:   # remove only EMPTY dirs (no recursive delete)
-        b = os.path.join(root, "runtime", "v3", "lifecycle_transfer_bundles")
-        for shard in sorted(os.listdir(b)):
-            sd = os.path.join(b, shard)
-            for tr in sorted(os.listdir(sd)) if os.path.isdir(sd) else []:
-                td = os.path.join(sd, tr)
-                for d, _s, _n in sorted(os.walk(td), key=lambda x: -len(x[0])):
-                    try:
-                        os.rmdir(d)
-                    except OSError:
-                        pass
+    if cls == "C3a" and execute:   # remove only EMPTY dirs derived from planned items (no recursive delete)
+        for d in sorted(derived, key=lambda x: -len(x)):
+            if derived[d] >= epoch_ts or not _path_ok(cdir, d):
+                continue
             try:
-                os.rmdir(sd)
+                os.rmdir(d)
             except OSError:
                 pass
 
 
-def rewrite_c4(root, epoch_ts, items, execute, log, totals, relay_pending):
-    if relay_pending not in (0, None) or relay_pending is None:
-        raise Abort(f"C4 needs relay outbox pending_total == 0 (got {relay_pending!r}): unacked-event check failed")
+def rewrite_c4(root, epoch_ts, items, execute, log, totals, pending_fn):
+    def _need_zero(when):
+        p = pending_fn()
+        if p != 0:
+            raise Abort(f"C4 needs relay outbox pending_total == 0 (got {p!r} {when}): unacked-event check failed")
+    _need_zero("at start")
     planned: dict = {}
     for rel, _len, sha in items:
         fname, idx = rel.split("#")
@@ -205,6 +259,11 @@ def rewrite_c4(root, epoch_ts, items, execute, log, totals, relay_pending):
                 fh.write(b"".join(keep))
                 fh.flush()
                 os.fsync(fh.fileno())
+            try:
+                _need_zero("right before the replace")      # re-checked after the rewrite is staged, immediately before os.replace
+            except Abort:
+                os.unlink(tmp)
+                raise
             st1 = os.stat(path)
             if (st1.st_size, st1.st_mtime_ns) != (st0.st_size, st0.st_mtime_ns):
                 os.unlink(tmp)
@@ -253,11 +312,15 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
     totals = {c: {"removed": 0, "bytes": 0, "skipped_changed_or_gone": 0} for c in classes}
     items = {k: list(P.ITEMS.get(k, [])) for k in classes}
     cur_before = current_bundle_dirs(root, epoch_ts)
-    check = lambda: log({"event": "gate", **gate(get, base, accepted)})
+    def check():
+        log({"event": "gate", **gate(get, base, accepted)})
+        now_cur = current_bundle_dirs(root, epoch_ts)          # per batch: the current-epoch bundle dirs must never shrink
+        if now_cur < cur_before:
+            raise Abort(f"current-epoch bundle dirs shrank {cur_before} -> {now_cur}")
     try:
         for cls in classes:
             if cls == "C4":
-                rewrite_c4(root, epoch_ts, items[cls], execute, log, totals, (get("/api/status").get("relay_outbox") or {}).get("pending_total"))
+                rewrite_c4(root, epoch_ts, items[cls], execute, log, totals, lambda: (get("/api/status").get("relay_outbox") or {}).get("pending_total"))
                 check()
             else:
                 delete_files(cls, root, epoch_ts, items[cls], execute, batch, sleep_s, check, log, totals)
@@ -268,6 +331,8 @@ def run(root: str, epoch_ts: float, expected_sha: str, get, classes=("C1", "C2",
                   "current_bundle_dirs_before": cur_before, "current_bundle_dirs_after": cur_after}
     except Abort as exc:
         result = {"status": "ABORTED", "reason": str(exc), "execute": execute, "plan_sha256": sha, "totals": totals}
+    except OSError as exc:   # a missing C4 file, a failing stat/replace: end with a summary event, never a bare traceback
+        result = {"status": "ABORTED", "reason": f"OSError: {exc}", "execute": execute, "plan_sha256": sha, "totals": totals}
     log({"event": "summary", **result})
     return result
 
