@@ -136,7 +136,23 @@ def _segments(old_cursor: int, limit: int) -> Iterator[tuple[int, int]]:
 
 def iter_canonical_rows(path: str | Path, *, byte_limit: int | None = None,
                         cache_dir: str | Path | None = None, stats: dict | None = None) -> Iterator[bytes]:
-    """Yield, in file order, the canonical JSON bytes of each object row.
+    """:func:`_iter_canonical_rows_all` behind the analyzer's hard fresh-epoch gate: under a declared epoch every
+    PRE_EPOCH / STRADDLE / UNSTAMPED row of a V3 ledger is dropped (analyzer_epoch_guard.admit_v3_line); the row
+    index itself still covers every line, so the cache stays byte-exact."""
+    from analyzer_epoch_guard import admit_v3_line, process_guard, v3_ledger_relpath
+
+    rel = v3_ledger_relpath(path)
+    gate = rel is not None and bool(process_guard().manifest)
+    for canonical in _iter_canonical_rows_all(path, byte_limit=byte_limit, cache_dir=cache_dir, stats=stats):
+        if gate and not admit_v3_line(rel, canonical):
+            continue
+        yield canonical
+
+
+def _iter_canonical_rows_all(path: str | Path, *, byte_limit: int | None = None,
+                             cache_dir: str | Path | None = None, stats: dict | None = None) -> Iterator[bytes]:
+    """Yield, in file order, the canonical JSON bytes of each object row (no epoch gate: use
+    :func:`iter_canonical_rows`).
 
     Equivalent to ``json.dumps(json.loads(line.decode("utf-8", "replace")),
     sort_keys=True, separators=(",", ":")).encode()`` for every complete line
@@ -207,7 +223,10 @@ def iter_canonical_rows(path: str | Path, *, byte_limit: int | None = None,
             elif kind == KIND_CANONICAL:
                 yield raw[:-1]
 
-    with path.open("rb") as handle:
+    from analyzer_epoch_guard import open_v3_ledger
+
+    # Rows leave only through iter_canonical_rows' fresh-epoch gate, so this open is epoch-filtered.
+    with open_v3_ledger(path, "rb") as handle:
         for start, end in _segments(old_cursor, limit):
             data = handle.read(end - start)
             short = len(data) != end - start
@@ -248,7 +267,7 @@ def iter_canonical_rows(path: str | Path, *, byte_limit: int | None = None,
         return
     full = new.cursor // BLOCK_BYTES
     del new.blocks[full:]
-    with path.open("rb") as handle:
+    with open_v3_ledger(path, "rb", inventory=True) as handle:  # tail digest only
         handle.seek(full * BLOCK_BYTES)
         new.tail = hashlib.sha256(handle.read(new.cursor - full * BLOCK_BYTES)).hexdigest()
     try:

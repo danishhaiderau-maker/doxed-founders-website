@@ -106,8 +106,12 @@ class VerifiedLedgerRowIndex:
         consumed = count = line_number = 0
         next_space_check = 0
         try:
+            from analyzer_epoch_guard import admit_v3_row, open_v3_ledger, v3_ledger_relpath
+
+            ledger_rel = v3_ledger_relpath(path)
             self._connection.execute("BEGIN")
-            with path.open("rb") as handle:
+            # The whole file is still digested against its pin; only fresh-epoch rows are indexed (hard gate below).
+            with open_v3_ledger(path, "rb") as handle:
                 while True:
                     raw = handle.readline(MAX_LEDGER_ROW_BYTES + 1)
                     if not raw:
@@ -129,6 +133,8 @@ class VerifiedLedgerRowIndex:
                     row = json.loads(raw.decode("utf-8-sig"))
                     if not isinstance(row, Mapping):
                         raise ValueError("SOURCE_ROW_INVALID")
+                    if ledger_rel is not None and not admit_v3_row(ledger_rel, dict(row)):
+                        continue
                     if stage_only and not (row.get("schema") == "compressed_chase_shadow_v1"
                             and row.get("event") == "STAGE" and type(row.get("stage_index")) is int
                             and row["stage_index"] == 0):

@@ -31,6 +31,7 @@ from research.policy_evidence_bindings import (
     segment_role,
 )
 from pathlib import Path
+from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
 import hashlib
 import json
 import re
@@ -985,12 +986,14 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
         for ledger in ("opportunity", "decision", "order_intent", "execution", "lifecycle"):
             ledger_path = v3_root / "ledgers" / f"{ledger}.jsonl"
             if ledger_path.is_file():
-                with ledger_path.open("r", encoding="utf-8-sig") as handle:
+                with open_v3_ledger(ledger_path, "r", encoding="utf-8-sig") as handle:
                     for line in handle:
                         if line.strip():
                             linked = json.loads(line)
                             if not isinstance(linked, Mapping):
                                 raise ValueError("IDENTITY_INCIDENT_LEDGER_ROW_INVALID")
+                            if not admit_v3_row(ledger_path, dict(linked)):  # hard fresh-epoch gate
+                                continue
                             incident_index.add([linked])
     path = v3_root / "ledgers" / "opportunity.jsonl"
     segment_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -1000,13 +1003,13 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
     ):
         if not segment_path.is_file():
             continue
-        with segment_path.open("r", encoding="utf-8-sig") as handle:
+        with open_v3_ledger(segment_path, "r", encoding="utf-8-sig") as handle:
             for line in handle:
                 try:
                     segment = json.loads(line)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                if not isinstance(segment, dict):
+                if not isinstance(segment, dict) or not admit_v3_row(segment_path, segment):
                     continue
                 incident_index.add([segment])
                 key = tuple(str(segment.get(field) or "") for field in (
@@ -1015,13 +1018,13 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                 segment_rows.setdefault(key, []).append(segment)
     episodes = []
     if path.is_file():
-        with path.open("r", encoding="utf-8") as handle:
+        with open_v3_ledger(path, "r", encoding="utf-8") as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                if not isinstance(row, Mapping):
+                if not isinstance(row, Mapping) or not admit_v3_row(path, dict(row)):  # hard fresh-epoch gate
                     continue
                 snapshot = row.get("baseline_schedule_snapshot")
                 schedules = (

@@ -39,13 +39,12 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
     limit = _snapshot_size(path) if byte_limit is None else max(0, int(byte_limit))
     if limit <= 0:
         return
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger, v3_ledger_relpath
     try:
-        handle = path.open("rb")
+        handle = open_v3_ledger(path, "rb")
     except OSError:
         return
-    from analyzer_epoch_guard import process_guard
-    guard = process_guard()
-    rel = f"v3/ledgers/{path.name}" if path.parent.name == "ledgers" else None
+    rel = v3_ledger_relpath(path)
     with handle:
         remaining = limit
         while remaining > 0:
@@ -62,7 +61,7 @@ def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
             if isinstance(value, dict):
-                if rel is not None and not guard.admit_v3_ledger_row(rel, value):
+                if rel is not None and not admit_v3_row(rel, value):
                     continue  # fail closed on pre-epoch / straddle / unstamped ledger rows (HM 19 Oct)
                 yield value
 
