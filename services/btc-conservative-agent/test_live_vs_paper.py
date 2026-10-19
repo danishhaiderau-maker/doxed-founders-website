@@ -1,0 +1,50 @@
+import live_vs_paper as lv
+
+
+def test_long_pair_computes_slippage_latencies_outcome_and_missing_fields():
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_ts": 50.0, "entry_ts": 10.0, "funding_usd_raw": 0.001}
+    ch = {"correlation_id": "t1", "fill_price": 100.02, "exit_price": 100.98, "fly_signal_at_ts": 9.0, "order_sent_at_ts": 9.4,
+          "fill_at_ts": 10.2, "stop_confirmed_at_ts": 10.9, "closed": True}
+    r = lv.pair_row("t1", ch, twin)
+    assert r["entry_slippage_bp"] == 2.0 and r["signal_to_send_ms"] == 400.0 and r["send_to_fill_ms"] == 800.0
+    assert r["fill_to_stop_ms"] == 700.0 and r["outcome_bp_paper"] == 100.0 and r["outcome_bp_live"] == 95.98
+    assert r["exit_slippage_bp"] == 1.98 and "live_exit_ts" in r["missing"] and "funding_usd_live" in r["missing"]
+
+
+def test_short_signs_are_flipped():
+    r = lv.pair_row("s", {"fill_price": 99.98, "exit_price": 99.0}, {"side": "SHORT", "entry_price": 100.0, "exit_price": 99.0})
+    assert r["entry_slippage_bp"] == 2.0 and r["outcome_bp_live"] == round(-(99.0 / 99.98 - 1) * 1e4, 2)
+
+
+def test_paper_signal_live_did_not_trade_gets_a_reason_code():
+    out = lv.build([{"correlation_id": "a", "fill_price": 100.0}], {"a": {"side": "LONG", "entry_price": 100.0}, "b": {"side": "LONG"}, "c": {}},
+                   paper_signal_ids=["a", "b", "c"], skip_reasons={"b": "LIVE_BUSY_SKIPPED"})
+    by = {r["trade_id"]: r for r in out["rows"]}
+    assert by["b"]["live_not_traded_reason"] == "LIVE_BUSY_SKIPPED" and by["c"]["live_not_traded_reason"] == "NO_LIVE_CHAIN"
+    assert out["n_live_traded"] == 1 and out["n_paper_only"] == 2 and out["paper_only_by_reason"]["LIVE_BUSY_SKIPPED"] == 1
+
+
+def test_declined_chain_reason_comes_from_executor_decision():
+    r = lv.pair_row("d", {"executor_decision": {"decision": "SKIPPED", "reason": "MARK_BAND"}}, {"side": "LONG"})
+    assert not r["live_traded"] and r["live_not_traded_reason"] == "MARK_BAND"
+
+
+def test_route_returns_pairs_including_paper_only_signal_with_lane_filter():
+    from flask import Flask
+    import live_copy_monitor_api as api
+    ctx = {"approvals": [{"correlation_id": "g1", "research_lane": "FAMILY_GS01_XV", "signal_at_ts": 9.0, "event": "ORDER_PLACED"},
+                         {"correlation_id": "g2", "research_lane": "FAMILY_GS01_XV", "signal_at_ts": 20.0, "event": "ORDER_PLACED"},
+                         {"correlation_id": "x1", "research_lane": "FAMILY_OTHER", "signal_at_ts": 5.0, "event": "ORDER_PLACED"}],
+           "reports": [{"correlation_id": "g1", "account": "A", "lane": "FAMILY_GS01_XV", "type": "ORDER_FILLED",
+                        "fill": {"price": 100.0}, "timeline": {"order_sent_at_ts": 9.4, "fill_at_ts": 10.0}}],
+           "paper_twins": {"g1": {"side": "LONG", "entry_price": 100.0}, "g2": {"side": "LONG"}},
+           "live_skip_reasons": {"g2": "LIVE_BUSY_SKIPPED"}}
+    api.wire(lambda: ctx, lambda: True)
+    app = Flask(__name__)
+    app.register_blueprint(api.blueprint)
+    r = app.test_client().get("/api/monitor/live-vs-paper?lane=GS01")
+    assert r.status_code == 200, r.data
+    body = r.get_json()
+    d = body.get("data", body)
+    ids = {x["trade_id"]: x for x in d["rows"]}
+    assert set(ids) == {"g1", "g2"} and ids["g1"]["live_traded"] and ids["g2"]["live_not_traded_reason"] == "LIVE_BUSY_SKIPPED"
