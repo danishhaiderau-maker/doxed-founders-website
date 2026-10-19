@@ -293,3 +293,11 @@ def test_record_loop_keeps_per_step_rss_delta_and_timed_step_records_it():
         pass
     else:
         raise AssertionError("step exceptions must propagate")
+
+
+def test_mem_tracker_is_a_module_global_so_analytics_loop_can_record_loops():
+    import re
+    src = open(__file__.replace("test_memory_structures.py", "bot.py"), encoding="utf-8").read()
+    assert re.search(r"^_mem_tracker = None", src, re.M)
+    body = src[src.index("def runtime_uptime_loop():"):][:400]
+    assert "global _mem_tracker" in body

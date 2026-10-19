@@ -46661,8 +46661,13 @@ def _runtime_uptime_problem(now: float) -> dict | None:
     )
 
 
+_mem_tracker = None  # module-level so analytics_loop can record per-step loops (#761 bug: it was local to runtime_uptime_loop,
+#                      record_loop raised NameError, swallowed, and memory_structures loops stayed empty)
+
+
 def runtime_uptime_loop():
     """Observe interruptions for the uptime strip; started once boot has restored state."""
+    global _mem_tracker
     tracker = runtime_uptime.UptimeTracker(_data_sync_volume_root() / runtime_uptime.STATE_FILE)
     opened = tracker.boot(float(process_boot_time or time.time()), _runtime_git_rev())
     _RUNTIME_UPTIME["tracker"] = tracker
