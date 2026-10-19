@@ -641,7 +641,7 @@ class RegimeComparator:
 # ----------------------------------------------------------------------------
 # A7 shipper custody
 # ----------------------------------------------------------------------------
-CUSTODY_STALL_AMBER_SEC = 3600.0       # custody unchanged > 60 min while shipped_seq is ahead of it -> AMBER
+CUSTODY_STALL_AMBER_SEC = 2 * 3600.0   # custody unchanged > 2 h while shipped_seq is ahead of it -> AMBER (hourly parity cadence: 60-75 min is normal)
 CUSTODY_STALL_RED_SEC = 6 * 3600.0     # > 6 h -> RED
 
 
@@ -664,6 +664,10 @@ def custody_stall(transfer: Mapping | None, now: float) -> dict:
     through_seq, put_if_absent), so it is the real time custody last advanced and survives restarts. Fly can see the laptop
     ACK but not the laptop parity/analyzer seqs, so the reason names which side holds custody back."""
     t = dict(transfer or {})
+    if str(t.get("prune_mode") or "").lower() == "off":
+        # pruning off: custody gates nothing, so no stall check and no custody fields
+        return {"custody_last_advanced_utc": None, "custody_stalled_s": None, "custody_stall_reason": "PRUNE_MODE_OFF",
+                "custody_last_error": None}
     ts = _iso_ts(t.get("custody_received_at"))
     custody, shipped, acked = t.get("custody_through_seq"), t.get("shipped_seq"), t.get("laptop_acked_seq")
     try:
@@ -685,8 +689,9 @@ def custody_stall(transfer: Mapping | None, now: float) -> dict:
     return {"custody_last_advanced_utc": (None if ts is None else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))),
             "custody_stalled_s": stalled_s,
             "custody_stall_reason": reason,
-            "custody_last_error": (str(t.get("last_error"))[:200] if t.get("last_error") else
-                                   (", ".join(map(str, deny))[:200] if isinstance(deny, (list, tuple)) and deny else None))}
+            # custody blockers first (the last prune plan's deny reasons); the shipper's general last_error only as a fallback
+            "custody_last_error": ((", ".join(map(str, deny))[:200]) if isinstance(deny, (list, tuple)) and deny else
+                                   (("SHIPPER: " + str(t.get("last_error")))[:200] if t.get("last_error") else None))}
 
 
 class CustodyLag:
