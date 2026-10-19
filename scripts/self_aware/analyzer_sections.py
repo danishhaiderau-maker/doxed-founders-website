@@ -42,7 +42,13 @@ def _grid_on_disk(now: float) -> dict[str, Any]:
         return {"present": False, "error": f"{type(exc).__name__}: {exc}"[:200], "path": str(GENOME_GRID_REPORT)}
     gen = parse_ts(rep.get("generated_at"))
     cov, grid = rep.get("coverage") or {}, rep.get("grid") or {}
-    return {"present": True, "path": str(GENOME_GRID_REPORT), "generated_at": rep.get("generated_at"),
+    epoch = rep.get("data_epoch") if isinstance(rep.get("data_epoch"), dict) else {}
+    fresh_rule = epoch.get("fresh_rule") if isinstance(epoch.get("fresh_rule"), dict) else {}
+    fail_closed = (str(rep.get("status") or "").upper() == "FAIL_CLOSED"
+                   or str(fresh_rule.get("status") or "").upper() == "RED")
+    return {"present": True, "status": rep.get("status") or "OK",
+            "fail_closed_reason": (str(rep.get("reason") or fresh_rule.get("reason") or "FRESH_RULE_RED")
+                                   if fail_closed else None), "path": str(GENOME_GRID_REPORT), "generated_at": rep.get("generated_at"),
             "age_sec": round(now - gen, 1) if gen else None, "episodes_evaluated": cov.get("episodes_evaluated"),
             "excluded_declared": cov.get("v3_opportunities_excluded_declared") or 0,
             "episodes_collected": cov.get("episodes_collected"), "last_signal_utc": cov.get("last_signal_utc"),
@@ -117,6 +123,9 @@ def findings(doc: dict[str, Any] | None, now: float, max_age_sec: float) -> list
     problems = []
     if not grid.get("present"):
         problems.append(("RED", f"genome grid report missing: {grid.get('error')}"))
+    elif grid.get("fail_closed_reason"):
+        # #803: a FAIL_CLOSED report is on disk and fresh, but it scored nothing under the fresh epoch.
+        problems.append(("RED", f"genome grid FAIL_CLOSED ({grid['fail_closed_reason']}): no episode scored"))
     else:
         age = grid.get("age_sec") or 0
         if age > GRID_RED_SEC:

@@ -137,12 +137,30 @@ def payload_shape(obj: Any, depth: int = 0) -> dict[str, Any]:
     return shape
 
 
+def genome_grid_fail_closed_reason(grid: Mapping[str, Any] | None) -> str | None:
+    """Reason when a genome grid payload/report is fail-closed (status FAIL_CLOSED or a RED fresh_rule), else None."""
+    if not isinstance(grid, Mapping):
+        return None
+    fresh_rule = (grid.get("data_epoch") or {}).get("fresh_rule") or {} if isinstance(grid.get("data_epoch"), Mapping) else {}
+    if str(grid.get("status") or "").upper() == "FAIL_CLOSED" or str(fresh_rule.get("status") or "").upper() == "RED":
+        return str(grid.get("reason") or fresh_rule.get("reason") or "FRESH_RULE_RED")
+    return None
+
+
 def genome_grid_checks(grid: Mapping[str, Any] | None, combos: Mapping[str, Any] | None, now: float,
                        collected_opportunities: int | None = None) -> list[dict[str, Any]]:
     """Dimension completeness of the Top-100 panel: genome grid present, axes spread, parity, coverage."""
     checks: list[dict[str, Any]] = []
     combos = combos or {}
     dims = tuple(combos.get("dimensions") or ())
+    reason = genome_grid_fail_closed_reason(grid)
+    if reason:
+        # #803: a fail-closed run published a report, but it scored nothing; present must never read GREEN.
+        checks.append({"id": "genome_grid_present", "severity": RED,
+                       "observed": f"genome grid FAIL_CLOSED ({reason}): no episode scored; Top-100 panel is not "
+                                   "backed by the current fresh epoch",
+                       "expected": "genome_grid_report.json scored under a declared fresh epoch (fresh_rule GREEN)"})
+        return checks
     if not grid or grid.get("status") == "UNAVAILABLE":
         sev = RED if dims == LEGACY_COMBO_DIMENSIONS or not dims else AMBER
         checks.append({"id": "genome_grid_present", "severity": sev,
