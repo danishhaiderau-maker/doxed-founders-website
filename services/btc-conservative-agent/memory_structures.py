@@ -124,6 +124,7 @@ DEFAULT_LIMIT_KB = 8192 * 1024
 ABS_RED_KB = 3 * 1024 * 1024        # HM 19 Oct interim alert: RSS (bot + shipper) > 3 GB is RED at any uptime
 ABS_RED_YOUNG_KB = 2 * 1024 * 1024  # ... and > 2 GB in a boot younger than 12 h
 YOUNG_BOOT_SEC = 12 * 3600.0
+SHIPPER_WINDOW_SEC = 30 * 60.0  # HM 19 Oct: rolling median over >= 30 min, shipper term only
 STAIR_MB = 50.0                     # a rise this large between two consecutive samples is recorded as a stair
 STAIRS_KEEP = 50
 LOOPS_KEEP = 40
@@ -186,7 +187,7 @@ def _slope_kb_per_h(pts: list) -> float | None:
 
 def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: float,
                sample_ts: float | None, rss_kb_now: int | None, leak_structure: str | None = None,
-               prev_boot: dict | None = None, extra_rss_kb: int = 0) -> dict:
+               prev_boot: dict | None = None, extra_rss_kb: int = 0, extra_rss_raw_kb: int | None = None) -> dict:
     """fly.memory_oom_eta state. ``series`` = [(ts, rss_kb)] of runtime_telemetry samples (the same RSS /api/status shows).
 
     - missing/stale sample -> UNKNOWN, AMBER once it has persisted > 30 min;
@@ -200,9 +201,11 @@ def oom_status(series: list, limit_kb: int | None, boot_ts: float | None, now: f
             "prev_boot": prev_boot}
     age = None if sample_ts is None else now - float(sample_ts)
     if rss_kb_now is not None and age is not None and age <= STALE_SEC:
-        total_kb = rss_kb_now + max(0, int(extra_rss_kb or 0))     # bot + shipper
+        total_kb = rss_kb_now + max(0, int(extra_rss_kb or 0))     # bot + SMOOTHED shipper (rolling median)
+        raw_kb = rss_kb_now + max(0, int(extra_rss_kb if extra_rss_raw_kb is None else extra_rss_raw_kb or 0))  # unsmoothed
         base["shipper_rss_mb"] = int(extra_rss_kb or 0) // 1024
-        if total_kb >= ABS_RED_KB:
+        base["shipper_rss_raw_mb"] = int(extra_rss_kb if extra_rss_raw_kb is None else extra_rss_raw_kb or 0) // 1024
+        if raw_kb >= ABS_RED_KB:   # the 3 GiB ceiling stays UNSMOOTHED
             base.update(status="RED", rss_mb=rss_kb_now // 1024, reason="RSS_OVER_3GB", sample_age_sec=round(age))
             return base
         if boot_ts is not None and now - float(boot_ts) < YOUNG_BOOT_SEC and total_kb >= ABS_RED_YOUNG_KB:
@@ -297,6 +300,7 @@ class Tracker:
         self.boot_ts: float | None = None
         self.prev_boot: dict | None = None
         self.loops: list = []
+        self.shipper_hist: list = []   # (ts, shipper_kb) for the rolling median (shipper term only; the bot's RSS is never smoothed)
         self._load_previous()
 
     def _load_previous(self) -> None:
@@ -327,6 +331,14 @@ class Tracker:
                 self.series = [(float(a), int(b)) for a, b in (doc.get("rss_series_full") or []) if b]
                 self.prev_boot = doc.get("prev_boot")
         self.boot_ts = boot_ts
+
+    def smooth_shipper(self, now: float, raw_kb: int) -> int:
+        """Rolling MEDIAN of the shipper's RSS over the last SHIPPER_WINDOW_SEC (>= 30 min; fewer samples early in a boot).
+        The shipper spikes to ~1.3 GB for about a minute every 6-7 min; the median ignores those spikes."""
+        self.shipper_hist = [(t, v) for t, v in self.shipper_hist if now - t <= SHIPPER_WINDOW_SEC] + [(now, int(raw_kb or 0))]
+        vals = sorted(v for _, v in self.shipper_hist)
+        n = len(vals)
+        return int(vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) // 2)
 
     def record_loop(self, name: str, start_ts: float, end_ts: float, steps: list | None = None) -> None:
         """Start/end of one loop body (analytics_loop) so a stair can be matched to the cycle that caused it; ``steps`` =
@@ -378,11 +390,13 @@ class Tracker:
             leak_name = "container:" + growth_c[0]["name"]
         elif growth_t and growth_t[0]["growth"] > 0:
             leak_name = "type:" + growth_t[0]["type"]
-        shipper_kb = process_rss_kb()
+        shipper_raw_kb = process_rss_kb()
+        shipper_kb = self.smooth_shipper(now, shipper_raw_kb)
         doc = {"schema": "memory_structures_v1", "latest": snap, "boot_ts": self.boot_ts,
                "oom_eta": oom_status(self.series, memory_limit_kb(), self.boot_ts, now, sample_ts, rss_now,
-                                     leak_structure=leak_name, prev_boot=self.prev_boot, extra_rss_kb=shipper_kb),
-               "shipper_rss_kb": shipper_kb, "stairs": detect_stairs(self.series), "loops": list(self.loops),
+                                     leak_structure=leak_name, prev_boot=self.prev_boot, extra_rss_kb=shipper_kb, extra_rss_raw_kb=shipper_raw_kb),
+               "shipper_rss_kb": shipper_kb, "shipper_rss_raw_kb": shipper_raw_kb,
+               "shipper_window_sec": round(now - self.shipper_hist[0][0]) if self.shipper_hist else 0, "stairs": detect_stairs(self.series), "loops": list(self.loops),
                "prev_boot": self.prev_boot,
                "rss_series_full": [[round(t, 1), v] for t, v in self.series],
                "rss_series": [[round(h["ts"]), h["rss_kb"]] for h in self.history], "samples": len(self.history),
