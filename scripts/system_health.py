@@ -1779,8 +1779,14 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                 st = AMBER
             if declared:
                 reasons.append(declared)
+        observed = "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID"
+        rejected = receipt.get("hard_rejected_rows") if isinstance(receipt.get("hard_rejected_rows"), Mapping) else None
+        if rejected is not None:
+            # Separate number, not "unguarded": rows the fresh-epoch guard dropped (straddle kept rejected, HM 19 Oct).
+            observed += (f"; hard-rejected (fresh rule): straddle {int(rejected.get('straddle_rows_rejected') or 0)}, "
+                         f"unstamped {int(rejected.get('unstamped_rows_rejected') or 0)}")
         add(check("analyzer.studies", "analyzer", st,
-                  "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID",
+                  observed,
                   "every required study OK, integrity VALID, protection replay not truncated, inputs not BLOCKED",
                   "" if st == GREEN else "see analyzer_generation_receipt.json and the analyzer-once log",
                   ", ".join(receipt.get("failed_required_studies") or [])[:200]))
