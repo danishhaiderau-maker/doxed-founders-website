@@ -352,6 +352,38 @@ def live_copy_chain():
                 "accounts": accts[-limit:], "lag_stats": a["lags"], "entry_fidelity": fidelity})
 
 
+@blueprint.route("/api/monitor/live-vs-paper", methods=["GET"])
+def live_vs_paper_route():
+    """Read-only live-vs-paper pairs per signal (HM spec 19 Oct). ?lane=GS01 (substring of the lane id), ?limit=N."""
+    ctx, err = _ctx_or_error()
+    if err is not None:
+        return err
+    import live_vs_paper as lvp
+    chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+    twins = ctx.get("paper_twins") or {}
+    intents = chains["intents"]
+    lane = str(request.args.get("lane") or "").strip().upper()
+    try:
+        limit = max(1, min(500, int(request.args.get("limit") or 200)))
+    except (TypeError, ValueError):
+        limit = 200
+
+    def _keep(ch, twin):
+        if not lane:
+            return True
+        return lane in str(ch.get("lane") or "").upper() or lane in str((intents.get(ch.get("correlation_id")) or {}).get("lane") or "").upper()
+
+    def _keep_paper(_ch, _twin):  # paper-only rows carry their lane on the emitted intent
+        return True
+
+    accts = list(chains["accounts"].values())
+    out = lvp.build(accts, twins, intents,
+                    paper_signal_ids=[c for c, i in intents.items() if not lane or lane in str(i.get("lane") or "").upper()],
+                    skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
+                    (lambda ch, tw: _keep(ch, tw) if ch else True), limit=limit)
+    return _ok(out)
+
+
 @blueprint.route("/api/monitor/live/gaps", methods=["GET"])
 def live_gaps():
     ctx, err = _ctx_or_error()
