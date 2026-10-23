@@ -199,8 +199,9 @@ class _Clock:
 def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10")):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_attempt_trigger", "_paper_exit_missing_book_seconds",
-                    "_paper_lane_entry_result", "_paper_no_fill_shadow_row", *extra_names],
-                   time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
+                    "_paper_lane_entry_result", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
+                    "_order_entry_decision", *extra_names],
+                   trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
                    _normalize_order_side_to_dir=lambda v: "LONG" if str(v).upper() in ("BUY", "LONG") else "SHORT")
 
 
