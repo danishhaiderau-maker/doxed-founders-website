@@ -370,13 +370,17 @@ def recorded_fill_atr(data_dir: Optional[str] = None, extra_dirs=DEFAULT_V3_LEDG
         path = os.path.join(d, "execution.jsonl")
         if not os.path.isfile(path):
             continue
-        with open(path, "rb") as fh:
+        from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
+        with open_v3_ledger(path, "rb") as fh:
             for raw in fh:
                 if b"atr14_pct_at_fill" not in raw:
                     continue
                 try:
                     r = json.loads(raw)
                 except ValueError:
+                    continue
+                if not admit_v3_row(path, r):  # hard fresh-epoch gate
                     continue
                 value = r.get("atr14_pct_at_fill")
                 tid = str(r.get("event_id") or r.get("trade_id") or "")

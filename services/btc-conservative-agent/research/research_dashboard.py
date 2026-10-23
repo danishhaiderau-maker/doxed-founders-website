@@ -8435,7 +8435,10 @@ async function loadGenomeGrid() {
   GENOME_GRID_CACHE = d;
   const note = document.getElementById('genome-grid-note');
   if (d.status !== 'OK') {
-    if (note) note.textContent = 'Genome grid UNAVAILABLE: ' + (d.reason || 'no report') + ' (' + (d.report_path || '') + '). The panel below falls back to the legacy executed-lane cohort only.';
+    if (note) note.textContent = (d.status === 'FAIL_CLOSED'
+      ? 'RED - Genome grid FAIL-CLOSED: fresh-epoch guard ' + (d.reason || '') + '; no episode scored (' + (d.generated_at || '') + ').'
+      : 'Genome grid UNAVAILABLE: ' + (d.reason || 'no report')) + ' (' + (d.report_path || '') + '). The panel below falls back to the legacy executed-lane cohort only.';
+    if (note && d.status === 'FAIL_CLOSED') note.style.color = '#f85149';
     ['genome-grid-kpis','genome-grid-axes','genome-grid-body','genome-grid-live','genome-grid-wf'].forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
     return;
   }
@@ -10297,6 +10300,7 @@ _GENOME_GRID_PASSTHROUGH = (
     "fill_model", "headline_fill_world", "shadow_fill_worlds", "headline_vs_shadow",
     "episode_integrity", "episode_cohorts", "episode_class_summary", "walk_forward_by_utc_day",
     "research_layer", "top_100_by_oos_net", "family_totals", "policy_totals_reconciliation", "forward_tracker",
+    "data_epoch",
 )
 
 
@@ -10307,6 +10311,13 @@ def _genome_grid_payload(limit: int = 100) -> dict:
         return {"schema": "genome_grid_dashboard_v1", "status": "UNAVAILABLE",
                 "reason": f"{type(exc).__name__}: {exc}"[:300], "report_path": str(GENOME_GRID_REPORT_PATH)}
     generated = _dashboard_sections._parse_ts(report.get("generated_at"))
+    fresh_rule = (report.get("data_epoch") or {}).get("fresh_rule") or {}
+    if report.get("status") == "FAIL_CLOSED" or str(fresh_rule.get("status")).upper() == "RED":
+        return {"schema": "genome_grid_dashboard_v1", "status": "FAIL_CLOSED", "level": "RED",
+                "reason": report.get("reason") or fresh_rule.get("reason") or "FRESH_RULE_RED",
+                "report_path": str(GENOME_GRID_REPORT_PATH), "generated_at": report.get("generated_at"),
+                "age_sec": round(time.time() - generated, 1) if generated else None,
+                "data_epoch": report.get("data_epoch")}
     limit = max(1, min(int(limit), 100))
     declared = (report.get("fill_model") or {}).get("fill_model")
     return {

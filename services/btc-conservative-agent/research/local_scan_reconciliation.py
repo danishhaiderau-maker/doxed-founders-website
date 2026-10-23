@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
 from research.local_dynamic_input import _check, _source, _directory, _encoded
 from research.mirror_generation_lease import MirrorGenerationLease
 from collector_v22_provisional import _atomic_write_unlocked
@@ -45,9 +46,11 @@ def _verify_page_ref(store, ref, source, config):
     ledger=ref['ledger']; offset=ref.get('byte_offset'); length=ref.get('row_length')
     if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=1048576:
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
-    with store.ledger_path(ledger).open('rb') as stream:
+    with open_v3_ledger(store.ledger_path(ledger), 'rb') as stream:
         stream.seek(offset); raw=stream.read(length)
     digest=hashlib.sha256(raw).hexdigest(); row=json.loads(raw)
+    if not admit_v3_row(store.ledger_path(ledger), row):
+        raise ValueError('CENSUS_CACHED_REFERENCE_PRE_EPOCH')  # hard fresh-epoch gate on cached references
     rid=row.get('record_id'); scan=row.get('scan_id') if ledger=='decision' else row.get('shared_ai_call_id')
     directions=(row.get('baseline_schedule_snapshot') or {}).get('directional_schedules') or {}
     if (digest!=ref.get('row_sha256') or rid!=ref.get('record_id') or scan!=ref.get('scan_id')
@@ -114,7 +117,7 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
                 offset=previous[1] if previous and previous[0]==fingerprint else 0
                 if previous and previous[0]!=fingerprint:
                     db.execute('DELETE FROM refs WHERE job=? AND ledger=?',(job,ledger))
-                with path.open('rb') as stream:
+                with open_v3_ledger(path, 'rb') as stream:
                     stream.seek(offset)
                     while budget and stream.tell()<stat.st_size:
                         start=stream.tell(); raw=stream.readline(min(budget,1048576)+1)
@@ -124,6 +127,7 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
                         budget-=len(raw); offset=stream.tell()
                         if not raw.strip(): continue
                         row=json.loads(raw)
+                        if not admit_v3_row(path, row): continue  # hard fresh-epoch gate
                         scan=row.get('scan_id') if ledger=='decision' else row.get('shared_ai_call_id')
                         if not isinstance(scan,str) or not scan.startswith('scan-census-'): continue
                         if (row.get('epoch_id')!=source['epoch'] or row.get('source_revision')!=source['revision']
@@ -195,6 +199,8 @@ def main(argv=None):
     parser.add_argument('--reference-after',default='')
     parser.add_argument('--dispatch-after',default='')
     args=vars(parser.parse_args(argv))
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots
+    ensure_process_guard(standalone_guard_roots(args['data_root']))  # standalone: same hard fresh-epoch guard
     try:
         report=reconcile_scans(**args)
         print(json.dumps({'status':'OBSERVED_ONLY' if report['index_caught_up'] else 'INDEX_CATCHUP',

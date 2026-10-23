@@ -58,8 +58,12 @@ def _finite(value: Any) -> float | None:
 
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    """Rows of one stream behind the hard fresh-epoch gate (shadow_exit_paths.jsonl is epoch-scoped; the analyzer
+    calls this in-process, the standalone main installs the same guard)."""
+    from analyzer_epoch_guard import admit_stream_row, open_v3_ledger  # noqa: PLC0415
+
     try:
-        handle = open(path, encoding="utf-8", errors="replace")
+        handle = open_v3_ledger(path, encoding="utf-8", errors="replace")
     except OSError:
         return
     with handle:
@@ -70,7 +74,7 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict):
+            if isinstance(row, dict) and admit_stream_row(path, row):
                 yield row
 
 
@@ -339,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default=os.getenv("SHADOW_EXIT_OUT_DIR", DEFAULT_OUT_DIR))
     parser.add_argument("--backfill-dir", default=None)
     args = parser.parse_args(argv)
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots  # noqa: PLC0415
+    ensure_process_guard(standalone_guard_roots(args.mirror))  # standalone: same hard fresh-epoch guard
     out_dir = Path(args.out_dir)
     backfill = Path(args.backfill_dir) if args.backfill_dir else out_dir / "backfill"
     report = build_report(Path(args.mirror), backfill)

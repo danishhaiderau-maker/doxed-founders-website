@@ -1129,7 +1129,7 @@ def _session_hours(session: dict = None) -> float:
 
 _EPOCH_GUARD = None
 _EPOCH_MANIFEST_DIR = None
-_LAPTOP_MIRROR_TREE = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
+from analyzer_epoch_guard import LAPTOP_MIRROR_TREE as _LAPTOP_MIRROR_TREE  # noqa: E402
 _EPOCH_AUDIT_SKIP_SUFFIXES = (".malformed_rows.jsonl",)
 
 
@@ -1139,28 +1139,24 @@ def _analyzer_data_root():
 
 def _epoch_manifest_roots():
     """Directories that may hold the declared data_epoch.json, in priority order."""
-    override = os.getenv("BTC_DATA_EPOCH_DIR")
-    if override:
-        return [override]
-    roots = []
-    for root in (os.getenv("BTC_AGENT_DATA_DIR"), _analyzer_data_root(), _LAPTOP_MIRROR_TREE):
-        if root:
-            roots += [root, os.path.join(root, "v3")]
-    return roots
+    # One root list for the analyzer and every standalone entry point (genome grid, walk-forward, ...), so both pick
+    # the same manifest and the same fresh-start floor (incl. canonical-research-data). HM 19 Oct fe334474 #6.
+    from analyzer_epoch_guard import epoch_roots
+
+    return [str(root) for root in epoch_roots([os.getenv("BTC_AGENT_DATA_DIR"), _analyzer_data_root()])]
 
 
 def _epoch_guard():
     """Process-wide clean-epoch guard; admits every row while no epoch is declared."""
     global _EPOCH_GUARD, _EPOCH_MANIFEST_DIR
     if _EPOCH_GUARD is None:
-        from analyzer_epoch_guard import EpochGuard, set_process_guard
+        from analyzer_epoch_guard import _log_guard_state, resolve_epoch_guard, set_process_guard
 
-        guard = EpochGuard(None)
-        for root in _epoch_manifest_roots():
-            candidate = EpochGuard.from_data_dir(root)
-            if candidate.declared:
-                guard, _EPOCH_MANIFEST_DIR = candidate, root
-                break
+        roots = _epoch_manifest_roots()
+        guard, root = resolve_epoch_guard(roots)
+        if guard.declared:
+            _EPOCH_MANIFEST_DIR = str(root) if root is not None else None
+        _log_guard_state(guard, roots, "analyzer")
         _EPOCH_GUARD = guard
         set_process_guard(guard)
     return _EPOCH_GUARD
@@ -13629,6 +13625,28 @@ def _first_number(*values):
     return None
 
 
+def _v3_ledger_generation_rows(name, generation_path):
+    """Rows of one V3 ledger generation behind the NESTED fresh-epoch rule (admit_v3_row: every *_ts key, so a row
+    straddling the floor or carrying no timestamp is rejected). ``_epoch_admit`` checked one top-level ts only."""
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
+    _epoch_guard()  # make sure the analyzer's process guard is installed before the first row is judged
+    rel = f"v3/ledgers/{name}.jsonl"
+    rows = []
+    with open_v3_ledger(generation_path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and admit_v3_row(rel, row):
+                rows.append(row)
+    return rows
+
+
 def _v3_ledger_rows(name):
     configured_root = os.getenv("BTC_AGENT_DATA_DIR")
     candidates = (
@@ -13649,7 +13667,7 @@ def _v3_ledger_rows(name):
                 rows = []
                 by_record_id = {}
                 for _ref, generation_path in store.ledger_generation_paths(name):
-                    for row in _load_jsonl_rows(str(generation_path)):
+                    for row in _v3_ledger_generation_rows(name, generation_path):
                         record_id = str(row.get("record_id") or "")
                         if not record_id:
                             raise ValueError("V3 analyzer row missing record identity")

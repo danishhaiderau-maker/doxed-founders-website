@@ -503,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kinds", nargs="*", help="Only these signal kinds (AI_CALL XVENUE_SIGNAL TILE_ENTRY)")
     ap.add_argument("--since-utc")
     args = ap.parse_args(argv)
+    from analyzer_epoch_guard import ensure_process_guard, standalone_guard_roots  # noqa: PLC0415
+    ensure_process_guard(standalone_guard_roots(args.data_dir))  # standalone: same hard fresh-epoch guard
     lat = {"source": "CLI_OVERRIDE", "latency_sec": args.latency_sec} if args.latency_sec is not None else None
     res = run(args.table, args.data_dir, args.out_dir, latency=lat, kinds=args.kinds, since_utc=args.since_utc)
     print(markdown_report(res))

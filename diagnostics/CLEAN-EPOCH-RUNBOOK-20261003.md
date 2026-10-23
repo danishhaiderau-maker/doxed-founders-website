@@ -194,3 +194,25 @@ The existing guarded Fresh Collection reset (`POST /api/wipe_fly_only` →
 - **Caveat:** the reset is whole-file (it also removes current-epoch research heads, genome and
   accumulator rows). It therefore runs only at the epoch-opening boundary; the workflow refuses when the
   epoch opened > 60 min ago.
+
+## Required fresh epoch (PR #792, 19 Oct 2026)
+
+Every analyzer, scan and report resolves its epoch with `analyzer_epoch_guard.resolve_epoch_guard`. The same root list
+(`epoch_roots`) serves the analyzer and every standalone job: `BTC_DATA_EPOCH_DIR` alone if set, otherwise
+`BTC_AGENT_DATA_DIR`, `services/btc-conservative-agent/canonical-research-data`, the caller's data dir and the laptop
+mirror tree, each with its `v3/`, in that fixed order. A root holding both manifest and floor wins, so the analyzer and the jobs resolve the same floor.
+
+| State | Result |
+|---|---|
+| valid `data_epoch.json` + floor (`fresh_start_epoch.json`) | normal hard guard (PRE_EPOCH / STRADDLE / UNSTAMPED rejected) |
+| manifest, no readable floor anywhere | FAIL CLOSED `FRESH_FLOOR_MISSING` (RED) |
+| `fresh_start_epoch.json` present (readable or corrupt), manifest missing/invalid | FAIL CLOSED `DATA_EPOCH_MANIFEST_MISSING` (RED) |
+| neither file, epoch **required** | FAIL CLOSED `FRESH_EPOCH_REQUIRED_NOT_DECLARED` (RED) |
+| neither file, not required | admits all, logged loudly on stderr (`EPOCH GUARD NOT DECLARED`) |
+
+An epoch is required when any of these holds:
+- `BTC_REQUIRE_FRESH_EPOCH=1` is in the environment. The laptop launchers set it: `scripts/run-analyzer-once.ps1` (Initialize-AnalyzerEnvironment), `scripts/start-home-analyzer.ps1` and `scripts/run-genome-grid.ps1` (scheduled task DoxxedGenomeGrid). They pick it up on the next fast-forward; nothing is set by hand.
+- A `fresh_epoch_required.json` marker exists in any epoch root, for jobs that do not go through those launchers. Create it by hand in `C:\DoxxedCrypto\...\canonical-research-data` if wanted.
+- The deploy is post-reset, meaning a `fresh_start_epoch.json` exists, even an unreadable one.
+
+A fail-closed genome run writes a `status: FAIL_CLOSED` report, exits 3, and `/api/genome-grid` returns `status: FAIL_CLOSED, level: RED`. The analyzer's generation receipt goes RED with "fresh rule FAIL-CLOSED".

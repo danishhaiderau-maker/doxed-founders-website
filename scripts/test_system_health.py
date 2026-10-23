@@ -1846,3 +1846,39 @@ def test_pull_ack_ack_zero_while_applied_is_amber_first_then_red_after_5_minutes
     assert by_id(sh.evaluate(later, state))["laptop.pull_ack"]["status"] == sh.RED
     ok = _pull_lag_inputs(now + 7 * 60, 3, 3, now + 7 * 60 - 100)
     assert by_id(sh.evaluate(ok, state))["laptop.pull_ack"]["status"] == sh.GREEN
+
+
+def test_hard_rejected_straddle_rows_are_a_separate_number_not_unguarded_and_never_change_status():
+    """HM 19 Oct: straddle rows stay hard-rejected; their count is shown on its own, never as 'read unguarded'."""
+    now = ts("2026-10-02T09:30:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_receipt"]["hard_rejected_rows"] = {"straddle_rows_rejected": 2529, "unstamped_rows_rejected": 1381}
+    check = by_id(sh.evaluate(inputs, {}))["analyzer.studies"]
+    assert check["status"] == sh.GREEN
+    assert "hard-rejected (fresh rule): straddle 2529, unstamped 1381" in check["observed"]
+    assert "unguarded" not in check["observed"]
+
+
+def test_reconcile_per_lane_block_rides_the_banner_push_with_the_receipt_epoch():
+    """Reconcile follow-up: mirror_n / analyzer_n / missing_ids_n / pnl_diff_usd per lane plus epoch_id and
+    generated_at go to Fly with the existing push; epoch_id is the analyzer receipt's declared data epoch."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
+    monitor_reconcile = pytest.importorskip("monitor_reconcile")
+    now = ts("2026-10-02T00:00:00Z")
+    inputs = _reconciled_inputs(now)
+    inputs["analyzer_receipt"] = dict(inputs.get("analyzer_receipt") or {}, data_epoch={"epoch_id": "ce-20261018-fresh"})
+    inputs["ledger_reconciliation"]["generated_at"] = sh.iso(now - 300)
+    report = sh.summarize(sh.evaluate(inputs, {}), {}, now)
+    payload = sh.banner_payload(report)
+    block = payload["ledger_reconcile"]
+    assert block["schema"] == "ledger_reconcile_push_v1" and block["epoch_id"] == "ce-20261018-fresh"
+    assert block["generated_at"] == sh.iso(now - 300) and block["compared"] is True
+    assert set(block["per_lane"]) == set(LANES)
+    assert block["per_lane"][LANES[0]] == {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0, "pnl_diff_usd": 0.0,
+                                           "bounded": True}
+    assert block["bounded"] is True  # Fly's listed closes reach the mirror head in this fixture
+    clean = monitor_reconcile.sanitize_push(block)
+    assert clean["per_lane"][LANES[0]]["mirror_n"] == 1
+    assert len(json.dumps(payload)) < 16000
+    # no reconciliation published -> no block on the push (the banner payload shape is unchanged)
+    assert "ledger_reconcile" not in sh.banner_payload(sh.summarize(sh.evaluate(healthy(now), {}), {}, now))

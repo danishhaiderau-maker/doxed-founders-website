@@ -117,29 +117,38 @@ def measure_decision_latency(ledger_dir: Path | str, *, exclude_lanes: Iterable[
     excluded = set(exclude_lanes)
     signal: dict[str, float] = {}
     samples: list[float] = []
-    try:
-        with open(led / "opportunity.jsonl", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                    signal[str(row["episode_id"])] = float(row["signal_ts"])
-                except (ValueError, KeyError, TypeError):
-                    continue
-        with open(led / "order_intent.jsonl", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if row.get("research_lane") in excluded or str(row.get("episode_id")) not in signal:
-                    continue
-                for act in (row.get("chase_schedule") or {}).get("action_timing_receipts") or []:
-                    if act.get("action_type") == "INITIAL_SUBMIT" and act.get("eligibility_ts") is not None:
-                        lat = float(act["eligibility_ts"]) - signal[str(row["episode_id"])]
-                        if 0 <= lat <= 120:
-                            samples.append(lat)
-    except OSError:
-        pass
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger, scoped_process_guard, standalone_guard_roots
+
+    # Standalone callers (genome grid, walk-forward scorer) get the analyzer's hard guard; an installed one is kept.
+    v3_root = led.parent if led.name == "ledgers" else led
+    with scoped_process_guard([*standalone_guard_roots(v3_root.parent), v3_root]):
+        try:
+            with open_v3_ledger(led / "opportunity.jsonl", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                        if not admit_v3_row(led / "opportunity.jsonl", row):  # hard fresh-epoch gate
+                            continue
+                        signal[str(row["episode_id"])] = float(row["signal_ts"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+            with open_v3_ledger(led / "order_intent.jsonl", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not admit_v3_row(led / "order_intent.jsonl", row):
+                        continue
+                    if row.get("research_lane") in excluded or str(row.get("episode_id")) not in signal:
+                        continue
+                    for act in (row.get("chase_schedule") or {}).get("action_timing_receipts") or []:
+                        if act.get("action_type") == "INITIAL_SUBMIT" and act.get("eligibility_ts") is not None:
+                            lat = float(act["eligibility_ts"]) - signal[str(row["episode_id"])]
+                            if 0 <= lat <= 120:
+                                samples.append(lat)
+        except OSError:
+            pass
     if len(samples) < 20:
         return {"source": "DEFAULT_NO_MEASUREMENT", "latency_sec": DEFAULT_DECISION_LATENCY_SEC, "n": len(samples)}
     samples.sort()

@@ -15,7 +15,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from analyzer_epoch_guard import process_guard
+from analyzer_epoch_guard import admit_v3_row, open_v3_ledger, process_guard
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash, validate_policy_spec
 import concurrent.futures
 import time
@@ -130,13 +130,14 @@ def protection_screen() -> list[dict[str, Any]]:
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                row = json.loads(line)
-                if isinstance(row, dict):
-                    rows.append(row)
+        handle = open_v3_ledger(path, "r", encoding="utf-8")
     except FileNotFoundError:
-        pass
+        return rows
+    with handle:
+        for line in handle:
+            row = json.loads(line)
+            if isinstance(row, dict) and admit_v3_row(path, row):  # hard fresh-epoch gate (non-ledger paths pass)
+                rows.append(row)
     return rows
 
 
@@ -1003,15 +1004,16 @@ def _regime_label(value: Any) -> str | None:
 
 def _read_jsonl_offsets(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
     try:
-        with path.open("rb") as handle:
-            offset = 0
-            for line in handle:
-                start, offset = offset, offset + len(line)
-                row = json.loads(line)
-                if isinstance(row, dict):
-                    yield start, row
+        handle = open_v3_ledger(path, "rb")
     except FileNotFoundError:
         return
+    with handle:
+        offset = 0
+        for line in handle:
+            start, offset = offset, offset + len(line)
+            row = json.loads(line)
+            if isinstance(row, dict) and admit_v3_row(path, row):
+                yield start, row
 
 
 _OPPORTUNITY_FIELDS = ("epoch_id", "signal_ts", "record_id", "feature_snapshot_at_signal")
@@ -1211,7 +1213,8 @@ class CandidateInputStream:
         self.events_yielded = 0
         if not self.event_ids:
             return
-        with self._intent_path.open("rb") as handle:
+        # Offsets were taken only from admitted rows (_read_jsonl_offsets), so this re-read is epoch-filtered.
+        with open_v3_ledger(self._intent_path, "rb") as handle:
             for position, event_id in event_ids:
                 row = self._build(event_id, handle)
                 if row is not None:

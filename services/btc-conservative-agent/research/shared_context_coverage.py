@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from lifecycle_bundles import lifecycle_key
 from lifecycle_shared_context import attach_shared_context
+from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
 
 
 def _advance_context_index(root, byte_budget, row_budget):
@@ -31,7 +32,8 @@ def _advance_context_index(root, byte_budget, row_budget):
             stat = path.stat()
             previous = db.execute('SELECT * FROM cursor WHERE ledger=?', (ledger,)).fetchone()
             offset = previous['offset'] if previous else 0
-            with path.open('rb') as stream:
+            # Rows enter the index only through the fresh-epoch gate below; anchors are byte digests.
+            with open_v3_ledger(path, 'rb') as stream:
                 stream.seek(max(0, offset-4096))
                 anchor = hashlib.sha256(stream.read(min(offset,4096))).hexdigest()
                 if previous and (stat.st_dev != previous['dev'] or stat.st_ino != previous['ino'] or stat.st_size < offset or anchor != previous['anchor']):
@@ -59,6 +61,8 @@ def _advance_context_index(root, byte_budget, row_budget):
                     byte_budget -= len(raw)
                     scanned += 1
                     offset = stream.tell()
+                    if not admit_v3_row(path, row):
+                        continue  # hard fresh-epoch gate: PRE_EPOCH / STRADDLE / UNSTAMPED rows are never indexed
                     if not row.get('policy_signature') and not row.get('research_lane'):
                         db.execute('INSERT OR IGNORE INTO refs VALUES(?,?,?,?,?,?)',
                             (ledger,start,len(raw),hashlib.sha256(raw).hexdigest(),
@@ -147,13 +151,16 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
             processed_keys.append(key)
             for ref in indexed:
                 path = Path(root)/'v3'/'ledgers'/(ref['ledger']+'.jsonl')
-                with path.open('rb') as stream:
+                with open_v3_ledger(path, 'rb') as stream:
                     stream.seek(ref['offset'])
                     raw = stream.read(ref['length'])
                 if len(raw) != ref['length'] or hashlib.sha256(raw).hexdigest() != ref['sha']:
                     raise ValueError('SHARED_CONTEXT_SOURCE_CHANGED')
+                source_row = json.loads(raw)
+                if not admit_v3_row(path, source_row):
+                    continue  # a ref cached before the gate existed is re-checked, never trusted
                 references[episode].append({'ledger':ref['ledger'], 'byte_offset':ref['offset'],
-                    'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':json.loads(raw)})
+                    'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':source_row})
         page_keys = processed_keys
     except (ValueError, OSError, sqlite3.Error) as exc:
         defects.append('SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT' if str(exc) == 'SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT'

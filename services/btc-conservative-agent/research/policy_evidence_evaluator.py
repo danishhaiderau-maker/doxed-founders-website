@@ -226,16 +226,20 @@ def _validate_projection(config: Mapping[str, Any], decision_ids: set[str]) -> t
 
 
 def _read_jsonl(path: Path, *, observe=None, drop_keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    from analyzer_epoch_guard import admit_v3_row, open_v3_ledger
+
     if not path.is_file():
         return []
     rows = []
-    with path.open("r", encoding="utf-8-sig") as handle:
+    with open_v3_ledger(path, "r", encoding="utf-8-sig") as handle:
         for number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError(f"V3_LEDGER_ROW_NOT_OBJECT:{path.name}:{number}")
+            if not admit_v3_row(path, value):  # hard fresh-epoch gate (before observe: no pre-epoch incident rows)
+                continue
             if observe is not None:
                 observe(value)
             for key in drop_keys:

@@ -578,3 +578,55 @@ def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_covera
     monkeypatch.setattr(_os.path, "getsize", lambda p: 3 * 1024 * 1024 if str(p).endswith("paper_ioc_no_fill_shadow.jsonl") else 0)
     r2 = client.get(path, headers={"Authorization": f"Bearer {MONITOR}"}, environ_base=REMOTE)
     assert r2.get_json()["shadow_truncated"] is True
+
+
+def test_closed_row_carries_trigger_vs_book_and_tape_age():
+    # #807: the exit fired on a stale ticker bid 85000 while the 1 s book bid at the trigger second was 85085
+    close = CUTOFF + 900
+    ev = {"schema": "trade_event_timestamps_v1", "signal_ts": close - 700.0, "exit_trigger_ts": close - 2.0,
+          "exit_trigger_source": "POSITION_MANAGER", "exit_trigger_price": 85000.0, "exit_trigger_bbo_ts": close - 3.8,
+          "exit_fill_ts": close - 0.2}
+    book = {"s": int(close - 2.0), "b": [[85085, 0.03], [85080, 0.1]], "a": [[85095, 0.05]]}
+    row = _rows([_closed("t-trig", GS1, close_ts=close, event_timestamps=ev, exit_depth_snapshot_signal=book)])[0]
+    assert row["exit"]["trigger_vs_book_bp"] == round((85085 / 85000 - 1) * 1e4, 3)
+    assert row["exit"]["trigger_tape_age_s"] == 1.8
+    bare = _rows([_closed("t-bare", GS1, close_ts=close)])[0]
+    assert bare["exit"]["trigger_vs_book_bp"] is None and bare["exit"]["trigger_tape_age_s"] is None
+
+
+def test_reconcile_route_uses_the_laptop_per_lane_push_only_for_the_same_epoch(bot, monkeypatch, tmp_path):
+    """Reconcile follow-up: the per-lane block rides the existing POST /api/system-health/report."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    import system_health_banner as shb
+
+    monkeypatch.setattr(bot, "_system_health_state_path", lambda: tmp_path / "system_health_state.json")
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_RESTORED, "done", True)
+    monkeypatch.setitem(bot._LEDGER_RECONCILE_PUSH, "block", None)
+    monkeypatch.setitem(bot._LEDGER_RECONCILE_PUSH, "received_ts", None)
+    monkeypatch.setitem(bot._SYSTEM_HEALTH_REPORT, "report", None)
+    client = bot.app.test_client()
+    OWN_IP = {"REMOTE_ADDR": "198.51.100.77"}  # own rate-limit bucket: later files share REMOTE's
+    now = datetime.now(timezone.utc).isoformat()
+
+    def push(epoch):
+        body = {"schema": shb.SCHEMA, "generated_at": now, "verdict": "GREEN", "counts": {"GREEN": 1},
+                "failing": [], "open_alarms": [],
+                "ledger_reconcile": {"schema": "ledger_reconcile_push_v1", "epoch_id": epoch, "generated_at": now,
+                                     "compared": True, "bounded": True,
+                                     "per_lane": {GS1: {"mirror_n": 1, "analyzer_n": 1, "missing_ids_n": 0,
+                                                        "pnl_diff_usd": 0.0}}}}
+        r = client.post("/api/system-health/report", json=body, headers={"X-Bot-Admin-Token": ADMIN},
+                        environ_base=OWN_IP)
+        assert r.status_code == 200
+        return client.get("/api/monitor/reconcile", headers={"Authorization": f"Bearer {MONITOR}"},
+                          environ_base=OWN_IP).get_json()
+
+    other = push("ce-20261004-other")
+    assert other["sources"]["mirror"] == "NOT_REPORTED_TO_FLY" and other["sources_reason"].startswith("EPOCH_MISMATCH")
+    same = push(EPOCH)
+    assert same["sources"] == {"fly": "OK", "mirror": "LAPTOP_PUSH", "analyzer": "LAPTOP_PUSH"}
+    tile = next(t for t in same["per_tile"] if t["lane"] == GS1)
+    assert tile["mirror_n"] == 1 and tile["analyzer_n"] == 1 and tile["missing_ids_n"] == 0 and tile["ok"] is True
+    assert bot._LEDGER_RECONCILE_PUSH["received_ts"] <= _time.time()

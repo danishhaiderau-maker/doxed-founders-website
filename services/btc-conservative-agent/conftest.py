@@ -56,3 +56,14 @@ def _no_runtime_state_written_to_source_dir():
     for path in leaked:
         _remove_runtime_state(path)
     assert not leaked, f"test wrote runtime state into the source folder: {leaked}"
+
+
+@pytest.fixture(autouse=True)
+def _no_epoch_process_guard_leaks_between_tests():
+    """The analyzer installs a process-wide EpochGuard (set_process_guard); a test that triggers it must not make
+    a later test's readers reject its fixture rows."""
+    import sys as _sys
+    yield
+    guard_mod = _sys.modules.get("analyzer_epoch_guard")
+    if guard_mod is not None:
+        guard_mod.set_process_guard(None)

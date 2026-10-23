@@ -182,6 +182,30 @@ def build_report(
     }
 
 
+PUSH_SCHEMA = "ledger_reconcile_push_v1"
+
+
+def reconcile_push_block(report: Mapping[str, Any], compared: Mapping[str, Any],
+                         epoch_id: Optional[str]) -> dict:
+    """Per-lane block the laptop watcher pushes to Fly with the system-health report. ``epoch_id`` is the analyzer's
+    declared data epoch (generation receipt), so Fly can refuse a block from another epoch."""
+    per = ((compared.get("breakdown") or {}).get("per_lane") or {}) if compared.get("fly_compared") else {}
+    return {
+        "schema": PUSH_SCHEMA,
+        "epoch_id": epoch_id or None,
+        "generated_at": report.get("generated_at"),
+        "source_data_through": report.get("source_data_through"),
+        "compared": bool(compared.get("fly_compared")),
+        "level": compared.get("level"),
+        # bounded: Fly's listed closes reach back to the mirror head, so the counts are exact (not a lagging bound)
+        "bounded": bool((compared.get("breakdown") or {}).get("bounded")) if compared.get("fly_compared") else None,
+        "per_lane": {lane: {"mirror_n": v.get("mirror_n"), "analyzer_n": v.get("analyzer_n"),
+                            "missing_ids_n": v.get("missing_ids_n"), "pnl_diff_usd": v.get("pnl_diff_usd"),
+                            "bounded": v.get("bounded")}
+                     for lane, v in per.items()},
+    }
+
+
 def _fly_rows(fly_trades: Iterable[Mapping[str, Any]], lanes: set[str]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for row in fly_trades or []:
@@ -298,6 +322,10 @@ def compare_with_fly(report: Mapping[str, Any], fly_state: Optional[Mapping[str,
             "fly_ledger_win_pct_cents": win_pct(fly["ledger_wins"], fly["closes"]) if fly["ledger_wins"] is not None
             and fly["closes"] else None,
             "bounded": covered,
+            # per-lane parity numbers pushed to Fly (/api/monitor/reconcile): Fly closes older than the mirror head
+            # that the mirror lacks, and Fly tile PnL minus the expected (mirror + newer listed) PnL
+            "missing_ids_n": sum(1 for t in missing_in_mirror if (newer.get(t) or {}).get("research_lane") == lane),
+            "pnl_diff_usd": round(fly["pnl"] - expected_pnl, 6) if fly["pnl"] is not None else None,
         }
         if fly["closes"] is None:
             continue

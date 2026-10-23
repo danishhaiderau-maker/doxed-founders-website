@@ -1779,8 +1779,14 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                 st = AMBER
             if declared:
                 reasons.append(declared)
+        observed = "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID"
+        rejected = receipt.get("hard_rejected_rows") if isinstance(receipt.get("hard_rejected_rows"), Mapping) else None
+        if rejected is not None:
+            # Separate number, not "unguarded": rows the fresh-epoch guard dropped (straddle kept rejected, HM 19 Oct).
+            observed += (f"; hard-rejected (fresh rule): straddle {int(rejected.get('straddle_rows_rejected') or 0)}, "
+                         f"unstamped {int(rejected.get('unstamped_rows_rejected') or 0)}")
         add(check("analyzer.studies", "analyzer", st,
-                  "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID",
+                  observed,
                   "every required study OK, integrity VALID, protection replay not truncated, inputs not BLOCKED",
                   "" if st == GREEN else "see analyzer_generation_receipt.json and the analyzer-once log",
                   ", ".join(receipt.get("failed_required_studies") or [])[:200]))
@@ -1820,6 +1826,9 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
             for lane, v in per.items()
         ) or "; ".join(f"{lane.replace('FAMILY_', '')}: analyzer {v.get('n')}, Win {v.get('win_pct')}%"
                        for lane, v in (recon.get("analyzer_cohort") or {}).items())
+        receipt = inputs.get("analyzer_receipt") if isinstance(inputs.get("analyzer_receipt"), Mapping) else {}
+        push = (lr.reconcile_push_block(recon, out, (receipt.get("data_epoch") or {}).get("epoch_id"))
+                if hasattr(lr, "reconcile_push_block") else None)
         add(check("ledger.reconciliation", "analyzer", st,
                   f"through {recon.get('source_data_through')}: {lanes}"
                   + (f"; {'; '.join(out['reasons'])}" if out["reasons"] else ""),
@@ -1827,7 +1836,8 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   f"watermark; Win % = {recon.get('win_pct_definition')}",
                   "" if st == GREEN else "see ledger_reconciliation.json (trades[]) and the breakdown for missing ids",
                   json.dumps({k: out["breakdown"].get(k) for k in ("missing_in_mirror", "bounded", "fly_listed")},
-                             default=str)[:400]))
+                             default=str)[:400],
+                  fields={"reconcile_push": push} if push else None))
 
     # ---------------- Exports (worker eed92197)
     exp = inputs.get("exports") or {}
@@ -2483,7 +2493,7 @@ def windows_toast(title: str, text: str) -> bool:
 
 def banner_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     """Compact summary for the dashboards' banner (no secrets, bounded size)."""
-    return {
+    payload = {
         "schema": SCHEMA,
         "verdict": report["verdict"],
         "generated_at": report["generated_at"],
@@ -2495,6 +2505,13 @@ def banner_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "source": f"laptop {report.get('host')}",
         "proof": report.get("proof"),
     }
+    # per-lane mirror/analyzer parity for Fly's /api/monitor/reconcile (monitor_reconcile.sanitize_push); only when
+    # the ledger.reconciliation check built one
+    recon = next(((c.get("observed_fields") or {}).get("reconcile_push")
+                  for c in report.get("checks") or [] if c.get("id") == "ledger.reconciliation"), None)
+    if recon:
+        payload["ledger_reconcile"] = recon
+    return payload
 
 
 def proof_summary(active: Any, now: float) -> dict[str, Any] | None:

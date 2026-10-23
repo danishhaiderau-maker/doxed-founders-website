@@ -2223,9 +2223,13 @@ class V3EvidenceStore:
 
     @staticmethod
     def _load_ids(path: Path) -> set[str]:
+        from analyzer_epoch_guard import open_v3_ledger
+
         ids: set[str] = set()
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            # Inventory, not evidence: whole-file record-id dedup / truncation proof for the append store. The ids
+            # never reach a cohort result; analyzer readers gate rows with analyzer_epoch_guard.admit_v3_row.
+            with open_v3_ledger(path, "r", encoding="utf-8", inventory=True) as handle:
                 for line_no, line in enumerate(handle, 1):
                     if not line.endswith("\n"):
                         raise ValueError(f"TRUNCATED_JSONL_LINE:{line_no}")

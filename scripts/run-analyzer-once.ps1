@@ -91,6 +91,8 @@ function Initialize-AnalyzerEnvironment {
   $env:PYTHONFAULTHANDLER = '1'
   # A stale user-level value would point the analyzer at a retired store.
   Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
+  # Post-reset: an undeclared fresh epoch fails closed (RED receipt) instead of admitting every row.
+  $env:BTC_REQUIRE_FRESH_EPOCH = '1'
   $health = $null
   if ($env:DOXXED_LAPTOP_CHAIN_OFFLINE -ne '1') {
     try { $health = Get-FlyHealth $cfg.SourceUrl; [void](Publish-UpstreamIdentity -Config $cfg -Health $health) } catch { }

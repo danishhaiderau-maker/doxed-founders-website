@@ -121,9 +121,13 @@ SWEEP_PROTECTIONS = (
 # ------------------------------------------------------------------ inputs
 
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
+    """Rows of one mirror stream behind the hard fresh-epoch gate (installed by :func:`install_epoch_guard`):
+    PRE_EPOCH / STRADDLE / UNSTAMPED V3 ledger rows and pre-epoch stream rows never enter; tape is epoch-independent."""
     if not path.is_file():
         return
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    from analyzer_epoch_guard import admit_stream_row, open_v3_ledger, stream_name, v3_ledger_relpath  # noqa: PLC0415
+    rel = v3_ledger_relpath(path) or stream_name(path)
+    with open_v3_ledger(path, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -132,8 +136,34 @@ def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict):
+            if isinstance(row, dict) and admit_stream_row(path, row, relpath=rel):
                 yield row
+
+
+def epoch_guard_roots(mirror: Path) -> list[Path]:
+    """Where the declared epoch and its fresh-start floor live: BTC_DATA_EPOCH_DIR, the mirror tree (data_epoch.json),
+    then the analyzer's canonical-research-data (fresh_start_epoch.json; the mirror tree carries no floor)."""
+    from analyzer_epoch_guard import standalone_guard_roots  # noqa: PLC0415
+    return standalone_guard_roots(mirror)
+
+
+FAIL_CLOSED = "FAIL_CLOSED"
+
+
+def fail_closed_report(epoch_block: dict[str, Any], started: float) -> dict[str, Any]:
+    reason = (epoch_block.get("fresh_rule") or {}).get("reason") or "FRESH_RULE_RED"
+    return {"schema": SCHEMA, "status": FAIL_CLOSED, "level": "RED", "reason": reason,
+            "generated_at": _iso(time.time()), "data_epoch": epoch_block,
+            "note": f"Genome grid FAIL-CLOSED: fresh-epoch guard {reason}; no episode was scored.",
+            "runtime_sec": round(time.time() - started, 2)}
+
+
+def install_epoch_guard(mirror: Path):
+    """Install the process guard every reader of this study (and fill_model latency) gates rows through."""
+    from analyzer_epoch_guard import guard_from_roots, set_process_guard  # noqa: PLC0415
+    guard = guard_from_roots(epoch_guard_roots(mirror))
+    set_process_guard(guard)
+    return guard
 
 
 def _rotations(base: Path) -> list[Path]:
@@ -1400,6 +1430,15 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         if "onedrive" in str(p).lower():
             raise SystemExit(f"REFUSED_ONEDRIVE: {p}")
     started = time.time()
+    guard = install_epoch_guard(mirror)
+    epoch_block = guard.receipt_block()
+    if (epoch_block.get("fresh_rule") or {}).get("status") == "RED":
+        # Fail-closed guard (no valid manifest, no floor, or a required epoch undeclared): nothing can be scored.
+        # Publish a RED report so /api/genome-grid shows it instead of serving the previous OK grid (HM #2).
+        report = fail_closed_report(epoch_block, started)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(out_dir / "genome_grid_report.json", json.dumps(report, indent=1, default=str).encode("utf-8"))
+        return report
     tape = load_tape(mirror, tier_a)
     episodes, episode_stats = load_episodes(mirror, tape)
     integrity = episode_integrity(episodes)
@@ -1587,6 +1626,7 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         report.update(research_layer.report_block(layer))
     out_dir.mkdir(parents=True, exist_ok=True)
     blob = gzip.compress("\n".join(json.dumps(r, separators=(",", ":"), default=str) for r in rows).encode("utf-8"))
+    report["data_epoch"] = guard.receipt_block()  # fresh-epoch hard gate: admitted / rejected per stream
     report["rows_artifact"] = {"file": "genome_grid_rows.jsonl.gz", "rows": len(rows), "sha256": hashlib.sha256(blob).hexdigest()}
     _atomic_write(out_dir / "genome_grid_rows.jsonl.gz", blob)
     _atomic_write(out_dir / "genome_grid_report.json", json.dumps(report, indent=1, default=str).encode("utf-8"))
@@ -1652,6 +1692,9 @@ def main(argv: list[str] | None = None) -> int:
     except EpisodeIntegrityError as exc:
         print(json.dumps({"status": "EPISODE_INTEGRITY_FAILED", "violations": str(exc)}))
         return 2
+    if rep.get("status") == FAIL_CLOSED:
+        print(json.dumps({"status": FAIL_CLOSED, "reason": rep.get("reason"), "generated_at": rep["generated_at"]}))
+        return 3
     print(json.dumps({"status": "OK", "generated_at": rep["generated_at"], "coverage": rep["coverage"]["episode_status"],
                       "policies": rep["grid"]["policies_evaluated"], "parity": rep["canonical_parity"]["status"],
                       "runtime_sec": rep["runtime_sec"]}))
