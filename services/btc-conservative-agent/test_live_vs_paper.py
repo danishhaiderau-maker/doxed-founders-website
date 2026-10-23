@@ -1,4 +1,7 @@
 import live_vs_paper as lv
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 
 
 def test_long_pair_computes_slippage_latencies_outcome_and_missing_fields():
@@ -76,3 +79,44 @@ def test_g5_one_pair_row_per_live_signal_and_anchor_drift_measured():
     assert by["a"]["stop_anchor_drift_status"] == "MEASURED" and abs(by["a"]["stop_anchor_drift_bp"] - 10.0) < 1e-6
     assert by["c"]["stop_anchor_drift_status"] == "LIVE_NOT_TRADED"
     assert by["b"]["stop_anchor_drift_status"] == "UNVERIFIED"  # live fill but no paper anchor
+
+
+def test_k3_live_only_forced_close_marks_the_paper_twin_non_countable():
+    """HM R2 K3 / RK C (R8-live both legs): a live-only USER_RELAY_STOP / ADMIN_FORCE_FLAT / maintenance close
+    makes the pair AND its paper twin non-countable, even though the paper twin itself closed on TP."""
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
+    for live_reason in ("USER_RELAY_STOP", "ADMIN_FORCE_FLAT", "SOURCE_CONFIRMED_DEPLOY_FORCE_FLAT",
+                        "ADMIN_PAUSE:DEPLOY_MAINTENANCE"):
+        chain = {"correlation_id": "c1", "fill_price": 100.1, "fill_at_ts": 10.0, "exit_price": 100.5,
+                 "exit_reason": live_reason, "closed": True}
+        r = lv.pair_row("c1", chain, twin)
+        assert r["non_countable"] is True and r["live_non_countable"] is True, live_reason
+        assert r["paper_twin_non_countable"] is True
+        assert r["paper_twin_non_countable_reason"].startswith("LIVE_TWIN_FORCED_CLOSE:"), r
+        out = lv.build([chain], {"c1": twin})
+        assert out["paper_twin_non_countable_ids"] == ["c1"] and out["n_non_countable_pairs"] == 1
+
+
+def test_k3_pair_rows_always_carry_non_countable():
+    twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 101.0, "exit_reason": "TAKE_PROFIT"}
+    chain = {"correlation_id": "c2", "fill_price": 100.1, "fill_at_ts": 10.0, "exit_price": 100.9,
+             "exit_reason": "EXCHANGE_STOP_35BP", "closed": True}
+    r = lv.pair_row("c2", chain, twin)
+    assert r["non_countable"] is False and r["non_countable_reasons"] is None
+    assert r["paper_twin_non_countable"] is False and r["live_non_countable"] is False
+    # a paper twin that is itself forced / non-countable makes the pair non-countable
+    r = lv.pair_row("c2", chain, dict(twin, exit_reason="DEPLOY_FORCE_FLAT"))
+    assert r["non_countable"] is True and r["paper_twin_non_countable"] is True
+    r = lv.pair_row("c2", chain, dict(twin, non_countable=True, non_countable_reason="R17_UNPROVEN:LIQ_UNVERIFIED"))
+    assert r["non_countable"] is True and r["non_countable_reasons"] == ["PAPER_NON_COUNTABLE:R17_UNPROVEN:LIQ_UNVERIFIED"]
+    # paper-only row (no live chain): only the paper leg decides
+    r = lv.pair_row("c3", None, twin)
+    assert r["non_countable"] is False and "non_countable" in r
+
+
+def test_k3_forced_set_mirrors_ts_and_paper_canon():
+    import paper_pnl_canon
+    assert paper_pnl_canon.FORCED_EXIT_REASONS <= lv.LIVE_FORCED_EXIT_REASONS
+    ts = (ROOT.parents[1] / "apps/api/src/trading-agents/live-row-countability.ts").read_text()
+    for r in lv.LIVE_FORCED_EXIT_REASONS:
+        assert f"'{r}'" in ts, r

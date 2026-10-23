@@ -14,6 +14,53 @@ SCHEMA = "live_vs_paper_v1"
 _NOT_TRADED_REASONS = ("LIVE_BUSY_SKIPPED",)
 
 
+# HM R2 K3 / RK C (R8-live, both legs): mirrors apps/api/src/trading-agents/live-row-countability.ts
+# (LIVE_FORCED_EXIT_REASONS = paper_pnl_canon.FORCED_EXIT_REASONS + relay-only USER_RELAY_STOP, and /FORCE_FLAT|MAINTENANCE/).
+LIVE_FORCED_EXIT_REASONS = frozenset({"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
+                                      "DEPLOY_FORCE_FLAT", "USER_RELAY_STOP"})
+_FORCED_PATTERN = ("FORCE_FLAT", "MAINTENANCE")
+_DISPLAY_PREFIXES = ("SOURCE_CONFIRMED_", "LATE_ENTRY_BETTER_ONLY_CONTINUATION: ", "LATE_ENTRY_BETTER_ONLY_CONTINUATION")
+
+
+def forced_reason(*reasons):
+    """The first forced close reason (canonical, upper case) among the candidates, else None."""
+    for raw in reasons:
+        s = str(raw or "").strip().upper()
+        for p in _DISPLAY_PREFIXES:
+            if s.startswith(p):
+                s = s[len(p):].lstrip(":").strip()
+        if s and (s in LIVE_FORCED_EXIT_REASONS or any(x in s for x in _FORCED_PATTERN)):
+            return s
+    return None
+
+
+def _truthy(v) -> bool:
+    return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+
+def pair_countability(chain: Mapping[str, Any] | None, twin: Mapping[str, Any] | None) -> dict:
+    """R8-live both legs: a pair is non-countable when EITHER leg was force-closed; a live-only forced close
+    (USER_RELAY_STOP, ADMIN_FORCE_FLAT, deploy/maintenance flatten ...) marks the paper twin non-countable too,
+    and a paper twin that is itself non-countable (forced, R17, default delay ...) makes the pair non-countable."""
+    chain, twin = chain or {}, twin or {}
+    live = forced_reason(chain.get("exit_reason"), chain.get("close_reason"), chain.get("terminal_reason"))
+    paper_forced = forced_reason(twin.get("exit_reason"))
+    reasons = []
+    if live:
+        reasons.append("LIVE_FORCED_CLOSE:" + live)
+    if paper_forced:
+        reasons.append("PAPER_FORCED_CLOSE:" + paper_forced)
+    elif twin and _truthy(twin.get("non_countable")):
+        reasons.append("PAPER_NON_COUNTABLE:" + str(twin.get("non_countable_reason") or twin.get("non_countable_reasons")
+                                                    or "STAMPED"))
+    twin_nc = bool(twin) and bool(live or paper_forced or _truthy(twin.get("non_countable")))
+    return {"live_non_countable": bool(live), "live_non_countable_reason": ("FORCED_CLOSE:" + live) if live else None,
+            "paper_twin_non_countable": twin_nc,
+            "paper_twin_non_countable_reason": (("LIVE_TWIN_FORCED_CLOSE:" + live) if live else
+                                                (reasons[0] if twin_nc and reasons else None)),
+            "non_countable": bool(reasons), "non_countable_reasons": reasons or None}
+
+
 def _f(v):
     try:
         x = float(v)
@@ -94,6 +141,8 @@ def pair_row(cid: str, chain: Mapping[str, Any] | None, twin: Mapping[str, Any] 
         # drift (paper anchors the exchange stop on the paper fill, live on the live fill) is measured from the pair.
         "twin_status": ("PAIRED" if chain and twin else "NO_PAPER_TWIN" if chain else "PAPER_ONLY"),
         **_anchor_drift(twin.get("side"), twin.get("exchange_stop_anchor_px") or p_in, l_in, traded),
+        # HM R2 K3 / RK C: pair-level countability (both legs; live-only forced close -> paper twin non-countable)
+        **pair_countability(chain, twin),
     }
     row["missing"] = sorted(k for k in ("paper_fill_ts", "live_exit_price", "live_exit_ts", "funding_usd_paper", "funding_usd_live",
                                          "fill_to_stop_ms") if traded and row.get(k) is None)
@@ -142,4 +191,7 @@ def build(chains: Iterable[Mapping[str, Any]], twins: Mapping[str, Mapping[str, 
             "n_live_signals": len(live_ids), "n_live_pair_rows": len(live_rows),
             "n_no_paper_twin": sum(1 for r in live_rows if r["twin_status"] == "NO_PAPER_TWIN"),
             "one_pair_row_per_live_signal": len(live_rows) == len({r["trade_id"] for r in live_rows}),
+            # HM R2 K3: paper twins any stat must exclude because their live twin was force-closed (R8-live both legs)
+            "n_non_countable_pairs": sum(1 for r in rows if r["non_countable"]),
+            "paper_twin_non_countable_ids": sorted(r["trade_id"] for r in rows if r["paper_twin_non_countable"]),
             "note": "read-only; no summary computed here (HM). Null = not reported by the executor/paper ledger (see missing). Funding only, no fees."}
