@@ -64,3 +64,24 @@ def test_live_legs_resident_exit_requires_print_and_fill_record():
     ok = lap.live_legs({**entry, "exit_trigger_print_at_ts": 5.0, "exit_fill_record_at_ts": 5.2}, None,
                        closed=True, exit_resident=True)
     assert ok["non_countable"] is False, ok
+
+
+def test_fly_chain_carries_exit_order_class_and_exit_stamps_into_the_leg_check():
+    """HM 02:55: exit_order_class production (Railway reporter -> Fly chain): a resident stop exit is classified as
+    EXCHANGE_RESIDENT (print -> BFX fill record legs) instead of failing the bot-sent send legs."""
+    import live_copy_monitor as lcm
+    import live_vs_paper as lv
+    tl = {"fly_signal_at_ts": 1.0, "fly_intent_emitted_at_ts": 1.1, "railway_received_at_ts": 1.2,
+          "exchange_ack_at_ts": 1.3, "fill_at_ts": 1.4}
+    rep = [{"type": "ORDER_FILLED", "correlation_id": "c1", "account": "a", "timeline": tl, "fill": {"price": 100.0}},
+           {"type": "POSITION_CLOSED", "correlation_id": "c1", "account": "a",
+            "timeline": {**tl, "exit_trigger_print_at_ts": 5.0, "exit_fill_record_at_ts": 5.2},
+            "close": {"price": 99.0, "reason": "EXCHANGE_STOP_25BP", "exit_order_class": "EXCHANGE_RESIDENT"}}]
+    appr = [{"correlation_id": "c1", "signal_at_ts": 1.0, "created_at_ts": 1.1, "entry_allowed": True}]
+    ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
+    assert ch["exit_order_class"] == "EXCHANGE_RESIDENT" and ch["exit_fill_record_at_ts"] == 5.2
+    pc = lv.pair_countability(ch, None)
+    assert pc["live_non_countable"] is False, pc
+    rep[1]["timeline"].pop("exit_trigger_print_at_ts")  # print not carried -> non-countable (R17)
+    ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
+    assert lv.pair_countability(ch, None)["live_non_countable"] is True
