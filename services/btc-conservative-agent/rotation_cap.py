@@ -93,9 +93,15 @@ CAP_ALLOW: dict[str, tuple[int, int]] = {name: DEFAULT_CAP for name in _DEFAULT_
 CAP_ALLOW["chase_offset_touch_grid.jsonl"] = (10, 200 * MB)
 
 # Days-based caps (RK binding conditions, 23 Oct 2026 ~21:12 AEDT).
-# market_microstructure_1s is the 1 s book/BBO tape. It feeds indicators,
-# features and coverage ONLY (e.g. the tape_minute_bars rebuild, 14-day
-# DEFAULT_RETENTION_MINUTES); it NEVER prices a fill, stop, TP or exit.
+# market_microstructure_1s is the 1 s tape. Its bid/ask/qty/last are
+# TICKER-derived (bot.py ~L29140-29174, source_ts = max(ws_last_tick,
+# rest_price_ts)), not verifiable book, so it must never price (R17) a fill,
+# stop, TP or exit; only its trade aggregates are real prints. It feeds
+# indicators, features and coverage. The 14-day need comes from
+# tape_minute_bars (DEFAULT_RETENTION_MINUTES = 14 * 1440): GS-FADE3 prices
+# only via the paper_fill book walk, never this tape. Remaining tape-pricing
+# consumers (genome_grid_study ~L204, evaluate_limit_fill, side_marks) are
+# tracked for retirement in SHARED-TRACKER.
 # Rotations younger than ``days`` are kept; older ones go. The byte backstop is
 # days x mb_per_day = 14 x 60 MB/day (Strategist's spec, RK 23 Oct ~22:05
 # AEDT; the tape grows ~44 MB/day so the age rule normally binds first). Only
