@@ -274,9 +274,23 @@ def regime_coverage_check(tile_rows: Iterable[Mapping[str, Any]], since_ts: Opti
                     checked=n, missing=len(miss))
 
 
+def realism_v2_stamp_check(stamps: Optional[Mapping[str, Any]]) -> dict:
+    """REALISM_V2 F6 alert: RED when any post-fix row (monitor_tiles.realism_v2_stamp_missing) is missing a stamp."""
+    if stamps is None:
+        return {"status": "GREEN", "reasons": [], "note": "NOT_PROVIDED", "checked": 0, "missing": None}
+    if stamps.get("error"):
+        return _verdict([], [f"STAMP_COUNT_FAILED {stamps.get('error')}"], checked=0, missing=None)
+    n = int(stamps.get("missing") or 0)
+    red = [f"MISSING_STAMPS {e.get('trade_id')} {','.join(e.get('missing') or [])}"
+           for e in (stamps.get("examples") or [])] or ([f"MISSING_STAMPS rows={n}"] if n else [])
+    return _verdict(red if n > 0 else [], [], checked=int(stamps.get("checked") or 0), missing=n,
+                    by_field=dict(stamps.get("by_field") or {}))
+
+
 def evaluate(*, now, rows, book_by_sec, chains, v1_since_ts, feed: dict, pnl_reconcile,
-             tile_rows=(), regime_since_ts=None) -> dict:
+             tile_rows=(), regime_since_ts=None, stamps: Optional[Mapping[str, Any]] = None) -> dict:
     parts = {
+        "realism-v2-stamps": realism_v2_stamp_check(stamps),
         "regime-coverage": regime_coverage_check(tile_rows, regime_since_ts),
         "fill-recompute": fill_recompute_check(rows, book_by_sec),
         "presence": presence_check(rows, v1_since_ts),

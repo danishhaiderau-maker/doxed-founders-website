@@ -6,6 +6,7 @@ import pytest
 import combo_pathway_config as cpc
 import paper_fill as pf
 import tile_fill as tf
+from realism_v2_fixture import V2_STAMPS
 
 ROOT = pathlib.Path(__file__).parent
 BOOK = {"s": 100, "a": [[100.0, 1.0], [101.0, 5.0]], "b": [[99.0, 1.0], [98.0, 5.0]]}
@@ -57,7 +58,7 @@ def test_entry_is_ioc_at_signal_plus_delay_with_provenance(monkeypatch):
     _use_book(monkeypatch)
     r = tf.entry_fill("LONG", 0.5, 99.0, 1.5, "default_until_n10")
     assert r["status"] == "FILLED" and r["price"] == 100.0 and r["fill_ts"] == 100.5
-    assert r["fill_model"] == pf.FILL_MODEL and r["fill_model_version"] == 1
+    assert r["fill_model"] == pf.FILL_MODEL and r["fill_model_version"] == 2
     assert r["delay_source"] == "default_until_n10" and r["depth_snapshot_fill"]["a"][0] == [100.0, 1.0]
     p = tf.provenance(r)
     assert p["fee_model"] == tf.FEE_MODEL and p["depth_snapshot_fill"]
@@ -404,12 +405,13 @@ def test_b5_no_fill_shadow_row_fields(monkeypatch):
 def _closed_raw(**kw):
     raw = {"trade_id": "t", "research_lane": "FAMILY_GSB1_CVD_DIV_REGIME", "dir": "LONG", "entry": 100.0, "exit": 101.0,
            "exit_reason": "TP", "qty": 0.5, "leverage": 100, "margin_usdt": 0.25, "ts": 2000.0,
-           "outcome_duration_sec": 60, "fill_model": pf.FILL_MODEL, "fill_model_version": 1, "delay_s": 1.5,
+           "outcome_duration_sec": 60, "fill_model": pf.FILL_MODEL, "fill_model_version": 2, "delay_s": 1.5,
            "delay_source": "default_until_n10", "ask_age_ms": 120, "exit_ask_age_ms": 90,
            "depth_snapshot_signal": {"s": 1}, "depth_snapshot_fill": {"s": 2}, "exit_depth_snapshot_fill": {"s": 3},
            "exit_price_basis": "VWAP_ALL_LEGS", "exit_price": 100.8, "fee_model": tf.FEE_MODEL, "funding_rate": 0.0001,
            "funding_source": tf.FUNDING_SOURCE, "hold_seconds": 60.0, "funding_ts_crossed": [], "fresh_eligible": True,
            "legacy_pricing": False, "exit_status": "PAPER_FILL"}
+    raw.update(V2_STAMPS)  # REALISM_V2: a countable closed row carries every stamp
     raw.update(kw)
     return raw
 
@@ -573,7 +575,7 @@ def test_blocker1_closed_row_entry_fields_come_from_entry_fill_sim(monkeypatch):
     ns = _row_ns()
     f = ns["_entry_pricing_fields"](pos, {"fill_model": "AI_DIRECT"})
     assert f["fill_model"] == pf.FILL_MODEL == "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"  # paper_fill wins over AI_DIRECT
-    assert f["fill_model_version"] == 1 and f["delay_s"] == 1.5 and f["delay_source"] == "default_until_n10"
+    assert f["fill_model_version"] == 2 and f["delay_s"] == 1.5 and f["delay_source"] == "default_until_n10"
     assert f["depth_snapshot_signal"] and f["depth_snapshot_fill"] and f["ask_age_ms"] is not None
     assert f["entry_provenance"] and f["entry_provenance"]["depth_snapshot_fill"]
     assert ns["_row_priced_by_paper_fill"](pos) is True
@@ -661,6 +663,7 @@ def _closed_row(monkeypatch, tid, **over):
     row = {"trade_id": tid, "ts": "2026-10-17T02:00:00", "entry_ts": 1.0, "research_lane": pos["research_lane"],
            **ns["_entry_pricing_fields"](pos, {}), "exit_status": "PAPER_FILL", "fill_model_tag": None,
            "legacy_pricing": not fresh, "fresh_eligible": fresh, "fresh_data_excluded": False}
+    row.update({k: v for k, v in V2_STAMPS.items() if k != "fill_model_version"})  # live-measured, stamped close
     row.update(over)
     return row
 
@@ -692,7 +695,7 @@ def test_reload_roundtrip_keeps_fresh_eligible_and_fresh_only_identical(tmp_path
     assert fresh == {"ok-1": True, "nobook-1": False, "legacy-1": False, "flagfalse-1": False}
     assert back["ok-1"]["fresh_eligible"] is True and back["nobook-1"]["fresh_eligible"] is False
     assert back["legacy-1"]["legacy_pricing"] is True and back["ok-1"]["legacy_pricing"] is False
-    assert back["ok-1"]["fill_model_version"] == 1 and isinstance(back["ok-1"]["depth_snapshot_fill"], dict)
+    assert back["ok-1"]["fill_model_version"] == 2 and isinstance(back["ok-1"]["depth_snapshot_fill"], dict)
 
 
 def test_pricing_block_never_trusts_a_stale_true_or_a_string_false(monkeypatch):
@@ -717,7 +720,7 @@ def test_open_row_shows_entry_pricing_not_pre_realistic(monkeypatch):
     pos.update({"trade_id": "o-1", "entry_ts": 1.0, "entry": 100.0})
     row = mt.tile_trade_row(pos, status="open", short_names={}, epoch_id=None, forced_reasons=[],
                             fill_evidence={"fill_model": "PRE_REALISTIC_V1_BBO_CROSS"})
-    assert row["pricing"]["fill_model"] == pf.FILL_MODEL and row["pricing"]["fill_model_version"] == 1
+    assert row["pricing"]["fill_model"] == pf.FILL_MODEL and row["pricing"]["fill_model_version"] == 2
     assert row["pricing"]["state"].startswith("OPEN") and row["pricing"]["fresh_eligible"] is None
     assert row["fill"]["fill_model"] == pf.FILL_MODEL
     assert mt.row_is_fresh(row) is True  # open rows are not trades; fresh_only keeps showing them as before

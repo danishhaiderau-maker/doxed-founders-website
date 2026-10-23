@@ -8,6 +8,7 @@ import pytest
 
 import monitor_api
 import monitor_tiles as mt
+from realism_v2_fixture import V2_STAMPS
 
 ADMIN = "tiles-test-admin-token"
 MONITOR = "monitor-read-token-for-tiles-0123456789"
@@ -467,11 +468,13 @@ def _ledger(tid, **over):
            "net_bp_taker_2p8": -4.0156, "signal_ts": CUTOFF + 598, "order_ts": CUTOFF + 599,
            "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
            "delay_source": "default_until_n10", "depth_snapshot_signal": {"s": 1}, "depth_snapshot_fill": {"s": 2}}
+    row.update(V2_LEDGER)  # REALISM_V2: only a fully stamped row is fresh (paper_fill.realism_v2_reasons)
     row.update(over)
     return row
 
 
 DISLOC_BASE = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
+V2_LEDGER = {**V2_STAMPS, "delay_s": 0.4}
 
 
 def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot, monkeypatch):
@@ -487,6 +490,8 @@ def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot
     assert len(real) == 5 and all("pricing" in r for r in real)
     fresh = {r["trade_id"]: r["pricing"]["fresh_eligible"] for r in real}
     assert fresh == {"d-fresh": True, "d-parts": True, "d-forced": False, "d-legacy": False, "d-flagged": False}
+    unstamped = _ledger("d-v1", **{**{k: None for k in V2_STAMPS}, "fill_model_version": 1})
+    assert dsl.ledger_pricing_block(unstamped)["fresh_eligible"] is False  # pre-REALISM_V2 DISLOC rows quarantined
     assert real[3]["pricing"]["legacy_pricing"] is True and real[2]["pricing"]["legacy_pricing"] is False
     monkeypatch.setattr(bot, "_disloc_tile_trade_rows", lambda lane, **kw: list(real) if lane == DISLOC_BASE else [])
     monkeypatch.setattr(bot, "_disloc_epoch_since", lambda: 0.0)
@@ -536,8 +541,7 @@ def test_tile_integrity_is_readable_with_the_monitor_bearer(bot):
 
 def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_coverage(bot, monkeypatch):
     book = {"s": 1, "a": [[100.0, 1.0]], "b": [[99.0, 1.0]]}
-    v1 = {"fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
-          "delay_source": "default_until_n10", "exit_status": "PAPER_FILL", "fresh_eligible": True,
+    v1 = {**V2_STAMPS, "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "delay_s": 1.5, "exit_status": "PAPER_FILL", "fresh_eligible": True,
           "depth_snapshot_signal": book, "depth_snapshot_fill": book, "exit_depth_snapshot_fill": book}
     rows = [
         _closed("p-ok", GS1, close_ts=CUTOFF + 100, bp=1.0, net=0.01, **v1),
@@ -566,7 +570,7 @@ def test_fill_provenance_route_reports_pricing_shadow_forced_and_snapshot_covera
     assert t["closed"] == 4 and t["fresh_eligible"] == 2 and t["not_fresh"] == 2
     assert t["legacy_rows"] == 1 and t["v1_rows"] == 3
     assert t["fill_model_counts"]["BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"] == 3 and t["fill_model_counts"]["AI_DIRECT"] == 1
-    assert t["fill_model_version_counts"] == {"1": 3, "none": 1} and t["delay_source_counts"]["default_until_n10"] == 3
+    assert t["fill_model_version_counts"] == {"2": 3, "none": 1} and t["delay_source_counts"]["LIVE_POOLED_ENTRY"] == 3
     assert t["forced_counts"] == {"FORCED_NO_BOOK": 1}
     assert t["shadow"]["no_fill"] == 1 and t["shadow"]["reject"] == 1  # the pre-epoch reject is not counted
     assert t["snapshot_coverage"] == {"entry_signal": 3, "entry_fill": 3, "exit_fill": 1, "of_v1_rows": 3,

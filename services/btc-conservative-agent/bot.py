@@ -7652,11 +7652,12 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
     delay_s, delay_source = _disloc_delay(lane, "exit", pos.get("trade_id"))
     _paper_note_exit_trigger(pos, t0)
-    marks = {"_paper_exit_trigger_ts": None}
+    marks = {"_paper_exit_trigger_ts": None, "exit_order_class": "BOT_SENT"}  # F6: forced/admin closes are BOT_SENT
     res = {**_tf.exit_fill(direction, qty, t0, delay_s, delay_source),
            **_paper_delay_meta(lane, "exit", pos.get("trade_id"))}
     if res.get("status") != "FILLED" or float(res.get("price") or 0) <= 0:
-        return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None}
+        return None, {**_paper_unpriced_marks(t0, why="INLINE_NO_WAIT_NO_BOOK"), "_paper_exit_trigger_ts": None,
+                      "exit_order_class": "BOT_SENT"}
     marks.update(exit_status="PAPER_FILL", exit_pricing_basis="MODEL_TIME",
                  **_paper_exit_model_times(t0, res, time.time(), 1))
     return _paper_exit_sim(res, pos, direction, qty, marks), marks
@@ -7797,6 +7798,14 @@ def _all_legs_book10l(pos: dict) -> bool:
     if isinstance(sim, dict) and sim.get("fill_model") and str(sim["fill_model"]) not in _pf.ALLOWED_FILL_MODELS:
         return False
     return True
+
+
+def _exit_basis_fallback(pos: dict) -> str:
+    """REALISM_V2 F6: the exit_pricing_basis of a row whose exit path stamped none. Paper tiles always stamp one in
+    _paper_lane_exit; reaching here on a paper tile is a bug the realism-v2-stamps alert counts (MISSING)."""
+    if _is_paper_book_lane(pos):
+        return ""
+    return "LIVE_EXCHANGE_FILL" if pos.get("bitfinex_live_entry") or pos.get("real_fill_recorded") else "LEGACY_PRICING"
 
 
 def _entry_priced_by_paper_fill(pos: dict) -> bool:
@@ -32380,7 +32389,13 @@ def close_position(pos: dict, exit_reason: str):
             "exit_status": pos.get("exit_status"),
             "missing_book_seconds": pos.get("missing_book_seconds"),
             "exit_repriced_lag_s": pos.get("exit_repriced_lag_s"),
-            "exit_pricing_basis": pos.get("exit_pricing_basis"),
+            # REALISM_V2 F6: every exit path stamps a basis and an order class at row creation. Paper tiles stamp
+            # them in _paper_lane_exit (lane / forced / no-book / inline); non-paper lanes are labelled legacy.
+            "exit_pricing_basis": pos.get("exit_pricing_basis") or _exit_basis_fallback(pos),
+            "exit_order_class": pos.get("exit_order_class") or __import__("order_model").exit_order_class(exit_reason),
+            # F2 stamps carried from the position onto the row (the analyzer pools / rejects by trigger source).
+            "trigger_price_source": pos.get("trigger_price_source"),
+            "exit_trigger_basis": pos.get("exit_trigger_basis"),
             "exit_fallback": pos.get("exit_fallback"),
             "fill_valid": False if pos.get("fill_valid") is False else True,
             "non_fill_category": pos.get("non_fill_category"),
@@ -32608,6 +32623,9 @@ def close_position(pos: dict, exit_reason: str):
                 observed_ts=pos.get("entry_ts"),
             ),
         }
+        # REALISM_V2 hard rejection at the source too: an UNVERIFIED row is never stored fresh_eligible.
+        if trade_row.get("fresh_eligible") and __import__("paper_fill").realism_v2_reasons(trade_row):
+            trade_row["fresh_eligible"] = False
     def target_mutator(target):
         matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
         if len(matches) != 1:
@@ -48623,7 +48641,13 @@ def _tile_integrity_run_once(now=None):
         tile_rows = [r for rows_ in inp["by_lane"].values() for r in rows_] + rows
     except Exception:  # noqa: BLE001
         pnl, tile_rows = None, []
-    res = _ti.evaluate(now=now, rows=rows, book_by_sec=_tile_integrity_book(now, rows),
+    try:
+        import monitor_tiles as _mt
+        stamps = _mt.realism_v2_stamp_missing(tile_rows)  # REALISM_V2 F6: post-fix rows missing a stamp -> RED
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[TILE INTEGRITY] stamp count failed: {exc}")
+        stamps = {"error": type(exc).__name__}
+    res = _ti.evaluate(now=now, rows=rows, book_by_sec=_tile_integrity_book(now, rows), stamps=stamps,
                        chains=_tile_integrity_chains(now), v1_since_ts=_tile_integrity_v1_since(),
                        feed=feed, pnl_reconcile=pnl, tile_rows=tile_rows,
                        regime_since_ts=float(os.getenv("REGIME_COVERAGE_SINCE_TS") or 0) or now - 86400)
@@ -51428,6 +51452,13 @@ def api_reconcile_phantom_cancel():
             "funding_fees_usd": 0.0,
             "total_cost_usd": 0.0,
             "exit_reason": PHANTOM_CANCEL_REASON,
+            # REALISM_V2 F6: reconcile path. No exit order was sent; unpriced, never fresh.
+            "exit_pricing_basis": "PHANTOM_CANCEL_UNPRICED",
+            "exit_order_class": "NO_EXIT_ORDER",
+            "fresh_epoch_id": _fresh_epoch_dv(),
+            "fill_model_version": _entry_fill_sim(pos).get("fill_model_version"),
+            "fresh_eligible": False,
+            "fill_valid": False,
             "phantom_cancel": True,
             "phantom_cancel_caller_reason": caller_reason or None,
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),

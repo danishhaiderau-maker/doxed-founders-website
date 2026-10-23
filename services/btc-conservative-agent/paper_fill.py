@@ -21,7 +21,11 @@ from collections import deque
 from typing import Any, Callable, Mapping, Optional
 
 FILL_MODEL = "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"
-FILL_MODEL_VERSION = 1
+# REALISM_V2 (HM/RK 23 Oct): ONE version bump for the F1-F6 group (they deploy together). Rows priced by version 1
+# (pre-V2) are UNVERIFIED and hard-rejected by every analyzer via row_fresh_strict -> realism_v2_reasons.
+FILL_MODEL_VERSION = 2
+REALISM_V2_FILL_MODEL_VERSION = 2
+REALISM_V2_FLOOR_ENV = "REALISM_V2_FLOOR_TS"  # the REALISM_V2 deploy ts (epoch s); unset/0 = version gate only
 FILL_BASIS_TAKER_WALK = "BOOK10L_TAKER_WALK"
 EVIDENCE_COMPLETE = "COMPLETE"  # the only fill_basis a paper_fill result can carry
 DEFAULT_DELAY_S = 1.5
@@ -655,12 +659,87 @@ def as_number(value):
 FRESH_EXIT_STATUSES = frozenset({"PAPER_FILL", "FILLED", "FILLED_IN_PARTS"})
 
 
+# REALISM_V2 F6: the exit stamps every row built at/after V2 must carry (no back-fill; older rows are quarantined).
+REALISM_V2_STAMP_FIELDS = ("exit_pricing_basis", "exit_order_class", "fresh_epoch_id", "fill_model_version")
+REALISM_V2_EXIT_ORDER_CLASSES = frozenset({"EXCHANGE_RESIDENT", "BOT_SENT"})
+_EXIT_DELAY_OK = frozenset({"EXCHANGE_RESIDENT_NO_DELAY"})
+
+
+def realism_v2_floor_ts(env=None) -> float:
+    import os as _os
+    n = as_number((env if env is not None else _os.environ).get(REALISM_V2_FLOOR_ENV))
+    return float(n) if n is not None and n > 0 else 0.0
+
+
+def _row_fill_ts(row) -> Optional[float]:
+    """The row's entry model fill time (epoch s), else its numeric / ISO entry ts."""
+    for k in ("model_fill_ts", "entry_ts_epoch", "entry_ts"):
+        v = row.get(k)
+        n = as_number(v)
+        if n is not None and n > 0:
+            return n
+        if isinstance(v, str) and v.strip():
+            try:
+                from datetime import datetime, timezone
+                d = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+                return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def realism_v2_missing_stamps(row) -> list:
+    """F6: the stamp fields a row is missing (empty / None / 'nan' strings count as missing)."""
+    if not isinstance(row, dict):
+        return list(REALISM_V2_STAMP_FIELDS)
+    return [k for k in REALISM_V2_STAMP_FIELDS if str(row.get(k) if row.get(k) is not None else "").strip().lower()
+            in ("", "none", "nan", "null")]
+
+
+def realism_v2_reasons(row, *, floor_ts: Optional[float] = None) -> list:
+    """REALISM_V2 hard rejection (every analyzer, via row_fresh_strict): the reasons a closed row is UNVERIFIED.
+    Empty list = the row may count. Pre-V2 rows (version < 2, or a fill before the deploy floor), the 1.5 s
+    DEFAULT_UNMEASURED delay (either leg), ticker-triggered rows of unflipped tiles, unverified funding, a
+    REPRICED_CURRENT_TIME / NO_BOOK exit and any missing F6 stamp are all UNVERIFIED. Never pooled across versions."""
+    if not isinstance(row, dict):
+        return ["NOT_A_ROW"]
+    out = []
+    version = as_number(row.get("fill_model_version"))
+    if version is None or version < REALISM_V2_FILL_MODEL_VERSION:
+        out.append("PRE_REALISM_V2_FILL_MODEL")
+    floor = realism_v2_floor_ts() if floor_ts is None else float(floor_ts or 0)
+    if floor > 0:
+        t = _row_fill_ts(row)
+        if t is None or t < floor:
+            out.append("BEFORE_REALISM_V2_FLOOR")
+    if not delay_is_measured(row.get("delay_source")) or str(row.get("priced_delay_model") or "") == "DEFAULT_1_5S":
+        out.append("ENTRY_DELAY_NOT_LIVE_MEASURED")
+    xd = str(row.get("exit_delay_source") or "")
+    if not (delay_is_measured(xd) or xd in _EXIT_DELAY_OK):
+        out.append("EXIT_DELAY_NOT_LIVE_MEASURED")
+    if str(row.get("trigger_price_source") or "ticker").strip().lower() != "book":
+        out.append("TICKER_TRIGGER_UNFLIPPED_TILE")
+    if as_bool(row.get("funding_verified"), False) is not True:
+        out.append("FUNDING_UNVERIFIED")
+    basis = str(row.get("exit_pricing_basis") or "")
+    if basis in ("REPRICED_CURRENT_TIME", "NO_BOOK_UNPRICED") or basis.startswith(("NO_BOOK", "BOOK_DEPTH_EXCEEDED")):
+        out.append("EXIT_BASIS_" + basis)
+    if str(row.get("non_fill_category") or "").strip() not in ("", "None", "nan"):
+        out.append("NON_FILL_" + str(row.get("non_fill_category")))  # NO_BOOK_EXIT, BOOK_DEPTH_EXCEEDED, TP1_UNPRICED_LEG
+    if row.get("exit_order_class") and str(row.get("exit_order_class")) not in REALISM_V2_EXIT_ORDER_CLASSES:
+        out.append("EXIT_ORDER_CLASS_UNKNOWN")
+    out.extend("MISSING_" + k.upper() for k in realism_v2_missing_stamps(row))
+    return out
+
+
 def row_fresh_strict(row) -> bool:
     """A closed paper row is fresh only if every pricing fact says so, whatever a stored flag claims:
-    exit_status PAPER_FILL (not FORCED_NO_BOOK / PAPER_FILL_FORCED), a v1 fill_model_version, an allowed
-    fill_model, not legacy-tagged and not excluded. Tolerates CSV-reloaded strings."""
+    exit_status PAPER_FILL (not FORCED_NO_BOOK / PAPER_FILL_FORCED), a REALISM_V2 (>= 2) fill_model_version with
+    no realism_v2_reasons, an allowed fill_model, not legacy-tagged and not excluded. Tolerates CSV-reloaded strings."""
     if not isinstance(row, dict):
         return False
+    if realism_v2_reasons(row):
+        return False  # REALISM_V2 hard rejection: UNVERIFIED rows are counted nowhere
     version = as_number(row.get("fill_model_version"))
     if str(row.get("exit_status") or "") not in FRESH_EXIT_STATUSES or version is None or version < 1:
         return False

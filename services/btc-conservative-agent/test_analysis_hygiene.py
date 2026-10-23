@@ -23,9 +23,10 @@ def test_forced_and_late_window_excluded_and_bp_added():
 
 def test_all_epochs_study_reads_archive_and_disloc(tmp_path):
     import json
-    cur = pd.DataFrame([{"trade_id": "a", "research_lane": "CTRL", "exit_reason": "X", "net_pnl_usd": 0.01,
+    from realism_v2_fixture import V2_STAMPS
+    cur = pd.DataFrame([{**V2_STAMPS, "trade_id": "a", "research_lane": "CTRL", "exit_reason": "X", "net_pnl_usd": 0.01,
                          "notional_usd": 25, "close_ts": 3600.0,
-                             "fill_model_version": 1, "exit_status": "PAPER_FILL",
+                             "fill_model_version": 2, "exit_status": "PAPER_FILL",
                              "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY"}])
     cur.to_csv(tmp_path / "trades_3factor.csv", index=False)
     old = tmp_path / "research_archive" / "pre_epoch" / "ce-old"

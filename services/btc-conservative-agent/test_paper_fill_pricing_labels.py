@@ -11,6 +11,7 @@ import monitor_tiles
 import paper_fill
 from research import fill_model as research_fill_model
 import research_v3_bridge
+from realism_v2_fixture import V2_STAMPS
 
 ROOT = Path(__file__).resolve().parent
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
@@ -27,8 +28,8 @@ def _epoch():
 
 
 def good_row(**extra):
-    row = {"research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "exit_status": "PAPER_FILL", "fill_model": MODEL,
-           "fill_model_version": 1, "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True,
+    row = {**V2_STAMPS, "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP", "exit_status": "PAPER_FILL", "fill_model": MODEL,
+           "fill_model_version": 2, "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True,
            "all_legs_book10l": True}
     row.update(extra)
     return row

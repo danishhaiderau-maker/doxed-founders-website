@@ -400,7 +400,9 @@ PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "
                 # REALISM_V2 F5: settlement-exact funding (raw, per settlement, aligned with funding_ts_crossed)
                 "funding_model", "funding_status", "funding_verified", "funding_usd_raw", "funding_rate_applied",
                 "funding_rate_ts", "funding_mark_price", "funding_mark_ts", "funding_usd_by_settlement",
-                "funding_settlement_status")
+                "funding_settlement_status",
+                # REALISM_V2 F6 stamps (exit_order_class is the only new field; the others are existing stamps)
+                "exit_order_class", "fresh_epoch_id", "trigger_price_source")
 
 
 _PRICING_NUMERIC = ("fill_model_version", "delay_s", "ask_age_ms", "exit_ask_age_ms",
@@ -451,7 +453,34 @@ def pricing_block(raw: Mapping[str, Any]) -> dict:
     typed = {**dict(raw), **{k: block[k] for k in block}}
     stored = _pf.as_bool(raw.get("fresh_eligible"))
     block["fresh_eligible"] = bool(_pf.row_fresh_strict(typed) and stored is not False)
+    block["realism_v2_unverified"] = _pf.realism_v2_reasons(typed)  # computed on read, never stored
     return block
+
+
+def realism_v2_stamp_missing(rows: Iterable[Mapping[str, Any]], *, floor_ts: float | None = None) -> dict:
+    """REALISM_V2 F6 row-build missing-field count: closed tile rows built by the V2 code (fill_model_version >= 2,
+    or entry fill at/after the V2 floor) that lack exit_pricing_basis / exit_order_class / fresh_epoch_id /
+    fill_model_version. Any count > 0 is an alert (tile_integrity part realism-v2-stamps). Pre-V2 rows are
+    quarantined (never back-filled) and not counted. DISLOC ledger rows (tiles 6/7, OFF) are out of scope."""
+    import paper_fill as _pf
+    floor = _pf.realism_v2_floor_ts() if floor_ts is None else float(floor_ts or 0)
+    checked, missing, by_field, examples = 0, 0, {}, []
+    for r in rows or ():
+        if not isinstance(r, Mapping) or str(r.get("event") or "").startswith("DISLOC"):
+            continue
+        v = _pf.as_number(r.get("fill_model_version"))
+        t = _pf._row_fill_ts(dict(r))
+        if not ((v is not None and v >= _pf.REALISM_V2_FILL_MODEL_VERSION) or (floor > 0 and t is not None and t >= floor)):
+            continue
+        checked += 1
+        miss = _pf.realism_v2_missing_stamps(dict(r))
+        if miss:
+            missing += 1
+            for k in miss:
+                by_field[k] = by_field.get(k, 0) + 1
+            if len(examples) < 10:
+                examples.append({"trade_id": r.get("trade_id"), "lane": r.get("research_lane"), "missing": miss})
+    return {"checked": checked, "missing": missing, "by_field": by_field, "examples": examples}
 
 
 def open_pricing_block(raw: Mapping[str, Any]) -> dict | None:

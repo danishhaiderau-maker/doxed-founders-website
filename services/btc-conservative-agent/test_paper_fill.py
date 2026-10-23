@@ -9,7 +9,7 @@ at = lambda t: BOOK if t >= 100 else None
 def test_walks_depth_at_signal_plus_delay():
     r = pf.paper_fill("LONG", 1.5, 99.0, 1.5, at)
     assert r["status"] == "FILLED" and abs(r["price"] - (100 + 0.5 * 101) / 1.5) < 1e-9
-    assert r["fill_ts"] == 100.5 and r["fill_model_version"] == 1 and r["book_s"] == 100
+    assert r["fill_ts"] == 100.5 and r["fill_model_version"] == 2 and r["book_s"] == 100
     assert r["depth_snapshot_fill"]["a"][0] == [100.0, 1.0]
     assert r["depth_snapshot_signal"] is None  # no book at t=99 in this fixture
 
