@@ -15725,6 +15725,11 @@ def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
 def r5_retention_loop():
     status = _r5_retention_status
     status.update({"alive": True, "started_ts": time.time()})
+    try:
+        # HM C6: retention REDs survive a restart and clear 24 h after their last occurrence.
+        disk_alert.configure(_data_sync_runtime_root() / "retention" / "disk_alert_red.json")
+    except Exception as exc:  # noqa: BLE001 - telemetry only, never blocks retention
+        status["disk_alert_state_error"] = type(exc).__name__
     if shutdown_event.wait(R5_RETENTION_FIRST_DELAY_SEC):
         return
     passes = 0
@@ -49781,6 +49786,9 @@ _SEGMENT_STATUS_FIELDS = (
     "laptop_cycle_stop_reason", "laptop_cycle_exit",
     # CUSTODY_STALLED (HM 19 Oct 16:34): received_at of the newest custody receipt + the last prune plan (deny reasons)
     "custody_received_at", "prune_last_plan",
+    # HM C5/C6 (23 Oct): laptop ACK advance time (ACK stall RED) and the R5 segment pass result.
+    "laptop_ack_advanced_at", "r5_segment_red", "r5_segment_over_cap", "r5_segment_last_deleted",
+    "r5_segment_last_at",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1

@@ -48,9 +48,9 @@ def test_segment_cap_oldest_first_and_count(tmp_path):
 
 def test_referenced_segments_go_last_but_still_capped_with_red(tmp_path):
     shas = [_seg(tmp_path, i, 100, 1000 + i) for i in range(4)]
-    res = r5.cap_market_segments(tmp_path, max_bytes=100, referenced=[shas[0]], now=5.0)
+    res = r5.cap_market_segments(tmp_path, max_bytes=100, referenced=[shas[0]], now=time.time())
     assert res["deleted"] == 3 and res["referenced_deleted"] == 0
-    res = r5.cap_market_segments(tmp_path, max_bytes=0, referenced=[shas[0]], now=6.0)
+    res = r5.cap_market_segments(tmp_path, max_bytes=0, referenced=[shas[0]], now=time.time())
     assert res["referenced_deleted"] == 1
     assert r5.count_market_segments(tmp_path) == 0
     assert "SEGMENT_CAP_DELETED_REFERENCED" in {r["reason"] for r in disk_alert.red_conditions()}
@@ -76,7 +76,7 @@ def test_bundles_capped_regardless_of_ack(tmp_path):
     res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=10 ** 9, now=now)
     assert res["removed"] == 2 and res["unacked_removed"] == 1
     assert not old_acked.exists() and not old_unacked.exists() and fresh.exists()
-    assert "BUNDLE_CAP_REMOVED_UNACKED" in {r["reason"] for r in disk_alert.red_conditions()}
+    assert "BUNDLE_CAP_REMOVED_UNACKED" in {r["reason"] for r in disk_alert.red_conditions(now=now)}
     res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=0, now=now)  # byte cap removes the fresh one too
     assert res["removed"] == 1 and not fresh.exists()
 
@@ -140,7 +140,7 @@ def test_v22_seal_drain_discard_with_pending_raises_red_and_keeps_index(tmp_path
     assert len(receipt) == 1 and len(receipt[0].encode()) + 1 <= r5.V22_RECEIPT_MAX_BYTES
     row = json.loads(receipt[0])
     assert row["pending_event_ids_truncated"] is True and row["pending_count"] == 5000
-    assert "V22_DISCARDED_WITH_PENDING" in {r["reason"] for r in disk_alert.red_conditions()}
+    assert "V22_DISCARDED_WITH_PENDING" in {r["reason"] for r in disk_alert.red_conditions(now=90.0)}
     # Collector reads/writes stay valid after the discard.
     paths = research_event_generation_paths(str(tmp_path))
     assert all(os.path.exists(p) for p in paths)
@@ -191,11 +191,11 @@ def test_bundles_rk_1810_keep_needed_unshipped_below_cap_drop_oldest_at_cap(tmp_
     assert needed.exists() and fresh.exists()
     assert not needed_acked.exists() and not aged.exists()
     assert res["kept_needed_unshipped"] == 1 and res["cap_removed"] == 0
-    assert "BUNDLE_CAP_REACHED" not in {r["reason"] for r in disk_alert.red_conditions()}
+    assert "BUNDLE_CAP_REACHED" not in {r["reason"] for r in disk_alert.red_conditions(now=now)}
     # At the cap: oldest first regardless of ship state or keep; ids logged; RED.
     res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=10, keep=["n1"], now=now)
     assert not needed.exists() and fresh.exists()
     assert res["cap_removed"] == 1 and res["over_cap"] is False
-    assert "BUNDLE_CAP_REACHED" in {r["reason"] for r in disk_alert.red_conditions()}
+    assert "BUNDLE_CAP_REACHED" in {r["reason"] for r in disk_alert.red_conditions(now=now)}
     receipts = tmp_path / "cap_receipts.jsonl"
     assert receipts.exists() and "lifecycle-n1" in receipts.read_text()

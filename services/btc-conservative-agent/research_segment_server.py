@@ -210,6 +210,13 @@ class SegmentServer:
             "prune_last_at": status.get("prune_last_at"),
             "prune_deleted_bytes_total": status.get("prune_deleted_bytes_total"),
             "prune_last_plan": status.get("prune_last_plan"),
+            # HM C5/C6 (23 Oct): R5 segment retention (no custody gate) and the laptop ACK clock.
+            "r5_segment_red": status.get("r5_segment_red") or {},
+            "r5_segment_over_cap": status.get("r5_segment_over_cap"),
+            "r5_segment_last_deleted": status.get("r5_segment_last_deleted"),
+            "r5_segment_last_at": status.get("r5_segment_last_at"),
+            "r5_segment_store_bytes": status.get("r5_segment_store_bytes"),
+            "laptop_ack_advanced_at": status.get("laptop_ack_advanced_at"),
         }
         payload.update(self._sync_view(payload))
         return self._respond(start_response, "200 OK", payload)
