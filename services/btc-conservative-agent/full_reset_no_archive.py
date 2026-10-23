@@ -97,6 +97,7 @@ DELETE_EXACT_NAMES = frozenset({
     "shadow_exit_paths.jsonl", "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl",
     # market streams (tape, book, deriv, trades, bbo, cross venue, context, liquidations)
     "market_microstructure_1s.jsonl", "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "bfx_deriv_status_1s.jsonl",
+    "bfx_ws_events.jsonl",
     "venue_bbo_1m.jsonl", "cross_venue_tape_1m.jsonl", "market_context_1m.jsonl", "liquidations.jsonl",
     "runtime_telemetry_1m.jsonl",
     # the other *_3factor.csv ledgers (named so the plan table documents them; the guarded expired-orders CSV is covered by

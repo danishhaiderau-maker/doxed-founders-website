@@ -11,14 +11,23 @@ change or cancel an order. Writes three lean append-only JSONL streams in the ru
   second: {"s": sec, "mts": exch_ms, "mark": px, "deriv": last, "spot": px, "fund_cur": rate,
   "fund_accr": accrued, "fund_step": step, "next_fund_ts": ms, "oi": BTC, "age_s": sec}. Funding is the
   raw 8 h rate (multiply by 1e4 for bp). Data-gap (c), 12 Oct.
+* ``bfx_ws_events.jsonl``    - Bitfinex WS event log (RK, 24 Oct): every control event (info/subscribed/error/conf),
+  every heartbeat (incl. the TRADES channel), every trades-channel te/tu id, the post-(re)subscribe trades
+  snapshot and connect/disconnect, each with its receive time ``r`` (epoch s, ms precision). It proves when the
+  trades channel was live and which prints a resubscribe may have missed. Never merged into ``bfx_trades`` rows.
 * ``venue_bbo_1m.jsonl``     - Lighter + Paradex BTC perp best bid/ask, 60 per-second samples per
   UTC-minute row {"m": minute_ts, "lighter": [[bid, ask] | null x60], "paradex": [...]}.
 
 Each file rotates at ROTATE_BYTES to ``<file>.N`` and only KEEP_ROTATIONS rotated files are kept
 locally (the segment shipper mirrors them), so on-disk use stays bounded.
+
+No look-ahead (RK, 24 Oct): second ``s`` is closed ~1.3-1.5 s after it starts. Every 1 s row describes the state as
+of the END of second ``s`` (receive time <= s+1): the book is frozen at the second boundary before later deltas are
+applied, trades are bucketed by receive second, deriv/venue quotes received after s+1 are not used for row ``s``.
 """
 from __future__ import annotations
 
+import collections
 import glob
 import json
 import os
@@ -39,6 +48,8 @@ LIGHTER_MARKET = os.getenv("STRATEGIST_LIGHTER_MARKET", "1")  # 1 = BTC perp
 PARADEX_BBO = "https://api.prod.paradex.trade/v1/bbo/BTC-USD-PERP"  # WS needs SBE binary; REST 1/s
 BOOK_FILE, TRADES_FILE, VENUE_FILE = "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "venue_bbo_1m.jsonl"
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"
+EVENTS_FILE = "bfx_ws_events.jsonl"
+_HIST = 16  # per-source receive history kept so a late close can pick the value as of s+1
 DERIV_KEY = "deriv:" + BFX_SYMBOL
 MAX_DERIV_AGE_SEC = 10.0  # Bitfinex pushes deriv status every ~1-4 s; rows carry age_s
 
@@ -153,11 +164,17 @@ class Collector:
         self.trade_sink = Sink(os.path.join(runtime_dir, TRADES_FILE))
         self.venue_sink = Sink(os.path.join(runtime_dir, VENUE_FILE))
         self.deriv_sink = Sink(os.path.join(runtime_dir, DERIV_FILE))
+        self.events_sink = Sink(os.path.join(runtime_dir, EVENTS_FILE))
         self._dv = _data_version.Stamp()  # D8: rows carry the fresh-start epoch they belong to
-        self.deriv: Optional[tuple] = None  # (fields, recv_ts)
+        self.deriv: Optional[tuple] = None  # (fields, recv_ts), latest
+        self._deriv_hist: collections.deque = collections.deque(maxlen=_HIST)
+        self._quote_hist = {"lighter": collections.deque(maxlen=_HIST), "paradex": collections.deque(maxlen=_HIST)}
+        # Book state frozen at each second boundary: {sec: (b, a, book_ts, carry_ok, alive_ts)} = state at END of sec.
+        self._open_sec: Optional[int] = None
+        self._frozen: dict = {}
         self.book = BfxBook()
         self.lock = threading.Lock()
-        self.trades: list = []
+        self.trades: list = []  # [recv_sec, [id, ms, amt, px]]
         self.quotes = {"lighter": None, "paradex": None}  # (bid, ask, recv_ts)
         self.minute: dict = {}
         self._ws_factory = ws_factory or self._default_ws
@@ -176,11 +193,52 @@ class Collector:
             return json.loads(r.read())
 
     # ---- message handlers (pure, unit-tested) ----------------------------------
+    def _roll(self, now: float) -> None:
+        """Caller holds self.lock. Freeze the book as it stood at the end of every second before int(now)."""
+        sec = int(now)
+        if self._open_sec is None:
+            self._open_sec = sec
+            return
+        if sec > self._open_sec:
+            b, a = self.book.top()
+            carry_ok = bool(self.book.ts and self.book.bids and self.book.asks and max(self.book.bids) < min(self.book.asks))
+            self._frozen[self._open_sec] = (b, a, self.book.ts, carry_ok, self.book_alive_ts)
+            self._open_sec = sec
+
+    def _book_at(self, sec: int):
+        keys = [k for k in self._frozen if k <= sec]
+        return self._frozen[max(keys)] if keys else None
+
+    def _event(self, now: float, ev: str, ch=None, **extra) -> None:
+        row = {"r": round(now, 3), "ev": ev}
+        if ch is not None:
+            row["ch"] = ch
+        row.update(extra)
+        dv = self._dv.current()
+        if dv:
+            row["dv"] = dv
+        self.events_sink.write(row)
+
     def on_bfx(self, msg, chans: dict, now: float) -> None:
+        with self.lock:
+            self._roll(now)
         if isinstance(msg, dict):
             if msg.get("event") == "subscribed":
                 chans[msg.get("chanId")] = msg.get("channel")
+            self._event(now, str(msg.get("event")), msg={k: v for k, v in msg.items() if k != "event"})
             return
+        if isinstance(msg, list) and len(msg) >= 2:
+            kind = chans.get(msg[0])
+            if msg[1] == "hb":
+                self._event(now, "hb", ch=kind)
+            elif kind == "trades":
+                if msg[1] in ("te", "tu") and len(msg) > 2 and isinstance(msg[2], list) and len(msg[2]) >= 2:
+                    self._event(now, msg[1], ch=kind, id=msg[2][0], mts=msg[2][1])
+                elif isinstance(msg[1], list):
+                    # (Re)subscribe snapshot: exchange history, possibly prints missed while disconnected. Kept here
+                    # (not in bfx_trades rows, which hold only live prints received after subscribe).
+                    self._event(now, "snapshot", ch=kind, tr=[[int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]
+                                                             for t in msg[1] if isinstance(t, list) and len(t) >= 4])
         if isinstance(msg, list) and msg and chans.get(msg[0]) == "book":
             with self.lock:
                 # Bitfinex heartbeats are per channel: only a frame (delta, snapshot or "hb") on the subscribed BOOK
@@ -201,16 +259,22 @@ class Collector:
                     parsed = parse_deriv_status(msg[1])
                     if parsed:
                         self.deriv = (parsed, now)
+                        self._deriv_hist.append(self.deriv)
             elif kind == "trades":
                 if msg[1] == "te" and isinstance(msg[2], list):
                     t = msg[2]
-                    self.trades.append([int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))])
-                # "tu" duplicates "te"; the initial snapshot is history, not new prints.
+                    self.trades.append([int(now), [int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]])
+                # "tu" duplicates "te"; the (re)subscribe snapshot is history, not new prints (logged to EVENTS_FILE).
 
-    def on_bfx_disconnect(self) -> None:
-        """The book channel is gone with the socket: nothing may be carried forward until a new book frame arrives."""
+    def on_bfx_disconnect(self, now: Optional[float] = None) -> None:
+        """The book channel is gone with the socket: nothing may be carried forward until a new book frame arrives.
+        Conservative: no not-yet-written second may carry the book either."""
+        now = self.clock() if now is None else now
         with self.lock:
+            self._roll(now)
             self.book_alive_ts = 0.0
+            self._frozen = {k: (b, a, ts, ok, 0.0) for k, (b, a, ts, ok, _alive) in self._frozen.items()}
+        self._event(now, "disconnect")
 
     def on_lighter(self, msg: dict, now: float) -> None:
         tk = msg.get("ticker") if isinstance(msg, dict) else None
@@ -219,36 +283,51 @@ class Collector:
             if bid and ask:
                 with self.lock:
                     self.quotes["lighter"] = (bid, ask, now)
+                    self._quote_hist["lighter"].append(self.quotes["lighter"])
 
     def on_paradex(self, body: dict, now: float) -> None:
         bid, ask = _f((body or {}).get("bid")), _f((body or {}).get("ask"))
         if bid and ask:
             with self.lock:
                 self.quotes["paradex"] = (bid, ask, now)
+                self._quote_hist["paradex"].append(self.quotes["paradex"])
 
     # ---- per-second close ----------------------------------------------------
-    def close_second(self, sec: int) -> None:
+    def close_second(self, sec: int, now: Optional[float] = None) -> None:
+        end = sec + 1  # row ``s`` = state as of receive time <= s+1 (no look-ahead into the ~0.3-0.5 s of s+1 already seen)
         with self.lock:
-            fresh = self.book.ts and sec + 1 - self.book.ts <= MAX_QUOTE_AGE_SEC
-            # Quiet book, live connection: carry the unchanged book forward instead of writing no row (18 Oct 17:38:08-13:
-            # a 6 s gap forced an exit to FORCED_NO_BOOK although the book had not changed).
-            carried = bool(not fresh and self.book.ts and self.book.bids and self.book.asks
-                           and max(self.book.bids) < min(self.book.asks)  # a crossed book is never carried
-                           and self.book_alive_ts > 0.0 and sec + 1 - self.book_alive_ts <= BOOK_LIVENESS_SEC)
-            b, a = self.book.top() if (fresh or carried) else ([], [])
-            trades, self.trades = self.trades, []
-            deriv = self.deriv
-            quotes = {v: (q[0], q[1]) if q and sec + 1 - q[2] <= MAX_QUOTE_AGE_SEC else None
-                      for v, q in self.quotes.items()}
+            self._roll(self.clock() if now is None else now)
+            snap = self._book_at(sec)
+            b = a = []
+            fresh = carried = False
+            if snap:
+                sb, sa, bts, carry_ok, alive = snap
+                fresh = bool(bts and end - bts <= MAX_QUOTE_AGE_SEC)
+                # Quiet book, live connection: carry the unchanged book forward instead of writing no row (18 Oct
+                # 17:38:08-13: a 6 s gap forced an exit to FORCED_NO_BOOK although the book had not changed).
+                carried = bool(not fresh and carry_ok  # a crossed book is never carried
+                               and alive > 0.0 and end - alive <= BOOK_LIVENESS_SEC)
+                if fresh or carried:
+                    b, a = sb, sa
+            trades = [t for rs, t in self.trades if rs <= sec]
+            self.trades = [x for x in self.trades if x[0] > sec]
+            deriv = next((d for d in reversed(self._deriv_hist) if d[1] <= end), None)
+            quotes = {}
+            for v, hist in self._quote_hist.items():
+                q = next((x for x in reversed(hist) if x[2] <= end), None)
+                quotes[v] = (q[0], q[1]) if q and end - q[2] <= MAX_QUOTE_AGE_SEC else None
+            for k in [k for k in self._frozen if k < sec - 60]:
+                if any(j > k and j <= sec for j in self._frozen):
+                    self._frozen.pop(k)
         dv = self._dv.current()
         stamp = {"dv": dv} if dv else {}
         if b and a:
             self.book_sink.write({"s": sec, "b": b, "a": a, **({"carried": True} if carried else {}), **stamp})
         if trades:
             self.trade_sink.write({"s": sec, "tr": trades, **stamp})
-        if deriv and sec + 1 - deriv[1] <= MAX_DERIV_AGE_SEC:
+        if deriv and end - deriv[1] <= MAX_DERIV_AGE_SEC:
             self.deriv_sink.write({"s": sec, **{k: v for k, v in deriv[0].items() if v is not None},
-                                   "age_s": round(sec + 1 - deriv[1], 3), **stamp})
+                                   "age_s": round(end - deriv[1], 3), **stamp})
         minute = sec - sec % 60
         row = self.minute.setdefault(minute, {v: [None] * 60 for v in quotes})
         for v, q in quotes.items():
@@ -265,6 +344,8 @@ class Collector:
             ws = None
             try:
                 ws = self._ws_factory(url)
+                if name == "bitfinex":
+                    self._event(self.clock(), "connect")
                 for s in subs:
                     ws.send(json.dumps(s))
                 chans: dict = {}
@@ -327,11 +408,12 @@ class Collector:
                 last = target - 10
             while last < target:
                 last += 1
-                self.close_second(last)
+                self.close_second(last, now)
             if now - last_status > 900:
                 last_status = now
                 _log(f"rows book={self.book_sink.rows} trades={self.trade_sink.rows} venue={self.venue_sink.rows} deriv={self.deriv_sink.rows} "
-                     f"failures={self.book_sink.failures + self.trade_sink.failures + self.venue_sink.failures + self.deriv_sink.failures} "
+                     f"events={self.events_sink.rows} "
+                     f"failures={self.book_sink.failures + self.trade_sink.failures + self.venue_sink.failures + self.deriv_sink.failures + self.events_sink.failures} "
                      f"reconnects={self.reconnects}")
             self.stop.wait(0.2)
 

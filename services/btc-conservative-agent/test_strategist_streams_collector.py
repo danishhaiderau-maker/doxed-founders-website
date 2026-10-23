@@ -115,3 +115,61 @@ def test_entrypoint_and_stream_catalog_wired():
     assert {"bfx_book_10l", "bfx_trades", "venue_bbo_lighter_paradex"} <= set(monitor_streams.STREAMS)
     src = (here / "strategist_streams_collector.py").read_text()
     assert "import bot" not in src and "api_key" not in src.lower()
+
+
+def _rows_or_empty(path):
+    return _rows(path) if path.exists() else []
+
+
+def test_row_s_has_no_look_ahead_into_s_plus_1(tmp_path):
+    """RK 24 Oct: second s is closed at ~s+1.3-1.5; deltas/trades/deriv received after s+1 must not enter row s."""
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 1}, chans, 100.0)
+    c.on_bfx({"event": "subscribed", "channel": "trades", "chanId": 2}, chans, 100.0)
+    c.on_bfx({"event": "subscribed", "channel": "status", "chanId": 7, "key": ssc.DERIV_KEY}, chans, 100.0)
+    c.on_bfx([1, [[100, 1, 0.5], [200, 1, -0.5]]], chans, 100.4)
+    c.on_bfx([2, "te", [1, 100400, 0.01, 150]], chans, 100.4)
+    # arrivals during s+1 = 101.0-101.4, before second 100 is closed
+    c.on_bfx([1, [101, 1, 0.7]], chans, 101.2)  # better bid
+    c.on_bfx([2, "te", [2, 101200, -0.02, 151]], chans, 101.2)
+    deriv = [0] * 23
+    deriv[0], deriv[14], deriv[11] = 101200, 150.5, 0.0001
+    c.on_bfx([7, deriv], chans, 101.2)
+    c.close_second(100, now=101.4)
+    book = _rows(tmp_path / ssc.BOOK_FILE)
+    assert book == [{"s": 100, "b": [[100, 0.5]], "a": [[200, 0.5]]}]
+    assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[1, 100400, 0.01, 150]]}]
+    assert _rows_or_empty(tmp_path / ssc.DERIV_FILE) == []  # received at 101.2 > s+1
+    c.close_second(101, now=102.4)
+    book = _rows(tmp_path / ssc.BOOK_FILE)
+    assert book[-1]["s"] == 101 and book[-1]["b"] == [[101, 0.7], [100, 0.5]]
+    assert _rows(tmp_path / ssc.TRADES_FILE)[-1] == {"s": 101, "tr": [[2, 101200, -0.02, 151]]}
+    assert _rows(tmp_path / ssc.DERIV_FILE)[-1]["s"] == 101
+
+
+def test_ws_events_log_trades_hb_snapshot_and_controls_with_receive_time(tmp_path):
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    chans = {}
+    c.on_bfx({"event": "info", "version": 2}, chans, 99.5)
+    c.on_bfx({"event": "subscribed", "channel": "trades", "chanId": 2, "symbol": ssc.BFX_SYMBOL}, chans, 100.0)
+    c.on_bfx([2, [[9, 99000, 0.5, 150], [8, 98000, -0.1, 149]]], chans, 100.05)  # post-(re)subscribe snapshot
+    c.on_bfx([2, "hb"], chans, 115.0)
+    c.on_bfx([2, "te", [10, 115100, 0.01, 151]], chans, 115.1234)
+    c.on_bfx_disconnect(now=116.0)
+    ev = _rows(tmp_path / ssc.EVENTS_FILE)
+    assert [e["ev"] for e in ev] == ["info", "subscribed", "snapshot", "hb", "te", "disconnect"]
+    assert ev[0]["r"] == 99.5 and ev[4]["r"] == 115.123 and ev[4]["id"] == 10 and ev[4]["mts"] == 115100
+    assert ev[3] == {"r": 115.0, "ev": "hb", "ch": "trades"}
+    assert ev[2]["tr"] == [[9, 99000, 0.5, 150], [8, 98000, -0.1, 149]]
+    c.close_second(115, now=116.5)
+    # the snapshot is history: never in bfx_trades rows; only the live print is
+    assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 115, "tr": [[10, 115100, 0.01, 151]]}]
+
+
+def test_ws_events_file_is_registered_but_not_a_trades_stream():
+    import full_reset_no_archive
+    import monitor_streams
+    assert monitor_streams.STREAMS["bfx_ws_events"] == ssc.EVENTS_FILE
+    assert monitor_streams.STREAMS["bfx_trades"] == ssc.TRADES_FILE != ssc.EVENTS_FILE
+    assert ssc.EVENTS_FILE in open(full_reset_no_archive.__file__, encoding="utf-8").read()
