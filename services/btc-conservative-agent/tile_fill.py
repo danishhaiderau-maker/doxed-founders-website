@@ -41,6 +41,13 @@ def price_exit_resident(p, ex):
                                  leg="exit_resident", delay_source=ex["delay_source"])
 
 
+def price_exit_forced(p, ex):
+    """RK 17:18 (4): a BOT_SENT exit with no fresh book row by EXIT_FORCE_AFTER_S is priced on the FIRST book row
+    available at or after its model fill time (price age recorded), UNVERIFIED, kept; no synthetic penalty."""
+    return paper_fill.paper_fill(p["side"], p["open_qty"], ex["trigger_ts"], ex["delay_s"], paper_fill.book10l_at,
+                                 leg="exit_forced", delay_source=ex["delay_source"])
+
+
 def signal_cap_px(direction: str, signal_ts: float):
     """IOC cap from the 10-level book at the signal second; None when there is no book."""
     book = paper_fill.book10l_at(float(signal_ts))
@@ -73,6 +80,11 @@ def exit_resident_fill(direction: str, qty: float, trigger_ts: float) -> dict:
     return price_exit_resident({"side": str(direction).upper(), "open_qty": qty},
                                {"trigger_ts": float(trigger_ts), "delay_s": 0.0,
                                 "delay_source": "EXCHANGE_RESIDENT_NO_DELAY"})
+
+
+def exit_forced_fill(direction: str, qty: float, trigger_ts: float, delay_s, delay_source: str) -> dict:
+    return price_exit_forced({"side": str(direction).upper(), "open_qty": qty},
+                             {"trigger_ts": float(trigger_ts), "delay_s": delay_s, "delay_source": delay_source})
 
 
 def provenance(res) -> dict:

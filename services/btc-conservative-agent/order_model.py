@@ -31,6 +31,24 @@ ENTRY_IOC_MARKET = "IOC_MARKET"
 NO_FILL = "NO_FILL"
 DEFAULT_PROTECTION_BP = 5.0
 DEFAULT_TAKER_TTL_S = 3.0
+# HM 17:26 R6: PER-TILE registry options on the shared helpers (GS-FADE3-TP30 AMEND1 model). Defaults keep every
+# existing tile's behaviour; a tile opts in through its registry spec "realism_options" and every row stamps them.
+REST_FILL_QUEUE_CLEAR = "queue_clear"       # default: at-limit prints deplete the queue, then fill us
+REST_FILL_TRADE_THROUGH = "trade_through"   # only prints strictly through the limit fill us (conservative)
+REST_FILL_BASES = (REST_FILL_QUEUE_CLEAR, REST_FILL_TRADE_THROUGH)
+STOP_TRIGGER_TRADES = "trades"  # RK 17:24 BINDING: the only resident-stop trigger basis (first trade at/through)
+STOP_TRIGGER_BASES = (STOP_TRIGGER_TRADES,)
+LIQ_MODEL = "MARK_BFXCI_ISOLATED_V1"  # mark-price liquidation check on bfx_deriv_status_1s (UNVALIDATED)
+# The live exchange stop exactly as the relay executor submits it (apps/api/src/exchanges/bitfinex-api.client.ts
+# submitStopOrder -> POST v2/auth/w/order/submit). Bitfinex does not document the plain STOP trigger basis
+# (support 115003506125 / 115003291045): STOP_BASIS_UNVERIFIED on every resident-stop row.
+LIVE_EXCHANGE_STOP_PARAMS = {"type": "STOP", "symbol": "tBTCF0:USTF0", "flags": 1024, "flags_named": ["REDUCE_ONLY"],
+                             "price": "stop level (min(hard + 25 bp, liq - 15 bp) from the entry fill)",
+                             "amount": "-qty (LONG) / +qty (SHORT)", "lev": "bitfinexOrderLev(leverage)",
+                             "price_trigger": None, "price_aux_limit": None, "placed": "once at entry, never moved",
+                             "price_rounding": "normalizeBitfinexOrderPrice: truncate to 5 significant figures "
+                                               "(bitfinex-api.client.ts:526-532)",
+                             "anchor": "live exchange fill (subscriber-exit.ts:175-184)"}
 PARAM_SOURCE_CONFIG = "CONFIG"  # combo_pathway_config / regime_exec cell (same values the live executor reads)
 
 
@@ -74,10 +92,89 @@ def exchange_stop_level(direction: Any, entry_fill_px: Any, spec: Optional[Mappi
         return None
     bp = float(plan["exchange_stop_bp"])
     level = px * (1 - bp / 1e4) if d == "LONG" else px * (1 + bp / 1e4)
-    return {"exchange_stop_px": round(level, 8), "exchange_stop_bp": bp, "exchange_stop_anchor_px": px,
+    return {"exchange_stop_px": bfx_truncate_price(level), "exchange_stop_px_untruncated": round(level, 8),
+            "exchange_stop_bp": bp, "exchange_stop_anchor_px": px, "exchange_stop_anchor": "PAPER_ENTRY_FILL",
+            "exchange_stop_rounding": "TRUNC_5SF", "exchange_stop_liq_bp": plan.get("liquidation_bp"),
             "exchange_stop_hard_bp": plan.get("hard_stop_bp"), "exchange_stop_cap_applied": plan.get("cap_applied"),
             "exchange_stop_param_source": PARAM_SOURCE_LIVE_CODE, "exchange_stop_param_ref": LIVE_CODE_REF,
             "exchange_stop_never_moved": True}
+
+
+def bfx_truncate_price(price: Any) -> Optional[float]:
+    """Exactly the live client's normalizeBitfinexOrderPrice (bitfinex-api.client.ts:526-532): truncate toward zero
+    to 5 significant figures (quantum 10^(floor(log10 p) - 4)); at ~$100k the quantum is $10 (~1 bp)."""
+    import math
+    p = _f(price)
+    if p is None or p <= 0:
+        return None
+    q = 10.0 ** (math.floor(math.log10(p)) - 4)
+    n = math.trunc(p / q + 2.220446049250313e-16)  # Number.EPSILON, as in the TS
+    return n * q
+
+
+def anchor_drift(direction: Any, paper_anchor_px: Any, live_fill_px: Any) -> dict:
+    """RK 17:24: paper-vs-live stop-anchor drift per trade (paper anchors on the paper fill, live on the live fill).
+    bp is signed adverse-positive for the position: live filled worse than paper -> positive."""
+    pa, lv = _f(paper_anchor_px), _f(live_fill_px)
+    d = str(direction or "").upper()
+    if pa is None or lv is None or pa <= 0:
+        return {"stop_anchor_paper_px": pa, "stop_anchor_live_px": lv, "stop_anchor_drift_bp": None,
+                "stop_anchor_drift_status": "NO_LIVE_TWIN" if lv is None else "UNVERIFIED"}
+    bp = (lv - pa) / pa * 1e4 * (1 if d == "LONG" else -1)
+    return {"stop_anchor_paper_px": pa, "stop_anchor_live_px": lv, "stop_anchor_drift_bp": round(bp, 3),
+            "stop_anchor_drift_status": "MEASURED"}
+
+
+MAINTENANCE_MARGIN = 0.005  # Bitfinex derivatives maintenance margin 0.5% (support 360035475374)
+
+
+def liquidation_check(direction: Any, mark_at_open: Any, leverage: Any, *, marks: Optional[list],
+                      trades: Optional[list], stop_trigger_ts: Optional[float], stop_fill_px: Any) -> dict:
+    """HM M10 / tracker 17:30 mark-price liquidation model (isolated, UNVALIDATED).
+
+    Liquidation price = the REAL BFXCI mark at open (bfx_deriv_status_1s) moved adverse by (1/leverage - 0.5%
+    maintenance margin). Liquidation fires on the FIRST of the BFXCI mark OR a tBTCF0:USTF0 last trade reaching that
+    level (liq_trigger_source mark | trade). liq_unverified = True when liquidation fired before the exchange stop,
+    OR the stop fill slipped past the liquidation price, OR the mark data is missing."""
+    m0, lev = _f(mark_at_open), _f(leverage)
+    d = str(direction or "").upper()
+    out = {"liq_model": LIQ_MODEL, "liq_model_validated": False, "liq_mark_at_open": m0, "liq_bp": None,
+           "liq_px": None, "liq_trigger_ts": None, "liq_trigger_source": None, "liq_before_stop": None,
+           "liq_stop_slipped_past": None, "liq_mark_rows_n": None if marks is None else len(marks),
+           "liq_unverified": False, "liq_reason": None}
+    if m0 is None or m0 <= 0 or lev is None or lev <= 0 or d not in ("LONG", "SHORT"):
+        out.update(liq_unverified=True, liq_reason="NO_MARK_AT_OPEN")
+        return out
+    bp = (1.0 / lev - MAINTENANCE_MARGIN) * 1e4
+    lpx = m0 * (1 - bp / 1e4) if d == "LONG" else m0 * (1 + bp / 1e4)
+    out.update(liq_bp=round(bp, 4), liq_px=round(lpx, 8))
+
+    def reached(px):
+        return px is not None and (px <= lpx if d == "LONG" else px >= lpx)
+    ev = []
+    for m in marks or ():
+        if reached(_f(m.get("mark"))):
+            ev.append((float(m["s"]) + 1.0, "mark"))  # a 1 s mark row is known at the end of its second
+            break
+    for tr in trades or ():
+        if reached(_f(tr.get("px"))) and _f(tr.get("ts")) is not None:
+            ev.append((float(tr["ts"]), "trade"))
+            break
+    if ev:
+        ts, src = min(ev)
+        out.update(liq_trigger_ts=ts, liq_trigger_source=src)
+        st = _f(stop_trigger_ts)
+        out["liq_before_stop"] = bool(st is None or ts < st)
+    fp = _f(stop_fill_px)
+    if fp is not None:
+        out["liq_stop_slipped_past"] = bool(reached(fp))
+    if marks is None:
+        out.update(liq_unverified=True, liq_reason="NO_MARK_DATA")
+    if out["liq_before_stop"]:
+        out.update(liq_unverified=True, liq_reason="LIQ_BEFORE_STOP")
+    if out["liq_stop_slipped_past"]:
+        out.update(liq_unverified=True, liq_reason=out["liq_reason"] or "STOP_SLIPPED_PAST_LIQ")
+    return out
 
 
 def race(exchange_trigger_ts: Optional[float], bot_trigger_ts: Optional[float], bot_delay_s: float) -> Optional[str]:
@@ -93,6 +190,22 @@ def race(exchange_trigger_ts: Optional[float], bot_trigger_ts: Optional[float], 
     return EXCHANGE_RESIDENT if e <= b + max(0.0, float(bot_delay_s or 0)) else BOT_SENT
 
 
+def tile_options(spec: Optional[Mapping[str, Any]]) -> dict:
+    """The tile's realism options (registry spec ``realism_options``), validated, with defaults + per-row flags.
+
+    resident_stop_trigger_basis: trades (the only basis, RK 17:24 BINDING; anything else is ignored).
+    entry_rest_fill_basis: queue_clear (default) | trade_through. stop_basis_unverified is True and
+    stop_basis_verified False on every row (plain STOP basis undocumented for derivatives) unless the spec declares
+    it verified; funding_unverified is True unless the spec declares a verified funding source."""
+    o = (spec or {}).get("realism_options") or {}
+    rb = str(o.get("entry_rest_fill_basis") or REST_FILL_QUEUE_CLEAR).lower()
+    verified = bool(o.get("stop_basis_verified"))
+    return {"resident_stop_trigger_basis": STOP_TRIGGER_TRADES,
+            "entry_rest_fill_basis": rb if rb in REST_FILL_BASES else REST_FILL_QUEUE_CLEAR,
+            "time_exit_basis": "CLOCK", "stop_basis_unverified": not verified, "stop_basis_verified": verified,
+            "funding_unverified": not bool(o.get("funding_verified"))}
+
+
 # ------------------------------------------------------------------ entries
 def entry_model(spec: Optional[Mapping[str, Any]], decision: Optional[Mapping[str, Any]] = None,
                 exec_cell: Optional[Mapping[str, Any]] = None) -> dict:
@@ -104,11 +217,12 @@ def entry_model(spec: Optional[Mapping[str, Any]], decision: Optional[Mapping[st
     if "SELF_SIMULATED" in mode or "MARKET_AT_REAL_TOUCH" in mode:
         return {"entry_order_model": ENTRY_IOC_MARKET, "entry_param_source": PARAM_SOURCE_CONFIG}
     kind = str((exec_cell or {}).get("kind") or (decision or {}).get("exec_kind") or "").upper()
+    rest_basis = tile_options(spec)["entry_rest_fill_basis"]
     if exec_cell and kind and kind != "TAKER":
-        return {"entry_order_model": ENTRY_MAKER_REST, "entry_rest_ttl_s": _f(exec_cell.get("ttl_sec")),
+        return {"entry_order_model": ENTRY_MAKER_REST, "entry_rest_fill_basis": rest_basis, "entry_rest_ttl_s": _f(exec_cell.get("ttl_sec")),
                 "entry_reprice_s": _f(exec_cell.get("reprice_sec")), "entry_queue_reset_on_reprice": True,
                 "entry_exec_kind": kind, "entry_param_source": PARAM_SOURCE_CONFIG}
-    return {"entry_order_model": ENTRY_WALK_THEN_REST,
+    return {"entry_order_model": ENTRY_WALK_THEN_REST, "entry_rest_fill_basis": rest_basis,
             "entry_protection_bp": prot if prot is not None else DEFAULT_PROTECTION_BP,
             "entry_rest_ttl_s": ttl if ttl is not None else DEFAULT_TAKER_TTL_S,
             "entry_param_source": PARAM_SOURCE_CONFIG if (prot is not None and ttl is not None) else "DEFAULT"}
@@ -132,10 +246,11 @@ def queue_ahead_at(direction: Any, limit_px: Any, book: Optional[Mapping[str, An
 
 
 def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead: float,
-                    trades: Iterable[Mapping[str, Any]]) -> dict:
+                    trades: Iterable[Mapping[str, Any]], fill_basis: str = REST_FILL_QUEUE_CLEAR) -> dict:
     """Advance a resting entry limit over trade prints (oldest first). A print THROUGH the limit (sell below a buy
-    limit / buy above a sell limit) fills us (trade-through); a print AT the limit on the aggressor side first
-    depletes the queue ahead, then fills us. Partials allowed. Returns fills [(ts, px, qty)], remaining, queue_ahead."""
+    limit / buy above a sell limit) fills us (trade-through); with ``fill_basis`` queue_clear (default) a print AT the
+    limit on the aggressor side first depletes the queue ahead, then fills us; with trade_through (per-tile option)
+    at-limit prints never fill us. Partials allowed. Returns fills [(ts, px, qty)], remaining, queue_ahead."""
     d, lp = _dir(direction), _f(limit_px)
     rem = max(0.0, float(remaining or 0))
     q = max(0.0, float(queue_ahead or 0))
@@ -155,7 +270,7 @@ def maker_rest_step(direction: Any, limit_px: Any, remaining: float, queue_ahead
             take = rem if not size else min(rem, size)
             fills.append((ts, lp, take))
             rem -= take
-        elif at and hits_us and size > 0:
+        elif at and hits_us and size > 0 and fill_basis != REST_FILL_TRADE_THROUGH:
             if q >= size:
                 q -= size
                 continue

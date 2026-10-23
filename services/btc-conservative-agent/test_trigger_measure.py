@@ -71,7 +71,11 @@ def test_live_vs_paper_pair_carries_paper_trigger_fields():
 
 def test_bot_wiring_present():
     src = open(os.path.join(os.path.dirname(__file__), "bot.py"), encoding="utf-8").read()
-    assert 'pos["exit_trigger_bbo_ts"] = state.get("bbo_ts")' in src
+    # RK: the trigger age is stamped from the order-book row (complete at s + 1), never the ticker bbo_ts
+    assert 'pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None' in src
+    assert 'state.get("bbo_ts")' not in _bot_function(src, "_stamp_trigger_basis")
+    assert "_stamp_trigger_book_age(pos, book)" in _bot_function(src, "_stamp_trigger_basis")
+    assert "state" not in _bot_function(src, "_stamp_trigger_book_age").split('"""')[-1]
     assert '"exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts"))' in src
     assert src.count("**_twin_trigger_fields(row)") == 2
     # #809: the decision recorder stamps only the cheap quote (no book read) from values read under state_lock
@@ -213,26 +217,61 @@ def test_trigger_measure_used_only_by_measurement_sites():
     assert "trigger_measure" not in pf and "entry_quote" not in pf and "trigger_vs_book" not in pf
 
 
+# HM C6: the ONLY top-level names of paper_fill.py the realism-v2 stack may change vs master (explicit allowlist; no
+# keyword guard). Anything else that differs fails - #809's measurement work leaves the pricer untouched.
+PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
+    # REALISM_V2 PR2: exchange-resident stop leg (delay 0) + forced first-row leg (RK 17:18 (2)/(4))
+    "RESIDENT_LEG", "FORCED_LEG", "FIRST_ROW_LEGS", "FIRST_ROW_HORIZON_S", "ROW_RULE_FIRST_AFTER", "ROW_RULE_LATEST",
+    "first_row_at_or_after", "_paper_fill_core", "paper_fill",
+    # HM C7: depth-short resident walk -> UNVERIFIED
+    "DEPTH_SHORT_PARTIAL",
+    # F1 delay pool (live acks, three legs, default until n10, MAX until n20, then q0.90)
+    "DelaySampler", "DELAY_LEGS", "PRICED_DELAY_LEGS", "MIN_POOL_N", "QUANTILE_SWITCH_N", "POOL_SCHEMA",
+    "UNVERIFIED_DELAY", "delay_stamp", "quantile_method_of", "quantile_nearest_rank",
+    # tile-fill site registry (DISLOC row left as is)
+    "TILE_FILL_SITES",
+    # #845 base (feat/r17-dynamic-exclusion): r17_exclusion fail-closed gate in the fresh-eligibility check
+    "row_fresh_eligible",
+})
+
+
+def _top_level_defs(src: str) -> dict:
+    import ast
+    out = {}
+    for n in ast.parse(src).body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[n.name] = ast.dump(n)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for tg in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if isinstance(tg, ast.Name):
+                    out[tg.id] = ast.dump(n)
+        else:
+            out["<module>"] = out.get("<module>", "") + ast.dump(n)
+    return out
+
+
 def test_paper_fill_unchanged_vs_master():
     try:
-        out = subprocess.run(["git", "diff", "--quiet", "origin/master", "--", "paper_fill.py"], cwd=HERE,
-                             capture_output=True, timeout=30)
+        out = subprocess.run(["git", "show", "origin/master:./paper_fill.py"], cwd=HERE, capture_output=True,
+                             text=True, timeout=30)
     except Exception:  # noqa: BLE001
         pytest.skip("git unavailable")
-    if out.returncode not in (0, 1):
+    if out.returncode != 0 or not out.stdout:
         pytest.skip("origin/master not available in this checkout")
-    if out.returncode == 0:
-        return
-    # REALISM_V2 PR2 edits paper_fill.py only for the exchange-resident (delay-0) stop leg: every changed hunk must
-    # be that change, so #809's measurement work still leaves the pricer untouched.
-    diff = subprocess.run(["git", "diff", "-U0", "origin/master", "--", "paper_fill.py"], cwd=HERE,
-                          capture_output=True, text=True, timeout=30).stdout
-    hunks = [h for h in diff.split("\n@@")[1:]]
-    assert hunks, "paper_fill.py differs from master but no hunks were parsed"
-    for h in hunks:
-        changed = [ln for ln in h.splitlines()[1:] if ln[:1] in "+-" and ln[1:].strip()]
-        assert any(k in h for k in ("REALISM_V2", "resident", "RESIDENT")), f"paper_fill.py hunk not REALISM_V2: {h[:400]}"
-        assert changed
+    with open(os.path.join(HERE, "paper_fill.py")) as fh:
+        mine = _top_level_defs(fh.read())
+    master = _top_level_defs(out.stdout)
+    changed = {k for k in set(mine) | set(master) if mine.get(k) != master.get(k)}
+    assert not (changed - PAPER_FILL_CHANGE_ALLOWLIST), (
+        f"paper_fill.py names changed outside the allowlist: {sorted(changed - PAPER_FILL_CHANGE_ALLOWLIST)}")
+
+
+def test_paper_fill_allowlist_guard_rejects_unlisted_change():
+    src = "def paper_fill():\n    return 1\n\ndef leg_slippage():\n    return 1\n"
+    a, b = _top_level_defs(src), _top_level_defs(src.replace("return 1\n\ndef leg", "return 1\n\ndef leg").replace(
+        "def leg_slippage():\n    return 1", "def leg_slippage():\n    return 2"))
+    changed = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+    assert changed == {"leg_slippage"} and changed - PAPER_FILL_CHANGE_ALLOWLIST
 
 
 def _book_at(t):
