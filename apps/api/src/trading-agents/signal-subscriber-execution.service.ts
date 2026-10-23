@@ -3776,8 +3776,12 @@ type PositionIdStampContext = {
   cycleId: string;
   participantId: string;
   entryOrderId?: number | null;
-  stopOrderId?: number | null;
   fillPath: string;
+  /**
+   * HM N1: when the fill was observed (cancel-race funnel entry). Absent =>
+   * the stop-submit start time, which is always after the fill was observed.
+   */
+  fillObservedAtMs?: number;
 };
 
 /** Participant-less SignalCycleEvent type carrying one executor decision. */
@@ -11784,6 +11788,7 @@ await this.notifications
           participantId,
           entryOrderId: meta.bitfinexOrderId,
           fillPath: `CANCEL_RACE_FILL/${cancelContext}`,
+          fillObservedAtMs: fillDetectedAtMs,
         });
     const stopOrderId = verifiedStop.ok ? verifiedStop.orderId : null;
     const stopExchangeAckAtMs: number | null = verifiedStop.ok
@@ -16547,6 +16552,8 @@ await this.notifications
     | { ok: false; orderId?: number; reason: string; submitAckAtMs?: number }
   > {
     let orderId: number;
+    // Local clock read only (no I/O): the create-time tie's fallback bound.
+    const stopSubmitStartedAtMs = Date.now();
     try {
       orderId = await this.activeTrading.submitStopOrder(creds, input);
     } catch (err) {
@@ -16564,7 +16571,10 @@ await this.notifications
       // Off the stop's critical path: the stop is already live.
       // Delayed so its two reads never sit on the nonce lane ahead of the
       // stop confirmation / an early exit.
-      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input, positionIdStamp).catch((err) => { stopDedupeStats.errors += 1; this.logger?.error(`[STOP-DEDUPE] failed keep=${orderId}: ${err instanceof Error ? err.message : err}`); }); }, 3_000);
+      const stampCtx = positionIdStamp
+        ? { ...positionIdStamp, fillObservedAtMs: positionIdStamp.fillObservedAtMs ?? stopSubmitStartedAtMs }
+        : undefined;
+      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input, stampCtx).catch((err) => { stopDedupeStats.errors += 1; this.logger?.error(`[STOP-DEDUPE] failed keep=${orderId}: ${err instanceof Error ? err.message : err}`); }); }, 3_000);
       (t as { unref?: () => void }).unref?.();
     }
     return { ...authenticated, submitAckAtMs };
@@ -16589,7 +16599,7 @@ await this.notifications
         // Same read the sweep already performs (no extra request, no new
         // endpoint). Not awaited: the stamp never delays the sweep, and the
         // stop was placed + authenticated >=3 s before this read began.
-        void this.stampBitfinexPositionId(positionIdStamp, input, readStartedAtMs, positionRead);
+        void this.stampBitfinexPositionId(positionIdStamp, keepId, input, readStartedAtMs, positionRead);
       }
       const [active, position] = await Promise.all([
         client.listActiveOrders(creds),
@@ -16616,6 +16626,7 @@ await this.notifications
    */
   private async stampBitfinexPositionId(
     ctx: PositionIdStampContext,
+    stopOrderId: number,
     input: { positionDirection: 'LONG' | 'SHORT'; qty: number },
     readStartedAtMs: number,
     positionRead: Promise<BitfinexPositionDetail | null | { amount: number }>,
@@ -16632,6 +16643,8 @@ await this.notifications
         expected: { direction: input.positionDirection, qty: input.qty },
         readStartedAtMs,
         readAtMs: Date.now(),
+        // Direct callers without a fill time fail closed (CREATE_TIME_MISMATCH).
+        fillObservedAtMs: ctx.fillObservedAtMs ?? Number.NaN,
       });
       await this.cycles.recordHireExecutionEvent(
         ctx.userId,
@@ -16641,7 +16654,8 @@ await this.notifications
         {
           ...stamp,
           participant_id: ctx.participantId,
-          stop_order_id: ctx.stopOrderId ?? undefined,
+          // HM N2: the authenticated protective stop this sweep keeps.
+          stop_order_id: stopOrderId,
           bitfinex_order_id: ctx.entryOrderId ?? undefined,
           fill_path: ctx.fillPath,
         },

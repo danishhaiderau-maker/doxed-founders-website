@@ -4,11 +4,13 @@ import {
   BITFINEX_BTC_PERP_SYMBOL,
   BITFINEX_REDUCE_ONLY_FLAG,
   BitfinexMultiplePositionsError,
+  parseBitfinexPositionCreatedAtMs,
   parseBitfinexPositionId,
   parseOpenPositionPayload,
 } from '../exchanges/bitfinex-api.client';
 import {
   BITFINEX_POSITION_ID_STAMP_EVENT,
+  BITFINEX_POSITION_CREATE_TIME_TOLERANCE_MS,
   BITFINEX_POSITION_ID_STAMP_SCHEMA,
   latestBitfinexPositionIdStamp,
   resolveBitfinexPositionIdStamp,
@@ -22,11 +24,13 @@ const PID = 160_123_456;
 const READ_START = 1_760_000_003_000;
 const READ_AT = 1_760_000_003_120;
 // Bitfinex v2 auth/r/positions row: [SYMBOL, STATUS, AMOUNT, BASE_PRICE, FUNDING,
-// FUNDING_TYPE, PL, PL_PERC, PRICE_LIQ, LEVERAGE, FLAG, POSITION_ID, ...]
-const row = (amount: number, pid: unknown = PID, symbol = BITFINEX_BTC_PERP_SYMBOL) =>
-  [symbol, 'ACTIVE', amount, 65_000, 0, 0, 0.1, 0.01, 50_000, 100, null, pid];
-const resolve = (outcome: Parameters<typeof resolveBitfinexPositionIdStamp>[0]['outcome'], qty = 0.0004, direction: 'LONG' | 'SHORT' = 'LONG') =>
-  resolveBitfinexPositionIdStamp({ outcome, expected: { direction, qty }, readStartedAtMs: READ_START, readAtMs: READ_AT });
+// FUNDING_TYPE, PL, PL_PERC, PRICE_LIQ, LEVERAGE, FLAG, POSITION_ID, MTS_CREATE, MTS_UPDATE, ...]
+const FILL_OBS = READ_START - 3_000;
+const CREATED = FILL_OBS - 200;
+const row = (amount: number, pid: unknown = PID, symbol = BITFINEX_BTC_PERP_SYMBOL, created: unknown = CREATED) =>
+  [symbol, 'ACTIVE', amount, 65_000, 0, 0, 0.1, 0.01, 50_000, 100, null, pid, created, CREATED + 50];
+const resolve = (outcome: Parameters<typeof resolveBitfinexPositionIdStamp>[0]['outcome'], qty = 0.0004, direction: 'LONG' | 'SHORT' = 'LONG', fillObservedAtMs = FILL_OBS) =>
+  resolveBitfinexPositionIdStamp({ outcome, expected: { direction, qty }, readStartedAtMs: READ_START, readAtMs: READ_AT, fillObservedAtMs });
 
 // ---------- parser: POSITION_ID is row[11] exactly as returned ----------
 
@@ -39,6 +43,15 @@ test('positions parser exposes the real POSITION_ID (row[11]) and never invents 
     assert.equal(parseBitfinexPositionId(bad), null, String(bad));
   }
   assert.equal(parseBitfinexPositionId(PID), PID);
+});
+
+test('positions parser exposes row[12] MTS_CREATE as createdAtMs and never invents one', () => {
+  assert.equal(parseOpenPositionPayload([row(0.0004)])?.createdAtMs, CREATED);
+  assert.equal(parseOpenPositionPayload([row(0.0004, PID, BITFINEX_BTC_PERP_SYMBOL, null)])?.createdAtMs, undefined);
+  assert.equal(parseOpenPositionPayload([row(0.0004).slice(0, 12)])?.createdAtMs, undefined);
+  for (const bad of [0, -1, 1.5, Number.NaN, String(CREATED), null, undefined, 2 ** 60]) {
+    assert.equal(parseBitfinexPositionCreatedAtMs(bad), null, String(bad));
+  }
 });
 
 test('positions parser throws a typed multi-position error instead of picking a row', () => {
@@ -59,6 +72,35 @@ test('success: exact single matching position stamps the real pid with its read 
   assert.equal(s.read_source, 'POST_STOP_POSITIONS_READBACK');
   assert.equal(s.position_side, 'LONG');
   assert.equal(s.schema, BITFINEX_POSITION_ID_STAMP_SCHEMA);
+  assert.equal(s.position_created_at, new Date(CREATED).toISOString());
+  assert.equal(s.fill_observed_at, new Date(FILL_OBS).toISOString());
+});
+
+test('HM N1 create-time tie: a position created after the observed fill (+1 s) is CREATE_TIME_MISMATCH', () => {
+  const at = (created: unknown) => resolve({ ok: true, position: parseOpenPositionPayload([row(0.0004, PID, BITFINEX_BTC_PERP_SYMBOL, created)]) });
+  assert.equal(BITFINEX_POSITION_CREATE_TIME_TOLERANCE_MS, 1_000);
+  assert.equal(at(FILL_OBS + 1_000).status, 'STAMPED');                      // inclusive skew tolerance
+  assert.equal(at(FILL_OBS - 86_400_000).status, 'STAMPED');                 // long-held position, same fill
+  const sliced = parseOpenPositionPayload([row(0.0004).slice(0, 12)]);        // row without [12]
+  assert.equal(resolve({ ok: true, position: sliced }).status, 'CREATE_TIME_ABSENT');
+  for (const late of [FILL_OBS + 1_001, READ_START, READ_AT + 5_000]) {
+    const s = at(late);
+    assert.equal(s.status, 'CREATE_TIME_MISMATCH', String(late));
+    assert.equal(s.bitfinex_position_id, null);
+    assert.equal(s.position_created_at, new Date(late).toISOString());
+  }
+  for (const missing of [null, '1760000000000', 0, -5, 1.5]) {
+    const s = at(missing);
+    assert.equal(s.status, 'CREATE_TIME_ABSENT', String(missing));
+    assert.equal(s.bitfinex_position_id, null);
+    assert.equal(s.position_created_at, null);
+  }
+  // No fill time => no tie => no pid (fail closed).
+  const noFill = resolve({ ok: true, position: parseOpenPositionPayload([row(0.0004)]) }, 0.0004, 'LONG', Number.NaN);
+  assert.equal(noFill.status, 'CREATE_TIME_MISMATCH');
+  assert.equal(noFill.bitfinex_position_id, null);
+  // Earlier guards still win: a pid-less row stays POSITION_ID_ABSENT.
+  assert.equal(resolve({ ok: true, position: parseOpenPositionPayload([row(0.0004, null, BITFINEX_BTC_PERP_SYMBOL, READ_AT)]) }).status, 'POSITION_ID_ABSENT');
 });
 
 test('read failure: pid null, status READ_FAILED, never throws', () => {
@@ -137,7 +179,7 @@ function stopHarness(position: () => Promise<unknown>, recordFails = false) {
       recorded.push({ type, payload });
     },
   };
-  const ctx = { userId: 'u1', agentId: 'a1', cycleId: 'c1', participantId: 'p1', entryOrderId: 111, stopOrderId: 7_100, fillPath: 'MONITOR_ENTRY_FILL' };
+  const ctx: Record<string, unknown> = { userId: 'u1', agentId: 'a1', cycleId: 'c1', participantId: 'p1', entryOrderId: 111, fillPath: 'MONITOR_ENTRY_FILL' };
   const input = { positionDirection: 'LONG' as const, qty: 0.0004, stopPrice: 64_000, leverage: 100 };
   return { service, calls, recorded, ctx, input };
 }
@@ -167,9 +209,42 @@ test('stop ordering: the stop is submitted + authenticated and returned before a
     assert.equal(h.recorded[0].payload.status, 'STAMPED');
     assert.equal(h.recorded[0].payload.participant_id, 'p1');
     assert.equal(typeof h.recorded[0].payload.position_id_read_at, 'string');
+    // HM N2: stop_order_id is POPULATED with the authenticated stop the sweep keeps.
+    assert.equal(h.recorded[0].payload.stop_order_id, 7_100);
+    assert.equal(h.recorded[0].payload.bitfinex_order_id, 111);
+    // HM N1: fill time defaults to the stop-submit start (a local clock read, no I/O).
+    const obs = Date.parse(String(h.recorded[0].payload.fill_observed_at));
+    assert.ok(obs <= Date.parse(String(h.recorded[0].payload.position_id_read_started_at)));
   } finally {
     mock.timers.reset();
   }
+});
+
+test('HM N1/N2 via the executor: an explicit fill time is honoured; a post-fill position is CREATE_TIME_MISMATCH', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const late = Date.now() + 60_000;
+    const h = stopHarness(async () => parseOpenPositionPayload([row(0.0004, PID, BITFINEX_BTC_PERP_SYMBOL, late)]));
+    h.ctx.fillObservedAtMs = late - 5_000;
+    const result = await h.service.submitVerifiedProtectiveStop({}, h.input, h.ctx);
+    assert.equal(result.ok, true);
+    assert.deepEqual(h.calls.map((c) => c.name), ['stop-submit', 'stop-auth']);
+    mock.timers.tick(3_000);
+    await flush();
+    assert.equal(h.calls.filter((c) => c.name === 'positions-read').length, 1, 'zero added Bitfinex reads');
+    assert.equal(h.recorded[0].payload.status, 'CREATE_TIME_MISMATCH');
+    assert.equal(h.recorded[0].payload.bitfinex_position_id, null);
+    assert.equal(h.recorded[0].payload.fill_observed_at, new Date(late - 5_000).toISOString());
+    assert.equal(h.recorded[0].payload.stop_order_id, 7_100);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('cancel-race path passes its funnel-entry fill time to the stamp', () => {
+  const source = String((SignalSubscriberExecutionService.prototype as any).recordCancelRaceFillOwned);
+  assert.match(source, /fillPath:\s*`CANCEL_RACE_FILL\/\$\{cancelContext\}`,\s*fillObservedAtMs:\s*fillDetectedAtMs\b/);
+  assert.match(source, /const fillDetectedAtMs\s*=\s*Date\.now\(\)/);
 });
 
 test('stop ordering: a hanging positions read never delays the stop result', async () => {
@@ -188,12 +263,14 @@ test('stop ordering: a hanging positions read never delays the stop result', asy
 
 test('read failure and stamp-write failure never throw into the stop/sweep path', async () => {
   const failing = stopHarness(async () => { throw new Error('positions 500'); });
+  failing.ctx.fillObservedAtMs = FILL_OBS;
   await assert.doesNotReject(failing.service.cancelDuplicateProtectiveStops({}, 7_100, failing.input, failing.ctx));
   await flush();
   assert.equal(failing.recorded[0].payload.status, 'READ_FAILED');
   assert.equal(failing.recorded[0].payload.bitfinex_position_id, null);
 
   const multi = stopHarness(async () => parseOpenPositionPayload([row(0.0004, 1), row(0.0004, 2)]));
+  multi.ctx.fillObservedAtMs = FILL_OBS;
   await assert.doesNotReject(multi.service.cancelDuplicateProtectiveStops({}, 7_100, multi.input, multi.ctx));
   await flush();
   assert.equal(multi.recorded[0].payload.status, 'MULTI_POSITION');
@@ -224,26 +301,20 @@ test('fill promotion paths pass a stamp context to the verified stop (no read be
 
 // ---------- the field reaches the executor report (#849 contract) ----------
 
-/** TS port of #849 live_copy_monitor_api._report_pid_side (branch realism-v2/f5-funding-settlement). */
+/**
+ * TS port of #849 live_copy_monitor_api._report_pid_side (realism-v2/f5-funding-settlement @ 9c22ca9c6):
+ * reads ONLY report.position, and only when status === 'STAMPED' and source === 'POST_STOP_POSITIONS_READBACK'.
+ */
 function reportPidSide(report: Record<string, unknown>): { pid: string | null; side: string | null } {
-  const keys = ['bitfinex_position_id', 'position_id'];
-  const blocks: Array<Record<string, unknown>> = [report];
-  for (const k of ['fill', 'close', 'exit', 'order', 'position']) {
-    const b = report[k];
-    if (b && typeof b === 'object' && !Array.isArray(b)) blocks.push(b as Record<string, unknown>);
-  }
-  let pid: string | null = null;
-  let side: string | null = null;
-  for (const b of blocks) {
-    for (const k of keys) {
-      if (pid == null && b[k] != null && b[k] !== '') pid = String(b[k]);
-    }
-    for (const k of ['position_side', 'side']) {
-      const v = String(b[k] ?? '').toUpperCase();
-      if (side == null && (v === 'LONG' || v === 'SHORT')) side = v;
-    }
-  }
-  return { pid, side };
+  const pos = report.position as Record<string, unknown> | undefined;
+  if (!pos || typeof pos !== 'object' || Array.isArray(pos)) return { pid: null, side: null };
+  if (pos.status !== 'STAMPED' || pos.source !== 'POST_STOP_POSITIONS_READBACK') return { pid: null, side: null };
+  const v = pos.bitfinex_position_id;
+  const pid = typeof v === 'number' && Number.isInteger(v) && v > 0 ? String(v)
+    : typeof v === 'string' && /^\d+$/.test(v) && Number(v) > 0 ? v : null;
+  if (pid == null) return { pid: null, side: null };
+  const s = String(pos.position_side ?? '').toUpperCase();
+  return { pid, side: s === 'LONG' || s === 'SHORT' ? s : null };
 }
 
 const T0 = 1_760_000_000_000;
@@ -273,6 +344,7 @@ test('bitfinex_position_id reaches the POSITION_CLOSED and ORDER_FILLED reports 
     assert.equal(rep.position.position_side, 'LONG');
     assert.equal(rep.position.read_at_ts, READ_AT / 1000);
     assert.equal(rep.position.status, 'STAMPED');
+    assert.equal(rep.position.source, 'POST_STOP_POSITIONS_READBACK');
     assert.deepEqual(reportPidSide(rep), { pid: String(PID), side: 'LONG' });
     // Survives the JSON the signed report is sent as.
     assert.deepEqual(reportPidSide(JSON.parse(JSON.stringify(rep))), { pid: String(PID), side: 'LONG' });
@@ -286,6 +358,11 @@ test('null-pid stamps and unstamped trades never leak a pid into the report', ()
   assert.equal(close1.position.bitfinex_position_id, null);
   assert.equal(close1.position.status, 'READ_FAILED');
   assert.equal(reportPidSide(close1).pid, null);
+  for (const st of ['MULTI_POSITION', 'CREATE_TIME_MISMATCH', 'AMOUNT_MISMATCH']) {
+    const blk = liveCopyPositionBlock({ ...resolve({ ok: true, position: parseOpenPositionPayload([row(0.0004)]) }), status: st as never });
+    assert.equal(blk?.bitfinex_position_id, null, st);
+    assert.equal(reportPidSide({ position: blk } as never).pid, null, st);
+  }
   const r2 = reports([...baseEvents, exitEvent]);
   const close2 = r2.find((x) => x.type === 'POSITION_CLOSED') as unknown as Record<string, any>;
   assert.equal('position' in close2, false);

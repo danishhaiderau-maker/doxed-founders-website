@@ -76,6 +76,12 @@ export type BitfinexPositionDetail = {
    * client and older callers may omit it.
    */
   positionId?: number | null;
+  /**
+   * MTS_CREATE (row[12]) — the position's creation time in epoch ms exactly
+   * as Bitfinex returned it in the SAME read-back, or absent when the row has
+   * no positive safe-integer value. Additive, never inferred.
+   */
+  createdAtMs?: number | null;
 };
 
 /**
@@ -695,6 +701,7 @@ export function parseOpenPositionPayload(
       throw new Error(`Bitfinex ${symbol} position amount or base price is invalid`);
     }
     const positionId = parseBitfinexPositionId(row[11]);
+    const createdAtMs = parseBitfinexPositionCreatedAtMs(row[12]);
     matched = {
       symbol,
       amount,
@@ -704,9 +711,15 @@ export function parseOpenPositionPayload(
       direction: amount > 0 ? 'LONG' : 'SHORT',
       // Additive: present only when Bitfinex returned a real POSITION_ID.
       ...(positionId != null ? { positionId } : {}),
+      ...(createdAtMs != null ? { createdAtMs } : {}),
     };
   }
   return matched;
+}
+
+/** row[12] MTS_CREATE: a positive safe-integer epoch-ms, else null (never inferred). */
+export function parseBitfinexPositionCreatedAtMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 export class BitfinexTradingClient {

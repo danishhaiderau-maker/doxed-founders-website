@@ -24,7 +24,17 @@ export type BitfinexPositionIdStampStatus =
   | 'SYMBOL_MISMATCH'
   | 'SIDE_MISMATCH'
   | 'AMOUNT_MISMATCH'
-  | 'POSITION_ID_ABSENT';
+  | 'POSITION_ID_ABSENT'
+  /** row[12] MTS_CREATE is later than the fill we are protecting (+ tolerance): a different position. */
+  | 'CREATE_TIME_MISMATCH'
+  /** row[12] MTS_CREATE missing / not a positive integer: the create-time tie cannot be proven. */
+  | 'CREATE_TIME_ABSENT';
+
+/**
+ * HM N1: the read-back position must already exist when we observed the fill.
+ * Tolerance absorbs Bitfinex-server vs. local clock skew only.
+ */
+export const BITFINEX_POSITION_CREATE_TIME_TOLERANCE_MS = 1_000;
 
 export type BitfinexPositionReadOutcome =
   | { ok: true; position: BitfinexPositionDetail | null }
@@ -53,6 +63,10 @@ export type BitfinexPositionIdStampPayload = {
   expected_qty: number;
   position_side: 'LONG' | 'SHORT' | null;
   position_amount: number | null;
+  /** row[12] MTS_CREATE of the read-back row (ISO), or null when absent. */
+  position_created_at: string | null;
+  /** Local time the fill was observed; the create-time tie's upper bound (+ tolerance). */
+  fill_observed_at: string;
   error?: string;
 };
 
@@ -71,6 +85,8 @@ export function resolveBitfinexPositionIdStamp(input: {
   expected: BitfinexPositionIdStampExpectation;
   readStartedAtMs: number;
   readAtMs: number;
+  /** When the executor observed the fill (before the stop was submitted). Required: no tie, no pid. */
+  fillObservedAtMs: number;
 }): BitfinexPositionIdStampPayload {
   const symbol = input.expected.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
   const base = {
@@ -83,6 +99,13 @@ export function resolveBitfinexPositionIdStamp(input: {
     symbol,
     expected_side: input.expected.direction,
     expected_qty: input.expected.qty,
+    fill_observed_at: Number.isFinite(input.fillObservedAtMs)
+      ? new Date(input.fillObservedAtMs).toISOString()
+      : 'INVALID',
+  };
+  const createdAtIso = (position: BitfinexPositionDetail | null): string | null => {
+    const c = position?.createdAtMs;
+    return typeof c === 'number' && Number.isSafeInteger(c) && c > 0 ? new Date(c).toISOString() : null;
   };
   const nullStamp = (
     status: Exclude<BitfinexPositionIdStampStatus, 'STAMPED'>,
@@ -94,6 +117,7 @@ export function resolveBitfinexPositionIdStamp(input: {
     bitfinex_position_id: null,
     position_side: position?.direction ?? null,
     position_amount: position?.amount ?? null,
+    position_created_at: createdAtIso(position),
     ...(error ? { error } : {}),
   });
 
@@ -120,12 +144,24 @@ export function resolveBitfinexPositionIdStamp(input: {
     if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) {
       return nullStamp('POSITION_ID_ABSENT', position);
     }
+    // HM N1: tie the id to THIS fill by row[12] MTS_CREATE from the same row.
+    const createdAtMs = position.createdAtMs;
+    if (typeof createdAtMs !== 'number' || !Number.isSafeInteger(createdAtMs) || createdAtMs <= 0) {
+      return nullStamp('CREATE_TIME_ABSENT', position);
+    }
+    if (
+      !Number.isFinite(input.fillObservedAtMs)
+      || createdAtMs > input.fillObservedAtMs + BITFINEX_POSITION_CREATE_TIME_TOLERANCE_MS
+    ) {
+      return nullStamp('CREATE_TIME_MISMATCH', position);
+    }
     return {
       ...base,
       status: 'STAMPED',
       bitfinex_position_id: pid,
       position_side: side,
       position_amount: amount,
+      position_created_at: createdAtIso(position),
     };
   } catch (err) {
     return nullStamp('READ_FAILED', null, errorMessage(err));
