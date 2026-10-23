@@ -25,12 +25,6 @@ ENTRY_TYPES = ("ORDER_SENT", "ORDER_PLACED", "ORDER_AMENDED", "ORDER_CANCELLED",
                "ORDER_FILLED", "ORDER_REJECTED", "INTENT_REJECTED")
 
 
-
-def _ctx_paper_lock(ctx: Mapping[str, Any]) -> bool:
-    """Live-copy paper lock from the context (HM E6): new name, then alias; fail closed."""
-    from bitfinex_live_switch import resolve_live_copy_paper_lock
-    return resolve_live_copy_paper_lock(ctx)[0]
-
 def wire(provider: Callable[[], dict], authorize: Callable[[], bool] | None = None) -> None:
     _CTX["provider"] = provider
     _CTX["authorize"] = authorize
@@ -94,7 +88,7 @@ def _summary(ctx: dict, analysis: dict, now: float) -> dict:
         cap_ts = 0.0
     last_report = max(last_report or 0.0, cap_ts) or None
     out = lcm.summary(
-        output=ctx.get("output") or {}, force_paper_mode=_ctx_paper_lock(ctx),
+        output=ctx.get("output") or {}, force_paper_mode=bool(ctx.get("force_paper_mode")),
         relay_stack_mode=str(ctx.get("relay_stack_mode") or ""), switch_rows=ctx.get("switch_rows") or [],
         gaps=analysis["gaps"], lags=analysis["lags"], executor_last_report_ts=last_report,
         website=ctx.get("website") or {}, rejects_1h=rejects, unsigned_rejects_1h=unsigned, now=now,
@@ -168,10 +162,9 @@ def live_summary():  # R19
     # name, so the two "disagreed". Report the /api/status source under the
     # shared name and the live-copy lock under its own name.
     if isinstance(payload, dict):
-        payload["live_copy_paper_lock"] = _ctx_paper_lock(ctx)
+        payload["live_copy_paper_lock"] = bool(ctx.get("force_paper_mode"))
         payload["force_paper_mode"] = bool(ctx.get("fly_direct_force_paper_mode"))
         payload["force_paper_mode_source"] = "_force_paper_mode_active (same as /api/status)"
-        payload.pop("deprecated_alias_of", None)  # force_paper_mode is the Fly flag here, not an alias
         payload["executor_freshness"] = executor_freshness(ctx, now)
         extra = extra_alerts(ctx, now)
         if extra:
@@ -219,10 +212,7 @@ def live_arming():  # R1
     rows = ctx.get("switch_rows") or []
     web = ctx.get("website") or {}
     return _ok({
-        "route": "R1", "live_copy_paper_lock": _ctx_paper_lock(ctx),
-        "force_paper_mode": _ctx_paper_lock(ctx),
-        "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
-        "fly_direct_force_paper_mode": ctx.get("fly_direct_force_paper_mode"),
+        "route": "R1", "force_paper_mode": ctx.get("force_paper_mode"),
         "live_copy_output_on": bool(out.get("enabled")), "live_copy_output": out,
         "fly_master_retired": True, "relay_stack_mode": ctx.get("relay_stack_mode"),
         "website_armed_accounts": web.get("armed_accounts"), "website_reachable": web.get("reachable"),
@@ -230,8 +220,7 @@ def live_arming():  # R1
                                           "relay_eligible", "eligible", "denials", "last_denial",
                                           "last_denied_at")} for r in rows],
         "kill_switches": [
-            {"name": "FORCE_PAPER_MODE", "state": "ON" if _ctx_paper_lock(ctx) else "OFF",
-             "alias_of": "live_copy_paper_lock"},
+            {"name": "FORCE_PAPER_MODE", "state": "ON" if ctx.get("force_paper_mode") else "OFF"},
             {"name": "LIVE_COPY_OUTPUT", "state": "ON" if out.get("enabled") else "OFF",
              "last_change_ts": out.get("last_change_ts"), "by": out.get("last_change_by"),
              "reason": out.get("last_reason")},
@@ -240,7 +229,7 @@ def live_arming():  # R1
         "audit_tail": out.get("history"),
         "trade_decisions": ctx.get("decisions"),
         "arming": lcl.effective_arming(
-            output=out, force_paper_mode=_ctx_paper_lock(ctx),
+            output=out, force_paper_mode=bool(ctx.get("force_paper_mode")),
             relay_stack_mode=str(ctx.get("relay_stack_mode") or ""), switch_rows=rows, website=web,
             fly_direct_force_paper=ctx.get("fly_direct_force_paper_mode")),
     })
@@ -698,9 +687,7 @@ def live_flags_snapshot(max_age_s: float = 5.0) -> dict:
                 "mismatches": arming.get("mismatches") or [],
                 "verdict": arming.get("verdict"),
                 "output_enabled": bool(output.get("enabled")) if isinstance(output, dict) else None,
-                "live_copy_paper_lock": _ctx_paper_lock(ctx),
-                "force_paper_mode": _ctx_paper_lock(ctx),
-                "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
+                "force_paper_mode": bool(ctx.get("force_paper_mode")),
                 "tiles_live_on": sorted(str(r.get("lane")) for r in ctx.get("switch_rows") or []
                                         if isinstance(r, dict) and (r.get("bitfinex_live_orders") or r.get("live_eligible"))),
                 "accounts": (arming.get("sources") or {}).get("website_accounts"),

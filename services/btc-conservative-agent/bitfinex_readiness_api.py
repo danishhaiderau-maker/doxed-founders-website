@@ -46,30 +46,12 @@ def wire(*, context_provider: Callable[[], Mapping[str, Any]],
         _telemetry = telemetry
 
 
-def _paper_lock_fields(ga: Mapping[str, Any]) -> dict:
-    """HM E6: the lock under its own name; ``force_paper_mode`` is a marked one-release alias."""
-    from bitfinex_live_switch import resolve_live_copy_paper_lock
-    locked, conflict = resolve_live_copy_paper_lock(ga)
-    out = {
-        "live_copy_paper_lock": locked,
-        "force_paper_mode": locked,
-        "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
-        "fly_direct_force_paper_mode": (None if ga.get("fly_direct_force_paper_mode") is None
-                                        else bool(ga.get("fly_direct_force_paper_mode"))),
-    }
-    if conflict:
-        out["live_copy_paper_lock_conflict"] = True
-    return out
-
-
 def _context() -> Mapping[str, Any]:
     if _context_provider is None:
         # Fail-closed default: nothing is armed, nothing is eligible.
         return {
             "global_arm": {
-                "live_copy_paper_lock": True, "force_paper_mode": True,
-                "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
-                "fly_direct_force_paper_mode": True, "live_armed": False,
+                "force_paper_mode": True, "live_armed": False,
                 "bitfinex_live_enabled": False, "relay_delivery_block": None,
                 "keys_ok": False,
                 "exchange_audit": {"authoritative": False, "fresh": False,
@@ -134,7 +116,7 @@ def status():
         "relay_arm_state": {
             "live_armed": bool(ga.get("live_armed")),
             "bitfinex_live_enabled": bool(ga.get("bitfinex_live_enabled")),
-            **_paper_lock_fields(ga),
+            "force_paper_mode": bool(ga.get("force_paper_mode")),
             "relay_delivery_block": ga.get("relay_delivery_block"),
             "keys_ok": bool(ga.get("keys_ok")),
         },
@@ -156,7 +138,7 @@ def tile_arming(lane: str):
         "relay_arm_state": {
             "live_armed": bool(ga.get("live_armed")),
             "bitfinex_live_enabled": bool(ga.get("bitfinex_live_enabled")),
-            **_paper_lock_fields(ga),
+            "force_paper_mode": bool(ga.get("force_paper_mode")),
         },
         "server_ts": time.time(),
     })
@@ -223,7 +205,7 @@ def overview():
         "relay_arm_state": {
             "live_armed": bool(ga.get("live_armed")),
             "bitfinex_live_enabled": bool(ga.get("bitfinex_live_enabled")),
-            **_paper_lock_fields(ga),
+            "force_paper_mode": bool(ga.get("force_paper_mode")),
             "relay_delivery_block": ga.get("relay_delivery_block"),
         },
         "switch": _switch.status(),

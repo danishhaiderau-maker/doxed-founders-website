@@ -69,24 +69,6 @@ REQUIRED_LEVERAGE = 100
 # Denial reason codes (queryable, stable across releases).
 DENY_GLOBAL_NOT_ARMED = "GLOBAL_RELAY_NOT_ARMED"
 DENY_FORCE_PAPER = "FORCE_PAPER_MODE_ACTIVE"
-DENY_PAPER_LOCK_CONFLICT = "LIVE_COPY_PAPER_LOCK_CONFLICT"
-
-
-def resolve_live_copy_paper_lock(global_arm) -> tuple[bool, bool]:
-    """Return (locked, conflict) for the live-copy paper lock (HM E6).
-
-    Reads ``live_copy_paper_lock`` first, then the one-release alias
-    ``force_paper_mode``. Fails closed: both absent -> locked; both present
-    with different values -> locked and ``conflict`` True (deny).
-    """
-    g = global_arm or {}
-    new = g.get("live_copy_paper_lock")
-    old = g.get("force_paper_mode")
-    if new is None and old is None:
-        return True, False
-    if new is not None and old is not None and bool(new) != bool(old):
-        return True, True
-    return bool(new if new is not None else old), False
 DENY_RELAY_DELIVERY_BLOCKED = "RELAY_DELIVERY_BLOCKED"
 DENY_LANE_NOT_ALLOWLISTED = "LANE_NOT_ALLOWLISTED"
 DENY_RELAY_CAPABILITY_BLOCKED = "LANE_RELAY_CAPABILITY_BLOCKED"
@@ -241,8 +223,7 @@ class BitfinexLiveSwitch:
         ``global_arm`` describes the operator/relay gate::
 
             {
-                "live_copy_paper_lock": bool,   # preferred (HM E6)
-                "force_paper_mode": bool,       # one-release alias of the lock
+                "force_paper_mode": bool,
                 "live_armed": bool,
                 "bitfinex_live_enabled": bool,
                 "relay_delivery_block": str | None,
@@ -276,11 +257,8 @@ class BitfinexLiveSwitch:
         denials: list[str] = []
 
         # 1. Global relay/arm gate.
-        paper_locked, lock_conflict = resolve_live_copy_paper_lock(g)
-        if paper_locked:
+        if g.get("force_paper_mode", True):
             denials.append(DENY_FORCE_PAPER)
-        if lock_conflict:
-            denials.append(DENY_PAPER_LOCK_CONFLICT)
         if not (g.get("live_armed") and g.get("bitfinex_live_enabled")):
             denials.append(DENY_GLOBAL_NOT_ARMED)
         relay_block = g.get("relay_delivery_block")

@@ -68,12 +68,6 @@ EXPECTED_PAUSED_STARTED_REASON_TOKENS = (
 )
 
 
-
-def _resolve_lock(ctx: Mapping[str, Any]) -> bool:
-    """Live-copy paper lock (HM E6): live_copy_paper_lock, then the force_paper_mode alias; fail closed."""
-    from bitfinex_live_switch import resolve_live_copy_paper_lock
-    return resolve_live_copy_paper_lock(ctx)[0]
-
 def _expected_paused_but_started(row: Mapping[str, Any], last: Mapping[str, Any]) -> bool:
     reason = str(last.get("reason") or row.get("paused_reason") or "").upper()
     return any(tok in reason for tok in EXPECTED_PAUSED_STARTED_REASON_TOKENS)
@@ -709,7 +703,7 @@ def build(ctx: Mapping[str, Any], *, now: float) -> dict:
 
 def build_with_classifier(ctx: Mapping[str, Any], *, now: float) -> tuple[dict, MissedCopyClassifier]:
     web = ctx.get("website") or {}
-    arming = effective_arming(output=ctx.get("output") or {}, force_paper_mode=_resolve_lock(ctx),
+    arming = effective_arming(output=ctx.get("output") or {}, force_paper_mode=bool(ctx.get("force_paper_mode")),
                               relay_stack_mode=str(ctx.get("relay_stack_mode") or ""),
                               switch_rows=ctx.get("switch_rows") or [], website=web,
                               fly_direct_force_paper=ctx.get("fly_direct_force_paper_mode"))

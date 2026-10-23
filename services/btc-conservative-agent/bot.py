@@ -23579,8 +23579,7 @@ def _ready_tile_live_copy_rows() -> dict:
                          "bitfinex_live_orders": bool(sw.get("bitfinex_live_orders")),
                          "selectable": True}
         return {"rows": out, "output_on": bool(_get_live_copy_output().enabled),
-                "paper_lock": _live_copy_paper_lock_active(),  # alias (HM E6)
-                "live_copy_paper_lock": _live_copy_paper_lock_active()}
+                "paper_lock": _live_copy_paper_lock_active()}
     except Exception as exc:  # noqa: BLE001 - read-only display
         return {"error": type(exc).__name__}
 
@@ -39441,7 +39440,7 @@ DASHBOARD_JS = """(function () {
           : '<span style="color:#8b949e;font-weight:700;">no account armed</span>';
       }
       el.innerHTML = '<div><strong>Fly "Live copy output":</strong> ' + state
-        + ((m.live_copy_paper_lock ?? m.force_paper_mode) ? ' · <span style="color:#8b949e;">FORCE_PAPER on (output cannot turn ON)</span>' : '') + '</div>'
+        + (m.force_paper_mode ? ' · <span style="color:#8b949e;">FORCE_PAPER on (output cannot turn ON)</span>' : '') + '</div>'
         + '<div style="margin-top:4px;"><strong>Website copier accounts:</strong> ' + webHtml + '</div>'
         + '<div style="margin-top:6px;">' + btn
         + ' <span style="color:#8b949e;font-size:0.82em;">(lets Fly emit signed copy intents — never places an order by itself; Fly\\'s own key never trades)</span></div>';
@@ -60135,12 +60134,7 @@ def _bitfinex_readiness_context() -> dict:
     runtime = _runtime_readiness_components(now)
     return {
         "global_arm": {
-            # HM E6: the lock under its own name; force_paper_mode is a
-            # one-release alias of the LOCK here (not the env flag).
-            "live_copy_paper_lock": _live_copy_paper_lock_active(),
             "force_paper_mode": _live_copy_paper_lock_active(),
-            "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
-            "fly_direct_force_paper_mode": _force_paper_mode_active(),
             "live_armed": live_armed,
             "bitfinex_live_enabled": bfx_enabled,
             "relay_delivery_block": relay_block,
@@ -60216,10 +60210,8 @@ def _bitfinex_size_checks_for_lane(lane: str, ctx: dict | None = None,
 
 def _bitfinex_master_state() -> dict:
     """Read-only account-level arm state for the dashboard + read APIs."""
-    from bitfinex_live_switch import resolve_live_copy_paper_lock
     ctx = _bitfinex_readiness_context()
     ga = ctx.get("global_arm") or {}
-    paper_locked = resolve_live_copy_paper_lock(ga)[0]
     _out_snap = _get_live_copy_output().snapshot()
     armed_at = _out_snap.get("enabled_at_ts")
     live_armed = bool(ga.get("live_armed"))
@@ -60231,10 +60223,7 @@ def _bitfinex_master_state() -> dict:
         "master_kind": "FLY_LIVE_COPY_OUTPUT",
         "live_copy_output": _out_snap,
         "website": _live_copy_website_cached_view(),
-        "live_copy_paper_lock": paper_locked,
-        "force_paper_mode": paper_locked,
-        "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
-        "fly_direct_force_paper_mode": _force_paper_mode_active(),
+        "force_paper_mode": bool(ga.get("force_paper_mode")),
         "relay_delivery_block": ga.get("relay_delivery_block"),
         "keys_ok": bool(ga.get("keys_ok")),
         "armed_at_ts": armed_at,
@@ -61361,9 +61350,7 @@ def _live_copy_monitor_context() -> dict:
         "output": _get_live_copy_output().snapshot(),
         # Option 1: FORCE_PAPER only governs Fly's retired direct path. It
         # blocks live-copy output only while the live-copy source is disabled.
-        "live_copy_paper_lock": _live_copy_paper_lock_active(),
-        "force_paper_mode": _live_copy_paper_lock_active(),  # internal alias of the lock (HM E6)
-        "deprecated_alias_of": {"force_paper_mode": "live_copy_paper_lock"},
+        "force_paper_mode": _live_copy_paper_lock_active(),
         "fly_direct_force_paper_mode": _force_paper_mode_active(),
         "relay_stack_mode": _relay_stack_mode.mode(),
         "live_copy_delivery": live_copy_delivery_status(),
