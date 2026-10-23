@@ -67,3 +67,19 @@ def test_analyzer_stamps_health_on_the_report_row():
     src = (HERE / "analyzer_research_engine_v62.py").read_text("utf-8")
     assert 'baseline_replay["health"] = replay_health(baseline_replay)' in src
     assert '"status": baseline_replay["health"]["status"]' in src
+
+
+def test_zero_evaluation_baseline_degrades_only_itself_not_the_report():
+    """HM #847 nit: one baseline with 0 evaluations is marked on its own row; the report stays OK."""
+    report = {"summaries": {
+        "A": {"directional_evaluations": 5, "unknown": 0, "full_fills": 2, "partial_fills": 0},
+        "B": {"directional_evaluations": 0, "unknown": 0, "full_fills": 0, "partial_fills": 0},
+    }}
+    health = replay_health(report)
+    assert health["status"] == "OK" and health["reason_code"] is None
+    assert health["per_baseline"]["B"]["status"] == "DEGRADED"
+    assert health["per_baseline"]["B"]["reason_code"] == "BASELINE_REPLAY_NO_EVALUATIONS"
+    assert health["no_evaluation_baselines"] == ["B"] and health["degraded_baselines"] == []
+    # an evaluated zero-fill baseline still degrades the report
+    report["summaries"]["C"] = {"directional_evaluations": 3, "unknown": 1, "full_fills": 0, "partial_fills": 0}
+    assert replay_health(report)["status"] == "DEGRADED"

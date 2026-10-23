@@ -424,9 +424,11 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
                 "underwater_observation_ratio": None}
     unobservable = _stop_unobservable_in_trade_gap(path, plan, atr_pct_at_fill, leverage, exit_index, exit_reason)
     if unobservable is not None:
+        # HM #847 nit: the R17 flag is stamped AT THE CELL (not only via stop_trigger_label).
         return {"status": "R17_UNPROVEN", "reasons": [unobservable], "exit_reason": None, "net_pnl_usd": None,
                 "profit_retention_ratio": None, "profit_giveback_pct": None,
-                "underwater_observation_ratio": None}
+                "underwater_observation_ratio": None,
+                "r17_status": "R17_UNPROVEN", "r17_unproven_reason": unobservable}
     terminal_mfe = float(path.mfe[exit_index])
     gross_usd = margin_usd * realized / 100.0
     cell = {
@@ -436,6 +438,7 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
         "profit_retention_ratio": round(max(0.0, realized) / terminal_mfe, 8) if terminal_mfe > 0 else None,
         "profit_giveback_pct": round(max(0.0, terminal_mfe - exit_margin), 8),
         "underwater_observation_ratio": round(int(path.underwater[exit_index]) / n, 8),
+        "r17_status": "PROVEN", "r17_unproven_reason": None,
     }
     label = stop_trigger_label(path, exit_reason)
     if label:

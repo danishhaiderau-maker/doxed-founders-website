@@ -158,6 +158,8 @@ def test_book_touching_the_stop_during_a_trade_gap_is_r17_unproven_never_countab
     assert result["status"] == R17_UNPROVEN
     assert result["reasons"] == [STOP_UNOBSERVABLE_REASON]
     assert result["net_pnl_usd"] is None and result["exit_reason"] is None
+    # HM #847 nit: the R17 flag is stamped at the cell itself
+    assert (result["r17_status"], result["r17_unproven_reason"]) == (R17_UNPROVEN, STOP_UNOBSERVABLE_REASON)
 
 
 def test_book_touch_with_live_trade_prints_is_not_flagged():
@@ -200,6 +202,7 @@ def test_stop_exit_cells_carry_the_last_trade_doc_inferred_label():
     cell = replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)
     assert (cell["status"], cell["exit_reason"]) == ("COMPLETE", "PHYSICAL_HARD_STOP")
     assert cell["stop_trigger_label"] == "LAST_TRADE_DOC_INFERRED"
+    assert (cell["r17_status"], cell["r17_unproven_reason"]) == ("PROVEN", None)
 
 
 def test_exit_fill_stamps_the_actual_row_ready_delay():
