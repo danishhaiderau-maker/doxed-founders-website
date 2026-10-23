@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import paper_fill
 
-# The five paper lanes migrated off the legacy touch model (tiles 6/7 DISLOC use disloc_engine's own copy of the same sites).
+# The five paper lanes migrated off the legacy touch model (Tiles 6/7 DISLOC / DISLOC-FOI removed 23 Oct 2026, R9).
 MIGRATED_LANES = frozenset({
     "FAMILY_RANDOM_CONTROL_TAKER_90", "FAMILY_GS01_XV_PREMIUM_ATR_TP", "FAMILY_GSB1_CVD_DIV_REGIME",
     "FAMILY_GSB2_REGIME_SWITCHER", "FAMILY_GS06_COMMITTED_FADE_ATR_TP"})
-IOC_CAP_BP = 5.0          # signal ask +5 bp (long) / signal bid -5 bp (short), same as DISLOC step B
+IOC_CAP_BP = 5.0          # signal ask +5 bp (long) / signal bid -5 bp (short), same cap as paper_fill step B
 EXIT_FORCE_AFTER_S = 10.0  # unpriced exit is force-closed (FORCED_NO_BOOK) after this
 EXIT_FORCE_CAP_S = 30.0
 TP1_MAX_RESTARTS = 3        # then the TP1 leg is priced with the no-wait forced pricer (livelock guard)

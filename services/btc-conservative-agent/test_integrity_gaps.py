@@ -31,11 +31,11 @@ def test_g12_requires_both_depth_fields():
     assert "depth_snapshot_signal" in r["G12"]["metric"] and "depth_snapshot_fill" in r["G12"]["metric"]
 
 
-def test_g14_needs_deploy_survival_and_paused_positive():
-    base = {"durable_total": 3, "survived_deploy": True, "guarded_deploys_with_paused_gt0": 0, "opens_while_paused": 0}
-    assert ids(ig.evaluate({"paused": base}))["G14"]["status"] == "AMBER"
-    assert ids(ig.evaluate({"paused": {**base, "guarded_deploys_with_paused_gt0": 1}}))["G14"]["status"] == "GREEN"
-    assert ids(ig.evaluate({"paused": {**base, "opens_while_paused": 1}}))["G14"]["status"] == "RED"
+def test_g14_is_na_after_disloc_removal():
+    # Tiles 6/7 removed 23 Oct 2026: the PAUSED-skip ledger has no writer; G14 is NA whatever facts arrive.
+    base = {"durable_total": 3, "survived_deploy": True, "guarded_deploys_with_paused_gt0": 0, "opens_while_paused": 1}
+    for facts in ({}, {"paused": base}):
+        assert ids(ig.evaluate(facts))["G14"]["status"] == "NA"
 
 
 def test_g16_red_on_rows_older_than_epoch_and_on_receipt_disagreement():

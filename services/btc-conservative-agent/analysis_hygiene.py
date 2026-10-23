@@ -25,6 +25,52 @@ def _flag(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes")
 
 
+def r17_reasons(df):
+    """Per-row R17 non-countable reason (None = countable): pinned ids, stamped rows, R17_UNPROVEN (no contract proof)."""
+    import pandas as pd
+    import r17_exclusion as _r17
+    recs = df.to_dict("records")
+    return pd.Series([_r17.non_countable_reason({k: (None if (isinstance(v, float) and v != v) else v)
+                                                 for k, v in r.items()}) for r in recs],
+                     index=df.index, dtype=object)
+
+
+def r17_reason_counts(reasons) -> dict:
+    """Count of every failed R17 check across rows ("R17_UNPROVEN:A|B" counts A and B; list/stamp reasons as-is)."""
+    out: dict = {}
+    for r in reasons:
+        if not r:
+            continue
+        r = str(r)
+        parts = r.split(":", 1)[1].split("|") if r.startswith("R17_UNPROVEN:") else [r]
+        for p in parts:
+            out[p] = out.get(p, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def r17_empty_label():
+    """Label for a report with zero countable rows when R17 excluded rows (never "No trades yet"); None otherwise."""
+    n = int(SUMMARY.get("r17_non_countable_excluded") or 0)
+    if SUMMARY.get("rows_out") or not n:
+        return None
+    top = ", ".join(f"{k}={v}" for k, v in list((SUMMARY.get("r17_reason_counts") or {}).items())[:6])
+    return f"0 countable: {n} excluded R17_UNPROVEN ({top})"
+
+
+def r17_filter(trades):
+    """R17 alone (no opt-in, ever): the analyzer's fallback when apply() fails, so a hygiene error never lets a
+    non-countable row into a verdict."""
+    if trades is None or getattr(trades, "empty", True):
+        return trades
+    reasons = r17_reasons(trades)
+    out = trades[reasons.isna()]
+    SUMMARY.clear()  # the fallback still reports WHY rows were excluded (labels read these keys)
+    SUMMARY.update({"schema": "analyzer_hygiene_v1", "mode": "r17_filter_fallback", "rows_in": int(len(trades)),
+                    "rows_out": int(len(out)), "r17_non_countable_excluded": int(reasons.notna().sum()),
+                    "r17_reason_counts": r17_reason_counts(reasons)})
+    return out
+
+
 def apply(trades, *, include_forced: bool | None = None, include_late: bool | None = None):
     import numpy as np
     import pandas as pd
@@ -63,7 +109,11 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
     df["net_bp"] = bp
     df["late_window"] = late
     df["forced_close_excluded"] = forced
+    # R17 (RK 23 Oct 2026): never countable, no env opt-in (ids list + stamped rows + countable-only-with-proof).
+    r17 = r17_reasons(df)
+    df["r17_non_countable_reason"] = r17
     keep = pd.Series(True, index=df.index)
+    keep &= r17.isna()
     if not include_forced:
         keep &= ~forced
     if not include_late:
@@ -73,13 +123,15 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
     SUMMARY.update({"schema": "analyzer_hygiene_v1", "rows_in": n0, "rows_out": int(len(out)),
                     "forced_excluded": 0 if include_forced else int(forced.sum()),
                     "late_window_excluded": 0 if include_late else int((late & ~forced).sum()),
+                    "r17_non_countable_excluded": int(r17.notna().sum()),
+                    "r17_reason_counts": r17_reason_counts(r17),
                     "net_bp_known": int(out["net_bp"].notna().sum()),
                     "mean_net_bp": round(float(out["net_bp"].mean()), 4) if out["net_bp"].notna().any() else None,
                     "late_window_aedt": _LATE.get("window_aedt"), "basis": "net_bp (price bp, unrounded)"})
     return out
 
 
-# ---------------------------------------------------------------------------- all epochs + DISLOC (bp)
+# ---------------------------------------------------------------------------- all epochs (bp)
 def _clustered(vals_ts):
     import math
     n = len(vals_ts)
@@ -99,12 +151,11 @@ def _clustered(vals_ts):
             "wr": round(100.0 * sum(1 for v in vals if v > 0) / n, 2)}
 
 
-def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
-                        disloc_file: str = "disloc_trades.jsonl") -> dict:
-    """ANALYZER-REVIEW #4: every epoch (current file unfiltered + research_archive/pre_epoch/*) plus the
-    DISLOC store, hygiene applied, reported in bp with hour-clustered 90% CIs per tile and per epoch."""
+def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv") -> dict:
+    """ANALYZER-REVIEW #4: every epoch (current file unfiltered + research_archive/pre_epoch/*), hygiene
+    applied, reported in bp with hour-clustered 90% CIs per tile and per epoch. The DISLOC / DISLOC-FOI
+    store fold was removed with Tiles 6/7 (23 Oct 2026, R9); their ledgers are retired history (R5)."""
     import glob
-    import json
     import os
     import pandas as pd
     frames, sources = [], []
@@ -148,34 +199,13 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
                 continue
             if pd.notna(bp):
                 rows.append((str(lane), str(epoch), float(bp), float(t) if pd.notna(t) else 0.0))
-    dpath = os.path.join(data_root, disloc_file)
-    disloc_n = 0
-    if os.path.isfile(dpath):
-        with open(dpath, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("event") != "DISLOC_CLOSED" or r.get("pnl_bp_vs_touch") is None:
-                    continue
-                ex = float(r.get("exit_ts") or 0)
-                if LATE_W0 <= ex <= LATE_W1:
-                    continue
-                lane = str(r.get("lane") or ("DISLOC-FOI" if r.get("variant") == "foi" else "DISLOC"))
-                import paper_fill as _pf
-                if not _pf.row_fresh_eligible(r):
-                    excluded_pending += 1
-                    continue
-                rows.append((lane, "disloc_store", float(r["pnl_bp_vs_touch"]), ex))
-                disloc_n += 1
     by_tile: dict = {}
     by_epoch: dict = {}
     for lane, epoch, bp, t in rows:
         by_tile.setdefault(lane, []).append((bp, t))
         by_epoch.setdefault(epoch, []).append((bp, t))
-    return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); DISLOC pnl_bp_vs_touch; fee 0",
-            "hygiene": summary, "sources": sources, "disloc_closes": disloc_n,
+    return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); fee 0",
+            "hygiene": summary, "sources": sources,
             "excluded_pending_paper_fill_migration": excluded_pending,
             "overall": _clustered([(bp, t) for _, _, bp, t in rows]),
             "by_tile": {k: _clustered(v) for k, v in sorted(by_tile.items())},

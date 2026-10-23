@@ -2435,7 +2435,7 @@ jobs:
           python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
-          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py test_research_freeze.py test_disloc_engine.py test_live_copy_tile_contract.py test_disloc_foi_oi_warmstart.py test_live_monitor_extra_routes.py test_strategist_streams_collector.py test_shadow_exit_path_1s.py test_exit_latency_slo.py test_live_fix_1485_exit_follow.py test_exit_latency_disloc_lanes.py test_hm_missing_checks.py -q
+          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py test_research_freeze.py test_live_copy_tile_contract.py test_tile_display_vs_key_contract.py test_tile67_byte_identity.py test_live_monitor_extra_routes.py test_strategist_streams_collector.py test_shadow_exit_path_1s.py test_exit_latency_slo.py test_live_fix_1485_exit_follow.py test_hm_missing_checks.py -q
           python -m pytest test_http_emergency_admission.py -q
           python -m pytest test_paper_policy_family_committed_fade_taker_90.py test_paper_policy_family_premium_reversion_60m.py test_paper_policy_family_random_control_taker_90.py -q
           python -m pytest test_paper_policy_family_gs01_xv_premium_atr_tp.py test_paper_policy_family_gsb1_cvd_div_regime.py test_paper_policy_family_gsb2_regime_switcher.py test_paper_policy_family_gsb3_committed_fade_regime.py test_paper_policy_family_gs06_committed_fade_atr_tp.py test_gs_regime_engine.py -q
@@ -3660,19 +3660,30 @@ jobs:
           import json, os, time, urllib.error, urllib.request
           base = "https://doxed-btc-bot.fly.dev"
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Content-Type": "application/json", "Cache-Control": "no-cache"}
-          # LIVE-FIX-1484: restore exactly the pre-deploy live-orders set. If the
-          # snapshot could not be read, restore DISLOC only (Danish 12 Oct 18:22).
+          from combo_pathway_config import ACTIVE_TILE_ORDER, RETIRED_TILE_LANES
+          # LIVE-FIX-1484: restore exactly the pre-deploy live-orders set. The old
+          # snapshot-failure fallback (restore DISLOC only) is gone with Tiles 6/7
+          # (23 Oct 2026): a failed snapshot now restores NOTHING, loudly (HM C1b).
           # An empty snapshot (operator had every tile off) restores nothing.
-          if os.environ.get("LIVE_SNAPSHOT_OK") == "true":
+          snapshot_ok = os.environ.get("LIVE_SNAPSHOT_OK") == "true"
+          if snapshot_ok:
               LIVE = tuple(l for l in (os.environ.get("LIVE_LANES") or "").split(",") if l)
           else:
-              LIVE = ("FAMILY_DISLOC_BFX_DISLOCATION_1M",)
-          print(json.dumps({"restore_lanes": LIVE, "from_snapshot": os.environ.get("LIVE_SNAPSHOT_OK") == "true"}))
+              LIVE = ()
+              msg = "Live-orders snapshot could not be read before deploy; NO tile was re-armed. Re-arm live tiles by hand."
+              print("::warning title=Live restore skipped::" + msg)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a", encoding="utf-8") as h:
+                      h.write("- :warning: **Live restore skipped:** " + msg + "\n")
+          print(json.dumps({"restore_lanes": LIVE, "from_snapshot": snapshot_ok}))
           if not LIVE:
-              print("No tile was placing live orders before this deploy; nothing to restore.")
+              print("No tile was placing live orders before this deploy (or the snapshot failed); nothing to restore.")
               raise SystemExit(0)
-          RETIRED = {"FAMILY_DANISH_REGIME_ROUTER", "FAMILY_COMMITTED_FADE_TAKER_90", "FAMILY_GS07_FAST_PREMIUM_FADE"}
-          assert not RETIRED & set(LIVE)
+          # HM C1: derive RETIRED from config so the workflow cannot drift from it.
+          RETIRED = set(RETIRED_TILE_LANES)
+          assert not RETIRED & set(LIVE), sorted(RETIRED & set(LIVE))
+          assert set(LIVE) <= set(ACTIVE_TILE_ORDER), sorted(set(LIVE) - set(ACTIVE_TILE_ORDER))
           def call(path, body=None):
               req = urllib.request.Request(base + path, data=None if body is None else json.dumps(body).encode(), headers=headers, method="GET" if body is None else "POST")
               for attempt in range(6):
@@ -3686,8 +3697,8 @@ jobs:
               call("/api/toggle_research_lane", {"lane": lane, "enabled": True})
               call(f"/api/live-copy/tiles/{lane}/eligibility", {"eligible": True})
           call("/api/live-copy/output", {"enabled": True})
-          # LIVE-FIX-1455: DISLOC live-orders can refuse for a few seconds after
-          # boot (38205556737 left DISLOC/FOI off); retry instead of failing.
+          # LIVE-FIX-1455: live-orders can refuse for a few seconds after boot;
+          # retry instead of failing.
           for attempt in range(8):
               for lane in LIVE:
                   call(f"/api/bitfinex/tiles/{lane}/live-orders", {"enabled": True})

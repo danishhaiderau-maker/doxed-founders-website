@@ -153,11 +153,6 @@ test_discovery_cohort_scorecard.py
 test_discovery_dynamic_publication.py
 test_discovery_scorecard_manifest.py
 test_discovery_scorecard_publication.py
-test_disloc_engine.py
-test_disloc_foi_oi_warmstart.py
-test_disloc_maintenance_gate.py
-test_disloc_paused_path.py
-test_disloc_tile_stats_fold.py
 test_dual_execution_truth_closed_rows.py
 test_dyn_regime.py
 test_dynamic_cohort_adapter.py
@@ -195,7 +190,6 @@ test_execution_panel_atomic_sources.py
 test_execution_tail_repair.py
 test_exhaustive_policy_persistence.py
 test_exit_combos_disclosure.py
-test_exit_latency_disloc_lanes.py
 test_exit_latency_slo.py
 test_exit_report_cohort_integrity.py
 test_exit_reports_validation_current.py
@@ -284,14 +278,12 @@ test_live_copy_lifecycle.py
 test_live_copy_tile_contract.py
 test_live_fix_0500.py
 test_live_fix_0615_bootstrap_carry.py
-test_live_fix_1054_disloc_twin.py
 test_live_fix_1111_bootstrap_starvation.py
 test_live_fix_1246_report_boot.py
 test_live_fix_1450_orphan_link.py
 test_live_fix_1484_restore_and_toggle.py
 test_live_fix_1485_exit_follow.py
 test_live_fix_1491_monitor_routes.py
-test_live_fix_1510_disloc_fill.py
 test_live_guardian.py
 test_live_monitor_extra_routes.py
 test_live_policy_provenance.py
@@ -618,3 +610,7 @@ test_rotation_cap.py
 test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
 test_v22_retired_r17.py
+test_entry_fidelity_after_disloc_removal.py
+test_tile67_byte_identity.py
+test_tile_display_vs_key_contract.py
+test_r17_exclusion.py

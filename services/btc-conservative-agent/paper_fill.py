@@ -354,13 +354,15 @@ TILE_FILL_SITES = {
     "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
     "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
     "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
-    "FAMILY_DISLOC_BFX_DISLOCATION_1M": (("disloc_engine.py", "_price_entry"), ("disloc_engine.py", "_price_exit")),
-    "FAMILY_DISLOC_FOI_LONG_1M": (("disloc_engine.py", "_price_entry"), ("disloc_engine.py", "_price_exit")),
 }
+# R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
+# (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five
+# remaining entries, PENDING_MIGRATION, ALLOWED_FILL_MODELS, FRESH_EXIT_STATUSES and every pricing
+# function in this module are unchanged (byte-identity pinned by test_tile67_byte_identity.py).
 # Step B migrates these and empties the set. HM 12:35: the list may only shrink (CI pins the
 # baseline), no new registry lane may join it, and it expires: after PENDING_MIGRATION_EXPIRES a
 # non-empty list fails CI. Paper rows from pending lanes are not fresh data (fresh_data_eligible).
-# Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (disloc_engine._price_entry / _price_exit).
+# Step B (HM 13:16): DISLOC and DISLOC-FOI migrated (both removed 23 Oct 2026).
 PENDING_MIGRATION = frozenset()  # 16 Oct 2026: tiles 1-5 migrated (tile_fill.py); must stay empty
 PENDING_MIGRATION_BASELINE = frozenset(TILE_FILL_SITES)  # 13 Oct 2026; never add to this
 ALLOWED_FILL_MODELS = frozenset({FILL_MODEL})
@@ -433,8 +435,8 @@ def as_number(value):
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
-# Terminal exit statuses of a fully book-priced close: bot rows say PAPER_FILL, DISLOC ledger rows say FILLED or
-# FILLED_IN_PARTS (multi-leg / TP1-style). FORCED_NO_BOOK and PAPER_FILL_FORCED are never fresh.
+# Terminal exit statuses of a fully book-priced close: bot rows say PAPER_FILL, (retired) DISLOC ledger rows said
+# FILLED or FILLED_IN_PARTS (multi-leg / TP1-style; kept so historical rows classify the same). FORCED_NO_BOOK and PAPER_FILL_FORCED are never fresh.
 FRESH_EXIT_STATUSES = frozenset({"PAPER_FILL", "FILLED", "FILLED_IN_PARTS"})
 
 
@@ -488,6 +490,11 @@ def row_fresh_eligible(row) -> bool:
     if not isinstance(row, dict):
         return True
     if row_before_epoch(row):
+        return False
+    # R17 (RK 23 Oct 2026): pinned discard ids, rows stamped non_countable on write, and any row that does not PROVE
+    # book realism against the r17_fields contract are never fresh (fails closed if a pinned list is missing/altered).
+    import r17_exclusion as _r17
+    if _r17.non_countable_reason(row):
         return False
     row = tag_legacy(row)
     if is_excluded(row.get("fresh_data_excluded")) or row.get("exit_status") == "FORCED_NO_BOOK" \

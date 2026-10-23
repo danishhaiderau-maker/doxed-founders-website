@@ -9,6 +9,16 @@ import pytest
 import monitor_api
 import monitor_tiles as mt
 
+
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
+
+
 ADMIN = "tiles-test-admin-token"
 MONITOR = "monitor-read-token-for-tiles-0123456789"
 REMOTE = {"REMOTE_ADDR": "198.51.100.9"}
@@ -301,7 +311,7 @@ def test_counters_route_and_specs_route(bot):
     assert gs1["epoch"]["fills"] == 2 and gs1["epoch"]["expiries"] == 1 and gs1["epoch"]["open"] == 1
     assert len(json.dumps(counters).encode()) <= mt.MAX_TILE_COUNTERS_BYTES
     specs = _get(bot, "/api/monitor/tiles/specs", {"X-Bot-Admin-Token": ADMIN}).get_json()
-    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 7
+    assert len(specs["tiles"]) == len(bot.ACTIVE_TILE_ORDER) == 5  # Tiles 6/7 removed 23 Oct 2026
     assert not specs.get("truncated")
     reg = bot.ACTIVE_TILE_REGISTRY
     for tile in specs["tiles"]:
@@ -459,44 +469,15 @@ def test_public_state_exposes_fill_provenance_but_still_strips_strategy_fields(b
     assert "exit_reason" not in out and "research_lane" not in out and "ai_band" not in out
 
 
-def _ledger(tid, **over):
-    """A real DISLOC ledger row shape (disloc_paper_v1, DISLOC_CLOSED) as disloc_engine writes it."""
-    row = {"schema": "disloc_paper_v1", "event": "DISLOC_CLOSED", "trade_id": tid, "research_lane": DISLOC_BASE,
-           "side": "LONG", "fill_price": 82263.0, "fill_ts": CUTOFF + 600, "exit_ts": CUTOFF + 660,
-           "exit_price": 82247.0, "exit_reason": "TIME_60S", "exit_status": "FILLED", "pnl_bp_vs_touch": -1.945,
-           "net_bp_taker_2p8": -4.0156, "signal_ts": CUTOFF + 598, "order_ts": CUTOFF + 599,
-           "fill_model": "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY", "fill_model_version": 1, "delay_s": 1.5,
-           "delay_source": "default_until_n10", "depth_snapshot_signal": {"s": 1}, "depth_snapshot_fill": {"s": 2}}
-    row.update(over)
-    return row
-
-
 DISLOC_BASE = "FAMILY_DISLOC_BFX_DISLOCATION_1M"
 
 
-def test_fresh_only_keeps_real_disloc_rows_and_drops_only_the_not_fresh_ones(bot, monkeypatch):
-    import disloc_engine as dsl
-    ledger = [
-        _ledger("d-fresh"),
-        _ledger("d-parts", exit_status="FILLED_IN_PARTS", exit_pieces=2),          # multi-leg close stays fresh
-        _ledger("d-forced", exit_status="FORCED_NO_BOOK", fresh_data_excluded="FORCED_NO_BOOK", exit_price=None),
-        _ledger("d-legacy", fill_model="TAKER_AT_BOOK_TOUCH", fill_model_version=None, delay_s=None),
-        _ledger("d-flagged", fresh_data_excluded="MANUAL"),
-    ]
-    real = dsl.tile_trade_rows(ledger, DISLOC_BASE, epoch_id=EPOCH)  # the REAL row shape, not mt.tile_trade_row
-    assert len(real) == 5 and all("pricing" in r for r in real)
-    fresh = {r["trade_id"]: r["pricing"]["fresh_eligible"] for r in real}
-    assert fresh == {"d-fresh": True, "d-parts": True, "d-forced": False, "d-legacy": False, "d-flagged": False}
-    assert real[3]["pricing"]["legacy_pricing"] is True and real[2]["pricing"]["legacy_pricing"] is False
-    monkeypatch.setattr(bot, "_disloc_tile_trade_rows", lambda lane, **kw: list(real) if lane == DISLOC_BASE else [])
-    monkeypatch.setattr(bot, "_disloc_epoch_since", lambda: 0.0)
-
-    def ids(**q):
-        body = _get(bot, "/api/monitor/tiles/trades", {"X-Bot-Admin-Token": ADMIN}, status="closed",
-                    lane=DISLOC_BASE, **q).get_json()
-        return {r["trade_id"] for r in body["rows"]}
-    assert ids() == set(fresh)                       # all rows stay visible without the filter
-    assert ids(fresh_only="1") == {"d-fresh", "d-parts"}  # DISLOC no longer collapses to 0
+def test_disloc_monitor_route_and_row_source_removed(bot):
+    """Tiles 6/7 removal (23 Oct 2026): /api/monitor/tiles/disloc is gone and the trades route has no
+    DISLOC row source any more (historical ledgers stay on disk, read by nothing on this path)."""
+    assert _get(bot, "/api/monitor/tiles/disloc", {"X-Bot-Admin-Token": ADMIN}).status_code == 404
+    assert not hasattr(bot, "_disloc_tile_trade_rows") and not hasattr(bot, "_disloc_epoch_since")
+    assert DISLOC_BASE not in bot.ACTIVE_TILE_ORDER
 
 
 def test_switches_route_and_api_build_use_the_same_live_state(bot, monkeypatch):

@@ -128,7 +128,7 @@ def runtime_backstop(row: Mapping[str, Any]) -> list:
             out.append(f"LOOK_AHEAD_BOOK {tid}/{leg} book_s={int(bs)} fill_ts={ts}")
         book = row.get(k["book"])
         if leg == "exit" and (row.get("exit_pieces") or 1) > 1:
-            continue  # VWAP over several books; each piece is checked on its DISLOC_PARTIAL_EXIT row
+            continue  # VWAP over several books; each piece is checked on its own partial-exit row (legacy DISLOC_PARTIAL_EXIT history)
         if isinstance(book, Mapping):
             levels = book.get("a") if _buys(row.get("side"), leg) else book.get("b")
             px, filled = walk_vwap(levels, row.get(k["qty"]) or row.get("qty"))

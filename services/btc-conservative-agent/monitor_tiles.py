@@ -385,7 +385,7 @@ def _late_window_block(rows) -> dict:
             "window_aedt": late_window_table().get("window_aedt"), "totals_use_repriced": True}
 
 
-PRICING_KEYS = ("fill_model", "fill_model_version", "delay_s", "delay_source", "priced_delay_s", "priced_delay_model", "ask_age_ms", "exit_ask_age_ms",
+PRICING_KEYS = ("non_countable", "non_countable_reason", "fill_model", "fill_model_version", "delay_s", "delay_source", "priced_delay_s", "priced_delay_model", "ask_age_ms", "exit_ask_age_ms",
                 "depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill", "exit_price_basis",
                 "fee_model", "funding_rate", "funding_source", "funding_rate_source_detail", "hold_seconds", "funding_ts_crossed",
                 "funding_settlement_rates", "fill_model_tag", "legacy_pricing", "exit_status",
@@ -439,6 +439,13 @@ def pricing_block(raw: Mapping[str, Any]) -> dict:
     typed = {**dict(raw), **{k: block[k] for k in block}}
     stored = _pf.as_bool(raw.get("fresh_eligible"))
     block["fresh_eligible"] = bool(_pf.row_fresh_strict(typed) and stored is not False)
+    if not block["fresh_eligible"]:
+        import r17_exclusion as _r17
+        reason = _r17.non_countable_reason(typed)
+        if reason:  # the tile shows WHY the row is not counted (R17_UNPROVEN:<failed checks>), never a bare "stale"
+            block["non_countable"] = True
+            block["non_countable_reason"] = reason
+            block["r17_label"] = "R17_UNPROVEN" if reason.startswith("R17_UNPROVEN") else "R17"
     return block
 
 

@@ -127,7 +127,6 @@
     ["GET", "/api/monitor/full-reset/receipt", "monitor_full_reset_receipt_route"],
     ["POST", "/api/monitor/full-reset/verify", "monitor_full_reset_verify_route"],
     ["POST", "/api/monitor/fresh-start", "monitor_fresh_start_set_route"],
-    ["GET", "/api/monitor/tiles/disloc", "monitor_tiles_disloc"],
     ["GET", "/api/monitor/tiles/field-completeness", "monitor_tiles_field_completeness"],
     ["GET", "/api/monitor/streams/health", "monitor_streams_health"],
     ["GET", "/api/monitor/streams/<name>/parts", "monitor_streams_parts"],

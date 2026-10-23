@@ -12,6 +12,16 @@ import paper_fill
 from research import fill_model as research_fill_model
 import research_v3_bridge
 
+
+@pytest.fixture(autouse=True)
+def _r17_proof_rule_out_of_scope(monkeypatch):
+    """R17 proof rule (countable only with book/delay/walk/level proof) is covered by test_r17_exclusion.py.
+    These synthetic rows test other properties, so the proof check is neutralised here; the pinned-list and
+    stamped exclusions still apply."""
+    import r17_exclusion
+    monkeypatch.setattr(r17_exclusion, "proof_failures", lambda row: [])
+
+
 ROOT = Path(__file__).resolve().parent
 BOT = (ROOT / "bot.py").read_text(encoding="utf-8")
 EPOCH = 1792263671.26
