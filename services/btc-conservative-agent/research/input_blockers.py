@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from analyzer_epoch_guard import epoch_csv_rows, epoch_lines, guarded_open
+from research import r3_quarantine
 
 SCHEMA = "analyzer_input_blockers_v1"
 REPORT_FILE = "analyzer_input_blockers.json"
@@ -117,6 +118,21 @@ def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, 
         load_replay_index,
     )
 
+    if r3_quarantine.is_active("EXIT_LADDER_SIM"):
+        # R3: the simulator replays ticker/BBO ticks; its report is never read.
+        # The paper cohort (trades + replay index, no pricing) stays as evidence.
+        index = replay_index if replay_index is not None else load_replay_index(data_dir)
+        book_coverage, coverage_receipt = load_book_coverage(data_dir, index)
+        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id,
+                                                book_coverage=book_coverage, coverage_receipt=coverage_receipt)
+        return _item(
+            "exit_ladder_simulator", "BLOCKED", r3_quarantine.STATUS,
+            "Exit-ladder simulator is R3_QUARANTINED: it prices on ticker/BBO ticks. Its report is not "
+            "written or read until rebuilt on paper_fill + quote_trigger.",
+            eligible=0, total=int(cohort.get("current_registry_trades") or 0), side="ANALYZER",
+            evidence={"quarantine": "EXIT_LADDER_SIM", "relay_state_assumed": "DISARMED_PAPER_ONLY",
+                      "paper_cohort": {k: v for k, v in cohort.items() if k != "eligible_trade_ids"}},
+        )
     report = _load_json(report_dir / EXIT_LADDER_REPORT) or {}
     cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
     if cohort is None or cohort.get("schema") != PAPER_SCHEMA:
@@ -476,7 +492,8 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
     epoch_id, epoch_source = current_epoch(data_dir)
     exit_ladder = exit_ladder_item(
         report_dir, data_dir, epoch_id,
-        replay_index=None if (_load_json(report_dir / EXIT_LADDER_REPORT) or {}).get("cohort_receipt")
+        replay_index=None if (not r3_quarantine.is_active("EXIT_LADDER_SIM")
+                              and (_load_json(report_dir / EXIT_LADDER_REPORT) or {}).get("cohort_receipt"))
         else load_replay_index(data_dir),
     )
     items = [

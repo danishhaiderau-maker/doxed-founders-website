@@ -37,6 +37,7 @@ from research import data_health_view as _data_health_view
 from research import archive_history_view as _archive_history_view
 from research import dashboard_sections as _dashboard_sections
 from research import research_api_cache as _research_cache
+from research import r3_quarantine as _r3_quarantine
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -793,6 +794,10 @@ def _read_report(name: str, default=None):
     """Load JSON from project root, reports/, or all_data fallback when SESSION file is empty."""
     if default is None:
         default = {}
+    if _r3_quarantine.quarantined_file(name):
+        # R3: never read a quarantined producer's output (stale copies stay on
+        # disk untouched; they are simply not loaded).
+        return default
     # A completed atomic generation is authoritative. If it intentionally did
     # not publish this report, do not resurrect a stale or in-progress working
     # copy from the analyzer directory.
@@ -890,6 +895,8 @@ def _read_contract_receipt(name: str) -> tuple[dict, dict]:
 
 def _best_report_path(name: str) -> Path | None:
     """Return the same scope-aware file that ``_read_report`` would expose."""
+    if _r3_quarantine.quarantined_file(name):
+        return None
     for base in (ROOT, DATA_ROOT):
         published_manifest = base / PUBLISHED_REPORTS_DIR / REPORT_MANIFEST_FILE
         if not published_manifest.is_file():
@@ -1649,7 +1656,7 @@ def _bundle_members():
     manifest = _read_json(REPORT_MANIFEST_FILE)
     for entry in manifest.get("reports") or []:
         fname = entry.get("file") if isinstance(entry, dict) else entry
-        if not fname or fname in BUNDLE_FILES:
+        if not fname or fname in BUNDLE_FILES or _r3_quarantine.quarantined_file(fname):
             continue
         candidate = _best_report_path(fname)
         # ``_best_report_path`` intentionally parses JSON so it can apply
@@ -2960,6 +2967,10 @@ def _ladder_sim_payload():
         "best_profile_id": rep.get("best_profile_id"),
         "profiles": rep.get("profiles") or [],
         "integrity": _integrity_payload(),
+        **({"data_status": _r3_quarantine.STATUS, "quarantine": "EXIT_LADDER_SIM",
+            "empty_reason": "R3_QUARANTINED — simulator prices on ticker/BBO ticks; not run or read until "
+                            "rebuilt on paper_fill + quote_trigger."}
+           if _r3_quarantine.is_active("EXIT_LADDER_SIM") else {}),
     }
 
 
@@ -6101,6 +6112,8 @@ def download_everything():
 
     unique = {}
     for path, arcname in candidates:
+        if _r3_quarantine.quarantined_file(arcname):
+            continue  # R3: stale quarantined outputs are never exported
         unique.setdefault(arcname, path)
     member_names = set(unique)
     required_raw_members = {
@@ -10301,6 +10314,9 @@ _GENOME_GRID_PASSTHROUGH = (
 
 
 def _genome_grid_payload(limit: int = 100) -> dict:
+    if _r3_quarantine.is_active("GENOME_GRID"):
+        return {"schema": "genome_grid_dashboard_v1", "report_path": str(GENOME_GRID_REPORT_PATH),
+                **_r3_quarantine.disabled_payload("GENOME_GRID")}
     try:
         report = json.loads(GENOME_GRID_REPORT_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -10395,6 +10411,10 @@ def api_research_indicator_edge():
 
 @app.route("/api/research")
 def api_research_index():
+    if _r3_quarantine.is_active("GENOME_GRID"):
+        return jsonify({**_r3_quarantine.disabled_payload("GENOME_GRID"), "datasets": [],
+                        "examples": ["/api/research/indicator_edge",
+                                     "/api/research/indicator_edge?label=HINT&independent=1"]})
     out = _research_cache.index(RESEARCH_API_DIR / _research_cache.DB_NAME)
     try:
         summary = json.loads((RESEARCH_API_DIR / _research_cache.SUMMARY_NAME).read_text(encoding="utf-8"))
@@ -10446,6 +10466,9 @@ def api_research_shadow_exits():
 
 @app.route("/api/research/<dataset>")
 def api_research_dataset(dataset: str):
+    if _r3_quarantine.is_active("GENOME_GRID"):
+        # Every research_api_cache dataset is materialized by the genome grid.
+        return jsonify({**_r3_quarantine.disabled_payload("GENOME_GRID"), "dataset": dataset, "rows": []}), 200
     status, out = _research_cache.query(RESEARCH_API_DIR / _research_cache.DB_NAME, dataset, request.args.to_dict())
     return jsonify(out), status
 

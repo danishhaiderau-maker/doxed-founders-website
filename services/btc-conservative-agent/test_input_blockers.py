@@ -9,6 +9,7 @@ import pandas as pd
 from book_walk_test_fixture import book_row, trade_row
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 from research import input_blockers as ib
+from research import r3_quarantine
 from research.exit_ladder_paper_cohort import (
     build_paper_exit_ladder_cohort,
     filter_for_exit_ladder,
@@ -210,9 +211,27 @@ class InputBlockersTest(unittest.TestCase):
         self.data = Path(self._tmp.name) / "data"
         self.report.mkdir()
         self.data.mkdir()
+        # Legacy (pre-quarantine) exit-ladder semantics stay covered; the R3
+        # quarantine itself is asserted in test_exit_ladder_r3_quarantined_*.
+        self._r3_active = set(r3_quarantine.ACTIVE)
+        r3_quarantine.ACTIVE.discard("EXIT_LADDER_SIM")
 
     def tearDown(self):
+        r3_quarantine.ACTIVE.clear()
+        r3_quarantine.ACTIVE.update(self._r3_active)
         self._tmp.cleanup()
+
+    def test_exit_ladder_r3_quarantined_never_reads_the_report(self):
+        r3_quarantine.ACTIVE.add("EXIT_LADDER_SIM")
+        _write_fixture(self.report, self.data)
+        (self.report / ib.EXIT_LADDER_REPORT).write_text("{\"cohort_receipt\": {\"schema\": \"bogus\"}}",
+                                                       encoding="utf-8")
+        item = ib.exit_ladder_item(self.report, self.data, EPOCH)
+        self.assertEqual(item["status"], "BLOCKED")
+        self.assertEqual(item["reason_code"], "R3_QUARANTINED")
+        self.assertEqual(item["eligible"], 0)
+        self.assertNotIn("report_data_status", item["evidence"])
+        self.assertIn("paper_cohort", item["evidence"])
 
     def test_exit_ladder_blocked_by_real_copy_gate_reports_paper_cohort(self):
         _write_fixture(self.report, self.data)

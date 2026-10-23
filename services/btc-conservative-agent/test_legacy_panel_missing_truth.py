@@ -1,6 +1,7 @@
 import ast
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 SOURCE = (Path(__file__).parent/'research/research_dashboard.py').read_text(encoding='utf-8-sig')
 
@@ -11,7 +12,8 @@ def test_payloads_distinguish_missing_from_explicit_empty():
     report = {}
     env = {'_read_report':lambda *a:report, '_combo_row_known':lambda row:True,
            '_current_generation_identity':lambda:{}, '_integrity_payload':lambda:{},
-           '_nonqualifying_scope':lambda *a:{'qualification_eligible':False}}
+           '_nonqualifying_scope':lambda *a:{'qualification_eligible':False},
+           '_r3_quarantine':SimpleNamespace(is_active=lambda key:False, STATUS='R3_QUARANTINED')}
     exec(compile(ast.Module(body=nodes,type_ignores=[]),'research_dashboard.py','exec'),env)
     for name in ('_spread_performance_payload','_ladder_sim_payload'):
         result=env[name]()
@@ -22,6 +24,9 @@ def test_payloads_distinguish_missing_from_explicit_empty():
     ladder=env['_ladder_sim_payload']()
     assert spread['source_available'] is True and spread['total_combos']==0
     assert ladder['source_available'] is True and ladder['actual_trades']==0
+    env['_r3_quarantine']=SimpleNamespace(is_active=lambda key:key=='EXIT_LADDER_SIM', STATUS='R3_QUARANTINED')
+    ladder=env['_ladder_sim_payload']()
+    assert ladder['data_status']=='R3_QUARANTINED' and ladder['empty_reason'].startswith('R3_QUARANTINED')
 
 
 def test_real_loaders_display_unavailable_and_keep_measured_zero():
