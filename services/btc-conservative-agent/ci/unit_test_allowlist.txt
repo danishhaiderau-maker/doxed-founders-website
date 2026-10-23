@@ -625,3 +625,4 @@ test_r17_contract_fields.py
 test_r17_close_position_row.py
 test_r17_gap_detector.py
 test_shadow_exit_backfill_r3_blocked.py
+test_r17_retired_sources.py
