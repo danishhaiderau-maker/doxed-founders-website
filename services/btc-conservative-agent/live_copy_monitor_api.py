@@ -354,7 +354,8 @@ def live_vs_paper_route():
     if err is not None:
         return err
     import live_vs_paper as lvp
-    chains = lcm.build_chains(ctx.get("approvals") or [], ctx.get("reports") or [])
+    reports = ctx.get("reports") or []
+    chains = lcm.build_chains(ctx.get("approvals") or [], reports)
     twins = ctx.get("paper_twins") or {}
     intents = chains["intents"]
     lane = str(request.args.get("lane") or "").strip().upper()
@@ -371,7 +372,9 @@ def live_vs_paper_route():
     def _keep_paper(_ch, _twin):  # paper-only rows carry their lane on the emitted intent
         return True
 
-    accts = list(chains["accounts"].values())
+    # HM R5 G1: the SAME pid/side attach as the funding job's feed (_with_pid_side -> _report_pid_side), so a route row
+    # resolves to the job's cache key (lfl._row_inputs: correlation id, fill window, pid) and a verified row can show.
+    accts = _with_pid_side(chains, reports)
     out = lvp.build(accts, twins, intents,
                     paper_signal_ids=[c for c, i in intents.items() if not lane or lane in str(i.get("lane") or "").upper()],
                     skip_reasons=ctx.get("live_skip_reasons") or {}, lane_filter=None if not lane else
@@ -421,8 +424,15 @@ def _closed_live_chains():
         return []
     reports = list(rf() or [])
     chains = lcm.build_chains(list(af() or []), reports)
+    return [c for c in _with_pid_side(chains, reports) if c.get("closed") or c.get("exit_ack_at_ts")]
+
+
+def _with_pid_side(chains, reports) -> list:
+    """HM R5 G1: the ONE pid/side attach shared by the funding job feed (_closed_live_chains) and the live-vs-paper
+    route: every account chain (build_chains output) gains ``bitfinex_position_id`` / ``position_side`` exactly as the
+    executor reported them for its (correlation id, account) via _report_pid_side. Pure, no I/O; never inferred."""
     found: dict = {}
-    for r in reports:
+    for r in reports or []:
         if not isinstance(r, dict):
             continue
         key = (str(r.get("correlation_id") or ""), str(r.get("account") or "UNKNOWN"))
@@ -432,8 +442,6 @@ def _closed_live_chains():
         cur["side"] = cur["side"] or side
     out = []
     for key, c in chains["accounts"].items():
-        if not (c.get("closed") or c.get("exit_ack_at_ts")):
-            continue
         f = found.get(key) or {}
         out.append(dict(c, bitfinex_position_id=f.get("pid"), position_side=f.get("side")))
     return out

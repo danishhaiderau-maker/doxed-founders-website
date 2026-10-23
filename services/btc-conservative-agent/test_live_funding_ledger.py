@@ -1107,3 +1107,40 @@ def test_F3_chain_feed_takes_no_trade_lock_and_makes_no_relay_call(tmp_path, mon
     feed_src = inspect.getsource(lcma._closed_live_chains) + inspect.getsource(lcma._report_pid_side)
     for bad in ("_CTX", "provider", "requests", "http", "trade_lock", "open(", "append(", "write"):
         assert bad not in feed_src.replace("found.setdefault", "").replace("out.append(", ""), bad
+
+
+# ---- HM R5 G1: the live-vs-paper route and the job resolve a row to the IDENTICAL cache key ---------------------------
+def test_G1_route_rows_carry_the_job_pid_and_hit_the_same_cache_key(tmp_path, monkeypatch):
+    from flask import Flask
+    ap, jr = _feed_files(tmp_path)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "approvals", ap.rows)
+    monkeypatch.setitem(lcma._FUNDING_FEED, "reports", jr.rows)
+    job = _job(post=_fake(sent=[]), get=lambda path, params: [])
+    job.chains_fn = lcma._closed_live_chains
+    job.run_once()
+    job_chains = {c["correlation_id"]: c for c in lcma._closed_live_chains()}
+    job_key = lfl._row_inputs(job_chains["c1"])[5]
+    assert job_key[3] == "5" and job_key in job._cache                       # the job read and cached c1 under its pid
+    seen = []
+
+    def _lookup(ch, paper=None):
+        seen.append(ch)
+        return job.lookup(ch, paper)
+
+    ctx = {"approvals": ap.rows(), "reports": jr.rows(), "paper_twins": {}, "live_funding_readback": _lookup}
+    monkeypatch.setitem(lcma._CTX, "provider", lambda: ctx)
+    monkeypatch.setitem(lcma._CTX, "authorize", lambda: True)
+    app = Flask(__name__)
+    app.register_blueprint(lcma.blueprint)
+    r = app.test_client().get("/api/monitor/live-vs-paper")
+    assert r.status_code == 200, r.data
+    route = {c["correlation_id"]: c for c in seen}
+    assert route["c1"]["bitfinex_position_id"] == "5" and route["c1"]["position_side"] == "LONG"
+    assert lfl._row_inputs(route["c1"])[5] == job_key                         # identical cache key
+    assert job.lookup(route["c1"]) == job.lookup(job_chains["c1"])           # so the route shows the job's result
+    assert job.lookup(route["c1"])["funding_status"] not in ("UNVERIFIED_POSITION_ID_MISSING", "PENDING_READBACK")
+    assert route["c2"]["bitfinex_position_id"] is None                        # never inferred on the route either
+    src = open(lcma.__file__).read()                                          # one shared helper on both paths
+    assert "_with_pid_side(chains, reports)" in src.split("def _closed_live_chains")[1].split("def _with_pid_side")[0]
+    assert "_with_pid_side(chains, reports)" in \
+        src.split("def live_vs_paper_route")[1].split("def _live_funding_lookup")[0]
