@@ -34,7 +34,7 @@ def _ns(names, paper=True, **extra):
 
 
 HELPERS = ("LEVELS_CROSSED_UNFIRED_MAX", "_note_level_crossed_unfired", "_stop_coverage_value",
-           "_levels_crossed_unfired", "_r17_contract_fields")
+           "_levels_crossed_unfired", "_finite_nonneg", "_r17_exit_book_age_ms", "_exit_book_age_ms", "_r17_contract_fields")
 
 
 def _clean_pos(**kw):
@@ -192,3 +192,22 @@ def test_stop_coverage_is_separate_from_the_live_stop_coverage_verified_flag():
     for name, body in fns.items():
         if "stop_coverage_verified" in body:
             assert '"stop_coverage"]' not in body and 'get("stop_coverage")' not in body, name
+
+
+def test_exit_book_age_ms_comes_from_the_exit_pricer_and_is_finite_nonneg():
+    """#845 @470e9cd3 HM R2/R3: exit_book_age_ms = the exit pricer's book_age_ms on latest-row legs (TP/BE/time,
+    BOT_SENT MODEL_TIME), price_age_s*1000 on first-row legs; never negative / non-finite / from a top-of-book fallback."""
+    import paper_fill as pf
+    f = _ns(HELPERS)
+    latest = {"price_source": "BFX_BOOK_10L", "book_row_rule": pf.ROW_RULE_LATEST, "book_age_ms": 640, "price_age_s": None}
+    assert f["_exit_book_age_ms"](latest) == 640
+    first = {"price_source": "BFX_BOOK_10L", "book_row_rule": pf.ROW_RULE_FIRST_AFTER, "book_age_ms": -300,
+             "price_age_s": 0.7}
+    assert f["_exit_book_age_ms"](first) == 700
+    assert f["_exit_book_age_ms"](dict(latest, price_source="BFX_BOOK_TOP_WS")) is None
+    for bad in (float("nan"), float("inf"), -1, None, "640", True):
+        assert f["_exit_book_age_ms"](dict(latest, book_age_ms=bad)) is None, bad
+        assert f["_r17_exit_book_age_ms"]({"exit_book_age_ms": bad, "exit_price_age_s": None}) is None, bad
+    assert f["_r17_exit_book_age_ms"]({"exit_book_age_ms": None, "exit_price_age_s": 0.25}) == 250
+    row = f["_r17_contract_fields"](_clean_pos(exit_price_age_s=None, exit_book_age_ms=640))
+    assert row["exit_price_age_s"] is None and row["exit_book_age_ms"] == 640

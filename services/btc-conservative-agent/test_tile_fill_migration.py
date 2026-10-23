@@ -201,7 +201,7 @@ class _Clock:
 def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None, **extra):
     t = types.SimpleNamespace(time=clock.time, sleep=clock.sleep)
     return _bot_ns(["_PAPER_EXIT_TLS", "_apply_paper_exit_marks", "_tp1_cancel_pending", "_paper_forced_reasons", "_tp1_gate", "_paper_exit_sim", "_paper_forced_exit", "_paper_lane_exit", "_paper_exit_missing_book_seconds",
-                    "_paper_unpriced_marks", "_paper_exit_model_times", "_tp1_pending_action",
+                    "_paper_unpriced_marks", "_paper_exit_model_times", "_exit_book_age_ms", "_finite_nonneg", "_tp1_pending_action",
                     "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",

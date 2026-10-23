@@ -5629,6 +5629,14 @@ def _levels_crossed_unfired(pos: dict):
     return []
 
 
+def _r17_exit_book_age_ms(pos: dict):
+    ms = _finite_nonneg(pos.get("exit_book_age_ms"))
+    if ms is not None:
+        return int(round(float(ms)))
+    age_s = _finite_nonneg(pos.get("exit_price_age_s"))
+    return int(round(float(age_s) * 1000)) if age_s is not None else None
+
+
 def _r17_contract_fields(pos: dict) -> dict:
     """R17 (#845 r17_exclusion.proof_failures) fields that live on the position: stamped on the closed row under
     exactly the contract names. Exit price stale = the exit book row was older than 2 s at the model fill time."""
@@ -5643,8 +5651,9 @@ def _r17_contract_fields(pos: dict) -> dict:
             "exit_eval_price_age_s": pos.get("exit_eval_price_age_s"),
             "exit_price_stale": stale,
             # contract alternative to exit_price_age_s (same measured book age, in ms; None when unmeasured)
-            "exit_book_age_ms": (int(round(float(pos["exit_price_age_s"]) * 1000))
-                                 if isinstance(pos.get("exit_price_age_s"), (int, float)) else None),
+            # contract alternative to exit_price_age_s: the exit pricer's book age (ms; _exit_book_age_ms), else the
+            # same measured exit_price_age_s in ms; None when neither is a finite number >= 0 (never fabricated)
+            "exit_book_age_ms": _r17_exit_book_age_ms(pos),
             "levels_crossed_unfired": _levels_crossed_unfired(pos),
             "stop_coverage": _stop_coverage_value(pos)}
 
@@ -7927,7 +7936,30 @@ def _paper_exit_model_times(t0: float, res: dict, priced_wall: float, attempts: 
             "exit_model_trigger_to_fill_s": (round(float(mf) - float(t0), 3) if mf is not None else None),
             "exit_book_s": res.get("book_s"), "exit_priced_wall_ts": priced_wall,
             "exit_book_wait_s": (round(priced_wall - float(mf), 3) if mf is not None else None),
-            "exit_pricing_attempts": attempts}
+            "exit_pricing_attempts": attempts, "exit_book_age_ms": _exit_book_age_ms(res)}
+
+
+def _finite_nonneg(v):
+    """R17 (HM R2): a finite number >= 0, else None (NaN, +-inf, negatives, bools and strings never pass)."""
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)) or float(v) < 0:
+        return None
+    return v
+
+
+def _exit_book_age_ms(res) -> "int | None":
+    """R17 contract exit_book_age_ms from the EXIT PRICER's own result (accepted instead of exit_price_age_s):
+    latest-row legs (TP/BE/time, BOT_SENT MODEL_TIME) -> the pricer's book_age_ms; first-row-at-or-after legs
+    (resident stop / forced) -> price_age_s*1000 (row-ready minus fill time). Only a BFX_BOOK_10L walk counts; a
+    top-of-book fallback or an unpriced result -> None. Never negative, never non-finite."""
+    import paper_fill as _pf
+    if not isinstance(res, dict) or res.get("price_source") != "BFX_BOOK_10L":
+        return None
+    if res.get("book_row_rule") == _pf.ROW_RULE_FIRST_AFTER:
+        age_s = _finite_nonneg(res.get("price_age_s"))
+        return int(round(float(age_s) * 1000)) if age_s is not None else None
+    ms = _finite_nonneg(res.get("book_age_ms"))
+    return int(round(float(ms))) if ms is not None else None
 
 
 def _paper_exit_missing_book_seconds(trigger_ts: float):

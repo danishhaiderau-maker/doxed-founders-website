@@ -76,8 +76,11 @@ def _hold_scan(monkeypatch, pos, now):
     assert pos.get("levels_scan_to_s") is not None and pos.get("status") == "OPEN"
 
 
-def _close(monkeypatch, reason):
+def _close(monkeypatch, reason, exit_pricer_wrap=None):
     now = time.time()
+    if exit_pricer_wrap is not None:
+        import tile_fill as tf
+        monkeypatch.setattr(tf, "exit_fill", exit_pricer_wrap(tf.exit_fill))
     pos = _pos(now, monkeypatch)
     _hold_scan(monkeypatch, pos, now)
     pos["exit_trigger_ts"] = now - 20.0
@@ -106,13 +109,46 @@ def test_close_position_row_passes_r17_on_a_clean_book(monkeypatch, tmp_path, re
     monkeypatch.chdir(tmp_path)
     row = _close(monkeypatch, reason)
     assert set(r17_fields.REQUIRED_FIELDS) <= set(row), set(r17_fields.REQUIRED_FIELDS) - set(row)
-    assert row["exit_pricing_basis"] == "MODEL_TIME" and row["exit_evidence_status"] == "COMPLETE"
-    assert isinstance(row["exit_price_age_s"], (int, float)) and row["exit_price_age_s"] >= 0  # HM (a)
-    assert row["exit_book_age_ms"] == int(round(row["exit_price_age_s"] * 1000))
-    assert row["levels_crossed_unfired"] == [] and row["stop_coverage"] == qt.STOP_COVERAGE_OK
-    assert row["trigger_price_source"] == "book" and row["exit_priced_delay_source"].startswith("lane_")
+    # BOT_SENT MODEL_TIME latest-row exit leg (TP/BE/time are bot-sent; only the exchange stop is resident)
+    assert row["exit_order_class"] == "BOT_SENT" and row["exit_pricing_basis"] == "MODEL_TIME"
+    # #845 @470e9cd3 HM R1: exact strings, no case folding
+    assert row["exit_evidence_status"] == "COMPLETE" and row["evidence_status"] == "COMPLETE"
+    assert row["trigger_price_source"] == "book" and row["stop_coverage"] == "STOP_COVERAGE_OK"
+    assert row["levels_crossed_unfired"] == [] and row["exit_priced_delay_source"].startswith("lane_")
+    # HM (a) / R2: finite ages >= 0 from the exit pricer; exit_book_age_ms is the pricer's own book_age_ms
+    assert isinstance(row["exit_price_age_s"], (int, float)) and math.isfinite(row["exit_price_age_s"])
+    assert row["exit_price_age_s"] >= 0
+    assert isinstance(row["exit_book_age_ms"], int) and row["exit_book_age_ms"] >= 0
+    assert abs(row["exit_book_age_ms"] - row["exit_price_age_s"] * 1000) <= 1
+    for k in ("entry_walk_bp", "exit_walk_bp", "entry_book_age_ms"):
+        assert isinstance(row[k], (int, float)) and math.isfinite(row[k]) and row[k] >= 0, (k, row[k])
     assert r17.proof_failures(row) == [], r17.proof_failures(row)
     assert not row.get("non_countable") or row.get("non_countable_reason") != "R17_UNPROVEN"
+
+
+@pytest.mark.parametrize("reason", ["TAKE_PROFIT", "BREAKEVEN_LOCK", "PATH_END_60M"])
+def test_bot_sent_model_time_exit_counts_on_exit_book_age_ms_alone(monkeypatch, tmp_path, reason):
+    """#845 @470e9cd3: a latest-row BOT_SENT MODEL_TIME exit whose pricer returns price_age_s=None but book_age_ms
+    passes on exit_book_age_ms (the accepted alternative) - stamped from the exit pricer's book_age_ms."""
+    monkeypatch.chdir(tmp_path)
+
+    def wrap(real):
+        def exit_fill(*a, **k):
+            res = dict(real(*a, **k))
+            res["price_age_s"] = None
+            return res
+        return exit_fill
+
+    row = _close(monkeypatch, reason, exit_pricer_wrap=wrap)
+    assert row["exit_order_class"] == "BOT_SENT" and row["exit_pricing_basis"] == "MODEL_TIME"
+    assert row["exit_price_age_s"] is None
+    assert isinstance(row["exit_book_age_ms"], int) and 0 <= row["exit_book_age_ms"] <= 2000
+    assert r17.proof_failures(row) == [], r17.proof_failures(row)
+    for bad in (-1, float("nan"), float("inf"), None):
+        assert "EXIT_PRICE_AGE_MISSING" in r17.proof_failures(dict(row, exit_book_age_ms=bad)), bad
+    assert "TRIGGER_NOT_BOOK" in r17.proof_failures(dict(row, trigger_price_source="BOOK"))
+    assert "EXIT_EVIDENCE_NOT_COMPLETE" in r17.proof_failures(dict(row, exit_evidence_status="complete"))
+    assert any(f.startswith("STOP_COVERAGE") for f in r17.proof_failures(dict(row, stop_coverage="stop_coverage_ok")))
 
 
 def test_close_position_without_hold_scan_is_level_cross_unknown(monkeypatch, tmp_path):
