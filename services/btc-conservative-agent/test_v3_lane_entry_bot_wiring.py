@@ -373,7 +373,7 @@ def test_per_tile_adaptive_decisions_share_one_pre_entry_receipt_and_every_tile_
         "_adaptive_regime_entry_decision": lambda lane, *_args, **_kwargs: {
             "lane": lane, "policy_id": f"policy-{lane}", "action": "TAKER",
         },
-        "_record_adaptive_entry_decision": lambda lane, decision: recorded.append((lane, decision)),
+        "_record_adaptive_entry_decision": lambda lane, decision, **k: recorded.append((lane, decision)),
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: dict(features),
