@@ -16018,6 +16018,27 @@ def _collector_frozen_signal_ref(source: dict, trade_id: str):
     return saved if saved is not None else incoming
 
 
+def _collector_release_refused_provisional(source: dict, why: str) -> None:
+    """HM C1 (re-review): a source refused before maturation (stale epoch or
+    STORAGE_PRESSURE) must not leave its pending/provisional entry behind.
+    Never raises; a failed release only logs."""
+    try:
+        tid = paper_multiverse_trade_id(
+            source.get("trade_id"),
+            source.get("canonical_trade_id"),
+            source.get("source_trade_id"),
+            source.get("source_order_trade_id"),
+        ) or str(source.get("trade_id") or "")
+        if not tid:
+            return
+        _order_multiverse_pending_src.pop(tid, None)
+        _order_multiverse_state.pop(tid, None)
+        if remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root())):
+            _collector_collection_stat(f"refused_provisional_released_{why}")
+    except Exception as exc:  # noqa: BLE001 - release is best effort, never blocks the refusal
+        logger.warning(f"[COLLECTOR_V22] provisional release failed ({why}): {exc} [PIPELINE ENFORCEMENT]")
+
+
 @_collector_epoch_serialized
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
@@ -16032,12 +16053,14 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             f"trade_id={source.get('trade_id')} epoch_id={_collector_v22_epoch_id()} "
             "[PIPELINE ENFORCEMENT]"
         )
+        _collector_release_refused_provisional(source, "stale_epoch")
         return None
     if storage_blocks_new_events() and not event_already_written(
         str(source.get("trade_id") or source.get("canonical_trade_id") or ""),
         data_dir=str(_data_sync_runtime_root()),
     ):
         logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping new research event [PIPELINE ENFORCEMENT]")
+        _collector_release_refused_provisional(source, "storage_pressure")
         return None
     try:
         tid = paper_multiverse_trade_id(
@@ -17382,6 +17405,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             "[COLLECTOR_V22] stale pre-reset rejected source refused "
             f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
         )
+        _collector_release_refused_provisional(signal, "stale_epoch")
         return None
     try:
         tid = str(signal.get("trade_id") or "")
@@ -17443,6 +17467,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         )
         if storage_blocks_new_events():
             logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping rejected capture [PIPELINE ENFORCEMENT]")
+            _collector_release_refused_provisional(signal, "storage_pressure")
             return None
         tid = str(signal.get("trade_id") or "")
         if tid in _order_multiverse_written:

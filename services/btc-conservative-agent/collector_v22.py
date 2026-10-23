@@ -92,7 +92,26 @@ RETIRED_R17 = "RETIRED_R17"
 # be replay-eligible. They are formally retired (counted, never written) and
 # callers must always drop the pending/provisional entry.
 V22_RETIRED_R17 = "V22_RETIRED_R17"
+# HM C1 (re-review): a re-sync of an already-retired event_id is reported with
+# this reason so callers (and the counter) count each retired id once.
+V22_RETIRED_R17_REPEAT = "V22_RETIRED_R17_REPEAT"
 _V22_RETIRED_R17_COUNT = 0
+_V22_RETIRED_R17_SEEN: "dict[str, None]" = {}
+_V22_RETIRED_R17_SEEN_MAX = 50_000
+_V22_RETIRED_R17_LOCK = threading.Lock()
+
+
+def _note_v22_retired_r17(event_id: str) -> bool:
+    """True the first time ``event_id`` is retired in this process (bounded memory)."""
+    global _V22_RETIRED_R17_COUNT
+    with _V22_RETIRED_R17_LOCK:
+        if event_id in _V22_RETIRED_R17_SEEN:
+            return False
+        _V22_RETIRED_R17_SEEN[event_id] = None
+        while len(_V22_RETIRED_R17_SEEN) > _V22_RETIRED_R17_SEEN_MAX:
+            _V22_RETIRED_R17_SEEN.pop(next(iter(_V22_RETIRED_R17_SEEN)))
+        _V22_RETIRED_R17_COUNT += 1
+        return True
 
 
 def v22_retired_r17_count() -> int:
@@ -1714,9 +1733,7 @@ def write_research_event_once(
         return False, "provisional or replay-ineligible event"
     if not eligibility.get("eligible") and not negative_evidence:
         if is_r17_retired_event(record):
-            global _V22_RETIRED_R17_COUNT
-            _V22_RETIRED_R17_COUNT += 1
-            return False, V22_RETIRED_R17
+            return False, (V22_RETIRED_R17 if _note_v22_retired_r17(event_id) else V22_RETIRED_R17_REPEAT)
         return False, "provisional or replay-ineligible event"
     line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
     if "\n" in line:
