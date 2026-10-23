@@ -13,8 +13,8 @@ Safety model
   ``.jsonl`` / ``.csv`` row streams with every rotated ``.N`` / ``.N.gz`` copy). Paper rows (including the
   PAPER_FILL_FORCED deploy-flatten rows, which live in those CSVs), the paper IOC no-fill shadow file, tape,
   book, deriv, (retired) DISLOC ledgers and shadow streams are all in it.
-  Analyzer-derived reports (``ANALYZER_DERIVED_REPORT_NAMES``) and ``*episode_receipts.jsonl.gz`` shards in an
-  ``analyzer/`` directory at any depth are DELETE too (R5 fresh-only, no archive); they are checked last, so every
+  Analyzer-derived reports (``ANALYZER_DERIVED_REPORT_NAMES``), the analyzer run manifests
+  (``ANALYZER_DERIVED_MANIFEST_NAMES``) and the known producers' episode-receipt shards in an ``analyzer/`` directory at any depth are DELETE too (R5 fresh-only, no archive); they are checked last, so every
   KEEP / CONFIG / RELAY / deny-list rule wins over them.
 * Anything that is neither allowlisted nor an explicit data class is UNCLASSIFIED: it is RETAINED and listed in
   the plan and receipt. Nothing is ever deleted by default.
@@ -139,7 +139,19 @@ ANALYZER_EXTRA_DERIVED_REPORT_NAMES = frozenset({
 })
 ANALYZER_DERIVED_REPORT_NAMES = frozenset(
     rri.ANALYZER_REPORT_FILES | rri.ANALYZER_SIDECAR_REPORT_FILES | ANALYZER_EXTRA_DERIVED_REPORT_NAMES)
+# HM #850 R2 C2: the analyzer's own run manifests describe the deleted reports (analyzer_research_engine_v62.py:118
+# REPORT_MANIFEST_FILE, :129 SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE, :130 POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+# research/past_analysis.py:247 past_analysis_manifest.json): stale after the wipe, so DELETE with them.
+ANALYZER_DERIVED_MANIFEST_NAMES = frozenset({
+    "report_manifest.json", "policy_evidence_library_manifest.json", "safe_policy_genome_v3_exhaustive_manifest.json",
+    "past_analysis_manifest.json",
+})
+# HM #850 R2 C5: only the KNOWN producers' receipt shards (the shared inventory, R4: one list), never a generic
+# ``*episode_receipts.jsonl.gz`` suffix. Today that is analyzer_research_engine_v62.py:120
+# ENTRY_BASELINE_REPLAY_RECEIPTS_FILE; an unknown shard stays UNCLASSIFIED and (being .gz) blocks execute.
 ANALYZER_EPISODE_RECEIPTS_SUFFIX = "episode_receipts.jsonl.gz"
+ANALYZER_EPISODE_RECEIPTS_FILES = frozenset(
+    n for n in rri.ANALYZER_SIDECAR_REPORT_FILES if n.endswith(ANALYZER_EPISODE_RECEIPTS_SUFFIX))
 DENY_NAME_TOKENS = ("live", "arm", "flag", "switch", "tile", "settings")
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
@@ -206,10 +218,12 @@ def classify(relpath: str) -> tuple[str, str]:
         return DELETE, "ROW_STREAM_ROTATED_COPY" if _ANY_ROTATION_RE.match(name) else "ROW_STREAM"
     # 8. analyzer-derived reports and episode-receipt shards in an analyzer/ directory at any depth (R5 fresh-only)
     if ANALYZER_DIR_NAME in parts[:-1]:
-        if name.endswith(ANALYZER_EPISODE_RECEIPTS_SUFFIX):
+        if name in ANALYZER_EPISODE_RECEIPTS_FILES:
             return DELETE, "ANALYZER_EPISODE_RECEIPTS"
         if base in ANALYZER_DERIVED_REPORT_NAMES:
             return DELETE, "ANALYZER_DERIVED_REPORT"
+        if name in ANALYZER_DERIVED_MANIFEST_NAMES:
+            return DELETE, "ANALYZER_DERIVED_MANIFEST"
     return UNCLASSIFIED, "NOT_ALLOWLISTED_NOT_A_DATA_CLASS"
 
 
@@ -268,7 +282,7 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
-RULES_VERSION = "full-reset-rules-v5-analyzer-derived-reports"
+RULES_VERSION = "full-reset-rules-v6-analyzer-manifests-known-receipts"
 
 
 def rules_identity() -> bytes:
@@ -277,7 +291,7 @@ def rules_identity() -> bytes:
     doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
            "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
            "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
-           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "analyzer_dir": ANALYZER_DIR_NAME, "analyzer_reports": sorted(ANALYZER_DERIVED_REPORT_NAMES), "analyzer_receipts_suffix": ANALYZER_EPISODE_RECEIPTS_SUFFIX, "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "analyzer_dir": ANALYZER_DIR_NAME, "analyzer_reports": sorted(ANALYZER_DERIVED_REPORT_NAMES), "analyzer_receipts": sorted(ANALYZER_EPISODE_RECEIPTS_FILES), "analyzer_manifests": sorted(ANALYZER_DERIVED_MANIFEST_NAMES), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 

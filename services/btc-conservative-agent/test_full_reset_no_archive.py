@@ -720,7 +720,7 @@ def test_denylist_does_not_swallow_the_real_delete_classes():
 
 
 def test_rules_version_is_bumped_and_changes_the_plan_sha(vol, monkeypatch):
-    assert frna.RULES_VERSION == "full-reset-rules-v5-analyzer-derived-reports"
+    assert frna.RULES_VERSION == "full-reset-rules-v6-analyzer-manifests-known-receipts"
     before = _plan(vol)["plan_sha256"]
     monkeypatch.setattr(frna, "DENY_NAME_TOKENS", ("live", "arm"))
     assert _plan(vol)["plan_sha256"] != before
@@ -778,9 +778,12 @@ def test_tile_integrity_jsonl_no_longer_blocks_execute(vol):
 ANALYZER_DEPTHS = ("analyzer/{}", "research/analyzer/{}", "runtime_mirror/x/analyzer/{}")
 # Still retained on purpose: manifests / pointers / snapshots / the startup sync gate (UNCLASSIFIED, .json so they do
 # not block execute) and deny-listed names (owner decision: the deny-list is never overridden by a DELETE rule).
-ANALYZER_RETAINED_UNCLASSIFIED = (
+# HM #850 R2 C2: the four analyzer run manifests moved to DELETE (ANALYZER_MANIFESTS_DELETE below).
+ANALYZER_MANIFESTS_DELETE = (
     "report_manifest.json", "policy_evidence_library_manifest.json", "safe_policy_genome_v3_exhaustive_manifest.json",
-    "past_analysis_manifest.json", "manifest.json", "canonical_dataset_current.json", "fly_runtime_snapshot_v1.json",
+    "past_analysis_manifest.json")
+ANALYZER_RETAINED_UNCLASSIFIED = (
+    "manifest.json", "canonical_dataset_current.json", "fly_runtime_snapshot_v1.json",
     "snapshot_meta.json", "verification_index.json", "bot_analyzer_sync.json")
 ANALYZER_DENYLISTED = ("tile_evidence_points_report.json", "tile_paired_comparison_report.json",
                        "shadow_vs_live_entry_report.json")
@@ -789,9 +792,13 @@ ANALYZER_DENYLISTED = ("tile_evidence_points_report.json", "tile_paired_comparis
 def test_n1_entry_baseline_sidecars_are_delete_at_any_depth():
     for tmpl in ANALYZER_DEPTHS:
         assert frna.classify(tmpl.format("entry_baseline_replay_report.json")) == (frna.DELETE, "ANALYZER_DERIVED_REPORT")
-        for shard in ("entry_baseline_replay_episode_receipts.jsonl.gz", "foo_episode_receipts.jsonl.gz",
-                      "episode_receipts.jsonl.gz"):
-            assert frna.classify(tmpl.format(shard)) == (frna.DELETE, "ANALYZER_EPISODE_RECEIPTS"), tmpl.format(shard)
+        assert frna.classify(tmpl.format("entry_baseline_replay_episode_receipts.jsonl.gz")) == (
+            frna.DELETE, "ANALYZER_EPISODE_RECEIPTS")
+        # HM #850 R2 C5: an unknown producer's shard is NOT deleted by suffix; it stays UNCLASSIFIED and blocks execute
+        for shard in ("foo_episode_receipts.jsonl.gz", "episode_receipts.jsonl.gz", "x_episode_receipts.jsonl.gz"):
+            assert frna.classify(tmpl.format(shard)) == (frna.UNCLASSIFIED, "NOT_ALLOWLISTED_NOT_A_DATA_CLASS"), shard
+            assert frna.is_data_file(tmpl.format(shard))
+    assert frna.ANALYZER_EPISODE_RECEIPTS_FILES == {"entry_baseline_replay_episode_receipts.jsonl.gz"}
     # only inside an analyzer/ directory: a top-level or foreign-dir copy keeps its v4 classification
     assert frna.classify("entry_baseline_replay_report.json")[0] == frna.UNCLASSIFIED
     assert frna.classify("other/entry_baseline_replay_report.json")[0] == frna.UNCLASSIFIED
@@ -807,7 +814,7 @@ def test_n1_every_shared_analyzer_report_is_delete_unless_an_earlier_rule_wins()
     for name in sorted(frna.ANALYZER_DERIVED_REPORT_NAMES):
         for tmpl in ANALYZER_DEPTHS:
             action, reason = frna.classify(tmpl.format(name))
-            if name.endswith(frna.ANALYZER_EPISODE_RECEIPTS_SUFFIX):
+            if name in frna.ANALYZER_EPISODE_RECEIPTS_FILES:
                 assert (action, reason) == (frna.DELETE, "ANALYZER_EPISODE_RECEIPTS"), name
             elif any(t in name for t in frna.DENY_NAME_TOKENS):
                 assert (action, reason) == (frna.UNCLASSIFIED, "DENYLIST_NAME_NEVER_DELETE"), name
@@ -833,6 +840,12 @@ def test_n1_previously_unclassified_inventory_is_now_delete_and_the_rest_is_pinn
         assert frna.classify("analyzer/" + name)[0] == frna.UNCLASSIFIED, name
     for name in frna.ANALYZER_EXTRA_DERIVED_REPORT_NAMES:
         assert frna.classify("analyzer/" + name) == (frna.DELETE, "ANALYZER_DERIVED_REPORT"), name
+    assert frna.ANALYZER_DERIVED_MANIFEST_NAMES == set(ANALYZER_MANIFESTS_DELETE)
+    for name in ANALYZER_MANIFESTS_DELETE:
+        for tmpl in ANALYZER_DEPTHS:
+            assert frna.classify(tmpl.format(name)) == (frna.DELETE, "ANALYZER_DERIVED_MANIFEST"), name
+        assert frna.classify(name)[0] == frna.UNCLASSIFIED  # only inside an analyzer/ directory
+        assert frna.classify("other/" + name)[0] == frna.UNCLASSIFIED
     # KEEP rules still win inside analyzer/
     assert frna.classify("analyzer/state.json")[0] == frna.KEEP
     assert frna.classify("analyzer/pathway_lane_specs.json")[0] == frna.KEEP
@@ -843,9 +856,9 @@ def test_n1_previously_unclassified_inventory_is_now_delete_and_the_rest_is_pinn
 def test_n1_plan_deletes_analyzer_reports_and_receipt_shards_and_unblocks_execute(vol, capsys):
     rt = vol / "runtime"
     deleted = ("analyzer/entry_baseline_replay_report.json", "analyzer/entry_baseline_replay_episode_receipts.jsonl.gz",
-               "research/analyzer/x_episode_receipts.jsonl.gz", "analyzer/fast_cut_sweep_report.json",
-               "deep/a/analyzer/historical_trade_cohort_report.json")
-    retained = ("analyzer/report_manifest.json", "analyzer/tile_evidence_points_report.json")
+               "research/analyzer/entry_baseline_replay_episode_receipts.jsonl.gz", "analyzer/fast_cut_sweep_report.json",
+               "deep/a/analyzer/historical_trade_cohort_report.json", "analyzer/report_manifest.json")
+    retained = ("analyzer/manifest.json", "analyzer/shadow_vs_live_entry_report.json")
     for rel in deleted + retained:
         _w(rt / rel, "{}\n")
     plan = _plan(vol)
@@ -858,6 +871,7 @@ def test_n1_plan_deletes_analyzer_reports_and_receipt_shards_and_unblocks_execut
     assert not [u for u in plan["unclassified_data_files"] if "analyzer/" in u["rel"]]
     assert plan["delete_by_class"]["ANALYZER_EPISODE_RECEIPTS"]["files"] == 2
     assert plan["delete_by_class"]["ANALYZER_DERIVED_REPORT"]["files"] == 3
+    assert plan["delete_by_class"]["ANALYZER_DERIVED_MANIFEST"]["files"] == 1
     assert _run(_good(vol)) == 0
     for rel in deleted:
         assert not (rt / rel).exists(), rel
@@ -869,3 +883,12 @@ def test_n1_analyzer_rules_change_the_plan_sha(vol, monkeypatch):
     before = _plan(vol)["plan_sha256"]
     monkeypatch.setattr(frna, "ANALYZER_DERIVED_REPORT_NAMES", frozenset({"x.json"}))
     assert _plan(vol)["plan_sha256"] != before
+
+
+def test_c5_unknown_receipt_shard_blocks_execute(vol, capsys):
+    """HM #850 R2 C5: a shard from an unknown producer is never deleted by suffix; it blocks execute until classified."""
+    _w(vol / "runtime" / "analyzer" / "mystery_episode_receipts.jsonl.gz", "x")
+    plan = _plan(vol)
+    assert "analyzer/mystery_episode_receipts.jsonl.gz" in {u["rel"] for u in plan["unclassified_data_files"]}
+    assert _run(_good(vol)) == 9
+    assert (vol / "runtime" / "analyzer" / "mystery_episode_receipts.jsonl.gz").exists()
