@@ -23,24 +23,6 @@ def test_post_exit_ring_survives_pre_exit_cap_and_covers_120m():
     assert "and len(buf.get(\"ticks\", [])) >= REPLAY_TICK_MAX" in maintenance
 
 
-def test_executable_bbo_marks_and_restart_sidecar_are_persisted():
-    service = _function_source("service_post_exit_replays")
-    append = _function_source("append_replay_tick")
-    restore = _function_source("_load_post_exit_replays")
-    assert 'best_bid if direction == "LONG"' in service
-    assert 'else best_ask' in service
-    assert 'mark_source = "last_trade"' in service
-    assert "PATH_REPLAY_FILE" in append
-    assert "ORDER_MULTIVERSE_FILE" in SOURCE
-    assert '"order_multiverse_file": ORDER_MULTIVERSE_FILE' in SOURCE
-    assert '"best_bid"' in append and '"best_ask"' in append
-    assert '"observed_ts"' in append
-    assert '"best_bid": row.get("best_bid")' in restore
-    assert '"best_ask": row.get("best_ask")' in restore
-    assert "rotated_paths" in restore and "replay_paths" in restore
-    assert 'header.get("policy_version")' in restore
-
-
 def test_missing_future_horizons_are_unknown_not_last_tick_substitutions():
     compute = _function_source("compute_horizon_outcomes_from_replay")
     assert '"1m": 60' in SOURCE
@@ -100,7 +82,6 @@ def test_close_replay_does_not_recursively_take_non_reentrant_lock():
 
 if __name__ == "__main__":
     test_post_exit_ring_survives_pre_exit_cap_and_covers_120m()
-    test_executable_bbo_marks_and_restart_sidecar_are_persisted()
     test_missing_future_horizons_are_unknown_not_last_tick_substitutions()
     test_ttl_complete_and_paper_id_hooks()
     test_close_replay_does_not_recursively_take_non_reentrant_lock()

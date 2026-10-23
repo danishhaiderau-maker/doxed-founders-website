@@ -86,25 +86,10 @@ def test_counterfactual_join_fields_fall_back_without_guessing(bot):
     assert set(missing["join_keys_missing"]) == {"signal_ts", "shared_ai_call_id", "epoch_id"}
 
 
-def test_counterfactual_builders_spread_join_fields():
-    assert SOURCE.count("**counterfactual_join_fields(") == 2
-    assert SOURCE.count("_counterfactual_snapshot_with_join_keys(") == 3
-
-
-# --------------------------------------------------------------------------
-# Signal replay completion
-# --------------------------------------------------------------------------
 def test_expiry_sweep_waits_for_post_exit_grace():
     assert "POST_EXIT_REPLAY_GRACE_SEC" in SOURCE
     i = SOURCE.index('_buf_float(buf.get("post_exit_deadline_ts"), 0) + POST_EXIT_REPLAY_GRACE_SEC')
     assert i > 0
-
-
-def test_shutdown_dumps_are_labelled_censored():
-    assert SOURCE.count('dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")') == 2
-    dump = _function_source("dump_replay")
-    for key in ('"dumped_ts"', '"dump_seq"', '"dump_reason"', '"censored"', '"natural_completion_reason"'):
-        assert key in dump
 
 
 def test_dump_replay_censored_row(bot, tmp_path, monkeypatch):

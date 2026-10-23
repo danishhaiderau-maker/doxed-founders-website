@@ -5,7 +5,6 @@ import pytest
 
 from microstructure_tape import build_bucket
 from qualification_horizon_index import TapeIndexError, TapeOffsetIndex, produce_post_exit_path
-from research_v3_store import V3EvidenceStore
 
 
 def _append(path: Path, start: int, end: int, *, bad_depth: int | None = None):
@@ -105,75 +104,21 @@ def test_prefix_mutation_and_index_corruption_fail_closed(tmp_path):
         TapeOffsetIndex(tmp_path)
 
 
-def test_indexed_row_mutation_is_detected_at_query_and_cannot_publish(tmp_path):
-    tape = tmp_path / "market_microstructure_1s.jsonl"
-    _append(tape, 1000, 1010)
-    index = TapeOffsetIndex(tmp_path); index.refresh(max_bytes=1_000_000)
-    with tape.open("r+b") as handle:
-        handle.seek(20); original = handle.read(1); handle.seek(20)
-        handle.write(b"0" if original != b"0" else b"1")
-    receipt = produce_post_exit_path(
-        _candidate(), data_dir=tmp_path, epoch_id="epoch-a", now_ts=1010,
-        horizon_sec=10, index=index,
-    )
-    assert receipt["post_observation"]["complete"] is False
-    assert "POST_OBSERVATION_SOURCE_INTEGRITY_FAILED" in receipt["post_observation"]["blockers"]
-    assert receipt["segment_ref"] is None
-
-
-def test_query_bounds_fail_closed_and_never_publish_partial_path(tmp_path):
-    tape = tmp_path / "market_microstructure_1s.jsonl"
-    _append(tape, 1000, 1010)
-    index = TapeOffsetIndex(tmp_path); index.refresh(max_bytes=1_000_000)
-    receipt = produce_post_exit_path(
-        _candidate(), data_dir=tmp_path, epoch_id="epoch-a", now_ts=1010,
-        horizon_sec=10, index=index, max_query_rows=4,
-    )
-    assert receipt["post_observation"]["complete"] is False
-    assert "POST_OBSERVATION_QUERY_BOUNDS_EXHAUSTED" in receipt["post_observation"]["blockers"]
-    assert receipt["segment_ref"] is None
-
-
-def test_missing_depth_remains_unknown(tmp_path):
-    tape = tmp_path / "market_microstructure_1s.jsonl"
-    _append(tape, 1000, 1010, bad_depth=1005)
-    index = TapeOffsetIndex(tmp_path); index.refresh(max_bytes=1_000_000)
-    receipt = produce_post_exit_path(
-        _candidate(), data_dir=tmp_path, epoch_id="epoch-a", now_ts=1010,
-        horizon_sec=10, index=index,
-    )
-    assert receipt["post_observation"]["complete"] is False
-    assert "POST_OBSERVATION_DEPTH_INCOMPLETE" in receipt["post_observation"]["blockers"]
-
-
-def test_complete_path_is_content_addressed_and_idempotent(tmp_path):
-    tape = tmp_path / "market_microstructure_1s.jsonl"
-    _append(tape, 1000, 1010)
-    index = TapeOffsetIndex(tmp_path); index.refresh(max_bytes=1_000_000)
-    first = produce_post_exit_path(
-        _candidate(), data_dir=tmp_path, epoch_id="epoch-a", now_ts=1010,
-        horizon_sec=10, index=index,
-    )
-    second = produce_post_exit_path(
-        _candidate(), data_dir=tmp_path, epoch_id="epoch-a", now_ts=1010,
-        horizon_sec=10, index=index,
-    )
-    assert first["post_observation"]["complete"] is True
-    assert first["write"]["written"] is True
-    assert second["write"]["duplicate"] is True
-    store = V3EvidenceStore(tmp_path, epoch_id="epoch-a")
-    rows = store.ledger_path("market_segment").read_text().splitlines()
-    assert len(rows) == 1
-    assert json.loads(rows[0])["context_role"] == "POST_EXIT_PATH"
-
-
-def test_not_mature_or_nonterminal_does_not_query_or_write(tmp_path):
-    candidate = _candidate(); candidate["terminal"] = False
-    receipt = produce_post_exit_path(
-        candidate, data_dir=tmp_path, epoch_id="epoch-a", now_ts=1005,
-        horizon_sec=10,
-    )
-    assert receipt["mature"] is False
-    assert set(receipt["post_observation"]["blockers"]) == {
-        "LIFECYCLE_NOT_TERMINAL", "QUALIFICATION_HORIZON_NOT_MATURE",
-    }
+def test_retired_r17_never_queries_or_writes(tmp_path):
+    """R17: market_segments writers are retired; the producer returns
+    "disabled: R17" without querying the tape or writing a segment, for a
+    terminal mature candidate as well as a non-terminal one."""
+    _append(tmp_path / "microstructure_tape.jsonl", 900, 1100)
+    for terminal in (True, False):
+        candidate = _candidate(); candidate["terminal"] = terminal
+        receipt = produce_post_exit_path(
+            candidate, data_dir=tmp_path, epoch_id="epoch-a", now_ts=5000,
+            horizon_sec=10,
+        )
+        assert receipt["mature"] is False
+        assert receipt["status"] == "disabled: R17"
+        assert receipt["post_observation"]["blockers"] == ["MARKET_SEGMENTS_RETIRED_R17"]
+        assert receipt["query_receipt"]["not_run"] is True
+        assert receipt["segment_ref"] is None
+        assert receipt["write"]["written"] is False
+    assert not (tmp_path / "v3" / "market_segments").exists()

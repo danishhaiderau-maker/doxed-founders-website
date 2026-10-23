@@ -103,6 +103,8 @@ def v22_retired_r17_count() -> int:
 def is_r17_retired_event(record: Mapping[str, Any]) -> bool:
     tape = record.get("canonical_tape") if isinstance(record, Mapping) else None
     return isinstance(tape, Mapping) and tape.get("path_1m_status") == RETIRED_R17 and not tape.get("path_1m")
+
+
 _entry_children_memo: "dict[str, list]" = {}
 _entry_children_memo_lock = threading.Lock()
 

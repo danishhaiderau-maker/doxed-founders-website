@@ -8,7 +8,6 @@ import lifecycle_pipeline
 import lifecycle_pipeline_worker
 import research_v3_store
 from lifecycle_bundles import LifecycleKey
-from microstructure_tape import build_bucket
 
 
 NOW = 20_000.0
@@ -270,49 +269,6 @@ def test_claimed_retry_cannot_starve_large_dirty_backlog(tmp_path, monkeypatch):
     assert first["candidate_count"] == second["candidate_count"] == 5
     assert first["scan"]["pending_dirty_lifecycles"] == 4_872
     assert second["scan"]["pending_dirty_lifecycles"] == 4_867
-
-
-def test_complete_indexed_horizon_obeys_reindex_before_completion(tmp_path, monkeypatch):
-    _patch_provenance(monkeypatch)
-    rows = _ready_rows()[:-1]
-    rows[0]["chase_schedule"]["terminal_ts"] = 10_000.0
-    for row in rows:
-        _append(tmp_path, row)
-    tape = tmp_path / "market_microstructure_1s.jsonl"
-    with tape.open("w", encoding="utf-8", newline="\n") as handle:
-        for ts in range(10_000, 17_200):
-            row = build_bucket(
-                bucket_ts=ts, bid=99, ask=101, bid_qty=2, ask_qty=3,
-                last=100, source_ts=ts + 0.9,
-            )
-            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
-
-    first = _run_until(
-        tmp_path, lambda report: bool(report["results"]), now=17_200.0,
-        max_tape_index_bytes=16 * 1024 * 1024, max_tape_index_rows=10_000,
-    )
-    assert first["results"][0]["stage"] == "QUALIFICATION_HORIZON_PENDING_REINDEX"
-    assert first["completion_appended_count"] == 0
-    assert first["bundle_count"] == 0
-
-    second = _run_until(
-        tmp_path, lambda report: report["completion_appended_count"] == 1,
-        now=17_380.0,
-    )
-    assert second["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX", second["results"][0]
-    assert second["completion_appended_count"] == 1
-    assert second["bundle_count"] == 0
-
-    def materialize(_root, _key, indexed_rows, **_kwargs):
-        assert any(row.get("context_role") == "POST_EXIT_PATH" for row in indexed_rows)
-        assert any("bundle_completion" in row for row in indexed_rows)
-        return {"written": True, "completion": {"blockers": []}}
-    monkeypatch.setattr(lifecycle_pipeline, "materialize_bundle", materialize)
-    third = _run_until(
-        tmp_path, lambda report: report["bundle_count"] == 1, now=17_380.0,
-    )
-    assert third["results"][0]["stage"] == "BUNDLE_MATERIALIZED_OR_VERIFIED"
-    assert third["bundle_count"] == 1
 
 
 def test_pressure_mode_clamps_all_relevant_limits(tmp_path):
