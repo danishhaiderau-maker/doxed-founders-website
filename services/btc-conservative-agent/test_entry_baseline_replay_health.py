@@ -59,7 +59,8 @@ def test_input_blockers_item_degrades_the_level(tmp_path):
     assert item["status"] == "DEGRADED" and item["reason_code"] == "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
     (tmp_path / ib.ENTRY_BASELINE_REPLAY_REPORT).write_text(json.dumps(_report(a=_summary(3, 1, full=2))))
     assert ib.entry_baseline_replay_item(tmp_path)["status"] == "OK"
-    assert ib.entry_baseline_replay_item(tmp_path / "missing") is None
+    missing = ib.entry_baseline_replay_item(tmp_path / "missing")  # HM #847 N2
+    assert (missing["status"], missing["reason_code"]) == ("DEGRADED", "REPORT_MISSING")
 
 
 def test_analyzer_stamps_health_on_the_report_row():

@@ -474,13 +474,15 @@ def protection_replay_item(report_dir: Path) -> dict:
 ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
 
 
-def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any] | None:
-    """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills."""
+def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any]:
+    """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills, or the report is missing."""
     from research.entry_baseline_replay import replay_health
 
     report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
     if report is None:
-        return None
+        # HM #847 N2: an absent report is a measured gap, never silently dropped.
+        return _item("entry_baseline_replay", "DEGRADED", "REPORT_MISSING",
+                     f"{ENTRY_BASELINE_REPLAY_REPORT} was not produced.", side="ANALYZER")
     health = replay_health(report)
     status = "OK" if health["status"] == "OK" else "DEGRADED"
     return _item(
@@ -529,9 +531,7 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
         signal_replay_item(report_dir, cohort=exit_ladder["evidence"].get("paper_cohort")),
         counterfactual_item(report_dir, data_dir, epoch_id),
     ]
-    baseline = entry_baseline_replay_item(report_dir)
-    if baseline is not None:
-        items.append(baseline)
+    items.append(entry_baseline_replay_item(report_dir))
     promotion = segment_promotion_item(data_dir)
     if promotion is not None:
         items.append(promotion)

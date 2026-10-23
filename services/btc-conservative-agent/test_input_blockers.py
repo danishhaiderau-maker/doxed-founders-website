@@ -327,8 +327,11 @@ class InputBlockersTest(unittest.TestCase):
         by_input = {item["input"]: item for item in document["items"]}
         self.assertEqual(set(by_input), {
             "protection_replay_window", "exit_ladder_simulator", "cross_world_evidence",
-            "trade_accumulator", "signal_replay", "counterfactual_stream",
+            "trade_accumulator", "signal_replay", "counterfactual_stream", "entry_baseline_replay",
         })
+        # HM #847 N2: the fixture writes no entry_baseline_replay_report.json => DEGRADED REPORT_MISSING.
+        self.assertEqual((by_input["entry_baseline_replay"]["status"], by_input["entry_baseline_replay"]["reason_code"]),
+                         ("DEGRADED", "REPORT_MISSING"))
         self.assertEqual(by_input["protection_replay_window"]["status"], "DEGRADED")
         self.assertEqual(by_input["cross_world_evidence"]["reason_code"], "FEWER_THAN_TWO_COMPUTABLE_WORLDS")
         self.assertEqual(by_input["signal_replay"]["status"], "DEGRADED")
