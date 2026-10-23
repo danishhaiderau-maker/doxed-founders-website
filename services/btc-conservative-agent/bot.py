@@ -346,7 +346,6 @@ from frozen_policy_trial import FrozenPolicyTrial
 _FROZEN_POLICY_TRIAL = FrozenPolicyTrial.from_env()
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
-    _load_offline_sim_jsonl_revisions as _pure_load_offline_sim_jsonl_revisions,
     _normalize_platform_bitfinex_evidence as _pure_normalize_platform_bitfinex_evidence,
     _offline_sim_jsonl_paths as _pure_offline_sim_jsonl_paths,
     _platform_relay_evidence_index as _pure_platform_relay_evidence_index,
@@ -46970,22 +46969,24 @@ def _memory_oom_check(now: float) -> dict:
 
 
 def _offline_sim_epoch_check() -> dict:
-    """fly.offline_sim_epoch_floor: RED when the fresh floor was unreadable on the last loader call (evidence from rotated
-    shards is being skipped, fail closed); GREEN with the last load stats otherwise."""
-    st = dict(globals().get("_OFFLINE_SIM_LOAD_STATS") or {})
-    _loaded = bool(st)
-    try:  # live re-read every health cycle, independent of the loader cadence
+    """fly.offline_sim_epoch_floor. HM C9 (R17): the offline-sim shard loader is retired ("source retired (R17)"), so
+    there is no "no loader call yet" AMBER any more. The fresh-epoch floor itself is still used (live guardian,
+    non-accum plans): RED when it is unreadable, GREEN otherwise."""
+    st: dict = {"loader": "source retired (R17)"}
+    try:  # live re-read every health cycle
         _fl, _src, _err = _offline_sim_epoch_floor_detail()
         st.update(live_floor_value=_fl, live_floor_source=_src, live_floor_error=_err)
         if _fl is None:
             st["floor_unreadable"] = True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        st.update(floor_unreadable=True, live_floor_error=f"{type(exc).__name__}")
     if st.get("floor_unreadable"):
-        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; stats={st}",
-                "threshold": "fresh-epoch floor readable (else all rotated shards skipped, fail closed)"}
-    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN" if _loaded else "AMBER",
-            "observed": f"stats={st}" if _loaded else f"no loader call yet; live floor={st.get('live_floor_value')} src={st.get('live_floor_source')}", "threshold": "fresh-epoch floor readable"}
+        return {"id": "fly.offline_sim_epoch_floor", "status": "RED", "observed": f"floor unreadable; {st}",
+                "threshold": "fresh-epoch floor readable (live guardian / non-accum plans fail closed without it)"}
+    return {"id": "fly.offline_sim_epoch_floor", "status": "GREEN",
+            "observed": f"offline-sim loader: source retired (R17); live floor={st.get('live_floor_value')} "
+                        f"src={st.get('live_floor_source')}",
+            "threshold": "fresh-epoch floor readable"}
 
 
 def _system_health_fly_self_checks(now: float | None = None) -> list:
@@ -57569,8 +57570,7 @@ def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIO
     return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
 
 
-_OFFLINE_SIM_PERIODIC_ROTATIONS = 8   # periodic analytics path; the every-10th-tick catch-up scans all shards itself
-_OFFLINE_SIM_LOAD_STATS: dict = {}
+_OFFLINE_SIM_LOAD_STATS: dict = {}   # loader retired (R17); kept empty for the health check below
 
 
 def _offline_sim_epoch_floor_detail():
@@ -57602,34 +57602,9 @@ def _offline_sim_epoch_floor():
     return fl
 
 
-def _load_offline_sim_jsonl_revisions(
-    active_path,
-    max_rotations=None,
-    target_trade_ids=None,
-):
-    if max_rotations is None:
-        max_rotations = globals().get("_OFFLINE_SIM_PERIODIC_ROTATIONS", 128)
-    floor_fn = globals().get("_offline_sim_epoch_floor")
-    _floor = floor_fn() if callable(floor_fn) else None
-    _stats = globals().get("_OFFLINE_SIM_LOAD_STATS")
-    if isinstance(_stats, dict):
-        _stats["floor_unreadable"] = bool(_floor is None and callable(floor_fn))
-        _stats["floor_checked_ts"] = time.time()
-        _fd = _offline_sim_epoch_floor_detail() if _floor is not None else (None, None, "floor unreadable")
-        _stats["floor_source"], _stats["floor_error"] = _fd[1], _fd[2]
-        _stats["floor_value_utc"] = datetime.fromtimestamp(_floor, timezone.utc).isoformat() if _floor else None
-        _stats["next_check_ts"] = time.time() + 600  # rechecked on every loader call (each analytics cycle)
-    return _pure_load_offline_sim_jsonl_revisions(
-        active_path,
-        max_rotations=max_rotations,
-        target_trade_ids=target_trade_ids,
-        min_ts=_floor,
-        stats=globals().get("_OFFLINE_SIM_LOAD_STATS"),
-        floor_unreadable=_floor is None and callable(floor_fn),   # fail closed: skip ALL rotated shards
-        on_read_error=lambda path, exc: logger.debug(
-            f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
-        ),
-    )
+# HM C9 (R17): _load_offline_sim_jsonl_revisions (the signal_replay/snapshot shard loader) is deleted; it had no
+# callers once the offline simulator was retired. The fresh-epoch floor above stays: the live guardian and the
+# non-accum plans route still use it.
 
 
 # R17 (23 Oct): offline_simulator and the counterfactual catch-up are retired.

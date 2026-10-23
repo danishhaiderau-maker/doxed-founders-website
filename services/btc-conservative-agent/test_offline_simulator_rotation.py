@@ -61,7 +61,10 @@ def _load_functions(*names):
 
 
 def test_rotation_loader_is_bounded_malformed_safe_and_newest_revision_wins(tmp_path):
-    funcs = _load_functions("_offline_sim_jsonl_paths", "_load_offline_sim_jsonl_revisions")
+    funcs = _load_functions("_offline_sim_jsonl_paths")
+    # HM C9: bot's _load_offline_sim_jsonl_revisions wrapper is deleted; the pure loader is still the shared helper.
+    assert "def _load_offline_sim_jsonl_revisions(" not in SOURCE
+    funcs["_load_offline_sim_jsonl_revisions"] = pure_relay._load_offline_sim_jsonl_revisions
     active = tmp_path / "signal_snapshot.jsonl"
     (tmp_path / "signal_snapshot.jsonl.1").write_text(
         '{"trade_id":"cont-old","revision":1}\n'
