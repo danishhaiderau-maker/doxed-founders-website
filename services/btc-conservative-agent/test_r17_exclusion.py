@@ -405,3 +405,16 @@ def test_845_fail_closed_rule_alone_already_rejects_1s_priced_entries(which, mon
     assert {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "ENTRY_PRICE_AGE_MISSING",
             "STOP_COVERAGE_MISSING"} <= set(alone)
     assert r17.non_countable_reason(row).startswith("R17_UNPROVEN:")
+
+
+def test_entry_proof_failures_is_the_entry_subset_of_proof_failures():
+    """HM #848 C3: research entry receipts gate on the same entry rule the row check uses (one module)."""
+    assert r17.entry_proof_failures(good_row()) == []
+    bad = good_row(trigger_price_source="ticker", delay_source="default", evidence_status="INCOMPLETE",
+                   entry_book_age_ms=None, entry_price_source="market_microstructure_1s")
+    entry = r17.entry_proof_failures(bad)
+    assert entry == ["TRIGGER_NOT_BOOK", "DELAY_NOT_MEASURED", "ENTRY_EVIDENCE_NOT_COMPLETE",
+                     "ENTRY_PRICE_AGE_MISSING", "ENTRY_PRICED_ON_1S_TAPE"]
+    assert set(entry) <= set(r17.proof_failures(bad))
+    exit_only = good_row(exit_walk_bp=None, stop_coverage=None)
+    assert r17.entry_proof_failures(exit_only) == [] and r17.proof_failures(exit_only)

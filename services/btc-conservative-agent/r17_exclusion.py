@@ -156,23 +156,36 @@ def _nonneg(v) -> bool:
     return n is not None and n >= 0
 
 
-def proof_failures(row) -> list:
-    """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
+def entry_proof_failures(row) -> list:
+    """The ENTRY-leg subset of ``proof_failures`` (trigger source, measured delay, COMPLETE evidence, book age, never
+    the 1 s tape). One rule, one module (R4): research entry receipts (book_limit_entry) gate on this, and the full
+    row check below re-uses it, so the entry rule cannot drift from the row rule (HM #848 C3)."""
     out = []
     tps = row.get("trigger_price_source")
     if _exact(tps) not in F.TRIGGER_PRICE_SOURCE_OK:
         out.append("TRIGGER_SOURCE_MISSING" if _missing(tps) else "TRIGGER_NOT_BOOK")
     if not _delay_measured(row.get("delay_source")):
         out.append("DELAY_SOURCE_MISSING" if _missing(row.get("delay_source")) else "DELAY_NOT_MEASURED")
+    if _exact(row.get("evidence_status")) not in F.EVIDENCE_OK:
+        out.append("ENTRY_EVIDENCE_NOT_COMPLETE")
+    if not _nonneg(row.get("entry_book_age_ms")):
+        out.append("ENTRY_PRICE_AGE_MISSING")
+    if entry_priced_on_1s_tape(row):
+        out.append(F.REASON_ENTRY_PRICED_ON_1S_TAPE)
+    return out
+
+
+def proof_failures(row) -> list:
+    """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
+    entry = entry_proof_failures(row)
+    out = [r for r in entry if r in ("TRIGGER_SOURCE_MISSING", "TRIGGER_NOT_BOOK",
+                                     "DELAY_SOURCE_MISSING", "DELAY_NOT_MEASURED")]
     resident_exit = str(row.get("exit_pricing_basis") or "") == F.RESIDENT_EXIT_BASIS
     if not resident_exit and not _delay_measured(row.get("exit_priced_delay_source")):
         out.append("EXIT_DELAY_NOT_MEASURED")
     if _num(row.get("entry_walk_bp")) is None:
         out.append("ENTRY_NOT_BOOK_WALKED")
-    if _exact(row.get("evidence_status")) not in F.EVIDENCE_OK:
-        out.append("ENTRY_EVIDENCE_NOT_COMPLETE")
-    if not _nonneg(row.get("entry_book_age_ms")):
-        out.append("ENTRY_PRICE_AGE_MISSING")
+    out.extend(r for r in entry if r in ("ENTRY_EVIDENCE_NOT_COMPLETE", "ENTRY_PRICE_AGE_MISSING"))
     if _num(row.get("exit_walk_bp")) is None:
         out.append("EXIT_NOT_BOOK_WALKED")
     if _num(row.get("exit_legs_unmeasured")) != 0:
@@ -188,7 +201,7 @@ def proof_failures(row) -> list:
     sc = _exact(row.get("stop_coverage"))
     if sc not in F.STOP_COVERAGE_OK:
         out.append("STOP_COVERAGE_MISSING" if _missing(row.get("stop_coverage")) else "STOP_COVERAGE_UNKNOWN")
-    if entry_priced_on_1s_tape(row):
+    if F.REASON_ENTRY_PRICED_ON_1S_TAPE in entry:
         out.append(F.REASON_ENTRY_PRICED_ON_1S_TAPE)
     return out
 
