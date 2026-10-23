@@ -165,9 +165,9 @@ TAPE = "market_microstructure_1s.jsonl"
 DAY = 86400.0
 
 
-def test_tape_cap_is_days_based_above_60mb_per_day():
+def test_tape_cap_is_days_based_with_60mb_per_day_backstop():
     days, per_day = rotation_cap.CAP_DAYS[TAPE]
-    assert days >= 14 and per_day > 60 * rotation_cap.MB
+    assert days == 14 and per_day == 60 * rotation_cap.MB  # Strategist's spec (RK 23 Oct)
     rot, cap_bytes = rotation_cap.CAP_ALLOW[TAPE]
     assert cap_bytes == int(days * per_day) and rot >= 10_000  # count never binds; age + byte backstop do
 

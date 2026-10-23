@@ -97,16 +97,17 @@ CAP_ALLOW["chase_offset_touch_grid.jsonl"] = (10, 200 * MB)
 # features and coverage ONLY (e.g. the tape_minute_bars rebuild, 14-day
 # DEFAULT_RETENTION_MINUTES); it NEVER prices a fill, stop, TP or exit.
 # Rotations younger than ``days`` are kept; older ones go. The byte backstop is
-# days x mb_per_day, sized above RK's ~60 MB/day so the age rule binds first;
-# only past that backstop does the oldest rotation go regardless of age (R5:
-# a cap never waits, and the disk never fills).
+# days x mb_per_day = 14 x 60 MB/day (Strategist's spec, RK 23 Oct ~22:05
+# AEDT; the tape grows ~44 MB/day so the age rule normally binds first). Only
+# past that backstop does the oldest rotation go regardless of age (R5: a cap
+# never waits, and the disk never fills).
 # TIED TO THE GS-FADE3-TP30 PREREG SET (frozen 17:37 AEDT 23 Oct): base
 # 94d32aa1, AMEND1 rev3 2f41d3d4, AMEND2 rev3 60d175f0, AMEND3 632dcf34
 # (/workspace/grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND*-20261023.md).
 # When those tests CLOSE or are KILLED, shrink this back to what the remaining
 # preregistered tests need (see SHARED-TRACKER).
 CAP_DAYS: dict[str, tuple[float, int]] = {
-    "market_microstructure_1s.jsonl": (14.0, 80 * MB),
+    "market_microstructure_1s.jsonl": (14.0, 60 * MB),
 }
 for _name in CAP_DAYS:
     CAP_ALLOW[_name] = (10_000, int(CAP_DAYS[_name][0] * CAP_DAYS[_name][1]))
