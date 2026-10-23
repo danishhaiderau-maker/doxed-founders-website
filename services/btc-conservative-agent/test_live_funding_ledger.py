@@ -19,7 +19,11 @@ def _pos(funding):
 KEY, SECRET = "k" * 43, "s" * 43
 # HM R4 F1: an RK+HM-confirmed sign (+1: positions/hist FUNDING == the signed ledger sum). Tests that price a non-zero
 # entry pass it explicitly; without it every non-zero row is UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN.
-ACTIVE = {"status": "ACTIVE", "position_funding_sign": 1, "confirmed_by_rk_ref": "RK-test", "confirmed_by_hm_ref": "HM-test"}
+# HM R5 G3: a pin is only read as a sign when it carries (a)/(b)/(c) evidence for that sign + a ledger id and pid.
+EVIDENCE = {"ledger_id": 10500585082, "pid": 194481758,
+            "checks": {"a": [{"ok": True}], "b": [{"ok": True}], "c": {"ok": True, "sign": 1}}}
+ACTIVE = dict(EVIDENCE, status="ACTIVE", position_funding_sign=1, confirmed_by_rk_ref="RK-test",
+              confirmed_by_hm_ref="HM-test")
 
 
 @pytest.fixture(autouse=True)
@@ -773,7 +777,8 @@ def test_F1_wrong_sign_is_never_countable_inverts_the_old_size_only_test():
     out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.025)], position=_pos(0.025), live_notional_usd=250.0,
                      sign_pin=ACTIVE)                             # tied-only path, same signed rule
     assert out["funding_status"] == "UNVERIFIED_LEDGER_POSITION_MISMATCH"
-    neg = dict(ACTIVE, position_funding_sign=-1)                 # a -1 sign is the only way +0.025 can match -0.025
+    # a -1 sign is the only way +0.025 can match -0.025
+    neg = dict(ACTIVE, position_funding_sign=-1, checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": -1}))
     assert _mixed(0.025, pin=neg)["funding_status"] == "PRICED"
     assert _mixed(-0.025, pin=neg)["funding_verified"] is False
 
@@ -1144,3 +1149,64 @@ def test_G1_route_rows_carry_the_job_pid_and_hit_the_same_cache_key(tmp_path, mo
     assert "_with_pid_side(chains, reports)" in src.split("def _closed_live_chains")[1].split("def _with_pid_side")[0]
     assert "_with_pid_side(chains, reports)" in \
         src.split("def live_vs_paper_route")[1].split("def _live_funding_lookup")[0]
+
+
+# ---- HM R5 G3: activate AND the pin read both re-check the (a)/(b)/(c) evidence -------------------------------------
+def _bad_pins():
+    chk = EVIDENCE["checks"]
+    return {
+        "abc_failed": dict(EVIDENCE, checks={"a": [{"ok": False}], "b": [{"ok": False}], "c": {"ok": False, "sign": 1}}),
+        "a_failed": dict(EVIDENCE, checks=dict(chk, a=[{"ok": False}])),
+        "b_unread": dict(EVIDENCE, checks=dict(chk, b=[{"ok": None}])),
+        "c_failed": dict(EVIDENCE, checks=dict(chk, c={"ok": False, "sign": 1})),
+        "no_evidence": {},
+        "empty_checks": dict(EVIDENCE, checks={"a": [], "b": [], "c": {}}),
+        "sign_mismatch": dict(EVIDENCE, checks=dict(chk, c={"ok": True, "sign": -1})),
+        "no_ledger_id": dict(EVIDENCE, ledger_id=None),
+        "no_pid": dict(EVIDENCE, pid=""),
+    }
+
+
+def test_G3_read_path_rejects_pins_without_valid_evidence():
+    rows = [_row(1, S + 4, 0.025)]
+    assert lfl.position_funding_sign(ACTIVE) == 1
+    for name, ev in _bad_pins().items():
+        pin = dict(ev, status="ACTIVE", position_funding_sign=1, confirmed_by_rk_ref="RK", confirmed_by_hm_ref="HM")
+        assert lfl.position_funding_sign(pin) is None, name
+        out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=_pos(0.025), live_notional_usd=250.0, sign_pin=pin)
+        assert out["funding_status"] == "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN" and not out["funding_verified"], name
+
+
+def test_G3_json_true_is_never_a_sign(_pin_file):
+    with open(_pin_file, "w") as fh:          # what a hand edit / JSON round trip of `true` produces
+        fh.write(json.dumps(dict(EVIDENCE, status="ACTIVE", position_funding_sign=True, confirmed_by_rk_ref="RK",
+                                 confirmed_by_hm_ref="HM", checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": True}))))
+    pin = lfl.load_sign_pin()
+    assert pin["position_funding_sign"] is True and lfl.position_funding_sign(pin) is None
+    assert lfl.position_funding_sign(dict(ACTIVE, position_funding_sign=True)) is None      # bool sign, int c.sign
+    assert lfl.position_funding_sign(dict(ACTIVE, checks=dict(EVIDENCE["checks"], c={"ok": True, "sign": True}))) is None
+    assert lfl.position_funding_sign(dict(ACTIVE, position_funding_sign=1.0)) is None       # float is not int
+    with open(_pin_file, "w") as fh:
+        fh.write(json.dumps(dict(EVIDENCE, status="PROPOSED", position_funding_sign=True)))
+    with pytest.raises(lfl.SignPinError, match="PIN_EVIDENCE_INVALID:SIGN_NOT_INT"):
+        lfl.activate_sign_pin("RK", "HM")
+    assert lfl.load_sign_pin()["status"] == "PROPOSED"
+
+
+def test_G3_activate_refuses_a_hand_written_proposed_pin_without_valid_evidence():
+    for name, ev in _bad_pins().items():
+        lfl._write_sign_pin(dict(ev, status="PROPOSED", position_funding_sign=-1 if name != "sign_mismatch" else 1))
+        with pytest.raises(lfl.SignPinError, match="PIN_EVIDENCE_INVALID"):
+            lfl.activate_sign_pin("RK", "HM")
+        assert lfl.load_sign_pin()["status"] == "PROPOSED", name                         # nothing activated
+        assert lfl.main(["sign-pin", "confirm", "--rk-ref", "RK", "--hm-ref", "HM"]) == 2
+    lfl._write_sign_pin(dict(EVIDENCE, status="PROPOSED", position_funding_sign=1))     # valid evidence -> activates
+    st = lfl.activate_sign_pin("RK", "HM")
+    assert st["status"] == "ACTIVE" and lfl.position_funding_sign(lfl.load_sign_pin()) == 1
+
+
+def test_G3_active_pin_with_refs_but_no_evidence_is_unproven(_pin_file):
+    with open(_pin_file, "w") as fh:
+        fh.write(json.dumps({"status": "ACTIVE", "position_funding_sign": 1, "confirmed_by_rk_ref": "RK",
+                             "confirmed_by_hm_ref": "HM"}))
+    assert lfl.position_funding_sign(lfl.load_sign_pin()) is None

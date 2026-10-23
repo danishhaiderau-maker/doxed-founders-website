@@ -307,10 +307,41 @@ def _write_sign_pin(state: dict, path: str | None = None) -> None:
     os.replace(tmp, path)
 
 
+def _is_sign(v) -> bool:
+    """Exactly int +1 / -1. ``bool`` is an int subclass (JSON ``true`` == 1) and is rejected explicitly (HM R5 G3)."""
+    return type(v) is int and v in (1, -1)
+
+
+def sign_pin_evidence_problem(pin) -> str | None:
+    """HM R5 G3: the (a)/(b)/(c) evidence a pin must carry before it can be activated OR read as a sign - re-checked on
+    every read, so a hand-written / hand-edited file can never pin a sign the evidence does not prove. None = valid;
+    else the first failing reason (the pin is then rejected / unproven)."""
+    if not isinstance(pin, Mapping):
+        return "NOT_A_PIN"
+    sign = pin.get("position_funding_sign")
+    if not _is_sign(sign):
+        return "SIGN_NOT_INT_PLUS_MINUS_1"
+    if pin.get("ledger_id") in (None, "") or pin.get("pid") in (None, ""):
+        return "LEDGER_ID_OR_PID_MISSING"
+    checks = pin.get("checks")
+    if not isinstance(checks, Mapping):
+        return "CHECKS_MISSING"
+    a, b, c = checks.get("a"), checks.get("b"), checks.get("c")
+    for name, xs in (("a", a), ("b", b)):
+        if not isinstance(xs, list) or not xs or not all(isinstance(x, Mapping) and x.get("ok") is True for x in xs):
+            return f"CHECK_{name.upper()}_NOT_OK"
+    if not isinstance(c, Mapping) or c.get("ok") is not True:
+        return "CHECK_C_NOT_OK"
+    if not _is_sign(c.get("sign")) or c.get("sign") != sign:
+        return "C_SIGN_MISMATCH"
+    return None
+
+
 def position_funding_sign(pin=None):
-    """+1 / -1 only for an ACTIVE pin confirmed by BOTH an RK ruling ref and an HM confirmation ref; else
-    POSITION_FUNDING_SIGN (None: unproven)."""
-    if isinstance(pin, Mapping) and pin.get("status") == "ACTIVE" and pin.get("position_funding_sign") in (1, -1) \
+    """+1 / -1 only for an ACTIVE pin confirmed by BOTH an RK ruling ref and an HM confirmation ref AND carrying valid
+    (a)/(b)/(c) evidence for that exact sign (HM R5 G3: sign_pin_evidence_problem is None); else POSITION_FUNDING_SIGN
+    (None: unproven)."""
+    if isinstance(pin, Mapping) and pin.get("status") == "ACTIVE" and sign_pin_evidence_problem(pin) is None \
             and str(pin.get("confirmed_by_rk_ref") or "").strip() and str(pin.get("confirmed_by_hm_ref") or "").strip():
         return pin["position_funding_sign"]
     return POSITION_FUNDING_SIGN
@@ -322,8 +353,11 @@ def activate_sign_pin(rk_ref: str, hm_ref: str, path: str | None = None, now: fl
     if not rk or not hm:
         raise SignPinError("RK_AND_HM_CONFIRMATION_REFS_REQUIRED")
     st = load_sign_pin(path)
-    if st.get("status") != "PROPOSED" or st.get("position_funding_sign") not in (1, -1):
+    if st.get("status") != "PROPOSED":
         raise SignPinError(f"NOT_PROPOSED:{st.get('status')}")
+    bad = sign_pin_evidence_problem(st)      # HM R5 G3: the evidence is re-checked here, never trusted from the file
+    if bad:
+        raise SignPinError(f"PIN_EVIDENCE_INVALID:{bad}")
     st.update(status="ACTIVE", confirmed_by_rk_ref=rk, confirmed_by_hm_ref=hm,
               confirmed_at_ts=time.time() if now is None else now)
     _write_sign_pin(st, path)

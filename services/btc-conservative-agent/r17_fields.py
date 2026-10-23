@@ -138,7 +138,10 @@ LIVE_FUNDING_CONTRACT = {
                                 "|pf - POSITION_FUNDING_SIGN * ledger sum| <= 1e-8 (signed, no abs, no relative tolerance); "
                                 "same rule on the zero-rate, tied-only and no-crossing paths",
     "funding_position_funding_sign": "+1 / -1 from an ACTIVE pin confirmed by BOTH an RK and an HM ref, else null "
-                                     "(POSITION_FUNDING_SIGN = None: unproven -> non-zero rows UNVERIFIED)",
+                                     "(POSITION_FUNDING_SIGN = None: unproven -> non-zero rows UNVERIFIED). HM R5 G3: the "
+                                     "pin is re-checked on every read and at activate - checks a, b, c all ok, c.sign == "
+                                     "the pin sign, ledger_id and pid present, sign an int in {-1, +1} (bool / JSON true "
+                                     "rejected); anything else is null (unproven) / refused",
     "funding_sign_pin_status": "NONE | PROPOSED | ACTIVE | DISAGREEMENT | UNREADABLE (persisted live_funding_sign_pin.json "
                                "on the BOT_DATA_DIR root, outside every reset path; LIVE_FUNDING_SIGN_PIN_PATH overrides)",
     "funding_sign_pin_refs": "{rk, hm} confirmation refs of the ACTIVE pin, else null",
