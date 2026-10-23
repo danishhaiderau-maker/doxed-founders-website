@@ -143,7 +143,9 @@ def test_stamped_book_rows_still_price_through_the_book_tail(tmp_path):
     path = tmp_path / "bfx_book_10l_1s.jsonl"
     path.write_text(json.dumps({"s": 100, "b": [[99.0, 1.0]], "a": [[100.0, 1.0]], "dv": "fse-1"}) + "\n")
     row = paper_fill.BookTail(str(path)).at(102.0)
-    assert row == {"s": 100, "b": [[99.0, 1.0]], "a": [[100.0, 1.0]]}
+    # RK/HM #851: a row without the collector's measured receive time still prices, labelled MISSING (non-countable)
+    assert row == {"s": 100, "b": [[99.0, 1.0]], "a": [[100.0, 1.0]], "receive_ts": None, "receive_mono": None,
+                   "receive_ts_source": "MISSING"}
 
 
 def test_bot_and_collector_share_one_epoch_path_resolver(bot, monkeypatch, tmp_path):

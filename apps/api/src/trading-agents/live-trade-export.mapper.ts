@@ -1,9 +1,10 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
 import {
-  liveRowCountability,
-  liveRowCountabilityWithStop,
+  liveRowCountabilityWithLegs,
   liveRowStopEvidenceFromEvents,
+  type LiveExitSide,
+  type LiveLegStamps,
 } from './live-row-countability';
 
 type IntentEnvelope = {
@@ -123,6 +124,60 @@ function mapEvent(payload: unknown, eventType: string, createdAt: Date): LiveTra
   };
 }
 
+const secOf = (v: unknown): number | null => {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v > 1e12 ? v / 1000 : v;
+  if (typeof v !== 'string' || !v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) && t > 0 ? t / 1000 : null;
+};
+const recOf = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+
+/**
+ * HM 01:43 item 3: the measured per-leg stamps a Railway live row has. Entry: Fly signal + intent from the signed
+ * approval, Railway receive from the envelope, exchange ack from the order/fill payload. Exit, bot-sent (RK (1)):
+ * exit trigger, Fly send and Railway receive are carried on the EXIT payload by railwayExitLegStamps (signed
+ * POSITION_CLOSED exit_trigger_ts, HMAC-verified X-Fly-Send-Started-At, platform receipt); exit,
+ * EXCHANGE_RESIDENT: trade-print trigger -> Bitfinex fill record (residentExitLegStamps). Any missing stamp fails
+ * closed (LIVE_LEG_MISSING:<side>.*) (R17).
+ */
+export function liveLegStamps(
+  intentEnvelope: unknown,
+  events: Array<{ eventType: string; payload: unknown }>,
+  closed: boolean,
+): [LiveLegStamps, LiveLegStamps | null, LiveExitSide] {
+  const ctx = recOf(recOf(intentEnvelope).context);
+  const approval = recOf(ctx.fly_live_approval);
+  const pl = (type: string) => recOf(events.find((e) => e.eventType === type)?.payload);
+  const placed = pl('ORDER_PLACED');
+  const filled = pl('FILLED');
+  const exitPl = recOf([...events].reverse().find((e) => e.eventType === 'EXIT')?.payload);
+  const entry: LiveLegStamps = {
+    fly_signal_at_ts: secOf(approval.signal_at_ts),
+    fly_intent_emitted_at_ts: secOf(approval.created_at_ts),
+    railway_received_at_ts: secOf(ctx.platform_received_at),
+    exchange_ack_at_ts: secOf(placed.entry_exchange_ack_at ?? placed.exchange_ack_at ?? filled.entry_exchange_ack_at),
+  };
+  if (!closed) return [entry, null, 'exit'];
+  if (String(exitPl.exit_order_class ?? '') === 'EXCHANGE_RESIDENT') {
+    // RK (1): no send leg; trigger = real trade print, fill = Bitfinex's own fill record.
+    return [entry, {
+      exit_trigger_print_at_ts: secOf(exitPl.exit_trigger_print_at),
+      exit_fill_record_at_ts: secOf(exitPl.exit_fill_record_at ?? exitPl.exchange_exit_fill_first_at),
+    }, 'exit_resident'];
+  }
+  const exit: LiveLegStamps = {
+    // HM #842 R3 nit: only the measured, window-bounded exit_trigger_ts counts. The old exit_signal_at fallback was
+    // produced by nothing; a row carrying only it stays LIVE_LEG_MISSING:exit.signal (non-countable, R17).
+    exit_signal_at_ts: secOf(exitPl.exit_trigger_ts),
+    fly_send_started_at_ts: secOf(exitPl.fly_send_started_at),
+    railway_received_at_ts: secOf(exitPl.platform_received_at),
+    exit_ack_at_ts: secOf(exitPl.close_exchange_ack_at),
+    exit_confirmed_at_ts: secOf(exitPl.close_confirmed_at),
+  };
+  return [entry, exit, 'exit'];
+}
+
 export function mapParticipantToExportRow(input: {
   participant: {
     id: string;
@@ -213,14 +268,12 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
-    // #852 item 4: a filled live row also needs the guardian's stop evidence (same rule as live_guardian)
-    ...(filledEvent
-      ? liveRowCountabilityWithStop(
-          liveRowStopEvidenceFromEvents(input.participant.events),
-          exitEvent?.exitReason,
-          input.cycle.showcaseExitReason,
-        )
-      : liveRowCountability(exitEvent?.exitReason, input.cycle.showcaseExitReason)),
+    // ONE live-row rule: forced close -> #852 item 4 guardian stop evidence (filled rows only) -> per-leg check.
+    ...liveRowCountabilityWithLegs(
+      [exitEvent?.exitReason, input.cycle.showcaseExitReason],
+      ...liveLegStamps(input.cycle.intentEnvelope, input.participant.events, closedAt != null),
+      filledEvent ? liveRowStopEvidenceFromEvents(input.participant.events) : undefined,
+    ),
     events,
   };
 }

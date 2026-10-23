@@ -34,12 +34,14 @@ def _ns(names, paper=True, **extra):
 
 
 HELPERS = ("LEVELS_CROSSED_UNFIRED_MAX", "_note_level_crossed_unfired", "_stop_coverage_value",
-           "_levels_crossed_unfired", "_finite_nonneg", "_r17_exit_book_age_ms", "_exit_book_age_ms", "_r17_contract_fields")
+           "_levels_crossed_unfired", "_finite_nonneg", "_r17_exit_book_age_ms", "_exit_book_age_ms", "_r17_contract_fields",
+           "_book_receive_row_fields")
 
 
 def _clean_pos(**kw):
-    pos = {"trigger_price_source": "book", "exit_priced_delay_source": "lane_q90_n12", "exit_price_age_s": 0.4,
-           "exit_fill_sim": {"price_stale": False}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200,
+    pos = {"trigger_price_source": "book", "exit_priced_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n12", "exit_price_age_s": 0.4,
+           "exit_fill_sim": {"price_stale": False, "book_receive_ts": 1100.4, "book_receive_mono": 150.4,
+                             "book_receive_ts_source": "WS_FRAME", "book_receive_age_ms": 80.0}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200,
            "levels_scan_from_s": 90.0, "levels_scan_to_s": 200.0, "levels_scan_rows_n": 110}
     pos.update(kw)
     return pos
@@ -52,7 +54,8 @@ def _proof_failures(row):
     if str(row.get("trigger_price_source") or "").lower() != "book":
         out.append("TRIGGER")
     s = str(row.get("exit_priced_delay_source") or "")
-    m = re.fullmatch(r"lane_(?:max|q90)_n(\d+)", s)
+    import r17_fields  # HM #842 R3 nit: the ONE measured-delay pattern (pooled cross-lane only)
+    m = re.fullmatch(r17_fields.MEASURED_DELAY_PATTERN, s)
     if row.get("exit_pricing_basis") != "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER" and not (
             s == "EXCHANGE_RESIDENT_NO_DELAY" or (m and int(m.group(1)) >= 10)):
         out.append("EXIT_DELAY")
@@ -76,8 +79,9 @@ def test_clean_paper_row_carries_contract_names_and_passes():
     row = _ns(HELPERS)["_r17_contract_fields"](_clean_pos())
     assert set(row) == {"trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage",
-                        "exit_book_age_ms"}
-    assert row["exit_book_age_ms"] == 400
+                        "exit_book_age_ms", "exit_book_receive_ts", "exit_book_receive_mono",
+                        "exit_book_receive_ts_source", "exit_book_receive_age_ms"}
+    assert row["exit_book_age_ms"] == 400 and row["exit_book_receive_ts_source"] == "WS_FRAME"
     assert row["levels_crossed_unfired"] == [] and row["stop_coverage"] == qt.STOP_COVERAGE_OK
     assert row["exit_price_stale"] is False
     assert _proof_failures(row) == []
@@ -142,9 +146,10 @@ def test_wired_into_closed_row_entry_fields_and_stale_discard():
 def _good_closed_row():
     """A clean REALISM_V2 paper close assembled from the REAL closed-row helpers (entry pricing, R17 contract fields)
     plus the shared-walk slippage / exit-evidence values those helpers sit next to in close_position."""
-    efs = {"fill_model": "BFX_BOOK_10L", "fill_model_version": 3, "delay_s": 1.2, "delay_source": "lane_q90_n14",
+    efs = {"fill_model": "BFX_BOOK_10L", "fill_model_version": 3, "delay_s": 1.2, "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n14",
            "pool_n": 14, "delay_unverified": False, "price_age_s": 0.6, "price_stale": False,
-           "book_age_ms": 600, "evidence_status": "COMPLETE"}
+           "book_age_ms": 600, "evidence_status": "COMPLETE",
+           "book_receive_ts": 1000.2, "book_receive_mono": 50.2, "book_receive_ts_source": "WS_FRAME", "book_receive_age_ms": 80.0}
     pos = _clean_pos(entry_fill_sim=efs)
     ns = _ns(HELPERS + ("_entry_pricing_fields",), _entry_fill_sim=lambda p: p.get("entry_fill_sim") or {})
     row = {"trade_id": "rv2-r17-good-1", "exit_pricing_basis": "MODEL_TIME",
@@ -161,7 +166,7 @@ def test_good_closed_row_has_entry_age_from_the_pricer():
     row = _good_closed_row()
     assert row["entry_price_age_s"] == 0.6 and row["entry_price_stale"] is False
     assert row["entry_book_age_ms"] == 600
-    assert row["delay_source"] == "lane_q90_n14" and row["trigger_price_source"] == "book"
+    assert row["delay_source"] == "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n14" and row["trigger_price_source"] == "book"
     assert _proof_failures(row) == []
 
 

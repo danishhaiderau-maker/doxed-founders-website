@@ -1338,6 +1338,8 @@ export class TradingAgentsService implements OnModuleInit {
           : null,
         // #852 item 4: the guardian's stop evidence (same sources as the Fly reporter)
         stopEvidence: liveRowStopEvidenceFromEvents(r.events),
+        // RK (1): events feed the shared liveLegStamps leg check in the live-book mapper.
+        events: r.events,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

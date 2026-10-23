@@ -515,6 +515,8 @@ export class TradingAgentsController {
     @Headers('x-showcase-signature') signature: string | undefined,
     @Req() req: Request,
     @Body() body: ShowcaseRelayEventBody,
+    @Headers('x-fly-send-started-at') flySendStartedAt?: string,
+    @Headers('x-fly-send-signature') flySendSignature?: string,
   ) {
     this.showcaseRelay.assertAuthorized(secret);
     // N1 (intent-mirror) — forward the raw body + signature so ingest() can
@@ -523,6 +525,9 @@ export class TradingAgentsController {
     return this.showcaseRelay.ingest(slug, body, {
       rawBody: (req as unknown as { rawBody?: Buffer }).rawBody,
       signatureHeader: signature,
+      // RK (1): HMAC-signed per-attempt Fly send stamp (verified in ingest; dropped if invalid).
+      flySendStartedAtHeader: flySendStartedAt,
+      flySendSignatureHeader: flySendSignature,
     });
   }
 

@@ -45,19 +45,29 @@ def gd(monkeypatch):
 
 
 def _entry(i, price=101.0, side="LONG", sent=1000.0, ack=1000.3, account="acct-A", **kw):
+    # HM 01:43 blocker 1: the sample starts at the Fly intent (sent), Railway receives inside [intent, ack]
     return {"type": "ORDER_PLACED", "correlation_id": f"e{i}", "lane": "GS-01", "account": account, "schema": "v2",
             "order": {"type": "LIMIT", "tif": "GTC", "side": side, "price": price},
-            "timeline": {"order_sent_at_ts": sent, "exchange_ack_at_ts": ack}, **kw}
+            "timeline": {"fly_intent_emitted_at_ts": sent, "railway_received_at_ts": sent + 0.01,
+                         "order_sent_at_ts": sent + 0.02, "exchange_ack_at_ts": ack}, **kw}
 
 
 def _close(i, reason="TP", xs=2000.0, xa=2000.2):
     return {"type": "POSITION_CLOSED", "correlation_id": f"x{i}", "lane": "GS-01", "account": "acct-A", "schema": "v2",
-            "close": {"reason": reason}, "timeline": {"exit_sent_at_ts": xs, "exit_ack_at_ts": xa}}
+            "close": {"reason": reason}, "timeline": {"exit_sent_at_ts": xs + 0.05, "exit_ack_at_ts": xa}}
 
 
-def _fill(pool, reports, now=10_000.0):
+def _fly_exit(xs=2000.0, rtt=0.04, rx=None, **kw):
+    """The bot's own Fly exit-send record (relay outbox ack): intent xs, POST at xs + 0.001, Railway rx inside RTT."""
+    rec = {"fly_intent_at_ts": xs, "fly_send_started_at_ts": xs + 0.001, "fly_send_rtt_s": rtt,
+           "railway_received_at_ts": xs + 0.02 if rx is None else rx, "attempts": 1}
+    rec.update(kw)
+    return lambda trade_id: rec
+
+
+def _fill(pool, reports, now=10_000.0, fly_exit_send=None):
     for r in reports:
-        pool.observe(r, book_at=_book_at, missing_seconds=_no_miss)
+        pool.observe(r, book_at=_book_at, missing_seconds=_no_miss, fly_exit_send=fly_exit_send or _fly_exit())
     return pool.admit_pending(now, "boot.jsonl")
 
 
@@ -79,7 +89,7 @@ def test_marketable_vs_resting_kept_separate(gd):
 
 def test_stale_book_entry_not_pooled(gd):
     p = lap.CrossLanePool()
-    p.observe(_entry(1, sent=1010.0), book_at=_book_at, missing_seconds=_no_miss)
+    p.observe(_entry(1, sent=1010.0, ack=1010.3), book_at=_book_at, missing_seconds=_no_miss)
     assert p.excluded == {"ENTRY_UNCLASSIFIED": 1}
 
 
@@ -143,7 +153,9 @@ def test_two_accounts_without_config_fail_closed(gd):
 def test_r17_accepts_only_measured_pooled_labels():
     rx = re.compile(F.MEASURED_DELAY_PATTERN)
     assert rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_q90_n25")
-    assert rx.fullmatch("lane_max_n12")
+    # HM #842 R3 nit: old per-lane labels no longer count
+    assert not rx.fullmatch("lane_max_n12")
+    assert not rx.fullmatch("lane_q90_n25")
     assert not rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_default_until_n10_n4")
     assert not rx.fullmatch("POOLED_LIVE_ACK_CROSS_LANE:STOP_max_n12")
     assert all(rx.fullmatch(f"{lap.DELAY_SOURCE}:{k}_q90_n20") for k in lap.KEYS)
@@ -157,6 +169,60 @@ def test_stamp(gd):
     assert row["delay_source_kind"] == "POOLED_LIVE_ACK_CROSS_LANE" and row["pool_n"] == 10
     assert row["pool_ts"] == 2000.2 and row["quantile_method"] == pf.quantile_method_of(src)
     assert row["own_signal_to_send_s"] == pytest.approx(0.3) and row["delay_unverified"] is False
+    # HM 01:43 item 5: per-leg component stamps, no double count: total = own + pooled
+    pooled = p.pooled("EXIT_RO_MKT")["pooled_send_to_ack_s"]
+    assert row["sig_to_send_ms"] == 300 and row["pool_send_to_ack_ms"] == round(pooled * 1000)
+    assert row["pool_def"] == lap.POOL_DEF and row["delay_span"] == lap.DELAY_SPAN and d == pytest.approx(0.3 + pooled)
+
+
+def test_entry_sample_is_fly_intent_to_ack_not_order_sent(gd):
+    p = lap.CrossLanePool()
+    _fill(p, [_entry(i, sent=1000.0, ack=1000.5) for i in range(10)])
+    assert p.pooled("ENTRY_MKT_GTC")["pooled_send_to_ack_s"] == pytest.approx(0.5)  # not 0.48 (order_sent->ack)
+
+
+@pytest.mark.parametrize("tl,why", [
+    ({"order_sent_at_ts": 1000.02, "exchange_ack_at_ts": 1000.3}, "FLY_SEND_TS_MISSING"),
+    ({"fly_intent_emitted_at_ts": 1000.0, "exchange_ack_at_ts": 1000.3}, "RAILWAY_RECEIVE_TS_MISSING"),
+    ({"fly_intent_emitted_at_ts": 1000.0, "railway_received_at_ts": 999.5, "exchange_ack_at_ts": 1000.3}, "CLOCK_SKEW"),
+    ({"fly_intent_emitted_at_ts": 1000.0, "railway_received_at_ts": 1000.9, "exchange_ack_at_ts": 1000.3}, "CLOCK_SKEW"),
+])
+def test_entry_without_fly_stamp_or_with_skew_fails_closed(gd, tl, why):
+    p = lap.CrossLanePool()
+    r = _entry(1)
+    r["timeline"] = tl
+    assert _fill(p, [r]) == 0 and p.excluded == {why: 1}
+
+
+@pytest.mark.parametrize("fly,why", [
+    (lambda tid: None, "FLY_SEND_TS_MISSING"),  # no Fly exit-send stamp: EXIT_RO_MKT fails closed
+    (_fly_exit(fly_send_started_at_ts=None), "FLY_SEND_TS_MISSING"),
+    (_fly_exit(railway_received_at_ts=None), "RAILWAY_RECEIVE_TS_MISSING"),
+    (_fly_exit(rx=2000.5), "CLOCK_SKEW"),  # Railway receive outside the POST round trip
+])
+def test_exit_needs_the_fly_exit_send_stamp(gd, fly, why):
+    p = lap.CrossLanePool()
+    assert _fill(p, [_close(1)], fly_exit_send=fly) == 0 and p.excluded == {why: 1}
+    p2 = lap.CrossLanePool()
+    p2.observe(_close(2), book_at=_book_at, missing_seconds=_no_miss)  # no lookup at all
+    assert p2.excluded == {"FLY_SEND_TS_MISSING": 1}
+
+
+def test_exit_sample_is_fly_exit_intent_to_exit_ack(gd):
+    p = lap.CrossLanePool()
+    _fill(p, [_close(i, xs=2000.0, xa=2000.3) for i in range(10)], fly_exit_send=_fly_exit(xs=2000.0))
+    assert p.pooled("EXIT_RO_MKT")["pooled_send_to_ack_s"] == pytest.approx(0.3)
+
+
+def test_v1_order_sent_pool_is_dropped_on_load(gd):
+    p = lap.CrossLanePool()
+    _fill(p, [_entry(i) for i in range(10)])
+    blob = p.to_json(EPOCH)
+    assert blob["pool_def"] == lap.POOL_DEF
+    assert lap.CrossLanePool().load(blob, EPOCH) is True
+    old = {k: v for k, v in blob.items() if k != "pool_def"}
+    q = lap.CrossLanePool()
+    assert q.load(old, EPOCH) is False and q.pooled("ENTRY_MKT_GTC")["pool_n"] == 0
 
 
 def test_bot_paper_only_lane_uses_pool_persists_and_resets(gd, tmp_path, monkeypatch):
@@ -178,3 +244,59 @@ def test_bot_paper_only_lane_uses_pool_persists_and_resets(gd, tmp_path, monkeyp
     assert ns2["_cross_lane_pool"]().pooled("ENTRY_MKT_GTC")["pool_n"] == 10
     ns2["_paper_delay_pool_reset"]()
     assert ns2["_cross_lane_pool"]().pooled("ENTRY_MKT_GTC")["pool_n"] == 0
+
+
+def test_bot_fly_exit_send_record_and_paper_exit_own_s2s_fails_closed(gd, tmp_path, monkeypatch):
+    ns = _fresh(tmp_path, monkeypatch)
+
+    class _Box:
+        def acknowledged_events(self, trade_id):
+            return [{"event_type": "ORDER_PLACED"},
+                    {"event_type": "POSITION_CLOSED", "fly_intent_at_unix": 2000.0, "fly_send_started_at_unix": 2000.001,
+                     "fly_send_rtt_s": 0.04, "platform_received_at": "1970-01-01T00:33:20.020Z", "fly_attempts": 1,
+                     "exit_signal_at_unix": 1999.9}]
+    monkeypatch.setitem(ns, "_relay_event_outbox", _Box())
+    rec = ns["_fly_exit_send_record"]("x1")
+    assert rec["fly_intent_at_ts"] == 2000.0 and rec["railway_received_at_ts"] == pytest.approx(2000.02)
+    assert rec["exit_signal_at_ts"] == 1999.9
+    p = lap.CrossLanePool()
+    assert _fill(p, [_close(1)], fly_exit_send=ns["_fly_exit_send_record"]) == 1
+    # HM 01:43 item 4: the bare exit (_tp1_gate) no longer assumes own signal->send = 0.0 -> fail closed
+    pool = ns["_cross_lane_pool"]()
+    _fill(pool, [_close(10 + i) for i in range(10)])
+    d, src = ns["_disloc_delay"]("GSB1", "exit")
+    assert "default" in src and pf.delay_stamp(src)["delay_unverified"]
+
+
+def test_hm0255_n1_b1_lane_pool_never_prices_a_row(gd, tmp_path, monkeypatch):
+    """HM 02:55 N1: a lane WITH its own B1 live acks still prices through the shared live_ack_pool (per order-type
+    key, checks, per-row s2s); the B1 lane pool is stamps-only and a leg without a pool key fails closed."""
+    monkeypatch.setattr(pf, "book10l_at", _book_at)
+    monkeypatch.setattr(pf, "book10l_missing_seconds", _no_miss)
+    ns = _fresh(tmp_path, monkeypatch)
+    for i in range(10):
+        ns["_paper_delay_sampler"]().add("GS-01", "entry", 0.5, trade_id=f"b1-{i}")
+    assert len(ns["_paper_delay_sampler"]()._xs("GS-01", "entry")) >= 10  # B1 has the lane's own acks
+    assert ns["_paper_delay_sampler"]().delay("GS-01", "entry")[1].startswith("lane_")  # (stamp meta only)
+    d, src = ns["_disloc_delay"]("GS-01", "entry", pool_key="ENTRY_MKT_GTC", own_signal_to_send_s=0.2)
+    assert src.startswith("POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC") and not src.startswith("lane_")
+    d, src = ns["_disloc_delay"]("GS-01", "entry")
+    assert src == "default_until_n10" and pf.delay_stamp(src)["delay_unverified"]
+
+
+def test_rk2_paper_exit_pooled_by_order_type_fails_closed_below_n10(gd, tmp_path, monkeypatch):
+    """RK (2): a paper BOT_SENT exit = own trigger->send + pooled EXIT_RO_MKT send->ack (n<10 fail closed, MAX at
+    10-19); a measured own leg is countable, a missing one is default_own_s2s_missing (UNVERIFIED)."""
+    ns = _fresh(tmp_path, monkeypatch)
+    pool = ns["_cross_lane_pool"]()
+    _fill(pool, [_close(10 + i) for i in range(9)])
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT", own_signal_to_send_s=0.3)
+    assert "default" in src and pf.delay_stamp(src)["delay_unverified"]
+    _fill(pool, [_close(30)])
+    own = ns["_paper_own_s2s_exit"](1000.0, 1000.3)
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT", own_signal_to_send_s=own)
+    assert src == "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_max_n10" and not pf.delay_stamp(src)["delay_unverified"]
+    assert d == pytest.approx(0.3 + pool.pooled("EXIT_RO_MKT")["pooled_send_to_ack_s"])
+    d, src = ns["_disloc_delay"]("GSB1", "exit", pool_key="EXIT_RO_MKT",
+                                 own_signal_to_send_s=ns["_paper_own_s2s_exit"](1000.0, None))
+    assert "default_own_s2s_missing" in src

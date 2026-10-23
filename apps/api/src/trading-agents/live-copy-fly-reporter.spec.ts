@@ -170,3 +170,25 @@ test('LIVE-FIX-1246: reporter failures turn copy-status AMBER/RED', async () => 
   assert.equal(reporterVerdict({ consecutiveFailures: 70, lastFailAt: now, lastOkAt: 0, pending: 3 }, now), 'RED');
   assert.equal(worstVerdict('GREEN', 'RED'), 'RED');
 });
+
+test('HM 02:55 / RK (1): POSITION_CLOSED report carries exit_order_class and the resident/bot-sent exit stamps', () => {
+  const resident = buildLiveCopyReports({
+    cycle: { id: 'c1', tradeId: 'gs1-a1', intentEnvelope: envelope }, correlationId: 'gs1-a1', lane: 'L',
+    events: [...events, ev('e5', 'EXIT', 9_000, { exit_price: 59_790, exit_order_class: 'EXCHANGE_RESIDENT',
+      exit_fill_record_at: at(8_500).toISOString(), close_confirmed_at: at(8_800).toISOString() })],
+    participants: [{ id: 'p1', userId: 'u1' }], accountFor: () => 'acct-x', nowMs: T0 + 10_000,
+  });
+  const rc = resident.find((r) => r.type === 'POSITION_CLOSED') as any;
+  assert.equal(rc.close.exit_order_class, 'EXCHANGE_RESIDENT');
+  assert.equal(rc.timeline.exit_fill_record_at_ts, (T0 + 8_500) / 1000);
+  assert.equal(rc.timeline.exit_trigger_print_at_ts, null); // not carried on Railway -> non-countable on Fly
+  const botSent = buildLiveCopyReports({
+    cycle: { id: 'c1', tradeId: 'gs1-a1', intentEnvelope: envelope }, correlationId: 'gs1-a1', lane: 'L',
+    events: [...events, ev('e5', 'EXIT', 9_000, { exit_price: 60_100, exit_order_class: 'nonsense',
+      close_exchange_ack_at: at(8_700).toISOString() })],
+    participants: [{ id: 'p1', userId: 'u1' }], accountFor: () => 'acct-x', nowMs: T0 + 10_000,
+  });
+  const bc = botSent.find((r) => r.type === 'POSITION_CLOSED') as any;
+  assert.equal(bc.close.exit_order_class, null);
+  assert.equal(bc.timeline.exit_ack_at_ts, (T0 + 8_700) / 1000);
+});

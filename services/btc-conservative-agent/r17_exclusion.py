@@ -180,6 +180,19 @@ def liq_failure(row):
     return None
 
 
+def book_receive_failures(row) -> list:
+    """RK/HM #851 (24 Oct): each priced book row must carry the collector's MEASURED receive time (wall + monotonic,
+    source WS_FRAME). A missing / non-finite stamp or any other source (pre-#851 row, INFERRED_BUCKET_LAG) fails."""
+    out = []
+    for side, label in (("entry", "BOOK_RECEIVE_TS_MISSING"), ("exit", "EXIT_BOOK_RECEIVE_TS_MISSING")):
+        rx, mono = _num(row.get(f"{side}_book_receive_ts")), _num(row.get(f"{side}_book_receive_mono"))
+        if (_exact(row.get(f"{side}_book_receive_ts_source")) not in F.BOOK_RECEIVE_SOURCE_OK
+                or rx is None or rx <= 0 or mono is None or mono < 0
+                or not _nonneg(row.get(f"{side}_book_receive_age_ms"))):  # HM 02:55: age from receipt >= 0 (proof)
+            out.append(label)
+    return out
+
+
 def proof_failures(row) -> list:
     """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
     out = []
@@ -215,6 +228,7 @@ def proof_failures(row) -> list:
     lf = liq_failure(row)
     if lf:
         out.append(lf)
+    out.extend(book_receive_failures(row))
     return out
 
 

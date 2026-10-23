@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import './bitfinex-auth-trade-stream.spec';
+import './bitfinex-ledger-layout.spec';
 import {
   BITFINEX_BTC_PERP_SYMBOL,
   BITFINEX_NONCE_MS_SCALE,

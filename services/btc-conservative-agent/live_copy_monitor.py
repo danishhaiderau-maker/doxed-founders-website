@@ -135,6 +135,14 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             except (TypeError, ValueError):
                 pass
             ch["closed_at_ts"] = ch.get("exit_at_ts")
+            # HM 02:55 / RK (1): exit order class + exit leg stamps for live_vs_paper's per-leg check (missing ->
+            # the leg is missing -> non-countable; never inferred).
+            if cl.get("exit_order_class") in ("BOT_SENT", "EXCHANGE_RESIDENT"):
+                ch["exit_order_class"] = cl.get("exit_order_class")
+            for k in ("exit_ack_at_ts", "exit_confirmed_at_ts", "exit_trigger_print_at_ts", "exit_fill_record_at_ts"):
+                v = _f(tl.get(k))
+                if v is not None and ch.get(k) is None:
+                    ch[k] = v
         if r.get("type") in ("ORDER_REJECTED", "INTENT_REJECTED", "STOP_FAILED", "ERROR"):
             err = r.get("error") if isinstance(r.get("error"), Mapping) else {}
             ch["errors"].append({"type": r.get("type"), "code": err.get("code"),

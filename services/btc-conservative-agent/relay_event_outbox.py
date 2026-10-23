@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
 import os
 import pickle
@@ -15,6 +16,20 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+FLY_SEND_STARTED_AT_HEADER = "X-Fly-Send-Started-At"
+FLY_SEND_SIGNATURE_HEADER = "X-Fly-Send-Signature"
+
+
+def fly_send_stamp_headers(secret: str, event_id: str, send_wall: float) -> dict:
+    """RK (1) 24 Oct: the measured per-attempt Fly send instant for the ONE shared Fly->relay path. It cannot go in
+    the signed body (Railway requires a retry to be hash-identical), so it rides in a header signed with
+    HMAC(secret, "<event_id>|<ts>"); Railway keeps it only when it verifies (apps/api fly-send-stamp.ts)."""
+    if not secret or not event_id or not isinstance(send_wall, (int, float)) or send_wall <= 0:
+        return {}
+    ts = f"{float(send_wall):.6f}"
+    sig = hmac.new(secret.encode("utf-8"), f"{event_id}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return {FLY_SEND_STARTED_AT_HEADER: ts, FLY_SEND_SIGNATURE_HEADER: f"sha256={sig}"}
 
 
 def _deep_copy(value):
@@ -488,7 +503,8 @@ class RelayEventOutbox:
                 raise
 
     def acknowledge(
-        self, event_id: str, receipt: dict, state_payload: dict | None = None
+        self, event_id: str, receipt: dict, state_payload: dict | None = None,
+        send_timing: dict | None = None,
     ) -> bool:
         with self._lock:
             row = self._pending.get(event_id)
@@ -505,10 +521,19 @@ class RelayEventOutbox:
                 return False
             before_acks = _deep_copy(self._acks)
             del self._pending[event_id]
+            timing = send_timing if isinstance(send_timing, dict) else {}
             self._acks.append({
                 **_deep_copy(ack),
                 "acknowledged_at_unix": time.time(),
                 "intent_created": receipt.get("intentCreated") is True,
+                # HM 01:43 blocker 1: the Fly-side send stamps of this event (intent = durable enqueue, the POST that
+                # got the durable ack, its round trip) so a live exit can be timed Fly intent -> exchange ack.
+                "fly_intent_at_unix": row.get("created_at_unix"),
+                "fly_attempts": int(row.get("attempts") or 0),
+                "fly_send_started_at_unix": timing.get("fly_send_started_at_unix"),
+                "fly_send_rtt_s": timing.get("fly_send_rtt_s"),
+                # HM 01:43 item 3: the exit signal leg start (the bot's exit trigger), only when the payload carries it
+                "exit_signal_at_unix": (row.get("payload") or {}).get("exit_trigger_ts"),
             })
             self._acks = self._acks[-self.ack_limit:]
             try:

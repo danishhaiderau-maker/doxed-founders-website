@@ -123,7 +123,8 @@ def test_resident_scan_wiring():
 
 def _shallow(t):
     s = int(t)
-    return {"s": s, "b": [[100.0, 0.01], [99.9, 0.01]], "a": [[100.1, 0.01], [100.2, 0.01]]}
+    return {"s": s, "b": [[100.0, 0.01], [99.9, 0.01]], "a": [[100.1, 0.01], [100.2, 0.01]],
+            "receive_ts": s + 0.9, "receive_mono": 1.0, "receive_ts_source": "WS_FRAME"}  # RK/HM #851 measured
 
 
 def test_depth_short_resident_walk_unverified():

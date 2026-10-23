@@ -6,12 +6,8 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import {
-  liveRowCountability,
-  liveRowCountabilityWithStop,
-  liveRowStopCountability,
-  type LiveRowStopEvidence,
-} from './live-row-countability';
+import { liveRowCountabilityWithLegs, liveRowUncheckedCountability, type LiveRowStopEvidence } from './live-row-countability';
+import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
   direction?: 'LONG' | 'SHORT';
@@ -52,6 +48,8 @@ export type SubscriberCycleRow = {
   negativeEvidence?: string | null;
   /** #852 item 4: the guardian's stop evidence for this row (liveRowStopEvidenceFromEvents). */
   stopEvidence?: LiveRowStopEvidence | null;
+  /** RK (1): the participant's execution events, read by the ONE shared liveLegStamps (R4); absent = no legs. */
+  events?: Array<{ eventType: string; payload: unknown }>;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -374,11 +372,14 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? 'Exchange-linked participant lifecycle'
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
-        // HM B4: forced closes carry non_countable on the website live row.
-        // #852 item 4: live books also need the guardian's stop evidence (same rule as live_guardian).
-        ...(input.requireStopEvidence
-          ? liveRowCountabilityWithStop(row.stopEvidence, row.cycle.showcaseExitReason, row.terminalReason)
-          : liveRowCountability(row.cycle.showcaseExitReason, row.terminalReason)),
+        // ONE live-row rule (live-row-countability.liveRowCountabilityWithLegs): HM B4 forced close -> #852 item 4 guardian
+        // stop evidence (Bitfinex live books) -> RK (1)/R17 measured legs (bot-sent: trigger -> Fly send -> relay receive
+        // -> ack/fill; resident: trade print -> BFX fill record), via the same liveLegStamps the export uses.
+        ...liveRowCountabilityWithLegs(
+          [row.cycle.showcaseExitReason, row.terminalReason],
+          ...liveLegStamps(row.cycle.intentEnvelope, row.events ?? [], true),
+          input.requireStopEvidence ? row.stopEvidence ?? null : undefined,
+        ),
       });
     }
   }
@@ -438,11 +439,9 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
   for (const t of trades) {
-    if (t.nonCountable === undefined) {
-      const forced = liveRowCountability(t.exitReason);
-      // an unlinked cash-ledger row carries no stop evidence: never countable on a live book
-      Object.assign(t, input.requireStopEvidence && !forced.nonCountable ? liveRowStopCountability(null) : forced);
-    }
+    // HM 02:55 blocker 4: rows not built through the leg check (ledger-only closes) default to non-countable; this also
+    // covers #852 item 4 (an unlinked cash-ledger row has no stop evidence), so no separate stop branch is needed.
+    if (t.nonCountable === undefined) Object.assign(t, liveRowUncheckedCountability(t.exitReason));
   }
   trades.sort((a, b) => {
     const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;

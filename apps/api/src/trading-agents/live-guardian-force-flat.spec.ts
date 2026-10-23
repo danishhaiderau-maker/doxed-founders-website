@@ -152,37 +152,47 @@ function reconcileSvc(opts: { rows: Array<{ id: string; status: string; venue?: 
   return { s, rows };
 }
 
-test('HM2: closeVirtualLot throws AFTER the Bitfinex close -> exchange FLAT_NO_STOPS -> every OPEN/PENDING row CLOSED non-countable with trigger + exchange evidence', async () => {
+test('HM2 (B1 merge): force-flat only VERIFIES the DB after FLAT_NO_STOPS; the per-lot closes reconcile it (ONE implementation)', async () => {
   const { s, rows } = reconcileSvc({ rows: [{ id: 'p1', status: 'OPEN' }, { id: 'p2', status: 'PENDING_ENTRY', venue: null }, { id: 'p3', status: 'OPEN', venue: 'paper' }] });
+  // the per-lot close path (closeVirtualLot -> reconcileExitAfterBitfinexClose on a post-close throw) closed p1/p2
+  (s as any).emergencyFlattenOpenCopyLots = async () => {
+    for (const r of rows) if (r.venue !== 'paper') r.status = 'CLOSED';
+    return { flattened: 2 };
+  };
   const r = await s.forceFlatDisarmAccount('u', 'slug', 'LIQ_CLAMP_FLATTEN:t1');
   assert.equal(r.verdict, 'FLAT_NO_STOPS');
-  assert.ok(r.errors.some((e) => e.startsWith('lots:')));       // the throw is reported...
-  assert.equal(r.dbReconciled, true);                            // ...but the DB follows the exchange
-  assert.equal(r.dbClosed, 2);
-  for (const id of ['p1', 'p2']) {
-    const row = rows.find((x) => x.id === id)!;
-    assert.equal(row.status, 'CLOSED');
-    const ev = row.terminalCloseAuthority as Record<string, any>;
-    assert.equal(ev.trigger_reason, 'LIQ_CLAMP_FLATTEN:t1');
-    assert.equal(ev.non_countable, true);
-    assert.equal(ev.exchange_readback.verdict, 'FLAT_NO_STOPS');
-    assert.equal(ev.exchange_readback.position_amount, 0);
-  }
-  assert.equal(rows.find((x) => x.id === 'p3')!.status, 'OPEN');   // another venue is never touched
+  assert.equal(r.dbReconciled, true);
+  assert.equal(r.dbOpenRemaining, 0);
+  assert.equal(rows.find((x) => x.id === 'p3')!.status, 'OPEN');   // another venue is never counted or touched
+  const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  assert.equal(src.includes('reconcileFlatAccountRows'), false);   // the duplicate writer is gone
+  assert.equal(src.includes('FORCE_FLAT_DB_RECONCILE'), false);
+  const cvl = src.slice(src.indexOf('  private async closeVirtualLot('), src.indexOf('  private async closeVirtualLot(') + 16_000);
+  assert.match(cvl, /return this\.reconcileExitAfterBitfinexClose\(\{/);   // the ONE post-close reconcile
+  const ff = src.slice(src.indexOf('  async forceFlatDisarmAccount('), src.indexOf('  private async forceFlatDisarmAccountInner('));
+  assert.equal(/updateMany|SignalCycleStatus\.CLOSED/.test(ff), false);   // verify-only: no second row writer
 });
 
-test('HM2: a failed DB reconcile -> dbReconciled=false (the routes return ok=false -> Fly RED); no reconcile unless FLAT_NO_STOPS', async () => {
-  const { s, rows } = reconcileSvc({ rows: [{ id: 'p1', status: 'OPEN' }], updateFails: true });
+test('HM2: rows left OPEN after a FLAT_NO_STOPS read-back -> dbReconciled=false (routes ok=false -> Fly RED); never force-closed', async () => {
+  const { s, rows } = reconcileSvc({ rows: [{ id: 'p1', status: 'OPEN' }] });
   const r = await s.forceFlatDisarmAccount('u', 'slug', 'AUTO_DISARM:X');
   assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.ok(r.errors.some((e) => e.startsWith('lots:')));
   assert.equal(r.dbReconciled, false);
-  assert.ok(r.errors.some((e) => e.startsWith('db-reconcile:')));
+  assert.equal(r.dbOpenRemaining, 1);
+  assert.ok(r.errors.some((e) => e === 'db-reconcile:1 rows still OPEN/PENDING_ENTRY'));
   assert.equal(rows[0].status, 'OPEN');
-  await assert.rejects(
-    s.reconcileFlatAccountRows('u', 'x', { verdict: 'NOT_FLAT', positionAmount: 1, openOrders: 0, readAt: 'now' } as any),
-  );
   const ctl = readFileSync(resolve(__dirname, 'trading-agents.controller.ts'), 'utf8');
   assert.equal((ctl.match(/&& flat\.fenced && flat\.dbReconciled;/g) ?? []).length, 2);   // both routes
+});
+
+test('HM2: a failed DB count -> dbReconciled=false with a db-reconcile error', async () => {
+  const { s } = reconcileSvc({ rows: [] });
+  (s as any).prisma.signalCycleParticipant.count = async () => { throw new Error('db down'); };
+  const r = await s.forceFlatDisarmAccount('u', 'slug', 'AUTO_DISARM:Y');
+  assert.equal(r.dbReconciled, false);
+  assert.equal(r.dbOpenRemaining, null);
+  assert.ok(r.errors.some((e) => e.startsWith('db-reconcile:db down')));
 });
 
 test('HM4: the trigger reason reaches emergencyFlattenOpenCopyLots (NOT as operator) and is stamped into the closed row evidence', async () => {

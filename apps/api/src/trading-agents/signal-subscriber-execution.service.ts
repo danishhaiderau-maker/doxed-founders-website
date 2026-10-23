@@ -130,6 +130,7 @@ import {
 import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
 import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 import { staleLotDecision, summarize, timed, tlsTimings } from './stale-lot-cleanup';
+import { boundedExitLegMs, EXIT_TRIGGER_OUT_OF_WINDOW, safeIsoMs } from './exit-leg-time';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -1827,6 +1828,9 @@ export function readSignedShowcaseClose(
   exitReason: string;
   sourceEventAtMs: number;
   platformReceivedAtMs: number;
+  /** RK (1): measured stamps when carried; null = not carried (the live row stays non-countable). */
+  exitTriggerAtMs: number | null;
+  flySendStartedAtMs: number | null;
 } | null {
   const intent = envelopeJson as {
       action?: string;
@@ -1841,6 +1845,8 @@ export function readSignedShowcaseClose(
         platform_received_at?: string;
         showcase_exit_price?: number;
         showcase_exit_reason?: string;
+        showcase_exit_trigger_ts?: number;
+        fly_send_started_at?: string;
       };
     } | null;
   const context = intent?.context;
@@ -1883,7 +1889,67 @@ export function readSignedShowcaseClose(
     exitReason,
     sourceEventAtMs,
     platformReceivedAtMs,
+    ...signedCloseExitStamps(context, { sourceEventAtMs, platformReceivedAtMs }),
   };
+}
+
+/**
+ * RK (1): exit trigger (epoch s in the signed body) and Fly send (verified header) stamps, additive only.
+ * HM #842 R3: both are bounded to the signed close's event/receive window (boundedExitLegMs); a us/ns/ms trigger,
+ * NaN, negative or far-future value is null (unmeasured -> non-countable), never a throw downstream.
+ */
+export function signedCloseExitStamps(
+  context: unknown,
+  window: { sourceEventAtMs?: number | null; platformReceivedAtMs?: number | null },
+): {
+  exitTriggerAtMs: number | null;
+  flySendStartedAtMs: number | null;
+} {
+  const ctx = (context && typeof context === 'object' ? context : {}) as Record<string, unknown>;
+  const trig = ctx.showcase_exit_trigger_ts;
+  const trigMs = typeof trig === 'number' && Number.isFinite(trig) && trig > 0 ? Math.round(trig * 1000) : null;
+  const send = Date.parse(String(ctx.fly_send_started_at ?? ''));
+  return {
+    exitTriggerAtMs: boundedExitLegMs(trigMs, window),
+    flySendStartedAtMs: boundedExitLegMs(Number.isFinite(send) ? send : null, window),
+  };
+}
+
+/** RK (1): EXIT payload stamps for a Railway close sent on Fly's signed POSITION_CLOSED (shared helper). */
+export function railwayExitLegStamps(opts?: {
+  exitTriggerAtMs?: number;
+  flySendStartedAtMs?: number;
+  platformReceivedAtMs?: number;
+  sourceEventAtMs?: number;
+}): Record<string, string> {
+  // HM #842 R3: never throws (safeIsoMs); trigger/send re-bounded to the signed close window here too, so a bad
+  // stamp from any caller can only make the row non-countable, never abort the EXIT record after the close.
+  const iso = safeIsoMs;
+  const out: Record<string, string> = { exit_order_class: 'BOT_SENT' };
+  const window = { sourceEventAtMs: opts?.sourceEventAtMs, platformReceivedAtMs: opts?.platformReceivedAtMs };
+  const t = iso(boundedExitLegMs(opts?.exitTriggerAtMs, window));
+  const f = iso(boundedExitLegMs(opts?.flySendStartedAtMs, window));
+  const r = iso(opts?.platformReceivedAtMs);
+  if (t) out.exit_trigger_ts = t;
+  else if (opts?.exitTriggerAtMs != null) out.exit_trigger_unmeasured = EXIT_TRIGGER_OUT_OF_WINDOW;
+  if (f) out.fly_send_started_at = f;
+  if (r) out.platform_received_at = r;
+  return out;
+}
+
+/**
+ * RK (1): EXIT payload stamps for an exchange-resident stop fill. There is no Fly-send leg: the trigger is the real
+ * trade print that crossed the stop and the fill is Bitfinex's own fill record. The trigger print is not carried
+ * on Railway today, so `exit_trigger_print_at` stays absent and the row is non-countable until it is (R17).
+ */
+export function residentExitLegStamps(fillRecordAtMs?: number | null, triggerPrintAtMs?: number | null): Record<string, string> {
+  const iso = safeIsoMs; // HM #842 R3: never throws
+  const out: Record<string, string> = { exit_order_class: 'EXCHANGE_RESIDENT' };
+  const f = iso(fillRecordAtMs);
+  const t = iso(triggerPrintAtMs);
+  if (f) out.exit_fill_record_at = f;
+  if (t) out.exit_trigger_print_at = t;
+  return out;
 }
 
 function mergeSignedShowcaseOrders(
@@ -2477,6 +2543,9 @@ export type RelayExecutorWakeRequest = {
     exitReason: string;
     sourceEventAtMs: number;
     platformReceivedAtMs: number;
+    /** RK (1): measured exit trigger / Fly send stamps (optional, additive). */
+    exitTriggerAtMs?: number | null;
+    flySendStartedAtMs?: number | null;
   };
   /** HMAC-verified source-fill evidence carried by a POSITION_OPENED wake. */
   signedOpen?: {
@@ -15525,6 +15594,7 @@ await this.notifications
       source: 'hire',
       event: 'PARTIAL_FILL_STOP_TRIGGERED',
       exit_reason: 'EXCHANGE_STOP',
+      ...residentExitLegStamps(null),
       qty_closed: partialQty,
       pnl_usd: 0,
       ...await this.authenticatedExchangeObservedTerminalProvenance(
@@ -17045,6 +17115,8 @@ await this.notifications
         showcaseExitReason,
         sourceEventAtMs: signedClose?.sourceEventAtMs,
         platformReceivedAtMs: signedClose?.platformReceivedAtMs,
+        exitTriggerAtMs: signedClose?.exitTriggerAtMs ?? undefined,
+        flySendStartedAtMs: signedClose?.flySendStartedAtMs ?? undefined,
         mirrorRelinked,
         trigger: mirrorTrigger,
         terminalAuthority,
@@ -17984,6 +18056,8 @@ await this.notifications
       showcaseExitReason?: string;
       sourceEventAtMs?: number;
       platformReceivedAtMs?: number;
+      exitTriggerAtMs?: number;
+      flySendStartedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
       terminalAuthority: TerminalCloseAuthority;
@@ -18019,6 +18093,8 @@ await this.notifications
       showcaseExitReason?: string;
       sourceEventAtMs?: number;
       platformReceivedAtMs?: number;
+      exitTriggerAtMs?: number;
+      flySendStartedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
       terminalAuthority: TerminalCloseAuthority;
@@ -18324,115 +18400,236 @@ await this.notifications
         ).catch(this.swallowedError('op@16975'));
         return false;
       }
-      const exitPrice = await preparedExitPricePromise;
-      const closeQty = closeTarget.closeQty;
+      // HM #842 R3 / RK (24 Oct 2026): Bitfinex has closed. From here on ANY throw (stamp formatting, PnL, evidence,
+      // persistence) must not leave the DB OPEN while the exchange is flat: reconcile the DB to the exchange's real
+      // state (EXIT from the exchange fill + cleanup) instead.
+      let exitRecorded = false;
+      let knownExitPrice: number | undefined;
+      try {
+        const exitPrice = await preparedExitPricePromise;
+        knownExitPrice = exitPrice;
+        const closeQty = closeTarget.closeQty;
 
-      const direction = meta.direction;
-      const pnlUsd =
-        fillPrice && exitPrice
-          ? direction === 'LONG'
-            ? (exitPrice - fillPrice) * meta.qty
-            : (fillPrice - exitPrice) * meta.qty
-          : cycle.showcasePnlUsd != null
-            ? Number(cycle.showcasePnlUsd)
-            : 0;
+        const direction = meta.direction;
+        const pnlUsd =
+          fillPrice && exitPrice
+            ? direction === 'LONG'
+              ? (exitPrice - fillPrice) * meta.qty
+              : (fillPrice - exitPrice) * meta.qty
+            : cycle.showcasePnlUsd != null
+              ? Number(cycle.showcasePnlUsd)
+              : 0;
 
-      const pnlMarginPct =
-        fillPrice && fillPrice > 0 ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage : 0;
+        const pnlMarginPct =
+          fillPrice && fillPrice > 0 ? (pnlUsd / (fillPrice * meta.qty)) * 100 * leverage : 0;
 
-      const exitSlippageUsd =
-        opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
-          ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
-          : undefined;
-      const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
-      const closeConfirmedAtMs = closeTarget.closeConfirmedAtMs;
-      const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
-        agentId, userId, participantId: participant.id, creds, meta, closeTarget,
-        showcaseExitPrice: opts?.showcaseExitPrice,
-      }).catch((err) => {
-        this.logger.warn(
-          `Normal close evidence unavailable ${participant.id}: ${err instanceof Error ? err.message : err}`,
+        const exitSlippageUsd =
+          opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
+            ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
+            : undefined;
+        const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
+        const closeConfirmedAtMs = closeTarget.closeConfirmedAtMs;
+        const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
+          agentId, userId, participantId: participant.id, creds, meta, closeTarget,
+          showcaseExitPrice: opts?.showcaseExitPrice,
+        }).catch((err) => {
+          this.logger.warn(
+            `Normal close evidence unavailable ${participant.id}: ${err instanceof Error ? err.message : err}`,
+          );
+          return {} as Record<string, unknown>;
+        });
+
+        const exitPersistenceCorrelationId = randomUUID();
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+          timing_correlation_id: exitPersistenceCorrelationId,
+          venue: 'bitfinex',
+          fee_model: stableRelayFeeModel(),
+          execution_profile: stableRelayExecutionProfile(),
+          exit_price: exitPrice,
+          exit_reason: 'SHOWCASE_MIRROR',
+          showcase_exit_price: opts?.showcaseExitPrice,
+          exit_slippage_usd: exitSlippageUsd,
+          showcase_exit_reason: opts?.showcaseExitReason,
+          terminal_authority_kind: terminalClaim.authority.kind,
+          terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+          terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+          terminal_authority_evidence: terminalClaim.authority.evidence,
+          terminal_close_claim_token: terminalClaim.ownerToken,
+          terminal_close_request_id: terminalClaim.requestId,
+          terminal_close_phase: 'CONFIRMED',
+          terminal_close_claim_recovered: terminalClaim.recovered,
+          // RK (1): measured legs of this Fly-sent exit (trigger -> Fly send -> Railway receive -> ack/fill);
+          // absent stamps stay absent and the mapper marks the row non-countable.
+          ...railwayExitLegStamps(opts),
+          close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
+            ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
+            : undefined,
+          close_preflight_started_at: new Date(closePreflightStartedAtMs).toISOString(),
+          close_exchange_ack_at: closeExchangeAckAtMs != null
+            ? new Date(closeExchangeAckAtMs).toISOString()
+            : undefined,
+          close_confirmed_at: closeConfirmedAtMs != null
+            ? new Date(closeConfirmedAtMs).toISOString()
+            : undefined,
+          source_to_close_ack_ms:
+            opts?.sourceEventAtMs != null && closeExchangeAckAtMs != null
+              ? Math.max(0, closeExchangeAckAtMs - opts.sourceEventAtMs)
+              : undefined,
+          platform_to_close_ack_ms:
+            opts?.platformReceivedAtMs != null && closeExchangeAckAtMs != null
+              ? Math.max(0, closeExchangeAckAtMs - opts.platformReceivedAtMs)
+              : undefined,
+          platform_to_close_submit_ms:
+            opts?.platformReceivedAtMs != null && closeTarget.closeSubmitStartedAtMs != null
+              ? Math.max(0, closeTarget.closeSubmitStartedAtMs - opts.platformReceivedAtMs)
+              : undefined,
+          close_preflight_to_submit_ms:
+            closeTarget.closeSubmitStartedAtMs != null
+              ? Math.max(0, closeTarget.closeSubmitStartedAtMs - closePreflightStartedAtMs)
+              : undefined,
+          close_ack_to_confirm_ms:
+            closeExchangeAckAtMs != null && closeConfirmedAtMs != null
+              ? Math.max(0, closeConfirmedAtMs - closeExchangeAckAtMs)
+              : undefined,
+          mirror_relinked: opts?.mirrorRelinked ?? false,
+          mirror_trigger: opts?.trigger,
+          pnl_usd: Math.round(pnlUsd * 100) / 100,
+          pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+          pnl_source: 'open_position',
+          ...authenticatedCloseEvidence,
+          final_reconciliation: terminalFinalReconciliation(closeTarget),
+          source: 'hire',
+        });
+        exitRecorded = true;
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
+          schema: 'relay_execution_persistence_receipt_v1',
+          venue: 'bitfinex', source: 'hire', operation: 'EXIT_PERSISTED',
+          trade_id: terminalClaim.authority.canonicalTradeId, participant_id: participant.id,
+          related_event_type: 'EXIT', timing_correlation_id: exitPersistenceCorrelationId,
+          stages: { persistenceCompletedAtMs: Date.now() },
+        }).catch((err) => this.logger.warn(`EXIT persistence receipt failed: ${err instanceof Error ? err.message : err}`));
+
+        this.logger.log(
+          `[EXIT-TIMING] ${exitMarksSummary(participant.id)} | Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
         );
-        return {} as Record<string, unknown>;
-      });
-
-      const exitPersistenceCorrelationId = randomUUID();
-      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
-        timing_correlation_id: exitPersistenceCorrelationId,
-        venue: 'bitfinex',
-        fee_model: stableRelayFeeModel(),
-        execution_profile: stableRelayExecutionProfile(),
-        exit_price: exitPrice,
-        exit_reason: 'SHOWCASE_MIRROR',
-        showcase_exit_price: opts?.showcaseExitPrice,
-        exit_slippage_usd: exitSlippageUsd,
-        showcase_exit_reason: opts?.showcaseExitReason,
-        terminal_authority_kind: terminalClaim.authority.kind,
-        terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
-        terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
-        terminal_authority_evidence: terminalClaim.authority.evidence,
-        terminal_close_claim_token: terminalClaim.ownerToken,
-        terminal_close_request_id: terminalClaim.requestId,
-        terminal_close_phase: 'CONFIRMED',
-        terminal_close_claim_recovered: terminalClaim.recovered,
-        close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
-          ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
-          : undefined,
-        close_preflight_started_at: new Date(closePreflightStartedAtMs).toISOString(),
-        close_exchange_ack_at: closeExchangeAckAtMs != null
-          ? new Date(closeExchangeAckAtMs).toISOString()
-          : undefined,
-        close_confirmed_at: closeConfirmedAtMs != null
-          ? new Date(closeConfirmedAtMs).toISOString()
-          : undefined,
-        source_to_close_ack_ms:
-          opts?.sourceEventAtMs != null && closeExchangeAckAtMs != null
-            ? Math.max(0, closeExchangeAckAtMs - opts.sourceEventAtMs)
-            : undefined,
-        platform_to_close_ack_ms:
-          opts?.platformReceivedAtMs != null && closeExchangeAckAtMs != null
-            ? Math.max(0, closeExchangeAckAtMs - opts.platformReceivedAtMs)
-            : undefined,
-        platform_to_close_submit_ms:
-          opts?.platformReceivedAtMs != null && closeTarget.closeSubmitStartedAtMs != null
-            ? Math.max(0, closeTarget.closeSubmitStartedAtMs - opts.platformReceivedAtMs)
-            : undefined,
-        close_preflight_to_submit_ms:
-          closeTarget.closeSubmitStartedAtMs != null
-            ? Math.max(0, closeTarget.closeSubmitStartedAtMs - closePreflightStartedAtMs)
-            : undefined,
-        close_ack_to_confirm_ms:
-          closeExchangeAckAtMs != null && closeConfirmedAtMs != null
-            ? Math.max(0, closeConfirmedAtMs - closeExchangeAckAtMs)
-            : undefined,
-        mirror_relinked: opts?.mirrorRelinked ?? false,
-        mirror_trigger: opts?.trigger,
-        pnl_usd: Math.round(pnlUsd * 100) / 100,
-        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-        pnl_source: 'open_position',
-        ...authenticatedCloseEvidence,
-        final_reconciliation: terminalFinalReconciliation(closeTarget),
-        source: 'hire',
-      });
-      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
-        schema: 'relay_execution_persistence_receipt_v1',
-        venue: 'bitfinex', source: 'hire', operation: 'EXIT_PERSISTED',
-        trade_id: terminalClaim.authority.canonicalTradeId, participant_id: participant.id,
-        related_event_type: 'EXIT', timing_correlation_id: exitPersistenceCorrelationId,
-        stages: { persistenceCompletedAtMs: Date.now() },
-      }).catch((err) => this.logger.warn(`EXIT persistence receipt failed: ${err instanceof Error ? err.message : err}`));
-
-      this.logger.log(
-        `[EXIT-TIMING] ${exitMarksSummary(participant.id)} | Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
-      );
-      this.showcaseVanishedMisses.delete(participant.id);
-      this.showcasePositionAbsentMisses.delete(participant.id);
-      this.showcasePositionAbsentSince.delete(participant.id);
-      this.showcaseFlatOpenSince.delete(participant.id);
-      return true;
+        this.clearShowcaseExitTracking(participant.id);
+        return true;
+      } catch (err) {
+        return this.reconcileExitAfterBitfinexClose({
+          agentId, userId, cycleId: cycle.id, participantId: participant.id, meta, creds, terminalClaim, closeTarget,
+          fillPrice, exitPrice: knownExitPrice, exitRecorded, closePreflightStartedAtMs, opts, err,
+        });
+      }
     } finally {
       this.exitingLots.delete(participant.id);
     }
+  }
+
+  /** Per-lot in-memory exit tracking cleared once the lot is terminal (success or post-close reconcile). */
+  private clearShowcaseExitTracking(participantId: string): void {
+    this.showcaseVanishedMisses.delete(participantId);
+    this.showcasePositionAbsentMisses.delete(participantId);
+    this.showcasePositionAbsentSince.delete(participantId);
+    this.showcaseFlatOpenSince.delete(participantId);
+  }
+
+  /**
+   * HM #842 R3 / RK ruling (24 Oct 2026): something threw AFTER Bitfinex closed the lot. The exchange is the truth:
+   * record the EXIT from the exchange's own close (authenticated fill evidence when readable, else the confirmed
+   * reconciliation target) under the same terminal claim, then run the cleanup, so the DB is not left OPEN while the
+   * exchange is flat. The row carries no measured leg stamps and `exit_legs_unmeasured`, so it is non-countable
+   * (R17). EXIT writes are idempotent (first writer wins), so a replay after a partial write is harmless.
+   * Only if this write itself fails is the relay paused (exchange flat, DB OPEN -> operator-visible mismatch).
+   */
+  private async reconcileExitAfterBitfinexClose(args: {
+    agentId: string;
+    userId: string;
+    cycleId: string;
+    participantId: string;
+    meta: ExecutionPayload;
+    creds: ExchangeCredentials;
+    terminalClaim: TerminalCloseClaim;
+    closeTarget: RelayLotExitTarget;
+    fillPrice: number;
+    exitPrice?: number;
+    exitRecorded: boolean;
+    closePreflightStartedAtMs: number;
+    /** B1 merge: the close path's own exit reason (closeVirtualLot policy/emergency closes); default SHOWCASE_MIRROR. */
+    exitReason?: string;
+    opts?: {
+      showcaseExitPrice?: number;
+      showcaseExitReason?: string;
+      mirrorRelinked?: boolean;
+      trigger?: string;
+    };
+    err: unknown;
+  }): Promise<boolean> {
+    const { agentId, userId, cycleId, participantId, meta, creds, terminalClaim, closeTarget } = args;
+    let errMsg = 'unknown error';
+    try {
+      errMsg = (args.err instanceof Error ? `${args.err.name}: ${args.err.message}` : String(args.err)).slice(0, 500);
+    } catch {
+      /* keep the default */
+    }
+    this.logger.warn(`[EXIT-POST-CLOSE] cycle=${cycleId} participant=${participantId}: ${errMsg}; reconciling DB to Bitfinex`);
+    try {
+      if (!args.exitRecorded) {
+        const evidence = await this.resolveNormalCloseExchangeEvidence({
+          agentId, userId, participantId, creds, meta, closeTarget,
+          showcaseExitPrice: args.opts?.showcaseExitPrice,
+        }).catch(() => ({} as Record<string, unknown>));
+        const fillExit = finiteDecimalLikeNumber(evidence.exit_exchange_fill_price);
+        const fillEntry = finiteDecimalLikeNumber(evidence.entry_exchange_fill_price);
+        const entry = fillEntry ?? (args.fillPrice > 0 ? args.fillPrice : null);
+        const exitPrice = fillExit ?? (args.exitPrice && args.exitPrice > 0 ? args.exitPrice : null)
+          ?? args.opts?.showcaseExitPrice ?? entry ?? 0;
+        const qty = meta.qty ?? 0;
+        const pnlUsd = entry && exitPrice && qty
+          ? (meta.direction === 'LONG' ? exitPrice - entry : entry - exitPrice) * qty
+          : 0;
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
+          venue: 'bitfinex',
+          exit_price: exitPrice,
+          exit_reason: args.exitReason ?? 'SHOWCASE_MIRROR',
+          showcase_exit_price: args.opts?.showcaseExitPrice,
+          showcase_exit_reason: args.opts?.showcaseExitReason,
+          exit_order_class: 'BOT_SENT',
+          // no measured leg stamps on this row: non-countable (R17); the exchange values are still the truth
+          exit_legs_unmeasured: 'POST_CLOSE_RECONCILED',
+          exit_post_close_reconciled: true,
+          exit_post_close_error: errMsg,
+          terminal_authority_kind: terminalClaim.authority.kind,
+          terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+          terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+          terminal_authority_evidence: terminalClaim.authority.evidence,
+          terminal_close_claim_token: terminalClaim.ownerToken,
+          terminal_close_request_id: terminalClaim.requestId,
+          terminal_close_phase: 'CONFIRMED',
+          terminal_close_claim_recovered: terminalClaim.recovered,
+          close_submit_started_at: safeIsoMs(closeTarget.closeSubmitStartedAtMs) ?? undefined,
+          close_preflight_started_at: safeIsoMs(args.closePreflightStartedAtMs) ?? undefined,
+          close_exchange_ack_at: safeIsoMs(closeTarget.closeExchangeAckAtMs) ?? undefined,
+          close_confirmed_at: safeIsoMs(closeTarget.closeConfirmedAtMs) ?? undefined,
+          mirror_relinked: args.opts?.mirrorRelinked ?? false,
+          mirror_trigger: args.opts?.trigger,
+          pnl_usd: Math.round(pnlUsd * 100) / 100,
+          pnl_source: fillExit != null && fillEntry != null ? 'exchange_fill' : 'reconstructed',
+          ...evidence,
+          final_reconciliation: terminalFinalReconciliation(closeTarget),
+          source: 'hire',
+        });
+      }
+    } catch (writeErr) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      await this.pauseUserRelayForPositionMismatch(
+        userId,
+        agentId,
+        `EXIT_POST_CLOSE_RECONCILE_FAILED cycle=${cycleId}: Bitfinex closed, DB EXIT not written; ${msg}`,
+      ).catch(this.swallowedError('pauseUserRelayForPositionMismatch@postClose', true));
+      return false;
+    }
+    this.clearShowcaseExitTracking(participantId);
+    return true;
   }
 
   private async countMirrorCatchupEntriesLast24h(userId: string, agentId: string): Promise<number> {
@@ -20410,6 +20607,7 @@ await this.notifications
     try {
     let closeQty = 0;
     let closeTarget: RelayLotExitTarget;
+    const lotClosePreflightStartedAtMs = Date.now();
     const stopIdsToCancel = new Set<number>();
     if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
 
@@ -20480,97 +20678,112 @@ await this.notifications
       return false;
     }
 
-    const direction = meta.direction;
-    // Already-flat path: the exchange position is gone (protective stop fired or
-    // showcase-mirror exit closed it first), so closeQty=0 and the mark-vs-fill formula
-    // would record $0 — even though Bitfinex realized a real result. Attribute the real
-    // P&L from the Bitfinex margin wallet ledger when only this lot was open, else
-    // reconstruct from this lot's own fill price vs the exit mark using the FULL lot qty
-    // (what the exchange would have realized on this lot's share of the merged position).
-    let pnlUsd: number;
-    let pnlSource: 'open_position' | 'exchange_realised' | 'reconstructed';
-    if (btcToSats(closeQty) === 0) {
-      const flat = await this.resolveAlreadyFlatPnl(
+    // B1 merge (#842 22abe36f + #852 HM2): Bitfinex has closed this lot. Any throw from here on (PnL, evidence, EXIT
+    // write) goes to the ONE post-close reconcile (reconcileExitAfterBitfinexClose): EXIT from the exchange fill under
+    // the same terminal claim, non-countable; relay paused only if that write fails. Force-flat relies on this path.
+    let exitRecorded = false;
+    try {
+      const direction = meta.direction;
+      // Already-flat path: the exchange position is gone (protective stop fired or
+      // showcase-mirror exit closed it first), so closeQty=0 and the mark-vs-fill formula
+      // would record $0 — even though Bitfinex realized a real result. Attribute the real
+      // P&L from the Bitfinex margin wallet ledger when only this lot was open, else
+      // reconstruct from this lot's own fill price vs the exit mark using the FULL lot qty
+      // (what the exchange would have realized on this lot's share of the merged position).
+      let pnlUsd: number;
+      let pnlSource: 'open_position' | 'exchange_realised' | 'reconstructed';
+      if (btcToSats(closeQty) === 0) {
+        const flat = await this.resolveAlreadyFlatPnl(
+          agentId,
+          userId,
+          creds,
+          participantId,
+          meta,
+          opts.fillPrice,
+          opts.mark,
+        );
+        pnlUsd = flat.pnlUsd;
+        pnlSource = flat.pnlSource;
+      } else {
+        pnlUsd =
+        direction === 'LONG'
+          ? (opts.mark - opts.fillPrice) * closeQty
+          : (opts.fillPrice - opts.mark) * closeQty;
+        pnlSource = 'open_position';
+      }
+      const pnlMarginPct =
+        opts.reason === 'PROFIT_LOCK' && opts.lockFloor != null
+          ? opts.lockFloor
+          : opts.unrealMarginPct;
+
+      const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
         agentId,
         userId,
-        creds,
         participantId,
+        creds,
         meta,
-        opts.fillPrice,
-        opts.mark,
+        closeTarget,
+      }).catch((err) => {
+        this.logger.warn(
+          `Policy close evidence unavailable ${participantId}: ${err instanceof Error ? err.message : err}`,
+        );
+        return {} as Record<string, unknown>;
+      });
+
+      const exitReasonMap: Record<
+        NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
+        string
+      > = {
+        TIME_60S: 'TIME_60S',
+        PROFIT_LOCK: 'PROFIT_LOCK',
+        THESIS_FAST_CUT: 'THESIS_FAST_CUT',
+        HARD_STOP: 'HARD_STOP',
+        SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
+        AUTHENTICATED_EMERGENCY_CLOSE: 'EMERGENCY_CLOSE',
+      };
+
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
+        venue: 'bitfinex',
+        fee_model: stableRelayFeeModel(),
+        execution_profile: stableRelayExecutionProfile(),
+        exit_price: opts.mark,
+        exit_reason: exitReasonMap[opts.reason],
+        peak_margin_pct: opts.peakMarginPct,
+        lock_floor_margin_pct: opts.lockFloor,
+        unreal_margin_pct: opts.unrealMarginPct,
+        pnl_usd: Math.round(pnlUsd * 100) / 100,
+        pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
+        qty_closed: closeQty,
+        pnl_source: pnlSource,
+        actual_bitfinex_realized_pnl_usd:
+          pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
+        ...authenticatedCloseEvidence,
+        final_reconciliation: terminalFinalReconciliation(closeTarget),
+        terminal_authority_kind: terminalClaim.authority.kind,
+        terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+        terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+        terminal_authority_evidence: terminalClaim.authority.evidence,
+        terminal_close_claim_token: terminalClaim.ownerToken,
+        terminal_close_request_id: terminalClaim.requestId,
+        terminal_close_phase: 'CONFIRMED',
+        terminal_close_claim_recovered: terminalClaim.recovered,
+        source: 'hire',
+      });
+      exitRecorded = true;
+
+      this.logger.log(
+        `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)} pnl_source=${pnlSource}`,
       );
-      pnlUsd = flat.pnlUsd;
-      pnlSource = flat.pnlSource;
-    } else {
-      pnlUsd =
-      direction === 'LONG'
-        ? (opts.mark - opts.fillPrice) * closeQty
-        : (opts.fillPrice - opts.mark) * closeQty;
-      pnlSource = 'open_position';
+      return true;
+    } catch (err) {
+      return this.reconcileExitAfterBitfinexClose({
+        agentId, userId, cycleId, participantId, meta, creds, terminalClaim, closeTarget,
+        fillPrice: opts.fillPrice, exitPrice: opts.mark, exitRecorded,
+        closePreflightStartedAtMs: lotClosePreflightStartedAtMs,
+        exitReason: opts.reason === 'AUTHENTICATED_EMERGENCY_CLOSE' ? 'EMERGENCY_CLOSE' : opts.reason,
+        err,
+      });
     }
-    const pnlMarginPct =
-      opts.reason === 'PROFIT_LOCK' && opts.lockFloor != null
-        ? opts.lockFloor
-        : opts.unrealMarginPct;
-
-    const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
-      agentId,
-      userId,
-      participantId,
-      creds,
-      meta,
-      closeTarget,
-    }).catch((err) => {
-      this.logger.warn(
-        `Policy close evidence unavailable ${participantId}: ${err instanceof Error ? err.message : err}`,
-      );
-      return {} as Record<string, unknown>;
-    });
-
-    const exitReasonMap: Record<
-      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE' | 'TIME_60S',
-      string
-    > = {
-      TIME_60S: 'TIME_60S',
-      PROFIT_LOCK: 'PROFIT_LOCK',
-      THESIS_FAST_CUT: 'THESIS_FAST_CUT',
-      HARD_STOP: 'HARD_STOP',
-      SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
-      AUTHENTICATED_EMERGENCY_CLOSE: 'EMERGENCY_CLOSE',
-    };
-
-    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
-      venue: 'bitfinex',
-      fee_model: stableRelayFeeModel(),
-      execution_profile: stableRelayExecutionProfile(),
-      exit_price: opts.mark,
-      exit_reason: exitReasonMap[opts.reason],
-      peak_margin_pct: opts.peakMarginPct,
-      lock_floor_margin_pct: opts.lockFloor,
-      unreal_margin_pct: opts.unrealMarginPct,
-      pnl_usd: Math.round(pnlUsd * 100) / 100,
-      pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-      qty_closed: closeQty,
-      pnl_source: pnlSource,
-      actual_bitfinex_realized_pnl_usd:
-        pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
-      ...authenticatedCloseEvidence,
-      final_reconciliation: terminalFinalReconciliation(closeTarget),
-      terminal_authority_kind: terminalClaim.authority.kind,
-      terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
-      terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
-      terminal_authority_evidence: terminalClaim.authority.evidence,
-      terminal_close_claim_token: terminalClaim.ownerToken,
-      terminal_close_request_id: terminalClaim.requestId,
-      terminal_close_phase: 'CONFIRMED',
-      terminal_close_claim_recovered: terminalClaim.recovered,
-      source: 'hire',
-    });
-
-    this.logger.log(
-      `Hire lot exit ${userId} cycle=${cycleId} ${opts.reason} peak=${opts.peakMarginPct.toFixed(2)}% unreal=${opts.unrealMarginPct.toFixed(2)}% qty=${closeQty} exit=${opts.mark.toFixed(2)} pnl_source=${pnlSource}`,
-    );
-    return true;
     } finally {
       this.exitingLots.delete(participantId);
       this.showcaseVanishedMisses.delete(participantId);
@@ -20713,10 +20926,19 @@ await this.notifications
       },
     });
     if (overlapCount !== 0) return evidence;
-    const rows = await this.activeTrading.getPositionCloseLedgerEntries(
-      input.creds,
-      input.closeTarget.closeSubmitStartedAtMs,
-    );
+    let rows: Awaited<ReturnType<ExecutionTradingClient['getPositionCloseLedgerEntries']>>;
+    try {
+      rows = await this.activeTrading.getPositionCloseLedgerEntries(
+        input.creds,
+        input.closeTarget.closeSubmitStartedAtMs,
+      );
+    } catch (err) {
+      // HM #842: an unverified ledger read (malformed row) leaves the evidence UNKNOWN, never a 0 realized P&L.
+      this.logger.warn(
+        `Normal-close ledger evidence unverified ${input.participantId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return evidence;
+    }
     const bounded = rows.filter((row) => {
       const at = row.closedAt.getTime();
       return at >= input.closeTarget.closeSubmitStartedAtMs! &&
@@ -20736,7 +20958,7 @@ await this.notifications
     );
     const exactTradingFees = Number(allFees.reduce((sum, fee) => sum + Math.abs(fee.amount), 0).toFixed(8));
     if (
-      bounded.length === 1 && ledgerCosts?.positionCloseRows === 1 &&
+      bounded.length === 1 && ledgerCosts?.verified === true && ledgerCosts.positionCloseRows === 1 &&
       Math.abs(ledgerCosts.tradingFeesUsd - exactTradingFees) <= 0.0001 &&
       Number.isFinite(ledgerCosts.fundingFeesUsd) &&
       bboValid(entryBbo, entry.firstExecutedAtMs) && bboValid(closeBbo, exit.firstExecutedAtMs)
@@ -21095,6 +21317,8 @@ await this.notifications
       execution_profile: stableRelayExecutionProfile(),
       exit_price: exitPrice,
       exit_reason: exactStopExecution ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
+      // RK (1): exchange-resident stop: no send leg; fill = Bitfinex's own fill record (trigger print not carried).
+      ...(exactStopExecution ? residentExitLegStamps(stopExecution.firstExecutedAtMs) : {}),
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       pnl_source: exactStopExecution ? 'bitfinex_order_trades' : 'reconstructed',
@@ -21437,6 +21661,8 @@ await this.notifications
       venue: 'bitfinex',
       exit_price: exitPrice,
       exit_reason: 'EXCHANGE_STOP',
+      // RK (1): exchange-resident stop lot; no Bitfinex fill record on this path -> fails closed in the mapper.
+      ...residentExitLegStamps(null),
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,
@@ -22096,7 +22322,7 @@ await this.notifications
     userId: string,
     agentSlug: string,
     reason = 'unspecified',
-  ): Promise<ForceFlatDisarmResult & { fenced: boolean; dbReconciled: boolean; dbClosed: number; dbOpenRemaining: number | null }> {
+  ): Promise<ForceFlatDisarmResult & { fenced: boolean; dbReconciled: boolean; dbOpenRemaining: number | null }> {
     // HM1: hold the account entry fence for the WHOLE route (both ops/position-flatten and ops/force-flat-disarm). A failed
     // acquisition still flattens (safety first) but is reported (fenced=false -> the caller returns ok=false).
     const fenceId = `flatten:${randomUUID()}`;
@@ -22115,78 +22341,42 @@ await this.notifications
       // #852 E6 / RK (3): both flatten routes run here; their read-backs use the CRITICAL class of the shared budget
       // (reserved headroom above the mirror and the money tick: never starved). Writes are never budget-refused.
       const r = await withBitfinexCriticalReads(() => this.forceFlatDisarmAccountInner(userId, agentSlug, touch, reason));
-      // HM2: the exchange is the truth. Only after a FLAT_NO_STOPS read-back (still under the fence), close every
-      // OPEN / PENDING_ENTRY row of this account as non-countable with the trigger reason + the exchange evidence. A failed
-      // reconcile (or rows left open) => dbReconciled=false => the route returns ok=false (Fly goes RED).
+      // HM2 after the B1 merge: the per-lot closes above already reconcile the DB to Bitfinex through the ONE post-close
+      // reconcile (#842 reconcileExitAfterBitfinexClose, wired into closeVirtualLot), and pending entries go through
+      // emergencyFlattenOpenCopyLots' own cancel path. Here we only VERIFY, under the fence, after a FLAT_NO_STOPS
+      // read-back: any OPEN / PENDING_ENTRY row left on this venue => dbReconciled=false => the route returns ok=false
+      // (Fly RED). No second writer: rows are never force-closed outside the terminal-claim EXIT gate.
       let dbReconciled = false;
-      let dbClosed = 0;
       let dbOpenRemaining: number | null = null;
       const recErrors: string[] = [];
       if (r.verdict === 'FLAT_NO_STOPS') {
         await touch();
         try {
-          const rec = await this.reconcileFlatAccountRows(userId, reason, r);
-          dbClosed = rec.closed;
-          dbOpenRemaining = rec.remaining;
-          dbReconciled = rec.remaining === 0;
-          if (!dbReconciled) recErrors.push(`db-reconcile:${rec.remaining} rows still OPEN/PENDING_ENTRY`);
+          dbOpenRemaining = await this.countOpenAccountRows(userId);
+          dbReconciled = dbOpenRemaining === 0;
+          if (!dbReconciled) recErrors.push(`db-reconcile:${dbOpenRemaining} rows still OPEN/PENDING_ENTRY`);
         } catch (e) {
           recErrors.push(`db-reconcile:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
         }
       }
-      return { ...r, errors: [...fenceErrors, ...r.errors, ...recErrors], fenced, dbReconciled, dbClosed, dbOpenRemaining };
+      return { ...r, errors: [...fenceErrors, ...r.errors, ...recErrors], fenced, dbReconciled, dbOpenRemaining };
     } finally {
       if (fenced) await releaseLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-release'));
     }
   }
 
   /**
-   * HM2 (24 Oct, #852): after an exchange FLAT_NO_STOPS read-back, retire every OPEN / PENDING_ENTRY Bitfinex (or legacy
-   * no-venue) row of the account: CLOSED, non-countable, with the trigger reason and the exchange read-back merged into
-   * terminalCloseAuthority (existing authority kept under `prior`). Conditional on the row still being OPEN/PENDING_ENTRY,
-   * so a close that lands concurrently wins. Returns how many rows it closed and how many remain.
+   * HM2 (#852, read-only since the B1 merge): OPEN / PENDING_ENTRY Bitfinex (or legacy no-venue) rows of the account.
+   * The force-flat route requires 0 after a FLAT_NO_STOPS read-back; it never writes rows itself.
    */
-  async reconcileFlatAccountRows(
-    userId: string,
-    triggerReason: string,
-    readback: Pick<ForceFlatDisarmResult, 'verdict' | 'positionAmount' | 'openOrders' | 'readAt'>,
-  ): Promise<{ closed: number; remaining: number }> {
-    if (readback.verdict !== 'FLAT_NO_STOPS') throw new Error('reconcile refused: exchange read-back is not FLAT_NO_STOPS');
-    const where = {
-      userId,
-      status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
-      AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
-    };
-    const rows = await this.prisma.signalCycleParticipant.findMany({
-      where,
-      select: { id: true, status: true, terminalCloseAuthority: true },
+  async countOpenAccountRows(userId: string): Promise<number> {
+    return this.prisma.signalCycleParticipant.count({
+      where: {
+        userId,
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+      },
     });
-    let closed = 0;
-    for (const row of rows) {
-      const evidence = {
-        schema: 'flat_reconcile_v1',
-        action: 'FORCE_FLAT_DB_RECONCILE',
-        trigger_reason: triggerReason.slice(0, 200),
-        non_countable: true,
-        non_countable_reason: `FORCE_FLAT:${triggerReason.slice(0, 120)}`,
-        prior_status: row.status,
-        exchange_readback: {
-          verdict: readback.verdict,
-          position_amount: readback.positionAmount,
-          open_orders: readback.openOrders,
-          read_at: readback.readAt,
-        },
-        reconciled_at: new Date().toISOString(),
-        ...(row.terminalCloseAuthority != null ? { prior: row.terminalCloseAuthority } : {}),
-      };
-      const u = await this.prisma.signalCycleParticipant.updateMany({
-        where: { id: row.id, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] } },
-        data: { status: SignalCycleStatus.CLOSED, terminalCloseAuthority: evidence as Prisma.InputJsonValue },
-      });
-      closed += u.count;
-    }
-    const remaining = await this.prisma.signalCycleParticipant.count({ where });
-    return { closed, remaining };
   }
 
   private async forceFlatDisarmAccountInner(

@@ -11,7 +11,7 @@ import {
   GUARDIAN_FORCE_FLAT_CLOSE_MARKERS,
   LIVE_FILL_TO_STOP_MAX_S,
   liveRowCountability,
-  liveRowCountabilityWithStop,
+  liveRowCountabilityWithLegs,
   liveRowStopCountability,
   liveRowStopEvidenceFromEvents,
 } from './live-row-countability';
@@ -46,8 +46,16 @@ test('item 4: stop evidence rule (missing / late / failed / unverifiable => non-
   assert.equal(liveRowStopCountability({ ...ok, stopFailed: true }).nonCountableReason, 'NO_STOP_EVIDENCE:STOP_FAILED');
   assert.equal(liveRowStopCountability({ ...ok, fillAtMs: null }).nonCountableReason, 'NO_STOP_EVIDENCE:FILL_TIME_UNKNOWN');
   assert.equal(liveRowStopCountability(null).nonCountableReason, 'NO_STOP_EVIDENCE:UNLINKED');
-  // a forced / guardian close reason wins over good stop evidence
-  assert.equal(liveRowCountabilityWithStop(ok, 'STOP_FAILURE_FLATTEN').nonCountableReason, 'FORCED_CLOSE:STOP_FAILURE_FLATTEN');
+  // B1 merge: ONE rule (liveRowCountabilityWithLegs): forced close -> stop evidence -> measured legs
+  const E = { fly_signal_at_ts: 9, fly_intent_emitted_at_ts: 9.1, railway_received_at_ts: 9.2, exchange_ack_at_ts: 9.6 };
+  const X = { exit_signal_at_ts: 49.9, fly_send_started_at_ts: 50.01, railway_received_at_ts: 50.08, exit_ack_at_ts: 50.4 };
+  assert.equal(liveRowCountabilityWithLegs(['STOP_FAILURE_FLATTEN'], E, X, 'exit', ok).nonCountableReason, 'FORCED_CLOSE:STOP_FAILURE_FLATTEN');
+  assert.deepEqual(liveRowCountabilityWithLegs(['TP'], E, X, 'exit', ok), { nonCountable: false, nonCountableReason: null });
+  assert.equal(liveRowCountabilityWithLegs(['TP'], E, X, 'exit', null).nonCountableReason, 'NO_STOP_EVIDENCE:UNLINKED');
+  assert.equal(liveRowCountabilityWithLegs(['TP'], E, X, 'exit', { ...ok, stopFailed: true }).nonCountableReason, 'NO_STOP_EVIDENCE:STOP_FAILED');
+  assert.equal(liveRowCountabilityWithLegs(['TP'], E, X, 'exit').nonCountable, false); // undefined = stop step not required
+  assert.equal(liveRowCountabilityWithLegs(['TP'], E, null, 'exit', ok).nonCountable, false);
+  assert.match(String(liveRowCountabilityWithLegs(['TP'], {}, X, 'exit', ok).nonCountableReason), /^LIVE_LEG_MISSING/);
 });
 
 test('item 4: evidence comes from the same events as the Fly reporter (fill_at_ts / stop_confirmed_at_ts / STOP_FAILED)', () => {
@@ -83,15 +91,18 @@ test('item 4: the website live book counts a row only with stop evidence (requir
     ledgerCloses: [{ ledgerId: 9, closedAt: at(9999), pnlUsd: 1 } as never],
   });
   const by = Object.fromEntries(book.trades.map((t) => [t.tradeId, t]));
-  assert.equal(by.good?.nonCountable, false);
+  // B1 merge (ONE rule): good stop evidence passes the stop step; the legs are checked next (none in these fixtures)
+  assert.equal(String(by.good?.nonCountableReason).startsWith('NO_STOP_EVIDENCE'), false);
+  assert.match(String(by.good?.nonCountableReason), /^LIVE_LEG_/);
   assert.equal(by.late?.nonCountableReason, 'NO_STOP_EVIDENCE:FILL_TO_STOP_GT_5S');
   assert.equal(by.none?.nonCountableReason, 'NO_STOP_EVIDENCE:STOP_NOT_CONFIRMED');
   assert.equal(by.failed?.nonCountableReason, 'NO_STOP_EVIDENCE:STOP_FAILED');
   assert.equal(by.sff?.nonCountableReason, 'FORCED_CLOSE:STOP_FAILURE_FLATTEN');
-  assert.equal(by['bfx-9']?.nonCountableReason, 'NO_STOP_EVIDENCE:UNLINKED');
-  // without the flag (non-exchange books) the reason-only B4 rule is unchanged
+  // an unlinked cash-ledger row is never countable (#842's unchecked rule covers #852's UNLINKED case)
+  assert.equal(by['bfx-9']?.nonCountable, true);
+  // without the flag (non-exchange books) the stop step is skipped: only forced reason + legs apply
   const paper = mapSubscriberExchangeLiveBook({ orders: [], position: null, participants });
-  assert.equal(Object.fromEntries(paper.trades.map((t) => [t.tradeId, t])).none?.nonCountable, false);
+  assert.equal(String(Object.fromEntries(paper.trades.map((t) => [t.tradeId, t])).none?.nonCountableReason).startsWith('NO_STOP_EVIDENCE'), false);
 });
 
 test('item 4: the live trade export applies the same rule to filled rows', () => {
@@ -99,7 +110,9 @@ test('item 4: the live trade export applies the same rule to filled rows', () =>
     pnlUsd: 3, pnlMarginPct: 10, feeUsd: null, createdAt: t0, updatedAt: at(60) };
   const cycle = { id: 'c1', tradeId: 't1', intentEnvelope: {}, showcaseExitReason: 'TP', createdAt: t0, closedAt: at(60) };
   const good = mapParticipantToExportRow({ participant: { ...base, events: [ev('FILLED', 1), ev('STOP_LOSS_ARMED', 3), ev('EXIT', 60)] }, cycle });
-  assert.equal(good.nonCountable, false);
+  // good stop evidence passes the stop step; the ONE rule then requires the measured legs (none in this fixture)
+  assert.equal(String(good.nonCountableReason).startsWith('NO_STOP_EVIDENCE'), false);
+  assert.match(String(good.nonCountableReason), /^LIVE_LEG_/);
   const none = mapParticipantToExportRow({ participant: { ...base, events: [ev('FILLED', 1), ev('EXIT', 60)] }, cycle });
   assert.equal(none.nonCountableReason, 'NO_STOP_EVIDENCE:STOP_NOT_CONFIRMED');
 });

@@ -92,6 +92,9 @@ DELETE_EXACT_NAMES = frozenset({
     "trades_3factor.csv", "trades_3factor.csv.malformed_rows.jsonl",
     "csv_write_fallback.jsonl", "csv_write_fallback_replay.json",
     "lane_pnl_ledger.json", "lane_lab_pnl_ledger.json", "paper_ioc_no_fill_shadow.jsonl",
+    # F1 / RK ruling A paper delay pool (B1 lane pool + cross-lane live-ack pool, HM 01:43 item 6): epoch-scoped
+    # measured samples; the in-process reset persists it empty, the no-archive wipe deletes the file outright
+    "paper_delay_pool.json",
     # Retired DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026): no writer; still classified so a
     # left-over file is handled like any paper ledger, and a missing one is simply absent (never a crash).
     "disloc_trades.jsonl", "disloc_foi_trades.jsonl", "disloc_paused_skips.jsonl",
