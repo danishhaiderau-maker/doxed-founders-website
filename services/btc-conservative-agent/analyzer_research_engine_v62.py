@@ -84,6 +84,7 @@ from research.shadow_outcome_reconstruction import (
     reconstruct_row as _reconstruct_research_row,
 )
 from research.conservative_limit_fill import evaluate_limit_fill as _evaluate_conservative_limit_fill
+from research.r3_quarantine import retired as _r3q_retired
 from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
@@ -4125,6 +4126,7 @@ def _replay_entry_price(replay: dict):
     return replay.get("start_price")
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_thesis_wide_sweep_all_replays(trades_df=None):
     """
     Sweep thesis fast-cut / stop placement on ALL signal_replay.jsonl paths
@@ -4322,6 +4324,7 @@ def _build_ladder_with_first_rung(trig, lock):
     return [(trig, lock)] + [(t, l) for t, l in TRAIL_LADDER if t > trig]
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
     """
     2D grid: thesis stop margin % × ladder first rung (trigger→lock) on all replays.
@@ -4483,6 +4486,7 @@ def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
     }
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
     """
     3D grid: thesis stop × ladder first rung × MFE protect floor.
@@ -4617,6 +4621,7 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
     return float(best["sum_pnl_usd"])
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def qualified_exit_policy_grid_report():
     """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
 
@@ -5265,6 +5270,7 @@ def _cohort_passes_spread(row, min_spread):
     return int(row.get("directional_spread") or 0) >= min_spread
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def _aggregate_cohort_replay_pnl(cohort_rows, stop_pct=None):
     total = 0.0
     n = wins = 0
@@ -5284,6 +5290,7 @@ def _aggregate_cohort_replay_pnl(cohort_rows, stop_pct=None):
     return {"n": n, "sum_pnl_usd": round(total, 2), "avg_pnl_usd": round(total / n, 2) if n else 0.0, "win_rate_pct": wr}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def entry_gate_replay_sweeps(blocked_df=None):
     """
     Sweep entry gate parameters on frozen APPROVE snapshots + tick replay exit PnL.
@@ -5534,6 +5541,7 @@ def _sim_replay_pnl_at_fill(replay: dict, entry: float, fill_t: float, stop_pct=
     return float(sim_usd), exit_reason
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def pullback_replay_fill_sweep(blocked_df=None):
     """
     Counterfactual entry pullback on APPROVE tick replays:
@@ -5631,6 +5639,7 @@ def pullback_replay_fill_sweep(blocked_df=None):
     return {"best_pullback_pct": float(best["pullback_%"]) / 100.0}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def entry_gate_mtf_chop_sweet_spot_sweep(blocked_df=None):
     """
     MTF rule × chop × ADX grid on frozen APPROVE cohort + tick replay PnL.
@@ -5755,6 +5764,7 @@ def entry_gate_mtf_chop_sweet_spot_sweep(blocked_df=None):
     return {"live_stack_pnl": live_agg["sum_pnl_usd"], "best_combo": best.to_dict() if best is not None else None}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def gate_margin_sweet_spot_analysis(blocked_df=None):
     """
     Distance-to-pass margins (adx/chop/edge/spread) — find minimal relaxation per gate.
@@ -5886,6 +5896,7 @@ def post_block_quality_analysis(blocked_df=None):
     return df
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def regime_segment_analysis(blocked_df=None):
     """Segment APPROVE replay PnL by session, funding, volatility, 4h ranging."""
     print("\n=== REGIME SEGMENT ANALYSIS (session / funding / vol / 4h) ===")
@@ -5946,6 +5957,7 @@ def regime_segment_analysis(blocked_df=None):
     return df
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def margin_size_sweep_analysis(df, blocked_df=None):
     """
     Did conviction/regime/ADX margin scaling help or hurt?
@@ -6125,6 +6137,7 @@ def margin_size_sweep_analysis(df, blocked_df=None):
     return {"best_flat_margin_usd": float(cf_df.iloc[0]["margin_usd"]) if df is not None and not df.empty else None}
 
 
+@_r3q_retired("TICK_SIM")  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def thesis_fast_cut_optimization(df):
     """Sweep THESIS_FAST_EXIT_UNREAL_PCT to find sweet spot (max sum PnL / win rate)."""
     print("\n=== THESIS FAST-CUT SWEET SPOT (THESIS_FAST_EXIT_UNREAL_PCT) ===")
@@ -17205,6 +17218,7 @@ def horizon_profitability_report(trades=None, session=None):
     return payload
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def fast_cut_survivor_report(trades=None, session=None):
     """
     THESIS_FAST_CUT survivor analysis — would trades recover / hit ladder if Scenario C stayed alive?
@@ -20066,6 +20080,7 @@ def benchmark_contribution_report(trades=None, session=None, benchmark_report=No
     return payload
 
 
+@_r3q_retired("TICK_SIM", writes_report=True)  # RK #847 cond 4 / R3: tick-sim on ticker/BBO ticks
 def fast_cut_sweep_report(trades=None, session=None):
     """Replay sweep at -6/-8/-10/-12 vs current booked PnL (executed trades)."""
     if session is None:
