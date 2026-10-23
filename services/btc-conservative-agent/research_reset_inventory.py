@@ -87,6 +87,11 @@ strategy_lab_report.json adaptive_entry_funnel_report.json
 tile_paired_comparison_report.json main_rankings_report.json stream_studies_report.json
 data_health_report.json event_study_report.json decision_model_report.json
 """.split())
+# HM #850 R2 N1 / Rule 17: analyzer outputs written outside ANALYZER_JSON_REPORT_FILES (hardlink-safe report +
+# its receipts sidecar, analyzer HARDLINK_SAFE_REPORT_FILES).  LIMIT_FILL_1S retired them (R3); a reset must still
+# discard stale copies like any other declared analyzer report.
+ANALYZER_SIDECAR_REPORT_FILES = frozenset({"entry_baseline_replay_report.json",
+                                           "entry_baseline_replay_episode_receipts.jsonl.gz"})
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",
     "decision_genome.jsonl", "execution_genome.jsonl", "lifecycle_genome.jsonl", "trade_genome.jsonl"})
@@ -187,7 +192,7 @@ def _base_class(relative):
             and re.fullmatch(r"generation-[0-9a-f]{64}", parts[2])
             and parts[3] in POLICY_CACHE_FILES):
         return "RETIRED_POLICY_EVIDENCE_DERIVED_ARTIFACT"
-    if len(parts) == 2 and parts[0] == "analyzer" and parts[1] in ANALYZER_REPORT_FILES:
+    if len(parts) == 2 and parts[0] == "analyzer" and parts[1] in ANALYZER_REPORT_FILES | ANALYZER_SIDECAR_REPORT_FILES:
         return "RETIRED_ANALYZER_DECLARED_REPORT"
     if len(parts) == 2 and parts[0] == "research_accumulator" and parts[1] in ACCUMULATOR_FILES:
         return "RETIRED_RESEARCH_ACCUMULATOR"
