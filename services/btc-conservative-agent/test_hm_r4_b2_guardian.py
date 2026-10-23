@@ -76,17 +76,18 @@ def test_b2_fly_mirror_carries_the_stamp_even_when_the_read_failed_or_is_stale()
 def test_n4_rolling_24h_cap_blocks_on_a_closed_row_without_a_real_exit_fill():
     # closed yesterday (UTC) but inside the rolling 24 h: only the rolling cap sees it
     now = _dtm.datetime(2027, 1, 15, 2, 0, tzinfo=_dtm.timezone.utc).timestamp()
-    rows = [_nofill(fill_at_ts=now - 7300, closed_at_ts=now - 7200)]
+    rows = [_nofill(fill_at_ts=now - 7300, closed_at_ts=now - 7200, exit_fill_at_ts=now - 7200)]
     v = g.evaluate(rows, MIR, {}, now)
     rolling = [x for x in v if x["code"] == ltg.VIOL_PNL_UNREADABLE and x.get("window") == "rolling_24h"]
     assert len(rolling) == 1 and "GS01-2" in rolling[0]["detail"]
     dis, amber = g.split_violations(v)
     assert dis == [] and ltg.VIOL_PNL_UNREADABLE in _codes(amber)        # AMBER entry block, never a disarm
-    # older than 24 h: aged out of the rolling window
+    # HM R6 B1 / RK 10:26: a row without a real exit fill has no Bitfinex fill time, so it never ages out on a
+    # report / close-record time: it blocks until the relay's clearing read re-stamps it with the real fill
     old = [_nofill(fill_at_ts=now - 90_100, closed_at_ts=now - 90_000)]
-    assert not [x for x in g.evaluate(old, MIR, {}, now) if x.get("window") == "rolling_24h"]
+    assert [x for x in g.evaluate(old, MIR, {}, now) if x.get("window") == "rolling_24h"]
     # a real exit fill: readable, nothing
-    assert not [x for x in g.evaluate([_real(-0.2, fill_at_ts=now - 7300, closed_at_ts=now - 7200)], MIR, {}, now)
+    assert not [x for x in g.evaluate([_real(-0.2, fill_at_ts=now - 7300, closed_at_ts=now - 7200, exit_fill_at_ts=now - 7200)], MIR, {}, now)
                 if x["code"] == ltg.VIOL_PNL_UNREADABLE]
     # also on a blind mirror (evaluated before the blind return)
     assert [x for x in g.evaluate(rows, {"ok": False}, {}, now) if x.get("window") == "rolling_24h"]
@@ -179,7 +180,7 @@ def test_balance_funding_debit_deposit_withdrawal_and_unreadable_never_gate():
              "deposit": (206.79, 1206.79),
              "withdrawal": (206.79, 6.79),
              "unreadable_balance": (206.79, "UNREADABLE", "UNREADABLE")}
-    ledger = [_real(0.05, fill_at_ts=NOW - 900, closed_at_ts=NOW - 600)]   # a small win: under the $0.10 D3 cap
+    ledger = [_real(0.05, fill_at_ts=NOW - 900, closed_at_ts=NOW - 600, exit_fill_at_ts=NOW - 600)]   # a small win: under the $0.10 D3 cap
     pnl_before = [ltg.trade_realised_pnl_usd(c) for c in ledger]
     for name, seq in cases.items():
         st, outs = _run_balance(seq, ledger)
@@ -212,7 +213,7 @@ def test_every_d3_code_is_an_entry_block_code():
           ltg.VIOL_PNL_UNREADABLE}
     assert d3 <= g.ENTRY_BLOCK_CODES
     now = _dtm.datetime(2027, 1, 15, 12, 0, tzinfo=_dtm.timezone.utc).timestamp()
-    rows = [_real(-6.0, fill_at_ts=now - 900, closed_at_ts=now - 600), _nofill(fill_at_ts=now - 500, closed_at_ts=now - 400)]
+    rows = [_real(-6.0, fill_at_ts=now - 900, closed_at_ts=now - 600, exit_fill_at_ts=now - 600), _nofill(fill_at_ts=now - 500, closed_at_ts=now - 400, exit_fill_at_ts=now - 400)]
     seen = set(_codes(g.evaluate(rows, MIR, {}, now))) | set(_codes(ltg.daily_loss_violations(rows, now)))
     assert {"DAILY_LOSS_CAP", ltg.VIOL_PNL_UNREADABLE, ltg.VIOL_TOTAL_LOSS_CAP} <= seen
     produced_d3 = seen & (d3 | {c for c in seen if "LOSS" in c or "PNL" in c})

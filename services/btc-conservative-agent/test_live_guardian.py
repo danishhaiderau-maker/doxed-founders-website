@@ -65,7 +65,7 @@ def test_balance_drift_when_flat_is_a_logged_warning_not_a_disarm():
     assert g.evaluate([], drift, st, NOW) == []
     assert st["balance_reconcile"]["drift_usd"] == -0.69 and st["balance_reconcile"]["warning"] is True
     st = {"day": g.day_key(NOW), "day_baseline": 206.79, "last_flat_balance": 206.79, "last_flat_ts": NOW - 100}
-    explained = [ch(closed=True, pnl_usd=-0.69, closed_at_ts=NOW - 50)]
+    explained = [ch(closed=True, pnl_usd=-0.69, closed_at_ts=NOW - 50, exit_fill_at_ts=NOW - 50)]
     v = g.evaluate(explained, drift, st, NOW)
     assert "BALANCE_DRIFT" not in codes(v) and abs(st["balance_reconcile"]["drift_usd"]) < 1e-9
 
@@ -217,7 +217,7 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
         v = ns["_live_guardian_tick"](now)
         assert code in {x["code"] for x in v} and calls and code in calls[0], code
     # AMEND4 E1 (L12): a daily-loss-cap breach is an AMBER entry block only - never a disarm, never a force-flat
-    ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100,
+    ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_fill_at_ts=n - 100,
                                              exit_at_ts=n - 100)], _mir(), None)
     ns["_live_guardian_tick"](now)
     assert calls == [] and "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
@@ -235,7 +235,7 @@ def test_single_failed_read_is_blind_not_clean_and_does_not_disarm_alone():
 
 
 def test_pre_epoch_rows_never_trip_loss_cap_or_drift():
-    old = ch(fill_at_ts=NOW - 5000, closed=True, pnl_usd=-5.0, closed_at_ts=NOW - 10, exit_at_ts=NOW - 10, stop_confirmed=True)
+    old = ch(fill_at_ts=NOW - 5000, closed=True, pnl_usd=-5.0, closed_at_ts=NOW - 10, exit_fill_at_ts=NOW - 10, exit_at_ts=NOW - 10, stop_confirmed=True)
     assert "DAILY_LOSS_CAP" in codes(g.evaluate([old], MIR, {}, NOW))
     assert "DAILY_LOSS_CAP" not in codes(g.evaluate([old], MIR, {}, NOW, epoch_ts=NOW - 100))
 
@@ -304,14 +304,14 @@ def test_rolling_window_does_not_reset_at_the_utc_or_sydney_day_boundary():
     low = dict(MIR, balance={"derivatives_available_usd": 205.70})
     after = ts + 120                                                                       # two minutes later, new UTC day
     assert g.evaluate([], low, st, after) == [] and st["balance_reconcile"]["balance_loss_usd"] == 1.09, "baseline must survive the UTC midnight (reconcile only, RK 07:57)"
-    loss = [ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 900, closed_at_ts=ts - 30)]
+    loss = [ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 900, closed_at_ts=ts - 30, exit_fill_at_ts=ts - 30)]
     assert "DAILY_LOSS_CAP" in codes(g.evaluate(loss, MIR, {}, after)), "ledger loss must survive the UTC midnight"
-    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 1000, closed_at_ts=ts - 90000)], MIR, {}, after)), "older than 24 h ages out"
+    assert "DAILY_LOSS_CAP" not in codes(g.evaluate([ch(closed=True, pnl_usd=-1.2, fill_at_ts=ts - 1000, closed_at_ts=ts - 90000, exit_fill_at_ts=ts - 90000)], MIR, {}, after)), "older than 24 h ages out"
     assert g.day_key(_dtm.datetime(2026, 10, 19, 13, 0, tzinfo=_dtm.timezone.utc).timestamp()) == "2026-10-20"   # Sydney day, AEDT
 
 
 def test_ledger_loss_cap_fires_even_when_the_exchange_read_is_blind_and_blind_since_resets_when_flat():
-    loss = [ch(closed=True, pnl_usd=-1.5, fill_at_ts=NOW - 900, closed_at_ts=NOW - 60)]
+    loss = [ch(closed=True, pnl_usd=-1.5, fill_at_ts=NOW - 900, closed_at_ts=NOW - 60, exit_fill_at_ts=NOW - 60)]
     assert "DAILY_LOSS_CAP" in codes(g.evaluate(loss, {"ok": False, "error": "x"}, {}, NOW))
     st = {}
     g.evaluate([], {"ok": False}, st, NOW)
@@ -354,10 +354,11 @@ def test_guardian_evaluation_error_does_not_stamp_heartbeat_and_disarms_after_th
 
 
 # ---- HM re-read fixes (#784) -------------------------------------------------------------------------------------------
-def test_closed_row_without_close_time_still_counts_in_loss_cap():
-    c = ch(fill_at_ts=NOW - 500, stop_confirmed=True, closed=True, pnl_usd=-1.5)   # no closed_at_ts / exit_at_ts
-    assert "DAILY_LOSS_CAP" in codes(g.evaluate([c], MIR, {}, NOW))
-    assert g.close_ts(c, NOW) == NOW
+def test_closed_row_without_close_time_is_unreadable_never_now():
+    # HM R6 B1 / RK 10:26: no real Bitfinex fill time => no close time (never 'now') => unreadable entry block
+    c = ch(fill_at_ts=NOW - 500, stop_confirmed=True, closed=True, pnl_usd=-1.5)   # no exit_fill_at_ts
+    assert g.close_ts(c, NOW) is None
+    assert "LEDGER_PNL_UNREADABLE" in codes(g.evaluate([c], MIR, {}, NOW))
 
 
 def test_failed_disarm_counts_as_error_and_skips_heartbeat():
@@ -418,7 +419,8 @@ def test_closed_row_without_close_time_does_not_create_false_drift():
     for i in range(3):
         v = g.evaluate([c], dict(MIR, balance={"derivatives_available_usd": 206.79}), st, NOW + i * 30)
         assert "BALANCE_DRIFT" not in codes(v) and not st["balance_reconcile"]["drift_usd"], i
-    assert st["ledger_loss_usd"] == 0.3        # still counted in the loss cap
+    # HM R6 B1: no real fill time => not counted at 'now' but unreadable (entry block), never silently dropped
+    assert st["ledger_loss_usd"] == 0 and "LEDGER_PNL_UNREADABLE" in codes(v)
 
 
 def test_live_guardian_route_returns_a_response():
@@ -497,7 +499,7 @@ DAY0 = 1_800_000_000.0 - (1_800_000_000.0 % 86400)      # 00:00 UTC of NOW's day
 
 
 def lc(tid, pnl, at):
-    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at, **real_fill(pnl)}
+    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at, "exit_fill_at_ts": at, **real_fill(pnl)}
 
 
 def test_g6_caps_are_pinned_to_the_prereg_values():

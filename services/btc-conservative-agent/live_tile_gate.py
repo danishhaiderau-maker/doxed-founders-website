@@ -384,7 +384,8 @@ def trade_realised_pnl_usd(c: Mapping[str, Any]) -> float | None:
     # HM R5 nit 6: the entry is the real entry fill only (live_exit_fill.entry_fill_price); no limit-price fallback
     entry, exit_, qty = _lef.entry_fill_price(c), _lef.exit_fill_price(c), _f(c.get("fill_qty"))
     side = str(c.get("side") or c.get("direction") or "").strip().upper()
-    if entry and exit_ and qty and qty > 0 and side in ("LONG", "BUY", "SHORT", "SELL"):
+    # HM R6 B1 / RK 10:26: without Bitfinex's exit fill time the trade cannot be placed in a cap window => UNREADABLE
+    if entry and exit_ and _lef.exit_fill_ts(c) and qty and qty > 0 and side in ("LONG", "BUY", "SHORT", "SELL"):
         sgn = 1.0 if side in ("LONG", "BUY") else -1.0
         return (exit_ - entry) * qty * sgn
     return None
@@ -395,8 +396,8 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
     """({tile_key|None: loss_usd}, total_loss_usd, n_rows) for live chains CLOSED in the current UTC day.
 
     Realised trade P&L from trade_realised_pnl_usd (REAL Bitfinex fills; no funding, no fees: RK D3 06:26). Loss = -sum(pnl),
-    so wins on the same tile/day offset losses. A closed row with pnl but no close time counts as closed now (conservative,
-    same as the guardian). Rows whose tile cannot be attributed count only towards the total."""
+    so wins on the same tile/day offset losses. A closed row's time is its real Bitfinex exit fill time (HM R6 B1); without one its
+    pnl is unreadable (never 'now'). Rows whose tile cannot be attributed count only towards the total."""
     day = utc_day(now)
     per: dict = {}
     n = 0
@@ -406,9 +407,8 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
         pnl = trade_realised_pnl_usd(c)
         if pnl is None:
             continue   # never silently: unreadable_pnl_rows() turns it into an entry block (HM N1)
-        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
-        t = now if t is None or t <= 0 else t
-        if t > now + 60 or utc_day(t) != day:
+        t = _lef.exit_fill_ts(c)   # HM R6 B1: the real fill time (always set when pnl is readable); never 'now'
+        if t is None or t > now + 60 or utc_day(t) != day:
             continue
         k = chain_tile_key(c, registry)
         per[k] = per.get(k, 0.0) - pnl
@@ -428,8 +428,8 @@ def unreadable_pnl_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list
     for c in chains or []:
         if not c.get("closed") or trade_realised_pnl_usd(c) is not None:
             continue
-        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
-        if t is None or t <= 0 or (t <= now + 60 and utc_day(t) == day):
+        t = _lef.exit_fill_ts(c)   # HM R6 B1: no real fill time => unreadable, blocks until the relay re-stamps it
+        if t is None or (t <= now + 60 and utc_day(t) == day):
             bad.append(c)
     return bad
 

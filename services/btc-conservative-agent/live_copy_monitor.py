@@ -137,14 +137,18 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             # close report wins outright: no price_source (old reporter) or a non-real source => no exit fill price.
             ch["exit_price_source"] = str(cl.get("price_source") or "none")
             ch["exit_fill_price"] = (_f(cl.get("price")) if ch["exit_price_source"] in _lef.REAL_EXIT_FILL_SOURCES else None)
-            ch["exit_at_ts"] = _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
+            # HM R6 B1 / RK 10:26: the close time is Bitfinex's own exit fill time (the reporter's close.fill_at_ts = the
+            # exit order's last trade mtsCreate). The latest close report wins outright (like the price): none => None,
+            # never 'now', never the report / send time. D3 rolls a loss out of the caps by THIS time only.
+            ch["exit_fill_at_ts"] = _f(cl.get("fill_at_ts"))
+            ch["exit_at_ts"] = ch["exit_fill_at_ts"] or _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
             ch["exit_reason"] = cl.get("reason") or r.get("exit_reason") or r.get("reason") or ch.get("exit_reason")
             ch["funding_usd"] = r.get("funding_usd") if r.get("funding_usd") is not None else ch.get("funding_usd")
             try:  # signed (a loss is negative): do not use _f(), which drops non-positive values
                 ch["pnl_usd"] = float(r["pnl_usd"]) if r.get("pnl_usd") is not None else ch.get("pnl_usd")
             except (TypeError, ValueError):
                 pass
-            ch["closed_at_ts"] = ch.get("exit_at_ts")
+            ch["closed_at_ts"] = ch["exit_fill_at_ts"]   # HM R6 B1: the gate / guardian close time is the real fill time only
             # HM 02:55 / RK (1): exit order class + exit leg stamps for live_vs_paper's per-leg check (missing ->
             # the leg is missing -> non-countable; never inferred).
             if cl.get("exit_order_class") in ("BOT_SENT", "EXCHANGE_RESIDENT"):

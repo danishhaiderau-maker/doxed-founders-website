@@ -80,7 +80,7 @@ def test_e1_open_mark_to_book_counts_against_the_cap_and_unreadable_blocks():
 
 
 def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
-    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": None}
+    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, "pnl_usd": None}
     blocks, _ = ltg.daily_cap_entry_block([c], mirror(), book(), NOW, "gs6")
     assert ltg.VIOL_PNL_UNREADABLE in {b["code"] for b in blocks}
     v = g.evaluate([c], mirror(), {}, NOW, lane_needle="", book=book())
@@ -90,7 +90,7 @@ def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
 
 def test_d3_trade_pnl_only_no_funding_no_fees():
     # RK D3 (24 Oct 06:26) supersedes AMEND4 E1's funding term: trade P&L only, no funding term, no fee term.
-    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9,
+    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "exit_fill_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9,
          "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 99_997.0, "exit_price_source": "stop_fill",
          "fill_price_source": "exchange_trades"}   # HM R5 nit 6: the entry price is the real entry fill
     per, total, n = ltg.daily_realised_loss([c], NOW)

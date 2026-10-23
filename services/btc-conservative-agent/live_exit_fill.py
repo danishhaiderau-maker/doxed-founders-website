@@ -35,6 +35,15 @@ def exit_fill_price(chain: Mapping[str, Any] | None) -> float | None:
     return _pos(c.get("exit_fill_price"))
 
 
+def exit_fill_ts(chain: Mapping[str, Any] | None) -> float | None:
+    """HM R6 B1 / RK 10:26: the REAL Bitfinex exit fill time (epoch s) of a chain with a real exit fill (reporter
+    close.fill_at_ts), else None. Never 'now', never a report / send / close-record time."""
+    c = chain if isinstance(chain, Mapping) else {}
+    if exit_fill_price(c) is None:
+        return None
+    return _pos(c.get("exit_fill_at_ts"))
+
+
 def entry_fill_price(chain: Mapping[str, Any] | None) -> float | None:
     """HM R5 nit 6: the real Bitfinex entry fill price of a chain (fill_price_source exchange_trades), else None.
     Never the limit price, never a mark or position-base fallback."""
@@ -52,6 +61,8 @@ def exit_fill_non_countable_reason(chain: Mapping[str, Any] | None) -> str | Non
         return None
     if exit_fill_price(c) is None:
         return f"{EXIT_FILL_UNREADABLE}:{str(c.get('exit_price_source') or 'none')}"
+    if exit_fill_ts(c) is None:   # HM R6 B1: a real price without Bitfinex's fill time is no readable exit
+        return f"{EXIT_FILL_UNREADABLE}:no_fill_ts"
     if entry_fill_price(c) is None:
         return f"{ENTRY_FILL_UNREADABLE}:{str(c.get('fill_price_source') or 'none')}"
     return None

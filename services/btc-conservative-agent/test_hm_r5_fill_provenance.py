@@ -30,7 +30,8 @@ def _reports(*closes, fill_source="exchange_trades", reason="EXCHANGE_STOP"):
     ]
     for cl in closes:
         out.append({"correlation_id": "gs1-a", "account": "A", "type": "POSITION_CLOSED",
-                    "close": {"reason": reason, **cl}, "closed_at_ts": NOW - 60})
+                    # HM R6 B1: the REAL reporter shape: close.fill_at_ts (Bitfinex fill time); no top-level closed_at_ts
+                    "close": {"reason": reason, "fill_at_ts": (NOW - 60) if cl.get("price") else None, **cl}})
     return out
 
 

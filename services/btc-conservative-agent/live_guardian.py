@@ -144,11 +144,11 @@ HEARTBEAT_STALE_SEC = 10.0      # guardian loop must beat at least this often wh
 PENDING_EXPOSURE_SEC = 300.0    # an order sent and not yet filled/closed counts as exposure for this long
 
 
-def close_ts(c, now: float) -> float:
-    """Close time of a closed row. A closed row with pnl but NO close time is counted as closed 'now' (conservative: it stays in
-    the rolling loss cap instead of silently becoming timestamp 0)."""
-    t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
-    return now if t is None or t <= 0 else t
+def close_ts(c, now: float) -> float | None:
+    """HM R6 B1 / RK 10:26: the close time of a closed row is its REAL Bitfinex exit fill time (live_exit_fill.exit_fill_ts),
+    else None (never 'now'). A row without it has no readable pnl and blocks entries (LEDGER_PNL_UNREADABLE)."""
+    import live_exit_fill as _lef
+    return _lef.exit_fill_ts(c)
 
 
 def heartbeat_stale(last_beat_ts, now: float, limit: float = HEARTBEAT_STALE_SEC) -> bool:
@@ -199,12 +199,12 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     # 4a. realised loss cap from the fresh-epoch ledger: needs no exchange read, so it is evaluated BEFORE the blind-mirror return
     # RK D3 (06:26, R4): the same trade_realised_pnl_usd as the G6 caps and admit_entry (real fills; no funding, no fees)
     ledger_today = [c for c in live if c.get("closed") and _ltg.trade_realised_pnl_usd(c) is not None
-                    and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
+                    and now - ROLLING_WINDOW_SEC <= (close_ts(c, now) or 0) <= now + 60]
     ledger_loss = -sum(float(_ltg.trade_realised_pnl_usd(c)) for c in ledger_today)
     state["ledger_loss_usd"] = round(ledger_loss, 4)
     # HM R4 N4: a closed row in the rolling window without a real exit fill makes this cap UNREADABLE -> entry block (AMBER)
     _unread = [c for c in live if c.get("closed") and _ltg.trade_realised_pnl_usd(c) is None
-               and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
+               and (close_ts(c, now) is None or now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60)]
     if _unread:
         out.append({"code": _ltg.VIOL_PNL_UNREADABLE, "tile": None, "window": "rolling_24h",
                     "detail": f"rolling-24h ledger cap unreadable: {len(_unread)} closed row(s) without a real exit fill "
