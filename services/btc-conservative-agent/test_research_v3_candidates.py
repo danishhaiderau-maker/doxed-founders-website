@@ -804,11 +804,19 @@ class V3CandidateTests(unittest.TestCase):
         ))
 
     def test_conservative_full_fill_drives_execution_metrics(self):
+        # HM #847 (a): the CONSERVATIVE entry is priced by evaluate_limit_fill on market_microstructure_1s
+        # (R3), so a full fill is R17_UNPROVEN_ENTRY and never countable until it moves to the book.
         report = evaluate_protection_screen([conservative_source()])
         first = report["candidates"][0]
-        self.assertEqual(first["full_fills"], 1)
+        self.assertEqual(first["full_fills"], 0)
         self.assertEqual(first["partial_fills"], 0)
-        self.assertEqual(first["unsupported_episodes"], 0)
+        self.assertEqual(first["supported_conservative_episodes"], 0)
+        self.assertEqual(first["unsupported_episodes"], 1)
+        self.assertIsNone(first["sealed_oos_net_usd"])
+        mark = report["mark_source"]
+        self.assertEqual(set(mark["r17_unproven_cell_reasons"]), {"R17_UNPROVEN_ENTRY"})
+        self.assertEqual(mark["r17_unproven_cells"], len(report["candidates"]))
+        self.assertNotEqual(mark["alert_level"], "GREEN")
         self.assertEqual(first["evidence_world"], "CONSERVATIVE_BBO_DEPTH_V1")
         self.assertEqual(
             first["ideal_touch_diagnostic"]["evidence_world"],
@@ -825,8 +833,35 @@ class V3CandidateTests(unittest.TestCase):
         report = evaluate_protection_screen([conservative_source(visible_qty=0.25)])
         first = report["candidates"][0]
         self.assertEqual(first["full_fills"], 0)
-        self.assertEqual(first["partial_fills"], 1)
-        self.assertEqual(first["conservative_fill_rate"], 1.0)
+        self.assertEqual(first["partial_fills"], 0)  # HM #847 (a): 1s-priced entry is R17_UNPROVEN_ENTRY
+        self.assertEqual(report["mark_source"]["r17_unproven_cell_reasons"],
+                         {"R17_UNPROVEN_ENTRY": len(report["candidates"])})
+
+    def test_conservative_entry_receipt_and_outcome_stamped_r17_unproven_entry(self):
+        """HM #847 (a): evaluate_limit_fill prices on market_microstructure_1s -> stamped and non-countable."""
+        src = conservative_source(visible_qty=0.25)
+        receipt = research_v3_candidates._conservative_child_receipt(src, src["entry_children"][0])
+        self.assertEqual(receipt["outcome"], "PARTIAL_FILL")
+        self.assertEqual(receipt["entry_price_source"], "MARKET_MICROSTRUCTURE_1S")
+        self.assertEqual(receipt["r17_entry_status"], "R17_UNPROVEN_ENTRY")
+        store = research_v3_candidates._ProtectionCellStore()
+        cell = (research_v3_candidates._KIND_REPLAYED, "R17_UNPROVEN_ENTRY:PARTIAL_FILL", "ATR_TP",
+                1.5, 0.5, 0.1, 0.2)
+        diag = (research_v3_candidates._KIND_NO_FILL, None, None, float("nan"))
+        store.append(0, 0, 0, 0, store.encode_conservative(cell), store.encode_diagnostic(diag))
+        outcome = store.conservative_outcome(0, "BOOK_WALK", {})
+        self.assertEqual(outcome["outcome_state"], "R17_UNPROVEN")
+        self.assertEqual(outcome["r17_unproven_reason"], "R17_UNPROVEN_ENTRY")
+        self.assertEqual(outcome["entry_price_source"], "MARKET_MICROSTRUCTURE_1S")
+        self.assertEqual(outcome["entry_fill_state"], "PARTIAL_FILL")
+        self.assertIsNone(outcome["net_pnl_usd"])
+        self.assertEqual(outcome["unproven_net_pnl_usd"], 1.5)
+        no_fill = research_v3_candidates._ProtectionCellStore()
+        no_fill.append(0, 0, 0, 0, no_fill.encode_conservative(
+            (research_v3_candidates._KIND_NO_FILL, None, None, *(float("nan"),) * 4)),
+            no_fill.encode_diagnostic(diag))
+        self.assertEqual(no_fill.conservative_outcome(0, "BOOK_WALK", {})["entry_price_source"],
+                         "MARKET_MICROSTRUCTURE_1S")
 
     def test_policy_identity_excludes_trade_quantity_and_hashes_once(self):
         first = conservative_source()

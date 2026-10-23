@@ -865,6 +865,10 @@ def _conservative_child_receipt(
         "entry_policy_id": child.get("entry_policy_id"),
         "chase_id": child.get("chase_id"),
         "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
+        "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+        "r17_entry_status": (
+            R17_UNPROVEN_ENTRY if str(receipt.get("outcome") or "") in {"FILL", "PARTIAL_FILL"} else None
+        ),
         "ideal_touch_reference": {
             "fill_ts": child.get("fill_ts"),
             "fill_price": child.get("fill_price"),
@@ -1344,6 +1348,15 @@ _UNSUPPORTED_REASON_BY_KIND = {
     3: "BOOK_WALK_PATH_OR_ATR_MISSING",
 }
 _KIND_NO_FILL, _KIND_REPLAYED = 0, 4
+
+# HM #847 (a) / RK R3: the CONSERVATIVE entry (fill_ts, fill_price, NO_FILL decision) is priced by
+# research.conservative_limit_fill.evaluate_limit_fill on market_microstructure_1s rows, which R3 forbids
+# for pricing. Until that entry moves to the book (paper_fill + quote_trigger, see the follow-up fix PR),
+# every FILL/PARTIAL_FILL CONSERVATIVE cell is R17_UNPROVEN (reason R17_UNPROVEN_ENTRY): never countable,
+# its PnL kept only as ``unproven_net_pnl_usd``.
+R17_UNPROVEN_ENTRY = "R17_UNPROVEN_ENTRY"
+ENTRY_PRICE_SOURCE_1S = "MARKET_MICROSTRUCTURE_1S"
+_ENTRY_UNPROVEN_PREFIX = R17_UNPROVEN_ENTRY + ":"
 _NAN = float("nan")
 
 
@@ -1461,12 +1474,27 @@ class _ProtectionCellStore:
     def conservative_outcome(self, cell: int, basis: str, base: Mapping[str, Any]) -> dict[str, Any]:
         kind = self.c_kind[cell]
         if kind == _KIND_NO_FILL:
-            return {"outcome_state": "NO_FILL", "net_pnl_usd": None}
+            return {"outcome_state": "NO_FILL", "net_pnl_usd": None,
+                    "entry_price_source": ENTRY_PRICE_SOURCE_1S}
         if kind != _KIND_REPLAYED:
             return {"outcome_state": "UNSUPPORTED", "reason": _UNSUPPORTED_REASON_BY_KIND[kind]}
         pnl, retention, giveback, underwater = (_maybe(v) for v in self.c_values[4 * cell: 4 * cell + 4])
+        state = str(self.names[self.c_state[cell]])
+        if state.startswith(_ENTRY_UNPROVEN_PREFIX):
+            # HM #847 (a): entry priced on market_microstructure_1s -> never countable.
+            return {
+                "outcome_state": R17_UNPROVEN,
+                "r17_unproven_reason": R17_UNPROVEN_ENTRY,
+                "entry_price_source": ENTRY_PRICE_SOURCE_1S,
+                "entry_fill_state": state[len(_ENTRY_UNPROVEN_PREFIX):],
+                "net_pnl_usd": None,
+                "unproven_net_pnl_usd": pnl,
+                "exit_reason": self.names[self.c_exit[cell]],
+                "replay_path_basis": basis,
+            }
         outcome = {
-            "outcome_state": self.names[self.c_state[cell]],
+            "outcome_state": state,
+            "entry_price_source": ENTRY_PRICE_SOURCE_1S,
             "net_pnl_usd": pnl,
             "exit_reason": self.names[self.c_exit[cell]],
             "profit_retention_ratio": retention,
@@ -2033,8 +2061,9 @@ class _EpisodeReplayer:
                         )
                         status = result.get("status")
                         state = (
-                            "PARTIAL_FILL" if status == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
-                            else "FULL_FILL" if status == "COMPLETE"
+                            _ENTRY_UNPROVEN_PREFIX + "PARTIAL_FILL"
+                            if status == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
+                            else _ENTRY_UNPROVEN_PREFIX + "FULL_FILL" if status == "COMPLETE"
                             else str(status or "UNSUPPORTED")
                         )
                         conservative = replays[replay_key] = (
@@ -2178,8 +2207,12 @@ def evaluate_protection_screen(
                 ]]
         for entry, (first_position, event, identity, cells) in kept.items():
             for protection_index, (conservative, diagnostic) in enumerate(cells):
-                if conservative[0] == _KIND_REPLAYED and store.names[conservative[1]] == R17_UNPROVEN:
-                    unproven_cells[STOP_UNOBSERVABLE_REASON] += 1
+                if conservative[0] == _KIND_REPLAYED:
+                    state_name = str(store.names[conservative[1]])
+                    if state_name == R17_UNPROVEN:  # stop unobservable (the entry is also 1s-priced)
+                        unproven_cells[STOP_UNOBSERVABLE_REASON] += 1
+                    elif state_name.startswith(_ENTRY_UNPROVEN_PREFIX):
+                        unproven_cells[R17_UNPROVEN_ENTRY] += 1
                 store.append(entry * protection_count + protection_index, event, first_position,
                              identity, conservative, diagnostic)
 
