@@ -251,10 +251,12 @@ def test_bot_fly_exit_send_record_and_paper_exit_own_s2s_fails_closed(gd, tmp_pa
         def acknowledged_events(self, trade_id):
             return [{"event_type": "ORDER_PLACED"},
                     {"event_type": "POSITION_CLOSED", "fly_intent_at_unix": 2000.0, "fly_send_started_at_unix": 2000.001,
-                     "fly_send_rtt_s": 0.04, "platform_received_at": "1970-01-01T00:33:20.020Z", "fly_attempts": 1}]
+                     "fly_send_rtt_s": 0.04, "platform_received_at": "1970-01-01T00:33:20.020Z", "fly_attempts": 1,
+                     "exit_signal_at_unix": 1999.9}]
     monkeypatch.setitem(ns, "_relay_event_outbox", _Box())
     rec = ns["_fly_exit_send_record"]("x1")
     assert rec["fly_intent_at_ts"] == 2000.0 and rec["railway_received_at_ts"] == pytest.approx(2000.02)
+    assert rec["exit_signal_at_ts"] == 1999.9
     p = lap.CrossLanePool()
     assert _fill(p, [_close(1)], fly_exit_send=ns["_fly_exit_send_record"]) == 1
     # HM 01:43 item 4: the bare exit (_tp1_gate) no longer assumes own signal->send = 0.0 -> fail closed

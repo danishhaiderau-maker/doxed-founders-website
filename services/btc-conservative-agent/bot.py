@@ -34008,7 +34008,8 @@ def _fly_exit_send_record(trade_id: str):
                 "fly_send_started_at_ts": row.get("fly_send_started_at_unix"),
                 "fly_send_rtt_s": row.get("fly_send_rtt_s"),
                 "railway_received_at_ts": _iso_or_unix(row.get("platform_received_at")),
-                "attempts": row.get("fly_attempts")}
+                "attempts": row.get("fly_attempts"),
+                "exit_signal_at_ts": row.get("exit_signal_at_unix")}  # None until POSITION_CLOSED carries it
     return None
 
 
@@ -62743,6 +62744,7 @@ def _live_copy_monitor_context() -> dict:
         "journal_write_failures": journal.write_failures,
         "ingest_rejects": list(_live_copy_ingest_rejects),
         "paper_twins": _live_copy_paper_twins(),
+        "fly_exit_send": _fly_exit_send_record,  # HM 01:43 item 3: live exit legs (callable; not serialised)
         "relay": {
             "pending": _relay_event_outbox.pending_count() if _relay_event_outbox else None,
             "live_copy_outbox": _get_live_copy_outbox().status(),

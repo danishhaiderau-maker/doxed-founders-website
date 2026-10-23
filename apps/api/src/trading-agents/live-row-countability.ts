@@ -43,3 +43,67 @@ export function liveRowCountability(...reasons: Array<string | null | undefined>
   }
   return { nonCountable: false, nonCountableReason: null };
 }
+
+/**
+ * HM 01:43 item 3 (R17): per-leg check of a LIVE row. Each side (entry; exit when closed by a Fly-sent order)
+ * needs the four stamps signal -> Fly send -> relay (Railway) receive -> exchange ack/fill; each stamp ends one
+ * leg and starts the next, so no interval is counted twice. A missing stamp or a leg that ends before it starts
+ * (beyond the clock slack) makes the row non-countable. Mirrors services/btc-conservative-agent/live_ack_pool.py
+ * LIVE_LEGS / live_legs (test_live_vs_paper.py asserts every name and key below appears here).
+ */
+export const LIVE_LEGS = {
+  entry: [
+    ['signal', ['fly_signal_at_ts']],
+    ['fly_send', ['fly_intent_emitted_at_ts']],
+    ['relay_receive', ['railway_received_at_ts']],
+    ['ack_fill', ['exchange_ack_at_ts', 'fill_at_ts']],
+  ],
+  exit: [
+    ['signal', ['exit_signal_at_ts']],
+    ['fly_send', ['fly_send_started_at_ts']],
+    ['relay_receive', ['railway_received_at_ts']],
+    ['ack_fill', ['exit_ack_at_ts', 'exit_confirmed_at_ts']],
+  ],
+} as const;
+
+export const LIVE_LEG_CLOCK_SLACK_S = 0.05;
+
+/** Epoch-second stamps of one side, keyed like the live chain / Fly outbox record. */
+export type LiveLegStamps = Record<string, number | null | undefined>;
+
+export type LiveLegCheck = LiveRowCountability & { legReasons: string[] };
+
+const posNum = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+
+/** `exit` null = no exit legs required (row still open, or closed by an exchange-resident stop: no Fly send). */
+export function liveRowLegCheck(entry: LiveLegStamps, exit: LiveLegStamps | null): LiveLegCheck {
+  const reasons: string[] = [];
+  const sides: Array<['entry' | 'exit', LiveLegStamps]> = [['entry', entry ?? {}]];
+  if (exit) sides.push(['exit', exit]);
+  for (const [side, src] of sides) {
+    const spec: ReadonlyArray<readonly [string, ReadonlyArray<string>]> = LIVE_LEGS[side];
+    const stamps = spec.map(([name, keys]) => {
+      const v = keys.map((k) => posNum(src[k])).find((x) => x != null) ?? null;
+      if (v == null) reasons.push(`LIVE_LEG_MISSING:${side}.${name}`);
+      return [name, v] as const;
+    });
+    for (let i = 0; i + 1 < stamps.length; i++) {
+      const [n0, v0] = stamps[i];
+      const [n1, v1] = stamps[i + 1];
+      if (v0 != null && v1 != null && v1 - v0 < -LIVE_LEG_CLOCK_SLACK_S) reasons.push(`LIVE_LEG_ORDER:${side}.${n0}->${n1}`);
+    }
+  }
+  return { nonCountable: reasons.length > 0, nonCountableReason: reasons[0] ?? null, legReasons: reasons };
+}
+
+/** Forced close first (B4), else the per-leg check (HM 01:43 item 3). */
+export function liveRowCountabilityWithLegs(
+  reasons: Array<string | null | undefined>,
+  entry: LiveLegStamps,
+  exit: LiveLegStamps | null,
+): LiveRowCountability {
+  const forced = liveRowCountability(...reasons);
+  if (forced.nonCountable) return forced;
+  const legs = liveRowLegCheck(entry, exit);
+  return { nonCountable: legs.nonCountable, nonCountableReason: legs.nonCountableReason };
+}

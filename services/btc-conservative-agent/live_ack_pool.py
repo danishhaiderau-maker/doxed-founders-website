@@ -97,6 +97,52 @@ def exit_window(tl: Mapping[str, Any], fly_send: Optional[Mapping[str, Any]]) ->
     return a, b, None
 
 
+LIVE_LEG_MISSING = "LIVE_LEG_MISSING"
+LIVE_LEG_ORDER = "LIVE_LEG_ORDER"
+# HM 01:43 item 3 / 5: the live row's per-leg stamps, one start and one end per leg (each stamp ends one leg and
+# starts the next, so no interval is counted twice). Mirrored by apps/api/.../live-row-countability.ts LIVE_LEGS.
+LIVE_LEGS = {
+    "entry": (("signal", ("fly_signal_at_ts",)), ("fly_send", ("fly_intent_emitted_at_ts",)),
+              ("relay_receive", ("railway_received_at_ts",)), ("ack_fill", ("exchange_ack_at_ts", "fill_at_ts"))),
+    "exit": (("signal", ("exit_signal_at_ts",)), ("fly_send", ("fly_send_started_at_ts",)),
+             ("relay_receive", ("railway_received_at_ts",)), ("ack_fill", ("exit_ack_at_ts", "exit_confirmed_at_ts"))),
+}
+
+
+def live_legs(tl: Optional[Mapping[str, Any]], fly_exit_send: Optional[Mapping[str, Any]] = None, *,
+              closed: bool = True, exit_resident: bool = False) -> dict:
+    """ONE shared per-leg check (R4/R17) of a LIVE row: signal -> Fly send -> relay (Railway) receive -> exchange
+    ack/fill, for the entry and (when closed) the exit. Entry stamps come from the live chain; exit Fly send and
+    Railway receive come from this bot's relay-outbox ack row (``fly_exit_send``) and the exit ack from the chain.
+    A missing stamp or a leg whose end precedes its start (beyond CLOCK_SLACK_S) makes the row non-countable.
+    An exchange-resident stop exit has no Fly send leg (the exchange fills it): its exit legs are not required."""
+    tl, fs = tl or {}, fly_exit_send if isinstance(fly_exit_send, Mapping) else {}
+    out: dict = {"legs": {}, "non_countable": False, "non_countable_reasons": None}
+    reasons = []
+    sides = ["entry"] + (["exit"] if closed and not exit_resident else [])
+    for side in sides:
+        src = tl if side == "entry" else {**{k: fs.get(k) for k in ("fly_send_started_at_ts", "railway_received_at_ts")},
+                                          "exit_signal_at_ts": fs.get("exit_signal_at_ts") or tl.get("exit_signal_at_ts"),
+                                          "exit_ack_at_ts": tl.get("exit_ack_at_ts"),
+                                          "exit_confirmed_at_ts": tl.get("exit_confirmed_at_ts")}
+        stamps = []
+        for name, keys in LIVE_LEGS[side]:
+            v = next((x for x in (_pf._f(src.get(k)) for k in keys) if x), None)
+            stamps.append((name, v))
+            if not v:
+                reasons.append(f"{LIVE_LEG_MISSING}:{side}.{name}")
+        legs = {}
+        for (n0, v0), (n1, v1) in zip(stamps, stamps[1:]):
+            ms = round((v1 - v0) * 1000.0, 3) if v0 and v1 else None
+            legs[f"{n0}->{n1}"] = {"start_ts": v0, "end_ts": v1, "ms": ms}
+            if ms is not None and ms < -CLOCK_SLACK_S * 1000.0:
+                reasons.append(f"{LIVE_LEG_ORDER}:{side}.{n0}->{n1}")
+        out["legs"][side] = legs
+    if reasons:
+        out.update({"non_countable": True, "non_countable_reasons": reasons})
+    return out
+
+
 def key_for(leg: str, *, entry_order_model: Any = None, exit_order_class: Any = None) -> Optional[str]:
     if leg == "exit":
         return None if exit_order_class == _om.EXCHANGE_RESIDENT else KEY_EXIT_RO_MKT

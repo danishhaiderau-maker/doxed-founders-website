@@ -517,6 +517,8 @@ class RelayEventOutbox:
                 "fly_attempts": int(row.get("attempts") or 0),
                 "fly_send_started_at_unix": timing.get("fly_send_started_at_unix"),
                 "fly_send_rtt_s": timing.get("fly_send_rtt_s"),
+                # HM 01:43 item 3: the exit signal leg start (the bot's exit trigger), only when the payload carries it
+                "exit_signal_at_unix": (row.get("payload") or {}).get("exit_trigger_ts"),
             })
             self._acks = self._acks[-self.ack_limit:]
             try:

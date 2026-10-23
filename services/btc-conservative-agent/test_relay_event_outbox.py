@@ -411,5 +411,12 @@ def test_ack_row_carries_fly_send_stamps_for_the_exit_pool(tmp_path):
     assert got["fly_intent_at_unix"] == row["created_at_unix"]
     assert got["fly_send_started_at_unix"] == timing["fly_send_started_at_unix"] and got["fly_send_rtt_s"] == 0.04
     assert got["fly_attempts"] == int(row.get("attempts") or 0)
+    assert got["exit_signal_at_unix"] is None  # the payload carries no exit trigger yet -> exit signal leg missing
     restarted = RelayEventOutbox(tmp_path / "paper_lifecycle_v1.json")
     assert restarted.acknowledged_events("trade")[-1]["fly_send_rtt_s"] == 0.04
+    row2 = box.enqueue_next(
+        {"event": "POSITION_CLOSED", "trade_id": "trade2", "ts": "closed", "exit_trigger_ts": 1234.5},
+        state_payload={**lifecycle(), "pending_orders": []},
+    )
+    assert box.acknowledge(row2["event_id"], ack(row2), send_timing=timing)
+    assert box.acknowledged_events("trade2")[-1]["exit_signal_at_unix"] == 1234.5

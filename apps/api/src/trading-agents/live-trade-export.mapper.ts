@@ -1,6 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
-import { liveRowCountability } from './live-row-countability';
+import { liveRowCountabilityWithLegs, type LiveLegStamps } from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: string;
@@ -119,6 +119,49 @@ function mapEvent(payload: unknown, eventType: string, createdAt: Date): LiveTra
   };
 }
 
+const secOf = (v: unknown): number | null => {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v > 1e12 ? v / 1000 : v;
+  if (typeof v !== 'string' || !v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) && t > 0 ? t / 1000 : null;
+};
+const recOf = (v: unknown): Record<string, unknown> =>
+  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+
+/**
+ * HM 01:43 item 3: the measured per-leg stamps a Railway live row has. Entry: Fly signal + intent from the signed
+ * approval, Railway receive from the envelope, exchange ack from the order/fill payload. Exit (closed rows not
+ * closed by an exchange-resident stop): exit trigger, Fly send and Railway receive must be on the EXIT payload;
+ * today they are not, so closed rows fail closed (LIVE_LEG_MISSING:exit.*) until they are carried (R17).
+ */
+export function liveLegStamps(
+  intentEnvelope: unknown,
+  events: Array<{ eventType: string; payload: unknown }>,
+  closed: boolean,
+): [LiveLegStamps, LiveLegStamps | null] {
+  const ctx = recOf(recOf(intentEnvelope).context);
+  const approval = recOf(ctx.fly_live_approval);
+  const pl = (type: string) => recOf(events.find((e) => e.eventType === type)?.payload);
+  const placed = pl('ORDER_PLACED');
+  const filled = pl('FILLED');
+  const exitPl = recOf([...events].reverse().find((e) => e.eventType === 'EXIT')?.payload);
+  const entry: LiveLegStamps = {
+    fly_signal_at_ts: secOf(approval.signal_at_ts),
+    fly_intent_emitted_at_ts: secOf(approval.created_at_ts),
+    railway_received_at_ts: secOf(ctx.platform_received_at),
+    exchange_ack_at_ts: secOf(placed.entry_exchange_ack_at ?? placed.exchange_ack_at ?? filled.entry_exchange_ack_at),
+  };
+  if (!closed || String(exitPl.exit_order_class ?? '') === 'EXCHANGE_RESIDENT') return [entry, null];
+  const exit: LiveLegStamps = {
+    exit_signal_at_ts: secOf(exitPl.exit_trigger_ts ?? exitPl.exit_signal_at),
+    fly_send_started_at_ts: secOf(exitPl.fly_send_started_at),
+    railway_received_at_ts: secOf(exitPl.platform_received_at),
+    exit_ack_at_ts: secOf(exitPl.close_exchange_ack_at),
+    exit_confirmed_at_ts: secOf(exitPl.close_confirmed_at),
+  };
+  return [entry, exit];
+}
+
 export function mapParticipantToExportRow(input: {
   participant: {
     id: string;
@@ -209,7 +252,10 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
-    ...liveRowCountability(exitEvent?.exitReason, input.cycle.showcaseExitReason),
+    ...liveRowCountabilityWithLegs(
+      [exitEvent?.exitReason, input.cycle.showcaseExitReason],
+      ...liveLegStamps(input.cycle.intentEnvelope, input.participant.events, closedAt != null),
+    ),
     events,
   };
 }
