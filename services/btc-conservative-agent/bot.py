@@ -21434,7 +21434,8 @@ def _record_tile_decision_and_dispatch(
         # record per shared call, so it must stay lane-independent.
         quote_ctx = adaptive.pop("_quote_ctx", None)
         lane_features = {**enriched, "adaptive_entry_decision": adaptive}
-        _record_adaptive_entry_decision(lane, adaptive, quote_ctx=quote_ctx)
+        _stamp_entry_quote(adaptive, quote_ctx)
+        _record_adaptive_entry_decision(lane, adaptive)
         if adaptive.get("action") == "STAND_ASIDE" and detail.get("passes"):
             detail = {**detail, "passes": False, "block_reason": f"ADAPTIVE_{adaptive.get('reason')}"}
     lane_enabled = is_research_lane_enabled(lane)
@@ -29260,18 +29261,22 @@ def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -
     _execution_markout_counters["taker_signals_scheduled"] += 1
 
 
-def _record_adaptive_entry_decision(lane: str, decision: dict, *, quote_ctx: dict | None = None) -> None:
-    """Persist every adaptive decision, including stand-asides, for the analyzer.
+def _stamp_entry_quote(decision: dict, quote_ctx: dict | None) -> None:
+    """#809 (measurement only): stamp the cheap decision quote onto an adaptive decision before it is recorded.
 
-    #809 (measurement only): stamp the cheap decision quote (bid/ask/age/WS-or-REST source/decision ts) from values
-    the caller already read under state_lock. No book read and no I/O here: the XVL path records before order
-    dispatch, so anything slow here would lengthen the real entry delay. The entry-vs-book comparison is computed at
-    tile-row build time (monitor_tiles) from the book snapshot already stored with the trade.
+    Uses bid/ask/age/WS-or-REST source/decision ts the caller already read under state_lock. No book read and no
+    I/O here: the XVL path records before order dispatch, so anything slow here would lengthen the real entry delay.
+    The entry-vs-book comparison is computed at tile-row build time (monitor_tiles) from the book snapshot already
+    stored with the trade. Never alters the decision's action, price or sizing.
     """
     try:
         decision.update(trigger_measure.entry_quote_fields(decision, recorded_ts=time.time(), **(quote_ctx or {})))
     except Exception:  # noqa: BLE001 - measurement must never break decision recording
         pass
+
+
+def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
+    """Persist every adaptive decision, including stand-asides, for the analyzer."""
     row = {"ts": utc_iso(), "research_lane": lane, "bot_version": EXECUTION_FIX_VERSION, **decision}
     _safe_append_jsonl(
         ADAPTIVE_ENTRY_DECISIONS_FILE, row,
@@ -32768,7 +32773,8 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     write_v3_rejection = accepted or _xvl_rejected_v3_due(lane, f"ADAPTIVE_{decision.get('reason')}", side)
     if not accepted:
         decision["v3_lane_decision_written"] = bool(write_v3_rejection)
-    _record_adaptive_entry_decision(lane, decision, quote_ctx=quote_ctx)
+    _stamp_entry_quote(decision, quote_ctx)
+    _record_adaptive_entry_decision(lane, decision)
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
         "research_soft": "APPROVE", "direction": side, "candidate_direction": side,

@@ -75,11 +75,14 @@ def test_bot_wiring_present():
     assert '"exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts"))' in src
     assert src.count("**_twin_trigger_fields(row)") == 2
     # #809: the decision recorder stamps only the cheap quote (no book read) from values read under state_lock
-    assert src.count("_record_adaptive_entry_decision(lane, adaptive, quote_ctx=quote_ctx)") == 1
-    assert src.count("_record_adaptive_entry_decision(lane, decision, quote_ctx=quote_ctx)") == 1
-    fn = _bot_function(src, "_record_adaptive_entry_decision")
-    for banned in ("book_at", "BookTail", "book10l", "paper_fill", "open(", "requests", "urlopen"):
-        assert banned not in fn, banned
+    assert src.count("_stamp_entry_quote(adaptive, quote_ctx)\n        _record_adaptive_entry_decision(lane, adaptive)") == 1
+    assert src.count("_stamp_entry_quote(decision, quote_ctx)\n    _record_adaptive_entry_decision(lane, decision)") == 1
+    # the recorder keeps its original (lane, decision) signature so existing callers/stubs are unaffected
+    assert "def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:" in src
+    for name in ("_stamp_entry_quote", "_record_adaptive_entry_decision"):
+        fn = _bot_function(src, name)
+        for banned in ("book_at", "BookTail", "book10l", "paper_fill", "open(", "requests", "urlopen"):
+            assert banned not in fn, (name, banned)
 
 
 # ------------------------------------------------------------------ #809 entry side
@@ -198,7 +201,7 @@ def test_no_runtime_module_names_a_measurement_key():
 
 def test_trigger_measure_used_only_by_measurement_sites():
     src = open(os.path.join(HERE, "bot.py"), encoding="utf-8").read()
-    allowed = {"_record_adaptive_entry_decision", "_twin_trigger_fields"}
+    allowed = {"_stamp_entry_quote", "_twin_trigger_fields"}
     tree = ast.parse(src)
     users = set()
     for node in ast.walk(tree):
