@@ -116,7 +116,7 @@ def _persist_ns(tmp, view=None, mirror_=None):
           "_LIVE_GUARDIAN_STATE": {}, "_LIVE_GUARDIAN_FORCE_FLAT_LOG": collections.deque(maxlen=50),
           "_fresh_start_epoch_path": lambda: str(tmp / "epoch.json"), "FF": [],
           "_live_copy_website_cached_view": lambda: view or {}, "_live_guardian_mirror": lambda: mirror_ or {"ok": False}}
-    ns["_live_guardian_force_flat"] = lambda reason, now=None, spawn=None: ns["FF"].append(reason) or {"requested": True}
+    ns["_live_guardian_force_flat"] = lambda reason, now=None, spawn=None, **kw: ns["FF"].append(reason) or {"requested": True}
     exec(_SRC[a:b], ns)
     return ns
 
@@ -344,7 +344,7 @@ def _pf_ns():
     ns = {"collections": collections, "threading": threading, "time": _t, "logger": logging.getLogger("t"), "DIS": [], "FF": [],
           "_LIVE_GUARDIAN_FORCE_FLAT_RETRY_SEC": (0, 0, 0)}
     ns["_disarm_live_control"] = lambda reason: ns["DIS"].append(reason)
-    ns["_live_guardian_force_flat"] = lambda reason, now=None: ns["FF"].append(reason)
+    ns["_live_guardian_force_flat"] = lambda reason, now=None, **kw: ns["FF"].append((reason, kw.get("disarmed", False))) and None
     exec(_SRC[a:b], ns)
     return ns
 
@@ -363,7 +363,7 @@ def test_position_flatten_ok_never_disarms_and_unconfirmed_escalates_to_disarm_a
     out = ns["_live_guardian_position_flatten_worker"](rec, post=lambda r: calls.append(r) or {"ok": False, "verdict": "NOT_FLAT"},
                                                       sleep=lambda s: None)
     assert len(calls) == 3 and out["readback"] == "NOT_FLAT"
-    assert ns["DIS"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"] and ns["FF"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
+    assert ns["DIS"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"] and ns["FF"] == [("AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED", True)]
     assert ns["LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION"] == "FLATTEN_POSITION_ONLY"
 
 
@@ -404,3 +404,58 @@ def test_hm2_fly_success_needs_the_relay_ok_db_reconciled_not_just_the_verdict()
         assert out["ok"] is False and out["db_reconciled"] is False and out["db_open_remaining"] == 1, name
         body.update(ok=True, dbReconciled=True, dbOpenRemaining=0)
         assert ns[name]("r")["ok"] is True, name
+
+
+def test_hm3_position_flatten_thread_not_started_disarms_all_first_then_force_flats():
+    ns = _pf_ns()
+    order = []
+    ns["_disarm_live_control"] = lambda reason: order.append(("disarm", reason))
+    ns["_live_guardian_force_flat"] = lambda reason, now=None, **kw: order.append(("ff", reason, kw.get("disarmed")))
+    def boom(fn):
+        raise RuntimeError("can't start new thread")
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t3"}, NOW, spawn=boom)
+    assert rec["ok"] is False and rec["done_ts"] == NOW
+    assert order == [("disarm", "AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED"),
+                     ("ff", "AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED", True)]
+
+
+def _ffo_ns():
+    import collections, threading, time as _tt
+    src = _SRC[_SRC.index("LIVE_GUARDIAN_FORCE_FLAT_CONFIRMATION ="):_SRC.index("def _live_copy_stale_exit_check")]
+    ns = {"time": _tt, "threading": threading, "collections": collections, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": {},
+          "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None,
+          "_live_guardian_persist": lambda: True, "ORDER": []}
+    exec(src, ns)
+    ns["_disarm_live_control"] = lambda reason: ns["ORDER"].append(("disarm", reason))
+    return ns
+
+
+def test_hm3_force_flat_disarms_all_before_spawning_even_when_the_thread_fails_to_start():
+    ns = _ffo_ns()
+    def boom(fn):
+        ns["ORDER"].append(("spawn",))
+        raise RuntimeError("no thread")
+    rec = ns["_live_guardian_force_flat"]("BOOT_REDERIVED_NOT_FLAT", 1.0, spawn=boom)
+    assert ns["ORDER"] == [("disarm", "BOOT_REDERIVED_NOT_FLAT"), ("spawn",)]
+    assert rec["ok"] is False and ns["_LIVE_GUARDIAN_STATE"]["red_alert"]["code"] == "FORCE_FLAT_NOT_STARTED"
+    # a disarm that raises still lets the flatten start (never blocks it)
+    ns2 = _ffo_ns()
+    ns2["_disarm_live_control"] = lambda reason: 1 / 0
+    started = []
+    ns2["_live_guardian_force_flat"]("X", 1.0, spawn=lambda fn: started.append(1))
+    assert started == [1]
+    # callers that have just disarmed do not disarm twice
+    ns3 = _ffo_ns()
+    ns3["_live_guardian_force_flat"]("Y", 1.0, spawn=lambda fn: None, disarmed=True)
+    assert ns3["ORDER"] == []
+
+
+def test_hm3_every_force_flat_caller_disarms_first():
+    import re
+    calls = [c for c in re.findall(r"_live_guardian_force_flat\(([^\n]*)", _SRC) if not c.startswith("reason: str")]
+    assert len([c for c in calls if "disarmed=True" in c]) == 5
+    for fn in ("def _live_guardian_tick", "def _live_guardian_on_error", "def _live_guardian_watchdog",
+               "def _live_guardian_position_flatten_worker", "def _live_guardian_position_flatten("):
+        body = _SRC[_SRC.index(fn):]
+        body = body[:body.index("\ndef ", 5)]
+        assert body.index("_disarm_live_control(") < body.index("_live_guardian_force_flat("), fn

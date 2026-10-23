@@ -87,7 +87,7 @@ def test_bot_wiring_tick_disarms_on_violation_and_is_inert_when_output_off():
               "_live_guardian_mirror": lambda: {"ok": True, "positions": [{}], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.0}},
               "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
               "_live_guardian_exposed": lambda chains: False, "_live_guardian_record_protection": lambda now, viol: None, "_live_guardian_persist": lambda: None,
-"_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
+"_live_guardian_force_flat": lambda reason, now=None, **kw: FF.append(reason) or {"requested": True, "reason": reason}}
         exec(src[start:end], g_)
         return g_["_live_guardian_tick"]()
     assert run(False) == [] and calls == []
@@ -113,7 +113,7 @@ def _tick_ns(on=True, chains=None, mirror=None, epoch=None):
           "_live_guardian_mirror": lambda: mirror, "_offline_sim_epoch_floor": lambda: epoch,
           "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
               "_live_guardian_exposed": lambda chains: False, "_live_guardian_record_protection": lambda now, viol: None, "_live_guardian_persist": lambda: None,
-"_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
+"_live_guardian_force_flat": lambda reason, now=None, **kw: FF.append(reason) or {"requested": True, "reason": reason}}
     exec(src_cut(start, end), ns)
     return ns, calls
 
@@ -180,7 +180,7 @@ def test_heartbeat_stale_dead_guardian_disarms_and_arming_refuses_while_stale():
     import live_guardian as lg
     ns = {"time": _t, "_LIVE_GUARDIAN_ERROR_LIMIT": 3, "logger": _lg2.getLogger("t"), "_LIVE_GUARDIAN_STATE": {"heartbeat_ts": _t.time() - 60, "disarms": []},
           "_get_live_copy_output": lambda: Out(), "_disarm_live_control": lambda r: calls.append(r),
-          "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True}}
+          "_live_guardian_force_flat": lambda reason, now=None, **kw: FF.append(reason) or {"requested": True}}
     exec("import live_guardian as _lg\n" + _SRC[s:e], ns)
     assert ns["_live_guardian_watchdog"]() is True and calls == ["AUTO_DISARM:GUARDIAN_STALE"]
     ns["_LIVE_GUARDIAN_STATE"]["heartbeat_ts"] = _t.time()
@@ -475,7 +475,7 @@ def _ff_ns():
     src = _SRC[_SRC.index("LIVE_GUARDIAN_FORCE_FLAT_CONFIRMATION ="):_SRC.index("def _live_copy_stale_exit_check")]
     ns = {"time": _tt, "threading": threading, "deque": deque, "collections": collections, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": {},
           "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None,
-          "_live_guardian_persist": lambda: True}
+          "_live_guardian_persist": lambda: True, "_disarm_live_control": lambda reason: None}
     exec(src, ns)
     return ns
 
@@ -561,4 +561,4 @@ def test_rk0225_untagged_position_is_red_after_grace_tagged_is_not():
 def test_rk0225_tick_latches_red_for_untagged_codes_before_disarm_and_force_flat():
     tick = _SRC[_SRC.index("def _live_guardian_tick"):_SRC.index("def live_guardian_loop")]
     red = tick.index('_LIVE_GUARDIAN_STATE["red_alert"] = {')
-    assert "RED_CODES" in tick and red < tick.index("_disarm_live_control(reason)") < tick.index("_live_guardian_force_flat(reason, now)")
+    assert "RED_CODES" in tick and red < tick.index("_disarm_live_control(reason)") < tick.index("_live_guardian_force_flat(reason, now, disarmed=True)")

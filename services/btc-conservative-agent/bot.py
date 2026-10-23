@@ -50138,7 +50138,7 @@ def _live_guardian_tick(now=None) -> list:
             disarm_exc = exc
             res = {"error": str(exc)[:200]}
         # RK ruling 2: every violation => disarm ALL live tiles (above) + force-flat, even if the disarm itself failed
-        ff = _live_guardian_force_flat(reason, now)
+        ff = _live_guardian_force_flat(reason, now, disarmed=True)   # HM3: disarmed just above
         _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": reason, "violations": viol, **res, "force_flat": ff}])[-20:]
         if disarm_exc is not None:
             # a failed disarm is an evaluation ERROR: count it, do NOT stamp the heartbeat (so the watchdog sees a stale guardian)
@@ -50163,7 +50163,7 @@ def _live_guardian_on_error(exc, now=None) -> bool:
             try:
                 _disarm_live_control("AUTO_DISARM:GUARDIAN_ERROR")
             finally:
-                ff = _live_guardian_force_flat("AUTO_DISARM:GUARDIAN_ERROR", now)
+                ff = _live_guardian_force_flat("AUTO_DISARM:GUARDIAN_ERROR", now, disarmed=True)
             st["disarms"] = (st["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_ERROR", "violations": [{"code": "GUARDIAN_ERROR", "detail": str(exc)[:200]}], "force_flat": ff}])[-20:]
             return True
     except Exception as exc2:  # noqa: BLE001
@@ -50185,7 +50185,7 @@ def _live_guardian_watchdog(now=None) -> bool:
             try:
                 _disarm_live_control("AUTO_DISARM:GUARDIAN_STALE")
             finally:
-                ff = _live_guardian_force_flat("AUTO_DISARM:GUARDIAN_STALE", now)
+                ff = _live_guardian_force_flat("AUTO_DISARM:GUARDIAN_STALE", now, disarmed=True)
             _LIVE_GUARDIAN_STATE["disarms"] = (_LIVE_GUARDIAN_STATE["disarms"] + [{"ts": now, "reason": "AUTO_DISARM:GUARDIAN_STALE", "violations": [{"code": "GUARDIAN_STALE"}], "force_flat": ff}])[-20:]
             return True
     except Exception as exc:  # noqa: BLE001
@@ -62461,10 +62461,17 @@ def _live_guardian_force_flat_worker(rec: dict, post=None, sleep=None) -> dict:
     return rec
 
 
-def _live_guardian_force_flat(reason: str, now=None, spawn=None) -> dict:
+def _live_guardian_force_flat(reason: str, now=None, spawn=None, disarmed: bool = False) -> dict:
     """Fire-and-forget force-flat for an auto-disarm. Returns the (live-updating) record; never blocks on the exchange (R8).
     Latches auto_disarm_latched (cleared only by an operator turning live output ON again), which also blocks the
-    stale-exit FORCE_FLAT_THEN_REARM path from resuming the relay."""
+    stale-exit FORCE_FLAT_THEN_REARM path from resuming the relay.
+    HM3 (24 Oct, #852): disarm ALL FIRST on every path (live output OFF + every tile OFF) before the flatten thread is even
+    started, so a spawn failure still leaves live disarmed. Callers that have just disarmed pass disarmed=True."""
+    if not disarmed:
+        try:
+            _disarm_live_control(str(reason))
+        except Exception as exc:  # noqa: BLE001 - a failed disarm never blocks the flatten
+            logger.error(f"[LIVE GUARDIAN] disarm before force-flat failed: {str(exc)[:120]} [PIPELINE ENFORCEMENT]")
     rec = {"ts": now or time.time(), "reason": str(reason), "requested": True,
            "non_countable": "GUARDIAN_FORCE_FLAT"}   # RK: force-flattened trades are non-countable (live_tile_gate.force_flat_non_countable)
     _LIVE_GUARDIAN_STATE["auto_disarm_latched"] = {"ts": rec["ts"], "reason": rec["reason"]}
@@ -62533,7 +62540,7 @@ def _live_guardian_position_flatten_worker(rec: dict, post=None, sleep=None) -> 
             _disarm_live_control(reason)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[LIVE GUARDIAN] disarm after unconfirmed position flatten failed: {str(exc)[:120]}")
-        _live_guardian_force_flat(reason)
+        _live_guardian_force_flat(reason, disarmed=True)
     return rec
 
 
@@ -62552,7 +62559,12 @@ def _live_guardian_position_flatten(v: dict, now=None, spawn=None) -> dict | Non
         spawn(lambda: _live_guardian_position_flatten_worker(rec))
     except Exception as exc:  # noqa: BLE001
         rec.update(ok=False, done_ts=now, error=f"spawn failed: {str(exc)[:160]}")
-        _live_guardian_force_flat("AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED", now)
+        nreason = "AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED"
+        try:   # HM3: the flatten thread did not start -> disarm ALL first, then force-flat
+            _disarm_live_control(nreason)
+        except Exception as dexc:  # noqa: BLE001
+            logger.error(f"[LIVE GUARDIAN] disarm after position-flatten spawn failure failed: {str(dexc)[:120]}")
+        _live_guardian_force_flat(nreason, now, disarmed=True)
     return rec
 
 
