@@ -71,3 +71,16 @@ test('ops/force-flat-disarm route: admin token, confirmation, pause first, ok on
   assert.equal(/setInstancePaused\([^)]*false\)/.test(body), false);
   assert.equal(/adminHeader\}|authorization\}/.test(body), false); // the token is never logged
 });
+
+test('ops/position-flatten route (AMEND5 G4(b) LIQ_CLAMP_FLATTEN): admin token, confirmation, flatten + read-back, NEVER pauses or resumes', () => {
+  const src = readFileSync(resolve(__dirname, 'trading-agents.controller.ts'), 'utf8');
+  const i = src.indexOf("@Post(':slug/ops/position-flatten')");
+  assert.ok(i > 0);
+  const body = src.slice(i, src.indexOf('@Post(', i + 10));
+  assert.ok(body.includes('assertBotAdminToken(adminHeader, authorization)'));
+  assert.ok(body.includes("'FLATTEN_POSITION_ONLY'"));
+  assert.ok(body.includes('forceFlatDisarmAccount(uid, slug)'));
+  assert.ok(body.includes("flat.verdict === 'FLAT_NO_STOPS'"));
+  assert.equal(/setInstancePaused\(/.test(body), false); // position only: the tiles stay armed (no pause, no resume)
+  assert.equal(/adminHeader\}|authorization\}/.test(body), false); // the token is never logged
+});

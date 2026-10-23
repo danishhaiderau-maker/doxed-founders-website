@@ -49922,6 +49922,44 @@ def _live_guardian_record_protection(now, viol) -> None:
         logger.critical(f"[LIVE GUARDIAN] STOP_FAILURE_FLATTEN cause={ev['cause']} overshoot_bp={ev['overshoot_bp']} "
                         f"tile={ev['tile']} (AMEND4 E2'/E5/E6/E7, non-countable) [PIPELINE ENFORCEMENT]")
         changed = True
+    for v in viol or []:
+        # AMEND5 G3 / G4(b): LIQ_CHECK_FLATTEN / LIQ_CLAMP_FLATTEN, non-countable and COUNTED once per trade (the clamp-rate
+        # rule divides these by closed live trades per tile)
+        if v.get("code") not in (_ltg.LIQ_CHECK_FLATTEN, _ltg.LIQ_CLAMP_FLATTEN):
+            continue
+        prior = list(st.get("liq_events") or [])
+        if any(e.get("code") == v["code"] and ((v.get("trade_id") and e.get("trade_id") == v.get("trade_id"))
+                                               or (not v.get("trade_id") and now - float(e.get("ts") or 0) < 60.0)) for e in prior):
+            continue
+        ev = {"ts": now, "code": v["code"], "cause": v.get("cause"), "tile": v.get("tile"), "trade_id": v.get("trade_id"),
+              "stop_liq_distance_bp": v.get("stop_liq_distance_bp"), "overshoot_bp": v.get("overshoot_bp"),
+              "detail": str(v.get("detail"))[:200], "non_countable": v["code"], "amend5_sha256": _ltg.AMEND5_SHA256}
+        st["liq_events"] = (prior + [ev])[-200:]
+        logger.critical(f"[LIVE GUARDIAN] {v['code']} cause={ev['cause']} tile={ev['tile']} trade={ev['trade_id']} "
+                        f"stop_liq_bp={ev['stop_liq_distance_bp']} (AMEND5, non-countable, counted) [PIPELINE ENFORCEMENT]")
+        changed = True
+    _prot = (st.get("calc") or {}).get("protection") or {}
+    if not st.get("g4_first_l") and _prot.get("tile") == _ltg.G4_FIRST_TILE:
+        # AMEND5 G4 / E8: the REAL L (G5: Bitfinex position liq price via the relay mirror, never estimated) on GS-01's FIRST
+        # live position decides (a) / (b) / (c'). Recorded once, persisted (HM N3), shown on the monitor; (c') => STOP_REEVAL.
+        for p in _prot.get("positions") or []:
+            d = p.get("stop_liq_distance_bp")
+            if d is None or not p.get("liq_price") or p.get("liq_source") != _ltg.LIQ_SOURCE:
+                continue
+            out = _ltg.g4_outcome(d)
+            st["g4_first_l"] = {"ts": now, "tile": _prot.get("tile"), "trade_id": _prot.get("trade_id"), "side": p.get("side"),
+                                "entry": p.get("entry"), "stop_level": p.get("stop_level"), "liq_price": p.get("liq_price"),
+                                "liq_read_at": p.get("liq_read_at"), "liq_source": _ltg.LIQ_SOURCE,
+                                "stop_liq_distance_bp": d, "outcome": out, "action": _ltg.G4_ACTIONS.get(out),
+                                "amend5_sha256": _ltg.AMEND5_SHA256}
+            logger.critical(f"[LIVE GUARDIAN] E8/G4 GS-01 first real L={p.get('liq_price')} stop={p.get('stop_level')} "
+                            f"stop_liq_bp={d} => {out} {_ltg.G4_ACTIONS.get(out)} (AMEND5 4407d5a2) [PIPELINE ENFORCEMENT]")
+            if out == _ltg.G4_C:
+                st["stop_reeval"] = {"ts": now, "flag": _ltg.STOP_REEVAL, "stop_liq_distance_bp": d,
+                                     "tiles_disarmed": list(_ltg.G4C_DISARMED_TILES),
+                                     "next": "Strategist evaluates a tighter stop on ALL fresh-epoch real-book data (AMEND5 G4(c'))"}
+            changed = True
+            break
     if not st.get("first_live_liq_distance"):
         for p in ((st.get("calc") or {}).get("protection") or {}).get("positions") or []:
             if p.get("liq_price") and p.get("entry"):
@@ -50068,14 +50106,18 @@ def _live_guardian_tick(now=None) -> list:
         _book = None
     # every live tile (two-tile gate): lane_needle="" evaluates all live-copy chains, violations carry their tile key
     viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, lane_needle="", epoch_ts=_epoch or None,
-                        book=_book)
+                        book=_book, liq_events=_LIVE_GUARDIAN_STATE.get("liq_events") or ())
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
+    # AMEND5 G4(b) (L22): LIQ_CLAMP_FLATTEN => flatten THAT position only (relay ops/position-flatten: no pause, no disarm)
+    _posf = _lg.position_flatten_violations(viol)
     # AMEND4 E1 (L12): cap / unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only (never a disarm or force-flat);
     # _live_tile_admission refuses new live entries while a fresh AMBER is held (stamped LIVE_SKIPPED_DAILY_CAP).
     viol, amber = _lg.split_violations(viol)
     _LIVE_GUARDIAN_STATE["amber"] = ({"ts": now, "codes": sorted({v["code"] for v in amber}),
                                       "detail": [str(v.get("detail"))[:160] for v in amber][:6]} if amber else None)
-    _live_guardian_record_protection(now, viol)
+    _live_guardian_record_protection(now, viol + _posf)
+    if _posf and not viol:   # any disarming violation force-flats the whole account below anyway
+        _live_guardian_position_flatten(_posf[0], now)
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
         logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
@@ -50161,6 +50203,22 @@ def live_guardian_loop():
         shutdown_event.wait(_LIVE_GUARDIAN_INTERVAL_SEC)
 
 
+def _live_guardian_today_summary(now=None) -> dict:
+    """HM N5 / AMEND4 E1: today's (UTC) realised loss per tile + total, LIVE_SKIPPED_DAILY_CAP count, non-countable counts."""
+    import live_tile_gate as _ltg
+    now = now or time.time()
+    try:
+        chains = _tile_integrity_chains(now)
+        per, total, n = _ltg.daily_realised_loss(chains, now)
+        return {"utc_day": _ltg.utc_day(now), "realised_loss_by_tile": {str(k): round(v, 4) for k, v in per.items()},
+                "realised_loss_total": round(total, 4), "rows": n,
+                "skipped_daily_cap": _ltg.skipped_daily_cap_count(_get_live_copy_decisions().items(), now),
+                "non_countable": _ltg.non_countable_summary(chains, _LIVE_GUARDIAN_STATE.get("stop_failure_events") or [],
+                                                            _LIVE_GUARDIAN_STATE.get("liq_events") or [])}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+
 @app.route('/api/monitor/live-guardian', methods=["GET"])
 def monitor_live_guardian_route():
     if not monitor_integrity_authorized():
@@ -50180,13 +50238,22 @@ def monitor_live_guardian_route():
                           "daily_loss_cap_source": _ltg.DAILY_LOSS_CAP_SOURCE,
                           "recent": list(_LIVE_TILE_GATE_LOG)[-20:]},
             "force_flat_on_disarm": {"route": "ops/force-flat-disarm", "recent": [dict(r) for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)[-10:]]},
+            "position_flatten": {"route": "ops/position-flatten", "recent": [dict(r) for r in list(_LIVE_GUARDIAN_POSITION_FLATTEN_LOG)[-10:]]},
+            "amend5": {"file": _ltg.AMEND5_FILE, "sha256": _ltg.AMEND5_SHA256, "binding": list(_ltg.AMEND5_BINDING),
+                       "lines": {k: v for k, v in _ltg.AMEND5_LINES.items()}, "stop_backstop_past_stop_bp": _ltg.STOP_BACKSTOP_PAST_STOP_BP,
+                       "stop_backstop_status": _ltg.STOP_BACKSTOP_STATUS, "liq_check_max_bp": _ltg.LIQ_CHECK_MAX_BP,
+                       "liq_normal_min_bp": _ltg.LIQ_NORMAL_MIN_BP, "liq_clamp_rate_max": _ltg.LIQ_CLAMP_RATE_MAX,
+                       "liq_clamp_min_n": _ltg.LIQ_CLAMP_MIN_N, "liq_source": _ltg.LIQ_SOURCE,
+                       "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval"),
+                       "fade3_hm_gate": bool(str(os.environ.get("LIVE_HM_GATE_FADE3") or "").upper().startswith("PASS"))},
+            "today": _live_guardian_today_summary(),
             "active": bool(_get_live_copy_output().snapshot().get("enabled")),
             "heartbeat_age_sec": (None if _LIVE_GUARDIAN_STATE.get("heartbeat_ts") is None else round(time.time() - _LIVE_GUARDIAN_STATE["heartbeat_ts"], 2)),
             "heartbeat_stale": _live_guardian_heartbeat_stale(), "heartbeat_stale_after_sec": _lg.HEARTBEAT_STALE_SEC,
             **{k: v for k, v in _LIVE_GUARDIAN_STATE.items() if k not in ("enabled", "calc")},
             "calc": {**{k: v for k, v in (_LIVE_GUARDIAN_STATE.get("calc") or {}).items() if k != "flat_hist"},
                      "flat_hist_n": len((_LIVE_GUARDIAN_STATE.get("calc") or {}).get("flat_hist") or [])}}
-    return _monitor_response(body, 16384)
+    return _monitor_response(body, 32768)
 
 
 @app.route('/api/monitor/live/exchange-stops', methods=["GET"])
@@ -61965,7 +62032,7 @@ def _live_tile_admission(lane, trade_id, now):
     ok, reasons, info = _ltg.admit_entry(
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
         decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
-        book=_book)
+        book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=os.environ.get("LIVE_HM_GATE_FADE3"))
     _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
     if ok and _amber.get("codes") and now - float(_amber.get("ts") or 0) <= 5.0:
         # the guardian's rolling-24 h ledger cap / AMBER entry blocks (AMEND4 E1: entry block only, never a disarm)
@@ -62398,6 +62465,87 @@ def _live_guardian_force_flat(reason: str, now=None, spawn=None) -> dict:
         logger.critical(f"[LIVE GUARDIAN] RED force-flat could not start: {exc} [PIPELINE ENFORCEMENT]")
     _live_guardian_persist()   # HM N3: an in-progress force-flat survives a restart (re-launched at boot)
     return rec
+
+
+# AMEND5 G4(b) (L22): the L-10 clamp with the exchange stop resident flattens THAT position only: relay ops/position-flatten
+# (reduce-only flatten + cancel its stops + FLAT_NO_STOPS read-back, WITHOUT pausing the instance). No disarm, no RED. Fire
+# and forget (R8). An unconfirmed position flatten escalates fail-safe: disarm ALL + force-flat (RED).
+LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION = "FLATTEN_POSITION_ONLY"
+_LIVE_GUARDIAN_POSITION_FLATTEN_LOG: "collections.deque" = collections.deque(maxlen=50)
+_LIVE_GUARDIAN_POSITION_FLATTEN_REFIRE_SEC = 30.0
+
+
+def _live_guardian_position_flatten_post(reason: str) -> dict:
+    if not _BOT_ADMIN_TOKEN:
+        return {"ok": False, "error": "BOT_ADMIN_TOKEN missing"}
+    r = requests.post(f"{LIVE_COPY_OPS_BASE}/position-flatten", params={"userId": LIVE_COPY_OPS_USER_ID},
+                      json={"confirmation": LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION, "reason": str(reason)[:200]},
+                      headers={"X-Bot-Admin-Token": _BOT_ADMIN_TOKEN}, timeout=30)
+    try:
+        body = r.json() if r.content else {}
+    except ValueError:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    return {"status": r.status_code, "verdict": body.get("verdict"), "flattened": body.get("flattened"),
+            "cancelled": body.get("cancelled"), "position_amount": body.get("positionAmount"), "open_orders": body.get("openOrders"),
+            "relay_errors": [str(e)[:120] for e in (body.get("errors") or [])][:5],
+            "ok": 200 <= r.status_code < 300 and body.get("verdict") == "FLAT_NO_STOPS"}
+
+
+def _live_guardian_position_flatten_worker(rec: dict, post=None, sleep=None) -> dict:
+    post = post or _live_guardian_position_flatten_post
+    sleep = sleep or time.sleep
+    for i, delay in enumerate(_LIVE_GUARDIAN_FORCE_FLAT_RETRY_SEC):
+        if delay:
+            sleep(delay)
+        try:
+            res = post(rec["reason"])
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        rec.update(attempts=i + 1, **res)
+        if res.get("ok"):
+            break
+    rec["done_ts"] = time.time()
+    rec["readback"] = "FLAT_NO_STOPS" if rec.get("ok") else (rec.get("verdict") or "UNCONFIRMED")
+    if rec.get("ok"):
+        logger.warning(f"[LIVE GUARDIAN] LIQ_CLAMP_FLATTEN position-only OK (no disarm) reason={rec['reason']} [PIPELINE ENFORCEMENT]")
+    else:
+        reason = "AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+        logger.critical(f"[LIVE GUARDIAN] position-only flatten UNCONFIRMED readback={rec['readback']} - escalating: disarm ALL + "
+                        f"force-flat [PIPELINE ENFORCEMENT]")
+        try:
+            _disarm_live_control(reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[LIVE GUARDIAN] disarm after unconfirmed position flatten failed: {str(exc)[:120]}")
+        _live_guardian_force_flat(reason)
+    return rec
+
+
+def _live_guardian_position_flatten(v: dict, now=None, spawn=None) -> dict | None:
+    """Fire one position-only flatten per trade (re-fired at most every 30 s while it stays open). Never waits (R8)."""
+    now = now or time.time()
+    tid = (v or {}).get("trade_id")
+    for r in list(_LIVE_GUARDIAN_POSITION_FLATTEN_LOG):
+        if (r.get("requested") and not r.get("done_ts")) or (r.get("trade_id") == tid and now - float(r.get("ts") or 0) < _LIVE_GUARDIAN_POSITION_FLATTEN_REFIRE_SEC):
+            return None
+    rec = {"ts": now, "reason": f"LIQ_CLAMP_FLATTEN:{tid}", "trade_id": tid, "tile": (v or {}).get("tile"), "requested": True,
+           "non_countable": "LIQ_CLAMP_FLATTEN"}
+    _LIVE_GUARDIAN_POSITION_FLATTEN_LOG.append(rec)
+    spawn = spawn or (lambda fn: threading.Thread(target=fn, daemon=True, name="live-guardian-position-flatten").start())
+    try:
+        spawn(lambda: _live_guardian_position_flatten_worker(rec))
+    except Exception as exc:  # noqa: BLE001
+        rec.update(ok=False, done_ts=now, error=f"spawn failed: {str(exc)[:160]}")
+        _live_guardian_force_flat("AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED", now)
+    return rec
+
+
+def _live_guardian_tile_arm_block(lane: str) -> str | None:
+    """AMEND5 G4(c') + G6 per-tile arm refusal (shared live_tile_gate.arm_gate_block): GS-01 + FADE3 stay disarmed after a
+    (c') first L; FADE3 arms only after GS-01's first real L is (a)/(b) AND HM's live gate passed (LIVE_HM_GATE_FADE3=PASS:<ref>)."""
+    import live_tile_gate as _ltg
+    return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
+                               os.environ.get("LIVE_HM_GATE_FADE3"))
 
 
 def _live_guardian_arm_block() -> str | None:
@@ -63204,6 +63352,9 @@ def api_bitfinex_tile_live_orders(lane: str):
         return jsonify({"ok": False, "error": "LIVE_GUARDIAN_HEARTBEAT_STALE", "lane": lane, "bitfinex_live_orders": False}), 409
     if enabled and _live_guardian_arm_block():
         return jsonify({"ok": False, "error": _live_guardian_arm_block(), "lane": lane, "bitfinex_live_orders": False}), 409
+    if enabled and _live_guardian_tile_arm_block(lane):
+        return jsonify({"ok": False, "error": _live_guardian_tile_arm_block(lane), "lane": lane, "bitfinex_live_orders": False,
+                        "g4_first_l": _LIVE_GUARDIAN_STATE.get("g4_first_l"), "stop_reeval": _LIVE_GUARDIAN_STATE.get("stop_reeval")}), 409
     if enabled:
         sw.request_on(lane, global_arm=ga, size_checks=size, operator_eligible=op_elig)
     else:

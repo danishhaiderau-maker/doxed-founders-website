@@ -30,7 +30,10 @@ ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two r
 LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only live tile)
 # RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every disarming
 # violation gets. AMEND4 (sha 7073ed25) E2'/E5/E6/E7: STOP_FAILURE_FLATTEN is RED too (non-countable, counted).
-RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN})
+# AMEND5 G3 (sha 4407d5a2, L18): LIQ_CHECK_FLATTEN (real L <= 15 bp past the stop, or unreadable) is RED as well.
+RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN})
+# AMEND5 G4(b) (L22): the L-10 clamp with the exchange stop resident flattens THAT position only - no disarm, no RED.
+POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
 # AMEND4 E1 (L12): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an
 # ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
 # is the one switchable live_tile_gate.cap_breach_response().
@@ -40,11 +43,19 @@ ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _
 
 
 def split_violations(viol: Iterable[Mapping[str, Any]]) -> tuple[list, list]:
-    """(disarm, entry_block). Entry-block codes only disarm if cap_breach_response() is ever switched away from ENTRY_BLOCK."""
-    viol = list(viol or [])
+    """(disarm, entry_block). Entry-block codes only disarm if cap_breach_response() is ever switched away from ENTRY_BLOCK.
+    AMEND5 G4(b) position-only codes (POSITION_FLATTEN_CODES) are in neither list: see position_flatten_violations()."""
+    viol = [v for v in (viol or []) if (v or {}).get("code") not in POSITION_FLATTEN_CODES]
     if _ltg_caps.cap_breach_response() != _ltg_caps.CAP_RESPONSE_ENTRY_BLOCK:
         return viol, []
     return [v for v in viol if v.get("code") not in ENTRY_BLOCK_CODES], [v for v in viol if v.get("code") in ENTRY_BLOCK_CODES]
+
+
+def position_flatten_violations(viol: Iterable[Mapping[str, Any]]) -> list:
+    """AMEND5 G4(b): LIQ_CLAMP_FLATTEN => reduce-only flatten of the open position only (relay ops/position-flatten), no disarm."""
+    return [v for v in (viol or []) if (v or {}).get("code") in POSITION_FLATTEN_CODES]
+
+
 FILL_TO_STOP_MAX_SEC = 5.0     # HM G6: a stop confirmed later than 5 s after the fill is itself a violation
 
 
@@ -92,7 +103,7 @@ _NO_BOOK = object()
 
 def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, state: dict, now: float,
              lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0, epoch_ts: float | None = None,
-             book: Any = _NO_BOOK) -> list:
+             book: Any = _NO_BOOK, liq_events: Iterable[Mapping[str, Any]] = ()) -> list:
     """Return [{code, detail}] violations; ``state`` is mutated (day baseline, orphan first-seen).
 
     Use split_violations(): AMEND4 E1 codes (ENTRY_BLOCK_CODES) are AMBER entry blocks, everything else disarms ALL.
@@ -135,6 +146,8 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
         out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})
     # 4b. HM G6 per-tile / account-wide daily (UTC) realised loss caps from the prereg (live_tile_gate), fresh-epoch rows only
     out.extend(_ltg.daily_loss_violations(live, now))
+    # AMEND5 G4(b) (L23): LIQ_CLAMP_FLATTEN > 5 % of live trades at n >= 20 per tile => disarm ALL
+    out.extend(_ltg.liq_clamp_rate_violations(live, liq_events or ()))
     m = mirror if isinstance(mirror, Mapping) else None
     if m is None or m.get("ok") is not True:
         # a blind exchange read while live is open is itself unsafe, but a single failed read must not flap: require 30 s
@@ -156,9 +169,14 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     if book is not _NO_BOOK:
         fill_grace = any(now - float(c["fill_at_ts"]) < FILL_TO_STOP_MAX_SEC for c in open_filled)
         prot = _ltg.open_position_protection(m, book, now, fill_grace=fill_grace)
-        state["protection"] = {"ts": now, "positions": prot["positions"][:2]}
+        _t = tile_of(open_filled[0]) if len(open_filled) == 1 else None
+        _tid = open_filled[0].get("correlation_id") if len(open_filled) == 1 else None
+        for v in prot["disarm"] + prot["flatten_position"]:
+            v.update(tile=v.get("tile") or _t, trade_id=_tid)
+        state["protection"] = {"ts": now, "tile": _t, "trade_id": _tid, "positions": prot["positions"][:2]}
         out.extend(prot["disarm"])
         out.extend(prot["block"])
+        out.extend(prot["flatten_position"])   # AMEND5 G4(b): position only, no disarm (split out by the bot)
     positions, orders = list(m.get("positions") or []), list(m.get("open_orders") or [])
     orphans = list(m.get("orphans") or [])
     # 2. orphan (persisting)

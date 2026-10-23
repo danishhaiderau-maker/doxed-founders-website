@@ -320,8 +320,8 @@ def test_missing_epoch_floor_fails_loudly_and_payload_trims_flat_hist():
         raise AssertionError("must raise")
     except RuntimeError as exc:
         assert "epoch floor" in str(exc)
-    assert "flat_hist_n" in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]
-    assert '"flat_hist"' in _SRC[_SRC.index("def monitor_live_guardian_route"):][:2500]   # excluded, only the count is emitted
+    assert "flat_hist_n" in _SRC[_SRC.index("def monitor_live_guardian_route"):][:4000]
+    assert '"flat_hist"' in _SRC[_SRC.index("def monitor_live_guardian_route"):][:4000]   # excluded, only the count is emitted
 
 
 def test_long_off_gap_drops_stale_baseline_no_false_loss_cap():

@@ -259,6 +259,39 @@ export class TradingAgentsController {
     return { ok, paused, pauseError, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
   }
 
+  /**
+   * Prereg AMEND5 rev 4 G4(b) (sha 4407d5a2, L22): Fly's live guardian calls this when the L - 10 bp liquidation clamp fires
+   * while the exchange stop is confirmed resident (LIQ_CLAMP_FLATTEN). Flattens THAT position only (one live position
+   * account-wide): emergency-close the open copy lot, reduce-only residual flatten, cancel its stops, FLAT_NO_STOPS read-back
+   * (forceFlatDisarmAccount). It does NOT pause the instance and never disarms (the tiles stay armed). Admin-token only,
+   * throttled, audit line without the token. ok only when the read-back is FLAT_NO_STOPS; otherwise Fly escalates to
+   * ops/force-flat-disarm (disarm ALL, RED).
+   */
+  @Public()
+  @Throttle({ default: { limit: 6, ttl: 60000 } })
+  @Post(':slug/ops/position-flatten')
+  async opsPositionFlatten(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    assertBotAdminToken(adminHeader, authorization);
+    if (!userId?.trim()) throw new BadRequestException('userId query param is required');
+    if (body?.confirmation !== 'FLATTEN_POSITION_ONLY') {
+      throw new BadRequestException('confirmation must equal FLATTEN_POSITION_ONLY');
+    }
+    const uid = userId.trim();
+    const reason = (body.reason?.trim() || 'LIQ_CLAMP_FLATTEN').slice(0, 200);
+    const startedAt = new Date().toISOString();
+    const flat = await this.execution.forceFlatDisarmAccount(uid, slug);
+    const ok = flat.verdict === 'FLAT_NO_STOPS';
+    // eslint-disable-next-line no-console
+    console.log(`[OPS-POSITION-FLATTEN] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
+    return { ok, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
+  }
+
   @Public()
   @Throttle({ default: { limit: 2, ttl: 60000 } })
   @Post(':slug/ops/emergency-reconcile')

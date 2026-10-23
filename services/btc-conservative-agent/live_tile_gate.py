@@ -85,7 +85,6 @@ AMEND4_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND4-20261024.md"
 AMEND4_SHA256 = "7073ed25e2ae8047b4f6e7993764af336b6599c912e13ea086a2e4e591fd8755"
 AMEND4_LINES = {"E1": 12, "E2": (13, 15), "E2'": (20, 23), "E5": (24, 27), "E6": 28, "E7": (29, 32), "E8": 33,
                 "E9": 36, "E10": 37, "E6E7_NON_COUNTABLE": 38}
-STOP_BACKSTOP_PAST_STOP_BP = 15.0   # E2'(L21) / E2(L14); INTERIM per E10 (L37): re-set after >= 20 real stop fills
 STOP_BACKSTOP_LIQ_BUFFER_BP = 10.0  # E2'(L22): liquidation price minus 10 bp toward entry
 STOP_RESIDENT_MAX_AGE_S = 5.0       # E6(L28): exchange stop confirmed resident at least every 5 s
 BOOK_ENTRY_MAX_AGE_S = 2.0          # E7(L30): book > 2 s old => block new entries (== paper_fill.MAX_BOOK_AGE_S)
@@ -94,6 +93,40 @@ CAP_RESPONSE_ENTRY_BLOCK = "ENTRY_BLOCK"
 SKIP_DAILY_CAP = "LIVE_SKIPPED_DAILY_CAP"          # E1(L12) stamp on the blocked (paper-only) signal
 STOP_FAILURE_FLATTEN = "STOP_FAILURE_FLATTEN"      # E2(L15) / E2'(L23) event + guardian code
 AMBER_BOOK_STALE = "BOOK_STALE_ENTRY_BLOCK"         # E7(L30)
+# ---- prereg AMEND5 rev 4 FINAL (on AMEND4 7073ed25): backstop margin, in-trade liq check, G4 outcomes, FADE3 arm gate ----------
+# grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND5-20261024.md, sha256 AMEND5_SHA256. Binding: F1, F2, F4, G1, G2, G3,
+# G4(a), G4(b), G4(c'), G5, G6. VOID (no code): F3 (L8-12), rev-2 G4(c) (L25), rev-3 F3'/G3' (L28-34, 7d1302b7).
+# ONE place for every AMEND5 constant; test_live_protection.test_amend5_constants_pinned re-hashes the file and re-reads every
+# cited line. Switchable only here (G4_ACTIONS maps each G4 outcome to its action); no env override.
+AMEND5_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND5-20261024.md"
+AMEND5_SHA256 = "4407d5a2bd86b349c64d59aaeaf180c237b5872315eae4e1f3be92e99382c850"
+AMEND5_LINES = {"F1": 6, "F2": 7, "F4": 13, "G1": 16, "G2": 17, "G3": 18, "G4": 19, "G4(a)": 20, "G4(b)": (21, 24),
+                "G5": 26, "REV4": (36, 37), "G4(c')": (38, 42), "G6": 43}
+AMEND5_VOID_LINES = {"F3": (8, 12), "G4(c)": 25, "REV3": (28, 34)}
+AMEND5_BINDING = ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5", "G6")
+# F1 (L6): 18 bp past the exchange-stop level. G1 (L16) deletes "only widen": after the receive-stamp PR (#851, F4 L13) has
+# landed and >= 20 REAL exchange-stop fills exist, E10 re-sets it EITHER way. G2 (L17): the STOPLOSS-DIST basis is an INTERIM
+# ESTIMATE used only for this safety margin, never realism/edge evidence.
+STOP_BACKSTOP_PAST_STOP_BP = 18.0
+STOP_BACKSTOP_STATUS = ("INTERIM ESTIMATE (AMEND5 F1/G2: STOPLOSS-DIST-20261024, proxy receive time; safety margin only, never "
+                        "realism/edge evidence). E10 re-set (either way, G1) needs the receive-stamp PR #851 (F4) AND >= 20 real stop fills")
+LIQ_CHECK_MAX_BP = 15.0      # G3 (L18): real L <= 15 bp past the stop (INCLUSIVE) or unreadable => LIQ_CHECK_FLATTEN + disarm ALL
+LIQ_NORMAL_MIN_BP = 28.0     # G4(a) (L20): L >= 28 bp past the stop => normal (backstop = stop + 18)
+LIQ_CLAMP_RATE_MAX = 0.05    # G4(b) (L23): disarm ALL if LIQ_CLAMP_FLATTEN > 5 % of live trades ...
+LIQ_CLAMP_MIN_N = 20         # ... at n >= 20 live trades per tile
+LIQ_SOURCE = "BITFINEX_POSITION_LIQ_PRICE"   # G5 (L26): L only ever read from Bitfinex (relay mirror); never estimated
+LIQ_CHECK_FLATTEN = "LIQ_CHECK_FLATTEN"      # G3: non-countable, counted; disarm ALL
+LIQ_CLAMP_FLATTEN = "LIQ_CLAMP_FLATTEN"      # G4(b): THIS position only, no disarm; non-countable, counted
+LIQ_CLAMP_RATE = "LIQ_CLAMP_RATE_GT_5PCT"    # G4(b): disarm ALL
+STOP_REEVAL = "STOP_REEVAL"                  # G4(c'): GS-01 + FADE3 stay disarmed; Strategist re-evaluates the stop
+G4_A, G4_B, G4_C = "G4(a)", "G4(b)", "G4(c')"
+G4_ACTIONS = {G4_A: "NORMAL", G4_B: "ARMED_LIQ_CLAMP_POSITION_ONLY", G4_C: "DISARMED_STOP_REEVAL"}
+G4_FIRST_TILE = "gs1"        # G4 / E8: the real L on GS-01's FIRST live position decides the outcome
+G6_GATED_TILE = "gs6"        # G6 (L43): FADE3 (FAMILY_GS06_COMMITTED_FADE_ATR_TP) arms only after G4 (a)/(b) AND HM's gate
+G4C_DISARMED_TILES = ("gs1", "gs6")   # G4(c'): GS-01 stays disarmed, and so does FADE3
+DENY_G4_STOP_REEVAL = "LIVE_G4C_STOP_REEVAL"
+DENY_G6_NO_FIRST_L = "LIVE_G6_GS01_FIRST_L_PENDING"
+DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
 DENY_DAILY_LOSS_CAP = SKIP_DAILY_CAP   # AMEND4 E1(L12): the cap refusal IS the LIVE_SKIPPED_DAILY_CAP stamp
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
@@ -252,7 +285,8 @@ def flat_check(mirror: Mapping[str, Any] | None) -> list:
 def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None,
                 decisions: Iterable[tuple], armed_lanes: Iterable[str], entry_margin_usd: float,
                 caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None,
-                book: Mapping[str, Any] | None = None) -> tuple[bool, list, dict]:
+                book: Mapping[str, Any] | None = None, g4_first_l: Mapping[str, Any] | None = None,
+                hm_gate: str | None = None) -> tuple[bool, list, dict]:
     """(ok, reasons, info) for the FIRST entry event of a live trade. Pure; fail closed on any error.
 
     ``decisions``: iterable of (trade_id, decision_row) (TradeDecisions rows; persisted, so the daily count and the in-flight
@@ -272,6 +306,11 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info["exposures"] = others[:5]
         if others:
             reasons.append(SKIP_MUTEX)
+        # 2. AMEND5 G4(c') / G6: GS-01 + FADE3 disarmed after a (c') first L; FADE3 only after (a)/(b) AND HM's gate
+        g = arm_gate_block(key, g4_first_l, hm_gate)
+        info["g4_first_l_outcome"] = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
+        if g:
+            reasons.append(g)
         # 5. net = 0 before this entry
         reasons.extend(flat_check(mirror))
         # 3. margin caps
@@ -377,7 +416,8 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         return [{"code": f"{VIOL_TOTAL_LOSS_CAP}_ERROR", "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
 
 
-FORCE_FLAT_CLOSE_MARKERS = ("AUTHENTICATED_EMERGENCY_CLOSE", "FORCE_FLAT", "GUARDIAN_FORCE_FLAT", STOP_FAILURE_FLATTEN)
+FORCE_FLAT_CLOSE_MARKERS = ("AUTHENTICATED_EMERGENCY_CLOSE", "FORCE_FLAT", "GUARDIAN_FORCE_FLAT", STOP_FAILURE_FLATTEN,
+                            LIQ_CHECK_FLATTEN, LIQ_CLAMP_FLATTEN)   # AMEND5 G3 / G4(b): non-countable, counted
 
 
 def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
@@ -387,6 +427,51 @@ def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
     c = chain if isinstance(chain, Mapping) else {}
     blob = " ".join(str(c.get(k) or "") for k in ("close_reason", "exit_reason", "close_source", "exit_source", "reason")).upper()
     return any(m in blob for m in FORCE_FLAT_CLOSE_MARKERS)
+
+
+def g4_outcome(stop_liq_bp: float | None) -> str | None:
+    """AMEND5 G4 by the real L distance past the exchange stop (bp): (c') <= 15 (inclusive), (b) 15 < d < 28, (a) >= 28."""
+    d = _f(stop_liq_bp)
+    if d is None:
+        return None
+    if d <= LIQ_CHECK_MAX_BP:
+        return G4_C
+    return G4_B if d < LIQ_NORMAL_MIN_BP else G4_A
+
+
+def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None) -> str | None:
+    """AMEND5 G4(c') + G6 arm/entry gate (pure, shared). GS-01 arms first (its first L is unknown until it trades); after a
+    G4(c') reading GS-01 and FADE3 stay disarmed (STOP_REEVAL). FADE3 needs a first L in (a)/(b) AND HM's live gate pass."""
+    out = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
+    if out == G4_C and tile_key in G4C_DISARMED_TILES:
+        return DENY_G4_STOP_REEVAL
+    if tile_key == G6_GATED_TILE:
+        if out not in (G4_A, G4_B):
+            return DENY_G6_NO_FIRST_L
+        if not str(hm_gate or "").strip().upper().startswith("PASS"):
+            return DENY_G6_HM_GATE
+    return None
+
+
+def liq_clamp_rate_violations(chains: Iterable[Mapping[str, Any]], liq_events: Iterable[Mapping[str, Any]],
+                              registry: Mapping[str, Mapping] | None = None) -> list:
+    """AMEND5 G4(b) (L23): per tile, LIQ_CLAMP_FLATTEN events / closed live trades > 5 % at n >= 20 => disarm ALL."""
+    n: dict = {}
+    for c in chains or []:
+        if (c or {}).get("closed") and (c.get("fill_at_ts") or c.get("fill_price")):
+            k = chain_tile_key(c, registry)
+            n[k] = n.get(k, 0) + 1
+    k_clamp: dict = {}
+    for e in liq_events or []:
+        if (e or {}).get("code") == LIQ_CLAMP_FLATTEN:
+            k_clamp[e.get("tile")] = k_clamp.get(e.get("tile"), 0) + 1
+    out = []
+    for k, cnt in k_clamp.items():
+        tot = n.get(k, 0)
+        if tot >= LIQ_CLAMP_MIN_N and cnt / tot > LIQ_CLAMP_RATE_MAX:
+            out.append({"code": LIQ_CLAMP_RATE, "tile": k,
+                        "detail": f"{k} LIQ_CLAMP_FLATTEN {cnt}/{tot} = {cnt / tot:.1%} > {LIQ_CLAMP_RATE_MAX:.0%} at n >= {LIQ_CLAMP_MIN_N} (AMEND5 G4(b))"})
+    return out
 
 
 # ---- AMEND4 shared functions (one implementation for every live tile, R4) -------------------------------------------------
@@ -452,7 +537,8 @@ def overshoot_bp(side: str, stop_level: float | None, px: float | None) -> float
 
 
 def backstop_level(side: str, entry: float | None, stop_level: float | None, liq_price: float | None) -> dict:
-    """AMEND4 A1 E2' (L20-22): the CLOSER to entry of (stop + 15 bp past it) and (real liq price - 10 bp toward entry)."""
+    """AMEND5 F1/F2 (L6-7, on AMEND4 E2' L20-22): the CLOSER to entry of (stop + STOP_BACKSTOP_PAST_STOP_BP = 18 bp past
+    it) and (REAL liq price - 10 bp toward entry). The liq leg is an outer limit, never a minimum distance (F2)."""
     s, lq = _f(stop_level), _f(liq_price)
     out = {"stop_leg": None, "liq_leg": None, "level": None, "binding": None}
     if side not in ("LONG", "SHORT") or s is None or s <= 0:
@@ -461,7 +547,7 @@ def backstop_level(side: str, entry: float | None, stop_level: float | None, liq
     out["stop_leg"] = s * (1.0 - sign * STOP_BACKSTOP_PAST_STOP_BP / 1e4)
     if lq is not None and lq > 0:
         out["liq_leg"] = lq * (1.0 + sign * STOP_BACKSTOP_LIQ_BUFFER_BP / 1e4)
-    legs = [(out["stop_leg"], "STOP+15BP")] + ([(out["liq_leg"], "LIQ-10BP")] if out["liq_leg"] is not None else [])
+    legs = [(out["stop_leg"], f"STOP+{STOP_BACKSTOP_PAST_STOP_BP:g}BP")] + ([(out["liq_leg"], "LIQ-10BP")] if out["liq_leg"] is not None else [])
     # closer to entry == the higher level for a LONG, the lower for a SHORT
     lvl, which = (max if side == "LONG" else min)(legs, key=lambda x: x[0])
     out["level"], out["binding"] = lvl, which
@@ -496,10 +582,11 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
     """AMEND4 E2'/E5/E6/E7 for the open live position(s) in the relay mirror (pure, shared for every tile).
 
     Returns {"disarm": [violations => RED + disarm ALL + reduce-only force-flat, non-countable], "block": [AMBER entry
-    blocks], "positions": [per-position evidence incl. backstop level, walk, overshoot_bp, liq distance]}. ``fill_grace``: a
+    blocks], "flatten_position": [AMEND5 G4(b) LIQ_CLAMP_FLATTEN: this position only, no disarm], "positions": [per-position
+    evidence incl. backstop level, walk, overshoot_bp, real liq distance, g4 outcome]}. ``fill_grace``: a
     live chain filled < 5 s ago (HM G6 fill->stop bound) - only the missing-stop rule waits for it."""
     m = mirror if isinstance(mirror, Mapping) else {}
-    res: dict = {"disarm": [], "block": [], "positions": []}
+    res: dict = {"disarm": [], "block": [], "flatten_position": [], "positions": []}
     age_book = book_age_s(book, now) if isinstance(book, Mapping) else None
     if age_book is None or age_book > BOOK_ENTRY_MAX_AGE_S:
         res["block"].append({"code": AMBER_BOOK_STALE, "tile": None, "detail": f"book age {age_book} s > {BOOK_ENTRY_MAX_AGE_S} s (E7)"})
@@ -532,10 +619,18 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
         if ev_age is None or ev_age > STOP_RESIDENT_MAX_AGE_S + STOP_RESIDENT_MAX_AGE_S:
             res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "STOP_RESIDENCY_UNCONFIRMED",
                                   "detail": f"stop residency evidence age {ev_age} s > {2 * STOP_RESIDENT_MAX_AGE_S} s (E6/E7 read failure)"})
-        # E5 (L26): liq unreadable with a position open => flatten + disarm ALL
-        if not liq_ok:
-            res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "LIQ_UNREADABLE",
-                                  "detail": f"position liq_price={p.get('liq_price')!r} read_at={p.get('liq_read_at')!r} unreadable (E5)"})
+        # AMEND5 G3 (L18): right after every live fill the REAL L (G5: Bitfinex only, never estimated) is read with its time.
+        # Unreadable, or <= 15 bp past the exchange stop (inclusive) => LIQ_CHECK_FLATTEN: reduce-only flatten + disarm ALL.
+        # ``fill_grace`` (fill < 5 s ago, HM G6 fill->stop bound) only covers the first relay read of L / the stop.
+        row["liq_source"] = LIQ_SOURCE if liq_ok else None
+        row["g4_outcome"] = g4_outcome(row["stop_liq_distance_bp"])
+        if not liq_ok and not fill_grace:
+            res["disarm"].append({"code": LIQ_CHECK_FLATTEN, "tile": None, "cause": "LIQ_UNREADABLE",
+                                  "detail": f"position liq_price={p.get('liq_price')!r} read_at={p.get('liq_read_at')!r} unreadable (AMEND5 G3)"})
+        elif liq_ok and row["stop_liq_distance_bp"] is not None and row["stop_liq_distance_bp"] <= LIQ_CHECK_MAX_BP:
+            res["disarm"].append({"code": LIQ_CHECK_FLATTEN, "tile": None, "cause": "LIQ_LE_15BP_PAST_STOP",
+                                  "stop_liq_distance_bp": row["stop_liq_distance_bp"],
+                                  "detail": f"real L {liq} is {row['stop_liq_distance_bp']} bp past stop {stop} <= {LIQ_CHECK_MAX_BP:g} bp (AMEND5 G3)"})
         # E7 (L31-32): hold only with a resident stop AND book <= 10 s
         if age_book is None or age_book > BOOK_HOLD_MAX_AGE_S:
             res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "BOOK_STALE_GT_10S",
@@ -553,7 +648,14 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
             v = walk["vwap"]
             hit = v <= bs["level"] if side == "LONG" else v >= bs["level"]
             row["overshoot_bp"] = overshoot_bp(side or "", stop, v)
-            if hit:
+            if hit and bs["binding"] == "LIQ-10BP" and ev_age is not None and ev_age <= 2 * STOP_RESIDENT_MAX_AGE_S:
+                # AMEND5 G4(b) (L22): the L-10 clamp fired with the exchange stop confirmed resident (no stop failure) =>
+                # flatten THIS position only, NO disarm; LIQ_CLAMP_FLATTEN, non-countable and counted (rate rule: G4(b) L23)
+                res["flatten_position"].append({"code": LIQ_CLAMP_FLATTEN, "tile": None, "cause": "BACKSTOP_LIQ-10BP",
+                                                "overshoot_bp": row["overshoot_bp"], "stop_liq_distance_bp": row["stop_liq_distance_bp"],
+                                                "detail": f"{side} exit walk {v:.2f} past L-10 clamp {bs['level']:.2f}; stop {stop} resident, "
+                                                          f"L {liq} (AMEND5 G4(b): this position only, no disarm)"})
+            elif hit:
                 res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "BACKSTOP_" + str(bs["binding"]),
                                       "overshoot_bp": row["overshoot_bp"],
                                       "detail": f"{side} exit walk {v:.2f} past backstop {bs['level']:.2f} ({bs['binding']}); stop {stop}, "
@@ -600,8 +702,8 @@ def stop_fill_overshoots(chains: Iterable[Mapping[str, Any]]) -> list:
     for c in chains or []:
         if not c.get("closed") or "STOP" not in str(c.get("exit_reason") or c.get("close_reason") or "").upper():
             continue
-        if STOP_FAILURE_FLATTEN in str(c.get("exit_reason") or "").upper():
-            continue
+        if force_flat_non_countable(c):
+            continue   # a guardian/liq flatten (STOP_FAILURE_FLATTEN, LIQ_CHECK_FLATTEN, LIQ_CLAMP_FLATTEN) is no stop fill
         stop, entry, px = _f(c.get("stop_price")), _f(c.get("fill_price")), _f(c.get("exit_price"))
         side = None if stop is None or entry is None else ("LONG" if stop < entry else "SHORT")
         out.append({"trade_id": c.get("correlation_id"), "tile": chain_tile_key(c), "side": side, "stop_level": stop,
@@ -623,15 +725,20 @@ def skipped_daily_cap_count(decisions: Iterable[tuple], now: float, registry: Ma
     return {"utc_day": day, "count": n, "by_tile": per}
 
 
-def non_countable_summary(chains: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]] = ()) -> dict:
+def non_countable_summary(chains: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]] = (),
+                          liq_events: Iterable[Mapping[str, Any]] = ()) -> dict:
     """AMEND4 E2/E6/E7/A2: counts of non-countable force-flattened trades and STOP_FAILURE_FLATTEN events (each RED in the
-    daily report), plus the real stop-fill overshoot sample (E9/E10: re-set the 15 bp once n >= 20)."""
+    daily report), plus AMEND5 G3/G4(b) LIQ_CHECK_FLATTEN / LIQ_CLAMP_FLATTEN counts and the real stop-fill overshoot sample (E9/E10)."""
     chains = list(chains or [])
     nc = [c for c in chains if c.get("closed") and force_flat_non_countable(c)]
     sff = [e for e in events or [] if (e or {}).get("code") == STOP_FAILURE_FLATTEN]
+    liq = [e for e in liq_events or [] if isinstance(e, Mapping)]
     ov = [o for o in stop_fill_overshoots(chains) if o.get("overshoot_bp") is not None]
     return {"non_countable_trades": len(nc), "non_countable_ids": [c.get("correlation_id") for c in nc][:20],
             "stop_failure_flatten_events": len(sff), "stop_failure_flatten_red": bool(sff),
             "real_stop_fills_measured": len(ov), "stop_overshoot_bp": [o["overshoot_bp"] for o in ov][-50:],
-            "stop_backstop_bp": STOP_BACKSTOP_PAST_STOP_BP, "stop_backstop_bp_status": (
-                "INTERIM (E10: re-set after >= 20 real stop fills)" if len(ov) < 20 else "E10 RE-SET DUE (>= 20 real stop fills)")}
+            "liq_check_flatten_events": sum(1 for e in liq if e.get("code") == LIQ_CHECK_FLATTEN),
+            "liq_clamp_flatten_events": sum(1 for e in liq if e.get("code") == LIQ_CLAMP_FLATTEN),
+            "stop_backstop_bp": STOP_BACKSTOP_PAST_STOP_BP, "amend5_sha256": AMEND5_SHA256, "stop_backstop_bp_status": (
+                STOP_BACKSTOP_STATUS if len(ov) < 20 else
+                "E10 RE-SET DUE (>= 20 real stop fills; either way per AMEND5 G1) once the receive-stamp PR #851 has landed (F4)")}

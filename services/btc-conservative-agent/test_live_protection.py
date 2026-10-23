@@ -161,3 +161,207 @@ def test_n5_red_clear_needs_fresh_evidence_after_the_red():
               "_live_guardian_mirror": lambda: mirror(age=age)}
         exec(_SRC[a:b], ns)
         assert ns["_live_guardian_red_clear_if_flat"](NOW) is expect, (fetched, age)
+
+
+# ---- AMEND5 rev 4 FINAL (sha 4407d5a2): F1/F2 backstop 18 bp, G3 in-trade liq check, G4 outcomes, G5 source, G6 FADE3 gate --
+_AMEND5 = pathlib.Path("/workspace") / ltg.AMEND5_FILE
+
+
+def test_amend5_constants_pinned():
+    import hashlib, pytest
+    if not _AMEND5.exists():
+        pytest.skip("AMEND5 prereg not present (CI / image build)")
+    raw = _AMEND5.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == ltg.AMEND5_SHA256
+    lines = raw.decode("utf-8").splitlines()
+    at = lambda n: lines[n - 1]
+    for tag in ("F1", "F2", "F4", "G1", "G2", "G3", "G5", "G6"):
+        assert at(ltg.AMEND5_LINES[tag]).startswith(f"- **{tag}"), tag
+    assert at(ltg.AMEND5_LINES["G4"]).startswith("- **G4 (HM 1)")
+    assert at(ltg.AMEND5_LINES["G4(a)"]).strip().startswith("- (a) L at least 28 bp past the stop")
+    assert at(ltg.AMEND5_LINES["G4(b)"][0]).strip().startswith("- (b) L more than 15 and less than 28 bp")
+    assert "L − 10" in at(22) and "LIQ_CLAMP_FLATTEN" in " ".join(lines[21:24]) and "5%" in " ".join(lines[21:24])
+    assert at(ltg.AMEND5_LINES["G4(c')"][0]).startswith("- **G4(c') replaces G4(c).**") and "15 bp or less" in at(38)
+    assert "Rev 4" in at(36) and "FINAL" in at(36)
+    assert "18" in at(6) and "CLOSER" in at(7) and "15 bp or less" in at(18) and "(inclusive)" in at(18)
+    assert "#851" in at(13) or "receive" in at(13)
+    # void text is cited, never coded
+    assert at(8).startswith("- **F3 ") and at(25).strip().startswith("- (c) L 15 bp or less") and at(28).startswith("## Rev 3")
+    assert ltg.STOP_BACKSTOP_PAST_STOP_BP == 18.0 and ltg.LIQ_CHECK_MAX_BP == 15.0 and ltg.LIQ_NORMAL_MIN_BP == 28.0
+    assert ltg.LIQ_CLAMP_RATE_MAX == 0.05 and ltg.LIQ_CLAMP_MIN_N == 20
+    assert ltg.AMEND5_BINDING == ("F1", "F2", "F4", "G1", "G2", "G3", "G4(a)", "G4(b)", "G4(c')", "G5", "G6")
+
+
+def test_amend5_void_rules_have_no_code():
+    src = pathlib.Path(ltg.__file__).read_text(encoding="utf-8")
+    for dead in ("STOP_NEAR_LIQ", "PRE_ARM_LIQ", "LIQ_ARM_MIN", "22.8", "63 bp", "F3_"):
+        assert dead not in src, dead
+
+
+def test_f1_f2_backstop_is_the_closer_of_stop_plus_18_and_l_minus_10():
+    s = 100000.0
+    far = ltg.backstop_level("LONG", 100500.0, s, s * (1 - 60 / 1e4))          # L 60 bp past stop => stop + 18 binds
+    assert far["binding"] == "STOP+18BP" and abs(far["level"] - s * (1 - 18 / 1e4)) < 1e-6
+    near = ltg.backstop_level("LONG", 100500.0, s, s * (1 - 20 / 1e4))         # L 20 bp past stop => L - 10 binds
+    assert near["binding"] == "LIQ-10BP" and near["level"] > far["level"]
+    sh = ltg.backstop_level("SHORT", 99500.0, s, s * (1 + 60 / 1e4))
+    assert sh["binding"] == "STOP+18BP" and abs(sh["level"] - s * (1 + 18 / 1e4)) < 1e-6
+    assert ltg.backstop_level("LONG", 100500.0, s, None)["binding"] == "STOP+18BP"
+
+
+def test_g4_outcome_boundaries():
+    assert ltg.g4_outcome(None) is None
+    assert ltg.g4_outcome(15.0) == ltg.G4_C and ltg.g4_outcome(-3) == ltg.G4_C       # (c') inclusive at 15
+    assert ltg.g4_outcome(15.001) == ltg.G4_B and ltg.g4_outcome(27.999) == ltg.G4_B
+    assert ltg.g4_outcome(28.0) == ltg.G4_A and ltg.g4_outcome(80) == ltg.G4_A
+
+
+def _pos(stop_liq_bp, side="LONG", **k):
+    s = 100000.0
+    liq = s * (1 - stop_liq_bp / 1e4) if side == "LONG" else s * (1 + stop_liq_bp / 1e4)
+    p = {"symbol": "tBTCF0:USTF0", "amount": 0.0001 if side == "LONG" else -0.0001, "base_price": 100500.0 if side == "LONG" else 99500.0,
+         "liq_price": liq, "liq_read_at": NOW - 1}
+    p.update(k)
+    return p, {"type": "STOP", "reduce_only": True, "price": s}
+
+
+def test_g3_liq_le_15bp_inclusive_or_unreadable_flattens_and_disarms_all():
+    for d in (15.0, 10.0):
+        p, st = _pos(d)
+        r = ltg.open_position_protection(mirror([p], [st]), book(), NOW)
+        assert (ltg.LIQ_CHECK_FLATTEN, "LIQ_LE_15BP_PAST_STOP") in codes(r) and r["positions"][0]["g4_outcome"] == ltg.G4_C
+    p, st = _pos(15.5)
+    r = ltg.open_position_protection(mirror([p], [st]), book(), NOW)
+    assert ltg.LIQ_CHECK_FLATTEN not in [c for c, _ in codes(r)] and r["positions"][0]["g4_outcome"] == ltg.G4_B
+    p, st = _pos(40, liq_price=None)
+    assert (ltg.LIQ_CHECK_FLATTEN, "LIQ_UNREADABLE") in codes(ltg.open_position_protection(mirror([p], [st]), book(), NOW))
+    p, st = _pos(40, liq_read_at=None)                      # G5: a price with no Bitfinex read time is not a real L
+    r = ltg.open_position_protection(mirror([p], [st]), book(), NOW)
+    assert (ltg.LIQ_CHECK_FLATTEN, "LIQ_UNREADABLE") in codes(r) and r["positions"][0]["liq_source"] is None
+    # the first relay read after a fill (< 5 s) may not carry L yet
+    assert ltg.LIQ_CHECK_FLATTEN not in [c for c, _ in codes(ltg.open_position_protection(mirror([p], [st]), book(), NOW, fill_grace=True))]
+    assert ltg.LIQ_CHECK_FLATTEN in g.RED_CODES
+
+
+def test_g4b_clamp_flattens_position_only_but_a_stop_failure_still_disarms():
+    p, st = _pos(20)                                         # (b): L - 10 = 10 bp past stop binds
+    lvl = 100000.0 * (1 - 12 / 1e4)                          # exit walk 12 bp past the stop: past the clamp, short of stop + 18
+    r = ltg.open_position_protection(mirror([p], [st]), book(bid=lvl, ask=lvl + 10), NOW)
+    assert codes(r, "flatten_position") == [(ltg.LIQ_CLAMP_FLATTEN, "BACKSTOP_LIQ-10BP")] and r["disarm"] == []
+    assert ltg.LIQ_CLAMP_FLATTEN in ltg.FORCE_FLAT_CLOSE_MARKERS and ltg.LIQ_CHECK_FLATTEN in ltg.FORCE_FLAT_CLOSE_MARKERS
+    # same walk with stale stop-residency evidence: a real stop failure => disarm ALL
+    r = ltg.open_position_protection(mirror([p], [st], age=10.5), book(bid=lvl, ask=lvl + 10), NOW)
+    assert r["flatten_position"] == [] and ltg.STOP_FAILURE_FLATTEN in [c for c, _ in codes(r)]
+    # (a): stop + 18 binds; a walk past it is a stop failure (disarm ALL), never a clamp
+    p, st = _pos(60)
+    lvl = 100000.0 * (1 - 19 / 1e4)
+    r = ltg.open_position_protection(mirror([p], [st]), book(bid=lvl, ask=lvl + 10), NOW)
+    assert (ltg.STOP_FAILURE_FLATTEN, "BACKSTOP_STOP+18BP") in codes(r) and r["flatten_position"] == []
+    # guardian split: the clamp is not a disarm violation, but is exposed as a position-only flatten
+    v = [{"code": ltg.LIQ_CLAMP_FLATTEN, "tile": "gs1", "trade_id": "t"}]
+    disarm, amber = g.split_violations(v)
+    assert disarm == [] and amber == [] and g.position_flatten_violations(v) == v
+
+
+def _ch(tile_code_tid, closed=True):
+    return {"correlation_id": tile_code_tid, "closed": closed, "fill_at_ts": NOW - 100, "fill_price": 1.0}
+
+
+def test_g4b_clamp_rate_gt_5pct_at_n_ge_20_per_tile_disarms_all():
+    reg = None
+    chains = [_ch(f"gs1-{i}") for i in range(20)]
+    tile = ltg.chain_tile_key(chains[0], reg)
+    assert tile == "gs1"
+    ev = lambda n: [{"code": ltg.LIQ_CLAMP_FLATTEN, "tile": tile, "trade_id": f"x{i}"} for i in range(n)]
+    assert ltg.liq_clamp_rate_violations(chains, ev(1), reg) == []          # 1/20 = 5 % is not > 5 %
+    out = ltg.liq_clamp_rate_violations(chains, ev(2), reg)
+    assert [(v["code"], v["tile"]) for v in out] == [(ltg.LIQ_CLAMP_RATE, "gs1")]
+    assert ltg.liq_clamp_rate_violations(chains[:19], ev(5), reg) == []     # n < 20: no rate rule yet
+    assert ltg.liq_clamp_rate_violations(chains + [_ch("gs1-open", False)], ev(1), reg) == []
+    d, _ = g.split_violations(out)
+    assert d and d[0]["code"] == ltg.LIQ_CLAMP_RATE                         # disarm ALL
+
+
+def test_g4c_and_g6_arm_gate():
+    c = {"outcome": ltg.G4_C}
+    assert ltg.arm_gate_block("gs1", None) is None                          # GS-01 arms first (its L is unknown until it trades)
+    assert ltg.arm_gate_block("gs1", c) == ltg.DENY_G4_STOP_REEVAL and ltg.arm_gate_block("gs6", c, "PASS:x") == ltg.DENY_G4_STOP_REEVAL
+    assert ltg.arm_gate_block("gs6", None, "PASS:hm") == ltg.DENY_G6_NO_FIRST_L
+    for o in (ltg.G4_A, ltg.G4_B):
+        assert ltg.arm_gate_block("gs6", {"outcome": o}, None) == ltg.DENY_G6_HM_GATE
+        assert ltg.arm_gate_block("gs6", {"outcome": o}, "FAIL") == ltg.DENY_G6_HM_GATE
+        assert ltg.arm_gate_block("gs6", {"outcome": o}, "PASS:hm-20261024") is None
+        assert ltg.arm_gate_block("gs1", {"outcome": o}) is None
+    assert ltg.arm_gate_block("gb1", c) is None                             # (c') names GS-01 and FADE3 only
+
+
+def _rec_ns(prot, state=None):
+    a = _SRC.index("def _live_guardian_record_protection")
+    b = _SRC.index("\ndef ", a + 10)
+    st = {"calc": {"protection": prot}}
+    st.update(state or {})
+    ns = {"_LIVE_GUARDIAN_STATE": st, "logger": logging.getLogger("t"), "_live_guardian_persist": lambda: True, "time": _t}
+    exec(_SRC[a:b], ns)
+    return ns, st
+
+
+def test_e8_g4_first_l_recorded_once_from_gs01_bitfinex_l_only():
+    row = {"side": "LONG", "entry": 100500.0, "stop_level": 100000.0, "liq_price": 99900.0, "liq_read_at": NOW - 1,
+           "stop_liq_distance_bp": 10.0, "liq_source": ltg.LIQ_SOURCE}
+    ns, st = _rec_ns({"tile": "gs6", "positions": [row]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert not st.get("g4_first_l")                                         # only GS-01's first position decides G4
+    ns, st = _rec_ns({"tile": "gs1", "trade_id": "t1", "positions": [dict(row, liq_source=None)]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert not st.get("g4_first_l")                                         # G5: no Bitfinex source => no record
+    ns, st = _rec_ns({"tile": "gs1", "trade_id": "t1", "positions": [row]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert st["g4_first_l"]["outcome"] == ltg.G4_C and st["stop_reeval"]["flag"] == ltg.STOP_REEVAL
+    st["calc"]["protection"]["positions"] = [dict(row, stop_liq_distance_bp=40.0)]
+    ns["_live_guardian_record_protection"](NOW + 5, [])
+    assert st["g4_first_l"]["outcome"] == ltg.G4_C                          # recorded once
+    ns, st = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(row, stop_liq_distance_bp=20.0)]})
+    ns["_live_guardian_record_protection"](NOW, [])
+    assert st["g4_first_l"]["outcome"] == ltg.G4_B and not st.get("stop_reeval")
+
+
+def test_liq_events_are_logged_once_per_trade_and_counted():
+    ns, st = _rec_ns({})
+    v = {"code": ltg.LIQ_CLAMP_FLATTEN, "tile": "gs1", "trade_id": "t1", "cause": "BACKSTOP_LIQ-10BP"}
+    for i in range(3):
+        ns["_live_guardian_record_protection"](NOW + i, [v])
+    ns["_live_guardian_record_protection"](NOW + 4, [dict(v, trade_id="t2"), {"code": ltg.LIQ_CHECK_FLATTEN, "tile": "gs1", "trade_id": "t2"}])
+    assert [(e["code"], e["trade_id"]) for e in st["liq_events"]] == [
+        (ltg.LIQ_CLAMP_FLATTEN, "t1"), (ltg.LIQ_CLAMP_FLATTEN, "t2"), (ltg.LIQ_CHECK_FLATTEN, "t2")]
+    s = ltg.non_countable_summary([], [], st["liq_events"])
+    assert s["liq_clamp_flatten_events"] == 2 and s["liq_check_flatten_events"] == 1 and s["amend5_sha256"] == ltg.AMEND5_SHA256
+
+
+def _pf_ns():
+    import collections, threading
+    a = _SRC.index("LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION =")
+    b = _SRC.index("def _live_guardian_tile_arm_block")
+    ns = {"collections": collections, "threading": threading, "time": _t, "logger": logging.getLogger("t"), "DIS": [], "FF": [],
+          "_LIVE_GUARDIAN_FORCE_FLAT_RETRY_SEC": (0, 0, 0)}
+    ns["_disarm_live_control"] = lambda reason: ns["DIS"].append(reason)
+    ns["_live_guardian_force_flat"] = lambda reason, now=None: ns["FF"].append(reason)
+    exec(_SRC[a:b], ns)
+    return ns
+
+
+def test_position_flatten_ok_never_disarms_and_unconfirmed_escalates_to_disarm_all():
+    ns = _pf_ns()
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t1", "tile": "gs1"}, NOW, spawn=lambda fn: None)
+    assert rec["reason"] == "LIQ_CLAMP_FLATTEN:t1"
+    assert ns["_live_guardian_position_flatten"]({"trade_id": "t1"}, NOW + 1, spawn=lambda fn: None) is None   # one in flight
+    out = ns["_live_guardian_position_flatten_worker"](rec, post=lambda r: {"ok": True, "verdict": "FLAT_NO_STOPS"}, sleep=lambda s: None)
+    assert out["readback"] == "FLAT_NO_STOPS" and ns["DIS"] == [] and ns["FF"] == []
+    assert ns["_live_guardian_position_flatten"]({"trade_id": "t1"}, NOW + 10, spawn=lambda fn: None) is None  # 30 s re-fire guard
+    ns = _pf_ns()
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t9"}, NOW, spawn=lambda fn: None)
+    calls = []
+    out = ns["_live_guardian_position_flatten_worker"](rec, post=lambda r: calls.append(r) or {"ok": False, "verdict": "NOT_FLAT"},
+                                                      sleep=lambda s: None)
+    assert len(calls) == 3 and out["readback"] == "NOT_FLAT"
+    assert ns["DIS"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"] and ns["FF"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
+    assert ns["LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION"] == "FLATTEN_POSITION_ONLY"
