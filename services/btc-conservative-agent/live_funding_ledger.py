@@ -25,6 +25,7 @@ COST-positive (= -sum(amounts)), the paper convention.
 """
 from __future__ import annotations
 
+import decimal
 import hashlib
 import hmac
 import json
@@ -33,6 +34,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable, Mapping
 
@@ -57,6 +59,17 @@ TIE_TOL_S = 120.0            # ledger MTS vs settlement instant (observed +3..+5
 POSITION_TOL_S = 10.0        # positions/hist create/update vs the real entry/exit fill ts
 EXIT_TS_FALLBACK_NEAR_S = 60.0
 LEDGER_LIMIT = 500
+# RK zero-rate ruling (24 Oct): a crossed settlement with NO ledger entry counts as 0 only when the rate of that EXACT
+# settlement, read back from the public derivatives status history, is exactly 0 as returned AND positions/hist FUNDING
+# for the pid is 0 within ZERO_POSITION_FUNDING_TOL. Read in the background job, same budget, never in a GET.
+API_PUB = "https://api-pub.bitfinex.com/"
+DERIV_HIST_PATH = "v2/status/deriv/" + SYMBOL + "/hist"
+DERIV_NEXT_FUNDING_TS_IDX = 7     # NEXT_FUNDING_EVT_TIMESTAMP_MS
+DERIV_CURRENT_FUNDING_IDX = 11    # CURRENT_FUNDING (paper FUNDING_SOURCE_V2: last row before the settlement)
+RATE_WINDOW_BEFORE_S = 300
+RATE_WINDOW_AFTER_S = 120
+ZERO_POSITION_FUNDING_TOL = 1e-8
+RATE_RETRY_MAX = 5                # a row whose rate read failed is re-read at most this many times
 _FUNDING_DESC = re.compile(r"^Funding Event\s+(\S+)\s+\(([-0-9.eE+]+)\)")
 _FEE_DESC = re.compile(r"fee|commission|rebate", re.I)
 
@@ -150,6 +163,85 @@ def _post(path: str, body: dict, creds, timeout: float = 8.0):
     return data
 
 
+def _get_public(path: str, params: dict, timeout: float = 8.0):
+    """Unauthenticated GET on the public API (no key). Floats parse as Decimal so a tiny rate never rounds to 0."""
+    req = urllib.request.Request(API_PUB + path + "?" + urllib.parse.urlencode(params), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode(), parse_float=decimal.Decimal)
+    except urllib.error.HTTPError as exc:
+        raise ReadError(f"HTTP_{exc.code}") from None
+    except Exception as exc:  # noqa: BLE001 - redacted
+        raise ReadError(f"TRANSPORT_{type(exc).__name__}") from None
+    if isinstance(data, list) and data and data[0] == "error" and "ratelimit" in str(data[-1]).lower():
+        raise ReadError("HTTP_429")
+    if not isinstance(data, list) or (data and data[0] == "error"):
+        raise ReadError("API_ERROR")
+    return data
+
+
+def _exact_zero(v) -> bool:
+    """True only for a value that IS 0 as returned (int 0 or Decimal 0); a float / string / None is never inferred."""
+    return (isinstance(v, decimal.Decimal) or (isinstance(v, int) and not isinstance(v, bool))) and v == 0
+
+
+def read_settlement_rate(t: float, get=_get_public) -> dict:
+    """The funding rate Bitfinex applied at the EXACT settlement ``t`` (epoch s), from the derivatives status history:
+    CURRENT_FUNDING of the last row before t whose NEXT_FUNDING_EVT_TIMESTAMP_MS == t, confirmed by a row at/after t
+    whose next-funding ts has flipped past t. Never taken from a neighbouring settlement. Returns
+    ``{rate, row_mts, endpoint, error}``; ``rate`` is the value as returned (Decimal/int, never rounded). Only HTTP_429
+    is raised (the job backs off); other read failures are returned as a redacted error code."""
+    t_ms = int(round(float(t) * 1000))
+    out = {"rate": None, "row_mts": None, "endpoint": API_PUB + DERIV_HIST_PATH, "error": None}
+    try:
+        rows = get(DERIV_HIST_PATH, {"start": t_ms - RATE_WINDOW_BEFORE_S * 1000, "end": t_ms + RATE_WINDOW_AFTER_S * 1000,
+                                     "limit": 100, "sort": 1})
+    except ReadError as exc:
+        if str(exc) in ("HTTP_429", "NOT_OWNER_THREAD"):
+            raise
+        out["error"] = str(exc)
+        return out
+    good = sorted((r for r in rows if isinstance(r, list) and len(r) > DERIV_CURRENT_FUNDING_IDX
+                   and isinstance(r[0], int) and not isinstance(r[0], bool)), key=lambda r: r[0])
+    before = [r for r in good if r[0] < t_ms]
+    pre = before[-1] if before else None
+    if pre is None or pre[DERIV_NEXT_FUNDING_TS_IDX] != t_ms:
+        out["error"] = "SETTLEMENT_ROW_MISSING"
+        return out
+    nxt = pre[DERIV_NEXT_FUNDING_TS_IDX]
+    if not any(isinstance(r[DERIV_NEXT_FUNDING_TS_IDX], int) and r[DERIV_NEXT_FUNDING_TS_IDX] > nxt
+               for r in good if r[0] >= t_ms):
+        out["error"] = "SETTLEMENT_FLIP_MISSING"
+        return out
+    out["row_mts"] = pre[0]
+    rate = pre[DERIV_CURRENT_FUNDING_IDX]
+    if rate is None:
+        out["error"] = "RATE_NULL"
+        return out
+    out["rate"] = rate
+    return out
+
+
+def _rate_text(v):
+    """The rate as returned, as text (Decimal in fixed notation, so 0.00000000 stays 0.00000000 - never a float)."""
+    if v is None:
+        return None
+    return format(v, "f") if isinstance(v, decimal.Decimal) else str(v)
+
+
+def _funding_events(ledger_rows, a, b):
+    parsed = [p for p in (_parse_row(r) for r in ledger_rows or []) if p]
+    ev = [p for p in parsed if not p["fee_like"] and p["currency"] == "USTF0" and p["symbol"] == SYMBOL[1:]
+          and a - TIE_TOL_S <= p["ts"] <= b + TIE_TOL_S]
+    return parsed, ev
+
+
+def no_entry_settlements(a, b, ledger_rows) -> list:
+    """Crossed settlements in (a, b] with no ledger entry near them: the only ones whose rate is read back."""
+    _parsed, ev = _funding_events(ledger_rows, a, b)
+    return [t for t in tile_fill.settlements_crossed(a, b) if not any(abs(p["ts"] - t) <= TIE_TOL_S for p in ev)]
+
+
 def read_funding_ledger(start_ts: float, end_ts: float, creds=None, post=_post) -> list:
     """Category-29 USTF0 ledger rows with MTS in [start_ts, end_ts] (epoch s). Raises ReadError (redacted)."""
     creds = creds or read_credentials()
@@ -213,8 +305,10 @@ def _grid(ts: float) -> float:
 
 
 def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, read_at_ts=None, position=None,
-           paper_funding_usd=None, exit_ts_source="exit_fill_record_at_ts", live_notional_usd=None, key_gate=None) -> dict:
-    """Pure decision for one live row. ``position`` = (position_id, create_ts, update_ts[, position_funding]) or None."""
+           paper_funding_usd=None, exit_ts_source="exit_fill_record_at_ts", live_notional_usd=None, key_gate=None,
+           settlement_rates=None) -> dict:
+    """Pure decision for one live row. ``position`` = (position_id, create_ts, update_ts[, position_funding]) or None.
+    ``settlement_rates`` = {settlement ts: read_settlement_rate(...) + read_at_ts} for the no-entry settlements."""
     a, b = _f(entry_fill_ts), _f(exit_fill_ts)
     crossed = tile_fill.settlements_crossed(a, b) if a is not None and b is not None else []
     out = {"funding_model": LIVE_FUNDING_MODEL, "funding_status": None, "funding_verified": False,
@@ -226,7 +320,7 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
            "funding_paper_usd": _f(paper_funding_usd), "funding_live_minus_paper_usd": None,
            "funding_exit_ts_source": exit_ts_source, "funding_key_gate": key_gate,
            "funding_position_funding": (position[3] if position and len(position) > 3 else None),
-           "funding_ts_fallbacks": []}
+           "funding_ts_fallbacks": [], "funding_settlement_rate_readbacks": []}
     if exit_ts_source != "exit_fill_record_at_ts" and b is not None and abs(b - _grid(b)) <= EXIT_TS_FALLBACK_NEAR_S:
         out["funding_ts_fallbacks"] = [f"exit_ts:{exit_ts_source}"]  # a non-fill exit stamp next to a settlement
     if a is None:   # HM (E): no real entry fill ts -> explicit fallback flag, never a guessed window (non-countable)
@@ -240,18 +334,27 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
         out["funding_status"] = "UNVERIFIED_LEDGER_READ_FAILED"
         out["funding_readback_error"] = read_error or "NO_READ"
         return out
-    parsed = [p for p in (_parse_row(r) for r in ledger_rows) if p]
+    parsed, ev = _funding_events(ledger_rows, a, b)
     fee = [p for p in parsed if p["fee_like"]]
     out["funding_fee_anomaly"] = bool(fee)                     # RK (1): flagged for HM, never applied (R7)
     out["funding_fee_anomaly_ledger_ids"] = [p["id"] for p in fee]
-    ev = [p for p in parsed if not p["fee_like"] and p["currency"] == "USTF0" and p["symbol"] == SYMBOL[1:]
-          and a - TIE_TOL_S <= p["ts"] <= b + TIE_TOL_S]
-    used, statuses, per, problems = [], [], [], []
+    used, statuses, per, problems, rate_proof = [], [], [], [], []
+    rates = settlement_rates or {}
     for t in crossed:
         near = [p for p in ev if abs(p["ts"] - t) <= TIE_TOL_S]
-        if not near:
-            statuses.append("NO_ENTRY")
-            problems.append("UNVERIFIED_SETTLEMENT_NO_ENTRY")
+        if not near:   # RK zero-rate ruling: 0 ONLY with the exact settlement rate == 0 AND positions/hist FUNDING == 0
+            st, prob = _zero_rate_status(t, rates.get(t), position)
+            statuses.append(st)
+            rec = rates.get(t) or {}
+            rate_proof.append({"settlement_ts": t, "rate": _rate_text(rec.get("rate")),
+                               "row_mts": rec.get("row_mts"), "read_at_ts": rec.get("read_at_ts"),
+                               "endpoint": rec.get("endpoint") or API_PUB + DERIV_HIST_PATH,
+                               "error": rec.get("error") if rates.get(t) is not None else "NOT_READ", "status": st})
+            if prob:
+                problems.append(prob)
+            else:
+                per.append({"settlement_ts": t, "ledger_id": None, "ledger_mts": None, "funding_usd": 0.0,
+                            "zero_rate_row_mts": rec.get("row_mts")})
             continue
         if len(near) > 1:
             statuses.append("AMBIGUOUS")
@@ -280,7 +383,7 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
         problems.append("UNVERIFIED_ENTRY_UNTIED")
     out.update(funding_ledger_ids=[p["id"] for p in used], funding_ledger_mts=[p["ts"] for p in used],
                funding_ledger_amounts=[p["amount"] for p in used], funding_usd_by_settlement=per,
-               funding_settlement_status=statuses)
+               funding_settlement_status=statuses, funding_settlement_rate_readbacks=rate_proof)
     led = sum(p["amount"] for p in used)
     if not problems and position is not None:   # RK 03:38: ledger vs positions/hist must agree, else non-countable
         pf = position[3] if len(position) > 3 else None
@@ -296,6 +399,21 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
     if out["funding_paper_usd"] is not None:                      # RK (3): realism metric, never an exclusion
         out["funding_live_minus_paper_usd"] = round(live - out["funding_paper_usd"], 10)
     return out
+
+
+def _zero_rate_status(t, rec, position):
+    """(settlement status, problem or None) for a crossed settlement with no ledger entry."""
+    if rec is None or (rec.get("error") and rec["error"] not in ("SETTLEMENT_ROW_MISSING", "SETTLEMENT_FLIP_MISSING",
+                                                                "RATE_NULL")):
+        return "RATE_READ_FAILED", "UNVERIFIED_ZERO_RATE_READ_FAILED"
+    if rec.get("error") or rec.get("rate") is None:
+        return "RATE_MISSING", "UNVERIFIED_ZERO_RATE_MISSING"
+    if not _exact_zero(rec["rate"]):
+        return "RATE_NONZERO", "UNVERIFIED_SETTLEMENT_NO_ENTRY"      # a non-zero rate must have booked an entry
+    pf = position[3] if position is not None and len(position) > 3 else None
+    if position is None or pf is None or not abs(pf) <= ZERO_POSITION_FUNDING_TOL:
+        return "ZERO_RATE_POSITION_CHECK", "UNVERIFIED_ZERO_RATE_POSITION_CHECK"
+    return "ZERO_RATE", None
 
 
 def chain_exit_fill(chain: Mapping[str, Any]):
@@ -338,8 +456,8 @@ class FundingReadbackJob:
     MAX_PENDING = 5000
 
     def __init__(self, creds_status_fn: Callable = credential_status, post=_post, clock=time.time,
-                 budget: RateBudget | None = None, chains_fn: Callable | None = None):
-        self._creds_status_fn, self._raw_post, self._clock = creds_status_fn, post, clock
+                 budget: RateBudget | None = None, chains_fn: Callable | None = None, get=_get_public):
+        self._creds_status_fn, self._raw_post, self._clock, self._raw_get = creds_status_fn, post, clock, get
         self._budget_rl = budget or GLOBAL_BUDGET
         self.chains_fn = chains_fn
         self._lock = threading.Lock()
@@ -362,8 +480,8 @@ class FundingReadbackJob:
         now = self._clock()
         with self._lock:
             gate, hit = self._gate, self._cache.get(key)
-            if gate in (None, "OK") and (hit is None or (hit["error"] and now - hit["read_at_ts"] >= self.RETRY_S)):
-                self._enqueue_locked(key, a, b, pid)
+            if gate in (None, "OK") and self._stale_locked(hit, now):
+                self._enqueue_locked(key, a, b, pid, hit)
         if hit is not None and hit["error"] is None:
             return self._result(hit, a, b, kw)
         if gate not in (None, "OK"):     # the job refuses to read: every row is UNVERIFIED
@@ -379,7 +497,14 @@ class FundingReadbackJob:
     @staticmethod
     def _result(hit, a, b, kw):
         return verify(a, b, ledger_rows=hit["rows"], read_error=hit["error"], read_at_ts=hit["read_at_ts"],
-                      position=hit["position"], key_gate="OK", **kw)
+                      position=hit["position"], key_gate="OK", settlement_rates=hit.get("rates"), **kw)
+
+    def _stale_locked(self, hit, now) -> bool:
+        if hit is None:
+            return True
+        if now - hit["read_at_ts"] < self.RETRY_S:
+            return False
+        return bool(hit["error"]) or (hit.get("rate_failed") and hit.get("attempts", 1) <= RATE_RETRY_MAX)
 
     def submit(self, chain: Mapping[str, Any]) -> None:
         """Queue a closed row for the owner thread (in-memory only)."""
@@ -391,13 +516,13 @@ class FundingReadbackJob:
             return
         with self._lock:
             hit = self._cache.get(key)
-            if hit is None or (hit["error"] and self._clock() - hit["read_at_ts"] >= self.RETRY_S):
-                self._enqueue_locked(key, a, b, pid)
+            if self._stale_locked(hit, self._clock()):
+                self._enqueue_locked(key, a, b, pid, hit)
 
-    def _enqueue_locked(self, key, a, b, pid):
+    def _enqueue_locked(self, key, a, b, pid, hit=None):
         if key not in self._pending and len(self._pending) < self.MAX_PENDING:
             self._pending[key] = {"a": a, "b": b, "pid": pid, "rows": None, "read_at_ts": None, "pos_done": False,
-                                  "position": None}
+                                  "position": None, "rates": None, "attempts": (hit or {}).get("attempts", 0) + 1}
 
     # ---- owner side: the single thread that performs every network call ----------------------------------------
     def start(self) -> bool:
@@ -425,13 +550,21 @@ class FundingReadbackJob:
                 pass
             self._stop.wait(self.TICK_S)
 
-    def _post(self, path, body, creds):
+    def _spend(self):
         if self._owner is not None and threading.get_ident() != self._owner:
             raise ReadError("NOT_OWNER_THREAD")   # single owner: no other thread may spend this key's budget
         if not self._budget_rl.acquire():
             raise _BudgetEmpty()
         self.requests_made += 1
+
+    def _post(self, path, body, creds):
+        self._spend()
         return self._raw_post(path, body, creds)
+
+    def _get(self, path, params):
+        """The public deriv-status read (RK zero-rate ruling): same owner thread, same budget, same 429 backoff."""
+        self._spend()
+        return self._raw_get(path, params)
 
     def _backoff(self, now):
         self._backoff_n += 1
@@ -501,6 +634,15 @@ class FundingReadbackJob:
                                                        position_id=work["pid"])
                 work["pos_done"] = True
                 self._backoff_n = 0
+            if work["rates"] is None:
+                work["rates"] = {}
+            if work["position"] is not None:   # unresolved position -> the zero-rate cross-check cannot pass: no read
+                for t in no_entry_settlements(work["a"], work["b"], work["rows"]):
+                    if t not in work["rates"]:
+                        rec = read_settlement_rate(t, get=self._get)   # raises only HTTP_429 / budget / owner
+                        rec["read_at_ts"] = self._clock()
+                        work["rates"][t] = rec
+                        self._backoff_n = 0
             self._finish(key, work, None)
         except ReadError as exc:
             if str(exc) in ("HTTP_429", "NOT_OWNER_THREAD"):
@@ -508,8 +650,11 @@ class FundingReadbackJob:
             self._finish(key, work, str(exc))
 
     def _finish(self, key, work, error):
+        rates = None if error else (work.get("rates") or {})
         rec = {"rows": None if error else work["rows"], "position": None if error else work["position"],
-               "error": error, "read_at_ts": work["read_at_ts"] or self._clock()}
+               "error": error, "read_at_ts": work["read_at_ts"] or self._clock(), "rates": rates,
+               "rate_failed": bool(rates) and any(r.get("error") for r in rates.values()),
+               "attempts": work.get("attempts", 1)}
         with self._lock:
             self._cache[key] = rec
             self._pending.pop(key, None)

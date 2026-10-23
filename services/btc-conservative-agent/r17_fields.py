@@ -78,12 +78,14 @@ CONTRACT = {
 # gating fields above apply unchanged with funding_model LIVE_LEDGER_V1; the rest are proof / metric fields (not gates).
 LIVE_FUNDING_CONTRACT = {
     "funding_model": "LIVE_LEDGER_V1",
-    "funding_status": "PRICED (every crossed settlement tied to exactly one category-29 ledger entry) | NO_CROSSING (no "
+    "funding_status": "PRICED (every crossed settlement tied to exactly one category-29 ledger entry, or a proven ZERO_RATE "
+                      "settlement per the RK zero-rate ruling) | NO_CROSSING (no "
                       "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
                       "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
                       "UNVERIFIED_LEDGER_POSITION_MISMATCH (ledger sum vs positions/hist FUNDING) | "
-                      "UNVERIFIED_POSITION_FUNDING_MISSING | PENDING_READBACK (HM B/C: not read yet by the background "
+                      "UNVERIFIED_POSITION_FUNDING_MISSING | UNVERIFIED_ZERO_RATE_READ_FAILED | "
+                      "UNVERIFIED_ZERO_RATE_MISSING | UNVERIFIED_ZERO_RATE_POSITION_CHECK | PENDING_READBACK (HM B/C: not read yet by the background "
                       "job) fail",
     "funding_verified": "True only for PRICED / NO_CROSSING",
     "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
@@ -96,7 +98,16 @@ LIVE_FUNDING_CONTRACT = {
     "funding_ledger_mts": "their MTS (epoch s)",
     "funding_ledger_amounts": "their raw amounts (received-positive, as Bitfinex books them)",
     "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd}]",
-    "funding_settlement_status": "per crossed settlement: LEDGER | NO_ENTRY | UNTIED | AMBIGUOUS",
+    "funding_settlement_status": "per crossed settlement: LEDGER | UNTIED | AMBIGUOUS | ZERO_RATE (no entry, counted 0) | "
+                                 "RATE_READ_FAILED | RATE_MISSING | RATE_NONZERO | ZERO_RATE_POSITION_CHECK",
+    "funding_settlement_rate_readbacks": "RK zero-rate ruling (24 Oct): per crossed settlement with NO ledger entry "
+                                         "{settlement_ts, rate (text, exactly as returned), row_mts, read_at_ts, endpoint "
+                                         "(api-pub v2/status/deriv/tBTCF0:USTF0/hist), error, status}. Counted 0 ONLY "
+                                         "when CURRENT_FUNDING of the last row before that EXACT settlement (its next-"
+                                         "funding ts == the settlement, confirmed by the flip) is exactly 0 as returned "
+                                         "(Decimal parse, never rounded, never from a neighbour) AND positions/hist "
+                                         "FUNDING for the pid is 0 within 1e-8; read in the background job under the "
+                                         "same 12/min budget, never in a GET. Else LIVE_FUNDING_UNVERIFIED",
     "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
     "funding_readback_at_ts": "epoch s of the background job's ledger read (RK 4), cached per row; null until read",
     "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY). HM B/C: every ledger / "

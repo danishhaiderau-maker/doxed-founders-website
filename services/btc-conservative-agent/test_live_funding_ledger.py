@@ -47,9 +47,9 @@ def test_settlement_with_its_entry_uses_the_ledger_value_and_records_the_gap():
 
 
 def test_settlement_without_an_entry_is_unverified():
-    out = lfl.verify(S - 60, S + 60, ledger_rows=[], read_at_ts=S + 120, position=POS)
-    assert out["funding_status"] == "UNVERIFIED_SETTLEMENT_NO_ENTRY" and out["funding_verified"] is False
-    assert out["funding_settlement_status"] == ["NO_ENTRY"] and rx.funding_failure(out, live=True) == "FUNDING_UNVERIFIED"
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[], read_at_ts=S + 120, position=POS)   # no rate read back
+    assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_READ_FAILED" and out["funding_verified"] is False
+    assert out["funding_settlement_status"] == ["RATE_READ_FAILED"] and rx.funding_failure(out, live=True) == "FUNDING_UNVERIFIED"
 
 
 def test_untied_entries_are_unverified():
@@ -108,7 +108,7 @@ def test_unverified_live_funding_makes_only_the_live_leg_non_countable():
     bad = lfl.verify(S - 60, S + 60, ledger_rows=[], position=POS)
     r = lv.pair_row("c1", chain, twin, live_funding=bad)
     assert r["live_non_countable"] is True and r["paper_twin_non_countable"] is False
-    assert "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_SETTLEMENT_NO_ENTRY" in r["non_countable_reasons"]
+    assert "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_ZERO_RATE_READ_FAILED" in r["non_countable_reasons"]
     assert r["funding_usd_live"] is None
     r = lv.pair_row("c1", chain, twin)                          # no read-back at all fails closed
     assert "LIVE_FUNDING_UNVERIFIED:NO_READBACK" in r["non_countable_reasons"]
@@ -152,7 +152,12 @@ def _ok_creds():
     return (KEY, SECRET, "BFX_FUNDING_READ_KEY"), None
 
 
+def _no_get(path, params):
+    raise AssertionError("unexpected deriv-status read")
+
+
 def _job(**kw):
+    kw.setdefault("get", _no_get)
     kw.setdefault("budget", lfl.RateBudget(100))
     kw.setdefault("creds_status_fn", _ok_creds)
     kw.setdefault("clock", lambda: S + 500)
@@ -319,7 +324,7 @@ def test_get_route_makes_zero_network_calls(monkeypatch):
         raise AssertionError("network call inside a GET")
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     monkeypatch.setattr(lfl, "_post", boom)
-    job = lfl.FundingReadbackJob(creds_status_fn=_ok_creds, post=boom, budget=lfl.RateBudget(100))
+    job = lfl.FundingReadbackJob(creds_status_fn=_ok_creds, post=boom, get=boom, budget=lfl.RateBudget(100))
     monkeypatch.setattr(lfl, "DEFAULT_JOB", job)
     ctx = {"approvals": [{"correlation_id": "g1", "research_lane": "FAMILY_GS01_XV", "signal_at_ts": S - 70, "event": "ORDER_PLACED"}],
            "reports": [{"correlation_id": "g1", "account": "A", "lane": "FAMILY_GS01_XV", "type": "ORDER_FILLED",
@@ -464,3 +469,175 @@ def test_build_wires_the_readback_and_a_raising_reader_fails_closed():
     assert not any("FUNDING" in x for x in ok["rows"][0]["non_countable_reasons"] or [])
     bad = lv.build([chain], {"c1": twin}, funding_readback_for=lambda ch, paper: 1 / 0)
     assert "LIVE_FUNDING_UNVERIFIED:NO_READBACK" in bad["rows"][0]["non_countable_reasons"]
+
+
+# ---- RK zero-rate ruling (24 Oct): a no-entry settlement is 0 only with the EXACT settlement rate == 0 as returned
+# (public deriv status history, read in the background job under the same budget) AND positions/hist FUNDING == 0.
+from decimal import Decimal
+
+T_MS = int(S * 1000)
+
+
+def _drow(mts_s, next_ts_ms, rate):
+    r = [int(mts_s * 1000), None, Decimal("81623.72"), Decimal("81577.5"), None, Decimal("61068082.5"), None, next_ts_ms,
+         Decimal("0.00055066"), 9189, None, rate, None, None]
+    return r
+
+
+def _dhist(rate, t=S, flip=True, before=True):
+    """Real shape (24 Oct probe): rows ~1/min, [7] = next settlement ms, [11] = CURRENT_FUNDING; [7] flips after t."""
+    tm = int(t * 1000)
+    rows = []
+    if before:
+        rows += [_drow(t - 124, tm, Decimal("0.00011")), _drow(t - 4, tm, rate)]
+    if flip:
+        rows += [_drow(t + 57, tm + 8 * 3600 * 1000, Decimal("0.00009"))]
+    return rows
+
+
+def _rate(rate, err=None, row_mts=T_MS - 4000):
+    return {S: {"rate": rate, "row_mts": None if err else row_mts, "read_at_ts": S + 500,
+                "endpoint": lfl.API_PUB + lfl.DERIV_HIST_PATH, "error": err}}
+
+
+def test_zero_rate_exact_and_position_zero_counts_as_zero():
+    for rate in (Decimal("0"), Decimal("0.00000000"), 0):
+        out = lfl.verify(S - 60, S + 60, ledger_rows=[], read_at_ts=S + 500, position=_pos(0.0),
+                         settlement_rates=_rate(rate))
+        assert out["funding_status"] == "PRICED" and out["funding_verified"] is True and out["funding_usd_raw"] == 0.0
+        assert out["funding_settlement_status"] == ["ZERO_RATE"] and rx.funding_failure(out, live=True) is None
+        proof = out["funding_settlement_rate_readbacks"][0]
+        assert proof["settlement_ts"] == S and proof["read_at_ts"] == S + 500 and proof["error"] is None
+        assert proof["endpoint"] == "https://api-pub.bitfinex.com/v2/status/deriv/tBTCF0:USTF0/hist"
+        assert proof["rate"] in ("0", "0.00000000") and proof["row_mts"] == T_MS - 4000
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=_pos(5e-9), settlement_rates=_rate(Decimal("0")))
+    assert out["funding_status"] == "PRICED"                                              # within 1e-8
+
+
+def test_zero_rate_nonzero_rate_with_no_entry_is_unverified():
+    for rate in (Decimal("0.00000001"), Decimal("1E-12"), Decimal("-0.0001"), 0.0, "0"):   # never rounded / inferred
+        out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=_pos(0.0), settlement_rates=_rate(rate))
+        assert out["funding_status"] == "UNVERIFIED_SETTLEMENT_NO_ENTRY" and out["funding_verified"] is False
+        assert out["funding_settlement_status"] == ["RATE_NONZERO"]
+        assert lv.live_funding_failure(CHAIN, out) == "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_SETTLEMENT_NO_ENTRY"
+
+
+def test_zero_rate_read_error_is_unverified():
+    for rates in (None, {}, _rate(None, err="HTTP_500"), _rate(None, err="TRANSPORT_URLError"), _rate(None, err="API_ERROR")):
+        out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=_pos(0.0), settlement_rates=rates)
+        assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_READ_FAILED" and out["funding_verified"] is False
+        assert out["funding_settlement_status"] == ["RATE_READ_FAILED"]
+
+
+def test_zero_rate_missing_settlement_is_unverified_and_never_inferred_from_neighbours():
+    assert lfl.read_settlement_rate(S, get=lambda p, q: _dhist(Decimal("0")))["rate"] == Decimal("0")
+    # only rows of the NEIGHBOURING settlement (their next-funding ts is S - 8h): never borrowed
+    prev = S - 8 * 3600
+    rows = [_drow(S - 124, int(prev * 1000), Decimal("0")), _drow(S - 4, int(prev * 1000), Decimal("0"))]
+    assert lfl.read_settlement_rate(S, get=lambda p, q: rows)["error"] == "SETTLEMENT_ROW_MISSING"
+    assert lfl.read_settlement_rate(S, get=lambda p, q: _dhist(Decimal("0"), before=False))["error"] == "SETTLEMENT_ROW_MISSING"
+    assert lfl.read_settlement_rate(S, get=lambda p, q: _dhist(Decimal("0"), flip=False))["error"] == "SETTLEMENT_FLIP_MISSING"
+    assert lfl.read_settlement_rate(S, get=lambda p, q: _dhist(None))["error"] == "RATE_NULL"
+    assert lfl.read_settlement_rate(S, get=lambda p, q: [])["error"] == "SETTLEMENT_ROW_MISSING"
+    for err in ("SETTLEMENT_ROW_MISSING", "SETTLEMENT_FLIP_MISSING", "RATE_NULL"):
+        out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=_pos(0.0), settlement_rates=_rate(None, err=err))
+        assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_MISSING" and out["funding_settlement_status"] == ["RATE_MISSING"]
+    seen = []
+    lfl.read_settlement_rate(S, get=lambda p, q: seen.append((p, q)) or [])
+    assert seen == [(lfl.DERIV_HIST_PATH, {"start": T_MS - 300000, "end": T_MS + 120000, "limit": 100, "sort": 1})]
+
+
+def test_zero_rate_position_cross_check_failing_is_unverified():
+    for pos in (_pos(-0.0001), _pos(2e-8), _pos(None), None):
+        out = lfl.verify(S - 60, S + 60, ledger_rows=[], position=pos, settlement_rates=_rate(Decimal("0")))
+        assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_POSITION_CHECK" and out["funding_verified"] is False
+        assert out["funding_settlement_status"] == ["ZERO_RATE_POSITION_CHECK"]
+
+
+def test_zero_rate_no_crossing_stays_a_countable_zero_without_a_rate_read():
+    gets = []
+    ch = dict(CHAIN, fill_at_ts=S + 10, exit_fill_record_at_ts=S + 3600)
+    prow = _PROW[:4] + [0.0] + _PROW[5:12] + [int((S + 10) * 1000), int((S + 3600) * 1000)]
+    job = _job(post=_fake(prow=prow), get=lambda p, q: gets.append(p) or [])
+    out = _read(job, ch)
+    assert out["funding_status"] == "NO_CROSSING" and out["funding_verified"] is True and gets == []
+    assert out["funding_settlement_rate_readbacks"] == []
+
+
+def _ledgerless(prow_funding=0.0, sent=None):
+    base = _fake(sent=sent, prow=_PROW[:4] + [prow_funding] + _PROW[5:])
+
+    def post(path, body, creds):
+        if path == lfl.LEDGER_PATH:
+            (sent if sent is not None else []).append((path, body))
+            return []                                   # the settlement booked no entry
+        return base(path, body, creds)
+    return post
+
+
+def test_zero_rate_is_read_in_the_background_job_under_the_same_budget():
+    sent, gets = [], []
+
+    def get(path, params):
+        gets.append((path, params))
+        return _dhist(Decimal("0"))
+    job = _job(post=_ledgerless(0.0, sent), get=get)
+    assert job.lookup(CHAIN, None)["funding_status"] == "PENDING_READBACK" and gets == []   # the GET reads nothing
+    job.run_once()
+    out = job.lookup(CHAIN, None)
+    assert out["funding_status"] == "PRICED" and out["funding_settlement_status"] == ["ZERO_RATE"]
+    assert out["funding_usd_raw"] == 0.0 and lv.live_funding_failure(CHAIN, out) is None
+    assert out["funding_settlement_rate_readbacks"][0]["read_at_ts"] == S + 500
+    assert [p for p, _ in gets] == [lfl.DERIV_HIST_PATH] and job.requests_made == 4    # perms, ledger, positions, rate
+    job.run_once()
+    assert len(gets) == 1                                                               # cached
+    # budget: 3 slots -> the rate read waits (PENDING), never a guessed 0
+    job = _job(post=_ledgerless(0.0), get=lambda p, q: _dhist(Decimal("0")), budget=lfl.RateBudget(3))
+    assert _read(job)["funding_status"] == "PENDING_READBACK" and job.requests_made == 3
+
+
+def test_zero_rate_read_429_backs_off_and_error_retries():
+    t = [S + 500]
+    state = {"n": 0}
+
+    def get(path, params):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise lfl.ReadError("HTTP_429")
+        if state["n"] == 2:
+            raise lfl.ReadError("HTTP_500")
+        return _dhist(Decimal("0"))
+    job = _job(post=_ledgerless(0.0), get=get, clock=lambda: t[0])
+    assert _read(job)["funding_status"] == "PENDING_READBACK" and job._backoff_until > t[0]
+    t[0] += job.BACKOFF_BASE_S + 1
+    out = _read(job)
+    assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_READ_FAILED"
+    assert out["funding_settlement_rate_readbacks"][0]["error"] == "HTTP_500"
+    t[0] += job.RETRY_S + 1
+    assert _read(job)["funding_status"] == "PRICED" and state["n"] == 3
+    # a non-zero rate read back through the job stays unverified
+    job = _job(post=_ledgerless(0.0), get=lambda p, q: _dhist(Decimal("0.00001")))
+    assert _read(job)["funding_status"] == "UNVERIFIED_SETTLEMENT_NO_ENTRY"
+    job = _job(post=_ledgerless(-0.01), get=lambda p, q: _dhist(Decimal("0")))
+    assert _read(job)["funding_status"] == "UNVERIFIED_ZERO_RATE_POSITION_CHECK"
+
+
+def test_public_get_parses_decimal_and_redacts(monkeypatch):
+    import urllib.request
+
+    class R:
+        def __init__(self, b): self.b = b
+        def read(self): return self.b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    body = json.dumps([[T_MS - 4000, None, 1.5, 1.5, None, 1.0, None, T_MS, 0.0005, 1, None, 0, None]]).encode()
+    body = body.replace(b"0.0005", b"0.00000000000000000001")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: R(body))
+    rows = lfl._get_public(lfl.DERIV_HIST_PATH, {"start": 1})
+    assert rows[0][8] == Decimal("1E-20") and rows[0][8] != 0                           # never underflows to 0
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: R(b'["error",11010,"ratelimit: error"]'))
+    with pytest.raises(lfl.ReadError) as ei:
+        lfl._get_public(lfl.DERIV_HIST_PATH, {})
+    assert str(ei.value) == "HTTP_429"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: R(b'["error",10020,"time_interval: invalid"]'))
+    assert lfl.read_settlement_rate(S, get=lfl._get_public)["error"] == "API_ERROR"
