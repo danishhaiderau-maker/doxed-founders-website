@@ -80,16 +80,22 @@ def taker_side_levels(side: str, leg: str, book: Mapping[str, Any]):
     return book.get("a") if buy else book.get("b")
 
 
+RESIDENT_LEG = "exit_resident"  # REALISM_V2: exchange-resident stop leg (delay 0, exit side of the book)
+
+
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
                delay_source: str = "lane_p50", top_at: Optional[Callable[[float], Optional[tuple]]] = None,
                cap_px: Optional[float] = None) -> dict:
     """book_at(t) -> {"s": sec, "b": [[px, sz]...], "a": [...]} for the latest snapshot at or before t."""
-    d = max(MIN_DELAY_S, _f(delay_s) or DEFAULT_DELAY_S)
+    # REALISM_V2: an exchange-resident stop order is already on the exchange; it fills at its trigger instant (no
+    # bot send delay). Every other leg keeps the MIN_DELAY_S floor.
+    resident = leg == RESIDENT_LEG
+    d = 0.0 if resident else max(MIN_DELAY_S, _f(delay_s) or DEFAULT_DELAY_S)
     t = float(signal_ts) + d
     q = _f(qty) or 0.0
     base = {"fill_model": FILL_MODEL, "fill_model_version": FILL_MODEL_VERSION, "delay_s": round(d, 3),
-            "delay_source": delay_source if delay_s else "default_until_n10", "fill_ts": t, "leg": leg, "qty": q,
+            "delay_source": delay_source if (delay_s or resident) else "default_until_n10", "fill_ts": t, "leg": leg, "qty": q,
             "signal_ts": float(signal_ts), "side": str(side).upper()}
     sig_book = _safe(book_at, float(signal_ts))
     base["depth_snapshot_signal"] = _snap(sig_book)
@@ -349,11 +355,16 @@ def aggregate_legs(legs) -> dict:
 # Every ACTIVE_TILE_REGISTRY lane must name the functions that price its paper fills. A migrated
 # site must call paper_fill.paper_fill and must not read state price/ask/bid or tape streams.
 TILE_FILL_SITES = {
-    "FAMILY_RANDOM_CONTROL_TAKER_90": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
-    "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
-    "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
-    "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
-    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit")),
+    "FAMILY_RANDOM_CONTROL_TAKER_90": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                          ("tile_fill.py", "price_exit_resident")),
+    "FAMILY_GS01_XV_PREMIUM_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                          ("tile_fill.py", "price_exit_resident")),
+    "FAMILY_GSB1_CVD_DIV_REGIME": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                          ("tile_fill.py", "price_exit_resident")),
+    "FAMILY_GSB2_REGIME_SWITCHER": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                          ("tile_fill.py", "price_exit_resident")),
+    "FAMILY_GS06_COMMITTED_FADE_ATR_TP": (("tile_fill.py", "price_entry"), ("tile_fill.py", "price_exit"),
+                                          ("tile_fill.py", "price_exit_resident")),
 }
 # R4 shared-helper note (23 Oct 2026, Tile 6/7 removal, owner R9): the two DISLOC / DISLOC-FOI entries
 # (disloc_engine._price_entry / _price_exit) were deleted with disloc_engine.py. Pure deletion: the five

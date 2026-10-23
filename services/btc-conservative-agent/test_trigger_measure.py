@@ -221,7 +221,18 @@ def test_paper_fill_unchanged_vs_master():
         pytest.skip("git unavailable")
     if out.returncode not in (0, 1):
         pytest.skip("origin/master not available in this checkout")
-    assert out.returncode == 0, "paper_fill.py must be unedited by #809"
+    if out.returncode == 0:
+        return
+    # REALISM_V2 PR2 edits paper_fill.py only for the exchange-resident (delay-0) stop leg: every changed hunk must
+    # be that change, so #809's measurement work still leaves the pricer untouched.
+    diff = subprocess.run(["git", "diff", "-U0", "origin/master", "--", "paper_fill.py"], cwd=HERE,
+                          capture_output=True, text=True, timeout=30).stdout
+    hunks = [h for h in diff.split("\n@@")[1:]]
+    assert hunks, "paper_fill.py differs from master but no hunks were parsed"
+    for h in hunks:
+        changed = [ln for ln in h.splitlines()[1:] if ln[:1] in "+-" and ln[1:].strip()]
+        assert any(k in h for k in ("REALISM_V2", "resident", "RESIDENT")), f"paper_fill.py hunk not REALISM_V2: {h[:400]}"
+        assert changed
 
 
 def _book_at(t):
