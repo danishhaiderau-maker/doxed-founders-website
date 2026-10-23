@@ -641,3 +641,69 @@ def test_public_get_parses_decimal_and_redacts(monkeypatch):
     assert str(ei.value) == "HTTP_429"
     monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: R(b'["error",10020,"time_interval: invalid"]'))
     assert lfl.read_settlement_rate(S, get=lfl._get_public)["error"] == "API_ERROR"
+
+
+# ---- RK amendment (24 Oct 04:07): condition 2 = positions/hist FUNDING == sum of the TIED ledger entries within 1e-8;
+# every crossed settlement needs exactly one proof (tied entry, or exact-0 rate read when there is no entry).
+S2 = S + 8 * 3600
+MIXED_POS = (194481758, S - 600.0, S2 + 600.0)
+
+
+def _mixed(pf, rates=None, rows=None):
+    rows = [_row(1, S + 4, -0.025, rate=0.0001)] if rows is None else rows
+    rates = {S2: _rate(Decimal("0"))[S]} if rates is None else rates
+    return lfl.verify(S - 60, S2 + 60, ledger_rows=rows, read_at_ts=S2 + 500, position=MIXED_POS + (pf,),
+                      live_notional_usd=250.0, settlement_rates=rates)
+
+
+def test_amend_mixed_hold_with_matching_sum_counts():
+    for pf in (-0.025, 0.025, -0.025 + 5e-9):                    # sign of positions/hist FUNDING not yet observed
+        out = _mixed(pf)
+        assert out["funding_status"] == "PRICED" and out["funding_verified"] is True, out["funding_status"]
+        assert out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE"] and out["funding_usd_raw"] == 0.025
+        assert out["funding_ledger_ids"] == [1] and [r["settlement_ts"] for r in out["funding_settlement_rate_readbacks"]] == [S2]
+        assert [x["funding_usd"] for x in out["funding_usd_by_settlement"]] == [0.025, 0.0]
+        assert rx.funding_failure(out, live=True) is None
+
+
+def test_amend_mixed_hold_with_mismatched_sum_is_unverified():
+    for pf in (-0.025 - 2e-8, -0.0251, 0.0, None):
+        out = _mixed(pf)
+        assert out["funding_status"] == "UNVERIFIED_ZERO_RATE_POSITION_CHECK" and out["funding_verified"] is False
+        assert out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE_POSITION_CHECK"]
+        assert out["funding_settlement_rate_readbacks"][0]["status"] == "ZERO_RATE_POSITION_CHECK"
+        chain = dict(CHAIN, fill_at_ts=S - 60, exit_fill_record_at_ts=S2 + 60)
+        assert lv.live_funding_failure(chain, out) == "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_ZERO_RATE_POSITION_CHECK"
+
+
+def test_amend_settlement_with_neither_entry_nor_zero_rate_is_unverified():
+    for rates in ({}, {S2: _rate(None, err="HTTP_500")[S]}, {S2: _rate(None, err="SETTLEMENT_ROW_MISSING")[S]},
+                  {S: _rate(Decimal("0"))[S]}):                    # a read for ANOTHER settlement does not count
+        out = _mixed(-0.025, rates=rates)
+        assert out["funding_verified"] is False and out["funding_status"].startswith("UNVERIFIED_ZERO_RATE_")
+        assert out["funding_settlement_status"][0] == "LEDGER" and out["funding_settlement_status"][1] in (
+            "RATE_READ_FAILED", "RATE_MISSING")
+
+
+def test_amend_entry_and_zero_rate_for_the_same_settlement_never_double_counts():
+    rates = {S: _rate(Decimal("0"))[S], S2: _rate(Decimal("0"))[S]}    # a (redundant) zero read for the entry's settlement
+    out = _mixed(-0.025, rates=rates)
+    assert out["funding_status"] == "PRICED" and out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE"]
+    assert out["funding_usd_raw"] == 0.025 and len(out["funding_usd_by_settlement"]) == 2
+    assert [r["settlement_ts"] for r in out["funding_settlement_rate_readbacks"]] == [S2]      # the entry wins, read unused
+    # a zero-rate read can never rescue an untied entry
+    out = lfl.verify(S - 60, S + 60, ledger_rows=[_row(1, S + 4, -0.025)], position=_pos(-0.025), live_notional_usd=None,
+                     settlement_rates=_rate(Decimal("0")))
+    assert out["funding_status"] == "UNVERIFIED_ENTRY_UNTIED" and out["funding_settlement_status"] == ["UNTIED"]
+    # the job only reads the rate of settlements WITHOUT an entry
+    assert lfl.no_entry_settlements(S - 60, S2 + 60, [_row(1, S + 4, -0.025)]) == [S2]
+    gets = []
+
+    def get(path, params):
+        gets.append(params["start"])
+        return _dhist(Decimal("0"), t=S2)
+    ch = dict(CHAIN, fill_at_ts=S - 60, exit_fill_record_at_ts=S2 + 60)
+    prow = _PROW[:4] + [-0.025] + _PROW[5:12] + [int((S - 60) * 1000), int((S2 + 60) * 1000)]
+    out = _read(_job(post=_fake(prow=prow), get=get, clock=lambda: S2 + 500), ch)
+    assert out["funding_status"] == "PRICED" and out["funding_settlement_status"] == ["LEDGER", "ZERO_RATE"]
+    assert gets == [int(S2 * 1000) - 300000]

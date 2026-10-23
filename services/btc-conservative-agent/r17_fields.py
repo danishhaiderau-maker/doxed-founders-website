@@ -106,7 +106,11 @@ LIVE_FUNDING_CONTRACT = {
                                          "when CURRENT_FUNDING of the last row before that EXACT settlement (its next-"
                                          "funding ts == the settlement, confirmed by the flip) is exactly 0 as returned "
                                          "(Decimal parse, never rounded, never from a neighbour) AND positions/hist "
-                                         "FUNDING for the pid is 0 within 1e-8; read in the background job under the "
+                                         "FUNDING for the pid EQUALS the sum of the tied ledger entries within 1e-8 "
+                                         "(RK amendment 04:07; magnitudes, sign unobserved; no entries -> ~0). Every "
+                                         "crossed settlement needs exactly one proof: a tied entry, or (no entry only) "
+                                         "an exact-0 rate read - an entry present means no rate read is used; read in "
+                                         "the background job under the "
                                          "same 12/min budget, never in a GET. Else LIVE_FUNDING_UNVERIFIED",
     "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
     "funding_readback_at_ts": "epoch s of the background job's ledger read (RK 4), cached per row; null until read",

@@ -60,15 +60,16 @@ POSITION_TOL_S = 10.0        # positions/hist create/update vs the real entry/ex
 EXIT_TS_FALLBACK_NEAR_S = 60.0
 LEDGER_LIMIT = 500
 # RK zero-rate ruling (24 Oct): a crossed settlement with NO ledger entry counts as 0 only when the rate of that EXACT
-# settlement, read back from the public derivatives status history, is exactly 0 as returned AND positions/hist FUNDING
-# for the pid is 0 within ZERO_POSITION_FUNDING_TOL. Read in the background job, same budget, never in a GET.
+# settlement, read back from the public derivatives status history, is exactly 0 as returned AND (RK amendment 04:07)
+# positions/hist FUNDING for the pid equals the sum of the tied ledger entries within ZERO_POSITION_FUNDING_TOL.
+# Read in the background job, same budget, never in a GET.
 API_PUB = "https://api-pub.bitfinex.com/"
 DERIV_HIST_PATH = "v2/status/deriv/" + SYMBOL + "/hist"
 DERIV_NEXT_FUNDING_TS_IDX = 7     # NEXT_FUNDING_EVT_TIMESTAMP_MS
 DERIV_CURRENT_FUNDING_IDX = 11    # CURRENT_FUNDING (paper FUNDING_SOURCE_V2: last row before the settlement)
 RATE_WINDOW_BEFORE_S = 300
 RATE_WINDOW_AFTER_S = 120
-ZERO_POSITION_FUNDING_TOL = 1e-8
+ZERO_POSITION_FUNDING_TOL = 1e-8  # |positions/hist FUNDING| vs |sum of tied ledger entries| (RK amendment 04:07)
 RATE_RETRY_MAX = 5                # a row whose rate read failed is re-read at most this many times
 _FUNDING_DESC = re.compile(r"^Funding Event\s+(\S+)\s+\(([-0-9.eE+]+)\)")
 _FEE_DESC = re.compile(r"fee|commission|rebate", re.I)
@@ -342,7 +343,10 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
     rates = settlement_rates or {}
     for t in crossed:
         near = [p for p in ev if abs(p["ts"] - t) <= TIE_TOL_S]
-        if not near:   # RK zero-rate ruling: 0 ONLY with the exact settlement rate == 0 AND positions/hist FUNDING == 0
+        # RK zero-rate ruling (amended 04:07): every crossed settlement needs EXACTLY ONE proof - a tied ledger entry, or
+        # (only when there is no entry) an exact-0 rate read for that settlement. An entry present means the rate read is
+        # neither needed nor used (no double count); a rate read can never rescue an untied / ambiguous entry.
+        if not near:
             st, prob = _zero_rate_status(t, rates.get(t), position)
             statuses.append(st)
             rec = rates.get(t) or {}
@@ -385,7 +389,19 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
                funding_ledger_amounts=[p["amount"] for p in used], funding_usd_by_settlement=per,
                funding_settlement_status=statuses, funding_settlement_rate_readbacks=rate_proof)
     led = sum(p["amount"] for p in used)
-    if not problems and position is not None:   # RK 03:38: ledger vs positions/hist must agree, else non-countable
+    zero_idx = [i for i, st in enumerate(statuses) if st == "ZERO_RATE"]
+    if not problems and zero_idx:
+        # RK amended condition 2: positions/hist FUNDING for the pid must EQUAL the sum of the tied ledger entries within
+        # 1e-8 (no entries -> ~0). Magnitudes compared: the positions/hist FUNDING sign is not yet observed live.
+        pf = position[3] if position is not None and len(position) > 3 else None
+        if pf is None or not abs(abs(pf) - abs(led)) <= ZERO_POSITION_FUNDING_TOL:
+            for i in zero_idx:
+                statuses[i] = "ZERO_RATE_POSITION_CHECK"
+            for rp in rate_proof:
+                if rp["status"] == "ZERO_RATE":
+                    rp["status"] = "ZERO_RATE_POSITION_CHECK"
+            problems.append("UNVERIFIED_ZERO_RATE_POSITION_CHECK")
+    elif not problems and position is not None:   # RK 03:38: ledger vs positions/hist must agree, else non-countable
         pf = position[3] if len(position) > 3 else None
         if pf is None and crossed:
             problems.append("UNVERIFIED_POSITION_FUNDING_MISSING")
@@ -410,8 +426,7 @@ def _zero_rate_status(t, rec, position):
         return "RATE_MISSING", "UNVERIFIED_ZERO_RATE_MISSING"
     if not _exact_zero(rec["rate"]):
         return "RATE_NONZERO", "UNVERIFIED_SETTLEMENT_NO_ENTRY"      # a non-zero rate must have booked an entry
-    pf = position[3] if position is not None and len(position) > 3 else None
-    if position is None or pf is None or not abs(pf) <= ZERO_POSITION_FUNDING_TOL:
+    if position is None:   # the positions/hist cross-check (sum of tied entries, in verify) needs the pid
         return "ZERO_RATE_POSITION_CHECK", "UNVERIFIED_ZERO_RATE_POSITION_CHECK"
     return "ZERO_RATE", None
 
