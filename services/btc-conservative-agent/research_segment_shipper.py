@@ -433,6 +433,37 @@ class SegmentShipper:
                 pass
             return set()
 
+    def inspect_intent(self) -> dict:
+        """Classify the ship intent spool without raising or touching it (HM C3-R).
+
+        NONE: no intent. PENDING: valid and completable (seq committed or
+        committed+1). STALE: seq outside that window. CORRUPT: unreadable,
+        schema/prefix mismatch or spool sha mismatch. Any intent that names a
+        seq excludes that seq from R5 deletion; nothing else is excluded.
+        """
+        intent_path = self.intent_dir / "intent.json"
+        if not intent_path.is_file():
+            return {"state": "NONE"}
+        seq = None
+        try:
+            intent = json.loads(intent_path.read_text(encoding="utf-8"))
+            seq = int(intent["seq"])
+            if intent.get("schema") != INTENT_SCHEMA or intent.get("prefix") != self.prefix:
+                return {"state": "CORRUPT", "reason": "schema_or_prefix", "seq": seq, "exclude_seqs": [seq]}
+            if (fmt.sha256_bytes((self.intent_dir / "segment.tar.gz").read_bytes()) != intent["segment_sha256"]
+                    or fmt.sha256_bytes((self.intent_dir / "manifest.json").read_bytes())
+                    != intent["manifest_sha256"]):
+                return {"state": "CORRUPT", "reason": "spool_sha", "seq": seq, "exclude_seqs": [seq]}
+            committed = int(self.load_state()["seq"])
+        except Exception as exc:  # noqa: BLE001 - classification never blocks R5
+            out = {"state": "CORRUPT", "reason": type(exc).__name__}
+            if seq is not None:
+                out.update(seq=seq, exclude_seqs=[seq])
+            return out
+        if seq not in (committed, committed + 1):
+            return {"state": "STALE", "seq": seq, "committed": committed, "exclude_seqs": [seq]}
+        return {"state": "PENDING", "seq": seq, "committed": committed, "exclude_seqs": [seq]}
+
     def r5_segment_pass(self, keep_seqs=()) -> dict:
         """R5 segment-store retention (RK 2026-10-23): live, no custody/ACK gate.
 
@@ -443,8 +474,11 @@ class SegmentShipper:
         """
         if not PRUNING_ENABLED or self.sink != "volume":
             return {"skipped": "NOT_VOLUME"}
-        if (self.intent_dir / "intent.json").is_file():
-            return {"skipped": "INTENT_PENDING"}
+        # HM C3-R: a pending/stale/corrupt ship intent never makes R5 wait (a
+        # crash mid-ship + LOW_DISK skips the cycle that would complete it, and
+        # complete_intent raises on a stale/corrupt spool). Only the intent's
+        # own seq is excluded from deletion; the spool is left untouched.
+        intent_info = self.inspect_intent()
         store_root = getattr(self.store, "root", None)
         if store_root is None:
             return {"skipped": "NO_VOLUME_STORE_ROOT"}
@@ -457,12 +491,14 @@ class SegmentShipper:
         plan = prune.plan_r5_segment_prune(Path(store_root), self.prefix, shipped_seq=int(state["seq"]),
                                            acked_seq=status.get("laptop_acked_seq"),
                                            max_store_bytes=self.max_store_bytes, now=now, keep_seqs=keep_seqs,
-                                           accounted_bytes=int(state.get("store_bytes") or 0))
+                                           accounted_bytes=int(state.get("store_bytes") or 0),
+                                           exclude_seqs=intent_info.get("exclude_seqs") or ())
         result = prune.execute_r5_segment_prune(plan, receipt_dir=self.runtime_root, clock=self.clock)
         fields: dict = {"r5_segment_last_at": now, "r5_segment_store_bytes": plan["store_bytes"],
                         "r5_segment_over_cap": plan["over_cap"],
                         "r5_segment_last_deleted": result["deleted"],
-                        "r5_segment_kept_needed_unacked": plan["kept_needed_unacked"][:20]}
+                        "r5_segment_kept_needed_unacked": plan["kept_needed_unacked"][:20],
+                        "r5_segment_intent": {k: v for k, v in intent_info.items() if k != "exclude_seqs"}}
         if result["deleted"]:
             state = self.load_state()
             state["store_bytes"] = max(0, plan["store_bytes"] - result["deleted_bytes"])

@@ -177,3 +177,77 @@ def test_c3_r5_pass_runs_before_the_low_disk_check():
     main = source[source.index("def main("):]
     loop = main[main.index("while "):]
     assert loop.index("r5_pass()") < loop.index("LOW_DISK")
+
+
+# ---------------------------------------------------------------- HM C3-R (re-review 23 Oct 21:10)
+class _StopLoop(Exception):
+    pass
+
+
+def _crash_mid_ship_intent(shipper, seq: int, *, corrupt: bool = False) -> None:
+    """Spool an intent like write_intent does, then 'crash' before complete_intent."""
+    state = dict(shipper.load_state())
+    state["seq"] = seq
+    shipper.write_intent(b"segment-bytes", b"{}", state)
+    if corrupt:
+        (shipper.intent_dir / "segment.tar.gz").write_bytes(b"torn write")
+
+
+def _run_one_low_disk_loop(monkeypatch, shipper) -> None:
+    import research_segment_shipper as mod
+    monkeypatch.setenv("RESEARCH_SEGMENTS_ENABLED", "1")
+    monkeypatch.setattr(mod, "shipper_from_env", lambda environ=None: shipper)
+    monkeypatch.setattr(mod, "_acquire_single_instance", lambda state_dir: object())
+    monkeypatch.setattr(mod, "_set_priority", lambda *a, **kw: None)
+    monkeypatch.setattr(mod, "_free_bytes", lambda path: 0)  # LOW_DISK: the ship cycle is skipped
+
+    def stop(_seconds):
+        raise _StopLoop
+
+    monkeypatch.setattr(mod.time, "sleep", stop)
+    with pytest.raises(_StopLoop):
+        mod.main()
+
+
+@pytest.mark.parametrize("kind", ["pending", "stale", "corrupt", "garbage"])
+def test_c3r_crash_mid_ship_plus_low_disk_still_prunes(venv, monkeypatch, kind):
+    """Behavioural: a crash mid-ship leaves intent.json, then LOW_DISK skips the cycle that
+    would complete it. The real main loop must still run R5 and free space; only the
+    intent's own seq is protected and the spool is left untouched."""
+    _ship_n(venv, 4)
+    assert _seqs(venv) == [1, 2, 3, 4]
+    for seq in (1, 2, 3, 4):
+        _age(venv, seq, 8 * DAY)
+    shipper = _shipper(venv)
+    if kind == "pending":
+        _crash_mid_ship_intent(shipper, 5)            # committed + 1 (not yet in the store)
+        protected = set()
+    elif kind == "stale":
+        _crash_mid_ship_intent(shipper, 2)            # complete_intent would raise "stale intent"
+        protected = {2}
+    elif kind == "corrupt":
+        _crash_mid_ship_intent(shipper, 3, corrupt=True)  # complete_intent would raise "corrupt"
+        protected = {3}
+    else:
+        shipper.intent_dir.mkdir(parents=True, exist_ok=True)
+        (shipper.intent_dir / "intent.json").write_text("{not json")
+        protected = set()
+    spool_before = sorted(p.name for p in shipper.intent_dir.iterdir())
+    _run_one_low_disk_loop(monkeypatch, shipper)
+    assert set(_seqs(venv)) == protected
+    status = json.loads(shipper.status_path.read_text())
+    assert status["last_error"] == "LOW_DISK_SKIPPED"
+    assert status["r5_segment_intent"]["state"] == {"pending": "PENDING", "stale": "STALE",
+                                                    "corrupt": "CORRUPT", "garbage": "CORRUPT"}[kind]
+    assert status["r5_segment_last_deleted"] == 4 - len(protected)
+    assert sorted(p.name for p in shipper.intent_dir.iterdir()) == spool_before  # nothing discarded
+
+
+def test_c3r_intent_seq_is_excluded_from_the_cap_pass_too(venv):
+    _ship_n(venv, 4)
+    shipper = _shipper(venv, max_store_bytes=1)  # far over cap: everything would go oldest-first
+    _crash_mid_ship_intent(shipper, 1)            # stale: committed is 4
+    out = shipper.r5_segment_pass()
+    assert out["plan"]["excluded_seqs"] == [1]
+    assert _seqs(venv) == [1]
+    assert 1 not in out["result"]["cap_dropped_seqs"]

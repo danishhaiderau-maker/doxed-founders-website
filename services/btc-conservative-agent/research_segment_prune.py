@@ -402,9 +402,15 @@ def _store_segments(store_root: Path, prefix: str, shipped_seq: int) -> list[dic
 def plan_r5_segment_prune(store_root: Path, prefix: str, *, shipped_seq: int, acked_seq: int | None,
                           max_store_bytes: int, now: float, keep_seqs=(), accounted_bytes: int = 0,
                           max_age_hours: float = R5_SEGMENT_MAX_AGE_HOURS,
-                          cap_target: float = R5_SEGMENT_CAP_TARGET) -> dict:
-    """Pure plan: which committed segments go by age and which by the cap."""
-    segments = _store_segments(store_root, prefix, shipped_seq)
+                          cap_target: float = R5_SEGMENT_CAP_TARGET, exclude_seqs=()) -> dict:
+    """Pure plan: which committed segments go by age and which by the cap.
+
+    HM C3-R: ``exclude_seqs`` (a pending ship intent's seq) is never deleted by
+    either pass; everything else is planned as usual, so the prune never waits.
+    """
+    excluded = {int(s) for s in exclude_seqs or ()}
+    segments = [item for item in _store_segments(store_root, prefix, shipped_seq)
+                if item["seq"] not in excluded]
     keep = {int(s) for s in keep_seqs or ()}
     acked = int(acked_seq or 0)
     # the shipper's accounted store_bytes (segments + manifests) is what its cap check reads
@@ -433,7 +439,8 @@ def plan_r5_segment_prune(store_root: Path, prefix: str, *, shipped_seq: int, ac
     return {"schema": R5_SEGMENT_SCHEMA, "planned_at": now, "shipped_seq": int(shipped_seq), "acked_seq": acked,
             "store_bytes": total, "max_store_bytes": int(max_store_bytes), "over_cap": over_cap,
             "max_age_hours": max_age_hours, "age_drop": age_drop, "cap_drop": cap_drop,
-            "kept_needed_unacked": [item["seq"] for item in kept_needed]}
+            "kept_needed_unacked": [item["seq"] for item in kept_needed],
+            "excluded_seqs": sorted(excluded)}
 
 
 def execute_r5_segment_prune(plan: dict, *, receipt_dir: Path | None, clock=time.time,
