@@ -39,8 +39,11 @@ def _row(lid, ts, amount, rate=0.0001, desc=None, currency="USTF0"):
             desc or f"Funding Event BTCF0:USTF0 ({rate:.8f}) on wallet margin"]
 
 
+NC_POS = (5, S + 10, S + 3600, 0.0)   # the chain-pid position of a no-crossing hold (pid REQUIRED, RK 04:12)
+
+
 def test_no_settlement_in_window_is_a_countable_zero_without_any_entry():
-    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], read_at_ts=S + 4000, paper_funding_usd=0.0)
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], read_at_ts=S + 4000, paper_funding_usd=0.0, position=NC_POS)
     assert out["funding_status"] == "NO_CROSSING" and out["funding_verified"] is True
     assert out["funding_usd_raw"] == 0.0 and out["funding_ts_crossed"] == [] and out["funding_ts_fallbacks"] == []
     assert out["funding_model"] == "LIVE_LEDGER_V1" and out["funding_readback_at_ts"] == S + 4000
@@ -84,7 +87,7 @@ def test_untied_entries_are_unverified():
 
 def test_entries_of_other_settlements_or_symbols_are_ignored():
     rows = [_row(1, S + 4, -0.02), _row(2, S + 8 * 3600 + 4, -0.02, desc="Funding Event ETHF0:USTF0 (0.0001) on wallet margin")]
-    out = lfl.verify(S + 10, S + 3600, ledger_rows=rows)   # S is before the real entry fill: another position's
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=rows, position=NC_POS)   # S is before the real entry fill: another position's
     assert out["funding_status"] == "NO_CROSSING" and out["funding_usd_raw"] == 0.0
 
 
@@ -162,9 +165,11 @@ def test_F4_any_non_fill_exit_source_is_unverified_with_no_near_window():
 
 def test_position_match_is_unique_or_none():
     r = ["tBTCF0:USTF0", "CLOSED", 0, 100.0, 0, 0, None, None, None, None, None, 5, int((S - 60) * 1000), int((S + 60) * 1000)]
-    assert lfl.match_position([r], S - 60, S + 60) == (5, S - 60, S + 60, 0.0)
-    assert lfl.match_position([r, list(r[:11]) + [6] + r[12:]], S - 60, S + 60) is None
-    assert lfl.match_position([r], S - 600, S + 60) is None
+    assert lfl.match_position([r], S - 60, S + 60, position_id=5) == (5, S - 60, S + 60, 0.0)
+    assert lfl.match_position([r, list(r[:11]) + [5] + r[12:]], S - 60, S + 60, position_id=5) is None
+    assert lfl.match_position([r], S - 600, S + 60, position_id=5) is None
+    assert lfl.match_position([r], S - 60, S + 60) is None              # RK 04:12: window-only matching is a violation
+    assert lfl.match_position([r], S - 60, S + 60, position_id=6) is None
 
 
 PERMS_RO = [["account", 1, 0], ["history", 1, 0], ["orders", 1, 0], ["positions", 1, 0], ["funding", 1, 0],
@@ -172,7 +177,7 @@ PERMS_RO = [["account", 1, 0], ["history", 1, 0], ["orders", 1, 0], ["positions"
 _PROW = ["tBTCF0:USTF0", "CLOSED", 0, 100.0, -0.025, 0, None, None, None, None, None, 5, int((S - 60) * 1000),
          int((S + 60) * 1000)]
 CHAIN = {"correlation_id": "c1", "fill_price": 100.0, "fill_qty": 2.5, "fill_at_ts": S - 60,
-         "exit_fill_record_at_ts": S + 60, "closed": True}
+         "exit_fill_record_at_ts": S + 60, "closed": True, "bitfinex_position_id": 5}
 
 
 def _fake(perms=PERMS_RO, sent=None, prow=_PROW):
@@ -470,7 +475,7 @@ def test_A_position_id_still_window_checked_and_notional_mandatory():
 
 
 def test_D_paper_rows_reject_the_live_ledger_source():
-    live = lfl.verify(S + 10, S + 3600, ledger_rows=[], read_at_ts=S + 4000)
+    live = lfl.verify(S + 10, S + 3600, ledger_rows=[], read_at_ts=S + 4000, position=NC_POS)
     assert live["funding_model"] == "LIVE_LEDGER_V1" and rx.funding_failure(live, live=True) is None
     assert rx.funding_failure(live) == "FUNDING_UNVERIFIED"                                # same dict as a PAPER row
     paper = dict(live, funding_model="SETTLEMENT_EXACT_V2")
@@ -511,7 +516,8 @@ def test_build_wires_the_readback_and_a_raising_reader_fails_closed():
     twin = {"side": "LONG", "entry_price": 100.0, "exit_price": 100.4, "funding_usd_raw": 0.0}
     seen = []
     ok = lv.build([chain], {"c1": twin}, funding_readback_for=lambda ch, paper: (
-        seen.append(paper), lfl.verify(S + 10, S + 60, ledger_rows=[], paper_funding_usd=paper))[1])
+        seen.append(paper), lfl.verify(S + 10, S + 60, ledger_rows=[], paper_funding_usd=paper,
+                                       position=(5, S + 10, S + 60, 0.0)))[1])
     assert seen == [0.0] and ok["rows"][0]["funding_usd_live"] == 0.0
     assert not any("FUNDING" in x for x in ok["rows"][0]["non_countable_reasons"] or [])
     bad = lv.build([chain], {"c1": twin}, funding_readback_for=lambda ch, paper: 1 / 0)
@@ -945,3 +951,57 @@ def test_F1_pin_state_lives_outside_reset_paths(monkeypatch, tmp_path):
     assert lfl.sign_pin_path() == str(tmp_path / "live_funding_sign_pin.json")
     (tmp_path / "live_funding_sign_pin.json").write_text("{not json")
     assert lfl.load_sign_pin()["status"] == "UNREADABLE" and lfl.position_funding_sign(lfl.load_sign_pin()) is None
+
+
+# ---- HM R4 N1/N2/N3 + RK 04:12: pid REQUIRED, positions page 50 with PAGE_FULL, ledger BALANCE stamped -------------
+def test_N2_chain_without_pid_is_unverified_and_never_read_even_with_no_crossing():
+    sent = []
+    job = _job(post=_fake(sent=sent))
+    for ch in ({k: v for k, v in CHAIN.items() if k != "bitfinex_position_id"},
+               dict({k: v for k, v in CHAIN.items() if k != "bitfinex_position_id"}, fill_at_ts=S + 10,
+                    exit_fill_record_at_ts=S + 3600),                        # no crossing: still unverified
+               dict(CHAIN, bitfinex_position_id="")):
+        out = _read(job, ch)
+        assert out["funding_status"] == "UNVERIFIED_POSITION_ID_MISSING" and out["funding_verified"] is False
+        assert out["funding_position_id_source"] == "MISSING" and out["funding_position_id"] is None
+        assert lv.live_funding_failure(ch, out) == "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_POSITION_ID_MISSING"
+    assert [p for p, _ in sent if p != lfl.PERMISSIONS_PATH] == []
+    with pytest.raises(lfl.ReadError, match="POSITION_ID_MISSING"):
+        lfl.resolve_position_id(S - 60, S + 60, creds=("k", "s", "x"), post=_fake(), position_id=None)
+
+
+def test_N2_no_resolved_position_is_never_verified_and_the_source_is_stamped():
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=None)       # no crossing, window-only would have passed
+    assert out["funding_status"] == "UNVERIFIED_POSITION_UNRESOLVED" and out["funding_verified"] is False
+    assert out["funding_position_id_source"] is None
+    out = lfl.verify(S + 10, S + 3600, ledger_rows=[], position=NC_POS)
+    assert out["funding_verified"] is True and out["funding_position_id_source"] == "chain.bitfinex_position_id"
+    sent = []
+    out = _read(_job(post=_fake(sent=sent)), dict(CHAIN, bitfinex_position_id=6))   # the id's position is not there
+    assert out["funding_status"] == "UNVERIFIED_POSITION_UNRESOLVED" and out["funding_verified"] is False
+
+
+def test_N1_positions_page_is_50_and_a_full_page_is_unverified():
+    sent = []
+    full = [list(_PROW[:11]) + [100 + i] + _PROW[12:] for i in range(lfl.POSITIONS_LIMIT)]
+    base = _fake(sent=sent)
+
+    def post(path, body, creds):
+        if path == lfl.POSITIONS_PATH:
+            sent.append((path, body))
+            return full
+        return base(path, body, creds)
+    out = _read(_job(post=post), CHAIN)
+    assert lfl.POSITIONS_LIMIT == 50 and [b["limit"] for p, b in sent if p == lfl.POSITIONS_PATH] == [50]
+    assert out["funding_status"] == "UNVERIFIED_POSITION_UNRESOLVED" and out["funding_verified"] is False
+    assert out["funding_readback_error"] == "POSITIONS_PAGE_FULL"
+    assert lv.live_funding_failure(CHAIN, out) == "LIVE_FUNDING_UNVERIFIED:UNVERIFIED_POSITION_UNRESOLVED"
+
+
+def test_N3_ledger_balance_is_stamped_per_entry():
+    rows = [[1, "USTF0", "margin", int((S + 4) * 1000), None, -0.025, 1234.5678, None,
+             "Funding Event BTCF0:USTF0 (0.00010000) on wallet margin"]]
+    out = lfl.verify(S - 60, S + 60, ledger_rows=rows, position=POS, live_notional_usd=250.0, sign_pin=ACTIVE)
+    assert out["funding_ledger_balances"] == [1234.5678]
+    assert out["funding_usd_by_settlement"][0]["ledger_balance"] == 1234.5678
+    assert out["funding_usd_by_settlement"][0]["ledger_amount"] == -0.025

@@ -61,6 +61,11 @@ TIE_TOL_S = 120.0            # ledger MTS vs settlement instant (observed +3..+5
 POSITION_TOL_S = 10.0        # positions/hist create/update vs the real entry/exit fill ts
 EXIT_FILL_SOURCE = "exit_fill_record_at_ts"   # HM R4 F4: the ONLY countable exit ts source (no near-settlement window)
 LEDGER_LIMIT = 500
+POSITIONS_LIMIT = 50         # HM R4 N1: positions/hist page; a FULL page is an incomplete read -> POSITIONS_PAGE_FULL
+# HM R4 N2 + RK 04:12: the chain's bitfinex_position_id is REQUIRED. A chain without it is UNVERIFIED_POSITION_ID_MISSING
+# (no-crossing rows included) and is never read; positions/hist is matched by that id AND the fill window - window-only
+# matching is a violation. funding_position_id_source stamps where the id came from.
+POSITION_ID_SOURCE = "chain.bitfinex_position_id"
 # RK zero-rate ruling (24 Oct): a crossed settlement with NO ledger entry counts as 0 only when the rate of that EXACT
 # settlement, read back from the public derivatives status history, is exactly 0 as returned AND (RK amendment 04:07)
 # positions/hist FUNDING for the pid equals the sum of the tied ledger entries within ZERO_POSITION_FUNDING_TOL.
@@ -492,13 +497,17 @@ def read_funding_ledger(start_ts: float, end_ts: float, creds=None, post=_post) 
 
 
 def resolve_position_id(entry_fill_ts: float, exit_fill_ts: float, creds=None, post=_post, position_id=None):
-    """The ONE Bitfinex position (positions/hist, SYMBOL) whose life matches the real fills; None if not unique.
-    With the chain's ``bitfinex_position_id`` that id is required AND its window is still checked (HM A)."""
+    """The ONE Bitfinex position (positions/hist, SYMBOL) with the chain's ``bitfinex_position_id`` whose life matches the
+    real fills; None if not unique. The id is REQUIRED (RK 04:12) AND its window is still checked (HM A)."""
     creds = creds or read_credentials()
     if not creds:
         raise ReadError("READ_KEY_MISSING")
+    if position_id in (None, ""):
+        raise ReadError("POSITION_ID_MISSING")   # RK 04:12: never a window-only match
     rows = post(POSITIONS_PATH, {"start": int((entry_fill_ts - 3600) * 1000), "end": int((exit_fill_ts + 3600) * 1000),
-                                 "limit": 100}, creds)
+                                 "limit": POSITIONS_LIMIT}, creds)
+    if isinstance(rows, list) and len(rows) >= POSITIONS_LIMIT:
+        raise ReadError("POSITIONS_PAGE_FULL")   # HM R4 N1: an incomplete positions page is a failed read
     return match_position(rows, entry_fill_ts, exit_fill_ts, position_id=position_id)
 
 
@@ -506,13 +515,15 @@ def match_position(rows, entry_fill_ts, exit_fill_ts, position_id=None):
     """Pure: (position_id, create_ts, update_ts, position_funding) of the unique SYMBOL position created at the entry fill and last
     updated at the exit fill (+/- POSITION_TOL_S); None when zero or several match. HM (A): a known
     ``position_id`` (the chain's bitfinex_position_id) narrows the candidates to that id but NEVER skips the window
-    check against the row's real fills - an id whose life does not match the fills is unresolved (None)."""
+    check against the row's real fills - an id whose life does not match the fills is unresolved (None). No id -> None."""
     hits = []
     want = None if position_id in (None, "") else str(position_id)
+    if want is None:      # HM R4 N2 / RK 04:12: window-only matching is a violation
+        return None
     for r in rows or []:
         if not isinstance(r, list) or len(r) < 14 or r[0] != SYMBOL:
             continue
-        if want is not None and str(r[11]) != want:
+        if str(r[11]) != want:
             continue
         c, u = _f(r[12]), _f(r[13])
         if c is None or u is None:
@@ -532,6 +543,7 @@ def _parse_row(r):
     desc = str(r[8] or "")
     m = _FUNDING_DESC.match(desc)
     return {"id": r[0], "currency": r[1], "wallet": r[2], "ts": mts / 1000.0, "amount": amt, "desc": desc,
+            "balance": _f(r[LEDGER_BALANCE_IDX]),   # HM R4 N3: BALANCE [6] after this entry, stamped raw
             "symbol": m.group(1) if m else None, "rate": _f(m.group(2)) if m else None,
             "fee_like": bool(_FEE_DESC.search(desc)) or not m}
 
@@ -543,7 +555,7 @@ def _grid(ts: float) -> float:
 
 def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, read_at_ts=None, position=None,
            paper_funding_usd=None, exit_ts_source="exit_fill_record_at_ts", live_notional_usd=None, key_gate=None,
-           settlement_rates=None, sign_pin=None, sign_pin_check=None) -> dict:
+           settlement_rates=None, sign_pin=None, sign_pin_check=None, position_id_missing=False) -> dict:
     """Pure decision for one live row. ``position`` = (position_id, create_ts, update_ts[, position_funding]) or None.
     ``settlement_rates`` = {settlement ts: read_settlement_rate(...) + read_at_ts} for the no-entry settlements.
     ``sign_pin`` = the persisted pin state (only an RK+HM-confirmed ACTIVE pin sets POSITION_FUNDING_SIGN);
@@ -552,7 +564,9 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
     crossed = tile_fill.settlements_crossed(a, b) if a is not None and b is not None else []
     out = {"funding_model": LIVE_FUNDING_MODEL, "funding_status": None, "funding_verified": False,
            "funding_usd_raw": None, "funding_ts_crossed": crossed, "funding_ledger_ids": [], "funding_ledger_mts": [],
-           "funding_ledger_amounts": [], "funding_usd_by_settlement": [], "funding_settlement_status": [],
+           "funding_ledger_amounts": [], "funding_ledger_balances": [], "funding_usd_by_settlement": [],
+           "funding_settlement_status": [],
+           "funding_position_id_source": ("MISSING" if position_id_missing else POSITION_ID_SOURCE if position else None),
            "funding_position_id": position[0] if position else None, "funding_readback_at_ts": read_at_ts,
            "funding_readback_endpoint": f"{LEDGER_PATH} category={LEDGER_CATEGORY_FUNDING}",
            "funding_readback_error": read_error, "funding_fee_anomaly": False, "funding_fee_anomaly_ledger_ids": [],
@@ -579,6 +593,13 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
         return out
     if out["funding_ts_fallbacks"]:
         out["funding_status"] = "UNVERIFIED_EXIT_TS_FALLBACK"
+        return out
+    if position_id_missing:   # RK 04:12 / HM R4 N2: no chain pid -> never verified, no-crossing rows included
+        out["funding_status"] = "UNVERIFIED_POSITION_ID_MISSING"
+        out["funding_position_id_source"] = "MISSING"
+        return out
+    if read_error is not None and str(read_error).startswith("POSITION"):
+        out["funding_status"] = "UNVERIFIED_POSITION_UNRESOLVED"     # positions/hist read failed (e.g. PAGE_FULL)
         return out
     if read_error is not None or ledger_rows is None:
         out["funding_status"] = "UNVERIFIED_LEDGER_READ_FAILED"
@@ -628,14 +649,16 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
             continue
         used.append(p)
         statuses.append("LEDGER")
-        per.append({"settlement_ts": t, "ledger_id": p["id"], "ledger_mts": p["ts"], "funding_usd": round(-p["amount"], 10)})
+        per.append({"settlement_ts": t, "ledger_id": p["id"], "ledger_mts": p["ts"], "funding_usd": round(-p["amount"], 10),
+                    "ledger_amount": p["amount"], "ledger_balance": p.get("balance")})
     # an entry for this symbol inside the hold that sits on no settlement instant cannot be tied (RK 3);
     # entries of settlements outside (entry, exit] belong to another position and are ignored
     stray = [p for p in ev if a < p["ts"] <= b and abs(p["ts"] - _grid(p["ts"])) > TIE_TOL_S]
     if stray:
         problems.append("UNVERIFIED_ENTRY_UNTIED")
     out.update(funding_ledger_ids=[p["id"] for p in used], funding_ledger_mts=[p["ts"] for p in used],
-               funding_ledger_amounts=[p["amount"] for p in used], funding_usd_by_settlement=per,
+               funding_ledger_amounts=[p["amount"] for p in used],
+               funding_ledger_balances=[p.get("balance") for p in used], funding_usd_by_settlement=per,
                funding_settlement_status=statuses, funding_settlement_rate_readbacks=rate_proof)
     led = sum(p["amount"] for p in used)
     zero_idx = [i for i, st in enumerate(statuses) if st == "ZERO_RATE"]
@@ -661,6 +684,8 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
             problems.append("UNVERIFIED_ZERO_RATE_POSITION_CHECK")
         else:
             problems.append("UNVERIFIED_LEDGER_POSITION_MISMATCH")
+    if not problems and position is None:   # RK 04:12: no resolved pid -> never verified (no-crossing rows included)
+        problems.append("UNVERIFIED_POSITION_UNRESOLVED")
     if problems:
         out["funding_status"] = problems[0]
         return out
@@ -763,9 +788,10 @@ class FundingReadbackJob:
             return None
         a, b, src, notional, pid, key = _row_inputs(chain)
         kw = dict(paper_funding_usd=paper_funding_usd, exit_ts_source=src, live_notional_usd=notional)
-        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE:
-            # HM (E) / R4 F4: missing fill ts or a non-fill exit stamp -> flagged, non-countable, never read (no budget)
-            return verify(a, b, read_error="NO_READ", key_gate=self._gate, **kw)
+        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE or pid is None:
+            # HM (E) / R4 F4 / R4 N2: missing fill ts, a non-fill exit stamp or no chain pid -> flagged, non-countable,
+            # never read (no budget)
+            return verify(a, b, read_error="NO_READ", key_gate=self._gate, position_id_missing=pid is None, **kw)
         now = self._clock()
         with self._lock:
             gate, hit = self._gate, self._cache.get(key)
@@ -807,7 +833,7 @@ class FundingReadbackJob:
         if not _closed(chain):
             return
         a, b, src, notional, pid, key = _row_inputs(chain)
-        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE:
+        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE or pid is None:
             return
         with self._lock:
             hit = self._cache.get(key)

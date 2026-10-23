@@ -82,7 +82,9 @@ LIVE_FUNDING_CONTRACT = {
                       "settlement per the RK zero-rate ruling) | NO_CROSSING (no "
                       "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
-                      "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
+                      "UNVERIFIED_POSITION_ID_MISSING (HM R4 N2 / RK 04:12: the chain has no bitfinex_position_id - no-crossing rows "
+                      "included; never read) | UNVERIFIED_POSITION_UNRESOLVED (no unique positions/hist row with that id at the "
+                      "fills, or the positions read failed incl. POSITIONS_PAGE_FULL) | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
                       "UNVERIFIED_EXIT_TS_FALLBACK (HM R4 F4: exit ts source is not exit_fill_record_at_ts; never read) | "
                       "UNVERIFIED_LEDGER_POSITION_MISMATCH (SIGNED: |pf - POSITION_FUNDING_SIGN * ledger sum| > 1e-8) | "
                       "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN (RK 04:09 + HM R4 F1: a non-zero tied entry while "
@@ -101,7 +103,8 @@ LIVE_FUNDING_CONTRACT = {
     "funding_ledger_ids": "Bitfinex ledger ids used (RK 4)",
     "funding_ledger_mts": "their MTS (epoch s)",
     "funding_ledger_amounts": "their raw amounts (received-positive, as Bitfinex books them)",
-    "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd}]",
+    "funding_ledger_balances": "HM R4 N3: the ledger BALANCE [6] after each used entry, raw (same order as the ids)",
+    "funding_usd_by_settlement": "[{settlement_ts, ledger_id, ledger_mts, funding_usd, ledger_amount, ledger_balance}]",
     "funding_settlement_status": "per crossed settlement: LEDGER | UNTIED | AMBIGUOUS | ZERO_RATE (no entry, counted 0) | "
                                  "RATE_READ_FAILED | RATE_MISSING | RATE_NONZERO | ZERO_RATE_POSITION_CHECK",
     "funding_settlement_rate_readbacks": "RK zero-rate ruling (24 Oct): per crossed settlement with NO ledger entry "
@@ -116,14 +119,17 @@ LIVE_FUNDING_CONTRACT = {
                                          "an exact-0 rate read - an entry present means no rate read is used; read in "
                                          "the background job under the "
                                          "same 12/min budget, never in a GET. Else LIVE_FUNDING_UNVERIFIED",
-    "funding_position_id": "the Bitfinex position id (positions/hist, unique match to the fills) or null",
+    "funding_position_id": "REQUIRED for a verified row (RK 04:12): the chain's bitfinex_position_id, confirmed by a unique "
+                           "positions/hist row with that id whose create/update match the fills (+/-10 s; page limit 50, a "
+                           "full page fails POSITIONS_PAGE_FULL); window-only matching is a violation; else null",
+    "funding_position_id_source": "chain.bitfinex_position_id when resolved | MISSING when the chain has no pid | null",
     "funding_readback_at_ts": "epoch s of the background job's ledger read (RK 4), cached per row; null until read",
     "funding_readback_endpoint": "v2/auth/r/ledgers/hist category=29 (BFX_FUNDING_READ_KEY). HM B/C: every ledger / "
                                  "positions / permissions read runs in ONE background owner thread (live_funding_ledger."
                                  "FundingReadbackJob) under the global 12 req/min budget with 429 backoff; GETs only read "
                                  "the per-row cache and never touch the network",
     "funding_readback_error": "redacted code (PENDING_READBACK / NO_READ / KEY_GATE:<gate> / HTTP_<n> incl. HTTP_429 / "
-                              "TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL) or null; never a key, signature or body",
+                              "TRANSPORT_<cls> / API_ERROR / LEDGER_PAGE_FULL / POSITIONS_PAGE_FULL) or null; never a key, signature or body",
     "funding_key_gate": "OK, else READ_KEY_MISSING | READ_KEY_NOT_SEPARATE | KEY_HAS_WRITE:<scopes> | "
                         "KEY_PERMISSIONS_READ_FAILED:<code> (RK 03:38: BFX_FUNDING_READ_KEY/SECRET, a separate Fly-only "
                         "key, permission read-back with NO write right; any refusal -> every row UNVERIFIED)",
