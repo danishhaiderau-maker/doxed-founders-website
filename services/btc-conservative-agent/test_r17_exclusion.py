@@ -28,7 +28,7 @@ def _epoch():
     paper_fill.FRESH_EPOCH_TS = old
 
 
-PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "exit_priced_delay_source": "lane_max_n12",
+PROOF = {"trigger_price_source": "book", "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n24", "exit_priced_delay_source": "POOLED_LIVE_ACK_CROSS_LANE:EXIT_RO_MKT_max_n12",
          "entry_walk_bp": 0.4, "exit_walk_bp": 0.6, "exit_legs_unmeasured": 0, "evidence_status": "COMPLETE",
          "entry_book_age_ms": 210, "exit_price_age_s": 0.33, "exit_evidence_status": "COMPLETE",
          "exit_unverified_reason": None, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK",
@@ -82,6 +82,10 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     ("delay_source", None, "DELAY_SOURCE_MISSING"),
     ("delay_source", "default_until_n10", "DELAY_NOT_MEASURED"),
     ("delay_source", "lane_max_n9", "DELAY_NOT_MEASURED"),
+    ("delay_source", "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_max_n9", "DELAY_NOT_MEASURED"),
+    ("delay_source", "lane_max_n12", "DELAY_NOT_MEASURED"),  # HM #842 R3 nit: old per-lane label never counts
+    ("delay_source", "lane_q90_n25", "DELAY_NOT_MEASURED"),
+    ("exit_priced_delay_source", "lane_q90_n25", "EXIT_DELAY_NOT_MEASURED"),
     ("exit_priced_delay_source", None, "EXIT_DELAY_NOT_MEASURED"),
     ("exit_priced_delay_source", "default_until_n10", "EXIT_DELAY_NOT_MEASURED"),
     ("entry_walk_bp", None, "ENTRY_NOT_BOOK_WALKED"),
@@ -178,7 +182,7 @@ def test_841_shaped_closed_row_with_contract_fields_counts():
            "exit_status": "PAPER_FILL", "fill_model": paper_fill.FILL_MODEL, "fill_model_version": 1,
            "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True, "all_legs_book10l": True,
            # _entry_pricing_fields
-           "delay_s": 1.9, "delay_source": "lane_q90_n31", "priced_delay_s": 1.9, "priced_delay_model": "PAPER_MEASURED",
+           "delay_s": 1.9, "delay_source": "POOLED_LIVE_ACK_CROSS_LANE:ENTRY_MKT_GTC_q90_n31", "priced_delay_s": 1.9, "priced_delay_model": "PAPER_MEASURED",
            "evidence_status": "COMPLETE",
            # _slippage_row_fields
            "book_slippage_usd_entry": 0.001, "entry_walk_bp": 0.3, "book_slippage_usd_exit": 0.002, "exit_walk_bp": 0.5,

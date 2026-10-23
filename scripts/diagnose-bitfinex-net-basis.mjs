@@ -200,15 +200,32 @@ function parsePosition(rows) {
   };
 }
 
+// Bitfinex ledgers/hist layout (HM #842): [0 ID, 1 CURRENCY, 2 WALLET, 3 MTS, 4 null, 5 AMOUNT, 6 BALANCE,
+// 7 null, 8 DESCRIPTION]. A null/non-finite AMOUNT or non-string DESCRIPTION is unverified (dropped and counted),
+// never read as 0.
+let unverifiedLedgerRows = 0;
 function parseLedgerRow(row) {
-  if (!Array.isArray(row) || row.length < 8) return null;
+  const amount = Array.isArray(row) && row[5] != null && row[5] !== '' ? Number(row[5]) : NaN;
+  const mts = Array.isArray(row) ? Number(row[3]) : NaN;
+  if (
+    !Array.isArray(row) ||
+    row.length < 9 ||
+    !Number.isFinite(amount) ||
+    typeof row[8] !== 'string' ||
+    !Number.isFinite(mts) ||
+    mts <= 0
+  ) {
+    unverifiedLedgerRows += 1;
+    return null;
+  }
+  const balance = row[6] != null && row[6] !== '' ? Number(row[6]) : NaN;
   return {
     ledgerId: String(row[0] ?? ''),
     currency: String(row[1] ?? ''),
-    at: new Date(Number(row[3] ?? 0)).toISOString(),
-    amountUsd: Number(row[4] ?? 0),
-    balanceUsd: Number(row[5] ?? 0),
-    description: String(row[7] ?? ''),
+    at: new Date(mts).toISOString(),
+    amountUsd: amount,
+    balanceUsd: Number.isFinite(balance) ? balance : null,
+    description: row[8],
   };
 }
 
@@ -319,16 +336,16 @@ async function main() {
     .filter(Boolean)
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   const basis = reconstructBasis(trades);
-  const closeLedger = (Array.isArray(ledgerRows) ? ledgerRows : [])
-    .map(parseLedgerRow)
+  const parsedLedger = (Array.isArray(ledgerRows) ? ledgerRows : []).map(parseLedgerRow);
+  const ledgerVerified = Array.isArray(ledgerRows) && unverifiedLedgerRows === 0;
+  const closeLedger = parsedLedger
     .filter(
       (row) =>
         row &&
         /position/i.test(row.description) &&
         !/fee|funding|transfer|commission/i.test(row.description),
     );
-  const feeLedger = (Array.isArray(ledgerRows) ? ledgerRows : [])
-    .map(parseLedgerRow)
+  const feeLedger = parsedLedger
     .filter(
       (row) =>
         row &&
@@ -360,23 +377,22 @@ async function main() {
     exchangeOrderHistoryCount: Array.isArray(orderRows) ? orderRows.length : 0,
     pnlComparison: {
       participantRealizedUsd: Number(participantRealizedUsd.toFixed(4)),
-      exchangePositionCloseLedgerUsd: Number(exchangeRealizedUsd.toFixed(4)),
-      exchangeFeesUsd: Number(exchangeFeesUsd.toFixed(4)),
+      // Unverified ledger (malformed row / failed read): exchange-ledger sums are null, never 0.
+      ledgerVerified,
+      unverifiedLedgerRows,
+      exchangePositionCloseLedgerUsd: ledgerVerified ? Number(exchangeRealizedUsd.toFixed(4)) : null,
+      // R7: fees are a separate metric, never subtracted from P&L below.
+      exchangeFeesUsd: ledgerVerified ? Number(exchangeFeesUsd.toFixed(4)) : null,
       exchangeUnrealizedUsd: Number((currentPosition?.unrealizedPnlUsd ?? 0).toFixed(4)),
       participantBasedSessionPnlUsd: Number(
         (
           participantRealizedUsd +
-          (currentPosition?.unrealizedPnlUsd ?? 0) -
-          exchangeFeesUsd
+          (currentPosition?.unrealizedPnlUsd ?? 0)
         ).toFixed(4),
       ),
-      exchangeBasedSessionPnlUsd: Number(
-        (
-          exchangeRealizedUsd +
-          (currentPosition?.unrealizedPnlUsd ?? 0) -
-          exchangeFeesUsd
-        ).toFixed(4),
-      ),
+      exchangeBasedSessionPnlUsd: ledgerVerified
+        ? Number((exchangeRealizedUsd + (currentPosition?.unrealizedPnlUsd ?? 0)).toFixed(4))
+        : null,
     },
     reconstructedBasis: {
       positionBtc: basis.positionBtc,

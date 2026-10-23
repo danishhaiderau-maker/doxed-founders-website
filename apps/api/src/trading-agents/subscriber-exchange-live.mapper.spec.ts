@@ -301,10 +301,8 @@ test('session P&L uses one exchange accounting basis without virtual-lot double 
     calculateBitfinexSessionPnl({
       realizedPnlUsd: -3.91,
       unrealizedPnlUsd: -0.47,
-      tradingFeesUsd: 0.2,
-      fundingFeesUsd: 0.01,
     }),
-    -4.59,
+    -4.38, // R7: fees are metrics, never subtracted from P&L
   );
 });
 

@@ -162,7 +162,9 @@ export function liveLegStamps(
     }, 'exit_resident'];
   }
   const exit: LiveLegStamps = {
-    exit_signal_at_ts: secOf(exitPl.exit_trigger_ts ?? exitPl.exit_signal_at),
+    // HM #842 R3 nit: only the measured, window-bounded exit_trigger_ts counts. The old exit_signal_at fallback was
+    // produced by nothing; a row carrying only it stays LIVE_LEG_MISSING:exit.signal (non-countable, R17).
+    exit_signal_at_ts: secOf(exitPl.exit_trigger_ts),
     fly_send_started_at_ts: secOf(exitPl.fly_send_started_at),
     railway_received_at_ts: secOf(exitPl.platform_received_at),
     exit_ack_at_ts: secOf(exitPl.close_exchange_ack_at),

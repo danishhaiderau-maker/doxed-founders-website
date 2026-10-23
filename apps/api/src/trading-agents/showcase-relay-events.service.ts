@@ -962,6 +962,9 @@ export class ShowcaseRelayEventsService {
           ...signedCloseExitStamps({
             showcase_exit_trigger_ts: body.exit_trigger_ts,
             fly_send_started_at: persistBody.fly_send_started_at,
+          }, {
+            sourceEventAtMs: Date.parse(body.ts),
+            platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
           }),
         }
       : undefined;

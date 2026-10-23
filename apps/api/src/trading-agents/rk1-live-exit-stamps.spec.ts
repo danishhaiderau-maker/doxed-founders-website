@@ -54,9 +54,9 @@ test('RK1: POSITION_CLOSED context carries exit_trigger_ts, order class and the 
   assert.equal(env.context.showcase_exit_trigger_ts, 99.9);
   assert.equal(env.context.showcase_exit_order_class, 'BOT_SENT');
   assert.equal(env.context.fly_send_started_at, iso(100.01));
-  assert.deepEqual(signedCloseExitStamps(env.context), { exitTriggerAtMs: 99_900, flySendStartedAtMs: 100_010 });
+  assert.deepEqual(signedCloseExitStamps(env.context, { sourceEventAtMs: 100_000, platformReceivedAtMs: 100_300 }), { exitTriggerAtMs: 99_900, flySendStartedAtMs: 100_010 });
   // unmeasured -> null, never invented
-  assert.deepEqual(signedCloseExitStamps({}), { exitTriggerAtMs: null, flySendStartedAtMs: null });
+  assert.deepEqual(signedCloseExitStamps({}, { sourceEventAtMs: 100_000, platformReceivedAtMs: 100_300 }), { exitTriggerAtMs: null, flySendStartedAtMs: null });
   const nowMs = 100_500;
   const ctxEnv = { action: 'ENTER', trade_id: 'cont-1', context: { ...env.context, signed_showcase_event: true, showcase_event_id: 'e1', showcase_event_seq: 3 } };
   const close = readSignedShowcaseClose(ctxEnv, 'cont-1', nowMs);
