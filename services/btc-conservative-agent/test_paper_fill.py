@@ -67,7 +67,7 @@ def test_delay_floor_and_sampler():
     assert s.delay("L")[1] == "default_until_n10"
     for _ in range(10):
         s.add("L", "entry", 0.8)
-    assert s.delay("L") == (0.8, "lane_p50_n10")
+    assert s.delay("L") == (0.8, "lane_max_n10")  # MAX until n>=20, then q0.90
 
 
 BANNED = ("market_microstructure_1s", "book_tape_1s")

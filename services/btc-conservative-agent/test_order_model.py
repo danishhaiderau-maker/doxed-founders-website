@@ -44,7 +44,8 @@ def test_resident_exit_fill_has_no_delay(monkeypatch):
     monkeypatch.setattr(paper_fill, "book10l_at", lambda t: books.get(int(t) - 1))
     res = tile_fill.exit_resident_fill("LONG", 1.0, 101.0)
     assert res["delay_s"] == 0.0 and res["fill_ts"] == 101.0 and res["delay_source"] == "EXCHANGE_RESIDENT_NO_DELAY"
-    assert res["price"] == 99.0 and res["leg"] == "exit_resident"
+    # HM M2 / RK 17:24: the row containing the trigger (s=101, ready 102), never the pre-trigger row s=100
+    assert res["price"] == 90.0 and res["leg"] == "exit_resident" and res["book_s"] == 101 and res["price_age_s"] == 1.0
     bot = tile_fill.exit_fill("LONG", 1.0, 101.0, 1.0, "LIVE_POOLED")
     assert bot["delay_s"] == 1.0 and bot["fill_ts"] == 102.0 and bot["price"] == 90.0
 

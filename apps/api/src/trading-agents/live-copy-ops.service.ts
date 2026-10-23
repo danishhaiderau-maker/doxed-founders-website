@@ -1,6 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { timingSafeEqual } from 'node:crypto';
-import { bitfinexAuthPost } from '../exchanges/bitfinex-api.client';
+import {
+  BITFINEX_BTC_PERP_SYMBOL,
+  bitfinexAuthPost,
+  parseActiveOrdersPayload,
+  parseOpenPositionPayload,
+} from '../exchanges/bitfinex-api.client';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { liveCopyAccountArmed } from './live-copy-approval';
@@ -162,6 +167,7 @@ export class LiveCopyOpsService {
         : null;
       if (!wallet) blockers.push('BALANCE_UNAVAILABLE');
       else if (wallet.derivativesUsd < LIVE_COPY_MIN_DERIVATIVES_USD) blockers.push('DERIVATIVES_BALANCE_BELOW_MIN');
+      checks.exchange = await readLiveExchangeExposure(creds);
     }
     return {
       schema: 'website_live_copy_account_check_v1',
@@ -259,4 +265,43 @@ export function liveCopyPauseState(input: {
     paused: false, pause_owner: null, pause_reason: null, paused_at: null, pause_source: null,
     executor_last_pass_exit_stage: stage,
   };
+}
+
+
+/**
+ * HM R8-live: the account's exchange net position and open-order count on
+ * tBTCF0:USTF0, read LIVE from Bitfinex on every call (never cached) through
+ * the read-only `/v2/auth/r/` endpoints. Returns numbers only, never key material.
+ */
+export async function readLiveExchangeExposure(
+  creds: Parameters<typeof bitfinexAuthPost>[0],
+  post: typeof bitfinexAuthPost = bitfinexAuthPost,
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {
+    symbol: BITFINEX_BTC_PERP_SYMBOL,
+    source: 'BITFINEX_LIVE_READ',
+    cached: false,
+    read_at: new Date().toISOString(),
+  };
+  try {
+    const pos = parseOpenPositionPayload(await post<unknown[][]>(creds, 'v2/auth/r/positions'), BITFINEX_BTC_PERP_SYMBOL);
+    out.net_position_btc = pos ? pos.amount : 0;
+    out.position_base_price = pos ? pos.basePrice : null;
+    out.position_error = null;
+  } catch (err) {
+    out.net_position_btc = null;
+    out.position_error = err instanceof Error ? err.message.slice(0, 120) : 'POSITIONS_READ_FAILED';
+  }
+  try {
+    const orders = parseActiveOrdersPayload(
+      await post<unknown[][]>(creds, 'v2/auth/r/orders', { sym: BITFINEX_BTC_PERP_SYMBOL }),
+      BITFINEX_BTC_PERP_SYMBOL,
+    );
+    out.open_order_count = orders.length;
+    out.orders_error = null;
+  } catch (err) {
+    out.open_order_count = null;
+    out.orders_error = err instanceof Error ? err.message.slice(0, 120) : 'ORDERS_READ_FAILED';
+  }
+  return out;
 }
