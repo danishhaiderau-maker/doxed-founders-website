@@ -120,7 +120,9 @@ def _num(v):
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return f if f == f else None  # NaN (CSV/pandas blank) is missing
+    import math
+    # NaN (CSV/pandas blank), +-inf and negatives are not proof: every contract number is a finite age/size >= 0
+    return f if math.isfinite(f) and f >= 0 else None
 
 
 def _missing(v) -> bool:
@@ -144,6 +146,11 @@ def _no_unfired_cross(v) -> bool:
     return isinstance(v, str) and v.strip() in ("[]", "false", "False")
 
 
+def _exact(v) -> str:
+    """Exact contract compare: strip surrounding spaces only, never case-fold ("BOOK", "complete" fail)."""
+    return v.strip() if isinstance(v, str) else ""
+
+
 def _nonneg(v) -> bool:
     n = _num(v)
     return n is not None and n >= 0
@@ -153,7 +160,7 @@ def proof_failures(row) -> list:
     """Every failed countability check against the r17_fields contract (empty list = the row proves book realism)."""
     out = []
     tps = row.get("trigger_price_source")
-    if str(tps or "").strip().lower() not in F.TRIGGER_PRICE_SOURCE_OK:
+    if _exact(tps) not in F.TRIGGER_PRICE_SOURCE_OK:
         out.append("TRIGGER_SOURCE_MISSING" if _missing(tps) else "TRIGGER_NOT_BOOK")
     if not _delay_measured(row.get("delay_source")):
         out.append("DELAY_SOURCE_MISSING" if _missing(row.get("delay_source")) else "DELAY_NOT_MEASURED")
@@ -162,7 +169,7 @@ def proof_failures(row) -> list:
         out.append("EXIT_DELAY_NOT_MEASURED")
     if _num(row.get("entry_walk_bp")) is None:
         out.append("ENTRY_NOT_BOOK_WALKED")
-    if str(row.get("evidence_status") or "").strip().upper() not in F.EVIDENCE_OK:
+    if _exact(row.get("evidence_status")) not in F.EVIDENCE_OK:
         out.append("ENTRY_EVIDENCE_NOT_COMPLETE")
     if not _nonneg(row.get("entry_book_age_ms")):
         out.append("ENTRY_PRICE_AGE_MISSING")
@@ -170,15 +177,15 @@ def proof_failures(row) -> list:
         out.append("EXIT_NOT_BOOK_WALKED")
     if _num(row.get("exit_legs_unmeasured")) != 0:
         out.append("EXIT_LEG_UNMEASURED")
-    if not _nonneg(row.get("exit_price_age_s")):
+    if not (_nonneg(row.get("exit_price_age_s")) or _nonneg(row.get("exit_book_age_ms"))):
         out.append("EXIT_PRICE_AGE_MISSING")
-    if str(row.get("exit_evidence_status") or "").strip().upper() not in F.EVIDENCE_OK:
+    if _exact(row.get("exit_evidence_status")) not in F.EVIDENCE_OK:
         out.append("EXIT_EVIDENCE_NOT_COMPLETE")
     if not _missing(row.get("exit_unverified_reason")) and str(row.get("exit_unverified_reason")).strip() not in ("None", "nan"):
         out.append("EXIT_UNVERIFIED")
     if not _no_unfired_cross(row.get("levels_crossed_unfired")):
         out.append("LEVEL_CROSS_UNKNOWN" if _missing(row.get("levels_crossed_unfired")) else "LEVEL_CROSSED_UNFIRED")
-    sc = str(row.get("stop_coverage") or "").strip().upper()
+    sc = _exact(row.get("stop_coverage"))
     if sc not in F.STOP_COVERAGE_OK:
         out.append("STOP_COVERAGE_MISSING" if _missing(row.get("stop_coverage")) else "STOP_COVERAGE_UNKNOWN")
     return out

@@ -10,6 +10,7 @@ Sources at #841 realism-v2/rk-fixes @9f095dbf (what each field is copied FROM):
   evidence_status          entry_fill_sim.evidence_status (already on the row, bot.py ~7858)
   entry_book_age_ms        entry_fill_sim.book_age_ms (paper_fill latest-row pricer; first-row legs: price_age_s*1000)
   exit_price_age_s         pos["exit_price_age_s"] (bot.py ~7739/7792)
+  exit_book_age_ms         exit pricer book_age_ms (latest-row legs); alternative to exit_price_age_s (HM R3)
   exit_evidence_status     pos["exit_evidence_status"] (bot.py ~7793)
   exit_unverified_reason   pos["exit_unverified_reason"] (bot.py ~7740/7794)
   exit_pricing_basis       pos["exit_pricing_basis"] (already on the row)
@@ -37,10 +38,13 @@ CONTRACT = {
     "exit_legs_unmeasured": "0 (missing fails)",
     "evidence_status": "COMPLETE",
     "entry_book_age_ms": "number >= 0",
-    "exit_price_age_s": "number >= 0",
+    "exit_price_age_s": "finite number >= 0 (seconds); OR exit_book_age_ms below",
+    "exit_book_age_ms": "finite number >= 0 (ms); accepted instead of exit_price_age_s for latest-row exit legs (TP/BE/time, BOT_SENT MODEL_TIME) whose pricer returns price_age_s=None but book_age_ms",
     "exit_evidence_status": "COMPLETE",
     "exit_unverified_reason": "absent / None / empty",
     "levels_crossed_unfired": "[] (real empty list) or False; a string such as 'None' fails",
     "stop_coverage": "STOP_COVERAGE_OK",
 }
+# Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
+# numbers must be finite and >= 0.
 REQUIRED_FIELDS = tuple(CONTRACT)

@@ -63,7 +63,12 @@ def r17_filter(trades):
     if trades is None or getattr(trades, "empty", True):
         return trades
     reasons = r17_reasons(trades)
-    return trades[reasons.isna()]
+    out = trades[reasons.isna()]
+    SUMMARY.clear()  # the fallback still reports WHY rows were excluded (labels read these keys)
+    SUMMARY.update({"schema": "analyzer_hygiene_v1", "mode": "r17_filter_fallback", "rows_in": int(len(trades)),
+                    "rows_out": int(len(out)), "r17_non_countable_excluded": int(reasons.notna().sum()),
+                    "r17_reason_counts": r17_reason_counts(reasons)})
+    return out
 
 
 def apply(trades, *, include_forced: bool | None = None, include_late: bool | None = None):

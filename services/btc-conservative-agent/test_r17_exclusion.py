@@ -129,7 +129,7 @@ def test_missing_stop_coverage_alone_excludes():
 def test_contract_module_is_the_single_source():
     import r17_fields
     assert set(PROOF) <= set(r17_fields.REQUIRED_FIELDS) | {"exit_unverified_reason"}
-    assert set(r17_fields.REQUIRED_FIELDS) - {"exit_pricing_basis"} <= set(PROOF)
+    assert set(r17_fields.REQUIRED_FIELDS) - {"exit_pricing_basis", "exit_book_age_ms"} <= set(PROOF)
     assert r17.F is r17_fields
     src = (ROOT / "r17_exclusion.py").read_text()
     assert "import os" not in src and "environ" not in src and "getenv" not in src  # proof rule cannot be switched off
@@ -264,3 +264,70 @@ def test_c5_labels_name_r17_not_no_trades():
     blk = mt.pricing_block(bad)
     assert blk["fresh_eligible"] is False and blk["r17_label"] == "R17_UNPROVEN"
     assert blk["non_countable_reason"] == "R17_UNPROVEN:EXIT_UNVERIFIED|STOP_COVERAGE_MISSING"
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("trigger_price_source", "BOOK", "TRIGGER_NOT_BOOK"),
+    ("trigger_price_source", "Book", "TRIGGER_NOT_BOOK"),
+    ("evidence_status", "complete", "ENTRY_EVIDENCE_NOT_COMPLETE"),
+    ("exit_evidence_status", "complete", "EXIT_EVIDENCE_NOT_COMPLETE"),
+    ("exit_evidence_status", "Complete", "EXIT_EVIDENCE_NOT_COMPLETE"),
+    ("stop_coverage", "stop_coverage_ok", "STOP_COVERAGE_UNKNOWN"),
+    ("stop_coverage", "Stop_Coverage_OK", "STOP_COVERAGE_UNKNOWN"),
+    ("entry_book_age_ms", float("inf"), "ENTRY_PRICE_AGE_MISSING"),
+    ("entry_book_age_ms", float("nan"), "ENTRY_PRICE_AGE_MISSING"),
+    ("entry_book_age_ms", "inf", "ENTRY_PRICE_AGE_MISSING"),
+    ("exit_price_age_s", float("inf"), "EXIT_PRICE_AGE_MISSING"),
+    ("exit_price_age_s", -0.1, "EXIT_PRICE_AGE_MISSING"),
+    ("entry_walk_bp", float("-inf"), "ENTRY_NOT_BOOK_WALKED"),
+    ("entry_walk_bp", -0.4, "ENTRY_NOT_BOOK_WALKED"),
+    ("exit_walk_bp", float("inf"), "EXIT_NOT_BOOK_WALKED"),
+    ("exit_walk_bp", float("nan"), "EXIT_NOT_BOOK_WALKED"),
+])
+def test_exact_case_and_finite_numbers(field, value, reason):
+    assert r17.non_countable_reason(good_row(**{field: value})) == f"R17_UNPROVEN:{reason}"
+
+
+@pytest.mark.parametrize("field,value", [("trigger_price_source", " book "), ("evidence_status", "COMPLETE "),
+                                         ("stop_coverage", " STOP_COVERAGE_OK")])
+def test_surrounding_spaces_only_are_stripped(field, value):
+    assert r17.non_countable_reason(good_row(**{field: value})) is None
+
+
+def test_exit_book_age_ms_proves_latest_row_exit_age():
+    """HM R3: BOT_SENT MODEL_TIME / TP / BE latest-row legs carry book_age_ms but price_age_s=None."""
+    assert r17.non_countable_reason(good_row(exit_price_age_s=None, exit_book_age_ms=1100)) is None
+    assert r17.non_countable_reason(good_row(exit_price_age_s=None, exit_book_age_ms=float("inf"))) == \
+        "R17_UNPROVEN:EXIT_PRICE_AGE_MISSING"
+    assert r17.non_countable_reason(good_row(exit_price_age_s=None, exit_book_age_ms=-1)) == \
+        "R17_UNPROVEN:EXIT_PRICE_AGE_MISSING"
+
+
+def test_r17_filter_fallback_populates_reason_counts():
+    import pandas as pd
+    import analysis_hygiene as hyg
+    out = hyg.r17_filter(pd.DataFrame([good_row(trade_id="gs1-fallback00001", stop_coverage="x"), good_row()]))
+    assert len(out) == 1
+    assert hyg.SUMMARY["r17_reason_counts"] == {"STOP_COVERAGE_UNKNOWN": 1}
+    assert hyg.SUMMARY["r17_non_countable_excluded"] == 1
+
+
+def test_analyzer_has_no_bare_no_trades_wording():
+    import re
+    src = (ROOT / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
+    bare = [ln for ln in src.splitlines() if re.search(r"No (executed )?trades", ln) and "_r17_empty_note()" not in ln]
+    assert bare == []
+
+
+def test_fly_dashboard_shows_r17_label_per_tile():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert '__TILE_R17_COUNTS__' in src and 'html_escape(_dashboard_r17_tile_text(tiles))' in src
+    ns = {}
+    start = src.index("def _dashboard_r17_tiles(")
+    end = src.index("def _dashboard_tile_offsets_text(")
+    bad = good_row(trade_id="gs1-dash00000001", stop_coverage=None)
+    ns["trades"] = [bad, good_row()]
+    exec(src[start:end], ns)
+    lane = bad["research_lane"].upper()
+    text = ns["_dashboard_r17_tile_text"]([{"lane": lane, "label": "GS1"}])
+    assert text.startswith("GS1: 1 countable, R17_UNPROVEN: 1 of 2 rows excluded (STOP_COVERAGE_MISSING=1)")
