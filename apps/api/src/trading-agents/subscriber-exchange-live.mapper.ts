@@ -6,7 +6,7 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import { liveRowCountabilityWithLegs, liveRowUncheckedCountability, type LiveRowStopEvidence } from './live-row-countability';
+import { liveExitFillEvidenceFromEvents, liveRowCountabilityWithLegs, liveRowUncheckedCountability, type LiveRowStopEvidence } from './live-row-countability';
 import { liveLegStamps } from './live-trade-export.mapper';
 
 type IntentEnvelope = {
@@ -379,6 +379,7 @@ export function mapSubscriberExchangeLiveBook(input: {
           [row.cycle.showcaseExitReason, row.terminalReason],
           ...liveLegStamps(row.cycle.intentEnvelope, row.events ?? [], true),
           input.requireStopEvidence ? row.stopEvidence ?? null : undefined,
+          liveExitFillEvidenceFromEvents(row.events ?? []),   // HM R4 B1 / RK 08:03: real exit fill or non-countable (R17)
         ),
       });
     }

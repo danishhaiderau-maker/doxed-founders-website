@@ -9,6 +9,7 @@ import {
   signExecutorCapability,
   signLiveExecutionReport,
 } from './live-copy-approval';
+import { liveExitFillEvidence } from './live-row-countability';
 import { BITFINEX_BTC_PERP_SYMBOL, BITFINEX_REDUCE_ONLY_FLAG } from '../exchanges/bitfinex-api.client';
 
 /**
@@ -153,6 +154,7 @@ export function buildLiveCopyReports(input: {
       stop_confirmed_at_ts: null,
     };
     let entryPrice: number | null = null;
+    let entryFillPrice: number | null = null;   // HM R4 B1: entry-fallback detection for the exit price
     let side: string | null = null;
     const push = (e: ReporterEvent, type: string, extra: Record<string, unknown>) => {
       out.push({
@@ -219,6 +221,7 @@ export function buildLiveCopyReports(input: {
             const v = isoMs(pl[f]);
             if (v != null) (tl as Record<string, number | null>)[k] = (tl as Record<string, number | null>)[k] ?? sec(v);
           }
+          entryFillPrice = entryFillPrice ?? num(pl.fill_price);
           push(e, 'ORDER_FILLED', {
             // LIVE-FIX-1499: observability only (which detector fired, probe ladder, entry marks).
             entry_obs: {
@@ -274,12 +277,16 @@ export function buildLiveCopyReports(input: {
           // (real trade print -> Bitfinex's own fill record) reach Fly's live-vs-paper leg check.
           tl.exit_trigger_print_at_ts = t('exit_trigger_print_at');
           tl.exit_fill_record_at_ts = t('exit_fill_record_at') ?? t('exchange_exit_fill_first_at');
+          // HM R4 B1 / RK 08:03 (R4, R17): close.price is ONLY a real Bitfinex fill (close-order trades or the resident
+          // stop's own trades), via the one shared liveExitFillEvidence also used by countability. A ticker/mark or
+          // entry-price fallback is never sent as the price: price null + price_source => Fly's D3 cap reads the trade
+          // as UNREADABLE (AMBER entry block), never as a $0 loss. reported_exit_price keeps the relay's value for audit.
+          const exitFill = liveExitFillEvidence(pl, entryFillPrice ?? entryPrice);
           push(e, 'POSITION_CLOSED', {
-            // exit_exchange_fill_price is the authenticated Bitfinex close
-            // fill; exit_price can be the quote side (11 Oct: 83084 ask vs
-            // 83071 real fill), so it is only a fallback.
             close: {
-              price: num(pl.exit_exchange_fill_price) ?? num(pl.exit_price) ?? num(pl.fill_price),
+              price: exitFill.price,
+              price_source: exitFill.source,
+              reported_exit_price: exitFill.reportedPrice,
               reason: pl.reason ?? pl.exit_reason ?? null,
               paper_exit_price: num(pl.showcase_exit_price),
               exchange_order_id: pl.close_exchange_order_id != null ? String(pl.close_exchange_order_id) : null,

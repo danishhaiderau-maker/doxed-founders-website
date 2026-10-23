@@ -2,6 +2,7 @@ import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
 import {
   liveRowCountabilityWithLegs,
+  liveExitFillEvidenceFromEvents,
   liveRowStopEvidenceFromEvents,
   type LiveExitSide,
   type LiveLegStamps,
@@ -273,6 +274,7 @@ export function mapParticipantToExportRow(input: {
       [exitEvent?.exitReason, input.cycle.showcaseExitReason],
       ...liveLegStamps(input.cycle.intentEnvelope, input.participant.events, closedAt != null),
       filledEvent ? liveRowStopEvidenceFromEvents(input.participant.events) : undefined,
+      closedAt != null ? liveExitFillEvidenceFromEvents(input.participant.events) : undefined,   // HM R4 B1 / RK 08:03
     ),
     events,
   };

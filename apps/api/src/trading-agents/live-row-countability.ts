@@ -102,6 +102,54 @@ export function liveRowStopEvidenceFromEvents(events: readonly EvidenceEvent[]):
   return { fillAtMs, stopConfirmedAtMs: armed ? armed.createdAt.getTime() : null, stopFailed };
 }
 
+/**
+ * HM R4 B1 + RK 08:03 (R4 one helper, R17): THE exit-price provenance of a closed live row, shared by the Fly reporter
+ * (D3 loss caps on Fly read close.price/close.price_source) and the countability rule below. Only a REAL Bitfinex fill
+ * counts: `exchange_fill` = the authenticated close-order trades (resolveNormalCloseExchangeEvidence:
+ * exit_exchange_fill_price) and `stop_fill` = the resident stop's own order trades at the exact lot qty
+ * (pnl_source bitfinex_order_trades + EXCHANGE_STOP + exchange_exit_fill_ids). Everything else (ticker/mark, entry-price
+ * fallback, failed or budget-refused fill read, partial, non-USD fee => no evidence) has price null: D3 UNREADABLE
+ * (AMBER entry block on Fly) and the row non-countable. Never a $0 loss.
+ */
+export type LiveExitPriceSource = 'exchange_fill' | 'stop_fill' | 'mark' | 'entry_fallback' | 'none';
+export const LIVE_REAL_EXIT_FILL_SOURCES: ReadonlySet<LiveExitPriceSource> = new Set(['exchange_fill', 'stop_fill']);
+export type LiveExitFillEvidence = { price: number | null; source: LiveExitPriceSource; reportedPrice: number | null };
+
+const finitePos = (v: unknown): number | null => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+export function liveExitFillEvidence(exitPayload: unknown, entryFillPrice?: unknown): LiveExitFillEvidence {
+  const pl = exitPayload && typeof exitPayload === 'object' ? (exitPayload as Record<string, unknown>) : {};
+  const reported = finitePos(pl.exit_price);
+  const fill = finitePos(pl.exit_exchange_fill_price);
+  if (fill != null) return { price: fill, source: 'exchange_fill', reportedPrice: reported ?? fill };
+  const stopIds = Array.isArray(pl.exchange_exit_fill_ids) ? pl.exchange_exit_fill_ids : [];
+  if (reported != null && String(pl.pnl_source ?? '') === 'bitfinex_order_trades'
+      && String(pl.exit_reason ?? '').toUpperCase() === 'EXCHANGE_STOP' && stopIds.length > 0
+      && finitePos(pl.exchange_exit_filled_qty) != null) {
+    return { price: reported, source: 'stop_fill', reportedPrice: reported };
+  }
+  if (reported == null) return { price: null, source: 'none', reportedPrice: null };
+  const entry = finitePos(entryFillPrice ?? pl.entry_exchange_fill_price ?? pl.fill_price);
+  return { price: null, source: entry != null && Math.abs(entry - reported) < 1e-9 ? 'entry_fallback' : 'mark', reportedPrice: reported };
+}
+
+/** The latest EXIT event of a participant, with the FILLED price as the entry reference. */
+export function liveExitFillEvidenceFromEvents(events: readonly { eventType: string; payload: unknown }[]): LiveExitFillEvidence {
+  const exit = [...events].reverse().find((e) => e.eventType === 'EXIT');
+  const filled = events.find((e) => e.eventType === 'FILLED');
+  const fp = filled && filled.payload && typeof filled.payload === 'object' ? (filled.payload as Record<string, unknown>) : {};
+  return liveExitFillEvidence(exit?.payload, fp.exchange_fill_price ?? fp.fill_price);
+}
+
+/** R17: a closed row whose exit price is not a real Bitfinex fill is non-countable. */
+export function liveRowExitFillCountability(ev: LiveExitFillEvidence | null | undefined): LiveRowCountability {
+  if (ev && LIVE_REAL_EXIT_FILL_SOURCES.has(ev.source) && ev.price != null) return COUNTABLE;
+  return { nonCountable: true, nonCountableReason: `EXIT_FILL_UNREADABLE:${ev?.source ?? 'none'}` };
+}
+
 /** HM 02:55 blocker 4 (R17): a live row with no leg stamps to check (e.g. a Bitfinex cash-ledger-only close) is
  * never countable: FORCED_CLOSE when forced, else LIVE_LEGS_UNCHECKED. */
 export const LIVE_LEGS_UNCHECKED = 'LIVE_LEGS_UNCHECKED';
@@ -180,7 +228,8 @@ export function liveRowLegCheck(
  *   2. the guardian's stop evidence for a FILLED row (#852 item 4: exchange-resident stop confirmed <= 5 s after the
  *      fill, no STOP_FAILED). `stopEvidence === undefined` means the row never filled (no stop to require); `null`
  *      means filled but unlinked => NO_STOP_EVIDENCE:UNLINKED (fail closed);
- *   3. the per-leg check (HM 01:43 item 3).
+ *   3. the per-leg check (HM 01:43 item 3);
+ *   4. a closed row's exit price must be a real Bitfinex fill (liveExitFillEvidence; HM R4 B1, RK 08:03, R17).
  * First failure wins; rows with no leg stamps at all use liveRowUncheckedCountability (always non-countable).
  */
 export function liveRowCountabilityWithLegs(
@@ -189,6 +238,7 @@ export function liveRowCountabilityWithLegs(
   exit: LiveLegStamps | null,
   exitSide: LiveExitSide = 'exit',
   stopEvidence?: LiveRowStopEvidence | null,
+  exitFill?: LiveExitFillEvidence | null,
 ): LiveRowCountability {
   const forced = liveRowCountability(...reasons);
   if (forced.nonCountable) return forced;
@@ -197,5 +247,8 @@ export function liveRowCountabilityWithLegs(
     if (stop.nonCountable) return stop;
   }
   const legs = liveRowLegCheck(entry, exit, exitSide);
-  return { nonCountable: legs.nonCountable, nonCountableReason: legs.nonCountableReason };
+  if (legs.nonCountable) return { nonCountable: true, nonCountableReason: legs.nonCountableReason };
+  // HM R4 B1 / RK 08:03 (R17): a closed row counts only with a REAL Bitfinex exit fill (shared liveExitFillEvidence).
+  if (exit && exitFill !== undefined) return liveRowExitFillCountability(exitFill);
+  return COUNTABLE;
 }
