@@ -1,5 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
+import { liveRowCountability } from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: string;
@@ -52,6 +53,9 @@ export type LiveTradeExportRow = {
   regime: string | null;
   strategy: string | null;
   showcaseExitReason: string | null;
+  /** HM B4: forced (force-flat / maintenance / admin) close; never a strategy outcome. */
+  nonCountable: boolean;
+  nonCountableReason: string | null;
   events: LiveTradeExportEvent[];
 };
 
@@ -205,6 +209,7 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
+    ...liveRowCountability(exitEvent?.exitReason, input.cycle.showcaseExitReason),
     events,
   };
 }
@@ -246,6 +251,8 @@ const CSV_COLUMNS: Array<keyof LiveTradeExportRow | 'eventsSummary'> = [
   'regime',
   'strategy',
   'showcaseExitReason',
+  'nonCountable',
+  'nonCountableReason',
   'eventsSummary',
 ];
 

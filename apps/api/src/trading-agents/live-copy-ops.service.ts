@@ -168,6 +168,9 @@ export class LiveCopyOpsService {
       if (!wallet) blockers.push('BALANCE_UNAVAILABLE');
       else if (wallet.derivativesUsd < LIVE_COPY_MIN_DERIVATIVES_USD) blockers.push('DERIVATIVES_BALANCE_BELOW_MIN');
       checks.exchange = await readLiveExchangeExposure(creds);
+      // HM C5: the account must be FLAT on the exchange (no net position, no open orders) and both live reads must
+      // succeed; otherwise ready_for_live_copy is blocked.
+      blockers.push(...exchangeExposureBlockers(checks.exchange as Record<string, unknown>));
     }
     return {
       schema: 'website_live_copy_account_check_v1',
@@ -267,6 +270,23 @@ export function liveCopyPauseState(input: {
   };
 }
 
+
+/**
+ * HM C5: blockers from the live exchange exposure read. A read error (either endpoint) -> EXCHANGE_READ_FAILED;
+ * a non-zero net position or any open order -> EXCHANGE_NOT_FLAT. Unknown (null) counts are never treated as flat.
+ */
+export function exchangeExposureBlockers(exposure: Record<string, unknown> | null | undefined): string[] {
+  const out: string[] = [];
+  const e = exposure ?? {};
+  const pos = e.net_position_btc;
+  const orders = e.open_order_count;
+  const readFailed = !exposure || Boolean(e.position_error) || Boolean(e.orders_error)
+    || typeof pos !== 'number' || !Number.isFinite(pos) || typeof orders !== 'number' || !Number.isFinite(orders);
+  if (readFailed) out.push('EXCHANGE_READ_FAILED');
+  if ((typeof pos === 'number' && Number.isFinite(pos) && pos !== 0)
+    || (typeof orders === 'number' && Number.isFinite(orders) && orders > 0)) out.push('EXCHANGE_NOT_FLAT');
+  return out;
+}
 
 /**
  * HM R8-live: the account's exchange net position and open-order count on

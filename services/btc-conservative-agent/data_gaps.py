@@ -35,7 +35,9 @@ def signal_to_fill_ms(row: Mapping[str, Any]):
 def field_values(row: Mapping[str, Any]) -> dict:
     ex = row.get("exit") or {}
     return {"signal_to_fill_ms": signal_to_fill_ms(row),
-            "exit_bid": _num(ex.get("exit_bid")), "exit_ask": _num(ex.get("exit_ask")),
+            # R3: book-top comparison columns (exit_book_top_*) on new rows; exit_bid/ask on legacy rows.
+            "exit_bid": _num(ex.get("exit_book_top_bid") if ex.get("exit_book_top_bid") is not None else ex.get("exit_bid")),
+            "exit_ask": _num(ex.get("exit_book_top_ask") if ex.get("exit_book_top_ask") is not None else ex.get("exit_ask")),
             "regime_at_signal": (row.get("trigger") or {}).get("regime_at_signal") or None}
 
 

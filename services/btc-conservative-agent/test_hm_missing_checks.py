@@ -153,14 +153,24 @@ def test_chase_gap_tables_and_side_scores():
 
 def test_checks_and_exit_bbo_with_a_populated_tape_ring(bot, monkeypatch):
     import time
+    import math
+    import paper_fill
     ring = monitor_tiles.TapeSliceRing()
     now = time.time()
     for i in range(5):
         ring.append({"bucket_ts": int(now) - 4 + i, "bid": 100.0, "ask": 100.1})
     monkeypatch.setattr(bot, "_TILE_TAPE_RING", ring)
+    # R3: the close stamp is the book top from bfx_book_10l_1s rows, never the ticker tape ring.
+    monkeypatch.setattr(paper_fill, "book10l_at", lambda t: {"s": float(math.floor(t) - 1),
+                                                             "b": [[99.5, 1.0]], "a": [[99.7, 1.0]]})
     row = {}
     bot._stamp_exit_bbo(row)
-    assert row.get("exit_bid") == 100.0 and row.get("exit_ask") == 100.1
+    assert row.get("exit_book_top_bid") == 99.5 and row.get("exit_book_top_ask") == 99.7
+    assert "exit_bid" not in row and "exit_ask" not in row
+    monkeypatch.setattr(paper_fill, "book10l_at", lambda t: {"s": float(t) - 30, "b": [[1, 1]], "a": [[2, 1]]})
+    stale = {}
+    bot._stamp_exit_bbo(stale)
+    assert stale == {"exit_book_top_missing": True}
     r = bot.app.test_client().get("/api/monitor/checks", headers={"Authorization": f"Bearer {MONITOR}"},
                                   environ_base=REMOTE)
     assert r.status_code == 200, r.get_json()

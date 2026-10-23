@@ -59,7 +59,8 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             "position_evaluation_lock": lock,
             "trade_lock": threading.RLock(),
             "open_positions": [pos],
-            "get_mark_price": lambda direction, fallback: fallback,
+            # RK step 2: the exit mark is the order-book row (get_mark_price), never the tick price.
+            "get_mark_price": lambda direction, fallback=None, now=None: 60000.0,
             # Per-position claim + policy evaluation (see bot._evaluate_position_exit).
             "_evaluate_position_exit": lambda p, mark, now, **_kw: calls.append((p, mark)),
         }
@@ -71,7 +72,7 @@ class WsTickLifecycleIsolationTest(unittest.TestCase):
             lock.release()
         self.assertEqual(calls, [])
         self.assertTrue(ns["_tick_driven_position_exits"](124.0))
-        self.assertEqual(calls, [(pos, 124.0)])
+        self.assertEqual(calls, [(pos, 60000.0)])
 
     def test_worker_discards_stale_tick_and_processes_fresh_tick_once(self):
         q = Queue(maxsize=1)
