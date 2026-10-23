@@ -165,7 +165,16 @@ def newest_rotation(active_path: str) -> str | None:
 
 def write_cap_receipt(directory: str, row: dict[str, Any]) -> bool:
     """Append one cap receipt; single rotation at 1 MB; never writes a receipt
-    about itself. Returns False on any failure (callers ignore it)."""
+    about itself. Returns False on any failure (callers ignore it).
+
+    R4 note (HM C13, accepted risk): two processes (the bot and the segment
+    shipper) append to and rotate this file with no shared lock. If both see
+    the 1 MB size at once, or one appends between the other's size check and
+    os.replace, a receipt row can land in the rotated-away ``.1`` and be
+    overwritten by the next rotation. The receipt is an audit trail, not a
+    gate: the cap/prune it describes has already happened and its RED (disk
+    alert / r5_segment_red) is raised independently. Losing a row at
+    rotation is accepted."""
     try:
         path = os.path.join(directory, CAP_RECEIPTS_FILE)
         try:
