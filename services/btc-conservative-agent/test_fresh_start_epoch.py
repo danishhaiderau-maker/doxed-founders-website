@@ -24,7 +24,8 @@ def test_epoch_boundary_includes_fresh_start():
 def test_trade_paths_use_the_boundary():
     assert "_current_epoch_boundary()" in ast.unparse(_fn("_showcase_trade_session_start"))
     assert "_current_epoch_boundary()" in ast.unparse(_fn("_monitor_tiles_scope"))
-    assert "_showcase_trade_session_start()" in ast.unparse(_fn("_disloc_epoch_since"))
+    # _disloc_epoch_since was removed with Tiles 6/7 (23 Oct 2026); no DISLOC path is left to cut.
+    assert not any(isinstance(n, ast.FunctionDef) and n.name == "_disloc_epoch_since" for n in ast.walk(TREE))
 
 
 def test_setter_is_guarded_and_never_deletes():

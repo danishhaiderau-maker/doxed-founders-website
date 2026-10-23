@@ -12,7 +12,7 @@ Safety model
 * DELETE is an explicit set of data classes (``DELETE_EXACT_NAMES``, ``DELETE_TAPE_DATASETS`` and top-level
   ``.jsonl`` / ``.csv`` row streams with every rotated ``.N`` / ``.N.gz`` copy). Paper rows (including the
   PAPER_FILL_FORCED deploy-flatten rows, which live in those CSVs), the paper IOC no-fill shadow file, tape,
-  book, deriv, DISLOC ledgers and shadow streams are all in it.
+  book, deriv, (retired) DISLOC ledgers and shadow streams are all in it.
 * Anything that is neither allowlisted nor an explicit data class is UNCLASSIFIED: it is RETAINED and listed in
   the plan and receipt. Nothing is ever deleted by default.
 * The plan pins the sha256 of every allowlisted file and a parsed "flag view" (every live / arm / force_paper /
@@ -92,6 +92,8 @@ DELETE_EXACT_NAMES = frozenset({
     "trades_3factor.csv", "trades_3factor.csv.malformed_rows.jsonl",
     "csv_write_fallback.jsonl", "csv_write_fallback_replay.json",
     "lane_pnl_ledger.json", "lane_lab_pnl_ledger.json", "paper_ioc_no_fill_shadow.jsonl",
+    # Retired DISLOC / DISLOC-FOI ledgers (Tiles 6/7 removed 23 Oct 2026): no writer; still classified so a
+    # left-over file is handled like any paper ledger, and a missing one is simply absent (never a crash).
     "disloc_trades.jsonl", "disloc_foi_trades.jsonl", "disloc_paused_skips.jsonl",
     # shadow / counterfactual streams
     "shadow_exit_paths.jsonl", "xvp_shadow_signals.jsonl", "ai_shadow_challengers.jsonl",

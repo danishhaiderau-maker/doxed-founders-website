@@ -26,6 +26,17 @@ jobs:
         run: |
           pip install --no-cache-dir -r requirements.txt
           pip install --no-cache-dir pytest
+      - name: Tile registry audit (ACTIVE_RETIRED_OVERLAP and every other registry defect)
+        # HM 20261023-tile67-removal C2: run combo_pathway_config.validate_tile_registry() in CI so an
+        # active/retired overlap (e.g. a DISLOC lane re-added to ACTIVE_TILE_ORDER) fails the PR.
+        run: |
+          python - <<'PY'
+          import combo_pathway_config as c
+          defects = c.validate_tile_registry()
+          print({"active": list(c.ACTIVE_TILE_ORDER), "retired_count": len(c.RETIRED_TILE_LANES), "defects": list(defects)})
+          if defects:
+              raise SystemExit("tile registry defects: " + "; ".join(defects))
+          PY
       - name: Run the allowlisted test files (ci/unit_test_allowlist.txt)
         # Allowlist of files that pass under pytest; KNOWN_RED files are listed with owner and date in
         # ci/known_red.txt, and test_ci_test_inventory.py fails when a test file is in neither list.

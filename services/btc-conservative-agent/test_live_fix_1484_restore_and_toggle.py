@@ -16,13 +16,19 @@ def test_snapshot_precedes_maintenance_and_flatten():
     assert snap < WF.index("Force flat (paper + live) and verify on the exchange immediately before deploy", job)
 
 
-def test_restore_uses_snapshot_and_falls_back_to_disloc_only():
+def test_restore_uses_snapshot_and_fails_loud_with_no_disloc_fallback():
+    """HM C1/C1b (23 Oct 2026, Tiles 6/7 retired): a failed snapshot restores NOTHING (no DISLOC fallback) and says so
+    loudly; RETIRED comes from combo_pathway_config.RETIRED_TILE_LANES and LIVE must be a subset of ACTIVE."""
     start = WF.index("Restore the pre-deploy Bitfinex live-orders tile set")
     block = WF[start:WF.index("      - name:", start + 10)]
     assert "steps.live_set.outputs.live_lanes" in block
-    assert 'LIVE = ("FAMILY_DISLOC_BFX_DISLOCATION_1M",)' in block
+    assert "FAMILY_DISLOC_BFX_DISLOCATION_1M" not in block
     assert "FAMILY_GS01_XV_PREMIUM_ATR_TP" not in block
     assert "FAMILY_DISLOC_FOI_LONG_1M" not in block
+    assert "LIVE = ()" in block
+    assert "::warning title=Live restore skipped::" in block and "GITHUB_STEP_SUMMARY" in block
+    assert "RETIRED_TILE_LANES" in block and "set(RETIRED_TILE_LANES)" in block
+    assert "ACTIVE_TILE_ORDER" in block
     assert "nothing to restore" in block
 
 

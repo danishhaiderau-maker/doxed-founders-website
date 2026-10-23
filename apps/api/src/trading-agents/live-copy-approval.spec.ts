@@ -138,8 +138,6 @@ test('account armed means ACTIVE, real exchange and explicit relayArmedAt (no le
 
 test('tile prefix map covers the active Fly tiles', () => {
   assert.equal(LIVE_COPY_TILE_PREFIXES.FAMILY_GS01_XV_PREMIUM_ATR_TP, 'gs1');
-  assert.equal(Object.keys(LIVE_COPY_TILE_PREFIXES).length, 7);
-  assert.equal(LIVE_COPY_TILE_PREFIXES.FAMILY_DISLOC_BFX_DISLOCATION_1M, 'dsl');
-  assert.equal(LIVE_COPY_TILE_PREFIXES.FAMILY_DISLOC_FOI_LONG_1M, 'dsf');
-  for (const retired of ['FAMILY_DANISH_REGIME_ROUTER', 'FAMILY_PREMIUM_REVERSION_60M', 'FAMILY_GSB3_COMMITTED_FADE_REGIME', 'FAMILY_FADE_POOL', 'FAMILY_GS07_V07_PREMIUM_FADE_60M']) assert.equal(LIVE_COPY_TILE_PREFIXES[retired], undefined);
+  assert.equal(Object.keys(LIVE_COPY_TILE_PREFIXES).length, 5);
+  for (const retired of ['FAMILY_DISLOC_BFX_DISLOCATION_1M', 'FAMILY_DISLOC_FOI_LONG_1M', 'FAMILY_DANISH_REGIME_ROUTER', 'FAMILY_PREMIUM_REVERSION_60M', 'FAMILY_GSB3_COMMITTED_FADE_REGIME', 'FAMILY_FADE_POOL', 'FAMILY_GS07_V07_PREMIUM_FADE_60M']) assert.equal(LIVE_COPY_TILE_PREFIXES[retired], undefined);
 });

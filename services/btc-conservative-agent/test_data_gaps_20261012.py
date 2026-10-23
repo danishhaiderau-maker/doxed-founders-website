@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 import data_gaps
-import disloc_engine
 import monitor_streams as ms
 import monitor_tiles
 import strategist_streams_collector as ssc
@@ -140,7 +139,7 @@ def test_main_row_has_ms_timing_exit_bbo_and_regime():
 def test_bot_stamps_regime_at_order_and_close():
     assert 'target_signal["regime_at_signal"] = _current_regime_tag()' in BOT
     assert "_stamp_regime_at_signal(trade_row, pos, master)" in BOT
-    assert "regime_fn=lambda: _current_regime_tag()" in BOT
+    assert "regime_fn=lambda: _current_regime_tag()" not in BOT  # DISLOC engine wiring removed 23 Oct 2026
     for route in ("/api/monitor/streams/health", "/api/monitor/streams/<name>/parts",
                   "/api/monitor/tiles/field-completeness"):
         assert f"@app.route('{route}'" in BOT
@@ -148,30 +147,11 @@ def test_bot_stamps_regime_at_order_and_close():
     assert '"signal_to_fill_trades_ms": _signal_to_fill_trades_ms().get(lane)' in BOT
 
 
-# DISLOC rows: exit_bid/ask, ms, regime -------------------------------------------------------
-def test_disloc_rows_carry_exit_bbo_ms_and_regime():
-    led = [{"schema": disloc_engine.SCHEMA, "event": "DISLOC_CLOSED", "trade_id": "dsl-1", "side": "LONG", "signal_ts": 10.0, "order_ts": 10.1,
-            "fill_ts": 10.33, "exit_ts": 70.3, "exit_price": 101.0, "exit_bid": 101.0, "exit_ask": 101.5,
-            "fill_price": 100.0, "limit_price": 100.0, "signal_to_fill_s": 0.328, "pnl_bp_vs_touch": 100.0,
-            "net_bp_taker_2p8": 97.2, "regime_at_signal": "QUIET", "exit_reason": "TIME_60S"}]
-    row = disloc_engine.tile_trade_rows(led, "FAMILY_DISLOC_BFX_DISLOCATION_1M")[0]
-    assert row["exit"]["exit_bid"] == 101.0 and row["exit"]["exit_ask"] == 101.5
-    assert row["timing"]["signal_to_fill_ms"] == 328 and row["timing"]["signal_to_fill_sec"] == 0.328
-    assert row["trigger"]["regime_at_signal"] == "QUIET"
-    vals = data_gaps.field_values(row)
-    assert all(vals[f] is not None for f in data_gaps.FIELDS)
-
-
-def test_disloc_engine_regime_fn_stamped_on_order():
-    ev = disloc_engine.DislocEngine.__init__
-    src = Path(disloc_engine.__file__).read_text()
-    assert 'self.order["regime_at_signal"] = self.regime_fn()' in src and ev
-
-
+# Generic tile_trade_row_v1 rows (DISLOC rows/engine removed with Tiles 6/7, 23 Oct 2026) -------------
 def test_field_completeness_and_s2f_stats():
-    full = disloc_engine.tile_trade_rows([{
-        "schema": disloc_engine.SCHEMA, "event": "DISLOC_CLOSED", "trade_id": "a", "side": "LONG", "fill_ts": 1.0, "exit_ts": 61.0,
-        "exit_bid": 1, "exit_ask": 2, "signal_to_fill_s": 0.5, "regime_at_signal": "QUIET"}], "L")[0]
+    full = {"status": "CLOSED", "trade_id": "a", "exit": {"close_ts": 61.0, "exit_bid": 1, "exit_ask": 2},
+            "timing": {"signal_to_fill_sec": 0.5}, "trigger": {"regime_at_signal": "QUIET"}}
+    assert all(v is not None for v in data_gaps.field_values(full).values())
     empty = {"status": "CLOSED", "trade_id": "b", "exit": {"close_ts": 61.0}, "timing": {}, "trigger": {}}
     out = data_gaps.field_completeness({"L": [full, empty]})
     assert out["lanes"]["L"]["closed"] == 2 and out["lanes"]["L"]["coverage"]["exit_bid"] == 0.5

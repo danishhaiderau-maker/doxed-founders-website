@@ -118,18 +118,9 @@ def test_archive_receipt_post_needs_the_dedicated_r2_token_not_admin_or_monitor(
                       environ_base=REMOTE).status_code == 410
 
 
-def test_disloc_shadow_30m_and_tape_archive(tmp_path):
-    import disloc_engine as d
+def test_tape_archive_strips_unlisted_fields(tmp_path):
+    # The DISLOC 30m-shadow half of this test went with disloc_engine (Tiles 6/7 removed 23 Oct 2026).
     import tape_archive
-    eng = d.DislocEngine.__new__(d.DislocEngine)
-    out = []
-    eng._shadows, eng.counters, eng.variant, eng.lane = [], {"shadow_30m_opened": 0, "shadow_30m_closed": 0, "errors": 0}, "base", "L"
-    eng._emit = out.append
-    eng._shadow_step(0.0, d.LONG, 100.0, 100.1, True)
-    eng._shadow_step(1799.0, None, 101.0, 101.1, True)
-    assert out == []
-    eng._shadow_step(1800.0, None, 101.0, 101.1, True)
-    assert out[0]["event"] == "DISLOC_SHADOW_30M" and abs(out[0]["pnl_bp_vs_touch"] - (101.0 / 100.1 - 1) * 1e4) < 1e-3
     a = tape_archive.TapeArchive(lambda: tmp_path, clock=lambda: 1_760_000_000.0)
     a._thread = object()  # no background thread in tests
     a.append({"bucket_ts": 1_760_000_000, "bid": 1.0, "ask": 2.0, "x": 9}, ("bid", "ask"))

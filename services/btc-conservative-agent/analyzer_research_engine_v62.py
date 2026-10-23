@@ -21903,8 +21903,8 @@ def _attach_generation_receipt(manifest, *, optional_errors):
         _study = _hyg.all_epochs_bp_study(os.getcwd(), TRADES_FILE)
         with open(analyzer_report_path("all_epochs_bp.json"), "w", encoding="utf-8") as _fh:
             json.dump(_study, _fh, indent=1, default=str)
-        manifest["all_epochs_bp"] = {k: _study.get(k) for k in ("overall", "disloc_closes")}
-        print(f"  All-epochs bp study: {_study.get('overall')} DISLOC={_study.get('disloc_closes')} {PIPELINE_ENFORCEMENT_TAG}")
+        manifest["all_epochs_bp"] = {k: _study.get(k) for k in ("overall",)}
+        print(f"  All-epochs bp study: {_study.get('overall')} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as _exc:
         print(f"  All-epochs bp study failed: {type(_exc).__name__}: {_exc} {PIPELINE_ENFORCEMENT_TAG}")
     artifacts = manifest.setdefault("text_artifacts", [])

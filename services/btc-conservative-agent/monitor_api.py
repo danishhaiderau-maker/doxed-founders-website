@@ -338,7 +338,7 @@ def lane_stats(rows: Iterable[Mapping[str, Any]]) -> dict:
             bp_weighted += bp * row_notional
             bp_notional += row_notional
             bp_bases.add(basis)
-        # Average only measured rows priced by the shared pricer (fill_model_version >= 1): legacy and DISLOC rows
+        # Average only measured rows priced by the shared pricer (fill_model_version >= 1): legacy rows (and retired DISLOC history)
         # are null, never 0.0, and the denominator is published as n_slippage_rows.
         # exit_legs is written only by the measured-slippage code (#689): rows closed before it are version 1 but
         # carry the old constant 0.0 and have no exit_legs, so they are excluded.

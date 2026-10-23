@@ -79,7 +79,7 @@ def apply(trades, *, include_forced: bool | None = None, include_late: bool | No
     return out
 
 
-# ---------------------------------------------------------------------------- all epochs + DISLOC (bp)
+# ---------------------------------------------------------------------------- all epochs (bp)
 def _clustered(vals_ts):
     import math
     n = len(vals_ts)
@@ -99,12 +99,11 @@ def _clustered(vals_ts):
             "wr": round(100.0 * sum(1 for v in vals if v > 0) / n, 2)}
 
 
-def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
-                        disloc_file: str = "disloc_trades.jsonl") -> dict:
-    """ANALYZER-REVIEW #4: every epoch (current file unfiltered + research_archive/pre_epoch/*) plus the
-    DISLOC store, hygiene applied, reported in bp with hour-clustered 90% CIs per tile and per epoch."""
+def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv") -> dict:
+    """ANALYZER-REVIEW #4: every epoch (current file unfiltered + research_archive/pre_epoch/*), hygiene
+    applied, reported in bp with hour-clustered 90% CIs per tile and per epoch. The DISLOC / DISLOC-FOI
+    store fold was removed with Tiles 6/7 (23 Oct 2026, R9); their ledgers are retired history (R5)."""
     import glob
-    import json
     import os
     import pandas as pd
     frames, sources = [], []
@@ -148,34 +147,13 @@ def all_epochs_bp_study(data_root: str, trades_file: str = "trades_3factor.csv",
                 continue
             if pd.notna(bp):
                 rows.append((str(lane), str(epoch), float(bp), float(t) if pd.notna(t) else 0.0))
-    dpath = os.path.join(data_root, disloc_file)
-    disloc_n = 0
-    if os.path.isfile(dpath):
-        with open(dpath, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("event") != "DISLOC_CLOSED" or r.get("pnl_bp_vs_touch") is None:
-                    continue
-                ex = float(r.get("exit_ts") or 0)
-                if LATE_W0 <= ex <= LATE_W1:
-                    continue
-                lane = str(r.get("lane") or ("DISLOC-FOI" if r.get("variant") == "foi" else "DISLOC"))
-                import paper_fill as _pf
-                if not _pf.row_fresh_eligible(r):
-                    excluded_pending += 1
-                    continue
-                rows.append((lane, "disloc_store", float(r["pnl_bp_vs_touch"]), ex))
-                disloc_n += 1
     by_tile: dict = {}
     by_epoch: dict = {}
     for lane, epoch, bp, t in rows:
         by_tile.setdefault(lane, []).append((bp, t))
         by_epoch.setdefault(epoch, []).append((bp, t))
-    return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); DISLOC pnl_bp_vs_touch; fee 0",
-            "hygiene": summary, "sources": sources, "disloc_closes": disloc_n,
+    return {"schema": "analyzer_all_epochs_bp_v1", "basis": "net bp (price, unrounded); fee 0",
+            "hygiene": summary, "sources": sources,
             "excluded_pending_paper_fill_migration": excluded_pending,
             "overall": _clustered([(bp, t) for _, _, bp, t in rows]),
             "by_tile": {k: _clustered(v) for k, v in sorted(by_tile.items())},

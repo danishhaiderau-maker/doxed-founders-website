@@ -367,23 +367,10 @@ def evaluate(f: dict) -> dict:
                      "PENDING" if off is None else ("GREEN" if off == 0 else "AMBER"),
                      "paper_fill.fill_site_violations"))
 
-    ps = f.get("paused") or {}
-    durable = ps.get("durable_total")
-    opens = ps.get("opens_while_paused")
-    guarded_pos = ps.get("guarded_deploys_with_paused_gt0")
-    if durable is None:
-        st = "PENDING"
-    elif opens:
-        st = "RED"
-    elif ps.get("survived_deploy") and (guarded_pos or 0) >= 1:
-        st = "GREEN"
-    else:
-        st = "AMBER"
-    rows.append(_row("G14", "PAUSED skips durable across deploy, >=1 guarded deploy PAUSED>0",
-                     {"durable_total": durable, "survived_deploy": ps.get("survived_deploy"),
-                      "guarded_deploys_with_paused_gt0": guarded_pos, "opens_while_paused": opens},
-                     "survives deploy; >= 1 guarded deploy with PAUSED > 0; 0 opens", st,
-                     "disloc_paused_skips.jsonl"))
+    # G14 measured the DISLOC PAUSED-skip ledger (disloc_paused_skips.jsonl); its only writer, disloc_engine, was
+    # removed with Tiles 6/7 on 23 Oct 2026 (R9). The row stays (stable ids) as NA, never PENDING forever.
+    rows.append(_row("G14", "PAUSED skips durable across deploy (DISLOC; retired)", None,
+                     "n/a: Tiles 6/7 removed 23 Oct 2026", "NA", "retired: disloc_engine removed"))
 
     hb = ti.get("last_run_age_s")
     rows.append(_row("G15", "tile-integrity heartbeat age s", hb, "< 600 s",

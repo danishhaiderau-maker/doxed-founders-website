@@ -12,7 +12,6 @@ Both directions, CI-enforced:
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,9 @@ ROOT = HERE.parents[1]
 TS = ROOT / "apps/api/src/trading-agents/live-copy-approval.ts"
 GEN = ROOT / "packages/utils/src/generated/tile-registry.generated.ts"
 BOT = HERE / "bot.py"
-SELF_SIM_BRIDGES = {"disloc_engine": "_disloc_live_copy_bridge"}
+# The only self-sim bridge (disloc_engine -> _disloc_live_copy_bridge) was removed with
+# Tiles 6/7 (23 Oct 2026). A future self-simulated tile must register its bridge here.
+SELF_SIM_BRIDGES: dict = {}
 
 
 def _ts_prefixes() -> dict:
@@ -100,32 +101,12 @@ def test_no_retired_tile_on_any_live_copy_path():
     assert "TILE_RETIRED" in route and "RETIRED_TILE_LANES" in route
 
 
-def test_disloc_bridge_lifecycle_and_signal_age():
-    import disloc_live_copy as d
-    now = time.time()
-    base = {"trade_id": "dsl-1-1", "research_lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "side": "LONG",
-            "side_tag": "LONG_CONFIRMED_BY_DEEP_SEARCH", "signal_ts": now - 0.4, "signal_bid": 100000.0,
-            "signal_ask": 100010.0}
-    [(ev, tid, x)] = d.disloc_live_copy_events({**base, "event": "DISLOC_ORDER",
-                                                "order_type": "MARKET_TAKER_AT_REAL_TOUCH_AFTER_DELAY"}, now=now)
-    assert ev == "ORDER_PLACED" and tid == "dsl-1-1" and x["executable"] is True
-    assert x["limit_price"] >= 100010.0 * 1.0005 and x["entry_order_semantics"] == "TAKER_IOC"
-    stale = d.disloc_live_copy_events({**base, "event": "DISLOC_ORDER", "signal_ts": now - 2.5,
-                                       "order_type": "MARKET_TAKER_AT_REAL_TOUCH_AFTER_DELAY"}, now=now)
-    assert stale == []
-    assert d.disloc_live_copy_events({**base, "event": "DISLOC_FILLED", "fill_price": 100010.0})[0][0] == "POSITION_OPENED"
-    [(ev, _, x)] = d.disloc_live_copy_events({**base, "event": "DISLOC_CLOSED", "exit_price": 100020.0,
-                                              "exit_reason": "TIME_60S"})
-    assert ev == "POSITION_CLOSED" and x["exit_price"] == 100020.0
-    assert d.disloc_live_copy_events({**base, "side": "SHORT", "side_tag": "SHORT_SHADOW_ONLY_NOT_TRADED",
-                                      "event": "DISLOC_FILLED", "fill_price": 1.0}) == []
-
-
-def test_disloc_approval_carries_signal_age_bound_and_stop():
+def test_disloc_tiles_retired_and_bridge_removed():
+    """Tiles 6/7 removal (23 Oct 2026): DISLOC lanes are retired, off every live-copy path,
+    and the self-sim bridge + its module are gone."""
     for lane in ("FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"):
-        spec = ACTIVE_TILE_REGISTRY[lane]
-        a = lc.build_approval(event="ORDER_PLACED", trade_id=spec["id_prefix"] + "-1-1", lane=lane, spec=spec,
-                              output={"enabled": True}, tile_row={}, entry_allowed=True, trade_approved_at_ts=None,
-                              created_at_ts=1.0, signal_at_ts=1.0)
-        assert a["max_signal_age_sec"] == 2.0
-        assert 5 < a["exchange_stop_bp"] <= lc.exchange_stop_cap_bp()
+        assert lane in RETIRED_TILE_LANES and lane not in ACTIVE_TILE_ORDER, lane
+        assert lane not in ACTIVE_TILE_REGISTRY, lane
+    assert not (HERE / "disloc_live_copy.py").exists()
+    assert not (HERE / "disloc_engine.py").exists()
+    assert "def _disloc_live_copy_bridge(" not in BOT.read_text(encoding="utf-8")

@@ -1,7 +1,8 @@
 """Bitfinex perp top-of-book from the WS ``book`` channel (P0, F0), isolated from the main WS.
 
-LIVE-FIX-1510 (HM 09:05): DISLOC must price from the order-book ask at signal time, not the
-throttled ticker channel. One daemon thread, its own socket, never touches bot state.
+LIVE-FIX-1510 (HM 09:05): written for DISLOC (order-book ask at signal time, not the throttled
+ticker channel). DISLOC was removed 23 Oct 2026; the remaining user is the tile-integrity frozen-feed
+check (bot._tile_integrity_run_once, FeedWatch), which starts it on demand. One daemon thread, its own socket, never touches bot state.
 ``top()`` -> (bid, ask, last_update_ts) or (None, None, None) when not ready.
 """
 from __future__ import annotations

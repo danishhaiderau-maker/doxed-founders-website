@@ -100,13 +100,13 @@ def test_mid_epoch_additions_are_appended_paper_tiles_that_toggle_like_frozen_on
                    "FAMILY_DISLOC_FOI_LONG_1M"}
     for item in rf.MID_EPOCH_ADDITIONS:
         lane = item["lane"]
-        spec = cfg.COMBO_LANE_SPECS[lane]
         # item["tile_number"] is the registration-time number; display numbers are
         # derived (2026-10-11 retirement renumbered active tiles 1-10, retired show none).
         assert cfg.tile_number(lane) == (None if lane in cfg.RETIRED_TILE_LANES
                                          else cfg.ACTIVE_TILE_ORDER.index(lane) + 1)
         if lane in cfg.RETIRED_TILE_LANES:
             continue
+        spec = cfg.COMBO_LANE_SPECS[lane]
         assert spec["paper_only"] is True and spec["platform_relay_eligible"] is False
         assert spec["live_copy_eligible"] is False and spec["relay_capability"] == "BLOCKED_UNQUALIFIED"
         assert spec["default_enabled"] is (lane not in default_off)
@@ -211,6 +211,7 @@ def test_status_payload_is_json_serialisable():
 
 def test_status_lists_the_current_roster_next_to_the_pinned_original():
     cur = rf.freeze_status(MANIFEST, START + 600)["current_roster"]
-    assert len(cur["on_by_default"]) == 5 and len(cur["default_off_tiles_6_7"]) == 2
-    assert all("DISLOC" in lane for lane in cur["default_off_tiles_6_7"])
+    assert len(cur["on_by_default"]) == 5 and cur["count"] == 5 and "default_off_tiles_6_7" not in cur
+    # Tiles 6/7 (DISLOC / DISLOC-FOI) removed 23 Oct 2026: retired, never on the live roster.
+    assert {"FAMILY_DISLOC_BFX_DISLOCATION_1M", "FAMILY_DISLOC_FOI_LONG_1M"}.isdisjoint(cur["on_by_default"])
     assert {"FAMILY_GSB3_COMMITTED_FADE_REGIME", "FAMILY_PREMIUM_REVERSION_60M"} <= set(cur["retired_not_listed"])

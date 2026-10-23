@@ -102,6 +102,8 @@ MID_EPOCH_ADDITIONS = (
      "approved_by": "Danish (owner), 2026-10-10 backlog batch: build Tile 14 GS-07 V07, then paper ON",
      "spec": "audit/TILE14-TILE15-DESIGN-20261008.md §2 (V07)",
      "window_start": "DEPLOY_OF_REGISTERING_REVISION"},
+    # Historical registrations (R5 custody): Tile 13 · DISLOC and Tile 14 · DISLOC-FOI were retired and their
+    # code removed 23 Oct 2026 (owner R9); the entries stay as the record of what this epoch registered.
     # Tile 13 · DISLOC (owner 2026-10-11; default OFF, paper only, relay-ineligible, self-simulated).
     {"lane": "FAMILY_DISLOC_BFX_DISLOCATION_1M", "tile_number": 13, "hypothesis_id": "GS-20261011-DISLOC",
      "approved_by": "Danish (owner), 2026-10-11: build the 5 s-cancel dislocation tile as a paper tile",
@@ -170,15 +172,13 @@ def window(manifest: Optional[Mapping[str, Any]]) -> tuple[Optional[float], Opti
 
 
 def _current_roster() -> dict:
-    """Live tile roster from combo_pathway_config: ON by default (5) and the Tiles 6/7 DISLOC paper lanes (default OFF)."""
+    """Live tile roster from combo_pathway_config: the active tiles (5 since DISLOC/DISLOC-FOI were removed 23 Oct 2026)."""
     try:
         import combo_pathway_config as cfg
         order = list(cfg.ACTIVE_TILE_ORDER)
     except Exception:  # noqa: BLE001 - status must never raise
         return {"error": "ROSTER_UNAVAILABLE"}
-    off = [lane for lane in order if "DISLOC" in lane]
-    on = [lane for lane in order if lane not in off]
-    return {"on_by_default": on, "default_off_tiles_6_7": off, "count": len(order),
+    return {"on_by_default": order, "count": len(order),
             "retired_not_listed": sorted(set(FREEZE_ROSTER) - set(order))}
 
 

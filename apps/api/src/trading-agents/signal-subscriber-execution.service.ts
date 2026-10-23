@@ -1147,20 +1147,6 @@ export function capRelayLimitAtShowcaseFill(
  * still owns cancellation and a later real fill still uses the normal
  * protection/terminal funnel.
  */
-export type DislocEntryOrderMode = 'LIMIT' | 'IOC_CAP' | 'IOC_MARKET';
-/**
- * LIVE-FIX-1510: entry order mode for Tile 6 DISLOC taker entries (null = not DISLOC).
- * Fly rewrites entry_limit_policy to the canonical copy policy, so the DISLOC trade id
- * prefix (dsl-) is the discriminator.
- */
-export function dislocEntryOrderMode(
-  tradeId: unknown,
-  env: NodeJS.ProcessEnv = process.env,
-): DislocEntryOrderMode | null {
-  if (typeof tradeId !== 'string' || !tradeId.startsWith('dsl-')) return null;
-  const v = String(env.DISLOC_ENTRY_ORDER_MODE ?? '').trim().toUpperCase();
-  return v === 'LIMIT' || v === 'IOC_CAP' || v === 'IOC_MARKET' ? v : 'IOC_MARKET';
-}
 
 export function aggressiveCatchupEnabled(): boolean {
   const value = (process.env.AGGRESSIVE_CATCHUP_ENABLED ?? '').trim().toLowerCase();
@@ -1435,8 +1421,7 @@ export type TerminalCloseAuthorityKind =
   | 'THESIS_FAST_CUT'
   | 'HARD_STOP'
   | 'LATE_FILL_CLEANUP'
-  | 'AUTHENTICATED_MANUAL_OR_EMERGENCY'
-  | 'SIGNED_TIME_DEADLINE';
+  | 'AUTHENTICATED_MANUAL_OR_EMERGENCY';
 
 export type TerminalCloseAuthority = {
   kind: TerminalCloseAuthorityKind;
@@ -1467,12 +1452,6 @@ type AccountEmergencyCloseFence = {
 };
 
 const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
-/**
- * LIVE-FIX-1490 (A2): DISLOC (dsl-) closes on TIME_60S measured from the paper
- * fill. The executor owns that exit on its own clock: claim + reads start
- * TIME_DEADLINE_PREARM_MS early, the reduce-only close is submitted at the
- * deadline. Paper's POSITION_CLOSED stays the fallback (mirror close).
- */
 /** LIVE-FIX-1493: stop-dedupe counters (exposed for monitoring + tests). */
 export const stopDedupeStats = { runs: 0, duplicatesFound: 0, cancelled: 0, cancelFailed: 0, errors: 0, lastDuplicateAtMs: 0 };
 export const RELAY_PAUSE_HISTORY_MAX = 50;
@@ -1484,14 +1463,12 @@ export function appendRelayPauseHistory(prev: unknown, row: Record<string, unkno
   const list = Array.isArray(prev) ? prev.filter((r) => r && typeof r === 'object') as Record<string, unknown>[] : [];
   return [...list, row].slice(-RELAY_PAUSE_HISTORY_MAX);
 }
-export const TIME_DEADLINE_HOLD_SEC = 60;
+/**
+ * Upper bound on the pre-submit hold for a terminal fence carrying submitNotBeforeMs
+ * (generic close fence). The DISLOC (dsl-) executor-owned TIME_60S exit that used
+ * to set it was removed with Tiles 6/7 on 23 Oct 2026; the bound stays.
+ */
 export const TIME_DEADLINE_PREARM_MS = 1_500;
-export function isTimeDeadlineExitTradeId(tradeId: string | null | undefined): boolean {
-  return typeof tradeId === 'string' && /^dsl-/.test(tradeId);
-}
-export function timeDeadlineExitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.RELAY_TIME_DEADLINE_EXIT ?? 'on').trim().toLowerCase() !== 'off';
-}
 const SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS = 5 * 60_000;
 const TERMINAL_EVIDENCE_CLOCK_SKEW_MS = 5_000;
 
@@ -1631,17 +1608,6 @@ export function validateTerminalCloseAuthority(
       return text('policy') === 'EXCHANGE_ONLY_PARTIAL_FILL_TERMINAL_CLEANUP' && Boolean(text('cancel_context')) && Boolean(text('fill_source')) && positive('filled_qty');
     case 'AUTHENTICATED_MANUAL_OR_EMERGENCY':
       return Boolean(text('actor_user_id')) && text('actor_type') === 'AUTHENTICATED_ACCOUNT_OWNER' && Boolean(text('action'));
-    case 'SIGNED_TIME_DEADLINE': {
-      const fillAt = finite('sourceFillAtMs');
-      const hold = finite('holdSec');
-      const deadline = finite('deadlineMs');
-      return evidence.schema === 'signed_time_deadline_v1'
-        && isTimeDeadlineExitTradeId(authority.canonicalTradeId)
-        && fillAt != null && hold === TIME_DEADLINE_HOLD_SEC && deadline === fillAt + hold * 1000
-        && fillAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS
-        && nowMs >= deadline - TIME_DEADLINE_PREARM_MS
-        && nowMs - deadline <= SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS;
-    }
     default: {
       const exhaustive: never = authority.kind;
       return exhaustive;
@@ -4498,111 +4464,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     entryMarks: Record<string, number> | null;
     fastPath: { used: boolean; reason: string | null } | null;
   }>();
-  /** LIVE-FIX-1490 (A2): executor-owned TIME_60S exit timers, keyed user:trade. */
-  private readonly timeDeadlineTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  readonly timeDeadlineStats: {
-    scheduled: number; fired: number; closed: number; noOpenLot: number; failed: number;
-    last?: { tradeId: string; deadlineMs: number; firedAtMs: number; submitLagMs?: number; outcome: string };
-  } = { scheduled: 0, fired: 0, closed: 0, noOpenLot: 0, failed: 0 };
-
-  private scheduleTimeDeadlineExit(
-    agentId: string,
-    userId: string,
-    tradeId: string | null,
-    sourceFillAtMs: number,
-    nowMs = Date.now(),
-  ): number | null {
-    if (!timeDeadlineExitEnabled() || !isTimeDeadlineExitTradeId(tradeId) || !Number.isFinite(sourceFillAtMs)) return null;
-    const key = `${userId}:${tradeId}`;
-    if (this.timeDeadlineTimers.has(key)) return null;
-    const deadlineMs = sourceFillAtMs + TIME_DEADLINE_HOLD_SEC * 1000;
-    const delay = deadlineMs - TIME_DEADLINE_PREARM_MS - nowMs;
-    if (deadlineMs - nowMs < -SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS) return null;
-    const t = setTimeout(() => {
-      this.timeDeadlineTimers.delete(key);
-      void this.runTimeDeadlineExit(agentId, userId, tradeId!, sourceFillAtMs, deadlineMs);
-    }, Math.max(0, delay));
-    (t as { unref?: () => void }).unref?.();
-    this.timeDeadlineTimers.set(key, t);
-    this.timeDeadlineStats.scheduled += 1;
-    this.logger.log(`[TIME-EXIT] scheduled trade=${tradeId} deadline=${new Date(deadlineMs).toISOString()} in=${Math.round(delay)}ms`);
-    return delay;
-  }
-
-  private async runTimeDeadlineExit(
-    agentId: string,
-    userId: string,
-    tradeId: string,
-    sourceFillAtMs: number,
-    deadlineMs: number,
-  ): Promise<void> {
-    const firedAtMs = Date.now();
-    this.timeDeadlineStats.fired += 1;
-    const done = (outcome: string, submitLagMs?: number) => {
-      this.timeDeadlineStats.last = { tradeId, deadlineMs, firedAtMs, submitLagMs, outcome };
-    };
-    try {
-      const participant = await this.prisma.signalCycleParticipant.findFirst({
-        where: { userId, status: SignalCycleStatus.OPEN, cycle: { agentId, tradeId } },
-        include: { cycle: true },
-      });
-      if (!participant) {
-        this.timeDeadlineStats.noOpenLot += 1;
-        done('NO_OPEN_LOT');
-        return;
-      }
-      const instance = await this.prisma.tradingAgentInstance.findUnique({
-        where: { agentId_userId: { agentId, userId } },
-      });
-      if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') { done('NOT_LIVE'); return; }
-      const [creds, meta, mark] = await Promise.all([
-        this.exchanges.getUserCredentials(userId, instance.exchangeProvider),
-        this.loadExecutionMeta(participant.id),
-        this.activeTrading.getMarkPrice().catch(() => null),
-      ]);
-      if (!creds || !meta.direction || !meta.qty) { done('META_INCOMPLETE'); return; }
-      const intent = participant.cycle.intentEnvelope as unknown as SignalIntentEnvelope;
-      const leverage = resolveSubscriberLeverage(intent);
-      const fillPrice = finiteDecimalLikeNumber(participant.fillPrice) ?? meta.fillPrice ?? meta.limitPrice ?? 0;
-      const exitMarkPx = mark ?? fillPrice;
-      const unrealMarginPct = fillPrice > 0 && exitMarkPx > 0
-        ? computeUnrealizedMarginPct(fillPrice, exitMarkPx, meta.direction, leverage) : 0;
-      const canonicalTradeId = this.resolveShowcaseMirrorTradeId(participant.cycle, meta) ?? tradeId;
-      const closed = await this.closeVirtualLot(agentId, userId, participant.cycle.id, participant.id, meta, creds, {
-        reason: 'TIME_60S',
-        submitNotBeforeMs: deadlineMs,
-        mark: exitMarkPx,
-        fillPrice,
-        leverage,
-        peakMarginPct: Math.max(0, meta.peakMarginPct ?? 0, unrealMarginPct),
-        unrealMarginPct,
-        stopLossMarginPct: this.liveCopyStopLossMarginPct(intent, { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false }),
-        terminalAuthority: {
-          kind: 'SIGNED_TIME_DEADLINE',
-          canonicalTradeId,
-          lifecycleGeneration: showcaseIntentRevision(participant.cycle.intentEnvelope) ?? `legacy:${canonicalTradeId}`,
-          evidence: {
-            schema: 'signed_time_deadline_v1',
-            sourceFillAtMs,
-            holdSec: TIME_DEADLINE_HOLD_SEC,
-            deadlineMs,
-          },
-        },
-      });
-      const lag = Date.now() - deadlineMs;
-      if (closed) {
-        this.timeDeadlineStats.closed += 1;
-        this.positionRuntime.delete(participant.id);
-      }
-      done(closed ? 'CLOSED' : 'NOT_CLOSED', lag);
-      this.logger.log(`[TIME-EXIT] trade=${tradeId} outcome=${closed ? 'CLOSED' : 'NOT_CLOSED'} done_after_deadline_ms=${lag} prearm_ms=${deadlineMs - firedAtMs}`);
-    } catch (err) {
-      this.timeDeadlineStats.failed += 1;
-      done('FAILED');
-      this.logger.warn(`[TIME-EXIT] trade=${tradeId} failed (paper close fallback stays armed): ${err instanceof Error ? err.message : err}`);
-    }
-  }
-
   private scheduleReconciliation(delayMs: number | null): void {
     if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
     this.reconciliationTimer = setTimeout(async () => {
@@ -5839,9 +5700,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             startedAtMs,
             'LIMIT_REPRICE_SKIPPED_PAUSED',
           );
-        }
-        if (wake.trigger === 'POSITION_OPENED' && wake.signedOpen) {
-          this.scheduleTimeDeadlineExit(instance.agentId, instance.userId, wake.tradeId ?? null, wake.signedOpen.sourceEventAtMs);
         }
         if (
           wake.trigger === 'POSITION_OPENED'
@@ -10898,33 +10756,15 @@ await this.notifications
       );
     }
     entrySubmitStarted = true;
-    // LIVE-FIX-1510 (HM 09:05, Danish 09:06): DISLOC entry is a true IOC, never resting.
-    // DISLOC_ENTRY_ORDER_MODE: IOC_MARKET (default, no price cap) | IOC_CAP (IOC at the signed
-    // limit = signal touch + cap bp) | LIMIT (legacy GTC limit that can rest).
-    const dislocEntryMode = dislocEntryOrderMode(tradeId);
-    const entryOrderType = dislocEntryMode === 'IOC_MARKET' ? 'MARKET' : dislocEntryMode === 'IOC_CAP' ? 'IOC' : 'LIMIT';
-    const entryTif = dislocEntryMode && dislocEntryMode !== 'LIMIT' ? 'IOC' : 'GTC';
-    if (dislocEntryMode) {
-      this.logger.log(
-        `[DISLOC-ENTRY] trade=${tradeId} mode=${dislocEntryMode} type=${entryOrderType} tif=${entryTif}`
-        + ` signed_limit=${limitPrice.toFixed(2)} qty=${qty.toFixed(8)} mark=${mark.toFixed(2)}`,
-      );
-    }
-    const orderId = dislocEntryMode === 'IOC_MARKET'
-      ? await this.activeTrading.submitMarketEntry(creds, {
-        direction: intent.direction,
-        qty,
-        leverage,
-        ...(clientOrderId != null ? { clientOrderId } : {}),
-      })
-      : await this.activeTrading.submitLimitOrder(creds, {
-        direction: intent.direction,
-        qty,
-        price: limitPrice,
-        leverage,
-        ...(clientOrderId != null ? { clientOrderId } : {}),
-        ...(dislocEntryMode === 'IOC_CAP' ? { timeInForce: 'IOC' as const } : {}),
-      });
+    const entryOrderType = 'LIMIT';
+    const entryTif = 'GTC';
+    const orderId = await this.activeTrading.submitLimitOrder(creds, {
+      direction: intent.direction,
+      qty,
+      price: limitPrice,
+      leverage,
+      ...(clientOrderId != null ? { clientOrderId } : {}),
+    });
     exchangeAckedOrderId = orderId;
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
@@ -10987,7 +10827,7 @@ await this.notifications
       venue,
       order_type: entryOrderType,
       time_in_force: entryTif,
-      entry_order_mode: dislocEntryMode ?? 'LIMIT',
+      entry_order_mode: 'LIMIT',
       fee_model: stableRelayFeeModel(),
       execution_profile: stableRelayExecutionProfile(),
       local_mark_at_signal: mark,
@@ -11106,9 +10946,7 @@ await this.notifications
           }
         }
       }
-      // LIVE-FIX-1510: an IOC/market DISLOC entry never rests, so there is nothing to chase;
-      // the tick's fill/unfilled classification owns it.
-      if (participant && !promotedAtAck && !(dislocEntryMode && dislocEntryMode !== 'LIMIT')) {
+      if (participant && !promotedAtAck) {
         await this.applyLimitChase(
           agentId,
           instance.userId,
@@ -15974,7 +15812,7 @@ await this.notifications
     });
     if (!candidate) return null;
     // LIVE-FIX-1200: never relink a real fill across tile families. On 12 Oct
-    // 11:41 a phantom adopt:dsl-… lot (a DISLOC lot that had already closed)
+    // 11:41 a phantom adopt: lot of another (since retired) tile family
     // was relinked to GS-01's gs1-… position, doubling the ledger (0.00058 vs
     // exchange 0.00029) and SAFETY_PAUSING the account on POSITION_MISMATCH.
     if (!relinkSameTileFamily(currentTradeId, candidate.tradeId)) {
