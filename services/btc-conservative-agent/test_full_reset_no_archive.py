@@ -108,7 +108,7 @@ def test_classification_table_is_pinned():
         "paper_ioc_no_fill_shadow.jsonl.2": d, "market_microstructure_1s.jsonl.14": d,
         "bfx_book_10l_1s.jsonl": d, "bfx_deriv_status_1s.jsonl.1": d, "bfx_trades.jsonl": d,
         "venue_bbo_1m.jsonl": d, "disloc_trades.jsonl": d, "disloc_foi_trades.jsonl.4.gz": d,
-        "lane_pnl_ledger.json": d, "xvp_shadow_signals.jsonl": d, "tierA/bitfinex_l1_tape_1s/v1/p.parquet": d,
+        "lane_pnl_ledger.json": d, "paper_delay_pool.json": d, "xvp_shadow_signals.jsonl": d, "tierA/bitfinex_l1_tape_1s/v1/p.parquet": d,
         "never_heard_of_it.jsonl": d, "never_heard_of_it.jsonl.1": d,
         "mystery_blob.bin": u, "sub/unknown.dat": u,
     }
