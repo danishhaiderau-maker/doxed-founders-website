@@ -20,6 +20,18 @@ total exceeds ``keep_bytes_cap`` and never one of the newest
 ``keep_min_generations`` or the newest snapshot of each of the last
 ``daily_keep_days`` UTC days. The ledgers are never rewritten: lines are
 appended, de-duplicated on ``generation_id``.
+
+Epoch cap (RK C4c): every snapshot, index line and ledger row carries the
+``data_epoch_id`` it was written under. After each snapshot, when the current
+epoch is known, ``cap_to_epoch`` deletes snapshots of any other epoch (or none)
+and drops other-epoch rows from the index and ledgers (atomic rewrite), so the
+history never spans two epochs. ``clear_for_reset`` empties the history at a
+data reset: it removes only entries this module owns (snapshot folders,
+staging folders, the index and the two ledgers) and refuses roots under
+OneDrive or a Windows user Temp folder. ``never_touch_reason`` is the shared
+guard: operator ``.puller-backup-*`` folders and ``gs-export*`` files (the
+GS export temp files in ``AppData\\Local\\Temp``) are never touched, by this
+module or by the laptop wipe planner in ``clean_epoch_wipe``.
 """
 from __future__ import annotations
 
@@ -28,6 +40,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -53,6 +66,11 @@ HEALTH_LEDGER = "data_health_ledger.jsonl"
 REPORT_MANIFEST = "report_manifest.json"
 EVENT_STUDY_REPORT = "event_study_report.json"
 DATA_HEALTH_REPORT = "data_health_report.json"
+EPOCH_FIELD = "data_epoch_id"
+CLEAR_CONFIRM = "CLEAR-REPORT-HISTORY"
+OWNED_FILES = (INDEX, EVENT_LEDGER, HEALTH_LEDGER)
+SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z_[A-Za-z0-9_-]{1,32}$")
+NEVER_TOUCH_PREFIXES = ((".puller-backup-", "PULLER_BACKUP"), ("gs-export", "GS_EXPORT_TEMP"))
 
 try:  # optional: zstd is faster and smaller; gzip is always available
     import zstandard as _zstd
@@ -66,6 +84,42 @@ def resolve_history_root(root: Optional[str] = None) -> Path:
 
 def _onedrive(path: Path) -> bool:
     return "onedrive" in {part.casefold() for part in Path(path).resolve().parts}
+
+
+def _path_parts(path) -> list:
+    """Path components split on both separators, so Windows paths are judged the same on any OS."""
+    return [part.casefold() for part in re.split(r"[\\/]+", str(path)) if part]
+
+
+def never_touch_reason(path) -> Optional[str]:
+    """Why ``path`` must never be modified or deleted by any reset/cap code, else None.
+
+    Shared by ``clear_for_reset``/``cap_to_epoch`` and ``clean_epoch_wipe.plan_laptop``: operator
+    ``.puller-backup-*`` folders, ``gs-export*`` temp files, anything under a Windows user Temp
+    folder (``AppData\\Local\\Temp``) and anything under OneDrive.
+    """
+    parts = _path_parts(path)
+    for part in parts:
+        for prefix, reason in NEVER_TOUCH_PREFIXES:
+            if part.startswith(prefix):
+                return reason
+    for i in range(len(parts) - 2):
+        if parts[i:i + 3] == ["appdata", "local", "temp"]:
+            return "WINDOWS_USER_TEMP"
+    if "onedrive" in parts:
+        return "ONEDRIVE"
+    return None
+
+
+def current_epoch_id(epoch_id: Optional[str] = None) -> Optional[str]:
+    """The epoch the history is capped to: ``epoch_id`` if given, else the active DATA_EPOCH_ID manifest's."""
+    if epoch_id:
+        return str(epoch_id)
+    try:
+        import data_epoch
+        return data_epoch.active_epoch_id()
+    except Exception:
+        return None
 
 
 def _iso(ts: float) -> str:
@@ -190,8 +244,8 @@ def snapshot_report_set(report_dir: str, history_root: Optional[str] = None, *,
                         daily_keep_days: int = DEFAULT_DAILY_KEEP_DAYS,
                         patterns: Iterable[str] = ("*.json",),
                         compress_min_bytes: int = COMPRESS_MIN_BYTES,
-                        now: Optional[float] = None) -> dict:
-    """Snapshot the full report set of one generation, append the ledgers, enforce retention.
+                        now: Optional[float] = None, epoch_id: Optional[str] = None) -> dict:
+    """Snapshot the full report set of one generation, append the ledgers, cap to the epoch, enforce retention.
 
     Idempotent per ``generation_id`` (default: ``report_manifest.json``'s). Never raises.
     """
@@ -203,20 +257,29 @@ def snapshot_report_set(report_dir: str, history_root: Optional[str] = None, *,
     try:
         if _onedrive(src) or _onedrive(root):
             return {**result, "status": "REFUSED", "reason": "OneDrive paths are never used for history"}
+        guard = never_touch_reason(root)
+        if guard:
+            return {**result, "status": "REFUSED", "reason": f"history root is never-touch: {guard}"}
         if not src.is_dir():
             return {**result, "status": "NO_REPORT_DIR"}
         manifest = _read_json(src / REPORT_MANIFEST)
         gen = str(generation_id or manifest.get("generation_id") or "").strip() or f"nogen-{int(now)}"
         result["generation_id"] = gen
+        epoch = current_epoch_id(epoch_id)
+        result[EPOCH_FIELD] = epoch
         root.mkdir(parents=True, exist_ok=True)
         _sweep_staging(root, now)
         existing = _generation_exists(root, gen)
         if existing:
             result.update(status="EXISTS", path=str(root / existing))
         else:
-            result.update(_write_snapshot(src, root, gen, manifest, tuple(patterns), compress_min_bytes, now))
-        result["event_study_ledger"] = append_event_study_ledger(str(src), str(root), generation_id=gen, now=now)
-        result["data_health_ledger"] = append_data_health_ledger(str(src), str(root), generation_id=gen, now=now)
+            result.update(_write_snapshot(src, root, gen, manifest, tuple(patterns), compress_min_bytes, now,
+                                          epoch))
+        result["event_study_ledger"] = append_event_study_ledger(str(src), str(root), generation_id=gen, now=now,
+                                                                 epoch_id=epoch)
+        result["data_health_ledger"] = append_data_health_ledger(str(src), str(root), generation_id=gen, now=now,
+                                                                 epoch_id=epoch)
+        result["epoch_cap"] = cap_to_epoch(str(root), epoch)
         result["retention"] = enforce_retention(str(root), keep_bytes_cap=keep_bytes_cap,
                                                 keep_min_generations=keep_min_generations,
                                                 daily_keep_days=daily_keep_days, now=now)
@@ -227,7 +290,7 @@ def snapshot_report_set(report_dir: str, history_root: Optional[str] = None, *,
 
 
 def _write_snapshot(src: Path, root: Path, gen: str, manifest: dict, patterns, compress_min_bytes: int,
-                    now: float) -> dict:
+                    now: float, epoch: Optional[str] = None) -> dict:
     stamp = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_gen = "".join(c for c in gen if c.isalnum() or c in "-_")[:32] or "nogen"
     name = f"{stamp}_{safe_gen}"
@@ -270,7 +333,7 @@ def _write_snapshot(src: Path, root: Path, gen: str, manifest: dict, patterns, c
         stored_bytes += 0 if entry["linked"] else entry["stored_bytes"]
         source_bytes += size
         files[path.name] = entry
-    doc = {"schema": SCHEMA, "generation_id": gen, "created_at": _iso(now), "created_ts": now,
+    doc = {"schema": SCHEMA, "generation_id": gen, EPOCH_FIELD: epoch, "created_at": _iso(now), "created_ts": now,
            "report_dir": str(src), "files": files,
            "report_manifest": {k: manifest.get(k) for k in ("generation_id", "generated_at", "generation_started_at",
                                                             "analyzer_revision", "dataset_epoch",
@@ -282,7 +345,8 @@ def _write_snapshot(src: Path, root: Path, gen: str, manifest: dict, patterns, c
     _make_read_only(staging / MANIFEST)
     final = root / name
     os.replace(staging, final)
-    _append_line(root / INDEX, {"schema": SCHEMA, "generation_id": gen, "path": name, "created_at": _iso(now),
+    _append_line(root / INDEX, {"schema": SCHEMA, "generation_id": gen, EPOCH_FIELD: epoch, "path": name,
+                                "created_at": _iso(now),
                                 "files": len(files), "manifest_sha256": _sha256(final / MANIFEST)})
     return {"status": "WRITTEN", "path": str(final), "files": len(files), "linked_files": linked,
             "source_bytes": source_bytes, "new_stored_bytes": stored_bytes}
@@ -390,7 +454,8 @@ def enforce_retention(history_root: str, *, keep_bytes_cap: int = DEFAULT_KEEP_B
 
 # ------------------------------------------------------------------ ledgers
 def append_event_study_ledger(report_dir: str, history_root: Optional[str] = None, *,
-                              generation_id: str, now: Optional[float] = None) -> dict:
+                              generation_id: str, now: Optional[float] = None,
+                              epoch_id: Optional[str] = None) -> dict:
     """One line per pre-registered hypothesis (H1-H5 lockbox counters) for this generation."""
     now = float(now if now is not None else time.time())
     path = resolve_history_root(history_root) / EVENT_LEDGER
@@ -404,7 +469,8 @@ def append_event_study_ledger(report_dir: str, history_root: Optional[str] = Non
         lock = h.get("lockbox") or {}
         disc = h.get("discovery") or {}
         _append_line(path, {
-            "schema": EVENT_LEDGER_SCHEMA, "generation_id": str(generation_id), "recorded_at": _iso(now),
+            "schema": EVENT_LEDGER_SCHEMA, "generation_id": str(generation_id), EPOCH_FIELD: epoch_id,
+            "recorded_at": _iso(now),
             "report_generated_ts": report.get("generated_ts"), "dataset_epoch": report.get("dataset_epoch"),
             "registered_utc": (report.get("registry") or {}).get("registered_utc"),
             "hypothesis_id": h.get("id"), "spec_hash": h.get("spec_hash"), "status": h.get("status"),
@@ -419,7 +485,8 @@ def append_event_study_ledger(report_dir: str, history_root: Optional[str] = Non
 
 
 def append_data_health_ledger(report_dir: str, history_root: Optional[str] = None, *,
-                              generation_id: str, now: Optional[float] = None) -> dict:
+                              generation_id: str, now: Optional[float] = None,
+                              epoch_id: Optional[str] = None) -> dict:
     """One line per generation with every stream's data-health verdict."""
     now = float(now if now is not None else time.time())
     path = resolve_history_root(history_root) / HEALTH_LEDGER
@@ -433,10 +500,135 @@ def append_data_health_ledger(report_dir: str, history_root: Optional[str] = Non
     streams = {str(s.get("stream")): {k: s.get(k) for k in keys}
                for s in report.get("streams") or [] if isinstance(s, dict) and s.get("stream")}
     _append_line(path, {
-        "schema": HEALTH_LEDGER_SCHEMA, "generation_id": str(generation_id), "recorded_at": _iso(now),
+        "schema": HEALTH_LEDGER_SCHEMA, "generation_id": str(generation_id), EPOCH_FIELD: epoch_id,
+        "recorded_at": _iso(now),
         "report_generated_ts": report.get("generated_ts"), "dataset_epoch": report.get("dataset_epoch"),
         "status": report.get("status"), "status_counts": report.get("status_counts"),
         "window_sec": report.get("window_sec"), "mirror_head_ts": report.get("mirror_head_ts"),
         "streams": streams,
     })
     return {"status": "APPENDED", "appended": 1}
+
+
+# ------------------------------------------------------------------ epoch cap and reset
+def _owned_snapshot_dir(path: Path) -> bool:
+    name = path.name
+    if name.startswith(STAGING_PREFIX):
+        name = name[len(STAGING_PREFIX):]
+    return (path.is_dir() and not path.is_symlink() and bool(SNAPSHOT_NAME_RE.match(name))
+            and never_touch_reason(path) is None)
+
+
+def owned_entries(history_root: str) -> list:
+    """Top-level entries of ``history_root`` this module wrote; nothing else is ever modified."""
+    root = Path(history_root)
+    if not root.is_dir():
+        return []
+    out = []
+    for p in sorted(root.iterdir()):
+        if never_touch_reason(p):
+            continue
+        if p.name in OWNED_FILES and p.is_file() and not p.is_symlink():
+            out.append(p)
+        elif _owned_snapshot_dir(p):
+            out.append(p)
+    return out
+
+
+def _rewrite_ledger_for_epoch(path: Path, epoch: str) -> int:
+    """Atomically drop rows not stamped with ``epoch``; returns the number dropped."""
+    if not path.is_file() or path.is_symlink():
+        return 0
+    rows = read_ledger(str(path))
+    keep = [row for row in rows if row.get(EPOCH_FIELD) == epoch]
+    dropped = len(rows) - len(keep)
+    if not dropped:
+        return 0
+    tmp = path.with_name(path.name + ".epoch-cap.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        for row in keep:
+            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    return dropped
+
+
+def cap_to_epoch(history_root: str, epoch_id: Optional[str]) -> dict:
+    """Keep only ``epoch_id``'s snapshots and rows; a no-op (never a delete) when the epoch is unknown."""
+    root = Path(history_root)
+    if not epoch_id:
+        return {"status": "EPOCH_UNKNOWN", "deleted_snapshots": [], "dropped_rows": {}}
+    if never_touch_reason(root) or _onedrive(root):
+        return {"status": "REFUSED", "deleted_snapshots": [], "dropped_rows": {}}
+    deleted = []
+    for snap in list_snapshots(root):
+        if not _owned_snapshot_dir(snap):
+            continue
+        if _read_json(snap / MANIFEST).get(EPOCH_FIELD) == epoch_id:
+            continue
+        try:
+            _rmtree(snap)
+        except OSError:
+            continue        # in use: capped on the next run
+        deleted.append(snap.name)
+    dropped = {name: _rewrite_ledger_for_epoch(root / name, epoch_id) for name in OWNED_FILES}
+    return {"status": "OK", EPOCH_FIELD: epoch_id, "deleted_snapshots": deleted,
+            "dropped_rows": {k: v for k, v in dropped.items() if v}}
+
+
+def clear_for_reset(history_root: Optional[str] = None, *, confirm: str) -> dict:
+    """Empty the report history at a data reset; only ``owned_entries`` are removed, then read back."""
+    root = resolve_history_root(history_root)
+    result = {"history_root": str(root), "removed": [], "untouched": []}
+    if confirm != CLEAR_CONFIRM:
+        return {**result, "status": "REFUSED", "reason": f"confirm must be {CLEAR_CONFIRM!r}"}
+    guard = never_touch_reason(root)
+    if guard or _onedrive(root):
+        return {**result, "status": "REFUSED", "reason": f"history root is never-touch: {guard or 'ONEDRIVE'}"}
+    if not root.is_dir():
+        return {**result, "status": "ABSENT"}
+    owned = owned_entries(str(root))
+    owned_names = {p.name for p in owned}
+    for p in owned:
+        try:
+            if p.is_dir():
+                _rmtree(p)
+            else:
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+                p.unlink()
+            result["removed"].append(p.name)
+        except OSError as exc:
+            result.setdefault("errors", []).append(f"{p.name}: {type(exc).__name__}")
+    result["untouched"] = sorted(p.name for p in root.iterdir() if p.name not in owned_names)
+    leftover = [p.name for p in owned_entries(str(root))]
+    result["readback_leftover"] = leftover
+    result["status"] = "CLEARED" if not leftover else "INCOMPLETE"
+    return result
+
+
+def main(argv=None) -> int:
+    """Laptop operator CLI (run only with Danish's approval): ``clear-for-reset`` or ``cap-to-epoch``."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m research.report_history")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    clear = sub.add_parser("clear-for-reset")
+    clear.add_argument("--root")
+    clear.add_argument("--confirm", required=True)
+    cap = sub.add_parser("cap-to-epoch")
+    cap.add_argument("--root")
+    cap.add_argument("--epoch-id")
+    args = ap.parse_args(argv)
+    if args.cmd == "clear-for-reset":
+        out = clear_for_reset(args.root, confirm=args.confirm)
+        ok = out["status"] in ("CLEARED", "ABSENT")
+    else:
+        root = resolve_history_root(args.root)
+        out = cap_to_epoch(str(root), current_epoch_id(args.epoch_id))
+        ok = out["status"] == "OK"
+    print(json.dumps(out, indent=1, sort_keys=True))
+    return 0 if ok else 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

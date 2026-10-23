@@ -133,3 +133,102 @@ def test_engine_snapshots_the_manifest_report_dir_with_its_generation():
     assert "os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE))" in call
     assert '_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id")' in call
     assert "REPORTS_DIR" not in call
+
+
+# ------------------------------------------------------------------ RK C4c: epoch cap and reset clear
+EP_A, EP_B = "ce-20261020-epoch-a", "ce-20261024-epoch-b"
+WIN_TEMP = r"C:\Users\danis\AppData\Local\Temp"
+
+
+def _rows(path):
+    return RH.read_ledger(str(path)) if path.exists() else []
+
+
+def test_c4c_history_is_stamped_and_capped_to_the_current_epoch(tmp_path):
+    root = tmp_path / "history"
+    for i, (gen, ep) in enumerate((("gen-1", EP_A), ("gen-2", EP_A), ("gen-3", EP_B))):
+        src = _report_dir(tmp_path, gen)
+        out = RH.snapshot_report_set(str(src), str(root), now=NOW + i * 60, epoch_id=ep)
+        assert out["status"] == "WRITTEN" and out[RH.EPOCH_FIELD] == ep
+    assert out["epoch_cap"]["status"] == "OK" and len(out["epoch_cap"]["deleted_snapshots"]) == 2
+    snaps = RH.list_snapshots(root)
+    assert [json.loads((s / RH.MANIFEST).read_text(encoding="utf-8"))["generation_id"] for s in snaps] == ["gen-3"]
+    for name in RH.OWNED_FILES:
+        rows = _rows(root / name)
+        assert rows and {r[RH.EPOCH_FIELD] for r in rows} == {EP_B}, name
+        assert {r["generation_id"] for r in rows} == {"gen-3"}, name
+
+
+def test_c4c_unstamped_legacy_history_is_dropped_but_unknown_epoch_never_deletes(tmp_path, monkeypatch):
+    root = tmp_path / "history"
+    monkeypatch.setattr(RH, "current_epoch_id", lambda epoch_id=None: epoch_id)
+    legacy = RH.snapshot_report_set(str(_report_dir(tmp_path, "gen-legacy")), str(root), now=NOW)
+    assert legacy["status"] == "WRITTEN" and legacy["epoch_cap"]["status"] == "EPOCH_UNKNOWN"
+    assert len(RH.list_snapshots(root)) == 1                     # no epoch known: nothing deleted
+    assert RH.cap_to_epoch(str(root), None)["deleted_snapshots"] == []
+    out = RH.snapshot_report_set(str(_report_dir(tmp_path, "gen-b")), str(root), now=NOW + 60, epoch_id=EP_B)
+    assert out["epoch_cap"]["deleted_snapshots"] and len(RH.list_snapshots(root)) == 1
+    assert {r["generation_id"] for r in _rows(root / RH.INDEX)} == {"gen-b"}
+
+
+def _populated_history_with_neighbours(tmp_path):
+    root = tmp_path / "report-history"
+    RH.snapshot_report_set(str(_report_dir(tmp_path, "gen-1")), str(root), now=NOW, epoch_id=EP_A)
+    (root / (RH.STAGING_PREFIX + "20261024T000000Z_gen-x")).mkdir()
+    neighbours = {
+        ".puller-backup-20261020T101500/report_manifest.json": "{\"keep\": 1}",
+        ".puller-backup-20261020T101500/index.jsonl": "{}\n",
+        "gs-export-20261023-153000.csv": "a,b\n1,2\n",
+        "gs-export-tmp/part.json": "{}",
+        "operator_notes.txt": "mine",
+        "20261024T000000Z_not-a-dir.json": "{}",
+    }
+    for rel, text in neighbours.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root, neighbours
+
+
+def test_c4c_clear_for_reset_removes_only_owned_entries_and_reads_back(tmp_path):
+    root, neighbours = _populated_history_with_neighbours(tmp_path)
+    assert RH.clear_for_reset(str(root), confirm="yes")["status"] == "REFUSED"
+    assert RH.list_snapshots(root)
+    out = RH.clear_for_reset(str(root), confirm=RH.CLEAR_CONFIRM)
+    assert out["status"] == "CLEARED" and out["readback_leftover"] == []
+    assert set(out["removed"]) >= {RH.INDEX, RH.EVENT_LEDGER, RH.HEALTH_LEDGER,
+                                    RH.STAGING_PREFIX + "20261024T000000Z_gen-x"}
+    assert not RH.list_snapshots(root) and RH.owned_entries(str(root)) == []
+    for rel, text in neighbours.items():                           # every neighbour byte-identical
+        assert (root / rel).read_text(encoding="utf-8") == text, rel
+    assert {".puller-backup-20261020T101500", "gs-export-20261023-153000.csv", "gs-export-tmp"} <= set(out["untouched"])
+
+
+def test_c4c_puller_backup_and_gs_export_are_excluded_everywhere(tmp_path):
+    # The shared guard: operator .puller-backup-* folders and the GS export temp files are never touched.
+    for path, reason in (
+            (WIN_TEMP + r"\gs-export-20261023-153000.csv", "GS_EXPORT_TEMP"),
+            (WIN_TEMP + r"\gs-export-abc\part-0.json", "GS_EXPORT_TEMP"),
+            (WIN_TEMP + r"\anything-else.tmp", "WINDOWS_USER_TEMP"),
+            (r"C:\DoxxedCrypto\analysis-archive\.puller-backup-20261020\index.jsonl", "PULLER_BACKUP"),
+            (r"C:\DoxxedCrypto\fly-mirror-segments\.puller-backup-1", "PULLER_BACKUP"),
+            ("report-history/.puller-backup-x/manifest.json", "PULLER_BACKUP")):
+        assert RH.never_touch_reason(path) == reason, path
+    assert RH.never_touch_reason(RH.DEFAULT_HISTORY_ROOT) is None
+    assert RH.never_touch_reason(r"C:\DoxxedCrypto\analysis-archive\report-history\index.jsonl") is None
+    # A history root inside a user Temp folder is refused outright: nothing in it is removed or written.
+    temp = tmp_path / "Users" / "danis" / "AppData" / "Local" / "Temp"
+    root = temp / "report-history"
+    export = temp / "gs-export-20261023-153000.csv"
+    export.parent.mkdir(parents=True)
+    export.write_text("a,b\n", encoding="utf-8")
+    root.mkdir()
+    (root / RH.INDEX).write_text("{}\n", encoding="utf-8")
+    assert RH.clear_for_reset(str(root), confirm=RH.CLEAR_CONFIRM)["status"] == "REFUSED"
+    assert RH.clear_for_reset(WIN_TEMP, confirm=RH.CLEAR_CONFIRM)["status"] == "REFUSED"
+    assert RH.cap_to_epoch(str(root), EP_B)["status"] == "REFUSED"
+    snap = RH.snapshot_report_set(str(_report_dir(tmp_path, "gen-t")), str(root), now=NOW, epoch_id=EP_B)
+    assert snap["status"] == "REFUSED"
+    assert (root / RH.INDEX).read_text(encoding="utf-8") == "{}\n"
+    assert export.read_text(encoding="utf-8") == "a,b\n"
+    assert sorted(p.name for p in root.iterdir()) == [RH.INDEX]

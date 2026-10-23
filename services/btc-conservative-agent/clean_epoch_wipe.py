@@ -201,18 +201,46 @@ class Plan:
 
 # ------------------------------------------------------------------ laptop planner
 
+def _report_history():
+    from research import report_history
+    return report_history
+
+
+def default_laptop_roots() -> dict[str, dict[str, Any]]:
+    """``LAPTOP_ROOTS`` plus the analyzer report history when ``DOXXED_REPORT_HISTORY_DIR`` moves it outside them."""
+    roots = dict(LAPTOP_ROOTS)
+    history = _report_history().resolve_history_root()
+    inside = any(str(history).lower().rstrip("\\/").startswith(spec["path"].lower().rstrip("\\/") + sep)
+                 for spec in LAPTOP_ROOTS.values() for sep in ("\\", "/"))
+    if not inside:
+        roots["report_history"] = {"path": str(history), "kind": "report_history"}
+    return roots
+
+
 def plan_laptop(plan: Plan, roots: dict[str, dict[str, Any]] | None = None) -> None:
-    roots = roots or LAPTOP_ROOTS
+    roots = roots or default_laptop_roots()
+    never_touch = _report_history().never_touch_reason
     epoch_day = time.strftime("%Y-%m-%d", time.gmtime(plan.epoch_start))
     start_ns = int(plan.epoch_start * 1e9)
     for name, spec in roots.items():
         root = Path(spec["path"])
         if "onedrive" in str(root).lower():
             raise SystemExit(f"REFUSED: {root} is under OneDrive")
+        guard = never_touch(root)
+        if guard:
+            raise SystemExit(f"REFUSED: {root} is never-touch ({guard})")
         if not root.is_dir():
             plan.notes.append(f"{name}: {root} absent")
             continue
         for rel, st in _walk(root):
+            # Operator .puller-backup-* folders and gs-export* temp files: never planned, whatever the root.
+            guard = never_touch(rel)
+            if guard:
+                plan.keep(name, rel, st.st_size, f"NEVER_TOUCH_{guard}")
+                continue
+            if spec["kind"] == "report_history" and not _report_history_owned(rel):
+                plan.keep(name, rel, st.st_size, "NOT_REPORT_HISTORY_OWNED")
+                continue
             reason = keep_reason(rel, scope="laptop")
             if reason:
                 plan.keep(name, rel, st.st_size, reason)
@@ -226,6 +254,15 @@ def plan_laptop(plan: Plan, roots: dict[str, dict[str, Any]] | None = None) -> N
                     plan.keep(name, rel, st.st_size, "TIER_A_EPOCH_DAY_PARTITION_MIXED")
                     continue
             plan.delete(name, str(root / rel), st.st_size, st.st_mtime_ns, f"PRE_EPOCH_{spec['kind'].upper()}", rel)
+
+
+def _report_history_owned(rel: str) -> bool:
+    rh = _report_history()
+    first = rel.replace("\\", "/").split("/", 1)
+    if len(first) == 1:
+        return first[0] in rh.OWNED_FILES
+    name = first[0][len(rh.STAGING_PREFIX):] if first[0].startswith(rh.STAGING_PREFIX) else first[0]
+    return bool(rh.SNAPSHOT_NAME_RE.match(name))
 
 
 # ------------------------------------------------------------------ Fly planner
