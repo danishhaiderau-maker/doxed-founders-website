@@ -30,6 +30,13 @@ burst of updates between s+1 and the close, or a catch-up after a stall, can nev
 Event rows also carry ``mono`` (time.monotonic(), s, ms precision) so a wall-clock step can neither fake nor hide a
 gap, and a disconnect row carries ``reason`` (the exception class, or ``stop`` on a graceful shutdown).
 
+Measured book receive time (RK/HM #851, 24 Oct): every ``bfx_book_10l_1s`` row carries ``receive_ts`` (epoch s, the
+wall clock read right after the WS recv of the LAST book frame applied to that row's frozen state, rounded UP to the
+ms), ``receive_mono`` (time.monotonic() at that same frame) and ``receive_ts_source`` = ``WS_FRAME``. The row is the
+exact book for any time t in [receive_ts, next frame), so a pricer proves no look-ahead with ``receive_ts <= t``.
+Rows written before this field existed carry no ``receive_ts`` and are non-countable for pricing; a bucket + write-lag
+estimate is never written here (it may only ever be a diagnostic label INFERRED_BUCKET_LAG, never countable).
+
 Disconnect zeroing is conservative only: on_bfx_disconnect also clears the book-liveness of seconds that are already
 frozen but not yet closed, so a disconnect seen after s+1 can suppress a carried row ``s`` (never the reverse). A
 fresh (non-carried) row is unaffected.
@@ -39,6 +46,7 @@ from __future__ import annotations
 import collections
 import glob
 import json
+import math
 import os
 import random
 import signal
@@ -133,6 +141,15 @@ class Sink:
                 _log(f"write failed {self.path}: {type(exc).__name__}")
 
 
+def book_receive_stamp(receive_ts: float, receive_mono: float) -> dict:
+    """Measured receive time of a book row (RK/HM #851): wall rounded UP to the ms (never earlier than measured),
+    monotonic at the same frame. Empty when there is no measured frame time (the row is then non-countable)."""
+    if not receive_ts or receive_ts <= 0:
+        return {}
+    return {"receive_ts": math.ceil(receive_ts * 1000.0 - 1e-6) / 1000.0, "receive_mono": round(receive_mono, 3),
+            "receive_ts_source": "WS_FRAME"}
+
+
 class BfxBook:
     """Bitfinex P0 book (price, count, amount): count 0 deletes; amount > 0 bid, < 0 ask."""
 
@@ -140,6 +157,7 @@ class BfxBook:
         self.bids: dict = {}
         self.asks: dict = {}
         self.ts = 0.0
+        self.mono = 0.0  # time.monotonic() at the WS recv of the last frame applied (set by the collector)
 
     def apply(self, entry, now: float) -> None:
         price, count, amount = float(entry[0]), int(entry[1]), float(entry[2])
@@ -206,7 +224,8 @@ class Collector:
         self.deriv: Optional[tuple] = None  # (fields, recv_ts), latest
         self._deriv_hist = _SecondHistory()
         self._quote_hist = {"lighter": _SecondHistory(), "paradex": _SecondHistory()}
-        # Book state frozen at each second boundary: {sec: (b, a, book_ts, carry_ok, alive_ts)} = state at END of sec.
+        # Book state frozen at each second boundary: {sec: (b, a, book_ts, carry_ok, alive_ts, book_mono)} = state at
+        # END of sec; book_ts/book_mono = measured wall/monotonic receive time of the last book frame applied.
         self._open_sec: Optional[int] = None
         self._frozen: dict = {}
         self.book = BfxBook()
@@ -239,7 +258,7 @@ class Collector:
         if sec > self._open_sec:
             b, a = self.book.top()
             carry_ok = bool(self.book.ts and self.book.bids and self.book.asks and max(self.book.bids) < min(self.book.asks))
-            self._frozen[self._open_sec] = (b, a, self.book.ts, carry_ok, self.book_alive_ts)
+            self._frozen[self._open_sec] = (b, a, self.book.ts, carry_ok, self.book_alive_ts, self.book.mono)
             self._open_sec = sec
 
     def _book_at(self, sec: int):
@@ -287,10 +306,13 @@ class Collector:
         with self.lock:
             if kind == "book":
                 body = msg[1]
+                mono = self.mono()  # same WS receipt as ``now`` (the caller reads the wall clock right after recv)
                 if body and isinstance(body[0], list):
                     self.book.snapshot(body, now)
+                    self.book.mono = mono
                 elif body:
                     self.book.apply(body, now)
+                    self.book.mono = mono
             elif kind == "status":
                 if isinstance(msg[1], list) and msg[1] and not isinstance(msg[1][0], list):
                     parsed = parse_deriv_status(msg[1])
@@ -310,7 +332,7 @@ class Collector:
         with self.lock:
             self._roll(now)
             self.book_alive_ts = 0.0
-            self._frozen = {k: (b, a, ts, ok, 0.0) for k, (b, a, ts, ok, _alive) in self._frozen.items()}
+            self._frozen = {k: (b, a, ts, ok, 0.0, m) for k, (b, a, ts, ok, _alive, m) in self._frozen.items()}
         self._event(now, "disconnect", reason=reason or "unknown")
 
     def on_lighter(self, msg: dict, now: float) -> None:
@@ -337,8 +359,9 @@ class Collector:
             snap = self._book_at(sec)
             b = a = []
             fresh = carried = False
+            bts = bmono = 0.0
             if snap:
-                sb, sa, bts, carry_ok, alive = snap
+                sb, sa, bts, carry_ok, alive, bmono = snap
                 fresh = bool(bts and end - bts <= MAX_QUOTE_AGE_SEC)
                 # Quiet book, live connection: carry the unchanged book forward instead of writing no row (18 Oct
                 # 17:38:08-13: a 6 s gap forced an exit to FORCED_NO_BOOK although the book had not changed).
@@ -359,7 +382,8 @@ class Collector:
         dv = self._dv.current()
         stamp = {"dv": dv} if dv else {}
         if b and a:
-            self.book_sink.write({"s": sec, "b": b, "a": a, **({"carried": True} if carried else {}), **stamp})
+            self.book_sink.write({"s": sec, "b": b, "a": a, **({"carried": True} if carried else {}),
+                                  **book_receive_stamp(bts, bmono), **stamp})
         if trades:
             self.trade_sink.write({"s": sec, "tr": trades, **stamp})
         if deriv and end - deriv[1] <= MAX_DERIV_AGE_SEC:

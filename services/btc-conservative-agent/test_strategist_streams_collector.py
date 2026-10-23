@@ -9,6 +9,11 @@ def _rows(p):
     return [json.loads(x) for x in Path(p).read_text().splitlines()]
 
 
+def _book_rows(p):
+    """Book rows without the measured receive stamp (asserted separately in test_book_rows_carry_measured_receive_ts)."""
+    return [{k: v for k, v in r.items() if k not in ("receive_ts", "receive_mono", "receive_ts_source")} for r in _rows(p)]
+
+
 def test_book_trades_and_venues(tmp_path):
     c = ssc.Collector(str(tmp_path))
     chans = {}
@@ -137,8 +142,9 @@ def test_row_s_has_no_look_ahead_into_s_plus_1(tmp_path):
     deriv[0], deriv[14], deriv[11] = 101200, 150.5, 0.0001
     c.on_bfx([7, deriv], chans, 101.2)
     c.close_second(100, now=101.4)
-    book = _rows(tmp_path / ssc.BOOK_FILE)
+    book = _book_rows(tmp_path / ssc.BOOK_FILE)
     assert book == [{"s": 100, "b": [[100, 0.5]], "a": [[200, 0.5]]}]
+    assert _rows(tmp_path / ssc.BOOK_FILE)[0]["receive_ts"] == 100.4  # the 101.2 delta is not in row 100
     assert _rows(tmp_path / ssc.TRADES_FILE) == [{"s": 100, "tr": [[1, 100400, 0.01, 150]]}]
     assert _rows_or_empty(tmp_path / ssc.DERIV_FILE) == []  # received at 101.2 > s+1
     c.close_second(101, now=102.4)
@@ -252,7 +258,7 @@ def test_c3a_reconnect_mid_second_row_is_the_new_snapshot(tmp_path):
     c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 5}, chans, 100.5)  # new chanId
     c.on_bfx([5, [[110, 1, 0.7], [190, 1, -0.7]]], chans, 100.6)  # snapshot B, same second
     c.close_second(100, now=101.3)
-    assert _rows(tmp_path / ssc.BOOK_FILE) == [{"s": 100, "b": [[110, 0.7]], "a": [[190, 0.7]]}]
+    assert _book_rows(tmp_path / ssc.BOOK_FILE) == [{"s": 100, "b": [[110, 0.7]], "a": [[190, 0.7]]}]
 
 
 def test_c3b_hb_only_book_carries_and_a_disconnect_drops_the_carry(tmp_path):
@@ -260,7 +266,7 @@ def test_c3b_hb_only_book_carries_and_a_disconnect_drops_the_carry(tmp_path):
     for t in (104.0, 108.0, 110.5):  # only heartbeats on the book channel
         c.on_bfx([1, "hb"], chans, t)
     c.close_second(110, now=111.3)
-    rows = _rows(tmp_path / ssc.BOOK_FILE)
+    rows = _book_rows(tmp_path / ssc.BOOK_FILE)
     assert rows == [{"s": 110, "b": [[100, 0.5]], "a": [[200, 0.5]], "carried": True}]
     c.on_bfx_disconnect(now=111.5, reason="TimeoutError")
     c.close_second(111, now=112.3)  # frozen before the disconnect was seen: dropped anyway (conservative, N1)
@@ -324,3 +330,21 @@ def test_c3e_ws_loop_graceful_stop_logs_disconnect_stop(tmp_path):
     ev = _rows(tmp_path / ssc.EVENTS_FILE)
     assert [e["ev"] for e in ev][-1] == "disconnect" and ev[-1]["reason"] == "stop"
     assert c.reconnects["bitfinex"] == 0
+
+
+def test_book_rows_carry_measured_receive_ts(tmp_path):
+    """RK/HM #851: each book row carries the MEASURED wall + monotonic receive time of the last book frame in it
+    (rounded up to the ms, never earlier), source WS_FRAME; a carried row keeps the old frame's receive time."""
+    ticks = iter([50.0, 50.25, 50.5, 50.75, 51.0, 51.25, 51.5, 51.75, 52.0])
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0, mono=lambda: next(ticks))
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 1}, chans, 100.0)
+    c.on_bfx([1, [[100, 1, 0.5], [200, 1, -0.5]]], chans, 100.1234)   # snapshot, mono 50.25
+    c.on_bfx([1, [101, 1, 0.5]], chans, 100.6)                          # delta, mono 50.5 (last frame in second 100)
+    c.on_bfx([1, [102, 1, 0.5]], chans, 101.2)                          # second 101 (not in row 100)
+    c.close_second(100, now=101.4)
+    row = _rows(tmp_path / ssc.BOOK_FILE)[0]
+    assert row["receive_ts"] == 100.6 and row["receive_mono"] == 50.5 and row["receive_ts_source"] == "WS_FRAME"
+    assert row["receive_ts"] <= row["s"] + 1
+    assert ssc.book_receive_stamp(100.1234, 1.0)["receive_ts"] == 100.124  # rounded UP, never before the frame
+    assert ssc.book_receive_stamp(0.0, 0.0) == {}  # no measured frame time -> no stamp (non-countable downstream)
