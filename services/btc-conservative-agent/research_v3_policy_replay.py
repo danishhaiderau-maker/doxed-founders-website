@@ -378,6 +378,34 @@ def _replay_exit(path: PreparedReplayArrays, plan: ReplayPlan, atr_pct_at_fill: 
     return exit_index, exit_reason, realized_margin_weighted, partials_taken, remaining_fraction, active_floor
 
 
+_STOP_EXIT_REASONS = frozenset({"PHYSICAL_HARD_STOP", "ATR_STOP", "THESIS_FAST_CUT"})
+
+
+def _stop_unobservable_in_trade_gap(path: Any, plan: ReplayPlan, atr_pct_at_fill: float, leverage: float,
+                                    exit_index: int, exit_reason: str) -> str | None:
+    """HM #847 C2: a stop the book touched while trade prints were silent cannot be proven untriggered.
+
+    Book-walk paths expose ``gap_neg_mae`` (running book-side loss over rows inside a long trade gap).
+    If it reaches any of the plan's stop levels before the exit (at or before it when the exit was
+    not itself a stop), the cell is R17_UNPROVEN and never countable.  Other paths: never.
+    """
+    gap = getattr(path, "gap_neg_mae", None)
+    if gap is None or not len(gap):
+        return None
+    limit = exit_index if exit_reason in _STOP_EXIT_REASONS else exit_index + 1
+    levels: list[tuple[float, int]] = [(plan.hard_stop, limit)]
+    if plan.atr_sl is not None:
+        levels.append((float(atr_pct_at_fill) * float(leverage) * plan.atr_sl, limit))
+    if plan.thesis_cut is not None:
+        window_end = int(np.searchsorted(path.age, plan.thesis_window, side="right")) if path.age_sorted else limit
+        levels.append((-plan.thesis_cut, min(limit, window_end)))
+    for level, end in levels:
+        if _first_at_least(gap, level, end) is not None:
+            from research_v3_book_walk import STOP_UNOBSERVABLE_REASON
+            return STOP_UNOBSERVABLE_REASON
+    return None
+
+
 def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill: float,
                 leverage: float, margin_usd: float) -> dict[str, Any]:
     """The screen's stored fields of ``replay_protected_policy_arrays``, identically rounded."""
@@ -392,6 +420,11 @@ def replay_cell(path: PreparedReplayArrays, plan: ReplayPlan, *, atr_pct_at_fill
         exit_margin = float((path.cur if getattr(path, "exit_cur", None) is None else path.exit_cur)[exit_index])
     except ExitFillUnavailable as exc:
         return {"status": "DATA_ERROR", "reasons": [str(exc)], "exit_reason": None, "net_pnl_usd": None,
+                "profit_retention_ratio": None, "profit_giveback_pct": None,
+                "underwater_observation_ratio": None}
+    unobservable = _stop_unobservable_in_trade_gap(path, plan, atr_pct_at_fill, leverage, exit_index, exit_reason)
+    if unobservable is not None:
+        return {"status": "R17_UNPROVEN", "reasons": [unobservable], "exit_reason": None, "net_pnl_usd": None,
                 "profit_retention_ratio": None, "profit_giveback_pct": None,
                 "underwater_observation_ratio": None}
     terminal_mfe = float(path.mfe[exit_index])

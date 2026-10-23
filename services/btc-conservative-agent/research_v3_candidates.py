@@ -24,6 +24,7 @@ import numpy as np
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
     R17_UNPROVEN,
+    STOP_UNOBSERVABLE_REASON,
     PreparedBookWalkArrays,
     coverage_summary,
     load_book_walk,
@@ -2103,6 +2104,7 @@ def evaluate_protection_screen(
     if book_walk is None:
         book_walk = getattr(inputs, "book_walk", None)
     unproven_reasons: dict[str, int] = defaultdict(int)
+    unproven_cells: dict[str, int] = defaultdict(int)
     unproven_episode: str | None = None
     protections = protection_screen()
     protection_count = len(protections)
@@ -2171,6 +2173,8 @@ def evaluate_protection_screen(
                 ]]
         for entry, (first_position, event, identity, cells) in kept.items():
             for protection_index, (conservative, diagnostic) in enumerate(cells):
+                if conservative[0] == _KIND_REPLAYED and store.names[conservative[1]] == R17_UNPROVEN:
+                    unproven_cells[STOP_UNOBSERVABLE_REASON] += 1
                 store.append(entry * protection_count + protection_index, event, first_position,
                              identity, conservative, diagnostic)
 
@@ -2284,7 +2288,7 @@ def evaluate_protection_screen(
 
     mark_source = coverage_summary(
         events_by_basis, episodes_by_basis, unproven_reasons, getattr(book_walk, "receipt", None),
-        horizon_sec=PATH_HORIZON_SEC,
+        horizon_sec=PATH_HORIZON_SEC, unproven_cells=unproven_cells,
     )
     streaming_receipt = {
         "schema": "protection_replay_streaming_v1",

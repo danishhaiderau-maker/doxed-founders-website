@@ -13,6 +13,9 @@ HM re-review 23 Oct 2026 (~21:10 AEDT) defect 2 and RK binding conditions (~21:1
   executable side of completed book rows (LONG bid, SHORT ask) and fill the same way.
 * An event is replayed only when the book (and trade prints) cover its whole window; otherwise it is
   ``R17_UNPROVEN`` and is excluded from every countable result.  Coverage is stamped per analysis.
+* A replay cell is ``R17_UNPROVEN`` (STOP_UNOBSERVABLE_TRADE_GAP) when, before its exit, the book's
+  executable side touches or crosses one of its stop levels during a trade-print gap longer than
+  ``STOP_UNOBSERVABLE_TRADE_GAP_S`` (no trades heartbeat: quiet market and outage are indistinguishable).
 
 The shared trigger helper (``quote_trigger.first_level_trigger`` / ``book_exit_price``) lands with
 realism-v2 (#839/#841), which merges before this change; the rules here are the same rules and the
@@ -40,6 +43,11 @@ STOP_TRIGGER_LABEL = "LAST_TRADE_DOC_INFERRED"
 STOP_BASIS_UNVERIFIED = "STOP_BASIS_UNVERIFIED"
 MAX_BOOK_GAP_S = _pf.MAX_BOOK_AGE_S  # 2 s: a longer gap between book rows breaks coverage
 MAX_TRADE_GAP_S = 300.0  # no trade-print row for 5 min inside a window = trade collector outage
+# HM #847 C2: bfx_trades has no heartbeat, so a quiet tape and a trade-WS outage look the same.  A
+# book row whose executable exit side sits inside a trade-print gap longer than this cannot prove
+# that a last-trade stop at that level did NOT trigger; if it touches a stop, the cell is R17_UNPROVEN.
+STOP_UNOBSERVABLE_TRADE_GAP_S = 5.0
+STOP_UNOBSERVABLE_REASON = "STOP_UNOBSERVABLE_TRADE_GAP"
 KIND_TRADE, KIND_BOOK = 0, 1
 EXIT_FILL_DELAY_SOURCE = "FIRST_BOOK_ROW_AT_OR_AFTER_TRIGGER"
 
@@ -281,6 +289,24 @@ class _LazyExitMargins:
         return self.path.exit_margin(int(index))
 
 
+def _in_trade_gap(ts: np.ndarray, trade_ts: np.ndarray,
+                  max_gap_s: float = STOP_UNOBSERVABLE_TRADE_GAP_S) -> np.ndarray:
+    """True where ``ts`` falls in a gap between consecutive trade prints longer than ``max_gap_s``.
+
+    Before the first or after the last print in the window the gap is unbounded (True).
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    prints = np.asarray(trade_ts, dtype=np.float64)
+    if not len(ts):
+        return np.zeros(0, dtype=bool)
+    if not len(prints):
+        return np.ones(len(ts), dtype=bool)
+    after = np.searchsorted(prints, ts, side="right")  # index of the next print strictly after ts
+    prev = np.where(after > 0, prints[np.maximum(after - 1, 0)], -np.inf)
+    nxt = np.where(after < len(prints), prints[np.minimum(after, len(prints) - 1)], np.inf)
+    return (nxt - prev) > max_gap_s
+
+
 class PreparedBookWalkArrays:
     """Drop-in for ``PreparedReplayArrays`` on a trade + book timeline.
 
@@ -292,7 +318,7 @@ class PreparedBookWalkArrays:
 
     __slots__ = ("ts", "price", "kind", "cur", "mfe", "mae", "neg_mae", "underwater", "favorable", "age",
                  "age_sorted", "n", "floors", "seg_start", "seg_mfe", "seg_min_cur", "exit_cur",
-                 "_window", "_direction", "_entry", "_leverage", "_qty", "_fills")
+                 "gap_neg_mae", "_window", "_direction", "_entry", "_leverage", "_qty", "_fills")
 
     def __init__(self, window: BookWalkWindow, *, direction: str, entry_price: float, leverage: float,
                  fill_ts: float, horizon_sec: float, qty: float) -> None:
@@ -320,6 +346,11 @@ class PreparedBookWalkArrays:
         else:
             self.seg_start = self.seg_mfe = self.seg_min_cur = np.empty(0)
         self.exit_cur = _LazyExitMargins(self)
+        # Running max of the book-side loss over book rows that sit inside a trade-print gap longer than
+        # STOP_UNOBSERVABLE_TRADE_GAP_S (HM #847 C2).  replay_cell compares it with every stop level.
+        in_gap = book & _in_trade_gap(ts, window.trade_ts)
+        gap_loss = np.where(in_gap, -margin, -np.inf)
+        self.gap_neg_mae = np.maximum.accumulate(gap_loss) if len(ts) else gap_loss
 
     def _margin(self, px: Any) -> Any:
         raw = (np.asarray(px, dtype=np.float64) - self._entry) / self._entry * 100.0 * self._leverage
@@ -342,17 +373,24 @@ class PreparedBookWalkArrays:
 
 def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapping[str, int],
                      unproven_reasons: Mapping[str, int], tape_receipt: Mapping[str, Any] | None,
-                     *, horizon_sec: float) -> dict[str, Any]:
-    """Per-analysis coverage stamp; R17_UNPROVEN events are excluded from every countable result."""
+                     *, horizon_sec: float, unproven_cells: Mapping[str, int] | None = None) -> dict[str, Any]:
+    """Per-analysis coverage stamp; R17_UNPROVEN events are excluded from every countable result.
+
+    ``unproven_cells`` counts replay cells (policy x episode) made R17_UNPROVEN inside a covered event,
+    e.g. STOP_UNOBSERVABLE_TRADE_GAP (HM #847 C2); they are never countable and keep the stamp off GREEN.
+    """
     total = sum(int(v) for v in events_by_basis.values())
     unproven = int(events_by_basis.get(R17_UNPROVEN, 0))
     countable = total - unproven
+    cells = {str(k): int(v) for k, v in (unproven_cells or {}).items() if int(v)}
     if not total:
         level, reason = "AMBER", "NO_REPLAYED_EVENTS"
     elif unproven * 2 > total:
         level, reason = "RED", "R17_UNPROVEN_MAJORITY"
     elif unproven:
         level, reason = "AMBER", "R17_UNPROVEN_EVENTS_EXCLUDED"
+    elif cells:
+        level, reason = "AMBER", "R17_UNPROVEN_CELLS_EXCLUDED"
     else:
         level, reason = "GREEN", None
     receipt = dict(tape_receipt or {})
@@ -372,6 +410,9 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
         "countable_events": countable,
         "r17_unproven_events": unproven,
         "r17_unproven_reasons": dict(sorted(unproven_reasons.items())),
+        "r17_unproven_cells": sum(cells.values()),
+        "r17_unproven_cell_reasons": dict(sorted(cells.items())),
+        "stop_unobservable_trade_gap_s": STOP_UNOBSERVABLE_TRADE_GAP_S,
         # Kept for the window summary / dashboards that read the old mark-source keys.
         "fallback_events": unproven,
         "side_correct_ratio": round(countable / total, 6) if total else None,

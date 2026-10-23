@@ -8,6 +8,7 @@ from book_walk_test_fixture import book_row, build_tape, trade_row
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
     R17_UNPROVEN,
+    STOP_UNOBSERVABLE_REASON,
     BookWalkTape,
     PreparedBookWalkArrays,
     coverage_summary,
@@ -127,3 +128,53 @@ def test_coverage_summary_counts_only_covered_events():
     red = coverage_summary({BASIS_BOOK_WALK: 1, R17_UNPROVEN: 2}, {}, {}, {"book_first_s": 5}, horizon_sec=7200)
     assert (red["alert_level"], red["reason"], red["coverage_book_first_s"]) == ("RED", "R17_UNPROVEN_MAJORITY", 5)
     assert coverage_summary({}, {}, {}, None, horizon_sec=7200)["alert_level"] == "AMBER"
+
+
+@pytest.mark.parametrize("direction", ["LONG", "SHORT"])
+def test_book_touching_the_stop_during_a_trade_gap_is_r17_unproven_never_countable(direction):
+    """HM #847 C2 probe: exit side 2 % through entry for 11 s while trade prints are silent for 247 s.
+
+    With a 1 % hard stop the trade-side margin never reaches the stop, so the old rule replayed the
+    event as covered and countable although a last-trade stop may have fired during a trade-WS outage.
+    """
+    sign = 1 if direction == "LONG" else -1
+    lev = 1.0  # margin % == price %: hard stop 1 % below entry
+
+    def row(s):
+        exit_px = ENTRY - sign * (2.0 if 1100 <= s < 1111 else 0.0)
+        return book_row(s, exit_px, exit_px + 0.05) if direction == "LONG" else book_row(s, exit_px - 0.05, exit_px)
+
+    trades = [trade_row(s, ENTRY + sign * 0.05) for s in range(990, 1700) if not 1000 < s < 1247]
+    tape = _tape([row(s) for s in range(990, 1700)], trades)
+    cover = tape.coverage(998, 1600)
+    assert cover["covered"] is True and cover["trade_max_gap_s"] == pytest.approx(247)  # the old hole
+    window = tape.window(998, 1600)
+    path = PreparedBookWalkArrays(window, direction=direction, entry_price=ENTRY, leverage=lev,
+                                  fill_ts=1000.0, horizon_sec=600, qty=MARGIN * lev / ENTRY)
+    assert float(path.neg_mae.max()) < 1.0  # trade side alone never reaches the 1 % stop
+    plan = ReplayPlan({"loss_protection": {"hard_stop_margin_pct": 1.0}, "profit_protection": {"mode": "NONE"}})
+    result = replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=lev, margin_usd=MARGIN)
+    assert result["status"] == R17_UNPROVEN
+    assert result["reasons"] == [STOP_UNOBSERVABLE_REASON]
+    assert result["net_pnl_usd"] is None and result["exit_reason"] is None
+
+
+def test_book_touch_with_live_trade_prints_is_not_flagged():
+    # Same book dip, but prints every second: a quiet stop was observable, so the cell stays countable.
+    def row(s):
+        exit_px = ENTRY - (2.0 if 1100 <= s < 1111 else 0.0)
+        return book_row(s, exit_px, exit_px + 0.05)
+
+    trades = [trade_row(s, ENTRY + 0.05) for s in range(990, 1700)]
+    tape = _tape([row(s) for s in range(990, 1700)], trades)
+    path = PreparedBookWalkArrays(tape.window(998, 1600), direction="LONG", entry_price=ENTRY, leverage=1.0,
+                                  fill_ts=1000.0, horizon_sec=600, qty=MARGIN / ENTRY)
+    plan = ReplayPlan({"loss_protection": {"hard_stop_margin_pct": 1.0}, "profit_protection": {"mode": "NONE"}})
+    assert replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)["status"] == "COMPLETE"
+
+
+def test_coverage_summary_reports_unproven_cells_and_is_never_green():
+    out = coverage_summary({BASIS_BOOK_WALK: 3}, {BASIS_BOOK_WALK: 3}, {}, None, horizon_sec=7200,
+                           unproven_cells={STOP_UNOBSERVABLE_REASON: 4})
+    assert (out["alert_level"], out["reason"], out["r17_unproven_cells"]) == ("AMBER", "R17_UNPROVEN_CELLS_EXCLUDED", 4)
+    assert out["r17_unproven_cell_reasons"] == {STOP_UNOBSERVABLE_REASON: 4}
