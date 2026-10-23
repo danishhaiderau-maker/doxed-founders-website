@@ -8851,7 +8851,7 @@ test('normal close evidence emits exact fills and uniquely attributable ledger P
       ledgerId: 'ledger-close-1', closedAt: new Date(20_500), pnlUsd: 1.25, description: 'position close',
     }],
     getLedgerFeesSince: async () => ({
-      tradingFeesUsd: 0, fundingFeesUsd: 0.02, realizedPnlUsd: 1.25, positionCloseRows: 1,
+      tradingFeesUsd: 0, fundingFeesUsd: 0.02, realizedPnlUsd: 1.25, positionCloseRows: 1, verified: true, unverifiedRows: 0,
     }),
   };
   const evidence = await service.resolveNormalCloseExchangeEvidence({
@@ -9057,7 +9057,7 @@ test('normal close cost vector fails closed when BBO or bounded funding proof is
     firstExecutedAtMs: id === 101 ? 10_500 : 20_500,
     lastExecutedAtMs: id === 101 ? 10_500 : 20_500,
   });
-  let fundingProof = { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 1, positionCloseRows: 1 };
+  let fundingProof: Record<string, unknown> = { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 1, positionCloseRows: 1, verified: true, unverifiedRows: 0 };
   service.activeTrading = {
     getPositionCloseLedgerEntries: async () => [{
       ledgerId: 'ledger', closedAt: new Date(20_500), pnlUsd: 1, description: 'position close',
@@ -9091,6 +9091,25 @@ test('normal close cost vector fails closed when BBO or bounded funding proof is
   assert.equal(noFunding.funding_fee_usd, undefined);
   assert.equal(noFunding.spread_cost_usd, undefined);
   assert.equal(noFunding.slippage_usd, undefined);
+
+  // HM #842: an unverified ledger read (malformed row) never yields cost evidence, even with one close row.
+  fundingProof = { ...fundingProof, positionCloseRows: 1, verified: false, unverifiedRows: 1 };
+  const unverified = await service.resolveNormalCloseExchangeEvidence({
+    ...base,
+    closeTarget: { ...base.closeTarget,
+      closeBbo: { bid: 64_390, ask: 64_410, observedAtMs: 20_000, source: 'BITFINEX_PUBLIC_TICKER' } },
+  });
+  assert.equal(unverified.trading_fee_usd, undefined);
+  assert.equal(unverified.funding_fee_usd, undefined);
+
+  // A position-close read that throws unverified leaves the evidence UNKNOWN (no realized P&L), never 0.
+  service.activeTrading.getPositionCloseLedgerEntries = async () => {
+    throw new Error('BITFINEX_LEDGER_UNVERIFIED: 1 ledger row(s)');
+  };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+  const throwing = await service.resolveNormalCloseExchangeEvidence(base);
+  assert.equal(throwing.actual_bitfinex_realized_pnl_usd, undefined);
+  assert.equal(throwing.trading_fee_usd, undefined);
 });
 
 test('service lifecycle settles a late TTL cancellation-race slice behind exact replacement protection', async () => {

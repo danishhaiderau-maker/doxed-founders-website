@@ -20474,10 +20474,19 @@ await this.notifications
       },
     });
     if (overlapCount !== 0) return evidence;
-    const rows = await this.activeTrading.getPositionCloseLedgerEntries(
-      input.creds,
-      input.closeTarget.closeSubmitStartedAtMs,
-    );
+    let rows: Awaited<ReturnType<ExecutionTradingClient['getPositionCloseLedgerEntries']>>;
+    try {
+      rows = await this.activeTrading.getPositionCloseLedgerEntries(
+        input.creds,
+        input.closeTarget.closeSubmitStartedAtMs,
+      );
+    } catch (err) {
+      // HM #842: an unverified ledger read (malformed row) leaves the evidence UNKNOWN, never a 0 realized P&L.
+      this.logger.warn(
+        `Normal-close ledger evidence unverified ${input.participantId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return evidence;
+    }
     const bounded = rows.filter((row) => {
       const at = row.closedAt.getTime();
       return at >= input.closeTarget.closeSubmitStartedAtMs! &&
@@ -20497,7 +20506,7 @@ await this.notifications
     );
     const exactTradingFees = Number(allFees.reduce((sum, fee) => sum + Math.abs(fee.amount), 0).toFixed(8));
     if (
-      bounded.length === 1 && ledgerCosts?.positionCloseRows === 1 &&
+      bounded.length === 1 && ledgerCosts?.verified === true && ledgerCosts.positionCloseRows === 1 &&
       Math.abs(ledgerCosts.tradingFeesUsd - exactTradingFees) <= 0.0001 &&
       Number.isFinite(ledgerCosts.fundingFeesUsd) &&
       bboValid(entryBbo, entry.firstExecutedAtMs) && bboValid(closeBbo, exit.firstExecutedAtMs)
