@@ -4,13 +4,15 @@ The CONSERVATIVE protection-replay entry used to be decided and priced by
 ``research.conservative_limit_fill.evaluate_limit_fill`` on ``market_microstructure_1s`` rows, which R3 forbids.
 This module composes only the two shared helpers R4 allows - no pricing or trigger logic of its own:
 
-* trigger: ``quote_trigger.first_level_trigger`` on completed ``bfx_book_10l`` rows.  A buy limit at L is reached
-  when the executable ask is at/through L; a sell limit when the bid is.  quote_trigger states that as a TARGET on
-  the opposite direction's exit side (LONG entry -> ``first_level_trigger("SHORT", KIND_TARGET, L)`` on the ask;
-  SHORT entry -> ``("LONG", KIND_TARGET, L)`` on the bid).
-* price: ``paper_fill(direction, qty, trigger_ts, delay_s, book_at, leg="entry", cap_px=L)`` - the shared
-  book-walk pricer as a limit-capped IOC sent at the trigger.  A miss (``NO_FILL_IOC_CAP`` / no depth) keeps
-  chasing: the next trigger in the same or a later schedule interval is tried.
+* price (RK #848 (a)): each chase interval is an order SENT at its start (the signal) that arrives after the
+  measured delay; ``paper_fill(direction, qty, signal_ts, delay_s, book_at, leg="entry", cap_px=L)`` walks the FULL
+  size on the book row latest at signal + delay, levels at or better than L only.  No fee term (RK #848 (c)).
+* remainder (RK #848 (b)): size not available within L at arrival is NOT filled.  It rests at L until the interval
+  ends; ``quote_trigger.first_level_trigger`` (a TARGET on the opposite side: LONG -> ask at/through L) says whether
+  the book reached L meanwhile.  If not, the remainder is proven NOT_FILLED.  If it did, a resting fill would need
+  real trades through L with our queue position - research has no such proof, so the entry is R17_UNPROVEN_ENTRY
+  (``RESTING_FILL_NO_TRADE_QUEUE_PROOF``).  With nothing filled at arrival, the next interval is tried; a resting
+  claim with nothing filled is kept (at L) for diagnostics only.
 
 Countability (R17): a fill is countable only when it is priced from ``BFX_BOOK_10L`` and its send delay is
 verified (``paper_fill.delay_stamp``: live-ack pool n >= 10).  Research has no live-ack pool, so the default
@@ -18,10 +20,7 @@ verified (``paper_fill.delay_stamp``: live-ack pool n >= 10).  Research has no l
 the book, kept for diagnostics, never counted.  A NO_FILL is countable only when every schedule second had a
 complete book row; a book gap inside the schedule makes the no-fill UNSUPPORTED (``ENTRY_BOOK_GAP``).
 
-Known model difference (flagged for RK): a resting maker limit fills AT L, while this IOC walk can fill below a
-buy limit (above a sell limit) when a completed row has already crossed it; the price improvement is stamped
-(``price_improvement_vs_limit``) on every fill.  The 1 s tape's aggressor-print rule is not reproduced: trade
-prints never trigger an entry here, only completed book rows do.
+Trade prints never decide an entry here; only completed book rows do (R3).
 """
 from __future__ import annotations
 
@@ -40,11 +39,15 @@ except ImportError:  # pragma: no cover - direct script execution
     from quantity_execution import apply_quantity_constraints, validate_signed_quantity_constraints
 
 RECEIPT_SCHEMA = "book_limit_entry_receipt_v1"
-EVALUATOR_VERSION = "book10l-ioc-chase-v1"
+EVALUATOR_VERSION = "book10l-arrival-walk-v2"
 ENTRY_PRICE_SOURCE_BOOK = "BFX_BOOK_10L"
 R17_UNPROVEN_ENTRY = _r17f.R17_UNPROVEN_ENTRY  # the ONE R17 contract module (R4)
 REASON_UNVERIFIED_DELAY = _pf.UNVERIFIED_DELAY
 REASON_NOT_BOOK_PRICED = "ENTRY_NOT_BOOK_PRICED"
+REASON_RESTING_NO_QUEUE_PROOF = "RESTING_FILL_NO_TRADE_QUEUE_PROOF"
+WALK_ROW_RULE = "LATEST_BOOK_ROW_AT_SIGNAL_PLUS_DELAY"
+FILL_BASIS_IMMEDIATE = "IMMEDIATE_WALK_WITHIN_LIMIT"
+FILL_BASIS_RESTING = "RESTING_AT_LIMIT_UNPROVEN"
 _FILLED = ("FILLED", "PARTIAL")
 _EPS = 1e-6
 
@@ -106,54 +109,91 @@ def book_limit_entry(direction: str, requested_qty: Any, chase_schedule: Sequenc
     receipt["quantity_constraints"] = normalized
     gaps: list[int] = []
     for interval in schedule:
-        t0, t1, limit = float(interval["start_ts"]) - _EPS, float(interval["end_ts"]), float(interval["limit_price"])
-        window = _qt.book_rows_window(t0, t1, book_at, late_grace_s=0.0)
+        signal_ts, t1 = float(interval["start_ts"]), float(interval["end_ts"])
+        limit = float(interval["limit_price"])
+        window = _qt.book_rows_window(signal_ts - _EPS, t1, book_at, late_grace_s=0.0)
         gaps.extend(int(g) for g in window["gap_seconds"] if isinstance(g, (int, float)))
-        rows = window["rows"]
         receipt["evidence_bucket_ids"].append(interval["bucket_id"])
-        cursor = t0
-        while cursor < t1:
-            trigger = _qt.first_level_trigger(_flip(side), _qt.KIND_TARGET, limit, cursor, t1, book_rows=rows)
-            if trigger is None:
-                break
-            fill = _pf.paper_fill(side, qty, trigger["trigger_ts"], delay_s, book_at, leg="entry",
-                                  delay_source=delay_source or "default_until_n10", cap_px=limit)
-            receipt["attempts"].append({"bucket_id": interval["bucket_id"], "limit_price": limit, **trigger,
-                                        "status": fill.get("status"), "fill_ts": fill.get("fill_ts")})
-            if fill.get("status") in _FILLED and fill.get("price_source") == ENTRY_PRICE_SOURCE_BOOK:
-                decision = apply_quantity_constraints(
-                    requested_qty=qty, raw_partial_qty=fill.get("filled_qty"), execution_price=fill.get("price"),
-                    accumulated_qty=0, constraints=quantity_constraints, symbol=symbol)
-                receipt["quantity_decision"] = decision
-                if decision.get("final_classification") == "UNSUPPORTED":
-                    return _unsupported(receipt, *(decision.get("reasons") or ["QUANTITY_DECISION_UNSUPPORTED"]))
-                if not decision.get("accepted"):
-                    cursor = float(trigger["trigger_ts"])
-                    continue
+        # RK #848 (a): the order is sent at the interval's signal time and arrives after the (measured) delay; the
+        # FULL size walks the book row latest at signal + delay, levels at or better than the limit only (cap_px).
+        fill = _pf.paper_fill(side, qty, signal_ts, delay_s, book_at, leg="entry",
+                              delay_source=delay_source or "default_until_n10", cap_px=limit)
+        arrival = float(fill.get("fill_ts") or signal_ts)
+        attempt = {"bucket_id": interval["bucket_id"], "limit_price": limit, "signal_ts": signal_ts,
+                   "arrival_ts": arrival, "walk_row_rule": WALK_ROW_RULE, "walk_book_s": fill.get("book_s"),
+                   "status": fill.get("status"), "walked_qty": fill.get("filled_qty") or 0.0}
+        receipt["attempts"].append(attempt)
+        if fill.get("status") == "REJECT_NO_BOOK":
+            # No complete book row at arrival: neither the immediate fill nor its absence is observable.
+            return _unsupported(receipt, "ENTRY_ARRIVAL_BOOK_MISSING")
+        decision = None
+        filled = 0.0
+        if fill.get("status") in _FILLED and fill.get("price_source") == ENTRY_PRICE_SOURCE_BOOK:
+            decision = apply_quantity_constraints(
+                requested_qty=qty, raw_partial_qty=fill.get("filled_qty"), execution_price=fill.get("price"),
+                accumulated_qty=0, constraints=quantity_constraints, symbol=symbol)
+            receipt["quantity_decision"] = decision
+            if decision.get("final_classification") == "UNSUPPORTED":
+                return _unsupported(receipt, *(decision.get("reasons") or ["QUANTITY_DECISION_UNSUPPORTED"]))
+            if decision.get("accepted"):
                 filled = float(decision["accumulated_quantity_after"])
-                full = decision["final_classification"] == "FULL_FILL"
-                stamp = _pf.delay_stamp(fill.get("delay_source"))
-                verified = (fill.get("evidence_status") in (_pf.EVIDENCE_COMPLETE, "INCOMPLETE")
-                            and not stamp.get("delay_unverified") and not fill.get("unverified_reason"))
-                price = float(fill["price"])
-                receipt.update({
-                    "outcome": "FILL" if full else "PARTIAL_FILL", "supported": True,
-                    "final_classification": "FULL_FILL" if full else "PARTIAL_FILL",
-                    "filled_qty": filled, "remaining_qty": round(max(0.0, qty - filled), 12),
-                    "fill_price": price, "fill_ts": fill.get("fill_ts"),
-                    # The replay starts its exit path at the moment the entry is filled (signal + delay).
-                    "trigger_bucket_ts": fill.get("fill_ts"),
-                    "chase_bucket_id": interval["bucket_id"], "limit_price": limit, "entry_fill": fill,
-                    "entry_trigger": trigger, "delay_s": fill.get("delay_s"),
-                    "delay_source": fill.get("delay_source"), "evidence_status": fill.get("evidence_status"),
-                    "price_improvement_vs_limit": round((limit - price) if side == "LONG" else (price - limit), 8),
-                    "book_gap_seconds": sorted(set(gaps)),
-                    "r17_entry_status": None if verified else R17_UNPROVEN_ENTRY,
-                    "r17_entry_reason": None if verified else (
-                        REASON_UNVERIFIED_DELAY if stamp.get("delay_unverified") else REASON_NOT_BOOK_PRICED),
-                })
-                return receipt
-            cursor = float(trigger["trigger_ts"])
+        remainder = round(max(0.0, qty - filled), 12)
+        # RK #848 (b): size not available within the limit at arrival is NOT filled.  It rests at the limit until
+        # the interval ends; a resting fill would need real trades through the level with our queue position, which
+        # research does not have - so a book row reaching the limit while it rests leaves the entry R17_UNPROVEN.
+        resting = None
+        if remainder > _EPS:
+            cross = _qt.first_level_trigger(_flip(side), _qt.KIND_TARGET, limit, arrival, t1, book_rows=window["rows"])
+            resting = {"qty": remainder, "limit_price": limit, "rest_from_ts": arrival, "rest_until_ts": t1,
+                       "status": "NOT_FILLED" if cross is None else R17_UNPROVEN_ENTRY,
+                       "reason": None if cross is None else REASON_RESTING_NO_QUEUE_PROOF,
+                       "level_reached_ts": None if cross is None else cross.get("trigger_ts"),
+                       "queue_position_proof": None}
+            attempt["resting_remainder"] = resting
+        resting_unproven = resting is not None and resting["status"] == R17_UNPROVEN_ENTRY
+        if filled <= 0 and not resting_unproven:
+            continue  # nothing filled and the level was never reached while resting: chase the next interval
+        receipt["book_gap_seconds"] = sorted(set(gaps + [int(g) for g in window["gap_seconds"]
+                                                         if isinstance(g, (int, float))]))
+        receipt.update({"chase_bucket_id": interval["bucket_id"], "limit_price": limit, "signal_ts": signal_ts,
+                        "walk_row_rule": WALK_ROW_RULE, "walk_book_s": fill.get("book_s"),
+                        "delay_s": fill.get("delay_s"), "delay_source": fill.get("delay_source"),
+                        "resting_remainder": resting, "supported": True})
+        if filled > 0:
+            full = decision["final_classification"] == "FULL_FILL"
+            stamp = _pf.delay_stamp(fill.get("delay_source"))
+            verified = (fill.get("evidence_status") in (_pf.EVIDENCE_COMPLETE, "INCOMPLETE")
+                        and not stamp.get("delay_unverified") and not fill.get("unverified_reason"))
+            price = float(fill["price"])
+            reason = None
+            if not verified:
+                reason = REASON_UNVERIFIED_DELAY if stamp.get("delay_unverified") else REASON_NOT_BOOK_PRICED
+            elif resting_unproven:
+                reason = REASON_RESTING_NO_QUEUE_PROOF  # the final size is unknown -> the whole entry is unproven
+            receipt.update({
+                "outcome": "FILL" if full else "PARTIAL_FILL",
+                "final_classification": "FULL_FILL" if full else "PARTIAL_FILL",
+                "fill_basis": FILL_BASIS_IMMEDIATE,
+                "filled_qty": filled, "remaining_qty": remainder,
+                "fill_price": price, "fill_ts": fill.get("fill_ts"),
+                # The replay starts its exit path at the moment the entry is filled (signal + delay).
+                "trigger_bucket_ts": fill.get("fill_ts"),
+                "entry_fill": fill, "evidence_status": fill.get("evidence_status"),
+                "price_improvement_vs_limit": round((limit - price) if side == "LONG" else (price - limit), 8),
+                "r17_entry_status": None if reason is None else R17_UNPROVEN_ENTRY,
+                "r17_entry_reason": reason,
+            })
+            return receipt
+        # Nothing filled at arrival, but the level was reached while the order rested: a maker fill AT the limit is
+        # claimed for diagnostics only - without trade + queue proof it is never countable.
+        receipt.update({
+            "outcome": "FILL", "final_classification": "FULL_FILL", "fill_basis": FILL_BASIS_RESTING,
+            "filled_qty": resting["qty"], "remaining_qty": 0.0, "fill_price": limit,
+            "fill_ts": resting["level_reached_ts"], "trigger_bucket_ts": resting["level_reached_ts"],
+            "entry_fill": None, "evidence_status": "UNVERIFIED", "price_improvement_vs_limit": 0.0,
+            "r17_entry_status": R17_UNPROVEN_ENTRY, "r17_entry_reason": REASON_RESTING_NO_QUEUE_PROOF,
+        })
+        return receipt
     receipt["book_gap_seconds"] = sorted(set(gaps))
     if _longest_run(receipt["book_gap_seconds"]) > _pf.MAX_BOOK_AGE_S:
         # A no-fill is proven only when the book was observed: a gap longer than the shared pricer's 2 s book age

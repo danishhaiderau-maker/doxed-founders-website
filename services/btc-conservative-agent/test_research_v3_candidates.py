@@ -805,7 +805,7 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(
             candidate["policy_spec"]["fill"]["source_fill_model"]
-            == "book10l-ioc-chase-v1"
+            == "book10l-arrival-walk-v2"
             for candidate in report["candidates"]
         ))
 
@@ -855,7 +855,8 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(report["mark_source"]["r17_unproven_cell_reasons"],
                          {"R17_UNPROVEN_ENTRY": len(report["candidates"])})
         row = conservative_source(visible_qty=0.25)
-        row.update({"entry_delay_s": 0.5, "entry_delay_source": "lane_max_n12"})
+        # verified 1.5 s delay: the 0.75 remainder then rests only on rows that never reach the limit -> NOT_FILLED
+        row.update({"entry_delay_s": 1.5, "entry_delay_source": "lane_max_n12"})
         verified = evaluate_protection_screen([row], book_walk=entry_tape(0.25))["candidates"][0]
         self.assertEqual(verified["full_fills"], 0)
         self.assertEqual(verified["partial_fills"], 1)
@@ -871,8 +872,9 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(receipt["entry_price_source"], "BFX_BOOK_10L")
         self.assertEqual(receipt["entry_fill"]["price_source"], "BFX_BOOK_10L")
         self.assertEqual(receipt["entry_fill"]["fill_model"], "BOOK10L_WALK_AT_SIGNAL_PLUS_DELAY")
-        self.assertEqual(receipt["entry_trigger"]["trigger_basis"], "BOOK_TOP")
-        self.assertEqual(receipt["entry_trigger"]["trigger_ts"], 1000.0)
+        # RK #848 (a): sent at the interval signal (1000), the full size walks the book row at signal + delay
+        self.assertEqual(receipt["signal_ts"], 1000.0)
+        self.assertEqual(receipt["walk_row_rule"], "LATEST_BOOK_ROW_AT_SIGNAL_PLUS_DELAY")
         self.assertAlmostEqual(receipt["fill_ts"], 1001.5)
         self.assertAlmostEqual(receipt["filled_qty"], 0.25)
         self.assertLessEqual(receipt["fill_price"], 100.0)
