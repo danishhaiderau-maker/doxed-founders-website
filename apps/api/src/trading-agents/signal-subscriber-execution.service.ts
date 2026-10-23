@@ -92,6 +92,7 @@ import {
   type CancelCapableClient,
 } from '../exchanges/bitfinex-cancel.util';
 import { SignalCyclesService } from './signal-cycles.service';
+import { bootCancelPendingEntries, type BootPendingRow } from './live-boot-pending-cancel';
 import {
   EXIT_FILL_REAL,
   EXIT_FILL_RECONCILED_EVENT,
@@ -4024,7 +4025,7 @@ export const LIVE_BOOT_RECONCILE_RETRY_MS = 30_000;
  *  retries_exhausted=true and an ALERT is logged; only an operator restart (a new boot reconcile) re-reads it. */
 export const LIVE_BOOT_RECONCILE_MAX_ATTEMPTS = 20;
 export type LiveBootReconcileVerdict =
-  | 'FLAT_NO_STOPS' | 'MATCH_STOPS_RESIDENT' | 'PENDING_ENTRY_MATCH' | 'MISMATCH' | 'STOP_NOT_RESIDENT' | 'STALE_READ' | 'UNREADABLE';
+  | 'FLAT_NO_STOPS' | 'MATCH_STOPS_RESIDENT' | 'PENDING_ENTRY_CANCEL_FAILED' | 'MISMATCH' | 'STOP_NOT_RESIDENT' | 'STALE_READ' | 'UNREADABLE';
 export type LiveBootReconcileStamp = {
   verdict: LiveBootReconcileVerdict;
   allowed: boolean;
@@ -4040,7 +4041,7 @@ export type LiveBootReconcileStamp = {
 };
 export type LiveBootDbRow = {
   id: string; status: string; direction: 'LONG' | 'SHORT' | null; qty: number | null; stopOrderIds: number[];
-  /** HM R5 nit 5: a PENDING_ENTRY row's resting entry order (meta.bitfinexOrderId); null = cannot be reconciled. */
+  /** HM R6 nit 5: a PENDING_ENTRY row's resting entry order (meta.bitfinexOrderId) — boot-cancelled; null = cannot be cancelled (RED). */
   entryOrderId?: number | null;
 };
 export function liveBootReconcileVerdict(i: {
@@ -4059,17 +4060,11 @@ export function liveBootReconcileVerdict(i: {
   const orderIds = new Set(i.activeOrders.map((o) => Number(o.id)));
   const pending = i.dbRows.filter((r) => r.status !== 'OPEN');
   const open = i.dbRows.filter((r) => r.status === 'OPEN');
-  // HM R5 nit 5: a PENDING_ENTRY row reconciles when its resting entry order is one of the active orders (it adds 0 sats:
-  // not filled yet). No entry order id, or an entry order that is not active (filled / cancelled while down) => MISMATCH.
+  // HM R6 nit 5 (RK 10:26, reverts the R5 nit 5 relaxation): a PENDING_ENTRY row is NEVER accepted as resting. The boot
+  // reconcile must first cancel + flatten it (bootCancelPendingEntries) and re-read; a pending row still here blocks.
+  if (pending.length > 0) return no('MISMATCH', `PENDING_ENTRY row ${pending[0].id} not boot-cancelled (${pending.length} pending)`);
   const known = new Set<number>();
-  for (const r of pending) {
-    const eid = r.entryOrderId == null ? null : Number(r.entryOrderId);
-    if (eid == null || !Number.isFinite(eid)) return no('MISMATCH', `PENDING_ENTRY row ${r.id} without an entry order id`);
-    if (!orderIds.has(eid)) return no('MISMATCH', `PENDING_ENTRY row ${r.id}: entry order ${eid} is not an active order`);
-    known.add(eid);
-  }
-  const allowedVerdict = (v: LiveBootReconcileVerdict, detail: string) =>
-    ({ verdict: pending.length > 0 ? ('PENDING_ENTRY_MATCH' as const) : v, allowed: true, detail: pending.length > 0 ? `${detail}; ${pending.length} PENDING_ENTRY order(s) resting` : detail });
+  const allowedVerdict = (v: LiveBootReconcileVerdict, detail: string) => ({ verdict: v, allowed: true, detail });
   if (posSats === 0) {
     const unknownFlat = [...orderIds].filter((id) => !known.has(id));
     if (unknownFlat.length === 0 && open.length === 0) return allowedVerdict('FLAT_NO_STOPS', 'flat, no unrecorded active orders, no open rows');
@@ -22703,19 +22698,58 @@ await this.notifications
 
   private async liveBootReconcileAccount(userId: string, attempt: number): Promise<LiveBootReconcileStamp> {
     const iso = (ms: number | null) => (ms == null ? null : new Date(ms).toISOString());
+    let r = await this.liveBootReconcileRead(userId);
+    let pendingNote = '';
+    const pending = (r.dbRows ?? []).filter((x) => x.status !== 'OPEN');
+    if (r.creds && r.dbRows && r.readAtMs != null && pending.length > 0) {
+      // HM R6 nit 5 (RK 10:26): cancel + read back, read the real fill, flatten any fill, stamp non-countable; else RED.
+      const res = await this.bootCancelPendingEntriesFor(userId, r.creds, pending.map((x) => ({
+        id: x.id, cycleId: r.cycleIdByRow.get(x.id) ?? null, entryOrderId: x.entryOrderId ?? null, qty: x.qty,
+      })));
+      if (!res.ok) {
+        return {
+          verdict: 'PENDING_ENTRY_CANCEL_FAILED', allowed: false, red: true, detail: `PENDING_ENTRY boot cancel failed: ${res.detail}`.slice(0, 500), attempt,
+          process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(), read_sent_at: iso(r.readSentAtMs), read_at: iso(r.readAtMs), stamped_at: new Date().toISOString(),
+        };
+      }
+      pendingNote = `; ${res.detail}${res.flattenRequired ? ` (fill flattened: ${res.flattenVerdict})` : ''}`;
+      r = await this.liveBootReconcileRead(userId);   // fresh read after the cancel / flatten
+    }
+    const v0 = liveBootReconcileVerdict({ processStartMs: LIVE_PROCESS_START_MS, readSentAtMs: r.readSentAtMs, positionAmount: r.positionAmount, activeOrders: r.activeOrders, dbRows: r.dbRows });
+    // after a boot cancel, relay entries are allowed ONLY on a FLAT_NO_STOPS read
+    const v = pendingNote && v0.verdict !== 'FLAT_NO_STOPS' ? { ...v0, allowed: false, detail: `after PENDING_ENTRY boot cancel requires FLAT_NO_STOPS: ${v0.detail}` } : v0;
+    return {
+      ...v,
+      detail: `${r.err ? `${v.detail}: ${r.err}` : v.detail}${pendingNote}`,
+      red: !v.allowed,
+      attempt,
+      process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(),
+      read_sent_at: iso(r.readSentAtMs),
+      read_at: iso(r.readAtMs),
+      stamped_at: new Date().toISOString(),
+    };
+  }
+
+  private async liveBootReconcileRead(userId: string): Promise<{
+    creds: ExchangeCredentials | null; readSentAtMs: number | null; readAtMs: number | null; positionAmount: number | null;
+    activeOrders: Array<{ id: number }> | null; dbRows: LiveBootDbRow[] | null; cycleIdByRow: Map<string, string>; err: string;
+  }> {
+    let creds: ExchangeCredentials | null = null;
     let readSentAtMs: number | null = null;
     let readAtMs: number | null = null;
     let positionAmount: number | null = null;
     let activeOrders: Array<{ id: number }> | null = null;
     let dbRows: LiveBootDbRow[] | null = null;
+    const cycleIdByRow = new Map<string, string>();
     let err = '';
     try {
-      const creds = await this.exchanges.getUserCredentials(userId, 'bitfinex');
+      creds = await this.exchanges.getUserCredentials(userId, 'bitfinex');
       if (!creds) throw new Error('credentials-missing');
+      const c = creds;
       readSentAtMs = Date.now();
       const [pos, orders] = await withBitfinexCriticalReads(() => Promise.all([
-        this.bitfinex.getOpenPositionDetail(creds),
-        this.bitfinex.listActiveOrders(creds),
+        this.bitfinex.getOpenPositionDetail(c),
+        this.bitfinex.listActiveOrders(c),
       ]));
       readAtMs = Date.now();
       positionAmount = pos ? pos.amount : 0;
@@ -22726,10 +22760,11 @@ await this.notifications
           status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
           AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
         },
-        select: { id: true, status: true },
+        select: { id: true, status: true, cycleId: true },
       });
       dbRows = [];
       for (const r of rows) {
+        if (r.cycleId) cycleIdByRow.set(r.id, r.cycleId);
         const meta = await this.loadExecutionMeta(r.id);
         const stops = await this.participantRecordedStopOrderIds(r.id);
         dbRows.push({
@@ -22738,7 +22773,7 @@ await this.notifications
           direction: meta.direction ?? null,
           qty: meta.qty ?? null,
           stopOrderIds: [...new Set([...(meta.stopOrderId ? [meta.stopOrderId] : []), ...stops])],
-          entryOrderId: meta.bitfinexOrderId ?? null,   // HM R5 nit 5
+          entryOrderId: meta.bitfinexOrderId ?? null,   // HM R6 nit 5: the order the boot cancels
         });
       }
     } catch (e) {
@@ -22746,17 +22781,37 @@ await this.notifications
       if (readAtMs == null) { positionAmount = null; activeOrders = null; }
       dbRows = null;
     }
-    const v = liveBootReconcileVerdict({ processStartMs: LIVE_PROCESS_START_MS, readSentAtMs, positionAmount, activeOrders, dbRows });
-    return {
-      ...v,
-      detail: err ? `${v.detail}: ${err}` : v.detail,
-      red: !v.allowed,
-      attempt,
-      process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(),
-      read_sent_at: iso(readSentAtMs),
-      read_at: iso(readAtMs),
-      stamped_at: new Date().toISOString(),
+    return { creds, readSentAtMs, readAtMs, positionAmount, activeOrders, dbRows, cycleIdByRow, err };
+  }
+
+  /** HM R6 nit 5: the Bitfinex / DB side of bootCancelPendingEntries (all reads strict: a failed read throws). */
+  private async bootCancelPendingEntriesFor(userId: string, creds: ExchangeCredentials, rows: BootPendingRow[]) {
+    const agentOf = async (cycleId: string | null) => {
+      if (!cycleId) throw new Error('no cycle id');
+      const cycle = await this.prisma.signalCycle.findUnique({ where: { id: cycleId }, select: { agentId: true } });
+      if (!cycle?.agentId) throw new Error(`cycle ${cycleId} not found`);
+      const agent = await this.prisma.tradingAgent.findUnique({ where: { id: cycle.agentId }, select: { id: true, slug: true } });
+      if (!agent) throw new Error(`agent ${cycle.agentId} not found`);
+      return agent;
     };
+    return bootCancelPendingEntries(rows, {
+      cancel: (orderId) => this.bitfinex.cancelOrder(creds, orderId),
+      activeOrderIds: async () => (await withBitfinexCriticalReads(() => this.bitfinex.listActiveOrders(creds))).map((o) => Number(o.id)),
+      orderHistory: (orderId) => withBitfinexCriticalReads(() => this.bitfinex.fetchOrderHistoryEvidence(creds, orderId)),
+      orderTradesQty: async (orderId) => {
+        const trades = await withBitfinexCriticalReads(() => this.bitfinex.fetchOrderTrades(creds, orderId));
+        return trades.reduce((sum, t) => sum + Math.abs(Number(t.execAmount) || 0), 0);
+      },
+      forceFlat: async () => {
+        const agent = await agentOf(rows.find((x) => x.cycleId)?.cycleId ?? null);
+        const f = await this.forceFlatDisarmAccount(userId, agent.slug, 'boot-pending-entry-fill');
+        return { verdict: f.verdict, errors: f.errors };
+      },
+      stampNonCountable: async (row, info) => {
+        const agent = await agentOf(row.cycleId);
+        await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId as string, 'EXPIRED', { ...info, participant_id: row.id });
+      },
+    });
   }
 
   /**

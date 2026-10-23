@@ -163,39 +163,26 @@ test('wiring: onModuleInit sets the gate PENDING before any tick; mirrors carry 
   assert.ok(init.indexOf('if (!executionEnabled())') < init.indexOf("liveBootGateSetPhase('PENDING')"));
   assert.ok(src.includes('mirror.boot_reconcile = liveBootReconcileStampFor(instance.userId);'));
   assert.ok(src.includes('return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0);'));
-  const acct = src.slice(src.indexOf('  private async liveBootReconcileAccount('), src.indexOf('  async countOpenAccountRows('));
-  assert.ok(acct.indexOf('readSentAtMs = Date.now();') < acct.indexOf('this.bitfinex.getOpenPositionDetail(creds)'));
-  assert.ok(acct.includes('this.bitfinex.listActiveOrders(creds)'));
+  const acct = src.slice(src.indexOf('  private async liveBootReconcileRead('), src.indexOf('  private async bootCancelPendingEntriesFor('));
+  assert.ok(acct.indexOf('readSentAtMs = Date.now();') > 0);
+  assert.ok(acct.indexOf('readSentAtMs = Date.now();') < acct.indexOf('this.bitfinex.getOpenPositionDetail(c)'));
+  assert.ok(acct.includes('this.bitfinex.listActiveOrders(c)'));
   const py = readFileSync(resolve(__dirname, '../../../../services/btc-conservative-agent/live_guardian.py'), 'utf8');
   assert.ok(py.includes('RELAY_BOOT_RECONCILE'));
 });
 
-test('HM R5 nit 5: a PENDING_ENTRY row whose resting entry order is active reconciles (PENDING_ENTRY_MATCH, no RED)', async () => {
+test('HM R6 nit 5 (reverts R5 nit 5): a PENDING_ENTRY row is never accepted as resting by the verdict', () => {
   const v = (o: Partial<Parameters<typeof liveBootReconcileVerdict>[0]>) => liveBootReconcileVerdict({
     processStartMs: START, readSentAtMs: AFTER, positionAmount: 0, activeOrders: [], dbRows: [], ...o,
   });
   const pend = (id: string, eid: number | null) => ({ id, status: 'PENDING_ENTRY', direction: 'LONG' as const, qty: 0.001, stopOrderIds: [], entryOrderId: eid });
-  const flat = v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)] });
-  assert.deepEqual([flat.verdict, flat.allowed], ['PENDING_ENTRY_MATCH', true]);
-  const withOpen = v({ positionAmount: 0.001, activeOrders: [{ id: 9 }, { id: 77 }], dbRows: [open('p', 'LONG', 0.001, [9]), pend('q', 77)] });
-  assert.deepEqual([withOpen.verdict, withOpen.allowed], ['PENDING_ENTRY_MATCH', true]);
-  // unreadable / unreconcilable stays blocked
-  assert.equal(v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', null)] }).verdict, 'MISMATCH');          // no entry order id
-  assert.equal(v({ activeOrders: [], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');                     // entry order gone
-  assert.equal(v({ positionAmount: 0.001, activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');   // filled while down
-  assert.equal(v({ activeOrders: [{ id: 77 }, { id: 5 }], dbRows: [pend('q', 77)] }).verdict, 'MISMATCH');  // + an unrecorded order
-  assert.equal(v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)], readSentAtMs: null }).verdict, 'UNREADABLE');
-
-  const b = svc({ read: { pos: null, orders: [{ id: 77 }] }, rows: [{ id: 'q', status: 'PENDING_ENTRY', direction: 'LONG', qty: 0.001, stops: [], entryOrderId: 77 }] });
-  await b.run();
-  const st = liveBootReconcileStampFor('u1') as Record<string, unknown>;
-  assert.deepEqual([st.verdict, st.allowed, st.red], ['PENDING_ENTRY_MATCH', true, false]);   // no RED -> Fly never force-flats it
-  assert.equal(liveBootEntryBlocked('u1'), false);
-  const n = svc({ read: { pos: null, orders: [{ id: 77 }] }, rows: [{ id: 'q', status: 'PENDING_ENTRY', direction: 'LONG', qty: 0.001, stops: [] }] });
-  await n.run();
-  assert.equal((liveBootReconcileStampFor('u1') as Record<string, unknown>).red, true);
-  assert.equal(liveBootEntryBlocked('u1'), true);
-  liveBootGateSetPhase('NOT_RUN');
+  for (const r of [
+    v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', 77)] }),
+    v({ positionAmount: 0.001, activeOrders: [{ id: 9 }, { id: 77 }], dbRows: [open('p', 'LONG', 0.001, [9]), pend('q', 77)] }),
+    v({ activeOrders: [], dbRows: [pend('q', 77)] }),
+    v({ activeOrders: [{ id: 77 }], dbRows: [pend('q', null)] }),
+  ]) assert.deepEqual([r.verdict, r.allowed], ['MISMATCH', false]);
+  assert.ok(!readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8').includes("'PENDING_ENTRY_MATCH'"));
 });
 
 test('HM R5 nit 4: after LIVE_BOOT_RECONCILE_MAX_ATTEMPTS failed reads -> ALERT, retries stop, entries stay BLOCKED (stamped)', async () => {

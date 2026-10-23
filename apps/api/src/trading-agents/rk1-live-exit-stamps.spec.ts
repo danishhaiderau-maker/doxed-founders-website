@@ -98,6 +98,7 @@ test('RK1: subscriber-exchange-live book rows use the same leg check (missing st
   const exitFull = { eventType: 'EXIT', payload: railwayExitLegStamps({ exitTriggerAtMs: 49_900, flySendStartedAtMs: 50_010, platformReceivedAtMs: 50_080 }) };
   (exitFull.payload as Record<string, unknown>).close_exchange_ack_at = iso(50.4);
   (exitFull.payload as Record<string, unknown>).exit_exchange_fill_price = 100_100;   // HM R4 B1: real exit fill
+  (exitFull.payload as Record<string, unknown>).exit_fill_status = 'REAL_FILL';       // HM R6 B2: helper-stamped real fill
   const book = mapSubscriberExchangeLiveBook({
     orders: [], position: null,
     participants: [
