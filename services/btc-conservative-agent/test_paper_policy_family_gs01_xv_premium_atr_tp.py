@@ -45,8 +45,10 @@ def test_exit_take_profit_books_the_maker_target():
                               policy_state=state, entry_decision=decision, fill_ts=0) is None
     action = policy.exit_action(entry=entry, direction="LONG", price=entry * 1.0011, age_sec=6,
                                 policy_state=state, entry_decision=decision, fill_ts=0)
-    assert action.reason == "GS_ATR_TAKE_PROFIT" and action.maker is True
-    assert abs(action.book_price - entry * 1.001) < 1e-6 and action.remaining_fraction == 0.0
+    # REALISM_V2: the TP is a BOT_SENT reduce-only market leg (not a maker limit at the target); the policy books the
+    # trigger price and the shared pricer walks the order book at trigger + delay.
+    assert action.reason == "GS_ATR_TAKE_PROFIT" and action.maker is False
+    assert abs(action.book_price - entry * 1.0011) < 1e-6 and action.remaining_fraction == 0.0
 
 
 def test_dashboard_discloses_the_rule():

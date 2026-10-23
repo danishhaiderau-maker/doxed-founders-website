@@ -141,7 +141,7 @@ def test_end_to_end_attempt_stamps_every_stage_on_a_large_tape(tmp_path, monkeyp
     monkeypatch.setattr(bot, "is_research_lane_enabled", lambda lane: True)
     monkeypatch.setattr(bot, "invert_signal_active", lambda: False)
     monkeypatch.setattr(bot, "ensure_lane_signal_capacity", lambda lane: True)
-    monkeypatch.setattr(bot, "_record_adaptive_entry_decision", lambda lane, d: None)
+    monkeypatch.setattr(bot, "_record_adaptive_entry_decision", lambda lane, d, **k: None)
     monkeypatch.setattr(bridge, "_paper_market_segment",
                         lambda *a, **k: pytest.fail("full-tape scan on the attempt path"))
 

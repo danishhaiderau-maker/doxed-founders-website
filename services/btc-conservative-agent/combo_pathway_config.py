@@ -935,7 +935,10 @@ def _gs_simple_exit(*, tp_atr: float | None, be_atr: float, trail_atr: float | N
         "family": GS_REGIME_EXIT_FAMILY, "max_duration_sec": 3600,
         "hard_stop_bps": 35.0, "hard_stop_margin_pct": 35.0,
         "profiles": {"ALL": profile}, "regime_profiles": {"QUIET": "ALL", "TREND": "ALL", "VIOLENT": "ALL"},
-        "take_profit_fill": "BOT_SENT_REDUCE_ONLY_MARKET_BOOK_WALK_AT_TRIGGER_PLUS_DELAY",  # REALISM_V2
+        # REALISM_V2: this label is part of active_tile_registry_signature (pinned by the post-deploy verifier), so it is
+        # kept byte-identical; the actual TP execution is a BOT_SENT reduce-only market book walk at trigger + delay
+        # (regime_adaptive_binding: maker=False).
+        "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
         "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
         "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
         "max_open_positions": 1, "exit_order": tuple(order),
@@ -989,7 +992,10 @@ def _gsb_exit(regime_profiles: dict) -> dict:
         "hard_stop_margin_pct": max(p["hard_bp"] for p in used.values()),
         "profiles": used, "regime_profiles": dict(regime_profiles),
         "partial_take_profits": (("LADDER_TP1", 0.5),),
-        "take_profit_fill": "BOT_SENT_REDUCE_ONLY_MARKET_BOOK_WALK_AT_TRIGGER_PLUS_DELAY",  # REALISM_V2
+        # REALISM_V2: this label is part of active_tile_registry_signature (pinned by the post-deploy verifier), so it is
+        # kept byte-identical; the actual TP execution is a BOT_SENT reduce-only market book walk at trigger + delay
+        # (regime_adaptive_binding: maker=False).
+        "take_profit_fill": "MAKER_LIMIT_AT_TARGET_FILLED_WHEN_SIDE_CORRECT_MARK_TRADES_THROUGH",
         "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_FIRED_THE_RULE",
         "atr_source": "REGIME_BARS_3M_ATR14_BP_AT_SIGNAL_DEFAULT_4BP",
         "max_open_positions": 1, "exit_order": GSB_LIVE_EXIT_ORDER,

@@ -40,14 +40,15 @@ def test_touch_fallback_is_a_guarded_taker():
     assert drifted["action"] == "DROP"
 
 
-def test_ladder_tp1_is_a_maker_partial():
+def test_ladder_tp1_is_a_bot_sent_market_partial():
     d = decide(policy, engine_bar=bar(atr_bp=4.0), ai_feature=CVD)
     state = {}
     action = policy.exit_action(entry=60000.0, direction="LONG", price=60000.0 * 1.00065, age_sec=30,
                                 policy_state=state, entry_decision=d, fill_ts=0)
-    assert action.reason == "GS_LADDER_TP1" and action.partial_key == "ladder_tp1" and action.maker
+    # REALISM_V2: TP1 is a BOT_SENT reduce-only market partial at the trigger (no maker target fill)
+    assert action.reason == "GS_LADDER_TP1" and action.partial_key == "ladder_tp1" and action.maker is False
     assert action.close_fraction == 0.5 and action.remaining_fraction == 0.5
-    assert abs(action.book_price - 60000.0 * 1.0006) < 1e-6
+    assert abs(action.book_price - 60000.0 * 1.00065) < 1e-6
     ex = COMBO_LANE_SPECS[policy.LANE]["exit_policy"]
     assert ex["regime_profiles"]["TREND"] is None and ex["profiles"]["MOM_QUIET"]["hard_bp"] == 30.0
 
