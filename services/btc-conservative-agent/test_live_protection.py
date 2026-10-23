@@ -145,11 +145,11 @@ def test_n3_unreadable_state_file_fails_closed(tmp_path):
 def test_n3_boot_rederive_paused_relay_not_flat_is_red(tmp_path):
     view = {"fetched_at_ts": NOW, "accounts": [{"armed": False}]}
     ns = _persist_ns(tmp_path, view, mirror([LONG], [STOP_L]))
-    ns["_LIVE_GUARDIAN_STATE"]["boot_rederive_pending"] = {"ts": NOW}
+    ns["_LIVE_GUARDIAN_STATE"]["boot_rederive_pending"] = {"ts": NOW - 30}   # HM R4 N5: the read (NOW-1) postdates the boot
     assert ns["_live_guardian_boot_rederive"](NOW) == "BOOT_REDERIVED_NOT_FLAT"
     assert ns["_LIVE_GUARDIAN_STATE"]["red_alert"]["code"] == "BOOT_REDERIVED_NOT_FLAT" and ns["FF"]
     ns = _persist_ns(tmp_path, view, mirror())
-    ns["_LIVE_GUARDIAN_STATE"]["boot_rederive_pending"] = {"ts": NOW}
+    ns["_LIVE_GUARDIAN_STATE"]["boot_rederive_pending"] = {"ts": NOW - 30}
     assert ns["_live_guardian_boot_rederive"](NOW) == "FLAT_NO_STOPS" and not ns["_LIVE_GUARDIAN_STATE"].get("red_alert")
 
 
@@ -631,7 +631,8 @@ def test_hm5r2_fresh_flat_reading_never_clears_liq_clamp_red():
         assert st["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and "red_alert_cleared" not in st
         assert g.red_codes(st["red_alert"]) == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
         assert [c["code"] for c in st["red_alert"].get("flat_cleared_codes") or []] == [c for c in red.get("codes", []) if c != "LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
-        assert st["red_alert"]["flat_evidence_ts"] == NOW and ns["PERSISTS"] == [1]   # stamped + persisted once
+        # stamped + persisted once; HM R4 N3: the stamp is the relay READ time (fetched NOW - read age 2 s), not the tick time
+        assert st["red_alert"]["flat_evidence_ts"] == NOW - 2.0 and ns["PERSISTS"] == [1]
     # a plain RED still clears on the same evidence (unchanged)
     ns = _red_clear_ns({"ts": NOW - 100, "code": "FORCE_FLAT_UNCONFIRMED"})
     assert ns["_live_guardian_red_clear_if_flat"](NOW) is True and "red_alert" not in ns["_LIVE_GUARDIAN_STATE"]

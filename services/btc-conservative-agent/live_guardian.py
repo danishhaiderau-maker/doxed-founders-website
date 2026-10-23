@@ -46,6 +46,15 @@ def red_codes(red: Mapping[str, Any] | None) -> list:
     return [c for i, c in enumerate(out) if c and c not in out[:i]]
 
 
+def red_latest_ts(red: Mapping[str, Any] | None) -> float:
+    """HM R4 N3: the time of the RED's LATEST code (its own ts and every stacked also[].ts). Clearing evidence must be newer."""
+    if not isinstance(red, Mapping):
+        return 0.0
+    out = [_f(red.get("ts")) or 0.0]
+    out += [_f(a.get("ts")) or 0.0 for a in (red.get("also") or []) if isinstance(a, Mapping)]
+    return max(out)
+
+
 def red_ack_only(red: Mapping[str, Any] | None) -> bool:
     """True when any code on the RED needs the operator ack (a FLAT reading never clears it)."""
     return any(c in ACK_ONLY_RED_CODES for c in red_codes(red))
@@ -193,6 +202,13 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
                     and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
     ledger_loss = -sum(float(_ltg.trade_realised_pnl_usd(c)) for c in ledger_today)
     state["ledger_loss_usd"] = round(ledger_loss, 4)
+    # HM R4 N4: a closed row in the rolling window without a real exit fill makes this cap UNREADABLE -> entry block (AMBER)
+    _unread = [c for c in live if c.get("closed") and _ltg.trade_realised_pnl_usd(c) is None
+               and now - ROLLING_WINDOW_SEC <= close_ts(c, now) <= now + 60]
+    if _unread:
+        out.append({"code": _ltg.VIOL_PNL_UNREADABLE, "tile": None, "window": "rolling_24h",
+                    "detail": f"rolling-24h ledger cap unreadable: {len(_unread)} closed row(s) without a real exit fill "
+                              f"({','.join(str(c.get('correlation_id')) for c in _unread[:4])})"})
     if ledger_loss >= DAILY_LOSS_CAP_USD:
         out.append({"code": "DAILY_LOSS_CAP", "detail": f"ledger realised loss ${ledger_loss:.2f} >= ${DAILY_LOSS_CAP_USD:.2f} in the last 24 h ({len(ledger_today)} fresh-epoch rows)"})
     # 4b. HM G6 per-tile / account-wide daily (UTC) realised loss caps from the prereg (live_tile_gate), fresh-epoch rows only
@@ -200,6 +216,13 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
     # AMEND5 G4(b) (L23): LIQ_CLAMP_FLATTEN > 5 % of live trades at n >= 20 per tile => disarm ALL
     out.extend(_ltg.liq_clamp_rate_violations(live, liq_events or ()))
     m = mirror if isinstance(mirror, Mapping) else None
+    # HM R4 B2 (RK 08:03): the relay's boot reconcile did not pass (mismatch / stop not resident / stale or unreadable read):
+    # the relay blocks every entry itself; Fly raises RED (disarm + force-flat). Checked before the blind-mirror return.
+    _br = (m or {}).get("boot_reconcile") if isinstance(m, Mapping) else None
+    if isinstance(_br, Mapping) and _br.get("red") is True:
+        out.append({"code": "RELAY_BOOT_RECONCILE", "tile": None, "cause": str(_br.get("verdict")),
+                    "detail": f"relay boot reconcile {_br.get('verdict')} (read_sent_at={_br.get('read_sent_at')}, "
+                              f"process_start_at={_br.get('process_start_at')}): {str(_br.get('detail'))[:160]}"})
     if m is None or m.get("ok") is not True:
         # a blind exchange read while live is open is itself unsafe, but a single failed read must not flap: require 30 s
         state["read_state"] = "BLIND"   # a failed/stale read is never a clean state

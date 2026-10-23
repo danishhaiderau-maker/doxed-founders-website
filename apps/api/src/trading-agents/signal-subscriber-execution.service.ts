@@ -3905,10 +3905,16 @@ export async function countLiveMutexOthers(
 ): Promise<number> {
   const others = await tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
   const fences = await tx.liveEntryFence.count({ where: liveEntryFenceActiveWhere(userId, nowMs) });
-  return others + fences;
+  // HM R4 B2 (RK 08:03): until this process's boot reconcile allowed the account, it counts as one more live participant
+  return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0);
 }
-/** HM1: bound for a crashed fence holder; the route refreshes it before each exchange step. */
-export const LIVE_ENTRY_FENCE_TTL_MS = 120_000;
+/**
+ * HM R4 B2(a) (RK 08:03): the entry fence has NO time expiry. A fence row blocks every claim until its holder releases it, or
+ * until a relay boot reconcile (liveBootReconcileVerdict) read the account FLAT_NO_STOPS or matching the DB with every stop
+ * resident; only then are the rows of a crashed holder (acquiredAt before this process started) removed. Expiry alone never
+ * allows an entry. expiresAt is kept only because the column is required; it is never read.
+ */
+export const LIVE_ENTRY_FENCE_NO_EXPIRY = new Date('9999-12-31T00:00:00.000Z');
 /**
  * B4 (#852 R3, real Postgres): the fence waits on the account live-mutex behind every queued claim. Prisma's default 5 s
  * interactive-transaction timeout expired under a 20-claim burst on a Neon branch (fence lost -> unfenced flatten, ok=false),
@@ -3916,8 +3922,8 @@ export const LIVE_ENTRY_FENCE_TTL_MS = 120_000;
  * flattens and reports fenced=false).
  */
 export const LIVE_ENTRY_FENCE_TX_OPTIONS = { maxWait: 10_000, timeout: 20_000 } as const;
-export function liveEntryFenceActiveWhere(userId: string, nowMs = Date.now()) {
-  return { userId, expiresAt: { gt: new Date(nowMs) } };
+export function liveEntryFenceActiveWhere(userId: string, _nowMs = Date.now()) {
+  return { userId };   // HM R4 B2(a): every fence row counts, whatever its expiresAt
 }
 type LiveEntryFenceDb = {
   $transaction: <T>(fn: (tx: any) => Promise<T>, opts?: { maxWait?: number; timeout?: number }) => Promise<T>;
@@ -3940,15 +3946,100 @@ export async function acquireLiveEntryFence(
   await db.$transaction(async (tx) => {
     await takeLiveMutexLock(tx, userId);
     await tx.liveEntryFence.create({
-      data: { id: fenceId, userId, reason: reason.slice(0, 200), acquiredAt: new Date(nowMs), expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) },
+      data: { id: fenceId, userId, reason: reason.slice(0, 200), acquiredAt: new Date(nowMs), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
     });
   }, LIVE_ENTRY_FENCE_TX_OPTIONS);
 }
-export async function refreshLiveEntryFence(db: LiveEntryFenceDb, fenceId: string, nowMs = Date.now()): Promise<void> {
-  await db.liveEntryFence.update({ where: { id: fenceId }, data: { expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) } });
+/** HM R4 B2(a): no TTL, so there is nothing to refresh (kept as a no-op for the route's step hooks). */
+export async function refreshLiveEntryFence(_db: LiveEntryFenceDb, _fenceId: string, _nowMs = Date.now()): Promise<void> {
+  return;
 }
 export async function releaseLiveEntryFence(db: LiveEntryFenceDb, fenceId: string): Promise<void> {
   await db.liveEntryFence.deleteMany({ where: { id: fenceId } });
+}
+
+/**
+ * HM R4 B2(b-d) (RK 08:03): relay boot reconcile. On boot the money-path process (executionEnabled) blocks EVERY live entry
+ * (liveBootEntryBlocked -> countLiveMutexOthers +1) until, per account, an authenticated read of the Bitfinex position AND the
+ * active orders, SENT after this process started, is FLAT_NO_STOPS with no OPEN / PENDING_ENTRY row, or matches the DB
+ * (signed open qty == position, every OPEN row's recorded stop resident, no other active order). Anything else (mismatch,
+ * a stop not resident, a read sent before the boot, an unreadable read) blocks and is RED (mirror.boot_reconcile.red ->
+ * Fly guardian RELAY_BOOT_RECONCILE). Every attempt is stamped with its read times. A blocked account is re-read every
+ * LIVE_BOOT_RECONCILE_RETRY_MS; only a passing read opens it. Process-local: the API process (no money path) never gates.
+ */
+export const LIVE_PROCESS_START_MS = Date.now();
+export const LIVE_BOOT_RECONCILE_RETRY_MS = 30_000;
+export type LiveBootReconcileVerdict =
+  | 'FLAT_NO_STOPS' | 'MATCH_STOPS_RESIDENT' | 'MISMATCH' | 'STOP_NOT_RESIDENT' | 'STALE_READ' | 'UNREADABLE';
+export type LiveBootReconcileStamp = {
+  verdict: LiveBootReconcileVerdict;
+  allowed: boolean;
+  red: boolean;
+  detail: string;
+  attempt: number;
+  process_start_at: string;
+  read_sent_at: string | null;
+  read_at: string | null;
+  stamped_at: string;
+};
+export type LiveBootDbRow = { id: string; status: string; direction: 'LONG' | 'SHORT' | null; qty: number | null; stopOrderIds: number[] };
+export function liveBootReconcileVerdict(i: {
+  processStartMs: number;
+  readSentAtMs: number | null;
+  positionAmount: number | null;
+  activeOrders: Array<{ id: number }> | null;
+  dbRows: LiveBootDbRow[] | null;
+}): { verdict: LiveBootReconcileVerdict; allowed: boolean; detail: string } {
+  const no = (verdict: LiveBootReconcileVerdict, detail: string) => ({ verdict, allowed: false, detail });
+  if (i.readSentAtMs == null || i.positionAmount == null || !Number.isFinite(i.positionAmount) || i.activeOrders == null || i.dbRows == null) {
+    return no('UNREADABLE', 'position / active orders / DB rows not read');
+  }
+  if (!(i.readSentAtMs > i.processStartMs)) return no('STALE_READ', 'read sent before this process started');
+  const posSats = btcToSats(i.positionAmount);
+  const orderIds = new Set(i.activeOrders.map((o) => Number(o.id)));
+  const pending = i.dbRows.filter((r) => r.status !== 'OPEN');
+  const open = i.dbRows.filter((r) => r.status === 'OPEN');
+  if (pending.length > 0) return no('MISMATCH', `${pending.length} PENDING_ENTRY row(s) at boot`);
+  if (posSats === 0) {
+    if (orderIds.size === 0 && open.length === 0) return { verdict: 'FLAT_NO_STOPS', allowed: true, detail: 'flat, no active orders, no open rows' };
+    return no('MISMATCH', `exchange flat with ${orderIds.size} active order(s) and ${open.length} OPEN row(s)`);
+  }
+  let dbSats = 0;
+  const known = new Set<number>();
+  for (const r of open) {
+    if (!r.direction || r.qty == null || btcToSats(r.qty) === 0) return no('MISMATCH', `OPEN row ${r.id} without direction/qty`);
+    const q = Math.abs(btcToSats(r.qty));
+    dbSats += r.direction === 'LONG' ? q : -q;
+    r.stopOrderIds.forEach((id) => known.add(Number(id)));
+    if (!r.stopOrderIds.some((id) => orderIds.has(Number(id)))) return no('STOP_NOT_RESIDENT', `OPEN row ${r.id}: no recorded stop is an active order`);
+  }
+  if (dbSats !== posSats) return no('MISMATCH', `exchange ${posSats} sats vs DB ${dbSats} sats`);
+  const unknown = [...orderIds].filter((id) => !known.has(id));
+  if (unknown.length > 0) return no('MISMATCH', `${unknown.length} active order(s) not recorded on an OPEN row`);
+  return { verdict: 'MATCH_STOPS_RESIDENT', allowed: true, detail: `position ${posSats} sats == DB, ${open.length} stop(s) resident` };
+}
+const liveBootGate: { phase: 'NOT_RUN' | 'PENDING' | 'DONE'; byUser: Map<string, LiveBootReconcileStamp> } = {
+  phase: 'NOT_RUN',
+  byUser: new Map(),
+};
+/** true = this process must not enter for the account (boot reconcile pending, or the last boot read did not pass). */
+export function liveBootEntryBlocked(userId: string): boolean {
+  if (liveBootGate.phase === 'NOT_RUN') return false;
+  if (liveBootGate.phase === 'PENDING') return true;
+  const s = liveBootGate.byUser.get(userId);
+  return s ? !s.allowed : false;
+}
+export function liveBootReconcileStampFor(userId: string): LiveBootReconcileStamp | { verdict: 'PENDING'; allowed: false; red: false } | null {
+  if (liveBootGate.phase === 'NOT_RUN') return null;
+  return liveBootGate.byUser.get(userId) ?? (liveBootGate.phase === 'PENDING' ? { verdict: 'PENDING', allowed: false, red: false } : null);
+}
+/** Test / boot hooks for the process-local gate. */
+export function liveBootGateSetPhase(phase: 'NOT_RUN' | 'PENDING' | 'DONE'): void {
+  liveBootGate.phase = phase;
+  if (phase !== 'DONE') liveBootGate.byUser.clear();
+}
+export function liveBootGateRecord(userId: string, stamp: LiveBootReconcileStamp): void {
+  liveBootGate.byUser.set(userId, stamp);
 }
 export type SpeculativeEntryClaim =
   | { key: string; ok: true; result: EntryClaimResult }
@@ -4625,6 +4716,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `MULTIPLE RELAY EXECUTOR REPLICAS DETECTED (count=${replicaCount}); refusing to start the money path`,
       );
     }
+    // HM R4 B2(b): block every live entry from this process until the boot reconcile read passes (per account)
+    liveBootGateSetPhase('PENDING');
+    void this.runLiveBootReconcile(1);
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
         `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (${describeSignedCopyMarginCap(cap)})`,
@@ -10496,6 +10590,8 @@ await this.notifications
             read_at: new Date().toISOString(),
           };
         }
+        // HM R4 B2(d): every mirror carries this process's boot reconcile stamp (red -> Fly RELAY_BOOT_RECONCILE)
+        mirror.boot_reconcile = liveBootReconcileStampFor(instance.userId);
         if (exchangeMirrorShowsExposure(mirror)) exposed = true;
         if (mirror.ok !== true) evidenceAtMs = Math.min(evidenceAtMs, readStartedAt);
         published += 1;
@@ -22325,18 +22421,17 @@ await this.notifications
   ): Promise<ForceFlatDisarmResult & { fenced: boolean; dbReconciled: boolean; dbOpenRemaining: number | null }> {
     // HM1: hold the account entry fence for the WHOLE route (both ops/position-flatten and ops/force-flat-disarm). A failed
     // acquisition still flattens (safety first) but is reported (fenced=false -> the caller returns ok=false).
+    // HM R4 N2: the flatten NEVER waits for the fence. The acquisition (which can queue behind every claim on the account
+    // live-mutex, bounded by LIVE_ENTRY_FENCE_TX_OPTIONS) runs concurrently with the flatten; it is awaited only before
+    // the DB verification and the release. The fence has no TTL (B2a), so once acquired it holds until released.
     const fenceId = `flatten:${randomUUID()}`;
     const fenceErrors: string[] = [];
     let fenced = false;
-    try {
-      await acquireLiveEntryFence(this.prisma, userId, fenceId, reason);
-      fenced = true;
-    } catch (e) {
-      fenceErrors.push(`fence:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
-    }
-    const touch = async () => {
-      if (fenced) await refreshLiveEntryFence(this.prisma, fenceId).catch(() => undefined);
-    };
+    const fenceSettled = acquireLiveEntryFence(this.prisma, userId, fenceId, reason).then(
+      () => { fenced = true; },
+      (e) => { fenceErrors.push(`fence:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`); },
+    );
+    const touch = async () => undefined;   // B2a: no TTL to refresh
     try {
       // #852 E6 / RK (3): both flatten routes run here; their read-backs use the CRITICAL class of the shared budget
       // (reserved headroom above the mirror and the money tick: never starved). Writes are never budget-refused.
@@ -22346,11 +22441,11 @@ await this.notifications
       // emergencyFlattenOpenCopyLots' own cancel path. Here we only VERIFY, under the fence, after a FLAT_NO_STOPS
       // read-back: any OPEN / PENDING_ENTRY row left on this venue => dbReconciled=false => the route returns ok=false
       // (Fly RED). No second writer: rows are never force-closed outside the terminal-claim EXIT gate.
+      await fenceSettled;   // HM R4 N2: the fence is awaited only here, after the flatten
       let dbReconciled = false;
       let dbOpenRemaining: number | null = null;
       const recErrors: string[] = [];
       if (r.verdict === 'FLAT_NO_STOPS') {
-        await touch();
         try {
           dbOpenRemaining = await this.countOpenAccountRows(userId);
           dbReconciled = dbOpenRemaining === 0;
@@ -22361,8 +22456,108 @@ await this.notifications
       }
       return { ...r, errors: [...fenceErrors, ...r.errors, ...recErrors], fenced, dbReconciled, dbOpenRemaining };
     } finally {
+      await fenceSettled;
       if (fenced) await releaseLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-release'));
     }
+  }
+
+  /**
+   * HM R4 B2(b-d): one boot reconcile pass over every Bitfinex account (see liveBootReconcileVerdict). Reads only; the only
+   * write is the stamp (dashboardState.relayBootReconcile) and, after a PASSING read, removing fence rows whose holder died
+   * with the previous process (acquiredAt before this process started). Blocked accounts are re-read until they pass.
+   */
+  private async runLiveBootReconcile(attempt: number): Promise<void> {
+    if (attempt > 1 && this.executorDestroyed) return;   // a retry after shutdown
+    let retry = false;
+    try {
+      const instances = await this.prisma.tradingAgentInstance.findMany({ where: { exchangeProvider: 'bitfinex' } });
+      const users = [...new Set(instances.map((i) => i.userId))];
+      for (const userId of users) {
+        const prior = liveBootGate.byUser.get(userId);
+        if (prior?.allowed) continue;
+        const stamp = await this.liveBootReconcileAccount(userId, attempt);
+        liveBootGateRecord(userId, stamp);
+        if (!stamp.allowed) retry = true;
+        const line = `[LIVE-BOOT-RECONCILE] ${userId} attempt=${attempt} verdict=${stamp.verdict} allowed=${stamp.allowed} `
+          + `read_sent_at=${stamp.read_sent_at} process_start_at=${stamp.process_start_at} ${stamp.detail}`;
+        if (stamp.red) this.logger.error(`${line} RED: live entries blocked`);
+        else this.logger.warn(line);
+        const payload = JSON.stringify(stamp);
+        await this.prisma.$executeRaw`
+          UPDATE "TradingAgentInstance"
+          SET "dashboardState" = jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayBootReconcile}', ${payload}::jsonb)
+          WHERE "userId" = ${userId}::text AND "exchangeProvider" = 'bitfinex'
+        `.catch(() => undefined);
+        if (stamp.allowed) {
+          await this.prisma.liveEntryFence.deleteMany({ where: { userId, acquiredAt: { lt: new Date(LIVE_PROCESS_START_MS) } } })
+            .catch(this.swallowedError('live-boot-reconcile-stale-fence'));
+        }
+      }
+      liveBootGate.phase = 'DONE';
+    } catch (e) {
+      retry = true;   // instance list unreadable: the gate stays PENDING (every account blocked)
+      this.logger.error(`[LIVE-BOOT-RECONCILE] attempt=${attempt} failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)} RED: live entries blocked`);
+    }
+    if (retry && !this.executorDestroyed) {
+      setTimeout(() => void this.runLiveBootReconcile(attempt + 1), LIVE_BOOT_RECONCILE_RETRY_MS).unref();
+    }
+  }
+
+  private async liveBootReconcileAccount(userId: string, attempt: number): Promise<LiveBootReconcileStamp> {
+    const iso = (ms: number | null) => (ms == null ? null : new Date(ms).toISOString());
+    let readSentAtMs: number | null = null;
+    let readAtMs: number | null = null;
+    let positionAmount: number | null = null;
+    let activeOrders: Array<{ id: number }> | null = null;
+    let dbRows: LiveBootDbRow[] | null = null;
+    let err = '';
+    try {
+      const creds = await this.exchanges.getUserCredentials(userId, 'bitfinex');
+      if (!creds) throw new Error('credentials-missing');
+      readSentAtMs = Date.now();
+      const [pos, orders] = await withBitfinexCriticalReads(() => Promise.all([
+        this.bitfinex.getOpenPositionDetail(creds),
+        this.bitfinex.listActiveOrders(creds),
+      ]));
+      readAtMs = Date.now();
+      positionAmount = pos ? pos.amount : 0;
+      activeOrders = orders.map((o) => ({ id: o.id }));
+      const rows = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+          AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+        },
+        select: { id: true, status: true },
+      });
+      dbRows = [];
+      for (const r of rows) {
+        const meta = await this.loadExecutionMeta(r.id);
+        const stops = await this.participantRecordedStopOrderIds(r.id);
+        dbRows.push({
+          id: r.id,
+          status: String(r.status),
+          direction: meta.direction ?? null,
+          qty: meta.qty ?? null,
+          stopOrderIds: [...new Set([...(meta.stopOrderId ? [meta.stopOrderId] : []), ...stops])],
+        });
+      }
+    } catch (e) {
+      err = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+      if (readAtMs == null) { positionAmount = null; activeOrders = null; }
+      dbRows = null;
+    }
+    const v = liveBootReconcileVerdict({ processStartMs: LIVE_PROCESS_START_MS, readSentAtMs, positionAmount, activeOrders, dbRows });
+    return {
+      ...v,
+      detail: err ? `${v.detail}: ${err}` : v.detail,
+      red: !v.allowed,
+      attempt,
+      process_start_at: new Date(LIVE_PROCESS_START_MS).toISOString(),
+      read_sent_at: iso(readSentAtMs),
+      read_at: iso(readAtMs),
+      stamped_at: new Date().toISOString(),
+    };
   }
 
   /**
@@ -22379,6 +22574,18 @@ await this.notifications
     });
   }
 
+  /**
+   * HM R4 N1 (#852): WHAT the force-flat closes, and the MANUAL path for everything else.
+   * Account-wide on the live instrument (BITFINEX_BTC_PERP_SYMBOL, tBTCF0:USTF0): after the DB-known lots are flattened, the
+   * WHOLE residual exchange position is closed (whatever opened it: relay, operator, manual app order) and EVERY active order
+   * on that symbol is cancelled; the read-back must be FLAT_NO_STOPS (no position, no orders) or the RED stays.
+   * NOT touched (manual operator path): positions/orders on any other symbol or wallet, funding offers, and transfers.
+   * Close those in the Bitfinex app. The Fly RED then clears only on a fresh relay mirror read FLAT_NO_STOPS taken after
+   * the RED and after every stacked code (an ack-only RED also needs POST /api/live-copy/guardian/red-ack); arming stays
+   * a separate operator action. If the relay worker itself is down, the same manual close applies; on restart the boot
+   * reconcile (runLiveBootReconcile) blocks entries until a post-boot read is FLAT_NO_STOPS or matches the DB with every
+   * recorded stop resident.
+   */
   private async forceFlatDisarmAccountInner(
     userId: string,
     agentSlug: string,

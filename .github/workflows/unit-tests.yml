@@ -35,6 +35,19 @@ jobs:
         working-directory: apps/api
         run: |
           npx tsx --test src/exchanges/bitfinex-api.client.spec.ts src/trading-agents/signal-subscriber-execution.helpers.spec.ts
+      - name: "Run the #852 two-tile live-gate API specs (HM R4 N7)"
+        working-directory: apps/api
+        run: |
+          npx tsx --test \
+            src/trading-agents/live-guardian-force-flat.spec.ts \
+            src/trading-agents/shared-read-budget.spec.ts \
+            src/trading-agents/live-mutex-concurrency.spec.ts \
+            src/trading-agents/live-row-countability.spec.ts \
+            src/trading-agents/stop-evidence-cadence.spec.ts \
+            src/trading-agents/live-copy-fly-reporter.spec.ts \
+            src/trading-agents/exit-post-close-reconcile.spec.ts \
+            src/trading-agents/live-exit-fill-evidence.spec.ts \
+            src/trading-agents/live-boot-reconcile.spec.ts
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -58,10 +58,12 @@ test('forceFlatDisarmAccount: lots -> reduce-only residual flatten -> cancel all
   assert.equal(r.cancelled, 2);
   const ex = calls.filter((c) => !c.startsWith('fence:'));
   assert.deepEqual(ex.slice(0, 6), ['lots', 'pos', 'flatten:LONG:0.0003', 'orders', 'cancel:5', 'cancel:6']);
-  // HM1: fence acquired (under the mutex lock) before anything else, refreshed, released last
-  assert.deepEqual(calls.slice(0, 2), ['fence:lock', 'fence:acquire']);
+  // HM1 + HM R4 N2: the fence acquisition starts first (under the mutex lock) but the flatten never waits for it; it is
+  // acquired before the DB verification and released last. No TTL (B2a): nothing is refreshed.
+  assert.equal(calls[0], 'fence:lock');
+  assert.ok(calls.includes('fence:acquire'));
   assert.equal(calls[calls.length - 1], 'fence:release');
-  assert.ok(calls.includes('fence:refresh'));
+  assert.ok(!calls.includes('fence:refresh'));
   assert.equal(r.fenced, true);
   assert.equal(JSON.stringify(r).includes('apiSecret'), false);
 });
@@ -209,4 +211,27 @@ test('HM4: the trigger reason reaches emergencyFlattenOpenCopyLots (NOT as opera
   assert.match(ev, /trigger_reason: trigger\.reason/);
   assert.match(ev, /non_countable: true/);
   assert.match(ev, /non_countable_reason: `FORCE_FLAT:\$\{trigger\.reason\}`/);
+});
+
+test('HM R4 N2: a fence stuck behind the account lock never delays the flatten (lots / residual / cancel start at once)', async () => {
+  const { s, calls } = svc({ pos: [{ amount: -0.0002 }, null], orders: [[{ id: 3 }], []] });
+  let unlock!: () => void;
+  const held = new Promise<void>((r) => { unlock = r; });
+  const prisma = (s as unknown as { prisma: Record<string, unknown> }).prisma;
+  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => {
+    await held;   // queued behind every claim on the account live-mutex
+    return fn({ $executeRawUnsafe: async () => { calls.push('fence:lock'); }, liveEntryFence: { create: async () => { calls.push('fence:acquire'); } } });
+  };
+  const t0 = Date.now();
+  const run = s.forceFlatDisarmAccount('u', 'slug');
+  while (!calls.includes('cancel:3') && Date.now() - t0 < 2_000) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(calls.includes('cancel:3'), `flatten waited for the fence: ${calls}`);
+  assert.ok(Date.now() - t0 <= 2_000);
+  assert.deepEqual(calls.filter((c) => !c.startsWith('fence:')).slice(0, 4), ['lots', 'pos', 'flatten:SHORT:0.0002', 'orders']);
+  assert.ok(!calls.includes('fence:acquire'));
+  unlock();
+  const r = await run;
+  assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.equal(r.fenced, true);
+  assert.equal(calls[calls.length - 1], 'fence:release');
 });

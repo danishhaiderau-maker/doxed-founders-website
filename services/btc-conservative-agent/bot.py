@@ -49961,7 +49961,11 @@ def _live_guardian_mirror():
     if isinstance(m, dict) and m.get("ok") and _age is not None and _age == _age and 0 <= _age <= 20.0:
         # AMEND4 E6: evidence age = relay read age at Fly's fetch + time since that fetch (live_tile_gate.mirror_evidence_age_s)
         return {**m, "fetched_at_ts": view.get("fetched_at_ts")}
-    return {"ok": False, "error": (m or {}).get("error") or "stale-or-missing mirror"}
+    out = {"ok": False, "error": (m or {}).get("error") or "stale-or-missing mirror"}
+    # HM R4 B2: a relay boot-reconcile RED travels even on a failed/stale read (exchange unreadable at boot -> RED)
+    if isinstance(m, dict) and isinstance(m.get("boot_reconcile"), dict):
+        out["boot_reconcile"] = m["boot_reconcile"]
+    return out
 
 
 _LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC = 10.0   # HM N5
@@ -49986,7 +49990,10 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     # merely within the 20 s mirror window
     if float(age) + max(0.0, float(now) - float(fetched)) > _LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC:
         return False
-    if float(fetched) - float(age) <= float(red.get("ts") or 0):
+    # HM R4 N3: the evidence is the relay READ time (Fly fetch time - read age); it must postdate the RED AND every stacked
+    # code (red["also"][].ts), and that read time (never the Fly tick time) is what flat_evidence_ts records
+    _read_ts = float(fetched) - float(age)
+    if _read_ts <= _lgm.red_latest_ts(red):
         return False
     if _esv.build(m).get("verdict") != "FLAT_NO_STOPS":
         return False
@@ -50002,12 +50009,13 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
             red["code"] = red.get("code") if red.get("code") in _ack else _ack[0]
             red.pop("flat_evidence_ts", None)
         if not red.get("flat_evidence_ts"):
-            red["flat_evidence_ts"] = now   # shown to the operator; stamped once (no persist churn per tick)
+            red["flat_evidence_ts"] = _read_ts   # HM R4 N3: the READ time; stamped once (no persist churn per tick)
             logger.warning(f"[LIVE GUARDIAN] FLAT_NO_STOPS seen but RED {red.get('code')} needs the operator ack "
                            f"(POST /api/live-copy/guardian/red-ack) [PIPELINE ENFORCEMENT]")
             _live_guardian_persist()
         return False
-    _LIVE_GUARDIAN_STATE["red_alert_cleared"] = {"ts": now, "was": red, "evidence": "relay mirror FLAT_NO_STOPS"}
+    _LIVE_GUARDIAN_STATE["red_alert_cleared"] = {"ts": now, "was": red, "evidence": "relay mirror FLAT_NO_STOPS",
+                                                 "evidence_read_ts": _read_ts}
     _LIVE_GUARDIAN_STATE.pop("red_alert", None)
     logger.warning(f"[LIVE GUARDIAN] RED cleared on exchange evidence FLAT_NO_STOPS (was {red.get('code')}); still disarmed")
     _live_guardian_persist()
@@ -50210,11 +50218,19 @@ def _live_guardian_boot_rederive(now) -> str | None:
     m = _live_guardian_mirror()
     if not view.get("fetched_at_ts") or not m.get("ok"):
         return None   # wait for evidence; arming is refused meanwhile only if RED/latched was restored
+    # HM R4 N5: the mirror READ (Fly fetch time - relay read age) must postdate this boot; an older (cached) read waits
+    try:
+        _read_ts = float(view.get("fetched_at_ts")) - float(m.get("read_age_s"))
+    except (TypeError, ValueError):
+        return None
+    _boot_ts = float((st.get("boot_rederive_pending") or {}).get("ts") or 0)
+    if not (_read_ts > _boot_ts):
+        return None
     st.pop("boot_rederive_pending", None)
     accts = [a for a in (view.get("accounts") or []) if isinstance(a, dict)]
     paused = bool(accts) and not any(a.get("armed") for a in accts)
     verdict = _esv.build(m).get("verdict")
-    st["boot_rederive"] = {"ts": now, "relay_paused": paused, "verdict": verdict}
+    st["boot_rederive"] = {"ts": now, "relay_paused": paused, "verdict": verdict, "read_ts": _read_ts, "boot_ts": _boot_ts}
     if paused and verdict != "FLAT_NO_STOPS" and not st.get("red_alert"):
         st["red_alert"] = {"ts": now, "code": "BOOT_REDERIVED_NOT_FLAT", "reason": f"relay paused, mirror {verdict}",
                            "readback": "UNCONFIRMED"}
@@ -62903,7 +62919,7 @@ def _live_guardian_red_ack(actor, reason, code, now=None, auth_method: str = "")
     _plain = [c for c in _codes if c not in _lgm.ACK_ONLY_RED_CODES]
     if not _codes or _plain:
         return 409, {"ok": False, "error": "RED_NOT_ACK_ONLY", "red_code": red.get("code"), "codes": _codes, "not_ack_only": _plain}
-    _red_ts = max([float(red.get("ts") or 0)] + [float(a.get("ts") or 0) for a in (red.get("also") or []) if isinstance(a, dict)])
+    _red_ts = _lgm.red_latest_ts(red)
     try:
         _flat_ts = float(red.get("flat_evidence_ts"))
     except (TypeError, ValueError):

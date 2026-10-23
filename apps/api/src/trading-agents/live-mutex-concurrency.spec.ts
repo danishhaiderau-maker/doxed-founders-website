@@ -6,7 +6,8 @@ import { SignalCycleStatus } from '@prisma/client';
 import {
   acquireLiveEntryFence,
   countLiveMutexOthers,
-  LIVE_ENTRY_FENCE_TTL_MS,
+  LIVE_ENTRY_FENCE_NO_EXPIRY,
+  liveEntryFenceActiveWhere,
   LIVE_ENTRY_FENCE_TX_OPTIONS,
   LIVE_MUTEX_INTENT_WINDOW_MS,
   releaseLiveEntryFence,
@@ -34,8 +35,9 @@ function fakeDb() {
       return r.status === st && r.createdAt >= (c as { createdAt: { gte: Date } }).createdAt.gte;
     });
   };
-  const fenceCount = (pool: Fence[], where: { userId: string; expiresAt: { gt: Date } }) =>
-    pool.filter((f) => f.userId === where.userId && f.expiresAt > where.expiresAt.gt).length;
+  // honours an expiresAt filter only if the production where-clause ever carries one again (HM R4 B2a: it must not)
+  const fenceCount = (pool: Fence[], where: { userId: string; expiresAt?: { gt: Date } }) =>
+    pool.filter((f) => f.userId === where.userId && (!where.expiresAt || f.expiresAt > where.expiresAt.gt)).length;
   async function txn<T>(fn: (tx: any) => Promise<T>): Promise<T> {
     const mine: Row[] = [];
     const myFences: Fence[] = [];
@@ -52,7 +54,7 @@ function fakeDb() {
           await new Promise((r) => setTimeout(r, 5));
           myFences.push({ id: data.id, userId: data.userId, expiresAt: data.expiresAt });
         },
-        count: async ({ where }: { where: { userId: string; expiresAt: { gt: Date } } }) => {
+        count: async ({ where }: { where: { userId: string; expiresAt?: { gt: Date } } }) => {
           const n = fenceCount([...fences, ...myFences], where);
           await new Promise((r) => setTimeout(r, 5));
           return n;
@@ -160,7 +162,7 @@ test('HM N5 venue filter: Bitfinex and legacy no-venue rows count; another venue
   }
 });
 
-test('HM1 fence: an unexpired LiveEntryFence makes every claim section refuse; release / expiry lifts it', async () => {
+test('HM1 fence: a LiveEntryFence makes every claim section refuse; only release lifts it (HM R4 B2a: no expiry)', async () => {
   const db = fakeDb();
   const now = Date.now();
   await acquireLiveEntryFence(db.db, 'u1', 'f1', 'LIQ_CLAMP_FLATTEN:t1', now);
@@ -169,8 +171,12 @@ test('HM1 fence: an unexpired LiveEntryFence makes every claim section refuse; r
   await releaseLiveEntryFence(db.db, 'f1');
   assert.equal(await claim(db, 'u1', true), 1);               // (the earlier refused claim row is still INTENT)
   const db2 = fakeDb();
-  await acquireLiveEntryFence(db2.db, 'u1', 'f2', 'x', now - LIVE_ENTRY_FENCE_TTL_MS - 1);   // a crashed holder's expired fence
-  assert.equal(await claim(db2, 'u1', true), 0);
+  await acquireLiveEntryFence(db2.db, 'u1', 'f2', 'x', now - 7 * 24 * 3600_000);   // a crashed holder's fence, a week old
+  assert.equal(await claim(db2, 'u1', true), 1);               // HM R4 B2a: expiry never allows an entry by itself
+  assert.deepEqual(liveEntryFenceActiveWhere('u1', now + 365 * 24 * 3600_000), { userId: 'u1' });
+  assert.ok(LIVE_ENTRY_FENCE_NO_EXPIRY.getUTCFullYear() === 9999);
+  const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  assert.ok(!/LIVE_ENTRY_FENCE_TTL_MS/.test(src), 'no fence TTL left in the service');
 });
 
 test('HM1 fence race (20x): a claim racing the fence acquisition is admitted only if it committed BEFORE the fence', async () => {
