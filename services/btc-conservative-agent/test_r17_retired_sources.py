@@ -12,6 +12,7 @@ TICK_HELPERS = {"_simulate_ticks_fast_cut_ladder", "_sim_replay_pnl_usd", "_sim_
 
 def _callers(path: Path, names: set[str]) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    aliases = _module_aliases(tree, names)  # HM #850 R2 C1: ``_x()`` after ``... import <pricer> as _x`` counts
     out = set()
     for fn in tree.body:
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or fn.name in names:
@@ -19,7 +20,7 @@ def _callers(path: Path, names: set[str]) -> set[str]:
         for node in ast.walk(fn):
             # any reference (direct call or ``evaluator = evaluate_limit_fill`` indirection)
             n = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
-            if n in names:
+            if n in names or (isinstance(node, ast.Name) and n in aliases):
                 out.add(fn.name)
     return out
 
@@ -193,11 +194,49 @@ def _docstring_ids(tree) -> set[int]:
     return out
 
 
-def _refs(node, names, docs) -> set[str]:
+def _module_aliases(tree, names) -> dict[str, str]:
+    """HM #850 R2 C1: every local name a module binds to a retired pricer, resolved to the pricer's real name.
+
+    ``from X import evaluate_limit_fill as _x`` binds ``_x``; ``import fill_model as fm2`` binds ``fm2`` as a module
+    alias (its ``fm2.<pricer>`` attributes are pinned by attribute name); ``_y = fm2.realistic_exit_margin`` and
+    ``_z = _x`` bind ``_y`` / ``_z``. Bindings anywhere in the module (top level, class or function body) count and
+    are resolved to a fixpoint so alias chains cannot hide a call."""
+    aliases: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            for a in n.names:
+                if a.name in names:
+                    aliases[a.asname or a.name] = a.name
+    assigns = [n for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr))]
+    changed = True
+    while changed:
+        changed = False
+        for n in assigns:
+            v = n.value
+            if v is None:
+                continue
+            real = (v.id if isinstance(v, ast.Name) and v.id in names else
+                    aliases.get(v.id) if isinstance(v, ast.Name) else
+                    v.attr if isinstance(v, ast.Attribute) and v.attr in names else None)
+            if real is None:
+                continue
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            for t in targets:
+                for tn in ast.walk(t):
+                    if isinstance(tn, ast.Name) and tn.id not in aliases and tn.id not in names:
+                        aliases[tn.id] = real
+                        changed = True
+    return aliases
+
+
+def _refs(node, names, docs, aliases=None) -> set[str]:
+    aliases = aliases or {}
     hit = set()
     for n in ast.walk(node):
         if isinstance(n, ast.Name) and n.id in names:
             hit.add(n.id)
+        elif isinstance(n, ast.Name) and n.id in aliases:
+            hit.add(aliases[n.id])  # resolved alias: ``_x()`` after ``from X import evaluate_limit_fill as _x``
         elif isinstance(n, ast.Attribute) and n.attr in names:
             hit.add(n.attr)
         elif isinstance(n, ast.alias) and (n.name.rsplit(".", 1)[-1] in names or n.asname in names):
@@ -234,30 +273,87 @@ def _repo_pricer_references() -> dict[str, set[str]]:
             continue
         if p.name.startswith("test_") or p.name.endswith("_test.py"):
             continue
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(p.read_text(encoding="utf-8-sig"), filename=str(rel))  # unparseable = fail closed
-        docs = _docstring_ids(tree)
-        for scope, node in _scopes(tree, names):
-            hit = _refs(node, names, docs)
-            if hit:
-                out.setdefault(f"{rel.as_posix()}::{scope}", set()).update(hit)
+        out.update(_scan_file(p, rel.as_posix(), names))
     return out
+
+
+def _scan_file(path: Path, rel: str, names: set[str]) -> dict[str, set[str]]:
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=rel)  # unparseable = fail closed
+    docs = _docstring_ids(tree)
+    aliases = _module_aliases(tree, names)
+    out: dict[str, set[str]] = {}
+    for scope, node in _scopes(tree, names):
+        hit = _refs(node, names, docs, aliases)
+        if hit:
+            out.setdefault(f"{rel}::{scope}", set()).update(hit)
+    return out
+
+
+def _pin_violations(found: dict[str, set[str]]) -> list[str]:
+    """Scopes that reference a retired pricer but are not pinned (or are pinned to an inactive key), and pins that no
+    longer reference anything. Empty means the repo matches the registry exactly."""
+    pinned = r3_quarantine.REPO_PRICER_REFERENCES
+    bad = [f"UNPINNED {s} -> {sorted(found[s])}" for s in sorted(set(found) - set(pinned))]
+    bad += [f"STALE_PIN {s}" for s in sorted(set(pinned) - set(found))]
+    bad += [f"INACTIVE {s} -> {k}" for s, k in sorted(pinned.items())
+            if k not in r3_quarantine.QUARANTINE or not r3_quarantine.is_active(k)]
+    return bad
 
 
 def test_repo_wide_retired_pricer_references_are_pinned_and_quarantined():
     """HM #850 R3: whole repo (minus tests / fill_model.py / the registry), every scope kind and string constants."""
     found = _repo_pricer_references()
-    assert set(found) == set(r3_quarantine.REPO_PRICER_REFERENCES), (
-        sorted(set(found) ^ set(r3_quarantine.REPO_PRICER_REFERENCES)))
-    for scope, key in r3_quarantine.REPO_PRICER_REFERENCES.items():
-        assert key in r3_quarantine.QUARANTINE and r3_quarantine.is_active(key), scope
-    # the narrower fill_model pin is a subset of the repo-wide one
-    fm_names = set(r3_quarantine.FILL_MODEL_ROW_PRICERS)
-    fm_scopes = {s for s, h in found.items() if h & fm_names}
-    assert "diagnostics/hypothesis-tiles-20261004/exit_study.py::replay" in fm_scopes
-    assert len(fm_scopes) == 6  # 4 R2 callers + genome_grid canonical_parity_sample label + exit_study.replay
+    assert _pin_violations(found) == []
+    # the narrower fill_model pin is covered by the repo-wide one (no count: the registry equality above is the pin)
+    assert found["diagnostics/hypothesis-tiles-20261004/exit_study.py::replay"] & set(r3_quarantine.FILL_MODEL_ROW_PRICERS)
+
+
+PLANTED_ALIAS_SRC = (
+    "import fill_model as fm2\n"
+    "from conservative_limit_fill import evaluate_limit_fill as _x\n"
+    "_y = fm2.realistic_exit_margin\n"
+    "_z = _y\n"
+    "def harmless():\n"
+    "    return 1\n"
+    "def sneaky_alias_call():\n"
+    "    return _x()\n"
+    "def sneaky_module_alias():\n"
+    "    return fm2.taker_fill_rows([])\n"
+    "class C:\n"
+    "    def sneaky_chain(self):\n"
+    "        return _z(1, 2)\n"
+)
+
+
+def test_planted_import_alias_caller_fails_the_pin(tmp_path):
+    """HM #850 R2 C1: a new function calling a retired pricer through an import alias MUST fail the repo pin."""
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    planted = tmp_path / "planted_alias_module.py"
+    planted.write_text(PLANTED_ALIAS_SRC, encoding="utf-8")
+    hits = _scan_file(planted, "services/btc-conservative-agent/planted_alias_module.py", names)
+    pre = "services/btc-conservative-agent/planted_alias_module.py::"
+    assert hits[pre + "sneaky_alias_call"] == {"evaluate_limit_fill"}
+    assert hits[pre + "sneaky_module_alias"] == {"taker_fill_rows"}
+    assert hits[pre + "C.sneaky_chain"] == {"realistic_exit_margin"}
+    assert pre + "harmless" not in hits
+    violations = _pin_violations({**_repo_pricer_references(), **hits})
+    assert f"UNPINNED {pre}sneaky_alias_call -> ['evaluate_limit_fill']" in violations
+    assert any(v.startswith(f"UNPINNED {pre}C.sneaky_chain") for v in violations)
+    # without alias resolution the bare ``_x()`` call would have been invisible
+    tree = ast.parse(PLANTED_ALIAS_SRC)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "sneaky_alias_call")
+    assert _refs(fn, names, set()) == set() and _refs(fn, names, set(), _module_aliases(tree, names))
+
+
+def test_module_aliases_resolve_chains_and_local_imports():
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    tree = ast.parse("from a import maker_fill_rows as m\nq = m\ndef f():\n    from b import taker_fill_rows as t\n"
+                     "    r = t\n    return r()\nk: object = q\n")
+    assert _module_aliases(tree, names) == {"m": "maker_fill_rows", "q": "maker_fill_rows", "t": "taker_fill_rows",
+                                             "r": "taker_fill_rows", "k": "maker_fill_rows"}
 
 
 def test_scanner_catches_every_scope_kind(tmp_path):
