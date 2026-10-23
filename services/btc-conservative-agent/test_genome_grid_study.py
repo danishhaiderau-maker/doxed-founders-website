@@ -166,3 +166,11 @@ def test_r3_quarantine_main_reports_status(tmp_path, monkeypatch, capsys):
                    "--tier-a", str(tmp_path)]) == 0
     assert '"R3_QUARANTINED"' in capsys.readouterr().out
     assert not (tmp_path / "o" / "genome_grid_report.json").exists()
+
+
+def test_r3_tape_sources_hard_stop(tmp_path):
+    """R3: genome_grid_study L204 refuses to open the 1s tape while quarantined."""
+    import pytest
+    from research import r3_quarantine
+    with pytest.raises(r3_quarantine.R3QuarantinedSource):
+        g._tape_sources(tmp_path, tmp_path)

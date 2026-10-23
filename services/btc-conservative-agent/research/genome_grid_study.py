@@ -201,6 +201,9 @@ class Tape:
 
 
 def _tape_sources(mirror: Path, tier_a: Path) -> list[tuple[str, Path]]:
+    # R3: bitfinex_l1_tape_1s / market_microstructure_1s may not price or trigger. Hard stop until the
+    # grid is rebuilt on paper_fill + quote_trigger (R4); the rebuild is left for RK.
+    r3_quarantine.guard("GENOME_GRID", "bitfinex_l1_tape_1s + market_microstructure_1s")
     sources = [("parquet", Path(p)) for p in sorted(glob.glob(str(tier_a / "bitfinex_l1_tape_1s" / "v1" / "date=*" / "*.parquet")))]
     sources += [("jsonl", p) for p in sorted(_rotations(mirror / "market_microstructure_1s.jsonl"))]
     return sources
