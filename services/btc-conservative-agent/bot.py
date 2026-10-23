@@ -47572,6 +47572,9 @@ def _tile_integrity_run_once(now=None):
         _TILE_INTEGRITY_FEED = _ti.FeedWatch()
     try:
         import bfx_book_top as _bbt
+        # R4 note (HM 23 Oct): behaviour change, not a removal. ensure_started() starts the
+        # bfx_book_top WS thread (idempotent) for FeedWatch. Monitor-only: it feeds no pricer,
+        # trigger or fill path, so the shared pricer/trigger helpers are unchanged.
         _bbt.ensure_started()  # sole remaining user after DISLOC removal (HM amendment 3 FeedWatch)
         st = _bbt.status()
         feed = _TILE_INTEGRITY_FEED.observe(st.get("msgs"), st.get("ts"), now)

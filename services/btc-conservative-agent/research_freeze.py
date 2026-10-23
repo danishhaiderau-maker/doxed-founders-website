@@ -123,9 +123,10 @@ MID_EPOCH_ADDITION_ROSTER = tuple(item["lane"] for item in MID_EPOCH_ADDITIONS)
 # The frozen roster's signature is unchanged.
 # 2026-10-11 (owner): H-C/B3/FADE-POOL/V07 retired and DISLOC/DISLOC-FOI added; pin moved.
 # 2026-10-12 10:57 (owner): H-A and GS-07 retired (roster 1..7); pin moved.
+# 2026-10-23 (owner): Tile 6 DISLOC and Tile 7 DISLOC-FOI retired (roster 1..5); score_led and hypothesis pins moved.
 MID_EPOCH_REGISTRY_SIGNATURES = {
-    "score_led": "0eaa123377fa49b149f5f96c61dd6d22b3808ce5bf8f334e3a0790b280028331",
-    "hypothesis": "4022e371fe5aeafe26b2621955286b2919d56ae6cad8e91658688768716a90cf",
+    "score_led": "19cfc36571f5523d2d403035764103f98fcdf5a6f9a83b666b2a5edab7522247",
+    "hypothesis": "16804a01413da19fd7527d70e33b7718507b225ea606775cdd62cb5d89ce9a2d",
 }
 OVERRIDE_CONFIRMATION = "BREAK_21_DAY_RESEARCH_FREEZE"
 OVERRIDE_ENV = "RESEARCH_FREEZE_OVERRIDE"
