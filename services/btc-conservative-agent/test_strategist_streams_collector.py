@@ -160,7 +160,7 @@ def test_ws_events_log_trades_hb_snapshot_and_controls_with_receive_time(tmp_pat
     ev = _rows(tmp_path / ssc.EVENTS_FILE)
     assert [e["ev"] for e in ev] == ["info", "subscribed", "snapshot", "hb", "te", "disconnect"]
     assert ev[0]["r"] == 99.5 and ev[4]["r"] == 115.123 and ev[4]["id"] == 10 and ev[4]["mts"] == 115100
-    assert ev[3] == {"r": 115.0, "ev": "hb", "ch": "trades"}
+    assert {k: v for k, v in ev[3].items() if k != "mono"} == {"r": 115.0, "ev": "hb", "ch": "trades"}
     assert ev[2]["tr"] == [[9, 99000, 0.5, 150], [8, 98000, -0.1, 149]]
     c.close_second(115, now=116.5)
     # the snapshot is history: never in bfx_trades rows; only the live print is
@@ -172,4 +172,155 @@ def test_ws_events_file_is_registered_but_not_a_trades_stream():
     import monitor_streams
     assert monitor_streams.STREAMS["bfx_ws_events"] == ssc.EVENTS_FILE
     assert monitor_streams.STREAMS["bfx_trades"] == ssc.TRADES_FILE != ssc.EVENTS_FILE
-    assert ssc.EVENTS_FILE in open(full_reset_no_archive.__file__, encoding="utf-8").read()
+    # HM #851 C3(c): a real reset classifies the events file and its rotations as DELETE (not a source-text grep)
+    for name in (ssc.EVENTS_FILE, ssc.EVENTS_FILE + ".3", ssc.EVENTS_FILE + ".3.gz"):
+        assert full_reset_no_archive.classify(name)[0] == "DELETE", name
+
+
+# ---- HM R2 #851 (24 Oct 2026 AEDT) C1-C3 ----------------------------------------------------------------------------
+def _lighter(bid, ask):
+    return {"ticker": {"b": {"price": str(bid)}, "a": {"price": str(ask)}}}
+
+
+def _venue_row(tmp_path, minute):
+    return next(r for r in _rows(tmp_path / ssc.VENUE_FILE) if r["m"] == minute)
+
+
+def test_c1_quote_burst_between_s_plus_1_and_close_keeps_the_s_value(tmp_path):
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    c.on_lighter(_lighter(99, 100), 100.5)  # the value as of s+1 for s=100
+    for i in range(40):  # burst in 101.0-101.2, received before second 100 is closed (more than any count cap)
+        c.on_lighter(_lighter(200 + i, 201 + i), 101.0 + i * 0.005)
+        c.on_paradex({"bid": 300 + i, "ask": 301 + i}, 101.0 + i * 0.005)
+    c.close_second(100, now=101.3)
+    c.close_second(101, now=102.3)
+    c.close_second(160, now=161.3)  # flush minute 60
+    row = _venue_row(tmp_path, 60)
+    assert row["lighter"][40] == [99, 100]
+    assert row["paradex"][40] is None  # no paradex value received <= s+1
+    assert row["lighter"][41] == [239, 240] and row["paradex"][41] == [339, 340]
+
+
+def test_c1_stall_catch_up_closes_every_second_with_its_own_value(tmp_path):
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    for k in range(60):  # 10 updates/s for 6 s, then a 5 s stall of the close loop
+        t = 100.0 + k * 0.1
+        c.on_lighter(_lighter(1000 + k, 1001 + k), t)
+    deriv = [0] * 23
+    deriv[11] = 0.0001
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "status", "chanId": 7, "key": ssc.DERIV_KEY}, chans, 100.0)
+    for k in range(6):
+        deriv[0], deriv[14] = int((100 + k) * 1000), 150 + k
+        c.on_bfx([7, list(deriv)], chans, 100.5 + k)
+    for sec in range(100, 106):  # catch-up loop: all closed at once, ~5 s late
+        c.close_second(sec, now=106.4)
+    c.close_second(160, now=161.3)
+    row = _venue_row(tmp_path, 60)
+    assert [row["lighter"][40 + k] for k in range(6)] == [[1009 + 10 * k, 1010 + 10 * k] for k in range(6)]
+    assert [r["mark"] for r in _rows(tmp_path / ssc.DERIV_FILE)][:6] == [150, 151, 152, 153, 154, 155]
+
+
+def test_c1_history_is_bounded_by_time_not_count():
+    h = ssc._SecondHistory(keep_s=15)
+    for k in range(1000):
+        h.add(("v", k), 100.0 + k * 0.01)  # 1000 updates over 10 s -> one entry per second
+    assert len(h) == 10 and h.as_of(104) == ("v", 499)
+    h.add(("late", 0), 200.0)
+    assert len(h) == 1 and h.as_of(150) is None and h.as_of(200) == ("late", 0)
+
+
+def test_c2_event_rows_carry_mono_and_disconnect_reason(tmp_path):
+    ticks = iter([5.0, 5.25, 9.5])
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0, mono=lambda: next(ticks))
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "trades", "chanId": 2}, chans, 100.0)
+    c.on_bfx([2, "hb"], chans, 100.25)
+    c.on_bfx_disconnect(now=104.5, reason="ConnectionResetError")
+    ev = _rows(tmp_path / ssc.EVENTS_FILE)
+    assert [e["mono"] for e in ev] == [5.0, 5.25, 9.5]
+    assert ev[-1]["ev"] == "disconnect" and ev[-1]["reason"] == "ConnectionResetError"
+
+
+def test_c3a_reconnect_mid_second_row_is_the_new_snapshot(tmp_path):
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 1}, chans, 100.0)
+    c.on_bfx([1, [[100, 1, 0.5], [200, 1, -0.5]]], chans, 100.1)  # snapshot A
+    c.on_bfx_disconnect(now=100.3, reason="ConnectionResetError")
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "book", "chanId": 5}, chans, 100.5)  # new chanId
+    c.on_bfx([5, [[110, 1, 0.7], [190, 1, -0.7]]], chans, 100.6)  # snapshot B, same second
+    c.close_second(100, now=101.3)
+    assert _rows(tmp_path / ssc.BOOK_FILE) == [{"s": 100, "b": [[110, 0.7]], "a": [[190, 0.7]]}]
+
+
+def test_c3b_hb_only_book_carries_and_a_disconnect_drops_the_carry(tmp_path):
+    c, chans = _quiet_book_collector(tmp_path)
+    for t in (104.0, 108.0, 110.5):  # only heartbeats on the book channel
+        c.on_bfx([1, "hb"], chans, t)
+    c.close_second(110, now=111.3)
+    rows = _rows(tmp_path / ssc.BOOK_FILE)
+    assert rows == [{"s": 110, "b": [[100, 0.5]], "a": [[200, 0.5]], "carried": True}]
+    c.on_bfx_disconnect(now=111.5, reason="TimeoutError")
+    c.close_second(111, now=112.3)  # frozen before the disconnect was seen: dropped anyway (conservative, N1)
+    c.close_second(112, now=113.3)
+    assert len(_rows(tmp_path / ssc.BOOK_FILE)) == 1
+
+
+def test_c3d_tu_error_unsubscribed_and_info_rows_are_logged(tmp_path):
+    c = ssc.Collector(str(tmp_path), clock=lambda: 0.0)
+    chans = {}
+    c.on_bfx({"event": "subscribed", "channel": "trades", "chanId": 2}, chans, 100.0)
+    c.on_bfx([2, "tu", [10, 100100, 0.01, 151]], chans, 100.2)
+    c.on_bfx({"event": "error", "msg": "subscribe: dup", "code": 10301}, chans, 100.3)
+    c.on_bfx({"event": "unsubscribed", "status": "OK", "chanId": 2}, chans, 100.4)
+    c.on_bfx({"event": "info", "code": 20051, "msg": "Stop/Restart Websocket Server"}, chans, 100.5)
+    ev = _rows(tmp_path / ssc.EVENTS_FILE)
+    assert [e["ev"] for e in ev] == ["subscribed", "tu", "error", "unsubscribed", "info"]
+    assert ev[1]["id"] == 10 and ev[1]["mts"] == 100100 and ev[1]["ch"] == "trades"
+    assert ev[2]["msg"]["code"] == 10301 and ev[3]["msg"]["chanId"] == 2 and ev[4]["msg"]["code"] == 20051
+    assert not (tmp_path / ssc.TRADES_FILE).exists() or _rows(tmp_path / ssc.TRADES_FILE) == []  # tu is not a print
+
+
+class _FakeWS:
+    def __init__(self, collector, frames, end_exc=None):
+        self.c, self.frames, self.end_exc, self.sent = collector, list(frames), end_exc, []
+
+    def send(self, s):
+        self.sent.append(json.loads(s))
+
+    def recv(self):
+        if self.frames:
+            return json.dumps(self.frames.pop(0))
+        self.c.stop.set()
+        if self.end_exc:
+            raise self.end_exc
+        return json.dumps([1, "hb"])
+
+    def close(self):
+        pass
+
+
+def test_c3e_ws_loop_logs_connect_and_disconnect_reason(tmp_path):
+    clock = iter([100.0 + i * 0.1 for i in range(50)])
+    c = ssc.Collector(str(tmp_path), clock=lambda: next(clock))
+    ws = _FakeWS(c, [{"event": "info", "version": 2},
+                     {"event": "subscribed", "channel": "book", "chanId": 1}], ConnectionResetError("reset"))
+    c._ws_factory = lambda url: ws
+    c._ws_loop("bitfinex", "wss://x", [{"event": "subscribe", "channel": "book"}], c.on_bfx)
+    ev = _rows(tmp_path / ssc.EVENTS_FILE)
+    assert [e["ev"] for e in ev] == ["connect", "info", "subscribed", "disconnect"]
+    assert ev[-1]["reason"] == "ConnectionResetError" and all("mono" in e for e in ev)
+    assert ws.sent == [{"event": "subscribe", "channel": "book"}] and c.reconnects["bitfinex"] == 1
+
+
+def test_c3e_ws_loop_graceful_stop_logs_disconnect_stop(tmp_path):
+    clock = iter([100.0 + i * 0.1 for i in range(50)])
+    c = ssc.Collector(str(tmp_path), clock=lambda: next(clock))
+    ws = _FakeWS(c, [{"event": "subscribed", "channel": "book", "chanId": 1}])
+    c._ws_factory = lambda url: ws
+    c._ws_loop("bitfinex", "wss://x", [], c.on_bfx)
+    ev = _rows(tmp_path / ssc.EVENTS_FILE)
+    assert [e["ev"] for e in ev][-1] == "disconnect" and ev[-1]["reason"] == "stop"
+    assert c.reconnects["bitfinex"] == 0
