@@ -7,7 +7,17 @@ MIR = {"ok": True, "positions": [], "open_orders": [], "orphans": [], "balance":
 FF: list = []   # force-flat stub calls (C2)
 
 def ch(**k):
+    if k.get("closed") and k.get("pnl_usd") is not None and "exit_price_source" not in k and not k.pop("no_fill", False):
+        k = {**real_fill(k["pnl_usd"]), **k}
+    k.pop("no_fill", None)
     return {"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", **k}
+
+
+def real_fill(pnl):
+    """HM R4 B1: a closed live trade whose P&L is backed by a REAL Bitfinex exit fill (the reporter's close.price with
+    price_source exchange_fill). pnl_usd alone is no longer read by D3 (no fallback)."""
+    return {"fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 100_000.0 + pnl / 0.01,
+            "exit_price_source": "exchange_fill"}
 
 
 def codes(v):
@@ -487,7 +497,7 @@ DAY0 = 1_800_000_000.0 - (1_800_000_000.0 % 86400)      # 00:00 UTC of NOW's day
 
 
 def lc(tid, pnl, at):
-    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at}
+    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at, **real_fill(pnl)}
 
 
 def test_g6_caps_are_pinned_to_the_prereg_values():
@@ -514,7 +524,7 @@ def test_g6_uses_the_utc_day_and_wins_offset_losses_on_the_same_day():
     assert not ltg.daily_loss_violations([lc("gs1-a", -0.09, DAY0 - 1)], NOW)
     assert not ltg.daily_loss_violations([lc("gs1-a", -0.06, NOW - 20), lc("gs1-b", 0.02, NOW - 10)], NOW)
     # a closed row with pnl but no close time counts as today (conservative)
-    assert ltg.daily_loss_violations([{"correlation_id": "gs1-x", "closed": True, "pnl_usd": -0.05}], NOW)
+    assert ltg.daily_loss_violations([{"correlation_id": "gs1-x", "closed": True, "pnl_usd": -0.05, **real_fill(-0.05)}], NOW)
 
 
 def test_g6_unattributed_loss_counts_towards_total_and_errors_fail_safe():

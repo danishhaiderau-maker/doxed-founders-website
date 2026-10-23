@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 import live_ack_pool as _lap
+import live_exit_fill as _lef
 import trigger_measure as _tm
 
 SCHEMA = "live_vs_paper_v1"
@@ -61,9 +62,13 @@ def pair_countability(chain: Mapping[str, Any] | None, twin: Mapping[str, Any] |
     legs_nc = bool(chain) and legs["non_countable"]
     if legs_nc:
         reasons.extend(legs["non_countable_reasons"])
+    # HM R4 B1 / RK 08:03 (R17): a closed live leg without a REAL Bitfinex exit fill is non-countable (shared helper)
+    ef_reason = _lef.exit_fill_non_countable_reason(chain) if chain else None
+    if ef_reason:
+        reasons.append(ef_reason)
     twin_nc = bool(twin) and bool(live or paper_forced or _truthy(twin.get("non_countable")))
-    live_reason = ("FORCED_CLOSE:" + live) if live else (legs["non_countable_reasons"][0] if legs_nc else None)
-    return {"live_non_countable": bool(live) or legs_nc, "live_non_countable_reason": live_reason,
+    live_reason = ("FORCED_CLOSE:" + live) if live else (legs["non_countable_reasons"][0] if legs_nc else ef_reason)
+    return {"live_non_countable": bool(live) or legs_nc or bool(ef_reason), "live_non_countable_reason": live_reason,
             "live_legs": legs["legs"] if chain else None,
             "paper_twin_non_countable": twin_nc,
             "paper_twin_non_countable_reason": (("LIVE_TWIN_FORCED_CLOSE:" + live) if live else

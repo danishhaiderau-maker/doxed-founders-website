@@ -22,6 +22,8 @@ import json
 import os
 from typing import Any, Iterable, Mapping
 
+import live_exit_fill as _lef
+
 # Stable tile key (= trade-id prefix) -> cid code (1..127). NEVER renumber or reuse a code; a new tile takes the next free one.
 # Display tile numbers are NOT stable (derived from ACTIVE_TILE_ORDER), so they are never used as the key.
 TILE_KEY_CODES: dict = {
@@ -371,16 +373,20 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
 
 def trade_realised_pnl_usd(c: Mapping[str, Any]) -> float | None:
     """THE realised P&L of one closed live trade for the D3 loss caps (RK final ruling (1), 24 Oct 06:26; R4: the ONE helper
-    used by admit_entry/daily_cap_entry_block, daily_loss_violations and live_guardian.evaluate). From the REAL Bitfinex
-    fill prices: (exit fill - entry fill) x filled qty x side when the chain carries all four; otherwise the executor's
-    ``pnl_usd`` for the trade, which the relay computes from the same Bitfinex fills. NO funding term and NO fee term.
-    None = unreadable (the caller fails closed: AMBER entry block, never silently skipped)."""
-    entry, exit_, qty = _f(c.get("fill_price")), _f(c.get("exit_price")), _f(c.get("fill_qty"))
+    used by admit_entry/daily_cap_entry_block, daily_loss_violations and live_guardian.evaluate).
+
+    ONLY from REAL Bitfinex fills (HM R4 B1, RK 08:03): (exit fill - entry fill) x filled qty x side, where the exit fill
+    is live_exit_fill.exit_fill_price (the reporter's close.price with price_source exchange_fill | stop_fill; never the
+    ticker/mark, never the entry price). NO funding term and NO fee term. There is NO pnl_usd fallback: the relay's
+    pnl_usd can itself be computed from a mark or entry fallback (a $0 "loss"), so it is never read here.
+    None = UNREADABLE: the caller fails closed (unreadable_pnl_rows -> LEDGER_PNL_UNREADABLE, AMBER entry block) and the
+    trade is non-countable (live_exit_fill.exit_fill_non_countable_reason, R17)."""
+    entry, exit_, qty = _f(c.get("fill_price")), _lef.exit_fill_price(c), _f(c.get("fill_qty"))
     side = str(c.get("side") or c.get("direction") or "").strip().upper()
     if entry and exit_ and qty and qty > 0 and side in ("LONG", "BUY", "SHORT", "SELL"):
         sgn = 1.0 if side in ("LONG", "BUY") else -1.0
         return (exit_ - entry) * qty * sgn
-    return _f(c.get("pnl_usd"))
+    return None
 
 
 def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
@@ -437,7 +443,8 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         out = []
         for c in unreadable_pnl_rows(chains, now)[:4]:
             out.append({"code": VIOL_PNL_UNREADABLE, "tile": chain_tile_key(c, registry),
-                        "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} pnl_usd={c.get('pnl_usd')!r} unreadable"})
+                        "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} has no real exit fill "
+                                  f"(price_source={c.get('exit_price_source') or 'none'}): D3 unreadable, non-countable"})
         for k, loss in sorted(per.items(), key=lambda kv: str(kv[0])):
             if k is not None and loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9:
                 out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k,
@@ -889,15 +896,39 @@ def skipped_daily_cap_count(decisions: Iterable[tuple], now: float, registry: Ma
 
 
 def non_countable_summary(chains: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]] = (),
-                          liq_events: Iterable[Mapping[str, Any]] = ()) -> dict:
+                          liq_events: Iterable[Mapping[str, Any]] = (),
+                          stop_failure_cause_counts: Mapping[str, Any] | None = None) -> dict:
     """AMEND4 E2/E6/E7/A2: counts of non-countable force-flattened trades and STOP_FAILURE_FLATTEN events (each RED in the
-    daily report), plus AMEND5 G3/G4(b) LIQ_CHECK_FLATTEN / LIQ_CLAMP_FLATTEN counts and the real stop-fill overshoot sample (E9/E10)."""
+    daily report), plus AMEND5 G3/G4(b) LIQ_CHECK_FLATTEN / LIQ_CLAMP_FLATTEN counts and the real stop-fill overshoot sample (E9/E10).
+
+    HM R4 N6: ``by_cause`` counts every non-countable cause: STOP_FAILURE_FLATTEN:<cause> (e.g. E6_READ_TIMEOUT) from the
+    UNCAPPED running per-cause counter (``stop_failure_cause_counts``; the event list itself keeps only the last 50), plus
+    FORCE_FLAT and EXIT_FILL_UNREADABLE:<source> (HM R4 B1) over the closed chains."""
     chains = list(chains or [])
     nc = [c for c in chains if c.get("closed") and force_flat_non_countable(c)]
+    ef = [(c, _lef.exit_fill_non_countable_reason(c)) for c in chains if c.get("closed")]
+    ef = [(c, r) for c, r in ef if r]
+    by_cause: dict = {}
+    for k, v in (stop_failure_cause_counts or {}).items():
+        try:
+            by_cause[f"{STOP_FAILURE_FLATTEN}:{k}"] = int(v)
+        except (TypeError, ValueError):
+            continue
+    if not stop_failure_cause_counts:   # no running counter (old state): fall back to the (capped) event list
+        for e in events or []:
+            if (e or {}).get("code", STOP_FAILURE_FLATTEN) == STOP_FAILURE_FLATTEN and (e or {}).get("cause") is not None:
+                k = f"{STOP_FAILURE_FLATTEN}:{e.get('cause')}"
+                by_cause[k] = by_cause.get(k, 0) + 1
+    if nc:
+        by_cause["FORCE_FLAT"] = len(nc)
+    for _c, r in ef:
+        by_cause[r] = by_cause.get(r, 0) + 1
     sff = [e for e in events or [] if (e or {}).get("code") == STOP_FAILURE_FLATTEN]
     liq = [e for e in liq_events or [] if isinstance(e, Mapping)]
     ov = [o for o in stop_fill_overshoots(chains) if o.get("overshoot_bp") is not None]
     return {"non_countable_trades": len(nc), "non_countable_ids": [c.get("correlation_id") for c in nc][:20],
+            "by_cause": by_cause, "exit_fill_unreadable_trades": len(ef),
+            "exit_fill_unreadable_ids": [c.get("correlation_id") for c, _r in ef][:20],
             "stop_failure_flatten_events": len(sff), "stop_failure_flatten_red": bool(sff),
             "real_stop_fills_measured": len(ov), "stop_overshoot_bp": [o["overshoot_bp"] for o in ov][-50:],
             "liq_check_flatten_events": sum(1 for e in liq if e.get("code") == LIQ_CHECK_FLATTEN),

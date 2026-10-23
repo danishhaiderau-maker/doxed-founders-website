@@ -104,7 +104,8 @@ def test_second_signal_refused_while_another_live_lot_exists(chain):
 
 
 def test_closed_or_stale_pending_chain_does_not_block():
-    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100},
+    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100,
+               "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 100_000.0, "exit_price_source": "exchange_fill"},
               {"correlation_id": "gs6-b", "lane": GS6, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
     assert admit(chains=chains)[0]
 
@@ -307,11 +308,14 @@ def test_c6_only_reduce_only_orders_are_skipped(order):
 
 
 def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
-    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06}
+    def rf(pnl):   # HM R4 B1: a real Bitfinex exit fill backs the loss (pnl_usd alone is unreadable)
+        return {"pnl_usd": pnl, "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG",
+                "exit_fill_price": 100_000.0 + pnl / 0.01, "exit_price_source": "exchange_fill"}
+    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, **rf(-0.06)}
     assert admit(chains=[lost])[0]
-    ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, pnl_usd=-0.05)])
+    ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, **rf(-0.05))])
     assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
-    small = dict(lost, pnl_usd=-0.01)
+    small = dict(lost, **rf(-0.01))
     assert admit(chains=[small])[0]
     # the per-tile cap blocks only that tile's entries (gs6 lost $0.06; gs1 is still under its own cap and the $0.10 total)
     ok, r, info = admit(chains=[lost], lane=GS6, trade_id="gs6-new")
@@ -356,19 +360,22 @@ def test_loss_caps_pinned_to_frozen_amend3():
 # position marked to the book (full-size walk, book <= 2 s else BLOCK). No funding term, no fee term. ONE shared helper (R4).
 def test_d3_realised_pnl_is_from_real_fills_with_no_funding_or_fee_term():
     row = {"correlation_id": "gs6-a", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60,
-           "fill_price": 100_000.0, "exit_price": 99_800.0, "fill_qty": 0.0003, "side": "LONG",
+           "fill_price": 100_000.0, "exit_fill_price": 99_800.0, "exit_price_source": "exchange_fill",
+           "exit_price": 99_900.0, "fill_qty": 0.0003, "side": "LONG",
            "pnl_usd": 123.0, "funding_usd": -50.0, "fee_usd": -9.0}
     assert ltg.trade_realised_pnl_usd(row) == pytest.approx(-0.06)              # fills win over the reported pnl
+    assert ltg.trade_realised_pnl_usd(dict(row, exit_price_source="stop_fill")) == pytest.approx(-0.06)
     assert ltg.trade_realised_pnl_usd(dict(row, side="SHORT")) == pytest.approx(0.06)
     per, total, n = ltg.daily_realised_loss([row], NOW)
     assert total == pytest.approx(0.06) and n == 1                               # funding/fee fields are ignored
-    # without the four fill fields: the executor's pnl for the trade (relay computes it from the same fills), still no funding
+    # a missing/unknown funding value never blocks, never gates countability
+    assert not ltg.daily_loss_violations([dict(row, side="SHORT", funding_usd=None, funding_status="PENDING")], NOW)
+    # HM R4 B1: NO pnl_usd fallback. Without a real exit fill the trade is UNREADABLE (AMBER), never a $0 loss
     bare = {"correlation_id": "gs6-b", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.02,
             "funding_usd": -5.0}
-    assert ltg.daily_realised_loss([bare], NOW)[1] == pytest.approx(0.02)
-    # a missing/unknown funding value never blocks, never gates countability
-    assert not ltg.daily_loss_violations([dict(bare, funding_usd=None, funding_status="PENDING")], NOW)
-    # unreadable trade pnl still fails closed (AMBER), via the same helper
+    assert ltg.trade_realised_pnl_usd(bare) is None
+    assert ltg.daily_realised_loss([bare], NOW)[2] == 0
+    assert {v["code"] for v in ltg.daily_loss_violations([bare], NOW)} == {ltg.VIOL_PNL_UNREADABLE}
     assert {v["code"] for v in ltg.daily_loss_violations([dict(bare, pnl_usd=None)], NOW)} == {ltg.VIOL_PNL_UNREADABLE}
 
 

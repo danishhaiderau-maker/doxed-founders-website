@@ -16,6 +16,8 @@ import statistics
 import time
 from typing import Any, Iterable, Mapping
 
+import live_exit_fill as _lef
+
 SCHEMA = "fly_live_copy_monitor_v1"
 
 # Thresholds (seconds / bp). Owner may tighten after the rehearsal.
@@ -109,6 +111,8 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["order_price"] = _f(order.get("price")) or ch.get("order_price")
             ch["order_type"] = order.get("type") or ch.get("order_type")
             ch["order_tif"] = order.get("tif") or ch.get("order_tif")
+            # HM R4 B1: the side for D3's fill-based trade P&L (trade_realised_pnl_usd: no pnl_usd fallback any more)
+            ch["side"] = (str(order.get("side")).upper() if order.get("side") else None) or ch.get("side")
             ch["entry_order_mode"] = order.get("entry_order_mode") or ch.get("entry_order_mode")
         if r.get("type") in ("INTENT_RECEIVED", "INTENT_SKIPPED", "INTENT_SUBMITTED"):
             d = r.get("decision") if isinstance(r.get("decision"), Mapping) else {}
@@ -126,7 +130,11 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
             ch["closed"] = True
             # live-vs-paper (HM 19 Oct): keep whatever the executor reports about the live exit; null if it reports none
             cl = next((r.get(k) for k in ("close", "exit", "fill") if isinstance(r.get(k), Mapping)), {})
-            ch["exit_price"] = _f(cl.get("price")) or _f(r.get("exit_price")) or ch.get("exit_price")
+            ch["exit_price"] = _f(cl.get("price")) or _f(r.get("exit_price")) or ch.get("exit_price")   # display only
+            # HM R4 B1 / RK 08:03: D3 and countability read ONLY the real fill (live_exit_fill.exit_fill_price). The latest
+            # close report wins outright: no price_source (old reporter) or a non-real source => no exit fill price.
+            ch["exit_price_source"] = str(cl.get("price_source") or "none")
+            ch["exit_fill_price"] = (_f(cl.get("price")) if ch["exit_price_source"] in _lef.REAL_EXIT_FILL_SOURCES else None)
             ch["exit_at_ts"] = _f(cl.get("ts")) or _f(r.get("closed_at_ts")) or _f(tl.get("closed_at_ts")) or ch.get("exit_at_ts")
             ch["exit_reason"] = cl.get("reason") or r.get("exit_reason") or r.get("reason") or ch.get("exit_reason")
             ch["funding_usd"] = r.get("funding_usd") if r.get("funding_usd") is not None else ch.get("funding_usd")

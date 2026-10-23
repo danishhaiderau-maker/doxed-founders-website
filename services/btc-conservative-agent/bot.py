@@ -50043,6 +50043,10 @@ def _live_guardian_record_protection(now, viol) -> None:
         ev = {"ts": now, "cause": v.get("cause"), "overshoot_bp": v.get("overshoot_bp"), "tile": v.get("tile"),
               "detail": str(v.get("detail"))[:200], "non_countable": _ltg.STOP_FAILURE_FLATTEN, "amend4_sha256": _ltg.AMEND4_SHA256}
         st["stop_failure_events"] = (list(st.get("stop_failure_events") or []) + [ev])[-50:]
+        # HM R4 N6: the event list is capped at 50, so also keep an UNCAPPED per-cause count (e.g. E6_READ_TIMEOUT)
+        _cc = dict(st.get("stop_failure_cause_counts") or {})
+        _cc[str(ev["cause"])] = int(_cc.get(str(ev["cause"]), 0) or 0) + 1
+        st["stop_failure_cause_counts"] = _cc
         logger.critical(f"[LIVE GUARDIAN] STOP_FAILURE_FLATTEN cause={ev['cause']} overshoot_bp={ev['overshoot_bp']} "
                         f"tile={ev['tile']} (AMEND4 E2'/E5/E6/E7, non-countable) [PIPELINE ENFORCEMENT]")
         changed = True
@@ -50138,7 +50142,7 @@ def _live_guardian_record_protection(now, viol) -> None:
 # and on the first tick with a fresh relay view the state is re-derived from the exchange: relay paused (no armed account)
 # while the mirror is NOT FLAT_NO_STOPS => RED BOOT_REDERIVED_NOT_FLAT + force-flat. A restart never clears RED.
 _LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "red_alert_acks", "auto_disarm_latched",
-                               "stop_failure_events", "liq_events",
+                               "stop_failure_events", "stop_failure_cause_counts", "liq_events",
                                "first_live_liq_distance", "g4_first_l", "stop_reeval", "liq_latest_l",
                                "liq_latest_l_safe_seen", "l27_amendment_pass", "l27_amendment_pass_history")
 _LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"
@@ -50381,7 +50385,8 @@ def _live_guardian_today_summary(now=None) -> dict:
                 "realised_loss_total": round(total, 4), "rows": n,
                 "skipped_daily_cap": _ltg.skipped_daily_cap_count(_get_live_copy_decisions().items(), now),
                 "non_countable": _ltg.non_countable_summary(chains, _LIVE_GUARDIAN_STATE.get("stop_failure_events") or [],
-                                                            _LIVE_GUARDIAN_STATE.get("liq_events") or [])}
+                                                            _LIVE_GUARDIAN_STATE.get("liq_events") or [],
+                                                            _LIVE_GUARDIAN_STATE.get("stop_failure_cause_counts") or {})}
     except Exception as exc:  # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
 

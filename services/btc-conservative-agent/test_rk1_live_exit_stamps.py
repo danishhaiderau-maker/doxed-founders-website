@@ -76,7 +76,7 @@ def test_fly_chain_carries_exit_order_class_and_exit_stamps_into_the_leg_check()
     rep = [{"type": "ORDER_FILLED", "correlation_id": "c1", "account": "a", "timeline": tl, "fill": {"price": 100.0}},
            {"type": "POSITION_CLOSED", "correlation_id": "c1", "account": "a",
             "timeline": {**tl, "exit_trigger_print_at_ts": 5.0, "exit_fill_record_at_ts": 5.2},
-            "close": {"price": 99.0, "reason": "EXCHANGE_STOP_25BP", "exit_order_class": "EXCHANGE_RESIDENT"}}]
+            "close": {"price": 99.0, "price_source": "stop_fill", "reason": "EXCHANGE_STOP_25BP", "exit_order_class": "EXCHANGE_RESIDENT"}}]
     appr = [{"correlation_id": "c1", "signal_at_ts": 1.0, "created_at_ts": 1.1, "entry_allowed": True}]
     ch = next(iter(lcm.build_chains(appr, rep)["accounts"].values()))
     assert ch["exit_order_class"] == "EXCHANGE_RESIDENT" and ch["exit_fill_record_at_ts"] == 5.2

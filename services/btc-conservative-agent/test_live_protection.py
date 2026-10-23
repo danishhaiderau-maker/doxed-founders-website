@@ -90,7 +90,8 @@ def test_n1_closed_trade_with_missing_pnl_blocks_entries_never_skipped():
 
 def test_d3_trade_pnl_only_no_funding_no_fees():
     # RK D3 (24 Oct 06:26) supersedes AMEND4 E1's funding term: trade P&L only, no funding term, no fee term.
-    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9}
+    c = {"correlation_id": "gs1-x", "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.03, "funding_usd": -0.025, "fee_usd": -9,
+         "fill_price": 100_000.0, "fill_qty": 0.01, "side": "LONG", "exit_fill_price": 99_997.0, "exit_price_source": "stop_fill"}
     per, total, n = ltg.daily_realised_loss([c], NOW)
     assert abs(per["gs1"] - 0.03) < 1e-9 and n == 1
 
