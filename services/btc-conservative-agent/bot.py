@@ -5477,6 +5477,9 @@ def _stamp_trigger_basis(pos: dict, direction: str, trigger_ts: float, price: fl
         book = None
     trades = _qt.trades_between(float(trigger_ts) - _qt.STALE_S, float(trigger_ts))
     pos.update(_qt.dual_stamp(direction, "exit", trigger_ts, book=book, last_trade=trades[-1] if trades else None))
+    # #807 measurement, order-book basis (no ticker): the time the book row this trigger was evaluated on became
+    # complete (row s is complete at s + 1). None when no book row is available.
+    pos["exit_trigger_bbo_ts"] = (float(book["s"]) + 1.0) if book and book.get("s") is not None else None
     m = meta or {}
     pos["exit_trigger_basis"] = m.get("basis") or _qt.BASIS_BOOK_TOP
     pos["exit_trigger_quote_stale"] = m.get("quote_stale")
