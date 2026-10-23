@@ -175,3 +175,133 @@ def test_walk_forward_scorer_retired_writes_nothing(tmp_path, capsys):
                      str(tmp_path / "out")]) == 0
     assert list(tmp_path.iterdir()) == []
     assert "source retired (R17)" in capsys.readouterr().out
+
+
+# ---- HM #850 R3: repo-wide pin of every retired-tape-pricer reference ------------------------------------------
+REPO = HERE.parents[1]
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "tests", ".pytest_cache"}
+_SKIP_FILES = {"fill_model.py", "r3_quarantine.py", "conftest.py"}
+
+
+def _docstring_ids(tree) -> set[int]:
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body:
+            first = n.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                out.add(id(first.value))
+    return out
+
+
+def _refs(node, names, docs) -> set[str]:
+    hit = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and n.id in names:
+            hit.add(n.id)
+        elif isinstance(n, ast.Attribute) and n.attr in names:
+            hit.add(n.attr)
+        elif isinstance(n, ast.alias) and (n.name.rsplit(".", 1)[-1] in names or n.asname in names):
+            hit.add(n.name)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs:
+            hit |= {x for x in names if x in n.value}  # getattr(fm, "realistic_exit_margin") style indirection
+    return hit
+
+
+def _scopes(tree, names):
+    """(scope, node) units: top-level functions, class methods / class-level code, module-level statements.  A
+    function named after a retired pricer is that pricer's own definition and is not a caller."""
+    for st in tree.body:
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if st.name not in names:
+                yield st.name, st
+        elif isinstance(st, ast.ClassDef):
+            for b in st.body:
+                if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if b.name not in names:
+                        yield f"{st.name}.{b.name}", b
+                else:
+                    yield f"{st.name}.<class>", b
+        else:
+            yield "<module>", st
+
+
+def _repo_pricer_references() -> dict[str, set[str]]:
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    out: dict[str, set[str]] = {}
+    for p in sorted(REPO.rglob("*.py")):
+        rel = p.relative_to(REPO)
+        if _SKIP_DIRS & set(rel.parts[:-1]) or p.name in _SKIP_FILES:
+            continue
+        if p.name.startswith("test_") or p.name.endswith("_test.py"):
+            continue
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(p.read_text(encoding="utf-8-sig"), filename=str(rel))  # unparseable = fail closed
+        docs = _docstring_ids(tree)
+        for scope, node in _scopes(tree, names):
+            hit = _refs(node, names, docs)
+            if hit:
+                out.setdefault(f"{rel.as_posix()}::{scope}", set()).update(hit)
+    return out
+
+
+def test_repo_wide_retired_pricer_references_are_pinned_and_quarantined():
+    """HM #850 R3: whole repo (minus tests / fill_model.py / the registry), every scope kind and string constants."""
+    found = _repo_pricer_references()
+    assert set(found) == set(r3_quarantine.REPO_PRICER_REFERENCES), (
+        sorted(set(found) ^ set(r3_quarantine.REPO_PRICER_REFERENCES)))
+    for scope, key in r3_quarantine.REPO_PRICER_REFERENCES.items():
+        assert key in r3_quarantine.QUARANTINE and r3_quarantine.is_active(key), scope
+    # the narrower fill_model pin is a subset of the repo-wide one
+    fm_names = set(r3_quarantine.FILL_MODEL_ROW_PRICERS)
+    fm_scopes = {s for s, h in found.items() if h & fm_names}
+    assert "diagnostics/hypothesis-tiles-20261004/exit_study.py::replay" in fm_scopes
+    assert len(fm_scopes) == 6  # 4 R2 callers + genome_grid canonical_parity_sample label + exit_study.replay
+
+
+def test_scanner_catches_every_scope_kind(tmp_path):
+    names = set(r3_quarantine.RETIRED_TAPE_PRICERS)
+    src = (
+        '"""docstring naming realistic_exit_margin is ignored"""\n'
+        "from research.fill_model import taker_fill_rows\n"
+        "X = fm.maker_fill_rows\n"
+        "class K:\n"
+        "    P = 'realistic_exit_margin'\n"
+        "    def m(self):\n"
+        "        return getattr(fm, 'taker_fill_rows')\n"
+        "def f():\n"
+        "    def inner():\n"
+        "        return fm.realistic_exit_margin\n"
+        "    return inner\n"
+        "def g():\n"
+        '    """mentions evaluate_limit_fill only in a docstring"""\n'
+        "    return 1\n"
+    )
+    tree = ast.parse(src)
+    docs = _docstring_ids(tree)
+    got = {scope for scope, node in _scopes(tree, names) if _refs(node, names, docs)}
+    assert got == {"<module>", "K.<class>", "K.m", "f"}
+
+
+def _load_exit_study():
+    import importlib.util
+    path = REPO / "diagnostics" / "hypothesis-tiles-20261004" / "exit_study.py"
+    spec = importlib.util.spec_from_file_location("exit_study_r17_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_exit_study_refuses_source_retired_r17(tmp_path, capsys, monkeypatch):
+    import pytest
+    es = _load_exit_study()
+    out = tmp_path / "study.json"
+    monkeypatch.setattr("sys.argv", ["exit_study.py", "--mirror", str(tmp_path), "--tier-a", str(tmp_path),
+                                     "--out", str(out)])
+    assert es.main() == es.RETIRED_EXIT_CODE != 0
+    err = capsys.readouterr().err
+    assert "SOURCE_RETIRED_R17" in err and r3_quarantine.RETIRED_LABEL in err
+    assert not out.exists() and list(tmp_path.iterdir()) == []
+    with pytest.raises(r3_quarantine.R3QuarantinedSource, match="SOURCE_RETIRED_R17 EXIT_STUDY_1S"):
+        es.replay({"cur": [], "mfe": [], "age": []}, {}, 0.0)

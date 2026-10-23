@@ -16,6 +16,9 @@ do exactly that until they are rebuilt on the shared ``paper_fill`` pricer and
 * WALK_FORWARD_1S  -- research/walk_forward_scorer.py prices taker/maker entries and
                       exits on the 1s tape via fill_model.taker_fill_rows /
                       maker_fill_rows / realistic_exit_margin (HM #850 R2 C1).
+* EXIT_STUDY_1S    -- diagnostics/hypothesis-tiles-20261004/exit_study.py books exits with
+                      fill_model.realistic_exit_margin on the 1s tape (HM #850 R3, 5th caller).
+                      main() refuses with SOURCE_RETIRED_R17 (exit 4); replay() raises.
 
 Until fixed the producers STOP writing their outputs, and every analyzer /
 dashboard / Strategist-facing reader refuses the named files (stale copies on
@@ -86,6 +89,14 @@ QUARANTINE: dict[str, dict[str, Any]] = {
             "walk_forward_trades.jsonl.gz",
         ),
     },
+    # HM #850 R3 (24 Oct 2026 AEDT): 5th fill_model row-pricer caller.  Manual research CLI; its output path is the
+    # caller's --out (no fixed basename), so there is no file list to refuse -- the CLI itself refuses to run.
+    # boss_retest.py / danish_study.py import its replay() and are refused through it.
+    "EXIT_STUDY_1S": {
+        "producer": "diagnostics/hypothesis-tiles-20261004/exit_study.py",
+        "price_source": "bitfinex_l1_tape_1s bid/ask via genome_grid_study paths + fill_model.realistic_exit_margin",
+        "files": (),
+    },
 }
 
 RETIRED_LABEL = "source retired (R17)"
@@ -135,6 +146,46 @@ FILL_MODEL_ROW_CALLERS: dict[str, str] = {
     "research.walk_forward_scorer.simulate_entry": "WALK_FORWARD_1S",
     "research.walk_forward_scorer.simulate_exit": "WALK_FORWARD_1S",
 }
+
+# HM #850 R3: repo-wide pin.  Every reference to a retired 1s-tape / ticker pricer anywhere in the repo (excluding
+# tests, the pricers' own definitions, fill_model.py and this registry) -- calls, attribute access, imports,
+# module-level code, class methods and non-docstring string constants -- by "<repo path>::<scope>", mapped to the
+# active quarantine key that stops it.  test_r17_retired_sources.py re-derives it from the AST.
+SOURCE_RETIRED_R17 = "SOURCE_RETIRED_R17"
+RETIRED_TAPE_PRICERS: dict[str, str] = {
+    "taker_fill_rows": "fill_model (1s tape BBO)",
+    "maker_fill_rows": "fill_model (1s tape trade-through)",
+    "realistic_exit_margin": "fill_model (1s tape exit)",
+    "_simulate_ticks_fast_cut_ladder": "analyzer tick-sim (ticker/BBO ticks)",
+    "_sim_replay_pnl_usd": "analyzer tick-sim (ticker/BBO ticks)",
+    "_sim_replay_pnl_at_fill": "analyzer tick-sim (ticker/BBO ticks)",
+    "evaluate_limit_fill": "conservative_limit_fill (market_microstructure_1s)",
+    "evaluate_conditional_limit_fill": "conservative_limit_fill (market_microstructure_1s)",
+    "_evaluate_conservative_limit_fill": "analyzer alias of evaluate_limit_fill",
+}
+_A = "services/btc-conservative-agent/analyzer_research_engine_v62.py::"
+_R = "services/btc-conservative-agent/research/"
+REPO_PRICER_REFERENCES: dict[str, str] = {
+    "diagnostics/hypothesis-tiles-20261004/exit_study.py::replay": "EXIT_STUDY_1S",
+    _A + "<module>": "LIMIT_FILL_1S",  # import alias _evaluate_conservative_limit_fill
+    _A + "_joined_compressed_chase_tape_evidence": "LIMIT_FILL_1S",
+    **{_A + n: ("EXIT_LADDER_SIM" if n == "exit_ladder_simulator_report" else "TICK_SIM") for n in INVENTORY["TICK_SIM"]},
+    _R + "conservative_fill_cohort.py::<module>": "LIMIT_FILL_1S",
+    _R + "conservative_fill_cohort.py::build_conservative_fill_cohort": "LIMIT_FILL_1S",
+    _R + "conservative_fill_cohort.py::build_v3_conservative_fill_cohort": "LIMIT_FILL_1S",
+    _R + "entry_baseline_replay.py::<module>": "LIMIT_FILL_1S",
+    _R + "entry_baseline_replay.py::replay_episode": "LIMIT_FILL_1S",
+    _R + "latency_schedule_replay.py::<module>": "LIMIT_FILL_1S",
+    _R + "latency_schedule_replay.py::_replay_delayed_entry": "LIMIT_FILL_1S",
+    _R + "policy_evidence_evaluator.py::<module>": "LIMIT_FILL_1S",
+    _R + "policy_evidence_evaluator.py::build_v3_conservative_results": "LIMIT_FILL_1S",
+    _R + "genome_grid_study.py::fast_replay": "GENOME_GRID",
+    _R + "genome_grid_study.py::realistic_exit_parity": "GENOME_GRID",
+    _R + "genome_grid_study.py::canonical_parity_sample": "GENOME_GRID",  # string constant (parity rule label)
+    _R + "walk_forward_scorer.py::simulate_entry": "WALK_FORWARD_1S",
+    _R + "walk_forward_scorer.py::simulate_exit": "WALK_FORWARD_1S",
+}
+del _A, _R
 
 # Tests may monkeypatch this set to exercise the legacy code path; production
 # has no runtime switch.
