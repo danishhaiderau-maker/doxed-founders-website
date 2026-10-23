@@ -5655,7 +5655,8 @@ def _r17_contract_fields(pos: dict) -> dict:
             # same measured exit_price_age_s in ms; None when neither is a finite number >= 0 (never fabricated)
             "exit_book_age_ms": _r17_exit_book_age_ms(pos),
             "levels_crossed_unfired": _levels_crossed_unfired(pos),
-            "stop_coverage": _stop_coverage_value(pos)}
+            "stop_coverage": _stop_coverage_value(pos),
+            **_book_receive_row_fields("exit", xs if paper else None)}
 
 
 def _stop_late_prints(pos: dict, now: float) -> list:
@@ -8178,7 +8179,18 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
                               (round(float(efs["price_age_s"]) * 1000) if efs.get("price_age_s") is not None else None))
                              if paper else None,
         "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
+        # RK/HM #851: the entry book row's MEASURED receive time (r17 BOOK_RECEIVE_TS_MISSING when absent)
+        **_book_receive_row_fields("entry", efs if paper else None),
     }
+
+
+def _book_receive_row_fields(side: str, sim) -> dict:
+    """ONE helper (R4) for both legs: copy paper_fill.book_receive_proof's stamp from a fill result onto the row under
+    the r17 contract names <side>_book_receive_ts / _mono / _ts_source. None when unpriced or not a paper book lane."""
+    sim = sim if isinstance(sim, dict) else {}
+    return {f"{side}_book_receive_ts": sim.get("book_receive_ts"),
+            f"{side}_book_receive_mono": sim.get("book_receive_mono"),
+            f"{side}_book_receive_ts_source": sim.get("book_receive_ts_source")}
 
 
 def _delay_leg_unverified(sim) -> bool:

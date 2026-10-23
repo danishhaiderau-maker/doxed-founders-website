@@ -34,12 +34,14 @@ def _ns(names, paper=True, **extra):
 
 
 HELPERS = ("LEVELS_CROSSED_UNFIRED_MAX", "_note_level_crossed_unfired", "_stop_coverage_value",
-           "_levels_crossed_unfired", "_finite_nonneg", "_r17_exit_book_age_ms", "_exit_book_age_ms", "_r17_contract_fields")
+           "_levels_crossed_unfired", "_finite_nonneg", "_r17_exit_book_age_ms", "_exit_book_age_ms", "_r17_contract_fields",
+           "_book_receive_row_fields")
 
 
 def _clean_pos(**kw):
     pos = {"trigger_price_source": "book", "exit_priced_delay_source": "lane_q90_n12", "exit_price_age_s": 0.4,
-           "exit_fill_sim": {"price_stale": False}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200,
+           "exit_fill_sim": {"price_stale": False, "book_receive_ts": 1100.4, "book_receive_mono": 150.4,
+                             "book_receive_ts_source": "WS_FRAME"}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200,
            "levels_scan_from_s": 90.0, "levels_scan_to_s": 200.0, "levels_scan_rows_n": 110}
     pos.update(kw)
     return pos
@@ -76,8 +78,9 @@ def test_clean_paper_row_carries_contract_names_and_passes():
     row = _ns(HELPERS)["_r17_contract_fields"](_clean_pos())
     assert set(row) == {"trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage",
-                        "exit_book_age_ms"}
-    assert row["exit_book_age_ms"] == 400
+                        "exit_book_age_ms", "exit_book_receive_ts", "exit_book_receive_mono",
+                        "exit_book_receive_ts_source"}
+    assert row["exit_book_age_ms"] == 400 and row["exit_book_receive_ts_source"] == "WS_FRAME"
     assert row["levels_crossed_unfired"] == [] and row["stop_coverage"] == qt.STOP_COVERAGE_OK
     assert row["exit_price_stale"] is False
     assert _proof_failures(row) == []
@@ -144,7 +147,8 @@ def _good_closed_row():
     plus the shared-walk slippage / exit-evidence values those helpers sit next to in close_position."""
     efs = {"fill_model": "BFX_BOOK_10L", "fill_model_version": 3, "delay_s": 1.2, "delay_source": "lane_q90_n14",
            "pool_n": 14, "delay_unverified": False, "price_age_s": 0.6, "price_stale": False,
-           "book_age_ms": 600, "evidence_status": "COMPLETE"}
+           "book_age_ms": 600, "evidence_status": "COMPLETE",
+           "book_receive_ts": 1000.2, "book_receive_mono": 50.2, "book_receive_ts_source": "WS_FRAME"}
     pos = _clean_pos(entry_fill_sim=efs)
     ns = _ns(HELPERS + ("_entry_pricing_fields",), _entry_fill_sim=lambda p: p.get("entry_fill_sim") or {})
     row = {"trade_id": "rv2-r17-good-1", "exit_pricing_basis": "MODEL_TIME",

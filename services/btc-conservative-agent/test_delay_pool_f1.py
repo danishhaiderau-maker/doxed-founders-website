@@ -146,7 +146,8 @@ def test_stamp_only_when_source_matches(tmp_path, monkeypatch):
 
 def _row_ns():
     import tile_fill as tf
-    return _ns("/tmp", ["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields", "_is_paper_book_lane",
+    return _ns("/tmp", ["_entry_fill_sim", "_entry_priced_by_paper_fill", "_entry_pricing_fields", "_book_receive_row_fields",
+                        "_is_paper_book_lane",
                         "_delay_leg_unverified", "_non_countable_reasons"],
                tile_fill=tf, STATS_EXCLUDED_EXIT_REASONS={"FORCE_FLATTENED"})
 
@@ -154,8 +155,9 @@ def _row_ns():
 def _pos(entry_src, exit_src):
     import tile_fill as tf
     lane = sorted(tf.MIGRATED_LANES)[0]
-    efs = {"delay_source": entry_src, "fill_px": 100.0, **pf.delay_stamp(entry_src, 123.0)}
-    xfs = {"delay_source": exit_src, **pf.delay_stamp(exit_src, 456.0)} if exit_src else None
+    rx = {"book_receive_ts": 1000.2, "book_receive_mono": 50.2, "book_receive_ts_source": "WS_FRAME"}  # RK/HM #851
+    efs = {"delay_source": entry_src, "fill_px": 100.0, **pf.delay_stamp(entry_src, 123.0), **rx}
+    xfs = {"delay_source": exit_src, **pf.delay_stamp(exit_src, 456.0), **rx} if exit_src else None
     return {"research_lane": lane, "fill_sim": efs, "entry_fill_sim": efs, "exit_fill_sim": xfs,
             "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None}  # RK/HM K1: liq proven clear
 

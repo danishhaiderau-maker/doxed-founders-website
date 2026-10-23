@@ -179,7 +179,8 @@ def test_by_model_route_is_registered_and_read_only():
 
 
 def _book(px_a=100.0, px_b=99.0):
-    return lambda t: {"s": int(t) - 1, "a": [[px_a, 10.0]], "b": [[px_b, 10.0]]}
+    return lambda t: {"s": int(t) - 1, "a": [[px_a, 10.0]], "b": [[px_b, 10.0]],
+                      "receive_ts": int(t) - 0.5, "receive_mono": 1.0, "receive_ts_source": "WS_FRAME"}  # #851
 
 
 def test_pricer_emits_explicit_evidence_status():

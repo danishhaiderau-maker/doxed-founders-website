@@ -124,6 +124,33 @@ def first_row_at_or_after(book_at, t: float, horizon_s: float = FIRST_ROW_HORIZO
 
 DEPTH_SHORT_PARTIAL = "DEPTH_SHORT_PARTIAL"  # HM C7: a first-row walk the visible 10 levels could not fill
 
+# RK/HM #851 (24 Oct): the no-look-ahead proof is the collector's MEASURED per-row receive time (WS receipt of the last
+# book frame in the row). A row without it (written before #851) or with any other source is non-countable; the
+# bucket + write-lag estimate may only ever appear as the diagnostic label INFERRED_BUCKET_LAG, never countable.
+RECEIVE_TS_MEASURED = "WS_FRAME"
+RECEIVE_TS_INFERRED = "INFERRED_BUCKET_LAG"  # diagnostic only, always non-countable
+RECEIVE_TS_MISSING = "MISSING"
+BOOK_RECEIVE_TS_MISSING = "BOOK_RECEIVE_TS_MISSING"
+BOOK_RECEIVE_AFTER_FILL = "BOOK_RECEIVE_AFTER_FILL"
+
+
+def book_receive_proof(book, t: float, rule: str) -> dict:
+    """ONE shared check (R4) for every book walk: the walked row's measured receive time and whether it proves the
+    fill used no look-ahead. LATEST rule (bot-sent fills): receive_ts <= fill time t. FIRST_AFTER rule (exchange-
+    resident stop / forced exit, HM M2 / RK 17:24): the row is deliberately the first one completed at or after the
+    trigger, so only the measured receive time is required. ``book_receive_unverified`` is the reason (or None)."""
+    rx = _f((book or {}).get("receive_ts"))
+    rx = rx if rx and rx > 0 else None
+    src = str((book or {}).get("receive_ts_source") or "") if rx else RECEIVE_TS_MISSING
+    reason = None
+    if src != RECEIVE_TS_MEASURED:  # missing, unlabelled or INFERRED_BUCKET_LAG: never countable
+        reason = BOOK_RECEIVE_TS_MISSING
+    elif rule == ROW_RULE_LATEST and rx > float(t) + 1e-9:
+        reason = BOOK_RECEIVE_AFTER_FILL
+    mono = _f((book or {}).get("receive_mono"))
+    return {"book_receive_ts": rx, "book_receive_mono": mono if rx else None,
+            "book_receive_ts_source": src or RECEIVE_TS_MISSING, "book_receive_unverified": reason}
+
 
 def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[float],
                book_at: Callable[[float], Optional[Mapping[str, Any]]], *, leg: str = "entry",
@@ -154,7 +181,8 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
         px, filled = _walk(taker_side_levels(side, leg, book), q)
         out = {**base, "book_s": int(book["s"]), "price_age_s": price_age,
                "price_stale": price_age > MAX_BOOK_AGE_S, "depth_snapshot_fill": _snap(book),
-               "book_age_ms": round((t - float(book["s"])) * 1000), "ask_age_ms": round((t - float(book["s"])) * 1000)}
+               "book_age_ms": round((t - float(book["s"])) * 1000), "ask_age_ms": round((t - float(book["s"])) * 1000),
+               **book_receive_proof(book, t, ROW_RULE_FIRST_AFTER)}
         if leg == FORCED_LEG:
             out["unverified_reason"] = "FORCED_NO_BOOK"
         elif out["price_stale"]:
@@ -167,6 +195,8 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
             out["depth_short_qty"] = round(q - filled, 8)
             out["unverified_reason"] = out.get("unverified_reason") or DEPTH_SHORT_PARTIAL
             out["depth_short"] = True
+        if out["book_receive_unverified"] and not out.get("unverified_reason"):
+            out["unverified_reason"] = out["book_receive_unverified"]  # RK/HM #851: no measured receive -> UNVERIFIED
         return {**out, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
                 "filled_qty": round(filled, 8), "price_source": "BFX_BOOK_10L"}
     base["book_row_rule"] = ROW_RULE_LATEST
@@ -179,11 +209,13 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
             levels = [lv for lv in levels or () if _f(lv[0]) is not None
                       and ((_f(lv[0]) <= cap_px + 1e-9) if buy else (_f(lv[0]) >= cap_px - 1e-9))]
         px, filled = _walk(levels, q)
+        rxp = book_receive_proof(book, t, ROW_RULE_LATEST)
         if px is None:
             st = "NO_FILL_IOC_CAP" if cap_px is not None and taker_side_levels(side, leg, book) else "NO_FILL_NO_DEPTH"
             return {**base, "status": st, "cap_px": cap_px, "depth_snapshot_fill": _snap(book), "price": None, "filled_qty": 0.0,
-                    "book_s": int(book["s"]), "book_age_ms": round((t - float(book["s"])) * 1000)}
-        return {**base, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px,
+                    "book_s": int(book["s"]), "book_age_ms": round((t - float(book["s"])) * 1000), **rxp}
+        return {**base, "status": "FILLED" if filled + 1e-12 >= q else "PARTIAL", "price": px, **rxp,
+                **({"unverified_reason": rxp["book_receive_unverified"]} if rxp["book_receive_unverified"] else {}),
                 "filled_qty": round(filled, 8), "book_s": int(book["s"]),
                 "book_age_ms": round((t - float(book["s"])) * 1000),
                 "ask_age_ms": round((t - float(book["s"])) * 1000),
@@ -230,10 +262,12 @@ def paper_fill(side: str, qty: float, signal_ts: float, delay_s: Optional[float]
 
 
 class BookTail:
-    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a"}).
+    """book_at(t) over the collector's bfx_book_10l_1s.jsonl (rows {"s", "b", "a", "receive_ts", ...}).
 
-    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t
-    (no look-ahead). Reads only the file tail, and only when cached rows are older than t.
+    A row for second s is complete only at s + 1, so at(t) returns the latest row with s + 1 <= t AND a measured
+    receive_ts <= t (RK/HM #851: no look-ahead proven per row). A row with no receive_ts (pre-#851) is still returned,
+    labelled receive_ts_source MISSING, and the pricer makes the fill non-countable. Reads only the file tail, and
+    only when cached rows are older than t.
     """
 
     def __init__(self, path: str, keep: int = 600, tail_bytes: int = 512 * 1024) -> None:
@@ -259,8 +293,12 @@ class BookTail:
                 sec = int(r["s"])
             except (ValueError, KeyError, TypeError):
                 continue
+            rx = _f(r.get("receive_ts"))
             self._rows[sec] = {"s": sec, "b": r.get("b") or [], "a": r.get("a") or [],
-                               **({"carried": True} if r.get("carried") else {})}
+                               **({"carried": True} if r.get("carried") else {}),
+                               "receive_ts": rx if rx and rx > 0 else None, "receive_mono": _f(r.get("receive_mono")),
+                               "receive_ts_source": (str(r.get("receive_ts_source") or "")
+                                                     if rx and rx > 0 else RECEIVE_TS_MISSING)}
         if self._rows:
             for sec in sorted(self._rows)[:-self.keep]:
                 del self._rows[sec]
@@ -270,7 +308,8 @@ class BookTail:
         with self._lock:
             if self._max_s is None or self._max_s + 1 < t - 0.5:
                 self._refresh()
-            ok = [sec for sec in self._rows if sec + 1 <= t]
+            ok = [sec for sec, r in self._rows.items()
+                  if sec + 1 <= t and (r.get("receive_ts") is None or r["receive_ts"] <= t)]
             return dict(self._rows[max(ok)]) if ok else None
 
 

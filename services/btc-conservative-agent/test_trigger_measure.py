@@ -232,6 +232,9 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     "TILE_FILL_SITES",
     # #845 base (feat/r17-dynamic-exclusion): r17_exclusion fail-closed gate in the fresh-eligibility check
     "row_fresh_eligible",
+    # RK/HM #851 + HM 01:43 blocker 2: measured per-row book receive time (no look-ahead proof), one shared helper
+    "RECEIVE_TS_MEASURED", "RECEIVE_TS_INFERRED", "RECEIVE_TS_MISSING", "BOOK_RECEIVE_TS_MISSING",
+    "BOOK_RECEIVE_AFTER_FILL", "book_receive_proof", "BookTail",
 })
 
 

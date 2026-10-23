@@ -18,6 +18,7 @@ BASE = "51d926f93"
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
 # #842 book exits (23 Oct 2026): intentional pin move for bot.py:get_mark_price, bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay, paper_fill.py:_paper_fill_core (every lane exits on book rows via the shared pricer; no ticker).
 # #842 RK ruling A (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (POOLED_LIVE_ACK_CROSS_LANE: a paper-only lane times fills with its own signal->send + the shared cross-lane send->ack pool; fail closed below n=10).
+# #842 HM 01:43 blocker 2 / #851 (24 Oct 2026): intentional pin move for paper_fill.py:_paper_fill_core (every book walk stamps the row's MEASURED WS receive time via the shared book_receive_proof; missing/inferred -> UNVERIFIED; bot-sent fills require receive_ts <= fill time).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
@@ -32,7 +33,7 @@ PINNED = {
         "_safe": "577c4d1a9927bea25660a9a46802c84fabf3b5d44889bfed82a86e0f042cd002",
         "_snap": "e19ffc0d73e86ae849dff85c6bec6c1e6219883f5c3e1897a2d9666e1bef9f29",
         "taker_side_levels": "2e794b626132b0f1320049fa51683053c6ba948e3b8292aa2bc4a84209efa05b",
-        "_paper_fill_core": "02200d0214fd576ad405e90b314a19bef86f4183896f9ebfd88c4c38c940f389",
+        "_paper_fill_core": "c677f477311e3d3de7399e6861e1ac49aeb85b91b23f6799ed870ef9c58ce800",
         "paper_fill": "3205191a41fde2cafbbdd1ebd4f500ccefe44668e5fbb792c6fc03943d008057",
         "book10l_at": "9bfbe8e684e475716e132b2105d7ad27eb43a3fc681db481601698f8b20f62d9",
         "book10l_missing_seconds": "3683b425ea5cf93da7aec4fcebbd26e26e9e5baaf75c52f672ae01d1b2f5b38d",
