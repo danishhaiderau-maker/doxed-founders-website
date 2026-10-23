@@ -754,15 +754,28 @@ def test_rk_l27_shared_liq_helper_bounds():
     assert ltg.g4_outcome(15.0) == ltg.G4_C and ltg.g4_outcome(15.01) == ltg.G4_B
 
 
-def test_rk_l27_arm_gate_refuses_until_a_new_amendment_passes():
-    rec = {"stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
+# RK binding ruling (2): only an RK+HM-signed frozen sha with a stamped, persisted pass record lifts L27
+_SHA1, _SHA2 = "a1b2c3d4e5f60718", "0f1e2d3c4b5a6978"
+_SIGNED = {_SHA1: {"rk": "TRACKER:RK-sig-1", "hm": "TRACKER:HM-sig-1"},
+           _SHA2: {"rk": "TRACKER:RK-sig-2", "hm": "TRACKER:HM-sig-2"}}
+
+
+def _pass(sha=_SHA1, ts=NOW, actor="danish"):
+    return {"sha": sha, "actor": actor, "ts": ts}
+
+
+def test_rk_l27_arm_gate_refuses_until_a_new_amendment_passes(monkeypatch):
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
+    rec = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
     for tile in ("gs1", "gs6", "gb1"):                                      # every tile, account-wide
         assert ltg.arm_gate_block(tile, {"outcome": ltg.G4_A}, "PASS:hm", rec) == ltg.DENY_L27_LATEST_L
     assert ltg.arm_gate_block("gb1", None, None, rec, "FAIL") == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:stop-amend-1") is None
-    old = dict(rec, amendment_at_record="PASS:stop-amend-1")              # the amendment already in force when L was read
-    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:stop-amend-1") == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:stop-amend-2") is None
+    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:" + _SHA1) == ltg.DENY_L27_LATEST_L   # env alone: no pass record
+    assert ltg.arm_gate_block("gb1", None, None, rec, "PASS:" + _SHA1, _pass()) is None
+    assert ltg.arm_gate_block("gb1", None, None, rec, _SHA1, _pass()) is None                    # bare sha form
+    old = dict(rec, amendment_at_record="PASS:" + _SHA1)                  # the amendment already in force when L was read
+    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:" + _SHA1, _pass()) == ltg.DENY_L27_LATEST_L
+    assert ltg.arm_gate_block("gb1", None, None, old, "PASS:" + _SHA2, _pass(_SHA2)) is None
     assert ltg.arm_gate_block("gb1", None, None, dict(rec, stop_liq_distance_bp=16.0)) is None
     assert ltg.arm_gate_block("gb1", None, None, None) is None             # nothing recorded: no estimate, no refusal
 
@@ -772,11 +785,74 @@ def test_rk_l27_admit_entry_carries_the_l27_refusal():
                               entry_margin_usd=1.0, latest_l={"stop_liq_distance_bp": 1.0})[1]
     assert reasons   # unknown tile key fails closed first; the L27 refusal is wired via arm_gate_block (source test below)
     src = pathlib.Path(ltg.__file__).read_text()
-    assert "g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment)" in src
+    assert "g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment, amendment_pass)" in src
+
+
+def test_rk2_l27_amendment_refusals_mismatch_unsigned_half_signed_stale_unstamped(monkeypatch):
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
+    L = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "amendment_at_record": ""}
+    r = ltg.l27_amendment_refusal
+    assert r("PASS:" + _SHA1, _pass(), L) is None
+    assert r("PASS:stop-amend-1", _pass(), L) == ltg.AMENDMENT_ENV_INVALID           # not a sha
+    assert r(None, _pass(), L) == ltg.AMENDMENT_ENV_INVALID
+    assert r("PASS:deadbeefcafe", _pass("deadbeefcafe"), L) == ltg.AMENDMENT_UNSIGNED  # unsigned sha
+    half = {_SHA1: {"rk": "TRACKER:RK-sig-1", "hm": ""}}
+    assert r("PASS:" + _SHA1, _pass(), L, signed=half) == ltg.AMENDMENT_UNSIGNED      # RK only: refused
+    assert r("PASS:" + _SHA1, None, L) == ltg.AMENDMENT_PASS_MISSING
+    assert r("PASS:" + _SHA1, _pass(_SHA2), L) == ltg.AMENDMENT_MISMATCH              # record for another sha
+    assert r("PASS:" + _SHA1, _pass(actor=""), L) == ltg.AMENDMENT_UNSTAMPED
+    assert r("PASS:" + _SHA1, {"sha": _SHA1, "actor": "danish"}, L) == ltg.AMENDMENT_UNSTAMPED
+    assert r("PASS:" + _SHA1, _pass(ts=NOW - 200), L) == ltg.AMENDMENT_PREDATES_L    # pass older than the too-close L
+    # the shipped allowlist is EMPTY: nothing lifts L27 until RK and HM sign and a reviewed PR freezes the sha
+    monkeypatch.undo()
+    assert ltg.SIGNED_STOP_AMENDMENTS == {}
+    assert ltg.l27_arm_block(L, "PASS:" + _SHA1, _pass()) == ltg.DENY_L27_LATEST_L
+
+
+def test_rk2_tracker_signature_parser_needs_both_rk_and_hm():
+    txt = ("STOP-AMENDMENT-SIGNED sha=PASS:A1B2C3D4E5F60718 RK=rk-0424 HM=hm-0424\n"
+           "STOP-AMENDMENT-SIGNED sha=0f1e2d3c4b5a6978 RK=rk-only\n"
+           "STOP-AMENDMENT-SIGNED sha=not-a-sha RK=x HM=y\n")
+    assert ltg.parse_signed_stop_amendments(txt) == {_SHA1: {"rk": "rk-0424", "hm": "hm-0424"}}
+
+
+def _amend_ns(state, env, persist_ok=True):
+    import types
+    a = _SRC.index("def _live_l27_amendment_pass_set")
+    la = _SRC.index("def _live_l27_arm_block")
+    ns = {"os": types.SimpleNamespace(environ=env), "time": _t, "logger": logging.getLogger("t"),
+          "_LIVE_GUARDIAN_STATE": state, "_live_guardian_persist": lambda: persist_ok}
+    exec(_SRC[la:_SRC.index("\ndef ", la + 10)], ns)
+    exec(_SRC[a:_SRC.index("\n\n\n", a)], ns)
+    return ns
+
+
+def test_rk2_amendment_pass_route_refuses_mismatch_and_unsigned_and_stamps_who_and_when(monkeypatch):
+    L = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "too_close": True, "amendment_at_record": ""}
+    st = {"liq_latest_l": L}
+    env = {ltg.STOP_AMENDMENT_ENV: "PASS:" + _SHA1}
+    ns = _amend_ns(st, env)
+    assert ns["_live_l27_amendment_pass_set"]("danish", _SHA1, now=NOW)[1]["error"] == ltg.AMENDMENT_UNSIGNED   # empty list
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
+    status, out = ns["_live_l27_amendment_pass_set"]("danish", _SHA2, now=NOW)
+    assert status == 409 and out["error"] == ltg.AMENDMENT_MISMATCH and "l27_amendment_pass" not in st
+    assert ns["_live_l27_amendment_pass_set"]("AUTO", _SHA1, now=NOW)[0] == 400
+    assert _amend_ns(st, {})["_live_l27_amendment_pass_set"]("danish", _SHA1, now=NOW)[1]["error"] == ltg.AMENDMENT_ENV_INVALID
+    status, out = _amend_ns(st, env, persist_ok=False)["_live_l27_amendment_pass_set"]("danish", _SHA1, now=NOW)
+    assert status == 503 and "l27_amendment_pass" not in st                                       # fail closed
+    assert ns["_live_l27_arm_block"]() == ltg.DENY_L27_LATEST_L
+    status, out = ns["_live_l27_amendment_pass_set"]("danish", _SHA1, now=NOW, auth_method="token")
+    p = st["l27_amendment_pass"]
+    assert status == 200 and p["sha"] == _SHA1 and p["actor"] == "danish" and p["ts"] == NOW and p["auth"] == "token"
+    assert p["rk"] == "TRACKER:RK-sig-1" and p["hm"] == "TRACKER:HM-sig-1" and out["l27_block"] is None
+    assert "l27_amendment_pass" in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS = "):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE")]
+    r = _SRC.index("@app.route('/api/live-copy/guardian/l27-amendment-pass'")
+    assert "if not _admin_authed_strict():" in _SRC[r:_SRC.index("\n@app.route(", r + 10)]
 
 
 def test_rk_l27_refusal_persists_across_a_restart(tmp_path, monkeypatch):
     monkeypatch.delenv(ltg.STOP_AMENDMENT_ENV, raising=False)
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
     ns, st = _rec_ns({"tile": "gs1", "trade_id": "t1", "positions": [_L27_ROW]})
     ns["_live_guardian_record_protection"](NOW, [])
     assert st["liq_latest_l"]["too_close"] and st["liq_latest_l"]["stop_liq_distance_bp"] == 12.0
@@ -787,12 +863,28 @@ def test_rk_l27_refusal_persists_across_a_restart(tmp_path, monkeypatch):
     p2["_live_guardian_restore"](NOW + 60)
     latest = p2["_LIVE_GUARDIAN_STATE"].get("liq_latest_l")
     assert latest and ltg.arm_gate_block("gb1", None, None, latest, None) == ltg.DENY_L27_LATEST_L
-    assert ltg.arm_gate_block("gb1", None, None, latest, "PASS:stop-amend-1") is None
-    # a later live position with a safe real L replaces the record (the latest L decides)
+    assert ltg.arm_gate_block("gb1", None, None, latest, "PASS:" + _SHA1, _pass(ts=NOW + 1)) is None
+    # HM C-R3-2: STICKY - a later live position with a SAFE real L does NOT replace the too-close record ...
     ns, st2 = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(_L27_ROW, stop_liq_distance_bp=30.0)]},
                       {"liq_latest_l": latest})
     ns["_live_guardian_record_protection"](NOW + 90, [])
-    assert st2["liq_latest_l"]["trade_id"] == "t2" and not st2["liq_latest_l"]["too_close"]
+    assert st2["liq_latest_l"]["trade_id"] == "t1" and st2["liq_latest_l"]["too_close"]
+    assert st2["liq_latest_l_safe_seen"]["trade_id"] == "t2"
+    assert ltg.arm_gate_block("gb1", None, None, st2["liq_latest_l"], None) == ltg.DENY_L27_LATEST_L
+    # ... until a persisted amendment-pass record exists (signed sha, actor, ts after the L); then the safe L replaces it
+    monkeypatch.setenv(ltg.STOP_AMENDMENT_ENV, "PASS:" + _SHA1)
+    ns, st2b = _rec_ns({"tile": "gs1", "trade_id": "t2", "positions": [dict(_L27_ROW, stop_liq_distance_bp=30.0)]},
+                       {"liq_latest_l": latest, "l27_amendment_pass": _pass(ts=NOW + 1)})
+    ns["_live_guardian_record_protection"](NOW + 90, [])
+    assert st2b["liq_latest_l"]["trade_id"] == "t2" and not st2b["liq_latest_l"]["too_close"]
+    # a NEWER too-close L always replaces (and the older pass then predates it => refused again)
+    ns, st2c = _rec_ns({"tile": "gs1", "trade_id": "t4", "positions": [dict(_L27_ROW, stop_liq_distance_bp=5.0)]},
+                       {"liq_latest_l": st2b["liq_latest_l"], "l27_amendment_pass": _pass(ts=NOW + 1)})
+    ns["_live_guardian_record_protection"](NOW + 120, [])
+    assert st2c["liq_latest_l"]["trade_id"] == "t4" and st2c["liq_latest_l"]["too_close"]
+    assert ltg.arm_gate_block("gb1", None, None, st2c["liq_latest_l"], "PASS:" + _SHA1,
+                              st2c["l27_amendment_pass"]) == ltg.DENY_L27_LATEST_L
+    monkeypatch.delenv(ltg.STOP_AMENDMENT_ENV, raising=False)
     # G5: a non-Bitfinex L is never recorded
     ns, st3 = _rec_ns({"tile": "gs1", "trade_id": "t3", "positions": [dict(_L27_ROW, liq_source=None)]})
     ns["_live_guardian_record_protection"](NOW, [])
@@ -817,7 +909,7 @@ def test_rk_l27_all_three_call_sites_use_the_one_helper():
     assert src.count("<= LIQ_CHECK_MAX_BP") == 1                                   # only inside liq_too_close
     a = _SRC.index("def _live_guardian_tile_arm_block")
     assert "liq_latest_l" in _SRC[a:_SRC.index("\ndef ", a + 10)]
-    assert '"liq_latest_l")' in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS ="):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE =")]
+    assert '"liq_latest_l",' in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS ="):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE =")]
 
 
 def test_852_e6_worst_case_evidence_age_under_normal_cadence_never_false_flattens():
@@ -872,11 +964,12 @@ def _resp(r):
     return r if isinstance(r, dict) else r[0], (200 if isinstance(r, dict) else r[1])
 
 
-_TOO_CLOSE = {"stop_liq_distance_bp": 12.0, "too_close": True, "amendment_at_record": ""}
+_TOO_CLOSE = {"ts": NOW - 100, "stop_liq_distance_bp": 12.0, "too_close": True, "amendment_at_record": ""}
 
 
-def test_852_l27_fly_output_on_route_refuses_and_new_amendment_unblocks():
+def test_852_l27_fly_output_on_route_refuses_and_new_amendment_unblocks(monkeypatch):
     import types
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
     out = types.SimpleNamespace(snapshot=lambda: {"enabled": False},
                                 set=lambda en, by=None, reason=None: {"enabled": en})
     extra = {"_get_live_copy_output": lambda: out, "_live_copy_paper_lock_active": lambda: False,
@@ -885,7 +978,10 @@ def test_852_l27_fly_output_on_route_refuses_and_new_amendment_unblocks():
     ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE}, extra)
     body, code = _resp(ns["api_live_copy_output"]())
     assert code == 409 and body["error"] == ltg.DENY_L27_LATEST_L
-    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE}, extra, amendment="PASS:stop-amend-1")
+    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE}, extra, amendment="PASS:" + _SHA1)
+    assert _resp(ns["api_live_copy_output"]())[1] == 409                       # env alone (no pass record): refused
+    ns, _ = _route_ns("/api/live-copy/output", {"liq_latest_l": _TOO_CLOSE, "l27_amendment_pass": _pass()}, extra,
+                      amendment="PASS:" + _SHA1)
     body, code = _resp(ns["api_live_copy_output"]())
     assert code == 200 and body["live_copy_output"]["enabled"] is True
     ns, _ = _route_ns("/api/live-copy/output", {}, extra)                     # nothing recorded: no estimate, no refusal
@@ -922,11 +1018,15 @@ def test_852_l27_fly_protection_bootstrap_rearm_refuses_per_lane(monkeypatch):
     assert _resp(ns["api_live_copy_protection_bootstrap"]())[0]["results"]["GS01"]["error"] == "LIVE_GUARDIAN_FORCE_FLAT_RED"
 
 
-def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_relay():
+def test_852_l27_fly_arm_gate_endpoint_serves_the_shared_helper_verdict_for_the_relay(monkeypatch):
+    monkeypatch.setattr(ltg, "SIGNED_STOP_AMENDMENTS", _SIGNED)
     ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE})
     body = ns["api_live_copy_arm_gate"]()
     assert body["schema"] == "fly_live_arm_gate_v1" and body["l27_block"] == ltg.DENY_L27_LATEST_L
-    ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE}, amendment="PASS:stop-amend-1")
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE}, amendment="PASS:" + _SHA1)
+    assert ns["api_live_copy_arm_gate"]()["l27_block"] == ltg.DENY_L27_LATEST_L       # no pass record
+    ns, _ = _route_ns("/api/live-copy/arm-gate", {"liq_latest_l": _TOO_CLOSE, "l27_amendment_pass": _pass()},
+                      amendment="PASS:" + _SHA1)
     assert ns["api_live_copy_arm_gate"]()["l27_block"] is None
     ns, _ = _route_ns("/api/live-copy/arm-gate", {})
     assert ns["api_live_copy_arm_gate"]()["l27_block"] is None

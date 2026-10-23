@@ -132,6 +132,20 @@ DENY_G6_HM_GATE = "LIVE_G6_HM_GATE_NOT_PASSED"
 # (LIVE_STOP_AMENDMENT_PASSED=PASS:<ref>, different from the value in force when that L was recorded).
 DENY_L27_LATEST_L = "LIVE_L27_LATEST_REAL_L_LE_15BP"
 STOP_AMENDMENT_ENV = "LIVE_STOP_AMENDMENT_PASSED"
+# RK binding ruling (2) (24 Oct, #852 R3): LIVE_STOP_AMENDMENT_PASSED must equal a FROZEN amendment sha that BOTH RK and HM have
+# signed in /workspace/grokbot/SHARED-TRACKER.md (line format: ``STOP-AMENDMENT-SIGNED sha=<sha> RK=<ref> HM=<ref>``). Fly
+# cannot read the tracker, so the signed shas are frozen HERE (sha -> {"rk": ref, "hm": ref}) and only a reviewed PR adds one
+# (parse_signed_stop_amendments checks the tracker text). EMPTY = no amendment signed yet => every value is refused (fail
+# closed). The pass itself is an explicit persisted record (bot l27_amendment_pass, set by the strict-admin route with
+# actor + ts), never inferred from a later L reading (HM C-R3-2).
+SIGNED_STOP_AMENDMENTS: Mapping[str, Mapping[str, str]] = {}
+AMENDMENT_ENV_INVALID = "L27_AMENDMENT_ENV_NOT_A_SHA"
+AMENDMENT_UNSIGNED = "L27_AMENDMENT_NOT_SIGNED_BY_RK_AND_HM"
+AMENDMENT_PASS_MISSING = "L27_AMENDMENT_PASS_NOT_RECORDED"
+AMENDMENT_MISMATCH = "L27_AMENDMENT_PASS_SHA_MISMATCH"
+AMENDMENT_UNSTAMPED = "L27_AMENDMENT_PASS_UNSTAMPED"
+AMENDMENT_PREDATES_L = "L27_AMENDMENT_PASS_PREDATES_LATEST_L"
+AMENDMENT_NOT_NEW = "L27_AMENDMENT_IN_FORCE_WHEN_L_RECORDED"
 DENY_DAILY_LOSS_CAP = SKIP_DAILY_CAP   # AMEND4 E1(L12): the cap refusal IS the LIVE_SKIPPED_DAILY_CAP stamp
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
@@ -292,7 +306,8 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
                 caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None,
                 book: Mapping[str, Any] | None = None, g4_first_l: Mapping[str, Any] | None = None,
                 hm_gate: str | None = None, latest_l: Mapping[str, Any] | None = None,
-                stop_amendment: str | None = None) -> tuple[bool, list, dict]:
+                stop_amendment: str | None = None,
+                amendment_pass: Mapping[str, Any] | None = None) -> tuple[bool, list, dict]:
     """(ok, reasons, info) for the FIRST entry event of a live trade. Pure; fail closed on any error.
 
     ``decisions``: iterable of (trade_id, decision_row) (TradeDecisions rows; persisted, so the daily count and the in-flight
@@ -313,7 +328,7 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         if others:
             reasons.append(SKIP_MUTEX)
         # 2. AMEND5 G4(c') / G6: GS-01 + FADE3 disarmed after a (c') first L; FADE3 only after (a)/(b) AND HM's gate
-        g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment)
+        g = arm_gate_block(key, g4_first_l, hm_gate, latest_l, stop_amendment, amendment_pass)
         info["g4_first_l_outcome"] = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None
         if g:
             reasons.append(g)
@@ -443,13 +458,71 @@ def liq_too_close(stop_liq_bp: float | None) -> bool:
     return d is not None and d <= LIQ_CHECK_MAX_BP
 
 
-def l27_arm_block(latest_l: Mapping[str, Any] | None, stop_amendment: str | None = None) -> str | None:
-    """RK L27 (24 Oct): refuse arming while the latest recorded real L is too close (liq_too_close) and no NEW stop amendment
-    has passed since it was recorded. No estimate is ever made; with no recorded L there is nothing to refuse on."""
+def stop_amendment_sha(value: Any) -> str | None:
+    """The amendment sha in a LIVE_STOP_AMENDMENT_PASSED value (``<sha>`` or ``PASS:<sha>``), lower-case hex 8-64; else None."""
+    import re as _re
+    v = str(value or "").strip()
+    if v.upper().startswith("PASS:"):
+        v = v[5:].strip()
+    v = v.lower()
+    return v if _re.fullmatch(r"[0-9a-f]{8,64}", v) else None
+
+
+def stop_amendment_signed(sha: str | None, signed: Mapping[str, Mapping[str, str]] | None = None) -> bool:
+    """RK (2): the sha is frozen in SIGNED_STOP_AMENDMENTS with BOTH an RK and an HM signature reference."""
+    rec = (SIGNED_STOP_AMENDMENTS if signed is None else signed).get(sha or "") if sha else None
+    return (isinstance(rec, Mapping) and bool(str(rec.get("rk") or "").strip()) and bool(str(rec.get("hm") or "").strip()))
+
+
+def parse_signed_stop_amendments(tracker_text: str) -> dict:
+    """{sha: {"rk": ref, "hm": ref}} from SHARED-TRACKER lines ``STOP-AMENDMENT-SIGNED sha=<sha> RK=<ref> HM=<ref>``.
+    A line missing either signature is ignored (not signed)."""
+    import re as _re
+    out: dict = {}
+    for m in _re.finditer(r"STOP-AMENDMENT-SIGNED\s+sha=(\S+)\s+RK=(\S+)\s+HM=(\S+)", str(tracker_text or "")):
+        sha = stop_amendment_sha(m.group(1))
+        if sha and m.group(2).strip() and m.group(3).strip():
+            out[sha] = {"rk": m.group(2).strip(), "hm": m.group(3).strip()}
+    return out
+
+
+def l27_amendment_refusal(stop_amendment: Any, amendment_pass: Mapping[str, Any] | None,
+                          latest_l: Mapping[str, Any] | None = None,
+                          signed: Mapping[str, Mapping[str, str]] | None = None) -> str | None:
+    """Why a stop-amendment pass does NOT lift L27 (None = it does). The env value must be a signed sha (RK + HM), the
+    persisted pass record must carry the SAME sha, a named actor and a ts newer than the latest too-close L, and the sha must
+    differ from the one in force when that L was recorded."""
+    sha = stop_amendment_sha(stop_amendment)
+    if sha is None:
+        return AMENDMENT_ENV_INVALID
+    if not stop_amendment_signed(sha, signed):
+        return AMENDMENT_UNSIGNED
+    rec = amendment_pass if isinstance(amendment_pass, Mapping) else None
+    if not rec:
+        return AMENDMENT_PASS_MISSING
+    if stop_amendment_sha(rec.get("sha")) != sha:
+        return AMENDMENT_MISMATCH
+    ts = _f(rec.get("ts"))
+    if not str(rec.get("actor") or "").strip() or ts is None or ts <= 0:
+        return AMENDMENT_UNSTAMPED
+    if isinstance(latest_l, Mapping):
+        lts = _f(latest_l.get("ts"))
+        if lts is None or ts <= lts:
+            return AMENDMENT_PREDATES_L
+        if stop_amendment_sha(latest_l.get("amendment_at_record")) == sha:
+            return AMENDMENT_NOT_NEW
+    return None
+
+
+def l27_arm_block(latest_l: Mapping[str, Any] | None, stop_amendment: str | None = None,
+                  amendment_pass: Mapping[str, Any] | None = None,
+                  signed: Mapping[str, Mapping[str, str]] | None = None) -> str | None:
+    """RK L27 (24 Oct): refuse arming while the latest recorded real L is too close (liq_too_close) and no NEW signed stop
+    amendment has passed since it was recorded (HM C-R3-2 + RK (2): l27_amendment_refusal over the explicit persisted pass
+    record). No estimate is ever made; with no recorded L there is nothing to refuse on."""
     if not isinstance(latest_l, Mapping) or not liq_too_close(latest_l.get("stop_liq_distance_bp")):
         return None
-    a = str(stop_amendment or "").strip()
-    if a.upper().startswith("PASS") and a != str(latest_l.get("amendment_at_record") or "").strip():
+    if l27_amendment_refusal(stop_amendment, amendment_pass, latest_l, signed) is None:
         return None
     return DENY_L27_LATEST_L
 
@@ -465,11 +538,12 @@ def g4_outcome(stop_liq_bp: float | None) -> str | None:
 
 
 def arm_gate_block(tile_key: str | None, g4_first_l: Mapping[str, Any] | None, hm_gate: str | None = None,
-                   latest_l: Mapping[str, Any] | None = None, stop_amendment: str | None = None) -> str | None:
+                   latest_l: Mapping[str, Any] | None = None, stop_amendment: str | None = None,
+                   amendment_pass: Mapping[str, Any] | None = None) -> str | None:
     """AMEND5 G4(c') + G6 arm/entry gate (pure, shared). GS-01 arms first (its first L is unknown until it trades); after a
     G4(c') reading GS-01 and FADE3 stay disarmed (STOP_REEVAL). FADE3 needs a first L in (a)/(b) AND HM's live gate pass.
     RK L27: every tile is refused while the latest recorded real L is too close and no new stop amendment has passed."""
-    l27 = l27_arm_block(latest_l, stop_amendment)
+    l27 = l27_arm_block(latest_l, stop_amendment, amendment_pass)
     if l27:
         return l27
     out = (g4_first_l or {}).get("outcome") if isinstance(g4_first_l, Mapping) else None

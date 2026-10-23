@@ -50007,6 +50007,16 @@ def _live_guardian_record_protection(now, viol) -> None:
                 and cur.get("liq_price") == p.get("liq_price")):
             break
         import os as _os
+        # HM C-R3-2 (#852 R3): STICKY. A too-close record stays until an explicit persisted amendment-pass record (RK (2):
+        # signed sha, actor, ts newer than the L) lifts it; a later SAFE L never replaces it (a newer too-close L does).
+        if (cur.get("too_close") and not _ltg.liq_too_close(d)
+                and _ltg.l27_arm_block(cur, _os.environ.get(_ltg.STOP_AMENDMENT_ENV),
+                                       st.get("l27_amendment_pass")) is not None):
+            if (st.get("liq_latest_l_safe_seen") or {}).get("trade_id") != _prot.get("trade_id"):
+                st["liq_latest_l_safe_seen"] = {"ts": now, "trade_id": _prot.get("trade_id"), "stop_liq_distance_bp": d,
+                                                "kept": "too-close record stays until a signed amendment pass (C-R3-2)"}
+                changed = True
+            break
         st["liq_latest_l"] = {"ts": now, "tile": _prot.get("tile"), "trade_id": _prot.get("trade_id"), "side": p.get("side"),
                               "stop_level": p.get("stop_level"), "liq_price": p.get("liq_price"),
                               "liq_read_at": p.get("liq_read_at"), "liq_source": _ltg.LIQ_SOURCE, "stop_liq_distance_bp": d,
@@ -50041,7 +50051,8 @@ def _live_guardian_record_protection(now, viol) -> None:
 # while the mirror is NOT FLAT_NO_STOPS => RED BOOT_REDERIVED_NOT_FLAT + force-flat. A restart never clears RED.
 _LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "red_alert_acks", "auto_disarm_latched",
                                "stop_failure_events", "liq_events",
-                               "first_live_liq_distance", "g4_first_l", "stop_reeval", "liq_latest_l")
+                               "first_live_liq_distance", "g4_first_l", "stop_reeval", "liq_latest_l",
+                               "liq_latest_l_safe_seen", "l27_amendment_pass", "l27_amendment_pass_history")
 _LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"
 
 
@@ -62104,7 +62115,8 @@ def _live_tile_admission(lane, trade_id, now):
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
         decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
         book=_book, g4_first_l=_LIVE_GUARDIAN_STATE.get("g4_first_l"), hm_gate=os.environ.get("LIVE_HM_GATE_FADE3"),
-        latest_l=_LIVE_GUARDIAN_STATE.get("liq_latest_l"), stop_amendment=os.environ.get(_ltg.STOP_AMENDMENT_ENV))
+        latest_l=_LIVE_GUARDIAN_STATE.get("liq_latest_l"), stop_amendment=os.environ.get(_ltg.STOP_AMENDMENT_ENV),
+        amendment_pass=_LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
     _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
     if ok and _amber.get("codes") and now - float(_amber.get("ts") or 0) <= 5.0:
         # the guardian's rolling-24 h ledger cap / AMBER entry blocks (AMEND4 E1: entry block only, never a disarm)
@@ -62682,7 +62694,7 @@ def _live_guardian_tile_arm_block(lane: str) -> str | None:
     import live_tile_gate as _ltg
     return _ltg.arm_gate_block(_ltg.tile_key_for_lane(lane), _LIVE_GUARDIAN_STATE.get("g4_first_l"),
                                os.environ.get("LIVE_HM_GATE_FADE3"), _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
-                               os.environ.get(_ltg.STOP_AMENDMENT_ENV))
+                               os.environ.get(_ltg.STOP_AMENDMENT_ENV), _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
 
 
 def _live_l27_arm_block() -> str | None:
@@ -62690,7 +62702,45 @@ def _live_l27_arm_block() -> str | None:
     Fly output ON route, the per-tile live-orders route (via arm_gate_block), the protection-bootstrap re-arm route and the
     relay's arm/re-arm routes (they read it from GET /api/live-copy/arm-gate)."""
     import live_tile_gate as _ltg
-    return _ltg.l27_arm_block(_LIVE_GUARDIAN_STATE.get("liq_latest_l"), os.environ.get(_ltg.STOP_AMENDMENT_ENV))
+    return _ltg.l27_arm_block(_LIVE_GUARDIAN_STATE.get("liq_latest_l"), os.environ.get(_ltg.STOP_AMENDMENT_ENV),
+                              _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"))
+
+
+def _live_l27_amendment_pass_set(actor, sha, now=None, auth_method: str = "") -> tuple:
+    """RK binding ruling (2) / HM C-R3-2 (#852 R3): record the explicit L27 amendment pass. Refused unless the sha equals
+    LIVE_STOP_AMENDMENT_PASSED AND is frozen in live_tile_gate.SIGNED_STOP_AMENDMENTS with both RK and HM signatures. Stamps
+    {sha, actor, ts, auth, rk, hm}; persisted BEFORE it is reported (a failed persist restores the previous record). Arms
+    nothing. Returns (http_status, body)."""
+    import re as _re
+    import live_tile_gate as _ltg
+    now = time.time() if now is None else now
+    actor = str(actor or "").strip()
+    if not _re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return 400, {"ok": False, "error": "actor must be a named operator (1-64 safe chars)"}
+    sha = _ltg.stop_amendment_sha(sha)
+    env_sha = _ltg.stop_amendment_sha(os.environ.get(_ltg.STOP_AMENDMENT_ENV))
+    if sha is None or env_sha is None:
+        return 409, {"ok": False, "error": _ltg.AMENDMENT_ENV_INVALID}
+    if sha != env_sha:
+        return 409, {"ok": False, "error": _ltg.AMENDMENT_MISMATCH}
+    if not _ltg.stop_amendment_signed(sha):
+        return 409, {"ok": False, "error": _ltg.AMENDMENT_UNSIGNED}
+    sig = _ltg.SIGNED_STOP_AMENDMENTS[sha]
+    prev = _LIVE_GUARDIAN_STATE.get("l27_amendment_pass")
+    rec = {"sha": sha, "actor": actor, "ts": now, "auth": auth_method or None, "rk": sig.get("rk"), "hm": sig.get("hm")}
+    _LIVE_GUARDIAN_STATE["l27_amendment_pass"] = rec
+    hist = list(_LIVE_GUARDIAN_STATE.get("l27_amendment_pass_history") or [])[-19:] + [rec]
+    _LIVE_GUARDIAN_STATE["l27_amendment_pass_history"] = hist
+    if not _live_guardian_persist():
+        if prev is None:
+            _LIVE_GUARDIAN_STATE.pop("l27_amendment_pass", None)
+        else:
+            _LIVE_GUARDIAN_STATE["l27_amendment_pass"] = prev
+        _LIVE_GUARDIAN_STATE["l27_amendment_pass_history"] = hist[:-1]
+        return 503, {"ok": False, "error": "PERSIST_FAILED"}
+    logger.critical(f"[LIVE GUARDIAN] L27 amendment pass recorded sha={sha} actor={actor} (RK={sig.get('rk')} "
+                    f"HM={sig.get('hm')}) [PIPELINE ENFORCEMENT]")
+    return 200, {"ok": True, "l27_amendment_pass": rec, "l27_block": _live_l27_arm_block()}
 
 
 def _live_guardian_arm_block() -> str | None:
@@ -63237,7 +63287,19 @@ def api_live_copy_arm_gate():
                     "guardian_arm_block": _live_guardian_arm_block(),
                     "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                     "stop_amendment": str(os.environ.get(_ltg.STOP_AMENDMENT_ENV) or "") or None,
+                    "l27_amendment_pass": _LIVE_GUARDIAN_STATE.get("l27_amendment_pass"),
                     "liq_check_max_bp": _ltg.LIQ_CHECK_MAX_BP})
+
+
+@app.route('/api/live-copy/guardian/l27-amendment-pass', methods=['POST'])
+def api_live_copy_guardian_l27_amendment_pass():
+    """RK (2) / HM C-R3-2 (#852 R3): strict-admin record of the signed L27 stop-amendment pass (_live_l27_amendment_pass_set).
+    Body {actor, sha}; the sha must equal LIVE_STOP_AMENDMENT_PASSED and be RK+HM signed. Arms nothing."""
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin authentication required"}), 401
+    body = request.get_json(silent=True) or {}
+    status, out = _live_l27_amendment_pass_set(body.get("actor"), body.get("sha"), auth_method=_admin_auth_method())
+    return jsonify(out), status
 
 
 @app.route('/api/live-copy/guardian/red-ack', methods=['POST'])
