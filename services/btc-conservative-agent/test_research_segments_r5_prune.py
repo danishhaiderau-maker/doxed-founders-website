@@ -167,4 +167,13 @@ def test_shipper_main_loop_runs_r5_between_cycles_not_inside():
     cycle = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "cycle")
     assert "r5_segment_pass" not in ast.unparse(cycle)
     main = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main")
-    assert "shipper.r5_segment_pass()" in ast.unparse(main)
+    body = ast.unparse(main)
+    assert "shipper.r5_segment_pass(keep_seqs=shipper.r5_keep_seqs())" in body
+
+
+def test_c3_r5_pass_runs_before_the_low_disk_check():
+    """HM C3: under LOW_DISK the loop `continue`s, so the R5 pass must run first or it never frees space."""
+    source = open(os.path.join(os.path.dirname(__file__), "research_segment_shipper.py"), encoding="utf-8").read()
+    main = source[source.index("def main("):]
+    loop = main[main.index("while "):]
+    assert loop.index("r5_pass()") < loop.index("LOW_DISK")

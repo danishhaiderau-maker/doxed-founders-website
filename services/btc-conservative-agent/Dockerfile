@@ -49,7 +49,7 @@ RUN python -c "import research.conservative_fill_cohort, research.conservative_l
 RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import research.close_origin"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
-RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker, rotation_cap, disk_alert, r5_retention"
+RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker, rotation_cap, disk_alert, r5_retention, r5_keep"
 # Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.
 RUN python -c "import research_segment_format, research_segment_selection, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe, data_retention_policy"
 # Bitfinex fee profile, fill markouts and every registry tile policy load on the order path.

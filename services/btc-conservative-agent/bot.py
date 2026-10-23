@@ -15700,15 +15700,25 @@ def _r5_v22_drain_probe(started_ts: float):
 
 def r5_retention_once(now: float | None = None, *, v22: bool = False) -> dict:
     """One R5 retention pass; each step is independent and never raises."""
+    import r5_keep
     import r5_retention
     now = time.time() if now is None else float(now)
     runtime_root = _data_sync_runtime_root()
     out: dict = {"ts": now}
+    # HM C7 (RK: keep only for open lifecycles or prereg tests): one read-only keep set.
+    try:
+        keep_info = r5_keep.open_lifecycles(runtime_root)
+        out["keep"] = r5_keep.summary(keep_info, r5_keep.keep_since_ts(keep_info))
+    except Exception as exc:
+        keep_info = {}
+        out["keep"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     steps = [
         ("locks", lambda: r5_retention.wipe_stale_locks(runtime_root, boot_ts=_R5_PROCESS_BOOT_TS, now=now)),
-        ("market_segments", lambda: r5_retention.cap_market_segments(runtime_root, now=now)),
+        ("market_segments", lambda: r5_retention.cap_market_segments(
+            runtime_root, referenced=keep_info.get("segment_shas") or (), now=now)),
         ("lifecycle_bundles", lambda: r5_retention.cap_lifecycle_bundles(
-            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", now=now)),
+            runtime_root, ack_root=_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks",
+            keep=keep_info.get("bundle_ids") or (), now=now)),
     ]
     if v22:
         steps.append(("v22", lambda: r5_retention.seal_drain_discard_v22(
@@ -48893,8 +48903,9 @@ def monitor_shipper_snapshot() -> dict:
     out = _CUSTODY_LAG.observe(transfer)
     out["transfer"] = {k: transfer.get(k) for k in ("enabled", "last_error", "unshipped_bytes", "updated_at")
                        if isinstance(transfer, dict)}
-    out["custody_note"] = ("custody_through_seq = min(laptop ACK, parity, analyzer-consumed seq): a lag means the "
-                           "analyzer has not consumed the newest acked segments; pruning never passes custody.")
+    out["custody_note"] = ("R5 (HM C4/C5): the store is pruned by cap/age with no custody gate, so a laptop ACK that "
+                           "has not advanced for 2 h while shipped_seq is ahead is RED LAPTOP_ACK_NOT_ADVANCING "
+                           "(alert only, never a gate).")
     return out
 
 
@@ -49784,7 +49795,7 @@ _SEGMENT_STATUS_FIELDS = (
     # HM (b): laptop/Fly sync verdict computed by the shipper from the laptop beacon.
     "sync_verdict", "sync_verdict_reasons", "laptop_applied_seq", "fresh_start_epoch_id",
     "laptop_cycle_stop_reason", "laptop_cycle_exit",
-    # CUSTODY_STALLED (HM 19 Oct 16:34): received_at of the newest custody receipt + the last prune plan (deny reasons)
+    # Legacy custody fields (custody prune retired, HM C4); kept so older status files still read.
     "custody_received_at", "prune_last_plan",
     # HM C5/C6 (23 Oct): laptop ACK advance time (ACK stall RED) and the R5 segment pass result.
     "laptop_ack_advanced_at", "r5_segment_red", "r5_segment_over_cap", "r5_segment_last_deleted",

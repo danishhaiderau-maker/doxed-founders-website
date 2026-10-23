@@ -1,9 +1,16 @@
 """Pruning of the Fly segment store and shipped runtime rotations.
 
-R5 (2026-10-23): the segment store itself is pruned by age/cap with NO custody
-or ACK gate (``plan_r5_segment_prune`` at the bottom, live in code). The
-custody-gated plan described below still governs runtime rotations (and may
-also drop segments under its bound).
+R5 (2026-10-23): the segment store is pruned by age/cap with NO custody or ACK
+gate (``plan_r5_segment_prune`` at the bottom; the shipper's
+``r5_segment_pass``), and runtime rotations by ``rotation_cap``.
+
+HM C4 (23 Oct): the custody-gated prune below is RETIRED (``CUSTODY_PRUNE_RETIRED``):
+the shipper no longer calls ``plan_prune``/``execute``, ``read_mode`` always
+answers ``("off", "CUSTODY_PRUNE_RETIRED_R5")`` and the server refuses a mode
+change with 409. A custody stall is an alert only
+(``monitor_gaps.custody_stall``: laptop ACK not advancing while shipped_seq is
+ahead). The plan/execute code is kept, uncalled, for audit of the old ledger
+format. Historical description of the retired path:
 
 Runs inside the segment shipper process, strictly between cycles (never
 between ``write_intent`` and ``complete_intent``). Nothing is deleted unless
@@ -48,13 +55,16 @@ import research_segment_format as fmt
 from tape_minute_bars import DEFAULT_RETENTION_MINUTES as TAPE_STORE_RETENTION_MINUTES
 
 PRUNE_ENABLED = True
+# HM C4 (23 Oct): custody-gated pruning retired under R5 (cap/age, no custody gate).
+CUSTODY_PRUNE_RETIRED = True
+CUSTODY_PRUNE_RETIRED_REASON = "CUSTODY_PRUNE_RETIRED_R5"
 REQUIRED_PROVEN_ACK_CYCLES = 2
 CUSTODY_SCHEMA = "research_segment_custody_receipt_v1"
 LEDGER_SCHEMA = "fly_prune_ledger_v1"
 PLAN_SCHEMA = "fly_prune_plan_v1"
 MODE_SCHEMA = "fly_prune_mode_v1"
 MODES = ("off", "dry_run", "enforce")
-DEFAULT_MODE = "dry_run"
+DEFAULT_MODE = "off"
 SEGMENT_MIN_AGE_HOURS = 6.0
 TIER_B_MIN_AGE_HOURS = 12.0
 TIER_B_KEEP_LATEST = 2
@@ -94,6 +104,8 @@ def mode_path(state_dir: Path) -> Path:
 def read_mode(state_dir: Path, environ=None) -> tuple[str, str]:
     """Return (mode, why). The env switch is the master; the file chooses within it."""
     env = os.environ if environ is None else environ
+    if CUSTODY_PRUNE_RETIRED:
+        return "off", CUSTODY_PRUNE_RETIRED_REASON
     if not PRUNE_ENABLED:
         return "off", "PRUNE_DISABLED_IN_CODE"
     if (env.get("RESEARCH_SEGMENTS_PRUNE_ENABLED") or "0").strip() != "1":
@@ -106,6 +118,8 @@ def read_mode(state_dir: Path, environ=None) -> tuple[str, str]:
 
 
 def write_mode(state_dir: Path, mode: str, *, clock=time.time, actor: str = "admin") -> dict:
+    if CUSTODY_PRUNE_RETIRED:
+        raise PermissionError(CUSTODY_PRUNE_RETIRED_REASON)
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     payload = {"schema": MODE_SCHEMA, "mode": mode, "set_at": _iso(clock()), "actor": actor}

@@ -77,8 +77,59 @@ def test_bundles_capped_regardless_of_ack(tmp_path):
     assert res["removed"] == 2 and res["unacked_removed"] == 1
     assert not old_acked.exists() and not old_unacked.exists() and fresh.exists()
     assert "BUNDLE_CAP_REMOVED_UNACKED" in {r["reason"] for r in disk_alert.red_conditions(now=now)}
-    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=0, now=now)  # byte cap removes the fresh one too
-    assert res["removed"] == 1 and not fresh.exists()
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=0, now=now)  # HM C7: a <10 min bundle is never capped
+    assert res["removed"] == 0 and fresh.exists() and res["over_cap"] is True
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=0, now=now + 601)  # past the fresh floor the cap takes it
+    assert res["removed"] == 1 and res["cap_removed"] == 1 and not fresh.exists()
+
+
+def test_c8_cap_pass_runs_first_with_its_own_budget_ignoring_keep(tmp_path):
+    now = 100 * 86400.0
+    old = [_bundle(tmp_path, "lifecycle_transfer_bundles", "transfer-", f"{i:064x}", 10, now - (20 - i) * 86400)
+           for i in range(4)]
+    mid = [_bundle(tmp_path, "lifecycle_bundles", "lifecycle-", f"m{i}", 10, now - 3600) for i in range(3)]
+    # cap 30 bytes over 70: the cap pass drops the 4 oldest even though all are in keep (budget 4)
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=30, max_removals=4, now=now,
+                                   keep=[p.name for p in old])
+    assert res["cap_removed"] == 4 and all(not p.exists() for p in old)
+    assert res["age_removed"] == 0 and all(p.exists() for p in mid)
+    assert "BUNDLE_CAP_REACHED" in {r["reason"] for r in disk_alert.red_conditions(now=now)}
+
+
+def test_c8_age_pass_has_its_own_budget_and_keeps_needed_unshipped(tmp_path):
+    now = 100 * 86400.0
+    aged = [_bundle(tmp_path, "lifecycle_bundles", "lifecycle-", f"a{i}", 10, now - 30 * 86400) for i in range(3)]
+    needed = _bundle(tmp_path, "lifecycle_transfer_bundles", "transfer-", "n" * 64, 10, now - 30 * 86400)
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=10 ** 9, max_removals=2, now=now,
+                                   keep=["lifecycle-" + "n" * 64])
+    assert res["cap_removed"] == 0 and res["age_removed"] == 2 and res["kept_needed_unshipped"] == 1
+    assert needed.exists() and sum(p.exists() for p in aged) == 1
+
+
+def _pointer(root, identity, bundle_id):
+    d = root / "v3" / "lifecycle_transfer_bundles" / "index"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{identity}.json"
+    p.write_text(json.dumps({"bundle_id": bundle_id}))
+    return p
+
+
+def test_c8_removed_transfer_bundle_takes_its_pointer_and_dangling_pointers_are_swept(tmp_path):
+    now = 100 * 86400.0
+    sha = "aa" + "1" * 62
+    _bundle(tmp_path, "lifecycle_transfer_bundles", "transfer-", sha, 10, now - 30 * 86400)
+    p_removed = _pointer(tmp_path, "id-removed", "transfer-" + sha)
+    p_dangling = _pointer(tmp_path, "id-dangling", "transfer-" + "aa" + "2" * 62)
+    staged = "aa" + "3" * 62
+    (tmp_path / "v3" / "lifecycle_transfer_bundles" / ".staging" / ("transfer-" + staged)).mkdir(parents=True)
+    p_staged = _pointer(tmp_path, "id-staged", "transfer-" + staged)
+    live = "aa" + "4" * 62
+    _bundle(tmp_path, "lifecycle_transfer_bundles", "transfer-", live, 10, now - 60)
+    p_live = _pointer(tmp_path, "id-live", "transfer-" + live)
+    res = r5.cap_lifecycle_bundles(tmp_path, max_bytes=10 ** 9, now=now)
+    assert res["removed"] == 1 and res["transfer_pointers_removed"] == 2
+    assert not p_removed.exists() and not p_dangling.exists()
+    assert p_staged.exists() and p_live.exists()
 
 
 def test_locks_wipe_keeps_recent(tmp_path):

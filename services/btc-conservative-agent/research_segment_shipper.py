@@ -41,6 +41,7 @@ import uuid
 import research_segment_epoch as epoch_mod
 import research_segment_format as fmt
 import research_segment_prune as prune
+import r5_keep
 import research_segment_selection as selection
 from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
 
@@ -397,58 +398,40 @@ class SegmentShipper:
             except (OSError, json.JSONDecodeError):
                 previous = {}
         previous.update(fields)
-        previous.update({"schema": STATUS_SCHEMA, "pruning_enabled": self.prune_mode() != "off",
+        previous.update({"schema": STATUS_SCHEMA, "prune_mode": "off",
+                         "pruning_enabled": bool(PRUNING_ENABLED and self.sink == "volume"),
+                         "retention": "R5_AGE_CAP_NO_CUSTODY_GATE",
                          "updated_at": self.clock(), "prefix": self.prefix, "sink": self.sink,
                          "max_store_bytes": self.max_store_bytes})
         _atomic_write(self.status_path, json.dumps(previous, sort_keys=True, indent=2).encode())
 
     # ---------------------------------------------------------------- pruning
     def prune_mode(self) -> str:
-        if not PRUNING_ENABLED or self.sink != "volume":
-            return "off"
-        return prune.read_mode(self.state_dir)[0]
+        """HM C4 (23 Oct): the custody-gated prune (``prune_pass``) is retired under R5.
 
-    def prune_pass(self) -> dict:
-        """Custody-gated prune; only between cycles, never with an intent pending."""
-        mode = self.prune_mode()
-        if mode == "off":
-            self.write_status(prune_mode="off")
-            return {"mode": "off"}
-        if (self.intent_dir / "intent.json").is_file():
-            return {"mode": mode, "skipped": "INTENT_PENDING"}
+        Retention is R5 only: ``r5_segment_pass`` (age/cap, no custody gate)
+        plus rotation_cap. Always "off"; kept for status/back-compat readers.
+        """
+        return "off"
+
+    def r5_keep_seqs(self) -> set[int]:
+        """HM C7: seqs covering min(open lifecycle start, FADE3 prereg start); never raises."""
         store_root = getattr(self.store, "root", None)
-        if store_root is None:
-            return {"mode": mode, "skipped": "NO_VOLUME_STORE_ROOT"}
-        state = self.load_state()
-        custody = prune.latest_custody(Path(store_root), self.prefix)
-        plan = prune.plan_prune(shipper_state=state, universe=self.scan(), store_root=Path(store_root),
-                                prefix=self.prefix, custody=custody, now=self.clock())
-        summary = prune.summarize(plan)
-        fields = {"prune_mode": mode, "prune_last_at": self.clock(), "prune_last_plan": summary,
-                  "custody_through_seq": plan.get("custody_through_seq"),
-                  # when custody last advanced: received_at of the newest receipt (one per through_seq, never rewritten)
-                  "custody_received_at": (custody or {}).get("received_at")}
-        _atomic_write(self.state_dir / "prune-plan-latest.json",
-                      json.dumps({**plan, "mode": mode}, sort_keys=True, default=str).encode())
-        if mode != "enforce" or not plan["allowed"]:
-            self.write_status(**fields)
-            return {"mode": mode, "plan": summary}
-        result = prune.execute(plan, runtime_root=self.runtime_root, clock=self.clock)
-        if result["segment_bytes"]:
-            state = self.load_state()
-            state["store_bytes"] = max(0, int(state.get("store_bytes") or 0) - result["segment_bytes"])
-            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
-        previous = {}
+        if store_root is None or self.sink != "volume":
+            return set()
         try:
-            previous = json.loads(self.status_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            previous = {}
-        pruned_through = max(int(previous.get("pruned_through_seq") or 0), result["max_segment_seq"])
-        self.write_status(**fields, prune_last_result=result, pruned_through_seq=pruned_through or None,
-                          store_bytes=int(self.load_state().get("store_bytes") or 0),
-                          prune_deleted_bytes_total=int(previous.get("prune_deleted_bytes_total") or 0)
-                          + result["deleted_bytes"])
-        return {"mode": mode, "plan": summary, "result": result}
+            info = r5_keep.open_lifecycles(self.runtime_root)
+            since = r5_keep.keep_since_ts(info)
+            seqs = r5_keep.segment_keep_seqs(Path(store_root), self.prefix, since,
+                                             shipped_seq=int(self.load_state().get("seq") or 0))
+            self.write_status(r5_keep=r5_keep.summary(info, since, seqs))
+            return seqs
+        except Exception as exc:  # noqa: BLE001 - keep set only narrows age retention
+            try:
+                self.write_status(r5_keep={"error": type(exc).__name__})
+            except Exception:  # noqa: BLE001
+                pass
+            return set()
 
     def r5_segment_pass(self, keep_seqs=()) -> dict:
         """R5 segment-store retention (RK 2026-10-23): live, no custody/ACK gate.
@@ -1247,7 +1230,16 @@ class SegmentShipper:
                 ack = fmt.parse_ack(raw)
                 if ack["through_seq"] == int(token) and ack["through_seq"] <= int(state["seq"]):
                     best = ack["through_seq"]
-        self.write_status(laptop_acked_seq=best, **self.sync_status_fields(best))
+        # HM C5: when the ACK last advanced (status-side, so a restart keeps it).
+        try:
+            previous = json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        advanced_at = previous.get("laptop_ack_advanced_at")
+        if advanced_at is None or best > int(previous.get("laptop_acked_seq") or 0):
+            advanced_at = self.clock()
+        self.write_status(laptop_acked_seq=best, laptop_ack_advanced_at=advanced_at,
+                          **self.sync_status_fields(best))
         return best
 
     def sync_status_fields(self, acked: int) -> dict:
@@ -1416,8 +1408,6 @@ def main() -> int:
     _log(f"started prefix={shipper.prefix} sink={shipper.sink} interval={interval:.0f}s "
          f"max_store_bytes={shipper.max_store_bytes} min_free={min_free} pruning={shipper.prune_mode()}")
     last_ack_poll = 0.0
-    last_prune = 0.0
-    prune_interval = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_PRUNE_INTERVAL_SECONDS") or 600))
 
     def settle_mode() -> str:
         nonlocal priority_boosted, priority_error
@@ -1448,11 +1438,25 @@ def main() -> int:
         except Exception as exc:  # an ack read never blocks shipping
             _log(f"ack poll error: {type(exc).__name__}: {exc}")
 
+    def r5_pass() -> None:
+        # HM C3: R5 segment-store retention runs FIRST every loop, in its own try,
+        # so LOW_DISK or a failing cycle never skips it (that is when it is needed).
+        # Age/cap, no custody gate; STORE_CAP_REACHED clears on the next cycle.
+        try:
+            r5 = shipper.r5_segment_pass(keep_seqs=shipper.r5_keep_seqs())
+        except Exception as exc:  # noqa: BLE001 - retention never stops the loop
+            _log(f"r5 segment prune error: {type(exc).__name__}: {exc}")
+            return
+        if r5.get("result", {}).get("deleted"):
+            _log(f"r5 segment prune deleted={r5['result']['deleted']} bytes={r5['result']['deleted_bytes']} "
+                 f"cap_dropped={r5['result']['cap_dropped_seqs'][:20]} red={r5['result']['red']}")
+
     while True:
         pause = interval
         # Outside the cycle's try: a slow or failed cycle must not leave
         # laptop_acked_seq stale on /health.
         poll_ack()
+        r5_pass()
         try:
             if _free_bytes(shipper.state_dir) < min_free:
                 shipper.write_status(last_error="LOW_DISK_SKIPPED")
@@ -1472,22 +1476,6 @@ def main() -> int:
                     _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):
                     pause = backlog_pause
-                # R5 (RK 2026-10-23): segment store pruned by age/cap every loop, no custody gate,
-                # so STORE_CAP_REACHED clears on the next cycle instead of stopping the shipper.
-                r5 = shipper.r5_segment_pass()
-                if r5.get("result", {}).get("deleted"):
-                    _log(f"r5 segment prune deleted={r5['result']['deleted']} bytes={r5['result']['deleted_bytes']} "
-                         f"cap_dropped={r5['result']['cap_dropped_seqs'][:20]} red={r5['result']['red']}")
-                if time.time() - last_prune >= prune_interval:
-                    last_prune = time.time()
-                    pruned = shipper.prune_pass()
-                    if pruned.get("result", {}).get("deleted"):
-                        _log(f"pruned files={pruned['result']['deleted']} bytes={pruned['result']['deleted_bytes']} "
-                             f"bound_seq={pruned['plan']['bound_seq']}")
-                    elif pruned.get("plan"):
-                        _log(f"prune {pruned['mode']}: candidates={pruned['plan']['segment_count']}seg+"
-                             f"{pruned['plan']['runtime_count']}rt bytes={pruned['plan']['candidate_bytes']} "
-                             f"deny={pruned['plan']['deny_reasons']}")
         except PlanRace as exc:
             try:
                 shipper.write_status(last_error=f"PLAN_RACE: {exc}")

@@ -610,6 +610,7 @@ test_nonaccum_execute.py
 test_live_vs_paper.py
 test_disk_alert.py
 test_r5_retention.py
+test_r5_keep.py
 test_rotation_cap.py
 test_taker_counterfactual_r17.py
 test_signal_replay_r17.py
