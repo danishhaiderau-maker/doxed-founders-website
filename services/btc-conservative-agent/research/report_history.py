@@ -25,7 +25,9 @@ Epoch cap (RK C4c): every snapshot, index line and ledger row carries the
 ``data_epoch_id`` it was written under. After each snapshot, when the current
 epoch is known, ``cap_to_epoch`` deletes snapshots of any other epoch (or none)
 and drops other-epoch rows from the index and ledgers (atomic rewrite), so the
-history never spans two epochs. ``clear_for_reset`` empties the history at a
+history never spans two epochs. With no valid current epoch the snapshot is
+refused (status EPOCH_UNKNOWN): no snapshot, no ledger line (Rule 17: data of
+an unknown epoch is unverifiable). ``clear_for_reset`` empties the history at a
 data reset: it removes only entries this module owns (snapshot folders,
 staging folders, the index and the two ledgers) and refuses roots under
 OneDrive or a Windows user Temp folder. ``never_touch_reason`` is the shared
@@ -111,15 +113,29 @@ def never_touch_reason(path) -> Optional[str]:
     return None
 
 
-def current_epoch_id(epoch_id: Optional[str] = None) -> Optional[str]:
-    """The epoch the history is capped to: ``epoch_id`` if given, else the active DATA_EPOCH_ID manifest's."""
-    if epoch_id:
-        return str(epoch_id)
+_EPOCH_ID_FALLBACK_RE = re.compile(r"^ce-\d{8}(?:T\d{6}Z)?-[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def valid_epoch_id(epoch_id) -> bool:
     try:
         import data_epoch
-        return data_epoch.active_epoch_id()
-    except Exception:
-        return None
+        return data_epoch.valid_epoch_id(epoch_id)
+    except ImportError:  # pragma: no cover - research/ used without the service root on sys.path
+        return isinstance(epoch_id, str) and bool(_EPOCH_ID_FALLBACK_RE.match(epoch_id))
+
+
+def current_epoch_id(epoch_id: Optional[str] = None) -> Optional[str]:
+    """The epoch the history is capped to: ``epoch_id`` if given, else the active DATA_EPOCH_ID manifest's.
+
+    None unless the result is a valid epoch id.
+    """
+    if not epoch_id:
+        try:
+            import data_epoch
+            epoch_id = data_epoch.active_epoch_id()
+        except Exception:
+            epoch_id = None
+    return str(epoch_id) if epoch_id and valid_epoch_id(str(epoch_id)) else None
 
 
 def _iso(ts: float) -> str:
@@ -206,12 +222,14 @@ def read_ledger(path: str) -> list:
 
 # ------------------------------------------------------------------ snapshots
 def list_snapshots(root: Path) -> list:
-    """Complete snapshots (manifest present) oldest-first; the name starts with the UTC stamp."""
+    """Complete snapshots oldest-first: owned name (``SNAPSHOT_NAME_RE``, as the epoch cap uses), not a symlink,
+    manifest present. Readers and the cap therefore see exactly the same set."""
     root = Path(root)
     if not root.is_dir():
         return []
     return sorted(p for p in root.iterdir()
-                  if p.is_dir() and not p.name.startswith(".") and (p / MANIFEST).is_file())
+                  if SNAPSHOT_NAME_RE.match(p.name) and p.is_dir() and not p.is_symlink()
+                  and never_touch_reason(p) is None and (p / MANIFEST).is_file())
 
 
 def _previous_files(root: Path) -> tuple:
@@ -267,6 +285,9 @@ def snapshot_report_set(report_dir: str, history_root: Optional[str] = None, *,
         result["generation_id"] = gen
         epoch = current_epoch_id(epoch_id)
         result[EPOCH_FIELD] = epoch
+        if not epoch:
+            return {**result, "status": "EPOCH_UNKNOWN",
+                    "reason": "no valid current DATA_EPOCH_ID: nothing snapshotted or appended (fail closed)"}
         root.mkdir(parents=True, exist_ok=True)
         _sweep_staging(root, now)
         existing = _generation_exists(root, gen)

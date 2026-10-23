@@ -1182,6 +1182,37 @@ def _epoch_guard():
     return _EPOCH_GUARD
 
 
+def _report_history_epoch_id():
+    """Epoch the laptop report history is stamped and capped to; None (history refuses) when unknown.
+
+    Source: the synced data_epoch.json found by ``_epoch_guard`` (BTC_DATA_EPOCH_DIR, the agent data dir or
+    the laptop mirror tree), else ``DATA_EPOCH_ID``. Both present but different -> None (fail closed).
+    """
+    import data_epoch as de
+
+    try:
+        guard = _epoch_guard()
+        manifest_epoch = guard.manifest["epoch_id"] if guard.declared else None
+    except Exception:
+        manifest_epoch = None
+    env_epoch = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
+    if manifest_epoch and env_epoch and manifest_epoch != env_epoch:
+        return None
+    epoch = manifest_epoch or env_epoch
+    return epoch if de.valid_epoch_id(epoch) else None
+
+
+def _snapshot_report_history():
+    """Snapshot this generation's report set into the laptop history, capped to the current epoch (RK C4c)."""
+    from research.report_history import snapshot_report_set
+
+    return snapshot_report_set(
+        os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
+        generation_id=(_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id"),
+        epoch_id=_report_history_epoch_id(),
+    )
+
+
 def _epoch_scoped(relpath):
     """Epoch-filterable stream file (current-cohort rows only once an epoch is declared)."""
     import data_epoch as de
@@ -23910,12 +23941,7 @@ def finalize_analyzer_outputs(
     snap = _save_rolling_snapshot()
     if _laptop_artifacts_enabled():
         try:
-            from research.report_history import snapshot_report_set
-
-            history = snapshot_report_set(
-                os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
-                generation_id=(_load_json_report(REPORT_MANIFEST_FILE) or {}).get("generation_id"),
-            )
+            history = _snapshot_report_history()
             print(f"  Report history: {history.get('status')} {history.get('path') or history.get('error') or ''} "
                   f"{PIPELINE_ENFORCEMENT_TAG}")
         except Exception as exc:
