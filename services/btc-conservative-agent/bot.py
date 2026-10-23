@@ -22,6 +22,7 @@ import runtime_uptime
 import monitor_api
 import http_emergency_routes as _her
 import monitor_tiles
+import trigger_measure
 try:
     import monitor_integrity as _monitor_integrity
 except Exception:  # pragma: no cover - read-only telemetry must never block boot
@@ -5285,6 +5286,9 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         pos["exit_trigger_price"] = float(fill_px)
         pos["exit_trigger_mark_price"] = float(price)
         pos["exit_trigger_source"] = str(exit_source)
+        # #807 measurement: age of the ticker BBO this trigger was evaluated on. Lock-free read (a float; callers may
+        # hold trade_lock, and state_lock must never be taken inside it).
+        pos["exit_trigger_bbo_ts"] = state.get("bbo_ts")
         with trade_lock:
             source_pos.clear()
             source_pos.update(pos)
@@ -21361,6 +21365,8 @@ def _adaptive_regime_entry_decision(lane: str, direction: str, ctx: dict,
         ask = _buf_float(state.get("ask"), 0.0)
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
         last = _buf_float(state.get("price"), 0.0)
+        quote_ctx = {"bbo_ts": bbo_ts, "ws_last_tick": state.get("ws_last_tick"),
+                     "rest_last_tick": state.get("rest_last_tick")}  # #809 measurement only
     features = features or {}
     cycle = (ctx or {}).get("cycle_3m_universe") or features.get("cycle_3m_universe") or {}
     reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
@@ -21385,6 +21391,7 @@ def _adaptive_regime_entry_decision(lane: str, direction: str, ctx: dict,
         },
     )
     decision["shared_ai_call_id"] = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    decision["_quote_ctx"] = quote_ctx  # popped by _record_tile_decision_and_dispatch (never persisted)
     return decision
 
 
@@ -21425,7 +21432,9 @@ def _record_tile_decision_and_dispatch(
     if adaptive is not None:
         # The decision is per tile; the pre-entry receipt is one immutable
         # record per shared call, so it must stay lane-independent.
+        quote_ctx = adaptive.pop("_quote_ctx", None)
         lane_features = {**enriched, "adaptive_entry_decision": adaptive}
+        _stamp_entry_quote(adaptive, quote_ctx)
         _record_adaptive_entry_decision(lane, adaptive)
         if adaptive.get("action") == "STAND_ASIDE" and detail.get("passes"):
             detail = {**detail, "passes": False, "block_reason": f"ADAPTIVE_{adaptive.get('reason')}"}
@@ -29252,6 +29261,20 @@ def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -
     _execution_markout_counters["taker_signals_scheduled"] += 1
 
 
+def _stamp_entry_quote(decision: dict, quote_ctx: dict | None) -> None:
+    """#809 (measurement only): stamp the cheap decision quote onto an adaptive decision before it is recorded.
+
+    Uses bid/ask/age/WS-or-REST source/decision ts the caller already read under state_lock. No book read and no
+    I/O here: the XVL path records before order dispatch, so anything slow here would lengthen the real entry delay.
+    The entry-vs-book comparison is computed at tile-row build time (monitor_tiles) from the book snapshot already
+    stored with the trade. Never alters the decision's action, price or sizing.
+    """
+    try:
+        decision.update(trigger_measure.entry_quote_fields(decision, recorded_ts=time.time(), **(quote_ctx or {})))
+    except Exception:  # noqa: BLE001 - measurement must never break decision recording
+        pass
+
+
 def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
     """Persist every adaptive decision, including stand-asides, for the analyzer."""
     row = {"ts": utc_iso(), "research_lane": lane, "bot_version": EXECUTION_FIX_VERSION, **decision}
@@ -31542,6 +31565,7 @@ def _trade_event_timestamps(pos: dict, master: dict = None, *, exit_fill_ts: flo
         "exit_trigger_eval_ts": _ts_or_none(pos.get("exit_trigger_eval_ts")),
         "exit_trigger_source": pos.get("exit_trigger_source"),
         "exit_trigger_price": pos.get("exit_trigger_price"),
+        "exit_trigger_bbo_ts": _ts_or_none(pos.get("exit_trigger_bbo_ts")),
         "exit_fill_ts": exit_fill,
         # Paper-book exits wait the measured delay by design: latency is measured from trigger + delay.
         "exit_delay_s": ((pos.get("exit_fill_sim") or {}).get("delay_s")
@@ -32726,6 +32750,8 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
         ask = _buf_float(state.get("ask"), 0.0)
         bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
         last = _buf_float(state.get("price"), 0.0)
+        quote_ctx = {"bbo_ts": bbo_ts, "ws_last_tick": state.get("ws_last_tick"),
+                     "rest_last_tick": state.get("rest_last_tick")}  # #809 measurement only
     reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
     evaluator = _XVL_EVALUATORS.get(lane) or _xvl.LeadEvaluator
     tag = f"{evaluator.ID_PREFIX.upper()}_TRIGGER"
@@ -32747,6 +32773,7 @@ def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
     write_v3_rejection = accepted or _xvl_rejected_v3_due(lane, f"ADAPTIVE_{decision.get('reason')}", side)
     if not accepted:
         decision["v3_lane_decision_written"] = bool(write_v3_rejection)
+    _stamp_entry_quote(decision, quote_ctx)
     _record_adaptive_entry_decision(lane, decision)
     ai = {
         "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
@@ -61362,6 +61389,24 @@ def api_live_copy_tile_eligibility(lane: str):
     return jsonify({"ok": ok, **row}), (200 if ok else 409)
 
 
+def _twin_trigger_fields(row: dict) -> dict:
+    """#807/#809 measurement on a closed paper row (measurement only; never a fill input).
+
+    Exit: trigger vs the 1 s book stored at the trigger + ticker message age. Entry: the decision quote vs the book
+    stored at the entry signal. Journal-twin rows that lack event_timestamps / snapshots / a decision carry nulls.
+    """
+    ev = row.get("event_timestamps") if isinstance(row.get("event_timestamps"), dict) else {}
+    side = row.get("dir") or row.get("direction") or row.get("side")
+    out = trigger_measure.fields(
+        side=side, trigger_price=row.get("exit_trigger_price") or ev.get("exit_trigger_price"),
+        trigger_ts=ev.get("exit_trigger_ts"), bbo_ts=ev.get("exit_trigger_bbo_ts"),
+        book_signal=row.get("exit_depth_snapshot_signal"))
+    entry = trigger_measure.entry_fields(side, row.get("adaptive_entry_decision"), row.get("depth_snapshot_signal"),
+                                         row.get("pricer_signal_ts"))
+    out.update({f"paper_{k}": v for k, v in entry.items()})
+    return out
+
+
 def _live_copy_paper_twins() -> dict:
     """Paper twin rows keyed by trade id (entry price/qty/side) for drift checks."""
     out = {}
@@ -61384,6 +61429,7 @@ def _live_copy_paper_twins() -> dict:
                     "exit_price": row.get("exit") or row.get("exit_price"),
                     "exit_ts": row.get("exit_ts") or row.get("close_ts"),
                     "exit_reason": row.get("exit_reason") or row.get("reason"),
+                    **_twin_trigger_fields(row),
                 }
     except Exception:  # noqa: BLE001
         pass
@@ -61400,7 +61446,7 @@ def _live_copy_paper_twins() -> dict:
                             "exit_ts": row.get("ts"), "exit_reason": row.get("exit_reason"),
                             "entry_ts": row.get("entry_ts"), "signal_ts": row.get("signal_ts"),
                             "funding_usd_raw": row.get("funding_usd_raw"), "funding_fees_usd": row.get("funding_fees_usd"),
-                            "source": "trade_outcome_journal"}
+                            "source": "trade_outcome_journal", **_twin_trigger_fields(row)}
     except Exception:  # noqa: BLE001 - twin lookup is best-effort, fail closed
         pass
     try:
