@@ -420,6 +420,27 @@ def protection_replay_item(report_dir: Path) -> dict:
     )
 
 
+ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
+
+
+def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any] | None:
+    """DEGRADED (never OK) when the entry baseline replay is all UNKNOWN with 0 fills."""
+    from research.entry_baseline_replay import replay_health
+
+    report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
+    if report is None:
+        return None
+    health = replay_health(report)
+    status = "OK" if health["status"] == "OK" else "DEGRADED"
+    return _item(
+        "entry_baseline_replay", status, health.get("reason_code"),
+        (f"Entry baseline replay: {health['fills']} fills, {health['unknown']}/"
+         f"{health['directional_evaluations']} directional evaluations UNKNOWN."),
+        eligible=health["directional_evaluations"] - health["unknown"], total=health["directional_evaluations"],
+        side="ANALYZER" if status != "OK" else None, evidence=health,
+    )
+
+
 def segment_promotion_item(data_dir: Path) -> dict[str, Any] | None:
     """DEGRADED when this dataset was promoted with disclosed Fly-side warnings."""
     receipt = _load_json(data_dir / MIGRATION_RECEIPT) or {}
@@ -454,6 +475,9 @@ def collect_input_blockers(report_dir, data_dir, *, write: bool = False) -> dict
         signal_replay_item(report_dir, cohort=exit_ladder["evidence"].get("paper_cohort")),
         counterfactual_item(report_dir, data_dir, epoch_id),
     ]
+    baseline = entry_baseline_replay_item(report_dir)
+    if baseline is not None:
+        items.append(baseline)
     promotion = segment_promotion_item(data_dir)
     if promotion is not None:
         items.append(promotion)

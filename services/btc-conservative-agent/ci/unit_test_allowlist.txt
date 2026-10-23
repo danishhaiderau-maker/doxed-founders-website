@@ -175,6 +175,7 @@ test_emergency_wal_runtime_integration.py
 test_empty_epoch_authority_retirement.py
 test_empty_paper_trade_index.py
 test_entry_baseline_replay.py
+test_entry_baseline_replay_health.py
 test_entry_baseline_replay_sidecar.py
 test_epoch_boundary_rotation.py
 test_epoch_guard_fresh_floor.py

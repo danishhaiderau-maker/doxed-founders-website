@@ -1237,6 +1237,37 @@ EPISODE_RECEIPTS_SIDECAR_FILE = "entry_baseline_replay_episode_receipts.jsonl.gz
 EPISODE_RECEIPTS_SIDECAR_SCHEMA = "entry_baseline_replay_episode_receipts_sidecar_v1"
 
 
+def replay_health(report: Mapping[str, Any] | None) -> dict[str, Any]:
+    """OK only when the replay measured something: DEGRADED when every
+    directional evaluation is UNKNOWN with zero fills (or nothing was evaluated).
+
+    A report where every opportunity is 'unknown' and nothing filled carries no
+    evidence; it must never read OK. Pure, never raises.
+    """
+    summaries = report.get("summaries") if isinstance(report, Mapping) else None
+    summaries = summaries if isinstance(summaries, Mapping) else {}
+
+    def total(key: str) -> int:
+        out = 0
+        for row in summaries.values():
+            try:
+                out += int((row or {}).get(key) or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return out
+
+    evaluations, unknown = total("directional_evaluations"), total("unknown")
+    fills = total("full_fills") + total("partial_fills")
+    counts = {"opportunities": (report or {}).get("same_opportunity_count") if isinstance(report, Mapping) else None,
+              "directional_evaluations": evaluations, "unknown": unknown, "fills": fills,
+              "no_fills": total("no_fills")}
+    if evaluations <= 0:
+        return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_NO_EVALUATIONS", **counts}
+    if fills == 0 and unknown >= evaluations:
+        return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS", **counts}
+    return {"status": "OK", "reason_code": None, **counts}
+
+
 def write_replay_report(report: Mapping[str, Any], target: Path,
                         sidecar_name: str = EPISODE_RECEIPTS_SIDECAR_FILE) -> dict:
     """Write the replay report with ``episode_receipts`` split into a gzip JSONL sidecar.

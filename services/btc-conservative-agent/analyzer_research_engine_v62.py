@@ -22047,7 +22047,9 @@ def write_report_manifest(
         baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
-        from research.entry_baseline_replay import write_replay_report
+        from research.entry_baseline_replay import replay_health, write_replay_report
+
+        baseline_replay["health"] = replay_health(baseline_replay)
 
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
         replay_sidecar = write_replay_report(
@@ -22065,6 +22067,8 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
             "summaries": baseline_replay.get("summaries"),
+            "status": baseline_replay["health"]["status"],
+            "health": baseline_replay["health"],
             "episode_receipts_sidecar": replay_sidecar,
         })
     except Exception as exc:
