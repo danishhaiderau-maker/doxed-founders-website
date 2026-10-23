@@ -8147,16 +8147,27 @@ def _is_trigger_consistent_exit_reason(reason) -> bool:
 
 
 LEGACY_EXIT_BOOK_WAIT_S = float(os.getenv("LEGACY_EXIT_BOOK_WAIT_S", "5"))
+LEGACY_EXIT_DEAD_FEED_S = 30.0  # a book silent this long is a dead feed: FORCED_NO_BOOK at once, no wait
 
 
 def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: dict):
-    """RK step 2: the non-paper-book exit fill is the side-correct top of the FIRST book row at or after the fill time
-    (shared pricer rows, never the WS ticker). Waits up to LEGACY_EXIT_BOOK_WAIT_S for that row (no wait on inline
-    closes); if none arrives the exit is FORCED_NO_BOOK: priced on the first available row (the latest one), stamped
-    UNVERIFIED with its price age, never dropped. Returns (px, source, meta)."""
+    """RK step 2: the non-paper-book exit fill is the side-correct top of the book row at the fill time (the shared
+    pricer's rows, never the WS ticker). A fresh row (age <= quote_trigger.STALE_S) prices it immediately: no wait, so
+    no close ever blocks on the feed. On a STALE_BOOK it waits up to LEGACY_EXIT_BOOK_WAIT_S for the FIRST row at or
+    after the fill time (no wait on inline closes, or when the feed has been dead > LEGACY_EXIT_DEAD_FEED_S); if none
+    arrives the exit is FORCED_NO_BOOK: priced on the first available row (the latest one), stamped UNVERIFIED with its
+    price age, never dropped. Returns (px, source, meta)."""
     import paper_fill as _pf
     import quote_trigger as _qt
-    deadline = time.time() + (0.0 if getattr(_PAPER_EXIT_TLS, "no_wait", False) else LEGACY_EXIT_BOOK_WAIT_S)
+    bx = _qt.book_exit_price(direction, fill_ts, _pf.book10l_at)
+    if bx.get("px"):
+        return float(bx["px"]), "exit_book_row_at_fill", {
+            "exit_pricing_basis": "BOOK_ROW_AT_FILL", "exit_book_s": bx.get("book_s"),
+            "exit_price_age_s": bx.get("price_age_s"), "exit_evidence_status": "COMPLETE"}
+    age0 = bx.get("price_age_s")
+    dead = bx.get("last_book_px") is None or (age0 is not None and float(age0) > LEGACY_EXIT_DEAD_FEED_S)
+    wait = 0.0 if (getattr(_PAPER_EXIT_TLS, "no_wait", False) or dead) else LEGACY_EXIT_BOOK_WAIT_S
+    deadline = time.time() + wait
     while True:
         row = _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2))
         px = _qt.exec_px(direction, "exit", row) if row else None
@@ -8164,7 +8175,8 @@ def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: 
             age = round(float(row["s"]) + 1.0 - float(fill_ts), 3)
             return float(px), "exit_book_row_at_or_after_fill", {
                 "exit_pricing_basis": "BOOK_ROW_AT_OR_AFTER_FILL", "exit_book_s": row.get("s"),
-                "exit_price_age_s": max(0.0, age), "exit_evidence_status": "COMPLETE"}
+                "exit_price_age_s": max(0.0, age), "exit_stale_book_at_fill": True,
+                "exit_evidence_status": "COMPLETE"}
         if time.time() >= deadline:
             break
         time.sleep(0.25)
@@ -27835,7 +27847,7 @@ def protective_exit_scan(now: float = None) -> int:
         _levels, _src, _why = _protective_exit_levels_ex(pos)
         coverage.append({"trade_id": str(pos.get("trade_id") or ""), "lane": pos.get("research_lane"),
                          "covered": bool(_levels and _levels[0] > 0), "source": _src, "reason": _why})
-        mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
+        mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
         due = _protective_exit_due(pos, mark, now)
         if not due:
             continue
@@ -27929,7 +27941,7 @@ def process_positions():
         # Exit evaluation can close a position, persist research artifacts, and
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
+            mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
             # Closes run on their own thread: one trigger closing several tiles
             # must not queue each close behind the previous one's I/O (HM audit
             # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
@@ -30007,7 +30019,7 @@ def _tick_driven_position_exits(price: float):
                 if isinstance(p, dict) and p.get("status") == "OPEN"
             ]
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
+            mark = get_mark_price(pos.get("dir"))  # book rows at wall now (RK step 2), never the ticker
             _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
         return True
     finally:

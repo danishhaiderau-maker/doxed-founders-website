@@ -135,9 +135,9 @@ def test_thesis_fast_cut_closes_and_books_trigger(monkeypatch):
     _book(monkeypatch, thesis_px - 3, thesis_px + 3)
     booked, sim = bot.resolve_sim_exit_price(pos, False, "THESIS_FAST_CUT")
     assert abs(sim["trigger_price"] - thesis_px) < 0.02
-    assert abs(booked - (thesis_px + 3)) < 0.02  # SHORT covers at the book ask of the first row at/after fill
-    assert sim["source"] == "exit_book_row_at_or_after_fill"
-    assert sim["exit_pricing_basis"] == "BOOK_ROW_AT_OR_AFTER_FILL"
+    assert abs(booked - (thesis_px + 3)) < 0.02  # SHORT covers at the book ask of the fresh row at fill
+    assert sim["source"] == "exit_book_row_at_fill"
+    assert sim["exit_pricing_basis"] == "BOOK_ROW_AT_FILL"
 
 
 def test_scenario_c_ladder_closes_and_books_trigger(monkeypatch):
@@ -158,7 +158,7 @@ def test_scenario_c_ladder_closes_and_books_trigger(monkeypatch):
     booked, sim = bot.resolve_sim_exit_price(pos, False, "PROFIT_LOCK_LADDER")
     assert abs(sim["trigger_price"] - lock_px) < 0.02
     assert abs(booked - (lock_px + 2)) < 0.02
-    assert sim["source"] == "exit_book_row_at_or_after_fill"
+    assert sim["source"] == "exit_book_row_at_fill"
 
 
 def test_non_combo_lane_stale_book_fires_no_price_exit_and_refuses_ticker(monkeypatch):
@@ -224,7 +224,7 @@ def test_booked_exit_is_not_a_better_book_walk(monkeypatch):
     assert sim["trigger_slippage_bp"] is not None
     assert pos["exit_trigger_price"] == sim["trigger_price"] and pos["exit_fill_price"] == booked
     assert abs(walk - (ENTRY + 5)) < 1.0
-    assert sim["source"] == "exit_book_row_at_or_after_fill"
+    assert sim["source"] == "exit_book_row_at_fill"
 
 
 @pytest.mark.parametrize(
@@ -254,7 +254,7 @@ def test_family_policy_exits_book_the_tick_that_triggered_them(monkeypatch, reas
     booked, sim = bot.resolve_sim_exit_price(pos, False, reason)
     assert abs(booked - (ENTRY + 500)) < 0.02  # side-correct book ask, not the trigger
     assert abs(sim["trigger_price"] - trigger) < 0.02
-    assert sim["source"] == "exit_book_row_at_or_after_fill"
+    assert sim["source"] == "exit_book_row_at_fill"
 
 
 def test_maker_take_profit_books_its_resting_limit(monkeypatch):
