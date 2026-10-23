@@ -802,6 +802,70 @@ def _pre_signal_market_segment(
     return tuple(rows), receipt
 
 
+# R17 (23 Oct): every v3/market_segments writer is retired. Segment rows were
+# copies of market_microstructure_1s (L1 bid/ask, ticker last), the stream
+# paper_fill bans; no fill, exit or tile decision reads a segment. Coverage is
+# reported as "disabled: R17" instead of silently empty.
+MARKET_SEGMENT_WRITES_RETIRED = True
+R17_DISABLED = "disabled: R17"
+
+
+def _r17_retired_segment_coverage(context_role: str) -> dict[str, Any]:
+    return {
+        "schema": "paper_market_segment_coverage_v1",
+        "status": R17_DISABLED,
+        "reason": "MARKET_SEGMENTS_RETIRED_R17",
+        "context_role": context_role,
+        "requested_start_ts": None, "requested_end_ts": None,
+        "observed_start_ts": None, "observed_end_ts": None,
+        "row_count": 0,
+        "requested_bounds_complete": False, "two_second_or_better": False,
+        "all_rows_have_valid_bbo": False, "all_rows_have_visible_depth": False,
+        "parse_errors": 0, "invalid_timestamp_rows": 0, "invalid_price_rows": 0,
+        "invalid_bbo_rows": 0, "invalid_depth_rows": 0,
+    }
+
+
+def _signal_time_bbo_from_book10l(data_dir: str, signal_ts: float) -> dict[str, Any] | None:
+    """Inline signal-time BBO from the Bitfinex 10-level book (HM R17 (B)).
+
+    Reads bfx_book_10l_1s.jsonl through paper_fill's BookTail: the latest
+    complete second at or before signal_ts (no look-ahead). A few hundred
+    bytes per decision; no segment store. None when the book is unavailable.
+    """
+    try:
+        import paper_fill
+        ts = float(signal_ts)
+        if Path(str(data_dir)).resolve() == Path.cwd().resolve():
+            book = paper_fill.book10l_at(ts)
+        else:
+            book = paper_fill.BookTail(str(Path(str(data_dir)) / paper_fill.BOOK_FILE)).at(ts)
+    except Exception:  # noqa: BLE001 - a missing book is simply no inline BBO
+        return None
+    if not isinstance(book, Mapping):
+        return None
+    bids = [lvl for lvl in (book.get("b") or []) if isinstance(lvl, (list, tuple)) and len(lvl) >= 2]
+    asks = [lvl for lvl in (book.get("a") or []) if isinstance(lvl, (list, tuple)) and len(lvl) >= 2]
+    try:
+        bid, bid_qty = float(bids[0][0]), abs(float(bids[0][1]))
+        ask, ask_qty = float(asks[0][0]), abs(float(asks[0][1]))
+        sec = int(book.get("s"))
+    except (IndexError, TypeError, ValueError):
+        return None
+    if not (bid > 0 and ask > 0 and bid_qty > 0 and ask_qty > 0):
+        return None
+    return {
+        "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty,
+        "source_ts": float(sec + 1), "observed_ts": float(sec + 1),
+        "age_sec": round(max(0.0, ts - float(sec + 1)), 3),
+        "bid_depth_qty_10l": round(sum(abs(float(l[1])) for l in bids[:10]), 8),
+        "ask_depth_qty_10l": round(sum(abs(float(l[1])) for l in asks[:10]), 8),
+        "levels": [len(bids[:10]), len(asks[:10])],
+        "carried": bool(book.get("carried")),
+        "capture_basis": "BFX_BOOK_10L_AT_SIGNAL",
+    }
+
+
 def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
     """Resolve the same causal episode for provisional and live paper rows."""
     shared = str(_first(*(source.get("shared_ai_call_id") for source in sources)) or "").strip()
@@ -1088,22 +1152,13 @@ def write_pre_ai_scan_opportunity(source, *, epoch_id, data_dir):
     if captured is None or isinstance(features.get('captured_at_ts'),bool) or captured>signal_ts:
         raise ValueError('PRE_AI_CAPTURE_TIME_INVALID_OR_FUTURE')
     store=V3EvidenceStore(data_dir,epoch_id=epoch_id)
-    segment_rows,coverage=_pre_signal_market_segment(str(Path(data_dir).resolve()),signal_ts)
+    # R17: no PRE_SIGNAL segment; signal_time_bbo comes inline from book10l.
+    coverage=_r17_retired_segment_coverage('PRE_SIGNAL_ONLY')
     refs=[]
-    if segment_rows:
-        refs.append(store.put_market_segment(source='LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL',
-            symbol=identity['symbol'],timeframe='1s',start_ts=signal_ts-PRE_SIGNAL_CONTEXT_SEC,
-            end_ts=signal_ts,rows=segment_rows))
-        if 'signal_time_bbo' not in _signal_time_baseline_inputs(material):
-            for quote in reversed(segment_rows):
-                source_at=_positive_finite(quote.get('source_ts'))
-                observed_at=_positive_finite(quote.get('observed_at_ts'))
-                if (source_at is not None and observed_at is not None
-                        and max(source_at,observed_at)<=signal_ts
-                        and all(_positive_finite(quote.get(k)) is not None for k in ('bid','ask','bid_qty','ask_qty'))):
-                    material['signal_time_bbo']={k:quote[k] for k in
-                        ('bid','ask','bid_qty','ask_qty','source_ts','observed_at_ts')}
-                    break
+    if 'signal_time_bbo' not in _signal_time_baseline_inputs(material):
+        bbo=_signal_time_bbo_from_book10l(str(Path(data_dir).resolve()),signal_ts)
+        if bbo is not None:
+            material['signal_time_bbo']=bbo
     feature_write=_pre_entry_features_receipt(store=store,source=material,identity=identity,
         causal_ids=causal_ids,signal_ts=signal_ts,segment_refs=refs,features=features)
     if (feature_write.get('blocked') or feature_write.get('deferred')
@@ -1200,67 +1255,13 @@ def dual_write_lane_decision(
 
 
     if signal_ts > 0:
-        segment_rows, segment_coverage = _pre_signal_market_segment(
-            str(Path(data_dir).resolve()), signal_ts,
-        )
-        segment_coverage = dict(segment_coverage)
-        segment_coverage["entry_path_included"] = False
-        segment_coverage["future_path_status"] = "NOT_CAPTURED_AT_DECISION_TIME"
-        segment_coverage["horizon_coverage"] = {
-            "pre_signal_context": bool(segment_coverage.get("requested_bounds_complete")),
-            "decision_to_entry_terminal": False,
-            "entry_to_exit_terminal": False,
-            "post_exit": False,
-        }
-        if segment_rows:
-            if "signal_time_bbo" not in baseline_inputs:
-                last_pre_signal = next((
-                    row for row in reversed(segment_rows)
-                    if _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) is not None
-                    and _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) <= signal_ts
-                    and _positive_finite(row.get("bid")) is not None
-                    and _positive_finite(row.get("ask")) is not None
-                    and _positive_finite(_first(row.get("bid_qty"), row.get("bid_size"))) is not None
-                    and _positive_finite(_first(row.get("ask_qty"), row.get("ask_size"))) is not None
-                ), None)
-                if last_pre_signal is not None:
-                    baseline_inputs["signal_time_bbo"] = {
-                        "bid": last_pre_signal.get("bid"),
-                        "ask": last_pre_signal.get("ask"),
-                        "bid_qty": _first(last_pre_signal.get("bid_qty"), last_pre_signal.get("bid_size")),
-                        "ask_qty": _first(last_pre_signal.get("ask_qty"), last_pre_signal.get("ask_size")),
-                        "observed_ts": _timestamp(_first(
-                            last_pre_signal.get("ts"), last_pre_signal.get("bucket_ts"),
-                        )),
-                        "capture_basis": "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
-                    }
-                    baseline_inputs.setdefault(
-                        "signal_price",
-                        _first(last_pre_signal.get("price"), last_pre_signal.get("last")),
-                    )
-            segment_ref = store.put_market_segment(
-                source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL",
-                symbol=identity["symbol"], timeframe="1s",
-                start_ts=signal_ts - PRE_SIGNAL_CONTEXT_SEC,
-                end_ts=signal_ts, rows=segment_rows,
-            )
-            segment_refs.append(segment_ref)
-            context_event_id = f"market-context:{identity['episode_id']}"
-            context_causal_ids = _explicit_causal_ids(
-                epoch_id=str(epoch_id), event_id=context_event_id,
-                episode_id=identity["episode_id"],
-                tape_id=f"tape:{segment_ref['sha256']}",
-            )
-            segment_writes.append(store.append("market_segment", {
-                "record_id": f"market-context:{identity['episode_id']}:{segment_ref['sha256']}",
-                "event_id": context_event_id,
-                "episode_id": identity["episode_id"],
-                "shared_ai_call_id": identity["shared_ai_call_id"],
-                "context_role": "PRE_SIGNAL_ONLY",
-                "segment_ref": segment_ref,
-                "coverage": segment_coverage,
-                **context_causal_ids,
-            }))
+        # R17: no PRE_SIGNAL segment is written; the signal-time BBO comes
+        # inline from the Bitfinex 10-level book (book10l_at).
+        segment_coverage = _r17_retired_segment_coverage("PRE_SIGNAL_ONLY")
+        if "signal_time_bbo" not in baseline_inputs:
+            bbo = _signal_time_bbo_from_book10l(str(Path(data_dir).resolve()), signal_ts)
+            if bbo is not None:
+                baseline_inputs["signal_time_bbo"] = bbo
     feature_receipt = _pre_entry_features_receipt(
         store=store, source=source, identity=identity, causal_ids=causal_ids,
         signal_ts=signal_ts, segment_refs=segment_refs, features=pre_entry_features,
@@ -1986,7 +1987,9 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "two_second_or_better": False,
         "reason": "PATH_TIME_BOUNDS_MISSING",
     }
-    if start_ts is not None and close_ts is not None and close_ts >= start_ts:
+    if MARKET_SEGMENT_WRITES_RETIRED:
+        segment_coverage = _r17_retired_segment_coverage("ENTRY_AND_EXIT_PATH")
+    elif start_ts is not None and close_ts is not None and close_ts >= start_ts:
         segment_rows, segment_coverage = _paper_market_segment(
             data_dir, start_ts=start_ts, end_ts=close_ts,
         )
@@ -2198,6 +2201,8 @@ def dual_write_lifecycle_qualification_horizon(
             "parse_errors": 0, "invalid_timestamp_rows": 0, "invalid_price_rows": 0,
             "invalid_bbo_rows": 0, "invalid_depth_rows": 0,
         }
+    elif MARKET_SEGMENT_WRITES_RETIRED:
+        coverage = _r17_retired_segment_coverage("POST_EXIT_PATH")
     else:
         rows, coverage = _paper_market_segment(
             data_dir, start_ts=terminal_ts,
@@ -2413,6 +2418,9 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     signal_ts = float(_first(envelope.get("signal_ts"), record.get("signal_ts"), 0) or 0)
     symbol = str(_first((record.get("feature_snapshot_at_signal") or {}).get("symbol"), "BTCUSD"))
     segment_refs = []
+    if MARKET_SEGMENT_WRITES_RETIRED:
+        # R17: CANONICAL_1M/1S are candle/ticker-derived; never stored.
+        path_1m, ticks_1s = [], []
     if path_1m:
         path_1m = _normalize_market_rows(path_1m, timeframe="1m")
         segment_refs.append(store.put_market_segment(
@@ -2462,11 +2470,11 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "event_id": event_id,
         "execution_basis": record.get("research_execution_basis") or envelope.get("research_execution_basis") or {},
         "chase_schedule": record.get("research_chase_schedule") or envelope.get("research_chase_schedule") or {},
-        "entry_children_count": len(record.get("entry_children") or []),
-        # These are immutable policy-intent results, not duplicated market
-        # paths. Keeping the exact fill/chase receipts lets the V3 analyzer
-        # evaluate protection variants without rereading mutable v2 rows.
-        "entry_children": record.get("entry_children") or [],
+        # R17 (23 Oct): the v22 hypothetical entry grid is retired. Only the
+        # ACTUAL_PAPER_LIMIT_SUBMIT child (written at submit) remains.
+        "entry_children_count": 0,
+        "entry_children": [],
+        "entry_children_status": "RETIRED_R17",
         "signal_price": _first(envelope.get("signal_price"), record.get("signal_price")),
         "executed_direction": _first(envelope.get("executed_direction"), record.get("direction")),
         "atr14_pct": _first(record.get("atr14_pct"), envelope.get("atr14_pct")),

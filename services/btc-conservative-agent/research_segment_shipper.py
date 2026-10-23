@@ -48,6 +48,8 @@ STATE_SCHEMA = "research_segment_shipper_state_v1"
 STATUS_SCHEMA = "research_segment_shipper_status_v1"
 INTENT_SCHEMA = "research_segment_shipper_intent_v1"
 PRUNING_ENABLED = True
+# R5 segment-store RED (cap drop / pre-ACK drop) stays on the status this long after the last drop.
+R5_RED_HOLD_SECONDS = 24 * 3600.0
 
 # The volume sink duplicates source data on the trading volume until pruning
 # exists, so it carries a hard size cap and a much higher free-space floor.
@@ -447,6 +449,59 @@ class SegmentShipper:
                           prune_deleted_bytes_total=int(previous.get("prune_deleted_bytes_total") or 0)
                           + result["deleted_bytes"])
         return {"mode": mode, "plan": summary, "result": result}
+
+    def r5_segment_pass(self, keep_seqs=()) -> dict:
+        """R5 segment-store retention (RK 2026-10-23): live, no custody/ACK gate.
+
+        Between cycles only. Below the cap, segments past the age limit go
+        (unless un-ACKed and in ``keep_seqs``); at the cap, oldest first
+        regardless, dropped seqs in the capped receipt and a RED reason in
+        the status. A custody stall only alerts (monitor_gaps.custody_stall).
+        """
+        if not PRUNING_ENABLED or self.sink != "volume":
+            return {"skipped": "NOT_VOLUME"}
+        if (self.intent_dir / "intent.json").is_file():
+            return {"skipped": "INTENT_PENDING"}
+        store_root = getattr(self.store, "root", None)
+        if store_root is None:
+            return {"skipped": "NO_VOLUME_STORE_ROOT"}
+        try:
+            status = json.loads(self.status_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            status = {}
+        state = self.load_state()
+        now = self.clock()
+        plan = prune.plan_r5_segment_prune(Path(store_root), self.prefix, shipped_seq=int(state["seq"]),
+                                           acked_seq=status.get("laptop_acked_seq"),
+                                           max_store_bytes=self.max_store_bytes, now=now, keep_seqs=keep_seqs,
+                                           accounted_bytes=int(state.get("store_bytes") or 0))
+        result = prune.execute_r5_segment_prune(plan, receipt_dir=self.runtime_root, clock=self.clock)
+        fields: dict = {"r5_segment_last_at": now, "r5_segment_store_bytes": plan["store_bytes"],
+                        "r5_segment_over_cap": plan["over_cap"],
+                        "r5_segment_last_deleted": result["deleted"],
+                        "r5_segment_kept_needed_unacked": plan["kept_needed_unacked"][:20]}
+        if result["deleted"]:
+            state = self.load_state()
+            state["store_bytes"] = max(0, plan["store_bytes"] - result["deleted_bytes"])
+            _atomic_write(self.state_path, json.dumps(state, sort_keys=True).encode())
+            fields["store_bytes"] = state["store_bytes"]
+            fields["r5_segment_deleted_bytes_total"] = (int(status.get("r5_segment_deleted_bytes_total") or 0)
+                                                        + result["deleted_bytes"])
+        # RED stays visible R5_RED_HOLD_SECONDS after the last drop (since = first drop of the episode)
+        red = status.get("r5_segment_red") if isinstance(status.get("r5_segment_red"), dict) else {}
+        red = {k: v for k, v in red.items()
+               if isinstance(v, dict) and now - float(v.get("last") or 0) < R5_RED_HOLD_SECONDS}
+        for reason in result["red"]:
+            entry = red.get(reason) or {"since": now}
+            red[reason] = {**entry, "last": now}
+        fields["r5_segment_red"] = red
+        if result["cap_dropped_seqs"]:
+            fields["r5_segment_last_cap_dropped_seqs"] = result["cap_dropped_seqs"][:prune.R5_RECEIPT_MAX_IDS]
+        if status.get("last_error") == "STORE_CAP_REACHED" and (not plan["over_cap"] or result["cap_dropped_seqs"]):
+            fields["last_error"] = None
+        self.write_status(**fields)
+        return {"plan": {k: v for k, v in plan.items() if k not in ("age_drop", "cap_drop")},
+                "result": result}
 
     # --------------------------------------------------------------- universe
     def _roots(self) -> list[tuple[Path, str]]:
@@ -1064,8 +1119,9 @@ class SegmentShipper:
         state = self.load_state()
         store_bytes = int(state.get("store_bytes") or 0)
         if self.max_store_bytes and store_bytes >= self.max_store_bytes:
-            # Fail closed: the store duplicates source data until pruning
-            # exists, so it must never grow into the trading volume's headroom.
+            # Fail closed for this cycle: the store must never grow into the
+            # trading volume's headroom. R5: the between-cycles
+            # r5_segment_pass drops the oldest segments, so this clears.
             self.write_status(shipped_seq=state["seq"], store_bytes=store_bytes,
                               last_error="STORE_CAP_REACHED",
                               last_segment_at=state.get("last_segment_at"))
@@ -1416,6 +1472,12 @@ def main() -> int:
                     _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):
                     pause = backlog_pause
+                # R5 (RK 2026-10-23): segment store pruned by age/cap every loop, no custody gate,
+                # so STORE_CAP_REACHED clears on the next cycle instead of stopping the shipper.
+                r5 = shipper.r5_segment_pass()
+                if r5.get("result", {}).get("deleted"):
+                    _log(f"r5 segment prune deleted={r5['result']['deleted']} bytes={r5['result']['deleted_bytes']} "
+                         f"cap_dropped={r5['result']['cap_dropped_seqs'][:20]} red={r5['result']['red']}")
                 if time.time() - last_prune >= prune_interval:
                     last_prune = time.time()
                     pruned = shipper.prune_pass()

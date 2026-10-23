@@ -239,6 +239,13 @@ class TapeOffsetIndex:
         }
 
 
+# R17 (23 Oct): market_segments writers are retired (HM R17 (B)1). The
+# segment rows were copies of L1 microstructure, which paper_fill bans; no
+# fill, exit or tile decision reads them. Callers get "disabled: R17".
+SEGMENT_WRITES_RETIRED_R17 = True
+R17_DISABLED = "disabled: R17"
+
+
 def produce_post_exit_path(candidate: Mapping[str, Any], *, data_dir: str | Path,
                            epoch_id: str, now_ts: float | None = None,
                            horizon_sec: float = 7200.0,
@@ -247,6 +254,17 @@ def produce_post_exit_path(candidate: Mapping[str, Any], *, data_dir: str | Path
                            max_query_rows: int = DEFAULT_MAX_QUERY_ROWS,
                            max_runtime_sec: float = DEFAULT_MAX_RUNTIME_SEC) -> dict[str, Any]:
     """Append one idempotent POST_EXIT_PATH for an explicitly terminal lifecycle."""
+    if SEGMENT_WRITES_RETIRED_R17:
+        return {
+            "schema": PRODUCER_SCHEMA,
+            "event_id": str(candidate.get("event_id") or candidate.get("trade_id") or ""),
+            "episode_id": str(candidate.get("episode_id") or ""),
+            "mature": False, "retired": "R17", "status": R17_DISABLED,
+            "post_observation": {"complete": False, "blockers": ["MARKET_SEGMENTS_RETIRED_R17"]},
+            "query_receipt": {"schema": "bounded_qualification_tape_query_v1", "not_run": True},
+            "segment_ref": None,
+            "write": {"written": False, "duplicate": False, "reason": R17_DISABLED},
+        }
     event_id = str(candidate.get("event_id") or candidate.get("trade_id") or "")
     episode_id = str(candidate.get("episode_id") or "")
     terminal_ts = _finite(candidate.get("terminal_ts") or candidate.get("close_ts") or candidate.get("terminal_ts_exact"))

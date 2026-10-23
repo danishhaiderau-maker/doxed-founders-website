@@ -956,7 +956,7 @@ def test_server_never_deletes_and_prune_deletes_only_in_execute():
     tree = ast.parse((ROOT / "research_segment_prune.py").read_text(encoding="utf-8"))
     owners = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
               and ".unlink(" in ast.unparse(node)}
-    assert owners == {"execute"}
+    assert owners == {"execute", "execute_r5_segment_prune"}  # R5 2026-10-23: age/cap segment pass
 
 
 def test_bot_mounts_segment_server_ahead_of_flask_with_reserved_workers():

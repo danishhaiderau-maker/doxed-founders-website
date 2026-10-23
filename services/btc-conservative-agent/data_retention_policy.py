@@ -34,6 +34,7 @@ OTHER = "OTHER"
 _ROTATION_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv|log))\.(?P<gen>[1-9][0-9]*)$")
 
 # Reconstructible path blobs (DATA-SUFFICIENCY-MODEL-A/B/C-20261002).
+# Writers retired R17 (23 Oct); kept TIER_B so legacy files stay prunable.
 TIER_B_BASES = frozenset({
     "signal_replay.jsonl",
     "order_multiverse.jsonl",
@@ -67,7 +68,7 @@ TIER_A_DATASETS = {
     "trade_lifecycle.jsonl": ("trade_lifecycle", 1, ("ts", "timestamp", "event_ts")),
     "fill_quality.jsonl": ("fill_quality", 1, ("ts", "fill_ts", "timestamp")),
     "fill_markouts.jsonl": ("fill_markouts", 1, ("ts", "fill_ts", "timestamp")),
-    "shadow_exit_paths.jsonl": ("shadow_exit_paths", 1, ("fill_ts", "signal_ts", "ts")),
+    # shadow_exit_paths.jsonl: retired R17 (23 Oct); no longer collected.
     "expired_orders_3factor.csv": ("expired_orders", 1, ("time", "expired_ts", "created_ts", "timestamp", "ts")),
     "v3/ledgers/order_intent.jsonl": ("v3_order_intent", 1,
                                       ("submitted_ts", "signal_ts", "entry_children.0.hypothetical_order_start_ts",
@@ -117,10 +118,9 @@ PROTECTED_SUBSTRINGS = (
     "research_events_v22", "ledger", "crash_dump",
 )
 PROTECTED_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm")
-# Rotations read by exact name or by content digest from surviving rows
-# (order_multiverse rows reference entry-grid digests with no timestamp, so a
-# pruned grid rotation is indistinguishable from a broken reference).
-FLY_KEEP_ROTATION_BASES = frozenset({"chase_offset_touch_grid.jsonl", "order_multiverse_entry_grid.jsonl"})
+# Rotations read by exact name. order_multiverse_entry_grid was removed (HM E1,
+# R17 23 Oct): the grid writer is retired, so its rotations are prunable.
+FLY_KEEP_ROTATION_BASES = frozenset({"chase_offset_touch_grid.jsonl"})
 
 
 def rotation_parts(relpath: str) -> tuple[str, int] | None:

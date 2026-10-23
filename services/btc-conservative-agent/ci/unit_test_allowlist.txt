@@ -460,6 +460,7 @@ test_research_segments_custody.py
 test_research_segments_epoch.py
 test_research_segments_promotion.py
 test_research_segments_prune.py
+test_research_segments_r5_prune.py
 test_research_segments_volume.py
 test_research_timing_capture.py
 test_research_timing_startup.py
@@ -609,3 +610,9 @@ test_offline_sim_floor_source.py
 test_funding_raw_fields.py
 test_nonaccum_execute.py
 test_live_vs_paper.py
+test_disk_alert.py
+test_live_copy_paper_lock_rename.py
+test_r5_retention.py
+test_rotation_cap.py
+test_taker_counterfactual_r17.py
+test_signal_replay_r17.py

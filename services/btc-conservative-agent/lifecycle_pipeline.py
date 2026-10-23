@@ -473,6 +473,14 @@ def _process_incremental_lifecycle_pipeline(
                                 max_runtime_sec=min(5.0, max(0.1, runtime_limit / 4.0)),
                             )
                             item["qualification_horizon"] = horizon
+                            if horizon.get("retired") == "R17":
+                                # R17: POST_EXIT_PATH segments are retired; do
+                                # not loop retries on a source that is gone.
+                                _remove_retry(connection, key)
+                                _clear_dirty(connection, key)
+                                item["stage"] = "QUALIFICATION_HORIZON_RETIRED_R17"
+                                results.append(item)
+                                continue
                             if horizon.get("write", {}).get("written") or horizon.get("write", {}).get("duplicate"):
                                 _remove_retry(connection, key)
                                 item["stage"] = "QUALIFICATION_HORIZON_PENDING_REINDEX"

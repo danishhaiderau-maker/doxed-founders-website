@@ -93,7 +93,7 @@ def _compact_row(row: Mapping[str, Any], line_bytes: int) -> dict:
         "never_recorded": (tape.get("coverage") or {}).get("reason") == NEVER_RECORDED_REASON
         if isinstance(tape.get("coverage"), Mapping) else False,
         "signal_ts": envelope.get("signal_ts"),
-        "empty_path": not tape.get("path_1m"),
+        "empty_path": not (tape.get("path_1m") or tape.get("path_1m_bars")),
         "post_fix": source is not None,
         "window_state": (source or {}).get("window_state"),
         "tape_bars": (source or {}).get("tape_bars"),

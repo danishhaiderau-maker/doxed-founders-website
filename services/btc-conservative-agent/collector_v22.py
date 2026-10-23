@@ -86,6 +86,8 @@ from microstructure_tape import window_reference as microstructure_window_refere
 PATH_SOURCE_RETRY_STATES = frozenset({"SOURCE_NOT_READY", "SOURCE_BEHIND"})
 PATH_SOURCE_BEFORE_TAPE = "BEFORE_TAPE"
 _ENTRY_CHILDREN_MEMO_MAX = 64
+# R17 (23 Oct): stamp for retired ticker/candle-derived research fields.
+RETIRED_R17 = "RETIRED_R17"
 _entry_children_memo: "dict[str, list]" = {}
 _entry_children_memo_lock = threading.Lock()
 
@@ -671,19 +673,11 @@ def build_research_event(
         shared_ai_call_id=shared_ai_call_id,
     )
     grid_anchor = dict(entry_grid_anchor) if isinstance(entry_grid_anchor, Mapping) else None
-    entry_children = build_entry_children(
-        candles_1m=candles_1m,
-        signal_ts=float(grid_anchor["signal_ts"]) if grid_anchor else signal_ts,
-        signal_price=float(grid_anchor["signal_price"]) if grid_anchor else signal_price,
-        direction=str(grid_anchor["direction"]).upper() if grid_anchor else direction_u,
-        ttl_sec=float(grid_anchor["ttl_sec"]) if grid_anchor else ttl_sec,
-        live_orig=live_orig,
-        ticks_1s=ticks_1s if include_ticks_1s else None,
-    )
-    valid_fill_ts = [
-        c["fill_ts"] for c in entry_children if c.get("fill_ts") is not None
-    ]
-    latest_hyp = max(valid_fill_ts) if valid_fill_ts else None
+    # R17 (23 Oct): the hypothetical entry grid (ideal-touch, zero-cost,
+    # ticker/candle priced) is retired. With no children there is no
+    # hypothetical fill, so the tape window is signal -> actual fill (HM A-1).
+    entry_children: list = []
+    latest_hyp = None
     tape_start, tape_end = canonical_tape_bounds(
         signal_ts=signal_ts,
         hypothetical_fill_ts=latest_hyp,
@@ -862,13 +856,6 @@ def build_research_event(
         "research_execution_basis": execution_basis,
         "research_chase_schedule": serialized_chase_schedule,
     }
-    ticks_bounded = []
-    if include_ticks_1s and ticks_1s and live_fill_ts:
-        cap = float(live_fill_ts) + MAX_HOLD_PERIOD_SEC
-        for tick in ticks_1s:
-            t = float(tick.get("t") or 0)
-            if t >= float(live_fill_ts) - 1e-9 and t <= cap + 1e-9:
-                ticks_bounded.append(tick)
     record = {
         "schema": EVENT_SCHEMA,
         "collector_version": COLLECTOR_VERSION,
@@ -891,12 +878,17 @@ def build_research_event(
         "feature_snapshot_at_signal": dict(feature_snapshot or {}),
         "research_horizon": dict(RESEARCH_HORIZON_V1),
         "canonical_tape": {
-            "path_1m": path_1m,
+            # R17: candle/ticker-derived paths are not stored. Coverage is
+            # still assessed in memory so maturation status is unchanged.
+            "path_1m": [],
+            "path_1m_bars": len(path_1m or []),
+            "path_1m_status": RETIRED_R17,
             "canonical_tape_start": tape_start,
             "canonical_tape_end": tape_end,
             "path_window_policy_id": PATH_WINDOW_POLICY_ID,
             "replay_status": obs,
-            "ticks_1s_optional": ticks_bounded if include_ticks_1s else [],
+            "ticks_1s_optional": [],
+            "ticks_1s_status": RETIRED_R17,
             "ticks_1s_note": "optional bounded; replay must not require 1s",
             "coverage": coverage,
             "path_source": dict(path_source) if isinstance(path_source, Mapping) else None,
@@ -908,6 +900,7 @@ def build_research_event(
         "research_chase_schedule": serialized_chase_schedule,
         "entry_grid_anchor": grid_anchor,
         "entry_children": entry_children,
+        "entry_children_status": RETIRED_R17,
         "primary_outcome": primary,
         "observation_status": obs,
         "live_fill_ts": live_fill_ts,

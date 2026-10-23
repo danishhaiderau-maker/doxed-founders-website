@@ -324,6 +324,9 @@ def _posix_lock_and_unlink(path: Path):
             handle.close()
 
 
+# R5/R17: a segment ref whose object was pruned verifies as PRUNED_R5.
+SEGMENT_PRUNED_R5 = "PRUNED_R5"
+
 class V3EvidenceStore:
     """One JSONL ledger per entity plus content-addressed market segments.
 
@@ -2554,6 +2557,8 @@ class V3EvidenceStore:
                     defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})
                 else:
                     segment_count += 1
+            except FileNotFoundError:
+                continue  # pruned (R5) between glob and read
             except OSError as exc:
                 defects.append({"segment": path.as_posix(), "reason": str(exc)})
         return {
@@ -2595,6 +2600,7 @@ class V3EvidenceStore:
                 defects.append({"ledger": ledger, "reason": str(exc)})
 
         segment_count = 0
+        pruned: list[dict[str, str]] = []
         seen_sha: set[str] = set()
         for ref in segment_refs:
             expected = str((ref or {}).get("sha256") or "").lower()
@@ -2605,6 +2611,11 @@ class V3EvidenceStore:
                 defects.append({"segment": expected or "MISSING", "reason": "INVALID_SEGMENT_REF"})
                 continue
             path = self.segment_dir / expected[:2] / f"{expected}.json"
+            if not path.exists():
+                # R5/R17: market_segments are pruned regardless of custody.
+                # A reference to a pruned object is not corruption.
+                pruned.append({"segment": expected, "status": SEGMENT_PRUNED_R5})
+                continue
             try:
                 with self._exclusive(path):
                     actual = self._cached_segment_hash(path)
@@ -2612,10 +2623,13 @@ class V3EvidenceStore:
                     defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})
                 else:
                     segment_count += 1
+            except FileNotFoundError:
+                pruned.append({"segment": expected, "status": SEGMENT_PRUNED_R5})
             except OSError as exc:
                 defects.append({"segment": path.as_posix(), "reason": str(exc)})
         return {
             "schema": "v3_store_write_set_verification_v1",
+            "market_segment_pruned": pruned,
             "scope": "TOUCHED_OBJECTS_ONLY",
             "full_store_verified": False,
             "epoch_id": self.epoch_id,

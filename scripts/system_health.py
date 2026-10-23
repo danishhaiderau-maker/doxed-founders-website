@@ -60,6 +60,14 @@ WATCHER_FEATURES = (
     "parity_timeout", "fly_platform_status",
 )
 GREEN, AMBER, RED, SKIP = "GREEN", "AMBER", "RED", "SKIP"
+# Operator hold for the laptop analyzer (HM 2026-10-23 18:05 addendum, item 1/3/4). Present when
+# <state-dir>/analyzer-operator-hold.json exists ({"since", "reason", "by"}) or the launcher status says
+# STOPPED_BY_OPERATOR / OPERATOR_HOLD. Analyzer-derived checks then report SKIP with an "INFO analyzer
+# down" observation instead of a frozen lag / stale generation (the pre-hold verdict stays in fields).
+ANALYZER_HOLD_FILE = "analyzer-operator-hold.json"
+ANALYZER_HOLD_STATES = {"STOPPED_BY_OPERATOR", "OPERATOR_HOLD"}
+ANALYZER_HOLD_CHECKS = ("analyzer.generation", "analyzer.api", "analyzer.reports", "streams.analysed_freshness",
+                        "exports.freshness", "archive.freshness")
 RANK = {SKIP: -1, GREEN: 0, AMBER: 1, RED: 2}
 RUNBOOK = "docs/SYSTEM_HEALTH_RUNBOOK.md"
 
@@ -616,6 +624,8 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         "runtime_snapshot": state_dir / "fly_runtime_snapshot_v1.json",
         "deploy_runs": state_dir / "fly_deploy_runs_snapshot_v1.json",
         "analyzer_status": state_dir / "analyzer-run.status.json",
+        # HM 2026-10-23 18:05 addendum: operator hold (analyzer stopped on purpose) -> INFO, not a lag/RED
+        "analyzer_hold": state_dir / ANALYZER_HOLD_FILE,
         "cycle_status": state_dir / "segment-analyzer-cycle.status.json",
         "proof_active": state_dir / "unattended-proof" / "active.json",
         "puller_status": shadow / ".puller" / "status.json",
@@ -2329,10 +2339,42 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   fields={"generated_age_sec": gen_age, "diagnose_age_sec": diag_age, "late_jobs": amber,
                           "verdict": sa.get("verdict")}))
 
+    apply_analyzer_hold(checks, analyzer_hold(inputs))
     if "fly_platform" in inputs:
         add(fly_platform_check(inputs.get("fly_platform"), checks, now))
     add(_fail_open_guard(checks, errors, source_down, now, t))
     return checks
+
+
+def analyzer_hold(inputs: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The active operator hold, or None. File flag first, then the launcher's own state."""
+    hold = inputs.get("analyzer_hold")
+    if isinstance(hold, Mapping) and hold.get("active", True) is not False:
+        return {"since": hold.get("since"), "reason": str(hold.get("reason") or "operator hold")[:160],
+                "by": hold.get("by"), "source": ANALYZER_HOLD_FILE}
+    an = inputs.get("analyzer_status") if isinstance(inputs.get("analyzer_status"), Mapping) else {}
+    if str(an.get("state") or "").upper() in ANALYZER_HOLD_STATES:
+        return {"since": an.get("stoppedAt") or an.get("updatedAt"), "reason": str(an.get("detail") or an.get("state"))[:160],
+                "by": an.get("stoppedBy"), "source": "analyzer-run.status.json"}
+    return None
+
+
+def apply_analyzer_hold(checks: list[dict[str, Any]], hold: Mapping[str, Any] | None) -> None:
+    """Under an operator hold, analyzer-derived checks become SKIP/INFO 'analyzer down' (never hides RED elsewhere)."""
+    if not hold:
+        return
+    since = hold.get("since") or "unknown"
+    for item in checks:
+        if item.get("id") not in ANALYZER_HOLD_CHECKS:
+            continue
+        held_status, held_observed = item.get("status"), item.get("observed")
+        what = ("content lag frozen at the last export, not a live lag" if item["id"] == "streams.analysed_freshness"
+                else "value frozen at the last generation")
+        item["status"] = SKIP
+        item["observed"] = f"INFO analyzer down (operator hold since {since}: {hold.get('reason')}); {what}"
+        item["hint"] = f"remove {ANALYZER_HOLD_FILE} / restart the analyzer to resume this check"
+        item["observed_fields"] = {**dict(item.get("observed_fields") or {}), "operator_hold": dict(hold),
+                                   "held_status": held_status, "held_observed": held_observed}
 
 
 def fly_platform_check(snapshot: Any, checks: list[dict[str, Any]], now: float) -> dict[str, Any]:

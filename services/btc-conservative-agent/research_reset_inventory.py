@@ -28,7 +28,7 @@ RESEARCH_FILES = frozenset("""
 decisions_3factor.csv trades_3factor.csv expired_orders_3factor.csv
 blocked_signals_3factor.csv ai_tranche_log.csv setup_log_3factor.csv
 candles_3factor.csv pipeline_events_3factor.csv ai_errors_3factor.csv
-signal_snapshot.jsonl signal_replay.jsonl trade_outcome.jsonl shadow_outcome.jsonl
+signal_snapshot.jsonl signal_replay.jsonl trade_outcome.jsonl shadow_outcome.jsonl cap_receipts.jsonl v22_discard_receipts.jsonl
 type_b_adx_v3_shadow_decisions.jsonl type_b_research_v2.jsonl path_replay.jsonl
 post_exit_replay.jsonl shadow_exit_paths.jsonl research_events_v22.jsonl research_events_v22.provisional.json
 cycle_3m_universe.jsonl chase_offset_touch_grid.jsonl order_multiverse.jsonl

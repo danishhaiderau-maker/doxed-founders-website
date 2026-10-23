@@ -1846,3 +1846,30 @@ def test_pull_ack_ack_zero_while_applied_is_amber_first_then_red_after_5_minutes
     assert by_id(sh.evaluate(later, state))["laptop.pull_ack"]["status"] == sh.RED
     ok = _pull_lag_inputs(now + 7 * 60, 3, 3, now + 7 * 60 - 100)
     assert by_id(sh.evaluate(ok, state))["laptop.pull_ack"]["status"] == sh.GREEN
+
+
+def test_analyzer_operator_hold_reports_info_analyzer_down():
+    """HM 2026-10-23 18:05: an operator hold turns analyzer-derived checks into SKIP/INFO 'analyzer down'."""
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["analyzer_status"]["lastCompletedGenerationAt"] = sh.iso(now - 5 * 3600)
+    inputs["analyzer_api"] = None
+    inputs["analyzer_streams"]["streams"][0]["content_lag_sec"] = 70 * 60
+    before = by_id(sh.evaluate(copy.deepcopy(inputs), {}))
+    assert before["analyzer.generation"]["status"] == sh.RED
+    assert before["streams.analysed_freshness"]["status"] == sh.AMBER
+    inputs["analyzer_hold"] = {"since": "2026-10-23T05:45:00Z", "reason": "F7 restart pending", "by": "operator"}
+    after = by_id(sh.evaluate(inputs, {}))
+    for cid in ("analyzer.generation", "analyzer.api", "streams.analysed_freshness"):
+        assert after[cid]["status"] == sh.SKIP
+        assert after[cid]["observed"].startswith("INFO analyzer down (operator hold since 2026-10-23T05:45:00Z")
+        assert after[cid]["observed_fields"]["held_status"] in (sh.RED, sh.AMBER)
+    assert "content lag frozen" in after["streams.analysed_freshness"]["observed"]
+    # unrelated checks keep their verdicts
+    assert after["trading.orders"]["status"] == before["trading.orders"]["status"]
+
+
+def test_analyzer_hold_from_launcher_state_and_inactive_flag():
+    assert sh.analyzer_hold({"analyzer_status": {"state": "STOPPED_BY_OPERATOR", "stoppedAt": "x"}})["since"] == "x"
+    assert sh.analyzer_hold({"analyzer_status": {"state": "RUNNING"}}) is None
+    assert sh.analyzer_hold({"analyzer_hold": {"active": False}, "analyzer_status": {"state": "RUNNING"}}) is None

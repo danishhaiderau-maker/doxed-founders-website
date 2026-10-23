@@ -4,6 +4,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
+import rotation_cap
 import shadow_chase_buckets as scb
 
 ROOT = Path(__file__).resolve().parent
@@ -114,10 +115,11 @@ def _snapshot_namespace(tmp_path, chasing=(), rows=()):
         "CHASE_OFFSET_TOUCH_GRID_FILE": str(grid), "FIXED_MARGIN_USDT": 0.25,
         "_state_leverage": lambda: 100, "_collector_v22_epoch_id": lambda: "epoch-a",
         "chasing_tile_lanes": lambda: tuple(chasing),
+        "rotation_cap": rotation_cap,
     }
     tree = ast.parse(BOT_SOURCE)
     wanted = {"_note_shadow_chase_bucket_records", "_load_shadow_chase_bucket_records_once",
-              "_load_chase_analytics_snapshot"}
+              "_load_chase_analytics_snapshot", "_chase_grid_recovery_candidates"}
     body = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
@@ -151,3 +153,19 @@ def test_snapshot_keeps_live_tile_section_separate_when_a_tile_chases(tmp_path):
     assert snap["status"] == "COLLECTING" and snap["chasing_lanes"] == ["FAMILY_CHASER"]
     assert snap["label"] == "SIMULATED (shadow)"
     assert snap["live"]["status"] == "UNAVAILABLE"
+
+
+def test_chase_recovery_reads_newest_rotation_not_oldest_dot_one(tmp_path):
+    """DISK-CAP: ".1" is the OLDEST rotation; recovery must read the newest."""
+    base = tmp_path / "chase_offset_touch_grid.jsonl"
+    old = {"schema": scb.SHADOW_CHASE_BUCKET_SCHEMA, "execution_class": "SHADOW_ONLY", "places_order": False,
+           "trade_id": "old", "epoch_id": "epoch-a", "chase_count": 1, "filled": True, "net_bp": 1.0,
+           "time_to_fill_sec": 10}
+    new = {**old, "trade_id": "new"}
+    (tmp_path / "chase_offset_touch_grid.jsonl.1").write_text(json.dumps(old) + "\n", encoding="utf-8")
+    (tmp_path / "chase_offset_touch_grid.jsonl.7").write_text(json.dumps(new) + "\n", encoding="utf-8")
+    ns = _snapshot_namespace(tmp_path, rows=[])
+    assert ns["_chase_grid_recovery_candidates"]() == (str(tmp_path / "chase_offset_touch_grid.jsonl.7"), str(base))
+    ns["_load_shadow_chase_bucket_records_once"]()
+    ids = {r["trade_id"] for r in ns["_shadow_chase_bucket_records"]}
+    assert "new" in ids and "old" not in ids
