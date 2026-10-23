@@ -88,6 +88,21 @@ PATH_SOURCE_BEFORE_TAPE = "BEFORE_TAPE"
 _ENTRY_CHILDREN_MEMO_MAX = 64
 # R17 (23 Oct): stamp for retired ticker/candle-derived research fields.
 RETIRED_R17 = "RETIRED_R17"
+# R17 (23 Oct): positive v22 events carry no stored 1m path, so they can never
+# be replay-eligible. They are formally retired (counted, never written) and
+# callers must always drop the pending/provisional entry.
+V22_RETIRED_R17 = "V22_RETIRED_R17"
+_V22_RETIRED_R17_COUNT = 0
+
+
+def v22_retired_r17_count() -> int:
+    """Process-lifetime count of positive v22 events retired under R17."""
+    return _V22_RETIRED_R17_COUNT
+
+
+def is_r17_retired_event(record: Mapping[str, Any]) -> bool:
+    tape = record.get("canonical_tape") if isinstance(record, Mapping) else None
+    return isinstance(tape, Mapping) and tape.get("path_1m_status") == RETIRED_R17 and not tape.get("path_1m")
 _entry_children_memo: "dict[str, list]" = {}
 _entry_children_memo_lock = threading.Lock()
 
@@ -1693,7 +1708,13 @@ def write_research_event_once(
     status = str(record.get("observation_status") or "")
     eligibility = event_replay_eligibility(record)
     negative_evidence = status in (OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR)
-    if not terminal_observation(status) or (not eligibility.get("eligible") and not negative_evidence):
+    if not terminal_observation(status):
+        return False, "provisional or replay-ineligible event"
+    if not eligibility.get("eligible") and not negative_evidence:
+        if is_r17_retired_event(record):
+            global _V22_RETIRED_R17_COUNT
+            _V22_RETIRED_R17_COUNT += 1
+            return False, V22_RETIRED_R17
         return False, "provisional or replay-ineligible event"
     line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
     if "\n" in line:

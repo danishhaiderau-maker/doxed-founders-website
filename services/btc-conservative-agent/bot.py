@@ -313,6 +313,8 @@ from collector_v22 import (
     terminal_observation,
     write_research_event_once,
     research_event_generation_stat_signature,
+    V22_RETIRED_R17,
+    v22_retired_r17_count,
 )
 from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
 from collector_storage import (
@@ -16213,8 +16215,12 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             return record
         _order_multiverse_pending_src.pop(tid, None)
         written, reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
+        # R17 (C1): terminal means done. Always drop the provisional entry so
+        # refused/retired events never accumulate in the journal.
+        remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
+        if reason == V22_RETIRED_R17:
+            _collector_collection_stat("v22_retired_r17")
         if written:
-            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
             _collector_record_multiverse_write(record, obs)
             logger.info(
@@ -17517,9 +17523,12 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 )
             return record
         written, _reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
+        # R17 (C1): terminal -> always clear pending + provisional.
+        _order_multiverse_pending_src.pop(tid, None)
+        remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
+        if _reason == V22_RETIRED_R17:
+            _collector_collection_stat("v22_retired_r17")
         if written:
-            _order_multiverse_pending_src.pop(tid, None)
-            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
             _collector_collection_stat("rejected_opportunity_written")
             _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
@@ -49738,6 +49747,8 @@ def status():
                 "compressed_shadow_books_inflight": len(_compressed_shadow_chase_book),
                 "order_multiverse_pending": len(_order_multiverse_pending_src),
                 "order_multiverse_written": len(_order_multiverse_written),
+                "v22_retired_r17": v22_retired_r17_count(),
+                "v22_retired_r17_label": "positive v22 events retired (R17): no stored 1m path, never written",
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
