@@ -1238,33 +1238,58 @@ EPISODE_RECEIPTS_SIDECAR_SCHEMA = "entry_baseline_replay_episode_receipts_sideca
 
 
 def replay_health(report: Mapping[str, Any] | None) -> dict[str, Any]:
-    """OK only when the replay measured something: DEGRADED when every
-    directional evaluation is UNKNOWN with zero fills (or nothing was evaluated).
+    """OK only when EVERY baseline measured at least one fill.
 
-    A report where every opportunity is 'unknown' and nothing filled carries no
-    evidence; it must never read OK. Pure, never raises.
+    Evaluated per baseline_id (never summed, so one baseline with fills cannot
+    hide another that measured nothing). A baseline with zero fills is DEGRADED
+    regardless of its UNKNOWN/NO_FILL mix (HM #847 C1): a zero-fill replay
+    carries no fill evidence and must never read OK. Pure, never raises.
     """
     summaries = report.get("summaries") if isinstance(report, Mapping) else None
     summaries = summaries if isinstance(summaries, Mapping) else {}
 
+    def num(row: Any, key: str) -> int:
+        try:
+            return int((row or {}).get(key) or 0)
+        except (TypeError, ValueError, AttributeError):
+            return 0
+
+    per_baseline: dict[str, dict[str, Any]] = {}
+    for baseline_id, row in summaries.items():
+        evals, unknown = num(row, "directional_evaluations"), num(row, "unknown")
+        fills = num(row, "full_fills") + num(row, "partial_fills")
+        if evals <= 0:
+            reason = "BASELINE_REPLAY_NO_EVALUATIONS"
+        elif fills == 0 and unknown >= evals:
+            reason = "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
+        elif fills == 0:
+            reason = "BASELINE_REPLAY_ZERO_FILLS"
+        else:
+            reason = None
+        per_baseline[str(baseline_id)] = {
+            "status": "OK" if reason is None else "DEGRADED", "reason_code": reason,
+            "directional_evaluations": evals, "unknown": unknown, "fills": fills,
+            "no_fills": num(row, "no_fills"),
+        }
+
     def total(key: str) -> int:
-        out = 0
-        for row in summaries.values():
-            try:
-                out += int((row or {}).get(key) or 0)
-            except (TypeError, ValueError, AttributeError):
-                continue
-        return out
+        return sum(int(b[key]) for b in per_baseline.values())
 
     evaluations, unknown = total("directional_evaluations"), total("unknown")
-    fills = total("full_fills") + total("partial_fills")
     counts = {"opportunities": (report or {}).get("same_opportunity_count") if isinstance(report, Mapping) else None,
-              "directional_evaluations": evaluations, "unknown": unknown, "fills": fills,
-              "no_fills": total("no_fills")}
+              "directional_evaluations": evaluations, "unknown": unknown, "fills": total("fills"),
+              "no_fills": total("no_fills"), "per_baseline": per_baseline}
+    degraded = sorted(k for k, b in per_baseline.items() if b["status"] != "OK")
+    counts["degraded_baselines"] = degraded
     if evaluations <= 0:
         return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_NO_EVALUATIONS", **counts}
-    if fills == 0 and unknown >= evaluations:
-        return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS", **counts}
+    if degraded:
+        reasons = {per_baseline[k]["reason_code"] for k in degraded}
+        if reasons == {"BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"} and len(degraded) == len(per_baseline):
+            code = "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
+        else:
+            code = "BASELINE_REPLAY_ZERO_FILLS"
+        return {"status": "DEGRADED", "reason_code": code, **counts}
     return {"status": "OK", "reason_code": None, **counts}
 
 

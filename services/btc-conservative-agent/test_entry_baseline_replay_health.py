@@ -32,7 +32,25 @@ def test_no_evaluations_is_degraded_and_garbage_never_raises():
 
 def test_measured_outcomes_are_ok():
     assert replay_health(_report(a=_summary(10, 9, full=1)))["status"] == "OK"
-    assert replay_health(_report(a=_summary(10, 4, no=6)))["status"] == "OK"  # no-fill is evidence
+    assert replay_health(_report(a=_summary(10, 4, no=6, full=1), b=_summary(5, 0, partial=2, no=3)))["status"] == "OK"
+
+
+def test_zero_fills_alone_is_degraded_even_with_no_fill_outcomes():
+    # HM #847 C1: 99% UNKNOWN + 1% NO_FILL with 0 fills used to read OK (AND rule).
+    health = replay_health(_report(a=_summary(100, 99, no=1)))
+    assert health["status"] == "DEGRADED"
+    assert health["reason_code"] == "BASELINE_REPLAY_ZERO_FILLS"
+    assert replay_health(_report(a=_summary(10, 0, no=10)))["status"] == "DEGRADED"
+
+
+def test_health_is_per_baseline_not_summed():
+    # One baseline with fills must not hide another that measured nothing.
+    health = replay_health(_report(good=_summary(10, 2, full=8), dead=_summary(14, 14)))
+    assert health["status"] == "DEGRADED"
+    assert health["degraded_baselines"] == ["dead"]
+    assert health["per_baseline"]["good"]["status"] == "OK"
+    assert health["per_baseline"]["dead"]["reason_code"] == "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
+    assert health["reason_code"] == "BASELINE_REPLAY_ZERO_FILLS"
 
 
 def test_input_blockers_item_degrades_the_level(tmp_path):

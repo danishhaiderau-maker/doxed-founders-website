@@ -452,7 +452,7 @@ ENTRY_BASELINE_REPLAY_REPORT = "entry_baseline_replay_report.json"
 
 
 def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any] | None:
-    """DEGRADED (never OK) when the entry baseline replay is all UNKNOWN with 0 fills."""
+    """DEGRADED (never OK) when any baseline in the entry baseline replay has 0 fills."""
     from research.entry_baseline_replay import replay_health
 
     report = _load_json(report_dir / ENTRY_BASELINE_REPLAY_REPORT)
@@ -463,7 +463,9 @@ def entry_baseline_replay_item(report_dir: Path) -> dict[str, Any] | None:
     return _item(
         "entry_baseline_replay", status, health.get("reason_code"),
         (f"Entry baseline replay: {health['fills']} fills, {health['unknown']}/"
-         f"{health['directional_evaluations']} directional evaluations UNKNOWN."),
+         f"{health['directional_evaluations']} directional evaluations UNKNOWN"
+         + (f"; zero-fill baselines: {', '.join(health['degraded_baselines'])}."
+            if health.get("degraded_baselines") else ".")),
         eligible=health["directional_evaluations"] - health["unknown"], total=health["directional_evaluations"],
         side="ANALYZER" if status != "OK" else None, evidence=health,
     )
