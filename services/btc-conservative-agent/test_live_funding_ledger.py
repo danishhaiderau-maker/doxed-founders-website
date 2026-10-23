@@ -134,6 +134,30 @@ def test_unverified_live_funding_makes_only_the_live_leg_non_countable():
 def test_non_fill_exit_stamp_next_to_a_settlement_is_a_ts_fallback():
     out = lfl.verify(S - 600, S + 30, ledger_rows=[_row(1, S + 4, -0.02)], position=POS, exit_ts_source="exit_at_ts")
     assert out["funding_ts_fallbacks"] == ["exit_ts:exit_at_ts"] and rx.funding_failure(out, live=True) == "FUNDING_TS_FALLBACK"
+    assert out["funding_status"] == "UNVERIFIED_EXIT_TS_FALLBACK" and out["funding_verified"] is False
+
+
+def test_F4_any_non_fill_exit_source_is_unverified_with_no_near_window():
+    assert not hasattr(lfl, "EXIT_TS_FALLBACK_NEAR_S")
+    for src in ("exit_ack_at_ts", "exit_confirmed_at_ts", "exit_at_ts", None):
+        # far from any settlement (the old 60 s window would have let these through) and with no crossing at all
+        for a, b in ((S - 3000, S - 1800), (S + 600, S + 1800)):
+            out = lfl.verify(a, b, ledger_rows=[], position=POS, exit_ts_source=src, sign_pin=ACTIVE)
+            assert out["funding_verified"] is False and out["funding_status"] == "UNVERIFIED_EXIT_TS_FALLBACK"
+            assert out["funding_ts_fallbacks"] == [f"exit_ts:{src or 'unknown'}"]
+            assert rx.funding_failure(out, live=True) == "FUNDING_TS_FALLBACK"
+    out = lfl.verify(S + 600, S + 1800, ledger_rows=[], position=POS, exit_ts_source="exit_fill_record_at_ts")
+    assert out["funding_ts_fallbacks"] == [] and out["funding_status"] != "UNVERIFIED_EXIT_TS_FALLBACK"
+    # the job never spends a read on such a row and lookup reports the flag
+    sent = []
+    job = _job(post=_fake(sent=sent))
+    ch = {k: v for k, v in CHAIN.items() if k != "exit_fill_record_at_ts"}
+    ch["exit_ack_at_ts"] = S + 1800
+    job.submit(ch)
+    out = job.lookup(ch)
+    job.run_once()
+    assert out["funding_status"] == "UNVERIFIED_EXIT_TS_FALLBACK" and out["funding_ts_fallbacks"] == ["exit_ts:exit_ack_at_ts"]
+    assert [p for p, _ in sent if p != lfl.PERMISSIONS_PATH] == []
 
 
 def test_position_match_is_unique_or_none():

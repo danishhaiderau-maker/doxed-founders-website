@@ -59,7 +59,7 @@ GATE_RETRY_S = 300.0          # a failed permission READ is retried at most this
 NONCE_MS_SCALE = 10_000      # scripts/self_aware/fees.py: never ahead of the shared nonce scale
 TIE_TOL_S = 120.0            # ledger MTS vs settlement instant (observed +3..+5 s)
 POSITION_TOL_S = 10.0        # positions/hist create/update vs the real entry/exit fill ts
-EXIT_TS_FALLBACK_NEAR_S = 60.0
+EXIT_FILL_SOURCE = "exit_fill_record_at_ts"   # HM R4 F4: the ONLY countable exit ts source (no near-settlement window)
 LEDGER_LIMIT = 500
 # RK zero-rate ruling (24 Oct): a crossed settlement with NO ledger entry counts as 0 only when the rate of that EXACT
 # settlement, read back from the public derivatives status history, is exactly 0 as returned AND (RK amendment 04:07)
@@ -567,14 +567,18 @@ def verify(entry_fill_ts, exit_fill_ts, *, ledger_rows=None, read_error=None, re
            "funding_sign_pin_flag": (sign_pin_check or {}).get("flag") or
                                     (SIGN_PIN_DISAGREEMENT if (sign_pin or {}).get("status") == "DISAGREEMENT" else None),
            "funding_sign_pin_check": sign_pin_check}
-    if exit_ts_source != "exit_fill_record_at_ts" and b is not None and abs(b - _grid(b)) <= EXIT_TS_FALLBACK_NEAR_S:
-        out["funding_ts_fallbacks"] = [f"exit_ts:{exit_ts_source}"]  # a non-fill exit stamp next to a settlement
+    if b is not None and exit_ts_source != EXIT_FILL_SOURCE:
+        # HM R4 F4: any exit ts other than the Bitfinex exit fill record is a fallback -> UNVERIFIED, wherever it lies
+        out["funding_ts_fallbacks"] = [f"exit_ts:{exit_ts_source or 'unknown'}"]
     if a is None:   # HM (E): no real entry fill ts -> explicit fallback flag, never a guessed window (non-countable)
         out["funding_ts_fallbacks"] = out["funding_ts_fallbacks"] + ["entry_ts:fill_at_ts_missing"]
     if b is None:
         out["funding_ts_fallbacks"] = out["funding_ts_fallbacks"] + ["exit_ts:exit_fill_missing"]
     if a is None or b is None or b < a:
         out["funding_status"] = "UNVERIFIED_FILL_TS_MISSING"
+        return out
+    if out["funding_ts_fallbacks"]:
+        out["funding_status"] = "UNVERIFIED_EXIT_TS_FALLBACK"
         return out
     if read_error is not None or ledger_rows is None:
         out["funding_status"] = "UNVERIFIED_LEDGER_READ_FAILED"
@@ -690,7 +694,8 @@ def _zero_rate_status(t, rec, position):
 
 
 def chain_exit_fill(chain: Mapping[str, Any]):
-    """(exit ts, source): the Bitfinex exit fill record first; other stamps are fallbacks (funding_ts_fallbacks)."""
+    """(exit ts, source): the Bitfinex exit fill record first; any other stamp is a fallback (funding_ts_fallbacks) and
+    makes the row UNVERIFIED_EXIT_TS_FALLBACK (HM R4 F4) - it is returned only so the flag names its source."""
     for k in ("exit_fill_record_at_ts", "exit_ack_at_ts", "exit_confirmed_at_ts", "exit_at_ts"):
         v = _f(chain.get(k))
         if v is not None:
@@ -758,8 +763,9 @@ class FundingReadbackJob:
             return None
         a, b, src, notional, pid, key = _row_inputs(chain)
         kw = dict(paper_funding_usd=paper_funding_usd, exit_ts_source=src, live_notional_usd=notional)
-        if a is None or b is None or b < a:
-            return verify(a, b, read_error="NO_READ", key_gate=self._gate, **kw)   # HM (E) flags, non-countable
+        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE:
+            # HM (E) / R4 F4: missing fill ts or a non-fill exit stamp -> flagged, non-countable, never read (no budget)
+            return verify(a, b, read_error="NO_READ", key_gate=self._gate, **kw)
         now = self._clock()
         with self._lock:
             gate, hit = self._gate, self._cache.get(key)
@@ -800,8 +806,8 @@ class FundingReadbackJob:
         chain = chain or {}
         if not _closed(chain):
             return
-        a, b, _src, notional, pid, key = _row_inputs(chain)
-        if a is None or b is None or b < a:
+        a, b, src, notional, pid, key = _row_inputs(chain)
+        if a is None or b is None or b < a or src != EXIT_FILL_SOURCE:
             return
         with self._lock:
             hit = self._cache.get(key)

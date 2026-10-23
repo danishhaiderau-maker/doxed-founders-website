@@ -83,6 +83,7 @@ LIVE_FUNDING_CONTRACT = {
                       "00/08/16 UTC settlement in (entry fill, exit fill] per tile_fill.settlements_crossed -> a countable 0); "
                       "UNVERIFIED_LEDGER_READ_FAILED | UNVERIFIED_SETTLEMENT_NO_ENTRY | UNVERIFIED_ENTRY_UNTIED | "
                       "UNVERIFIED_POSITION_UNRESOLVED | UNVERIFIED_AMBIGUOUS_ENTRY | UNVERIFIED_FILL_TS_MISSING | "
+                      "UNVERIFIED_EXIT_TS_FALLBACK (HM R4 F4: exit ts source is not exit_fill_record_at_ts; never read) | "
                       "UNVERIFIED_LEDGER_POSITION_MISMATCH (SIGNED: |pf - POSITION_FUNDING_SIGN * ledger sum| > 1e-8) | "
                       "UNVERIFIED_POSITION_FUNDING_SIGN_UNPROVEN (RK 04:09 + HM R4 F1: a non-zero tied entry while "
                       "POSITION_FUNDING_SIGN is unset - no RK+HM-confirmed ACTIVE pin) | "
@@ -91,10 +92,11 @@ LIVE_FUNDING_CONTRACT = {
                       "job) fail",
     "funding_verified": "True only for PRICED / NO_CROSSING",
     "funding_usd_raw": "COST-positive USD = -sum(ledger amounts used); 0.0 for NO_CROSSING; null when unverified",
-    "funding_ts_fallbacks": "[] unless the exit ts is not the Bitfinex exit fill record AND lies within 60 s of a settlement; "
+    "funding_ts_fallbacks": "[] unless: exit_ts:<source> whenever the exit ts is NOT the Bitfinex exit fill record "
+                            "(HM R4 F4 - any distance from a settlement, no near-settlement window; row UNVERIFIED); "
                             "entry_ts:fill_at_ts_missing / exit_ts:exit_fill_missing when a fill ts is absent (HM E: "
                             "explicit flag, non-countable, the window is never guessed)",
-    "funding_exit_ts_source": "exit_fill_record_at_ts (else the fallback stamp name)",
+    "funding_exit_ts_source": "exit_fill_record_at_ts (else the fallback stamp name -> UNVERIFIED_EXIT_TS_FALLBACK)",
     "funding_ts_crossed": "list of settlement epoch s in (entry fill, exit fill]",
     "funding_ledger_ids": "Bitfinex ledger ids used (RK 4)",
     "funding_ledger_mts": "their MTS (epoch s)",
