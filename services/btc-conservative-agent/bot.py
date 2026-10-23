@@ -5198,6 +5198,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float, *, exit_source:
         # first fresh book row.
         import quote_trigger as _qtc
         if not _qtc.is_clock_exit_reason(getattr(action, "reason", None)):
+            _note_level_crossed_unfired(source_pos, getattr(action, "reason", None), price, now, "STALE_BOOK_HELD")
             action = None
     if source_pos.get("_tp1_pending") and _is_paper_book_lane(pos):
         # REALISM_V2 PR2: a pending TP1 leg is a SENT reduce-only market order; it completes with its own committed
@@ -5572,6 +5573,67 @@ def _exchange_stop_trigger(pos: dict, t0: float, t1: float, *, page: dict = None
 
 STOP_COVERAGE_ROW_KEYS = ("stop_tail_lo_s", "stop_tail_hi_s", "stop_coverage_gap_s", "stop_coverage_flag",
                           "stop_coverage_unverified", "stop_late_prints_n", "stop_late_print_max_s")
+
+
+R17_CONTRACT_ROW_KEYS = ("trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
+                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage")
+LEVELS_CROSSED_UNFIRED_MAX = 20
+
+
+def _note_level_crossed_unfired(pos: dict, reason, price, ts, why: str) -> None:
+    """R17 / HM C3: a stop / TP / BE level the policy saw reached that did NOT fire (e.g. held back by a stale book)."""
+    log = pos.setdefault("_levels_crossed_unfired_log", [])
+    if isinstance(log, list) and len(log) < LEVELS_CROSSED_UNFIRED_MAX:
+        log.append({"reason": None if reason is None else str(reason), "why": str(why),
+                    "px": None if price is None else float(price), "ts": None if ts is None else float(ts)})
+
+
+def _stop_coverage_value(pos: dict):
+    """R17 contract ``stop_coverage``: STOP_COVERAGE_GAP when any part of the hold was not covered by the trades tail
+    (a resident-stop crossing may have been missed), STOP_COVERAGE_UNVERIFIED when the scan never ran, else
+    STOP_COVERAGE_OK. None on live rows / non-book lanes (the exchange holds the live stop; not re-judged here)."""
+    import quote_trigger as _qt
+    if not _is_paper_book_lane(pos):
+        return None
+    if pos.get("stop_coverage_flag") == _qt.STOP_COVERAGE_GAP or float(pos.get("stop_coverage_gap_s") or 0) > 0:
+        return _qt.STOP_COVERAGE_GAP
+    if pos.get("stop_tail_hi_s") is None and pos.get("stop_tail_lo_s") is None:
+        return _qt.STOP_COVERAGE_UNVERIFIED
+    return _qt.STOP_COVERAGE_OK
+
+
+def _levels_crossed_unfired(pos: dict):
+    """R17 contract ``levels_crossed_unfired``: the stop / TP / BE crossings seen during the hold that did not fire
+    ([] = none). Every completed book row and every trade print is evaluated, so a crossing can only be missed where
+    the evidence is missing: a book gap second, a stale-book span (price-level exits held), or a trades-tail
+    coverage gap. Then the answer is UNKNOWN -> None (never a fabricated []). None on live rows / non-book lanes."""
+    import quote_trigger as _qt
+    if not _is_paper_book_lane(pos):
+        return None
+    log = [dict(x) for x in (pos.get("_levels_crossed_unfired_log") or []) if isinstance(x, dict)]
+    if log:
+        return log
+    if int(pos.get("trigger_gap_seconds_n") or 0) > 0 or pos.get("stale_book_since_s") is not None \
+            or pos.get("stale_book_age_s") is not None or _stop_coverage_value(pos) != _qt.STOP_COVERAGE_OK:
+        return None
+    return []
+
+
+def _r17_contract_fields(pos: dict) -> dict:
+    """R17 (#845 r17_exclusion.proof_failures) fields that live on the position: stamped on the closed row under
+    exactly the contract names. Exit price stale = the exit book row was older than 2 s at the model fill time."""
+    xs = pos.get("exit_fill_sim") if isinstance(pos.get("exit_fill_sim"), dict) else {}
+    paper = _is_paper_book_lane(pos)
+    stale = None
+    if paper and (xs.get("price_stale") is not None or pos.get("exit_stale_book_at_fill") is not None):
+        stale = bool(xs.get("price_stale") or pos.get("exit_stale_book_at_fill"))
+    return {"trigger_price_source": pos.get("trigger_price_source"),
+            "exit_priced_delay_source": pos.get("exit_priced_delay_source"),
+            "exit_price_age_s": pos.get("exit_price_age_s"),
+            "exit_eval_price_age_s": pos.get("exit_eval_price_age_s"),
+            "exit_price_stale": stale,
+            "levels_crossed_unfired": _levels_crossed_unfired(pos),
+            "stop_coverage": _stop_coverage_value(pos)}
 
 
 def _stop_late_prints(pos: dict, now: float) -> list:
@@ -8049,6 +8111,11 @@ def _entry_pricing_fields(pos: dict, master: dict) -> dict:
         "depth_snapshot_signal": efs.get("depth_snapshot_signal"),
         "depth_snapshot_fill": efs.get("depth_snapshot_fill"),
         "entry_provenance": __import__("tile_fill").provenance(efs) if paper else None,
+        # R17 contract (#845): the entry book row's price age + stale flag, top level (the pricer's own values).
+        "entry_price_age_s": (efs.get("price_age_s") if efs.get("price_age_s") is not None else
+                              (round(float(efs["book_age_ms"]) / 1000.0, 3) if efs.get("book_age_ms") is not None else None))
+                             if paper else None,
+        "entry_price_stale": (bool(efs.get("price_stale")) if efs.get("price_stale") is not None else None) if paper else None,
     }
 
 
@@ -24109,11 +24176,13 @@ _RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "as
                           "entry_walk_bp", "exit_walk_bp", "entry_delay_drift_usd", "entry_delay_drift_bp",
                           "exit_delay_drift_usd", "exit_delay_drift_bp", "exit_touch_drift_usd",
                           "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
-                          "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts")
+                          "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
+                          "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s")  # R17 contract ages
 _RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                           "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
-                          "entry_provenance", "exit_provenance", "funding_settlement_rates")
+                          "entry_provenance", "exit_provenance", "funding_settlement_rates",
+                          "levels_crossed_unfired")
 
 
 def _restore_reloaded_row_types(trade: dict) -> None:
@@ -32677,6 +32746,7 @@ def close_position(pos: dict, exit_reason: str):
             "non_countable_reasons": _non_countable_reasons(pos, exit_reason) or None,
             **_terminal_liq_fields(pos, price),
             **_exit_evidence_fields(pos),
+            **_r17_contract_fields(pos),  # R17 (#845): exact contract names on the closed row
             "exit_order_class": pos.get("exit_order_class"),
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),

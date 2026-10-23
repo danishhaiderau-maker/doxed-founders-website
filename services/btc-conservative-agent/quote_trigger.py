@@ -274,6 +274,9 @@ def trades_coverage() -> Optional[dict]:
 
 
 STOP_COVERAGE_GAP = "STOP_COVERAGE_GAP"
+STOP_COVERAGE_UNVERIFIED = "STOP_COVERAGE_UNVERIFIED"  # the resident-stop scan never covered the hold
+STOP_COVERAGE_OK = "STOP_COVERAGE_OK"  # every second of the hold was covered by the trades tail
+STOP_COVERAGE_VALUES = (STOP_COVERAGE_OK, STOP_COVERAGE_GAP, STOP_COVERAGE_UNVERIFIED)
 LATE_PRINT_S = STALE_S  # a print known (end of its collector second) more than 2 s after its own time is LATE
 
 

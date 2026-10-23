@@ -611,3 +611,4 @@ test_order_model.py
 test_realism_rk_binding.py
 test_delay_pool_f1.py
 test_stop_coverage_c3c7.py
+test_r17_contract_fields.py

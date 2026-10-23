@@ -187,6 +187,8 @@ def _paper_fill_core(side: str, qty: float, signal_ts: float, delay_s: Optional[
                 "filled_qty": round(filled, 8), "book_s": int(book["s"]),
                 "book_age_ms": round((t - float(book["s"])) * 1000),
                 "ask_age_ms": round((t - float(book["s"])) * 1000),
+                # R17 contract: the walked row's age at the model fill time (s), and the stale flag (> 2 s refused above)
+                "price_age_s": round(t - float(book["s"]), 3), "price_stale": False,
                 "depth_snapshot_fill": _snap(book), "price_source": "BFX_BOOK_10L"}
     if top_at is not None:
         # HM 12:20: top-of-book fallback fills at most the top size (PARTIAL), else rejects; counted.
