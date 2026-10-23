@@ -32027,7 +32027,7 @@ def close_position(pos: dict, exit_reason: str):
             ),
         }
         # R17 (RK 23 Oct 2026): every new closed row is stamped non_countable / non_countable_reason on write (pinned
-        # discard ids, non-book exit trigger); a stamping error fails closed as non-countable.
+        # discard ids, or R17_UNPROVEN when the row lacks r17_fields contract proof); a stamping error fails closed.
         try:
             import r17_exclusion as _r17
             _r17.stamp_on_write(trade_row)

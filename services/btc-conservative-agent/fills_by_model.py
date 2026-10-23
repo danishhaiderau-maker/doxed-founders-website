@@ -8,7 +8,7 @@ from __future__ import annotations
 import paper_fill
 
 SCHEMA = "fills_by_model_v1"
-CATEGORIES = ("countable", "not_fresh_book10l", "pre_epoch", "unstamped", "no_book_exit", "tp1_unpriced_leg",
+CATEGORIES = ("countable", "r17_unproven", "not_fresh_book10l", "pre_epoch", "unstamped", "no_book_exit", "tp1_unpriced_leg",
               "fill_model_invalid", "other_fill_model", "legacy_pricing", "identity_quarantined")
 
 # HM 18 Oct: trades of episodes whose decision and execution minted different policy signatures (B1/B2 TTL 1200 vs 660,
@@ -47,7 +47,10 @@ def classify(row: dict) -> str:
         # row_before_epoch fails closed for a row with no usable timestamp; that is "unstamped", not "pre-epoch"
         # (the row may well be post-epoch). It is still never countable.
         return "pre_epoch" if _has_timestamp(row) else "unstamped"
-    return "countable" if paper_fill.row_fresh_strict(row) else "not_fresh_book10l"
+    if paper_fill.row_fresh_strict(row):
+        return "countable"
+    import r17_exclusion as _r17
+    return "r17_unproven" if _r17.non_countable_reason(row) else "not_fresh_book10l"
 
 
 def uses_carried_book(row: dict) -> bool:
@@ -79,6 +82,10 @@ def summarise(rows, lanes, *, refused: dict | None = None, now: float | None = N
             continue
         cat = classify(row)
         t = tiles[lane]
+        if cat == "r17_unproven":
+            import r17_exclusion as _r17
+            for k in str(_r17.non_countable_reason(row) or "").split(":", 1)[-1].split("|"):
+                t.setdefault("r17_reason_counts", {})[k] = t.setdefault("r17_reason_counts", {}).get(k, 0) + 1
         t["by_category"][cat] += 1
         model = str(row.get("fill_model") or "NONE")
         t["by_fill_model"][model] = t["by_fill_model"].get(model, 0) + 1
@@ -91,6 +98,9 @@ def summarise(rows, lanes, *, refused: dict | None = None, now: float | None = N
     for t in tiles.values():
         t["countable"] = t["by_category"]["countable"]
         t["rows"] = sum(t["by_category"].values())
+        t.setdefault("r17_reason_counts", {})
+        n17 = t["by_category"]["r17_unproven"]
+        t["r17_label"] = (f"R17_UNPROVEN: {n17} of {t['rows']} rows excluded" if n17 else None)
         t["repriced_exit_share"] = round(t["repriced_exit_rows"] / t["rows"], 4) if t["rows"] else None
         t["carried_book_share"] = round(t["carried_book_rows"] / t["rows"], 4) if t["rows"] else None
     return {"schema": SCHEMA, "generated_at": now, "fresh_epoch_ts": paper_fill.FRESH_EPOCH_TS,

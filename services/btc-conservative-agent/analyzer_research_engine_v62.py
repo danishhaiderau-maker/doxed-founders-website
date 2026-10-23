@@ -1811,10 +1811,19 @@ def load_data():
     )
     return trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
 
+def _r17_empty_note():
+    """R17 label for an empty report ("0 countable: N excluded R17_UNPROVEN (...)"), None when R17 excluded nothing."""
+    try:
+        import analysis_hygiene as _hyg
+        return _hyg.r17_empty_label()
+    except Exception:
+        return None
+
+
 def build_master_dataset(trades, blocked, decisions, ai_log, signal_persist, near_edge):
     print("\n=== BUILDING MASTER DATASET (v62 DEDUPED) ===")
     if trades.empty:
-        print(f"⚠️ No trades yet - using decisions for partial funnel only {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"⚠️ {_r17_empty_note() or 'No trades yet'} - using decisions for partial funnel only {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()
 
     df = trades.drop_duplicates(subset=["trade_id"], keep="last").copy()
@@ -7194,7 +7203,7 @@ def first_3_candle_report(trade_outcomes):
 def sr_direction_bucket_report(df):
     print("\n=== V80 SUPPORT/RESISTANCE × DIRECTION ===")
     if df is None or df.empty:
-        print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"{_r17_empty_note() or 'No trades.'} {PIPELINE_ENFORCEMENT_TAG}")
         return
     work = _enrich_trades_with_buckets(df)
     direction = work.get("final_direction", work.get("dir", "LONG")).astype(str).str.upper()
@@ -7346,7 +7355,7 @@ def research_lane_execution_report(trades, decisions, ai_log, pipeline_events, s
             )
             print(gm.to_string())
     else:
-        print(f"  No executed trades yet. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {_r17_empty_note() or 'No executed trades yet.'} {PIPELINE_ENFORCEMENT_TAG}")
 
     if snapshots:
         snap_lanes = []

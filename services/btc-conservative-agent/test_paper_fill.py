@@ -1,6 +1,6 @@
-import pytest
 """Book-pricing PR A: shared paper_fill + CI guards (ticker / book_tape_1s ban, new-tile rule)."""
 import ast, pathlib
+import pytest
 import paper_fill as pf
 
 BOOK = {"s": 100, "a": [[100.0, 1.0], [101.0, 1.0]], "b": [[99.0, 1.0], [98.0, 1.0]]}

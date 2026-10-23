@@ -1,5 +1,6 @@
-"""R17 (RK 23 Oct 2026): dynamic non-countable exclusion (pinned id lists AND non-book exit triggers AND rows stamped
-on write). RK: "a static list alone is a VIOLATION" -> the trigger rule must hold for ids never on any list."""
+"""R17 dynamic non-countable exclusion: pinned id lists, plus countable-only-with-proof against the r17_fields
+closed-row contract, plus rows stamped on write. RK: "a static list alone is a VIOLATION", so the proof rule must
+hold for ids that are on no list."""
 import ast
 import hashlib
 import json
@@ -27,10 +28,10 @@ def _epoch():
     paper_fill.FRESH_EPOCH_TS = old
 
 
-PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "delay_unverified": False,
-         "exit_priced_delay_source": "lane_max_n12", "entry_walk_bp": 0.4, "exit_walk_bp": 0.6,
-         "exit_legs_unmeasured": 0, "entry_fill_sim": {"price_age_s": 0.21, "price_stale": False},
-         "exit_price_age_s": 0.33, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
+PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "exit_priced_delay_source": "lane_max_n12",
+         "entry_walk_bp": 0.4, "exit_walk_bp": 0.6, "exit_legs_unmeasured": 0, "evidence_status": "COMPLETE",
+         "entry_book_age_ms": 210, "exit_price_age_s": 0.33, "exit_evidence_status": "COMPLETE",
+         "exit_unverified_reason": None, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
 
 
 def good_row(**extra):
@@ -74,21 +75,32 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     ("delay_source", None, "DELAY_SOURCE_MISSING"),
     ("delay_source", "default_until_n10", "DELAY_NOT_MEASURED"),
     ("delay_source", "lane_max_n9", "DELAY_NOT_MEASURED"),
-    ("delay_unverified", True, "DELAY_UNVERIFIED"),
     ("exit_priced_delay_source", None, "EXIT_DELAY_NOT_MEASURED"),
     ("exit_priced_delay_source", "default_until_n10", "EXIT_DELAY_NOT_MEASURED"),
     ("entry_walk_bp", None, "ENTRY_NOT_BOOK_WALKED"),
     ("entry_walk_bp", float("nan"), "ENTRY_NOT_BOOK_WALKED"),
-    ("entry_fill_sim", {}, "ENTRY_PRICE_AGE_MISSING"),
-    ("entry_fill_sim", {"price_age_s": 0.2, "price_stale": True}, "ENTRY_PRICE_STALE"),
+    ("evidence_status", None, "ENTRY_EVIDENCE_NOT_COMPLETE"),
+    ("evidence_status", "UNVERIFIED", "ENTRY_EVIDENCE_NOT_COMPLETE"),
+    ("entry_book_age_ms", None, "ENTRY_PRICE_AGE_MISSING"),
+    ("entry_book_age_ms", -5, "ENTRY_PRICE_AGE_MISSING"),
     ("exit_walk_bp", None, "EXIT_NOT_BOOK_WALKED"),
     ("exit_legs_unmeasured", 1, "EXIT_LEG_UNMEASURED"),
+    ("exit_legs_unmeasured", None, "EXIT_LEG_UNMEASURED"),
     ("exit_price_age_s", None, "EXIT_PRICE_AGE_MISSING"),
+    ("exit_evidence_status", None, "EXIT_EVIDENCE_NOT_COMPLETE"),
+    ("exit_evidence_status", "UNVERIFIED", "EXIT_EVIDENCE_NOT_COMPLETE"),
+    ("exit_unverified_reason", "STALE_BOOK", "EXIT_UNVERIFIED"),
+    ("exit_unverified_reason", "FORCED_NO_BOOK", "EXIT_UNVERIFIED"),
     ("levels_crossed_unfired", None, "LEVEL_CROSS_UNKNOWN"),
     ("levels_crossed_unfired", ["SL"], "LEVEL_CROSSED_UNFIRED"),
+    ("levels_crossed_unfired", "None", "LEVEL_CROSSED_UNFIRED"),
+    ("levels_crossed_unfired", "none", "LEVEL_CROSSED_UNFIRED"),
+    ("levels_crossed_unfired", "0", "LEVEL_CROSSED_UNFIRED"),
     ("levels_crossed_unfired", "unknown", "LEVEL_CROSSED_UNFIRED"),
-    ("stop_coverage", "STOP_COVERAGE_GAP", "STOP_COVERAGE_GAP"),
-    ("stop_coverage", "STOP_COVERAGE_UNVERIFIED", "STOP_COVERAGE_GAP"),
+    ("stop_coverage", None, "STOP_COVERAGE_MISSING"),
+    ("stop_coverage", "WHATEVER", "STOP_COVERAGE_UNKNOWN"),
+    ("stop_coverage", "STOP_COVERAGE_GAP", "STOP_COVERAGE_UNKNOWN"),
+    ("stop_coverage", "STOP_COVERAGE_UNVERIFIED", "STOP_COVERAGE_UNKNOWN"),
 ])
 def test_any_missing_or_unknown_proof_excludes_ids_on_no_list(field, value, reason):
     tid = "gs1-ffffffffffff"
@@ -102,9 +114,48 @@ def test_any_missing_or_unknown_proof_excludes_ids_on_no_list(field, value, reas
 def test_row_without_any_proof_lists_every_reason():
     bare = {"trade_id": "gs1-eeeeeeeeeeee", "exit_status": "PAPER_FILL"}
     got = r17.non_countable_reason(bare).split(":", 1)[1].split("|")
-    assert set(got) >= {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "EXIT_DELAY_NOT_MEASURED",
-                        "ENTRY_NOT_BOOK_WALKED", "ENTRY_PRICE_AGE_MISSING", "EXIT_NOT_BOOK_WALKED",
-                        "EXIT_PRICE_AGE_MISSING", "LEVEL_CROSS_UNKNOWN"}
+    assert set(got) == {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "EXIT_DELAY_NOT_MEASURED",
+                        "ENTRY_NOT_BOOK_WALKED", "ENTRY_EVIDENCE_NOT_COMPLETE", "ENTRY_PRICE_AGE_MISSING",
+                        "EXIT_NOT_BOOK_WALKED", "EXIT_LEG_UNMEASURED", "EXIT_PRICE_AGE_MISSING",
+                        "EXIT_EVIDENCE_NOT_COMPLETE", "LEVEL_CROSS_UNKNOWN", "STOP_COVERAGE_MISSING"}
+
+
+def test_missing_stop_coverage_alone_excludes():
+    row = good_row()
+    del row["stop_coverage"]
+    assert r17.non_countable_reason(row) == "R17_UNPROVEN:STOP_COVERAGE_MISSING"
+
+
+def test_contract_module_is_the_single_source():
+    import r17_fields
+    assert set(PROOF) <= set(r17_fields.REQUIRED_FIELDS) | {"exit_unverified_reason"}
+    assert set(r17_fields.REQUIRED_FIELDS) - {"exit_pricing_basis"} <= set(PROOF)
+    assert r17.F is r17_fields
+    src = (ROOT / "r17_exclusion.py").read_text()
+    assert "import os" not in src and "environ" not in src and "getenv" not in src  # proof rule cannot be switched off
+
+
+def test_841_shaped_closed_row_with_contract_fields_counts():
+    """A closed row shaped like #841 @9f095dbf trade_row (entry pricing fields flattened from entry_fill_sim,
+    slippage fields, exit marks from _paper_exit_* copied over) plus the contract fields counts."""
+    row = {"trade_id": "gs1-aaaaaaaaaaaa", "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP",
+           "exit_status": "PAPER_FILL", "fill_model": paper_fill.FILL_MODEL, "fill_model_version": 1,
+           "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True, "all_legs_book10l": True,
+           # _entry_pricing_fields
+           "delay_s": 1.9, "delay_source": "lane_q90_n31", "priced_delay_s": 1.9, "priced_delay_model": "PAPER_MEASURED",
+           "evidence_status": "COMPLETE",
+           # _slippage_row_fields
+           "book_slippage_usd_entry": 0.001, "entry_walk_bp": 0.3, "book_slippage_usd_exit": 0.002, "exit_walk_bp": 0.5,
+           "exit_legs": 1, "exit_legs_unmeasured": 0,
+           # exit marks (_paper_exit_*), resident stop exit
+           "exit_pricing_basis": "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER", "exit_price_age_s": 0.4,
+           "exit_book_row_rule": "FIRST_ROW_AT_OR_AFTER", "exit_evidence_status": "COMPLETE",
+           "exit_unverified_reason": None, "exit_trigger_source": "PROTECTIVE_EXIT_WORKER",
+           # contract fields REALISM_V2 copies onto trade_row
+           "trigger_price_source": "book", "exit_priced_delay_source": "EXCHANGE_RESIDENT_NO_DELAY",
+           "entry_book_age_ms": 180, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
+    assert r17.non_countable_reason(row) is None
+    assert r17.stamp_on_write(dict(row))["non_countable"] is False
 
 
 def test_loop_name_is_not_evidence_either_way():
@@ -115,7 +166,7 @@ def test_loop_name_is_not_evidence_either_way():
 
 def test_resident_exit_needs_no_exit_delay_and_csv_reprs_parse():
     row = good_row(exit_priced_delay_source=None, exit_pricing_basis=r17.RESIDENT_EXIT_BASIS,
-                   entry_fill_sim=repr({"price_age_s": 0.1}), levels_crossed_unfired="[]")
+                   levels_crossed_unfired="[]", exit_unverified_reason="")
     assert r17.non_countable_reason(row) is None
 
 
@@ -193,3 +244,23 @@ def test_r17_lists_ship_in_the_fly_image():
     lines = (ROOT / ".dockerignore").read_text().splitlines()
     for name in ("!r17/", "!r17/r17_ids_20261023.json", "!r17/r17_final_ids_20261023.json"):
         assert name in lines
+
+
+def test_c5_labels_name_r17_not_no_trades():
+    import pandas as pd
+    import analysis_hygiene as hyg
+    import fills_by_model as fm
+    import monitor_tiles as mt
+    bad = good_row(trade_id="gs1-unproven00001", stop_coverage=None, exit_unverified_reason="STALE_BOOK")
+    out = hyg.apply(pd.DataFrame([bad]))
+    assert out.empty
+    assert hyg.SUMMARY["r17_reason_counts"] == {"EXIT_UNVERIFIED": 1, "STOP_COVERAGE_MISSING": 1}
+    label = hyg.r17_empty_label()
+    assert label.startswith("0 countable: 1 excluded R17_UNPROVEN") and "STOP_COVERAGE_MISSING=1" in label
+    assert fm.classify(bad) == "r17_unproven"
+    tile = fm.summarise([bad], [bad["research_lane"].upper()])["tiles"][bad["research_lane"].upper()]
+    assert tile["r17_label"].startswith("R17_UNPROVEN: 1 of 1") and tile["r17_reason_counts"]["EXIT_UNVERIFIED"] == 1
+    assert "non_countable_reason" in mt.PRICING_KEYS
+    blk = mt.pricing_block(bad)
+    assert blk["fresh_eligible"] is False and blk["r17_label"] == "R17_UNPROVEN"
+    assert blk["non_countable_reason"] == "R17_UNPROVEN:EXIT_UNVERIFIED|STOP_COVERAGE_MISSING"
