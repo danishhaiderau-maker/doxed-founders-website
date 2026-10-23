@@ -232,6 +232,9 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     "TILE_FILL_SITES",
     # #845 base (feat/r17-dynamic-exclusion): r17_exclusion fail-closed gate in the fresh-eligibility check
     "row_fresh_eligible",
+    # REALISM_V2 F5: settlement-exact funding source (bfx_deriv_status_1s, read-only; no fee term)
+    "DERIV_FILE", "DERIV_WINDOW_S", "DerivStatusFiles", "_num_or_none", "_settlement_from_rows", "_DERIV_FILES",
+    "deriv_settlement",
 })
 
 
