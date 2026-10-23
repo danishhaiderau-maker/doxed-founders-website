@@ -1144,12 +1144,10 @@ class CandidateInputStream:
         if len(source_policy_signatures) > 1:
             return None
         one_second_rows = []
-        one_minute_rows = []
+        # HM #847 N6: 1m segments are no longer loaded; nothing downstream reads canonical_1m_ohlc.
         for ref in lifecycle.get("market_segment_refs") or []:
             if str(ref.get("timeframe")) == "1s":
                 one_second_rows.extend(_load_segment(self.root, ref))
-            elif str(ref.get("timeframe")) == "1m":
-                one_minute_rows.extend(_load_segment(self.root, ref))
         feature = opportunity.get("feature_snapshot_at_signal") or {}
         market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
         fill_execution = next((
@@ -1208,7 +1206,6 @@ class CandidateInputStream:
             ),
             "entry_children": _normalized_entry_children(intent, executions),
             "ordered_1s_prices": one_second_rows,
-            "canonical_1m_ohlc": one_minute_rows,
             "terminal_outcome_state": lifecycle.get("outcome_state"),
         }
 

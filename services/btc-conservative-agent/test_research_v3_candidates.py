@@ -631,6 +631,7 @@ class V3CandidateTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["regime"], "BULL")
+            self.assertNotIn("canonical_1m_ohlc", rows[0])  # HM #847 N6: 1m segments are not loaded
 
     def test_no_candle_fallback_event_outside_book_coverage_is_r17_unproven(self):
         self.assertFalse(hasattr(research_v3_candidates, "_conservative_ohlc_prices"))
