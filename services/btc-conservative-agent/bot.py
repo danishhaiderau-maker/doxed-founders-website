@@ -7584,7 +7584,8 @@ def _paper_lane_entry_core(order: dict, now: float, *, force: bool = False):
         return cached
     lane = str(order.get("research_lane") or "").upper()
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or now)
-    delay_s, delay_source = _disloc_delay(lane, "entry")
+    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+                                          own_signal_to_send_s=_paper_own_s2s_entry(order))
     if not force and now < signal_ts + float(delay_s):
         return None
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
@@ -7757,7 +7758,8 @@ def _paper_entry_rest_drop(order: dict, why: str) -> bool:
     if not st.get("fills"):
         return False
     lane = str(order.get("research_lane") or "").upper()
-    delay_s, delay_source = _disloc_delay(lane, "entry")
+    delay_s, delay_source = _disloc_delay(lane, "entry", pool_key=_paper_entry_pool_key(order, lane),
+                                          own_signal_to_send_s=_paper_own_s2s_entry(order))
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
     signal_ts = float(order.get("signal_created_ts") or order.get("created_ts") or 0)
     _paper_entry_rest_close(order, direction, signal_ts, delay_s, delay_source,
@@ -7937,7 +7939,8 @@ def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
     import tile_fill as _tf
     lane = str(pos.get("research_lane") or "").upper()
     t0 = float(pos.get("exit_trigger_ts") or 0) or float(now)
-    delay_s, delay_source = _disloc_delay(lane, "exit")
+    delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.KEY_EXIT_RO_MKT,
+                                          own_signal_to_send_s=max(0.0, float(now) - t0))
     _paper_note_exit_trigger(pos, t0)
     marks = {"_paper_exit_trigger_ts": None}
     res = _paper_stamp_pool(_tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8039,7 +8042,8 @@ def _paper_lane_exit(pos: dict, exit_reason: str):
         delay_s, delay_source = 0.0, "EXCHANGE_RESIDENT_NO_DELAY"
         price_fn = lambda: _tf.exit_resident_fill(direction, qty, t0)  # noqa: E731
     else:
-        delay_s, delay_source = _disloc_delay(lane, "exit")
+        delay_s, delay_source = _disloc_delay(lane, "exit", pool_key=_live_ack_pool.key_for("exit", exit_order_class=cls),
+                                              own_signal_to_send_s=max(0.0, now - t0))
         _paper_note_exit_trigger(pos, t0)
         price_fn = lambda: _paper_stamp_pool(  # noqa: E731
             _tf.exit_fill(direction, qty, t0, delay_s, delay_source), lane, "exit")
@@ -8214,7 +8218,8 @@ def _delay_leg_unverified(sim) -> bool:
 
 def _non_countable_reasons(pos: dict, exit_reason) -> list:
     """Why a closed row must not count in any statistic: FORCE_FLATTENED (HM R8-live) and/or DEFAULT_DELAY_ENTRY /
-    DEFAULT_DELAY_EXIT (HM C2: priced with the 1.5 s default because the live-ack pool had n < 10)."""
+    DEFAULT_DELAY_EXIT (HM C2: priced with the 1.5 s default because the live-ack pool had n < 10) and/or the
+    shared r17_exclusion.liq_failure label (LIQ_UNVERIFIED / LIQ_CHECK_MISSING / ... ; RK/HM K1) on paper rows."""
     out = []
     if str(exit_reason or "").strip().upper() in STATS_EXCLUDED_EXIT_REASONS:
         out.append("FORCE_FLATTENED")
@@ -8223,6 +8228,10 @@ def _non_countable_reasons(pos: dict, exit_reason) -> list:
             out.append("DEFAULT_DELAY_ENTRY")
         if _delay_leg_unverified(pos.get("exit_fill_sim")):
             out.append("DEFAULT_DELAY_EXIT")
+        import r17_exclusion as _r17
+        lf = _r17.liq_failure(pos)  # RK/HM K1: the shared r17 liquidation proof (liq stamped before this call)
+        if lf:
+            out.append(lf)
     return out
 
 
@@ -32748,6 +32757,7 @@ def close_position(pos: dict, exit_reason: str):
             funding_total=funding_total,
             net_pnl=net_pnl,
         )
+        _liq_row = _terminal_liq_fields(pos, price)  # RK/HM K1: stamp liq before _non_countable_reasons reads it
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,
@@ -32852,7 +32862,7 @@ def close_position(pos: dict, exit_reason: str):
             # leg is non_countable too (non_countable_reasons says why).
             "non_countable": bool(_non_countable_reasons(pos, exit_reason)),
             "non_countable_reasons": _non_countable_reasons(pos, exit_reason) or None,
-            **_terminal_liq_fields(pos, price),
+            **_liq_row,
             **_exit_evidence_fields(pos),
             **_r17_contract_fields(pos),  # R17 (#845): exact contract names on the closed row
             "exit_order_class": pos.get("exit_order_class"),
@@ -33282,7 +33292,9 @@ def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
     """HM-BATCH2 / R3 (no ticker anywhere): record the book top at close on every closed row as COMPARISON columns only
     (never pricing): exit_book_top_bid / exit_book_top_ask / exit_book_top_s from the latest complete bfx_book_10l_1s row
     (paper_fill.book10l_at, the shared pricer's rows). The old exit_bid / exit_ask came from the WS-ticker microstructure
-    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises."""
+    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises.
+    HM R2 N-c: kept (not dead) - read by monitor_checks (exit spread check), data_gaps (exit_bid/ask columns) and
+    monitor_tiles (row view). Comparison only; no pricer or trigger reads these columns."""
     try:
         import paper_fill as _pf
         import quote_trigger as _qt
@@ -33923,7 +33935,10 @@ def _paper_delay_sampler():
         try:
             path = _paper_delay_pool_path()
             if path.is_file():
-                sampler.load(json.loads(path.read_text(encoding="utf-8") or "{}"), globals().get("DATA_EPOCH_ID"))
+                payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+                if sampler.load(payload, globals().get("DATA_EPOCH_ID")):
+                    _paper_exit_triggers_restore(payload)  # HM R2 N-d: same epoch only (load rejects others)
+                    _cross_lane_pool().load(payload.get(_live_ack_pool.POOL_KEY), globals().get("DATA_EPOCH_ID"))
         except Exception as exc:  # noqa: BLE001 - an unreadable pool is an empty pool (default delay, UNVERIFIED)
             logger.warning(f"[F1 DELAY POOL] load failed: {type(exc).__name__}")
         _DISLOC_DELAYS = sampler
@@ -33934,8 +33949,10 @@ def _paper_delay_sampler():
 def _paper_delay_pool_persist() -> bool:
     with _PAPER_DELAY_POOL_LOCK:
         try:
-            return bool(_live_copy._atomic_write_json(
-                _paper_delay_pool_path(), _paper_delay_sampler().to_json(globals().get("DATA_EPOCH_ID"))))
+            payload = _paper_delay_sampler().to_json(globals().get("DATA_EPOCH_ID"))
+            payload[PAPER_EXIT_TRIGGERS_KEY] = dict(list(_PAPER_EXIT_TRIGGERS.items())[-PAPER_EXIT_TRIGGERS_CAP:])
+            payload[_live_ack_pool.POOL_KEY] = _cross_lane_pool().to_json(globals().get("DATA_EPOCH_ID"))
+            return bool(_live_copy._atomic_write_json(_paper_delay_pool_path(), payload))
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[F1 DELAY POOL] persist failed: {type(exc).__name__}")
             return False
@@ -33944,14 +33961,58 @@ def _paper_delay_pool_persist() -> bool:
 def _paper_delay_pool_reset() -> None:
     """Reset hook: the live-ack pool starts empty (persisted empty for the current epoch)."""
     _paper_delay_sampler().clear()
+    _cross_lane_pool().clear()  # RK A: the cross-lane pool is per epoch too
     _PAPER_EXIT_TRIGGERS.clear()
     _paper_delay_pool_persist()
 
 
-def _disloc_delay(lane: str, leg: str):
+import live_ack_pool as _live_ack_pool
+
+_CROSS_LANE_POOL = None
+
+
+def _cross_lane_pool():
+    """RK A: the ONE POOLED_LIVE_ACK_CROSS_LANE pool (live_ack_pool.CrossLanePool, extends the B1 DelaySampler),
+    restored with the B1 pool from paper_delay_pool.json (same epoch check)."""
+    global _CROSS_LANE_POOL
+    if _CROSS_LANE_POOL is None:
+        _CROSS_LANE_POOL = _live_ack_pool.CrossLanePool()
+    return _CROSS_LANE_POOL
+
+
+def _disloc_delay(lane: str, leg: str, *, pool_key: str = None, own_signal_to_send_s=None):
     """Measured live delay per lane/leg from the F1 live-ack pool (DelaySampler): n<10 default 1.5 s (UNVERIFIED),
-    then MAX until n>=20, then q0.90."""
-    return _paper_delay_sampler().delay(lane, leg)
+    then MAX until n>=20, then q0.90.  RK A: a lane with NO live acks of its own on this leg (paper-only: no per-tile
+    list) and a pool key (from its order model) uses the cross-lane pool instead: own signal->send + pooled send->ack,
+    fail closed below n=10 per key."""
+    sampler = _paper_delay_sampler()
+    if pool_key is None and leg == "exit" and own_signal_to_send_s is None:
+        # the one bare exit caller is _tp1_gate (R4 byte-pinned): it decides and sends at the same instant, so the
+        # row's own signal->send is 0 and the exit is a bot-sent reduce-only market order
+        pool_key, own_signal_to_send_s = _live_ack_pool.KEY_EXIT_RO_MKT, 0.0
+    if pool_key is None or sampler._xs(lane, leg):
+        return sampler.delay(lane, leg)
+    pool = _cross_lane_pool()
+    try:
+        if pool.admit_pending(time.time(), _live_ack_pool.boot_log_path()):
+            _paper_delay_pool_persist()
+    except Exception as exc:  # noqa: BLE001 - admission failure only delays admission (fail closed)
+        logger.warning(f"[RK-A POOL] admit failed: {type(exc).__name__}")
+    d, src, _meta = pool.total(pool_key, own_signal_to_send_s)
+    return d, src
+
+
+def _paper_own_s2s_entry(order: dict):
+    """The row's OWN bot-side signal -> send (order created - signal created); None when either is missing."""
+    try:
+        sig, sent = float(order.get("signal_created_ts") or 0), float(order.get("created_ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(sent - sig, 6) if sig > 0 and sent >= sig else None
+
+
+def _paper_entry_pool_key(order: dict, lane: str):
+    return _live_ack_pool.key_for("entry", entry_order_model=_paper_entry_order_model(order, lane).get("entry_order_model"))
 
 
 def _paper_delay_meta(lane: str, leg: str) -> dict:
@@ -33968,6 +34029,8 @@ def _paper_stamp_pool(res, lane: str, leg: str):
     """Stamp the F1 pool provenance (pool_ts included) on a fill result priced with this lane/leg's pool delay."""
     if not isinstance(res, dict):
         return res
+    if _live_ack_pool.is_pooled(res.get("delay_source")):
+        return _cross_lane_pool().stamp(res)  # RK A: POOLED_LIVE_ACK_CROSS_LANE provenance
     meta = _paper_delay_meta(lane, leg)
     if meta and str(res.get("delay_source") or "") == str(meta.get("delay_source") or ""):
         res.update({k: meta.get(k) for k in _DELAY_STAMP_KEYS})
@@ -33975,14 +34038,36 @@ def _paper_stamp_pool(res, lane: str, leg: str):
 
 
 _PAPER_EXIT_TRIGGERS: dict = {}  # trade_id -> paper exit trigger ts (the anchor of that trade's live exit ack)
+PAPER_EXIT_TRIGGERS_KEY = "exit_triggers"  # HM R2 N-d: persisted in the same per-epoch pool file as the B1 pool
+PAPER_EXIT_TRIGGERS_CAP = 2000
+
+
+def _paper_exit_triggers_restore(payload) -> int:
+    """HM R2 N-d: restore the exit-leg anchors persisted with the B1 pool (caller has already checked schema + epoch),
+    so a live exit ack that lands after a restart still pairs with its paper exit trigger. In-memory entries win."""
+    raw = payload.get(PAPER_EXIT_TRIGGERS_KEY) if isinstance(payload, dict) else None
+    n = 0
+    for tid, t0 in list((raw if isinstance(raw, dict) else {}).items())[-PAPER_EXIT_TRIGGERS_CAP:]:
+        try:
+            v = float(t0)
+        except (TypeError, ValueError):
+            continue
+        if tid and math.isfinite(v) and v > 0:
+            _PAPER_EXIT_TRIGGERS.setdefault(str(tid), v)
+            n += 1
+    return n
 
 
 def _paper_note_exit_trigger(pos: dict, t0) -> None:
     tid = str((pos or {}).get("trade_id") or "")
     if tid and t0:
-        if len(_PAPER_EXIT_TRIGGERS) > 2000:
+        _paper_delay_sampler()  # restore the persisted anchors first (per epoch)
+        if tid in _PAPER_EXIT_TRIGGERS:
+            return
+        while len(_PAPER_EXIT_TRIGGERS) >= PAPER_EXIT_TRIGGERS_CAP:
             _PAPER_EXIT_TRIGGERS.pop(next(iter(_PAPER_EXIT_TRIGGERS)))
-        _PAPER_EXIT_TRIGGERS.setdefault(tid, float(t0))
+        _PAPER_EXIT_TRIGGERS[tid] = float(t0)
+        _paper_delay_pool_persist()  # HM R2 N-d: once per trade, survives restarts like the B1 pool
 
 
 def _paper_delay_observe_report(report: dict) -> dict:
@@ -34009,7 +34094,12 @@ def _paper_delay_observe_report(report: dict) -> dict:
             v = sampler.add(lane, leg, end - start, measured_ts=end, trade_id=cid)
             if v is not None:
                 out[leg] = v
-    if out:
+    queued = []
+    try:  # RK A: the same verified report feeds the cross-lane send->ack pool (queued; admitted after the boot check)
+        queued = _cross_lane_pool().observe(report, book_at=_pf.book10l_at, missing_seconds=_pf.book10l_missing_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[RK-A POOL] observe failed: {type(exc).__name__}")
+    if out or queued:
         _paper_delay_pool_persist()
     return out
 

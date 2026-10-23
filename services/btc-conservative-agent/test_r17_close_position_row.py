@@ -72,6 +72,10 @@ def _hold_scan(monkeypatch, pos, now):
     monkeypatch.setattr(qt, "trades_received_after", lambda a, b, c: [])
     monkeypatch.setattr(qt, "trades_coverage", lambda: {"lo_s": pos["entry_ts"] - 60.0, "hi_s": now + 1.0})
     monkeypatch.setattr(bot, "_apply_family_tile_exit", lambda *a, **k: False)  # policy: no level reached
+    # RK/HM K1: the real BFXCI mark series over the hold (never near the liquidation distance) -> liq proven clear
+    marks = [{"s": float(x), "mark": ENTRY} for x in range(int(pos["entry_ts"]), int(now) + 1, 10)]
+    monkeypatch.setattr(qt, "marks_between", lambda a, b: [m for m in marks if a < m["s"] + 1 <= b])
+    monkeypatch.setattr(bot, "_real_mark_at", lambda t: ENTRY)
     assert bot._realism_family_exit(pos, BID, now, exit_source="POSITION_MANAGER", close_async=False) is False
     assert pos.get("levels_scan_to_s") is not None and pos.get("status") == "OPEN"
 
@@ -123,7 +127,8 @@ def test_close_position_row_passes_r17_on_a_clean_book(monkeypatch, tmp_path, re
     for k in ("entry_walk_bp", "exit_walk_bp", "entry_book_age_ms"):
         assert isinstance(row[k], (int, float)) and math.isfinite(row[k]) and row[k] >= 0, (k, row[k])
     assert r17.proof_failures(row) == [], r17.proof_failures(row)
-    assert not row.get("non_countable") or row.get("non_countable_reason") != "R17_UNPROVEN"
+    assert row["liq_unverified"] is False and row["liq_trigger_ts"] is None and row["liq_mark_rows_n"] > 0
+    assert row["non_countable"] is False and row["non_countable_reason"] is None  # HM K2: the row COUNTS
 
 
 @pytest.mark.parametrize("reason", ["TAKE_PROFIT", "BREAKEVEN_LOCK", "PATH_END_60M"])
@@ -171,3 +176,37 @@ def test_close_position_without_hold_scan_is_level_cross_unknown(monkeypatch, tm
     row = built["row"]
     assert row["levels_crossed_unfired"] is None
     assert "LEVEL_CROSS_UNKNOWN" in r17.proof_failures(row)
+
+
+def test_resident_exchange_stop_row_passes_r17(monkeypatch, tmp_path):
+    """HM K2: the exchange-resident stop (EXCHANGE_RESIDENT_NO_DELAY, first book row at/after the trigger) is run
+    through the REAL close_position and passes R17 without an exit delay pool."""
+    import order_model as om
+    monkeypatch.chdir(tmp_path)
+    row = _close(monkeypatch, om.exchange_stop_reason(35))
+    assert row["exit_order_class"] == om.EXCHANGE_RESIDENT
+    assert row["exit_pricing_basis"] == r17_fields.RESIDENT_EXIT_BASIS
+    assert r17.proof_failures(row) == [], r17.proof_failures(row)
+    assert row["non_countable"] is False and row["non_countable_reason"] is None
+
+
+@pytest.mark.parametrize("reason", ["ADMIN_FORCE_FLAT", "DEPLOY_FORCE_FLAT", "ADMIN_MANUAL_CLOSE"])
+def test_forced_exit_row_is_non_countable(monkeypatch, tmp_path, reason):
+    """HM K2 / R8-live: a forced close through the REAL close_position never counts (FORCE_FLATTENED)."""
+    monkeypatch.chdir(tmp_path)
+    row = _close(monkeypatch, reason)
+    assert row["non_countable"] is True
+    assert "FORCE_FLATTENED" in (row.get("non_countable_reasons") or [])
+    assert r17.non_countable_reason(row)
+
+
+@pytest.mark.parametrize("liq", [{"liq_unverified": True, "liq_reason": "LIQ_BEFORE_STOP"},
+                                 {"liq_unverified": None}, {"liq_mark_rows_n": 0},
+                                 {"liq_trigger_ts": 123.0}])
+def test_liq_not_proven_clear_is_non_countable(monkeypatch, tmp_path, liq):
+    """RK/HM K1: a row whose hold path is not PROVEN clear of the liquidation distance never counts."""
+    monkeypatch.chdir(tmp_path)
+    row = _close(monkeypatch, "TAKE_PROFIT")
+    bad = dict(row, **liq)
+    assert any(f.startswith("LIQ_") for f in r17.proof_failures(bad)), r17.proof_failures(bad)
+    assert r17.non_countable_reason(dict(bad, non_countable=False)).startswith("R17_UNPROVEN")

@@ -149,7 +149,9 @@ def _good_closed_row():
     ns = _ns(HELPERS + ("_entry_pricing_fields",), _entry_fill_sim=lambda p: p.get("entry_fill_sim") or {})
     row = {"trade_id": "rv2-r17-good-1", "exit_pricing_basis": "MODEL_TIME",
            "entry_walk_bp": 0.8, "exit_walk_bp": 1.1, "exit_legs_unmeasured": 0, "exit_evidence_status": "COMPLETE",
-           "exit_unverified_reason": None}
+           "exit_unverified_reason": None,
+           # RK/HM K1: order_model.liquidation_check output with marks read and liq_px never reached
+           "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None}
     row.update(ns["_entry_pricing_fields"](pos, {}))
     row.update(ns["_r17_contract_fields"](pos))
     return row
