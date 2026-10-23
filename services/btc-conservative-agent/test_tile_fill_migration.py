@@ -5,6 +5,7 @@ import pytest
 
 import combo_pathway_config as cpc
 import paper_fill as pf
+import live_ack_pool
 import tile_fill as tf
 
 ROOT = pathlib.Path(__file__).parent
@@ -205,8 +206,9 @@ def _lane_ns(clock, extra_names=(), delay=(1.5, "default_until_n10"), xstop=None
                     "_paper_lane_entry_result", "_paper_lane_entry_core", "_rest_unsized_stamp", "_paper_no_fill_shadow_row", "_paper_entry_quote_gate",
                     "_order_entry_decision", "PAPER_ENTRY_TAPE_LAG_S", "_paper_entry_order_model",
                     "_paper_entry_rest_finish", "_paper_entry_maker_rest", "_paper_entry_rest_close",
-                    "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", *extra_names],
-                   trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg: delay,
+                    "_paper_entry_rest_drop", "_real_mark_at", "_liquidation_stamp", "_paper_entry_pool_key", "_paper_own_s2s_entry", *extra_names],
+                   trades_map={}, time=t, logger=_Log(), _disloc_delay=lambda lane, leg, **kw: delay,
+                   _live_ack_pool=live_ack_pool,
                    _paper_stamp_pool=lambda res, lane, leg: res, _paper_note_exit_trigger=lambda pos, t0: None,
                    ACTIVE_TILE_REGISTRY=cpc.ACTIVE_TILE_REGISTRY, _is_paper_book_lane=lambda p: True,
                    _exchange_stop_trigger=(xstop or (lambda pos, a, b: None)),
