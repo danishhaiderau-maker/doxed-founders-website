@@ -34911,12 +34911,9 @@ def _is_local_operator(ip: str) -> bool:
 
 
 def _trusted_dashboard_operator(ip: str) -> bool:
-    """Local operator or request carrying a valid BOT_ADMIN_TOKEN cookie/header."""
-    if _is_local_operator(ip):
-        return True
-    if _BOT_ADMIN_TOKEN and _admin_authed():
-        return True
-    return False
+    """Request carrying a valid BOT_ADMIN_TOKEN cookie/header. RK binding ruling (4) (#852 R3): a local / loopback /
+    X-Forwarded-For source address is never trusted on its own (``ip`` kept for the call signature only)."""
+    return bool(_BOT_ADMIN_TOKEN) and _admin_authed()
 
 
 def _is_direct_local_control(ip: str) -> bool:
@@ -34945,18 +34942,22 @@ def _rate_check(log: dict, key: str, window_s: int, limit: int) -> bool:
         return True
 
 
-def _admin_authed() -> bool:
-    """True if the request carries the admin token (cookie or header)."""
+def _admin_token_presented() -> bool:
+    """RK binding ruling (4) (#852 R3): the ONLY admin credential is BOT_ADMIN_TOKEN (header or cookie), compared in constant
+    time. No token configured => nobody is admin (fail closed); a loopback / X-Forwarded-For / "local" request is NOT a
+    credential on any admin route (arm included)."""
     if not _BOT_ADMIN_TOKEN:
-        # Never turn a missing production secret into an open remote control
-        # surface. Local tests/recovery may still use a direct, unproxied
-        # loopback request; the canonical Fly wrapper requires the secret.
-        return _is_direct_local_control(_client_ip())
-    if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
-        return True
-    if request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
-        return True
+        return False
+    tok = str(_BOT_ADMIN_TOKEN)
+    for v in (request.headers.get("X-Bot-Admin-Token"), request.cookies.get("bot_admin_token")):
+        if v and hmac.compare_digest(str(v).encode(), tok.encode()):
+            return True
     return False
+
+
+def _admin_authed() -> bool:
+    """True only if the request carries the admin token (cookie or header). RK (4): no local / XFF bypass."""
+    return _admin_token_presented()
 
 
 def _admin_authed_strict() -> bool:
@@ -34967,19 +34968,11 @@ def _admin_authed_strict() -> bool:
     presented. Used by /api/state and /debug_state to decide whether to
     return the full state or the sanitized public view.
 
-    Local operator on :7002 (127.0.0.1 / ::1) is always trusted — the home
-    showcase dashboard must render Pathway Lab tiles and controls without
-    requiring a token cookie on every refresh.
+    RK binding ruling (4) (#852 R3): a local operator (127.0.0.1 / ::1) or any
+    X-Forwarded-For value is NOT trusted any more - the home dashboard must
+    carry the bot_admin_token cookie like every other admin client.
     """
-    if _is_local_operator(_client_ip()):
-        return True
-    if not _BOT_ADMIN_TOKEN:
-        return False
-    if request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
-        return True
-    if request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
-        return True
-    return False
+    return _admin_token_presented()
 
 
 def _analyzer_view_cookie_value() -> str:
@@ -35157,7 +35150,7 @@ def _emergency_api_guard():
     is_signed_executor_post = method == "POST" and path in _SIGNED_EXECUTOR_POST_PATHS
     if (
         path.startswith("/api/")
-        and not _is_local_operator(ip)
+        and not _is_direct_local_control(ip)   # RK (4): an XFF "127.0.0.1" no longer skips the rate limit
         and not is_authenticated_data_sync
         and not is_signed_executor_post
     ):
@@ -35200,15 +35193,8 @@ def _emergency_api_guard():
     if method == "OPTIONS":
         return None  # CORS preflight — let route handlers respond
 
-    # The home bridge is a direct 127.0.0.1 caller. Allow only its narrow
-    # pause/resume path during secret rotation. Remote/proxy requests carry
-    # forwarding headers and therefore remain protected by BOT_ADMIN_TOKEN.
-    if (
-        method == "POST"
-        and path in ("/api/pause", "/api/resume")
-        and _is_direct_local_control(ip)
-    ):
-        return None
+    # RK binding ruling (4) (#852 R3): the former direct-127.0.0.1 pause/resume bypass is removed; every admin route (arm
+    # included) requires BOT_ADMIN_TOKEN regardless of source address or X-Forwarded-For.
 
     # Everything else (POST/PUT/DELETE, or GETs not in the safe list) requires
     # the admin token remotely and fails closed if the secret is missing.
@@ -51656,7 +51642,7 @@ def _admin_auth_method() -> str:
         return "ADMIN_TOKEN_HEADER"
     if _BOT_ADMIN_TOKEN and request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
         return "ADMIN_TOKEN_COOKIE"
-    return "DIRECT_LOCAL_CONTROL"
+    return "NONE"   # RK (4): there is no local-control credential any more
 
 
 @app.route('/api/admin/emergency-wal/clear-alarms', methods=['POST'])

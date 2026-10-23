@@ -1109,3 +1109,49 @@ def test_852_l27_every_fly_arm_path_uses_the_one_helper():
     # the retired direct-arm routes cannot arm at all
     for r in ("/api/live_arm", "/api/bitfinex_live"):
         assert "return _retired_direct_arm_response()" in body(r)
+
+
+# ---- RK binding ruling (4) (#852 R3): no local / X-Forwarded-For admin bypass; every admin route needs the token ----------
+def _auth_ns(token, headers=None, cookies=None, remote="127.0.0.1"):
+    import hmac
+    import types
+    req = types.SimpleNamespace(headers=dict(headers or {}), cookies=dict(cookies or {}), remote_addr=remote)
+    req.headers = {k.lower(): v for k, v in req.headers.items()}
+    hdr = req.headers
+    req.headers = types.SimpleNamespace(get=lambda k, d=None: hdr.get(k.lower(), d))
+    ns = {"request": req, "hmac": hmac, "_BOT_ADMIN_TOKEN": token}
+    for fn in ("_client_ip", "_is_local_operator", "_is_direct_local_control", "_admin_token_presented", "_admin_authed",
+               "_admin_authed_strict", "_trusted_dashboard_operator"):
+        exec(_fn_src(fn), ns)
+    return ns
+
+
+def test_rk4_local_or_xff_request_without_the_token_is_refused():
+    tok = "t" * 32
+    cases = [({}, "127.0.0.1"), ({}, "::1"), ({"X-Forwarded-For": "127.0.0.1"}, "10.0.0.5"),
+             ({"X-Forwarded-For": "127.0.0.1, 66.1.2.3"}, "10.0.0.5"), ({"X-Forwarded-For": "::1"}, "127.0.0.1")]
+    for configured in (tok, ""):
+        for headers, remote in cases:
+            ns = _auth_ns(configured, headers, remote=remote)
+            assert not ns["_admin_authed"](), (configured, headers, remote)
+            assert not ns["_admin_authed_strict"](), (configured, headers, remote)
+            assert not ns["_trusted_dashboard_operator"](ns["_client_ip"]()), (configured, headers, remote)
+    # a wrong token from loopback is refused; the right token (header or cookie) is the only credential
+    assert not _auth_ns(tok, {"X-Bot-Admin-Token": "nope"})["_admin_authed_strict"]()
+    assert _auth_ns(tok, {"X-Bot-Admin-Token": tok}, remote="66.1.2.3")["_admin_authed_strict"]()
+    assert _auth_ns(tok, cookies={"bot_admin_token": tok}, remote="66.1.2.3")["_admin_authed"]()
+    assert not _auth_ns("", {"X-Bot-Admin-Token": ""})["_admin_authed"]()               # unset secret: fail closed
+
+
+def test_rk4_no_local_bypass_left_on_any_admin_path():
+    a = _SRC.index("def _before_request_guard") if "def _before_request_guard" in _SRC else _SRC.index("is_signed_executor_post = ")
+    guard = _SRC[a:_SRC.index("def _fast_state_copy")]
+    assert 'path in ("/api/pause", "/api/resume")' not in guard                       # home-bridge pause/resume bypass gone
+    assert "_is_local_operator" not in _fn_src("_admin_authed_strict")
+    assert "_is_direct_local_control" not in _fn_src("_admin_authed") + _fn_src("_admin_token_presented")
+    assert "_is_local_operator" not in _fn_src("_trusted_dashboard_operator")
+    for route in ("/api/live-copy/output", "/api/live-copy/guardian/red-ack", "/api/live-copy/guardian/l27-amendment-pass",
+                  "/api/live-copy/protection-bootstrap"):
+        r = _SRC.index(f"@app.route('{route}'")
+        body = _SRC[r:_SRC.index("\n@app.route(", r + 10)]
+        assert "_is_local_operator" not in body and "_is_direct_local_control" not in body
