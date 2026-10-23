@@ -100,7 +100,8 @@ class BookWalkTape:
     """Book rows and trade prints held as compact arrays (read-only research input)."""
 
     def __init__(self, book_s: np.ndarray, levels: np.ndarray, trade_ts: np.ndarray, trade_px: np.ndarray,
-                 trade_recv_s: np.ndarray, receipt: dict[str, Any], boot_log: "_gd.BootLog | None" = None) -> None:
+                 trade_recv_s: np.ndarray, receipt: dict[str, Any], boot_log: "_gd.BootLog | None" = None,
+                 trade_amt: np.ndarray | None = None) -> None:
         self.book_s = book_s          # int64, sorted, unique (last row per second wins)
         self.levels = levels          # float64 [n, 2, LEVELS, 2]: side (0 bid, 1 ask), level, (px, sz)
         self.trade_ts = trade_ts      # float64 exchange print time, sorted
@@ -108,6 +109,9 @@ class BookWalkTape:
         self.trade_recv_s = trade_recv_s  # int64 collector second each print was written (sorted unique)
         self.receipt = receipt
         self.boot_log = boot_log      # runtime_telemetry boots (C2 BOOT clause); None = unreadable -> flags
+        # Bitfinex signed print amount (negative = sell aggressor); NaN = unknown.  The resting entry limit's queue
+        # model (order_model.maker_rest_step, HM #848 C1) needs the aggressor side and size.
+        self.trade_amt = trade_amt if trade_amt is not None else np.full(len(trade_ts), np.nan)
 
     @classmethod
     def from_rows(cls, book_rows: Iterable[Mapping[str, Any]], trade_rows: Iterable[Mapping[str, Any]] = (),
@@ -132,7 +136,7 @@ class BookWalkTape:
                 stats["book_rows_accepted"] += 1
             else:
                 stats["book_rows_rejected"] += 1
-        prints: list[tuple[float, float, int]] = []
+        prints: list[tuple[float, float, int, float]] = []
         recv: set[int] = set()
         for row in trade_rows:
             s = _num(row.get("s")) if isinstance(row, Mapping) else None
@@ -145,8 +149,12 @@ class BookWalkTape:
                     ms, px = float(tr[1]), float(tr[3])
                 except (TypeError, ValueError, IndexError):
                     continue
+                try:
+                    amt = float(tr[2])
+                except (TypeError, ValueError, IndexError):
+                    amt = math.nan
                 if px > 0 and math.isfinite(px) and math.isfinite(ms):
-                    prints.append((ms / 1000.0, px, int(s)))
+                    prints.append((ms / 1000.0, px, int(s), amt if math.isfinite(amt) else math.nan))
                     stats["trade_prints"] += 1
         prints.sort()
         secs = sorted(by_s)
@@ -164,7 +172,8 @@ class BookWalkTape:
         return cls(np.asarray(secs, dtype=np.int64), levels,
                    np.asarray([p[0] for p in prints], dtype=np.float64),
                    np.asarray([p[1] for p in prints], dtype=np.float64),
-                   np.asarray(sorted(recv), dtype=np.int64), details, boot_log)
+                   np.asarray(sorted(recv), dtype=np.int64), details, boot_log,
+                   np.asarray([p[3] for p in prints], dtype=np.float64))
 
     # ---------------------------------------------------------------- coverage
     def coverage(self, t0: float, t1: float) -> dict[str, Any]:
@@ -207,17 +216,20 @@ class BookWalkTape:
         # detector must see the previous/next print even when it lies outside [t0, t1].
         return BookWalkWindow(self.book_s[lo:hi].copy(), self.levels[lo:hi].copy(),
                               self.trade_ts[tlo:thi].copy(), self.trade_px[tlo:thi].copy(),
-                              tape_trade_ts=self.trade_ts, tape_book_s=self.book_s, boot_log=self.boot_log)
+                              tape_trade_ts=self.trade_ts, tape_book_s=self.book_s, boot_log=self.boot_log,
+                              trade_amt=self.trade_amt[tlo:thi].copy())
 
 
 class BookWalkWindow:
     """One event's book rows and prints (small, picklable for replay workers)."""
 
-    __slots__ = ("book_s", "levels", "trade_ts", "trade_px", "tape_trade_ts", "tape_book_s", "boot_log")
+    __slots__ = ("book_s", "levels", "trade_ts", "trade_px", "tape_trade_ts", "tape_book_s", "boot_log",
+                 "trade_amt")
 
     def __init__(self, book_s, levels, trade_ts, trade_px, *, tape_trade_ts=None, tape_book_s=None,
-                 boot_log=None) -> None:
+                 boot_log=None, trade_amt=None) -> None:
         self.book_s, self.levels, self.trade_ts, self.trade_px = book_s, levels, trade_ts, trade_px
+        self.trade_amt = trade_amt if trade_amt is not None else np.full(len(trade_ts), np.nan)
         self.tape_trade_ts = trade_ts if tape_trade_ts is None else tape_trade_ts
         self.tape_book_s = book_s if tape_book_s is None else tape_book_s
         self.boot_log = boot_log
@@ -227,6 +239,24 @@ class BookWalkWindow:
         return {"s": int(self.book_s[index]),
                 "b": [[float(p), float(z)] for p, z in lv[0] if p == p],
                 "a": [[float(p), float(z)] for p, z in lv[1] if p == p]}
+
+    def trades_between(self, t0: float, t1: float) -> list[dict[str, Any]]:
+        """Prints with ``t0 < ts <= t1`` as ``order_model.maker_rest_step`` / ``quote_trigger.trades_between`` rows
+        ({"ts", "px", "amt"}; amt None when the collector row had no amount)."""
+        lo = int(np.searchsorted(self.trade_ts, t0, side="right"))
+        hi = int(np.searchsorted(self.trade_ts, t1, side="right"))
+        return [{"ts": float(self.trade_ts[i]), "px": float(self.trade_px[i]),
+                 "amt": None if self.trade_amt[i] != self.trade_amt[i] else float(self.trade_amt[i])}
+                for i in range(lo, hi)]
+
+    def gap_clause_at(self, ts: Iterable[float]) -> int:
+        """OR of the shared C2 detector's clause bitmasks for the print gaps containing ``ts`` (full tape prints,
+        book seconds and boot log): non-zero means a print at those instants may be missing from the tape."""
+        arr = np.asarray(list(ts), dtype=np.float64)
+        if not len(arr):
+            return 0
+        return int(np.bitwise_or.reduce(_gd.touch_gap_clauses(arr, self.tape_trade_ts, self.tape_book_s,
+                                                               self.boot_log)))
 
     def book_at(self, t: float) -> dict[str, Any] | None:
         """paper_fill / quote_trigger ``book_at``: the latest row complete at ``t`` (``s + 1 <= t``), no look-ahead."""
