@@ -93,10 +93,27 @@ def current_epoch(data_dir: Path) -> tuple[str | None, str]:
 
 
 # --------------------------------------------------------------------------- exit ladder
+def _no_eligible_exit_ladder_item(cohort: Mapping, eligible: int, registry_trades: int, evidence: dict) -> dict:
+    unproven = int(cohort.get("r17_unproven_count") or 0)
+    if unproven:
+        return _item(
+            "exit_ladder_simulator", "BLOCKED", "R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE",
+            f"{unproven} current-registry paper trade replay(s) are R17_UNPROVEN (span not covered by "
+            "1s book rows and trade prints) and are excluded; no countable trade remains.",
+            eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
+        )
+    return _item(
+        "exit_ladder_simulator", "BLOCKED", "NO_COMPLETE_REPLAY_FOR_CURRENT_REGISTRY_TRADES",
+        "No current-registry executed paper trade has a complete replay path yet.",
+        eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
+    )
+
+
 def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, replay_index=None) -> dict:
     from research.exit_ladder_paper_cohort import (
         SCHEMA as PAPER_SCHEMA,
         build_paper_exit_ladder_cohort,
+        load_book_coverage,
         load_replay_index,
     )
 
@@ -104,7 +121,9 @@ def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, 
     cohort = report.get("cohort_receipt") if isinstance(report.get("cohort_receipt"), Mapping) else None
     if cohort is None or cohort.get("schema") != PAPER_SCHEMA:
         index = replay_index if replay_index is not None else load_replay_index(data_dir)
-        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id)
+        book_coverage, coverage_receipt = load_book_coverage(data_dir, index)
+        cohort = build_paper_exit_ladder_cohort(_read_trades(data_dir), index, epoch_id=epoch_id,
+                                                book_coverage=book_coverage, coverage_receipt=coverage_receipt)
         report_uses_paper_cohort = False
     else:
         report_uses_paper_cohort = True
@@ -130,22 +149,15 @@ def exit_ladder_item(report_dir: Path, data_dir: Path, epoch_id: str | None, *, 
                 "is pending.",
                 eligible=0, total=registry_trades, side="ANALYZER", evidence=evidence,
             )
-        return _item(
-            "exit_ladder_simulator", "BLOCKED", "NO_COMPLETE_REPLAY_FOR_CURRENT_REGISTRY_TRADES",
-            "No current-registry executed paper trade has a complete replay path yet.",
-            eligible=0, total=registry_trades, side="COLLECTION", evidence=evidence,
-        )
+        return _no_eligible_exit_ladder_item(cohort, 0, registry_trades, evidence)
     if not eligible or not matched:
-        return _item(
-            "exit_ladder_simulator", "BLOCKED", "NO_COMPLETE_REPLAY_FOR_CURRENT_REGISTRY_TRADES",
-            "No current-registry executed paper trade has a complete replay path yet.",
-            eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
-        )
+        return _no_eligible_exit_ladder_item(cohort, eligible, registry_trades, evidence)
     if eligible < registry_trades:
         return _item(
             "exit_ladder_simulator", "DEGRADED", "PARTIAL_REPLAY_COVERAGE",
-            f"{eligible}/{registry_trades} current-registry paper trades have a complete replay; "
-            "the rest are missing or still inside their post-exit horizon.",
+            f"{eligible}/{registry_trades} current-registry paper trades have a complete, book-covered "
+            "replay; the rest are missing, still inside their post-exit horizon, or R17_UNPROVEN "
+            f"({int(cohort.get('r17_unproven_count') or 0)} outside book coverage, excluded).",
             eligible=eligible, total=registry_trades, side="COLLECTION", evidence=evidence,
         )
     return _item("exit_ladder_simulator", "OK", None, "All current-registry paper trades replayable.",

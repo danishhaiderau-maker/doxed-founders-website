@@ -18848,11 +18848,14 @@ def exit_ladder_simulator_report(trades=None, session=None):
     raw_replays = _load_jsonl_replays()
     trades, replays, ladder_cohort = filter_for_exit_ladder(
         trades, raw_replays, epoch_id=_fresh_epoch_provenance().get("fresh_epoch_id"),
+        data_dir=os.path.dirname(os.path.abspath(_agent_data_path(SIGNAL_REPLAY_FILE))),
     )
     print(
         f"   exit ladder simulator: {ladder_cohort['cohort']} eligibility "
         f"{ladder_cohort['eligible_count']}/{ladder_cohort['current_registry_trades']} "
-        f"(exclusions={ladder_cohort['exclusion_reason_counts']}). {PIPELINE_ENFORCEMENT_TAG}"
+        f"(exclusions={ladder_cohort['exclusion_reason_counts']}; "
+        f"R17_UNPROVEN={ladder_cohort['r17_unproven_count']} {ladder_cohort['r17_unproven_reasons']}). "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     raw_replays_available = len(raw_replays)
     executed_ids = set()

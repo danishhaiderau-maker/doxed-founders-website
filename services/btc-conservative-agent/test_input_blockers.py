@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from book_walk_test_fixture import book_row, trade_row
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 from research import input_blockers as ib
 from research.exit_ladder_paper_cohort import (
@@ -13,6 +14,17 @@ from research.exit_ladder_paper_cohort import (
     filter_for_exit_ladder,
     load_replay_index,
 )
+
+
+def _covered(t0, t1):
+    return {"covered": True, "reason": None}
+
+
+def _write_book_tape(data: Path, start=990, end=1010):
+    (data / "bfx_book_10l_1s.jsonl").write_text(
+        "".join(json.dumps(book_row(s, 100, 100.05)) + "\n" for s in range(start, end + 1)), encoding="utf-8")
+    (data / "bfx_trades.jsonl").write_text(
+        "".join(json.dumps(trade_row(s, 100.02)) + "\n" for s in range(start, end + 1, 5)), encoding="utf-8")
 
 EPOCH = "epoch-v22-test"
 LANE = ACTIVE_TILE_ORDER[0]
@@ -30,7 +42,7 @@ def _trade(trade_id, lane=LANE, epoch=EPOCH, signature="paper-policy-x", version
 def _replay(trade_id, complete=True, provenance="SHOWCASE_STRATEGY_EXIT", ticks=3):
     return {
         "schema": "signal_replay_v4", "trade_id": trade_id, "lane": "executed",
-        "replay_complete": complete, "terminal_provenance": provenance,
+        "replay_complete": complete, "terminal_provenance": provenance, "start_ts": 1000.0,
         "ticks": [{"t": i, "p": 100 + i} for i in range(ticks)],
     }
 
@@ -58,7 +70,7 @@ class PaperExitLadderCohortTest(unittest.TestCase):
             "fc3-retired": _replay("fc3-retired"),
             "fc3-spoof": _replay("fc3-spoof"),
         }
-        receipt = build_paper_exit_ladder_cohort(rows, replays, epoch_id=EPOCH)
+        receipt = build_paper_exit_ladder_cohort(rows, replays, epoch_id=EPOCH, book_coverage=_covered)
         self.assertEqual(receipt["eligible_trade_ids"], [f"{PREFIX}-alias", f"{PREFIX}-ok"])
         self.assertEqual(receipt["exclusion_reason_counts"], {
             "EXCLUDED_TERMINAL_PROVENANCE": 1,
@@ -74,6 +86,7 @@ class PaperExitLadderCohortTest(unittest.TestCase):
     def test_unknown_epoch_fails_closed(self):
         receipt = build_paper_exit_ladder_cohort(
             [_trade(f"{PREFIX}-ok")], {f"{PREFIX}-ok": _replay(f"{PREFIX}-ok")}, epoch_id=None,
+            book_coverage=_covered,
         )
         self.assertEqual(receipt["eligible_count"], 0)
         self.assertEqual(receipt["exclusion_reason_counts"], {"CURRENT_EPOCH_UNKNOWN": 1})
@@ -82,10 +95,39 @@ class PaperExitLadderCohortTest(unittest.TestCase):
         frame = pd.DataFrame([_trade(f"{PREFIX}-ok"), _trade("fc3-retired", lane="FAMILY_CHANDELIER_3")])
         replays = {f"{PREFIX}-ok": _replay(f"{PREFIX}-ok"), "fc3-retired": _replay("fc3-retired"),
                    "scan-1": _replay("scan-1")}
-        trades, kept, receipt = filter_for_exit_ladder(frame, replays, epoch_id=EPOCH)
+        trades, kept, receipt = filter_for_exit_ladder(frame, replays, epoch_id=EPOCH, book_coverage=_covered)
         self.assertEqual(list(trades["trade_id"]), [f"{PREFIX}-ok"])
         self.assertEqual(list(kept), [f"{PREFIX}-ok"])
         self.assertEqual(receipt["schema"], "paper_exit_ladder_cohort_v1")
+
+    def test_replay_outside_book_coverage_is_r17_unproven_and_excluded(self):
+        rows = [_trade(f"{PREFIX}-covered"), _trade(f"{PREFIX}-late"), _trade(f"{PREFIX}-nospan")]
+        replays = {
+            f"{PREFIX}-covered": _replay(f"{PREFIX}-covered"),
+            f"{PREFIX}-late": {**_replay(f"{PREFIX}-late"), "start_ts": 5000.0},
+            f"{PREFIX}-nospan": {**_replay(f"{PREFIX}-nospan"), "start_ts": None},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_book_tape(Path(tmp))
+            frame = pd.DataFrame(rows)
+            trades, kept, receipt = filter_for_exit_ladder(frame, replays, epoch_id=EPOCH, data_dir=tmp)
+        self.assertEqual(receipt["eligible_trade_ids"], [f"{PREFIX}-covered"])
+        self.assertEqual(list(trades["trade_id"]), [f"{PREFIX}-covered"])
+        self.assertEqual(list(kept), [f"{PREFIX}-covered"])
+        self.assertEqual(receipt["exclusion_reason_counts"], {"R17_UNPROVEN": 2})
+        self.assertEqual(receipt["r17_unproven_count"], 2)
+        self.assertEqual(receipt["r17_unproven_reasons"],
+                         {"BOOK_ROWS_DO_NOT_COVER_WINDOW": 1, "REPLAY_SPAN_UNKNOWN": 1})
+        self.assertEqual(receipt["book_coverage_receipt"]["status"], "LOADED")
+
+    def test_no_book_coverage_fails_closed_every_trade_r17_unproven(self):
+        receipt = build_paper_exit_ladder_cohort(
+            [_trade(f"{PREFIX}-ok")], {f"{PREFIX}-ok": _replay(f"{PREFIX}-ok")}, epoch_id=EPOCH,
+        )
+        self.assertEqual(receipt["eligible_count"], 0)
+        self.assertEqual(receipt["exclusion_reason_counts"], {"R17_UNPROVEN": 1})
+        self.assertEqual(receipt["r17_unproven_reasons"], {"BOOK_COVERAGE_NOT_LOADED": 1})
+        self.assertFalse(receipt["book_coverage_loaded"])
 
     def test_replay_index_promotes_only_explicit_completion_across_rotations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,7 +143,7 @@ class PaperExitLadderCohortTest(unittest.TestCase):
         self.assertFalse(index["b"]["replay_complete"])
 
 
-def _write_fixture(report: Path, data: Path, *, accumulator_epoch=EPOCH):
+def _write_fixture(report: Path, data: Path, *, accumulator_epoch=EPOCH, book_tape=True):
     with open(data / ib.TRADES_CSV, "w", encoding="utf-8", newline="") as handle:
         rows = [_trade(f"{PREFIX}-ok"), _trade(f"{PREFIX}-pending"), _trade("fc3-retired", lane="FAMILY_CHANDELIER_3")]
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -110,6 +152,8 @@ def _write_fixture(report: Path, data: Path, *, accumulator_epoch=EPOCH):
     (data / "signal_replay.jsonl").write_text(
         json.dumps(_replay(f"{PREFIX}-ok")) + "\n"
         + json.dumps(_replay(f"{PREFIX}-pending", complete=False)) + "\n", encoding="utf-8")
+    if book_tape:
+        _write_book_tape(data)
     (data / "research_session.json").write_text(json.dumps({
         "bot_start_time": 1789983916.5, "collector_v22_epoch_ts": 1790624095.1,
         "collector_v22_epoch_id": EPOCH,
@@ -177,6 +221,13 @@ class InputBlockersTest(unittest.TestCase):
         self.assertEqual(item["reason_code"], "REAL_COPY_COHORT_GATE_WHILE_RELAY_DISARMED")
         self.assertEqual(item["evidence"]["paper_cohort"]["eligible_count"], 1)
         self.assertEqual(item["total"], 2)
+
+    def test_exit_ladder_without_book_coverage_is_blocked_r17_unproven(self):
+        _write_fixture(self.report, self.data, book_tape=False)
+        item = ib.exit_ladder_item(self.report, self.data, EPOCH)
+        self.assertEqual((item["status"], item["reason_code"]), ("BLOCKED", "R17_UNPROVEN_OUTSIDE_BOOK_COVERAGE"))
+        self.assertEqual(item["evidence"]["paper_cohort"]["eligible_count"], 0)
+        self.assertEqual(item["evidence"]["paper_cohort"]["r17_unproven_count"], 2)
 
     def test_exit_ladder_with_paper_cohort_receipt_is_degraded_on_partial_coverage(self):
         _write_fixture(self.report, self.data)
