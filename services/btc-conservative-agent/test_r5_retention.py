@@ -273,5 +273,7 @@ def test_c8_pointer_survives_publish_landing_between_the_checks(tmp_path, monkey
         return result
 
     monkeypatch.setattr(_P, "exists", exists)
-    assert r5._drop_transfer_pointers(tmp_path, set()) == 0
+    dropped = r5._drop_transfer_pointers(tmp_path, set())
+    monkeypatch.undo()
+    assert dropped == 0
     assert pointer.exists() and (target.exists() or staging.exists())
