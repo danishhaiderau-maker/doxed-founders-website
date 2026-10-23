@@ -50150,8 +50150,8 @@ def _live_guardian_tick(now=None) -> list:
         _LIVE_GUARDIAN_STATE["calc"] = {k: v for k, v in _calc.items() if k in ("flat_hist", "day_baseline", "day_baseline_ts")}
         _LIVE_GUARDIAN_STATE["error_streak"] = 0
         _LIVE_GUARDIAN_STATE["heartbeat_ts"] = now   # a clean pass: nothing to evaluate while output is OFF
-        if _LIVE_GUARDIAN_STATE.get("red_alert"):
-            _live_guardian_red_clear_if_flat(now)
+        if _LIVE_GUARDIAN_STATE.get("red_alert") and not _LIVE_GUARDIAN_STATE.get("boot_rederive_pending"):
+            _live_guardian_red_clear_if_flat(now)   # RK (1): never before the post-restart exchange reconcile
         return []
     chains = _tile_integrity_chains(now)
     _floor_fn = globals().get("_offline_sim_epoch_floor")
@@ -62666,19 +62666,21 @@ def _live_guardian_position_flatten(v: dict, now=None, spawn=None) -> dict | Non
     return rec
 
 
-_LIVE_FLATTEN_FENCE_TAIL_SEC = 120.0
-
-
+# RK binding ruling (1) (#852 R3): the fence has NO time-based expiry. It lifts only on exchange evidence (a relay read taken
+# after the last flatten finished); an old flatten is satisfied by any later read, so no tail window is needed. The fence is
+# a pure read: lifting it never clears RED, auto_disarm_latched or arm state. After a crash/restart it is held
+# (BOOT_RECONCILE_PENDING) until _live_guardian_boot_rederive has reconciled to the exchange.
 def _live_flatten_entry_fence(now, mirror=None) -> str | None:
     """HM1 (24 Oct, #852): Fly-side entry fence. Live admission refuses (SKIP_MUTEX) while ANY position-flatten or force-flat
     is requested and not done, and after one finishes until a relay mirror read TAKEN AFTER it finished (Fly fetch time -
     relay read age > done_ts) is available. The relay holds its own LiveEntryFence for the whole route as well."""
+    if (globals().get("_LIVE_GUARDIAN_STATE") or {}).get("boot_rederive_pending"):
+        return "BOOT_RECONCILE_PENDING"   # RK (1): reconcile to the exchange first after a crash/restart
     recs = list(_LIVE_GUARDIAN_POSITION_FLATTEN_LOG) + list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)
     for r in recs:
         if r.get("requested") and not r.get("done_ts"):
             return "FLATTEN_IN_PROGRESS"
-    done = [float(r["done_ts"]) for r in recs
-            if r.get("requested") and r.get("done_ts") and now - float(r["done_ts"]) <= _LIVE_FLATTEN_FENCE_TAIL_SEC]
+    done = [float(r["done_ts"]) for r in recs if r.get("requested") and r.get("done_ts")]
     if not done:
         return None
     m = mirror if isinstance(mirror, dict) else {}
@@ -62747,9 +62749,12 @@ def _live_l27_amendment_pass_set(actor, sha, now=None, auth_method: str = "") ->
 
 
 def _live_guardian_arm_block() -> str | None:
-    """Arm refusal while a force-flat is unconfirmed (RED) or still running."""
+    """Arm refusal while a force-flat is unconfirmed (RED) or still running, or (RK (1)) after a crash/restart until the
+    guardian has reconciled to the exchange (boot_rederive_pending)."""
     if _LIVE_GUARDIAN_STATE.get("red_alert"):
         return "LIVE_GUARDIAN_FORCE_FLAT_RED"
+    if _LIVE_GUARDIAN_STATE.get("boot_rederive_pending"):
+        return "LIVE_GUARDIAN_BOOT_RECONCILE_PENDING"
     if any(r.get("requested") and not r.get("done_ts") for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)):
         return "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS"
     return None

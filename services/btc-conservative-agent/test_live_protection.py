@@ -387,6 +387,68 @@ def test_hm1_fly_admission_refuses_while_a_flatten_runs_and_until_a_post_flatten
     assert fence(NOW + 9, {"ok": True, "fetched_at_ts": NOW + 9, "read_age_s": 0.5}) == "FLATTEN_IN_PROGRESS"
 
 
+def _fn_src(name):
+    a = _SRC.index(f"def {name}(")
+    return _SRC[a:_SRC.index("\ndef ", a + 10)]
+
+
+def test_rk1_fence_expiry_never_clears_red_disarm_or_arm_state():
+    import collections
+    ns = _pf_ns()
+    ns["_LIVE_GUARDIAN_FORCE_FLAT_LOG"] = collections.deque(maxlen=50)
+    exec(_fn_src("_live_guardian_arm_block"), ns)
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    st.update(red_alert={"ts": NOW, "code": "STOP_FAILURE_FLATTEN"}, auto_disarm_latched={"ts": NOW, "reason": "x"})
+    before = json.loads(json.dumps(st))
+    fence = ns["_live_flatten_entry_fence"]
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t1", "tile": "gs1"}, NOW, spawn=lambda fn: None)
+    rec["done_ts"] = NOW + 5
+    # no time-based expiry: hours later, with no post-flatten exchange read, the fence is STILL held
+    assert fence(NOW + 7200, {"ok": False}) == "FLATTEN_READBACK_PENDING"
+    assert fence(NOW + 7200, {"ok": True, "fetched_at_ts": NOW + 4, "read_age_s": 0.5}) == "FLATTEN_READBACK_PENDING"
+    # it lifts only on a read taken after the flatten finished - and lifting it changes NO guardian state
+    assert fence(NOW + 7200, {"ok": True, "fetched_at_ts": NOW + 7200, "read_age_s": 1.0}) is None
+    for k in ("red_alert", "auto_disarm_latched"):
+        assert st[k] == before[k]
+    assert ns["_live_guardian_arm_block"]() == "LIVE_GUARDIAN_FORCE_FLAT_RED"
+    assert "_LIVE_FLATTEN_FENCE_TAIL_SEC" not in _SRC
+    body = _fn_src("_live_flatten_entry_fence")
+    assert "pop(" not in body and "_LIVE_GUARDIAN_STATE[" not in body and "output.set" not in body
+
+
+def test_rk1_restart_reconciles_to_the_exchange_before_any_state_change(tmp_path):
+    import collections
+    view = {"fetched_at_ts": NOW + 40, "accounts": [{"armed": False}]}
+    ns = _persist_ns(tmp_path)
+    ns["_LIVE_GUARDIAN_STATE"].update(auto_disarm_latched={"ts": NOW, "reason": "x"})
+    assert ns["_live_guardian_persist"]()
+    ev = {"view": {}, "mirror": {"ok": False}}
+    ns2 = _persist_ns(tmp_path)
+    ns2["_live_copy_website_cached_view"] = lambda: ev["view"]
+    ns2["_live_guardian_mirror"] = lambda: ev["mirror"]
+    ns2["_LIVE_GUARDIAN_POSITION_FLATTEN_LOG"] = collections.deque(maxlen=50)
+    ns2["_LIVE_GUARDIAN_FORCE_FLAT_LOG"] = collections.deque(maxlen=50)
+    for fn in ("_live_guardian_arm_block", "_live_flatten_entry_fence"):
+        exec(_fn_src(fn), ns2)
+    ns2["_live_guardian_restore"](NOW + 30)
+    st = ns2["_LIVE_GUARDIAN_STATE"]
+    # before the reconcile: arming AND live entries are refused, the latch stays
+    assert ns2["_live_guardian_arm_block"]() == "LIVE_GUARDIAN_BOOT_RECONCILE_PENDING"
+    assert ns2["_live_flatten_entry_fence"](NOW + 31, {"ok": True, "fetched_at_ts": NOW + 31, "read_age_s": 0.5}) == "BOOT_RECONCILE_PENDING"
+    assert ns2["_live_guardian_boot_rederive"](NOW + 31) is None and st["boot_rederive_pending"]   # no evidence yet: wait
+    assert ns2["_live_guardian_arm_block"]() == "LIVE_GUARDIAN_BOOT_RECONCILE_PENDING"
+    # exchange evidence arrives: reconcile first, then the gates evaluate normally; the reconcile never unlatches
+    ev.update(view=view, mirror=mirror())
+    assert ns2["_live_guardian_boot_rederive"](NOW + 41) == "FLAT_NO_STOPS"
+    assert "boot_rederive_pending" not in st and st["auto_disarm_latched"]
+    assert ns2["_live_guardian_arm_block"]() is None
+    assert ns2["_live_flatten_entry_fence"](NOW + 41, {"ok": True, "fetched_at_ts": NOW + 41, "read_age_s": 0.5}) is None
+    # the OFF-tick RED clear never runs before the reconcile
+    tick = _fn_src("_live_guardian_tick")
+    assert 'get("red_alert") and not _LIVE_GUARDIAN_STATE.get("boot_rederive_pending")' in tick
+    assert tick.index("_live_guardian_boot_rederive(now)") < tick.index("_live_guardian_red_clear_if_flat(now)")
+
+
 def test_hm1_admission_checks_the_fence_before_admit_entry():
     body = _SRC[_SRC.index("def _live_tile_admission("):_SRC.index("def _live_copy_stamp_payload")]
     assert body.index("_live_flatten_entry_fence(now, mirror)") < body.index("_ltg.admit_entry(")
