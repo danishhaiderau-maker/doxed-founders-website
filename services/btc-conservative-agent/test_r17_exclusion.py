@@ -27,10 +27,18 @@ def _epoch():
     paper_fill.FRESH_EPOCH_TS = old
 
 
+PROOF = {"trigger_price_source": "book", "delay_source": "lane_q90_n24", "delay_unverified": False,
+         "exit_priced_delay_source": "lane_max_n12", "entry_walk_bp": 0.4, "exit_walk_bp": 0.6,
+         "exit_legs_unmeasured": 0, "entry_fill_sim": {"price_age_s": 0.21, "price_stale": False},
+         "exit_price_age_s": 0.33, "levels_crossed_unfired": [], "stop_coverage": "STOP_COVERAGE_OK"}
+
+
 def good_row(**extra):
     row = {"trade_id": "gs1-000000000000", "research_lane": "FAMILY_GS01_XV_PREMIUM_ATR_TP",
            "exit_status": "PAPER_FILL", "fill_model": paper_fill.FILL_MODEL, "fill_model_version": 1,
-           "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True, "all_legs_book10l": True}
+           "entry_ts": EPOCH + 60, "exit_ts": EPOCH + 120, "fill_valid": True, "all_legs_book10l": True,
+           # proof fields (#841 stamps; levels_crossed_unfired / stop_coverage per REALISM_V2 C3)
+           **PROOF}
     row.update(extra)
     return row
 
@@ -59,23 +67,56 @@ def test_rk_list_ids_are_non_countable_and_never_fresh():
     assert paper_fill.row_fresh_strict(good_row()) is True  # control: an unlisted book-triggered row still counts
 
 
-@pytest.mark.parametrize("src", sorted(r17.TICKER_TRIGGER_SOURCES))
-def test_ticker_sourced_trigger_is_rejected_for_ids_on_no_list(src):
+@pytest.mark.parametrize("field,value,reason", [
+    ("trigger_price_source", None, "TRIGGER_SOURCE_MISSING"),
+    ("trigger_price_source", "ticker", "TRIGGER_NOT_BOOK"),
+    ("trigger_price_source", "last_trade", "TRIGGER_NOT_BOOK"),
+    ("delay_source", None, "DELAY_SOURCE_MISSING"),
+    ("delay_source", "default_until_n10", "DELAY_NOT_MEASURED"),
+    ("delay_source", "lane_max_n9", "DELAY_NOT_MEASURED"),
+    ("delay_unverified", True, "DELAY_UNVERIFIED"),
+    ("exit_priced_delay_source", None, "EXIT_DELAY_NOT_MEASURED"),
+    ("exit_priced_delay_source", "default_until_n10", "EXIT_DELAY_NOT_MEASURED"),
+    ("entry_walk_bp", None, "ENTRY_NOT_BOOK_WALKED"),
+    ("entry_walk_bp", float("nan"), "ENTRY_NOT_BOOK_WALKED"),
+    ("entry_fill_sim", {}, "ENTRY_PRICE_AGE_MISSING"),
+    ("entry_fill_sim", {"price_age_s": 0.2, "price_stale": True}, "ENTRY_PRICE_STALE"),
+    ("exit_walk_bp", None, "EXIT_NOT_BOOK_WALKED"),
+    ("exit_legs_unmeasured", 1, "EXIT_LEG_UNMEASURED"),
+    ("exit_price_age_s", None, "EXIT_PRICE_AGE_MISSING"),
+    ("levels_crossed_unfired", None, "LEVEL_CROSS_UNKNOWN"),
+    ("levels_crossed_unfired", ["SL"], "LEVEL_CROSSED_UNFIRED"),
+    ("levels_crossed_unfired", "unknown", "LEVEL_CROSSED_UNFIRED"),
+    ("stop_coverage", "STOP_COVERAGE_GAP", "STOP_COVERAGE_GAP"),
+    ("stop_coverage", "STOP_COVERAGE_UNVERIFIED", "STOP_COVERAGE_GAP"),
+])
+def test_any_missing_or_unknown_proof_excludes_ids_on_no_list(field, value, reason):
     tid = "gs1-ffffffffffff"
     assert tid not in r17.R17_IDS
-    ev = {"schema": "trade_event_timestamps_v1", "exit_trigger_source": src}
-    for row in (good_row(trade_id=tid, exit_trigger_source=src),
-                good_row(trade_id=tid, event_timestamps=ev),
-                good_row(trade_id=tid, event_timestamps=repr(ev)),        # bot.log_trade CSV dict repr
-                good_row(trade_id=tid, event_timestamps=json.dumps(ev)),
-                good_row(trade_id=tid, exit_trigger_source=src.lower())):
-        assert r17.non_countable_reason(row) == f"R17_TICKER_TRIGGER:{src}"
-        assert paper_fill.row_fresh_strict(row) is False and paper_fill.row_fresh_eligible(row) is False
+    row = good_row(trade_id=tid, **{field: value})
+    got = r17.non_countable_reason(row)
+    assert got and got.startswith("R17_UNPROVEN:") and reason in got.split(":", 1)[1].split("|")
+    assert paper_fill.row_fresh_strict(row) is False and paper_fill.row_fresh_eligible(row) is False
 
 
-def test_book_and_admin_triggers_are_not_rejected_by_the_trigger_rule():
-    for src in (None, "", "PAPER_BOOK_EXIT", "ADMIN_MANUAL_CLOSE", "PATH_END_60M"):
+def test_row_without_any_proof_lists_every_reason():
+    bare = {"trade_id": "gs1-eeeeeeeeeeee", "exit_status": "PAPER_FILL"}
+    got = r17.non_countable_reason(bare).split(":", 1)[1].split("|")
+    assert set(got) >= {"TRIGGER_SOURCE_MISSING", "DELAY_SOURCE_MISSING", "EXIT_DELAY_NOT_MEASURED",
+                        "ENTRY_NOT_BOOK_WALKED", "ENTRY_PRICE_AGE_MISSING", "EXIT_NOT_BOOK_WALKED",
+                        "EXIT_PRICE_AGE_MISSING", "LEVEL_CROSS_UNKNOWN"}
+
+
+def test_loop_name_is_not_evidence_either_way():
+    # #841 still names the loop (POSITION_MANAGER / PROTECTIVE_EXIT_WORKER / WS_TICK) on book-triggered rows
+    for src in (None, "", "POSITION_MANAGER", "PROTECTIVE_EXIT_WORKER", "WS_TICK", "ADMIN_MANUAL_CLOSE"):
         assert r17.non_countable_reason(good_row(exit_trigger_source=src)) is None, src
+
+
+def test_resident_exit_needs_no_exit_delay_and_csv_reprs_parse():
+    row = good_row(exit_priced_delay_source=None, exit_pricing_basis=r17.RESIDENT_EXIT_BASIS,
+                   entry_fill_sim=repr({"price_age_s": 0.1}), levels_crossed_unfired="[]")
+    assert r17.non_countable_reason(row) is None
 
 
 def test_wrapped_trade_id_keeps_exclusion_and_stamped_rows_stay_excluded():
@@ -102,9 +143,8 @@ def test_stamp_on_write_marks_new_rows():
     bad = r17.stamp_on_write(good_row(trade_id=tid, fresh_eligible=True))
     assert bad["non_countable"] is True and bad["non_countable_reason"] == r17.REASON_ID_LIST
     assert bad["fresh_eligible"] is False
-    tick = r17.stamp_on_write(good_row(trade_id="rnd-ffffffffffff",
-                                       event_timestamps={"exit_trigger_source": "WS_TICK"}))
-    assert tick["non_countable"] is True and tick["non_countable_reason"] == "R17_TICKER_TRIGGER:WS_TICK"
+    tick = r17.stamp_on_write(good_row(trade_id="rnd-ffffffffffff", trigger_price_source="ticker"))
+    assert tick["non_countable"] is True and tick["non_countable_reason"] == "R17_UNPROVEN:TRIGGER_NOT_BOOK"
     ok = r17.stamp_on_write(good_row(fresh_eligible=True))
     assert ok["non_countable"] is False and ok["non_countable_reason"] is None and ok["fresh_eligible"] is True
 
@@ -127,10 +167,12 @@ def test_close_position_stamps_trade_row_on_write_before_any_writer():
 def test_analyzer_hygiene_excludes_r17_rows_without_opt_in():
     tid = next(iter(sorted(r17.R17_IDS)))
     df = pd.DataFrame([
-        {"trade_id": "a", "exit_reason": "BREAKEVEN_LOCK", "net_pnl_usd": 0.01, "notional_usd": 25.0, "close_ts": 1.0},
+        {"trade_id": "a", "exit_reason": "BREAKEVEN_LOCK", "net_pnl_usd": 0.01, "notional_usd": 25.0, "close_ts": 1.0,
+         **{k: (repr(v) if isinstance(v, (dict, list)) else v) for k, v in PROOF.items()}},
         {"trade_id": tid, "exit_reason": "BREAKEVEN_LOCK", "net_pnl_usd": 0.01, "notional_usd": 25.0, "close_ts": 1.0},
         {"trade_id": "c", "exit_reason": "TP1", "net_pnl_usd": 0.01, "notional_usd": 25.0, "close_ts": 1.0,
-         "event_timestamps": repr({"exit_trigger_source": "POSITION_MANAGER"})},
+         **{k: (repr(v) if isinstance(v, (dict, list)) else v) for k, v in PROOF.items()},
+         "delay_source": "default_until_n10"},
         {"trade_id": "d", "exit_reason": "TP1", "net_pnl_usd": 0.01, "notional_usd": 25.0, "close_ts": 1.0,
          "non_countable": True, "non_countable_reason": "R17_TICKER_TRIGGER:WS_TICK"},
     ])

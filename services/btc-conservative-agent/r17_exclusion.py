@@ -6,9 +6,19 @@ A closed row is NON-COUNTABLE (never fresh data, never in an analyzer verdict) w
    * ``r17_ids_20261023.json`` (RK list, 995 ids, file sha256 46bc5012...a801b7), and
    * ``r17_final_ids_20261023.json`` (reconciled r17_final list, 1030 ids = the 995 + 35 ADMIN_MANUAL_CLOSE rows,
      sha256 of the compact sorted id list a4701c55...2bc7);
-2. OR (the dynamic rule, so a static list is never the only guard) its exit was triggered by a ticker-sourced
-   price feed instead of the order book: ``exit_trigger_source`` in POSITION_MANAGER / PROTECTIVE_EXIT_WORKER /
-   WS_TICK, read from the row or from its ``event_timestamps`` block (dict, or the CSV-reloaded dict repr / JSON string);
+2. OR (the dynamic rule, INVERTED per HM/RK 23 Oct: proof, not loop name) the row does not PROVE all of
+   (a) ``trigger_price_source == "book"`` (#841 stamp);
+   (b) a measured delay: entry ``delay_source`` is ``lane_max_n<N>`` / ``lane_q90_n<N>`` with N >= 10 (or
+       ``EXCHANGE_RESIDENT_NO_DELAY``), ``delay_unverified`` is not true, and the exit leg's
+       ``exit_priced_delay_source`` is measured as well (a resident exit, ``exit_pricing_basis`` =
+       EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER, needs none);
+   (c) both legs walked on the book with a recorded price age: ``entry_walk_bp`` and ``exit_walk_bp`` not None,
+       ``exit_legs_unmeasured`` 0, entry price age (``entry_price_age_s`` or ``entry_fill_sim.price_age_s``) and
+       exit price age (``exit_price_age_s`` or ``exit_eval_price_age_s``) numeric, and no ``price_stale``;
+   (d) no stop/TP/BE level crossed during the hold without firing: ``levels_crossed_unfired`` present and empty /
+       0 / false, and ``stop_coverage`` not STOP_COVERAGE_GAP / STOP_COVERAGE_UNVERIFIED.
+   ANY missing or unknown field excludes the row; the reason is ``R17_UNPROVEN:`` plus every failed check joined
+   by ``|``. (d) is not yet stamped by #841, so every row is excluded until REALISM_V2 C3 stamps it (fail closed).
 3. OR the row was already stamped ``non_countable`` at write time.
 
 Fail closed: if a list file is missing or its sha256 differs from the pin, EVERY row is non-countable
@@ -28,11 +38,11 @@ PINNED_LISTS = {
     "r17_ids_20261023.json": "46bc50129176563e15e68591d8f419b66815daec58475206f89b288367a801b7",
     "r17_final_ids_20261023.json": "a4701c554f5085408bbde2c206b0d043169577359d52f17b6a41b40fc36e2bc7",
 }
-# Exit triggers evaluated off a ticker / last-trade price, not the BOOK10L book: never countable.
-TICKER_TRIGGER_SOURCES = frozenset({"POSITION_MANAGER", "PROTECTIVE_EXIT_WORKER", "WS_TICK"})
+MIN_POOL_N = 10  # paper_fill.MIN_POOL_N (RK delay pool): below it the delay is UNVERIFIED_DELAY
+RESIDENT_EXIT_BASIS = "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
 
 REASON_ID_LIST = "R17_ID_LIST"
-REASON_TICKER_TRIGGER = "R17_TICKER_TRIGGER"
+REASON_UNPROVEN = "R17_UNPROVEN"
 REASON_UNVERIFIED = "R17_LIST_UNVERIFIED"
 REASON_STAMPED = "R17_STAMPED"
 
@@ -89,20 +99,112 @@ def _parse_block(text: str):
 
 
 def exit_trigger_source(row) -> str:
+    """Kept for diagnostics only (the loop name is NOT evidence of the price basis)."""
     if not isinstance(row, dict):
         return ""
     src = row.get("exit_trigger_source")
     if not src:
-        ev = row.get("event_timestamps")
-        if isinstance(ev, str) and ev.strip().startswith("{"):
-            ev = _parse_block(ev)
-        if isinstance(ev, dict):
-            src = ev.get("exit_trigger_source")
+        ev = _event_block(row)
+        src = ev.get("exit_trigger_source") if ev else None
     return str(src or "").strip().upper()
+
+
+def _event_block(row):
+    ev = row.get("event_timestamps")
+    if isinstance(ev, str) and ev.strip().startswith("{"):
+        ev = _parse_block(ev)
+    return ev if isinstance(ev, dict) else None
 
 
 def _truthy(v) -> bool:
     return v is True or str(v).strip().lower() in ("1", "true", "yes")
+
+
+def _sub(row, key):
+    v = row.get(key)
+    if isinstance(v, str) and v.strip().startswith("{"):
+        v = _parse_block(v)
+    return v if isinstance(v, dict) else {}
+
+
+def _num(v):
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN (CSV/pandas blank) is missing
+
+
+def _missing(v) -> bool:
+    return v is None or (isinstance(v, float) and v != v) or (isinstance(v, str) and not v.strip())
+
+
+def _delay_measured(src) -> bool:
+    import re
+    s = str(src or "").strip()
+    if s == "EXCHANGE_RESIDENT_NO_DELAY":
+        return True
+    m = re.fullmatch(r"lane_(?:max|q90)_n(\d+)", s)
+    return bool(m) and int(m.group(1)) >= MIN_POOL_N
+
+
+def _no_unfired_cross(v) -> bool:
+    if _missing(v):
+        return False
+    if isinstance(v, str):
+        t = v.strip()
+        if t.startswith("["):
+            try:
+                v = json.loads(t)
+            except ValueError:
+                return False
+        elif t.lower() in ("false", "0", "none", "[]"):
+            return True
+        else:
+            return False
+    if isinstance(v, (list, tuple)):
+        return len(v) == 0
+    return v is False or (_num(v) == 0)
+
+
+def proof_failures(row) -> list:
+    """Every failed countability check (empty list = the row proves book realism)."""
+    efs = _sub(row, "entry_fill_sim")
+    prov = _sub(row, "entry_provenance")
+    out = []
+    if str(row.get("trigger_price_source") or "").strip().lower() != "book":
+        out.append("TRIGGER_NOT_BOOK" if not _missing(row.get("trigger_price_source")) else "TRIGGER_SOURCE_MISSING")
+    if not _delay_measured(row.get("delay_source")):
+        out.append("DELAY_NOT_MEASURED" if not _missing(row.get("delay_source")) else "DELAY_SOURCE_MISSING")
+    if _truthy(row.get("delay_unverified")):
+        out.append("DELAY_UNVERIFIED")
+    resident_exit = str(row.get("exit_pricing_basis") or "") == RESIDENT_EXIT_BASIS
+    if not resident_exit and not _delay_measured(row.get("exit_priced_delay_source")):
+        out.append("EXIT_DELAY_NOT_MEASURED")
+    if _num(row.get("entry_walk_bp")) is None:
+        out.append("ENTRY_NOT_BOOK_WALKED")
+    entry_age = next((a for a in (_num(row.get("entry_price_age_s")), _num(efs.get("price_age_s")),
+                                  _num(prov.get("price_age_s"))) if a is not None), None)
+    if entry_age is None:
+        out.append("ENTRY_PRICE_AGE_MISSING")
+    if _truthy(row.get("entry_price_stale")) or _truthy(efs.get("price_stale")):
+        out.append("ENTRY_PRICE_STALE")
+    if _num(row.get("exit_walk_bp")) is None:
+        out.append("EXIT_NOT_BOOK_WALKED")
+    unmeasured = _num(row.get("exit_legs_unmeasured"))
+    if not _missing(row.get("exit_legs_unmeasured")) and unmeasured != 0:
+        out.append("EXIT_LEG_UNMEASURED")
+    if _num(row.get("exit_price_age_s")) is None and _num(row.get("exit_eval_price_age_s")) is None:
+        out.append("EXIT_PRICE_AGE_MISSING")
+    if _truthy(row.get("exit_price_stale")):
+        out.append("EXIT_PRICE_STALE")
+    if not _no_unfired_cross(row.get("levels_crossed_unfired")):
+        out.append("LEVEL_CROSS_UNKNOWN" if _missing(row.get("levels_crossed_unfired")) else "LEVEL_CROSSED_UNFIRED")
+    if str(row.get("stop_coverage") or "").strip().upper() in ("STOP_COVERAGE_GAP", "STOP_COVERAGE_UNVERIFIED"):
+        out.append("STOP_COVERAGE_GAP")
+    return out
 
 
 def non_countable_reason(row, *, ids=None, load_errors=None):
@@ -116,11 +218,11 @@ def non_countable_reason(row, *, ids=None, load_errors=None):
     tid = str(row.get("trade_id") or "").strip()
     if tid and (tid in ids or _base_trade_id(tid) in ids):
         return REASON_ID_LIST
-    src = exit_trigger_source(row)
-    if src in TICKER_TRIGGER_SOURCES:
-        return f"{REASON_TICKER_TRIGGER}:{src}"
     if _truthy(row.get("non_countable")):
         return str(row.get("non_countable_reason") or REASON_STAMPED)
+    failed = proof_failures(row)
+    if failed:
+        return REASON_UNPROVEN + ":" + "|".join(failed)
     return None
 
 
@@ -137,6 +239,6 @@ def stamp_on_write(row: dict) -> dict:
 
 
 def status() -> dict:
-    return {"schema": "r17_exclusion_v1", "ids": len(R17_IDS), "lists": dict(PINNED_LISTS),
-            "load_errors": list(LOAD_ERRORS), "ticker_trigger_sources": sorted(TICKER_TRIGGER_SOURCES),
+    return {"schema": "r17_exclusion_v2", "ids": len(R17_IDS), "lists": dict(PINNED_LISTS),
+            "load_errors": list(LOAD_ERRORS), "rule": "countable_only_with_proof",
             "fail_closed": bool(LOAD_ERRORS)}
