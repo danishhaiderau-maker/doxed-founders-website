@@ -41,6 +41,7 @@ BASIS_BOOK_WALK = "BOOK10L_WALK_TRADE_STOP_V1"
 R17_UNPROVEN = "R17_UNPROVEN"
 STOP_TRIGGER_LABEL = "LAST_TRADE_DOC_INFERRED"
 STOP_BASIS_UNVERIFIED = "STOP_BASIS_UNVERIFIED"
+PATH_HORIZON_SEC = 7200  # replay horizon after the entry fill (moved from the retired research_v3_side_marks)
 MAX_BOOK_GAP_S = _pf.MAX_BOOK_AGE_S  # 2 s: a longer gap between book rows breaks coverage
 MAX_TRADE_GAP_S = 300.0  # no trade-print row for 5 min inside a window = trade collector outage
 # HM #847 N3: bfx_book_10l / bfx_trades are collected for the Bitfinex perp only (bfx_book_top.SYMBOL).

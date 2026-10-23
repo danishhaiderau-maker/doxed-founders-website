@@ -23,6 +23,7 @@ import numpy as np
 
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
+    PATH_HORIZON_SEC,
     R17_UNPROVEN,
     STOP_BASIS_UNVERIFIED,
     STOP_TRIGGER_LABEL,
@@ -32,7 +33,6 @@ from research_v3_book_walk import (
     load_book_walk,
 )
 from research_v3_policy_replay import ReplayPlan, replay_cell
-from research_v3_side_marks import PATH_HORIZON_SEC
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
