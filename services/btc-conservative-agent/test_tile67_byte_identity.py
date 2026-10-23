@@ -17,13 +17,14 @@ BASE = "51d926f93"
 # #840 order model (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core (live order-type model: resident stop, BOT_SENT market exits, model-time exits).
 # #841 RK fixes (23 Oct 2026): intentional pin move for bot.py:_paper_lane_entry_result, bot.py:_paper_lane_exit, paper_fill.py:_paper_fill_core, paper_fill.py:paper_fill (trades-only stops, first-row-at-or-after resident fill, BFX truncation, liquidation stamp).
 # #842 book exits (23 Oct 2026): intentional pin move for bot.py:get_mark_price, bot.py:_paper_lane_entry_result, bot.py:_tp1_gate, bot.py:_paper_lane_exit, bot.py:_disloc_delay, paper_fill.py:_paper_fill_core (every lane exits on book rows via the shared pricer; no ticker).
+# #842 RK ruling A (24 Oct 2026): intentional pin move for bot.py:_paper_lane_exit, bot.py:_disloc_delay (POOLED_LIVE_ACK_CROSS_LANE: a paper-only lane times fills with its own signal->send + the shared cross-lane send->ack pool; fail closed below n=10).
 PINNED = {
     "bot.py": {
         "get_mark_price": "b03f13d6030996983221371bede76b67fd2f610c03922e9aa3f142ece840b9c6",
         "_paper_lane_entry_result": "a227911677f4b9c9f80b0bec463171fe9e06e4190d2ddac5e1d51005193ef05d",
         "_tp1_gate": "49ad3cb852da75e99879f00713e6a43d6b2b1f315f4d8e6066b6ced711b17062",
-        "_paper_lane_exit": "39f0f42b7c4259ce2a64e3af253704a9862898a2d0f586a6fa09954c74e5cdfa",
-        "_disloc_delay": "abbdf95f84130c322712ff3193a42d6eca11fc1683ddead40d894c79b2c04d86"
+        "_paper_lane_exit": "0a1641587c50eb800fc78bec981721fb4dcac5aee280b5ee5d01dc7aa2dafb6e",
+        "_disloc_delay": "78f532e68c3d1b9b324b15c8c1f19ae1d8f5cf5b05f30b646afed5770418acf0"
     },
     "paper_fill.py": {
         "_f": "c70d10da2af1181b4d56905d296e71c2b6da8603ab5d7e9a22c0ad0b0b6e303f",

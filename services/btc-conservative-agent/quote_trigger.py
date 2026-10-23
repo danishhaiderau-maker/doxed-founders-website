@@ -509,7 +509,11 @@ def book_exit_price(direction: Any, now: float, book_at: Callable[[float], Optio
 
 
 def live_tp_be_trigger(direction: Any, level: Any, now: float, book: Any) -> Optional[dict]:
-    """The TP / BE-lock level test on the latest complete book row known at ``now`` (same rule as paper)."""
+    """The TP / BE-lock level test on the latest complete book row known at ``now`` (same rule as paper).
+
+    TEST-ONLY reference (HM R2 N-b): no production caller. The live TP/BE trigger in production is bot.get_mark_price
+    (book_exit_mark, book-only, 0.0 on a stale book); test_quote_trigger pins that this helper and the paper driver
+    apply the same first_level_trigger rule. Do not add a second trigger path through it (R4)."""
     ready = book_ready_ts(book)
     if ready is None or ready > float(now) or is_stale(_age(float(now), _f(book.get("s")))):
         return None

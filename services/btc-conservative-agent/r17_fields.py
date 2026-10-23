@@ -16,13 +16,14 @@ Sources at #841 realism-v2/rk-fixes @9f095dbf (what each field is copied FROM):
   exit_pricing_basis       pos["exit_pricing_basis"] (already on the row)
   levels_crossed_unfired   NEW (REALISM_V2 C3/C4): list of stop/TP/BE levels crossed during the hold that did not fire
   stop_coverage            NEW (REALISM_V2 C3): STOP_COVERAGE_OK only when the trades tail covered the whole hold
+  liq_unverified           pos["liq_unverified"] (bot._liquidation_stamp / _terminal_liq_fields; order_model.liquidation_check)
 """
 from __future__ import annotations
 
 MIN_POOL_N = 10  # paper_fill.MIN_POOL_N: below it the delay is UNVERIFIED_DELAY
 RESIDENT_DELAY_SOURCE = "EXCHANGE_RESIDENT_NO_DELAY"
 RESIDENT_EXIT_BASIS = "EXCHANGE_RESIDENT_FIRST_ROW_AT_OR_AFTER_TRIGGER"
-MEASURED_DELAY_PATTERN = r"lane_(?:max|q90)_n(\d+)"  # with N >= MIN_POOL_N, or RESIDENT_DELAY_SOURCE
+MEASURED_DELAY_PATTERN = r"(?:lane|POOLED_LIVE_ACK_CROSS_LANE:(?:ENTRY_MKT_GTC|MAKER_REST|EXIT_RO_MKT))_(?:max|q90)_n(\d+)"  # RK A  # with N >= MIN_POOL_N, or RESIDENT_DELAY_SOURCE
 
 TRIGGER_PRICE_SOURCE_OK = frozenset({"book"})
 EVIDENCE_OK = frozenset({"COMPLETE"})
@@ -31,7 +32,7 @@ STOP_COVERAGE_OK = frozenset({"STOP_COVERAGE_OK"})
 # field -> accepted positive value (human/contract form; r17_exclusion implements the check)
 CONTRACT = {
     "trigger_price_source": "book",
-    "delay_source": f"lane_max_n<N> | lane_q90_n<N> (N >= {MIN_POOL_N}) | {RESIDENT_DELAY_SOURCE}",
+    "delay_source": f"lane_max_n<N> | lane_q90_n<N> | POOLED_LIVE_ACK_CROSS_LANE:<ENTRY_MKT_GTC|MAKER_REST|EXIT_RO_MKT>_<max|q90>_n<N> (N >= {MIN_POOL_N}) | {RESIDENT_DELAY_SOURCE}",
     "exit_priced_delay_source": f"same as delay_source; not required when exit_pricing_basis == {RESIDENT_EXIT_BASIS}",
     "entry_walk_bp": "number (not None/NaN)",
     "exit_walk_bp": "number (not None/NaN)",
@@ -44,6 +45,10 @@ CONTRACT = {
     "exit_unverified_reason": "absent / None / empty",
     "levels_crossed_unfired": "[] (real empty list) or False; a string such as 'None' fails",
     "stop_coverage": "STOP_COVERAGE_OK",
+    "liq_unverified": "False (real bool or 'false') AND liq_mark_rows_n > 0 AND no liq_trigger_ts: the hold path is "
+                      "proven clear of the liquidation distance (RK/HM K1, 24 Oct); True or missing fails",
+    "liq_mark_rows_n": "number > 0 (the BFXCI mark series over the hold was read)",
+    "liq_trigger_ts": "absent / None (neither the mark nor a last trade reached liq_px during the hold)",
 }
 # Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
 # numbers must be finite and >= 0.
