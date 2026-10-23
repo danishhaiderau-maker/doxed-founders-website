@@ -38,6 +38,7 @@ from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
 from research.fill_model import fill_model_declaration
 from execution_cost_receipt_adapter import build_measured_execution_cost_receipt
+from r17_fields import ENTRY_PRICE_SOURCE_1S, R17_UNPROVEN_ENTRY  # the ONE R17 contract module (R4)
 
 
 def protection_screen() -> list[dict[str, Any]]:
@@ -1354,8 +1355,6 @@ _KIND_NO_FILL, _KIND_REPLAYED = 0, 4
 # for pricing. Until that entry moves to the book (paper_fill + quote_trigger, see the follow-up fix PR),
 # every FILL/PARTIAL_FILL CONSERVATIVE cell is R17_UNPROVEN (reason R17_UNPROVEN_ENTRY): never countable,
 # its PnL kept only as ``unproven_net_pnl_usd``.
-R17_UNPROVEN_ENTRY = "R17_UNPROVEN_ENTRY"
-ENTRY_PRICE_SOURCE_1S = "MARKET_MICROSTRUCTURE_1S"
 _ENTRY_UNPROVEN_PREFIX = R17_UNPROVEN_ENTRY + ":"
 _NAN = float("nan")
 
