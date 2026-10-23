@@ -10,7 +10,8 @@ Binding model (tracker "REALISM FIXES F1-F7", HM #807 a-h, Rules Keeper, steerin
   MARKET book walk at trigger + delay. No maker exits, no booking at the target.
 - Entries: WALK_THEN_REST (GS-01 / GS-06 / CTRL: walk to a 5 bp protection limit, remainder rests under maker rules
   until the 3 s TTL then cancels), MAKER_REST (B1 / B2 regime cells: rest 600-1200 s, repriced at the
-  LIMIT_UPDATED cadence, queue reset on every reprice), IOC_MARKET (DISLOC; tiles 6/7 stay OFF).
+  LIMIT_UPDATED cadence, queue reset on every reprice), IOC_MARKET (entry_policy.mode SELF_SIMULATED /
+  MARKET_AT_REAL_TOUCH only; DISLOC is retired and removed from TILE_FILL_SITES / COMBO_EXECUTION_LANES).
 """
 from __future__ import annotations
 
