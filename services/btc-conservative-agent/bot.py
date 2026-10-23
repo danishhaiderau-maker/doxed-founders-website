@@ -8465,14 +8465,22 @@ def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: 
     wait = 0.0 if (getattr(_PAPER_EXIT_TLS, "no_wait", False) or dead) else LEGACY_EXIT_BOOK_WAIT_S
     deadline = time.time() + wait
     while True:
-        row = _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2))
+        # RK 24 Oct (3): the FIRST row received at/after the fill time (shared helper); a row that cannot be proven
+        # first (or has no measured receive_ts) is still priced but UNVERIFIED via the shared first_after_proof.
+        _hz = max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2)
+        row = (_pf.first_row_received_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz)
+               or _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=_hz))
         px = _qt.exec_px(direction, "exit", row) if row else None
         if px:
             age = round(float(row["s"]) + 1.0 - float(fill_ts), 3)
+            _rx = row.get("receive_ts")
+            _fa = _pf.first_after_proof(row, fill_ts, max(float(fill_ts), float(_rx or 0)))
             return float(px), "exit_book_row_at_or_after_fill", {
                 "exit_pricing_basis": "BOOK_ROW_AT_OR_AFTER_FILL", "exit_book_s": row.get("s"),
                 "exit_price_age_s": max(0.0, age), "exit_stale_book_at_fill": True,
-                "exit_evidence_status": "COMPLETE"}
+                "exit_book_receive_ts": _rx, "exit_first_after_reason": _fa["first_after_reason"],
+                "exit_evidence_status": "COMPLETE" if _fa["first_after_ok"] else "UNVERIFIED",
+                **({} if _fa["first_after_ok"] else {"exit_unverified_reason": _fa["first_after_reason"]})}
         if time.time() >= deadline:
             break
         time.sleep(0.25)
