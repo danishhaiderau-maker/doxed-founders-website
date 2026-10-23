@@ -68,6 +68,7 @@ function harness() {
     showcasePositionAbsentSince: new Map(),
     showcaseFlatOpenSince: new Map(),
     exitFillClearAtMs: new Map<string, number>(),
+    exitFillClearCursor: new Map<string, number>(),   // HM R6 nit 2
     bitfinex: {
       fetchOrderTrades: async (_c: unknown, orderId: number) => {
         st.reads.push(orderId);

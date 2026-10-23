@@ -51,7 +51,8 @@ jobs:
             src/trading-agents/live-exit-fill-c1.spec.ts \
             src/trading-agents/live-report-contract.spec.ts \
             src/trading-agents/live-exit-b2.spec.ts \
-            src/trading-agents/live-boot-nit5.spec.ts
+            src/trading-agents/live-boot-nit5.spec.ts \
+            src/trading-agents/live-hm-r6-nits.spec.ts
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

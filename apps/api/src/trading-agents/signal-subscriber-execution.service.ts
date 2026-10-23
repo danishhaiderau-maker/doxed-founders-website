@@ -3918,7 +3918,8 @@ export async function countLiveMutexOthers(
   const others = await tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
   const fences = await tx.liveEntryFence.count({ where: liveEntryFenceActiveWhere(userId, nowMs) });
   // HM R4 B2 (RK 08:03): until this process's boot reconcile allowed the account, it counts as one more live participant
-  return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0);
+  // HM R6 nit 1: an exit-fill fence whose write failed blocks in-process too
+  return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0) + (exitFillFenceWriteFailed(userId) ? 1 : 0);
 }
 /**
  * HM R4 B2(a) (RK 08:03): the entry fence has NO time expiry. A fence row blocks every claim until its holder releases it, or
@@ -3966,6 +3967,52 @@ export const FENCE_BEFORE_FLATTEN_MAX_WAIT_MS = 5_000;
 export const EXIT_FILL_UNREADABLE_FENCE_PREFIX = 'exit-fill-unreadable:';
 export const exitFillUnreadableFenceId = (participantId: string) => `${EXIT_FILL_UNREADABLE_FENCE_PREFIX}${participantId}`;
 export const EXIT_FILL_CLEAR_INTERVAL_MS = 60_000;
+/** HM R6 nit 2: at most this many per-order fill reads per clearing sweep (round-robin over fences; routine read class),
+ *  so a backlog of unreadable exits never stalls the money tick or eats the shared read budget. */
+export const EXIT_FILL_CLEAR_MAX_ORDER_READS_PER_SWEEP = 4;
+/**
+ * HM R6 nit 1: an exit-fill fence whose DB write FAILED. Fail closed in-process: the account counts one more live
+ * participant (countLiveMutexOthers) and an ALERT is logged; the clearing sweep retries the write; it is dropped only once
+ * the durable fence row is written.
+ */
+const exitFillFenceWriteFailures = new Map<string, Map<string, { reason: string; at: string; error: string }>>();
+export function exitFillFenceWriteFailed(userId: string): boolean {
+  return (exitFillFenceWriteFailures.get(userId)?.size ?? 0) > 0;
+}
+export function exitFillFenceWriteFailuresFor(userId: string): Array<{ participant_id: string; reason: string; at: string; error: string }> {
+  return [...(exitFillFenceWriteFailures.get(userId) ?? new Map()).entries()].map(([participant_id, v]) => ({ participant_id, ...v }));
+}
+/** @internal tests only */
+export function resetExitFillFenceWriteFailures(): void { exitFillFenceWriteFailures.clear(); }
+function noteExitFillFenceWriteFailure(userId: string, participantId: string, reason: string, error: string | null): void {
+  const m = exitFillFenceWriteFailures.get(userId) ?? new Map();
+  if (error == null) m.delete(participantId);
+  else m.set(participantId, { reason, at: new Date().toISOString(), error });
+  if (m.size) exitFillFenceWriteFailures.set(userId, m); else exitFillFenceWriteFailures.delete(userId);
+}
+/** HM R6 nit 3: read-only view of the account's entry fences (published in dashboardState.relayExchangeMirror.live_fences). */
+export function liveFenceView(
+  rows: Array<{ id: string; reason: string | null; acquiredAt: Date | string | null; expiresAt: Date | string | null }>,
+  writeFailures: Array<{ participant_id: string; reason: string; at: string; error: string }>,
+  bootStamp: unknown,
+) {
+  const iso = (d: Date | string | null) => (d == null ? null : new Date(d).toISOString());
+  const kindOf = (id: string) => (id.startsWith(`${EXIT_FILL_UNREADABLE_FENCE_PREFIX}cycle:`) ? 'exit_fill_cycle'
+    : id.startsWith(EXIT_FILL_UNREADABLE_FENCE_PREFIX) ? 'exit_fill' : id.startsWith('flatten:') ? 'flatten' : 'other');
+  const fences = rows.map((r) => ({
+    id: r.id, kind: kindOf(r.id), reason: r.reason, acquired_at: iso(r.acquiredAt),
+    expires_at: r.expiresAt && new Date(r.expiresAt).getTime() >= LIVE_ENTRY_FENCE_NO_EXPIRY.getTime() ? null : iso(r.expiresAt),
+  }));
+  return {
+    schema: 'relay_live_fences_v1',
+    blocked: fences.length > 0 || writeFailures.length > 0,
+    exit_fill: fences.filter((f) => f.kind === 'exit_fill'),
+    exit_fill_cycle: fences.filter((f) => f.kind === 'exit_fill_cycle'),
+    other: fences.filter((f) => f.kind !== 'exit_fill' && f.kind !== 'exit_fill_cycle'),
+    exit_fill_fence_write_failures: writeFailures,
+    boot_reconcile: bootStamp ?? null,
+  };
+}
 /**
  * B4 (#852 R3, real Postgres): the fence waits on the account live-mutex behind every queued claim. Prisma's default 5 s
  * interactive-transaction timeout expired under a 20-claim burst on a Neon branch (fence lost -> unfenced flatten, ok=false),
@@ -10680,6 +10727,14 @@ await this.notifications
         }
         // HM R4 B2(d): every mirror carries this process's boot reconcile stamp (red -> Fly RELAY_BOOT_RECONCILE)
         mirror.boot_reconcile = liveBootReconcileStampFor(instance.userId);
+        // HM R6 nit 3: read-only exit-fill / cycle fence view (dashboardState.relayExchangeMirror.live_fences)
+        mirror.live_fences = await this.prisma.liveEntryFence.findMany({
+          where: { userId: instance.userId },
+          select: { id: true, reason: true, acquiredAt: true, expiresAt: true },
+        }).then(
+          (rows) => liveFenceView(rows, exitFillFenceWriteFailuresFor(instance.userId), mirror.boot_reconcile),
+          (e) => ({ schema: 'relay_live_fences_v1', ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 160) }),
+        );
         if (exchangeMirrorShowsExposure(mirror)) exposed = true;
         if (mirror.ok !== true) evidenceAtMs = Math.min(evidenceAtMs, readStartedAt);
         published += 1;
@@ -11970,7 +12025,7 @@ await this.notifications
     return res;
   }
 
-  private async holdExitFillUnreadableFence(userId: string, participantId: string, reason: string): Promise<void> {
+  private async holdExitFillUnreadableFence(userId: string, participantId: string, reason: string): Promise<boolean> {
     const id = exitFillUnreadableFenceId(participantId);
     try {
       await this.prisma.liveEntryFence.upsert({
@@ -11978,9 +12033,18 @@ await this.notifications
         create: { id, userId, reason: `${EXIT_FILL_UNREADABLE}:${reason}`.slice(0, 200), acquiredAt: new Date(), expiresAt: LIVE_ENTRY_FENCE_NO_EXPIRY },
         update: {},
       });
+      noteExitFillFenceWriteFailure(userId, participantId, reason, null);
       this.logger.error(`[EXIT-FILL] ${EXIT_FILL_UNREADABLE} user=${userId} participant=${participantId} ${reason}: live entries blocked until the fill is read`);
+      return true;
     } catch (e) {
-      this.logger.error(`[EXIT-FILL] fence write failed user=${userId} participant=${participantId}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+      // HM R6 nit 1: fail closed in-process (countLiveMutexOthers +1), ALERT, and the clearing sweep retries the write
+      const err = (e instanceof Error ? e.message : String(e)).slice(0, 160);
+      noteExitFillFenceWriteFailure(userId, participantId, reason, err);
+      this.logger.error(
+        `[EXIT-FILL] ALERT RED: fence write FAILED user=${userId} participant=${participantId} ${reason}: ${err}; `
+        + 'live entries blocked in-process, write retried each clearing sweep',
+      );
+      return false;
     }
   }
 
@@ -11991,15 +12055,25 @@ await this.notifications
    * recomputes), correct the participant's exitPrice / pnl, then lift the fence. Still unreadable => nothing changes.
    */
   private readonly exitFillClearAtMs = new Map<string, number>();
+  private readonly exitFillClearCursor = new Map<string, number>();   // HM R6 nit 2
   async clearUnreadableExitFills(userId: string, creds: ExchangeCredentials, nowMs = Date.now()): Promise<number> {
     if (nowMs - (this.exitFillClearAtMs.get(userId) ?? 0) < EXIT_FILL_CLEAR_INTERVAL_MS) return 0;
     this.exitFillClearAtMs.set(userId, nowMs);
-    const fences = await this.prisma.liveEntryFence.findMany({
+    // HM R6 nit 1: retry every fence write that failed (the in-process block stays until the durable row exists)
+    for (const w of exitFillFenceWriteFailuresFor(userId)) await this.holdExitFillUnreadableFence(userId, w.participant_id, w.reason);
+    const all = await this.prisma.liveEntryFence.findMany({
       where: { userId, id: { startsWith: EXIT_FILL_UNREADABLE_FENCE_PREFIX } },
       select: { id: true },
+      orderBy: { id: 'asc' },
     });
+    // HM R6 nit 2: round-robin start + a per-sweep cap on per-order fill reads (never stalls the tick)
+    const start = all.length ? (this.exitFillClearCursor.get(userId) ?? 0) % all.length : 0;
+    const fences = [...all.slice(start), ...all.slice(0, start)];
+    let readsLeft = EXIT_FILL_CLEAR_MAX_ORDER_READS_PER_SWEEP;
+    let visited = 0;
     let cleared = 0;
     for (const f of fences) {
+      visited += 1;
       const participantId = f.id.slice(EXIT_FILL_UNREADABLE_FENCE_PREFIX.length);
       const events = await this.prisma.signalCycleEvent.findMany({
         where: { participantId, eventType: { in: ['EXIT', EXIT_FILL_RECONCILED_EVENT, 'FILLED'] } },
@@ -12019,7 +12093,11 @@ await this.notifications
       const direction = pl.exit_fill_direction === 'LONG' || pl.exit_fill_direction === 'SHORT' ? pl.exit_fill_direction : null;
       const expectedQty = typeof pl.exit_fill_expected_qty === 'number' ? pl.exit_fill_expected_qty : null;
       if (pending.length === 0 || expectedQty == null) continue;   // nothing to read by order id: stays blocked
-      const fill = await this.readLiveExitOrderFill(creds, { kind, orderIds: pending, expectedQty, direction, participantId });
+      const reads = new Set(pending.filter((id) => Number.isFinite(id) && id > 0)).size;
+      if (reads > readsLeft) { visited -= 1; break; }   // HM R6 nit 2: cap reached; this fence is first next sweep
+      readsLeft -= reads;
+      const fill = await withBitfinexReadClass('routine', () =>
+        this.readLiveExitOrderFill(creds, { kind, orderIds: pending, expectedQty, direction, participantId }));
       if (!fill.ok) continue;
       const participant = await this.prisma.signalCycleParticipant.findUnique({
         where: { id: participantId },
@@ -12046,6 +12124,7 @@ await this.notifications
       this.logger.warn(`[EXIT-FILL] reconciled participant=${participantId} exit=${fill.price} qty=${fill.qty}: entry fence lifted`);
       cleared += 1;
     }
+    this.exitFillClearCursor.set(userId, all.length ? (start + visited) % all.length : 0);
     return cleared;
   }
 

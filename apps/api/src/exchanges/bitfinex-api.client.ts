@@ -380,11 +380,20 @@ export async function assertProtectiveStopSide(apiPath: string, body: Record<str
 export const BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN = 90;
 const authCallLog = new Map<string, number[]>();
 
+/**
+ * HM R6 nit 2: the budget key of an authenticated path. Per-order paths (v2/auth/r/order/{sym}:{id}/trades) are ONE
+ * endpoint for Bitfinex's per-endpoint rate limit, so they share one key (else every order id had its own 90/min).
+ */
+export function bitfinexAuthBudgetKey(apiPath: string): string {
+  return apiPath.replace(/^(\/?v2\/auth\/r\/order)\/[^/]+\/trades$/, '$1/trades');
+}
+
 export function recordBitfinexAuthCall(apiPath: string, nowMs = Date.now()): void {
-  const log = authCallLog.get(apiPath) ?? [];
+  const key = bitfinexAuthBudgetKey(apiPath);
+  const log = authCallLog.get(key) ?? [];
   log.push(nowMs);
   while (log.length && nowMs - log[0] >= 60_000) log.shift();
-  authCallLog.set(apiPath, log);
+  authCallLog.set(key, log);
 }
 
 /** Authenticated requests sent per endpoint in the last 60 s (process-wide, i.e. per relay IP). */
@@ -440,7 +449,7 @@ export function bitfinexAuthAdmission(
 ): { ok: true } | { ok: false; reason: string } {
   if (isBitfinexAuthWrite(apiPath)) return { ok: true };
   const cap = BITFINEX_AUTH_CLASS_CAP[cls] ?? BITFINEX_AUTH_TICK_CAP_PER_MIN;
-  const n = (authCallLog.get(apiPath) ?? []).filter((t) => nowMs - t < 60_000).length;
+  const n = (authCallLog.get(bitfinexAuthBudgetKey(apiPath)) ?? []).filter((t) => nowMs - t < 60_000).length;   // HM R6 nit 2
   if (n < cap) return { ok: true };
   return {
     ok: false,

@@ -162,7 +162,7 @@ test('wiring: onModuleInit sets the gate PENDING before any tick; mirrors carry 
   assert.ok(init.includes("liveBootGateSetPhase('PENDING');") && init.includes('void this.runLiveBootReconcile(1);'));
   assert.ok(init.indexOf('if (!executionEnabled())') < init.indexOf("liveBootGateSetPhase('PENDING')"));
   assert.ok(src.includes('mirror.boot_reconcile = liveBootReconcileStampFor(instance.userId);'));
-  assert.ok(src.includes('return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0);'));
+  assert.ok(src.includes('return others + fences + (liveBootEntryBlocked(userId) ? 1 : 0) + (exitFillFenceWriteFailed(userId) ? 1 : 0);'));
   const acct = src.slice(src.indexOf('  private async liveBootReconcileRead('), src.indexOf('  private async bootCancelPendingEntriesFor('));
   assert.ok(acct.indexOf('readSentAtMs = Date.now();') > 0);
   assert.ok(acct.indexOf('readSentAtMs = Date.now();') < acct.indexOf('this.bitfinex.getOpenPositionDetail(c)'));
