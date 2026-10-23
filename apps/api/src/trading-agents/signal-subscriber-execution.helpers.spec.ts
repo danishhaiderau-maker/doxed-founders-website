@@ -758,6 +758,7 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean; oth
   service.prisma = {
     $transaction: async (run: (tx: any) => Promise<unknown>) => run({
       $executeRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
+      liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
       signalCycleParticipant: {
         count: async () => opts.otherLive ?? 0, // HM C3: live-mutex count in the claim txn
         create: async () => ({ id: 'participant-exact-qty' }),
@@ -767,6 +768,7 @@ async function runExactQtyEntry(opts: { approval?: unknown; armed?: boolean; oth
         }],
       },
     }),
+    liveEntryFence: { count: async () => 0 }, // HM1: pre-submit recount also checks the fence
     signalCycleParticipant: {
       count: async () => opts.otherLive ?? 0, // two-tile live gate: other live participants
       create: async () => ({ id: 'participant-exact-qty' }),
@@ -877,6 +879,7 @@ test('market catch-up money path also submits the exact showcase position quanti
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
     $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: {
       create: async () => ({}),
     },
@@ -956,6 +959,7 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
     $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: { create: async ({ data }: any) => { fences.push(data.payload); return {}; } },
     signalCycleParticipant: {
       count: async () => 0, // two-tile live gate: no other live participant
@@ -1011,6 +1015,7 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
     $transaction: async function (this: any, run: (tx: any) => Promise<unknown>) { return run({ ...this, $executeRawUnsafe: async () => [] }); }, // HM C3 claim txn
+    liveEntryFence: { count: async () => 0 }, // HM1: no flatten fence held
     signalCycleEvent: { create: async () => ({}) },
     signalCycleParticipant: {
       count: async () => 0, // two-tile live gate: no other live participant
