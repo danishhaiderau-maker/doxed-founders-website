@@ -240,9 +240,14 @@ class BookWalkWindow:
         if index is None or float(self.book_s[index]) + 1.0 - trigger_ts > MAX_BOOK_GAP_S:
             return {"status": "REJECT_NO_BOOK", "evidence_status": "NO_FILL", "price": None}
         row = self.row(index)
-        out = _pf.paper_fill(direction, qty, trigger_ts, _pf.MIN_DELAY_S, lambda _t: row, leg="exit",
+        # HM #847 N5: the delay is the actual wait until this row is complete (s + 1), floored at the shared
+        # pricer's MIN_DELAY_S, so fill_ts / delay_s stamp the row-ready time instead of a constant 0.3 s.
+        ready_ts = float(self.book_s[index]) + 1.0
+        delay_s = max(_pf.MIN_DELAY_S, ready_ts - float(trigger_ts))
+        out = _pf.paper_fill(direction, qty, trigger_ts, delay_s, lambda _t: row, leg="exit",
                              delay_source=EXIT_FILL_DELAY_SOURCE)
         out["trigger_ts"] = float(trigger_ts)
+        out["book_row_ready_ts"] = ready_ts
         return out
 
 

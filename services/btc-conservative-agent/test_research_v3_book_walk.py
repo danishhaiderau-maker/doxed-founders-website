@@ -200,3 +200,15 @@ def test_stop_exit_cells_carry_the_last_trade_doc_inferred_label():
     cell = replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)
     assert (cell["status"], cell["exit_reason"]) == ("COMPLETE", "PHYSICAL_HARD_STOP")
     assert cell["stop_trigger_label"] == "LAST_TRADE_DOC_INFERRED"
+
+
+def test_exit_fill_stamps_the_actual_row_ready_delay():
+    # HM #847 N5: trigger at 1100.2, next complete row is s=1102 (ready 1103) because 1100/1101 are missing.
+    tape = _tape([book_row(s, 100, 100.05) for s in range(990, 1700) if s not in (1100, 1101)],
+                 [trade_row(s, 100.02) for s in range(990, 1700)])
+    fill = tape.window(998, 1600).exit_fill("LONG", 0.001, 1101.2)
+    assert fill["book_row_ready_ts"] == 1103.0
+    assert fill["delay_s"] == pytest.approx(1.8)
+    assert fill["fill_ts"] == pytest.approx(1103.0)
+    near = tape.window(998, 1600).exit_fill("LONG", 0.001, 1102.9)  # row ready 0.1 s later: floored at 0.3 s
+    assert near["delay_s"] == pytest.approx(0.3) and near["book_row_ready_ts"] == 1103.0
