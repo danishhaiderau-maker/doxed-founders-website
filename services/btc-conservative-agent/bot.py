@@ -49913,6 +49913,14 @@ def _live_guardian_tick(now=None) -> list:
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
         logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
+        red_codes = sorted({v["code"] for v in viol} & set(getattr(_lg, "RED_CODES", ())))
+        if red_codes:
+            # RK 02:25: an untagged order/position (or unreadable ledger PnL) is RED on sight: latched until exchange evidence
+            # FLAT_NO_STOPS clears it; arming is refused while RED. Disarm ALL + force-flat follow below as for every violation.
+            _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": now, "code": red_codes[0], "codes": red_codes, "reason": reason,
+                                                 "readback": "UNCONFIRMED",
+                                                 "detail": [v.get("detail") for v in viol if v["code"] in red_codes][:4]}
+            logger.critical(f"[LIVE GUARDIAN] RED {','.join(red_codes)} - disarm ALL + force-flat, no auto re-arm [PIPELINE ENFORCEMENT]")
         disarm_exc = None
         try:
             ctl = _disarm_live_control(reason)

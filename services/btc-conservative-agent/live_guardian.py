@@ -28,6 +28,8 @@ LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position
 BALANCE_DRIFT_USD = 0.50        # unexplained balance change when flat beyond reported pnl; this $0.50 tolerance is the allowance for funding (the bot passes funding_usd_today=0)
 ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two reads) to count
 LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only live tile)
+# RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every violation gets
+RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", "LEDGER_PNL_UNREADABLE"})
 FILL_TO_STOP_MAX_SEC = 5.0     # HM G6: a stop confirmed later than 5 s after the fill is itself a violation
 
 
@@ -156,6 +158,22 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
                             "detail": f"exchange entry order {o.get('id')} cid tile={t} but live tiles with an order={sorted(x for x in live_tiles if x)}"})
     else:
         state.pop("tile_mismatch_since", None)
+    # 3c. RK 02:25 / HM re-review: ONLY reduce-only closing orders may be untagged. A non-reduce-only order whose cid carries
+    #     no live tile key (legacy/foreign/manual, or reduce_only unreadable) is RED immediately; a position that no tile-keyed
+    #     open/pending live chain explains is RED once it persists LEDGER_GRACE_SEC. Both => disarm ALL + force-flat + RED.
+    for o in orders:
+        o = o or {}
+        if o.get("reduce_only") is not True and _ltg.decode_cid(o.get("cid")) is None:
+            out.append({"code": "UNTAGGED_ORDER", "tile": None,
+                        "detail": f"exchange order {o.get('id')} cid={o.get('cid')} reduce_only={o.get('reduce_only')} carries no live tile key"})
+    tagged_live = [c for c in open_filled + pending if tile_of(c)]
+    if positions and not tagged_live:
+        first = state.setdefault("untagged_pos_since", now)
+        if now - first >= LEDGER_GRACE_SEC:
+            out.append({"code": "UNTAGGED_POSITION", "tile": None,
+                        "detail": f"{len(positions)} exchange position(s) with no tile-keyed open/pending live chain for {now - first:.0f}s"})
+    else:
+        state.pop("untagged_pos_since", None)
     bal = _f((m.get("balance") or {}).get("derivatives_available_usd"))
     flat = not positions and not orders and not open_filled
     if bal is not None and flat:

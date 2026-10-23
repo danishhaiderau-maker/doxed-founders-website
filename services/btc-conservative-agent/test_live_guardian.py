@@ -514,3 +514,44 @@ def test_c2_wiring_red_alert_surfaces_arming_refuses_and_stale_exit_never_rearms
     assert "/force-flat-disarm" in helper and "rearm" not in helper and "logger" not in helper   # never logs the token
     on = _SRC[_SRC.index('reason=_onoff_reason("OPERATOR_ON", data))'):][:200]
     assert '_LIVE_GUARDIAN_STATE.pop("auto_disarm_latched", None)' in on
+
+
+def test_rk0225_untagged_non_reduce_only_order_is_red_immediately():
+    import live_tile_gate as ltg
+    tagged = (0b101 << 28) | (2 << 21) | 77     # gs1
+    gs1 = ch(correlation_id="gs1-1", order_sent_at_ts=NOW - 1)
+    for o in ({"id": 1, "cid": 987654, "reduce_only": False}, {"id": 2, "cid": None, "reduce_only": False},
+              {"id": 3, "cid": 987654, "reduce_only": None}, {"id": 4, "cid": (0b101 << 28) | (6 << 21) | 1, "reduce_only": False}):
+        v = g.evaluate([gs1], dict(MIR, open_orders=[o]), {}, NOW)
+        assert "UNTAGGED_ORDER" in codes(v), o
+        assert "UNTAGGED_ORDER" in g.RED_CODES
+    # reduce-only closing orders (stops) may be untagged; a tagged entry of a live tile is fine
+    assert "UNTAGGED_ORDER" not in codes(g.evaluate([gs1], dict(MIR, open_orders=[{"id": 5, "cid": 987654, "reduce_only": True}]), {}, NOW))
+    assert ltg.decode_cid(tagged) == "gs1"
+    assert "UNTAGGED_ORDER" not in codes(g.evaluate([gs1], dict(MIR, open_orders=[{"id": 6, "cid": tagged, "reduce_only": False}]), {}, NOW))
+
+
+def test_rk0225_untagged_position_is_red_after_grace_tagged_is_not():
+    mp = dict(MIR, positions=[{"id": 1, "amount": 0.001}])
+    st = {}
+    assert "UNTAGGED_POSITION" not in codes(g.evaluate([], mp, st, NOW))
+    assert "UNTAGGED_POSITION" in codes(g.evaluate([], mp, st, NOW + g.LEDGER_GRACE_SEC))
+    # an untagged (no tile key) open chain does not explain the position either
+    st2 = {}
+    legacy = ch(correlation_id="LEGACY-1", lane="LEGACY", fill_at_ts=NOW - 100, stop_confirmed=True)
+    g.evaluate([legacy], mp, st2, NOW)
+    assert "UNTAGGED_POSITION" in codes(g.evaluate([legacy], mp, st2, NOW + 11))
+    # a tile-keyed open live chain explains it; flat clears the timer
+    st3 = {}
+    gs1 = ch(correlation_id="gs1-1", fill_at_ts=NOW - 100, stop_confirmed=True)
+    g.evaluate([gs1], mp, st3, NOW)
+    assert "UNTAGGED_POSITION" not in codes(g.evaluate([gs1], mp, st3, NOW + 11))
+    g.evaluate([], mp, st, NOW + 12)
+    g.evaluate([], MIR, st, NOW + 13)
+    assert "untagged_pos_since" not in st
+
+
+def test_rk0225_tick_latches_red_for_untagged_codes_before_disarm_and_force_flat():
+    tick = _SRC[_SRC.index("def _live_guardian_tick"):_SRC.index("def live_guardian_loop")]
+    red = tick.index('_LIVE_GUARDIAN_STATE["red_alert"] = {')
+    assert "RED_CODES" in tick and red < tick.index("_disarm_live_control(reason)") < tick.index("_live_guardian_force_flat(reason, now)")
