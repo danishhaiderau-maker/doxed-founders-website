@@ -568,7 +568,9 @@ def tile_trade_row(raw: Mapping[str, Any], *, status: str, short_names: Mapping[
             "close_ts": close_ts, "exit_price": _finite(raw.get("exit_price") if raw.get("exit_price_basis") == "VWAP_ALL_LEGS"
                                                       else (raw.get("exit") or raw.get("exit_price"))),
             "exit_price_basis": raw.get("exit_price_basis"),
-            "exit_bid": _finite(raw.get("exit_bid")), "exit_ask": _finite(raw.get("exit_ask")),
+            "exit_bid": _finite(raw.get("exit_bid")), "exit_ask": _finite(raw.get("exit_ask")),  # legacy rows only (ticker tape)
+            "exit_book_top_bid": _finite(raw.get("exit_book_top_bid")), "exit_book_top_ask": _finite(raw.get("exit_book_top_ask")),
+            "exit_book_top_s": _finite(raw.get("exit_book_top_s")),
             "exit_reason": raw.get("exit_reason"), "close_origin": raw.get("close_origin"),
             "forced_close": reason in forced, "legs": _legs(raw),
             "deploy_flatten": bool(reason in forced and (

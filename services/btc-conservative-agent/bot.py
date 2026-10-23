@@ -33186,21 +33186,24 @@ def _stamp_regime_at_signal(trade_row: dict, pos, master) -> None:
 
 
 def _stamp_exit_bbo(trade_row: dict, max_age_sec: float = 3.0) -> None:
-    """HM-BATCH2: record the touch (bid/ask) at close on every closed row; never raises."""
+    """HM-BATCH2 / R3 (no ticker anywhere): record the book top at close on every closed row as COMPARISON columns only
+    (never pricing): exit_book_top_bid / exit_book_top_ask / exit_book_top_s from the latest complete bfx_book_10l_1s row
+    (paper_fill.book10l_at, the shared pricer's rows). The old exit_bid / exit_ask came from the WS-ticker microstructure
+    tape ring and are no longer written. A row older than max_age_sec is not stamped (exit_book_top_missing). Never raises."""
     try:
+        import paper_fill as _pf
+        import quote_trigger as _qt
         now = time.time()
-        ts, rows = _TILE_TAPE_RING.slice(now - max_age_sec, now + 1)
-        if not rows:
-            trade_row.setdefault("exit_bbo_missing", True)
+        book = _pf.book10l_at(now)
+        s = float(book.get("s")) if isinstance(book, dict) and book.get("s") is not None else None
+        if s is None or now - (s + 1.0) > float(max_age_sec):
+            trade_row.setdefault("exit_book_top_missing", True)
             return
-        last = rows[-1]
-        if not isinstance(last, dict):  # TapeSliceRing stores value tuples in fields() order
-            last = dict(zip(_TILE_TAPE_RING.fields, last))
-        trade_row["exit_bid"] = last.get("bid")
-        trade_row["exit_ask"] = last.get("ask")
-        trade_row["exit_bbo_ts"] = ts[-1]
+        trade_row["exit_book_top_bid"] = _qt.exec_px("SHORT", "entry", book)  # best bid
+        trade_row["exit_book_top_ask"] = _qt.exec_px("LONG", "entry", book)   # best ask
+        trade_row["exit_book_top_s"] = s
     except Exception:
-        trade_row.setdefault("exit_bbo_missing", True)
+        trade_row.setdefault("exit_book_top_missing", True)
 _AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
 _AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
 _AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
