@@ -21,16 +21,15 @@ import concurrent.futures
 import time
 import numpy as np
 
-from research_v3_policy_replay import PreparedReplayArrays, ReplayPlan, prepare_replay_price_path, replay_cell
-from research_v3_side_marks import (
-    BASIS_1M_ADVERSE_FIRST,
-    BASIS_NONE,
-    BASIS_SEGMENT_LAST_PRICE,
-    PATH_HORIZON_SEC,
-    event_side_marks,
-    load_side_mark_tape,
-    mark_source_summary,
+from research_v3_book_walk import (
+    BASIS_BOOK_WALK,
+    R17_UNPROVEN,
+    PreparedBookWalkArrays,
+    coverage_summary,
+    load_book_walk,
 )
+from research_v3_policy_replay import ReplayPlan, replay_cell
+from research_v3_side_marks import PATH_HORIZON_SEC
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
@@ -988,6 +987,10 @@ def protection_replay_window_summary(receipt: Mapping[str, Any] | None) -> dict[
         "mark_fallback_events": mark.get("fallback_events"),
         "mark_side_correct_ratio": mark.get("side_correct_ratio"),
         "mark_side_convention": mark.get("side_convention"),
+        "mark_countable_events": mark.get("countable_events"),
+        "mark_r17_unproven_events": mark.get("r17_unproven_events"),
+        "mark_r17_unproven_reasons": mark.get("r17_unproven_reasons"),
+        "mark_price_source": mark.get("price_source"),
         "replay_cells": streaming.get("cells"),
         "replay_cell_store_bytes": streaming.get("cell_store_bytes"),
     }
@@ -1089,7 +1092,7 @@ class CandidateInputStream:
         self._terminal = {event_id: terminal[event_id] for event_id in self.event_ids}
         self._executions = {event_id: executions_by_event.get(event_id, []) for event_id in keep}
         self._cycle_atr = _cycle_atr_by_event(self.root)
-        self._mark_tape: Any = None
+        self._book_walk: Any = None
         self.events_yielded = 0
 
     def __len__(self) -> int:
@@ -1100,16 +1103,15 @@ class CandidateInputStream:
         return _number((self._opportunities.get(episode_id) or {}).get("signal_ts"))
 
     @property
-    def mark_tape(self) -> Any:
-        """The 1 s side-mark tape covering every selected event's replay horizon."""
-        if self._mark_tape is None and self.event_ids:
+    def book_walk(self) -> Any:
+        """bfx_book_10l rows + trade prints over each selected event's replay window (never the 1 s tape)."""
+        if self._book_walk is None and self.event_ids:
             times = [ts for ts in (self._signal_ts(event_id) for event_id in self.event_ids) if ts is not None]
             if times:
-                self._mark_tape = load_side_mark_tape(
-                    self.root, start_ts=min(times) - 5,
-                    end_ts=max(times) + _MAX_ENTRY_WINDOW_SEC + PATH_HORIZON_SEC + 5,
-                )
-        return self._mark_tape
+                self._book_walk = load_book_walk(self.root, [
+                    (ts - 5, ts + _MAX_ENTRY_WINDOW_SEC + PATH_HORIZON_SEC + 5) for ts in times
+                ])
+        return self._book_walk
 
     def _build(self, event_id: str, handle: Any) -> dict[str, Any] | None:
         handle.seek(self._intent_offsets[event_id])
@@ -1254,29 +1256,6 @@ def load_candidate_inputs(
     ))
 
 
-def _conservative_ohlc_prices(rows: Iterable[Mapping[str, Any]], *, direction: str) -> list[dict[str, float]]:
-    """Expand candles adverse-first when intrabar ordering is unknowable.
-
-    This is deliberately pessimistic: if a stop and profit exit are both
-    touched in one candle, the stop-side extreme appears first. The generated
-    path is descriptive and never upgrades execution evidence to depth/tick.
-    """
-    result: list[dict[str, float]] = []
-    for row in rows:
-        try:
-            ts = float(row.get("t", row.get("ts")))
-            open_price = float(row.get("o", row.get("open")))
-            high = float(row.get("h", row.get("high")))
-            low = float(row.get("l", row.get("low")))
-            close = float(row.get("c", row.get("close")))
-        except (TypeError, ValueError):
-            continue
-        sequence = (open_price, low, high, close) if direction == "LONG" else (open_price, high, low, close)
-        for offset, price in enumerate(sequence):
-            result.append({"ts": ts + offset * 0.001, "price": price})
-    return sorted(result, key=lambda row: row["ts"])
-
-
 def _comparison_cohort_receipt(
     rows: list[dict[str, Any]],
     *,
@@ -1362,7 +1341,7 @@ def _comparison_cohort_receipt(
 _UNSUPPORTED_REASON_BY_KIND = {
     1: "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
     2: "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
-    3: "ORDERED_1S_PATH_OR_ATR_MISSING",
+    3: "BOOK_WALK_PATH_OR_ATR_MISSING",
 }
 _KIND_NO_FILL, _KIND_REPLAYED = 0, 4
 _NAN = float("nan")
@@ -1843,8 +1822,13 @@ def _source_order(inputs: Any) -> Iterable[tuple[int, Mapping[str, Any]]]:
         yield index, rows[index]
 
 
-def _event_price_path(source: Mapping[str, Any], mark_tape: Any) -> dict[str, Any]:
-    """Side-correct 1 s marks; flagged last-price or 1m adverse-first fallbacks."""
+def _event_price_path(source: Mapping[str, Any], book_walk: Any) -> dict[str, Any]:
+    """The event's book-walk window, or R17_UNPROVEN when book rows / trade prints do not cover it.
+
+    HM 23 Oct defect 2 + RK binding (1): there is no 1 m candle, segment last-price or 1 s tape
+    fallback.  An event is replayed only inside actual book coverage; outside it the event is
+    R17_UNPROVEN and excluded from every countable result.
+    """
     direction = str(source.get("direction") or "UNKNOWN")
     signal_ts = _number(source.get("signal_ts"))
     times = [signal_ts] if signal_ts is not None else []
@@ -1853,30 +1837,17 @@ def _event_price_path(source: Mapping[str, Any], mark_tape: Any) -> dict[str, An
         times.extend(_number(row.get("active_until_ts")) for row in (child.get("chase_schedule") or [])
                      if isinstance(row, Mapping))
     times = [value for value in times if value is not None]
-    segment_rows = source.get("ordered_1s_prices") or []
-    if times:
-        marks = event_side_marks(
-            direction=direction, segment_rows=segment_rows, tape=mark_tape,
-            start_ts=min(times) - 2, end_ts=max(times) + PATH_HORIZON_SEC,
-        )
-        if len(marks["ts"]):
-            return {"basis": marks["basis"], "ts": marks["ts"], "price": marks["price"], "rows": None}
-    rows: list[dict[str, float]] = []
-    for row in segment_rows:
-        try:
-            rows.append({
-                "ts": float(row.get("ts", row.get("t"))),
-                "price": float(row.get("price", row.get("mark", row.get("close")))),
-            })
-        except (TypeError, ValueError):
-            continue
-    if rows:
-        return {"basis": BASIS_SEGMENT_LAST_PRICE, "ts": None, "price": None,
-                "rows": sorted(rows, key=lambda row: row["ts"])}
-    rows = _conservative_ohlc_prices(source.get("canonical_1m_ohlc") or [], direction=direction)
-    if rows:
-        return {"basis": BASIS_1M_ADVERSE_FIRST, "ts": None, "price": None, "rows": rows}
-    return {"basis": BASIS_NONE, "ts": None, "price": None, "rows": None}
+    if direction not in ("LONG", "SHORT"):
+        return {"basis": R17_UNPROVEN, "reason": "DIRECTION_UNKNOWN", "walk": None, "coverage": None}
+    if not times:
+        return {"basis": R17_UNPROVEN, "reason": "EVENT_TIMES_MISSING", "walk": None, "coverage": None}
+    if book_walk is None:
+        return {"basis": R17_UNPROVEN, "reason": "BOOK_WALK_NOT_LOADED", "walk": None, "coverage": None}
+    t0, t1 = min(times) - 2, max(times) + PATH_HORIZON_SEC
+    coverage = book_walk.coverage(t0, t1)
+    if not coverage.get("covered"):
+        return {"basis": R17_UNPROVEN, "reason": coverage.get("reason"), "walk": None, "coverage": coverage}
+    return {"basis": BASIS_BOOK_WALK, "reason": None, "walk": book_walk.window(t0, t1), "coverage": coverage}
 
 
 STREAM_PARALLEL_MIN_EVENTS = 200
@@ -1938,7 +1909,8 @@ class _EpisodeReplayer:
         direction = str(source.get("direction") or "UNKNOWN")
         leverage = float(source.get("leverage") or 100)
         atr = source.get("atr14_pct")
-        has_prices = path["ts"] is not None or bool(path["rows"])
+        has_prices = path["basis"] == BASIS_BOOK_WALK and path.get("walk") is not None
+        margin_full = float(source.get("margin_usd") or 0.25)
         microstructure_by_ts = {}
         for row in source.get("ordered_1s_prices") or []:
             try:
@@ -1955,20 +1927,17 @@ class _EpisodeReplayer:
             key = (fill_ts, entry_price)
             prepared = prepared_paths.get(key)
             if prepared is None:
-                end_ts = fill_ts + PATH_HORIZON_SEC
-                if path["ts"] is not None:
-                    lo, hi = np.searchsorted(path["ts"], [fill_ts, end_ts], side="left")
-                    ordered = np.column_stack((path["ts"][lo:hi], path["price"][lo:hi]))
-                    error = None
+                if not entry_price or entry_price <= 0:
+                    prepared = "ENTRY_PRICE_MISSING"
                 else:
-                    canonical = prepare_replay_price_path(
-                        (row for row in path["rows"] if row["ts"] < end_ts), fill_ts=fill_ts,
+                    # Exits trigger on trade prints (stops) / completed book rows (targets, locks,
+                    # clocks) and fill through paper_fill on the first complete book row after the
+                    # trigger; the depth walk uses the full (unscaled) position size.
+                    prepared = PreparedBookWalkArrays(
+                        path["walk"], direction=direction, entry_price=entry_price, leverage=leverage,
+                        fill_ts=fill_ts, horizon_sec=PATH_HORIZON_SEC,
+                        qty=margin_full * leverage / entry_price,
                     )
-                    ordered, error = canonical.get("ordered") or (), canonical.get("error")
-                prepared = error or PreparedReplayArrays(
-                    ordered, direction=direction, entry_price=entry_price,
-                    leverage=leverage, fill_ts=fill_ts,
-                )
                 prepared_paths[key] = prepared
             return prepared
 
@@ -2119,7 +2088,7 @@ def evaluate_protection_screen(
     *,
     sealed_holdout: Mapping[str, Any] | bool | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    mark_tape: Any = None,
+    book_walk: Any = None,
     input_observer: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Evaluate exact policies; return descriptive rows and gated candidates.
@@ -2127,11 +2096,14 @@ def evaluate_protection_screen(
     Inputs are consumed one event at a time, grouped by episode.  The first
     event (lowest event id) carrying an entry policy supplies that policy's
     sample for the episode, so later events of the episode are not replayed
-    for it.  Exits are replayed on side-correct 1 s marks over a fixed
-    post-fill horizon.
+    for it.  Exits are repriced on the bfx_book_10l walk over a fixed post-fill
+    horizon; an episode whose first event lacks book coverage is R17_UNPROVEN
+    and contributes to no countable result.
     """
-    if mark_tape is None:
-        mark_tape = getattr(inputs, "mark_tape", None)
+    if book_walk is None:
+        book_walk = getattr(inputs, "book_walk", None)
+    unproven_reasons: dict[str, int] = defaultdict(int)
+    unproven_episode: str | None = None
     protections = protection_screen()
     protection_count = len(protections)
     entry_ids: list[str] = []
@@ -2246,32 +2218,45 @@ def evaluate_protection_screen(
                     first_event_of_episode = True
                 else:
                     first_event_of_episode = False
-                path = _event_price_path(source, mark_tape)
-                replay_path_basis = path["basis"]
-                events_by_basis[replay_path_basis] += 1
-                if first_event_of_episode:
-                    episodes_by_basis[replay_path_basis] += 1
-                episode_event_indexes.append(len(events))
-                events.append({
-                    "epoch_id": source.get("epoch_id"),
-                    "dataset_epoch": source.get("dataset_epoch") or source.get("epoch_id"),
-                    "source_revision": source.get("source_revision"),
-                    "deployed_revision": source.get("deployed_revision"),
-                    "tile_config_signature": source.get("tile_config_signature"),
-                    "cohort_signature": source.get("cohort_signature"),
-                    "episode_id": episode_id,
-                    "opportunity_id": source.get("opportunity_id"),
-                    "tape_ids": list(source.get("tape_ids") or []),
-                    "source_event_id": source.get("event_id"),
-                    "signal_ts": source.get("signal_ts"),
-                    "evidence_collected_at": source.get("evidence_collected_at"),
-                    "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
-                    "regime": _regime_label(source.get("regime")),
-                    "replay_path_basis": replay_path_basis,
-                    "authoritative_cost_source": source.get("authoritative_cost_source") or {},
-                    "authoritative_cost_source_ids": list(source.get("authoritative_cost_source_ids") or []),
-                })
-                episode_jobs.append((position, source, path))
+                if not first_event_of_episode and unproven_episode == episode_id:
+                    # The episode's sample is its first event; later events never stand in for it.
+                    events_by_basis[R17_UNPROVEN] += 1
+                    unproven_reasons["EPISODE_FIRST_EVENT_R17_UNPROVEN"] += 1
+                    path = None
+                else:
+                    path = _event_price_path(source, book_walk)
+                if path is not None:
+                    replay_path_basis = path["basis"]
+                    events_by_basis[replay_path_basis] += 1
+                    if first_event_of_episode:
+                        episodes_by_basis[replay_path_basis] += 1
+                    if replay_path_basis == R17_UNPROVEN:
+                        unproven_reasons[str(path.get("reason") or "UNKNOWN")] += 1
+                        if first_event_of_episode:
+                            unproven_episode = episode_id
+                        path = None
+                if path is not None:
+                    episode_event_indexes.append(len(events))
+                    events.append({
+                        "epoch_id": source.get("epoch_id"),
+                        "dataset_epoch": source.get("dataset_epoch") or source.get("epoch_id"),
+                        "source_revision": source.get("source_revision"),
+                        "deployed_revision": source.get("deployed_revision"),
+                        "tile_config_signature": source.get("tile_config_signature"),
+                        "cohort_signature": source.get("cohort_signature"),
+                        "episode_id": episode_id,
+                        "opportunity_id": source.get("opportunity_id"),
+                        "tape_ids": list(source.get("tape_ids") or []),
+                        "source_event_id": source.get("event_id"),
+                        "signal_ts": source.get("signal_ts"),
+                        "evidence_collected_at": source.get("evidence_collected_at"),
+                        "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
+                        "regime": _regime_label(source.get("regime")),
+                        "replay_path_basis": replay_path_basis,
+                        "authoritative_cost_source": source.get("authoritative_cost_source") or {},
+                        "authoritative_cost_source_ids": list(source.get("authoritative_cost_source_ids") or []),
+                    })
+                    episode_jobs.append((position, source, path))
 
             if progress_callback is not None and (
                 processed == 1 or processed == input_total or processed % 5 == 0
@@ -2297,8 +2282,9 @@ def evaluate_protection_screen(
     )
     cells_by_policy = store.cells_by_policy()
 
-    mark_source = mark_source_summary(
-        events_by_basis, episodes_by_basis, getattr(mark_tape, "receipt", None),
+    mark_source = coverage_summary(
+        events_by_basis, episodes_by_basis, unproven_reasons, getattr(book_walk, "receipt", None),
+        horizon_sec=PATH_HORIZON_SEC,
     )
     streaming_receipt = {
         "schema": "protection_replay_streaming_v1",
