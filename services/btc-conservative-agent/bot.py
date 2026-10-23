@@ -5450,6 +5450,42 @@ def _real_mark_at(ts: float):
     return float(rows[-1]["mark"]) if rows else None
 
 
+def _funding_paid_for_liq(pos: dict, until: float):
+    """HM #849 item 6: settlements paid between the entry fill and ``until`` ([{ts, usd, qty}]) for the liquidation
+    distance (paper-book lanes; None elsewhere = no adjustment). A failed pricer gives one unpriced step (fail closed)."""
+    if not _is_paper_book_lane(pos):
+        return None
+    f = _paper_funding_v2(pos, until=until) or {}
+    if f.get("funding_status") in (FUNDING_PRICER_ERROR, "UNVERIFIED_PARTIAL_TS_MISSING"):
+        return [{"ts": until, "usd": None, "qty": None}]
+    return [{"ts": t, "usd": u, "qty": q} for t, u, q in zip(f.get("funding_ts_crossed") or [],
+                                                              f.get("funding_usd_by_settlement") or [],
+                                                              f.get("funding_qty") or [])]
+
+
+def _stamp_open_funding_paid(pos: dict, now: float = None) -> None:
+    """HM #849 item 6: funding PAID at settlements already passed is in an open paper position's funding_fees, so the
+    snapshot uPnL (unreal_usd = gross - funding_fees_accrued) carries it. Re-priced when a new settlement is crossed
+    (or every 60 s while unverified); an unpriced settlement books 0 here and funding_open_status says UNVERIFIED."""
+    import tile_fill as _tf
+    now = time.time() if now is None else float(now)
+    efs = pos.get("entry_fill_sim") if isinstance(pos.get("entry_fill_sim"), dict) else {}
+    t0 = efs.get("fill_ts") or pos.get("entry_ts")
+    try:
+        n = len(_tf.settlements_crossed(t0, now))
+    except Exception:  # noqa: BLE001
+        n = None
+    if (n is not None and n == pos.get("_funding_open_n")
+            and (pos.get("funding_open_status") in ("PRICED", "NO_CROSSING")
+                 or now - float(pos.get("_funding_open_checked_ts") or 0) < 60)):
+        return
+    f = _paper_funding_v2(pos, until=now) or {}
+    pos["_funding_open_n"], pos["_funding_open_checked_ts"] = n, now
+    pos["funding_open_status"] = f.get("funding_status")
+    pos["funding_open_usd_raw"] = f.get("funding_usd_raw")
+    pos["funding_fees"] = f.get("funding_usd_raw") or 0.0
+
+
 def _liquidation_stamp(pos: dict, stop_trigger_ts, stop_fill_px) -> dict:
     """HM M10 (tracker 17:30): the shared mark-price liquidation check, stamped per row (liq_unverified etc.)."""
     import order_model as _om
@@ -5464,7 +5500,8 @@ def _liquidation_stamp(pos: dict, stop_trigger_ts, stop_fill_px) -> dict:
         trades = _qt.trades_between(t0, t1) if t0 > 0 else []
         out = _om.liquidation_check(pos.get("dir"), pos.get("liq_mark_at_open"),
                                     float(pos.get("leverage") or _lcc.REQUIRED_LEVERAGE), marks=marks,
-                                    trades=trades, stop_trigger_ts=stop_trigger_ts, stop_fill_px=stop_fill_px)
+                                    trades=trades, stop_trigger_ts=stop_trigger_ts, stop_fill_px=stop_fill_px,
+                                    funding_paid=_funding_paid_for_liq(pos, t1))
     except Exception as exc:  # noqa: BLE001 - a measurement stamp must never block an exit; the row says UNVERIFIED
         out = {"liq_unverified": True, "liq_reason": "LIQ_CHECK_ERROR:" + type(exc).__name__,
                "liq_model_validated": False}
@@ -5481,7 +5518,7 @@ def _stamp_trigger_book_age(pos: dict, book) -> None:
 
 LIQ_ROW_KEYS = ("liq_model", "liq_model_validated", "liq_mark_at_open", "liq_bp", "liq_px", "liq_trigger_ts",
                 "liq_trigger_source", "liq_before_stop", "liq_stop_slipped_past", "liq_mark_rows_n", "liq_unverified",
-                "liq_reason")
+                "liq_reason", "liq_funding_shift_px", "liq_px_funding_adj")  # HM #849 item 6
 
 
 EXIT_EVIDENCE_ROW_KEYS = ("exit_evidence_status", "exit_unverified_reason", "exit_depth_short_qty",
@@ -7501,25 +7538,53 @@ def _funding_raw_fields(pos: dict, entry: float, qty: float) -> dict:
             "funding_rate_source_detail": srcs or (["bfx_deriv_status_1s"] if "_funding_usd_raw_v2" in pos else None)}
 
 
-def _paper_funding_v2(pos: dict):
+FUNDING_PRICER_ERROR = "FUNDING_PRICER_ERROR"  # HM #849 item 2: the funding pricer raised -> row non_countable
+FUNDING_TS_FALLBACK = "FUNDING_TS_FALLBACK"    # HM #849 item 3: a funding window end was not the priced fill ts
+
+
+def _paper_funding_v2(pos: dict, until=None):
     """REALISM_V2 F5 for paper-book lanes: settlement-exact funding between the entry and exit FILL times
     (model fill ts of the priced legs), with the open qty at each settlement (partials filled before it removed).
-    Every number comes from tile_fill.funding_fields (the shared module); bot.py only hands in plain values."""
+    Every number comes from tile_fill.funding_fields (the shared module); bot.py only hands in plain values.
+
+    ``until`` (open position, HM #849 item 6): funding PAID so far, window end = that instant (not a fallback).
+    HM #849 item 3: a window end that is not the priced fill ts (entry_ts / exit_model_fill_ts / now) is stamped in
+    funding_ts_fallbacks and the row is non_countable (FUNDING_TS_FALLBACK). Item 2: an exception returns a
+    FUNDING_PRICER_ERROR row (funding_usd_raw None, non_countable) instead of silently keeping legacy accrual."""
     import tile_fill as _tf
+    fallbacks = []
     try:
         efs = pos.get("entry_fill_sim") if isinstance(pos.get("entry_fill_sim"), dict) else {}
         xfs = pos.get("exit_fill_sim") if isinstance(pos.get("exit_fill_sim"), dict) else {}
-        entry_fill_ts = efs.get("fill_ts") or pos.get("entry_ts")
-        exit_fill_ts = xfs.get("fill_ts") or pos.get("exit_model_fill_ts") or time.time()
+        entry_fill_ts = efs.get("fill_ts")
+        if entry_fill_ts is None:
+            entry_fill_ts = pos.get("entry_ts")
+            fallbacks.append("ENTRY_FILL_TS_FROM_ENTRY_TS")
+        if until is not None:
+            exit_fill_ts = float(until)
+        else:
+            exit_fill_ts = xfs.get("fill_ts")
+            if exit_fill_ts is None:
+                exit_fill_ts = pos.get("exit_model_fill_ts")
+                fallbacks.append("EXIT_FILL_TS_FROM_EXIT_MODEL_FILL_TS" if exit_fill_ts is not None
+                                 else "EXIT_FILL_TS_FROM_NOW")
+                if exit_fill_ts is None:
+                    exit_fill_ts = time.time()
         receipts = [r for r in (pos.get("partial_exit_receipts") or []) if isinstance(r, dict)]
         cut = sum(float(r.get("closed_qty") or 0) for r in receipts if float(r.get("remaining_fraction") or 0) > 0)
         original = pos.get("policy_original_qty") or (float(pos.get("qty") or 0) + cut)
-        return _tf.funding_fields(entry_fill_ts, exit_fill_ts, direction=pos.get("dir"),
-                                  qty_at=_tf.qty_schedule(original, receipts),
-                                  settlements=pos.get("funding_settlements"))
-    except Exception:  # noqa: BLE001 - never blocks a close; the row is then legacy-funded and flagged
-        logger.exception("[F5 FUNDING] settlement-exact funding failed; legacy accrual kept")
-        return None
+        out = _tf.funding_fields(entry_fill_ts, exit_fill_ts, direction=pos.get("dir"),
+                                 qty_at=_tf.qty_schedule(original, receipts),
+                                 settlements=pos.get("funding_settlements"))
+    except Exception as exc:  # noqa: BLE001 - never blocks a close; the row is FUNDING_PRICER_ERROR, non_countable
+        logger.exception("[F5 FUNDING] settlement-exact funding failed; row non_countable FUNDING_PRICER_ERROR")
+        return {"funding_model": _tf.FUNDING_MODEL_V2, "funding_status": FUNDING_PRICER_ERROR,
+                "funding_verified": False, "funding_usd_raw": None, "funding_ts_fallbacks": fallbacks,
+                "funding_error": type(exc).__name__}
+    out["funding_ts_fallbacks"] = fallbacks
+    if fallbacks:
+        out["funding_verified"] = False
+    return out
 
 
 def _funding_rate_now():
@@ -8779,8 +8844,10 @@ def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = Tru
     if not FUNDING_SIMULATION_ENABLED:
         return
     if _is_paper_book_lane(pos):
-        # REALISM_V2 F5: tiles 1-5 pay funding only at settlement, priced once at close by
-        # tile_fill.funding_fields from bfx_deriv_status_1s (no pro-rata, no predicted state rate).
+        # REALISM_V2 F5: tiles 1-5 pay funding only at settlement, priced by tile_fill.funding_fields from
+        # bfx_deriv_status_1s (no pro-rata, no predicted state rate). HM #849 item 6: settlements already
+        # passed are booked into funding_fees while open (uPnL); the close re-prices the whole hold.
+        _stamp_open_funding_paid(pos, now)
         return
     if now is None:
         now = time.time()
