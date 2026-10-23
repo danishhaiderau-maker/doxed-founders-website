@@ -281,11 +281,12 @@ test('1487: reduce-only STOP submit rides the priority stop lane', async () => {
   assert.ok(src.includes('lane.stops?.shift() ?? lane.mutations.shift() ?? lane.reads.shift()'));
 });
 
-test('AMEND4 E6: mirror re-reads every <= 4 s while exposed or blind, never faster when flat', () => {
-  assert.equal(EXCHANGE_MIRROR_EXPOSED_EVERY_MS, 4_000);
+test('AMEND4 E6 / #852: mirror republishes stop evidence at <= 2 s of age while exposed or blind, never faster when flat', () => {
+  assert.equal(EXCHANGE_MIRROR_EXPOSED_EVERY_MS, 1_750);
+  assert.ok(EXCHANGE_MIRROR_EXPOSED_EVERY_MS <= 2_000);
   const now = 1_000_000;
-  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 4_000, nowMs: now }), true);
-  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 3_999, nowMs: now }), false);
+  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 1_750, nowMs: now }), true);
+  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 1_749, nowMs: now }), false);
   assert.equal(exchangeMirrorExposedDue({ exposed: false, lastMirrorAtMs: now - 60_000, nowMs: now }), false);
   assert.equal(exchangeMirrorShowsExposure({ ok: false }), true);
   assert.equal(exchangeMirrorShowsExposure({ ok: true, positions: [], open_orders: [] }), false);

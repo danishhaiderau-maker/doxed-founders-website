@@ -49905,7 +49905,10 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     return True
 
 
-_LIVE_GUARDIAN_EXPOSED_FETCH_SEC = 3.0   # AMEND4 E6: Fly view refresh while exposed (relay mirror <= 4 s while exposed)
+# AMEND4 E6 / #852: Fly view cache ttl while exposed. 0.5 s < the 1 s guardian tick, so every tick re-fetches (fetch
+# cadence 1 s); with the relay republishing at 1.75 s of evidence age the worst case is <= 4 s
+# (live_tile_gate.stop_evidence_worst_case_age_s), under the 5 s STOP_RESIDENT_MAX_AGE_S rule.
+_LIVE_GUARDIAN_EXPOSED_FETCH_SEC = 0.5
 
 
 def _live_guardian_exposed(chains) -> bool:

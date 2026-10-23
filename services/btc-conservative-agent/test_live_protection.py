@@ -631,3 +631,21 @@ def test_rk_l27_all_three_call_sites_use_the_one_helper():
     a = _SRC.index("def _live_guardian_tile_arm_block")
     assert "liq_latest_l" in _SRC[a:_SRC.index("\ndef ", a + 10)]
     assert '"liq_latest_l")' in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS ="):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE =")]
+
+
+def test_852_e6_worst_case_evidence_age_under_normal_cadence_never_false_flattens():
+    worst = ltg.stop_evidence_worst_case_age_s()
+    assert worst == 3.95 and worst <= 4.0 < ltg.STOP_RESIDENT_MAX_AGE_S
+    assert ltg.STOP_EVIDENCE_TIMING["relay_every_s"] <= 2.0
+    src = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "_LIVE_GUARDIAN_EXPOSED_FETCH_SEC = 0.5" in src and "_LIVE_GUARDIAN_INTERVAL_SEC = 1.0" in src
+    # Fly computes read_age_s(at response) + (now - fetched_at stamped before the request); worst = 3.45 + 0.5 HTTP
+    fetched = NOW - ltg.STOP_EVIDENCE_TIMING["fly_http_s"]
+    m = dict(mirror([LONG], [STOP_L]), read_age_s=worst - ltg.STOP_EVIDENCE_TIMING["fly_http_s"], fetched_at_ts=fetched)
+    assert abs(ltg.mirror_evidence_age_s(m, NOW) - worst) < 1e-9
+    r = ltg.open_position_protection(m, book(), NOW)
+    assert "STOP_RESIDENCY_UNCONFIRMED" not in [c for _, c in codes(r)] and r["disarm"] == []
+    # the boundary itself still bites (4.9 holds, 5.1 flattens)
+    assert ltg.open_position_protection(dict(m, read_age_s=4.9, fetched_at_ts=NOW), book(), NOW)["disarm"] == []
+    assert (ltg.STOP_FAILURE_FLATTEN, "STOP_RESIDENCY_UNCONFIRMED") in codes(
+        ltg.open_position_protection(dict(m, read_age_s=5.1, fetched_at_ts=NOW), book(), NOW))

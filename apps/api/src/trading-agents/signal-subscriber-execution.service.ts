@@ -78,6 +78,9 @@ import {
   normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
   type BitfinexFuturesPairConstraints,
+  bitfinexAuthCallsLastMinute,
+  recentBitfinexAuthRead,
+  BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -3999,13 +4002,18 @@ export function exchangeMirrorMayRun(input: {
   moneyTickRunning: boolean;
   lastMirrorAtMs: number;
   nowMs: number;
+  /** #852 E6: the fast exposed (stop-evidence) refresh */
+  fastExposed?: boolean;
 }): boolean {
   if (input.destroyed || input.mirrorRunning) return false;
-  // LIVE-FIX-0741: never during a money tick. Forcing it mid-tick (#559) put
-  // three authenticated reads ahead of the protective stop on the per-key
-  // nonce lane: fill->stop_placed regressed 0.4 s -> 5.6-6.5 s. Staleness is
-  // instead cured by exchangeMirrorDueAfterTick() right after each tick.
-  return !input.moneyTickRunning;
+  // LIVE-FIX-0741: never a full (3-read) mirror during a money tick. Forcing it
+  // mid-tick (#559) put three authenticated reads ahead of the protective stop
+  // on the per-key nonce lane: fill->stop_placed regressed 0.4 s -> 5.6-6.5 s.
+  // #852 E6: the fast exposed refresh may run mid-tick because it normally
+  // REUSES the tick's own orders/positions reads (no lane traffic) and at most
+  // queues <= 2 reads in the READ class, behind the stop/mutation priority
+  // classes added since (a stop waits for <= one in-flight read).
+  return !input.moneyTickRunning || input.fastExposed === true;
 }
 
 /** Pure: run the mirror immediately after a tick ends (no wake queued) when stale. */
@@ -4016,18 +4024,83 @@ export function exchangeMirrorDueAfterTick(input: {
 }): boolean {
   return !input.wakeQueued && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
 }
-/** AMEND4 E6 (sha 7073ed25, L28): while the last mirror showed a position or open
- * orders, or failed, re-read at least this often so the Fly guardian can confirm
- * stop residency every 5 s (RK 24 Oct: stop evidence > 5 s old end to end is RED; 10 s is book age only). */
-export const EXCHANGE_MIRROR_EXPOSED_EVERY_MS = 4_000;
+/** AMEND4 E6 (sha 7073ed25, L28) / #852 E6 timing: while the last mirror showed a
+ * position or open orders, or failed, republish stop evidence once its age
+ * (measured from the oldest read's SEND time) reaches this, so healthy evidence
+ * is always < 5 s old end to end at Fly (RK 24 Oct). 1.75 s (<= 2 s) is the
+ * tightest cadence whose worst case stays <= 4 s: see stopEvidenceWorstCaseAgeS. */
+export const EXCHANGE_MIRROR_EXPOSED_EVERY_MS = 1_750;
+/** Due-check period of the exposed cadence (adds at most this much lateness). */
+export const EXCHANGE_MIRROR_DUE_CHECK_MS = 250;
+/** A money-tick orders/positions read at most this old is reused instead of a new read. */
+export const EXCHANGE_MIRROR_REUSE_MAX_AGE_MS = 1_000;
+/** The Derivatives balance is not stop evidence: refreshed at the slow cadence only. */
+export const EXCHANGE_MIRROR_BALANCE_EVERY_MS = 15_000;
+/** Fast mirror issues NO new read of an endpoint already at 80 % of Bitfinex's
+ * 90 req/min/IP (a breach blocks the IP for 60 s: blind relay, stops unplaceable).
+ * Evidence then ages and the Fly guardian fails closed (flatten), never the IP. */
+export const EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN = Math.floor(BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN * 0.8);
+/** Budgets used for the worst-case evidence age (measured relay signed-read p95 0.59 s, 12-19 Oct EXECUTOR-DIAG). */
+export const STOP_EVIDENCE_TIMING = {
+  relayEveryS: EXCHANGE_MIRROR_EXPOSED_EVERY_MS / 1000,
+  dueCheckS: EXCHANGE_MIRROR_DUE_CHECK_MS / 1000,
+  /** orders + positions, serialized on the per-key nonce lane: 2 x 0.6 s p95 */
+  readS: 1.2,
+  /** one jsonb_set UPDATE (db p95 ~16 ms; generous) */
+  writeS: 0.25,
+  /** Fly re-fetches on every 1 s guardian tick (cache ttl 0.5 s < tick); fly-view HTTP budget */
+  flyHttpS: 0.5,
+} as const;
 
-/** Pure: fast mirror cadence while exposed (or blind). Never during a money tick (exchangeMirrorMayRun). */
+/**
+ * Pure: worst-case stop-evidence age the Fly guardian can compute under normal
+ * cadence. Evidence is replaced once it is ``relayEveryS`` old (+ due-check
+ * lateness + reads + DB write); Fly's age = relay read_age_s at response +
+ * (now - fetched_at, stamped BEFORE the request) = that + HTTP time.
+ */
+export function stopEvidenceWorstCaseAgeS(t: {
+  relayEveryS: number; dueCheckS: number; readS: number; writeS: number; flyHttpS: number;
+} = STOP_EVIDENCE_TIMING): number {
+  return Math.round((t.relayEveryS + t.dueCheckS + t.readS + t.writeS + t.flyHttpS) * 1000) / 1000;
+}
+
+/** Pure: fast mirror cadence while exposed (or blind), from the evidence (read-send) time. */
 export function exchangeMirrorExposedDue(input: {
   exposed: boolean;
   lastMirrorAtMs: number;
   nowMs: number;
 }): boolean {
   return input.exposed && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_EXPOSED_EVERY_MS;
+}
+
+export type ExchangeMirrorReadPlan = {
+  orders: 'REUSE' | 'READ' | 'SKIP';
+  positions: 'REUSE' | 'READ' | 'SKIP';
+  balance: 'REUSE' | 'READ';
+};
+
+/**
+ * Pure (#852 E6): which reads the FAST exposed mirror issues. A money-tick read
+ * <= EXCHANGE_MIRROR_REUSE_MAX_AGE_MS old is reused (0 extra Bitfinex load while
+ * ACTIVE); otherwise a new read unless that endpoint is at the budget guard
+ * (SKIP => not published; evidence ages and Fly fails closed). The balance is
+ * read only every EXCHANGE_MIRROR_BALANCE_EVERY_MS.
+ */
+export function exchangeMirrorReadPlan(input: {
+  ordersReuseAgeMs: number | null;
+  positionsReuseAgeMs: number | null;
+  balanceAgeMs: number | null;
+  callsLastMinute: Record<string, number>;
+}): ExchangeMirrorReadPlan {
+  const guard = (path: string) => (input.callsLastMinute[path] ?? 0) >= EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN;
+  const pick = (age: number | null, path: string): 'REUSE' | 'READ' | 'SKIP' =>
+    age != null && age >= 0 && age <= EXCHANGE_MIRROR_REUSE_MAX_AGE_MS ? 'REUSE' : guard(path) ? 'SKIP' : 'READ';
+  return {
+    orders: pick(input.ordersReuseAgeMs, 'v2/auth/r/orders'),
+    positions: pick(input.positionsReuseAgeMs, 'v2/auth/r/positions'),
+    balance: input.balanceAgeMs != null && input.balanceAgeMs < EXCHANGE_MIRROR_BALANCE_EVERY_MS
+      || guard('v2/auth/r/wallets') ? 'REUSE' : 'READ',
+  };
 }
 
 /** Pure: does this mirror call for the fast cadence? Failed reads and any position/order do. */
@@ -4047,6 +4120,10 @@ export function buildExchangeMirror(input: {
   balance: number | null;
   readStartedAt: number;
   readAt: number;
+  /** #852 E6: send time of the OLDEST read used (stop-evidence time); defaults to readAt */
+  evidenceAt?: number;
+  /** send time of the positions read (liq_read_at); defaults to readAt */
+  positionReadAt?: number;
 }): Record<string, unknown> {
   const REDUCE_ONLY = 1024;
   const open_orders = input.orders.map((o) => ({
@@ -4074,7 +4151,7 @@ export function buildExchangeMirror(input: {
       // AMEND4 E5 (sha 7073ed25, L24-26): live liq with its read timestamp; null = unreadable (Fly fails closed).
       liq_price: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0 ? input.position.liqPrice : null,
       liq_read_at: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0
-        ? new Date(input.readAt).toISOString() : null,
+        ? new Date(input.positionReadAt ?? input.readAt).toISOString() : null,
     }]
     : [];
   return {
@@ -4087,7 +4164,7 @@ export function buildExchangeMirror(input: {
     orphans: positions.length === 0 ? open_orders.map((o) => o.id) : [],
     balance: { derivatives_available_usd: input.balance },
     read_latency_ms: Math.max(0, input.readAt - input.readStartedAt),
-    read_at: new Date(input.readAt).toISOString(),
+    read_at: new Date(Math.min(input.evidenceAt ?? input.readAt, input.readAt)).toISOString(),
   };
 }
 
@@ -4484,14 +4561,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
       setInterval(() => void this.refreshExchangeMirror(), EXCHANGE_MIRROR_EVERY_MS).unref();
-      // AMEND4 E6: <= 4 s mirror cadence while a position/order is open or the last read failed.
+      // AMEND4 E6 / #852: stop evidence republished at 1.75 s of age (from read SEND
+      // time), checked every 250 ms, while a position/order is open or the last read failed.
       setInterval(() => {
         if (exchangeMirrorExposedDue({
           exposed: this.lastExchangeMirrorExposed,
-          lastMirrorAtMs: this.lastExchangeMirrorAtMs,
+          lastMirrorAtMs: this.lastExchangeMirrorEvidenceAtMs,
           nowMs: Date.now(),
-        })) void this.refreshExchangeMirror();
-      }, 1_000).unref();
+        })) void this.refreshExchangeMirror({ fast: true });
+      }, EXCHANGE_MIRROR_DUE_CHECK_MS).unref();
     }
   }
 
@@ -10225,6 +10303,10 @@ await this.notifications
   private exchangeMirrorRunning = false;
   private lastExchangeMirrorAtMs = 0;
   private lastExchangeMirrorExposed = false;
+  /** #852 E6: send time of the oldest read in the last published mirror (min over accounts) */
+  private lastExchangeMirrorEvidenceAtMs = 0;
+  private readonly exchangeMirrorBalance = new Map<string, { atMs: number; usd: number | null }>();
+  private exchangeMirrorBudgetWarnAtMs = 0;
 
   /**
    * Read-only exchange mirror for monitoring (11 Oct lifecycle audit RED 2/5):
@@ -10235,16 +10317,21 @@ await this.notifications
    * while a money tick holds the lane, and paused accounts are not polled
    * (read_age then grows, and Fly alerts only while armed).
    */
-  private async refreshExchangeMirror(): Promise<void> {
+  private async refreshExchangeMirror(opts: { fast?: boolean } = {}): Promise<void> {
+    const fast = opts.fast === true;
     if (!exchangeMirrorMayRun({
       destroyed: this.executorDestroyed,
       mirrorRunning: this.exchangeMirrorRunning,
       moneyTickRunning: this.running,
       lastMirrorAtMs: this.lastExchangeMirrorAtMs,
       nowMs: Date.now(),
+      fastExposed: fast,
     })) return;
     this.exchangeMirrorRunning = true;
     let exposed = false;
+    let evidenceAtMs = Number.POSITIVE_INFINITY;
+    let published = 0;
+    let skipped = 0;
     try {
       for (const instance of this.relayInstanceCache.values()) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
@@ -10256,12 +10343,54 @@ await this.notifications
         try {
           const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
           if (!creds) throw new Error('credentials-missing');
+          type Orders = Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>>;
+          type Position = Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
+          const reusedOrders = fast ? recentBitfinexAuthRead<Orders>(creds.apiKey, 'orders', EXCHANGE_MIRROR_REUSE_MAX_AGE_MS) : null;
+          const reusedPosition = fast ? recentBitfinexAuthRead<Position>(creds.apiKey, 'positions', EXCHANGE_MIRROR_REUSE_MAX_AGE_MS) : null;
+          const lastBalance = this.exchangeMirrorBalance.get(instance.id);
+          const calls = bitfinexAuthCallsLastMinute(readStartedAt);
+          const plan: ExchangeMirrorReadPlan = fast
+            ? exchangeMirrorReadPlan({
+              ordersReuseAgeMs: reusedOrders ? readStartedAt - reusedOrders.sentAtMs : null,
+              positionsReuseAgeMs: reusedPosition ? readStartedAt - reusedPosition.sentAtMs : null,
+              balanceAgeMs: lastBalance ? readStartedAt - lastBalance.atMs : null,
+              callsLastMinute: calls,
+            })
+            : { orders: 'READ', positions: 'READ', balance: 'READ' };
+          if (plan.orders === 'SKIP' || plan.positions === 'SKIP') {
+            skipped += 1;
+            if (readStartedAt - this.exchangeMirrorBudgetWarnAtMs > 60_000) {
+              this.exchangeMirrorBudgetWarnAtMs = readStartedAt;
+              this.logger.warn(`[EXCHANGE-MIRROR] auth read budget guard (${EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN}/min/endpoint): `
+                + `fast stop-evidence refresh skipped; calls_last_60s=${JSON.stringify(calls)}`);
+            }
+            continue;   // not published: evidence ages and the Fly guardian fails closed
+          }
           const [orders, position, balance] = await Promise.all([
-            this.bitfinex.listActiveOrders(creds),
-            this.bitfinex.getOpenPositionDetail(creds),
-            this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
+            plan.orders === 'REUSE' && reusedOrders ? reusedOrders.value : this.bitfinex.listActiveOrders(creds),
+            plan.positions === 'REUSE' && reusedPosition ? reusedPosition.value : this.bitfinex.getOpenPositionDetail(creds),
+            plan.balance === 'REUSE' && lastBalance
+              ? lastBalance.usd
+              : this.bitfinex.getDerivativesAvailableUsd(creds).catch(() => null),
           ]);
-          mirror = buildExchangeMirror({ orders, position, balance, readStartedAt, readAt: Date.now() });
+          if (!(plan.balance === 'REUSE' && lastBalance)) this.exchangeMirrorBalance.set(instance.id, { atMs: readStartedAt, usd: balance });
+          const ordersAt = plan.orders === 'REUSE' && reusedOrders ? reusedOrders.sentAtMs : readStartedAt;
+          const positionAt = plan.positions === 'REUSE' && reusedPosition ? reusedPosition.sentAtMs : readStartedAt;
+          const evidenceAt = Math.min(ordersAt, positionAt);
+          mirror = {
+            ...buildExchangeMirror({
+              orders, position, balance, readStartedAt, readAt: Date.now(), evidenceAt, positionReadAt: positionAt,
+            }),
+            evidence_source: { orders: plan.orders, positions: plan.positions, balance: plan.balance },
+            auth_calls_last_60s: {
+              orders: calls['v2/auth/r/orders'] ?? 0,
+              positions: calls['v2/auth/r/positions'] ?? 0,
+              wallets: calls['v2/auth/r/wallets'] ?? 0,
+              limit_per_min: BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN,
+              guard_per_min: EXCHANGE_MIRROR_AUTH_GUARD_PER_MIN,
+            },
+          };
+          evidenceAtMs = Math.min(evidenceAtMs, evidenceAt);
         } catch (err) {
           mirror = {
             schema: 'relay_exchange_mirror_v1',
@@ -10271,6 +10400,8 @@ await this.notifications
           };
         }
         if (exchangeMirrorShowsExposure(mirror)) exposed = true;
+        if (mirror.ok !== true) evidenceAtMs = Math.min(evidenceAtMs, readStartedAt);
+        published += 1;
         const payload = JSON.stringify(mirror);
         await this.prisma.$executeRaw`
           UPDATE "TradingAgentInstance"
@@ -10278,8 +10409,13 @@ await this.notifications
           WHERE "id" = ${instance.id}::text AND "exchangeProvider" = 'bitfinex'
         `.catch(() => undefined);
       }
-      this.lastExchangeMirrorAtMs = Date.now();
-      this.lastExchangeMirrorExposed = exposed;
+      if (skipped === 0) {
+        this.lastExchangeMirrorAtMs = Date.now();
+        this.lastExchangeMirrorEvidenceAtMs = Number.isFinite(evidenceAtMs) ? evidenceAtMs : this.lastExchangeMirrorAtMs;
+        this.lastExchangeMirrorExposed = exposed;
+      } else if (published > 0 && exposed) {
+        this.lastExchangeMirrorExposed = true;
+      }
     } finally {
       this.exchangeMirrorRunning = false;
     }

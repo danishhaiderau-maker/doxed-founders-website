@@ -340,6 +340,68 @@ export async function assertProtectiveStopSide(apiPath: string, body: Record<str
   throw new Error(`STOP_SIDE_REFUSED: ${reason}`);
 }
 
+/**
+ * #852 E6 budget: rolling 60 s count of authenticated requests actually sent,
+ * per endpoint path, process-wide. Bitfinex rate-limits REST per IP per
+ * endpoint (90 req/min for v2/auth/r/orders, positions, wallets; a breach
+ * blocks the IP for 60 s), and every relay account shares this process's IP.
+ */
+export const BITFINEX_AUTH_ENDPOINT_LIMIT_PER_MIN = 90;
+const authCallLog = new Map<string, number[]>();
+
+export function recordBitfinexAuthCall(apiPath: string, nowMs = Date.now()): void {
+  const log = authCallLog.get(apiPath) ?? [];
+  log.push(nowMs);
+  while (log.length && nowMs - log[0] >= 60_000) log.shift();
+  authCallLog.set(apiPath, log);
+}
+
+/** Authenticated requests sent per endpoint in the last 60 s (process-wide, i.e. per relay IP). */
+export function bitfinexAuthCallsLastMinute(nowMs = Date.now()): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [path, log] of authCallLog) {
+    const n = log.filter((t) => nowMs - t < 60_000).length;
+    if (n > 0) out[path] = n;
+  }
+  return out;
+}
+
+/** @internal tests only */
+export function resetBitfinexAuthCallLog(): void {
+  authCallLog.clear();
+  recentAuthReads.clear();
+}
+
+/**
+ * #852 E6: the last successful orders / positions read per API key, stamped
+ * with the time that request was ENQUEUED (<= sent: a conservative evidence age). The
+ * read-only exchange mirror reuses a recent money-tick read instead of
+ * issuing its own, so the fast stop-evidence cadence adds no Bitfinex load
+ * while the relay is ticking. Values are parsed payloads only (no secrets).
+ */
+type RecentAuthRead = { sentAtMs: number; value: unknown };
+const recentAuthReads = new Map<string, RecentAuthRead>();
+function recentReadKey(apiKey: string, kind: 'orders' | 'positions', symbol: string): string {
+  return `${createHmac('sha256', 'recent-read').update(apiKey).digest('hex').slice(0, 16)}:${kind}:${symbol}`;
+}
+function rememberAuthRead(apiKey: string, kind: 'orders' | 'positions', symbol: string, sentAtMs: number, value: unknown): void {
+  const key = recentReadKey(apiKey, kind, symbol);
+  const prev = recentAuthReads.get(key);
+  if (!prev || prev.sentAtMs <= sentAtMs) recentAuthReads.set(key, { sentAtMs, value });
+}
+/** A successful read of ``kind`` sent at most ``maxAgeMs`` ago, or null. */
+export function recentBitfinexAuthRead<T>(
+  apiKey: string,
+  kind: 'orders' | 'positions',
+  maxAgeMs: number,
+  nowMs = Date.now(),
+  symbol = BITFINEX_BTC_PERP_SYMBOL,
+): { sentAtMs: number; value: T } | null {
+  const hit = recentAuthReads.get(recentReadKey(apiKey, kind, symbol));
+  if (!hit || nowMs - hit.sentAtMs > maxAgeMs || hit.sentAtMs > nowMs) return null;
+  return { sentAtMs: hit.sentAtMs, value: hit.value as T };
+}
+
 export async function bitfinexAuthPost<T = unknown>(
   creds: ExchangeCredentials,
   apiPath: string,
@@ -372,6 +434,7 @@ export async function bitfinexAuthPost<T = unknown>(
         );
       }
       const nonce = allocateBitfinexAuthNonce(creds.apiKey);
+      recordBitfinexAuthCall(apiPath);
       try {
         return await bitfinexAuthPostOnce<T>(
           creds,
@@ -1137,10 +1200,13 @@ export class BitfinexTradingClient {
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
   ): Promise<BitfinexActiveOrder[]> {
+    const sentAtMs = Date.now();
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/orders', {
       sym: symbol,
     });
-    return parseActiveOrdersPayload(rows, symbol);
+    const orders = parseActiveOrdersPayload(rows, symbol);
+    rememberAuthRead(creds.apiKey, 'orders', symbol, sentAtMs, orders);
+    return orders;
   }
 
   async findOrder(
@@ -1165,8 +1231,11 @@ export class BitfinexTradingClient {
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
   ): Promise<BitfinexPositionDetail | null> {
+    const sentAtMs = Date.now();
     const rows = await bitfinexAuthPost<unknown[][]>(creds, 'v2/auth/r/positions');
-    return parseOpenPositionPayload(rows, symbol);
+    const detail = parseOpenPositionPayload(rows, symbol);
+    rememberAuthRead(creds.apiKey, 'positions', symbol, sentAtMs, detail);
+    return detail;
   }
 
   /** Sum fees and exchange-realized position P&L from one margin-ledger request. */

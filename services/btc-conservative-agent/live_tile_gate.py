@@ -597,6 +597,18 @@ def resident_stops(orders: Iterable[Mapping[str, Any]] | None) -> list:
     return [o for o in (orders or []) if isinstance(o, Mapping) and o.get("reduce_only") is True and "STOP" in str(o.get("type") or "").upper()]
 
 
+# #852 E6 timing budget (seconds), mirrored from the relay's STOP_EVIDENCE_TIMING (signal-subscriber-execution.service.ts):
+# relay republishes stop evidence at 1.75 s of age (read SEND time), due-checked every 0.25 s; orders+positions reads
+# serialized 2 x 0.6 s p95; DB write 0.25 s; Fly re-fetches on every 1 s guardian tick (cache ttl 0.5 s), HTTP 0.5 s.
+STOP_EVIDENCE_TIMING = {"relay_every_s": 1.75, "due_check_s": 0.25, "read_s": 1.2, "write_s": 0.25, "fly_http_s": 0.5}
+
+
+def stop_evidence_worst_case_age_s(t: Mapping[str, float] | None = None) -> float:
+    """Worst-case evidence age the guardian computes under normal cadence (must stay < STOP_RESIDENT_MAX_AGE_S)."""
+    t = dict(STOP_EVIDENCE_TIMING if t is None else t)
+    return round(sum(float(t[k]) for k in ("relay_every_s", "due_check_s", "read_s", "write_s", "fly_http_s")), 3)
+
+
 def mirror_evidence_age_s(mirror: Mapping[str, Any] | None, now: float) -> float | None:
     """Age of the relay's exchange read: read_age_s at Fly's fetch + time since that fetch (fetched_at_ts), when given."""
     m = mirror if isinstance(mirror, Mapping) else {}
