@@ -24,6 +24,15 @@ locally (the segment shipper mirrors them), so on-disk use stays bounded.
 No look-ahead (RK, 24 Oct): second ``s`` is closed ~1.3-1.5 s after it starts. Every 1 s row describes the state as
 of the END of second ``s`` (receive time <= s+1): the book is frozen at the second boundary before later deltas are
 applied, trades are bucketed by receive second, deriv/venue quotes received after s+1 are not used for row ``s``.
+Deriv/venue history is kept as ONE value per receive second (the last one received in it) for HIST_SEC seconds, so a
+burst of updates between s+1 and the close, or a catch-up after a stall, can never push the s+1 value out (HM #851 C1).
+
+Event rows also carry ``mono`` (time.monotonic(), s, ms precision) so a wall-clock step can neither fake nor hide a
+gap, and a disconnect row carries ``reason`` (the exception class, or ``stop`` on a graceful shutdown).
+
+Disconnect zeroing is conservative only: on_bfx_disconnect also clears the book-liveness of seconds that are already
+frozen but not yet closed, so a disconnect seen after s+1 can suppress a carried row ``s`` (never the reverse). A
+fresh (non-carried) row is unaffected.
 """
 from __future__ import annotations
 
@@ -49,7 +58,7 @@ PARADEX_BBO = "https://api.prod.paradex.trade/v1/bbo/BTC-USD-PERP"  # WS needs S
 BOOK_FILE, TRADES_FILE, VENUE_FILE = "bfx_book_10l_1s.jsonl", "bfx_trades.jsonl", "venue_bbo_1m.jsonl"
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"
 EVENTS_FILE = "bfx_ws_events.jsonl"
-_HIST = 16  # per-source receive history kept so a late close can pick the value as of s+1
+HIST_SEC = 15  # per-source history: last value per receive second, kept this long (close lags <= ~10 s catch-up)
 DERIV_KEY = "deriv:" + BFX_SYMBOL
 MAX_DERIV_AGE_SEC = 10.0  # Bitfinex pushes deriv status every ~1-4 s; rows carry age_s
 
@@ -152,13 +161,41 @@ class BfxBook:
         return ([[_num(p), round(q, 4)] for p, q in b], [[_num(p), round(q, 4)] for p, q in a])
 
 
+class _SecondHistory:
+    """Last value received in each receive second, for HIST_SEC seconds. Bounded by time, not count: a burst cannot
+    evict the value a late close needs (HM #851 C1). Always keeps the newest value even when older than HIST_SEC."""
+
+    def __init__(self, keep_s: int = HIST_SEC) -> None:
+        self.keep_s = keep_s
+        self._by_sec: "collections.OrderedDict[int, tuple]" = collections.OrderedDict()
+
+    def add(self, value: tuple, recv: float) -> None:
+        sec = int(recv)
+        self._by_sec[sec] = value
+        self._by_sec.move_to_end(sec)
+        while len(self._by_sec) > 1 and next(iter(self._by_sec)) < sec - self.keep_s:
+            self._by_sec.popitem(last=False)
+
+    def as_of(self, sec: int):
+        """Newest value received before the end of second ``sec`` (receive time < sec+1)."""
+        best = None
+        for k, v in self._by_sec.items():
+            if k <= sec and (best is None or k >= best[0]):
+                best = (k, v)
+        return best[1] if best else None
+
+    def __len__(self) -> int:
+        return len(self._by_sec)
+
+
 def _num(p: float):
     return int(p) if float(p).is_integer() else p
 
 
 class Collector:
-    def __init__(self, runtime_dir: str, ws_factory=None, http_get=None, clock=time.time) -> None:
-        self.dir, self.clock = runtime_dir, clock
+    def __init__(self, runtime_dir: str, ws_factory=None, http_get=None, clock=time.time,
+                 mono=time.monotonic) -> None:
+        self.dir, self.clock, self.mono = runtime_dir, clock, mono
         self.stop = threading.Event()
         self.book_sink = Sink(os.path.join(runtime_dir, BOOK_FILE))
         self.trade_sink = Sink(os.path.join(runtime_dir, TRADES_FILE))
@@ -167,8 +204,8 @@ class Collector:
         self.events_sink = Sink(os.path.join(runtime_dir, EVENTS_FILE))
         self._dv = _data_version.Stamp()  # D8: rows carry the fresh-start epoch they belong to
         self.deriv: Optional[tuple] = None  # (fields, recv_ts), latest
-        self._deriv_hist: collections.deque = collections.deque(maxlen=_HIST)
-        self._quote_hist = {"lighter": collections.deque(maxlen=_HIST), "paradex": collections.deque(maxlen=_HIST)}
+        self._deriv_hist = _SecondHistory()
+        self._quote_hist = {"lighter": _SecondHistory(), "paradex": _SecondHistory()}
         # Book state frozen at each second boundary: {sec: (b, a, book_ts, carry_ok, alive_ts)} = state at END of sec.
         self._open_sec: Optional[int] = None
         self._frozen: dict = {}
@@ -210,7 +247,7 @@ class Collector:
         return self._frozen[max(keys)] if keys else None
 
     def _event(self, now: float, ev: str, ch=None, **extra) -> None:
-        row = {"r": round(now, 3), "ev": ev}
+        row = {"r": round(now, 3), "mono": round(self.mono(), 3), "ev": ev}
         if ch is not None:
             row["ch"] = ch
         row.update(extra)
@@ -259,14 +296,14 @@ class Collector:
                     parsed = parse_deriv_status(msg[1])
                     if parsed:
                         self.deriv = (parsed, now)
-                        self._deriv_hist.append(self.deriv)
+                        self._deriv_hist.add(self.deriv, now)
             elif kind == "trades":
                 if msg[1] == "te" and isinstance(msg[2], list):
                     t = msg[2]
                     self.trades.append([int(now), [int(t[0]), int(t[1]), float(t[2]), _num(float(t[3]))]])
                 # "tu" duplicates "te"; the (re)subscribe snapshot is history, not new prints (logged to EVENTS_FILE).
 
-    def on_bfx_disconnect(self, now: Optional[float] = None) -> None:
+    def on_bfx_disconnect(self, now: Optional[float] = None, reason: Optional[str] = None) -> None:
         """The book channel is gone with the socket: nothing may be carried forward until a new book frame arrives.
         Conservative: no not-yet-written second may carry the book either."""
         now = self.clock() if now is None else now
@@ -274,7 +311,7 @@ class Collector:
             self._roll(now)
             self.book_alive_ts = 0.0
             self._frozen = {k: (b, a, ts, ok, 0.0) for k, (b, a, ts, ok, _alive) in self._frozen.items()}
-        self._event(now, "disconnect")
+        self._event(now, "disconnect", reason=reason or "unknown")
 
     def on_lighter(self, msg: dict, now: float) -> None:
         tk = msg.get("ticker") if isinstance(msg, dict) else None
@@ -283,14 +320,14 @@ class Collector:
             if bid and ask:
                 with self.lock:
                     self.quotes["lighter"] = (bid, ask, now)
-                    self._quote_hist["lighter"].append(self.quotes["lighter"])
+                    self._quote_hist["lighter"].add(self.quotes["lighter"], now)
 
     def on_paradex(self, body: dict, now: float) -> None:
         bid, ask = _f((body or {}).get("bid")), _f((body or {}).get("ask"))
         if bid and ask:
             with self.lock:
                 self.quotes["paradex"] = (bid, ask, now)
-                self._quote_hist["paradex"].append(self.quotes["paradex"])
+                self._quote_hist["paradex"].add(self.quotes["paradex"], now)
 
     # ---- per-second close ----------------------------------------------------
     def close_second(self, sec: int, now: Optional[float] = None) -> None:
@@ -311,10 +348,10 @@ class Collector:
                     b, a = sb, sa
             trades = [t for rs, t in self.trades if rs <= sec]
             self.trades = [x for x in self.trades if x[0] > sec]
-            deriv = next((d for d in reversed(self._deriv_hist) if d[1] <= end), None)
+            deriv = self._deriv_hist.as_of(sec)
             quotes = {}
             for v, hist in self._quote_hist.items():
-                q = next((x for x in reversed(hist) if x[2] <= end), None)
+                q = hist.as_of(sec)
                 quotes[v] = (q[0], q[1]) if q and end - q[2] <= MAX_QUOTE_AGE_SEC else None
             for k in [k for k in self._frozen if k < sec - 60]:
                 if any(j > k and j <= sec for j in self._frozen):
@@ -364,10 +401,12 @@ class Collector:
                         handler(msg, chans, self.clock())
                     else:
                         handler(msg, self.clock())
+                if name == "bitfinex":
+                    self.on_bfx_disconnect(reason="stop")  # graceful shutdown
             except Exception as exc:  # noqa: BLE001
                 self.reconnects[name] += 1
                 if name == "bitfinex":
-                    self.on_bfx_disconnect()
+                    self.on_bfx_disconnect(reason=type(exc).__name__)
                 _log(f"{name} reconnect ({type(exc).__name__})")
             finally:
                 try:
