@@ -5400,6 +5400,11 @@ def _realism_family_exit(pos: dict, price: float, now: float, *, exit_source: st
     start = max(float(pos.get("_trigger_cursor_ts") or 0), float(pos.get("entry_ts") or 0))
     page = _qt.book_rows_window(start, float(now), _pf.book10l_at)
     pos["_trigger_cursor_ts"] = float(page["checked_to"])
+    # R17 / HM (c): proof the hold scan really ran - levels_crossed_unfired is only answered from this scan.
+    if pos.get("levels_scan_from_s") is None:
+        pos["levels_scan_from_s"] = float(start)
+    pos["levels_scan_to_s"] = float(page["checked_to"])
+    pos["levels_scan_rows_n"] = int(pos.get("levels_scan_rows_n") or 0) + len(page["rows"] or [])
     if page["gap_seconds"]:
         pos["trigger_gap_seconds_n"] = int(pos.get("trigger_gap_seconds_n") or 0) + len(page["gap_seconds"])
         pos["trigger_gap_last"] = [page["gap_seconds"][0], page["gap_seconds"][-1]]
@@ -5576,7 +5581,8 @@ STOP_COVERAGE_ROW_KEYS = ("stop_tail_lo_s", "stop_tail_hi_s", "stop_coverage_gap
 
 
 R17_CONTRACT_ROW_KEYS = ("trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
-                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage")
+                         "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage",
+                         "exit_book_age_ms")
 LEVELS_CROSSED_UNFIRED_MAX = 20
 
 
@@ -5606,13 +5612,17 @@ def _levels_crossed_unfired(pos: dict):
     """R17 contract ``levels_crossed_unfired``: the stop / TP / BE crossings seen during the hold that did not fire
     ([] = none). Every completed book row and every trade print is evaluated, so a crossing can only be missed where
     the evidence is missing: a book gap second, a stale-book span (price-level exits held), or a trades-tail
-    coverage gap. Then the answer is UNKNOWN -> None (never a fabricated []). None on live rows / non-book lanes."""
+    coverage gap. Then the answer is UNKNOWN -> None (never a fabricated []). HM (c): [] only comes from the REAL hold
+    scan (_realism_family_exit stamps levels_scan_to_s); a position whose scan never ran is UNKNOWN -> None.
+    None on live rows / non-book lanes."""
     import quote_trigger as _qt
     if not _is_paper_book_lane(pos):
         return None
     log = [dict(x) for x in (pos.get("_levels_crossed_unfired_log") or []) if isinstance(x, dict)]
     if log:
         return log
+    if pos.get("levels_scan_to_s") is None:
+        return None
     if int(pos.get("trigger_gap_seconds_n") or 0) > 0 or pos.get("stale_book_since_s") is not None \
             or pos.get("stale_book_age_s") is not None or _stop_coverage_value(pos) != _qt.STOP_COVERAGE_OK:
         return None
@@ -5632,6 +5642,9 @@ def _r17_contract_fields(pos: dict) -> dict:
             "exit_price_age_s": pos.get("exit_price_age_s"),
             "exit_eval_price_age_s": pos.get("exit_eval_price_age_s"),
             "exit_price_stale": stale,
+            # contract alternative to exit_price_age_s (same measured book age, in ms; None when unmeasured)
+            "exit_book_age_ms": (int(round(float(pos["exit_price_age_s"]) * 1000))
+                                 if isinstance(pos.get("exit_price_age_s"), (int, float)) else None),
             "levels_crossed_unfired": _levels_crossed_unfired(pos),
             "stop_coverage": _stop_coverage_value(pos)}
 
@@ -7882,7 +7895,8 @@ def _paper_unpriced_marks(t0, missing=None, why: str = "NO_BOOK") -> dict:
     return {"missing_book_seconds": missing, "exit_status": "NO_BOOK_UNPRICED", "fresh_data_excluded": True,
             "exit_fallback": None, "_paper_exit_trigger_ts": t0, "fill_valid": False,
             "non_fill_category": "NO_BOOK_EXIT", "exit_pricing_basis": "NO_BOOK_UNPRICED",
-            "exit_unpriced_reason": why}
+            "exit_unpriced_reason": why, "exit_price_age_s": None, "exit_evidence_status": "UNVERIFIED",
+            "exit_unverified_reason": f"NO_BOOK_UNPRICED:{why}"}
 
 
 def _paper_forced_exit(pos: dict, now: float, direction: str, qty: float):
@@ -24194,7 +24208,7 @@ _RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "as
                           "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
                           "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
                           "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s",
-                          "entry_book_age_ms")  # R17 contract ages
+                          "entry_book_age_ms", "exit_book_age_ms")  # R17 contract ages
 _RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                           "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",

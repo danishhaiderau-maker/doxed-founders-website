@@ -39,7 +39,8 @@ HELPERS = ("LEVELS_CROSSED_UNFIRED_MAX", "_note_level_crossed_unfired", "_stop_c
 
 def _clean_pos(**kw):
     pos = {"trigger_price_source": "book", "exit_priced_delay_source": "lane_q90_n12", "exit_price_age_s": 0.4,
-           "exit_fill_sim": {"price_stale": False}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200}
+           "exit_fill_sim": {"price_stale": False}, "stop_tail_lo_s": 90, "stop_tail_hi_s": 200,
+           "levels_scan_from_s": 90.0, "levels_scan_to_s": 200.0, "levels_scan_rows_n": 110}
     pos.update(kw)
     return pos
 
@@ -74,7 +75,9 @@ def _proof_failures(row):
 def test_clean_paper_row_carries_contract_names_and_passes():
     row = _ns(HELPERS)["_r17_contract_fields"](_clean_pos())
     assert set(row) == {"trigger_price_source", "exit_priced_delay_source", "exit_price_age_s",
-                        "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage"}
+                        "exit_eval_price_age_s", "exit_price_stale", "levels_crossed_unfired", "stop_coverage",
+                        "exit_book_age_ms"}
+    assert row["exit_book_age_ms"] == 400
     assert row["levels_crossed_unfired"] == [] and row["stop_coverage"] == qt.STOP_COVERAGE_OK
     assert row["exit_price_stale"] is False
     assert _proof_failures(row) == []
@@ -94,6 +97,18 @@ def test_missing_evidence_is_unknown_never_empty():
     f = _ns(HELPERS)
     for kw in ({"trigger_gap_seconds_n": 2}, {"stale_book_since_s": 150.0}, {"stale_book_age_s": 3.5}):
         assert f["_levels_crossed_unfired"](_clean_pos(**kw)) is None, kw
+
+
+def test_levels_crossed_unfired_is_none_unless_the_hold_scan_ran():
+    """HM (c): [] means "the real hold scan ran and nothing was crossed"; a position that never ran it answers None."""
+    f = _ns(HELPERS)
+    pos = _clean_pos()
+    for k in ("levels_scan_from_s", "levels_scan_to_s", "levels_scan_rows_n"):
+        pos.pop(k)
+    assert f["_levels_crossed_unfired"](pos) is None
+    row = f["_r17_contract_fields"](pos)
+    assert row["levels_crossed_unfired"] is None and "LEVEL_CROSS_UNKNOWN" in _proof_failures(row)
+    assert f["_levels_crossed_unfired"](_clean_pos()) == []
 
 
 def test_stale_book_held_level_is_recorded_as_crossed_unfired():
@@ -165,3 +180,15 @@ def test_good_closed_row_carries_every_r17_fields_contract_key():
     import pytest
     fields = pytest.importorskip("r17_fields")
     assert set(fields.REQUIRED_FIELDS) <= set(_good_closed_row()), set(fields.REQUIRED_FIELDS) - set(_good_closed_row())
+
+
+def test_stop_coverage_is_separate_from_the_live_stop_coverage_verified_flag():
+    """HM (d): the paper R17 `stop_coverage` value never reads or writes the live-copy `stop_coverage_verified`
+    protection flag, and the live gate never reads the paper `stop_coverage` row field."""
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    fns = {n.name: ast.get_source_segment(src, n) for n in _tree().body if isinstance(n, ast.FunctionDef)}
+    for name in ("_stop_coverage_value", "_r17_contract_fields", "_levels_crossed_unfired"):
+        assert "stop_coverage_verified" not in fns[name], name
+    for name, body in fns.items():
+        if "stop_coverage_verified" in body:
+            assert '"stop_coverage"]' not in body and 'get("stop_coverage")' not in body, name
