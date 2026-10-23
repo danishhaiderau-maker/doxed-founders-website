@@ -10,6 +10,7 @@ import {
   bitfinexAuthPost,
   parseActiveOrdersPayload,
   parseOpenPositionPayload,
+  parsePositionLiqPrice,
   parseOrderHistoryEvidence,
   parseOrderTrade,
   parseBitfinexBtcPerpConstraints,
@@ -190,8 +191,19 @@ test('position proof returns a valid exact eight-decimal BTC position', () => {
       pnlUsd: 0.25,
       pnlPct: 0.01,
       direction: 'SHORT',
+      liqPrice: null,
     },
   );
+});
+
+test('AMEND4 E5: position row index 8 is PRICE_LIQ; unusable values are null, never 0', () => {
+  const row = (liq: unknown) => [BITFINEX_BTC_PERP_SYMBOL, 'ACTIVE', 0.0003, 67_000, 0, 0, -0.01, -0.05, liq];
+  assert.equal(parseOpenPositionPayload([row(61_234.5)])?.liqPrice, 61_234.5);
+  assert.equal(parseOpenPositionPayload([row('61234.5')])?.liqPrice, 61_234.5);
+  for (const bad of [null, 0, -1, 'x', undefined]) {
+    assert.equal(parseOpenPositionPayload([row(bad)])?.liqPrice, null);
+  }
+  assert.equal(parsePositionLiqPrice([BITFINEX_BTC_PERP_SYMBOL, 'ACTIVE', 1, 2, 0, 0, 0, 0]), null);
 });
 
 test('authenticated nonce lane bounds queue wait and never sends expired queued work later', async () => {

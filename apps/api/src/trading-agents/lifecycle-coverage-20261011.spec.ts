@@ -59,6 +59,19 @@ test('exchange mirror: stops, orphans when flat, balance', () => {
   assert.deepEqual(open.orphans, []);
 });
 
+test('AMEND4 E5: mirror positions carry live liq_price + liq_read_at (null when unreadable)', () => {
+  const pos = { symbol: 'tBTCF0:USTF0', amount: 0.0003, basePrice: 67000, pnlUsd: -0.01, direction: 'LONG' as const };
+  const withLiq = buildExchangeMirror({ orders: [], position: { ...pos, liqPrice: 60250.5 }, balance: null, readStartedAt: T0, readAt: T0 + 50 });
+  const p = (withLiq.positions as any[])[0];
+  assert.equal(p.liq_price, 60250.5);
+  assert.equal(p.liq_read_at, new Date(T0 + 50).toISOString());
+  for (const liqPrice of [null, undefined, 0]) {
+    const m = buildExchangeMirror({ orders: [], position: { ...pos, liqPrice }, balance: null, readStartedAt: T0, readAt: T0 });
+    assert.equal((m.positions as any[])[0].liq_price, null);
+    assert.equal((m.positions as any[])[0].liq_read_at, null);
+  }
+});
+
 test('fly-view projections: transition (who/why/when) and mirror read age', () => {
   const t = flyViewTransition({ at: '2026-10-11T06:22:00Z', actor: 'SYSTEM', action: 'SAFETY_PAUSED', reason: 'POSITION_MISMATCH', userId: 'secret' });
   assert.deepEqual(Object.keys(t ?? {}).includes('userId'), false);

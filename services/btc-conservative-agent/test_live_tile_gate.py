@@ -24,9 +24,12 @@ FLAT = {"ok": True, "read_age_s": 1.0, "positions": [], "open_orders": [], "orph
 CAPS = {"per_tile_usd": {}, "total_usd": None, "max_entries_per_day": 20}
 
 
+BOOK = {"s": NOW - 1.5, "b": [[100000.0, 1.0]], "a": [[100010.0, 1.0]]}   # fresh (complete at s+1 => 0.5 s old)
+
+
 def admit(**over):
     kw = dict(lane=GS1, trade_id="gs1-new", now=NOW, chains=[], mirror=FLAT, decisions=[],
-              armed_lanes=[GS1, GS6], entry_margin_usd=0.25, caps=CAPS)
+              armed_lanes=[GS1, GS6], entry_margin_usd=0.25, caps=CAPS, book=BOOK)
     kw.update(over)
     return ltg.admit_entry(**kw)
 
@@ -101,7 +104,7 @@ def test_second_signal_refused_while_another_live_lot_exists(chain):
 
 
 def test_closed_or_stale_pending_chain_does_not_block():
-    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True},
+    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100},
               {"correlation_id": "gs6-b", "lane": GS6, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
     assert admit(chains=chains)[0]
 
@@ -305,10 +308,14 @@ def test_c6_only_reduce_only_orders_are_skipped(order):
 
 def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
     lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06}
-    ok, r, info = admit(chains=[lost])
+    assert admit(chains=[lost])[0]
+    ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, pnl_usd=-0.05)])
     assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]
     small = dict(lost, pnl_usd=-0.01)
     assert admit(chains=[small])[0]
+    # the per-tile cap blocks only that tile's entries (gs6 lost $0.06; gs1 is still under its own cap and the $0.10 total)
+    ok, r, info = admit(chains=[lost], lane=GS6, trade_id="gs6-new")
+    assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and ltg.VIOL_TILE_LOSS_CAP in info["daily_loss_violations"]
 
 
 def test_force_flattened_trades_are_non_countable():

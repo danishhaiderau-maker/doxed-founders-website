@@ -119,6 +119,9 @@ def build_chains(approvals: Iterable[Mapping[str, Any]], reports: Iterable[Mappi
                                      "message": "executor skipped", "at_ts": _f(d.get("decided_at_ts"))})
         if r.get("type") == "STOP_CONFIRMED":
             ch["stop_confirmed"] = True
+            # AMEND4 E2'/E9 (sha 7073ed25): the resident stop price feeds the backstop level and stop-fill overshoot_bp
+            st = r.get("stop") if isinstance(r.get("stop"), Mapping) else {}
+            ch["stop_price"] = _f(st.get("price")) or ch.get("stop_price")
         if r.get("type") == "POSITION_CLOSED":
             ch["closed"] = True
             # live-vs-paper (HM 19 Oct): keep whatever the executor reports about the live exit; null if it reports none

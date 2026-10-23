@@ -55,7 +55,12 @@ MIRROR_MAX_AGE_SEC = 20.0
 # pin below (CAP_PREREG_FILE / CAP_PREREG_LINE / CAP_PREREG_SHA256 / CAP_PREREG_LINE_TEXT) must be updated in the same
 # commit. test_live_tile_gate.test_loss_caps_pinned_to_frozen_amend3 parses the values out of CAP_PREREG_LINE_TEXT, pins
 # the sha and line, and when the prereg file is present it re-hashes it and re-reads line 22, so a silent edit fails CI.
-# Breach => the guardian disarms ALL live tiles + force-flat (RK). Disarm-only: these caps never size or skip an entry.
+# Breach response (AMEND4 E1, sha256 AMEND4_SHA256 below, L12): the caps are an ENTRY BLOCK ONLY, never a close and never a
+# disarm. admit_entry refuses a new live entry (LIVE_SKIPPED_DAILY_CAP, AMBER; the signal stays a normal paper row) while the
+# tile's (or the account's) UTC-day realised loss (incl. funding, no fees, R7) plus the open mark-to-book loss (full-size
+# exit-side walk through the shared paper_fill book helper) is >= the cap. HM N1: a closed live trade of the day whose pnl is
+# unreadable, or a book older than 2 s, is NOT skipped: it blocks entries (AMBER). The caps never SIZE an entry. The one
+# switchable response is cap_breach_response() (== CAP_RESPONSE_ENTRY_BLOCK under AMEND4).
 CAP_PREREG_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md"
 CAP_PREREG_LINE = 22
 CAP_PREREG_SHA256 = "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9"
@@ -71,7 +76,25 @@ VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
 VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
 
 SKIP_MUTEX = "LIVE_SKIPPED_MUTEX"
-DENY_DAILY_LOSS_CAP = "LIVE_DAILY_LOSS_CAP"
+
+# ---- prereg AMEND4 (+A1, +A2): daily-cap scope, liquidation-aware stop backstop, stop residency, stale book ----------------
+# grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND4-20261024.md, sha256 AMEND4_SHA256 (supersedes ea582767 / 3ca9b4f7).
+# FROZEN like the AMEND3 pin: no env override; test_live_tile_gate.test_amend4_constants_pinned re-hashes the file when present
+# and re-reads every cited line. One shared implementation for every live tile (R4); prices only from the order book (R3).
+AMEND4_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND4-20261024.md"
+AMEND4_SHA256 = "7073ed25e2ae8047b4f6e7993764af336b6599c912e13ea086a2e4e591fd8755"
+AMEND4_LINES = {"E1": 12, "E2": (13, 15), "E2'": (20, 23), "E5": (24, 27), "E6": 28, "E7": (29, 32), "E8": 33,
+                "E9": 36, "E10": 37, "E6E7_NON_COUNTABLE": 38}
+STOP_BACKSTOP_PAST_STOP_BP = 15.0   # E2'(L21) / E2(L14); INTERIM per E10 (L37): re-set after >= 20 real stop fills
+STOP_BACKSTOP_LIQ_BUFFER_BP = 10.0  # E2'(L22): liquidation price minus 10 bp toward entry
+STOP_RESIDENT_MAX_AGE_S = 5.0       # E6(L28): exchange stop confirmed resident at least every 5 s
+BOOK_ENTRY_MAX_AGE_S = 2.0          # E7(L30): book > 2 s old => block new entries (== paper_fill.MAX_BOOK_AGE_S)
+BOOK_HOLD_MAX_AGE_S = 10.0          # E7(L31): hold an open position only while the book is <= 10 s old AND the stop is resident
+CAP_RESPONSE_ENTRY_BLOCK = "ENTRY_BLOCK"
+SKIP_DAILY_CAP = "LIVE_SKIPPED_DAILY_CAP"          # E1(L12) stamp on the blocked (paper-only) signal
+STOP_FAILURE_FLATTEN = "STOP_FAILURE_FLATTEN"      # E2(L15) / E2'(L23) event + guardian code
+AMBER_BOOK_STALE = "BOOK_STALE_ENTRY_BLOCK"         # E7(L30)
+DENY_DAILY_LOSS_CAP = SKIP_DAILY_CAP   # AMEND4 E1(L12): the cap refusal IS the LIVE_SKIPPED_DAILY_CAP stamp
 DENY_TILE_KEY_UNKNOWN = "LIVE_TILE_KEY_UNKNOWN"
 DENY_TILE_CAP = "LIVE_TILE_MARGIN_CAP"
 DENY_TOTAL_CAP = "LIVE_TOTAL_MARGIN_CAP"
@@ -228,11 +251,13 @@ def flat_check(mirror: Mapping[str, Any] | None) -> list:
 
 def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None,
                 decisions: Iterable[tuple], armed_lanes: Iterable[str], entry_margin_usd: float,
-                caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None) -> tuple[bool, list, dict]:
+                caps: Mapping[str, Any] | None = None, registry: Mapping[str, Mapping] | None = None,
+                book: Mapping[str, Any] | None = None) -> tuple[bool, list, dict]:
     """(ok, reasons, info) for the FIRST entry event of a live trade. Pure; fail closed on any error.
 
     ``decisions``: iterable of (trade_id, decision_row) (TradeDecisions rows; persisted, so the daily count and the in-flight
-    mutex survive restarts). ``armed_lanes``: lanes whose live switch is ON now (the total cap is their caps' sum)."""
+    mutex survive restarts). ``armed_lanes``: lanes whose live switch is ON now (the total cap is their caps' sum).
+    ``book``: paper_fill.book10l_at(now) (the shared book helper); missing or > 2 s old => LIVE_SKIPPED_DAILY_CAP (AMEND4 E1/E7)."""
     try:
         caps = load_caps() if caps is None else caps
         key = tile_key_for_lane(lane, registry)
@@ -268,11 +293,17 @@ def admit_entry(*, lane: str, trade_id: str, now: float, chains: Iterable[Mappin
         info.update(entries_today=n, max_entries_per_day=int(caps.get("max_entries_per_day", MAX_ENTRIES_PER_DAY)), utc_day=day)
         if n >= info["max_entries_per_day"]:
             reasons.append(DENY_DAILY_LIMIT)
-        # 6. HM G6 loss caps (belt and braces: the guardian disarms ALL on a breach; admission also refuses meanwhile)
-        loss_v = daily_loss_violations(chains, now, registry)
-        info["daily_loss_violations"] = [v["code"] for v in loss_v]
-        if loss_v:
-            reasons.append(DENY_DAILY_LOSS_CAP)
+        # 6. HM G6 loss caps under AMEND4 E1 (L12): ENTRY BLOCK only (cap_breach_response()). Realised incl. funding + open
+        #    mark-to-book (full-size exit-side book walk); unreadable pnl / mark or a book > 2 s also blocks (AMBER). The
+        #    signal stays a normal paper row stamped LIVE_SKIPPED_DAILY_CAP. The E7 stale-book block comes from the same shared
+        #    open_position_protection(). (No pre-arm/pre-entry liq-distance block: AMEND5 F3/F3' are VOID; G3/G4 act in-trade.)
+        blocks, cap_info = daily_cap_entry_block(chains, mirror, book, now, key, registry)
+        prot = open_position_protection(mirror, book, now)
+        blocks += prot["block"]   # incl. AMBER_BOOK_STALE: E7 (L30) blocks entries on a > 2 s book even when flat
+        info["daily_loss_violations"] = [b["code"] for b in blocks]
+        info["daily_cap"] = cap_info
+        if blocks:
+            reasons.append(SKIP_DAILY_CAP)
         return (not reasons), reasons, info
     except Exception as exc:  # noqa: BLE001 - any error refuses the live entry (paper unaffected)
         return False, [f"{DENY_GATE_ERROR}:{type(exc).__name__}"], {}
@@ -282,7 +313,7 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
                         registry: Mapping[str, Mapping] | None = None) -> tuple[dict, float, int]:
     """({tile_key|None: loss_usd}, total_loss_usd, n_rows) for live chains CLOSED in the current UTC day.
 
-    Realised pnl only (``pnl_usd`` as reported by the executor; no fees added or removed, R7). Loss = -sum(pnl), so wins
+    Realised pnl (``pnl_usd`` as reported by the executor) plus reported ``funding_usd`` (AMEND4 E1); no fees (R7). Loss = -sum(pnl), so wins
     on the same tile/day offset losses. A closed row with pnl but no close time counts as closed now (conservative, same
     as the guardian). Rows whose tile cannot be attributed count only towards the total."""
     day = utc_day(now)
@@ -293,23 +324,47 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
             continue
         pnl = _f(c.get("pnl_usd"))
         if pnl is None:
-            continue
+            continue   # never silently: unreadable_pnl_rows() turns it into an entry block (HM N1)
         t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
         t = now if t is None or t <= 0 else t
         if t > now + 60 or utc_day(t) != day:
             continue
         k = chain_tile_key(c, registry)
-        per[k] = per.get(k, 0.0) - pnl
+        fund = _f(c.get("funding_usd")) or 0.0   # AMEND4 E1: incl. funding (signed cash flow, negative = paid); no fees (R7)
+        per[k] = per.get(k, 0.0) - pnl - fund
         n += 1
     return per, sum(per.values()), n
 
 
+VIOL_PNL_UNREADABLE = "LEDGER_PNL_UNREADABLE"
+
+
+def unreadable_pnl_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list:
+    """HM N1: live chains CLOSED in the current UTC day (or with no readable close time) whose realised pnl is missing or
+    unreadable. They cannot be summed, so they fail CLOSED: an AMBER entry block (AMEND4 E1), never silently skipped and
+    never a disarm."""
+    day = utc_day(now)
+    bad = []
+    for c in chains or []:
+        if not c.get("closed") or _f(c.get("pnl_usd")) is not None:
+            continue
+        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
+        if t is None or t <= 0 or (t <= now + 60 and utc_day(t) == day):
+            bad.append(c)
+    return bad
+
+
 def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
                           registry: Mapping[str, Mapping] | None = None) -> list:
-    """HM G6 loss caps as guardian violations ([{code, tile, detail}]). Fail safe: any error is itself a violation."""
+    """HM G6 loss caps ([{code, tile, detail}]) on REALISED loss. AMEND4 E1: every one of these is an ENTRY BLOCK (AMBER), never
+    a disarm/close. Fail safe: any error is itself a block, and so is a closed trade of the day whose pnl is unreadable (N1)."""
     try:
+        chains = list(chains or [])
         per, total, n = daily_realised_loss(chains, now, registry)
         out = []
+        for c in unreadable_pnl_rows(chains, now)[:4]:
+            out.append({"code": VIOL_PNL_UNREADABLE, "tile": chain_tile_key(c, registry),
+                        "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} pnl_usd={c.get('pnl_usd')!r} unreadable"})
         for k, loss in sorted(per.items(), key=lambda kv: str(kv[0])):
             if k is not None and loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9:
                 out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k,
@@ -322,7 +377,7 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         return [{"code": f"{VIOL_TOTAL_LOSS_CAP}_ERROR", "tile": None, "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}]
 
 
-FORCE_FLAT_CLOSE_MARKERS = ("AUTHENTICATED_EMERGENCY_CLOSE", "FORCE_FLAT", "GUARDIAN_FORCE_FLAT")
+FORCE_FLAT_CLOSE_MARKERS = ("AUTHENTICATED_EMERGENCY_CLOSE", "FORCE_FLAT", "GUARDIAN_FORCE_FLAT", STOP_FAILURE_FLATTEN)
 
 
 def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
@@ -332,3 +387,251 @@ def force_flat_non_countable(chain: Mapping[str, Any] | None) -> bool:
     c = chain if isinstance(chain, Mapping) else {}
     blob = " ".join(str(c.get(k) or "") for k in ("close_reason", "exit_reason", "close_source", "exit_source", "reason")).upper()
     return any(m in blob for m in FORCE_FLAT_CLOSE_MARKERS)
+
+
+# ---- AMEND4 shared functions (one implementation for every live tile, R4) -------------------------------------------------
+
+def cap_breach_response() -> str:
+    """THE switchable daily-cap breach response. AMEND4 E1 (L12): entry block only (no close, no disarm)."""
+    return CAP_RESPONSE_ENTRY_BLOCK
+
+
+def book_age_s(book: Mapping[str, Any] | None, now: float) -> float | None:
+    """Age of a paper_fill.book10l_at row: a row stamped s is complete at s + 1 (None = unreadable)."""
+    s = _f((book or {}).get("s")) if isinstance(book, Mapping) else None
+    return None if s is None else float(now) - (s + 1.0)
+
+
+def position_side(p: Mapping[str, Any] | None) -> str | None:
+    p = p if isinstance(p, Mapping) else {}
+    amt = _f(p.get("amount"))
+    if amt is not None and amt != 0.0:
+        return "LONG" if amt > 0 else "SHORT"
+    sd = str(p.get("side") or "").upper()
+    return sd if sd in ("LONG", "SHORT") else None
+
+
+def book_exit_walk(side: str, qty: float, book: Mapping[str, Any] | None, now: float) -> dict:
+    """Full-size EXIT-side walk through the shared book helper (paper_fill.taker_side_levels + _walk): exit LONG sells into
+    the bid, exit SHORT buys the ask. Never the ticker / mark (R3). ok only for a full fill on a readable book."""
+    import paper_fill as _pf
+    q = abs(_f(qty) or 0.0)
+    out = {"ok": False, "vwap": None, "filled": 0.0, "qty": q, "book_s": None, "book_age_s": None, "error": None}
+    if not isinstance(book, Mapping) or q <= 0 or side not in ("LONG", "SHORT"):
+        out["error"] = "NO_BOOK" if not isinstance(book, Mapping) else "BAD_INPUT"
+        return out
+    out["book_s"], out["book_age_s"] = book.get("s"), book_age_s(book, now)
+    if out["book_age_s"] is None:
+        out["error"] = "BOOK_TS_UNREADABLE"
+        return out
+    vwap, filled = _pf._walk(_pf.taker_side_levels(side, "exit", book), q)
+    out.update(vwap=vwap, filled=filled)
+    if vwap is None or filled < q - 1e-12:
+        out["error"] = "PARTIAL_DEPTH"
+        return out
+    out["ok"] = True
+    return out
+
+
+def open_mark_to_book_loss(position: Mapping[str, Any], book: Mapping[str, Any] | None, now: float) -> tuple[float | None, dict]:
+    """(loss_usd, walk) of one open position marked to the full-size exit-side book walk (AMEND4 E1). None = unreadable."""
+    side, amt, entry = position_side(position), _f((position or {}).get("amount")), _f((position or {}).get("base_price"))
+    walk = book_exit_walk(side or "", abs(amt or 0.0), book, now)
+    if not walk["ok"] or entry is None or amt is None:
+        return None, walk
+    pnl = (walk["vwap"] - entry) * abs(amt) * (1.0 if side == "LONG" else -1.0)
+    return -pnl, walk
+
+
+def overshoot_bp(side: str, stop_level: float | None, px: float | None) -> float | None:
+    """AMEND4 A2 E9 (L36): bp past the stop level, signed so that POSITIVE = WORSE (LONG: below the stop; SHORT: above)."""
+    s, p = _f(stop_level), _f(px)
+    if s is None or p is None or s <= 0 or side not in ("LONG", "SHORT"):
+        return None
+    return round(((s - p) if side == "LONG" else (p - s)) / s * 1e4, 3)
+
+
+def backstop_level(side: str, entry: float | None, stop_level: float | None, liq_price: float | None) -> dict:
+    """AMEND4 A1 E2' (L20-22): the CLOSER to entry of (stop + 15 bp past it) and (real liq price - 10 bp toward entry)."""
+    s, lq = _f(stop_level), _f(liq_price)
+    out = {"stop_leg": None, "liq_leg": None, "level": None, "binding": None}
+    if side not in ("LONG", "SHORT") or s is None or s <= 0:
+        return out
+    sign = 1.0 if side == "LONG" else -1.0   # LONG: adverse is down
+    out["stop_leg"] = s * (1.0 - sign * STOP_BACKSTOP_PAST_STOP_BP / 1e4)
+    if lq is not None and lq > 0:
+        out["liq_leg"] = lq * (1.0 + sign * STOP_BACKSTOP_LIQ_BUFFER_BP / 1e4)
+    legs = [(out["stop_leg"], "STOP+15BP")] + ([(out["liq_leg"], "LIQ-10BP")] if out["liq_leg"] is not None else [])
+    # closer to entry == the higher level for a LONG, the lower for a SHORT
+    lvl, which = (max if side == "LONG" else min)(legs, key=lambda x: x[0])
+    out["level"], out["binding"] = lvl, which
+    return out
+
+
+def stop_liq_distance_bp(side: str, stop_level: float | None, liq_price: float | None) -> float | None:
+    """bp between the exchange stop and the real liq price on the adverse side (AMEND4 E5 L27; E8 records the first one)."""
+    s, lq = _f(stop_level), _f(liq_price)
+    if s is None or lq is None or s <= 0 or lq <= 0 or side not in ("LONG", "SHORT"):
+        return None
+    return round(((s - lq) if side == "LONG" else (lq - s)) / s * 1e4, 3)
+
+
+def resident_stops(orders: Iterable[Mapping[str, Any]] | None) -> list:
+    """Exchange-resident protective stops: reduce-only STOP orders (flags & 1024 read back from Bitfinex)."""
+    return [o for o in (orders or []) if isinstance(o, Mapping) and o.get("reduce_only") is True and "STOP" in str(o.get("type") or "").upper()]
+
+
+def mirror_evidence_age_s(mirror: Mapping[str, Any] | None, now: float) -> float | None:
+    """Age of the relay's exchange read: read_age_s at Fly's fetch + time since that fetch (fetched_at_ts), when given."""
+    m = mirror if isinstance(mirror, Mapping) else {}
+    age = _f(m.get("read_age_s"))
+    if age is None or age < 0:
+        return None
+    fetched = _f(m.get("fetched_at_ts"))
+    return age + (max(0.0, float(now) - fetched) if fetched is not None else 0.0)
+
+
+def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None, now: float,
+                             fill_grace: bool = False) -> dict:
+    """AMEND4 E2'/E5/E6/E7 for the open live position(s) in the relay mirror (pure, shared for every tile).
+
+    Returns {"disarm": [violations => RED + disarm ALL + reduce-only force-flat, non-countable], "block": [AMBER entry
+    blocks], "positions": [per-position evidence incl. backstop level, walk, overshoot_bp, liq distance]}. ``fill_grace``: a
+    live chain filled < 5 s ago (HM G6 fill->stop bound) - only the missing-stop rule waits for it."""
+    m = mirror if isinstance(mirror, Mapping) else {}
+    res: dict = {"disarm": [], "block": [], "positions": []}
+    age_book = book_age_s(book, now) if isinstance(book, Mapping) else None
+    if age_book is None or age_book > BOOK_ENTRY_MAX_AGE_S:
+        res["block"].append({"code": AMBER_BOOK_STALE, "tile": None, "detail": f"book age {age_book} s > {BOOK_ENTRY_MAX_AGE_S} s (E7)"})
+    if m.get("ok") is not True:
+        return res   # blind mirror: the guardian's EXCHANGE_MIRROR_BLIND rule owns this (no position evidence to act on)
+    orders = list(m.get("open_orders") or [])
+    stops = resident_stops(orders)
+    ev_age = mirror_evidence_age_s(m, now)
+    for p in m.get("positions") or []:
+        p = p if isinstance(p, Mapping) else {}
+        side, amt = position_side(p), _f(p.get("amount"))
+        if amt == 0.0:
+            continue   # a zero row is no position (flat_check agrees); an unreadable amount is NOT skipped
+        entry = _f(p.get("base_price"))
+        stop = None
+        if stops and side:
+            # the protective stop sits on the adverse side; the one closest to entry is the binding exchange stop
+            px = [x for x in (_f(o.get("price")) for o in stops) if x]
+            stop = (max(px) if side == "LONG" else min(px)) if px else None
+        liq = _f(p.get("liq_price"))
+        liq_ok = liq is not None and liq > 0 and p.get("liq_read_at") is not None
+        row = {"side": side, "amount": amt, "entry": entry, "stop_level": stop, "liq_price": liq if liq_ok else None,
+               "liq_read_at": p.get("liq_read_at"), "evidence_age_s": ev_age, "book_age_s": age_book,
+               "stop_liq_distance_bp": stop_liq_distance_bp(side or "", stop, liq) if liq_ok else None}
+        res["positions"].append(row)
+        # E6 (L28): resident stop confirmed on an exchange read <= 5 s old (+ <= 5 s transport to Fly); missing => flatten
+        if stop is None and not fill_grace:
+            res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "STOP_NOT_RESIDENT",
+                                  "detail": f"open {side} {amt} with no resident reduce-only stop on the exchange (E6)"})
+        if ev_age is None or ev_age > STOP_RESIDENT_MAX_AGE_S + STOP_RESIDENT_MAX_AGE_S:
+            res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "STOP_RESIDENCY_UNCONFIRMED",
+                                  "detail": f"stop residency evidence age {ev_age} s > {2 * STOP_RESIDENT_MAX_AGE_S} s (E6/E7 read failure)"})
+        # E5 (L26): liq unreadable with a position open => flatten + disarm ALL
+        if not liq_ok:
+            res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "LIQ_UNREADABLE",
+                                  "detail": f"position liq_price={p.get('liq_price')!r} read_at={p.get('liq_read_at')!r} unreadable (E5)"})
+        # E7 (L31-32): hold only with a resident stop AND book <= 10 s
+        if age_book is None or age_book > BOOK_HOLD_MAX_AGE_S:
+            res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "BOOK_STALE_GT_10S",
+                                  "detail": f"position open and book age {age_book} s > {BOOK_HOLD_MAX_AGE_S} s (E7)"})
+            continue
+        # E2' (L20-23): backstop on the full-size exit-side book walk
+        bs = backstop_level(side or "", entry, stop, liq if liq_ok else None)
+        walk = book_exit_walk(side or "", abs(amt or 0.0), book, now)
+        row.update(backstop=bs, walk_vwap=walk["vwap"], walk_ok=walk["ok"])
+        if stop is not None and bs["level"] is not None:
+            if not walk["ok"]:
+                res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "BOOK_WALK_UNREADABLE",
+                                      "detail": f"exit-side walk {walk['error']} filled {walk['filled']}/{walk['qty']} (E7 read failure)"})
+                continue
+            v = walk["vwap"]
+            hit = v <= bs["level"] if side == "LONG" else v >= bs["level"]
+            row["overshoot_bp"] = overshoot_bp(side or "", stop, v)
+            if hit:
+                res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "BACKSTOP_" + str(bs["binding"]),
+                                      "overshoot_bp": row["overshoot_bp"],
+                                      "detail": f"{side} exit walk {v:.2f} past backstop {bs['level']:.2f} ({bs['binding']}); stop {stop}, "
+                                                f"overshoot {row['overshoot_bp']} bp (E2')"})
+    return res
+
+
+def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, book: Mapping[str, Any] | None,
+                          now: float, tile_key: str | None, registry: Mapping[str, Mapping] | None = None) -> tuple[list, dict]:
+    """AMEND4 E1 (L12): (blocks, info) for a NEW live entry of ``tile_key``. Realised (incl. funding, no fees) UTC-day loss
+    plus the open mark-to-book loss of any live position (full-size exit-side book walk) vs $0.05/tile and $0.10 total.
+    Unreadable realised pnl, an unreadable open mark or a book > 2 s => block (AMBER). Never a close, never a disarm."""
+    chains = list(chains or [])
+    per, total, n = daily_realised_loss(chains, now, registry)
+    blocks = [{"code": v["code"], "tile": v.get("tile"), "detail": v.get("detail")} for v in daily_loss_violations(chains, now, registry)
+              if v.get("tile") in (None, tile_key) or v["code"] == VIOL_PNL_UNREADABLE]
+    open_loss = 0.0
+    m = mirror if isinstance(mirror, Mapping) else {}
+    for p in (m.get("positions") or []) if m.get("ok") is True else []:
+        if _f((p or {}).get("amount")) == 0.0:
+            continue
+        loss, walk = open_mark_to_book_loss(p, book, now)
+        if loss is None or (walk.get("book_age_s") or 0) > BOOK_ENTRY_MAX_AGE_S:
+            blocks.append({"code": "OPEN_MARK_UNREADABLE", "tile": None, "detail": f"open mark-to-book unreadable: {walk.get('error')} age {walk.get('book_age_s')}"})
+            continue
+        open_loss += loss
+    tile_loss = per.get(tile_key, 0.0) + open_loss   # one live position account-wide (N1): its loss counts against every tile
+    if open_loss and tile_loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9 and not any(b["code"] == VIOL_TILE_LOSS_CAP for b in blocks):
+        blocks.append({"code": VIOL_TILE_LOSS_CAP, "tile": tile_key, "detail": f"{tile_key} realised+open ${tile_loss:.4f} >= ${DAILY_LOSS_CAP_PER_TILE_USD:.2f}"})
+    if open_loss and total + open_loss >= DAILY_LOSS_CAP_TOTAL_USD - 1e-9 and not any(b["code"] == VIOL_TOTAL_LOSS_CAP for b in blocks):
+        blocks.append({"code": VIOL_TOTAL_LOSS_CAP, "tile": None, "detail": f"total realised+open ${total + open_loss:.4f} >= ${DAILY_LOSS_CAP_TOTAL_USD:.2f}"})
+    age = book_age_s(book, now) if isinstance(book, Mapping) else None
+    if age is None or age > BOOK_ENTRY_MAX_AGE_S:
+        blocks.append({"code": AMBER_BOOK_STALE, "tile": None, "detail": f"book age {age} s > {BOOK_ENTRY_MAX_AGE_S} s"})
+    info = {"realised_loss_by_tile": {str(k): round(v, 4) for k, v in per.items()}, "realised_loss_total": round(total, 4),
+            "open_mark_loss": round(open_loss, 4), "rows": n, "book_age_s": age, "response": cap_breach_response()}
+    return blocks, info
+
+
+def stop_fill_overshoots(chains: Iterable[Mapping[str, Any]]) -> list:
+    """AMEND4 A2 E9 (L36): overshoot_bp of every closed live chain that exited on its exchange stop (stop level from
+    STOP_CONFIRMED, fill from the authenticated close). Side is implied by the stop being below (LONG) / above (SHORT) the fill."""
+    out = []
+    for c in chains or []:
+        if not c.get("closed") or "STOP" not in str(c.get("exit_reason") or c.get("close_reason") or "").upper():
+            continue
+        if STOP_FAILURE_FLATTEN in str(c.get("exit_reason") or "").upper():
+            continue
+        stop, entry, px = _f(c.get("stop_price")), _f(c.get("fill_price")), _f(c.get("exit_price"))
+        side = None if stop is None or entry is None else ("LONG" if stop < entry else "SHORT")
+        out.append({"trade_id": c.get("correlation_id"), "tile": chain_tile_key(c), "side": side, "stop_level": stop,
+                    "fill_px": px, "overshoot_bp": overshoot_bp(side or "", stop, px)})
+    return out
+
+
+def skipped_daily_cap_count(decisions: Iterable[tuple], now: float, registry: Mapping[str, Mapping] | None = None) -> dict:
+    """AMEND4 E1: LIVE_SKIPPED_DAILY_CAP decisions this UTC day, total and per tile (monitor route)."""
+    day, per, n = utc_day(now), {}, 0
+    for tid, r in decisions or []:
+        r = r or {}
+        t = _f(r.get("decided_at_ts"))
+        if t is None or utc_day(t) != day or SKIP_DAILY_CAP not in (r.get("reasons") or []):
+            continue
+        k = tile_key_for_trade_id(tid) or tile_key_for_lane(r.get("lane"), registry)
+        per[str(k)] = per.get(str(k), 0) + 1
+        n += 1
+    return {"utc_day": day, "count": n, "by_tile": per}
+
+
+def non_countable_summary(chains: Iterable[Mapping[str, Any]], events: Iterable[Mapping[str, Any]] = ()) -> dict:
+    """AMEND4 E2/E6/E7/A2: counts of non-countable force-flattened trades and STOP_FAILURE_FLATTEN events (each RED in the
+    daily report), plus the real stop-fill overshoot sample (E9/E10: re-set the 15 bp once n >= 20)."""
+    chains = list(chains or [])
+    nc = [c for c in chains if c.get("closed") and force_flat_non_countable(c)]
+    sff = [e for e in events or [] if (e or {}).get("code") == STOP_FAILURE_FLATTEN]
+    ov = [o for o in stop_fill_overshoots(chains) if o.get("overshoot_bp") is not None]
+    return {"non_countable_trades": len(nc), "non_countable_ids": [c.get("correlation_id") for c in nc][:20],
+            "stop_failure_flatten_events": len(sff), "stop_failure_flatten_red": bool(sff),
+            "real_stop_fills_measured": len(ov), "stop_overshoot_bp": [o["overshoot_bp"] for o in ov][-50:],
+            "stop_backstop_bp": STOP_BACKSTOP_PAST_STOP_BP, "stop_backstop_bp_status": (
+                "INTERIM (E10: re-set after >= 20 real stop fills)" if len(ov) < 20 else "E10 RE-SET DUE (>= 20 real stop fills)")}

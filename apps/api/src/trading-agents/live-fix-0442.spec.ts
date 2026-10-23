@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  EXCHANGE_MIRROR_EXPOSED_EVERY_MS,
   EXCHANGE_MIRROR_MAX_AGE_MS,
+  exchangeMirrorExposedDue,
+  exchangeMirrorShowsExposure,
   exchangeMirrorMayRun,
   shouldSkipExchangeStopTrailForApprovedCopy,
 } from './signal-subscriber-execution.service';
@@ -276,4 +279,16 @@ test('1487: reduce-only STOP submit rides the priority stop lane', async () => {
   assert.equal(isBitfinexProtectiveStopSubmit('v2/auth/w/order/submit', { type: 'STOP', flags: 0 }), false);
   const src = readFileSync(join(__dirname, '../exchanges/bitfinex-api.client.ts'), 'utf8');
   assert.ok(src.includes('lane.stops?.shift() ?? lane.mutations.shift() ?? lane.reads.shift()'));
+});
+
+test('AMEND4 E6: mirror re-reads every <= 4 s while exposed or blind, never faster when flat', () => {
+  assert.equal(EXCHANGE_MIRROR_EXPOSED_EVERY_MS, 4_000);
+  const now = 1_000_000;
+  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 4_000, nowMs: now }), true);
+  assert.equal(exchangeMirrorExposedDue({ exposed: true, lastMirrorAtMs: now - 3_999, nowMs: now }), false);
+  assert.equal(exchangeMirrorExposedDue({ exposed: false, lastMirrorAtMs: now - 60_000, nowMs: now }), false);
+  assert.equal(exchangeMirrorShowsExposure({ ok: false }), true);
+  assert.equal(exchangeMirrorShowsExposure({ ok: true, positions: [], open_orders: [] }), false);
+  assert.equal(exchangeMirrorShowsExposure({ ok: true, positions: [{ amount: 0.0003 }], open_orders: [] }), true);
+  assert.equal(exchangeMirrorShowsExposure({ ok: true, positions: [], open_orders: [{ id: '1' }] }), true);
 });

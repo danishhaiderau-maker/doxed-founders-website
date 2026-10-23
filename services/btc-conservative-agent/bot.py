@@ -49859,8 +49859,12 @@ def _live_guardian_mirror():
     except (TypeError, ValueError):
         _age = None
     if isinstance(m, dict) and m.get("ok") and _age is not None and _age == _age and 0 <= _age <= 20.0:
-        return m
+        # AMEND4 E6: evidence age = relay read age at Fly's fetch + time since that fetch (live_tile_gate.mirror_evidence_age_s)
+        return {**m, "fetched_at_ts": view.get("fetched_at_ts")}
     return {"ok": False, "error": (m or {}).get("error") or "stale-or-missing mirror"}
+
+
+_LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC = 10.0   # HM N5
 
 
 def _live_guardian_red_clear_if_flat(now) -> bool:
@@ -49874,6 +49878,10 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     age = m.get("read_age_s") if isinstance(m, dict) else None
     if not m.get("ok") or fetched is None or age is None:
         return False
+    # HM N5: the clearing evidence must itself be fresh (<= _LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC at decision time), not
+    # merely within the 20 s mirror window
+    if float(age) + max(0.0, float(now) - float(fetched)) > _LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC:
+        return False
     if float(fetched) - float(age) <= float(red.get("ts") or 0):
         return False
     if _esv.build(m).get("verdict") != "FLAT_NO_STOPS":
@@ -49881,7 +49889,141 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     _LIVE_GUARDIAN_STATE["red_alert_cleared"] = {"ts": now, "was": red, "evidence": "relay mirror FLAT_NO_STOPS"}
     _LIVE_GUARDIAN_STATE.pop("red_alert", None)
     logger.warning(f"[LIVE GUARDIAN] RED cleared on exchange evidence FLAT_NO_STOPS (was {red.get('code')}); still disarmed")
+    _live_guardian_persist()
     return True
+
+
+_LIVE_GUARDIAN_EXPOSED_FETCH_SEC = 3.0   # AMEND4 E6: Fly view refresh while exposed (relay mirror <= 4 s while exposed)
+
+
+def _live_guardian_exposed(chains) -> bool:
+    """A live chain open (sent/filled, not closed) or the cached mirror showing a position/order or a failed read."""
+    if any((c.get("fill_at_ts") or c.get("order_sent_at_ts")) and not c.get("closed") for c in chains or []):
+        return True
+    for a in (_live_copy_website_cached_view().get("accounts") or []):
+        m = (a or {}).get("exchange_mirror") if isinstance(a, dict) else None
+        if isinstance(m, dict) and (m.get("ok") is not True or m.get("positions") or m.get("open_orders")):
+            return True
+    return False
+
+
+def _live_guardian_record_protection(now, viol) -> None:
+    """AMEND4 E2'/A2/E9 + E8: record every STOP_FAILURE_FLATTEN event (cause, overshoot_bp; non-countable) and, once, the
+    real liq distance of the first live position. Both are persisted (HM N3) and shown on /api/monitor/live-guardian."""
+    import live_tile_gate as _ltg
+    st = _LIVE_GUARDIAN_STATE
+    changed = False
+    for v in viol or []:
+        if v.get("code") != _ltg.STOP_FAILURE_FLATTEN:
+            continue
+        ev = {"ts": now, "cause": v.get("cause"), "overshoot_bp": v.get("overshoot_bp"), "tile": v.get("tile"),
+              "detail": str(v.get("detail"))[:200], "non_countable": _ltg.STOP_FAILURE_FLATTEN, "amend4_sha256": _ltg.AMEND4_SHA256}
+        st["stop_failure_events"] = (list(st.get("stop_failure_events") or []) + [ev])[-50:]
+        logger.critical(f"[LIVE GUARDIAN] STOP_FAILURE_FLATTEN cause={ev['cause']} overshoot_bp={ev['overshoot_bp']} "
+                        f"tile={ev['tile']} (AMEND4 E2'/E5/E6/E7, non-countable) [PIPELINE ENFORCEMENT]")
+        changed = True
+    if not st.get("first_live_liq_distance"):
+        for p in ((st.get("calc") or {}).get("protection") or {}).get("positions") or []:
+            if p.get("liq_price") and p.get("entry"):
+                d = abs(float(p["entry"]) - float(p["liq_price"])) / float(p["entry"]) * 1e4
+                st["first_live_liq_distance"] = {"ts": now, "side": p.get("side"), "entry": p.get("entry"),
+                                                 "liq_price": p.get("liq_price"), "liq_distance_bp": round(d, 2),
+                                                 "stop_level": p.get("stop_level"), "stop_liq_distance_bp": p.get("stop_liq_distance_bp")}
+                logger.warning(f"[LIVE GUARDIAN] E8 first live position liq_distance_bp={d:.2f} entry={p.get('entry')} "
+                               f"liq={p.get('liq_price')} stop={p.get('stop_level')} stop_liq_bp={p.get('stop_liq_distance_bp')}")
+                changed = True
+                break
+    if changed:
+        _live_guardian_persist()
+
+
+
+# ---- HM N3: the RED / latched guardian state survives a Fly restart ------------------------------------------------------
+# Persisted (atomic json next to the fresh-start epoch file, /app/data/runtime on Fly): red_alert, auto_disarm_latched, the
+# AMEND4/AMEND5 event logs, the E8 / G4 first-L record, STOP_REEVAL, and any force-flat still in progress. At boot the file is
+# restored BEFORE the guardian thread starts (so arming is refused immediately), an interrupted force-flat is re-launched,
+# and on the first tick with a fresh relay view the state is re-derived from the exchange: relay paused (no armed account)
+# while the mirror is NOT FLAT_NO_STOPS => RED BOOT_REDERIVED_NOT_FLAT + force-flat. A restart never clears RED.
+_LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "auto_disarm_latched", "stop_failure_events", "liq_events",
+                               "first_live_liq_distance", "g4_first_l", "stop_reeval")
+_LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"
+
+
+def _live_guardian_state_path() -> str:
+    return os.path.join(os.path.dirname(_fresh_start_epoch_path()) or ".", _LIVE_GUARDIAN_PERSIST_FILE)
+
+
+def _live_guardian_persist() -> bool:
+    """Atomic write of the latched guardian state (HM N3). Never raises: a failed write is logged (the in-memory latch holds)."""
+    try:
+        st = _LIVE_GUARDIAN_STATE
+        rec = {k: st.get(k) for k in _LIVE_GUARDIAN_PERSIST_KEYS if st.get(k) is not None}
+        rec["force_flat_inflight"] = [{k: r.get(k) for k in ("ts", "reason", "requested", "attempts")}
+                                      for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG) if r.get("requested") and not r.get("done_ts")]
+        rec["persisted_at_ts"] = time.time()
+        path = _live_guardian_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh, default=str)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] persist failed: {type(exc).__name__}: {str(exc)[:120]} [PIPELINE ENFORCEMENT]")
+        return False
+
+
+def _live_guardian_restore(now=None, spawn=None) -> dict:
+    """Boot (HM N3): reload the latched state; re-launch an interrupted force-flat; mark the exchange re-derive pending."""
+    now = now or time.time()
+    st = _LIVE_GUARDIAN_STATE
+    st["boot_rederive_pending"] = {"ts": now}
+    try:
+        with open(_live_guardian_state_path(), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except FileNotFoundError:
+        return {"restored": False, "reason": "NO_FILE"}
+    except Exception as exc:  # noqa: BLE001 - an unreadable latch file fails CLOSED: RED until exchange evidence clears it
+        st["red_alert"] = {"ts": now, "code": "GUARDIAN_STATE_UNREADABLE", "reason": f"{type(exc).__name__}", "readback": "UNCONFIRMED"}
+        logger.critical(f"[LIVE GUARDIAN] RED persisted state unreadable at boot ({type(exc).__name__}) [PIPELINE ENFORCEMENT]")
+        return {"restored": False, "reason": "UNREADABLE"}
+    rec = rec if isinstance(rec, dict) else {}
+    for k in _LIVE_GUARDIAN_PERSIST_KEYS:
+        if rec.get(k) is not None:
+            st[k] = rec[k]
+    inflight = [r for r in rec.get("force_flat_inflight") or [] if isinstance(r, dict)]
+    for r in inflight[-1:]:
+        logger.critical(f"[LIVE GUARDIAN] force-flat was in progress at shutdown (reason={r.get('reason')}): re-launching")
+        _live_guardian_force_flat(f"BOOT_RESUME:{r.get('reason')}", now, spawn=spawn)
+    if st.get("red_alert"):
+        logger.critical(f"[LIVE GUARDIAN] RED restored at boot: {st['red_alert'].get('code')} - arming refused [PIPELINE ENFORCEMENT]")
+    return {"restored": True, "red": bool(st.get("red_alert")), "force_flat_resumed": bool(inflight)}
+
+
+def _live_guardian_boot_rederive(now) -> str | None:
+    """First tick with a fresh relay view after boot: relay paused (no armed account) + mirror not FLAT_NO_STOPS => RED."""
+    import exchange_stops_view as _esv
+    st = _LIVE_GUARDIAN_STATE
+    if not st.get("boot_rederive_pending"):
+        return None
+    view = _live_copy_website_cached_view()
+    m = _live_guardian_mirror()
+    if not view.get("fetched_at_ts") or not m.get("ok"):
+        return None   # wait for evidence; arming is refused meanwhile only if RED/latched was restored
+    st.pop("boot_rederive_pending", None)
+    accts = [a for a in (view.get("accounts") or []) if isinstance(a, dict)]
+    paused = bool(accts) and not any(a.get("armed") for a in accts)
+    verdict = _esv.build(m).get("verdict")
+    st["boot_rederive"] = {"ts": now, "relay_paused": paused, "verdict": verdict}
+    if paused and verdict != "FLAT_NO_STOPS" and not st.get("red_alert"):
+        st["red_alert"] = {"ts": now, "code": "BOOT_REDERIVED_NOT_FLAT", "reason": f"relay paused, mirror {verdict}",
+                           "readback": "UNCONFIRMED"}
+        logger.critical(f"[LIVE GUARDIAN] RED BOOT_REDERIVED_NOT_FLAT (relay paused, mirror {verdict}) - force-flat [PIPELINE ENFORCEMENT]")
+        _live_guardian_force_flat("BOOT_REDERIVED_NOT_FLAT", now)
+        _live_guardian_persist()
+        return "BOOT_REDERIVED_NOT_FLAT"
+    return verdict
 
 
 def _live_guardian_tick(now=None) -> list:
@@ -49889,6 +50031,11 @@ def _live_guardian_tick(now=None) -> list:
     import live_guardian as _lg
     now = now or time.time()
     _LIVE_GUARDIAN_STATE["last_check_ts"] = now
+    if _LIVE_GUARDIAN_STATE.get("boot_rederive_pending"):
+        try:
+            _live_guardian_boot_rederive(now)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[LIVE GUARDIAN] boot re-derive failed: {str(exc)[:120]}")
     if not bool(_get_live_copy_output().snapshot().get("enabled")):
         # keep the rolling balance history (flat_hist) across OFF ticks so the 24 h peak survives a disarm/re-arm; drop only the
         # transient per-session markers (a balance change while OFF, e.g. a deposit, must not look like drift on re-arm)
@@ -49907,9 +50054,28 @@ def _live_guardian_tick(now=None) -> list:
     if not _epoch and now - float(_LIVE_GUARDIAN_STATE.get("epoch_warn_ts") or 0) >= 60.0:
         _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
         logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
+    # AMEND4 E6: while a live position/order is open (or the last read was blind), refresh Fly's view of the relay mirror
+    # every ~3 s (relay re-reads every <= 4 s while exposed) so stop residency is confirmed on evidence <= 10 s old.
+    if _live_guardian_exposed(chains):
+        try:
+            _live_copy_website_state(max_age=_LIVE_GUARDIAN_EXPOSED_FETCH_SEC)
+        except Exception as exc:  # noqa: BLE001 - a failed fetch ages the evidence; the protection rules fail closed on that
+            logger.warning(f"[LIVE GUARDIAN] fast mirror fetch failed: {str(exc)[:120]}")
+    try:   # AMEND4 E2'/E7: the shared book helper (full-size exit-side walk); unreadable => None => fail closed
+        import paper_fill as _pf
+        _book = _pf.book10l_at(now)
+    except Exception:  # noqa: BLE001
+        _book = None
     # every live tile (two-tile gate): lane_needle="" evaluates all live-copy chains, violations carry their tile key
-    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, lane_needle="", epoch_ts=_epoch or None)
+    viol = _lg.evaluate(chains, _live_guardian_mirror(), _LIVE_GUARDIAN_STATE["calc"], now, lane_needle="", epoch_ts=_epoch or None,
+                        book=_book)
     _LIVE_GUARDIAN_STATE["last_violations"] = viol
+    # AMEND4 E1 (L12): cap / unreadable-PnL / stale-book codes are AMBER ENTRY BLOCKS only (never a disarm or force-flat);
+    # _live_tile_admission refuses new live entries while a fresh AMBER is held (stamped LIVE_SKIPPED_DAILY_CAP).
+    viol, amber = _lg.split_violations(viol)
+    _LIVE_GUARDIAN_STATE["amber"] = ({"ts": now, "codes": sorted({v["code"] for v in amber}),
+                                      "detail": [str(v.get("detail"))[:160] for v in amber][:6]} if amber else None)
+    _live_guardian_record_protection(now, viol)
     if viol:
         reason = "AUTO_DISARM:" + ",".join(sorted({v["code"] for v in viol}))
         logger.error(f"[LIVE GUARDIAN] {reason} {viol} [PIPELINE ENFORCEMENT]")
@@ -49921,6 +50087,7 @@ def _live_guardian_tick(now=None) -> list:
                                                  "readback": "UNCONFIRMED",
                                                  "detail": [v.get("detail") for v in viol if v["code"] in red_codes][:4]}
             logger.critical(f"[LIVE GUARDIAN] RED {','.join(red_codes)} - disarm ALL + force-flat, no auto re-arm [PIPELINE ENFORCEMENT]")
+            _live_guardian_persist()
         disarm_exc = None
         try:
             ctl = _disarm_live_control(reason)
@@ -61263,6 +61430,10 @@ def main():
     threading.Thread(
         target=safe_thread(runtime_uptime_loop), name="runtime-uptime", daemon=True
     ).start()
+    try:
+        _live_guardian_restore()   # HM N3: RED / latch / in-progress force-flat survive a restart
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"[LIVE GUARDIAN] restore failed: {exc}")
     threading.Thread(target=safe_thread(live_guardian_loop), name="live-guardian", daemon=True).start()
     # Evidence processing is optional and may launch a bounded worker
     # immediately.  Start it only after the safety restore and dashboard boot
@@ -61786,9 +61957,20 @@ def _live_tile_admission(lane, trade_id, now):
     _fetched = _live_copy_website_cached_view().get("fetched_at_ts")
     if not _fetched or now - float(_fetched) > 45.0:
         mirror = {"ok": False, "error": "website view stale"}
+    try:   # AMEND4 E1/E7: the shared book helper (the same one paper fills walk); unreadable => None => AMBER block
+        import paper_fill as _pf
+        _book = _pf.book10l_at(now)
+    except Exception:  # noqa: BLE001
+        _book = None
     ok, reasons, info = _ltg.admit_entry(
         lane=lane, trade_id=trade_id, now=now, chains=chains, mirror=mirror,
-        decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD)
+        decisions=_get_live_copy_decisions().items(), armed_lanes=armed, entry_margin_usd=_live_copy.MAX_MARGIN_USD,
+        book=_book)
+    _amber = _LIVE_GUARDIAN_STATE.get("amber") or {}
+    if ok and _amber.get("codes") and now - float(_amber.get("ts") or 0) <= 5.0:
+        # the guardian's rolling-24 h ledger cap / AMBER entry blocks (AMEND4 E1: entry block only, never a disarm)
+        ok, reasons = False, [_ltg.SKIP_DAILY_CAP]
+        info = {**info, "guardian_amber": list(_amber.get("codes") or [])[:6]}
     row = {"ts": now, "trade_id": trade_id, "lane": lane, "tile_key": info.get("tile_key"), "admitted": bool(ok),
            "reasons": list(reasons)[:8], "entries_today": info.get("entries_today"), "utc_day": info.get("utc_day"),
            "exposures": info.get("exposures")}
@@ -62194,6 +62376,7 @@ def _live_guardian_force_flat_worker(rec: dict, post=None, sleep=None) -> dict:
         logger.critical(f"[LIVE GUARDIAN] RED FORCE_FLAT_UNCONFIRMED reason={rec['reason']} readback={rec['readback']} "
                         f"attempts={rec.get('attempts')} status={rec.get('status')} err={rec.get('error')} "
                         f"- live stays OFF, relay stays paused, no auto re-arm [PIPELINE ENFORCEMENT]")
+    _live_guardian_persist()
     return rec
 
 
@@ -62213,6 +62396,7 @@ def _live_guardian_force_flat(reason: str, now=None, spawn=None) -> dict:
         _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": rec["ts"], "code": "FORCE_FLAT_NOT_STARTED", "reason": rec["reason"],
                                              "readback": "UNCONFIRMED", "error": rec["error"]}
         logger.critical(f"[LIVE GUARDIAN] RED force-flat could not start: {exc} [PIPELINE ENFORCEMENT]")
+    _live_guardian_persist()   # HM N3: an in-progress force-flat survives a restart (re-launched at boot)
     return rec
 
 
@@ -62592,6 +62776,7 @@ def api_live_copy_output():
                             "live_copy_output": output.snapshot()}), 409
         snap = output.set(True, by=_onoff_actor(data), reason=_onoff_reason("OPERATOR_ON", data))
         _LIVE_GUARDIAN_STATE.pop("auto_disarm_latched", None)   # an explicit operator arm is the only unlatch
+        _live_guardian_persist()
     else:
         snap = output.set(False, by=_onoff_actor(data), reason=_onoff_reason("OPERATOR_OFF", data))
         try:

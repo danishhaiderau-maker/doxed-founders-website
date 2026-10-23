@@ -3964,13 +3964,34 @@ export function exchangeMirrorDueAfterTick(input: {
 }): boolean {
   return !input.wakeQueued && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_MAX_AGE_MS;
 }
+/** AMEND4 E6 (sha 7073ed25, L28): while the last mirror showed a position or open
+ * orders, or failed, re-read at least this often so the Fly guardian can confirm
+ * stop residency every 5 s (its own fetch adds <= 1 s; evidence > 10 s old is RED). */
+export const EXCHANGE_MIRROR_EXPOSED_EVERY_MS = 4_000;
+
+/** Pure: fast mirror cadence while exposed (or blind). Never during a money tick (exchangeMirrorMayRun). */
+export function exchangeMirrorExposedDue(input: {
+  exposed: boolean;
+  lastMirrorAtMs: number;
+  nowMs: number;
+}): boolean {
+  return input.exposed && input.nowMs - input.lastMirrorAtMs >= EXCHANGE_MIRROR_EXPOSED_EVERY_MS;
+}
+
+/** Pure: does this mirror call for the fast cadence? Failed reads and any position/order do. */
+export function exchangeMirrorShowsExposure(mirror: Record<string, unknown>): boolean {
+  if (mirror.ok !== true) return true;
+  const positions = Array.isArray(mirror.positions) ? mirror.positions : [];
+  const orders = Array.isArray(mirror.open_orders) ? mirror.open_orders : [];
+  return positions.length > 0 || orders.length > 0;
+}
 /** A position mismatch must persist this long across fresh re-reads before a pause. */
 export const MISMATCH_CONFIRM_MS = 15_000;
 
 /** Pure: exchange read -> monitoring mirror (no secrets, no ids beyond order ids). */
 export function buildExchangeMirror(input: {
   orders: Array<{ id: number; symbol: string; amount: number; amountOrig: number; price: number; status: string; orderType: string; flags?: number; cid?: number }>;
-  position: { symbol: string; amount: number; basePrice: number; pnlUsd: number; direction: 'LONG' | 'SHORT' } | null;
+  position: { symbol: string; amount: number; basePrice: number; pnlUsd: number; direction: 'LONG' | 'SHORT'; liqPrice?: number | null } | null;
   balance: number | null;
   readStartedAt: number;
   readAt: number;
@@ -3998,6 +4019,10 @@ export function buildExchangeMirror(input: {
       base_price: input.position.basePrice,
       pnl_usd: input.position.pnlUsd,
       stops: stops.length,
+      // AMEND4 E5 (sha 7073ed25, L24-26): live liq with its read timestamp; null = unreadable (Fly fails closed).
+      liq_price: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0 ? input.position.liqPrice : null,
+      liq_read_at: typeof input.position.liqPrice === 'number' && input.position.liqPrice > 0
+        ? new Date(input.readAt).toISOString() : null,
     }]
     : [];
   return {
@@ -4396,6 +4421,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
       setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
       setInterval(() => void this.refreshExchangeMirror(), EXCHANGE_MIRROR_EVERY_MS).unref();
+      // AMEND4 E6: <= 4 s mirror cadence while a position/order is open or the last read failed.
+      setInterval(() => {
+        if (exchangeMirrorExposedDue({
+          exposed: this.lastExchangeMirrorExposed,
+          lastMirrorAtMs: this.lastExchangeMirrorAtMs,
+          nowMs: Date.now(),
+        })) void this.refreshExchangeMirror();
+      }, 1_000).unref();
     }
   }
 
@@ -10128,6 +10161,7 @@ await this.notifications
 
   private exchangeMirrorRunning = false;
   private lastExchangeMirrorAtMs = 0;
+  private lastExchangeMirrorExposed = false;
 
   /**
    * Read-only exchange mirror for monitoring (11 Oct lifecycle audit RED 2/5):
@@ -10147,6 +10181,7 @@ await this.notifications
       nowMs: Date.now(),
     })) return;
     this.exchangeMirrorRunning = true;
+    let exposed = false;
     try {
       for (const instance of this.relayInstanceCache.values()) {
         if (instance.exchangeProvider !== 'bitfinex') continue;
@@ -10172,6 +10207,7 @@ await this.notifications
             read_at: new Date().toISOString(),
           };
         }
+        if (exchangeMirrorShowsExposure(mirror)) exposed = true;
         const payload = JSON.stringify(mirror);
         await this.prisma.$executeRaw`
           UPDATE "TradingAgentInstance"
@@ -10180,6 +10216,7 @@ await this.notifications
         `.catch(() => undefined);
       }
       this.lastExchangeMirrorAtMs = Date.now();
+      this.lastExchangeMirrorExposed = exposed;
     } finally {
       this.exchangeMirrorRunning = false;
     }

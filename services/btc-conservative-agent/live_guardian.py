@@ -28,8 +28,23 @@ LEDGER_GRACE_SEC = 10.0         # fill/close propagation grace before a position
 BALANCE_DRIFT_USD = 0.50        # unexplained balance change when flat beyond reported pnl; this $0.50 tolerance is the allowance for funding (the bot passes funding_usd_today=0)
 ORPHAN_GRACE_SEC = 3.0          # an orphan must persist across this long (two reads) to count
 LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only live tile)
-# RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every violation gets
-RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", "LEDGER_PNL_UNREADABLE"})
+# RK 02:25: these violations also latch RED (bot._live_guardian_tick), on top of the disarm ALL + force-flat every disarming
+# violation gets. AMEND4 (sha 7073ed25) E2'/E5/E6/E7: STOP_FAILURE_FLATTEN is RED too (non-countable, counted).
+RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN})
+# AMEND4 E1 (L12): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an
+# ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
+# is the one switchable live_tile_gate.cap_breach_response().
+ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
+                               _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE, "OPEN_MARK_UNREADABLE",
+                               _ltg_caps.AMBER_BOOK_STALE})
+
+
+def split_violations(viol: Iterable[Mapping[str, Any]]) -> tuple[list, list]:
+    """(disarm, entry_block). Entry-block codes only disarm if cap_breach_response() is ever switched away from ENTRY_BLOCK."""
+    viol = list(viol or [])
+    if _ltg_caps.cap_breach_response() != _ltg_caps.CAP_RESPONSE_ENTRY_BLOCK:
+        return viol, []
+    return [v for v in viol if v.get("code") not in ENTRY_BLOCK_CODES], [v for v in viol if v.get("code") in ENTRY_BLOCK_CODES]
 FILL_TO_STOP_MAX_SEC = 5.0     # HM G6: a stop confirmed later than 5 s after the fill is itself a violation
 
 
@@ -72,9 +87,17 @@ def heartbeat_stale(last_beat_ts, now: float, limit: float = HEARTBEAT_STALE_SEC
     return b is None or now - b > limit
 
 
+_NO_BOOK = object()
+
+
 def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | None, state: dict, now: float,
-             lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0, epoch_ts: float | None = None) -> list:
+             lane_needle: str = LANE_NEEDLE, funding_usd_today: float = 0.0, epoch_ts: float | None = None,
+             book: Any = _NO_BOOK) -> list:
     """Return [{code, detail}] violations; ``state`` is mutated (day baseline, orphan first-seen).
+
+    Use split_violations(): AMEND4 E1 codes (ENTRY_BLOCK_CODES) are AMBER entry blocks, everything else disarms ALL.
+    ``book`` (paper_fill.book10l_at(now), the bot always passes it): AMEND4 E2'/E5/E6/E7 open-position protection via the
+    shared live_tile_gate.open_position_protection (STOP_FAILURE_FLATTEN, RED). Omitted only by unit tests of other rules.
 
     Only FRESH-EPOCH live ledger rows count (``epoch_ts``: chains whose first stage is before it are ignored), so a pre-epoch
     row can never trip the loss cap or the drift check."""
@@ -120,11 +143,22 @@ def evaluate(chains: Iterable[Mapping[str, Any]], mirror: Mapping[str, Any] | No
             state.setdefault("blind_since", now)
             if now - state["blind_since"] > 30.0:
                 out.append({"code": "EXCHANGE_MIRROR_BLIND", "detail": str((m or {}).get("error") or "no mirror")})
+            elif open_filled and book is not _NO_BOOK and now - state["blind_since"] > _ltg.BOOK_HOLD_MAX_AGE_S:
+                # AMEND4 E7 (L31-32): a FILLED live position whose stop residency cannot be read back for > 10 s => RED
+                out.append({"code": _ltg.STOP_FAILURE_FLATTEN, "tile": tile_of(open_filled[0]), "cause": "EXCHANGE_READ_FAILED",
+                            "detail": f"position open, exchange read failing {now - state['blind_since']:.0f}s (E6/E7)"})
         else:
             state.pop("blind_since", None)   # nothing exposed: blindness is not accumulating towards a disarm
         return out
     state.pop("blind_since", None)
     state["read_state"] = "OK"
+    # AMEND4 E2'/E5/E6/E7: open-position protection on the full-size exit-side book walk + live liq + stop residency
+    if book is not _NO_BOOK:
+        fill_grace = any(now - float(c["fill_at_ts"]) < FILL_TO_STOP_MAX_SEC for c in open_filled)
+        prot = _ltg.open_position_protection(m, book, now, fill_grace=fill_grace)
+        state["protection"] = {"ts": now, "positions": prot["positions"][:2]}
+        out.extend(prot["disarm"])
+        out.extend(prot["block"])
     positions, orders = list(m.get("positions") or []), list(m.get("open_orders") or [])
     orphans = list(m.get("orphans") or [])
     # 2. orphan (persisting)

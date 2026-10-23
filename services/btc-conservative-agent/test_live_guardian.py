@@ -86,12 +86,13 @@ def test_bot_wiring_tick_disarms_on_violation_and_is_inert_when_output_off():
               "_tile_integrity_chains": lambda now: [{"correlation_id": "GS01-1", "lane": "FAMILY_GS01_XV", "fill_at_ts": now - 9}],
               "_live_guardian_mirror": lambda: {"ok": True, "positions": [{}], "open_orders": [], "orphans": [], "balance": {"derivatives_available_usd": 206.0}},
               "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
-              "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
+              "_live_guardian_exposed": lambda chains: False, "_live_guardian_record_protection": lambda now, viol: None, "_live_guardian_persist": lambda: None,
+"_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
         exec(src[start:end], g_)
         return g_["_live_guardian_tick"]()
     assert run(False) == [] and calls == []
     v = run(True)
-    assert any(x["code"] == "STOP_MISSING_GT_5S" for x in v) and calls and calls[0].startswith("AUTO_DISARM:STOP_MISSING_GT_5S")
+    assert any(x["code"] == "STOP_MISSING_GT_5S" for x in v) and calls and calls[0].startswith("AUTO_DISARM:") and "STOP_MISSING_GT_5S" in calls[0]
 
 
 # ---- drill: every trigger disarms through the bot tick, plus heartbeat, arm refusal, relay reach, no order calls --------------
@@ -111,7 +112,8 @@ def _tick_ns(on=True, chains=None, mirror=None, epoch=None):
           "_get_live_copy_output": lambda: Out(), "_tile_integrity_chains": lambda now: chains(now) if callable(chains) else (chains or []),
           "_live_guardian_mirror": lambda: mirror, "_offline_sim_epoch_floor": lambda: epoch,
           "_disarm_live_control": lambda reason: calls.append(reason) or {"cancel": {"failed": []}},
-              "_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
+              "_live_guardian_exposed": lambda chains: False, "_live_guardian_record_protection": lambda now, viol: None, "_live_guardian_persist": lambda: None,
+"_live_guardian_force_flat": lambda reason, now=None: FF.append(reason) or {"requested": True, "reason": reason}}
     exec(src_cut(start, end), ns)
     return ns, calls
 
@@ -133,7 +135,6 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
         "STOP_MISSING_GT_5S": (lambda n: [ch(fill_at_ts=n - 9)], _mir(positions=P), None),
         "ORPHAN": (lambda n: [], _mir(orphans=["1"]), None),
         "LEDGER_MISMATCH": (lambda n: [], _mir(positions=P), None),
-        "DAILY_LOSS_CAP": (lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100, exit_at_ts=n - 100)], _mir(), None),
         "BALANCE_DRIFT": (lambda n: [], _mir(balance={"derivatives_available_usd": 205.9}), None),
     }
     for code, (chains, mirror, epoch) in cases.items():
@@ -144,6 +145,11 @@ def test_drill_each_of_the_six_triggers_disarms_via_the_bot_tick_with_its_own_co
             ns["_LIVE_GUARDIAN_STATE"]["calc"].update(day=g.day_key(now), day_baseline=206.79, last_flat_balance=206.79, last_flat_ts=now - 100)
         v = ns["_live_guardian_tick"](now)
         assert code in {x["code"] for x in v} and calls and code in calls[0], code
+    # AMEND4 E1 (L12): a daily-loss-cap breach is an AMBER entry block only - never a disarm, never a force-flat
+    ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 500, stop_confirmed=True, closed=True, pnl_usd=-1.2, closed_at_ts=n - 100,
+                                             exit_at_ts=n - 100)], _mir(), None)
+    ns["_live_guardian_tick"](now)
+    assert calls == [] and "DAILY_LOSS_CAP" in (ns["_LIVE_GUARDIAN_STATE"]["amber"] or {}).get("codes", [])
     ns, calls = _tick_ns(True, lambda n: [ch(fill_at_ts=n - 99, stop_confirmed=True)], {"ok": False, "error": "stale"})
     ns["_LIVE_GUARDIAN_STATE"]["calc"]["blind_since"] = now - 40
     v = ns["_live_guardian_tick"](now)
@@ -468,7 +474,8 @@ def _ff_ns():
     from collections import deque
     src = _SRC[_SRC.index("LIVE_GUARDIAN_FORCE_FLAT_CONFIRMATION ="):_SRC.index("def _live_copy_stale_exit_check")]
     ns = {"time": _tt, "threading": threading, "deque": deque, "collections": collections, "logger": logging.getLogger("t"), "_LIVE_GUARDIAN_STATE": {},
-          "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None}
+          "_BOT_ADMIN_TOKEN": "x", "LIVE_COPY_OPS_BASE": "http://relay", "LIVE_COPY_OPS_USER_ID": "u", "requests": None,
+          "_live_guardian_persist": lambda: True}
     exec(src, ns)
     return ns
 

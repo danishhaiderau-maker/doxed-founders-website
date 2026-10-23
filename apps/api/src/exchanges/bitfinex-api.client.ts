@@ -71,6 +71,9 @@ export type BitfinexPositionDetail = {
   pnlUsd: number;
   pnlPct: number;
   direction: 'LONG' | 'SHORT';
+  // AMEND4 E5 (sha 7073ed25, L24-26): position row index 8 = PRICE_LIQ. null when Bitfinex
+  // omits it or sends a non-positive / non-numeric value (the Fly guardian then fails closed).
+  liqPrice?: number | null;
 };
 
 export type BitfinexPositionCloseLedgerRow = {
@@ -627,6 +630,13 @@ export function parseOrderHistoryEvidence(
   return null;
 }
 
+/** AMEND4 E5: Bitfinex v2 position row index 8 is PRICE_LIQ; anything unusable is null (never 0). */
+export function parsePositionLiqPrice(row: readonly unknown[]): number | null {
+  if (row.length <= 8 || row[8] == null) return null;
+  const liq = Number(row[8]);
+  return Number.isFinite(liq) && liq > 0 ? liq : null;
+}
+
 export function parseOpenPositionPayload(
   payload: unknown,
   symbol = BITFINEX_BTC_PERP_SYMBOL,
@@ -679,6 +689,7 @@ export function parseOpenPositionPayload(
       pnlUsd,
       pnlPct,
       direction: amount > 0 ? 'LONG' : 'SHORT',
+      liqPrice: parsePositionLiqPrice(row),
     };
   }
   return matched;
