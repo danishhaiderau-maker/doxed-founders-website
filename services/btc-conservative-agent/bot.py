@@ -62423,7 +62423,10 @@ def _live_guardian_force_flat_post(reason: str) -> dict:
             "flattened": body.get("flattened"), "cancelled": body.get("cancelled"),
             "position_amount": body.get("positionAmount"), "open_orders": body.get("openOrders"),
             "relay_errors": [str(e)[:120] for e in (body.get("errors") or [])][:5],
-            "ok": 200 <= r.status_code < 300 and body.get("paused") is True and body.get("verdict") == "FLAT_NO_STOPS"}
+            "db_reconciled": body.get("dbReconciled") is True, "db_open_remaining": body.get("dbOpenRemaining"),
+            # HM2: the relay's ok also needs the entry fence held + the DB rows reconciled to the exchange
+            "ok": 200 <= r.status_code < 300 and body.get("ok") is True and body.get("paused") is True
+                  and body.get("verdict") == "FLAT_NO_STOPS"}
 
 
 def _live_guardian_force_flat_worker(rec: dict, post=None, sleep=None) -> dict:
@@ -62500,7 +62503,9 @@ def _live_guardian_position_flatten_post(reason: str) -> dict:
     return {"status": r.status_code, "verdict": body.get("verdict"), "flattened": body.get("flattened"),
             "cancelled": body.get("cancelled"), "position_amount": body.get("positionAmount"), "open_orders": body.get("openOrders"),
             "relay_errors": [str(e)[:120] for e in (body.get("errors") or [])][:5],
-            "ok": 200 <= r.status_code < 300 and body.get("verdict") == "FLAT_NO_STOPS"}
+            "db_reconciled": body.get("dbReconciled") is True, "db_open_remaining": body.get("dbOpenRemaining"),
+            # HM2: the relay's ok also needs the entry fence held + the DB rows reconciled to the exchange
+            "ok": 200 <= r.status_code < 300 and body.get("ok") is True and body.get("verdict") == "FLAT_NO_STOPS"}
 
 
 def _live_guardian_position_flatten_worker(rec: dict, post=None, sleep=None) -> dict:

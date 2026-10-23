@@ -254,7 +254,8 @@ export class TradingAgentsController {
     // flatten even if the pause failed (fail safe); ok stays false so Fly raises RED
     const flat = await this.execution.forceFlatDisarmAccount(uid, slug, reason);
     // HM1: ok also requires the account entry fence to have been held for the whole route
-    const ok = paused && flat.verdict === 'FLAT_NO_STOPS' && flat.fenced;
+    // HM2: ...and the DB rows reconciled to the exchange (no OPEN/PENDING_ENTRY left); otherwise ok=false -> Fly RED
+    const ok = paused && flat.verdict === 'FLAT_NO_STOPS' && flat.fenced && flat.dbReconciled;
     // eslint-disable-next-line no-console
     console.log(`[OPS-FORCE-FLAT-DISARM] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} paused=${paused} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
     return { ok, paused, pauseError, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };
@@ -288,7 +289,8 @@ export class TradingAgentsController {
     const startedAt = new Date().toISOString();
     const flat = await this.execution.forceFlatDisarmAccount(uid, slug, reason);
     // HM1: ok also requires the account entry fence to have been held for the whole route
-    const ok = flat.verdict === 'FLAT_NO_STOPS' && flat.fenced;
+    // HM2: ...and the DB rows reconciled to the exchange (no OPEN/PENDING_ENTRY left); otherwise ok=false -> Fly RED
+    const ok = flat.verdict === 'FLAT_NO_STOPS' && flat.fenced && flat.dbReconciled;
     // eslint-disable-next-line no-console
     console.log(`[OPS-POSITION-FLATTEN] actor=BOT_ADMIN_TOKEN user=${uid} slug=${slug} reason=${reason} verdict=${flat.verdict} flattened=${flat.flattened} cancelled=${flat.cancelled} errors=${flat.errors.length} at=${startedAt}`);
     return { ok, ...flat, audit: { actor: 'BOT_ADMIN_TOKEN', reason, at: startedAt } };

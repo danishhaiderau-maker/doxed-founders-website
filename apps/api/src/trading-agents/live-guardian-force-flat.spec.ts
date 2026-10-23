@@ -107,3 +107,80 @@ test('HM1: a fence that cannot be acquired still flattens (safety) but is report
   assert.equal(r.fenced, false);
   assert.ok(r.errors.some((e) => e.startsWith('fence:')));
 });
+
+/** HM2: a service whose participant table is a tiny in-memory store (OPEN/PENDING rows) and whose exchange is a toggle. */
+function reconcileSvc(opts: { rows: Array<{ id: string; status: string; venue?: string | null }>; updateFails?: boolean }) {
+  const s = Object.create(SignalSubscriberExecutionService.prototype) as SignalSubscriberExecutionService;
+  const rows = opts.rows.map((r) => ({ venue: 'bitfinex', terminalCloseAuthority: null as unknown, ...r }));
+  const ex = { amount: 0.0003 };
+  const match = (r: (typeof rows)[number], where: any) =>
+    where.status.in.includes(r.status)
+    && (!where.id || where.id === r.id)
+    && (!where.AND || [r.venue === 'bitfinex', r.venue == null].some(Boolean));
+  Object.assign(s as unknown as Record<string, unknown>, {
+    prisma: {
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({ $executeRawUnsafe: async () => undefined, liveEntryFence: { create: async () => undefined } }),
+      liveEntryFence: { update: async () => undefined, deleteMany: async () => undefined },
+      tradingAgent: { findUnique: async () => ({ id: 'a1' }) },
+      tradingAgentInstance: { findUnique: async () => ({ exchangeProvider: 'bitfinex' }) },
+      signalCycleParticipant: {
+        findMany: async ({ where }: any) => rows.filter((r) => match(r, where)).map((r) => ({ ...r })),
+        updateMany: async ({ where, data }: any) => {
+          if (opts.updateFails) throw new Error('db write failed');
+          const hit = rows.filter((r) => match(r, where));
+          hit.forEach((r) => Object.assign(r, data));
+          return { count: hit.length };
+        },
+        count: async ({ where }: any) => rows.filter((r) => match(r, where)).length,
+      },
+    },
+    // closeVirtualLot submits the Bitfinex close (the position goes flat) and THEN throws (e.g. a DB write after the fill)
+    closeVirtualLot: async () => { ex.amount = 0; throw new Error('db write after close failed'); },
+    emergencyFlattenOpenCopyLots: async function (this: any) {
+      await this.closeVirtualLot();
+      return { flattened: 1 };
+    },
+    exchanges: { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) },
+    bitfinex: {
+      getOpenPositionDetail: async () => (ex.amount ? { amount: ex.amount } : null),
+      submitPositionFlatten: async () => { ex.amount = 0; return 1; },
+      listActiveOrders: async () => [],
+      cancelOrder: async () => undefined,
+    },
+  });
+  return { s, rows };
+}
+
+test('HM2: closeVirtualLot throws AFTER the Bitfinex close -> exchange FLAT_NO_STOPS -> every OPEN/PENDING row CLOSED non-countable with trigger + exchange evidence', async () => {
+  const { s, rows } = reconcileSvc({ rows: [{ id: 'p1', status: 'OPEN' }, { id: 'p2', status: 'PENDING_ENTRY', venue: null }, { id: 'p3', status: 'OPEN', venue: 'paper' }] });
+  const r = await s.forceFlatDisarmAccount('u', 'slug', 'LIQ_CLAMP_FLATTEN:t1');
+  assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.ok(r.errors.some((e) => e.startsWith('lots:')));       // the throw is reported...
+  assert.equal(r.dbReconciled, true);                            // ...but the DB follows the exchange
+  assert.equal(r.dbClosed, 2);
+  for (const id of ['p1', 'p2']) {
+    const row = rows.find((x) => x.id === id)!;
+    assert.equal(row.status, 'CLOSED');
+    const ev = row.terminalCloseAuthority as Record<string, any>;
+    assert.equal(ev.trigger_reason, 'LIQ_CLAMP_FLATTEN:t1');
+    assert.equal(ev.non_countable, true);
+    assert.equal(ev.exchange_readback.verdict, 'FLAT_NO_STOPS');
+    assert.equal(ev.exchange_readback.position_amount, 0);
+  }
+  assert.equal(rows.find((x) => x.id === 'p3')!.status, 'OPEN');   // another venue is never touched
+});
+
+test('HM2: a failed DB reconcile -> dbReconciled=false (the routes return ok=false -> Fly RED); no reconcile unless FLAT_NO_STOPS', async () => {
+  const { s, rows } = reconcileSvc({ rows: [{ id: 'p1', status: 'OPEN' }], updateFails: true });
+  const r = await s.forceFlatDisarmAccount('u', 'slug', 'AUTO_DISARM:X');
+  assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.equal(r.dbReconciled, false);
+  assert.ok(r.errors.some((e) => e.startsWith('db-reconcile:')));
+  assert.equal(rows[0].status, 'OPEN');
+  await assert.rejects(
+    s.reconcileFlatAccountRows('u', 'x', { verdict: 'NOT_FLAT', positionAmount: 1, openOrders: 0, readAt: 'now' } as any),
+  );
+  const ctl = readFileSync(resolve(__dirname, 'trading-agents.controller.ts'), 'utf8');
+  assert.equal((ctl.match(/&& flat\.fenced && flat\.dbReconciled;/g) ?? []).length, 2);   // both routes
+});

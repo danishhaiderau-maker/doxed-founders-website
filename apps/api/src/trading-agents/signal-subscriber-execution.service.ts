@@ -21932,7 +21932,7 @@ await this.notifications
     userId: string,
     agentSlug: string,
     reason = 'unspecified',
-  ): Promise<ForceFlatDisarmResult & { fenced: boolean }> {
+  ): Promise<ForceFlatDisarmResult & { fenced: boolean; dbReconciled: boolean; dbClosed: number; dbOpenRemaining: number | null }> {
     // HM1: hold the account entry fence for the WHOLE route (both ops/position-flatten and ops/force-flat-disarm). A failed
     // acquisition still flattens (safety first) but is reported (fenced=false -> the caller returns ok=false).
     const fenceId = `flatten:${randomUUID()}`;
@@ -21949,10 +21949,78 @@ await this.notifications
     };
     try {
       const r = await this.forceFlatDisarmAccountInner(userId, agentSlug, touch);
-      return { ...r, errors: [...fenceErrors, ...r.errors], fenced };
+      // HM2: the exchange is the truth. Only after a FLAT_NO_STOPS read-back (still under the fence), close every
+      // OPEN / PENDING_ENTRY row of this account as non-countable with the trigger reason + the exchange evidence. A failed
+      // reconcile (or rows left open) => dbReconciled=false => the route returns ok=false (Fly goes RED).
+      let dbReconciled = false;
+      let dbClosed = 0;
+      let dbOpenRemaining: number | null = null;
+      const recErrors: string[] = [];
+      if (r.verdict === 'FLAT_NO_STOPS') {
+        await touch();
+        try {
+          const rec = await this.reconcileFlatAccountRows(userId, reason, r);
+          dbClosed = rec.closed;
+          dbOpenRemaining = rec.remaining;
+          dbReconciled = rec.remaining === 0;
+          if (!dbReconciled) recErrors.push(`db-reconcile:${rec.remaining} rows still OPEN/PENDING_ENTRY`);
+        } catch (e) {
+          recErrors.push(`db-reconcile:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+        }
+      }
+      return { ...r, errors: [...fenceErrors, ...r.errors, ...recErrors], fenced, dbReconciled, dbClosed, dbOpenRemaining };
     } finally {
       if (fenced) await releaseLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-release'));
     }
+  }
+
+  /**
+   * HM2 (24 Oct, #852): after an exchange FLAT_NO_STOPS read-back, retire every OPEN / PENDING_ENTRY Bitfinex (or legacy
+   * no-venue) row of the account: CLOSED, non-countable, with the trigger reason and the exchange read-back merged into
+   * terminalCloseAuthority (existing authority kept under `prior`). Conditional on the row still being OPEN/PENDING_ENTRY,
+   * so a close that lands concurrently wins. Returns how many rows it closed and how many remain.
+   */
+  async reconcileFlatAccountRows(
+    userId: string,
+    triggerReason: string,
+    readback: Pick<ForceFlatDisarmResult, 'verdict' | 'positionAmount' | 'openOrders' | 'readAt'>,
+  ): Promise<{ closed: number; remaining: number }> {
+    if (readback.verdict !== 'FLAT_NO_STOPS') throw new Error('reconcile refused: exchange read-back is not FLAT_NO_STOPS');
+    const where = {
+      userId,
+      status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+      AND: [{ OR: [{ venue: LIVE_MUTEX_VENUE }, { venue: null }] }],
+    };
+    const rows = await this.prisma.signalCycleParticipant.findMany({
+      where,
+      select: { id: true, status: true, terminalCloseAuthority: true },
+    });
+    let closed = 0;
+    for (const row of rows) {
+      const evidence = {
+        schema: 'flat_reconcile_v1',
+        action: 'FORCE_FLAT_DB_RECONCILE',
+        trigger_reason: triggerReason.slice(0, 200),
+        non_countable: true,
+        non_countable_reason: `FORCE_FLAT:${triggerReason.slice(0, 120)}`,
+        prior_status: row.status,
+        exchange_readback: {
+          verdict: readback.verdict,
+          position_amount: readback.positionAmount,
+          open_orders: readback.openOrders,
+          read_at: readback.readAt,
+        },
+        reconciled_at: new Date().toISOString(),
+        ...(row.terminalCloseAuthority != null ? { prior: row.terminalCloseAuthority } : {}),
+      };
+      const u = await this.prisma.signalCycleParticipant.updateMany({
+        where: { id: row.id, status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] } },
+        data: { status: SignalCycleStatus.CLOSED, terminalCloseAuthority: evidence as Prisma.InputJsonValue },
+      });
+      closed += u.count;
+    }
+    const remaining = await this.prisma.signalCycleParticipant.count({ where });
+    return { closed, remaining };
   }
 
   private async forceFlatDisarmAccountInner(

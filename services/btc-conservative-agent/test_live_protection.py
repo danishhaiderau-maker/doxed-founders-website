@@ -388,3 +388,19 @@ def test_hm1_admission_checks_the_fence_before_admit_entry():
     body = _SRC[_SRC.index("def _live_tile_admission("):_SRC.index("def _live_copy_stamp_payload")]
     assert body.index("_live_flatten_entry_fence(now, mirror)") < body.index("_ltg.admit_entry(")
     assert "return False, [_ltg.SKIP_MUTEX]" in body
+
+
+def test_hm2_fly_success_needs_the_relay_ok_db_reconciled_not_just_the_verdict():
+    import types
+    for name in ("_live_guardian_force_flat_post", "_live_guardian_position_flatten_post"):
+        a = _SRC.index(f"def {name}")
+        ns = {"_BOT_ADMIN_TOKEN": "t", "LIVE_COPY_OPS_BASE": "b", "LIVE_COPY_OPS_USER_ID": "u",
+              "LIVE_GUARDIAN_FORCE_FLAT_CONFIRMATION": "x", "LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION": "y"}
+        body = {"verdict": "FLAT_NO_STOPS", "paused": True, "ok": False, "dbReconciled": False, "dbOpenRemaining": 1}
+        ns["requests"] = types.SimpleNamespace(post=lambda *a, **k: types.SimpleNamespace(
+            status_code=200, content=b"1", json=lambda: dict(body)))
+        exec(_SRC[a:_SRC.index("\ndef ", a + 5)], ns)
+        out = ns[name]("r")
+        assert out["ok"] is False and out["db_reconciled"] is False and out["db_open_remaining"] == 1, name
+        body.update(ok=True, dbReconciled=True, dbOpenRemaining=0)
+        assert ns[name]("r")["ok"] is True, name
