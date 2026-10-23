@@ -92,25 +92,39 @@ def test_expiry_sweep_waits_for_post_exit_grace():
     assert i > 0
 
 
-def test_dump_replay_censored_row(bot, tmp_path, monkeypatch):
+def test_dump_replay_writes_no_signal_replay_file_r17(bot, tmp_path, monkeypatch):
+    """C9 / R17: the signal_replay writer is stopped. A real dump_replay of a
+    censored and of a completed buffer, in a tmp cwd, creates no
+    signal_replay.jsonl* file anywhere and still counts the dumps."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bot, "SIGNAL_REPLAY_FILE", str(tmp_path / "signal_replay.jsonl"))
-    tid = "shadow-test-censor"
+    synced = []
+    monkeypatch.setattr(bot, "_sync_order_multiverse", lambda *a, **k: synced.append((a, k)))
     now = time.time()
+    buffers = {
+        "shadow-test-censor": {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
+                               "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
+                               "closed": False},
+        "shadow-test-closed": {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
+                               "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
+                               "closed": True, "virtual_fill_t": 1.0, "virtual_entry": 100000.0},
+    }
+    before = bot.write_counter
     with bot.replay_lock:
-        bot.replay_buffers[tid] = {"start_ts": now - 30, "start_price": 100000.0, "direction": "LONG",
-                                   "lane": "shadow", "ticks": [{"t": 1.0, "price": 100000.0}],
-                                   "closed": False}
+        bot.replay_buffers.update(buffers)
     try:
-        bot.dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
-        bot.dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-censor", terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-censor", terminal_reason="CENSORED_PROCESS_SHUTDOWN")
+        bot.dump_replay("shadow-test-closed")
+        seqs = {tid: bot.replay_buffers[tid]["dump_seq"] for tid in buffers}
     finally:
         with bot.replay_lock:
-            bot.replay_buffers.pop(tid, None)
-    rows = [json.loads(line) for line in open(tmp_path / "signal_replay.jsonl", encoding="utf-8")]
-    assert [r["dump_seq"] for r in rows] == [1, 2]
-    assert all(r["censored"] is True for r in rows)
-    assert rows[0]["replay_completion_reason"] == "CENSORED_PROCESS_SHUTDOWN"
-    assert rows[0]["natural_completion_reason"] == "INCOMPLETE_BUFFER"
+            for tid in buffers:
+                bot.replay_buffers.pop(tid, None)
+    assert sorted(p.name for p in tmp_path.rglob("signal_replay.jsonl*")) == []
+    assert not any("signal_replay" in p.name for p in tmp_path.rglob("*"))
+    assert seqs == {"shadow-test-censor": 2, "shadow-test-closed": 1}
+    assert bot.write_counter == before + 3
 
 
 # --------------------------------------------------------------------------

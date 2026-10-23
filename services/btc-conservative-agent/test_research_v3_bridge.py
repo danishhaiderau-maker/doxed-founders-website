@@ -47,35 +47,44 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
-    def test_lane_decision_freezes_baselines_from_immutable_pre_signal_bbo(self):
+    @staticmethod
+    def _lane_decision_opportunity(tmp, trade_id):
+        dual_write_lane_decision(
+            {
+                "trade_id": trade_id, "shared_ai_call_id": trade_id,
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "feature_snapshot_at_signal": {"signal_price": 100.0},
+            },
+            lane="CONTINUOUS", policy_decision="ACCEPT",
+            execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+            epoch_id="epoch-v3-test", data_dir=tmp,
+            lane_policy={"policy_id": "CONTINUOUS"},
+        )
+        return json.loads(
+            V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            .ledger_path("opportunity").read_text().strip()
+        )
+
+    def test_lane_decision_freezes_baselines_from_book10l_bbo_at_signal(self):
+        """R17 realism pin: signal_time_bbo comes from the Bitfinex 10-level
+        book (latest complete second at or before the signal, no look-ahead),
+        never from the retired ticker/1s market-segment path."""
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "market_microstructure_1s.jsonl").write_text(
-                json.dumps({
-                    "bucket_ts": 999, "last": 100.0,
-                    "bid": 99.99, "ask": 100.01,
-                    "bid_qty": 3.0, "ask_qty": 4.0,
-                }) + "\n",
+            Path(tmp, "bfx_book_10l_1s.jsonl").write_text(
+                json.dumps({"s": 998, "b": [[99.99, 3.0], [99.98, 1.5]],
+                            "a": [[100.01, 4.0], [100.02, 2.0]]}) + "\n"
+                # s=1000 completes at 1001 > signal_ts: look-ahead, never used.
+                + json.dumps({"s": 1000, "b": [[90.0, 9.0]], "a": [[110.0, 9.0]]}) + "\n",
                 encoding="utf-8",
             )
-            dual_write_lane_decision(
-                {
-                    "trade_id": "scan-pre-bbo", "shared_ai_call_id": "scan-pre-bbo",
-                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
-                    "feature_snapshot_at_signal": {"signal_price": 100.0},
-                },
-                lane="CONTINUOUS", policy_decision="ACCEPT",
-                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
-                epoch_id="epoch-v3-test", data_dir=tmp,
-                lane_policy={"policy_id": "CONTINUOUS"},
-            )
-            opportunity = json.loads(
-                V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
-                .ledger_path("opportunity").read_text().strip()
-            )
-            self.assertEqual(
-                opportunity["signal_time_bbo"]["capture_basis"],
-                "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
-            )
+            opportunity = self._lane_decision_opportunity(tmp, "scan-book-bbo")
+            bbo = opportunity["signal_time_bbo"]
+            self.assertEqual(bbo["capture_basis"], "BFX_BOOK_10L_AT_SIGNAL")
+            self.assertEqual((bbo["bid"], bbo["ask"]), (99.99, 100.01))
+            self.assertEqual((bbo["bid_qty"], bbo["ask_qty"]), (3.0, 4.0))
+            self.assertEqual(bbo["source_ts"], 999.0)
+            self.assertEqual(bbo["bid_depth_qty_10l"], 4.5)
+            self.assertEqual(bbo["ask_depth_qty_10l"], 6.0)
             schedules = opportunity["baseline_schedule_snapshot"]["schedules"]
             self.assertEqual(
                 schedules["MARKET_ENTRY_AT_SIGNAL"]["capture_status"],
@@ -84,6 +93,26 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(
                 schedules["NO_CHASE_LIMIT"]["capture_status"],
                 "CAPTURED_AT_SIGNAL",
+            )
+
+    def test_lane_decision_without_book_has_no_bbo_and_no_ticker_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A ticker/1s row is present but must never be used (R17).
+            Path(tmp, "market_microstructure_1s.jsonl").write_text(
+                json.dumps({
+                    "bucket_ts": 999, "last": 100.0,
+                    "bid": 99.99, "ask": 100.01,
+                    "bid_qty": 3.0, "ask_qty": 4.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            opportunity = self._lane_decision_opportunity(tmp, "scan-no-book")
+            self.assertIsNone(opportunity.get("signal_time_bbo"))
+            self.assertNotIn("IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT", json.dumps(opportunity))
+            schedules = opportunity["baseline_schedule_snapshot"]["schedules"]
+            self.assertEqual(
+                schedules["MARKET_ENTRY_AT_SIGNAL"]["capture_status"],
+                "UNKNOWN_NOT_CAPTURED_AT_SIGNAL",
             )
 
     def test_terminal_schedule_snapshot_is_append_only_idempotent_and_evidence_only(self):
@@ -1562,7 +1591,7 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(execution["policy_epoch_id"], "pe-a")
             self.assertEqual(execution["research_lane"], "CONTROL_V1")
 
-    def test_order_intent_preserves_exact_entry_children_for_v3_replay(self):
+    def test_order_intent_is_live_with_entry_children_retired_r17(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = _event()
             event["atr14_pct"] = 0.42
@@ -1570,8 +1599,9 @@ class V3BridgeTests(unittest.TestCase):
             dual_write_v22_record(event, data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             intent = json.loads(store.ledger_path("order_intent").read_text().strip())
-            self.assertEqual(intent["entry_children"], event["entry_children"])
-            self.assertEqual(intent["entry_children_count"], 2)
+            # R17: the hypothetical entry grid is retired; order_intent is live.
+            self.assertEqual(intent["entry_children"], [])
+            self.assertEqual(intent["entry_children_status"], "RETIRED_R17")
             self.assertEqual(intent["atr14_pct"], 0.42)
             self.assertEqual(intent["signal_price"], 100.0)
             self.assertEqual(intent["executed_direction"], "LONG")

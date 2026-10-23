@@ -539,10 +539,17 @@ class CollectorIntegrityTests(unittest.TestCase):
             self.assertEqual(write_research_event_once(event, data_dir=root), (False, "duplicate event_id"))
             report = analyze_v22_events(data_dir=root)
             integrity = report["replay_integrity"]
+            # R17: the negative row is retired (no stored 1m path), so it is
+            # labelled "source retired (R17)" and never scored or counted as
+            # an ineligible primary; the durable row itself is untouched.
             self.assertEqual(integrity["eligible_events"], 0)
-            self.assertEqual(integrity["ineligible_events"], 1)
-            self.assertEqual(integrity["observation_statuses"][OBS_INSUFFICIENT_PATH], 1)
-            self.assertGreater(sum(integrity["blockers"].values()), 0)
+            self.assertEqual(integrity["ineligible_events"], 0)
+            self.assertEqual(integrity["ranking_denominator"], 0)
+            self.assertEqual(report["source_retired"]["rows"], 1)
+            self.assertEqual(report["source_retired"]["label"], "source retired (R17)")
+            self.assertEqual(report["source_retired"]["reason"], "MISSING_1M_TAPE")
+            self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
+            self.assertTrue(collector_v22.is_r17_retired_event(event))
 
 
 if __name__ == "__main__":
