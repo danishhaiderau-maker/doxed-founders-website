@@ -184,3 +184,19 @@ test('HM2: a failed DB reconcile -> dbReconciled=false (the routes return ok=fal
   const ctl = readFileSync(resolve(__dirname, 'trading-agents.controller.ts'), 'utf8');
   assert.equal((ctl.match(/&& flat\.fenced && flat\.dbReconciled;/g) ?? []).length, 2);   // both routes
 });
+
+test('HM4: the trigger reason reaches emergencyFlattenOpenCopyLots (NOT as operator) and is stamped into the closed row evidence', async () => {
+  const { s } = reconcileSvc({ rows: [] });
+  const seen: unknown[][] = [];
+  (s as any).emergencyFlattenOpenCopyLots = async (...args: unknown[]) => { seen.push(args); return { flattened: 0 }; };
+  await s.forceFlatDisarmAccount('u', 'slug', 'LIQ_CLAMP_FLATTEN:t9');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0][2], undefined);                       // operator mode would skip the OPEN loop
+  assert.deepEqual(seen[0][3], { reason: 'LIQ_CLAMP_FLATTEN:t9' });
+  const src = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('  async emergencyFlattenOpenCopyLots('));
+  const ev = fn.slice(fn.indexOf("action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS'"), fn.indexOf("action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS'") + 400);
+  assert.match(ev, /trigger_reason: trigger\.reason/);
+  assert.match(ev, /non_countable: true/);
+  assert.match(ev, /non_countable_reason: `FORCE_FLAT:\$\{trigger\.reason\}`/);
+});

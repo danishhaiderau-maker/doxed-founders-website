@@ -21948,7 +21948,7 @@ await this.notifications
       if (fenced) await refreshLiveEntryFence(this.prisma, fenceId).catch(() => undefined);
     };
     try {
-      const r = await this.forceFlatDisarmAccountInner(userId, agentSlug, touch);
+      const r = await this.forceFlatDisarmAccountInner(userId, agentSlug, touch, reason);
       // HM2: the exchange is the truth. Only after a FLAT_NO_STOPS read-back (still under the fence), close every
       // OPEN / PENDING_ENTRY row of this account as non-countable with the trigger reason + the exchange evidence. A failed
       // reconcile (or rows left open) => dbReconciled=false => the route returns ok=false (Fly goes RED).
@@ -22027,12 +22027,13 @@ await this.notifications
     userId: string,
     agentSlug: string,
     touch: () => Promise<void>,
+    triggerReason = 'unspecified',
   ): Promise<ForceFlatDisarmResult> {
     const errors: string[] = [];
     const msg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 160);
     let flattened = 0;
     try {
-      flattened = (await this.emergencyFlattenOpenCopyLots(userId, agentSlug)).flattened;
+      flattened = (await this.emergencyFlattenOpenCopyLots(userId, agentSlug, undefined, { reason: triggerReason })).flattened;
     } catch (e) {
       errors.push(`lots:${msg(e)}`);
     }
@@ -22096,6 +22097,9 @@ await this.notifications
       actorId: string;
       reason: string;
     },
+    // HM4: the guardian trigger (force-flat / position-flatten reason). Separate
+    // from `operator` on purpose: operator mode skips the OPEN loop.
+    trigger?: { reason: string },
   ): Promise<{ flattened: number }> {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
     if (!agent) throw new NotFoundException('Agent not found');
@@ -22256,6 +22260,13 @@ await this.notifications
             operator_reason: operator?.reason,
             action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS',
             agent_slug: agentSlug,
+            ...(trigger
+              ? {
+                  trigger_reason: trigger.reason,
+                  non_countable: true,
+                  non_countable_reason: `FORCE_FLAT:${trigger.reason}`,
+                }
+              : {}),
           },
         },
       });
