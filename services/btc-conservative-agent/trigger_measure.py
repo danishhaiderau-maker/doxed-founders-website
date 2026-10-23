@@ -35,9 +35,9 @@ from typing import Any, Mapping, Optional
 # module never imports the pricer (and the pricer never imports this module).
 MAX_BOOK_AGE_S = 2.0
 NEGATIVE_AGE = "NEGATIVE_AGE"
-QUOTE_SOURCE_WS = "WS"
-QUOTE_SOURCE_REST = "REST"
-QUOTE_SOURCE_UNKNOWN = "UNKNOWN"
+QUOTE_SOURCE_WS = "ws_ticker"
+QUOTE_SOURCE_REST = "rest_refresh"
+QUOTE_SOURCE_UNKNOWN = "unknown"
 
 ENTRY_QUOTE_KEYS = ("entry_quote_bid", "entry_quote_ask", "entry_quote_age_s", "entry_quote_age_flag",
                     "entry_quote_source", "entry_quote_bbo_ts", "entry_decision_signal_ts", "entry_decision_recorded_ts")
@@ -137,7 +137,8 @@ def fields(*, side: Any, trigger_price: Any, trigger_ts: Any, bbo_ts: Any, book_
 
 # ---------------------------------------------------------------- entry side (#809)
 def quote_source(bbo_ts: Any, ws_last_tick: Any, rest_last_tick: Any) -> str:
-    """WS when the quote's bbo_ts is the last WS ticker message, REST when it is the last REST refresh."""
+    """ws_ticker when the quote's bbo_ts is the last WS ticker message, rest_refresh when it is the last REST refresh
+    (else unknown). Values per the HM (b) spec."""
     b = _f(bbo_ts)
     if b is None or b <= 0:
         return QUOTE_SOURCE_UNKNOWN
