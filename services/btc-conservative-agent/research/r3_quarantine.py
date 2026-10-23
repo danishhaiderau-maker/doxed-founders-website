@@ -13,6 +13,9 @@ do exactly that until they are rebuilt on the shared ``paper_fill`` pricer and
 * LIMIT_FILL_1S    -- the six evaluate_limit_fill callers (INVENTORY['LIMIT_FILL_1S'];
                       RK #847 cond 4, 24 Oct 2026 AEDT).  None has the book/trades
                       window book_limit_entry needs, so all six are retired.
+* WALK_FORWARD_1S  -- research/walk_forward_scorer.py prices taker/maker entries and
+                      exits on the 1s tape via fill_model.taker_fill_rows /
+                      maker_fill_rows / realistic_exit_margin (HM #850 R2 C1).
 
 Until fixed the producers STOP writing their outputs, and every analyzer /
 dashboard / Strategist-facing reader refuses the named files (stale copies on
@@ -72,6 +75,17 @@ QUARANTINE: dict[str, dict[str, Any]] = {
             "conservative_fill_descriptive_report.json",
         ),
     },
+    # HM #850 R2 C1 (24 Oct 2026 AEDT): retired, not exempted.  Manual CLI with no importers/readers today.
+    "WALK_FORWARD_1S": {
+        "producer": "research/walk_forward_scorer.py",
+        "price_source": "market_microstructure_1s bid/ask (fill_model.taker_fill_rows / maker_fill_rows / "
+                        "realistic_exit_margin)",
+        "files": (
+            "walk_forward_scores.json",
+            "walk_forward_scores.md",
+            "walk_forward_trades.jsonl.gz",
+        ),
+    },
 }
 
 RETIRED_LABEL = "source retired (R17)"
@@ -109,6 +123,17 @@ INVENTORY: dict[str, tuple[str, ...]] = {
         "research.conservative_fill_cohort.build_conservative_fill_cohort",
         "research.conservative_fill_cohort.build_v3_conservative_fill_cohort",
     ),
+}
+
+# HM #850 R2 C1: every caller of the fill_model 1s-tape row pricers, by enclosing top-level function, and the
+# quarantine key that stops it.  test_r17_retired_sources.py re-derives this from the AST (repo top level +
+# research/) so a new row-pricer caller cannot appear unpinned.
+FILL_MODEL_ROW_PRICERS: tuple[str, ...] = ("taker_fill_rows", "maker_fill_rows", "realistic_exit_margin")
+FILL_MODEL_ROW_CALLERS: dict[str, str] = {
+    "research.genome_grid_study.fast_replay": "GENOME_GRID",
+    "research.genome_grid_study.realistic_exit_parity": "GENOME_GRID",
+    "research.walk_forward_scorer.simulate_entry": "WALK_FORWARD_1S",
+    "research.walk_forward_scorer.simulate_exit": "WALK_FORWARD_1S",
 }
 
 # Tests may monkeypatch this set to exercise the legacy code path; production

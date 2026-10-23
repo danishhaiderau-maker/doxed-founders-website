@@ -136,3 +136,40 @@ def test_limit_fill_1s_readers_refuse(tmp_path):
     assert research_dashboard._pick_best_payload("conservative_fill_descriptive_report.json", {"d": 1}) == {"d": 1}
     payload, _meta = research_dashboard._declared_atomic_generation_report("entry_baseline_replay_report.json")
     assert payload is None
+
+
+def _row_pricer_callers() -> set[str]:
+    names = set(r3_quarantine.FILL_MODEL_ROW_PRICERS)
+    out = set()
+    for p in [*sorted(HERE.glob("*.py")), *sorted((HERE / "research").glob("*.py"))]:
+        if p.name.startswith("test_") or p.name == "fill_model.py":
+            continue
+        mod = p.stem if p.parent == HERE else f"research.{p.stem}"
+        out |= {f"{mod}.{c}" for c in _callers(p, names)}
+    return out
+
+
+def test_fill_model_row_pricer_callers_are_pinned_and_quarantined():
+    """HM #850 R2 C1: fill_model.taker_fill_rows / maker_fill_rows / realistic_exit_margin price on the 1s tape."""
+    assert _row_pricer_callers() == set(r3_quarantine.FILL_MODEL_ROW_CALLERS)
+    for caller, key in r3_quarantine.FILL_MODEL_ROW_CALLERS.items():
+        assert key in r3_quarantine.QUARANTINE and r3_quarantine.is_active(key), caller
+    from research import genome_grid_study, walk_forward_scorer
+    for fn in ("simulate_entry", "simulate_exit", "simulate", "run"):
+        assert getattr(walk_forward_scorer, fn).r3_retired_key == "WALK_FORWARD_1S", fn
+    assert 'r3_quarantine.guard("GENOME_GRID"' in Path(genome_grid_study.__file__).read_text(encoding="utf-8")
+
+
+def test_walk_forward_scorer_retired_writes_nothing(tmp_path, capsys):
+    from research import walk_forward_scorer as wfs
+    rep = wfs.run(tmp_path / "t.csv.gz", tmp_path, tmp_path / "out")
+    assert r3_quarantine.is_retired_payload(rep) and rep["quarantine"] == "WALK_FORWARD_1S"
+    assert set(rep["files_not_written"]) == {"walk_forward_scores.json", "walk_forward_scores.md",
+                                             "walk_forward_trades.jsonl.gz"}
+    assert wfs.simulate([], None, latency_sec=1.0) == []
+    leg = wfs.simulate_entry(None, {}, {}, "LONG", None, 1.0)
+    assert leg["status"] == "SOURCE_RETIRED_R17" and leg["label"] == r3_quarantine.RETIRED_LABEL
+    assert wfs.main(["--table", str(tmp_path / "t"), "--data-dir", str(tmp_path), "--out-dir",
+                     str(tmp_path / "out")]) == 0
+    assert list(tmp_path.iterdir()) == []
+    assert "source retired (R17)" in capsys.readouterr().out
