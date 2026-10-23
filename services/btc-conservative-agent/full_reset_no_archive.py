@@ -13,6 +13,9 @@ Safety model
   ``.jsonl`` / ``.csv`` row streams with every rotated ``.N`` / ``.N.gz`` copy). Paper rows (including the
   PAPER_FILL_FORCED deploy-flatten rows, which live in those CSVs), the paper IOC no-fill shadow file, tape,
   book, deriv, (retired) DISLOC ledgers and shadow streams are all in it.
+  Analyzer-derived reports (``ANALYZER_DERIVED_REPORT_NAMES``) and ``*episode_receipts.jsonl.gz`` shards in an
+  ``analyzer/`` directory at any depth are DELETE too (R5 fresh-only, no archive); they are checked last, so every
+  KEEP / CONFIG / RELAY / deny-list rule wins over them.
 * Anything that is neither allowlisted nor an explicit data class is UNCLASSIFIED: it is RETAINED and listed in
   the plan and receipt. Nothing is ever deleted by default.
 * The plan pins the sha256 of every allowlisted file and a parsed "flag view" (every live / arm / force_paper /
@@ -54,6 +57,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 import clean_epoch_wipe as cew
 import data_epoch
+import research_reset_inventory as rri
 
 MODE = "full-reset-no-archive"
 PLAN_SCHEMA = "full_reset_no_archive_plan_v1"
@@ -118,6 +122,24 @@ DELETE_TAPE_DATASETS = cew.TAPE_DATASETS | cew.MARKET_DATASETS
 # The ONLY names allowed to override the deny-list (top level, plus that stream's own rotations). Owner decision
 # 2026-10-17 21:15 AEDT: tile_integrity.jsonl is an append-only data stream (tile integrity rows), not a switch.
 DENY_OVERRIDE_DELETE_NAMES = frozenset({"tile_integrity.jsonl"})
+# Analyzer-derived reports (R5 fresh-only, no archive): every report the analyzer regenerates from collected rows is
+# DELETE when it sits in an ``analyzer/`` directory at ANY depth. The declared set is the shared inventory
+# (research_reset_inventory, parity-tested against the analyzer's own report list, R4: one list) plus the derived
+# reports the analyzer / past_analysis write outside that list. Manifests, pointers, snapshots and the startup sync gate
+# are NOT here (they stay UNCLASSIFIED and retained); KEEP, CONFIG, RELAY and the deny-list are evaluated first and win.
+ANALYZER_DIR_NAME = "analyzer"
+ANALYZER_EXTRA_DERIVED_REPORT_NAMES = frozenset({
+    "ai_confidence_expectancy.json", "ai_scan_independence_report.json", "all_epochs_bp.json",
+    "analyzer_input_blockers.json", "conservative_shadow_terminal_report.json", "counterfactual_coverage_report.json",
+    "discovery_cohort_scorecard_report.json", "dynamic_policy_analysis_report.json",
+    "evidence_coverage_triage_report.json", "execution_funnel_summary.json", "exit_reports_validation.json",
+    "historical_trade_cohort_report.json", "lane_definition_report.json", "lane_memory_validation.json",
+    "lane_retirement_report.json", "lifecycle_bundle_inventory.json", "policy_evidence_binding_report.json",
+    "policy_research_reports.json",
+})
+ANALYZER_DERIVED_REPORT_NAMES = frozenset(
+    rri.ANALYZER_REPORT_FILES | rri.ANALYZER_SIDECAR_REPORT_FILES | ANALYZER_EXTRA_DERIVED_REPORT_NAMES)
+ANALYZER_EPISODE_RECEIPTS_SUFFIX = "episode_receipts.jsonl.gz"
 DENY_NAME_TOKENS = ("live", "arm", "flag", "switch", "tile", "settings")
 DELETE_STREAM_SUFFIXES = (".jsonl", ".csv", ".jsonl.gz", ".csv.gz")
 ROTATION_RE = cew.ROTATION_RE
@@ -182,6 +204,12 @@ def classify(relpath: str) -> tuple[str, str]:
     # 7. top-level row streams (and every rotated copy) are collected data
     if top_level and (lower.endswith(DELETE_STREAM_SUFFIXES) or _ANY_ROTATION_RE.match(name)):
         return DELETE, "ROW_STREAM_ROTATED_COPY" if _ANY_ROTATION_RE.match(name) else "ROW_STREAM"
+    # 8. analyzer-derived reports and episode-receipt shards in an analyzer/ directory at any depth (R5 fresh-only)
+    if ANALYZER_DIR_NAME in parts[:-1]:
+        if name.endswith(ANALYZER_EPISODE_RECEIPTS_SUFFIX):
+            return DELETE, "ANALYZER_EPISODE_RECEIPTS"
+        if base in ANALYZER_DERIVED_REPORT_NAMES:
+            return DELETE, "ANALYZER_DERIVED_REPORT"
     return UNCLASSIFIED, "NOT_ALLOWLISTED_NOT_A_DATA_CLASS"
 
 
@@ -240,7 +268,7 @@ def flag_views(runtime: Path) -> dict:
     return views
 
 
-RULES_VERSION = "full-reset-rules-v4-denylist-tile-integrity"
+RULES_VERSION = "full-reset-rules-v5-analyzer-derived-reports"
 
 
 def rules_identity() -> bytes:
@@ -249,7 +277,7 @@ def rules_identity() -> bytes:
     doc = {"version": RULES_VERSION, "delete_exact": sorted(DELETE_EXACT_NAMES), "delete_datasets": sorted(DELETE_TAPE_DATASETS),
            "delete_suffixes": list(DELETE_STREAM_SUFFIXES), "keep_exact": sorted(KEEP_EXACT_NAMES),
            "keep_prefixes": list(KEEP_PREFIXES), "inprocess": list(INPROCESS_RESET_BASES),
-           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
+           "preserved": list(PRESERVED_RESEARCH_TOKENS), "deny": list(DENY_NAME_TOKENS), "deny_override": sorted(DENY_OVERRIDE_DELETE_NAMES), "analyzer_dir": ANALYZER_DIR_NAME, "analyzer_reports": sorted(ANALYZER_DERIVED_REPORT_NAMES), "analyzer_receipts_suffix": ANALYZER_EPISODE_RECEIPTS_SUFFIX, "legacy": ["orders.json", "positions.json", "pending_orders.json", "paper_state.json"]}
     return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()
 
 
