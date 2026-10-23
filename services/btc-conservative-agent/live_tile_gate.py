@@ -612,13 +612,15 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
                "liq_read_at": p.get("liq_read_at"), "evidence_age_s": ev_age, "book_age_s": age_book,
                "stop_liq_distance_bp": stop_liq_distance_bp(side or "", stop, liq) if liq_ok else None}
         res["positions"].append(row)
-        # E6 (L28): resident stop confirmed on an exchange read <= 5 s old (+ <= 5 s transport to Fly); missing => flatten
+        # E6 (L28): resident stop confirmed on an exchange read <= 5 s old end to end (RK 24 Oct); missing => flatten
         if stop is None and not fill_grace:
             res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "STOP_NOT_RESIDENT",
                                   "detail": f"open {side} {amt} with no resident reduce-only stop on the exchange (E6)"})
-        if ev_age is None or ev_age > STOP_RESIDENT_MAX_AGE_S + STOP_RESIDENT_MAX_AGE_S:
+        # RK ruling (24 Oct, AMEND4 E6): stop evidence must be <= 5 s old (end to end); the 10 s bound is ONLY the E7 book age
+        # while holding. Older evidence => STOP_FAILURE_FLATTEN (RED => flatten + disarm ALL).
+        if ev_age is None or ev_age > STOP_RESIDENT_MAX_AGE_S:
             res["disarm"].append({"code": STOP_FAILURE_FLATTEN, "tile": None, "cause": "STOP_RESIDENCY_UNCONFIRMED",
-                                  "detail": f"stop residency evidence age {ev_age} s > {2 * STOP_RESIDENT_MAX_AGE_S} s (E6/E7 read failure)"})
+                                  "detail": f"stop residency evidence age {ev_age} s > {STOP_RESIDENT_MAX_AGE_S:g} s (E6)"})
         # AMEND5 G3 (L18): right after every live fill the REAL L (G5: Bitfinex only, never estimated) is read with its time.
         # Unreadable, or <= 15 bp past the exchange stop (inclusive) => LIQ_CHECK_FLATTEN: reduce-only flatten + disarm ALL.
         # ``fill_grace`` (fill < 5 s ago, HM G6 fill->stop bound) only covers the first relay read of L / the stop.
@@ -648,7 +650,7 @@ def open_position_protection(mirror: Mapping[str, Any] | None, book: Mapping[str
             v = walk["vwap"]
             hit = v <= bs["level"] if side == "LONG" else v >= bs["level"]
             row["overshoot_bp"] = overshoot_bp(side or "", stop, v)
-            if hit and bs["binding"] == "LIQ-10BP" and ev_age is not None and ev_age <= 2 * STOP_RESIDENT_MAX_AGE_S:
+            if hit and bs["binding"] == "LIQ-10BP" and ev_age is not None and ev_age <= STOP_RESIDENT_MAX_AGE_S:
                 # AMEND5 G4(b) (L22): the L-10 clamp fired with the exchange stop confirmed resident (no stop failure) =>
                 # flatten THIS position only, NO disarm; LIQ_CLAMP_FLATTEN, non-countable and counted (rate rule: G4(b) L23)
                 res["flatten_position"].append({"code": LIQ_CLAMP_FLATTEN, "tile": None, "cause": "BACKSTOP_LIQ-10BP",

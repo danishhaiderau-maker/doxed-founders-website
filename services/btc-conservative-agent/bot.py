@@ -50105,7 +50105,7 @@ def _live_guardian_tick(now=None) -> list:
         _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
         logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
     # AMEND4 E6: while a live position/order is open (or the last read was blind), refresh Fly's view of the relay mirror
-    # every ~3 s (relay re-reads every <= 4 s while exposed) so stop residency is confirmed on evidence <= 10 s old.
+    # every ~3 s (relay re-reads every <= 4 s while exposed) so stop residency is confirmed on evidence <= 5 s old (RK E6 24 Oct; 10 s is book age only).
     if _live_guardian_exposed(chains):
         try:
             _live_copy_website_state(max_age=_LIVE_GUARDIAN_EXPOSED_FETCH_SEC)

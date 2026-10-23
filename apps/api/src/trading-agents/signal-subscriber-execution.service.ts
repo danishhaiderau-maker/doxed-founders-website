@@ -4018,7 +4018,7 @@ export function exchangeMirrorDueAfterTick(input: {
 }
 /** AMEND4 E6 (sha 7073ed25, L28): while the last mirror showed a position or open
  * orders, or failed, re-read at least this often so the Fly guardian can confirm
- * stop residency every 5 s (its own fetch adds <= 1 s; evidence > 10 s old is RED). */
+ * stop residency every 5 s (RK 24 Oct: stop evidence > 5 s old end to end is RED; 10 s is book age only). */
 export const EXCHANGE_MIRROR_EXPOSED_EVERY_MS = 4_000;
 
 /** Pure: fast mirror cadence while exposed (or blind). Never during a money tick (exchangeMirrorMayRun). */

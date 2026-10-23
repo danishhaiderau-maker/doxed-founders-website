@@ -529,3 +529,28 @@ def test_b5_the_persist_file_name_matches_the_protected_name_and_wipe_routes_go_
     assert body.index("_reset_never_delete(path)") < body.index("os.remove(path)")
     reset = _SRC[_SRC.index("live_paths = all_research_wipe_paths("):]
     assert reset.index("all_research_wipe_paths(") < reset.index("_delete_paths(live_paths)")
+
+
+# RK ruling (24 Oct, AMEND4 E6): stop evidence must be <= 5 s old; 10 s is ONLY the E7 book age while holding.
+def test_rk_e6_stop_evidence_4_9s_ok_5_1s_and_9s_flatten_disarm():
+    def res(age):
+        return ltg.open_position_protection(mirror([LONG], [STOP_L], age=age), book(), NOW)
+    ok = res(4.9)
+    assert ok["disarm"] == [] and ok["flatten_position"] == []
+    for age in (5.1, 9.0):
+        r = res(age)
+        assert (ltg.STOP_FAILURE_FLATTEN, "STOP_RESIDENCY_UNCONFIRMED") in codes(r), age
+        assert ltg.STOP_FAILURE_FLATTEN in g.RED_CODES     # RED => reduce-only flatten + disarm ALL (guardian)
+    # end-to-end age: relay read age + time since Fly fetched it
+    m = mirror([LONG], [STOP_L], age=3.0)
+    m["fetched_at_ts"] = NOW - 2.5
+    assert (ltg.STOP_FAILURE_FLATTEN, "STOP_RESIDENCY_UNCONFIRMED") in codes(ltg.open_position_protection(m, book(), NOW))
+    # the book bound is still 10 s while holding (unchanged): 8 s old book with fresh stop evidence = hold (AMBER only)
+    r = ltg.open_position_protection(mirror([LONG], [STOP_L], age=1.0), book(8.0), NOW)
+    assert r["disarm"] == []
+
+
+def test_rk_e6_no_10s_stop_evidence_window_left_in_source():
+    src = pathlib.Path(ltg.__file__).read_text()
+    assert "2 * STOP_RESIDENT_MAX_AGE_S" not in src and "STOP_RESIDENT_MAX_AGE_S + STOP_RESIDENT_MAX_AGE_S" not in src
+    assert ltg.STOP_RESIDENT_MAX_AGE_S == 5.0 and ltg.BOOK_HOLD_MAX_AGE_S == 10.0
