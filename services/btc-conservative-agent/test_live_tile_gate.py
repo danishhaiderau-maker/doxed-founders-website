@@ -104,7 +104,8 @@ def test_second_signal_refused_while_another_live_lot_exists(chain):
 
 
 def test_closed_or_stale_pending_chain_does_not_block():
-    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100},
+    chains = [{"correlation_id": "gs6-a", "lane": GS6, "fill_at_ts": NOW - 500, "closed": True, "pnl_usd": 0.0, "closed_at_ts": NOW - 100,
+               "funding_usd": 0.0},
               {"correlation_id": "gs6-b", "lane": GS6, "order_sent_at_ts": NOW - ltg.PENDING_EXPOSURE_SEC - 1}]
     assert admit(chains=chains)[0]
 
@@ -307,7 +308,8 @@ def test_c6_only_reduce_only_orders_are_skipped(order):
 
 
 def test_c1_admission_refuses_while_a_daily_loss_cap_is_breached():
-    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06}
+    lost = {"correlation_id": "gs6-old", "lane": GS6, "closed": True, "closed_at_ts": NOW - 60, "pnl_usd": -0.06,
+            "funding_status": "NO_CROSSING"}
     assert admit(chains=[lost])[0]
     ok, r, info = admit(chains=[lost, dict(lost, correlation_id="gs1-old", lane=GS1, pnl_usd=-0.05)])
     assert not ok and ltg.DENY_DAILY_LOSS_CAP in r and info["daily_loss_violations"]

@@ -426,7 +426,7 @@ DAY0 = 1_800_000_000.0 - (1_800_000_000.0 % 86400)      # 00:00 UTC of NOW's day
 
 
 def lc(tid, pnl, at):
-    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at}
+    return {"correlation_id": tid, "trade_id": tid, "closed": True, "pnl_usd": pnl, "closed_at_ts": at, "funding_usd": 0.0}
 
 
 def test_g6_caps_are_pinned_to_the_prereg_values():
@@ -453,7 +453,22 @@ def test_g6_uses_the_utc_day_and_wins_offset_losses_on_the_same_day():
     assert not ltg.daily_loss_violations([lc("gs1-a", -0.09, DAY0 - 1)], NOW)
     assert not ltg.daily_loss_violations([lc("gs1-a", -0.06, NOW - 20), lc("gs1-b", 0.02, NOW - 10)], NOW)
     # a closed row with pnl but no close time counts as today (conservative)
-    assert ltg.daily_loss_violations([{"correlation_id": "gs1-x", "closed": True, "pnl_usd": -0.05}], NOW)
+    assert ltg.daily_loss_violations([{"correlation_id": "gs1-x", "closed": True, "pnl_usd": -0.05, "funding_usd": 0.0}], NOW)
+
+
+def test_b3_missing_funding_fails_closed_as_live_funding_unverified():
+    row = {"correlation_id": "gs1-a", "trade_id": "gs1-a", "closed": True, "pnl_usd": 0.01, "closed_at_ts": NOW - 10}
+    v = ltg.daily_loss_violations([row], NOW)
+    assert codes(v) == {ltg.VIOL_FUNDING_UNVERIFIED} and v[0]["tile"] == "gs1"
+    assert ltg.VIOL_FUNDING_UNVERIFIED in g.ENTRY_BLOCK_CODES                       # AMBER entry block, never a disarm
+    assert g.split_violations(v) == ([], v)
+    assert not ltg.daily_loss_violations([dict(row, funding_status="NO_CROSSING")], NOW)   # #849: countable 0
+    assert not ltg.daily_loss_violations([dict(row, funding_usd=-0.001)], NOW)             # verified funding counts
+    assert ltg.daily_loss_violations([dict(row, funding_usd=-0.06)], NOW)                  # ... towards the cap
+    assert not ltg.daily_loss_violations([dict(row, closed_at_ts=DAY0 - 1)], NOW)          # yesterday: not today's ledger
+    assert codes(ltg.daily_loss_violations([dict(row, funding_status="PENDING")], NOW)) == {ltg.VIOL_FUNDING_UNVERIFIED}
+    blocks, _ = ltg.daily_cap_entry_block([row], {"ok": True, "positions": []}, None, NOW, "gb1")
+    assert ltg.VIOL_FUNDING_UNVERIFIED in [b["code"] for b in blocks]              # account-wide, like unreadable pnl
 
 
 def test_g6_unattributed_loss_counts_towards_total_and_errors_fail_safe():

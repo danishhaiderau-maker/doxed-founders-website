@@ -50162,7 +50162,10 @@ def _live_guardian_tick(now=None) -> list:
         _LIVE_GUARDIAN_STATE["epoch_warn_ts"] = now
         logger.error("[LIVE GUARDIAN] fresh epoch floor unreadable: evaluating WITHOUT the epoch filter [PIPELINE ENFORCEMENT]")
     # AMEND4 E6: while a live position/order is open (or the last read was blind), refresh Fly's view of the relay mirror
-    # every ~3 s (relay re-reads every <= 4 s while exposed) so stop residency is confirmed on evidence <= 5 s old (RK E6 24 Oct; 10 s is book age only).
+    # on every 1 s guardian tick (0.5 s view cache, _LIVE_GUARDIAN_EXPOSED_FETCH_SEC); the relay re-reads Bitfinex every 1.75 s
+    # while exposed (250 ms due check). Worst-case stop evidence age = relay 1.75 + due check 0.25 + reads 1.2 + DB write 0.25
+    # + Fly HTTP 0.5 = 3.95 s < the 5 s STOP_RESIDENT_MAX_AGE_S rule (live_tile_gate.STOP_EVIDENCE_TIMING /
+    # stop_evidence_worst_case_age_s; RK E6 24 Oct; 10 s is book age only).
     if _live_guardian_exposed(chains):
         try:
             _live_copy_website_state(max_age=_LIVE_GUARDIAN_EXPOSED_FETCH_SEC)

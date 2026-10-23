@@ -390,13 +390,42 @@ def daily_realised_loss(chains: Iterable[Mapping[str, Any]], now: float,
         if t > now + 60 or utc_day(t) != day:
             continue
         k = chain_tile_key(c, registry)
-        fund = _f(c.get("funding_usd")) or 0.0   # AMEND4 E1: incl. funding (signed cash flow, negative = paid); no fees (R7)
+        fund = funding_usd_countable(c)   # AMEND4 E1: incl. funding (signed cash flow, negative = paid); no fees (R7)
+        fund = 0.0 if fund is None else fund   # never silently: unverified_funding_rows() blocks entries (HM B3)
         per[k] = per.get(k, 0.0) - pnl - fund
         n += 1
     return per, sum(per.values()), n
 
 
 VIOL_PNL_UNREADABLE = "LEDGER_PNL_UNREADABLE"
+# HM BEFORE-ARM B3 (#852 R3): a closed live trade of the day with NO verified funding fails CLOSED (AMBER entry block, never a
+# disarm), same codes as #849: funding_usd readable => counted; funding_status NO_CROSSING (no funding settlement crossed
+# while open) => countable 0; anything else => LIVE_FUNDING_UNVERIFIED.
+VIOL_FUNDING_UNVERIFIED = "LIVE_FUNDING_UNVERIFIED"
+FUNDING_NO_CROSSING = "NO_CROSSING"
+
+
+def funding_usd_countable(c: Mapping[str, Any]) -> float | None:
+    """Verified funding of a closed chain (signed USD), 0.0 for NO_CROSSING, None when unverified (B3)."""
+    v = _f(c.get("funding_usd") if c.get("funding_usd") is not None else c.get("fundingUsd"))
+    if v is not None:
+        return v
+    st = str(c.get("funding_status") or c.get("fundingStatus") or "").strip().upper()
+    return 0.0 if st == FUNDING_NO_CROSSING else None
+
+
+def unverified_funding_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list:
+    """B3: live chains CLOSED in the current UTC day (or with no readable close time) with readable pnl but no verified
+    funding. Unreadable-pnl rows are already blocked by unreadable_pnl_rows."""
+    day = utc_day(now)
+    bad = []
+    for c in chains or []:
+        if not c.get("closed") or _f(c.get("pnl_usd")) is None or funding_usd_countable(c) is not None:
+            continue
+        t = _f(c.get("closed_at_ts") or c.get("exit_at_ts"))
+        if t is None or t <= 0 or (t <= now + 60 and utc_day(t) == day):
+            bad.append(c)
+    return bad
 
 
 def unreadable_pnl_rows(chains: Iterable[Mapping[str, Any]], now: float) -> list:
@@ -425,6 +454,10 @@ def daily_loss_violations(chains: Iterable[Mapping[str, Any]], now: float,
         for c in unreadable_pnl_rows(chains, now)[:4]:
             out.append({"code": VIOL_PNL_UNREADABLE, "tile": chain_tile_key(c, registry),
                         "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} pnl_usd={c.get('pnl_usd')!r} unreadable"})
+        for c in unverified_funding_rows(chains, now)[:4]:
+            out.append({"code": VIOL_FUNDING_UNVERIFIED, "tile": chain_tile_key(c, registry),
+                        "detail": f"closed live trade {c.get('correlation_id') or c.get('trade_id')} funding unverified "
+                                  f"(funding_usd={c.get('funding_usd')!r} status={c.get('funding_status')!r})"})
         for k, loss in sorted(per.items(), key=lambda kv: str(kv[0])):
             if k is not None and loss >= DAILY_LOSS_CAP_PER_TILE_USD - 1e-9:
                 out.append({"code": VIOL_TILE_LOSS_CAP, "tile": k,
@@ -789,7 +822,7 @@ def daily_cap_entry_block(chains: Iterable[Mapping[str, Any]], mirror: Mapping[s
     chains = list(chains or [])
     per, total, n = daily_realised_loss(chains, now, registry)
     blocks = [{"code": v["code"], "tile": v.get("tile"), "detail": v.get("detail")} for v in daily_loss_violations(chains, now, registry)
-              if v.get("tile") in (None, tile_key) or v["code"] == VIOL_PNL_UNREADABLE]
+              if v.get("tile") in (None, tile_key) or v["code"] in (VIOL_PNL_UNREADABLE, VIOL_FUNDING_UNVERIFIED)]
     open_loss = 0.0
     m = mirror if isinstance(mirror, Mapping) else {}
     for p in (m.get("positions") or []) if m.get("ok") is True else []:

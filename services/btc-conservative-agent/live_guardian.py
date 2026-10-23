@@ -88,7 +88,8 @@ POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
 # ENTRY BLOCK ONLY (AMBER): reported, enforced in live_tile_gate.admit_entry, never a disarm and never a close. The response
 # is the one switchable live_tile_gate.cap_breach_response().
 ENTRY_BLOCK_CODES = frozenset({"DAILY_LOSS_CAP", _ltg_caps.VIOL_TILE_LOSS_CAP, _ltg_caps.VIOL_TOTAL_LOSS_CAP,
-                               _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE, "OPEN_MARK_UNREADABLE",
+                               _ltg_caps.VIOL_TOTAL_LOSS_CAP + "_ERROR", _ltg_caps.VIOL_PNL_UNREADABLE,
+                               _ltg_caps.VIOL_FUNDING_UNVERIFIED, "OPEN_MARK_UNREADABLE",
                                _ltg_caps.AMBER_BOOK_STALE})
 
 
