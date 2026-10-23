@@ -5582,6 +5582,16 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         now = time.time()
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress") or pos.get("_exit_dispatch_pending"):
         return False
+    if str(pos.get("research_lane") or "").upper() not in COMBO_EXECUTION_LANES:
+        # RK step 2 / HM B3: non-combo lanes re-read the book row here (a caller-supplied price is never trusted).
+        book_px = _legacy_book_gate(pos, now)
+        if book_px is None:
+            return _legacy_clock_exit(pos, now)
+        price = book_px
+    if not price or float(price) <= 0:
+        # STALE_BOOK on a combo lane: no MFE/MAE/replay stats from a non-book price; the combo branch below handles
+        # the clock-only evaluation from its own book read.
+        return _apply_combo_lane_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
     unreal_pct = unrealized_margin_pct(pos, price)
     with state_lock:
         replay_book = copy.deepcopy(state.get("order_book") or {})
@@ -5631,6 +5641,12 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
     pos["_exit_eval_price"] = float(price or 0)
 
     if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
+        return _apply_combo_lane_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
+    return _apply_legacy_lane_exit(pos, price, now, unreal_pct, entry_ts)
+
+
+def _apply_combo_lane_exit(pos: dict, price: float, now: float, *, exit_source: str, close_async: bool):
+    if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
         if _is_paper_book_lane(pos):
             return _realism_family_exit(pos, price, now, exit_source=exit_source, close_async=close_async)
         # RK 17:24 BINDING: the live TP / BE / hard-stop trigger (the Fly close that the relay copies) is the SAME
@@ -5652,6 +5668,10 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
         pos["_trigger_meta"] = {"basis": bx["basis"], "ts": float(now), "px": float(bx["px"]), "quote_stale": False,
                                 "book_s": bx["book_s"], "trigger_version": _qt.TRIGGER_VERSION}
         return _apply_family_tile_exit(pos, float(bx["px"]), now, exit_source=exit_source, close_async=close_async)
+    return False
+
+
+def _apply_legacy_lane_exit(pos: dict, price: float, now: float, unreal_pct: float, entry_ts: float):
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
         return True
@@ -5750,6 +5770,12 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
             close_position(pos, "TAKE_PROFIT")
             return True
 
+    return _legacy_clock_exit(pos, now)
+
+
+def _legacy_clock_exit(pos: dict, now: float) -> bool:
+    """The legacy (non-combo) CLOCK exits: TIME_EXIT / EMERGENCY_MAX_HOLD. They need no price, so they also fire
+    while the book is stale; their fill is priced on the first book row at or after the close (price age stamped)."""
     if FIXED_TIME_EXIT_ENABLED:
         time_in_trade = now - pos.get("entry_ts", 0)
         if time_in_trade > MAX_POSITION_AGE_SEC:
@@ -5766,6 +5792,31 @@ def _apply_position_exits(pos: dict, price: float, now: float = None, *,
             close_position(pos, "EMERGENCY_MAX_HOLD")
             return True
     return False
+
+
+def _legacy_book_gate(pos: dict, now: float):
+    """RK step 2 / HM B3: a non-combo lane (CONTINUOUS adoption owner of adopted LIVE exposure, retired-lane orphans,
+    any tile missing from COMBO_EXECUTION_LANES) is exit-managed from the same shared book pricer as the combo lanes.
+    Returns the fresh book-side price, or None on STALE_BOOK (stamped; only clock exits may fire this pass and every
+    price-level exit fires on the first fresh row)."""
+    import quote_trigger as _qt
+    bx = book_exit_mark(pos.get("dir"), now)
+    pos["exit_eval_book_s"], pos["exit_eval_price_age_s"] = bx["book_s"], bx["price_age_s"]
+    if bx["px"] is None:
+        pos.setdefault("_stale_book_since", float(now))
+        pos["stale_book_age_s"] = bx["price_age_s"]
+        pos["_trigger_meta"] = {"basis": _qt.BASIS_CLOCK, "ts": float(now), "px": bx.get("last_book_px"),
+                                "quote_stale": True, "clock_only": True, "stale_book_age_s": bx["price_age_s"],
+                                "trigger_version": _qt.TRIGGER_VERSION}
+        return None
+    since = pos.pop("_stale_book_since", None)
+    if since is not None:
+        pos["exit_stale_book_wait_s"] = round(float(now) - float(since), 3)
+    pos["_trigger_meta"] = {"basis": bx["basis"], "ts": float(now), "px": float(bx["px"]), "quote_stale": False,
+                            "book_s": bx["book_s"], "price_age_s": bx["price_age_s"],
+                            "trigger_version": _qt.TRIGGER_VERSION}
+    return float(bx["px"])
+
 
 CIRCUIT_BREAKER_REASONS = frozenset({
     "STALE_DATA_HARD_STOP", "THREAD_CRASH", "WS_STALE", "PRICE_STALE_OR_MISSING",
@@ -7227,18 +7278,35 @@ def simulate_marketable_limit_fill(
     }
 
 
-def get_mark_price(direction: str, fallback: float = None) -> float:
-    """Realistic mark for PnL/exits: LONG marks at bid (sellable), SHORT at ask (cover buy)."""
-    direction = str(direction or "").upper()
-    with state_lock:
-        bid = float(state.get("bid") or 0)
-        ask = float(state.get("ask") or 0)
-        last = float(fallback if fallback is not None else (state.get("price") or 0))
-    if direction == "LONG" and bid > 0:
-        return bid
-    if direction == "SHORT" and ask > 0:
-        return ask
-    return last if last > 0 else 0.0
+_BOOK_MARK_STATUS = {"fresh": 0, "stale": 0, "last_stale_ts": None, "ticker_refused": 0}
+
+
+def book_exit_mark(direction: str, now: float = None) -> dict:
+    """RK step 2 / HM B3: THE exit mark for EVERY lane (combo, CONTINUOUS adoption owner, retired orphans, any tile
+    missing from the combo lists): the shared pricer quote_trigger.book_exit_price on the 1 s bfx_book_10l rows
+    (LONG best bid, SHORT best ask of the latest complete row). Stale (> 2 s) or missing -> px None + STALE_BOOK.
+    Never the WS ticker, book_tape_1s or market_microstructure_1s."""
+    import quote_trigger as _qt
+    import paper_fill as _pf
+    bx = _qt.book_exit_price(str(direction or "").upper(), float(time.time() if now is None else now), _pf.book10l_at)
+    if bx.get("stale"):
+        _BOOK_MARK_STATUS["stale"] += 1
+        _BOOK_MARK_STATUS["last_stale_ts"] = time.time()
+    else:
+        _BOOK_MARK_STATUS["fresh"] += 1
+    return bx
+
+
+def get_mark_price(direction: str, fallback: float = None, now: float = None) -> float:
+    """Side-correct exit mark from the order-book rows (book_exit_mark), 0.0 when the book is stale (STALE_BOOK).
+
+    RK step 2: this used to read the WS ticker bid/ask and fall back to the last trade; ``fallback`` is kept for call
+    compatibility and IGNORED (every caller passed the ticker last price). Callers treat 0.0 as "no price-level exit
+    on this pass; fire on the first fresh book row"."""
+    if fallback is not None:
+        _BOOK_MARK_STATUS["ticker_refused"] += 1
+    bx = book_exit_mark(direction, now)
+    return float(bx["px"]) if bx.get("px") else 0.0
 
 
 def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
@@ -8078,6 +8146,39 @@ def _is_trigger_consistent_exit_reason(reason) -> bool:
     )
 
 
+LEGACY_EXIT_BOOK_WAIT_S = float(os.getenv("LEGACY_EXIT_BOOK_WAIT_S", "5"))
+
+
+def _legacy_exit_book_fill(direction: str, fill_ts: float, trigger: float, pos: dict):
+    """RK step 2: the non-paper-book exit fill is the side-correct top of the FIRST book row at or after the fill time
+    (shared pricer rows, never the WS ticker). Waits up to LEGACY_EXIT_BOOK_WAIT_S for that row (no wait on inline
+    closes); if none arrives the exit is FORCED_NO_BOOK: priced on the first available row (the latest one), stamped
+    UNVERIFIED with its price age, never dropped. Returns (px, source, meta)."""
+    import paper_fill as _pf
+    import quote_trigger as _qt
+    deadline = time.time() + (0.0 if getattr(_PAPER_EXIT_TLS, "no_wait", False) else LEGACY_EXIT_BOOK_WAIT_S)
+    while True:
+        row = _pf.first_row_at_or_after(_pf.book10l_at, fill_ts, horizon_s=max(1.0, LEGACY_EXIT_BOOK_WAIT_S + 2))
+        px = _qt.exec_px(direction, "exit", row) if row else None
+        if px:
+            age = round(float(row["s"]) + 1.0 - float(fill_ts), 3)
+            return float(px), "exit_book_row_at_or_after_fill", {
+                "exit_pricing_basis": "BOOK_ROW_AT_OR_AFTER_FILL", "exit_book_s": row.get("s"),
+                "exit_price_age_s": max(0.0, age), "exit_evidence_status": "COMPLETE"}
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    bx = _qt.book_exit_price(direction, time.time(), _pf.book10l_at)
+    last = bx.get("last_book_px")
+    meta = {"exit_pricing_basis": "FORCED_NO_BOOK_FIRST_ROW", "exit_forced_no_book": True,
+            "exit_book_s": bx.get("book_s"), "exit_price_age_s": bx.get("price_age_s"),
+            "exit_evidence_status": "UNVERIFIED", "exit_unverified_reason": "FORCED_NO_BOOK"}
+    if last:
+        return float(last), "exit_forced_no_book_first_row", meta
+    meta.update(exit_pricing_basis="FORCED_NO_BOOK_TRIGGER", exit_book_s=None)
+    return float(trigger or pos.get("entry") or 0), "exit_forced_no_book_trigger", meta
+
+
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
     """Paper exit fill = side-correct BBO at the moment the close executes.
 
@@ -8104,11 +8205,7 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
         if maker_tp and trigger > 0:
             px, source = trigger, "exit_maker_limit_fill"
         else:
-            px = get_mark_price(direction, fallback=0.0)
-            source = "exit_bbo_at_fill"
-            if px <= 0:
-                px, source = (trigger, "exit_trigger_no_bbo") if trigger > 0 else (
-                    float(state.get("price") or pos.get("entry") or 0), "exit_last_no_bbo")
+            px, source, book_meta = _legacy_exit_book_fill(direction, fill_ts, trigger, pos)
         sim = {
             "avg_price": round(px, 2),
             "filled_qty": qty,
@@ -8121,12 +8218,16 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
             "trigger_slippage_bp": (round((px - trigger) / trigger * 1e4 * (1 if direction == "LONG" else -1), 3)
                                     if trigger > 0 and px > 0 else None),
         }
+        if not (maker_tp and trigger > 0):
+            sim.update(book_meta)
+            pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
         pos["exit_trigger_price"] = sim["trigger_price"]
         pos["exit_fill_price"] = sim["fill_price"]
         return round(px, 2), sim
     refresh_bbo_state()
     refresh_order_book_state()
-    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
+    # RK step 2: book-row mark only (no ticker last price); the trigger/entry is the last resort, stamped.
+    fallback = get_mark_price(direction) or trigger or float(pos.get("entry") or 0)
     if exit_is_maker:
         tp_px = float(pos.get("tp") or 0)
         if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
@@ -8135,9 +8236,11 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
         pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
         pos["exit_fill_price"] = round(fallback, 2)
         return fallback, None
-    exit_side = "sell" if direction == "LONG" else "buy"
-    sim = simulate_market_fill(exit_side, qty)
-    px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
+    # RK step 2: the market exit is priced on the first book row at/after the fill (shared pricer rows), not on the
+    # cached WS book walk / ticker.
+    px, source, book_meta = _legacy_exit_book_fill(direction, time.time(), trigger, pos)
+    sim = {"avg_price": round(px, 2), "filled_qty": qty, "fully_filled": True, "source": source, **book_meta}
+    pos.update({k: v for k, v in book_meta.items() if k.startswith("exit_")})
     pos["exit_trigger_price"] = round(trigger, 2) if trigger > 0 else None
     pos["exit_fill_price"] = round(px, 2)
     return px, sim
@@ -27698,13 +27801,16 @@ def _protective_exit_due(pos: dict, mark: float, now: float):
     """Cheap check: 'HARD_STOP' / 'TIME_BACKSTOP' when one is due on this mark, else None."""
     levels = _protective_exit_levels(pos)
     entry = _buf_float(pos.get("entry"), 0.0)
-    if not levels or entry <= 0 or not mark or mark <= 0:
+    if not levels or entry <= 0:
         return None
     hard_bp, time_sec = levels
-    sign = 1.0 if str(pos.get("dir") or "").upper() == "LONG" else -1.0
-    cur_bp = sign * (float(mark) - entry) / entry * 1e4
-    if cur_bp <= -hard_bp:
-        return "HARD_STOP"
+    # RK step 2: no fresh book row (mark 0 = STALE_BOOK) -> no price-level exit on this pass (it fires on the first
+    # fresh row); the TIME_BACKSTOP is a CLOCK exit and still fires (priced on the first book row at/after its time).
+    if mark and mark > 0:
+        sign = 1.0 if str(pos.get("dir") or "").upper() == "LONG" else -1.0
+        cur_bp = sign * (float(mark) - entry) / entry * 1e4
+        if cur_bp <= -hard_bp:
+            return "HARD_STOP"
     entry_ts = _buf_float(pos.get("entry_ts"), 0.0)
     if entry_ts > 0 and now - entry_ts >= time_sec:
         return "TIME_BACKSTOP"
@@ -27729,7 +27835,7 @@ def protective_exit_scan(now: float = None) -> int:
         _levels, _src, _why = _protective_exit_levels_ex(pos)
         coverage.append({"trade_id": str(pos.get("trade_id") or ""), "lane": pos.get("research_lane"),
                          "covered": bool(_levels and _levels[0] > 0), "source": _src, "reason": _why})
-        mark = get_mark_price(pos.get("dir"))
+        mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
         due = _protective_exit_due(pos, mark, now)
         if not due:
             continue
@@ -27823,7 +27929,7 @@ def process_positions():
         # Exit evaluation can close a position, persist research artifacts, and
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), fallback=price)
+            mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
             # Closes run on their own thread: one trigger closing several tiles
             # must not queue each close behind the previous one's I/O (HM audit
             # 10 Oct: 6.9/9.6/12.0 s serialized PROFIT_PROTECTION_STOP burst).
@@ -29901,7 +30007,7 @@ def _tick_driven_position_exits(price: float):
                 if isinstance(p, dict) and p.get("status") == "OPEN"
             ]
         for pos in positions:
-            mark = get_mark_price(pos.get("dir"), fallback=price)
+            mark = get_mark_price(pos.get("dir"), now=now)  # book rows (RK step 2), never the ticker
             _evaluate_position_exit(pos, mark, now, exit_source="WS_TICK", close_async=True)
         return True
     finally:
