@@ -7492,11 +7492,33 @@ def get_executable_mark_price(pos: dict, fallback: float = None) -> float:
 # MARKETABLE_AT_PLACEMENT is a taker that may take the better opposite quote.
 def _funding_raw_fields(pos: dict, entry: float, qty: float) -> dict:
     """Unrounded funding (USD and bp of entry notional) plus the rate source; evidence only, funding_fees_usd unchanged."""
-    raw = float(pos.get("funding_fees", 0.0) or 0.0)
+    raw = (pos.get("_funding_usd_raw_v2") if "_funding_usd_raw_v2" in pos
+           else float(pos.get("funding_fees", 0.0) or 0.0))  # F5: None = an unpriced settlement (UNVERIFIED)
     notional = float(entry) * float(qty)
     srcs = sorted({str(x.get("source")) for x in (pos.get("funding_settlements") or []) if isinstance(x, dict)})
-    return {"funding_usd_raw": raw, "funding_bp_raw": (raw / notional * 1e4) if notional > 0 else None,
-            "funding_rate_source_detail": srcs or None}
+    return {"funding_usd_raw": raw, "funding_bp_raw": (raw / notional * 1e4) if notional > 0 and raw is not None else None,
+            "funding_rate_source_detail": srcs or (["bfx_deriv_status_1s"] if "_funding_usd_raw_v2" in pos else None)}
+
+
+def _paper_funding_v2(pos: dict):
+    """REALISM_V2 F5 for paper-book lanes: settlement-exact funding between the entry and exit FILL times
+    (model fill ts of the priced legs), with the open qty at each settlement (partials filled before it removed).
+    Every number comes from tile_fill.funding_fields (the shared module); bot.py only hands in plain values."""
+    import tile_fill as _tf
+    try:
+        efs = pos.get("entry_fill_sim") if isinstance(pos.get("entry_fill_sim"), dict) else {}
+        xfs = pos.get("exit_fill_sim") if isinstance(pos.get("exit_fill_sim"), dict) else {}
+        entry_fill_ts = efs.get("fill_ts") or pos.get("entry_ts")
+        exit_fill_ts = xfs.get("fill_ts") or pos.get("exit_model_fill_ts") or time.time()
+        receipts = [r for r in (pos.get("partial_exit_receipts") or []) if isinstance(r, dict)]
+        cut = sum(float(r.get("closed_qty") or 0) for r in receipts if float(r.get("remaining_fraction") or 0) > 0)
+        original = pos.get("policy_original_qty") or (float(pos.get("qty") or 0) + cut)
+        return _tf.funding_fields(entry_fill_ts, exit_fill_ts, direction=pos.get("dir"),
+                                  qty_at=_tf.qty_schedule(original, receipts),
+                                  settlements=pos.get("funding_settlements"))
+    except Exception:  # noqa: BLE001 - never blocks a close; the row is then legacy-funded and flagged
+        logger.exception("[F5 FUNDING] settlement-exact funding failed; legacy accrual kept")
+        return None
 
 
 def _funding_rate_now():
@@ -8732,6 +8754,10 @@ def projected_funding_to_next_settlement(pos: dict, funding: dict = None) -> flo
 
 def accrue_position_funding(pos: dict, now: float = None, *, refresh: bool = True):
     if not FUNDING_SIMULATION_ENABLED:
+        return
+    if _is_paper_book_lane(pos):
+        # REALISM_V2 F5: tiles 1-5 pay funding only at settlement, priced once at close by
+        # tile_fill.funding_fields from bfx_deriv_status_1s (no pro-rata, no predicted state rate).
         return
     if now is None:
         now = time.time()
@@ -24246,12 +24272,18 @@ _RELOAD_NUMERIC_FIELDS = ("fill_model_version", "delay_s", "priced_delay_s", "as
                           "exit_touch_drift_bp", "exit_trigger_overshoot_bp", "exit_legs", "exit_legs_unmeasured",
                           "pricer_signal_ts", "model_fill_ts", "exit_pricer_signal_ts", "exit_model_fill_ts",
                           "entry_price_age_s", "exit_price_age_s", "exit_eval_price_age_s",
-                          "entry_book_age_ms", "exit_book_age_ms")  # R17 contract ages
+                          "entry_book_age_ms", "exit_book_age_ms",  # R17 contract ages
+                          # F5: the 277 pre-19-Oct rows stored funding_rate as a string; raw funding is nullable
+                          "funding_rate", "funding_usd_raw")
 _RELOAD_INT_FIELDS = ("fill_model_version", "exit_legs", "exit_legs_unmeasured")
 _RELOAD_LITERAL_FIELDS = ("depth_snapshot_signal", "depth_snapshot_fill", "exit_depth_snapshot_fill",
                           "exit_depth_snapshot_signal", "exit_depth_snapshot_legs",
                           "entry_provenance", "exit_provenance", "funding_settlement_rates",
-                          "levels_crossed_unfired")
+                          "levels_crossed_unfired",
+                          # F5: per-settlement lists ('[1792310400]' string form = a real crossing, never empty)
+                          "funding_ts_crossed", "funding_rate_applied", "funding_rate_ts", "funding_rate_accrued",
+                          "funding_mark_price", "funding_mark_ts", "funding_qty", "funding_usd_by_settlement",
+                          "funding_settlement_status")
 
 
 def _restore_reloaded_row_types(trade: dict) -> None:
@@ -32619,7 +32651,14 @@ def close_position(pos: dict, exit_reason: str):
         margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
         maker_fee, taker_fee = get_trading_fee_rates()
         accrue_position_funding(pos, time.time())
-        funding_total = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
+        _funding_v2 = _paper_funding_v2(pos) if _is_paper_book_lane(pos) else None
+        if _funding_v2 is not None:
+            # raw, unrounded settlement-exact funding; an unpriced settlement books 0 and the row is UNVERIFIED
+            pos["funding_fees"] = _funding_v2.get("funding_usd_raw") or 0.0
+            pos["_funding_usd_raw_v2"] = _funding_v2.get("funding_usd_raw")
+            funding_total = float(pos["funding_fees"])
+        else:
+            funding_total = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
         pnl_components = _paper_terminal_pnl_components(
             pos,
             entry=float(entry),
@@ -32752,8 +32791,8 @@ def close_position(pos: dict, exit_reason: str):
             "fresh_eligible": bool(_row_priced_by_paper_fill(pos) and pos.get("exit_status") == "PAPER_FILL"
                                    and not pos.get("fresh_data_excluded")),
             "fee_model": __import__("tile_fill").FEE_MODEL,
-            **__import__("tile_fill").funding_fields(pos.get("entry_ts"), time.time(), _funding_rate_now(),
-                                                      settlements=pos.get("funding_settlements")),
+            **(_funding_v2 if _funding_v2 is not None else __import__("tile_fill").funding_fields(
+                pos.get("entry_ts"), time.time(), _funding_rate_now(), settlements=pos.get("funding_settlements"))),
             "exit_status": pos.get("exit_status"),
             "missing_book_seconds": pos.get("missing_book_seconds"),
             "exit_repriced_lag_s": pos.get("exit_repriced_lag_s"),

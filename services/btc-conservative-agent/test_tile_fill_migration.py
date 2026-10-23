@@ -142,7 +142,7 @@ def test_fee_model_and_funding_fields():
     assert "8h settlement" in f["funding_source"]
     assert tf.funding_fields(100, 200, 0.0)["funding_ts_crossed"] == []
     src = (ROOT / "bot.py").read_text(encoding="utf-8")
-    assert "funding_fields(pos.get(\"entry_ts\")" in src and "BITFINEX_FEE_RATES" not in src.split("def close_position")[1][:20000]
+    assert "funding_fields(\n                pos.get(\"entry_ts\")" in src and "_paper_funding_v2(pos)" in src and "BITFINEX_FEE_RATES" not in src.split("def close_position")[1][:20000]
 
 
 # ----------------------------------------------------------------------------- HM blockers B1-B5 + nits

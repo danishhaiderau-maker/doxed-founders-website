@@ -308,6 +308,145 @@ def book10l_missing_seconds(start: float, end: float):
         return None
 
 
+# REALISM_V2 F5 (HM 23 Oct): funding is paid only at the 00/08/16 UTC settlement instants, priced from the
+# collector's deriv-status file (never the REST "predicted" state rate). Read-only; no new stored data.
+DERIV_FILE = "bfx_deriv_status_1s.jsonl"
+DERIV_WINDOW_S = 60  # a settlement needs a status row within this many seconds before (rate/mark) it
+
+
+class DerivStatusFiles:
+    """deriv_settlement(t) over bfx_deriv_status_1s.jsonl and its rotations (<file>.N, N rising = newer).
+
+    Rows {"s", "mts", "mark", "fund_cur", "fund_accr", "next_fund_ts" (ms), ...} are time-ordered inside a file,
+    so each lookup bisects the file by byte offset and reads only a +-window around t (no full scans, rotation
+    safe). A result is cached once a post-settlement row exists (it can no longer change).
+    """
+
+    def __init__(self, path: str, window_s: int = DERIV_WINDOW_S) -> None:
+        self.path, self.window_s = path, int(window_s)
+        self._lock = threading.Lock()
+        self._cache: dict = {}
+
+    def _files(self) -> list:
+        import glob
+        import os
+        rot = sorted((p for p in glob.glob(self.path + ".*") if p.rsplit(".", 1)[-1].isdigit()),
+                     key=lambda p: int(p.rsplit(".", 1)[-1]), reverse=True)
+        return ([self.path] if os.path.exists(self.path) else []) + rot  # newest first
+
+    @staticmethod
+    def _row_at(fh, off: int, size: int):
+        import json
+        fh.seek(off)
+        if off:
+            fh.readline()  # skip the partial line
+        while fh.tell() < size:
+            line = fh.readline()
+            try:
+                r = json.loads(line)
+                return int(r["s"]), r
+            except (ValueError, KeyError, TypeError):
+                continue
+        return None, None
+
+    def _window_rows(self, path: str, lo: int, hi: int) -> list:
+        import json
+        import os
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as fh:
+                first, _ = self._row_at(fh, 0, size)
+                if first is None or first > hi:
+                    return []
+                a, b = 0, size
+                while b - a > 4096:  # bisect to an offset whose next row is < lo
+                    m = (a + b) // 2
+                    s, _ = self._row_at(fh, m, size)
+                    if s is None or s >= lo:
+                        b = m
+                    else:
+                        a = m
+                fh.seek(a)
+                if a:
+                    fh.readline()
+                out = []
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                        sec = int(r["s"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                    if sec > hi:
+                        break
+                    if sec >= lo:
+                        out.append(r)
+                return out
+        except OSError:
+            return []
+
+    def settlement(self, t: float):
+        t = int(t)
+        with self._lock:
+            if t in self._cache:
+                return dict(self._cache[t])
+            rows = {}
+            for path in self._files():
+                for r in self._window_rows(path, t - self.window_s, t + self.window_s):
+                    rows.setdefault(int(r["s"]), r)
+            out = _settlement_from_rows(t, [rows[k] for k in sorted(rows)])
+            if out is not None and out.get("confirmed"):
+                self._cache[t] = dict(out)
+            return out
+
+
+def _num_or_none(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
+def _settlement_from_rows(t: int, rows: list):
+    """Pure: the applied rate / mark of the settlement at t from time-ordered deriv rows near t.
+
+    rate = fund_cur of the last row with s < t (CURRENT_FUNDING just before the settlement; fund_accr kept raw);
+    mark = MARK_PRICE of that same last pre-settlement row (the mark at the settlement instant, no look-ahead);
+    confirmed = a row with s >= t shows the flip (next_fund_ts moved past t). None when no usable pre row.
+    """
+    pre = [r for r in rows if int(r["s"]) < t and _num_or_none(r.get("fund_cur")) is not None]
+    mk = [r for r in rows if int(r["s"]) < t and _num_or_none(r.get("mark")) is not None]
+    if not pre or not mk:
+        return None
+    rr, mr = pre[-1], mk[-1]
+    post = [r for r in rows if int(r["s"]) >= t and _num_or_none(r.get("next_fund_ts")) is not None]
+    flip = next((r for r in post if float(r["next_fund_ts"]) > t * 1000.0), None)
+
+    def _ts(r):
+        m = _num_or_none(r.get("mts"))
+        return m / 1000.0 if m else float(r["s"])
+    return {"settlement_ts": t, "rate_applied": float(rr["fund_cur"]), "rate_accrued": _num_or_none(rr.get("fund_accr")),
+            "rate_ts": _ts(rr), "rate_row_s": int(rr["s"]),
+            "rate_next_fund_ts": _num_or_none(rr.get("next_fund_ts")),
+            "mark_price": float(mr["mark"]), "mark_ts": _ts(mr), "mark_row_s": int(mr["s"]),
+            "confirmed": flip is not None, "flip_row_s": int(flip["s"]) if flip else None}
+
+
+_DERIV_FILES: Optional[DerivStatusFiles] = None
+
+
+def deriv_settlement(t: float):
+    """THE funding price source (F5): the deriv-status settlement at t, or None (no status rows near t)."""
+    global _DERIV_FILES
+    if _DERIV_FILES is None:
+        import os
+        _DERIV_FILES = DerivStatusFiles(os.path.join(os.getcwd(), DERIV_FILE))
+    try:
+        return _DERIV_FILES.settlement(t)
+    except Exception:  # noqa: BLE001 - a read failure is an unpriced (UNVERIFIED) settlement, never a crash
+        return None
+
+
 DELAYS = None  # set by the bot: DelaySampler of measured live delays (empty while live is OFF)
 
 

@@ -105,18 +105,126 @@ def row_provenance_complete(row) -> bool:
                and p.get("delay_source") and p.get("depth_snapshot_fill") for p in (e, x))
 
 
-def funding_fields(entry_ts, exit_ts, rate, settlements=None) -> dict:
-    """Funding kept separate from the fill price: rate, hold time, the 8h settlement times crossed, the
-    rate recorded at each settlement (when the position's accrual ticks saw it) and where the rate came from."""
-    base = {"funding_rate": rate, "funding_source": FUNDING_SOURCE, "funding_interval_s": FUNDING_INTERVAL_S}
+def settlements_crossed(entry_ts, exit_ts) -> list:
+    """The 00/08/16 UTC settlement instants t with entry_ts < t <= exit_ts (strict / inclusive, as Bitfinex)."""
     try:
         a, b = float(entry_ts), float(exit_ts)
     except (TypeError, ValueError):
-        return {**base, "hold_seconds": None, "funding_ts_crossed": [], "funding_settlement_rates": []}
+        return []
     t = (int(a // FUNDING_INTERVAL_S) + 1) * FUNDING_INTERVAL_S
     crossed = []
     while t <= b and len(crossed) < 100:
         crossed.append(t)
         t += FUNDING_INTERVAL_S
-    return {**base, "hold_seconds": round(max(0.0, b - a), 3), "funding_ts_crossed": crossed,
-            "funding_settlement_rates": [dict(x) for x in (settlements or []) if isinstance(x, dict)]}
+    return crossed
+
+
+def parse_funding_ts_crossed(value) -> list:
+    """Reader for funding_ts_crossed in every stored form: a real list, or the pre-19-Oct string form
+    ('[]' / '[1792310400]', HM: 277 rows, 13 of them real crossings that must never read as empty)."""
+    import json
+    if isinstance(value, (list, tuple)):
+        return [int(float(x)) for x in value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            out = json.loads(text)
+        except ValueError:
+            return []
+        return [int(float(x)) for x in out] if isinstance(out, list) else []
+    return []
+
+
+def qty_schedule(original_qty, receipts=None):
+    """qty_at(t): the open quantity at instant t = original qty minus every partial reduction filled before t."""
+    import datetime as _dt
+    try:
+        q0 = float(original_qty)
+    except (TypeError, ValueError):
+        q0 = 0.0
+    cuts = []
+    for r in receipts or []:
+        if not isinstance(r, dict) or not (float(r.get("remaining_fraction") or 0) > 0):
+            continue  # only genuine partial reductions (a terminal receipt is the close itself)
+        ts = r.get("leg_fill_ts")
+        if ts is None and isinstance(r.get("ts"), str):
+            try:
+                ts = _dt.datetime.fromisoformat(r["ts"].replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                ts = None
+        try:
+            cuts.append((float(ts), float(r.get("closed_qty") or 0)))
+        except (TypeError, ValueError):
+            continue
+
+    def qty_at(t):
+        return max(0.0, q0 - sum(q for ts, q in cuts if ts < float(t)))
+    return qty_at
+
+
+FUNDING_MODEL_V2 = "SETTLEMENT_EXACT_V2"
+FUNDING_SOURCE_V2 = ("bfx_deriv_status_1s: rate = CURRENT_FUNDING of the last row before the settlement "
+                     "(confirmed by the next_fund_ts flip), notional = qty x MARK_PRICE at the settlement")
+
+
+def funding_fields(entry_ts, exit_ts, rate=None, settlements=None, *, direction=None, qty=None, qty_at=None,
+                   deriv=None) -> dict:
+    """Funding kept separate from the fill price.
+
+    REALISM_V2 F5 (direction + qty/qty_at given): paid only at each settlement t with entry_fill_ts < t <=
+    exit_fill_ts; amount = sign x qty_at(t) x MARK(t) x rate_applied(t) (positive rate: longs pay, shorts
+    receive; positive USD = cost). Raw, unrounded per-settlement fields (Rules Keeper); no fee term; no
+    pro-rating; never the predicted state rate. A settlement with no deriv-status row is unpriced: its USD
+    is None and the row is UNVERIFIED for funding. Non-crossers book exactly 0.0.
+
+    Without direction/qty: the legacy evidence shape (crossings + the accrual's recorded rates), kept only for
+    non-paper lanes.
+    """
+    crossed = settlements_crossed(entry_ts, exit_ts)
+    try:
+        hold = round(max(0.0, float(exit_ts) - float(entry_ts)), 3)
+    except (TypeError, ValueError):
+        hold = None
+    passthrough = [dict(x) for x in (settlements or []) if isinstance(x, dict)]
+    if direction is None or (qty is None and qty_at is None):
+        return {"funding_rate": rate, "funding_source": FUNDING_SOURCE, "funding_interval_s": FUNDING_INTERVAL_S,
+                "hold_seconds": hold, "funding_ts_crossed": crossed, "funding_settlement_rates": passthrough}
+    deriv = deriv or paper_fill.deriv_settlement
+    if qty_at is None:
+        qty_at = (lambda _t, _q=float(qty): _q)
+    sign = 1.0 if str(direction).upper() == "LONG" else -1.0
+    rates, rts, accr, marks, mts, qtys, usds, stat = [], [], [], [], [], [], [], []
+    for t in crossed:
+        d = deriv(t)
+        q = float(qty_at(t))
+        qtys.append(q)
+        if not d or d.get("rate_applied") is None or d.get("mark_price") is None:
+            rates.append(None); rts.append(None); accr.append(None); marks.append(None); mts.append(None)
+            usds.append(None); stat.append("NO_DERIV_STATUS")
+            continue
+        r, m = float(d["rate_applied"]), float(d["mark_price"])
+        rates.append(r); rts.append(d.get("rate_ts")); accr.append(d.get("rate_accrued"))
+        marks.append(m); mts.append(d.get("mark_ts"))
+        usds.append(sign * q * m * r)
+        stat.append("CONFIRMED" if d.get("confirmed") else "UNCONFIRMED_NO_FLIP")
+    if not crossed:
+        status, total = "NO_CROSSING", 0.0
+    elif "NO_DERIV_STATUS" in stat:
+        status, total = "UNVERIFIED_NO_DERIV_STATUS", None
+    elif "UNCONFIRMED_NO_FLIP" in stat:
+        status, total = "UNVERIFIED_UNCONFIRMED", float(sum(usds))
+    else:
+        status, total = "PRICED", float(sum(usds))
+    return {"funding_model": FUNDING_MODEL_V2, "funding_source": FUNDING_SOURCE_V2,
+            "funding_interval_s": FUNDING_INTERVAL_S, "hold_seconds": hold,
+            "funding_entry_fill_ts": entry_ts, "funding_exit_fill_ts": exit_ts,
+            "funding_ts_crossed": crossed,
+            # per settlement, aligned with funding_ts_crossed; raw and unrounded
+            "funding_rate_applied": rates, "funding_rate_ts": rts, "funding_rate_accrued": accr,
+            "funding_mark_price": marks, "funding_mark_ts": mts, "funding_qty": qtys,
+            "funding_usd_by_settlement": usds, "funding_settlement_status": stat,
+            "funding_rate": rates[-1] if rates else None,
+            "funding_usd_raw": total, "funding_status": status, "funding_verified": status in ("PRICED", "NO_CROSSING"),
+            "funding_settlement_rates": passthrough}
