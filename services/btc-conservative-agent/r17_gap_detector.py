@@ -12,6 +12,9 @@ C2 binding rule (RK + HM agreed, 24 Oct 2026 AEDT; source: TRADEPRINT-GAP-202610
     A quiet gap with live book rows, a readable boot log and no boot is NOT flagged, whatever its length <= 60 s.
 Offline clearing would need an exact print match against Bitfinex public trades/hist stamped with that source;
 it is not implemented, so nothing is ever cleared here.
+A post-resubscribe trades snapshot (bfx_ws_events.jsonl, #851) holds only the ~30 most recent prints: it is
+INCOMPLETE for a gap unless its oldest print is at/before the gap start (``resubscribe_snapshot_complete``).  An
+incomplete snapshot never clears or narrows a gap (still R17_UNPROVEN) (HM #851 N3).
 """
 from __future__ import annotations
 
@@ -166,3 +169,23 @@ def touch_gap_clauses(ts: np.ndarray, trade_ts: np.ndarray, book_s: Optional[np.
             cache[key] = gap_clauses(key[0], key[1], book_s, boot_log)
         out[i] = cache[key]
     return out
+
+
+def resubscribe_snapshot_complete(gap_start_s: float, snapshot_tr: Iterable[Any]) -> bool:
+    """HM #851 N3: a Bitfinex post-(re)subscribe trades snapshot ``[[id, mts_ms, amount, price], ...]`` holds only
+    about 30 prints.  It can account for a gap starting at ``gap_start_s`` (exchange time, s) only when its OLDEST
+    print is at or before the gap start; a snapshot whose oldest print is after the gap began may have dropped
+    prints in between and is incomplete.  Empty, malformed or non-finite input is incomplete (fail closed).
+    Informational only: no C2 clause is cleared by a complete snapshot either (offline clearing is not implemented)."""
+    if not math.isfinite(gap_start_s):
+        return False
+    mts = []
+    for t in snapshot_tr or ():
+        try:
+            v = float(t[1]) / 1000.0
+        except (TypeError, ValueError, IndexError):
+            return False
+        if not math.isfinite(v):
+            return False
+        mts.append(v)
+    return bool(mts) and min(mts) <= gap_start_s

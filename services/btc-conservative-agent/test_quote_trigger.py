@@ -250,3 +250,14 @@ def test_bot_wiring():
     assert "_paper_entry_quote_gate(" in fns["_paper_lane_entry_core"]
     assert "_stamp_trigger_basis(" in fns["_apply_family_tile_exit"]
     assert "trigger_price_source" in fns["_realism_family_exit"]
+
+
+def test_trades_tail_between_has_no_receive_look_ahead(tmp_path):
+    """HM #851 N6: a print stamped <= t1 but written in collector second floor(t1) is not known until floor(t1)+1."""
+    p = tmp_path / "bfx_trades.jsonl"
+    rows = [{"s": T, "tr": [[1, (T + 0.2) * 1000, 0.1, 100.0]]},
+            {"s": T + 1, "tr": [[2, (T + 1.1) * 1000, 0.1, 100.5]]}]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    tail = qt.TradesTail(str(p))
+    assert [g["id"] for g in tail.between(T, T + 1.5)] == [1]  # print 2 (ts T+1.1) is only known at T+2
+    assert [g["id"] for g in tail.between(T, T + 2.0)] == [1, 2]
