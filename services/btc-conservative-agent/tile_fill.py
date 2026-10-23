@@ -144,7 +144,7 @@ def qty_schedule(original_qty, receipts=None):
         q0 = float(original_qty)
     except (TypeError, ValueError):
         q0 = 0.0
-    cuts = []
+    cuts, unresolved = [], []
     for r in receipts or []:
         if not isinstance(r, dict) or not (float(r.get("remaining_fraction") or 0) > 0):
             continue  # only genuine partial reductions (a terminal receipt is the close itself)
@@ -157,10 +157,11 @@ def qty_schedule(original_qty, receipts=None):
         try:
             cuts.append((float(ts), float(r.get("closed_qty") or 0)))
         except (TypeError, ValueError):
-            continue
+            unresolved.append(r)  # HM #849 item 4: a partial without a fill ts cannot be placed -> fail closed
 
     def qty_at(t):
         return max(0.0, q0 - sum(q for ts, q in cuts if ts < float(t)))
+    qty_at.unresolved_partials = len(unresolved)  # funding_fields marks the row UNVERIFIED_PARTIAL_TS_MISSING
     return qty_at
 
 
@@ -196,6 +197,8 @@ def funding_fields(entry_ts, exit_ts, rate=None, settlements=None, *, direction=
         qty_at = (lambda _t, _q=float(qty): _q)
     sign = 1.0 if str(direction).upper() == "LONG" else -1.0
     rates, rts, accr, marks, mts, qtys, usds, stat = [], [], [], [], [], [], [], []
+    max_age = float(getattr(paper_fill, "DERIV_MAX_AGE_S", 2.0))
+    ages = []
     for t in crossed:
         d = deriv(t)
         q = float(qty_at(t))
@@ -208,11 +211,23 @@ def funding_fields(entry_ts, exit_ts, rate=None, settlements=None, *, direction=
         rates.append(r); rts.append(d.get("rate_ts")); accr.append(d.get("rate_accrued"))
         marks.append(m); mts.append(d.get("mark_ts"))
         usds.append(sign * q * m * r)
-        stat.append("CONFIRMED" if d.get("confirmed") else "UNCONFIRMED_NO_FLIP")
-    if not crossed:
+        # HM #849 item 5: the rate/mark row must be at most DERIV_MAX_AGE_S before the settlement instant
+        age = max((float(t) - float(x)) for x in (d.get("rate_ts"), d.get("mark_ts")) if x is not None) \
+            if (d.get("rate_ts") is not None or d.get("mark_ts") is not None) else None
+        ages.append(age)
+        if age is None or age > max_age:
+            stat.append("STALE_DERIV_ROW")
+        else:
+            stat.append("CONFIRMED" if d.get("confirmed") else "UNCONFIRMED_NO_FLIP")
+    unresolved = int(getattr(qty_at, "unresolved_partials", 0) or 0)
+    if unresolved:
+        status, total = "UNVERIFIED_PARTIAL_TS_MISSING", None  # HM #849 item 4: open qty unknown -> fail closed
+    elif not crossed:
         status, total = "NO_CROSSING", 0.0
     elif "NO_DERIV_STATUS" in stat:
         status, total = "UNVERIFIED_NO_DERIV_STATUS", None
+    elif "STALE_DERIV_ROW" in stat:
+        status, total = "UNVERIFIED_STALE_DERIV", float(sum(usds))
     elif "UNCONFIRMED_NO_FLIP" in stat:
         status, total = "UNVERIFIED_UNCONFIRMED", float(sum(usds))
     else:
@@ -225,6 +240,7 @@ def funding_fields(entry_ts, exit_ts, rate=None, settlements=None, *, direction=
             "funding_rate_applied": rates, "funding_rate_ts": rts, "funding_rate_accrued": accr,
             "funding_mark_price": marks, "funding_mark_ts": mts, "funding_qty": qtys,
             "funding_usd_by_settlement": usds, "funding_settlement_status": stat,
+            "funding_deriv_age_s": ages, "funding_deriv_max_age_s": max_age, "funding_unresolved_partials": unresolved,
             "funding_rate": rates[-1] if rates else None,
             "funding_usd_raw": total, "funding_status": status, "funding_verified": status in ("PRICED", "NO_CROSSING"),
             "funding_settlement_rates": passthrough}

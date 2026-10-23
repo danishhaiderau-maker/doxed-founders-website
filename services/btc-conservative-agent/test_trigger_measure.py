@@ -234,7 +234,7 @@ PAPER_FILL_CHANGE_ALLOWLIST = frozenset({
     "row_fresh_eligible",
     # REALISM_V2 F5: settlement-exact funding source (bfx_deriv_status_1s, read-only; no fee term)
     "DERIV_FILE", "DERIV_WINDOW_S", "DerivStatusFiles", "_num_or_none", "_settlement_from_rows", "_DERIV_FILES",
-    "deriv_settlement",
+    "deriv_settlement", "DERIV_MAX_AGE_S",  # HM #849 item 5: deriv row staleness bound
     # RK/HM #851 + HM 01:43 blocker 2: measured per-row book receive time (no look-ahead proof), one shared helper
     "RECEIVE_TS_MEASURED", "RECEIVE_TS_INFERRED", "RECEIVE_TS_MISSING", "BOOK_RECEIVE_TS_MISSING",
     "BOOK_RECEIVE_AFTER_FILL", "book_receive_proof", "BookTail",

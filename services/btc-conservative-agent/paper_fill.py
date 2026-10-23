@@ -350,7 +350,11 @@ def book10l_missing_seconds(start: float, end: float):
 # REALISM_V2 F5 (HM 23 Oct): funding is paid only at the 00/08/16 UTC settlement instants, priced from the
 # collector's deriv-status file (never the REST "predicted" state rate). Read-only; no new stored data.
 DERIV_FILE = "bfx_deriv_status_1s.jsonl"
-DERIV_WINDOW_S = 60  # a settlement needs a status row within this many seconds before (rate/mark) it
+DERIV_WINDOW_S = 60  # READ window: rows within this many seconds around t are read (bisect + scan)
+# HM #849 item 5 (paper_fill.py:314 staleness): the READ window is not the staleness bound. The applied rate/mark row
+# must be at most DERIV_MAX_AGE_S before the settlement instant (1 s collector: the last pre row is ~0.6 s old; 2 s
+# tolerates one missed row). Older -> STALE_DERIV_ROW -> funding_status UNVERIFIED_STALE_DERIV (non-countable).
+DERIV_MAX_AGE_S = 2.0
 
 
 class DerivStatusFiles:
