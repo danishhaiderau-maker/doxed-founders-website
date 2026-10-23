@@ -3774,7 +3774,42 @@ export type EntryClaimResult = {
   claimed: { id: string } | null;
   assessment: ReturnType<typeof assessCorrelatedExposureCluster>;
   evidence: Record<string, unknown> | null;
+  /** Two-tile live mutex (HM C3): other live lots counted under the account-wide lock in the claim txn. */
+  liveMutexOthers?: number;
 };
+
+/**
+ * Two-tile live gate mutex (HM R2 C3 + RK 24 Oct): ONE Bitfinex position per symbol per ACCOUNT, unconditionally (any
+ * agent, any tile). Counts this user's OTHER participants that are PENDING_ENTRY/OPEN, or INTENT claims younger than
+ * LIVE_MUTEX_INTENT_WINDOW_MS (a racing entry that has claimed but not yet submitted).
+ */
+export const LIVE_MUTEX_INTENT_WINDOW_MS = 120_000;
+export const liveMutexLockKey = (userId: string) => `live-mutex:${userId}`;
+export function liveMutexWhere(userId: string, excludeParticipantId: string | null | undefined, nowMs = Date.now()) {
+  return {
+    userId,
+    OR: [
+      { status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] } },
+      { status: SignalCycleStatus.INTENT, createdAt: { gte: new Date(nowMs - LIVE_MUTEX_INTENT_WINDOW_MS) } },
+    ],
+    ...(excludeParticipantId ? { id: { not: excludeParticipantId } } : {}),
+  };
+}
+/** Take the account-wide live-mutex advisory lock (xact-scoped). Call BEFORE inserting the claim, in the same txn. */
+export async function takeLiveMutexLock(
+  tx: { $executeRawUnsafe: (q: string, ...v: unknown[]) => Promise<unknown> },
+  userId: string,
+): Promise<void> {
+  await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', liveMutexLockKey(userId));
+}
+export async function countLiveMutexOthers(
+  tx: { signalCycleParticipant: { count: (a: any) => Promise<number> } },
+  userId: string,
+  excludeParticipantId: string | null | undefined,
+  nowMs = Date.now(),
+): Promise<number> {
+  return tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
+}
 export type SpeculativeEntryClaim =
   | { key: string; ok: true; result: EntryClaimResult }
   | { key: string; ok: false; error: unknown };
@@ -10211,12 +10246,16 @@ await this.notifications
     const intent = { direction: input.direction };
     return this.prisma.$transaction(async (tx) => {
         if (timing) (timing.marks ??= {}).claimTxOpen = Date.now();
+        // HM C3: the account-wide live mutex lock is taken FIRST in the claim txn (fixed lock order: live-mutex, then
+        // copy-cluster), so two racing claims serialize and the later one counts the earlier INTENT.
+        if (venue === 'bitfinex') await takeLiveMutexLock(tx, instance.userId);
         const claimed = await lockedEntryClaimInsert(tx, {
           lockKey: `copy-cluster:${instance.userId}:${agentId}`,
           cycleId, userId: instance.userId, venue,
         });
         if (timing) (timing.marks ??= {}).claimLock = Date.now();
         if (timing) (timing.marks ??= {}).claimInsert = Date.now();
+        const liveMutexOthers = venue === 'bitfinex' ? await countLiveMutexOthers(tx, instance.userId, claimed.id) : 0;
         const assessment = await this.correlatedExposureSnapshot({
           userId: instance.userId, agentId, participantId: claimed.id,
           cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
@@ -10276,7 +10315,7 @@ await this.notifications
               },
             });
             await tx.signalCycleParticipant.delete({ where: { id: claimed.id } });
-            return { claimed: null, assessment, evidence };
+            return { claimed: null, assessment, evidence, liveMutexOthers };
           }
           await tx.signalCycleEvent.create({
             data: {
@@ -10300,9 +10339,9 @@ await this.notifications
               payload: { ...evidence, event: 'CORRELATED_CLUSTER_BLOCKED' } as Prisma.InputJsonValue,
             },
           });
-          return { claimed, assessment, evidence };
+          return { claimed, assessment, evidence, liveMutexOthers };
         }
-        return { claimed, assessment, evidence: null };
+        return { claimed, assessment, evidence: null, liveMutexOthers };
       });;
   }
 
@@ -10314,20 +10353,16 @@ await this.notifications
       .catch(this.swallowedError('op@spec-claim-release'));
   }
 
-  /** Two-tile live gate: this account's OTHER pending/open lots on this agent (any tile), excluding the current claim. */
+  /**
+   * Two-tile live gate re-count just before submit: this ACCOUNT's other live lots (any agent, any tile; RK: account-wide
+   * unconditionally), incl. INTENT claims < 120 s. The authoritative count runs in the claim txn under the lock.
+   */
   private async countOtherLiveParticipants(
     userId: string,
-    agentId: string,
+    _agentId: string,
     excludeParticipantId: string | null | undefined,
   ): Promise<number> {
-    return this.prisma.signalCycleParticipant.count({
-      where: {
-        userId,
-        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
-        cycle: { agentId },
-        ...(excludeParticipantId ? { id: { not: excludeParticipantId } } : {}),
-      },
-    });
+    return countLiveMutexOthers(this.prisma, userId, excludeParticipantId);
   }
 
   private async placeEntryInner(
@@ -10585,6 +10620,7 @@ await this.notifications
     // (P2002) and it bails out — preventing a DUPLICATE order on Bitfinex. The claim is
     // released (deleted) if order placement fails, so a future tick can retry.
     let cluster: ReturnType<typeof assessCorrelatedExposureCluster>;
+    let claimTxLiveMutexOthers = 0;
     try {
       if (timing) (timing.marks ??= {}).claimTx = Date.now();
       const specKey = entryClaimKey({ cycleId, direction: intent.direction, limitPrice, qty, marginUsd });
@@ -10607,6 +10643,7 @@ await this.notifications
       }
       claimParticipantId = claimedAndAssessed.claimed?.id ?? null;
       cluster = claimedAndAssessed.assessment;
+      claimTxLiveMutexOthers = claimedAndAssessed.liveMutexOthers ?? 0;
     if (timing) (timing.marks ??= {}).claimCluster = Date.now();
     } catch (err) {
       if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -10720,6 +10757,8 @@ await this.notifications
     // Two-tile live gate (N1 mutex + N5 per-entry net=0): refuse unless no other live lot exists and the fresh exchange
     // read (or the proven-flat preflight moments ago) shows no position. Never waits for flat (R8): refuse and log.
     if (venue === 'bitfinex') {
+      // the in-txn count (under the account-wide lock) is authoritative; the re-count just before submit is belt and braces
+      otherLiveParticipants = Math.max(otherLiveParticipants, claimTxLiveMutexOthers);
       const admission = liveEntryAdmission({
         otherLiveParticipants,
         positionQty: prePosition ? prePosition.amount : 0,
@@ -18491,6 +18530,7 @@ await this.notifications
 
     let claimParticipantId: string | null = null;
     let revivedTerminal = false;
+    let catchupMutexOthers = 0;
 
     if (existingClaim) {
       // Active claim — another path owns this trade (or a concurrent replica).
@@ -18513,16 +18553,21 @@ await this.notifications
         TERMINAL_PARTICIPANT_STATUSES.has(existingClaim.status) ||
         existingClaim.status === SignalCycleStatus.INTENT
       ) {
-        await this.prisma.signalCycleParticipant.update({
-          where: { id: existingClaim.id },
-          data: {
-            status: SignalCycleStatus.INTENT,
-            fillPrice: null,
-            exitPrice: null,
-            pnlUsd: null,
-            pnlMarginPct: null,
-            stopLossConfirmedAt: null,
-          },
+        // HM C3: revive + live-mutex count in ONE txn under the account-wide lock (taken first)
+        catchupMutexOthers = await this.prisma.$transaction(async (tx) => {
+          await takeLiveMutexLock(tx, instance.userId);
+          await tx.signalCycleParticipant.update({
+            where: { id: existingClaim.id },
+            data: {
+              status: SignalCycleStatus.INTENT,
+              fillPrice: null,
+              exitPrice: null,
+              pnlUsd: null,
+              pnlMarginPct: null,
+              stopLossConfirmedAt: null,
+            },
+          });
+          return countLiveMutexOthers(tx, instance.userId, existingClaim.id);
         });
         claimParticipantId = existingClaim.id;
         revivedTerminal = true;
@@ -18534,15 +18579,21 @@ await this.notifications
       }
     } else {
       try {
-        const claimed = await this.prisma.signalCycleParticipant.create({
-          data: {
-            cycleId,
-            userId: instance.userId,
-            venue: 'bitfinex',
-            status: SignalCycleStatus.INTENT,
-          },
+        // HM C3: claim + live-mutex count in ONE txn under the account-wide lock (taken first)
+        const [claimed, others] = await this.prisma.$transaction(async (tx) => {
+          await takeLiveMutexLock(tx, instance.userId);
+          const row = await tx.signalCycleParticipant.create({
+            data: {
+              cycleId,
+              userId: instance.userId,
+              venue: 'bitfinex',
+              status: SignalCycleStatus.INTENT,
+            },
+          });
+          return [row, await countLiveMutexOthers(tx, instance.userId, row.id)] as const;
         });
         claimParticipantId = claimed.id;
+        catchupMutexOthers = others;
       } catch (err) {
         if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') return false;
         throw err;
@@ -18633,6 +18684,7 @@ await this.notifications
       return false;
     }
     // Two-tile live gate (N1 mutex + N5 per-entry net=0), same shared rule as placeEntryInner.
+    otherLiveParticipants = Math.max(otherLiveParticipants, catchupMutexOthers);
     const catchupAdmission = liveEntryAdmission({
       otherLiveParticipants,
       positionQty: prePosition ? prePosition.amount : 0,
