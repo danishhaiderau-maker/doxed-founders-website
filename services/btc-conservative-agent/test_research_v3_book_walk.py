@@ -212,3 +212,14 @@ def test_exit_fill_stamps_the_actual_row_ready_delay():
     assert fill["fill_ts"] == pytest.approx(1103.0)
     near = tape.window(998, 1600).exit_fill("LONG", 0.001, 1102.9)  # row ready 0.1 s later: floored at 0.3 s
     assert near["delay_s"] == pytest.approx(0.3) and near["book_row_ready_ts"] == 1103.0
+
+
+def test_every_coverage_stamp_carries_the_c2_flagged_count_even_when_zero():
+    # RK #847 cond 2: the interim 5 s rule stays; each report stamps how many cells it flagged.
+    from research_v3_book_walk import C2_FLAGGED_KEY, STOP_UNOBSERVABLE_RULE_STATUS
+    zero = coverage_summary({BASIS_BOOK_WALK: 2}, {BASIS_BOOK_WALK: 2}, {}, None, horizon_sec=7200)
+    assert zero[C2_FLAGGED_KEY] == 0
+    assert zero["stop_unobservable_rule_status"] == STOP_UNOBSERVABLE_RULE_STATUS == "INTERIM_CHOSEN_NOT_DATA_DERIVED"
+    mixed = coverage_summary({BASIS_BOOK_WALK: 2}, {BASIS_BOOK_WALK: 2}, {}, None, horizon_sec=7200,
+                             unproven_cells={STOP_UNOBSERVABLE_REASON: 3, "R17_UNPROVEN_ENTRY": 9})
+    assert mixed[C2_FLAGGED_KEY] == 3 and mixed["r17_unproven_cells"] == 12

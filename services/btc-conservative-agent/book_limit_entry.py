@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import paper_fill as _pf
 import quote_trigger as _qt
+import r17_fields as _r17f
 
 try:
     from research.conservative_limit_fill import _normalise_schedule  # pure schedule hash; reads no tape
@@ -41,7 +42,7 @@ except ImportError:  # pragma: no cover - direct script execution
 RECEIPT_SCHEMA = "book_limit_entry_receipt_v1"
 EVALUATOR_VERSION = "book10l-ioc-chase-v1"
 ENTRY_PRICE_SOURCE_BOOK = "BFX_BOOK_10L"
-R17_UNPROVEN_ENTRY = "R17_UNPROVEN_ENTRY"
+R17_UNPROVEN_ENTRY = _r17f.R17_UNPROVEN_ENTRY  # the ONE R17 contract module (R4)
 REASON_UNVERIFIED_DELAY = _pf.UNVERIFIED_DELAY
 REASON_NOT_BOOK_PRICED = "ENTRY_NOT_BOOK_PRICED"
 _FILLED = ("FILLED", "PARTIAL")
