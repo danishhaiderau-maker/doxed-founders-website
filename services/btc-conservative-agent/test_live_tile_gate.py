@@ -315,3 +315,31 @@ def test_force_flattened_trades_are_non_countable():
     assert ltg.force_flat_non_countable({"close_reason": "AUTHENTICATED_EMERGENCY_CLOSE"})
     assert ltg.force_flat_non_countable({"exit_source": "guardian_force_flat"})
     assert not ltg.force_flat_non_countable({"close_reason": "TP"}) and not ltg.force_flat_non_countable(None)
+
+
+def test_loss_caps_pinned_to_frozen_amend3():
+    """RK 02:25: all three loss caps come from AMEND3 line 22 (sha pinned); they change only via a new frozen amendment."""
+    import hashlib, os, re
+    import live_guardian as lg
+    assert ltg.CAP_PREREG_FILE.endswith("PREREG-GS-FADE3-TP30-AMEND3-20261023.md")
+    assert ltg.CAP_PREREG_LINE == 22
+    assert ltg.CAP_PREREG_SHA256 == "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9"
+    m = re.search(r"Daily loss cap: \$(\d+\.\d+) per tile and \$(\d+\.\d+) in total \(UTC day\)\. "
+                  r"At most (\d+) live entries per tile per day\.", ltg.CAP_PREREG_LINE_TEXT)
+    assert m, ltg.CAP_PREREG_LINE_TEXT
+    assert float(m.group(1)) == ltg.DAILY_LOSS_CAP_PER_TILE_USD == 0.05
+    assert float(m.group(2)) == ltg.DAILY_LOSS_CAP_TOTAL_USD == 0.10
+    assert lg.DAILY_LOSS_CAP_USD == ltg.DAILY_LOSS_CAP_TOTAL_USD          # guardian cap = the same frozen total
+    assert int(m.group(3)) == ltg.MAX_ENTRIES_PER_DAY == 20
+    assert ltg.CAP_PREREG_SHA256 in ltg.DAILY_LOSS_CAP_SOURCE and "L22" in ltg.DAILY_LOSS_CAP_SOURCE
+    # no env override for the loss caps
+    src = open(ltg.__file__, encoding="utf-8").read()
+    assert not re.search(r"getenv\([^)]*LOSS", src) and not re.search(r"environ[^\n]*LOSS", src)
+    # when the frozen prereg is present (operator box), it must still hash to the pin and carry the same line 22
+    for root in (os.environ.get("PREREG_ROOT") or "", "/workspace"):
+        path = os.path.join(root, ltg.CAP_PREREG_FILE) if root else ""
+        if path and os.path.isfile(path):
+            raw = open(path, "rb").read()
+            assert hashlib.sha256(raw).hexdigest() == ltg.CAP_PREREG_SHA256
+            assert raw.decode("utf-8").splitlines()[ltg.CAP_PREREG_LINE - 1] == ltg.CAP_PREREG_LINE_TEXT
+            break

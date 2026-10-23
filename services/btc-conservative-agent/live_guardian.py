@@ -19,7 +19,8 @@ from typing import Any, Iterable, Mapping
 STOP_MISSING_SEC = 5.0          # HM: stop must be confirmed within 5 s of the fill
 import live_tile_gate as _ltg_caps  # noqa: E402
 
-# HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 D3, $0.10). Was $1.00. This
+# HM C1 (24 Oct): aligned with the G6 account-wide cap pinned in live_tile_gate (prereg AMEND3 line 22 (D3), sha256 632dcf34...
+# = live_tile_gate.CAP_PREREG_SHA256, $0.10). Was $1.00. FROZEN: changes only via a new frozen amendment (see live_tile_gate). This
 # rolling-24 h check runs on the ledger AND on the Derivatives balance (so funding is included); the UTC-day G6 checks
 # (per tile $0.05, total $0.10) run on the ledger in live_tile_gate.daily_loss_violations.
 DAILY_LOSS_CAP_USD = _ltg_caps.DAILY_LOSS_CAP_TOTAL_USD

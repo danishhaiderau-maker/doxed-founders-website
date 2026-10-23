@@ -47,16 +47,25 @@ PENDING_EXPOSURE_SEC = 300.0      # same bound the guardian uses for a sent-but-
 INFLIGHT_APPROVAL_SEC = 180.0     # relay placement bound (FLY_APPROVAL_PLACEMENT_MAX_AGE_SEC): approved, not yet reported
 MIRROR_MAX_AGE_SEC = 20.0
 
-# HM G6 daily REALISED live loss caps, pinned to the frozen GS-FADE3-TP30 prereg set (AMEND3 sha 632dcf34..., D3:
-# "Daily loss cap: $0.05 per tile and $0.10 in total (UTC day)") and HM LIVE-CHECK-RECIPE G6. Not configurable (no env
-# override): a change needs a new prereg amendment with RK PASS. Breach => the guardian disarms ALL live tiles + force-flat
-# (RK ruling 24 Oct). Disarm-only: these caps never size or skip an entry.
+# HM G6 daily REALISED live loss caps (RK 02:25 24 Oct: ALL THREE caps (per tile, account-wide total, and the guardian's
+# live_guardian.DAILY_LOSS_CAP_USD, which is DAILY_LOSS_CAP_TOTAL_USD) come from ONE source):
+#   grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md line 22 (D3), sha256 CAP_PREREG_SHA256:
+#   "Daily loss cap: $0.05 per tile and $0.10 in total (UTC day). At most 20 live entries per tile per day."
+# FROZEN: there is no env override. These values change ONLY through a NEW frozen prereg amendment with RK PASS, and the
+# pin below (CAP_PREREG_FILE / CAP_PREREG_LINE / CAP_PREREG_SHA256 / CAP_PREREG_LINE_TEXT) must be updated in the same
+# commit. test_live_tile_gate.test_loss_caps_pinned_to_frozen_amend3 parses the values out of CAP_PREREG_LINE_TEXT, pins
+# the sha and line, and when the prereg file is present it re-hashes it and re-reads line 22, so a silent edit fails CI.
+# Breach => the guardian disarms ALL live tiles + force-flat (RK). Disarm-only: these caps never size or skip an entry.
+CAP_PREREG_FILE = "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md"
+CAP_PREREG_LINE = 22
+CAP_PREREG_SHA256 = "632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9"
+CAP_PREREG_LINE_TEXT = ("- Daily loss cap: $0.05 per tile and $0.10 in total (UTC day). "
+                        "At most 20 live entries per tile per day.")
 DAILY_LOSS_CAP_PER_TILE_USD = 0.05
 DAILY_LOSS_CAP_TOTAL_USD = 0.10
 DAILY_LOSS_CAP_SOURCE = (
-    "grok-strategist/prereg/PREREG-GS-FADE3-TP30-AMEND3-20261023.md L22 (D3: \"Daily loss cap: $0.05 per tile and "
-    "$0.10 in total (UTC day)\") sha256 632dcf347ce061a3f81d0afd73a4820d0406f4b714e11d5daed00485183efde9; "
-    "HM grokbot/health-monitor/LIVE-CHECK-RECIPE.md L94-107 (G6)"
+    f"{CAP_PREREG_FILE} L{CAP_PREREG_LINE} (D3: \"Daily loss cap: $0.05 per tile and $0.10 in total (UTC day)\") "
+    f"sha256 {CAP_PREREG_SHA256}; HM grokbot/health-monitor/LIVE-CHECK-RECIPE.md L94-107 (G6)"
 )
 VIOL_TILE_LOSS_CAP = "LIVE_TILE_DAILY_LOSS_CAP"
 VIOL_TOTAL_LOSS_CAP = "LIVE_TOTAL_DAILY_LOSS_CAP"
