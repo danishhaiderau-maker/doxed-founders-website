@@ -156,6 +156,10 @@ def _good_closed_row():
            "exit_unverified_reason": None,
            # RK/HM K1: order_model.liquidation_check output with marks read and liq_px never reached
            "liq_unverified": False, "liq_mark_rows_n": 30, "liq_trigger_ts": None}
+    # HM #849 item 1: bot._paper_funding_v2 output (tile_fill.funding_fields V2 + fill-ts window ends)
+    import tile_fill as _tf
+    row.update(_tf.funding_fields(1000.0, 1100.0, direction="LONG", qty=1.0, deriv=lambda t: None),
+               funding_ts_fallbacks=[])
     row.update(ns["_entry_pricing_fields"](pos, {}))
     row.update(ns["_r17_contract_fields"](pos))
     return row

@@ -30,6 +30,8 @@ MEASURED_DELAY_PATTERN = r"(?:lane|POOLED_LIVE_ACK_CROSS_LANE:(?:ENTRY_MKT_GTC|M
 TRIGGER_PRICE_SOURCE_OK = frozenset({"book"})
 EVIDENCE_OK = frozenset({"COMPLETE"})
 STOP_COVERAGE_OK = frozenset({"STOP_COVERAGE_OK"})
+FUNDING_MODEL_OK = frozenset({"SETTLEMENT_EXACT_V2"})  # HM #849 item 1: settlement-exact deriv-status funding only
+FUNDING_STATUS_OK = frozenset({"PRICED", "NO_CROSSING"})
 BOOK_RECEIVE_SOURCE_OK = frozenset({"WS_FRAME"})  # RK/HM #851: measured WS receipt; INFERRED_BUCKET_LAG never counts
 
 # field -> accepted positive value (human/contract form; r17_exclusion implements the check)
@@ -58,6 +60,10 @@ CONTRACT = {
                       "proven clear of the liquidation distance (RK/HM K1, 24 Oct); True or missing fails",
     "liq_mark_rows_n": "number > 0 (the BFXCI mark series over the hold was read)",
     "liq_trigger_ts": "absent / None (neither the mark nor a last trade reached liq_px during the hold)",
+    "funding_model": "SETTLEMENT_EXACT_V2 (legacy pro-rata accrual fails: FUNDING_UNVERIFIED)",
+    "funding_status": "PRICED | NO_CROSSING (UNVERIFIED_* -> FUNDING_UNVERIFIED; FUNDING_PRICER_ERROR -> FUNDING_PRICER_ERROR)",
+    "funding_verified": "True (real bool or 'true'); False / missing fails FUNDING_UNVERIFIED (HM #849 item 1)",
+    "funding_ts_fallbacks": "[] (real empty list): the window ends are the priced fill ts; any entry fails FUNDING_TS_FALLBACK",
 }
 # Matching is EXACT: string values are compared after stripping surrounding spaces only (no case folding);
 # numbers must be finite and >= 0.

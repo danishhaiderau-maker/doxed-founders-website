@@ -180,6 +180,26 @@ def liq_failure(row):
     return None
 
 
+def funding_failure(row):
+    """HM #849 items 1-3 (24 Oct): a row counts only with settlement-exact funding that priced every crossed
+    settlement from deriv status, with the window ends at the priced fill ts. Returns the failure label or None."""
+    st = _exact(row.get("funding_status"))
+    if st == "FUNDING_PRICER_ERROR":
+        return "FUNDING_PRICER_ERROR"
+    fb = row.get("funding_ts_fallbacks")
+    if isinstance(fb, str):
+        try:
+            fb = json.loads(fb)
+        except ValueError:
+            fb = [fb]
+    if fb is None or not isinstance(fb, list) or fb:
+        return "FUNDING_TS_FALLBACK" if fb else "FUNDING_UNVERIFIED"
+    if (_exact(row.get("funding_model")) not in F.FUNDING_MODEL_OK or st not in F.FUNDING_STATUS_OK
+            or not _truthy(row.get("funding_verified"))):
+        return "FUNDING_UNVERIFIED"
+    return None
+
+
 def book_receive_failures(row) -> list:
     """RK/HM #851 (24 Oct): each priced book row must carry the collector's MEASURED receive time (wall + monotonic,
     source WS_FRAME). A missing / non-finite stamp or any other source (pre-#851 row, INFERRED_BUCKET_LAG) fails."""
@@ -228,6 +248,9 @@ def proof_failures(row) -> list:
     if lf:
         out.append(lf)
     out.extend(book_receive_failures(row))
+    ff = funding_failure(row)
+    if ff:
+        out.append(ff)
     return out
 
 
