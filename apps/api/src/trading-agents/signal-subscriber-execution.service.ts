@@ -70,7 +70,13 @@ import {
   normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
   type BitfinexFuturesPairConstraints,
+  type BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
+import {
+  BITFINEX_POSITION_ID_STAMP_EVENT,
+  resolveBitfinexPositionIdStamp,
+  type BitfinexPositionReadOutcome,
+} from './bitfinex-position-id-stamp';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
   cancelOrderWithRetry,
@@ -3762,6 +3768,17 @@ type VirtualLotSummary = {
 };
 
 type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
+
+/** Identity for the additive post-stop Bitfinex POSITION_ID stamp. */
+type PositionIdStampContext = {
+  userId: string;
+  agentId: string;
+  cycleId: string;
+  participantId: string;
+  entryOrderId?: number | null;
+  stopOrderId?: number | null;
+  fillPath: string;
+};
 
 /** Participant-less SignalCycleEvent type carrying one executor decision. */
 export const EXECUTOR_DECISION_EVENT = 'EXECUTOR_DECISION';
@@ -11760,7 +11777,14 @@ await this.notifications
           promotion.resumeStopOrderId ?? recoveredSubmittingStopId!,
           stopInput,
         )
-      : await this.submitVerifiedProtectiveStop(creds, stopInput);
+      : await this.submitVerifiedProtectiveStop(creds, stopInput, {
+          userId,
+          agentId,
+          cycleId: cycle.id,
+          participantId,
+          entryOrderId: meta.bitfinexOrderId,
+          fillPath: `CANCEL_RACE_FILL/${cancelContext}`,
+        });
     const stopOrderId = verifiedStop.ok ? verifiedStop.orderId : null;
     const stopExchangeAckAtMs: number | null = verifiedStop.ok
       ? (resumingProtectedStop || recoveredSubmittingStopId != null
@@ -13338,6 +13362,13 @@ await this.notifications
       qty,
       stopPrice,
       leverage,
+    }, {
+      userId,
+      agentId,
+      cycleId: cycle.id,
+      participantId: participant.id,
+      entryOrderId: meta.bitfinexOrderId,
+      fillPath: 'MONITOR_ENTRY_FILL',
     });
     if (!verifiedStop.ok) {
       await this.holdUnprotectedFill(
@@ -13518,6 +13549,13 @@ await this.notifications
               qty,
               stopPrice,
               leverage,
+            }, {
+              userId,
+              agentId,
+              cycleId: row.cycleId,
+              participantId: row.id,
+              entryOrderId: meta.bitfinexOrderId,
+              fillPath: 'RECONCILE_EXISTING_FILLED_EVENT',
             });
         if (!verifiedStop.ok) {
           await this.holdUnprotectedFill(
@@ -13617,6 +13655,13 @@ await this.notifications
           stopPrice,
           leverage,
           clientOrderId: reconcileClaim.stopClientOrderId,
+        }, {
+          userId,
+          agentId,
+          cycleId: row.cycleId,
+          participantId: row.id,
+          entryOrderId: meta.bitfinexOrderId,
+          fillPath: 'EXCHANGE_FILL_RECONCILE',
         });
         if (verifiedStop.ok) {
           await this.setFillPromotionPhase(row.id, reconcileClaim.token, 'SUBMITTING', 'PROTECTED', verifiedStop.orderId);
@@ -16493,6 +16538,10 @@ await this.notifications
       leverage: number;
       clientOrderId?: number;
     },
+    // Fill paths only: lets the EXISTING delayed post-stop positions read-back
+    // also stamp the Bitfinex POSITION_ID. Never read before / instead of the
+    // stop; absent => no stamp (stop replacement / partial paths).
+    positionIdStamp?: PositionIdStampContext,
   ): Promise<
     | { ok: true; orderId: number; order: BitfinexActiveOrder; submitAckAtMs: number }
     | { ok: false; orderId?: number; reason: string; submitAckAtMs?: number }
@@ -16515,7 +16564,7 @@ await this.notifications
       // Off the stop's critical path: the stop is already live.
       // Delayed so its two reads never sit on the nonce lane ahead of the
       // stop confirmation / an early exit.
-      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input).catch((err) => { stopDedupeStats.errors += 1; this.logger?.error(`[STOP-DEDUPE] failed keep=${orderId}: ${err instanceof Error ? err.message : err}`); }); }, 3_000);
+      const t = setTimeout(() => { void this.cancelDuplicateProtectiveStops(creds, orderId, input, positionIdStamp).catch((err) => { stopDedupeStats.errors += 1; this.logger?.error(`[STOP-DEDUPE] failed keep=${orderId}: ${err instanceof Error ? err.message : err}`); }); }, 3_000);
       (t as { unref?: () => void }).unref?.();
     }
     return { ...authenticated, submitAckAtMs };
@@ -16525,6 +16574,7 @@ await this.notifications
     creds: ExchangeCredentials,
     keepId: number,
     input: { positionDirection: 'LONG' | 'SHORT'; qty: number },
+    positionIdStamp?: PositionIdStampContext,
   ): Promise<void> {
     if (this.executorDestroyed) return;
     const client = this.activeTrading as unknown as {
@@ -16533,9 +16583,17 @@ await this.notifications
     };
     if (typeof client.listActiveOrders !== 'function' || typeof client.getOpenPositionDetail !== 'function') return;
     try {
+      const readStartedAtMs = Date.now();
+      const positionRead = client.getOpenPositionDetail(creds);
+      if (positionIdStamp) {
+        // Same read the sweep already performs (no extra request, no new
+        // endpoint). Not awaited: the stamp never delays the sweep, and the
+        // stop was placed + authenticated >=3 s before this read began.
+        void this.stampBitfinexPositionId(positionIdStamp, input, readStartedAtMs, positionRead);
+      }
       const [active, position] = await Promise.all([
         client.listActiveOrders(creds),
-        client.getOpenPositionDetail(creds),
+        positionRead,
       ]);
       const extras = extraProtectiveStopIds(active, keepId, input.positionDirection, input.qty, position?.amount ?? 0);
       stopDedupeStats.runs += 1;
@@ -16548,6 +16606,50 @@ await this.notifications
     } catch (err) {
       stopDedupeStats.errors += 1;
       this.logger?.error(`[STOP-DEDUPE] skipped keep=${keepId}: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * Records BITFINEX_POSITION_ID_STAMP from the post-stop positions read-back.
+   * Never throws (fill / stop / exit paths are untouched): any failure yields
+   * a null pid stamp or, if even the write fails, only a warning log.
+   */
+  private async stampBitfinexPositionId(
+    ctx: PositionIdStampContext,
+    input: { positionDirection: 'LONG' | 'SHORT'; qty: number },
+    readStartedAtMs: number,
+    positionRead: Promise<BitfinexPositionDetail | null | { amount: number }>,
+  ): Promise<void> {
+    try {
+      let outcome: BitfinexPositionReadOutcome;
+      try {
+        outcome = { ok: true, position: (await positionRead) as BitfinexPositionDetail | null };
+      } catch (error) {
+        outcome = { ok: false, error };
+      }
+      const stamp = resolveBitfinexPositionIdStamp({
+        outcome,
+        expected: { direction: input.positionDirection, qty: input.qty },
+        readStartedAtMs,
+        readAtMs: Date.now(),
+      });
+      await this.cycles.recordHireExecutionEvent(
+        ctx.userId,
+        ctx.agentId,
+        ctx.cycleId,
+        BITFINEX_POSITION_ID_STAMP_EVENT,
+        {
+          ...stamp,
+          participant_id: ctx.participantId,
+          stop_order_id: ctx.stopOrderId ?? undefined,
+          bitfinex_order_id: ctx.entryOrderId ?? undefined,
+          fill_path: ctx.fillPath,
+        },
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `[PID-STAMP] skipped participant=${ctx.participantId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

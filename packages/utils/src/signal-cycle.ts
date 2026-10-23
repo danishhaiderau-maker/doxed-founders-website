@@ -210,7 +210,11 @@ export type SignalCycleEventType =
   // kill-switch state): when the sweep is enabled the market-order id is
   // recorded; when disabled it surfaces detection-only for operator review.
   // No participant status transition � the reconcile loop closes the lot.
-  | 'DUST_SWEEP';
+  | 'DUST_SWEEP'
+  // Additive Bitfinex POSITION_ID stamp (bitfinex_position_id_stamp_v1) from
+  // the post-stop positions read-back. Never transitions participant state;
+  // pid is null on read failure / multi-position / mismatch.
+  | 'BITFINEX_POSITION_ID_STAMP';
 
 export const SIGNAL_SUCCESS_FEE_PCT = 0.1;
 export const SIGNAL_MIN_FEE_USD = 0.2;
