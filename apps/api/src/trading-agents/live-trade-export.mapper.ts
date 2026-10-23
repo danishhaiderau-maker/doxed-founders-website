@@ -1,6 +1,10 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import { formatMelbourneDateTime } from '@dcf/utils';
-import { liveRowCountability } from './live-row-countability';
+import {
+  liveRowCountability,
+  liveRowCountabilityWithStop,
+  liveRowStopEvidenceFromEvents,
+} from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: string;
@@ -209,7 +213,14 @@ export function mapParticipantToExportRow(input: {
     regime: intent.regime ?? null,
     strategy: intent.strategy ?? null,
     showcaseExitReason: input.cycle.showcaseExitReason,
-    ...liveRowCountability(exitEvent?.exitReason, input.cycle.showcaseExitReason),
+    // #852 item 4: a filled live row also needs the guardian's stop evidence (same rule as live_guardian)
+    ...(filledEvent
+      ? liveRowCountabilityWithStop(
+          liveRowStopEvidenceFromEvents(input.participant.events),
+          exitEvent?.exitReason,
+          input.cycle.showcaseExitReason,
+        )
+      : liveRowCountability(exitEvent?.exitReason, input.cycle.showcaseExitReason)),
     events,
   };
 }

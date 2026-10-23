@@ -82,6 +82,7 @@ import {
   type SubscriberCycleRow,
 } from './subscriber-exchange-live.mapper';
 import { foldParticipantExecutionMeta } from './participant-execution-meta.util';
+import { liveRowStopEvidenceFromEvents } from './live-row-countability';
 import {
   mapLiveBookToActivity,
   mergeActivityFeeds,
@@ -1335,6 +1336,8 @@ export class TradingAgentsService implements OnModuleInit {
         negativeEvidence: negativeEvent
           ? String(negativePayload?.event ?? negativePayload?.reason ?? negativeEvent.eventType)
           : null,
+        // #852 item 4: the guardian's stop evidence (same sources as the Fly reporter)
+        stopEvidence: liveRowStopEvidenceFromEvents(r.events),
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {
@@ -1360,6 +1363,8 @@ export class TradingAgentsService implements OnModuleInit {
       markPrice,
       participants,
       ledgerCloses: ledgerCloses ?? [],
+      // #852 item 4: a real-exchange live row counts only with the guardian's stop evidence
+      requireStopEvidence: instance.exchangeProvider === 'bitfinex',
     });
   }
 

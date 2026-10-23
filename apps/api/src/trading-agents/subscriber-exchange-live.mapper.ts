@@ -6,7 +6,12 @@ import type {
   BitfinexPositionCloseLedgerRow,
   BitfinexPositionDetail,
 } from '../exchanges/bitfinex-api.client';
-import { liveRowCountability } from './live-row-countability';
+import {
+  liveRowCountability,
+  liveRowCountabilityWithStop,
+  liveRowStopCountability,
+  type LiveRowStopEvidence,
+} from './live-row-countability';
 
 type IntentEnvelope = {
   direction?: 'LONG' | 'SHORT';
@@ -45,6 +50,8 @@ export type SubscriberCycleRow = {
   exchangeFillAt?: Date | null;
   exchangeExitAt?: Date | null;
   negativeEvidence?: string | null;
+  /** #852 item 4: the guardian's stop evidence for this row (liveRowStopEvidenceFromEvents). */
+  stopEvidence?: LiveRowStopEvidence | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -121,6 +128,8 @@ export function mapSubscriberExchangeLiveBook(input: {
   markPrice?: number;
   participants: SubscriberCycleRow[];
   ledgerCloses?: BitfinexPositionCloseLedgerRow[];
+  /** #852 item 4: live (real-money) books: a row counts only with the guardian's stop evidence. */
+  requireStopEvidence?: boolean;
 }): TradingAgentDashboardState['liveBook'] {
   const mark = input.markPrice ?? 0;
   const positions: TradingAgentDashboardState['liveBook']['positions'] = [];
@@ -366,7 +375,10 @@ export function mapSubscriberExchangeLiveBook(input: {
           : 'Neon lifecycle; exchange linkage incomplete',
         negativeEvidence: row.negativeEvidence ?? null,
         // HM B4: forced closes carry non_countable on the website live row.
-        ...liveRowCountability(row.cycle.showcaseExitReason, row.terminalReason),
+        // #852 item 4: live books also need the guardian's stop evidence (same rule as live_guardian).
+        ...(input.requireStopEvidence
+          ? liveRowCountabilityWithStop(row.stopEvidence, row.cycle.showcaseExitReason, row.terminalReason)
+          : liveRowCountability(row.cycle.showcaseExitReason, row.terminalReason)),
       });
     }
   }
@@ -426,7 +438,11 @@ export function mapSubscriberExchangeLiveBook(input: {
   trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
   for (const t of trades) {
-    if (t.nonCountable === undefined) Object.assign(t, liveRowCountability(t.exitReason));
+    if (t.nonCountable === undefined) {
+      const forced = liveRowCountability(t.exitReason);
+      // an unlinked cash-ledger row carries no stop evidence: never countable on a live book
+      Object.assign(t, input.requireStopEvidence && !forced.nonCountable ? liveRowStopCountability(null) : forced);
+    }
   }
   trades.sort((a, b) => {
     const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;
