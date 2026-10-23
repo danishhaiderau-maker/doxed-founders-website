@@ -365,3 +365,26 @@ def test_position_flatten_ok_never_disarms_and_unconfirmed_escalates_to_disarm_a
     assert len(calls) == 3 and out["readback"] == "NOT_FLAT"
     assert ns["DIS"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"] and ns["FF"] == ["AUTO_DISARM:LIQ_CLAMP_FLATTEN_UNCONFIRMED"]
     assert ns["LIVE_GUARDIAN_POSITION_FLATTEN_CONFIRMATION"] == "FLATTEN_POSITION_ONLY"
+
+
+def test_hm1_fly_admission_refuses_while_a_flatten_runs_and_until_a_post_flatten_read():
+    import collections
+    ns = _pf_ns()
+    ns["_LIVE_GUARDIAN_FORCE_FLAT_LOG"] = collections.deque(maxlen=50)
+    fence = ns["_live_flatten_entry_fence"]
+    fresh = {"ok": True, "fetched_at_ts": NOW, "read_age_s": 1.0}
+    assert fence(NOW, fresh) is None
+    rec = ns["_live_guardian_position_flatten"]({"trade_id": "t1", "tile": "gs1"}, NOW, spawn=lambda fn: None)
+    assert fence(NOW + 1, fresh) == "FLATTEN_IN_PROGRESS"
+    rec["done_ts"] = NOW + 5
+    assert fence(NOW + 6, {"ok": True, "fetched_at_ts": NOW + 5.5, "read_age_s": 1.0}) == "FLATTEN_READBACK_PENDING"
+    assert fence(NOW + 6, {"ok": False}) == "FLATTEN_READBACK_PENDING"
+    assert fence(NOW + 8, {"ok": True, "fetched_at_ts": NOW + 7.5, "read_age_s": 1.0}) is None
+    ns["_LIVE_GUARDIAN_FORCE_FLAT_LOG"].append({"requested": True, "ts": NOW + 9})      # a force-flat fences too
+    assert fence(NOW + 9, {"ok": True, "fetched_at_ts": NOW + 9, "read_age_s": 0.5}) == "FLATTEN_IN_PROGRESS"
+
+
+def test_hm1_admission_checks_the_fence_before_admit_entry():
+    body = _SRC[_SRC.index("def _live_tile_admission("):_SRC.index("def _live_copy_stamp_payload")]
+    assert body.index("_live_flatten_entry_fence(now, mirror)") < body.index("_ltg.admit_entry(")
+    assert "return False, [_ltg.SKIP_MUTEX]" in body

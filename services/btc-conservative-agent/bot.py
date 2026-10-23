@@ -62024,6 +62024,17 @@ def _live_tile_admission(lane, trade_id, now):
     _fetched = _live_copy_website_cached_view().get("fetched_at_ts")
     if not _fetched or now - float(_fetched) > 45.0:
         mirror = {"ok": False, "error": "website view stale"}
+    _fence = _live_flatten_entry_fence(now, mirror)
+    if _fence:   # HM1: no live entry while a position-flatten / force-flat runs (or before a post-flatten read-back)
+        try:
+            _tk = _ltg.tile_key_for_lane(lane)
+        except Exception:  # noqa: BLE001
+            _tk = None
+        row = {"ts": now, "trade_id": trade_id, "lane": lane, "tile_key": _tk, "admitted": False,
+               "reasons": [_ltg.SKIP_MUTEX], "flatten_fence": _fence}
+        _LIVE_TILE_GATE_LOG.append(row)
+        logger.warning(f"[LIVE TILE GATE] {trade_id} lane={lane} NOT copied (paper unaffected): {_ltg.SKIP_MUTEX} ({_fence})")
+        return False, [_ltg.SKIP_MUTEX], {"tile_key": _tk, "flatten_fence": _fence}
     try:   # AMEND4 E1/E7: the shared book helper (the same one paper fills walk); unreadable => None => AMBER block
         import paper_fill as _pf
         _book = _pf.book10l_at(now)
@@ -62538,6 +62549,31 @@ def _live_guardian_position_flatten(v: dict, now=None, spawn=None) -> dict | Non
         rec.update(ok=False, done_ts=now, error=f"spawn failed: {str(exc)[:160]}")
         _live_guardian_force_flat("AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED", now)
     return rec
+
+
+_LIVE_FLATTEN_FENCE_TAIL_SEC = 120.0
+
+
+def _live_flatten_entry_fence(now, mirror=None) -> str | None:
+    """HM1 (24 Oct, #852): Fly-side entry fence. Live admission refuses (SKIP_MUTEX) while ANY position-flatten or force-flat
+    is requested and not done, and after one finishes until a relay mirror read TAKEN AFTER it finished (Fly fetch time -
+    relay read age > done_ts) is available. The relay holds its own LiveEntryFence for the whole route as well."""
+    recs = list(_LIVE_GUARDIAN_POSITION_FLATTEN_LOG) + list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)
+    for r in recs:
+        if r.get("requested") and not r.get("done_ts"):
+            return "FLATTEN_IN_PROGRESS"
+    done = [float(r["done_ts"]) for r in recs
+            if r.get("requested") and r.get("done_ts") and now - float(r["done_ts"]) <= _LIVE_FLATTEN_FENCE_TAIL_SEC]
+    if not done:
+        return None
+    m = mirror if isinstance(mirror, dict) else {}
+    try:
+        read_ts = float(m["fetched_at_ts"]) - float(m["read_age_s"]) if m.get("ok") else None
+    except (KeyError, TypeError, ValueError):
+        read_ts = None
+    if read_ts is None or read_ts <= max(done):
+        return "FLATTEN_READBACK_PENDING"
+    return None
 
 
 def _live_guardian_tile_arm_block(lane: str) -> str | None:

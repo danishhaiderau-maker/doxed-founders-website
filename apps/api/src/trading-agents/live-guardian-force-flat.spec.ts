@@ -23,6 +23,14 @@ function svc(opts: { pos: Array<{ amount: number } | null>; orders: Array<Array<
   Object.assign(s as unknown as Record<string, unknown>, {
     emergencyFlattenOpenCopyLots: async () => { calls.push('lots'); return { flattened: 1 }; },
     prisma: {
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({
+        $executeRawUnsafe: async () => { calls.push('fence:lock'); },
+        liveEntryFence: { create: async () => { calls.push('fence:acquire'); } },
+      }),
+      liveEntryFence: {
+        update: async () => { calls.push('fence:refresh'); },
+        deleteMany: async () => { calls.push('fence:release'); },
+      },
       tradingAgent: { findUnique: async () => ({ id: 'a1' }) },
       tradingAgentInstance: { findUnique: async () => ({ exchangeProvider: 'bitfinex' }) },
     },
@@ -48,7 +56,13 @@ test('forceFlatDisarmAccount: lots -> reduce-only residual flatten -> cancel all
   assert.equal(r.verdict, 'FLAT_NO_STOPS');
   assert.equal(r.residualCloseOrderId, 77);
   assert.equal(r.cancelled, 2);
-  assert.deepEqual(calls.slice(0, 6), ['lots', 'pos', 'flatten:LONG:0.0003', 'orders', 'cancel:5', 'cancel:6']);
+  const ex = calls.filter((c) => !c.startsWith('fence:'));
+  assert.deepEqual(ex.slice(0, 6), ['lots', 'pos', 'flatten:LONG:0.0003', 'orders', 'cancel:5', 'cancel:6']);
+  // HM1: fence acquired (under the mutex lock) before anything else, refreshed, released last
+  assert.deepEqual(calls.slice(0, 2), ['fence:lock', 'fence:acquire']);
+  assert.equal(calls[calls.length - 1], 'fence:release');
+  assert.ok(calls.includes('fence:refresh'));
+  assert.equal(r.fenced, true);
   assert.equal(JSON.stringify(r).includes('apiSecret'), false);
 });
 
@@ -67,7 +81,7 @@ test('ops/force-flat-disarm route: admin token, confirmation, pause first, ok on
   assert.ok(body.includes('assertBotAdminToken(adminHeader, authorization)'));
   assert.ok(body.includes("'FORCE_FLAT_AND_DISARM'"));
   assert.ok(body.indexOf('setInstancePaused(uid, slug, true)') < body.indexOf('forceFlatDisarmAccount('));
-  assert.ok(body.includes("paused && flat.verdict === 'FLAT_NO_STOPS'"));
+  assert.ok(body.includes("paused && flat.verdict === 'FLAT_NO_STOPS' && flat.fenced"));
   assert.equal(/setInstancePaused\([^)]*false\)/.test(body), false);
   assert.equal(/adminHeader\}|authorization\}/.test(body), false); // the token is never logged
 });
@@ -79,8 +93,17 @@ test('ops/position-flatten route (AMEND5 G4(b) LIQ_CLAMP_FLATTEN): admin token, 
   const body = src.slice(i, src.indexOf('@Post(', i + 10));
   assert.ok(body.includes('assertBotAdminToken(adminHeader, authorization)'));
   assert.ok(body.includes("'FLATTEN_POSITION_ONLY'"));
-  assert.ok(body.includes('forceFlatDisarmAccount(uid, slug)'));
-  assert.ok(body.includes("flat.verdict === 'FLAT_NO_STOPS'"));
+  assert.ok(body.includes('forceFlatDisarmAccount(uid, slug, reason)'));
+  assert.ok(body.includes("flat.verdict === 'FLAT_NO_STOPS' && flat.fenced"));
   assert.equal(/setInstancePaused\(/.test(body), false); // position only: the tiles stay armed (no pause, no resume)
   assert.equal(/adminHeader\}|authorization\}/.test(body), false); // the token is never logged
+});
+
+test('HM1: a fence that cannot be acquired still flattens (safety) but is reported -> fenced=false (route ok=false)', async () => {
+  const { s } = svc({ pos: [null, null], orders: [[], []] });
+  (s as unknown as { prisma: Record<string, unknown> }).prisma.$transaction = async () => { throw new Error('db down'); };
+  const r = await s.forceFlatDisarmAccount('u', 'slug', 'why');
+  assert.equal(r.verdict, 'FLAT_NO_STOPS');
+  assert.equal(r.fenced, false);
+  assert.ok(r.errors.some((e) => e.startsWith('fence:')));
 });

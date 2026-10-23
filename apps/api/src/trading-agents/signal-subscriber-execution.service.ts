@@ -3814,13 +3814,59 @@ export async function takeLiveMutexLock(
 ): Promise<void> {
   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', liveMutexLockKey(userId));
 }
+/**
+ * HM1 (24 Oct, #852): an unexpired LiveEntryFence row (held by ops/position-flatten or ops/force-flat-disarm for the whole
+ * route) counts as one more live participant, so every hire / catch-up claim section and the pre-submit recount refuse
+ * while a flatten runs. A fence read that throws propagates (the claim fails closed).
+ */
 export async function countLiveMutexOthers(
-  tx: { signalCycleParticipant: { count: (a: any) => Promise<number> } },
+  tx: {
+    signalCycleParticipant: { count: (a: any) => Promise<number> };
+    liveEntryFence: { count: (a: any) => Promise<number> };
+  },
   userId: string,
   excludeParticipantId: string | null | undefined,
   nowMs = Date.now(),
 ): Promise<number> {
-  return tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
+  const others = await tx.signalCycleParticipant.count({ where: liveMutexWhere(userId, excludeParticipantId, nowMs) });
+  const fences = await tx.liveEntryFence.count({ where: liveEntryFenceActiveWhere(userId, nowMs) });
+  return others + fences;
+}
+/** HM1: bound for a crashed fence holder; the route refreshes it before each exchange step. */
+export const LIVE_ENTRY_FENCE_TTL_MS = 120_000;
+export function liveEntryFenceActiveWhere(userId: string, nowMs = Date.now()) {
+  return { userId, expiresAt: { gt: new Date(nowMs) } };
+}
+type LiveEntryFenceDb = {
+  $transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+  liveEntryFence: {
+    update: (a: any) => Promise<unknown>;
+    deleteMany: (a: any) => Promise<unknown>;
+  };
+};
+/**
+ * HM1: acquire the account entry fence under the account-wide live-mutex advisory lock (the same lock every claim takes),
+ * so a claim either committed before the fence (and its pre-submit recount then sees the fence) or sees the fence.
+ */
+export async function acquireLiveEntryFence(
+  db: LiveEntryFenceDb,
+  userId: string,
+  fenceId: string,
+  reason: string,
+  nowMs = Date.now(),
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await takeLiveMutexLock(tx, userId);
+    await tx.liveEntryFence.create({
+      data: { id: fenceId, userId, reason: reason.slice(0, 200), acquiredAt: new Date(nowMs), expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) },
+    });
+  });
+}
+export async function refreshLiveEntryFence(db: LiveEntryFenceDb, fenceId: string, nowMs = Date.now()): Promise<void> {
+  await db.liveEntryFence.update({ where: { id: fenceId }, data: { expiresAt: new Date(nowMs + LIVE_ENTRY_FENCE_TTL_MS) } });
+}
+export async function releaseLiveEntryFence(db: LiveEntryFenceDb, fenceId: string): Promise<void> {
+  await db.liveEntryFence.deleteMany({ where: { id: fenceId } });
 }
 export type SpeculativeEntryClaim =
   | { key: string; ok: true; result: EntryClaimResult }
@@ -4044,6 +4090,17 @@ export function buildExchangeMirror(input: {
     read_at: new Date(input.readAt).toISOString(),
   };
 }
+
+export type ForceFlatDisarmResult = {
+  verdict: 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' | 'NOT_LIVE' | 'READ_FAILED';
+  flattened: number;
+  residualCloseOrderId: number | null;
+  cancelled: number;
+  positionAmount: number | null;
+  openOrders: number | null;
+  errors: string[];
+  readAt: string;
+};
 
 /** Pure: force-flat read-back verdict (RK 24 Oct). FLAT_NO_STOPS only with zero position AND zero active orders. */
 export function forceFlatReadBackVerdict(positionAmount: number, activeOrders: number): 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' {
@@ -21874,16 +21931,35 @@ await this.notifications
   async forceFlatDisarmAccount(
     userId: string,
     agentSlug: string,
-  ): Promise<{
-    verdict: 'FLAT_NO_STOPS' | 'NOT_FLAT' | 'FLAT_WITH_ORDERS' | 'NOT_LIVE' | 'READ_FAILED';
-    flattened: number;
-    residualCloseOrderId: number | null;
-    cancelled: number;
-    positionAmount: number | null;
-    openOrders: number | null;
-    errors: string[];
-    readAt: string;
-  }> {
+    reason = 'unspecified',
+  ): Promise<ForceFlatDisarmResult & { fenced: boolean }> {
+    // HM1: hold the account entry fence for the WHOLE route (both ops/position-flatten and ops/force-flat-disarm). A failed
+    // acquisition still flattens (safety first) but is reported (fenced=false -> the caller returns ok=false).
+    const fenceId = `flatten:${randomUUID()}`;
+    const fenceErrors: string[] = [];
+    let fenced = false;
+    try {
+      await acquireLiveEntryFence(this.prisma, userId, fenceId, reason);
+      fenced = true;
+    } catch (e) {
+      fenceErrors.push(`fence:${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+    }
+    const touch = async () => {
+      if (fenced) await refreshLiveEntryFence(this.prisma, fenceId).catch(() => undefined);
+    };
+    try {
+      const r = await this.forceFlatDisarmAccountInner(userId, agentSlug, touch);
+      return { ...r, errors: [...fenceErrors, ...r.errors], fenced };
+    } finally {
+      if (fenced) await releaseLiveEntryFence(this.prisma, fenceId).catch(this.swallowedError('live-entry-fence-release'));
+    }
+  }
+
+  private async forceFlatDisarmAccountInner(
+    userId: string,
+    agentSlug: string,
+    touch: () => Promise<void>,
+  ): Promise<ForceFlatDisarmResult> {
     const errors: string[] = [];
     const msg = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 160);
     let flattened = 0;
@@ -21903,6 +21979,7 @@ await this.notifications
     const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
     if (!creds) return { verdict: 'READ_FAILED', ...empty, errors: [...errors, 'credentials-missing'], readAt: new Date().toISOString() };
     let residualCloseOrderId: number | null = null;
+    await touch();
     try {
       const pos = await this.bitfinex.getOpenPositionDetail(creds);
       if (pos && btcToSats(pos.amount) !== 0) {
@@ -21916,6 +21993,7 @@ await this.notifications
       errors.push(`residual:${msg(e)}`);
     }
     let cancelled = 0;
+    await touch();
     try {
       for (const o of await this.bitfinex.listActiveOrders(creds)) {
         try {
