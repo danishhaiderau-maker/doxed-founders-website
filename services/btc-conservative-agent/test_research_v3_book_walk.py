@@ -4,7 +4,7 @@ import json
 import pytest
 
 import paper_fill
-from book_walk_test_fixture import book_row, build_tape, trade_row
+from book_walk_test_fixture import book_row, build_tape, quiet_boot_log, trade_row
 from research_v3_book_walk import (
     BASIS_BOOK_WALK,
     R17_UNPROVEN,
@@ -31,8 +31,10 @@ def _replay(tape, direction, protection_id, *, fill_ts=1000.0, horizon=600):
     return replay_cell(path, _plan(protection_id), atr_pct_at_fill=ATR, leverage=LEV, margin_usd=MARGIN), path
 
 
-def _tape(books, trades):
-    return BookWalkTape.from_rows(books, trades)
+def _tape(books, trades, boot_log="quiet"):
+    books, trades = list(books), list(trades)
+    log = quiet_boot_log(0, 5000) if boot_log == "quiet" else boot_log
+    return BookWalkTape.from_rows(books, trades, boot_log=log)
 
 
 @pytest.mark.parametrize("direction", ["LONG", "SHORT"])
@@ -87,7 +89,10 @@ def test_coverage_requires_book_rows_and_trade_prints_over_the_whole_window():
     assert tape.coverage(500, 1900)["reason"] == "BOOK_ROWS_DO_NOT_COVER_WINDOW"
     assert tape.coverage(1010, 2500)["reason"] == "BOOK_ROWS_DO_NOT_COVER_WINDOW"
     gappy = build_tape(1000, 2000, skip_book=lambda s: 1500 <= s < 1503)
-    assert gappy.coverage(1010, 1900)["reason"] == "BOOK_ROW_GAP_OVER_2S"
+    assert gappy.coverage(1010, 1900)["reason"] == "BOOK_ROW_HOLE_DIFF_GE_2S"
+    # HM C2 refinement 2: ONE missing row (diff == 2) is already a hole
+    one_row = build_tape(1000, 2000, skip_book=lambda s: s == 1500)
+    assert one_row.coverage(1010, 1900)["reason"] == "BOOK_ROW_HOLE_DIFF_GE_2S"
     no_trades = BookWalkTape.from_rows([book_row(s, 100, 100.05) for s in range(1000, 2001)], [])
     assert no_trades.coverage(1010, 1900)["reason"] == "TRADE_PRINTS_DO_NOT_COVER_WINDOW"
     sparse = build_tape(1000, 2000, trade_every=400)
@@ -158,6 +163,8 @@ def test_book_touching_the_stop_during_a_trade_gap_is_r17_unproven_never_countab
     assert result["status"] == R17_UNPROVEN
     assert result["reasons"] == [STOP_UNOBSERVABLE_REASON]
     assert result["net_pnl_usd"] is None and result["exit_reason"] is None
+    # HM #847 nit: the R17 flag is stamped at the cell itself
+    assert (result["r17_status"], result["r17_unproven_reason"]) == (R17_UNPROVEN, STOP_UNOBSERVABLE_REASON)
 
 
 def test_book_touch_with_live_trade_prints_is_not_flagged():
@@ -200,6 +207,7 @@ def test_stop_exit_cells_carry_the_last_trade_doc_inferred_label():
     cell = replay_cell(path, plan, atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)
     assert (cell["status"], cell["exit_reason"]) == ("COMPLETE", "PHYSICAL_HARD_STOP")
     assert cell["stop_trigger_label"] == "LAST_TRADE_DOC_INFERRED"
+    assert (cell["r17_status"], cell["r17_unproven_reason"]) == ("PROVEN", None)
 
 
 def test_exit_fill_stamps_the_actual_row_ready_delay():
@@ -215,11 +223,102 @@ def test_exit_fill_stamps_the_actual_row_ready_delay():
 
 
 def test_every_coverage_stamp_carries_the_c2_flagged_count_even_when_zero():
-    # RK #847 cond 2: the interim 5 s rule stays; each report stamps how many cells it flagged.
-    from research_v3_book_walk import C2_FLAGGED_KEY, STOP_UNOBSERVABLE_RULE_STATUS
+    # RK #847 cond 2: each report stamps how many cells the C2 rule flagged, and per clause (HM refinement 3).
+    from research_v3_book_walk import C2_CLAUSE_COUNTS_KEY, C2_FLAGGED_KEY, STOP_UNOBSERVABLE_RULE_STATUS
     zero = coverage_summary({BASIS_BOOK_WALK: 2}, {BASIS_BOOK_WALK: 2}, {}, None, horizon_sec=7200)
     assert zero[C2_FLAGGED_KEY] == 0
-    assert zero["stop_unobservable_rule_status"] == STOP_UNOBSERVABLE_RULE_STATUS == "INTERIM_CHOSEN_NOT_DATA_DERIVED"
+    assert zero[C2_CLAUSE_COUNTS_KEY] == {"BOOK_HOLE": 0, "BOOT": 0, "GAP_OVER_60S": 0, "BOOK_MISSING": 0,
+                                          "BOOT_LOG_MISSING": 0}
+    assert "stop_unobservable_trade_gap_s" not in zero  # the 5 s constant is gone
+    status = zero["stop_unobservable_rule_status"]
+    assert status == STOP_UNOBSERVABLE_RULE_STATUS
+    assert "TRADEPRINT-GAP-20261023" in status and "n=17" in status and "in-sample" in status
+    assert "out-of-sample" in status and "offline only" in status
+    clauses = coverage_summary({BASIS_BOOK_WALK: 2}, {BASIS_BOOK_WALK: 2}, {}, None, horizon_sec=7200,
+                               unproven_cells={STOP_UNOBSERVABLE_REASON: 2},
+                               c2_clauses={"BOOK_HOLE": 1, "GAP_OVER_60S": 2})
+    assert clauses[C2_CLAUSE_COUNTS_KEY]["BOOK_HOLE"] == 1 and clauses[C2_CLAUSE_COUNTS_KEY]["GAP_OVER_60S"] == 2
     mixed = coverage_summary({BASIS_BOOK_WALK: 2}, {BASIS_BOOK_WALK: 2}, {}, None, horizon_sec=7200,
                              unproven_cells={STOP_UNOBSERVABLE_REASON: 3, "R17_UNPROVEN_ENTRY": 9})
     assert mixed[C2_FLAGGED_KEY] == 3 and mixed["r17_unproven_cells"] == 12
+
+
+# ---------------------------------------------------------------- HM C2 binding-rule probes (24 Oct 2026)
+_STOP_1PCT = {"loss_protection": {"hard_stop_margin_pct": 1.0}, "profit_protection": {"mode": "NONE"}}
+
+
+def _touch_cell(prints, *, missing_book=(), touch=range(1100, 1111), boot_log="quiet", window=(998, 1600)):
+    """LONG at 100 with a 1 % stop; the bid dips 2 % over ``touch`` while prints (at 100.05) are at ``prints``."""
+    def row(s):
+        bid = ENTRY - (2.0 if s in touch else 0.0)
+        return book_row(s, bid, bid + 0.05)
+
+    tape = _tape([row(s) for s in range(900, 1700) if s not in missing_book],
+                 [trade_row(s, ENTRY + 0.05) for s in prints], boot_log=boot_log)
+    path = PreparedBookWalkArrays(tape.window(*window), direction="LONG", entry_price=ENTRY, leverage=1.0,
+                                  fill_ts=1000.0, horizon_sec=600, qty=MARGIN / ENTRY)
+    assert float(path.neg_mae.max()) < 1.0  # the trade side alone never reaches the stop
+    return replay_cell(path, ReplayPlan(_STOP_1PCT), atr_pct_at_fill=ATR, leverage=1.0, margin_usd=MARGIN)
+
+
+def _quiet_30s(lo=1090, hi=1120):
+    return [s for s in range(900, 1700) if not lo < s < hi]
+
+
+def test_c2_single_missing_book_row_in_the_gap_plus_touch_is_flagged():
+    cell = _touch_cell(_quiet_30s(), missing_book=(1105,))
+    assert (cell["status"], cell["r17_unproven_reason"]) == (R17_UNPROVEN, STOP_UNOBSERVABLE_REASON)
+    assert cell["c2_clause"] == "C2:BOOK_HOLE"
+
+
+def test_c2_quiet_30s_gap_plus_touch_without_a_hole_is_not_flagged():
+    cell = _touch_cell(_quiet_30s())
+    assert cell["status"] == "COMPLETE" and cell["r17_status"] == "PROVEN"
+
+
+def test_c2_touch_before_the_first_in_window_print_uses_the_full_tape_previous_print():
+    # window starts at 998; the previous print (997) is just outside it, the next is 1010: a 13 s quiet gap.
+    prints = [s for s in range(900, 1700) if not 997 < s < 1010]
+    cell = _touch_cell(prints, touch=range(1000, 1006))
+    assert cell["status"] == "COMPLETE"
+
+
+def test_c2_gap_over_60s_plus_touch_is_flagged():
+    cell = _touch_cell(_quiet_30s(1080, 1145))  # 65 s, no hole, no boot, boot log readable
+    assert cell["status"] == R17_UNPROVEN and cell["c2_clause"] == "C2:GAP_OVER_60S"
+
+
+def test_c2_boot_near_the_gap_plus_touch_is_flagged():
+    cell = _touch_cell(_quiet_30s(), boot_log=quiet_boot_log(0, 5000, boots=(1150.0,)))  # b + 30 s
+    assert cell["status"] == R17_UNPROVEN and cell["c2_clause"] == "C2:BOOT"
+    late = _touch_cell(_quiet_30s(), boot_log=quiet_boot_log(0, 5000, boots=(1190.0,)))  # b + 70 s: outside
+    assert late["status"] == "COMPLETE"
+
+
+def test_c2_absent_boot_log_flags_but_absent_resubscribe_log_never_does():
+    cell = _touch_cell(_quiet_30s(), boot_log=None)
+    assert cell["status"] == R17_UNPROVEN and cell["c2_clause"] == "C2:BOOT_LOG_MISSING"
+    # the same quiet gap with a readable boot log is fine: no resubscribe log exists and none is required
+    assert _touch_cell(_quiet_30s())["status"] == "COMPLETE"
+
+
+def test_c2_gap_without_a_touch_is_never_flagged():
+    cell = _touch_cell(_quiet_30s(1080, 1145), touch=())
+    assert cell["status"] == "COMPLETE"
+
+
+def test_c2_has_no_fixed_seconds_threshold_left():
+    import research_v3_book_walk as bw
+    assert not hasattr(bw, "STOP_UNOBSERVABLE_TRADE_GAP_S") and not hasattr(bw, "_in_trade_gap")
+
+
+def test_load_book_walk_reads_the_boot_log(tmp_path):
+    (tmp_path / "bfx_book_10l_1s.jsonl").write_text(json.dumps(book_row(1000, 100, 100.05)) + "\n")
+    (tmp_path / "bfx_trades.jsonl").write_text(json.dumps(trade_row(1000, 100.02)) + "\n")
+    (tmp_path / "runtime_telemetry_1m.jsonl").write_text(
+        "\n".join(json.dumps({"ts": t, "boot_ts": 900.0}) for t in (960, 1020, 1080)) + "\nnot json\n")
+    tape = load_book_walk(tmp_path, [(1000, 1001)])
+    assert tape.boot_log is not None and list(tape.boot_log.boots) == [900.0]
+    assert tape.receipt["boot_log_samples"] == 3
+    (tmp_path / "runtime_telemetry_1m.jsonl").unlink()
+    assert load_book_walk(tmp_path, [(1000, 1001)]).boot_log is None

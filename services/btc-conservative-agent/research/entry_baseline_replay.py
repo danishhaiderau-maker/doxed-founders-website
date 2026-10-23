@@ -1279,13 +1279,17 @@ def replay_health(report: Mapping[str, Any] | None) -> dict[str, Any]:
     counts = {"opportunities": (report or {}).get("same_opportunity_count") if isinstance(report, Mapping) else None,
               "directional_evaluations": evaluations, "unknown": unknown, "fills": total("fills"),
               "no_fills": total("no_fills"), "per_baseline": per_baseline}
-    degraded = sorted(k for k, b in per_baseline.items() if b["status"] != "OK")
+    # HM #847 nit: a baseline that had zero evaluations is DEGRADED on its own row only; it must not degrade the
+    # whole report (it is listed separately). The report degrades only for a zero-fill baseline that WAS evaluated.
+    no_eval = sorted(k for k, b in per_baseline.items() if b["reason_code"] == "BASELINE_REPLAY_NO_EVALUATIONS")
+    degraded = sorted(k for k, b in per_baseline.items() if b["status"] != "OK" and k not in no_eval)
     counts["degraded_baselines"] = degraded
+    counts["no_evaluation_baselines"] = no_eval
     if evaluations <= 0:
         return {"status": "DEGRADED", "reason_code": "BASELINE_REPLAY_NO_EVALUATIONS", **counts}
     if degraded:
         reasons = {per_baseline[k]["reason_code"] for k in degraded}
-        if reasons == {"BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"} and len(degraded) == len(per_baseline):
+        if reasons == {"BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"} and len(degraded) == len(per_baseline) - len(no_eval):
             code = "BASELINE_REPLAY_ALL_UNKNOWN_ZERO_FILLS"
         else:
             code = "BASELINE_REPLAY_ZERO_FILLS"

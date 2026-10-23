@@ -898,11 +898,11 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(outcome["unproven_net_pnl_usd"], 1.5)
 
     def test_c2_flagged_cell_outcome_and_per_candidate_count(self):
-        """RK #847 cond 2: a C2 (stop in a >5 s trade gap) cell names its reason; every candidate row and the
-        mark_source stamp carry the C2 flagged count (0 stamped, not omitted)."""
+        """RK #847 cond 2 + HM C2 refinement 3: a C2 cell names its reason and clauses; every candidate row and
+        the mark_source stamp carry the C2 flagged count and per-clause counts (0 stamped, not omitted)."""
         C = research_v3_candidates
         store = C._ProtectionCellStore()
-        cell = (C._KIND_REPLAYED, "R17_UNPROVEN", "PHYSICAL_HARD_STOP", -0.4, 0.0, 1.0, 1.0)
+        cell = (C._KIND_REPLAYED, "R17_UNPROVEN", "C2:BOOK_HOLE+BOOT", -0.4, 0.0, 1.0, 1.0)
         diag = (C._KIND_NO_FILL, None, None, float("nan"))
         store.append(0, 0, 0, 0, store.encode_conservative(cell), store.encode_diagnostic(diag))
         outcome = store.conservative_outcome(0, "BOOK_WALK", {})
@@ -910,11 +910,15 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(outcome["r17_unproven_reason"], "STOP_UNOBSERVABLE_TRADE_GAP")
         self.assertIsNone(outcome["net_pnl_usd"])
         self.assertEqual(outcome["unproven_net_pnl_usd"], -0.4)
+        self.assertEqual(outcome["c2_clauses"], ["BOOK_HOLE", "BOOT"])
+        self.assertIsNone(outcome["exit_reason"])
         report = evaluate_protection_screen([conservative_source()])
         self.assertEqual(report["mark_source"]["c2_stop_unobservable_trade_gap_cells"], 0)
+        self.assertEqual(set(report["mark_source"]["c2_stop_unobservable_clause_counts"].values()), {0})
         self.assertTrue(report["candidates"])
         for candidate in report["candidates"]:
             self.assertEqual(candidate["c2_stop_unobservable_trade_gap_cells"], 0)
+            self.assertEqual(candidate["c2_stop_unobservable_clause_counts"]["GAP_OVER_60S"], 0)
 
     def test_policy_identity_excludes_trade_quantity_and_hashes_once(self):
         first = conservative_source()

@@ -634,3 +634,12 @@ def test_combos_contract_carries_the_full_prereg_shas_and_no_provisional_minimum
     assert {k: len(v) for k, v in spec["prereg"].items()} == {"frozen_h1_h8_sha256": 64, "addendum1_sha256": 64, "addendum2_sha256": 64}
     spec2 = {**_combos_spec(), "prereg": spec["prereg"]}
     assert _eval(spec2, {"policy_grid": {"rows": []}})["prereg"]["addendum2_sha256"].startswith("2a047c5e")
+
+
+def test_r3_quarantined_research_api_is_amber_source_retired_not_red():
+    """HM #847: the R3 quarantine is a retirement, not an outage -> AMBER SOURCE_RETIRED_R17, never RED."""
+    viol, met = ct._rec_research_api_content({"status": "R3_QUARANTINED", "quarantine": "GENOME_GRID"}, {})
+    assert [v["kind"] for v in viol] == ["SOURCE_RETIRED_R17"]
+    assert [v["severity"] for v in viol] == [ct.AMBER]
+    down, _ = ct._rec_research_api_content({"status": "UNAVAILABLE"}, {})
+    assert [(v["kind"], v["severity"]) for v in down] == [("RESEARCH_API_UNAVAILABLE", ct.RED)]

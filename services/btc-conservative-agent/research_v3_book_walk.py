@@ -14,8 +14,9 @@ HM re-review 23 Oct 2026 (~21:10 AEDT) defect 2 and RK binding conditions (~21:1
 * An event is replayed only when the book (and trade prints) cover its whole window; otherwise it is
   ``R17_UNPROVEN`` and is excluded from every countable result.  Coverage is stamped per analysis.
 * A replay cell is ``R17_UNPROVEN`` (STOP_UNOBSERVABLE_TRADE_GAP) when, before its exit, the book's
-  executable side touches or crosses one of its stop levels during a trade-print gap longer than
-  ``STOP_UNOBSERVABLE_TRADE_GAP_S`` (no trades heartbeat: quiet market and outage are indistinguishable).
+  executable side touches or crosses one of its stop levels during a trade-print gap AND the shared
+  detector ``r17_gap_detector`` finds a book hole, a boot, a gap > 60 s, or absent book/boot evidence
+  for that gap (C2 binding rule, TRADEPRINT-GAP-20261023; previous/next prints come from the FULL tape).
 
 The shared trigger helper (``quote_trigger.first_level_trigger`` / ``book_exit_price``) lands with
 realism-v2 (#839/#841), which merges before this change; the rules here are the same rules and the
@@ -33,6 +34,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 import paper_fill as _pf
+import r17_gap_detector as _gd
 
 BOOK_FILE = "bfx_book_10l_1s.jsonl"
 TRADES_FILE = "bfx_trades.jsonl"
@@ -46,14 +48,13 @@ MAX_BOOK_GAP_S = _pf.MAX_BOOK_AGE_S  # 2 s: a longer gap between book rows break
 MAX_TRADE_GAP_S = 300.0  # no trade-print row for 5 min inside a window = trade collector outage
 # HM #847 N3: bfx_book_10l / bfx_trades are collected for the Bitfinex perp only (bfx_book_top.SYMBOL).
 TAPE_SYMBOL = "tBTCF0:USTF0"
-# HM #847 C2: bfx_trades has no heartbeat, so a quiet tape and a trade-WS outage look the same.  A
-# book row whose executable exit side sits inside a trade-print gap longer than this cannot prove
-# that a last-trade stop at that level did NOT trigger; if it touches a stop, the cell is R17_UNPROVEN.
-STOP_UNOBSERVABLE_TRADE_GAP_S = 5.0
+# HM #847 C2: bfx_trades has no heartbeat, so a quiet tape and a trade-WS outage look the same.  A book row
+# whose executable exit side touches a stop inside a trade-print gap is R17_UNPROVEN only when the ONE shared
+# detector (r17_gap_detector, also #848's ENTRY_BOOK_GAP) finds hole / boot / >60 s / missing evidence.
 STOP_UNOBSERVABLE_REASON = "STOP_UNOBSERVABLE_TRADE_GAP"
-# RK #847 cond 2: the 5 s gap is an INTERIM threshold (chosen, not data-derived); every report stamps the count.
-STOP_UNOBSERVABLE_RULE_STATUS = "INTERIM_CHOSEN_NOT_DATA_DERIVED"
+STOP_UNOBSERVABLE_RULE_STATUS = _gd.RULE_STATUS
 C2_FLAGGED_KEY = "c2_stop_unobservable_trade_gap_cells"
+C2_CLAUSE_COUNTS_KEY = "c2_stop_unobservable_clause_counts"
 KIND_TRADE, KIND_BOOK = 0, 1
 EXIT_FILL_DELAY_SOURCE = "FIRST_BOOK_ROW_AT_OR_AFTER_TRIGGER"
 
@@ -99,17 +100,19 @@ class BookWalkTape:
     """Book rows and trade prints held as compact arrays (read-only research input)."""
 
     def __init__(self, book_s: np.ndarray, levels: np.ndarray, trade_ts: np.ndarray, trade_px: np.ndarray,
-                 trade_recv_s: np.ndarray, receipt: dict[str, Any]) -> None:
+                 trade_recv_s: np.ndarray, receipt: dict[str, Any], boot_log: "_gd.BootLog | None" = None) -> None:
         self.book_s = book_s          # int64, sorted, unique (last row per second wins)
         self.levels = levels          # float64 [n, 2, LEVELS, 2]: side (0 bid, 1 ask), level, (px, sz)
         self.trade_ts = trade_ts      # float64 exchange print time, sorted
         self.trade_px = trade_px
         self.trade_recv_s = trade_recv_s  # int64 collector second each print was written (sorted unique)
         self.receipt = receipt
+        self.boot_log = boot_log      # runtime_telemetry boots (C2 BOOT clause); None = unreadable -> flags
 
     @classmethod
     def from_rows(cls, book_rows: Iterable[Mapping[str, Any]], trade_rows: Iterable[Mapping[str, Any]] = (),
-                  *, receipt: dict[str, Any] | None = None) -> "BookWalkTape":
+                  *, receipt: dict[str, Any] | None = None,
+                  boot_log: "_gd.BootLog | None" = None) -> "BookWalkTape":
         by_s: dict[int, np.ndarray] = {}
         stats = {"book_rows_accepted": 0, "book_rows_rejected": 0, "trade_rows": 0, "trade_prints": 0}
         for row in book_rows:
@@ -161,7 +164,7 @@ class BookWalkTape:
         return cls(np.asarray(secs, dtype=np.int64), levels,
                    np.asarray([p[0] for p in prints], dtype=np.float64),
                    np.asarray([p[1] for p in prints], dtype=np.float64),
-                   np.asarray(sorted(recv), dtype=np.int64), details)
+                   np.asarray(sorted(recv), dtype=np.int64), details, boot_log)
 
     # ---------------------------------------------------------------- coverage
     def coverage(self, t0: float, t1: float) -> dict[str, Any]:
@@ -176,8 +179,9 @@ class BookWalkTape:
             return out
         gap = float(np.max(np.diff(window))) if len(window) > 1 else 0.0
         out["book_max_gap_s"] = gap
-        if gap > MAX_BOOK_GAP_S:
-            out.update(covered=False, reason="BOOK_ROW_GAP_OVER_2S")
+        # HM C2 refinement 2: a hole is ONE missing 1-s row (consecutive rows diff >= 2), shared detector constant.
+        if gap >= _gd.BOOK_HOLE_MIN_DIFF_S:
+            out.update(covered=False, reason="BOOK_ROW_HOLE_DIFF_GE_2S")
             return out
         r = self.trade_recv_s
         tlo = int(np.searchsorted(r, math.floor(t0) - MAX_TRADE_GAP_S, side="left"))
@@ -199,17 +203,24 @@ class BookWalkTape:
         hi = int(np.searchsorted(self.book_s, math.ceil(t1) + MAX_BOOK_GAP_S + 1, side="right"))
         tlo = int(np.searchsorted(self.trade_ts, t0, side="left"))
         thi = int(np.searchsorted(self.trade_ts, t1, side="right"))
+        # The full tape's prints / book seconds / boots ride along by reference (HM window-edge fix): the C2
+        # detector must see the previous/next print even when it lies outside [t0, t1].
         return BookWalkWindow(self.book_s[lo:hi].copy(), self.levels[lo:hi].copy(),
-                              self.trade_ts[tlo:thi].copy(), self.trade_px[tlo:thi].copy())
+                              self.trade_ts[tlo:thi].copy(), self.trade_px[tlo:thi].copy(),
+                              tape_trade_ts=self.trade_ts, tape_book_s=self.book_s, boot_log=self.boot_log)
 
 
 class BookWalkWindow:
     """One event's book rows and prints (small, picklable for replay workers)."""
 
-    __slots__ = ("book_s", "levels", "trade_ts", "trade_px")
+    __slots__ = ("book_s", "levels", "trade_ts", "trade_px", "tape_trade_ts", "tape_book_s", "boot_log")
 
-    def __init__(self, book_s, levels, trade_ts, trade_px) -> None:
+    def __init__(self, book_s, levels, trade_ts, trade_px, *, tape_trade_ts=None, tape_book_s=None,
+                 boot_log=None) -> None:
         self.book_s, self.levels, self.trade_ts, self.trade_px = book_s, levels, trade_ts, trade_px
+        self.tape_trade_ts = trade_ts if tape_trade_ts is None else tape_trade_ts
+        self.tape_book_s = book_s if tape_book_s is None else tape_book_s
+        self.boot_log = boot_log
 
     def row(self, index: int) -> dict[str, Any]:
         lv = self.levels[index]
@@ -283,8 +294,16 @@ def load_book_walk(data_dir: str | Path, intervals: Iterable[tuple[float, float]
                     if isinstance(row, dict):
                         yield row
 
-    tape = BookWalkTape.from_rows(rows(BOOK_FILE, "book_lines_read"), rows(TRADES_FILE, "trade_lines_read"))
+    boot_paths = rotation_paths(data_dir, _gd.BOOT_LOG_FILE)
+    boot_log = _gd.BootLog.load(boot_paths) if boot_paths else None  # absent -> every touched gap flags
+    tape = BookWalkTape.from_rows(rows(BOOK_FILE, "book_lines_read"), rows(TRADES_FILE, "trade_lines_read"),
+                                  boot_log=boot_log)
     tape.receipt.update(stats)
+    tape.receipt.update({
+        "boot_log_source_files": [p.name for p in boot_paths],
+        "boot_log_samples": int(len(boot_log.sample_ts)) if boot_log is not None else 0,
+        "boot_log_boots": int(len(boot_log.boots)) if boot_log is not None else 0,
+    })
     tape.receipt.update({
         "symbol": TAPE_SYMBOL,
         "windows": len(windows),
@@ -306,24 +325,6 @@ class _LazyExitMargins:
         return self.path.exit_margin(int(index))
 
 
-def _in_trade_gap(ts: np.ndarray, trade_ts: np.ndarray,
-                  max_gap_s: float = STOP_UNOBSERVABLE_TRADE_GAP_S) -> np.ndarray:
-    """True where ``ts`` falls in a gap between consecutive trade prints longer than ``max_gap_s``.
-
-    Before the first or after the last print in the window the gap is unbounded (True).
-    """
-    ts = np.asarray(ts, dtype=np.float64)
-    prints = np.asarray(trade_ts, dtype=np.float64)
-    if not len(ts):
-        return np.zeros(0, dtype=bool)
-    if not len(prints):
-        return np.ones(len(ts), dtype=bool)
-    after = np.searchsorted(prints, ts, side="right")  # index of the next print strictly after ts
-    prev = np.where(after > 0, prints[np.maximum(after - 1, 0)], -np.inf)
-    nxt = np.where(after < len(prints), prints[np.minimum(after, len(prints) - 1)], np.inf)
-    return (nxt - prev) > max_gap_s
-
-
 class PreparedBookWalkArrays:
     """Drop-in for ``PreparedReplayArrays`` on a trade + book timeline.
 
@@ -335,7 +336,7 @@ class PreparedBookWalkArrays:
 
     __slots__ = ("ts", "price", "kind", "cur", "mfe", "mae", "neg_mae", "underwater", "favorable", "age",
                  "age_sorted", "n", "floors", "seg_start", "seg_mfe", "seg_min_cur", "exit_cur",
-                 "gap_neg_mae", "_window", "_direction", "_entry", "_leverage", "_qty", "_fills")
+                 "gap_neg_mae", "gap_clause", "_window", "_direction", "_entry", "_leverage", "_qty", "_fills")
 
     def __init__(self, window: BookWalkWindow, *, direction: str, entry_price: float, leverage: float,
                  fill_ts: float, horizon_sec: float, qty: float) -> None:
@@ -363,9 +364,12 @@ class PreparedBookWalkArrays:
         else:
             self.seg_start = self.seg_mfe = self.seg_min_cur = np.empty(0)
         self.exit_cur = _LazyExitMargins(self)
-        # Running max of the book-side loss over book rows that sit inside a trade-print gap longer than
-        # STOP_UNOBSERVABLE_TRADE_GAP_S (HM #847 C2).  replay_cell compares it with every stop level.
-        in_gap = book & _in_trade_gap(ts, window.trade_ts)
+        # Running max of the book-side loss over book rows inside a trade-print gap that the shared C2 detector
+        # flags (hole / boot / >60 s / missing evidence).  replay_cell compares it with every stop level (TOUCH
+        # gate) and reads ``gap_clause`` at the first touching row for the per-clause report counts.
+        clauses = _gd.touch_gap_clauses(ts, window.tape_trade_ts, window.tape_book_s, window.boot_log)
+        in_gap = book & (clauses != 0)
+        self.gap_clause = np.where(in_gap, clauses, 0)
         gap_loss = np.where(in_gap, -margin, -np.inf)
         self.gap_neg_mae = np.maximum.accumulate(gap_loss) if len(ts) else gap_loss
 
@@ -390,7 +394,8 @@ class PreparedBookWalkArrays:
 
 def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapping[str, int],
                      unproven_reasons: Mapping[str, int], tape_receipt: Mapping[str, Any] | None,
-                     *, horizon_sec: float, unproven_cells: Mapping[str, int] | None = None) -> dict[str, Any]:
+                     *, horizon_sec: float, unproven_cells: Mapping[str, int] | None = None,
+                     c2_clauses: Mapping[str, int] | None = None) -> dict[str, Any]:
     """Per-analysis coverage stamp; R17_UNPROVEN events are excluded from every countable result.
 
     ``unproven_cells`` counts replay cells (policy x episode) made R17_UNPROVEN inside a covered event,
@@ -430,9 +435,12 @@ def coverage_summary(events_by_basis: Mapping[str, int], episodes_by_basis: Mapp
         "r17_unproven_reasons": dict(sorted(unproven_reasons.items())),
         "r17_unproven_cells": sum(cells.values()),
         "r17_unproven_cell_reasons": dict(sorted(cells.items())),
-        "stop_unobservable_trade_gap_s": STOP_UNOBSERVABLE_TRADE_GAP_S,
-        # RK #847 cond 2: how many cells the interim C2 rule flagged in THIS report (0 is stamped, not omitted).
+        # RK #847 cond 2: how many cells the C2 rule flagged in THIS report (0 is stamped, not omitted), and
+        # HM refinement 3: per clause (a cell can hit several clauses, so these may sum above the total).
         C2_FLAGGED_KEY: int(cells.get(STOP_UNOBSERVABLE_REASON, 0)),
+        C2_CLAUSE_COUNTS_KEY: {name: int((c2_clauses or {}).get(name, 0)) for name in _gd.CLAUSE_NAMES.values()},
+        "stop_unobservable_rule": ("touch AND (book hole diff>=2 OR boot in [a-5s, b+60s] OR gap > 60 s OR "
+                                   "book/boot evidence absent); resubscribe-log absence never flags"),
         "stop_unobservable_rule_status": STOP_UNOBSERVABLE_RULE_STATUS,
         # Kept for the window summary / dashboards that read the old mark-source keys.
         "fallback_events": unproven,
