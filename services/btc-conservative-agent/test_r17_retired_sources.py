@@ -68,3 +68,71 @@ def test_readers_refuse_retired_files():
     for f in ("fast_cut_survivor_report.json", "fast_cut_sweep_report.json", "qualified_exit_policy_grid_report.json"):
         assert r3_quarantine.quarantined_file(f"/x/{f}")
     json.dumps(r3_quarantine.disabled_payload("TICK_SIM"))
+
+
+# ---- LIMIT_FILL_1S (RK #847 cond 4): all six evaluate_limit_fill callers retired -----------------------------
+import importlib
+
+LIMIT_FILES = (
+    "entry_baseline_replay_report.json",
+    "entry_baseline_replay_episode_receipts.jsonl.gz",
+    "conservative-results.jsonl.gz",
+    "conservative_fill_descriptive_report.json",
+)
+
+
+def _resolve(dotted):
+    mod, _, name = dotted.rpartition(".")
+    return getattr(importlib.import_module(mod), name)
+
+
+def test_every_limit_fill_1s_producer_is_retired():
+    assert "LIMIT_FILL_1S" in r3_quarantine.ACTIVE
+    for dotted in r3_quarantine.INVENTORY["LIMIT_FILL_1S"]:
+        assert getattr(_resolve(dotted), "r3_retired_key", None) == "LIMIT_FILL_1S", dotted
+    # the writers that wrap the producers are retired as well
+    from research import entry_baseline_replay, policy_evidence_evaluator
+    for fn in (entry_baseline_replay.materialize_same_opportunity_replay,
+               entry_baseline_replay.materialize_v3_opportunity_replay,
+               policy_evidence_evaluator.persist_v3_conservative_results):
+        assert fn.r3_retired_key == "LIMIT_FILL_1S"
+
+
+def test_limit_fill_1s_writers_write_nothing(tmp_path, capsys):
+    from research import conservative_fill_cohort, entry_baseline_replay, policy_evidence_evaluator
+    for rep in (entry_baseline_replay.materialize_v3_opportunity_replay(tmp_path),
+                entry_baseline_replay.materialize_same_opportunity_replay(tmp_path),
+                policy_evidence_evaluator.build_v3_conservative_results(tmp_path),
+                policy_evidence_evaluator.persist_v3_conservative_results(tmp_path),
+                conservative_fill_cohort.build_conservative_fill_cohort([]),
+                conservative_fill_cohort.build_v3_conservative_fill_cohort([])):
+        assert r3_quarantine.is_retired_payload(rep) and rep["countable"] is False
+        assert rep["quarantine"] == "LIMIT_FILL_1S" and set(LIMIT_FILES) == set(rep["files_not_written"])
+    assert list(tmp_path.iterdir()) == []
+    assert capsys.readouterr().out.count("source retired (R17)") == 6
+
+
+def test_limit_fill_1s_row_producers_return_no_evidence_and_print_once(capsys):
+    from research import entry_baseline_replay, latency_schedule_replay
+    assert analyzer._joined_compressed_chase_tape_evidence({}, {}, [], "long", {}) == {}
+    assert analyzer._joined_compressed_chase_tape_evidence({}, {}, [], "long", {}) == {}
+    assert entry_baseline_replay.replay_episode({}) is None
+    out = latency_schedule_replay._replay_delayed_entry(
+        schedule={}, delay_sec=1, ordering_treatment=None, tape=[], direction="long", requested_qty=None,
+        quantity_constraints=None, symbol=None, conditional=False)
+    assert out["status"] == "UNKNOWN" and out["reason_codes"] == ["SOURCE_RETIRED_R17"]
+    assert out["qualification_eligible"] is False and out["entry_receipt"] is None
+    assert capsys.readouterr().out.count("_joined_compressed_chase_tape_evidence: source retired (R17)") == 1
+
+
+def test_limit_fill_1s_readers_refuse(tmp_path):
+    from research import input_blockers, research_dashboard
+    for f in LIMIT_FILES:
+        assert r3_quarantine.quarantined_file(f"/x/{f}")
+    (tmp_path / "entry_baseline_replay_report.json").write_text('{"schema":"stale"}')
+    assert analyzer._load_json_report(str(tmp_path / "entry_baseline_replay_report.json")) == {}
+    item = input_blockers.entry_baseline_replay_item(tmp_path)
+    assert item["status"] == input_blockers.RETIRED and item["reason_code"] == input_blockers.SOURCE_RETIRED_R17
+    assert research_dashboard._pick_best_payload("conservative_fill_descriptive_report.json", {"d": 1}) == {"d": 1}
+    payload, _meta = research_dashboard._declared_atomic_generation_report("entry_baseline_replay_report.json")
+    assert payload is None

@@ -89,6 +89,16 @@ from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
+
+
+class _R3RetiredSection(Exception):
+    """Control flow only: a retired (R17) producer returned its disabled payload; the section writes nothing."""
+
+    def __init__(self, payload):
+        super().__init__(payload.get("label"))
+        self.payload = payload
+
+
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
 
@@ -362,6 +372,11 @@ def _restore_analyzer_output(tee, log_handle):
 
 
 def _load_json_report(path, default=None):
+    from research.r3_quarantine import quarantined_file as _r3_quarantined
+
+    if _r3_quarantined(path):
+        # R3/R17: a retired producer's stale output is never read (left on disk, not loaded).
+        return default if default is not None else {}
     candidates = [path]
     if not os.path.dirname(str(path)):
         alt = analyzer_report_path(path)
@@ -13980,6 +13995,7 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
     }
 
 
+@_r3q_retired("LIMIT_FILL_1S", returns=lambda *a, **k: {}, print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tape_by_bucket):
     """Replay the signed virtual limit over the complete one-second path.
 
@@ -21141,6 +21157,7 @@ def _stamp_policy_evaluator_status(path, status):
             "relative_path", "artifact_sha256", "artifact_size_bytes",
             "cache_rows_ingested", "cache_rows_skipped_missing_identity",
             "cache_skip_reason_counts", "regime_feature_coverage",
+            "status", "label", "quarantine", "files_not_written",
         )
     }
     temporary = target.with_name(
@@ -22113,6 +22130,11 @@ def write_report_manifest(
             policy_data_dir, incident_input=incident_input,
             generation=baseline_generation, canonical_manifest=baseline_manifest,
         )
+        from research.r3_quarantine import is_retired_payload as _r3q_is_retired
+
+        if _r3q_is_retired(baseline_replay):
+            # RK #847 cond 4: priced on market_microstructure_1s -> source retired (R17); no report, no sidecar.
+            raise _R3RetiredSection(baseline_replay)
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
         baseline_replay["generation"] = baseline_generation
@@ -22142,6 +22164,10 @@ def write_report_manifest(
             "health": baseline_replay["health"],
             "episode_receipts_sidecar": replay_sidecar,
         })
+    except _R3RetiredSection as retired_section:
+        baseline_replay = None
+        print(f"  Same-Opportunity Entry Baseline Replay: {retired_section.payload['label']} "
+              f"({retired_section.payload['status']} {retired_section.payload['quarantine']}) — not written")
     except Exception as exc:
         baseline_replay_error = f"{type(exc).__name__}: {exc}"
     try:

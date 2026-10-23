@@ -9,6 +9,10 @@ do exactly that until they are rebuilt on the shared ``paper_fill`` pricer and
                       chases and exits on 1s tape bid/ask.
 * EXIT_LADDER_SIM  -- analyzer exit_ladder_simulator_report replays
                       signal_replay ticker/BBO ticks through the fast-cut ladder.
+* TICK_SIM         -- the analyzer tick-sim helpers (INVENTORY['TICK_SIM']).
+* LIMIT_FILL_1S    -- the six evaluate_limit_fill callers (INVENTORY['LIMIT_FILL_1S'];
+                      RK #847 cond 4, 24 Oct 2026 AEDT).  None has the book/trades
+                      window book_limit_entry needs, so all six are retired.
 
 Until fixed the producers STOP writing their outputs, and every analyzer /
 dashboard / Strategist-facing reader refuses the named files (stale copies on
@@ -52,6 +56,20 @@ QUARANTINE: dict[str, dict[str, Any]] = {
             "fast_cut_survivor_report.json",
             "fast_cut_sweep_report.json",
             "qualified_exit_policy_grid_report.json",
+        ),
+    },
+    # RK #847 cond 4 (24 Oct 2026 AEDT): labels alone are not enough.  None of the six evaluate_limit_fill callers
+    # can move onto book_limit_entry without a new per-episode bfx_book_10l + bfx_trades loader in its builder
+    # (their inputs embed market_microstructure_1s rows only), so all six stop writing until rebuilt.  The
+    # canonical CONSERVATIVE entry (research_v3_candidates -> book_limit_entry) is unaffected.
+    "LIMIT_FILL_1S": {
+        "producer": "conservative_limit_fill.evaluate_limit_fill callers (see INVENTORY['LIMIT_FILL_1S'])",
+        "price_source": "market_microstructure_1s bid/ask (evaluate_limit_fill / evaluate_conditional_limit_fill)",
+        "files": (
+            "entry_baseline_replay_report.json",
+            "entry_baseline_replay_episode_receipts.jsonl.gz",
+            "conservative-results.jsonl.gz",
+            "conservative_fill_descriptive_report.json",
         ),
     },
 }
@@ -142,19 +160,32 @@ def disabled_payload(key: str, **extra: Any) -> dict[str, Any]:
     return out
 
 
-def retired(key: str, *, writes_report: bool = False):
+def retired(key: str, *, writes_report: bool = False, returns: Any = None, print_once: bool = False):
     """Decorator for a quarantined producer: when ``key`` is active it runs nothing, writes nothing, prints the
-    section as ``source retired (R17)`` and returns ``disabled_payload`` (report writers) or None (stdout sweeps,
-    whose callers already treat None as "no result")."""
+    section as ``source retired (R17)`` and returns ``disabled_payload`` (report writers), ``returns(*args,
+    **kwargs)`` when ``returns`` is callable (per-row producers whose callers need a shaped "no evidence" value),
+    else None (stdout sweeps, whose callers already treat None as "no result").  ``print_once`` limits the
+    label to the first call per process (per-row producers)."""
     import functools
 
     def wrap(fn):
+        printed: list[bool] = []
+
         @functools.wraps(fn)
         def inner(*args, **kwargs):
             if is_active(key):
-                print(f"\n=== {fn.__name__}: {RETIRED_LABEL} — {STATUS} {key}, not run, nothing written ===")
-                return disabled_payload(key, section=fn.__name__) if writes_report else None
+                if not (print_once and printed):
+                    printed.append(True)
+                    print(f"\n=== {fn.__name__}: {RETIRED_LABEL} — {STATUS} {key}, not run, nothing written ===")
+                if writes_report:
+                    return disabled_payload(key, section=fn.__name__)
+                return returns(*args, **kwargs) if callable(returns) else None
             return fn(*args, **kwargs)
         inner.r3_retired_key = key
         return inner
     return wrap
+
+
+def is_retired_payload(obj: Any) -> bool:
+    """True for a ``disabled_payload`` (a retired producer's return value)."""
+    return isinstance(obj, dict) and obj.get("status") == STATUS and obj.get("label") == RETIRED_LABEL

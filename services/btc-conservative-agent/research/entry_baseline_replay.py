@@ -23,6 +23,7 @@ from research_entry_baselines import (
     missing_baseline_evidence,
 )
 from research_v3_contract import canonical_hash
+from research.r3_quarantine import retired as _r3q_retired
 from research.policy_evidence_bindings import (
     ALL_OPPORTUNITY_FUTURE_ROLE,
     _verify_segment,
@@ -646,6 +647,7 @@ def _declared_delayed_variants(episode, generation):
     return variants
 
 
+@_r3q_retired("LIMIT_FILL_1S", print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = None) -> dict[str, Any]:
     """Replay all registered baselines against one causal opportunity."""
     episode_id = str(episode.get("episode_id") or "")
@@ -886,6 +888,7 @@ def _directional_episodes(episode: Mapping[str, Any]) -> list[dict[str, Any]]:
     return output
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def materialize_same_opportunity_replay(
     episodes: Iterable[Mapping[str, Any]],
     *, generation: Mapping | None = None,
@@ -952,6 +955,7 @@ def materialize_same_opportunity_replay(
     return material
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=None,
         generation: Mapping | None = None, canonical_manifest: Mapping | None = None) -> dict[str, Any]:
     with VerifiedLedgerRowIndex() if generation is not None else nullcontext(None) as context_index:

@@ -4,6 +4,16 @@ import hashlib
 import json
 
 from research.conservative_limit_fill import _normalise_schedule, evaluate_limit_fill
+from research.r3_quarantine import retired as _r3q_retired
+
+
+def _retired_delayed_entry(**kwargs):
+    """Shape of an UNKNOWN delayed-entry result while the 1 s evaluator is retired (R17); never countable."""
+    return {'schema': 'declared_delayed_entry_replay_v1', 'scope': 'ENTRY_ONLY_NOT_FULL_LIFECYCLE',
+            'qualification_eligible': False, 'evidence_basis': 'DECLARED_SIMULATION',
+            'live_arming_authorized': False, 'status': 'UNKNOWN', 'reason_codes': ['SOURCE_RETIRED_R17'],
+            'label': 'source retired (R17)', 'entry_receipt': None, 'evaluated_schedule_sha256': None,
+            'replay_input_sha256': None, 'replay_receipt_sha256': None}
 
 
 TREATMENT = 'FIXED_EXPIRY_CANCEL_BEFORE_REPLACE'
@@ -80,6 +90,7 @@ def replay_conditional_delayed_entry(*, schedule, delay_sec, ordering_treatment,
     return result
 
 
+@_r3q_retired("LIMIT_FILL_1S", returns=_retired_delayed_entry, print_once=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def _replay_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
                           direction, requested_qty, quantity_constraints, symbol, conditional):
     adapted=delayed_submission_schedule(schedule,delay_sec=delay_sec,

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from research.conservative_limit_fill import evaluate_limit_fill
+from research.r3_quarantine import retired as _r3q_retired
 from research.policy_evidence_bindings import (
     ALL_OPPORTUNITY_FUTURE_ROLE,
     authoritative_future_path_segments,
@@ -1006,6 +1007,7 @@ def _bind_terminal_outcome(
             "observed_cost_model_id": observed_cost_model_id}
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def build_v3_conservative_results(
     v3_root: str | Path, *, phase7_config: Mapping[str, Any] | None = None,
     incident_input=None,
@@ -1375,6 +1377,7 @@ def build_v3_conservative_results(
             "results": results}
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revision: str,
                                     incident_input=None) -> dict[str, Any]:
     from research.runtime_identity_incidents import load_incident_input

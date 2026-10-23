@@ -11,6 +11,7 @@ try:
 except ImportError:  # direct script/test execution
     from conservative_limit_fill import evaluate_limit_fill
 from microstructure_tape import validate_window
+from research.r3_quarantine import retired as _r3q_retired
 
 
 COHORT_SCHEMA = "conservative_fill_descriptive_cohort_v1"
@@ -60,6 +61,7 @@ def _market_microstructure_symbol(event: Mapping[str, Any]) -> str | None:
     return _TAPE_SYMBOL_ALIASES.get(strategy_symbol.upper(), strategy_symbol)
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def build_conservative_fill_cohort(
     events: Iterable[Mapping[str, Any]],
     microstructure_rows: Iterable[Mapping[str, Any]],
@@ -166,6 +168,7 @@ def _complete_v3_schedule(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return normalized
 
 
+@_r3q_retired("LIMIT_FILL_1S", writes_report=True)  # RK #847 cond 4 / R3: priced on market_microstructure_1s (evaluate_limit_fill)
 def build_v3_conservative_fill_cohort(
     order_intents: Iterable[Mapping[str, Any]],
     microstructure_rows: Iterable[Mapping[str, Any]],
