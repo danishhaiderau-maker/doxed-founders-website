@@ -49881,8 +49881,12 @@ _LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC = 10.0   # HM N5
 
 def _live_guardian_red_clear_if_flat(now) -> bool:
     """The RED force-flat latch clears ONLY on exchange evidence: a fresh relay mirror read (<= 20 s, taken after the RED)
-    whose verdict is FLAT_NO_STOPS. Clearing re-arms nothing; it only lets an operator arm again."""
+    whose verdict is FLAT_NO_STOPS. Clearing re-arms nothing; it only lets an operator arm again.
+    HM5 (24 Oct, #852): an ack-only RED (live_guardian.ACK_ONLY_RED_CODES: LIQ_CLAMP_FLATTEN_UNCONFIRMED, as primary code or
+    in `codes`) is NEVER cleared here; the FLAT evidence is only stamped on it. It clears via the stamped operator ack route
+    POST /api/live-copy/guardian/red-ack."""
     import exchange_stops_view as _esv
+    import live_guardian as _lgm
     red = _LIVE_GUARDIAN_STATE.get("red_alert") or {}
     view = _live_copy_website_cached_view()
     m = _live_guardian_mirror()
@@ -49897,6 +49901,13 @@ def _live_guardian_red_clear_if_flat(now) -> bool:
     if float(fetched) - float(age) <= float(red.get("ts") or 0):
         return False
     if _esv.build(m).get("verdict") != "FLAT_NO_STOPS":
+        return False
+    if _lgm.red_ack_only(red):
+        if not red.get("flat_evidence_ts"):
+            red["flat_evidence_ts"] = now   # shown to the operator; stamped once (no persist churn per tick)
+            logger.warning(f"[LIVE GUARDIAN] FLAT_NO_STOPS seen but RED {red.get('code')} needs the operator ack "
+                           f"(POST /api/live-copy/guardian/red-ack) [PIPELINE ENFORCEMENT]")
+            _live_guardian_persist()
         return False
     _LIVE_GUARDIAN_STATE["red_alert_cleared"] = {"ts": now, "was": red, "evidence": "relay mirror FLAT_NO_STOPS"}
     _LIVE_GUARDIAN_STATE.pop("red_alert", None)
@@ -50018,7 +50029,8 @@ def _live_guardian_record_protection(now, viol) -> None:
 # restored BEFORE the guardian thread starts (so arming is refused immediately), an interrupted force-flat is re-launched,
 # and on the first tick with a fresh relay view the state is re-derived from the exchange: relay paused (no armed account)
 # while the mirror is NOT FLAT_NO_STOPS => RED BOOT_REDERIVED_NOT_FLAT + force-flat. A restart never clears RED.
-_LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "auto_disarm_latched", "stop_failure_events", "liq_events",
+_LIVE_GUARDIAN_PERSIST_KEYS = ("red_alert", "red_alert_cleared", "red_alert_acks", "auto_disarm_latched",
+                               "stop_failure_events", "liq_events",
                                "first_live_liq_distance", "g4_first_l", "stop_reeval", "liq_latest_l")
 _LIVE_GUARDIAN_PERSIST_FILE = "live_guardian_state.json"
 
@@ -50161,9 +50173,10 @@ def _live_guardian_tick(now=None) -> list:
         if red_codes:
             # RK 02:25: an untagged order/position (or unreadable ledger PnL) is RED on sight: latched until exchange evidence
             # FLAT_NO_STOPS clears it; arming is refused while RED. Disarm ALL + force-flat follow below as for every violation.
-            _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": now, "code": red_codes[0], "codes": red_codes, "reason": reason,
+            # HM5: latch_red never replaces an ack-only RED's code (both are recorded)
+            _lg.latch_red(_LIVE_GUARDIAN_STATE, {"ts": now, "code": red_codes[0], "codes": red_codes, "reason": reason,
                                                  "readback": "UNCONFIRMED",
-                                                 "detail": [v.get("detail") for v in viol if v["code"] in red_codes][:4]}
+                                                 "detail": [v.get("detail") for v in viol if v["code"] in red_codes][:4]})
             logger.critical(f"[LIVE GUARDIAN] RED {','.join(red_codes)} - disarm ALL + force-flat, no auto re-arm [PIPELINE ENFORCEMENT]")
             _live_guardian_persist()
         disarm_exc = None
@@ -62489,9 +62502,11 @@ def _live_guardian_force_flat_worker(rec: dict, post=None, sleep=None) -> dict:
         logger.warning(f"[LIVE GUARDIAN] force-flat OK reason={rec['reason']} attempts={rec['attempts']} FLAT_NO_STOPS "
                        f"[PIPELINE ENFORCEMENT]")
     else:
-        _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": rec["done_ts"], "code": "FORCE_FLAT_UNCONFIRMED", "reason": rec["reason"],
-                                             "readback": rec["readback"], "attempts": rec.get("attempts"),
-                                             "status": rec.get("status"), "error": rec.get("error")}
+        import live_guardian as _lgm
+        # HM5: never replaces an ack-only RED code (e.g. LIQ_CLAMP_FLATTEN_UNCONFIRMED); both codes are recorded
+        _lgm.latch_red(_LIVE_GUARDIAN_STATE, {"ts": rec["done_ts"], "code": "FORCE_FLAT_UNCONFIRMED", "reason": rec["reason"],
+                                              "readback": rec["readback"], "attempts": rec.get("attempts"),
+                                              "status": rec.get("status"), "error": rec.get("error")})
         logger.critical(f"[LIVE GUARDIAN] RED FORCE_FLAT_UNCONFIRMED reason={rec['reason']} readback={rec['readback']} "
                         f"attempts={rec.get('attempts')} status={rec.get('status')} err={rec.get('error')} "
                         f"- live stays OFF, relay stays paused, no auto re-arm [PIPELINE ENFORCEMENT]")
@@ -62519,8 +62534,10 @@ def _live_guardian_force_flat(reason: str, now=None, spawn=None, disarmed: bool 
         spawn(lambda: _live_guardian_force_flat_worker(rec))
     except Exception as exc:  # noqa: BLE001
         rec.update(ok=False, error=f"spawn failed: {str(exc)[:160]}")
-        _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": rec["ts"], "code": "FORCE_FLAT_NOT_STARTED", "reason": rec["reason"],
-                                             "readback": "UNCONFIRMED", "error": rec["error"]}
+        import live_guardian as _lgm
+        # HM5: a force-flat that cannot start after LIQ_CLAMP_FLATTEN_UNCONFIRMED records BOTH codes; the RED code stays
+        _lgm.latch_red(_LIVE_GUARDIAN_STATE, {"ts": rec["ts"], "code": "FORCE_FLAT_NOT_STARTED", "reason": rec["reason"],
+                                              "readback": "UNCONFIRMED", "error": rec["error"]})
         logger.critical(f"[LIVE GUARDIAN] RED force-flat could not start: {exc} [PIPELINE ENFORCEMENT]")
     _live_guardian_persist()   # HM N3: an in-progress force-flat survives a restart (re-launched at boot)
     return rec
@@ -62556,11 +62573,13 @@ def _live_guardian_position_flatten_post(reason: str) -> dict:
 def _live_guardian_position_flatten_red(rec: dict, now) -> None:
     """HM5 (24 Oct, #852): an unconfirmed (or never started) position-only flatten is a PERSISTED RED
     LIQ_CLAMP_FLATTEN_UNCONFIRMED, latched BEFORE the escalation force-flat and kept even if that force-flat succeeds (the
-    force-flat worker never clears red_alert; only fresh exchange evidence FLAT_NO_STOPS does, recorded in red_alert_cleared)."""
-    _LIVE_GUARDIAN_STATE["red_alert"] = {"ts": now, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "reason": rec.get("reason"),
-                                         "trade_id": rec.get("trade_id"), "tile": rec.get("tile"),
-                                         "readback": rec.get("readback") or "UNCONFIRMED", "attempts": rec.get("attempts"),
-                                         "error": rec.get("error")}
+    force-flat worker never clears red_alert). HM5 rev 2: it is ACK-ONLY (live_guardian.ACK_ONLY_RED_CODES): a fresh FLAT
+    reading does not clear it either; only the stamped operator ack route POST /api/live-copy/guardian/red-ack does."""
+    import live_guardian as _lgm
+    _lgm.latch_red(_LIVE_GUARDIAN_STATE, {"ts": now, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "reason": rec.get("reason"),
+                                          "trade_id": rec.get("trade_id"), "tile": rec.get("tile"),
+                                          "readback": rec.get("readback") or "UNCONFIRMED", "attempts": rec.get("attempts"),
+                                          "error": rec.get("error")})
     try:
         _live_guardian_persist()
     except Exception as exc:  # noqa: BLE001
@@ -62682,6 +62701,58 @@ def _live_guardian_force_flat_check() -> dict:
                 "threshold": "FLAT_NO_STOPS after auto-disarm"}
     return {"id": "fly.live_guardian_force_flat", "status": "GREEN", "observed": "no unconfirmed force-flat",
             "threshold": "FLAT_NO_STOPS after auto-disarm"}
+
+
+LIVE_GUARDIAN_RED_ACK_MAX = 20
+
+
+def _live_guardian_red_ack(actor, reason, code, now=None, auth_method: str = "") -> tuple:
+    """HM5 (24 Oct, #852): the stamped operator ack that clears a persisted guardian RED - the ONLY way an ack-only RED
+    (live_guardian.ACK_ONLY_RED_CODES: LIQ_CLAMP_FLATTEN_UNCONFIRMED) clears. Needs a named actor (not AUTO), a reason and
+    the CURRENT primary RED code (no blind/stale ack). Refused while a force-flat is still running. The stamp {ts, actor,
+    reason, auth, was} goes to red_alert_acks + red_alert_cleared and is persisted BEFORE the ack is reported; a failed
+    persist restores the RED (fail closed). Re-arms nothing: auto_disarm_latched stays; arming stays an operator action
+    behind every other gate. Returns (http_status, body)."""
+    import re as _re
+    now = time.time() if now is None else now
+    actor, reason, code = str(actor or "").strip(), str(reason or "").strip(), str(code or "").strip()
+    if not _re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return 400, {"ok": False, "error": "actor must be a named operator (1-64 safe chars)"}
+    if not reason:
+        return 400, {"ok": False, "error": "reason is required"}
+    red = _LIVE_GUARDIAN_STATE.get("red_alert")
+    if not isinstance(red, dict) or not red.get("code"):
+        return 409, {"ok": False, "error": "NO_RED"}
+    if code != red.get("code"):
+        return 409, {"ok": False, "error": "RED_CODE_MISMATCH", "red_code": red.get("code")}
+    if any(r.get("requested") and not r.get("done_ts") and r.get("ok") is not False
+           for r in list(_LIVE_GUARDIAN_FORCE_FLAT_LOG)):
+        return 409, {"ok": False, "error": "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS", "red_code": red.get("code")}
+    import live_guardian as _lgm
+    stamp = {"ts": now, "actor": actor, "reason": reason[:240], "auth": str(auth_method or "")[:32],
+             "code": red.get("code"), "codes": _lgm.red_codes(red), "was": red}
+    prev_acks, prev_cleared = _LIVE_GUARDIAN_STATE.get("red_alert_acks"), _LIVE_GUARDIAN_STATE.get("red_alert_cleared")
+    _LIVE_GUARDIAN_STATE["red_alert_acks"] = (list(prev_acks or []) + [stamp])[-LIVE_GUARDIAN_RED_ACK_MAX:]
+    _LIVE_GUARDIAN_STATE["red_alert_cleared"] = {"ts": now, "was": red, "evidence": "OPERATOR_ACK", "actor": actor,
+                                                 "reason": stamp["reason"], "auth": stamp["auth"]}
+    _LIVE_GUARDIAN_STATE.pop("red_alert", None)
+    try:
+        persisted = _live_guardian_persist() is True
+    except Exception:  # noqa: BLE001
+        persisted = False
+    if not persisted:
+        _LIVE_GUARDIAN_STATE["red_alert"] = red
+        _LIVE_GUARDIAN_STATE["red_alert_acks"] = prev_acks
+        _LIVE_GUARDIAN_STATE["red_alert_cleared"] = prev_cleared
+        for k in ("red_alert_acks", "red_alert_cleared"):
+            if _LIVE_GUARDIAN_STATE.get(k) is None:
+                _LIVE_GUARDIAN_STATE.pop(k, None)
+        logger.critical(f"[LIVE GUARDIAN] RED ack NOT applied (persist failed) code={red.get('code')} [PIPELINE ENFORCEMENT]")
+        return 500, {"ok": False, "error": "PERSIST_FAILED", "red_code": red.get("code")}
+    logger.warning(f"[LIVE GUARDIAN] RED {stamp['codes']} cleared by operator ack actor={actor} auth={stamp['auth']} "
+                   f"reason={stamp['reason'][:80]!r} - still disarmed [PIPELINE ENFORCEMENT]")
+    return 200, {"ok": True, "acked": {k: v for k, v in stamp.items() if k != "was"},
+                 "arm_block_after": _live_guardian_arm_block()}
 
 
 def _live_copy_stale_exit_check(now=None) -> list:
@@ -63135,6 +63206,18 @@ def api_live_copy_arm_gate():
                     "liq_latest_l": _LIVE_GUARDIAN_STATE.get("liq_latest_l"),
                     "stop_amendment": str(os.environ.get(_ltg.STOP_AMENDMENT_ENV) or "") or None,
                     "liq_check_max_bp": _ltg.LIQ_CHECK_MAX_BP})
+
+
+@app.route('/api/live-copy/guardian/red-ack', methods=['POST'])
+def api_live_copy_guardian_red_ack():
+    """HM5 (24 Oct, #852): stamped operator/admin ack of the persisted guardian RED (_live_guardian_red_ack). Strict admin
+    auth; body {actor, reason, code} where code must equal the current red_alert code."""
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin authentication required"}), 401
+    body = request.get_json(silent=True) or {}
+    status, out = _live_guardian_red_ack(body.get("actor"), body.get("reason"), body.get("code"),
+                                         auth_method=_admin_auth_method())
+    return jsonify(out), status
 
 
 @app.route('/api/live-copy/status', methods=['GET'])

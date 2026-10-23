@@ -32,6 +32,54 @@ LANE_NEEDLE = ""   # "" = every live tile (was "GS01" while GS-01 was the only l
 # violation gets. AMEND4 (sha 7073ed25) E2'/E5/E6/E7: STOP_FAILURE_FLATTEN is RED too (non-countable, counted).
 # AMEND5 G3 (sha 4407d5a2, L18): LIQ_CHECK_FLATTEN (real L <= 15 bp past the stop, or unreadable) is RED as well.
 RED_CODES = frozenset({"UNTAGGED_ORDER", "UNTAGGED_POSITION", _ltg_caps.STOP_FAILURE_FLATTEN, _ltg_caps.LIQ_CHECK_FLATTEN})
+# HM5 (24 Oct, #852): REDs that fresh exchange evidence FLAT_NO_STOPS does NOT clear. They clear only through the stamped
+# operator ack route (bot POST /api/live-copy/guardian/red-ack), and no later RED replaces their code (latch_red).
+ACK_ONLY_RED_CODES = frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+RED_ALSO_MAX = 10
+
+
+def red_codes(red: Mapping[str, Any] | None) -> list:
+    """Every code a RED record carries (its primary code first)."""
+    if not isinstance(red, Mapping):
+        return []
+    out = [red.get("code")] + list(red.get("codes") or [])
+    return [c for i, c in enumerate(out) if c and c not in out[:i]]
+
+
+def red_ack_only(red: Mapping[str, Any] | None) -> bool:
+    """True when any code on the RED needs the operator ack (a FLAT reading never clears it)."""
+    return any(c in ACK_ONLY_RED_CODES for c in red_codes(red))
+
+
+def latch_red(state: dict, red: Mapping[str, Any]) -> dict:
+    """Latch a RED into state["red_alert"] without ever losing a code. HM5: when the current RED is ack-only its code (and
+    record) stays; the new RED is added to `codes` and appended to `also`. A new ack-only RED takes the primary slot over a
+    non-ack one (the old code stays in `codes`). Otherwise the new RED replaces the record, keeping the old codes."""
+    new = dict(red)
+    cur = state.get("red_alert")
+    if not isinstance(cur, Mapping) or not cur.get("code"):
+        new["codes"] = red_codes(new)
+        state["red_alert"] = new
+        return new
+    merged = red_codes(cur) + [c for c in red_codes(new) if c not in red_codes(cur)]
+    if red_ack_only(cur):
+        kept = dict(cur)
+        kept["codes"] = merged
+        also = list(kept.get("also") or [])
+        also.append({k: new.get(k) for k in ("ts", "code", "reason", "readback", "error") if new.get(k) is not None})
+        kept["also"] = also[-RED_ALSO_MAX:]
+        state["red_alert"] = kept
+        return kept
+    primary = [new.get("code")] + [c for c in merged if c != new.get("code")]
+    new["codes"] = primary
+    prior = dict(cur)
+    prior.pop("also", None)
+    new["also"] = (list(cur.get("also") or []) + [{k: prior.get(k) for k in ("ts", "code", "reason", "readback", "error")
+                                                   if prior.get(k) is not None}])[-RED_ALSO_MAX:]
+    state["red_alert"] = new
+    return new
+
+
 # AMEND5 G4(b) (L22): the L-10 clamp with the exchange stop resident flattens THAT position only - no disarm, no RED.
 POSITION_FLATTEN_CODES = frozenset({_ltg_caps.LIQ_CLAMP_FLATTEN})
 # AMEND4 E1 (L12): the daily loss caps (and an unreadable realised pnl / open mark, a book > 2 s) are an

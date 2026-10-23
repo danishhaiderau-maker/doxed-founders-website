@@ -560,5 +560,5 @@ def test_rk0225_untagged_position_is_red_after_grace_tagged_is_not():
 
 def test_rk0225_tick_latches_red_for_untagged_codes_before_disarm_and_force_flat():
     tick = _SRC[_SRC.index("def _live_guardian_tick"):_SRC.index("def live_guardian_loop")]
-    red = tick.index('_LIVE_GUARDIAN_STATE["red_alert"] = {')
+    red = tick.index('_lg.latch_red(_LIVE_GUARDIAN_STATE, {')
     assert "RED_CODES" in tick and red < tick.index("_disarm_live_control(reason)") < tick.index("_live_guardian_force_flat(reason, now, disarmed=True)")

@@ -495,6 +495,125 @@ def test_hm5_force_flat_worker_success_never_clears_red():
     assert 'pop("red_alert"' not in body and "red_alert\"] = None" not in body
 
 
+# ---- HM5 rev 2 (24 Oct, #852): LIQ_CLAMP_FLATTEN_UNCONFIRMED is ack-only; both codes recorded; stamped operator ack ----
+def test_hm5r2_latch_red_never_replaces_an_ack_only_code():
+    import live_guardian as g
+    st = {}
+    g.latch_red(st, {"ts": 1, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "trade_id": "t1"})
+    g.latch_red(st, {"ts": 2, "code": "FORCE_FLAT_NOT_STARTED", "error": "spawn failed"})
+    g.latch_red(st, {"ts": 3, "code": "UNTAGGED_ORDER", "codes": ["UNTAGGED_ORDER", "UNTAGGED_POSITION"]})
+    red = st["red_alert"]
+    assert red["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and red["trade_id"] == "t1" and red["ts"] == 1
+    assert red["codes"] == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED", "UNTAGGED_ORDER", "UNTAGGED_POSITION"]
+    assert [a["code"] for a in red["also"]] == ["FORCE_FLAT_NOT_STARTED", "UNTAGGED_ORDER"]
+    # an ack-only RED arriving after a plain RED takes the primary slot and keeps the old code
+    st = {"red_alert": {"ts": 1, "code": "FORCE_FLAT_UNCONFIRMED"}}
+    g.latch_red(st, {"ts": 2, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+    assert st["red_alert"]["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+    assert st["red_alert"]["codes"] == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_UNCONFIRMED"] and g.red_ack_only(st["red_alert"])
+    # plain over plain: unchanged behaviour (new code primary), old code still recorded
+    st = {"red_alert": {"ts": 1, "code": "UNTAGGED_ORDER"}}
+    g.latch_red(st, {"ts": 2, "code": "FORCE_FLAT_UNCONFIRMED"})
+    assert st["red_alert"]["codes"] == ["FORCE_FLAT_UNCONFIRMED", "UNTAGGED_ORDER"] and not g.red_ack_only(st["red_alert"])
+    assert g.ACK_ONLY_RED_CODES == frozenset({"LIQ_CLAMP_FLATTEN_UNCONFIRMED"})
+
+
+def test_hm5r2_force_flat_not_started_after_liq_clamp_red_records_both_codes():
+    ns = _ffo_ns()
+    ns["_LIVE_GUARDIAN_STATE"]["red_alert"] = {"ts": NOW, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "trade_id": "t9"}
+    def boom(fn):
+        raise RuntimeError("no thread")
+    rec = ns["_live_guardian_force_flat"]("AUTO_DISARM:LIQ_CLAMP_FLATTEN_NOT_STARTED", NOW, spawn=boom, disarmed=True)
+    red = ns["_LIVE_GUARDIAN_STATE"]["red_alert"]
+    assert rec["ok"] is False and red["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and red["trade_id"] == "t9"
+    assert red["codes"] == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED"]
+    # and an unconfirmed force-flat worker after it: still the RED code, all three recorded
+    ns["_live_guardian_force_flat_worker"]({"reason": "x"}, post=lambda r: {"ok": False, "verdict": "NOT_FLAT"},
+                                           sleep=lambda s: None)
+    red = ns["_LIVE_GUARDIAN_STATE"]["red_alert"]
+    assert red["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED"
+    assert red["codes"] == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED", "FORCE_FLAT_UNCONFIRMED"]
+    # end to end: the position-flatten spawn failure path (RED latched, then the escalation force-flat cannot start)
+    import types
+    ns = _ffo_ns()
+    def no_thread(*a, **kw):
+        raise RuntimeError("no thread")
+    ns["threading"] = types.SimpleNamespace(Thread=no_thread, Lock=__import__("threading").Lock)
+    ns["_live_guardian_position_flatten"]({"trade_id": "t10", "tile": "gs1"}, NOW, spawn=boom)
+    red = ns["_LIVE_GUARDIAN_STATE"]["red_alert"]
+    assert red["code"] == "LIQ_CLAMP_FLATTEN_UNCONFIRMED" and red["trade_id"] == "t10"
+    assert red["codes"] == ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED"]
+
+
+def _red_clear_ns(red, fetched=NOW, age=2.0):
+    a = _SRC.index("_LIVE_GUARDIAN_RED_CLEAR_MAX_AGE_SEC =")
+    b = _SRC.index("_LIVE_GUARDIAN_EXPOSED_FETCH_SEC =")
+    ns = {"_LIVE_GUARDIAN_STATE": {"red_alert": red}, "logger": logging.getLogger("t"), "PERSISTS": [],
+          "_live_copy_website_cached_view": lambda: {"fetched_at_ts": fetched},
+          "_live_guardian_mirror": lambda: mirror(age=age)}
+    ns["_live_guardian_persist"] = lambda: ns["PERSISTS"].append(1) or True
+    exec(_SRC[a:b], ns)
+    return ns
+
+
+def test_hm5r2_fresh_flat_reading_never_clears_liq_clamp_red():
+    for red in ({"ts": NOW - 100, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED"},
+                {"ts": NOW - 100, "code": "FORCE_FLAT_NOT_STARTED", "codes": ["FORCE_FLAT_NOT_STARTED", "LIQ_CLAMP_FLATTEN_UNCONFIRMED"]}):
+        ns = _red_clear_ns(dict(red))
+        for _ in range(3):
+            assert ns["_live_guardian_red_clear_if_flat"](NOW) is False
+        st = ns["_LIVE_GUARDIAN_STATE"]
+        assert st["red_alert"]["code"] == red["code"] and "red_alert_cleared" not in st
+        assert st["red_alert"]["flat_evidence_ts"] == NOW and ns["PERSISTS"] == [1]   # stamped + persisted once
+    # a plain RED still clears on the same evidence (unchanged)
+    ns = _red_clear_ns({"ts": NOW - 100, "code": "FORCE_FLAT_UNCONFIRMED"})
+    assert ns["_live_guardian_red_clear_if_flat"](NOW) is True and "red_alert" not in ns["_LIVE_GUARDIAN_STATE"]
+
+
+def test_hm5r2_operator_ack_is_the_only_clear_and_is_stamped_and_persisted():
+    ns = _ffo_ns()
+    persisted = []
+    ns["_live_guardian_persist"] = lambda: persisted.append(dict(ns["_LIVE_GUARDIAN_STATE"])) or True
+    red = {"ts": NOW, "code": "LIQ_CLAMP_FLATTEN_UNCONFIRMED", "codes": ["LIQ_CLAMP_FLATTEN_UNCONFIRMED", "FORCE_FLAT_NOT_STARTED"]}
+    st = ns["_LIVE_GUARDIAN_STATE"]
+    st["red_alert"] = dict(red)
+    ack = ns["_live_guardian_red_ack"]
+    assert ack("", "r", red["code"], NOW)[0] == 400 and ack("AUTO", "r", red["code"], NOW)[0] == 400
+    assert ack("danish", "", red["code"], NOW)[0] == 400
+    code, out = ack("danish", "checked", "FORCE_FLAT_NOT_STARTED", NOW)
+    assert code == 409 and out["error"] == "RED_CODE_MISMATCH" and st["red_alert"]["code"] == red["code"]
+    # refused while a force-flat is still running
+    ns["_LIVE_GUARDIAN_FORCE_FLAT_LOG"].append({"requested": True, "ts": NOW})
+    assert ack("danish", "checked", red["code"], NOW)[1]["error"] == "LIVE_GUARDIAN_FORCE_FLAT_IN_PROGRESS"
+    ns["_LIVE_GUARDIAN_FORCE_FLAT_LOG"].clear()
+    assert persisted == [] and st["red_alert"]["code"] == red["code"]
+    # persist failure -> RED restored, nothing stamped
+    ns["_live_guardian_persist"] = lambda: False
+    code, out = ack("danish", "checked", red["code"], NOW)
+    assert code == 500 and st["red_alert"]["code"] == red["code"] and "red_alert_acks" not in st and "red_alert_cleared" not in st
+    ns["_live_guardian_persist"] = lambda: persisted.append(dict(ns["_LIVE_GUARDIAN_STATE"])) or True
+    code, out = ack("danish", "flat on exchange, checked", red["code"], NOW + 1, auth_method="token")
+    assert code == 200 and out["ok"] and "red_alert" not in st
+    stamp = st["red_alert_acks"][-1]
+    assert stamp["actor"] == "danish" and stamp["ts"] == NOW + 1 and stamp["auth"] == "token" and stamp["was"]["code"] == red["code"]
+    assert stamp["codes"] == red["codes"] and st["red_alert_cleared"]["evidence"] == "OPERATOR_ACK"
+    assert persisted and "red_alert" not in persisted[-1] and persisted[-1]["red_alert_acks"][-1]["actor"] == "danish"
+    assert ack("danish", "again", red["code"], NOW)[1]["error"] == "NO_RED"
+
+
+def test_hm5r2_ack_route_wiring_and_persistence_keys():
+    route = _SRC[_SRC.index("@app.route('/api/live-copy/guardian/red-ack', methods=['POST'])"):]
+    route = route[:route.index("@app.route", 10)]
+    assert "_admin_authed_strict()" in route and route.index("_admin_authed_strict()") < route.index("_live_guardian_red_ack(")
+    assert '"red_alert_acks"' in _SRC[_SRC.index("_LIVE_GUARDIAN_PERSIST_KEYS ="):_SRC.index("_LIVE_GUARDIAN_PERSIST_FILE =")]
+    # every RED write after the first goes through latch_red (no raw overwrite of red_alert anywhere but boot fail-closed paths)
+    import re
+    raw = [m.start() for m in re.finditer(r'_LIVE_GUARDIAN_STATE\["red_alert"\] = \{', _SRC)]
+    for pos in raw:
+        fn = _SRC[:pos][_SRC[:pos].rindex("\ndef "):][:60]
+        assert "_live_guardian_restore" in fn or "_live_guardian_boot_rederive" in fn, fn
+
+
 # ------------------------------------------------------------------ B5: live_guardian_state.json is out of every reset/wipe plan
 def _wipe_ns():
     import glob as _glob, os
